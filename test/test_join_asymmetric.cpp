@@ -7,6 +7,7 @@
 #include <qdb/plan/ops/operator.h>
 #include <qdb/plan/ops/stats.h>
 #include <qdb/plan/types/nullable.h>
+#include <qdb/plan/passes/runtime_filters.h>
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/parser/type.h>
@@ -267,6 +268,131 @@ TEST(AsymmetricJoin, BuildRightMatchesSymmetric) {
 
 TEST(AsymmetricJoin, BuildLeftMatchesSymmetric) {
     EXPECT_EQ(RunAsymmetric(EJoinBuildSide::Left), ExpectedInner());
+}
+
+TStatsPtr RowsWithKeyNdv(uint64_t rows, const std::string& column, uint64_t ndv) {
+    auto s = std::make_shared<TStats>();
+    s->RowCount = rows;
+    auto col = std::make_shared<TStats::TColumnStats>();
+    col->Ndv = ndv;
+    s->ColumnStats[column] = std::move(col);
+    return s;
+}
+
+std::optional<TRuntimeFilterSpec> AttachTo(const TOperatorPtr& join) {
+    uint32_t nextId = 1;
+    AttachRuntimeFilters(join, nextId);
+    return static_cast<TJoinOperator*>(join.get())->RuntimeFilter();
+}
+
+TEST(AttachRuntimeFilters, EmitsFromTheSideWithFewerDistinctKeys) {
+    auto join = JoinOfType(EJoinType::Inner);
+    ASSERT_TRUE(join);
+    auto* j = static_cast<TJoinOperator*>(join.get());
+
+    j->Left()->Stats_ = RowsWithKeyNdv(40000, "lk", 40000);
+    j->Right()->Stats_ = RowsWithKeyNdv(40000, "rk", 10000);
+    auto emitted = AttachTo(join);
+    ASSERT_TRUE(emitted.has_value());
+    EXPECT_EQ(emitted->Id, 1u);
+    EXPECT_EQ(emitted->BuildSide, EJoinFilterSide::Right);
+    EXPECT_EQ(ChooseJoinBuildSide(*j), EJoinBuildSide::Right);
+
+    j->Left()->Stats_ = RowsWithKeyNdv(40000, "lk", 10000);
+    j->Right()->Stats_ = RowsWithKeyNdv(40000, "rk", 40000);
+    emitted = AttachTo(join);
+    ASSERT_TRUE(emitted.has_value());
+    EXPECT_EQ(emitted->BuildSide, EJoinFilterSide::Left);
+    EXPECT_EQ(ChooseJoinBuildSide(*j), EJoinBuildSide::Left);
+}
+
+TEST(AttachRuntimeFilters, JudgesDistinctKeysNotRows) {
+    auto join = JoinOfType(EJoinType::Inner);
+    ASSERT_TRUE(join);
+    auto* j = static_cast<TJoinOperator*>(join.get());
+
+    j->Left()->Stats_ = RowsWithKeyNdv(1000000, "lk", 1000000);
+    j->Right()->Stats_ = RowsWithKeyNdv(50000000, "rk", 100);
+    auto emitted = AttachTo(join);
+    ASSERT_TRUE(emitted.has_value());
+    EXPECT_EQ(emitted->BuildSide, EJoinFilterSide::Right);
+
+    j->Left()->Stats_ = RowsWithKeyNdv(50000000, "lk", 1000);
+    j->Right()->Stats_ = RowsWithKeyNdv(1000, "rk", 1000);
+    EXPECT_FALSE(AttachTo(join).has_value());
+}
+
+TEST(AttachRuntimeFilters, SkipsUncappedUnknownAndUnsupportedJoins) {
+    auto inner = JoinOfType(EJoinType::Inner);
+    ASSERT_TRUE(inner);
+    auto* j = static_cast<TJoinOperator*>(inner.get());
+
+    j->Left()->Stats_ = RowsWithKeyNdv(40000, "lk", 40000);
+    j->Right()->Stats_ = RowsWithKeyNdv(40000, "rk", 40000);
+    EXPECT_FALSE(AttachTo(inner).has_value()) << "balanced";
+
+    j->Left()->Stats_ = RowsWithKeyNdv(100000000, "lk", 100000000);
+    j->Right()->Stats_ = RowsWithKeyNdv(20000000, "rk", 20000000);
+    EXPECT_FALSE(AttachTo(inner).has_value()) << "over the key cap";
+
+    j->Left()->Stats_ = Rows(40000);
+    j->Right()->Stats_ = RowsWithKeyNdv(40000, "rk", 100);
+    EXPECT_FALSE(AttachTo(inner).has_value()) << "no ndv";
+
+    j->Left()->Stats_ = RowsWithKeyNdv(40000, "lk", 40000);
+    j->Right()->Stats_ = nullptr;
+    EXPECT_FALSE(AttachTo(inner).has_value()) << "no stats";
+
+    for (auto type : {EJoinType::LeftAnti, EJoinType::Left, EJoinType::Full}) {
+        auto join = JoinOfType(type);
+        ASSERT_TRUE(join) << JoinTypeName(type);
+        auto* other = static_cast<TJoinOperator*>(join.get());
+        other->Left()->Stats_ = RowsWithKeyNdv(40000, "lk", 40000);
+        other->Right()->Stats_ = RowsWithKeyNdv(40000, "rk", 100);
+        EXPECT_FALSE(AttachTo(join).has_value()) << JoinTypeName(type);
+    }
+}
+
+TEST(AttachRuntimeFilters, SemiPublishesOnlyFromTheRight) {
+    auto join = JoinOfType(EJoinType::LeftSemi);
+    ASSERT_TRUE(join);
+    auto* j = static_cast<TJoinOperator*>(join.get());
+
+    j->Left()->Stats_ = RowsWithKeyNdv(40000, "lk", 40000);
+    j->Right()->Stats_ = RowsWithKeyNdv(40000, "rk", 10000);
+    auto emitted = AttachTo(join);
+    ASSERT_TRUE(emitted.has_value());
+    EXPECT_EQ(emitted->BuildSide, EJoinFilterSide::Right);
+
+    j->Left()->Stats_ = RowsWithKeyNdv(40000, "lk", 10000);
+    j->Right()->Stats_ = RowsWithKeyNdv(40000, "rk", 40000);
+    EXPECT_FALSE(AttachTo(join).has_value());
+
+    j->Left()->Stats_ = RowsWithKeyNdv(40000, "lk", 40000);
+    j->Right()->Stats_ = RowsWithKeyNdv(40000, "rk", 10000);
+    j->MutableFilter() = std::make_shared<TBinaryExpr>(
+        NQumir::TLocation{}, TOperator("!="),
+        std::make_shared<TIdentExpr>(NQumir::TLocation{}, "lv"),
+        std::make_shared<TIdentExpr>(NQumir::TLocation{}, "rv"));
+    EXPECT_FALSE(AttachTo(join).has_value());
+}
+
+TEST(AttachRuntimeFilters, IdsComeFromTheCallersAllocator) {
+    auto first = JoinOfType(EJoinType::Inner);
+    auto second = JoinOfType(EJoinType::Inner);
+    ASSERT_TRUE(first);
+    ASSERT_TRUE(second);
+    for (auto* j : {static_cast<TJoinOperator*>(first.get()),
+                    static_cast<TJoinOperator*>(second.get())}) {
+        j->Left()->Stats_ = RowsWithKeyNdv(40000, "lk", 40000);
+        j->Right()->Stats_ = RowsWithKeyNdv(40000, "rk", 10000);
+    }
+
+    uint32_t nextId = 1;
+    AttachRuntimeFilters(first, nextId);
+    AttachRuntimeFilters(second, nextId);
+    EXPECT_EQ(static_cast<TJoinOperator*>(first.get())->RuntimeFilter()->Id, 1u);
+    EXPECT_EQ(static_cast<TJoinOperator*>(second.get())->RuntimeFilter()->Id, 2u);
 }
 
 class SemiAntiOrientation : public testing::TestWithParam<EJoinType> {};
