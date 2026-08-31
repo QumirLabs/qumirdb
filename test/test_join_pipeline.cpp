@@ -68,7 +68,7 @@ TEST(JoinPipeline, TypingSetsTwoParamTypesAndConcatenatedOutput) {
     std::shared_ptr<TSourceOperator> leftOp, rightOp;
 
     auto root = ParseJoinPlan(
-        "(rel join (rel source \"L\") (rel source \"R\") ((a c)) (inner) (< b d))",
+        "(rel join (rel source \"L\") (rel source \"R\") ((a c)) (inner) (residual (< b d)))",
         left, right, leftOp, rightOp);
     ASSERT_NE(root, nullptr);
 
@@ -89,7 +89,7 @@ TEST(JoinPipeline, PruningNarrowsEachSideIndependently) {
     // Downstream project selects only a and d; join key (a,c); filter uses (b,d).
     auto root = ParseJoinPlan(
         "(rel project (rel join (rel source \"L\") (rel source \"R\") "
-        "((a c)) (inner) (< b d)) (oa a) (od d))",
+        "((a c)) (inner) (residual (< b d))) (oa a) (od d))",
         left, right, leftOp, rightOp);
     ASSERT_NE(root, nullptr);
 

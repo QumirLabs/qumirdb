@@ -169,7 +169,7 @@ TEST(JoinPlanner, InnerJoinResidualHonorsLeftSelection) {
     NQdb::TMockSource right({"rk", "rv"}, {KeyValBatch(rk.data(), rv.data(), 4, rcols)});
 
     auto plan = PlanJoin(R"qdb(
-(rel join (rel source "L") (rel source "R") ((lk rk)) (inner) (== lv (+ rv 1)))
+(rel join (rel source "L") (rel source "R") ((lk rk)) (inner) (residual (== lv (+ rv 1))))
 )qdb", left, right);
 
     std::vector<std::tuple<int64_t, int64_t, int64_t, int64_t>> got;
@@ -205,11 +205,11 @@ TEST(JoinPlanner, ChainedInnerJoinResidualHonorsLeftSelection) {
 
     auto plan = PlanJoin3(R"qdb(
 (rel join
-  (rel join (rel source "L") (rel source "R") ((lk rk)) (inner) (== lv (+ rv 1)))
+  (rel join (rel source "L") (rel source "R") ((lk rk)) (inner) (residual (== lv (+ rv 1))))
   (rel source "S")
   ((lk sk))
   (inner)
-  (== lv (- sv 1)))
+  (residual (== lv (- sv 1))))
 )qdb", left, right, third);
 
     std::vector<std::tuple<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t>> got;
@@ -286,7 +286,7 @@ TEST(JoinPlanner, CrossJoinResidualSupportsRightGroupKeys) {
 
         auto plan = PlanJoin(R"qdb(
 (rel aggregate
-  (rel join (rel source "L") (rel source "R") () (inner) (> rv lv))
+  (rel join (rel source "L") (rel source "R") () (inner) (residual (> rv lv)))
   (keys rv) (agg n count) (agg total sum lv))
 )qdb", left, right, settings);
 
@@ -472,7 +472,7 @@ TEST(JoinPlanner, ResidualLeftSemiMarksInKernel) {
 
     auto plan = PlanJoin(
         "(rel join (rel source \"L\") (rel source \"R\") "
-        "((lk rk)) (left_semi) (!= lv rv))",
+        "((lk rk)) (left_semi) (residual (!= lv rv)))",
         left, right);
 
     std::vector<std::tuple<int64_t, int64_t>> got;
@@ -504,7 +504,7 @@ TEST(JoinPlanner, ResidualLeftAntiHonorsLeftSelection) {
 
     auto plan = PlanJoin(
         "(rel join (rel source \"L\") (rel source \"R\") "
-        "((lk rk)) (left_anti) (!= lv rv))",
+        "((lk rk)) (left_anti) (residual (!= lv rv)))",
         left, right);
 
     std::vector<std::tuple<int64_t, int64_t>> got;

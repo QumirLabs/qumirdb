@@ -36,6 +36,10 @@ std::string JoinPlanLabel(const TJoinOperator& join) {
     if (!keys.empty()) {
         label += "]";
     }
+    if (const auto& runtimeFilter = join.RuntimeFilter()) {
+        label += " emit-filter " + std::to_string(runtimeFilter->Id) + " from "
+            + std::string(JoinFilterSideName(runtimeFilter->BuildSide));
+    }
     if (join.Filter()) {
         label += " residual " + ExprLine(join.Filter());
     }

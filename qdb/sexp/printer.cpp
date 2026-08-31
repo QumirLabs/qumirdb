@@ -240,6 +240,11 @@ void PrintRel(NQumir::NAst::TExpr& expr, TPrinter& printer, TPrintFrame frame) {
             printer.PrintExpr(join.Filter(), frame.AllowTypeWrap, frame.Level + 1);
             out << ')';
         }
+        if (const auto& runtimeFilter = join.RuntimeFilter()) {
+            printer.Separator(frame.Level + 1);
+            out << "(emit-filter " << runtimeFilter->Id << ' '
+                << JoinFilterSideName(runtimeFilter->BuildSide) << ')';
+        }
         out << ')';
         return;
     }
