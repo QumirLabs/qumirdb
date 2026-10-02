@@ -144,7 +144,7 @@ void ApplyPlanPasses(TOperatorPtr& plan, TPlanPassOptions options) {
     ForEachPlan(plan, [](TOperatorPtr& current, TCteDefinition*) {
         AttachRowGroupPredicates(current);
     });
-    {
+    if (options.EnableRuntimeFilters) {
         // Runs last, so the pairing it records survives every restructuring
         // pass. One counter across every plan of the query: after ApplyCteReuse
         // a shared definition lives in its own materialization plan, which

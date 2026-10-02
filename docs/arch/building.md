@@ -57,6 +57,8 @@ Common options:
 --scan-tasks 8
 --scheduler-counters
 --no-partial-aggregates
+--no-runtime-filters
+--force-runtime-filters
 --verbose
 ```
 
@@ -78,6 +80,10 @@ does this when row-count and NDV statistics show a large drop in rows. Use
 `--no-partial-aggregates` to keep the raw-row plan for an A/B test. See
 [Aggregation](aggregation.md#partial-aggregate-plan) for the rule and the two
 physical plans.
+
+Use `--no-runtime-filters` for an A/B run against automatic runtime-filter
+selection. `--force-runtime-filters` bypasses the filter benefit estimate;
+it is useful for measuring joins that the estimate currently skips.
 
 Example:
 
