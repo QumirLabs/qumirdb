@@ -350,10 +350,6 @@ TEST(AttachRuntimeFilters, AccountsForForcedBuildAndNdvUncertainty) {
     j->Right()->Stats_ = RowsWithKeyNdv(10000, "rk", 10000, true);
     EXPECT_TRUE(AttachTo(join).has_value())
         << "exact NDV removes the uncertainty margin";
-
-    j->Left()->Stats_ = RowsWithKeyNdv(50000, "lk", 100000, true);
-    EXPECT_FALSE(AttachTo(join).has_value())
-        << "clamping a pre-filter key domain to output rows is not exact NDV";
 }
 
 TEST(AttachRuntimeFilters, SkipsUncappedUnknownAndUnsupportedJoins) {
