@@ -74,7 +74,7 @@ TEST(RuntimeFilter, PassesEverythingWhenItCannotAnswer) {
     EXPECT_TRUE(unpublished.MayContain(12345));
     EXPECT_TRUE(unpublished.MayContainKey(12345));
 
-    TRuntimeFilter overflowed(/*maxKeys=*/8);
+    TRuntimeFilter overflowed(/*maxKeys=*/8, /*bloomBytes=*/0);
     auto builder = overflowed.MakeBuilder();
     for (uint64_t key : Hashes(64, 3)) {
         builder.Add(key);
@@ -88,19 +88,24 @@ TEST(RuntimeFilter, PassesEverythingWhenItCannotAnswer) {
     EXPECT_TRUE(overflowed.MayContain(12345));
 }
 
-TEST(RuntimeFilter, MergedOverflowDisables) {
-    TRuntimeFilter filter(/*maxKeys=*/16);
+TEST(RuntimeFilter, MergedOverflowUsesBloom) {
+    TRuntimeFilter filter(/*maxKeys=*/16, /*bloomBytes=*/512);
+    std::vector<uint64_t> allKeys;
     for (uint64_t seed = 0; seed < 4; ++seed) {
         auto builder = filter.MakeBuilder();
         for (uint64_t key : Hashes(8, seed + 10)) {
             builder.Add(key);
+            allKeys.push_back(key);
         }
         EXPECT_FALSE(builder.Overflowed());
         filter.Merge(std::move(builder));
     }
     filter.Publish();
     EXPECT_TRUE(filter.ExactSetDisabled());
-    EXPECT_TRUE(filter.MayContain(999));
+    EXPECT_TRUE(filter.UsesBloom());
+    for (uint64_t key : allKeys) {
+        EXPECT_TRUE(filter.MayContain(key));
+    }
 }
 
 TEST(RuntimeFilter, MergesKeysAndBoundsFromEveryBuilder) {
@@ -229,9 +234,10 @@ TEST(RuntimeFilter, RepeatsAtTheCapDoNotResortEveryRow) {
 }
 
 TEST(RuntimeFilter, OverflowKeepsBounds) {
-    TRuntimeFilter filter(/*maxKeys=*/8);
+    TRuntimeFilter filter(/*maxKeys=*/8, /*bloomBytes=*/512);
     auto builder = filter.MakeBuilder();
-    for (uint64_t key : Hashes(64, 12)) {
+    auto keys = Hashes(64, 12);
+    for (uint64_t key : keys) {
         builder.Add(key);
     }
     builder.AddBound(100);
@@ -241,7 +247,10 @@ TEST(RuntimeFilter, OverflowKeepsBounds) {
     filter.Publish();
 
     ASSERT_TRUE(filter.ExactSetDisabled());
-    EXPECT_TRUE(filter.MayContain(12345)) << "the key set is gone";
+    ASSERT_TRUE(filter.UsesBloom());
+    for (uint64_t key : keys) {
+        EXPECT_TRUE(filter.MayContain(key));
+    }
     auto bounds = filter.Bounds();
     ASSERT_TRUE(bounds.has_value()) << "bounds outlive the key set";
     EXPECT_EQ(bounds->first, 100);
@@ -254,7 +263,7 @@ TEST(RuntimeFilter, OverflowKeepsBounds) {
 TEST(RuntimeFilter, CapIsEnforcedAtPublication) {
     constexpr size_t Cap = 8;
     for (size_t distinct : {Cap, Cap + 1}) {
-        TRuntimeFilter filter(Cap);
+        TRuntimeFilter filter(Cap, /*bloomBytes=*/512);
         auto keys = Hashes(distinct, 13);
         auto builder = filter.MakeBuilder();
         for (uint64_t key : keys) {
@@ -266,9 +275,11 @@ TEST(RuntimeFilter, CapIsEnforcedAtPublication) {
 
         if (distinct > Cap) {
             EXPECT_TRUE(filter.ExactSetDisabled()) << distinct;
+            EXPECT_TRUE(filter.UsesBloom()) << distinct;
             EXPECT_EQ(filter.KeyCount(), 0u) << distinct;
-            EXPECT_TRUE(filter.MayContain(keys.front())) << distinct;
-            EXPECT_TRUE(filter.MayContain(~keys.front())) << distinct;
+            for (uint64_t key : keys) {
+                EXPECT_TRUE(filter.MayContain(key)) << distinct;
+            }
         } else {
             EXPECT_FALSE(filter.ExactSetDisabled()) << distinct;
             EXPECT_EQ(filter.KeyCount(), Cap) << distinct;
@@ -281,18 +292,69 @@ TEST(RuntimeFilter, CapIsEnforcedAtPublication) {
 
 TEST(RuntimeFilter, CapIsEnforcedAcrossBuildersAtPublication) {
     constexpr size_t Cap = 8;
-    TRuntimeFilter filter(Cap);
+    TRuntimeFilter filter(Cap, /*bloomBytes=*/512);
+    std::vector<uint64_t> allKeys;
     for (uint64_t producer = 0; producer < 3; ++producer) {
         auto builder = filter.MakeBuilder();
         for (uint64_t key : Hashes(3, producer + 30)) {
             builder.Add(key);
+            allKeys.push_back(key);
         }
         EXPECT_FALSE(builder.Overflowed());
         filter.Merge(std::move(builder));
     }
     filter.Publish();
     EXPECT_TRUE(filter.ExactSetDisabled());
+    EXPECT_TRUE(filter.UsesBloom());
     EXPECT_EQ(filter.KeyCount(), 0u);
+    for (uint64_t key : allKeys) {
+        EXPECT_TRUE(filter.MayContain(key));
+    }
+}
+
+TEST(RuntimeFilter, BloomFragmentsMergeFromSeveralProducers) {
+    TRuntimeFilter filter(/*maxKeys=*/32, /*bloomBytes=*/4096);
+    constexpr size_t Producers = 4;
+    filter.SetProducerCount(Producers);
+    std::vector<std::vector<uint64_t>> parts;
+    for (size_t i = 0; i < Producers; ++i) {
+        parts.push_back(Hashes(100, i + 70));
+        auto builder = filter.MakeBuilder();
+        for (uint64_t key : parts.back()) {
+            builder.Add(key);
+        }
+        auto partial = std::move(builder).TakePartial();
+        ASSERT_TRUE(partial.ExactSetOverflowed);
+        ASSERT_FALSE(partial.BloomWords.empty());
+        filter.FinishProducer(std::move(partial));
+        if (i + 1 < Producers) {
+            EXPECT_FALSE(filter.Ready());
+        }
+    }
+    ASSERT_TRUE(filter.UsesBloom());
+    for (const auto& part : parts) {
+        for (uint64_t key : part) {
+            EXPECT_TRUE(filter.MayContain(key));
+        }
+    }
+    size_t passed = 0;
+    for (uint64_t key : Hashes(1000, 99)) {
+        passed += filter.MayContain(key);
+    }
+    EXPECT_LT(passed, 100u);
+}
+
+TEST(RuntimeFilter, SaturatedBloomPassesEverything) {
+    TRuntimeFilter filter(/*maxKeys=*/8, /*bloomBytes=*/64);
+    auto builder = filter.MakeBuilder();
+    for (uint64_t key : Hashes(10000, 88)) {
+        builder.Add(key);
+    }
+    filter.Merge(std::move(builder));
+    filter.Publish();
+    EXPECT_TRUE(filter.ExactSetDisabled());
+    EXPECT_FALSE(filter.UsesBloom());
+    EXPECT_TRUE(filter.MayContain(1234567));
 }
 
 TEST(RuntimeFilter, RepeatedKeysDoNotConsumeTheCap) {

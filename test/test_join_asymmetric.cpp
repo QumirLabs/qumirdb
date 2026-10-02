@@ -270,11 +270,13 @@ TEST(AsymmetricJoin, BuildLeftMatchesSymmetric) {
     EXPECT_EQ(RunAsymmetric(EJoinBuildSide::Left), ExpectedInner());
 }
 
-TStatsPtr RowsWithKeyNdv(uint64_t rows, const std::string& column, uint64_t ndv) {
+TStatsPtr RowsWithKeyNdv(uint64_t rows, const std::string& column,
+    uint64_t ndv, bool exact = false) {
     auto s = std::make_shared<TStats>();
     s->RowCount = rows;
     auto col = std::make_shared<TStats::TColumnStats>();
     col->Ndv = ndv;
+    col->NdvIsExact = exact;
     s->ColumnStats[column] = std::move(col);
     return s;
 }
@@ -290,7 +292,7 @@ TEST(AttachRuntimeFilters, EmitsFromTheSideWithFewerDistinctKeys) {
     ASSERT_TRUE(join);
     auto* j = static_cast<TJoinOperator*>(join.get());
 
-    j->Left()->Stats_ = RowsWithKeyNdv(40000, "lk", 40000);
+    j->Left()->Stats_ = RowsWithKeyNdv(400000, "lk", 400000);
     j->Right()->Stats_ = RowsWithKeyNdv(40000, "rk", 10000);
     auto emitted = AttachTo(join);
     ASSERT_TRUE(emitted.has_value());
@@ -299,7 +301,7 @@ TEST(AttachRuntimeFilters, EmitsFromTheSideWithFewerDistinctKeys) {
     EXPECT_EQ(ChooseJoinBuildSide(*j), EJoinBuildSide::Right);
 
     j->Left()->Stats_ = RowsWithKeyNdv(40000, "lk", 10000);
-    j->Right()->Stats_ = RowsWithKeyNdv(40000, "rk", 40000);
+    j->Right()->Stats_ = RowsWithKeyNdv(400000, "rk", 400000);
     emitted = AttachTo(join);
     ASSERT_TRUE(emitted.has_value());
     EXPECT_EQ(emitted->BuildSide, EJoinFilterSide::Left);
@@ -313,13 +315,41 @@ TEST(AttachRuntimeFilters, JudgesDistinctKeysNotRows) {
 
     j->Left()->Stats_ = RowsWithKeyNdv(1000000, "lk", 1000000);
     j->Right()->Stats_ = RowsWithKeyNdv(50000000, "rk", 100);
-    auto emitted = AttachTo(join);
-    ASSERT_TRUE(emitted.has_value());
-    EXPECT_EQ(emitted->BuildSide, EJoinFilterSide::Right);
+    EXPECT_FALSE(AttachTo(join).has_value())
+        << "a low-NDV side is too expensive to build when it has 50M rows";
 
     j->Left()->Stats_ = RowsWithKeyNdv(50000000, "lk", 1000);
     j->Right()->Stats_ = RowsWithKeyNdv(1000, "rk", 1000);
     EXPECT_FALSE(AttachTo(join).has_value());
+
+    j->Left()->Stats_ = RowsWithKeyNdv(50000000, "lk", 50000000);
+    j->Right()->Stats_ = RowsWithKeyNdv(1000000, "rk", 100);
+    auto emitted = AttachTo(join);
+    ASSERT_TRUE(emitted.has_value());
+    EXPECT_EQ(emitted->BuildSide, EJoinFilterSide::Right);
+}
+
+TEST(AttachRuntimeFilters, AccountsForForcedBuildAndNdvUncertainty) {
+    auto join = JoinOfType(EJoinType::Inner);
+    ASSERT_TRUE(join);
+    auto* j = static_cast<TJoinOperator*>(join.get());
+
+    j->Left()->Stats_ = RowsWithKeyNdv(50000, "lk", 50000);
+    j->Right()->Stats_ = RowsWithKeyNdv(10000, "rk", 10000);
+    EXPECT_FALSE(AttachTo(join).has_value())
+        << "weak filter does not pay for blocking a 5:1 join";
+
+    j->Left()->Stats_ = RowsWithKeyNdv(300000, "lk", 300000);
+    j->Right()->Stats_ = RowsWithKeyNdv(100000, "rk", 100);
+    auto emitted = AttachTo(join);
+    ASSERT_TRUE(emitted.has_value())
+        << "high selectivity can pay for a 3:1 build barrier";
+    EXPECT_EQ(emitted->BuildSide, EJoinFilterSide::Right);
+
+    j->Left()->Stats_ = RowsWithKeyNdv(50000, "lk", 50000, true);
+    j->Right()->Stats_ = RowsWithKeyNdv(10000, "rk", 10000, true);
+    EXPECT_TRUE(AttachTo(join).has_value())
+        << "exact NDV removes the uncertainty margin";
 }
 
 TEST(AttachRuntimeFilters, SkipsUncappedUnknownAndUnsupportedJoins) {
@@ -358,17 +388,17 @@ TEST(AttachRuntimeFilters, SemiPublishesOnlyFromTheRight) {
     ASSERT_TRUE(join);
     auto* j = static_cast<TJoinOperator*>(join.get());
 
-    j->Left()->Stats_ = RowsWithKeyNdv(40000, "lk", 40000);
+    j->Left()->Stats_ = RowsWithKeyNdv(400000, "lk", 400000);
     j->Right()->Stats_ = RowsWithKeyNdv(40000, "rk", 10000);
     auto emitted = AttachTo(join);
     ASSERT_TRUE(emitted.has_value());
     EXPECT_EQ(emitted->BuildSide, EJoinFilterSide::Right);
 
     j->Left()->Stats_ = RowsWithKeyNdv(40000, "lk", 10000);
-    j->Right()->Stats_ = RowsWithKeyNdv(40000, "rk", 40000);
+    j->Right()->Stats_ = RowsWithKeyNdv(400000, "rk", 400000);
     EXPECT_FALSE(AttachTo(join).has_value());
 
-    j->Left()->Stats_ = RowsWithKeyNdv(40000, "lk", 40000);
+    j->Left()->Stats_ = RowsWithKeyNdv(400000, "lk", 400000);
     j->Right()->Stats_ = RowsWithKeyNdv(40000, "rk", 10000);
     j->MutableFilter() = std::make_shared<TBinaryExpr>(
         NQumir::TLocation{}, TOperator("!="),
@@ -384,7 +414,7 @@ TEST(AttachRuntimeFilters, IdsComeFromTheCallersAllocator) {
     ASSERT_TRUE(second);
     for (auto* j : {static_cast<TJoinOperator*>(first.get()),
                     static_cast<TJoinOperator*>(second.get())}) {
-        j->Left()->Stats_ = RowsWithKeyNdv(40000, "lk", 40000);
+        j->Left()->Stats_ = RowsWithKeyNdv(400000, "lk", 400000);
         j->Right()->Stats_ = RowsWithKeyNdv(40000, "rk", 10000);
     }
 

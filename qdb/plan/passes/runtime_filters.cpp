@@ -1,5 +1,6 @@
 #include <qdb/plan/passes/runtime_filters.h>
 
+#include <qdb/exec/join_exec.h>
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/stats.h>
 
@@ -13,16 +14,30 @@ using NQumir::NAst::TMaybeNode;
 
 namespace {
 
-constexpr double RuntimeFilterEmitRatio = 3.0;
+// Work units are relative to one join hash-table probe. These are deliberately
+// conservative: the logical pass cannot yet know whether lowering will need an
+// extra one-lane hash shuffle or whether the NDV estimate is accurate.
+constexpr double SavedRowWork = 2.0; // shuffle transfer + join probe
+constexpr double FilterBuildWork = 1.0; // collect hashes + possible Bloom merge
+constexpr double FilterProbeWork = 0.75; // lookup + possible one-lane shuffle
+constexpr double ForcedBuildWork = 2.0; // blocking a join that would run Auto
+constexpr double InexactNdvSafetyFactor = 2.0;
+constexpr double RuntimeFilterMaxBuildRows = 2'000'000.0;
 constexpr double RuntimeFilterMaxBuildKeys = 2'000'000.0;
 
-std::optional<double> KeyNdv(
+struct TKeyEstimate {
+    double Ndv;
+    bool Exact;
+};
+
+std::optional<TKeyEstimate> KeyNdv(
     const TStatsPtr& stats,
     const std::vector<TJoinKey>& keys,
     bool leftSide)
 {
     const double rows = static_cast<double>(stats->RowCount);
     double ndv = 1.0;
+    bool exact = true;
     for (const auto& key : keys) {
         auto it = stats->ColumnStats.find(leftSide ? key.Left : key.Right);
         if (it == stats->ColumnStats.end() || !it->second->Ndv) {
@@ -30,11 +45,35 @@ std::optional<double> KeyNdv(
             return std::nullopt;
         }
         ndv *= std::max(1.0, static_cast<double>(*it->second->Ndv));
-        if (ndv >= rows) {
-            return rows;
-        }
+        exact &= it->second->NdvIsExact;
+        ndv = std::min(ndv, rows);
     }
-    return std::min(ndv, rows);
+    return TKeyEstimate{ndv, exact};
+}
+
+std::optional<double> EstimatedBenefit(double buildRows, double probeRows,
+    TKeyEstimate buildKey, TKeyEstimate probeKey)
+{
+    if (buildRows > RuntimeFilterMaxBuildRows
+        || buildKey.Ndv > RuntimeFilterMaxBuildKeys
+        || buildRows > probeRows) {
+        return std::nullopt;
+    }
+
+    // With unknown overlap, the NDV ratio estimates the share of probe rows
+    // that may match. Widen it when either NDV is approximate so optimism does
+    // not force a join into a build-first mode for a weak filter.
+    const double uncertainty = buildKey.Exact && probeKey.Exact
+        ? 1.0 : InexactNdvSafetyFactor;
+    const double passFraction = std::min(1.0,
+        uncertainty * buildKey.Ndv / std::max(1.0, probeKey.Ndv));
+    const double saved = probeRows * (1.0 - passFraction) * SavedRowWork;
+    const double filterCost = buildRows * FilterBuildWork
+        + probeRows * FilterProbeWork;
+    const double buildPenalty = probeRows >= buildRows * JoinAsymmetryRatio
+        ? 0.0 : buildRows * ForcedBuildWork;
+    const double net = saved - filterCost - buildPenalty;
+    return net > 0.0 ? std::optional(net) : std::nullopt;
 }
 
 std::optional<TRuntimeFilterSpec> ChooseRuntimeFilter(
@@ -60,34 +99,42 @@ std::optional<TRuntimeFilterSpec> ChooseRuntimeFilter(
         || leftStats->RowCount == 0 || rightStats->RowCount == 0) {
         return std::nullopt;
     }
-    // Forced: fall back to row counts, which are exact in the file's stats,
-    // and take the smaller side. Distinct keys would be the right measure, but
-    // the NDV that would report them is saturated.
-    const auto leftNdv = force
-        ? std::optional<double>(static_cast<double>(leftStats->RowCount))
-        : KeyNdv(leftStats, join.Keys(), /*leftSide=*/true);
-    const auto rightNdv = force
-        ? std::optional<double>(static_cast<double>(rightStats->RowCount))
-        : KeyNdv(rightStats, join.Keys(), /*leftSide=*/false);
+    // Measurement mode retains the structural rules but bypasses estimates.
+    if (force) {
+        const auto side = !semi && leftStats->RowCount < rightStats->RowCount
+            ? EJoinFilterSide::Left : EJoinFilterSide::Right;
+        if (semi && rightStats->RowCount > leftStats->RowCount) {
+            return std::nullopt;
+        }
+        return TRuntimeFilterSpec{.Id = nextId++, .BuildSide = side};
+    }
+
+    const auto leftNdv = KeyNdv(leftStats, join.Keys(), /*leftSide=*/true);
+    const auto rightNdv = KeyNdv(rightStats, join.Keys(), /*leftSide=*/false);
     if (!leftNdv || !rightNdv) {
         return std::nullopt;
     }
 
-    // NDV ratio estimates how many probe keys the filter can reject.
-    const double ratio = force ? 1.0 : RuntimeFilterEmitRatio;
     std::optional<EJoinFilterSide> side;
-    if (*rightNdv * ratio <= *leftNdv) {
+    double bestBenefit = 0.0;
+    if (auto benefit = EstimatedBenefit(
+            static_cast<double>(rightStats->RowCount),
+            static_cast<double>(leftStats->RowCount),
+            *rightNdv, *leftNdv)) {
         side = EJoinFilterSide::Right;
-    } else if (!semi && *leftNdv * ratio <= *rightNdv) {
-        // SEMI can publish only from its key-only right table.
-        side = EJoinFilterSide::Left;
+        bestBenefit = *benefit;
+    }
+    // SEMI can publish only from its key-only right table.
+    if (!semi) {
+        if (auto benefit = EstimatedBenefit(
+                static_cast<double>(leftStats->RowCount),
+                static_cast<double>(rightStats->RowCount),
+                *leftNdv, *rightNdv);
+            benefit && *benefit > bestBenefit) {
+            side = EJoinFilterSide::Left;
+        }
     }
     if (!side) {
-        return std::nullopt;
-    }
-    const double buildKeys =
-        *side == EJoinFilterSide::Right ? *rightNdv : *leftNdv;
-    if (!force && buildKeys > RuntimeFilterMaxBuildKeys) {
         return std::nullopt;
     }
     return TRuntimeFilterSpec{.Id = nextId++, .BuildSide = *side};

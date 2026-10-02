@@ -16,6 +16,8 @@ namespace NQdb {
 // a scheduler task, so a remote publisher can encode and send it to a merger.
 struct TRuntimeFilterPartial {
     std::vector<uint64_t> Hashes;
+    // 64-byte blocked Bloom data. All producers of one filter use the same size.
+    std::vector<uint64_t> BloomWords;
     std::optional<std::pair<int64_t, int64_t>> Bounds;
     bool BoundsUsable = true;
     bool ExactSetOverflowed = false;
@@ -25,18 +27,10 @@ struct TRuntimeFilterPartial {
 // Builders are task-local; probes pass until their merged state is published.
 class TRuntimeFilterBuilder {
 public:
-    explicit TRuntimeFilterBuilder(size_t maxKeys) : MaxKeys_(maxKeys) {}
+    TRuntimeFilterBuilder(size_t maxKeys, size_t bloomBytes)
+        : MaxKeys_(maxKeys), BloomBytes_(bloomBytes) {}
 
-    void Add(uint64_t hash) {
-        if (Overflowed_) {
-            return;
-        }
-        Hashes_.push_back(hash);
-        // Delay compaction to avoid sorting every duplicate at the cap.
-        if (Hashes_.size() >= MaxKeys_ * 2) {
-            Compact();
-        }
-    }
+    void Add(uint64_t hash);
 
     // Bounds apply only to single-column integer keys.
     void AddBound(int64_t value) {
@@ -63,7 +57,9 @@ private:
     };
 
     size_t MaxKeys_;
+    size_t BloomBytes_;
     std::vector<uint64_t> Hashes_;
+    std::vector<uint64_t> BloomWords_;
     std::optional<TBounds> Bounds_;
     bool BoundsUsable_ = true;
     bool Overflowed_ = false;
@@ -99,16 +95,19 @@ public:
 
 class TRuntimeFilter final : public IRuntimeFilterProducer, public IRuntimeFilterProbe {
 public:
-    // Exact-set probes stop paying off beyond this size.
-    static constexpr size_t DefaultMaxKeys = 1u << 18;
+    // Tiny build sides use an exact set; larger ones use a blocked Bloom filter.
+    static constexpr size_t DefaultMaxKeys = 1u << 14;
+    static constexpr size_t DefaultBloomBytes = 2u << 20;
 
-    explicit TRuntimeFilter(size_t maxKeys = DefaultMaxKeys) : MaxKeys_(maxKeys) {}
+    explicit TRuntimeFilter(size_t maxKeys = DefaultMaxKeys,
+        size_t bloomBytes = DefaultBloomBytes)
+        : MaxKeys_(maxKeys), BloomBytes_(bloomBytes) {}
 
     TRuntimeFilter(const TRuntimeFilter&) = delete;
     TRuntimeFilter& operator=(const TRuntimeFilter&) = delete;
 
     TRuntimeFilterBuilder MakeBuilder() const override {
-        return TRuntimeFilterBuilder(MaxKeys_);
+        return TRuntimeFilterBuilder(MaxKeys_, BloomBytes_);
     }
 
     void SetProducerCount(size_t producers);
@@ -129,6 +128,7 @@ public:
     bool ExactSetDisabled() const {
         return ExactSetDisabled_.load(std::memory_order_relaxed);
     }
+    bool UsesBloom() const { return Ready() && !BloomWords_.empty(); }
     size_t KeyCount() const { return KeyCount_; }
     std::optional<std::pair<int64_t, int64_t>> Bounds() const;
 
@@ -137,7 +137,10 @@ public:
     bool MayContainKey(int64_t value) const;
 
 private:
+    void PromoteToBloom(); // called with Mutex_ held or before publication
+
     size_t MaxKeys_;
+    size_t BloomBytes_;
     std::mutex Mutex_;
     std::vector<uint64_t> Pending_;
     std::optional<std::pair<int64_t, int64_t>> Bounds_;
@@ -146,6 +149,7 @@ private:
     std::atomic<bool> ExactSetDisabled_{false};
     size_t KeyCount_ = 0;
     std::vector<uint64_t> Table_;
+    std::vector<uint64_t> BloomWords_;
     uint64_t Mask_ = 0;
     std::atomic<bool> Ready_{false};
     std::atomic<size_t> PendingProducers_{0};

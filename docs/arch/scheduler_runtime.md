@@ -305,12 +305,23 @@ it, including when there is only one lane and no partition redistribution. It
 asks an `IRuntimeFilterBindingFactory` for separate producer and probe endpoints.
 The default local factory binds both to one `TRuntimeFilter`. A producer hands
 off a value-only `TRuntimeFilterPartial`
-containing hashes and optional bounds; a distributed factory can send that
-partial to a merger and make the published result available to probe workers.
+containing exact hashes or a 64-byte blocked Bloom fragment, plus optional
+bounds. Exact sets are used up to 16K distinct hashes; larger contributions
+switch to Bloom. A distributed factory can send each partial to a merger and
+make the published result available to probe workers.
 The merger must wait for every producer before publishing. Until then, probes
 pass all rows. The network encoding, global completion tracking, and worker
 failure handling remain part of a distributed runtime. Every worker must also
 use the same join-key hash representation for filter publication and probing.
+
+`AttachRuntimeFilters` estimates how many probe rows the filter can reject from
+the build and probe key NDVs. It compares saved shuffle and join work with the
+cost of building and probing the filter, including a penalty when attaching the
+filter forces a build-first join below the usual 10:1 asymmetry threshold.
+Approximate NDVs get a safety margin; missing NDVs or a nonpositive estimated
+benefit leave the join unfiltered. These work weights are heuristics and need
+calibration against representative queries before relying on them for precise
+latency predictions.
 
 | Runtime piece | JS can own today in principle | Requires C++/WASM adapter | Why |
 |---|---|---|---|
