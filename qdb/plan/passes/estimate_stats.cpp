@@ -324,6 +324,130 @@ double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shar
     return 0.5; // fallback selectivity for unknown atoms
 }
 
+// A grouped SUM compared with a high constant is often much more selective
+// than the generic 0.5 fallback. Use this only when group count is exact and
+// the argument has a numeric histogram. The compound-Poisson variance models
+// group sizes; doubling it covers moderate group-size skew, and a
+// 1% floor prevents an unrealistically tiny estimate from a sparse histogram.
+std::optional<double> EstimateSumHavingSelectivity(
+    const TExprPtr& atom, const TOperatorPtr& input)
+{
+    auto aggregate = TMaybeOp<TAggregateOperator>(input);
+    auto comparison = TMaybeNode<TBinaryExpr>(atom);
+    if (!aggregate || !comparison || !aggregate.Cast()->GroupingSets().empty()
+        || aggregate.Cast()->GroupKeys().size() != 1) {
+        return std::nullopt;
+    }
+    const auto& binary = *comparison.Cast();
+    if (binary.Operator != ">" && binary.Operator != ">=") {
+        return std::nullopt;
+    }
+    auto resultName = TMaybeNode<TIdentExpr>(binary.Left);
+    auto thresholdNode = TMaybeNode<TNumberExpr>(binary.Right);
+    if (!resultName || !thresholdNode) {
+        return std::nullopt;
+    }
+    const double threshold = thresholdNode.Cast()->IsFloat()
+        ? thresholdNode.Cast()->FloatValue
+        : static_cast<double>(thresholdNode.Cast()->IntValue);
+
+    // A filter below the aggregate could have changed key frequencies while
+    // leaving its source NDV marked exact. Restrict this model to a direct scan.
+    const auto source = TMaybeOp<TSourceOperator>(aggregate.Cast()->Input());
+    const auto& inputStats = aggregate.Cast()->Input()->Stats_;
+    if (!source || !inputStats || !inputStats->RowCount
+        || !aggregate.Cast()->Stats_ || !aggregate.Cast()->Stats_->RowCount) {
+        return std::nullopt;
+    }
+    const auto keyIt = inputStats->ColumnStats.find(
+        aggregate.Cast()->GroupKeys().front());
+    if (keyIt == inputStats->ColumnStats.end() || !keyIt->second->Ndv
+        || !keyIt->second->NdvIsExact || *keyIt->second->Ndv == 0
+        || keyIt->second->NullCount != 0) {
+        return std::nullopt;
+    }
+
+    const TAggregateSpec* sum = nullptr;
+    for (const auto& spec : aggregate.Cast()->Aggs()) {
+        if (spec.Name == resultName.Cast()->Name && spec.Func == "sum") {
+            sum = &spec;
+            break;
+        }
+    }
+    if (!sum) {
+        return std::nullopt;
+    }
+    auto argument = TMaybeNode<TIdentExpr>(sum->Arg);
+    if (!argument) {
+        return std::nullopt;
+    }
+    const auto argIt = inputStats->ColumnStats.find(argument.Cast()->Name);
+    if (argIt == inputStats->ColumnStats.end()
+        || argIt->second->Histogram.size() < 2
+        || argIt->second->NullCount != 0) {
+        return std::nullopt;
+    }
+
+    auto schema = TMaybeType<TStructType>(aggregate.Cast()->Input()->OutputColumns());
+    if (!schema) {
+        return std::nullopt;
+    }
+    TTypePtr argumentType;
+    for (const auto& [name, type] : schema.Cast()->Fields) {
+        if (name == argument.Cast()->Name) {
+            argumentType = UnwrapNamedType(UnwrapNullableType(type));
+            break;
+        }
+    }
+    if (!argumentType) {
+        return std::nullopt;
+    }
+
+    auto boundary = [&](size_t index) -> std::optional<double> {
+        const auto& stats = *argIt->second;
+        if (TMaybeType<TFloatType>(argumentType)) {
+            return stats.GetHistogramValue<double>(index);
+        }
+        if (auto integer = TMaybeType<TIntegerType>(argumentType);
+            integer && integer.Cast()->BitWidth() == 64) {
+            return integer.Cast()->IsSigned()
+                ? static_cast<double>(*stats.GetHistogramValue<int64_t>(index))
+                : static_cast<double>(*stats.GetHistogramValue<uint64_t>(index));
+        }
+        return std::nullopt;
+    };
+
+    double mean = 0.0;
+    double secondMoment = 0.0;
+    const size_t buckets = argIt->second->Histogram.size() - 1;
+    for (size_t i = 0; i < buckets; ++i) {
+        auto lo = boundary(i);
+        auto hi = boundary(i + 1);
+        if (!lo || !hi || !std::isfinite(*lo) || !std::isfinite(*hi)
+            || *lo < 0.0 || *lo > *hi) {
+            return std::nullopt;
+        }
+        mean += (*lo + *hi) / 2.0;
+        secondMoment += (*lo * *lo + *lo * *hi + *hi * *hi) / 3.0;
+    }
+    mean /= buckets;
+    secondMoment /= buckets;
+    const double rowsPerGroup = static_cast<double>(inputStats->RowCount)
+        / aggregate.Cast()->Stats_->RowCount;
+    if (rowsPerGroup < 1.0 || rowsPerGroup > 32.0) {
+        return std::nullopt; // large groups need a group-size distribution
+    }
+    const double aggregateMean = rowsPerGroup * mean;
+    if (threshold <= aggregateMean) {
+        return std::nullopt;
+    }
+    const double variance = 2.0 * rowsPerGroup * secondMoment;
+    const double distance = threshold - aggregateMean;
+    const double estimate = std::clamp(variance
+        / (variance + distance * distance), 0.01, 1.0);
+    return estimate < 0.5 ? std::optional(estimate) : std::nullopt;
+}
+
 TStatsPtr ComputeFilterStats(const std::shared_ptr<TFilterOperator>& filter) {
     auto inputStats = filter->Input()->Stats_;
     if (!inputStats) {
@@ -333,7 +457,12 @@ TStatsPtr ComputeFilterStats(const std::shared_ptr<TFilterOperator>& filter) {
     FlattenConjuncts(filter->Predicate(), conjuncts);
     double selectivity = 1.0;
     for (const auto& conjunct : conjuncts) {
-        selectivity *= EstimateSelectivity(conjunct, inputStats, TMaybeType<TStructType>(filter->Input()->OutputColumns()).Cast());
+        if (auto sumHaving = EstimateSumHavingSelectivity(conjunct, filter->Input())) {
+            selectivity *= *sumHaving;
+        } else {
+            selectivity *= EstimateSelectivity(conjunct, inputStats,
+                TMaybeType<TStructType>(filter->Input()->OutputColumns()).Cast());
+        }
     }
     selectivity = std::clamp(selectivity, 0.0, 1.0);
     auto outputStats = std::make_shared<TStats>();

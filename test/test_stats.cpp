@@ -297,6 +297,41 @@ TEST(StatsTest, AggregateStatsAccountForGroupingSets) {
     EXPECT_TRUE(stats->ColumnStats.at("t.y")->Histogram.empty());
 }
 
+TEST(StatsTest, SumHavingUsesHistogramOnlyWithExactGroupNdv) {
+    TStatsSource src({{"order_key", 1'500'000}, {"quantity", 50}},
+        6'000'000);
+    auto& key = src.Stats_->ColumnStats.at("order_key");
+    key->NdvIsExact = true;
+    key->NullCount = 0;
+    auto& quantity = src.Stats_->ColumnStats.at("quantity");
+    quantity->Histogram = Hist<int64_t>({1, 10, 20, 30, 40, 50});
+    quantity->NullCount = 0;
+
+    auto input = std::make_shared<NQdb::TSourceOperator>(src, "");
+    input->SetAlias("t");
+    auto aggregate = std::make_shared<NQdb::TAggregateOperator>(
+        input, std::vector<std::string>{"t.order_key"},
+        std::vector<NQdb::TAggregateSpec>{
+            {.Name = "total", .Func = "sum",
+             .Arg = std::make_shared<NQumir::NAst::TIdentExpr>(
+                 NQumir::TLocation{}, "t.quantity")},
+        });
+    auto filter = NQdb::MakeFilter(aggregate, "(> total 315)");
+    ASSERT_TRUE(filter.has_value()) << filter.error().ToString();
+    NQdb::AnnotateTypes(*filter);
+
+    auto selective = NQdb::EstimateStats(*filter);
+    ASSERT_TRUE(selective);
+    EXPECT_LT(selective->RowCount, 500'000u);
+
+    // A capped NDV is only a lower bound. The group-size model must not treat
+    // it as the actual number of groups.
+    key->NdvIsExact = false;
+    auto uncertain = NQdb::EstimateStats(*filter);
+    ASSERT_TRUE(uncertain);
+    EXPECT_EQ(uncertain->RowCount, 750'000u);
+}
+
 TEST(StatsTest, AggregateInitialCapacityUsesNdvAndPartitionCount) {
     TStatsSource src({{"x", 100}}, 1000);
     auto input = std::make_shared<NQdb::TSourceOperator>(src, "t");

@@ -46,6 +46,12 @@ std::optional<TKeyEstimate> KeyNdv(
         }
         ndv *= std::max(1.0, static_cast<double>(*it->second->Ndv));
         exact &= it->second->NdvIsExact;
+        // Filtering can leave the original key domain intact in stats while
+        // reducing rows. Capping that domain to rows is an estimate, not an
+        // exact distinct count for the filtered side.
+        if (ndv > rows) {
+            exact = false;
+        }
         ndv = std::min(ndv, rows);
     }
     return TKeyEstimate{ndv, exact};
