@@ -7,6 +7,7 @@
 #include <qumir/parser/type.h>
 
 #include "plan_runner.h"
+#include <qdb/exec/runtime_filter.h>
 #include <qdb/io/io.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/passes/column_pruning.h>
@@ -14,6 +15,7 @@
 #include <qdb/sexp/parser.h>
 
 #include <algorithm>
+#include <atomic>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -34,13 +36,53 @@ TRowSet KeyValBatch(int64_t* keys, int64_t* vals, int64_t rows, std::vector<TCol
     return TRowSet{.Columns = cols.data(), .ColumnCount = 2, .RowCount = rows, .RefCount = 1};
 }
 
+class TCountingFilterProbe final : public IRuntimeFilterProbe {
+public:
+    explicit TCountingFilterProbe(std::shared_ptr<IRuntimeFilterProbe> inner)
+        : Inner_(std::move(inner))
+    {}
+
+    bool MayContain(uint64_t hash) const override {
+        Probed.fetch_add(1, std::memory_order_relaxed);
+        const bool keep = Inner_->MayContain(hash);
+        if (!keep) {
+            Rejected.fetch_add(1, std::memory_order_relaxed);
+        }
+        return keep;
+    }
+
+    mutable std::atomic<size_t> Probed{0};
+    mutable std::atomic<size_t> Rejected{0};
+
+private:
+    std::shared_ptr<IRuntimeFilterProbe> Inner_;
+};
+
+class TCountingFilterBindingFactory final : public IRuntimeFilterBindingFactory {
+public:
+    TRuntimeFilterBinding Create(uint32_t id, size_t producerCount) override {
+        ++Created;
+        auto binding = Local_.Create(id, producerCount);
+        Probe = std::make_shared<TCountingFilterProbe>(std::move(binding.Probe));
+        binding.Probe = Probe;
+        return binding;
+    }
+
+    size_t Created = 0;
+    std::shared_ptr<TCountingFilterProbe> Probe;
+
+private:
+    TLocalRuntimeFilterBindingFactory Local_;
+};
+
 // Parses `sexp`, wiring "L" -> left source, anything else -> right source, then
 // runs the full logical pipeline + physical planner.
 std::unique_ptr<TTestRuntime> PlanJoin(
     const std::string& sexp,
     ISource& left,
     ISource& right,
-    NScheduler::TSettings schedulerSettings = {})
+    NScheduler::TSettings schedulerSettings = {},
+    std::shared_ptr<IRuntimeFilterBindingFactory> filterBindings = nullptr)
 {
     TRelParserOptions opts;
     opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
@@ -58,7 +100,7 @@ std::unique_ptr<TTestRuntime> PlanJoin(
     auto root = std::static_pointer_cast<IOperator>(*parsed);
     AnnotateTypes(root);
     ApplyColumnPruning(root);
-    return RunPlan(root, schedulerSettings);
+    return RunPlan(root, schedulerSettings, nullptr, std::move(filterBindings));
 }
 
 std::unique_ptr<TTestRuntime> PlanJoin3(
@@ -382,6 +424,42 @@ TEST(JoinPlanner, RuntimeFilterBindingKeepsThreadedJoinResult) {
     EXPECT_EQ(got,
         (std::vector<std::tuple<int64_t, int64_t, int64_t, int64_t>>{
             {1, 10, 1, 100}}));
+}
+
+TEST(JoinPlanner, RuntimeFilterRejectsRowsWithOneLanePerSide) {
+    for (auto mode : {NScheduler::EExecutionMode::SingleThreadedScheduler,
+             NScheduler::EExecutionMode::ThreadedScheduler}) {
+        SCOPED_TRACE(static_cast<int>(mode));
+        std::vector<int64_t> lk = {1, 2, 3}, lv = {10, 20, 30};
+        std::vector<int64_t> rk = {1}, rv = {100};
+        std::vector<TColumn> lcols, rcols;
+        TMockSource left({"lk", "lv"}, {KeyValBatch(lk.data(), lv.data(), 3, lcols)});
+        TMockSource right({"rk", "rv"}, {KeyValBatch(rk.data(), rv.data(), 1, rcols)});
+        auto bindings = std::make_shared<TCountingFilterBindingFactory>();
+        NScheduler::TSettings settings;
+        settings.Scheduler.Mode = mode;
+        settings.Scheduler.WorkerCount = 2;
+
+        auto plan = PlanJoin(
+            "(rel join (rel source \"L\") (rel source \"R\") "
+            "((lk rk)) (inner) (emit-filter 7 right))",
+            left, right, settings, bindings);
+
+        std::vector<int64_t> keys;
+        TRowSet out{};
+        while (plan->Next(out)) {
+            for (int64_t i = 0; i < out.RowCount; ++i) {
+                keys.push_back(
+                    reinterpret_cast<const int64_t*>(out.Columns[0].Data)[i]);
+            }
+            Release(&out);
+        }
+        EXPECT_EQ(keys, (std::vector<int64_t>{1}));
+        ASSERT_EQ(bindings->Created, 1u);
+        ASSERT_TRUE(bindings->Probe);
+        EXPECT_EQ(bindings->Probe->Probed.load(), 3u);
+        EXPECT_EQ(bindings->Probe->Rejected.load(), 2u);
+    }
 }
 
 TEST(JoinPlanner, ProjectOnTopPrunesJoinInputs) {

@@ -299,10 +299,12 @@ aggregate phases. A distributed scheduler still needs a wire format, flow
 control, error recovery, and a placement policy. It does not need to find the
 aggregate keys again or change a single aggregate after worker placement.
 
-Runtime join filters use a query-scoped id in the logical join. For repartitioned
-joins, `LowerPlanToGraph` asks an `IRuntimeFilterBindingFactory` for separate
-producer and probe endpoints. The default local factory binds both to one
-`TRuntimeFilter`. A producer hands off a value-only `TRuntimeFilterPartial`
+Runtime join filters use a query-scoped id in the logical join. For a join with
+an emitted filter, `LowerPlanToGraph` uses hash-shuffle tasks to build and apply
+it, including when there is only one lane and no partition redistribution. It
+asks an `IRuntimeFilterBindingFactory` for separate producer and probe endpoints.
+The default local factory binds both to one `TRuntimeFilter`. A producer hands
+off a value-only `TRuntimeFilterPartial`
 containing hashes and optional bounds; a distributed factory can send that
 partial to a merger and make the published result available to probe workers.
 The merger must wait for every producer before publishing. Until then, probes

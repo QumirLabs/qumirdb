@@ -2513,7 +2513,10 @@ private:
             KernelOptions(joinGroup, execStageId));
         auto joinCode = MakeBinaryJoinCode<TSchedulerInnerJoinState>();
 
-        if (leftLanes == 1 && rightLanes == 1 && joinParts == 1) {
+        // A filtered join still needs the hash-shuffle tasks to publish and
+        // apply the filter, even when both inputs have only one lane.
+        if (leftLanes == 1 && rightLanes == 1 && joinParts == 1
+            && !join.RuntimeFilter()) {
             auto joinKernels = std::make_shared<TJoinKernels>(
                 [&]() {
                     TStageDiagnosticsScope diagnosticsScope(Diagnostics_, joinGroup);
