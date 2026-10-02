@@ -25,26 +25,45 @@ void TRuntimeFilterBuilder::Compact() {
     }
 }
 
+TRuntimeFilterPartial TRuntimeFilterBuilder::TakePartial() && {
+    // A nonempty contribution without key bounds cannot safely participate in
+    // a global range, even if the caller did not explicitly call DropBounds().
+    const bool boundsUsable = BoundsUsable_
+        && (Bounds_.has_value() || (Hashes_.empty() && !Overflowed_));
+    return TRuntimeFilterPartial{
+        .Hashes = std::move(Hashes_),
+        .Bounds = Bounds_
+            ? std::optional(std::pair{Bounds_->Min, Bounds_->Max})
+            : std::nullopt,
+        .BoundsUsable = boundsUsable,
+        .ExactSetOverflowed = Overflowed_,
+    };
+}
+
 void TRuntimeFilter::Merge(TRuntimeFilterBuilder&& builder) {
+    Merge(std::move(builder).TakePartial());
+}
+
+void TRuntimeFilter::Merge(TRuntimeFilterPartial&& partial) {
     std::lock_guard guard(Mutex_);
-    if (!builder.BoundsUsable_) {
+    if (!partial.BoundsUsable) {
         BoundsUsable_ = false;
-    } else if (builder.Bounds_) {
+    } else if (partial.Bounds) {
         if (!Bounds_) {
-            Bounds_ = *builder.Bounds_;
+            Bounds_ = *partial.Bounds;
         } else {
-            Bounds_->Min = std::min(Bounds_->Min, builder.Bounds_->Min);
-            Bounds_->Max = std::max(Bounds_->Max, builder.Bounds_->Max);
+            Bounds_->first = std::min(Bounds_->first, partial.Bounds->first);
+            Bounds_->second = std::max(Bounds_->second, partial.Bounds->second);
         }
     }
-    if (ExactSetDisabled() || builder.Overflowed_) {
+    if (ExactSetDisabled() || partial.ExactSetOverflowed) {
         ExactSetDisabled_.store(true, std::memory_order_relaxed);
         Pending_.clear();
         Pending_.shrink_to_fit();
         return;
     }
     Pending_.insert(Pending_.end(),
-        builder.Hashes_.begin(), builder.Hashes_.end());
+        partial.Hashes.begin(), partial.Hashes.end());
     if (Pending_.size() >= MaxKeys_ * 2) {
         std::ranges::sort(Pending_);
         const auto duplicates = std::ranges::unique(Pending_);
@@ -54,6 +73,21 @@ void TRuntimeFilter::Merge(TRuntimeFilterBuilder&& builder) {
             Pending_.clear();
             Pending_.shrink_to_fit();
         }
+    }
+}
+
+void TRuntimeFilter::SetProducerCount(size_t producers) {
+    PendingProducers_.store(producers, std::memory_order_relaxed);
+}
+
+void TRuntimeFilter::FinishProducer(TRuntimeFilterBuilder&& builder) {
+    FinishProducer(std::move(builder).TakePartial());
+}
+
+void TRuntimeFilter::FinishProducer(TRuntimeFilterPartial&& partial) {
+    Merge(std::move(partial));
+    if (PendingProducers_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        Publish();
     }
 }
 
@@ -94,7 +128,7 @@ std::optional<std::pair<int64_t, int64_t>> TRuntimeFilter::Bounds() const {
     if (!Ready() || !BoundsUsable_ || !Bounds_) {
         return std::nullopt;
     }
-    return std::pair{Bounds_->Min, Bounds_->Max};
+    return Bounds_;
 }
 
 bool TRuntimeFilter::MayContain(uint64_t hash) const {
@@ -119,7 +153,19 @@ bool TRuntimeFilter::MayContainKey(int64_t value) const {
     if (!Ready() || !BoundsUsable_ || !Bounds_) {
         return true;
     }
-    return value >= Bounds_->Min && value <= Bounds_->Max;
+    return value >= Bounds_->first && value <= Bounds_->second;
+}
+
+TRuntimeFilterBinding TLocalRuntimeFilterBindingFactory::Create(
+    uint32_t id, size_t producerCount)
+{
+    (void)id;
+    auto filter = std::make_shared<TRuntimeFilter>();
+    filter->SetProducerCount(producerCount);
+    return TRuntimeFilterBinding{
+        .Producer = filter,
+        .Probe = std::move(filter),
+    };
 }
 
 } // namespace NQdb

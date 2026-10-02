@@ -16,6 +16,7 @@
 namespace NQdb {
 class TExternalCatalogSnapshot;
 class TAggregateOperator;
+class IRuntimeFilterBindingFactory;
 namespace NScheduler {
 
 // A plan lowered into a scheduler task graph, without a terminal sink attached.
@@ -55,11 +56,13 @@ bool ShouldUsePartialAggregate(
 
 // Lower a logical plan into a scheduler graph (no terminal sink yet).
 // Kernels are generated but not compiled.
+// A custom filter factory can bind query-scoped filter ids to remote endpoints.
 TLoweredPlan LowerPlanToGraph(
     const TOperatorPtr& root,
     TSettings settings,
     std::ostream* diagnostics,
-    std::shared_ptr<const TExternalCatalogSnapshot> externalCatalog = nullptr);
+    std::shared_ptr<const TExternalCatalogSnapshot> externalCatalog = nullptr,
+    std::shared_ptr<IRuntimeFilterBindingFactory> filterBindings = nullptr);
 
 // Attach a terminal sink that writes every output rowset to `sink`, then run the
 // graph on the configured scheduler. Returns false and sets `error` on failure.

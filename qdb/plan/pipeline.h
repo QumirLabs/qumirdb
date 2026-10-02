@@ -18,6 +18,8 @@ struct TPlanPassDiagnostics {
 
 struct TPlanPassOptions {
     bool EnableCbo = true;
+    // Measurement switch; see AttachRuntimeFilters.
+    bool ForceRuntimeFilters = false;
     TLateMaterializationSettings LateMaterialization;
     TPlanPassDiagnostics* Diagnostics = nullptr;
     NKernel::TAnnotationContext Annotation;

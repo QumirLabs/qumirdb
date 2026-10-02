@@ -10,7 +10,9 @@
 #include <qdb/plan/passes/cte_reuse.h>
 #include <qdb/plan/passes/top_sort.h>
 #include <qdb/plan/passes/push_limit.h>
+#include <qdb/plan/ops/cte_consumer.h>
 #include <qdb/plan/passes/row_group_predicate.h>
+#include <qdb/plan/passes/runtime_filters.h>
 #include <qdb/plan/passes/typing.h>
 #include <qdb/plan/plan_print.h>
 
@@ -142,6 +144,20 @@ void ApplyPlanPasses(TOperatorPtr& plan, TPlanPassOptions options) {
     ForEachPlan(plan, [](TOperatorPtr& current, TCteDefinition*) {
         AttachRowGroupPredicates(current);
     });
+    {
+        // Runs last, so the pairing it records survives every restructuring
+        // pass. One counter across every plan of the query: after ApplyCteReuse
+        // a shared definition lives in its own materialization plan, which
+        // ForEachPlan no longer reaches, and two joins must never share an id.
+        uint32_t nextFilterId = 1;
+        for (const auto& materialization : CollectMaterializations(plan)) {
+            AttachRuntimeFilters(materialization.Materialization->Plan,
+                nextFilterId, options.ForceRuntimeFilters);
+        }
+        ForEachPlan(plan, [&](TOperatorPtr& current, TCteDefinition*) {
+            AttachRuntimeFilters(current, nextFilterId, options.ForceRuntimeFilters);
+        });
+    }
     if (std::getenv("QDB_DUMP_PASSES") != nullptr) {
         std::cerr << "\n===== after ApplyCteReuse =====\n";
         PrintPlanTreeWithCtes(std::cerr, plan);

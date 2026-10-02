@@ -152,6 +152,24 @@ TEST(RuntimeFilter, OneBuilderWithoutBoundsDropsThemAll) {
     EXPECT_TRUE(filter.MayContain(2));
 }
 
+TEST(RuntimeFilter, AProducerWithKeysButNoBoundsDisablesTheRange) {
+    TRuntimeFilter filter;
+    auto withBounds = filter.MakeBuilder();
+    withBounds.Add(1);
+    withBounds.AddBound(10);
+    filter.Merge(std::move(withBounds));
+
+    auto withoutBounds = filter.MakeBuilder();
+    withoutBounds.Add(2);
+    filter.Merge(std::move(withoutBounds));
+    filter.Publish();
+
+    EXPECT_FALSE(filter.Bounds().has_value());
+    EXPECT_TRUE(filter.MayContainKey(-1000));
+    EXPECT_TRUE(filter.MayContain(1));
+    EXPECT_TRUE(filter.MayContain(2));
+}
+
 TEST(RuntimeFilter, MergesConcurrently) {
     TRuntimeFilter filter;
     constexpr size_t Threads = 8;
@@ -323,6 +341,105 @@ TEST(RuntimeFilter, DeduplicatesRepeatedKeys) {
     filter.Publish();
     EXPECT_EQ(filter.KeyCount(), 1u);
     EXPECT_TRUE(filter.MayContain(42));
+}
+
+TEST(RuntimeFilter, PublishesWhenTheLastProducerFinishes) {
+    TRuntimeFilter filter;
+    filter.SetProducerCount(3);
+
+    std::vector<std::vector<uint64_t>> parts;
+    for (uint64_t producer = 0; producer < 3; ++producer) {
+        parts.push_back(Hashes(50, producer + 40));
+        auto builder = filter.MakeBuilder();
+        for (uint64_t key : parts.back()) {
+            builder.Add(key);
+        }
+        EXPECT_FALSE(filter.Ready()) << "published before the last producer";
+        filter.FinishProducer(std::move(builder));
+    }
+
+    ASSERT_TRUE(filter.Ready());
+    for (const auto& part : parts) {
+        for (uint64_t key : part) {
+            EXPECT_TRUE(filter.MayContain(key));
+        }
+    }
+    EXPECT_FALSE(filter.MayContain(~parts[0][0]));
+}
+
+TEST(RuntimeFilter, PublishesOnceUnderContention) {
+    TRuntimeFilter filter;
+    constexpr size_t Producers = 8;
+    filter.SetProducerCount(Producers);
+
+    std::vector<std::thread> workers;
+    for (size_t t = 0; t < Producers; ++t) {
+        workers.emplace_back([&filter, t] {
+            auto builder = filter.MakeBuilder();
+            for (uint64_t key : Hashes(200, t + 50)) {
+                builder.Add(key);
+            }
+            filter.FinishProducer(std::move(builder));
+        });
+    }
+    for (auto& worker : workers) {
+        worker.join();
+    }
+
+    ASSERT_TRUE(filter.Ready());
+    ASSERT_FALSE(filter.ExactSetDisabled());
+    EXPECT_EQ(filter.KeyCount(), Producers * 200);
+    for (size_t t = 0; t < Producers; ++t) {
+        for (uint64_t key : Hashes(200, t + 50)) {
+            EXPECT_TRUE(filter.MayContain(key));
+        }
+    }
+}
+
+TEST(RuntimeFilter, PartialCanBeMergedAfterLeavingTheProducer) {
+    TRuntimeFilter filter(/*maxKeys=*/8);
+    filter.SetProducerCount(2);
+
+    auto first = filter.MakeBuilder();
+    first.Add(10);
+    first.AddBound(100);
+    auto firstPartial = std::move(first).TakePartial();
+    ASSERT_EQ(firstPartial.Hashes, (std::vector<uint64_t>{10}));
+    ASSERT_EQ(firstPartial.Bounds,
+        (std::optional<std::pair<int64_t, int64_t>>{{100, 100}}));
+    filter.FinishProducer(std::move(firstPartial));
+    EXPECT_FALSE(filter.Ready());
+
+    auto second = filter.MakeBuilder();
+    second.Add(20);
+    second.AddBound(200);
+    filter.FinishProducer(std::move(second).TakePartial());
+
+    ASSERT_TRUE(filter.Ready());
+    EXPECT_TRUE(filter.MayContain(10));
+    EXPECT_TRUE(filter.MayContain(20));
+    EXPECT_FALSE(filter.MayContain(30));
+    EXPECT_EQ(filter.Bounds(),
+        (std::optional<std::pair<int64_t, int64_t>>{{100, 200}}));
+}
+
+TEST(RuntimeFilter, LocalBindingKeepsProducerAndProbeInSync) {
+    TLocalRuntimeFilterBindingFactory factory;
+    auto binding = factory.Create(/*id=*/7, /*producerCount=*/2);
+    ASSERT_TRUE(binding.Producer);
+    ASSERT_TRUE(binding.Probe);
+
+    for (uint64_t key : {11, 22}) {
+        auto builder = binding.Producer->MakeBuilder();
+        builder.Add(key);
+        binding.Producer->FinishProducer(std::move(builder).TakePartial());
+        if (key == 11) {
+            EXPECT_TRUE(binding.Probe->MayContain(33));
+        }
+    }
+    EXPECT_TRUE(binding.Probe->MayContain(11));
+    EXPECT_TRUE(binding.Probe->MayContain(22));
+    EXPECT_FALSE(binding.Probe->MayContain(33));
 }
 
 int main(int argc, char** argv) {

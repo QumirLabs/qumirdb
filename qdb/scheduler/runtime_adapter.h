@@ -1,5 +1,6 @@
 #pragma once
 
+#include <qdb/exec/runtime_filter.h>
 #include <qdb/io/io.h>
 #include <qdb/scheduler/connection.h>
 #include <qdb/scheduler/state.h>
@@ -96,6 +97,11 @@ struct THashShuffleCode {
     size_t TargetOutputBatchRows = 0;
     size_t MaxOutputBatchRows = 0;
     size_t TargetOutputBatchBytes = 0;
+    // Bindings are shared by every lane of one exchange. The local factory
+    // uses one filter object; remote publishers and probes may be separate.
+    // At most one of the two is set.
+    std::shared_ptr<IRuntimeFilterProducer> ProducedFilter;
+    std::shared_ptr<IRuntimeFilterProbe> AppliedFilter;
 };
 
 struct TMergeCode {
@@ -251,6 +257,9 @@ private:
     struct TPendingOutput;
 
     bool BatchingEnabled() const;
+    bool NeedsHashes(size_t partitions) const;
+    void AccumulateFilter(const TRowSet& rowSet);
+    bool FilterKeeps(size_t row) const;
     void EnsureBuffers(size_t partitions);
     void Scatter(TRowSet& rowSet);
     void ScatterBuffered(TRowSet& rowSet);
@@ -272,6 +281,7 @@ private:
     THashShuffleConnection* Output_ = nullptr;
     size_t SourceLane_ = 0;
     std::vector<uint64_t> Hashes_;
+    std::optional<TRuntimeFilterBuilder> FilterBuilder_;
     std::vector<std::unique_ptr<TDestinationBuffer>> Buffers_;
     std::vector<TPendingOutput> Pending_;
     size_t PendingIndex_ = 0;

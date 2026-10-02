@@ -515,6 +515,15 @@ ETaskResult THashShuffleTask::Execute() {
         if (result != ETaskResult::OK) {
             return result;
         }
+        if (Code_->ProducedFilter) {
+            // This lane is done contributing; the last one to say so publishes.
+            auto builder = FilterBuilder_
+                ? std::move(*FilterBuilder_)
+                : Code_->ProducedFilter->MakeBuilder();
+            Code_->ProducedFilter->FinishProducer(
+                std::move(builder).TakePartial());
+            FilterBuilder_.reset();
+        }
         OutputFinished_ = true;
         Output_->Finish(SourceLane_);
         return ETaskResult::FINISHED;
@@ -529,6 +538,31 @@ ETaskResult THashShuffleTask::Execute() {
 
 bool THashShuffleTask::BatchingEnabled() const {
     return Code_->InputType && Code_->TargetOutputBatchRows > 0;
+}
+
+// Routing needs hashes only when there are several partitions, but a filter
+// needs them whatever the fan-out, so the single-partition short cut cannot be
+// taken while one is attached.
+bool THashShuffleTask::NeedsHashes(size_t partitions) const {
+    return partitions > 1 || Code_->ProducedFilter || Code_->AppliedFilter;
+}
+
+void THashShuffleTask::AccumulateFilter(const TRowSet& rowSet) {
+    if (!Code_->ProducedFilter) {
+        return;
+    }
+    if (!FilterBuilder_) {
+        FilterBuilder_.emplace(Code_->ProducedFilter->MakeBuilder());
+    }
+    for (int64_t row = 0; row < rowSet.RowCount; ++row) {
+        if (RowSelected(rowSet, row)) {
+            FilterBuilder_->Add(Hashes_[static_cast<size_t>(row)]);
+        }
+    }
+}
+
+bool THashShuffleTask::FilterKeeps(size_t row) const {
+    return !Code_->AppliedFilter || Code_->AppliedFilter->MayContain(Hashes_[row]);
 }
 
 void THashShuffleTask::EnsureBuffers(size_t partitions) {
@@ -570,7 +604,7 @@ void THashShuffleTask::ScatterBuffered(TRowSet& rowSet) {
 
     const size_t estimatedRowBytes = EstimateShuffleRowBytes(inputType);
 
-    if (partitions == 1) {
+    if (partitions == 1 && !NeedsHashes(partitions)) {
         rows[0].reserve(static_cast<size_t>(input->RowCount));
         for (int64_t row = 0; row < input->RowCount; ++row) {
             if (!RowSelected(*input, row)) {
@@ -588,13 +622,18 @@ void THashShuffleTask::ScatterBuffered(TRowSet& rowSet) {
         throw std::runtime_error("hash shuffle hash kernel failed");
     }
     auto hashes = std::make_shared<std::vector<uint64_t>>(Hashes_);
+    AccumulateFilter(*input);
 
     for (int64_t row = 0; row < input->RowCount; ++row) {
         if (!RowSelected(*input, row)) {
             continue;
         }
-        const size_t dst = static_cast<size_t>(
-            Hashes_[static_cast<size_t>(row)] % partitions);
+        if (!FilterKeeps(static_cast<size_t>(row))) {
+            continue;
+        }
+        const size_t dst = partitions == 1
+            ? 0
+            : static_cast<size_t>(Hashes_[static_cast<size_t>(row)] % partitions);
         rows[dst].push_back(static_cast<int32_t>(row));
     }
 
@@ -612,7 +651,8 @@ void THashShuffleTask::ScatterViews(TRowSet& rowSet) {
 
     // Many-to-one shuffle: every row routes to lane 0, so skip hashing and
     // forward the whole rowset (keeping its existing selection) unchanged.
-    if (partitions == 1) {
+    // A filter still needs the hashes, so it falls through to the general path.
+    if (partitions == 1 && !NeedsHashes(partitions)) {
         ClearPending();
         auto input = std::shared_ptr<TRowSet>(new TRowSet(rowSet), DestroySharedRowSet);
         rowSet = {};
@@ -638,6 +678,7 @@ void THashShuffleTask::ScatterViews(TRowSet& rowSet) {
         throw std::runtime_error("hash shuffle hash kernel failed");
     }
     auto hashes = std::make_shared<std::vector<uint64_t>>(Hashes_);
+    AccumulateFilter(rowSet);
 
     std::vector<std::vector<uint8_t>> selections(partitions);
     std::vector<size_t> counts(partitions, 0);
@@ -648,7 +689,12 @@ void THashShuffleTask::ScatterViews(TRowSet& rowSet) {
         if (!RowSelected(rowSet, row)) {
             continue;
         }
-        const size_t dst = static_cast<size_t>(Hashes_[static_cast<size_t>(row)] % partitions);
+        if (!FilterKeeps(static_cast<size_t>(row))) {
+            continue;
+        }
+        const size_t dst = partitions == 1
+            ? 0
+            : static_cast<size_t>(Hashes_[static_cast<size_t>(row)] % partitions);
         selections[dst][static_cast<size_t>(row)] = 0xff;
         ++counts[dst];
     }

@@ -350,6 +350,40 @@ TEST(JoinPlanner, SchedulerThreadedInnerJoinE2E) {
     EXPECT_EQ(got, expected);
 }
 
+TEST(JoinPlanner, RuntimeFilterBindingKeepsThreadedJoinResult) {
+    std::vector<int64_t> lk = {1, 2, 3}, lv = {10, 20, 30};
+    std::vector<int64_t> rk = {1}, rv = {100};
+    std::vector<TColumn> lcols, rcols;
+    TMockSource left({"lk", "lv"}, {KeyValBatch(lk.data(), lv.data(), 3, lcols)});
+    TMockSource right({"rk", "rv"}, {KeyValBatch(rk.data(), rv.data(), 1, rcols)});
+    NScheduler::TSettings settings;
+    settings.Scheduler.Mode = NScheduler::EExecutionMode::ThreadedScheduler;
+    settings.Scheduler.WorkerCount = 2;
+    settings.HashShuffle.PartitionCount = 2;
+    settings.HashShuffle.MaxPartitionCount = 2;
+
+    auto plan = PlanJoin(
+        "(rel join (rel source \"L\") (rel source \"R\") "
+        "((lk rk)) (inner) (emit-filter 7 right))",
+        left, right, settings);
+
+    std::vector<std::tuple<int64_t, int64_t, int64_t, int64_t>> got;
+    TRowSet out{};
+    while (plan->Next(out)) {
+        for (int64_t i = 0; i < out.RowCount; ++i) {
+            got.emplace_back(
+                reinterpret_cast<const int64_t*>(out.Columns[0].Data)[i],
+                reinterpret_cast<const int64_t*>(out.Columns[1].Data)[i],
+                reinterpret_cast<const int64_t*>(out.Columns[2].Data)[i],
+                reinterpret_cast<const int64_t*>(out.Columns[3].Data)[i]);
+        }
+        Release(&out);
+    }
+    EXPECT_EQ(got,
+        (std::vector<std::tuple<int64_t, int64_t, int64_t, int64_t>>{
+            {1, 10, 1, 100}}));
+}
+
 TEST(JoinPlanner, ProjectOnTopPrunesJoinInputs) {
     // Project keeps only lk and rv; lv and rk(beyond the key) are not selected.
     // Pruning narrows each source, but the key columns survive.

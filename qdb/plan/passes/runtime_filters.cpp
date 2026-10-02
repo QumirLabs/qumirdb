@@ -38,7 +38,7 @@ std::optional<double> KeyNdv(
 }
 
 std::optional<TRuntimeFilterSpec> ChooseRuntimeFilter(
-    const TJoinOperator& join, uint32_t& nextId)
+    const TJoinOperator& join, uint32_t& nextId, bool force)
 {
     if (join.Keys().empty()) {
         return std::nullopt;
@@ -60,17 +60,25 @@ std::optional<TRuntimeFilterSpec> ChooseRuntimeFilter(
         || leftStats->RowCount == 0 || rightStats->RowCount == 0) {
         return std::nullopt;
     }
-    const auto leftNdv = KeyNdv(leftStats, join.Keys(), /*leftSide=*/true);
-    const auto rightNdv = KeyNdv(rightStats, join.Keys(), /*leftSide=*/false);
+    // Forced: fall back to row counts, which are exact in the file's stats,
+    // and take the smaller side. Distinct keys would be the right measure, but
+    // the NDV that would report them is saturated.
+    const auto leftNdv = force
+        ? std::optional<double>(static_cast<double>(leftStats->RowCount))
+        : KeyNdv(leftStats, join.Keys(), /*leftSide=*/true);
+    const auto rightNdv = force
+        ? std::optional<double>(static_cast<double>(rightStats->RowCount))
+        : KeyNdv(rightStats, join.Keys(), /*leftSide=*/false);
     if (!leftNdv || !rightNdv) {
         return std::nullopt;
     }
 
     // NDV ratio estimates how many probe keys the filter can reject.
+    const double ratio = force ? 1.0 : RuntimeFilterEmitRatio;
     std::optional<EJoinFilterSide> side;
-    if (*rightNdv * RuntimeFilterEmitRatio <= *leftNdv) {
+    if (*rightNdv * ratio <= *leftNdv) {
         side = EJoinFilterSide::Right;
-    } else if (!semi && *leftNdv * RuntimeFilterEmitRatio <= *rightNdv) {
+    } else if (!semi && *leftNdv * ratio <= *rightNdv) {
         // SEMI can publish only from its key-only right table.
         side = EJoinFilterSide::Left;
     }
@@ -79,31 +87,33 @@ std::optional<TRuntimeFilterSpec> ChooseRuntimeFilter(
     }
     const double buildKeys =
         *side == EJoinFilterSide::Right ? *rightNdv : *leftNdv;
-    if (buildKeys > RuntimeFilterMaxBuildKeys) {
+    if (!force && buildKeys > RuntimeFilterMaxBuildKeys) {
         return std::nullopt;
     }
     return TRuntimeFilterSpec{.Id = nextId++, .BuildSide = *side};
 }
 
-void Attach(const TOperatorPtr& node, uint32_t& nextId) {
+void Attach(const TOperatorPtr& node, uint32_t& nextId, bool force) {
     if (!node) {
         return;
     }
     if (auto join = TMaybeOp<TJoinOperator>(node)) {
         join.Cast()->MutableRuntimeFilter() =
-            ChooseRuntimeFilter(*join.Cast(), nextId);
+            ChooseRuntimeFilter(*join.Cast(), nextId, force);
     }
     for (const auto& child : node->Children()) {
         if (auto op = TMaybeNode<IOperator>(child)) {
-            Attach(op.Cast(), nextId);
+            Attach(op.Cast(), nextId, force);
         }
     }
 }
 
 } // namespace
 
-void AttachRuntimeFilters(const TOperatorPtr& root, uint32_t& nextId) {
-    Attach(root, nextId);
+void AttachRuntimeFilters(
+    const TOperatorPtr& root, uint32_t& nextId, bool force)
+{
+    Attach(root, nextId, force);
 }
 
 } // namespace NQdb
