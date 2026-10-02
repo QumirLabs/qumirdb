@@ -504,6 +504,39 @@ TEST(JoinPlanner, RuntimeFilterRejectsRowsWithOneLanePerSide) {
     }
 }
 
+TEST(JoinPlanner, RuntimeFilterAtSourceComposesWithStaticFilter) {
+    std::vector<int64_t> lk = {1, 2, 3}, lv = {20, 20, 5};
+    std::vector<int64_t> rk = {1}, rv = {100};
+    std::vector<TColumn> lcols, rcols;
+    TMockSource left({"lk", "lv"}, {KeyValBatch(lk.data(), lv.data(), 3, lcols)});
+    TMockSource right({"rk", "rv"}, {KeyValBatch(rk.data(), rv.data(), 1, rcols)});
+    auto bindings = std::make_shared<TCountingFilterBindingFactory>();
+    NScheduler::TSettings settings;
+    settings.Scheduler.Mode = NScheduler::EExecutionMode::ThreadedScheduler;
+    settings.Scheduler.WorkerCount = 2;
+
+    auto plan = PlanJoin(
+        "(rel join (rel filter (rel source \"L\") (> lv 10)) "
+        "(rel source \"R\") ((lk rk)) (inner) (emit-filter 7 right))",
+        left, right, settings, bindings);
+
+    std::vector<int64_t> keys;
+    TRowSet out{};
+    while (plan->Next(out)) {
+        for (int64_t i = 0; i < out.RowCount; ++i) {
+            if (!out.Selection || out.Selection[i]) {
+                keys.push_back(
+                    reinterpret_cast<const int64_t*>(out.Columns[0].Data)[i]);
+            }
+        }
+        Release(&out);
+    }
+    EXPECT_EQ(keys, (std::vector<int64_t>{1}));
+    ASSERT_TRUE(bindings->Probe);
+    EXPECT_EQ(bindings->Probe->Probed.load(), 3u);
+    EXPECT_EQ(bindings->Probe->Rejected.load(), 2u);
+}
+
 TEST(JoinPlanner, RuntimeFilterMergesTwoBuildLanesBeforeProbing) {
     std::vector<int64_t> lk1 = {1, 2}, lv1 = {10, 20};
     std::vector<int64_t> lk2 = {3, 4}, lv2 = {30, 40};

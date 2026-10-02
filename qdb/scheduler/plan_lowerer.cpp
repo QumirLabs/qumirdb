@@ -3,6 +3,7 @@
 #include <qdb/exec/join_exec.h>
 #include <qdb/exec/late_materialize_exec.h>
 #include <qdb/exec/planner_helpers.h>
+#include <qdb/exec/runtime_filter.h>
 #include <qdb/exec/runtime_context.h>
 #include <qdb/exec/sort_exec.h>
 #include <qdb/exec/window_exec.h>
@@ -41,6 +42,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 namespace NQdb {
 namespace {
@@ -48,7 +50,58 @@ namespace {
 struct TSchedulerSourceState {
     ISource* Source = nullptr;
     std::unique_ptr<ISource> OwnedSource;
+    std::vector<std::string> OutputFields;
+    NScheduler::THashShuffleCode::THash RuntimeFilterHash;
+    std::shared_ptr<IRuntimeFilterProbe> RuntimeFilterProbe;
 };
+
+struct TSourceFilterRowSetData {
+    TRowSet Input;
+    std::vector<uint8_t> Selection;
+    std::vector<uint64_t> Hashes;
+};
+
+void DestroySourceFilterRowSet(TRowSet* rowSet) {
+    auto* data = static_cast<TSourceFilterRowSetData*>(rowSet->Private);
+    Release(&data->Input);
+    delete data;
+}
+
+bool ReadSourceWithRuntimeFilter(TSchedulerSourceState& state, TRowSet& rowSet) {
+    while (state.Source->Next(rowSet)) {
+        if (!state.RuntimeFilterProbe) {
+            return true;
+        }
+        auto data = std::make_unique<TSourceFilterRowSetData>();
+        data->Hashes.resize(static_cast<size_t>(rowSet.RowCount));
+        if (!state.RuntimeFilterHash(&rowSet, data->Hashes.data())) {
+            Release(&rowSet);
+            throw std::runtime_error("source runtime filter hash kernel failed");
+        }
+        data->Selection.resize(static_cast<size_t>(rowSet.RowCount));
+        size_t kept = 0;
+        for (int64_t row = 0; row < rowSet.RowCount; ++row) {
+            const bool selected = !rowSet.Selection || rowSet.Selection[row] != 0;
+            const bool keep = selected && state.RuntimeFilterProbe->MayContain(
+                data->Hashes[static_cast<size_t>(row)]);
+            data->Selection[static_cast<size_t>(row)] = keep ? 0xff : 0;
+            kept += keep;
+        }
+        if (!kept) {
+            Release(&rowSet);
+            rowSet = {};
+            continue;
+        }
+        data->Input = rowSet;
+        rowSet.Selection = data->Selection.data();
+        rowSet.Hash = data->Hashes.data();
+        rowSet.Destroy = DestroySourceFilterRowSet;
+        rowSet.Private = data.release();
+        rowSet.RefCount = 1;
+        return true;
+    }
+    return false;
+}
 
 struct TSchedulerUnaryStage {
     std::shared_ptr<const NScheduler::TUnaryCode> Code;
@@ -988,6 +1041,11 @@ private:
         size_t outLaneOffset)
     {
         auto outputType = BuildSourceRuntimeType(src);
+        std::vector<std::string> outputFields;
+        for (const auto& field :
+             static_cast<const NQumir::NAst::TStructType&>(*outputType).Fields) {
+            outputFields.push_back(field.first);
+        }
         const auto execStageId = NewExecStage(
             &src, EExecPlanNodeKind::Source);
         auto splitPlan = ScanSplits(src);
@@ -996,7 +1054,7 @@ private:
         auto code = std::make_shared<NScheduler::TSourceCode>(
             [](void* state, TRowSet& rowSet) {
                 auto* sourceState = static_cast<TSchedulerSourceState*>(state);
-                return sourceState->Source->Next(rowSet);
+                return ReadSourceWithRuntimeFilter(*sourceState, rowSet);
             });
 
         const size_t lanes = std::max<size_t>(
@@ -1008,7 +1066,7 @@ private:
             const auto* split = splitPlan && !splitPlan->empty()
                 ? &(*splitPlan)[p]
                 : nullptr;
-            std::shared_ptr<void> state;
+            std::shared_ptr<TSchedulerSourceState> state;
             if (parquetSource && split && !split->RowGroups.empty()) {
                 auto owned = parquetSource->MakeRowGroupsSource(split->RowGroups);
                 auto* ptr = owned.get();
@@ -1016,6 +1074,7 @@ private:
                     TSchedulerSourceState{
                         .Source = ptr,
                         .OwnedSource = std::move(owned),
+                        .OutputFields = outputFields,
                     });
             } else if (parquetSource && splitPlan && splitPlan->empty()) {
                 auto owned = parquetSource->MakeRowGroupsSource({});
@@ -1024,15 +1083,20 @@ private:
                     TSchedulerSourceState{
                         .Source = ptr,
                         .OwnedSource = std::move(owned),
+                        .OutputFields = outputFields,
                     });
             } else {
                 state = std::make_shared<TSchedulerSourceState>(
-                    TSchedulerSourceState{.Source = sourcePtr});
+                    TSchedulerSourceState{
+                        .Source = sourcePtr,
+                        .OutputFields = outputFields,
+                    });
             }
             auto task = std::make_unique<NScheduler::TSourceTask>(
                 code,
-                std::move(state),
+                state,
                 NScheduler::TOutputPort{.Connection = &outConn, .Lane = p + outLaneOffset});
+            SourceStates_[&src].push_back(std::move(state));
             auto& node = Graph_.AddOwnedNode(std::move(task));
             MarkNode(node,
                 "source",
@@ -2578,8 +2642,44 @@ private:
             }
             (buildIsLeft ? leftShuffleCode : rightShuffleCode)->ProducedFilter =
                 std::move(binding.Producer);
-            (buildIsLeft ? rightShuffleCode : leftShuffleCode)->AppliedFilter =
-                std::move(binding.Probe);
+            // A filter and a source preserve their input schema. The join's
+            // probe hash kernel can therefore run at that source, before rows
+            // enter the intervening filter tasks or the join repartition.
+            auto probeInput = buildIsLeft ? join.Right() : join.Left();
+            while (auto filter = TMaybeOp<TFilterOperator>(probeInput)) {
+                probeInput = filter.Cast()->Input();
+            }
+            auto source = TMaybeOp<TSourceOperator>(probeInput);
+            auto states = source
+                ? SourceStates_.find(source.Cast().get()) : SourceStates_.end();
+            const auto& probeType = buildIsLeft ? rightType : leftType;
+            const auto& probeFields =
+                static_cast<const TStructType&>(*probeType).Fields;
+            const bool sourceSchemaMatches =
+                states != SourceStates_.end()
+                && std::all_of(states->second.begin(), states->second.end(),
+                    [&](const auto& state) {
+                        return !state->RuntimeFilterProbe
+                            && state->OutputFields.size() == probeFields.size()
+                            && std::equal(state->OutputFields.begin(),
+                                state->OutputFields.end(), probeFields.begin(),
+                                [](const std::string& name, const auto& field) {
+                                    return name == field.first;
+                                });
+                    });
+            if (sourceSchemaMatches) {
+                const auto& hash = buildIsLeft
+                    ? hashKernels.Right : hashKernels.Left;
+                for (const auto& state : states->second) {
+                    state->RuntimeFilterHash = hash;
+                    state->RuntimeFilterProbe = binding.Probe;
+                }
+                (buildIsLeft ? rightShuffleCode : leftShuffleCode)
+                    ->UseInputHash = true;
+            } else {
+                (buildIsLeft ? rightShuffleCode : leftShuffleCode)->AppliedFilter =
+                    std::move(binding.Probe);
+            }
         }
         auto leftShuf = BuildRepartitionExchange(
             leftOut,
@@ -2830,6 +2930,8 @@ private:
     // source", while an engaged empty vector is a proven empty scan.
     mutable std::unordered_map<const TSourceOperator*, TSourceSplits>
         ScanSplitCache_;
+    std::unordered_map<const TSourceOperator*,
+        std::vector<std::shared_ptr<TSchedulerSourceState>>> SourceStates_;
     std::unordered_map<const TCteMaterialization*, TMaterializedProducer> Materialized_;
     std::vector<TLoweredExecStage> ExecStages_;
     NScheduler::TTaskGroupId LastTaskGroupId_ =

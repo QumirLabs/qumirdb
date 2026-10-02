@@ -102,6 +102,9 @@ struct THashShuffleCode {
     // At most one of the two is set.
     std::shared_ptr<IRuntimeFilterProducer> ProducedFilter;
     std::shared_ptr<IRuntimeFilterProbe> AppliedFilter;
+    // Set only when the immediately upstream source computed hashes for this
+    // exchange's key. Other exchanges must run their own hash kernel.
+    bool UseInputHash = false;
 };
 
 struct TMergeCode {

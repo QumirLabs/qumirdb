@@ -39,6 +39,13 @@ TUnaryStreamProcess MakeFilterViewProcess(
         TRowSet filtered = rowSet;
         filtered.Selection = data->Selection.data();
         dispatch(filtered);
+        if (rowSet.Selection) {
+            for (int64_t row = 0; row < rowSet.RowCount; ++row) {
+                if (rowSet.Selection[row] == 0) {
+                    data->Selection[static_cast<size_t>(row)] = 0;
+                }
+            }
+        }
 
         TColumn* columns = rowSet.Columns;
         int64_t columnCount = rowSet.ColumnCount;
@@ -59,6 +66,7 @@ TUnaryStreamProcess MakeFilterViewProcess(
             .ColumnCount = columnCount,
             .RowCount = rowSet.RowCount,
             .Selection = view->Selection.data(),
+            .Hash = rowSet.Hash,
             .Destroy = DestroyFilterViewRowSet,
             .Private = view,
             .RefCount = 1,

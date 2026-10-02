@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <qdb/io/io.h>
+#include <qdb/exec/filter_exec.h>
 #include <qdb/kernel/compiler.h>
 #include <qdb/kernel/spec.h>
 #include <qdb/plan/types/nullable.h>
@@ -220,6 +221,34 @@ TEST(FilterKernel, AppliesSqlThreeValuedLogicToNullableColumns) {
         (std::array<uint8_t, 6>{0, 0xff, 0, 0xff, 0xff, 0}));
     EXPECT_EQ(RunNullableIntegerFilter("(! (== left 1))"),
         (std::array<uint8_t, 6>{0xff, 0, 0, 0, 0, 0xff}));
+}
+
+TEST(FilterKernel, PreservesInputSelectionAndPrecomputedHashes) {
+    std::array<int64_t, 3> values = {1, 2, -1};
+    std::array<uint8_t, 3> inputSelection = {2, 0, 0xff};
+    std::array<uint64_t, 3> hashes = {11, 22, 33};
+    TColumn column{.Data = reinterpret_cast<char*>(values.data())};
+    TStructType inputType({
+        {"value", std::make_shared<TIntegerType>(TIntegerType::I64)},
+    });
+    auto dispatch = TKernelCompiler().CompileFilter(
+        NKernel::BuildFilterKernelSpec(inputType, ParsePredicate("(> value 0)")));
+    auto process = MakeFilterProcess(std::move(dispatch));
+    TRowSet rowSet{
+        .Columns = &column,
+        .ColumnCount = 1,
+        .RowCount = 3,
+        .Selection = inputSelection.data(),
+        .Hash = hashes.data(),
+        .RefCount = 1,
+    };
+    TUnaryStreamingKernelState state;
+    process(rowSet, state);
+    EXPECT_EQ((std::array<uint8_t, 3>{
+        rowSet.Selection[0], rowSet.Selection[1], rowSet.Selection[2]}),
+        (std::array<uint8_t, 3>{0xff, 0, 0}));
+    EXPECT_EQ(rowSet.Hash, hashes.data());
+    Release(&rowSet);
 }
 
 TEST(FilterKernel, InListHoistsNullableLhsGuard) {

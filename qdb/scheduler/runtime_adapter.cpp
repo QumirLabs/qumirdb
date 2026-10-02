@@ -618,7 +618,9 @@ void THashShuffleTask::ScatterBuffered(TRowSet& rowSet) {
     }
 
     Hashes_.assign(static_cast<size_t>(input->RowCount), 0);
-    if (!Code_->Hash(input.get(), Hashes_.data())) {
+    if (Code_->UseInputHash && input->Hash) {
+        std::copy_n(input->Hash, input->RowCount, Hashes_.data());
+    } else if (!Code_->Hash(input.get(), Hashes_.data())) {
         throw std::runtime_error("hash shuffle hash kernel failed");
     }
     auto hashes = std::make_shared<std::vector<uint64_t>>(Hashes_);
@@ -674,7 +676,9 @@ void THashShuffleTask::ScatterViews(TRowSet& rowSet) {
     }
 
     Hashes_.assign(static_cast<size_t>(rowSet.RowCount), 0);
-    if (!Code_->Hash(&rowSet, Hashes_.data())) {
+    if (Code_->UseInputHash && rowSet.Hash) {
+        std::copy_n(rowSet.Hash, rowSet.RowCount, Hashes_.data());
+    } else if (!Code_->Hash(&rowSet, Hashes_.data())) {
         throw std::runtime_error("hash shuffle hash kernel failed");
     }
     auto hashes = std::make_shared<std::vector<uint64_t>>(Hashes_);
