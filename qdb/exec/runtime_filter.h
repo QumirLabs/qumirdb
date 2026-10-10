@@ -7,6 +7,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -78,6 +79,10 @@ public:
     virtual ~IRuntimeFilterProbe() = default;
     // A missing or incomplete filter must pass every hash.
     virtual bool MayContain(uint64_t hash) const = 0;
+    // Output is one byte per hash, with zero for rejected rows.
+    virtual void MayContainBatch(
+        std::span<const uint64_t> hashes,
+        std::span<uint8_t> output) const;
 };
 
 struct TRuntimeFilterBinding {
@@ -134,6 +139,9 @@ public:
 
     // Exact-set overflow does not disable independently collected bounds.
     bool MayContain(uint64_t hash) const override;
+    void MayContainBatch(
+        std::span<const uint64_t> hashes,
+        std::span<uint8_t> output) const override;
     bool MayContainKey(int64_t value) const;
 
 private:
@@ -153,6 +161,7 @@ private:
     uint64_t Mask_ = 0;
     std::atomic<bool> Ready_{false};
     std::atomic<size_t> PendingProducers_{0};
+    mutable std::atomic<size_t> BloomProbeRows_{0};
 };
 
 class TLocalRuntimeFilterBindingFactory final : public IRuntimeFilterBindingFactory {

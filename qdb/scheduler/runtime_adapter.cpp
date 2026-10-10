@@ -561,8 +561,16 @@ void THashShuffleTask::AccumulateFilter(const TRowSet& rowSet) {
     }
 }
 
+void THashShuffleTask::ProbeFilter() {
+    if (!Code_->AppliedFilter) {
+        return;
+    }
+    FilterMask_.resize(Hashes_.size());
+    Code_->AppliedFilter->MayContainBatch(Hashes_, FilterMask_);
+}
+
 bool THashShuffleTask::FilterKeeps(size_t row) const {
-    return !Code_->AppliedFilter || Code_->AppliedFilter->MayContain(Hashes_[row]);
+    return !Code_->AppliedFilter || FilterMask_[row] != 0;
 }
 
 void THashShuffleTask::EnsureBuffers(size_t partitions) {
@@ -625,6 +633,7 @@ void THashShuffleTask::ScatterBuffered(TRowSet& rowSet) {
     }
     auto hashes = std::make_shared<std::vector<uint64_t>>(Hashes_);
     AccumulateFilter(*input);
+    ProbeFilter();
 
     for (int64_t row = 0; row < input->RowCount; ++row) {
         if (!RowSelected(*input, row)) {
@@ -683,6 +692,7 @@ void THashShuffleTask::ScatterViews(TRowSet& rowSet) {
     }
     auto hashes = std::make_shared<std::vector<uint64_t>>(Hashes_);
     AccumulateFilter(rowSet);
+    ProbeFilter();
 
     std::vector<std::vector<uint8_t>> selections(partitions);
     std::vector<size_t> counts(partitions, 0);

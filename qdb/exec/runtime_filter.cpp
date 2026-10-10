@@ -1,7 +1,9 @@
 #include <qdb/exec/runtime_filter.h>
+#include <qdb/exec/runtime_filter_vector.h>
 
 #include <algorithm>
 #include <bit>
+#include <stdexcept>
 
 namespace NQdb {
 
@@ -58,6 +60,18 @@ bool BloomMayContain(const std::vector<uint64_t>& words, uint64_t hash) {
 }
 
 } // namespace
+
+void IRuntimeFilterProbe::MayContainBatch(
+    std::span<const uint64_t> hashes,
+    std::span<uint8_t> output) const
+{
+    if (hashes.size() != output.size()) {
+        throw std::invalid_argument("runtime filter batch size mismatch");
+    }
+    for (size_t i = 0; i < hashes.size(); ++i) {
+        output[i] = MayContain(hashes[i]) ? 0xff : 0;
+    }
+}
 
 void TRuntimeFilterBuilder::Add(uint64_t hash) {
     if (Overflowed_) {
@@ -258,6 +272,43 @@ bool TRuntimeFilter::MayContain(uint64_t hash) const {
             return true;
         }
         slot = (slot + 1) & Mask_;
+    }
+}
+
+void TRuntimeFilter::MayContainBatch(
+    std::span<const uint64_t> hashes,
+    std::span<uint8_t> output) const
+{
+    if (hashes.size() != output.size()) {
+        throw std::invalid_argument("runtime filter batch size mismatch");
+    }
+    if (!Ready() || (ExactSetDisabled() && BloomWords_.empty())) {
+        std::fill(output.begin(), output.end(), 0xff);
+        return;
+    }
+    if (ExactSetDisabled()) {
+        // The vector kernel is JIT-compiled once per process. Small scans are
+        // cheaper to finish scalar than to pay for that compilation.
+        constexpr size_t VectorCompileThreshold = 1'000'000;
+        const size_t seen = BloomProbeRows_.fetch_add(
+            hashes.size(), std::memory_order_relaxed);
+        const size_t vectorized =
+            (seen >= VectorCompileThreshold
+                || hashes.size() >= VectorCompileThreshold - seen)
+            ? ProbeBloomVectorBatch(BloomWords_, hashes, output)
+            : 0;
+        for (size_t i = vectorized; i < hashes.size(); ++i) {
+            output[i] = BloomMayContain(BloomWords_, hashes[i]) ? 0xff : 0;
+        }
+        return;
+    }
+    for (size_t i = 0; i < hashes.size(); ++i) {
+        const uint64_t stored = Storable(hashes[i]);
+        uint64_t slot = hashes[i] & Mask_;
+        while (Table_[slot] != 0 && Table_[slot] != stored) {
+            slot = (slot + 1) & Mask_;
+        }
+        output[i] = Table_[slot] == stored ? 0xff : 0;
     }
 }
 

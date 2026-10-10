@@ -262,6 +262,7 @@ private:
     bool BatchingEnabled() const;
     bool NeedsHashes(size_t partitions) const;
     void AccumulateFilter(const TRowSet& rowSet);
+    void ProbeFilter();
     bool FilterKeeps(size_t row) const;
     void EnsureBuffers(size_t partitions);
     void Scatter(TRowSet& rowSet);
@@ -284,6 +285,7 @@ private:
     THashShuffleConnection* Output_ = nullptr;
     size_t SourceLane_ = 0;
     std::vector<uint64_t> Hashes_;
+    std::vector<uint8_t> FilterMask_;
     std::optional<TRuntimeFilterBuilder> FilterBuilder_;
     std::vector<std::unique_ptr<TDestinationBuffer>> Buffers_;
     std::vector<TPendingOutput> Pending_;

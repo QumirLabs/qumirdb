@@ -1,7 +1,9 @@
 #include <gtest/gtest.h>
 
 #include <qdb/exec/runtime_filter.h>
+#include <qdb/exec/runtime_filter_vector.h>
 
+#include <algorithm>
 #include <random>
 #include <thread>
 #include <vector>
@@ -50,6 +52,81 @@ TEST(RuntimeFilter, HandlesZeroHash) {
     EXPECT_TRUE(filter.MayContain(0));
     EXPECT_TRUE(filter.MayContain(7));
     EXPECT_FALSE(filter.MayContain(9));
+}
+
+TEST(RuntimeFilter, BatchMatchesScalarForExactBloomAndUnpublished) {
+    auto keys = Hashes(200, 21);
+    auto probes = Hashes(10000, 22);
+    probes.insert(probes.end(), keys.begin(), keys.end());
+    probes.push_back(0);
+
+    auto check = [&](const TRuntimeFilter& filter) {
+        std::vector<uint8_t> output(probes.size());
+        filter.MayContainBatch(probes, output);
+        for (size_t i = 0; i < probes.size(); ++i) {
+            EXPECT_EQ(output[i] != 0, filter.MayContain(probes[i])) << i;
+        }
+    };
+
+    TRuntimeFilter exact(/*maxKeys=*/256, /*bloomBytes=*/512);
+    check(exact);
+    auto exactBuilder = exact.MakeBuilder();
+    for (uint64_t key : keys) {
+        exactBuilder.Add(key);
+    }
+    exact.Merge(std::move(exactBuilder));
+    exact.Publish();
+    ASSERT_FALSE(exact.UsesBloom());
+    check(exact);
+
+    TRuntimeFilter bloom(/*maxKeys=*/8, /*bloomBytes=*/512);
+    auto bloomBuilder = bloom.MakeBuilder();
+    for (uint64_t key : keys) {
+        bloomBuilder.Add(key);
+    }
+    bloom.Merge(std::move(bloomBuilder));
+    bloom.Publish();
+    ASSERT_TRUE(bloom.UsesBloom());
+    check(bloom);
+}
+
+TEST(RuntimeFilter, QumirVectorBloomKernel) {
+    auto probes = Hashes(8195, 23);
+    std::vector<uint8_t> output(probes.size(), 7);
+    std::vector<uint64_t> words(64, ~uint64_t{0});
+
+    const size_t processed = ProbeBloomVectorBatch(words, probes, output);
+    ASSERT_EQ(processed, 8192u);
+    EXPECT_TRUE(std::all_of(output.begin(), output.begin() + processed,
+        [](uint8_t value) { return value != 0; }));
+    EXPECT_EQ(output.back(), 7);
+
+    std::fill(words.begin(), words.end(), 0);
+    ProbeBloomVectorBatch(words, probes, output);
+    EXPECT_TRUE(std::all_of(output.begin(), output.begin() + processed,
+        [](uint8_t value) { return value == 0; }));
+}
+
+TEST(RuntimeFilter, BloomBatchMatchesScalarAfterVectorThreshold) {
+    TRuntimeFilter filter(/*maxKeys=*/8, /*bloomBytes=*/2048);
+    auto keys = Hashes(2000, 24);
+    auto builder = filter.MakeBuilder();
+    for (uint64_t key : keys) {
+        builder.Add(key);
+    }
+    filter.Merge(std::move(builder));
+    filter.Publish();
+    ASSERT_TRUE(filter.UsesBloom());
+
+    auto probes = Hashes(1'000'003, 25);
+    for (size_t i = 0; i < probes.size(); i += 1000) {
+        probes[i] = keys[i % keys.size()];
+    }
+    std::vector<uint8_t> output(probes.size());
+    filter.MayContainBatch(probes, output);
+    for (size_t i = 0; i < probes.size(); ++i) {
+        ASSERT_EQ(output[i] != 0, filter.MayContain(probes[i])) << i;
+    }
 }
 
 TEST(RuntimeFilter, RejectsKeysItWasNotGiven) {

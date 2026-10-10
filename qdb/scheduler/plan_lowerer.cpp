@@ -79,11 +79,13 @@ bool ReadSourceWithRuntimeFilter(TSchedulerSourceState& state, TRowSet& rowSet) 
             throw std::runtime_error("source runtime filter hash kernel failed");
         }
         data->Selection.resize(static_cast<size_t>(rowSet.RowCount));
+        state.RuntimeFilterProbe->MayContainBatch(
+            data->Hashes, data->Selection);
         size_t kept = 0;
         for (int64_t row = 0; row < rowSet.RowCount; ++row) {
             const bool selected = !rowSet.Selection || rowSet.Selection[row] != 0;
-            const bool keep = selected && state.RuntimeFilterProbe->MayContain(
-                data->Hashes[static_cast<size_t>(row)]);
+            const bool keep = selected &&
+                data->Selection[static_cast<size_t>(row)] != 0;
             data->Selection[static_cast<size_t>(row)] = keep ? 0xff : 0;
             kept += keep;
         }
