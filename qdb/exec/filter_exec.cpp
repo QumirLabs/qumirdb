@@ -33,7 +33,7 @@ TUnaryStreamProcess MakeFilterViewProcess(
             keptIndices = std::move(keptIndices),
             keepAll](TRowSet& rowSet, TUnaryStreamingKernelState&) {
         auto data = std::make_unique<TFilterViewData>();
-        data->Selection.resize(static_cast<size_t>(rowSet.RowCount));
+        data->Selection.resize(rowSet.RowCount);
 
         // Predicate on a copy; leave the input intact until it succeeds.
         TRowSet filtered = rowSet;
@@ -42,7 +42,7 @@ TUnaryStreamProcess MakeFilterViewProcess(
         if (rowSet.Selection) {
             for (int64_t row = 0; row < rowSet.RowCount; ++row) {
                 if (rowSet.Selection[row] == 0) {
-                    data->Selection[static_cast<size_t>(row)] = 0;
+                    data->Selection[row] = 0;
                 }
             }
         }
