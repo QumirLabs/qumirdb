@@ -2042,12 +2042,28 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
         }),
         nullptr));
 
+    // Fixed-width keys with physical states are read in slot order: a Ctrl
+    // scan replaces the per-group state gather through SlotId.
+    const bool slotOrder = !HasStringReducer(layout) &&
+        std::ranges::none_of(key.Fields, [](const auto& field) {
+            return static_cast<bool>(
+                TMaybeType<TStringType>(UnwrapNamedType(field.Type)));
+        });
+    const char* keyIndex = slotOrder ? "phys" : "slot";
     std::vector<TExprPtr> project;
     project.push_back(std::make_shared<TVarStmt>(loc, "group_keys", ptrKeyType));
     project.push_back(std::make_shared<TAssignExpr>(loc, "group_keys",
         std::make_shared<TCastExpr>(loc,
-            std::make_shared<TFieldAccessExpr>(loc, ident("ht"), "GroupKeys"),
+            std::make_shared<TFieldAccessExpr>(
+                loc, ident("ht"), slotOrder ? "Keys" : "GroupKeys"),
             ptrKeyType)));
+    if (slotOrder) {
+        project.push_back(std::make_shared<TVarStmt>(loc, "ctrl", ptrU8Type));
+        project.push_back(std::make_shared<TAssignExpr>(loc, "ctrl",
+            std::make_shared<TFieldAccessExpr>(loc, ident("ht"), "Ctrl")));
+        project.push_back(std::make_shared<TVarStmt>(loc, "phys", i64Type));
+        project.push_back(std::make_shared<TAssignExpr>(loc, "phys", numI64(0)));
+    }
     if (!ptrColumnType) {
         throw std::invalid_argument(
             "GenGenericAggregateFinalizeAst: missing TColumn type");
@@ -2166,12 +2182,15 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
 
     std::vector<TExprPtr> loopStmts;
     // Dense output order is independent of the physical aggregate-state slot.
-    if (!HasStringReducer(layout)) {
+    if (!HasStringReducer(layout) && !slotOrder) {
         project.push_back(std::make_shared<TVarStmt>(loc, "state_slots", ptrI64Type));
         project.push_back(std::make_shared<TAssignExpr>(loc, "state_slots",
             std::make_shared<TFieldAccessExpr>(loc, ident("ht"), "SlotId")));
     }
     auto stateSlot = [&]() -> TExprPtr {
+        if (slotOrder) {
+            return ident("phys");
+        }
         if (HasStringReducer(layout)) {
             return ident("slot");
         }
@@ -2179,13 +2198,13 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
     };
     for (size_t fieldIndex = 0; fieldIndex < key.Fields.size(); ++fieldIndex) {
         auto keyValue = std::make_shared<TIndexExpr>(
-            loc, ident("group_keys"), ident("slot"));
+            loc, ident("group_keys"), ident(keyIndex));
         TExprPtr value;
         value = std::make_shared<TFieldAccessExpr>(
             loc, keyValue, "key_" + std::to_string(fieldIndex));
         if (key.Fields[fieldIndex].IsNullable) {
             keyValue = std::make_shared<TIndexExpr>(
-                loc, ident("group_keys"), ident("slot"));
+                loc, ident("group_keys"), ident(keyIndex));
             auto valid = std::make_shared<TFieldAccessExpr>(
                 loc, keyValue, "valid_" + std::to_string(fieldIndex));
             loopStmts.push_back(std::make_shared<TCallExpr>(loc,
@@ -2273,6 +2292,19 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
     loopStmts.push_back(std::make_shared<TAssignExpr>(loc, "slot",
         std::make_shared<TBinaryExpr>(loc, TOperator("+"), ident("slot"),
             std::make_shared<TNumberExpr>(loc, int64_t{1}))));
+    if (slotOrder) {
+        // Empty Ctrl bytes are 0x80; the scan stops at the last group.
+        auto empty = std::make_shared<TNumberExpr>(loc, int64_t{128});
+        empty->Type = u8Type;
+        auto occupied = binary("<", index(ident("ctrl"), ident("phys")), empty);
+        auto emit = std::make_shared<TIfExpr>(loc, std::move(occupied),
+            std::make_shared<TBlockExpr>(loc, std::move(loopStmts)), nullptr);
+        loopStmts = {
+            std::move(emit),
+            std::make_shared<TAssignExpr>(loc, "phys",
+                binary("+", ident("phys"), numI64(1))),
+        };
+    }
     project.push_back(std::make_shared<TWhileStmtExpr>(loc,
         std::make_shared<TBinaryExpr>(loc, TOperator("<"),
             ident("slot"), ident("result")),
