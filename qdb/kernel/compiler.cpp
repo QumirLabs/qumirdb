@@ -17,7 +17,6 @@
 #include <qdb/modules/qumirdb_runtime.h>
 #include <qdb/utils/module_path.h>
 
-#include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/error.h>
 #include <qumir/parser/core/printer.h>
 

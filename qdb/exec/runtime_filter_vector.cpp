@@ -3,7 +3,6 @@
 #include <qdb/kernel/compiler.h>
 #include <qdb/kernel/lib.h>
 
-#include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/parser/core/lexer.h>
 #include <qumir/parser/core/parser.h>
 
@@ -20,7 +19,6 @@ struct TBloomVectorKernel {
     using TProbe = void (*)(const uint64_t*, const uint64_t*, uint8_t*,
         int64_t, uint64_t);
 
-    NQumir::NCodeGen::TLLVMInitializer Llvm;
     std::unique_ptr<NQumir::TLLVMRunner> Runner;
     TProbe Probe = nullptr;
 

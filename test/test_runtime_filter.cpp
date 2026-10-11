@@ -3,6 +3,8 @@
 #include <qdb/exec/runtime_filter.h>
 #include <qdb/exec/runtime_filter_vector.h>
 
+#include <qumir/codegen/llvm/llvm_initializer.h>
+
 #include <algorithm>
 #include <random>
 #include <thread>
@@ -632,5 +634,6 @@ TEST(RuntimeFilter, LocalBindingKeepsProducerAndProbeInSync) {
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
+    NQumir::NCodeGen::TLLVMInitializer llvmInit;
     return RUN_ALL_TESTS();
 }
