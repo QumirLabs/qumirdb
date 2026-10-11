@@ -11,7 +11,7 @@
                   (rel source "store_returns")
                   ()
                   (left)
-                  (&& (== sr_item_sk ss_item_sk) (== sr_ticket_number ss_ticket_number)))
+                  (residual (&& (== sr_item_sk ss_item_sk) (== sr_ticket_number ss_ticket_number))))
                 (rel source "reason")
                 ()
                 (inner))

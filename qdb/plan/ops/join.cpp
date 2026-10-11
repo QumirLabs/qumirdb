@@ -193,7 +193,7 @@ const std::string TJoinOperator::ToString() const {
     s += ")";
     s += " (" + std::string(JoinTypeName(Type_)) + ")";
     if (Filter_) {
-        s += " " + PrintAst(Filter_);
+        s += " (residual " + PrintAst(Filter_) + ")";
     }
     return s + ")";
 }

@@ -12,7 +12,7 @@
                     (rel source "catalog_returns")
                     ()
                     (left)
-                    (&& (== cs_order_number cr_order_number) (== cs_item_sk cr_item_sk)))
+                    (residual (&& (== cs_order_number cr_order_number) (== cs_item_sk cr_item_sk))))
                   (rel source "warehouse")
                   ()
                   (inner))

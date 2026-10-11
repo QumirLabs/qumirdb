@@ -42,7 +42,7 @@
                       (__qdb_in__s_state s_state))
                     ()
                     (left_semi)
-                    (== s_state __qdb_in__s_state))
+                    (residual (== s_state __qdb_in__s_state)))
                   (&& (&& (&& (<= 1212 |d1.d_month_seq|) (<= |d1.d_month_seq| (+ 1212 11)))
                       (== |d1.d_date_sk| ss_sold_date_sk))
                     (== s_store_sk ss_store_sk)))
