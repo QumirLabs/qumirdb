@@ -54,6 +54,7 @@ struct TSchedulerSourceState {
     std::vector<std::string> OutputFields;
     NScheduler::THashShuffleCode::THash RuntimeFilterHash;
     std::shared_ptr<IRuntimeFilterProbe> RuntimeFilterProbe;
+    std::shared_ptr<TRuntimeFilterProbeState> RuntimeFilterState;
 };
 
 struct TSourceFilterRowSetData {
@@ -73,23 +74,24 @@ bool ReadSourceWithRuntimeFilter(TSchedulerSourceState& state, TRowSet& rowSet) 
         if (!state.RuntimeFilterProbe) {
             return true;
         }
+        const size_t rows = static_cast<size_t>(rowSet.RowCount);
+        const std::span<const uint8_t> selection = rowSet.Selection
+            ? std::span<const uint8_t>(rowSet.Selection, rows) : std::span<const uint8_t>{};
+        const size_t selected = selection.empty() ? rows : static_cast<size_t>(
+            std::count_if(selection.begin(), selection.end(),
+                [](uint8_t value) { return value != 0; }));
+        if (!state.RuntimeFilterProbe->BeginBatch(*state.RuntimeFilterState, selected)) {
+            return true;
+        }
         auto data = std::make_unique<TSourceFilterRowSetData>();
-        data->Hashes.resize(static_cast<size_t>(rowSet.RowCount));
+        data->Hashes.resize(rows);
         if (!state.RuntimeFilterHash(&rowSet, data->Hashes.data())) {
             Release(&rowSet);
             throw std::runtime_error("source runtime filter hash kernel failed");
         }
-        data->Selection.resize(static_cast<size_t>(rowSet.RowCount));
-        state.RuntimeFilterProbe->MayContainBatch(
-            data->Hashes, data->Selection);
-        size_t kept = 0;
-        for (int64_t row = 0; row < rowSet.RowCount; ++row) {
-            const bool selected = !rowSet.Selection || rowSet.Selection[row] != 0;
-            const bool keep = selected &&
-                data->Selection[static_cast<size_t>(row)] != 0;
-            data->Selection[static_cast<size_t>(row)] = keep ? 0xff : 0;
-            kept += keep;
-        }
+        data->Selection.resize(rows);
+        const size_t kept = state.RuntimeFilterProbe->MayContainBatch(
+            data->Hashes, data->Selection, *state.RuntimeFilterState, selection);
         if (!kept) {
             Release(&rowSet);
             rowSet = {};
@@ -2701,6 +2703,7 @@ private:
                 for (const auto& state : states->second) {
                     state->RuntimeFilterHash = hash;
                     state->RuntimeFilterProbe = binding.Probe;
+                    state->RuntimeFilterState = binding.Probe->CreateProbeState();
                 }
                 (buildIsLeft ? rightShuffleCode : leftShuffleCode)
                     ->UseInputHash = true;

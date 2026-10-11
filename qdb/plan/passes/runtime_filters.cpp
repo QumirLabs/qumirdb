@@ -75,7 +75,8 @@ std::optional<TKeyEstimate> KeyNdv(
 {
     const double rows = static_cast<double>(stats->RowCount);
     double ndv = 1.0;
-    bool exact = true;
+    // Exact per-column NDVs do not describe correlations in a composite key.
+    bool exact = keys.size() == 1;
     for (const auto& key : keys) {
         auto it = stats->ColumnStats.find(leftSide ? key.Left : key.Right);
         if (it == stats->ColumnStats.end() || !it->second->Ndv) {

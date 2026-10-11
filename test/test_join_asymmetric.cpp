@@ -351,6 +351,16 @@ TEST(AttachRuntimeFilters, AccountsForForcedBuildAndNdvUncertainty) {
     j->Right()->Stats_ = RowsWithKeyNdv(10000, "rk", 10000, true);
     EXPECT_TRUE(AttachTo(join).has_value())
         << "exact NDV removes the uncertainty margin";
+
+    j->MutableKeys().push_back({"lv", "rv"});
+    j->Left()->Stats_ = RowsWithKeyNdv(50000, "lk", 250, true);
+    j->Right()->Stats_ = RowsWithKeyNdv(10000, "rk", 100, true);
+    j->Left()->Stats_->ColumnStats["lv"] =
+        RowsWithKeyNdv(50000, "lv", 200, true)->ColumnStats.at("lv");
+    j->Right()->Stats_->ColumnStats["rv"] =
+        RowsWithKeyNdv(10000, "rv", 100, true)->ColumnStats.at("rv");
+    EXPECT_FALSE(AttachTo(join).has_value())
+        << "products of exact column NDVs still need an uncertainty margin";
 }
 
 TEST(AttachRuntimeFilters, SkipsUncappedUnknownAndUnsupportedJoins) {

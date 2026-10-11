@@ -7,6 +7,7 @@
 #include <qumir/parser/core/lexer.h>
 #include <qumir/parser/core/parser.h>
 
+#include <atomic>
 #include <bit>
 #include <memory>
 #include <sstream>
@@ -44,6 +45,35 @@ struct TBloomVectorKernel {
     }
 };
 
+struct TBloomVectorCache {
+    enum class EStatus { Empty, Compiling, Ready, Failed };
+    std::atomic<EStatus> Status{EStatus::Empty};
+    std::unique_ptr<TBloomVectorKernel> Kernel;
+
+    const TBloomVectorKernel* Get() {
+        auto status = Status.load(std::memory_order_acquire);
+        if (status == EStatus::Ready) {
+            return Kernel.get();
+        }
+        if (status != EStatus::Empty || !Status.compare_exchange_strong(
+                status, EStatus::Compiling, std::memory_order_acq_rel)) {
+            return nullptr;
+        }
+        // One caller compiles; other lanes keep probing scalar while it does.
+        // A failed optional optimization must not fail the query.
+        try {
+            Kernel = std::make_unique<TBloomVectorKernel>();
+        } catch (...) {
+            Status.store(EStatus::Failed, std::memory_order_release);
+            return nullptr;
+        }
+        const bool ready = Kernel->Probe != nullptr;
+        Status.store(ready ? EStatus::Ready : EStatus::Failed,
+            std::memory_order_release);
+        return ready ? Kernel.get() : nullptr;
+    }
+};
+
 } // namespace
 
 size_t ProbeBloomVectorBatch(
@@ -60,12 +90,13 @@ size_t ProbeBloomVectorBatch(
     {
         return 0;
     }
-    static const TBloomVectorKernel kernel;
-    if (!kernel.Probe) {
+    static TBloomVectorCache cache;
+    const auto* kernel = cache.Get();
+    if (!kernel) {
         return 0;
     }
     const size_t count = hashes.size() & ~size_t{3};
-    kernel.Probe(words.data(), hashes.data(), output.data(),
+    kernel->Probe(words.data(), hashes.data(), output.data(),
         static_cast<int64_t>(count),
         static_cast<uint64_t>(words.size() / WordsPerBlock - 1));
     return count;

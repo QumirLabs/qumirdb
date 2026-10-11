@@ -1,91 +1,84 @@
 #pragma once
 
-#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <mutex>
-#include <optional>
 #include <span>
-#include <utility>
 #include <vector>
 
 namespace NQdb {
 
-// One producer's contribution. This contains values rather than pointers into
-// a scheduler task, so a remote publisher can encode and send it to a merger.
+// Value-only contribution, suitable for transfer to a remote merger.
 struct TRuntimeFilterPartial {
     std::vector<uint64_t> Hashes;
-    // 64-byte blocked Bloom data. All producers of one filter use the same size.
     std::vector<uint64_t> BloomWords;
-    std::optional<std::pair<int64_t, int64_t>> Bounds;
-    bool BoundsUsable = true;
     bool ExactSetOverflowed = false;
     uint64_t BuildRows = 0;
 };
 
-// Runtime filters may return false positives, never false negatives.
-// Builders are task-local; probes pass until their merged state is published.
+// Filters may return false positives, never false negatives. Builders are
+// task-local; probes pass until the complete merged filter is published.
 class TRuntimeFilterBuilder {
 public:
-    TRuntimeFilterBuilder(size_t maxKeys, size_t bloomBytes)
-        : MaxKeys_(maxKeys), BloomBytes_(bloomBytes) {}
-
+    TRuntimeFilterBuilder(size_t maxKeys, size_t bloomBytes);
     void Add(uint64_t hash);
-
-    // Bounds apply only to single-column integer keys.
-    void AddBound(int64_t value) {
-        if (!Bounds_) {
-            Bounds_ = TBounds{value, value};
-            return;
-        }
-        Bounds_->Min = std::min(Bounds_->Min, value);
-        Bounds_->Max = std::max(Bounds_->Max, value);
-    }
-
-    void DropBounds() { BoundsUsable_ = false; }
-
     bool Overflowed() const { return Overflowed_; }
-    size_t Size() const { return Hashes_.size(); }
     TRuntimeFilterPartial TakePartial() &&;
 
 private:
     void Compact();
 
-    struct TBounds {
-        int64_t Min;
-        int64_t Max;
-    };
-
     size_t MaxKeys_;
     size_t BloomBytes_;
     std::vector<uint64_t> Hashes_;
     std::vector<uint64_t> BloomWords_;
-    std::optional<TBounds> Bounds_;
-    bool BoundsUsable_ = true;
     bool Overflowed_ = false;
     uint64_t BuildRows_ = 0;
+};
+
+// Owned by a scheduler task, not a worker thread: tasks may migrate.
+// Policy and counters have one writer and are read after execution finishes.
+struct alignas(64) TRuntimeFilterProbeState {
+    uint64_t ProbeRows = 0;
+    uint64_t RejectedRows = 0;
+    uint64_t SkippedProbeRows = 0;
+    uint64_t PausedProbeRows = 0;
+    uint64_t SampleRows = 0;
+    uint64_t SampleAccepted = 0;
+    size_t SampleBatches = 0;
+    size_t PauseBatches = 0;
+    size_t PauseMultiplier = 0;
+    std::vector<uint64_t> SelectedHashes;
+    std::vector<uint8_t> SelectedOutput;
+
+    void RecordBloomBatch(size_t rows, size_t accepted);
 };
 
 class IRuntimeFilterProducer {
 public:
     virtual ~IRuntimeFilterProducer() = default;
     virtual TRuntimeFilterBuilder MakeBuilder() const = 0;
-    // Called once per lane after its final build-side row has been processed.
+    // Once per lane at input EOF, before waiting for its output to drain.
     virtual void FinishProducer(TRuntimeFilterPartial&& partial) = 0;
 };
 
 class IRuntimeFilterProbe {
 public:
     virtual ~IRuntimeFilterProbe() = default;
-    // A missing or incomplete filter must pass every hash.
+    // Called during graph construction, before any task starts.
+    virtual std::shared_ptr<TRuntimeFilterProbeState> CreateProbeState();
+    // Check before allocating masks or computing hashes. False passes the input
+    // through unchanged. rows counts only rows in the incoming selection.
+    virtual bool BeginBatch(TRuntimeFilterProbeState& state, size_t rows) const;
     virtual bool MayContain(uint64_t hash) const = 0;
-    // Output is one byte per hash, with zero for rejected rows.
-    virtual void MayContainBatch(
+    // Requires a successful BeginBatch. Returns the number of accepted rows.
+    virtual size_t MayContainBatch(
         std::span<const uint64_t> hashes,
-        std::span<uint8_t> output) const;
+        std::span<uint8_t> output,
+        TRuntimeFilterProbeState& state,
+        std::span<const uint8_t> selection = {}) const;
 };
 
 struct TRuntimeFilterBinding {
@@ -93,13 +86,11 @@ struct TRuntimeFilterBinding {
     std::shared_ptr<IRuntimeFilterProbe> Probe;
 };
 
-// The filter id is scoped to one query. A distributed implementation can bind
-// it to remote publication/subscription endpoints instead of shared memory.
+// IDs are query-scoped; endpoints can also represent remote publication/probing.
 class IRuntimeFilterBindingFactory {
 public:
     virtual ~IRuntimeFilterBindingFactory() = default;
     virtual TRuntimeFilterBinding Create(uint32_t id, size_t producerCount) = 0;
-    // Remote implementations may ignore the local Bloom allocation hint.
     virtual TRuntimeFilterBinding CreateSized(
         uint32_t id, size_t producerCount, size_t bloomBytes) {
         (void)bloomBytes;
@@ -123,88 +114,61 @@ struct TRuntimeFilterStats {
 
 class TRuntimeFilter final : public IRuntimeFilterProducer, public IRuntimeFilterProbe {
 public:
-    // Tiny build sides use an exact set; larger ones use a blocked Bloom filter.
     static constexpr size_t DefaultMaxKeys = 1u << 14;
     static constexpr size_t DefaultBloomBytes = 2u << 20;
 
     explicit TRuntimeFilter(size_t maxKeys = DefaultMaxKeys,
-        size_t bloomBytes = DefaultBloomBytes)
-        : MaxKeys_(maxKeys), BloomBytes_(bloomBytes) {}
-
-    TRuntimeFilter(const TRuntimeFilter&) = delete;
-    TRuntimeFilter& operator=(const TRuntimeFilter&) = delete;
+        size_t bloomBytes = DefaultBloomBytes);
 
     TRuntimeFilterBuilder MakeBuilder() const override {
         return TRuntimeFilterBuilder(MaxKeys_, BloomBytes_);
     }
 
+    // Configure before execution. A standalone filter defaults to one producer.
     void SetProducerCount(size_t producers);
-
-    // Merges a single producer's builder into the filter
-    // Calls Publish() when the last producer finishes
-    void FinishProducer(TRuntimeFilterBuilder&& builder);
     void FinishProducer(TRuntimeFilterPartial&& partial) override;
-
-    void Merge(TRuntimeFilterBuilder&& builder); // effectively a private helper for FinishProducer
-    void Merge(TRuntimeFilterPartial&& partial);
-
-    // Publish only after every build-side task has merged.
-    void Publish(); // effectively a private helper for FinishProducer
+    std::shared_ptr<TRuntimeFilterProbeState> CreateProbeState() override;
+    bool BeginBatch(TRuntimeFilterProbeState& state, size_t rows) const override;
+    bool MayContain(uint64_t hash) const override;
+    size_t MayContainBatch(
+        std::span<const uint64_t> hashes,
+        std::span<uint8_t> output,
+        TRuntimeFilterProbeState& state,
+        std::span<const uint8_t> selection = {}) const override;
 
     bool Ready() const { return Ready_.load(std::memory_order_acquire); }
-    // Bounds remain valid after exact-set overflow.
-    bool ExactSetDisabled() const {
-        return ExactSetDisabled_.load(std::memory_order_relaxed);
-    }
-    bool UsesBloom() const { return Ready() && !BloomWords_.empty(); }
-    size_t KeyCount() const { return KeyCount_; }
-    std::optional<std::pair<int64_t, int64_t>> Bounds() const;
-
-    // Exact-set overflow does not disable independently collected bounds.
-    bool MayContain(uint64_t hash) const override;
-    void MayContainBatch(
-        std::span<const uint64_t> hashes,
-        std::span<uint8_t> output) const override;
-    bool MayContainKey(int64_t value) const;
+    bool UsesBloom() const { return Ready() && Data_.Kind == EKind::Bloom; }
     void StartExecutionClock();
+    // Only while execution is quiescent; probe counters are task-local.
     TRuntimeFilterStats StatsSnapshot() const;
 
 private:
-    void PromoteToBloom(); // called with Mutex_ held or before publication
-    bool SkipWeakBloomBatch() const;
-    void RecordBloomBatch(size_t rows, size_t accepted) const;
+    enum class EKind { PassAll, Exact, Bloom };
+    // Written by the last producer, immutable after Ready_ is published.
+    struct TPublishedData {
+        EKind Kind = EKind::PassAll;
+        std::vector<uint64_t> Table;
+        std::vector<uint64_t> BloomWords;
+        uint64_t Mask = 0;
+        TRuntimeFilterStats Stats;
+    };
+
+    void Publish();
+    void BuildPublishedData();
+    size_t ProbeBloom(
+        std::span<const uint64_t> hashes, std::span<uint8_t> output) const;
 
     size_t MaxKeys_;
     size_t BloomBytes_;
-    std::mutex Mutex_;
-    std::vector<uint64_t> Pending_;
-    std::optional<std::pair<int64_t, int64_t>> Bounds_;
-    bool BoundsUsable_ = true;
-    // May be observed before publication.
-    std::atomic<bool> ExactSetDisabled_{false};
-    size_t KeyCount_ = 0;
-    uint64_t BuildRows_ = 0;
-    size_t BloomAllocatedBytes_ = 0;
-    size_t BloomSetBits_ = 0;
-    bool BloomDisabled_ = false;
-    std::chrono::steady_clock::time_point ExecutionStart_;
-    double ReadyLatencyMs_ = 0.0;
-    std::vector<uint64_t> Table_;
-    std::vector<uint64_t> BloomWords_;
-    uint64_t Mask_ = 0;
-    std::atomic<bool> Ready_{false};
+    std::vector<TRuntimeFilterPartial> Partials_;
+    std::atomic<size_t> NextPartial_{0};
     std::atomic<size_t> PendingProducers_{0};
+    TPublishedData Data_;
+    std::atomic<bool> Ready_{false};
+    std::vector<std::shared_ptr<TRuntimeFilterProbeState>> ProbeStates_;
+    std::chrono::steady_clock::time_point ExecutionStart_;
+    // Modified only during the initial scalar warmup, before the JIT threshold.
     mutable std::atomic<size_t> BloomProbeRows_{0};
-    mutable std::atomic<uint64_t> ProbeRows_{0};
-    mutable std::atomic<uint64_t> RejectedRows_{0};
-    mutable std::atomic<uint64_t> SkippedProbeRows_{0};
-    mutable std::atomic<uint64_t> PausedProbeRows_{0};
-    mutable std::mutex ProbePolicyMutex_;
-    mutable uint64_t SampleRows_ = 0;
-    mutable uint64_t SampleAccepted_ = 0;
-    mutable size_t SampleBatches_ = 0;
-    mutable size_t PauseBatches_ = 0;
-    mutable size_t PauseMultiplier_ = 0;
 };
 
 class TLocalRuntimeFilterBindingFactory final : public IRuntimeFilterBindingFactory {

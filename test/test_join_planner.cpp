@@ -21,6 +21,7 @@
 #include <string>
 #include <tuple>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 using namespace NQdb;
@@ -42,6 +43,27 @@ public:
     explicit TCountingFilterProbe(std::shared_ptr<IRuntimeFilterProbe> inner)
         : Inner_(std::move(inner))
     {}
+
+    std::shared_ptr<TRuntimeFilterProbeState> CreateProbeState() override {
+        return Inner_->CreateProbeState();
+    }
+
+    bool BeginBatch(TRuntimeFilterProbeState& state, size_t rows) const override {
+        return Inner_->BeginBatch(state, rows);
+    }
+
+    size_t MayContainBatch(std::span<const uint64_t> hashes,
+        std::span<uint8_t> output, TRuntimeFilterProbeState& state,
+        std::span<const uint8_t> selection = {}) const override
+    {
+        const size_t rows = selection.empty() ? hashes.size() : static_cast<size_t>(
+            std::count_if(selection.begin(), selection.end(),
+                [](uint8_t value) { return value != 0; }));
+        const size_t accepted = Inner_->MayContainBatch(hashes, output, state, selection);
+        Probed.fetch_add(rows, std::memory_order_relaxed);
+        Rejected.fetch_add(rows - accepted, std::memory_order_relaxed);
+        return accepted;
+    }
 
     bool MayContain(uint64_t hash) const override {
         Probed.fetch_add(1, std::memory_order_relaxed);
