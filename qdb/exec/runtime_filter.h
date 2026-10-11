@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -22,6 +23,7 @@ struct TRuntimeFilterPartial {
     std::optional<std::pair<int64_t, int64_t>> Bounds;
     bool BoundsUsable = true;
     bool ExactSetOverflowed = false;
+    uint64_t BuildRows = 0;
 };
 
 // Runtime filters may return false positives, never false negatives.
@@ -64,6 +66,7 @@ private:
     std::optional<TBounds> Bounds_;
     bool BoundsUsable_ = true;
     bool Overflowed_ = false;
+    uint64_t BuildRows_ = 0;
 };
 
 class IRuntimeFilterProducer {
@@ -96,6 +99,26 @@ class IRuntimeFilterBindingFactory {
 public:
     virtual ~IRuntimeFilterBindingFactory() = default;
     virtual TRuntimeFilterBinding Create(uint32_t id, size_t producerCount) = 0;
+    // Remote implementations may ignore the local Bloom allocation hint.
+    virtual TRuntimeFilterBinding CreateSized(
+        uint32_t id, size_t producerCount, size_t bloomBytes) {
+        (void)bloomBytes;
+        return Create(id, producerCount);
+    }
+};
+
+struct TRuntimeFilterStats {
+    uint64_t BuildRows = 0;
+    uint64_t ProbeRows = 0;
+    uint64_t RejectedRows = 0;
+    uint64_t SkippedProbeRows = 0;
+    uint64_t PausedProbeRows = 0;
+    size_t BloomBytes = 0;
+    size_t BloomSetBits = 0;
+    size_t ExactKeys = 0;
+    double ReadyLatencyMs = 0.0;
+    bool Ready = false;
+    bool BloomDisabled = false;
 };
 
 class TRuntimeFilter final : public IRuntimeFilterProducer, public IRuntimeFilterProbe {
@@ -143,9 +166,13 @@ public:
         std::span<const uint64_t> hashes,
         std::span<uint8_t> output) const override;
     bool MayContainKey(int64_t value) const;
+    void StartExecutionClock();
+    TRuntimeFilterStats StatsSnapshot() const;
 
 private:
     void PromoteToBloom(); // called with Mutex_ held or before publication
+    bool SkipWeakBloomBatch() const;
+    void RecordBloomBatch(size_t rows, size_t accepted) const;
 
     size_t MaxKeys_;
     size_t BloomBytes_;
@@ -156,17 +183,35 @@ private:
     // May be observed before publication.
     std::atomic<bool> ExactSetDisabled_{false};
     size_t KeyCount_ = 0;
+    uint64_t BuildRows_ = 0;
+    size_t BloomAllocatedBytes_ = 0;
+    size_t BloomSetBits_ = 0;
+    bool BloomDisabled_ = false;
+    std::chrono::steady_clock::time_point ExecutionStart_;
+    double ReadyLatencyMs_ = 0.0;
     std::vector<uint64_t> Table_;
     std::vector<uint64_t> BloomWords_;
     uint64_t Mask_ = 0;
     std::atomic<bool> Ready_{false};
     std::atomic<size_t> PendingProducers_{0};
     mutable std::atomic<size_t> BloomProbeRows_{0};
+    mutable std::atomic<uint64_t> ProbeRows_{0};
+    mutable std::atomic<uint64_t> RejectedRows_{0};
+    mutable std::atomic<uint64_t> SkippedProbeRows_{0};
+    mutable std::atomic<uint64_t> PausedProbeRows_{0};
+    mutable std::mutex ProbePolicyMutex_;
+    mutable uint64_t SampleRows_ = 0;
+    mutable uint64_t SampleAccepted_ = 0;
+    mutable size_t SampleBatches_ = 0;
+    mutable size_t PauseBatches_ = 0;
+    mutable size_t PauseMultiplier_ = 0;
 };
 
 class TLocalRuntimeFilterBindingFactory final : public IRuntimeFilterBindingFactory {
 public:
     TRuntimeFilterBinding Create(uint32_t id, size_t producerCount) override;
+    TRuntimeFilterBinding CreateSized(
+        uint32_t id, size_t producerCount, size_t bloomBytes) override;
 };
 
 } // namespace NQdb

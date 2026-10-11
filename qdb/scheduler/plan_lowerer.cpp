@@ -31,6 +31,7 @@
 #include <qdb/scheduler/scan_split.h>
 
 #include <algorithm>
+#include <bit>
 #include <cstdint>
 #include <functional>
 #include <limits>
@@ -387,6 +388,28 @@ std::unordered_set<const TSourceOperator*> SourcesFeedingJoins(
         };
     visit(root, false);
     return sources;
+}
+
+size_t ChooseRuntimeBloomBytes(const TJoinOperator& join,
+    EJoinFilterSide buildSide, size_t producerCount)
+{
+    constexpr size_t TotalBudget = 128u << 20;
+    const size_t maximum = std::bit_floor(std::max<size_t>(
+        64, TotalBudget / (producerCount + 1)));
+    const size_t minimum = std::min(
+        TRuntimeFilter::DefaultBloomBytes, maximum);
+    const auto& build = buildSide == EJoinFilterSide::Left
+        ? join.Left() : join.Right();
+    if (!build->Stats_) {
+        return minimum;
+    }
+    // The builder needs a fixed size before its lanes begin. Reserve up to
+    // twelve bits per estimated build row, bounded across all lane-local
+    // fragments and the merged filter. A saturated filter is disabled later.
+    const auto estimatedBytes = static_cast<size_t>(std::min<long double>(
+        static_cast<long double>(maximum),
+        static_cast<long double>(build->Stats_->RowCount) * 1.5L));
+    return std::bit_ceil(std::clamp(estimatedBytes, minimum, maximum));
 }
 
 class TSchedulerGraphLowerer {
@@ -2636,12 +2659,15 @@ private:
             // them to finish publishes, and only from then on does the probe
             // side reject anything. Before that a partial filter would be
             // missing another lane's keys, so it passes everything instead.
-            auto binding = RuntimeFilterBindings_->Create(runtimeFilter->Id,
-                buildIsLeft ? leftLanes : rightLanes);
+            const size_t producerCount = buildIsLeft ? leftLanes : rightLanes;
+            auto binding = RuntimeFilterBindings_->CreateSized(runtimeFilter->Id,
+                producerCount, ChooseRuntimeBloomBytes(
+                    join, runtimeFilter->BuildSide, producerCount));
             if (!binding.Producer || !binding.Probe) {
                 throw std::runtime_error(
                     "runtime filter binding factory returned an incomplete binding");
             }
+            auto diagnosticProbe = binding.Probe;
             (buildIsLeft ? leftShuffleCode : rightShuffleCode)->ProducedFilter =
                 std::move(binding.Producer);
             // A filter and a source preserve their input schema. The join's
@@ -2682,6 +2708,11 @@ private:
                 (buildIsLeft ? rightShuffleCode : leftShuffleCode)->AppliedFilter =
                     std::move(binding.Probe);
             }
+            RuntimeFilters_.push_back({
+                .Id = runtimeFilter->Id,
+                .Probe = std::move(diagnosticProbe),
+                .AtSource = sourceSchemaMatches,
+            });
         }
         auto leftShuf = BuildRepartitionExchange(
             leftOut,
@@ -2887,6 +2918,9 @@ public:
     std::vector<TLoweredExecStage>& ExecStages() {
         return ExecStages_;
     }
+    std::vector<NScheduler::TRuntimeFilterDiagnostic>& RuntimeFilters() {
+        return RuntimeFilters_;
+    }
 
 private:
     TExecStageId NewExecStage(
@@ -2936,6 +2970,7 @@ private:
         std::vector<std::shared_ptr<TSchedulerSourceState>>> SourceStates_;
     std::unordered_map<const TCteMaterialization*, TMaterializedProducer> Materialized_;
     std::vector<TLoweredExecStage> ExecStages_;
+    std::vector<NScheduler::TRuntimeFilterDiagnostic> RuntimeFilters_;
     NScheduler::TTaskGroupId LastTaskGroupId_ =
         NScheduler::InvalidTaskGroupId;
 };
@@ -3152,6 +3187,7 @@ TLoweredPlan LowerPlanToGraph(
         .Kernels = std::move(kernels),
         .ExternalCatalog = std::move(externalCatalog),
         .ExecStages = std::move(lowerer.ExecStages()),
+        .RuntimeFilters = std::move(lowerer.RuntimeFilters()),
     };
 }
 
@@ -3189,12 +3225,42 @@ bool RunPlanIntoSink(
         PrintGraphDiagnostics(*diagnostics, *lowered.Graph, settings);
     }
 
+    if (settings.Queue.EnableDebugCounters && diagnostics) {
+        for (const auto& diagnostic : lowered.RuntimeFilters) {
+            if (auto local = std::dynamic_pointer_cast<TRuntimeFilter>(
+                    diagnostic.Probe)) {
+                local->StartExecutionClock();
+            }
+        }
+    }
+
     TSchedulerExecutor executor(*lowered.Graph, settings);
     if (!executor.Run(error)) {
         return false;
     }
     if (settings.Queue.EnableDebugCounters && diagnostics) {
         PrintCounterDiagnostics(*diagnostics, *lowered.Graph, executor.Stats());
+        for (const auto& diagnostic : lowered.RuntimeFilters) {
+            auto local = std::dynamic_pointer_cast<TRuntimeFilter>(diagnostic.Probe);
+            if (!local) {
+                continue;
+            }
+            const auto stats = local->StatsSnapshot();
+            *diagnostics << "runtime-filter " << diagnostic.Id
+                << " at=" << (diagnostic.AtSource ? "source" : "repartition")
+                << " build_rows=" << stats.BuildRows
+                << " probe_rows=" << stats.ProbeRows
+                << " rejected=" << stats.RejectedRows
+                << " skipped_probe=" << stats.SkippedProbeRows
+                << " paused_probe=" << stats.PausedProbeRows
+                << " exact_keys=" << stats.ExactKeys
+                << " bloom_bytes=" << stats.BloomBytes
+                << " bloom_set_bits=" << stats.BloomSetBits
+                << " ready_ms=" << stats.ReadyLatencyMs
+                << " ready=" << stats.Ready
+                << " bloom_disabled=" << stats.BloomDisabled
+                << '\n';
+        }
     }
     return true;
 }

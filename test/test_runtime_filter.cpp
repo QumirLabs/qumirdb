@@ -129,6 +129,40 @@ TEST(RuntimeFilter, BloomBatchMatchesScalarAfterVectorThreshold) {
     }
 }
 
+TEST(RuntimeFilter, WeakBloomPausesAndRechecks) {
+    TRuntimeFilter filter(/*maxKeys=*/8, /*bloomBytes=*/512);
+    auto keys = Hashes(200, 31);
+    auto builder = filter.MakeBuilder();
+    for (uint64_t key : keys) {
+        builder.Add(key);
+    }
+    filter.Merge(std::move(builder));
+    filter.Publish();
+    ASSERT_TRUE(filter.UsesBloom());
+
+    std::vector<uint64_t> matching(8192, keys[0]);
+    std::vector<uint8_t> output(matching.size());
+    for (size_t batch = 0; batch < 10; ++batch) {
+        filter.MayContainBatch(matching, output);
+    }
+    auto stats = filter.StatsSnapshot();
+    EXPECT_EQ(stats.BuildRows, keys.size());
+    EXPECT_EQ(stats.ProbeRows, matching.size() * 10);
+    EXPECT_EQ(stats.SkippedProbeRows, matching.size() * 4);
+    EXPECT_EQ(stats.PausedProbeRows, matching.size() * 4);
+    EXPECT_EQ(stats.RejectedRows, 0u);
+    EXPECT_EQ(stats.BloomBytes, 512u);
+    EXPECT_GT(stats.BloomSetBits, 0u);
+
+    auto random = Hashes(8192, 32);
+    filter.MayContainBatch(random, output);
+    stats = filter.StatsSnapshot();
+    EXPECT_GT(stats.RejectedRows, 0u);
+    for (size_t i = 0; i < random.size(); ++i) {
+        ASSERT_EQ(output[i] != 0, filter.MayContain(random[i])) << i;
+    }
+}
+
 TEST(RuntimeFilter, RejectsKeysItWasNotGiven) {
     TRuntimeFilter filter;
     auto builder = filter.MakeBuilder();
@@ -409,6 +443,8 @@ TEST(RuntimeFilter, BloomFragmentsMergeFromSeveralProducers) {
         }
     }
     ASSERT_TRUE(filter.UsesBloom());
+    EXPECT_EQ(filter.StatsSnapshot().BuildRows, Producers * 100);
+    EXPECT_EQ(filter.StatsSnapshot().BloomBytes, 4096u);
     for (const auto& part : parts) {
         for (uint64_t key : part) {
             EXPECT_TRUE(filter.MayContain(key));

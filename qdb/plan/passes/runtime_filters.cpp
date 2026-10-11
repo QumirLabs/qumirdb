@@ -1,7 +1,9 @@
 #include <qdb/plan/passes/runtime_filters.h>
 
 #include <qdb/exec/join_exec.h>
+#include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
+#include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/stats.h>
 
 #include <algorithm>
@@ -24,11 +26,46 @@ constexpr double ForcedBuildWork = 2.0; // blocking a join that would run Auto
 constexpr double InexactNdvSafetyFactor = 2.0;
 constexpr double RuntimeFilterMaxBuildRows = 2'000'000.0;
 constexpr double RuntimeFilterMaxBuildKeys = 2'000'000.0;
+constexpr double FilteredBuildMaxProbeRatio = 0.6;
+constexpr double FilteredBuildMinProbeRows = 1'000'000.0;
 
 struct TKeyEstimate {
     double Ndv;
     bool Exact;
 };
+
+bool HasFilteredBuildInput(const TOperatorPtr& op) {
+    if (TMaybeOp<TFilterOperator>(op)) {
+        return true;
+    }
+    if (auto source = TMaybeOp<TSourceOperator>(op)) {
+        return static_cast<bool>(source.Cast()->RowGroupPredicate());
+    }
+    if (op->Inputs().size() > 1) {
+        auto join = TMaybeOp<TJoinOperator>(op);
+        if (!join || (join.Cast()->JoinType() != EJoinType::Inner
+                && join.Cast()->JoinType() != EJoinType::LeftSemi)) {
+            return false;
+        }
+    }
+    for (const auto& child : op->Inputs()) {
+        if (HasFilteredBuildInput(child)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool FilteredBuildCandidate(const TOperatorPtr& build,
+    double buildRows, double probeRows)
+{
+    // A filter or HAVING below the build can make row-count estimates very
+    // pessimistic. Admit a smaller, explicitly filtered build and let the
+    // runtime probe pause if the published filter has weak selectivity.
+    return probeRows >= FilteredBuildMinProbeRows
+        && buildRows <= probeRows * FilteredBuildMaxProbeRatio
+        && HasFilteredBuildInput(build);
+}
 
 std::optional<TKeyEstimate> KeyNdv(
     const TStatsPtr& stats,
@@ -111,26 +148,38 @@ std::optional<TRuntimeFilterSpec> ChooseRuntimeFilter(
 
     const auto leftNdv = KeyNdv(leftStats, join.Keys(), /*leftSide=*/true);
     const auto rightNdv = KeyNdv(rightStats, join.Keys(), /*leftSide=*/false);
-    if (!leftNdv || !rightNdv) {
-        return std::nullopt;
-    }
 
     std::optional<EJoinFilterSide> side;
     double bestBenefit = 0.0;
-    if (auto benefit = EstimatedBenefit(
-            static_cast<double>(rightStats->RowCount),
-            static_cast<double>(leftStats->RowCount),
-            *rightNdv, *leftNdv)) {
-        side = EJoinFilterSide::Right;
-        bestBenefit = *benefit;
+    if (leftNdv && rightNdv) {
+        if (auto benefit = EstimatedBenefit(
+                static_cast<double>(rightStats->RowCount),
+                static_cast<double>(leftStats->RowCount),
+                *rightNdv, *leftNdv)) {
+            side = EJoinFilterSide::Right;
+            bestBenefit = *benefit;
+        }
     }
     // SEMI can publish only from its key-only right table.
     if (!semi) {
-        if (auto benefit = EstimatedBenefit(
-                static_cast<double>(leftStats->RowCount),
-                static_cast<double>(rightStats->RowCount),
-                *leftNdv, *rightNdv);
-            benefit && *benefit > bestBenefit) {
+        if (leftNdv && rightNdv) {
+            if (auto benefit = EstimatedBenefit(
+                    static_cast<double>(leftStats->RowCount),
+                    static_cast<double>(rightStats->RowCount),
+                    *leftNdv, *rightNdv);
+                benefit && *benefit > bestBenefit) {
+                side = EJoinFilterSide::Left;
+            }
+        }
+    }
+    if (!side) {
+        const double leftRows = static_cast<double>(leftStats->RowCount);
+        const double rightRows = static_cast<double>(rightStats->RowCount);
+        if (FilteredBuildCandidate(join.Right(), rightRows, leftRows)) {
+            side = EJoinFilterSide::Right;
+        }
+        if (!semi && FilteredBuildCandidate(join.Left(), leftRows, rightRows)
+            && (!side || leftRows < rightRows)) {
             side = EJoinFilterSide::Left;
         }
     }

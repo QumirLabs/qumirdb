@@ -3,6 +3,7 @@
 #include <qdb/exec/join_exec.h>
 #include <qdb/exec/planner_helpers.h>
 #include <qdb/io/io.h>
+#include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/operator.h>
 #include <qdb/plan/ops/stats.h>
@@ -381,6 +382,46 @@ TEST(AttachRuntimeFilters, SkipsUncappedUnknownAndUnsupportedJoins) {
         other->Right()->Stats_ = RowsWithKeyNdv(40000, "rk", 100);
         EXPECT_FALSE(AttachTo(join).has_value()) << JoinTypeName(type);
     }
+}
+
+TEST(AttachRuntimeFilters, AdmitsLargeFilteredBuilds) {
+    auto join = JoinOfType(EJoinType::Inner);
+    ASSERT_TRUE(join);
+    auto* j = static_cast<TJoinOperator*>(join.get());
+    j->Left()->Stats_ = RowsWithKeyNdv(80000000, "lk", 80000000);
+    j->Right()->Stats_ = RowsWithKeyNdv(30000000, "rk", 30000000);
+    EXPECT_FALSE(AttachTo(join).has_value());
+
+    auto filtered = MakeFilter(j->Right(), "(> rk 0)");
+    ASSERT_TRUE(filtered.has_value());
+    j->MutableRight() = *filtered;
+    j->Right()->Stats_ = RowsWithKeyNdv(30000000, "rk", 30000000);
+    auto emitted = AttachTo(join);
+    ASSERT_TRUE(emitted.has_value());
+    EXPECT_EQ(emitted->BuildSide, EJoinFilterSide::Right);
+
+    j->Left()->Stats_ = Rows(40000000);
+    EXPECT_FALSE(AttachTo(join).has_value())
+        << "a nearly balanced join still pays the build barrier";
+
+    j->Left()->Stats_ = Rows(500000);
+    j->Right()->Stats_ = Rows(100000);
+    EXPECT_FALSE(AttachTo(join).has_value())
+        << "small probe inputs should use the NDV cost path";
+}
+
+TEST(AttachRuntimeFilters, FilteredBuildCanCompensateForUnknownNdv) {
+    auto join = JoinOfType(EJoinType::LeftSemi);
+    ASSERT_TRUE(join);
+    auto* j = static_cast<TJoinOperator*>(join.get());
+    j->Left()->Stats_ = Rows(150000000);
+    auto filtered = MakeFilter(j->Right(), "(> rk 0)");
+    ASSERT_TRUE(filtered.has_value());
+    j->MutableRight() = *filtered;
+    j->Right()->Stats_ = Rows(75000000);
+    auto emitted = AttachTo(join);
+    ASSERT_TRUE(emitted.has_value());
+    EXPECT_EQ(emitted->BuildSide, EJoinFilterSide::Right);
 }
 
 TEST(AttachRuntimeFilters, SemiPublishesOnlyFromTheRight) {

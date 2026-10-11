@@ -74,6 +74,7 @@ void IRuntimeFilterProbe::MayContainBatch(
 }
 
 void TRuntimeFilterBuilder::Add(uint64_t hash) {
+    ++BuildRows_;
     if (Overflowed_) {
         BloomAdd(BloomWords_, hash);
         return;
@@ -115,6 +116,7 @@ TRuntimeFilterPartial TRuntimeFilterBuilder::TakePartial() && {
             : std::nullopt,
         .BoundsUsable = boundsUsable,
         .ExactSetOverflowed = Overflowed_,
+        .BuildRows = BuildRows_,
     };
 }
 
@@ -124,6 +126,7 @@ void TRuntimeFilter::Merge(TRuntimeFilterBuilder&& builder) {
 
 void TRuntimeFilter::Merge(TRuntimeFilterPartial&& partial) {
     std::lock_guard guard(Mutex_);
+    BuildRows_ += partial.BuildRows;
     if (!partial.BoundsUsable) {
         BoundsUsable_ = false;
     } else if (partial.Bounds) {
@@ -180,6 +183,7 @@ void TRuntimeFilter::PromoteToBloom() {
     ExactSetDisabled_.store(true, std::memory_order_relaxed);
     if (BloomBytes_ >= BloomBytesPerBlock) {
         BloomWords_.assign(BloomWordCount(BloomBytes_), 0);
+        BloomAllocatedBytes_ = BloomWords_.size() * sizeof(uint64_t);
         for (uint64_t hash : Pending_) {
             BloomAdd(BloomWords_, hash);
         }
@@ -190,6 +194,10 @@ void TRuntimeFilter::PromoteToBloom() {
 
 void TRuntimeFilter::SetProducerCount(size_t producers) {
     PendingProducers_.store(producers, std::memory_order_relaxed);
+}
+
+void TRuntimeFilter::StartExecutionClock() {
+    ExecutionStart_ = std::chrono::steady_clock::now();
 }
 
 void TRuntimeFilter::FinishProducer(TRuntimeFilterBuilder&& builder) {
@@ -237,12 +245,18 @@ void TRuntimeFilter::Publish() {
             for (uint64_t word : BloomWords_) {
                 setBits += std::popcount(word);
             }
+            BloomSetBits_ = setBits;
             // At this density the false-positive rate approaches 50%; the
             // extra probe is unlikely to pay for itself.
             if (setBits * 10 >= BloomWords_.size() * 64 * 9) {
+                BloomDisabled_ = true;
                 BloomWords_.clear();
             }
         }
+    }
+    if (ExecutionStart_ != std::chrono::steady_clock::time_point{}) {
+        ReadyLatencyMs_ = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - ExecutionStart_).count();
     }
     Ready_.store(true, std::memory_order_release);
 }
@@ -282,11 +296,22 @@ void TRuntimeFilter::MayContainBatch(
     if (hashes.size() != output.size()) {
         throw std::invalid_argument("runtime filter batch size mismatch");
     }
+    if (hashes.empty()) {
+        return;
+    }
+    ProbeRows_.fetch_add(hashes.size(), std::memory_order_relaxed);
     if (!Ready() || (ExactSetDisabled() && BloomWords_.empty())) {
         std::fill(output.begin(), output.end(), 0xff);
+        SkippedProbeRows_.fetch_add(hashes.size(), std::memory_order_relaxed);
         return;
     }
     if (ExactSetDisabled()) {
+        if (SkipWeakBloomBatch()) {
+            std::fill(output.begin(), output.end(), 0xff);
+            SkippedProbeRows_.fetch_add(hashes.size(), std::memory_order_relaxed);
+            PausedProbeRows_.fetch_add(hashes.size(), std::memory_order_relaxed);
+            return;
+        }
         // The vector kernel is JIT-compiled once per process. Small scans are
         // cheaper to finish scalar than to pay for that compilation.
         constexpr size_t VectorCompileThreshold = 1'000'000;
@@ -300,8 +325,14 @@ void TRuntimeFilter::MayContainBatch(
         for (size_t i = vectorized; i < hashes.size(); ++i) {
             output[i] = BloomMayContain(BloomWords_, hashes[i]) ? 0xff : 0;
         }
+        const size_t accepted = static_cast<size_t>(std::count_if(
+            output.begin(), output.end(), [](uint8_t value) { return value != 0; }));
+        RejectedRows_.fetch_add(hashes.size() - accepted,
+            std::memory_order_relaxed);
+        RecordBloomBatch(hashes.size(), accepted);
         return;
     }
+    size_t rejected = 0;
     for (size_t i = 0; i < hashes.size(); ++i) {
         const uint64_t stored = Storable(hashes[i]);
         uint64_t slot = hashes[i] & Mask_;
@@ -309,7 +340,56 @@ void TRuntimeFilter::MayContainBatch(
             slot = (slot + 1) & Mask_;
         }
         output[i] = Table_[slot] == stored ? 0xff : 0;
+        rejected += output[i] == 0;
     }
+    RejectedRows_.fetch_add(rejected, std::memory_order_relaxed);
+}
+
+bool TRuntimeFilter::SkipWeakBloomBatch() const {
+    std::lock_guard guard(ProbePolicyMutex_);
+    if (!PauseBatches_) {
+        return false;
+    }
+    --PauseBatches_;
+    return true;
+}
+
+void TRuntimeFilter::RecordBloomBatch(size_t rows, size_t accepted) const {
+    std::lock_guard guard(ProbePolicyMutex_);
+    SampleRows_ += rows;
+    SampleAccepted_ += accepted;
+    ++SampleBatches_;
+    // Require both several batches and enough rows: tiny task batches should
+    // not make the global probe policy oscillate on sparse samples.
+    if (SampleBatches_ < 6 || SampleRows_ < 32768) {
+        return;
+    }
+    if (SampleAccepted_ * 2 >= SampleRows_) {
+        PauseMultiplier_ = std::min<size_t>(PauseMultiplier_ + 1, 16);
+        PauseBatches_ = PauseMultiplier_ * 4;
+    } else {
+        PauseMultiplier_ = 0;
+    }
+    SampleRows_ = 0;
+    SampleAccepted_ = 0;
+    SampleBatches_ = 0;
+}
+
+TRuntimeFilterStats TRuntimeFilter::StatsSnapshot() const {
+    const bool ready = Ready();
+    return TRuntimeFilterStats{
+        .BuildRows = BuildRows_,
+        .ProbeRows = ProbeRows_.load(std::memory_order_relaxed),
+        .RejectedRows = RejectedRows_.load(std::memory_order_relaxed),
+        .SkippedProbeRows = SkippedProbeRows_.load(std::memory_order_relaxed),
+        .PausedProbeRows = PausedProbeRows_.load(std::memory_order_relaxed),
+        .BloomBytes = BloomAllocatedBytes_,
+        .BloomSetBits = BloomSetBits_,
+        .ExactKeys = KeyCount_,
+        .ReadyLatencyMs = ReadyLatencyMs_,
+        .Ready = ready,
+        .BloomDisabled = BloomDisabled_,
+    };
 }
 
 bool TRuntimeFilter::MayContainKey(int64_t value) const {
@@ -322,8 +402,15 @@ bool TRuntimeFilter::MayContainKey(int64_t value) const {
 TRuntimeFilterBinding TLocalRuntimeFilterBindingFactory::Create(
     uint32_t id, size_t producerCount)
 {
+    return CreateSized(id, producerCount, TRuntimeFilter::DefaultBloomBytes);
+}
+
+TRuntimeFilterBinding TLocalRuntimeFilterBindingFactory::CreateSized(
+    uint32_t id, size_t producerCount, size_t bloomBytes)
+{
     (void)id;
-    auto filter = std::make_shared<TRuntimeFilter>();
+    auto filter = std::make_shared<TRuntimeFilter>(
+        TRuntimeFilter::DefaultMaxKeys, bloomBytes);
     filter->SetProducerCount(producerCount);
     return TRuntimeFilterBinding{
         .Producer = filter,
