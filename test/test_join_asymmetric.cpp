@@ -364,7 +364,7 @@ TEST(AttachRuntimeFilters, SkipsUncappedUnknownAndUnsupportedJoins) {
 
     j->Left()->Stats_ = RowsWithKeyNdv(100000000, "lk", 100000000);
     j->Right()->Stats_ = RowsWithKeyNdv(20000000, "rk", 20000000);
-    EXPECT_FALSE(AttachTo(inner).has_value()) << "over the key cap";
+    EXPECT_FALSE(AttachTo(inner).has_value()) << "over the build row cap";
 
     j->Left()->Stats_ = Rows(40000);
     j->Right()->Stats_ = RowsWithKeyNdv(40000, "rk", 100);

@@ -24,8 +24,9 @@ constexpr double FilterBuildWork = 1.0; // collect hashes + possible Bloom merge
 constexpr double FilterProbeWork = 0.75; // lookup + possible one-lane shuffle
 constexpr double ForcedBuildWork = 2.0; // blocking a join that would run Auto
 constexpr double InexactNdvSafetyFactor = 2.0;
-constexpr double RuntimeFilterMaxBuildRows = 2'000'000.0;
-constexpr double RuntimeFilterMaxBuildKeys = 2'000'000.0;
+// The NDV cost path bounds unfiltered builds. Filtered builds have a separate
+// fallback below, since their row estimates can be pessimistic.
+constexpr double NdvCostPathMaxBuildRows = 2'000'000.0;
 constexpr double FilteredBuildMaxProbeRatio = 0.6;
 constexpr double FilteredBuildMinProbeRows = 1'000'000.0;
 
@@ -91,9 +92,7 @@ std::optional<TKeyEstimate> KeyNdv(
 std::optional<double> EstimatedBenefit(double buildRows, double probeRows,
     TKeyEstimate buildKey, TKeyEstimate probeKey)
 {
-    if (buildRows > RuntimeFilterMaxBuildRows
-        || buildKey.Ndv > RuntimeFilterMaxBuildKeys
-        || buildRows > probeRows) {
+    if (buildRows > NdvCostPathMaxBuildRows || buildRows > probeRows) {
         return std::nullopt;
     }
 
