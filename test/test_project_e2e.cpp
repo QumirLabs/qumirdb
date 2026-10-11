@@ -120,6 +120,89 @@ bool IsValid(const TColumn& column, int64_t row) {
     return ((column.Mask[bit / 8] >> (bit % 8)) & 1) != 0;
 }
 
+TEST(SqlDateE2E, CastDateComparisons) {
+    struct TCase {
+        std::string Operator;
+        int64_t Count;
+        int64_t ReversedCount;
+    };
+    const std::array<TCase, 6> cases = {{
+        {"=", 1, 1}, {"<>", 3, 3}, {"<", 1, 2},
+        {"<=", 2, 3}, {">", 2, 1}, {">=", 3, 2},
+    }};
+    const std::string date = "CAST('1998-08-04' AS DATE)";
+    for (bool nullable : {false, true}) {
+        for (const auto& test : cases) {
+            for (const auto& [expression, count] : {
+                std::pair{"d " + test.Operator + " " + date, test.Count},
+                std::pair{date + " " + test.Operator + " d", test.ReversedCount},
+                std::pair{"CAST(d AS DATE) " + test.Operator + " " + date, test.Count},
+            }) {
+                SCOPED_TRACE(expression + (nullable ? " nullable" : ""));
+                std::array<int32_t, 5> days = {10441, 10442, 10443, 10444, 10442};
+                uint8_t mask = 0b00001111;
+                std::array<TColumn, 1> columns = {
+                    TColumn{
+                        .Data = reinterpret_cast<char*>(days.data()),
+                        .Mask = nullable ? &mask : nullptr,
+                    },
+                };
+                TRowSet batch{
+                    .Columns = columns.data(),
+                    .ColumnCount = 1,
+                    .RowCount = nullable ? 5 : 4,
+                    .RefCount = 1,
+                };
+                TTypePtr type = std::make_shared<TIntegerType>(TIntegerType::I32);
+                if (nullable) {
+                    type = std::make_shared<TNullable>(type);
+                }
+                TMockSource source({"d"}, {type}, {batch});
+                auto runtime = SqlPlan(
+                    "SELECT count(*) FROM dates WHERE " + expression,
+                    {{"dates", &source}});
+                EXPECT_EQ(ReadAllI64(*runtime), (std::vector<int64_t>{count}));
+            }
+        }
+    }
+}
+
+TEST(SqlDateE2E, BetweenCastDatesWithInterval) {
+    for (bool nullable : {false, true}) {
+        for (const std::string bounds : {
+            "CAST('1998-08-04' AS DATE) AND "
+                "CAST('1998-08-04' AS DATE) + INTERVAL '14' DAY",
+            "CAST('1998-08-18' AS DATE) - INTERVAL '14' DAY AND "
+                "CAST('1998-08-18' AS DATE)",
+        }) {
+            SCOPED_TRACE(bounds + (nullable ? " nullable" : ""));
+            std::array<int32_t, 5> days = {10441, 10442, 10456, 10457, 10450};
+            uint8_t mask = 0b00001111;
+            std::array<TColumn, 1> columns = {
+                TColumn{
+                    .Data = reinterpret_cast<char*>(days.data()),
+                    .Mask = nullable ? &mask : nullptr,
+                },
+            };
+            TRowSet batch{
+                .Columns = columns.data(),
+                .ColumnCount = 1,
+                .RowCount = nullable ? 5 : 4,
+                .RefCount = 1,
+            };
+            TTypePtr type = std::make_shared<TIntegerType>(TIntegerType::I32);
+            if (nullable) {
+                type = std::make_shared<TNullable>(type);
+            }
+            TMockSource source({"d"}, {type}, {batch});
+            auto runtime = SqlPlan(
+                "SELECT count(*) FROM dates WHERE d BETWEEN " + bounds,
+                {{"dates", &source}});
+            EXPECT_EQ(ReadAllI64(*runtime), (std::vector<int64_t>{2}));
+        }
+    }
+}
+
 TEST(SqlUnionE2E, UnionAllPreservesDuplicates) {
     std::array<int64_t, 2> left = {1, 1};
     std::array<int64_t, 1> right = {1};
