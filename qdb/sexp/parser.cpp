@@ -487,7 +487,6 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
             // Canonical plans tag the residual. Accept the former untagged
             // form as input so stored plans remain readable.
             TExprPtr filter;
-            size_t residualCount = 0;
             std::optional<TRuntimeFilterSpec> runtimeFilter;
             for (;;) {
                 auto tok = h.Next();
@@ -498,7 +497,7 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
                     auto tagTok = h.Next();
                     auto tag = ReadIdentifier(h, tagTok);
                     if (tag && *tag == "residual") {
-                        if (++residualCount > 1) {
+                        if (filter) {
                             co_return IParseHandle::MakeError(
                                 tok, "(rel join) accepts at most one (residual …)");
                         }
@@ -515,7 +514,7 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
                     }
                     h.Unget(tagTok);
                 }
-                if (++residualCount > 1) {
+                if (filter) {
                     co_return IParseHandle::MakeError(
                         tok, "(rel join) accepts at most one (residual …)");
                 }
