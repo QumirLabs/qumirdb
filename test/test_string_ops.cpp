@@ -76,6 +76,54 @@ TEST(QumirDbStringOps, LikeFastPathsMatchByteSemantics) {
     EXPECT_EQ(qdb_like_contains(sv("anything"), sv("")), 1);
 }
 
+// The oz kernel must agree with the C++ reference around every block boundary.
+TEST(QumirDbStringOps, LikeContainsKernelMatchesReference) {
+    auto library = NQdb::NKernel::ParseFunctionLibrary(
+        "(block (fun like_contains_entry"
+        " ((var str StringView) (var lit StringView)) -> i64"
+        " (block (return (call qdb_like_contains str lit)))))");
+    ASSERT_TRUE(library) << library.error().ToString();
+    NQumir::TLLVMRunnerOptions options;
+    options.CoreInput = true;
+    options.NativeCode = true;
+    options.AllowOverloads = true;
+    NQdb::NTest::ConfigureQumirDbSourceModule(options);
+    NQumir::TLLVMRunner runner(options);
+    auto program = std::make_shared<NQumir::NAst::TBlockExpr>(
+        NQumir::TLocation{}, std::move(*library));
+    NQdb::NTest::AddQumirDbUse(program);
+    std::string error;
+    void* entry = runner.CompileKernelAst(program, "like_contains_entry", &error);
+    ASSERT_NE(entry, nullptr) << error;
+    auto contains = reinterpret_cast<int64_t(*)(
+        NQdb::TStringView, NQdb::TStringView)>(entry);
+    auto reference = [](const std::string& str, const std::string& lit) {
+        return qdb_like_contains(
+            {reinterpret_cast<const uint8_t*>(str.data()),
+                static_cast<int64_t>(str.size())},
+            {reinterpret_cast<const uint8_t*>(lit.data()),
+                static_cast<int64_t>(lit.size())});
+    };
+
+    for (const std::string lit : {"", "g", "ge", "google", "g-seventeen-bytes"}) {
+        for (size_t size = 0; size <= 70; ++size) {
+            // Decoys share the first and last literal byte with real matches.
+            std::string miss(size, 'x');
+            for (size_t i = 0; i < size; i += 3) {
+                miss[i] = i % 2 ? 'e' : 'g';
+            }
+            EXPECT_EQ(contains(View(miss), View(lit)), reference(miss, lit))
+                << "lit=" << lit << " size=" << size;
+            for (size_t at = 0; at + lit.size() <= size; ++at) {
+                std::string hit = miss;
+                hit.replace(at, lit.size(), lit);
+                EXPECT_EQ(contains(View(hit), View(lit)), 1)
+                    << "lit=" << lit << " size=" << size << " at=" << at;
+            }
+        }
+    }
+}
+
 // Hash value is an implementation detail, so check properties, not magic numbers.
 TEST(QumirDbStringOps, HashIsDeterministicAndContentSensitive) {
     auto hash = qdb_string_hash_bytes;

@@ -149,8 +149,59 @@
        (attrs extern) (block))
   (fun qdb_like_suffix ((var str StringView) (var lit StringView)) -> i64
        (attrs extern) (block))
+  ;; Tests 16 start positions at once: a start survives only if both the first
+  ;; and the last literal byte match; memcmp confirms the survivors.
+  (fun qdb_like_probe16
+       ((var s i64) (var p <ptr u8>) (var m i64) (var first u8) (var last u8)) -> bool
+    (attrs inline)
+    (block
+      (var head = (cast s <ptr <vec u8 16>>))
+      (var tail = (cast (+ s (- m 1)) <ptr <vec u8 16>>))
+      (var hit = (& (== (index head 0) first) (== (index tail 0) last)))
+      (if (! (call builtin::any hit)) (block (return #f)))
+      (var mask = (cast (call builtin::movemask hit) u64))
+      (while (!= mask (: 0 u64))
+        (block
+          (if (== (call builtin::memcmp
+                    (cast (+ s (call builtin::cttz mask)) <ptr u8>) p m) (: 0 i32))
+            (block (return #t)))
+          (= mask (& mask (- mask (: 1 u64))))))
+      (return #f)))
+
   (fun qdb_like_contains ((var str StringView) (var lit StringView)) -> i64
-       (attrs extern) (block))
+    (block
+      (var m = (field lit Size))
+      (var n = (field str Size))
+      (if (== m 0) (block (return 1)))
+      (if (< n m) (block (return 0)))
+      (var s = (cast (field str Data) i64))
+      (var p = (field lit Data))
+      (var first = (index p 0))
+      (var last = (index p (- m 1)))
+      ;; A block of 16 starts reads m + 15 bytes.
+      (var tail = (- n (+ m 15)))
+      (var pos = 0)
+      (if (>= tail 0)
+        (block
+          (while (< pos tail)
+            (block
+              (if (call qdb_like_probe16 (+ s pos) p m first last)
+                (block (return 1)))
+              (= pos (+ pos 16))))
+          ;; The last block overlaps the previous one instead of overreading.
+          (if (call qdb_like_probe16 (+ s tail) p m first last)
+            (block (return 1)))
+          (return 0)))
+      (var data = (field str Data))
+      (while (<= pos (- n m))
+        (block
+          (if (&& (== (index data pos) first)
+                  (== (index data (+ pos (- m 1))) last))
+            (block
+              (if (== (call builtin::memcmp (cast (+ s pos) <ptr u8>) p m) (: 0 i32))
+                (block (return 1)))))
+          (= pos (+ pos 1))))
+      (return 0)))
 
   (fun qdb_sv_sv_eq ((var left StringView) (var right StringView)) -> bool (attrs (operator "=="))
     (block (return (== (call qdb_filter_string_compare (field left Data) (field left Size) (field right Data) (field right Size)) (: 0 i64)))))
