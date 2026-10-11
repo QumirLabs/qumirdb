@@ -205,6 +205,11 @@
   ;; string. TODO: replace with native qumir support for StringView literals.
   (fun qdb_lit_to_sv ((var lit string)) -> StringView (attrs extern (operator "cast")) (block))
 
+  ;; Kernels build literal views from the bytes and a length known at codegen.
+  (fun qdb_sv_from_ptr ((var data <ptr u8>) (var size i64)) -> StringView
+    (attrs inline)
+    (block (return (cast (struct ((Data data) (Size size))) StringView))))
+
   (fun qdb_substring ((var str StringView) (var start i32) (var length i32)) -> StringView
        (attrs extern) (block))
 
