@@ -87,26 +87,16 @@ bool CanStartExpression(const TToken& token) {
 
 namespace {
 
-TAstTask ParseJoinResidual(IParseHandle& h, const TToken& token,
-    const TExprPtr& current)
+TAstTask ParseJoinResidual(IParseHandle& h)
 {
-    if (current) {
-        co_return IParseHandle::MakeError(
-            token, "(rel join) accepts at most one (residual …)");
-    }
     auto residual = co_await h.Expr();
     co_await h.Take(')');
     co_return residual;
 }
 
 NQumir::TExpectedTask<TRuntimeFilterSpec, TError, TLocation>
-ParseJoinEmitFilter(IParseHandle& h, const TToken& token,
-    const std::optional<TRuntimeFilterSpec>& current)
+ParseJoinEmitFilter(IParseHandle& h)
 {
-    if (current) {
-        co_return IParseHandle::MakeError(
-            token, "(rel join) accepts at most one (emit-filter …)");
-    }
     auto idTok = h.Next();
     if (idTok.Type != TToken::Integer
         || idTok.Value.i64 <= 0
@@ -497,6 +487,7 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
             // Canonical plans tag the residual. Accept the former untagged
             // form as input so stored plans remain readable.
             TExprPtr filter;
+            size_t residualCount = 0;
             std::optional<TRuntimeFilterSpec> runtimeFilter;
             for (;;) {
                 auto tok = h.Next();
@@ -507,16 +498,24 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
                     auto tagTok = h.Next();
                     auto tag = ReadIdentifier(h, tagTok);
                     if (tag && *tag == "residual") {
-                        filter = co_await ParseJoinResidual(h, tok, filter);
+                        if (++residualCount > 1) {
+                            co_return IParseHandle::MakeError(
+                                tok, "(rel join) accepts at most one (residual …)");
+                        }
+                        filter = co_await ParseJoinResidual(h);
                         continue;
                     }
                     if (tag && *tag == "emit-filter") {
-                        runtimeFilter = co_await ParseJoinEmitFilter(h, tok, runtimeFilter);
+                        if (runtimeFilter) {
+                            co_return IParseHandle::MakeError(
+                                tok, "(rel join) accepts at most one (emit-filter …)");
+                        }
+                        runtimeFilter = co_await ParseJoinEmitFilter(h);
                         continue;
                     }
                     h.Unget(tagTok);
                 }
-                if (filter) {
+                if (++residualCount > 1) {
                     co_return IParseHandle::MakeError(
                         tok, "(rel join) accepts at most one (residual …)");
                 }
