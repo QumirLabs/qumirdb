@@ -23,6 +23,44 @@ TScanSplit MakeSingleSplit(
 
 } // namespace
 
+size_t ChooseScanTaskCount(
+    const std::vector<TScanRowGroup>& rowGroups,
+    const TSettings& settings,
+    bool feedsJoin)
+{
+    if (settings.ScanSplit.MaxScanTasks != 0) {
+        return settings.ScanSplit.MaxScanTasks;
+    }
+    const size_t workers = std::max<size_t>(settings.Scheduler.WorkerCount, 1);
+    if (rowGroups.empty() || workers == 1 ||
+        settings.Scheduler.Mode == EExecutionMode::SingleThreadedScheduler ||
+        settings.ScanSplit.Strategy == EScanSplitStrategy::SerialRead)
+    {
+        return 1;
+    }
+
+    uint64_t rows = 0;
+    uint64_t bytes = 0;
+    for (const auto& group : rowGroups) {
+        rows += static_cast<uint64_t>(std::max<int64_t>(group.RowCount, 0));
+        bytes += static_cast<uint64_t>(std::max<int64_t>(group.ByteSize, 0));
+    }
+    auto tasksFor = [](uint64_t work, size_t target) -> uint64_t {
+        return target == 0 ? 0 : work / target + (work % target != 0);
+    };
+    const uint64_t sizeTasks = std::max({
+        tasksFor(rows, settings.ScanSplit.TargetRowsPerTask),
+        tasksFor(bytes, settings.ScanSplit.TargetBytesPerTask),
+        uint64_t{1}});
+
+    size_t budget = std::min(workers, rowGroups.size());
+    if (!feedsJoin) {
+        // Saturate at the available row groups without overflowing 2 * workers.
+        budget += std::min(workers, rowGroups.size() - budget);
+    }
+    return static_cast<size_t>(std::min<uint64_t>(sizeTasks, budget));
+}
+
 std::vector<TScanSplit> BuildScanSplits(
     const std::vector<TScanRowGroup>& rowGroups,
     const TScanSplitSettings& settings)

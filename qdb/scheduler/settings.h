@@ -1,7 +1,9 @@
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <iosfwd>
+#include <thread>
 
 namespace NQdb {
 namespace NScheduler {
@@ -18,8 +20,9 @@ enum class EScanSplitStrategy {
 };
 
 struct TSchedulerSettings {
-    EExecutionMode Mode = EExecutionMode::SingleThreadedScheduler;
-    size_t WorkerCount = 1;
+    EExecutionMode Mode = EExecutionMode::ThreadedScheduler;
+    // hardware_concurrency may be unknown (zero); always keep one worker.
+    size_t WorkerCount = std::max(1u, std::thread::hardware_concurrency());
     size_t ReadyQueueCapacity = 1024;
 };
 
@@ -34,7 +37,11 @@ struct TQueueSettings {
 
 struct TScanSplitSettings {
     EScanSplitStrategy Strategy = EScanSplitStrategy::Auto;
-    size_t MaxScanTasks = 1;
+    // Zero selects a per-source limit from scan size, workers and consumers.
+    // A positive value is an explicit cap, including 1 for a serial scan.
+    size_t MaxScanTasks = 0;
+    size_t TargetRowsPerTask = 1024 * 1024;
+    size_t TargetBytesPerTask = 64 * 1024 * 1024;
     size_t TinyInputRowsThreshold = 0;
 };
 

@@ -23,6 +23,8 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace {
@@ -118,7 +120,10 @@ std::shared_ptr<TSourceOperator> FindSource(const TOperatorPtr& node) {
     return nullptr;
 }
 
-TOperatorPtr BuildSqlPlan(std::string_view sql, TParquetSource& source) {
+TOperatorPtr BuildSqlPlan(
+    std::string_view sql,
+    const std::unordered_map<std::string, ISource*>& sources)
+{
     std::istringstream input{std::string(sql)};
     NSql::TTokenStream tokens(input);
     NSql::TParser parser;
@@ -129,13 +134,34 @@ TOperatorPtr BuildSqlPlan(std::string_view sql, TParquetSource& source) {
     auto plan = BuildPlan(*parsed, [&](std::string_view table)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
-        return std::make_shared<TSourceOperator>(source, std::string(table));
+        return std::make_shared<TSourceOperator>(
+            *sources.at(std::string(table)), std::string(table));
     });
     if (!plan) {
         throw std::runtime_error(plan.error().ToString());
     }
     ApplyPlanPasses(*plan, {.EnableCbo = false});
     return *plan;
+}
+
+TOperatorPtr BuildSqlPlan(std::string_view sql, TParquetSource& source) {
+    return BuildSqlPlan(sql, {{"t", &source}});
+}
+
+std::vector<int64_t> ReadIds(TTestRuntime& runtime) {
+    std::vector<int64_t> ids;
+    TRowSet rows{};
+    while (runtime.Next(rows)) {
+        const auto* values = reinterpret_cast<const int64_t*>(rows.Columns[0].Data);
+        for (int64_t row = 0; row < rows.RowCount; ++row) {
+            if (!rows.Selection || rows.Selection[row]) {
+                ids.push_back(values[row]);
+            }
+        }
+        Release(&rows);
+    }
+    std::ranges::sort(ids);
+    return ids;
 }
 
 struct TRunResult {
@@ -146,7 +172,8 @@ struct TRunResult {
 TRunResult RunQuery(
     const std::string& path,
     std::string_view sql,
-    bool enablePruning)
+    bool enablePruning,
+    bool autoTasks = false)
 {
     TParquetSource source(path);
     auto plan = BuildSqlPlan(sql, source);
@@ -165,23 +192,36 @@ TRunResult RunQuery(
     NScheduler::TSettings settings;
     settings.ScanSplit.Strategy = NScheduler::EScanSplitStrategy::RowGroupRange;
     settings.ScanSplit.MaxScanTasks = 3;
+    if (autoTasks) {
+        settings.Scheduler.Mode = NScheduler::EExecutionMode::ThreadedScheduler;
+        settings.Scheduler.WorkerCount = 4;
+        settings.ScanSplit.MaxScanTasks = 0;
+        settings.ScanSplit.TargetRowsPerTask = 1;
+        settings.ScanSplit.TargetBytesPerTask = 0;
+    }
     settings.Diagnostics.RowGroupPredicate = enablePruning;
     settings.Diagnostics.Output = &diagnostics;
 
-    auto runtime = RunPlan(plan, settings);
-    std::vector<int64_t> ids;
-    TRowSet rows{};
-    while (runtime->Next(rows)) {
-        const auto* values = reinterpret_cast<const int64_t*>(rows.Columns[0].Data);
-        for (int64_t row = 0; row < rows.RowCount; ++row) {
-            if (!rows.Selection || rows.Selection[row]) {
-                ids.push_back(values[row]);
+    if (autoTasks) {
+        const auto projectedGroups = source.ScanRowGroups(
+            std::unordered_set<std::string>{"id", "signed_value"});
+        int64_t projectedBytes = 0;
+        for (size_t rg = 0; rg < projectedGroups.size(); ++rg) {
+            if (!enablePruning || rg == 1) {
+                projectedBytes += projectedGroups[rg].ByteSize;
             }
         }
-        Release(&rows);
+        auto lowered = NScheduler::LowerPlanToGraph(plan, settings, &diagnostics);
+        const auto lanes = std::ranges::count_if(
+            lowered.Graph->Nodes(), [](const auto& node) {
+                return node->DebugKind == "source";
+            });
+        EXPECT_EQ(lanes, enablePruning ? 1 : 3);
+        EXPECT_NE(diagnostics.str().find(" bytes=" + std::to_string(projectedBytes)),
+            std::string::npos);
     }
-    std::ranges::sort(ids);
-    return {.Ids = std::move(ids), .Diagnostics = diagnostics.str()};
+    auto runtime = RunPlan(plan, settings);
+    return {.Ids = ReadIds(*runtime), .Diagnostics = diagnostics.str()};
 }
 
 void ExpectSameAsFullScan(
@@ -237,6 +277,55 @@ TEST(RowGroupPushdownE2E, AllPrunedProducesAnEmptyScan) {
     EXPECT_NE(pruned.Diagnostics.find("rg=0 may_be_true=0"), std::string::npos);
     EXPECT_NE(pruned.Diagnostics.find("rg=1 may_be_true=0"), std::string::npos);
     EXPECT_NE(pruned.Diagnostics.find("rg=2 may_be_true=0"), std::string::npos);
+}
+
+TEST(RowGroupPushdownE2E, AutoScanTasksUseSurvivingRowGroups) {
+    TTempDir tempDir;
+    const std::string path = (tempDir.Path() / "auto-scan.parquet").string();
+    WriteFixture(path);
+    constexpr std::string_view sql =
+        "SELECT id FROM t WHERE signed_value > 50";
+    const auto pruned = RunQuery(path, sql, true, true);
+    const auto full = RunQuery(path, sql, false, true);
+    EXPECT_EQ(pruned.Ids, (std::vector<int64_t>{2, 3}));
+    EXPECT_EQ(pruned.Ids, full.Ids);
+    EXPECT_NE(pruned.Diagnostics.find("scan_tasks=auto max_tasks=1 tasks=1"),
+        std::string::npos);
+    EXPECT_NE(full.Diagnostics.find("scan_tasks=auto max_tasks=3 tasks=3"),
+        std::string::npos);
+}
+
+TEST(RowGroupPushdownE2E, AutoJoinRunsWithUnequalSourceWidths) {
+    TTempDir tempDir;
+    const std::string path = (tempDir.Path() / "auto-join.parquet").string();
+    WriteFixture(path);
+    TParquetFile file(path);
+    auto left = file.MakeSource();
+    auto right = left->MakeRowGroupsSource({1});
+    auto plan = BuildSqlPlan(
+        "SELECT l.id FROM l JOIN r ON l.signed_value = r.signed_value",
+        {{"l", left.get()}, {"r", right.get()}});
+    NScheduler::TSettings settings;
+    settings.Scheduler.Mode = NScheduler::EExecutionMode::ThreadedScheduler;
+    settings.Scheduler.WorkerCount = 2;
+    settings.ScanSplit.TargetRowsPerTask = 1;
+    settings.ScanSplit.TargetBytesPerTask = 0;
+    settings.HashShuffle.PartitionCount = 2;
+    auto lowered = NScheduler::LowerPlanToGraph(plan, settings, nullptr);
+    std::unordered_map<std::string, size_t> lanes;
+    for (const auto& node : lowered.Graph->Nodes()) {
+        if (node->DebugKind == "source") {
+            ++lanes[node->DebugLabel];
+        }
+    }
+    EXPECT_EQ(lanes.at("source l"), 2u);
+    EXPECT_EQ(lanes.at("source r"), 1u);
+    auto threaded = RunPlan(plan, settings);
+    EXPECT_EQ(ReadIds(*threaded), (std::vector<int64_t>{2, 3}));
+    NScheduler::TSettings serialSettings;
+    serialSettings.Scheduler.Mode = NScheduler::EExecutionMode::SingleThreadedScheduler;
+    auto serial = RunPlan(plan, serialSettings);
+    EXPECT_EQ(ReadIds(*serial), (std::vector<int64_t>{2, 3}));
 }
 
 int main(int argc, char** argv) {

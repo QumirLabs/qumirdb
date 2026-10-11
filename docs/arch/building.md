@@ -60,6 +60,19 @@ Common options:
 --verbose
 ```
 
+Execution defaults to the threaded scheduler with one worker per logical CPU
+reported by the system (at least one if the count is unknown). Scheduler options
+can be omitted; `--scheduler single` and `--scheduler-workers N` override these
+defaults.
+
+When `--scan-tasks` is omitted, the threaded scheduler chooses a limit for each
+Parquet source using its surviving row groups, row count and uncompressed bytes
+of selected columns. Small scans stay serial. Large scans feeding a join are
+capped at the worker count; other scans may use up to twice that count. An
+explicit `--scan-tasks N` overrides this choice, including `N=1`. The single
+scheduler defaults to one scan task. `--verbose` reports each automatic choice.
+See [Scan parallelism](scan_parallelism.md) for the sizing rule and its limits.
+
 The scheduler can add a local grouped aggregate before hash repartition. It
 does this when row-count and NDV statistics show a large drop in rows. Use
 `--no-partial-aggregates` to keep the raw-row plan for an A/B test. See

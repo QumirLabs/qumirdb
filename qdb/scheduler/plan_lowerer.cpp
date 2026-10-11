@@ -39,6 +39,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace NQdb {
@@ -301,10 +302,43 @@ struct TLoweredOutput {
     NQumir::NAst::TTypePtr OutputType;
 };
 
+std::unordered_set<const TSourceOperator*> SourcesFeedingJoins(
+    const TOperatorPtr& root)
+{
+    std::unordered_set<const TSourceOperator*> sources;
+    // A shared subtree can be reached both with and without a downstream join.
+    std::unordered_map<const IOperator*, unsigned> visited;
+    std::function<void(const TOperatorPtr&, bool)> visit =
+        [&](const TOperatorPtr& op, bool feedsJoin) {
+            if (!op) {
+                return;
+            }
+            feedsJoin = feedsJoin || static_cast<bool>(TMaybeOp<TJoinOperator>(op));
+            const unsigned state = feedsJoin ? 2 : 1;
+            auto& seen = visited[op.get()];
+            if (seen & state) {
+                return;
+            }
+            seen |= state;
+            if (auto source = TMaybeOp<TSourceOperator>(op); source && feedsJoin) {
+                sources.insert(source.Cast().get());
+            }
+            if (auto consumer = TMaybeOp<TCteConsumer>(op)) {
+                visit(consumer.Cast()->Materialization()->Plan, feedsJoin);
+            }
+            for (const auto& input : op->Inputs()) {
+                visit(input, feedsJoin);
+            }
+        };
+    visit(root, false);
+    return sources;
+}
+
 class TSchedulerGraphLowerer {
 public:
     TSchedulerGraphLowerer(
         NScheduler::TTaskGraph& graph,
+        const TOperatorPtr& root,
         NScheduler::TSettings settings,
         std::ostream* diagnostics,
         std::vector<TGeneratedKernel>* kernelSink,
@@ -315,6 +349,9 @@ public:
         , KernelSink_(kernelSink)
         , ExternalCatalog_(std::move(externalCatalog))
         , RuntimeContext_(std::make_shared<TRuntimeContext>())
+        , SourcesFeedingJoins_(Settings_.ScanSplit.MaxScanTasks == 0
+            ? SourcesFeedingJoins(root)
+            : std::unordered_set<const TSourceOperator*>{})
     {}
 
     // Kernel options for one stage: generation only (deferred finalization),
@@ -821,24 +858,55 @@ private:
         if (!metadata) {
             return std::nullopt;
         }
-        auto rowGroups = metadata->ScanRowGroups();
-        if (auto* parquet = dynamic_cast<TParquetSource*>(&src.GetSource());
-            parquet && src.RowGroupPredicate())
-        {
+        std::vector<NScheduler::TScanRowGroup> rowGroups;
+        if (auto* parquet = dynamic_cast<TParquetSource*>(&src.GetSource())) {
+            // OutputLanes runs before BuildSourceRuntimeType restricts the
+            // reader. Estimate the logical scan's projection without mutating
+            // a source that may also be used by an inlined CTE reference.
+            std::optional<std::unordered_set<std::string>> columns;
+            if (auto required = src.RequiredColumns();
+                required && Settings_.ScanSplit.MaxScanTasks == 0)
+            {
+                columns.emplace();
+                for (const auto& [name, _] : required->Fields) {
+                    const auto dot = name.rfind('.');
+                    columns->insert(dot == std::string::npos
+                        ? name : name.substr(dot + 1));
+                }
+            }
             rowGroups = parquet->PruneRowGroups(
                 src.RowGroupPredicate(),
                 src.GetAlias(),
                 Settings_.Diagnostics.RowGroupPredicate
                     ? Settings_.Diagnostics.Output
-                    : nullptr);
+                    : nullptr,
+                columns ? &*columns : nullptr);
+        } else {
+            rowGroups = metadata->ScanRowGroups();
         }
         if (rowGroups.empty()) {
             TSourceSplits empty = std::vector<NScheduler::TScanSplit>{};
             ScanSplitCache_.emplace(&src, empty);
             return empty;
         }
-        auto splits = NScheduler::BuildScanSplits(
-            rowGroups, Settings_.ScanSplit);
+        auto splitSettings = Settings_.ScanSplit;
+        splitSettings.MaxScanTasks = NScheduler::ChooseScanTaskCount(
+            rowGroups, Settings_, SourcesFeedingJoins_.contains(&src));
+        auto splits = NScheduler::BuildScanSplits(rowGroups, splitSettings);
+        if (Diagnostics_ && Settings_.ScanSplit.MaxScanTasks == 0) {
+            int64_t rows = 0;
+            int64_t bytes = 0;
+            for (const auto& group : rowGroups) {
+                rows += group.RowCount;
+                bytes += group.ByteSize;
+            }
+            *Diagnostics_ << "scan split: source="
+                << (src.GetAlias().empty() ? src.SourcePath() : src.GetAlias())
+                << " scan_tasks=auto max_tasks=" << splitSettings.MaxScanTasks
+                << " tasks=" << splits.size()
+                << " row_groups=" << rowGroups.size()
+                << " rows=" << rows << " bytes=" << bytes << '\n';
+        }
         // An engaged empty value is reserved for a proven empty scan. If a
         // future strategy declines a non-empty input by returning {}, use the
         // original source rather than silently dropping all rows.
@@ -2728,6 +2796,7 @@ private:
     std::vector<TGeneratedKernel>* KernelSink_ = nullptr;
     std::shared_ptr<const TExternalCatalogSnapshot> ExternalCatalog_;
     std::shared_ptr<TRuntimeContext> RuntimeContext_;
+    std::unordered_set<const TSourceOperator*> SourcesFeedingJoins_;
     // Split planning includes Parquet predicate compilation and evaluation;
     // OutputLanes and LowerSource both query it. nullopt means "use the original
     // source", while an engaged empty vector is a proven empty scan.
@@ -2865,7 +2934,12 @@ void PrintGraphDiagnostics(
         << " workers=" << settings.Scheduler.WorkerCount
         << " ready_queue=" << settings.Scheduler.ReadyQueueCapacity
         << " rowset_queue=" << settings.Queue.RowsetCapacityPerLane
-        << " scan_tasks=" << settings.ScanSplit.MaxScanTasks;
+        << " scan_tasks=";
+    if (settings.ScanSplit.MaxScanTasks == 0) {
+        out << "auto";
+    } else {
+        out << settings.ScanSplit.MaxScanTasks;
+    }
     if (settings.HashShuffle.PartitionCount == 0) {
         out << " shuffle_parts=auto";
     } else {
@@ -2912,7 +2986,7 @@ TLoweredPlan LowerPlanToGraph(
     auto graph = std::make_unique<TTaskGraph>();
     std::vector<TGeneratedKernel> kernels;
     TSchedulerGraphLowerer lowerer(
-        *graph, settings, diagnostics, &kernels, externalCatalog);
+        *graph, root, settings, diagnostics, &kernels, externalCatalog);
     const size_t lanes = lowerer.OutputLanes(root);
     if (lanes == 0) {
         throw std::runtime_error(

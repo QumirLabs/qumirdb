@@ -557,9 +557,13 @@ bool TParquetSource::RowIdRequested() const {
         std::string(InternalRowIdColumnName));
 }
 
-std::vector<int> TParquetSource::EffectiveFileColumnIndexes() const
+std::vector<int> TParquetSource::EffectiveFileColumnIndexes(
+    const std::unordered_set<std::string>* columnNames) const
 {
-    if (!RestrictedColumns_) {
+    if (!columnNames && RestrictedColumns_) {
+        columnNames = &*RestrictedColumns_;
+    }
+    if (!columnNames) {
         return {};
     }
 
@@ -567,7 +571,7 @@ std::vector<int> TParquetSource::EffectiveFileColumnIndexes() const
     // never the possibly-narrowed Names_, so repeated restrictions stay stable.
     std::vector<int> indices;
     for (int i = 0; i < static_cast<int>(File_->FileNames.size()); ++i) {
-        if (RestrictedColumns_->count(File_->FileNames[i])) {
+        if (columnNames->count(File_->FileNames[i])) {
             indices.push_back(i);
         }
     }
@@ -836,26 +840,61 @@ void TParquetSource::RestrictColumns(const std::unordered_set<std::string>& name
 
 std::vector<NScheduler::TScanRowGroup> TParquetSource::ScanRowGroups() const
 {
-    return File_->RowGroups;
+    return ScanRowGroupsForColumns(nullptr);
+}
+
+std::vector<NScheduler::TScanRowGroup> TParquetSource::ScanRowGroups(
+    const std::unordered_set<std::string>& columnNames) const
+{
+    return ScanRowGroupsForColumns(&columnNames);
+}
+
+std::vector<NScheduler::TScanRowGroup> TParquetSource::ScanRowGroupsForColumns(
+    const std::unordered_set<std::string>* columnNames) const
+{
+    if (!columnNames && RestrictedColumns_) {
+        columnNames = &*RestrictedColumns_;
+    }
+    std::vector<NScheduler::TScanRowGroup> groups;
+    const auto rowGroups = EffectiveRowGroups();
+    const auto columns = EffectiveFileColumnIndexes(columnNames);
+    const auto metadata = File_->FileReader->parquet_reader()->metadata();
+    groups.reserve(rowGroups.size());
+    for (int rg : rowGroups) {
+        auto group = File_->RowGroups[static_cast<size_t>(rg)];
+        if (columnNames) {
+            group.ByteSize = 0;
+            const auto rowGroup = metadata->RowGroup(rg);
+            for (int column : columns) {
+                group.ByteSize += rowGroup->ColumnChunk(column)
+                    ->total_uncompressed_size();
+            }
+        }
+        groups.push_back(group);
+    }
+    return groups;
 }
 
 std::vector<NScheduler::TScanRowGroup> TParquetSource::PruneRowGroups(
     const NQumir::NAst::TExprPtr& predicate,
     std::string_view sourceAlias,
-    std::ostream* diagnostics) const
+    std::ostream* diagnostics,
+    const std::unordered_set<std::string>* columnNames) const
 {
+    auto rowGroups = ScanRowGroupsForColumns(columnNames);
     if (!predicate) {
-        return File_->RowGroups;
+        return rowGroups;
     }
     auto evaluator = TRowGroupPredicateEvaluator::Compile(
         predicate, File_->FullSchema, sourceAlias, diagnostics);
     if (!evaluator || File_->RowGroupRanges.size() != File_->RowGroups.size()) {
-        return File_->RowGroups;
+        return rowGroups;
     }
 
     std::vector<NScheduler::TScanRowGroup> kept;
-    kept.reserve(File_->RowGroups.size());
-    for (size_t rg = 0; rg < File_->RowGroups.size(); ++rg) {
+    kept.reserve(rowGroups.size());
+    for (const auto& group : rowGroups) {
+        const size_t rg = group.RowGroup;
         const bool mayBeTrue = evaluator->MayBeTrue(File_->RowGroupRanges[rg]);
         if (diagnostics) {
             *diagnostics << "row-group predicate: rg=" << rg
@@ -874,7 +913,7 @@ std::vector<NScheduler::TScanRowGroup> TParquetSource::PruneRowGroups(
             *diagnostics << '\n';
         }
         if (mayBeTrue) {
-            kept.push_back(File_->RowGroups[rg]);
+            kept.push_back(group);
         }
     }
     return kept;

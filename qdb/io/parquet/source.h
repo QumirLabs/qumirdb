@@ -47,10 +47,14 @@ public:
     bool Next(TRowSet& rowSet) override;
     void RestrictColumns(const std::unordered_set<std::string>& names) override;
     std::vector<NScheduler::TScanRowGroup> ScanRowGroups() const override;
+    // Estimate a planned projection without changing the source's reader.
+    std::vector<NScheduler::TScanRowGroup> ScanRowGroups(
+        const std::unordered_set<std::string>& columnNames) const;
     std::vector<NScheduler::TScanRowGroup> PruneRowGroups(
         const NQumir::NAst::TExprPtr& predicate,
         std::string_view sourceAlias,
-        std::ostream* diagnostics = nullptr) const;
+        std::ostream* diagnostics = nullptr,
+        const std::unordered_set<std::string>* columnNames = nullptr) const;
     std::unique_ptr<TParquetSource> MakeRowGroupsSource(
         const std::vector<size_t>& rowGroups) const;
     std::shared_ptr<const IPhysicalRowReader> CompileReader(
@@ -71,7 +75,10 @@ private:
 
     void ResetReader();
     std::vector<int> EffectiveRowGroups() const;
-    std::vector<int> EffectiveFileColumnIndexes() const;
+    std::vector<int> EffectiveFileColumnIndexes(
+        const std::unordered_set<std::string>* columnNames = nullptr) const;
+    std::vector<NScheduler::TScanRowGroup> ScanRowGroupsForColumns(
+        const std::unordered_set<std::string>* columnNames) const;
     void RefreshSchema();
     bool RowIdRequested() const;
 
