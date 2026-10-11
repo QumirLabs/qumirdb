@@ -10,6 +10,8 @@
 
 namespace NQdb {
 
+struct TRuntimeContext;
+
 // Value-only contribution, suitable for transfer to a remote merger.
 struct TRuntimeFilterPartial {
     std::vector<uint64_t> Hashes;
@@ -118,7 +120,8 @@ public:
     static constexpr size_t DefaultBloomBytes = 2u << 20;
 
     explicit TRuntimeFilter(size_t maxKeys = DefaultMaxKeys,
-        size_t bloomBytes = DefaultBloomBytes);
+        size_t bloomBytes = DefaultBloomBytes,
+        std::shared_ptr<TRuntimeContext> runtimeContext = nullptr);
 
     TRuntimeFilterBuilder MakeBuilder() const override {
         return TRuntimeFilterBuilder(MaxKeys_, BloomBytes_);
@@ -160,6 +163,7 @@ private:
 
     size_t MaxKeys_;
     size_t BloomBytes_;
+    std::shared_ptr<TRuntimeContext> RuntimeContext_;
     std::vector<TRuntimeFilterPartial> Partials_;
     std::atomic<size_t> NextPartial_{0};
     std::atomic<size_t> PendingProducers_{0};
@@ -167,15 +171,18 @@ private:
     std::atomic<bool> Ready_{false};
     std::vector<std::shared_ptr<TRuntimeFilterProbeState>> ProbeStates_;
     std::chrono::steady_clock::time_point ExecutionStart_;
-    // Modified only during the initial scalar warmup, before the JIT threshold.
-    mutable std::atomic<size_t> BloomProbeRows_{0};
 };
 
 class TLocalRuntimeFilterBindingFactory final : public IRuntimeFilterBindingFactory {
 public:
+    explicit TLocalRuntimeFilterBindingFactory(
+        std::shared_ptr<TRuntimeContext> runtimeContext = nullptr);
     TRuntimeFilterBinding Create(uint32_t id, size_t producerCount) override;
     TRuntimeFilterBinding CreateSized(
         uint32_t id, size_t producerCount, size_t bloomBytes) override;
+
+private:
+    std::shared_ptr<TRuntimeContext> RuntimeContext_;
 };
 
 } // namespace NQdb

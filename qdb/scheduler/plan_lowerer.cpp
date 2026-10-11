@@ -429,9 +429,7 @@ public:
         , Diagnostics_(diagnostics)
         , KernelSink_(kernelSink)
         , ExternalCatalog_(std::move(externalCatalog))
-        , RuntimeFilterBindings_(filterBindings
-            ? std::move(filterBindings)
-            : std::make_shared<TLocalRuntimeFilterBindingFactory>())
+        , RuntimeFilterBindings_(std::move(filterBindings))
         , RuntimeContext_(std::make_shared<TRuntimeContext>())
         , SourcesFeedingJoins_(Settings_.ScanSplit.MaxScanTasks == 0
             ? SourcesFeedingJoins(root)
@@ -2655,6 +2653,11 @@ private:
         auto leftShuffleCode = MakeHashShuffleCode(hashKernels.Left, leftType);
         auto rightShuffleCode = MakeHashShuffleCode(hashKernels.Right, rightType);
         if (const auto& runtimeFilter = join.RuntimeFilter()) {
+            if (!RuntimeFilterBindings_) {
+                RuntimeContext_->BloomProbe = compiler.CompileBloomProbe();
+                RuntimeFilterBindings_ =
+                    std::make_shared<TLocalRuntimeFilterBindingFactory>(RuntimeContext_);
+            }
             const bool buildIsLeft =
                 runtimeFilter->BuildSide == EJoinFilterSide::Left;
             // The producers are the build side's repartition lanes; the last of

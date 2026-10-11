@@ -2,6 +2,9 @@
 
 #include <qdb/exec/runtime_filter.h>
 #include <qdb/exec/runtime_filter_vector.h>
+#include <qdb/exec/runtime_context.h>
+#include <qdb/kernel/compiler.h>
+#include <qdb/kernel/finalize.h>
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
 
@@ -108,24 +111,40 @@ TEST(RuntimeFilter, BatchMatchesScalarForExactBloomAndUnpublished) {
 }
 
 TEST(RuntimeFilter, QumirVectorBloomKernel) {
+    auto context = std::make_shared<TRuntimeContext>();
+    {
+        std::vector<TGeneratedKernel> kernels;
+        TKernelCompiler compiler(TKernelCompilerOptions{
+            .Sink = &kernels,
+            .BindNow = false,
+            .RuntimeContext = context,
+        });
+        context->BloomProbe = compiler.CompileBloomProbe();
+        ASSERT_EQ(kernels.size(), 1u);
+        EXPECT_FALSE(kernels.front().Slot->Runner);
+        JitFinalizeKernels(kernels);
+    }
+
     auto probes = Hashes(8195, 23);
     std::vector<uint8_t> output(probes.size(), 7);
     std::vector<uint64_t> words(64, ~uint64_t{0});
 
-    const size_t processed = ProbeBloomVectorBatch(words, probes, output);
+    const size_t processed = ProbeBloomVectorBatch(*context->BloomProbe, words, probes, output);
     ASSERT_EQ(processed, 8192u);
     EXPECT_TRUE(std::all_of(output.begin(), output.begin() + processed,
         [](uint8_t value) { return value != 0; }));
     EXPECT_EQ(output.back(), 7);
 
     std::fill(words.begin(), words.end(), 0);
-    ProbeBloomVectorBatch(words, probes, output);
+    ProbeBloomVectorBatch(*context->BloomProbe, words, probes, output);
     EXPECT_TRUE(std::all_of(output.begin(), output.begin() + processed,
         [](uint8_t value) { return value == 0; }));
 }
 
-TEST(RuntimeFilter, BloomBatchMatchesScalarAfterVectorThreshold) {
-    TRuntimeFilter filter(/*maxKeys=*/8, /*bloomBytes=*/2048);
+TEST(RuntimeFilter, BloomBatchMatchesScalarWithQueryKernel) {
+    auto context = std::make_shared<TRuntimeContext>();
+    context->BloomProbe = TKernelCompiler().CompileBloomProbe();
+    TRuntimeFilter filter(/*maxKeys=*/8, /*bloomBytes=*/2048, context);
     auto keys = Hashes(2000, 24);
     auto builder = filter.MakeBuilder();
     for (uint64_t key : keys) {
@@ -135,7 +154,7 @@ TEST(RuntimeFilter, BloomBatchMatchesScalarAfterVectorThreshold) {
 
     ASSERT_TRUE(filter.UsesBloom());
 
-    auto probes = Hashes(1'000'003, 25);
+    auto probes = Hashes(16'387, 25);
     for (size_t i = 0; i < probes.size(); i += 1000) {
         probes[i] = keys[i % keys.size()];
     }

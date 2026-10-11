@@ -1535,6 +1535,21 @@ NQumir::NAst::TExprPtr BuildTopSortMergeProgramAst(
     return std::make_shared<TBlockExpr>(NQumir::TLocation{}, std::move(programStmts));
 }
 
+std::shared_ptr<TKernelSlot> TKernelCompiler::CompileBloomProbe() {
+    auto functions = NKernel::ParseFunctionLibrary(
+        NKernel::ReadJoinKernel("bloom_vector.oz"));
+    if (!functions) {
+        throw NQumir::TError("CompileBloomProbe: " + functions.error().ToString());
+    }
+    auto ast = std::make_shared<NQumir::NAst::TBlockExpr>(
+        NQumir::TLocation{}, std::move(*functions));
+    PrintKernelAst(Diagnostics_, "runtime-filter.bloom", ast);
+    auto kernel = EmitKernel("runtime-filter.bloom", {"bloom_probe4"}, std::move(ast));
+    FinishKernelDiagnostics(Diagnostics_);
+
+    return kernel.Slot;
+}
+
 TKernelCompiler::TFilterDispatch TKernelCompiler::CompileFilter(
     const NKernel::TOperatorKernelSpec& spec)
 {

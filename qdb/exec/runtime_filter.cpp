@@ -1,4 +1,5 @@
 #include <qdb/exec/runtime_filter.h>
+#include <qdb/exec/runtime_context.h>
 #include <qdb/exec/runtime_filter_vector.h>
 
 #include <algorithm>
@@ -139,9 +140,11 @@ TRuntimeFilterPartial TRuntimeFilterBuilder::TakePartial() && {
     };
 }
 
-TRuntimeFilter::TRuntimeFilter(size_t maxKeys, size_t bloomBytes)
+TRuntimeFilter::TRuntimeFilter(size_t maxKeys, size_t bloomBytes,
+    std::shared_ptr<TRuntimeContext> runtimeContext)
     : MaxKeys_(maxKeys)
     , BloomBytes_(NormalizeBloomBytes(bloomBytes))
+    , RuntimeContext_(std::move(runtimeContext))
 {
     SetProducerCount(1);
 }
@@ -313,7 +316,9 @@ bool TRuntimeFilter::MayContain(uint64_t hash) const {
 size_t TRuntimeFilter::ProbeBloom(
     std::span<const uint64_t> hashes, std::span<uint8_t> output) const
 {
-    const size_t vectorized = ProbeBloomVectorBatch(Data_.BloomWords, hashes, output);
+    const size_t vectorized = RuntimeContext_ && RuntimeContext_->BloomProbe
+        ? ProbeBloomVectorBatch(*RuntimeContext_->BloomProbe, Data_.BloomWords, hashes, output)
+        : 0;
     size_t accepted = static_cast<size_t>(std::count_if(
         output.begin(), output.begin() + vectorized, [](uint8_t value) { return value != 0; }));
     for (size_t i = vectorized; i < hashes.size(); ++i) {
@@ -334,17 +339,9 @@ size_t TRuntimeFilter::MayContainBatch(
     const size_t rows = SelectedRows(hashes.size(), selection);
     size_t accepted = 0;
     if (Data_.Kind == EKind::Bloom) {
-        // Stop modifying the shared warmup counter once compilation is allowed.
-        constexpr size_t VectorCompileThreshold = 1'000'000;
-        size_t seen = BloomProbeRows_.load(std::memory_order_relaxed);
-        if (seen < VectorCompileThreshold) {
-            seen = BloomProbeRows_.fetch_add(rows, std::memory_order_relaxed);
-        }
-        const bool vectorize = seen >= VectorCompileThreshold
-            || rows >= VectorCompileThreshold - seen;
-        if (vectorize && rows == hashes.size()) {
+        if (rows == hashes.size()) {
             accepted = ProbeBloom(hashes, output);
-        } else if (vectorize && rows >= 8192) {
+        } else if (rows >= 8192 && RuntimeContext_ && RuntimeContext_->BloomProbe) {
             // Compact sparse input masks so the vector kernel also ignores
             // rows already rejected upstream. Scratch space belongs to a lane.
             state.SelectedHashes.clear();
@@ -418,6 +415,11 @@ TRuntimeFilterStats TRuntimeFilter::StatsSnapshot() const {
     return stats;
 }
 
+TLocalRuntimeFilterBindingFactory::TLocalRuntimeFilterBindingFactory(
+    std::shared_ptr<TRuntimeContext> runtimeContext)
+    : RuntimeContext_(std::move(runtimeContext))
+{}
+
 TRuntimeFilterBinding TLocalRuntimeFilterBindingFactory::Create(
     uint32_t id, size_t producerCount)
 {
@@ -428,7 +430,8 @@ TRuntimeFilterBinding TLocalRuntimeFilterBindingFactory::CreateSized(
     uint32_t id, size_t producerCount, size_t bloomBytes)
 {
     (void)id;
-    auto filter = std::make_shared<TRuntimeFilter>(TRuntimeFilter::DefaultMaxKeys, bloomBytes);
+    auto filter = std::make_shared<TRuntimeFilter>(
+        TRuntimeFilter::DefaultMaxKeys, bloomBytes, RuntimeContext_);
     filter->SetProducerCount(producerCount);
     return TRuntimeFilterBinding{.Producer = filter, .Probe = std::move(filter)};
 }
