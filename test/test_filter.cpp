@@ -174,6 +174,42 @@ TEST(FilterKernel, ComparesStringColumnAndLiteralInBothOrders) {
     }
 }
 
+// A StringView literal carries its codegen length instead of a per-row strlen,
+// so bytes after an embedded zero take part in the comparison.
+TEST(FilterKernel, StringViewLiteralKeepsItsLength) {
+    const std::string literal("a\0b", 3);
+    const std::string data = "a" + literal + "z" + "a";
+    const std::array<int32_t, 5> offsets = {0, 1, 4, 5, 6};
+    std::array<TColumn, 1> columns = {
+        TColumn{.Data = const_cast<char*>(data.data()), .Mask = nullptr,
+            .Offsets = const_cast<int32_t*>(offsets.data()), .OffsetWidth = 4},
+    };
+    TStructType inputType({
+        {"value", std::make_shared<TStringType>()},
+    });
+    auto predicate = ParsePredicate(
+        "(== value (cast \"placeholder\" <named StringView>))");
+    auto cast = TMaybeNode<TCastExpr>(
+        TMaybeNode<TBinaryExpr>(predicate).Cast()->Right).Cast();
+    TMaybeNode<TStringLiteralExpr>(cast->Operand).Cast()->Value = literal;
+
+    std::ostringstream diagnostics;
+    TKernelCompiler compiler(&diagnostics);
+    auto dispatch = compiler.CompileFilter(
+        NKernel::BuildFilterKernelSpec(inputType, predicate));
+    std::array<uint8_t, 4> selection{};
+    TRowSet rowSet{
+        .Columns = columns.data(),
+        .ColumnCount = static_cast<int64_t>(columns.size()),
+        .RowCount = static_cast<int64_t>(selection.size()),
+        .Selection = selection.data(),
+        .RefCount = 1,
+    };
+    dispatch(rowSet);
+
+    EXPECT_EQ(selection, (std::array<uint8_t, 4>{0, 0xff, 0, 0}));
+    EXPECT_NE(diagnostics.str().find("qdb_sv_from_ptr"), std::string::npos);
+}
 
 TEST(FilterKernel, AppliesSqlThreeValuedLogicToNullableColumns) {
     EXPECT_EQ(RunNullableIntegerFilter(

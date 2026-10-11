@@ -109,6 +109,24 @@ void SpecializeFilterPredicate(
         }
         return;
     }
+    // cast("lit", StringView) would call qdb_lit_to_sv (strlen) on every row.
+    if (auto cast = TMaybeNode<TCastExpr>(expr)) {
+        auto literal = TMaybeNode<TStringLiteralExpr>(cast.Cast()->Operand);
+        auto target = TMaybeType<TNamedType>(cast.Cast()->Type);
+        if (literal && target && target.Cast()->Name == "StringView") {
+            const auto loc = expr->Location;
+            auto size = std::make_shared<TNumberExpr>(
+                loc, static_cast<int64_t>(literal.Cast()->Value.size()));
+            size->Type = std::make_shared<TIntegerType>();
+            auto data = std::make_shared<TBitcastExpr>(loc, cast.Cast()->Operand,
+                std::make_shared<TPointerType>(
+                    std::make_shared<TIntegerType>(TIntegerType::U8)));
+            expr = std::make_shared<TCallExpr>(loc,
+                std::make_shared<TIdentExpr>(loc, "qdb_sv_from_ptr"),
+                std::vector<TExprPtr>{std::move(data), std::move(size)});
+            return;
+        }
+    }
     for (auto* child : expr->MutableChildren()) {
         SpecializeFilterPredicate(*child, stringFields, stringValues);
     }
