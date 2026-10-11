@@ -9,6 +9,7 @@
 #include <qumir/ir/eval.h>
 #include <qumir/ir/lowering/lower_ast.h>
 #include <qumir/ir/vmcompiler.h>
+#include <qumir/modules/builtins/builtins.h>
 #include <qumir/modules/system/system.h>
 #include <qumir/semantics/name_resolution/name_resolver.h>
 #include <qumir/semantics/transform/transform.h>
@@ -28,6 +29,9 @@ struct TVmFrontendContext::TImpl {
     };
     std::shared_ptr<NQumir::NRegistry::SystemModule> System =
         std::make_shared<NQumir::NRegistry::SystemModule>();
+    // qumirdb.oz kernels call builtin::memcmp/cttz.
+    std::shared_ptr<NQumir::NRegistry::BuiltinsModule> Builtins =
+        std::make_shared<NQumir::NRegistry::BuiltinsModule>();
     NQumir::NFrontend::TSourceModuleLoader Loader;
     std::optional<std::string> LoadError;
     uint64_t Counter = 0;
@@ -128,6 +132,8 @@ std::expected<TExprPtr, std::string> TVmFrontendContext::TransformLocked(
     NQumir::NSemantics::TNameResolver resolver;
     resolver.ApplyPragmas(Impl_->Pragmas);
     resolver.RegisterModule(Impl_->System.get());
+    resolver.RegisterModule(Impl_->Builtins.get());
+    (void)resolver.ImportModule(Impl_->Builtins->Name());
     return TransformWithResolver(
         Impl_->Loader, Impl_->Pragmas, resolver, std::move(module));
 }
@@ -153,6 +159,8 @@ std::expected<void, std::string> TVmFrontendContext::Lower(
     NQumir::NSemantics::TNameResolver resolver;
     resolver.ApplyPragmas(Impl_->Pragmas);
     resolver.RegisterModule(Impl_->System.get());
+    resolver.RegisterModule(Impl_->Builtins.get());
+    (void)resolver.ImportModule(Impl_->Builtins->Name());
     auto transformed = TransformWithResolver(
         Impl_->Loader, Impl_->Pragmas, resolver, std::move(module));
     if (!transformed) {
