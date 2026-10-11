@@ -27,7 +27,7 @@
               (rel project (rel cte-ref 1) (|csci.customer_sk| customer_sk) (|csci.item_sk| item_sk))
               ()
               (full)
-              (&& (== |ssci.customer_sk| |csci.customer_sk|) (== |ssci.item_sk| |csci.item_sk|)))
+              (residual (&& (== |ssci.customer_sk| |csci.customer_sk|) (== |ssci.item_sk| |csci.item_sk|))))
             (arg_0 (if
                 (call qdb_is_true (&& (! (call qdb_is_null |ssci.customer_sk|)) (call qdb_is_null |csci.customer_sk|)))
                 1

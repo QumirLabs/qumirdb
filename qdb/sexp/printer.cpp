@@ -233,10 +233,12 @@ void PrintRel(NQumir::NAst::TExpr& expr, TPrinter& printer, TPrintFrame frame) {
         // Join type as a bare keyword: (inner)
         printer.Separator(frame.Level + 1);
         out << '(' << JoinTypeName(join.JoinType()) << ')';
-        // Optional residual predicate, printed directly (no 'filter' label).
         if (join.Filter()) {
             printer.Separator(frame.Level + 1);
+            out << "(residual";
+            printer.Space();
             printer.PrintExpr(join.Filter(), frame.AllowTypeWrap, frame.Level + 1);
+            out << ')';
         }
         out << ')';
         return;

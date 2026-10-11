@@ -34,7 +34,7 @@
               (rel source "orders")
               ()
               (left_anti)
-              (== o_custkey c_custkey))
+              (residual (== o_custkey c_custkey)))
             (&& (call
                 qdb_in_list
                 (call qdb_substring c_phone (cast 1 i32) (cast 2 i32))

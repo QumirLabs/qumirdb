@@ -15,7 +15,7 @@
                   (__qdb_in__p_partkey p_partkey))
                 ()
                 (left_semi)
-                (== ps_partkey __qdb_in__p_partkey))
+                (residual (== ps_partkey __qdb_in__p_partkey)))
               (rel project
                 (rel aggregate
                   (rel project
@@ -34,7 +34,7 @@
           (__qdb_in__ps_suppkey ps_suppkey))
         ()
         (left_semi)
-        (== s_suppkey __qdb_in__ps_suppkey))
+        (residual (== s_suppkey __qdb_in__ps_suppkey)))
       (&& (== s_nationkey n_nationkey) (== n_name (cast "PERU" <named StringView>))))
     (s_name s_name)
     (s_address s_address))

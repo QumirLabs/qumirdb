@@ -448,12 +448,26 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
                 co_return TError(loc, "cross join (empty key list) only supports inner type");
             }
 
-            // Optional residual predicate, then the closing ')'.
+            // Canonical plans tag the residual. Accept the former untagged
+            // form as input so stored plans remain readable.
             TExprPtr filter;
             auto tok = h.Next();
             if (!IParseHandle::IsOp(tok, ')')) {
-                h.Unget(tok);
-                filter = co_await h.Expr();
+                if (IParseHandle::IsOp(tok, '(')) {
+                    auto tagTok = h.Next();
+                    auto tag = ReadIdentifier(h, tagTok);
+                    if (tag && *tag == "residual") {
+                        filter = co_await h.Expr();
+                        co_await h.Take(')');
+                    } else {
+                        h.Unget(tagTok);
+                        h.Unget(tok);
+                        filter = co_await h.Expr();
+                    }
+                } else {
+                    h.Unget(tok);
+                    filter = co_await h.Expr();
+                }
                 co_await h.Take(')');
             }
 

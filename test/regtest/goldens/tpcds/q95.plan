@@ -35,7 +35,7 @@
                         (__qdb_in__ws_order_number ws_order_number))
                       ()
                       (left_semi)
-                      (== |ws1.ws_order_number| __qdb_in__ws_order_number))
+                      (residual (== |ws1.ws_order_number| __qdb_in__ws_order_number)))
                     (rel project
                       (rel filter
                         (rel join
@@ -51,7 +51,7 @@
                       (__qdb_in__wr_order_number wr_order_number))
                     ()
                     (left_semi)
-                    (== |ws1.ws_order_number| __qdb_in__wr_order_number))
+                    (residual (== |ws1.ws_order_number| __qdb_in__wr_order_number)))
                   (&& (&& (&& (&& (&& (&& (<= (cast "1999-5-01" <named StringView>) d_date)
                               (<= d_date (+ (cast (cast "1999-5-01" <named StringView>) <named DATE>) (: 60 i32))))
                             (== |ws1.ws_ship_date_sk| d_date_sk))

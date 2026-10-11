@@ -119,7 +119,7 @@
                       (rel source "web_sales")
                       ()
                       (left)
-                      (&& (== wr_item_sk ws_item_sk) (== wr_order_number ws_order_number)))
+                      (residual (&& (== wr_item_sk ws_item_sk) (== wr_order_number ws_order_number))))
                     (wsr_web_site_sk ws_web_site_sk)
                     (date_sk wr_returned_date_sk)
                     (sales_price (cast 0 <named DECIMAL [7 2]>))

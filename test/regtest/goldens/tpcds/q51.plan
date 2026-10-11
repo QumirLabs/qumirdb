@@ -56,7 +56,7 @@
                           (|store.cume_sales| cume_sales))
                         ()
                         (full)
-                        (&& (== |web.item_sk| |store.item_sk|) (== |web.d_date| |store.d_date|)))
+                        (residual (&& (== |web.item_sk| |store.item_sk|) (== |web.d_date| |store.d_date|))))
                       (item_sk (if (call qdb_is_true (! (call qdb_is_null |web.item_sk|))) |web.item_sk| |store.item_sk|))
                       (d_date (if (call qdb_is_true (! (call qdb_is_null |web.d_date|))) |web.d_date| |store.d_date|))
                       (web_sales |web.cume_sales|)

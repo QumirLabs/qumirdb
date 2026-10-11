@@ -90,7 +90,7 @@
                         (__qdb_in__item_sk item_sk))
                       ()
                       (left_semi)
-                      (== cs_item_sk __qdb_in__item_sk))
+                      (residual (== cs_item_sk __qdb_in__item_sk)))
                     (rel project
                       (rel project
                         (rel cte-ref 2)
@@ -99,7 +99,7 @@
                       (__qdb_in__c_customer_sk c_customer_sk))
                     ()
                     (left_semi)
-                    (== cs_bill_customer_sk __qdb_in__c_customer_sk))
+                    (residual (== cs_bill_customer_sk __qdb_in__c_customer_sk)))
                   (&& (&& (== d_year 1999) (== d_moy 1)) (== cs_sold_date_sk d_date_sk)))
                 (sales (* cs_quantity cs_list_price)))
               (rel project
@@ -117,7 +117,7 @@
                         (__qdb_in__item_sk item_sk))
                       ()
                       (left_semi)
-                      (== ws_item_sk __qdb_in__item_sk))
+                      (residual (== ws_item_sk __qdb_in__item_sk)))
                     (rel project
                       (rel project
                         (rel cte-ref 2)
@@ -126,7 +126,7 @@
                       (__qdb_in__c_customer_sk c_customer_sk))
                     ()
                     (left_semi)
-                    (== ws_bill_customer_sk __qdb_in__c_customer_sk))
+                    (residual (== ws_bill_customer_sk __qdb_in__c_customer_sk)))
                   (&& (&& (== d_year 1999) (== d_moy 1)) (== ws_sold_date_sk d_date_sk)))
                 (sales (* ws_quantity ws_list_price))))
             (sales sales)

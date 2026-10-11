@@ -10,15 +10,20 @@
                   (rel filter
                     (rel join
                       (rel join
-                        (rel join (rel source "catalog_sales") (rel source "item") () (inner) (== i_item_sk cs_item_sk))
+                        (rel join
+                          (rel source "catalog_sales")
+                          (rel source "item")
+                          ()
+                          (inner)
+                          (residual (== i_item_sk cs_item_sk)))
                         (rel source "date_dim")
                         ()
                         (inner)
-                        (== d_date_sk cs_sold_date_sk))
+                        (residual (== d_date_sk cs_sold_date_sk)))
                       (rel source "catalog_returns")
                       ()
                       (left)
-                      (&& (== cs_order_number cr_order_number) (== cs_item_sk cr_item_sk)))
+                      (residual (&& (== cs_order_number cr_order_number) (== cs_item_sk cr_item_sk))))
                     (== i_category (cast "Sports" <named StringView>)))
                   (d_year d_year)
                   (i_brand_id i_brand_id)
@@ -31,15 +36,20 @@
                   (rel filter
                     (rel join
                       (rel join
-                        (rel join (rel source "store_sales") (rel source "item") () (inner) (== i_item_sk ss_item_sk))
+                        (rel join
+                          (rel source "store_sales")
+                          (rel source "item")
+                          ()
+                          (inner)
+                          (residual (== i_item_sk ss_item_sk)))
                         (rel source "date_dim")
                         ()
                         (inner)
-                        (== d_date_sk ss_sold_date_sk))
+                        (residual (== d_date_sk ss_sold_date_sk)))
                       (rel source "store_returns")
                       ()
                       (left)
-                      (&& (== ss_ticket_number sr_ticket_number) (== ss_item_sk sr_item_sk)))
+                      (residual (&& (== ss_ticket_number sr_ticket_number) (== ss_item_sk sr_item_sk))))
                     (== i_category (cast "Sports" <named StringView>)))
                   (d_year d_year)
                   (i_brand_id i_brand_id)
@@ -52,15 +62,20 @@
                   (rel filter
                     (rel join
                       (rel join
-                        (rel join (rel source "web_sales") (rel source "item") () (inner) (== i_item_sk ws_item_sk))
+                        (rel join
+                          (rel source "web_sales")
+                          (rel source "item")
+                          ()
+                          (inner)
+                          (residual (== i_item_sk ws_item_sk)))
                         (rel source "date_dim")
                         ()
                         (inner)
-                        (== d_date_sk ws_sold_date_sk))
+                        (residual (== d_date_sk ws_sold_date_sk)))
                       (rel source "web_returns")
                       ()
                       (left)
-                      (&& (== ws_order_number wr_order_number) (== ws_item_sk wr_item_sk)))
+                      (residual (&& (== ws_order_number wr_order_number) (== ws_item_sk wr_item_sk))))
                     (== i_category (cast "Sports" <named StringView>)))
                   (d_year d_year)
                   (i_brand_id i_brand_id)

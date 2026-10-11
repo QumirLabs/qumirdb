@@ -12,7 +12,7 @@
               (__qdb_in__s_suppkey s_suppkey))
             ()
             (left_anti)
-            (== ps_suppkey __qdb_in__s_suppkey))
+            (residual (== ps_suppkey __qdb_in__s_suppkey)))
           (&& (&& (&& (== p_partkey ps_partkey) (!= p_brand (cast "Brand#54" <named StringView>)))
               (! (call qdb_string_view_sql_like p_type (cast "PROMO ANODIZED%" <named StringView>))))
             (call qdb_in_list p_size 24 47 25 36 22 26 49 40)))

@@ -7,7 +7,7 @@
           (rel source "lineitem")
           ()
           (left_semi)
-          (&& (== l_orderkey o_orderkey) (< l_commitdate l_receiptdate)))
+          (residual (&& (== l_orderkey o_orderkey) (< l_commitdate l_receiptdate))))
         (&& (>= o_orderdate (: 9465 i32)) (< o_orderdate (+ (: 9465 i32) (: 90 i32)))))
       (keys o_orderpriority)
       (agg count_0 count))

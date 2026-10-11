@@ -419,7 +419,7 @@ TEST(SexpPrinter, JoinWithFilterAndMultipleKeys) {
     auto join = MakeJoin(l, r, {{"a", "c"}, {"b", "d"}}, EJoinType::Left, "(< b d)");
     ASSERT_TRUE(join.has_value()) << (join ? "" : join.error().ToString());
     EXPECT_EQ(PrintAst(*join, MakePrintOpts()),
-              "(rel join (rel source) (rel source) ((a c) (b d)) (left) (< b d))");
+              "(rel join (rel source) (rel source) ((a c) (b d)) (left) (residual (< b d)))");
 }
 
 TEST(SexpParser, JoinPrintRoundtrip) {
@@ -428,7 +428,7 @@ TEST(SexpParser, JoinPrintRoundtrip) {
 
     const std::string input =
         "(rel join (rel source \"left.parquet\") (rel source \"right.parquet\") "
-        "((a c nulls_equal) (b d)) (left) (< b d))";
+        "((a c nulls_equal) (b d)) (left) (residual (< b d)))";
 
     TRelParserOptions opts;
     opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
@@ -453,6 +453,14 @@ TEST(SexpParser, JoinPrintRoundtrip) {
 
     auto printed = PrintAst(std::static_pointer_cast<TExpr>(expr), MakePrintOpts());
     EXPECT_EQ(printed, input);
+
+    const std::string legacy =
+        "(rel join (rel source \"left.parquet\") (rel source \"right.parquet\") "
+        "((a c nulls_equal) (b d)) (left) (< b d))";
+    auto legacyExpr = Parse(p, legacy);
+    ASSERT_NE(legacyExpr, nullptr);
+    EXPECT_EQ(PrintAst(std::static_pointer_cast<TExpr>(legacyExpr), MakePrintOpts()),
+              input);
 }
 
 TEST(SexpParser, CrossJoinAcceptsEmptyKeyList) {
