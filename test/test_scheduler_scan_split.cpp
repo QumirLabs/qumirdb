@@ -107,6 +107,62 @@ TEST(SchedulerScanSplit, PreservesSparseRowGroupIds) {
     EXPECT_EQ(splits[1].RowCount, 30);
 }
 
+TEST(SchedulerScanSplit, AutoSizesEachSourceAndLimitsJoinFanIn) {
+    TSettings settings;
+    settings.Scheduler.Mode = EExecutionMode::ThreadedScheduler;
+    settings.Scheduler.WorkerCount = 4;
+    auto groups = RowGroups();
+    EXPECT_EQ(ChooseScanTaskCount(groups, settings, false), 1u);
+
+    // Enough work and row groups to fill two lanes per worker.
+    groups.resize(8, {.RowCount = 2 * 1024 * 1024, .ByteSize = 0});
+    EXPECT_EQ(ChooseScanTaskCount(groups, settings, false), 8u);
+    EXPECT_EQ(ChooseScanTaskCount(groups, settings, true), 4u);
+
+    groups.resize(2);
+    groups[0].RowCount = groups[1].RowCount = 2 * 1024 * 1024;
+    EXPECT_EQ(ChooseScanTaskCount(groups, settings, false), 2u);
+    EXPECT_EQ(ChooseScanTaskCount({}, settings, false), 1u);
+}
+
+TEST(SchedulerScanSplit, AutoAccountsForProjectedBytesAndRows) {
+    TSettings settings;
+    settings.Scheduler.Mode = EExecutionMode::ThreadedScheduler;
+    settings.Scheduler.WorkerCount = 4;
+    auto groups = RowGroups();
+    for (auto& group : groups) {
+        group.ByteSize = 32 * 1024 * 1024;
+    }
+    EXPECT_EQ(ChooseScanTaskCount(groups, settings, false), 2u);
+    for (auto& group : groups) {
+        group.ByteSize = 0;
+        group.RowCount = 1024 * 1024;
+    }
+    EXPECT_EQ(ChooseScanTaskCount(groups, settings, false), 4u);
+}
+
+TEST(SchedulerScanSplit, AutoRespectsSerialExecutionAndExplicitOverrides) {
+    TSettings settings;
+    settings.Scheduler.Mode = EExecutionMode::SingleThreadedScheduler;
+    settings.Scheduler.WorkerCount = 4;
+    settings.ScanSplit.TargetRowsPerTask = 1;
+    EXPECT_EQ(ChooseScanTaskCount(RowGroups(), settings, false), 1u);
+    settings.Scheduler.Mode = EExecutionMode::ThreadedScheduler;
+    EXPECT_EQ(ChooseScanTaskCount(RowGroups(), settings, false), 4u);
+    settings.Scheduler.WorkerCount = 1;
+    EXPECT_EQ(ChooseScanTaskCount(RowGroups(), settings, false), 1u);
+    settings.Scheduler.WorkerCount = 4;
+    settings.ScanSplit.Strategy = EScanSplitStrategy::SerialRead;
+    EXPECT_EQ(ChooseScanTaskCount(RowGroups(), settings, false), 1u);
+
+    settings.ScanSplit.Strategy = EScanSplitStrategy::Auto;
+    for (const size_t cap : {size_t{1}, size_t{18}, size_t{32}}) {
+        settings.ScanSplit.MaxScanTasks = cap;
+        EXPECT_EQ(ChooseScanTaskCount(RowGroups(), settings, false), cap);
+        EXPECT_EQ(ChooseScanTaskCount(RowGroups(), settings, true), cap);
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {

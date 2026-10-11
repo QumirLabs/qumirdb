@@ -161,8 +161,22 @@ TEST(IOTest, ParquetRowGroupRangeSource) {
     EXPECT_EQ(rowGroups[1].RowCount, 2);
     EXPECT_EQ(rowGroups[2].RowCount, 1);
 
+    const auto plannedGroups = source->ScanRowGroups(
+        std::unordered_set<std::string>{"id"});
+    // Planning metadata must not alter a reader shared by other scan aliases.
+    EXPECT_EQ(source->Schema().Columns.size(), 2u);
+    EXPECT_EQ(source->ScanRowGroups()[0].ByteSize, rowGroups[0].ByteSize);
     source->RestrictColumns({"id"});
     ASSERT_EQ(source->Schema().Columns.size(), 1u);
+    const auto projectedGroups = source->ScanRowGroups();
+    ASSERT_EQ(projectedGroups.size(), rowGroups.size());
+    for (size_t rg = 0; rg < rowGroups.size(); ++rg) {
+        EXPECT_EQ(projectedGroups[rg].RowGroup, rowGroups[rg].RowGroup);
+        EXPECT_EQ(projectedGroups[rg].RowCount, rowGroups[rg].RowCount);
+        EXPECT_GT(projectedGroups[rg].ByteSize, 0);
+        EXPECT_LT(projectedGroups[rg].ByteSize, rowGroups[rg].ByteSize);
+        EXPECT_EQ(projectedGroups[rg].ByteSize, plannedGroups[rg].ByteSize);
+    }
     const std::vector<std::string> columnNames{
         "payload",
         "id",
@@ -195,6 +209,11 @@ TEST(IOTest, ParquetRowGroupRangeSource) {
 
     auto split = source->MakeRowGroupsSource({1});
     EXPECT_EQ(split->Stats().get(), source->Stats().get());
+    const auto splitGroups = split->ScanRowGroups();
+    ASSERT_EQ(splitGroups.size(), 1u);
+    EXPECT_EQ(splitGroups[0].RowGroup, 1u);
+    EXPECT_EQ(splitGroups[0].RowCount, projectedGroups[1].RowCount);
+    EXPECT_EQ(splitGroups[0].ByteSize, projectedGroups[1].ByteSize);
     TRowSet rowSet = {};
     ASSERT_TRUE(split->Next(rowSet));
     ASSERT_EQ(rowSet.RowCount, 2);
@@ -208,6 +227,9 @@ TEST(IOTest, ParquetRowGroupRangeSource) {
     EXPECT_FALSE(split->Next(rowSet));
 
     source->RestrictColumns({});
+    for (const auto& group : source->ScanRowGroups()) {
+        EXPECT_EQ(group.ByteSize, 0);
+    }
     int64_t rowCount = 0;
     while (source->Next(rowSet)) {
         EXPECT_EQ(rowSet.ColumnCount, 0);

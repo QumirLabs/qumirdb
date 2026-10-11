@@ -134,6 +134,7 @@ struct TBuiltPlan {
     TExecPlan Exec;
     std::vector<TGeneratedKernel> Kernels;
     size_t PhysicalTasks = 0;
+    std::unordered_map<std::string, size_t> SourceLanes;
     struct TRepartition {
         std::vector<std::string> Keys;
         size_t Sources = 0;
@@ -154,6 +155,12 @@ TBuiltPlan Lower(
         throw std::runtime_error(exec.error());
     }
     std::vector<TBuiltPlan::TRepartition> repartitions;
+    std::unordered_map<std::string, size_t> sourceLanes;
+    for (const auto& node : lowered.Graph->Nodes()) {
+        if (node->DebugKind == "source") {
+            ++sourceLanes[node->DebugLabel];
+        }
+    }
     std::unordered_set<const NScheduler::IConnection*> seenConnections;
     for (const auto& edge : lowered.Graph->Edges()) {
         const auto* connection = edge->Connection;
@@ -176,6 +183,7 @@ TBuiltPlan Lower(
         .Exec = std::move(*exec),
         .Kernels = std::move(lowered.Kernels),
         .PhysicalTasks = lowered.Graph->Nodes().size(),
+        .SourceLanes = std::move(sourceLanes),
         .Repartitions = std::move(repartitions),
     };
 }
@@ -386,6 +394,54 @@ TEST(ExecPlanBuilder, CteConsumersShareTypedMaterialization) {
         }
         EXPECT_EQ(node.MaterializationId, materialization);
     }
+    ExpectKernelBindings(built);
+}
+
+TEST(ExecPlanBuilder, AutoScanTasksAreChosenPerSourceBeforeJoinShuffle) {
+    TStatsSplitMockSource large(100'000'000, 5'000'000);
+    TSplitMockSource small({"k"});
+    const std::unordered_map<std::string, ISource*> sources{
+        {"l", &large}, {"r", &small},
+    };
+    auto settings = MultiSettings();
+    settings.Scheduler.WorkerCount = 2;
+    settings.ScanSplit.MaxScanTasks = 0;
+    auto standalone = Lower("SELECT k FROM l", sources, settings);
+    EXPECT_EQ(standalone.SourceLanes.at("source l"), 4u);
+
+    constexpr std::string_view sql =
+        "SELECT l.k FROM l JOIN r ON l.k = r.k";
+    auto joined = Lower(sql, sources, settings);
+    EXPECT_EQ(joined.SourceLanes.at("source l"), 2u);
+    EXPECT_EQ(joined.SourceLanes.at("source r"), 1u);
+    ASSERT_EQ(joined.Repartitions.size(), 2u);
+    EXPECT_EQ(joined.Repartitions[0].Sources, 2u);
+    EXPECT_EQ(joined.Repartitions[1].Sources, 1u);
+    EXPECT_EQ(joined.Repartitions[0].Destinations, 2u);
+    EXPECT_EQ(joined.Repartitions[1].Destinations, 2u);
+
+    settings.ScanSplit.MaxScanTasks = 4;
+    auto explicitTasks = Lower(sql, sources, settings);
+    EXPECT_EQ(explicitTasks.SourceLanes.at("source l"), 4u);
+    EXPECT_EQ(explicitTasks.SourceLanes.at("source r"), 4u);
+    ExpectSameSemanticPlan(joined.Exec, explicitTasks.Exec);
+}
+
+TEST(ExecPlanBuilder, AutoScanJoinBudgetReachesSharedCteMaterialization) {
+    TSplitMockSource source({"k"});
+    const std::unordered_map<std::string, ISource*> sources{{"t", &source}};
+    auto settings = MultiSettings();
+    settings.Scheduler.WorkerCount = 2;
+    settings.ScanSplit.MaxScanTasks = 0;
+    settings.ScanSplit.TargetRowsPerTask = 1;
+    // The producer is first reached by a consumer without a downstream join.
+    constexpr std::string_view sql =
+        "WITH x AS (SELECT k FROM t) "
+        "SELECT k FROM x UNION ALL "
+        "SELECT p.k FROM x p JOIN x q ON p.k = q.k";
+    auto built = Lower(sql, sources, settings);
+    EXPECT_EQ(built.SourceLanes.at("source t"), 2u);
+    EXPECT_EQ(CountKind(built.Exec, EExecPlanNodeKind::CteProducer), 1u);
     ExpectKernelBindings(built);
 }
 

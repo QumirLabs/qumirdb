@@ -444,6 +444,14 @@ independent row-group ranges, which is what creates the parallel lanes every
 optimization below builds on. A single-row-group file yields one lane, and the
 parallel variants then do not apply.
 
+Without an explicit limit, each source is sized after column and row-group
+pruning: one task per 1,048,576 rows or 64 MiB of uncompressed selected-column
+data, whichever yields more tasks. The limit is capped at the number of row
+groups and at the worker count for sources feeding a join, or twice the worker
+count otherwise. Single-threaded execution stays serial by default. Positive
+`--scan-tasks` values preserve the explicit limit. See
+[Scan parallelism](scan_parallelism.md), including the comparison with DuckDB.
+
 ### 4.3 Hash-shuffled grouped aggregate — `scheduler/plan_lowerer.cpp`
 
 Always on for a grouped aggregate over parallel input: the input is shuffled by

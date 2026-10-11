@@ -2077,9 +2077,6 @@ async function explainCurrent(
     sql,
     dataset,
     options: {
-      scheduler: 'threaded',
-      schedulerWorkers: 18,
-      scanTasks: 18,
       shufflePartitions: 4,
       format: 'runtime-bundle',
       embedWasm: dataset.source?.kind === 'browser',

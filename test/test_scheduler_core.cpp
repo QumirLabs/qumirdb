@@ -3,6 +3,9 @@
 #include <qdb/scheduler/settings.h>
 #include <qdb/scheduler/state.h>
 
+#include <algorithm>
+#include <thread>
+
 using namespace NQdb::NScheduler;
 
 namespace {
@@ -38,13 +41,14 @@ TEST(SchedulerCore, TaskStateValuesAreStable) {
     EXPECT_EQ(static_cast<int>(ETaskState::Finished), 4);
 }
 
-TEST(SchedulerCore, SettingsDefaultsAreConservative) {
+TEST(SchedulerCore, SettingsDefaultsEnableAutomaticParallelism) {
     TSettings settings;
 
-    EXPECT_EQ(settings.Scheduler.Mode, EExecutionMode::SingleThreadedScheduler);
-    EXPECT_EQ(settings.Scheduler.WorkerCount, 1u);
+    EXPECT_EQ(settings.Scheduler.Mode, EExecutionMode::ThreadedScheduler);
+    EXPECT_EQ(settings.Scheduler.WorkerCount,
+        std::max(1u, std::thread::hardware_concurrency()));
     EXPECT_EQ(settings.Queue.RowsetCapacityPerLane, 4u);
-    EXPECT_EQ(settings.ScanSplit.MaxScanTasks, 1u);
+    EXPECT_EQ(settings.ScanSplit.MaxScanTasks, 0u);
     EXPECT_EQ(settings.HashShuffle.PartitionCount, 0u);
     EXPECT_EQ(settings.HashShuffle.MaxPartitionCount, 0u);
     EXPECT_EQ(settings.HashShuffle.TargetOutputBatchRows, 16u * 1024u);

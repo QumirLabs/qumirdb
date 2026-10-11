@@ -12,6 +12,7 @@ namespace NScheduler {
 struct TScanRowGroup {
     size_t RowGroup = 0;
     int64_t RowCount = 0;
+    // Uncompressed bytes of the columns read by this scan, when known.
     int64_t ByteSize = 0;
 };
 
@@ -28,6 +29,13 @@ public:
     virtual ~IScanMetadataSource() = default;
     virtual std::vector<TScanRowGroup> ScanRowGroups() const = 0;
 };
+
+// Resolve an explicit cap or choose one for a source after pruning. Join inputs
+// stay within the worker count; other large scans may use two lanes per worker.
+size_t ChooseScanTaskCount(
+    const std::vector<TScanRowGroup>& rowGroups,
+    const TSettings& settings,
+    bool feedsJoin);
 
 std::vector<TScanSplit> BuildScanSplits(
     const std::vector<TScanRowGroup>& rowGroups,

@@ -2875,8 +2875,13 @@ llvm::json::Object BuildBundle(
         schedulerText << "\n========== SCHEDULER GRAPH ==========\n";
         schedulerText << "mode=" << static_cast<int>(request.Scheduler.Scheduler.Mode)
                       << " workers=" << request.Scheduler.Scheduler.WorkerCount
-                      << " scan_tasks=" << request.Scheduler.ScanSplit.MaxScanTasks
-                      << "\n";
+                      << " scan_tasks=";
+        if (request.Scheduler.ScanSplit.MaxScanTasks == 0) {
+            schedulerText << "auto";
+        } else {
+            schedulerText << request.Scheduler.ScanSplit.MaxScanTasks;
+        }
+        schedulerText << "\n";
         lowered.Graph->Print(schedulerText);
         schedulerText << "=====================================\n";
         legacyGraph = GraphJson(lowered, wasmFinalized.Kernels);
