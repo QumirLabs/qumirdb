@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <iterator>
 #include <optional>
+#include <unordered_set>
 #include <utility>
 
 namespace NQdb {
@@ -26,6 +27,7 @@ namespace {
 constexpr double SavedRowWork = 2.0; // shuffle transfer + join probe
 constexpr double FilterBuildWork = 1.0; // collect hashes + possible Bloom merge
 constexpr double FilterProbeWork = 0.75; // lookup + possible one-lane shuffle
+constexpr double UpstreamOperatorWork = 0.5; // filter/project work per input row
 constexpr double ForcedBuildWork = 2.0; // blocking a join that would run Auto
 constexpr double InexactNdvSafetyFactor = 2.0;
 // The NDV cost path bounds unfiltered builds. Filtered builds have a separate
@@ -42,6 +44,12 @@ struct TKeyEstimate {
 struct TConsumerTarget {
     TOperatorPtr Operator;
     std::vector<std::string> ProbeKeys;
+    struct TUpstreamStage {
+        TOperatorPtr Operator;
+        TOperatorPtr Input;
+        std::vector<std::string> ProbeKeys;
+    };
+    std::vector<TUpstreamStage> UpstreamStages;
 };
 
 using TConsumerPlacement = std::vector<TConsumerTarget>;
@@ -57,7 +65,8 @@ struct TFilterDecision {
 };
 
 std::vector<TConsumerPlacement> PlacementCandidates(
-    TOperatorPtr target, std::vector<std::string> probeKeys);
+    TOperatorPtr target, std::vector<std::string> probeKeys,
+    std::optional<TKeyEstimate> buildKey = std::nullopt);
 void AttachPlacement(const TConsumerPlacement& placement, uint32_t id);
 void RemoveFilterUse(const TOperatorPtr& root, uint32_t id);
 
@@ -95,25 +104,46 @@ bool FilteredBuildCandidate(const TOperatorPtr& build,
 }
 
 std::optional<TKeyEstimate> KeyNdv(
-    const TStatsPtr& stats,
-    const std::vector<TJoinKey>& keys,
-    bool leftSide)
+    const TStatsPtr& stats, const std::vector<std::string>& keys)
 {
+    if (!stats || keys.empty()) {
+        return std::nullopt;
+    }
     const double rows = static_cast<double>(stats->RowCount);
     double ndv = 1.0;
     // Exact per-column NDVs do not describe correlations in a composite key.
     bool exact = keys.size() == 1;
     for (const auto& key : keys) {
-        auto it = stats->ColumnStats.find(leftSide ? key.Left : key.Right);
+        auto it = stats->ColumnStats.find(key);
         if (it == stats->ColumnStats.end() || !it->second->Ndv) {
             // Guessing here could introduce an unprofitable build barrier.
             return std::nullopt;
         }
         ndv *= std::max(1.0, static_cast<double>(*it->second->Ndv));
         exact &= it->second->NdvIsExact;
+        // A row-count cap on inherited column stats is only an upper bound.
+        exact &= ndv <= rows;
         ndv = std::min(ndv, rows);
     }
     return TKeyEstimate{ndv, exact};
+}
+
+std::optional<TKeyEstimate> KeyNdv(
+    const TStatsPtr& stats, const std::vector<TJoinKey>& keys, bool leftSide)
+{
+    std::vector<std::string> names;
+    names.reserve(keys.size());
+    for (const auto& key : keys) {
+        names.push_back(leftSide ? key.Left : key.Right);
+    }
+    return KeyNdv(stats, names);
+}
+
+double PassFraction(TKeyEstimate buildKey, TKeyEstimate probeKey) {
+    const double uncertainty = buildKey.Exact && probeKey.Exact
+        ? 1.0 : InexactNdvSafetyFactor;
+    return std::min(1.0,
+        uncertainty * buildKey.Ndv / std::max(1.0, probeKey.Ndv));
 }
 
 std::optional<double> EstimatedPassFraction(double buildRows, double probeRows,
@@ -126,10 +156,7 @@ std::optional<double> EstimatedPassFraction(double buildRows, double probeRows,
     // With unknown overlap, the NDV ratio estimates the share of probe rows
     // that may match. Widen it when either NDV is approximate so optimism does
     // not force a join into a build-first mode for a weak filter.
-    const double uncertainty = buildKey.Exact && probeKey.Exact
-        ? 1.0 : InexactNdvSafetyFactor;
-    return std::min(1.0,
-        uncertainty * buildKey.Ndv / std::max(1.0, probeKey.Ndv));
+    return PassFraction(buildKey, probeKey);
 }
 
 std::vector<std::string> ProbeKeys(
@@ -162,9 +189,45 @@ std::optional<double> PlacementRows(const TConsumerPlacement& placement) {
     return rows;
 }
 
+std::optional<double> PlacementVariableBenefit(
+    const TConsumerPlacement& placement,
+    std::optional<TKeyEstimate> buildKey)
+{
+    double benefit = 0.0;
+    std::unordered_set<const IOperator*> creditedStages;
+    for (const auto& target : placement) {
+        if (!target.Operator->Stats_) {
+            return std::nullopt;
+        }
+        benefit -= static_cast<double>(target.Operator->Stats_->RowCount)
+            * FilterProbeWork;
+        if (!buildKey) {
+            continue;
+        }
+        // A consumer below a filter or project avoids that operator's work
+        // for rows rejected at its input. Use the key NDV at each input: the
+        // join input can have a different key distribution after filtering.
+        for (const auto& stage : target.UpstreamStages) {
+            if (!creditedStages.insert(stage.Operator.get()).second
+                || !stage.Input->Stats_) {
+                continue;
+            }
+            auto key = KeyNdv(stage.Input->Stats_, stage.ProbeKeys);
+            if (!key) {
+                continue;
+            }
+            const double rows = static_cast<double>(stage.Input->Stats_->RowCount);
+            benefit += rows * (1.0 - PassFraction(*buildKey, *key))
+                * UpstreamOperatorWork;
+        }
+    }
+    return benefit;
+}
+
 std::optional<TScoredPlacement> BestPlacement(
     const TJoinOperator& join, EJoinFilterSide buildSide,
-    double passFraction, bool includeBuildPenalty = true)
+    double passFraction, std::optional<TKeyEstimate> buildKey,
+    bool includeBuildPenalty = true)
 {
     const auto probe = ProbeInput(join, buildSide);
     const auto build = buildSide == EJoinFilterSide::Left
@@ -177,15 +240,13 @@ std::optional<TScoredPlacement> BestPlacement(
             ? 0.0 : buildRows * ForcedBuildWork);
 
     std::optional<TScoredPlacement> best;
-    for (auto& placement : PlacementCandidates(probe, ProbeKeys(join, buildSide))) {
-        const auto rows = PlacementRows(placement);
-        if (!rows) {
+    for (auto& placement : PlacementCandidates(
+            probe, ProbeKeys(join, buildSide), buildKey)) {
+        const auto variableBenefit = PlacementVariableBenefit(placement, buildKey);
+        if (!variableBenefit) {
             continue;
         }
-        // A consumer below a selective operator may see far more rows than
-        // the join. Credit only work saved at the join until we can estimate
-        // key selectivity independently at the deeper boundary.
-        const double benefit = saved - buildCost - *rows * FilterProbeWork;
+        const double benefit = saved - buildCost + *variableBenefit;
         // Prefer the earlier consumer when its estimated cost is equal.
         if (benefit > 0.0 && (!best || benefit >= best->Benefit)) {
             best = TScoredPlacement{
@@ -242,7 +303,7 @@ std::optional<TFilterDecision> ChooseRuntimeFilter(
                 static_cast<double>(leftStats->RowCount),
                 *rightNdv, *leftNdv)) {
             if (auto placement = BestPlacement(
-                    join, EJoinFilterSide::Right, *passFraction)) {
+                    join, EJoinFilterSide::Right, *passFraction, *rightNdv)) {
                 bestBenefit = placement->Benefit;
                 decision = TFilterDecision{
                     .BuildSide = EJoinFilterSide::Right,
@@ -258,7 +319,7 @@ std::optional<TFilterDecision> ChooseRuntimeFilter(
                     static_cast<double>(rightStats->RowCount),
                     *leftNdv, *rightNdv)) {
                 if (auto placement = BestPlacement(
-                        join, EJoinFilterSide::Left, *passFraction);
+                        join, EJoinFilterSide::Left, *passFraction, *leftNdv);
                     placement && placement->Benefit > bestBenefit) {
                     bestBenefit = placement->Benefit;
                     decision = TFilterDecision{
@@ -277,7 +338,8 @@ std::optional<TFilterDecision> ChooseRuntimeFilter(
             // still rejects a probe site whose cost exceeds even the most
             // optimistic join-side savings.
             if (auto placement = BestPlacement(join, EJoinFilterSide::Right,
-                    /*passFraction=*/0.0, /*includeBuildPenalty=*/false)) {
+                    /*passFraction=*/0.0, std::nullopt,
+                    /*includeBuildPenalty=*/false)) {
                 bestBenefit = placement->Benefit;
                 decision = TFilterDecision{
                     .BuildSide = EJoinFilterSide::Right,
@@ -286,7 +348,8 @@ std::optional<TFilterDecision> ChooseRuntimeFilter(
         }
         if (!semi && FilteredBuildCandidate(join.Left(), leftRows, rightRows)) {
             if (auto placement = BestPlacement(join, EJoinFilterSide::Left,
-                    /*passFraction=*/0.0, /*includeBuildPenalty=*/false);
+                    /*passFraction=*/0.0, std::nullopt,
+                    /*includeBuildPenalty=*/false);
                 placement && placement->Benefit > bestBenefit) {
                 decision = TFilterDecision{
                     .BuildSide = EJoinFilterSide::Left,
@@ -475,7 +538,8 @@ TOperatorPtr InnerJoinKeyInput(const TJoinOperator& join,
 }
 
 std::vector<TConsumerPlacement> PlacementCandidates(
-    TOperatorPtr target, std::vector<std::string> probeKeys)
+    TOperatorPtr target, std::vector<std::string> probeKeys,
+    std::optional<TKeyEstimate> buildKey)
 {
     std::vector<TConsumerPlacement> candidates{
         TConsumerPlacement{{.Operator = target, .ProbeKeys = probeKeys}}};
@@ -487,7 +551,14 @@ std::vector<TConsumerPlacement> PlacementCandidates(
                     return SameKeyType(*target->OutputColumns(), key,
                         *input->OutputColumns(), key);
                 })) {
-            auto deeper = PlacementCandidates(input, std::move(probeKeys));
+            auto deeper = PlacementCandidates(input, probeKeys, buildKey);
+            for (auto& placement : deeper) {
+                for (auto& consumer : placement) {
+                    consumer.UpstreamStages.push_back(
+                        {.Operator = target, .Input = input,
+                         .ProbeKeys = probeKeys});
+                }
+            }
             candidates.insert(candidates.end(),
                 std::make_move_iterator(deeper.begin()),
                 std::make_move_iterator(deeper.end()));
@@ -496,7 +567,15 @@ std::vector<TConsumerPlacement> PlacementCandidates(
         auto inputKeys = ProjectInputKeys(*project.Cast(), probeKeys);
         if (inputKeys) {
             auto deeper = PlacementCandidates(
-                project.Cast()->Input(), std::move(*inputKeys));
+                project.Cast()->Input(), *inputKeys, buildKey);
+            for (auto& placement : deeper) {
+                for (auto& consumer : placement) {
+                    consumer.UpstreamStages.push_back(
+                        {.Operator = target,
+                         .Input = project.Cast()->Input(),
+                         .ProbeKeys = *inputKeys});
+                }
+            }
             candidates.insert(candidates.end(),
                 std::make_move_iterator(deeper.begin()),
                 std::make_move_iterator(deeper.end()));
@@ -505,36 +584,40 @@ std::vector<TConsumerPlacement> PlacementCandidates(
         auto branches = UnionBranchUses(*un.Cast(),
             TRuntimeFilterUseSpec{.ProbeKeys = probeKeys});
         if (branches) {
-            TConsumerPlacement cheapest;
+            TConsumerPlacement bestBranches;
             TConsumerPlacement fanout;
             for (size_t i = 0; i < branches->size(); ++i) {
                 auto branch = PlacementCandidates(
-                    un.Cast()->Inputs()[i], std::move((*branches)[i].ProbeKeys));
-                size_t cheapestIndex = 0;
-                std::optional<double> fewestRows;
+                    un.Cast()->Inputs()[i],
+                    std::move((*branches)[i].ProbeKeys), buildKey);
+                size_t bestIndex = 0;
+                std::optional<double> bestScore;
                 for (size_t candidate = 0; candidate < branch.size(); ++candidate) {
-                    const auto rows = PlacementRows(branch[candidate]);
-                    if (rows && (!fewestRows || *rows <= *fewestRows)) {
-                        fewestRows = rows;
-                        cheapestIndex = candidate;
+                    const auto score = buildKey
+                        ? PlacementVariableBenefit(branch[candidate], buildKey)
+                        : PlacementRows(branch[candidate]).transform(
+                            [](double rows) { return -rows; });
+                    if (score && (!bestScore || *score >= *bestScore)) {
+                        bestScore = score;
+                        bestIndex = candidate;
                     }
                 }
-                const auto& branchCheapest = branch[cheapestIndex];
-                cheapest.insert(cheapest.end(),
-                    branchCheapest.begin(), branchCheapest.end());
+                const auto& branchBest = branch[bestIndex];
+                bestBranches.insert(bestBranches.end(),
+                    branchBest.begin(), branchBest.end());
                 auto& deepest = branch.back();
                 fanout.insert(fanout.end(),
                     std::make_move_iterator(deepest.begin()),
                     std::make_move_iterator(deepest.end()));
             }
-            candidates.push_back(std::move(cheapest));
+            candidates.push_back(std::move(bestBranches));
             candidates.push_back(std::move(fanout));
         }
     } else if (auto join = TMaybeOp<TJoinOperator>(target)) {
         auto input = InnerJoinKeyInput(*join.Cast(), probeKeys);
         if (input) {
             auto deeper = PlacementCandidates(
-                std::move(input), std::move(probeKeys));
+                std::move(input), std::move(probeKeys), buildKey);
             candidates.insert(candidates.end(),
                 std::make_move_iterator(deeper.begin()),
                 std::make_move_iterator(deeper.end()));
