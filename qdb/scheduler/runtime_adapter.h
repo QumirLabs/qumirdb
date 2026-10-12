@@ -307,7 +307,6 @@ private:
     struct TPendingOutput;
 
     bool BatchingEnabled() const;
-    bool NeedsHashes(size_t partitions) const;
     std::shared_ptr<uint64_t> ComputeHashes(const std::shared_ptr<TRowSet>& input);
     void AccumulateFilter(const TRowSet& rowSet, std::span<const uint64_t> hashes);
     void EnsureBuffers(size_t partitions);

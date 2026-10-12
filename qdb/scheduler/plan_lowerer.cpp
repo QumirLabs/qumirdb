@@ -1230,7 +1230,7 @@ private:
             const auto* split = splitPlan && !splitPlan->empty()
                 ? &(*splitPlan)[p]
                 : nullptr;
-            std::shared_ptr<TSchedulerSourceState> state;
+            std::shared_ptr<void> state;
             if (parquetSource && split && !split->RowGroups.empty()) {
                 auto owned = parquetSource->MakeRowGroupsSource(split->RowGroups);
                 auto* ptr = owned.get();
@@ -1249,13 +1249,11 @@ private:
                     });
             } else {
                 state = std::make_shared<TSchedulerSourceState>(
-                    TSchedulerSourceState{
-                        .Source = sourcePtr,
-                    });
+                    TSchedulerSourceState{.Source = sourcePtr});
             }
             auto task = std::make_unique<NScheduler::TSourceTask>(
                 code,
-                state,
+                std::move(state),
                 NScheduler::TOutputPort{.Connection = &outConn, .Lane = p + outLaneOffset});
             auto& node = Graph_.AddOwnedNode(std::move(task));
             MarkNode(node,
@@ -2801,7 +2799,7 @@ private:
             // Every build repartition lane contributes before publication.
             // Probe tasks wait for the complete filter.
             const size_t producerCount = buildIsLeft ? leftLanes : rightLanes;
-            auto binding = RuntimeFilterBindings_->CreateSized(runtimeFilter->Id,
+            auto binding = RuntimeFilterBindings_->Create(runtimeFilter->Id,
                 producerCount, ChooseRuntimeBloomBytes(
                     join, runtimeFilter->BuildSide, producerCount));
             if (!binding.Producer || !binding.Probe) {
@@ -3370,7 +3368,7 @@ bool RunPlanIntoSink(
             }
             const auto stats = local->StatsSnapshot();
             *diagnostics << "runtime-filter " << diagnostic.Id
-                << " at=" << (diagnostic.AtSource ? "source" : "join-input")
+                << " at=" << (diagnostic.AtSource ? "source" : "operator")
                 << " build_rows=" << stats.BuildRows
                 << " probe_rows=" << stats.ProbeRows
                 << " rejected=" << stats.RejectedRows

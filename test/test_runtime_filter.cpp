@@ -682,7 +682,8 @@ TEST(RuntimeFilter, PartialCanBeMergedAfterLeavingTheProducer) {
 
 TEST(RuntimeFilter, LocalBindingKeepsProducerAndProbeInSync) {
     TLocalRuntimeFilterBindingFactory factory;
-    auto binding = factory.Create(/*id=*/7, /*producerCount=*/2);
+    auto binding = factory.Create(/*id=*/7, /*producerCount=*/2,
+        TRuntimeFilter::DefaultBloomBytes);
     ASSERT_TRUE(binding.Producer);
     ASSERT_TRUE(binding.Probe);
 

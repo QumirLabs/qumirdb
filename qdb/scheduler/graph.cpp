@@ -20,6 +20,10 @@ void SetError(std::string* error, std::string message) {
     }
 }
 
+bool IsRowsetEdge(const TTaskEdge* edge) {
+    return edge->Kind == ETaskEdgeKind::Rowset;
+}
+
 const char* ConnectionKindName(EConnectionKind kind) {
     switch (kind) {
         case EConnectionKind::OneToOne:
@@ -126,15 +130,12 @@ void TTaskGraph::Build() {
         edge->Src->Outbound.push_back(edge.get());
         edge->Dst->Inbound.push_back(edge.get());
     }
+
     for (auto& node : Nodes_) {
-        if (std::ranges::none_of(node->Inbound, [](const auto* edge) {
-                return edge->Kind == ETaskEdgeKind::Rowset;
-            })) {
+        if (std::ranges::none_of(node->Inbound, IsRowsetEdge)) {
             Leaves_.push_back(node.get());
         }
-        if (std::ranges::none_of(node->Outbound, [](const auto* edge) {
-                return edge->Kind == ETaskEdgeKind::Rowset;
-            })) {
+        if (std::ranges::none_of(node->Outbound, IsRowsetEdge)) {
             Root_ = node.get();
         }
     }
@@ -156,14 +157,10 @@ bool TTaskGraph::Validate(std::string* error) const {
             return false;
         }
         nodes.insert(node.get());
-        if (std::ranges::none_of(node->Inbound, [](const auto* edge) {
-                return edge->Kind == ETaskEdgeKind::Rowset;
-            })) {
+        if (std::ranges::none_of(node->Inbound, IsRowsetEdge)) {
             ++leafCount;
         }
-        if (std::ranges::none_of(node->Outbound, [](const auto* edge) {
-                return edge->Kind == ETaskEdgeKind::Rowset;
-            })) {
+        if (std::ranges::none_of(node->Outbound, IsRowsetEdge)) {
             ++rootCount;
         }
     }

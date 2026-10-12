@@ -84,9 +84,10 @@ private:
 
 class TRecordingFilterBindingFactory final : public IRuntimeFilterBindingFactory {
 public:
-    TRuntimeFilterBinding Create(uint32_t id, size_t producerCount) override {
+    TRuntimeFilterBinding Create(
+        uint32_t id, size_t producerCount, size_t bloomBytes) override {
         Created.emplace_back(id, producerCount);
-        return Local_.Create(id, producerCount);
+        return Local_.Create(id, producerCount, bloomBytes);
     }
 
     std::vector<std::pair<uint32_t, size_t>> Created;

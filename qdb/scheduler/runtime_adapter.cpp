@@ -715,10 +715,6 @@ bool THashShuffleTask::BatchingEnabled() const {
     return Code_->InputType && Code_->TargetOutputBatchRows > 0;
 }
 
-bool THashShuffleTask::NeedsHashes(size_t partitions) const {
-    return partitions > 1 || Code_->ProducedFilter;
-}
-
 std::shared_ptr<uint64_t> THashShuffleTask::ComputeHashes(
     const std::shared_ptr<TRowSet>& input)
 {
@@ -787,7 +783,7 @@ void THashShuffleTask::ScatterBuffered(const std::shared_ptr<TRowSet>& input) {
 
     const size_t estimatedRowBytes = EstimateShuffleRowBytes(inputType);
 
-    if (partitions == 1 && !NeedsHashes(partitions)) {
+    if (partitions == 1 && !Code_->ProducedFilter) {
         rows[0].reserve(input->RowCount);
         for (int64_t row = 0; row < input->RowCount; ++row) {
             if (!RowSelected(*input, row)) {
@@ -825,7 +821,7 @@ void THashShuffleTask::ScatterViews(const std::shared_ptr<TRowSet>& input) {
 
     // Many-to-one shuffle: every row routes to lane 0, so skip hashing and
     // forward the whole rowset (keeping its existing selection) unchanged.
-    if (partitions == 1 && !NeedsHashes(partitions)) {
+    if (partitions == 1 && !Code_->ProducedFilter) {
         ClearPending();
         auto* data = new THashShuffleRowSetData;
         data->Input = input;

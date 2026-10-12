@@ -444,12 +444,6 @@ TLocalRuntimeFilterBindingFactory::TLocalRuntimeFilterBindingFactory(
 {}
 
 TRuntimeFilterBinding TLocalRuntimeFilterBindingFactory::Create(
-    uint32_t id, size_t producerCount)
-{
-    return CreateSized(id, producerCount, TRuntimeFilter::DefaultBloomBytes);
-}
-
-TRuntimeFilterBinding TLocalRuntimeFilterBindingFactory::CreateSized(
     uint32_t id, size_t producerCount, size_t bloomBytes)
 {
     (void)id;

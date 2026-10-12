@@ -99,12 +99,8 @@ struct TRuntimeFilterBinding {
 class IRuntimeFilterBindingFactory {
 public:
     virtual ~IRuntimeFilterBindingFactory() = default;
-    virtual TRuntimeFilterBinding Create(uint32_t id, size_t producerCount) = 0;
-    virtual TRuntimeFilterBinding CreateSized(
-        uint32_t id, size_t producerCount, size_t bloomBytes) {
-        (void)bloomBytes;
-        return Create(id, producerCount);
-    }
+    virtual TRuntimeFilterBinding Create(
+        uint32_t id, size_t producerCount, size_t bloomBytes) = 0;
 };
 
 struct TRuntimeFilterStats {
@@ -185,8 +181,7 @@ class TLocalRuntimeFilterBindingFactory final : public IRuntimeFilterBindingFact
 public:
     explicit TLocalRuntimeFilterBindingFactory(
         std::shared_ptr<TRuntimeContext> runtimeContext = nullptr);
-    TRuntimeFilterBinding Create(uint32_t id, size_t producerCount) override;
-    TRuntimeFilterBinding CreateSized(
+    TRuntimeFilterBinding Create(
         uint32_t id, size_t producerCount, size_t bloomBytes) override;
 
 private:

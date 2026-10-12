@@ -19,7 +19,6 @@
 #include <qdb/sexp/parser.h>
 
 #include <algorithm>
-#include <atomic>
 #include <functional>
 #include <memory>
 #include <sstream>
@@ -43,51 +42,6 @@ TRowSet KeyValBatch(int64_t* keys, int64_t* vals, int64_t rows, std::vector<TCol
     return TRowSet{.Columns = cols.data(), .ColumnCount = 2, .RowCount = rows, .RefCount = 1};
 }
 
-class TCountingFilterProbe final : public IRuntimeFilterProbe {
-public:
-    explicit TCountingFilterProbe(std::shared_ptr<IRuntimeFilterProbe> inner)
-        : Inner_(std::move(inner))
-    {}
-
-    bool Ready() const override { return Inner_->Ready(); }
-
-    std::shared_ptr<TRuntimeFilterProbeState> CreateProbeState() override {
-        return Inner_->CreateProbeState();
-    }
-
-    bool BeginBatch(TRuntimeFilterProbeState& state, size_t rows) const override {
-        return Inner_->BeginBatch(state, rows);
-    }
-
-    size_t MayContainBatch(std::span<const uint64_t> hashes,
-        std::span<uint8_t> output, TRuntimeFilterProbeState& state,
-        std::span<const uint8_t> selection = {}) const override
-    {
-        const size_t rows = selection.empty() ? hashes.size() : static_cast<size_t>(
-            std::count_if(selection.begin(), selection.end(),
-                [](uint8_t value) { return value != 0; }));
-        const size_t accepted = Inner_->MayContainBatch(hashes, output, state, selection);
-        Probed.fetch_add(rows, std::memory_order_relaxed);
-        Rejected.fetch_add(rows - accepted, std::memory_order_relaxed);
-        return accepted;
-    }
-
-    bool MayContain(uint64_t hash) const override {
-        Probed.fetch_add(1, std::memory_order_relaxed);
-        const bool keep = Inner_->MayContain(hash);
-        if (!keep) {
-            Rejected.fetch_add(1, std::memory_order_relaxed);
-        }
-        return keep;
-    }
-
-    mutable std::atomic<size_t> Probed{0};
-    mutable std::atomic<size_t> Rejected{0};
-
-private:
-    std::shared_ptr<IRuntimeFilterProbe> Inner_;
-};
-
 class TCountingFilterBindingFactory final : public IRuntimeFilterBindingFactory {
 public:
     TCountingFilterBindingFactory(
@@ -95,20 +49,20 @@ public:
         size_t bloomBytes = TRuntimeFilter::DefaultBloomBytes)
         : MaxKeys_(maxKeys), BloomBytes_(bloomBytes) {}
 
-    TRuntimeFilterBinding Create(uint32_t id, size_t producerCount) override {
+    TRuntimeFilterBinding Create(
+        uint32_t id, size_t producerCount, size_t bloomBytes) override {
         (void)id;
+        (void)bloomBytes;
         ++Created;
         ProducerCount = producerCount;
         Filter = std::make_shared<TRuntimeFilter>(MaxKeys_, BloomBytes_);
         Filter->SetProducerCount(producerCount);
-        Probe = std::make_shared<TCountingFilterProbe>(Filter);
-        return {.Producer = Filter, .Probe = Probe};
+        return {.Producer = Filter, .Probe = Filter};
     }
 
     size_t Created = 0;
     size_t ProducerCount = 0;
     std::shared_ptr<TRuntimeFilter> Filter;
-    std::shared_ptr<TCountingFilterProbe> Probe;
 
 private:
     size_t MaxKeys_;
@@ -531,9 +485,9 @@ TEST(JoinPlanner, RuntimeFilterRejectsRowsWithOneLanePerSide) {
         }
         EXPECT_EQ(keys, (std::vector<int64_t>{1}));
         ASSERT_EQ(bindings->Created, 1u);
-        ASSERT_TRUE(bindings->Probe);
-        EXPECT_EQ(bindings->Probe->Probed.load(), 3u);
-        EXPECT_EQ(bindings->Probe->Rejected.load(), 2u);
+        ASSERT_TRUE(bindings->Filter);
+        EXPECT_EQ(bindings->Filter->StatsSnapshot().ProbeRows, 3u);
+        EXPECT_EQ(bindings->Filter->StatsSnapshot().RejectedRows, 2u);
         EXPECT_EQ(bindings->Filter->StatsSnapshot().SkippedProbeRows, 0u);
     }
 }
@@ -584,9 +538,9 @@ TEST(JoinPlanner, LeftOuterRuntimeFilterPreservesUnmatchedRows) {
         EXPECT_EQ(got,
             (std::vector<std::pair<int64_t, bool>>{
                 {1, true}, {1, true}, {2, false}, {4, false}}));
-        ASSERT_TRUE(bindings->Probe);
-        EXPECT_EQ(bindings->Probe->Probed.load(), 4u);
-        EXPECT_EQ(bindings->Probe->Rejected.load(), 2u);
+        ASSERT_TRUE(bindings->Filter);
+        EXPECT_EQ(bindings->Filter->StatsSnapshot().ProbeRows, 4u);
+        EXPECT_EQ(bindings->Filter->StatsSnapshot().RejectedRows, 2u);
     }
 }
 
@@ -649,9 +603,9 @@ TEST(JoinPlanner, OneRuntimeFilterServesTwoLeftJoinInputs) {
             (std::vector<std::tuple<int64_t, bool, bool>>{
                 {1, true, true}, {2, false, true}, {4, false, false}}));
         ASSERT_EQ(bindings->Created, 1u);
-        ASSERT_TRUE(bindings->Probe);
-        EXPECT_EQ(bindings->Probe->Probed.load(), 5u);
-        EXPECT_EQ(bindings->Probe->Rejected.load(), 2u);
+        ASSERT_TRUE(bindings->Filter);
+        EXPECT_EQ(bindings->Filter->StatsSnapshot().ProbeRows, 5u);
+        EXPECT_EQ(bindings->Filter->StatsSnapshot().RejectedRows, 2u);
     }
 }
 
@@ -703,9 +657,9 @@ TEST(JoinPlanner, LeftOuterRuntimeFilterRunsBeforeGroupedAggregate) {
         EXPECT_EQ(got,
             (std::vector<std::tuple<int64_t, bool, int64_t>>{
                 {1, true, 30}, {4, false, 0}}));
-        ASSERT_TRUE(bindings->Probe);
-        EXPECT_EQ(bindings->Probe->Probed.load(), 4u);
-        EXPECT_EQ(bindings->Probe->Rejected.load(), 2u);
+        ASSERT_TRUE(bindings->Filter);
+        EXPECT_EQ(bindings->Filter->StatsSnapshot().ProbeRows, 4u);
+        EXPECT_EQ(bindings->Filter->StatsSnapshot().RejectedRows, 2u);
     }
 }
 
@@ -737,9 +691,9 @@ TEST(JoinPlanner, RuntimeFilterAtSourceComposesWithStaticFilter) {
         Release(&out);
     }
     EXPECT_EQ(keys, (std::vector<int64_t>{1}));
-    ASSERT_TRUE(bindings->Probe);
-    EXPECT_EQ(bindings->Probe->Probed.load(), 3u);
-    EXPECT_EQ(bindings->Probe->Rejected.load(), 2u);
+    ASSERT_TRUE(bindings->Filter);
+    EXPECT_EQ(bindings->Filter->StatsSnapshot().ProbeRows, 3u);
+    EXPECT_EQ(bindings->Filter->StatsSnapshot().RejectedRows, 2u);
     EXPECT_EQ(bindings->Filter->StatsSnapshot().SkippedProbeRows, 0u);
 }
 
@@ -790,9 +744,9 @@ TEST(JoinPlanner, RuntimeFilterCrossesOnlyDirectProjectKeyLineage) {
             Release(&out);
         }
         EXPECT_EQ(keys, (std::vector<int64_t>{1}));
-        ASSERT_TRUE(bindings->Probe);
-        EXPECT_EQ(bindings->Probe->Probed.load(), 3u);
-        EXPECT_EQ(bindings->Probe->Rejected.load(), 2u);
+        ASSERT_TRUE(bindings->Filter);
+        EXPECT_EQ(bindings->Filter->StatsSnapshot().ProbeRows, 3u);
+        EXPECT_EQ(bindings->Filter->StatsSnapshot().RejectedRows, 2u);
     }
 }
 
@@ -816,9 +770,9 @@ TEST(JoinPlanner, RuntimeFilterTaskDropsEntireBatch) {
 
         TRowSet out{};
         EXPECT_FALSE(plan->Next(out));
-        ASSERT_TRUE(bindings->Probe);
-        EXPECT_EQ(bindings->Probe->Probed.load(), 2u);
-        EXPECT_EQ(bindings->Probe->Rejected.load(), 2u);
+        ASSERT_TRUE(bindings->Filter);
+        EXPECT_EQ(bindings->Filter->StatsSnapshot().ProbeRows, 2u);
+        EXPECT_EQ(bindings->Filter->StatsSnapshot().RejectedRows, 2u);
     }
 }
 
@@ -866,9 +820,8 @@ TEST(JoinPlanner, RuntimeFilterMergesTwoBuildLanesBeforeProbing) {
     EXPECT_EQ(bindings->ProducerCount, 2u);
     ASSERT_TRUE(bindings->Filter);
     EXPECT_TRUE(bindings->Filter->UsesBloom());
-    ASSERT_TRUE(bindings->Probe);
-    EXPECT_EQ(bindings->Probe->Probed.load(), 4u);
-    EXPECT_EQ(bindings->Probe->Rejected.load(), 2u);
+    EXPECT_EQ(bindings->Filter->StatsSnapshot().ProbeRows, 4u);
+    EXPECT_EQ(bindings->Filter->StatsSnapshot().RejectedRows, 2u);
 }
 
 TEST(JoinPlanner, RuntimeFilterUsesEachUnionBranchKeyName) {
@@ -934,9 +887,9 @@ TEST(JoinPlanner, RuntimeFilterUsesEachUnionBranchKeyName) {
     }
     std::sort(keys.begin(), keys.end());
     EXPECT_EQ(keys, (std::vector<int64_t>{1, 3, 5}));
-    ASSERT_TRUE(bindings->Probe);
-    EXPECT_EQ(bindings->Probe->Probed.load(), 6u);
-    EXPECT_EQ(bindings->Probe->Rejected.load(), 3u);
+    ASSERT_TRUE(bindings->Filter);
+    EXPECT_EQ(bindings->Filter->StatsSnapshot().ProbeRows, 6u);
+    EXPECT_EQ(bindings->Filter->StatsSnapshot().RejectedRows, 3u);
 }
 
 TEST(JoinPlanner, RuntimeFilterCrossesOnlySameSideInnerJoinKeys) {
@@ -1010,9 +963,9 @@ TEST(JoinPlanner, RuntimeFilterCrossesOnlySameSideInnerJoinKeys) {
         EXPECT_EQ(keys, (std::vector<int64_t>{1}));
         EXPECT_EQ(bindings->Created,
             nestedType == EJoinType::Inner ? 2u : 1u);
-        ASSERT_TRUE(bindings->Probe);
-        EXPECT_EQ(bindings->Probe->Probed.load(), 3u);
-        EXPECT_EQ(bindings->Probe->Rejected.load(), 2u);
+        ASSERT_TRUE(bindings->Filter);
+        EXPECT_EQ(bindings->Filter->StatsSnapshot().ProbeRows, 3u);
+        EXPECT_EQ(bindings->Filter->StatsSnapshot().RejectedRows, 2u);
     }
 }
 
