@@ -387,6 +387,17 @@ public:
         bool AtSource = false;
     };
 
+    struct TFilterProducerTasks {
+        uint32_t Id;
+        NKernel::TOperatorKernelSpec KernelSpec;
+        TJoinHashKernels HashKernels;
+        std::shared_ptr<IRuntimeFilterProbe> Probe;
+        std::vector<NScheduler::TTaskNode*> Nodes;
+        EJoinFilterSide BuildSide;
+        TExecStageId ExecStageId;
+        std::string Group;
+    };
+
     TSchedulerGraphLowerer(
         NScheduler::TTaskGraph& graph,
         const TOperatorPtr& root,
@@ -711,6 +722,101 @@ public:
                 throw std::runtime_error(
                     "cte materialization: completion fan-out does not match RefCount");
             }
+        }
+    }
+
+    void WireRuntimeFilters() {
+        for (const auto& producer : FilterProducers_) {
+            auto found = FilterConsumers_.find(producer.Id);
+            if (found == FilterConsumers_.end() || found->second.empty()) {
+                throw std::runtime_error(
+                    "runtime filter has no planned consumer");
+            }
+            auto& consumers = found->second;
+            const bool buildIsLeft =
+                producer.BuildSide == EJoinFilterSide::Left;
+            const auto& spec = producer.KernelSpec;
+            auto probeSchema = NQumir::NAst::TMaybeType<
+                NQumir::NAst::TStructType>(
+                    spec.InputSchemas[buildIsLeft ? 1 : 0]);
+            if (!probeSchema) {
+                throw std::runtime_error(
+                    "runtime filter producer has invalid probe schema");
+            }
+            TKernelCompiler compiler(
+                KernelOptions(producer.Group, producer.ExecStageId));
+            for (auto& consumer : consumers) {
+                auto consumerSchema = NQumir::NAst::TMaybeType<
+                    NQumir::NAst::TStructType>(consumer.OutputType);
+                if (!consumerSchema
+                    || consumer.ProbeKeys.size() != spec.JoinKeys.size()) {
+                    throw std::runtime_error(
+                        "runtime filter consumer has invalid probe schema or keys");
+                }
+                auto consumerHashSpec = spec;
+                consumerHashSpec.InputSchemas[buildIsLeft ? 1 : 0] =
+                    consumer.OutputType;
+                for (size_t i = 0; i < spec.JoinKeys.size(); ++i) {
+                    const auto& originalKey = buildIsLeft
+                        ? spec.JoinKeys[i].Right.Name
+                        : spec.JoinKeys[i].Left.Name;
+                    const auto originalType = FieldType(
+                        probeSchema.Cast().get(), originalKey);
+                    const auto consumerType = FieldType(
+                        consumerSchema.Cast().get(), consumer.ProbeKeys[i]);
+                    const auto& fields = consumerSchema.Cast()->Fields;
+                    const auto field = std::find_if(fields.begin(), fields.end(),
+                        [&](const auto& item) {
+                            return item.first == consumer.ProbeKeys[i];
+                        });
+                    if (!originalType || !consumerType
+                        || field == fields.end()
+                        || originalType->ToString()
+                            != consumerType->ToString()) {
+                        throw std::runtime_error(
+                            "runtime filter consumer key type differs from join probe key");
+                    }
+                    auto& ref = buildIsLeft
+                        ? consumerHashSpec.JoinKeys[i].Right
+                        : consumerHashSpec.JoinKeys[i].Left;
+                    ref.Name = consumer.ProbeKeys[i];
+                    ref.Index = static_cast<int32_t>(
+                        std::distance(fields.begin(), field));
+                    ref.Type = consumerType;
+                }
+                if (consumer.OutputType->ToString()
+                        == spec.InputSchemas[buildIsLeft ? 1 : 0]->ToString()
+                    && std::equal(consumer.ProbeKeys.begin(),
+                        consumer.ProbeKeys.end(), spec.JoinKeys.begin(),
+                        [buildIsLeft](const auto& name, const auto& key) {
+                            return name == (buildIsLeft
+                                ? key.Right.Name : key.Left.Name);
+                        })) {
+                    consumer.Code->Hash = buildIsLeft
+                        ? producer.HashKernels.Right
+                        : producer.HashKernels.Left;
+                } else {
+                    auto consumerHash = compiler.CompileJoinHash(
+                        consumerHashSpec);
+                    consumer.Code->Hash = buildIsLeft
+                        ? std::move(consumerHash.Right)
+                        : std::move(consumerHash.Left);
+                }
+                consumer.Code->Probe = producer.Probe;
+                consumer.Code->AuxInput->AddFilter(producer.Probe);
+                for (auto* buildNode : producer.Nodes) {
+                    consumer.Code->AuxInput->AddProducer(*buildNode);
+                    for (auto* probeNode : consumer.Nodes) {
+                        Graph_.AddDependencyEdge(*buildNode, *probeNode);
+                    }
+                }
+            }
+            RuntimeFilters_.push_back({
+                .Id = producer.Id,
+                .Probe = producer.Probe,
+                .AtSource = std::all_of(consumers.begin(), consumers.end(),
+                    [](const auto& consumer) { return consumer.AtSource; }),
+            });
         }
     }
 
@@ -2677,7 +2783,7 @@ private:
         auto leftShuffleCode = MakeHashShuffleCode(hashKernels.Left, leftType);
         auto rightShuffleCode = MakeHashShuffleCode(hashKernels.Right, rightType);
         bool filterBuildIsLeft = false;
-        std::vector<TFilterConsumerTasks>* filterConsumers = nullptr;
+        std::shared_ptr<IRuntimeFilterProbe> filterProbe;
         if (const auto& runtimeFilter = join.RuntimeFilter()) {
             if (!RuntimeFilterBindings_) {
                 RuntimeContext_->BloomProbe = compiler.CompileBloomProbe();
@@ -2699,74 +2805,9 @@ private:
                 throw std::runtime_error(
                     "runtime filter binding factory returned an incomplete binding");
             }
-            auto diagnosticProbe = binding.Probe;
             (buildIsLeft ? leftShuffleCode : rightShuffleCode)->ProducedFilter =
                 std::move(binding.Producer);
-            auto found = FilterConsumers_.find(runtimeFilter->Id);
-            if (found == FilterConsumers_.end() || found->second.empty()) {
-                throw std::runtime_error(
-                    "runtime filter has no planned consumer");
-            }
-            filterConsumers = &found->second;
-            const auto& probeSchema = buildIsLeft ? *rightStruct : *leftStruct;
-            for (auto& consumer : *filterConsumers) {
-                auto consumerSchema = NQumir::NAst::TMaybeType<TStructType>(
-                    consumer.OutputType);
-                if (!consumerSchema
-                    || consumer.ProbeKeys.size() != join.Keys().size()) {
-                    throw std::runtime_error(
-                        "runtime filter consumer has invalid probe schema or keys");
-                }
-                // Hash the key in the consumer's column layout. Keep the
-                // original build schema and key order so both sides produce
-                // the same Bloom hashes after a project renames or reorders
-                // probe columns.
-                auto consumerHashSpec = kernelSpec;
-                consumerHashSpec.InputSchemas[buildIsLeft ? 1 : 0] =
-                    consumer.OutputType;
-                for (size_t i = 0; i < join.Keys().size(); ++i) {
-                    const auto& originalKey = buildIsLeft
-                        ? join.Keys()[i].Right : join.Keys()[i].Left;
-                    const auto originalType = FieldType(&probeSchema, originalKey);
-                    const auto consumerType = FieldType(
-                        consumerSchema.Cast().get(), consumer.ProbeKeys[i]);
-                    const auto& fields = consumerSchema.Cast()->Fields;
-                    const auto field = std::find_if(fields.begin(), fields.end(),
-                        [&](const auto& item) {
-                            return item.first == consumer.ProbeKeys[i];
-                        });
-                    if (!originalType || !consumerType
-                        || field == fields.end()
-                        || originalType->ToString() != consumerType->ToString()) {
-                        throw std::runtime_error(
-                            "runtime filter consumer key type differs from join probe key");
-                    }
-                    auto& ref = buildIsLeft
-                        ? consumerHashSpec.JoinKeys[i].Right
-                        : consumerHashSpec.JoinKeys[i].Left;
-                    ref.Name = consumer.ProbeKeys[i];
-                    ref.Index = static_cast<int32_t>(
-                        std::distance(fields.begin(), field));
-                    ref.Type = consumerType;
-                }
-                if (consumer.OutputType->ToString()
-                    == (buildIsLeft ? rightType : leftType)->ToString()
-                    && std::equal(consumer.ProbeKeys.begin(),
-                        consumer.ProbeKeys.end(), join.Keys().begin(),
-                        [buildIsLeft](const auto& name, const auto& key) {
-                            return name == (buildIsLeft ? key.Right : key.Left);
-                        })) {
-                    consumer.Code->Hash = buildIsLeft
-                        ? hashKernels.Right : hashKernels.Left;
-                } else {
-                    auto consumerHash = compiler.CompileJoinHash(consumerHashSpec);
-                    consumer.Code->Hash = buildIsLeft
-                        ? std::move(consumerHash.Right)
-                        : std::move(consumerHash.Left);
-                }
-                consumer.Code->Probe = binding.Probe;
-                consumer.Code->AuxInput->AddFilter(binding.Probe);
-            }
+            filterProbe = std::move(binding.Probe);
             // TRowSet::Hash has no key identity. Another consumer on this
             // path may leave a hash for a different join key, and a nested
             // join may produce its own hash-bearing rowsets. Recompute in
@@ -2774,13 +2815,6 @@ private:
             (buildIsLeft ? rightShuffleCode : leftShuffleCode)
                 ->UseInputHash = CanReuseRuntimeFilterHash(
                     buildIsLeft ? join.Right() : join.Left(), runtimeFilter->Id);
-            RuntimeFilters_.push_back({
-                .Id = runtimeFilter->Id,
-                .Probe = std::move(diagnosticProbe),
-                .AtSource = std::all_of(filterConsumers->begin(),
-                    filterConsumers->end(),
-                    [](const auto& consumer) { return consumer.AtSource; }),
-            });
         }
         auto leftShuf = BuildRepartitionExchange(
             leftOut,
@@ -2802,14 +2836,16 @@ private:
         if (join.RuntimeFilter()) {
             const auto& buildNodes = filterBuildIsLeft
                 ? leftShuf.Nodes : rightShuf.Nodes;
-            for (auto* buildNode : buildNodes) {
-                for (auto& consumer : *filterConsumers) {
-                    consumer.Code->AuxInput->AddProducer(*buildNode);
-                    for (auto* probeNode : consumer.Nodes) {
-                        Graph_.AddDependencyEdge(*buildNode, *probeNode);
-                    }
-                }
-            }
+            FilterProducers_.push_back(TFilterProducerTasks{
+                .Id = join.RuntimeFilter()->Id,
+                .KernelSpec = kernelSpec,
+                .HashKernels = hashKernels,
+                .Probe = std::move(filterProbe),
+                .Nodes = buildNodes,
+                .BuildSide = join.RuntimeFilter()->BuildSide,
+                .ExecStageId = execStageId,
+                .Group = joinGroup,
+            });
         }
 
         TLoweredOutput result;
@@ -3048,6 +3084,7 @@ private:
     mutable std::unordered_map<const TSourceOperator*, TSourceSplits>
         ScanSplitCache_;
     std::unordered_map<uint32_t, std::vector<TFilterConsumerTasks>> FilterConsumers_;
+    std::vector<TFilterProducerTasks> FilterProducers_;
     std::unordered_map<const TCteMaterialization*, TMaterializedProducer> Materialized_;
     std::vector<TLoweredExecStage> ExecStages_;
     std::vector<NScheduler::TRuntimeFilterDiagnostic> RuntimeFilters_;
@@ -3258,6 +3295,7 @@ TLoweredPlan LowerPlanToGraph(
     }
     auto out = lowerer.Lower(root, *finalRef);
     lowerer.CheckMaterializationsWired();
+    lowerer.WireRuntimeFilters();
     lowerer.CheckExecStagesConsistent();
 
     return TLoweredPlan{

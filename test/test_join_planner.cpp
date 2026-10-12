@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -176,7 +177,8 @@ std::unique_ptr<TTestRuntime> PlanJoinMany(
     const std::string& sexp,
     const std::unordered_map<std::string, ISource*>& sources,
     NScheduler::TSettings settings,
-    std::shared_ptr<IRuntimeFilterBindingFactory> filterBindings)
+    std::shared_ptr<IRuntimeFilterBindingFactory> filterBindings,
+    std::function<void(const TOperatorPtr&)> configure = {})
 {
     TRelParserOptions opts;
     opts.SourceFactory = [&](std::string_view path, NQumir::TLocation)
@@ -200,6 +202,9 @@ std::unique_ptr<TTestRuntime> PlanJoinMany(
     auto root = std::static_pointer_cast<IOperator>(*parsed);
     AnnotateTypes(root);
     ApplyColumnPruning(root);
+    if (configure) {
+        configure(root);
+    }
     return RunPlan(root, settings, nullptr, std::move(filterBindings));
 }
 
@@ -581,6 +586,71 @@ TEST(JoinPlanner, LeftOuterRuntimeFilterPreservesUnmatchedRows) {
                 {1, true}, {1, true}, {2, false}, {4, false}}));
         ASSERT_TRUE(bindings->Probe);
         EXPECT_EQ(bindings->Probe->Probed.load(), 4u);
+        EXPECT_EQ(bindings->Probe->Rejected.load(), 2u);
+    }
+}
+
+TEST(JoinPlanner, OneRuntimeFilterServesTwoLeftJoinInputs) {
+    for (auto mode : {NScheduler::EExecutionMode::SingleThreadedScheduler,
+             NScheduler::EExecutionMode::ThreadedScheduler}) {
+        SCOPED_TRACE(static_cast<int>(mode));
+        std::vector<int64_t> lk = {1, 2, 4}, lv = {10, 20, 40};
+        std::vector<int64_t> rk = {1, 9000}, rv = {100, 900};
+        std::vector<int64_t> ck = {1, 2, 9001}, cv = {1000, 2000, 9000};
+        std::vector<TColumn> lcols, rcols, ccols;
+        TMockSource left({"lk", "lv"},
+            {KeyValBatch(lk.data(), lv.data(), 3, lcols)});
+        TMockSource middle({"rk", "rv"},
+            {KeyValBatch(rk.data(), rv.data(), 2, rcols)});
+        TMockSource third({"ck", "cv"},
+            {KeyValBatch(ck.data(), cv.data(), 3, ccols)});
+        auto bindings = std::make_shared<TCountingFilterBindingFactory>();
+        NScheduler::TSettings settings;
+        settings.Scheduler.Mode = mode;
+        settings.Scheduler.WorkerCount = 2;
+        settings.Queue.RowsetCapacityPerLane = 1;
+        settings.HashShuffle.MaxQueuedRowsetsPerLane = 1;
+        settings.HashShuffle.PartitionCount = 2;
+        settings.HashShuffle.MaxPartitionCount = 2;
+
+        auto plan = PlanJoinMany(
+            "(rel join "
+            "(rel join (rel source \"L\") (rel source \"R\") "
+            "((lk rk)) (left) (emit-filter 7 left)) "
+            "(rel source \"C\") ((lk ck)) (left))",
+            {{"L", &left}, {"R", &middle}, {"C", &third}},
+            settings, bindings,
+            [](const TOperatorPtr& root) {
+                auto& outer = static_cast<TJoinOperator&>(*root);
+                outer.Right()->RuntimeFilterUses.push_back(
+                    {.Id = 7, .ProbeKeys = {"ck"}});
+                PlaceRuntimeFilterConsumers(root);
+            });
+
+        std::vector<std::tuple<int64_t, bool, bool>> got;
+        TRowSet out{};
+        while (plan->Next(out)) {
+            for (int64_t i = 0; i < out.RowCount; ++i) {
+                if (out.Selection && !out.Selection[i]) {
+                    continue;
+                }
+                auto valid = [&](size_t column) {
+                    return !out.Columns[column].Mask
+                        || ((out.Columns[column].Mask[i / 8] >> (i % 8)) & 1);
+                };
+                got.emplace_back(
+                    reinterpret_cast<const int64_t*>(out.Columns[0].Data)[i],
+                    valid(2), valid(4));
+            }
+            Release(&out);
+        }
+        std::sort(got.begin(), got.end());
+        EXPECT_EQ(got,
+            (std::vector<std::tuple<int64_t, bool, bool>>{
+                {1, true, true}, {2, false, true}, {4, false, false}}));
+        ASSERT_EQ(bindings->Created, 1u);
+        ASSERT_TRUE(bindings->Probe);
+        EXPECT_EQ(bindings->Probe->Probed.load(), 5u);
         EXPECT_EQ(bindings->Probe->Rejected.load(), 2u);
     }
 }
