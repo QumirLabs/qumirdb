@@ -90,6 +90,59 @@ TEST(SexpParser, SourceRowGroupPredicateRoundtrip) {
     EXPECT_EQ(PrintAst(expr, MakePrintOpts()), input);
 }
 
+TEST(SexpParser, RuntimeFilterUsesRoundtrip) {
+    NQdb::TMockSource src({"x", "y"});
+    TRelParserOptions opts;
+    opts.SourceFactory = [&](std::string_view path, NQumir::TLocation)
+        -> TOperatorPtr {
+        return std::make_shared<TSourceOperator>(src, std::string(path));
+    };
+    auto parser = MakeParser(std::move(opts));
+    const std::string input =
+        "(rel use-filter (rel source \"data.parquet\") "
+        "(7 |t.x|) (9 y x))";
+    auto expr = Parse(parser, input);
+    ASSERT_NE(expr, nullptr);
+    auto op = std::static_pointer_cast<IOperator>(expr);
+    ASSERT_EQ(op->RuntimeFilterUses.size(), 2u);
+    EXPECT_EQ(op->RuntimeFilterUses[0].Id, 7u);
+    EXPECT_EQ(op->RuntimeFilterUses[0].ProbeKeys,
+        (std::vector<std::string>{"t.x"}));
+    EXPECT_EQ(op->RuntimeFilterUses[1].ProbeKeys,
+        (std::vector<std::string>{"y", "x"}));
+    EXPECT_EQ(PrintAst(expr, MakePrintOpts()), input);
+}
+
+TEST(SexpParser, SharedFilterConsumerPlacementRoundtrip) {
+    NQdb::TMockSource left({"lk"});
+    NQdb::TMockSource middle({"rk"});
+    NQdb::TMockSource third({"ck"});
+    TRelParserOptions opts;
+    opts.SourceFactory = [&](std::string_view path, NQumir::TLocation)
+        -> TOperatorPtr {
+        auto& source = path == "L" ? left : path == "R" ? middle : third;
+        return std::make_shared<TSourceOperator>(source, std::string(path));
+    };
+    auto parser = MakeParser(std::move(opts));
+    const std::string input =
+        "(rel join "
+        "(rel join (rel source \"L\") "
+        "(rel use-filter (rel source \"R\") (7 rk)) "
+        "((lk rk)) (left) (emit-filter 7 left)) "
+        "(rel use-filter (rel source \"C\") (7 ck)) "
+        "((lk ck)) (left))";
+    auto expr = Parse(parser, input);
+    ASSERT_NE(expr, nullptr);
+    auto& outer = static_cast<TJoinOperator&>(*expr);
+    auto& first = static_cast<TJoinOperator&>(*outer.Left());
+    ASSERT_TRUE(first.RuntimeFilter());
+    ASSERT_EQ(first.Right()->RuntimeFilterUses.size(), 1u);
+    ASSERT_EQ(outer.Right()->RuntimeFilterUses.size(), 1u);
+    EXPECT_EQ(first.Right()->RuntimeFilterUses[0].Id,
+        outer.Right()->RuntimeFilterUses[0].Id);
+    EXPECT_EQ(PrintAst(expr, MakePrintOpts()), input);
+}
+
 TEST(SexpPrinter, Filter) {
     NQdb::TMockSource src({"x"});
     auto source = std::make_shared<TSourceOperator>(src);

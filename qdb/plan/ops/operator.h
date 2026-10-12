@@ -8,6 +8,8 @@
 #include <string>
 #include <unordered_set>
 #include <span>
+#include <vector>
+#include <cstdint>
 
 #include "stats.h"
 
@@ -16,11 +18,19 @@ namespace NQdb {
 struct IOperator;
 using TOperatorPtr = std::shared_ptr<IOperator>;
 
+struct TRuntimeFilterUseSpec {
+    uint32_t Id = 0;
+    std::vector<std::string> ProbeKeys;
+};
+
 struct IOperator : NQumir::NAst::TExpr {
     // Type of Source: TFunctionType : () -> TStructType
     // Type: TFunctionType : (TStructType) -> TStructType
     static constexpr const char* NodeId = "Rel";
     TStatsPtr Stats_;
+    // Query-local, approximate consumer bindings placed after optimization.
+    // They do not change SQL semantics or row-count estimates.
+    std::vector<TRuntimeFilterUseSpec> RuntimeFilterUses;
 
     const std::string_view NodeName() const override { return NodeId; }
     virtual std::string_view RelName() const = 0;

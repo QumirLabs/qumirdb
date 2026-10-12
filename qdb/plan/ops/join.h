@@ -10,7 +10,6 @@
 #include <optional>
 #include <string>
 #include <string_view>
-#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -51,9 +50,6 @@ struct TRuntimeFilterSpec {
     uint32_t Id = 0;
     EJoinFilterSide BuildSide = EJoinFilterSide::Right;
 };
-
-// Non-trivial fields need explicit clone handling.
-static_assert(std::is_trivially_copyable_v<TRuntimeFilterSpec>);
 
 class TJoinOperator : public IOperator {
 public:

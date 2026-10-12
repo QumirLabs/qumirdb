@@ -114,11 +114,13 @@ TTaskNode* TThreadedScheduler::PopReady() {
 }
 
 void TThreadedScheduler::ScheduleInput(TTaskNode* node) {
-    bool allFinished = !node->Inbound.empty();
+    bool hasWantedInput = false;
+    bool allFinished = true;
     for (auto* edge : node->Inbound) {
         if (!node->Task->WantsInput(*edge)) {
             continue;
         }
+        hasWantedInput = true;
         if (edge->Src->State.load(std::memory_order_acquire) ==
             ETaskState::Finished)
         {
@@ -127,13 +129,17 @@ void TThreadedScheduler::ScheduleInput(TTaskNode* node) {
         allFinished = false;
         Schedule(edge->Src);
     }
-    if (allFinished) {
+    if (hasWantedInput && allFinished) {
         Schedule(node);
     }
 }
 
 void TThreadedScheduler::ScheduleOutput(TTaskNode* node) {
     for (auto* edge : node->Outbound) {
+        if (edge->Kind == ETaskEdgeKind::Dependency
+            && !edge->Dst->Task->TryNotifyDependency()) {
+            continue;
+        }
         Schedule(edge->Dst);
     }
 }

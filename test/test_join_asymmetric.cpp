@@ -3,9 +3,12 @@
 #include <qdb/exec/join_exec.h>
 #include <qdb/exec/planner_helpers.h>
 #include <qdb/io/io.h>
+#include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/operator.h>
+#include <qdb/plan/ops/project.h>
+#include <qdb/plan/ops/union.h>
 #include <qdb/plan/ops/stats.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/plan/passes/runtime_filters.h>
@@ -17,6 +20,7 @@
 #include <cmath>
 #include <cstdint>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -361,6 +365,407 @@ TEST(AttachRuntimeFilters, AccountsForForcedBuildAndNdvUncertainty) {
         RowsWithKeyNdv(10000, "rv", 100, true)->ColumnStats.at("rv");
     EXPECT_FALSE(AttachTo(join).has_value())
         << "products of exact column NDVs still need an uncertainty margin";
+}
+
+TEST(AttachRuntimeFilters, PricesTheActualProbeBoundary) {
+    auto join = JoinOfType(EJoinType::Inner);
+    ASSERT_TRUE(join);
+    auto* j = static_cast<TJoinOperator*>(join.get());
+    auto source = j->Left();
+    auto filtered = MakeFilter(source, "(> lk 0)");
+    ASSERT_TRUE(filtered.has_value());
+    j->MutableLeft() = *filtered;
+    source->Stats_ = RowsWithKeyNdv(10'000'000, "lk", 1'000'000);
+    (*filtered)->Stats_ = RowsWithKeyNdv(1'000'000, "lk", 1'000'000);
+    j->Right()->Stats_ = RowsWithKeyNdv(100'000, "rk", 10'000);
+
+    auto emitted = AttachTo(join);
+    ASSERT_TRUE(emitted);
+    EXPECT_EQ(emitted->BuildSide, EJoinFilterSide::Right);
+    EXPECT_TRUE(source->RuntimeFilterUses.empty());
+    ASSERT_EQ((*filtered)->RuntimeFilterUses.size(), 1u);
+    EXPECT_EQ((*filtered)->RuntimeFilterUses[0].ProbeKeys,
+        (std::vector<std::string>{"lk"}));
+
+    // Forced measurement mode still chooses the deepest safe boundary.
+    uint32_t nextId = 1;
+    AttachRuntimeFilters(join, nextId, /*force=*/true);
+    ASSERT_EQ(source->RuntimeFilterUses.size(), 1u);
+    EXPECT_TRUE((*filtered)->RuntimeFilterUses.empty());
+
+    // With equal row estimates, normal planning also chooses the source.
+    source->Stats_ = RowsWithKeyNdv(1'000'000, "lk", 1'000'000);
+    emitted = AttachTo(join);
+    ASSERT_TRUE(emitted);
+    ASSERT_EQ(source->RuntimeFilterUses.size(), 1u);
+    EXPECT_TRUE((*filtered)->RuntimeFilterUses.empty());
+}
+
+TEST(AttachRuntimeFilters, UsesBoundaryNdvForWorkSavedBeforeJoin) {
+    auto join = JoinOfType(EJoinType::Inner);
+    ASSERT_TRUE(join);
+    auto* j = static_cast<TJoinOperator*>(join.get());
+    auto source = j->Left();
+    auto filtered = MakeFilter(source, "(> lk 0)");
+    ASSERT_TRUE(filtered.has_value());
+    j->MutableLeft() = *filtered;
+    (*filtered)->Stats_ = RowsWithKeyNdv(1'000'000, "lk", 100'000);
+    j->Right()->Stats_ = RowsWithKeyNdv(100'000, "rk", 10'000);
+
+    // The SQL filter retains many of the same keys. A Bloom probe on every
+    // source row costs more than the predicate work it would avoid.
+    source->Stats_ = RowsWithKeyNdv(2'500'000, "lk", 100'000);
+    ASSERT_TRUE(AttachTo(join));
+    EXPECT_TRUE(source->RuntimeFilterUses.empty());
+    ASSERT_EQ((*filtered)->RuntimeFilterUses.size(), 1u);
+
+    // When the source has a wider key domain, the runtime filter rejects
+    // more rows before the SQL predicate, so the source boundary wins.
+    source->Stats_ = RowsWithKeyNdv(2'500'000, "lk", 1'000'000);
+    ASSERT_TRUE(AttachTo(join));
+    ASSERT_EQ(source->RuntimeFilterUses.size(), 1u);
+    EXPECT_TRUE((*filtered)->RuntimeFilterUses.empty());
+}
+
+TEST(AttachRuntimeFilters, RowCountCapDoesNotMakeNdvExact) {
+    auto join = JoinOfType(EJoinType::Inner);
+    ASSERT_TRUE(join);
+    auto* j = static_cast<TJoinOperator*>(join.get());
+    j->Left()->Stats_ = RowsWithKeyNdv(100'000, "lk", 1'000'000, true);
+    j->Right()->Stats_ = RowsWithKeyNdv(40'000, "rk", 10'000, true);
+    EXPECT_FALSE(AttachTo(join))
+        << "capping an inherited exact NDV to row count is only an estimate";
+}
+
+TEST(AttachRuntimeFilters, StopsAtComputedProjectKey) {
+    auto join = JoinOfType(EJoinType::Inner);
+    ASSERT_TRUE(join);
+    auto* j = static_cast<TJoinOperator*>(join.get());
+    auto source = j->Left();
+    auto projected = MakeProject(source,
+        {{"alias_key", "(+ lk 0)"}, {"lv", "lv"}});
+    ASSERT_TRUE(projected.has_value());
+    j->MutableLeft() = *projected;
+    j->MutableKeys()[0].Left = "alias_key";
+    source->Stats_ = RowsWithKeyNdv(1'000'000, "lk", 1'000'000);
+    (*projected)->Stats_ = RowsWithKeyNdv(
+        1'000'000, "alias_key", 1'000'000);
+    j->Right()->Stats_ = RowsWithKeyNdv(100'000, "rk", 10'000);
+
+    auto emitted = AttachTo(join);
+    ASSERT_TRUE(emitted);
+    EXPECT_TRUE(source->RuntimeFilterUses.empty());
+    ASSERT_EQ((*projected)->RuntimeFilterUses.size(), 1u);
+    EXPECT_EQ((*projected)->RuntimeFilterUses[0].ProbeKeys,
+        (std::vector<std::string>{"alias_key"}));
+}
+
+TEST(AttachRuntimeFilters, PricesUnionBranchesIndependently) {
+    auto join = JoinOfType(EJoinType::Inner);
+    ASSERT_TRUE(join);
+    auto* j = static_cast<TJoinOperator*>(join.get());
+    auto first = j->Left();
+    auto second = std::make_shared<TFakeSource>(
+        std::vector<std::pair<std::string, TTypePtr>>{
+            {"lk", I64Type()}, {"lv", I64Type()}});
+    auto filtered = MakeFilter(first, "(> lk 0)");
+    ASSERT_TRUE(filtered.has_value());
+    auto un = std::make_shared<TUnionAllOperator>(
+        std::vector<TOperatorPtr>{*filtered, second});
+    j->MutableLeft() = un;
+    first->Stats_ = RowsWithKeyNdv(5'000'000, "lk", 1'000'000);
+    (*filtered)->Stats_ = RowsWithKeyNdv(500'000, "lk", 500'000);
+    second->Stats_ = RowsWithKeyNdv(500'000, "lk", 500'000);
+    un->Stats_ = RowsWithKeyNdv(1'000'000, "lk", 1'000'000);
+    j->Right()->Stats_ = RowsWithKeyNdv(100'000, "rk", 10'000);
+
+    auto emitted = AttachTo(join);
+    ASSERT_TRUE(emitted);
+    EXPECT_TRUE(un->RuntimeFilterUses.empty());
+    EXPECT_TRUE(first->RuntimeFilterUses.empty());
+    ASSERT_EQ((*filtered)->RuntimeFilterUses.size(), 1u);
+    ASSERT_EQ(second->RuntimeFilterUses.size(), 1u);
+    EXPECT_EQ((*filtered)->RuntimeFilterUses[0].Id,
+        second->RuntimeFilterUses[0].Id);
+}
+
+TEST(AttachRuntimeFilters, UnionChoosesEachBranchBySavedWork) {
+    auto join = JoinOfType(EJoinType::Inner);
+    ASSERT_TRUE(join);
+    auto* j = static_cast<TJoinOperator*>(join.get());
+    auto first = j->Left();
+    auto second = std::make_shared<TFakeSource>(
+        std::vector<std::pair<std::string, TTypePtr>>{
+            {"lk", I64Type()}, {"lv", I64Type()}});
+    auto filtered = MakeFilter(first, "(> lk 0)");
+    ASSERT_TRUE(filtered.has_value());
+    auto un = std::make_shared<TUnionAllOperator>(
+        std::vector<TOperatorPtr>{*filtered, second});
+    j->MutableLeft() = un;
+    first->Stats_ = RowsWithKeyNdv(2'500'000, "lk", 1'000'000);
+    (*filtered)->Stats_ = RowsWithKeyNdv(1'000'000, "lk", 100'000);
+    second->Stats_ = RowsWithKeyNdv(1'000'000, "lk", 100'000);
+    un->Stats_ = RowsWithKeyNdv(2'000'000, "lk", 200'000);
+    j->Right()->Stats_ = RowsWithKeyNdv(100'000, "rk", 10'000);
+
+    ASSERT_TRUE(AttachTo(join));
+    EXPECT_TRUE(un->RuntimeFilterUses.empty());
+    EXPECT_TRUE((*filtered)->RuntimeFilterUses.empty());
+    ASSERT_EQ(first->RuntimeFilterUses.size(), 1u);
+    ASSERT_EQ(second->RuntimeFilterUses.size(), 1u);
+    EXPECT_EQ(first->RuntimeFilterUses[0].Id, second->RuntimeFilterUses[0].Id);
+}
+
+TEST(AttachRuntimeFilters, SharedStageAboveUnionIsCreditedOnce) {
+    auto join = JoinOfType(EJoinType::Inner);
+    ASSERT_TRUE(join);
+    auto* j = static_cast<TJoinOperator*>(join.get());
+    auto first = j->Left();
+    auto second = std::make_shared<TFakeSource>(
+        std::vector<std::pair<std::string, TTypePtr>>{
+            {"lk", I64Type()}, {"lv", I64Type()}});
+    auto un = std::make_shared<TUnionAllOperator>(
+        std::vector<TOperatorPtr>{first, second});
+    auto filtered = MakeFilter(un, "(> lk 0)");
+    ASSERT_TRUE(filtered.has_value());
+    j->MutableLeft() = *filtered;
+    first->Stats_ = RowsWithKeyNdv(1'000'000, "lk", 50'000);
+    second->Stats_ = RowsWithKeyNdv(1'000'000, "lk", 50'000);
+    un->Stats_ = RowsWithKeyNdv(2'000'000, "lk", 100'000);
+    (*filtered)->Stats_ = RowsWithKeyNdv(1'000'000, "lk", 100'000);
+    j->Right()->Stats_ = RowsWithKeyNdv(100'000, "rk", 20'000);
+
+    ASSERT_TRUE(AttachTo(join));
+    ASSERT_EQ((*filtered)->RuntimeFilterUses.size(), 1u);
+    EXPECT_TRUE(un->RuntimeFilterUses.empty());
+    EXPECT_TRUE(first->RuntimeFilterUses.empty());
+    EXPECT_TRUE(second->RuntimeFilterUses.empty());
+}
+
+TEST(AttachRuntimeFilters, LeftOuterFiltersOnlyNullableRightInput) {
+    auto join = JoinOfType(EJoinType::Left);
+    ASSERT_TRUE(join);
+    auto* j = static_cast<TJoinOperator*>(join.get());
+    j->Left()->Stats_ = RowsWithKeyNdv(100'000, "lk", 10'000);
+    j->Right()->Stats_ = RowsWithKeyNdv(1'000'000, "rk", 1'000'000);
+
+    auto emitted = AttachTo(join);
+    ASSERT_TRUE(emitted);
+    EXPECT_EQ(emitted->BuildSide, EJoinFilterSide::Left);
+    EXPECT_EQ(ChooseJoinBuildSide(*j), EJoinBuildSide::Auto);
+    EXPECT_TRUE(j->Left()->RuntimeFilterUses.empty());
+    ASSERT_EQ(j->Right()->RuntimeFilterUses.size(), 1u);
+    EXPECT_EQ(j->Right()->RuntimeFilterUses[0].ProbeKeys,
+        (std::vector<std::string>{"rk"}));
+
+    // Even forced placement may not reject preserved left rows.
+    uint32_t nextId = 1;
+    AttachRuntimeFilters(join, nextId, /*force=*/true);
+    ASSERT_TRUE(j->RuntimeFilter());
+    EXPECT_EQ(j->RuntimeFilter()->BuildSide, EJoinFilterSide::Left);
+    EXPECT_TRUE(j->Left()->RuntimeFilterUses.empty());
+}
+
+TEST(AttachRuntimeFilters, LeftOuterCrossesAggregateOnGroupKeys) {
+    auto join = JoinOfType(EJoinType::Left);
+    ASSERT_TRUE(join);
+    auto* j = static_cast<TJoinOperator*>(join.get());
+    auto source = j->Right();
+    auto grouped = MakeAggregate(source, {"rk"}, {{"total", "sum", "rv"}});
+    ASSERT_TRUE(grouped.has_value());
+    j->MutableRight() = *grouped;
+    j->Left()->Stats_ = RowsWithKeyNdv(100'000, "lk", 10'000);
+    source->Stats_ = RowsWithKeyNdv(10'000'000, "rk", 10'000'000);
+    (*grouped)->Stats_ = RowsWithKeyNdv(1'000'000, "rk", 1'000'000);
+
+    ASSERT_TRUE(AttachTo(join));
+    ASSERT_EQ(source->RuntimeFilterUses.size(), 1u);
+    EXPECT_TRUE((*grouped)->RuntimeFilterUses.empty());
+
+    auto aggregate = std::static_pointer_cast<TAggregateOperator>(*grouped);
+    aggregate->MutableGroupingSets() = {{0}};
+    ASSERT_TRUE(AttachTo(join));
+    EXPECT_TRUE(source->RuntimeFilterUses.empty());
+    ASSERT_EQ((*grouped)->RuntimeFilterUses.size(), 1u);
+}
+
+struct TLeftJoinChain {
+    TOperatorPtr Outer;
+    std::shared_ptr<TJoinOperator> First;
+    TOperatorPtr Third;
+};
+
+TLeftJoinChain MakeLeftJoinChain() {
+    auto left = std::make_shared<TFakeSource>(
+        std::vector<std::pair<std::string, TTypePtr>>{
+            {"lk", I64Type()}, {"lv", I64Type()}});
+    auto middle = std::make_shared<TFakeSource>(
+        std::vector<std::pair<std::string, TTypePtr>>{
+            {"rk", I64Type()}, {"rv", I64Type()}});
+    auto third = std::make_shared<TFakeSource>(
+        std::vector<std::pair<std::string, TTypePtr>>{
+            {"ck", I64Type()}, {"cv", I64Type()}});
+    auto first = MakeJoin(left, middle, {{"lk", "rk"}}, EJoinType::Left);
+    EXPECT_TRUE(first.has_value());
+    auto outer = MakeJoin(*first, third, {{"lk", "ck"}}, EJoinType::Left);
+    EXPECT_TRUE(outer.has_value());
+    left->Stats_ = RowsWithKeyNdv(100'000, "lk", 10'000);
+    middle->Stats_ = RowsWithKeyNdv(1'000'000, "rk", 1'000'000);
+    (*first)->Stats_ = RowsWithKeyNdv(10'000'000, "lk", 10'000);
+    third->Stats_ = RowsWithKeyNdv(1'000'000, "ck", 1'000'000);
+    return {.Outer = *outer,
+        .First = std::static_pointer_cast<TJoinOperator>(*first),
+        .Third = third};
+}
+
+TEST(AttachRuntimeFilters, ReusesPreservedLeftKeyAcrossLeftJoins) {
+    auto chain = MakeLeftJoinChain();
+    uint32_t nextId = 1;
+    AttachRuntimeFilters(chain.Outer, nextId);
+    ASSERT_TRUE(chain.First->RuntimeFilter());
+    EXPECT_FALSE(static_cast<TJoinOperator&>(*chain.Outer).RuntimeFilter());
+    ASSERT_EQ(chain.First->Right()->RuntimeFilterUses.size(), 1u);
+    ASSERT_EQ(chain.Third->RuntimeFilterUses.size(), 1u);
+    EXPECT_EQ(chain.First->Right()->RuntimeFilterUses[0].Id,
+        chain.Third->RuntimeFilterUses[0].Id);
+    EXPECT_EQ(chain.Third->RuntimeFilterUses[0].ProbeKeys,
+        (std::vector<std::string>{"ck"}));
+
+    chain.Third->Stats_ = RowsWithKeyNdv(1'000'000, "ck", 100);
+    nextId = 100;
+    AttachRuntimeFilters(chain.Outer, nextId);
+    EXPECT_TRUE(chain.Third->RuntimeFilterUses.empty());
+    ASSERT_EQ(chain.First->Right()->RuntimeFilterUses.size(), 1u);
+    EXPECT_EQ(chain.First->Right()->RuntimeFilterUses[0].Id, 100u);
+}
+
+TEST(AttachRuntimeFilters, ReuseFollowsOnlyDirectKeyAliases) {
+    for (const auto& expression : {"lk", "(+ lk 0)"}) {
+        auto chain = MakeLeftJoinChain();
+        auto projected = MakeProject(chain.First,
+            {{"mapped", expression}, {"lv", "lv"}});
+        ASSERT_TRUE(projected.has_value());
+        (*projected)->Stats_ = RowsWithKeyNdv(10'000'000, "mapped", 10'000);
+        static_cast<TJoinOperator&>(*chain.Outer).MutableLeft() = *projected;
+        static_cast<TJoinOperator&>(*chain.Outer).MutableKeys()[0].Left =
+            "mapped";
+        uint32_t nextId = 10;
+        AttachRuntimeFilters(chain.Outer, nextId);
+        EXPECT_EQ(chain.Third->RuntimeFilterUses.size(),
+            expression == std::string("lk") ? 1u : 0u);
+    }
+}
+
+TEST(AttachRuntimeFilters, ReuseRequiresTheSameKeyAndNullSemantics) {
+    for (int variant = 0; variant < 3; ++variant) {
+        auto chain = MakeLeftJoinChain();
+        auto& outer = static_cast<TJoinOperator&>(*chain.Outer);
+        if (variant == 0) {
+            outer.MutableKeys()[0].Left = "lv";
+        } else if (variant == 1) {
+            outer.MutableKeys()[0].NullsEqual = true;
+        } else {
+            outer.MutableKeys()[0].Left = "rk";
+        }
+        uint32_t nextId = 1;
+        AttachRuntimeFilters(chain.Outer, nextId);
+        ASSERT_TRUE(chain.First->RuntimeFilter());
+        EXPECT_TRUE(chain.Third->RuntimeFilterUses.empty());
+    }
+}
+
+TEST(AttachRuntimeFilters, PrefersExistingFilterToBuildingTheSameKeysAgain) {
+    auto chain = MakeLeftJoinChain();
+    chain.First->Stats_ = RowsWithKeyNdv(1'000'000, "lk", 10'000);
+    chain.Third->Stats_ = RowsWithKeyNdv(5'000'000, "ck", 5'000'000);
+    uint32_t nextId = 1;
+    AttachRuntimeFilters(chain.Outer, nextId);
+    ASSERT_TRUE(chain.First->RuntimeFilter());
+    EXPECT_FALSE(static_cast<TJoinOperator&>(*chain.Outer).RuntimeFilter());
+    ASSERT_EQ(chain.Third->RuntimeFilterUses.size(), 1u);
+    EXPECT_EQ(chain.Third->RuntimeFilterUses[0].Id,
+        chain.First->RuntimeFilter()->Id);
+}
+
+TEST(AttachRuntimeFilters, ReuseMapsCompositeKeysInProducerOrder) {
+    auto left = std::make_shared<TFakeSource>(
+        std::vector<std::pair<std::string, TTypePtr>>{
+            {"a", I64Type()}, {"b", I64Type()}});
+    auto middle = std::make_shared<TFakeSource>(
+        std::vector<std::pair<std::string, TTypePtr>>{
+            {"x", I64Type()}, {"y", I64Type()}});
+    auto third = std::make_shared<TFakeSource>(
+        std::vector<std::pair<std::string, TTypePtr>>{
+            {"u", I64Type()}, {"v", I64Type()}});
+    auto first = MakeJoin(left, middle,
+        {{"a", "x"}, {"b", "y"}}, EJoinType::Left);
+    ASSERT_TRUE(first.has_value());
+    auto outer = MakeJoin(*first, third,
+        {{"b", "v"}, {"a", "u"}}, EJoinType::Left);
+    ASSERT_TRUE(outer.has_value());
+    auto stats = [](uint64_t rows, const std::string& one,
+                     const std::string& two, uint64_t ndv) {
+        auto result = RowsWithKeyNdv(rows, one, ndv);
+        result->ColumnStats[two] =
+            RowsWithKeyNdv(rows, two, ndv)->ColumnStats.at(two);
+        return result;
+    };
+    left->Stats_ = stats(100'000, "a", "b", 100);
+    middle->Stats_ = stats(1'000'000, "x", "y", 1'000);
+    (*first)->Stats_ = stats(10'000'000, "a", "b", 100);
+    third->Stats_ = stats(1'000'000, "u", "v", 1'000);
+    uint32_t nextId = 1;
+    AttachRuntimeFilters(*outer, nextId);
+    ASSERT_TRUE(static_cast<TJoinOperator&>(**first).RuntimeFilter());
+    ASSERT_EQ(third->RuntimeFilterUses.size(), 1u);
+    EXPECT_EQ(third->RuntimeFilterUses[0].ProbeKeys,
+        (std::vector<std::string>{"u", "v"}));
+}
+
+TEST(AttachRuntimeFilters, RejectsUnsafeManualOuterDirection) {
+    auto join = JoinOfType(EJoinType::Left);
+    ASSERT_TRUE(join);
+    auto* j = static_cast<TJoinOperator*>(join.get());
+    j->MutableRuntimeFilter() = TRuntimeFilterSpec{
+        .Id = 7, .BuildSide = EJoinFilterSide::Right};
+    EXPECT_THROW(PlaceRuntimeFilterConsumers(join), std::runtime_error);
+}
+
+TEST(AttachRuntimeFilters, RejectsResidualSemiManualFilter) {
+    auto left = std::make_shared<TFakeSource>(
+        std::vector<std::pair<std::string, TTypePtr>>{
+            {"lk", I64Type()}, {"lv", I64Type()}});
+    auto right = std::make_shared<TFakeSource>(
+        std::vector<std::pair<std::string, TTypePtr>>{
+            {"rk", I64Type()}, {"rv", I64Type()}});
+    auto join = MakeJoin(left, right, {{"lk", "rk"}},
+        EJoinType::LeftSemi, "(> rv 0)");
+    ASSERT_TRUE(join.has_value());
+    static_cast<TJoinOperator&>(**join).MutableRuntimeFilter() =
+        TRuntimeFilterSpec{.Id = 7, .BuildSide = EJoinFilterSide::Right};
+    EXPECT_THROW(PlaceRuntimeFilterConsumers(*join), std::runtime_error);
+}
+
+TEST(AttachRuntimeFilters, ClearsOrphanConsumerBindings) {
+    auto join = JoinOfType(EJoinType::Inner);
+    ASSERT_TRUE(join);
+    auto& j = static_cast<TJoinOperator&>(*join);
+    j.Left()->Stats_ = RowsWithKeyNdv(1'000'000, "lk", 1'000'000);
+    j.Right()->Stats_ = RowsWithKeyNdv(100'000, "rk", 10'000);
+    j.Left()->RuntimeFilterUses.push_back(
+        {.Id = 999, .ProbeKeys = {"lk"}});
+    uint32_t nextId = 1;
+    AttachRuntimeFilters(join, nextId);
+    ASSERT_TRUE(j.RuntimeFilter());
+    ASSERT_EQ(j.Left()->RuntimeFilterUses.size(), 1u);
+    EXPECT_EQ(j.Left()->RuntimeFilterUses[0].Id, j.RuntimeFilter()->Id);
+
+    j.Left()->RuntimeFilterUses.push_back(
+        {.Id = 999, .ProbeKeys = {"lk"}});
+    nextId = 1;
+    AttachRuntimeFilters(join, nextId);
+    ASSERT_EQ(j.Left()->RuntimeFilterUses.size(), 1u);
+    EXPECT_EQ(j.Left()->RuntimeFilterUses[0].Id, j.RuntimeFilter()->Id);
 }
 
 TEST(AttachRuntimeFilters, SkipsUncappedUnknownAndUnsupportedJoins) {

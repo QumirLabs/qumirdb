@@ -63,6 +63,8 @@ bool TSingleThreadedScheduler::Run(std::string* error) {
                 ++Stats_.BlockedOutput;
             } else {
                 ++Stats_.Finished;
+                node->State.store(
+                    ETaskState::Finished, std::memory_order_release);
             }
             ScheduleOutput(node);
         } else if (state == ETaskResult::OK) {
@@ -76,7 +78,8 @@ bool TSingleThreadedScheduler::Run(std::string* error) {
 }
 
 void TSingleThreadedScheduler::Schedule(TTaskNode* node) {
-    if (!node || Scheduled_.contains(node)) {
+    if (!node || Scheduled_.contains(node)
+        || node->State.load(std::memory_order_acquire) == ETaskState::Finished) {
         return;
     }
     Ready_.push_back(node);
@@ -85,16 +88,31 @@ void TSingleThreadedScheduler::Schedule(TTaskNode* node) {
 }
 
 void TSingleThreadedScheduler::ScheduleInput(TTaskNode* node) {
+    bool hasWantedInput = false;
+    bool allFinished = true;
     for (auto* edge : node->Inbound) {
         if (!node->Task->WantsInput(*edge)) {
             continue;
         }
+        hasWantedInput = true;
+        if (edge->Src->State.load(std::memory_order_acquire)
+            == ETaskState::Finished) {
+            continue;
+        }
+        allFinished = false;
         Schedule(edge->Src);
+    }
+    if (hasWantedInput && allFinished) {
+        Schedule(node);
     }
 }
 
 void TSingleThreadedScheduler::ScheduleOutput(TTaskNode* node) {
     for (auto* edge : node->Outbound) {
+        if (edge->Kind == ETaskEdgeKind::Dependency
+            && !edge->Dst->Task->TryNotifyDependency()) {
+            continue;
+        }
         Schedule(edge->Dst);
     }
 }

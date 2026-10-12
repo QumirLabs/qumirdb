@@ -5,7 +5,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <span>
+#include <unordered_set>
 #include <vector>
 
 namespace NQdb {
@@ -21,7 +23,7 @@ struct TRuntimeFilterPartial {
 };
 
 // Filters may return false positives, never false negatives. Builders are
-// task-local; probes pass until the complete merged filter is published.
+// task-local; consumer tasks wait for the complete merged filter.
 class TRuntimeFilterBuilder {
 public:
     TRuntimeFilterBuilder(size_t maxKeys, size_t bloomBytes);
@@ -31,10 +33,13 @@ public:
 
 private:
     void Compact();
+    void OverflowToBloom();
 
     size_t MaxKeys_;
     size_t BloomBytes_;
     std::vector<uint64_t> Hashes_;
+    std::unordered_set<uint64_t> Seen_;
+    bool Deduplicating_ = false;
     std::vector<uint64_t> BloomWords_;
     bool Overflowed_ = false;
     uint64_t BuildRows_ = 0;
@@ -69,7 +74,9 @@ public:
 class IRuntimeFilterProbe {
 public:
     virtual ~IRuntimeFilterProbe() = default;
-    // Called during graph construction, before any task starts.
+    // Auxiliary inputs wait for a complete filter or PassAll publication.
+    virtual bool Ready() const = 0;
+    // Created lazily by each consumer task after the filter is published.
     virtual std::shared_ptr<TRuntimeFilterProbeState> CreateProbeState();
     // Check before allocating masks or computing hashes. False passes the input
     // through unchanged. rows counts only rows in the incoming selection.
@@ -92,12 +99,8 @@ struct TRuntimeFilterBinding {
 class IRuntimeFilterBindingFactory {
 public:
     virtual ~IRuntimeFilterBindingFactory() = default;
-    virtual TRuntimeFilterBinding Create(uint32_t id, size_t producerCount) = 0;
-    virtual TRuntimeFilterBinding CreateSized(
-        uint32_t id, size_t producerCount, size_t bloomBytes) {
-        (void)bloomBytes;
-        return Create(id, producerCount);
-    }
+    virtual TRuntimeFilterBinding Create(
+        uint32_t id, size_t producerCount, size_t bloomBytes) = 0;
 };
 
 struct TRuntimeFilterStats {
@@ -139,7 +142,7 @@ public:
         TRuntimeFilterProbeState& state,
         std::span<const uint8_t> selection = {}) const override;
 
-    bool Ready() const { return Ready_.load(std::memory_order_acquire); }
+    bool Ready() const override { return Ready_.load(std::memory_order_acquire); }
     bool UsesBloom() const { return Ready() && Data_.Kind == EKind::Bloom; }
     void StartExecutionClock();
     // Only while execution is quiescent; probe counters are task-local.
@@ -169,6 +172,7 @@ private:
     std::atomic<size_t> PendingProducers_{0};
     TPublishedData Data_;
     std::atomic<bool> Ready_{false};
+    std::mutex ProbeStatesMutex_;
     std::vector<std::shared_ptr<TRuntimeFilterProbeState>> ProbeStates_;
     std::chrono::steady_clock::time_point ExecutionStart_;
 };
@@ -177,8 +181,7 @@ class TLocalRuntimeFilterBindingFactory final : public IRuntimeFilterBindingFact
 public:
     explicit TLocalRuntimeFilterBindingFactory(
         std::shared_ptr<TRuntimeContext> runtimeContext = nullptr);
-    TRuntimeFilterBinding Create(uint32_t id, size_t producerCount) override;
-    TRuntimeFilterBinding CreateSized(
+    TRuntimeFilterBinding Create(
         uint32_t id, size_t producerCount, size_t bloomBytes) override;
 
 private:

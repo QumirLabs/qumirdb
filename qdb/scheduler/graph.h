@@ -19,6 +19,7 @@ using TTaskGroupId = uint64_t;
 inline constexpr TTaskGroupId InvalidTaskGroupId = 0;
 
 struct TTaskEdge;
+enum class ETaskEdgeKind { Rowset, Dependency };
 
 struct TTaskNode {
     ITaskNode* Task = nullptr;
@@ -38,6 +39,7 @@ struct TTaskEdge {
     TTaskNode* Src = nullptr;
     TTaskNode* Dst = nullptr;
     IConnection* Connection = nullptr;
+    ETaskEdgeKind Kind = ETaskEdgeKind::Rowset;
     size_t SrcLane = 0;
     size_t DstLane = 0;
     // Stable semantic-stage input. This is distinct from DstLane: all left
@@ -66,6 +68,9 @@ public:
         size_t srcLane = 0,
         size_t dstLane = 0,
         size_t execInput = 0);
+
+    // Carries wakeups and demand, but no rowsets or exec-stage input.
+    TTaskEdge& AddDependencyEdge(TTaskNode& producer, TTaskNode& consumer);
 
     void Build();
     bool Validate(std::string* error = nullptr) const;

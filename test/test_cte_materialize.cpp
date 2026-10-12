@@ -6,6 +6,7 @@
 
 #include <qdb/plan/build.h>
 #include <qdb/plan/ops/filter.h>
+#include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/pipeline.h>
 #include <qdb/sql/parser.h>
@@ -113,6 +114,18 @@ std::shared_ptr<TFilterOperator> FindFilter(const TOperatorPtr& op) {
     return nullptr;
 }
 
+TJoinOperator* FindJoin(const TOperatorPtr& op) {
+    if (auto join = TMaybeOp<TJoinOperator>(op)) {
+        return join.Cast().get();
+    }
+    for (const auto& child : op->Inputs()) {
+        if (auto* join = FindJoin(child)) {
+            return join;
+        }
+    }
+    return nullptr;
+}
+
 int64_t CountRows(TTestRuntime& runtime) {
     int64_t total = 0;
     TRowSet batch{};
@@ -191,6 +204,38 @@ TEST(CteMaterialize, DiamondCapacityOneThreadedNoDeadlock) {
         "SELECT p.k, q.v FROM x p JOIN x q ON p.k = q.k",
         sources, settings);
     EXPECT_EQ(CountRows(*runtime), 40);
+}
+
+TEST(CteMaterialize, RuntimeFilterAfterSharedReaderDoesNotDeadlock) {
+    for (bool threaded : {false, true}) {
+        auto table = MakeTable(/*rows=*/40, /*batches=*/20);
+        TMockSource t({"k", "v"}, std::move(table->Batches));
+        std::unordered_map<std::string, ISource*> sources = {{"t", &t}};
+        auto plan = BuildSqlPlan(
+            "WITH x AS (SELECT k, v FROM t) "
+            "SELECT p.k FROM x p JOIN "
+            "(SELECT k FROM x WHERE k <= 10) q ON p.k = q.k",
+            sources);
+        auto* join = FindJoin(plan);
+        ASSERT_NE(join, nullptr);
+        join->MutableRuntimeFilter() = TRuntimeFilterSpec{
+            .Id = 1, .BuildSide = EJoinFilterSide::Right};
+
+        NScheduler::TSettings settings;
+        settings.Queue.RowsetCapacityPerLane = 1;
+        if (threaded) {
+            settings.Scheduler.Mode =
+                NScheduler::EExecutionMode::ThreadedScheduler;
+            settings.Scheduler.WorkerCount = 4;
+        }
+        auto runtime = RunPlan(plan, settings);
+        auto keys = CollectFirstColumnSorted(*runtime);
+        std::vector<int64_t> expected;
+        for (int64_t key = 1; key <= 10; ++key) {
+            expected.push_back(key);
+        }
+        EXPECT_EQ(keys, expected) << "threaded=" << threaded;
+    }
 }
 
 TEST(CteMaterialize, EmptyCte) {

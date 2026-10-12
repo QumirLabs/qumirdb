@@ -309,9 +309,10 @@ containing exact hashes or a 64-byte blocked Bloom fragment. Exact sets are
 used up to 16K distinct hashes; larger contributions switch to Bloom. A
 distributed factory can send each partial to a merger and make the published
 result available to probe workers.
-The merger must wait for every producer before publishing. Until then, probes
-pass all rows. The network encoding, global completion tracking, and worker
-failure handling remain part of a distributed runtime. Every worker must also
+The merger must wait for every producer before publishing. Consumer tasks wait
+for publication before reading rows. Network encoding, global completion
+tracking, and worker failure handling remain part of a distributed runtime.
+Every worker must also
 use the same join-key hash representation for filter publication and probing.
 
 Locally, each producer moves its contribution into a separate slot at input
@@ -329,8 +330,8 @@ computing filter hashes, a task checks whether the filter is ready and active.
 An inactive filter passes the batch through. Source-computed hashes share the
 source rowset's lifetime through shuffle views; materialized shuffle batches
 gather their existing hashes alongside the columns. The optional vector Bloom
-kernel compiles once after scalar warmup. Other tasks continue scalar probing
-while compilation is in progress.
+kernel compiles with the query kernels; scalar probing handles batches that
+are too small for the vector path.
 
 `AttachRuntimeFilters` estimates how many probe rows the filter can reject from
 the build and probe key NDVs. It compares saved shuffle and join work with the

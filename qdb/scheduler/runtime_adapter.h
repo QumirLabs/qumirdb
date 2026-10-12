@@ -18,6 +18,8 @@
 namespace NQdb {
 namespace NScheduler {
 
+struct TTaskNode;
+
 enum class ERequiredSide { Both = 0, Left = 1, Right = 2 };
 
 struct TInputPort {
@@ -34,6 +36,22 @@ struct TOutputPort {
     bool CanPush() const;
     bool Push(TRowSet&& rowSet) const;
     void Finish() const;
+};
+
+enum class EAuxInputStatus { Ready, NeedProducer, Waiting, Failed };
+
+// Query-local auxiliary input. It carries filter publication state rather
+// than rowsets; dependency edges supply demand and wakeups.
+class TAuxInput {
+public:
+    void AddFilter(std::shared_ptr<IRuntimeFilterProbe> filter);
+    void AddProducer(TTaskNode& producer);
+    bool Ready() const;
+    EAuxInputStatus Poll() const;
+
+private:
+    std::vector<std::shared_ptr<IRuntimeFilterProbe>> Filters_;
+    std::vector<TTaskNode*> Producers_;
 };
 
 struct TSourceCode {
@@ -99,14 +117,16 @@ struct THashShuffleCode {
     size_t TargetOutputBatchRows = 0;
     size_t MaxOutputBatchRows = 0;
     size_t TargetOutputBatchBytes = 0;
-    // Bindings are shared by every lane of one exchange. The local factory
-    // uses one filter object; remote publishers and probes may be separate.
-    // At most one of the two is set.
+    // Build lanes share a producer binding; each publishes one partial.
     std::shared_ptr<IRuntimeFilterProducer> ProducedFilter;
-    std::shared_ptr<IRuntimeFilterProbe> AppliedFilter;
-    // Set only when the immediately upstream source computed hashes for this
-    // exchange's key. Other exchanges must run their own hash kernel.
+    // Reuse hashes produced by a preceding runtime-filter task for this key.
     bool UseInputHash = false;
+};
+
+struct TRuntimeFilterCode {
+    THashShuffleCode::THash Hash;
+    std::shared_ptr<IRuntimeFilterProbe> Probe;
+    std::shared_ptr<TAuxInput> AuxInput;
 };
 
 struct TMergeCode {
@@ -134,6 +154,31 @@ private:
     std::shared_ptr<void> State_;
     TOutputPort Output_;
     bool Finished_ = false;
+};
+
+class TRuntimeFilterTask final : public ITaskNode {
+public:
+    TRuntimeFilterTask(
+        std::shared_ptr<const TRuntimeFilterCode> code,
+        TInputPort input,
+        TOutputPort output);
+    ~TRuntimeFilterTask() override;
+
+    ETaskResult Execute() override;
+    bool WantsInput(const TTaskEdge& edge) const noexcept override;
+    bool TryNotifyDependency() noexcept override;
+
+private:
+    std::shared_ptr<const TRuntimeFilterCode> Code_;
+    std::shared_ptr<TRuntimeFilterProbeState> ProbeState_;
+    TInputPort Input_;
+    TOutputPort Output_;
+    TRowSet CurrentInput_ = {};
+    bool HasInput_ = false;
+    bool Prepared_ = false;
+    bool InputFinished_ = false;
+    bool OutputFinished_ = false;
+    std::atomic<bool> DependencyNotified_ = false;
 };
 
 class TUnaryTask final : public ITaskNode {
@@ -209,7 +254,7 @@ public:
     ~TBinaryBlockingTask() override;
 
     ETaskResult Execute() override;
-    bool WantsInput(const TTaskEdge& edge) const override;
+    bool WantsInput(const TTaskEdge& edge) const noexcept override;
 
 private:
     std::shared_ptr<const TBinaryBlockingCode> Code_;
@@ -262,11 +307,8 @@ private:
     struct TPendingOutput;
 
     bool BatchingEnabled() const;
-    bool NeedsHashes(size_t partitions) const;
     std::shared_ptr<uint64_t> ComputeHashes(const std::shared_ptr<TRowSet>& input);
     void AccumulateFilter(const TRowSet& rowSet, std::span<const uint64_t> hashes);
-    void ProbeFilter(const TRowSet& rowSet, std::span<const uint64_t> hashes);
-    bool FilterKeeps(size_t row) const;
     void EnsureBuffers(size_t partitions);
     void Scatter(TRowSet& rowSet);
     void ScatterBuffered(const std::shared_ptr<TRowSet>& input);
@@ -287,10 +329,7 @@ private:
     TInputPort Input_;
     THashShuffleConnection* Output_ = nullptr;
     size_t SourceLane_ = 0;
-    std::vector<uint8_t> FilterMask_;
     std::optional<TRuntimeFilterBuilder> FilterBuilder_;
-    std::shared_ptr<TRuntimeFilterProbeState> FilterProbeState_;
-    bool FilterActive_ = false;
     std::vector<std::unique_ptr<TDestinationBuffer>> Buffers_;
     std::vector<TPendingOutput> Pending_;
     size_t PendingIndex_ = 0;

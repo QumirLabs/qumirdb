@@ -247,13 +247,19 @@ NQumir::NAst::TTypePtr BuildSourceRuntimeType(TSourceOperator& src)
 }
 
 EJoinBuildSide ChooseJoinBuildSide(const TJoinOperator& join) {
+    const auto type = join.JoinType();
+    // Outer joins retain both sides until finalization. Their runtime filter
+    // has a producer side, but it does not change the join processor's mode.
+    if (type == EJoinType::Left || type == EJoinType::Right
+        || type == EJoinType::Full) {
+        return EJoinBuildSide::Auto;
+    }
     // Publishing requires the build side to finish before probing.
     if (const auto& runtimeFilter = join.RuntimeFilter()) {
         return runtimeFilter->BuildSide == EJoinFilterSide::Left
             ? EJoinBuildSide::Left
             : EJoinBuildSide::Right;
     }
-    const auto type = join.JoinType();
     // A residual predicate needs right rows, not just key membership.
     const bool semiAnti =
         type == EJoinType::LeftSemi || type == EJoinType::LeftAnti;

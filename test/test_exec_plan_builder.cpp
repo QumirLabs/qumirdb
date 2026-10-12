@@ -7,9 +7,13 @@
 #include <qdb/kernel/finalize.h>
 #include <qdb/plan/build.h>
 #include <qdb/plan/ops/join.h>
+#include <qdb/plan/ops/cte_consumer.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/pipeline.h>
+#include <qdb/plan/plan_print.h>
+#include <qdb/plan/passes/runtime_filters.h>
 #include <qdb/scheduler/plan_lowerer.h>
+#include <qdb/scheduler/runtime_adapter.h>
 #include <qdb/scheduler/scan_split.h>
 #include <qdb/sql/parser.h>
 
@@ -80,9 +84,10 @@ private:
 
 class TRecordingFilterBindingFactory final : public IRuntimeFilterBindingFactory {
 public:
-    TRuntimeFilterBinding Create(uint32_t id, size_t producerCount) override {
+    TRuntimeFilterBinding Create(
+        uint32_t id, size_t producerCount, size_t bloomBytes) override {
         Created.emplace_back(id, producerCount);
-        return Local_.Create(id, producerCount);
+        return Local_.Create(id, producerCount, bloomBytes);
     }
 
     std::vector<std::pair<uint32_t, size_t>> Created;
@@ -103,6 +108,18 @@ TJoinOperator* FindJoin(const TOperatorPtr& node) {
         }
     }
     return nullptr;
+}
+
+bool HasRuntimeFilterUse(const TOperatorPtr& node) {
+    if (!node->RuntimeFilterUses.empty()) {
+        return true;
+    }
+    for (const auto& input : node->Inputs()) {
+        if (HasRuntimeFilterUse(input)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 TOperatorPtr BuildSqlPlan(
@@ -230,6 +247,13 @@ void ExpectSameSemanticPlan(const TExecPlan& left, const TExecPlan& right) {
         EXPECT_EQ(l.StageId, r.StageId) << i;
         EXPECT_EQ(l.Kind, r.Kind) << i;
         EXPECT_EQ(l.AggregatePhase, r.AggregatePhase) << i;
+        ASSERT_EQ(l.RuntimeFilterUse.has_value(),
+            r.RuntimeFilterUse.has_value()) << i;
+        if (l.RuntimeFilterUse) {
+            EXPECT_EQ(l.RuntimeFilterUse->Id, r.RuntimeFilterUse->Id) << i;
+            EXPECT_EQ(l.RuntimeFilterUse->ProbeKeys,
+                r.RuntimeFilterUse->ProbeKeys) << i;
+        }
         EXPECT_EQ(l.Inputs, r.Inputs) << i;
         ASSERT_TRUE(l.OutputType) << i;
         ASSERT_TRUE(r.OutputType) << i;
@@ -276,6 +300,25 @@ TEST(ExecPlanBuilder, SingleAndMultiCollapseJoinToSameSemanticDag) {
     EXPECT_EQ(CountKind(multi.Exec, EExecPlanNodeKind::Join), 1u);
 }
 
+TEST(ExecPlanBuilder, CostedRuntimeFilterIsPlacedBeforeLowering) {
+    TStatsSplitMockSource large(1'000'000, 1'000'000);
+    TStatsSplitMockSource small(100'000, 10'000);
+    const std::unordered_map<std::string, ISource*> sources{
+        {"l", &large}, {"r", &small},
+    };
+    auto plan = BuildSqlPlan(
+        "SELECT l.k FROM l JOIN r ON l.k = r.k", sources);
+    auto* join = FindJoin(plan);
+    ASSERT_NE(join, nullptr);
+    ASSERT_TRUE(join->RuntimeFilter());
+    EXPECT_EQ(join->RuntimeFilter()->BuildSide, EJoinFilterSide::Right);
+    auto probe = TMaybeOp<TSourceOperator>(join->Left());
+    ASSERT_TRUE(probe);
+    ASSERT_EQ(probe.Cast()->RuntimeFilterUses.size(), 1u);
+    EXPECT_EQ(probe.Cast()->RuntimeFilterUses[0].Id,
+        join->RuntimeFilter()->Id);
+}
+
 TEST(ExecPlanBuilder, LowererUsesInjectedRuntimeFilterBindings) {
     TSplitMockSource left({"k"});
     TSplitMockSource right({"k"});
@@ -290,12 +333,103 @@ TEST(ExecPlanBuilder, LowererUsesInjectedRuntimeFilterBindings) {
     join->MutableRuntimeFilter() = TRuntimeFilterSpec{
         .Id = 17, .BuildSide = EJoinFilterSide::Right};
 
+    PlaceRuntimeFilterConsumers(plan);
+    std::stringstream printed;
+    PrintPlanTree(printed, plan);
+    EXPECT_NE(printed.str().find("source l AS l use-filter 17 keys=[l.k]"),
+        std::string::npos);
+
     auto bindings = std::make_shared<TRecordingFilterBindingFactory>();
     auto lowered = NScheduler::LowerPlanToGraph(
         plan, MultiSettings(), nullptr, nullptr, bindings);
     ASSERT_TRUE(lowered.Graph);
     EXPECT_EQ(bindings->Created,
         (std::vector<std::pair<uint32_t, size_t>>{{17, 4}}));
+    size_t filterTasks = 0;
+    for (const auto& node : lowered.Graph->Nodes()) {
+        if (node->DebugKind == "runtime-filter") {
+            ++filterTasks;
+            EXPECT_NE(dynamic_cast<NScheduler::TRuntimeFilterTask*>(node->Task),
+                nullptr);
+        }
+    }
+    EXPECT_EQ(filterTasks, 4u);
+    size_t dependencies = 0;
+    for (const auto& edge : lowered.Graph->Edges()) {
+        if (edge->Kind == NScheduler::ETaskEdgeKind::Dependency) {
+            ++dependencies;
+            EXPECT_EQ(edge->Dst->DebugKind, "runtime-filter");
+        }
+    }
+    EXPECT_EQ(dependencies, 16u);
+    auto exec = BuildExecPlan(lowered);
+    ASSERT_TRUE(exec.has_value()) << exec.error();
+    ASSERT_EQ(CountKind(*exec, EExecPlanNodeKind::RuntimeFilter), 1u);
+    const auto filterNode = std::ranges::find_if(exec->Nodes,
+        [](const auto& node) {
+            return node.Kind == EExecPlanNodeKind::RuntimeFilter;
+        });
+    ASSERT_TRUE(filterNode->RuntimeFilterUse);
+    EXPECT_EQ(filterNode->RuntimeFilterUse->Id, 17u);
+    EXPECT_EQ(filterNode->RuntimeFilterUse->ProbeKeys,
+        (std::vector<std::string>{"l.k"}));
+    ASSERT_EQ(filterNode->Inputs.size(), 1u);
+    EXPECT_EQ(exec->Nodes[filterNode->Inputs[0]].Kind,
+        EExecPlanNodeKind::Source);
+    EXPECT_EQ(filterNode->OutputType->ToString(),
+        exec->Nodes[filterNode->Inputs[0]].OutputType->ToString());
+}
+
+TEST(ExecPlanBuilder, RuntimeFilterStaysAfterOneSharedCteReader) {
+    TSplitMockSource source({"k", "v"});
+    const std::unordered_map<std::string, ISource*> sources{{"t", &source}};
+    constexpr std::string_view sql =
+        "WITH x AS (SELECT k, v FROM t) "
+        "SELECT p.k FROM x p JOIN x q ON p.k = q.k";
+    auto plan = BuildSqlPlan(sql, sources);
+    auto* join = FindJoin(plan);
+    ASSERT_NE(join, nullptr);
+    join->MutableRuntimeFilter() = TRuntimeFilterSpec{
+        .Id = 23, .BuildSide = EJoinFilterSide::Right};
+    PlaceRuntimeFilterConsumers(plan);
+    ASSERT_EQ(join->Left()->Inputs().size(), 1u);
+    ASSERT_EQ(join->Right()->Inputs().size(), 1u);
+    auto left = TMaybeOp<TCteConsumer>(join->Left()->Inputs()[0]);
+    auto right = TMaybeOp<TCteConsumer>(join->Right()->Inputs()[0]);
+    ASSERT_TRUE(left);
+    ASSERT_TRUE(right);
+    ASSERT_EQ(left.Cast()->Materialization(), right.Cast()->Materialization());
+    ASSERT_EQ(left.Cast()->RuntimeFilterUses.size(), 1u);
+    EXPECT_TRUE(right.Cast()->RuntimeFilterUses.empty());
+    EXPECT_FALSE(HasRuntimeFilterUse(left.Cast()->Materialization()->Plan));
+
+    auto lowered = NScheduler::LowerPlanToGraph(
+        plan, MultiSettings(), nullptr);
+    size_t dependencyCount = 0;
+    for (const auto& edge : lowered.Graph->Edges()) {
+        if (edge->Kind == NScheduler::ETaskEdgeKind::Dependency) {
+            ++dependencyCount;
+            EXPECT_EQ(edge->Dst->DebugKind, "runtime-filter");
+        }
+    }
+    EXPECT_GT(dependencyCount, 0u);
+
+    auto exec = BuildExecPlan(lowered);
+    ASSERT_TRUE(exec.has_value()) << exec.error();
+    EXPECT_EQ(CountKind(*exec, EExecPlanNodeKind::CteProducer), 1u);
+    EXPECT_EQ(CountKind(*exec, EExecPlanNodeKind::CteConsumer), 2u);
+    ASSERT_EQ(CountKind(*exec, EExecPlanNodeKind::RuntimeFilter), 1u);
+    const auto filterNode = std::ranges::find_if(exec->Nodes,
+        [](const auto& node) {
+            return node.Kind == EExecPlanNodeKind::RuntimeFilter;
+        });
+    ASSERT_TRUE(filterNode->RuntimeFilterUse);
+    EXPECT_EQ(filterNode->RuntimeFilterUse->Id, 23u);
+    EXPECT_EQ(filterNode->RuntimeFilterUse->ProbeKeys,
+        (std::vector<std::string>{"k"}));
+    ASSERT_EQ(filterNode->Inputs.size(), 1u);
+    EXPECT_EQ(exec->Nodes[filterNode->Inputs[0]].Kind,
+        EExecPlanNodeKind::CteConsumer);
 }
 
 TEST(ExecPlanBuilder, RuntimeFiltersShareTheQueryJit) {
@@ -334,6 +468,25 @@ TEST(ExecPlanBuilder, RuntimeFiltersShareTheQueryJit) {
     for (const auto& kernel : first.Kernels) {
         EXPECT_EQ(kernel.Slot->Runner, bloom->Slot->Runner);
     }
+}
+
+TEST(ExecPlanBuilder, RejectsDuplicateRuntimeFilterProducerIds) {
+    TSplitMockSource left({"k"}), right({"k"}), third({"k"});
+    const std::unordered_map<std::string, ISource*> sources{
+        {"l", &left}, {"r", &right}, {"t", &third},
+    };
+    auto plan = BuildSqlPlan(
+        "SELECT l.k FROM l JOIN r ON l.k = r.k JOIN t ON l.k = t.k", sources);
+    auto* outer = FindJoin(plan);
+    ASSERT_NE(outer, nullptr);
+    auto* inner = FindJoin(outer->Left());
+    ASSERT_NE(inner, nullptr);
+    inner->MutableRuntimeFilter() = TRuntimeFilterSpec{
+        .Id = 7, .BuildSide = EJoinFilterSide::Right};
+    outer->MutableRuntimeFilter() = TRuntimeFilterSpec{
+        .Id = 7, .BuildSide = EJoinFilterSide::Right};
+    EXPECT_THROW(NScheduler::LowerPlanToGraph(plan, SingleSettings(), nullptr),
+        std::runtime_error);
 }
 
 TEST(ExecPlanBuilder, SingleAndMultiCollapseUnionLanes) {

@@ -222,6 +222,42 @@ function exportBundle(name, mode, embedWasm, cacheDir = null) {
   return bundle;
 }
 
+async function runRuntimeFilterExportContract() {
+  const fixture = fixtures.join;
+  const request = {
+    sql: fixture.sql,
+    dataset: datasetFor({
+      ...fixture,
+      stats: {
+        l: {
+          rows: 1_000_000,
+          columns: [{ name: 'k', ndv: 1_000_000, ndv_exact: true }],
+        },
+        r: {
+          rows: 100_000,
+          columns: [{ name: 'rk', ndv: 10_000, ndv_exact: true }],
+        },
+      },
+    }),
+    options: {
+      scheduler: 'single',
+      scanTasks: 1,
+      shufflePartitions: 1,
+      format: 'runtime-bundle',
+      embedWasm: true,
+    },
+  };
+  const bundle = JSON.parse(run(
+    exporter, exporterBaseArgs, JSON.stringify(request)));
+  assert.equal(bundle.ok, true, bundle.error?.message);
+  assert.equal(bundle.exec?.supported, true, bundle.exec?.reason);
+  assert.ok(bundle.graphs?.physical?.nodes?.length > 0);
+  assert.ok(!bundle.exec.nodes.some(node => node.kind === 'runtime-filter'));
+  assert.deepEqual(
+    normalizeResult(await browserResult('join', resolveExecArtifacts(bundle))),
+    normalizeResult(nativeResult('join', 'single')));
+}
+
 function schemaTypeRequest(type) {
   return {
     sql: 'SELECT amount FROM t',
@@ -738,6 +774,24 @@ async function main() {
       pathToFileURL(runtimePath).href));
     ({ Type, printType, prettifyType } = await import(
       pathToFileURL(path.join(path.dirname(runtimePath), 'oz_type.js')).href));
+    {
+      const started = performance.now();
+      try {
+        await runRuntimeFilterExportContract();
+        results.push({
+          name: 'runtime-filter-export',
+          elapsedMs: performance.now() - started,
+          error: null,
+        });
+      } catch (error) {
+        results.push({
+          name: 'runtime-filter-export',
+          elapsedMs: performance.now() - started,
+          error,
+        });
+        console.error(`[FAIL] runtime-filter-export\n${errorText(error)}`);
+      }
+    }
     {
       const started = performance.now();
       try {
