@@ -6,6 +6,7 @@
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/stats.h>
+#include <qdb/plan/ops/union.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -274,6 +275,92 @@ std::optional<std::vector<std::string>> ProjectInputKeys(
     return inputKeys;
 }
 
+std::optional<std::vector<TRuntimeFilterUseSpec>> UnionBranchUses(
+    const TUnionAllOperator& un, const TRuntimeFilterUseSpec& use)
+{
+    if (!un.Type || un.Inputs().empty()) {
+        return std::nullopt;
+    }
+    const auto output = un.OutputColumns();
+    if (!output) {
+        return std::nullopt;
+    }
+    std::vector<size_t> keyPositions;
+    keyPositions.reserve(use.ProbeKeys.size());
+    for (const auto& key : use.ProbeKeys) {
+        const auto field = std::find_if(output->Fields.begin(),
+            output->Fields.end(), [&](const auto& item) {
+                return item.first == key;
+            });
+        if (field == output->Fields.end()) {
+            return std::nullopt;
+        }
+        keyPositions.push_back(static_cast<size_t>(
+            std::distance(output->Fields.begin(), field)));
+    }
+
+    std::vector<TRuntimeFilterUseSpec> branches;
+    branches.reserve(un.Inputs().size());
+    for (const auto& branch : un.Inputs()) {
+        if (!branch->Type) {
+            return std::nullopt;
+        }
+        const auto schema = branch->OutputColumns();
+        if (!schema || schema->Fields.size() != output->Fields.size()) {
+            return std::nullopt;
+        }
+        TRuntimeFilterUseSpec translated{.Id = use.Id};
+        translated.ProbeKeys.reserve(keyPositions.size());
+        for (size_t position : keyPositions) {
+            const auto& outputField = output->Fields[position];
+            const auto& branchField = schema->Fields[position];
+            if (!outputField.second || !branchField.second
+                || outputField.second->ToString()
+                    != branchField.second->ToString()) {
+                return std::nullopt;
+            }
+            translated.ProbeKeys.push_back(branchField.first);
+        }
+        branches.push_back(std::move(translated));
+    }
+    return branches;
+}
+
+void PlaceConsumer(TOperatorPtr target, TRuntimeFilterUseSpec use) {
+    if (auto predicate = TMaybeOp<TFilterOperator>(target)) {
+        auto input = predicate.Cast()->Input();
+        if (target->Type && input->Type
+            && std::all_of(use.ProbeKeys.begin(), use.ProbeKeys.end(),
+                [&](const auto& key) {
+                    return SameKeyType(*target->OutputColumns(), key,
+                        *input->OutputColumns(), key);
+                })) {
+            PlaceConsumer(input, std::move(use));
+            return;
+        }
+    } else if (auto project = TMaybeOp<TProjectOperator>(target)) {
+        auto inputKeys = ProjectInputKeys(*project.Cast(), use.ProbeKeys);
+        if (inputKeys) {
+            use.ProbeKeys = std::move(*inputKeys);
+            PlaceConsumer(project.Cast()->Input(), std::move(use));
+            return;
+        }
+    } else if (auto un = TMaybeOp<TUnionAllOperator>(target)) {
+        auto branches = UnionBranchUses(*un.Cast(), use);
+        if (branches) {
+            for (size_t i = 0; i < branches->size(); ++i) {
+                PlaceConsumer(un.Cast()->Inputs()[i], std::move((*branches)[i]));
+            }
+            return;
+        }
+    }
+    if (!std::any_of(target->RuntimeFilterUses.begin(),
+            target->RuntimeFilterUses.end(),
+            [&](const auto& existing) { return existing.Id == use.Id; })) {
+        target->RuntimeFilterUses.push_back(std::move(use));
+    }
+}
+
 void PlaceConsumers(const TOperatorPtr& root) {
     for (const auto& child : root->Inputs()) {
         PlaceConsumers(child);
@@ -295,31 +382,7 @@ void PlaceConsumers(const TOperatorPtr& root) {
         use.ProbeKeys.push_back(filter.BuildSide == EJoinFilterSide::Left
             ? key.Right : key.Left);
     }
-    auto target = probe;
-    while (true) {
-        if (auto predicate = TMaybeOp<TFilterOperator>(target)) {
-            auto input = predicate.Cast()->Input();
-            if (!target->Type || !input->Type
-                || !std::all_of(use.ProbeKeys.begin(), use.ProbeKeys.end(),
-                    [&](const auto& key) {
-                        return SameKeyType(*target->OutputColumns(), key,
-                            *input->OutputColumns(), key);
-                    })) {
-                break;
-            }
-            target = input;
-        } else if (auto project = TMaybeOp<TProjectOperator>(target)) {
-            auto inputKeys = ProjectInputKeys(*project.Cast(), use.ProbeKeys);
-            if (!inputKeys) {
-                break;
-            }
-            use.ProbeKeys = std::move(*inputKeys);
-            target = project.Cast()->Input();
-        } else {
-            break;
-        }
-    }
-    target->RuntimeFilterUses.push_back(std::move(use));
+    PlaceConsumer(probe, std::move(use));
 }
 
 } // namespace

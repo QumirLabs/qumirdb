@@ -12,6 +12,7 @@
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/project.h>
+#include <qdb/plan/ops/union.h>
 #include <qdb/plan/passes/column_pruning.h>
 #include <qdb/plan/passes/runtime_filters.h>
 #include <qdb/plan/passes/typing.h>
@@ -692,6 +693,74 @@ TEST(JoinPlanner, RuntimeFilterMergesTwoBuildLanesBeforeProbing) {
     ASSERT_TRUE(bindings->Probe);
     EXPECT_EQ(bindings->Probe->Probed.load(), 4u);
     EXPECT_EQ(bindings->Probe->Rejected.load(), 2u);
+}
+
+TEST(JoinPlanner, RuntimeFilterUsesEachUnionBranchKeyName) {
+    std::vector<int64_t> lk1 = {1, 2}, lv1 = {10, 20};
+    std::vector<int64_t> lk2 = {3, 4}, lv2 = {30, 40};
+    std::vector<int64_t> lk3 = {5, 6}, lv3 = {50, 60};
+    std::vector<int64_t> rk = {1, 3, 5}, rv = {100, 300, 500};
+    std::vector<TColumn> lc1, lc2, lc3, rc;
+    TMockSource left1({"lv", "lk"},
+        {KeyValBatch(lv1.data(), lk1.data(), 2, lc1)});
+    TMockSource left2({"alternate_v", "alternate_k"},
+        {KeyValBatch(lv2.data(), lk2.data(), 2, lc2)});
+    TMockSource left3({"raw_k", "raw_v"},
+        {KeyValBatch(lk3.data(), lv3.data(), 2, lc3)});
+    TMockSource right({"rk", "rv"},
+        {KeyValBatch(rk.data(), rv.data(), 3, rc)});
+    auto first = std::make_shared<TSourceOperator>(left1, "L1");
+    auto second = std::make_shared<TSourceOperator>(left2, "L2");
+    auto third = std::make_shared<TSourceOperator>(left3, "L3");
+    auto computed = MakeProject(third,
+        {{"raw_v", "raw_v"}, {"computed_k", "(+ raw_k 0)"}});
+    ASSERT_TRUE(computed);
+    auto unionAll = std::make_shared<TUnionAllOperator>(
+        std::vector<TOperatorPtr>{first, second, *computed});
+    auto join = std::make_shared<TJoinOperator>(unionAll,
+        std::make_shared<TSourceOperator>(right, "R"),
+        std::vector<TJoinKey>{{"lk", "rk"}}, EJoinType::Inner, nullptr);
+    join->MutableRuntimeFilter() = TRuntimeFilterSpec{
+        .Id = 7, .BuildSide = EJoinFilterSide::Right};
+    TOperatorPtr root = join;
+    AnnotateTypes(root);
+    PlaceRuntimeFilterConsumers(root);
+
+    ASSERT_TRUE(unionAll->RuntimeFilterUses.empty());
+    ASSERT_EQ(first->RuntimeFilterUses.size(), 1u);
+    ASSERT_EQ(second->RuntimeFilterUses.size(), 1u);
+    ASSERT_EQ((*computed)->RuntimeFilterUses.size(), 1u);
+    EXPECT_TRUE(third->RuntimeFilterUses.empty());
+    EXPECT_EQ(first->RuntimeFilterUses[0].ProbeKeys,
+        (std::vector<std::string>{"lk"}));
+    EXPECT_EQ(second->RuntimeFilterUses[0].ProbeKeys,
+        (std::vector<std::string>{"alternate_k"}));
+    EXPECT_EQ((*computed)->RuntimeFilterUses[0].ProbeKeys,
+        (std::vector<std::string>{"computed_k"}));
+
+    NScheduler::TSettings settings;
+    settings.Scheduler.Mode = NScheduler::EExecutionMode::ThreadedScheduler;
+    settings.Scheduler.WorkerCount = 4;
+    settings.HashShuffle.PartitionCount = 2;
+    settings.HashShuffle.MaxPartitionCount = 2;
+    auto bindings = std::make_shared<TCountingFilterBindingFactory>();
+    auto plan = RunPlan(root, settings, nullptr, bindings);
+    std::vector<int64_t> keys;
+    TRowSet out{};
+    while (plan->Next(out)) {
+        for (int64_t row = 0; row < out.RowCount; ++row) {
+            if (!out.Selection || out.Selection[row]) {
+                keys.push_back(reinterpret_cast<const int64_t*>(
+                    out.Columns[1].Data)[row]);
+            }
+        }
+        Release(&out);
+    }
+    std::sort(keys.begin(), keys.end());
+    EXPECT_EQ(keys, (std::vector<int64_t>{1, 3, 5}));
+    ASSERT_TRUE(bindings->Probe);
+    EXPECT_EQ(bindings->Probe->Probed.load(), 6u);
+    EXPECT_EQ(bindings->Probe->Rejected.load(), 3u);
 }
 
 TEST(JoinPlanner, ProjectOnTopPrunesJoinInputs) {
