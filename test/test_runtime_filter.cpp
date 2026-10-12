@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <atomic>
 #include <random>
+#include <span>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -27,6 +28,14 @@ std::vector<uint64_t> Hashes(size_t count, uint64_t seed) {
         out.push_back(rng());
     }
     return out;
+}
+
+void PublishKeys(TRuntimeFilter& filter, const std::vector<uint64_t>& keys) {
+    auto builder = filter.MakeBuilder();
+    for (uint64_t key : keys) {
+        builder.Add(key);
+    }
+    filter.FinishProducer(std::move(builder).TakePartial());
 }
 
 size_t ProbeBatch(IRuntimeFilterProbe& filter, TRuntimeFilterProbeState& state,
@@ -49,11 +58,7 @@ size_t ProbeBatch(IRuntimeFilterProbe& filter, TRuntimeFilterProbeState& state,
 TEST(RuntimeFilter, NeverRejectsAKeyItWasGiven) {
     TRuntimeFilter filter;
     auto keys = Hashes(5000, 1);
-    auto builder = filter.MakeBuilder();
-    for (uint64_t key : keys) {
-        builder.Add(key);
-    }
-    filter.FinishProducer(std::move(builder).TakePartial());
+    PublishKeys(filter, keys);
 
     ASSERT_TRUE(filter.Ready());
     EXPECT_FALSE(filter.UsesBloom());
@@ -116,21 +121,13 @@ TEST(RuntimeFilter, BatchMatchesScalarForExactBloomAndUnpublished) {
 
     TRuntimeFilter exact(/*maxKeys=*/256, /*bloomBytes=*/512);
     check(exact);
-    auto exactBuilder = exact.MakeBuilder();
-    for (uint64_t key : keys) {
-        exactBuilder.Add(key);
-    }
-    exact.FinishProducer(std::move(exactBuilder).TakePartial());
+    PublishKeys(exact, keys);
 
     ASSERT_FALSE(exact.UsesBloom());
     check(exact);
 
     TRuntimeFilter bloom(/*maxKeys=*/8, /*bloomBytes=*/512);
-    auto bloomBuilder = bloom.MakeBuilder();
-    for (uint64_t key : keys) {
-        bloomBuilder.Add(key);
-    }
-    bloom.FinishProducer(std::move(bloomBuilder).TakePartial());
+    PublishKeys(bloom, keys);
 
     ASSERT_TRUE(bloom.UsesBloom());
     check(bloom);
@@ -172,11 +169,7 @@ TEST(RuntimeFilter, BloomBatchMatchesScalarWithQueryKernel) {
     context->BloomProbe = TKernelCompiler().CompileBloomProbe();
     TRuntimeFilter filter(/*maxKeys=*/8, /*bloomBytes=*/2048, context);
     auto keys = Hashes(2000, 24);
-    auto builder = filter.MakeBuilder();
-    for (uint64_t key : keys) {
-        builder.Add(key);
-    }
-    filter.FinishProducer(std::move(builder).TakePartial());
+    PublishKeys(filter, keys);
 
     ASSERT_TRUE(filter.UsesBloom());
 
@@ -205,11 +198,7 @@ TEST(RuntimeFilter, BatchRespectsSelectionAndCountsOnlySelectedRows) {
         TRuntimeFilter filter(cap, /*bloomBytes=*/512);
         auto state = filter.CreateProbeState();
         auto keys = Hashes(200, 26);
-        auto builder = filter.MakeBuilder();
-        for (uint64_t key : keys) {
-            builder.Add(key);
-        }
-        filter.FinishProducer(std::move(builder).TakePartial());
+        PublishKeys(filter, keys);
 
         auto probes = Hashes(1000, 27);
         std::vector<uint8_t> selection(probes.size(), 0);
@@ -237,11 +226,7 @@ TEST(RuntimeFilter, BatchRespectsSelectionAndCountsOnlySelectedRows) {
 TEST(RuntimeFilter, WeakBloomPausesAndRechecks) {
     TRuntimeFilter filter(/*maxKeys=*/8, /*bloomBytes=*/512);
     auto keys = Hashes(200, 31);
-    auto builder = filter.MakeBuilder();
-    for (uint64_t key : keys) {
-        builder.Add(key);
-    }
-    filter.FinishProducer(std::move(builder).TakePartial());
+    PublishKeys(filter, keys);
 
     ASSERT_TRUE(filter.UsesBloom());
 
@@ -278,11 +263,7 @@ TEST(RuntimeFilter, WeakBloomPausesAndRechecks) {
 
 TEST(RuntimeFilter, RejectsKeysItWasNotGiven) {
     TRuntimeFilter filter;
-    auto builder = filter.MakeBuilder();
-    for (uint64_t key : Hashes(1000, 2)) {
-        builder.Add(key);
-    }
-    filter.FinishProducer(std::move(builder).TakePartial());
+    PublishKeys(filter, Hashes(1000, 2));
 
     size_t passed = 0;
     for (uint64_t probe : Hashes(10000, 99)) {
@@ -325,55 +306,6 @@ TEST(RuntimeFilter, MergedOverflowUsesBloom) {
     EXPECT_TRUE(filter.UsesBloom());
     for (uint64_t key : allKeys) {
         EXPECT_TRUE(filter.MayContain(key));
-    }
-}
-
-TEST(RuntimeFilter, MergesKeysFromEveryBuilder) {
-    TRuntimeFilter filter;
-    filter.SetProducerCount(4);
-    std::vector<std::vector<uint64_t>> parts;
-    for (uint64_t seed = 0; seed < 4; ++seed) {
-        parts.push_back(Hashes(100, seed + 20));
-        auto builder = filter.MakeBuilder();
-        for (uint64_t key : parts.back()) {
-            builder.Add(key);
-        }
-        filter.FinishProducer(std::move(builder).TakePartial());
-    }
-
-    for (const auto& part : parts) {
-        for (uint64_t key : part) {
-            EXPECT_TRUE(filter.MayContain(key));
-        }
-    }
-}
-
-TEST(RuntimeFilter, MergesConcurrently) {
-    TRuntimeFilter filter;
-    constexpr size_t Threads = 8;
-    constexpr size_t PerThread = 500;
-    filter.SetProducerCount(Threads);
-
-    std::vector<std::thread> workers;
-    for (size_t t = 0; t < Threads; ++t) {
-        workers.emplace_back([&filter, t] {
-            auto builder = filter.MakeBuilder();
-            for (uint64_t key : Hashes(PerThread, t + 100)) {
-                builder.Add(key);
-            }
-            filter.FinishProducer(std::move(builder).TakePartial());
-        });
-    }
-    for (auto& worker : workers) {
-        worker.join();
-    }
-
-    ASSERT_FALSE(filter.UsesBloom());
-    EXPECT_EQ(filter.StatsSnapshot().ExactKeys, Threads * PerThread);
-    for (size_t t = 0; t < Threads; ++t) {
-        for (uint64_t key : Hashes(PerThread, t + 100)) {
-            EXPECT_TRUE(filter.MayContain(key));
-        }
     }
 }
 
@@ -516,11 +448,7 @@ TEST(RuntimeFilter, MergesExactEmptyAndBloomContributionsWithoutLosingZeroHash) 
     filter.FinishProducer(filter.MakeBuilder().TakePartial());
 
     auto keys = Hashes(200, 71);
-    auto bloom = filter.MakeBuilder();
-    for (uint64_t key : keys) {
-        bloom.Add(key);
-    }
-    filter.FinishProducer(std::move(bloom).TakePartial());
+    PublishKeys(filter, keys);
 
     ASSERT_TRUE(filter.UsesBloom());
     EXPECT_EQ(filter.StatsSnapshot().BloomBytes, 512u);
@@ -548,11 +476,7 @@ TEST(RuntimeFilter, IncompatibleBloomContributionPassesEverything) {
 
 TEST(RuntimeFilter, SaturatedBloomPassesEverything) {
     TRuntimeFilter filter(/*maxKeys=*/8, /*bloomBytes=*/64);
-    auto builder = filter.MakeBuilder();
-    for (uint64_t key : Hashes(10000, 88)) {
-        builder.Add(key);
-    }
-    filter.FinishProducer(std::move(builder).TakePartial());
+    PublishKeys(filter, Hashes(10000, 88));
 
     EXPECT_TRUE(filter.StatsSnapshot().BloomDisabled);
     EXPECT_FALSE(filter.UsesBloom());
@@ -583,27 +507,11 @@ TEST(RuntimeFilter, RepeatedKeysAcrossBuildersDoNotConsumeTheCap) {
     filter.SetProducerCount(20);
     auto keys = Hashes(50, 8);
     for (int producer = 0; producer < 20; ++producer) {
-        auto builder = filter.MakeBuilder();
-        for (uint64_t key : keys) {
-            builder.Add(key);
-        }
-        filter.FinishProducer(std::move(builder).TakePartial());
+        PublishKeys(filter, keys);
     }
 
     ASSERT_FALSE(filter.UsesBloom());
     EXPECT_EQ(filter.StatsSnapshot().ExactKeys, keys.size());
-}
-
-TEST(RuntimeFilter, DeduplicatesRepeatedKeys) {
-    TRuntimeFilter filter;
-    auto builder = filter.MakeBuilder();
-    for (int i = 0; i < 100; ++i) {
-        builder.Add(42);
-    }
-    filter.FinishProducer(std::move(builder).TakePartial());
-
-    EXPECT_EQ(filter.StatsSnapshot().ExactKeys, 1u);
-    EXPECT_TRUE(filter.MayContain(42));
 }
 
 TEST(RuntimeFilter, PublishesWhenTheLastProducerFinishes) {
@@ -633,16 +541,13 @@ TEST(RuntimeFilter, PublishesWhenTheLastProducerFinishes) {
 TEST(RuntimeFilter, PublishesOnceUnderContention) {
     TRuntimeFilter filter;
     constexpr size_t Producers = 8;
+    constexpr size_t KeysPerProducer = 500;
     filter.SetProducerCount(Producers);
 
     std::vector<std::thread> workers;
     for (size_t t = 0; t < Producers; ++t) {
         workers.emplace_back([&filter, t] {
-            auto builder = filter.MakeBuilder();
-            for (uint64_t key : Hashes(200, t + 50)) {
-                builder.Add(key);
-            }
-            filter.FinishProducer(std::move(builder).TakePartial());
+            PublishKeys(filter, Hashes(KeysPerProducer, t + 50));
         });
     }
     for (auto& worker : workers) {
@@ -651,9 +556,9 @@ TEST(RuntimeFilter, PublishesOnceUnderContention) {
 
     ASSERT_TRUE(filter.Ready());
     ASSERT_FALSE(filter.UsesBloom());
-    EXPECT_EQ(filter.StatsSnapshot().ExactKeys, Producers * 200);
+    EXPECT_EQ(filter.StatsSnapshot().ExactKeys, Producers * KeysPerProducer);
     for (size_t t = 0; t < Producers; ++t) {
-        for (uint64_t key : Hashes(200, t + 50)) {
+        for (uint64_t key : Hashes(KeysPerProducer, t + 50)) {
             EXPECT_TRUE(filter.MayContain(key));
         }
     }

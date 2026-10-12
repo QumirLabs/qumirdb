@@ -132,15 +132,15 @@ std::optional<TKeyEstimate> KeyNdv(
     return TKeyEstimate{ndv, exact};
 }
 
-std::optional<TKeyEstimate> KeyNdv(
-    const TStatsPtr& stats, const std::vector<TJoinKey>& keys, bool leftSide)
+std::vector<std::string> JoinSideKeys(
+    const TJoinOperator& join, EJoinFilterSide side)
 {
     std::vector<std::string> names;
-    names.reserve(keys.size());
-    for (const auto& key : keys) {
-        names.push_back(leftSide ? key.Left : key.Right);
+    names.reserve(join.Keys().size());
+    for (const auto& key : join.Keys()) {
+        names.push_back(side == EJoinFilterSide::Left ? key.Left : key.Right);
     }
-    return KeyNdv(stats, names);
+    return names;
 }
 
 double PassFraction(TKeyEstimate buildKey, TKeyEstimate probeKey) {
@@ -166,13 +166,8 @@ std::optional<double> EstimatedPassFraction(double buildRows, double probeRows,
 std::vector<std::string> ProbeKeys(
     const TJoinOperator& join, EJoinFilterSide buildSide)
 {
-    std::vector<std::string> keys;
-    keys.reserve(join.Keys().size());
-    for (const auto& key : join.Keys()) {
-        keys.push_back(buildSide == EJoinFilterSide::Left
-            ? key.Right : key.Left);
-    }
-    return keys;
+    return JoinSideKeys(join, buildSide == EJoinFilterSide::Left
+        ? EJoinFilterSide::Right : EJoinFilterSide::Left);
 }
 
 TOperatorPtr ProbeInput(
@@ -318,8 +313,10 @@ std::optional<TFilterDecision> ChooseRuntimeFilter(
             .BuildSide = side, .Targets = std::move(placements.back())};
     }
 
-    const auto leftNdv = KeyNdv(leftStats, join.Keys(), /*leftSide=*/true);
-    const auto rightNdv = KeyNdv(rightStats, join.Keys(), /*leftSide=*/false);
+    const auto leftNdv = KeyNdv(leftStats,
+        JoinSideKeys(join, EJoinFilterSide::Left));
+    const auto rightNdv = KeyNdv(rightStats,
+        JoinSideKeys(join, EJoinFilterSide::Right));
 
     std::optional<TFilterDecision> decision;
     auto consider = [&](EJoinFilterSide side,
@@ -754,7 +751,8 @@ void FindReusableFilter(const TOperatorPtr& node,
             probeKeys.push_back(laterKey.Right);
         }
         if (compatible) {
-            auto buildNdv = KeyNdv(left->Stats_, ancestor.Cast()->Keys(), true);
+            auto buildNdv = KeyNdv(left->Stats_,
+                JoinSideKeys(*ancestor.Cast(), EJoinFilterSide::Left));
             auto probeNdv = KeyNdv(consumerJoin.Right()->Stats_, probeKeys);
             if (buildNdv && probeNdv) {
                 const double buildRows = static_cast<double>(left->Stats_->RowCount);
@@ -787,11 +785,7 @@ void ReuseRuntimeFilters(const TOperatorPtr& root) {
         || join.Cast()->Keys().empty()) {
         return;
     }
-    std::vector<std::string> leftKeys;
-    leftKeys.reserve(join.Cast()->Keys().size());
-    for (const auto& key : join.Cast()->Keys()) {
-        leftKeys.push_back(key.Left);
-    }
+    auto leftKeys = JoinSideKeys(*join.Cast(), EJoinFilterSide::Left);
     std::optional<TReusablePlacement> best;
     FindReusableFilter(join.Cast()->Left(), leftKeys, *join.Cast(), best);
     if (best) {
@@ -807,15 +801,11 @@ void ReuseRuntimeFilters(const TOperatorPtr& root) {
     }
 }
 
-void PlaceConsumer(TOperatorPtr target, TRuntimeFilterUseSpec use) {
-    auto candidates = PlacementCandidates(
-        std::move(target), std::move(use.ProbeKeys));
-    AttachPlacement(candidates.back(), use.Id);
-}
+} // namespace
 
-void PlaceConsumers(const TOperatorPtr& root) {
+void PlaceRuntimeFilterConsumers(const TOperatorPtr& root) {
     for (const auto& child : root->Inputs()) {
-        PlaceConsumers(child);
+        PlaceRuntimeFilterConsumers(child);
     }
     auto join = TMaybeOp<TJoinOperator>(root);
     if (!join || !join.Cast()->RuntimeFilter()) {
@@ -836,16 +826,9 @@ void PlaceConsumers(const TOperatorPtr& root) {
         return;
     }
 
-    TRuntimeFilterUseSpec use{
-        .Id = filter.Id,
-        .ProbeKeys = ProbeKeys(*join.Cast(), filter.BuildSide)};
-    PlaceConsumer(probe, std::move(use));
-}
-
-} // namespace
-
-void PlaceRuntimeFilterConsumers(const TOperatorPtr& root) {
-    PlaceConsumers(root);
+    auto candidates = PlacementCandidates(probe,
+        ProbeKeys(*join.Cast(), filter.BuildSide));
+    AttachPlacement(candidates.back(), filter.Id);
 }
 
 } // namespace NQdb

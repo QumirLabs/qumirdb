@@ -69,79 +69,20 @@ private:
     size_t BloomBytes_;
 };
 
-// Parses `sexp`, wiring "L" -> left source, anything else -> right source, then
-// runs the full logical pipeline + physical planner.
-std::unique_ptr<TTestRuntime> PlanJoin(
+std::unique_ptr<TTestRuntime> PlanJoinWithSources(
     const std::string& sexp,
-    ISource& left,
-    ISource& right,
-    NScheduler::TSettings schedulerSettings = {},
-    std::shared_ptr<IRuntimeFilterBindingFactory> filterBindings = nullptr)
-{
-    TRelParserOptions opts;
-    opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
-        ISource& src = (path == "L") ? left : right;
-        return std::make_shared<TSourceOperator>(src, std::string(path));
-    };
-    TParser parser;
-    for (auto& [name, fn] : MakeRelParsers(std::move(opts))) {
-        parser.NodeParsers[name] = std::move(fn);
-    }
-    std::istringstream in(sexp);
-    TTokenStream ts(in);
-    auto parsed = parser.Parse(ts);
-    if (!parsed) throw std::runtime_error(parsed.error().ToString());
-    auto root = std::static_pointer_cast<IOperator>(*parsed);
-    AnnotateTypes(root);
-    ApplyColumnPruning(root);
-    return RunPlan(root, schedulerSettings, nullptr, std::move(filterBindings));
-}
-
-std::unique_ptr<TTestRuntime> PlanJoin3(
-    const std::string& sexp,
-    ISource& left,
-    ISource& right,
-    ISource& third)
-{
-    TRelParserOptions opts;
-    opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
-        if (path == "L") {
-            return std::make_shared<TSourceOperator>(left, std::string(path));
-        }
-        if (path == "R") {
-            return std::make_shared<TSourceOperator>(right, std::string(path));
-        }
-        return std::make_shared<TSourceOperator>(third, std::string(path));
-    };
-    TParser parser;
-    for (auto& [name, fn] : MakeRelParsers(std::move(opts))) {
-        parser.NodeParsers[name] = std::move(fn);
-    }
-    std::istringstream in(sexp);
-    TTokenStream ts(in);
-    auto parsed = parser.Parse(ts);
-    if (!parsed) throw std::runtime_error(parsed.error().ToString());
-    auto root = std::static_pointer_cast<IOperator>(*parsed);
-    AnnotateTypes(root);
-    ApplyColumnPruning(root);
-    return RunPlan(root);
-}
-
-std::unique_ptr<TTestRuntime> PlanJoinMany(
-    const std::string& sexp,
-    const std::unordered_map<std::string, ISource*>& sources,
-    NScheduler::TSettings settings,
-    std::shared_ptr<IRuntimeFilterBindingFactory> filterBindings,
+    const std::function<ISource*(std::string_view)>& sourceLookup,
+    NScheduler::TSettings settings = {},
+    std::shared_ptr<IRuntimeFilterBindingFactory> filterBindings = nullptr,
     std::function<void(const TOperatorPtr&)> configure = {})
 {
     TRelParserOptions opts;
     opts.SourceFactory = [&](std::string_view path, NQumir::TLocation)
         -> TOperatorPtr {
-        auto it = sources.find(std::string(path));
-        if (it == sources.end()) {
-            return nullptr;
-        }
-        return std::make_shared<TSourceOperator>(*it->second, std::string(path));
+        auto* source = sourceLookup(path);
+        return source
+            ? std::make_shared<TSourceOperator>(*source, std::string(path))
+            : nullptr;
     };
     TParser parser;
     for (auto& [name, fn] : MakeRelParsers(std::move(opts))) {
@@ -160,6 +101,52 @@ std::unique_ptr<TTestRuntime> PlanJoinMany(
         configure(root);
     }
     return RunPlan(root, settings, nullptr, std::move(filterBindings));
+}
+
+// Parses `sexp`, wiring "L" -> left source, anything else -> right source, then
+// runs the full logical pipeline + physical planner.
+std::unique_ptr<TTestRuntime> PlanJoin(
+    const std::string& sexp,
+    ISource& left,
+    ISource& right,
+    NScheduler::TSettings schedulerSettings = {},
+    std::shared_ptr<IRuntimeFilterBindingFactory> filterBindings = nullptr)
+{
+    return PlanJoinWithSources(sexp,
+        [&](std::string_view path) -> ISource* {
+            return path == "L" ? &left : &right;
+        }, schedulerSettings, std::move(filterBindings));
+}
+
+std::unique_ptr<TTestRuntime> PlanJoin3(
+    const std::string& sexp,
+    ISource& left,
+    ISource& right,
+    ISource& third)
+{
+    return PlanJoinWithSources(sexp, [&](std::string_view path) -> ISource* {
+        if (path == "L") {
+            return &left;
+        }
+        if (path == "R") {
+            return &right;
+        }
+        return &third;
+    });
+}
+
+std::unique_ptr<TTestRuntime> PlanJoinMany(
+    const std::string& sexp,
+    const std::unordered_map<std::string, ISource*>& sources,
+    NScheduler::TSettings settings,
+    std::shared_ptr<IRuntimeFilterBindingFactory> filterBindings,
+    std::function<void(const TOperatorPtr&)> configure = {})
+{
+    return PlanJoinWithSources(sexp,
+        [&](std::string_view path) -> ISource* {
+            auto it = sources.find(std::string(path));
+            return it == sources.end() ? nullptr : it->second;
+        }, settings, std::move(filterBindings), std::move(configure));
 }
 
 } // namespace

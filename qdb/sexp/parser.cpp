@@ -88,6 +88,14 @@ bool CanStartExpression(const TToken& token) {
 
 namespace {
 
+std::optional<uint32_t> PositiveRuntimeFilterId(const TToken& token) {
+    if (token.Type != TToken::Integer || token.Value.i64 <= 0
+        || token.Value.i64 > std::numeric_limits<uint32_t>::max()) {
+        return std::nullopt;
+    }
+    return static_cast<uint32_t>(token.Value.i64);
+}
+
 TAstTask ParseJoinResidual(IParseHandle& h)
 {
     auto residual = co_await h.Expr();
@@ -99,9 +107,8 @@ NQumir::TExpectedTask<TRuntimeFilterSpec, TError, TLocation>
 ParseJoinEmitFilter(IParseHandle& h)
 {
     auto idTok = h.Next();
-    if (idTok.Type != TToken::Integer
-        || idTok.Value.i64 <= 0
-        || idTok.Value.i64 > std::numeric_limits<uint32_t>::max()) {
+    auto id = PositiveRuntimeFilterId(idTok);
+    if (!id) {
         co_return IParseHandle::MakeError(
             idTok, "(emit-filter) expects a positive uint32 id");
     }
@@ -114,7 +121,7 @@ ParseJoinEmitFilter(IParseHandle& h)
     }
     co_await h.Take(')');
     co_return TRuntimeFilterSpec{
-        .Id = static_cast<uint32_t>(idTok.Value.i64),
+        .Id = *id,
         .BuildSide = *side,
     };
 }
@@ -144,12 +151,12 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
                         tok, "(rel use-filter) expects a filter binding");
                 }
                 auto idTok = h.Next();
-                if (idTok.Type != TToken::Integer || idTok.Value.i64 <= 0
-                    || idTok.Value.i64 > std::numeric_limits<uint32_t>::max()) {
+                auto parsedId = PositiveRuntimeFilterId(idTok);
+                if (!parsedId) {
                     co_return IParseHandle::MakeError(
                         idTok, "(rel use-filter) expects a positive uint32 id");
                 }
-                const auto id = static_cast<uint32_t>(idTok.Value.i64);
+                const auto id = *parsedId;
                 if (std::any_of(input->RuntimeFilterUses.begin(),
                         input->RuntimeFilterUses.end(),
                         [id](const auto& use) { return use.Id == id; })) {
