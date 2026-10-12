@@ -326,6 +326,36 @@ std::optional<std::vector<TRuntimeFilterUseSpec>> UnionBranchUses(
     return branches;
 }
 
+TOperatorPtr InnerJoinKeyInput(const TJoinOperator& join,
+    const std::vector<std::string>& keys)
+{
+    if (join.JoinType() != EJoinType::Inner || !join.Type
+        || !join.Left()->Type || !join.Right()->Type) {
+        return nullptr;
+    }
+    const auto output = join.OutputColumns();
+    const auto left = join.Left()->OutputColumns();
+    const auto right = join.Right()->OutputColumns();
+    if (!output || !left || !right) {
+        return nullptr;
+    }
+
+    TOperatorPtr input;
+    for (const auto& key : keys) {
+        const bool fromLeft = SameKeyType(*output, key, *left, key);
+        const bool fromRight = SameKeyType(*output, key, *right, key);
+        if (fromLeft == fromRight) {
+            return nullptr;
+        }
+        auto side = fromLeft ? join.Left() : join.Right();
+        if (input && input != side) {
+            return nullptr;
+        }
+        input = std::move(side);
+    }
+    return input;
+}
+
 void PlaceConsumer(TOperatorPtr target, TRuntimeFilterUseSpec use) {
     if (auto predicate = TMaybeOp<TFilterOperator>(target)) {
         auto input = predicate.Cast()->Input();
@@ -351,6 +381,12 @@ void PlaceConsumer(TOperatorPtr target, TRuntimeFilterUseSpec use) {
             for (size_t i = 0; i < branches->size(); ++i) {
                 PlaceConsumer(un.Cast()->Inputs()[i], std::move((*branches)[i]));
             }
+            return;
+        }
+    } else if (auto join = TMaybeOp<TJoinOperator>(target)) {
+        auto input = InnerJoinKeyInput(*join.Cast(), use.ProbeKeys);
+        if (input) {
+            PlaceConsumer(std::move(input), std::move(use));
             return;
         }
     }

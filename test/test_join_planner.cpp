@@ -763,6 +763,106 @@ TEST(JoinPlanner, RuntimeFilterUsesEachUnionBranchKeyName) {
     EXPECT_EQ(bindings->Probe->Rejected.load(), 3u);
 }
 
+TEST(JoinPlanner, RuntimeFilterCrossesOnlySameSideInnerJoinKeys) {
+    for (const auto& [nestedType, parentKey, matchKey, targetSide, mode] : {
+             std::tuple{EJoinType::Inner, "av", int64_t{10}, 0,
+                 NScheduler::EExecutionMode::SingleThreadedScheduler},
+             std::tuple{EJoinType::Inner, "av", int64_t{10}, 0,
+                 NScheduler::EExecutionMode::ThreadedScheduler},
+             std::tuple{EJoinType::Inner, "bv", int64_t{100}, 1,
+                 NScheduler::EExecutionMode::ThreadedScheduler},
+             std::tuple{EJoinType::Left, "bv", int64_t{100}, 2,
+                 NScheduler::EExecutionMode::ThreadedScheduler}}) {
+        SCOPED_TRACE(parentKey);
+        SCOPED_TRACE(JoinTypeName(nestedType));
+        SCOPED_TRACE(static_cast<int>(mode));
+        std::vector<int64_t> ak = {1, 2, 3}, av = {10, 20, 30};
+        std::vector<int64_t> bk = {1, 2, 3}, bv = {100, 200, 300};
+        std::vector<int64_t> rk = {matchKey}, rv = {1000};
+        std::vector<TColumn> ac, bc, rc;
+        TMockSource a({"ak", "av"}, {KeyValBatch(ak.data(), av.data(), 3, ac)});
+        TMockSource b({"bk", "bv"}, {KeyValBatch(bk.data(), bv.data(), 3, bc)});
+        TMockSource r({"rk", "rv"}, {KeyValBatch(rk.data(), rv.data(), 1, rc)});
+        auto aSource = std::make_shared<TSourceOperator>(a, "A");
+        auto bSource = std::make_shared<TSourceOperator>(b, "B");
+        auto nested = std::make_shared<TJoinOperator>(aSource, bSource,
+            std::vector<TJoinKey>{{"ak", "bk"}}, nestedType, nullptr);
+        if (nestedType == EJoinType::Inner) {
+            nested->MutableRuntimeFilter() = TRuntimeFilterSpec{
+                .Id = 8, .BuildSide = EJoinFilterSide::Right};
+        }
+        auto parent = std::make_shared<TJoinOperator>(nested,
+            std::make_shared<TSourceOperator>(r, "R"),
+            std::vector<TJoinKey>{{parentKey, "rk"}},
+            EJoinType::Inner, nullptr);
+        parent->MutableRuntimeFilter() = TRuntimeFilterSpec{
+            .Id = 7, .BuildSide = EJoinFilterSide::Right};
+        TOperatorPtr root = parent;
+        AnnotateTypes(root);
+        PlaceRuntimeFilterConsumers(root);
+
+        auto hasUse = [](const TOperatorPtr& op, uint32_t id) {
+            return std::any_of(op->RuntimeFilterUses.begin(),
+                op->RuntimeFilterUses.end(),
+                [&](const auto& use) { return use.Id == id; });
+        };
+        EXPECT_EQ(hasUse(aSource, 7), targetSide == 0);
+        EXPECT_EQ(hasUse(bSource, 7), targetSide == 1);
+        EXPECT_EQ(hasUse(nested, 7), targetSide == 2);
+        EXPECT_EQ(hasUse(aSource, 8), nestedType == EJoinType::Inner);
+
+        NScheduler::TSettings settings;
+        settings.Scheduler.Mode = mode;
+        settings.Scheduler.WorkerCount = mode
+                == NScheduler::EExecutionMode::SingleThreadedScheduler
+            ? 1 : 4;
+        settings.HashShuffle.PartitionCount = 4;
+        settings.HashShuffle.MaxPartitionCount = 4;
+        auto bindings = std::make_shared<TCountingFilterBindingFactory>();
+        auto plan = RunPlan(root, settings, nullptr, bindings);
+        std::vector<int64_t> keys;
+        TRowSet out{};
+        while (plan->Next(out)) {
+            for (int64_t row = 0; row < out.RowCount; ++row) {
+                if (!out.Selection || out.Selection[row]) {
+                    keys.push_back(reinterpret_cast<const int64_t*>(
+                        out.Columns[0].Data)[row]);
+                }
+            }
+            Release(&out);
+        }
+        EXPECT_EQ(keys, (std::vector<int64_t>{1}));
+        EXPECT_EQ(bindings->Created,
+            nestedType == EJoinType::Inner ? 2u : 1u);
+        ASSERT_TRUE(bindings->Probe);
+        EXPECT_EQ(bindings->Probe->Probed.load(), 3u);
+        EXPECT_EQ(bindings->Probe->Rejected.load(), 2u);
+    }
+}
+
+TEST(JoinPlanner, RuntimeFilterStaysAboveInnerJoinForSplitKeys) {
+    TMockSource a({"ak"}), b({"bk", "bv"}), r({"rk1", "rk2"});
+    auto aSource = std::make_shared<TSourceOperator>(a, "A");
+    auto bSource = std::make_shared<TSourceOperator>(b, "B");
+    auto nested = std::make_shared<TJoinOperator>(aSource, bSource,
+        std::vector<TJoinKey>{{"ak", "bk"}}, EJoinType::Inner, nullptr);
+    auto parent = std::make_shared<TJoinOperator>(nested,
+        std::make_shared<TSourceOperator>(r, "R"),
+        std::vector<TJoinKey>{{"ak", "rk1"}, {"bv", "rk2"}},
+        EJoinType::Inner, nullptr);
+    parent->MutableRuntimeFilter() = TRuntimeFilterSpec{
+        .Id = 7, .BuildSide = EJoinFilterSide::Right};
+    TOperatorPtr root = parent;
+    AnnotateTypes(root);
+    PlaceRuntimeFilterConsumers(root);
+
+    ASSERT_EQ(nested->RuntimeFilterUses.size(), 1u);
+    EXPECT_EQ(nested->RuntimeFilterUses[0].ProbeKeys,
+        (std::vector<std::string>{"ak", "bv"}));
+    EXPECT_TRUE(aSource->RuntimeFilterUses.empty());
+    EXPECT_TRUE(bSource->RuntimeFilterUses.empty());
+}
+
 TEST(JoinPlanner, ProjectOnTopPrunesJoinInputs) {
     // Project keeps only lk and rv; lv and rk(beyond the key) are not selected.
     // Pruning narrows each source, but the key columns survive.

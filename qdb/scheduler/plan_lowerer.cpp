@@ -360,6 +360,23 @@ size_t ChooseRuntimeBloomBytes(const TJoinOperator& join,
     return std::bit_ceil(std::clamp(estimatedBytes, minimum, maximum));
 }
 
+bool CanReuseRuntimeFilterHash(const TOperatorPtr& probe, uint32_t filterId) {
+    // Lower() applies annotations after the operator, in vector order. The
+    // final consumer owns the outgoing hash even when the operator is a join.
+    if (!probe->RuntimeFilterUses.empty()) {
+        return probe->RuntimeFilterUses.back().Id == filterId;
+    }
+    if (TMaybeOp<TJoinOperator>(probe)) {
+        return false;
+    }
+    for (const auto& child : probe->Inputs()) {
+        if (!CanReuseRuntimeFilterHash(child, filterId)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 class TSchedulerGraphLowerer {
 public:
     struct TFilterConsumerTasks {
@@ -2747,8 +2764,13 @@ private:
                 consumer.Code->Probe = binding.Probe;
                 consumer.Code->AuxInput->AddFilter(binding.Probe);
             }
+            // TRowSet::Hash has no key identity. Another consumer on this
+            // path may leave a hash for a different join key, and a nested
+            // join may produce its own hash-bearing rowsets. Recompute in
+            // those cases before partitioning this join.
             (buildIsLeft ? rightShuffleCode : leftShuffleCode)
-                ->UseInputHash = true;
+                ->UseInputHash = CanReuseRuntimeFilterHash(
+                    buildIsLeft ? join.Right() : join.Left(), runtimeFilter->Id);
             RuntimeFilters_.push_back({
                 .Id = runtimeFilter->Id,
                 .Probe = std::move(diagnosticProbe),
