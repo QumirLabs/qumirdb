@@ -134,7 +134,7 @@ void Prune(const TOperatorPtr& root, const TColumnSet* explicitRootDemand, TCteU
         }
 
         // Relational-output pruning for aggregates: drop aggregate outputs the
-        // consumer doesn't need. Group keys stay — they define the grouping and
+        // consumer doesn't need. Group keys stay - they define the grouping and
         // remain output columns. Dropping an aggregate also removes its argument
         // from this node's input demand.
         if (auto aggOp = TMaybeOp<TAggregateOperator>(op)) {

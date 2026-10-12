@@ -40,10 +40,11 @@ TOperatorPtr ReorderJoins(
 // cardinality-expanding inner join forces the semi to buffer that expanded
 // intermediate (semi/anti are blocking on the build side). When the semi's key
 // and residual columns all come from ONE side of an inner join below it, the
-// semi is pushed onto that side: (A ⋈ B) ⋉ C  ->  (A ⋉ C) ⋈ B. Applied
-// recursively so the semi sinks as far as it can. This is what lets e.g. TPC-H
-// Q18 apply its `o_orderkey IN (...)` filter on orders (~|orders| rows) instead
-// of on customer⋈orders⋈lineitem (~|lineitem| rows).
+// semi is pushed onto that side:
+//   (A join B) semijoin C  ->  (A semijoin C) join B
+// Applied recursively so the semi sinks as far as it can. This is what lets e.g.
+// TPC-H Q18 apply its `o_orderkey IN (...)` filter on orders (~|orders| rows)
+// instead of on customer join orders join lineitem (~|lineitem| rows).
 //
 // Runs after ExtractEquiJoins and AnnotateTypes (needs join keys and output
 // schemas); re-annotate afterwards since it restructures the join tree.

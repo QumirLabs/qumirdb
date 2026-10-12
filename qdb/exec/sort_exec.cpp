@@ -509,7 +509,7 @@ void TMergeProcessor::Finish()
 
     // TODO(browser-path): this k-way merge runs the sort comparator
     // (SortRowsLess) and the output gather (GatherColumn) in C++. Like the window
-    // operator, it should move to a generated oz kernel — any C++ compute on the
+    // operator, it should move to a generated oz kernel - any C++ compute on the
     // data path complicates the JIT/browser (WASM) execution path, which runs the
     // oz kernels. Remove this C++ fallback once a merge kernel exists.
     size_t total = 0;

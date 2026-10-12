@@ -41,7 +41,7 @@ struct TFrameBound {
 // bound (`ROWS/RANGE <start>`) it means `... BETWEEN <start> AND CURRENT ROW`, so
 // the builder fills End with CURRENT ROW in that case. A window with NO frame
 // clause is represented by an empty optional on the node (see Frame_ below), not
-// by a defaulted TWindowFrame — its default-frame semantics are resolved later.
+// by a defaulted TWindowFrame - its default-frame semantics are resolved later.
 struct TWindowFrame {
     EWindowFrameMode Mode = EWindowFrameMode::Range;
     TFrameBound Start;

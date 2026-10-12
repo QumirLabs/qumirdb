@@ -5,7 +5,7 @@
 namespace NQdb {
 
 // Pre-order: set TSourceOperator::Alias_ based on file path stem.
-// Sources with the same stem get numeric suffixes: nation_0, nation_1, …
+// Sources with the same stem get numeric suffixes: nation_0, nation_1, ...
 // An explicit alias already set via sexp is respected and excluded from numbering.
 void AssignSourceAliases(const TOperatorPtr& root);
 

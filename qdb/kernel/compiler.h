@@ -346,18 +346,18 @@ public:
         int64_t size,
         int64_t limit)>;
 
-    // sizeof(HashTable) per modules/qumirdb.cpp's layout — callers of
+    // sizeof(HashTable) per modules/qumirdb.cpp's layout - callers of
     // CompileAggregate must allocate a zero-initialized buffer this large
     // for `ht`.
     static constexpr size_t HashTableSize = 104;
 
     // The symmetric hash join reuses the aggregation HashTable (HashTableSize)
-    // as each side's hash map. sizeof(PairBuffer) per modules/qumirdb.cpp —
+    // as each side's hash map. sizeof(PairBuffer) per modules/qumirdb.cpp -
     // callers of CompileJoin allocate a zero-initialized buffer this large for
     // the output pair buffer.
     static constexpr size_t PairBufferSize = 24;
 
-    // sizeof(TRowSet) per io.h / modules/qumirdb.oz — generated kernels that
+    // sizeof(TRowSet) per io.h / modules/qumirdb.oz - generated kernels that
     // pack TRowSet values into a byte buffer (e.g. top-sort's materialize
     // store) size the allocation off this instead of a bare literal.
     static constexpr size_t RowSetSize = 64;

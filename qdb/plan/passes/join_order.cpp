@@ -141,7 +141,7 @@ TOperatorPtr MakeInnerJoin(TOperatorPtr left, TOperatorPtr right) {
         std::move(left), std::move(right), std::vector<TJoinKey>{}, EJoinType::Inner, nullptr);
 }
 
-// Left-deep heuristic order — fallback when a component exceeds MaxRelations.
+// Left-deep heuristic order - fallback when a component exceeds MaxRelations.
 TOperatorPtr HeuristicChain(
     const std::vector<TOperatorPtr>& leaves,
     const std::vector<std::unordered_set<size_t>>& adjacency)
@@ -419,7 +419,7 @@ TOperatorPtr SinkSemi(std::shared_ptr<TJoinOperator> semi) {
     const bool toLeft = AllIn(needBuild, leftCols);
     const bool toRight = !toLeft && AllIn(needBuild, rightCols);
     if (!toLeft && !toRight) {
-        return semi; // build dependencies span both sides — cannot push
+        return semi; // build dependencies span both sides - cannot push
     }
 
     // Don't push past a selective (filtered) side: keeping that join in the

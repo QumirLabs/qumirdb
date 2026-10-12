@@ -12,7 +12,7 @@ namespace NQdb {
 
 // Blocking window processor. Buffers all input, then in a single Next() sorts
 // the row-id permutation by (partition ++ order) and materializes the input
-// columns followed by one computed column per window function — all inside the
+// columns followed by one computed column per window function - all inside the
 // JIT window kernel (qdb_window_run). The whole result is emitted at once
 // because the running/prefix compute spans the full partition.
 class TWindowProcessor {

@@ -40,7 +40,7 @@ inline int32_t RowIndex(TRowId id) {
 // TProjectedRowSetData in project_exec.cpp). The caller transfers the batch and
 // must not use or Release it afterwards; the store Releases every batch on
 // destruction. Note RefCount lives inside the TRowSet struct, so there is
-// exactly one canonical copy — the one held here.
+// exactly one canonical copy - the one held here.
 class TRowStore {
 public:
     TRowStore() = default;
@@ -64,7 +64,7 @@ public:
     // Contiguous base of the batch array, indexable by batch index. Passed to
     // the join kernels so the injected jt_residual_filter can read columns of
     // already-stored rows by decoding packed row IDs. The pointer may be
-    // invalidated by a later PushBatch (vector growth) — re-read it each call.
+    // invalidated by a later PushBatch (vector growth) - re-read it each call.
     const TRowSet* Data() const { return Batches_.data(); }
 
     const TRowSet& Batch(int32_t batchIdx) const { return Batches_[batchIdx]; }

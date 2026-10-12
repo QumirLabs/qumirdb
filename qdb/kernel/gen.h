@@ -137,7 +137,7 @@ NQumir::NAst::TExprPtr GenJoinResidualFilterAst(
     NQumir::NAst::TTypePtr stringViewType);
 
 // Builds a vectorized project kernel for the COMPUTED columns only.
-// Signature: void <kernel>(rowSet, out, arena, regexHandles) — for each
+// Signature: void <kernel>(rowSet, out, arena, regexHandles) - for each
 // row i and each computed projection k: out[k][i] = (cast) <expr_k>. Output
 // buffer k holds values of computedTypes[k]; the explicit cast pins the buffer
 // type. ident projections are NOT here (handled zero-copy by project_exec).
@@ -157,7 +157,7 @@ NQumir::NAst::TExprPtr GenProjectKernelAst(
 // aht_destroy. Each reducer reads its own argument column (layout's
 // ArgColumnIndex), so different aggregates may aggregate different columns; the
 // reducer applications are inlined per row with per-reducer values.
-// hasPrecomputedHash: read batch.Hash[i] instead of calling rh_hash(key) —
+// hasPrecomputedHash: read batch.Hash[i] instead of calling rh_hash(key) -
 // set when the caller knows this batch comes straight from a hash shuffle
 // keyed on the same group keys (plan_lowerer.cpp decides this).
 NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
@@ -214,7 +214,7 @@ std::vector<NQumir::NAst::TExprPtr> GenReducerFunDecls(
 //                       i64 value, bool is_new)
 // which for i in [0, numReducers) does
 //   agg_buffers[i][dense_slot] = reduce_i(agg_buffers[i][dense_slot], value, is_new)
-// — numReducers static, direct, by-name calls to the reduce_0..reduce_{N-1}
+// - numReducers static, direct, by-name calls to the reduce_0..reduce_{N-1}
 // functions from GenReducerFunDecls.
 //
 // This is the one piece of per-query generated code that the NumAggs-generic

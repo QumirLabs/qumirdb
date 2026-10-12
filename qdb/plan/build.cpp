@@ -350,7 +350,7 @@ public:
     }
 
     // Set when a count(distinct <col>) was collected: BuildSelect realizes it via
-    // a double aggregation (inner dedup on the group keys ∪ <col>, then count).
+    // a double aggregation (inner dedup on the group keys + <col>, then count).
     const std::optional<std::string>& DistinctColumn() const {
         return DistinctColumn_;
     }
@@ -968,7 +968,7 @@ std::string ItemName(const NSql::TSqlSelectItem& item, size_t index) {
     }
     if (auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(item.Expr)) {
         // `SELECT t.col` (no alias) yields a column named `col` (unqualified), per SQL.
-        // Keeping the `t.` prefix breaks later references to the bare name — notably CTE
+        // Keeping the `t.` prefix breaks later references to the bare name - notably CTE
         // columns referenced as `<cte>.col` / bare `col`, whose equi-joins then fail to
         // extract keys (keyless cross joins).
         const std::string& name = ident.Cast()->Name;
@@ -1402,7 +1402,7 @@ bool HasWindowExpr(const NAst::TExprPtr& expr) {
     return false;
 }
 
-// True if `expr` contains a window function in its OWN scope — not descending
+// True if `expr` contains a window function in its OWN scope - not descending
 // into nested subqueries, whose windows belong to that subquery. Used to reject
 // windows in WHERE/HAVING and in ORDER BY over an independent scalar subquery.
 bool HasWindowExprLocal(const NAst::TExprPtr& expr) {
@@ -1586,8 +1586,8 @@ std::expected<TOperatorPtr, TError> BuildTableRef(
             }
             return *source;
         }
-        // A CTE inlined as a subplan: qualify its columns by the reference alias, or —
-        // when referenced bare — by the CTE name, so `<cte>.col` references resolve
+        // A CTE inlined as a subplan: qualify its columns by the reference alias, or -
+        // when referenced bare - by the CTE name, so `<cte>.col` references resolve
         // (otherwise the inlined columns stay bare and equi-joins over them drop their
         // keys, producing keyless cross joins).
         return AliasSubplan(
@@ -1767,10 +1767,10 @@ std::expected<TOperatorPtr, TError> DecorrelateIn(
         return std::unexpected(TError("IN subquery must return exactly one column"));
     }
     // Rename the subquery's output to a synthetic name so the residual's two sides
-    // never share a name: otherwise `x IN (SELECT x …)` yields `x == x`, which
+    // never share a name: otherwise `x IN (SELECT x ...)` yields `x == x`, which
     // qualification cannot bind to the left side and key extraction drops entirely,
     // leaving a keyless (unschedulable, condition-less) semi-join. The name is
-    // internal — a semi/anti join exposes only its left side.
+    // internal - a semi/anti join exposes only its left side.
     auto& spec = project.Cast()->MutableProjections()[0];
     spec.Name = "__qdb_in__" + spec.Name;
     spec.ImplicitName = false;
@@ -1822,7 +1822,7 @@ void CollectLocalColumns(
 }
 
 // Collects correlation equalities (outer_col == local_col) anywhere in a subquery
-// predicate — including inside OR/AND — so a correlation buried in a disjunction is
+// predicate - including inside OR/AND - so a correlation buried in a disjunction is
 // lifted too (not only top-level conjuncts).
 void CollectCorrelations(
     const NAst::TExprPtr& expr,
@@ -1889,7 +1889,7 @@ void RenameIdents(
 }
 
 // A conjunct that is a disjunction of positive EXISTS subqueries (`exists(A) OR
-// exists(B) [OR …]`). Returns the EXISTS subqueries, or empty if the shape doesn't match.
+// exists(B) [OR ...]`). Returns the EXISTS subqueries, or empty if the shape doesn't match.
 std::vector<std::shared_ptr<NSql::TSubqueryExpr>> AsExistsOrDisjunction(
     const NAst::TExprPtr& conjunct)
 {
@@ -1909,8 +1909,8 @@ std::vector<std::shared_ptr<NSql::TSubqueryExpr>> AsExistsOrDisjunction(
     return existsList;
 }
 
-// `exists(A) OR exists(B) OR …`, where every EXISTS is correlated to the SAME outer
-// column by a single equality, is equivalent to `outer IN (A_key UNION ALL B_key …)`:
+// `exists(A) OR exists(B) OR ...`, where every EXISTS is correlated to the SAME outer
+// column by a single equality, is equivalent to `outer IN (A_key UNION ALL B_key ...)`:
 // a row satisfies the OR iff its outer key matches any branch. Each branch's correlation
 // is neutralized and its inner key projected under a common name; the union feeds one
 // left-semi join. Returns nullopt when the shape isn't supported (caller falls back).
@@ -1970,7 +1970,7 @@ std::expected<std::optional<TOperatorPtr>, TError> DecorrelateExistsOr(
 }
 
 // True if any identifier leaf is not a local column (a leftover outer reference not
-// covered by a correlation equality — that shape we cannot decorrelate).
+// covered by a correlation equality - that shape we cannot decorrelate).
 bool HasUnmappedOuter(
     const NAst::TExprPtr& expr,
     const std::unordered_set<std::string>& local)
@@ -2000,7 +2000,7 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
         auto scalar = sub.Cast();
         if (scalar->Kind == NSql::TSubqueryExpr::EKind::In) {
             // An uncorrelated IN-subquery nested inside a boolean expression (e.g. one
-            // side of an OR) cannot be a semi-join — that would drop rows the OR keeps.
+            // side of an OR) cannot be a semi-join - that would drop rows the OR keeps.
             // Rewrite it as a mark join: LEFT-join `node` to the DISTINCT subquery on
             // the IN key, then replace `x IN (subquery)` with `marker IS NOT NULL`.
             if (!scalar->Operand || HasSubquery(scalar->Operand)) {
@@ -2008,7 +2008,7 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
             }
             // Only uncorrelated IN is supported here: a correlated body would leave
             // outer columns unbound in the standalone subquery plan. (`!local.empty()`
-            // avoids misfiring on empty-schema mock builds — see the scalar guard.)
+            // avoids misfiring on empty-schema mock builds - see the scalar guard.)
             if (auto sel = NSql::TMaybeNode<NSql::TSqlSelect>(scalar->Query->Body);
                 sel && sel.Cast()->From && sel.Cast()->Where)
             {
@@ -2035,7 +2035,7 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
             projection.ImplicitName = false;
             // Dedup so each outer row matches at most one right row (no duplication).
             auto distinct = ApplyDistinct(*plan, { markName });
-            // Left join null-extends `markName` to NULL on non-match — the marker.
+            // Left join null-extends `markName` to NULL on non-match - the marker.
             std::vector<TJoinKey> keys;
             NAst::TExprPtr residual;
             if (auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(scalar->Operand)) {
@@ -2141,7 +2141,7 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
             // would be left unbound in the subquery. Fail loudly rather than silently
             // cross-joining and dropping rows. Only when `local` is known (non-empty):
             // if the subquery's own columns couldn't be resolved (e.g. an unschema'd
-            // source), every ident looks "outer" and we must not misfire — fall back.
+            // source), every ident looks "outer" and we must not misfire - fall back.
             if (!local.empty() && HasUnmappedOuter(sel->Where, local)) {
                 return std::unexpected(TError(
                     "unsupported correlated scalar subquery "
@@ -2196,7 +2196,7 @@ std::expected<TOperatorPtr, TError> BuildSelect(
     }
     int scalarCounter = 0;
     // Extracts scalar subqueries out of a finished projection list, broadcasting
-    // each onto `n` (uncorrelated → keyless cross join; correlated → decorrelated
+    // each onto `n` (uncorrelated -> keyless cross join; correlated -> decorrelated
     // left join). Shares scalarCounter with the WHERE/HAVING extraction so the
     // __scalar_N__ names stay unique. Called just before the final project so the
     // broadcast joins attach above any aggregate (matching HAVING).
@@ -2530,8 +2530,8 @@ std::expected<TOperatorPtr, TError> BuildSelect(
         }
     }
 
-    // count(distinct col): dedup with an inner aggregate on (group keys ∪ col),
-    // then count over the deduped rows above — the double aggregation the hand
+    // count(distinct col): dedup with an inner aggregate on (group keys + col),
+    // then count over the deduped rows above - the double aggregation the hand
     // plans use.
     if (multiSet && collector.DistinctColumn()) {
         return std::unexpected(
@@ -2552,9 +2552,9 @@ std::expected<TOperatorPtr, TError> BuildSelect(
 
         if (collector.HasNonDistinct()) {
             // Mixed DISTINCT + non-DISTINCT (single distinct column): one input scan, a
-            // double aggregation with partials. The inner (grouped by group keys ∪ col)
+            // double aggregation with partials. The inner (grouped by group keys + col)
             // computes the non-distinct aggregates per (group, distinct value); the outer
-            // (grouped by group keys) merges them — sum→sum, count→sum, min/max→min/max —
+            // (grouped by group keys) merges them - sum->sum, count->sum, min/max->min/max -
             // alongside count(col) for the distinct. No join, no input clone.
             std::vector<TAggregateSpec> innerSpecs;
             std::vector<TAggregateSpec> outerSpecs;
@@ -3019,7 +3019,7 @@ std::expected<TOperatorPtr, TError> BuildQuery(
 
     // CTE-aware factory: a CTE name is built once as a canonical definition
     // (shared by every reference via TCteRef); other names fall back to the base
-    // sources. Nested CTEs memoize into a DAG. Stack-local — definitions survive
+    // sources. Nested CTEs memoize into a DAG. Stack-local - definitions survive
     // via the shared_ptr the TCteRef holds.
     std::map<std::string, TCteDefinitionPtr> builtDefs;
     TTableSourceFactory factory =

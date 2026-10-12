@@ -68,7 +68,7 @@ bool IsAliasOfStem(std::string_view table, std::string_view stem) {
 
 // Qualify `name` against `schema`, matching by the bare column part. A dotted reference
 // (`time_dim.t_time_sk`) is remapped to the field's actual table alias when the source was
-// renamed (`time_dim` -> `time_dim_0`) — otherwise the reference no longer matches the
+// renamed (`time_dim` -> `time_dim_0`) - otherwise the reference no longer matches the
 // schema and equi-join edges over it get dropped. Returns `name` if no unique match.
 std::string QualifyIdent(const TStructType& schema, const std::string& name) {
     const auto dotPos = name.rfind('.');
@@ -95,7 +95,7 @@ std::string QualifyIdent(const TStructType& schema, const std::string& name) {
         ++matches;
     }
     if (matches == 1) return result;
-    return name; // zero or ambiguous → keep original (best-effort)
+    return name; // zero or ambiguous -> keep original (best-effort)
 }
 
 // Recursively rename TIdentExpr leaves in an expression tree.
@@ -114,7 +114,7 @@ void QualifyExpr(TExprPtr& expr, const TStructType& schema) {
 // Also modifies the node in-place (source Type, join keys, expression idents, etc.)
 std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op) {
 
-    // ── Source ──────────────────────────────────────────────────────────────
+    // -- Source --------------------------------------------------------------
     if (auto maybe = TMaybeOp<TSourceOperator>(op)) {
         auto src = maybe.Cast();
         const std::string& alias = src->GetAlias();
@@ -143,7 +143,7 @@ std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op) {
         return qStruct;
     }
 
-    // ── Filter ──────────────────────────────────────────────────────────────
+    // -- Filter --------------------------------------------------------------
     if (auto maybe = TMaybeOp<TFilterOperator>(op)) {
         auto flt = maybe.Cast();
         auto childSchema = QualifyColumnsImpl(flt->Input());
@@ -153,7 +153,7 @@ std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op) {
         return childSchema;
     }
 
-    // ── Sort / TopSort / Limit ─────────────────────────────────────────────
+    // -- Sort / TopSort / Limit ---------------------------------------------
     if (auto maybe = TMaybeOp<TSortOperator>(op)) {
         auto sort = maybe.Cast();
         auto childSchema = QualifyColumnsImpl(sort->Input());
@@ -181,7 +181,7 @@ std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op) {
         return QualifyColumnsImpl(limit->Input());
     }
 
-    // ── Join ────────────────────────────────────────────────────────────────
+    // -- Join ----------------------------------------------------------------
     if (auto maybe = TMaybeOp<TJoinOperator>(op)) {
         auto join = maybe.Cast();
         auto leftSchema  = QualifyColumnsImpl(join->Left());
@@ -233,7 +233,7 @@ std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op) {
         return outSchema;
     }
 
-    // ── Project ─────────────────────────────────────────────────────────────
+    // -- Project -------------------------------------------------------------
     if (auto maybe = TMaybeOp<TProjectOperator>(op)) {
         auto proj = maybe.Cast();
         auto childSchema = QualifyColumnsImpl(proj->Input());
@@ -256,7 +256,7 @@ std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op) {
         return std::make_shared<TStructType>(std::move(outFields));
     }
 
-    // ── Aggregate ───────────────────────────────────────────────────────────
+    // -- Aggregate -----------------------------------------------------------
     if (auto maybe = TMaybeOp<TAggregateOperator>(op)) {
         auto agg = maybe.Cast();
         auto childSchema = QualifyColumnsImpl(agg->Input());
@@ -279,7 +279,7 @@ std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op) {
         return std::make_shared<TStructType>(std::move(outFields));
     }
 
-    // ── Window ──────────────────────────────────────────────────────────────
+    // -- Window --------------------------------------------------------------
     // Preserves all input columns and appends one per function; qualify the
     // partition/order key names and the function arguments against the input.
     if (auto maybe = TMaybeOp<TWindowOperator>(op)) {
@@ -306,11 +306,11 @@ std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op) {
         return std::make_shared<TStructType>(std::move(outFields));
     }
 
-    // ── Union ─────────────────────────────────────────────────────────────────
+    // -- Union -----------------------------------------------------------------
     // Qualify every branch; the union's output schema follows the first branch
     // (set-op columns are positional). Returning a non-null schema here is what
     // lets a semi-join above a decorrelated EXISTS-in-OR keep a valid right
-    // schema — otherwise the join returns null and its ancestors stop qualifying.
+    // schema - otherwise the join returns null and its ancestors stop qualifying.
     if (auto maybe = TMaybeOp<TUnionAllOperator>(op)) {
         auto un = maybe.Cast();
         std::shared_ptr<TStructType> first;
@@ -330,7 +330,7 @@ std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op) {
 
 } // namespace
 
-// ────────────────────────────────────────────────────────────────────────────
+// ----------------------------------------------------------------------------
 
 void AssignSourceAliases(const TOperatorPtr& root) {
     std::vector<std::shared_ptr<TSourceOperator>> sources;
@@ -344,7 +344,7 @@ void AssignSourceAliases(const TOperatorPtr& root) {
         }
     }
 
-    // Assign aliases: unique stem → bare stem, duplicate stem → stem_0, stem_1, …
+    // Assign aliases: unique stem -> bare stem, duplicate stem -> stem_0, stem_1, ...
     std::unordered_map<std::string, int> stemIndex;
     for (auto& src : sources) {
         if (!src->GetAlias().empty()) continue; // explicit alias already set

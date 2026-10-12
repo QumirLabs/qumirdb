@@ -712,7 +712,7 @@ TEST(SexpParser, CrossJoinAcceptsEmptyKeyList) {
     };
     auto p = MakeParser(std::move(opts));
 
-    // Empty key list + inner → cross join, must parse successfully.
+    // Empty key list + inner -> cross join, must parse successfully.
     std::istringstream in(
         "(rel join (rel source \"left.parquet\") (rel source \"right.parquet\") () (inner))");
     TTokenStream ts(in);

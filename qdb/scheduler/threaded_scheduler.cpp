@@ -148,7 +148,7 @@ void TThreadedScheduler::Work() {
     // Terminate once the root (sink) is Finished: all output the query needs has
     // been produced. Nodes still unfinished at that point are upstream branches
     // abandoned by early termination (a satisfied LIMIT stops pulling, leaving
-    // its producers blocked on a Finished consumer) — waiting for them to finish
+    // its producers blocked on a Finished consumer) - waiting for them to finish
     // would deadlock. The single-threaded scheduler equivalently stops when no
     // work remains queued.
     // Run() only reaches Work() after a successful Validate(), which guarantees
@@ -194,7 +194,7 @@ void TThreadedScheduler::Work() {
         // The root may have finished while this node sat queued; abandon it
         // rather than start (possibly heavy) upstream work no consumer needs, so
         // cancellation after a satisfied LIMIT is prompt. Leaving it unrun is
-        // safe — the graph is being torn down.
+        // safe - the graph is being torn down.
         if (done()) {
             return;
         }

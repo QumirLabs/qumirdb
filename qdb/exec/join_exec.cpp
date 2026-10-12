@@ -531,9 +531,9 @@ TCrossJoinProcessor::TCrossJoinProcessor(TCrossJoinKernels kernels)
 
 TCrossJoinProcessor::~TCrossJoinProcessor() {
     // The pair buffer is only allocated once the kernel actually runs (pb_push
-    // during Process). When nothing ran — e.g. plan export, which compiles the
+    // during Process). When nothing ran - e.g. plan export, which compiles the
     // kernels to WASM but never JIT-finalizes them, so Kernels_.Dispatch wraps
-    // a null function pointer — Data stays null and there is nothing to free.
+    // a null function pointer - Data stays null and there is nothing to free.
     if (PairBuffer_.Data) {
         Kernels_.Dispatch(
             nullptr,

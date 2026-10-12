@@ -81,7 +81,7 @@ void Collect(
         return;
     }
 
-    // TVarStmt itself doesn't introduce references — it's a declaration.
+    // TVarStmt itself doesn't introduce references - it's a declaration.
     if (TMaybeNode<TVarStmt>(expr)) {
         return;
     }

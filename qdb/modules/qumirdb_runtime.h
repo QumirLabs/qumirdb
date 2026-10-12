@@ -11,7 +11,7 @@ struct qdb_string_view;
 
 // Chunked bump arena for strings produced during kernel evaluation (e.g. `||`
 // concatenation via qdb_string_concat). It never moves bytes it has already handed
-// out — new blocks are appended, existing blocks stay put — so every StringView it
+// out - new blocks are appended, existing blocks stay put - so every StringView it
 // returns stays valid for the whole batch, until the executor copies the bytes into
 // the owned output column. One instance lives per kernel invocation (owned by the
 // executor) and frees all blocks on destruction.
@@ -75,7 +75,7 @@ int64_t qdb_like_prefix(qdb_string_view str, qdb_string_view lit);
 int64_t qdb_like_suffix(qdb_string_view str, qdb_string_view lit);
 int64_t qdb_like_contains(qdb_string_view str, qdb_string_view lit);
 
-// TODO: needs qumir changes — temporary cast so string literals reach nullable
+// TODO: needs qumir changes - temporary cast so string literals reach nullable
 // StringView operators without str_from_lit (not linked in JIT kernels).
 qdb_string_view qdb_lit_to_sv(const char* lit);
 
