@@ -528,7 +528,7 @@ public:
     // A "global" aggregate is a decorrelated ungrouped aggregate: its only
     // group key is the constant `__group__` marker (a projected 1). It produces
     // one row, so hash-shuffling it (all rows to one partition) is pure
-    // overhead — treat it as ungrouped and gather to a single aggregate.
+    // overhead - treat it as ungrouped and gather to a single aggregate.
     bool IsGlobalAggregate(TAggregateOperator& aggregate) const {
         const auto& keys = aggregate.GroupKeys();
         if (keys.empty()) {
@@ -1145,7 +1145,7 @@ private:
 
     // Number of hash-shuffle partitions for a shuffled operator (grouped
     // aggregate / equi-join). Defaults to the input's own parallelism
-    // (`inputLanes` — its scan-split lane count, a data-size proxy) capped at
+    // (`inputLanes` - its scan-split lane count, a data-size proxy) capped at
     // half the worker count: small inputs stay narrow, large inputs fan out, and
     // the half-worker cap guards against shuffle over-sharding on big inputs
     // (measured to regress a few queries at cap = WorkerCount).

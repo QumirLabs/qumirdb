@@ -10,7 +10,7 @@ namespace NQdb {
 
 // UNION ALL: concatenates the rows of N branches, which must agree on column
 // count and types. Output schema is the first branch's (its column names).
-// Logical-only — the scheduler lowers it away into a plain fan-in (no task).
+// Logical-only - the scheduler lowers it away into a plain fan-in (no task).
 class TUnionAllOperator : public IOperator {
 public:
     static constexpr const char* OpId = "union-all";

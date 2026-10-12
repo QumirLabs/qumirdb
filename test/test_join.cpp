@@ -251,7 +251,7 @@ TEST(JoinTest, ResidualFilterAppliedBeforeEmit) {
     auto leftTable = GenerateTable(&seed, numLeftKeys, numLeftRows, leftColumns);
     auto rightTable = GenerateTable(&seed, numRightKeys, numRightRows, rightColumns);
 
-    // Residual θ over the joined row: keep only pairs where l1 < r1
+    // Residual theta over the joined row: keep only pairs where l1 < r1
     // lexicographically. The symmetric join must apply this at the match
     // point (before emit) and agree with the nested-loop oracle.
     TJoinFilter filter = [](const TTableRow& row) {

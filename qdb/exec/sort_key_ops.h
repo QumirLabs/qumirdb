@@ -14,8 +14,8 @@ namespace NQdb {
 // A row is selected unless the batch carries a selection vector that zeroes it.
 bool RowSelected(const TRowSet& batch, int32_t row);
 
-// Null placement for a sort key, defaulting to PostgreSQL's rule (ASC → NULLS
-// LAST, DESC → NULLS FIRST) when the key does not specify one.
+// Null placement for a sort key, defaulting to PostgreSQL's rule (ASC -> NULLS
+// LAST, DESC -> NULLS FIRST) when the key does not specify one.
 ESortNulls EffectiveNulls(const TSortKey& key);
 
 inline bool SortNullsFirst(const TSortKey& key) {

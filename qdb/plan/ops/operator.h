@@ -37,11 +37,11 @@ struct IOperator : NQumir::NAst::TExpr {
     void Accept(NQumir::NAst::IVisitor& visitor) override { visitor.VisitOtherwise(*this); }
 
     // Columns referenced in this node's own expressions (predicate / projections).
-    // Excludes what input operators produce — only own references.
+    // Excludes what input operators produce - only own references.
     virtual std::unordered_set<std::string> ComputeReferencedColumns() const = 0;
 
     // Columns the child at `childIdx` must produce, given what this node's
-    // consumer needs (`needed`). Default = pass-through (needed ∪ own refs),
+    // consumer needs (`needed`). Default = pass-through (needed + own refs),
     // correct for schema-preserving single-input operators (filter, source).
     // Schema-defining operators (project, aggregate) override to return only
     // their own refs; multi-input operators (join) override to split per side.

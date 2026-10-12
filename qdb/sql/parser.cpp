@@ -126,7 +126,7 @@
 <join_condition> ::=
       "ON" <expr>
     | "USING" "(" <ident_list> ")"
-    | ε
+    | <empty>
 
 <where_clause> ::= "WHERE" <expr>
 

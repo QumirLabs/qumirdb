@@ -120,7 +120,7 @@ BuildJoinKernelLibrary() {
     if (!library) {
         return library;
     }
-    // Default always-true residual filter — must precede join_update.oz and
+    // Default always-true residual filter - must precede join_update.oz and
     // join_semi_anti.oz, whose probe helpers call jt_residual_filter.
     // CompileJoin replaces this with a generated predicate when the query has
     // a residual filter.

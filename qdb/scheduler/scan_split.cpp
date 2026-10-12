@@ -87,7 +87,7 @@ std::vector<TScanSplit> BuildScanSplits(
 
     // Split the row groups into up to maxTasks evenly-sized, contiguous chunks
     // of ceil(n / m) groups each. The last chunk may be slightly smaller, which
-    // is fine — an even split keeps every worker busy. (The previous target/byte
+    // is fine - an even split keeps every worker busy. (The previous target/byte
     // heuristic degenerated to 15 one-group splits plus one giant split when no
     // target was configured, serialising the whole scan onto a single worker.)
     const size_t groupCount = rowGroups.size();

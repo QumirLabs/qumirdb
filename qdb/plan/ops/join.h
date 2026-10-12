@@ -55,7 +55,7 @@ class TJoinOperator : public IOperator {
 public:
     static constexpr const char* OpId = "join";
 
-    // filter: optional residual predicate θ over the joined (left⊕right) row,
+    // filter: optional residual predicate theta over the joined (left+right) row,
     // applied at the match point BEFORE a pair is emitted. nullptr if none.
     TJoinOperator(TOperatorPtr left, TOperatorPtr right,
         std::vector<TJoinKey> keys, EJoinType type,
@@ -63,8 +63,8 @@ public:
 
     std::string_view RelName() const override { return OpId; }
     std::unordered_set<std::string> ComputeReferencedColumns() const override;
-    // Per-side split: child i needs its own key columns ∪ (filter vars ∩ side)
-    // ∪ (parent-required ∩ side). childIdx 0 = left, 1 = right.
+    // Per-side split: child i needs its own key columns + (filter vars & side)
+    // + (parent-required & side). childIdx 0 = left, 1 = right.
     std::unordered_set<std::string> RequiredColumnsForChild(
         size_t childIdx, const std::unordered_set<std::string>& needed) const override;
     // First operator with TWO children.

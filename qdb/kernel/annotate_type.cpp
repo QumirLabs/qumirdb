@@ -178,7 +178,7 @@ public:
 
     // Planner return type of an extern function declared in qumirdb.oz (e.g. qdb_substring
     // -> string), or nullptr if unknown. Built once from the resolver's external-function
-    // set — a single qumirdb.oz compose, not a per-node one.
+    // set - a single qumirdb.oz compose, not a per-node one.
     TTypePtr ExternReturnType(const std::string& name) {
         EnsureExterns();
         auto it = ExternReturns_.find(name);
@@ -365,7 +365,7 @@ TExprPtr Ident(const std::string& n, TLocation loc) {
     return std::make_shared<TIdentExpr>(loc, n);
 }
 // Access `.Value`/`.Valid` of a (freshly cloned) nullable operand. Cloning keeps the
-// AST a tree — the operand is referenced from both the guard and the result, so a shared
+// AST a tree - the operand is referenced from both the guard and the result, so a shared
 // node would be annotated/lowered twice.
 TExprPtr FieldOf(const TExprPtr& obj, const char* field, TLocation loc) {
     return std::make_shared<TFieldAccessExpr>(loc, CloneExpr(obj), field);
@@ -600,13 +600,13 @@ TTypePtr UnifyBranchTypes(const TTypePtr& a, const TTypePtr& b) {
 }
 
 // COALESCE result: value type (unified over non-NULL args) and whether every arg is
-// nullable (a bare NULL arg is ignored). Non-nullable arg ⇒ the whole COALESCE is
+// nullable (a bare NULL arg is ignored). Non-nullable arg => the whole COALESCE is
 // non-nullable (it is guaranteed to return that arg's value at worst).
 std::pair<TTypePtr, bool> CoalesceValueType(const std::vector<TTypePtr>& argTypes) {
     TTypePtr v = nullptr;
     bool allNullable = true;
     for (const auto& t : argTypes) {
-        if (!t) continue; // bare NULL — never chosen
+        if (!t) continue; // bare NULL - never chosen
         v = v ? UnifyBranchTypes(v, t) : UnwrapNullableType(t);
         if (!IsNullableType(t)) allNullable = false;
     }
@@ -646,12 +646,12 @@ TTypePtr BinaryValueType(TOperator op, const TExprPtr& le, const TExprPtr& re,
     return CommonNumeric(vl, vr);
 }
 
-// Lightweight, rule-based SQL type inference — no AST rewrite and no per-node qumirdb.oz
+// Lightweight, rule-based SQL type inference - no AST rewrite and no per-node qumirdb.oz
 // compose. Types operators/calls "as if" ExpandNullable had run: a nullable operand makes
 // the result Nullable[R]. Extern-call returns come from the resolver (ExternReturnType).
 TTypePtr InferType(const TExprPtr& e, const TStructType& schema) {
     if (!e || IsNullLiteral(e)) {
-        return nullptr; // bare/typed NULL — the enclosing node supplies the value type
+        return nullptr; // bare/typed NULL - the enclosing node supplies the value type
     }
     if (TMaybeNode<TStringLiteralExpr>(e)) {
         return std::make_shared<TStringType>();
@@ -666,7 +666,7 @@ TTypePtr InferType(const TExprPtr& e, const TStructType& schema) {
         for (const auto& [fn, ft] : schema.Fields) {
             if (fn == n) return ft;
         }
-        return nullptr; // unknown here — tolerated when nested (null propagates)
+        return nullptr; // unknown here - tolerated when nested (null propagates)
     }
     if (auto bin = TMaybeNode<TBinaryExpr>(e)) {
         auto node =bin.Cast();
@@ -779,10 +779,10 @@ TTypePtr ResultTypeUnary(TOperator op, const TTypePtr& ot) {
 
 // Build `if(all-valid) cast(<apply unwrapped>, Nullable[R]) else null[R]`, guarding on
 // every nullable operand's `.Valid` and applying the op to their `.Value`s. `R` is the
-// plain result value type. Uses only `if`/`cast` (no block-local vars) — the shape the
+// plain result value type. Uses only `if`/`cast` (no block-local vars) - the shape the
 // annotator and kernel lowering already handle; operands are cloned per reference.
 // Bind `expr` to a fresh temp var (appended to `stmts`) and return an ident referencing
-// it. `counter` is per-query (owned by the ExpandNullable call) — names must be unique
+// it. `counter` is per-query (owned by the ExpandNullable call) - names must be unique
 // within one expansion. Reading a temp's fields many times can't re-expand a compound
 // operand, so this keeps the rewrite linear instead of 2^depth.
 TExprPtr BindTemp(const TExprPtr& expr, std::vector<TExprPtr>& stmts, uint64_t& counter,
@@ -992,7 +992,7 @@ std::pair<TExprPtr, TTypePtr> ExpandCoalesce(const TCallExpr& node,
     }
     auto [T, allNullable] = CoalesceValueType(types);
     if (args.empty() || !T) {
-        return {MakeNull(loc), nullptr}; // degenerate (all NULL) — untyped
+        return {MakeNull(loc), nullptr}; // degenerate (all NULL) - untyped
     }
     const bool resultNullable = allNullable;
     auto tq = ToQumirType(T);
@@ -1099,11 +1099,11 @@ TTypePtr Expand(TExprPtr& e, const TStructType& inputType, uint64_t& counter) {
         const bool thenNullable = thenNull || IsNullableType(thenT);
         const bool elseNullable = elseNull || IsNullableType(elseT);
         if (!thenNullable && !elseNullable) {
-            return UnifyBranchTypes(thenT, elseT); // no null — unify (i32/i64 -> i64)
+            return UnifyBranchTypes(thenT, elseT); // no null - unify (i32/i64 -> i64)
         }
         TTypePtr value = UnifyBranchTypes(thenT, elseT);
         if (!value) {
-            return nullptr; // both branches NULL — untyped, leave for the parent
+            return nullptr; // both branches NULL - untyped, leave for the parent
         }
         node->Then = CoerceBranch(node->Then, thenT, thenNull, value, counter, node->Location);
         node->Else = CoerceBranch(node->Else, elseT, elseNull, value, counter, node->Location);
@@ -1127,7 +1127,7 @@ TTypePtr Expand(TExprPtr& e, const TStructType& inputType, uint64_t& counter) {
         if (!lNull && !rNull) {
             return BinaryValueType(op, node->Left, node->Right, lt, rt);
         }
-        // Bare-NULL operand ⇒ the whole op is unconditionally NULL[R].
+        // Bare-NULL operand => the whole op is unconditionally NULL[R].
         if (!lt || !rt) {
             TTypePtr R = BinaryValueType(op, node->Left, node->Right,
                 lt ? lt : rt, rt ? rt : lt);
@@ -1170,15 +1170,15 @@ TTypePtr Expand(TExprPtr& e, const TStructType& inputType, uint64_t& counter) {
         if (!ot || !IsNullableType(ot)) {
             // Non-nullable operand cast to a nullable target (e.g. a UNION-branch
             // coercion `cast(i32, Nullable[i32])`): emit nullable_from_value. The cast
-            // target must be the qumir Nullable type — a raw planner TNullable does not
-            // compile — and the value is widened to the target base if needed. (Checked
+            // target must be the qumir Nullable type - a raw planner TNullable does not
+            // compile - and the value is widened to the target base if needed. (Checked
             // on the raw node->Type: FromQumirType strips the qdb TNullable.)
             if (ot && IsNullableType(node->Type)) {
                 TTypePtr base = UnwrapNullableType(node->Type);
                 TExprPtr val = node->Operand;
                 if (PlanTypeKey(UnwrapNullableType(ot)) != PlanTypeKey(base)) {
                     // Base conversion targets the planner base type so ExpandDecimal can
-                    // still turn a float/int → decimal cast into qdb_decimal_from_*.
+                    // still turn a float/int -> decimal cast into qdb_decimal_from_*.
                     val = std::make_shared<TCastExpr>(node->Location, val, base);
                 }
                 e = std::make_shared<TCastExpr>(node->Location, val, ToQumirType(node->Type));
@@ -1225,7 +1225,7 @@ TTypePtr Expand(TExprPtr& e, const TStructType& inputType, uint64_t& counter) {
             return type;
         }
         if (name == "strcat") {
-            // `strcat(a, b)` (parser lowering of `a || b`) → the runtime call
+            // `strcat(a, b)` (parser lowering of `a || b`) -> the runtime call
             // `qdb_string_concat(__arena__, a, b)`. __arena__ is a placeholder the
             // codegen binds to the kernel's scratch arena. Null-strict: NULL if either
             // operand is NULL (SQL `NULL || x = NULL`).
@@ -1256,7 +1256,7 @@ TTypePtr Expand(TExprPtr& e, const TStructType& inputType, uint64_t& counter) {
             argTypes.push_back(Expand(arg, inputType, counter));
         }
         if (IsExcludedCall(name)) {
-            return InferType(e, inputType); // e.g. is_null/is_true → non-null bool
+            return InferType(e, inputType); // e.g. is_null/is_true -> non-null bool
         }
         bool anyNull = false;
         for (const auto& t : argTypes) {
@@ -1302,7 +1302,7 @@ TTypePtr Expand(TExprPtr& e, const TStructType& inputType, uint64_t& counter) {
     if (TMaybeNode<TIdentExpr>(e) || TMaybeNode<TNumberExpr>(e) ||
         TMaybeNode<TStringLiteralExpr>(e))
     {
-        return InferType(e, inputType); // leaves — no rewrite
+        return InferType(e, inputType); // leaves - no rewrite
     }
 
     // Anything else (field access already produced by this pass, etc.): recurse into
@@ -1766,7 +1766,7 @@ bool ContainsNull(const TExprPtr& e) {
     return false;
 }
 
-// Constructs Expand always rewrites regardless of nullability — the fast path must not
+// Constructs Expand always rewrites regardless of nullability - the fast path must not
 // skip Expand when one is present: coalesce -> if-chain, qdb_in_list -> typed
 // comparisons, strcat -> qdb_string_concat, qdb_string_view_sql_like -> a constant-pattern
 // fast path, and a cast to a nullable target -> nullable_from_value (the raw planner
@@ -1833,7 +1833,7 @@ std::pair<TExprPtr, TTypePtr> ExpandNullable(
     if (!anyNullable && !ContainsNull(expr) && !ContainsMustExpandCall(expr)) {
         return {expr, InferType(expr, inputType)};
     }
-    // Rewrite a clone — this runs at kernel build on the plan's shared expression, which
+    // Rewrite a clone - this runs at kernel build on the plan's shared expression, which
     // must stay intact (a node may be lowered into more than one kernel).
     TExprPtr e = CloneExpr(expr);
     uint64_t counter = 0; // per-query temp-name counter (unique within this expansion)

@@ -66,7 +66,7 @@ TUnaryStreamProcess MakeProjectProcess(
             }
             // Scratch for strings the kernel produces (e.g. `||` concatenation). It must
             // outlive the kernel *and* the string post-processing below, which copies the
-            // bytes into owned StringData — a local here does exactly that.
+            // bytes into owned StringData - a local here does exactly that.
             TStringArena arena;
             computeDispatch(&rowSet, outBuffers.data(), &arena);
 

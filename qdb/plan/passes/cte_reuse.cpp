@@ -127,7 +127,7 @@ TOperatorPtr Resolve(const TOperatorPtr& op, TResolveState& state) {
 namespace {
 
 // Spool traffic cost per byte, in the abstract byte-work units EstimateStats
-// uses for Cost. Rough placeholders — they still need calibration against the
+// uses for Cost. Rough placeholders - they still need calibration against the
 // real memory-vs-scan cost ratio.
 constexpr double SpoolWriteCostPerByte = 1.0;
 constexpr double SpoolReadCostPerByte = 1.0;

@@ -56,7 +56,7 @@ struct TFixture {
     }
 };
 
-// Independent Cout model — mirrors dpccp's cost, used to check optimality.
+// Independent Cout model - mirrors dpccp's cost, used to check optimality.
 struct TModel {
     struct TEdge {
         size_t A;

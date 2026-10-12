@@ -236,7 +236,7 @@ int64_t qdb_filter_string_compare(
 }
 
 // Fixed random secret in place of XXH3_64bits_withSeed's (slow) seed-derived
-// one, exactly as arrow::internal::ComputeStringHash does — bytes copied from
+// one, exactly as arrow::internal::ComputeStringHash does - bytes copied from
 // its kXxh3Secrets so this gets the same tested distribution.
 alignas(8) constexpr unsigned char Xxh3Secret[XXH3_SECRET_SIZE_MIN + 1] = {
     0xe7, 0x8b, 0x13, 0xf9, 0xfc, 0xb5, 0x8e, 0xef, 0x81, 0x48, 0x2c, 0xbf, 0xf9, 0x9f,
@@ -445,7 +445,7 @@ int32_t qdb_date_year(int32_t days) {
     int32_t yoe = (doe - doe/1460 + doe/36524 - doe/146096) / 365; // year of era [0, 399]
     int32_t y   = yoe + era * 400;
     int32_t doy = doe - (365*yoe + yoe/4 - yoe/100);      // day of year [0, 365]
-    int32_t mp  = (5*doy + 2) / 153;                      // month [0=Mar … 11=Feb]
+    int32_t mp  = (5*doy + 2) / 153;                      // month [0=Mar ... 11=Feb]
     y += (mp >= 10);                                       // Jan/Feb belong to next year
     return y;
 }

@@ -19,7 +19,7 @@ using namespace NQumir::NAst::NLiterals;
 namespace {
 
 // ConstFold takes untyped expressions (it types closed ones itself), so no
-// annotation here — parse and hand the raw AST straight to ConstFold.
+// annotation here - parse and hand the raw AST straight to ConstFold.
 TExprPtr Parse(const std::string& src) {
     std::istringstream in(src);
     NCore::TTokenStream tokens(in);

@@ -41,7 +41,7 @@ std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError>
 BuildJoinKernelLibrary();
 
 // Cross join library: the shared HashTable/pair-buffer base plus
-// join_cross.oz. Deliberately excludes join_update.oz / join_semi_anti.oz —
+// join_cross.oz. Deliberately excludes join_update.oz / join_semi_anti.oz -
 // cross join has no keys, and those helpers' bodies name the dual-key and
 // per-key-overload functions that a cross program does not define.
 std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError>

@@ -34,7 +34,7 @@ private:
     bool Destroyed_ = false;
 };
 
-// Replays each batch once per set as a masked view (set id → constant column, keys
+// Replays each batch once per set as a masked view (set id -> constant column, keys
 // outside the set forced NULL), so all sets land in one table in a single pass.
 class TGroupingSetsAggregateProcessor {
 public:

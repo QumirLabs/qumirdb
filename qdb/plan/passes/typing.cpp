@@ -26,9 +26,9 @@ namespace {
 bool IsIntType(const TTypePtr& t) { return static_cast<bool>(TMaybeType<TIntegerType>(t)); }
 bool IsFloatType(const TTypePtr& t) { return static_cast<bool>(TMaybeType<TFloatType>(t)); }
 
-// Common numeric type for a UNION column across branches: any decimal → decimal
+// Common numeric type for a UNION column across branches: any decimal -> decimal
 // (scale = max branch scale, precision widened to 38 to avoid overflow when a float/int
-// branch is cast in); else any float → float; else keep. Returns nullptr if the base
+// branch is cast in); else any float -> float; else keep. Returns nullptr if the base
 // types are not a compatible numeric mix (caller reports the mismatch).
 TTypePtr UnifyUnionBase(const TTypePtr& a, const TTypePtr& b) {
     if (!a || !b) return nullptr;
@@ -46,7 +46,7 @@ TTypePtr UnifyUnionBase(const TTypePtr& a, const TTypePtr& b) {
     return a; // both integer
 }
 
-// Unify two UNION column types (nullability + numeric base). nullptr → incompatible.
+// Unify two UNION column types (nullability + numeric base). nullptr -> incompatible.
 TTypePtr UnifyUnionColumn(const TTypePtr& a, const TTypePtr& b) {
     auto base = UnifyUnionBase(UnwrapNullableType(a), UnwrapNullableType(b));
     if (!base) return nullptr;
@@ -278,7 +278,7 @@ void AnnotateTypes(
         }
         auto* first = static_cast<TStructType*>(paramTypes[0].get());
         // Unified per-column types (names from the first branch). Numeric branches are
-        // promoted to a common type (any decimal → decimal), and a column is nullable if
+        // promoted to a common type (any decimal -> decimal), and a column is nullable if
         // any branch's is. CoerceSetOpBranches then inserts casts so every branch
         // physically produces this layout (the union just routes branch rowsets).
         std::vector<std::pair<std::string, TTypePtr>> unified;

@@ -17,8 +17,8 @@ using TColumnSet = std::unordered_set<std::string>;
 // Must be called after AnnotateTypes (operators must have TFunctionType set).
 void ApplyColumnPruning(const TOperatorPtr& root);
 
-// `explicitRootDemand` null → seed from the root's full output; non-null (even
-// empty) → seed exactly from it. Each TCteRef accumulates its refcount and the
+// `explicitRootDemand` null -> seed from the root's full output; non-null (even
+// empty) -> seed exactly from it. Each TCteRef accumulates its refcount and the
 // columns its consumer needs into `usage`.
 void ApplyColumnPruning(
     const TOperatorPtr& root, const TColumnSet* explicitRootDemand, TCteUsageMap* usage);

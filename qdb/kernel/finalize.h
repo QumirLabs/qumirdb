@@ -11,7 +11,7 @@ namespace NQdb {
 class TExternalCatalogSnapshot;
 
 // Compile each kernel's AST with the native JIT and fill its slot (Fns per
-// entrypoint + owning runner). Idempotent — already-bound slots are skipped.
+// entrypoint + owning runner). Idempotent - already-bound slots are skipped.
 // Throws on compilation failure.
 void JitFinalizeKernels(
     std::span<TGeneratedKernel> kernels,

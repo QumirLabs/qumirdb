@@ -649,17 +649,17 @@ TEST_P(RuntimeSemiAntiJoin, MultiBatch) {
     EXPECT_EQ(got, expected);
 }
 
-// ─── Left / Right Outer Join ───────────────────────────────────────────────
+// --- Left / Right Outer Join -----------------------------------------------
 
 namespace {
 
 // Left outer oracle: for each left row (lk[i], lv[i]), find all right rows with
 // matching key. If none found, emit (lk[i], lv[i], nullKey, nullVal) where null
-// values are represented as -1 (NullRowId rows → mask bit 0 → zeroed data, but
+// values are represented as -1 (NullRowId rows -> mask bit 0 -> zeroed data, but
 // we use -1 sentinel for comparison in the oracle).
 struct TOuterRow {
     int64_t Lk, Lv;
-    bool RNull;   // true  → right side is NULL
+    bool RNull;   // true  -> right side is NULL
     int64_t Rk, Rv;
     auto operator<=>(const TOuterRow&) const = default;
 };
@@ -684,7 +684,7 @@ std::vector<TOuterRow> LeftOuterOracle(
     return result;
 }
 
-// Drains a Left outer join — expects 4 columns (lk, lv, rk, rv).
+// Drains a Left outer join - expects 4 columns (lk, lv, rk, rv).
 // Right-side nulls are detected via the mask and represented as (rNull=true, rk=0, rv=0).
 std::vector<TOuterRow> DrainOuterJoin(TRuntimeJoin& join) {
     std::vector<TOuterRow> got;
@@ -849,7 +849,7 @@ TEST(RuntimeJoin, RightOuterScalarKey) {
         Release(&out);
     }
 
-    // Oracle: for each right row, find matching left rows; unmatched → lNull
+    // Oracle: for each right row, find matching left rows; unmatched -> lNull
     std::vector<TRightRow> expected;
     for (size_t j = 0; j < rk.size(); ++j) {
         bool matched = false;

@@ -45,7 +45,7 @@ NQumir::NAst::TExprPtr GenJoinFinalizeSemiAntiAst(
 //              batch: <ref TRowSet>, key_columns: <ptr i64>,
 //              batch_idx: i64, pairs: <ref PairBuffer>) -> bool
 //
-// hasPrecomputedHash: read batch.Hash[i] instead of calling rh_hash(key) —
+// hasPrecomputedHash: read batch.Hash[i] instead of calling rh_hash(key) -
 // set when this batch comes straight from a hash shuffle keyed on the same
 // join columns (plan_lowerer.cpp decides this).
 NQumir::NAst::TExprPtr GenJoinProcessAst(

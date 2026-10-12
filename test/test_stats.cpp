@@ -57,7 +57,7 @@ void WriteParquet(
 
 } // namespace
 
-// ─── TColumnStats scalar accessors: bit_cast round-trip ──────────────────────
+// --- TColumnStats scalar accessors: bit_cast round-trip ----------------------
 
 TEST(StatsTest, MinMaxRoundTrip) {
     TColumnStats cs;
@@ -76,7 +76,7 @@ TEST(StatsTest, MinMaxRoundTrip) {
     EXPECT_FALSE(empty.GetMinValue<int64_t>().has_value());
 }
 
-// ─── FractionBelow: equi-depth histogram selectivity ─────────────────────────
+// --- FractionBelow: equi-depth histogram selectivity -------------------------
 
 TEST(StatsTest, FractionBelowUniformInt) {
     // 100 buckets over [0, 1000): boundaries 0,10,...,1000.
@@ -120,7 +120,7 @@ TEST(StatsTest, FractionBelowEmptyHistogram) {
     EXPECT_FALSE(cs.FractionBelow<int64_t>(5).has_value());
 }
 
-// ─── TParquetSource::Stats(): row count + standard column stats ──────────────
+// --- TParquetSource::Stats(): row count + standard column stats --------------
 
 TEST(StatsTest, ParquetStandardStats) {
     const std::string path = "/tmp/test_stats_qdb.parquet";
@@ -211,7 +211,7 @@ TEST(StatsTest, ParquetRowGroupPredicateUsesPerGroupBounds) {
     EXPECT_FALSE(emptySource->Next(rowSet));
 }
 
-// ─── EstimateStats: filter selectivity propagation (source → filter) ─────────
+// --- EstimateStats: filter selectivity propagation (source -> filter) ---------
 // NOTE: exercises the whole stats-propagation pipeline. Expected to go green
 // once EstimateStats actually computes per-node stats (calls ComputeStatsFor),
 // the source's per-column stats are keyed by the qualified name the plan uses,
@@ -490,7 +490,7 @@ TEST(StatsTest, ProjectStatsPropagation) {
 }
 
 // Inner join on x=y where the two sides have different key cardinalities.
-// The equi-join key collapses to min(ndvL, ndvR), and — critically — this must
+// The equi-join key collapses to min(ndvL, ndvR), and - critically - this must
 // happen copy-on-write: the shared source column stats stay untouched.
 TEST(StatsTest, JoinKeyNdvCollapse) {
     TStatsSource left({{"x", 100}});

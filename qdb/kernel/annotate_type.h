@@ -62,7 +62,7 @@ NQumir::NAst::TTypePtr EffectiveBinaryNumericType(
 // Heavy rewrite, run once per kernel just before compilation (never during logical
 // planning). Rewrites null-strict ops/calls/casts, AND/OR (SQL 3VL) and CASE/`if`
 // branches so nullability is explicit in the AST (guards on `.Valid`, results wrapped
-// Nullable[T]); the non-nullable path is untouched. Operates on a clone — the plan's
+// Nullable[T]); the non-nullable path is untouched. Operates on a clone - the plan's
 // shared expression is left intact. Returns the rewritten expression and its planner type.
 std::pair<NQumir::NAst::TExprPtr, NQumir::NAst::TTypePtr> ExpandNullable(
     const NQumir::NAst::TExprPtr& expr,
