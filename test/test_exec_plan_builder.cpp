@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "mock_source.h"
+#include "runtime_filter_test_util.h"
 
 #include <qdb/exec/plan_builder.h>
 #include <qdb/exec/runtime_filter.h>
@@ -93,7 +94,7 @@ public:
     std::vector<std::pair<uint32_t, size_t>> Created;
 
 private:
-    TLocalRuntimeFilterBindingFactory Local_;
+    TLocalRuntimeFilterBindingFactory Local_{NTest::RuntimeFilterContext()};
 };
 
 TJoinOperator* FindJoin(const TOperatorPtr& node) {
@@ -451,22 +452,22 @@ TEST(ExecPlanBuilder, RuntimeFiltersShareTheQueryJit) {
     auto first = NScheduler::LowerPlanToGraph(plan, MultiSettings(), nullptr);
     auto second = NScheduler::LowerPlanToGraph(plan, MultiSettings(), nullptr);
     ASSERT_EQ(first.RuntimeFilters.size(), 2u);
-    EXPECT_EQ(std::ranges::count(first.Kernels, "runtime-filter.bloom",
+    EXPECT_EQ(std::ranges::count(first.Kernels, "runtime-filter",
         &TGeneratedKernel::Name), 1);
-    auto bloom = std::ranges::find(first.Kernels, "runtime-filter.bloom",
+    auto filter = std::ranges::find(first.Kernels, "runtime-filter",
         &TGeneratedKernel::Name);
-    auto secondBloom = std::ranges::find(second.Kernels, "runtime-filter.bloom",
+    auto secondFilter = std::ranges::find(second.Kernels, "runtime-filter",
         &TGeneratedKernel::Name);
-    ASSERT_NE(bloom, first.Kernels.end());
-    ASSERT_NE(secondBloom, second.Kernels.end());
-    ASSERT_TRUE(bloom->RuntimeContext);
-    EXPECT_NE(bloom->RuntimeContext, secondBloom->RuntimeContext);
-    EXPECT_FALSE(bloom->Slot->Runner);
+    ASSERT_NE(filter, first.Kernels.end());
+    ASSERT_NE(secondFilter, second.Kernels.end());
+    ASSERT_TRUE(filter->RuntimeContext);
+    EXPECT_NE(filter->RuntimeContext, secondFilter->RuntimeContext);
+    EXPECT_FALSE(filter->Slot->Runner);
 
     JitFinalizeKernels(first.Kernels);
-    ASSERT_TRUE(bloom->Slot->Runner);
+    ASSERT_TRUE(filter->Slot->Runner);
     for (const auto& kernel : first.Kernels) {
-        EXPECT_EQ(kernel.Slot->Runner, bloom->Slot->Runner);
+        EXPECT_EQ(kernel.Slot->Runner, filter->Slot->Runner);
     }
 }
 

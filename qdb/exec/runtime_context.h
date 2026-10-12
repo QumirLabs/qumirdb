@@ -13,7 +13,8 @@ struct TKernelSlot;
 // and is the extension point for future query-scoped runtime state.
 struct TRuntimeContext {
     NKernel::TRegexRegistry Regexes;
-    std::shared_ptr<TKernelSlot> BloomProbe;
+    // Set before any runtime filter is created (see TRuntimeFilterKernels).
+    std::shared_ptr<TKernelSlot> RuntimeFilterKernels;
 };
 
 } // namespace NQdb

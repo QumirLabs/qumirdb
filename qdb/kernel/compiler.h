@@ -366,7 +366,8 @@ public:
     // Returns a dispatch lambda that calls the compiled kernel.
     TFilterDispatch CompileFilter(const NKernel::TOperatorKernelSpec& spec);
 
-    std::shared_ptr<TKernelSlot> CompileBloomProbe();
+    // Entry points follow TRuntimeFilterKernels::Entrypoints().
+    std::shared_ptr<TKernelSlot> CompileRuntimeFilter();
 
     // Compiles a project kernel for the computed (non-ident) projections.
     // computedExprs and computedTypes are parallel; computedTypes[k] is the

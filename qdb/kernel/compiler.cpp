@@ -13,6 +13,7 @@
 #include <qdb/kernel/lib.h>
 #include <qdb/kernel/spec.h>
 #include <qdb/exec/runtime_context.h>
+#include <qdb/exec/runtime_filter_kernels.h>
 #include <qdb/modules/qumirdb.h>
 #include <qdb/modules/qumirdb_runtime.h>
 #include <qdb/utils/module_path.h>
@@ -102,7 +103,7 @@ std::unordered_map<std::string, void*> CompileKernelAst(
 namespace {
 constexpr const char* CacheSchemaVersion = "v1";
 // Bump when the generated key helpers or the .oz kernel libraries change.
-constexpr const char* KernelLibVersion = "26";
+constexpr const char* KernelLibVersion = "27";
 } // namespace
 
 NQumir::NCodeGen::TLlvmRunner::TLinkedModule CompileKernelAstCached(
@@ -1535,16 +1536,26 @@ NQumir::NAst::TExprPtr BuildTopSortMergeProgramAst(
     return std::make_shared<TBlockExpr>(NQumir::TLocation{}, std::move(programStmts));
 }
 
-std::shared_ptr<TKernelSlot> TKernelCompiler::CompileBloomProbe() {
-    auto functions = NKernel::ParseFunctionLibrary(
-        NKernel::ReadJoinKernel("bloom_vector.oz"));
-    if (!functions) {
-        throw NQumir::TError("CompileBloomProbe: " + functions.error().ToString());
+std::shared_ptr<TKernelSlot> TKernelCompiler::CompileRuntimeFilter() {
+    std::vector<NQumir::NAst::TExprPtr> programStmts;
+    for (const auto& source : {
+        NKernel::ReadSortKernel("radix.oz"),
+        NKernel::ReadAggregationKernel("swiss_group.oz"),
+        NKernel::ReadJoinKernel("runtime_filter.oz")})
+    {
+        auto library = NKernel::ParseFunctionLibrary(source);
+        if (!library) {
+            throw NQumir::TError("CompileRuntimeFilter: " + library.error().ToString());
+        }
+        for (auto& stmt : *library) {
+            programStmts.push_back(std::move(stmt));
+        }
     }
     auto ast = std::make_shared<NQumir::NAst::TBlockExpr>(
-        NQumir::TLocation{}, std::move(*functions));
-    PrintKernelAst(Diagnostics_, "runtime-filter.bloom", ast);
-    auto kernel = EmitKernel("runtime-filter.bloom", {"bloom_probe4"}, std::move(ast));
+        NQumir::TLocation{}, std::move(programStmts));
+    PrintKernelAst(Diagnostics_, "runtime-filter", ast);
+    auto kernel = EmitKernel(
+        "runtime-filter", TRuntimeFilterKernels::Entrypoints(), std::move(ast));
     FinishKernelDiagnostics(Diagnostics_);
 
     return kernel.Slot;

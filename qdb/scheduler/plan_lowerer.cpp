@@ -2789,7 +2789,7 @@ private:
         std::shared_ptr<IRuntimeFilterProbe> filterProbe;
         if (const auto& runtimeFilter = join.RuntimeFilter()) {
             if (!RuntimeFilterBindings_) {
-                RuntimeContext_->BloomProbe = compiler.CompileBloomProbe();
+                RuntimeContext_->RuntimeFilterKernels = compiler.CompileRuntimeFilter();
                 RuntimeFilterBindings_ =
                     std::make_shared<TLocalRuntimeFilterBindingFactory>(RuntimeContext_);
             }
