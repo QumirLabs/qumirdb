@@ -157,12 +157,6 @@ void ApplyPlanPasses(TOperatorPtr& plan, TPlanPassOptions options) {
         ForEachPlan(plan, [&](TOperatorPtr& current, TCteDefinition*) {
             AttachRuntimeFilters(current, nextFilterId, options.ForceRuntimeFilters);
         });
-        for (const auto& materialization : CollectMaterializations(plan)) {
-            PlaceRuntimeFilterConsumers(materialization.Materialization->Plan);
-        }
-        ForEachPlan(plan, [&](TOperatorPtr& current, TCteDefinition*) {
-            PlaceRuntimeFilterConsumers(current);
-        });
     }
     if (std::getenv("QDB_DUMP_PASSES") != nullptr) {
         std::cerr << "\n===== after ApplyCteReuse =====\n";

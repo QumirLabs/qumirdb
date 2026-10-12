@@ -299,6 +299,25 @@ TEST(ExecPlanBuilder, SingleAndMultiCollapseJoinToSameSemanticDag) {
     EXPECT_EQ(CountKind(multi.Exec, EExecPlanNodeKind::Join), 1u);
 }
 
+TEST(ExecPlanBuilder, CostedRuntimeFilterIsPlacedBeforeLowering) {
+    TStatsSplitMockSource large(1'000'000, 1'000'000);
+    TStatsSplitMockSource small(100'000, 10'000);
+    const std::unordered_map<std::string, ISource*> sources{
+        {"l", &large}, {"r", &small},
+    };
+    auto plan = BuildSqlPlan(
+        "SELECT l.k FROM l JOIN r ON l.k = r.k", sources);
+    auto* join = FindJoin(plan);
+    ASSERT_NE(join, nullptr);
+    ASSERT_TRUE(join->RuntimeFilter());
+    EXPECT_EQ(join->RuntimeFilter()->BuildSide, EJoinFilterSide::Right);
+    auto probe = TMaybeOp<TSourceOperator>(join->Left());
+    ASSERT_TRUE(probe);
+    ASSERT_EQ(probe.Cast()->RuntimeFilterUses.size(), 1u);
+    EXPECT_EQ(probe.Cast()->RuntimeFilterUses[0].Id,
+        join->RuntimeFilter()->Id);
+}
+
 TEST(ExecPlanBuilder, LowererUsesInjectedRuntimeFilterBindings) {
     TSplitMockSource left({"k"});
     TSplitMockSource right({"k"});

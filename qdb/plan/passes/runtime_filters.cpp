@@ -10,7 +10,9 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <iterator>
 #include <optional>
+#include <utility>
 
 namespace NQdb {
 
@@ -36,6 +38,28 @@ struct TKeyEstimate {
     double Ndv;
     bool Exact;
 };
+
+struct TConsumerTarget {
+    TOperatorPtr Operator;
+    std::vector<std::string> ProbeKeys;
+};
+
+using TConsumerPlacement = std::vector<TConsumerTarget>;
+
+struct TScoredPlacement {
+    double Benefit = 0.0;
+    TConsumerPlacement Targets;
+};
+
+struct TFilterDecision {
+    EJoinFilterSide BuildSide;
+    TConsumerPlacement Targets;
+};
+
+std::vector<TConsumerPlacement> PlacementCandidates(
+    TOperatorPtr target, std::vector<std::string> probeKeys);
+void AttachPlacement(const TConsumerPlacement& placement, uint32_t id);
+void RemoveFilterUse(const TOperatorPtr& root, uint32_t id);
 
 bool HasFilteredBuildInput(const TOperatorPtr& op) {
     if (TMaybeOp<TFilterOperator>(op)) {
@@ -92,7 +116,7 @@ std::optional<TKeyEstimate> KeyNdv(
     return TKeyEstimate{ndv, exact};
 }
 
-std::optional<double> EstimatedBenefit(double buildRows, double probeRows,
+std::optional<double> EstimatedPassFraction(double buildRows, double probeRows,
     TKeyEstimate buildKey, TKeyEstimate probeKey)
 {
     if (buildRows > NdvCostPathMaxBuildRows || buildRows > probeRows) {
@@ -104,19 +128,75 @@ std::optional<double> EstimatedBenefit(double buildRows, double probeRows,
     // not force a join into a build-first mode for a weak filter.
     const double uncertainty = buildKey.Exact && probeKey.Exact
         ? 1.0 : InexactNdvSafetyFactor;
-    const double passFraction = std::min(1.0,
+    return std::min(1.0,
         uncertainty * buildKey.Ndv / std::max(1.0, probeKey.Ndv));
-    const double saved = probeRows * (1.0 - passFraction) * SavedRowWork;
-    const double filterCost = buildRows * FilterBuildWork
-        + probeRows * FilterProbeWork;
-    const double buildPenalty = probeRows >= buildRows * JoinAsymmetryRatio
-        ? 0.0 : buildRows * ForcedBuildWork;
-    const double net = saved - filterCost - buildPenalty;
-    return net > 0.0 ? std::optional(net) : std::nullopt;
 }
 
-std::optional<TRuntimeFilterSpec> ChooseRuntimeFilter(
-    const TJoinOperator& join, uint32_t& nextId, bool force)
+std::vector<std::string> ProbeKeys(
+    const TJoinOperator& join, EJoinFilterSide buildSide)
+{
+    std::vector<std::string> keys;
+    keys.reserve(join.Keys().size());
+    for (const auto& key : join.Keys()) {
+        keys.push_back(buildSide == EJoinFilterSide::Left
+            ? key.Right : key.Left);
+    }
+    return keys;
+}
+
+TOperatorPtr ProbeInput(
+    const TJoinOperator& join, EJoinFilterSide buildSide)
+{
+    return buildSide == EJoinFilterSide::Left
+        ? join.Right() : join.Left();
+}
+
+std::optional<double> PlacementRows(const TConsumerPlacement& placement) {
+    double rows = 0.0;
+    for (const auto& target : placement) {
+        if (!target.Operator->Stats_) {
+            return std::nullopt;
+        }
+        rows += static_cast<double>(target.Operator->Stats_->RowCount);
+    }
+    return rows;
+}
+
+std::optional<TScoredPlacement> BestPlacement(
+    const TJoinOperator& join, EJoinFilterSide buildSide,
+    double passFraction, bool includeBuildPenalty = true)
+{
+    const auto probe = ProbeInput(join, buildSide);
+    const auto build = buildSide == EJoinFilterSide::Left
+        ? join.Left() : join.Right();
+    const double buildRows = static_cast<double>(build->Stats_->RowCount);
+    const double joinProbeRows = static_cast<double>(probe->Stats_->RowCount);
+    const double saved = joinProbeRows * (1.0 - passFraction) * SavedRowWork;
+    const double buildCost = buildRows * FilterBuildWork
+        + (!includeBuildPenalty || joinProbeRows >= buildRows * JoinAsymmetryRatio
+            ? 0.0 : buildRows * ForcedBuildWork);
+
+    std::optional<TScoredPlacement> best;
+    for (auto& placement : PlacementCandidates(probe, ProbeKeys(join, buildSide))) {
+        const auto rows = PlacementRows(placement);
+        if (!rows) {
+            continue;
+        }
+        // A consumer below a selective operator may see far more rows than
+        // the join. Credit only work saved at the join until we can estimate
+        // key selectivity independently at the deeper boundary.
+        const double benefit = saved - buildCost - *rows * FilterProbeWork;
+        // Prefer the earlier consumer when its estimated cost is equal.
+        if (benefit > 0.0 && (!best || benefit >= best->Benefit)) {
+            best = TScoredPlacement{
+                .Benefit = benefit, .Targets = std::move(placement)};
+        }
+    }
+    return best;
+}
+
+std::optional<TFilterDecision> ChooseRuntimeFilter(
+    const TJoinOperator& join, bool force)
 {
     if (join.Keys().empty()) {
         return std::nullopt;
@@ -145,50 +225,76 @@ std::optional<TRuntimeFilterSpec> ChooseRuntimeFilter(
         if (semi && rightStats->RowCount > leftStats->RowCount) {
             return std::nullopt;
         }
-        return TRuntimeFilterSpec{.Id = nextId++, .BuildSide = side};
+        auto placements = PlacementCandidates(
+            ProbeInput(join, side), ProbeKeys(join, side));
+        return TFilterDecision{
+            .BuildSide = side, .Targets = std::move(placements.back())};
     }
 
     const auto leftNdv = KeyNdv(leftStats, join.Keys(), /*leftSide=*/true);
     const auto rightNdv = KeyNdv(rightStats, join.Keys(), /*leftSide=*/false);
 
-    std::optional<EJoinFilterSide> side;
+    std::optional<TFilterDecision> decision;
     double bestBenefit = 0.0;
     if (leftNdv && rightNdv) {
-        if (auto benefit = EstimatedBenefit(
+        if (auto passFraction = EstimatedPassFraction(
                 static_cast<double>(rightStats->RowCount),
                 static_cast<double>(leftStats->RowCount),
                 *rightNdv, *leftNdv)) {
-            side = EJoinFilterSide::Right;
-            bestBenefit = *benefit;
+            if (auto placement = BestPlacement(
+                    join, EJoinFilterSide::Right, *passFraction)) {
+                bestBenefit = placement->Benefit;
+                decision = TFilterDecision{
+                    .BuildSide = EJoinFilterSide::Right,
+                    .Targets = std::move(placement->Targets)};
+            }
         }
     }
     // SEMI can publish only from its key-only right table.
     if (!semi) {
         if (leftNdv && rightNdv) {
-            if (auto benefit = EstimatedBenefit(
+            if (auto passFraction = EstimatedPassFraction(
                     static_cast<double>(leftStats->RowCount),
                     static_cast<double>(rightStats->RowCount),
-                    *leftNdv, *rightNdv);
-                benefit && *benefit > bestBenefit) {
-                side = EJoinFilterSide::Left;
+                    *leftNdv, *rightNdv)) {
+                if (auto placement = BestPlacement(
+                        join, EJoinFilterSide::Left, *passFraction);
+                    placement && placement->Benefit > bestBenefit) {
+                    bestBenefit = placement->Benefit;
+                    decision = TFilterDecision{
+                        .BuildSide = EJoinFilterSide::Left,
+                        .Targets = std::move(placement->Targets)};
+                }
             }
         }
     }
-    if (!side) {
+    if (!decision) {
         const double leftRows = static_cast<double>(leftStats->RowCount);
         const double rightRows = static_cast<double>(rightStats->RowCount);
         if (FilteredBuildCandidate(join.Right(), rightRows, leftRows)) {
-            side = EJoinFilterSide::Right;
+            // Filtered-build row estimates can be pessimistic, so the
+            // fallback keeps its existing barrier assumption. Placement
+            // still rejects a probe site whose cost exceeds even the most
+            // optimistic join-side savings.
+            if (auto placement = BestPlacement(join, EJoinFilterSide::Right,
+                    /*passFraction=*/0.0, /*includeBuildPenalty=*/false)) {
+                bestBenefit = placement->Benefit;
+                decision = TFilterDecision{
+                    .BuildSide = EJoinFilterSide::Right,
+                    .Targets = std::move(placement->Targets)};
+            }
         }
-        if (!semi && FilteredBuildCandidate(join.Left(), leftRows, rightRows)
-            && (!side || leftRows < rightRows)) {
-            side = EJoinFilterSide::Left;
+        if (!semi && FilteredBuildCandidate(join.Left(), leftRows, rightRows)) {
+            if (auto placement = BestPlacement(join, EJoinFilterSide::Left,
+                    /*passFraction=*/0.0, /*includeBuildPenalty=*/false);
+                placement && placement->Benefit > bestBenefit) {
+                decision = TFilterDecision{
+                    .BuildSide = EJoinFilterSide::Left,
+                    .Targets = std::move(placement->Targets)};
+            }
         }
     }
-    if (!side) {
-        return std::nullopt;
-    }
-    return TRuntimeFilterSpec{.Id = nextId++, .BuildSide = *side};
+    return decision;
 }
 
 void Attach(const TOperatorPtr& node, uint32_t& nextId, bool force) {
@@ -196,8 +302,20 @@ void Attach(const TOperatorPtr& node, uint32_t& nextId, bool force) {
         return;
     }
     if (auto join = TMaybeOp<TJoinOperator>(node)) {
-        join.Cast()->MutableRuntimeFilter() =
-            ChooseRuntimeFilter(*join.Cast(), nextId, force);
+        if (const auto& previous = join.Cast()->RuntimeFilter()) {
+            for (const auto& input : join.Cast()->Inputs()) {
+                RemoveFilterUse(input, previous->Id);
+            }
+        }
+        auto decision = ChooseRuntimeFilter(*join.Cast(), force);
+        if (decision) {
+            const uint32_t id = nextId++;
+            join.Cast()->MutableRuntimeFilter() = TRuntimeFilterSpec{
+                .Id = id, .BuildSide = decision->BuildSide};
+            AttachPlacement(decision->Targets, id);
+        } else {
+            join.Cast()->MutableRuntimeFilter() = std::nullopt;
+        }
     }
     for (const auto& child : node->Children()) {
         if (auto op = TMaybeNode<IOperator>(child)) {
@@ -356,45 +474,99 @@ TOperatorPtr InnerJoinKeyInput(const TJoinOperator& join,
     return input;
 }
 
-void PlaceConsumer(TOperatorPtr target, TRuntimeFilterUseSpec use) {
+std::vector<TConsumerPlacement> PlacementCandidates(
+    TOperatorPtr target, std::vector<std::string> probeKeys)
+{
+    std::vector<TConsumerPlacement> candidates{
+        TConsumerPlacement{{.Operator = target, .ProbeKeys = probeKeys}}};
     if (auto predicate = TMaybeOp<TFilterOperator>(target)) {
         auto input = predicate.Cast()->Input();
         if (target->Type && input->Type
-            && std::all_of(use.ProbeKeys.begin(), use.ProbeKeys.end(),
+            && std::all_of(probeKeys.begin(), probeKeys.end(),
                 [&](const auto& key) {
                     return SameKeyType(*target->OutputColumns(), key,
                         *input->OutputColumns(), key);
                 })) {
-            PlaceConsumer(input, std::move(use));
-            return;
+            auto deeper = PlacementCandidates(input, std::move(probeKeys));
+            candidates.insert(candidates.end(),
+                std::make_move_iterator(deeper.begin()),
+                std::make_move_iterator(deeper.end()));
         }
     } else if (auto project = TMaybeOp<TProjectOperator>(target)) {
-        auto inputKeys = ProjectInputKeys(*project.Cast(), use.ProbeKeys);
+        auto inputKeys = ProjectInputKeys(*project.Cast(), probeKeys);
         if (inputKeys) {
-            use.ProbeKeys = std::move(*inputKeys);
-            PlaceConsumer(project.Cast()->Input(), std::move(use));
-            return;
+            auto deeper = PlacementCandidates(
+                project.Cast()->Input(), std::move(*inputKeys));
+            candidates.insert(candidates.end(),
+                std::make_move_iterator(deeper.begin()),
+                std::make_move_iterator(deeper.end()));
         }
     } else if (auto un = TMaybeOp<TUnionAllOperator>(target)) {
-        auto branches = UnionBranchUses(*un.Cast(), use);
+        auto branches = UnionBranchUses(*un.Cast(),
+            TRuntimeFilterUseSpec{.ProbeKeys = probeKeys});
         if (branches) {
+            TConsumerPlacement cheapest;
+            TConsumerPlacement fanout;
             for (size_t i = 0; i < branches->size(); ++i) {
-                PlaceConsumer(un.Cast()->Inputs()[i], std::move((*branches)[i]));
+                auto branch = PlacementCandidates(
+                    un.Cast()->Inputs()[i], std::move((*branches)[i].ProbeKeys));
+                size_t cheapestIndex = 0;
+                std::optional<double> fewestRows;
+                for (size_t candidate = 0; candidate < branch.size(); ++candidate) {
+                    const auto rows = PlacementRows(branch[candidate]);
+                    if (rows && (!fewestRows || *rows <= *fewestRows)) {
+                        fewestRows = rows;
+                        cheapestIndex = candidate;
+                    }
+                }
+                const auto& branchCheapest = branch[cheapestIndex];
+                cheapest.insert(cheapest.end(),
+                    branchCheapest.begin(), branchCheapest.end());
+                auto& deepest = branch.back();
+                fanout.insert(fanout.end(),
+                    std::make_move_iterator(deepest.begin()),
+                    std::make_move_iterator(deepest.end()));
             }
-            return;
+            candidates.push_back(std::move(cheapest));
+            candidates.push_back(std::move(fanout));
         }
     } else if (auto join = TMaybeOp<TJoinOperator>(target)) {
-        auto input = InnerJoinKeyInput(*join.Cast(), use.ProbeKeys);
+        auto input = InnerJoinKeyInput(*join.Cast(), probeKeys);
         if (input) {
-            PlaceConsumer(std::move(input), std::move(use));
-            return;
+            auto deeper = PlacementCandidates(
+                std::move(input), std::move(probeKeys));
+            candidates.insert(candidates.end(),
+                std::make_move_iterator(deeper.begin()),
+                std::make_move_iterator(deeper.end()));
         }
     }
-    if (!std::any_of(target->RuntimeFilterUses.begin(),
-            target->RuntimeFilterUses.end(),
-            [&](const auto& existing) { return existing.Id == use.Id; })) {
-        target->RuntimeFilterUses.push_back(std::move(use));
+    return candidates;
+}
+
+void AttachPlacement(const TConsumerPlacement& placement, uint32_t id) {
+    for (const auto& target : placement) {
+        if (!std::any_of(target.Operator->RuntimeFilterUses.begin(),
+                target.Operator->RuntimeFilterUses.end(),
+                [id](const auto& existing) { return existing.Id == id; })) {
+            target.Operator->RuntimeFilterUses.push_back(
+                TRuntimeFilterUseSpec{
+                    .Id = id, .ProbeKeys = target.ProbeKeys});
+        }
     }
+}
+
+void RemoveFilterUse(const TOperatorPtr& root, uint32_t id) {
+    std::erase_if(root->RuntimeFilterUses,
+        [id](const auto& use) { return use.Id == id; });
+    for (const auto& input : root->Inputs()) {
+        RemoveFilterUse(input, id);
+    }
+}
+
+void PlaceConsumer(TOperatorPtr target, TRuntimeFilterUseSpec use) {
+    auto candidates = PlacementCandidates(
+        std::move(target), std::move(use.ProbeKeys));
+    AttachPlacement(candidates.back(), use.Id);
 }
 
 void PlaceConsumers(const TOperatorPtr& root) {
