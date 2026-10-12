@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <vector>
 
@@ -171,6 +172,7 @@ private:
     std::atomic<size_t> PendingProducers_{0};
     TPublishedData Data_;
     std::atomic<bool> Ready_{false};
+    std::mutex ProbeStatesMutex_;
     std::vector<std::shared_ptr<TRuntimeFilterProbeState>> ProbeStates_;
     std::chrono::steady_clock::time_point ExecutionStart_;
 };

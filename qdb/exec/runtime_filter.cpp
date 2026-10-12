@@ -276,7 +276,10 @@ void TRuntimeFilter::Publish() {
 
 std::shared_ptr<TRuntimeFilterProbeState> TRuntimeFilter::CreateProbeState() {
     auto state = IRuntimeFilterProbe::CreateProbeState();
-    ProbeStates_.push_back(state);
+    {
+        std::lock_guard lock(ProbeStatesMutex_);
+        ProbeStates_.push_back(state);
+    }
     return state;
 }
 

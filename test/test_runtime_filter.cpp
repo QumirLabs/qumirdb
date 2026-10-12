@@ -9,6 +9,7 @@
 #include <qumir/codegen/llvm/llvm_initializer.h>
 
 #include <algorithm>
+#include <atomic>
 #include <random>
 #include <thread>
 #include <utility>
@@ -71,6 +72,31 @@ TEST(RuntimeFilter, HandlesZeroHash) {
     EXPECT_TRUE(filter.MayContain(0));
     EXPECT_TRUE(filter.MayContain(7));
     EXPECT_FALSE(filter.MayContain(9));
+}
+
+TEST(RuntimeFilter, RegistersProbeStatesFromConcurrentLanes) {
+    TRuntimeFilter filter;
+    constexpr size_t Lanes = 16;
+    constexpr size_t StatesPerLane = 64;
+    std::atomic<bool> start{false};
+    std::vector<std::thread> lanes;
+    lanes.reserve(Lanes);
+    for (size_t lane = 0; lane < Lanes; ++lane) {
+        lanes.emplace_back([&] {
+            while (!start.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            for (size_t i = 0; i < StatesPerLane; ++i) {
+                auto state = filter.CreateProbeState();
+                filter.BeginBatch(*state, 1);
+            }
+        });
+    }
+    start.store(true, std::memory_order_release);
+    for (auto& lane : lanes) {
+        lane.join();
+    }
+    EXPECT_EQ(filter.StatsSnapshot().ProbeRows, Lanes * StatesPerLane);
 }
 
 TEST(RuntimeFilter, BatchMatchesScalarForExactBloomAndUnpublished) {

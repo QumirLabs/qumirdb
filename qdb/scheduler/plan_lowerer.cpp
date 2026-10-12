@@ -569,6 +569,9 @@ public:
             }
             auto code = std::make_shared<NScheduler::TRuntimeFilterCode>();
             code->AuxInput = std::make_shared<NScheduler::TAuxInput>();
+            const auto execStageId = NewExecStage(
+                op.get(), EExecPlanNodeKind::RuntimeFilter);
+            ExecStages_.back().RuntimeFilterUse = use;
             TFilterConsumerTasks consumer{
                 .Code = code,
                 .ProbeKeys = use.ProbeKeys,
@@ -586,7 +589,7 @@ public:
                         .Lane = lane + (output == &outConn ? outLaneOffset : 0)});
                 auto& node = Graph_.AddOwnedNode(std::move(task));
                 MarkNode(node, "runtime-filter", group,
-                    "runtime-filter " + std::to_string(use.Id));
+                    "runtime-filter " + std::to_string(use.Id), execStageId);
                 Graph_.AddEdge(*lowered.Producers[lane], node, *input, lane, lane);
                 consumer.Nodes.push_back(&node);
             }

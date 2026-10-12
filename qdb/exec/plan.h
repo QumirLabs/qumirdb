@@ -15,6 +15,7 @@ namespace NQdb {
 enum class EExecPlanNodeKind {
     Source,
     Filter,
+    RuntimeFilter,
     Project,
     Aggregate,
     Join,
@@ -49,6 +50,7 @@ inline std::string_view ExecPlanNodeKindName(EExecPlanNodeKind kind) {
     switch (kind) {
         case EExecPlanNodeKind::Source: return "source";
         case EExecPlanNodeKind::Filter: return "filter";
+        case EExecPlanNodeKind::RuntimeFilter: return "runtime-filter";
         case EExecPlanNodeKind::Project: return "project";
         case EExecPlanNodeKind::Aggregate: return "aggregate";
         case EExecPlanNodeKind::Join: return "join";
@@ -75,6 +77,7 @@ struct TLoweredExecStage {
     const IOperator* Operator = nullptr;
     TOperatorPtr OperatorOwner;
     EAggregatePhase AggregatePhase = EAggregatePhase::Single;
+    std::optional<TRuntimeFilterUseSpec> RuntimeFilterUse;
 };
 
 using TExecPlanNodeId = size_t;
@@ -88,6 +91,7 @@ struct TExecPlanNode {
     const IOperator* Operator = nullptr;
     TOperatorPtr OperatorOwner;
     EAggregatePhase AggregatePhase = EAggregatePhase::Single;
+    std::optional<TRuntimeFilterUseSpec> RuntimeFilterUse;
     std::vector<TExecPlanNodeId> Inputs;
     NQumir::NAst::TTypePtr OutputType;
     std::vector<size_t> KernelIndexes;

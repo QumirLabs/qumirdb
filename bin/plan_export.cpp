@@ -2378,6 +2378,11 @@ struct TExecPlanCodec {
                 AddNode(node, std::move(encoded));
                 return;
             }
+            case NQdb::EExecPlanNodeKind::RuntimeFilter: {
+                Unsupported = UnsupportedExec(
+                    "runtime-filter is only supported by the native runtime");
+                return;
+            }
             case NQdb::EExecPlanNodeKind::Project: {
                 auto* project = const_cast<NQdb::TProjectOperator*>(
                     static_cast<const NQdb::TProjectOperator*>(node.Operator));

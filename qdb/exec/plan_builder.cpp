@@ -229,6 +229,8 @@ private:
             .AggregatePhase = stage
                 ? stage->AggregatePhase
                 : EAggregatePhase::Single,
+            .RuntimeFilterUse = stage ? stage->RuntimeFilterUse
+                : std::nullopt,
             .OutputType = std::move(outputType),
             .MaterializationId = materialization,
             .KeptInputColumns = std::move(keptColumns),
@@ -312,6 +314,13 @@ private:
                 keptColumns = std::move(columnPlan.KeptInputColumns);
                 break;
             }
+            case EExecPlanNodeKind::RuntimeFilter:
+                if (!stage.RuntimeFilterUse) {
+                    throw std::runtime_error(
+                        "exec plan builder: runtime filter has no binding");
+                }
+                outputType = inputs[0].OutputType;
+                break;
             case EExecPlanNodeKind::Project: {
                 auto* project = const_cast<TProjectOperator*>(
                     static_cast<const TProjectOperator*>(stage.Operator));
