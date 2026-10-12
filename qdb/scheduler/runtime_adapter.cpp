@@ -310,7 +310,7 @@ TRuntimeFilterTask::~TRuntimeFilterTask() {
     }
 }
 
-bool TRuntimeFilterTask::WantsInput(const TTaskEdge& edge) const {
+bool TRuntimeFilterTask::WantsInput(const TTaskEdge& edge) const noexcept {
     switch (Code_->AuxInput->Poll()) {
         case EAuxInputStatus::Ready:
             return edge.Kind == ETaskEdgeKind::Rowset;
@@ -323,7 +323,7 @@ bool TRuntimeFilterTask::WantsInput(const TTaskEdge& edge) const {
     return false;
 }
 
-bool TRuntimeFilterTask::TryNotifyDependency() {
+bool TRuntimeFilterTask::TryNotifyDependency() noexcept {
     const auto status = Code_->AuxInput->Poll();
     if (status != EAuxInputStatus::Ready
         && status != EAuxInputStatus::Failed) {
@@ -340,8 +340,8 @@ ETaskResult TRuntimeFilterTask::Execute() {
     }
     switch (Code_->AuxInput->Poll()) {
         case EAuxInputStatus::Ready: break;
-        case EAuxInputStatus::NeedProducer: return ETaskResult::NEED_DATA;
-        case EAuxInputStatus::Waiting: return ETaskResult::WAITING;
+        case EAuxInputStatus::NeedProducer:
+        case EAuxInputStatus::Waiting: return ETaskResult::NEED_DATA;
         case EAuxInputStatus::Failed:
             throw std::runtime_error(
                 "auxiliary producers finished without publishing input");
@@ -583,7 +583,7 @@ ETaskResult TBinaryBlockingTask::Execute() {
     return result;
 }
 
-bool TBinaryBlockingTask::WantsInput(const TTaskEdge& edge) const {
+bool TBinaryBlockingTask::WantsInput(const TTaskEdge& edge) const noexcept {
     if (!Code_->RequiredSide) {
         return true;
     }

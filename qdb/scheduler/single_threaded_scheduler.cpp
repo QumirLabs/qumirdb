@@ -41,37 +41,36 @@ bool TSingleThreadedScheduler::Run(std::string* error) {
         Scheduled_.erase(node);
         ++Stats_.Popped;
 
+        ETaskResult state;
         try {
-            const auto state = node->Task->Execute();
-            ++Stats_.Executed;
-            if (state == ETaskResult::NEED_DATA) {
-                ++Stats_.NeedData;
-                ScheduleInput(node);
-            } else if (state == ETaskResult::WAITING) {
-                ++Stats_.Waiting;
-            } else if (
-                state == ETaskResult::BLOCKED_OUTPUT ||
-                state == ETaskResult::FINISHED)
-            {
-                if (state == ETaskResult::BLOCKED_OUTPUT) {
-                    ++Stats_.BlockedOutput;
-                } else {
-                    ++Stats_.Finished;
-                    node->State.store(
-                        ETaskState::Finished, std::memory_order_release);
-                }
-                ScheduleOutput(node);
-            } else if (state == ETaskResult::OK) {
-                ++Stats_.Ok;
-                Schedule(node);
-                ScheduleOutput(node);
-            }
+            state = node->Task->Execute();
         } catch (const std::exception& e) {
             SetError(error, e.what());
             return false;
         } catch (...) {
             SetError(error, "scheduler task failed with an unknown exception");
             return false;
+        }
+        ++Stats_.Executed;
+        if (state == ETaskResult::NEED_DATA) {
+            ++Stats_.NeedData;
+            ScheduleInput(node);
+        } else if (
+            state == ETaskResult::BLOCKED_OUTPUT ||
+            state == ETaskResult::FINISHED)
+        {
+            if (state == ETaskResult::BLOCKED_OUTPUT) {
+                ++Stats_.BlockedOutput;
+            } else {
+                ++Stats_.Finished;
+                node->State.store(
+                    ETaskState::Finished, std::memory_order_release);
+            }
+            ScheduleOutput(node);
+        } else if (state == ETaskResult::OK) {
+            ++Stats_.Ok;
+            Schedule(node);
+            ScheduleOutput(node);
         }
     }
 

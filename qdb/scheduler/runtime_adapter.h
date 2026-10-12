@@ -165,8 +165,8 @@ public:
     ~TRuntimeFilterTask() override;
 
     ETaskResult Execute() override;
-    bool WantsInput(const TTaskEdge& edge) const override;
-    bool TryNotifyDependency() override;
+    bool WantsInput(const TTaskEdge& edge) const noexcept override;
+    bool TryNotifyDependency() noexcept override;
 
 private:
     std::shared_ptr<const TRuntimeFilterCode> Code_;
@@ -254,7 +254,7 @@ public:
     ~TBinaryBlockingTask() override;
 
     ETaskResult Execute() override;
-    bool WantsInput(const TTaskEdge& edge) const override;
+    bool WantsInput(const TTaskEdge& edge) const noexcept override;
 
 private:
     std::shared_ptr<const TBinaryBlockingCode> Code_;

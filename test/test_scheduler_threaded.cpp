@@ -137,14 +137,6 @@ public:
     }
 };
 
-class TThrowWantsInputTask : public ITaskNode {
-public:
-    ETaskResult Execute() override { return ETaskResult::NEED_DATA; }
-    bool WantsInput(const TTaskEdge&) const override {
-        throw std::runtime_error("expected input scheduling failure");
-    }
-};
-
 class TManyInputSinkTask : public ITaskNode {
 public:
     ETaskResult Execute() override {
@@ -327,26 +319,6 @@ TEST(SchedulerThreaded, ReportsTaskExceptions) {
         EXPECT_EQ(error, "expected task failure");
     };
 
-    run(false);
-    run(true);
-}
-
-TEST(SchedulerThreaded, ReportsInputSchedulingExceptions) {
-    auto run = [](bool threaded) {
-        TTaskGraph graph;
-        auto& source = graph.AddOwnedNode(std::make_unique<TFinishTask>());
-        auto& sink = graph.AddOwnedNode(
-            std::make_unique<TThrowWantsInputTask>());
-        graph.AddOwnedEdge(source, sink,
-            std::make_unique<TOneToOneConnection>());
-        graph.Build();
-        std::string error;
-        const bool ok = threaded
-            ? TThreadedScheduler(graph, 2).Run(&error)
-            : TSingleThreadedScheduler(graph).Run(&error);
-        EXPECT_FALSE(ok);
-        EXPECT_EQ(error, "expected input scheduling failure");
-    };
     run(false);
     run(true);
 }

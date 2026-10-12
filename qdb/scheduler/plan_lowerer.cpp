@@ -3250,7 +3250,6 @@ void PrintCounterDiagnostics(
         << " executed=" << stats.Executed
         << " ok=" << stats.Ok
         << " need_data=" << stats.NeedData
-        << " waiting=" << stats.Waiting
         << " blocked_output=" << stats.BlockedOutput
         << " finished=" << stats.Finished
         << " rescheduled=" << stats.Rescheduled

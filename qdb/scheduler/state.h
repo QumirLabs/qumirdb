@@ -12,7 +12,6 @@ enum class ETaskResult {
     NEED_DATA = 1,
     BLOCKED_OUTPUT = 2,
     FINISHED = 3,
-    WAITING = 4,
 };
 
 enum class ETaskState {
@@ -32,9 +31,9 @@ public:
     // Whether the demand path should schedule this inbound edge's producer.
     // Default: all. Lets a task that reads one input at a time (asymmetric join:
     // build side first, then probe) avoid waking a producer it won't yet read.
-    virtual bool WantsInput(const TTaskEdge&) const { return true; }
+    virtual bool WantsInput(const TTaskEdge&) const noexcept { return true; }
     // Dependency edges signal publication, not every rowset produced upstream.
-    virtual bool TryNotifyDependency() { return true; }
+    virtual bool TryNotifyDependency() noexcept { return true; }
 };
 
 struct TSchedulerRunStats {
@@ -42,7 +41,6 @@ struct TSchedulerRunStats {
     uint64_t Popped = 0;
     uint64_t Executed = 0;
     uint64_t NeedData = 0;
-    uint64_t Waiting = 0;
     uint64_t BlockedOutput = 0;
     uint64_t Ok = 0;
     uint64_t Finished = 0;
