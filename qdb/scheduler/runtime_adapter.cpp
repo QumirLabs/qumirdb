@@ -738,11 +738,9 @@ void THashShuffleTask::AccumulateFilter(
     if (!FilterBuilder_) {
         FilterBuilder_.emplace(Code_->ProducedFilter->MakeBuilder());
     }
-    for (int64_t row = 0; row < rowSet.RowCount; ++row) {
-        if (RowSelected(rowSet, row)) {
-            FilterBuilder_->Add(hashes[row]);
-        }
-    }
+    FilterBuilder_->Add(hashes, rowSet.Selection
+        ? std::span<const uint8_t>(rowSet.Selection, hashes.size())
+        : std::span<const uint8_t>{});
 }
 
 void THashShuffleTask::EnsureBuffers(size_t partitions) {

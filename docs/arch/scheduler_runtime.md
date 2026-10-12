@@ -329,9 +329,24 @@ diagnostics are read only after execution stops. Before allocating a mask or
 computing filter hashes, a task checks whether the filter is ready and active.
 An inactive filter passes the batch through. Source-computed hashes share the
 source rowset's lifetime through shuffle views; materialized shuffle batches
-gather their existing hashes alongside the columns. The optional vector Bloom
-kernel compiles with the query kernels; scalar probing handles batches that
-are too small for the vector path.
+gather their existing hashes alongside the columns.
+
+Every operation on filter contents runs in the `runtime-filter` kernel
+(`qdb/kernel/join/runtime_filter.oz`): key accumulation and deduplication, the
+exact table, Bloom insertion, merging and probing. It compiles with the query
+kernels when the first join with a filter is lowered. The query's
+`TRuntimeContext` holds it and is passed to the binding factory, so a filter
+cannot be created without it.
+
+The kernel has three entry points, each called once per batch: `rf_build` adds
+a batch to a producer's contribution, `rf_publish` merges the contributions,
+and `rf_probe` tests a batch. They work on state structs that point to storage
+provided by C++. `rf_build` returns early when it needs storage it was not
+given, such as the Bloom words on overflow, and continues from the same row.
+`TRuntimeFilter` keeps the buffers, producer completion, publication, counters
+and the pause policy. Bloom probes of fewer than 8192 selected rows are scalar;
+larger batches use the vector probe, which first packs the selected hashes so
+that every vector lane carries a live row.
 
 `AttachRuntimeFilters` estimates how many probe rows the filter can reject from
 the build and probe key NDVs. It compares saved shuffle and join work with the

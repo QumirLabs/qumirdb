@@ -1,11 +1,14 @@
 #include <gtest/gtest.h>
 
+#include "runtime_filter_test_util.h"
+
 #include <qdb/scheduler/connection.h>
 #include <qdb/scheduler/graph.h>
 #include <qdb/scheduler/runtime_adapter.h>
 #include <qdb/scheduler/single_threaded_scheduler.h>
 #include <qdb/scheduler/threaded_scheduler.h>
 
+#include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/parser/type.h>
 
 #include <atomic>
@@ -20,8 +23,10 @@ using namespace NQdb::NScheduler;
 
 namespace {
 
-TEST(SchedulerRuntimeAdapter, AuxInputWaitsForAllProducers) {
-    auto filter = std::make_shared<TRuntimeFilter>(16, 1024);
+class SchedulerRuntimeFilter : public NTest::TRuntimeFilterTest {};
+
+TEST_F(SchedulerRuntimeFilter, AuxInputWaitsForAllProducers) {
+    auto filter = std::make_shared<TRuntimeFilter>(Context_, 16, 1024);
     filter->SetProducerCount(2);
     TTaskNode first;
     TTaskNode second;
@@ -44,8 +49,8 @@ TEST(SchedulerRuntimeAdapter, AuxInputWaitsForAllProducers) {
     EXPECT_EQ(input.Poll(), EAuxInputStatus::Ready);
 }
 
-TEST(SchedulerRuntimeAdapter, FilterDependencyNotifiesOnlyOnPublication) {
-    auto filter = std::make_shared<TRuntimeFilter>(16, 1024);
+TEST_F(SchedulerRuntimeFilter, FilterDependencyNotifiesOnlyOnPublication) {
+    auto filter = std::make_shared<TRuntimeFilter>(Context_, 16, 1024);
     TTaskNode producer;
     auto code = std::make_shared<TRuntimeFilterCode>();
     code->Probe = filter;
@@ -65,8 +70,8 @@ TEST(SchedulerRuntimeAdapter, FilterDependencyNotifiesOnlyOnPublication) {
     EXPECT_FALSE(consumer.TryNotifyDependency());
 }
 
-TEST(SchedulerRuntimeAdapter, MissingFilterPublicationFailsInExecute) {
-    auto filter = std::make_shared<TRuntimeFilter>(16, 1024);
+TEST_F(SchedulerRuntimeFilter, MissingFilterPublicationFailsInExecute) {
+    auto filter = std::make_shared<TRuntimeFilter>(Context_, 16, 1024);
     TTaskNode producer;
     producer.State.store(ETaskState::Finished);
     auto code = std::make_shared<TRuntimeFilterCode>();
@@ -698,7 +703,7 @@ TEST(SchedulerRuntimeAdapter, HashShuffleTaskBatchesRowsUntilFinish) {
     EXPECT_EQ(destroyCount.load(std::memory_order_relaxed), 2);
 }
 
-TEST(SchedulerRuntimeAdapter, PublishesRuntimeFilterBeforeBufferedOutputDrains) {
+TEST_F(SchedulerRuntimeFilter, PublishesRuntimeFilterBeforeBufferedOutputDrains) {
     using namespace NQumir::NAst;
     std::atomic<int> destroyCount = 0;
     TOneToOneConnection input(1);
@@ -720,7 +725,7 @@ TEST(SchedulerRuntimeAdapter, PublishesRuntimeFilterBeforeBufferedOutputDrains) 
             }
             return true;
         }, schema, 16, 64, 1024 * 1024);
-    auto filter = std::make_shared<TRuntimeFilter>();
+    auto filter = std::make_shared<TRuntimeFilter>(Context_);
     code->ProducedFilter = filter;
     THashShuffleTask task(code, nullptr, TInputPort{.Connection = &input}, output, 0);
 
@@ -728,8 +733,8 @@ TEST(SchedulerRuntimeAdapter, PublishesRuntimeFilterBeforeBufferedOutputDrains) 
     EXPECT_FALSE(filter->Ready());
     EXPECT_EQ(task.Execute(), ETaskResult::BLOCKED_OUTPUT);
     ASSERT_TRUE(filter->Ready());
-    EXPECT_TRUE(filter->MayContain(11));
-    EXPECT_TRUE(filter->MayContain(22));
+    EXPECT_TRUE(NTest::RuntimeFilterMayContain(*filter, 11));
+    EXPECT_TRUE(NTest::RuntimeFilterMayContain(*filter, 22));
     EXPECT_EQ(filter->StatsSnapshot().BuildRows, 2u);
 
     TRowSet out{};
@@ -748,5 +753,6 @@ TEST(SchedulerRuntimeAdapter, PublishesRuntimeFilterBeforeBufferedOutputDrains) 
 
 int main(int argc, char** argv) {
     testing::InitGoogleTest(&argc, argv);
+    NQumir::NCodeGen::TLLVMInitializer initializer;
     return RUN_ALL_TESTS();
 }

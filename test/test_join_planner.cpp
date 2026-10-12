@@ -50,12 +50,14 @@ public:
         : MaxKeys_(maxKeys), BloomBytes_(bloomBytes) {}
 
     TRuntimeFilterBinding Create(
-        uint32_t id, size_t producerCount, size_t bloomBytes) override {
+        uint32_t id, size_t producerCount, size_t bloomBytes,
+        std::shared_ptr<TRuntimeContext> runtimeContext) override {
         (void)id;
         (void)bloomBytes;
         ++Created;
         ProducerCount = producerCount;
-        Filter = std::make_shared<TRuntimeFilter>(MaxKeys_, BloomBytes_);
+        Filter = std::make_shared<TRuntimeFilter>(
+            std::move(runtimeContext), MaxKeys_, BloomBytes_);
         Filter->SetProducerCount(producerCount);
         return {.Producer = Filter, .Probe = Filter};
     }

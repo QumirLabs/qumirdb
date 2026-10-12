@@ -2788,10 +2788,12 @@ private:
         bool filterBuildIsLeft = false;
         std::shared_ptr<IRuntimeFilterProbe> filterProbe;
         if (const auto& runtimeFilter = join.RuntimeFilter()) {
+            if (!RuntimeContext_->RuntimeFilterKernels) {
+                RuntimeContext_->RuntimeFilterKernels = compiler.CompileRuntimeFilter();
+            }
             if (!RuntimeFilterBindings_) {
-                RuntimeContext_->BloomProbe = compiler.CompileBloomProbe();
                 RuntimeFilterBindings_ =
-                    std::make_shared<TLocalRuntimeFilterBindingFactory>(RuntimeContext_);
+                    std::make_shared<TLocalRuntimeFilterBindingFactory>();
             }
             const bool buildIsLeft =
                 runtimeFilter->BuildSide == EJoinFilterSide::Left;
@@ -2801,7 +2803,8 @@ private:
             const size_t producerCount = buildIsLeft ? leftLanes : rightLanes;
             auto binding = RuntimeFilterBindings_->Create(runtimeFilter->Id,
                 producerCount, ChooseRuntimeBloomBytes(
-                    join, runtimeFilter->BuildSide, producerCount));
+                    join, runtimeFilter->BuildSide, producerCount),
+                RuntimeContext_);
             if (!binding.Producer || !binding.Probe) {
                 throw std::runtime_error(
                     "runtime filter binding factory returned an incomplete binding");

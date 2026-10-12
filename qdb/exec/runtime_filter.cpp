@@ -1,6 +1,6 @@
 #include <qdb/exec/runtime_filter.h>
 #include <qdb/exec/runtime_context.h>
-#include <qdb/exec/runtime_filter_vector.h>
+#include <qdb/kernel/generated.h>
 
 #include <algorithm>
 #include <bit>
@@ -11,53 +11,81 @@
 namespace NQdb {
 namespace {
 
-// Reserve zero for empty slots.
-uint64_t Storable(uint64_t hash) {
-    return hash == 0 ? 1 : hash;
-}
+// A Bloom filter is a power-of-two number of 64-byte blocks.
+constexpr size_t BloomBytesPerBlock = 8 * sizeof(uint64_t);
 
-// One block has eight words, with one bit in each word. All producers use
-// the same positions, so their contributions merge with a bitwise OR.
-constexpr size_t BloomWordsPerBlock = 8;
-constexpr size_t BloomBytesPerBlock = BloomWordsPerBlock * sizeof(uint64_t);
+// Smaller batches use the scalar Bloom probe.
+constexpr size_t VectorProbeRows = 8192;
 
 size_t NormalizeBloomBytes(size_t bytes) {
     return bytes < BloomBytesPerBlock ? 0 : std::bit_floor(bytes);
 }
 
-uint64_t Mix(uint64_t value) {
-    value ^= value >> 30;
-    value *= 0xbf58476d1ce4e5b9ULL;
-    value ^= value >> 27;
-    value *= 0x94d049bb133111ebULL;
-    return value ^ (value >> 31);
+// Mirror RuntimeFilterPartial, RuntimeFilterPublish and RuntimeFilterData in
+// the kernel, which documents the fields.
+struct TPartialView {
+    const uint64_t* Keys;
+    int64_t KeyCount;
+    const uint64_t* Bloom;
+    int64_t BloomWords;
+};
+
+struct TPublishState {
+    int64_t MaxKeys = 0;
+    uint64_t* Keys = nullptr;
+    uint32_t* SortOrder = nullptr;
+    uint64_t* SortKeys = nullptr;
+    uint64_t* Table = nullptr;
+    uint64_t* Bloom = nullptr;
+    int64_t BloomWords = 0;
+    int64_t BloomSeeded = 0;
+    int64_t Kind = 0;
+    int64_t ExactKeys = 0;
+    int64_t TableSize = 0;
+    int64_t BloomSetBits = 0;
+};
+
+struct TFilterData {
+    int64_t Kind;
+    const uint64_t* Words;
+    int64_t WordCount;
+};
+
+static_assert(sizeof(TRuntimeFilterBuildState) == 12 * sizeof(int64_t));
+static_assert(sizeof(TPartialView) == 4 * sizeof(int64_t));
+static_assert(sizeof(TPublishState) == 12 * sizeof(int64_t));
+static_assert(sizeof(TFilterData) == 3 * sizeof(int64_t));
+
+using EMode = TRuntimeFilterBuildState::EMode;
+using EWant = TRuntimeFilterBuildState::EWant;
+
+// Parallel to RuntimeFilterKernelEntrypoints.
+enum EEntry : size_t { Build, Publish, Probe };
+
+using TBuild = int64_t (*)(TRuntimeFilterBuildState*, const uint64_t*, const uint8_t*, int64_t);
+using TPublish = void (*)(TPublishState*, const TPartialView*, int64_t);
+using TProbe = int64_t (*)(const TFilterData*, const uint64_t*, const uint8_t*, uint8_t*,
+    int64_t, int64_t, uint64_t*, uint8_t*);
+
+template <typename T>
+T Entry(const TRuntimeContext& context, EEntry entry) {
+    return reinterpret_cast<T>(context.RuntimeFilterKernels->Fns[entry]);
 }
 
-size_t BloomBlock(const std::vector<uint64_t>& words, uint64_t hash) {
-    return static_cast<size_t>(Mix(hash) & (words.size() / BloomWordsPerBlock - 1))
-        * BloomWordsPerBlock;
-}
-
-void BloomAdd(std::vector<uint64_t>& words, uint64_t hash) {
-    if (words.empty()) {
-        return;
-    }
-    const size_t block = BloomBlock(words, hash);
-    const uint64_t bits = Mix(hash ^ 0x9e3779b97f4a7c15ULL);
-    for (size_t i = 0; i < BloomWordsPerBlock; ++i) {
-        words[block + i] |= uint64_t{1} << ((bits >> (i * 8)) & 63);
+void CheckKernels(const std::shared_ptr<TRuntimeContext>& context) {
+    if (!context || !context->RuntimeFilterKernels) {
+        throw std::invalid_argument("runtime filter requires the runtime-filter kernel");
     }
 }
 
-bool BloomMayContain(const std::vector<uint64_t>& words, uint64_t hash) {
-    const size_t block = BloomBlock(words, hash);
-    const uint64_t bits = Mix(hash ^ 0x9e3779b97f4a7c15ULL);
-    for (size_t i = 0; i < BloomWordsPerBlock; ++i) {
-        if ((words[block + i] & (uint64_t{1} << ((bits >> (i * 8)) & 63))) == 0) {
-            return false;
-        }
-    }
-    return true;
+// Scratch for sorting count keys: two index arrays and the radix counters.
+size_t SortOrderSize(size_t count) {
+    return count * 2 + 256;
+}
+
+template <typename T>
+void Free(std::vector<T>& storage) {
+    std::vector<T>().swap(storage);
 }
 
 size_t SelectedRows(size_t rows, std::span<const uint8_t> selection) {
@@ -82,90 +110,85 @@ bool IRuntimeFilterProbe::BeginBatch(TRuntimeFilterProbeState& state, size_t row
     return rows != 0;
 }
 
-size_t IRuntimeFilterProbe::MayContainBatch(
-    std::span<const uint64_t> hashes,
-    std::span<uint8_t> output,
-    TRuntimeFilterProbeState& state,
-    std::span<const uint8_t> selection) const
-{
-    CheckBatchSizes(hashes.size(), output.size(), selection.size());
-    size_t accepted = 0;
-    for (size_t i = 0; i < hashes.size(); ++i) {
-        const bool keep = (selection.empty() || selection[i]) && MayContain(hashes[i]);
-        output[i] = keep ? 0xff : 0;
-        accepted += keep;
-    }
-    state.RejectedRows += SelectedRows(hashes.size(), selection) - accepted;
-    return accepted;
-}
-
-TRuntimeFilterBuilder::TRuntimeFilterBuilder(size_t maxKeys, size_t bloomBytes)
-    : MaxKeys_(maxKeys)
+TRuntimeFilterBuilder::TRuntimeFilterBuilder(
+    std::shared_ptr<TRuntimeContext> runtimeContext, size_t maxKeys, size_t bloomBytes)
+    : RuntimeContext_(std::move(runtimeContext))
     , BloomBytes_(NormalizeBloomBytes(bloomBytes))
-{}
+{
+    CheckKernels(RuntimeContext_);
+    State_.MaxKeys = static_cast<int64_t>(maxKeys);
+}
 
-void TRuntimeFilterBuilder::Add(uint64_t hash) {
-    ++BuildRows_;
-    if (Overflowed_) {
-        BloomAdd(BloomWords_, hash);
-        return;
+void TRuntimeFilterBuilder::Add(
+    std::span<const uint64_t> hashes, std::span<const uint8_t> selection)
+{
+    CheckBatchSizes(hashes.size(), hashes.size(), selection.size());
+    BuildRows_ += SelectedRows(hashes.size(), selection);
+    const auto build = Entry<TBuild>(*RuntimeContext_, EEntry::Build);
+    size_t row = 0;
+    // The kernel stops only to ask for storage, and continues from that row.
+    do {
+        ProvideStorage(hashes.size() - row);
+        row += static_cast<size_t>(build(&State_, hashes.data() + row,
+            selection.empty() ? nullptr : selection.data() + row,
+            static_cast<int64_t>(hashes.size() - row)));
+    } while (State_.Want != EWant::Nothing);
+
+    if (State_.Mode != EMode::Collecting) {
+        Free(SortOrder_);
+        Free(SortKeys_);
     }
-    if (Deduplicating_) {
-        if (Seen_.insert(hash).second) {
-            Hashes_.push_back(hash);
-            if (Hashes_.size() > MaxKeys_) {
-                OverflowToBloom();
-            }
-        }
-        return;
-    }
-    Hashes_.push_back(hash);
-    // One compaction distinguishes mostly unique from duplicate-heavy input.
-    // Afterwards the exact set deduplicates incrementally.
-    if (Hashes_.size() >= MaxKeys_ * 2) {
-        Compact();
+    if (State_.Mode == EMode::Bloom) {
+        Free(Keys_);
+        Free(SetCtrl_);
+        Free(SetSlots_);
     }
 }
 
-void TRuntimeFilterBuilder::OverflowToBloom() {
-    Overflowed_ = true;
-    BloomWords_.assign(BloomBytes_ / sizeof(uint64_t), 0);
-    for (uint64_t hash : Hashes_) {
-        BloomAdd(BloomWords_, hash);
+void TRuntimeFilterBuilder::ProvideStorage(size_t rows) {
+    if (State_.Want == EWant::CompactionStorage) {
+        const auto keys = static_cast<size_t>(State_.KeyCount);
+        SortOrder_.resize(SortOrderSize(keys));
+        SortKeys_.resize(keys);
+        // Keeps the set at most half full, in whole swiss groups.
+        const size_t capacity = std::bit_ceil(
+            std::max<size_t>(16, (static_cast<size_t>(State_.MaxKeys) + 1) * 2));
+        SetCtrl_.resize(capacity);
+        SetSlots_.resize(capacity);
+        State_.SetCapacity = static_cast<int64_t>(capacity);
+    } else if (State_.Want == EWant::BloomStorage) {
+        BloomWords_.assign(BloomBytes_ / sizeof(uint64_t), 0);
+        State_.BloomWords = static_cast<int64_t>(BloomWords_.size());
     }
-    std::vector<uint64_t>().swap(Hashes_);
-    std::unordered_set<uint64_t>().swap(Seen_);
-    Deduplicating_ = false;
-}
-
-void TRuntimeFilterBuilder::Compact() {
-    std::ranges::sort(Hashes_);
-    const auto duplicates = std::ranges::unique(Hashes_);
-    Hashes_.erase(duplicates.begin(), duplicates.end());
-    if (Hashes_.size() > MaxKeys_) {
-        OverflowToBloom();
-    } else {
-        Seen_.reserve(MaxKeys_ + 1);
-        Seen_.insert(Hashes_.begin(), Hashes_.end());
-        Deduplicating_ = true;
+    const size_t keyRoom = static_cast<size_t>(State_.KeyCount) + rows;
+    if (State_.Mode != EMode::Bloom && Keys_.size() < keyRoom) {
+        Keys_.resize(keyRoom);
     }
+    State_.Keys = Keys_.data();
+    State_.SetCtrl = SetCtrl_.data();
+    State_.SetSlots = SetSlots_.data();
+    State_.SortOrder = SortOrder_.data();
+    State_.SortKeys = SortKeys_.data();
+    State_.Bloom = BloomWords_.data();
 }
 
 TRuntimeFilterPartial TRuntimeFilterBuilder::TakePartial() && {
+    Keys_.resize(static_cast<size_t>(State_.KeyCount));
     return TRuntimeFilterPartial{
-        .Hashes = std::move(Hashes_),
+        .Hashes = std::move(Keys_),
         .BloomWords = std::move(BloomWords_),
-        .ExactSetOverflowed = Overflowed_,
+        .ExactSetOverflowed = Overflowed(),
         .BuildRows = BuildRows_,
     };
 }
 
-TRuntimeFilter::TRuntimeFilter(size_t maxKeys, size_t bloomBytes,
-    std::shared_ptr<TRuntimeContext> runtimeContext)
-    : MaxKeys_(maxKeys)
+TRuntimeFilter::TRuntimeFilter(std::shared_ptr<TRuntimeContext> runtimeContext,
+    size_t maxKeys, size_t bloomBytes)
+    : RuntimeContext_(std::move(runtimeContext))
+    , MaxKeys_(maxKeys)
     , BloomBytes_(NormalizeBloomBytes(bloomBytes))
-    , RuntimeContext_(std::move(runtimeContext))
 {
+    CheckKernels(RuntimeContext_);
     SetProducerCount(1);
 }
 
@@ -209,78 +232,72 @@ void TRuntimeFilter::BuildPublishedData() {
         return;
     }
 
+    TPublishState state{.MaxKeys = static_cast<int64_t>(MaxKeys_)};
+    std::vector<uint64_t> bloom;
+    std::vector<uint64_t> table;
+    std::vector<uint64_t> keys;
+    std::vector<uint64_t> sortKeys;
+    std::vector<uint32_t> sortOrder;
     // Reuse one producer's Bloom allocation instead of allocating and OR-ing
     // an initially empty global filter.
     for (auto& partial : Partials_) {
         if (!partial.BloomWords.empty()) {
-            Data_.BloomWords.swap(partial.BloomWords);
+            bloom.swap(partial.BloomWords);
+            state.BloomSeeded = 1;
             break;
         }
     }
-    if (!Data_.BloomWords.empty()) {
-        for (const auto& partial : Partials_) {
-            for (size_t i = 0; i < partial.BloomWords.size(); ++i) {
-                Data_.BloomWords[i] |= partial.BloomWords[i];
-            }
-            for (uint64_t hash : partial.Hashes) {
-                BloomAdd(Data_.BloomWords, hash);
-            }
-        }
-    } else {
-        std::vector<uint64_t> keys;
-        for (auto& partial : Partials_) {
-            if (!partial.Hashes.empty()) {
-                keys.swap(partial.Hashes);
-                break;
-            }
-        }
-        keys.reserve(exactHashes);
-        for (const auto& partial : Partials_) {
-            keys.insert(keys.end(), partial.Hashes.begin(), partial.Hashes.end());
-        }
-        // Sort once, after all producers finish, including duplicates across
-        // lanes. Raw hashes are retained until Bloom promotion (including 0).
-        std::ranges::sort(keys);
-        const auto duplicates = std::ranges::unique(keys);
-        keys.erase(duplicates.begin(), duplicates.end());
-        if (keys.size() <= MaxKeys_) {
-            Data_.Kind = EKind::Exact;
-            Data_.Stats.ExactKeys = keys.size();
-            const size_t capacity = std::bit_ceil(std::max<size_t>(8, keys.size() * 2));
-            Data_.Table.assign(capacity, 0);
-            Data_.Mask = capacity - 1;
-            for (uint64_t hash : keys) {
-                const uint64_t stored = Storable(hash);
-                uint64_t slot = hash & Data_.Mask;
-                while (Data_.Table[slot] != 0 && Data_.Table[slot] != stored) {
-                    slot = (slot + 1) & Data_.Mask;
-                }
-                Data_.Table[slot] = stored;
-            }
-            return;
-        }
-        if (!BloomBytes_) {
-            Data_.Stats.BloomDisabled = true;
-            return;
-        }
-        Data_.BloomWords.assign(BloomBytes_ / sizeof(uint64_t), 0);
-        for (uint64_t hash : keys) {
-            BloomAdd(Data_.BloomWords, hash);
+    if (!state.BloomSeeded) {
+        keys.resize(exactHashes);
+        sortKeys.resize(exactHashes);
+        sortOrder.resize(SortOrderSize(exactHashes));
+        table.assign(std::bit_ceil(
+            std::max<size_t>(8, std::min(exactHashes, MaxKeys_) * 2)), 0);
+        if (exactHashes > MaxKeys_) {
+            bloom.assign(BloomBytes_ / sizeof(uint64_t), 0);
         }
     }
+    std::vector<TPartialView> partials;
+    partials.reserve(Partials_.size());
+    for (const auto& partial : Partials_) {
+        partials.push_back(TPartialView{
+            .Keys = partial.Hashes.data(),
+            .KeyCount = static_cast<int64_t>(partial.Hashes.size()),
+            .Bloom = partial.BloomWords.data(),
+            .BloomWords = static_cast<int64_t>(partial.BloomWords.size()),
+        });
+    }
+    state.Keys = keys.data();
+    state.SortOrder = sortOrder.data();
+    state.SortKeys = sortKeys.data();
+    state.Table = table.data();
+    state.Bloom = bloom.data();
+    state.BloomWords = static_cast<int64_t>(bloom.size());
+    Entry<TPublish>(*RuntimeContext_, EEntry::Publish)(
+        &state, partials.data(), static_cast<int64_t>(partials.size()));
 
-    Data_.Kind = EKind::Bloom;
-    Data_.Stats.BloomBytes = Data_.BloomWords.size() * sizeof(uint64_t);
-    for (uint64_t word : Data_.BloomWords) {
-        Data_.Stats.BloomSetBits += std::popcount(word);
+    if (state.Kind == static_cast<int64_t>(EKind::Exact)) {
+        table.resize(static_cast<size_t>(state.TableSize));
+        Data_.Kind = EKind::Exact;
+        Data_.Words = std::move(table);
+        Data_.Stats.ExactKeys = static_cast<size_t>(state.ExactKeys);
+        return;
     }
+    if (state.Kind != static_cast<int64_t>(EKind::Bloom)) {
+        // More keys than the exact set may hold, and no Bloom storage.
+        Data_.Stats.BloomDisabled = true;
+        return;
+    }
+    Data_.Stats.BloomBytes = bloom.size() * sizeof(uint64_t);
+    Data_.Stats.BloomSetBits = static_cast<size_t>(state.BloomSetBits);
     // At this density the false-positive rate approaches 50%, making the
     // extra probe unlikely to pay for itself.
-    if (Data_.Stats.BloomSetBits * 10 >= Data_.BloomWords.size() * 64 * 9) {
-        Data_.Kind = EKind::PassAll;
+    if (Data_.Stats.BloomSetBits * 10 >= bloom.size() * 64 * 9) {
         Data_.Stats.BloomDisabled = true;
-        std::vector<uint64_t>().swap(Data_.BloomWords);
+        return;
     }
+    Data_.Kind = EKind::Bloom;
+    Data_.Words = std::move(bloom);
 }
 
 void TRuntimeFilter::Publish() {
@@ -321,37 +338,6 @@ bool TRuntimeFilter::BeginBatch(TRuntimeFilterProbeState& state, size_t rows) co
     return true;
 }
 
-bool TRuntimeFilter::MayContain(uint64_t hash) const {
-    if (!Ready() || Data_.Kind == EKind::PassAll) {
-        return true;
-    }
-    if (Data_.Kind == EKind::Bloom) {
-        return BloomMayContain(Data_.BloomWords, hash);
-    }
-    const uint64_t stored = Storable(hash);
-    uint64_t slot = hash & Data_.Mask;
-    while (Data_.Table[slot] != 0 && Data_.Table[slot] != stored) {
-        slot = (slot + 1) & Data_.Mask;
-    }
-    return Data_.Table[slot] == stored;
-}
-
-size_t TRuntimeFilter::ProbeBloom(
-    std::span<const uint64_t> hashes, std::span<uint8_t> output) const
-{
-    const size_t vectorized = RuntimeContext_ && RuntimeContext_->BloomProbe
-        ? ProbeBloomVectorBatch(*RuntimeContext_->BloomProbe, Data_.BloomWords, hashes, output)
-        : 0;
-    size_t accepted = static_cast<size_t>(std::count_if(
-        output.begin(), output.begin() + vectorized, [](uint8_t value) { return value != 0; }));
-    for (size_t i = vectorized; i < hashes.size(); ++i) {
-        const bool keep = BloomMayContain(Data_.BloomWords, hashes[i]);
-        output[i] = keep ? 0xff : 0;
-        accepted += keep;
-    }
-    return accepted;
-}
-
 size_t TRuntimeFilter::MayContainBatch(
     std::span<const uint64_t> hashes,
     std::span<uint8_t> output,
@@ -360,50 +346,25 @@ size_t TRuntimeFilter::MayContainBatch(
 {
     CheckBatchSizes(hashes.size(), output.size(), selection.size());
     const size_t rows = SelectedRows(hashes.size(), selection);
-    size_t accepted = 0;
-    if (Data_.Kind == EKind::Bloom) {
-        if (rows == hashes.size()) {
-            accepted = ProbeBloom(hashes, output);
-        } else if (rows >= 8192 && RuntimeContext_ && RuntimeContext_->BloomProbe) {
-            // Compact sparse input masks so the vector kernel also ignores
-            // rows already rejected upstream. Scratch space belongs to a lane.
-            state.SelectedHashes.clear();
-            for (size_t i = 0; i < hashes.size(); ++i) {
-                if (selection[i]) {
-                    state.SelectedHashes.push_back(hashes[i]);
-                }
-            }
-            state.SelectedOutput.resize(rows);
-            accepted = ProbeBloom(state.SelectedHashes, state.SelectedOutput);
-            size_t selected = 0;
-            for (size_t i = 0; i < hashes.size(); ++i) {
-                output[i] = selection[i] ? state.SelectedOutput[selected++] : 0;
-            }
-        } else {
-            // Without SIMD, probing the mask directly avoids scratch copies.
-            for (size_t i = 0; i < hashes.size(); ++i) {
-                const bool keep = (selection.empty() || selection[i])
-                    && BloomMayContain(Data_.BloomWords, hashes[i]);
-                output[i] = keep ? 0xff : 0;
-                accepted += keep;
-            }
-        }
+    const bool bloom = Data_.Kind == EKind::Bloom;
+    const bool vectorized = bloom && rows >= VectorProbeRows;
+    // The vector probe packs sparse input masks so that it also ignores rows
+    // already rejected upstream. Scratch space belongs to a lane.
+    if (vectorized && !selection.empty() && state.SelectedHashes.size() < hashes.size()) {
+        state.SelectedHashes.resize(hashes.size());
+        state.SelectedOutput.resize(hashes.size());
+    }
+    const TFilterData data{
+        .Kind = static_cast<int64_t>(Data_.Kind),
+        .Words = Data_.Words.data(),
+        .WordCount = static_cast<int64_t>(Data_.Words.size()),
+    };
+    const auto accepted = static_cast<size_t>(Entry<TProbe>(*RuntimeContext_, EEntry::Probe)(
+        &data, hashes.data(), selection.empty() ? nullptr : selection.data(),
+        output.data(), static_cast<int64_t>(hashes.size()), vectorized,
+        state.SelectedHashes.data(), state.SelectedOutput.data()));
+    if (bloom) {
         state.RecordBloomBatch(rows, accepted);
-    } else {
-        for (size_t i = 0; i < hashes.size(); ++i) {
-            if (!selection.empty() && !selection[i]) {
-                output[i] = 0;
-                continue;
-            }
-            const uint64_t stored = Storable(hashes[i]);
-            uint64_t slot = hashes[i] & Data_.Mask;
-            while (Data_.Table[slot] != 0 && Data_.Table[slot] != stored) {
-                slot = (slot + 1) & Data_.Mask;
-            }
-            const bool keep = Data_.Table[slot] == stored;
-            output[i] = keep ? 0xff : 0;
-            accepted += keep;
-        }
     }
     state.RejectedRows += rows - accepted;
     return accepted;
@@ -438,17 +399,13 @@ TRuntimeFilterStats TRuntimeFilter::StatsSnapshot() const {
     return stats;
 }
 
-TLocalRuntimeFilterBindingFactory::TLocalRuntimeFilterBindingFactory(
-    std::shared_ptr<TRuntimeContext> runtimeContext)
-    : RuntimeContext_(std::move(runtimeContext))
-{}
-
 TRuntimeFilterBinding TLocalRuntimeFilterBindingFactory::Create(
-    uint32_t id, size_t producerCount, size_t bloomBytes)
+    uint32_t id, size_t producerCount, size_t bloomBytes,
+    std::shared_ptr<TRuntimeContext> runtimeContext)
 {
     (void)id;
     auto filter = std::make_shared<TRuntimeFilter>(
-        TRuntimeFilter::DefaultMaxKeys, bloomBytes, RuntimeContext_);
+        std::move(runtimeContext), TRuntimeFilter::DefaultMaxKeys, bloomBytes);
     filter->SetProducerCount(producerCount);
     return TRuntimeFilterBinding{.Producer = filter, .Probe = std::move(filter)};
 }

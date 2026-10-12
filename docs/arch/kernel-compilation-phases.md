@@ -41,6 +41,8 @@ Kernels per operator:
 - join: one multi-entry kernel (jt_init, jt_process_*, jt_probe_*_stream,
   jt_destroy, pb_destroy, plus semi/anti/outer finalizers), resolved via
   LookupMany; `join_hash` (jt_hash_left/right) for the partitioned path.
+- runtime filters: one `runtime-filter` kernel per query, shared by all
+  filters, with the entries `rf_build`, `rf_publish` and `rf_probe`.
 
 Lowering (`plan_lowerer.cpp`) creates compilers via
 `KernelOptions(stage, execStageId)`: `Sink = &TLoweredPlan::Kernels`,
