@@ -1,3 +1,0 @@
-1. select distinct
-2. select limit -> 'Returned rows' show wrong number
-3. select * -> does not work
