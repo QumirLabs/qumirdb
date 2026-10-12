@@ -515,20 +515,19 @@ TEST(SchedulerRuntimeAdapter, HashShuffleTaskScattersSelectedRows) {
     output.Resize(1, 2);
 
     std::vector<uint8_t> selection = {0xff, 0, 0xff, 0xff};
+    std::vector<uint64_t> precomputed = {0, 1, 1, 0};
     auto rowSet = MakeRowSet(4, &destroyCount);
     rowSet.Selection = selection.data();
+    rowSet.Hash = precomputed.data();
     ASSERT_TRUE(input.Push(0, std::move(rowSet)));
     input.Finish(0);
 
     auto code = std::make_shared<THashShuffleCode>(
-        [](TRowSet* batch, uint64_t* hashes) {
-            EXPECT_EQ(batch->RowCount, 4);
-            hashes[0] = 0;
-            hashes[1] = 1;
-            hashes[2] = 1;
-            hashes[3] = 0;
-            return true;
+        [](TRowSet*, uint64_t*) {
+            ADD_FAILURE() << "shuffle recomputed input hashes";
+            return false;
         });
+    code->UseInputHash = true;
     auto state = std::make_shared<int>(0);
     THashShuffleTask task(
         code,
@@ -541,6 +540,7 @@ TEST(SchedulerRuntimeAdapter, HashShuffleTaskScattersSelectedRows) {
 
     TRowSet left{};
     ASSERT_EQ(output.Fetch(0, left), EFetchResult::OK);
+    EXPECT_EQ(left.Hash, precomputed.data());
     ASSERT_NE(left.Selection, nullptr);
     EXPECT_EQ(
         std::vector<uint8_t>(left.Selection, left.Selection + left.RowCount),
@@ -549,6 +549,7 @@ TEST(SchedulerRuntimeAdapter, HashShuffleTaskScattersSelectedRows) {
 
     TRowSet right{};
     ASSERT_EQ(output.Fetch(1, right), EFetchResult::OK);
+    EXPECT_EQ(right.Hash, precomputed.data());
     ASSERT_NE(right.Selection, nullptr);
     EXPECT_EQ(
         std::vector<uint8_t>(right.Selection, right.Selection + right.RowCount),
@@ -612,6 +613,9 @@ TEST(SchedulerRuntimeAdapter, HashShuffleTaskBatchesRowsUntilFinish) {
     auto* leftValues = reinterpret_cast<int64_t*>(left.Columns[0].Data);
     EXPECT_EQ(std::vector<int64_t>(leftValues, leftValues + left.RowCount),
         (std::vector<int64_t>{0, 2}));
+    ASSERT_NE(left.Hash, nullptr);
+    EXPECT_EQ(std::vector<uint64_t>(left.Hash, left.Hash + left.RowCount),
+        (std::vector<uint64_t>{0, 2}));
     Release(&left);
 
     TRowSet right{};
@@ -621,11 +625,60 @@ TEST(SchedulerRuntimeAdapter, HashShuffleTaskBatchesRowsUntilFinish) {
     auto* rightValues = reinterpret_cast<int64_t*>(right.Columns[0].Data);
     EXPECT_EQ(std::vector<int64_t>(rightValues, rightValues + right.RowCount),
         (std::vector<int64_t>{1, 3}));
+    ASSERT_NE(right.Hash, nullptr);
+    EXPECT_EQ(std::vector<uint64_t>(right.Hash, right.Hash + right.RowCount),
+        (std::vector<uint64_t>{1, 3}));
     Release(&right);
 
     EXPECT_EQ(output.Fetch(0, left), EFetchResult::FINISHED);
     EXPECT_EQ(output.Fetch(1, right), EFetchResult::FINISHED);
     EXPECT_EQ(destroyCount.load(std::memory_order_relaxed), 2);
+}
+
+TEST(SchedulerRuntimeAdapter, PublishesRuntimeFilterBeforeBufferedOutputDrains) {
+    using namespace NQumir::NAst;
+    std::atomic<int> destroyCount = 0;
+    TOneToOneConnection input(1);
+    THashShuffleConnection output(1);
+    output.Resize(1, 1);
+    ASSERT_TRUE(input.Push(0, MakeInt64RowSet({11, 22}, &destroyCount)));
+    input.Finish(0);
+    ASSERT_TRUE(output.PushTo(0, 0, MakeRowSet(1, &destroyCount)));
+
+    auto schema = std::make_shared<TStructType>(
+        std::vector<std::pair<std::string, TTypePtr>>{
+            {"value", std::make_shared<TIntegerType>()},
+        });
+    auto code = std::make_shared<THashShuffleCode>(
+        [](TRowSet* batch, uint64_t* hashes) {
+            auto* values = reinterpret_cast<int64_t*>(batch->Columns[0].Data);
+            for (int64_t row = 0; row < batch->RowCount; ++row) {
+                hashes[row] = static_cast<uint64_t>(values[row]);
+            }
+            return true;
+        }, schema, 16, 64, 1024 * 1024);
+    auto filter = std::make_shared<TRuntimeFilter>();
+    code->ProducedFilter = filter;
+    THashShuffleTask task(code, nullptr, TInputPort{.Connection = &input}, output, 0);
+
+    EXPECT_EQ(task.Execute(), ETaskResult::OK);
+    EXPECT_FALSE(filter->Ready());
+    EXPECT_EQ(task.Execute(), ETaskResult::BLOCKED_OUTPUT);
+    ASSERT_TRUE(filter->Ready());
+    EXPECT_TRUE(filter->MayContain(11));
+    EXPECT_TRUE(filter->MayContain(22));
+    EXPECT_EQ(filter->StatsSnapshot().BuildRows, 2u);
+
+    TRowSet out{};
+    ASSERT_EQ(output.Fetch(0, out), EFetchResult::OK);
+    Release(&out);
+    EXPECT_EQ(task.Execute(), ETaskResult::OK);
+    EXPECT_EQ(task.Execute(), ETaskResult::FINISHED);
+    EXPECT_EQ(filter->StatsSnapshot().BuildRows, 2u);
+    ASSERT_EQ(output.Fetch(0, out), EFetchResult::OK);
+    Release(&out);
+    EXPECT_EQ(output.Fetch(0, out), EFetchResult::FINISHED);
+    EXPECT_EQ(destroyCount.load(), 2);
 }
 
 } // namespace

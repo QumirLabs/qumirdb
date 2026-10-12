@@ -5,10 +5,12 @@
 #include <qumir/error.h>
 
 #include <array>
+#include <cstdint>
 #include <expected>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -37,6 +39,21 @@ struct TJoinKey {
 // String <-> enum helpers (used by sexp and ToString).
 std::string_view JoinTypeName(EJoinType type);
 std::optional<EJoinType> ParseJoinType(std::string_view name);
+
+// Runtime filters require a fixed build side; Auto is invalid.
+enum class EJoinFilterSide { Left, Right };
+
+std::string_view JoinFilterSideName(EJoinFilterSide side);
+std::optional<EJoinFilterSide> ParseJoinFilterSide(std::string_view name);
+
+// Execution builds the filter; the plan stores only its binding.
+struct TRuntimeFilterSpec {
+    uint32_t Id = 0;
+    EJoinFilterSide BuildSide = EJoinFilterSide::Right;
+};
+
+// Non-trivial fields need explicit clone handling.
+static_assert(std::is_trivially_copyable_v<TRuntimeFilterSpec>);
 
 class TJoinOperator : public IOperator {
 public:
@@ -68,6 +85,12 @@ public:
     // Residual predicate, applied before emit; nullptr if absent.
     const NQumir::NAst::TExprPtr& Filter() const { return Filter_; }
     NQumir::NAst::TExprPtr& MutableFilter() { return Filter_; }
+    const std::optional<TRuntimeFilterSpec>& RuntimeFilter() const {
+        return RuntimeFilter_;
+    }
+    std::optional<TRuntimeFilterSpec>& MutableRuntimeFilter() {
+        return RuntimeFilter_;
+    }
 
     std::span<const TOperatorPtr> Inputs() const override {
         return std::span<const TOperatorPtr>(Inputs_);
@@ -82,6 +105,7 @@ private:
     std::vector<TJoinKey> Keys_;
     EJoinType Type_;
     NQumir::NAst::TExprPtr Filter_; // parsed, unannotated; may be null
+    std::optional<TRuntimeFilterSpec> RuntimeFilter_;
 };
 
 // Output schema by join type:

@@ -8,6 +8,7 @@
 #include <qdb/scheduler/graph.h>
 #include <qdb/scheduler/settings.h>
 
+#include <cstdint>
 #include <iosfwd>
 #include <memory>
 #include <string>
@@ -16,7 +17,15 @@
 namespace NQdb {
 class TExternalCatalogSnapshot;
 class TAggregateOperator;
+class IRuntimeFilterBindingFactory;
+class IRuntimeFilterProbe;
 namespace NScheduler {
+
+struct TRuntimeFilterDiagnostic {
+    uint32_t Id = 0;
+    std::shared_ptr<IRuntimeFilterProbe> Probe;
+    bool AtSource = false;
+};
 
 // A plan lowered into a scheduler task graph, without a terminal sink attached.
 // FinalGather and Producers point into Graph; a sink is attached to FinalGather
@@ -37,6 +46,7 @@ struct TLoweredPlan {
     // Stable, exporter-neutral executable stages produced by the same lowering
     // that creates Graph. Debug labels are deliberately not identities.
     std::vector<TLoweredExecStage> ExecStages;
+    std::vector<TRuntimeFilterDiagnostic> RuntimeFilters;
 };
 
 // Choose hash-shuffle fanout for a plain grouped aggregate. Explicit shuffle
@@ -55,11 +65,13 @@ bool ShouldUsePartialAggregate(
 
 // Lower a logical plan into a scheduler graph (no terminal sink yet).
 // Kernels are generated but not compiled.
+// A custom filter factory can bind query-scoped filter ids to remote endpoints.
 TLoweredPlan LowerPlanToGraph(
     const TOperatorPtr& root,
     TSettings settings,
     std::ostream* diagnostics,
-    std::shared_ptr<const TExternalCatalogSnapshot> externalCatalog = nullptr);
+    std::shared_ptr<const TExternalCatalogSnapshot> externalCatalog = nullptr,
+    std::shared_ptr<IRuntimeFilterBindingFactory> filterBindings = nullptr);
 
 // Attach a terminal sink that writes every output rowset to `sink`, then run the
 // graph on the configured scheduler. Returns false and sets `error` on failure.

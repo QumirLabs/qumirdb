@@ -42,26 +42,40 @@ TFields NullableFields(const TStructType* s) {
 
 std::string_view JoinTypeName(EJoinType type) {
     switch (type) {
-        case EJoinType::Inner:     return "inner";
-        case EJoinType::Left:      return "left";
-        case EJoinType::Right:     return "right";
-        case EJoinType::Full:      return "full";
-        case EJoinType::LeftSemi:  return "left_semi";
+        case EJoinType::Inner: return "inner";
+        case EJoinType::Left: return "left";
+        case EJoinType::Right: return "right";
+        case EJoinType::Full: return "full";
+        case EJoinType::LeftSemi: return "left_semi";
         case EJoinType::RightSemi: return "right_semi";
-        case EJoinType::LeftAnti:  return "left_anti";
+        case EJoinType::LeftAnti: return "left_anti";
         case EJoinType::RightAnti: return "right_anti";
     }
     return "inner";
 }
 
+std::string_view JoinFilterSideName(EJoinFilterSide side) {
+    switch (side) {
+        case EJoinFilterSide::Left: return "left";
+        case EJoinFilterSide::Right: return "right";
+    }
+    return "right";
+}
+
+std::optional<EJoinFilterSide> ParseJoinFilterSide(std::string_view name) {
+    if (name == "left")  return EJoinFilterSide::Left;
+    if (name == "right") return EJoinFilterSide::Right;
+    return std::nullopt;
+}
+
 std::optional<EJoinType> ParseJoinType(std::string_view name) {
-    if (name == "inner")      return EJoinType::Inner;
-    if (name == "left")       return EJoinType::Left;
-    if (name == "right")      return EJoinType::Right;
-    if (name == "full")       return EJoinType::Full;
-    if (name == "left_semi")  return EJoinType::LeftSemi;
+    if (name == "inner") return EJoinType::Inner;
+    if (name == "left") return EJoinType::Left;
+    if (name == "right") return EJoinType::Right;
+    if (name == "full") return EJoinType::Full;
+    if (name == "left_semi") return EJoinType::LeftSemi;
     if (name == "right_semi") return EJoinType::RightSemi;
-    if (name == "left_anti")  return EJoinType::LeftAnti;
+    if (name == "left_anti") return EJoinType::LeftAnti;
     if (name == "right_anti") return EJoinType::RightAnti;
     return std::nullopt;
 }
@@ -194,6 +208,10 @@ const std::string TJoinOperator::ToString() const {
     s += " (" + std::string(JoinTypeName(Type_)) + ")";
     if (Filter_) {
         s += " (residual " + PrintAst(Filter_) + ")";
+    }
+    if (RuntimeFilter_) {
+        s += " (emit-filter " + std::to_string(RuntimeFilter_->Id) + " "
+            + std::string(JoinFilterSideName(RuntimeFilter_->BuildSide)) + ")";
     }
     return s + ")";
 }

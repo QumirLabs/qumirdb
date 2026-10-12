@@ -299,6 +299,49 @@ aggregate phases. A distributed scheduler still needs a wire format, flow
 control, error recovery, and a placement policy. It does not need to find the
 aggregate keys again or change a single aggregate after worker placement.
 
+Runtime join filters use a query-scoped id in the logical join. For a join with
+an emitted filter, `LowerPlanToGraph` uses hash-shuffle tasks to build and apply
+it, including when there is only one lane and no partition redistribution. It
+asks an `IRuntimeFilterBindingFactory` for separate producer and probe endpoints.
+The default local factory binds both to one `TRuntimeFilter`. A producer hands
+off a value-only `TRuntimeFilterPartial`
+containing exact hashes or a 64-byte blocked Bloom fragment. Exact sets are
+used up to 16K distinct hashes; larger contributions switch to Bloom. A
+distributed factory can send each partial to a merger and make the published
+result available to probe workers.
+The merger must wait for every producer before publishing. Until then, probes
+pass all rows. The network encoding, global completion tracking, and worker
+failure handling remain part of a distributed runtime. Every worker must also
+use the same join-key hash representation for filter publication and probing.
+
+Locally, each producer moves its contribution into a separate slot at input
+EOF, before waiting for buffered shuffle output to drain. The last producer
+merges the contributions and publishes immutable filter data with a release
+store; probes acquire it before reading. No merger mutex is needed. One Bloom
+fragment supplies the result's storage, and the other fragments are OR-ed into
+it. Bloom sizes are powers of two so both scalar and vector probes use a block
+mask instead of division.
+
+Each probe task owns its counters, selection scratch buffers, and weak-Bloom
+pause policy. Worker migration does not move this state between tasks. Aggregate
+diagnostics are read only after execution stops. Before allocating a mask or
+computing filter hashes, a task checks whether the filter is ready and active.
+An inactive filter passes the batch through. Source-computed hashes share the
+source rowset's lifetime through shuffle views; materialized shuffle batches
+gather their existing hashes alongside the columns. The optional vector Bloom
+kernel compiles once after scalar warmup. Other tasks continue scalar probing
+while compilation is in progress.
+
+`AttachRuntimeFilters` estimates how many probe rows the filter can reject from
+the build and probe key NDVs. It compares saved shuffle and join work with the
+cost of building and probing the filter, including a penalty when attaching the
+filter forces a build-first join below the usual 10:1 asymmetry threshold.
+Approximate NDVs, including products of column NDVs for composite keys, get a
+safety margin; missing NDVs or a nonpositive estimated benefit leave the join
+unfiltered. These work weights are heuristics and need
+calibration against representative queries before relying on them for precise
+latency predictions.
+
 | Runtime piece | JS can own today in principle | Requires C++/WASM adapter | Why |
 |---|---|---|---|
 | Graph topology | yes | no | Nodes, edges, lanes and debug names are plain structural data. |

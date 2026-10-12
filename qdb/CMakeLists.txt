@@ -48,6 +48,7 @@ add_library(qumirdb
     plan/passes/push_limit.cpp
     plan/passes/predicate_requirements.cpp
     plan/passes/row_group_predicate.cpp
+    plan/passes/runtime_filters.cpp
     plan/passes/late_materialization.cpp
     plan/passes/flatten_conjuncts.cpp
     plan/passes/flatten_disjuncts.cpp
@@ -77,6 +78,8 @@ add_library(qumirdb
     exec/project_exec.cpp
     exec/aggregate_exec.cpp
     exec/join_exec.cpp
+    exec/runtime_filter.cpp
+    exec/runtime_filter_vector.cpp
     exec/late_materialize_exec.cpp
     exec/sort_exec.cpp
     exec/sort_key_ops.cpp

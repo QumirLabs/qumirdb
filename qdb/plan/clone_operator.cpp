@@ -114,9 +114,12 @@ TOperatorPtr Reconstruct(const TOperatorPtr& op) {
         return agg;
     }
     if (auto n = TMaybeOp<TJoinOperator>(op)) {
-        return std::make_shared<TJoinOperator>(
+        auto join = std::make_shared<TJoinOperator>(
             StructuralClone(n.Cast()->Left()), StructuralClone(n.Cast()->Right()),
             n.Cast()->Keys(), n.Cast()->JoinType(), n.Cast()->Filter());
+        // The constructor omits plan annotations.
+        join->MutableRuntimeFilter() = n.Cast()->RuntimeFilter();
+        return join;
     }
     if (auto n = TMaybeOp<TUnionAllOperator>(op)) {
         std::vector<TOperatorPtr> inputs;

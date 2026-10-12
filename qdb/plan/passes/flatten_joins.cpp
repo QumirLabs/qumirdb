@@ -27,11 +27,14 @@ TExprPtr Conjoin(const std::vector<TExprPtr>& parts) {
     return result;
 }
 
+// Flattening would discard the annotation with its join node.
 bool IsInner(const TOperatorPtr& node) {
     auto join = TMaybeOp<TJoinOperator>(node);
     // Flattening represents keys as ordinary equality predicates. Keep joins
-    // with NULL-equal keys intact so that conversion preserves their semantics.
+    // with NULL-equal keys or runtime filters intact so that conversion
+    // preserves their semantics and annotations.
     return join && join.Cast()->JoinType() == EJoinType::Inner
+        && !join.Cast()->RuntimeFilter()
         && std::ranges::none_of(join.Cast()->Keys(), [](const TJoinKey& key) {
             return key.NullsEqual;
         });

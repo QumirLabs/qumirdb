@@ -45,7 +45,7 @@ std::optional<ETaskResult> FlushPendingOutput(
 struct THashShuffleRowSetData {
     std::shared_ptr<TRowSet> Input;
     std::vector<uint8_t> Selection;
-    std::shared_ptr<std::vector<uint64_t>> Hashes; // nullptr if not computed for this batch
+    std::shared_ptr<uint64_t> Hashes; // nullptr if not computed for this batch
 };
 
 struct TShuffleColumnData {
@@ -58,6 +58,7 @@ struct TShuffleColumnData {
 struct TMaterializedShuffleRowSetData {
     std::vector<TShuffleColumnData> Gathered;
     std::vector<TColumn> Columns;
+    std::vector<uint64_t> Hashes;
 };
 
 void DestroyHashShuffleRowSet(TRowSet* rowSet) {
@@ -469,7 +470,7 @@ struct THashShuffleTask::TPendingOutput {
 struct THashShuffleTask::TBufferedBatch {
     std::shared_ptr<TRowSet> Input;
     std::vector<int32_t> Rows;
-    std::shared_ptr<std::vector<uint64_t>> Hashes; // nullptr if not computed for this batch
+    std::shared_ptr<uint64_t> Hashes; // nullptr if not computed for this batch
 };
 
 struct THashShuffleTask::TDestinationBuffer {
@@ -489,7 +490,11 @@ THashShuffleTask::THashShuffleTask(
     , Input_(input)
     , Output_(&output)
     , SourceLane_(sourceLane)
-{}
+{
+    if (Code_->AppliedFilter) {
+        FilterProbeState_ = Code_->AppliedFilter->CreateProbeState();
+    }
+}
 
 THashShuffleTask::~THashShuffleTask() {
     ClearPending();
@@ -505,12 +510,24 @@ ETaskResult THashShuffleTask::Execute() {
     }
 
     TRowSet rowSet{};
-    auto fetch = Input_.Fetch(rowSet);
+    auto fetch = InputFinished_ ? EFetchResult::FINISHED : Input_.Fetch(rowSet);
     if (fetch == EFetchResult::NO_DATA) {
         return ETaskResult::NEED_DATA;
     }
     if (fetch == EFetchResult::FINISHED) {
-        FlushAllBuffers();
+        if (!InputFinished_) {
+            InputFinished_ = true;
+            if (Code_->ProducedFilter) {
+                // All input keys have been collected. Publish before waiting
+                // for buffered output, which cannot change this contribution.
+                auto builder = FilterBuilder_
+                    ? std::move(*FilterBuilder_)
+                    : Code_->ProducedFilter->MakeBuilder();
+                Code_->ProducedFilter->FinishProducer(std::move(builder).TakePartial());
+                FilterBuilder_.reset();
+            }
+            FlushAllBuffers();
+        }
         auto result = PushPending();
         if (result != ETaskResult::OK) {
             return result;
@@ -531,6 +548,57 @@ bool THashShuffleTask::BatchingEnabled() const {
     return Code_->InputType && Code_->TargetOutputBatchRows > 0;
 }
 
+// A paused or unpublished probe does not require hashes for a one-lane shuffle.
+bool THashShuffleTask::NeedsHashes(size_t partitions) const {
+    return partitions > 1 || Code_->ProducedFilter || FilterActive_;
+}
+
+std::shared_ptr<uint64_t> THashShuffleTask::ComputeHashes(
+    const std::shared_ptr<TRowSet>& input)
+{
+    if (Code_->UseInputHash && input->Hash) {
+        // Share the input owner without copying its already computed hashes.
+        return std::shared_ptr<uint64_t>(input, input->Hash);
+    }
+    auto hashes = std::make_shared<std::vector<uint64_t>>(input->RowCount);
+    if (!Code_->Hash(input.get(), hashes->data())) {
+        throw std::runtime_error("hash shuffle hash kernel failed");
+    }
+    return std::shared_ptr<uint64_t>(hashes, hashes->data());
+}
+
+void THashShuffleTask::AccumulateFilter(
+    const TRowSet& rowSet, std::span<const uint64_t> hashes)
+{
+    if (!Code_->ProducedFilter) {
+        return;
+    }
+    if (!FilterBuilder_) {
+        FilterBuilder_.emplace(Code_->ProducedFilter->MakeBuilder());
+    }
+    for (int64_t row = 0; row < rowSet.RowCount; ++row) {
+        if (RowSelected(rowSet, row)) {
+            FilterBuilder_->Add(hashes[row]);
+        }
+    }
+}
+
+void THashShuffleTask::ProbeFilter(
+    const TRowSet& rowSet, std::span<const uint64_t> hashes)
+{
+    if (!FilterActive_) {
+        return;
+    }
+    FilterMask_.resize(hashes.size());
+    const std::span<const uint8_t> selection = rowSet.Selection
+        ? std::span<const uint8_t>(rowSet.Selection, hashes.size()) : std::span<const uint8_t>{};
+    Code_->AppliedFilter->MayContainBatch(hashes, FilterMask_, *FilterProbeState_, selection);
+}
+
+bool THashShuffleTask::FilterKeeps(size_t row) const {
+    return !FilterActive_ || FilterMask_[row] != 0;
+}
+
 void THashShuffleTask::EnsureBuffers(size_t partitions) {
     if (Buffers_.size() == partitions) {
         return;
@@ -543,35 +611,42 @@ void THashShuffleTask::EnsureBuffers(size_t partitions) {
 }
 
 void THashShuffleTask::Scatter(TRowSet& rowSet) {
+    if (Output_->DstCount() == 0 || rowSet.RowCount <= 0) {
+        return;
+    }
+    FilterActive_ = false;
+    if (Code_->AppliedFilter) {
+        const size_t rows = rowSet.RowCount;
+        const size_t selected = rowSet.Selection ? std::count_if(
+            rowSet.Selection, rowSet.Selection + rows,
+            [](uint8_t value) { return value != 0; }) : rows;
+        FilterActive_ = Code_->AppliedFilter->BeginBatch(*FilterProbeState_, selected);
+    }
+    auto input = std::shared_ptr<TRowSet>(new TRowSet(rowSet), DestroySharedRowSet);
+    rowSet = {};
     if (BatchingEnabled()) {
-        ScatterBuffered(rowSet);
+        ScatterBuffered(input);
     } else {
-        ScatterViews(rowSet);
+        ScatterViews(input);
     }
 }
 
-void THashShuffleTask::ScatterBuffered(TRowSet& rowSet) {
+void THashShuffleTask::ScatterBuffered(const std::shared_ptr<TRowSet>& input) {
     const size_t partitions = Output_->DstCount();
-    if (partitions == 0 || rowSet.RowCount <= 0) {
-        return;
-    }
     EnsureBuffers(partitions);
 
     const auto& inputType = ShuffleInputStruct(Code_->InputType);
-    if (rowSet.ColumnCount < static_cast<int64_t>(inputType.Fields.size())) {
+    if (input->ColumnCount < static_cast<int64_t>(inputType.Fields.size())) {
         throw std::runtime_error("hash shuffle rowset has fewer columns than schema");
     }
-
-    auto input = std::shared_ptr<TRowSet>(new TRowSet(rowSet), DestroySharedRowSet);
-    rowSet = {};
 
     std::vector<std::vector<int32_t>> rows(partitions);
     std::vector<size_t> bytes(partitions, 0);
 
     const size_t estimatedRowBytes = EstimateShuffleRowBytes(inputType);
 
-    if (partitions == 1) {
-        rows[0].reserve(static_cast<size_t>(input->RowCount));
+    if (partitions == 1 && !NeedsHashes(partitions)) {
+        rows[0].reserve(input->RowCount);
         for (int64_t row = 0; row < input->RowCount; ++row) {
             if (!RowSelected(*input, row)) {
                 continue;
@@ -579,22 +654,25 @@ void THashShuffleTask::ScatterBuffered(TRowSet& rowSet) {
             rows[0].push_back(static_cast<int32_t>(row));
         }
         bytes[0] = rows[0].size() * estimatedRowBytes;
-        AddBufferedRows(0, input, std::move(rows[0]), bytes[0], nullptr);
+        const auto hashes = Code_->UseInputHash && input->Hash
+            ? std::shared_ptr<uint64_t>(input, input->Hash) : nullptr;
+        AddBufferedRows(0, input, std::move(rows[0]), bytes[0], hashes);
         return;
     }
 
-    Hashes_.assign(static_cast<size_t>(input->RowCount), 0);
-    if (!Code_->Hash(input.get(), Hashes_.data())) {
-        throw std::runtime_error("hash shuffle hash kernel failed");
-    }
-    auto hashes = std::make_shared<std::vector<uint64_t>>(Hashes_);
+    auto hashes = ComputeHashes(input);
+    const std::span<const uint64_t> hashValues(hashes.get(), input->RowCount);
+    AccumulateFilter(*input, hashValues);
+    ProbeFilter(*input, hashValues);
 
     for (int64_t row = 0; row < input->RowCount; ++row) {
         if (!RowSelected(*input, row)) {
             continue;
         }
-        const size_t dst = static_cast<size_t>(
-            Hashes_[static_cast<size_t>(row)] % partitions);
+        if (!FilterKeeps(row)) {
+            continue;
+        }
+        const size_t dst = partitions == 1 ? 0 : hashValues[row] % partitions;
         rows[dst].push_back(static_cast<int32_t>(row));
     }
 
@@ -604,18 +682,14 @@ void THashShuffleTask::ScatterBuffered(TRowSet& rowSet) {
     }
 }
 
-void THashShuffleTask::ScatterViews(TRowSet& rowSet) {
+void THashShuffleTask::ScatterViews(const std::shared_ptr<TRowSet>& input) {
     const size_t partitions = Output_->DstCount();
-    if (partitions == 0 || rowSet.RowCount <= 0) {
-        return;
-    }
 
     // Many-to-one shuffle: every row routes to lane 0, so skip hashing and
     // forward the whole rowset (keeping its existing selection) unchanged.
-    if (partitions == 1) {
+    // An active filter still needs hashes, so it uses the general path.
+    if (partitions == 1 && !NeedsHashes(partitions)) {
         ClearPending();
-        auto input = std::shared_ptr<TRowSet>(new TRowSet(rowSet), DestroySharedRowSet);
-        rowSet = {};
         auto* data = new THashShuffleRowSetData;
         data->Input = input;
         Pending_.push_back(TPendingOutput{
@@ -625,6 +699,7 @@ void THashShuffleTask::ScatterViews(TRowSet& rowSet) {
                 .ColumnCount = input->ColumnCount,
                 .RowCount = input->RowCount,
                 .Selection = input->Selection,
+                .Hash = Code_->UseInputHash ? input->Hash : nullptr,
                 .Destroy = DestroyHashShuffleRowSet,
                 .Private = data,
                 .RefCount = 1,
@@ -633,29 +708,29 @@ void THashShuffleTask::ScatterViews(TRowSet& rowSet) {
         return;
     }
 
-    Hashes_.assign(static_cast<size_t>(rowSet.RowCount), 0);
-    if (!Code_->Hash(&rowSet, Hashes_.data())) {
-        throw std::runtime_error("hash shuffle hash kernel failed");
-    }
-    auto hashes = std::make_shared<std::vector<uint64_t>>(Hashes_);
+    auto hashes = ComputeHashes(input);
+    const std::span<const uint64_t> hashValues(hashes.get(), input->RowCount);
+    AccumulateFilter(*input, hashValues);
+    ProbeFilter(*input, hashValues);
 
     std::vector<std::vector<uint8_t>> selections(partitions);
     std::vector<size_t> counts(partitions, 0);
     for (auto& selection : selections) {
-        selection.assign(static_cast<size_t>(rowSet.RowCount), uint8_t{0});
+        selection.assign(input->RowCount, uint8_t{0});
     }
-    for (int64_t row = 0; row < rowSet.RowCount; ++row) {
-        if (!RowSelected(rowSet, row)) {
+    for (int64_t row = 0; row < input->RowCount; ++row) {
+        if (!RowSelected(*input, row)) {
             continue;
         }
-        const size_t dst = static_cast<size_t>(Hashes_[static_cast<size_t>(row)] % partitions);
-        selections[dst][static_cast<size_t>(row)] = 0xff;
+        if (!FilterKeeps(row)) {
+            continue;
+        }
+        const size_t dst = partitions == 1 ? 0 : hashValues[row] % partitions;
+        selections[dst][row] = 0xff;
         ++counts[dst];
     }
 
     ClearPending();
-    auto input = std::shared_ptr<TRowSet>(new TRowSet(rowSet), DestroySharedRowSet);
-    rowSet = {};
 
     Pending_.reserve(partitions);
     for (size_t dst = 0; dst < partitions; ++dst) {
@@ -673,7 +748,7 @@ void THashShuffleTask::ScatterViews(TRowSet& rowSet) {
                 .ColumnCount = input->ColumnCount,
                 .RowCount = input->RowCount,
                 .Selection = data->Selection.data(),
-                .Hash = data->Hashes->data(),
+                .Hash = data->Hashes.get(),
                 .Destroy = DestroyHashShuffleRowSet,
                 .Private = data,
                 .RefCount = 1,
@@ -686,7 +761,7 @@ void THashShuffleTask::AddBufferedRows(size_t dst,
     const std::shared_ptr<TRowSet>& input,
     std::vector<int32_t>&& rows,
     size_t bytes,
-    const std::shared_ptr<std::vector<uint64_t>>& hashes)
+    const std::shared_ptr<uint64_t>& hashes)
 {
     if (rows.empty()) {
         return;
@@ -720,10 +795,9 @@ void THashShuffleTask::FlushBuffer(size_t dst) {
         auto& batch = buffer.Batches[0];
         auto* data = new THashShuffleRowSetData;
         data->Input = batch.Input;
-        data->Selection.assign(static_cast<size_t>(batch.Input->RowCount),
-            uint8_t{0});
+        data->Selection.assign(batch.Input->RowCount, uint8_t{0});
         for (int32_t row : batch.Rows) {
-            data->Selection[static_cast<size_t>(row)] = 0xff;
+            data->Selection[row] = 0xff;
         }
         data->Hashes = batch.Hashes;
         Pending_.push_back(TPendingOutput{
@@ -733,7 +807,7 @@ void THashShuffleTask::FlushBuffer(size_t dst) {
                 .ColumnCount = batch.Input->ColumnCount,
                 .RowCount = batch.Input->RowCount,
                 .Selection = data->Selection.data(),
-                .Hash = data->Hashes ? data->Hashes->data() : nullptr,
+                .Hash = data->Hashes.get(),
                 .Destroy = DestroyHashShuffleRowSet,
                 .Private = data,
                 .RefCount = 1,
@@ -749,6 +823,15 @@ void THashShuffleTask::FlushBuffer(size_t dst) {
     auto* data = new TMaterializedShuffleRowSetData;
     data->Gathered.resize(inputType.Fields.size());
     data->Columns.resize(inputType.Fields.size());
+    if (std::all_of(buffer.Batches.begin(), buffer.Batches.end(),
+            [](const auto& batch) { return static_cast<bool>(batch.Hashes); })) {
+        data->Hashes.reserve(buffer.RowCount);
+        for (const auto& batch : buffer.Batches) {
+            for (int32_t row : batch.Rows) {
+                data->Hashes.push_back(batch.Hashes.get()[row]);
+            }
+        }
+    }
 
     for (size_t colIdx = 0; colIdx < inputType.Fields.size(); ++colIdx) {
         const auto& type = inputType.Fields[colIdx].second;
@@ -860,6 +943,7 @@ void THashShuffleTask::FlushBuffer(size_t dst) {
             .ColumnCount = static_cast<int64_t>(data->Columns.size()),
             .RowCount = static_cast<int64_t>(buffer.RowCount),
             .Selection = nullptr,
+            .Hash = data->Hashes.empty() ? nullptr : data->Hashes.data(),
             .Destroy = DestroyMaterializedShuffleRowSet,
             .Private = data,
             .RefCount = 1,

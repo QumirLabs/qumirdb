@@ -3,10 +3,12 @@
 #include <qdb/exec/join_exec.h>
 #include <qdb/exec/planner_helpers.h>
 #include <qdb/io/io.h>
+#include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/operator.h>
 #include <qdb/plan/ops/stats.h>
 #include <qdb/plan/types/nullable.h>
+#include <qdb/plan/passes/runtime_filters.h>
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/parser/type.h>
@@ -267,6 +269,211 @@ TEST(AsymmetricJoin, BuildRightMatchesSymmetric) {
 
 TEST(AsymmetricJoin, BuildLeftMatchesSymmetric) {
     EXPECT_EQ(RunAsymmetric(EJoinBuildSide::Left), ExpectedInner());
+}
+
+TStatsPtr RowsWithKeyNdv(uint64_t rows, const std::string& column,
+    uint64_t ndv, bool exact = false) {
+    auto s = std::make_shared<TStats>();
+    s->RowCount = rows;
+    auto col = std::make_shared<TStats::TColumnStats>();
+    col->Ndv = ndv;
+    col->NdvIsExact = exact;
+    s->ColumnStats[column] = std::move(col);
+    return s;
+}
+
+std::optional<TRuntimeFilterSpec> AttachTo(const TOperatorPtr& join) {
+    uint32_t nextId = 1;
+    AttachRuntimeFilters(join, nextId);
+    return static_cast<TJoinOperator*>(join.get())->RuntimeFilter();
+}
+
+TEST(AttachRuntimeFilters, EmitsFromTheSideWithFewerDistinctKeys) {
+    auto join = JoinOfType(EJoinType::Inner);
+    ASSERT_TRUE(join);
+    auto* j = static_cast<TJoinOperator*>(join.get());
+
+    j->Left()->Stats_ = RowsWithKeyNdv(400000, "lk", 400000);
+    j->Right()->Stats_ = RowsWithKeyNdv(40000, "rk", 10000);
+    auto emitted = AttachTo(join);
+    ASSERT_TRUE(emitted.has_value());
+    EXPECT_EQ(emitted->Id, 1u);
+    EXPECT_EQ(emitted->BuildSide, EJoinFilterSide::Right);
+    EXPECT_EQ(ChooseJoinBuildSide(*j), EJoinBuildSide::Right);
+
+    j->Left()->Stats_ = RowsWithKeyNdv(40000, "lk", 10000);
+    j->Right()->Stats_ = RowsWithKeyNdv(400000, "rk", 400000);
+    emitted = AttachTo(join);
+    ASSERT_TRUE(emitted.has_value());
+    EXPECT_EQ(emitted->BuildSide, EJoinFilterSide::Left);
+    EXPECT_EQ(ChooseJoinBuildSide(*j), EJoinBuildSide::Left);
+}
+
+TEST(AttachRuntimeFilters, JudgesDistinctKeysNotRows) {
+    auto join = JoinOfType(EJoinType::Inner);
+    ASSERT_TRUE(join);
+    auto* j = static_cast<TJoinOperator*>(join.get());
+
+    j->Left()->Stats_ = RowsWithKeyNdv(1000000, "lk", 1000000);
+    j->Right()->Stats_ = RowsWithKeyNdv(50000000, "rk", 100);
+    EXPECT_FALSE(AttachTo(join).has_value())
+        << "a low-NDV side is too expensive to build when it has 50M rows";
+
+    j->Left()->Stats_ = RowsWithKeyNdv(50000000, "lk", 1000);
+    j->Right()->Stats_ = RowsWithKeyNdv(1000, "rk", 1000);
+    EXPECT_FALSE(AttachTo(join).has_value());
+
+    j->Left()->Stats_ = RowsWithKeyNdv(50000000, "lk", 50000000);
+    j->Right()->Stats_ = RowsWithKeyNdv(1000000, "rk", 100);
+    auto emitted = AttachTo(join);
+    ASSERT_TRUE(emitted.has_value());
+    EXPECT_EQ(emitted->BuildSide, EJoinFilterSide::Right);
+}
+
+TEST(AttachRuntimeFilters, AccountsForForcedBuildAndNdvUncertainty) {
+    auto join = JoinOfType(EJoinType::Inner);
+    ASSERT_TRUE(join);
+    auto* j = static_cast<TJoinOperator*>(join.get());
+
+    j->Left()->Stats_ = RowsWithKeyNdv(50000, "lk", 50000);
+    j->Right()->Stats_ = RowsWithKeyNdv(10000, "rk", 10000);
+    EXPECT_FALSE(AttachTo(join).has_value())
+        << "weak filter does not pay for blocking a 5:1 join";
+
+    j->Left()->Stats_ = RowsWithKeyNdv(300000, "lk", 300000);
+    j->Right()->Stats_ = RowsWithKeyNdv(100000, "rk", 100);
+    auto emitted = AttachTo(join);
+    ASSERT_TRUE(emitted.has_value())
+        << "high selectivity can pay for a 3:1 build barrier";
+    EXPECT_EQ(emitted->BuildSide, EJoinFilterSide::Right);
+
+    j->Left()->Stats_ = RowsWithKeyNdv(50000, "lk", 50000, true);
+    j->Right()->Stats_ = RowsWithKeyNdv(10000, "rk", 10000, true);
+    EXPECT_TRUE(AttachTo(join).has_value())
+        << "exact NDV removes the uncertainty margin";
+
+    j->MutableKeys().push_back({"lv", "rv"});
+    j->Left()->Stats_ = RowsWithKeyNdv(50000, "lk", 250, true);
+    j->Right()->Stats_ = RowsWithKeyNdv(10000, "rk", 100, true);
+    j->Left()->Stats_->ColumnStats["lv"] =
+        RowsWithKeyNdv(50000, "lv", 200, true)->ColumnStats.at("lv");
+    j->Right()->Stats_->ColumnStats["rv"] =
+        RowsWithKeyNdv(10000, "rv", 100, true)->ColumnStats.at("rv");
+    EXPECT_FALSE(AttachTo(join).has_value())
+        << "products of exact column NDVs still need an uncertainty margin";
+}
+
+TEST(AttachRuntimeFilters, SkipsUncappedUnknownAndUnsupportedJoins) {
+    auto inner = JoinOfType(EJoinType::Inner);
+    ASSERT_TRUE(inner);
+    auto* j = static_cast<TJoinOperator*>(inner.get());
+
+    j->Left()->Stats_ = RowsWithKeyNdv(40000, "lk", 40000);
+    j->Right()->Stats_ = RowsWithKeyNdv(40000, "rk", 40000);
+    EXPECT_FALSE(AttachTo(inner).has_value()) << "balanced";
+
+    j->Left()->Stats_ = RowsWithKeyNdv(100000000, "lk", 100000000);
+    j->Right()->Stats_ = RowsWithKeyNdv(20000000, "rk", 20000000);
+    EXPECT_FALSE(AttachTo(inner).has_value()) << "over the build row cap";
+
+    j->Left()->Stats_ = Rows(40000);
+    j->Right()->Stats_ = RowsWithKeyNdv(40000, "rk", 100);
+    EXPECT_FALSE(AttachTo(inner).has_value()) << "no ndv";
+
+    j->Left()->Stats_ = RowsWithKeyNdv(40000, "lk", 40000);
+    j->Right()->Stats_ = nullptr;
+    EXPECT_FALSE(AttachTo(inner).has_value()) << "no stats";
+
+    for (auto type : {EJoinType::LeftAnti, EJoinType::Left, EJoinType::Full}) {
+        auto join = JoinOfType(type);
+        ASSERT_TRUE(join) << JoinTypeName(type);
+        auto* other = static_cast<TJoinOperator*>(join.get());
+        other->Left()->Stats_ = RowsWithKeyNdv(40000, "lk", 40000);
+        other->Right()->Stats_ = RowsWithKeyNdv(40000, "rk", 100);
+        EXPECT_FALSE(AttachTo(join).has_value()) << JoinTypeName(type);
+    }
+}
+
+TEST(AttachRuntimeFilters, AdmitsLargeFilteredBuilds) {
+    auto join = JoinOfType(EJoinType::Inner);
+    ASSERT_TRUE(join);
+    auto* j = static_cast<TJoinOperator*>(join.get());
+    j->Left()->Stats_ = RowsWithKeyNdv(80000000, "lk", 80000000);
+    j->Right()->Stats_ = RowsWithKeyNdv(30000000, "rk", 30000000);
+    EXPECT_FALSE(AttachTo(join).has_value());
+
+    auto filtered = MakeFilter(j->Right(), "(> rk 0)");
+    ASSERT_TRUE(filtered.has_value());
+    j->MutableRight() = *filtered;
+    j->Right()->Stats_ = RowsWithKeyNdv(30000000, "rk", 30000000);
+    auto emitted = AttachTo(join);
+    ASSERT_TRUE(emitted.has_value());
+    EXPECT_EQ(emitted->BuildSide, EJoinFilterSide::Right);
+
+    j->Left()->Stats_ = Rows(40000000);
+    EXPECT_FALSE(AttachTo(join).has_value())
+        << "a nearly balanced join still pays the build barrier";
+
+    j->Left()->Stats_ = Rows(500000);
+    j->Right()->Stats_ = Rows(100000);
+    EXPECT_FALSE(AttachTo(join).has_value())
+        << "small probe inputs should use the NDV cost path";
+}
+
+TEST(AttachRuntimeFilters, FilteredBuildCanCompensateForUnknownNdv) {
+    auto join = JoinOfType(EJoinType::LeftSemi);
+    ASSERT_TRUE(join);
+    auto* j = static_cast<TJoinOperator*>(join.get());
+    j->Left()->Stats_ = Rows(150000000);
+    auto filtered = MakeFilter(j->Right(), "(> rk 0)");
+    ASSERT_TRUE(filtered.has_value());
+    j->MutableRight() = *filtered;
+    j->Right()->Stats_ = Rows(75000000);
+    auto emitted = AttachTo(join);
+    ASSERT_TRUE(emitted.has_value());
+    EXPECT_EQ(emitted->BuildSide, EJoinFilterSide::Right);
+}
+
+TEST(AttachRuntimeFilters, SemiPublishesOnlyFromTheRight) {
+    auto join = JoinOfType(EJoinType::LeftSemi);
+    ASSERT_TRUE(join);
+    auto* j = static_cast<TJoinOperator*>(join.get());
+
+    j->Left()->Stats_ = RowsWithKeyNdv(400000, "lk", 400000);
+    j->Right()->Stats_ = RowsWithKeyNdv(40000, "rk", 10000);
+    auto emitted = AttachTo(join);
+    ASSERT_TRUE(emitted.has_value());
+    EXPECT_EQ(emitted->BuildSide, EJoinFilterSide::Right);
+
+    j->Left()->Stats_ = RowsWithKeyNdv(40000, "lk", 10000);
+    j->Right()->Stats_ = RowsWithKeyNdv(400000, "rk", 400000);
+    EXPECT_FALSE(AttachTo(join).has_value());
+
+    j->Left()->Stats_ = RowsWithKeyNdv(400000, "lk", 400000);
+    j->Right()->Stats_ = RowsWithKeyNdv(40000, "rk", 10000);
+    j->MutableFilter() = std::make_shared<TBinaryExpr>(
+        NQumir::TLocation{}, TOperator("!="),
+        std::make_shared<TIdentExpr>(NQumir::TLocation{}, "lv"),
+        std::make_shared<TIdentExpr>(NQumir::TLocation{}, "rv"));
+    EXPECT_FALSE(AttachTo(join).has_value());
+}
+
+TEST(AttachRuntimeFilters, IdsComeFromTheCallersAllocator) {
+    auto first = JoinOfType(EJoinType::Inner);
+    auto second = JoinOfType(EJoinType::Inner);
+    ASSERT_TRUE(first);
+    ASSERT_TRUE(second);
+    for (auto* j : {static_cast<TJoinOperator*>(first.get()),
+                    static_cast<TJoinOperator*>(second.get())}) {
+        j->Left()->Stats_ = RowsWithKeyNdv(400000, "lk", 400000);
+        j->Right()->Stats_ = RowsWithKeyNdv(40000, "rk", 10000);
+    }
+
+    uint32_t nextId = 1;
+    AttachRuntimeFilters(first, nextId);
+    AttachRuntimeFilters(second, nextId);
+    EXPECT_EQ(static_cast<TJoinOperator*>(first.get())->RuntimeFilter()->Id, 1u);
+    EXPECT_EQ(static_cast<TJoinOperator*>(second.get())->RuntimeFilter()->Id, 2u);
 }
 
 class SemiAntiOrientation : public testing::TestWithParam<EJoinType> {};

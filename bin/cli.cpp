@@ -166,6 +166,8 @@ struct TConfig {
     TFormatSpec Format;
     bool Verbose = false;
     bool EnableCbo = true;
+    bool EnableRuntimeFilters = true;
+    bool ForceRuntimeFilters = false;
     bool Timing = false;
     EExplainMode ExplainMode = EExplainMode::Text;
     NQdb::TLateMaterializationSettings LateMaterialization;
@@ -282,6 +284,8 @@ int ExecutePlan(
     NQdb::TPlanPassDiagnostics planDiagnostics;
     NQdb::ApplyPlanPasses(plan, {
         .EnableCbo = config.EnableCbo,
+        .EnableRuntimeFilters = config.EnableRuntimeFilters,
+        .ForceRuntimeFilters = config.ForceRuntimeFilters,
         .LateMaterialization = config.LateMaterialization,
         .Diagnostics = &planDiagnostics,
         .Annotation = {.ExternalCatalog = externalCatalog},
@@ -704,6 +708,9 @@ void PrintHelp() {
         "  --shuffle-max-rows <n>       Maximum rows per materialized shuffle batch\n"
         "  --shuffle-target-bytes <n>   Target bytes per materialized shuffle batch\n"
         "  --nocbo                      Disable cost-based join reordering\n"
+        "  --no-runtime-filters         Disable join runtime filters (for A/B runs)\n"
+        "  --force-runtime-filters      Emit a join runtime filter wherever a build\n"
+        "                               side exists, ignoring selectivity estimates\n"
         "  --explain-mode <mode>        explain output: text (default), sexpr, both\n"
         "  --verbose                    Print the logical and runtime plans\n"
         "  --timing                     Print per-phase timings (planning, kernel build, JIT LLVM, CPU)\n"
@@ -923,6 +930,10 @@ int main(int argc, char** argv) {
                 static_cast<size_t>(bytes);
         } else if (!std::strcmp(argv[i], "--nocbo")) {
             config.EnableCbo = false;
+        } else if (!std::strcmp(argv[i], "--no-runtime-filters")) {
+            config.EnableRuntimeFilters = false;
+        } else if (!std::strcmp(argv[i], "--force-runtime-filters")) {
+            config.ForceRuntimeFilters = true;
         } else if (!std::strcmp(argv[i], "--verbose")) {
             config.Verbose = true;
         } else if (!std::strcmp(argv[i], "--timing")) {

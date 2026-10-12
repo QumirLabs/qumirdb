@@ -1,5 +1,6 @@
 #pragma once
 
+#include <qdb/exec/runtime_filter.h>
 #include <qdb/io/io.h>
 #include <qdb/scheduler/connection.h>
 #include <qdb/scheduler/state.h>
@@ -10,6 +11,8 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
+#include <span>
 #include <vector>
 
 namespace NQdb {
@@ -96,6 +99,14 @@ struct THashShuffleCode {
     size_t TargetOutputBatchRows = 0;
     size_t MaxOutputBatchRows = 0;
     size_t TargetOutputBatchBytes = 0;
+    // Bindings are shared by every lane of one exchange. The local factory
+    // uses one filter object; remote publishers and probes may be separate.
+    // At most one of the two is set.
+    std::shared_ptr<IRuntimeFilterProducer> ProducedFilter;
+    std::shared_ptr<IRuntimeFilterProbe> AppliedFilter;
+    // Set only when the immediately upstream source computed hashes for this
+    // exchange's key. Other exchanges must run their own hash kernel.
+    bool UseInputHash = false;
 };
 
 struct TMergeCode {
@@ -251,15 +262,20 @@ private:
     struct TPendingOutput;
 
     bool BatchingEnabled() const;
+    bool NeedsHashes(size_t partitions) const;
+    std::shared_ptr<uint64_t> ComputeHashes(const std::shared_ptr<TRowSet>& input);
+    void AccumulateFilter(const TRowSet& rowSet, std::span<const uint64_t> hashes);
+    void ProbeFilter(const TRowSet& rowSet, std::span<const uint64_t> hashes);
+    bool FilterKeeps(size_t row) const;
     void EnsureBuffers(size_t partitions);
     void Scatter(TRowSet& rowSet);
-    void ScatterBuffered(TRowSet& rowSet);
-    void ScatterViews(TRowSet& rowSet);
+    void ScatterBuffered(const std::shared_ptr<TRowSet>& input);
+    void ScatterViews(const std::shared_ptr<TRowSet>& input);
     void AddBufferedRows(size_t dst,
         const std::shared_ptr<TRowSet>& input,
         std::vector<int32_t>&& rows,
         size_t bytes,
-        const std::shared_ptr<std::vector<uint64_t>>& hashes);
+        const std::shared_ptr<uint64_t>& hashes);
     void FlushBuffer(size_t dst);
     void FlushAllBuffers();
     ETaskResult PushPending();
@@ -271,10 +287,14 @@ private:
     TInputPort Input_;
     THashShuffleConnection* Output_ = nullptr;
     size_t SourceLane_ = 0;
-    std::vector<uint64_t> Hashes_;
+    std::vector<uint8_t> FilterMask_;
+    std::optional<TRuntimeFilterBuilder> FilterBuilder_;
+    std::shared_ptr<TRuntimeFilterProbeState> FilterProbeState_;
+    bool FilterActive_ = false;
     std::vector<std::unique_ptr<TDestinationBuffer>> Buffers_;
     std::vector<TPendingOutput> Pending_;
     size_t PendingIndex_ = 0;
+    bool InputFinished_ = false;
     bool OutputFinished_ = false;
 };
 

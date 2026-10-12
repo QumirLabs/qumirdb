@@ -11,6 +11,7 @@
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/window.h>
 
+#include <limits>
 #include <optional>
 
 namespace NQdb {
@@ -83,6 +84,41 @@ bool CanStartExpression(const TToken& token) {
         || token.Type == TToken::Identifier
         || IParseHandle::IsOp(token, '(');
 }
+
+namespace {
+
+TAstTask ParseJoinResidual(IParseHandle& h)
+{
+    auto residual = co_await h.Expr();
+    co_await h.Take(')');
+    co_return residual;
+}
+
+NQumir::TExpectedTask<TRuntimeFilterSpec, TError, TLocation>
+ParseJoinEmitFilter(IParseHandle& h)
+{
+    auto idTok = h.Next();
+    if (idTok.Type != TToken::Integer
+        || idTok.Value.i64 <= 0
+        || idTok.Value.i64 > std::numeric_limits<uint32_t>::max()) {
+        co_return IParseHandle::MakeError(
+            idTok, "(emit-filter) expects a positive uint32 id");
+    }
+    auto sideTok = h.Next();
+    auto sideName = ReadIdentifier(h, sideTok);
+    auto side = sideName ? ParseJoinFilterSide(*sideName) : std::nullopt;
+    if (!side) {
+        co_return IParseHandle::MakeError(
+            sideTok, "(emit-filter) expects build side 'left' or 'right'");
+    }
+    co_await h.Take(')');
+    co_return TRuntimeFilterSpec{
+        .Id = static_cast<uint32_t>(idTok.Value.i64),
+        .BuildSide = *side,
+    };
+}
+
+} // namespace
 
 TNodeParserMap MakeRelParsers(TRelParserOptions options) {
     TNodeParserMap parsers;
@@ -451,28 +487,45 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
             // Canonical plans tag the residual. Accept the former untagged
             // form as input so stored plans remain readable.
             TExprPtr filter;
-            auto tok = h.Next();
-            if (!IParseHandle::IsOp(tok, ')')) {
+            std::optional<TRuntimeFilterSpec> runtimeFilter;
+            for (;;) {
+                auto tok = h.Next();
+                if (IParseHandle::IsOp(tok, ')')) {
+                    break;
+                }
                 if (IParseHandle::IsOp(tok, '(')) {
                     auto tagTok = h.Next();
                     auto tag = ReadIdentifier(h, tagTok);
                     if (tag && *tag == "residual") {
-                        filter = co_await h.Expr();
-                        co_await h.Take(')');
-                    } else {
-                        h.Unget(tagTok);
-                        h.Unget(tok);
-                        filter = co_await h.Expr();
+                        if (filter) {
+                            co_return IParseHandle::MakeError(
+                                tok, "(rel join) accepts at most one (residual …)");
+                        }
+                        filter = co_await ParseJoinResidual(h);
+                        continue;
                     }
-                } else {
-                    h.Unget(tok);
-                    filter = co_await h.Expr();
+                    if (tag && *tag == "emit-filter") {
+                        if (runtimeFilter) {
+                            co_return IParseHandle::MakeError(
+                                tok, "(rel join) accepts at most one (emit-filter …)");
+                        }
+                        runtimeFilter = co_await ParseJoinEmitFilter(h);
+                        continue;
+                    }
+                    h.Unget(tagTok);
                 }
-                co_await h.Take(')');
+                if (filter) {
+                    co_return IParseHandle::MakeError(
+                        tok, "(rel join) accepts at most one (residual …)");
+                }
+                h.Unget(tok);
+                filter = co_await h.Expr();
             }
 
-            co_return std::make_shared<TJoinOperator>(
+            auto joinOp = std::make_shared<TJoinOperator>(
                 std::move(left), std::move(right), std::move(keys), type, std::move(filter));
+            joinOp->MutableRuntimeFilter() = std::move(runtimeFilter);
+            co_return joinOp;
         }
 
         if (*relName == TWindowOperator::OpId) {

@@ -13,6 +13,8 @@
 #include <qdb/plan/ops/union.h>
 #include <qdb/plan/ops/window.h>
 #include <qdb/plan/plan_print.h>
+#include <qdb/plan/clone_operator.h>
+#include <qdb/plan/passes/flatten_joins.h>
 #include <qdb/sexp/parser.h>
 #include <qdb/sexp/printer.h>
 
@@ -461,6 +463,187 @@ TEST(SexpParser, JoinPrintRoundtrip) {
     ASSERT_NE(legacyExpr, nullptr);
     EXPECT_EQ(PrintAst(std::static_pointer_cast<TExpr>(legacyExpr), MakePrintOpts()),
               input);
+}
+
+TEST(SexpParser, JoinAnnotationRoundtrip) {
+    NQdb::TMockSource leftSrc({"a", "b"});
+    NQdb::TMockSource rightSrc({"c", "d"});
+
+    auto parseJoin = [&](const std::string& input) {
+        TRelParserOptions opts;
+        opts.SourceFactory =
+            [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
+            if (path == "left.parquet") {
+                return std::make_shared<TSourceOperator>(leftSrc, std::string(path));
+            }
+            return std::make_shared<TSourceOperator>(rightSrc, std::string(path));
+        };
+        auto p = MakeParser(std::move(opts));
+        return Parse(p, input);
+    };
+    auto roundtrip = [&](const std::string& input) {
+        auto expr = parseJoin(input);
+        EXPECT_NE(expr, nullptr) << input;
+        if (expr) {
+            EXPECT_EQ(PrintAst(std::static_pointer_cast<TExpr>(expr), MakePrintOpts()),
+                      input);
+        }
+        return expr;
+    };
+
+    const std::string head =
+        "(rel join (rel source \"left.parquet\") (rel source \"right.parquet\") "
+        "((a c)) ";
+
+    auto none = roundtrip(head + "(inner))");
+    ASSERT_NE(none, nullptr);
+    EXPECT_FALSE(static_cast<TJoinOperator&>(*none).RuntimeFilter().has_value());
+    EXPECT_EQ(static_cast<TJoinOperator&>(*none).Filter(), nullptr);
+
+    auto emitOnly = roundtrip(head + "(inner) (emit-filter 7 right))");
+    ASSERT_NE(emitOnly, nullptr);
+    const auto& emitted = static_cast<TJoinOperator&>(*emitOnly).RuntimeFilter();
+    ASSERT_TRUE(emitted.has_value());
+    EXPECT_EQ(emitted->Id, 7u);
+    EXPECT_EQ(emitted->BuildSide, EJoinFilterSide::Right);
+    EXPECT_EQ(static_cast<TJoinOperator&>(*emitOnly).Filter(), nullptr);
+
+    auto residualOnly = roundtrip(head + "(left) (residual (< b d)))");
+    ASSERT_NE(residualOnly, nullptr);
+    EXPECT_NE(static_cast<TJoinOperator&>(*residualOnly).Filter(), nullptr);
+    EXPECT_FALSE(
+        static_cast<TJoinOperator&>(*residualOnly).RuntimeFilter().has_value());
+
+    auto both = roundtrip(
+        head + "(left) (residual (< b d)) (emit-filter 42 left))");
+    ASSERT_NE(both, nullptr);
+    const auto& bothFilter = static_cast<TJoinOperator&>(*both).RuntimeFilter();
+    ASSERT_TRUE(bothFilter.has_value());
+    EXPECT_EQ(bothFilter->Id, 42u);
+    EXPECT_EQ(bothFilter->BuildSide, EJoinFilterSide::Left);
+    EXPECT_NE(static_cast<TJoinOperator&>(*both).Filter(), nullptr);
+
+    auto rejects = [&](const std::string& input) {
+        TRelParserOptions opts;
+        opts.SourceFactory =
+            [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
+            if (path == "left.parquet") {
+                return std::make_shared<TSourceOperator>(leftSrc, std::string(path));
+            }
+            return std::make_shared<TSourceOperator>(rightSrc, std::string(path));
+        };
+        auto p = MakeParser(std::move(opts));
+        std::istringstream in(input);
+        TTokenStream ts(in);
+        EXPECT_FALSE(p.Parse(ts).has_value()) << input;
+    };
+    rejects(head + "(inner) (emit-filter 7 middle))");
+    rejects(head + "(inner) (emit-filter 0 right))");
+    rejects(head + "(inner) (bogus 1))");
+    rejects(head + "(inner) (emit-filter 1 left) (emit-filter 2 right))");
+    rejects(head + "(inner) (emit-filter 4294967296 right))");
+}
+
+TEST(SexpParser, CloneKeepsJoinRuntimeFilter) {
+    NQdb::TMockSource leftSrc({"a", "b"});
+    NQdb::TMockSource rightSrc({"c", "d"});
+
+    TRelParserOptions opts;
+    opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
+        if (path == "left.parquet") {
+            return std::make_shared<TSourceOperator>(leftSrc, std::string(path));
+        }
+        return std::make_shared<TSourceOperator>(rightSrc, std::string(path));
+    };
+    auto p = MakeParser(std::move(opts));
+    auto expr = Parse(p,
+        "(rel join (rel source \"left.parquet\") (rel source \"right.parquet\") "
+        "((a c)) (inner) (emit-filter 3 left))");
+    ASSERT_NE(expr, nullptr);
+
+    auto clone = CloneOperator(std::static_pointer_cast<IOperator>(expr));
+    ASSERT_NE(clone, nullptr);
+    auto* cloned = dynamic_cast<TJoinOperator*>(clone.get());
+    ASSERT_NE(cloned, nullptr);
+    ASSERT_TRUE(cloned->RuntimeFilter().has_value());
+    EXPECT_EQ(cloned->RuntimeFilter()->Id, 3u);
+    EXPECT_EQ(cloned->RuntimeFilter()->BuildSide, EJoinFilterSide::Left);
+}
+
+TEST(SexpParser, JoinToStringUsesTaggedForms) {
+    NQdb::TMockSource leftSrc({"a", "b"});
+    NQdb::TMockSource rightSrc({"c", "d"});
+    auto factory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
+        if (path == "left.parquet") {
+            return std::make_shared<TSourceOperator>(leftSrc, std::string(path));
+        }
+        return std::make_shared<TSourceOperator>(rightSrc, std::string(path));
+    };
+    TRelParserOptions opts;
+    opts.SourceFactory = factory;
+    auto p = MakeParser(std::move(opts));
+    auto expr = Parse(p,
+        "(rel join (rel source \"left.parquet\") (rel source \"right.parquet\") "
+        "((a c)) (left) (residual (< b d)) (emit-filter 7 right))");
+    ASSERT_NE(expr, nullptr);
+
+    const std::string printed = expr->ToString();
+    EXPECT_NE(printed.find("(residual "), std::string::npos) << printed;
+    EXPECT_NE(printed.find("(emit-filter 7 right)"), std::string::npos) << printed;
+
+    EXPECT_EQ(printed.find("(left) (< b d)"), std::string::npos) << printed;
+}
+
+TEST(SexpParser, FlattenKeepsAnnotatedJoin) {
+    NQdb::TMockSource leftSrc({"a", "b"});
+    NQdb::TMockSource rightSrc({"c", "d"});
+    NQdb::TMockSource thirdSrc({"e", "f"});
+
+    TRelParserOptions opts;
+    opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
+        if (path == "left.parquet") {
+            return std::make_shared<TSourceOperator>(leftSrc, std::string(path));
+        }
+        if (path == "right.parquet") {
+            return std::make_shared<TSourceOperator>(rightSrc, std::string(path));
+        }
+        return std::make_shared<TSourceOperator>(thirdSrc, std::string(path));
+    };
+    auto p = MakeParser(std::move(opts));
+    auto expr = Parse(p,
+        "(rel join"
+        " (rel join (rel source \"left.parquet\") (rel source \"right.parquet\")"
+        " ((a c)) (inner) (emit-filter 7 right))"
+        " (rel source \"third.parquet\") ((a e)) (inner))");
+    ASSERT_NE(expr, nullptr);
+
+    auto flattened = FlattenInnerJoins(std::static_pointer_cast<IOperator>(expr));
+    ASSERT_NE(flattened, nullptr);
+
+    std::function<const TJoinOperator*(const TOperatorPtr&)> findAnnotated =
+        [&](const TOperatorPtr& node) -> const TJoinOperator* {
+        if (!node) {
+            return nullptr;
+        }
+        if (auto* join = dynamic_cast<TJoinOperator*>(node.get());
+            join && join->RuntimeFilter()) {
+            return join;
+        }
+        for (const auto& child : node->Children()) {
+            if (auto childOp = TMaybeNode<IOperator>(child)) {
+                if (auto* found = findAnnotated(childOp.Cast())) {
+                    return found;
+                }
+            }
+        }
+        return nullptr;
+    };
+
+    const auto* annotated = findAnnotated(flattened);
+    ASSERT_NE(annotated, nullptr) << "flattening dropped the runtime-filter join";
+    EXPECT_EQ(annotated->RuntimeFilter()->Id, 7u);
+    EXPECT_EQ(annotated->RuntimeFilter()->BuildSide, EJoinFilterSide::Right);
+    EXPECT_EQ(annotated->Keys().size(), 1u);
 }
 
 TEST(SexpParser, CrossJoinAcceptsEmptyKeyList) {

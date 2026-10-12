@@ -3,9 +3,13 @@
 #include "mock_source.h"
 
 #include <qdb/exec/plan_builder.h>
+#include <qdb/exec/runtime_filter.h>
+#include <qdb/kernel/finalize.h>
 #include <qdb/plan/build.h>
+#include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/pipeline.h>
+#include <qdb/scheduler/plan_lowerer.h>
 #include <qdb/scheduler/scan_split.h>
 #include <qdb/sql/parser.h>
 
@@ -73,6 +77,33 @@ public:
 private:
     TStatsPtr Stats_;
 };
+
+class TRecordingFilterBindingFactory final : public IRuntimeFilterBindingFactory {
+public:
+    TRuntimeFilterBinding Create(uint32_t id, size_t producerCount) override {
+        Created.emplace_back(id, producerCount);
+        return Local_.Create(id, producerCount);
+    }
+
+    std::vector<std::pair<uint32_t, size_t>> Created;
+
+private:
+    TLocalRuntimeFilterBindingFactory Local_;
+};
+
+TJoinOperator* FindJoin(const TOperatorPtr& node) {
+    if (auto join = TMaybeOp<TJoinOperator>(node)) {
+        return join.Cast().get();
+    }
+    for (const auto& child : node->Children()) {
+        if (auto op = NQumir::NAst::TMaybeNode<IOperator>(child)) {
+            if (auto* join = FindJoin(op.Cast())) {
+                return join;
+            }
+        }
+    }
+    return nullptr;
+}
 
 TOperatorPtr BuildSqlPlan(
     std::string_view sql,
@@ -243,6 +274,66 @@ TEST(ExecPlanBuilder, SingleAndMultiCollapseJoinToSameSemanticDag) {
     ExpectKernelBindings(multi);
     EXPECT_EQ(CountKind(single.Exec, EExecPlanNodeKind::Join), 1u);
     EXPECT_EQ(CountKind(multi.Exec, EExecPlanNodeKind::Join), 1u);
+}
+
+TEST(ExecPlanBuilder, LowererUsesInjectedRuntimeFilterBindings) {
+    TSplitMockSource left({"k"});
+    TSplitMockSource right({"k"});
+    const std::unordered_map<std::string, ISource*> sources{
+        {"l", &left},
+        {"r", &right},
+    };
+    auto plan = BuildSqlPlan(
+        "SELECT l.k FROM l JOIN r ON l.k = r.k", sources);
+    auto* join = FindJoin(plan);
+    ASSERT_NE(join, nullptr);
+    join->MutableRuntimeFilter() = TRuntimeFilterSpec{
+        .Id = 17, .BuildSide = EJoinFilterSide::Right};
+
+    auto bindings = std::make_shared<TRecordingFilterBindingFactory>();
+    auto lowered = NScheduler::LowerPlanToGraph(
+        plan, MultiSettings(), nullptr, nullptr, bindings);
+    ASSERT_TRUE(lowered.Graph);
+    EXPECT_EQ(bindings->Created,
+        (std::vector<std::pair<uint32_t, size_t>>{{17, 4}}));
+}
+
+TEST(ExecPlanBuilder, RuntimeFiltersShareTheQueryJit) {
+    TSplitMockSource left({"k"}), right({"k"}), third({"k"});
+    const std::unordered_map<std::string, ISource*> sources{
+        {"l", &left}, {"r", &right}, {"t", &third},
+    };
+    auto plan = BuildSqlPlan(
+        "SELECT l.k FROM l JOIN r ON l.k = r.k JOIN t ON l.k = t.k", sources);
+    auto* outer = FindJoin(plan);
+    ASSERT_NE(outer, nullptr);
+    auto* inner = FindJoin(outer->Left());
+    ASSERT_NE(inner, nullptr);
+    inner->MutableRuntimeFilter() = TRuntimeFilterSpec{
+        .Id = 1, .BuildSide = EJoinFilterSide::Right};
+    outer->MutableRuntimeFilter() = TRuntimeFilterSpec{
+        .Id = 2, .BuildSide = EJoinFilterSide::Right};
+
+    auto first = NScheduler::LowerPlanToGraph(plan, MultiSettings(), nullptr);
+    auto second = NScheduler::LowerPlanToGraph(plan, MultiSettings(), nullptr);
+    ASSERT_EQ(first.RuntimeFilters.size(), 2u);
+    EXPECT_EQ(std::ranges::count(first.Kernels, "runtime-filter.bloom",
+        &TGeneratedKernel::Name), 1);
+    auto bloom = std::ranges::find(first.Kernels, "runtime-filter.bloom",
+        &TGeneratedKernel::Name);
+    auto secondBloom = std::ranges::find(second.Kernels, "runtime-filter.bloom",
+        &TGeneratedKernel::Name);
+    ASSERT_NE(bloom, first.Kernels.end());
+    ASSERT_NE(secondBloom, second.Kernels.end());
+    ASSERT_TRUE(bloom->RuntimeContext);
+    EXPECT_NE(bloom->RuntimeContext, secondBloom->RuntimeContext);
+    EXPECT_FALSE(bloom->Slot->Runner);
+
+    JitFinalizeKernels(first.Kernels);
+    ASSERT_TRUE(bloom->Slot->Runner);
+    for (const auto& kernel : first.Kernels) {
+        EXPECT_EQ(kernel.Slot->Runner, bloom->Slot->Runner);
+    }
 }
 
 TEST(ExecPlanBuilder, SingleAndMultiCollapseUnionLanes) {

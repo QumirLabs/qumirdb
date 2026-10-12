@@ -7,6 +7,7 @@
 #include <qumir/parser/type.h>
 
 #include "plan_runner.h"
+#include <qdb/exec/runtime_filter.h>
 #include <qdb/io/io.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/passes/column_pruning.h>
@@ -14,10 +15,13 @@
 #include <qdb/sexp/parser.h>
 
 #include <algorithm>
+#include <atomic>
 #include <memory>
 #include <sstream>
 #include <string>
 #include <tuple>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 using namespace NQdb;
@@ -34,13 +38,84 @@ TRowSet KeyValBatch(int64_t* keys, int64_t* vals, int64_t rows, std::vector<TCol
     return TRowSet{.Columns = cols.data(), .ColumnCount = 2, .RowCount = rows, .RefCount = 1};
 }
 
+class TCountingFilterProbe final : public IRuntimeFilterProbe {
+public:
+    explicit TCountingFilterProbe(std::shared_ptr<IRuntimeFilterProbe> inner)
+        : Inner_(std::move(inner))
+    {}
+
+    std::shared_ptr<TRuntimeFilterProbeState> CreateProbeState() override {
+        return Inner_->CreateProbeState();
+    }
+
+    bool BeginBatch(TRuntimeFilterProbeState& state, size_t rows) const override {
+        return Inner_->BeginBatch(state, rows);
+    }
+
+    size_t MayContainBatch(std::span<const uint64_t> hashes,
+        std::span<uint8_t> output, TRuntimeFilterProbeState& state,
+        std::span<const uint8_t> selection = {}) const override
+    {
+        const size_t rows = selection.empty() ? hashes.size() : static_cast<size_t>(
+            std::count_if(selection.begin(), selection.end(),
+                [](uint8_t value) { return value != 0; }));
+        const size_t accepted = Inner_->MayContainBatch(hashes, output, state, selection);
+        Probed.fetch_add(rows, std::memory_order_relaxed);
+        Rejected.fetch_add(rows - accepted, std::memory_order_relaxed);
+        return accepted;
+    }
+
+    bool MayContain(uint64_t hash) const override {
+        Probed.fetch_add(1, std::memory_order_relaxed);
+        const bool keep = Inner_->MayContain(hash);
+        if (!keep) {
+            Rejected.fetch_add(1, std::memory_order_relaxed);
+        }
+        return keep;
+    }
+
+    mutable std::atomic<size_t> Probed{0};
+    mutable std::atomic<size_t> Rejected{0};
+
+private:
+    std::shared_ptr<IRuntimeFilterProbe> Inner_;
+};
+
+class TCountingFilterBindingFactory final : public IRuntimeFilterBindingFactory {
+public:
+    TCountingFilterBindingFactory(
+        size_t maxKeys = TRuntimeFilter::DefaultMaxKeys,
+        size_t bloomBytes = TRuntimeFilter::DefaultBloomBytes)
+        : MaxKeys_(maxKeys), BloomBytes_(bloomBytes) {}
+
+    TRuntimeFilterBinding Create(uint32_t id, size_t producerCount) override {
+        (void)id;
+        ++Created;
+        ProducerCount = producerCount;
+        Filter = std::make_shared<TRuntimeFilter>(MaxKeys_, BloomBytes_);
+        Filter->SetProducerCount(producerCount);
+        Probe = std::make_shared<TCountingFilterProbe>(Filter);
+        return {.Producer = Filter, .Probe = Probe};
+    }
+
+    size_t Created = 0;
+    size_t ProducerCount = 0;
+    std::shared_ptr<TRuntimeFilter> Filter;
+    std::shared_ptr<TCountingFilterProbe> Probe;
+
+private:
+    size_t MaxKeys_;
+    size_t BloomBytes_;
+};
+
 // Parses `sexp`, wiring "L" -> left source, anything else -> right source, then
 // runs the full logical pipeline + physical planner.
 std::unique_ptr<TTestRuntime> PlanJoin(
     const std::string& sexp,
     ISource& left,
     ISource& right,
-    NScheduler::TSettings schedulerSettings = {})
+    NScheduler::TSettings schedulerSettings = {},
+    std::shared_ptr<IRuntimeFilterBindingFactory> filterBindings = nullptr)
 {
     TRelParserOptions opts;
     opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
@@ -58,7 +133,7 @@ std::unique_ptr<TTestRuntime> PlanJoin(
     auto root = std::static_pointer_cast<IOperator>(*parsed);
     AnnotateTypes(root);
     ApplyColumnPruning(root);
-    return RunPlan(root, schedulerSettings);
+    return RunPlan(root, schedulerSettings, nullptr, std::move(filterBindings));
 }
 
 std::unique_ptr<TTestRuntime> PlanJoin3(
@@ -89,6 +164,37 @@ std::unique_ptr<TTestRuntime> PlanJoin3(
     AnnotateTypes(root);
     ApplyColumnPruning(root);
     return RunPlan(root);
+}
+
+std::unique_ptr<TTestRuntime> PlanJoinMany(
+    const std::string& sexp,
+    const std::unordered_map<std::string, ISource*>& sources,
+    NScheduler::TSettings settings,
+    std::shared_ptr<IRuntimeFilterBindingFactory> filterBindings)
+{
+    TRelParserOptions opts;
+    opts.SourceFactory = [&](std::string_view path, NQumir::TLocation)
+        -> TOperatorPtr {
+        auto it = sources.find(std::string(path));
+        if (it == sources.end()) {
+            return nullptr;
+        }
+        return std::make_shared<TSourceOperator>(*it->second, std::string(path));
+    };
+    TParser parser;
+    for (auto& [name, fn] : MakeRelParsers(std::move(opts))) {
+        parser.NodeParsers[name] = std::move(fn);
+    }
+    std::istringstream in(sexp);
+    TTokenStream ts(in);
+    auto parsed = parser.Parse(ts);
+    if (!parsed) {
+        throw std::runtime_error(parsed.error().ToString());
+    }
+    auto root = std::static_pointer_cast<IOperator>(*parsed);
+    AnnotateTypes(root);
+    ApplyColumnPruning(root);
+    return RunPlan(root, settings, nullptr, std::move(filterBindings));
 }
 
 } // namespace
@@ -169,7 +275,7 @@ TEST(JoinPlanner, InnerJoinResidualHonorsLeftSelection) {
     NQdb::TMockSource right({"rk", "rv"}, {KeyValBatch(rk.data(), rv.data(), 4, rcols)});
 
     auto plan = PlanJoin(R"qdb(
-(rel join (rel source "L") (rel source "R") ((lk rk)) (inner) (== lv (+ rv 1)))
+(rel join (rel source "L") (rel source "R") ((lk rk)) (inner) (residual (== lv (+ rv 1))))
 )qdb", left, right);
 
     std::vector<std::tuple<int64_t, int64_t, int64_t, int64_t>> got;
@@ -205,11 +311,11 @@ TEST(JoinPlanner, ChainedInnerJoinResidualHonorsLeftSelection) {
 
     auto plan = PlanJoin3(R"qdb(
 (rel join
-  (rel join (rel source "L") (rel source "R") ((lk rk)) (inner) (== lv (+ rv 1)))
+  (rel join (rel source "L") (rel source "R") ((lk rk)) (inner) (residual (== lv (+ rv 1))))
   (rel source "S")
   ((lk sk))
   (inner)
-  (== lv (- sv 1)))
+  (residual (== lv (- sv 1))))
 )qdb", left, right, third);
 
     std::vector<std::tuple<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t>> got;
@@ -286,7 +392,7 @@ TEST(JoinPlanner, CrossJoinResidualSupportsRightGroupKeys) {
 
         auto plan = PlanJoin(R"qdb(
 (rel aggregate
-  (rel join (rel source "L") (rel source "R") () (inner) (> rv lv))
+  (rel join (rel source "L") (rel source "R") () (inner) (residual (> rv lv)))
   (keys rv) (agg n count) (agg total sum lv))
 )qdb", left, right, settings);
 
@@ -348,6 +454,158 @@ TEST(JoinPlanner, SchedulerThreadedInnerJoinE2E) {
     std::sort(got.begin(), got.end());
     std::sort(expected.begin(), expected.end());
     EXPECT_EQ(got, expected);
+}
+
+TEST(JoinPlanner, RuntimeFilterBindingKeepsThreadedJoinResult) {
+    std::vector<int64_t> lk = {1, 2, 3}, lv = {10, 20, 30};
+    std::vector<int64_t> rk = {1}, rv = {100};
+    std::vector<TColumn> lcols, rcols;
+    TMockSource left({"lk", "lv"}, {KeyValBatch(lk.data(), lv.data(), 3, lcols)});
+    TMockSource right({"rk", "rv"}, {KeyValBatch(rk.data(), rv.data(), 1, rcols)});
+    NScheduler::TSettings settings;
+    settings.Scheduler.Mode = NScheduler::EExecutionMode::ThreadedScheduler;
+    settings.Scheduler.WorkerCount = 2;
+    settings.HashShuffle.PartitionCount = 2;
+    settings.HashShuffle.MaxPartitionCount = 2;
+
+    auto plan = PlanJoin(
+        "(rel join (rel source \"L\") (rel source \"R\") "
+        "((lk rk)) (inner) (emit-filter 7 right))",
+        left, right, settings);
+
+    std::vector<std::tuple<int64_t, int64_t, int64_t, int64_t>> got;
+    TRowSet out{};
+    while (plan->Next(out)) {
+        for (int64_t i = 0; i < out.RowCount; ++i) {
+            got.emplace_back(
+                reinterpret_cast<const int64_t*>(out.Columns[0].Data)[i],
+                reinterpret_cast<const int64_t*>(out.Columns[1].Data)[i],
+                reinterpret_cast<const int64_t*>(out.Columns[2].Data)[i],
+                reinterpret_cast<const int64_t*>(out.Columns[3].Data)[i]);
+        }
+        Release(&out);
+    }
+    EXPECT_EQ(got,
+        (std::vector<std::tuple<int64_t, int64_t, int64_t, int64_t>>{
+            {1, 10, 1, 100}}));
+}
+
+TEST(JoinPlanner, RuntimeFilterRejectsRowsWithOneLanePerSide) {
+    for (auto mode : {NScheduler::EExecutionMode::SingleThreadedScheduler,
+             NScheduler::EExecutionMode::ThreadedScheduler}) {
+        SCOPED_TRACE(static_cast<int>(mode));
+        std::vector<int64_t> lk = {1, 2, 3}, lv = {10, 20, 30};
+        std::vector<int64_t> rk = {1}, rv = {100};
+        std::vector<TColumn> lcols, rcols;
+        TMockSource left({"lk", "lv"}, {KeyValBatch(lk.data(), lv.data(), 3, lcols)});
+        TMockSource right({"rk", "rv"}, {KeyValBatch(rk.data(), rv.data(), 1, rcols)});
+        auto bindings = std::make_shared<TCountingFilterBindingFactory>();
+        NScheduler::TSettings settings;
+        settings.Scheduler.Mode = mode;
+        settings.Scheduler.WorkerCount = 2;
+
+        auto plan = PlanJoin(
+            "(rel join (rel source \"L\") (rel source \"R\") "
+            "((lk rk)) (inner) (emit-filter 7 right))",
+            left, right, settings, bindings);
+
+        std::vector<int64_t> keys;
+        TRowSet out{};
+        while (plan->Next(out)) {
+            for (int64_t i = 0; i < out.RowCount; ++i) {
+                keys.push_back(
+                    reinterpret_cast<const int64_t*>(out.Columns[0].Data)[i]);
+            }
+            Release(&out);
+        }
+        EXPECT_EQ(keys, (std::vector<int64_t>{1}));
+        ASSERT_EQ(bindings->Created, 1u);
+        ASSERT_TRUE(bindings->Probe);
+        EXPECT_EQ(bindings->Probe->Probed.load(), 3u);
+        EXPECT_EQ(bindings->Probe->Rejected.load(), 2u);
+    }
+}
+
+TEST(JoinPlanner, RuntimeFilterAtSourceComposesWithStaticFilter) {
+    std::vector<int64_t> lk = {1, 2, 3}, lv = {20, 20, 5};
+    std::vector<int64_t> rk = {1}, rv = {100};
+    std::vector<TColumn> lcols, rcols;
+    TMockSource left({"lk", "lv"}, {KeyValBatch(lk.data(), lv.data(), 3, lcols)});
+    TMockSource right({"rk", "rv"}, {KeyValBatch(rk.data(), rv.data(), 1, rcols)});
+    auto bindings = std::make_shared<TCountingFilterBindingFactory>();
+    NScheduler::TSettings settings;
+    settings.Scheduler.Mode = NScheduler::EExecutionMode::ThreadedScheduler;
+    settings.Scheduler.WorkerCount = 2;
+
+    auto plan = PlanJoin(
+        "(rel join (rel filter (rel source \"L\") (> lv 10)) "
+        "(rel source \"R\") ((lk rk)) (inner) (emit-filter 7 right))",
+        left, right, settings, bindings);
+
+    std::vector<int64_t> keys;
+    TRowSet out{};
+    while (plan->Next(out)) {
+        for (int64_t i = 0; i < out.RowCount; ++i) {
+            if (!out.Selection || out.Selection[i]) {
+                keys.push_back(
+                    reinterpret_cast<const int64_t*>(out.Columns[0].Data)[i]);
+            }
+        }
+        Release(&out);
+    }
+    EXPECT_EQ(keys, (std::vector<int64_t>{1}));
+    ASSERT_TRUE(bindings->Probe);
+    EXPECT_EQ(bindings->Probe->Probed.load(), 3u);
+    EXPECT_EQ(bindings->Probe->Rejected.load(), 2u);
+}
+
+TEST(JoinPlanner, RuntimeFilterMergesTwoBuildLanesBeforeProbing) {
+    std::vector<int64_t> lk1 = {1, 2}, lv1 = {10, 20};
+    std::vector<int64_t> lk2 = {3, 4}, lv2 = {30, 40};
+    std::vector<int64_t> rk1 = {1}, rv1 = {100};
+    std::vector<int64_t> rk2 = {3}, rv2 = {300};
+    std::vector<TColumn> lc1, lc2, rc1, rc2;
+    TMockSource left1({"lk", "lv"}, {KeyValBatch(lk1.data(), lv1.data(), 2, lc1)});
+    TMockSource left2({"lk", "lv"}, {KeyValBatch(lk2.data(), lv2.data(), 2, lc2)});
+    TMockSource right1({"rk", "rv"}, {KeyValBatch(rk1.data(), rv1.data(), 1, rc1)});
+    TMockSource right2({"rk", "rv"}, {KeyValBatch(rk2.data(), rv2.data(), 1, rc2)});
+    const std::unordered_map<std::string, ISource*> sources{
+        {"L1", &left1}, {"L2", &left2},
+        {"R1", &right1}, {"R2", &right2},
+    };
+    NScheduler::TSettings settings;
+    settings.Scheduler.Mode = NScheduler::EExecutionMode::ThreadedScheduler;
+    settings.Scheduler.WorkerCount = 4;
+    settings.HashShuffle.PartitionCount = 2;
+    settings.HashShuffle.MaxPartitionCount = 2;
+    auto bindings = std::make_shared<TCountingFilterBindingFactory>(
+        /*maxKeys=*/1, /*bloomBytes=*/512);
+
+    auto plan = PlanJoinMany(
+        "(rel join "
+        "(rel union-all (rel source \"L1\") (rel source \"L2\")) "
+        "(rel union-all (rel source \"R1\") (rel source \"R2\")) "
+        "((lk rk)) (inner) (emit-filter 7 right))",
+        sources, settings, bindings);
+
+    std::vector<int64_t> keys;
+    TRowSet out{};
+    while (plan->Next(out)) {
+        for (int64_t i = 0; i < out.RowCount; ++i) {
+            keys.push_back(
+                reinterpret_cast<const int64_t*>(out.Columns[0].Data)[i]);
+        }
+        Release(&out);
+    }
+    std::sort(keys.begin(), keys.end());
+    EXPECT_EQ(keys, (std::vector<int64_t>{1, 3}));
+    EXPECT_EQ(bindings->Created, 1u);
+    EXPECT_EQ(bindings->ProducerCount, 2u);
+    ASSERT_TRUE(bindings->Filter);
+    EXPECT_TRUE(bindings->Filter->UsesBloom());
+    ASSERT_TRUE(bindings->Probe);
+    EXPECT_EQ(bindings->Probe->Probed.load(), 4u);
+    EXPECT_EQ(bindings->Probe->Rejected.load(), 2u);
 }
 
 TEST(JoinPlanner, ProjectOnTopPrunesJoinInputs) {
@@ -472,7 +730,7 @@ TEST(JoinPlanner, ResidualLeftSemiMarksInKernel) {
 
     auto plan = PlanJoin(
         "(rel join (rel source \"L\") (rel source \"R\") "
-        "((lk rk)) (left_semi) (!= lv rv))",
+        "((lk rk)) (left_semi) (residual (!= lv rv)))",
         left, right);
 
     std::vector<std::tuple<int64_t, int64_t>> got;
@@ -504,7 +762,7 @@ TEST(JoinPlanner, ResidualLeftAntiHonorsLeftSelection) {
 
     auto plan = PlanJoin(
         "(rel join (rel source \"L\") (rel source \"R\") "
-        "((lk rk)) (left_anti) (!= lv rv))",
+        "((lk rk)) (left_anti) (residual (!= lv rv)))",
         left, right);
 
     std::vector<std::tuple<int64_t, int64_t>> got;

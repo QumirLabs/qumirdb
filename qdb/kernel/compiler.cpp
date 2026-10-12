@@ -17,7 +17,6 @@
 #include <qdb/modules/qumirdb_runtime.h>
 #include <qdb/utils/module_path.h>
 
-#include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/error.h>
 #include <qumir/parser/core/printer.h>
 
@@ -1534,6 +1533,21 @@ NQumir::NAst::TExprPtr BuildTopSortMergeProgramAst(
     programStmts.push_back(BuildTopSortMergePicksAst());
     programStmts.push_back(BuildTopSortUpdateAst(keys, materializeType != nullptr));
     return std::make_shared<TBlockExpr>(NQumir::TLocation{}, std::move(programStmts));
+}
+
+std::shared_ptr<TKernelSlot> TKernelCompiler::CompileBloomProbe() {
+    auto functions = NKernel::ParseFunctionLibrary(
+        NKernel::ReadJoinKernel("bloom_vector.oz"));
+    if (!functions) {
+        throw NQumir::TError("CompileBloomProbe: " + functions.error().ToString());
+    }
+    auto ast = std::make_shared<NQumir::NAst::TBlockExpr>(
+        NQumir::TLocation{}, std::move(*functions));
+    PrintKernelAst(Diagnostics_, "runtime-filter.bloom", ast);
+    auto kernel = EmitKernel("runtime-filter.bloom", {"bloom_probe4"}, std::move(ast));
+    FinishKernelDiagnostics(Diagnostics_);
+
+    return kernel.Slot;
 }
 
 TKernelCompiler::TFilterDispatch TKernelCompiler::CompileFilter(
