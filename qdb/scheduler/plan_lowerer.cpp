@@ -366,6 +366,7 @@ public:
         std::shared_ptr<NScheduler::TRuntimeFilterCode> Code;
         std::vector<NScheduler::TTaskNode*> Nodes;
         std::vector<std::string> ProbeKeys;
+        NQumir::NAst::TTypePtr OutputType;
         bool AtSource = false;
     };
 
@@ -554,6 +555,7 @@ public:
             TFilterConsumerTasks consumer{
                 .Code = code,
                 .ProbeKeys = use.ProbeKeys,
+                .OutputType = lowered.OutputType,
                 .AtSource = static_cast<bool>(TMaybeOp<TSourceOperator>(op)),
             };
             consumer.Nodes.reserve(lanes);
@@ -2686,18 +2688,62 @@ private:
                     "runtime filter has no planned consumer");
             }
             filterConsumers = &found->second;
-            std::vector<std::string> expectedKeys;
-            expectedKeys.reserve(join.Keys().size());
-            for (const auto& key : join.Keys()) {
-                expectedKeys.push_back(buildIsLeft ? key.Right : key.Left);
-            }
+            const auto& probeSchema = buildIsLeft ? *rightStruct : *leftStruct;
             for (auto& consumer : *filterConsumers) {
-                if (consumer.ProbeKeys != expectedKeys) {
+                auto consumerSchema = NQumir::NAst::TMaybeType<TStructType>(
+                    consumer.OutputType);
+                if (!consumerSchema
+                    || consumer.ProbeKeys.size() != join.Keys().size()) {
                     throw std::runtime_error(
-                        "runtime filter consumer keys differ from join probe keys");
+                        "runtime filter consumer has invalid probe schema or keys");
                 }
-                consumer.Code->Hash = buildIsLeft
-                    ? hashKernels.Right : hashKernels.Left;
+                // Hash the key in the consumer's column layout. Keep the
+                // original build schema and key order so both sides produce
+                // the same Bloom hashes after a project renames or reorders
+                // probe columns.
+                auto consumerHashSpec = kernelSpec;
+                consumerHashSpec.InputSchemas[buildIsLeft ? 1 : 0] =
+                    consumer.OutputType;
+                for (size_t i = 0; i < join.Keys().size(); ++i) {
+                    const auto& originalKey = buildIsLeft
+                        ? join.Keys()[i].Right : join.Keys()[i].Left;
+                    const auto originalType = FieldType(&probeSchema, originalKey);
+                    const auto consumerType = FieldType(
+                        consumerSchema.Cast().get(), consumer.ProbeKeys[i]);
+                    const auto& fields = consumerSchema.Cast()->Fields;
+                    const auto field = std::find_if(fields.begin(), fields.end(),
+                        [&](const auto& item) {
+                            return item.first == consumer.ProbeKeys[i];
+                        });
+                    if (!originalType || !consumerType
+                        || field == fields.end()
+                        || originalType->ToString() != consumerType->ToString()) {
+                        throw std::runtime_error(
+                            "runtime filter consumer key type differs from join probe key");
+                    }
+                    auto& ref = buildIsLeft
+                        ? consumerHashSpec.JoinKeys[i].Right
+                        : consumerHashSpec.JoinKeys[i].Left;
+                    ref.Name = consumer.ProbeKeys[i];
+                    ref.Index = static_cast<int32_t>(
+                        std::distance(fields.begin(), field));
+                    ref.Type = consumerType;
+                }
+                if (consumer.OutputType->ToString()
+                    == (buildIsLeft ? rightType : leftType)->ToString()
+                    && std::equal(consumer.ProbeKeys.begin(),
+                        consumer.ProbeKeys.end(), join.Keys().begin(),
+                        [buildIsLeft](const auto& name, const auto& key) {
+                            return name == (buildIsLeft ? key.Right : key.Left);
+                        })) {
+                    consumer.Code->Hash = buildIsLeft
+                        ? hashKernels.Right : hashKernels.Left;
+                } else {
+                    auto consumerHash = compiler.CompileJoinHash(consumerHashSpec);
+                    consumer.Code->Hash = buildIsLeft
+                        ? std::move(consumerHash.Right)
+                        : std::move(consumerHash.Left);
+                }
                 consumer.Code->Probe = binding.Probe;
                 consumer.Code->AuxInput->AddFilter(binding.Probe);
             }

@@ -3,6 +3,7 @@
 #include <qdb/exec/join_exec.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
+#include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/stats.h>
 
@@ -227,6 +228,52 @@ bool HasFilterUse(const TOperatorPtr& root, uint32_t id) {
     return false;
 }
 
+bool SameKeyType(const NQumir::NAst::TStructType& outer,
+    const std::string& outerKey, const NQumir::NAst::TStructType& inner,
+    const std::string& innerKey)
+{
+    const auto outerType = FieldType(&outer, outerKey);
+    const auto innerType = FieldType(&inner, innerKey);
+    return outerType && innerType
+        && outerType->ToString() == innerType->ToString();
+}
+
+std::optional<std::vector<std::string>> ProjectInputKeys(
+    const TProjectOperator& project, const std::vector<std::string>& outputKeys)
+{
+    if (!project.Type || !project.Input()->Type) {
+        return std::nullopt;
+    }
+    const auto output = project.OutputColumns();
+    const auto input = project.Input()->OutputColumns();
+    std::vector<std::string> inputKeys;
+    inputKeys.reserve(outputKeys.size());
+    for (const auto& key : outputKeys) {
+        size_t field = 0;
+        bool found = false;
+        for (const auto& projection : project.Projections()) {
+            const size_t arity = FlattenedProjectionArity(projection);
+            if (arity == 1 && field < output->Fields.size()
+                && output->Fields[field].first == key) {
+                auto ident = NQumir::NAst::TMaybeNode<
+                    NQumir::NAst::TIdentExpr>(projection.Expression);
+                if (!ident || !SameKeyType(*output, key, *input,
+                        ident.Cast()->Name)) {
+                    return std::nullopt;
+                }
+                inputKeys.push_back(ident.Cast()->Name);
+                found = true;
+                break;
+            }
+            field += arity;
+        }
+        if (!found) {
+            return std::nullopt;
+        }
+    }
+    return inputKeys;
+}
+
 void PlaceConsumers(const TOperatorPtr& root) {
     for (const auto& child : root->Inputs()) {
         PlaceConsumers(child);
@@ -242,28 +289,35 @@ void PlaceConsumers(const TOperatorPtr& root) {
         return;
     }
 
-    auto target = probe;
-    while (auto predicate = TMaybeOp<TFilterOperator>(target)) {
-        target = predicate.Cast()->Input();
-    }
-    auto source = TMaybeOp<TSourceOperator>(target);
-    const auto probeSchema = probe->Type ? probe->OutputColumns() : nullptr;
-    const auto sourceSchema = source && source.Cast()->Type
-        ? source.Cast()->OutputColumns() : nullptr;
-    const bool sameSchema = sourceSchema && probeSchema
-        && sourceSchema->Fields.size() == probeSchema->Fields.size()
-        && std::equal(sourceSchema->Fields.begin(), sourceSchema->Fields.end(),
-            probeSchema->Fields.begin(),
-            [](const auto& a, const auto& b) { return a.first == b.first; });
-    if (!sameSchema) {
-        target = probe;
-    }
-
     TRuntimeFilterUseSpec use{.Id = filter.Id};
     use.ProbeKeys.reserve(join.Cast()->Keys().size());
     for (const auto& key : join.Cast()->Keys()) {
         use.ProbeKeys.push_back(filter.BuildSide == EJoinFilterSide::Left
             ? key.Right : key.Left);
+    }
+    auto target = probe;
+    while (true) {
+        if (auto predicate = TMaybeOp<TFilterOperator>(target)) {
+            auto input = predicate.Cast()->Input();
+            if (!target->Type || !input->Type
+                || !std::all_of(use.ProbeKeys.begin(), use.ProbeKeys.end(),
+                    [&](const auto& key) {
+                        return SameKeyType(*target->OutputColumns(), key,
+                            *input->OutputColumns(), key);
+                    })) {
+                break;
+            }
+            target = input;
+        } else if (auto project = TMaybeOp<TProjectOperator>(target)) {
+            auto inputKeys = ProjectInputKeys(*project.Cast(), use.ProbeKeys);
+            if (!inputKeys) {
+                break;
+            }
+            use.ProbeKeys = std::move(*inputKeys);
+            target = project.Cast()->Input();
+        } else {
+            break;
+        }
     }
     target->RuntimeFilterUses.push_back(std::move(use));
 }

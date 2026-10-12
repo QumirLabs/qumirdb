@@ -10,7 +10,10 @@
 #include <qdb/exec/runtime_filter.h>
 #include <qdb/io/io.h>
 #include <qdb/plan/ops/source.h>
+#include <qdb/plan/ops/join.h>
+#include <qdb/plan/ops/project.h>
 #include <qdb/plan/passes/column_pruning.h>
+#include <qdb/plan/passes/runtime_filters.h>
 #include <qdb/plan/passes/typing.h>
 #include <qdb/sexp/parser.h>
 
@@ -561,6 +564,59 @@ TEST(JoinPlanner, RuntimeFilterAtSourceComposesWithStaticFilter) {
     EXPECT_EQ(bindings->Probe->Probed.load(), 3u);
     EXPECT_EQ(bindings->Probe->Rejected.load(), 2u);
     EXPECT_EQ(bindings->Filter->StatsSnapshot().SkippedProbeRows, 0u);
+}
+
+TEST(JoinPlanner, RuntimeFilterCrossesOnlyDirectProjectKeyLineage) {
+    for (const auto& [expression, reachesSource] :
+         {std::pair{"lk", true}, std::pair{"(+ lk 0)", false}}) {
+        SCOPED_TRACE(expression);
+        std::vector<int64_t> lk = {1, 2, 3}, lv = {10, 20, 30};
+        std::vector<int64_t> rk = {1}, rv = {100};
+        std::vector<TColumn> lcols, rcols;
+        TMockSource left({"lk", "lv"},
+            {KeyValBatch(lk.data(), lv.data(), 3, lcols)});
+        TMockSource right({"rk", "rv"},
+            {KeyValBatch(rk.data(), rv.data(), 1, rcols)});
+        auto source = std::make_shared<TSourceOperator>(left, "L");
+        auto projected = MakeProject(source,
+            {{"lv", "lv"}, {"alias_key", expression}});
+        ASSERT_TRUE(projected);
+        auto join = std::make_shared<TJoinOperator>(*projected,
+            std::make_shared<TSourceOperator>(right, "R"),
+            std::vector<TJoinKey>{{"alias_key", "rk"}},
+            EJoinType::Inner, nullptr);
+        join->MutableRuntimeFilter() = TRuntimeFilterSpec{
+            .Id = 7, .BuildSide = EJoinFilterSide::Right};
+        TOperatorPtr root = join;
+        AnnotateTypes(root);
+        PlaceRuntimeFilterConsumers(root);
+
+        ASSERT_EQ(source->RuntimeFilterUses.size(), reachesSource ? 1u : 0u);
+        ASSERT_EQ((*projected)->RuntimeFilterUses.size(), reachesSource ? 0u : 1u);
+        const auto& use = reachesSource
+            ? source->RuntimeFilterUses.front()
+            : (*projected)->RuntimeFilterUses.front();
+        EXPECT_EQ(use.ProbeKeys,
+            (std::vector<std::string>{reachesSource ? "lk" : "alias_key"}));
+
+        auto bindings = std::make_shared<TCountingFilterBindingFactory>();
+        auto plan = RunPlan(root, {}, nullptr, bindings);
+        std::vector<int64_t> keys;
+        TRowSet out{};
+        while (plan->Next(out)) {
+            for (int64_t row = 0; row < out.RowCount; ++row) {
+                if (!out.Selection || out.Selection[row]) {
+                    keys.push_back(reinterpret_cast<const int64_t*>(
+                        out.Columns[1].Data)[row]);
+                }
+            }
+            Release(&out);
+        }
+        EXPECT_EQ(keys, (std::vector<int64_t>{1}));
+        ASSERT_TRUE(bindings->Probe);
+        EXPECT_EQ(bindings->Probe->Probed.load(), 3u);
+        EXPECT_EQ(bindings->Probe->Rejected.load(), 2u);
+    }
 }
 
 TEST(JoinPlanner, RuntimeFilterTaskDropsEntireBatch) {
