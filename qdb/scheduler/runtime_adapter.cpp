@@ -246,29 +246,15 @@ THashShuffleCode::THashShuffleCode(THash hash,
 TSourceTask::TSourceTask(
     std::shared_ptr<const TSourceCode> code,
     std::shared_ptr<void> state,
-    TOutputPort output,
-    std::shared_ptr<TAuxInput> auxInput)
+    TOutputPort output)
     : Code_(std::move(code))
     , State_(std::move(state))
     , Output_(output)
-    , AuxInput_(std::move(auxInput))
 {}
-
-bool TSourceTask::WantsInput(const TTaskEdge& edge) const {
-    return AuxInput_ && AuxInput_->Poll() == EAuxInputStatus::NeedProducer
-        && edge.Kind == ETaskEdgeKind::Dependency;
-}
 
 ETaskResult TSourceTask::Execute() {
     if (Finished_) {
         return ETaskResult::FINISHED;
-    }
-    if (AuxInput_) {
-        switch (AuxInput_->Poll()) {
-            case EAuxInputStatus::Ready: break;
-            case EAuxInputStatus::NeedProducer: return ETaskResult::NEED_DATA;
-            case EAuxInputStatus::Waiting: return ETaskResult::WAITING;
-        }
     }
     if (!Output_.CanPush()) {
         return ETaskResult::BLOCKED_OUTPUT;
@@ -285,6 +271,128 @@ ETaskResult TSourceTask::Execute() {
         Release(&rowSet);
         return ETaskResult::BLOCKED_OUTPUT;
     }
+    return ETaskResult::OK;
+}
+
+namespace {
+
+struct TRuntimeFilterRowSetData {
+    TRowSet Input;
+    std::vector<uint8_t> Selection;
+    std::vector<uint64_t> Hashes;
+};
+
+void DestroyRuntimeFilterRowSet(TRowSet* rowSet) {
+    auto* data = static_cast<TRuntimeFilterRowSetData*>(rowSet->Private);
+    Release(&data->Input);
+    delete data;
+}
+
+} // namespace
+
+TRuntimeFilterTask::TRuntimeFilterTask(
+    std::shared_ptr<const TRuntimeFilterCode> code,
+    TInputPort input,
+    TOutputPort output)
+    : Code_(std::move(code))
+    , Input_(input)
+    , Output_(output)
+{}
+
+TRuntimeFilterTask::~TRuntimeFilterTask() {
+    if (HasInput_) {
+        Release(&CurrentInput_);
+    }
+}
+
+bool TRuntimeFilterTask::WantsInput(const TTaskEdge& edge) const {
+    switch (Code_->AuxInput->Poll()) {
+        case EAuxInputStatus::Ready:
+            return edge.Kind == ETaskEdgeKind::Rowset;
+        case EAuxInputStatus::NeedProducer:
+            return edge.Kind == ETaskEdgeKind::Dependency;
+        case EAuxInputStatus::Waiting:
+            return false;
+    }
+    return false;
+}
+
+ETaskResult TRuntimeFilterTask::Execute() {
+    if (OutputFinished_) {
+        return ETaskResult::FINISHED;
+    }
+    switch (Code_->AuxInput->Poll()) {
+        case EAuxInputStatus::Ready: break;
+        case EAuxInputStatus::NeedProducer: return ETaskResult::NEED_DATA;
+        case EAuxInputStatus::Waiting: return ETaskResult::WAITING;
+    }
+
+    if (!HasInput_ && !InputFinished_) {
+        auto fetch = Input_.Fetch(CurrentInput_);
+        if (fetch == EFetchResult::OK) {
+            HasInput_ = true;
+        } else if (fetch == EFetchResult::FINISHED) {
+            InputFinished_ = true;
+        } else {
+            return ETaskResult::NEED_DATA;
+        }
+    }
+    if (!HasInput_) {
+        OutputFinished_ = true;
+        Output_.Finish();
+        return ETaskResult::FINISHED;
+    }
+    if (!Output_.CanPush()) {
+        return ETaskResult::BLOCKED_OUTPUT;
+    }
+
+    if (!Prepared_) {
+        if (!Code_->Probe || !Code_->Hash) {
+            throw std::runtime_error("runtime filter consumer is not bound");
+        }
+        if (!ProbeState_) {
+            ProbeState_ = Code_->Probe->CreateProbeState();
+        }
+        const size_t rows = static_cast<size_t>(CurrentInput_.RowCount);
+        const std::span<const uint8_t> selection = CurrentInput_.Selection
+            ? std::span<const uint8_t>(CurrentInput_.Selection, rows)
+            : std::span<const uint8_t>{};
+        const size_t selected = selection.empty() ? rows : static_cast<size_t>(
+            std::count_if(selection.begin(), selection.end(),
+                [](uint8_t value) { return value != 0; }));
+        if (Code_->Probe->BeginBatch(*ProbeState_, selected)) {
+            auto data = std::make_unique<TRuntimeFilterRowSetData>();
+            data->Hashes.resize(rows);
+            if (!Code_->Hash(&CurrentInput_, data->Hashes.data())) {
+                throw std::runtime_error("runtime filter hash kernel failed");
+            }
+            data->Selection.resize(rows);
+            const size_t kept = Code_->Probe->MayContainBatch(
+                data->Hashes, data->Selection, *ProbeState_, selection);
+            if (!kept) {
+                Release(&CurrentInput_);
+                CurrentInput_ = {};
+                HasInput_ = false;
+                return ETaskResult::OK;
+            }
+            data->Input = CurrentInput_;
+            CurrentInput_.Selection = data->Selection.data();
+            CurrentInput_.Hash = data->Hashes.data();
+            CurrentInput_.Destroy = DestroyRuntimeFilterRowSet;
+            CurrentInput_.Private = data.release();
+            CurrentInput_.RefCount = 1;
+        } else {
+            // A previous filter may have hashed a different key.
+            CurrentInput_.Hash = nullptr;
+        }
+        Prepared_ = true;
+    }
+    if (!Output_.Push(std::move(CurrentInput_))) {
+        return ETaskResult::BLOCKED_OUTPUT;
+    }
+    CurrentInput_ = {};
+    HasInput_ = false;
+    Prepared_ = false;
     return ETaskResult::OK;
 }
 
@@ -533,40 +641,15 @@ THashShuffleTask::THashShuffleTask(
     , Input_(input)
     , Output_(&output)
     , SourceLane_(sourceLane)
-{
-    if (Code_->AppliedFilter) {
-        FilterProbeState_ = Code_->AppliedFilter->CreateProbeState();
-    }
-}
+{}
 
 THashShuffleTask::~THashShuffleTask() {
     ClearPending();
 }
 
-bool THashShuffleTask::WantsInput(const TTaskEdge& edge) const {
-    if (Code_->AuxInput) {
-        switch (Code_->AuxInput->Poll()) {
-            case EAuxInputStatus::Ready:
-                return edge.Kind == ETaskEdgeKind::Rowset;
-            case EAuxInputStatus::NeedProducer:
-                return edge.Kind == ETaskEdgeKind::Dependency;
-            case EAuxInputStatus::Waiting:
-                return false;
-        }
-    }
-    return edge.Kind == ETaskEdgeKind::Rowset;
-}
-
 ETaskResult THashShuffleTask::Execute() {
     if (OutputFinished_) {
         return ETaskResult::FINISHED;
-    }
-    if (Code_->AuxInput) {
-        switch (Code_->AuxInput->Poll()) {
-            case EAuxInputStatus::Ready: break;
-            case EAuxInputStatus::NeedProducer: return ETaskResult::NEED_DATA;
-            case EAuxInputStatus::Waiting: return ETaskResult::WAITING;
-        }
     }
 
     if (PendingIndex_ < Pending_.size()) {
@@ -612,9 +695,8 @@ bool THashShuffleTask::BatchingEnabled() const {
     return Code_->InputType && Code_->TargetOutputBatchRows > 0;
 }
 
-// A paused or unpublished probe does not require hashes for a one-lane shuffle.
 bool THashShuffleTask::NeedsHashes(size_t partitions) const {
-    return partitions > 1 || Code_->ProducedFilter || FilterActive_;
+    return partitions > 1 || Code_->ProducedFilter;
 }
 
 std::shared_ptr<uint64_t> THashShuffleTask::ComputeHashes(
@@ -647,22 +729,6 @@ void THashShuffleTask::AccumulateFilter(
     }
 }
 
-void THashShuffleTask::ProbeFilter(
-    const TRowSet& rowSet, std::span<const uint64_t> hashes)
-{
-    if (!FilterActive_) {
-        return;
-    }
-    FilterMask_.resize(hashes.size());
-    const std::span<const uint8_t> selection = rowSet.Selection
-        ? std::span<const uint8_t>(rowSet.Selection, hashes.size()) : std::span<const uint8_t>{};
-    Code_->AppliedFilter->MayContainBatch(hashes, FilterMask_, *FilterProbeState_, selection);
-}
-
-bool THashShuffleTask::FilterKeeps(size_t row) const {
-    return !FilterActive_ || FilterMask_[row] != 0;
-}
-
 void THashShuffleTask::EnsureBuffers(size_t partitions) {
     if (Buffers_.size() == partitions) {
         return;
@@ -677,14 +743,6 @@ void THashShuffleTask::EnsureBuffers(size_t partitions) {
 void THashShuffleTask::Scatter(TRowSet& rowSet) {
     if (Output_->DstCount() == 0 || rowSet.RowCount <= 0) {
         return;
-    }
-    FilterActive_ = false;
-    if (Code_->AppliedFilter) {
-        const size_t rows = rowSet.RowCount;
-        const size_t selected = rowSet.Selection ? std::count_if(
-            rowSet.Selection, rowSet.Selection + rows,
-            [](uint8_t value) { return value != 0; }) : rows;
-        FilterActive_ = Code_->AppliedFilter->BeginBatch(*FilterProbeState_, selected);
     }
     auto input = std::shared_ptr<TRowSet>(new TRowSet(rowSet), DestroySharedRowSet);
     rowSet = {};
@@ -727,13 +785,9 @@ void THashShuffleTask::ScatterBuffered(const std::shared_ptr<TRowSet>& input) {
     auto hashes = ComputeHashes(input);
     const std::span<const uint64_t> hashValues(hashes.get(), input->RowCount);
     AccumulateFilter(*input, hashValues);
-    ProbeFilter(*input, hashValues);
 
     for (int64_t row = 0; row < input->RowCount; ++row) {
         if (!RowSelected(*input, row)) {
-            continue;
-        }
-        if (!FilterKeeps(row)) {
             continue;
         }
         const size_t dst = partitions == 1 ? 0 : hashValues[row] % partitions;
@@ -751,7 +805,6 @@ void THashShuffleTask::ScatterViews(const std::shared_ptr<TRowSet>& input) {
 
     // Many-to-one shuffle: every row routes to lane 0, so skip hashing and
     // forward the whole rowset (keeping its existing selection) unchanged.
-    // An active filter still needs hashes, so it uses the general path.
     if (partitions == 1 && !NeedsHashes(partitions)) {
         ClearPending();
         auto* data = new THashShuffleRowSetData;
@@ -775,7 +828,6 @@ void THashShuffleTask::ScatterViews(const std::shared_ptr<TRowSet>& input) {
     auto hashes = ComputeHashes(input);
     const std::span<const uint64_t> hashValues(hashes.get(), input->RowCount);
     AccumulateFilter(*input, hashValues);
-    ProbeFilter(*input, hashValues);
 
     std::vector<std::vector<uint8_t>> selections(partitions);
     std::vector<size_t> counts(partitions, 0);
@@ -784,9 +836,6 @@ void THashShuffleTask::ScatterViews(const std::shared_ptr<TRowSet>& input) {
     }
     for (int64_t row = 0; row < input->RowCount; ++row) {
         if (!RowSelected(*input, row)) {
-            continue;
-        }
-        if (!FilterKeeps(row)) {
             continue;
         }
         const size_t dst = partitions == 1 ? 0 : hashValues[row] % partitions;

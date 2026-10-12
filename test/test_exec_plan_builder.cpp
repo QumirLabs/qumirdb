@@ -9,7 +9,10 @@
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/pipeline.h>
+#include <qdb/plan/plan_print.h>
+#include <qdb/plan/passes/runtime_filters.h>
 #include <qdb/scheduler/plan_lowerer.h>
+#include <qdb/scheduler/runtime_adapter.h>
 #include <qdb/scheduler/scan_split.h>
 #include <qdb/sql/parser.h>
 
@@ -290,12 +293,35 @@ TEST(ExecPlanBuilder, LowererUsesInjectedRuntimeFilterBindings) {
     join->MutableRuntimeFilter() = TRuntimeFilterSpec{
         .Id = 17, .BuildSide = EJoinFilterSide::Right};
 
+    PlaceRuntimeFilterConsumers(plan);
+    std::stringstream printed;
+    PrintPlanTree(printed, plan);
+    EXPECT_NE(printed.str().find("source l AS l use-filter 17 keys=[l.k]"),
+        std::string::npos);
+
     auto bindings = std::make_shared<TRecordingFilterBindingFactory>();
     auto lowered = NScheduler::LowerPlanToGraph(
         plan, MultiSettings(), nullptr, nullptr, bindings);
     ASSERT_TRUE(lowered.Graph);
     EXPECT_EQ(bindings->Created,
         (std::vector<std::pair<uint32_t, size_t>>{{17, 4}}));
+    size_t filterTasks = 0;
+    for (const auto& node : lowered.Graph->Nodes()) {
+        if (node->DebugKind == "runtime-filter") {
+            ++filterTasks;
+            EXPECT_NE(dynamic_cast<NScheduler::TRuntimeFilterTask*>(node->Task),
+                nullptr);
+        }
+    }
+    EXPECT_EQ(filterTasks, 4u);
+    size_t dependencies = 0;
+    for (const auto& edge : lowered.Graph->Edges()) {
+        if (edge->Kind == NScheduler::ETaskEdgeKind::Dependency) {
+            ++dependencies;
+            EXPECT_EQ(edge->Dst->DebugKind, "runtime-filter");
+        }
+    }
+    EXPECT_EQ(dependencies, 16u);
 }
 
 TEST(ExecPlanBuilder, RuntimeFiltersShareTheQueryJit) {

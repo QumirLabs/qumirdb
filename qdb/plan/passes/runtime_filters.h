@@ -13,4 +13,8 @@ namespace NQdb {
 void AttachRuntimeFilters(
     const TOperatorPtr& root, uint32_t& nextId, bool force = false);
 
+// Place each selected join's consumer on the deepest currently supported
+// probe boundary. Idempotent so hand-written plans can use the same lowering.
+void PlaceRuntimeFilterConsumers(const TOperatorPtr& root);
+
 } // namespace NQdb

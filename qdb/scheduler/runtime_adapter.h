@@ -116,15 +116,16 @@ struct THashShuffleCode {
     size_t TargetOutputBatchRows = 0;
     size_t MaxOutputBatchRows = 0;
     size_t TargetOutputBatchBytes = 0;
-    // Bindings are shared by every lane of one exchange. The local factory
-    // uses one filter object; remote publishers and probes may be separate.
-    // At most one of the two is set.
+    // Build lanes share a producer binding; each publishes one partial.
     std::shared_ptr<IRuntimeFilterProducer> ProducedFilter;
-    std::shared_ptr<IRuntimeFilterProbe> AppliedFilter;
-    std::shared_ptr<TAuxInput> AuxInput;
-    // Set only when the immediately upstream source computed hashes for this
-    // exchange's key. Other exchanges must run their own hash kernel.
+    // Reuse hashes produced by a preceding runtime-filter task for this key.
     bool UseInputHash = false;
+};
+
+struct TRuntimeFilterCode {
+    THashShuffleCode::THash Hash;
+    std::shared_ptr<IRuntimeFilterProbe> Probe;
+    std::shared_ptr<TAuxInput> AuxInput;
 };
 
 struct TMergeCode {
@@ -143,18 +144,38 @@ public:
     TSourceTask(
         std::shared_ptr<const TSourceCode> code,
         std::shared_ptr<void> state,
-        TOutputPort output,
-        std::shared_ptr<TAuxInput> auxInput = nullptr);
+        TOutputPort output);
 
     ETaskResult Execute() override;
-    bool WantsInput(const TTaskEdge& edge) const override;
 
 private:
     std::shared_ptr<const TSourceCode> Code_;
     std::shared_ptr<void> State_;
     TOutputPort Output_;
-    std::shared_ptr<TAuxInput> AuxInput_;
     bool Finished_ = false;
+};
+
+class TRuntimeFilterTask final : public ITaskNode {
+public:
+    TRuntimeFilterTask(
+        std::shared_ptr<const TRuntimeFilterCode> code,
+        TInputPort input,
+        TOutputPort output);
+    ~TRuntimeFilterTask() override;
+
+    ETaskResult Execute() override;
+    bool WantsInput(const TTaskEdge& edge) const override;
+
+private:
+    std::shared_ptr<const TRuntimeFilterCode> Code_;
+    std::shared_ptr<TRuntimeFilterProbeState> ProbeState_;
+    TInputPort Input_;
+    TOutputPort Output_;
+    TRowSet CurrentInput_ = {};
+    bool HasInput_ = false;
+    bool Prepared_ = false;
+    bool InputFinished_ = false;
+    bool OutputFinished_ = false;
 };
 
 class TUnaryTask final : public ITaskNode {
@@ -276,7 +297,6 @@ public:
     ~THashShuffleTask() override;
 
     ETaskResult Execute() override;
-    bool WantsInput(const TTaskEdge& edge) const override;
 
 private:
     struct TBufferedBatch;
@@ -287,8 +307,6 @@ private:
     bool NeedsHashes(size_t partitions) const;
     std::shared_ptr<uint64_t> ComputeHashes(const std::shared_ptr<TRowSet>& input);
     void AccumulateFilter(const TRowSet& rowSet, std::span<const uint64_t> hashes);
-    void ProbeFilter(const TRowSet& rowSet, std::span<const uint64_t> hashes);
-    bool FilterKeeps(size_t row) const;
     void EnsureBuffers(size_t partitions);
     void Scatter(TRowSet& rowSet);
     void ScatterBuffered(const std::shared_ptr<TRowSet>& input);
@@ -309,10 +327,7 @@ private:
     TInputPort Input_;
     THashShuffleConnection* Output_ = nullptr;
     size_t SourceLane_ = 0;
-    std::vector<uint8_t> FilterMask_;
     std::optional<TRuntimeFilterBuilder> FilterBuilder_;
-    std::shared_ptr<TRuntimeFilterProbeState> FilterProbeState_;
-    bool FilterActive_ = false;
     std::vector<std::unique_ptr<TDestinationBuffer>> Buffers_;
     std::vector<TPendingOutput> Pending_;
     size_t PendingIndex_ = 0;

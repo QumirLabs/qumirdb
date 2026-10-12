@@ -217,6 +217,16 @@ void PrintPlanTree(
         out << (isLast ? "└─ " : "├─ ");
     }
     out << PlanLabel(op);
+    for (const auto& use : op->RuntimeFilterUses) {
+        out << " use-filter " << use.Id << " keys=[";
+        for (size_t i = 0; i < use.ProbeKeys.size(); ++i) {
+            if (i) {
+                out << ", ";
+            }
+            out << use.ProbeKeys[i];
+        }
+        out << ']';
+    }
     if (op->Stats_) {
         out << " (rows≈" << op->Stats_->RowCount
             << " cost≈" << FormatEstimate(op->Stats_->Cost) << ")";

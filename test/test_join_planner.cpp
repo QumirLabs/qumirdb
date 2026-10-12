@@ -563,6 +563,32 @@ TEST(JoinPlanner, RuntimeFilterAtSourceComposesWithStaticFilter) {
     EXPECT_EQ(bindings->Filter->StatsSnapshot().SkippedProbeRows, 0u);
 }
 
+TEST(JoinPlanner, RuntimeFilterTaskDropsEntireBatch) {
+    for (auto mode : {NScheduler::EExecutionMode::SingleThreadedScheduler,
+             NScheduler::EExecutionMode::ThreadedScheduler}) {
+        SCOPED_TRACE(static_cast<int>(mode));
+        std::vector<int64_t> lk = {2, 3}, lv = {20, 30};
+        std::vector<int64_t> rk = {1}, rv = {100};
+        std::vector<TColumn> lcols, rcols;
+        TMockSource left({"lk", "lv"}, {KeyValBatch(lk.data(), lv.data(), 2, lcols)});
+        TMockSource right({"rk", "rv"}, {KeyValBatch(rk.data(), rv.data(), 1, rcols)});
+        auto bindings = std::make_shared<TCountingFilterBindingFactory>();
+        NScheduler::TSettings settings;
+        settings.Scheduler.Mode = mode;
+        settings.Scheduler.WorkerCount = 2;
+        auto plan = PlanJoin(
+            "(rel join (rel source \"L\") (rel source \"R\") "
+            "((lk rk)) (inner) (emit-filter 7 right))",
+            left, right, settings, bindings);
+
+        TRowSet out{};
+        EXPECT_FALSE(plan->Next(out));
+        ASSERT_TRUE(bindings->Probe);
+        EXPECT_EQ(bindings->Probe->Probed.load(), 2u);
+        EXPECT_EQ(bindings->Probe->Rejected.load(), 2u);
+    }
+}
+
 TEST(JoinPlanner, RuntimeFilterMergesTwoBuildLanesBeforeProbing) {
     std::vector<int64_t> lk1 = {1, 2}, lv1 = {10, 20};
     std::vector<int64_t> lk2 = {3, 4}, lv2 = {30, 40};

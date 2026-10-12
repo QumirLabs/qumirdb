@@ -212,4 +212,66 @@ void AttachRuntimeFilters(
     Attach(root, nextId, force);
 }
 
+namespace {
+
+bool HasFilterUse(const TOperatorPtr& root, uint32_t id) {
+    if (std::any_of(root->RuntimeFilterUses.begin(), root->RuntimeFilterUses.end(),
+            [id](const auto& use) { return use.Id == id; })) {
+        return true;
+    }
+    for (const auto& child : root->Inputs()) {
+        if (HasFilterUse(child, id)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void PlaceConsumers(const TOperatorPtr& root) {
+    for (const auto& child : root->Inputs()) {
+        PlaceConsumers(child);
+    }
+    auto join = TMaybeOp<TJoinOperator>(root);
+    if (!join || !join.Cast()->RuntimeFilter()) {
+        return;
+    }
+    const auto& filter = *join.Cast()->RuntimeFilter();
+    auto probe = filter.BuildSide == EJoinFilterSide::Left
+        ? join.Cast()->Right() : join.Cast()->Left();
+    if (HasFilterUse(probe, filter.Id)) {
+        return;
+    }
+
+    auto target = probe;
+    while (auto predicate = TMaybeOp<TFilterOperator>(target)) {
+        target = predicate.Cast()->Input();
+    }
+    auto source = TMaybeOp<TSourceOperator>(target);
+    const auto probeSchema = probe->Type ? probe->OutputColumns() : nullptr;
+    const auto sourceSchema = source && source.Cast()->Type
+        ? source.Cast()->OutputColumns() : nullptr;
+    const bool sameSchema = sourceSchema && probeSchema
+        && sourceSchema->Fields.size() == probeSchema->Fields.size()
+        && std::equal(sourceSchema->Fields.begin(), sourceSchema->Fields.end(),
+            probeSchema->Fields.begin(),
+            [](const auto& a, const auto& b) { return a.first == b.first; });
+    if (!sameSchema) {
+        target = probe;
+    }
+
+    TRuntimeFilterUseSpec use{.Id = filter.Id};
+    use.ProbeKeys.reserve(join.Cast()->Keys().size());
+    for (const auto& key : join.Cast()->Keys()) {
+        use.ProbeKeys.push_back(filter.BuildSide == EJoinFilterSide::Left
+            ? key.Right : key.Left);
+    }
+    target->RuntimeFilterUses.push_back(std::move(use));
+}
+
+} // namespace
+
+void PlaceRuntimeFilterConsumers(const TOperatorPtr& root) {
+    PlaceConsumers(root);
+}
+
 } // namespace NQdb

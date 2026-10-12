@@ -21,6 +21,7 @@
 #include <qdb/plan/ops/union.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/window.h>
+#include <qdb/plan/passes/runtime_filters.h>
 #include <qdb/plan/ops/cte_consumer.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
@@ -51,63 +52,7 @@ namespace {
 struct TSchedulerSourceState {
     ISource* Source = nullptr;
     std::unique_ptr<ISource> OwnedSource;
-    std::vector<std::string> OutputFields;
-    NScheduler::THashShuffleCode::THash RuntimeFilterHash;
-    std::shared_ptr<IRuntimeFilterProbe> RuntimeFilterProbe;
-    std::shared_ptr<TRuntimeFilterProbeState> RuntimeFilterState;
-    std::shared_ptr<NScheduler::TAuxInput> AuxInput;
 };
-
-struct TSourceFilterRowSetData {
-    TRowSet Input;
-    std::vector<uint8_t> Selection;
-    std::vector<uint64_t> Hashes;
-};
-
-void DestroySourceFilterRowSet(TRowSet* rowSet) {
-    auto* data = static_cast<TSourceFilterRowSetData*>(rowSet->Private);
-    Release(&data->Input);
-    delete data;
-}
-
-bool ReadSourceWithRuntimeFilter(TSchedulerSourceState& state, TRowSet& rowSet) {
-    while (state.Source->Next(rowSet)) {
-        if (!state.RuntimeFilterProbe) {
-            return true;
-        }
-        const size_t rows = static_cast<size_t>(rowSet.RowCount);
-        const std::span<const uint8_t> selection = rowSet.Selection
-            ? std::span<const uint8_t>(rowSet.Selection, rows) : std::span<const uint8_t>{};
-        const size_t selected = selection.empty() ? rows : static_cast<size_t>(
-            std::count_if(selection.begin(), selection.end(),
-                [](uint8_t value) { return value != 0; }));
-        if (!state.RuntimeFilterProbe->BeginBatch(*state.RuntimeFilterState, selected)) {
-            return true;
-        }
-        auto data = std::make_unique<TSourceFilterRowSetData>();
-        data->Hashes.resize(rows);
-        if (!state.RuntimeFilterHash(&rowSet, data->Hashes.data())) {
-            Release(&rowSet);
-            throw std::runtime_error("source runtime filter hash kernel failed");
-        }
-        data->Selection.resize(rows);
-        const size_t kept = state.RuntimeFilterProbe->MayContainBatch(
-            data->Hashes, data->Selection, *state.RuntimeFilterState, selection);
-        if (!kept) {
-            Release(&rowSet);
-            rowSet = {};
-            continue;
-        }
-        data->Input = rowSet;
-        rowSet.Selection = data->Selection.data();
-        rowSet.Hash = data->Hashes.data();
-        rowSet.Destroy = DestroySourceFilterRowSet;
-        rowSet.Private = data.release();
-        rowSet.RefCount = 1;
-        return true;
-    }
-    return false;
-}
 
 struct TSchedulerUnaryStage {
     std::shared_ptr<const NScheduler::TUnaryCode> Code;
@@ -417,6 +362,13 @@ size_t ChooseRuntimeBloomBytes(const TJoinOperator& join,
 
 class TSchedulerGraphLowerer {
 public:
+    struct TFilterConsumerTasks {
+        std::shared_ptr<NScheduler::TRuntimeFilterCode> Code;
+        std::vector<NScheduler::TTaskNode*> Nodes;
+        std::vector<std::string> ProbeKeys;
+        bool AtSource = false;
+    };
+
     TSchedulerGraphLowerer(
         NScheduler::TTaskGraph& graph,
         const TOperatorPtr& root,
@@ -582,6 +534,55 @@ public:
         NScheduler::IConnection& outConn,
         size_t outLaneOffset = 0)
     {
+        if (op->RuntimeFilterUses.empty()) {
+            return LowerRaw(op, outConn, outLaneOffset);
+        }
+        const size_t lanes = OutputLanes(op);
+        auto& firstInput = AddConn<NScheduler::TOneToOneConnection>(
+            lanes, lanes, "runtime-filter-input");
+        auto lowered = LowerRaw(op, firstInput, 0);
+        NScheduler::IConnection* input = &firstInput;
+        for (size_t index = 0; index < op->RuntimeFilterUses.size(); ++index) {
+            const auto& use = op->RuntimeFilterUses[index];
+            NScheduler::IConnection* output = &outConn;
+            if (index + 1 != op->RuntimeFilterUses.size()) {
+                output = &AddConn<NScheduler::TOneToOneConnection>(
+                    lanes, lanes, "runtime-filter-chain");
+            }
+            auto code = std::make_shared<NScheduler::TRuntimeFilterCode>();
+            code->AuxInput = std::make_shared<NScheduler::TAuxInput>();
+            TFilterConsumerTasks consumer{
+                .Code = code,
+                .ProbeKeys = use.ProbeKeys,
+                .AtSource = static_cast<bool>(TMaybeOp<TSourceOperator>(op)),
+            };
+            consumer.Nodes.reserve(lanes);
+            const auto group = NewTaskGroup();
+            for (size_t lane = 0; lane < lanes; ++lane) {
+                auto task = std::make_unique<NScheduler::TRuntimeFilterTask>(
+                    code,
+                    NScheduler::TInputPort{.Connection = input, .Lane = lane},
+                    NScheduler::TOutputPort{
+                        .Connection = output,
+                        .Lane = lane + (output == &outConn ? outLaneOffset : 0)});
+                auto& node = Graph_.AddOwnedNode(std::move(task));
+                MarkNode(node, "runtime-filter", group,
+                    "runtime-filter " + std::to_string(use.Id));
+                Graph_.AddEdge(*lowered.Producers[lane], node, *input, lane, lane);
+                consumer.Nodes.push_back(&node);
+            }
+            lowered.Producers = consumer.Nodes;
+            FilterConsumers_[use.Id].push_back(std::move(consumer));
+            input = output;
+        }
+        return lowered;
+    }
+
+    TLoweredOutput LowerRaw(
+        const TOperatorPtr& op,
+        NScheduler::IConnection& outConn,
+        size_t outLaneOffset)
+    {
         if (auto n = TMaybeOp<TSourceOperator>(op)) {
             return LowerSource(*n.Cast(), outConn, outLaneOffset);
         }
@@ -692,6 +693,15 @@ public:
     }
 
     void CheckExecStagesConsistent() const {
+        for (const auto& [id, consumers] : FilterConsumers_) {
+            for (const auto& consumer : consumers) {
+                if (!consumer.Code->Probe || !consumer.Code->Hash) {
+                    throw std::runtime_error(
+                        "runtime filter consumer " + std::to_string(id)
+                        + " has no producer binding");
+                }
+            }
+        }
         std::vector<size_t> taskCounts(ExecStages_.size() + 1, 0);
         for (const auto& node : Graph_.Nodes()) {
             if (node->TaskGroupId == NScheduler::InvalidTaskGroupId) {
@@ -1067,11 +1077,6 @@ private:
         size_t outLaneOffset)
     {
         auto outputType = BuildSourceRuntimeType(src);
-        std::vector<std::string> outputFields;
-        for (const auto& field :
-             static_cast<const NQumir::NAst::TStructType&>(*outputType).Fields) {
-            outputFields.push_back(field.first);
-        }
         const auto execStageId = NewExecStage(
             &src, EExecPlanNodeKind::Source);
         auto splitPlan = ScanSplits(src);
@@ -1080,7 +1085,7 @@ private:
         auto code = std::make_shared<NScheduler::TSourceCode>(
             [](void* state, TRowSet& rowSet) {
                 auto* sourceState = static_cast<TSchedulerSourceState*>(state);
-                return ReadSourceWithRuntimeFilter(*sourceState, rowSet);
+                return sourceState->Source->Next(rowSet);
             });
 
         const size_t lanes = std::max<size_t>(
@@ -1100,7 +1105,6 @@ private:
                     TSchedulerSourceState{
                         .Source = ptr,
                         .OwnedSource = std::move(owned),
-                        .OutputFields = outputFields,
                     });
             } else if (parquetSource && splitPlan && splitPlan->empty()) {
                 auto owned = parquetSource->MakeRowGroupsSource({});
@@ -1109,25 +1113,18 @@ private:
                     TSchedulerSourceState{
                         .Source = ptr,
                         .OwnedSource = std::move(owned),
-                        .OutputFields = outputFields,
                     });
             } else {
                 state = std::make_shared<TSchedulerSourceState>(
                     TSchedulerSourceState{
                         .Source = sourcePtr,
-                        .OutputFields = outputFields,
                     });
             }
-            state->AuxInput =
-                std::make_shared<NScheduler::TAuxInput>();
             auto task = std::make_unique<NScheduler::TSourceTask>(
                 code,
                 state,
-                NScheduler::TOutputPort{.Connection = &outConn, .Lane = p + outLaneOffset},
-                state->AuxInput);
-            SourceStates_[&src].push_back(std::move(state));
+                NScheduler::TOutputPort{.Connection = &outConn, .Lane = p + outLaneOffset});
             auto& node = Graph_.AddOwnedNode(std::move(task));
-            SourceNodes_[&src].push_back(&node);
             MarkNode(node,
                 "source",
                 execStageId,
@@ -2658,9 +2655,7 @@ private:
         auto leftShuffleCode = MakeHashShuffleCode(hashKernels.Left, leftType);
         auto rightShuffleCode = MakeHashShuffleCode(hashKernels.Right, rightType);
         bool filterBuildIsLeft = false;
-        bool filterAtSource = false;
-        std::vector<NScheduler::TTaskNode*> sourceFilterConsumers;
-        std::vector<std::shared_ptr<NScheduler::TAuxInput>> filterInputs;
+        std::vector<TFilterConsumerTasks>* filterConsumers = nullptr;
         if (const auto& runtimeFilter = join.RuntimeFilter()) {
             if (!RuntimeFilterBindings_) {
                 RuntimeContext_->BloomProbe = compiler.CompileBloomProbe();
@@ -2685,62 +2680,35 @@ private:
             auto diagnosticProbe = binding.Probe;
             (buildIsLeft ? leftShuffleCode : rightShuffleCode)->ProducedFilter =
                 std::move(binding.Producer);
-            // A filter and a source preserve their input schema. The join's
-            // probe hash kernel can therefore run at that source, before rows
-            // enter the intervening filter tasks or the join repartition.
-            auto probeInput = buildIsLeft ? join.Right() : join.Left();
-            while (auto filter = TMaybeOp<TFilterOperator>(probeInput)) {
-                probeInput = filter.Cast()->Input();
+            auto found = FilterConsumers_.find(runtimeFilter->Id);
+            if (found == FilterConsumers_.end() || found->second.empty()) {
+                throw std::runtime_error(
+                    "runtime filter has no planned consumer");
             }
-            auto source = TMaybeOp<TSourceOperator>(probeInput);
-            auto states = source
-                ? SourceStates_.find(source.Cast().get()) : SourceStates_.end();
-            auto sourceNodes = source
-                ? SourceNodes_.find(source.Cast().get()) : SourceNodes_.end();
-            const auto& probeType = buildIsLeft ? rightType : leftType;
-            const auto& probeFields =
-                static_cast<const TStructType&>(*probeType).Fields;
-            const bool sourceSchemaMatches =
-                states != SourceStates_.end()
-                && sourceNodes != SourceNodes_.end()
-                && sourceNodes->second.size() == states->second.size()
-                && std::all_of(states->second.begin(), states->second.end(),
-                    [&](const auto& state) {
-                        return !state->RuntimeFilterProbe
-                            && state->OutputFields.size() == probeFields.size()
-                            && std::equal(state->OutputFields.begin(),
-                                state->OutputFields.end(), probeFields.begin(),
-                                [](const std::string& name, const auto& field) {
-                                    return name == field.first;
-                                });
-                    });
-            if (sourceSchemaMatches) {
-                filterAtSource = true;
-                sourceFilterConsumers = sourceNodes->second;
-                const auto& hash = buildIsLeft
-                    ? hashKernels.Right : hashKernels.Left;
-                for (const auto& state : states->second) {
-                    state->RuntimeFilterHash = hash;
-                    state->RuntimeFilterProbe = binding.Probe;
-                    state->RuntimeFilterState = binding.Probe->CreateProbeState();
-                    state->AuxInput->AddFilter(binding.Probe);
-                    filterInputs.push_back(state->AuxInput);
+            filterConsumers = &found->second;
+            std::vector<std::string> expectedKeys;
+            expectedKeys.reserve(join.Keys().size());
+            for (const auto& key : join.Keys()) {
+                expectedKeys.push_back(buildIsLeft ? key.Right : key.Left);
+            }
+            for (auto& consumer : *filterConsumers) {
+                if (consumer.ProbeKeys != expectedKeys) {
+                    throw std::runtime_error(
+                        "runtime filter consumer keys differ from join probe keys");
                 }
-                (buildIsLeft ? rightShuffleCode : leftShuffleCode)
-                    ->UseInputHash = true;
-            } else {
-                auto& probeCode = buildIsLeft
-                    ? rightShuffleCode : leftShuffleCode;
-                probeCode->AppliedFilter = binding.Probe;
-                probeCode->AuxInput =
-                    std::make_shared<NScheduler::TAuxInput>();
-                probeCode->AuxInput->AddFilter(std::move(binding.Probe));
-                filterInputs.push_back(probeCode->AuxInput);
+                consumer.Code->Hash = buildIsLeft
+                    ? hashKernels.Right : hashKernels.Left;
+                consumer.Code->Probe = binding.Probe;
+                consumer.Code->AuxInput->AddFilter(binding.Probe);
             }
+            (buildIsLeft ? rightShuffleCode : leftShuffleCode)
+                ->UseInputHash = true;
             RuntimeFilters_.push_back({
                 .Id = runtimeFilter->Id,
                 .Probe = std::move(diagnosticProbe),
-                .AtSource = sourceSchemaMatches,
+                .AtSource = std::all_of(filterConsumers->begin(),
+                    filterConsumers->end(),
+                    [](const auto& consumer) { return consumer.AtSource; }),
             });
         }
         auto leftShuf = BuildRepartitionExchange(
@@ -2763,15 +2731,12 @@ private:
         if (join.RuntimeFilter()) {
             const auto& buildNodes = filterBuildIsLeft
                 ? leftShuf.Nodes : rightShuf.Nodes;
-            const auto& probeNodes = filterAtSource
-                ? sourceFilterConsumers
-                : (filterBuildIsLeft ? rightShuf.Nodes : leftShuf.Nodes);
             for (auto* buildNode : buildNodes) {
-                for (const auto& input : filterInputs) {
-                    input->AddProducer(*buildNode);
-                }
-                for (auto* probeNode : probeNodes) {
-                    Graph_.AddDependencyEdge(*buildNode, *probeNode);
+                for (auto& consumer : *filterConsumers) {
+                    consumer.Code->AuxInput->AddProducer(*buildNode);
+                    for (auto* probeNode : consumer.Nodes) {
+                        Graph_.AddDependencyEdge(*buildNode, *probeNode);
+                    }
                 }
             }
         }
@@ -3011,10 +2976,7 @@ private:
     // source", while an engaged empty vector is a proven empty scan.
     mutable std::unordered_map<const TSourceOperator*, TSourceSplits>
         ScanSplitCache_;
-    std::unordered_map<const TSourceOperator*,
-        std::vector<std::shared_ptr<TSchedulerSourceState>>> SourceStates_;
-    std::unordered_map<const TSourceOperator*,
-        std::vector<NScheduler::TTaskNode*>> SourceNodes_;
+    std::unordered_map<uint32_t, std::vector<TFilterConsumerTasks>> FilterConsumers_;
     std::unordered_map<const TCteMaterialization*, TMaterializedProducer> Materialized_;
     std::vector<TLoweredExecStage> ExecStages_;
     std::vector<NScheduler::TRuntimeFilterDiagnostic> RuntimeFilters_;
@@ -3199,6 +3161,7 @@ TLoweredPlan LowerPlanToGraph(
     std::shared_ptr<const TExternalCatalogSnapshot> externalCatalog,
     std::shared_ptr<IRuntimeFilterBindingFactory> filterBindings)
 {
+    PlaceRuntimeFilterConsumers(root);
     auto graph = std::make_unique<TTaskGraph>();
     std::vector<TGeneratedKernel> kernels;
     TSchedulerGraphLowerer lowerer(
@@ -3295,7 +3258,7 @@ bool RunPlanIntoSink(
             }
             const auto stats = local->StatsSnapshot();
             *diagnostics << "runtime-filter " << diagnostic.Id
-                << " at=" << (diagnostic.AtSource ? "source" : "repartition")
+                << " at=" << (diagnostic.AtSource ? "source" : "join-input")
                 << " build_rows=" << stats.BuildRows
                 << " probe_rows=" << stats.ProbeRows
                 << " rejected=" << stats.RejectedRows
