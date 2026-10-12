@@ -114,11 +114,13 @@ TTaskNode* TThreadedScheduler::PopReady() {
 }
 
 void TThreadedScheduler::ScheduleInput(TTaskNode* node) {
-    bool allFinished = !node->Inbound.empty();
+    bool hasWantedInput = false;
+    bool allFinished = true;
     for (auto* edge : node->Inbound) {
         if (!node->Task->WantsInput(*edge)) {
             continue;
         }
+        hasWantedInput = true;
         if (edge->Src->State.load(std::memory_order_acquire) ==
             ETaskState::Finished)
         {
@@ -127,7 +129,7 @@ void TThreadedScheduler::ScheduleInput(TTaskNode* node) {
         allFinished = false;
         Schedule(edge->Src);
     }
-    if (allFinished) {
+    if (hasWantedInput && allFinished) {
         Schedule(node);
     }
 }
@@ -235,6 +237,12 @@ void TThreadedScheduler::Work() {
                 Rescheduled_.fetch_add(1, std::memory_order_relaxed);
                 Schedule(node);
             }
+        } else if (result == ETaskResult::WAITING) {
+            Waiting_.fetch_add(1, std::memory_order_relaxed);
+            if (FinishRun(node)) {
+                Rescheduled_.fetch_add(1, std::memory_order_relaxed);
+                Schedule(node);
+            }
         } else if (result == ETaskResult::BLOCKED_OUTPUT) {
             BlockedOutput_.fetch_add(1, std::memory_order_relaxed);
             auto reschedule = FinishRun(node);
@@ -279,6 +287,7 @@ void TThreadedScheduler::ResetStats() {
     Popped_.store(0, std::memory_order_relaxed);
     Executed_.store(0, std::memory_order_relaxed);
     NeedData_.store(0, std::memory_order_relaxed);
+    Waiting_.store(0, std::memory_order_relaxed);
     BlockedOutput_.store(0, std::memory_order_relaxed);
     Ok_.store(0, std::memory_order_relaxed);
     Finished_.store(0, std::memory_order_relaxed);
@@ -293,6 +302,7 @@ TSchedulerRunStats TThreadedScheduler::Stats() const {
         .Popped = Popped_.load(std::memory_order_relaxed),
         .Executed = Executed_.load(std::memory_order_relaxed),
         .NeedData = NeedData_.load(std::memory_order_relaxed),
+        .Waiting = Waiting_.load(std::memory_order_relaxed),
         .BlockedOutput = BlockedOutput_.load(std::memory_order_relaxed),
         .Ok = Ok_.load(std::memory_order_relaxed),
         .Finished = Finished_.load(std::memory_order_relaxed),

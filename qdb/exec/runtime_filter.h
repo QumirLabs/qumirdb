@@ -69,6 +69,8 @@ public:
 class IRuntimeFilterProbe {
 public:
     virtual ~IRuntimeFilterProbe() = default;
+    // Auxiliary inputs wait for a complete filter or PassAll publication.
+    virtual bool Ready() const = 0;
     // Called during graph construction, before any task starts.
     virtual std::shared_ptr<TRuntimeFilterProbeState> CreateProbeState();
     // Check before allocating masks or computing hashes. False passes the input
@@ -139,7 +141,7 @@ public:
         TRuntimeFilterProbeState& state,
         std::span<const uint8_t> selection = {}) const override;
 
-    bool Ready() const { return Ready_.load(std::memory_order_acquire); }
+    bool Ready() const override { return Ready_.load(std::memory_order_acquire); }
     bool UsesBloom() const { return Ready() && Data_.Kind == EKind::Bloom; }
     void StartExecutionClock();
     // Only while execution is quiescent; probe counters are task-local.

@@ -1,7 +1,10 @@
 #include <qdb/scheduler/graph.h>
 
+#include <algorithm>
+#include <deque>
 #include <format>
 #include <ostream>
+#include <ranges>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -97,6 +100,18 @@ TTaskEdge& TTaskGraph::AddOwnedEdge(
     return AddEdge(src, dst, stored, srcLane, dstLane, execInput);
 }
 
+TTaskEdge& TTaskGraph::AddDependencyEdge(
+    TTaskNode& producer, TTaskNode& consumer)
+{
+    auto edge = std::make_unique<TTaskEdge>();
+    edge->Src = &producer;
+    edge->Dst = &consumer;
+    edge->Kind = ETaskEdgeKind::Dependency;
+    auto* ptr = edge.get();
+    Edges_.push_back(std::move(edge));
+    return *ptr;
+}
+
 void TTaskGraph::Build() {
     Leaves_.clear();
     Root_ = nullptr;
@@ -111,12 +126,15 @@ void TTaskGraph::Build() {
         edge->Src->Outbound.push_back(edge.get());
         edge->Dst->Inbound.push_back(edge.get());
     }
-
     for (auto& node : Nodes_) {
-        if (node->Inbound.empty()) {
+        if (std::ranges::none_of(node->Inbound, [](const auto* edge) {
+                return edge->Kind == ETaskEdgeKind::Rowset;
+            })) {
             Leaves_.push_back(node.get());
         }
-        if (node->Outbound.empty()) {
+        if (std::ranges::none_of(node->Outbound, [](const auto* edge) {
+                return edge->Kind == ETaskEdgeKind::Rowset;
+            })) {
             Root_ = node.get();
         }
     }
@@ -138,10 +156,14 @@ bool TTaskGraph::Validate(std::string* error) const {
             return false;
         }
         nodes.insert(node.get());
-        if (node->Inbound.empty()) {
+        if (std::ranges::none_of(node->Inbound, [](const auto* edge) {
+                return edge->Kind == ETaskEdgeKind::Rowset;
+            })) {
             ++leafCount;
         }
-        if (node->Outbound.empty()) {
+        if (std::ranges::none_of(node->Outbound, [](const auto* edge) {
+                return edge->Kind == ETaskEdgeKind::Rowset;
+            })) {
             ++rootCount;
         }
     }
@@ -165,6 +187,13 @@ bool TTaskGraph::Validate(std::string* error) const {
             SetError(error, "task graph contains an edge with unknown endpoints");
             return false;
         }
+        if (edge->Kind == ETaskEdgeKind::Dependency) {
+            if (edge->Connection) {
+                SetError(error, "dependency edge must not carry a rowset connection");
+                return false;
+            }
+            continue;
+        }
         if (!edge->Connection) {
             SetError(error, "task graph contains an edge without a connection");
             return false;
@@ -177,6 +206,34 @@ bool TTaskGraph::Validate(std::string* error) const {
             SetError(error, "task graph contains an invalid destination lane id");
             return false;
         }
+    }
+
+    // A dependency edge must not turn a data-flow DAG into a scheduling
+    // cycle. In particular, a probe cannot gate its own build-side producer.
+    std::unordered_map<const TTaskNode*, size_t> pending;
+    for (const auto& node : Nodes_) {
+        pending.emplace(node.get(), node->Inbound.size());
+    }
+    std::deque<const TTaskNode*> ready;
+    for (const auto& [node, count] : pending) {
+        if (count == 0) {
+            ready.push_back(node);
+        }
+    }
+    size_t visited = 0;
+    while (!ready.empty()) {
+        const auto* node = ready.front();
+        ready.pop_front();
+        ++visited;
+        for (const auto* edge : node->Outbound) {
+            if (--pending.at(edge->Dst) == 0) {
+                ready.push_back(edge->Dst);
+            }
+        }
+    }
+    if (visited != Nodes_.size()) {
+        SetError(error, "task graph contains a scheduling cycle");
+        return false;
     }
 
     // The threaded scheduler stops once the single root (sink) is Finished, so
@@ -256,6 +313,11 @@ void TTaskGraph::Print(std::ostream& out) const {
 
     for (size_t i = 0; i < Edges_.size(); ++i) {
         const auto& edge = Edges_[i];
+        if (edge->Kind == ETaskEdgeKind::Dependency) {
+            out << "dependency n" << nodeIds[edge->Src]
+                << " -> n" << nodeIds[edge->Dst] << "\n";
+            continue;
+        }
         out << "edge e" << i
             << " n" << nodeIds[edge->Src]
             << "[" << edge->SrcLane << "] -> n"

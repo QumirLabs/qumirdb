@@ -44,6 +44,8 @@ public:
         : Inner_(std::move(inner))
     {}
 
+    bool Ready() const override { return Inner_->Ready(); }
+
     std::shared_ptr<TRuntimeFilterProbeState> CreateProbeState() override {
         return Inner_->CreateProbeState();
     }
@@ -523,6 +525,7 @@ TEST(JoinPlanner, RuntimeFilterRejectsRowsWithOneLanePerSide) {
         ASSERT_TRUE(bindings->Probe);
         EXPECT_EQ(bindings->Probe->Probed.load(), 3u);
         EXPECT_EQ(bindings->Probe->Rejected.load(), 2u);
+        EXPECT_EQ(bindings->Filter->StatsSnapshot().SkippedProbeRows, 0u);
     }
 }
 
@@ -557,6 +560,7 @@ TEST(JoinPlanner, RuntimeFilterAtSourceComposesWithStaticFilter) {
     ASSERT_TRUE(bindings->Probe);
     EXPECT_EQ(bindings->Probe->Probed.load(), 3u);
     EXPECT_EQ(bindings->Probe->Rejected.load(), 2u);
+    EXPECT_EQ(bindings->Filter->StatsSnapshot().SkippedProbeRows, 0u);
 }
 
 TEST(JoinPlanner, RuntimeFilterMergesTwoBuildLanesBeforeProbing) {

@@ -18,6 +18,8 @@
 namespace NQdb {
 namespace NScheduler {
 
+struct TTaskNode;
+
 enum class ERequiredSide { Both = 0, Left = 1, Right = 2 };
 
 struct TInputPort {
@@ -34,6 +36,21 @@ struct TOutputPort {
     bool CanPush() const;
     bool Push(TRowSet&& rowSet) const;
     void Finish() const;
+};
+
+enum class EAuxInputStatus { Ready, NeedProducer, Waiting };
+
+// Query-local auxiliary input. It carries filter publication state rather
+// than rowsets; dependency edges supply demand and wakeups.
+class TAuxInput {
+public:
+    void AddFilter(std::shared_ptr<IRuntimeFilterProbe> filter);
+    void AddProducer(TTaskNode& producer);
+    EAuxInputStatus Poll() const;
+
+private:
+    std::vector<std::shared_ptr<IRuntimeFilterProbe>> Filters_;
+    std::vector<TTaskNode*> Producers_;
 };
 
 struct TSourceCode {
@@ -104,6 +121,7 @@ struct THashShuffleCode {
     // At most one of the two is set.
     std::shared_ptr<IRuntimeFilterProducer> ProducedFilter;
     std::shared_ptr<IRuntimeFilterProbe> AppliedFilter;
+    std::shared_ptr<TAuxInput> AuxInput;
     // Set only when the immediately upstream source computed hashes for this
     // exchange's key. Other exchanges must run their own hash kernel.
     bool UseInputHash = false;
@@ -125,14 +143,17 @@ public:
     TSourceTask(
         std::shared_ptr<const TSourceCode> code,
         std::shared_ptr<void> state,
-        TOutputPort output);
+        TOutputPort output,
+        std::shared_ptr<TAuxInput> auxInput = nullptr);
 
     ETaskResult Execute() override;
+    bool WantsInput(const TTaskEdge& edge) const override;
 
 private:
     std::shared_ptr<const TSourceCode> Code_;
     std::shared_ptr<void> State_;
     TOutputPort Output_;
+    std::shared_ptr<TAuxInput> AuxInput_;
     bool Finished_ = false;
 };
 
@@ -255,6 +276,7 @@ public:
     ~THashShuffleTask() override;
 
     ETaskResult Execute() override;
+    bool WantsInput(const TTaskEdge& edge) const override;
 
 private:
     struct TBufferedBatch;

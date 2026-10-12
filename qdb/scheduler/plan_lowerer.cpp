@@ -55,6 +55,7 @@ struct TSchedulerSourceState {
     NScheduler::THashShuffleCode::THash RuntimeFilterHash;
     std::shared_ptr<IRuntimeFilterProbe> RuntimeFilterProbe;
     std::shared_ptr<TRuntimeFilterProbeState> RuntimeFilterState;
+    std::shared_ptr<NScheduler::TAuxInput> AuxInput;
 };
 
 struct TSourceFilterRowSetData {
@@ -1117,12 +1118,16 @@ private:
                         .OutputFields = outputFields,
                     });
             }
+            state->AuxInput =
+                std::make_shared<NScheduler::TAuxInput>();
             auto task = std::make_unique<NScheduler::TSourceTask>(
                 code,
                 state,
-                NScheduler::TOutputPort{.Connection = &outConn, .Lane = p + outLaneOffset});
+                NScheduler::TOutputPort{.Connection = &outConn, .Lane = p + outLaneOffset},
+                state->AuxInput);
             SourceStates_[&src].push_back(std::move(state));
             auto& node = Graph_.AddOwnedNode(std::move(task));
+            SourceNodes_[&src].push_back(&node);
             MarkNode(node,
                 "source",
                 execStageId,
@@ -2652,6 +2657,10 @@ private:
         }
         auto leftShuffleCode = MakeHashShuffleCode(hashKernels.Left, leftType);
         auto rightShuffleCode = MakeHashShuffleCode(hashKernels.Right, rightType);
+        bool filterBuildIsLeft = false;
+        bool filterAtSource = false;
+        std::vector<NScheduler::TTaskNode*> sourceFilterConsumers;
+        std::vector<std::shared_ptr<NScheduler::TAuxInput>> filterInputs;
         if (const auto& runtimeFilter = join.RuntimeFilter()) {
             if (!RuntimeFilterBindings_) {
                 RuntimeContext_->BloomProbe = compiler.CompileBloomProbe();
@@ -2660,6 +2669,7 @@ private:
             }
             const bool buildIsLeft =
                 runtimeFilter->BuildSide == EJoinFilterSide::Left;
+            filterBuildIsLeft = buildIsLeft;
             // The producers are the build side's repartition lanes; the last of
             // them to finish publishes, and only from then on does the probe
             // side reject anything. Before that a partial filter would be
@@ -2685,11 +2695,15 @@ private:
             auto source = TMaybeOp<TSourceOperator>(probeInput);
             auto states = source
                 ? SourceStates_.find(source.Cast().get()) : SourceStates_.end();
+            auto sourceNodes = source
+                ? SourceNodes_.find(source.Cast().get()) : SourceNodes_.end();
             const auto& probeType = buildIsLeft ? rightType : leftType;
             const auto& probeFields =
                 static_cast<const TStructType&>(*probeType).Fields;
             const bool sourceSchemaMatches =
                 states != SourceStates_.end()
+                && sourceNodes != SourceNodes_.end()
+                && sourceNodes->second.size() == states->second.size()
                 && std::all_of(states->second.begin(), states->second.end(),
                     [&](const auto& state) {
                         return !state->RuntimeFilterProbe
@@ -2701,18 +2715,27 @@ private:
                                 });
                     });
             if (sourceSchemaMatches) {
+                filterAtSource = true;
+                sourceFilterConsumers = sourceNodes->second;
                 const auto& hash = buildIsLeft
                     ? hashKernels.Right : hashKernels.Left;
                 for (const auto& state : states->second) {
                     state->RuntimeFilterHash = hash;
                     state->RuntimeFilterProbe = binding.Probe;
                     state->RuntimeFilterState = binding.Probe->CreateProbeState();
+                    state->AuxInput->AddFilter(binding.Probe);
+                    filterInputs.push_back(state->AuxInput);
                 }
                 (buildIsLeft ? rightShuffleCode : leftShuffleCode)
                     ->UseInputHash = true;
             } else {
-                (buildIsLeft ? rightShuffleCode : leftShuffleCode)->AppliedFilter =
-                    std::move(binding.Probe);
+                auto& probeCode = buildIsLeft
+                    ? rightShuffleCode : leftShuffleCode;
+                probeCode->AppliedFilter = binding.Probe;
+                probeCode->AuxInput =
+                    std::make_shared<NScheduler::TAuxInput>();
+                probeCode->AuxInput->AddFilter(std::move(binding.Probe));
+                filterInputs.push_back(probeCode->AuxInput);
             }
             RuntimeFilters_.push_back({
                 .Id = runtimeFilter->Id,
@@ -2736,6 +2759,22 @@ private:
             std::move(rightShuffleCode),
             "join-right-repartition",
             {.Keys = std::move(rightPartitionKeys)});
+
+        if (join.RuntimeFilter()) {
+            const auto& buildNodes = filterBuildIsLeft
+                ? leftShuf.Nodes : rightShuf.Nodes;
+            const auto& probeNodes = filterAtSource
+                ? sourceFilterConsumers
+                : (filterBuildIsLeft ? rightShuf.Nodes : leftShuf.Nodes);
+            for (auto* buildNode : buildNodes) {
+                for (const auto& input : filterInputs) {
+                    input->AddProducer(*buildNode);
+                }
+                for (auto* probeNode : probeNodes) {
+                    Graph_.AddDependencyEdge(*buildNode, *probeNode);
+                }
+            }
+        }
 
         TLoweredOutput result;
         result.OutputType = kernelSpec.OutputSchema;
@@ -2974,6 +3013,8 @@ private:
         ScanSplitCache_;
     std::unordered_map<const TSourceOperator*,
         std::vector<std::shared_ptr<TSchedulerSourceState>>> SourceStates_;
+    std::unordered_map<const TSourceOperator*,
+        std::vector<NScheduler::TTaskNode*>> SourceNodes_;
     std::unordered_map<const TCteMaterialization*, TMaterializedProducer> Materialized_;
     std::vector<TLoweredExecStage> ExecStages_;
     std::vector<NScheduler::TRuntimeFilterDiagnostic> RuntimeFilters_;
@@ -3138,6 +3179,7 @@ void PrintCounterDiagnostics(
         << " executed=" << stats.Executed
         << " ok=" << stats.Ok
         << " need_data=" << stats.NeedData
+        << " waiting=" << stats.Waiting
         << " blocked_output=" << stats.BlockedOutput
         << " finished=" << stats.Finished
         << " rescheduled=" << stats.Rescheduled

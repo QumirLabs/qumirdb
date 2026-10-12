@@ -20,6 +20,30 @@ using namespace NQdb::NScheduler;
 
 namespace {
 
+TEST(SchedulerRuntimeAdapter, AuxInputWaitsForAllProducers) {
+    auto filter = std::make_shared<TRuntimeFilter>(16, 1024);
+    filter->SetProducerCount(2);
+    TTaskNode first;
+    TTaskNode second;
+    TAuxInput input;
+    input.AddFilter(filter);
+    input.AddProducer(first);
+    input.AddProducer(second);
+
+    EXPECT_EQ(input.Poll(), EAuxInputStatus::NeedProducer);
+    first.State.store(ETaskState::Queued);
+    EXPECT_EQ(input.Poll(), EAuxInputStatus::NeedProducer);
+    second.State.store(ETaskState::Queued);
+    EXPECT_EQ(input.Poll(), EAuxInputStatus::Waiting);
+
+    filter->FinishProducer(std::move(filter->MakeBuilder()).TakePartial());
+    first.State.store(ETaskState::Finished);
+    EXPECT_EQ(input.Poll(), EAuxInputStatus::Waiting);
+    filter->FinishProducer(std::move(filter->MakeBuilder()).TakePartial());
+    second.State.store(ETaskState::Finished);
+    EXPECT_EQ(input.Poll(), EAuxInputStatus::Ready);
+}
+
 struct TSourceState {
     int Next = 0;
     int End = 0;

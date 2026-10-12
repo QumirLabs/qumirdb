@@ -46,6 +46,7 @@ private:
     std::atomic<uint64_t> Popped_ = 0;
     std::atomic<uint64_t> Executed_ = 0;
     std::atomic<uint64_t> NeedData_ = 0;
+    std::atomic<uint64_t> Waiting_ = 0;
     std::atomic<uint64_t> BlockedOutput_ = 0;
     std::atomic<uint64_t> Ok_ = 0;
     std::atomic<uint64_t> Finished_ = 0;

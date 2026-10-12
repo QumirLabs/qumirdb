@@ -3,6 +3,7 @@
 #include <qdb/scheduler/connection.h>
 #include <qdb/scheduler/graph.h>
 #include <qdb/scheduler/single_threaded_scheduler.h>
+#include <qdb/scheduler/threaded_scheduler.h>
 
 #include <memory>
 #include <sstream>
@@ -74,6 +75,61 @@ private:
     bool Consumed_ = false;
 };
 
+class TOrderedProbeTask : public ITaskNode {
+public:
+    TTaskNode* Prerequisite = nullptr;
+    bool RanAfterPrerequisite = false;
+
+    ETaskResult Execute() override {
+        if (Prerequisite->State.load() != ETaskState::Finished) {
+            return ETaskResult::NEED_DATA;
+        }
+        RanAfterPrerequisite = true;
+        return ETaskResult::FINISHED;
+    }
+};
+
+class TWaitForBothTask : public ITaskNode {
+public:
+    TTaskNode* Left = nullptr;
+    TTaskNode* Right = nullptr;
+
+    ETaskResult Execute() override {
+        return Left->State.load() == ETaskState::Finished
+                && Right->State.load() == ETaskState::Finished
+            ? ETaskResult::FINISHED : ETaskResult::NEED_DATA;
+    }
+};
+
+void CheckControlDependency(bool threaded) {
+    TTaskGraph graph;
+    auto& build = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto probeTask = std::make_unique<TOrderedProbeTask>();
+    auto* probePtr = probeTask.get();
+    auto& probe = graph.AddOwnedNode(std::move(probeTask));
+    auto rootTask = std::make_unique<TWaitForBothTask>();
+    auto& root = graph.AddOwnedNode(std::move(rootTask));
+    probePtr->Prerequisite = &build;
+    auto* rootPtr = static_cast<TWaitForBothTask*>(root.Task);
+    rootPtr->Left = &build;
+    rootPtr->Right = &probe;
+    graph.AddOwnedEdge(build, root, std::make_unique<TOneToOneConnection>());
+    graph.AddOwnedEdge(probe, root, std::make_unique<TOneToOneConnection>());
+    graph.AddDependencyEdge(build, probe);
+    graph.Build();
+
+    std::string error;
+    if (threaded) {
+        TThreadedScheduler scheduler(graph, 2);
+        ASSERT_TRUE(scheduler.Run(&error)) << error;
+    } else {
+        TSingleThreadedScheduler scheduler(graph);
+        ASSERT_TRUE(scheduler.Run(&error)) << error;
+    }
+    EXPECT_TRUE(probePtr->RanAfterPrerequisite);
+    EXPECT_EQ(root.State.load(), ETaskState::Finished);
+}
+
 TEST(SchedulerGraph, BuildsAdjacencyAndValidates) {
     TTaskGraph graph;
     auto& source = graph.AddOwnedNode(std::make_unique<TNoopTask>());
@@ -144,6 +200,46 @@ TEST(SchedulerGraph, PrintsConnectionsAndLaneMapping) {
     EXPECT_NE(text.find("conn c0 - gather src=2 dst=1"), std::string::npos);
     EXPECT_NE(text.find("edge e0 n0[0] -> n2[0] via c0"), std::string::npos);
     EXPECT_NE(text.find("edge e1 n1[1] -> n2[0] via c0"), std::string::npos);
+}
+
+TEST(SchedulerGraph, RejectsDependencyCycle) {
+    TTaskGraph graph;
+    auto& source = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& sink = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    graph.AddOwnedEdge(source, sink, std::make_unique<TOneToOneConnection>());
+    graph.AddDependencyEdge(sink, source);
+    graph.Build();
+
+    std::string error;
+    EXPECT_FALSE(graph.Validate(&error));
+    EXPECT_NE(error.find("scheduling cycle"), std::string::npos);
+}
+
+TEST(SchedulerGraph, DependencyEdgesDoNotCarryRowsets) {
+    TTaskGraph graph;
+    auto& build = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& probe = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& sink = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    graph.AddOwnedEdge(build, sink, std::make_unique<TOneToOneConnection>());
+    graph.AddOwnedEdge(probe, sink, std::make_unique<TOneToOneConnection>());
+    graph.AddDependencyEdge(build, probe);
+    graph.Build();
+
+    ASSERT_EQ(probe.Inbound.size(), 1u);
+    EXPECT_EQ(probe.Inbound.front()->Kind, ETaskEdgeKind::Dependency);
+    EXPECT_EQ(probe.Inbound.front()->Src, &build);
+    EXPECT_EQ(probe.Inbound.front()->Connection, nullptr);
+    std::stringstream out;
+    graph.Print(out);
+    EXPECT_NE(out.str().find("dependency n0 -> n1"), std::string::npos);
+}
+
+TEST(SchedulerGraph, SingleThreadedDependencyInput) {
+    CheckControlDependency(false);
+}
+
+TEST(SchedulerGraph, ThreadedDependencyInput) {
+    CheckControlDependency(true);
 }
 
 TEST(SchedulerGraph, SingleThreadedSchedulerRunsSmallGraph) {

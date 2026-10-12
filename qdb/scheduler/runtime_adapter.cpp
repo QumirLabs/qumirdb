@@ -174,6 +174,35 @@ void TOutputPort::Finish() const {
     }
 }
 
+void TAuxInput::AddFilter(std::shared_ptr<IRuntimeFilterProbe> filter) {
+    Filters_.push_back(std::move(filter));
+}
+
+void TAuxInput::AddProducer(TTaskNode& producer) {
+    Producers_.push_back(&producer);
+}
+
+EAuxInputStatus TAuxInput::Poll() const {
+    if (std::all_of(Filters_.begin(), Filters_.end(),
+            [](const auto& filter) { return filter->Ready(); })) {
+        return EAuxInputStatus::Ready;
+    }
+    if (Producers_.empty()) {
+        throw std::runtime_error("unpublished auxiliary input has no producer");
+    }
+    if (std::any_of(Producers_.begin(), Producers_.end(), [](const auto* producer) {
+            return producer->State.load(std::memory_order_acquire) == ETaskState::Idle;
+        })) {
+        return EAuxInputStatus::NeedProducer;
+    }
+    if (std::all_of(Producers_.begin(), Producers_.end(), [](const auto* producer) {
+            return producer->State.load(std::memory_order_acquire) == ETaskState::Finished;
+        })) {
+        throw std::runtime_error("auxiliary producers finished without publishing input");
+    }
+    return EAuxInputStatus::Waiting;
+}
+
 TSourceCode::TSourceCode(TNext next)
     : Next(std::move(next))
 {}
@@ -217,15 +246,29 @@ THashShuffleCode::THashShuffleCode(THash hash,
 TSourceTask::TSourceTask(
     std::shared_ptr<const TSourceCode> code,
     std::shared_ptr<void> state,
-    TOutputPort output)
+    TOutputPort output,
+    std::shared_ptr<TAuxInput> auxInput)
     : Code_(std::move(code))
     , State_(std::move(state))
     , Output_(output)
+    , AuxInput_(std::move(auxInput))
 {}
+
+bool TSourceTask::WantsInput(const TTaskEdge& edge) const {
+    return AuxInput_ && AuxInput_->Poll() == EAuxInputStatus::NeedProducer
+        && edge.Kind == ETaskEdgeKind::Dependency;
+}
 
 ETaskResult TSourceTask::Execute() {
     if (Finished_) {
         return ETaskResult::FINISHED;
+    }
+    if (AuxInput_) {
+        switch (AuxInput_->Poll()) {
+            case EAuxInputStatus::Ready: break;
+            case EAuxInputStatus::NeedProducer: return ETaskResult::NEED_DATA;
+            case EAuxInputStatus::Waiting: return ETaskResult::WAITING;
+        }
     }
     if (!Output_.CanPush()) {
         return ETaskResult::BLOCKED_OUTPUT;
@@ -500,9 +543,30 @@ THashShuffleTask::~THashShuffleTask() {
     ClearPending();
 }
 
+bool THashShuffleTask::WantsInput(const TTaskEdge& edge) const {
+    if (Code_->AuxInput) {
+        switch (Code_->AuxInput->Poll()) {
+            case EAuxInputStatus::Ready:
+                return edge.Kind == ETaskEdgeKind::Rowset;
+            case EAuxInputStatus::NeedProducer:
+                return edge.Kind == ETaskEdgeKind::Dependency;
+            case EAuxInputStatus::Waiting:
+                return false;
+        }
+    }
+    return edge.Kind == ETaskEdgeKind::Rowset;
+}
+
 ETaskResult THashShuffleTask::Execute() {
     if (OutputFinished_) {
         return ETaskResult::FINISHED;
+    }
+    if (Code_->AuxInput) {
+        switch (Code_->AuxInput->Poll()) {
+            case EAuxInputStatus::Ready: break;
+            case EAuxInputStatus::NeedProducer: return ETaskResult::NEED_DATA;
+            case EAuxInputStatus::Waiting: return ETaskResult::WAITING;
+        }
     }
 
     if (PendingIndex_ < Pending_.size()) {

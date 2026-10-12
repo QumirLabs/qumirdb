@@ -110,6 +110,9 @@ private:
         }
         if (auto it = Inbound_.find(node); it != Inbound_.end()) {
             for (const auto* edge : it->second) {
+                if (edge->Kind == NScheduler::ETaskEdgeKind::Dependency) {
+                    continue;
+                }
                 CollectUpstreamStages(edge->Src, current, out, visited);
             }
         }
@@ -154,6 +157,9 @@ private:
                 continue;
             }
             for (const auto* edge : inboundIt->second) {
+                if (edge->Kind == NScheduler::ETaskEdgeKind::Dependency) {
+                    continue;
+                }
                 std::unordered_set<const TNode*> visited;
                 CollectUpstreamStages(
                     edge->Src, stageId, result[edge->ExecInput], visited);
