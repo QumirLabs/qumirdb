@@ -3,6 +3,7 @@
 #include <qdb/exec/join_exec.h>
 #include <qdb/exec/planner_helpers.h>
 #include <qdb/io/io.h>
+#include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/operator.h>
@@ -19,6 +20,7 @@
 #include <cmath>
 #include <cstdint>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -538,6 +540,62 @@ TEST(AttachRuntimeFilters, SharedStageAboveUnionIsCreditedOnce) {
     EXPECT_TRUE(un->RuntimeFilterUses.empty());
     EXPECT_TRUE(first->RuntimeFilterUses.empty());
     EXPECT_TRUE(second->RuntimeFilterUses.empty());
+}
+
+TEST(AttachRuntimeFilters, LeftOuterFiltersOnlyNullableRightInput) {
+    auto join = JoinOfType(EJoinType::Left);
+    ASSERT_TRUE(join);
+    auto* j = static_cast<TJoinOperator*>(join.get());
+    j->Left()->Stats_ = RowsWithKeyNdv(100'000, "lk", 10'000);
+    j->Right()->Stats_ = RowsWithKeyNdv(1'000'000, "rk", 1'000'000);
+
+    auto emitted = AttachTo(join);
+    ASSERT_TRUE(emitted);
+    EXPECT_EQ(emitted->BuildSide, EJoinFilterSide::Left);
+    EXPECT_EQ(ChooseJoinBuildSide(*j), EJoinBuildSide::Auto);
+    EXPECT_TRUE(j->Left()->RuntimeFilterUses.empty());
+    ASSERT_EQ(j->Right()->RuntimeFilterUses.size(), 1u);
+    EXPECT_EQ(j->Right()->RuntimeFilterUses[0].ProbeKeys,
+        (std::vector<std::string>{"rk"}));
+
+    // Even forced placement may not reject preserved left rows.
+    uint32_t nextId = 1;
+    AttachRuntimeFilters(join, nextId, /*force=*/true);
+    ASSERT_TRUE(j->RuntimeFilter());
+    EXPECT_EQ(j->RuntimeFilter()->BuildSide, EJoinFilterSide::Left);
+    EXPECT_TRUE(j->Left()->RuntimeFilterUses.empty());
+}
+
+TEST(AttachRuntimeFilters, LeftOuterCrossesAggregateOnGroupKeys) {
+    auto join = JoinOfType(EJoinType::Left);
+    ASSERT_TRUE(join);
+    auto* j = static_cast<TJoinOperator*>(join.get());
+    auto source = j->Right();
+    auto grouped = MakeAggregate(source, {"rk"}, {{"total", "sum", "rv"}});
+    ASSERT_TRUE(grouped.has_value());
+    j->MutableRight() = *grouped;
+    j->Left()->Stats_ = RowsWithKeyNdv(100'000, "lk", 10'000);
+    source->Stats_ = RowsWithKeyNdv(10'000'000, "rk", 10'000'000);
+    (*grouped)->Stats_ = RowsWithKeyNdv(1'000'000, "rk", 1'000'000);
+
+    ASSERT_TRUE(AttachTo(join));
+    ASSERT_EQ(source->RuntimeFilterUses.size(), 1u);
+    EXPECT_TRUE((*grouped)->RuntimeFilterUses.empty());
+
+    auto aggregate = std::static_pointer_cast<TAggregateOperator>(*grouped);
+    aggregate->MutableGroupingSets() = {{0}};
+    ASSERT_TRUE(AttachTo(join));
+    EXPECT_TRUE(source->RuntimeFilterUses.empty());
+    ASSERT_EQ((*grouped)->RuntimeFilterUses.size(), 1u);
+}
+
+TEST(AttachRuntimeFilters, RejectsUnsafeManualOuterDirection) {
+    auto join = JoinOfType(EJoinType::Left);
+    ASSERT_TRUE(join);
+    auto* j = static_cast<TJoinOperator*>(join.get());
+    j->MutableRuntimeFilter() = TRuntimeFilterSpec{
+        .Id = 7, .BuildSide = EJoinFilterSide::Right};
+    EXPECT_THROW(PlaceRuntimeFilterConsumers(join), std::runtime_error);
 }
 
 TEST(AttachRuntimeFilters, SkipsUncappedUnknownAndUnsupportedJoins) {

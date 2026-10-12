@@ -1,6 +1,7 @@
 #include <qdb/plan/passes/runtime_filters.h>
 
 #include <qdb/exec/join_exec.h>
+#include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/project.h>
@@ -12,6 +13,7 @@
 #include <cstdint>
 #include <iterator>
 #include <optional>
+#include <stdexcept>
 #include <unordered_set>
 #include <utility>
 
@@ -28,6 +30,7 @@ constexpr double SavedRowWork = 2.0; // shuffle transfer + join probe
 constexpr double FilterBuildWork = 1.0; // collect hashes + possible Bloom merge
 constexpr double FilterProbeWork = 0.75; // lookup + possible one-lane shuffle
 constexpr double UpstreamOperatorWork = 0.5; // filter/project work per input row
+constexpr double AggregateRowWork = 1.0; // group lookup/update per input row
 constexpr double ForcedBuildWork = 2.0; // blocking a join that would run Auto
 constexpr double InexactNdvSafetyFactor = 2.0;
 // The NDV cost path bounds unfiltered builds. Filtered builds have a separate
@@ -48,6 +51,7 @@ struct TConsumerTarget {
         TOperatorPtr Operator;
         TOperatorPtr Input;
         std::vector<std::string> ProbeKeys;
+        double WorkPerRow = UpstreamOperatorWork;
     };
     std::vector<TUpstreamStage> UpstreamStages;
 };
@@ -218,7 +222,7 @@ std::optional<double> PlacementVariableBenefit(
             }
             const double rows = static_cast<double>(stage.Input->Stats_->RowCount);
             benefit += rows * (1.0 - PassFraction(*buildKey, *key))
-                * UpstreamOperatorWork;
+                * stage.WorkPerRow;
         }
     }
     return benefit;
@@ -264,8 +268,10 @@ std::optional<TFilterDecision> ChooseRuntimeFilter(
     }
     const auto type = join.JoinType();
     const bool semi = type == EJoinType::LeftSemi;
-    // Outer and anti joins preserve non-matches.
-    if (type != EJoinType::Inner && !semi) {
+    const bool leftOuter = type == EJoinType::Left;
+    // A left outer join may filter only its nullable right input, using keys
+    // from the preserved left input. Anti joins need a different rule.
+    if (type != EJoinType::Inner && !semi && !leftOuter) {
         return std::nullopt;
     }
     // Residual SEMI builds the left, but filters are published from the right.
@@ -281,7 +287,8 @@ std::optional<TFilterDecision> ChooseRuntimeFilter(
     }
     // Measurement mode retains the structural rules but bypasses estimates.
     if (force) {
-        const auto side = !semi && leftStats->RowCount < rightStats->RowCount
+        const auto side = leftOuter
+            || (!semi && leftStats->RowCount < rightStats->RowCount)
             ? EJoinFilterSide::Left : EJoinFilterSide::Right;
         if (semi && rightStats->RowCount > leftStats->RowCount) {
             return std::nullopt;
@@ -297,7 +304,7 @@ std::optional<TFilterDecision> ChooseRuntimeFilter(
 
     std::optional<TFilterDecision> decision;
     double bestBenefit = 0.0;
-    if (leftNdv && rightNdv) {
+    if (!leftOuter && leftNdv && rightNdv) {
         if (auto passFraction = EstimatedPassFraction(
                 static_cast<double>(rightStats->RowCount),
                 static_cast<double>(leftStats->RowCount),
@@ -332,7 +339,8 @@ std::optional<TFilterDecision> ChooseRuntimeFilter(
     if (!decision) {
         const double leftRows = static_cast<double>(leftStats->RowCount);
         const double rightRows = static_cast<double>(rightStats->RowCount);
-        if (FilteredBuildCandidate(join.Right(), rightRows, leftRows)) {
+        if (!leftOuter && FilteredBuildCandidate(
+                join.Right(), rightRows, leftRows)) {
             // Filtered-build row estimates can be pessimistic, so the
             // fallback keeps its existing barrier assumption. Placement
             // still rejects a probe site whose cost exceeds even the most
@@ -580,6 +588,34 @@ std::vector<TConsumerPlacement> PlacementCandidates(
                 std::make_move_iterator(deeper.begin()),
                 std::make_move_iterator(deeper.end()));
         }
+    } else if (auto aggregate = TMaybeOp<TAggregateOperator>(target)) {
+        const auto& groupKeys = aggregate.Cast()->GroupKeys();
+        auto input = aggregate.Cast()->Input();
+        // Removing an entire group is safe only when the membership test uses
+        // group keys. Grouping sets can emit a key as NULL even for input rows
+        // with a non-NULL value, so keep their consumer above the aggregate.
+        if (aggregate.Cast()->GroupingSets().empty() && target->Type
+            && input->Type
+            && std::all_of(probeKeys.begin(), probeKeys.end(),
+                [&](const auto& key) {
+                    return std::find(groupKeys.begin(), groupKeys.end(), key)
+                            != groupKeys.end()
+                        && SameKeyType(*target->OutputColumns(), key,
+                            *input->OutputColumns(), key);
+                })) {
+            auto deeper = PlacementCandidates(input, probeKeys, buildKey);
+            for (auto& placement : deeper) {
+                for (auto& consumer : placement) {
+                    consumer.UpstreamStages.push_back(
+                        {.Operator = target, .Input = input,
+                         .ProbeKeys = probeKeys,
+                         .WorkPerRow = AggregateRowWork});
+                }
+            }
+            candidates.insert(candidates.end(),
+                std::make_move_iterator(deeper.begin()),
+                std::make_move_iterator(deeper.end()));
+        }
     } else if (auto un = TMaybeOp<TUnionAllOperator>(target)) {
         auto branches = UnionBranchUses(*un.Cast(),
             TRuntimeFilterUseSpec{.ProbeKeys = probeKeys});
@@ -661,6 +697,14 @@ void PlaceConsumers(const TOperatorPtr& root) {
         return;
     }
     const auto& filter = *join.Cast()->RuntimeFilter();
+    const auto type = join.Cast()->JoinType();
+    if (!((type == EJoinType::Inner)
+            || (type == EJoinType::LeftSemi
+                && filter.BuildSide == EJoinFilterSide::Right)
+            || (type == EJoinType::Left
+                && filter.BuildSide == EJoinFilterSide::Left))) {
+        throw std::runtime_error("runtime filter build side is unsafe for join type");
+    }
     auto probe = filter.BuildSide == EJoinFilterSide::Left
         ? join.Cast()->Right() : join.Cast()->Left();
     if (HasFilterUse(probe, filter.Id)) {

@@ -533,6 +533,112 @@ TEST(JoinPlanner, RuntimeFilterRejectsRowsWithOneLanePerSide) {
     }
 }
 
+TEST(JoinPlanner, LeftOuterRuntimeFilterPreservesUnmatchedRows) {
+    for (auto mode : {NScheduler::EExecutionMode::SingleThreadedScheduler,
+             NScheduler::EExecutionMode::ThreadedScheduler}) {
+        SCOPED_TRACE(static_cast<int>(mode));
+        std::vector<int64_t> lk = {1, 2, 4}, lv = {10, 20, 40};
+        std::vector<int64_t> rk0 = {1, 9000}, rv0 = {100, 900};
+        std::vector<int64_t> rk1 = {1, 9001}, rv1 = {101, 901};
+        std::vector<TColumn> lcols, rcols0, rcols1;
+        TMockSource left({"lk", "lv"},
+            {KeyValBatch(lk.data(), lv.data(), 3, lcols)});
+        TMockSource right({"rk", "rv"},
+            {KeyValBatch(rk0.data(), rv0.data(), 2, rcols0),
+             KeyValBatch(rk1.data(), rv1.data(), 2, rcols1)});
+        auto bindings = std::make_shared<TCountingFilterBindingFactory>();
+        NScheduler::TSettings settings;
+        settings.Scheduler.Mode = mode;
+        settings.Scheduler.WorkerCount = 2;
+        settings.Queue.RowsetCapacityPerLane = 1;
+        settings.HashShuffle.MaxQueuedRowsetsPerLane = 1;
+        settings.HashShuffle.PartitionCount = 2;
+        settings.HashShuffle.MaxPartitionCount = 2;
+
+        auto plan = PlanJoin(
+            "(rel join (rel source \"L\") (rel source \"R\") "
+            "((lk rk)) (left) (emit-filter 7 left))",
+            left, right, settings, bindings);
+
+        std::vector<std::pair<int64_t, bool>> got;
+        TRowSet out{};
+        while (plan->Next(out)) {
+            for (int64_t i = 0; i < out.RowCount; ++i) {
+                if (out.Selection && !out.Selection[i]) {
+                    continue;
+                }
+                const bool matched = !out.Columns[2].Mask
+                    || ((out.Columns[2].Mask[i / 8] >> (i % 8)) & 1);
+                got.emplace_back(
+                    reinterpret_cast<const int64_t*>(out.Columns[0].Data)[i],
+                    matched);
+            }
+            Release(&out);
+        }
+        std::sort(got.begin(), got.end());
+        EXPECT_EQ(got,
+            (std::vector<std::pair<int64_t, bool>>{
+                {1, true}, {1, true}, {2, false}, {4, false}}));
+        ASSERT_TRUE(bindings->Probe);
+        EXPECT_EQ(bindings->Probe->Probed.load(), 4u);
+        EXPECT_EQ(bindings->Probe->Rejected.load(), 2u);
+    }
+}
+
+TEST(JoinPlanner, LeftOuterRuntimeFilterRunsBeforeGroupedAggregate) {
+    for (auto mode : {NScheduler::EExecutionMode::SingleThreadedScheduler,
+             NScheduler::EExecutionMode::ThreadedScheduler}) {
+        SCOPED_TRACE(static_cast<int>(mode));
+        std::vector<int64_t> lk = {1, 4}, lv = {10, 40};
+        std::vector<int64_t> rk = {1, 1, 3, 3}, rv = {10, 20, 30, 40};
+        std::vector<TColumn> lcols, rcols;
+        TMockSource left({"lk", "lv"},
+            {KeyValBatch(lk.data(), lv.data(), 2, lcols)});
+        TMockSource right({"rk", "rv"},
+            {KeyValBatch(rk.data(), rv.data(), 4, rcols)});
+        auto bindings = std::make_shared<TCountingFilterBindingFactory>();
+        NScheduler::TSettings settings;
+        settings.Scheduler.Mode = mode;
+        settings.Scheduler.WorkerCount = 2;
+        settings.Queue.RowsetCapacityPerLane = 1;
+        settings.HashShuffle.MaxQueuedRowsetsPerLane = 1;
+        settings.HashShuffle.PartitionCount = 2;
+        settings.HashShuffle.MaxPartitionCount = 2;
+
+        auto plan = PlanJoin(
+            "(rel join (rel source \"L\") "
+            "(rel aggregate (rel source \"R\") (keys rk) (agg total sum rv)) "
+            "((lk rk)) (left) (emit-filter 8 left))",
+            left, right, settings, bindings);
+
+        std::vector<std::tuple<int64_t, bool, int64_t>> got;
+        TRowSet out{};
+        while (plan->Next(out)) {
+            for (int64_t i = 0; i < out.RowCount; ++i) {
+                if (out.Selection && !out.Selection[i]) {
+                    continue;
+                }
+                const bool matched = !out.Columns[2].Mask
+                    || ((out.Columns[2].Mask[i / 8] >> (i % 8)) & 1);
+                got.emplace_back(
+                    reinterpret_cast<const int64_t*>(out.Columns[0].Data)[i],
+                    matched,
+                    matched
+                        ? reinterpret_cast<const int64_t*>(out.Columns[3].Data)[i]
+                        : 0);
+            }
+            Release(&out);
+        }
+        std::sort(got.begin(), got.end());
+        EXPECT_EQ(got,
+            (std::vector<std::tuple<int64_t, bool, int64_t>>{
+                {1, true, 30}, {4, false, 0}}));
+        ASSERT_TRUE(bindings->Probe);
+        EXPECT_EQ(bindings->Probe->Probed.load(), 4u);
+        EXPECT_EQ(bindings->Probe->Rejected.load(), 2u);
+    }
+}
+
 TEST(JoinPlanner, RuntimeFilterAtSourceComposesWithStaticFilter) {
     std::vector<int64_t> lk = {1, 2, 3}, lv = {20, 20, 5};
     std::vector<int64_t> rk = {1}, rv = {100};
