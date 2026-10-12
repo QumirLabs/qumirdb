@@ -107,9 +107,7 @@ TRuntimeFilterBuilder::TRuntimeFilterBuilder(size_t maxKeys, size_t bloomBytes)
 void TRuntimeFilterBuilder::Add(uint64_t hash) {
     ++BuildRows_;
     if (Overflowed_) {
-        if (!BloomWords_.empty()) {
-            BloomAdd(BloomWords_, hash);
-        }
+        BloomAdd(BloomWords_, hash);
         return;
     }
     if (Deduplicating_) {
@@ -132,10 +130,8 @@ void TRuntimeFilterBuilder::Add(uint64_t hash) {
 void TRuntimeFilterBuilder::OverflowToBloom() {
     Overflowed_ = true;
     BloomWords_.assign(BloomBytes_ / sizeof(uint64_t), 0);
-    if (!BloomWords_.empty()) {
-        for (uint64_t hash : Hashes_) {
-            BloomAdd(BloomWords_, hash);
-        }
+    for (uint64_t hash : Hashes_) {
+        BloomAdd(BloomWords_, hash);
     }
     std::vector<uint64_t>().swap(Hashes_);
     std::unordered_set<uint64_t>().swap(Seen_);

@@ -166,7 +166,7 @@ public:
 
     ETaskResult Execute() override;
     bool WantsInput(const TTaskEdge& edge) const override;
-    bool ShouldNotifyDependency() const override;
+    bool TryNotifyDependency() override;
 
 private:
     std::shared_ptr<const TRuntimeFilterCode> Code_;
@@ -178,7 +178,7 @@ private:
     bool Prepared_ = false;
     bool InputFinished_ = false;
     bool OutputFinished_ = false;
-    mutable std::atomic<bool> DependencyNotified_ = false;
+    std::atomic<bool> DependencyNotified_ = false;
 };
 
 class TUnaryTask final : public ITaskNode {

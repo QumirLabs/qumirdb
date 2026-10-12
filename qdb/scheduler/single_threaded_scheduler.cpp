@@ -111,7 +111,7 @@ void TSingleThreadedScheduler::ScheduleInput(TTaskNode* node) {
 void TSingleThreadedScheduler::ScheduleOutput(TTaskNode* node) {
     for (auto* edge : node->Outbound) {
         if (edge->Kind == ETaskEdgeKind::Dependency
-            && !edge->Dst->Task->ShouldNotifyDependency()) {
+            && !edge->Dst->Task->TryNotifyDependency()) {
             continue;
         }
         Schedule(edge->Dst);

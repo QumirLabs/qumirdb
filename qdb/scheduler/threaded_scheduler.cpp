@@ -137,7 +137,7 @@ void TThreadedScheduler::ScheduleInput(TTaskNode* node) {
 void TThreadedScheduler::ScheduleOutput(TTaskNode* node) {
     for (auto* edge : node->Outbound) {
         if (edge->Kind == ETaskEdgeKind::Dependency
-            && !edge->Dst->Task->ShouldNotifyDependency()) {
+            && !edge->Dst->Task->TryNotifyDependency()) {
             continue;
         }
         Schedule(edge->Dst);

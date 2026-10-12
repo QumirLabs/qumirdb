@@ -55,14 +55,14 @@ TEST(SchedulerRuntimeAdapter, FilterDependencyNotifiesOnlyOnPublication) {
     TRuntimeFilterTask consumer(code, {}, {});
     TTaskEdge dependency{.Kind = ETaskEdgeKind::Dependency};
 
-    EXPECT_FALSE(consumer.ShouldNotifyDependency());
+    EXPECT_FALSE(consumer.TryNotifyDependency());
     EXPECT_TRUE(consumer.WantsInput(dependency));
     producer.State.store(ETaskState::Queued);
     EXPECT_FALSE(consumer.WantsInput(dependency));
     filter->FinishProducer(std::move(filter->MakeBuilder()).TakePartial());
     producer.State.store(ETaskState::Finished);
-    EXPECT_TRUE(consumer.ShouldNotifyDependency());
-    EXPECT_FALSE(consumer.ShouldNotifyDependency());
+    EXPECT_TRUE(consumer.TryNotifyDependency());
+    EXPECT_FALSE(consumer.TryNotifyDependency());
 }
 
 TEST(SchedulerRuntimeAdapter, MissingFilterPublicationFailsInExecute) {
@@ -79,7 +79,7 @@ TEST(SchedulerRuntimeAdapter, MissingFilterPublicationFailsInExecute) {
 
     EXPECT_EQ(code->AuxInput->Poll(), EAuxInputStatus::Failed);
     EXPECT_FALSE(consumer.WantsInput(dependency));
-    EXPECT_TRUE(consumer.ShouldNotifyDependency());
+    EXPECT_TRUE(consumer.TryNotifyDependency());
     EXPECT_THROW(consumer.Execute(), std::runtime_error);
 }
 

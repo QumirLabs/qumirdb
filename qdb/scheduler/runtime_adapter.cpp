@@ -323,7 +323,7 @@ bool TRuntimeFilterTask::WantsInput(const TTaskEdge& edge) const {
     return false;
 }
 
-bool TRuntimeFilterTask::ShouldNotifyDependency() const {
+bool TRuntimeFilterTask::TryNotifyDependency() {
     const auto status = Code_->AuxInput->Poll();
     if (status != EAuxInputStatus::Ready
         && status != EAuxInputStatus::Failed) {

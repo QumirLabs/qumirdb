@@ -34,7 +34,7 @@ public:
     // build side first, then probe) avoid waking a producer it won't yet read.
     virtual bool WantsInput(const TTaskEdge&) const { return true; }
     // Dependency edges signal publication, not every rowset produced upstream.
-    virtual bool ShouldNotifyDependency() const { return true; }
+    virtual bool TryNotifyDependency() { return true; }
 };
 
 struct TSchedulerRunStats {
