@@ -182,13 +182,17 @@ void TAuxInput::AddProducer(TTaskNode& producer) {
     Producers_.push_back(&producer);
 }
 
+bool TAuxInput::Ready() const {
+    return std::all_of(Filters_.begin(), Filters_.end(),
+        [](const auto& filter) { return filter->Ready(); });
+}
+
 EAuxInputStatus TAuxInput::Poll() const {
-    if (std::all_of(Filters_.begin(), Filters_.end(),
-            [](const auto& filter) { return filter->Ready(); })) {
+    if (Ready()) {
         return EAuxInputStatus::Ready;
     }
     if (Producers_.empty()) {
-        throw std::runtime_error("unpublished auxiliary input has no producer");
+        return EAuxInputStatus::Failed;
     }
     if (std::any_of(Producers_.begin(), Producers_.end(), [](const auto* producer) {
             return producer->State.load(std::memory_order_acquire) == ETaskState::Idle;
@@ -198,7 +202,8 @@ EAuxInputStatus TAuxInput::Poll() const {
     if (std::all_of(Producers_.begin(), Producers_.end(), [](const auto* producer) {
             return producer->State.load(std::memory_order_acquire) == ETaskState::Finished;
         })) {
-        throw std::runtime_error("auxiliary producers finished without publishing input");
+        // Publication and task completion are separate atomic operations.
+        return Ready() ? EAuxInputStatus::Ready : EAuxInputStatus::Failed;
     }
     return EAuxInputStatus::Waiting;
 }
@@ -312,9 +317,21 @@ bool TRuntimeFilterTask::WantsInput(const TTaskEdge& edge) const {
         case EAuxInputStatus::NeedProducer:
             return edge.Kind == ETaskEdgeKind::Dependency;
         case EAuxInputStatus::Waiting:
+        case EAuxInputStatus::Failed:
             return false;
     }
     return false;
+}
+
+bool TRuntimeFilterTask::ShouldNotifyDependency() const {
+    const auto status = Code_->AuxInput->Poll();
+    if (status != EAuxInputStatus::Ready
+        && status != EAuxInputStatus::Failed) {
+        return false;
+    }
+    bool expected = false;
+    return DependencyNotified_.compare_exchange_strong(expected, true,
+        std::memory_order_acq_rel);
 }
 
 ETaskResult TRuntimeFilterTask::Execute() {
@@ -325,6 +342,9 @@ ETaskResult TRuntimeFilterTask::Execute() {
         case EAuxInputStatus::Ready: break;
         case EAuxInputStatus::NeedProducer: return ETaskResult::NEED_DATA;
         case EAuxInputStatus::Waiting: return ETaskResult::WAITING;
+        case EAuxInputStatus::Failed:
+            throw std::runtime_error(
+                "auxiliary producers finished without publishing input");
     }
 
     if (!HasInput_ && !InputFinished_) {

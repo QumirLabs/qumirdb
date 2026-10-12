@@ -11,11 +11,11 @@ size_t ProbeBloomVectorBatch(
     std::span<const uint64_t> hashes,
     std::span<uint8_t> output)
 {
-    constexpr size_t WordsPerBlock = 8;
+    constexpr size_t wordsPerBlock = 8;
     if (hashes.size() != output.size()
-        || words.size() < WordsPerBlock
-        || words.size() % WordsPerBlock != 0
-        || !std::has_single_bit(words.size() / WordsPerBlock)
+        || words.size() < wordsPerBlock
+        || words.size() % wordsPerBlock != 0
+        || !std::has_single_bit(words.size() / wordsPerBlock)
         || hashes.size() < 8192)
     {
         return 0;
@@ -25,7 +25,7 @@ size_t ProbeBloomVectorBatch(
         int64_t, uint64_t);
     const auto probe = reinterpret_cast<TProbe>(kernel.Fns[0]);
     probe(words.data(), hashes.data(), output.data(),
-        count, words.size() / WordsPerBlock - 1);
+        count, words.size() / wordsPerBlock - 1);
     return count;
 }
 

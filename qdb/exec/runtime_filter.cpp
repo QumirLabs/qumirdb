@@ -107,14 +107,39 @@ TRuntimeFilterBuilder::TRuntimeFilterBuilder(size_t maxKeys, size_t bloomBytes)
 void TRuntimeFilterBuilder::Add(uint64_t hash) {
     ++BuildRows_;
     if (Overflowed_) {
-        BloomAdd(BloomWords_, hash);
+        if (!BloomWords_.empty()) {
+            BloomAdd(BloomWords_, hash);
+        }
+        return;
+    }
+    if (Deduplicating_) {
+        if (Seen_.insert(hash).second) {
+            Hashes_.push_back(hash);
+            if (Hashes_.size() > MaxKeys_) {
+                OverflowToBloom();
+            }
+        }
         return;
     }
     Hashes_.push_back(hash);
-    // Delay compaction to avoid sorting every duplicate at the cap.
+    // One compaction distinguishes mostly unique from duplicate-heavy input.
+    // Afterwards the exact set deduplicates incrementally.
     if (Hashes_.size() >= MaxKeys_ * 2) {
         Compact();
     }
+}
+
+void TRuntimeFilterBuilder::OverflowToBloom() {
+    Overflowed_ = true;
+    BloomWords_.assign(BloomBytes_ / sizeof(uint64_t), 0);
+    if (!BloomWords_.empty()) {
+        for (uint64_t hash : Hashes_) {
+            BloomAdd(BloomWords_, hash);
+        }
+    }
+    std::vector<uint64_t>().swap(Hashes_);
+    std::unordered_set<uint64_t>().swap(Seen_);
+    Deduplicating_ = false;
 }
 
 void TRuntimeFilterBuilder::Compact() {
@@ -122,12 +147,11 @@ void TRuntimeFilterBuilder::Compact() {
     const auto duplicates = std::ranges::unique(Hashes_);
     Hashes_.erase(duplicates.begin(), duplicates.end());
     if (Hashes_.size() > MaxKeys_) {
-        Overflowed_ = true;
-        BloomWords_.assign(BloomBytes_ / sizeof(uint64_t), 0);
-        for (uint64_t hash : Hashes_) {
-            BloomAdd(BloomWords_, hash);
-        }
-        std::vector<uint64_t>().swap(Hashes_);
+        OverflowToBloom();
+    } else {
+        Seen_.reserve(MaxKeys_ + 1);
+        Seen_.insert(Hashes_.begin(), Hashes_.end());
+        Deduplicating_ = true;
     }
 }
 

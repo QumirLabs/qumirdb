@@ -23,7 +23,7 @@ using namespace NQumir::NAst::NCore;
 
 namespace {
 
-void PrintRel(NQumir::NAst::TExpr& expr, TPrinter& printer, TPrintFrame frame) {
+void PrintRelBody(NQumir::NAst::TExpr& expr, TPrinter& printer, TPrintFrame frame) {
     auto& op = static_cast<IOperator&>(expr);
     auto& out = printer.GetOut();
     const auto rel = op.RelName();
@@ -322,6 +322,29 @@ void PrintRel(NQumir::NAst::TExpr& expr, TPrinter& printer, TPrintFrame frame) {
     }
 
     throw std::runtime_error("PrintRel: unknown rel operator: " + std::string(rel));
+}
+
+void PrintRel(NQumir::NAst::TExpr& expr, TPrinter& printer, TPrintFrame frame) {
+    auto& op = static_cast<IOperator&>(expr);
+    if (op.RuntimeFilterUses.empty()) {
+        PrintRelBody(expr, printer, frame);
+        return;
+    }
+    auto& out = printer.GetOut();
+    out << "(rel use-filter";
+    printer.Separator(frame.Level + 1);
+    PrintRelBody(expr, printer,
+        {.AllowTypeWrap = frame.AllowTypeWrap, .Level = frame.Level + 1});
+    for (const auto& use : op.RuntimeFilterUses) {
+        printer.Separator(frame.Level + 1);
+        out << '(' << use.Id;
+        for (const auto& key : use.ProbeKeys) {
+            printer.Space();
+            printer.PrintIdentifier(key);
+        }
+        out << ')';
+    }
+    out << ')';
 }
 
 } // namespace

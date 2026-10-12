@@ -136,6 +136,10 @@ void TThreadedScheduler::ScheduleInput(TTaskNode* node) {
 
 void TThreadedScheduler::ScheduleOutput(TTaskNode* node) {
     for (auto* edge : node->Outbound) {
+        if (edge->Kind == ETaskEdgeKind::Dependency
+            && !edge->Dst->Task->ShouldNotifyDependency()) {
+            continue;
+        }
         Schedule(edge->Dst);
     }
 }
@@ -204,9 +208,41 @@ void TThreadedScheduler::Work() {
             continue;
         }
 
-        ETaskResult result;
         try {
-            result = node->Task->Execute();
+            const auto result = node->Task->Execute();
+            Executed_.fetch_add(1, std::memory_order_relaxed);
+            if (result == ETaskResult::NEED_DATA) {
+                NeedData_.fetch_add(1, std::memory_order_relaxed);
+                auto reschedule = FinishRun(node);
+                ScheduleInput(node);
+                if (reschedule) {
+                    Rescheduled_.fetch_add(1, std::memory_order_relaxed);
+                    Schedule(node);
+                }
+            } else if (result == ETaskResult::WAITING) {
+                Waiting_.fetch_add(1, std::memory_order_relaxed);
+                if (FinishRun(node)) {
+                    Rescheduled_.fetch_add(1, std::memory_order_relaxed);
+                    Schedule(node);
+                }
+            } else if (result == ETaskResult::BLOCKED_OUTPUT) {
+                BlockedOutput_.fetch_add(1, std::memory_order_relaxed);
+                auto reschedule = FinishRun(node);
+                ScheduleOutput(node);
+                if (reschedule) {
+                    Rescheduled_.fetch_add(1, std::memory_order_relaxed);
+                    Schedule(node);
+                }
+            } else if (result == ETaskResult::FINISHED) {
+                Finished_.fetch_add(1, std::memory_order_relaxed);
+                FinishNode(node);
+                ScheduleOutput(node);
+            } else if (result == ETaskResult::OK) {
+                Ok_.fetch_add(1, std::memory_order_relaxed);
+                FinishRun(node);
+                Schedule(node);
+                ScheduleOutput(node);
+            }
         } catch (const std::exception& e) {
             bool expected = false;
             if (Failed_.compare_exchange_strong(
@@ -227,39 +263,6 @@ void TThreadedScheduler::Work() {
             }
             WorkAvailable_.release(static_cast<ptrdiff_t>(WorkerCount_));
             return;
-        }
-        Executed_.fetch_add(1, std::memory_order_relaxed);
-        if (result == ETaskResult::NEED_DATA) {
-            NeedData_.fetch_add(1, std::memory_order_relaxed);
-            auto reschedule = FinishRun(node);
-            ScheduleInput(node);
-            if (reschedule) {
-                Rescheduled_.fetch_add(1, std::memory_order_relaxed);
-                Schedule(node);
-            }
-        } else if (result == ETaskResult::WAITING) {
-            Waiting_.fetch_add(1, std::memory_order_relaxed);
-            if (FinishRun(node)) {
-                Rescheduled_.fetch_add(1, std::memory_order_relaxed);
-                Schedule(node);
-            }
-        } else if (result == ETaskResult::BLOCKED_OUTPUT) {
-            BlockedOutput_.fetch_add(1, std::memory_order_relaxed);
-            auto reschedule = FinishRun(node);
-            ScheduleOutput(node);
-            if (reschedule) {
-                Rescheduled_.fetch_add(1, std::memory_order_relaxed);
-                Schedule(node);
-            }
-        } else if (result == ETaskResult::FINISHED) {
-            Finished_.fetch_add(1, std::memory_order_relaxed);
-            FinishNode(node);
-            ScheduleOutput(node);
-        } else if (result == ETaskResult::OK) {
-            Ok_.fetch_add(1, std::memory_order_relaxed);
-            FinishRun(node);
-            Schedule(node);
-            ScheduleOutput(node);
         }
     }
 }

@@ -44,6 +44,45 @@ TEST(SchedulerRuntimeAdapter, AuxInputWaitsForAllProducers) {
     EXPECT_EQ(input.Poll(), EAuxInputStatus::Ready);
 }
 
+TEST(SchedulerRuntimeAdapter, FilterDependencyNotifiesOnlyOnPublication) {
+    auto filter = std::make_shared<TRuntimeFilter>(16, 1024);
+    TTaskNode producer;
+    auto code = std::make_shared<TRuntimeFilterCode>();
+    code->Probe = filter;
+    code->AuxInput = std::make_shared<TAuxInput>();
+    code->AuxInput->AddFilter(filter);
+    code->AuxInput->AddProducer(producer);
+    TRuntimeFilterTask consumer(code, {}, {});
+    TTaskEdge dependency{.Kind = ETaskEdgeKind::Dependency};
+
+    EXPECT_FALSE(consumer.ShouldNotifyDependency());
+    EXPECT_TRUE(consumer.WantsInput(dependency));
+    producer.State.store(ETaskState::Queued);
+    EXPECT_FALSE(consumer.WantsInput(dependency));
+    filter->FinishProducer(std::move(filter->MakeBuilder()).TakePartial());
+    producer.State.store(ETaskState::Finished);
+    EXPECT_TRUE(consumer.ShouldNotifyDependency());
+    EXPECT_FALSE(consumer.ShouldNotifyDependency());
+}
+
+TEST(SchedulerRuntimeAdapter, MissingFilterPublicationFailsInExecute) {
+    auto filter = std::make_shared<TRuntimeFilter>(16, 1024);
+    TTaskNode producer;
+    producer.State.store(ETaskState::Finished);
+    auto code = std::make_shared<TRuntimeFilterCode>();
+    code->Probe = filter;
+    code->AuxInput = std::make_shared<TAuxInput>();
+    code->AuxInput->AddFilter(filter);
+    code->AuxInput->AddProducer(producer);
+    TRuntimeFilterTask consumer(code, {}, {});
+    TTaskEdge dependency{.Kind = ETaskEdgeKind::Dependency};
+
+    EXPECT_EQ(code->AuxInput->Poll(), EAuxInputStatus::Failed);
+    EXPECT_FALSE(consumer.WantsInput(dependency));
+    EXPECT_TRUE(consumer.ShouldNotifyDependency());
+    EXPECT_THROW(consumer.Execute(), std::runtime_error);
+}
+
 struct TSourceState {
     int Next = 0;
     int End = 0;

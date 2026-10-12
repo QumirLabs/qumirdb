@@ -731,6 +731,43 @@ TEST(AttachRuntimeFilters, RejectsUnsafeManualOuterDirection) {
     EXPECT_THROW(PlaceRuntimeFilterConsumers(join), std::runtime_error);
 }
 
+TEST(AttachRuntimeFilters, RejectsResidualSemiManualFilter) {
+    auto left = std::make_shared<TFakeSource>(
+        std::vector<std::pair<std::string, TTypePtr>>{
+            {"lk", I64Type()}, {"lv", I64Type()}});
+    auto right = std::make_shared<TFakeSource>(
+        std::vector<std::pair<std::string, TTypePtr>>{
+            {"rk", I64Type()}, {"rv", I64Type()}});
+    auto join = MakeJoin(left, right, {{"lk", "rk"}},
+        EJoinType::LeftSemi, "(> rv 0)");
+    ASSERT_TRUE(join.has_value());
+    static_cast<TJoinOperator&>(**join).MutableRuntimeFilter() =
+        TRuntimeFilterSpec{.Id = 7, .BuildSide = EJoinFilterSide::Right};
+    EXPECT_THROW(PlaceRuntimeFilterConsumers(*join), std::runtime_error);
+}
+
+TEST(AttachRuntimeFilters, ClearsOrphanConsumerBindings) {
+    auto join = JoinOfType(EJoinType::Inner);
+    ASSERT_TRUE(join);
+    auto& j = static_cast<TJoinOperator&>(*join);
+    j.Left()->Stats_ = RowsWithKeyNdv(1'000'000, "lk", 1'000'000);
+    j.Right()->Stats_ = RowsWithKeyNdv(100'000, "rk", 10'000);
+    j.Left()->RuntimeFilterUses.push_back(
+        {.Id = 999, .ProbeKeys = {"lk"}});
+    uint32_t nextId = 1;
+    AttachRuntimeFilters(join, nextId);
+    ASSERT_TRUE(j.RuntimeFilter());
+    ASSERT_EQ(j.Left()->RuntimeFilterUses.size(), 1u);
+    EXPECT_EQ(j.Left()->RuntimeFilterUses[0].Id, j.RuntimeFilter()->Id);
+
+    j.Left()->RuntimeFilterUses.push_back(
+        {.Id = 999, .ProbeKeys = {"lk"}});
+    nextId = 1;
+    AttachRuntimeFilters(join, nextId);
+    ASSERT_EQ(j.Left()->RuntimeFilterUses.size(), 1u);
+    EXPECT_EQ(j.Left()->RuntimeFilterUses[0].Id, j.RuntimeFilter()->Id);
+}
+
 TEST(AttachRuntimeFilters, SkipsUncappedUnknownAndUnsupportedJoins) {
     auto inner = JoinOfType(EJoinType::Inner);
     ASSERT_TRUE(inner);

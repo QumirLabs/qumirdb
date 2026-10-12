@@ -1459,13 +1459,18 @@ llvm::json::Object GraphJson(
 
     addConnection(lowered.FinalGather);
     for (const auto& edge : lowered.Graph->Edges()) {
-        addConnection(edge->Connection);
+        if (edge->Kind != NQdb::NScheduler::ETaskEdgeKind::Dependency) {
+            addConnection(edge->Connection);
+        }
     }
 
     llvm::json::Array edges;
     std::vector<TEdge> groupedEdges;
     std::unordered_map<std::string, size_t> edgeIndexes;
     for (const auto& edge : lowered.Graph->Edges()) {
+        if (edge->Kind == NQdb::NScheduler::ETaskEdgeKind::Dependency) {
+            continue;
+        }
         const auto& from = nodeGroups.at(edge->Src);
         const auto& to = nodeGroups.at(edge->Dst);
         const auto& connection = connectionIds.at(edge->Connection);
@@ -2804,6 +2809,7 @@ llvm::json::Object BuildBundle(
         NQdb::ApplyPlanPasses(logicalPlan, {
             // The browser runtime has no data-source lookup task yet. Keep its
             // plan on the eager path until it can bind a lookup-capable source.
+            .EnableRuntimeFilters = false,
             .LateMaterialization = {.Enabled = false},
             .Diagnostics = &planDiagnostics,
             .Annotation = {.ExternalCatalog = externalCatalog},

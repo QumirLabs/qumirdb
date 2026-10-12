@@ -7,6 +7,7 @@
 #include <memory>
 #include <mutex>
 #include <span>
+#include <unordered_set>
 #include <vector>
 
 namespace NQdb {
@@ -22,7 +23,7 @@ struct TRuntimeFilterPartial {
 };
 
 // Filters may return false positives, never false negatives. Builders are
-// task-local; probes pass until the complete merged filter is published.
+// task-local; consumer tasks wait for the complete merged filter.
 class TRuntimeFilterBuilder {
 public:
     TRuntimeFilterBuilder(size_t maxKeys, size_t bloomBytes);
@@ -32,10 +33,13 @@ public:
 
 private:
     void Compact();
+    void OverflowToBloom();
 
     size_t MaxKeys_;
     size_t BloomBytes_;
     std::vector<uint64_t> Hashes_;
+    std::unordered_set<uint64_t> Seen_;
+    bool Deduplicating_ = false;
     std::vector<uint64_t> BloomWords_;
     bool Overflowed_ = false;
     uint64_t BuildRows_ = 0;
@@ -72,7 +76,7 @@ public:
     virtual ~IRuntimeFilterProbe() = default;
     // Auxiliary inputs wait for a complete filter or PassAll publication.
     virtual bool Ready() const = 0;
-    // Called during graph construction, before any task starts.
+    // Created lazily by each consumer task after the filter is published.
     virtual std::shared_ptr<TRuntimeFilterProbeState> CreateProbeState();
     // Check before allocating masks or computing hashes. False passes the input
     // through unchanged. rows counts only rows in the incoming selection.

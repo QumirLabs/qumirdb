@@ -421,16 +421,10 @@ void Attach(const TOperatorPtr& node, uint32_t& nextId, bool force) {
     }
 }
 
-void CollectProducedFilterIds(
-    const TOperatorPtr& node, std::unordered_set<uint32_t>& ids)
-{
-    if (auto join = TMaybeOp<TJoinOperator>(node)) {
-        if (const auto& filter = join.Cast()->RuntimeFilter()) {
-            ids.insert(filter->Id);
-        }
-    }
+void ClearFilterUses(const TOperatorPtr& node) {
+    node->RuntimeFilterUses.clear();
     for (const auto& input : node->Inputs()) {
-        CollectProducedFilterIds(input, ids);
+        ClearFilterUses(input);
     }
 }
 
@@ -439,11 +433,7 @@ void CollectProducedFilterIds(
 void AttachRuntimeFilters(
     const TOperatorPtr& root, uint32_t& nextId, bool force)
 {
-    std::unordered_set<uint32_t> oldIds;
-    CollectProducedFilterIds(root, oldIds);
-    for (uint32_t id : oldIds) {
-        RemoveFilterUse(root, id);
-    }
+    ClearFilterUses(root);
     Attach(root, nextId, force);
     if (!force) {
         ReuseRuntimeFilters(root);
@@ -879,6 +869,7 @@ void PlaceConsumers(const TOperatorPtr& root) {
     const auto type = join.Cast()->JoinType();
     if (!((type == EJoinType::Inner)
             || (type == EJoinType::LeftSemi
+                && !join.Cast()->Filter()
                 && filter.BuildSide == EJoinFilterSide::Right)
             || (type == EJoinType::Left
                 && filter.BuildSide == EJoinFilterSide::Left))) {

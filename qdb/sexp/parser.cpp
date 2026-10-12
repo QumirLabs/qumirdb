@@ -11,6 +11,7 @@
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/window.h>
 
+#include <algorithm>
 #include <limits>
 #include <optional>
 
@@ -127,6 +128,58 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
         auto relName = ReadIdentifier(h, nameTok);
         if (!relName) {
             co_return IParseHandle::MakeError(nameTok, "expected rel operator name after 'rel'");
+        }
+
+        if (*relName == "use-filter") {
+            auto inputExpr = co_await h.Expr();
+            auto input = std::static_pointer_cast<IOperator>(inputExpr);
+            bool hasUse = false;
+            while (true) {
+                auto tok = h.Next();
+                if (IParseHandle::IsOp(tok, ')')) {
+                    break;
+                }
+                if (!IParseHandle::IsOp(tok, '(')) {
+                    co_return IParseHandle::MakeError(
+                        tok, "(rel use-filter) expects a filter binding");
+                }
+                auto idTok = h.Next();
+                if (idTok.Type != TToken::Integer || idTok.Value.i64 <= 0
+                    || idTok.Value.i64 > std::numeric_limits<uint32_t>::max()) {
+                    co_return IParseHandle::MakeError(
+                        idTok, "(rel use-filter) expects a positive uint32 id");
+                }
+                const auto id = static_cast<uint32_t>(idTok.Value.i64);
+                if (std::any_of(input->RuntimeFilterUses.begin(),
+                        input->RuntimeFilterUses.end(),
+                        [id](const auto& use) { return use.Id == id; })) {
+                    co_return IParseHandle::MakeError(
+                        idTok, "duplicate runtime filter use id");
+                }
+                TRuntimeFilterUseSpec use{.Id = id};
+                while (true) {
+                    auto keyTok = h.Next();
+                    if (IParseHandle::IsOp(keyTok, ')')) {
+                        break;
+                    }
+                    auto key = ReadIdentifier(h, keyTok);
+                    if (!key) {
+                        co_return IParseHandle::MakeError(
+                            keyTok, "(rel use-filter) expects probe keys");
+                    }
+                    use.ProbeKeys.push_back(std::move(*key));
+                }
+                if (use.ProbeKeys.empty()) {
+                    co_return IParseHandle::MakeError(
+                        idTok, "(rel use-filter) needs at least one probe key");
+                }
+                input->RuntimeFilterUses.push_back(std::move(use));
+                hasUse = true;
+            }
+            if (!hasUse) {
+                co_return TError(loc, "(rel use-filter) needs at least one binding");
+            }
+            co_return input;
         }
 
         if (*relName == TSourceOperator::OpId) {

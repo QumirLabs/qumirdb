@@ -38,7 +38,7 @@ struct TOutputPort {
     void Finish() const;
 };
 
-enum class EAuxInputStatus { Ready, NeedProducer, Waiting };
+enum class EAuxInputStatus { Ready, NeedProducer, Waiting, Failed };
 
 // Query-local auxiliary input. It carries filter publication state rather
 // than rowsets; dependency edges supply demand and wakeups.
@@ -46,6 +46,7 @@ class TAuxInput {
 public:
     void AddFilter(std::shared_ptr<IRuntimeFilterProbe> filter);
     void AddProducer(TTaskNode& producer);
+    bool Ready() const;
     EAuxInputStatus Poll() const;
 
 private:
@@ -165,6 +166,7 @@ public:
 
     ETaskResult Execute() override;
     bool WantsInput(const TTaskEdge& edge) const override;
+    bool ShouldNotifyDependency() const override;
 
 private:
     std::shared_ptr<const TRuntimeFilterCode> Code_;
@@ -176,6 +178,7 @@ private:
     bool Prepared_ = false;
     bool InputFinished_ = false;
     bool OutputFinished_ = false;
+    mutable std::atomic<bool> DependencyNotified_ = false;
 };
 
 class TUnaryTask final : public ITaskNode {

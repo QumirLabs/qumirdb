@@ -145,10 +145,8 @@ void ApplyPlanPasses(TOperatorPtr& plan, TPlanPassOptions options) {
         AttachRowGroupPredicates(current);
     });
     if (options.EnableRuntimeFilters) {
-        // Runs last, so the pairing it records survives every restructuring
-        // pass. One counter across every plan of the query: after ApplyCteReuse
-        // a shared definition lives in its own materialization plan, which
-        // ForEachPlan no longer reaches, and two joins must never share an id.
+        // Run after restructuring, with one id counter across the query.
+        // Shared materialization plans are visited separately.
         uint32_t nextFilterId = 1;
         for (const auto& materialization : CollectMaterializations(plan)) {
             AttachRuntimeFilters(materialization.Materialization->Plan,

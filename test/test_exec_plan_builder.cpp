@@ -469,6 +469,25 @@ TEST(ExecPlanBuilder, RuntimeFiltersShareTheQueryJit) {
     }
 }
 
+TEST(ExecPlanBuilder, RejectsDuplicateRuntimeFilterProducerIds) {
+    TSplitMockSource left({"k"}), right({"k"}), third({"k"});
+    const std::unordered_map<std::string, ISource*> sources{
+        {"l", &left}, {"r", &right}, {"t", &third},
+    };
+    auto plan = BuildSqlPlan(
+        "SELECT l.k FROM l JOIN r ON l.k = r.k JOIN t ON l.k = t.k", sources);
+    auto* outer = FindJoin(plan);
+    ASSERT_NE(outer, nullptr);
+    auto* inner = FindJoin(outer->Left());
+    ASSERT_NE(inner, nullptr);
+    inner->MutableRuntimeFilter() = TRuntimeFilterSpec{
+        .Id = 7, .BuildSide = EJoinFilterSide::Right};
+    outer->MutableRuntimeFilter() = TRuntimeFilterSpec{
+        .Id = 7, .BuildSide = EJoinFilterSide::Right};
+    EXPECT_THROW(NScheduler::LowerPlanToGraph(plan, SingleSettings(), nullptr),
+        std::runtime_error);
+}
+
 TEST(ExecPlanBuilder, SingleAndMultiCollapseUnionLanes) {
     TSplitMockSource left({"k"});
     TSplitMockSource right({"k"});

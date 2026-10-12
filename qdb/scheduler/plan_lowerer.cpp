@@ -341,9 +341,9 @@ std::unordered_set<const TSourceOperator*> SourcesFeedingJoins(
 size_t ChooseRuntimeBloomBytes(const TJoinOperator& join,
     EJoinFilterSide buildSide, size_t producerCount)
 {
-    constexpr size_t TotalBudget = 128u << 20;
+    constexpr size_t totalBudget = 128u << 20;
     const size_t maximum = std::bit_floor(std::max<size_t>(
-        64, TotalBudget / (producerCount + 1)));
+        64, totalBudget / (producerCount + 1)));
     const size_t minimum = std::min(
         TRuntimeFilter::DefaultBloomBytes, maximum);
     const auto& build = buildSide == EJoinFilterSide::Left
@@ -726,7 +726,12 @@ public:
     }
 
     void WireRuntimeFilters() {
+        std::unordered_set<uint32_t> seenIds;
         for (const auto& producer : FilterProducers_) {
+            if (!seenIds.insert(producer.Id).second) {
+                throw std::runtime_error(
+                    "runtime filter id is produced by more than one join");
+            }
             auto found = FilterConsumers_.find(producer.Id);
             if (found == FilterConsumers_.end() || found->second.empty()) {
                 throw std::runtime_error(
@@ -2793,10 +2798,8 @@ private:
             const bool buildIsLeft =
                 runtimeFilter->BuildSide == EJoinFilterSide::Left;
             filterBuildIsLeft = buildIsLeft;
-            // The producers are the build side's repartition lanes; the last of
-            // them to finish publishes, and only from then on does the probe
-            // side reject anything. Before that a partial filter would be
-            // missing another lane's keys, so it passes everything instead.
+            // Every build repartition lane contributes before publication.
+            // Probe tasks wait for the complete filter.
             const size_t producerCount = buildIsLeft ? leftLanes : rightLanes;
             auto binding = RuntimeFilterBindings_->CreateSized(runtimeFilter->Id,
                 producerCount, ChooseRuntimeBloomBytes(

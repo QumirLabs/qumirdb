@@ -33,6 +33,8 @@ public:
     // Default: all. Lets a task that reads one input at a time (asymmetric join:
     // build side first, then probe) avoid waking a producer it won't yet read.
     virtual bool WantsInput(const TTaskEdge&) const { return true; }
+    // Dependency edges signal publication, not every rowset produced upstream.
+    virtual bool ShouldNotifyDependency() const { return true; }
 };
 
 struct TSchedulerRunStats {

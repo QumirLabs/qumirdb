@@ -400,6 +400,28 @@ TEST(RuntimeFilter, RepeatsAtTheCapDoNotResortEveryRow) {
     }
 }
 
+TEST(RuntimeFilter, PromotesAfterDuplicateHeavyExactBuildGetsNewKey) {
+    constexpr size_t Cap = 64;
+    TRuntimeFilter filter(Cap, /*bloomBytes=*/512);
+    auto keys = Hashes(Cap, 21);
+    auto builder = filter.MakeBuilder();
+    for (int repeat = 0; repeat < 100; ++repeat) {
+        for (uint64_t key : keys) {
+            builder.Add(key);
+        }
+    }
+    EXPECT_FALSE(builder.Overflowed());
+    const uint64_t newKey = 0xfedcba9876543210ULL;
+    builder.Add(newKey);
+    EXPECT_TRUE(builder.Overflowed());
+    filter.FinishProducer(std::move(builder).TakePartial());
+    EXPECT_TRUE(filter.UsesBloom());
+    for (uint64_t key : keys) {
+        EXPECT_TRUE(filter.MayContain(key));
+    }
+    EXPECT_TRUE(filter.MayContain(newKey));
+}
+
 TEST(RuntimeFilter, CapIsEnforcedAtPublication) {
     constexpr size_t Cap = 8;
     for (size_t distinct : {Cap, Cap + 1}) {
