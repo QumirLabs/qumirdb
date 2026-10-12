@@ -13,7 +13,7 @@
 #include <qdb/kernel/lib.h>
 #include <qdb/kernel/spec.h>
 #include <qdb/exec/runtime_context.h>
-#include <qdb/exec/runtime_filter_kernels.h>
+#include <qdb/exec/runtime_filter.h>
 #include <qdb/modules/qumirdb.h>
 #include <qdb/modules/qumirdb_runtime.h>
 #include <qdb/utils/module_path.h>
@@ -1537,7 +1537,10 @@ NQumir::NAst::TExprPtr BuildTopSortMergeProgramAst(
 }
 
 std::shared_ptr<TKernelSlot> TKernelCompiler::CompileRuntimeFilter() {
-    std::vector<NQumir::NAst::TExprPtr> programStmts;
+    using namespace NQumir::NAst;
+    // Type declarations go first, as in a source file.
+    std::vector<TExprPtr> programStmts;
+    std::vector<TExprPtr> functions;
     for (const auto& source : {
         NKernel::ReadSortKernel("radix.oz"),
         NKernel::ReadAggregationKernel("swiss_group.oz"),
@@ -1548,14 +1551,18 @@ std::shared_ptr<TKernelSlot> TKernelCompiler::CompileRuntimeFilter() {
             throw NQumir::TError("CompileRuntimeFilter: " + library.error().ToString());
         }
         for (auto& stmt : *library) {
-            programStmts.push_back(std::move(stmt));
+            (TMaybeNode<TTypeDeclStmt>(stmt) ? programStmts : functions)
+                .push_back(std::move(stmt));
         }
     }
-    auto ast = std::make_shared<NQumir::NAst::TBlockExpr>(
+    programStmts.insert(programStmts.end(),
+        std::make_move_iterator(functions.begin()), std::make_move_iterator(functions.end()));
+    auto ast = std::make_shared<TBlockExpr>(
         NQumir::TLocation{}, std::move(programStmts));
     PrintKernelAst(Diagnostics_, "runtime-filter", ast);
-    auto kernel = EmitKernel(
-        "runtime-filter", TRuntimeFilterKernels::Entrypoints(), std::move(ast));
+    auto kernel = EmitKernel("runtime-filter",
+        {RuntimeFilterKernelEntrypoints.begin(), RuntimeFilterKernelEntrypoints.end()},
+        std::move(ast));
     FinishKernelDiagnostics(Diagnostics_);
 
     return kernel.Slot;

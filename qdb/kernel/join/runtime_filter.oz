@@ -1,13 +1,76 @@
 (block
-  ;; Runtime filter kernels: every operation that reads or writes filter
-  ;; contents. C++ (qdb/exec/runtime_filter.cpp) owns the buffers, publication
-  ;; and probe policy. Conventions shared by all entry points:
+  ;; Runtime filter kernel: every operation that reads or writes filter
+  ;; contents. It has three entry points, at the end of this file:
+  ;;   rf_build    adds a batch of hashes to a producer's contribution;
+  ;;   rf_publish  merges the contributions into the published filter;
+  ;;   rf_probe    tests a batch of hashes against the published filter.
+  ;; C++ (qdb/exec/runtime_filter.cpp) provides the storage that the state
+  ;; structs below point to, and owns publication and probe policy.
+  ;; Conventions:
   ;;   - a null selection selects every row;
   ;;   - probes write a nonzero byte for a kept row and 0 otherwise, and
   ;;     return the number of kept rows;
   ;;   - a Bloom block is eight u64 words with one bit set in each word, and
   ;;     block_mask is (blocks - 1) for a power-of-two block count.
   ;; Needs sort/radix.oz and aggregation/swiss_group.oz in the same program.
+
+  ;; One producer's contribution; mirrors TRuntimeFilterBuildState.
+  ;; Mode: 0 collecting      Keys holds every selected hash, repeats included,
+  ;;                         until there are 2 * MaxKeys of them; one
+  ;;                         compaction then tells mostly unique input from
+  ;;                         duplicate-heavy input;
+  ;;       1 deduplicating   Keys holds distinct hashes, at most MaxKeys;
+  ;;       2 overflowing     more than MaxKeys distinct hashes wait for Bloom
+  ;;                         storage;
+  ;;       3 Bloom           Bloom holds every hash seen.
+  ;; rf_build stops early when it needs storage it was not given and names
+  ;; it in Want: 1 SortOrder, SortKeys and the set; 2 Bloom (BloomWords >= 0).
+  ;; Keys always has room for the rows of the current batch.
+  (type RuntimeFilterBuild <struct
+    (MaxKeys i64)
+    (Mode i64)
+    (Want i64)
+    (Keys <ptr u64>)
+    (KeyCount i64)
+    (SetCtrl <ptr u8>)
+    (SetSlots <ptr u64>)
+    (SetCapacity i64)
+    (SortOrder <ptr u32>)
+    (SortKeys <ptr u64>)
+    (Bloom <ptr u64>)
+    (BloomWords i64)>)
+
+  ;; A finished contribution: exact keys, or a Bloom fragment.
+  (type RuntimeFilterPartial <struct
+    (Keys <ptr u64>)
+    (KeyCount i64)
+    (Bloom <ptr u64>)
+    (BloomWords i64)>)
+
+  ;; Storage and result of a merge; mirrors TRuntimeFilterPublishState.
+  ;; Keys and SortKeys hold every partial key, SortOrder twice as many
+  ;; entries plus 256. Table is zeroed and fits min(keys, MaxKeys) keys.
+  ;; Bloom is zeroed, or with BloomSeeded already holds one fragment, which
+  ;; makes the result a Bloom filter. Kind: 0 cannot answer, 1 exact, 2 Bloom.
+  (type RuntimeFilterPublish <struct
+    (MaxKeys i64)
+    (Keys <ptr u64>)
+    (SortOrder <ptr u32>)
+    (SortKeys <ptr u64>)
+    (Table <ptr u64>)
+    (Bloom <ptr u64>)
+    (BloomWords i64)
+    (BloomSeeded i64)
+    (Kind i64)
+    (ExactKeys i64)
+    (TableSize i64)
+    (BloomSetBits i64)>)
+
+  ;; The published filter. Words is the exact table or the Bloom words.
+  (type RuntimeFilterData <struct
+    (Kind i64)
+    (Words <ptr u64>)
+    (WordCount i64)>)
 
   ;; splitmix64 finalizer; one body serves u64 and <vec u64 4>.
   (fun rf_mix [T] ((var value T)) -> T (attrs inline)
@@ -42,6 +105,10 @@
     (block
       (return (<< (cast 1 u64)
                 (& (>> bits (cast (* word 8) u64)) (cast 63 u64))))))
+
+  (fun rf_bloom_block_mask ((var word_count i64)) -> u64 (attrs inline)
+    (block
+      (return (cast (- (// word_count 8) 1) u64))))
 
   (fun rf_bloom_contains
        ((var words <ptr u64>) (var block_mask u64) (var hash u64)) -> bool
@@ -163,7 +230,7 @@
   ;; carry only rows that are still alive, and the answers are spread back
   ;; afterwards. selected_hashes and selected_output are scratch for count
   ;; entries each; they are not touched without a selection.
-  (fun rf_bloom_probe_vec
+  (fun rf_bloom_probe_vector
        ((var words <ptr u64>) (var block_mask u64) (var hashes <ptr u64>)
         (var selection <ptr u8>) (var output <ptr u8>) (var count i64)
         (var selected_hashes <ptr u64>) (var selected_output <ptr u8>)) -> i64
@@ -252,26 +319,7 @@
           (= row (+ row 1))))
       (return kept)))
 
-  ;; ---- Key accumulation ----
-  ;; size points at the current key count and is updated in place. Both
-  ;; append kernels return the number of input rows they consumed.
-
-  ;; Appends selected hashes as they come until keys holds capacity entries.
-  (fun rf_keys_append
-       ((var keys <ptr u64>) (var size <ptr i64>) (var capacity i64)
-        (var hashes <ptr u64>) (var selection <ptr u8>) (var count i64)) -> i64
-    (block
-      (var used = (index size 0))
-      (var row = 0)
-      (while (&& (< row count) (< used capacity))
-        (block
-          (if (call rf_selected selection row)
-            (block
-              (= keys [used] (index hashes row))
-              (= used (+ used 1))))
-          (= row (+ row 1))))
-      (= size [0] used)
-      (return row)))
+  ;; ---- Keys ----
 
   ;; Sorts keys and drops repeats in place; returns the distinct count.
   ;; Scratch: order and order_work hold count entries each, counts 256,
@@ -364,24 +412,177 @@
                             (index keys i)))
           (= i (+ i 1))))))
 
-  ;; Appends selected hashes the set has not seen. Stops right after the key
-  ;; count exceeds max_keys, so keys needs room for max_keys + 1 entries.
-  (fun rf_keys_append_distinct
-       ((var ctrl <ptr u8>) (var slots <ptr u64>) (var capacity i64)
-        (var keys <ptr u64>) (var size <ptr i64>) (var max_keys i64)
-        (var hashes <ptr u64>) (var selection <ptr u8>) (var count i64)) -> i64
+  ;; ---- Entry points ----
+
+  ;; Adds the selected hashes to a producer's contribution. Returns the number
+  ;; of rows consumed: all of them, unless state.Want asks for storage.
+  (fun rf_build
+       ((var state <ref RuntimeFilterBuild>) (var hashes <ptr u64>)
+        (var selection <ptr u8>) (var count i64)) -> i64
     (block
-      (var used = (index size 0))
+      (var max_keys = (field state MaxKeys))
+      (var keys = (field state Keys))
       (var row = 0)
-      (while (&& (< row count) (<= used max_keys))
+      (field_assign state Want 0)
+      (if (== (field state Mode) 0)
         (block
-          (if (call rf_selected selection row)
+          (var limit = (* max_keys 2))
+          (var used = (field state KeyCount))
+          (while (&& (< row count) (< used limit))
             (block
-              (var hash = (index hashes row))
-              (if (call rf_set_insert ctrl slots capacity hash)
+              (if (call rf_selected selection row)
                 (block
-                  (= keys [used] hash)
-                  (= used (+ used 1))))))
-          (= row (+ row 1))))
-      (= size [0] used)
-      (return row))))
+                  (= keys [used] (index hashes row))
+                  (= used (+ used 1))))
+              (= row (+ row 1))))
+          (field_assign state KeyCount used)
+          (if (< used limit)
+            (block (return row)))
+          (if (== (field state SetCapacity) 0)
+            (block
+              (field_assign state Want 1)
+              (return row)))
+          (var order = (field state SortOrder))
+          (var order_work = (cast (+ (cast order i64) (* used 4)) <ptr u32>))
+          (var counts = (cast (+ (cast order i64) (* used 8)) <ptr u32>))
+          (= used (call rf_keys_sort_unique keys used order order_work counts
+                    (field state SortKeys)))
+          (field_assign state KeyCount used)
+          (if (> used max_keys)
+            (block
+              (field_assign state Mode 2))
+            (block
+              (call rf_set_fill (field state SetCtrl) (field state SetSlots)
+                (field state SetCapacity) keys used)
+              (field_assign state Mode 1)))))
+      (if (== (field state Mode) 1)
+        (block
+          (var ctrl = (field state SetCtrl))
+          (var slots = (field state SetSlots))
+          (var capacity = (field state SetCapacity))
+          (var used = (field state KeyCount))
+          (while (&& (< row count) (<= used max_keys))
+            (block
+              (if (call rf_selected selection row)
+                (block
+                  (var hash = (index hashes row))
+                  (if (call rf_set_insert ctrl slots capacity hash)
+                    (block
+                      (= keys [used] hash)
+                      (= used (+ used 1))))))
+              (= row (+ row 1))))
+          (field_assign state KeyCount used)
+          (if (<= used max_keys)
+            (block (return row)))
+          (field_assign state Mode 2)))
+      (var bloom = (field state Bloom))
+      (var bloom_words = (field state BloomWords))
+      (if (== (field state Mode) 2)
+        (block
+          (if (< bloom_words 0)
+            (block
+              (field_assign state Want 2)
+              (return row)))
+          (if (> bloom_words 0)
+            (block
+              (call rf_bloom_add bloom (call rf_bloom_block_mask bloom_words)
+                keys (cast (: 0 i64) <ptr u8>) (field state KeyCount))))
+          (field_assign state KeyCount 0)
+          (field_assign state Mode 3)))
+      ;; Bloom storage arrives between calls, so no row of this batch has
+      ;; been consumed yet.
+      (if (> bloom_words 0)
+        (block
+          (call rf_bloom_add bloom (call rf_bloom_block_mask bloom_words)
+            hashes selection count)))
+      (return count)))
+
+  ;; Merges the contributions of every producer.
+  (fun rf_publish
+       ((var state <ref RuntimeFilterPublish>)
+        (var partials <ptr RuntimeFilterPartial>) (var partial_count i64))
+    (block
+      (var bloom = (field state Bloom))
+      (var bloom_words = (field state BloomWords))
+      (var no_selection = (cast (: 0 i64) <ptr u8>))
+      (field_assign state Kind 0)
+      (if (!= (field state BloomSeeded) 0)
+        (block
+          (var block_mask = (call rf_bloom_block_mask bloom_words))
+          (var i = 0)
+          (while (< i partial_count)
+            (block
+              (var partial = (index partials i))
+              (call rf_bloom_or bloom (field partial Bloom)
+                (field partial BloomWords))
+              (call rf_bloom_add bloom block_mask (field partial Keys)
+                no_selection (field partial KeyCount))
+              (= i (+ i 1))))
+          (field_assign state Kind 2))
+        (block
+          (var keys = (field state Keys))
+          (var total = 0)
+          (var i = 0)
+          (while (< i partial_count)
+            (block
+              (var partial = (index partials i))
+              (var partial_keys = (field partial Keys))
+              (var partial_key_count = (field partial KeyCount))
+              (var k = 0)
+              (while (< k partial_key_count)
+                (block
+                  (= keys [total] (index partial_keys k))
+                  (= total (+ total 1))
+                  (= k (+ k 1))))
+              (= i (+ i 1))))
+          ;; Sort once, after all producers finish, including duplicates
+          ;; across lanes.
+          (var order = (field state SortOrder))
+          (var order_work = (cast (+ (cast order i64) (* total 4)) <ptr u32>))
+          (var counts = (cast (+ (cast order i64) (* total 8)) <ptr u32>))
+          (var distinct = (call rf_keys_sort_unique keys total order order_work
+                            counts (field state SortKeys)))
+          (if (<= distinct (field state MaxKeys))
+            (block
+              (var size = 8)
+              (while (< size (* distinct 2))
+                (block (= size (* size 2))))
+              (call rf_exact_build (field state Table) (cast (- size 1) u64)
+                keys distinct)
+              (field_assign state TableSize size)
+              (field_assign state ExactKeys distinct)
+              (field_assign state Kind 1))
+            (block
+              (if (> bloom_words 0)
+                (block
+                  (call rf_bloom_add bloom
+                    (call rf_bloom_block_mask bloom_words) keys no_selection
+                    distinct)
+                  (field_assign state Kind 2)))))))
+      (if (== (field state Kind) 2)
+        (block
+          (field_assign state BloomSetBits
+            (call rf_bloom_popcount bloom bloom_words))))))
+
+  ;; Tests the selected hashes. A Bloom filter is probed four hashes at a
+  ;; time when vectorized is nonzero; selected_hashes and selected_output
+  ;; then are scratch for count entries each.
+  (fun rf_probe
+       ((var data <ref RuntimeFilterData>) (var hashes <ptr u64>)
+        (var selection <ptr u8>) (var output <ptr u8>) (var count i64)
+        (var vectorized i64)
+        (var selected_hashes <ptr u64>) (var selected_output <ptr u8>)) -> i64
+    (block
+      (var words = (field data Words))
+      (var word_count = (field data WordCount))
+      (if (== (field data Kind) 1)
+        (block
+          (return (call rf_exact_probe words (cast (- word_count 1) u64)
+                    hashes selection output count))))
+      (var block_mask = (call rf_bloom_block_mask word_count))
+      (if (!= vectorized 0)
+        (block
+          (return (call rf_bloom_probe_vector words block_mask hashes selection
+                    output count selected_hashes selected_output))))
+      (return (call rf_bloom_probe_scalar words block_mask hashes selection
+                output count)))))

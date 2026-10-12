@@ -366,7 +366,7 @@ public:
     // Returns a dispatch lambda that calls the compiled kernel.
     TFilterDispatch CompileFilter(const NKernel::TOperatorKernelSpec& spec);
 
-    // Entry points follow TRuntimeFilterKernels::Entrypoints().
+    // Entry points follow RuntimeFilterKernelEntrypoints.
     std::shared_ptr<TKernelSlot> CompileRuntimeFilter();
 
     // Compiles a project kernel for the computed (non-ident) projections.

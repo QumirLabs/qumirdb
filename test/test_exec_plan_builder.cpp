@@ -1,7 +1,6 @@
 #include <gtest/gtest.h>
 
 #include "mock_source.h"
-#include "runtime_filter_test_util.h"
 
 #include <qdb/exec/plan_builder.h>
 #include <qdb/exec/runtime_filter.h>
@@ -86,15 +85,16 @@ private:
 class TRecordingFilterBindingFactory final : public IRuntimeFilterBindingFactory {
 public:
     TRuntimeFilterBinding Create(
-        uint32_t id, size_t producerCount, size_t bloomBytes) override {
+        uint32_t id, size_t producerCount, size_t bloomBytes,
+        std::shared_ptr<TRuntimeContext> runtimeContext) override {
         Created.emplace_back(id, producerCount);
-        return Local_.Create(id, producerCount, bloomBytes);
+        return Local_.Create(id, producerCount, bloomBytes, std::move(runtimeContext));
     }
 
     std::vector<std::pair<uint32_t, size_t>> Created;
 
 private:
-    TLocalRuntimeFilterBindingFactory Local_{NTest::RuntimeFilterContext()};
+    TLocalRuntimeFilterBindingFactory Local_;
 };
 
 TJoinOperator* FindJoin(const TOperatorPtr& node) {

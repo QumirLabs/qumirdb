@@ -1,7 +1,6 @@
 #pragma once
 
-#include <qdb/exec/runtime_filter_kernels.h>
-
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -15,6 +14,31 @@ namespace NQdb {
 
 struct TRuntimeContext;
 
+// The runtime-filter kernel (qdb/kernel/join/runtime_filter.oz) implements
+// every operation on filter contents; these are its entry points, in
+// TKernelSlot::Fns order. C++ provides the storage and calls it once per batch.
+inline constexpr std::array<const char*, 3> RuntimeFilterKernelEntrypoints = {
+    "rf_build", "rf_publish", "rf_probe"};
+
+// Mirrors RuntimeFilterBuild in the kernel, which documents the fields.
+struct TRuntimeFilterBuildState {
+    enum class EMode : int64_t { Collecting, Deduplicating, Overflowing, Bloom };
+    enum class EWant : int64_t { Nothing, CompactionStorage, BloomStorage };
+
+    int64_t MaxKeys = 0;
+    EMode Mode = EMode::Collecting;
+    EWant Want = EWant::Nothing;
+    uint64_t* Keys = nullptr;
+    int64_t KeyCount = 0;
+    uint8_t* SetCtrl = nullptr;
+    uint64_t* SetSlots = nullptr;
+    int64_t SetCapacity = 0;
+    uint32_t* SortOrder = nullptr;
+    uint64_t* SortKeys = nullptr;
+    uint64_t* Bloom = nullptr;
+    int64_t BloomWords = -1;
+};
+
 // Value-only contribution, suitable for transfer to a remote merger.
 struct TRuntimeFilterPartial {
     std::vector<uint64_t> Hashes;
@@ -24,30 +48,29 @@ struct TRuntimeFilterPartial {
 };
 
 // Filters may return false positives, never false negatives. Builders are
-// task-local; consumer tasks wait for the complete merged filter. Filter
-// contents are read and written only by the runtime-filter kernel, which
-// runtimeContext must hold.
+// task-local; consumer tasks wait for the complete merged filter.
+// runtimeContext must hold the runtime-filter kernel.
 class TRuntimeFilterBuilder {
 public:
     TRuntimeFilterBuilder(std::shared_ptr<TRuntimeContext> runtimeContext,
         size_t maxKeys, size_t bloomBytes);
     // An empty selection selects every row.
     void Add(std::span<const uint64_t> hashes, std::span<const uint8_t> selection = {});
-    bool Overflowed() const { return Overflowed_; }
+    bool Overflowed() const { return State_.Mode == TRuntimeFilterBuildState::EMode::Bloom; }
     TRuntimeFilterPartial TakePartial() &&;
 
 private:
-    void Compact();
-    void OverflowToBloom();
+    void ProvideStorage(size_t rows);
 
     std::shared_ptr<TRuntimeContext> RuntimeContext_;
-    size_t MaxKeys_;
     size_t BloomBytes_;
-    std::vector<uint64_t> Hashes_;
-    TRuntimeFilterKeySet Seen_;
-    bool Deduplicating_ = false;
+    TRuntimeFilterBuildState State_;
+    std::vector<uint64_t> Keys_;
+    std::vector<uint8_t> SetCtrl_;
+    std::vector<uint64_t> SetSlots_;
+    std::vector<uint32_t> SortOrder_;
+    std::vector<uint64_t> SortKeys_;
     std::vector<uint64_t> BloomWords_;
-    bool Overflowed_ = false;
     uint64_t BuildRows_ = 0;
 };
 
@@ -101,11 +124,13 @@ struct TRuntimeFilterBinding {
 };
 
 // IDs are query-scoped; endpoints can also represent remote publication/probing.
+// runtimeContext belongs to the query and holds its runtime-filter kernel.
 class IRuntimeFilterBindingFactory {
 public:
     virtual ~IRuntimeFilterBindingFactory() = default;
     virtual TRuntimeFilterBinding Create(
-        uint32_t id, size_t producerCount, size_t bloomBytes) = 0;
+        uint32_t id, size_t producerCount, size_t bloomBytes,
+        std::shared_ptr<TRuntimeContext> runtimeContext) = 0;
 };
 
 struct TRuntimeFilterStats {
@@ -153,12 +178,13 @@ public:
     TRuntimeFilterStats StatsSnapshot() const;
 
 private:
-    enum class EKind { PassAll, Exact, Bloom };
+    // Values are the kernel's filter kinds.
+    enum class EKind : int64_t { PassAll, Exact, Bloom };
     // Written by the last producer, immutable after Ready_ is published.
     struct TPublishedData {
         EKind Kind = EKind::PassAll;
-        std::vector<uint64_t> Table;
-        std::vector<uint64_t> BloomWords;
+        // The exact table or the Bloom words.
+        std::vector<uint64_t> Words;
         TRuntimeFilterStats Stats;
     };
 
@@ -180,13 +206,9 @@ private:
 
 class TLocalRuntimeFilterBindingFactory final : public IRuntimeFilterBindingFactory {
 public:
-    explicit TLocalRuntimeFilterBindingFactory(
-        std::shared_ptr<TRuntimeContext> runtimeContext);
     TRuntimeFilterBinding Create(
-        uint32_t id, size_t producerCount, size_t bloomBytes) override;
-
-private:
-    std::shared_ptr<TRuntimeContext> RuntimeContext_;
+        uint32_t id, size_t producerCount, size_t bloomBytes,
+        std::shared_ptr<TRuntimeContext> runtimeContext) override;
 };
 
 } // namespace NQdb

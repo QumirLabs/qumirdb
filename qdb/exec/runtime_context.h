@@ -13,7 +13,7 @@ struct TKernelSlot;
 // and is the extension point for future query-scoped runtime state.
 struct TRuntimeContext {
     NKernel::TRegexRegistry Regexes;
-    // Set before any runtime filter is created (see TRuntimeFilterKernels).
+    // The query's runtime-filter kernel; set before any filter is created.
     std::shared_ptr<TKernelSlot> RuntimeFilterKernels;
 };
 

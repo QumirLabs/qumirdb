@@ -1,5 +1,7 @@
 #pragma once
 
+#include <gtest/gtest.h>
+
 #include <qdb/exec/runtime_context.h>
 #include <qdb/exec/runtime_filter.h>
 #include <qdb/kernel/compiler.h>
@@ -11,16 +13,18 @@
 
 namespace NQdb::NTest {
 
-// Runtime filters work only through the runtime-filter kernel. It is compiled
-// once per test process; LLVM must be initialized first (TLLVMInitializer).
-inline std::shared_ptr<TRuntimeContext> RuntimeFilterContext() {
-    static const std::shared_ptr<TRuntimeContext> context = [] {
-        auto context = std::make_shared<TRuntimeContext>();
-        context->RuntimeFilterKernels = TKernelCompiler().CompileRuntimeFilter();
-        return context;
-    }();
-    return context;
-}
+// Runtime filters work only through the runtime-filter kernel. Each test
+// compiles its own, the way lowering does for a query. LLVM must be
+// initialized first (TLLVMInitializer).
+class TRuntimeFilterTest : public testing::Test {
+protected:
+    void SetUp() override {
+        Context_ = std::make_shared<TRuntimeContext>();
+        Context_->RuntimeFilterKernels = TKernelCompiler().CompileRuntimeFilter();
+    }
+
+    std::shared_ptr<TRuntimeContext> Context_;
+};
 
 // Probes the way a consumer task does: an unpublished or inactive filter
 // passes every row. Returns one flag per hash.

@@ -7,7 +7,6 @@
 #include <qumir/parser/type.h>
 
 #include "plan_runner.h"
-#include "runtime_filter_test_util.h"
 #include <qdb/exec/runtime_filter.h>
 #include <qdb/io/io.h>
 #include <qdb/plan/ops/source.h>
@@ -51,13 +50,14 @@ public:
         : MaxKeys_(maxKeys), BloomBytes_(bloomBytes) {}
 
     TRuntimeFilterBinding Create(
-        uint32_t id, size_t producerCount, size_t bloomBytes) override {
+        uint32_t id, size_t producerCount, size_t bloomBytes,
+        std::shared_ptr<TRuntimeContext> runtimeContext) override {
         (void)id;
         (void)bloomBytes;
         ++Created;
         ProducerCount = producerCount;
         Filter = std::make_shared<TRuntimeFilter>(
-            NTest::RuntimeFilterContext(), MaxKeys_, BloomBytes_);
+            std::move(runtimeContext), MaxKeys_, BloomBytes_);
         Filter->SetProducerCount(producerCount);
         return {.Producer = Filter, .Probe = Filter};
     }
@@ -86,12 +86,12 @@ std::unique_ptr<TTestRuntime> PlanJoinWithSources(
             ? std::make_shared<TSourceOperator>(*source, std::string(path))
             : nullptr;
     };
-    NCore::TParser parser;
+    TParser parser;
     for (auto& [name, fn] : MakeRelParsers(std::move(opts))) {
         parser.NodeParsers[name] = std::move(fn);
     }
     std::istringstream in(sexp);
-    NCore::TTokenStream ts(in);
+    TTokenStream ts(in);
     auto parsed = parser.Parse(ts);
     if (!parsed) {
         throw std::runtime_error(parsed.error().ToString());
