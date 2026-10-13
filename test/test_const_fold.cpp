@@ -89,6 +89,13 @@ TEST(ConstFold, FoldsNullableIsNull) {
     EXPECT_EQ(FoldToInt("(call qdb_is_null (call nullable_from_value 5))"), 0);
 }
 
+TEST(ConstFold, LeavesNamedTypesOfTheArgumentUnresolved) {
+    auto expr = Parse("(call strlen (cast \"hello\" StringView))");
+    const std::string before = NCore::PrintAst(expr);
+    NQdb::ConstFold(expr);
+    EXPECT_EQ(NCore::PrintAst(expr), before);
+}
+
 TEST(ConstFold, LeavesOpenExpressionUntouched) {
     auto expr = Parse("(+ a 1)"); // free variable `a` -> not closed, left as-is
     auto folded = NQdb::ConstFold(expr);

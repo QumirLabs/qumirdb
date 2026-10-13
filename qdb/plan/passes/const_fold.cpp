@@ -38,6 +38,20 @@ std::optional<std::string> EvalClosed(const TExprPtr& expr, const TTypePtr& retT
     return (*compiled)->Eval({});
 }
 
+// CloneExpr shares types with the original, and compiling resolves named types
+// in place. Give the clone its own, so that folding leaves the caller's
+// expression as it was.
+void DetachNamedTypes(const TExprPtr& expr) {
+    if (auto maybeNamed = TMaybeType<TNamedType>(expr->Type)) {
+        expr->Type = std::make_shared<TNamedType>(*maybeNamed.Cast());
+    }
+    for (auto* child : expr->MutableChildren()) {
+        if (*child) {
+            DetachNamedTypes(*child);
+        }
+    }
+}
+
 TExprPtr LiteralFromResult(const std::string& s) {
     NQumir::TLocation loc{};
     if (s == "true") {
@@ -67,8 +81,10 @@ TExprPtr ConstFold(TExprPtr expr) {
     }
     // A closed expression can be typed against an empty input schema; expansion
     // rewrites SQL nullability/Decimal and yields the result type used to wrap it.
+    auto clone = CloneExpr(expr);
+    DetachNamedTypes(clone);
     auto [rewritten, rewrittenType] =
-        NKernel::ExpandKernelExpr(CloneExpr(expr), TStructType({}));
+        NKernel::ExpandKernelExpr(clone, TStructType({}));
     if (!rewrittenType) {
         return expr;
     }
