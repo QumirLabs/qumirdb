@@ -258,7 +258,11 @@ double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shar
             if (leftIdent && rightIdent) {
                 auto leftName = std::string(leftIdent.Cast()->Name);
                 auto rightName = std::string(rightIdent.Cast()->Name);
-                if (leftName == rightName) {
+                // NaN != NaN, so a float column keeps the general estimate below.
+                auto type = columnType(leftName);
+                const bool mayBeNaN = type
+                    && TMaybeType<TFloatType>(UnwrapNamedType(UnwrapNullableType(type)));
+                if (leftName == rightName && !mayBeNaN) {
                     // A column equals itself on every non-NULL row, whatever its
                     // NDV; `x != x` holds on no row.
                     auto it = inputStats->ColumnStats.find(leftName);

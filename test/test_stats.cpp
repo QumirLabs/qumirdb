@@ -520,12 +520,15 @@ TEST(StatsTest, JoinKeyNdvCollapse) {
     EXPECT_EQ(right.Stats_->ColumnStats.at("y")->Ndv.value_or(0), 10u);
 }
 
-// 1000 rows; x is i64, n is Nullable<i64> with 250 NULLs; ndv 100 each.
+// 1000 rows; x is i64, n is Nullable<i64> with 250 NULLs, f and g are f64;
+// ndv 100 each.
 class SelfEqualityStats : public ::testing::Test {
 protected:
     SelfEqualityStats() {
         Src.Cols[1].Type = std::make_shared<NQdb::TNullable>(Src.Cols[1].Type);
         Src.Stats_->ColumnStats.at("n")->NullCount = 250;
+        Src.Cols[2].Type = std::make_shared<NQumir::NAst::TFloatType>();
+        Src.Cols[3].Type = std::make_shared<NQumir::NAst::TFloatType>();
         Source = std::make_shared<NQdb::TSourceOperator>(Src, "");
         Source->SetAlias("t");
     }
@@ -537,7 +540,7 @@ protected:
         return NQdb::EstimateStats(*filter)->RowCount;
     }
 
-    TStatsSource Src{{{"x", 100}, {"n", 100}}, 1000};
+    TStatsSource Src{{{"x", 100}, {"n", 100}, {"f", 100}, {"g", 100}}, 1000};
     std::shared_ptr<NQdb::TSourceOperator> Source;
 };
 
@@ -550,6 +553,15 @@ TEST_F(SelfEqualityStats, ColumnEqualToItselfKeepsNonNullRows) {
 
 TEST_F(SelfEqualityStats, ColumnUnequalToItselfKeepsNoRows) {
     EXPECT_EQ(Rows("(!= |t.x| |t.x|)"), 1u); // estimates never go below one row
+}
+
+// A float column may hold NaN, which is unequal to itself, and the statistics
+// do not count NaNs. Its self-comparisons get the estimate of any two columns.
+TEST_F(SelfEqualityStats, FloatColumnKeepsTheGeneralEstimate) {
+    EXPECT_EQ(Rows("(== |t.f| |t.f|)"), Rows("(== |t.f| |t.g|)"));
+    EXPECT_EQ(Rows("(!= |t.f| |t.f|)"), Rows("(!= |t.f| |t.g|)"));
+    EXPECT_LT(Rows("(== |t.f| |t.f|)"), 1000u);
+    EXPECT_GT(Rows("(!= |t.f| |t.f|)"), 1u);
 }
 
 // The shape decorrelation leaves under a correlated aggregate (TPC-H Q17).
