@@ -6,6 +6,7 @@
 namespace NQdb {
 
 using namespace NQumir::NAst;
+using namespace NQumir::NAst::NLiterals;
 
 namespace {
 
@@ -16,10 +17,10 @@ TExprPtr Simplify(const TExprPtr& expr, const TStructType& schema) {
         return expr;
     }
     auto binary = maybeBinary.Cast();
-    if (binary->Operator == "&&" || binary->Operator == "||") {
+    if (binary->Operator == "&&"_op || binary->Operator == "||"_op) {
         auto left = Simplify(binary->Left, schema);
         auto right = Simplify(binary->Right, schema);
-        if (binary->Operator == "||") {
+        if (binary->Operator == "||"_op) {
             if (!left || !right) {
                 return nullptr;
             }
@@ -32,16 +33,20 @@ TExprPtr Simplify(const TExprPtr& expr, const TStructType& schema) {
         return std::make_shared<TBinaryExpr>(
             binary->Location, binary->Operator, std::move(left), std::move(right));
     }
-    if (binary->Operator != "==") {
+    if (binary->Operator != "=="_op) {
         return expr;
     }
-    auto left = TMaybeNode<TIdentExpr>(binary->Left);
-    auto right = TMaybeNode<TIdentExpr>(binary->Right);
-    if (!left || !right || left.Cast()->Name != right.Cast()->Name) {
+    auto maybeLeft = TMaybeNode<TIdentExpr>(binary->Left);
+    auto maybeRight = TMaybeNode<TIdentExpr>(binary->Right);
+    if (!maybeLeft || !maybeRight) {
+        return expr;
+    }
+    auto left = maybeLeft.Cast();
+    if (left->Name != maybeRight.Cast()->Name) {
         return expr;
     }
     for (const auto& [name, type] : schema.Fields) {
-        if (name != left.Cast()->Name) {
+        if (name != left->Name) {
             continue;
         }
         // NaN != NaN, so a float column does not equal itself on every row.
@@ -53,7 +58,7 @@ TExprPtr Simplify(const TExprPtr& expr, const TStructType& schema) {
         }
         // NULL = NULL is unknown, which the filter drops like FALSE.
         return std::make_shared<TUnaryExpr>(
-            binary->Location, TOperator("!"),
+            binary->Location, "!"_op,
             std::make_shared<TCallExpr>(
                 binary->Location,
                 std::make_shared<TIdentExpr>(binary->Location, "qdb_is_null"),
@@ -71,19 +76,20 @@ TOperatorPtr SimplifySelfEquality(TOperatorPtr root) {
     for (auto& input : root->MutableInputs()) {
         input = SimplifySelfEquality(input);
     }
-    auto filter = TMaybeOp<TFilterOperator>(root);
-    if (!filter) {
+    auto maybeFilter = TMaybeOp<TFilterOperator>(root);
+    if (!maybeFilter) {
         return root;
     }
-    auto schema = filter.Cast()->Input()->OutputColumns();
+    auto filter = maybeFilter.Cast();
+    auto schema = filter->Input()->OutputColumns();
     if (!schema) {
         return root;
     }
-    auto predicate = Simplify(filter.Cast()->Predicate(), *schema);
+    auto predicate = Simplify(filter->Predicate(), *schema);
     if (!predicate) {
-        return filter.Cast()->Input();
+        return filter->Input();
     }
-    filter.Cast()->MutablePredicate() = std::move(predicate);
+    filter->MutablePredicate() = std::move(predicate);
     return root;
 }
 

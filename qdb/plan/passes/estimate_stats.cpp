@@ -19,6 +19,7 @@
 namespace NQdb {
 
 using namespace NQumir::NAst;
+using namespace NQumir::NAst::NLiterals;
 
 double EstimateTypeWidth(const TTypePtr& type) {
     auto inner = UnwrapNamedType(UnwrapNullableType(type));
@@ -266,7 +267,7 @@ double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shar
                         : 0.0;
                     const double rows = std::max(
                         1.0, static_cast<double>(inputStats->RowCount));
-                    return binary->Operator == "!="
+                    return binary->Operator == "!="_op
                         ? 0.0
                         : 1.0 - std::min(1.0, nulls / rows);
                 }
