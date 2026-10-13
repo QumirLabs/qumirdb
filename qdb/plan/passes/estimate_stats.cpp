@@ -13,6 +13,8 @@
 #include <qdb/plan/ops/union.h>
 #include <qdb/plan/types/nullable.h>
 
+#include <qumir/parser/core/printer.h>
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -152,7 +154,9 @@ struct TColumnRange {
 
 // overSource: the input is a table scan, so its null counts and its row count
 // describe the same rows.
-double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shared_ptr<TStructType> operatorType, bool overSource) {
+double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shared_ptr<TStructType> operatorType,
+    bool overSource, TFoldedBounds& foldedBounds)
+{
     if (!operatorType) {
         return 0.5;
     }
@@ -171,12 +175,20 @@ double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shar
     };
 
     // A closed expression (typed literal, cast, date + interval) as a number.
-    auto constNumber = [](const TExprPtr& expr) -> std::shared_ptr<TNumberExpr> {
-        auto number = TMaybeNode<TNumberExpr>(expr);
-        if (!number) {
-            number = TMaybeNode<TNumberExpr>(ConstFold(expr));
+    auto constNumber = [&](const TExprPtr& expr) -> std::shared_ptr<TNumberExpr> {
+        if (auto number = TMaybeNode<TNumberExpr>(expr)) {
+            return number.Cast();
         }
-        return number ? number.Cast() : nullptr;
+        if (!isConstExpr(expr)) {
+            return nullptr;
+        }
+        auto [it, inserted] = foldedBounds.try_emplace(NCore::PrintAst(expr));
+        if (inserted) {
+            if (auto folded = TMaybeNode<TNumberExpr>(ConstFold(expr))) {
+                it->second = folded.Cast();
+            }
+        }
+        return it->second;
     };
 
     // Fraction of rows with the column <= bound, or < bound when strict.
@@ -309,7 +321,8 @@ double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shar
     if (auto maybeUnary = TMaybeNode<TUnaryExpr>(atom)) {
         auto unary = maybeUnary.Cast();
         if (unary->Operator == "!"_op) {
-            return 1.0 - EstimateSelectivity(unary->Operand, inputStats, operatorType, overSource);
+            return 1.0 - EstimateSelectivity(
+                unary->Operand, inputStats, operatorType, overSource, foldedBounds);
         }
     }
 
@@ -367,7 +380,8 @@ double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shar
                         range.Lower = std::max(range.Lower.value_or(0.0), bound->Below);
                     }
                 } else {
-                    selectivity *= EstimateSelectivity(conjunct, inputStats, operatorType, overSource);
+                    selectivity *= EstimateSelectivity(
+                        conjunct, inputStats, operatorType, overSource, foldedBounds);
                 }
             }
             for (const auto& [column, range] : ranges) {
@@ -457,14 +471,14 @@ double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shar
     return 0.5; // fallback selectivity for unknown atoms
 }
 
-TStatsPtr ComputeFilterStats(const std::shared_ptr<TFilterOperator>& filter) {
+TStatsPtr ComputeFilterStats(const std::shared_ptr<TFilterOperator>& filter, TFoldedBounds& foldedBounds) {
     auto inputStats = filter->Input()->Stats_;
     if (!inputStats) {
         return nullptr;
     }
     double selectivity = EstimateSelectivity(filter->Predicate(), inputStats,
         TMaybeType<TStructType>(filter->Input()->OutputColumns()).Cast(),
-        TMaybeOp<TSourceOperator>(filter->Input()));
+        TMaybeOp<TSourceOperator>(filter->Input()), foldedBounds);
     selectivity = std::clamp(selectivity, 0.0, 1.0);
     auto outputStats = std::make_shared<TStats>();
     outputStats->ColumnStats = inputStats->ColumnStats;
@@ -761,7 +775,7 @@ TStatsPtr ComputeAggregateStats(const std::shared_ptr<TAggregateOperator>& aggre
     return outputStats;
 }
 
-TStatsPtr ComputeStatsFor(TOperatorPtr op) {
+TStatsPtr ComputeStatsFor(TOperatorPtr op, TFoldedBounds& foldedBounds) {
     if (auto source = TMaybeOp<TSourceOperator>(op)) {
         return ComputeSourceStats(source.Cast());
     }
@@ -773,7 +787,7 @@ TStatsPtr ComputeStatsFor(TOperatorPtr op) {
     }
 
     if (auto maybeFilter = TMaybeOp<TFilterOperator>(op)) {
-        return ComputeFilterStats(maybeFilter.Cast());
+        return ComputeFilterStats(maybeFilter.Cast(), foldedBounds);
     }
     if (auto maybeProject = TMaybeOp<TProjectOperator>(op)) {
         return ComputeProjectStats(maybeProject.Cast());
@@ -838,12 +852,17 @@ TJoinCardinality EstimateEquiJoin(
     return {rows, ndvL, ndvR};
 }
 
-TStatsPtr EstimateStats(TOperatorPtr op) {
+TStatsPtr EstimateStats(TOperatorPtr op, TFoldedBounds& foldedBounds) {
     for (const auto& input : op->Inputs()) {
-        input->Stats_ = EstimateStats(input);
+        input->Stats_ = EstimateStats(input, foldedBounds);
     }
 
-    return op->Stats_ = ComputeStatsFor(op);
+    return op->Stats_ = ComputeStatsFor(op, foldedBounds);
+}
+
+TStatsPtr EstimateStats(TOperatorPtr op) {
+    TFoldedBounds foldedBounds;
+    return EstimateStats(op, foldedBounds);
 }
 
 } // namespace NQdb

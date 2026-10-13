@@ -2,14 +2,26 @@
 
 #include <qdb/plan/ops/operator.h>
 
+#include <qumir/parser/ast.h>
 #include <qumir/parser/type.h>
 
+#include <memory>
+#include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
 namespace NQdb {
 
+// Closed comparison bounds already folded to numbers, by printed expression;
+// null for a bound that is not a number. Folding compiles the bound and the
+// planner estimates a plan several times, so the estimates of one query share
+// one set and each bound is folded once.
+using TFoldedBounds = std::unordered_map<
+    std::string, std::shared_ptr<NQumir::NAst::TNumberExpr>>;
+
 TStatsPtr EstimateStats(TOperatorPtr op);
+TStatsPtr EstimateStats(TOperatorPtr op, TFoldedBounds& foldedBounds);
 
 // Width estimate used by the CBO cost model. Strings are costed as the
 // materialized StringView (ptr + size), not as their payload bytes.

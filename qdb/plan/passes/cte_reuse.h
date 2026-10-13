@@ -2,6 +2,7 @@
 
 #include <qdb/plan/ops/cte_ref.h>
 #include <qdb/plan/ops/operator.h>
+#include <qdb/plan/passes/estimate_stats.h>
 
 #include <string>
 #include <unordered_map>
@@ -32,7 +33,8 @@ using TCteReuseDecisions = std::unordered_map<TCteDefinition*, TCteReuseDecision
 // PushDownPredicates. Run after main+definition optimization, before ChooseCteReuse.
 void PushConsumerPredicatesIntoDefinitions(
     const TOperatorPtr& main,
-    const NKernel::TAnnotationContext& context);
+    const NKernel::TAnnotationContext& context,
+    TFoldedBounds& foldedBounds);
 
 // >=2 references -> Materialize, else Inline.
 TCteReuseDecisions ChooseCteReuse(const TCteUsageMap& usage);
