@@ -172,10 +172,11 @@ double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shar
 
     // A closed expression (typed literal, cast, date + interval) as a number.
     auto constNumber = [](const TExprPtr& expr) -> std::shared_ptr<TNumberExpr> {
-        if (auto number = TMaybeNode<TNumberExpr>(expr)) {
-            return number.Cast();
+        auto number = TMaybeNode<TNumberExpr>(expr);
+        if (!number) {
+            number = TMaybeNode<TNumberExpr>(ConstFold(expr));
         }
-        return TMaybeNode<TNumberExpr>(ConstFold(expr)).Cast();
+        return number ? number.Cast() : nullptr;
     };
 
     // Fraction of rows with the column <= bound, or < bound when strict.
@@ -219,14 +220,14 @@ double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shar
             return std::nullopt;
         }
         auto binary = maybeBinary.Cast();
-        const bool less = binary->Operator == "<" || binary->Operator == "<=";
-        const bool greater = binary->Operator == ">" || binary->Operator == ">=";
+        const bool less = binary->Operator == "<"_op || binary->Operator == "<="_op;
+        const bool greater = binary->Operator == ">"_op || binary->Operator == ">="_op;
         if (!less && !greater) {
             return std::nullopt;
         }
         // An upper bound keeps the rows below it and a lower bound drops
         // them, so `<` and `>=` count the rows strictly below the constant.
-        const bool inclusive = binary->Operator == "<=" || binary->Operator == ">=";
+        const bool inclusive = binary->Operator == "<="_op || binary->Operator == ">="_op;
         // `col OP const`
         if (auto leftIdent = TMaybeNode<TIdentExpr>(binary->Left)) {
             auto name = std::string(leftIdent.Cast()->Name);
@@ -305,7 +306,7 @@ double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shar
 
     if (auto maybeUnary = TMaybeNode<TUnaryExpr>(atom)) {
         auto unary = maybeUnary.Cast();
-        if (unary->Operator == "!") {
+        if (unary->Operator == "!"_op) {
             return 1.0 - EstimateSelectivity(unary->Operand, inputStats, operatorType, overSource);
         }
     }
@@ -313,12 +314,13 @@ double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shar
     // col LIKE pattern -> qdb_string_view_sql_like; assume high selectivity.
     if (auto maybeCall = TMaybeNode<TCallExpr>(atom)) {
         auto call = maybeCall.Cast();
-        if (auto callee = TMaybeNode<TIdentExpr>(call->Callee)) {
-            if (callee.Cast()->Name == "qdb_string_view_sql_like") {
+        if (auto maybeCallee = TMaybeNode<TIdentExpr>(call->Callee)) {
+            auto callee = maybeCallee.Cast();
+            if (callee->Name == "qdb_string_view_sql_like") {
                 return LikeSelectivity;
             }
             // col IS NULL -> qdb_is_null(col): the share of nulls in the table.
-            if (callee.Cast()->Name == "qdb_is_null" && call->Args.size() == 1
+            if (callee->Name == "qdb_is_null" && call->Args.size() == 1
                 && overSource && inputStats->RowCount > 0)
             {
                 if (auto column = TMaybeNode<TIdentExpr>(call->Args[0])) {
@@ -334,7 +336,7 @@ double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shar
 
     if (auto maybeBinary = TMaybeNode<TBinaryExpr>(atom)) {
         auto binary = maybeBinary.Cast();
-        if (binary->Operator == "&&") {
+        if (binary->Operator == "&&"_op) {
             std::vector<TExprPtr> conjuncts;
             FlattenConjuncts(atom, conjuncts);
             // Bounds on one column form one range. Multiplying them as
