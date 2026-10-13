@@ -186,15 +186,17 @@ double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shar
         bool strict) -> std::optional<double>
     {
         auto colIt = inputStats->ColumnStats.find(colName);
-        // Check the histogram first: evaluating the bound is the costly step.
-        if (colIt == inputStats->ColumnStats.end() || colIt->second->Histogram.empty()) {
+        auto type = columnType(colName);
+        // Check the statistics first: evaluating the bound is the costly step.
+        if (colIt == inputStats->ColumnStats.end() || colIt->second->Histogram.empty()
+            || !(TMaybeType<TFloatType>(type) || TMaybeType<TIntegerType>(type)))
+        {
             return std::nullopt;
         }
         auto num = constNumber(bound);
         if (!num) {
             return std::nullopt;
         }
-        auto type = columnType(colName);
         if (TMaybeType<TFloatType>(type)) {
             double c = num->IsFloat()
                 ? num->FloatValue
@@ -253,10 +255,6 @@ double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shar
         if (!colStats->MinValue || !colStats->MaxValue) {
             return std::nullopt;
         }
-        auto number = constNumber(expr);
-        if (!number) {
-            return std::nullopt;
-        }
         bool isIntegerType = false;
         bool isSigned = false;
         bool isFloatType = false;
@@ -272,6 +270,10 @@ double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shar
                 }
                 break;
             }
+        }
+        auto number = constNumber(expr);
+        if (!number) {
+            return std::nullopt;
         }
         if (isIntegerType) {
             if (number->IsFloat()) {
