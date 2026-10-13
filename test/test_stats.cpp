@@ -2,6 +2,7 @@
 
 #include <qdb/io/parquet/source.h>
 #include <qdb/exec/planner_helpers.h>
+#include <qdb/plan/build.h>
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
@@ -14,13 +15,17 @@
 #include <qdb/plan/passes/typing.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/scheduler/plan_lowerer.h>
+#include <qdb/sql/parser.h>
 
 #include <qumir/parser/core/printer.h>
 #include <qumir/parser/type.h>
 
 #include <bit>
 #include <cstdint>
+#include <expected>
 #include <memory>
+#include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -296,6 +301,67 @@ TEST(StatsTest, FilterSelectivityPropagation) {
     EXPECT_LE(plan->Stats_->RowCount, 300u);
     EXPECT_TRUE(sourceOp->RowGroupPredicate());
     EXPECT_TRUE(NQdb::TMaybeOp<NQdb::TFilterOperator>(plan));
+}
+
+namespace {
+
+// Estimates `SELECT x FROM t WHERE <predicate>` over 1000 rows. Columns x and
+// y are i64, uniform on [0, 1000) with 100 distinct values; z has no histogram.
+class SelectivityTest : public ::testing::Test {
+protected:
+    SelectivityTest() {
+        Source_.Stats_->ColumnStats.at("z")->Histogram.clear();
+    }
+
+    uint64_t Rows(const std::string& predicate) {
+        std::istringstream in("SELECT x FROM t WHERE " + predicate);
+        NQdb::NSql::TTokenStream tokens(in);
+        NQdb::NSql::TParser parser;
+        auto parsed = parser.Parse(tokens);
+        if (!parsed) {
+            throw std::runtime_error(parsed.error().ToString());
+        }
+        auto plan = NQdb::BuildPlan(*parsed, [&](std::string_view table)
+            -> std::expected<NQdb::TOperatorPtr, NQumir::TError>
+        {
+            return std::make_shared<NQdb::TSourceOperator>(Source_, std::string(table));
+        });
+        if (!plan) {
+            throw std::runtime_error(plan.error().ToString());
+        }
+        NQdb::ApplyPlanPasses(*plan);
+        if (!(*plan)->Stats_) {
+            throw std::runtime_error("no stats for: " + predicate);
+        }
+        return (*plan)->Stats_->RowCount;
+    }
+
+    TStatsSource Source_{{{"x", 100}, {"y", 100}, {"z", 100}}};
+};
+
+} // namespace
+
+TEST_F(SelectivityTest, ConstantExpressionBoundUsesHistogram) {
+    const uint64_t literal = Rows("x < 250");
+    EXPECT_NEAR(literal, 250, 1);
+    // The same bound spelled as a constant expression.
+    EXPECT_EQ(Rows("x < 200 + 50"), literal);
+    EXPECT_EQ(Rows("200 + 50 > x"), literal);
+    EXPECT_EQ(Rows("x < cast(250 as bigint)"), literal);
+    EXPECT_EQ(Rows("x < date '1970-01-01' + interval '250' day"), literal);
+}
+
+TEST_F(SelectivityTest, ConstantExpressionOutsideColumnRangeMatchesNothing) {
+    EXPECT_EQ(Rows("x = 2000 + 1"), 1u);
+    // Inside the range it is one of the 100 distinct values.
+    EXPECT_NEAR(Rows("x = 200 + 1"), 10, 1);
+}
+
+TEST_F(SelectivityTest, UnknownBoundKeepsDefaultSelectivity) {
+    // Not a constant.
+    EXPECT_EQ(Rows("x < y + 250"), 500u);
+    // A constant, but the column has no histogram to place it in.
+    EXPECT_EQ(Rows("z < 200 + 50"), 500u);
 }
 
 TEST(StatsTest, AggregateStatsAccountForGroupingSets) {

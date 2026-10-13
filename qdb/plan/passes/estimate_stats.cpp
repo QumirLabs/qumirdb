@@ -1,4 +1,5 @@
 #include "estimate_stats.h"
+#include "const_fold.h"
 #include "flatten_conjuncts.h"
 #include "unbound_vars.h"
 
@@ -137,8 +138,6 @@ double JoinKeyWidth(const TOperatorPtr& left, const TOperatorPtr& right,
 constexpr double LikeSelectivity = 0.05;
 
 double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shared_ptr<TStructType> operatorType) {
-    // TODO: eval consts
-
     if (!operatorType) {
         return 0.5;
     }
@@ -156,12 +155,25 @@ double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shar
         return nullptr;
     };
 
+    // A closed expression (typed literal, cast, date + interval) as a number.
+    auto constNumber = [](const TExprPtr& expr) -> std::shared_ptr<TNumberExpr> {
+        if (auto number = TMaybeNode<TNumberExpr>(expr)) {
+            return number.Cast();
+        }
+        return TMaybeNode<TNumberExpr>(ConstFold(expr)).Cast();
+    };
+
     auto fractionBelow = [&](
         const std::string& colName,
-        const std::shared_ptr<TNumberExpr>& num) -> std::optional<double>
+        const TExprPtr& bound) -> std::optional<double>
     {
         auto colIt = inputStats->ColumnStats.find(colName);
-        if (colIt == inputStats->ColumnStats.end()) {
+        // Check the histogram first: evaluating the bound is the costly step.
+        if (colIt == inputStats->ColumnStats.end() || colIt->second->Histogram.empty()) {
+            return std::nullopt;
+        }
+        auto num = constNumber(bound);
+        if (!num) {
             return std::nullopt;
         }
         auto type = columnType(colName);
@@ -188,8 +200,8 @@ double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shar
         if (!colStats->MinValue || !colStats->MaxValue) {
             return std::nullopt;
         }
-        auto maybeNumber = TMaybeNode<TNumberExpr>(expr);
-        if (!maybeNumber) {
+        auto number = constNumber(expr);
+        if (!number) {
             return std::nullopt;
         }
         bool isIntegerType = false;
@@ -208,7 +220,6 @@ double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shar
                 break;
             }
         }
-        auto number = maybeNumber.Cast();
         if (isIntegerType) {
             if (number->IsFloat()) {
                 if (isSigned) {
@@ -322,17 +333,15 @@ double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shar
             const bool greater = binary->Operator == ">" || binary->Operator == ">=";
             auto leftIdent = TMaybeNode<TIdentExpr>(binary->Left);
             auto rightIdent = TMaybeNode<TIdentExpr>(binary->Right);
-            auto leftNumber = TMaybeNode<TNumberExpr>(binary->Left);
-            auto rightNumber = TMaybeNode<TNumberExpr>(binary->Right);
             // `col OP const`
-            if (leftIdent && rightNumber) {
-                if (auto f = fractionBelow(std::string(leftIdent.Cast()->Name), rightNumber.Cast())) {
+            if (leftIdent) {
+                if (auto f = fractionBelow(std::string(leftIdent.Cast()->Name), binary->Right)) {
                     return greater ? 1.0 - *f : *f;
                 }
             }
             // `const OP col`  ==  `col (flip OP) const`
-            if (rightIdent && leftNumber) {
-                if (auto f = fractionBelow(std::string(rightIdent.Cast()->Name), leftNumber.Cast())) {
+            if (rightIdent) {
+                if (auto f = fractionBelow(std::string(rightIdent.Cast()->Name), binary->Left)) {
                     return greater ? *f : 1.0 - *f;
                 }
             }
