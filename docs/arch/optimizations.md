@@ -148,6 +148,8 @@ project (a)
 
 The correlated predicate is replaced by an equi-join on the correlation column,
 so the subquery is evaluated once per distinct value instead of once per row.
+What is left of it inside the subquery is `v.a = v.a`: the outer column was
+renamed onto the subquery's own one. `SimplifySelfEquality` (§2.2) removes it.
 
 ## 2. Pipeline passes
 
@@ -159,7 +161,40 @@ idempotent; `AnnotateTypes` re-runs after each structural rewrite.
 Only with the cost-based optimizer (default; `--nocbo` disables it). Collapses a
 left-deep inner-join chain into one region so DPccp can reassociate it freely.
 
-### 2.2 PushDownPredicates — `plan/passes/equijoin.cpp`
+### 2.2 SimplifySelfEquality — `plan/passes/self_equality.cpp`
+
+A filter that compares a column with itself only rejects NULLs, but the
+estimator would cost it as an equality of two columns, `1/NDV`. Decorrelation
+leaves such a comparison in every correlated scalar subquery (§1.5), so the pass
+runs before predicate pushdown and the first `EstimateStats`:
+
+| column | `col = col` becomes |
+|---|---|
+| non-nullable | `TRUE`; a filter left with nothing else is removed |
+| nullable | `col IS NOT NULL` |
+| float | unchanged: `NaN = NaN` is false |
+
+```sql
+SELECT t.a FROM t WHERE t.c > (SELECT avg(v.e) FROM v WHERE v.a = t.a);
+```
+
+```
+before                                    after (v.a is non-nullable)
+aggregate keys=[v.a] aggs=[...]           aggregate keys=[v.a] aggs=[...]
+└─ filter (== |v.a| |v.a|)                └─ source v.parquet AS v
+   └─ source v.parquet AS v
+```
+
+Only plain column references are matched, and only along the AND/OR spine of a
+filter predicate. There a NULL result and FALSE both drop the row, so
+`(v.a = v.a AND p) OR q` may become `(v.a IS NOT NULL AND p) OR q`. Under `NOT`
+or any other operator the comparison is kept: `NOT (NULL = NULL)` is unknown,
+while `NOT (v.a IS NOT NULL)` would be true.
+
+A comparison that is kept is estimated by `EstimateStats` as the non-NULL
+fraction of the column, never through its NDV.
+
+### 2.3 PushDownPredicates — `plan/passes/equijoin.cpp`
 
 A conjunction above a join is split per side: conjuncts referencing only one
 side sink onto that side, the rest stays above as a residual. This is the
@@ -228,7 +263,7 @@ filter (== |x.tag| "s")                     project (x.a, x.tag)
 
 The `u` branch, the union and the filter all disappear.
 
-### 2.3 ReorderJoins — `plan/passes/join_order.cpp`, `plan/passes/cbo/dpccp.cpp`
+### 2.4 ReorderJoins — `plan/passes/join_order.cpp`, `plan/passes/cbo/dpccp.cpp`
 
 Turns a cross-join chain into a connected order, threading equalities down the
 chain; with the CBO on, DPccp picks the order by estimated cost using
@@ -247,7 +282,7 @@ join inner                        join inner
 └─ source u AS u                  └─ source v AS v        (rows≈3)
 ```
 
-### 2.4 ExtractEquiJoins — `plan/passes/equijoin.cpp`
+### 2.5 ExtractEquiJoins — `plan/passes/equijoin.cpp`
 
 Lifts equalities out of the residual filter into join keys, using equivalence
 classes: `t.a = u.a AND u.a = v.a` yields a key for the upper join even though
@@ -307,7 +342,7 @@ Each `nation` scan gets `n_name = 'FRANCE' OR n_name = 'UNITED KINGDOM'`, so 23
 of 25 nations — and everything joined through them — are dropped before the
 join, while the pairing condition is still enforced by the residual above.
 
-### 2.5 PushDownSemiJoins — `plan/passes/join_order.cpp`
+### 2.6 PushDownSemiJoins — `plan/passes/join_order.cpp`
 
 A semi join whose keys touch one side of an inner join below it is pushed onto
 that side, so the semi filter shrinks the input before the inner join runs.
@@ -325,7 +360,7 @@ join left_semi [t.a = u.a]          join inner [t.a = v.a]
 └─ source u AS u                    └─ source v AS v
 ```
 
-### 2.6 PushDownLimits — `plan/passes/push_limit.cpp`
+### 2.7 PushDownLimits — `plan/passes/push_limit.cpp`
 
 `LIMIT` sinks through row-preserving projections down to the source, so the scan
 stops early instead of after the whole projection chain.
@@ -343,7 +378,7 @@ limit                     project (a)
          └─ source t                └─ source t AS t
 ```
 
-### 2.7 ApplyTopSort — `plan/passes/top_sort.cpp`
+### 2.8 ApplyTopSort — `plan/passes/top_sort.cpp`
 
 `limit(sort(...))` collapses into a single top-K operator, which keeps a bounded
 heap instead of materializing and sorting the whole input.
@@ -360,7 +395,7 @@ limit 2                                project (a)
       └─ source t AS t                       └─ source t AS t
 ```
 
-### 2.8 ApplyColumnPruning — `plan/passes/column_pruning.cpp`
+### 2.9 ApplyColumnPruning — `plan/passes/column_pruning.cpp`
 
 Narrows each operator's required input columns, which for a Parquet source means
 fewer column chunks are read. It does not change the tree shape, so it shows up
@@ -534,7 +569,7 @@ keys does not turn into a malloc storm. See [aggregation.md](aggregation.md).
 
 - `plan/passes/const_fold.cpp` — `ConstFold` is a helper, not a pipeline pass.
   Its only production caller is `plan/passes/equijoin.cpp:403`, inside the
-  UNION ALL pushdown of §2.2: a conjunct cloned into a branch, with closed
+  UNION ALL pushdown of §2.3: a conjunct cloned into a branch, with closed
   projections substituted for its columns, is folded to decide whether the
   branch is dead, needs the filter, or trivially satisfies it.
 - `AssignSourceAliases`, `QualifyColumns`, `AnnotateTypes`,

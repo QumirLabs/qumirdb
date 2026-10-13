@@ -12,6 +12,7 @@
 #include <qdb/plan/passes/estimate_stats.h>
 #include <qdb/plan/passes/row_group_predicate.h>
 #include <qdb/plan/passes/typing.h>
+#include <qdb/plan/types/nullable.h>
 #include <qdb/scheduler/plan_lowerer.h>
 
 #include <qumir/parser/core/printer.h>
@@ -517,6 +518,64 @@ TEST(StatsTest, JoinKeyNdvCollapse) {
     // copy-on-write: the source's own (shared) stats must NOT have been mutated
     EXPECT_EQ(left.Stats_->ColumnStats.at("x")->Ndv.value_or(0), 100u);
     EXPECT_EQ(right.Stats_->ColumnStats.at("y")->Ndv.value_or(0), 10u);
+}
+
+// 1000 rows; x is i64, n is Nullable<i64> with 250 NULLs, f and g are f64;
+// ndv 100 each.
+class SelfEqualityStats : public ::testing::Test {
+protected:
+    SelfEqualityStats() {
+        Src.Cols[1].Type = std::make_shared<NQdb::TNullable>(Src.Cols[1].Type);
+        Src.Stats_->ColumnStats.at("n")->NullCount = 250;
+        Src.Cols[2].Type = std::make_shared<NQumir::NAst::TFloatType>();
+        Src.Cols[3].Type = std::make_shared<NQumir::NAst::TFloatType>();
+        Source = std::make_shared<NQdb::TSourceOperator>(Src, "");
+        Source->SetAlias("t");
+    }
+
+    // Row estimate of a filter over the source, with the predicate as written.
+    uint64_t Rows(const std::string& predicate) {
+        auto filter = NQdb::MakeFilter(Source, predicate);
+        EXPECT_TRUE(filter.has_value()) << filter.error().ToString();
+        return NQdb::EstimateStats(*filter)->RowCount;
+    }
+
+    TStatsSource Src{{{"x", 100}, {"n", 100}, {"f", 100}, {"g", 100}}, 1000};
+    std::shared_ptr<NQdb::TSourceOperator> Source;
+};
+
+TEST_F(SelfEqualityStats, ColumnEqualToItselfKeepsNonNullRows) {
+    EXPECT_EQ(Rows("(== |t.x| |t.x|)"), 1000u);
+    EXPECT_EQ(Rows("(== |t.n| |t.n|)"), 750u);
+    // Two different columns are still estimated through NDV.
+    EXPECT_EQ(Rows("(== |t.x| |t.n|)"), 10u);
+}
+
+TEST_F(SelfEqualityStats, ColumnUnequalToItselfKeepsNoRows) {
+    EXPECT_EQ(Rows("(!= |t.x| |t.x|)"), 1u); // estimates never go below one row
+}
+
+// A float column may hold NaN, which is unequal to itself, and the statistics
+// do not count NaNs. Its self-comparisons get the estimate of any two columns.
+TEST_F(SelfEqualityStats, FloatColumnKeepsTheGeneralEstimate) {
+    EXPECT_EQ(Rows("(== |t.f| |t.f|)"), Rows("(== |t.f| |t.g|)"));
+    EXPECT_EQ(Rows("(!= |t.f| |t.f|)"), Rows("(!= |t.f| |t.g|)"));
+    EXPECT_LT(Rows("(== |t.f| |t.f|)"), 1000u);
+    EXPECT_GT(Rows("(!= |t.f| |t.f|)"), 1u);
+}
+
+// The shape decorrelation leaves under a correlated aggregate (TPC-H Q17).
+TEST_F(SelfEqualityStats, GroupEstimateIsNotCappedBySelfEquality) {
+    auto filter = NQdb::MakeFilter(
+        std::make_shared<NQdb::TSourceOperator>(Src, "t"), "(== x x)");
+    ASSERT_TRUE(filter.has_value()) << filter.error().ToString();
+    NQdb::TOperatorPtr plan = std::make_shared<NQdb::TAggregateOperator>(
+        *filter, std::vector<std::string>{"x"}, std::vector<NQdb::TAggregateSpec>{});
+
+    NQdb::ApplyPlanPasses(plan);
+
+    ASSERT_TRUE(plan->Stats_);
+    EXPECT_EQ(plan->Stats_->RowCount, 100u); // one group per distinct x
 }
 
 int main(int argc, char** argv) {

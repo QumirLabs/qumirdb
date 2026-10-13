@@ -77,7 +77,8 @@ filter.
 Rewrite of the subquery:
 - `GROUP BY` each `localCol`;
 - prepend `localCol AS __corr_N_k__` to its SELECT (a fresh, unambiguous name);
-- `WHERE` keeps only the local predicates.
+- `WHERE` keeps the local predicates; each correlation equality is renamed
+  to `localCol = localCol`.
 
 Then `LEFT JOIN` the outer node with the rewritten subquery on
 `outerCol == __corr_N_k__`, and rename the original single output to
@@ -113,6 +114,12 @@ chain. Reorder threads the filter's equalities **through** the LEFT join so the
 inner chain still reorders connectedly; equijoin pushes the preserved-side
 conjuncts down and keeps the scalar comparison above the join. See the q2 example
 in [join_reorder.md](join_reorder.md).
+
+The renamed equality `localCol = localCol` only rejects NULL keys, which the
+join would not match anyway. `SimplifySelfEquality` drops it for a non-nullable
+column and turns it into `localCol IS NOT NULL` for a nullable one before
+statistics are estimated, so it is not costed as a selective predicate
+([optimizations.md](optimizations.md)).
 
 ## Limits
 
