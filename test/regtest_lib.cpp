@@ -880,12 +880,23 @@ TCaseResult CheckCase(const TQueryCase& test, bool canonize) {
         std::istringstream input(ReadAll(test.Sql));
         return {ComparePlan(test, BuildPlanText(input), canonize), std::nullopt};
     }
+    const char* timingEnv = std::getenv("QDB_REGTEST_TIMING");
+    const bool timing = timingEnv && *timingEnv && std::string_view(timingEnv) != "0";
+    const auto started = std::chrono::steady_clock::now();
+    auto point = started;
+    auto mark = [&]() {
+        const auto now = std::chrono::steady_clock::now();
+        const auto elapsed = std::chrono::duration<double, std::milli>(now - point).count();
+        point = now;
+        return elapsed;
+    };
     std::vector<std::unique_ptr<TParquetSource>> sources;
     std::istringstream input(ReadAll(test.Sql));
     NSql::TTokenStream tokens(input);
     NSql::TParser parser;
     auto parsed = parser.Parse(tokens);
     if (!parsed) throw std::runtime_error(parsed.error().ToString());
+    const auto parseMs = mark();
     auto plan = BuildPlan(*parsed, [&](std::string_view table)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
@@ -900,10 +911,13 @@ TCaseResult CheckCase(const TQueryCase& test, bool canonize) {
         return std::make_shared<TSourceOperator>(*source, std::string(table));
     });
     if (!plan) throw std::runtime_error(plan.error().ToString());
+    const auto buildMs = mark();
     ApplyPlanPasses(*plan);
+    const auto optimizeMs = mark();
     std::ostringstream planOutput;
     PrintPlanTreeWithCtes(planOutput, *plan);
     const auto planComparison = ComparePlan(test, planOutput.str(), canonize);
+    const auto planGoldenMs = mark();
     NScheduler::TSettings settings;
     settings.Scheduler.Mode = test.Variant == "single"
         ? NScheduler::EExecutionMode::SingleThreadedScheduler
@@ -911,7 +925,9 @@ TCaseResult CheckCase(const TQueryCase& test, bool canonize) {
     settings.Scheduler.WorkerCount = test.Variant == "single" ? 1 : 4;
     settings.ScanSplit.Strategy = NScheduler::EScanSplitStrategy::RowGroupRange;
     settings.ScanSplit.MaxScanTasks = test.Variant == "single" ? 1 : 4;
-    auto runtime = RunPlan(*plan, settings);
+    TPlanRunTimings runTimings;
+    auto runtime = RunPlan(*plan, settings, nullptr, nullptr, timing ? &runTimings : nullptr);
+    mark();
     auto actual = Result(*runtime);
     Normalize(actual, test.Ordered);
     TValue expected = nullptr;
@@ -923,7 +939,18 @@ TCaseResult CheckCase(const TQueryCase& test, bool canonize) {
         if (!expected.getAsObject()) throw std::runtime_error("result golden must be an object");
         Normalize(expected, test.Ordered);
     }
-    return {planComparison, TComparison{actual == expected, RenderResult(actual), RenderResult(expected)}};
+    auto comparison = TComparison{actual == expected, RenderResult(actual), RenderResult(expected)};
+    const auto resultGoldenMs = mark();
+    if (timing) {
+        const auto totalMs = std::chrono::duration<double, std::milli>(point - started).count();
+        std::cerr << "[regtest-timing] query=" << test.Base.string() << " variant=" << test.Variant
+            << " read_parse_ms=" << parseMs << " build_plan_ms=" << buildMs
+            << " optimize_ms=" << optimizeMs << " plan_golden_ms=" << planGoldenMs
+            << " lower_ms=" << runTimings.LowerMs << " jit_ms=" << runTimings.JitMs
+            << " execute_ms=" << runTimings.ExecuteMs << " result_golden_ms=" << resultGoldenMs
+            << " total_ms=" << totalMs << '\n';
+    }
+    return {planComparison, std::move(comparison)};
 }
 
 void CommitGoldens(const std::vector<TQueryCase>& tests) {

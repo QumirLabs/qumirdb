@@ -6,9 +6,11 @@
 // one-line change (`RunPlan(root[, settings])` instead of building a planner).
 
 #include <qdb/io/io.h>
+#include <qdb/kernel/finalize.h>
 #include <qdb/scheduler/plan_lowerer.h>
 #include <qdb/scheduler/settings.h>
 
+#include <chrono>
 #include <memory>
 #include <stdexcept>
 #include <utility>
@@ -68,22 +70,44 @@ public:
 
 } // namespace NTestDetail
 
+struct TPlanRunTimings {
+    double LowerMs = 0;
+    double JitMs = 0;
+    double ExecuteMs = 0;
+};
+
 inline std::unique_ptr<TTestRuntime> RunPlan(
     const TOperatorPtr& root,
     NScheduler::TSettings settings = {},
     std::shared_ptr<const TExternalCatalogSnapshot> externalCatalog = nullptr,
-    std::shared_ptr<IRuntimeFilterBindingFactory> filterBindings = nullptr)
+    std::shared_ptr<IRuntimeFilterBindingFactory> filterBindings = nullptr,
+    TPlanRunTimings* timings = nullptr)
 {
+    using TClock = std::chrono::steady_clock;
+    auto started = timings ? TClock::now() : TClock::time_point{};
     auto lowered = NScheduler::LowerPlanToGraph(
         root, settings, nullptr, std::move(externalCatalog),
         std::move(filterBindings));
     auto outputType = lowered.OutputType;
+
+    if (timings) {
+        auto now = TClock::now();
+        timings->LowerMs = std::chrono::duration<double, std::milli>(now - started).count();
+        started = now;
+        JitFinalizeKernels(lowered.Kernels, nullptr, lowered.ExternalCatalog);
+        now = TClock::now();
+        timings->JitMs = std::chrono::duration<double, std::milli>(now - started).count();
+        started = now;
+    }
 
     NTestDetail::TCollectingSink sink;
     std::string error;
     if (!NScheduler::RunPlanIntoSink(
             std::move(lowered), sink, settings, nullptr, &error)) {
         throw std::runtime_error(error);
+    }
+    if (timings) {
+        timings->ExecuteMs = std::chrono::duration<double, std::milli>(TClock::now() - started).count();
     }
     return std::make_unique<TTestRuntime>(
         std::move(sink.RowSets), std::move(outputType));
