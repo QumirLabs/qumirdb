@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "schema": "<struct (id i64) (a <named Nullable [i64]>) (b i32) (label <named Nullable [string]>) (enabled <named Nullable [bool]>) (score <named Nullable [f64]>)>",
+  "rows": [
+    ["1", "2", 10, "two", true, 1.5],
+    ["2", null, 20, null, null, null],
+    ["3", "1", 30, "quote\"\nline", false, -2.0],
+    ["4", "2", 40, "duplicate", true, 0.0],
+    ["5", "3", 50, "", false, 42.0],
+    ["6", null, 60, null, null, 1.0]
+  ],
+  "stats": {
+    "columns": [
+      {"name": "id", "ndv": 6, "ndv_exact": true},
+      {"name": "a", "ndv": 3, "ndv_exact": true, "histogram": [1, 1, 2, 2, 3]},
+      {"name": "b", "ndv": 6, "ndv_exact": true}
+    ]
+  }
+}

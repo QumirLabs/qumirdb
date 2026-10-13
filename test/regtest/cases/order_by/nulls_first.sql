@@ -1,0 +1,1 @@
+SELECT a AS a, id AS id FROM t ORDER BY a NULLS FIRST, id ASC;

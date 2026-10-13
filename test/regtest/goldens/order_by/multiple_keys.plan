@@ -1,0 +1,3 @@
+sort [a asc nulls-last, b desc]
+└─ project (a, b) (rows≈6 cost≈144)
+   └─ source t AS t (rows≈6 cost≈72)

@@ -1,0 +1,1 @@
+SELECT a AS a FROM t WHERE a = 2;

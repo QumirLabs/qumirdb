@@ -1,163 +1,85 @@
-#include <gtest/gtest.h>
-#include "mock_source.h"
+#include "regtest_lib.h"
 
-#include <algorithm>
+#include <gtest/gtest.h>
+#include <qumir/codegen/llvm/llvm_initializer.h>
+
 #include <cstring>
 #include <filesystem>
-#include <fstream>
-#include <iterator>
+#include <iostream>
 #include <memory>
-#include <sstream>
+#include <set>
+#include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
-#include <qdb/io/schema.h>
-#include <qdb/plan/build.h>
-#include <qdb/plan/ops/source.h>
-#include <qdb/sexp/printer.h>
-#include <qdb/sql/parser.h>
-#include <qdb/sql/printer.h>
-
-#include <qumir/parser/core/printer.h>
-
 namespace fs = std::filesystem;
-
-using namespace NQdb;
 
 namespace {
 
 fs::path RootDir = "regtest";
 fs::path CasesDir = RootDir / "cases";
 fs::path GoldensDir = RootDir / "goldens";
-
+std::vector<NRegTest::TQueryCase> AstCases;
 bool updateGoldens = false;
 bool printOutput = false;
 
-std::string ReadAll(const fs::path& p) {
-    std::ifstream in(p, std::ios::binary);
-    return std::string((std::istreambuf_iterator<char>(in)), {});
-}
-
-void WriteAll(const fs::path& p, const std::string& s) {
-    std::cerr << "Updating golden file: " << p << "\n";
-    fs::create_directories(p.parent_path());
-    std::ofstream out(p, std::ios::binary);
-    out << s;
-}
-
-struct ProgCase { fs::path base; }; // base without extension
-
-std::vector<ProgCase> Collect(const fs::path& root, std::string_view extension = ".sql") {
-    std::vector<ProgCase> v;
-    if (!fs::exists(root)) {
-        return v;
-    }
-    auto casePath = [&](const fs::path& p) {
-        auto rel = fs::relative(p, root);
-        return rel.replace_extension();
-    };
-    for (auto& e : fs::recursive_directory_iterator(root)) {
-        if (e.is_regular_file() && e.path().extension() == extension) {
-            v.push_back({ casePath(e.path()) });
-        }
-    }
-    std::sort(v.begin(), v.end(),
-        [](auto& a, auto& b){ return a.base.string() < b.base.string(); });
-    return v;
-}
-
-std::string NameFromPath(const fs::path& p) {
-    std::string s = p.string();
-    for (auto& c : s) {
-        if (c == '/' || c == '\\' || c == '.') {
-            c = '_';
-        }
-    }
-    return s;
-}
-
-std::string BuildAst(std::istream& in) {
-    NSql::TTokenStream ts(in);
-    NSql::TParser parser;
-
-    auto parsed = parser.Parse(ts);
-    if (!parsed) {
-        return parsed.error().ToString() + "\n";
-    }
-    return NSql::PrintAst(parsed.value());
-}
-
-std::string BuildPlan(std::istream& in) {
-    NSql::TTokenStream ts(in);
-    NSql::TParser parser;
-
-    auto parsed = parser.Parse(ts);
-    if (!parsed) {
-        return parsed.error().ToString() + "\n";
-    }
-
-    std::vector<std::unique_ptr<NQdb::TMockSource>> sources;
-    auto factory = [&](std::string_view table)
-        -> std::expected<NQdb::TOperatorPtr, NQumir::TError>
-    {
-        auto& source = sources.emplace_back(std::make_unique<NQdb::TMockSource>());
-        return std::make_shared<NQdb::TSourceOperator>(*source, std::string(table));
-    };
-
-    auto plan = NQdb::BuildPlan(parsed.value(), factory);
-    if (!plan) {
-        return plan.error().ToString() + "\n";
-    }
-
-    std::ostringstream out;
-    NQdb::NSexp::PrintRelPlan(out, plan.value());
-    out << "\n";
-    return out.str();
-}
-
-void CheckGolden(const fs::path& base, std::string_view extension, const std::string& got) {
-    const fs::path src = fs::path(CasesDir / base).replace_extension(".sql");
-    const fs::path golden = fs::path(GoldensDir / base).replace_extension(extension);
-
-    if (printOutput) {
-        std::cout << "=== " << src << " (" << extension << ") ===\n" << got << "\n";
-    }
-    if (updateGoldens) {
-        WriteAll(golden, got);
-    }
-    if (!fs::exists(golden)) {
-        std::cerr << "Missing golden file: " << golden << "\n";
-        FAIL();
-    }
-    EXPECT_EQ(got, ReadAll(golden));
-}
-
 } // namespace
 
-class RegAst : public ::testing::TestWithParam<ProgCase> {};
-class RegPlan : public ::testing::TestWithParam<ProgCase> {};
+class RegAst : public ::testing::TestWithParam<NRegTest::TQueryCase> {};
 
 TEST_P(RegAst, Ast) {
-    std::istringstream input(ReadAll(fs::path(CasesDir / GetParam().base).replace_extension(".sql")));
-    CheckGolden(GetParam().base, ".ast", BuildAst(input));
-}
-
-TEST_P(RegPlan, Plan) {
-    std::istringstream input(ReadAll(fs::path(CasesDir / GetParam().base).replace_extension(".sql")));
-    CheckGolden(GetParam().base, ".plan", BuildPlan(input));
+    const auto result = NRegTest::CheckAst(GetParam(), updateGoldens);
+    if (printOutput) {
+        std::cout << "=== " << GetParam().Sql << " (.ast) ===\n" << result.Actual;
+    }
+    EXPECT_EQ(result.Expected, result.Actual);
 }
 
 INSTANTIATE_TEST_SUITE_P(
     RegProgAst,
     RegAst,
-    ::testing::ValuesIn(Collect(CasesDir)),
-    [](const ::testing::TestParamInfo<ProgCase>& i){ return "AST_" + NameFromPath(i.param.base); });
+    ::testing::ValuesIn(AstCases),
+    [](const ::testing::TestParamInfo<NRegTest::TQueryCase>& test) {
+        return "AST_" + NRegTest::TestName(test.param.Base);
+    });
 
-INSTANTIATE_TEST_SUITE_P(
-    RegProgPlan,
-    RegPlan,
-    ::testing::ValuesIn(Collect(CasesDir)),
-    [](const ::testing::TestParamInfo<ProgCase>& i){ return "PLAN_" + NameFromPath(i.param.base); });
+class RegQuery : public ::testing::Test {
+public:
+    explicit RegQuery(NRegTest::TQueryCase test) : Case(std::move(test)) {}
+
+private:
+    void TestBody() override {
+        const auto result = NRegTest::CheckCase(Case, updateGoldens);
+        if (printOutput) {
+            std::cout << "=== " << Case.Sql << " (.plan, " << Case.Variant << ") ===\n"
+                << result.Plan.Actual;
+            if (result.Result) {
+                std::cout << "=== " << Case.Sql << " (.result.json, " << Case.Variant << ") ===\n"
+                    << result.Result->Actual;
+            }
+        }
+        EXPECT_TRUE(result.Plan.Matches) << "SQL: " << Case.Sql << "\nGolden: " << Case.PlanGolden
+            << "\nExpected:\n" << result.Plan.Expected << "Actual:\n" << result.Plan.Actual;
+        if (result.Result) {
+            EXPECT_TRUE(result.Result->Matches) << "SQL: " << Case.Sql << "\nGolden: " << Case.Golden
+                << "\nExpected:\n" << result.Result->Expected << "Actual:\n" << result.Result->Actual;
+        }
+    }
+
+    NRegTest::TQueryCase Case;
+};
+
+class RegQueryEnvironment : public ::testing::Environment {
+public:
+    std::vector<std::pair<NRegTest::TQueryCase, const ::testing::TestInfo*>> Cases;
+
+    void SetUp() override {
+        for (const auto& [test, info] : Cases) {
+            if (info->should_run()) NRegTest::PrepareCase(test);
+        }
+    }
+};
 
 int main(int argc, char** argv) {
     if (argc > 1 && argv[1][0] != '-') {
@@ -166,12 +88,29 @@ int main(int argc, char** argv) {
         GoldensDir = RootDir / "goldens";
     }
     for (int i = 1; i < argc; ++i) {
-        if (!strcmp(argv[i], "--canonize")) {
-            updateGoldens = true;
-        } else if (!strcmp(argv[i], "--print")) {
-            printOutput = true;
-        }
+        if (!strcmp(argv[i], "--canonize")) updateGoldens = true;
+        else if (!strcmp(argv[i], "--print")) printOutput = true;
     }
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
+    try {
+        const auto cases = NRegTest::CollectCases(CasesDir, GoldensDir);
+        auto environment = std::make_unique<RegQueryEnvironment>();
+        std::set<std::string> names;
+        for (const auto& test : cases) {
+            if (!test.Suite) AstCases.push_back(test);
+            const auto name = NRegTest::TestName(test.Base) + "_" + test.Variant;
+            if (!names.insert(name).second) throw std::runtime_error("duplicate query test name: " + name);
+            const auto* info = ::testing::RegisterTest("RegQuery", name.c_str(),
+                nullptr, nullptr, __FILE__, __LINE__, [test]() { return new RegQuery(test); });
+            environment->Cases.emplace_back(test, info);
+        }
+        ::testing::AddGlobalTestEnvironment(environment.release());
+        ::testing::InitGoogleTest(&argc, argv);
+        NQumir::NCodeGen::TLLVMInitializer llvmInit;
+        const auto result = RUN_ALL_TESTS();
+        if (result == 0 && updateGoldens) NRegTest::CommitGoldens(cases);
+        return result;
+    } catch (const std::exception& error) {
+        std::cerr << "Regression test setup failed: " << error.what() << '\n';
+        return 1;
+    }
 }
