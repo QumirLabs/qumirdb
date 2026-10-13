@@ -137,6 +137,19 @@ double JoinKeyWidth(const TOperatorPtr& left, const TOperatorPtr& right,
 
 constexpr double LikeSelectivity = 0.05;
 
+// One side of a range on a column.
+struct TRangeBound {
+    std::string Column;
+    bool Upper = false; // `col < c` or `col <= c`
+    double Below = 0.0; // fraction of rows below the bound
+};
+
+// Fractions of rows below the two ends of a range on a column.
+struct TColumnRange {
+    std::optional<double> Lower;
+    std::optional<double> Upper;
+};
+
 double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shared_ptr<TStructType> operatorType) {
     if (!operatorType) {
         return 0.5;
@@ -163,9 +176,11 @@ double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shar
         return TMaybeNode<TNumberExpr>(ConstFold(expr)).Cast();
     };
 
+    // Fraction of rows with the column <= bound, or < bound when strict.
     auto fractionBelow = [&](
         const std::string& colName,
-        const TExprPtr& bound) -> std::optional<double>
+        const TExprPtr& bound,
+        bool strict) -> std::optional<double>
     {
         auto colIt = inputStats->ColumnStats.find(colName);
         // Check the histogram first: evaluating the bound is the costly step.
@@ -181,13 +196,48 @@ double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shar
             double c = num->IsFloat()
                 ? num->FloatValue
                 : static_cast<double>(num->IntValue);
-            return colIt->second->FractionBelow(c);
+            return colIt->second->FractionBelow(c, strict);
         }
         if (TMaybeType<TIntegerType>(type)) {
-            int64_t c = num->IsFloat()
-                ? static_cast<int64_t>(num->FloatValue)
-                : num->IntValue;
-            return colIt->second->FractionBelow(c);
+            if (num->IsFloat()) {
+                // An integer is below 24.5 exactly when it is <= 24.
+                const double whole = std::floor(num->FloatValue);
+                return colIt->second->FractionBelow(
+                    static_cast<int64_t>(whole), strict && whole == num->FloatValue);
+            }
+            return colIt->second->FractionBelow(num->IntValue, strict);
+        }
+        return std::nullopt;
+    };
+
+    // `col OP const` or `const OP col` over a column with a histogram.
+    auto rangeBound = [&](const TExprPtr& expr) -> std::optional<TRangeBound> {
+        auto maybeBinary = TMaybeNode<TBinaryExpr>(expr);
+        if (!maybeBinary) {
+            return std::nullopt;
+        }
+        auto binary = maybeBinary.Cast();
+        const bool less = binary->Operator == "<" || binary->Operator == "<=";
+        const bool greater = binary->Operator == ">" || binary->Operator == ">=";
+        if (!less && !greater) {
+            return std::nullopt;
+        }
+        // An upper bound keeps the rows below it and a lower bound drops
+        // them, so `<` and `>=` count the rows strictly below the constant.
+        const bool inclusive = binary->Operator == "<=" || binary->Operator == ">=";
+        // `col OP const`
+        if (auto leftIdent = TMaybeNode<TIdentExpr>(binary->Left)) {
+            auto name = std::string(leftIdent.Cast()->Name);
+            if (auto f = fractionBelow(name, binary->Right, less != inclusive)) {
+                return TRangeBound{name, less, *f};
+            }
+        }
+        // `const OP col`  ==  `col (flip OP) const`
+        if (auto rightIdent = TMaybeNode<TIdentExpr>(binary->Right)) {
+            auto name = std::string(rightIdent.Cast()->Name);
+            if (auto f = fractionBelow(name, binary->Left, greater != inclusive)) {
+                return TRangeBound{name, greater, *f};
+            }
         }
         return std::nullopt;
     };
@@ -272,9 +322,31 @@ double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shar
         if (binary->Operator == "&&") {
             std::vector<TExprPtr> conjuncts;
             FlattenConjuncts(atom, conjuncts);
+            // Bounds on one column form one range. Multiplying them as
+            // independent predicates distorts a narrow range a lot.
+            std::map<std::string, TColumnRange> ranges;
             double selectivity = 1.0;
             for (const auto& conjunct : conjuncts) {
-                selectivity *= EstimateSelectivity(conjunct, inputStats, operatorType);
+                if (auto bound = rangeBound(conjunct)) {
+                    auto& range = ranges[bound->Column];
+                    if (bound->Upper) {
+                        range.Upper = std::min(range.Upper.value_or(1.0), bound->Below);
+                    } else {
+                        range.Lower = std::max(range.Lower.value_or(0.0), bound->Below);
+                    }
+                } else {
+                    selectivity *= EstimateSelectivity(conjunct, inputStats, operatorType);
+                }
+            }
+            for (const auto& [column, range] : ranges) {
+                double fraction = range.Upper.value_or(1.0) - range.Lower.value_or(0.0);
+                if (range.Lower && range.Upper) {
+                    // The histogram cannot resolve a range narrower than a
+                    // bucket, but such a range still keeps a distinct value.
+                    auto ndv = inputStats->ColumnStats[column]->Ndv;
+                    fraction = std::max(fraction, ndv ? 1.0 / *ndv : 0.0);
+                }
+                selectivity *= fraction;
             }
             return selectivity;
         }
@@ -345,23 +417,8 @@ double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shar
             return selectivity;
         } // ==, !=
 
-        if (binary->Operator == "<" || binary->Operator == "<="
-            || binary->Operator == ">" || binary->Operator == ">=") {
-            const bool greater = binary->Operator == ">" || binary->Operator == ">=";
-            auto leftIdent = TMaybeNode<TIdentExpr>(binary->Left);
-            auto rightIdent = TMaybeNode<TIdentExpr>(binary->Right);
-            // `col OP const`
-            if (leftIdent) {
-                if (auto f = fractionBelow(std::string(leftIdent.Cast()->Name), binary->Right)) {
-                    return greater ? 1.0 - *f : *f;
-                }
-            }
-            // `const OP col`  ==  `col (flip OP) const`
-            if (rightIdent) {
-                if (auto f = fractionBelow(std::string(rightIdent.Cast()->Name), binary->Left)) {
-                    return greater ? *f : 1.0 - *f;
-                }
-            }
+        if (auto bound = rangeBound(atom)) {
+            return bound->Upper ? bound->Below : 1.0 - bound->Below;
         }
     }
 

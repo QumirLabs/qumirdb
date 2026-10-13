@@ -20,6 +20,7 @@
 #include <qumir/parser/core/printer.h>
 #include <qumir/parser/type.h>
 
+#include <algorithm>
 #include <bit>
 #include <cstdint>
 #include <expected>
@@ -307,13 +308,21 @@ namespace {
 
 // Estimates `SELECT x FROM t WHERE <predicate>` over 1000 rows. Columns x and
 // y are i64, uniform on [0, 1000) with 100 distinct values; z has no
-// histogram; s is a string.
+// histogram; s is a string; d holds the values 0..9, 100 rows each.
 class SelectivityTest : public ::testing::Test {
 protected:
     SelectivityTest() {
         Source_.Stats_->ColumnStats.at("z")->Histogram.clear();
         Source_.Stats_->ColumnStats.at("s")->Histogram.clear();
         Source_.Cols[3].Type = std::make_shared<NQumir::NAst::TStringType>();
+
+        auto& d = *Source_.Stats_->ColumnStats.at("d");
+        d.Ndv = 10;
+        d.MaxValue = std::bit_cast<uint64_t>(int64_t{9});
+        d.Histogram.clear();
+        for (int64_t i = 0; i <= 100; ++i) { // every value spans 10 buckets
+            d.Histogram.push_back(std::bit_cast<uint64_t>(std::min<int64_t>(i / 10, 9)));
+        }
     }
 
     uint64_t Rows(const std::string& predicate) {
@@ -339,7 +348,7 @@ protected:
         return (*plan)->Stats_->RowCount;
     }
 
-    TStatsSource Source_{{{"x", 100}, {"y", 100}, {"z", 100}, {"s", 100}}};
+    TStatsSource Source_{{{"x", 100}, {"y", 100}, {"z", 100}, {"s", 100}, {"d", 10}}};
 };
 
 } // namespace
@@ -365,6 +374,9 @@ TEST_F(SelectivityTest, UnknownBoundKeepsDefaultSelectivity) {
     EXPECT_EQ(Rows("x < y + 250"), 500u);
     // A constant, but the column has no histogram to place it in.
     EXPECT_EQ(Rows("z < 200 + 50"), 500u);
+    EXPECT_EQ(Rows("z >= 250 and z < 350"), 250u);
+    // Only the bound the statistics can place is estimated.
+    EXPECT_NEAR(Rows("x >= 250 and x < y"), 375, 1);
 }
 
 TEST_F(SelectivityTest, NotKeepsWhatItsOperandDrops) {
@@ -375,6 +387,37 @@ TEST_F(SelectivityTest, NotKeepsWhatItsOperandDrops) {
         EXPECT_NEAR(Rows(predicate) + Rows("not (" + predicate + ")"), 1000, 1)
             << predicate;
     }
+}
+
+TEST_F(SelectivityTest, BoundsOnOneColumnFormOneRange) {
+    // A tenth of the rows. As independent predicates the two bounds would
+    // keep 0.75 * 0.35 of them.
+    EXPECT_NEAR(Rows("x >= 250 and x < 350"), 100, 1);
+    EXPECT_NEAR(Rows("x between 250 and 350"), 100, 1);
+    EXPECT_NEAR(Rows("x >= date '1970-09-08'"
+        " and x < date '1970-09-08' + interval '100' day"), 100, 1);
+    // The tightest bounds win.
+    EXPECT_NEAR(Rows("x >= 100 and x >= 250 and x < 350 and x < 900"), 100, 1);
+    // Another column stays independent.
+    EXPECT_NEAR(Rows("x >= 250 and y < 500 and x < 350"), 50, 1);
+    EXPECT_NEAR(Rows("x not between 250 and 350"), 900, 1);
+}
+
+TEST_F(SelectivityTest, RangeBoundsRespectInclusiveness) {
+    // The histogram places a value to within a bucket, 10 rows.
+    EXPECT_NEAR(Rows("d between 3 and 5"), 300, 15);
+    EXPECT_NEAR(Rows("d > 3 and d < 5"), 100, 15);
+    EXPECT_NEAR(Rows("d >= 3 and d < 5"), 200, 15);
+    EXPECT_NEAR(Rows("d < 5"), 500, 15);
+    EXPECT_NEAR(Rows("d <= 5"), 600, 15);
+    // An integer is below 4.5 exactly when it is <= 4.
+    EXPECT_EQ(Rows("d < 4.5"), Rows("d <= 4"));
+    EXPECT_EQ(Rows("d >= 4.5"), Rows("d > 4"));
+}
+
+TEST_F(SelectivityTest, NarrowRangeKeepsOneDistinctValue) {
+    // Narrower than a histogram bucket: one of the 100 distinct values.
+    EXPECT_NEAR(Rows("x between 250 and 250"), 10, 1);
 }
 
 TEST(StatsTest, AggregateStatsAccountForGroupingSets) {
