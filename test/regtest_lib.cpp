@@ -27,8 +27,10 @@
 
 #include <algorithm>
 #include <charconv>
+#include <chrono>
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -48,6 +50,11 @@ using TObject = llvm::json::Object;
 using TArray = llvm::json::Array;
 
 namespace {
+
+bool TraceFixtures() {
+    const char* value = std::getenv("QDB_REGTEST_TRACE_FIXTURES");
+    return value && *value && std::string_view(value) != "0";
+}
 
 std::string ReadAll(const fs::path& path) {
     std::ifstream input(path, std::ios::binary);
@@ -515,6 +522,24 @@ std::string TestName(const fs::path& path) {
     return name;
 }
 
+fs::path InitializeJitCache(const char* executable) {
+    const char* configured = std::getenv("QDB_JIT_CACHE_DIR");
+    fs::path path;
+    if (configured && *configured) {
+        path = configured;
+    } else {
+        static int anchor;
+        const auto binary = llvm::sys::fs::getMainExecutable(executable, &anchor);
+        if (binary.empty()) throw std::runtime_error("cannot locate test_reg executable");
+        path = fs::path(binary).parent_path() / "test_reg_jit_cache";
+    }
+    fs::create_directories(path);
+    if (!(configured && *configured) && ::setenv("QDB_JIT_CACHE_DIR", path.c_str(), 1) != 0) {
+        throw std::runtime_error("cannot configure regression JIT cache");
+    }
+    return path;
+}
+
 TComparison CheckAst(const TQueryCase& test, bool canonize) {
     std::istringstream input(ReadAll(test.Sql));
     const auto actual = BuildAst(input);
@@ -550,13 +575,17 @@ struct TSuite {
             if (!fixture.Parquet.empty()) {
                 fixture.File = std::make_shared<TParquetFile>(fixture.Parquet.string());
                 fixture.PreparedPath = fixture.Parquet;
+                if (TraceFixtures()) std::cerr << "[regtest-fixture] opened " << fixture.Parquet << '\n';
                 return;
             }
             const auto identity = std::make_pair(fixture.Json, fixture.RowGroupRows);
             auto& [path, file] = Files[identity];
             if (!file) {
                 auto& table = Parsed[fixture.Json];
-                if (!table) table = ReadTable(fixture.Json);
+                if (!table) {
+                    table = ReadTable(fixture.Json);
+                    if (TraceFixtures()) std::cerr << "[regtest-fixture] parsed " << fixture.Json << '\n';
+                }
                 if (!Temp) Temp = std::make_unique<TTempDir>();
                 path = Temp->Path / (std::to_string(Files.size()) + ".parquet");
                 auto output = ArrowValue(arrow::io::FileOutputStream::Open(path.string()));
@@ -572,6 +601,10 @@ struct TSuite {
                 CheckArrow(writer->WriteTable(*table, fixture.RowGroupRows));
                 CheckArrow(writer->Close());
                 CheckArrow(output->Close());
+                if (TraceFixtures()) {
+                    std::cerr << "[regtest-fixture] generated " << fixture.Json << " -> " << path
+                        << " rows=" << table->num_rows() << " row_group_rows=" << fixture.RowGroupRows << '\n';
+                }
                 file = std::make_shared<TParquetFile>(path.string());
             }
             fixture.File = file;
@@ -697,9 +730,24 @@ std::vector<TQueryCase> CollectCases(const fs::path& root, const fs::path& golde
     return result;
 }
 
+void PrepareCases(std::span<const TQueryCase> tests) {
+    const auto started = std::chrono::steady_clock::now();
+    std::map<TSuite*, std::set<std::string>> selected;
+    for (const auto& test : tests) {
+        if (!test.Suite) continue;
+        for (const auto& [table, fixture] : test.Tables) {
+            if (selected[test.Suite.get()].insert(fixture).second) test.Suite->Prepare(fixture);
+        }
+    }
+    if (TraceFixtures()) {
+        const auto elapsed = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - started).count();
+        std::cerr << "[regtest-fixture] preparation cases=" << tests.size() << " elapsed_ms=" << elapsed << '\n';
+    }
+}
+
 void PrepareCase(const TQueryCase& test) {
-    if (!test.Suite) return;
-    for (const auto& [table, fixture] : test.Tables) test.Suite->Prepare(fixture);
+    PrepareCases(std::span(&test, 1));
 }
 
 TStatsPtr TableStats(const TQueryCase& test, const std::string& table) {

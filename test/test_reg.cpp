@@ -8,6 +8,7 @@
 #include <iostream>
 #include <memory>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -23,6 +24,18 @@ fs::path GoldensDir = RootDir / "goldens";
 std::vector<NRegTest::TQueryCase> AstCases;
 bool updateGoldens = false;
 bool printOutput = false;
+
+std::string ComparisonDiff(const NRegTest::TComparison& result) {
+    if (result.Matches) return {};
+    auto lines = [](const std::string& text) {
+        std::vector<std::string> result;
+        std::istringstream input(text);
+        for (std::string line; std::getline(input, line);) result.push_back(std::move(line));
+        return result;
+    };
+    return "--- expected\n+++ actual\n" + ::testing::internal::edit_distance::CreateUnifiedDiff(
+        lines(result.Expected), lines(result.Actual), 3);
+}
 
 } // namespace
 
@@ -60,10 +73,10 @@ private:
             }
         }
         EXPECT_TRUE(result.Plan.Matches) << "SQL: " << Case.Sql << "\nGolden: " << Case.PlanGolden
-            << "\nExpected:\n" << result.Plan.Expected << "Actual:\n" << result.Plan.Actual;
+            << "\nVariant: " << Case.Variant << '\n' << ComparisonDiff(result.Plan);
         if (result.Result) {
             EXPECT_TRUE(result.Result->Matches) << "SQL: " << Case.Sql << "\nGolden: " << Case.Golden
-                << "\nExpected:\n" << result.Result->Expected << "Actual:\n" << result.Result->Actual;
+                << "\nVariant: " << Case.Variant << '\n' << ComparisonDiff(*result.Result);
         }
     }
 
@@ -75,9 +88,11 @@ public:
     std::vector<std::pair<NRegTest::TQueryCase, const ::testing::TestInfo*>> Cases;
 
     void SetUp() override {
+        std::vector<NRegTest::TQueryCase> selected;
         for (const auto& [test, info] : Cases) {
-            if (info->should_run()) NRegTest::PrepareCase(test);
+            if (info->should_run()) selected.push_back(test);
         }
+        NRegTest::PrepareCases(selected);
     }
 };
 
@@ -106,6 +121,7 @@ int main(int argc, char** argv) {
         ::testing::AddGlobalTestEnvironment(environment.release());
         ::testing::InitGoogleTest(&argc, argv);
         NQumir::NCodeGen::TLLVMInitializer llvmInit;
+        NRegTest::InitializeJitCache(argv[0]);
         const auto result = RUN_ALL_TESTS();
         if (result == 0 && updateGoldens) NRegTest::CommitGoldens(cases);
         return result;
