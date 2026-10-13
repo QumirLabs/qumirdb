@@ -1,0 +1,7 @@
+project (a, b, c) (rows≈2 cost≈8.2K)
+└─ filter (== |t.c| __scalar_0__) (rows≈2 cost≈8.2K)
+   └─ join left [t.a = __corr_0_0__, t.b = __corr_0_1__] emit-filter 1 from left (rows≈4 cost≈8K)
+      ├─ source t AS t (rows≈4 cost≈96)
+      └─ project (__corr_0_0__, __corr_0_1__, __scalar_0__) (rows≈40 cost≈2.9K)
+         └─ aggregate keys=[v.a, v.b] aggs=[sum_0=sum] (rows≈40 cost≈1.9K)
+            └─ source v AS v use-filter 1 keys=[v.a, v.b] (rows≈40 cost≈960)

@@ -1,0 +1,8 @@
+project (a, c) (rows≈3 cost≈6.4K)
+└─ filter (== |t.c| __scalar_0__) (rows≈3 cost≈6.4K)
+   └─ join left [t.a = __corr_0_0__] emit-filter 1 from left (rows≈6 cost≈6.2K)
+      ├─ source t AS t (rows≈6 cost≈96)
+      └─ project (__corr_0_0__, __scalar_0__) (rows≈24 cost≈1.5K)
+         └─ aggregate keys=[v.a] aggs=[count_0=count] (rows≈24 cost≈1.2K)
+            └─ filter (! (call qdb_is_null |v.a|)) (rows≈24 cost≈768)
+               └─ source v AS v row-groups (! (call qdb_is_null |v.a|)) use-filter 1 keys=[v.a] (rows≈48 cost≈384)
