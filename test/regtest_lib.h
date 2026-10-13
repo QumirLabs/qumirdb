@@ -4,6 +4,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 #include <qdb/plan/ops/stats.h>
@@ -41,7 +42,10 @@ struct TCaseResult {
 std::vector<TQueryCase> CollectCases(
     const std::filesystem::path& casesDir,
     const std::filesystem::path& goldensDir);
-// Called once by the preparation environment, for selected cases only.
+// A persistent cache next to the executable, unless QDB_JIT_CACHE_DIR is set.
+std::filesystem::path InitializeJitCache(const char* executable);
+// Prepare each selected suite/fixture once, sharing files across cases and variants.
+void PrepareCases(std::span<const TQueryCase> tests);
 void PrepareCase(const TQueryCase& test);
 TComparison CheckAst(const TQueryCase& test, bool canonize);
 TCaseResult CheckCase(const TQueryCase& test, bool canonize);

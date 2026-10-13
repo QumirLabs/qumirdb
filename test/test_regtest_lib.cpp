@@ -208,6 +208,41 @@ TEST(RegSuiteInfrastructure, RelativeRootIsNormalized) {
     EXPECT_EQ(NRegTest::CollectCases(dir.CasesDir / ".", dir.GoldensDir / ".").size(), 1);
 }
 
+TEST(RegSuiteInfrastructure, SharesPreparedFixturesAcrossQueriesAliasesAndVariants) {
+    TCaseDirectory dir;
+    dir.Write("suite.json", R"({
+        "version":1,
+        "fixtures":{"data":{"json":"table.json"},"alias":{"json":"table.json"},
+                    "split":{"json":"table.json","parquet":{"row_group_rows":1}}},
+        "tables":{"t":"data"},"variants":["single","threaded"],
+        "cases":{"query.sql":{"order":"ordered"},
+                 "alias.sql":{"order":"ordered","tables":{"t":"alias"}},
+                 "split.sql":{"order":"ordered","tables":{"t":"split"}}}
+    })");
+    dir.Write("alias.sql", "SELECT v AS v FROM t ORDER BY v DESC;");
+    dir.Write("split.sql", "SELECT v AS v FROM t ORDER BY v DESC;");
+    const auto tests = dir.Collect();
+    ASSERT_EQ(tests.size(), 6);
+    NRegTest::PrepareCase(tests[0]);
+    const auto shared = NRegTest::TableFile(tests[0], "t");
+    // Further cases must use the parsed table and generated file even after
+    // the source disappears; a different row-group layout needs its own file.
+    fs::remove(dir.SuiteDir / "table.json");
+    NRegTest::PrepareCases(tests);
+    NRegTest::PrepareCases(tests);
+    const auto expected = NRegTest::CheckCase(tests[0], true).Result->Actual;
+    for (const auto& test : tests) {
+        const auto file = NRegTest::TableFile(test, "t");
+        EXPECT_TRUE(fs::is_regular_file(file));
+        if (test.Base.filename() == "split") EXPECT_NE(file, shared);
+        else EXPECT_EQ(file, shared);
+        const auto result = NRegTest::CheckCase(test, true);
+        ASSERT_TRUE(result.Result);
+        EXPECT_TRUE(result.Result->Matches);
+        EXPECT_EQ(result.Result->Actual, expected);
+    }
+}
+
 TEST(RegSuiteInfrastructure, GoldenPathMirrorsCasesOutsideCases) {
     TCaseDirectory dir;
     fs::copy(dir.SuiteDir, dir.CasesDir / "other", fs::copy_options::recursive);

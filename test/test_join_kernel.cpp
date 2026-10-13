@@ -780,10 +780,11 @@ TEST(JoinKernelGeneric, Int32KeyTriggersRehash) {
                                 int64_t, void *, TRowSet *, TRowSet *)>(
           rightFn);
 
-  // ~25 distinct int32 keys over 60 rows/side forces rehashes from capacity 4.
-  int seed = 12345;
+  // Enough distinct keys to rehash with either 8-slot or 16-slot groups.
+  // Unsigned arithmetic keeps the generator's wraparound well-defined.
+  uint32_t seed = 12345;
   auto rnd = [&]() {
-    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    seed = (seed * 1103515245u + 12345u) & 0x7fffffffu;
     return seed;
   };
   std::vector<int32_t> lk, rk;
@@ -1361,13 +1362,13 @@ TEST(JoinStringKey, SemiAntiClonesRightKeysAndSurvivesRehash) {
   TStructType leftType({{"lk", std::make_shared<TStringType>()}, {"lv", i64}});
   TStructType rightType({{"rk", std::make_shared<TStringType>()}});
 
-  // ~20 distinct string keys over 40 right rows force rehashes from
-  // capacity 4 and exercise owned-key cloning + carry across rehash.
+  // Enough distinct string keys to rehash with 8-slot or 16-slot groups,
+  // exercising owned-key cloning and carry across rehash.
   std::vector<std::string> leftKeys, rightKeys;
   std::vector<int64_t> lv;
-  int seed = 4242;
+  uint32_t seed = 4242;
   auto rnd = [&]() {
-    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    seed = (seed * 1103515245u + 12345u) & 0x7fffffffu;
     return seed;
   };
   for (int i = 0; i < 30; ++i) {
