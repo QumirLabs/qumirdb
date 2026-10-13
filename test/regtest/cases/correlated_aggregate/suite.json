@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "fixtures": {
+    "outer": {"json": "tables/outer.json", "parquet": {"row_group_rows": 2}},
+    "inner": {"json": "tables/inner.json", "parquet": {"row_group_rows": 8}},
+    "outer_pairs": {"json": "tables/outer_pairs.json", "parquet": {"row_group_rows": 2}},
+    "inner_pairs": {"json": "tables/inner_pairs.json", "parquet": {"row_group_rows": 8}}
+  },
+  "tables": {"t": "outer", "v": "inner"},
+  "variants": ["single", "threaded"],
+  "cases": {
+    "sum_matches.sql": {"order": "unordered"},
+    "min_matches.sql": {"order": "unordered"},
+    "avg_compares.sql": {"order": "unordered"},
+    "count_matches.sql": {"order": "unordered"},
+    "sum_over_no_rows.sql": {"order": "unordered"},
+    "min_over_no_rows.sql": {"order": "unordered"},
+    "avg_over_no_rows.sql": {"order": "unordered"},
+    "empty_domain.sql": {"order": "unordered"},
+    "non_nullable_key.sql": {
+      "tables": {"t": "outer_pairs", "v": "inner_pairs"},
+      "order": "unordered"
+    },
+    "composite_key.sql": {
+      "tables": {"t": "outer_pairs", "v": "inner_pairs"},
+      "order": "unordered"
+    }
+  }
+}
