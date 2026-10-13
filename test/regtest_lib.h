@@ -13,6 +13,11 @@ namespace NRegTest {
 
 struct TSuite;
 
+struct TFloatTolerance {
+    double Absolute = 1e-12;
+    double Relative = 1e-12;
+};
+
 struct TQueryCase {
     std::filesystem::path Base;
     std::filesystem::path Sql;
@@ -23,6 +28,7 @@ struct TQueryCase {
     std::string Variant;
     bool Ordered = true;
     bool Execute = true;
+    TFloatTolerance Tol;
 
     bool HasTables() const { return !Tables.empty(); }
 };
@@ -32,6 +38,10 @@ struct TComparison {
     std::string Actual;
     std::string Expected;
 };
+
+// Typed result comparison, also used for agreement between canonized variants.
+TComparison CompareResults(const std::string& actual, const std::string& expected,
+    bool ordered = true, TFloatTolerance tol = {});
 
 std::string TestName(const std::filesystem::path& path);
 

@@ -512,6 +512,32 @@ bool ExecuteOption(const TObject& object, bool fallback) {
     return *enabled;
 }
 
+void ValidateTolerance(TFloatTolerance tol) {
+    if (!std::isfinite(tol.Absolute) || tol.Absolute < 0
+        || !std::isfinite(tol.Relative) || tol.Relative < 0)
+    {
+        throw std::runtime_error("tol.abs and tol.rel must be finite nonnegative numbers");
+    }
+}
+
+TFloatTolerance ToleranceOption(const TObject& object, TFloatTolerance fallback) {
+    const auto* value = object.get("tol");
+    if (!value) return fallback;
+    const auto& options = Object(*value);
+    Fields(options, {"abs", "rel"});
+    auto read = [&](llvm::StringRef name, double& target) {
+        if (const auto* setting = options.get(name)) {
+            const auto number = setting->getAsNumber();
+            if (!number) throw std::runtime_error("tol." + name.str() + " must be a number");
+            target = *number;
+        }
+    };
+    read("abs", fallback.Absolute);
+    read("rel", fallback.Relative);
+    ValidateTolerance(fallback);
+    return fallback;
+}
+
 fs::path File(const fs::path& dir, const TValue& value) {
     const auto path = (dir / String(value)).lexically_normal();
     if (!fs::is_regular_file(path)) throw std::runtime_error("missing file " + path.string());
@@ -649,9 +675,10 @@ std::vector<TQueryCase> CollectCases(const fs::path& root, const fs::path& golde
         try {
             auto json = ReadJson(manifest);
             const auto& object = Object(json);
-            Fields(object, {"version", "fixtures", "tables", "variants", "cases", "execute"});
+            Fields(object, {"version", "fixtures", "tables", "variants", "cases", "execute", "tol"});
             Version(object);
             const bool suiteExecute = ExecuteOption(object, true);
+            const auto suiteTol = ToleranceOption(object, {});
             auto suite = std::make_shared<TSuite>();
             suite->Manifest = manifest;
             const auto dir = manifest.parent_path();
@@ -699,8 +726,9 @@ std::vector<TQueryCase> CollectCases(const fs::path& root, const fs::path& golde
             std::set<fs::path> queries;
             for (const auto& [name, value] : Object(Required(object, "cases"))) {
                 const auto& definition = Object(value);
-                Fields(definition, {"tables", "order", "execute"});
+                Fields(definition, {"tables", "order", "execute", "tol"});
                 const bool execute = ExecuteOption(definition, suiteExecute);
+                const auto tol = ToleranceOption(definition, suiteTol);
                 const auto sql = File(dir, TValue(name.str()));
                 if (sql.extension() != ".sql" || sql.parent_path() != dir) {
                     throw std::runtime_error("suite SQL cases must be .sql files in the manifest directory");
@@ -721,7 +749,7 @@ std::vector<TQueryCase> CollectCases(const fs::path& root, const fs::path& golde
                     ? std::set<std::string>{"plan"} : variants;
                 for (const auto& variant : caseVariants) {
                     result.push_back({base, sql, planGolden,
-                        golden, suite, bindings, variant, order == "ordered", execute});
+                        golden, suite, bindings, variant, order == "ordered", execute, tol});
                 }
             }
             for (const auto& entry : fs::directory_iterator(dir)) {
@@ -865,6 +893,7 @@ TValue Result(TTestRuntime& runtime) {
 }
 
 void Normalize(TValue& value, bool ordered) {
+    if (!value.getAsObject()) throw std::runtime_error("result must be an object");
     auto& object = *value.getAsObject();
     Fields(object, {"schema", "rows"});
     const auto schema = ParseSchema(Required(object, "schema"));
@@ -872,8 +901,16 @@ void Normalize(TValue& value, bool ordered) {
     auto* rows = object.getArray("rows");
     if (!rows) throw std::runtime_error("result rows must be an array");
     for (auto& row : *rows) {
-        const auto& values = Array(row);
-        if (values.size() != schema->Fields.size()) throw std::runtime_error("wrong result row width");
+        auto* values = row.getAsArray();
+        if (!values || values->size() != schema->Fields.size()) {
+            throw std::runtime_error("wrong result row width");
+        }
+        for (size_t column = 0; column < values->size(); ++column) {
+            auto& cell = (*values)[column];
+            if (!cell.getAsNull() && TMaybeType<TFloatType>(FieldType(schema->Fields[column].second).first)) {
+                cell = FloatJson(Float(cell));
+            }
+        }
     }
     if (!ordered) {
         std::sort(rows->begin(), rows->end(), [](const auto& a, const auto& b) {
@@ -882,7 +919,104 @@ void Normalize(TValue& value, bool ordered) {
     }
 }
 
+bool Close(double actual, double expected, TFloatTolerance tol) {
+    const double difference = std::abs(actual - expected);
+    if (difference <= tol.Absolute) return true;
+    const double scale = std::max(std::abs(actual), std::abs(expected));
+    // Scale the comparison to avoid overflow in either the difference or the
+    // relative threshold, including values with opposite signs near DBL_MAX.
+    const double scaledDifference = std::isfinite(difference)
+        ? difference / scale : std::abs(actual / scale - expected / scale);
+    return scaledDifference <= tol.Absolute / scale + tol.Relative;
+}
+
+bool ResultsMatch(const TValue& actual, const TValue& expected, bool ordered, TFloatTolerance tol) {
+    ValidateTolerance(tol);
+    if (actual == expected) return true;
+    const auto& a = Object(actual);
+    const auto& e = Object(expected);
+    if (Required(a, "schema") != Required(e, "schema")) return false;
+    const auto& actualRows = Array(Required(a, "rows"));
+    const auto& expectedRows = Array(Required(e, "rows"));
+    if (actualRows.size() != expectedRows.size()) return false;
+    const auto schema = ParseSchema(Required(a, "schema"));
+    std::vector<bool> floats;
+    for (const auto& [name, type] : schema->Fields) {
+        floats.push_back(static_cast<bool>(TMaybeType<TFloatType>(FieldType(type).first)));
+    }
+    if (std::none_of(floats.begin(), floats.end(), [](bool value) { return value; })) return false;
+    auto rowMatches = [&](const TValue& actualRow, const TValue& expectedRow) {
+        const auto& av = Array(actualRow);
+        const auto& ev = Array(expectedRow);
+        for (size_t column = 0; column < floats.size(); ++column) {
+            if (av[column] == ev[column]) continue;
+            if (!floats[column]) return false;
+            const auto an = av[column].getAsNumber();
+            const auto en = ev[column].getAsNumber();
+            // NULL and $float tags (NaN, infinities, signed zero) stay exact.
+            if (!an || !en || !Close(*an, *en, tol)) return false;
+        }
+        return true;
+    };
+    if (ordered) {
+        for (size_t row = 0; row < actualRows.size(); ++row) {
+            if (!rowMatches(actualRows[row], expectedRows[row])) return false;
+        }
+        return true;
+    }
+    // Approximate equality is not transitive: neither sorting and zipping nor
+    // greedy pairing can compare unordered results correctly. Find a complete
+    // one-to-one matching so that every occurrence, including duplicates, counts.
+    const size_t count = actualRows.size();
+    std::vector<std::vector<size_t>> candidates(count);
+    for (size_t row = 0; row < count; ++row) {
+        for (size_t other = 0; other < count; ++other) {
+            if (rowMatches(actualRows[row], expectedRows[other])) candidates[row].push_back(other);
+        }
+        if (candidates[row].empty()) return false;
+    }
+    std::vector<size_t> matched(count, count);
+    std::vector<bool> visited(count);
+    auto augment = [&](auto&& self, size_t row) -> bool {
+        for (const auto other : candidates[row]) {
+            if (!visited[other] && matched[other] == count) {
+                visited[other] = true;
+                matched[other] = row;
+                return true;
+            }
+        }
+        for (const auto other : candidates[row]) {
+            if (visited[other]) continue;
+            visited[other] = true;
+            if (self(self, matched[other])) {
+                matched[other] = row;
+                return true;
+            }
+        }
+        return false;
+    };
+    for (size_t row = 0; row < count; ++row) {
+        std::fill(visited.begin(), visited.end(), false);
+        if (!augment(augment, row)) return false;
+    }
+    return true;
+}
+
 } // namespace
+
+TComparison CompareResults(const std::string& actual, const std::string& expected,
+    bool ordered, TFloatTolerance tol)
+{
+    auto parse = [&](const std::string& text) {
+        auto value = llvm::json::parse(text);
+        if (!value) throw std::runtime_error(llvm::toString(value.takeError()));
+        Normalize(*value, ordered);
+        return std::move(*value);
+    };
+    const auto a = parse(actual);
+    const auto e = parse(expected);
+    return {ResultsMatch(a, e, ordered, tol), RenderResult(a), RenderResult(e)};
+}
 
 TCaseResult CheckCase(const TQueryCase& test, bool canonize) {
     if (!test.HasTables()) {
@@ -962,7 +1096,8 @@ TCaseResult CheckCase(const TQueryCase& test, bool canonize) {
         if (!expected.getAsObject()) throw std::runtime_error("result golden must be an object");
         Normalize(expected, test.Ordered);
     }
-    auto comparison = TComparison{actual == expected, RenderResult(actual), RenderResult(expected)};
+    auto comparison = TComparison{ResultsMatch(actual, expected, test.Ordered, test.Tol),
+        RenderResult(actual), RenderResult(expected)};
     const auto resultGoldenMs = mark();
     printTiming(runTimings, resultGoldenMs);
     return {planComparison, std::move(comparison)};
