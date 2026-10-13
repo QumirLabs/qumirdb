@@ -77,9 +77,17 @@ with `NCore::PrintType`, rather than `TStructType::ToString()`.
 {
   "version": 1,
   "schema": "<struct (id i64) (label <named Nullable [string]>)>",
-  "rows": [["1", "one"], ["2", null]]
+  "rows": [
+    ["1", "one"],
+    ["2", null]
+  ]
 }
 ```
+
+Result goldens and execution diagnostics print one complete result row per line,
+with spaces between cells. JSON escaping keeps newlines and quotes inside string
+values on that same line. Empty results print `"rows": []`. This presentation
+does not change typed comparison or row ordering.
 
 Nullable columns use a generic named `Nullable` wrapper. The writer turns the
 wrapper into Arrow field nullability; output serialization adapts QDB's

@@ -102,6 +102,27 @@ std::string Render(const TValue& value) {
     return llvm::formatv("{0:2}", value).str() + "\n";
 }
 
+std::string RenderResult(const TValue& value) {
+    const auto& object = Object(value);
+    const auto& rows = Array(Required(object, "rows"));
+    std::ostringstream output;
+    output << "{\n  \"version\": " << llvm::formatv("{0}", Required(object, "version")).str()
+        << ",\n  \"schema\": " << llvm::formatv("{0}", Required(object, "schema")).str()
+        << ",\n  \"rows\": [";
+    for (size_t row = 0; row < rows.size(); ++row) {
+        output << (row == 0 ? "\n" : ",\n") << "    [";
+        const auto& cells = Array(rows[row]);
+        for (size_t column = 0; column < cells.size(); ++column) {
+            if (column) output << ", ";
+            output << llvm::formatv("{0}", cells[column]).str();
+        }
+        output << ']';
+    }
+    if (!rows.empty()) output << "\n  ";
+    output << "]\n}\n";
+    return output.str();
+}
+
 void CheckArrow(const arrow::Status& status) {
     if (!status.ok()) {
         throw std::runtime_error(status.ToString());
@@ -597,7 +618,7 @@ TComparison ExecuteCase(const TExecCase& test, bool canonize) {
         if (!expected.getAsObject()) throw std::runtime_error("result golden must be an object");
         Normalize(expected, test.Ordered);
     }
-    return {actual == expected, Render(actual), Render(expected)};
+    return {actual == expected, RenderResult(actual), RenderResult(expected)};
 }
 
 void CommitExecGoldens(const std::vector<TExecCase>& tests) {
@@ -607,7 +628,7 @@ void CommitExecGoldens(const std::vector<TExecCase>& tests) {
         for (const auto& [path, result] : test.Suite->Canonized) {
             fs::create_directories(path.parent_path());
             std::ofstream output(path, std::ios::binary);
-            if (!output || !(output << Render(result))) throw std::runtime_error("cannot write " + path.string());
+            if (!output || !(output << RenderResult(result))) throw std::runtime_error("cannot write " + path.string());
         }
     }
 }
