@@ -251,6 +251,13 @@ double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shar
         }
     };
 
+    if (auto maybeUnary = TMaybeNode<TUnaryExpr>(atom)) {
+        auto unary = maybeUnary.Cast();
+        if (unary->Operator == "!") {
+            return 1.0 - EstimateSelectivity(unary->Operand, inputStats, operatorType);
+        }
+    }
+
     // col LIKE pattern -> qdb_string_view_sql_like; assume high selectivity.
     if (auto maybeCall = TMaybeNode<TCallExpr>(atom)) {
         if (auto callee = TMaybeNode<TIdentExpr>(maybeCall.Cast()->Callee)) {
@@ -262,6 +269,16 @@ double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shar
 
     if (auto maybeBinary = TMaybeNode<TBinaryExpr>(atom)) {
         auto binary = maybeBinary.Cast();
+        if (binary->Operator == "&&") {
+            std::vector<TExprPtr> conjuncts;
+            FlattenConjuncts(atom, conjuncts);
+            double selectivity = 1.0;
+            for (const auto& conjunct : conjuncts) {
+                selectivity *= EstimateSelectivity(conjunct, inputStats, operatorType);
+            }
+            return selectivity;
+        }
+
         if (binary->Operator == "==" || binary->Operator == "!=") {
             double selectivity = 0.5;
             auto leftIdent = TMaybeNode<TIdentExpr>(binary->Left);
@@ -356,12 +373,8 @@ TStatsPtr ComputeFilterStats(const std::shared_ptr<TFilterOperator>& filter) {
     if (!inputStats) {
         return nullptr;
     }
-    std::vector<TExprPtr> conjuncts;
-    FlattenConjuncts(filter->Predicate(), conjuncts);
-    double selectivity = 1.0;
-    for (const auto& conjunct : conjuncts) {
-        selectivity *= EstimateSelectivity(conjunct, inputStats, TMaybeType<TStructType>(filter->Input()->OutputColumns()).Cast());
-    }
+    double selectivity = EstimateSelectivity(filter->Predicate(), inputStats,
+        TMaybeType<TStructType>(filter->Input()->OutputColumns()).Cast());
     selectivity = std::clamp(selectivity, 0.0, 1.0);
     auto outputStats = std::make_shared<TStats>();
     outputStats->ColumnStats = inputStats->ColumnStats;

@@ -306,11 +306,14 @@ TEST(StatsTest, FilterSelectivityPropagation) {
 namespace {
 
 // Estimates `SELECT x FROM t WHERE <predicate>` over 1000 rows. Columns x and
-// y are i64, uniform on [0, 1000) with 100 distinct values; z has no histogram.
+// y are i64, uniform on [0, 1000) with 100 distinct values; z has no
+// histogram; s is a string.
 class SelectivityTest : public ::testing::Test {
 protected:
     SelectivityTest() {
         Source_.Stats_->ColumnStats.at("z")->Histogram.clear();
+        Source_.Stats_->ColumnStats.at("s")->Histogram.clear();
+        Source_.Cols[3].Type = std::make_shared<NQumir::NAst::TStringType>();
     }
 
     uint64_t Rows(const std::string& predicate) {
@@ -336,7 +339,7 @@ protected:
         return (*plan)->Stats_->RowCount;
     }
 
-    TStatsSource Source_{{{"x", 100}, {"y", 100}, {"z", 100}}};
+    TStatsSource Source_{{{"x", 100}, {"y", 100}, {"z", 100}, {"s", 100}}};
 };
 
 } // namespace
@@ -362,6 +365,16 @@ TEST_F(SelectivityTest, UnknownBoundKeepsDefaultSelectivity) {
     EXPECT_EQ(Rows("x < y + 250"), 500u);
     // A constant, but the column has no histogram to place it in.
     EXPECT_EQ(Rows("z < 200 + 50"), 500u);
+}
+
+TEST_F(SelectivityTest, NotKeepsWhatItsOperandDrops) {
+    EXPECT_NEAR(Rows("not x < 250"), 750, 1);
+    for (const std::string predicate : {
+        "x < 250", "x = 7", "s like 'a%'", "x < 250 and y < 500", "z < 250"})
+    {
+        EXPECT_NEAR(Rows(predicate) + Rows("not (" + predicate + ")"), 1000, 1)
+            << predicate;
+    }
 }
 
 TEST(StatsTest, AggregateStatsAccountForGroupingSets) {
