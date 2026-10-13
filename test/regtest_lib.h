@@ -22,6 +22,7 @@ struct TQueryCase {
     std::map<std::string, std::string> Tables;
     std::string Variant;
     bool Ordered = true;
+    bool Execute = true;
 
     bool HasTables() const { return !Tables.empty(); }
 };

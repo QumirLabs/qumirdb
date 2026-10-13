@@ -1,56 +1,19 @@
-(rel limit
-  (rel sort
-    (rel project
-      (rel aggregate
-        (rel project
-          (rel aggregate
-            (rel filter
-              (rel join
-                (rel join
-                  (rel join
-                    (rel join
-                      (rel join (rel source "catalog_sales" "cs1") (rel source "date_dim") () (inner))
-                      (rel source "customer_address")
-                      ()
-                      (inner))
-                    (rel source "call_center")
-                    ()
-                    (inner))
-                  (rel source "catalog_sales" "cs2")
-                  ()
-                  (left_semi)
-                  (residual (&& (== |cs1.cs_order_number| |cs2.cs_order_number|) (!= |cs1.cs_warehouse_sk| |cs2.cs_warehouse_sk|))))
-                (rel source "catalog_returns" "cr1")
-                ()
-                (left_anti)
-                (residual (== |cs1.cs_order_number| |cr1.cr_order_number|)))
-              (&& (&& (&& (&& (&& (&& (<= (cast "1999-2-01" <named StringView>) d_date)
-                          (<= d_date (+ (cast (cast "1999-2-01" <named StringView>) <named DATE>) (: 60 i32))))
-                        (== |cs1.cs_ship_date_sk| d_date_sk))
-                      (== |cs1.cs_ship_addr_sk| ca_address_sk))
-                    (== ca_state (cast "IL" <named StringView>)))
-                  (== |cs1.cs_call_center_sk| cc_call_center_sk))
-                (call
-                  qdb_in_list
-                  cc_county
-                  (cast "Williamson County" <named StringView>)
-                  (cast "Williamson County" <named StringView>)
-                  (cast "Williamson County" <named StringView>)
-                  (cast "Williamson County" <named StringView>)
-                  (cast "Williamson County" <named StringView>))))
-            (keys cs_order_number)
-            (agg partial_sum_1 sum cs_ext_ship_cost)
-            (agg partial_sum_2 sum cs_net_profit))
-          (cs_order_number cs_order_number)
-          (partial_sum_1 partial_sum_1)
-          (partial_sum_2 partial_sum_2)
-          (__group__ 1))
-        (keys __group__)
-        (agg count_0 count cs_order_number)
-        (agg sum_1 sum partial_sum_1)
-        (agg sum_2 sum partial_sum_2))
-      (|order count| count_0)
-      (|total shipping cost| sum_1)
-      (|total net profit| sum_2))
-    (|order count| asc nulls-default))
-  (limit 100))
+top-sort [order count asc] limit 100
+└─ project (order count, total shipping cost, total net profit) (rows≈1 cost≈22.6K)
+   └─ aggregate keys=[__group__] aggs=[count_0=count, sum_1=sum, sum_2=sum] (rows≈1 cost≈22.5K)
+      └─ project (cs_order_number, partial_sum_1, partial_sum_2, __group__) (rows≈1 cost≈22.5K)
+         └─ aggregate keys=[cs1.cs_order_number] aggs=[partial_sum_1=sum, partial_sum_2=sum] (rows≈1 cost≈22.5K)
+            └─ join left_anti [cs1.cs_order_number = cr1.cr_order_number] (rows≈1 cost≈22.5K)
+               ├─ join left_semi [cs1.cs_order_number = cs2.cs_order_number] residual (!= |cs1.cs_warehouse_sk| |cs2.cs_warehouse_sk|) (rows≈1 cost≈18.2K)
+               │  ├─ join inner [call_center.cc_call_center_sk = cs1.cs_call_center_sk] (rows≈1 cost≈13.9K)
+               │  │  ├─ filter (call qdb_in_list |call_center.cc_county| (cast "Williamson County" <named StringView>) (cast "Williamson County" <named StringView>) (cast "Williamson County" <named StringView>) (cast "Williamson County" <named StringView>) (cast "Williamson County" <named StringView>)) (rows≈5 cost≈400)
+               │  │  │  └─ source call_center AS call_center row-groups (call qdb_in_list |call_center.cc_county| (cast "Williamson County" <named StringView>) (cast "Williamson County" <named StringView>) (cast "Williamson County" <named StringView>) (cast "Williamson County" <named StringView>) (cast "Williamson County" <named StringView>)) (rows≈10 cost≈200)
+               │  │  └─ join inner [cs1.cs_ship_date_sk = date_dim.d_date_sk] (rows≈1 cost≈9.3K)
+               │  │     ├─ join inner [customer_address.ca_address_sk = cs1.cs_ship_addr_sk] (rows≈1 cost≈5K)
+               │  │     │  ├─ filter (== |customer_address.ca_state| (cast "IL" <named StringView>)) (rows≈1 cost≈400)
+               │  │     │  │  └─ source customer_address AS customer_address row-groups (== |customer_address.ca_state| (cast "IL" <named StringView>)) (rows≈10 cost≈200)
+               │  │     │  └─ source catalog_sales AS cs1 (rows≈10 cost≈360)
+               │  │     └─ filter (&& (<= (cast "1999-2-01" <named StringView>) |date_dim.d_date|) (<= |date_dim.d_date| (+ (cast (cast "1999-2-01" <named StringView>) <named DATE>) (: 60 i32)))) (rows≈2 cost≈160)
+               │  │        └─ source date_dim AS date_dim row-groups (&& (<= (cast "1999-2-01" <named StringView>) |date_dim.d_date|) (<= |date_dim.d_date| (+ (cast (cast "1999-2-01" <named StringView>) <named DATE>) (: 60 i32)))) (rows≈10 cost≈80)
+               │  └─ source catalog_sales AS cs2 (rows≈10 cost≈80)
+               └─ source catalog_returns AS cr1 (rows≈10 cost≈40)

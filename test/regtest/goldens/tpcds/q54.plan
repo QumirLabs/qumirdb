@@ -1,112 +1,46 @@
-(query
-  (cte 0
-    (rel project
-      (rel aggregate
-        (rel project
-          (rel filter
-            (rel join
-              (rel join
-                (rel join
-                  (rel project
-                    (rel union-all
-                      (rel project
-                        (rel source "catalog_sales")
-                        (sold_date_sk cs_sold_date_sk)
-                        (customer_sk cs_bill_customer_sk)
-                        (item_sk cs_item_sk))
-                      (rel project
-                        (rel source "web_sales")
-                        (sold_date_sk ws_sold_date_sk)
-                        (customer_sk ws_bill_customer_sk)
-                        (item_sk ws_item_sk)))
-                    (|cs_or_ws_sales.sold_date_sk| sold_date_sk)
-                    (|cs_or_ws_sales.customer_sk| customer_sk)
-                    (|cs_or_ws_sales.item_sk| item_sk))
-                  (rel source "item")
-                  ()
-                  (inner))
-                (rel source "date_dim")
-                ()
-                (inner))
-              (rel source "customer")
-              ()
-              (inner))
-            (&& (&& (&& (&& (&& (&& (== sold_date_sk d_date_sk) (== item_sk i_item_sk))
-                      (== i_category (cast "Jewelry" <named StringView>)))
-                    (== i_class (cast "consignment" <named StringView>)))
-                  (== c_customer_sk |cs_or_ws_sales.customer_sk|))
-                (== d_moy 3))
-              (== d_year 1999)))
-          (c_customer_sk c_customer_sk)
-          (c_current_addr_sk c_current_addr_sk))
-        (keys c_customer_sk c_current_addr_sk))
-      (c_customer_sk c_customer_sk)
-      (c_current_addr_sk c_current_addr_sk)))
-  (cte 1
-    (rel project
-      (rel aggregate
-        (rel filter
-          (rel join
-            (rel join
-              (rel join
-                (rel join
-                  (rel join
-                    (rel join
-                      (rel project
-                        (rel cte-ref 0)
-                        (|my_customers.c_customer_sk| c_customer_sk)
-                        (|my_customers.c_current_addr_sk| c_current_addr_sk))
-                      (rel source "store_sales")
-                      ()
-                      (inner))
-                    (rel source "customer_address")
-                    ()
-                    (inner))
-                  (rel source "store")
-                  ()
-                  (inner))
-                (rel source "date_dim")
-                ()
-                (inner))
-              (rel project
-                (rel aggregate
-                  (rel project
-                    (rel filter (rel source "date_dim") (&& (== d_year 1999) (== d_moy 3)))
-                    (col0 (+ d_month_seq 1)))
-                  (keys col0))
-                (__scalar_0__ col0))
-              ()
-              (inner))
-            (rel project
-              (rel aggregate
-                (rel project
-                  (rel filter (rel source "date_dim") (&& (== d_year 1999) (== d_moy 3)))
-                  (col0 (+ d_month_seq 3)))
-                (keys col0))
-              (__scalar_1__ col0))
-            ()
-            (inner))
-          (&& (&& (&& (&& (&& (&& (== c_current_addr_sk ca_address_sk) (== ca_county s_county)) (== ca_state s_state))
-                  (== ss_sold_date_sk d_date_sk))
-                (== c_customer_sk ss_customer_sk))
-              (<= __scalar_0__ d_month_seq))
-            (<= d_month_seq __scalar_1__)))
-        (keys c_customer_sk)
-        (agg sum_0 sum ss_ext_sales_price))
-      (c_customer_sk c_customer_sk)
-      (revenue sum_0)))
-  (cte 2
-    (rel project
-      (rel project (rel cte-ref 1) (|my_revenue.c_customer_sk| c_customer_sk) (|my_revenue.revenue| revenue))
-      (segment (cast (/ revenue 50) i32))))
-  (main
-    (rel limit
-      (rel sort
-        (rel project
-          (rel aggregate (rel project (rel cte-ref 2) (|segments.segment| segment)) (keys segment) (agg count_0 count))
-          (segment segment)
-          (num_customers count_0)
-          (segment_base (* segment 50)))
-        (segment asc nulls-default)
-        (num_customers asc nulls-default))
-      (limit 100))))
+top-sort [segment asc, num_customers asc] limit 100
+└─ project (segment, num_customers, segment_base) (rows≈1 cost≈1.3M)
+   └─ aggregate keys=[segments.segment] aggs=[count_0=count] (rows≈1 cost≈1.3M)
+      └─ project (segments.segment) (rows≈1 cost≈1.3M)
+         └─ project (segment) (rows≈1 cost≈1.3M)
+            └─ project (my_revenue.revenue) (rows≈1 cost≈1.3M)
+               └─ project (revenue) (rows≈1 cost≈1.3M)
+                  └─ aggregate keys=[my_customers.c_customer_sk] aggs=[sum_0=sum] (rows≈1 cost≈1.3M)
+                     └─ join inner residual (&& (<= __scalar_0__ |date_dim_0.d_month_seq|) (<= |date_dim_0.d_month_seq| __scalar_1__)) (rows≈10000 cost≈1.2M)
+                        ├─ join inner (rows≈100 cost≈5.6K)
+                        │  ├─ project (__scalar_0__) (rows≈10 cost≈360)
+                        │  │  └─ aggregate keys=[col0] (rows≈10 cost≈320)
+                        │  │     └─ project (col0) (rows≈10 cost≈280)
+                        │  │        └─ filter (&& (== |date_dim_1.d_year| 1999) (== |date_dim_1.d_moy| 3)) (rows≈10 cost≈240)
+                        │  │           └─ source date_dim AS date_dim_1 row-groups (&& (== |date_dim_1.d_moy| 3) (== |date_dim_1.d_year| 1999)) (rows≈10 cost≈120)
+                        │  └─ project (__scalar_1__) (rows≈10 cost≈360)
+                        │     └─ aggregate keys=[col0] (rows≈10 cost≈320)
+                        │        └─ project (col0) (rows≈10 cost≈280)
+                        │           └─ filter (&& (== |date_dim_2.d_year| 1999) (== |date_dim_2.d_moy| 3)) (rows≈10 cost≈240)
+                        │              └─ source date_dim AS date_dim_2 row-groups (&& (== |date_dim_2.d_moy| 3) (== |date_dim_2.d_year| 1999)) (rows≈10 cost≈120)
+                        └─ join inner [store_sales.ss_customer_sk = my_customers.c_customer_sk] (rows≈100 cost≈43.3K)
+                           ├─ join inner [date_dim_0.d_date_sk = store_sales.ss_sold_date_sk] (rows≈10 cost≈4.7K)
+                           │  ├─ source date_dim AS date_dim_0 (rows≈10 cost≈80)
+                           │  └─ source store_sales AS store_sales (rows≈10 cost≈160)
+                           └─ join inner [store.s_county = customer_address.ca_county, store.s_state = customer_address.ca_state] emit-filter 1 from right (rows≈10 cost≈24.5K)
+                              ├─ source store AS store use-filter 1 keys=[store.s_county, store.s_state] (rows≈10 cost≈320)
+                              └─ join inner [customer_address.ca_address_sk = my_customers.c_current_addr_sk] emit-filter 2 from right (rows≈1 cost≈19K)
+                                 ├─ source customer_address AS customer_address use-filter 2 keys=[customer_address.ca_address_sk] (rows≈10 cost≈360)
+                                 └─ project (my_customers.c_customer_sk, my_customers.c_current_addr_sk) (rows≈1 cost≈14.4K)
+                                    └─ project (c_customer_sk, c_current_addr_sk) (rows≈1 cost≈14.4K)
+                                       └─ aggregate keys=[c_customer_sk, c_current_addr_sk] (rows≈1 cost≈14.4K)
+                                          └─ project (c_customer_sk, c_current_addr_sk) (rows≈1 cost≈14.4K)
+                                             └─ join inner [cs_or_ws_sales.sold_date_sk = date_dim.d_date_sk] emit-filter 3 from left (rows≈1 cost≈14.4K)
+                                                ├─ join inner [customer.c_customer_sk = cs_or_ws_sales.customer_sk] emit-filter 4 from right (rows≈1 cost≈9.9K)
+                                                │  ├─ source customer AS customer use-filter 4 keys=[customer.c_customer_sk] (rows≈10 cost≈80)
+                                                │  └─ join inner [item.i_item_sk = cs_or_ws_sales.item_sk] emit-filter 5 from left (rows≈1 cost≈5.7K)
+                                                │     ├─ filter (&& (== |item.i_category| (cast "Jewelry" <named StringView>)) (== |item.i_class| (cast "consignment" <named StringView>))) (rows≈1 cost≈720)
+                                                │     │  └─ source item AS item row-groups (&& (== |item.i_category| (cast "Jewelry" <named StringView>)) (== |item.i_class| (cast "consignment" <named StringView>))) (rows≈10 cost≈360)
+                                                │     └─ project (cs_or_ws_sales.sold_date_sk, cs_or_ws_sales.customer_sk, cs_or_ws_sales.item_sk) (rows≈20 cost≈720)
+                                                │        └─ union-all (rows≈20 cost≈480)
+                                                │           ├─ project (sold_date_sk, customer_sk, item_sk) (rows≈10 cost≈240)
+                                                │           │  └─ source catalog_sales AS catalog_sales use-filter 5 keys=[catalog_sales.cs_item_sk] (rows≈10 cost≈120)
+                                                │           └─ project (sold_date_sk, customer_sk, item_sk) (rows≈10 cost≈240)
+                                                │              └─ source web_sales AS web_sales use-filter 5 keys=[web_sales.ws_item_sk] (rows≈10 cost≈120)
+                                                └─ filter (&& (== |date_dim.d_moy| 3) (== |date_dim.d_year| 1999)) (rows≈10 cost≈240)
+                                                   └─ source date_dim AS date_dim row-groups (&& (== |date_dim.d_moy| 3) (== |date_dim.d_year| 1999)) use-filter 3 keys=[date_dim.d_date_sk] (rows≈10 cost≈120)

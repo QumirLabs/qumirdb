@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "schema": "<struct (l_orderkey i32) (l_partkey i32) (l_suppkey i32) (l_linenumber i32) (l_quantity f64) (l_extendedprice f64) (l_discount f64) (l_tax f64) (l_returnflag string) (l_linestatus string) (l_shipdate i32) (l_commitdate i32) (l_receiptdate i32) (l_shipinstruct string) (l_shipmode string) (l_comment string)>",
+  "rows": [
+    [1, 15518935, 768951, 1, 17.0, 33203.72, 0.04, 0.02, "N", "O", 9568, 9538, 9577, "DELIVER IN PERSON", "TRUCK", "egular courts above the"],
+    [1, 6730908, 730909, 2, 36.0, 69788.52, 0.09, 0.06, "N", "O", 9598, 9554, 9606, "TAKE BACK RETURN", "MAIL", "ly final dependencies: slyly bold "],
+    [1, 6369978, 369979, 3, 8.0, 16381.28, 0.1, 0.02, "N", "O", 9524, 9560, 9526, "TAKE BACK RETURN", "REG AIR", "riously. regular, express dep"],
+    [1, 213150, 463151, 4, 28.0, 29767.92, 0.09, 0.06, "N", "O", 9607, 9585, 9632, "NONE", "AIR", "lites. fluffily even de"],
+    [1, 2402664, 152671, 5, 24.0, 37596.96, 0.1, 0.04, "N", "O", 9585, 9569, 9587, "NONE", "FOB", " pending foxes. slyly re"],
+    [1, 1563445, 63448, 6, 32.0, 48267.84, 0.07, 0.02, "N", "O", 9525, 9533, 9529, "DELIVER IN PERSON", "MAIL", "arefully slyly ex"],
+    [2, 10616973, 116994, 1, 38.0, 71798.72, 0.0, 0.05, "N", "O", 9889, 9875, 9894, "TAKE BACK RETURN", "RAIL", "ven requests. deposits breach a"],
+    [3, 429697, 179698, 1, 45.0, 73200.15, 0.06, 0.0, "R", "F", 8798, 8769, 8819, "NONE", "AIR", "ongside of the furiously brave acco"],
+    [3, 1903543, 653547, 2, 49.0, 75776.05, 0.1, 0.0, "R", "F", 8713, 8754, 8728, "TAKE BACK RETURN", "RAIL", " unusual accounts. eve"],
+    [3, 12844823, 344848, 3, 27.0, 47713.86, 0.06, 0.07, "A", "F", 8781, 8726, 8788, "DELIVER IN PERSON", "SHIP", "nal foxes wake. "]
+  ]
+}

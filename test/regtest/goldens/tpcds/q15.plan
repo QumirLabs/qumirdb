@@ -1,43 +1,11 @@
-(rel limit
-  (rel sort
-    (rel project
-      (rel aggregate
-        (rel filter
-          (rel join
-            (rel join
-              (rel join (rel source "catalog_sales") (rel source "customer") () (inner))
-              (rel source "customer_address")
-              ()
-              (inner))
-            (rel source "date_dim")
-            ()
-            (inner))
-          (&& (&& (&& (&& (&& (== cs_bill_customer_sk c_customer_sk) (== c_current_addr_sk ca_address_sk))
-                  (|| (|| (call
-                        qdb_in_list
-                        (call substr ca_zip 1 5)
-                        (cast "85669" <named StringView>)
-                        (cast "86197" <named StringView>)
-                        (cast "88274" <named StringView>)
-                        (cast "83405" <named StringView>)
-                        (cast "86475" <named StringView>)
-                        (cast "85392" <named StringView>)
-                        (cast "85460" <named StringView>)
-                        (cast "80348" <named StringView>)
-                        (cast "81792" <named StringView>))
-                      (call
-                        qdb_in_list
-                        ca_state
-                        (cast "CA" <named StringView>)
-                        (cast "WA" <named StringView>)
-                        (cast "GA" <named StringView>)))
-                    (> cs_sales_price 500)))
-                (== cs_sold_date_sk d_date_sk))
-              (== d_qoy 2))
-            (== d_year 2000)))
-        (keys ca_zip)
-        (agg sum_0 sum cs_sales_price))
-      (ca_zip ca_zip)
-      (col1 sum_0))
-    (ca_zip asc nulls-default))
-  (limit 100))
+top-sort [ca_zip asc] limit 100
+└─ project (ca_zip, col1) (rows≈10 cost≈15.3K)
+   └─ aggregate keys=[customer_address.ca_zip] aggs=[sum_0=sum] (rows≈10 cost≈15K)
+      └─ join inner [catalog_sales.cs_bill_customer_sk = customer.c_customer_sk] residual (|| (|| (call qdb_in_list (call substr |customer_address.ca_zip| 1 5) (cast "85669" <named StringView>) (cast "86197" <named StringView>) (cast "88274" <named StringView>) (cast "83405" <named StringView>) (cast "86475" <named StringView>) (cast "85392" <named StringView>) (cast "85460" <named StringView>) (cast "80348" <named StringView>) (cast "81792" <named StringView>)) (call qdb_in_list |customer_address.ca_state| (cast "CA" <named StringView>) (cast "WA" <named StringView>) (cast "GA" <named StringView>))) (> |catalog_sales.cs_sales_price| 500)) (rows≈10 cost≈14.8K)
+         ├─ join inner [date_dim.d_date_sk = catalog_sales.cs_sold_date_sk] (rows≈10 cost≈4.9K)
+         │  ├─ filter (&& (== |date_dim.d_qoy| 2) (== |date_dim.d_year| 2000)) (rows≈10 cost≈240)
+         │  │  └─ source date_dim AS date_dim row-groups (&& (== |date_dim.d_qoy| 2) (== |date_dim.d_year| 2000)) (rows≈10 cost≈120)
+         │  └─ source catalog_sales AS catalog_sales (rows≈10 cost≈160)
+         └─ join inner [customer_address.ca_address_sk = customer.c_current_addr_sk] (rows≈10 cost≈5.1K)
+            ├─ source customer_address AS customer_address (rows≈10 cost≈360)
+            └─ source customer AS customer (rows≈10 cost≈80)

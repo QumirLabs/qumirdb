@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "schema": "<struct (d_date_sk i32) (d_date_id string) (d_date i32) (d_month_seq <named Nullable [i32]>) (d_week_seq <named Nullable [i32]>) (d_quarter_seq <named Nullable [i32]>) (d_year <named Nullable [i32]>) (d_dow <named Nullable [i32]>) (d_moy <named Nullable [i32]>) (d_dom <named Nullable [i32]>) (d_qoy <named Nullable [i32]>) (d_fy_year <named Nullable [i32]>) (d_fy_quarter_seq <named Nullable [i32]>) (d_fy_week_seq <named Nullable [i32]>) (d_day_name <named Nullable [string]>) (d_quarter_name <named Nullable [string]>) (d_holiday <named Nullable [string]>) (d_weekend <named Nullable [string]>) (d_following_holiday <named Nullable [string]>) (d_first_dom <named Nullable [i32]>) (d_last_dom <named Nullable [i32]>) (d_same_day_ly <named Nullable [i32]>) (d_same_day_lq <named Nullable [i32]>) (d_current_day <named Nullable [string]>) (d_current_week <named Nullable [string]>) (d_current_month <named Nullable [string]>) (d_current_quarter <named Nullable [string]>) (d_current_year <named Nullable [string]>)>",
+  "rows": [
+    [2415022, "AAAAAAAAOKJNECAA", -25566, 0, 1, 1, 1900, 1, 1, 2, 1, 1900, 1, 1, "Monday", "1900Q1", "N", "N", "Y", 2415021, 2415020, 2414657, 2414930, "N", "N", "N", "N", "N"],
+    [2415023, "AAAAAAAAPKJNECAA", -25565, 0, 1, 1, 1900, 2, 1, 3, 1, 1900, 1, 1, "Tuesday", "1900Q1", "N", "N", "N", 2415021, 2415020, 2414658, 2414931, "N", "N", "N", "N", "N"],
+    [2415024, "AAAAAAAAALJNECAA", -25564, 0, 1, 1, 1900, 3, 1, 4, 1, 1900, 1, 1, "Wednesday", "1900Q1", "N", "N", "N", 2415021, 2415020, 2414659, 2414932, "N", "N", "N", "N", "N"],
+    [2415025, "AAAAAAAABLJNECAA", -25563, 0, 1, 1, 1900, 4, 1, 5, 1, 1900, 1, 1, "Thursday", "1900Q1", "N", "N", "N", 2415021, 2415020, 2414660, 2414933, "N", "N", "N", "N", "N"],
+    [2415026, "AAAAAAAACLJNECAA", -25562, 0, 1, 1, 1900, 5, 1, 6, 1, 1900, 1, 1, "Friday", "1900Q1", "N", "Y", "N", 2415021, 2415020, 2414661, 2414934, "N", "N", "N", "N", "N"],
+    [2415027, "AAAAAAAADLJNECAA", -25561, 0, 1, 1, 1900, 6, 1, 7, 1, 1900, 1, 1, "Saturday", "1900Q1", "N", "Y", "N", 2415021, 2415020, 2414662, 2414935, "N", "N", "N", "N", "N"],
+    [2415028, "AAAAAAAAELJNECAA", -25560, 0, 1, 1, 1900, 0, 1, 8, 1, 1900, 1, 1, "Sunday", "1900Q1", "N", "N", "N", 2415021, 2415020, 2414663, 2414936, "N", "N", "N", "N", "N"],
+    [2415029, "AAAAAAAAFLJNECAA", -25559, 0, 2, 1, 1900, 1, 1, 9, 1, 1900, 1, 2, "Monday", "1900Q1", "N", "N", "N", 2415021, 2415020, 2414664, 2414937, "N", "N", "N", "N", "N"],
+    [2415030, "AAAAAAAAGLJNECAA", -25558, 0, 2, 1, 1900, 2, 1, 10, 1, 1900, 1, 2, "Tuesday", "1900Q1", "N", "N", "N", 2415021, 2415020, 2414665, 2414938, "N", "N", "N", "N", "N"],
+    [2415031, "AAAAAAAAHLJNECAA", -25557, 0, 2, 1, 1900, 3, 1, 11, 1, 1900, 1, 2, "Wednesday", "1900Q1", "N", "N", "N", 2415021, 2415020, 2414666, 2414939, "N", "N", "N", "N", "N"]
+  ]
+}

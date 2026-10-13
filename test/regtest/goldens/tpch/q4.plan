@@ -1,16 +1,8 @@
-(rel sort
-  (rel project
-    (rel aggregate
-      (rel filter
-        (rel join
-          (rel source "orders")
-          (rel source "lineitem")
-          ()
-          (left_semi)
-          (residual (&& (== l_orderkey o_orderkey) (< l_commitdate l_receiptdate))))
-        (&& (>= o_orderdate (: 9465 i32)) (< o_orderdate (+ (: 9465 i32) (: 90 i32)))))
-      (keys o_orderpriority)
-      (agg count_0 count))
-    (o_orderpriority o_orderpriority)
-    (order_count count_0))
-  (o_orderpriority asc nulls-default))
+sort [o_orderpriority asc]
+└─ project (o_orderpriority, order_count) (rows≈1 cost≈4.9K)
+   └─ aggregate keys=[orders.o_orderpriority] aggs=[count_0=count] (rows≈1 cost≈4.9K)
+      └─ join left_semi [orders.o_orderkey = lineitem.l_orderkey] (rows≈1 cost≈4.9K)
+         ├─ filter (&& (>= |orders.o_orderdate| (: 9465 i32)) (< |orders.o_orderdate| (+ (: 9465 i32) (: 90 i32)))) (rows≈1 cost≈480)
+         │  └─ source orders AS orders row-groups (&& (>= |orders.o_orderdate| (: 9465 i32)) (< |orders.o_orderdate| (+ (: 9465 i32) (: 90 i32)))) (rows≈10 cost≈240)
+         └─ filter (< |lineitem.l_commitdate| |lineitem.l_receiptdate|) (rows≈5 cost≈240)
+            └─ source lineitem AS lineitem row-groups (< |lineitem.l_commitdate| |lineitem.l_receiptdate|) (rows≈10 cost≈120)

@@ -1,38 +1,19 @@
-(rel limit
-  (rel project
-    (rel aggregate
-      (rel project
-        (rel filter
-          (rel join
-            (rel join
-              (rel join (rel source "catalog_sales") (rel source "item") () (inner))
-              (rel source "date_dim")
-              ()
-              (inner))
-            (rel project
-              (rel aggregate
-                (rel project
-                  (rel filter
-                    (rel join (rel source "catalog_sales") (rel source "date_dim") () (inner))
-                    (&& (&& (&& (== cs_item_sk i_item_sk) (<= (cast "1998-03-18" <named StringView>) d_date))
-                        (<= d_date (+ (cast (cast "1998-03-18" <named StringView>) <named DATE>) (: 90 i32))))
-                      (== d_date_sk cs_sold_date_sk)))
-                  (cs_ext_discount_amt cs_ext_discount_amt)
-                  (__group__ 1))
-                (keys __group__)
-                (agg sum_0 sum cs_ext_discount_amt)
-                (agg count_1 count cs_ext_discount_amt))
-              (__scalar_0__ (* 1.3 (/ sum_0 (cast count_1 f64)))))
-            ()
-            (inner))
-          (&& (&& (&& (&& (&& (== i_manufact_id 269) (== i_item_sk cs_item_sk))
-                  (<= (cast "1998-03-18" <named StringView>) d_date))
-                (<= d_date (+ (cast (cast "1998-03-18" <named StringView>) <named DATE>) (: 90 i32))))
-              (== d_date_sk cs_sold_date_sk))
-            (> cs_ext_discount_amt __scalar_0__)))
-        (cs_ext_discount_amt cs_ext_discount_amt)
-        (__group__ 1))
-      (keys __group__)
-      (agg sum_0 sum cs_ext_discount_amt))
-    (|excess discount amount| sum_0))
-  (limit 100))
+project (excess discount amount)
+└─ limit
+   └─ aggregate keys=[__group__] aggs=[sum_0=sum] (rows≈1 cost≈17.6K)
+      └─ project (cs_ext_discount_amt, __group__) (rows≈1 cost≈17.6K)
+         └─ filter (> |catalog_sales_0.cs_ext_discount_amt| __scalar_0__) (rows≈1 cost≈17.6K)
+            └─ join left [item.i_item_sk = __corr_0_0__] (rows≈1 cost≈17.5K)
+               ├─ join inner [date_dim_0.d_date_sk = catalog_sales_0.cs_sold_date_sk] (rows≈1 cost≈8.8K)
+               │  ├─ filter (&& (<= (cast "1998-03-18" <named StringView>) |date_dim_0.d_date|) (<= |date_dim_0.d_date| (+ (cast (cast "1998-03-18" <named StringView>) <named DATE>) (: 90 i32)))) (rows≈2 cost≈160)
+               │  │  └─ source date_dim AS date_dim_0 row-groups (&& (<= (cast "1998-03-18" <named StringView>) |date_dim_0.d_date|) (<= |date_dim_0.d_date| (+ (cast (cast "1998-03-18" <named StringView>) <named DATE>) (: 90 i32)))) (rows≈10 cost≈80)
+               │  └─ join inner [item.i_item_sk = catalog_sales_0.cs_item_sk] emit-filter 1 from left (rows≈1 cost≈4.5K)
+               │     ├─ filter (== |item.i_manufact_id| 269) (rows≈1 cost≈160)
+               │     │  └─ source item AS item row-groups (== |item.i_manufact_id| 269) (rows≈10 cost≈80)
+               │     └─ source catalog_sales AS catalog_sales_0 use-filter 1 keys=[catalog_sales_0.cs_item_sk] (rows≈10 cost≈160)
+               └─ project (__corr_0_0__, __scalar_0__) (rows≈2 cost≈4.6K)
+                  └─ aggregate keys=[catalog_sales_1.cs_item_sk] aggs=[sum_0=sum, count_1=count] (rows≈2 cost≈4.6K)
+                     └─ join inner [date_dim_1.d_date_sk = catalog_sales_1.cs_sold_date_sk] (rows≈2 cost≈4.5K)
+                        ├─ filter (&& (<= (cast "1998-03-18" <named StringView>) |date_dim_1.d_date|) (<= |date_dim_1.d_date| (+ (cast (cast "1998-03-18" <named StringView>) <named DATE>) (: 90 i32)))) (rows≈2 cost≈160)
+                        │  └─ source date_dim AS date_dim_1 row-groups (&& (<= (cast "1998-03-18" <named StringView>) |date_dim_1.d_date|) (<= |date_dim_1.d_date| (+ (cast (cast "1998-03-18" <named StringView>) <named DATE>) (: 90 i32)))) (rows≈10 cost≈80)
+                        └─ source catalog_sales AS catalog_sales_1 (rows≈10 cost≈160)

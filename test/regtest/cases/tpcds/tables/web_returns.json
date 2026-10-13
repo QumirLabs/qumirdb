@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "schema": "<struct (wr_returned_date_sk <named Nullable [i32]>) (wr_returned_time_sk <named Nullable [i32]>) (wr_item_sk i32) (wr_refunded_customer_sk <named Nullable [i32]>) (wr_refunded_cdemo_sk <named Nullable [i32]>) (wr_refunded_hdemo_sk <named Nullable [i32]>) (wr_refunded_addr_sk <named Nullable [i32]>) (wr_returning_customer_sk <named Nullable [i32]>) (wr_returning_cdemo_sk <named Nullable [i32]>) (wr_returning_hdemo_sk <named Nullable [i32]>) (wr_returning_addr_sk <named Nullable [i32]>) (wr_web_page_sk <named Nullable [i32]>) (wr_reason_sk <named Nullable [i32]>) (wr_order_number i32) (wr_return_quantity <named Nullable [i32]>) (wr_return_amt <named Nullable [f64]>) (wr_return_tax <named Nullable [f64]>) (wr_return_amt_inc_tax <named Nullable [f64]>) (wr_fee <named Nullable [f64]>) (wr_return_ship_cost <named Nullable [f64]>) (wr_refunded_cash <named Nullable [f64]>) (wr_reversed_charge <named Nullable [f64]>) (wr_account_credit <named Nullable [f64]>) (wr_net_loss <named Nullable [f64]>)>",
+  "rows": [
+    [2451653, 7022, 91852, 146224, 1011635, 3446, 154057, 146224, 1011635, 3446, 154057, 22, 73, 1, 10, 698.2, 13.96, 712.16, 18.63, 820.3, 300.22, 382.06, 15.92, 852.89],
+    [2451627, 64915, 52039, 3811, 18405, 199, 48793, 3811, 18405, 199, 48793, 50, 54, 1, 47, 1248.79, 49.95, 1298.74, 61.81, 709.23, 262.24, 128.25, 858.3, 820.99],
+    [2452798, null, 15870, null, 31639, null, 218790, null, 31639, 2038, 218790, null, 71, 2, 11, null, 25.52, null, null, 16.72, null, 16.36, 165.47, null],
+    [2452243, 23325, 46911, 347687, 663037, 1234, 76984, 347687, 663037, 1234, 76984, 200, 56, 5, 33, 1820.94, 54.62, 1875.56, 70.16, 1000.23, 1802.73, 14.56, 3.65, 1125.01],
+    [2452305, 73981, 79381, 292552, 1104998, 2244, 169090, 292552, 1104998, 2244, 169090, 125, 41, 5, 18, 82.08, 7.38, 89.46, 35.63, 1342.26, 38.57, 19.14, 24.37, 1385.27],
+    [2451288, 74891, 48301, 236650, 1309189, 128, 165420, 236650, 1309189, 128, 165420, 31, 32, 7, 16, 1956.0, 156.48, 2112.48, 22.56, 221.76, 215.16, 504.84, 1236.0, 400.8],
+    [2451337, 44242, 13372, 275377, 1291615, 653, 216891, 275377, 1291615, 653, 216891, 7, 19, 7, 3, 134.4, 0.0, 134.4, 78.06, 108.78, 108.86, 15.06, 10.48, 186.84],
+    [2451278, 48347, 71744, 368887, 1781163, 3486, 35762, 368887, 1781163, 3486, 35762, 14, 15, 7, 43, 520.3, 20.81, 541.11, 54.02, 3468.38, 504.69, 14.36, 1.25, 3543.21],
+    [2452098, 72741, 71581, 427559, 1010209, 2812, 143415, 427559, 1010209, 2812, 143415, 32, 5, 10, 4, 79.68, 2.39, 82.07, 11.4, 54.52, 58.16, 1.5, 20.02, 68.31],
+    [2452065, 46137, 61490, 326204, 217410, 1416, 178222, 326204, 217410, 1416, 178222, 79, 27, 11, 28, 707.0, 28.28, 735.28, 16.84, 382.2, 424.2, 248.86, 33.94, 427.32]
+  ]
+}

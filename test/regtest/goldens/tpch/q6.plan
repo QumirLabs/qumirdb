@@ -1,14 +1,5 @@
-(rel project
-  (rel aggregate
-    (rel project
-      (rel filter
-        (rel source "lineitem")
-        (&& (&& (&& (&& (>= l_shipdate (: 9131 i32)) (< l_shipdate (+ (: 9131 i32) (: 365 i32))))
-              (<= (- 0.040000000000000001 0.01) l_discount))
-            (<= l_discount (+ 0.040000000000000001 0.01)))
-          (< l_quantity 24)))
-      (arg_0 (* l_extendedprice l_discount))
-      (__group__ 1))
-    (keys __group__)
-    (agg sum_0 sum arg_0))
-  (revenue sum_0))
+project (revenue) (rows≈1 cost≈600)
+└─ aggregate keys=[__group__] aggs=[sum_0=sum] (rows≈1 cost≈592)
+   └─ project (arg_0, __group__) (rows≈1 cost≈576)
+      └─ filter (&& (&& (&& (&& (>= |lineitem.l_shipdate| (: 9131 i32)) (< |lineitem.l_shipdate| (+ (: 9131 i32) (: 365 i32)))) (<= (- 0.040000000000000001 0.01) |lineitem.l_discount|)) (<= |lineitem.l_discount| (+ 0.040000000000000001 0.01))) (< |lineitem.l_quantity| 24)) (rows≈1 cost≈560)
+         └─ source lineitem AS lineitem row-groups (&& (&& (&& (<= (- 0.040000000000000001 0.01) |lineitem.l_discount|) (<= |lineitem.l_discount| (+ 0.040000000000000001 0.01))) (< |lineitem.l_quantity| 24)) (&& (>= |lineitem.l_shipdate| (: 9131 i32)) (< |lineitem.l_shipdate| (+ (: 9131 i32) (: 365 i32))))) (rows≈10 cost≈280)

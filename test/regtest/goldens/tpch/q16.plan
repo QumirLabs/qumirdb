@@ -1,29 +1,12 @@
-(rel sort
-  (rel project
-    (rel aggregate
-      (rel aggregate
-        (rel filter
-          (rel join
-            (rel join (rel source "partsupp") (rel source "part") () (inner))
-            (rel project
-              (rel filter
-                (rel source "supplier")
-                (call qdb_string_view_sql_like s_comment (cast "%Customer%Complaints%" <named StringView>)))
-              (__qdb_in__s_suppkey s_suppkey))
-            ()
-            (left_anti)
-            (residual (== ps_suppkey __qdb_in__s_suppkey)))
-          (&& (&& (&& (== p_partkey ps_partkey) (!= p_brand (cast "Brand#54" <named StringView>)))
-              (! (call qdb_string_view_sql_like p_type (cast "PROMO ANODIZED%" <named StringView>))))
-            (call qdb_in_list p_size 24 47 25 36 22 26 49 40)))
-        (keys p_brand p_type p_size ps_suppkey))
-      (keys p_brand p_type p_size)
-      (agg count_0 count ps_suppkey))
-    (p_brand p_brand)
-    (p_type p_type)
-    (p_size p_size)
-    (supplier_cnt count_0))
-  (supplier_cnt desc nulls-default)
-  (p_brand asc nulls-default)
-  (p_type asc nulls-default)
-  (p_size asc nulls-default))
+sort [supplier_cnt desc, p_brand asc, p_type asc, p_size asc]
+└─ project (p_brand, p_type, p_size, supplier_cnt) (rows≈1 cost≈9.8K)
+   └─ aggregate keys=[part.p_brand, part.p_type, part.p_size] aggs=[count_0=count] (rows≈1 cost≈9.8K)
+      └─ aggregate keys=[part.p_brand, part.p_type, part.p_size, partsupp.ps_suppkey] (rows≈1 cost≈9.7K)
+         └─ join left_anti [partsupp.ps_suppkey = __qdb_in__s_suppkey] (rows≈1 cost≈9.7K)
+            ├─ join inner [part.p_partkey = partsupp.ps_partkey] (rows≈2 cost≈5.1K)
+            │  ├─ filter (&& (&& (!= |part.p_brand| (cast "Brand#54" <named StringView>)) (! (call qdb_string_view_sql_like |part.p_type| (cast "PROMO ANODIZED%" <named StringView>)))) (call qdb_in_list |part.p_size| 24 47 25 36 22 26 49 40)) (rows≈2 cost≈800)
+            │  │  └─ source part AS part row-groups (&& (&& (!= |part.p_brand| (cast "Brand#54" <named StringView>)) (call qdb_in_list |part.p_size| 24 47 25 36 22 26 49 40)) (! (call qdb_string_view_sql_like |part.p_type| (cast "PROMO ANODIZED%" <named StringView>)))) (rows≈10 cost≈400)
+            │  └─ source partsupp AS partsupp (rows≈10 cost≈80)
+            └─ project (__qdb_in__s_suppkey) (rows≈1 cost≈404)
+               └─ filter (call qdb_string_view_sql_like |supplier.s_comment| (cast "%Customer%Complaints%" <named StringView>)) (rows≈1 cost≈400)
+                  └─ source supplier AS supplier row-groups (call qdb_string_view_sql_like |supplier.s_comment| (cast "%Customer%Complaints%" <named StringView>)) (rows≈10 cost≈200)

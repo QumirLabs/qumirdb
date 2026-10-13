@@ -1,87 +1,14 @@
-(rel limit
-  (rel sort
-    (rel project
-      (rel aggregate
-        (rel project
-          (rel filter
-            (rel join
-              (rel join
-                (rel join
-                  (rel join (rel source "store_sales") (rel source "store_returns") () (inner))
-                  (rel source "store")
-                  ()
-                  (inner))
-                (rel source "date_dim" "d1")
-                ()
-                (inner))
-              (rel source "date_dim" "d2")
-              ()
-              (inner))
-            (&& (&& (&& (&& (&& (&& (&& (== |d2.d_year| 2000) (== |d2.d_moy| 9)) (== ss_ticket_number sr_ticket_number))
-                      (== ss_item_sk sr_item_sk))
-                    (== ss_sold_date_sk |d1.d_date_sk|))
-                  (== sr_returned_date_sk |d2.d_date_sk|))
-                (== ss_customer_sk sr_customer_sk))
-              (== ss_store_sk s_store_sk)))
-          (s_store_name s_store_name)
-          (s_company_id s_company_id)
-          (s_street_number s_street_number)
-          (s_street_name s_street_name)
-          (s_street_type s_street_type)
-          (s_suite_number s_suite_number)
-          (s_city s_city)
-          (s_county s_county)
-          (s_state s_state)
-          (s_zip s_zip)
-          (arg_0 (if (call qdb_is_true (<= (- sr_returned_date_sk ss_sold_date_sk) 30)) 1 0))
-          (arg_1 (if
-              (call
-                qdb_is_true
-                (&& (> (- sr_returned_date_sk ss_sold_date_sk) 30) (<= (- sr_returned_date_sk ss_sold_date_sk) 60)))
-              1
-              0))
-          (arg_2 (if
-              (call
-                qdb_is_true
-                (&& (> (- sr_returned_date_sk ss_sold_date_sk) 60) (<= (- sr_returned_date_sk ss_sold_date_sk) 90)))
-              1
-              0))
-          (arg_3 (if
-              (call
-                qdb_is_true
-                (&& (> (- sr_returned_date_sk ss_sold_date_sk) 90) (<= (- sr_returned_date_sk ss_sold_date_sk) 120)))
-              1
-              0))
-          (arg_4 (if (call qdb_is_true (> (- sr_returned_date_sk ss_sold_date_sk) 120)) 1 0)))
-        (keys s_store_name s_company_id s_street_number s_street_name s_street_type s_suite_number s_city s_county s_state s_zip)
-        (agg sum_0 sum arg_0)
-        (agg sum_1 sum arg_1)
-        (agg sum_2 sum arg_2)
-        (agg sum_3 sum arg_3)
-        (agg sum_4 sum arg_4))
-      (s_store_name s_store_name)
-      (s_company_id s_company_id)
-      (s_street_number s_street_number)
-      (s_street_name s_street_name)
-      (s_street_type s_street_type)
-      (s_suite_number s_suite_number)
-      (s_city s_city)
-      (s_county s_county)
-      (s_state s_state)
-      (s_zip s_zip)
-      (|30 days| sum_0)
-      (|31-60 days| sum_1)
-      (|61-90 days| sum_2)
-      (|91-120 days| sum_3)
-      (|>120 days| sum_4))
-    (s_store_name asc nulls-default)
-    (s_company_id asc nulls-default)
-    (s_street_number asc nulls-default)
-    (s_street_name asc nulls-default)
-    (s_street_type asc nulls-default)
-    (s_suite_number asc nulls-default)
-    (s_city asc nulls-default)
-    (s_county asc nulls-default)
-    (s_state asc nulls-default)
-    (s_zip asc nulls-default))
-  (limit 100))
+top-sort [s_store_name asc, s_company_id asc, s_street_number asc, s_street_name asc, s_street_type asc, s_suite_number asc, s_city asc, s_county asc, s_state asc, s_zip asc] limit 100
+└─ project (s_store_name, s_company_id, s_street_number, s_street_name, s_street_type, s_suite_number, s_city, s_county, s_state, s_zip, 30 days, 31-60 days, 61-90 days, 91-120 days, >120 days) (rows≈1 cost≈19.8K)
+   └─ aggregate keys=[s_store_name, s_company_id, s_street_number, s_street_name, s_street_type, s_suite_number, s_city, s_county, s_state, s_zip] aggs=[sum_0=sum, sum_1=sum, sum_2=sum, sum_3=sum, sum_4=sum] (rows≈1 cost≈19.6K)
+      └─ project (s_store_name, s_company_id, s_street_number, s_street_name, s_street_type, s_suite_number, s_city, s_county, s_state, s_zip, arg_0, arg_1, arg_2, arg_3, arg_4) (rows≈1 cost≈19.4K)
+         └─ join inner [store_sales.ss_store_sk = store.s_store_sk] emit-filter 1 from left (rows≈1 cost≈19.3K)
+            ├─ join inner [store_sales.ss_sold_date_sk = d1.d_date_sk] emit-filter 2 from left (rows≈1 cost≈13.4K)
+            │  ├─ join inner [d2.d_date_sk = store_returns.sr_returned_date_sk] emit-filter 3 from right (rows≈1 cost≈9.2K)
+            │  │  ├─ filter (&& (== |d2.d_year| 2000) (== |d2.d_moy| 9)) (rows≈10 cost≈240)
+            │  │  │  └─ source date_dim AS d2 row-groups (&& (== |d2.d_moy| 9) (== |d2.d_year| 2000)) use-filter 3 keys=[d2.d_date_sk] (rows≈10 cost≈120)
+            │  │  └─ join inner [store_returns.sr_ticket_number = store_sales.ss_ticket_number, store_returns.sr_item_sk = store_sales.ss_item_sk, store_returns.sr_customer_sk = store_sales.ss_customer_sk] (rows≈1 cost≈4.7K)
+            │  │     ├─ source store_returns AS store_returns (rows≈10 cost≈160)
+            │  │     └─ source store_sales AS store_sales (rows≈10 cost≈200)
+            │  └─ source date_dim AS d1 use-filter 2 keys=[d1.d_date_sk] (rows≈10 cost≈40)
+            └─ source store AS store use-filter 1 keys=[store.s_store_sk] (rows≈10 cost≈1.5K)

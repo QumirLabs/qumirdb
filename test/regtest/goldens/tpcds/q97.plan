@@ -1,53 +1,19 @@
-(query
-  (cte 0
-    (rel project
-      (rel aggregate
-        (rel filter
-          (rel join (rel source "store_sales") (rel source "date_dim") () (inner))
-          (&& (&& (== ss_sold_date_sk d_date_sk) (<= 1212 d_month_seq)) (<= d_month_seq (+ 1212 11))))
-        (keys ss_customer_sk ss_item_sk))
-      (customer_sk ss_customer_sk)
-      (item_sk ss_item_sk)))
-  (cte 1
-    (rel project
-      (rel aggregate
-        (rel filter
-          (rel join (rel source "catalog_sales") (rel source "date_dim") () (inner))
-          (&& (&& (== cs_sold_date_sk d_date_sk) (<= 1212 d_month_seq)) (<= d_month_seq (+ 1212 11))))
-        (keys cs_bill_customer_sk cs_item_sk))
-      (customer_sk cs_bill_customer_sk)
-      (item_sk cs_item_sk)))
-  (main
-    (rel limit
-      (rel project
-        (rel aggregate
-          (rel project
-            (rel join
-              (rel project (rel cte-ref 0) (|ssci.customer_sk| customer_sk) (|ssci.item_sk| item_sk))
-              (rel project (rel cte-ref 1) (|csci.customer_sk| customer_sk) (|csci.item_sk| item_sk))
-              ()
-              (full)
-              (residual (&& (== |ssci.customer_sk| |csci.customer_sk|) (== |ssci.item_sk| |csci.item_sk|))))
-            (arg_0 (if
-                (call qdb_is_true (&& (! (call qdb_is_null |ssci.customer_sk|)) (call qdb_is_null |csci.customer_sk|)))
-                1
-                0))
-            (arg_1 (if
-                (call qdb_is_true (&& (call qdb_is_null |ssci.customer_sk|) (! (call qdb_is_null |csci.customer_sk|))))
-                1
-                0))
-            (arg_2 (if
-                (call
-                  qdb_is_true
-                  (&& (! (call qdb_is_null |ssci.customer_sk|)) (! (call qdb_is_null |csci.customer_sk|))))
-                1
-                0))
-            (__group__ 1))
-          (keys __group__)
-          (agg sum_0 sum arg_0)
-          (agg sum_1 sum arg_1)
-          (agg sum_2 sum arg_2))
-        (store_only sum_0)
-        (catalog_only sum_1)
-        (store_and_catalog sum_2))
-      (limit 100))))
+project (store_only, catalog_only, store_and_catalog)
+└─ limit
+   └─ aggregate keys=[__group__] aggs=[sum_0=sum, sum_1=sum, sum_2=sum] (rows≈1 cost≈13.5K)
+      └─ project (arg_0, arg_1, arg_2, __group__) (rows≈4 cost≈13.3K)
+         └─ join full [ssci.customer_sk = csci.customer_sk, ssci.item_sk = csci.item_sk] (rows≈4 cost≈13.2K)
+            ├─ project (ssci.customer_sk, ssci.item_sk) (rows≈2 cost≈4.5K)
+            │  └─ project (customer_sk, item_sk) (rows≈2 cost≈4.5K)
+            │     └─ aggregate keys=[store_sales.ss_customer_sk, store_sales.ss_item_sk] (rows≈2 cost≈4.5K)
+            │        └─ join inner [date_dim.d_date_sk = store_sales.ss_sold_date_sk] (rows≈2 cost≈4.5K)
+            │           ├─ filter (&& (<= 1212 |date_dim.d_month_seq|) (<= |date_dim.d_month_seq| (+ 1212 11))) (rows≈2 cost≈160)
+            │           │  └─ source date_dim AS date_dim row-groups (&& (<= 1212 |date_dim.d_month_seq|) (<= |date_dim.d_month_seq| (+ 1212 11))) (rows≈10 cost≈80)
+            │           └─ source store_sales AS store_sales (rows≈10 cost≈120)
+            └─ project (csci.customer_sk, csci.item_sk) (rows≈2 cost≈4.5K)
+               └─ project (customer_sk, item_sk) (rows≈2 cost≈4.5K)
+                  └─ aggregate keys=[catalog_sales.cs_bill_customer_sk, catalog_sales.cs_item_sk] (rows≈2 cost≈4.5K)
+                     └─ join inner [date_dim.d_date_sk = catalog_sales.cs_sold_date_sk] (rows≈2 cost≈4.5K)
+                        ├─ filter (&& (<= 1212 |date_dim.d_month_seq|) (<= |date_dim.d_month_seq| (+ 1212 11))) (rows≈2 cost≈160)
+                        │  └─ source date_dim AS date_dim row-groups (&& (<= 1212 |date_dim.d_month_seq|) (<= |date_dim.d_month_seq| (+ 1212 11))) (rows≈10 cost≈80)
+                        └─ source catalog_sales AS catalog_sales (rows≈10 cost≈120)

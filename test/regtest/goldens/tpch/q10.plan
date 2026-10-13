@@ -1,39 +1,13 @@
-(rel limit
-  (rel sort
-    (rel project
-      (rel aggregate
-        (rel project
-          (rel filter
-            (rel join
-              (rel join
-                (rel join (rel source "customer") (rel source "orders") () (inner))
-                (rel source "lineitem")
-                ()
-                (inner))
-              (rel source "nation")
-              ()
-              (inner))
-            (&& (&& (&& (&& (&& (== c_custkey o_custkey) (== l_orderkey o_orderkey)) (>= o_orderdate (: 8917 i32)))
-                  (< o_orderdate (+ (: 8917 i32) (: 90 i32))))
-                (== l_returnflag (cast "R" <named StringView>)))
-              (== c_nationkey n_nationkey)))
-          (c_custkey c_custkey)
-          (c_name c_name)
-          (c_acctbal c_acctbal)
-          (c_phone c_phone)
-          (n_name n_name)
-          (c_address c_address)
-          (c_comment c_comment)
-          (arg_0 (* l_extendedprice (- 1 l_discount))))
-        (keys c_custkey c_name c_acctbal c_phone n_name c_address c_comment)
-        (agg sum_0 sum arg_0))
-      (c_custkey c_custkey)
-      (c_name c_name)
-      (revenue sum_0)
-      (c_acctbal c_acctbal)
-      (n_name n_name)
-      (c_address c_address)
-      (c_phone c_phone)
-      (c_comment c_comment))
-    (revenue desc nulls-default))
-  (limit 20))
+top-sort [revenue desc] limit 20
+└─ project (c_custkey, c_name, revenue, c_acctbal, n_name, c_address, c_phone, c_comment) (rows≈1 cost≈15K)
+   └─ aggregate keys=[c_custkey, c_name, c_acctbal, c_phone, n_name, c_address, c_comment] aggs=[sum_0=sum] (rows≈1 cost≈14.9K)
+      └─ project (c_custkey, c_name, c_acctbal, c_phone, n_name, c_address, c_comment, arg_0) (rows≈1 cost≈14.8K)
+         └─ join inner [nation.n_nationkey = customer.c_nationkey] emit-filter 1 from right (rows≈1 cost≈14.7K)
+            ├─ source nation AS nation use-filter 1 keys=[nation.n_nationkey] (rows≈10 cost≈200)
+            └─ join inner [orders.o_custkey = customer.c_custkey] emit-filter 2 from left (rows≈1 cost≈10.2K)
+               ├─ join inner [lineitem.l_orderkey = orders.o_orderkey] (rows≈1 cost≈5.1K)
+               │  ├─ filter (== |lineitem.l_returnflag| (cast "R" <named StringView>)) (rows≈3 cost≈720)
+               │  │  └─ source lineitem AS lineitem row-groups (== |lineitem.l_returnflag| (cast "R" <named StringView>)) (rows≈10 cost≈360)
+               │  └─ filter (&& (>= |orders.o_orderdate| (: 8917 i32)) (< |orders.o_orderdate| (+ (: 8917 i32) (: 90 i32)))) (rows≈3 cost≈240)
+               │     └─ source orders AS orders row-groups (&& (>= |orders.o_orderdate| (: 8917 i32)) (< |orders.o_orderdate| (+ (: 8917 i32) (: 90 i32)))) (rows≈10 cost≈120)
+               └─ source customer AS customer use-filter 2 keys=[customer.c_custkey] (rows≈10 cost≈800)

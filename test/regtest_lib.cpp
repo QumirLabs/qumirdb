@@ -214,12 +214,6 @@ std::shared_ptr<TStructType> ParseSchema(const TValue& value) {
     if (!tokens.Next().IsEof()) throw std::runtime_error("unexpected input after schema type");
     auto structure = TMaybeType<TStructType>(*parsed);
     if (!structure) throw std::runtime_error("schema must be a Qumir struct type");
-    std::set<std::string> names;
-    for (const auto& [name, type] : structure.Cast()->Fields) {
-        if (name.empty() || !names.insert(name).second) {
-            throw std::runtime_error("empty or duplicate schema field name");
-        }
-    }
     return structure.Cast();
 }
 
@@ -414,7 +408,11 @@ std::shared_ptr<arrow::Table> ReadTable(const fs::path& path) {
     std::vector<std::shared_ptr<arrow::Field>> fields;
     std::vector<std::unique_ptr<arrow::ArrayBuilder>> builders;
     const auto schema = ParseSchema(Required(object, "schema"));
+    std::set<std::string> names;
     for (const auto& [name, columnType] : schema->Fields) {
+        if (name.empty() || !names.insert(name).second) {
+            throw std::runtime_error("empty or duplicate schema field name");
+        }
         const auto [valueType, nullable] = FieldType(columnType);
         auto type = ArrowType(valueType);
         fields.push_back(arrow::field(name, type, nullable));
@@ -504,6 +502,14 @@ std::map<std::string, std::string> Bindings(const TObject& object) {
         result.emplace(name.str(), String(value));
     }
     return result;
+}
+
+bool ExecuteOption(const TObject& object, bool fallback) {
+    const auto* value = object.get("execute");
+    if (!value) return fallback;
+    const auto enabled = value->getAsBoolean();
+    if (!enabled) throw std::runtime_error("execute must be a boolean");
+    return *enabled;
 }
 
 fs::path File(const fs::path& dir, const TValue& value) {
@@ -643,8 +649,9 @@ std::vector<TQueryCase> CollectCases(const fs::path& root, const fs::path& golde
         try {
             auto json = ReadJson(manifest);
             const auto& object = Object(json);
-            Fields(object, {"version", "fixtures", "tables", "variants", "cases"});
+            Fields(object, {"version", "fixtures", "tables", "variants", "cases", "execute"});
             Version(object);
+            const bool suiteExecute = ExecuteOption(object, true);
             auto suite = std::make_shared<TSuite>();
             suite->Manifest = manifest;
             const auto dir = manifest.parent_path();
@@ -692,7 +699,8 @@ std::vector<TQueryCase> CollectCases(const fs::path& root, const fs::path& golde
             std::set<fs::path> queries;
             for (const auto& [name, value] : Object(Required(object, "cases"))) {
                 const auto& definition = Object(value);
-                Fields(definition, {"tables", "order"});
+                Fields(definition, {"tables", "order", "execute"});
+                const bool execute = ExecuteOption(definition, suiteExecute);
                 const auto sql = File(dir, TValue(name.str()));
                 if (sql.extension() != ".sql" || sql.parent_path() != dir) {
                     throw std::runtime_error("suite SQL cases must be .sql files in the manifest directory");
@@ -709,10 +717,11 @@ std::vector<TQueryCase> CollectCases(const fs::path& root, const fs::path& golde
                 const auto base = fs::path(relativeSql).replace_extension();
                 const auto golden = fs::path(goldenRoot / relativeSql).replace_extension(".result.json");
                 const auto planGolden = fs::path(goldenRoot / relativeSql).replace_extension(".plan");
-                const auto caseVariants = bindings.empty() ? std::set<std::string>{"plan"} : variants;
+                const auto caseVariants = bindings.empty() || !execute
+                    ? std::set<std::string>{"plan"} : variants;
                 for (const auto& variant : caseVariants) {
                     result.push_back({base, sql, planGolden,
-                        golden, suite, bindings, variant, order == "ordered"});
+                        golden, suite, bindings, variant, order == "ordered", execute});
                 }
             }
             for (const auto& entry : fs::directory_iterator(dir)) {
@@ -918,6 +927,20 @@ TCaseResult CheckCase(const TQueryCase& test, bool canonize) {
     PrintPlanTreeWithCtes(planOutput, *plan);
     const auto planComparison = ComparePlan(test, planOutput.str(), canonize);
     const auto planGoldenMs = mark();
+    auto printTiming = [&](const TPlanRunTimings& runTimings, double resultGoldenMs) {
+        if (!timing) return;
+        const auto totalMs = std::chrono::duration<double, std::milli>(point - started).count();
+        std::cerr << "[regtest-timing] query=" << test.Base.string() << " variant=" << test.Variant
+            << " read_parse_ms=" << parseMs << " build_plan_ms=" << buildMs
+            << " optimize_ms=" << optimizeMs << " plan_golden_ms=" << planGoldenMs
+            << " lower_ms=" << runTimings.LowerMs << " jit_ms=" << runTimings.JitMs
+            << " execute_ms=" << runTimings.ExecuteMs << " result_golden_ms=" << resultGoldenMs
+            << " total_ms=" << totalMs << '\n';
+    };
+    if (!test.Execute) {
+        printTiming({}, 0);
+        return {planComparison, std::nullopt};
+    }
     NScheduler::TSettings settings;
     settings.Scheduler.Mode = test.Variant == "single"
         ? NScheduler::EExecutionMode::SingleThreadedScheduler
@@ -941,15 +964,7 @@ TCaseResult CheckCase(const TQueryCase& test, bool canonize) {
     }
     auto comparison = TComparison{actual == expected, RenderResult(actual), RenderResult(expected)};
     const auto resultGoldenMs = mark();
-    if (timing) {
-        const auto totalMs = std::chrono::duration<double, std::milli>(point - started).count();
-        std::cerr << "[regtest-timing] query=" << test.Base.string() << " variant=" << test.Variant
-            << " read_parse_ms=" << parseMs << " build_plan_ms=" << buildMs
-            << " optimize_ms=" << optimizeMs << " plan_golden_ms=" << planGoldenMs
-            << " lower_ms=" << runTimings.LowerMs << " jit_ms=" << runTimings.JitMs
-            << " execute_ms=" << runTimings.ExecuteMs << " result_golden_ms=" << resultGoldenMs
-            << " total_ms=" << totalMs << '\n';
-    }
+    printTiming(runTimings, resultGoldenMs);
     return {planComparison, std::move(comparison)};
 }
 

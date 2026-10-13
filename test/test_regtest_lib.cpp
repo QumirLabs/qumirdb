@@ -99,6 +99,80 @@ TEST(RegSuiteInfrastructure, NoManifestRunsPlanOnly) {
     EXPECT_TRUE(NRegTest::CheckCase(tests[0], false).Plan.Matches);
 }
 
+TEST(RegSuiteInfrastructure, PlanOnlyKeepsRealSchemasAndDoesNotReadOrCanonizeResults) {
+    TCaseDirectory dir;
+    dir.Write("suite.json", R"({
+        "version":1,"execute":false,
+        "fixtures":{"data":{"json":"table.json"}},
+        "tables":{"t":"data"},"variants":["single","threaded"],
+        "cases":{"query.sql":{}}
+    })");
+    fs::remove(dir.Golden);
+    const auto tests = dir.Collect();
+    ASSERT_EQ(tests.size(), 1);
+    EXPECT_TRUE(tests[0].HasTables());
+    EXPECT_FALSE(tests[0].Execute);
+    EXPECT_EQ(tests[0].Variant, "plan");
+    NRegTest::PrepareCases(tests);
+    EXPECT_EQ(NRegTest::TableStats(tests[0], "t")->RowCount, 2);
+    const auto result = NRegTest::CheckCase(tests[0], true);
+    EXPECT_TRUE(result.Plan.Matches);
+    EXPECT_NE(result.Plan.Actual.find("source t"), std::string::npos);
+    EXPECT_NE(result.Plan.Actual.find("rows≈2"), std::string::npos);
+    EXPECT_FALSE(result.Result);
+    NRegTest::CommitGoldens(tests);
+    EXPECT_TRUE(fs::is_regular_file(tests[0].PlanGolden));
+    EXPECT_FALSE(fs::exists(dir.Golden));
+    const auto checked = NRegTest::CheckCase(tests[0], false);
+    EXPECT_TRUE(checked.Plan.Matches);
+    EXPECT_FALSE(checked.Result);
+}
+
+TEST(RegSuiteInfrastructure, CaseExecutionOverridesSuiteDefault) {
+    TCaseDirectory dir;
+    dir.Write("run.sql", "SELECT v AS v FROM t ORDER BY v DESC;");
+    dir.Write("suite.json", R"({
+        "version":1,"execute":false,
+        "fixtures":{"data":{"json":"table.json"}},
+        "tables":{"t":"data"},"variants":["single","threaded"],
+        "cases":{"query.sql":{},"run.sql":{"execute":true}}
+    })");
+    const auto tests = dir.Collect();
+    ASSERT_EQ(tests.size(), 3);
+    EXPECT_FALSE(tests[0].Execute);
+    EXPECT_EQ(tests[0].Variant, "plan");
+    EXPECT_TRUE(tests[1].Execute);
+    EXPECT_EQ(tests[1].Variant, "single");
+    EXPECT_TRUE(tests[2].Execute);
+    EXPECT_EQ(tests[2].Variant, "threaded");
+
+    fs::remove(dir.SuiteDir / "run.sql");
+    dir.Write("suite.json", R"({
+        "version":1,
+        "fixtures":{"data":{"json":"table.json"}},
+        "tables":{"t":"data"},"variants":["single","threaded"],
+        "cases":{"query.sql":{"execute":false}}
+    })");
+    const auto overridden = dir.Collect();
+    ASSERT_EQ(overridden.size(), 1);
+    EXPECT_FALSE(overridden[0].Execute);
+    EXPECT_EQ(overridden[0].Variant, "plan");
+}
+
+TEST(RegSuiteInfrastructure, RejectsInvalidExecutionOptions) {
+    TCaseDirectory dir;
+    for (const std::string value : {"0", "\"false\"", "null"}) {
+        auto manifest = std::string(TCaseDirectory::Manifest);
+        manifest.insert(1, "\"execute\":" + value + ',');
+        dir.Write("suite.json", manifest);
+        EXPECT_THROW(dir.Collect(), std::runtime_error);
+        manifest = TCaseDirectory::Manifest;
+        manifest.insert(manifest.find("\"order\":\"ordered\""), "\"execute\":" + value + ',');
+        dir.Write("suite.json", manifest);
+        EXPECT_THROW(dir.Collect(), std::runtime_error);
+    }
+}
+
 TEST(RegSuiteInfrastructure, RejectsUnknownFixturesAndVariants) {
     TCaseDirectory dir;
     auto manifest = std::string(TCaseDirectory::Manifest);
@@ -241,6 +315,16 @@ TEST(RegSuiteInfrastructure, SharesPreparedFixturesAcrossQueriesAliasesAndVarian
         EXPECT_TRUE(result.Result->Matches);
         EXPECT_EQ(result.Result->Actual, expected);
     }
+}
+
+TEST(RegSuiteInfrastructure, ResultSchemaAllowsDuplicateColumnNames) {
+    TCaseDirectory dir;
+    dir.Write("query.sql", "SELECT v, v FROM t ORDER BY v DESC;");
+    dir.WriteGolden(R"({
+        "schema":"<struct (v i64) (v i64)>",
+        "rows":[["2","2"],["1","1"]]
+    })");
+    EXPECT_TRUE(dir.Run().Matches);
 }
 
 TEST(RegSuiteInfrastructure, GoldenPathMirrorsCasesOutsideCases) {

@@ -1,49 +1,8 @@
-(rel project
-  (rel aggregate
-    (rel project
-      (rel filter
-        (rel join (rel source "lineitem") (rel source "part") () (inner))
-        (|| (|| (&& (&& (&& (&& (&& (&& (&& (== p_partkey l_partkey) (== p_brand (cast "Brand#35" <named StringView>)))
-                        (call
-                          qdb_in_list
-                          p_container
-                          (cast "SM CASE" <named StringView>)
-                          (cast "SM BOX" <named StringView>)
-                          (cast "SM PACK" <named StringView>)
-                          (cast "SM PKG" <named StringView>)))
-                      (>= l_quantity 10))
-                    (<= l_quantity (+ 10 10)))
-                  (&& (<= 1 p_size) (<= p_size 5)))
-                (call qdb_in_list l_shipmode (cast "AIR" <named StringView>) (cast "AIR REG" <named StringView>)))
-              (== l_shipinstruct (cast "DELIVER IN PERSON" <named StringView>)))
-            (&& (&& (&& (&& (&& (&& (&& (== p_partkey l_partkey) (== p_brand (cast "Brand#34" <named StringView>)))
-                        (call
-                          qdb_in_list
-                          p_container
-                          (cast "MED BAG" <named StringView>)
-                          (cast "MED BOX" <named StringView>)
-                          (cast "MED PKG" <named StringView>)
-                          (cast "MED PACK" <named StringView>)))
-                      (>= l_quantity 18))
-                    (<= l_quantity (+ 18 10)))
-                  (&& (<= 1 p_size) (<= p_size 10)))
-                (call qdb_in_list l_shipmode (cast "AIR" <named StringView>) (cast "AIR REG" <named StringView>)))
-              (== l_shipinstruct (cast "DELIVER IN PERSON" <named StringView>))))
-          (&& (&& (&& (&& (&& (&& (&& (== p_partkey l_partkey) (== p_brand (cast "Brand#23" <named StringView>)))
-                      (call
-                        qdb_in_list
-                        p_container
-                        (cast "LG CASE" <named StringView>)
-                        (cast "LG BOX" <named StringView>)
-                        (cast "LG PACK" <named StringView>)
-                        (cast "LG PKG" <named StringView>)))
-                    (>= l_quantity 24))
-                  (<= l_quantity (+ 24 10)))
-                (&& (<= 1 p_size) (<= p_size 15)))
-              (call qdb_in_list l_shipmode (cast "AIR" <named StringView>) (cast "AIR REG" <named StringView>)))
-            (== l_shipinstruct (cast "DELIVER IN PERSON" <named StringView>)))))
-      (arg_0 (* l_extendedprice (- 1 l_discount)))
-      (__group__ 1))
-    (keys __group__)
-    (agg sum_0 sum arg_0))
-  (revenue sum_0))
+project (revenue) (rows≈1 cost≈6.3K)
+└─ aggregate keys=[__group__] aggs=[sum_0=sum] (rows≈1 cost≈6.3K)
+   └─ project (arg_0, __group__) (rows≈1 cost≈6.2K)
+      └─ join inner [part.p_partkey = lineitem.l_partkey] residual (|| (|| (&& (&& (&& (&& (== |part.p_brand| (cast "Brand#35" <named StringView>)) (call qdb_in_list |part.p_container| (cast "SM CASE" <named StringView>) (cast "SM BOX" <named StringView>) (cast "SM PACK" <named StringView>) (cast "SM PKG" <named StringView>))) (>= |lineitem.l_quantity| 10)) (<= |lineitem.l_quantity| (+ 10 10))) (<= |part.p_size| 5)) (&& (&& (&& (&& (== |part.p_brand| (cast "Brand#34" <named StringView>)) (call qdb_in_list |part.p_container| (cast "MED BAG" <named StringView>) (cast "MED BOX" <named StringView>) (cast "MED PKG" <named StringView>) (cast "MED PACK" <named StringView>))) (>= |lineitem.l_quantity| 18)) (<= |lineitem.l_quantity| (+ 18 10))) (<= |part.p_size| 10))) (&& (&& (&& (&& (== |part.p_brand| (cast "Brand#23" <named StringView>)) (call qdb_in_list |part.p_container| (cast "LG CASE" <named StringView>) (cast "LG BOX" <named StringView>) (cast "LG PACK" <named StringView>) (cast "LG PKG" <named StringView>))) (>= |lineitem.l_quantity| 24)) (<= |lineitem.l_quantity| (+ 24 10))) (<= |part.p_size| 15))) (rows≈1 cost≈6.2K)
+         ├─ filter (&& (|| (|| (&& (&& (== |part.p_brand| (cast "Brand#35" <named StringView>)) (call qdb_in_list |part.p_container| (cast "SM CASE" <named StringView>) (cast "SM BOX" <named StringView>) (cast "SM PACK" <named StringView>) (cast "SM PKG" <named StringView>))) (<= |part.p_size| 5)) (&& (&& (== |part.p_brand| (cast "Brand#34" <named StringView>)) (call qdb_in_list |part.p_container| (cast "MED BAG" <named StringView>) (cast "MED BOX" <named StringView>) (cast "MED PKG" <named StringView>) (cast "MED PACK" <named StringView>))) (<= |part.p_size| 10))) (&& (&& (== |part.p_brand| (cast "Brand#23" <named StringView>)) (call qdb_in_list |part.p_container| (cast "LG CASE" <named StringView>) (cast "LG BOX" <named StringView>) (cast "LG PACK" <named StringView>) (cast "LG PKG" <named StringView>))) (<= |part.p_size| 15))) (<= 1 |part.p_size|)) (rows≈5 cost≈800)
+         │  └─ source part AS part row-groups (&& (|| (|| (&& (&& (== |part.p_brand| (cast "Brand#35" <named StringView>)) (call qdb_in_list |part.p_container| (cast "SM CASE" <named StringView>) (cast "SM BOX" <named StringView>) (cast "SM PACK" <named StringView>) (cast "SM PKG" <named StringView>))) (<= |part.p_size| 5)) (&& (&& (== |part.p_brand| (cast "Brand#34" <named StringView>)) (call qdb_in_list |part.p_container| (cast "MED BAG" <named StringView>) (cast "MED BOX" <named StringView>) (cast "MED PKG" <named StringView>) (cast "MED PACK" <named StringView>))) (<= |part.p_size| 10))) (&& (&& (== |part.p_brand| (cast "Brand#23" <named StringView>)) (call qdb_in_list |part.p_container| (cast "LG CASE" <named StringView>) (cast "LG BOX" <named StringView>) (cast "LG PACK" <named StringView>) (cast "LG PKG" <named StringView>))) (<= |part.p_size| 15))) (<= 1 |part.p_size|)) (rows≈10 cost≈400)
+         └─ filter (&& (&& (|| (|| (&& (>= |lineitem.l_quantity| 10) (<= |lineitem.l_quantity| (+ 10 10))) (&& (>= |lineitem.l_quantity| 18) (<= |lineitem.l_quantity| (+ 18 10)))) (&& (>= |lineitem.l_quantity| 24) (<= |lineitem.l_quantity| (+ 24 10)))) (call qdb_in_list |lineitem.l_shipmode| (cast "AIR" <named StringView>) (cast "AIR REG" <named StringView>))) (== |lineitem.l_shipinstruct| (cast "DELIVER IN PERSON" <named StringView>))) (rows≈1 cost≈1.2K)
+            └─ source lineitem AS lineitem row-groups (&& (&& (|| (|| (&& (>= |lineitem.l_quantity| 10) (<= |lineitem.l_quantity| (+ 10 10))) (&& (>= |lineitem.l_quantity| 18) (<= |lineitem.l_quantity| (+ 18 10)))) (&& (>= |lineitem.l_quantity| 24) (<= |lineitem.l_quantity| (+ 24 10)))) (== |lineitem.l_shipinstruct| (cast "DELIVER IN PERSON" <named StringView>))) (call qdb_in_list |lineitem.l_shipmode| (cast "AIR" <named StringView>) (cast "AIR REG" <named StringView>))) (rows≈10 cost≈600)

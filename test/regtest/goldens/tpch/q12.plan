@@ -1,34 +1,8 @@
-(rel sort
-  (rel project
-    (rel aggregate
-      (rel project
-        (rel filter
-          (rel join (rel source "orders") (rel source "lineitem") () (inner))
-          (&& (&& (&& (&& (&& (== o_orderkey l_orderkey)
-                    (call qdb_in_list l_shipmode (cast "TRUCK" <named StringView>) (cast "AIR" <named StringView>)))
-                  (< l_commitdate l_receiptdate))
-                (< l_shipdate l_commitdate))
-              (>= l_receiptdate (: 8401 i32)))
-            (< l_receiptdate (+ (: 8401 i32) (: 365 i32)))))
-        (l_shipmode l_shipmode)
-        (arg_0 (if
-            (call
-              qdb_is_true
-              (|| (== o_orderpriority (cast "1-URGENT" <named StringView>))
-                (== o_orderpriority (cast "2-HIGH" <named StringView>))))
-            1
-            0))
-        (arg_1 (if
-            (call
-              qdb_is_true
-              (&& (!= o_orderpriority (cast "1-URGENT" <named StringView>))
-                (!= o_orderpriority (cast "2-HIGH" <named StringView>))))
-            1
-            0)))
-      (keys l_shipmode)
-      (agg sum_0 sum arg_0)
-      (agg sum_1 sum arg_1))
-    (l_shipmode l_shipmode)
-    (high_line_count sum_0)
-    (low_line_count sum_1))
-  (l_shipmode asc nulls-default))
+sort [l_shipmode asc]
+└─ project (l_shipmode, high_line_count, low_line_count) (rows≈1 cost≈5.1K)
+   └─ aggregate keys=[l_shipmode] aggs=[sum_0=sum, sum_1=sum] (rows≈1 cost≈5.1K)
+      └─ project (l_shipmode, arg_0, arg_1) (rows≈1 cost≈5.1K)
+         └─ join inner [lineitem.l_orderkey = orders.o_orderkey] emit-filter 1 from left (rows≈1 cost≈5K)
+            ├─ filter (&& (&& (&& (&& (call qdb_in_list |lineitem.l_shipmode| (cast "TRUCK" <named StringView>) (cast "AIR" <named StringView>)) (< |lineitem.l_commitdate| |lineitem.l_receiptdate|)) (< |lineitem.l_shipdate| |lineitem.l_commitdate|)) (>= |lineitem.l_receiptdate| (: 8401 i32))) (< |lineitem.l_receiptdate| (+ (: 8401 i32) (: 365 i32)))) (rows≈1 cost≈640)
+            │  └─ source lineitem AS lineitem row-groups (&& (&& (&& (< |lineitem.l_commitdate| |lineitem.l_receiptdate|) (< |lineitem.l_shipdate| |lineitem.l_commitdate|)) (&& (>= |lineitem.l_receiptdate| (: 8401 i32)) (< |lineitem.l_receiptdate| (+ (: 8401 i32) (: 365 i32))))) (call qdb_in_list |lineitem.l_shipmode| (cast "TRUCK" <named StringView>) (cast "AIR" <named StringView>))) (rows≈10 cost≈320)
+            └─ source orders AS orders use-filter 1 keys=[orders.o_orderkey] (rows≈10 cost≈200)

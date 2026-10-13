@@ -1,48 +1,19 @@
-(query
-  (cte 0
-    (rel project
-      (rel aggregate
-        (rel project
-          (rel filter
-            (rel source "lineitem")
-            (&& (>= l_shipdate (: 9190 i32)) (< l_shipdate (+ (: 9190 i32) (: 90 i32)))))
-          (l_suppkey l_suppkey)
-          (arg_0 (* l_extendedprice (- 1 l_discount))))
-        (keys l_suppkey)
-        (agg sum_0 sum arg_0))
-      (supplier_no l_suppkey)
-      (total_revenue sum_0)))
-  (main
-    (rel sort
-      (rel project
-        (rel filter
-          (rel join
-            (rel join
-              (rel source "supplier")
-              (rel project
-                (rel cte-ref 0)
-                (|revenue0.supplier_no| supplier_no)
-                (|revenue0.total_revenue| total_revenue))
-              ()
-              (inner))
-            (rel project
-              (rel aggregate
-                (rel project
-                  (rel project
-                    (rel cte-ref 0)
-                    (|revenue0.supplier_no| supplier_no)
-                    (|revenue0.total_revenue| total_revenue))
-                  (total_revenue total_revenue)
-                  (__group__ 1))
-                (keys __group__)
-                (agg max_0 max total_revenue))
-              (__scalar_0__ max_0))
-            ()
-            (inner))
-          (&& (== s_suppkey supplier_no) (== total_revenue __scalar_0__)))
-        (s_suppkey s_suppkey)
-        (s_name s_name)
-        (s_address s_address)
-        (s_phone s_phone)
-        (total_revenue total_revenue))
-      (s_suppkey asc nulls-default))))
+cte #0 (materialized, ×2):
+project (supplier_no, total_revenue) (rows≈3 cost≈588)
+└─ aggregate keys=[l_suppkey] aggs=[sum_0=sum] (rows≈3 cost≈552)
+   └─ project (l_suppkey, arg_0) (rows≈3 cost≈516)
+      └─ filter (&& (>= |lineitem.l_shipdate| (: 9190 i32)) (< |lineitem.l_shipdate| (+ (: 9190 i32) (: 90 i32)))) (rows≈3 cost≈480)
+         └─ source lineitem AS lineitem (rows≈10 cost≈240)
+main:
+sort [s_suppkey asc]
+└─ project (s_suppkey, s_name, s_address, s_phone, total_revenue) (rows≈1 cost≈10.5K)
+   └─ join inner [revenue0.total_revenue = __scalar_0__] (rows≈1 cost≈10.4K)
+      ├─ join inner [supplier.s_suppkey = revenue0.supplier_no] (rows≈3 cost≈5.5K)
+      │  ├─ source supplier AS supplier (rows≈10 cost≈520)
+      │  └─ project (revenue0.supplier_no, revenue0.total_revenue) (rows≈3 cost≈624)
+      │     └─ cte-consumer #0 (×2)
+      └─ project (__scalar_0__) (rows≈1 cost≈716)
+         └─ aggregate keys=[__group__] aggs=[max_0=max] (rows≈1 cost≈708)
+            └─ project (total_revenue, __group__) (rows≈3 cost≈660)
+               └─ project (revenue0.total_revenue) (rows≈3 cost≈612)
+                  └─ cte-consumer #0 (×2)

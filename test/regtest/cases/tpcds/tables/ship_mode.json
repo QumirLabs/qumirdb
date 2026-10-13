@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "schema": "<struct (sm_ship_mode_sk i32) (sm_ship_mode_id string) (sm_type <named Nullable [string]>) (sm_code <named Nullable [string]>) (sm_carrier <named Nullable [string]>) (sm_contract <named Nullable [string]>)>",
+  "rows": [
+    [1, "AAAAAAAABAAAAAAA", "EXPRESS", "AIR", "UPS", "YvxVaJI10"],
+    [2, "AAAAAAAACAAAAAAA", "NEXT DAY", "AIR", "FEDEX", "ldhM8IvpzHgdbBgDfI"],
+    [3, "AAAAAAAADAAAAAAA", "OVERNIGHT", "AIR", "AIRBORNE", "6Hzzp4JkzjqD8MGXLCDa"],
+    [4, "AAAAAAAAEAAAAAAA", "TWO DAY", "AIR", "USPS", "UaAJjKDnL4gTOqbpj"],
+    [5, "AAAAAAAAFAAAAAAA", "LIBRARY", "AIR", "DHL", "HVDFCcQ"],
+    [6, "AAAAAAAAGAAAAAAA", "REGULAR", "SURFACE", "TBS", "Ek"],
+    [7, "AAAAAAAAHAAAAAAA", "EXPRESS", "SURFACE", "ZHOU", "hGoF18SLDDPBj"],
+    [8, "AAAAAAAAIAAAAAAA", "NEXT DAY", "SURFACE", "ZOUROS", "yVfotg7Tio3MVhBg6Bkn"],
+    [9, "AAAAAAAAJAAAAAAA", "OVERNIGHT", "SURFACE", "MSC", "Xjy3ZPuiDjzHlRx14Z3"],
+    [10, "AAAAAAAAKAAAAAAA", "TWO DAY", "SURFACE", "LATVIAN", "P7FBIt8yd"]
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "schema": "<struct (hd_demo_sk i32) (hd_income_band_sk <named Nullable [i32]>) (hd_buy_potential <named Nullable [string]>) (hd_dep_count <named Nullable [i32]>) (hd_vehicle_count <named Nullable [i32]>)>",
+  "rows": [
+    [1, 2, "0-500", 0, 0],
+    [2, 3, "0-500", 0, 0],
+    [3, 4, "0-500", 0, 0],
+    [4, 5, "0-500", 0, 0],
+    [5, 6, "0-500", 0, 0],
+    [6, 7, "0-500", 0, 0],
+    [7, 8, "0-500", 0, 0],
+    [8, 9, "0-500", 0, 0],
+    [9, 10, "0-500", 0, 0],
+    [10, 11, "0-500", 0, 0]
+  ]
+}
