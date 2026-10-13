@@ -22,10 +22,16 @@ public:
         auto* created = ::mkdtemp(pattern.data());
         if (!created) throw std::runtime_error("cannot create suite test directory");
         Root = created;
+        CasesDir = Root / "cases";
+        SuiteDir = CasesDir / "group";
+        GoldensDir = Root / "goldens";
+        Golden = GoldensDir / "group/query.result.json";
+        fs::create_directories(SuiteDir);
+        fs::create_directories(Golden.parent_path());
         Write("suite.json", Manifest);
         Write("query.sql", "SELECT v AS v FROM t ORDER BY v DESC;");
         Write("table.json", Table);
-        Write("result.json", Result);
+        WriteGolden(Result);
     }
 
     ~TCaseDirectory() {
@@ -34,17 +40,22 @@ public:
     }
 
     void Write(std::string_view file, std::string_view text) const {
-        std::ofstream output(Root / file);
+        std::ofstream output(SuiteDir / file);
         if (!(output << text)) throw std::runtime_error("cannot write suite test file");
     }
 
-    std::string Read(std::string_view file) const {
-        std::ifstream input(Root / file);
+    void WriteGolden(std::string_view text) const {
+        std::ofstream output(Golden);
+        if (!(output << text)) throw std::runtime_error("cannot write suite test golden");
+    }
+
+    std::string ReadGolden() const {
+        std::ifstream input(Golden);
         return {std::istreambuf_iterator<char>(input), {}};
     }
 
     std::vector<NRegTest::TExecCase> Collect() const {
-        return NRegTest::CollectExecCases(Root);
+        return NRegTest::CollectExecCases(CasesDir, GoldensDir);
     }
 
     NRegTest::TComparison Run(bool canonize = false) const {
@@ -54,11 +65,15 @@ public:
     }
 
     fs::path Root;
+    fs::path CasesDir;
+    fs::path SuiteDir;
+    fs::path GoldensDir;
+    fs::path Golden;
     static constexpr auto Manifest = R"({
         "version":1,
         "fixtures":{"data":{"json":"table.json","parquet":{"row_group_rows":1}}},
         "tables":{"t":"data"},"variants":["single"],
-        "cases":{"query.sql":{"golden":"result.json","order":"ordered"}}
+        "cases":{"query.sql":{"order":"ordered"}}
     })";
     static constexpr auto Table = R"({
         "version":1,"schema":"<struct (v i64)>",
@@ -72,7 +87,7 @@ public:
 
 TEST(RegSuiteInfrastructure, NoManifestHasNoExecutionCases) {
     TCaseDirectory dir;
-    fs::rename(dir.Root / "suite.json", dir.Root / "disabled.json");
+    fs::rename(dir.SuiteDir / "suite.json", dir.SuiteDir / "disabled.json");
     EXPECT_TRUE(dir.Collect().empty());
 }
 
@@ -98,7 +113,7 @@ TEST(RegSuiteInfrastructure, OrderedComparisonPreservesOrder) {
     TCaseDirectory dir;
     auto golden = std::string(TCaseDirectory::Result);
     golden.replace(golden.find("[[\"2\"],[\"1\"]]"), 13, "[[\"1\"],[\"2\"]]");
-    dir.Write("result.json", golden);
+    dir.WriteGolden(golden);
     EXPECT_FALSE(dir.Run().Matches);
 }
 
@@ -113,7 +128,7 @@ TEST(RegSuiteInfrastructure, UnorderedComparisonPreservesDuplicates) {
         "version":1,"schema":"<struct (v i64)>",
         "rows":[["2"],["2"]]
     })");
-    dir.Write("result.json", R"({
+    dir.WriteGolden(R"({
         "version":1,"schema":"<struct (v i64)>",
         "rows":[["2"]]
     })");
@@ -141,7 +156,7 @@ TEST(RegSuiteInfrastructure, IntegersNeverRoundThroughDouble) {
         "rows":[["18446744073709551615"],["9007199254740993"]]
     })";
     dir.Write("table.json", data);
-    dir.Write("result.json", data);
+    dir.WriteGolden(data);
     EXPECT_TRUE(dir.Run().Matches);
     dir.Write("table.json", R"({
         "version":1,"schema":"<struct (v u64)>",
@@ -158,12 +173,12 @@ TEST(RegSuiteInfrastructure, RejectsUnmappedSqlTable) {
 
 TEST(RegSuiteInfrastructure, SchemaUsesCoreParserAndPrinter) {
     TCaseDirectory dir;
-    dir.Write("result.json", R"({
+    dir.WriteGolden(R"({
         "version":1,"schema":"<struct   (v   i64) >",
         "rows":[["2"],["1"]]
     })");
     EXPECT_TRUE(dir.Run().Matches);
-    dir.Write("result.json", R"({
+    dir.WriteGolden(R"({
         "version":1,"schema":"<struct (v <named Nullable [i64]>)>",
         "rows":[["2"],["1"]]
     })");
@@ -180,16 +195,37 @@ TEST(RegSuiteInfrastructure, SchemaUsesCoreParserAndPrinter) {
 
 TEST(RegSuiteInfrastructure, RelativeRootIsNormalized) {
     TCaseDirectory dir;
-    EXPECT_EQ(NRegTest::CollectExecCases(dir.Root / ".").size(), 1);
+    EXPECT_EQ(NRegTest::CollectExecCases(dir.CasesDir / ".", dir.GoldensDir / ".").size(), 1);
+}
+
+TEST(RegSuiteInfrastructure, GoldenPathMirrorsCasesOutsideCases) {
+    TCaseDirectory dir;
+    fs::copy(dir.SuiteDir, dir.CasesDir / "other", fs::copy_options::recursive);
+    const auto tests = dir.Collect();
+    ASSERT_EQ(tests.size(), 2);
+    EXPECT_EQ(tests[0].Golden, dir.Golden);
+    EXPECT_EQ(tests[1].Golden, dir.GoldensDir / "other/query.result.json");
+
+    auto manifest = std::string(TCaseDirectory::Manifest);
+    manifest.replace(manifest.find("\"order\":\"ordered\""), 17,
+        "\"order\":\"ordered\",\"golden\":\"result.json\"");
+    dir.Write("suite.json", manifest);
+    EXPECT_THROW(dir.Collect(), std::runtime_error);
+}
+
+TEST(RegSuiteInfrastructure, DoesNotReadGoldensFromCaseDirectory) {
+    TCaseDirectory dir;
+    fs::rename(dir.Golden, dir.SuiteDir / "query.result.json");
+    EXPECT_THROW(dir.Run(), std::runtime_error);
 }
 
 TEST(RegSuiteInfrastructure, CanonizeWaitsForExplicitCommit) {
     TCaseDirectory dir;
     auto tests = dir.Collect();
-    const auto before = dir.Read("result.json");
+    const auto before = dir.ReadGolden();
     NRegTest::PrepareExecCase(tests.at(0));
     EXPECT_TRUE(NRegTest::ExecuteCase(tests.at(0), true).Matches);
-    EXPECT_EQ(dir.Read("result.json"), before);
+    EXPECT_EQ(dir.ReadGolden(), before);
     NRegTest::CommitExecGoldens(tests);
     EXPECT_TRUE(NRegTest::ExecuteCase(tests.at(0), false).Matches);
 }
@@ -197,12 +233,12 @@ TEST(RegSuiteInfrastructure, CanonizeWaitsForExplicitCommit) {
 TEST(RegSuiteInfrastructure, CanonizeRejectsDifferingVariantResults) {
     TCaseDirectory dir;
     auto tests = dir.Collect();
-    const auto before = dir.Read("result.json");
+    const auto before = dir.ReadGolden();
     NRegTest::PrepareExecCase(tests.at(0));
     EXPECT_TRUE(NRegTest::ExecuteCase(tests.at(0), true).Matches);
     dir.Write("query.sql", "SELECT v AS v FROM t ORDER BY v ASC;");
     EXPECT_FALSE(NRegTest::ExecuteCase(tests.at(0), true).Matches);
-    EXPECT_EQ(dir.Read("result.json"), before);
+    EXPECT_EQ(dir.ReadGolden(), before);
 }
 
 } // namespace

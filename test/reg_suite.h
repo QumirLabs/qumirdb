@@ -26,7 +26,9 @@ struct TComparison {
     std::string Expected;
 };
 
-std::vector<TExecCase> CollectExecCases(const std::filesystem::path& root);
+std::vector<TExecCase> CollectExecCases(
+    const std::filesystem::path& casesDir,
+    const std::filesystem::path& goldensDir);
 // Called once by the preparation environment, for selected cases only.
 void PrepareExecCase(const TExecCase& test);
 TComparison ExecuteCase(const TExecCase& test, bool canonize);

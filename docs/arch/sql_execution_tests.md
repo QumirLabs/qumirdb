@@ -20,14 +20,16 @@ across cases and variants and calls `MakeSource()` for every source occurrence.
 A self join and a second run therefore get independent cursors and projections.
 
 ```text
-test/regtest/cases/order_by/
-  suite.json
-  tables/numbers.json
-  tables/empty.json
-  nulls_first.sql
-  empty.sql
-  goldens/nulls_first.result.json
-  goldens/empty.result.json
+test/regtest/
+  cases/order_by/
+    suite.json
+    tables/numbers.json
+    tables/empty.json
+    nulls_first.sql
+    empty.sql
+  goldens/order_by/
+    nulls_first.result.json
+    empty.result.json
 ```
 
 A minimal manifest looks like this:
@@ -42,17 +44,21 @@ A minimal manifest looks like this:
   "tables": {"t": "numbers"},
   "variants": ["single", "threaded"],
   "cases": {
-    "nulls_first.sql": {"golden": "goldens/nulls_first.result.json", "order": "ordered"},
+    "nulls_first.sql": {"order": "ordered"},
     "empty.sql": {
       "tables": {"t": "empty"},
-      "golden": "goldens/empty.result.json",
       "order": "ordered"
     }
   }
 }
 ```
 
-Paths are relative to the manifest. Named fixtures are local to the suite.
+SQL and fixture paths are relative to the manifest. Result goldens follow the
+existing regression-test layout: `cases/<path>.sql` maps to
+`goldens/<path>.result.json`, outside `cases`. The runner derives this fixed path;
+the manifest does not specify or override it. All variants share that file.
+
+Named fixtures are local to the suite.
 Default SQL table bindings are merged with a case's overrides. Multiple names
 can refer to the same fixture. Aliases and CTEs follow the existing SQL builder's
 scope rules; no separate alias mapping or reverse list of queries is required.

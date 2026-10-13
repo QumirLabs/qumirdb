@@ -368,10 +368,11 @@ struct TSuite {
     }
 };
 
-std::vector<TExecCase> CollectExecCases(const fs::path& root) {
+std::vector<TExecCase> CollectExecCases(const fs::path& root, const fs::path& goldensDir) {
     std::vector<fs::path> manifests;
     if (!fs::exists(root)) return {};
     const auto rootDir = fs::absolute(root).lexically_normal();
+    const auto goldenRoot = fs::absolute(goldensDir).lexically_normal();
     for (const auto& entry : fs::recursive_directory_iterator(rootDir)) {
         if (entry.is_regular_file() && entry.path().filename() == "suite.json") {
             manifests.push_back(entry.path());
@@ -423,7 +424,7 @@ std::vector<TExecCase> CollectExecCases(const fs::path& root) {
             std::set<fs::path> queries;
             for (const auto& [name, value] : Object(Required(object, "cases"))) {
                 const auto& definition = Object(value);
-                Fields(definition, {"tables", "golden", "order"});
+                Fields(definition, {"tables", "order"});
                 const auto sql = File(dir, TValue(name.str()));
                 if (sql.extension() != ".sql" || sql.parent_path() != dir) {
                     throw std::runtime_error("suite SQL cases must be .sql files in the manifest directory");
@@ -436,9 +437,11 @@ std::vector<TExecCase> CollectExecCases(const fs::path& root) {
                 validateTables(bindings);
                 const auto order = String(Required(definition, "order"));
                 if (order != "ordered" && order != "unordered") throw std::runtime_error("invalid result order");
-                const fs::path golden = (dir / String(Required(definition, "golden"))).lexically_normal();
+                const auto relativeSql = fs::relative(sql, rootDir);
+                const auto base = fs::path(relativeSql).replace_extension();
+                const auto golden = fs::path(goldenRoot / relativeSql).replace_extension(".result.json");
                 for (const auto& variant : variants) {
-                    result.push_back({fs::relative(sql, rootDir).replace_extension(), sql,
+                    result.push_back({base, sql,
                         golden, suite, bindings, variant, order == "ordered"});
                 }
             }

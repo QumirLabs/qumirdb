@@ -210,7 +210,7 @@ int main(int argc, char** argv) {
         }
     }
     try {
-        const auto execCases = NRegTest::CollectExecCases(CasesDir);
+        const auto execCases = NRegTest::CollectExecCases(CasesDir, GoldensDir);
         auto environment = std::make_unique<RegExecEnvironment>();
         std::set<std::string> names;
         for (const auto& test : execCases) {
