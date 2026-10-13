@@ -1090,8 +1090,10 @@ GenKeyHashBatchAst(const TAggregateKeyDescriptor &key, const std::string &funcNa
   NQumir::TLocation loc{};
 
   auto i64Type = std::make_shared<TIntegerType>();
+  auto u8Type = std::make_shared<TIntegerType>(TIntegerType::U8);
   auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
   auto boolType = std::make_shared<TBoolType>();
+  auto ptrU8Type = std::make_shared<TPointerType>(u8Type);
   auto ptrU64Type = std::make_shared<TPointerType>(u64Type);
   auto ptrI64Type = std::make_shared<TPointerType>(i64Type);
   auto ptrLookupKeyType = std::make_shared<TPointerType>(key.LookupType);
@@ -1151,6 +1153,8 @@ GenKeyHashBatchAst(const TAggregateKeyDescriptor &key, const std::string &funcNa
   std::vector<TExprPtr> body;
   body.push_back(var("n", i64Type));
   body.push_back(assign("n", field("batch", "RowCount")));
+  body.push_back(var("selection", ptrU8Type));
+  body.push_back(assign("selection", field("batch", "Selection")));
   body.push_back(var("cols", ptrColumnType));
   body.push_back(assign("cols", field("batch", "Columns")));
   for (size_t fieldIndex = 0; fieldIndex < key.Fields.size(); ++fieldIndex) {
@@ -1158,6 +1162,10 @@ GenKeyHashBatchAst(const TAggregateKeyDescriptor &key, const std::string &funcNa
     body.push_back(var(name, columnValueType));
     body.push_back(assign(name, columnAt(fieldIndex)));
   }
+  body.push_back(var("selection_is_null", boolType));
+  body.push_back(
+      assign("selection_is_null",
+             binary("==", cast(ident("selection"), i64Type), numI64(0))));
   body.push_back(var("i", i64Type));
   body.push_back(assign("i", numI64(0)));
 
@@ -1202,10 +1210,20 @@ GenKeyHashBatchAst(const TAggregateKeyDescriptor &key, const std::string &funcNa
   process.push_back(std::make_shared<TArrayAssignExpr>(
       loc, "hashes", std::vector<TExprPtr>{ident("i")},
       cast(call("rh_hash", {std::move(keyValue)}), u64Type)));
-  process.push_back(assign("i", binary("+", ident("i"), numI64(1))));
 
+  // A rejected row gets no hash: its slot keeps what the caller left there.
+  auto selected = binary(
+      "||", ident("selection_is_null"),
+      binary("!=",
+             std::make_shared<TIndexExpr>(loc, ident("selection"), ident("i")),
+             number(0, u8Type)));
+  auto loop = block({
+      std::make_shared<TIfExpr>(loc, std::move(selected),
+                                block(std::move(process)), nullptr),
+      assign("i", binary("+", ident("i"), numI64(1))),
+  });
   body.push_back(std::make_shared<TWhileStmtExpr>(
-      loc, binary("<", ident("i"), ident("n")), block(std::move(process))));
+      loc, binary("<", ident("i"), ident("n")), std::move(loop)));
   body.push_back(std::make_shared<TReturnExpr>(loc, number(1, boolType)));
 
   auto function = std::make_shared<TFunDecl>(

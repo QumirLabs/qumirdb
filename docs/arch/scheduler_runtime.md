@@ -140,9 +140,17 @@ routes each row. The connection states which partition rule the task uses.
 | Project | `CompileProject` | `void(TRowSet*, void** outBuffers)` | `TUnaryTask` via `MakeProjectProcess` | Compute non-identity projection columns; identity columns stay zero-copy references. |
 | Aggregate | `CompileAggregate` | `Dispatch(ht,batch,arg,op)`, `Measure`, `Finalize` | `TBlockingTask` through `TAggregateProcessor` | Maintain per-group hash table and emit grouped aggregate output. |
 | Join | `CompileJoin` | init, process-left/right, stream-probe, finalizers, destroy | `TBinaryBlockingTask` through `TInnerJoinProcessor` | Symmetric hash join, semi/anti, outer finalization, residual filtering inside join kernel where supported. |
-| Join hash | `CompileJoinHash` | `bool(TRowSet*, uint64_t*)` | `THashShuffleTask` | Compute one hash per physical row for join-side partitioning. |
-| Group hash | `MakeGroupKeyHash` | `bool(TRowSet*, uint64_t*)` | `THashShuffleTask` | Compute one hash per physical row for grouped aggregate partitioning. |
+| Join hash | `CompileJoinHash` | `bool(TRowSet*, uint64_t*)` | `THashShuffleTask`, `TRuntimeFilterTask` | Compute one hash per selected row for join-side partitioning and runtime filters. |
+| Group hash | `MakeGroupKeyHash` | `bool(TRowSet*, uint64_t*)` | `THashShuffleTask` | Compute one hash per selected row for grouped aggregate partitioning. |
 | Sort radix | `CompileRadixSortComposite`, `CompileRadixSortCompositeNullable` | key arrays + index/work/count buffers | `TSortProcessor`, `TTopSortProcessor` | Fast index sorting for radix-sortable key columns. |
+
+A hash kernel writes `hashes[i]` only for rows in `TRowSet::Selection`. The slot
+of an unselected row holds whatever the caller put there, so it is not a hash.
+Every reader of `TRowSet::Hash` or of a hash kernel's output checks the
+selection first: the shuffle when it routes and gathers rows, the runtime filter
+kernel when it builds and probes, and the join and aggregate kernels that take a
+precomputed hash. A selection only shrinks on the way downstream, so a row that
+is still selected always has its hash.
 
 The important ownership split is:
 

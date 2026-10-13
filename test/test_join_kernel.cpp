@@ -372,6 +372,113 @@ TEST(CompileJoinHash, ProducesMatchingSideHashes) {
   EXPECT_NE(leftHashes[0], leftHashes[1]);
 }
 
+namespace {
+
+// Join kernels for lk = rk over one i64 key column a side. A row outside the
+// selection has no hash, so every hash buffer starts as NoHash_ everywhere.
+class JoinKeyHash : public testing::Test {
+protected:
+  struct TSide {
+    std::vector<int64_t> Keys;
+    std::vector<uint8_t> Selection; // empty = no selection
+    TColumn Column{};
+    std::vector<uint64_t> Hashes;
+    TRowSet Batch{};
+  };
+
+  void SetUp() override {
+    using namespace NQumir::NAst;
+    auto i64 = [] { return std::make_shared<TIntegerType>(TIntegerType::I64); };
+    TStructType leftType({{"lk", i64()}});
+    TStructType rightType({{"rk", i64()}});
+    Spec_ = NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}},
+                                         EJoinType::Inner);
+    Hash_ = TKernelCompiler().CompileJoinHash(Spec_);
+  }
+
+  // Hashes the side with its own kernel and attaches the result to the batch.
+  void Prepare(TSide &side, const TJoinHashKernels::TDispatch &hash) {
+    side.Column = TColumn{.Data = reinterpret_cast<char *>(side.Keys.data())};
+    side.Hashes.assign(side.Keys.size(), NoHash_);
+    side.Batch = TRowSet{
+        .Columns = &side.Column,
+        .ColumnCount = 1,
+        .RowCount = static_cast<int64_t>(side.Keys.size()),
+        .Selection = side.Selection.empty() ? nullptr : side.Selection.data(),
+        .RefCount = 1,
+    };
+    ASSERT_TRUE(hash(&side.Batch, side.Hashes.data()));
+    side.Batch.Hash = side.Hashes.data();
+  }
+
+  std::vector<uint64_t> LeftHashes(std::vector<uint8_t> selection) {
+    TSide side{.Keys = {1, 2, 3, 4, 5, 6}, .Selection = std::move(selection)};
+    Prepare(side, Hash_.Left);
+    return side.Hashes;
+  }
+
+  const uint64_t NoHash_ = 0x5a5a5a5a5a5a5a5aULL;
+  NKernel::TOperatorKernelSpec Spec_;
+  TJoinHashKernels Hash_;
+};
+
+} // namespace
+
+TEST_F(JoinKeyHash, SparseSelectionHashesOnlySelectedRows) {
+  const auto all = LeftHashes({});
+  const std::vector<uint8_t> selection = {0xff, 0, 1, 0, 0, 2};
+  const auto sparse = LeftHashes(selection);
+  for (size_t row = 0; row < selection.size(); ++row) {
+    EXPECT_EQ(sparse[row], selection[row] ? all[row] : NoHash_) << row;
+  }
+}
+
+TEST_F(JoinKeyHash, EmptySelectionWritesNoHash) {
+  EXPECT_EQ(LeftHashes({0, 0, 0, 0, 0, 0}),
+            std::vector<uint64_t>(6, NoHash_));
+}
+
+TEST_F(JoinKeyHash, FullSelectionMatchesNoSelection) {
+  const auto all = LeftHashes({});
+  EXPECT_EQ(std::ranges::count(all, NoHash_), 0);
+  EXPECT_EQ(LeftHashes({1, 0xff, 2, 1, 0xff, 3}), all);
+}
+
+// The join reads the hash of a selected row only, so the rows that the hash
+// kernel skipped do not show up in the result.
+TEST_F(JoinKeyHash, JoinWithPrecomputedHashesSkipsUnselectedRows) {
+  TSide left{.Keys = {1, 2, 1, 3}, .Selection = {1, 0, 0xff, 1}};
+  TSide right{.Keys = {1, 2, 3, 1}, .Selection = {0, 1, 1, 0xff}};
+  Prepare(left, Hash_.Left);
+  Prepare(right, Hash_.Right);
+
+  Spec_.HasPrecomputedHash = true;
+  auto kernels = TKernelCompiler().CompileJoin(Spec_);
+  THashTable leftTable{}, rightTable{};
+  TPairBuffer pairs{};
+  ASSERT_TRUE(kernels.Dispatch(&leftTable, &rightTable, nullptr, 0, &pairs,
+                               nullptr, nullptr, 8,
+                               JoinOpCode(EJoinKernelOp::Init)));
+  ASSERT_TRUE(kernels.Dispatch(&leftTable, &rightTable, &left.Batch, 0, &pairs,
+                               &left.Batch, &right.Batch, 0,
+                               JoinOpCode(EJoinKernelOp::UpdateLeft)));
+  ASSERT_TRUE(kernels.Dispatch(&leftTable, &rightTable, &right.Batch, 0, &pairs,
+                               &left.Batch, &right.Batch, 0,
+                               JoinOpCode(EJoinKernelOp::UpdateRight)));
+
+  std::vector<std::tuple<int64_t, int64_t>> got;
+  for (int64_t i = 0; i < pairs.Count; ++i) {
+    got.emplace_back(pairs.Data[2 * i] & 0xffffffff,
+                     pairs.Data[2 * i + 1] & 0xffffffff);
+  }
+  std::sort(got.begin(), got.end());
+  EXPECT_EQ(got, (std::vector<std::tuple<int64_t, int64_t>>{
+                     {0, 3}, {2, 3}, {3, 2}}));
+
+  kernels.Dispatch(&leftTable, &rightTable, nullptr, 0, &pairs, nullptr,
+                   nullptr, 0, JoinOpCode(EJoinKernelOp::Destroy));
+}
+
 TEST(CompileJoin, ProbeOnlyStreamsWithoutInserting) {
   using namespace NQumir::NAst;
   auto i64 = [] { return std::make_shared<TIntegerType>(TIntegerType::I64); };

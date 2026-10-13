@@ -414,8 +414,8 @@ public:
         const NKernel::TOperatorKernelSpec& spec);
 
     // Compiles rowset-wide hash helpers for the join keys described by `spec`.
-    // Each dispatch fills one uint64 hash per physical input row. Selection is
-    // not applied by the helper; callers skip unselected rows during scatter.
+    // Each dispatch fills one uint64 hash per selected input row; the slots of
+    // unselected rows are not written and must not be read.
     TJoinHashKernels CompileJoinHash(
         const NKernel::TOperatorKernelSpec& spec);
 

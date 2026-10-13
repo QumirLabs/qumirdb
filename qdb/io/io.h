@@ -29,7 +29,10 @@ struct TRowSet {
     int64_t ColumnCount;
     int64_t RowCount;
     uint8_t* Selection; // nullptr = all rows selected; Selection[i]==0 skips row i
-    uint64_t* Hash; // nullptr = not precomputed; Hash[i] is a shuffle-consistent rh_hash of row i's key
+    // nullptr = not precomputed; otherwise Hash[i] is a shuffle-consistent
+    // rh_hash of row i's key for every selected row. The slot of an unselected
+    // row holds no hash and must not be read.
+    uint64_t* Hash;
 
     void (*Destroy)(TRowSet*);
     void* Private;
