@@ -49,6 +49,7 @@ add_library(qumirdb
     plan/passes/predicate_requirements.cpp
     plan/passes/row_group_predicate.cpp
     plan/passes/runtime_filters.cpp
+    plan/passes/self_equality.cpp
     plan/passes/late_materialization.cpp
     plan/passes/flatten_conjuncts.cpp
     plan/passes/flatten_disjuncts.cpp

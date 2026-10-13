@@ -257,6 +257,19 @@ double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shar
             if (leftIdent && rightIdent) {
                 auto leftName = std::string(leftIdent.Cast()->Name);
                 auto rightName = std::string(rightIdent.Cast()->Name);
+                if (leftName == rightName) {
+                    // A column equals itself on every non-NULL row, whatever its
+                    // NDV; `x != x` holds on no row.
+                    auto it = inputStats->ColumnStats.find(leftName);
+                    const double nulls = it != inputStats->ColumnStats.end()
+                        ? static_cast<double>(it->second->NullCount.value_or(0))
+                        : 0.0;
+                    const double rows = std::max(
+                        1.0, static_cast<double>(inputStats->RowCount));
+                    return binary->Operator == "!="
+                        ? 0.0
+                        : 1.0 - std::min(1.0, nulls / rows);
+                }
                 if (inputStats->ColumnStats.count(leftName) > 0
                     && inputStats->ColumnStats.count(rightName) > 0)
                 {

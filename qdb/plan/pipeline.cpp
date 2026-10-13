@@ -13,6 +13,7 @@
 #include <qdb/plan/ops/cte_consumer.h>
 #include <qdb/plan/passes/row_group_predicate.h>
 #include <qdb/plan/passes/runtime_filters.h>
+#include <qdb/plan/passes/self_equality.h>
 #include <qdb/plan/passes/typing.h>
 #include <qdb/plan/plan_print.h>
 
@@ -42,6 +43,9 @@ void OptimizeOne(TOperatorPtr& plan, TPlanPassOptions& options) {
         plan = FlattenInnerJoins(plan); stage("FlattenInnerJoins");
         AnnotateTypes(plan, options.Annotation); // re-annotate: inner-join regions were reassociated
     }
+    // Before pushdown and the first EstimateStats: a self-equality left by
+    // decorrelation would otherwise be costed as a selective predicate.
+    plan = SimplifySelfEquality(plan); stage("SimplifySelfEquality");
     plan = PushDownPredicates(plan); stage("PushDownPredicates");
     AnnotateTypes(plan, options.Annotation); // re-annotate: pushdown moved filters onto leaves
     EstimateStats(plan); // leaf cardinalities for cost-based ReorderJoins
