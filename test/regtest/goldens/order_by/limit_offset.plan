@@ -1,0 +1,4 @@
+limit
+└─ sort [a desc nulls-last, id asc]
+   └─ project (a, id) (rows≈6 cost≈192)
+      └─ source t AS t (rows≈6 cost≈96)

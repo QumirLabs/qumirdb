@@ -1,23 +1,28 @@
-# SQL execution regression tests
+# SQL query regression tests
 
-`test_reg` supports execution suites alongside the existing AST and raw-plan
-regression cases. A directory with `suite.json` runs its declared SQL cases
-against fixture data. SQL files in directories without a manifest retain the
-previous AST/plan golden checks. Manifests apply to their own directory; they do
-not implicitly change the behavior of child directories.
+`test_reg` uses one `TQueryCase` and one `RegQuery` check for SQL cases. A case
+without table bindings checks its raw logical plan. A case with table bindings
+checks the optimized logical plan and the query result, running through the
+native Parquet source and scheduler. Existing AST goldens remain separate parser
+checks for SQL files in directories without `suite.json`.
 
-The first suite is [order_by](../../test/regtest/cases/order_by/suite.json).
-It covers NULL ordering, multiple sort keys, expressions, LIMIT/OFFSET, duplicate
-rows, self joins, and an empty-table override. Each query runs in both the
-single-threaded and threaded schedulers.
+The test-only CMake target `regtest_lib` owns case discovery, JSON parsing,
+fixture materialization, schema/result printing, and comparison. `test_reg.cpp`
+contains GoogleTest checks and runner setup. `test_regtest_lib.cpp` tests the
+infrastructure contracts, including a dedicated CBO ordering test.
+
+The first data suite is [order_by](../../test/regtest/cases/order_by/suite.json).
+Its seven queries cover NULL ordering, multiple sort keys, expressions,
+LIMIT/OFFSET, duplicate rows, self joins, and an empty-table override. They run
+with fixed fixture statistics in the single-threaded and threaded schedulers.
+There is no join-order matrix applied to the whole suite.
 
 ## Files and table mapping
 
-Keep typed JSON fixtures, SQL, and result goldens in ordinary Git. The runner
-loads manifest metadata once and prepares each selected fixture as Parquet once
-per suite and process, before executing queries. It shares `TParquetFile` objects
-across cases and variants and calls `MakeSource()` for every source occurrence.
-A self join and a second run therefore get independent cursors and projections.
+Keep input JSON, SQL, and result/plan goldens in ordinary Git. A directory with
+`suite.json` uses its declared fixture bindings; a directory without a manifest
+produces plan-only query cases. Manifests apply to their own directory and do not
+implicitly change child directories.
 
 ```text
 test/regtest/
@@ -28,11 +33,11 @@ test/regtest/
     nulls_first.sql
     empty.sql
   goldens/order_by/
+    nulls_first.plan
     nulls_first.result.json
+    empty.plan
     empty.result.json
 ```
-
-A minimal manifest looks like this:
 
 ```json
 {
@@ -45,37 +50,36 @@ A minimal manifest looks like this:
   "variants": ["single", "threaded"],
   "cases": {
     "nulls_first.sql": {"order": "ordered"},
-    "empty.sql": {
-      "tables": {"t": "empty"},
-      "order": "ordered"
-    }
+    "empty.sql": {"tables": {"t": "empty"}, "order": "ordered"}
   }
 }
 ```
 
-SQL and fixture paths are relative to the manifest. Result goldens follow the
-existing regression-test layout: `cases/<path>.sql` maps to
-`goldens/<path>.result.json`, outside `cases`. The runner derives this fixed path;
-the manifest does not specify or override it. All variants share that file.
+SQL and fixture paths are relative to the manifest. Named fixtures are local to
+its suite. Default SQL table bindings are merged with case overrides; multiple
+table names can refer to one fixture. Aliases and CTEs follow SQL scope rules.
+A case with no bindings runs once in the `plan` variant and does not execute SQL.
 
-Named fixtures are local to the suite.
-Default SQL table bindings are merged with a case's overrides. Multiple names
-can refer to the same fixture. Aliases and CTEs follow the existing SQL builder's
-scope rules; no separate alias mapping or reverse list of queries is required.
+The runner derives golden paths from SQL paths: `cases/<path>.sql` maps to
+`goldens/<path>.plan` and, for cases with tables, `goldens/<path>.result.json`.
+The manifest cannot override these paths. All execution variants share both
+files. SQL cases must be directly in the manifest directory and listed in
+`cases`. Missing files, unknown fields, invalid versions, unknown fixtures or
+variants, and unmapped tables in an execution case fail explicitly.
 
-SQL cases must be files directly in the manifest directory. All SQL files there
-must appear in `cases`. Missing files, unknown fields, invalid versions, unknown
-fixtures or variants, and unmapped SQL tables produce explicit failures.
+## Schema and row values
 
-## Schema and values
+Input data and result goldens use a Qumir struct type string and row arrays.
+Schema strings are parsed with `NCore::ParseType` and canonically printed with
+`NCore::PrintType`. Nullable fields use `<named Nullable [T]>`, which maps to
+Arrow field nullability on input and QDB's `TNullable` on output.
 
-Both fixture data and expected results use a Qumir struct type string and row
-arrays. Schema strings are parsed with `NCore::ParseType` and canonically printed
-with `NCore::PrintType`, rather than `TStructType::ToString()`.
+Input fixtures include `"version": 1`. Result goldens contain only `schema` and
+`rows`; they have no version. Regenerate them with `--canonize` when the result
+format changes. For example:
 
 ```json
 {
-  "version": 1,
   "schema": "<struct (id i64) (label <named Nullable [string]>)>",
   "rows": [
     ["1", "one"],
@@ -84,85 +88,104 @@ with `NCore::PrintType`, rather than `TStructType::ToString()`.
 }
 ```
 
-Input fixtures, result goldens, and execution diagnostics use one complete row
-per line, with spaces between cells. JSON escaping keeps newlines and quotes
-inside string values on that same line. Empty tables and results use `"rows": []`.
-This presentation does not change typed comparison or row ordering.
+Input fixtures, result goldens, and diagnostics use one complete row per line,
+with spaces between cells. JSON escaping keeps quotes and newlines inside string
+values on that same line. Empty tables/results use `"rows": []`.
 
-Nullable columns use a generic named `Nullable` wrapper. The writer turns the
-wrapper into Arrow field nullability; output serialization adapts QDB's
-`TNullable` back to the same Qumir representation. Field order and names are part
-of the expected result. Whitespace in the schema string is normalized by the
-core parser/printer.
+Supported JSON fixture and result types are signed/unsigned integers through
+64 bits, `f64`, `bool`, and `string`, with optional nullability. All 64-bit
+integers use decimal strings, parsed without conversion through double. Smaller
+integers may use JSON numbers. Overflow, invalid row widths, duplicate schema
+fields, and NULL in a non-nullable input column are errors. Empty and all-NULL
+tables retain their schema.
 
-Supported fixture and result values are `i8`, `i16`, `i32`, `i64`, `u8`, `u16`,
-`u32`, `u64`, `f64`, `bool`, and `string`, with optional nullability. All 64-bit
-integers use decimal strings and are parsed without conversion through double.
-Smaller integers may use JSON numbers. Overflow, wrong row widths, duplicate
-schema fields, and NULL in a non-nullable fixture column are errors. Empty and
-all-NULL tables keep their declared schema.
+Floats use JSON numbers or tags such as `{"$float":"nan"}`, `{"$float":"+inf"}`,
+`{"$float":"-inf"}`, and `{"$float":"-0"}`. Results compare exactly, including
+the tags. Decimal/date JSON fixtures and float tolerances are future extensions.
 
-Floats use ordinary JSON numbers or tags such as `{"$float":"nan"}`,
-`{"$float":"+inf"}`, `{"$float":"-inf"}`, and `{"$float":"-0"}`. Results compare
-exactly, including these tags; float tolerance is not implemented. Decimal and
-date fixtures are also left for a later extension.
+## Cost metadata
 
-## Preparation and execution
+JSON fixtures default to computing custom statistics at materialization time;
+`"stats": "compute"` requests this explicitly. The generator computes exact NDV
+for supported non-NULL values and sampled equi-depth histogram boundaries for
+numeric columns, then writes the existing `stats` key-value blob into the Parquet
+footer. Strings and booleans receive NDV without histograms. NaN columns omit
+NDV; non-finite float boundaries and unsigned values outside the metadata
+reader's signed-integer range omit histograms.
 
-Manifest collection and test registration happen in `main`. GoogleTest's global
-preparation environment materializes only fixtures bound by selected execution
-cases. Listing tests reads metadata without generating Parquet. Unselected
-execution suites do not generate files, though their manifests are validated.
+A fixture can instead provide an explicit `stats` object:
 
-The C++ Arrow/Parquet writer creates uncompressed files with dictionaries
-disabled and standard statistics enabled. Row groups default to 128 rows;
-`row_group_rows` overrides this per fixture. Different layouts of one JSON file
-can use different fixture names; identical input paths and row-group sizes share
-a generated file within a suite. Files live in a unique temporary directory
-owned by the suite and are removed when its registry is destroyed. There is no
-persistent cache or Python generator.
+```json
+"stats": {
+  "columns": [
+    {"name": "id", "ndv": 6, "ndv_exact": true},
+    {"name": "a", "ndv": 3, "ndv_exact": true, "histogram": [1, 1, 2, 2, 3]}
+  ]
+}
+```
 
-Each test builds a fresh plan through `BuildPlan`, applies `ApplyPlanPasses`,
-lowers it, runs the native scheduler, and collects typed output. The `single`
-preset uses one worker and one scan task. The `threaded` preset uses four workers
-and up to four row-group scan tasks. Both use row-group-range scan splitting.
-Runtime filters and CBO use normal plan-pass defaults.
+Explicit NDV/histogram values are written as supplied and are not supplemented
+with computed values. This lets a test force the intended CBO join ordering by
+controlling its input statistics. Set `ndv_exact` only when exactness is part of
+the intended input. The dedicated `SuppliedStatsControlCboJoinOrder` test changes
+NDV for one three-table query, checks that CBO chooses a different lower join,
+and verifies the same result; ordinary suites do not enumerate join orders.
 
-An `ordered` expectation compares the row sequence. An `unordered` expectation
-compares a multiset, retaining duplicate counts. ORDER BY cases use ordered
-comparison and explicit tie-breaking keys. All variants share one golden.
+`"stats": "footer"` omits custom metadata. In all generated files, the Parquet
+writer emits standard statistics; row count comes from the physical footer and
+min/max/null count come from its column statistics. The custom blob supplies
+NDV/histograms and can fill missing standard min/max/null-count values. It does
+not override row count or existing standard column statistics.
 
-Generated Parquet uses the production source, but an output golden does not
-prove that a particular optimization activated. Tiny-fixture partial aggregation
-and estimator regressions still need targeted settings or internal assertions.
-Row-group size also does not guarantee an exact output record-batch boundary.
+A fixture can also use an existing file: `{"parquet_file":"tables/input.parquet"}`.
+The runner opens it directly and uses its embedded standard/custom metadata
+without regeneration or recomputation. Exactly one of `json` and `parquet_file`
+is required. Existing-file fixtures do not accept generator options. This path
+also accommodates particular encodings or malformed-input tests; LFS is optional.
+
+## Preparation, plans, and results
+
+`main` collects metadata once. A preparation environment materializes only
+fixtures bound by selected query cases, once per suite/input/layout. Listing
+tests does not generate files. Identical JSON paths and row-group sizes share a
+file within a suite. The writer uses uncompressed data, no dictionaries, and
+128 rows per row group unless `row_group_rows` overrides that size.
+
+Each file has a shared `TParquetFile`, while every source occurrence gets a fresh
+`MakeSource()` cursor. Self joins and repeated variants therefore have independent
+scan state and projections. Generated files live in a suite-owned temporary
+directory and are cleaned up when its registry is destroyed. There is no cache
+across processes or Python generator.
+
+For cases with tables, build a fresh plan, apply normal plan passes including
+CBO, and compare `PrintPlanTreeWithCtes` output to `.plan`. This is the optimized
+logical plan before scheduler lowering, with row/cost estimates and CTE trees.
+Then execute and compare typed output to `.result.json`. Cases without tables
+retain the existing raw s-expression plan format and schema-less mock sources.
+Parser errors remain valid expected text in plan-only cases.
+
+The `single` preset uses one worker and one scan task. The `threaded` preset uses
+four workers and up to four row-group scan tasks. An `ordered` result compares the
+row sequence; `unordered` compares a multiset, preserving duplicate counts.
+ORDER BY tests use explicit tie-breaking keys. All variants share plan and result
+goldens; a disagreement is a failure.
 
 ## Commands and canonization
 
 ```sh
 cmake --build build --target test_reg -j 4
 ctest --test-dir build -R '^test_reg$' --output-on-failure
-build/test/test_reg test/regtest --gtest_filter='RegExec.order_by_*' --print
-build/test/test_reg test/regtest --gtest_filter='RegExec.order_by_*' --gtest_list_tests
+build/test/test_reg test/regtest --gtest_filter='RegQuery.order_by_*_single:RegQuery.order_by_*_threaded' --print
+build/test/test_reg test/regtest --gtest_filter='RegQuery.order_by_*_single:RegQuery.order_by_*_threaded' --canonize
 ```
 
-`--canonize` collects execution outputs in memory and checks that selected
-variants agree. Result goldens are written only after the entire selected run
-passes; setup errors, execution failures, or differing variants prevent the
-commit. Existing AST/plan canonization retains its previous behavior. Use a
-filter when updating only execution goldens and review the expected rows.
+For suite cases, `--canonize` collects plan and result goldens in memory and
+checks agreement across selected variants. Both are written only after the
+selected run passes. Missing expectations can be created in this mode. AST and
+plan-only cases without manifests retain their existing immediate canonization.
+Review plan changes and expected rows independently of the engine output.
 
-## Later extensions
-
-The [Roadmap](https://github.com/resetius/qumirdb/wiki/Roadmap) describes the
-execution-testing goal; fixture storage remains a design choice. The current
-JSON-to-Parquet path can later share the same catalog with a direct JSON/memory
-source or existing Parquet fixtures. Existing files are useful for malformed
-inputs, physical encodings, or external writer behavior that generated files
-cannot reproduce. LFS is optional for those fixtures.
-
-Other possible additions are decimal/date values, explicit writer settings,
-custom NDV/histogram metadata, selected optimizer profiles, and a cache across
-processes if preparation time warrants it. Move C++ tests whose contract is a
-SQL input and result into suites; retain tests of kernel ABI, ownership,
-scheduling, and internal estimates that result goldens cannot verify.
+The [Roadmap](https://github.com/resetius/qumirdb/wiki/Roadmap) describes the query
+execution goal, with fixture storage as a design choice. SQL input/result tests
+can migrate into suites; tests of ABI, ownership, scheduling, and internal
+estimates can stay in C++ where result and plan goldens cannot verify the contract.

@@ -8,5 +8,12 @@
     ["4", "2", 40, "duplicate", true, 0.0],
     ["5", "3", 50, "", false, 42.0],
     ["6", null, 60, null, null, 1.0]
-  ]
+  ],
+  "stats": {
+    "columns": [
+      {"name": "id", "ndv": 6, "ndv_exact": true},
+      {"name": "a", "ndv": 3, "ndv_exact": true, "histogram": [1, 1, 2, 2, 3]},
+      {"name": "b", "ndv": 6, "ndv_exact": true}
+    ]
+  }
 }

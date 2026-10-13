@@ -1,17 +1,22 @@
-#include "reg_suite.h"
+#include "regtest_lib.h"
+#include "mock_source.h"
 #include "plan_runner.h"
 
 #include <qdb/io/parquet/source.h>
 #include <qdb/plan/build.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/pipeline.h>
+#include <qdb/plan/plan_print.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/sql/parser.h>
+#include <qdb/sql/printer.h>
+#include <qdb/sexp/printer.h>
 #include <qumir/parser/core/parser.h>
 #include <qumir/parser/core/printer.h>
 
 #include <arrow/api.h>
 #include <arrow/io/api.h>
+#include <arrow/util/key_value_metadata.h>
 #include <parquet/arrow/writer.h>
 #include <parquet/properties.h>
 
@@ -22,12 +27,16 @@
 
 #include <algorithm>
 #include <charconv>
+#include <cctype>
 #include <cmath>
 #include <fstream>
+#include <iostream>
+#include <iterator>
 #include <limits>
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 
 namespace NRegTest {
@@ -46,6 +55,42 @@ std::string ReadAll(const fs::path& path) {
         throw std::runtime_error("cannot read " + path.string());
     }
     return {std::istreambuf_iterator<char>(input), {}};
+}
+
+void WriteAll(const fs::path& path, const std::string& contents) {
+    fs::create_directories(path.parent_path());
+    std::ofstream output(path, std::ios::binary);
+    if (!output || !(output << contents)) {
+        throw std::runtime_error("cannot write " + path.string());
+    }
+}
+
+std::string BuildAst(std::istream& input) {
+    NSql::TTokenStream tokens(input);
+    NSql::TParser parser;
+    auto parsed = parser.Parse(tokens);
+    if (!parsed) return parsed.error().ToString() + "\n";
+    return NSql::PrintAst(*parsed);
+}
+
+std::string BuildPlanText(std::istream& input) {
+    NSql::TTokenStream tokens(input);
+    NSql::TParser parser;
+    auto parsed = parser.Parse(tokens);
+    if (!parsed) return parsed.error().ToString() + "\n";
+    std::vector<std::unique_ptr<TMockSource>> sources;
+    auto factory = [&](std::string_view table)
+        -> std::expected<TOperatorPtr, NQumir::TError>
+    {
+        auto& source = sources.emplace_back(std::make_unique<TMockSource>());
+        return std::make_shared<TSourceOperator>(*source, std::string(table));
+    };
+    auto plan = BuildPlan(*parsed, factory);
+    if (!plan) return plan.error().ToString() + "\n";
+    std::ostringstream output;
+    NSexp::PrintRelPlan(output, *plan);
+    output << '\n';
+    return output.str();
 }
 
 TValue ReadJson(const fs::path& path) {
@@ -106,8 +151,7 @@ std::string RenderResult(const TValue& value) {
     const auto& object = Object(value);
     const auto& rows = Array(Required(object, "rows"));
     std::ostringstream output;
-    output << "{\n  \"version\": " << llvm::formatv("{0}", Required(object, "version")).str()
-        << ",\n  \"schema\": " << llvm::formatv("{0}", Required(object, "schema")).str()
+    output << "{\n  \"schema\": " << llvm::formatv("{0}", Required(object, "schema")).str()
         << ",\n  \"rows\": [";
     for (size_t row = 0; row < rows.size(); ++row) {
         output << (row == 0 ? "\n" : ",\n") << "    [";
@@ -287,10 +331,78 @@ void Append(arrow::ArrayBuilder& builder, const TValue& value) {
     }
 }
 
+template <typename TArrowArray>
+TObject ComputeNumericStats(const std::string& name, const arrow::Array& column) {
+    const auto& array = static_cast<const TArrowArray&>(column);
+    using T = decltype(array.Value(0));
+    std::vector<T> values;
+    for (int64_t row = 0; row < array.length(); ++row) {
+        if (array.IsNull(row)) continue;
+        const auto value = array.Value(row);
+        if constexpr (std::is_floating_point_v<T>) {
+            // NaN grouping/equality is not a portable exact-NDV contract.
+            if (std::isnan(value)) return TObject{{"name", name}};
+        }
+        values.push_back(value);
+    }
+    std::sort(values.begin(), values.end());
+    auto unique = values;
+    unique.erase(std::unique(unique.begin(), unique.end()), unique.end());
+    TObject stats{{"name", name}, {"ndv", static_cast<int64_t>(unique.size())}, {"ndv_exact", true}};
+    if constexpr (std::is_same_v<T, bool>) return stats;
+    if (values.empty()) return stats;
+    if constexpr (std::is_floating_point_v<T>) {
+        if (!std::isfinite(values.front()) || !std::isfinite(values.back())) return stats;
+    }
+    if constexpr (std::is_same_v<T, uint64_t>) {
+        // The current metadata reader accepts signed JSON integer boundaries.
+        if (values.back() > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) return stats;
+    }
+    TArray histogram;
+    const auto buckets = std::min<size_t>(32, std::max<size_t>(1, values.size() - 1));
+    for (size_t bucket = 0; bucket <= buckets; ++bucket) {
+        const auto index = bucket * (values.size() - 1) / buckets;
+        histogram.push_back(TValue(static_cast<T>(values[index])));
+    }
+    stats["histogram"] = std::move(histogram);
+    return stats;
+}
+
+TValue ComputeStats(const arrow::Schema& schema, const std::vector<std::shared_ptr<arrow::Array>>& columns) {
+    TArray stats;
+    for (size_t i = 0; i < columns.size(); ++i) {
+        const auto& column = *columns[i];
+        const auto name = schema.field(static_cast<int>(i))->name();
+        switch (column.type_id()) {
+            case arrow::Type::INT8: stats.push_back(ComputeNumericStats<arrow::Int8Array>(name, column)); break;
+            case arrow::Type::INT16: stats.push_back(ComputeNumericStats<arrow::Int16Array>(name, column)); break;
+            case arrow::Type::INT32: stats.push_back(ComputeNumericStats<arrow::Int32Array>(name, column)); break;
+            case arrow::Type::INT64: stats.push_back(ComputeNumericStats<arrow::Int64Array>(name, column)); break;
+            case arrow::Type::UINT8: stats.push_back(ComputeNumericStats<arrow::UInt8Array>(name, column)); break;
+            case arrow::Type::UINT16: stats.push_back(ComputeNumericStats<arrow::UInt16Array>(name, column)); break;
+            case arrow::Type::UINT32: stats.push_back(ComputeNumericStats<arrow::UInt32Array>(name, column)); break;
+            case arrow::Type::UINT64: stats.push_back(ComputeNumericStats<arrow::UInt64Array>(name, column)); break;
+            case arrow::Type::DOUBLE: stats.push_back(ComputeNumericStats<arrow::DoubleArray>(name, column)); break;
+            case arrow::Type::BOOL: stats.push_back(ComputeNumericStats<arrow::BooleanArray>(name, column)); break;
+            case arrow::Type::STRING: {
+                const auto& array = static_cast<const arrow::StringArray&>(column);
+                std::set<std::string> distinct;
+                for (int64_t row = 0; row < array.length(); ++row) {
+                    if (!array.IsNull(row)) distinct.insert(array.GetString(row));
+                }
+                stats.push_back(TObject{{"name", name}, {"ndv", static_cast<int64_t>(distinct.size())}, {"ndv_exact", true}});
+                break;
+            }
+            default: throw std::runtime_error("unsupported column for stats computation");
+        }
+    }
+    return TObject{{"columns", std::move(stats)}};
+}
+
 std::shared_ptr<arrow::Table> ReadTable(const fs::path& path) {
     auto json = ReadJson(path);
     const auto& object = Object(json);
-    Fields(object, {"version", "schema", "rows"});
+    Fields(object, {"version", "schema", "rows", "stats"});
     Version(object);
     std::vector<std::shared_ptr<arrow::Field>> fields;
     std::vector<std::unique_ptr<arrow::ArrayBuilder>> builders;
@@ -325,7 +437,57 @@ std::shared_ptr<arrow::Table> ReadTable(const fs::path& path) {
     }
     std::vector<std::shared_ptr<arrow::Array>> columns;
     for (auto& builder : builders) columns.push_back(ArrowValue(builder->Finish()));
-    return arrow::Table::Make(arrow::schema(std::move(fields)), std::move(columns), rowIndex);
+    auto arrowSchema = arrow::schema(std::move(fields));
+    TValue computed = nullptr;
+    const TValue* statsValue = object.get("stats");
+    if (!statsValue || statsValue->getAsString() == "compute") {
+        computed = ComputeStats(*arrowSchema, columns);
+        statsValue = &computed;
+    } else if (const auto mode = statsValue->getAsString()) {
+        if (*mode != "footer") throw std::runtime_error("stats mode must be compute or footer");
+        statsValue = nullptr;
+    }
+    if (statsValue) {
+        const auto& stats = Object(*statsValue);
+        Fields(stats, {"columns"});
+        std::set<std::string> names;
+        for (const auto& value : Array(Required(stats, "columns"))) {
+            const auto& column = Object(value);
+            Fields(column, {"name", "ndv", "ndv_exact", "null_count", "min", "max", "histogram"});
+            const auto name = String(Required(column, "name"));
+            const auto index = arrowSchema->GetFieldIndex(name);
+            if (index < 0 || !names.insert(name).second) throw std::runtime_error("unknown or duplicate stats column '" + name + "'");
+            for (const auto key : {"ndv", "null_count"}) {
+                if (const auto* count = column.get(key)) {
+                    const auto number = count->getAsInteger();
+                    if (!number || *number < 0) throw std::runtime_error(std::string(key) + " must be a nonnegative integer");
+                }
+            }
+            if (const auto* exact = column.get("ndv_exact"); exact && !exact->getAsBoolean()) {
+                throw std::runtime_error("ndv_exact must be boolean");
+            }
+            const auto floating = arrowSchema->field(index)->type()->id() == arrow::Type::DOUBLE;
+            auto numeric = [&](const TValue& boundary) {
+                if (floating) {
+                    const auto number = boundary.getAsNumber();
+                    if (number && std::isfinite(*number)) return;
+                } else if (boundary.getAsInteger()) return;
+                throw std::runtime_error("stats boundaries must be finite numbers matching the column type");
+            };
+            for (const auto key : {"min", "max"}) {
+                if (const auto* boundary = column.get(key)) numeric(*boundary);
+            }
+            if (const auto* histogram = column.get("histogram")) {
+                if (arrowSchema->field(index)->type()->id() == arrow::Type::STRING) {
+                    throw std::runtime_error("string histograms are not supported");
+                }
+                for (const auto& boundary : Array(*histogram)) numeric(boundary);
+            }
+        }
+        arrowSchema = arrowSchema->WithMetadata(arrow::key_value_metadata(
+            {"stats"}, {llvm::formatv("{0}", *statsValue).str()}));
+    }
+    return arrow::Table::Make(std::move(arrowSchema), std::move(columns), rowIndex);
 }
 
 std::map<std::string, std::string> Bindings(const TObject& object) {
@@ -345,9 +507,28 @@ fs::path File(const fs::path& dir, const TValue& value) {
 
 } // namespace
 
+std::string TestName(const fs::path& path) {
+    auto name = path.string();
+    for (auto& c : name) {
+        if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_') c = '_';
+    }
+    return name;
+}
+
+TComparison CheckAst(const TQueryCase& test, bool canonize) {
+    std::istringstream input(ReadAll(test.Sql));
+    const auto actual = BuildAst(input);
+    const auto golden = fs::path(test.PlanGolden).replace_extension(".ast");
+    if (canonize) WriteAll(golden, actual);
+    const auto expected = ReadAll(golden);
+    return {actual == expected, actual, expected};
+}
+
 struct TSuite {
     struct TFixture {
         fs::path Json;
+        fs::path Parquet;
+        fs::path PreparedPath;
         int64_t RowGroupRows = 128;
         std::shared_ptr<TParquetFile> File;
         std::string Error;
@@ -358,49 +539,73 @@ struct TSuite {
     std::map<std::string, TFixture> Fixtures;
     std::map<fs::path, std::shared_ptr<arrow::Table>> Parsed;
     // Same input/layout, even under two fixture names, shares a generated file.
-    std::map<std::pair<fs::path, int64_t>, std::shared_ptr<TParquetFile>> Files;
+    std::map<std::pair<fs::path, int64_t>, std::pair<fs::path, std::shared_ptr<TParquetFile>>> Files;
     std::map<fs::path, TValue> Canonized;
+    std::map<fs::path, std::string> CanonizedPlans;
 
     void Prepare(const std::string& name) {
         auto& fixture = Fixtures.at(name);
         if (fixture.File || !fixture.Error.empty()) return;
         try {
+            if (!fixture.Parquet.empty()) {
+                fixture.File = std::make_shared<TParquetFile>(fixture.Parquet.string());
+                fixture.PreparedPath = fixture.Parquet;
+                return;
+            }
             const auto identity = std::make_pair(fixture.Json, fixture.RowGroupRows);
-            auto& file = Files[identity];
+            auto& [path, file] = Files[identity];
             if (!file) {
                 auto& table = Parsed[fixture.Json];
                 if (!table) table = ReadTable(fixture.Json);
                 if (!Temp) Temp = std::make_unique<TTempDir>();
-                const auto path = Temp->Path / (std::to_string(Files.size()) + ".parquet");
+                path = Temp->Path / (std::to_string(Files.size()) + ".parquet");
                 auto output = ArrowValue(arrow::io::FileOutputStream::Open(path.string()));
                 parquet::WriterProperties::Builder properties;
                 properties.compression(parquet::Compression::UNCOMPRESSED);
                 properties.disable_dictionary();
                 properties.enable_statistics();
-                CheckArrow(parquet::arrow::WriteTable(*table, arrow::default_memory_pool(),
-                    output, fixture.RowGroupRows, properties.build()));
+                auto writer = ArrowValue(parquet::arrow::FileWriter::Open(*table->schema(),
+                    arrow::default_memory_pool(), output, properties.build()));
+                if (const auto& metadata = table->schema()->metadata()) {
+                    CheckArrow(writer->AddKeyValueMetadata(metadata));
+                }
+                CheckArrow(writer->WriteTable(*table, fixture.RowGroupRows));
+                CheckArrow(writer->Close());
                 CheckArrow(output->Close());
                 file = std::make_shared<TParquetFile>(path.string());
             }
             fixture.File = file;
+            fixture.PreparedPath = path;
         } catch (const std::exception& error) {
             fixture.Error = Manifest.string() + ": fixture '" + name + "': " + error.what();
         }
     }
 };
 
-std::vector<TExecCase> CollectExecCases(const fs::path& root, const fs::path& goldensDir) {
+std::vector<TQueryCase> CollectCases(const fs::path& root, const fs::path& goldensDir) {
     std::vector<fs::path> manifests;
+    std::vector<fs::path> queriesWithoutSuite;
     if (!fs::exists(root)) return {};
     const auto rootDir = fs::absolute(root).lexically_normal();
     const auto goldenRoot = fs::absolute(goldensDir).lexically_normal();
     for (const auto& entry : fs::recursive_directory_iterator(rootDir)) {
         if (entry.is_regular_file() && entry.path().filename() == "suite.json") {
             manifests.push_back(entry.path());
+        } else if (entry.is_regular_file() && entry.path().extension() == ".sql"
+            && !fs::exists(entry.path().parent_path() / "suite.json"))
+        {
+            queriesWithoutSuite.push_back(entry.path());
         }
     }
     std::sort(manifests.begin(), manifests.end());
-    std::vector<TExecCase> result;
+    std::vector<TQueryCase> result;
+    for (const auto& sql : queriesWithoutSuite) {
+        const auto relative = fs::relative(sql, rootDir);
+        result.push_back({fs::path(relative).replace_extension(), sql,
+            fs::path(goldenRoot / relative).replace_extension(".plan"),
+            fs::path(goldenRoot / relative).replace_extension(".result.json"),
+            nullptr, {}, "plan", true});
+    }
     for (const auto& manifest : manifests) {
         try {
             auto json = ReadJson(manifest);
@@ -412,9 +617,18 @@ std::vector<TExecCase> CollectExecCases(const fs::path& root, const fs::path& go
             const auto dir = manifest.parent_path();
             for (const auto& [name, value] : Object(Required(object, "fixtures"))) {
                 const auto& fixture = Object(value);
-                Fields(fixture, {"json", "parquet"});
+                Fields(fixture, {"json", "parquet", "parquet_file"});
                 TSuite::TFixture definition;
-                definition.Json = File(dir, Required(fixture, "json"));
+                const auto* jsonFile = fixture.get("json");
+                const auto* parquetFile = fixture.get("parquet_file");
+                if (static_cast<bool>(jsonFile) == static_cast<bool>(parquetFile)) {
+                    throw std::runtime_error("fixture needs exactly one of json or parquet_file");
+                }
+                if (jsonFile) definition.Json = File(dir, *jsonFile);
+                else {
+                    if (fixture.get("parquet")) throw std::runtime_error("parquet_file fixtures cannot have writer options");
+                    definition.Parquet = File(dir, *parquetFile);
+                }
                 if (auto* options = fixture.getObject("parquet")) {
                     Fields(*options, {"row_group_rows"});
                     auto size = Required(*options, "row_group_rows").getAsInteger();
@@ -456,13 +670,15 @@ std::vector<TExecCase> CollectExecCases(const fs::path& root, const fs::path& go
                     for (const auto& [table, fixture] : Bindings(Object(*overrides))) bindings[table] = fixture;
                 }
                 validateTables(bindings);
-                const auto order = String(Required(definition, "order"));
+                const auto order = definition.get("order") ? String(*definition.get("order")) : "ordered";
                 if (order != "ordered" && order != "unordered") throw std::runtime_error("invalid result order");
                 const auto relativeSql = fs::relative(sql, rootDir);
                 const auto base = fs::path(relativeSql).replace_extension();
                 const auto golden = fs::path(goldenRoot / relativeSql).replace_extension(".result.json");
-                for (const auto& variant : variants) {
-                    result.push_back({base, sql,
+                const auto planGolden = fs::path(goldenRoot / relativeSql).replace_extension(".plan");
+                const auto caseVariants = bindings.empty() ? std::set<std::string>{"plan"} : variants;
+                for (const auto& variant : caseVariants) {
+                    result.push_back({base, sql, planGolden,
                         golden, suite, bindings, variant, order == "ordered"});
                 }
             }
@@ -481,9 +697,44 @@ std::vector<TExecCase> CollectExecCases(const fs::path& root, const fs::path& go
     return result;
 }
 
-void PrepareExecCase(const TExecCase& test) {
+void PrepareCase(const TQueryCase& test) {
+    if (!test.Suite) return;
     for (const auto& [table, fixture] : test.Tables) test.Suite->Prepare(fixture);
 }
+
+TStatsPtr TableStats(const TQueryCase& test, const std::string& table) {
+    const auto& fixture = test.Suite->Fixtures.at(test.Tables.at(table));
+    if (!fixture.Error.empty()) throw std::runtime_error(fixture.Error);
+    if (!fixture.File) throw std::runtime_error("fixture was not prepared");
+    return fixture.File->MakeSource()->Stats();
+}
+
+fs::path TableFile(const TQueryCase& test, const std::string& table) {
+    const auto& fixture = test.Suite->Fixtures.at(test.Tables.at(table));
+    if (!fixture.Error.empty()) throw std::runtime_error(fixture.Error);
+    if (!fixture.File) throw std::runtime_error("fixture was not prepared");
+    return fixture.PreparedPath;
+}
+
+namespace {
+
+TComparison ComparePlan(const TQueryCase& test, const std::string& actual, bool canonize) {
+    std::string expected;
+    if (canonize) {
+        if (test.Suite) {
+            auto [it, inserted] = test.Suite->CanonizedPlans.emplace(test.PlanGolden, actual);
+            expected = it->second;
+        } else {
+            WriteAll(test.PlanGolden, actual);
+            expected = actual;
+        }
+    } else if (!fs::is_regular_file(test.PlanGolden)) {
+        return {false, actual, "Missing golden file: " + test.PlanGolden.string() + "\n"};
+    } else expected = ReadAll(test.PlanGolden);
+    return {actual == expected, actual, expected};
+}
+
+} // namespace
 
 namespace {
 
@@ -553,13 +804,12 @@ TValue Result(TTestRuntime& runtime) {
         }
         Release(&batch);
     }
-    return TObject{{"version", 1}, {"schema", PrintSchema(output.Cast())}, {"rows", std::move(rows)}};
+    return TObject{{"schema", PrintSchema(output.Cast())}, {"rows", std::move(rows)}};
 }
 
 void Normalize(TValue& value, bool ordered) {
     auto& object = *value.getAsObject();
-    Fields(object, {"version", "schema", "rows"});
-    Version(object);
+    Fields(object, {"schema", "rows"});
     const auto schema = ParseSchema(Required(object, "schema"));
     object["schema"] = PrintSchema(schema);
     auto* rows = object.getArray("rows");
@@ -577,7 +827,11 @@ void Normalize(TValue& value, bool ordered) {
 
 } // namespace
 
-TComparison ExecuteCase(const TExecCase& test, bool canonize) {
+TCaseResult CheckCase(const TQueryCase& test, bool canonize) {
+    if (!test.HasTables()) {
+        std::istringstream input(ReadAll(test.Sql));
+        return {ComparePlan(test, BuildPlanText(input), canonize), std::nullopt};
+    }
     std::vector<std::unique_ptr<TParquetSource>> sources;
     std::istringstream input(ReadAll(test.Sql));
     NSql::TTokenStream tokens(input);
@@ -599,6 +853,9 @@ TComparison ExecuteCase(const TExecCase& test, bool canonize) {
     });
     if (!plan) throw std::runtime_error(plan.error().ToString());
     ApplyPlanPasses(*plan);
+    std::ostringstream planOutput;
+    PrintPlanTreeWithCtes(planOutput, *plan);
+    const auto planComparison = ComparePlan(test, planOutput.str(), canonize);
     NScheduler::TSettings settings;
     settings.Scheduler.Mode = test.Variant == "single"
         ? NScheduler::EExecutionMode::SingleThreadedScheduler
@@ -618,18 +875,18 @@ TComparison ExecuteCase(const TExecCase& test, bool canonize) {
         if (!expected.getAsObject()) throw std::runtime_error("result golden must be an object");
         Normalize(expected, test.Ordered);
     }
-    return {actual == expected, RenderResult(actual), RenderResult(expected)};
+    return {planComparison, TComparison{actual == expected, RenderResult(actual), RenderResult(expected)}};
 }
 
-void CommitExecGoldens(const std::vector<TExecCase>& tests) {
+void CommitGoldens(const std::vector<TQueryCase>& tests) {
     std::set<TSuite*> seen;
     for (const auto& test : tests) {
+        if (!test.Suite) continue;
         if (!seen.insert(test.Suite.get()).second) continue;
         for (const auto& [path, result] : test.Suite->Canonized) {
-            fs::create_directories(path.parent_path());
-            std::ofstream output(path, std::ios::binary);
-            if (!output || !(output << RenderResult(result))) throw std::runtime_error("cannot write " + path.string());
+            WriteAll(path, RenderResult(result));
         }
+        for (const auto& [path, plan] : test.Suite->CanonizedPlans) WriteAll(path, plan);
     }
 }
 
