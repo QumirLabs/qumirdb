@@ -438,6 +438,22 @@ TEST_F(SelectivityTest, IsNullWithoutNullCountKeepsDefaultSelectivity) {
     EXPECT_EQ(Rows("n is not null"), 500u);
 }
 
+TEST_F(SelectivityTest, InListKeepsListedDistinctValues) {
+    EXPECT_EQ(Rows("d in (1, 2, 3)"), 300u); // 3 of the 10 values
+    EXPECT_EQ(Rows("d not in (1, 2, 3)"), 700u);
+    EXPECT_NEAR(Rows("s in ('a', 'b')"), 20, 1); // 2 of the 100 values
+    // A list longer than the column has distinct values keeps every row.
+    EXPECT_EQ(Rows("d in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)"), 1000u);
+}
+
+TEST_F(SelectivityTest, InListKeepsDefaultSelectivityWhenUnknown) {
+    // An item that is not a constant.
+    EXPECT_EQ(Rows("x in (y, 2)"), 500u);
+    // No distinct count for the column.
+    Source_.Stats_->ColumnStats.at("d")->Ndv.reset();
+    EXPECT_EQ(Rows("d in (1, 2, 3)"), 500u);
+}
+
 TEST_F(SelectivityTest, NullCountAppliesOnlyAboveTheSource) {
     // 100 rows reach the outer filter, fewer than the table has nulls: the
     // table-wide count says nothing about them.

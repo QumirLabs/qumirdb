@@ -333,6 +333,19 @@ double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shar
                     }
                 }
             }
+            // col IN (c1, ..., cn) -> qdb_in_list(col, c1, ..., cn): n of the
+            // distinct values of the column.
+            if (callee->Name == "qdb_in_list" && call->Args.size() > 1
+                && std::all_of(call->Args.begin() + 1, call->Args.end(), isConstExpr))
+            {
+                if (auto column = TMaybeNode<TIdentExpr>(call->Args[0])) {
+                    auto colIt = inputStats->ColumnStats.find(column.Cast()->Name);
+                    if (colIt != inputStats->ColumnStats.end() && colIt->second->Ndv) {
+                        return std::min(1.0, static_cast<double>(call->Args.size() - 1)
+                            / static_cast<double>(*colIt->second->Ndv));
+                    }
+                }
+            }
         }
     }
 
