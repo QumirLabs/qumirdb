@@ -1001,9 +1001,40 @@ NQumir::NAst::TExprPtr GenFilterKernelAst(
     bodyStmts.push_back(varI);
     bodyStmts.push_back(initI);
     loopSetup.push_back(std::move(writeSel));
-    loopSetup.push_back(std::move(incrI));
+
+    // A row an earlier operator rejected is not evaluated: the predicate may
+    // be expensive, and may fail on a value that was filtered out on purpose.
+    auto u8Zero = [&]() {
+        auto zero = std::make_shared<TNumberExpr>(loc, int64_t(0));
+        zero->Type = std::make_shared<TIntegerType>(TIntegerType::U8);
+        return zero;
+    };
+    bodyStmts.push_back(NOz::Var("input_selection_is_null",
+        std::make_shared<TBoolType>()));
+    bodyStmts.push_back(NOz::Assign("input_selection_is_null",
+        std::make_shared<TBinaryExpr>(loc, TOperator("=="),
+            std::make_shared<TCastExpr>(loc,
+                std::make_shared<TIdentExpr>(loc, "__input_selection__"),
+                std::make_shared<TIntegerType>()),
+            std::make_shared<TNumberExpr>(loc, int64_t(0)))));
+    auto inputSelected = std::make_shared<TBinaryExpr>(loc, TOperator("||"),
+        std::make_shared<TIdentExpr>(loc, "input_selection_is_null"),
+        std::make_shared<TBinaryExpr>(loc, TOperator("!="),
+            std::make_shared<TIndexExpr>(loc,
+                std::make_shared<TIdentExpr>(loc, "__input_selection__"),
+                std::make_shared<TIdentExpr>(loc, "i")),
+            u8Zero()));
+    auto writeRejected = std::make_shared<TArrayAssignExpr>(loc, "selection",
+        std::vector<TExprPtr>{std::make_shared<TIdentExpr>(loc, "i")},
+        u8Zero());
+    std::vector<TExprPtr> loopBody;
+    loopBody.push_back(std::make_shared<TIfExpr>(loc, std::move(inputSelected),
+        std::make_shared<TBlockExpr>(loc, std::move(loopSetup)),
+        std::make_shared<TBlockExpr>(loc,
+            std::vector<TExprPtr>{std::move(writeRejected)})));
+    loopBody.push_back(std::move(incrI));
     bodyStmts.push_back(std::make_shared<TWhileStmtExpr>(loc, cond,
-        std::make_shared<TBlockExpr>(loc, std::move(loopSetup))));
+        std::make_shared<TBlockExpr>(loc, std::move(loopBody))));
 
     auto ptrI8Type = std::make_shared<TPointerType>(
         std::make_shared<TIntegerType>(TIntegerType::I8));
@@ -1012,6 +1043,7 @@ NQumir::NAst::TExprPtr GenFilterKernelAst(
         .Param("rowSet", rowSetRefType)
         .Param("__arena__", ptrI8Type)
         .Param("__regexes__", ptrPtrI8Type)
+        .Param("__input_selection__", ptrU8Type)
         .Return(std::make_shared<TVoidType>());
     for (auto& stmt : bodyStmts) {
         builder.Stmt(std::move(stmt));

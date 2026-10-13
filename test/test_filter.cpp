@@ -14,6 +14,7 @@
 
 #include <array>
 #include <cstdint>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -72,7 +73,7 @@ std::array<uint8_t, 4> RunStringLiteralFilter(
         .Selection = selection.data(),
         .RefCount = 1,
     };
-    dispatch(rowSet);
+    dispatch(rowSet, nullptr);
     return selection;
 }
 
@@ -104,8 +105,114 @@ std::array<uint8_t, 6> RunNullableIntegerFilter(
         .Selection = selection.data(),
         .RefCount = 1,
     };
-    dispatch(rowSet);
+    dispatch(rowSet, nullptr);
     return selection;
+}
+
+// A filter over one i64 column "value", run the way the filter operator runs
+// it: the batch brings its own selection and leaves with a narrowed one.
+class FilterSelection : public testing::Test {
+protected:
+    // Returns the rows the filter keeps. An empty selection means the batch has
+    // none; a non-empty validity bitmap makes the column nullable.
+    std::vector<bool> Keep(
+        const std::string& predicate,
+        std::vector<int64_t> values,
+        std::vector<uint8_t> selection,
+        std::vector<uint8_t> validity = {})
+    {
+        TColumn column{
+            .Data = reinterpret_cast<char*>(values.data()),
+            .Mask = validity.empty() ? nullptr : validity.data(),
+        };
+        TTypePtr valueType = std::make_shared<TIntegerType>(TIntegerType::I64);
+        if (!validity.empty()) {
+            valueType = std::make_shared<TNullable>(valueType);
+        }
+        TStructType inputType({{"value", valueType}});
+        auto process = MakeFilterProcess(TKernelCompiler().CompileFilter(
+            NKernel::BuildFilterKernelSpec(inputType, ParsePredicate(predicate))));
+        TRowSet rowSet{
+            .Columns = &column,
+            .ColumnCount = 1,
+            .RowCount = static_cast<int64_t>(values.size()),
+            .Selection = selection.empty() ? nullptr : selection.data(),
+            .RefCount = 1,
+        };
+        TUnaryStreamingKernelState state;
+        process(rowSet, state);
+        std::vector<bool> kept;
+        for (int64_t row = 0; row < rowSet.RowCount; ++row) {
+            kept.push_back(rowSet.Selection[row] != 0);
+        }
+        Release(&rowSet);
+        return kept;
+    }
+};
+
+TEST_F(FilterSelection, SparseSelectionNarrowsToRowsThatPass) {
+    EXPECT_EQ(Keep("(> value 0)", {5, -1, 7, 9, -3, 2}, {1, 1, 0, 0xff, 0, 2}),
+        (std::vector<bool>{true, false, false, true, false, true}));
+}
+
+TEST_F(FilterSelection, EmptySelectionKeepsNothing) {
+    EXPECT_EQ(Keep("(> value 0)", {5, -1, 7}, {0, 0, 0}),
+        (std::vector<bool>{false, false, false}));
+}
+
+TEST_F(FilterSelection, FullSelectionMatchesNoSelection) {
+    const std::vector<bool> expected = {true, false, true, false};
+    EXPECT_EQ(Keep("(> value 0)", {5, -1, 7, 0}, {}), expected);
+    EXPECT_EQ(Keep("(> value 0)", {5, -1, 7, 0}, {1, 0xff, 2, 1}), expected);
+}
+
+TEST_F(FilterSelection, NullValuesStayRejectedUnderSelection) {
+    // Rows 1 and 4 are NULL; rows 2 and 4 are not selected.
+    EXPECT_EQ(Keep("(> value 0)", {5, 6, 7, -1, 8, 9},
+            {1, 1, 0, 1, 0, 1}, {0b00101101}),
+        (std::vector<bool>{true, false, false, false, false, true}));
+    EXPECT_EQ(Keep("(call qdb_is_null value)", {5, 6, 7, -1, 8, 9},
+            {1, 1, 0, 1, 0, 1}, {0b00101101}),
+        (std::vector<bool>{false, true, false, false, false, false}));
+}
+
+// abs fails on the minimum i64. An earlier operator rejected those rows, so
+// the filter must not evaluate them.
+TEST_F(FilterSelection, DoesNotEvaluateRejectedRows) {
+    const int64_t min = std::numeric_limits<int64_t>::min();
+    EXPECT_EQ(Keep("(> (call abs value) 2)", {5, min, -7, 1, min},
+            {1, 0, 1, 1, 0}),
+        (std::vector<bool>{true, false, true, false, false}));
+}
+
+// The kernel owns every byte of its output: a rejected row gets 0 whatever
+// the buffer held before.
+TEST(FilterKernel, ClearsOutputOfRejectedRows) {
+    const std::string data = std::string("a") + "same" + "z" + "same";
+    const std::array<int32_t, 5> offsets = {0, 1, 5, 6, 10};
+    TColumn column{.Data = const_cast<char*>(data.data()), .Mask = nullptr,
+        .Offsets = const_cast<int32_t*>(offsets.data()), .OffsetWidth = 4};
+    TStructType inputType({
+        {"value", std::make_shared<TStringType>()},
+    });
+    auto dispatch = TKernelCompiler().CompileFilter(
+        NKernel::BuildFilterKernelSpec(
+            inputType, ParsePredicate("(== value \"same\")")));
+    const std::array<uint8_t, 4> inputSelection = {0, 1, 0xff, 0};
+    std::array<uint8_t, 4> selection = {7, 7, 7, 7};
+    TRowSet rowSet{
+        .Columns = &column,
+        .ColumnCount = 1,
+        .RowCount = static_cast<int64_t>(selection.size()),
+        .Selection = selection.data(),
+        .RefCount = 1,
+    };
+    dispatch(rowSet, inputSelection.data());
+
+    EXPECT_EQ(selection[0], 0);
+    EXPECT_NE(selection[1], 0);
+    EXPECT_EQ(selection[2], 0);
+    EXPECT_EQ(selection[3], 0);
 }
 
 TEST(FilterKernel, ComparesStringColumnsWithoutMutatingLogicalPredicate) {
@@ -145,7 +252,7 @@ TEST(FilterKernel, ComparesStringColumnsWithoutMutatingLogicalPredicate) {
             .Selection = selection.data(),
             .RefCount = 1,
         };
-        dispatch(rowSet);
+        dispatch(rowSet, nullptr);
         EXPECT_EQ(selection, expected) << op;
         EXPECT_EQ(NCore::PrintAst(predicate), logical) << op;
     }
@@ -206,7 +313,7 @@ TEST(FilterKernel, StringViewLiteralKeepsItsLength) {
         .Selection = selection.data(),
         .RefCount = 1,
     };
-    dispatch(rowSet);
+    dispatch(rowSet, nullptr);
 
     EXPECT_EQ(selection, (std::array<uint8_t, 4>{0, 0xff, 0, 0}));
     EXPECT_NE(diagnostics.str().find("qdb_sv_from_ptr"), std::string::npos);
@@ -298,7 +405,7 @@ TEST(FilterKernel, CompilesFromKernelSpec) {
         .RefCount = 1,
     };
 
-    dispatch(rowSet);
+    dispatch(rowSet, nullptr);
 
     EXPECT_EQ(selection, (std::array<uint8_t, 4>{0, 0, 0xff, 0xff}));
 }

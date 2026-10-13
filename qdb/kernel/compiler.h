@@ -307,8 +307,11 @@ public:
         Opts_.PrintLlvm = Diagnostics_ != nullptr;
     }
 
-    // Filter dispatch: called per batch to fill the selection buffer.
-    using TFilterDispatch = std::function<void(TRowSet& rowSet)>;
+    // Filter dispatch: called per batch to fill the selection buffer
+    // rowSet.Selection. inputSelection is the mask the batch arrived with
+    // (null = every row); rows outside it get 0 and are not evaluated.
+    using TFilterDispatch =
+        std::function<void(TRowSet& rowSet, const uint8_t* inputSelection)>;
 
     // Project dispatch: called per batch; for each computed column k and row i,
     // writes outBuffers[k][i] = <expr_k>. outBuffers has one pointer per computed

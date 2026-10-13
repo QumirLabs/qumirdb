@@ -1611,12 +1611,14 @@ TKernelCompiler::TFilterDispatch TKernelCompiler::CompileFilter(
         "filter", {"<kernel>"}, std::move(*kernelAst), literalStorage);
     FinishKernelDiagnostics(Diagnostics_);
 
-    using TFilterFn = void(*)(void*, void*, void**);
+    using TFilterFn = void(*)(void*, void*, void**, const uint8_t*);
     return [slot = kernel.Slot, storage = kernel.Storage,
-            runtime = RuntimeContext_](TRowSet& rowSet) {
+            runtime = RuntimeContext_](
+               TRowSet& rowSet, const uint8_t* inputSelection) {
         TStringArena arena;
         reinterpret_cast<TFilterFn>(slot->Fns[0])(
-            &rowSet, &arena, runtime ? runtime->Regexes.Handles() : nullptr);
+            &rowSet, &arena, runtime ? runtime->Regexes.Handles() : nullptr,
+            inputSelection);
     };
 }
 

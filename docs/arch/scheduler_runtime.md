@@ -85,7 +85,7 @@ adapter.
 
 | Physical node | Generic task | Processor state | State machine | Compiled kernels used |
 |---|---|---|---|---|
-| `Filter` | `TUnaryTask` | reusable selection buffer | For each rowset, resize selection, point `rowSet.Selection` at it, call filter dispatch, then detach selection before crossing a connection. | `CompileFilter` |
+| `Filter` | `TUnaryTask` | reusable selection buffer | For each rowset, resize selection, point `rowSet.Selection` at it, call filter dispatch with the input selection, then detach selection before crossing a connection. | `CompileFilter` |
 | `Project` | `TUnaryTask` | none beyond closure metadata | For each rowset, retain input, allocate owned buffers for computed columns, call project dispatch, build output column array mixing input columns and computed columns. | optional `CompileProject` |
 | `Limit` | `TBlockingTask` | skipped/emitted counters | Fetch rowsets until enough rows are skipped/emitted; produce selection-view rowsets; finish when limit reached or input finishes. | none |
 | `Aggregate` | `TBlockingTask` | aggregate hash table, done flag, output buffers inside processor | On first use init hash table; for each input rowset call update dispatch; on EOF measure groups, allocate output buffers, call finalize, emit output, then finish/destroy. | aggregate dispatch/measure/finalize |
@@ -136,7 +136,7 @@ routes each row. The connection states which partition rule the task uses.
 
 | Kernel bundle | Compiler entry | ABI shape | Called by | Purpose |
 |---|---|---|---|---|
-| Filter | `CompileFilter` | `void(TRowSet&)` | `TUnaryTask` via `MakeFilterProcess` | Fill `rowSet.Selection` for one input batch. |
+| Filter | `CompileFilter` | `void(TRowSet&, const uint8_t* inputSelection)` | `TUnaryTask` via `MakeFilterProcess` | Fill `rowSet.Selection` for one input batch. Rows outside `inputSelection` get 0 and are not evaluated. |
 | Project | `CompileProject` | `void(TRowSet*, void** outBuffers)` | `TUnaryTask` via `MakeProjectProcess` | Compute non-identity projection columns; identity columns stay zero-copy references. |
 | Aggregate | `CompileAggregate` | `Dispatch(ht,batch,arg,op)`, `Measure`, `Finalize` | `TBlockingTask` through `TAggregateProcessor` | Maintain per-group hash table and emit grouped aggregate output. |
 | Join | `CompileJoin` | init, process-left/right, stream-probe, finalizers, destroy | `TBinaryBlockingTask` through `TInnerJoinProcessor` | Symmetric hash join, semi/anti, outer finalization, residual filtering inside join kernel where supported. |

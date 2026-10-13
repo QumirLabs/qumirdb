@@ -22,8 +22,8 @@ void DestroyFilterViewRowSet(TRowSet* rowSet) {
     delete data;
 }
 
-// Predicate over the full input; emit an owning view of keptIndices (keepAll =
-// every column, zero-copy).
+// Predicate over the rows the input selects; emit an owning view of
+// keptIndices (keepAll = every column, zero-copy).
 TUnaryStreamProcess MakeFilterViewProcess(
     TKernelCompiler::TFilterDispatch dispatch,
     std::vector<int32_t> keptIndices,
@@ -38,14 +38,7 @@ TUnaryStreamProcess MakeFilterViewProcess(
         // Predicate on a copy; leave the input intact until it succeeds.
         TRowSet filtered = rowSet;
         filtered.Selection = data->Selection.data();
-        dispatch(filtered);
-        if (rowSet.Selection) {
-            for (int64_t row = 0; row < rowSet.RowCount; ++row) {
-                if (rowSet.Selection[row] == 0) {
-                    data->Selection[row] = 0;
-                }
-            }
-        }
+        dispatch(filtered, rowSet.Selection);
 
         TColumn* columns = rowSet.Columns;
         int64_t columnCount = rowSet.ColumnCount;
