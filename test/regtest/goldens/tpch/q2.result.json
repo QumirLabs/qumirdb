@@ -1,0 +1,4 @@
+{
+  "schema": "<struct (s_acctbal f64) (s_name string) (n_name string) (p_partkey i32) (p_mfgr string) (s_address string) (s_phone string) (s_comment string)>",
+  "rows": []
+}

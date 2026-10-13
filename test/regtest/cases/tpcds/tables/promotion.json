@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "schema": "<struct (p_promo_sk i32) (p_promo_id string) (p_start_date_sk <named Nullable [i32]>) (p_end_date_sk <named Nullable [i32]>) (p_item_sk <named Nullable [i32]>) (p_cost <named Nullable [f64]>) (p_response_target <named Nullable [i32]>) (p_promo_name <named Nullable [string]>) (p_channel_dmail <named Nullable [string]>) (p_channel_email <named Nullable [string]>) (p_channel_catalog <named Nullable [string]>) (p_channel_tv <named Nullable [string]>) (p_channel_radio <named Nullable [string]>) (p_channel_press <named Nullable [string]>) (p_channel_event <named Nullable [string]>) (p_channel_demo <named Nullable [string]>) (p_channel_details <named Nullable [string]>) (p_purpose <named Nullable [string]>) (p_discount_active <named Nullable [string]>)>",
+  "rows": [
+    [1, "AAAAAAAABAAAAAAA", 2450164, 2450185, 88022, 1000.0, 1, "ought", "Y", "N", "N", "N", "N", "N", "N", "N", "Men will not say merely. Old, available ", "Unknown", "N"],
+    [2, "AAAAAAAACAAAAAAA", 2450118, 2450150, 44410, 1000.0, 1, "able", "Y", "N", "N", "N", "N", "N", "N", "N", "So willing buildings coul", "Unknown", "N"],
+    [3, "AAAAAAAADAAAAAAA", 2450675, 2450712, 4843, 1000.0, 1, "pri", "Y", "N", "N", "N", "N", "N", "N", "N", "Companies shall not pr", "Unknown", "N"],
+    [4, "AAAAAAAAEAAAAAAA", 2450633, 2450646, 57794, 1000.0, 1, "ese", "N", "N", "N", "N", "N", "N", "N", "N", "High, good shoulders can tell on a proble", "Unknown", "N"],
+    [5, "AAAAAAAAFAAAAAAA", 2450347, 2450357, 66655, 1000.0, 1, "anti", "N", "N", "N", "N", "N", "N", "N", "N", "Huge, competent structures can remember different pat", "Unknown", "N"],
+    [6, "AAAAAAAAGAAAAAAA", 2450516, 2450561, 45464, 1000.0, 1, "cally", "N", "N", "N", "N", "N", "N", "N", "N", "Boards might not reverse up to a hopes. Now high respon", "Unknown", "N"],
+    [7, "AAAAAAAAHAAAAAAA", 2450123, 2450132, 14527, 1000.0, 1, "ation", "N", "N", "N", "N", "N", "N", "N", "N", "Effects used to prefer however new terms. Usually ava", "Unknown", "N"],
+    [8, "AAAAAAAAIAAAAAAA", 2450350, 2450409, 6304, 1000.0, 1, "eing", "Y", "N", "N", "N", "N", "N", "N", "N", "Offences feel only on a fees.", "Unknown", "N"],
+    [9, "AAAAAAAAJAAAAAAA", 2450192, 2450248, 27439, 1000.0, 1, "n st", "Y", "N", "N", "N", "N", "N", "N", "N", "External forces shall comprehend ideal, disciplinary stud", "Unknown", "N"],
+    [10, "AAAAAAAAKAAAAAAA", 2450324, 2450365, 57314, 1000.0, 1, "bar", "N", "N", "N", "N", "N", "N", "N", "N", "Only local achievements used to make t", "Unknown", "N"]
+  ]
+}

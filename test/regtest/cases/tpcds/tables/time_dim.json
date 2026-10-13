@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "schema": "<struct (t_time_sk i32) (t_time_id string) (t_time i32) (t_hour <named Nullable [i32]>) (t_minute <named Nullable [i32]>) (t_second <named Nullable [i32]>) (t_am_pm <named Nullable [string]>) (t_shift <named Nullable [string]>) (t_sub_shift <named Nullable [string]>) (t_meal_time <named Nullable [string]>)>",
+  "rows": [
+    [0, "AAAAAAAABAAAAAAA", 0, 0, 0, 0, "AM", "third", "night", null],
+    [1, "AAAAAAAACAAAAAAA", 1, 0, 0, 1, "AM", "third", "night", null],
+    [2, "AAAAAAAADAAAAAAA", 2, 0, 0, 2, "AM", "third", "night", null],
+    [3, "AAAAAAAAEAAAAAAA", 3, 0, 0, 3, "AM", "third", "night", null],
+    [4, "AAAAAAAAFAAAAAAA", 4, 0, 0, 4, "AM", "third", "night", null],
+    [5, "AAAAAAAAGAAAAAAA", 5, 0, 0, 5, "AM", "third", "night", null],
+    [6, "AAAAAAAAHAAAAAAA", 6, 0, 0, 6, "AM", "third", "night", null],
+    [7, "AAAAAAAAIAAAAAAA", 7, 0, 0, 7, "AM", "third", "night", null],
+    [8, "AAAAAAAAJAAAAAAA", 8, 0, 0, 8, "AM", "third", "night", null],
+    [9, "AAAAAAAAKAAAAAAA", 9, 0, 0, 9, "AM", "third", "night", null]
+  ]
+}

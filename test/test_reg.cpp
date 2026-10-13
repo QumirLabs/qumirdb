@@ -110,8 +110,12 @@ int main(int argc, char** argv) {
         const auto cases = NRegTest::CollectCases(CasesDir, GoldensDir);
         auto environment = std::make_unique<RegQueryEnvironment>();
         std::set<std::string> names;
+        std::set<fs::path> astQueries;
         for (const auto& test : cases) {
-            if (!test.Suite) AstCases.push_back(test);
+            const auto astGolden = fs::path(test.PlanGolden).replace_extension(".ast");
+            if ((!test.Suite || fs::is_regular_file(astGolden)) && astQueries.insert(test.Sql).second) {
+                AstCases.push_back(test);
+            }
             const auto name = NRegTest::TestName(test.Base) + "_" + test.Variant;
             if (!names.insert(name).second) throw std::runtime_error("duplicate query test name: " + name);
             const auto* info = ::testing::RegisterTest("RegQuery", name.c_str(),

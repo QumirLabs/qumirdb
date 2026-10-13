@@ -1,0 +1,4 @@
+{
+  "schema": "<struct (s_name string) (numwait i64)>",
+  "rows": []
+}

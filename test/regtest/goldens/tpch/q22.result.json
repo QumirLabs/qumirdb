@@ -1,0 +1,6 @@
+{
+  "schema": "<struct (cntrycode string) (numcust i64) (totacctbal f64)>",
+  "rows": [
+    ["27", "1", 6819.7399999999998]
+  ]
+}

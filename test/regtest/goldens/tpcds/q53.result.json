@@ -1,0 +1,4 @@
+{
+  "schema": "<struct (i_manufact_id <named Nullable [i32]>) (sum_sales <named Nullable [f64]>) (avg_quarterly_sales <named Nullable [f64]>)>",
+  "rows": []
+}

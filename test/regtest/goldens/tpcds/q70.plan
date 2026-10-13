@@ -1,86 +1,26 @@
-(rel limit
-  (rel project
-    (rel sort
-      (rel project
-        (rel window
-          (rel project
-            (rel aggregate
-              (rel project
-                (rel filter
-                  (rel join
-                    (rel join
-                      (rel join (rel source "store_sales") (rel source "date_dim" "d1") () (inner))
-                      (rel source "store")
-                      ()
-                      (inner))
-                    (rel project
-                      (rel filter
-                        (rel project
-                          (rel project
-                            (rel window
-                              (rel aggregate
-                                (rel filter
-                                  (rel join
-                                    (rel join (rel source "store_sales") (rel source "store") () (inner))
-                                    (rel source "date_dim")
-                                    ()
-                                    (inner))
-                                  (&& (&& (&& (<= 1212 d_month_seq) (<= d_month_seq (+ 1212 11)))
-                                      (== d_date_sk ss_sold_date_sk))
-                                    (== s_store_sk ss_store_sk)))
-                                (keys s_state)
-                                (agg sum_0 sum ss_net_profit))
-                              (partition s_state)
-                              (order (sum_0 desc nulls-default))
-                              (frame range (start unbounded-preceding) (end current-row))
-                              (fn w_0 rank))
-                            (s_state s_state)
-                            (ranking w_0))
-                          (|tmp1.s_state| s_state)
-                          (|tmp1.ranking| ranking))
-                        (<= ranking 5))
-                      (__qdb_in__s_state s_state))
-                    ()
-                    (left_semi)
-                    (residual (== s_state __qdb_in__s_state)))
-                  (&& (&& (&& (<= 1212 |d1.d_month_seq|) (<= |d1.d_month_seq| (+ 1212 11)))
-                      (== |d1.d_date_sk| ss_sold_date_sk))
-                    (== s_store_sk ss_store_sk)))
-                (s_state s_state)
-                (s_county s_county)
-                (ss_net_profit ss_net_profit))
-              (keys s_state s_county)
-              (set s_state s_county)
-              (set s_state)
-              (set)
-              (agg sum_0 sum ss_net_profit))
-            (__grouping_id__ __grouping_id__)
-            (s_state s_state)
-            (s_county s_county)
-            (sum_0 sum_0)
-            (wk_0 (+ (if (== __grouping_id__ (: 2 i32)) 1 0)
-                (if (== __grouping_id__ (: 1 i32)) 1 (if (== __grouping_id__ (: 2 i32)) 1 0))))
-            (wk_1 (if
-                (call qdb_is_true (== (if (== __grouping_id__ (: 1 i32)) 1 (if (== __grouping_id__ (: 2 i32)) 1 0)) 0))
-                s_state
-                (call qdb_sql_null))))
-          (partition wk_0 wk_1)
-          (order (sum_0 desc nulls-default))
-          (frame range (start unbounded-preceding) (end current-row))
-          (fn w_0 rank))
-        (total_sum sum_0)
-        (s_state s_state)
-        (s_county s_county)
-        (lochierarchy (+ (if (== __grouping_id__ (: 2 i32)) 1 0)
-            (if (== __grouping_id__ (: 1 i32)) 1 (if (== __grouping_id__ (: 2 i32)) 1 0))))
-        (rank_within_parent w_0)
-        (__sort_0 (if (call qdb_is_true (== lochierarchy 0)) s_state (call qdb_sql_null))))
-      (lochierarchy desc nulls-default)
-      (__sort_0 asc nulls-default)
-      (rank_within_parent asc nulls-default))
-    (total_sum total_sum)
-    (s_state s_state)
-    (s_county s_county)
-    (lochierarchy lochierarchy)
-    (rank_within_parent rank_within_parent))
-  (limit 100))
+project (total_sum, s_state, s_county, lochierarchy, rank_within_parent)
+└─ top-sort [lochierarchy desc, __sort_0 asc, rank_within_parent asc] limit 100
+   └─ project (total_sum, s_state, s_county, lochierarchy, rank_within_parent, __sort_0)
+      └─ window partition=[wk_0, wk_1] order=[sum_0 desc] fns=[w_0=rank]
+         └─ project (__grouping_id__, s_state, s_county, sum_0, wk_0, wk_1)
+            └─ aggregate keys=[s_state, s_county] aggs=[sum_0=sum]
+               └─ project (s_state, s_county, ss_net_profit)
+                  └─ join left_semi [store_0.s_state = __qdb_in__s_state]
+                     ├─ join inner [store_0.s_store_sk = store_sales_0.ss_store_sk] emit-filter 1 from right (rows≈2 cost≈9.1K)
+                     │  ├─ source store AS store_0 use-filter 1 keys=[store_0.s_store_sk] (rows≈10 cost≈360)
+                     │  └─ join inner [d1.d_date_sk = store_sales_0.ss_sold_date_sk] (rows≈2 cost≈4.5K)
+                     │     ├─ filter (&& (<= 1212 |d1.d_month_seq|) (<= |d1.d_month_seq| (+ 1212 11))) (rows≈2 cost≈160)
+                     │     │  └─ source date_dim AS d1 row-groups (&& (<= 1212 |d1.d_month_seq|) (<= |d1.d_month_seq| (+ 1212 11))) (rows≈10 cost≈80)
+                     │     └─ source store_sales AS store_sales_0 (rows≈10 cost≈160)
+                     └─ project (__qdb_in__s_state)
+                        └─ project (tmp1.s_state)
+                           └─ project (s_state)
+                              └─ filter (<= w_0 5)
+                                 └─ window partition=[store_1.s_state] order=[sum_0 desc] fns=[w_0=rank]
+                                    └─ aggregate keys=[store_1.s_state] aggs=[sum_0=sum] (rows≈2 cost≈9K)
+                                       └─ join inner [store_sales_1.ss_store_sk = store_1.s_store_sk] emit-filter 2 from left (rows≈2 cost≈8.9K)
+                                          ├─ join inner [date_dim.d_date_sk = store_sales_1.ss_sold_date_sk] (rows≈2 cost≈4.5K)
+                                          │  ├─ filter (&& (<= 1212 |date_dim.d_month_seq|) (<= |date_dim.d_month_seq| (+ 1212 11))) (rows≈2 cost≈160)
+                                          │  │  └─ source date_dim AS date_dim row-groups (&& (<= 1212 |date_dim.d_month_seq|) (<= |date_dim.d_month_seq| (+ 1212 11))) (rows≈10 cost≈80)
+                                          │  └─ source store_sales AS store_sales_1 (rows≈10 cost≈160)
+                                          └─ source store AS store_1 use-filter 2 keys=[store_1.s_store_sk] (rows≈10 cost≈200)

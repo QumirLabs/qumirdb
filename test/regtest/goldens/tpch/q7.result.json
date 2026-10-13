@@ -1,0 +1,4 @@
+{
+  "schema": "<struct (supp_nation string) (cust_nation string) (l_year i32) (revenue f64)>",
+  "rows": []
+}

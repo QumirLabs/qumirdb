@@ -243,6 +243,16 @@ TEST(RegSuiteInfrastructure, SharesPreparedFixturesAcrossQueriesAliasesAndVarian
     }
 }
 
+TEST(RegSuiteInfrastructure, ResultSchemaAllowsDuplicateColumnNames) {
+    TCaseDirectory dir;
+    dir.Write("query.sql", "SELECT v, v FROM t ORDER BY v DESC;");
+    dir.WriteGolden(R"({
+        "schema":"<struct (v i64) (v i64)>",
+        "rows":[["2","2"],["1","1"]]
+    })");
+    EXPECT_TRUE(dir.Run().Matches);
+}
+
 TEST(RegSuiteInfrastructure, GoldenPathMirrorsCasesOutsideCases) {
     TCaseDirectory dir;
     fs::copy(dir.SuiteDir, dir.CasesDir / "other", fs::copy_options::recursive);

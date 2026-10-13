@@ -1,70 +1,11 @@
-(rel limit
-  (rel sort
-    (rel project
-      (rel aggregate
-        (rel project
-          (rel filter
-            (rel join
-              (rel join (rel source "date_dim") (rel source "store_sales") () (inner))
-              (rel source "store")
-              ()
-              (inner))
-            (&& (&& (&& (== d_date_sk ss_sold_date_sk) (== s_store_sk ss_store_sk)) (== s_gmt_offset (- 5)))
-              (== d_year 1998)))
-          (s_store_name s_store_name)
-          (s_store_id s_store_id)
-          (arg_0 (if
-              (call qdb_is_true (== d_day_name (cast "Sunday" <named StringView>)))
-              ss_sales_price
-              (call qdb_sql_null)))
-          (arg_1 (if
-              (call qdb_is_true (== d_day_name (cast "Monday" <named StringView>)))
-              ss_sales_price
-              (call qdb_sql_null)))
-          (arg_2 (if
-              (call qdb_is_true (== d_day_name (cast "Tuesday" <named StringView>)))
-              ss_sales_price
-              (call qdb_sql_null)))
-          (arg_3 (if
-              (call qdb_is_true (== d_day_name (cast "Wednesday" <named StringView>)))
-              ss_sales_price
-              (call qdb_sql_null)))
-          (arg_4 (if
-              (call qdb_is_true (== d_day_name (cast "Thursday" <named StringView>)))
-              ss_sales_price
-              (call qdb_sql_null)))
-          (arg_5 (if
-              (call qdb_is_true (== d_day_name (cast "Friday" <named StringView>)))
-              ss_sales_price
-              (call qdb_sql_null)))
-          (arg_6 (if
-              (call qdb_is_true (== d_day_name (cast "Saturday" <named StringView>)))
-              ss_sales_price
-              (call qdb_sql_null))))
-        (keys s_store_name s_store_id)
-        (agg sum_0 sum arg_0)
-        (agg sum_1 sum arg_1)
-        (agg sum_2 sum arg_2)
-        (agg sum_3 sum arg_3)
-        (agg sum_4 sum arg_4)
-        (agg sum_5 sum arg_5)
-        (agg sum_6 sum arg_6))
-      (s_store_name s_store_name)
-      (s_store_id s_store_id)
-      (sun_sales sum_0)
-      (mon_sales sum_1)
-      (tue_sales sum_2)
-      (wed_sales sum_3)
-      (thu_sales sum_4)
-      (fri_sales sum_5)
-      (sat_sales sum_6))
-    (s_store_name asc nulls-default)
-    (s_store_id asc nulls-default)
-    (sun_sales asc nulls-default)
-    (mon_sales asc nulls-default)
-    (tue_sales asc nulls-default)
-    (wed_sales asc nulls-default)
-    (thu_sales asc nulls-default)
-    (fri_sales asc nulls-default)
-    (sat_sales asc nulls-default))
-  (limit 100))
+top-sort [s_store_name asc, s_store_id asc, sun_sales asc, mon_sales asc, tue_sales asc, wed_sales asc, thu_sales asc, fri_sales asc, sat_sales asc] limit 100
+└─ project (s_store_name, s_store_id, sun_sales, mon_sales, tue_sales, wed_sales, thu_sales, fri_sales, sat_sales) (rows≈5 cost≈11.9K)
+   └─ aggregate keys=[s_store_name, s_store_id] aggs=[sum_0=sum, sum_1=sum, sum_2=sum, sum_3=sum, sum_4=sum, sum_5=sum, sum_6=sum] (rows≈5 cost≈11.4K)
+      └─ project (s_store_name, s_store_id, arg_0, arg_1, arg_2, arg_3, arg_4, arg_5, arg_6) (rows≈5 cost≈11K)
+         └─ join inner [store_sales.ss_sold_date_sk = date_dim.d_date_sk] (rows≈5 cost≈10.6K)
+            ├─ join inner [store.s_store_sk = store_sales.ss_store_sk] (rows≈5 cost≈5.5K)
+            │  ├─ filter (== |store.s_gmt_offset| (- 5)) (rows≈5 cost≈880)
+            │  │  └─ source store AS store row-groups (== |store.s_gmt_offset| (- 5)) (rows≈10 cost≈440)
+            │  └─ source store_sales AS store_sales (rows≈10 cost≈160)
+            └─ filter (== |date_dim.d_year| 1998) (rows≈10 cost≈480)
+               └─ source date_dim AS date_dim row-groups (== |date_dim.d_year| 1998) (rows≈10 cost≈240)

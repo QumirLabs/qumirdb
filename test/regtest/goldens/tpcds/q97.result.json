@@ -1,0 +1,4 @@
+{
+  "schema": "<struct (store_only i64) (catalog_only i64) (store_and_catalog i64)>",
+  "rows": []
+}

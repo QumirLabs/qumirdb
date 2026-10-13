@@ -1,26 +1,12 @@
-(rel project
-  (rel aggregate
-    (rel project
-      (rel filter
-        (rel join
-          (rel join (rel source "lineitem") (rel source "part") () (inner))
-          (rel project
-            (rel aggregate
-              (rel project
-                (rel filter (rel source "lineitem") (== l_partkey p_partkey))
-                (l_quantity l_quantity)
-                (__group__ 1))
-              (keys __group__)
-              (agg sum_0 sum l_quantity)
-              (agg count_1 count l_quantity))
-            (__scalar_0__ (* 0.20000000000000001 (/ sum_0 (cast count_1 f64)))))
-          ()
-          (inner))
-        (&& (&& (&& (== p_partkey l_partkey) (== p_brand (cast "Brand#45" <named StringView>)))
-            (== p_container (cast "MED BAG" <named StringView>)))
-          (< l_quantity __scalar_0__)))
-      (l_extendedprice l_extendedprice)
-      (__group__ 1))
-    (keys __group__)
-    (agg sum_0 sum l_extendedprice))
-  (avg_yearly (/ sum_0 7.0)))
+project (avg_yearly) (rows≈1 cost≈9.9K)
+└─ aggregate keys=[__group__] aggs=[sum_0=sum] (rows≈1 cost≈9.9K)
+   └─ project (l_extendedprice, __group__) (rows≈1 cost≈9.8K)
+      └─ filter (< |lineitem_0.l_quantity| __scalar_0__) (rows≈1 cost≈9.8K)
+         └─ join left [part.p_partkey = __corr_0_0__] emit-filter 1 from left (rows≈1 cost≈9.8K)
+            ├─ join inner [part.p_partkey = lineitem_0.l_partkey] emit-filter 2 from left (rows≈1 cost≈5.1K)
+            │  ├─ filter (&& (== |part.p_brand| (cast "Brand#45" <named StringView>)) (== |part.p_container| (cast "MED BAG" <named StringView>))) (rows≈1 cost≈720)
+            │  │  └─ source part AS part row-groups (&& (== |part.p_brand| (cast "Brand#45" <named StringView>)) (== |part.p_container| (cast "MED BAG" <named StringView>))) (rows≈10 cost≈360)
+            │  └─ source lineitem AS lineitem_0 use-filter 2 keys=[lineitem_0.l_partkey] (rows≈10 cost≈200)
+            └─ project (__corr_0_0__, __scalar_0__) (rows≈10 cost≈440)
+               └─ aggregate keys=[lineitem_1.l_partkey] aggs=[sum_0=sum, count_1=count] (rows≈10 cost≈320)
+                  └─ source lineitem AS lineitem_1 use-filter 1 keys=[lineitem_1.l_partkey] (rows≈10 cost≈120)

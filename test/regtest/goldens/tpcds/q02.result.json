@@ -1,0 +1,4 @@
+{
+  "schema": "<struct (d_week_seq1 <named Nullable [i32]>) (col1 <named Nullable [f64]>) (col2 <named Nullable [f64]>) (col3 <named Nullable [f64]>) (col4 <named Nullable [f64]>) (col5 <named Nullable [f64]>) (col6 <named Nullable [f64]>) (col7 <named Nullable [f64]>)>",
+  "rows": []
+}

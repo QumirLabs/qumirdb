@@ -1,64 +1,14 @@
-(rel limit
-  (rel sort
-    (rel project
-      (rel aggregate
-        (rel project
-          (rel filter
-            (rel join
-              (rel join
-                (rel join
-                  (rel join (rel source "catalog_sales") (rel source "warehouse") () (inner))
-                  (rel source "ship_mode")
-                  ()
-                  (inner))
-                (rel source "call_center")
-                ()
-                (inner))
-              (rel source "date_dim")
-              ()
-              (inner))
-            (&& (&& (&& (&& (&& (<= 1212 d_month_seq) (<= d_month_seq (+ 1212 11))) (== cs_ship_date_sk d_date_sk))
-                  (== cs_warehouse_sk w_warehouse_sk))
-                (== cs_ship_mode_sk sm_ship_mode_sk))
-              (== cs_call_center_sk cc_call_center_sk)))
-          (gb_0 (call substr w_warehouse_name 1 20))
-          (sm_type sm_type)
-          (cc_name cc_name)
-          (arg_0 (if (call qdb_is_true (<= (- cs_ship_date_sk cs_sold_date_sk) 30)) 1 0))
-          (arg_1 (if
-              (call
-                qdb_is_true
-                (&& (> (- cs_ship_date_sk cs_sold_date_sk) 30) (<= (- cs_ship_date_sk cs_sold_date_sk) 60)))
-              1
-              0))
-          (arg_2 (if
-              (call
-                qdb_is_true
-                (&& (> (- cs_ship_date_sk cs_sold_date_sk) 60) (<= (- cs_ship_date_sk cs_sold_date_sk) 90)))
-              1
-              0))
-          (arg_3 (if
-              (call
-                qdb_is_true
-                (&& (> (- cs_ship_date_sk cs_sold_date_sk) 90) (<= (- cs_ship_date_sk cs_sold_date_sk) 120)))
-              1
-              0))
-          (arg_4 (if (call qdb_is_true (> (- cs_ship_date_sk cs_sold_date_sk) 120)) 1 0)))
-        (keys gb_0 sm_type cc_name)
-        (agg sum_0 sum arg_0)
-        (agg sum_1 sum arg_1)
-        (agg sum_2 sum arg_2)
-        (agg sum_3 sum arg_3)
-        (agg sum_4 sum arg_4))
-      (col0 gb_0)
-      (sm_type sm_type)
-      (cc_name cc_name)
-      (|30 days| sum_0)
-      (|31-60 days| sum_1)
-      (|61-90 days| sum_2)
-      (|91-120 days| sum_3)
-      (|>120 days| sum_4))
-    (col0 asc nulls-default)
-    (sm_type asc nulls-default)
-    (cc_name asc nulls-default))
-  (limit 100))
+top-sort [col0 asc, sm_type asc, cc_name asc] limit 100
+└─ project (col0, sm_type, cc_name, 30 days, 31-60 days, 61-90 days, 91-120 days, >120 days) (rows≈2 cost≈18.5K)
+   └─ aggregate keys=[gb_0, sm_type, cc_name] aggs=[sum_0=sum, sum_1=sum, sum_2=sum, sum_3=sum, sum_4=sum] (rows≈2 cost≈18.4K)
+      └─ project (gb_0, sm_type, cc_name, arg_0, arg_1, arg_2, arg_3, arg_4) (rows≈2 cost≈18.2K)
+         └─ join inner [catalog_sales.cs_call_center_sk = call_center.cc_call_center_sk] emit-filter 1 from left (rows≈2 cost≈18K)
+            ├─ join inner [catalog_sales.cs_warehouse_sk = warehouse.w_warehouse_sk] emit-filter 2 from left (rows≈2 cost≈13.5K)
+            │  ├─ join inner [catalog_sales.cs_ship_mode_sk = ship_mode.sm_ship_mode_sk] emit-filter 3 from left (rows≈2 cost≈9K)
+            │  │  ├─ join inner [date_dim.d_date_sk = catalog_sales.cs_ship_date_sk] (rows≈2 cost≈4.6K)
+            │  │  │  ├─ filter (&& (<= 1212 |date_dim.d_month_seq|) (<= |date_dim.d_month_seq| (+ 1212 11))) (rows≈2 cost≈160)
+            │  │  │  │  └─ source date_dim AS date_dim row-groups (&& (<= 1212 |date_dim.d_month_seq|) (<= |date_dim.d_month_seq| (+ 1212 11))) (rows≈10 cost≈80)
+            │  │  │  └─ source catalog_sales AS catalog_sales (rows≈10 cost≈200)
+            │  │  └─ source ship_mode AS ship_mode use-filter 3 keys=[ship_mode.sm_ship_mode_sk] (rows≈10 cost≈200)
+            │  └─ source warehouse AS warehouse use-filter 2 keys=[warehouse.w_warehouse_sk] (rows≈10 cost≈200)
+            └─ source call_center AS call_center use-filter 1 keys=[call_center.cc_call_center_sk] (rows≈10 cost≈200)

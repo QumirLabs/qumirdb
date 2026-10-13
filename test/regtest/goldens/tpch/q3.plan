@@ -1,28 +1,12 @@
-(rel limit
-  (rel sort
-    (rel project
-      (rel aggregate
-        (rel project
-          (rel filter
-            (rel join
-              (rel join (rel source "customer") (rel source "orders") () (inner))
-              (rel source "lineitem")
-              ()
-              (inner))
-            (&& (&& (&& (&& (== c_mktsegment (cast "FURNITURE" <named StringView>)) (== c_custkey o_custkey))
-                  (== l_orderkey o_orderkey))
-                (< o_orderdate (: 9209 i32)))
-              (> l_shipdate (: 9209 i32))))
-          (l_orderkey l_orderkey)
-          (o_orderdate o_orderdate)
-          (o_shippriority o_shippriority)
-          (arg_0 (* l_extendedprice (- 1 l_discount))))
-        (keys l_orderkey o_orderdate o_shippriority)
-        (agg sum_0 sum arg_0))
-      (l_orderkey l_orderkey)
-      (revenue sum_0)
-      (o_orderdate o_orderdate)
-      (o_shippriority o_shippriority))
-    (revenue desc nulls-default)
-    (o_orderdate asc nulls-default))
-  (limit 10))
+top-sort [revenue desc, o_orderdate asc] limit 10
+└─ project (l_orderkey, revenue, o_orderdate, o_shippriority) (rows≈1 cost≈9.7K)
+   └─ aggregate keys=[l_orderkey, o_orderdate, o_shippriority] aggs=[sum_0=sum] (rows≈1 cost≈9.7K)
+      └─ project (l_orderkey, o_orderdate, o_shippriority, arg_0) (rows≈2 cost≈9.6K)
+         └─ join inner [lineitem.l_orderkey = orders.o_orderkey] emit-filter 1 from right (rows≈2 cost≈9.6K)
+            ├─ filter (> |lineitem.l_shipdate| (: 9209 i32)) (rows≈7 cost≈480)
+            │  └─ source lineitem AS lineitem row-groups (> |lineitem.l_shipdate| (: 9209 i32)) use-filter 1 keys=[lineitem.l_orderkey] (rows≈10 cost≈240)
+            └─ join inner [orders.o_custkey = customer.c_custkey] (rows≈1 cost≈4.9K)
+               ├─ filter (< |orders.o_orderdate| (: 9209 i32)) (rows≈4 cost≈320)
+               │  └─ source orders AS orders row-groups (< |orders.o_orderdate| (: 9209 i32)) (rows≈10 cost≈160)
+               └─ filter (== |customer.c_mktsegment| (cast "FURNITURE" <named StringView>)) (rows≈2 cost≈400)
+                  └─ source customer AS customer row-groups (== |customer.c_mktsegment| (cast "FURNITURE" <named StringView>)) (rows≈10 cost≈200)

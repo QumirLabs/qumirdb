@@ -1,0 +1,4 @@
+{
+  "schema": "<struct (l_orderkey i32) (revenue f64) (o_orderdate i32) (o_shippriority i32)>",
+  "rows": []
+}

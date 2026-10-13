@@ -1,55 +1,13 @@
-(rel limit
-  (rel project
-    (rel sort
-      (rel project
-        (rel window
-          (rel project
-            (rel aggregate
-              (rel project
-                (rel filter
-                  (rel join
-                    (rel join (rel source "web_sales") (rel source "date_dim" "d1") () (inner))
-                    (rel source "item")
-                    ()
-                    (inner))
-                  (&& (&& (&& (<= 1212 |d1.d_month_seq|) (<= |d1.d_month_seq| (+ 1212 11)))
-                      (== |d1.d_date_sk| ws_sold_date_sk))
-                    (== i_item_sk ws_item_sk)))
-                (i_category i_category)
-                (i_class i_class)
-                (ws_net_paid ws_net_paid))
-              (keys i_category i_class)
-              (set i_category i_class)
-              (set i_category)
-              (set)
-              (agg sum_0 sum ws_net_paid))
-            (__grouping_id__ __grouping_id__)
-            (i_category i_category)
-            (i_class i_class)
-            (sum_0 sum_0)
-            (wk_0 (+ (if (== __grouping_id__ (: 2 i32)) 1 0)
-                (if (== __grouping_id__ (: 1 i32)) 1 (if (== __grouping_id__ (: 2 i32)) 1 0))))
-            (wk_1 (if
-                (call qdb_is_true (== (if (== __grouping_id__ (: 1 i32)) 1 (if (== __grouping_id__ (: 2 i32)) 1 0)) 0))
-                i_category
-                (call qdb_sql_null))))
-          (partition wk_0 wk_1)
-          (order (sum_0 desc nulls-default))
-          (frame range (start unbounded-preceding) (end current-row))
-          (fn w_0 rank))
-        (total_sum sum_0)
-        (i_category i_category)
-        (i_class i_class)
-        (lochierarchy (+ (if (== __grouping_id__ (: 2 i32)) 1 0)
-            (if (== __grouping_id__ (: 1 i32)) 1 (if (== __grouping_id__ (: 2 i32)) 1 0))))
-        (rank_within_parent w_0)
-        (__sort_0 (if (call qdb_is_true (== lochierarchy 0)) i_category (call qdb_sql_null))))
-      (lochierarchy desc nulls-default)
-      (__sort_0 asc nulls-default)
-      (rank_within_parent asc nulls-default))
-    (total_sum total_sum)
-    (i_category i_category)
-    (i_class i_class)
-    (lochierarchy lochierarchy)
-    (rank_within_parent rank_within_parent))
-  (limit 100))
+project (total_sum, i_category, i_class, lochierarchy, rank_within_parent)
+└─ top-sort [lochierarchy desc, __sort_0 asc, rank_within_parent asc] limit 100
+   └─ project (total_sum, i_category, i_class, lochierarchy, rank_within_parent, __sort_0)
+      └─ window partition=[wk_0, wk_1] order=[sum_0 desc] fns=[w_0=rank]
+         └─ project (__grouping_id__, i_category, i_class, sum_0, wk_0, wk_1) (rows≈5 cost≈9.8K)
+            └─ aggregate keys=[i_category, i_class] aggs=[sum_0=sum] (rows≈5 cost≈9.5K)
+               └─ project (i_category, i_class, ws_net_paid) (rows≈2 cost≈9.2K)
+                  └─ join inner [item.i_item_sk = web_sales.ws_item_sk] emit-filter 1 from right (rows≈2 cost≈9.1K)
+                     ├─ source item AS item use-filter 1 keys=[item.i_item_sk] (rows≈10 cost≈360)
+                     └─ join inner [d1.d_date_sk = web_sales.ws_sold_date_sk] (rows≈2 cost≈4.5K)
+                        ├─ filter (&& (<= 1212 |d1.d_month_seq|) (<= |d1.d_month_seq| (+ 1212 11))) (rows≈2 cost≈160)
+                        │  └─ source date_dim AS d1 row-groups (&& (<= 1212 |d1.d_month_seq|) (<= |d1.d_month_seq| (+ 1212 11))) (rows≈10 cost≈80)
+                        └─ source web_sales AS web_sales (rows≈10 cost≈160)

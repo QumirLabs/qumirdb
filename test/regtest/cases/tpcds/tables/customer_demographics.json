@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "schema": "<struct (cd_demo_sk i32) (cd_gender <named Nullable [string]>) (cd_marital_status <named Nullable [string]>) (cd_education_status <named Nullable [string]>) (cd_purchase_estimate <named Nullable [i32]>) (cd_credit_rating <named Nullable [string]>) (cd_dep_count <named Nullable [i32]>) (cd_dep_employed_count <named Nullable [i32]>) (cd_dep_college_count <named Nullable [i32]>)>",
+  "rows": [
+    [1, "M", "M", "Primary", 500, "Good", 0, 0, 0],
+    [2, "F", "M", "Primary", 500, "Good", 0, 0, 0],
+    [3, "M", "S", "Primary", 500, "Good", 0, 0, 0],
+    [4, "F", "S", "Primary", 500, "Good", 0, 0, 0],
+    [5, "M", "D", "Primary", 500, "Good", 0, 0, 0],
+    [6, "F", "D", "Primary", 500, "Good", 0, 0, 0],
+    [7, "M", "W", "Primary", 500, "Good", 0, 0, 0],
+    [8, "F", "W", "Primary", 500, "Good", 0, 0, 0],
+    [9, "M", "U", "Primary", 500, "Good", 0, 0, 0],
+    [10, "F", "U", "Primary", 500, "Good", 0, 0, 0]
+  ]
+}

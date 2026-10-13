@@ -1,0 +1,4 @@
+{
+  "schema": "<struct (d_year <named Nullable [i32]>) (brand_id <named Nullable [i32]>) (brand <named Nullable [string]>) (sum_agg <named Nullable [f64]>)>",
+  "rows": []
+}

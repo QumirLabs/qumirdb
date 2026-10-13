@@ -1,0 +1,4 @@
+{
+  "schema": "<struct (channel string) (item i32) (return_ratio <named DECIMAL [35 20]>) (return_rank i64) (currency_rank i64)>",
+  "rows": []
+}

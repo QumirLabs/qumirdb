@@ -1,0 +1,4 @@
+{
+  "schema": "<struct (p_brand string) (p_type string) (p_size i32) (supplier_cnt i64)>",
+  "rows": []
+}

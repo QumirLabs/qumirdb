@@ -1,0 +1,4 @@
+{
+  "schema": "<struct (i_item_id <named Nullable [string]>) (s_state <named Nullable [string]>) (g_state i64) (agg1 <named Nullable [f64]>) (agg2 <named Nullable [f64]>) (agg3 <named Nullable [f64]>) (agg4 <named Nullable [f64]>)>",
+  "rows": []
+}

@@ -1,0 +1,4 @@
+{
+  "schema": "<struct (c_name string) (c_custkey i32) (o_orderkey i32) (o_orderdate i32) (o_totalprice f64) (col5 f64)>",
+  "rows": []
+}

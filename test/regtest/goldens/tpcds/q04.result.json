@@ -1,0 +1,4 @@
+{
+  "schema": "<struct (customer_id string) (customer_first_name <named Nullable [string]>) (customer_last_name <named Nullable [string]>) (customer_email_address <named Nullable [string]>)>",
+  "rows": []
+}

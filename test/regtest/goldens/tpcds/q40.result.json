@@ -1,0 +1,4 @@
+{
+  "schema": "<struct (w_state <named Nullable [string]>) (i_item_id string) (sales_before <named Nullable [f64]>) (sales_after <named Nullable [f64]>)>",
+  "rows": []
+}

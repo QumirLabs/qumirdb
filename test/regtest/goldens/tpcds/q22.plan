@@ -1,37 +1,10 @@
-(rel limit
-  (rel sort
-    (rel project
-      (rel aggregate
-        (rel project
-          (rel filter
-            (rel join
-              (rel join (rel source "inventory") (rel source "date_dim") () (inner))
-              (rel source "item")
-              ()
-              (inner))
-            (&& (&& (&& (== inv_date_sk d_date_sk) (== inv_item_sk i_item_sk)) (<= 1212 d_month_seq))
-              (<= d_month_seq (+ 1212 11))))
-          (i_product_name i_product_name)
-          (i_brand i_brand)
-          (i_class i_class)
-          (i_category i_category)
-          (inv_quantity_on_hand inv_quantity_on_hand))
-        (keys i_product_name i_brand i_class i_category)
-        (set i_product_name i_brand i_class i_category)
-        (set i_product_name i_brand i_class)
-        (set i_product_name i_brand)
-        (set i_product_name)
-        (set)
-        (agg sum_0 sum inv_quantity_on_hand)
-        (agg count_1 count inv_quantity_on_hand))
-      (i_product_name i_product_name)
-      (i_brand i_brand)
-      (i_class i_class)
-      (i_category i_category)
-      (qoh (/ sum_0 (cast count_1 f64))))
-    (qoh asc nulls-default)
-    (i_product_name asc nulls-default)
-    (i_brand asc nulls-default)
-    (i_class asc nulls-default)
-    (i_category asc nulls-default))
-  (limit 100))
+top-sort [qoh asc, i_product_name asc, i_brand asc, i_class asc, i_category asc] limit 100
+└─ project (i_product_name, i_brand, i_class, i_category, qoh) (rows≈9 cost≈11.1K)
+   └─ aggregate keys=[i_product_name, i_brand, i_class, i_category] aggs=[sum_0=sum, count_1=count] (rows≈9 cost≈10.4K)
+      └─ project (i_product_name, i_brand, i_class, i_category, inv_quantity_on_hand) (rows≈2 cost≈9.6K)
+         └─ join inner [item.i_item_sk = inventory.inv_item_sk] emit-filter 1 from right (rows≈2 cost≈9.5K)
+            ├─ source item AS item use-filter 1 keys=[item.i_item_sk] (rows≈10 cost≈680)
+            └─ join inner [date_dim.d_date_sk = inventory.inv_date_sk] (rows≈2 cost≈4.5K)
+               ├─ filter (&& (<= 1212 |date_dim.d_month_seq|) (<= |date_dim.d_month_seq| (+ 1212 11))) (rows≈2 cost≈160)
+               │  └─ source date_dim AS date_dim row-groups (&& (<= 1212 |date_dim.d_month_seq|) (<= |date_dim.d_month_seq| (+ 1212 11))) (rows≈10 cost≈80)
+               └─ source inventory AS inventory (rows≈10 cost≈120)

@@ -1,0 +1,4 @@
+{
+  "schema": "<struct (channel <named Nullable [string]>) (id <named Nullable [i32]>) (sales <named Nullable [f64]>) (returns <named Nullable [f64]>) (profit <named Nullable [f64]>)>",
+  "rows": []
+}

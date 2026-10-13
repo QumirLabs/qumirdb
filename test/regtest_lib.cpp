@@ -214,12 +214,6 @@ std::shared_ptr<TStructType> ParseSchema(const TValue& value) {
     if (!tokens.Next().IsEof()) throw std::runtime_error("unexpected input after schema type");
     auto structure = TMaybeType<TStructType>(*parsed);
     if (!structure) throw std::runtime_error("schema must be a Qumir struct type");
-    std::set<std::string> names;
-    for (const auto& [name, type] : structure.Cast()->Fields) {
-        if (name.empty() || !names.insert(name).second) {
-            throw std::runtime_error("empty or duplicate schema field name");
-        }
-    }
     return structure.Cast();
 }
 
@@ -414,7 +408,11 @@ std::shared_ptr<arrow::Table> ReadTable(const fs::path& path) {
     std::vector<std::shared_ptr<arrow::Field>> fields;
     std::vector<std::unique_ptr<arrow::ArrayBuilder>> builders;
     const auto schema = ParseSchema(Required(object, "schema"));
+    std::set<std::string> names;
     for (const auto& [name, columnType] : schema->Fields) {
+        if (name.empty() || !names.insert(name).second) {
+            throw std::runtime_error("empty or duplicate schema field name");
+        }
         const auto [valueType, nullable] = FieldType(columnType);
         auto type = ArrowType(valueType);
         fields.push_back(arrow::field(name, type, nullable));

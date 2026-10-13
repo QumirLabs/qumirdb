@@ -1,36 +1,17 @@
-(rel sort
-  (rel project
-    (rel aggregate
-      (rel project
-        (rel filter
-          (rel join
-            (rel join
-              (rel join
-                (rel join
-                  (rel join (rel source "customer") (rel source "orders") () (inner))
-                  (rel source "lineitem")
-                  ()
-                  (inner))
-                (rel source "supplier")
-                ()
-                (inner))
-              (rel source "nation")
-              ()
-              (inner))
-            (rel source "region")
-            ()
-            (inner))
-          (&& (&& (&& (&& (&& (&& (&& (&& (== c_custkey o_custkey) (== l_orderkey o_orderkey)) (== l_suppkey s_suppkey))
-                      (== c_nationkey s_nationkey))
-                    (== s_nationkey n_nationkey))
-                  (== n_regionkey r_regionkey))
-                (== r_name (cast "MIDDLE EAST" <named StringView>)))
-              (>= o_orderdate (: 9131 i32)))
-            (< o_orderdate (+ (: 9131 i32) (: 365 i32)))))
-        (n_name n_name)
-        (arg_0 (* l_extendedprice (- 1 l_discount))))
-      (keys n_name)
-      (agg sum_0 sum arg_0))
-    (n_name n_name)
-    (revenue sum_0))
-  (revenue desc nulls-default))
+sort [revenue desc]
+└─ project (n_name, revenue) (rows≈1 cost≈22.4K)
+   └─ aggregate keys=[n_name] aggs=[sum_0=sum] (rows≈1 cost≈22.3K)
+      └─ project (n_name, arg_0) (rows≈1 cost≈22.3K)
+         └─ join inner [orders.o_orderkey = lineitem.l_orderkey, supplier.s_suppkey = lineitem.l_suppkey] emit-filter 1 from left (rows≈1 cost≈22.3K)
+            ├─ join inner [customer.c_custkey = orders.o_custkey] (rows≈1 cost≈17.8K)
+            │  ├─ join inner [supplier.s_nationkey = customer.c_nationkey] emit-filter 2 from left (rows≈2 cost≈13.3K)
+            │  │  ├─ join inner [nation.n_nationkey = supplier.s_nationkey] emit-filter 3 from left (rows≈2 cost≈9K)
+            │  │  │  ├─ join inner [region.r_regionkey = nation.n_regionkey] emit-filter 4 from left (rows≈2 cost≈4.7K)
+            │  │  │  │  ├─ filter (== |region.r_name| (cast "MIDDLE EAST" <named StringView>)) (rows≈1 cost≈200)
+            │  │  │  │  │  └─ source region AS region row-groups (== |region.r_name| (cast "MIDDLE EAST" <named StringView>)) (rows≈5 cost≈100)
+            │  │  │  │  └─ source nation AS nation use-filter 4 keys=[nation.n_regionkey] (rows≈10 cost≈240)
+            │  │  │  └─ source supplier AS supplier use-filter 3 keys=[supplier.s_nationkey] (rows≈10 cost≈80)
+            │  │  └─ source customer AS customer use-filter 2 keys=[customer.c_nationkey] (rows≈10 cost≈80)
+            │  └─ filter (&& (>= |orders.o_orderdate| (: 9131 i32)) (< |orders.o_orderdate| (+ (: 9131 i32) (: 365 i32)))) (rows≈3 cost≈240)
+            │     └─ source orders AS orders row-groups (&& (>= |orders.o_orderdate| (: 9131 i32)) (< |orders.o_orderdate| (+ (: 9131 i32) (: 365 i32)))) (rows≈10 cost≈120)
+            └─ source lineitem AS lineitem use-filter 1 keys=[lineitem.l_orderkey, lineitem.l_suppkey] (rows≈10 cost≈240)

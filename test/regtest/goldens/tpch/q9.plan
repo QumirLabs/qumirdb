@@ -1,41 +1,17 @@
-(rel sort
-  (rel project
-    (rel aggregate
-      (rel project
-        (rel project
-          (rel filter
-            (rel join
-              (rel join
-                (rel join
-                  (rel join
-                    (rel join (rel source "part") (rel source "supplier") () (inner))
-                    (rel source "lineitem")
-                    ()
-                    (inner))
-                  (rel source "partsupp")
-                  ()
-                  (inner))
-                (rel source "orders")
-                ()
-                (inner))
-              (rel source "nation")
-              ()
-              (inner))
-            (&& (&& (&& (&& (&& (&& (== s_suppkey l_suppkey) (== ps_suppkey l_suppkey)) (== ps_partkey l_partkey))
-                    (== p_partkey l_partkey))
-                  (== o_orderkey l_orderkey))
-                (== s_nationkey n_nationkey))
-              (call qdb_string_view_sql_like p_name (cast "%turquoise%" <named StringView>))))
-          (nation n_name)
-          (o_year (call qdb_date_year o_orderdate))
-          (amount (- (* l_extendedprice (- 1 l_discount)) (* ps_supplycost l_quantity))))
-        (|profit.nation| nation)
-        (|profit.o_year| o_year)
-        (|profit.amount| amount))
-      (keys nation o_year)
-      (agg sum_0 sum amount))
-    (nation nation)
-    (o_year o_year)
-    (sum_profit sum_0))
-  (nation asc nulls-default)
-  (o_year desc nulls-default))
+sort [nation asc, o_year desc]
+└─ project (nation, o_year, sum_profit) (rows≈1 cost≈22.6K)
+   └─ aggregate keys=[profit.nation, profit.o_year] aggs=[sum_0=sum] (rows≈1 cost≈22.5K)
+      └─ project (profit.nation, profit.o_year, profit.amount) (rows≈1 cost≈22.5K)
+         └─ project (nation, o_year, amount) (rows≈1 cost≈22.5K)
+            └─ join inner [lineitem.l_orderkey = orders.o_orderkey] emit-filter 1 from left (rows≈1 cost≈22.4K)
+               ├─ join inner [nation.n_nationkey = supplier.s_nationkey] emit-filter 2 from right (rows≈1 cost≈18.1K)
+               │  ├─ source nation AS nation use-filter 2 keys=[nation.n_nationkey] (rows≈10 cost≈200)
+               │  └─ join inner [lineitem.l_suppkey = supplier.s_suppkey] emit-filter 3 from left (rows≈1 cost≈13.7K)
+               │     ├─ join inner [partsupp.ps_suppkey = lineitem.l_suppkey, partsupp.ps_partkey = lineitem.l_partkey] emit-filter 4 from right (rows≈1 cost≈9.4K)
+               │     │  ├─ source partsupp AS partsupp use-filter 4 keys=[partsupp.ps_suppkey, partsupp.ps_partkey] (rows≈10 cost≈160)
+               │     │  └─ join inner [lineitem.l_partkey = part.p_partkey] emit-filter 5 from right (rows≈1 cost≈5K)
+               │     │     ├─ source lineitem AS lineitem use-filter 5 keys=[lineitem.l_partkey] (rows≈10 cost≈360)
+               │     │     └─ filter (call qdb_string_view_sql_like |part.p_name| (cast "%turquoise%" <named StringView>)) (rows≈1 cost≈400)
+               │     │        └─ source part AS part row-groups (call qdb_string_view_sql_like |part.p_name| (cast "%turquoise%" <named StringView>)) (rows≈10 cost≈200)
+               │     └─ source supplier AS supplier use-filter 3 keys=[supplier.s_suppkey] (rows≈10 cost≈80)
+               └─ source orders AS orders use-filter 1 keys=[orders.o_orderkey] (rows≈10 cost≈80)

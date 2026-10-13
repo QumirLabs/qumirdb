@@ -1,0 +1,6 @@
+{
+  "schema": "<struct (o_orderpriority string) (order_count i64)>",
+  "rows": [
+    ["5-LOW", "1"]
+  ]
+}

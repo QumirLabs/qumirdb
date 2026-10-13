@@ -1,0 +1,220 @@
+{
+  "version": 1,
+  "fixtures": {
+    "customer": {
+      "json": "tables/customer.json",
+      "parquet": {
+        "row_group_rows": 2
+      }
+    },
+    "lineitem": {
+      "json": "tables/lineitem.json",
+      "parquet": {
+        "row_group_rows": 2
+      }
+    },
+    "nation": {
+      "json": "tables/nation.json",
+      "parquet": {
+        "row_group_rows": 2
+      }
+    },
+    "orders": {
+      "json": "tables/orders.json",
+      "parquet": {
+        "row_group_rows": 2
+      }
+    },
+    "part": {
+      "json": "tables/part.json",
+      "parquet": {
+        "row_group_rows": 2
+      }
+    },
+    "partsupp": {
+      "json": "tables/partsupp.json",
+      "parquet": {
+        "row_group_rows": 2
+      }
+    },
+    "region": {
+      "json": "tables/region.json",
+      "parquet": {
+        "row_group_rows": 2
+      }
+    },
+    "supplier": {
+      "json": "tables/supplier.json",
+      "parquet": {
+        "row_group_rows": 2
+      }
+    }
+  },
+  "tables": {},
+  "variants": [
+    "single",
+    "threaded"
+  ],
+  "cases": {
+    "q1.sql": {
+      "tables": {
+        "lineitem": "lineitem"
+      }
+    },
+    "q10.sql": {
+      "tables": {
+        "customer": "customer",
+        "lineitem": "lineitem",
+        "nation": "nation",
+        "orders": "orders"
+      }
+    },
+    "q11.sql": {
+      "tables": {
+        "nation": "nation",
+        "partsupp": "partsupp",
+        "supplier": "supplier"
+      }
+    },
+    "q12.sql": {
+      "tables": {
+        "lineitem": "lineitem",
+        "orders": "orders"
+      }
+    },
+    "q13.sql": {
+      "tables": {
+        "customer": "customer",
+        "orders": "orders"
+      }
+    },
+    "q14.sql": {
+      "tables": {
+        "lineitem": "lineitem",
+        "part": "part"
+      }
+    },
+    "q15.sql": {
+      "tables": {
+        "lineitem": "lineitem",
+        "supplier": "supplier"
+      }
+    },
+    "q16.sql": {
+      "tables": {
+        "part": "part",
+        "partsupp": "partsupp",
+        "supplier": "supplier"
+      }
+    },
+    "q17.sql": {
+      "tables": {
+        "lineitem": "lineitem",
+        "part": "part"
+      }
+    },
+    "q18.sql": {
+      "tables": {
+        "customer": "customer",
+        "lineitem": "lineitem",
+        "orders": "orders"
+      }
+    },
+    "q19.sql": {
+      "tables": {
+        "lineitem": "lineitem",
+        "part": "part"
+      }
+    },
+    "q2.sql": {
+      "tables": {
+        "nation": "nation",
+        "part": "part",
+        "partsupp": "partsupp",
+        "region": "region",
+        "supplier": "supplier"
+      }
+    },
+    "q20.sql": {
+      "tables": {
+        "lineitem": "lineitem",
+        "nation": "nation",
+        "part": "part",
+        "partsupp": "partsupp",
+        "supplier": "supplier"
+      }
+    },
+    "q21.sql": {
+      "tables": {
+        "lineitem": "lineitem",
+        "nation": "nation",
+        "orders": "orders",
+        "supplier": "supplier"
+      }
+    },
+    "q22.sql": {
+      "tables": {
+        "customer": "customer",
+        "orders": "orders"
+      }
+    },
+    "q3.sql": {
+      "tables": {
+        "customer": "customer",
+        "lineitem": "lineitem",
+        "orders": "orders"
+      }
+    },
+    "q4.sql": {
+      "tables": {
+        "lineitem": "lineitem",
+        "orders": "orders"
+      }
+    },
+    "q5.sql": {
+      "tables": {
+        "customer": "customer",
+        "lineitem": "lineitem",
+        "nation": "nation",
+        "orders": "orders",
+        "region": "region",
+        "supplier": "supplier"
+      }
+    },
+    "q6.sql": {
+      "tables": {
+        "lineitem": "lineitem"
+      }
+    },
+    "q7.sql": {
+      "tables": {
+        "customer": "customer",
+        "lineitem": "lineitem",
+        "nation": "nation",
+        "orders": "orders",
+        "supplier": "supplier"
+      }
+    },
+    "q8.sql": {
+      "tables": {
+        "customer": "customer",
+        "lineitem": "lineitem",
+        "nation": "nation",
+        "orders": "orders",
+        "part": "part",
+        "region": "region",
+        "supplier": "supplier"
+      }
+    },
+    "q9.sql": {
+      "tables": {
+        "lineitem": "lineitem",
+        "nation": "nation",
+        "orders": "orders",
+        "part": "part",
+        "partsupp": "partsupp",
+        "supplier": "supplier"
+      }
+    }
+  }
+}

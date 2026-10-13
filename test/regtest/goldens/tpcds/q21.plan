@@ -1,58 +1,16 @@
-(rel limit
-  (rel sort
-    (rel project
-      (rel filter
-        (rel project
-          (rel project
-            (rel aggregate
-              (rel project
-                (rel filter
-                  (rel join
-                    (rel join
-                      (rel join (rel source "inventory") (rel source "warehouse") () (inner))
-                      (rel source "item")
-                      ()
-                      (inner))
-                    (rel source "date_dim")
-                    ()
-                    (inner))
-                  (&& (&& (&& (&& (&& (&& (<= 0.98999999999999999 i_current_price) (<= i_current_price 1.49))
-                            (== i_item_sk inv_item_sk))
-                          (== inv_warehouse_sk w_warehouse_sk))
-                        (== inv_date_sk d_date_sk))
-                      (<= (- (cast (cast "1998-04-08" <named StringView>) <named DATE>) (: 30 i32)) d_date))
-                    (<= d_date (+ (cast (cast "1998-04-08" <named StringView>) <named DATE>) (: 30 i32)))))
-                (w_warehouse_name w_warehouse_name)
-                (i_item_id i_item_id)
-                (arg_0 (if
-                    (call
-                      qdb_is_true
-                      (< (cast d_date <named DATE>) (cast (cast "1998-04-08" <named StringView>) <named DATE>)))
-                    inv_quantity_on_hand
-                    0))
-                (arg_1 (if
-                    (call
-                      qdb_is_true
-                      (>= (cast d_date <named DATE>) (cast (cast "1998-04-08" <named StringView>) <named DATE>)))
-                    inv_quantity_on_hand
-                    0)))
-              (keys w_warehouse_name i_item_id)
-              (agg sum_0 sum arg_0)
-              (agg sum_1 sum arg_1))
-            (w_warehouse_name w_warehouse_name)
-            (i_item_id i_item_id)
-            (inv_before sum_0)
-            (inv_after sum_1))
-          (|x.w_warehouse_name| w_warehouse_name)
-          (|x.i_item_id| i_item_id)
-          (|x.inv_before| inv_before)
-          (|x.inv_after| inv_after))
-        (&& (<= (/ 2.0 3.0) (if (call qdb_is_true (> inv_before 0)) (/ inv_after inv_before) (call qdb_sql_null)))
-          (<= (if (call qdb_is_true (> inv_before 0)) (/ inv_after inv_before) (call qdb_sql_null)) (/ 3.0 2.0))))
-      (w_warehouse_name |x.w_warehouse_name|)
-      (i_item_id |x.i_item_id|)
-      (inv_before |x.inv_before|)
-      (inv_after |x.inv_after|))
-    (w_warehouse_name asc nulls-default)
-    (i_item_id asc nulls-default))
-  (limit 100))
+top-sort [w_warehouse_name asc, i_item_id asc] limit 100
+└─ project (w_warehouse_name, i_item_id, inv_before, inv_after) (rows≈1 cost≈14K)
+   └─ project (x.w_warehouse_name, x.i_item_id, x.inv_before, x.inv_after) (rows≈1 cost≈13.9K)
+      └─ project (w_warehouse_name, i_item_id, inv_before, inv_after) (rows≈1 cost≈13.9K)
+         └─ filter (&& (<= (/ 2.0 3.0) (if (call qdb_is_true (> sum_0 0)) (/ sum_1 sum_0) (call qdb_sql_null))) (<= (if (call qdb_is_true (> sum_0 0)) (/ sum_1 sum_0) (call qdb_sql_null)) (/ 3.0 2.0))) (rows≈1 cost≈13.8K)
+            └─ aggregate keys=[w_warehouse_name, i_item_id] aggs=[sum_0=sum, sum_1=sum] (rows≈1 cost≈13.8K)
+               └─ project (w_warehouse_name, i_item_id, arg_0, arg_1) (rows≈1 cost≈13.7K)
+                  └─ join inner [inventory.inv_warehouse_sk = warehouse.w_warehouse_sk] emit-filter 1 from left (rows≈1 cost≈13.7K)
+                     ├─ join inner [date_dim.d_date_sk = inventory.inv_date_sk] (rows≈1 cost≈9.3K)
+                     │  ├─ filter (&& (<= (- (cast (cast "1998-04-08" <named StringView>) <named DATE>) (: 30 i32)) |date_dim.d_date|) (<= |date_dim.d_date| (+ (cast (cast "1998-04-08" <named StringView>) <named DATE>) (: 30 i32)))) (rows≈2 cost≈160)
+                     │  │  └─ source date_dim AS date_dim row-groups (&& (<= (- (cast (cast "1998-04-08" <named StringView>) <named DATE>) (: 30 i32)) |date_dim.d_date|) (<= |date_dim.d_date| (+ (cast (cast "1998-04-08" <named StringView>) <named DATE>) (: 30 i32)))) (rows≈10 cost≈80)
+                     │  └─ join inner [item.i_item_sk = inventory.inv_item_sk] (rows≈2 cost≈5K)
+                     │     ├─ filter (&& (<= 0.98999999999999999 |item.i_current_price|) (<= |item.i_current_price| 1.49)) (rows≈2 cost≈560)
+                     │     │  └─ source item AS item row-groups (&& (<= 0.98999999999999999 |item.i_current_price|) (<= |item.i_current_price| 1.49)) (rows≈10 cost≈280)
+                     │     └─ source inventory AS inventory (rows≈10 cost≈160)
+                     └─ source warehouse AS warehouse use-filter 1 keys=[warehouse.w_warehouse_sk] (rows≈10 cost≈200)
