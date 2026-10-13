@@ -84,10 +84,10 @@ with `NCore::PrintType`, rather than `TStructType::ToString()`.
 }
 ```
 
-Result goldens and execution diagnostics print one complete result row per line,
-with spaces between cells. JSON escaping keeps newlines and quotes inside string
-values on that same line. Empty results print `"rows": []`. This presentation
-does not change typed comparison or row ordering.
+Input fixtures, result goldens, and execution diagnostics use one complete row
+per line, with spaces between cells. JSON escaping keeps newlines and quotes
+inside string values on that same line. Empty tables and results use `"rows": []`.
+This presentation does not change typed comparison or row ordering.
 
 Nullable columns use a generic named `Nullable` wrapper. The writer turns the
 wrapper into Arrow field nullability; output serialization adapts QDB's
