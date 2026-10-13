@@ -2,7 +2,6 @@
 
 #include <qdb/io/parquet/source.h>
 #include <qdb/exec/planner_helpers.h>
-#include <qdb/plan/build.h>
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
@@ -16,18 +15,13 @@
 #include <qdb/plan/passes/typing.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/scheduler/plan_lowerer.h>
-#include <qdb/sql/parser.h>
 
 #include <qumir/parser/core/printer.h>
 #include <qumir/parser/type.h>
 
-#include <algorithm>
 #include <bit>
 #include <cstdint>
-#include <expected>
 #include <memory>
-#include <sstream>
-#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -307,169 +301,49 @@ TEST(StatsTest, FilterSelectivityPropagation) {
 
 namespace {
 
-// Estimates `SELECT x FROM t WHERE <predicate>` over 1000 rows. Columns x and
-// y are i64, uniform on [0, 1000) with 100 distinct values; z has no
-// histogram; s is a string; d holds the values 0..9, 100 rows each; n is
-// nullable and null in 200 rows.
-class SelectivityTest : public ::testing::Test {
+// A 1000-row table: x is i64, uniform on [0, 1000); n is Nullable<i64> and
+// NULL in 200 rows. SQL-level selectivity cases live in the regression suite
+// test/regtest/cases/selectivity; these two need what it cannot set up.
+class NullCountStats : public ::testing::Test {
 protected:
-    SelectivityTest() {
-        Source_.Stats_->ColumnStats.at("z")->Histogram.clear();
-        Source_.Stats_->ColumnStats.at("s")->Histogram.clear();
-        Source_.Cols[3].Type = std::make_shared<NQumir::NAst::TStringType>();
-
-        auto& d = *Source_.Stats_->ColumnStats.at("d");
-        d.Ndv = 10;
-        d.MaxValue = std::bit_cast<uint64_t>(int64_t{9});
-        d.Histogram.clear();
-        for (int64_t i = 0; i <= 100; ++i) { // every value spans 10 buckets
-            d.Histogram.push_back(std::bit_cast<uint64_t>(std::min<int64_t>(i / 10, 9)));
-        }
-
-        Source_.Cols[5].Type = std::make_shared<NQdb::TNullable>(Source_.Cols[5].Type);
-        Source_.Stats_->ColumnStats.at("n")->NullCount = 200;
+    NullCountStats() {
+        Src.Cols[1].Type = std::make_shared<NQdb::TNullable>(Src.Cols[1].Type);
+        Src.Stats_->ColumnStats.at("n")->NullCount = 200;
     }
 
-    uint64_t Rows(const std::string& predicate) {
-        std::istringstream in("SELECT x FROM t WHERE " + predicate);
-        NQdb::NSql::TTokenStream tokens(in);
-        NQdb::NSql::TParser parser;
-        auto parsed = parser.Parse(tokens);
-        if (!parsed) {
-            throw std::runtime_error(parsed.error().ToString());
+    // Row estimate of the filters stacked on the source, innermost first. No
+    // pushdown runs, so the filters stay separate.
+    uint64_t Rows(std::initializer_list<const char*> predicates) {
+        NQdb::TOperatorPtr plan = std::make_shared<NQdb::TSourceOperator>(Src, "t");
+        for (const char* predicate : predicates) {
+            auto filter = NQdb::MakeFilter(plan, predicate);
+            EXPECT_TRUE(filter.has_value()) << filter.error().ToString();
+            plan = *filter;
         }
-        auto plan = NQdb::BuildPlan(*parsed, [&](std::string_view table)
-            -> std::expected<NQdb::TOperatorPtr, NQumir::TError>
-        {
-            return std::make_shared<NQdb::TSourceOperator>(Source_, std::string(table));
-        });
-        if (!plan) {
-            throw std::runtime_error(plan.error().ToString());
-        }
-        NQdb::ApplyPlanPasses(*plan);
-        if (!(*plan)->Stats_) {
-            throw std::runtime_error("no stats for: " + predicate);
-        }
-        return (*plan)->Stats_->RowCount;
+        NQdb::AssignSourceAliases(plan);
+        NQdb::QualifyColumns(plan);
+        NQdb::AnnotateTypes(plan);
+        return NQdb::EstimateStats(plan)->RowCount;
     }
 
-    TStatsSource Source_{
-        {{"x", 100}, {"y", 100}, {"z", 100}, {"s", 100}, {"d", 10}, {"n", 100}}};
+    TStatsSource Src{{{"x", 100}, {"n", 100}}, 1000};
 };
 
 } // namespace
 
-TEST_F(SelectivityTest, ConstantExpressionBoundUsesHistogram) {
-    const uint64_t literal = Rows("x < 250");
-    EXPECT_NEAR(literal, 250, 1);
-    // The same bound spelled as a constant expression.
-    EXPECT_EQ(Rows("x < 200 + 50"), literal);
-    EXPECT_EQ(Rows("200 + 50 > x"), literal);
-    EXPECT_EQ(Rows("x < cast(250 as bigint)"), literal);
-    EXPECT_EQ(Rows("x < date '1970-01-01' + interval '250' day"), literal);
+// A Parquet file always records null counts, so a suite fixture has them.
+TEST_F(NullCountStats, IsNullWithoutNullCountKeepsDefaultSelectivity) {
+    Src.Stats_->ColumnStats.at("n")->NullCount.reset();
+    EXPECT_EQ(Rows({"(call qdb_is_null n)"}), 500u);
+    EXPECT_EQ(Rows({"(! (call qdb_is_null n))"}), 500u);
 }
 
-TEST_F(SelectivityTest, ConstantExpressionOutsideColumnRangeMatchesNothing) {
-    EXPECT_EQ(Rows("x = 2000 + 1"), 1u);
-    // Inside the range it is one of the 100 distinct values.
-    EXPECT_NEAR(Rows("x = 200 + 1"), 10, 1);
-}
-
-TEST_F(SelectivityTest, UnknownBoundKeepsDefaultSelectivity) {
-    // Not a constant.
-    EXPECT_EQ(Rows("x < y + 250"), 500u);
-    // A constant, but the column has no histogram to place it in.
-    EXPECT_EQ(Rows("z < 200 + 50"), 500u);
-    EXPECT_EQ(Rows("z >= 250 and z < 350"), 250u);
-    // Only the bound the statistics can place is estimated.
-    EXPECT_NEAR(Rows("x >= 250 and x < y"), 375, 1);
-}
-
-TEST_F(SelectivityTest, NotKeepsWhatItsOperandDrops) {
-    EXPECT_NEAR(Rows("not x < 250"), 750, 1);
-    for (const std::string predicate : {
-        "x < 250", "x = 7", "s like 'a%'", "x < 250 and y < 500", "z < 250"})
-    {
-        EXPECT_NEAR(Rows(predicate) + Rows("not (" + predicate + ")"), 1000, 1)
-            << predicate;
-    }
-}
-
-TEST_F(SelectivityTest, BoundsOnOneColumnFormOneRange) {
-    // A tenth of the rows. As independent predicates the two bounds would
-    // keep 0.75 * 0.35 of them.
-    EXPECT_NEAR(Rows("x >= 250 and x < 350"), 100, 1);
-    EXPECT_NEAR(Rows("x between 250 and 350"), 100, 1);
-    EXPECT_NEAR(Rows("x >= date '1970-09-08'"
-        " and x < date '1970-09-08' + interval '100' day"), 100, 1);
-    // The tightest bounds win.
-    EXPECT_NEAR(Rows("x >= 100 and x >= 250 and x < 350 and x < 900"), 100, 1);
-    // Another column stays independent.
-    EXPECT_NEAR(Rows("x >= 250 and y < 500 and x < 350"), 50, 1);
-    EXPECT_NEAR(Rows("x not between 250 and 350"), 900, 1);
-}
-
-TEST_F(SelectivityTest, RangeBoundsRespectInclusiveness) {
-    // The histogram places a value to within a bucket, 10 rows.
-    EXPECT_NEAR(Rows("d between 3 and 5"), 300, 15);
-    EXPECT_NEAR(Rows("d > 3 and d < 5"), 100, 15);
-    EXPECT_NEAR(Rows("d >= 3 and d < 5"), 200, 15);
-    EXPECT_NEAR(Rows("d < 5"), 500, 15);
-    EXPECT_NEAR(Rows("d <= 5"), 600, 15);
-    // An integer is below 4.5 exactly when it is <= 4.
-    EXPECT_EQ(Rows("d < 4.5"), Rows("d <= 4"));
-    EXPECT_EQ(Rows("d >= 4.5"), Rows("d > 4"));
-}
-
-TEST_F(SelectivityTest, NarrowRangeKeepsOneDistinctValue) {
-    // Narrower than a histogram bucket: one of the 100 distinct values.
-    EXPECT_NEAR(Rows("x between 250 and 250"), 10, 1);
-}
-
-TEST_F(SelectivityTest, IsNullUsesNullCount) {
-    EXPECT_EQ(Rows("n is null"), 200u);
-    EXPECT_EQ(Rows("n is not null"), 800u);
-    EXPECT_NEAR(Rows("x < 250 and n is not null"), 200, 1);
-}
-
-TEST_F(SelectivityTest, IsNullWithoutNullCountKeepsDefaultSelectivity) {
-    Source_.Stats_->ColumnStats.at("n")->NullCount.reset();
-    EXPECT_EQ(Rows("n is null"), 500u);
-    EXPECT_EQ(Rows("n is not null"), 500u);
-}
-
-TEST_F(SelectivityTest, InListKeepsListedDistinctValues) {
-    EXPECT_EQ(Rows("d in (1, 2, 3)"), 300u); // 3 of the 10 values
-    EXPECT_EQ(Rows("d not in (1, 2, 3)"), 700u);
-    EXPECT_NEAR(Rows("s in ('a', 'b')"), 20, 1); // 2 of the 100 values
-    // A list longer than the column has distinct values keeps every row.
-    EXPECT_EQ(Rows("d in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)"), 1000u);
-}
-
-TEST_F(SelectivityTest, InListKeepsDefaultSelectivityWhenUnknown) {
-    // An item that is not a constant.
-    EXPECT_EQ(Rows("x in (y, 2)"), 500u);
-    // No distinct count for the column.
-    Source_.Stats_->ColumnStats.at("d")->Ndv.reset();
-    EXPECT_EQ(Rows("d in (1, 2, 3)"), 500u);
-}
-
-TEST_F(SelectivityTest, NullCountAppliesOnlyAboveTheSource) {
+// The pipeline pushes a single-table filter down to the scan, so SQL does not
+// leave an IS NULL filter above another operator with a null count.
+TEST_F(NullCountStats, NullCountAppliesOnlyAboveTheSource) {
     // 100 rows reach the outer filter, fewer than the table has nulls: the
     // table-wide count says nothing about them.
-    NQdb::TOperatorPtr plan = std::make_shared<NQdb::TSourceOperator>(Source_, "t");
-    auto inner = NQdb::MakeFilter(plan, "(< x 100)");
-    ASSERT_TRUE(inner.has_value()) << inner.error().ToString();
-    auto outer = NQdb::MakeFilter(*inner, "(! (call qdb_is_null n))");
-    ASSERT_TRUE(outer.has_value()) << outer.error().ToString();
-    plan = *outer;
-    NQdb::AssignSourceAliases(plan);
-    NQdb::QualifyColumns(plan);
-    NQdb::AnnotateTypes(plan);
-
-    auto stats = NQdb::EstimateStats(plan);
-    ASSERT_TRUE(stats);
-    EXPECT_EQ(stats->RowCount, 50u);
+    EXPECT_EQ(Rows({"(< x 100)", "(! (call qdb_is_null n))"}), 50u);
 }
 
 TEST(StatsTest, AggregateStatsAccountForGroupingSets) {

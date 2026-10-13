@@ -1,0 +1,5 @@
+project (cnt) (rows≈1 cost≈2.2K)
+└─ aggregate keys=[__group__] aggs=[count_0=count] (rows≈1 cost≈2.2K)
+   └─ project (__group__) (rows≈38 cost≈1.6K)
+      └─ filter (! (call qdb_string_view_sql_like |t.tag| (cast "gr%" <named StringView>))) (rows≈38 cost≈1.3K)
+         └─ source t AS t row-groups (! (call qdb_string_view_sql_like |t.tag| (cast "gr%" <named StringView>))) (rows≈41 cost≈656)

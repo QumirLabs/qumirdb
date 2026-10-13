@@ -1,0 +1,1 @@
+SELECT count(*) AS cnt FROM t WHERE grp BETWEEN 1 AND 2;
