@@ -1,5 +1,22 @@
 # Architecture
 
+## Documentation scope
+
+Keep only fundamental documentation of the engine's architecture and algorithms
+in this directory: the query pipeline, scheduler, logical and physical plans,
+optimizer runs and pass ordering, kernels, runtime ABI, ownership, and the core
+join and aggregation algorithms.
+
+Explain the design decisions, invariants, and trade-offs. Link to the papers and
+articles that informed an algorithm or design, and describe how the engine
+applies or adapts those ideas.
+
+Project-specific guides and local implementation details belong in the project
+wiki: test infrastructure, suite and fixture formats, and troubleshooting.
+Build and run instructions belong in [docs/building.md](../building.md).
+Benchmark reports belong in [docs/benchmarks](../benchmarks/README.md), with
+separate pages for each benchmark.
+
 ## Query pipeline
 
 SQL → logical plan → idempotent rewrite passes → physical plan. Entry point
@@ -65,11 +82,9 @@ Physical execution:
 
 Deployment:
 
-- [Building, running, benchmarking](building.md) - build/test commands, the
+- [Building, running, benchmarking](../building.md) - build/test commands, the
   CLI, the web workbench, plan export, and the TPC-H/ClickBench runners.
-- [SQL execution regression tests](sql_execution_tests.md) - suite manifests,
-  typed JSON fixtures materialized as Parquet, and result comparison.
-- [Benchmark results](benchmark_results.md) - measured ClickBench, TPC-H and
+- [Benchmark results](../benchmarks/README.md) - measured ClickBench, TPC-H and
   TPC-DS numbers for qdb, DuckDB and YQL, per query and per scale, with what
   each engine's metric does and does not include. A dated snapshot: qumirdb is
   under development and the numbers are expected to move.

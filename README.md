@@ -161,7 +161,7 @@ inspect the logical and physical plans, and run the query natively on the
 server or in your own browser.
 
 To build and run locally, see
-[docs/arch/building.md](docs/arch/building.md).
+[docs/building.md](docs/building.md).
 
 ## Architecture
 
@@ -192,8 +192,10 @@ Design notes live in [docs/arch/](docs/arch/README.md).
 - `service/`: web server and static browser workbench.
 - `test/`: C++ unit and regression tests.
 - `benchmark/`: TPC-H, TPC-DS, and ClickBench query packs and runners.
-- `docs/arch/`: design notes for planner, scheduler, joins, aggregation, and
-  kernel dispatch, plus build and deployment instructions.
+- [docs/benchmarks/](docs/benchmarks/README.md): benchmark methodology and results,
+  with separate pages for ClickBench, TPC-H, and TPC-DS.
+- `docs/arch/`: fundamental architecture and algorithms for the planner,
+  scheduler, joins, aggregation, and kernel dispatch.
 
 QumirDB is built on [Qumir](https://qumir.dev)
 ([GitHub](https://github.com/resetius/qumir)), the compiler and runtime
