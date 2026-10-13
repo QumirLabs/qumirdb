@@ -103,7 +103,7 @@ std::unordered_map<std::string, void*> CompileKernelAst(
 namespace {
 constexpr const char* CacheSchemaVersion = "v1";
 // Bump when the generated key helpers or the .oz kernel libraries change.
-constexpr const char* KernelLibVersion = "27";
+constexpr const char* KernelLibVersion = "28";
 } // namespace
 
 NQumir::NCodeGen::TLlvmRunner::TLinkedModule CompileKernelAstCached(
@@ -1611,13 +1611,21 @@ TKernelCompiler::TFilterDispatch TKernelCompiler::CompileFilter(
         "filter", {"<kernel>"}, std::move(*kernelAst), literalStorage);
     FinishKernelDiagnostics(Diagnostics_);
 
-    using TFilterFn = void(*)(void*, void*, void**);
-    return [slot = kernel.Slot, storage = kernel.Storage,
-            runtime = RuntimeContext_](TRowSet& rowSet) {
-        TStringArena arena;
-        reinterpret_cast<TFilterFn>(slot->Fns[0])(
-            &rowSet, &arena, runtime ? runtime->Regexes.Handles() : nullptr);
+    return {
+        .Slot = kernel.Slot,
+        .Storage = kernel.Storage,
+        .Runtime = RuntimeContext_,
     };
+}
+
+void TKernelCompiler::TFilterDispatch::operator()(
+    TRowSet& rowSet, const uint8_t* inputSelection) const
+{
+    using TFilterFn = void(*)(void*, void*, void**, const uint8_t*);
+    TStringArena arena;
+    reinterpret_cast<TFilterFn>(Slot->Fns[0])(
+        &rowSet, &arena, Runtime ? Runtime->Regexes.Handles() : nullptr,
+        inputSelection);
 }
 
 TKernelCompiler::TProjectDispatch TKernelCompiler::CompileProject(

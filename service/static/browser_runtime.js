@@ -1877,8 +1877,11 @@ export function runFilter(kernel, layout, rowSet, writer, options = {}) {
   }
   const releaseStringScratch = beginKernelStringScratch(kernel);
   try {
+    // The last argument is the input mask; null makes the kernel evaluate
+    // every row, as this runtime always did.
     kernel.fn(
-      toWasmPtr(rowsetPtr), toWasmPtr(0), toWasmPtr(kernel.regexHandles || 0));
+      toWasmPtr(rowsetPtr), toWasmPtr(0), toWasmPtr(kernel.regexHandles || 0),
+      toWasmPtr(0));
   } finally {
     releaseStringScratch();
   }

@@ -115,9 +115,10 @@ NQumir::NAst::TExprPtr GenJoinProbeMarkAst(
 // Generates the cacheable rowset hash worker for shuffle:
 //   <funcName>(batch: <ref TRowSet>, hashes: <ptr u64>,
 //              key_columns: <ptr i64>, witness: <ptr LookupKey>) -> bool
-// Fills hashes[i] for every physical row i in the batch. Selection is not
-// applied here; shuffle/scatter code must skip unselected rows itself. The
-// unused witness makes the physical key type part of automatic cache mangling.
+// Fills hashes[i] for every row i in batch.Selection (null = every row) and
+// leaves the other slots as the caller passed them, so a reader must check
+// the selection before it reads a hash. The unused witness makes the physical
+// key type part of automatic cache mangling.
 // Operator-neutral; GenJoinHashBatchAst below shims join keys into it.
 NQumir::NAst::TExprPtr GenKeyHashBatchAst(
     const TAggregateKeyDescriptor& key,

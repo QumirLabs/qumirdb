@@ -107,6 +107,10 @@ void SubstFieldsInPlace(
 
 // Builds a vectorized filter kernel that takes (ref TRowSet) directly.
 // fieldIndices maps each field name to its index in TRowSet.Columns.
+// Signature: void <kernel>(rowSet, arena, regexHandles, inputSelection).
+// rowSet.Selection is the output mask and inputSelection the mask the batch
+// arrived with (null = every row); the two must not overlap. A row outside
+// inputSelection gets 0 and its columns are not read.
 NQumir::NAst::TExprPtr GenFilterKernelAst(
     NQumir::NAst::TExprPtr predicate,
     const NQumir::NAst::TStructType& inputType,

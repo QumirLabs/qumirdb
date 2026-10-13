@@ -749,6 +749,246 @@ TEST_F(SchedulerRuntimeFilter, PublishesRuntimeFilterBeforeBufferedOutputDrains)
     EXPECT_EQ(destroyCount.load(), 2);
 }
 
+// Stands in for the hash kernel over one i64 column: the hash is the value,
+// and an unselected row gets none.
+bool HashSelectedValues(TRowSet* batch, uint64_t* hashes) {
+    auto* values = reinterpret_cast<int64_t*>(batch->Columns[0].Data);
+    for (int64_t row = 0; row < batch->RowCount; ++row) {
+        if (!batch->Selection || batch->Selection[row] != 0) {
+            hashes[row] = static_cast<uint64_t>(values[row]);
+        }
+    }
+    return true;
+}
+
+struct TSelectedRows {
+    std::vector<int64_t> Values;
+    std::vector<uint64_t> Hashes;
+};
+
+// Drains one lane into the selected rows of its rowsets and their hashes.
+TSelectedRows FetchSelectedRows(IConnection& connection, size_t lane) {
+    TSelectedRows out;
+    TRowSet rowSet{};
+    while (connection.Fetch(lane, rowSet) == EFetchResult::OK) {
+        auto* values = reinterpret_cast<int64_t*>(rowSet.Columns[0].Data);
+        for (int64_t row = 0; row < rowSet.RowCount; ++row) {
+            if (rowSet.Selection && rowSet.Selection[row] == 0) {
+                continue;
+            }
+            out.Values.push_back(values[row]);
+            if (rowSet.Hash) {
+                out.Hashes.push_back(rowSet.Hash[row]);
+            }
+        }
+        Release(&rowSet);
+        rowSet = {};
+    }
+    return out;
+}
+
+// Two batches with sparse selections, repartitioned by value parity. The slot
+// of an unselected row stays 0: a shuffle that read it would send the row to
+// partition 0 and add 0 to the filter.
+TEST_F(SchedulerRuntimeFilter, HashShuffleReadsHashesOfSelectedRowsOnly) {
+    using namespace NQumir::NAst;
+    std::atomic<int> destroyCount = 0;
+    TOneToOneConnection input(2);
+    THashShuffleConnection output(4);
+    output.Resize(1, 2);
+
+    std::vector<uint8_t> firstSelection = {0xff, 0, 1, 0, 2};
+    std::vector<uint8_t> secondSelection = {0, 0, 1, 0xff};
+    auto first = MakeInt64RowSet({12, 13, 2, 5, 21}, &destroyCount);
+    first.Selection = firstSelection.data();
+    auto second = MakeInt64RowSet({7, 9, 4, 3}, &destroyCount);
+    second.Selection = secondSelection.data();
+    ASSERT_TRUE(input.Push(0, std::move(first)));
+    ASSERT_TRUE(input.Push(0, std::move(second)));
+    input.Finish(0);
+
+    auto schema = std::make_shared<TStructType>(
+        std::vector<std::pair<std::string, TTypePtr>>{
+            {"value", std::make_shared<TIntegerType>()},
+        });
+    auto code = std::make_shared<THashShuffleCode>(
+        HashSelectedValues, schema, 16, 64, 1024 * 1024);
+    auto filter = std::make_shared<TRuntimeFilter>(Context_);
+    code->ProducedFilter = filter;
+    THashShuffleTask task(code, nullptr, TInputPort{.Connection = &input}, output, 0);
+
+    EXPECT_EQ(task.Execute(), ETaskResult::OK);
+    EXPECT_EQ(task.Execute(), ETaskResult::OK);
+    EXPECT_EQ(task.Execute(), ETaskResult::FINISHED);
+
+    const auto even = FetchSelectedRows(output, 0);
+    EXPECT_EQ(even.Values, (std::vector<int64_t>{12, 2, 4}));
+    EXPECT_EQ(even.Hashes, (std::vector<uint64_t>{12, 2, 4}));
+    const auto odd = FetchSelectedRows(output, 1);
+    EXPECT_EQ(odd.Values, (std::vector<int64_t>{21, 3}));
+    EXPECT_EQ(odd.Hashes, (std::vector<uint64_t>{21, 3}));
+
+    ASSERT_TRUE(filter->Ready());
+    const auto stats = filter->StatsSnapshot();
+    EXPECT_EQ(stats.BuildRows, 5u);
+    EXPECT_EQ(stats.ExactKeys, 5u);
+    for (uint64_t key : {12, 2, 21, 4, 3}) {
+        EXPECT_TRUE(NTest::RuntimeFilterMayContain(*filter, key)) << key;
+    }
+    for (uint64_t key : {0, 13, 5, 7, 9}) {
+        EXPECT_FALSE(NTest::RuntimeFilterMayContain(*filter, key)) << key;
+    }
+    EXPECT_EQ(destroyCount.load(), 2);
+}
+
+TEST_F(SchedulerRuntimeFilter, HashShuffleDropsBatchWithEmptySelection) {
+    std::atomic<int> destroyCount = 0;
+    TOneToOneConnection input(1);
+    THashShuffleConnection output(2);
+    output.Resize(1, 2);
+
+    std::vector<uint8_t> selection = {0, 0, 0};
+    auto rowSet = MakeInt64RowSet({2, 3, 4}, &destroyCount);
+    rowSet.Selection = selection.data();
+    ASSERT_TRUE(input.Push(0, std::move(rowSet)));
+    input.Finish(0);
+
+    auto code = std::make_shared<THashShuffleCode>(HashSelectedValues);
+    auto filter = std::make_shared<TRuntimeFilter>(Context_);
+    code->ProducedFilter = filter;
+    THashShuffleTask task(code, nullptr, TInputPort{.Connection = &input}, output, 0);
+
+    EXPECT_EQ(task.Execute(), ETaskResult::OK);
+    EXPECT_EQ(task.Execute(), ETaskResult::FINISHED);
+
+    EXPECT_TRUE(FetchSelectedRows(output, 0).Values.empty());
+    EXPECT_TRUE(FetchSelectedRows(output, 1).Values.empty());
+    ASSERT_TRUE(filter->Ready());
+    EXPECT_EQ(filter->StatsSnapshot().BuildRows, 0u);
+    EXPECT_EQ(destroyCount.load(), 1);
+}
+
+TEST(SchedulerRuntimeAdapter, HashShuffleTreatsFullSelectionAsNoSelection) {
+    for (bool withSelection : {false, true}) {
+        std::atomic<int> destroyCount = 0;
+        TOneToOneConnection input(1);
+        THashShuffleConnection output(2);
+        output.Resize(1, 2);
+
+        std::vector<uint8_t> selection = {1, 0xff, 2, 1};
+        auto rowSet = MakeInt64RowSet({2, 3, 4, 5}, &destroyCount);
+        rowSet.Selection = withSelection ? selection.data() : nullptr;
+        ASSERT_TRUE(input.Push(0, std::move(rowSet)));
+        input.Finish(0);
+
+        auto code = std::make_shared<THashShuffleCode>(HashSelectedValues);
+        THashShuffleTask task(
+            code, nullptr, TInputPort{.Connection = &input}, output, 0);
+        EXPECT_EQ(task.Execute(), ETaskResult::OK);
+
+        const auto even = FetchSelectedRows(output, 0);
+        EXPECT_EQ(even.Values, (std::vector<int64_t>{2, 4})) << withSelection;
+        EXPECT_EQ(even.Hashes, (std::vector<uint64_t>{2, 4})) << withSelection;
+        const auto odd = FetchSelectedRows(output, 1);
+        EXPECT_EQ(odd.Values, (std::vector<int64_t>{3, 5})) << withSelection;
+        EXPECT_EQ(odd.Hashes, (std::vector<uint64_t>{3, 5})) << withSelection;
+    }
+}
+
+// One runtime filter task between two connections. The filter holds 0, the
+// hash an unselected row is left with, so a probe that read it would keep the
+// row.
+class RuntimeFilterTask : public NTest::TRuntimeFilterTest {
+protected:
+    void SetUp() override {
+        NTest::TRuntimeFilterTest::SetUp();
+        Filter_ = std::make_shared<TRuntimeFilter>(Context_);
+        const std::vector<uint64_t> keys = {0, 11, 22};
+        auto builder = Filter_->MakeBuilder();
+        builder.Add(keys);
+        Filter_->FinishProducer(std::move(builder).TakePartial());
+
+        auto code = std::make_shared<TRuntimeFilterCode>();
+        code->Hash = HashSelectedValues;
+        code->Probe = Filter_;
+        code->AuxInput = std::make_shared<TAuxInput>();
+        code->AuxInput->AddFilter(Filter_);
+        Task_ = std::make_unique<TRuntimeFilterTask>(
+            code,
+            TInputPort{.Connection = &Input_},
+            TOutputPort{.Connection = &Output_});
+    }
+
+    // An empty selection vector means the rowset has no selection.
+    void Push(std::vector<int64_t> values, std::vector<uint8_t> selection) {
+        Selection_ = std::move(selection);
+        auto rowSet = MakeInt64RowSet(std::move(values), &DestroyCount_);
+        rowSet.Selection = Selection_.empty() ? nullptr : Selection_.data();
+        ASSERT_TRUE(Input_.Push(0, std::move(rowSet)));
+    }
+
+    std::atomic<int> DestroyCount_ = 0;
+    std::vector<uint8_t> Selection_;
+    TOneToOneConnection Input_{1};
+    TOneToOneConnection Output_{1};
+    std::shared_ptr<TRuntimeFilter> Filter_;
+    std::unique_ptr<TRuntimeFilterTask> Task_;
+};
+
+TEST_F(RuntimeFilterTask, SparseSelectionProbesOnlySelectedRows) {
+    Push({11, 33, 0, 22, 11, 44}, {1, 1, 0, 0xff, 0, 2});
+    EXPECT_EQ(Task_->Execute(), ETaskResult::OK);
+
+    const auto kept = FetchSelectedRows(Output_, 0);
+    EXPECT_EQ(kept.Values, (std::vector<int64_t>{11, 22}));
+    EXPECT_EQ(kept.Hashes, (std::vector<uint64_t>{11, 22}));
+    const auto stats = Filter_->StatsSnapshot();
+    EXPECT_EQ(stats.ProbeRows, 4u);
+    EXPECT_EQ(stats.RejectedRows, 2u);
+}
+
+TEST_F(RuntimeFilterTask, EmptySelectionKeepsNothing) {
+    Push({11, 0, 22}, {0, 0, 0});
+    EXPECT_EQ(Task_->Execute(), ETaskResult::OK);
+
+    EXPECT_TRUE(FetchSelectedRows(Output_, 0).Values.empty());
+    const auto stats = Filter_->StatsSnapshot();
+    EXPECT_EQ(stats.ProbeRows, 0u);
+    EXPECT_EQ(stats.RejectedRows, 0u);
+}
+
+TEST_F(RuntimeFilterTask, FullSelectionMatchesNoSelection) {
+    for (const auto& selection :
+        {std::vector<uint8_t>{}, std::vector<uint8_t>{1, 0xff, 2, 1}}) {
+        Push({11, 33, 0, 22}, selection);
+        EXPECT_EQ(Task_->Execute(), ETaskResult::OK);
+        const auto kept = FetchSelectedRows(Output_, 0);
+        EXPECT_EQ(kept.Values, (std::vector<int64_t>{11, 0, 22}));
+        EXPECT_EQ(kept.Hashes, (std::vector<uint64_t>{11, 0, 22}));
+    }
+    const auto stats = Filter_->StatsSnapshot();
+    EXPECT_EQ(stats.ProbeRows, 8u);
+    EXPECT_EQ(stats.RejectedRows, 2u);
+}
+
+TEST_F(RuntimeFilterTask, BlockedOutputProbesTheBatchOnce) {
+    ASSERT_TRUE(Output_.Push(0, MakeInt64RowSet({7}, &DestroyCount_)));
+    Push({11, 33, 0, 22}, {1, 1, 0, 1});
+    EXPECT_EQ(Task_->Execute(), ETaskResult::BLOCKED_OUTPUT);
+    EXPECT_EQ(Task_->Execute(), ETaskResult::BLOCKED_OUTPUT);
+
+    TRowSet blocker{};
+    ASSERT_EQ(Output_.Fetch(0, blocker), EFetchResult::OK);
+    Release(&blocker);
+    EXPECT_EQ(Task_->Execute(), ETaskResult::OK);
+
+    const auto kept = FetchSelectedRows(Output_, 0);
+    EXPECT_EQ(kept.Values, (std::vector<int64_t>{11, 22}));
+    const auto stats = Filter_->StatsSnapshot();
+    EXPECT_EQ(stats.ProbeRows, 3u);
+    EXPECT_EQ(stats.RejectedRows, 1u);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
