@@ -1611,15 +1611,21 @@ TKernelCompiler::TFilterDispatch TKernelCompiler::CompileFilter(
         "filter", {"<kernel>"}, std::move(*kernelAst), literalStorage);
     FinishKernelDiagnostics(Diagnostics_);
 
-    using TFilterFn = void(*)(void*, void*, void**, const uint8_t*);
-    return [slot = kernel.Slot, storage = kernel.Storage,
-            runtime = RuntimeContext_](
-               TRowSet& rowSet, const uint8_t* inputSelection) {
-        TStringArena arena;
-        reinterpret_cast<TFilterFn>(slot->Fns[0])(
-            &rowSet, &arena, runtime ? runtime->Regexes.Handles() : nullptr,
-            inputSelection);
+    return {
+        .Slot = kernel.Slot,
+        .Storage = kernel.Storage,
+        .Runtime = RuntimeContext_,
     };
+}
+
+void TKernelCompiler::TFilterDispatch::operator()(
+    TRowSet& rowSet, const uint8_t* inputSelection) const
+{
+    using TFilterFn = void(*)(void*, void*, void**, const uint8_t*);
+    TStringArena arena;
+    reinterpret_cast<TFilterFn>(Slot->Fns[0])(
+        &rowSet, &arena, Runtime ? Runtime->Regexes.Handles() : nullptr,
+        inputSelection);
 }
 
 TKernelCompiler::TProjectDispatch TKernelCompiler::CompileProject(

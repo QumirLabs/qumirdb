@@ -420,7 +420,7 @@ TEST(FilterKernel, SkipsThreeValuedLogicForNonNullablePredicate) {
     TKernelCompiler compiler(&diagnostics);
     auto dispatch = compiler.CompileFilter(NKernel::BuildFilterKernelSpec(
         inputType, ParsePredicate("(== plain 1)")));
-    ASSERT_TRUE(dispatch);
+    ASSERT_NE(dispatch.Slot, nullptr);
     EXPECT_EQ(diagnostics.str().find("qdb_sql_bool_"), std::string::npos);
     EXPECT_EQ(diagnostics.str().find("filter_truth_state"), std::string::npos);
 }

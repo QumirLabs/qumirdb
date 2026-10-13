@@ -310,8 +310,17 @@ public:
     // Filter dispatch: called per batch to fill the selection buffer
     // rowSet.Selection. inputSelection is the mask the batch arrived with
     // (null = every row); rows outside it get 0 and are not evaluated.
-    using TFilterDispatch =
-        std::function<void(TRowSet& rowSet, const uint8_t* inputSelection)>;
+    // A plain struct, so a call has no type-erased indirection. The entry
+    // point is read from Slot on every call, because JIT finalization fills it
+    // after this object is created and copied.
+    struct TFilterDispatch {
+        void operator()(TRowSet& rowSet, const uint8_t* inputSelection) const;
+
+        std::shared_ptr<TKernelSlot> Slot;
+        // Payloads the kernel points into (literal strings).
+        std::shared_ptr<void> Storage;
+        std::shared_ptr<TRuntimeContext> Runtime;
+    };
 
     // Project dispatch: called per batch; for each computed column k and row i,
     // writes outBuffers[k][i] = <expr_k>. outBuffers has one pointer per computed
