@@ -150,7 +150,9 @@ struct TColumnRange {
     std::optional<double> Upper;
 };
 
-double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shared_ptr<TStructType> operatorType) {
+// overSource: the input is a table scan, so its null counts and its row count
+// describe the same rows.
+double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shared_ptr<TStructType> operatorType, bool overSource) {
     if (!operatorType) {
         return 0.5;
     }
@@ -304,15 +306,28 @@ double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shar
     if (auto maybeUnary = TMaybeNode<TUnaryExpr>(atom)) {
         auto unary = maybeUnary.Cast();
         if (unary->Operator == "!") {
-            return 1.0 - EstimateSelectivity(unary->Operand, inputStats, operatorType);
+            return 1.0 - EstimateSelectivity(unary->Operand, inputStats, operatorType, overSource);
         }
     }
 
     // col LIKE pattern -> qdb_string_view_sql_like; assume high selectivity.
     if (auto maybeCall = TMaybeNode<TCallExpr>(atom)) {
-        if (auto callee = TMaybeNode<TIdentExpr>(maybeCall.Cast()->Callee)) {
+        auto call = maybeCall.Cast();
+        if (auto callee = TMaybeNode<TIdentExpr>(call->Callee)) {
             if (callee.Cast()->Name == "qdb_string_view_sql_like") {
                 return LikeSelectivity;
+            }
+            // col IS NULL -> qdb_is_null(col): the share of nulls in the table.
+            if (callee.Cast()->Name == "qdb_is_null" && call->Args.size() == 1
+                && overSource && inputStats->RowCount > 0)
+            {
+                if (auto column = TMaybeNode<TIdentExpr>(call->Args[0])) {
+                    auto colIt = inputStats->ColumnStats.find(column.Cast()->Name);
+                    if (colIt != inputStats->ColumnStats.end() && colIt->second->NullCount) {
+                        return static_cast<double>(*colIt->second->NullCount)
+                            / static_cast<double>(inputStats->RowCount);
+                    }
+                }
             }
         }
     }
@@ -335,7 +350,7 @@ double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shar
                         range.Lower = std::max(range.Lower.value_or(0.0), bound->Below);
                     }
                 } else {
-                    selectivity *= EstimateSelectivity(conjunct, inputStats, operatorType);
+                    selectivity *= EstimateSelectivity(conjunct, inputStats, operatorType, overSource);
                 }
             }
             for (const auto& [column, range] : ranges) {
@@ -431,7 +446,8 @@ TStatsPtr ComputeFilterStats(const std::shared_ptr<TFilterOperator>& filter) {
         return nullptr;
     }
     double selectivity = EstimateSelectivity(filter->Predicate(), inputStats,
-        TMaybeType<TStructType>(filter->Input()->OutputColumns()).Cast());
+        TMaybeType<TStructType>(filter->Input()->OutputColumns()).Cast(),
+        TMaybeOp<TSourceOperator>(filter->Input()));
     selectivity = std::clamp(selectivity, 0.0, 1.0);
     auto outputStats = std::make_shared<TStats>();
     outputStats->ColumnStats = inputStats->ColumnStats;

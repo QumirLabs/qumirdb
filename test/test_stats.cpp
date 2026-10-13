@@ -11,6 +11,7 @@
 #include <qdb/plan/ops/stats.h>
 #include <qdb/plan/pipeline.h>
 #include <qdb/plan/passes/estimate_stats.h>
+#include <qdb/plan/passes/qualify_columns.h>
 #include <qdb/plan/passes/row_group_predicate.h>
 #include <qdb/plan/passes/typing.h>
 #include <qdb/plan/types/nullable.h>
@@ -308,7 +309,8 @@ namespace {
 
 // Estimates `SELECT x FROM t WHERE <predicate>` over 1000 rows. Columns x and
 // y are i64, uniform on [0, 1000) with 100 distinct values; z has no
-// histogram; s is a string; d holds the values 0..9, 100 rows each.
+// histogram; s is a string; d holds the values 0..9, 100 rows each; n is
+// nullable and null in 200 rows.
 class SelectivityTest : public ::testing::Test {
 protected:
     SelectivityTest() {
@@ -323,6 +325,9 @@ protected:
         for (int64_t i = 0; i <= 100; ++i) { // every value spans 10 buckets
             d.Histogram.push_back(std::bit_cast<uint64_t>(std::min<int64_t>(i / 10, 9)));
         }
+
+        Source_.Cols[5].Type = std::make_shared<NQdb::TNullable>(Source_.Cols[5].Type);
+        Source_.Stats_->ColumnStats.at("n")->NullCount = 200;
     }
 
     uint64_t Rows(const std::string& predicate) {
@@ -348,7 +353,8 @@ protected:
         return (*plan)->Stats_->RowCount;
     }
 
-    TStatsSource Source_{{{"x", 100}, {"y", 100}, {"z", 100}, {"s", 100}, {"d", 10}}};
+    TStatsSource Source_{
+        {{"x", 100}, {"y", 100}, {"z", 100}, {"s", 100}, {"d", 10}, {"n", 100}}};
 };
 
 } // namespace
@@ -418,6 +424,36 @@ TEST_F(SelectivityTest, RangeBoundsRespectInclusiveness) {
 TEST_F(SelectivityTest, NarrowRangeKeepsOneDistinctValue) {
     // Narrower than a histogram bucket: one of the 100 distinct values.
     EXPECT_NEAR(Rows("x between 250 and 250"), 10, 1);
+}
+
+TEST_F(SelectivityTest, IsNullUsesNullCount) {
+    EXPECT_EQ(Rows("n is null"), 200u);
+    EXPECT_EQ(Rows("n is not null"), 800u);
+    EXPECT_NEAR(Rows("x < 250 and n is not null"), 200, 1);
+}
+
+TEST_F(SelectivityTest, IsNullWithoutNullCountKeepsDefaultSelectivity) {
+    Source_.Stats_->ColumnStats.at("n")->NullCount.reset();
+    EXPECT_EQ(Rows("n is null"), 500u);
+    EXPECT_EQ(Rows("n is not null"), 500u);
+}
+
+TEST_F(SelectivityTest, NullCountAppliesOnlyAboveTheSource) {
+    // 100 rows reach the outer filter, fewer than the table has nulls: the
+    // table-wide count says nothing about them.
+    NQdb::TOperatorPtr plan = std::make_shared<NQdb::TSourceOperator>(Source_, "t");
+    auto inner = NQdb::MakeFilter(plan, "(< x 100)");
+    ASSERT_TRUE(inner.has_value()) << inner.error().ToString();
+    auto outer = NQdb::MakeFilter(*inner, "(! (call qdb_is_null n))");
+    ASSERT_TRUE(outer.has_value()) << outer.error().ToString();
+    plan = *outer;
+    NQdb::AssignSourceAliases(plan);
+    NQdb::QualifyColumns(plan);
+    NQdb::AnnotateTypes(plan);
+
+    auto stats = NQdb::EstimateStats(plan);
+    ASSERT_TRUE(stats);
+    EXPECT_EQ(stats->RowCount, 50u);
 }
 
 TEST(StatsTest, AggregateStatsAccountForGroupingSets) {
