@@ -18,6 +18,7 @@
 #include "const_fold.h"
 
 #include <algorithm>
+#include <set>
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
@@ -67,7 +68,7 @@ TOperatorPtr Materialize(TOperatorPtr result, const std::vector<TConjuct>& conju
         : std::make_shared<TFilterOperator>(std::move(result), Conjoin(conjucts));
 }
 
-std::vector<TJoinKey> ExtractJoinKeys(const std::unordered_set<std::string>& leftCols, std::unordered_set<std::string> rightCols, TUnionFind<std::string>& unionFind)
+std::vector<TJoinKey> ExtractJoinKeys(const std::set<std::string>& leftCols, std::set<std::string> rightCols, TUnionFind<std::string>& unionFind)
 {
     std::vector<TJoinKey> joinKeys;
     for (const auto& left : leftCols) {
@@ -624,7 +625,11 @@ TOperatorPtr ProcessOuterJoin(std::shared_ptr<TJoinOperator> join, TContext ctx)
 
         std::unordered_set<std::string> used;
         auto& keys = join->MutableKeys();
-        for (auto& key : ExtractJoinKeys(leftCols, rightCols, unionFind)) {
+        // Ordered traversal keeps key selection and composite key layout stable
+        // across standard libraries, including runtime-filter key projections.
+        const std::set<std::string> orderedLeftCols(leftCols.begin(), leftCols.end());
+        std::set<std::string> orderedRightCols(rightCols.begin(), rightCols.end());
+        for (auto& key : ExtractJoinKeys(orderedLeftCols, std::move(orderedRightCols), unionFind)) {
             used.insert(key.Left);
             used.insert(key.Right);
             keys.push_back(std::move(key));

@@ -210,6 +210,28 @@ LEFT JOIN returns r ON s.key = r.key WHERE r.key IS NULL
     EXPECT_EQ(RunValues(plan, Settings()), (std::vector<int64_t>{10, 20, 21}));
 }
 
+TEST(OuterJoinKeys, CompositeKeysHaveStableOrder) {
+    TTable sales({1}, {10});
+    TTable returns({1}, {10});
+    for (const auto* type : {"LEFT", "RIGHT", "FULL"}) {
+        for (const auto* on : {"s.key = r.key AND s.value = r.value",
+                              "s.value = r.value AND s.key = r.key",
+                              "r.value = s.value AND r.key = s.key"}) {
+            const auto sql = std::string("SELECT s.value FROM sales s ") + type
+                + " JOIN returns r ON " + on;
+            SCOPED_TRACE(sql);
+            const auto joins = Joins(PlanSql(sql, sales, returns, false));
+            ASSERT_EQ(joins.size(), 1);
+            const auto& keys = joins[0]->Keys();
+            ASSERT_EQ(keys.size(), 2);
+            EXPECT_EQ(keys[0].Left, "s.key");
+            EXPECT_EQ(keys[0].Right, "r.key");
+            EXPECT_EQ(keys[1].Left, "s.value");
+            EXPECT_EQ(keys[1].Right, "r.value");
+        }
+    }
+}
+
 TEST_P(OuterJoinToAntiExecution, PreservesCompositeKeys) {
     TTable sales({1, 1, 2, 2}, {10, 11, 20, 21});
     TTable returns({1, 2}, {11, 20});
