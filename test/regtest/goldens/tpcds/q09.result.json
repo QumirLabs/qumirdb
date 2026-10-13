@@ -1,6 +1,0 @@
-{
-  "schema": "<struct (bucket1 <named Nullable [f64]>) (bucket2 <named Nullable [f64]>) (bucket3 <named Nullable [f64]>) (bucket4 <named Nullable [f64]>) (bucket5 <named Nullable [f64]>)>",
-  "rows": [
-    [-299.77999999999997, -865.95000000000005, -60.899999999999999, -1225.7849999999999, -704.76666666666677]
-  ]
-}

@@ -1,4 +1,0 @@
-{
-  "schema": "<struct (item_sk <named Nullable [i32]>) (d_date <named Nullable [i32]>) (web_sales <named Nullable [f64]>) (store_sales <named Nullable [f64]>) (web_cumulative <named Nullable [f64]>) (store_cumulative <named Nullable [f64]>)>",
-  "rows": []
-}

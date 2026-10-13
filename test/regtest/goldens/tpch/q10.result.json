@@ -1,4 +1,0 @@
-{
-  "schema": "<struct (c_custkey i32) (c_name string) (revenue f64) (c_acctbal f64) (n_name string) (c_address string) (c_phone string) (c_comment string)>",
-  "rows": []
-}

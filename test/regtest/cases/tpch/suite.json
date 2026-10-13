@@ -1,5 +1,6 @@
 {
   "version": 1,
+  "execute": false,
   "fixtures": {
     "customer": {
       "json": "tables/customer.json",

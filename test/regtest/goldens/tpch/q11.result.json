@@ -1,4 +1,0 @@
-{
-  "schema": "<struct (ps_partkey i32) (value f64)>",
-  "rows": []
-}

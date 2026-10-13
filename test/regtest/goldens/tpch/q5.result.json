@@ -1,4 +1,0 @@
-{
-  "schema": "<struct (n_name string) (revenue f64)>",
-  "rows": []
-}

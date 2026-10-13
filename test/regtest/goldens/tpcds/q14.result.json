@@ -1,4 +1,0 @@
-{
-  "schema": "<struct (channel <named Nullable [string]>) (i_brand_id <named Nullable [i32]>) (i_class_id <named Nullable [i32]>) (i_category_id <named Nullable [i32]>) (col4 <named Nullable [f64]>) (col5 i64)>",
-  "rows": []
-}

@@ -1,4 +1,0 @@
-{
-  "schema": "<struct (l_shipmode string) (high_line_count i64) (low_line_count i64)>",
-  "rows": []
-}

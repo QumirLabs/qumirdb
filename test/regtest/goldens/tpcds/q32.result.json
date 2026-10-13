@@ -1,4 +1,0 @@
-{
-  "schema": "<struct (|excess discount amount| <named Nullable [f64]>)>",
-  "rows": []
-}

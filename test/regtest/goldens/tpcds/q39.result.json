@@ -1,4 +1,0 @@
-{
-  "schema": "<struct (w_warehouse_sk i32) (i_item_sk i32) (d_moy <named Nullable [i32]>) (mean <named Nullable [f64]>) (cov <named Nullable [f64]>) (w_warehouse_sk i32) (i_item_sk i32) (d_moy <named Nullable [i32]>) (mean <named Nullable [f64]>) (cov <named Nullable [f64]>)>",
-  "rows": []
-}

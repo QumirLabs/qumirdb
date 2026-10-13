@@ -1,4 +1,0 @@
-{
-  "schema": "<struct (c_customer_id string) (c_salutation <named Nullable [string]>) (c_first_name <named Nullable [string]>) (c_last_name <named Nullable [string]>) (c_preferred_cust_flag <named Nullable [string]>) (c_birth_day <named Nullable [i32]>) (c_birth_month <named Nullable [i32]>) (c_birth_year <named Nullable [i32]>) (c_birth_country <named Nullable [string]>) (c_login <named Nullable [string]>) (c_email_address <named Nullable [string]>) (c_last_review_date_sk <named Nullable [i32]>) (ctr_total_return <named Nullable [f64]>)>",
-  "rows": []
-}

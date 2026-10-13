@@ -1,6 +1,0 @@
-{
-  "schema": "<struct (c_count i64) (custdist i64)>",
-  "rows": [
-    ["0", "10"]
-  ]
-}

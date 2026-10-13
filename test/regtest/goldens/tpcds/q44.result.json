@@ -1,4 +1,0 @@
-{
-  "schema": "<struct (rnk i64) (best_performing <named Nullable [string]>) (worst_performing <named Nullable [string]>)>",
-  "rows": []
-}

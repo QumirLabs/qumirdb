@@ -1,4 +1,0 @@
-{
-  "schema": "<struct (i_product_name <named Nullable [string]>) (i_brand <named Nullable [string]>) (i_class <named Nullable [string]>) (i_category <named Nullable [string]>) (qoh <named Nullable [f64]>)>",
-  "rows": []
-}

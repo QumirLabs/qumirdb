@@ -1,4 +1,0 @@
-{
-  "schema": "<struct (i_item_id string) (i_item_desc <named Nullable [string]>) (i_current_price <named Nullable [f64]>)>",
-  "rows": []
-}

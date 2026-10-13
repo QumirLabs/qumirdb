@@ -1,4 +1,0 @@
-{
-  "schema": "<struct (s_suppkey i32) (s_name string) (s_address string) (s_phone string) (total_revenue f64)>",
-  "rows": []
-}

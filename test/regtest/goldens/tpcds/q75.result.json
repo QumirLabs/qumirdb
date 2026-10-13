@@ -1,4 +1,0 @@
-{
-  "schema": "<struct (prev_year <named Nullable [i32]>) (year <named Nullable [i32]>) (i_brand_id <named Nullable [i32]>) (i_class_id <named Nullable [i32]>) (i_category_id <named Nullable [i32]>) (i_manufact_id <named Nullable [i32]>) (prev_yr_cnt <named Nullable [i64]>) (curr_yr_cnt <named Nullable [i64]>) (sales_cnt_diff <named Nullable [i64]>) (sales_amt_diff <named Nullable [f64]>)>",
-  "rows": []
-}

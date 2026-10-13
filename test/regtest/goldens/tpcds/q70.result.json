@@ -1,4 +1,0 @@
-{
-  "schema": "<struct (total_sum <named Nullable [f64]>) (s_state <named Nullable [string]>) (s_county <named Nullable [string]>) (lochierarchy i64) (rank_within_parent i64)>",
-  "rows": []
-}

@@ -1,4 +1,0 @@
-{
-  "schema": "<struct (state <named Nullable [string]>) (cnt i64)>",
-  "rows": []
-}

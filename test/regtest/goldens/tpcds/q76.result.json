@@ -1,4 +1,0 @@
-{
-  "schema": "<struct (channel string) (col_name string) (d_year <named Nullable [i32]>) (d_qoy <named Nullable [i32]>) (i_category <named Nullable [string]>) (sales_cnt i64) (sales_amt <named Nullable [f64]>)>",
-  "rows": []
-}

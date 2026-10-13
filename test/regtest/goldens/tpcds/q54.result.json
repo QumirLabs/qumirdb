@@ -1,4 +1,0 @@
-{
-  "schema": "<struct (segment <named Nullable [i32]>) (num_customers i64) (segment_base <named Nullable [i32]>)>",
-  "rows": []
-}

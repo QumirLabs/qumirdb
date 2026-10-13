@@ -1,4 +1,0 @@
-{
-  "schema": "<struct (ca_county <named Nullable [string]>) (d_year <named Nullable [i32]>) (web_q1_q2_increase <named Nullable [f64]>) (store_q1_q2_increase <named Nullable [f64]>) (web_q2_q3_increase <named Nullable [f64]>) (store_q2_q3_increase <named Nullable [f64]>)>",
-  "rows": []
-}

@@ -1,4 +1,0 @@
-{
-  "schema": "<struct (s_store_name1 <named Nullable [string]>) (s_store_id1 string) (d_week_seq1 <named Nullable [i32]>) (col3 <named Nullable [f64]>) (col4 <named Nullable [f64]>) (col5 <named Nullable [f64]>) (col6 <named Nullable [f64]>) (col7 <named Nullable [f64]>) (col8 <named Nullable [f64]>) (col9 <named Nullable [f64]>)>",
-  "rows": []
-}

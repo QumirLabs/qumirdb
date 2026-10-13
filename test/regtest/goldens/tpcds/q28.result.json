@@ -1,4 +1,0 @@
-{
-  "schema": "<struct (b1_lp <named Nullable [f64]>) (b1_cnt i64) (b1_cntd i64) (b2_lp <named Nullable [f64]>) (b2_cnt i64) (b2_cntd i64) (b3_lp <named Nullable [f64]>) (b3_cnt i64) (b3_cntd i64) (b4_lp <named Nullable [f64]>) (b4_cnt i64) (b4_cntd i64) (b5_lp <named Nullable [f64]>) (b5_cnt i64) (b5_cntd i64) (b6_lp <named Nullable [f64]>) (b6_cnt i64) (b6_cntd i64)>",
-  "rows": []
-}

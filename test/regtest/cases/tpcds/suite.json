@@ -1,5 +1,6 @@
 {
   "version": 1,
+  "execute": false,
   "fixtures": {
     "call_center": {
       "json": "tables/call_center.json",

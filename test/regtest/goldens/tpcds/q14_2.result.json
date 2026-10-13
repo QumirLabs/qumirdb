@@ -1,4 +1,0 @@
-{
-  "schema": "<struct (ty_channel string) (ty_brand <named Nullable [i32]>) (ty_class <named Nullable [i32]>) (ty_category <named Nullable [i32]>) (ty_sales <named Nullable [f64]>) (ty_number_sales i64) (ly_channel string) (ly_brand <named Nullable [i32]>) (ly_class <named Nullable [i32]>) (ly_category <named Nullable [i32]>) (ly_sales <named Nullable [f64]>) (ly_number_sales i64)>",
-  "rows": []
-}

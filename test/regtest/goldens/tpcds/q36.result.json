@@ -1,4 +1,0 @@
-{
-  "schema": "<struct (gross_margin <named Nullable [f64]>) (i_category <named Nullable [string]>) (i_class <named Nullable [string]>) (lochierarchy i64) (rank_within_parent i64)>",
-  "rows": []
-}

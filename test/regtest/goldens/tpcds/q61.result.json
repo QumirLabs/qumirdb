@@ -1,4 +1,0 @@
-{
-  "schema": "<struct (promotions <named Nullable [f64]>) (total <named Nullable [f64]>) (col2 <named Nullable [<named DECIMAL [36 20]>]>)>",
-  "rows": []
-}

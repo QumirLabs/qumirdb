@@ -1,4 +1,0 @@
-{
-  "schema": "<struct (o_year i32) (mkt_share f64)>",
-  "rows": []
-}

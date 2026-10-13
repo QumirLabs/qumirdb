@@ -1,4 +1,0 @@
-{
-  "schema": "<struct (cd_gender <named Nullable [string]>) (cd_marital_status <named Nullable [string]>) (cd_education_status <named Nullable [string]>) (cnt1 i64) (cd_purchase_estimate <named Nullable [i32]>) (cnt2 i64) (cd_credit_rating <named Nullable [string]>) (cnt3 i64)>",
-  "rows": []
-}

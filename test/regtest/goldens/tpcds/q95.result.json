@@ -1,4 +1,0 @@
-{
-  "schema": "<struct (|order count| i64) (|total shipping cost| <named Nullable [f64]>) (|total net profit| <named Nullable [f64]>)>",
-  "rows": []
-}

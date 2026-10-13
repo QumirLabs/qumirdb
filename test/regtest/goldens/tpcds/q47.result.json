@@ -1,4 +1,0 @@
-{
-  "schema": "<struct (i_category <named Nullable [string]>) (i_brand <named Nullable [string]>) (d_year <named Nullable [i32]>) (d_moy <named Nullable [i32]>) (avg_monthly_sales <named Nullable [f64]>) (sum_sales <named Nullable [f64]>) (psum <named Nullable [f64]>) (nsum <named Nullable [f64]>)>",
-  "rows": []
-}
