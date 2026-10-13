@@ -60,24 +60,30 @@ struct TStats {
             return std::bit_cast<T>(Histogram[idx]);
         }
 
+        // Fraction of rows with value <= c, or < c when strict. The two differ
+        // only for a heavy value, which repeats as a boundary.
         template<typename T>
-        std::optional<double> FractionBelow(T c) const {
+        std::optional<double> FractionBelow(T c, bool strict = false) const {
             if (Histogram.empty()) {
                 return std::nullopt;
             }
             auto val = [&](uint64_t v) {
                 return std::bit_cast<T>(v);
             };
-            if (c < val(Histogram.front())) {
+            if (strict ? c <= val(Histogram.front()) : c < val(Histogram.front())) {
                 return 0.0;
             }
-            if (c >= val(Histogram.back())) {
+            if (strict ? c > val(Histogram.back()) : c >= val(Histogram.back())) {
                 return 1.0;
             }
 
-            auto it = std::upper_bound(Histogram.begin(), Histogram.end(), c, [&](T a, uint64_t b) {
-                return a < val(b);
-            });
+            auto it = strict
+                ? std::lower_bound(Histogram.begin(), Histogram.end(), c, [&](uint64_t a, T b) {
+                    return val(a) < b;
+                })
+                : std::upper_bound(Histogram.begin(), Histogram.end(), c, [&](T a, uint64_t b) {
+                    return a < val(b);
+                });
 
             size_t belowCount = std::distance(Histogram.begin(), it); // # < c
             size_t bucketIdx = belowCount - 1; // bucket containing c

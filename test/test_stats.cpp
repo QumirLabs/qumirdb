@@ -121,6 +121,25 @@ TEST(StatsTest, FractionBelowEmptyHistogram) {
     EXPECT_FALSE(cs.FractionBelow<int64_t>(5).has_value());
 }
 
+TEST(StatsTest, FractionBelowStrictExcludesTheValue) {
+    // The value 5 holds half of the rows, so it repeats as a boundary.
+    TColumnStats cs;
+    cs.Histogram = Hist<int64_t>({0, 5, 5, 5, 10}); // 4 buckets
+    EXPECT_DOUBLE_EQ(cs.FractionBelow<int64_t>(5).value(), 0.75);       // <= 5
+    EXPECT_DOUBLE_EQ(cs.FractionBelow<int64_t>(5, true).value(), 0.25); // < 5
+    // Between heavy values there is nothing to exclude.
+    EXPECT_DOUBLE_EQ(cs.FractionBelow<int64_t>(7, true).value(),
+        cs.FractionBelow<int64_t>(7).value());
+    EXPECT_DOUBLE_EQ(cs.FractionBelow<int64_t>(0, true).value(), 0.0);  // nothing below min
+    EXPECT_DOUBLE_EQ(cs.FractionBelow<int64_t>(11, true).value(), 1.0);
+
+    // A heavy maximum is not below itself.
+    TColumnStats top;
+    top.Histogram = Hist<int64_t>({0, 5, 10, 10, 10});
+    EXPECT_DOUBLE_EQ(top.FractionBelow<int64_t>(10).value(), 1.0);
+    EXPECT_DOUBLE_EQ(top.FractionBelow<int64_t>(10, true).value(), 0.5);
+}
+
 // --- TParquetSource::Stats(): row count + standard column stats --------------
 
 TEST(StatsTest, ParquetStandardStats) {
