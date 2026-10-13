@@ -51,7 +51,7 @@ top-sort [channel asc, id asc] limit 100
                               │  │     │     └─ source web_sales AS web_sales_0 use-filter 3 keys=[web_sales_0.ws_sold_date_sk] (rows≈10 cost≈240)
                               │  │     └─ project (wsr_web_site_sk, date_sk, sales_price, profit, return_amt, net_loss) (rows≈10 cost≈5.9K)
                               │  │        └─ project (wsr_web_site_sk, date_sk, sales_price, profit, return_amt, net_loss) (rows≈10 cost≈5.5K)
-                              │  │           └─ join left [web_returns.wr_order_number = web_sales_1.ws_order_number, web_returns.wr_item_sk = web_sales_1.ws_item_sk] use-filter 3 keys=[web_returns.wr_returned_date_sk] (rows≈10 cost≈5.1K)
+                              │  │           └─ join left [web_returns.wr_item_sk = web_sales_1.ws_item_sk, web_returns.wr_order_number = web_sales_1.ws_order_number] use-filter 3 keys=[web_returns.wr_returned_date_sk] (rows≈10 cost≈5.1K)
                               │  │              ├─ source web_returns AS web_returns (rows≈10 cost≈280)
                               │  │              └─ source web_sales AS web_sales_1 (rows≈10 cost≈120)
                               │  └─ filter (&& (<= (cast (cast "1998-08-04" <named StringView>) <named DATE>) |date_dim.d_date|) (<= |date_dim.d_date| (+ (cast (cast "1998-08-04" <named StringView>) <named DATE>) (: 14 i32)))) (rows≈2 cost≈160)

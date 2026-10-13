@@ -2,7 +2,7 @@ project (store_only, catalog_only, store_and_catalog)
 └─ limit
    └─ aggregate keys=[__group__] aggs=[sum_0=sum, sum_1=sum, sum_2=sum] (rows≈1 cost≈13.5K)
       └─ project (arg_0, arg_1, arg_2, __group__) (rows≈4 cost≈13.3K)
-         └─ join full [ssci.item_sk = csci.item_sk, ssci.customer_sk = csci.customer_sk] (rows≈4 cost≈13.2K)
+         └─ join full [ssci.customer_sk = csci.customer_sk, ssci.item_sk = csci.item_sk] (rows≈4 cost≈13.2K)
             ├─ project (ssci.customer_sk, ssci.item_sk) (rows≈2 cost≈4.5K)
             │  └─ project (customer_sk, item_sk) (rows≈2 cost≈4.5K)
             │     └─ aggregate keys=[store_sales.ss_customer_sk, store_sales.ss_item_sk] (rows≈2 cost≈4.5K)
