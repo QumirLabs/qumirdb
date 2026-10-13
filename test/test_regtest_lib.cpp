@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -85,6 +86,190 @@ public:
         "rows":[["2"],["1"]]
     })";
 };
+
+std::string FloatResult(std::string_view rows, std::string_view schema = "<struct (v f64)>") {
+    return "{\"schema\":\"" + std::string(schema) + "\",\"rows\":" + std::string(rows) + '}';
+}
+
+TEST(RegResultComparison, DefaultToleranceAcceptsAggregateRoundingWithoutChangingGolden) {
+    const auto actual = FloatResult("[[306804.95999999996]]");
+    const auto expected = FloatResult("[[306804.96000000002]]");
+    const auto result = NRegTest::CompareResults(actual, expected);
+    EXPECT_TRUE(result.Matches);
+    EXPECT_NE(result.Actual, result.Expected);
+    EXPECT_FALSE(NRegTest::CompareResults(actual, expected, true, {0, 0}).Matches);
+}
+
+TEST(RegResultComparison, AbsoluteAndRelativeToleranceIncludeTheirBoundary) {
+    const auto zero = FloatResult("[[0]]");
+    EXPECT_TRUE(NRegTest::CompareResults(zero, FloatResult("[[1]]"), true, {1, 0}).Matches);
+    EXPECT_FALSE(NRegTest::CompareResults(zero, FloatResult("[[1.000001]]"), true, {1, 0}).Matches);
+    EXPECT_TRUE(NRegTest::CompareResults(zero, FloatResult("[[1e-13]]")).Matches);
+    EXPECT_FALSE(NRegTest::CompareResults(zero, FloatResult("[[1e-6]]")).Matches);
+    const auto a = FloatResult("[[-100]]");
+    const auto b = FloatResult("[[-200]]");
+    EXPECT_TRUE(NRegTest::CompareResults(a, b, true, {0, 0.5}).Matches);
+    EXPECT_TRUE(NRegTest::CompareResults(b, a, true, {0, 0.5}).Matches);
+    EXPECT_FALSE(NRegTest::CompareResults(a, b, true, {0, 0.499}).Matches);
+    EXPECT_TRUE(NRegTest::CompareResults(zero, zero, true, {0, 0}).Matches);
+}
+
+TEST(RegResultComparison, ToleranceCombinesAbsoluteAndRelativeTerms) {
+    EXPECT_TRUE(NRegTest::CompareResults(FloatResult("[[100]]"), FloatResult("[[102]]"),
+        true, {1, 0.01}).Matches);
+    EXPECT_FALSE(NRegTest::CompareResults(FloatResult("[[100]]"), FloatResult("[[102]]"),
+        true, {0.5, 0.01}).Matches);
+}
+
+TEST(RegResultComparison, OverflowDoesNotMakeDifferentFiniteValuesEqual) {
+    const auto positive = FloatResult("[[1.7976931348623157e308]]");
+    const auto negative = FloatResult("[[-1.7976931348623157e308]]");
+    EXPECT_FALSE(NRegTest::CompareResults(positive, negative, true, {0, 1}).Matches);
+    EXPECT_TRUE(NRegTest::CompareResults(positive, negative, true, {0, 2}).Matches);
+    // Both the naive difference and abs + rel * scale overflow here.
+    EXPECT_FALSE(NRegTest::CompareResults(positive, negative, true,
+        {1.7976931348623157e308, 0.5}).Matches);
+}
+
+TEST(RegResultComparison, NonFiniteTagsNullAndSignedZeroStayExact) {
+    const auto nullable = "<struct (v <named Nullable [f64]>)>";
+    EXPECT_TRUE(NRegTest::CompareResults(FloatResult("[[null],[1]]", nullable),
+        FloatResult("[[null],[1.0000000000000002]]", nullable)).Matches);
+    const auto special = FloatResult(
+        R"([[{"$float":"nan"}],[{"$float":"+inf"}],[{"$float":"-inf"}],[{"$float":"-0"}],[null]])",
+        "<struct (v <named Nullable [f64]>)>");
+    EXPECT_TRUE(NRegTest::CompareResults(special, special).Matches);
+    for (const auto value : {R"({"$float":"nan"})", R"({"$float":"+inf"})",
+            R"({"$float":"-inf"})", R"({"$float":"-0"})", "null"})
+    {
+        const auto tagged = FloatResult("[[" + std::string(value) + "]]",
+            "<struct (v <named Nullable [f64]>)>");
+        EXPECT_FALSE(NRegTest::CompareResults(tagged,
+            FloatResult("[[0]]", "<struct (v <named Nullable [f64]>)>"), true, {1e100, 1e100}).Matches);
+    }
+    EXPECT_FALSE(NRegTest::CompareResults(FloatResult(R"([[{"$float":"+inf"}]])"),
+        FloatResult(R"([[{"$float":"-inf"}]])")).Matches);
+    EXPECT_FALSE(NRegTest::CompareResults(FloatResult("[[1.7976931348623157e308]]"),
+        FloatResult(R"([[{"$float":"+inf"}]])")).Matches);
+}
+
+TEST(RegResultComparison, OtherTypesAndSchemasStayExact) {
+    const auto integer = R"({"schema":"<struct (v u64)>","rows":[["9007199254740993"]]})";
+    const auto different = R"({"schema":"<struct (v u64)>","rows":[["9007199254740992"]]})";
+    EXPECT_FALSE(NRegTest::CompareResults(integer, different, true, {1e100, 1e100}).Matches);
+    EXPECT_FALSE(NRegTest::CompareResults(FloatResult("[[1]]"),
+        R"({"schema":"<struct (v i32)>","rows":[[1]]})").Matches);
+    EXPECT_FALSE(NRegTest::CompareResults(FloatResult("[[1]]"),
+        FloatResult("[[1]]", "<struct (v <named Nullable [f64]>)>")).Matches);
+    const auto schema = "<struct (v f64) (s string) (b bool)>";
+    const auto base = FloatResult(R"([[1,"a",true]])", schema);
+    EXPECT_TRUE(NRegTest::CompareResults(base, FloatResult(R"([[1.0000000000000002,"a",true]])", schema)).Matches);
+    EXPECT_FALSE(NRegTest::CompareResults(base, FloatResult(R"([[1,"b",true]])", schema)).Matches);
+    EXPECT_FALSE(NRegTest::CompareResults(base, FloatResult(R"([[1,"a",false]])", schema)).Matches);
+}
+
+TEST(RegResultComparison, UnorderedRowsCompareWithToleranceAndPreserveMultiplicity) {
+    const auto actual = FloatResult("[[1],[2],[1]]");
+    const auto expected = FloatResult("[[2.0000000000000004],[1],[1.0000000000000002]]");
+    EXPECT_FALSE(NRegTest::CompareResults(actual, expected).Matches);
+    EXPECT_TRUE(NRegTest::CompareResults(actual, expected, false).Matches);
+    EXPECT_FALSE(NRegTest::CompareResults(actual, FloatResult("[[1],[2],[2]]"), false).Matches);
+    EXPECT_FALSE(NRegTest::CompareResults(actual, FloatResult("[[1],[2]]"), false).Matches);
+}
+
+TEST(RegResultComparison, UnorderedMatchingReassignsAmbiguousPairs) {
+    const auto schema = "<struct (a f64) (b f64)>";
+    const auto actual = FloatResult("[[0,0],[0,1]]", schema);
+    const auto expected = FloatResult("[[0,0.5],[1,-0.5]]", schema);
+    // The first actual row matches both expected rows; the second only the
+    // first. A sorted or greedy comparison would report a false difference.
+    EXPECT_TRUE(NRegTest::CompareResults(actual, expected, false, {1, 0}).Matches);
+    EXPECT_FALSE(NRegTest::CompareResults(actual, expected, true, {1, 0}).Matches);
+    EXPECT_FALSE(NRegTest::CompareResults(actual,
+        FloatResult("[[1,-0.5],[1,-0.5]]", schema), false, {1, 0}).Matches);
+}
+
+TEST(RegResultComparison, RejectsMalformedResultsAndInvalidTolerances) {
+    const auto valid = FloatResult("[[1]]");
+    for (const auto invalid : {"null", R"({"schema":"<struct (v f64)>","rows":[[]]})",
+        R"({"schema":"<struct (v f64)>","rows":[["1"]]})",
+        R"({"schema":"<struct (v f64)>","rows":[[{"$float":"unknown"}]]})"})
+    {
+        EXPECT_THROW(NRegTest::CompareResults(valid, invalid), std::runtime_error);
+    }
+    EXPECT_THROW(NRegTest::CompareResults(valid, valid, true, (NRegTest::TFloatTolerance{-1, 0})),
+        std::runtime_error);
+    EXPECT_THROW(NRegTest::CompareResults(valid, valid, true,
+        (NRegTest::TFloatTolerance{0, std::numeric_limits<double>::infinity()})), std::runtime_error);
+}
+
+TEST(RegSuiteInfrastructure, ToleranceDefaultsAndPartialCaseOverrides) {
+    TCaseDirectory dir;
+    const auto defaults = dir.Collect();
+    ASSERT_EQ(defaults.size(), 1);
+    EXPECT_DOUBLE_EQ(defaults[0].Tol.Absolute, 1e-12);
+    EXPECT_DOUBLE_EQ(defaults[0].Tol.Relative, 1e-12);
+    dir.Write("other.sql", "SELECT v AS v FROM t;");
+    dir.Write("suite.json", R"({
+        "version":1,"tol":{"abs":1e-4,"rel":1e-6},
+        "fixtures":{"data":{"json":"table.json"}},"tables":{"t":"data"},
+        "variants":["single","threaded"],
+        "cases":{"query.sql":{"tol":{"abs":0}},"other.sql":{}}
+    })");
+    const auto tests = dir.Collect();
+    ASSERT_EQ(tests.size(), 4);
+    for (const auto& test : tests) {
+        EXPECT_DOUBLE_EQ(test.Tol.Absolute, test.Base.filename() == "query" ? 0 : 1e-4);
+        EXPECT_DOUBLE_EQ(test.Tol.Relative, 1e-6);
+    }
+}
+
+TEST(RegSuiteInfrastructure, RejectsInvalidToleranceOptions) {
+    TCaseDirectory dir;
+    for (const std::string value : {"0", "null", R"({"abs":-1})", R"({"rel":-1})",
+        R"({"abs":"1e-6"})", R"({"rel":true})", R"({"epsilon":0.1})"})
+    {
+        auto manifest = std::string(TCaseDirectory::Manifest);
+        manifest.insert(1, "\"tol\":" + value + ',');
+        dir.Write("suite.json", manifest);
+        EXPECT_THROW(dir.Collect(), std::runtime_error);
+        manifest = TCaseDirectory::Manifest;
+        manifest.insert(manifest.find("\"order\":\"ordered\""), "\"tol\":" + value + ',');
+        dir.Write("suite.json", manifest);
+        EXPECT_THROW(dir.Collect(), std::runtime_error);
+    }
+}
+
+TEST(RegSuiteInfrastructure, GoldenCheckingUsesCaseTolerance) {
+    TCaseDirectory dir;
+    dir.Write("table.json", R"({"version":1,"schema":"<struct (v f64)>","rows":[[1],[2]]})");
+    dir.WriteGolden(FloatResult("[[2.0000000000000004],[1.0000000000000002]]"));
+    EXPECT_TRUE(dir.Run().Matches);
+    auto manifest = std::string(TCaseDirectory::Manifest);
+    manifest.insert(manifest.find("\"order\":\"ordered\""), R"("tol":{"abs":0,"rel":0},)");
+    dir.Write("suite.json", manifest);
+    EXPECT_FALSE(dir.Run().Matches);
+}
+
+TEST(RegSuiteInfrastructure, CanonizedVariantsUseToleranceWithoutRoundingResults) {
+    TCaseDirectory dir;
+    dir.Write("table.json", R"({"version":1,"schema":"<struct (v f64)>","rows":[[1],[2]]})");
+    const auto tests = dir.Collect();
+    NRegTest::PrepareCases(tests);
+    const auto first = NRegTest::CheckCase(tests[0], true);
+    ASSERT_TRUE(first.Result);
+    EXPECT_TRUE(first.Result->Matches);
+    dir.Write("query.sql", "SELECT v + 0.0000000000005 AS v FROM t ORDER BY v DESC;");
+    const auto nearby = NRegTest::CheckCase(tests[0], true);
+    ASSERT_TRUE(nearby.Result);
+    EXPECT_TRUE(nearby.Result->Matches);
+    EXPECT_NE(nearby.Result->Actual, nearby.Result->Expected);
+    dir.Write("query.sql", "SELECT v + 0.01 AS v FROM t ORDER BY v DESC;");
+    const auto different = NRegTest::CheckCase(tests[0], true);
+    ASSERT_TRUE(different.Result);
+    EXPECT_FALSE(different.Result->Matches);
+    EXPECT_EQ(nearby.Result->Expected, first.Result->Actual);
+}
 
 TEST(RegSuiteInfrastructure, NoManifestRunsPlanOnly) {
     TCaseDirectory dir;

@@ -76,7 +76,8 @@ private:
             << "\nVariant: " << Case.Variant << '\n' << ComparisonDiff(result.Plan);
         if (result.Result) {
             EXPECT_TRUE(result.Result->Matches) << "SQL: " << Case.Sql << "\nGolden: " << Case.Golden
-                << "\nVariant: " << Case.Variant << '\n' << ComparisonDiff(*result.Result);
+                << "\nVariant: " << Case.Variant << "\nTolerance: abs=" << Case.Tol.Absolute
+                << " rel=" << Case.Tol.Relative << '\n' << ComparisonDiff(*result.Result);
         }
     }
 
