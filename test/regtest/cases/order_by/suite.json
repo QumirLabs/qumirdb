@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "fixtures": {
+    "numbers": {"json": "tables/numbers.json", "parquet": {"row_group_rows": 2}},
+    "empty": {"json": "tables/empty.json"}
+  },
+  "tables": {"t": "numbers"},
+  "variants": ["single", "threaded"],
+  "cases": {
+    "nulls_first.sql": {"golden": "goldens/nulls_first.result.json", "order": "ordered"},
+    "limit_offset.sql": {"golden": "goldens/limit_offset.result.json", "order": "ordered"},
+    "multiple_keys.sql": {"golden": "goldens/multiple_keys.result.json", "order": "ordered"},
+    "expression.sql": {"golden": "goldens/expression.result.json", "order": "ordered"},
+    "duplicates.sql": {"golden": "goldens/duplicates.result.json", "order": "unordered"},
+    "self_join.sql": {"golden": "goldens/self_join.result.json", "order": "ordered"},
+    "empty.sql": {
+      "tables": {"t": "empty"},
+      "golden": "goldens/empty.result.json",
+      "order": "ordered"
+    }
+  }
+}

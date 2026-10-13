@@ -1,13 +1,17 @@
 #include <gtest/gtest.h>
 #include "mock_source.h"
+#include "reg_suite.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <memory>
 #include <sstream>
+#include <set>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -19,6 +23,7 @@
 #include <qdb/sql/printer.h>
 
 #include <qumir/parser/core/printer.h>
+#include <qumir/codegen/llvm/llvm_initializer.h>
 
 namespace fs = std::filesystem;
 
@@ -58,6 +63,9 @@ std::vector<ProgCase> Collect(const fs::path& root, std::string_view extension =
     };
     for (auto& e : fs::recursive_directory_iterator(root)) {
         if (e.is_regular_file() && e.path().extension() == extension) {
+            if (fs::exists(e.path().parent_path() / "suite.json")) {
+                continue;
+            }
             v.push_back({ casePath(e.path()) });
         }
     }
@@ -69,7 +77,7 @@ std::vector<ProgCase> Collect(const fs::path& root, std::string_view extension =
 std::string NameFromPath(const fs::path& p) {
     std::string s = p.string();
     for (auto& c : s) {
-        if (c == '/' || c == '\\' || c == '.') {
+        if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_') {
             c = '_';
         }
     }
@@ -137,6 +145,35 @@ void CheckGolden(const fs::path& base, std::string_view extension, const std::st
 class RegAst : public ::testing::TestWithParam<ProgCase> {};
 class RegPlan : public ::testing::TestWithParam<ProgCase> {};
 
+class RegExec : public ::testing::Test {
+public:
+    explicit RegExec(NRegTest::TExecCase test) : Case(std::move(test)) {}
+
+private:
+    void TestBody() override {
+        const auto result = NRegTest::ExecuteCase(Case, updateGoldens);
+        if (printOutput) {
+            std::cout << "=== " << Case.Sql << " (" << Case.Variant << ") ===\n"
+                << result.Actual;
+        }
+        EXPECT_TRUE(result.Matches) << "SQL: " << Case.Sql << "\nGolden: " << Case.Golden
+            << "\nExpected:\n" << result.Expected << "Actual:\n" << result.Actual;
+    }
+
+    NRegTest::TExecCase Case;
+};
+
+class RegExecEnvironment : public ::testing::Environment {
+public:
+    std::vector<std::pair<NRegTest::TExecCase, const ::testing::TestInfo*>> Cases;
+
+    void SetUp() override {
+        for (const auto& [test, info] : Cases) {
+            if (info->should_run()) NRegTest::PrepareExecCase(test);
+        }
+    }
+};
+
 TEST_P(RegAst, Ast) {
     std::istringstream input(ReadAll(fs::path(CasesDir / GetParam().base).replace_extension(".sql")));
     CheckGolden(GetParam().base, ".ast", BuildAst(input));
@@ -172,6 +209,27 @@ int main(int argc, char** argv) {
             printOutput = true;
         }
     }
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
+    try {
+        const auto execCases = NRegTest::CollectExecCases(CasesDir);
+        auto environment = std::make_unique<RegExecEnvironment>();
+        std::set<std::string> names;
+        for (const auto& test : execCases) {
+            const auto name = NameFromPath(test.Base) + "_" + test.Variant;
+            if (!names.insert(name).second) {
+                throw std::runtime_error("duplicate execution test name: " + name);
+            }
+            const auto* info = ::testing::RegisterTest("RegExec", name.c_str(),
+                nullptr, nullptr, __FILE__, __LINE__, [test]() { return new RegExec(test); });
+            environment->Cases.emplace_back(test, info);
+        }
+        ::testing::AddGlobalTestEnvironment(environment.release());
+        ::testing::InitGoogleTest(&argc, argv);
+        NQumir::NCodeGen::TLLVMInitializer llvmInit;
+        const auto result = RUN_ALL_TESTS();
+        if (result == 0 && updateGoldens) NRegTest::CommitExecGoldens(execCases);
+        return result;
+    } catch (const std::exception& error) {
+        std::cerr << "Regression test setup failed: " << error.what() << '\n';
+        return 1;
+    }
 }

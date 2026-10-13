@@ -67,6 +67,8 @@ Deployment:
 
 - [Building, running, benchmarking](building.md) - build/test commands, the
   CLI, the web workbench, plan export, and the TPC-H/ClickBench runners.
+- [SQL execution regression tests](sql_execution_tests.md) - suite manifests,
+  typed JSON fixtures materialized as Parquet, and result comparison.
 - [Benchmark results](benchmark_results.md) - measured ClickBench, TPC-H and
   TPC-DS numbers for qdb, DuckDB and YQL, per query and per scale, with what
   each engine's metric does and does not include. A dated snapshot: qumirdb is

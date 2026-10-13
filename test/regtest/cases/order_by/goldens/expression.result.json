@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "schema": "<struct (id i64) (label <named Nullable [string]>) (enabled <named Nullable [bool]>) (score <named Nullable [f64]>)>",
+  "rows": [
+    [
+      "5",
+      "",
+      false,
+      42.0
+    ],
+    [
+      "4",
+      "duplicate",
+      true,
+      0.0
+    ],
+    [
+      "3",
+      "quote\"\nline",
+      false,
+      -2.0
+    ],
+    [
+      "1",
+      "two",
+      true,
+      1.5
+    ],
+    [
+      "2",
+      null,
+      null,
+      null
+    ],
+    [
+      "6",
+      null,
+      null,
+      1.0
+    ]
+  ]
+}
