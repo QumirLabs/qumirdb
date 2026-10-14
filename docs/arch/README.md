@@ -7,9 +7,19 @@ in this directory: the query pipeline, scheduler, logical and physical plans,
 optimizer runs and pass ordering, kernels, runtime ABI, ownership, and the core
 join and aggregation algorithms.
 
-Explain the design decisions, invariants, and trade-offs. Link to the papers and
-articles that informed an algorithm or design, and describe how the engine
+Explain the design decisions, invariants, and trade-offs. Link to the papers,
+articles, and books that informed an algorithm or design. Explain how the engine
 applies or adapts those ideas.
+
+These pages are for human readers. Explain fundamental concepts without
+requiring a source-code tour. AI slop, repetitive filler, exhaustive source
+links, and detailed inventories of classes, functions, or fields are not
+acceptable here; implementation details belong in the project wiki.
+
+For each architectural change, assess whether it substantially changes the
+engine's model. Update these pages for substantial changes; document minor
+implementation changes in the wiki. A new optimization, pass, or algorithm
+must always be mentioned here, with its purpose and role in the pipeline.
 
 Project-specific guides and local implementation details belong in the project
 wiki: test infrastructure, suite and fixture formats, and troubleshooting.
