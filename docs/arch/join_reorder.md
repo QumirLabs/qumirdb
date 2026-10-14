@@ -3,22 +3,41 @@
 `ReorderJoins` rewrites each left-deep chain of cross joins (the comma-join shape
 the builder emits) into a **connected** order, so that adjacent joins always have
 a real equality between them. Only genuinely disconnected relations stay
-cross-joined. It runs **before** [predicate_pushdown.md](predicate_pushdown.md):
-reorder fixes the tree *shape*, equijoin then lifts the keys.
-
-## Source map
-
-| Area | Source |
-|---|---|
-| Pass | `qdb/plan/passes/join_order.{h,cpp}` (`ReorderJoins`) |
-| Conjunct/disjunct splitting | `qdb/plan/passes/{flatten_conjucts,flatten_disjuncts,factor_conjuncts}.cpp` |
+cross-joined. Predicate pushdown and input estimation run before ordering; equi-key
+extraction follows it. Reorder fixes the tree *shape*, then extraction lifts
+keys onto that tree (see [predicate_pushdown.md](predicate_pushdown.md)).
 
 ## Pipeline position
 
-Runs after `QualifyColumns` + `AnnotateTypes` (it needs **qualified** column
-names and leaf output schemas to map a column to its relation), and before
-`ExtractEquiJoins`. `AnnotateTypes` is re-run afterwards because the chain is
-rebuilt.
+Runs after column qualification, typing, predicate pushdown, and input
+estimation, and before `ExtractEquiJoins`. With CBO enabled, inner-join
+flattening first exposes reassociation opportunities. Types are re-annotated
+after ordering because the tree is rebuilt.
+
+## Cost-based order and fallback
+
+With input row counts and positive NDVs on both endpoints of every join edge,
+QDB searches connected relation subsets for the cheapest bushy tree under its
+cost model. Each larger candidate combines two disjoint connected subplans
+linked by an equality. It retains the cheapest candidate for that subset:
+
+```text
+best(A union B) = min over connected splits:
+    cost(best(A)) + cost(best(B)) + estimated join work(A, B)
+```
+
+This is the connected-subgraph/complement search space described by Moerkotte
+and Neumann in [Analysis of Two Existing and One New Dynamic Programming
+Algorithm for the Generation of Optimal Bushy Join Trees without Cross Products
+(VLDB 2006)](https://www.vldb.org/conf/2006/p930-moerkotte.pdf).
+QDB uses a bounded subset search over that space, rather than the paper's full
+specialized pair-enumeration procedure. Disconnected components are planned
+separately and then cross-joined.
+
+The greedy connected-order algorithm below remains the fallback when CBO is
+disabled, rows or key NDVs are missing, there are no equality edges, a component
+exceeds the current 12-relation bound, or search produces no tree. Its examples
+illustrate connectivity; the cost-based path can choose a different tree.
 
 ## Why it is needed
 
@@ -30,10 +49,11 @@ real cross product.
 
 ## Algorithm
 
-Two phases over each reorderable chain.
+The greedy fallback has two phases over each reorderable chain.
 
 A join is **reorderable** iff it is `inner`, has empty keys, and has no residual
-(exactly the comma-join shape; explicit-`ON`, semi/anti, outer joins are opaque).
+(the comma-join shape, also exposed by CBO inner-join flattening;
+semi/anti and outer joins are opaque).
 
 ### 1. Collect edges and leaves
 
@@ -115,5 +135,6 @@ edges (edges reset across the project/aggregate above it).
 
 ## Non-goals
 
-No cost model: ordering is purely connectivity-driven, seeded from the first
-relation. Cardinality-aware ordering is future work.
+The greedy fallback is connectivity-driven and does not compare costs. The CBO
+path chooses among connected bushy trees using estimates; neither path performs
+unrestricted reassociation across outer/semi/anti joins.

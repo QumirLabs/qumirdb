@@ -6,21 +6,13 @@ joins — those are optimizer passes that run afterwards (see
 [join_reorder.md](join_reorder.md), [predicate_pushdown.md](predicate_pushdown.md),
 [decorrelation.md](decorrelation.md)).
 
-## Source map
-
-| Area | Source |
-|---|---|
-| Builder | `qdb/plan/build.{h,cpp}` (`BuildPlan` → `BuildQuery` → `BuildSelect`) |
-| Operators | `qdb/plan/ops/{source,filter,project,aggregate,join,window}.{h,cpp}` |
-| Expression clone (CTE inlining) | `qdb/plan/clone_expr.{h,cpp}` |
-| Conjunct splitting | `qdb/plan/passes/flatten_conjucts.{h,cpp}` |
-
 ## Pipeline position
 
 ```
-parse → BuildPlan → AssignSourceAliases → QualifyColumns → AnnotateTypes
-      → ReorderJoins → AnnotateTypes → ExtractEquiJoins → AnnotateTypes
-      → ApplyColumnPruning → physical planning
+parse → BuildPlan → source aliases / column qualification / typing
+      → predicate pushdown → estimates → join ordering → equi-key extraction
+      → semi/limit/top-sort rewrites → pruning → CTE optimization
+      → physical lowering
 ```
 
 `BuildPlan` produces everything left of `AssignSourceAliases`. Column names are
@@ -93,7 +85,7 @@ project   (final SELECT list; drops helper columns)
          └─ <WHERE tree>
 ```
 
-`avg(x)` has no kernel; it is rewritten to `sum(x) / cast(count(*) as f64)` —
+`avg(x)` has no kernel; it is rewritten to `sum(x) / cast(count(x) as f64)` —
 two specs plus a projection expression.
 
 ### Aggregate argument materialization
@@ -237,27 +229,28 @@ Supported functions (qdb v1): `rank`, `sum`, `avg`, `max`.
 
 ## CTE (WITH)
 
-CTEs are **inlined per reference**: a CTE-aware source factory resolves a CTE
-name by building a fresh copy of its query. Because `QualifyColumns` rewrites
-identifier nodes in place, each inlined copy's expressions are deep-cloned
-(`CloneOperatorExprs` → `CloneExpr`) so two copies of the same CTE do not share
-mutable nodes. The optional column-alias list renames the copy's top projection
-(`ApplyColumnAliases`).
+A CTE is built once as a canonical definition. Each reference points to that
+definition, so reuse remains an optimizer choice instead of being erased by
+unconditional build-time inlining. The optional column-alias list renames the
+definition's output.
 
-```
+```text
 WITH r (k, v) AS (SELECT a, sum(b) FROM t GROUP BY a)
-SELECT ... FROM r, ...
-=>  r is built (twice if referenced twice), its top project renamed to (k, v),
-    and spliced into the FROM tree as an ordinary sub-plan.
+SELECT ... FROM r, r AS other
+=> one definition of r, two references
+=> optimizer: inline copies or materialize r once for both consumers
 ```
 
-`WITH RECURSIVE` is rejected.
+The CTE phase propagates common predicates and the union of required columns
+from all consumers, then chooses inlining versus shared materialization using
+estimated cost. Inlined expression trees must be cloned before mutable column
+rewrites. `WITH RECURSIVE` is rejected.
 
 ### Derived-table column aliases
 
-`( <subquery> ) AS d (c1, c2)` builds the subquery and renames its top
-projection to `(c1, c2)` via the same `ApplyColumnAliases` helper. The derived
-alias `d` itself is not applied as a qualifier (columns stay bare).
+`( <subquery> ) AS d (c1, c2)` builds the subquery and renames its output to
+`(c1, c2)`. These aliases affect column binding, not whether the subplan is
+materialized.
 
 ## What the builder never does
 

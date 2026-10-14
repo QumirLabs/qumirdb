@@ -40,10 +40,6 @@
   run/.style={box, fill=runfill, draw=rundraw,
               text width=40mm, minimum height=19mm},
   planned/.style={run, dashed, draw=muted, text=muted},
-  hint/.style={font=\scriptsize\ttfamily, text=black!50, anchor=north,
-               inner sep=0.7mm},
-  % Above the box where an incoming arrow needs the space below it.
-  hintabove/.style={hint, anchor=south},
   flow/.style={-{Stealth[length=2.6mm]}, thick, draw=black!65},
   feed/.style={flow, draw=udfdraw, dashed},
   link/.style={thick, draw=kerneldraw},
@@ -66,19 +62,13 @@
                    optimized/physical, physical/graph}
   \draw[flow] (\a) -- (\b);
 
-\node[hint] at (parser.south)    {qdb/sql/parser.cpp};
-\node[hint] at (ast.south)       {qdb/sql/ast.h};
-\node[hint] at (logical.south)   {qdb/plan/build.cpp};
-\node[hint] at (optimized.south) {qdb/plan/passes/};
-\node[hint] at (physical.south)  {qdb/exec/};
-\node[hint] at (graph.south)     {scheduler/plan\_lowerer.cpp};
 
 %% --------------------------------------------------------- kernel compilation
 \node[kernel] (ksrc)   at (  0, -58) {Kernel\\\texttt{.oz} source};
 \node[kernel] (oz)     at ( 48, -58) {Oz language\\front end};
 \node[kernel] (ir)     at ( 96, -58) {Qumir IR};
 \node[kernel] (vmcode) at (148, -40) {VM bytecode};
-\node[kernel] (vmexec) at (200, -40) {VM execution};
+\node[planned] (vmexec) at (200, -40) {Qumir VM\sub{QDB integration planned}};
 \node[kernel] (llvm)   at (148, -78) {LLVM IR};
 \node[kernel] (jit)    at (200, -64) {JIT native code};
 \node[kernel] (wasm)   at (200, -92) {WASM code};
@@ -87,18 +77,10 @@
 \draw[flow] (oz)   -- (ir);
 \draw[flow] (ir.east) -- ++(8,0) |- (vmcode.west);
 \draw[flow] (ir.east) -- ++(8,0) |- (llvm.west);
-\draw[flow] (vmcode) -- (vmexec);
+\draw[flow, dashed, draw=muted] (vmcode) -- (vmexec);
 \draw[flow] (llvm.east) -- ++(8,0) |- (jit.west);
 \draw[flow] (llvm.east) -- ++(8,0) |- (wasm.west);
 
-\node[hint] at (ksrc.south)   {qdb/kernel/*/*.oz};
-\node[hintabove] at (oz.north) {qumir/parser/};
-\node[hint] at (ir.south)     {qumir/ir/};
-\node[hint] at (vmcode.south) {qumir/ir/vmcompiler.cpp};
-\node[hint] at (vmexec.south) {qumir/runner/runner\_ir.cpp};
-\node[hint] at (jit.south)    {qumir/runner/runner\_llvm.cpp};
-\node[hintabove] at (llvm.north) {qumir/codegen/llvm/};
-\node[hint] at (wasm.south)   {bin/plan\_export.cpp (wasm-ld)};
 
 %% --------------------------------------------------------------- user modules
 \node[udf] (kumirudf) at (  0, -116) {Kumir UDF};
@@ -110,7 +92,7 @@
 \draw[feed] (rustudf.east) -| (llvm.south);
 
 %% ----------------------------------------------------- kernels join the graph
-\draw[link] (vmexec.east) -- (226, -40);
+\draw[link, dashed, draw=muted] (vmexec.east) -- (226, -40);
 \draw[link] (jit.east)    -- (226, -64);
 \draw[link] (wasm.east)   -- (226, -92);
 \draw[link] (226, -92) -- (226, -40);
@@ -120,7 +102,7 @@
 \node[run] (single) at ( 24, -158)
   {Single-threaded scheduler\sub{run to completion}};
 \node[run] (threaded) at ( 96, -158)
-  {Threaded scheduler\sub{static morsel-driven\\parallelism}};
+  {Threaded scheduler\sub{task scheduling\\static scan ranges}};
 \node[run] (browser) at (168, -158)
   {Browser runtime\sub{single-threaded, WASM}};
 \node[planned] (distrib) at (240, -158)
@@ -140,8 +122,6 @@
 
 \node[bandlabel] at ([yshift=2mm]band1.north west) {Query pipeline};
 \node[bandlabel] at ([yshift=2mm]band2.north west) {Kernel compilation};
-\node[anchor=south east, font=\scriptsize\ttfamily, text=black!50]
-  at ([yshift=2.5mm]band2.north east) {qumir/* = externals/qumir/qumir/*};
 \node[bandlabel] at ([yshift=2mm]band3.north west) {Execution};
 
 %% ---------------------------------------------------------------------- title

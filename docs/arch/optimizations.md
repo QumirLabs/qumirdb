@@ -5,30 +5,9 @@ in the pipeline of plan passes, in the CTE phase that runs after them, and at
 lowering/execution time outside the plan altogether. Each entry gives a minimal
 query and the plan before and after.
 
-## Reproducing the plans
-
-```sh
-QDB_DUMP_PASSES=1 ./build/bin/qdb --sql --data <dir> -i q.sql   # plan after every pass
-./build/bin/qdb --sql --verbose --data <dir> -i q.sql           # logical + runtime plan + scheduler graph
-```
-
-All examples below use four tiny Parquet tables:
-
-| table | columns | rows |
-|---|---|---|
-| `t` | `a int64, b string, c int64` | 6 |
-| `u` | `a int64, d string` | 4 |
-| `v` | `a int64, e int64` | 3 |
-| `big` | `a int64, c int64` | 40 rows in 4 row groups |
-
-Plans are printed by `PrintPlanTree` (`qdb/plan/plan_print.cpp`); source paths
-are shortened here. `rows≈`/`cost≈` annotations appear once `EstimateStats` has
-run, and are elided below where they are not the point.
-
 ## 1. During plan construction
 
-These run inside `qdb/plan/build.cpp`, so `QDB_DUMP_PASSES` already shows their
-result under `===== initial =====`. The "before" shapes below are what the
+These run during logical plan construction, before the pipeline passes. The "before" shapes below are what the
 straightforward translation would produce; they never exist as a plan.
 
 ### 1.1 Global aggregate as a constant group key
@@ -153,15 +132,15 @@ renamed onto the subquery's own one. `SimplifySelfEquality` (§2.2) removes it.
 
 ## 2. Pipeline passes
 
-Order and re-annotation points live in `qdb/plan/pipeline.cpp`. Passes are
+The pass order below is the per-plan optimizer sequence. Passes are
 idempotent; `AnnotateTypes` re-runs after each structural rewrite.
 
-### 2.1 FlattenInnerJoins — `plan/passes/flatten_joins.cpp`
+### 2.1 FlattenInnerJoins
 
 Only with the cost-based optimizer (default; `--nocbo` disables it). Collapses a
 left-deep inner-join chain into one region so DPccp can reassociate it freely.
 
-### 2.2 SimplifySelfEquality — `plan/passes/self_equality.cpp`
+### 2.2 SimplifySelfEquality
 
 A filter that compares a column with itself only rejects NULLs, but the
 estimator would cost it as an equality of two columns, `1/NDV`. Decorrelation
@@ -194,7 +173,7 @@ while `NOT (v.a IS NOT NULL)` would be true.
 A comparison that is kept is estimated by `EstimateStats` as the non-NULL
 fraction of the column, never through its NDV.
 
-### 2.3 PushDownPredicates — `plan/passes/equijoin.cpp`
+### 2.3 PushDownPredicates
 
 A conjunction above a join is split per side: conjuncts referencing only one
 side sink onto that side, the rest stays above as a residual. This is the
@@ -231,11 +210,11 @@ filter (&& (== |t.a| |u.a|) (> (+ |t.c| |u.a|) 25))   -- residual, both sides
 ```
 
 The pass also pushes into derived tables and factors disjunctions
-(`plan/passes/factor_conjuncts.cpp`, `flatten_disjuncts.cpp`): from
+: from
 `(a=1 AND x) OR (a=1 AND y)` it extracts the common `a=1` so it can sink.
 
 **Into UNION ALL branches, with dead-branch elimination.** `ProcessUnion`
-(`equijoin.cpp:365`) rewrites each pushed conjunct into the branch's own column
+ rewrites each pushed conjunct into the branch's own column
 names, substitutes *closed* projections — a branch column whose expression
 references no input, such as a constant tag — and const-folds the result. A
 conjunct folding to `false` kills the branch outright; one folding to `true`
@@ -263,7 +242,7 @@ filter (== |x.tag| "s")                     project (x.a, x.tag)
 
 The `u` branch, the union and the filter all disappear.
 
-### 2.4 ReorderJoins — `plan/passes/join_order.cpp`, `plan/passes/cbo/dpccp.cpp`
+### 2.4 ReorderJoins
 
 Turns a cross-join chain into a connected order, threading equalities down the
 chain; with the CBO on, DPccp picks the order by estimated cost using
@@ -282,7 +261,7 @@ join inner                        join inner
 └─ source u AS u                  └─ source v AS v        (rows≈3)
 ```
 
-### 2.5 ExtractEquiJoins — `plan/passes/equijoin.cpp`
+### 2.5 ExtractEquiJoins
 
 Lifts equalities out of the residual filter into join keys, using equivalence
 classes: `t.a = u.a AND u.a = v.a` yields a key for the upper join even though
@@ -308,7 +287,7 @@ also lets a predicate on one member be replayed on the others.
 
 **Derived per-side filters from a disjunction.** A residual conjunct that
 touches both sides is additionally *weakened* into a one-sided necessary
-condition by `DeriveSideFilter` (`equijoin.cpp:182`): in every disjunct it keeps
+condition by `DeriveSideFilter` : in every disjunct it keeps
 only the atoms over that side and re-ORs them. If any disjunct constrains the
 side with nothing, no condition can be derived and nothing is pushed. The
 original disjunction stays as the join residual — the derived filter is
@@ -342,7 +321,7 @@ Each `nation` scan gets `n_name = 'FRANCE' OR n_name = 'UNITED KINGDOM'`, so 23
 of 25 nations — and everything joined through them — are dropped before the
 join, while the pairing condition is still enforced by the residual above.
 
-### 2.6 PushDownSemiJoins — `plan/passes/join_order.cpp`
+### 2.6 PushDownSemiJoins
 
 A semi join whose keys touch one side of an inner join below it is pushed onto
 that side, so the semi filter shrinks the input before the inner join runs.
@@ -360,7 +339,7 @@ join left_semi [t.a = u.a]          join inner [t.a = v.a]
 └─ source u AS u                    └─ source v AS v
 ```
 
-### 2.7 PushDownLimits — `plan/passes/push_limit.cpp`
+### 2.7 PushDownLimits
 
 `LIMIT` sinks through row-preserving projections down to the source, so the scan
 stops early instead of after the whole projection chain.
@@ -378,7 +357,7 @@ limit                     project (a)
          └─ source t                └─ source t AS t
 ```
 
-### 2.8 ApplyTopSort — `plan/passes/top_sort.cpp`
+### 2.8 ApplyTopSort
 
 `limit(sort(...))` collapses into a single top-K operator, which keeps a bounded
 heap instead of materializing and sorting the whole input.
@@ -395,7 +374,7 @@ limit 2                                project (a)
       └─ source t AS t                       └─ source t AS t
 ```
 
-### 2.9 ApplyColumnPruning — `plan/passes/column_pruning.cpp`
+### 2.9 ApplyColumnPruning
 
 Narrows each operator's required input columns, which for a Parquet source means
 fewer column chunks are read. It does not change the tree shape, so it shows up
@@ -415,15 +394,14 @@ source u.parquet AS u (cost≈96)         source u.parquet AS u (cost≈32)
 
 ## 3. CTE phase
 
-Runs once after every plan (main plus each definition) has been optimized —
-`ApplyPlanPasses` in `qdb/plan/pipeline.cpp`.
+Runs once after every plan (main plus each definition) has been optimized.
 
 ### 3.1 PushConsumerPredicatesIntoDefinitions / PropagateCteDemands
 
 A predicate that every consumer applies is pushed into the definition, and the
 definition's output schema is narrowed to the union of what consumers demand.
 
-### 3.2 ApplyLateMaterialization — `plan/passes/late_materialization.cpp`
+### 3.2 ApplyLateMaterialization
 
 After CTE demand is known, QDB knows the final columns for each plan. For a
 wide query with a small limit, QDB can read only the filter and sort columns
@@ -431,7 +409,7 @@ first. It fetches the other columns after the limit. The default limit
 threshold is 100 rows. The eager scan estimate must be at least 2x the late
 estimate. See [late_materialization.md](late_materialization.md).
 
-### 3.3 ChooseCteReuse / ApplyCteReuse — `plan/passes/cte_reuse.cpp`
+### 3.3 ChooseCteReuse / ApplyCteReuse
 
 Cost-based: a definition used once (or cheap enough to recompute) is inlined,
 otherwise it stays a materialized `cte-ref` shared by consumers.
@@ -452,7 +430,7 @@ join inner [w.a = u.a]                  join inner [w.a = u.a]
 
 ## 4. Outside the plan pipeline
 
-### 4.1 Parquet row-group pruning — `plan/passes/row_group_predicate.cpp`
+### 4.1 Parquet row-group pruning
 
 `AttachRowGroupPredicates` runs after the CTE phase and attaches a conservative
 predicate *hint* to the source; scheduler lowering evaluates it against each
@@ -472,7 +450,7 @@ filter (> |t.c| 40)                 filter (> |t.c| 40)
 `QDB_DEBUG_ROW_GROUP_PREDICATE=1` reports what was skipped.
 See [predicate_pushdown.md](predicate_pushdown.md#parquet-row-group-pruning).
 
-### 4.2 Scan splitting — `scheduler/scan_split.cpp`
+### 4.2 Scan splitting
 
 With the threaded scheduler a Parquet source is split into up to `--scan-tasks`
 independent row-group ranges, which is what creates the parallel lanes every
@@ -487,7 +465,7 @@ count otherwise. Single-threaded execution stays serial by default. Positive
 `--scan-tasks` values preserve the explicit limit. See
 [Scan parallelism](scan_parallelism.md), including the comparison with DuckDB.
 
-### 4.3 Hash-shuffled grouped aggregate — `scheduler/plan_lowerer.cpp`
+### 4.3 Hash-shuffled grouped aggregate
 
 Always on for a grouped aggregate over parallel input: the input is shuffled by
 group key into partition-local tables, each of which computes complete groups.
@@ -521,13 +499,7 @@ conn blocking-input-gather gather src=4 dst=1  conn aggregate-cascade-input  one
                                                conn aggregate-cascade-gather gather     src=4 dst=1
 ```
 
-Measured on ClickBench (`hits.parquet`, 100 M rows, 18 workers):
-`SELECT AVG(UserID) FROM hits` takes 0.337 s by default and 0.045 s with the
-cascade — DuckDB on the same machine takes 0.046 s. The default is off because
-the single-aggregate path wins for cheap aggregates over small inputs; on large
-scans it costs ~7×.
-
-### 4.5 Parallel grouping sets — `scheduler/plan_lowerer.cpp`
+### 4.5 Parallel grouping sets
 
 ROLLUP/GROUPING SETS over parallel input always use `partial → shuffle →
 combine`, keyed by a synthetic `__grouping_id__` so masked-NULL sets stay
@@ -537,7 +509,7 @@ distinct. Unlike the global cascade this one is not behind a flag.
 
 The inner join starts symmetric — both sides build and probe — and switches to
 probe-only streaming for the remaining side as soon as one input is exhausted,
-which is normally the smaller one. Nothing is decided by the planner: the
+which is normally the smaller one. the
 adaptation is a scheduling property, so a wrong cardinality estimate costs
 nothing here. See [join.md](join.md).
 
@@ -552,12 +524,11 @@ conn join-right-shuffle hash-shuffle src=1 dst=2
 
 ### 4.7 Kernel fusion and the JIT object cache
 
-All kernels of one query are compiled as a single fused module (shared helpers
-are deduplicated), and `QDB_JIT_CACHE_DIR=<dir>` caches the compiled objects
-keyed by kernel spec, so a repeated query skips LLVM entirely. Planning plus JIT
-is ~0.14 s on a cold cache for a single-aggregate query — the fixed cost that
-dominates sub-second queries. See
-[kernel-compilation-phases.md](kernel-compilation-phases.md).
+All kernels of one query are compiled as a single fused module, with shared
+helpers deduplicated. This shares compilation without removing operator/task
+boundaries. The persistent JIT object cache reuses eligible objects, but
+planning, frontend work, query-specific emission, and linking still remain.
+See [kernel-compilation-phases.md](kernel-compilation-phases.md).
 
 ### 4.8 Arena allocation for string aggregation keys
 
@@ -567,20 +538,11 @@ keys does not turn into a malloc storm. See [aggregation.md](aggregation.md).
 
 ## 5. Helpers that are not optimizations
 
-- `plan/passes/const_fold.cpp` — `ConstFold` is a helper, not a pipeline pass.
-  Its only production caller is `plan/passes/equijoin.cpp:403`, inside the
-  UNION ALL pushdown of §2.3: a conjunct cloned into a branch, with closed
-  projections substituted for its columns, is folded to decide whether the
-  branch is dead, needs the filter, or trivially satisfies it.
+- `ConstFold` is a helper, not a pipeline pass. UNION ALL pushdown uses it
+  after substituting closed projections to decide whether a branch is dead,
+  needs the filter, or trivially satisfies it.
 - `AssignSourceAliases`, `QualifyColumns`, `AnnotateTypes`,
   `CoerceSetOpBranches`, `unbound_vars`, `typing` — normalization and checking.
-- `EstimateStats` (`plan/passes/estimate_stats.cpp`) — produces the row counts,
+- `EstimateStats` — produces the row counts,
   NDVs and selectivities that ReorderJoins and ChooseCteReuse consume. Parquet
   files may carry NDV and equi-depth histograms in a custom footer key.
-
-## 6. Not yet in master
-
-- **Aggregate hash-table pre-sizing from NDV** — sizes the Robin Hood table from
-  group-key NDVs instead of growing from 4, and moves the string hash/copy
-  primitives into the runtime. On branch `todo-aggregate-presizing`, pending the
-  review findings recorded there.

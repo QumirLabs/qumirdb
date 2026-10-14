@@ -29,27 +29,34 @@ separate pages for each benchmark.
 
 ## Query pipeline
 
-SQL → logical plan → idempotent rewrite passes → physical plan. Entry point
-`bin/cli.cpp` (`RunQuery`); builder `qdb/plan/build.cpp`; passes
-`qdb/plan/passes/`.
+SQL → logical plan → typed rewrite passes → physical task graph and kernels
+→ compilation → scheduled execution.
 
-1. **Build** — SQL AST → naive operator tree (no keys, no pushdown, no reorder).
+1. **Build** — SQL AST → initial operator tree, including aggregate rewrites and
+   supported subquery decorrelation.
    [logical_plan_build.md](logical_plan_build.md), [decorrelation.md](decorrelation.md).
-2. **AssignSourceAliases** — unique alias per source.
-3. **QualifyColumns** — rewrite refs to `alias.col`; set source/join schemas.
-4. **AnnotateTypes** — attach `TFunctionType` (input/output schema) to every op;
-   idempotent, re-run after each structural rewrite.
-5. **ReorderJoins** — cross-join chains → connected order.
+2. **AssignSourceAliases / QualifyColumns / AnnotateTypes** — resolve column
+   ownership and schemas; re-annotate after structural rewrites.
+3. **FlattenInnerJoins** (with CBO), **SimplifySelfEquality**, then
+   **PushDownPredicates** — expose join regions and filtered leaf inputs.
+4. **EstimateStats / ReorderJoins** — choose a cost-based connected join tree,
+   or use the greedy fallback when CBO cannot apply.
    [join_reorder.md](join_reorder.md).
-6. **ExtractEquiJoins** — lift equi-keys (equivalence classes), push predicates
-   per side, leave residuals. [predicate_pushdown.md](predicate_pushdown.md).
-7. **ApplyColumnPruning** — narrow each op's required input columns.
-8. **ApplyLateMaterialization** — after CTE output demand is known, move wide
-   output columns after a small limit when the cost is lower.
+5. **ExtractEquiJoins / PushDownSemiJoins** — place keys, residuals, and safe
+   existence filters. [predicate_pushdown.md](predicate_pushdown.md).
+6. **PushDownLimits / ApplyTopSort / CoerceSetOpBranches / ApplyColumnPruning** —
+   bound work, align set-operation schemas, and establish output demand.
+   **RewriteOuterJoinAsAnti** runs after pruning; a successful rewrite repeats
+   typing, semi pushdown, and pruning before the final estimate.
+7. **CTE optimization** — push common consumer predicates, propagate demand,
+   apply late materialization, and choose inlining versus shared reuse.
    [late_materialization.md](late_materialization.md).
-9. **AttachRowGroupPredicates** — attach a conservative Parquet row-group
-   pruning hint without removing the row-level filter.
-   [predicate_pushdown.md](predicate_pushdown.md#parquet-row-group-pruning).
+8. **AttachRowGroupPredicates / AttachRuntimeFilters** — attach conservative
+   scan and join-filter hints after plan restructuring.
+9. **Lower / compile / execute** — select scan lanes and exchanges, generate
+   kernels, finalize their code, and schedule tasks.
+   [scheduler_runtime.md](scheduler_runtime.md),
+   [kernel-compilation-phases.md](kernel-compilation-phases.md).
 
 - [Optimizations](optimizations.md) - every rewrite in one place: build-time,
   pipeline passes, the CTE phase and the execution-time ones, each with a
@@ -59,10 +66,10 @@ Detailed algorithm docs:
 
 - [Logical plan build](logical_plan_build.md) - SQL AST → naive operator tree:
   FROM/WHERE/SELECT/GROUP BY/HAVING mapping, aggregate-argument materialization,
-  global-aggregate and `count(distinct)` rewrites, CTE inlining, derived-table
+  global-aggregate and `count(distinct)` rewrites, shared CTE definitions and reuse, derived-table
   aliases.
 - [Join reorder](join_reorder.md) - rewriting cross-join chains into a connected
-  order by threading filter equalities down to each chain.
+  order using CBO or the greedy fallback, with filter equalities available to each chain.
 - [Predicate pushdown](predicate_pushdown.md) - equi-key extraction via
   equivalence classes, per-side predicate pushdown, disjunction factoring and
   derived side filters, outer-join residual handling.
@@ -85,19 +92,7 @@ Physical execution:
   locators, lookup tasks, and safety rules.
 - [Dispatch](dispatch.md) - runtime shell dispatch model, node kinds, and
   kernel/dispatcher ownership split.
-- [String values](string_values.md) - proposed borrowed/owned string ABI for
+- [String values](string_values.md) - borrowed/owned string representations for
   filtering and aggregation, including dual lookup/storage key types.
 - [SQL expression pseudo-calls](sql_pseudo_calls.md) - call-shaped parser and
   typing markers for `IN`, concatenation, and SQL NULL semantics.
-
-Deployment:
-
-- [Building, running, benchmarking](../building.md) - build/test commands, the
-  CLI, the web workbench, plan export, and the TPC-H/ClickBench runners.
-- [Benchmark results](../benchmarks/README.md) - measured ClickBench, TPC-H and
-  TPC-DS numbers for qdb, DuckDB and YQL, per query and per scale, with what
-  each engine's metric does and does not include. A dated snapshot: qumirdb is
-  under development and the numbers are expected to move.
-- [Rust toolchain](rust_toolchain.md) - toolchain external `CREATE MODULE`
-  compilation needs, why the Rust release is pinned to the linked LLVM, and how
-  to configure it for the packaged service user.

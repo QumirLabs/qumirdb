@@ -1,8 +1,7 @@
 # Join architecture
 
-This document describes the current physical join implementation. Development
-history lives in `PLAN_JOIN.md`, `PLAN_RESIDUAL_FILTER.md`, and
-`PLAN_JOIN_STREAMING.md`; this file is the runtime contract.
+This document describes hash matching, input scheduling, and ownership across
+join modes.
 
 ## Overview
 
@@ -23,25 +22,11 @@ reaches EOF:
 - output involving a streamed row is materialized immediately, while that
   stream batch is still alive.
 
-This gives the join a CBO-free way to avoid materializing the large side when
-the smaller side naturally finishes first.
-
-## Source map
-
-| Area | Source |
-|---|---|
-| Logical join operator and output schema | `qdb/ops/join.{h,cpp}` |
-| Physical planning | `qdb/exec/planner.cpp` |
-| Runtime executor and output materialization | `qdb/exec/join_exec.{h,cpp}` |
-| Join key descriptor | `qdb/kernel/join_key.{h,cpp}` |
-| Generated join process/probe/finalize AST | `qdb/kernel/join_gen.{h,cpp}` |
-| Residual predicate AST generation | `qdb/kernel/gen.{h,cpp}` |
-| JIT compilation and C++ callable ABI | `qdb/kernel/compiler.{h,cpp}` |
-| Generic Oz join table/update code | `qdb/kernel/join/*.oz` |
-| Shared hash table ABI | `qdb/modules/qumirdb.cpp` |
-| Runtime tests | `test/test_join_exec.cpp` |
-| Kernel tests | `test/test_join_kernel.cpp` |
-| Planner tests | `test/test_join_planner.cpp` |
+This can avoid materializing the large side without a cardinality estimate.
+Lowering can also choose build-first inner execution when estimates show strong
+asymmetry; a runtime filter may require completing its build input first. In
+that path, the build side finishes before the probe stream starts. Poor estimates
+can still affect work and memory.
 
 ## Supported join forms
 
@@ -54,17 +39,17 @@ Current production support:
 | `LeftAnti` | Supported | Left-preserving, emits left columns only |
 | `Left` | Supported | Symmetric path plus unmatched-left final scan |
 | `Right` | Supported | Symmetric path plus unmatched-right final scan |
-| `Full` | Not implemented in runtime | Logical output typing exists, runtime guard rejects it |
+| `Full` | Supported | Symmetric path plus unmatched scans on both sides |
 | `RightSemi` / `RightAnti` | Not implemented in runtime | Logical enum exists, runtime guard rejects it |
-| Cross join | Supported for `Inner` only | Separate `TRuntimeCrossJoin` path |
+| Cross join | Supported for `Inner` only | Separate `TCrossJoinProcessor` path |
 
-Residual predicates are supported for `Inner`, `LeftSemi`, and `LeftAnti`.
-They are intentionally rejected for outer joins until null-padding semantics and
-unmatched-row tracking are handled inside the residual path.
+Residual predicates are supported for inner, semi/anti, and outer joins.
+Only pairs passing the residual count as matches for outer finalization.
 
-String join keys are not supported by the current production `CompileJoin`
-validation. Fixed-width integer and `f64` keys are supported, including
-composite key structs generated from multiple equi-key pairs.
+String, fixed-width, and nullable keys are supported, including composite keys.
+Ordinary equality skips NULL keys; explicit null-safe keys use their declared
+matching contract. Borrowed lookup keys and owned stored keys share compatible
+hash/equality semantics.
 
 ## Output schema
 
@@ -75,7 +60,7 @@ composite key structs generated from multiple equi-key pairs.
 - `RightSemi` / `RightAnti`: right columns only, typed but not executed;
 - `Left`: left columns followed by nullable right columns;
 - `Right`: nullable left columns followed by right columns;
-- `Full`: nullable columns from both sides, typed but not executed.
+- `Full`: nullable columns from both sides.
 
 For joins that emit both sides, duplicate column names are an error. The
 column-qualification pass normally prevents accidental collisions by rewriting
@@ -90,120 +75,22 @@ Column pruning runs before physical planning. Each join child keeps:
 The physical planner then computes runtime output types from the pruned child
 schemas.
 
-## Runtime data structures
-
-`TRowStore` owns retained input batches for one join side. Stored rows are
-addressed by a packed `TRowId`:
-
-```text
-row_id = (batch_idx << 32) | row_idx
-```
-
-`kNullRowId == -1` marks absent rows for outer-join null padding and for
-semi/anti builder pairs where the non-emitted side is ignored.
-
-`TJoinOutputBuilder` stores `(left_row_id, right_row_id)` pairs and later
-gathers output columns from `LeftRows_` and `RightRows_`. This is used when
-both sides of a pair are retained.
-
-Probe-only streaming uses a different materialization path. The streamed row
-does not have a stable `TRowStore` entry, so `TRuntimeJoin` drains the kernel
-pair buffer immediately into owned output `TRowSet`s and queues them in
-`ReadyOutput_`. The stream batch can then be released safely.
-
-## Hash tables and pair buffers
-
-Join reuses the generic `HashTable` external ABI used by aggregation, but with
-join-specific dense buffers:
-
-```text
-AggBuffers[0] = bucket row count per dense slot
-AggBuffers[1] = bucket row capacity per dense slot
-AggBuffers[2] = bucket data pointer, stored as i64
-```
-
-Each side has its own `HashTable` buffer:
-
-```text
-LeftTable_
-RightTable_
-```
-
-The kernel emits matches into a `PairBuffer` containing adjacent left/right
-row-id pairs:
-
-```text
-Data[2*i + 0] = left row id
-Data[2*i + 1] = right row id
-```
-
-The pair buffer grows in Oz code and is destroyed by the compiled kernel
-library. C++ resets only `Count` after draining.
-
-## Kernel split
-
-`TKernelCompiler::CompileJoin` composes one complete Qumir AST per entry point:
-
-1. generated key type declarations;
-2. generated `rh_hash(Key)` and `rh_key_equal(Key, Key)`;
-3. generic join library from `qdb/kernel/join/*.oz`;
-4. generated entry wrappers for the concrete query.
-
-The compiled `TJoinKernels` ABI contains:
-
-| Entry | Purpose |
-|---|---|
-| `Init(table, capacity)` | Initialize one side's hash table |
-| `ProcessLeft(own, opp, batch, batch_idx, pairs, left_store, right_store)` | Probe right, emit matches, insert left rows |
-| `ProcessRight(own, opp, batch, batch_idx, pairs, left_store, right_store)` | Probe left, emit matches, insert right rows |
-| `ProbeLeftStream(build, batch, batch_idx, pairs, left_store, right_store)` | Probe right/build table with a left stream batch; no insert |
-| `ProbeRightStream(build, batch, batch_idx, pairs, left_store, right_store)` | Probe left/build table with a right stream batch; no insert |
-| `InsertKeyOnly(own, opp, batch, batch_idx, pairs)` | Build a key-existence table for non-residual semi/anti |
-| `FinalizeAntiSemi(own, opp, pairs)` | Scan left table and emit semi/anti left row ids |
-| `FinalizeOuter(own, opp, pairs)` | Scan own side and emit rows with no opposite match |
-| `DestroyTable(table)` | Free table allocations |
-| `DestroyPairs(pairs)` | Free pair-buffer allocation |
-
-The generic Oz helper `jt_probe_and_emit` does the common probe and pair emit.
-`jt_emit_and_insert` calls it first, then inserts the current row into the
-own-side table. Probe-only wrappers call only `jt_probe_and_emit`.
-
-This split is deliberate: the expensive and type-specialized key extraction is
-generated once per side, while the generic table code remains shared.
-
 ## Residual predicates
 
 A residual predicate is a non-key predicate over the joined row, for example
 `l1.l_suppkey != l2.l_suppkey` in TPC-H Q21.
 
-Residual filtering happens in the join kernel before `pb_push`. The compiler
-replaces the default always-true Oz function:
+Residual filtering happens inside the join kernel before a pair is emitted.
+Generated code materializes only referenced columns and accepts the pair only
+when the SQL predicate is TRUE; FALSE and UNKNOWN do not match.
 
-```text
-jt_residual_filter(left_store, right_store,
-                   stream_left_batch, stream_right_batch,
-                   left_row_id, right_row_id) -> bool
-```
-
-with a generated predicate function. It decodes row ids, materializes only the
-referenced columns, evaluates SQL three-valued truth rules for nullable values,
-and returns a boolean.
-
-Stored rows are read from `left_store[batch_idx]` or `right_store[batch_idx]`.
-For probe-only streaming, the generated probe wrapper passes `batch_idx == -1`
-for the streamed side. The residual function interprets that sentinel as:
-
-```text
-left batch  == -1 -> read left columns from stream_left_batch
-right batch == -1 -> read right columns from stream_right_batch
-```
-
-This keeps residual evaluation inside the kernel without retaining the streamed
-side.
+Residual evaluation reads retained rows or the current transient probe batch.
+Output involving the transient batch is materialized before that batch is
+released; the join need not retain it just to evaluate the residual.
 
 ## Scheduling
 
-`TRuntimeJoin` has three inner-join modes:
+`TInnerJoinProcessor` has three inner-join modes:
 
 ```text
 Symmetric
@@ -215,15 +102,7 @@ In `Symmetric` mode, both sides are still live. A pulled batch is retained in
 that side's `TRowStore`, processed by `ProcessLeft` or `ProcessRight`, and
 inserted into that side's hash table.
 
-The scheduler is row-balanced, not simple batch round-robin. It tracks:
-
-```text
-StoredLeftRows_
-StoredRightRows_
-LastLeftBatchRows_
-LastRightBatchRows_
-```
-
+The automatic input policy tracks retained row counts and recent batch sizes,
 and prefers the side with fewer stored rows unless pulling one more batch of
 that side would likely catch up to or exceed the other side. This matters for
 TPC-H because Parquet batches can be large and join output batches can be
@@ -233,15 +112,13 @@ finish, then switches the large side to probe-only streaming.
 
 When one side returns EOF:
 
-- `LeftDone_` or `RightDone_` is set;
-- if the other side is still live, `StreamMode_` switches to the corresponding
-  probe-only mode;
+- it becomes the complete build side;
+- if the other side is still live, processing switches to probe-only mode;
 - remaining batches from the live side call `ProbeLeftStream` or
   `ProbeRightStream`;
 - the stream batch is materialized into owned output immediately and released.
 
-`BothDone_` becomes true only when the build side has reached EOF and the
-stream side has also finished.
+Completion requires EOF on both build and stream inputs.
 
 Outer joins currently keep the older symmetric scheduling path. They need the
 retained opposite table for final unmatched scans, so probe-only streaming is
@@ -252,7 +129,7 @@ not enabled there.
 ### Inner
 
 `Inner` uses the adaptive scheduler described above. Stored/stored matches go
-through `TJoinOutputBuilder`. Stream/stored matches are materialized
+through the generated output materializer. Stream/stored matches are materialized
 immediately into `ReadyOutput_`.
 
 ### LeftSemi / LeftAnti without residual
@@ -270,7 +147,7 @@ The right side is never retained because only key existence is needed.
 ### LeftSemi / LeftAnti with residual
 
 Residual semi/anti cannot use `InsertKeyOnly`, because the residual predicate
-may reference right-side non-key columns. The current path:
+may reference right-side non-key columns. The blocking path (alongside supported build-first streaming paths):
 
 1. consumes all left batches into `LeftRows_` and `LeftTable_`;
 2. streams every right batch through `ProbeRightStream`;
@@ -291,13 +168,13 @@ Outer joins use symmetric probe+insert while inputs are live, then call
   are swapped before materialization.
 
 The finalize kernel emits rows with no opposite-side match as `(row_id, -1)`.
-`TJoinOutputBuilder` turns `kNullRowId` into null output values.
+The generated output materializer emits NULL values for the absent side.
 
 ### Cross join
 
-`TRuntimeCrossJoin` is separate from hash join. It buffers the entire right
+`TCrossJoinProcessor` is separate from hash join. It buffers the entire right
 side, then streams left batches and emits the Cartesian product through
-`TJoinOutputBuilder`. Cross join is accepted only for `Inner`.
+the generated output materializer. Cross join is accepted only for `Inner`.
 
 ## Memory and lifetime invariants
 
@@ -315,21 +192,12 @@ The implementation relies on these invariants:
   reused;
 - `ReadyOutput_` owns already-materialized output rowsets and is drained before
   pulling more input;
-- the `TRuntimeJoin` destructor releases any queued `ReadyOutput_` batches if
+- the `TInnerJoinProcessor` destructor releases any queued `ReadyOutput_` batches if
   the consumer stops early.
 
-## Current limitations and likely next work
+## Current limitations
 
-The largest remaining limitations are:
-
-- no runtime `Full`, `RightSemi`, or `RightAnti`;
-- no residual predicates for outer joins;
-- no string join keys;
-- outer joins do not use adaptive probe-only streaming;
-- intermediate join output is still materialized as full rowsets between
-  operators rather than fused directly into a following project/aggregate.
-
-For TPC-H Q9, the current row-balanced scheduler is critical: it avoids
-materializing almost all of `lineitem` before the small filtered part/partsupp
-side reaches EOF. Further performance work is likely to focus on reducing
-intermediate materialization after matches rather than on hash insertion.
+- Runtime kernels do not directly execute `RightSemi` / `RightAnti`.
+- Outer joins retain the symmetric path rather than adaptive probe-only streaming.
+- Intermediate rowsets remain explicit between operators; compiling kernels in
+  one module does not imply cross-operator row-loop fusion.

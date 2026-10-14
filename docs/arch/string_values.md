@@ -1,9 +1,9 @@
 # String values in kernels
 
-Status: proposed architecture. The implementation plan is tracked in
-`PLAN_AGGREGATION.md`, section M13.
+This document explains borrowed column values and owned keys across kernel
+and operator lifetimes.
 
-## Current mismatch
+## Column and kernel representations
 
 QDB exposes Arrow strings as a variable-width `TColumn`:
 
@@ -16,14 +16,13 @@ Mask        -> optional validity bitmap
 
 Qumir `string` is a different, managed runtime object. It is represented by a
 pointer to NUL-terminated data with a refcounted header. Casting `TColumn.Data`
-to `<ptr string>` is therefore invalid. The current filter generator does
-exactly this for every logical field type, so string predicates are not a
-working path today.
+to `<ptr string>` is therefore invalid. QDB instead materializes a borrowed
+string view from the column's byte storage and offsets.
 
 Aggregation has an additional lifetime problem: input batches are released
 immediately after update, while group keys must remain valid until finalize.
 
-## Proposed value types
+## Value types
 
 QDB kernels must not use Qumir `TStringType` or the Qumir managed `string`
 runtime at all. `TStringType` may remain the logical schema marker received
@@ -46,7 +45,7 @@ managed-string lowering.
 
 `OwnedString` is a semantic name, not per-value RAII. Copying or swapping the
 two-field struct does not transfer or duplicate ownership. This property is
-required because Robin Hood insertion moves keys and the same logical key is
+required because hash-table growth moves keys and the same logical key is
 also referenced by dense output storage.
 
 Lengths are byte lengths, not Unicode symbol counts. Hashing, equality,
@@ -71,12 +70,9 @@ This logic must not be duplicated between filter and aggregation.
 
 ## Why lookup and storage keys differ
 
-The current hash table uses one generic `Key` type for both input lookup and
-stored entries. That would force a string copy before every lookup, including
-duplicates. It would also require rollback/free behavior for a temporary owned
-key.
-
-Instead, generated aggregation code should derive two representations:
+Using one owned key for both lookup and storage would force a string copy
+before every lookup, including duplicates. Generated aggregation code therefore
+derives two representations:
 
 ```text
 LookupKey  = fixed fields + StringView leaves
@@ -87,7 +83,7 @@ For a scalar string these are the corresponding scalar named types. For a
 composite key, QDB generates parallel named structs with identical logical
 field order but different string leaf types.
 
-The table API then becomes conceptually:
+The table API is conceptually:
 
 ```text
 lookup(StoredKey[], LookupKey) -> dense slot or -1
@@ -107,7 +103,7 @@ The distinction is operational, not only nominal:
 | Lifetime | One update call/batch | Until table destruction |
 | Construction | Materialize without allocation | Clone only after lookup miss |
 | Probe argument | Yes | Existing resident key |
-| Robin Hood storage | No | Yes |
+| Table storage | No | Yes |
 | Rehash | Never retained | Handle copied without copying bytes |
 
 For fixed-width leaves both representations use the same concrete type. For
@@ -129,73 +125,21 @@ identity operation that ignores its byte buffer. Generic update code can
 therefore always execute `lookup -> allocate an arena slice -> clone -> insert`;
 the allocation step is skipped when the requested size is zero.
 
-## Generated type helpers
-
-The AST generator must recursively produce helpers for the concrete pair of
-types:
-
-```text
-rh_hash(LookupKey) -> i64
-rh_hash(StoredKey) -> i64
-rh_key_equal(StoredKey, LookupKey) -> bool
-rh_key_equal(StoredKey, StoredKey) -> bool
-key_owned_bytes(LookupKey) -> i64
-key_clone_owned(LookupKey, <ptr u8>) -> StoredKey
-```
-
-Both hash overloads must use the same byte hash and struct combiner. Equality
-must compare lengths first and then bytes. Composite helpers recurse through
-nested fields and ignore generated padding.
-
-`key_clone_owned` is recursive and type-directed. Fixed-width leaves are
-copied directly. String leaves copy bytes into successive slices of one
-caller-provided block and construct `OwnedString` handles pointing into those
-slices.
-
-The first implementation should use a small, stable Oz byte hash with fixed
-test vectors. A faster hash can replace it later only with deliberate
-compatibility and performance testing. Hash values are process-local table
-details; they are not persisted.
-
 ## Owned byte storage
 
-Each new group receives one contiguous byte slice containing all string leaves
-of its key. Generated clone code sets each `OwnedString.Data` into that slice.
+Each new group receives owned bytes for its string key leaves. Slices come
+from a table-owned chunked arena, amortizing allocation across many groups.
+Only the newest chunk accepts new slices; unused tails trade some memory for
+constant-time bump allocation. Oversized values receive a suitable chunk.
 
-Slices come from a table-owned chunked arena. Chunks start at 4 KiB and grow
-geometrically up to 2 MiB; a request larger than that receives an exactly sized
-chunk. Each chunk has a 24-byte `{magic, capacity, used}` header and allocations
-bump the `used` offset. The magic distinguishes arena chunks from foreign or
-legacy registry entries before their allocator fields are read; a mismatch
-fails allocation without modifying the registry. This turns the allocation
-cost from one allocation per unique string-bearing group into roughly one
-allocation per arena chunk.
-
-Only the most recent chunk accepts new slices. If a request does not fit, its
-remaining tail is not revisited; this keeps allocation constant-time at the
-cost of up to roughly 2x fragmentation for adversarial sizes. Ordinary short
-string keys leave much smaller tails.
-
-The table owns a registry of chunk bases. `aht_destroy` delegates its cleanup
-to the shared `owned_arena_destroy` lifecycle helper, so allocation ownership
-has one destruction path across aggregation and join kernels. Rehash copies
-`OwnedString` handles and never clones or frees their bytes. If insertion fails
-after allocation, the most recent slice is rewound; an empty chunk may remain
-registered for reuse.
-
-The registry reuses the three previously unused 8-byte scratch slots in
-`HashTable`: `OwnedBlocks`, `OwnedBlockCount`, and `OwnedBlockCapacity` at
-offsets 40, 48, and 56. The table ABI therefore remains 104 bytes.
-
-Allocation must happen only after borrowed lookup reports a miss. A failure
-during allocation or insertion must leave the table logically unchanged and
-return an error.
+Rehash copies `OwnedString` handles without cloning or freeing their bytes.
+Allocation follows a borrowed lookup miss. An insertion failure rewinds the
+latest slice, and table destruction releases registered arena chunks once.
+Exact chunk sizes and registry layout are implementation details in the wiki.
 
 ## String output
 
-The current fixed-width finalize ABI allocates `row_count * field.Size`, which
-cannot represent strings. String key output needs Arrow-compatible column
-storage:
+String key output uses Arrow-compatible variable-width column storage:
 
 ```text
 Data        -> copied UTF-8 bytes
@@ -211,20 +155,18 @@ Use a two-pass finalize:
    values.
 4. The table may then be destroyed; output no longer references its arena.
 
-`TAggregateOutputKey` must become a representation descriptor rather than only
-`Size` and `Alignment`. The generated finalize ABI should receive output
-`TColumn` descriptors, or an equivalent structure carrying both data and
-offset buffers.
+Finalization produces column descriptors carrying data, offsets, and validity.
+The output owner remains independent of the table arena.
 
 ## Filtering
 
-Filtering should consume the same generated `StringView` values, but it does
+Filtering consumes the same generated `StringView` values, but it does
 not need owned strings. The filter expression boundary needs explicit
 StringView operations for at least:
 
 - equality and inequality;
 - lexical ordering;
-- optional prefix/contains helpers later.
+- optional prefix/contains helpers where the expression permits.
 
 Column-to-column comparisons can be fully `StringView` based. String literals
 in query expressions must also be lowered by QDB into static byte storage plus
@@ -234,12 +176,10 @@ Parsing and annotation of the final kernel AST must see both column bindings
 and literals as `StringView`. Otherwise Qumir can select managed-string
 operators and insert retain/release behavior inappropriate for Arrow memory.
 
-The current filter path annotates the logical predicate through a wrapper whose
-string parameters are `TStringType`. String support therefore requires a
-separate kernel specialization pass: clone/rewrite the predicate's string
-field bindings and literals to `StringView`, then resolve and annotate the
-complete generated kernel. Reusing an already annotated managed-string
-predicate is not sufficient.
+Kernel specialization rewrites logical string bindings and literals to
+`StringView`, then resolves and annotates the complete generated kernel.
+Reusing a managed-string predicate without this representation change would
+not be sufficient.
 
 ## Null semantics
 
@@ -252,8 +192,8 @@ still determines what null means:
 
 - `GROUP BY`: null keys participate in grouping; nulls in the same key position
   compare equal for grouping, and their payload bytes must not be read;
-- `WHERE`: a null/unknown predicate does not select the row; correct compound
-  nullable predicates eventually require three-valued logic;
+- `WHERE`: a null/unknown predicate does not select the row; compound
+  nullable predicates preserve three-valued logic;
 - `count(*)` counts rows, `count(arg)` skips null arguments, and `sum/min/max`
   skip null inputs and need a defined empty-group result;
 - output columns carry nulls through their own `TColumn.Mask`.
@@ -271,7 +211,7 @@ rule.
 - Stored keys never reference input batch memory.
 - `OwnedString` bytes remain immutable until table destruction.
 - Equal lookup/stored keys always produce the same hash.
-- Robin Hood displacement and rehash never allocate or free string bytes.
+- Probe-table rebuild and rehash never allocate or free string bytes.
 - Final output owns its bytes and does not reference the table arena.
 - String comparisons use byte length and do not depend on NUL termination.
 - No generated QDB kernel value has Qumir `string` type.

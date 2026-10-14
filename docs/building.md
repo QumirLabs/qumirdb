@@ -32,6 +32,13 @@ Run one test binary directly:
 ./build/test/test_sort
 ```
 
+## External modules
+
+Rust `CREATE MODULE` queries require a local toolchain whose LLVM bitcode is
+compatible with QDB's linked LLVM. The current LLVM 20 CI build uses Rust 1.90.0
+with `rust-src` for wasm64 standard-library compilation. Service-user setup and
+toolchain troubleshooting are documented in the project wiki.
+
 ## CLI
 
 Run SQL against a directory of `<table>.parquet` files:
