@@ -30,6 +30,10 @@
     "range_inverted.sql": {"order": "ordered"},
     "range_ndv_zero.sql": {"order": "ordered"},
     "in_list_duplicates.sql": {"order": "ordered"},
-    "in_list_null.sql": {"order": "ordered"}
+    "in_list_null.sql": {"order": "ordered"},
+    "in_list_outside_domain.sql": {"order": "ordered"},
+    "not_in_list_outside_domain.sql": {"order": "ordered"},
+    "not_in_list_all_values.sql": {"order": "ordered"},
+    "not_equal_chain.sql": {"order": "ordered"}
   }
 }

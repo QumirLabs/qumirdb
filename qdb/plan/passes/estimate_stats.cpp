@@ -374,8 +374,9 @@ double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shar
     };
 
     // `col IN (c1, ..., cn)`: the number of distinct constants that can equal a
-    // value of col, and the distinct count of col. NULL equals no value. Empty
-    // when an item cannot be resolved or the column has no distinct count.
+    // value of col, and the distinct count of col. NULL equals no value, and a
+    // constant outside the column's min and max neither. Empty when an item
+    // cannot be resolved or the column has no distinct count.
     auto inListValues = [&](const TExprPtr& expr) -> std::optional<std::pair<double, double>> {
         auto maybeCall = TMaybeNode<TCallExpr>(expr);
         if (!maybeCall) {
@@ -418,7 +419,7 @@ double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shar
             const double value = number->IsFloat()
                 ? number->FloatValue
                 : static_cast<double>(number->IntValue);
-            if (std::isnan(value)) {
+            if (std::isnan(value) || inRange(item, name) == false) {
                 continue;
             }
             numbers.insert(value);
@@ -430,6 +431,11 @@ double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shar
     if (auto maybeUnary = TMaybeNode<TUnaryExpr>(atom)) {
         auto unary = maybeUnary.Cast();
         if (unary->Operator == "!"_op) {
+            // NOT IN is the chain of `<>` it stands for: each value keeps
+            // 1 - 1/ndv of the rows.
+            if (auto values = inListValues(unary->Operand)) {
+                return std::pow(1.0 - 1.0 / values->second, values->first);
+            }
             return 1.0 - EstimateSelectivity(
                 unary->Operand, inputStats, operatorType, overSource, foldedBounds);
         }
