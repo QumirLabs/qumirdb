@@ -160,6 +160,47 @@ struct TColumnRange {
     std::optional<TRangeEnd> Upper;
 };
 
+// Whether expr can be NULL, which makes a predicate over it UNKNOWN rather than
+// FALSE. Only what is known to be NULL-free counts as such.
+bool MayBeNull(const TExprPtr& expr, const TStructType& input) {
+    if (TMaybeNode<TNumberExpr>(expr) || TMaybeNode<TStringLiteralExpr>(expr)) {
+        return false;
+    }
+    if (auto ident = TMaybeNode<TIdentExpr>(expr)) {
+        const auto& name = ident.Cast()->Name;
+        for (const auto& [column, type] : input.Fields) {
+            if (column == name) {
+                return IsNullableType(type);
+            }
+        }
+        return true;
+    }
+    std::vector<TExprPtr> operands;
+    if (auto maybeCall = TMaybeNode<TCallExpr>(expr)) {
+        auto call = maybeCall.Cast();
+        auto callee = TMaybeNode<TIdentExpr>(call->Callee);
+        if (!callee) {
+            return true;
+        }
+        const auto& name = callee.Cast()->Name;
+        if (name == "qdb_is_null") {
+            return false;
+        }
+        // These return NULL only for a NULL argument.
+        if (name != "qdb_in_list" && name != "qdb_string_view_sql_like") {
+            return true;
+        }
+        operands = call->Args;
+    } else if (TMaybeNode<TCastExpr>(expr) || TMaybeNode<TUnaryExpr>(expr) || TMaybeNode<TBinaryExpr>(expr)) {
+        operands = expr->Children();
+    } else {
+        return true;
+    }
+    return std::ranges::any_of(operands, [&](const TExprPtr& operand) {
+        return MayBeNull(operand, input);
+    });
+}
+
 // overSource: the input is a table scan, so its null counts and its row count
 // describe the same rows.
 double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shared_ptr<TStructType> operatorType,
@@ -431,6 +472,12 @@ double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shar
     if (auto maybeUnary = TMaybeNode<TUnaryExpr>(atom)) {
         auto unary = maybeUnary.Cast();
         if (unary->Operator == "!"_op) {
+            // NOT keeps the rows where the operand is FALSE. If it can also be
+            // UNKNOWN, that is not the complement of TRUE, and the statistics
+            // do not say how many rows are UNKNOWN.
+            if (MayBeNull(unary->Operand, *operatorType)) {
+                return 0.5;
+            }
             // NOT IN is the chain of `<>` it stands for: each value keeps
             // 1 - 1/ndv of the rows.
             if (auto values = inListValues(unary->Operand)) {

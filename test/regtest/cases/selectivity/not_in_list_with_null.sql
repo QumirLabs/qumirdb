@@ -1,0 +1,1 @@
+SELECT id AS id FROM t WHERE grp NOT IN (1, NULL) ORDER BY id;
