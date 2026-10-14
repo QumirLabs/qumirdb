@@ -25,6 +25,9 @@
     "default_not_constant.sql": {"order": "ordered"},
     "bound_nan.sql": {"order": "ordered"},
     "bound_beyond_int64.sql": {"order": "ordered"},
-    "bound_fractional.sql": {"order": "ordered"}
+    "bound_fractional.sql": {"order": "ordered"},
+    "range_outside_domain.sql": {"order": "ordered"},
+    "range_inverted.sql": {"order": "ordered"},
+    "range_ndv_zero.sql": {"order": "ordered"}
   }
 }

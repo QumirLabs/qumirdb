@@ -140,16 +140,23 @@ double JoinKeyWidth(const TOperatorPtr& left, const TOperatorPtr& right,
 constexpr double LikeSelectivity = 0.05;
 
 // One side of a range on a column.
+// One end of a range on a column.
+struct TRangeEnd {
+    double Value = 0.0;
+    bool Inclusive = false; // `<=` or `>=`
+    double Below = 0.0; // fraction of rows below the end
+};
+
 struct TRangeBound {
     std::string Column;
     bool Upper = false; // `col < c` or `col <= c`
-    double Below = 0.0; // fraction of rows below the bound
+    TRangeEnd End;
 };
 
-// Fractions of rows below the two ends of a range on a column.
+// The tightest ends of a range on a column.
 struct TColumnRange {
-    std::optional<double> Lower;
-    std::optional<double> Upper;
+    std::optional<TRangeEnd> Lower;
+    std::optional<TRangeEnd> Upper;
 };
 
 // overSource: the input is a table scan, so its null counts and its row count
@@ -253,21 +260,57 @@ double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shar
         // An upper bound keeps the rows below it and a lower bound drops
         // them, so `<` and `>=` count the rows strictly below the constant.
         const bool inclusive = binary->Operator == "<="_op || binary->Operator == ">="_op;
+        // The bound folded already when the fraction was found.
+        auto value = [&](const TExprPtr& bound) {
+            auto number = constNumber(bound);
+            return number->IsFloat() ? number->FloatValue : static_cast<double>(number->IntValue);
+        };
         // `col OP const`
         if (auto leftIdent = TMaybeNode<TIdentExpr>(binary->Left)) {
             auto name = std::string(leftIdent.Cast()->Name);
             if (auto f = fractionBelow(name, binary->Right, less != inclusive)) {
-                return TRangeBound{name, less, *f};
+                return TRangeBound{name, less, {value(binary->Right), inclusive, *f}};
             }
         }
         // `const OP col`  ==  `col (flip OP) const`
         if (auto rightIdent = TMaybeNode<TIdentExpr>(binary->Right)) {
             auto name = std::string(rightIdent.Cast()->Name);
             if (auto f = fractionBelow(name, binary->Left, greater != inclusive)) {
-                return TRangeBound{name, greater, *f};
+                return TRangeBound{name, greater, {value(binary->Left), inclusive, *f}};
             }
         }
         return std::nullopt;
+    };
+
+    // Whether a value of the column can lie between the two ends: the range is
+    // not empty and meets the column's min and max.
+    auto rangeCanHoldValue = [&](const std::string& colName, TRangeEnd lower, TRangeEnd upper) {
+        const auto& colStats = inputStats->ColumnStats.at(colName);
+        if (!colStats->MinValue || !colStats->MaxValue) {
+            return false; // the statistics cannot show it
+        }
+        double min = 0.0;
+        double max = 0.0;
+        if (auto integer = TMaybeType<TIntegerType>(columnType(colName))) {
+            // The smallest and the largest integer between the ends.
+            lower.Value = lower.Inclusive ? std::ceil(lower.Value) : std::floor(lower.Value) + 1.0;
+            upper.Value = upper.Inclusive ? std::floor(upper.Value) : std::ceil(upper.Value) - 1.0;
+            lower.Inclusive = upper.Inclusive = true;
+            const bool isSigned = integer.Cast()->IsSigned();
+            min = isSigned ? static_cast<double>(*colStats->GetMinValue<int64_t>())
+                : static_cast<double>(*colStats->GetMinValue<uint64_t>());
+            max = isSigned ? static_cast<double>(*colStats->GetMaxValue<int64_t>())
+                : static_cast<double>(*colStats->GetMaxValue<uint64_t>());
+        } else {
+            min = *colStats->GetMinValue<double>();
+            max = *colStats->GetMaxValue<double>();
+        }
+        auto below = [](double a, bool aInclusive, double b, bool bInclusive) {
+            return a < b || (a == b && !(aInclusive && bInclusive));
+        };
+        return !below(upper.Value, upper.Inclusive, lower.Value, lower.Inclusive)
+            && !below(upper.Value, upper.Inclusive, min, true)
+            && !below(max, true, lower.Value, lower.Inclusive);
     };
 
     auto inRange = [&](TExprPtr expr, const std::string& colName) -> std::optional<bool> {
@@ -385,10 +428,18 @@ double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shar
             for (const auto& conjunct : conjuncts) {
                 if (auto bound = rangeBound(conjunct)) {
                     auto& range = ranges[bound->Column];
+                    const auto& end = bound->End;
+                    // The tighter end wins; at the same constant the strict one.
                     if (bound->Upper) {
-                        range.Upper = std::min(range.Upper.value_or(1.0), bound->Below);
-                    } else {
-                        range.Lower = std::max(range.Lower.value_or(0.0), bound->Below);
+                        if (!range.Upper || end.Value < range.Upper->Value
+                            || (end.Value == range.Upper->Value && !end.Inclusive))
+                        {
+                            range.Upper = end;
+                        }
+                    } else if (!range.Lower || end.Value > range.Lower->Value
+                        || (end.Value == range.Lower->Value && !end.Inclusive))
+                    {
+                        range.Lower = end;
                     }
                 } else {
                     selectivity *= EstimateSelectivity(
@@ -396,12 +447,18 @@ double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shar
                 }
             }
             for (const auto& [column, range] : ranges) {
-                double fraction = range.Upper.value_or(1.0) - range.Lower.value_or(0.0);
-                if (range.Lower && range.Upper) {
-                    // The histogram cannot resolve a range narrower than a
-                    // bucket, but such a range still keeps a distinct value.
-                    auto ndv = inputStats->ColumnStats[column]->Ndv;
-                    fraction = std::max(fraction, ndv ? 1.0 / *ndv : 0.0);
+                const double upper = range.Upper ? range.Upper->Below : 1.0;
+                const double lower = range.Lower ? range.Lower->Below : 0.0;
+                double fraction = std::max(upper - lower, 0.0);
+                // The histogram cannot resolve a range narrower than a bucket,
+                // but a range that can hold a value of the column keeps one
+                // distinct value. It never keeps more than either end alone.
+                auto ndv = inputStats->ColumnStats[column]->Ndv;
+                if (range.Lower && range.Upper && ndv && *ndv > 0
+                    && rangeCanHoldValue(column, *range.Lower, *range.Upper))
+                {
+                    fraction = std::min({std::max(fraction, 1.0 / static_cast<double>(*ndv)),
+                        upper, 1.0 - lower});
                 }
                 selectivity *= fraction;
             }
@@ -475,7 +532,7 @@ double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shar
         } // ==, !=
 
         if (auto bound = rangeBound(atom)) {
-            return bound->Upper ? bound->Below : 1.0 - bound->Below;
+            return bound->Upper ? bound->End.Below : 1.0 - bound->End.Below;
         }
     }
 
