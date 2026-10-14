@@ -22,6 +22,9 @@
     "eq_outside_range.sql": {"order": "ordered"},
     "default_no_histogram.sql": {"order": "ordered"},
     "default_in_list_no_ndv.sql": {"order": "ordered"},
-    "default_not_constant.sql": {"order": "ordered"}
+    "default_not_constant.sql": {"order": "ordered"},
+    "bound_nan.sql": {"order": "ordered"},
+    "bound_beyond_int64.sql": {"order": "ordered"},
+    "bound_fractional.sql": {"order": "ordered"}
   }
 }

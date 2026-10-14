@@ -1,12 +1,14 @@
 #pragma once
 
 #include <bit>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <map>
 #include <memory>
 #include <optional>
 #include <string>
+#include <type_traits>
 #include <vector>
 #include <algorithm>
 
@@ -61,21 +63,21 @@ struct TStats {
         }
 
         // Fraction of rows with value <= c, or < c when strict. The two differ
-        // only for a heavy value, which repeats as a boundary.
+        // only for a heavy value, which repeats as a boundary. NaN compares
+        // with nothing, so it has no fraction.
         template<typename T>
         std::optional<double> FractionBelow(T c, bool strict = false) const {
             if (Histogram.empty()) {
                 return std::nullopt;
             }
+            if constexpr (std::is_floating_point_v<T>) {
+                if (std::isnan(c)) {
+                    return std::nullopt;
+                }
+            }
             auto val = [&](uint64_t v) {
                 return std::bit_cast<T>(v);
             };
-            if (strict ? c <= val(Histogram.front()) : c < val(Histogram.front())) {
-                return 0.0;
-            }
-            if (strict ? c > val(Histogram.back()) : c >= val(Histogram.back())) {
-                return 1.0;
-            }
 
             auto it = strict
                 ? std::lower_bound(Histogram.begin(), Histogram.end(), c, [&](uint64_t a, T b) {
@@ -85,13 +87,22 @@ struct TStats {
                     return a < val(b);
                 });
 
+            if (it == Histogram.begin()) {
+                return 0.0; // c is below the first boundary
+            }
+            if (it == Histogram.end()) {
+                return 1.0; // c is at or above the last boundary
+            }
+
             size_t belowCount = std::distance(Histogram.begin(), it); // # < c
             size_t bucketIdx = belowCount - 1; // bucket containing c
             T lo = val(Histogram[bucketIdx]);
             T hi = val(Histogram[bucketIdx + 1]);
             double frac = 0.0;
             if (hi != lo) {
-                frac = (double)(c - lo) / (double)(hi - lo);
+                // In double: the int64 difference of two boundaries can overflow.
+                frac = (static_cast<double>(c) - static_cast<double>(lo))
+                    / (static_cast<double>(hi) - static_cast<double>(lo));
             }
             return (bucketIdx + frac) / (double)(Histogram.size() - 1);
         }

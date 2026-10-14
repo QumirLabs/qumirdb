@@ -21,6 +21,7 @@
 
 #include <bit>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -115,6 +116,23 @@ TEST(StatsTest, FractionBelowRepeatedBoundaries) {
     EXPECT_LE(at0, at5);
     EXPECT_LE(at5, at15);
     EXPECT_LE(at15, 1.0);
+}
+
+TEST(StatsTest, FractionBelowAcceptsAnyBound) {
+    TColumnStats cs;
+    cs.Histogram = Hist<double>({0.0, 0.5, 1.0});
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double inf = std::numeric_limits<double>::infinity();
+    EXPECT_FALSE(cs.FractionBelow(nan).has_value());
+    EXPECT_FALSE(cs.FractionBelow(nan, true).has_value());
+    EXPECT_DOUBLE_EQ(cs.FractionBelow(inf, true).value(), 1.0);
+    EXPECT_DOUBLE_EQ(cs.FractionBelow(-inf).value(), 0.0);
+
+    // The width of this bucket does not fit in int64.
+    TColumnStats wide;
+    wide.Histogram = Hist<int64_t>({std::numeric_limits<int64_t>::min(), 0,
+        std::numeric_limits<int64_t>::max()});
+    EXPECT_DOUBLE_EQ(wide.FractionBelow<int64_t>(0, true).value(), 0.5);
 }
 
 TEST(StatsTest, FractionBelowEmptyHistogram) {

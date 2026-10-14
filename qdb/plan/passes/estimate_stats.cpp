@@ -217,10 +217,21 @@ double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shar
         }
         if (TMaybeType<TIntegerType>(type)) {
             if (num->IsFloat()) {
+                const double value = num->FloatValue;
+                if (std::isnan(value)) {
+                    return std::nullopt;
+                }
+                // Outside the int64 range the bound is above or below every value.
+                if (value >= 0x1p63) {
+                    return 1.0;
+                }
+                if (value < -0x1p63) {
+                    return 0.0;
+                }
                 // An integer is below 24.5 exactly when it is <= 24.
-                const double whole = std::floor(num->FloatValue);
+                const double whole = std::floor(value);
                 return colIt->second->FractionBelow(
-                    static_cast<int64_t>(whole), strict && whole == num->FloatValue);
+                    static_cast<int64_t>(whole), strict && whole == value);
             }
             return colIt->second->FractionBelow(num->IntValue, strict);
         }
