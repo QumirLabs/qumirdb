@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <set>
 
 namespace NQdb {
 
@@ -372,6 +373,60 @@ double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shar
         }
     };
 
+    // `col IN (c1, ..., cn)`: the number of distinct constants that can equal a
+    // value of col, and the distinct count of col. NULL equals no value. Empty
+    // when an item cannot be resolved or the column has no distinct count.
+    auto inListValues = [&](const TExprPtr& expr) -> std::optional<std::pair<double, double>> {
+        auto maybeCall = TMaybeNode<TCallExpr>(expr);
+        if (!maybeCall) {
+            return std::nullopt;
+        }
+        auto call = maybeCall.Cast();
+        auto callee = TMaybeNode<TIdentExpr>(call->Callee);
+        if (!callee || callee.Cast()->Name != "qdb_in_list" || call->Args.size() < 2) {
+            return std::nullopt;
+        }
+        auto column = TMaybeNode<TIdentExpr>(call->Args[0]);
+        if (!column) {
+            return std::nullopt;
+        }
+        const auto& name = column.Cast()->Name;
+        auto colIt = inputStats->ColumnStats.find(name);
+        if (colIt == inputStats->ColumnStats.end() || !colIt->second->Ndv || *colIt->second->Ndv == 0) {
+            return std::nullopt;
+        }
+        std::set<double> numbers;
+        std::set<std::string> strings;
+        for (size_t i = 1; i < call->Args.size(); ++i) {
+            const auto& item = call->Args[i];
+            if (auto maybeNull = TMaybeNode<TCallExpr>(item)) {
+                auto nullCallee = TMaybeNode<TIdentExpr>(maybeNull.Cast()->Callee);
+                if (nullCallee && nullCallee.Cast()->Name == "qdb_sql_null") {
+                    continue;
+                }
+            }
+            if (auto maybeCast = TMaybeNode<TCastExpr>(item)) {
+                if (auto literal = TMaybeNode<TStringLiteralExpr>(maybeCast.Cast()->Operand)) {
+                    strings.insert(literal.Cast()->Value);
+                    continue;
+                }
+            }
+            auto number = constNumber(item);
+            if (!number) {
+                return std::nullopt;
+            }
+            const double value = number->IsFloat()
+                ? number->FloatValue
+                : static_cast<double>(number->IntValue);
+            if (std::isnan(value)) {
+                continue;
+            }
+            numbers.insert(value);
+        }
+        return std::pair{static_cast<double>(numbers.size() + strings.size()),
+            static_cast<double>(*colIt->second->Ndv)};
+    };
+
     if (auto maybeUnary = TMaybeNode<TUnaryExpr>(atom)) {
         auto unary = maybeUnary.Cast();
         if (unary->Operator == "!"_op) {
@@ -400,18 +455,9 @@ double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shar
                     }
                 }
             }
-            // col IN (c1, ..., cn) -> qdb_in_list(col, c1, ..., cn): n of the
-            // distinct values of the column.
-            if (callee->Name == "qdb_in_list" && call->Args.size() > 1
-                && std::all_of(call->Args.begin() + 1, call->Args.end(), isConstExpr))
-            {
-                if (auto column = TMaybeNode<TIdentExpr>(call->Args[0])) {
-                    auto colIt = inputStats->ColumnStats.find(column.Cast()->Name);
-                    if (colIt != inputStats->ColumnStats.end() && colIt->second->Ndv) {
-                        return std::min(1.0, static_cast<double>(call->Args.size() - 1)
-                            / static_cast<double>(*colIt->second->Ndv));
-                    }
-                }
+            // col IN (c1, ..., cn) -> qdb_in_list(col, c1, ..., cn)
+            if (auto values = inListValues(atom)) {
+                return std::min(1.0, values->first / values->second);
             }
         }
     }
