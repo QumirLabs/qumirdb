@@ -96,6 +96,18 @@ TEST(ConstFold, LeavesNamedTypesOfTheArgumentUnresolved) {
     EXPECT_EQ(NCore::PrintAst(expr), before);
 }
 
+TEST(ConstFold, LeavesExpressionItCannotTypeUnfolded) {
+    // The kernel expander rejects a decimal product.
+    NQumir::TLocation loc{};
+    auto decLit = [&](int64_t v) -> TExprPtr {
+        return std::make_shared<TCastExpr>(
+            loc, std::make_shared<TNumberExpr>(loc, v),
+            std::make_shared<NQdb::TDecimal>(10, 2));
+    };
+    auto product = std::make_shared<TBinaryExpr>(loc, "*"_op, decLit(5), decLit(2));
+    EXPECT_EQ(NQdb::ConstFold(product), product);
+}
+
 TEST(ConstFold, LeavesOpenExpressionUntouched) {
     auto expr = Parse("(+ a 1)"); // free variable `a` -> not closed, left as-is
     auto folded = NQdb::ConstFold(expr);

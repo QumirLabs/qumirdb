@@ -5,12 +5,14 @@
 #include <qdb/plan/clone_expr.h>
 #include <qdb/plan/passes/unbound_vars.h>
 
+#include <qumir/error.h>
 #include <qumir/parser/ast.h>
 
 #include <charconv>
 #include <memory>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace NQdb {
@@ -81,10 +83,18 @@ TExprPtr ConstFold(TExprPtr expr) {
     }
     // A closed expression can be typed against an empty input schema; expansion
     // rewrites SQL nullability/Decimal and yields the result type used to wrap it.
-    auto clone = CloneExpr(expr);
-    DetachNamedTypes(clone);
-    auto [rewritten, rewrittenType] =
-        NKernel::ExpandKernelExpr(clone, TStructType({}));
+    // It throws for what it cannot type, such as a decimal product: the caller
+    // then keeps the expression, as after any other failure to fold.
+    TExprPtr rewritten;
+    TTypePtr rewrittenType;
+    try {
+        auto clone = CloneExpr(expr);
+        DetachNamedTypes(clone);
+        std::tie(rewritten, rewrittenType) =
+            NKernel::ExpandKernelExpr(clone, TStructType({}));
+    } catch (const NQumir::TError&) {
+        return expr;
+    }
     if (!rewrittenType) {
         return expr;
     }
