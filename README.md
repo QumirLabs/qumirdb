@@ -21,6 +21,26 @@ query](#udfs-that-disappear-into-the-query) below.
 
 Try it live at **[db.qumir.dev](https://db.qumir.dev)**.
 
+## Project principles
+
+1. **A database at the forefront of the field.** QumirDB draws on modern
+   database ideas. Beauty, clarity, and coherence of code and architecture
+   are the project's highest priority.
+
+2. **All computation in oz-lang.** Operator computation is expressed in
+   oz-lang and executed through a pipeline compiled by the JIT.
+
+3. **A pipeline split into operators and tasks.** Explicit execution
+   boundaries and data exchange contracts provide the foundation for
+   distributed execution across threads, processes, and nodes.
+
+4. **Complex analytical queries.** The engine is designed for joins across
+   many tables, complex join conditions, and correlated subqueries.
+
+5. **Speed throughout query processing.** Optimize planning, compilation,
+   and execution. Confirm improvements with measurements while preserving
+   code and architecture quality.
+
 ## SQL, plainly
 
 ```sql
