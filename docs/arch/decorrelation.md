@@ -4,14 +4,6 @@ Subqueries are removed at **build time**, before the optimizer passes, so the
 resulting joins flow through [join_reorder.md](join_reorder.md) and
 [predicate_pushdown.md](predicate_pushdown.md) like any other.
 
-## Source map
-
-| Area | Source |
-|---|---|
-| EXISTS/IN → semi/anti | `qdb/plan/build.cpp` (`AsDecorrelation`, `DecorrelateExists`, `DecorrelateIn`) |
-| Scalar subqueries | `qdb/plan/build.cpp` (`ExtractScalarSubqueries`, `CollectLocalColumns`) |
-| Subquery AST node | `qdb/sql/ast.h` (`TSubqueryExpr`, kind `Exists`/`In`/`Scalar`) |
-
 ## EXISTS / IN → semi / anti join
 
 A top-level `WHERE` conjunct that is `EXISTS`/`IN` (or its negation) wraps the
@@ -38,6 +30,10 @@ join left_semi  residual (&& (== l2.l_orderkey l1.l_orderkey)
 └─ source l2
 => after equijoin: key [l1.l_orderkey = l2.l_orderkey], residual (!= ...)
 ```
+
+The table describes QDB's current construction shapes. `NOT IN` is not
+generally equivalent to `NOT EXISTS` when NULLs are possible: an ordinary anti
+join alone does not provide general NULL-aware membership semantics.
 
 `IN`: the subquery is built as a full plan (must project exactly one column) and
 the residual is `operand == <that column>`.

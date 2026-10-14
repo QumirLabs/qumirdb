@@ -1,46 +1,28 @@
 # Aggregation architecture
 
-This document describes the current aggregation implementation. The source of
-truth is the code referenced below; `PLAN_AGGREGATION.md` describes development
-history and future work rather than the runtime contract.
+Aggregation combines query-specific key and reducer operations with reusable
+oz-lang table algorithms.
 
 ## Overview
 
 Aggregation is a pipeline breaker. It consumes every input `TRowSet`, updates a
-query-local Robin Hood hash table, then emits one dense output `TRowSet`.
+query-local hash table, then emits one dense output `TRowSet`.
 
 The implementation is deliberately split into three layers:
 
 1. C++ derives concrete query types and generates query-specific Qumir AST.
 2. Reusable Oz code implements the generic hash table and lifecycle with
    function-level generic type parameters such as `[Key]`.
-3. C++ owns execution, the small `HashTable` header, and the result buffers;
-   Oz code allocates and frees the table's internal arrays.
+3. C++ owns execution and state lifetime; Oz code allocates/frees internal
+   table storage and materializes owned result buffers.
 
 There is no C++ implementation of the aggregation algorithm. C++ composes and
 JIT-compiles Oz plus generated AST into two named functions:
 
 ```text
 agg_dispatch(ht, batch, arg, op) -> i64
-agg_finalize(ht, key_outputs, aggregate_outputs, capacity) -> i64
+agg_finish_rowset(ht, output) -> i64
 ```
-
-## Source map
-
-| Area | Source |
-|---|---|
-| Logical aggregate operator and output schema | `qdb/ops/aggregate.{h,cpp}` |
-| Physical planning | `qdb/exec/planner.cpp` |
-| Key type and ABI layout construction | `qdb/kernel/aggregate_key.{h,cpp}` |
-| Generated hash, equality, reducers and entry wrappers | `qdb/kernel/gen.{h,cpp}` |
-| Oz loading and final AST composition | `qdb/kernel/lib.{h,cpp}` |
-| LLVM JIT setup and callable kernel wrappers | `qdb/kernel/compiler.{h,cpp}` |
-| Generic production Oz kernels | `qdb/kernel/aggregation/*.oz` |
-| External Qumir types and allocator functions | `qdb/modules/qumirdb.cpp` |
-| Allocator and `f64` bit helper implementations | `qdb/modules/qumirdb_runtime.{h,cpp}` |
-| Runtime pipeline breaker | `qdb/exec/aggregate_exec.{h,cpp}` |
-| Kernel-level tests | `test/test_aggregation.cpp` |
-| End-to-end execution tests | `test/test_aggregate.cpp` |
 
 ## Planning and compilation
 
@@ -58,46 +40,19 @@ Compilation performs these steps:
 2. Build a `TAggregateKeyDescriptor` for the concrete group key.
 3. Obtain the external `TColumn`, `TRowSet`, and `HashTable` types from
    `QumirDbModule`.
-4. Build an unresolved update program with
-   `BuildGenericAggregateProgramAst`.
-5. Compile it with overloads/generics enabled and explicit entry `agg_dispatch`.
-6. Build a separate finalize program with
-   `BuildGenericAggregateFinalizeProgramAst`.
-7. Compile it with explicit entry `agg_finalize`.
+4. Generate key hash/equality and ownership helpers, plus typed reducers.
+5. Compose update, lifecycle, and finalization in one program with explicit
+   named entrypoints.
+6. Finalize it with the other query kernels and retain the shared code owner
+   for as long as any dispatch can invoke it.
 
-The two programs use separate `TLLVMRunner` instances. Each returned C++
-closure retains its runner, so the JIT code remains alive as long as the
-compiled aggregation kernels.
-
-`CompileKernelAst` always receives an explicit entry name. The aggregation
-code does not depend on source order or on the runner choosing the first
-function.
-
-## Concrete key representation
-
-`BuildAggregateKeyDescriptor` maps logical group columns to a fixed-width key:
-
-- one group column: `Key` is that column's type directly;
-- multiple group columns: `Key` is a generated named struct such as
-  `AggKey_k1_i64_k2_f64`;
-- generated struct fields are named `key_0`, `key_1`, and so on;
-- Qumir's struct layout supplies the C ABI padding implicitly;
-- each descriptor records source column index, offset, size, and alignment.
-
-Supported layout leaves are integers, `f64`, `bool`, and recursively nested
-structs. The current `CompileAggregate` validation is narrower: each selected
-group column must itself be an integer or `f64`. Recursive struct hashing is
-already implemented and tested, but is not yet exposed by that production
-validation path.
-
-Owned key arrays are byte-addressed in the external ABI. `HashTable.Keys` and
-`HashTable.GroupKeys` are `<ptr u8>` plus `HashTable.KeySize`. A generic Oz
-function casts them locally to `<ptr Key>` only after `Key` is specialized.
-This keeps the C++ ABI independent of the query's key type.
+A scalar key uses its concrete type; a composite key uses a generated struct.
+String lookup keys borrow batch bytes, while stored keys own their bytes.
+The generic table is specialized to these representations by Qumir.
 
 ## Building the update AST
 
-`BuildGenericAggregateProgramAst` constructs one top-level Qumir block in
+The aggregate generator constructs one top-level Qumir block in
 dependency order:
 
 ```text
@@ -106,30 +61,22 @@ generated rh_hash(Key)
 generated rh_key_equal(Key, Key)
 generated reduce_0 ... reduce_N
 generated agg_apply_reducers(...)
-functions parsed from robin_hood_rehash_generic.oz
-functions parsed from aggregation_hashtable_generic.oz
-generated agg_dispatch(...)
+generic control-byte lookup, rehash, and update helpers
+owned-key arena and output helpers
+generated agg_dispatch(...) and agg_finish_rowset(...)
 ```
 
 The complete block is unresolved when returned. `TLLVMRunner` resolves it with
 `AllowOverloads=true`, instantiates generic named types, lowers it, and compiles
-the selected `agg_dispatch` entry.
+the explicitly named update and finalization entries.
 
 The generated dispatch wrapper adapts `TRowSet` to the generic table API:
 
 - reads each key column through its concrete pointer type;
 - materializes a generated struct value for a composite key;
-- reads the one aggregate value column and widens it to `i64`;
+- reads each aggregate argument with its concrete type and validity;
 - respects `TRowSet.Selection` when it is non-null;
 - calls `aht_update(ht, key, value)` once per selected row.
-
-Dispatch operation codes are:
-
-| `op` | Operation | Meaning of `arg` |
-|---:|---|---|
-| 0 | `aht_init` | initial capacity |
-| 1 | batch update | ignored |
-| other | `aht_destroy` | ignored |
 
 ## Generic hash injection
 
@@ -180,120 +127,68 @@ the same `rh_hash` result.
 
 ## Reducer injection
 
-Reducers are also query-specific generated functions. For aggregate number
-`i`, `GenReducerFunDecls` creates:
+Reducers are query-specific generated functions for `count`, `sum`, `min`, and
+`max`. Their state and arguments use the appropriate types, including nullable
+and string values. Each selected row updates the reducer slots for its group:
 
 ```text
-reduce_i(i64 prev, i64 value, bool is_new) -> i64
+lookup group -> dense group slot -> update each reducer -> finalize values
 ```
 
-Current bodies implement `count`, `sum`, `min`, and `max`. A generated
-`agg_apply_reducers` statically calls every `reduce_i` and stores the result in
-`AggBuffers[i][dense_slot]`. The generic table therefore knows only that it
-must call `agg_apply_reducers`; it does not contain runtime dispatch on an
-aggregate function name.
+The generated reducer application calls concrete operations statically; the
+generic table does not dispatch on aggregate function names at runtime.
+`count(*)` counts rows; `count(arg)` skips NULLs. Other reducers track validity
+so an all-NULL contribution is distinguishable from a numeric zero.
 
-This generated-function boundary is the intended insertion point for future
-custom Oz reducer functions carried by an aggregation AST node.
+## Hash table
 
-## Robin Hood table
-
-The production update program loads two Oz files:
-
-- `robin_hood_rehash_generic.oz` implements rebuilding the probe arrays;
-- `aggregation_hashtable_generic.oz` implements lookup, insertion, allocation,
-  grow, update, and destroy over `<ref HashTable>`.
-
-The table separates probe storage from dense output storage:
+The current implementation uses Swiss-style grouped control-byte probing. The
+table separates probe storage from dense output storage:
 
 ```text
-probe slot: Keys[slot], Dist[slot], SlotId[slot]
-dense slot: GroupKeys[slot_id], AggBuffers[*][slot_id]
+probe slot: key, control byte, stable dense slot id
+dense slot: group key, reducer states
 ```
 
-Robin Hood displacement moves probe entries, including their stable
-`SlotId`. Dense keys and aggregate states remain indexed by `SlotId`, so probe
-movement does not reorder aggregate state.
+A short hash fingerprint in each control byte identifies candidate slots. Full
+key equality is evaluated only for candidates. An empty slot ends an unsuccessful
+probe; the group matcher has portable and target-specific implementations.
+See Abseil's [Swiss Tables design notes](https://abseil.io/about/design/swisstables)
+for the metadata-filtering idea. QDB implements its own typed Oz table.
 
-Lookup stops on an empty slot or when the resident probe distance is smaller
-than the query distance. Insertion swaps with a resident whose distance is
-smaller than the carried entry's distance. Capacity is a power of two and the
-home slot is `hash & (capacity - 1)`.
-
-Before inserting a new group, `aht_update` grows when the next size would
-exceed 75% of capacity. Grow allocates doubled probe and dense arrays, rebuilds
-the probe table using the injected hash/equality contract, copies dense keys
-and aggregate states, then frees the old arrays.
-
-## HashTable ABI and memory ownership
-
-`QumirDbModule` exposes a 104-byte `HashTable` struct. Its important fields are:
-
-| Field | Type | Purpose |
-|---|---|---|
-| `Keys` | `u8*` | probe keys, `Capacity * KeySize` bytes |
-| `Dist` | `i64*` | probe distance, `-1` means empty |
-| `SlotId` | `i64*` | stable dense slot for each probe entry |
-| `GroupKeys` | `u8*` | dense keys |
-| `AggBuffers` | `i64**` | one dense state array per reducer |
-| `Capacity` | `i64` | power-of-two table capacity |
-| `Size` | `i64` | number of groups |
-| `NumAggs` | `i64` | reducer count |
-| `KeySize` | `i64` | concrete key size in bytes |
-
-`Scratch`, `Scratch2`, `QueryKey`, and `NumKeys` are retained in the current
-ABI but are not used by the production table path.
-
-Ownership is split intentionally:
-
-- `TRuntimeAggregate` owns a zero-initialized 104-byte header for one query
-  execution;
-- `aht_init` and `aht_rehash` allocate internal arrays through the registered
-  `qdb_alloc` external function;
-- `aht_destroy` releases those arrays through `qdb_free`;
-- C++ owns the finalized output arrays and their `TRowSet` lifetime.
-
-The allocator functions currently wrap `malloc`/`free`. A future query-owned
-allocator can replace this implementation without changing the typed generic
-kernel boundary; allocator context propagation is not designed yet.
+Probe-table growth preserves stable dense group ids, so rebuilding lookup slots
+does not reassign reducer state. Before a new group exceeds the current 7/8
+load threshold, the table grows and rehashes keys. Group NDV estimates can
+pre-size it, but missing or inaccurate statistics still require normal growth.
 
 ## Finalization
 
-The finalize program is smaller and separately compiled:
+Finalization is part of the same generated program as update. It turns dense
+group storage into a normal columnar `TRowSet`:
 
-```text
-optional generated Key type declaration
-functions parsed from aggregation_finalize_states.oz
-generated agg_finalize(...)
-```
+1. Measure output sizes, including variable-width string bytes.
+2. Allocate column buffers, offsets, and validity storage.
+3. Project scalar/composite keys and reducer values into those columns.
+4. Destroy table storage after output has acquired independent ownership.
 
-`aht_finalize_states` copies each dense `i64` aggregate buffer. The generated
-`agg_finalize` handles concrete key projection:
-
-- C++ passes one opaque `u8*` output buffer per logical key column;
-- generated code casts each buffer to the concrete field pointer type;
-- scalar dense keys are copied directly;
-- composite dense `Key` values are projected from `key_0`, `key_1`, etc. into
-  separate columnar output buffers.
-
-This preserves a type-independent C++ ABI while producing a normal SoA
-`TRowSet`. Finalize returns the group count, or `-1` when output capacity is
-smaller than `HashTable.Size`.
+String keys are copied out of the table arena; output cannot borrow bytes from
+a table that is about to be destroyed. The result owner releases its buffers
+when downstream consumers finish with the batch.
 
 ## Runtime execution
 
-`TRuntimeAggregate::Next` runs once:
+The aggregate processor follows this lifecycle:
 
-1. Zero-initialize the `HashTable` header and initialize capacity to 4.
-2. Pull every input batch and invoke update dispatch.
-3. Read the final group count from the header.
-4. Allocate aligned byte buffers for each key output and `i64` buffers for each
-   reducer output.
-5. Invoke `agg_finalize`.
-6. Destroy the hash table through dispatch.
-7. Return one `TRowSet`; its private owner releases all output buffers.
+```text
+initialize state
+  -> for each input batch: update selected rows
+  -> at EOF: finalize one dense result batch and destroy table state
+  -> publish result, then report completion
+```
 
-The node then reports end-of-stream on subsequent `Next` calls.
+Initialization is deferred until the first use, allowing physical lowering to
+create state before kernel finalization. If execution stops early, destruction
+also releases initialized state and any pending output.
 
 ## Partial aggregate plan
 
@@ -350,46 +245,12 @@ A two-phase `f64` sum changes the addition order. Its result is valid, but its
 last bits can differ from the result of the first plan. Integer functions and
 `min`/`max` do not have this effect.
 
-## Production and staged Oz files
-
-Only these files are currently composed by `CompileAggregate`:
-
-- `robin_hood_rehash_generic.oz`
-- `aggregation_hashtable_generic.oz`
-- `aggregation_finalize_states.oz`
-
-Other files under `qdb/kernel/aggregation` are staged components, focused
-examples, or earlier integration layers used by `test/test_aggregation.cpp`.
-In particular, `key_ops_i64.oz` is a test/reference implementation; production
-hash and equality helpers are generated from the query type AST.
-
 ## Current constraints
 
-- At least one group key is required.
-- Production group columns are fixed-width integers or `f64`.
-- Reducer state and output are always `i64`.
-- Aggregate arguments must be column references.
-- All reducers with an argument must currently use the same integer column.
-- `count(*)` supplies zero as its unused value argument.
-- Null masks are not part of aggregation semantics yet; only row selection is
-  honored.
-- Update allocation/insertion failures are represented inside Oz by negative
-  slots, but the generated batch wrapper currently returns zero after the
-  loop, so runtime error propagation remains incomplete.
-
-## Extension points
-
-The main type-generic extension points are already isolated:
-
-- add a supported leaf type in key layout, hash generation, and equality
-  generation together;
-- relax `CompileAggregate` validation when recursively structured group
-  columns are ready for the input/output ABI;
-- replace generated built-in reducer bodies with reducer functions carried by
-  the logical aggregation node;
-- generalize aggregate state buffers beyond `i64`;
-- introduce a query context and query-owned allocator without changing the
-  opaque byte storage used for concrete keys.
-
-Any new key type must preserve all three contracts: fixed ABI layout, matching
-hash/equality semantics, and typed projection during finalize.
+- A group-key descriptor is required; global aggregates use a synthetic key.
+- Aggregate arguments at this boundary are column references; planning
+  materializes computed arguments first.
+- Built-in reducer kernels implement `count`, `sum`, `min`, and `max`; planning
+  expresses `avg` using `sum` and `count` of its argument.
+- String and nullable keys are supported. Matching key equality and hashing,
+  plus owned storage for retained strings, are required for every key type.

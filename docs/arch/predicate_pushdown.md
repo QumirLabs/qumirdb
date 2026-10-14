@@ -7,17 +7,9 @@
 2. **pushes** the remaining predicates down to the side(s) they constrain;
 3. leaves only genuine cross-side predicates as a join **residual**.
 
-It runs after [join_reorder.md](join_reorder.md), so the chain shape is already
-connected.
-
-## Source map
-
-| Area | Source |
-|---|---|
-| Pass | `qdb/plan/passes/equijoin.{h,cpp}` (`ExtractEquiJoins`) |
-| Equivalence classes | `qdb/utils/union_find.h` |
-| Conjunct/disjunct splitting | `qdb/plan/passes/{flatten_conjucts,flatten_disjuncts,factor_conjuncts}.cpp` |
-| Free-variable detection | `qdb/plan/passes/unbound_vars.{h,cpp}` |
+Predicate pushdown first runs without key extraction before cardinality
+estimation and [join ordering](join_reorder.md). The extraction phase then
+runs on the chosen tree, placing keys and repeating safe predicate placement.
 
 ## Model
 
@@ -127,8 +119,9 @@ side, their `OR` is a valid filter for it.
 
 ## ProcessOuterJoin (left / right / full)
 
-The executor has **no residual support for outer joins**, so the pass must empty
-`join.residual`.
+An outer join's keys and residual together preserve its ON condition.
+Residual matching is supported: only candidates passing both keys and residual
+count as matches, including for unmatched-row finalization.
 
 - Equi keys are lifted from the `ON` only (WHERE conjuncts from above are *not*
   folded into the ON of an outer join).
@@ -153,7 +146,7 @@ join left [c_custkey = o_custkey]
 ## Invariants after the pass
 
 - inner/semi/anti joins may carry keys and a residual;
-- outer joins carry keys and **no** residual;
+- outer joins retain ON residuals that cannot safely move to an input;
 - a `filter` remains only where a predicate could not be pushed further down.
 
 ## Parquet row-group pruning

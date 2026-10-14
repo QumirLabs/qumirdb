@@ -92,19 +92,6 @@ not store a live source pointer. After an S-expression parse, `SourceFactory`
 provides the source. The plan pipeline checks that the operator has one lookup
 source and then turns row locators on.
 
-## CLI and Browser
 
-These CLI options control the rule:
-
-```text
---late-materialization=auto|off
---late-materialization-max-rows <n>
---late-materialization-min-savings <factor>
-```
-
-`auto` is the default. The default maximum is 100 rows. The default minimum
-cost factor is 2.0. With `--verbose`, QDB prints the planner decision and its
-byte estimates.
-
-The browser runtime has no source lookup task. Plan export turns late
-materialization off for browser plans.
+Browser plan export disables the rule because that runtime has no source
+lookup task.

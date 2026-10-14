@@ -172,7 +172,7 @@ a custom Rust output format.
   trip per row.
 - **Not tied to Rust.** Any language with an LLVM backend and a C ABI can use
   the same path. Rust just has no GC to fight and a small, clear boundary.
-  See [docs/arch/rust_toolchain.md](docs/arch/rust_toolchain.md).
+  See [external-module requirements](docs/building.md#external-modules).
 
 ## Try it
 

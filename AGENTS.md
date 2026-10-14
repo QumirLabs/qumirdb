@@ -86,6 +86,31 @@ The main areas are:
 - `externals/qumir/`, `externals/coroio/`: Git submodules. Compiler/VM changes
   belong in Qumir; record their commits and update the QDB submodule pin.
 
+### Source map for agents
+
+Use this map to locate implementation details. Keep source-file inventories here
+or in the wiki; architectural chapters should explain the algorithms themselves.
+
+| Area | Starting points |
+|---|---|
+| Logical operators and schemas | `qdb/plan/ops/` |
+| SQL-to-plan construction and decorrelation | `qdb/plan/build.cpp` |
+| Optimizer order and CTE decisions | `qdb/plan/pipeline.cpp`, `qdb/plan/passes/cte_reuse.cpp` |
+| Join ordering, DPccp, and estimates | `qdb/plan/passes/join_order.cpp`, `qdb/plan/passes/cbo/dpccp.cpp`, `qdb/plan/passes/estimate_stats.cpp` |
+| Predicate placement and join keys | `qdb/plan/passes/equijoin.cpp` |
+| Physical task lowering and parallel aggregation | `qdb/scheduler/plan_lowerer.cpp`, `qdb/exec/planner_helpers.cpp` |
+| Task protocol, graphs, connections, scheduling | `qdb/scheduler/state.h`, `qdb/scheduler/graph.h`, `qdb/scheduler/connection.h`, `qdb/scheduler/threaded_scheduler.cpp` |
+| Kernel specifications, generation, finalization | `qdb/kernel/spec.h`, `qdb/kernel/compiler.cpp`, `qdb/kernel/finalize.cpp` |
+| Aggregate key types and generated reducers | `qdb/kernel/aggregate_key.cpp`, `qdb/kernel/gen.cpp`, `qdb/kernel/lib.cpp` |
+| Join keys and generated matching/materialization | `qdb/kernel/join_key.cpp`, `qdb/kernel/join_gen.cpp` |
+| Generic oz-lang algorithms | `qdb/kernel/aggregation/`, `qdb/kernel/join/`, `qdb/kernel/sort/` |
+| Operator state and lifetimes | `qdb/exec/aggregate_exec.cpp`, `qdb/exec/join_exec.cpp`, `qdb/exec/sort_exec.cpp` |
+| Column values and runtime ABI | `qdb/io/io.h`, `qdb/kernel/column_value.cpp`, `qdb/modules/qumirdb.cpp`, `qdb/modules/qumirdb_runtime.cpp` |
+| Runtime filters | `qdb/plan/passes/runtime_filters.cpp`, `qdb/exec/runtime_filter.cpp`, `qdb/kernel/join/runtime_filter.oz` |
+| Parquet scans and late lookup | `qdb/io/parquet/source.cpp`, `qdb/io/parquet/row_reader.cpp`, `qdb/plan/passes/late_materialization.cpp` |
+| Execution-plan export and browser dispatch | `qdb/exec/plan_builder.cpp`, `bin/plan_export.cpp`, `service/static/` |
+| Regression tests and focused operator tests | `test/test_reg.cpp`, `test/test_aggregate.cpp`, `test/test_join_kernel.cpp`, `test/test_join_exec.cpp` |
+
 ## Building and running qdb
 
 Use [docs/building.md](docs/building.md) for dependencies and full build/service
