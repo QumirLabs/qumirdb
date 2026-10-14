@@ -309,14 +309,14 @@ double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shar
         };
         // `col OP const`
         if (auto leftIdent = TMaybeNode<TIdentExpr>(binary->Left)) {
-            auto name = std::string(leftIdent.Cast()->Name);
+            const auto& name = leftIdent.Cast()->Name;
             if (auto f = fractionBelow(name, binary->Right, less != inclusive)) {
                 return TRangeBound{name, less, {value(binary->Right), inclusive, *f}};
             }
         }
         // `const OP col`  ==  `col (flip OP) const`
         if (auto rightIdent = TMaybeNode<TIdentExpr>(binary->Right)) {
-            auto name = std::string(rightIdent.Cast()->Name);
+            const auto& name = rightIdent.Cast()->Name;
             if (auto f = fractionBelow(name, binary->Left, greater != inclusive)) {
                 return TRangeBound{name, greater, {value(binary->Left), inclusive, *f}};
             }
@@ -569,8 +569,8 @@ double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shar
             auto leftIdent = TMaybeNode<TIdentExpr>(binary->Left);
             auto rightIdent = TMaybeNode<TIdentExpr>(binary->Right);
             if (leftIdent && rightIdent) {
-                auto leftName = std::string(leftIdent.Cast()->Name);
-                auto rightName = std::string(rightIdent.Cast()->Name);
+                const auto& leftName = leftIdent.Cast()->Name;
+                const auto& rightName = rightIdent.Cast()->Name;
                 // NaN != NaN, so a float column keeps the general estimate below.
                 auto type = columnType(leftName);
                 const bool mayBeNaN = type
@@ -598,7 +598,7 @@ double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shar
                     }
                 }
             } else if (leftIdent && isConstExpr(binary->Right)) {
-                auto leftName = std::string(leftIdent.Cast()->Name);
+                const auto& leftName = leftIdent.Cast()->Name;
                 if (inputStats->ColumnStats.count(leftName) > 0) {
                     auto inRangeResult = inRange(binary->Right, leftName);
                     if (inRangeResult.has_value() && !*inRangeResult) {
@@ -611,7 +611,7 @@ double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shar
                     }
                 }
             } else if (rightIdent && isConstExpr(binary->Left)) {
-                auto rightName = std::string(rightIdent.Cast()->Name);
+                const auto& rightName = rightIdent.Cast()->Name;
                 if (inputStats->ColumnStats.count(rightName) > 0) {
                     auto inRangeResult = inRange(binary->Left, rightName);
                     if (inRangeResult.has_value() && !*inRangeResult) {
