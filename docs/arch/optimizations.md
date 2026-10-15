@@ -549,6 +549,24 @@ Group keys of string type are copied into a bump arena owned by the hash table
 instead of individually allocated, so building a table over many distinct string
 keys does not turn into a malloc storm. See [aggregation.md](aggregation.md).
 
+### 4.9 Reusing restricted join-key domains
+
+After runtime-filter producers are selected, ordinary equalities within an
+INNER-join region form classes of compatible keys. A domain already produced
+in one branch can filter another branch whose key tuple belongs to those
+classes, in the producer's tuple order. This reuses the existing publication
+and membership kernel without another scan or key-set build. The original
+joins still check matches and residuals, preserving duplicates and tolerating
+filter false positives.
+
+Reuse must save more downstream work than probing and waiting cost. It may
+replace a more expensive producer for the same branch when that producer has
+no consumers elsewhere. Key types must match; computed projections retain the
+filter above the computation. Outer, semi, anti and schema-changing boundaries
+do not contribute cross-boundary equalities, and NULL-safe equalities are not
+inferred. Publication dependencies are checked before adding a consumer, so
+the producer cannot wait, directly or indirectly, for its own filtered input.
+
 ## 5. Helpers that are not optimizations
 
 - `ConstFold` is a helper, not a pipeline pass. UNION ALL pushdown uses it

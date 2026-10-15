@@ -1,0 +1,8 @@
+project (value, v, w) (rows≈3 cost≈9.1K)
+└─ join left [f.k = g.k] (rows≈3 cost≈9K)
+   ├─ join inner [f.k = d.k] (rows≈3 cost≈4.5K)
+   │  ├─ source f AS f (rows≈5 cost≈80)
+   │  └─ filter |d.enabled| (rows≈2 cost≈170)
+   │     └─ source d AS d row-groups |d.enabled| (rows≈5 cost≈85)
+   └─ filter (< |g.w| 0) (rows≈3 cost≈192)
+      └─ source g AS g row-groups (< |g.w| 0) (rows≈6 cost≈96)
