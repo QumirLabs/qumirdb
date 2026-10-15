@@ -24,7 +24,7 @@ namespace NQdb {
 
 namespace {
 
-void OptimizeOne(TOperatorPtr& plan, TPlanPassOptions& options) {
+void OptimizeOne(TOperatorPtr& plan, TPlanPassOptions& options, TFoldedBounds& foldedBounds) {
     // QDB_DUMP_PASSES=1 dumps the plan after each pass to stderr (debugging).
     const bool dump = std::getenv("QDB_DUMP_PASSES") != nullptr;
     auto stage = [&](const char* name) {
@@ -48,7 +48,7 @@ void OptimizeOne(TOperatorPtr& plan, TPlanPassOptions& options) {
     plan = SimplifySelfEquality(plan); stage("SimplifySelfEquality");
     plan = PushDownPredicates(plan); stage("PushDownPredicates");
     AnnotateTypes(plan, options.Annotation); // re-annotate: pushdown moved filters onto leaves
-    EstimateStats(plan); // leaf cardinalities for cost-based ReorderJoins
+    EstimateStats(plan, foldedBounds); // leaf cardinalities for cost-based ReorderJoins
     plan = ReorderJoins(
         plan,
         options.EnableCbo,
@@ -77,7 +77,7 @@ void OptimizeOne(TOperatorPtr& plan, TPlanPassOptions& options) {
         ApplyColumnPruning(plan);
     }
 
-    EstimateStats(plan);
+    EstimateStats(plan, foldedBounds);
 }
 
 template <class TFn>
@@ -93,13 +93,14 @@ void ForEachPlan(TOperatorPtr& main, TFn&& fn, bool includeMain = true) {
 } // namespace
 
 void ApplyPlanPasses(TOperatorPtr& plan, TPlanPassOptions options) {
+    TFoldedBounds foldedBounds; // one per query: see TFoldedBounds
     ForEachPlan(plan, [&](TOperatorPtr& current, TCteDefinition* def) {
-        OptimizeOne(current, options);
+        OptimizeOne(current, options, foldedBounds);
         if (def) {
             def->OutputType = current->OutputColumns();
         }
     });
-    PushConsumerPredicatesIntoDefinitions(plan, options.Annotation);
+    PushConsumerPredicatesIntoDefinitions(plan, options.Annotation, foldedBounds);
     auto usage = PropagateCteDemands(plan);
 
     // CTE output demand is only known after PropagateCteDemands. Apply the
@@ -129,7 +130,7 @@ void ApplyPlanPasses(TOperatorPtr& plan, TPlanPassOptions options) {
         if (def) {
             def->OutputType = current->OutputColumns();
         }
-        EstimateStats(current);
+        EstimateStats(current, foldedBounds);
 
         const int rank = local.Applied ? 3
             : local.Considered ? 2

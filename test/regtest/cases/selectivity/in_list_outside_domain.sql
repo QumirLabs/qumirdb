@@ -1,0 +1,1 @@
+SELECT id AS id FROM t WHERE grp IN (100, 200) ORDER BY id;

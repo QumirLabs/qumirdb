@@ -540,9 +540,45 @@ keys does not turn into a malloc storm. See [aggregation.md](aggregation.md).
 
 - `ConstFold` is a helper, not a pipeline pass. UNION ALL pushdown uses it
   after substituting closed projections to decide whether a branch is dead,
-  needs the filter, or trivially satisfies it.
+  needs the filter, or trivially satisfies it. `EstimateStats` uses it for
+  constant comparison bounds. An expression it cannot type or evaluate is
+  returned unfolded, so folding never fails a query.
 - `AssignSourceAliases`, `QualifyColumns`, `AnnotateTypes`,
   `CoerceSetOpBranches`, `unbound_vars`, `typing` — normalization and checking.
 - `EstimateStats` — produces the row counts,
   NDVs and selectivities that ReorderJoins and ChooseCteReuse consume. Parquet
   files may carry NDV and equi-depth histograms in a custom footer key.
+
+### Filter selectivity
+
+A filter keeps the input rows for which its predicate is TRUE. `EstimateStats`
+estimates that fraction from the statistics of the filter's input: row count,
+min/max, null count, NDV, and an equi-depth histogram, as introduced by
+Piatetsky-Shapiro and Connell in [Accurate Estimation of the Number of Tuples
+Satisfying a Condition (SIGMOD 1984)](https://doi.org/10.1145/602259.602294).
+The assumptions are those of System R, Selinger et al. in [Access Path Selection
+in a Relational Database Management System (SIGMOD 1979)](https://doi.org/10.1145/582095.582099):
+predicates on different columns are independent, values are uniform within a
+bucket, and a predicate the statistics cannot answer gets a default, 0.5 here.
+
+- A comparison of a column with a constant reads the histogram. The constant
+  may be a closed expression such as `date '1995-01-01' + interval '1' year`;
+  it is folded to a number once per query, and the plan keeps the expression.
+  `<` and `>=` count the rows strictly below the constant, so a heavy value
+  that repeats as a bucket boundary falls on the correct side.
+- The bounds on one column form one range rather than two independent
+  predicates, whose product can be far from the narrow range they describe.
+  The histogram cannot resolve a range narrower than a bucket, so a range that
+  can hold a value of the column keeps at least `1/NDV`, but never more than
+  either bound alone: adding a conjunct never raises an estimate. A range that
+  is empty or lies outside min/max keeps nothing.
+- `col = c` is `1/NDV`, or nothing when `c` lies outside min/max. `col IN (...)`
+  counts the distinct non-NULL constants inside min/max. `NOT IN` is estimated
+  as the chain of `<>` it stands for, `(1 - 1/NDV)` per constant, so it cannot
+  reach zero from a list longer than the NDV.
+- `col IS NULL` is the null fraction of the column, used only directly above
+  the scan: the null count describes the table and is not rescaled by the
+  operators in between.
+- `NOT p` keeps the rows where `p` is FALSE. That is the complement of TRUE only
+  when `p` cannot be NULL; otherwise the UNKNOWN rows are not known, and
+  `NOT p` gets the default.

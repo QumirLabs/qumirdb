@@ -1,0 +1,4 @@
+sort [id asc]
+└─ project (id) (rows≈20 cost≈408)
+   └─ filter (< |t.id| (/ 0.0 0.0)) (rows≈20 cost≈328)
+      └─ source t AS t row-groups (< |t.id| (/ 0.0 0.0)) (rows≈41 cost≈164)

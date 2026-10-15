@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "fixtures": {
+    "numbers": {"json": "tables/numbers.json"}
+  },
+  "tables": {"t": "numbers"},
+  "variants": ["single", "threaded"],
+  "cases": {
+    "bound_date_interval.sql": {"order": "ordered"},
+    "bound_cast_date.sql": {"order": "ordered"},
+    "bound_arithmetic.sql": {"order": "ordered"},
+    "range_inclusive.sql": {"order": "ordered"},
+    "range_exclusive.sql": {"order": "ordered"},
+    "range_point.sql": {"order": "ordered"},
+    "range_other_column.sql": {"order": "ordered"},
+    "not_range.sql": {"order": "ordered"},
+    "not_like.sql": {"order": "ordered"},
+    "is_null.sql": {"order": "ordered"},
+    "is_not_null.sql": {"order": "ordered"},
+    "in_list.sql": {"order": "ordered"},
+    "not_in_list.sql": {"order": "ordered"},
+    "eq_outside_range.sql": {"order": "ordered"},
+    "default_no_histogram.sql": {"order": "ordered"},
+    "default_in_list_no_ndv.sql": {"order": "ordered"},
+    "default_not_constant.sql": {"order": "ordered"},
+    "default_nullable_range.sql": {"order": "ordered"},
+    "bound_nan.sql": {"order": "ordered"},
+    "bound_beyond_int64.sql": {"order": "ordered"},
+    "bound_fractional.sql": {"order": "ordered"},
+    "range_outside_domain.sql": {"order": "ordered"},
+    "range_inverted.sql": {"order": "ordered"},
+    "range_ndv_zero.sql": {"order": "ordered"},
+    "in_list_duplicates.sql": {"order": "ordered"},
+    "in_list_null.sql": {"order": "ordered"},
+    "in_list_outside_domain.sql": {"order": "ordered"},
+    "not_in_list_outside_domain.sql": {"order": "ordered"},
+    "not_in_list_all_values.sql": {"order": "ordered"},
+    "not_equal_chain.sql": {"order": "ordered"},
+    "not_nullable_range.sql": {"order": "ordered"},
+    "not_in_list_with_null.sql": {"order": "ordered"}
+  }
+}

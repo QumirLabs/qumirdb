@@ -1,0 +1,5 @@
+project (cnt) (rows≈1 cost≈1.8K)
+└─ aggregate keys=[__group__] aggs=[count_0=count] (rows≈1 cost≈1.8K)
+   └─ project (__group__) (rows≈5 cost≈1.7K)
+      └─ filter (&& (&& (>= |t.id| 10) (< |t.id| 20)) (call qdb_in_list |t.tag| (cast "red" <named StringView>) (cast "blue" <named StringView>))) (rows≈5 cost≈1.6K)
+         └─ source t AS t row-groups (&& (&& (>= |t.id| 10) (< |t.id| 20)) (call qdb_in_list |t.tag| (cast "red" <named StringView>) (cast "blue" <named StringView>))) (rows≈41 cost≈820)

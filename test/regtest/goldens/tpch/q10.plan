@@ -8,6 +8,6 @@ top-sort [revenue desc] limit 20
                ├─ join inner [lineitem.l_orderkey = orders.o_orderkey] (rows≈1 cost≈5.1K)
                │  ├─ filter (== |lineitem.l_returnflag| (cast "R" <named StringView>)) (rows≈3 cost≈720)
                │  │  └─ source lineitem AS lineitem row-groups (== |lineitem.l_returnflag| (cast "R" <named StringView>)) (rows≈10 cost≈360)
-               │  └─ filter (&& (>= |orders.o_orderdate| (: 8917 i32)) (< |orders.o_orderdate| (+ (: 8917 i32) (: 90 i32)))) (rows≈3 cost≈240)
+               │  └─ filter (&& (>= |orders.o_orderdate| (: 8917 i32)) (< |orders.o_orderdate| (+ (: 8917 i32) (: 90 i32)))) (rows≈1 cost≈240)
                │     └─ source orders AS orders row-groups (&& (>= |orders.o_orderdate| (: 8917 i32)) (< |orders.o_orderdate| (+ (: 8917 i32) (: 90 i32)))) (rows≈10 cost≈120)
                └─ source customer AS customer use-filter 2 keys=[customer.c_custkey] (rows≈10 cost≈800)

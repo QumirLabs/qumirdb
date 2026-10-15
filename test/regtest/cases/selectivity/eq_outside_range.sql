@@ -1,0 +1,1 @@
+SELECT id AS id FROM t WHERE id = 100 + 1 ORDER BY id;

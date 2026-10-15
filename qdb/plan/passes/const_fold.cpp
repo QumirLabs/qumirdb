@@ -5,12 +5,14 @@
 #include <qdb/plan/clone_expr.h>
 #include <qdb/plan/passes/unbound_vars.h>
 
+#include <qumir/error.h>
 #include <qumir/parser/ast.h>
 
 #include <charconv>
 #include <memory>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace NQdb {
@@ -36,6 +38,20 @@ std::optional<std::string> EvalClosed(const TExprPtr& expr, const TTypePtr& retT
         return std::nullopt;
     }
     return (*compiled)->Eval({});
+}
+
+// CloneExpr shares types with the original, and compiling resolves named types
+// in place. Give the clone its own, so that folding leaves the caller's
+// expression as it was.
+void DetachNamedTypes(const TExprPtr& expr) {
+    if (auto maybeNamed = TMaybeType<TNamedType>(expr->Type)) {
+        expr->Type = std::make_shared<TNamedType>(*maybeNamed.Cast());
+    }
+    for (auto* child : expr->MutableChildren()) {
+        if (*child) {
+            DetachNamedTypes(*child);
+        }
+    }
 }
 
 TExprPtr LiteralFromResult(const std::string& s) {
@@ -67,8 +83,18 @@ TExprPtr ConstFold(TExprPtr expr) {
     }
     // A closed expression can be typed against an empty input schema; expansion
     // rewrites SQL nullability/Decimal and yields the result type used to wrap it.
-    auto [rewritten, rewrittenType] =
-        NKernel::ExpandKernelExpr(CloneExpr(expr), TStructType({}));
+    // It throws for what it cannot type, such as a decimal product: the caller
+    // then keeps the expression, as after any other failure to fold.
+    TExprPtr rewritten;
+    TTypePtr rewrittenType;
+    try {
+        auto clone = CloneExpr(expr);
+        DetachNamedTypes(clone);
+        std::tie(rewritten, rewrittenType) =
+            NKernel::ExpandKernelExpr(clone, TStructType({}));
+    } catch (const NQumir::TError&) {
+        return expr;
+    }
     if (!rewrittenType) {
         return expr;
     }

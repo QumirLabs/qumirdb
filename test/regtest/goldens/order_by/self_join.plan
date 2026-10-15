@@ -1,6 +1,6 @@
 sort [id asc]
-└─ project (id, a) (rows≈3 cost≈4.5K)
-   └─ join inner [r.id = l.id] (rows≈3 cost≈4.4K)
+└─ project (id, a) (rows≈2 cost≈4.4K)
+   └─ join inner [r.id = l.id] (rows≈2 cost≈4.4K)
       ├─ source t AS r (rows≈6 cost≈96)
-      └─ filter (call qdb_in_list |l.id| 1 3) (rows≈3 cost≈96)
+      └─ filter (call qdb_in_list |l.id| 1 3) (rows≈2 cost≈96)
          └─ source t AS l row-groups (call qdb_in_list |l.id| 1 3) (rows≈6 cost≈48)

@@ -1,4 +1,5 @@
 #include "estimate_stats.h"
+#include "const_fold.h"
 #include "flatten_conjuncts.h"
 #include "unbound_vars.h"
 
@@ -12,9 +13,12 @@
 #include <qdb/plan/ops/union.h>
 #include <qdb/plan/types/nullable.h>
 
+#include <qumir/parser/core/printer.h>
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <set>
 
 namespace NQdb {
 
@@ -136,223 +140,542 @@ double JoinKeyWidth(const TOperatorPtr& left, const TOperatorPtr& right,
 
 constexpr double LikeSelectivity = 0.05;
 
-double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shared_ptr<TStructType> operatorType) {
-    // TODO: eval consts
+// One end of a range on a column.
+struct TRangeEnd {
+    double Value = 0.0;
+    bool Inclusive = false; // `<=` or `>=`
+    double Below = 0.0; // fraction of rows below the end
+};
 
-    if (!operatorType) {
+struct TRangeBound {
+    std::string Column;
+    bool Upper = false; // `col < c` or `col <= c`
+    TRangeEnd End;
+};
+
+// The tightest ends of a range on a column.
+struct TColumnRange {
+    std::optional<TRangeEnd> Lower;
+    std::optional<TRangeEnd> Upper;
+};
+
+// Whether expr can be NULL, which makes a predicate over it UNKNOWN rather than
+// FALSE. Only what is known to be NULL-free counts as such.
+bool MayBeNull(const TExprPtr& expr, const TStructType& input) {
+    if (TMaybeNode<TNumberExpr>(expr) || TMaybeNode<TStringLiteralExpr>(expr)) {
+        return false;
+    }
+    if (auto ident = TMaybeNode<TIdentExpr>(expr)) {
+        const auto& name = ident.Cast()->Name;
+        for (const auto& [column, type] : input.Fields) {
+            if (column == name) {
+                return IsNullableType(type);
+            }
+        }
+        return true;
+    }
+    std::vector<TExprPtr> operands;
+    if (auto maybeCall = TMaybeNode<TCallExpr>(expr)) {
+        auto call = maybeCall.Cast();
+        auto callee = TMaybeNode<TIdentExpr>(call->Callee);
+        if (!callee) {
+            return true;
+        }
+        const auto& name = callee.Cast()->Name;
+        if (name == "qdb_is_null") {
+            return false;
+        }
+        // These return NULL only for a NULL argument.
+        if (name != "qdb_in_list" && name != "qdb_string_view_sql_like") {
+            return true;
+        }
+        operands = call->Args;
+    } else if (TMaybeNode<TCastExpr>(expr) || TMaybeNode<TUnaryExpr>(expr) || TMaybeNode<TBinaryExpr>(expr)) {
+        operands = expr->Children();
+    } else {
+        return true;
+    }
+    return std::ranges::any_of(operands, [&](const TExprPtr& operand) {
+        return MayBeNull(operand, input);
+    });
+}
+
+// One filter's statistics and schema, with the folding memo shared by the query.
+class TSelectivityEstimator {
+public:
+    TSelectivityEstimator(
+        const TStats& inputStats,
+        const TStructType& operatorType,
+        bool overSource,
+        TFoldedBounds& foldedBounds)
+        : InputStats_(inputStats)
+        , OperatorType_(operatorType)
+        , OverSource_(overSource)
+        , FoldedBounds_(foldedBounds) {}
+
+    double Estimate(const TExprPtr& atom) {
+        if (auto maybeUnary = TMaybeNode<TUnaryExpr>(atom)) {
+            auto unary = maybeUnary.Cast();
+            if (unary->Operator == "!"_op) {
+                return EstimateNot(*unary);
+            }
+        }
+        if (auto maybeCall = TMaybeNode<TCallExpr>(atom)) {
+            return EstimateCall(atom, *maybeCall.Cast());
+        }
+        if (auto maybeBinary = TMaybeNode<TBinaryExpr>(atom)) {
+            return EstimateBinary(atom, *maybeBinary.Cast());
+        }
         return 0.5;
     }
 
-    auto isConstExpr = [&](const TExprPtr& expr) {
-        return FindUnboundVars(expr).empty();
-    };
+private:
+    double EstimateNot(const TUnaryExpr& unary) {
+        // NOT keeps the rows where the operand is FALSE. If it can also be
+        // UNKNOWN, that is not the complement of TRUE, and the statistics
+        // do not say how many rows are UNKNOWN.
+        if (MayBeNull(unary.Operand, OperatorType_)) {
+            return 0.5;
+        }
+        // NOT IN is the chain of `<>` it stands for: each value keeps
+        // 1 - 1/ndv of the rows.
+        if (auto values = InListValues(unary.Operand)) {
+            return std::pow(1.0 - 1.0 / values->second, values->first);
+        }
+        return 1.0 - Estimate(unary.Operand);
+    }
 
-    auto columnType = [&](const std::string& colName) -> TTypePtr {
-        for (auto& [col, type] : operatorType->Fields) {
+    double EstimateCall(const TExprPtr& atom, const TCallExpr& call) {
+        auto maybeCallee = TMaybeNode<TIdentExpr>(call.Callee);
+        if (!maybeCallee) {
+            return 0.5;
+        }
+        auto callee = maybeCallee.Cast();
+        if (callee->Name == "qdb_string_view_sql_like") {
+            return LikeSelectivity;
+        }
+        // A source's null count and row count describe the same rows.
+        if (
+            callee->Name == "qdb_is_null" && call.Args.size() == 1 &&
+            OverSource_ && InputStats_.RowCount > 0)
+        {
+            if (auto column = TMaybeNode<TIdentExpr>(call.Args[0])) {
+                auto colIt = InputStats_.ColumnStats.find(column.Cast()->Name);
+                if (colIt != InputStats_.ColumnStats.end() && colIt->second->NullCount) {
+                    return static_cast<double>(*colIt->second->NullCount)
+                        / static_cast<double>(InputStats_.RowCount);
+                }
+            }
+        }
+        if (auto values = InListValues(atom)) {
+            return std::min(1.0, values->first / values->second);
+        }
+        return 0.5;
+    }
+
+    double EstimateBinary(const TExprPtr& atom, const TBinaryExpr& binary) {
+        if (binary.Operator == "&&"_op) {
+            return EstimateConjunction(atom);
+        }
+        if (binary.Operator == "=="_op || binary.Operator == "!="_op) {
+            return EstimateEquality(binary);
+        }
+        if (auto bound = RangeBound(atom)) {
+            return bound->Upper
+                ? bound->End.Below
+                : 1.0 - bound->End.Below;
+        }
+        return 0.5;
+    }
+
+    double EstimateConjunction(const TExprPtr& atom) {
+        std::vector<TExprPtr> conjuncts;
+        FlattenConjuncts(atom, conjuncts);
+        // Bounds on one column form one range. Multiplying them as
+        // independent predicates distorts a narrow range a lot.
+        std::map<std::string, TColumnRange> ranges;
+        double selectivity = 1.0;
+        for (const auto& conjunct : conjuncts) {
+            if (auto bound = RangeBound(conjunct)) {
+                auto& range = ranges[bound->Column];
+                const auto& end = bound->End;
+                // The tighter end wins; at the same constant the strict one.
+                if (bound->Upper) {
+                    if (
+                        !range.Upper || end.Value < range.Upper->Value ||
+                        (end.Value == range.Upper->Value && !end.Inclusive))
+                    {
+                        range.Upper = end;
+                    }
+                } else if (
+                    !range.Lower || end.Value > range.Lower->Value ||
+                    (end.Value == range.Lower->Value && !end.Inclusive))
+                {
+                    range.Lower = end;
+                }
+            } else {
+                selectivity *= Estimate(conjunct);
+            }
+        }
+        for (const auto& [column, range] : ranges) {
+            const double upper = range.Upper
+                ? range.Upper->Below
+                : 1.0;
+            const double lower = range.Lower
+                ? range.Lower->Below
+                : 0.0;
+            double fraction = std::max(upper - lower, 0.0);
+            // The histogram cannot resolve a range narrower than a bucket,
+            // but a range that can hold a value of the column keeps one
+            // distinct value. It never keeps more than either end alone.
+            auto ndv = InputStats_.ColumnStats.at(column)->Ndv;
+            if (
+                range.Lower && range.Upper && ndv && *ndv > 0 &&
+                RangeCanHoldValue(column, *range.Lower, *range.Upper))
+            {
+                fraction = std::min({
+                    std::max(fraction, 1.0 / static_cast<double>(*ndv)),
+                    upper,
+                    1.0 - lower});
+            }
+            selectivity *= fraction;
+        }
+        return selectivity;
+    }
+
+    double EstimateEquality(const TBinaryExpr& binary) {
+        double selectivity = 0.5;
+        auto leftIdent = TMaybeNode<TIdentExpr>(binary.Left);
+        auto rightIdent = TMaybeNode<TIdentExpr>(binary.Right);
+        if (leftIdent && rightIdent) {
+            return EstimateColumnEquality(
+                leftIdent.Cast()->Name,
+                rightIdent.Cast()->Name,
+                binary.Operator == "!="_op);
+        }
+        if (leftIdent && IsConstExpr(binary.Right)) {
+            selectivity = EstimateConstantEquality(leftIdent.Cast()->Name, binary.Right);
+        } else if (rightIdent && IsConstExpr(binary.Left)) {
+            selectivity = EstimateConstantEquality(rightIdent.Cast()->Name, binary.Left);
+        }
+        return binary.Operator == "!="_op
+            ? 1.0 - selectivity
+            : selectivity;
+    }
+
+    double EstimateColumnEquality(
+        const std::string& leftName,
+        const std::string& rightName,
+        bool negated) const
+    {
+        // NaN != NaN, so a float column keeps the general estimate below.
+        auto type = ColumnType(leftName);
+        const bool mayBeNaN = type
+            && TMaybeType<TFloatType>(UnwrapNamedType(UnwrapNullableType(type)));
+        if (leftName == rightName && !mayBeNaN) {
+            // A column equals itself on every non-NULL row, whatever its
+            // NDV; `x != x` holds on no row.
+            auto it = InputStats_.ColumnStats.find(leftName);
+            const double nulls = it != InputStats_.ColumnStats.end()
+                ? static_cast<double>(it->second->NullCount.value_or(0))
+                : 0.0;
+            const double rows = std::max(1.0, static_cast<double>(InputStats_.RowCount));
+            return negated
+                ? 0.0
+                : 1.0 - std::min(1.0, nulls / rows);
+        }
+        double selectivity = 0.5;
+        if (InputStats_.ColumnStats.count(leftName) > 0 && InputStats_.ColumnStats.count(rightName) > 0) {
+            auto leftNdv = InputStats_.ColumnStats.at(leftName)->Ndv;
+            auto rightNdv = InputStats_.ColumnStats.at(rightName)->Ndv;
+            if (leftNdv && rightNdv) {
+                selectivity = 1.0 / std::max(*leftNdv, *rightNdv);
+            }
+        }
+        return negated
+            ? 1.0 - selectivity
+            : selectivity;
+    }
+
+    double EstimateConstantEquality(const std::string& colName, const TExprPtr& value) {
+        auto it = InputStats_.ColumnStats.find(colName);
+        if (it == InputStats_.ColumnStats.end()) {
+            return 0.5;
+        }
+        auto inRangeResult = InRange(value, colName);
+        if (inRangeResult.has_value() && !*inRangeResult) {
+            return 0.0;
+        }
+        return it->second->Ndv
+            ? 1.0 / *it->second->Ndv
+            : 0.5;
+    }
+
+    static bool IsConstExpr(const TExprPtr& expr) {
+        return FindUnboundVars(expr).empty();
+    }
+
+    TTypePtr ColumnType(const std::string& colName) const {
+        for (const auto& [col, type] : OperatorType_.Fields) {
             if (col == colName) {
                 return type;
             }
         }
         return nullptr;
-    };
+    }
 
-    auto fractionBelow = [&](
+    std::shared_ptr<TNumberExpr> ConstNumber(const TExprPtr& expr) {
+        if (auto number = TMaybeNode<TNumberExpr>(expr)) {
+            return number.Cast();
+        }
+        if (!IsConstExpr(expr)) {
+            return nullptr;
+        }
+        auto [it, inserted] = FoldedBounds_.try_emplace(NCore::PrintAst(expr));
+        if (inserted) {
+            if (auto folded = TMaybeNode<TNumberExpr>(ConstFold(expr))) {
+                it->second = folded.Cast();
+            }
+        }
+        return it->second;
+    }
+
+    std::optional<double> FractionBelow(
         const std::string& colName,
-        const std::shared_ptr<TNumberExpr>& num) -> std::optional<double>
+        const TExprPtr& bound,
+        bool strict)
     {
-        auto colIt = inputStats->ColumnStats.find(colName);
-        if (colIt == inputStats->ColumnStats.end()) {
+        auto colIt = InputStats_.ColumnStats.find(colName);
+        auto type = ColumnType(colName);
+        // Check the statistics first: evaluating the bound is the costly step.
+        if (
+            colIt == InputStats_.ColumnStats.end() || colIt->second->Histogram.empty() ||
+            !(TMaybeType<TFloatType>(type) || TMaybeType<TIntegerType>(type)))
+        {
             return std::nullopt;
         }
-        auto type = columnType(colName);
+        auto num = ConstNumber(bound);
+        if (!num) {
+            return std::nullopt;
+        }
         if (TMaybeType<TFloatType>(type)) {
             double c = num->IsFloat()
                 ? num->FloatValue
                 : static_cast<double>(num->IntValue);
-            return colIt->second->FractionBelow(c);
+            return colIt->second->FractionBelow(c, strict);
         }
         if (TMaybeType<TIntegerType>(type)) {
-            int64_t c = num->IsFloat()
-                ? static_cast<int64_t>(num->FloatValue)
-                : num->IntValue;
-            return colIt->second->FractionBelow(c);
+            if (num->IsFloat()) {
+                const double value = num->FloatValue;
+                if (std::isnan(value)) {
+                    return std::nullopt;
+                }
+                // Outside the int64 range the bound is above or below every value.
+                if (value >= 0x1p63) {
+                    return 1.0;
+                }
+                if (value < -0x1p63) {
+                    return 0.0;
+                }
+                // An integer is below 24.5 exactly when it is <= 24.
+                const double whole = std::floor(value);
+                return colIt->second->FractionBelow(
+                    static_cast<int64_t>(whole), strict && whole == value);
+            }
+            return colIt->second->FractionBelow(num->IntValue, strict);
         }
         return std::nullopt;
-    };
+    }
 
-    auto inRange = [&](TExprPtr expr, const std::string& colName) -> std::optional<bool> {
-        if (inputStats->ColumnStats.count(colName) == 0) {
+    std::optional<TRangeBound> RangeBound(const TExprPtr& expr) {
+        auto maybeBinary = TMaybeNode<TBinaryExpr>(expr);
+        if (!maybeBinary) {
             return std::nullopt;
         }
-        auto colStats = inputStats->ColumnStats[colName];
+        auto binary = maybeBinary.Cast();
+        const bool less = binary->Operator == "<"_op || binary->Operator == "<="_op;
+        const bool greater = binary->Operator == ">"_op || binary->Operator == ">="_op;
+        if (!less && !greater) {
+            return std::nullopt;
+        }
+        // An upper bound keeps the rows below it and a lower bound drops
+        // them, so `<` and `>=` count the rows strictly below the constant.
+        const bool inclusive = binary->Operator == "<="_op || binary->Operator == ">="_op;
+        // The bound folded already when the fraction was found.
+        auto value = [&](const TExprPtr& bound) {
+            auto number = ConstNumber(bound);
+            return number->IsFloat()
+                ? number->FloatValue
+                : static_cast<double>(number->IntValue);
+        };
+        // `col OP const`
+        if (auto leftIdent = TMaybeNode<TIdentExpr>(binary->Left)) {
+            const auto& name = leftIdent.Cast()->Name;
+            if (auto f = FractionBelow(name, binary->Right, less != inclusive)) {
+                return TRangeBound{name, less, {value(binary->Right), inclusive, *f}};
+            }
+        }
+        // `const OP col`  ==  `col (flip OP) const`
+        if (auto rightIdent = TMaybeNode<TIdentExpr>(binary->Right)) {
+            const auto& name = rightIdent.Cast()->Name;
+            if (auto f = FractionBelow(name, binary->Left, greater != inclusive)) {
+                return TRangeBound{name, greater, {value(binary->Left), inclusive, *f}};
+            }
+        }
+        return std::nullopt;
+    }
+
+    bool RangeCanHoldValue(const std::string& colName, TRangeEnd lower, TRangeEnd upper) const {
+        const auto& colStats = InputStats_.ColumnStats.at(colName);
+        if (!colStats->MinValue || !colStats->MaxValue) {
+            return false; // the statistics cannot show it
+        }
+        double min = 0.0;
+        double max = 0.0;
+        if (auto integer = TMaybeType<TIntegerType>(ColumnType(colName))) {
+            // The smallest and the largest integer between the ends.
+            lower.Value = lower.Inclusive
+                ? std::ceil(lower.Value)
+                : std::floor(lower.Value) + 1.0;
+            upper.Value = upper.Inclusive
+                ? std::floor(upper.Value)
+                : std::ceil(upper.Value) - 1.0;
+            lower.Inclusive = upper.Inclusive = true;
+            const bool isSigned = integer.Cast()->IsSigned();
+            min = isSigned
+                ? static_cast<double>(*colStats->GetMinValue<int64_t>())
+                : static_cast<double>(*colStats->GetMinValue<uint64_t>());
+            max = isSigned
+                ? static_cast<double>(*colStats->GetMaxValue<int64_t>())
+                : static_cast<double>(*colStats->GetMaxValue<uint64_t>());
+        } else {
+            min = *colStats->GetMinValue<double>();
+            max = *colStats->GetMaxValue<double>();
+        }
+        auto below = [](double a, bool aInclusive, double b, bool bInclusive) {
+            return a < b || (a == b && !(aInclusive && bInclusive));
+        };
+        return !below(upper.Value, upper.Inclusive, lower.Value, lower.Inclusive)
+            && !below(upper.Value, upper.Inclusive, min, true)
+            && !below(max, true, lower.Value, lower.Inclusive);
+    }
+
+    std::optional<bool> InRange(const TExprPtr& expr, const std::string& colName) {
+        if (InputStats_.ColumnStats.count(colName) == 0) {
+            return std::nullopt;
+        }
+        auto colStats = InputStats_.ColumnStats.at(colName);
         if (!colStats->MinValue || !colStats->MaxValue) {
             return std::nullopt;
         }
-        auto maybeNumber = TMaybeNode<TNumberExpr>(expr);
-        if (!maybeNumber) {
+        const auto type = ColumnType(colName);
+        auto integerType = TMaybeType<TIntegerType>(type);
+        if (type && !integerType && !TMaybeType<TFloatType>(type)) {
             return std::nullopt;
         }
-        bool isIntegerType = false;
-        bool isSigned = false;
-        bool isFloatType = false;
-        for (auto& [col, type] : operatorType->Fields) {
-            if (col == colName) {
-                if (auto integerType = TMaybeType<TIntegerType>(type)) {
-                    isIntegerType = true;
-                    isSigned = integerType.Cast()->IsSigned();
-                } else if (TMaybeType<TFloatType>(type)) {
-                    isFloatType = true;
-                } else {
-                    return std::nullopt;
-                }
-                break;
-            }
+        auto number = ConstNumber(expr);
+        if (!number) {
+            return std::nullopt;
         }
-        auto number = maybeNumber.Cast();
-        if (isIntegerType) {
-            if (number->IsFloat()) {
-                if (isSigned) {
-                    return *colStats->GetMinValue<int64_t>() <= number->FloatValue
-                        && number->FloatValue <= colStats->GetMaxValue<int64_t>();
-                } else {
-                    return *colStats->GetMinValue<uint64_t>() <= number->FloatValue
-                        && number->FloatValue <= colStats->GetMaxValue<uint64_t>();
-                }
-            } else {
-                if (isSigned) {
-                    return *colStats->GetMinValue<int64_t>() <= number->IntValue
-                        && number->IntValue <= colStats->GetMaxValue<int64_t>();
-                } else {
-                    return *colStats->GetMinValue<uint64_t>() <= number->IntValue
-                        && number->IntValue <= colStats->GetMaxValue<uint64_t>();
-                }
-            }
-        } else {
-            // float
-            // TODO: only double supported
-            if (number->IsFloat()) {
-                return *colStats->GetMinValue<double>() <= number->FloatValue
-                    && number->FloatValue <= colStats->GetMaxValue<double>();
-            } else {
-                return *colStats->GetMinValue<double>() <= number->IntValue
-                    && number->IntValue <= colStats->GetMaxValue<double>();
-            }
+        if (integerType) {
+            return integerType.Cast()->IsSigned()
+                ? NumberInRange<int64_t>(*colStats, *number)
+                : NumberInRange<uint64_t>(*colStats, *number);
         }
-    };
-
-    // col LIKE pattern -> qdb_string_view_sql_like; assume high selectivity.
-    if (auto maybeCall = TMaybeNode<TCallExpr>(atom)) {
-        if (auto callee = TMaybeNode<TIdentExpr>(maybeCall.Cast()->Callee)) {
-            if (callee.Cast()->Name == "qdb_string_view_sql_like") {
-                return LikeSelectivity;
-            }
-        }
+        // TODO: only double supported
+        return NumberInRange<double>(*colStats, *number);
     }
 
-    if (auto maybeBinary = TMaybeNode<TBinaryExpr>(atom)) {
-        auto binary = maybeBinary.Cast();
-        if (binary->Operator == "==" || binary->Operator == "!=") {
-            double selectivity = 0.5;
-            auto leftIdent = TMaybeNode<TIdentExpr>(binary->Left);
-            auto rightIdent = TMaybeNode<TIdentExpr>(binary->Right);
-            if (leftIdent && rightIdent) {
-                auto leftName = std::string(leftIdent.Cast()->Name);
-                auto rightName = std::string(rightIdent.Cast()->Name);
-                // NaN != NaN, so a float column keeps the general estimate below.
-                auto type = columnType(leftName);
-                const bool mayBeNaN = type
-                    && TMaybeType<TFloatType>(UnwrapNamedType(UnwrapNullableType(type)));
-                if (leftName == rightName && !mayBeNaN) {
-                    // A column equals itself on every non-NULL row, whatever its
-                    // NDV; `x != x` holds on no row.
-                    auto it = inputStats->ColumnStats.find(leftName);
-                    const double nulls = it != inputStats->ColumnStats.end()
-                        ? static_cast<double>(it->second->NullCount.value_or(0))
-                        : 0.0;
-                    const double rows = std::max(
-                        1.0, static_cast<double>(inputStats->RowCount));
-                    return binary->Operator == "!="_op
-                        ? 0.0
-                        : 1.0 - std::min(1.0, nulls / rows);
-                }
-                if (inputStats->ColumnStats.count(leftName) > 0
-                    && inputStats->ColumnStats.count(rightName) > 0)
-                {
-                    auto leftNdv = inputStats->ColumnStats[leftName]->Ndv;
-                    auto rightNdv = inputStats->ColumnStats[rightName]->Ndv;
-                    if (leftNdv && rightNdv) {
-                        selectivity = 1.0 / std::max(*leftNdv, *rightNdv);
-                    }
-                }
-            } else if (leftIdent && isConstExpr(binary->Right)) {
-                auto leftName = std::string(leftIdent.Cast()->Name);
-                if (inputStats->ColumnStats.count(leftName) > 0) {
-                    auto inRangeResult = inRange(binary->Right, leftName);
-                    if (inRangeResult.has_value() && !*inRangeResult) {
-                        selectivity = 0.0;
-                    } else {
-                        auto leftNdv = inputStats->ColumnStats[leftName]->Ndv;
-                        if (leftNdv) {
-                            selectivity = 1.0 / *leftNdv;
-                        }
-                    }
-                }
-            } else if (rightIdent && isConstExpr(binary->Left)) {
-                auto rightName = std::string(rightIdent.Cast()->Name);
-                if (inputStats->ColumnStats.count(rightName) > 0) {
-                    auto inRangeResult = inRange(binary->Left, rightName);
-                    if (inRangeResult.has_value() && !*inRangeResult) {
-                        selectivity = 0.0;
-                    } else {
-                        auto rightNdv = inputStats->ColumnStats[rightName]->Ndv;
-                        if (rightNdv) {
-                            selectivity = 1.0 / *rightNdv;
-                        }
-                    }
-                }
-            }
-            if (binary->Operator == "!=") {
-                selectivity = 1.0 - selectivity;
-            }
-            return selectivity;
-        } // ==, !=
-
-        if (binary->Operator == "<" || binary->Operator == "<="
-            || binary->Operator == ">" || binary->Operator == ">=") {
-            const bool greater = binary->Operator == ">" || binary->Operator == ">=";
-            auto leftIdent = TMaybeNode<TIdentExpr>(binary->Left);
-            auto rightIdent = TMaybeNode<TIdentExpr>(binary->Right);
-            auto leftNumber = TMaybeNode<TNumberExpr>(binary->Left);
-            auto rightNumber = TMaybeNode<TNumberExpr>(binary->Right);
-            // `col OP const`
-            if (leftIdent && rightNumber) {
-                if (auto f = fractionBelow(std::string(leftIdent.Cast()->Name), rightNumber.Cast())) {
-                    return greater ? 1.0 - *f : *f;
-                }
-            }
-            // `const OP col`  ==  `col (flip OP) const`
-            if (rightIdent && leftNumber) {
-                if (auto f = fractionBelow(std::string(rightIdent.Cast()->Name), leftNumber.Cast())) {
-                    return greater ? *f : 1.0 - *f;
-                }
-            }
+    template<class TValue>
+    static bool NumberInRange(const TStats::TColumnStats& stats, const TNumberExpr& number) {
+        if (number.IsFloat()) {
+            return *stats.GetMinValue<TValue>() <= number.FloatValue
+                && number.FloatValue <= *stats.GetMaxValue<TValue>();
         }
+        return *stats.GetMinValue<TValue>() <= number.IntValue
+            && number.IntValue <= *stats.GetMaxValue<TValue>();
     }
 
-    return 0.5; // fallback selectivity for unknown atoms
+    std::optional<std::pair<double, double>> InListValues(const TExprPtr& expr) {
+        auto maybeCall = TMaybeNode<TCallExpr>(expr);
+        if (!maybeCall) {
+            return std::nullopt;
+        }
+        auto call = maybeCall.Cast();
+        auto callee = TMaybeNode<TIdentExpr>(call->Callee);
+        if (!callee || callee.Cast()->Name != "qdb_in_list" || call->Args.size() < 2) {
+            return std::nullopt;
+        }
+        auto column = TMaybeNode<TIdentExpr>(call->Args[0]);
+        if (!column) {
+            return std::nullopt;
+        }
+        const auto& name = column.Cast()->Name;
+        auto colIt = InputStats_.ColumnStats.find(name);
+        if (colIt == InputStats_.ColumnStats.end() || !colIt->second->Ndv || *colIt->second->Ndv == 0) {
+            return std::nullopt;
+        }
+        std::set<double> numbers;
+        std::set<std::string> strings;
+        for (size_t i = 1; i < call->Args.size(); ++i) {
+            const auto& item = call->Args[i];
+            if (auto maybeNull = TMaybeNode<TCallExpr>(item)) {
+                auto nullCallee = TMaybeNode<TIdentExpr>(maybeNull.Cast()->Callee);
+                if (nullCallee && nullCallee.Cast()->Name == "qdb_sql_null") {
+                    continue;
+                }
+            }
+            if (auto maybeCast = TMaybeNode<TCastExpr>(item)) {
+                if (auto literal = TMaybeNode<TStringLiteralExpr>(maybeCast.Cast()->Operand)) {
+                    strings.insert(literal.Cast()->Value);
+                    continue;
+                }
+            }
+            auto number = ConstNumber(item);
+            if (!number) {
+                return std::nullopt;
+            }
+            const double value = number->IsFloat()
+                ? number->FloatValue
+                : static_cast<double>(number->IntValue);
+            if (std::isnan(value) || InRange(item, name) == false) {
+                continue;
+            }
+            numbers.insert(value);
+        }
+        return std::pair{
+            static_cast<double>(numbers.size() + strings.size()),
+            static_cast<double>(*colIt->second->Ndv)};
+    }
+
+    const TStats& InputStats_;
+    const TStructType& OperatorType_;
+    const bool OverSource_;
+    TFoldedBounds& FoldedBounds_;
+};
+
+// A source's null counts and row count describe the same rows.
+double EstimateSelectivity(
+    const TExprPtr& atom,
+    const TStatsPtr& inputStats,
+    const std::shared_ptr<TStructType>& operatorType,
+    bool overSource,
+    TFoldedBounds& foldedBounds)
+{
+    if (!operatorType) {
+        return 0.5;
+    }
+    return TSelectivityEstimator(*inputStats, *operatorType, overSource, foldedBounds).Estimate(atom);
 }
 
-TStatsPtr ComputeFilterStats(const std::shared_ptr<TFilterOperator>& filter) {
+TStatsPtr ComputeFilterStats(const std::shared_ptr<TFilterOperator>& filter, TFoldedBounds& foldedBounds) {
     auto inputStats = filter->Input()->Stats_;
     if (!inputStats) {
         return nullptr;
     }
-    std::vector<TExprPtr> conjuncts;
-    FlattenConjuncts(filter->Predicate(), conjuncts);
-    double selectivity = 1.0;
-    for (const auto& conjunct : conjuncts) {
-        selectivity *= EstimateSelectivity(conjunct, inputStats, TMaybeType<TStructType>(filter->Input()->OutputColumns()).Cast());
-    }
+    double selectivity = EstimateSelectivity(filter->Predicate(), inputStats,
+        TMaybeType<TStructType>(filter->Input()->OutputColumns()).Cast(),
+        TMaybeOp<TSourceOperator>(filter->Input()), foldedBounds);
     selectivity = std::clamp(selectivity, 0.0, 1.0);
     auto outputStats = std::make_shared<TStats>();
     outputStats->ColumnStats = inputStats->ColumnStats;
@@ -649,7 +972,7 @@ TStatsPtr ComputeAggregateStats(const std::shared_ptr<TAggregateOperator>& aggre
     return outputStats;
 }
 
-TStatsPtr ComputeStatsFor(TOperatorPtr op) {
+TStatsPtr ComputeStatsFor(TOperatorPtr op, TFoldedBounds& foldedBounds) {
     if (auto source = TMaybeOp<TSourceOperator>(op)) {
         return ComputeSourceStats(source.Cast());
     }
@@ -661,7 +984,7 @@ TStatsPtr ComputeStatsFor(TOperatorPtr op) {
     }
 
     if (auto maybeFilter = TMaybeOp<TFilterOperator>(op)) {
-        return ComputeFilterStats(maybeFilter.Cast());
+        return ComputeFilterStats(maybeFilter.Cast(), foldedBounds);
     }
     if (auto maybeProject = TMaybeOp<TProjectOperator>(op)) {
         return ComputeProjectStats(maybeProject.Cast());
@@ -726,12 +1049,17 @@ TJoinCardinality EstimateEquiJoin(
     return {rows, ndvL, ndvR};
 }
 
-TStatsPtr EstimateStats(TOperatorPtr op) {
+TStatsPtr EstimateStats(TOperatorPtr op, TFoldedBounds& foldedBounds) {
     for (const auto& input : op->Inputs()) {
-        input->Stats_ = EstimateStats(input);
+        input->Stats_ = EstimateStats(input, foldedBounds);
     }
 
-    return op->Stats_ = ComputeStatsFor(op);
+    return op->Stats_ = ComputeStatsFor(op, foldedBounds);
+}
+
+TStatsPtr EstimateStats(TOperatorPtr op) {
+    TFoldedBounds foldedBounds;
+    return EstimateStats(op, foldedBounds);
 }
 
 } // namespace NQdb

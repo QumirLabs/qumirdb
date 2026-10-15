@@ -10,6 +10,7 @@
 #include <qdb/plan/ops/stats.h>
 #include <qdb/plan/pipeline.h>
 #include <qdb/plan/passes/estimate_stats.h>
+#include <qdb/plan/passes/qualify_columns.h>
 #include <qdb/plan/passes/row_group_predicate.h>
 #include <qdb/plan/passes/typing.h>
 #include <qdb/plan/types/nullable.h>
@@ -20,6 +21,7 @@
 
 #include <bit>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -116,9 +118,45 @@ TEST(StatsTest, FractionBelowRepeatedBoundaries) {
     EXPECT_LE(at15, 1.0);
 }
 
+TEST(StatsTest, FractionBelowAcceptsAnyBound) {
+    TColumnStats cs;
+    cs.Histogram = Hist<double>({0.0, 0.5, 1.0});
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double inf = std::numeric_limits<double>::infinity();
+    EXPECT_FALSE(cs.FractionBelow(nan).has_value());
+    EXPECT_FALSE(cs.FractionBelow(nan, true).has_value());
+    EXPECT_DOUBLE_EQ(cs.FractionBelow(inf, true).value(), 1.0);
+    EXPECT_DOUBLE_EQ(cs.FractionBelow(-inf).value(), 0.0);
+
+    // The width of this bucket does not fit in int64.
+    TColumnStats wide;
+    wide.Histogram = Hist<int64_t>({std::numeric_limits<int64_t>::min(), 0,
+        std::numeric_limits<int64_t>::max()});
+    EXPECT_DOUBLE_EQ(wide.FractionBelow<int64_t>(0, true).value(), 0.5);
+}
+
 TEST(StatsTest, FractionBelowEmptyHistogram) {
     TColumnStats cs;
     EXPECT_FALSE(cs.FractionBelow<int64_t>(5).has_value());
+}
+
+TEST(StatsTest, FractionBelowStrictExcludesTheValue) {
+    // The value 5 holds half of the rows, so it repeats as a boundary.
+    TColumnStats cs;
+    cs.Histogram = Hist<int64_t>({0, 5, 5, 5, 10}); // 4 buckets
+    EXPECT_DOUBLE_EQ(cs.FractionBelow<int64_t>(5).value(), 0.75);       // <= 5
+    EXPECT_DOUBLE_EQ(cs.FractionBelow<int64_t>(5, true).value(), 0.25); // < 5
+    // Between heavy values there is nothing to exclude.
+    EXPECT_DOUBLE_EQ(cs.FractionBelow<int64_t>(7, true).value(),
+        cs.FractionBelow<int64_t>(7).value());
+    EXPECT_DOUBLE_EQ(cs.FractionBelow<int64_t>(0, true).value(), 0.0);  // nothing below min
+    EXPECT_DOUBLE_EQ(cs.FractionBelow<int64_t>(11, true).value(), 1.0);
+
+    // A heavy maximum is not below itself.
+    TColumnStats top;
+    top.Histogram = Hist<int64_t>({0, 5, 10, 10, 10});
+    EXPECT_DOUBLE_EQ(top.FractionBelow<int64_t>(10).value(), 1.0);
+    EXPECT_DOUBLE_EQ(top.FractionBelow<int64_t>(10, true).value(), 0.5);
 }
 
 // --- TParquetSource::Stats(): row count + standard column stats --------------
@@ -277,6 +315,53 @@ TEST(StatsTest, FilterSelectivityPropagation) {
     EXPECT_LE(plan->Stats_->RowCount, 300u);
     EXPECT_TRUE(sourceOp->RowGroupPredicate());
     EXPECT_TRUE(NQdb::TMaybeOp<NQdb::TFilterOperator>(plan));
+}
+
+namespace {
+
+// A 1000-row table: x is i64, uniform on [0, 1000); n is Nullable<i64> and
+// NULL in 200 rows. SQL-level selectivity cases live in the regression suite
+// test/regtest/cases/selectivity; these two need what it cannot set up.
+class NullCountStats : public ::testing::Test {
+protected:
+    NullCountStats() {
+        Src.Cols[1].Type = std::make_shared<NQdb::TNullable>(Src.Cols[1].Type);
+        Src.Stats_->ColumnStats.at("n")->NullCount = 200;
+    }
+
+    // Row estimate of the filters stacked on the source, innermost first. No
+    // pushdown runs, so the filters stay separate.
+    uint64_t Rows(std::initializer_list<const char*> predicates) {
+        NQdb::TOperatorPtr plan = std::make_shared<NQdb::TSourceOperator>(Src, "t");
+        for (const char* predicate : predicates) {
+            auto filter = NQdb::MakeFilter(plan, predicate);
+            EXPECT_TRUE(filter.has_value()) << filter.error().ToString();
+            plan = *filter;
+        }
+        NQdb::AssignSourceAliases(plan);
+        NQdb::QualifyColumns(plan);
+        NQdb::AnnotateTypes(plan);
+        return NQdb::EstimateStats(plan)->RowCount;
+    }
+
+    TStatsSource Src{{{"x", 100}, {"n", 100}}, 1000};
+};
+
+} // namespace
+
+// A Parquet file always records null counts, so a suite fixture has them.
+TEST_F(NullCountStats, IsNullWithoutNullCountKeepsDefaultSelectivity) {
+    Src.Stats_->ColumnStats.at("n")->NullCount.reset();
+    EXPECT_EQ(Rows({"(call qdb_is_null n)"}), 500u);
+    EXPECT_EQ(Rows({"(! (call qdb_is_null n))"}), 500u);
+}
+
+// The pipeline pushes a single-table filter down to the scan, so SQL does not
+// leave an IS NULL filter above another operator with a null count.
+TEST_F(NullCountStats, NullCountAppliesOnlyAboveTheSource) {
+    // 100 rows reach the outer filter, fewer than the table has nulls: the
+    // table-wide count says nothing about them.
+    EXPECT_EQ(Rows({"(< x 100)", "(! (call qdb_is_null n))"}), 50u);
 }
 
 TEST(StatsTest, AggregateStatsAccountForGroupingSets) {
