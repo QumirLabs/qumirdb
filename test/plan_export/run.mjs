@@ -739,7 +739,7 @@ async function runDiagnosticPayloadContract() {
       yield { rowCount: 4, columns: stage.columns.map(column => ({ ...column, values: values[column.name] })) };
     }, { operatorDiagnostics: true });
   assert.deepEqual(normalizeResult(result), {
-    columns: ['k', 'v'], rows: [['2', 'аб'], ['3', 'null'], ['4', '']],
+    columns: ['k', 'v'], rows: [['2', 'аб'], ['3', ''], ['4', '']],
   });
   const stages = result.operator_diagnostics.stages;
   const source = stages.find(stage => stage.kind === 'source');
