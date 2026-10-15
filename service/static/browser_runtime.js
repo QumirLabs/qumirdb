@@ -2731,7 +2731,7 @@ function finishJoinState(state) {
   state.arena.free(state.rightKeyColumns);
 }
 
-function createCrossJoinState(kernel, layout, stage) {
+function createCrossJoinState(kernel, layout, stage, diagnostics = null) {
   const dispatch = kernelExport(kernel, stage, 'xj_dispatch');
   const materialize = kernelExport(kernel, stage, 'jt_materialize');
 
@@ -2739,6 +2739,7 @@ function createCrossJoinState(kernel, layout, stage) {
   const pairBuffer = arena.alloc(layout.pairBuffer.size, 8);
   new Uint8Array(arena.memory.buffer, pairBuffer, layout.pairBuffer.size).fill(0);
   return {
+    diagnostics,
     kernel,
     layout,
     stage,
@@ -2779,6 +2780,7 @@ function stableRowSetForStore(state, rowSet) {
 function updateCrossRightState(state, rowSet) {
   const { rowsetPtr, ownedPtr, wasmHandle, releaseInput } =
     stableRowSetForStore(state, rowSet);
+  state.diagnostics?.retain(rowSet, 1);
   state.rightStore.push(rowSet.batch, rowsetPtr, ownedPtr, wasmHandle);
   if (releaseInput) {
     releaseWasmRowSet(rowSet);
@@ -2793,6 +2795,7 @@ function updateCrossLeftState(state, rowSet) {
   }
   const { rowsetPtr, ownedPtr, wasmHandle, releaseInput } =
     stableRowSetForStore(state, rowSet);
+  state.diagnostics?.retain(rowSet, 0);
   const batchIdx = state.leftStore.push(rowSet.batch, rowsetPtr, ownedPtr, wasmHandle);
   const batchPtr = state.leftStore.dataPtr() + batchIdx * state.layout.rowset.size;
   try {
@@ -3572,6 +3575,8 @@ class CteProducerTask {
     const fetched = input.fetch();
     if (fetched.result === FetchResult.NO_DATA) return TaskResult.NEED_DATA;
     if (fetched.result === FetchResult.OK) {
+      this.diagnostics?.retain(fetched.rowSet, 0);
+      this.diagnostics?.output(fetched.rowSet);
       this.spool.rowSets.push(fetched.rowSet);
       this.rows += fetched.rowSet.batch.rowCount;
       return TaskResult.OK;
@@ -3662,6 +3667,7 @@ class WindowTask {
     const fetched = input.fetch();
     if (fetched.result === FetchResult.NO_DATA) return TaskResult.NEED_DATA;
     if (fetched.result === FetchResult.OK) {
+      this.diagnostics?.retain(fetched.rowSet, 0);
       this.inputs.push(fetched.rowSet);
       this.rows += fetched.rowSet.batch.rowCount;
       return TaskResult.OK;
@@ -4042,7 +4048,7 @@ class CrossJoinTask {
         this.kernel = await instantiateKernel(
           stageEntrypoint(this.stage, 'xj_dispatch'), this.shared);
       }
-      this.state = createCrossJoinState(this.kernel, this.layout, this.stage);
+      this.state = createCrossJoinState(this.kernel, this.layout, this.stage, this.diagnostics);
     }
 
     const drained = drainCrossJoinPairs(this.state, BROWSER_JOIN_OUTPUT_BATCH_ROWS, asWasm);
@@ -4256,8 +4262,12 @@ class SortTask {
     if (fetched.result === FetchResult.OK) {
       if (this.topSort) {
         await this.topSort.add(fetched.rowSet);
+        if (this.diagnostics && this.topSort.stateBatch) {
+          this.diagnostics.retain({ batch: this.topSort.stateBatch, selection: null }, 0, false);
+        }
       } else {
-        this.inputs.push(fetched.rowSet);
+        this.diagnostics?.retain(fetched.rowSet, 0);
+      this.inputs.push(fetched.rowSet);
       }
       this.rows += fetched.rowSet.batch.rowCount;
       return TaskResult.OK;
@@ -4566,7 +4576,9 @@ class OperatorDiagnostics {
     this.sideBytes = [0, 0];
     this.inputWidths = [];
     this.retainedBytes = 0;
+    this.retainedPeak = 0;
     this.buildMemory = 0;
+    this.hasBuildMemory = false;
   }
 
   measure(rowSet, widths, allRows = false) {
@@ -4612,13 +4624,16 @@ class OperatorDiagnostics {
     this.bytesOut += bytes;
   }
 
-  retain(rowSet, input) {
+  retain(rowSet, input, append = true) {
     const [, bytes] = this.measure(rowSet, this.inputWidths[input], true);
-    this.retainedBytes += bytes;
+    this.retainedBytes = append ? this.retainedBytes + bytes : bytes;
+    this.hasBuildMemory = true;
+    this.retainedPeak = Math.max(this.retainedPeak, this.retainedBytes);
     this.buildMemory = Math.max(this.buildMemory, this.retainedBytes + this.sideBytes[0] + this.sideBytes[1]);
   }
 
   hash(table, side, join) {
+    this.hasBuildMemory = true;
     this.kernels.hash(toWasmPtr(table), join ? 1n : 0n,
       toWasmPtr(this.stringBuffers), BigInt(this.stage.diagnosticStringBuffers?.length || 0),
       toWasmPtr(this.scratch));
@@ -4640,7 +4655,7 @@ class OperatorDiagnostics {
   }
 
   snapshot(node) {
-    const materializes = ['aggregate', 'join', 'cross-join', 'window', 'sort', 'top-sort'].includes(this.stage.kind);
+    const materializes = ['aggregate', 'join', 'cross-join', 'window', 'sort', 'top-sort', 'cte-producer'].includes(this.stage.kind);
     return {
       stage_id: this.stage.stageId ?? this.stage.id,
       kind: this.stage.kind,
@@ -4654,8 +4669,9 @@ class OperatorDiagnostics {
       hash_growth_events: this.growths,
       rehashes: this.growths,
       hash_memory_peak_bytes: this.memory,
-      retained_input_bytes: this.memory === null ? null : this.retainedBytes,
-      build_memory_peak_bytes: this.memory === null ? null : this.buildMemory,
+      retained_input_bytes: this.hasBuildMemory ? this.retainedBytes : null,
+      retained_input_peak_bytes: this.hasBuildMemory ? this.retainedPeak : null,
+      build_memory_peak_bytes: this.hasBuildMemory ? this.buildMemory : null,
       materialized_bytes: materializes ? this.bytesOut : null,
       execution_cpu_seconds: null,
       task_elapsed_seconds: node.elapsedMs / 1000,

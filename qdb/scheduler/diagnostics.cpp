@@ -130,6 +130,7 @@ struct TStageSnapshot {
     uint64_t Rehashes = 0;
     uint64_t HashMemory = 0;
     uint64_t RetainedInput = 0;
+    uint64_t RetainedInputPeak = 0;
     uint64_t BuildMemory = 0;
     uint64_t Materialized = 0;
     bool HasHash = false;
@@ -153,6 +154,7 @@ struct TStageSnapshot {
         Rehashes += counters.Rehashes;
         HashMemory += counters.HashMemoryPeakBytes;
         RetainedInput += counters.RetainedInputBytes;
+        RetainedInputPeak += counters.RetainedInputPeakBytes;
         BuildMemory += counters.BuildMemoryPeakBytes;
         Materialized += counters.MaterializesOutput ? counters.Output.Bytes : 0;
         HasHash |= counters.HasHash;
@@ -180,9 +182,10 @@ void WriteSnapshot(std::ostream& out, const TStageSnapshot& value) {
     }
     if (value.HasBuildMemory) {
         out << " retained_input_bytes=" << value.RetainedInput
+            << " retained_input_peak_bytes=" << value.RetainedInputPeak
             << " build_memory_peak_bytes=" << value.BuildMemory;
     } else {
-        out << " retained_input_bytes=null build_memory_peak_bytes=null";
+        out << " retained_input_bytes=null retained_input_peak_bytes=null build_memory_peak_bytes=null";
     }
     out << " materialized_bytes=";
     if (value.Materializes) {

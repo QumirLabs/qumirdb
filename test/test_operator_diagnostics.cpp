@@ -224,7 +224,7 @@ TEST(OperatorDiagnostics, DisabledPlanHasNoMeasurementProgramOrCounters) {
     }
 }
 
-TEST(OperatorDiagnostics, ReportsFilterAggregateAndPartitionCardinalitiesInBothSchedulers) {
+TEST(OperatorDiagnostics, ReportsFilterAggregateCardinalitiesInBothSchedulers) {
     for (const auto mode : {EExecutionMode::SingleThreadedScheduler, EExecutionMode::ThreadedScheduler}) {
         std::array<int64_t, 100> keys;
         std::array<int64_t, 100> values;
@@ -263,6 +263,59 @@ TEST(OperatorDiagnostics, ReportsFilterAggregateAndPartitionCardinalitiesInBothS
         EXPECT_EQ(StageSum(diagnostics.str(), "aggregate", "rows_in"), 90u);
         EXPECT_EQ(StageSum(diagnostics.str(), "aggregate", "rows_out"), 10u);
         EXPECT_NE(diagnostics.str().find("partition_skew="), std::string::npos);
+    }
+}
+
+TEST(OperatorDiagnostics, ShuffleAccountsSparseRetainedOwnersOnceAcrossPartitions) {
+    TTaskNode node;
+    node.Diagnostics = std::make_unique<TOperatorDiagnostics>();
+    node.Diagnostics->Kernel = MeasurementKernel();
+    node.Diagnostics->Inputs.reserve(1);
+    std::array<int64_t, 10000> keys;
+    std::array<int64_t, 10000> values;
+    std::array<uint8_t, 10000> selected{};
+    for (size_t i = 0; i < keys.size(); ++i) {
+        keys[i] = i % 2;
+        values[i] = i;
+    }
+    selected[9998] = selected[9999] = 0xff;
+    TColumn columns[] = {{.Data = reinterpret_cast<char*>(keys.data())},
+        {.Data = reinterpret_cast<char*>(values.data())}};
+    TRowSet batch{.Columns = columns, .ColumnCount = 2, .RowCount = 10000,
+        .Selection = selected.data(), .RefCount = 1};
+    auto i64 = std::make_shared<TIntegerType>();
+    auto schema = std::make_shared<TStructType>(std::vector<std::pair<std::string, TTypePtr>>{
+        {"k", i64}, {"v", i64}});
+    auto hash = TKernelCompiler().CompileAggregateHash(*schema, {"k"});
+    std::vector<uint64_t> hashes(10000);
+    ASSERT_TRUE(hash(&batch, hashes.data()));
+    ASSERT_NE(hashes[9998] % 4, hashes[9999] % 4);
+    auto code = std::make_shared<THashShuffleCode>(hash, schema, 16384, 65536, 1048576);
+    TOneToOneConnection input(1);
+    input.Resize(1, 1);
+    THashShuffleConnection output(1);
+    output.Resize(1, 4);
+    THashShuffleTask task(code, nullptr, TInputPort{.Connection = &input}, output, 0);
+    node.Task = &task;
+    std::unordered_map<const IConnection*, TTypePtr> types{{&input, schema}, {&output, schema}};
+    TTaskDiagnosticSetup setup(node, types);
+    task.ConfigureDiagnostics(setup);
+    ASSERT_TRUE(input.Push(0, std::move(batch)));
+    input.Finish(0);
+    EXPECT_EQ(task.Execute(), ETaskResult::OK);
+    EXPECT_EQ(node.Diagnostics->Inputs[0].Rows, 2u);
+    EXPECT_EQ(node.Diagnostics->RetainedInputBytes, 160000u);
+    EXPECT_EQ(node.Diagnostics->RetainedInputPeakBytes, 160000u);
+    EXPECT_EQ(task.Execute(), ETaskResult::FINISHED);
+    EXPECT_EQ(node.Diagnostics->Output.Rows, 2u);
+    EXPECT_EQ(node.Diagnostics->RetainedInputBytes, 0u);
+    EXPECT_EQ(node.Diagnostics->RetainedInputPeakBytes, 160000u);
+    EXPECT_EQ(node.Diagnostics->BuildMemoryPeakBytes, 160000u);
+    for (size_t partition = 0; partition < 4; ++partition) {
+        TRowSet rowSet{};
+        while (output.Fetch(partition, rowSet) == EFetchResult::OK) {
+            Release(&rowSet);
+        }
     }
 }
 

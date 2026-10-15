@@ -45,16 +45,26 @@ void TRowSetDiagnostics::Add(const TRowSet& rowSet) {
     Bytes += values[1];
 }
 
-void TOperatorDiagnostics::RetainInput(const TRowSet& rowSet, size_t input, bool append) {
+uint64_t TOperatorDiagnostics::InputPayloadBytes(const TRowSet& rowSet, size_t input) const {
     auto counter = Inputs.at(input);
     counter.Rows = 0;
     counter.Bytes = 0;
     auto allRows = rowSet;
     allRows.Selection = nullptr;
     counter.Add(allRows);
-    RetainedInputBytes = append ? RetainedInputBytes + counter.Bytes : counter.Bytes;
+    return counter.Bytes;
+}
+
+void TOperatorDiagnostics::SetRetainedInputBytes(uint64_t bytes) {
+    RetainedInputBytes = bytes;
+    RetainedInputPeakBytes = std::max(RetainedInputPeakBytes, bytes);
     HasBuildMemory = true;
-    BuildMemoryPeakBytes = std::max(BuildMemoryPeakBytes, RetainedInputBytes + Memory_[0] + Memory_[1]);
+    BuildMemoryPeakBytes = std::max(BuildMemoryPeakBytes, bytes + Memory_[0] + Memory_[1]);
+}
+
+void TOperatorDiagnostics::RetainInput(const TRowSet& rowSet, size_t input, bool append) {
+    const auto bytes = InputPayloadBytes(rowSet, input);
+    SetRetainedInputBytes(append ? RetainedInputBytes + bytes : bytes);
 }
 
 void TOperatorDiagnostics::ObserveHash(

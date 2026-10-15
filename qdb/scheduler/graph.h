@@ -86,9 +86,10 @@ public:
     TTaskNode* Root() const;
 
 private:
-    std::vector<std::unique_ptr<ITaskNode>> OwnedTasks_;
-    std::vector<std::unique_ptr<IConnection>> OwnedConnections_;
+    // Task-local observers and ports remain valid through task destruction.
     std::vector<std::unique_ptr<TTaskNode>> Nodes_;
+    std::vector<std::unique_ptr<IConnection>> OwnedConnections_;
+    std::vector<std::unique_ptr<ITaskNode>> OwnedTasks_;
     std::vector<std::unique_ptr<TTaskEdge>> Edges_;
     std::vector<TTaskNode*> Leaves_;
     TTaskNode* Root_ = nullptr;

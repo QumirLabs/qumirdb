@@ -321,6 +321,7 @@ private:
     struct TBufferedBatch;
     struct TDestinationBuffer;
     struct TPendingOutput;
+    struct TDiagnosticState;
 
     bool BatchingEnabled() const;
     std::shared_ptr<uint64_t> ComputeHashes(const std::shared_ptr<TRowSet>& input);
@@ -338,6 +339,7 @@ private:
     void FlushAllBuffers();
     ETaskResult PushPending();
     void ClearPending();
+    void ObserveDiagnostics();
 
 private:
     std::shared_ptr<const THashShuffleCode> Code_;
@@ -346,6 +348,7 @@ private:
     THashShuffleConnection* Output_ = nullptr;
     size_t SourceLane_ = 0;
     TRowSetDiagnostics* OutputDiagnostics_ = nullptr;
+    std::unique_ptr<TDiagnosticState> ResourceDiagnostics_;
     std::optional<TRuntimeFilterBuilder> FilterBuilder_;
     std::vector<std::unique_ptr<TDestinationBuffer>> Buffers_;
     std::vector<TPendingOutput> Pending_;

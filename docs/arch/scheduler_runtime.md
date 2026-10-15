@@ -318,6 +318,12 @@ capacity and growth are observed at batch boundaries before state is destroyed.
 Geometric capacity changes preserve the number of successful rehashes even when
 several occur inside one batch. Initial reservation is not a rehash.
 
+Buffered exchanges account the full visible payload of retained input owners,
+including inactive rows in sparse views. Partition views of one batch count
+that owner once per task. Measurement is cached for the lifetime of a retained
+owner, so another partition does not trigger another row walk. Current retained
+payload and its peak remain separate from selected output bytes.
+
 Memory snapshots separate retained hash allocations from retained input payload.
 Their sum is accounted build memory, excluding transient rehash copies,
 allocator overhead, input-buffer metadata and sort scratch; it is not process

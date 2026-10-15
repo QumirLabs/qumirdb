@@ -13,6 +13,8 @@
 #include <optional>
 #include <stdexcept>
 #include <utility>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace NQdb {
@@ -657,6 +659,11 @@ struct THashShuffleTask::TBufferedBatch {
     std::shared_ptr<uint64_t> Hashes; // nullptr if not computed for this batch
 };
 
+struct THashShuffleTask::TDiagnosticState {
+    TOperatorDiagnostics* Counters = nullptr;
+    std::unordered_map<const void*, uint64_t> PayloadBytes;
+};
+
 struct THashShuffleTask::TDestinationBuffer {
     std::vector<TBufferedBatch> Batches;
     size_t RowCount = 0;
@@ -724,6 +731,44 @@ ETaskResult THashShuffleTask::Execute() {
     return PushPending();
 }
 
+void THashShuffleTask::ObserveDiagnostics() {
+    if (!ResourceDiagnostics_) {
+        return;
+    }
+    auto& state = *ResourceDiagnostics_;
+    std::unordered_set<const void*> owners;
+    uint64_t bytes = 0;
+    auto retain = [&](const void* owner, const TRowSet& rowSet) {
+        if (!owners.insert(owner).second) {
+            return;
+        }
+        auto found = state.PayloadBytes.find(owner);
+        if (found == state.PayloadBytes.end()) {
+            found = state.PayloadBytes.emplace(owner,
+                state.Counters->InputPayloadBytes(rowSet, 0)).first;
+        }
+        bytes += found->second;
+    };
+    for (const auto& buffer : Buffers_) {
+        for (const auto& batch : buffer->Batches) {
+            retain(batch.Input.get(), *batch.Input);
+        }
+    }
+    for (size_t i = PendingIndex_; i < Pending_.size(); ++i) {
+        const auto& rowSet = Pending_[i].RowSet;
+        if (rowSet.Destroy == DestroyHashShuffleRowSet) {
+            const auto* view = static_cast<const THashShuffleRowSetData*>(rowSet.Private);
+            retain(view->Input.get(), *view->Input);
+        } else {
+            retain(rowSet.Private, rowSet);
+        }
+    }
+    std::erase_if(state.PayloadBytes, [&](const auto& entry) {
+        return !owners.contains(entry.first);
+    });
+    state.Counters->SetRetainedInputBytes(bytes);
+}
+
 bool THashShuffleTask::BatchingEnabled() const {
     return Code_->InputType && Code_->TargetOutputBatchRows > 0;
 }
@@ -778,6 +823,7 @@ void THashShuffleTask::Scatter(TRowSet& rowSet) {
     } else {
         ScatterViews(input);
     }
+    ObserveDiagnostics();
 }
 
 void THashShuffleTask::ScatterBuffered(const std::shared_ptr<TRowSet>& input) {
@@ -914,6 +960,7 @@ void THashShuffleTask::AddBufferedRows(size_t dst,
         .Rows = std::move(rows),
         .Hashes = hashes,
     });
+    ObserveDiagnostics();
 
     const size_t targetRows = Code_->TargetOutputBatchRows;
     const size_t maxRows = Code_->MaxOutputBatchRows;
@@ -956,6 +1003,7 @@ void THashShuffleTask::FlushBuffer(size_t dst) {
         buffer.Batches.clear();
         buffer.RowCount = 0;
         buffer.ByteCount = 0;
+        ObserveDiagnostics();
         return;
     }
 
@@ -1093,6 +1141,7 @@ void THashShuffleTask::FlushBuffer(size_t dst) {
     buffer.Batches.clear();
     buffer.RowCount = 0;
     buffer.ByteCount = 0;
+    ObserveDiagnostics();
 }
 
 void THashShuffleTask::FlushAllBuffers() {
@@ -1120,6 +1169,7 @@ ETaskResult THashShuffleTask::PushPending() {
             return ETaskResult::BLOCKED_OUTPUT;
         }
         ++PendingIndex_;
+        ObserveDiagnostics();
     }
     ClearPending();
     return ETaskResult::OK;
@@ -1133,6 +1183,7 @@ void THashShuffleTask::ClearPending() {
     }
     Pending_.clear();
     PendingIndex_ = 0;
+    ObserveDiagnostics();
 }
 
 TCteConsumerTask::TCteConsumerTask(
@@ -1218,6 +1269,8 @@ void TMergeTask::ConfigureDiagnostics(TTaskDiagnosticSetup& setup) {
 void THashShuffleTask::ConfigureDiagnostics(TTaskDiagnosticSetup& setup) {
     setup.Input(Input_);
     OutputDiagnostics_ = &setup.Output(*Output_);
+    ResourceDiagnostics_ = std::make_unique<TDiagnosticState>();
+    ResourceDiagnostics_->Counters = &setup.Counters();
 }
 
 void TCteConsumerTask::ConfigureDiagnostics(TTaskDiagnosticSetup& setup) {
