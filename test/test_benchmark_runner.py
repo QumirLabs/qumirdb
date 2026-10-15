@@ -60,7 +60,7 @@ class BenchmarkTest(unittest.TestCase):
                 csv.writer(output).writerows(rows)
         return compare_csv(self.root / "left", self.root / "right", sql)
 
-    def campaign(self, extra=()):
+    def campaign(self, extra=(), env=None):
         data = self.root / "data files" / "pq1"
         data.mkdir(parents=True)
         (data / "nation.parquet").write_bytes(b"fixed dataset content")
@@ -68,7 +68,7 @@ class BenchmarkTest(unittest.TestCase):
         command = [sys.executable, str(REPO / "benchmark/tpch/compare_runs.py"),
                    "--data", str(data.parent), "--scale", "1", "--queries", "19",
                    "--a", str(self.binary), "--a-commit", commit, "--out", str(self.root / "campaign"), *extra]
-        result = subprocess.run(command, text=True, capture_output=True, timeout=60)
+        result = subprocess.run(command, text=True, capture_output=True, timeout=60, env=env)
         manifest = self.root / "campaign/manifest.json"
         return result, json.loads(manifest.read_text()) if manifest.exists() else None
 
@@ -82,7 +82,9 @@ class BenchmarkTest(unittest.TestCase):
         self.assertGreaterEqual(record["process_user_seconds"], 0)
         self.assertEqual(record["query"], 19)
         self.assertEqual(len(record["sql_sha256"]), 64)
-        self.assertIn("\n", next(csv.reader(Path(record["stdout_path"]).open()))[0] if False else Path(record["stdout_path"]).read_text())
+        with Path(record["stdout_path"]).open(newline="") as output:
+            rows = list(csv.reader(output))
+        self.assertEqual(rows[1], ["1.5", "commas, and\na newline"])
         self.assertEqual(json.loads((self.root / "metrics.jsonl").read_text()), record)
 
     def test_missing_timings_remain_unknown(self):
@@ -96,6 +98,22 @@ class BenchmarkTest(unittest.TestCase):
         self.assertEqual(record["returncode"], 7)
         self.assertIn("query failed", Path(record["stderr_path"]).read_text())
         self.assertIn("rc=7", (self.root / "results").read_text())
+
+    def test_missing_executable_is_a_recorded_failure(self):
+        self.binary.unlink()
+        record = self.collect()
+        self.assertEqual(record["returncode"], 127)
+        self.assertIsNone(record["max_rss_bytes"])
+        self.assertIsNone(record["process_user_seconds"])
+        self.assertTrue(Path(record["stderr_path"]).read_text())
+
+    def test_nonfinite_numeric_strings_are_compared_exactly(self):
+        self.assertEqual(self.compare([["value"], ["1e999"]], [["value"], ["2e999"]])["status"], "different")
+
+    def test_nonfinite_tolerance_is_rejected(self):
+        result, _ = self.campaign(["--abs-tol", "nan"])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("finite", result.stderr)
 
     def test_scientific_timings(self):
         record = parse_timings("Returned 1 rows in 2e-5 seconds. Cpu: 3.5E-5 seconds.")
@@ -155,6 +173,11 @@ class BenchmarkTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(manifest["status"], "failed")
         self.assertIn("Missing timings", manifest["error"])
+
+    def test_diagnostic_environment_cannot_enter_timed_runs(self):
+        result, _ = self.campaign(env={**os.environ, "QDB_DEBUG_ROW_GROUP_PREDICATE": "1"})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Diagnostic environment", result.stderr)
 
     def test_diagnostic_flag_cannot_enter_timed_runs(self):
         result, _ = self.campaign(["--a-args=--operator-diagnostics"])

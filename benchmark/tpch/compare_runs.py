@@ -4,9 +4,11 @@
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import platform
+import re
 import shlex
 import signal
 import statistics
@@ -90,6 +92,11 @@ def binary_manifest(path, declared_commit, arguments):
                 key, value = line.split("=", 1)
                 build[key.split(":", 1)[0]] = value
         build["cmake_cache_sha256"] = sha256(cache)
+    compiler = build.get("CMAKE_CXX_COMPILER")
+    if compiler:
+        compiler_version = subprocess.run([compiler, "--version"], text=True, capture_output=True, timeout=30)
+        build["compiler_version"] = compiler_version.stdout.strip()
+    build["declared_source_submodules"] = git("ls-tree", commit, "externals/coroio", "externals/qumir")
     return {"path": str(path), "binary_sha256": sha256(path), "declared_source_commit": commit,
             "version": version.stdout.strip(), "engine_args": arguments, "build": build}
 
@@ -101,7 +108,7 @@ def freeze_queries(config, out, env):
     queries = {}
     for query in range(1, 23):
         path = rendered / "queries" / f"q{query}_sf{config.scale}.sql"
-        if not path.is_file() or "__" in path.read_text():
+        if not path.is_file() or re.search(r"__[A-Z][A-Z0-9_]*__", path.read_text()):
             raise ValueError(f"Missing or unresolved rendered SQL: {path}")
         queries[query] = {"path": str(path), "sha256": sha256(path)}
         path.chmod(0o444)
@@ -182,6 +189,10 @@ def summarize(out):
 
 
 def run_campaign(config):
+    diagnostic_env = {"QDB_DEBUG_ROW_GROUP_PREDICATE", "QDB_DUMP_PASSES", "QDB_JIT_CACHE_STATS"}
+    if diagnostic_env.intersection(os.environ):
+        raise ValueError("Diagnostic environment variables require a separate run: " +
+                         ", ".join(sorted(diagnostic_env.intersection(os.environ))))
     config.data = config.data.resolve()
     config.out = config.out.resolve()
     if config.out.exists() and any(config.out.iterdir()):
@@ -199,11 +210,12 @@ def run_campaign(config):
                 "host": {"platform": platform.platform(), "machine": platform.machine(), "logical_cpus": os.cpu_count(),
                          "cpu_affinity": sorted(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else None,
                          "python": sys.version, "environment": {key: env.get(key) for key in
-                         ("JITDUMPDIR", "QUMIR_LIBCACHE_DIR", "OMP_NUM_THREADS", "ARROW_NUM_THREADS", "LC_ALL", "TZ")}},
+                         ("JITDUMPDIR", "QUMIR_RUNTIME", "QDB_ARROW_MEMORY_POOL", "LD_PRELOAD", "OMP_NUM_THREADS", "ARROW_NUM_THREADS", "LC_ALL", "TZ")}},
                 "harness": {"commit": git("rev-parse", "HEAD"), "tracked_changes": git("status", "--porcelain", "--untracked-files=no")},
                 "cache_policy": "Dataset content hashing reads files before warmup; no page-cache eviction. Separate newly created JIT caches per arm, retained after warmup. Query-specific compilation may remain.",
                 "comparison": {"format": "quoted CSV", "relative_tolerance": config.rel_tol, "absolute_tolerance": config.abs_tol,
-                               "integers_and_text": "exact", "row_order": "multiset preserving duplicates", "limited_mismatch": "requires review, never automatically accepted"},
+                               "numeric_policy": "canonical floating spellings inferred by column; integer-only and other text columns exact", "row_order": "multiset preserving duplicates", "limited_mismatch": "requires review, never automatically accepted"},
+                "cli_defaults": {"scheduler": "threaded", "scheduler_workers": os.cpu_count(), "scan_tasks": "auto"},
                 "default_control": "skipped by explicit --skip-control" if config.skip_control else "all22queries, no engine tuning arguments; shared CSV/timing/input options remain"}
     manifest_path = config.out / "manifest.json"
     write_json(manifest_path, manifest)
@@ -222,9 +234,11 @@ def run_campaign(config):
             if file_state(files) != states or any(sha256(info["path"]) != binaries[name] for name, info in arms.items()):
                 raise RuntimeError("Dataset or binary changed during campaign")
             records = run_sample(config, manifest, arm, kind, index, selected, env)
+            if file_state(files) != states or any(sha256(info["path"]) != binaries[name] for name, info in arms.items()):
+                raise RuntimeError("Dataset or binary changed during a sample")
             compare_sample(config, manifest, records, reference)
             write_json(manifest_path, manifest)
-            print(f"{kind} {arm} {index}: {len(records)} queries, results equal", flush=True)
+            print(f"{kind} {arm} {index}: {len(records)} queries collected; result gates passed", flush=True)
         if dataset_manifest(config.data / f"pq{config.scale}")[1] != dataset:
             raise RuntimeError("Dataset content changed during campaign")
         write_json(config.out / "summary.json", summarize(config.out))
@@ -237,7 +251,30 @@ def run_campaign(config):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=r"""Example (Q19 runtime filters; repeat with --scale 10 in a new output directory):
+  python3 benchmark/tpch/compare_runs.py --data /data/tpch --scale 1 --queries 19 \
+    --a build/bin/qdb --a-commit <build-source-sha> \
+    --a-args='--scheduler threaded --scheduler-workers 2' \
+    --b-args='--scheduler threaded --scheduler-workers 2 --no-runtime-filters' \
+    --out build/results/q19-sf1
+
+The runner first saves all 22 SQL files using the existing templates/scale params.
+A default-settings full-suite control precedes warmup A,B and measured A,B,A,B,A,B.
+CSV/timing/input flags are shared; no engine tuning arguments enter the control.
+Dataset hashing warms file pages; no cache eviction occurs. Each arm starts with
+an empty persistent JIT cache, then retains it. Query compilation is reported
+separately. Provenance declares the build source; binary version text is not proof.
+Raw stdout/stderr, commands, frozen SQL, per-query JSONL and medians are retained.
+RSS is bytes (per-query peak; suite peak is max, not a sum). All other totals sum
+within each measured run before taking the median. Floating-looking numeric
+columns use tolerance; CSV has no types, so numeric-looking text is ambiguous.
+Integer-only/text columns compare exactly, row order is ignored, duplicates count.
+TOP/LIMIT differences fail for manual boundary-tie review; they are never waived.
+Profile/diagnostic runs must be separate. This tool does not establish that a
+small-scale campaign satisfies the SF100/18-thread acceptance criteria of #77.
+""")
     parser.add_argument("--data", type=Path, required=True, help="Base directory containing pq1/pq10/pq100")
     parser.add_argument("--scale", type=int, required=True)
     parser.add_argument("--queries", default=",".join(map(str, range(1, 23))))
@@ -255,13 +292,16 @@ def main():
     parser.add_argument("--rel-tol", type=float, default=1e-9)
     parser.add_argument("--abs-tol", type=float, default=1e-6)
     config = parser.parse_args()
-    config.queries = list(map(int, config.queries.split(",")))
-    if config.runs < 3 or config.warmups < 1 or config.timeout <= 0:
-        parser.error("At least3measured runs,1warmup and a positive timeout are required")
+    try:
+        config.queries = list(map(int, config.queries.split(",")))
+    except ValueError:
+        parser.error("Queries must be comma-separated integers")
+    if config.runs < 3 or config.warmups < 1 or not math.isfinite(config.timeout) or config.timeout <= 0:
+        parser.error("At least 3 measured runs, 1 warmup and a positive timeout are required")
     if not config.queries or len(set(config.queries)) != len(config.queries) or any(q < 1 or q > 22 for q in config.queries):
-        parser.error("Queries must be distinct numbers from1to22")
-    if config.rel_tol < 0 or config.abs_tol < 0:
-        parser.error("Tolerances cannot be negative")
+        parser.error("Queries must be distinct numbers from 1 to 22")
+    if any(not math.isfinite(value) or value < 0 for value in (config.rel_tol, config.abs_tol)):
+        parser.error("Tolerances must be finite and nonnegative")
     def interrupted(number, frame):
         raise SystemExit(128 + number)
     signal.signal(signal.SIGTERM, interrupted)
