@@ -248,6 +248,12 @@ Turns a cross-join chain into a connected order, threading equalities down the
 chain; with the CBO on, DPccp picks the order by estimated cost using
 `EstimateStats` cardinalities. See [join_reorder.md](join_reorder.md).
 
+Column demand is propagated before cost-based enumeration, so unused source
+payload does not inflate a join input's width. Predicate-only columns remain
+available to the scan and filter but do not widen the filter's output. Columns
+needed by join equalities and final results remain demanded. Pruning runs again
+after rewrites and type annotation restore the operator schemas.
+
 ```sql
 SELECT t.a FROM t, v, u WHERE t.a = u.a AND u.a = v.a;   -- v listed between the joined pair
 ```
