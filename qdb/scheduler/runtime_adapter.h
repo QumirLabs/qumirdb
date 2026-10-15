@@ -120,6 +120,8 @@ struct THashShuffleCode {
     NQumir::NAst::TTypePtr InputType;
     size_t TargetOutputBatchRows = 0;
     size_t MaxOutputBatchRows = 0;
+    // Also bounds the full visible input payload referenced by each buffer.
+    // Shared references are charged conservatively; one input may exceed it.
     size_t TargetOutputBatchBytes = 0;
     // Build lanes share a producer binding; each publishes one partial.
     std::shared_ptr<IRuntimeFilterProducer> ProducedFilter;
@@ -326,12 +328,14 @@ private:
     void Scatter(TRowSet& rowSet);
     void ScatterBuffered(const std::shared_ptr<TRowSet>& input);
     void ScatterViews(const std::shared_ptr<TRowSet>& input);
-    void AddBufferedRows(size_t dst,
+    void AddBufferedRows(
+        size_t dst,
         const std::shared_ptr<TRowSet>& input,
         std::vector<int32_t>&& rows,
         size_t bytes,
-        const std::shared_ptr<uint64_t>& hashes);
-    void FlushBuffer(size_t dst);
+        const std::shared_ptr<uint64_t>& hashes,
+        size_t inputBytes);
+    void FlushBuffer(size_t dst, bool releaseInputs = false);
     void FlushAllBuffers();
     ETaskResult PushPending();
     void ClearPending();
