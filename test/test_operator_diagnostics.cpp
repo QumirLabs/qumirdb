@@ -1,0 +1,294 @@
+#include "mock_source.h"
+#include "plan_runner.h"
+
+#include <qdb/exec/aggregate_exec.h>
+#include <qdb/exec/diagnostics.h>
+#include <qdb/kernel/compiler.h>
+#include <qdb/kernel/builder.h>
+#include <qdb/kernel/spec.h>
+#include <qdb/plan/build.h>
+#include <qdb/plan/types/decimal.h>
+#include <qdb/plan/types/nullable.h>
+#include <qdb/plan/ops/source.h>
+#include <qdb/plan/passes/column_pruning.h>
+#include <qdb/plan/passes/typing.h>
+#include <qdb/scheduler/diagnostics.h>
+#include <qdb/sql/parser.h>
+
+#include <qumir/codegen/llvm/llvm_initializer.h>
+
+#include <gtest/gtest.h>
+
+#include <array>
+#include <bit>
+#include <chrono>
+#include <numeric>
+#include <sstream>
+#include <thread>
+#include <unordered_map>
+
+using namespace NQdb;
+using namespace NQdb::NScheduler;
+using namespace NQumir::NAst;
+
+namespace {
+
+std::shared_ptr<TKernelSlot> MeasurementKernel() {
+    // Prepared code may be shared; every test owns its mutable counters.
+    return TKernelCompiler().CompileDiagnostics();
+}
+
+TOperatorPtr SqlPlan(const std::string& sql, ISource& source) {
+    std::istringstream input(sql);
+    NSql::TTokenStream tokens(input);
+    NSql::TParser parser;
+    auto parsed = parser.Parse(tokens);
+    if (!parsed) {
+        throw parsed.error();
+    }
+    auto plan = BuildPlan(*parsed, [&](std::string_view table)
+        -> std::expected<TOperatorPtr, NQumir::TError>
+    {
+        return std::make_shared<TSourceOperator>(source, std::string(table));
+    });
+    if (!plan) {
+        throw plan.error();
+    }
+    AnnotateTypes(*plan);
+    ApplyColumnPruning(*plan);
+    return *plan;
+}
+
+uint64_t StageSum(const std::string& text, const std::string& kind, const std::string& field) {
+    uint64_t total = 0;
+    std::istringstream lines(text);
+    std::string line;
+    while (std::getline(lines, line)) {
+        if (!line.starts_with("operator-stage ") || line.find(" kind=" + kind + " ") == std::string::npos) {
+            continue;
+        }
+        auto begin = line.find(" " + field + "=");
+        if (begin == std::string::npos) {
+            throw std::runtime_error("missing diagnostic field " + field);
+        }
+        total += std::stoull(line.substr(begin + field.size() + 2));
+    }
+    return total;
+}
+
+} // namespace
+
+TEST(OperatorDiagnostics, ResolvesLogicalAndPhysicalColumnWidths) {
+    auto schema = std::make_shared<TStructType>(std::vector<std::pair<std::string, TTypePtr>>{
+        {"decimal", std::make_shared<TNullable>(std::make_shared<TDecimal>(18, 2))},
+        {"binint", BinIntStorageType()},
+        {"date", std::make_shared<TNamedType>("DATE", std::make_shared<TIntegerType>(TIntegerType::I32))},
+        {"boolean", std::make_shared<TBoolType>()},
+        {"text", std::make_shared<TNullable>(std::make_shared<TStringType>())},
+        {"float", std::make_shared<TFloatType>()},
+    });
+    EXPECT_EQ(DiagnosticColumnWidths(schema), (std::vector<int64_t>{16, 16, 4, 1, -1, 8}));
+}
+
+TEST(OperatorDiagnostics, CountsSelectedNonNullPayloadAndBothOffsetWidths) {
+    auto kernel = MeasurementKernel();
+    std::array<int32_t, 4> values = {10, 20, 30, 40};
+    std::array<int32_t, 5> narrow = {0, 1, 4, 4, 9};
+    std::array<int64_t, 5> wide = {0, 1, 4, 4, 9};
+    std::array<uint8_t, 4> selection = {0, 2, 1, 255};
+    uint8_t numericMask = 0b01011000;
+    uint8_t stringMask = 0b00001110;
+    char strings[] = "abcdefghi";
+    for (const bool large : {false, true}) {
+        TColumn columns[] = {
+            {.Data = reinterpret_cast<char*>(values.data()), .Mask = &numericMask, .MaskBitOffset = 3},
+            {.Data = strings, .Mask = &stringMask, .MaskBitOffset = 1,
+                .Offsets = large ? static_cast<void*>(wide.data()) : static_cast<void*>(narrow.data()),
+                .OffsetWidth = static_cast<uint8_t>(large ? 8 : 4)},
+        };
+        TRowSet batch{.Columns = columns, .ColumnCount = 2, .RowCount = 4,
+            .Selection = selection.data(), .RefCount = 1};
+        TRowSetDiagnostics counters{.Kernel = kernel, .Widths = {4, -1}};
+        counters.Add(batch);
+        EXPECT_EQ(counters.Rows, 3u);
+        EXPECT_EQ(counters.Bytes, 11u);
+        batch.Selection = nullptr;
+        counters.Add(batch);
+        EXPECT_EQ(counters.Rows, 7u);
+        EXPECT_EQ(counters.Bytes, 27u);
+        batch.RowCount = 0;
+        counters.Add(batch);
+        EXPECT_EQ(counters.Rows, 7u);
+    }
+}
+
+TEST(OperatorDiagnostics, BackpressureRetriesDoNotCountFailedPushOrEmptyFetch) {
+    auto kernel = MeasurementKernel();
+    TOneToOneConnection connection(1);
+    connection.Resize(1, 1);
+    int64_t value = 42;
+    TColumn column{.Data = reinterpret_cast<char*>(&value)};
+    TRowSet batch{.Columns = &column, .ColumnCount = 1, .RowCount = 1, .RefCount = 1};
+    TRowSetDiagnostics sent{.Kernel = kernel, .Widths = {8}};
+    TRowSetDiagnostics received{.Kernel = kernel, .Widths = {8}};
+    TOutputPort output{.Connection = &connection, .Diagnostics = &sent};
+    TInputPort input{.Connection = &connection, .Diagnostics = &received};
+    auto first = batch;
+    EXPECT_TRUE(output.Push(std::move(first)));
+    auto second = batch;
+    EXPECT_FALSE(output.Push(std::move(second)));
+    EXPECT_EQ(sent.Rows, 1u);
+    TRowSet fetched{};
+    EXPECT_EQ(input.Fetch(fetched), EFetchResult::OK);
+    Release(&fetched);
+    EXPECT_EQ(input.Fetch(fetched), EFetchResult::NO_DATA);
+    EXPECT_EQ(received.Rows, 1u);
+    EXPECT_EQ(received.Bytes, 8u);
+    EXPECT_TRUE(output.Push(std::move(second)));
+    EXPECT_EQ(sent.Rows, 2u);
+    EXPECT_EQ(input.Fetch(fetched), EFetchResult::OK);
+    Release(&fetched);
+}
+
+TEST(OperatorDiagnostics, ObservesEveryGeometricGrowthInsideABatch) {
+    auto i64 = std::make_shared<TIntegerType>();
+    TStructType inputType({{"k", i64}});
+    auto spec = NKernel::BuildAggregateKernelSpec(inputType, {"k"}, {{.Name = "n", .Func = "count"}});
+    auto kernels = TKernelCompiler().CompileAggregate(spec);
+    TOperatorDiagnostics counters;
+    counters.Kernel = MeasurementKernel();
+    TAggregateProcessor processor(kernels, 8);
+    processor.SetDiagnostics(&counters);
+    std::array<int64_t, 100> keys;
+    std::iota(keys.begin(), keys.end(), 0);
+    TColumn column{.Data = reinterpret_cast<char*>(keys.data())};
+    TRowSet batch{.Columns = &column, .ColumnCount = 1, .RowCount = 100, .RefCount = 1};
+    batch.RowCount = 0;
+    processor.Add(batch);
+    const auto initialCapacity = counters.HashCapacity;
+    EXPECT_TRUE(initialCapacity == 8 || initialCapacity == 16);
+    EXPECT_EQ(counters.Rehashes, 0u);
+    batch.RowCount = 100;
+    processor.Add(batch);
+    EXPECT_TRUE(counters.HasHash);
+    EXPECT_EQ(counters.Groups, 100u);
+    EXPECT_EQ(counters.HashCapacity, 128u);
+    EXPECT_EQ(counters.Rehashes,
+        std::countr_zero(uint64_t{128}) - std::countr_zero(initialCapacity));
+    EXPECT_EQ(counters.Rehashes, counters.HashGrowthEvents);
+    const auto memory = counters.HashMemoryPeakBytes;
+    EXPECT_GT(memory, 128u * 8u);
+    EXPECT_EQ(counters.BuildMemoryPeakBytes, memory);
+    processor.Add(batch);
+    EXPECT_EQ(counters.Groups, 100u);
+    EXPECT_EQ(counters.HashMemoryPeakBytes, memory);
+    TRowSet output{};
+    ASSERT_TRUE(processor.Finish(output));
+    EXPECT_EQ(output.RowCount, 100);
+    Release(&output);
+    EXPECT_EQ(counters.Groups, 100u);
+}
+
+TEST(OperatorDiagnostics, MeasuresResidualSemiJoinMatchSetWithoutRowBuckets) {
+    auto i64 = std::make_shared<TIntegerType>();
+    TStructType leftType({{"lk", i64}});
+    TStructType rightType({{"rk", i64}});
+    auto spec = NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}},
+        EJoinType::LeftSemi, NKernel::NOz::Bool(true));
+    auto kernels = TKernelCompiler().CompileJoin(spec);
+    alignas(8) std::array<uint8_t, TKernelCompiler::HashTableSize> left{};
+    alignas(8) std::array<uint8_t, TKernelCompiler::HashTableSize> right{};
+    alignas(8) std::array<uint8_t, TKernelCompiler::PairBufferSize> pairs{};
+    ASSERT_TRUE(kernels.Dispatch(left.data(), right.data(), nullptr, 0, pairs.data(),
+        nullptr, nullptr, 8, static_cast<int64_t>(EJoinKernelOp::Init)));
+    TOperatorDiagnostics counters;
+    counters.Kernel = MeasurementKernel();
+    counters.ObserveHash(left.data(), 0, true);
+    counters.ObserveHash(right.data(), 1, true);
+    EXPECT_EQ(counters.Groups, 0u);
+    EXPECT_GT(counters.HashMemoryPeakBytes, 0u);
+    EXPECT_EQ(counters.Rehashes, 0u);
+    EXPECT_TRUE(kernels.Dispatch(left.data(), right.data(), nullptr, 0, pairs.data(),
+        nullptr, nullptr, 0, static_cast<int64_t>(EJoinKernelOp::Destroy)));
+}
+
+TEST(OperatorDiagnostics, DisabledPlanHasNoMeasurementProgramOrCounters) {
+    TMockSource source({"k"});
+    auto plan = SqlPlan("SELECT k FROM t", source);
+    auto lowered = LowerPlanToGraph(plan, {}, nullptr);
+    for (const auto& kernel : lowered.Kernels) {
+        EXPECT_NE(kernel.Name, "diagnostics");
+    }
+    for (const auto& node : lowered.Graph->Nodes()) {
+        EXPECT_EQ(node->Diagnostics, nullptr);
+    }
+}
+
+TEST(OperatorDiagnostics, ReportsFilterAggregateAndPartitionCardinalitiesInBothSchedulers) {
+    for (const auto mode : {EExecutionMode::SingleThreadedScheduler, EExecutionMode::ThreadedScheduler}) {
+        std::array<int64_t, 100> keys;
+        std::array<int64_t, 100> values;
+        for (size_t i = 0; i < keys.size(); ++i) {
+            keys[i] = i % 10;
+            values[i] = i;
+        }
+        TColumn columns[] = {{.Data = reinterpret_cast<char*>(keys.data())},
+            {.Data = reinterpret_cast<char*>(values.data())}};
+        TRowSet batch{.Columns = columns, .ColumnCount = 2, .RowCount = 100, .RefCount = 1};
+        TMockSource source({"k", "v"}, {batch});
+        auto plan = SqlPlan("SELECT k, SUM(v) AS s FROM t WHERE v >= 10 GROUP BY k", source);
+        TSettings settings;
+        settings.Scheduler.Mode = mode;
+        settings.Scheduler.WorkerCount = 2;
+        settings.HashShuffle.PartitionCount = 4;
+        std::ostringstream diagnostics;
+        settings.Diagnostics.Operators = true;
+        settings.Diagnostics.Output = &diagnostics;
+        auto runtime = RunPlan(plan, settings);
+        TRowSet output{};
+        size_t groups = 0;
+        while (runtime->Next(output)) {
+            groups += output.RowCount;
+            for (int64_t i = 0; i < output.RowCount; ++i) {
+                const auto key = reinterpret_cast<int64_t*>(output.Columns[0].Data)[i];
+                const auto sum = reinterpret_cast<int64_t*>(output.Columns[1].Data)[i];
+                EXPECT_EQ(sum, 450 + key * 9);
+            }
+            Release(&output);
+        }
+        EXPECT_EQ(groups, 10u);
+        EXPECT_EQ(StageSum(diagnostics.str(), "source", "rows_out"), 100u);
+        EXPECT_EQ(StageSum(diagnostics.str(), "filter", "rows_out"), 90u);
+        EXPECT_EQ(StageSum(diagnostics.str(), "aggregate", "groups"), 10u);
+        EXPECT_EQ(StageSum(diagnostics.str(), "aggregate", "rows_in"), 90u);
+        EXPECT_EQ(StageSum(diagnostics.str(), "aggregate", "rows_out"), 10u);
+        EXPECT_NE(diagnostics.str().find("partition_skew="), std::string::npos);
+    }
+}
+
+TEST(OperatorDiagnostics, ThreadCpuExcludesSleepingAndSurvivesWorkerMigration) {
+    class TSleepTask final : public ITaskNode {
+    public:
+        ETaskResult Execute() override {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            return ETaskResult::OK;
+        }
+    } task;
+    TTaskNode node;
+    node.Task = &task;
+    node.Diagnostics = std::make_unique<TOperatorDiagnostics>();
+    const auto start = std::chrono::steady_clock::now();
+    for (size_t worker = 0; worker < 2; ++worker) {
+        std::thread([&] { EXPECT_EQ(ExecuteTask(node), ETaskResult::OK); }).join();
+    }
+    const auto wall = std::chrono::steady_clock::now() - start;
+    EXPECT_GE(wall, std::chrono::milliseconds(100));
+    EXPECT_GT(node.Diagnostics->ExecutionCpuNanoseconds, 0u);
+    EXPECT_LT(node.Diagnostics->ExecutionCpuNanoseconds, 50'000'000u);
+}
+
+int main(int argc, char** argv) {
+    testing::InitGoogleTest(&argc, argv);
+    NQumir::NCodeGen::TLLVMInitializer llvmInit;
+    return RUN_ALL_TESTS();
+}

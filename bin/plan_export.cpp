@@ -2297,6 +2297,7 @@ struct TExecPlanCodec {
     const NQdb::TExecPlan& Plan;
     const TKernelIndex& Kernels;
     bool EmbedWasm = false;
+    bool OperatorDiagnostics = false;
     std::optional<llvm::json::Object> Unsupported;
     llvm::json::Array Nodes;
     llvm::json::Array Edges;
@@ -2321,11 +2322,13 @@ struct TExecPlanCodec {
         if (typed.StageId != NQdb::InvalidExecStageId) {
             encoded["stageId"] = static_cast<int64_t>(typed.StageId);
         }
-        llvm::json::Array widths;
-        for (const auto width : NQdb::DiagnosticColumnWidths(typed.OutputType)) {
-            widths.push_back(width);
+        if (OperatorDiagnostics) {
+            llvm::json::Array widths;
+            for (const auto width : NQdb::DiagnosticColumnWidths(typed.OutputType)) {
+                widths.push_back(width);
+            }
+            encoded["diagnosticWidths"] = std::move(widths);
         }
-        encoded["diagnosticWidths"] = std::move(widths);
         Nodes.push_back(std::move(encoded));
     }
 
@@ -2481,15 +2484,15 @@ struct TExecPlanCodec {
                             : int64_t{8}},
                     {"entrypoints", EntrypointsJson(*ref)},
                     {"keyCount", static_cast<int64_t>(keyCount)},
-                    {"diagnosticStringBuffers", [&] {
-                        llvm::json::Array result;
-                        for (const auto index : ref->Kernel->AggStringMetadataBuffers) {
-                            result.push_back(index);
-                        }
-                        return result;
-                    }()},
                     {"output", std::move(output)},
                 };
+                if (OperatorDiagnostics) {
+                    llvm::json::Array buffers;
+                    for (const auto index : ref->Kernel->AggStringMetadataBuffers) {
+                        buffers.push_back(index);
+                    }
+                    encoded["diagnosticStringBuffers"] = std::move(buffers);
+                }
                 if (!aggregate->GroupingSets().empty()) {
                     llvm::json::Array sets;
                     for (const auto& set : aggregate->GroupingSets()) {
@@ -2795,10 +2798,14 @@ llvm::json::Object EncodeExecPlan(
     }
     try {
         auto kernelIndex = BuildKernelIndex(*plan, kernels, artifacts);
+        const bool diagnostic = std::ranges::any_of(kernels, [](const auto& kernel) {
+            return kernel.Name == "diagnostics";
+        });
         return TExecPlanCodec{
             .Plan = *plan,
             .Kernels = kernelIndex,
             .EmbedWasm = embedWasm,
+            .OperatorDiagnostics = diagnostic,
         }.Encode(std::move(queryWasm), heapBase, wasmBits);
     } catch (const NQumir::TError& e) {
         return UnsupportedExec(e.ToString());

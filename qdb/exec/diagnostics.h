@@ -36,9 +36,13 @@ struct TOperatorDiagnostics {
     uint64_t HashGrowthEvents = 0;
     uint64_t Rehashes = 0;
     uint64_t HashMemoryPeakBytes = 0;
-    uint64_t MaterializedBytes = 0;
+    uint64_t RetainedInputBytes = 0;
+    uint64_t BuildMemoryPeakBytes = 0;
     bool HasHash = false;
+    bool HasBuildMemory = false;
     bool MaterializesOutput = false;
+
+    void RetainInput(const TRowSet& rowSet, size_t input, bool append = true);
 
     void ObserveHash(
         void* table,

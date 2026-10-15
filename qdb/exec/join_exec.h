@@ -55,7 +55,15 @@ public:
     }
 
     // Returns the batch index used to build RowIds for rows of this batch.
+    void SetDiagnostics(TOperatorDiagnostics* diagnostics, size_t input) {
+        Diagnostics_ = diagnostics;
+        Input_ = input;
+    }
+
     int32_t PushBatch(TRowSet batch) {
+        if (Diagnostics_) {
+            Diagnostics_->RetainInput(batch, Input_);
+        }
         Batches_.push_back(batch);
         return static_cast<int32_t>(Batches_.size() - 1);
     }
@@ -80,6 +88,8 @@ public:
 
 private:
     std::vector<TRowSet> Batches_;
+    TOperatorDiagnostics* Diagnostics_ = nullptr;
+    size_t Input_ = 0;
 };
 
 // Default target rows per output batch (drain granularity).
@@ -197,6 +207,7 @@ public:
     using TFetch = std::function<EJoinFetchResult(TRowSet&)>;
 
     explicit TCrossJoinProcessor(TCrossJoinKernels kernels);
+    void SetDiagnostics(TOperatorDiagnostics* diagnostics);
     TCrossJoinProcessor(const TCrossJoinProcessor&) = delete;
     TCrossJoinProcessor& operator=(const TCrossJoinProcessor&) = delete;
     ~TCrossJoinProcessor();

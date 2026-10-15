@@ -4,6 +4,8 @@
   (fun qdb_diagnostics_rows
        ((var batch <ref TRowSet>) (var widths <ptr i64>) (var output <ptr i64>))
     (block
+      (var selection = (field batch Selection))
+      (var columns = (field batch Columns))
       (var rows = (: 0 i64))
       (var bytes = (: 0 i64))
       (var i = (: 0 i64))
@@ -11,14 +13,14 @@
         (block
           (var selected = #t)
           (if (!= (cast (field batch Selection) i64) 0)
-            (block (= selected (!= (index (field batch Selection) i) 0))))
+            (block (= selected (!= (index selection i) 0))))
           (if selected
             (block
               (= rows (+ rows 1))
               (var c = (: 0 i64))
               (while (< c (field batch ColumnCount))
                 (block
-                  (var col = (index (field batch Columns) c))
+                  (var col = (index columns c))
                   (var valid = #t)
                   (if (!= (cast (field col Mask) i64) 0)
                     (block (= valid (call bitoff (field col Mask) i
@@ -51,6 +53,8 @@
         (var string_buffers <ptr i64>) (var string_count i64)
         (var output <ptr i64>))
     (block
+      (var buffers = (field ht AggBuffers))
+      (var blocks = (field ht OwnedBlocks))
       (var capacity = (field ht Capacity))
       (var size = (field ht Size))
       (var aggs = (field ht NumAggs))
@@ -60,12 +64,12 @@
       (var i = (: 0 i64))
       (while (< i (field ht OwnedBlockCount))
         (block
-          (var header = (cast (index (field ht OwnedBlocks) i) <ptr i64>))
+          (var header = (cast (index blocks i) <ptr i64>))
           (= bytes (+ bytes 24 (index header 1)))
           (= i (+ i 1))))
-      (if (!= join 0)
+      (if (&& (!= join 0) (>= aggs 3))
         (block
-          (var caps = (index (field ht AggBuffers) 1))
+          (var caps = (index buffers 1))
           (= i 0)
           (while (< i size)
             (block
@@ -74,7 +78,7 @@
       (= i 0)
       (while (< i string_count)
         (block
-          (var metadata = (index (field ht AggBuffers) (index string_buffers i)))
+          (var metadata = (index buffers (index string_buffers i)))
           (var g = (: 0 i64))
           (while (< g capacity)
             (block

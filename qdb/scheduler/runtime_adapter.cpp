@@ -1207,6 +1207,9 @@ void TBinaryBlockingTask::ConfigureDiagnostics(TTaskDiagnosticSetup& setup) {
 
 void TMergeTask::ConfigureDiagnostics(TTaskDiagnosticSetup& setup) {
     setup.Output(Output_);
+    if (Code_->ConfigureDiagnostics) {
+        Code_->ConfigureDiagnostics(State_.get(), &setup.Counters());
+    }
     for (auto& input : Inputs_) {
         setup.Input(input);
     }

@@ -34,6 +34,8 @@ TInnerJoinProcessor::TInnerJoinProcessor(
 
 void TInnerJoinProcessor::SetDiagnostics(TOperatorDiagnostics* diagnostics) {
     Diagnostics_ = diagnostics;
+    LeftRows_.SetDiagnostics(diagnostics, 0);
+    RightRows_.SetDiagnostics(diagnostics, 1);
 }
 
 void TInnerJoinProcessor::ObserveDiagnostics() {
@@ -534,6 +536,11 @@ EJoinBuildSide TInnerJoinProcessor::RequiredInputSide() const {
         return EJoinBuildSide::Right;
     }
     return EJoinBuildSide::Auto;
+}
+
+void TCrossJoinProcessor::SetDiagnostics(TOperatorDiagnostics* diagnostics) {
+    LeftRows_.SetDiagnostics(diagnostics, 0);
+    RightRows_.SetDiagnostics(diagnostics, 1);
 }
 
 TCrossJoinProcessor::TCrossJoinProcessor(TCrossJoinKernels kernels)

@@ -929,7 +929,7 @@ private:
     // drains the input first, then emits processor output.
     template <class TState>
     std::shared_ptr<const NScheduler::TBlockingCode> MakeDrainBlockingCode() {
-        return std::make_shared<NScheduler::TBlockingCode>(
+        auto code = std::make_shared<NScheduler::TBlockingCode>(
             [](void* state, NScheduler::TInputPort& input, TRowSet& output) {
                 auto* s = static_cast<TState*>(state);
                 TRowSet rowSet{};
@@ -950,6 +950,14 @@ private:
                 }
                 return NScheduler::ETaskResult::FINISHED;
             });
+        if constexpr (requires(TState& state, TOperatorDiagnostics* diagnostics) {
+            state.Processor.SetDiagnostics(diagnostics);
+        }) {
+            code->ConfigureDiagnostics = [](void* state, TOperatorDiagnostics* diagnostics) {
+                static_cast<TState*>(state)->Processor.SetDiagnostics(diagnostics);
+            };
+        }
+        return code;
     }
 
     // Blocking tail for a local sort (top-K when topLimit is set, otherwise a
@@ -1036,10 +1044,10 @@ private:
                 }
                 return MapJoinProcessResult(result);
             });
+        code->ConfigureDiagnostics = [](void* state, TOperatorDiagnostics* diagnostics) {
+            static_cast<TState*>(state)->Processor.SetDiagnostics(diagnostics);
+        };
         if constexpr (std::is_same_v<TState, TSchedulerInnerJoinState>) {
-            code->ConfigureDiagnostics = [](void* state, TOperatorDiagnostics* diagnostics) {
-                static_cast<TState*>(state)->Processor.SetDiagnostics(diagnostics);
-            };
             code->RequiredSide = [](void* state) {
                 switch (static_cast<TState*>(state)->Processor.RequiredInputSide()) {
                     case EJoinBuildSide::Left:
@@ -1338,6 +1346,10 @@ private:
                     TRowSet batch{};
                     auto fetch = input.Fetch(batch);
                     if (fetch == NScheduler::EFetchResult::OK) {
+                        if (shared->Diagnostics) {
+                            shared->Diagnostics->RetainInput(batch, 0);
+                            shared->Diagnostics->Output.Add(batch);
+                        }
                         shared->Batches.push_back(batch);
                         continue;
                     }
@@ -1350,6 +1362,9 @@ private:
                     return NScheduler::ETaskResult::FINISHED;
                 }
             });
+        code->ConfigureDiagnostics = [](void* state, TOperatorDiagnostics* diagnostics) {
+            static_cast<NScheduler::TCteSharedState*>(state)->Diagnostics = diagnostics;
+        };
         if (materialization->RefCount == 0) {
             throw std::runtime_error(
                 "cte materialization: lowered a producer with no consumers");
@@ -2473,6 +2488,9 @@ private:
                 return NScheduler::ETaskResult::FINISHED;
             });
 
+        mergeCode->ConfigureDiagnostics = [](void* state, TOperatorDiagnostics* diagnostics) {
+            static_cast<TMergeState*>(state)->Processor.SetDiagnostics(diagnostics);
+        };
         auto merge = std::make_unique<NScheduler::TMergeTask>(
             mergeCode,
             std::make_shared<TMergeState>(childType, keys, keyColumns, lanes),
@@ -3342,16 +3360,17 @@ bool RunPlanIntoSink(
         std::move(sinkState),
         TInputPort{.Connection = lowered.FinalGather, .Lane = 0});
     auto& sinkNode = lowered.Graph->AddOwnedNode(std::move(sinkTask));
+    sinkNode.DebugKind = "sink";
     for (size_t p = 0; p < lowered.Lanes; ++p) {
         lowered.Graph->AddEdge(
             *lowered.Producers[p], sinkNode, *lowered.FinalGather, p, 0);
     }
 
+    lowered.Graph->Build();
     if (settings.Diagnostics.Operators) {
         EnableOperatorDiagnostics(lowered);
     }
     JitFinalizeKernels(lowered.Kernels, diagnostics, lowered.ExternalCatalog);
-    lowered.Graph->Build();
     if (!lowered.Graph->Validate(error)) {
         return false;
     }

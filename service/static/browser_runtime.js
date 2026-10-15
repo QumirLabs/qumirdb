@@ -2628,6 +2628,7 @@ function updateJoinState(state, side, rowSet) {
   let stored = false;
   if (isLeft || !semiAnti) {
     const store = isLeft ? state.leftStore : state.rightStore;
+    state.diagnostics?.retain(rowSet, side);
     batchIdx = store.push(
       batch,
       rowsetPtr,
@@ -4547,12 +4548,10 @@ class OperatorDiagnostics {
     this.shared = shared;
     this.layout = layout;
     this.kernels = kernels;
-    this.writer = new RowSetWriter(shared.arena, layout);
-    this.widths = shared.arena.alloc(Math.max(stage.diagnosticWidths.length, 1) * 8, 8);
+
     this.scratch = shared.arena.alloc(24, 8);
     this.stringBuffers = shared.arena.alloc(Math.max(stage.diagnosticStringBuffers?.length || 0, 1) * 8, 8);
     const view = shared.arena.view();
-    stage.diagnosticWidths.forEach((width, i) => view.setBigInt64(this.widths + i * 8, BigInt(width), true));
     (stage.diagnosticStringBuffers || []).forEach((index, i) =>
       view.setBigInt64(this.stringBuffers + i * 8, BigInt(index), true));
     this.inputs = [];
@@ -4565,14 +4564,25 @@ class OperatorDiagnostics {
     this.previous = [0, 0];
     this.sideGroups = [0, 0];
     this.sideBytes = [0, 0];
+    this.inputWidths = [];
+    this.retainedBytes = 0;
+    this.buildMemory = 0;
   }
 
-  measure(rowSet, widths) {
+  measure(rowSet, widths, allRows = false) {
     // Marshalling stays in the existing adapter; selection, validity, offset
     // widths and payload measurement are interpreted by the common Oz code.
     const wasm = wasmRowSetForSelection(rowSet.batch, rowSet.selection);
-    const pointer = wasm ? wasm.rowsetPtr : this.writer.write(
-      rowSet.batch.columns, rowSet.batch.rowCount, false, rowSet.selection).rowsetPtr;
+    const marshalled = wasm ? null : marshalRowSet(this.shared.arena, this.layout,
+      rowSet.batch.columns, rowSet.batch.rowCount, false, rowSet.selection);
+    let pointer = wasm ? wasm.rowsetPtr : marshalled.rowsetPtr;
+    let descriptor = 0;
+    if (allRows) {
+      descriptor = this.shared.arena.alloc(this.layout.rowset.size, 8);
+      this.shared.arena.bytes().copyWithin(descriptor, pointer, pointer + this.layout.rowset.size);
+      writePointer(this.shared.arena.view(), descriptor + this.layout.rowset.selection, 0);
+      pointer = descriptor;
+    }
     const widthPtr = this.shared.arena.alloc(Math.max(widths.length, 1) * 8, 8);
     try {
       const view = this.shared.arena.view();
@@ -4583,11 +4593,14 @@ class OperatorDiagnostics {
         Number(result.getBigInt64(this.scratch + 8, true))];
     } finally {
       this.shared.arena.free(widthPtr);
+      if (descriptor) this.shared.arena.free(descriptor);
+      if (marshalled) freeMarshalledRowSet(this.shared.arena, this.layout, marshalled.rowsetPtr);
     }
   }
 
   input(rowSet, widths, index) {
     const [rows, bytes] = this.measure(rowSet, widths);
+    this.inputWidths[index] = widths;
     const input = this.inputs[index] ||= { rows: 0, bytes: 0 };
     input.rows += rows;
     input.bytes += bytes;
@@ -4597,6 +4610,12 @@ class OperatorDiagnostics {
     const [rows, bytes] = this.measure(rowSet, this.stage.diagnosticWidths);
     this.rowsOut += rows;
     this.bytesOut += bytes;
+  }
+
+  retain(rowSet, input) {
+    const [, bytes] = this.measure(rowSet, this.inputWidths[input], true);
+    this.retainedBytes += bytes;
+    this.buildMemory = Math.max(this.buildMemory, this.retainedBytes + this.sideBytes[0] + this.sideBytes[1]);
   }
 
   hash(table, side, join) {
@@ -4617,6 +4636,7 @@ class OperatorDiagnostics {
     this.groups = this.sideGroups[0] + this.sideGroups[1];
     this.capacity = this.previous[0] + this.previous[1];
     this.memory = Math.max(this.memory || 0, this.sideBytes[0] + this.sideBytes[1]);
+    this.buildMemory = Math.max(this.buildMemory, this.retainedBytes + this.sideBytes[0] + this.sideBytes[1]);
   }
 
   snapshot(node) {
@@ -4634,6 +4654,8 @@ class OperatorDiagnostics {
       hash_growth_events: this.growths,
       rehashes: this.growths,
       hash_memory_peak_bytes: this.memory,
+      retained_input_bytes: this.memory === null ? null : this.retainedBytes,
+      build_memory_peak_bytes: this.memory === null ? null : this.buildMemory,
       materialized_bytes: materializes ? this.bytesOut : null,
       execution_cpu_seconds: null,
       task_elapsed_seconds: node.elapsedMs / 1000,
@@ -4644,8 +4666,6 @@ class OperatorDiagnostics {
   }
 
   destroy() {
-    this.writer.destroy();
-    this.shared.arena.free(this.widths);
     this.shared.arena.free(this.stringBuffers);
     this.shared.arena.free(this.scratch);
   }
@@ -4773,11 +4793,11 @@ export async function executeBrowserPipelineScheduled(exec, readSourceBatches, o
   const { roots, sink, nodes } =
     buildScheduledGraph(exec, readSourceBatches, options, layout, shared);
   const scheduler = new SingleThreadedScheduler(roots);
-  if (options.operatorDiagnostics === true) {
-    await attachOperatorDiagnostics(exec, nodes, shared, layout);
-  }
   let result;
   try {
+    if (options.operatorDiagnostics === true) {
+      await attachOperatorDiagnostics(exec, nodes, shared, layout);
+    }
     await scheduler.run();
     result = sink.task.result();
     if (options.operatorDiagnostics === true) {

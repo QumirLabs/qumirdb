@@ -143,6 +143,7 @@ struct TMergeCode {
         TRowSet&)>;
 
     explicit TMergeCode(TProcess process);
+    std::function<void(void*, TOperatorDiagnostics*)> ConfigureDiagnostics;
 
     TProcess Process;
 };
@@ -362,6 +363,7 @@ struct TCteSharedState {
     };
 
     std::atomic<EStatus> Status = EStatus::Building;
+    TOperatorDiagnostics* Diagnostics = nullptr;
     std::vector<TRowSet> Batches;
 
     ~TCteSharedState() {

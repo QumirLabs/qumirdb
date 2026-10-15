@@ -292,3 +292,42 @@ safety margin; missing NDVs or a nonpositive estimated benefit leave the join
 unfiltered. These work weights are heuristics and need
 calibration against representative queries before relying on them for precise
 latency predictions.
+
+## Task-local diagnostics
+
+Runtime cardinalities belong to the task that reads or publishes a batch.
+Instrumentation is opt-in: ordinary execution does not emit the measurement
+program or visit rows for diagnostics. Prepared measurement code is immutable;
+selection-aware row and byte computation uses the same Oz program in native
+and browser execution.
+
+Each task owns its counters and receives its observer explicitly before it can
+run. Only the worker executing that task writes them. The scheduler's existing
+single-writer guarantee lets the counters follow a task between workers without
+locks, atomics per row, thread-local storage, or query-global mutable counters.
+Snapshots are read and combined only after workers stop. An input counts a batch
+when fetched successfully; an output counts it once when published successfully.
+Backpressure retries do not count the same batch again. Source stages have no
+rowset input; their output is the data actually supplied to the graph.
+
+Active rows respect the selection mask. Bytes measure the logical payload of
+selected, non-NULL values, including actual string lengths, rather than disk
+I/O or allocator traffic. Materialized bytes describe output payload at stages
+that materialize rows; they do not claim every byte was copied. Hash groups,
+capacity and growth are observed at batch boundaries before state is destroyed.
+Geometric capacity changes preserve the number of successful rehashes even when
+several occur inside one batch. Initial reservation is not a rehash.
+
+Memory snapshots separate retained hash allocations from retained input payload.
+Their sum is accounted build memory, excluding transient rehash copies,
+allocator overhead, input-buffer metadata and sort scratch; it is not process
+RSS. Retained payload can share backing storage. A stage sums task peaks, which
+need not occur simultaneously. Task cardinalities remain in the snapshot so
+partition imbalance can be distinguished from a cardinality-estimation error.
+
+Native stage CPU sums thread CPU consumed inside task execution, including
+instrumentation, and excludes ready-queue waiting and descheduling. The browser
+has no thread CPU clock: it reports CPU as unavailable and labels task elapsed
+time separately, including asynchronous I/O. Its contracted graph does not
+measure the native partition distribution. Unavailable metrics remain absent
+or null, rather than being presented as zero.

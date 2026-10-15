@@ -101,7 +101,7 @@ void EnableOperatorDiagnostics(TLoweredPlan& lowered) {
             node->DebugKind == "join" || node->DebugKind == "cross-join" ||
             node->DebugKind == "sort" || node->DebugKind == "top-sort" ||
             node->DebugKind == "window" || node->DebugKind == "late-materialize" ||
-            node->DebugKind == "hash-shuffle";
+            node->DebugKind == "hash-shuffle" || node->DebugKind == "cte-producer";
         TTaskDiagnosticSetup setup(*node, types);
         node->Task->ConfigureDiagnostics(setup);
     }
@@ -118,7 +118,8 @@ uint64_t ThreadCpuNanoseconds() {
 }
 
 struct TStageSnapshot {
-    std::vector<uint64_t> RowsIn;
+    std::vector<uint64_t> TaskRows;
+    uint64_t ActualRowsIn = 0;
     uint64_t RowsOut = 0;
     uint64_t BytesIn = 0;
     uint64_t BytesOut = 0;
@@ -128,8 +129,11 @@ struct TStageSnapshot {
     uint64_t Growths = 0;
     uint64_t Rehashes = 0;
     uint64_t HashMemory = 0;
+    uint64_t RetainedInput = 0;
+    uint64_t BuildMemory = 0;
     uint64_t Materialized = 0;
     bool HasHash = false;
+    bool HasBuildMemory = false;
     bool Materializes = false;
 
     void Add(const TOperatorDiagnostics& counters) {
@@ -138,7 +142,8 @@ struct TStageSnapshot {
             inputRows += input.Rows;
             BytesIn += input.Bytes;
         }
-        RowsIn.push_back(inputRows);
+        TaskRows.push_back(counters.Inputs.empty() ? counters.Output.Rows : inputRows);
+        ActualRowsIn += inputRows;
         RowsOut += counters.Output.Rows;
         BytesOut += counters.Output.Bytes;
         Cpu += counters.ExecutionCpuNanoseconds;
@@ -147,18 +152,21 @@ struct TStageSnapshot {
         Growths += counters.HashGrowthEvents;
         Rehashes += counters.Rehashes;
         HashMemory += counters.HashMemoryPeakBytes;
+        RetainedInput += counters.RetainedInputBytes;
+        BuildMemory += counters.BuildMemoryPeakBytes;
         Materialized += counters.MaterializesOutput ? counters.Output.Bytes : 0;
         HasHash |= counters.HasHash;
+        HasBuildMemory |= counters.HasBuildMemory;
         Materializes |= counters.MaterializesOutput;
     }
 };
 
 void WriteSnapshot(std::ostream& out, const TStageSnapshot& value) {
     uint64_t rowsIn = 0;
-    for (const auto rows : value.RowsIn) {
+    for (const auto rows : value.TaskRows) {
         rowsIn += rows;
     }
-    out << " rows_in=" << rowsIn << " rows_out=" << value.RowsOut
+    out << " rows_in=" << value.ActualRowsIn << " rows_out=" << value.RowsOut
         << " bytes_in=" << value.BytesIn << " bytes_out=" << value.BytesOut
         << " execution_cpu_seconds=" << std::setprecision(9)
         << static_cast<double>(value.Cpu) / 1e9;
@@ -170,17 +178,23 @@ void WriteSnapshot(std::ostream& out, const TStageSnapshot& value) {
         out << " groups=null hash_capacity=null hash_growth_events=null rehashes=null"
             << " hash_memory_peak_bytes=null";
     }
+    if (value.HasBuildMemory) {
+        out << " retained_input_bytes=" << value.RetainedInput
+            << " build_memory_peak_bytes=" << value.BuildMemory;
+    } else {
+        out << " retained_input_bytes=null build_memory_peak_bytes=null";
+    }
     out << " materialized_bytes=";
     if (value.Materializes) {
         out << value.Materialized;
     } else {
         out << "null";
     }
-    auto bounds = std::minmax_element(value.RowsIn.begin(), value.RowsIn.end());
+    auto bounds = std::minmax_element(value.TaskRows.begin(), value.TaskRows.end());
     out << " task_rows_min=" << *bounds.first << " task_rows_max=" << *bounds.second
         << " partition_skew=";
     if (rowsIn) {
-        out << static_cast<double>(*bounds.second) * value.RowsIn.size() / rowsIn;
+        out << static_cast<double>(*bounds.second) * value.TaskRows.size() / rowsIn;
     } else {
         out << "null";
     }
@@ -201,7 +215,7 @@ ETaskResult ExecuteTask(TTaskNode& node) {
 
 void PrintOperatorDiagnostics(std::ostream& out, const TTaskGraph& graph) {
     out << "\noperator-diagnostics schema_version=1 bytes=logical_nonnull_payload"
-        << " memory=batch_boundary_hash_reservations cpu=thread_execute\n";
+        << " memory=batch_boundary_hash_plus_retained_payload stage_memory=sum_task_peaks cpu=thread_execute\n";
     using TKey = std::tuple<TExecStageId, TTaskGroupId, std::string>;
     std::map<TKey, TStageSnapshot> stages;
     size_t task = 0;
@@ -212,8 +226,13 @@ void PrintOperatorDiagnostics(std::ostream& out, const TTaskGraph& graph) {
         const auto& counters = *node->Diagnostics;
         TStageSnapshot value;
         value.Add(counters);
+        auto label = node->DebugLabel;
+        std::replace(label.begin(), label.end(), '\n', ' ');
+        std::replace(label.begin(), label.end(), '\r', ' ');
         out << "operator-task task=" << task++ << " stage=" << node->ExecStageId
-            << " group=" << node->TaskGroupId << " kind=" << node->DebugKind;
+            << " group=" << node->TaskGroupId << " kind=" << node->DebugKind
+            << " label=" << std::quoted(label)
+            << " finished=" << (node->State.load(std::memory_order_relaxed) == ETaskState::Finished);
         WriteSnapshot(out, value);
         for (size_t input = 0; input < counters.Inputs.size(); ++input) {
             out << "operator-input task=" << task - 1 << " input=" << input
@@ -225,7 +244,7 @@ void PrintOperatorDiagnostics(std::ostream& out, const TTaskGraph& graph) {
     for (const auto& [key, value] : stages) {
         const auto& [stage, group, kind] = key;
         out << "operator-stage stage=" << stage << " group=" << group << " kind=" << kind
-            << " tasks=" << value.RowsIn.size();
+            << " tasks=" << value.TaskRows.size();
         WriteSnapshot(out, value);
     }
 }

@@ -17,7 +17,7 @@ std::vector<int64_t> DiagnosticColumnWidths(const NQumir::NAst::TTypePtr& type) 
     std::vector<int64_t> widths;
     for (const auto& [name, field] : structure.Cast()->Fields) {
         const auto value = UnwrapNamedType(UnwrapNullableType(field));
-        if (IsDecimalType(field)) {
+        if (IsDecimalType(field) || IsBinIntStorageType(field)) {
             widths.push_back(16);
         } else if (TMaybeType<TStringType>(value)) {
             widths.push_back(-1);
@@ -45,6 +45,18 @@ void TRowSetDiagnostics::Add(const TRowSet& rowSet) {
     Bytes += values[1];
 }
 
+void TOperatorDiagnostics::RetainInput(const TRowSet& rowSet, size_t input, bool append) {
+    auto counter = Inputs.at(input);
+    counter.Rows = 0;
+    counter.Bytes = 0;
+    auto allRows = rowSet;
+    allRows.Selection = nullptr;
+    counter.Add(allRows);
+    RetainedInputBytes = append ? RetainedInputBytes + counter.Bytes : counter.Bytes;
+    HasBuildMemory = true;
+    BuildMemoryPeakBytes = std::max(BuildMemoryPeakBytes, RetainedInputBytes + Memory_[0] + Memory_[1]);
+}
+
 void TOperatorDiagnostics::ObserveHash(
     void* table,
     size_t side,
@@ -56,6 +68,7 @@ void TOperatorDiagnostics::ObserveHash(
     reinterpret_cast<TMeasure>(Kernel->Fns[1])(
         table, join, stringBuffers.data(), stringBuffers.size(), values);
     HasHash = true;
+    HasBuildMemory = true;
     const uint64_t capacity = values[1];
     if (Capacities_[side]) {
         // Tables only grow by doubling, including multiple growths inside one
@@ -71,6 +84,7 @@ void TOperatorDiagnostics::ObserveHash(
     Groups = Groups_[0] + Groups_[1];
     HashCapacity = Capacities_[0] + Capacities_[1];
     HashMemoryPeakBytes = std::max(HashMemoryPeakBytes, Memory_[0] + Memory_[1]);
+    BuildMemoryPeakBytes = std::max(BuildMemoryPeakBytes, RetainedInputBytes + Memory_[0] + Memory_[1]);
 }
 
 } // namespace NQdb
