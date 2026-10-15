@@ -2727,6 +2727,7 @@ function finishJoinState(state) {
   // query (upstream joins finish before the final one peaks).
   state.leftStore.freeMarshalled();
   state.rightStore.freeMarshalled();
+  state.diagnostics?.releaseRetained();
   state.arena.free(state.leftKeyColumns);
   state.arena.free(state.rightKeyColumns);
 }
@@ -2847,6 +2848,7 @@ function finishCrossJoinState(state) {
     CrossJoinOp.DESTROY);
   state.leftStore.freeMarshalled();
   state.rightStore.freeMarshalled();
+  state.diagnostics?.releaseRetained();
 }
 
 function outputShapeFromRowSets(rowSets) {
@@ -3683,6 +3685,7 @@ class WindowTask {
     this.inputs = [];
     this.pending = runWindowKernelRowSets(
       kernel, this.layout, inputs, this.stage);
+    this.diagnostics?.releaseRetained();
     return this.execute();
   }
 
@@ -4251,6 +4254,7 @@ class SortTask {
     if (this.pending) {
       if (!output.canPush()) return TaskResult.BLOCKED_OUTPUT;
       output.push({ batch: this.pending, selection: null });
+      if (this.topSort) this.diagnostics?.releaseRetained();
       output.finish();
       this.pending = null;
       this.done = true;
@@ -4267,7 +4271,7 @@ class SortTask {
         }
       } else {
         this.diagnostics?.retain(fetched.rowSet, 0);
-      this.inputs.push(fetched.rowSet);
+        this.inputs.push(fetched.rowSet);
       }
       this.rows += fetched.rowSet.batch.rowCount;
       return TaskResult.OK;
@@ -4290,6 +4294,7 @@ class SortTask {
     this.inputs = [];
     this.pending = runRadixSortRowSets(
       kernel, this.layout, inputs, this.stage.radixKeys, null);
+    this.diagnostics?.releaseRetained();
     return this.execute();
   }
 
@@ -4630,6 +4635,10 @@ class OperatorDiagnostics {
     this.hasBuildMemory = true;
     this.retainedPeak = Math.max(this.retainedPeak, this.retainedBytes);
     this.buildMemory = Math.max(this.buildMemory, this.retainedBytes + this.sideBytes[0] + this.sideBytes[1]);
+  }
+
+  releaseRetained() {
+    this.retainedBytes = 0;
   }
 
   hash(table, side, join) {

@@ -766,6 +766,8 @@ async function runDiagnosticSemiJoinContract() {
   const join = result.operator_diagnostics.stages.find(stage => stage.kind === 'join');
   assert.equal(join.rows_out, 2);
   assert.ok(join.hash_memory_peak_bytes > 0);
+  assert.equal(join.retained_input_bytes, 0);
+  assert.ok(join.retained_input_peak_bytes > 0);
   assert.equal(result.memory.liveMB, '0.0');
 }
 
@@ -807,7 +809,8 @@ async function runOperatorDiagnosticsContract() {
       const join = diagnostic.stages.find(stage => stage.kind === 'join');
       assert.equal(join.rows_in, 7);
       assert.equal(join.rows_out, 2);
-      assert.ok(join.retained_input_bytes > 0);
+      assert.equal(join.retained_input_bytes, 0);
+      assert.ok(join.retained_input_peak_bytes > 0);
       assert.ok(join.build_memory_peak_bytes >= join.hash_memory_peak_bytes);
     }
     assert.equal(result.memory?.liveMB, '0.0', `${name}: diagnostics leaked wasm memory`);

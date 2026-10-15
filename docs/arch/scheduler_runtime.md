@@ -323,6 +323,9 @@ including inactive rows in sparse views. Partition views of one batch count
 that owner once per task. Measurement is cached for the lifetime of a retained
 owner, so another partition does not trigger another row walk. Current retained
 payload and its peak remain separate from selected output bytes.
+Current payload describes ownership at snapshot time; releasing input resets
+the current value while preserving its peak. State retained until graph teardown
+can therefore remain current in the post-run snapshot.
 
 Memory snapshots separate retained hash allocations from retained input payload.
 Their sum is accounted build memory, excluding transient rehash copies,
