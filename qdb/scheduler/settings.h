@@ -74,6 +74,7 @@ struct TDiagnosticsSettings {
     // Disabled by default. Applications may opt in and provide the destination
     // explicitly; the execution library never reads process environment state.
     bool RowGroupPredicate = false;
+    bool Operators = false;
     std::ostream* Output = nullptr;
 };
 

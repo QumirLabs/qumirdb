@@ -22,6 +22,8 @@
 #include <qumir/parser/core/printer.h>
 
 #include <algorithm>
+#include <fstream>
+#include <sstream>
 #include <span>
 #include <stdexcept>
 #include <unordered_map>
@@ -103,7 +105,7 @@ std::unordered_map<std::string, void*> CompileKernelAst(
 namespace {
 constexpr const char* CacheSchemaVersion = "v1";
 // Bump when the generated key helpers or the .oz kernel libraries change.
-constexpr const char* KernelLibVersion = "28";
+constexpr const char* KernelLibVersion = "31";
 } // namespace
 
 NQumir::NCodeGen::TLlvmRunner::TLinkedModule CompileKernelAstCached(
@@ -117,6 +119,23 @@ NQumir::NCodeGen::TLlvmRunner::TLinkedModule CompileKernelAstCached(
     EnsureQumirDbUse(ast);
     return runner.CompileFusedKernelsCached(
         std::move(ast), entryNames, cacheDir, CacheSchemaVersion, KernelLibVersion, error);
+}
+
+std::shared_ptr<TKernelSlot> TKernelCompiler::CompileDiagnostics() {
+    auto source = NUtils::KernelFile(".", "diagnostics.oz");
+    std::ifstream input(source);
+    if (!input) {
+        throw std::runtime_error("cannot open diagnostic kernel: " + source);
+    }
+    std::ostringstream text;
+    text << input.rdbuf();
+    auto library = NKernel::ParseFunctionLibrary(text.str());
+    if (!library) {
+        throw library.error();
+    }
+    auto ast = NKernel::NOz::Block(std::move(*library));
+    return EmitKernel("diagnostics", {"qdb_diagnostics_rows", "qdb_diagnostics_hash"},
+        std::move(ast)).Slot;
 }
 
 TGeneratedKernel TKernelCompiler::EmitKernel(
@@ -2000,6 +2019,11 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
 
     TAggregateKernels kernels;
     kernels.NumAggs = funcs.size();
+    for (const auto& reducer : layout.Reducers) {
+        if (reducer.IsString()) {
+            kernels.StringMetadataBuffers.push_back(reducer.ExtraBufIdx);
+        }
+    }
     kernels.OutputAggs.reserve(layout.Reducers.size());
     for (const auto& reducer : layout.Reducers) {
         kernels.OutputAggs.push_back({.IsNullable = reducer.IsNullableOutput});
@@ -2041,6 +2065,7 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
             valueMeta.push_back({.IsNullable = outputAgg.IsNullable});
         }
         for (size_t i = sinkBefore; i < Sink_->size(); ++i) {
+            (*Sink_)[i].AggStringMetadataBuffers = kernels.StringMetadataBuffers;
             (*Sink_)[i].AggKeys = keyMeta;
             (*Sink_)[i].AggValues = valueMeta;
         }

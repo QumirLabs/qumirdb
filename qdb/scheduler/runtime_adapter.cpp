@@ -1,6 +1,7 @@
 #include <qdb/scheduler/runtime_adapter.h>
 
 #include <qdb/scheduler/graph.h>
+#include <qdb/scheduler/diagnostics.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 
@@ -153,9 +154,13 @@ const TStructType& ShuffleInputStruct(const TTypePtr& type) {
 } // namespace
 
 EFetchResult TInputPort::Fetch(TRowSet& rowSet) const {
-    return Connection
+    const auto result = Connection
         ? Connection->Fetch(Lane, rowSet)
         : EFetchResult::FINISHED;
+    if (result == EFetchResult::OK && Diagnostics) {
+        Diagnostics->Add(rowSet);
+    }
+    return result;
 }
 
 bool TOutputPort::CanPush() const {
@@ -163,9 +168,17 @@ bool TOutputPort::CanPush() const {
 }
 
 bool TOutputPort::Push(TRowSet&& rowSet) const {
-    return Connection
-        ? Connection->Push(Lane, std::move(rowSet))
-        : true;
+    const auto rows = Diagnostics ? Diagnostics->Rows : 0;
+    const auto bytes = Diagnostics ? Diagnostics->Bytes : 0;
+    if (Diagnostics) {
+        Diagnostics->Add(rowSet);
+    }
+    const bool pushed = !Connection || Connection->Push(Lane, std::move(rowSet));
+    if (!pushed && Diagnostics) {
+        Diagnostics->Rows = rows;
+        Diagnostics->Bytes = bytes;
+    }
+    return pushed;
 }
 
 void TOutputPort::Finish() const {
@@ -1094,7 +1107,16 @@ ETaskResult THashShuffleTask::PushPending() {
         if (!Output_->CanPushTo(SourceLane_, pending.DstLane)) {
             return ETaskResult::BLOCKED_OUTPUT;
         }
+        const auto rows = OutputDiagnostics_ ? OutputDiagnostics_->Rows : 0;
+        const auto bytes = OutputDiagnostics_ ? OutputDiagnostics_->Bytes : 0;
+        if (OutputDiagnostics_) {
+            OutputDiagnostics_->Add(pending.RowSet);
+        }
         if (!Output_->PushTo(SourceLane_, pending.DstLane, std::move(pending.RowSet))) {
+            if (OutputDiagnostics_) {
+                OutputDiagnostics_->Rows = rows;
+                OutputDiagnostics_->Bytes = bytes;
+            }
             return ETaskResult::BLOCKED_OUTPUT;
         }
         ++PendingIndex_;
@@ -1146,6 +1168,57 @@ ETaskResult TCteConsumerTask::Execute() {
     }
     ++NextBatch_;
     return ETaskResult::OK;
+}
+
+void TSourceTask::ConfigureDiagnostics(TTaskDiagnosticSetup& setup) {
+    setup.Output(Output_);
+}
+
+void TRuntimeFilterTask::ConfigureDiagnostics(TTaskDiagnosticSetup& setup) {
+    setup.Input(Input_);
+    setup.Output(Output_);
+}
+
+void TUnaryTask::ConfigureDiagnostics(TTaskDiagnosticSetup& setup) {
+    setup.Input(Input_);
+    setup.Output(Output_);
+}
+
+void TSinkTask::ConfigureDiagnostics(TTaskDiagnosticSetup& setup) {
+    setup.Input(Input_);
+}
+
+void TBlockingTask::ConfigureDiagnostics(TTaskDiagnosticSetup& setup) {
+    setup.Input(Input_);
+    setup.Output(Output_);
+    if (Code_->ConfigureDiagnostics) {
+        Code_->ConfigureDiagnostics(State_.get(), &setup.Counters());
+    }
+}
+
+void TBinaryBlockingTask::ConfigureDiagnostics(TTaskDiagnosticSetup& setup) {
+    setup.Input(Left_);
+    setup.Input(Right_);
+    setup.Output(Output_);
+    if (Code_->ConfigureDiagnostics) {
+        Code_->ConfigureDiagnostics(State_.get(), &setup.Counters());
+    }
+}
+
+void TMergeTask::ConfigureDiagnostics(TTaskDiagnosticSetup& setup) {
+    setup.Output(Output_);
+    for (auto& input : Inputs_) {
+        setup.Input(input);
+    }
+}
+
+void THashShuffleTask::ConfigureDiagnostics(TTaskDiagnosticSetup& setup) {
+    setup.Input(Input_);
+    OutputDiagnostics_ = &setup.Output(*Output_);
+}
+
+void TCteConsumerTask::ConfigureDiagnostics(TTaskDiagnosticSetup& setup) {
+    setup.Output(Output_);
 }
 
 } // namespace NScheduler

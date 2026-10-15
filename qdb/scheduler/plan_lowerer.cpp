@@ -1,4 +1,5 @@
 #include <qdb/scheduler/plan_lowerer.h>
+#include <qdb/scheduler/diagnostics.h>
 #include <qdb/exec/aggregate_exec.h>
 #include <qdb/exec/join_exec.h>
 #include <qdb/exec/late_materialize_exec.h>
@@ -1029,10 +1030,16 @@ private:
                 auto fetchRight = [&](TRowSet& rowSet) {
                     return MapJoinFetch(right.Fetch(rowSet));
                 };
-                return MapJoinProcessResult(
-                    s->Processor.Process(fetchLeft, fetchRight, output));
+                const auto result = s->Processor.Process(fetchLeft, fetchRight, output);
+                if constexpr (std::is_same_v<TState, TSchedulerInnerJoinState>) {
+                    s->Processor.ObserveDiagnostics();
+                }
+                return MapJoinProcessResult(result);
             });
         if constexpr (std::is_same_v<TState, TSchedulerInnerJoinState>) {
+            code->ConfigureDiagnostics = [](void* state, TOperatorDiagnostics* diagnostics) {
+                static_cast<TState*>(state)->Processor.SetDiagnostics(diagnostics);
+            };
             code->RequiredSide = [](void* state) {
                 switch (static_cast<TState*>(state)->Processor.RequiredInputSide()) {
                     case EJoinBuildSide::Left:
@@ -1509,6 +1516,9 @@ private:
                     rowSet = {};
                 }
             });
+        code->ConfigureDiagnostics = [](void* state, TOperatorDiagnostics* diagnostics) {
+            static_cast<TGroupingSetsBlockingState*>(state)->Processor.SetDiagnostics(diagnostics);
+        };
         return TBlockingTail{
             .Code = std::move(code),
             .MakeState = [kernels, sets, numKeys]() -> std::shared_ptr<void> {
@@ -1565,6 +1575,9 @@ private:
                     rowSet = {};
                 }
             });
+        code->ConfigureDiagnostics = [](void* state, TOperatorDiagnostics* diagnostics) {
+            static_cast<TAggregateBlockingState*>(state)->Processor.SetDiagnostics(diagnostics);
+        };
         return TBlockingTail{
             .Code = std::move(code),
             .MakeState = [kernels, initialCapacity]() -> std::shared_ptr<void> {
@@ -3321,11 +3334,6 @@ bool RunPlanIntoSink(
     std::ostream* diagnostics,
     std::string* error)
 {
-    // Bind every kernel generated during lowering before any task can execute
-    // (no-op for kernels the caller already finalized).
-    JitFinalizeKernels(
-        lowered.Kernels, diagnostics, lowered.ExternalCatalog);
-
     // Aliasing shared_ptr: the sink task's state points at the caller-owned
     // sink without taking ownership of it.
     std::shared_ptr<void> sinkState(std::shared_ptr<void>{}, &sink);
@@ -3339,6 +3347,10 @@ bool RunPlanIntoSink(
             *lowered.Producers[p], sinkNode, *lowered.FinalGather, p, 0);
     }
 
+    if (settings.Diagnostics.Operators) {
+        EnableOperatorDiagnostics(lowered);
+    }
+    JitFinalizeKernels(lowered.Kernels, diagnostics, lowered.ExternalCatalog);
     lowered.Graph->Build();
     if (!lowered.Graph->Validate(error)) {
         return false;
@@ -3360,6 +3372,9 @@ bool RunPlanIntoSink(
     TSchedulerExecutor executor(*lowered.Graph, settings);
     if (!executor.Run(error)) {
         return false;
+    }
+    if (settings.Diagnostics.Operators && settings.Diagnostics.Output) {
+        PrintOperatorDiagnostics(*settings.Diagnostics.Output, *lowered.Graph);
     }
     if (settings.Queue.EnableDebugCounters && diagnostics) {
         PrintCounterDiagnostics(*diagnostics, *lowered.Graph, executor.Stats());

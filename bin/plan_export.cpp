@@ -1,4 +1,5 @@
 #include "plan_export.h"
+#include <qdb/exec/diagnostics.h>
 
 #include <qdb/catalog/external_module.h>
 #include <qdb/exec/plan_builder.h>
@@ -995,6 +996,7 @@ NQdb::NScheduler::TSettings ParseSchedulerSettings(const llvm::json::Object& roo
             settings.HashShuffle.MaxPartitionCount = static_cast<size_t>(*shuffleParts);
         }
     }
+    settings.Diagnostics.Operators = options->getBoolean("operatorDiagnostics").value_or(false);
     return settings;
 }
 
@@ -2319,6 +2321,11 @@ struct TExecPlanCodec {
         if (typed.StageId != NQdb::InvalidExecStageId) {
             encoded["stageId"] = static_cast<int64_t>(typed.StageId);
         }
+        llvm::json::Array widths;
+        for (const auto width : NQdb::DiagnosticColumnWidths(typed.OutputType)) {
+            widths.push_back(width);
+        }
+        encoded["diagnosticWidths"] = std::move(widths);
         Nodes.push_back(std::move(encoded));
     }
 
@@ -2474,6 +2481,13 @@ struct TExecPlanCodec {
                             : int64_t{8}},
                     {"entrypoints", EntrypointsJson(*ref)},
                     {"keyCount", static_cast<int64_t>(keyCount)},
+                    {"diagnosticStringBuffers", [&] {
+                        llvm::json::Array result;
+                        for (const auto index : ref->Kernel->AggStringMetadataBuffers) {
+                            result.push_back(index);
+                        }
+                        return result;
+                    }()},
                     {"output", std::move(output)},
                 };
                 if (!aggregate->GroupingSets().empty()) {
@@ -2869,6 +2883,14 @@ llvm::json::Object BuildBundle(
                 {"message", execPlanError},
             });
         }
+        if (request.Scheduler.Diagnostics.Operators && typedExecPlan) {
+            NQdb::TKernelCompiler compiler({
+                .Sink = &lowered.Kernels,
+                .BindNow = false,
+                .ExternalCatalog = externalCatalog,
+            });
+            compiler.CompileDiagnostics();
+        }
         lowered.Graph->Build();
 
         // Wasm finalization: ast artifacts always, wasm in embed mode.
@@ -2917,6 +2939,12 @@ llvm::json::Object BuildBundle(
             wasmFinalized.QueryWasm,
             wasmFinalized.HeapBase,
             request.WasmBits);
+        for (size_t i = 0; i < loweredKernels.size(); ++i) {
+            if (loweredKernels[i].Name == "diagnostics") {
+                execPlan["operatorDiagnostics"] = EntrypointsJson({
+                    &loweredKernels[i], &wasmFinalized.Kernels[i]});
+            }
+        }
     } else {
         execPlan = UnsupportedExec(execPlanError.empty()
             ? "scheduler lowering did not produce an exec plan"

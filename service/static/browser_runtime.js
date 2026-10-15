@@ -2264,7 +2264,7 @@ export function runAggregate(kernel, layout, batch, selection, stage) {
   return finishAggregateState(state);
 }
 
-function createAggregateState(kernel, layout, stage) {
+function createAggregateState(kernel, layout, stage, diagnostics = null) {
   const dispatch = kernelExport(kernel, stage, 'agg_dispatch');
   const finishRowSet = kernelExport(kernel, stage, 'agg_finish_rowset');
 
@@ -2291,7 +2291,9 @@ function createAggregateState(kernel, layout, stage) {
     throw new Error('aggregate initialization failed');
   }
 
+  diagnostics?.hash(ht, 0, false);
   return {
+    diagnostics,
     kernel,
     layout,
     stage,
@@ -2505,7 +2507,7 @@ function dispatchJoin(state, batch, batchIdx, leftStore, rightStore, arg, op) {
     BigInt(op));
 }
 
-function createJoinState(kernel, layout, stage) {
+function createJoinState(kernel, layout, stage, diagnostics = null) {
   if (!browserRuntimeSupportsJoin(stage)) {
     throw new Error(`browser join type is not implemented: ${stage.joinType}` +
       (stage.hasResidual ? ' with residual' : ''));
@@ -2533,6 +2535,7 @@ function createJoinState(kernel, layout, stage) {
   }
 
   const state = {
+    diagnostics,
     kernel,
     layout,
     stage,
@@ -2557,6 +2560,8 @@ function createJoinState(kernel, layout, stage) {
   if (!dispatchJoin(state, 0, 0, 0, 0, 256, JoinOp.INIT)) {
     throw new Error('join hash table initialization failed');
   }
+  diagnostics?.hash(leftTable, 0, true);
+  diagnostics?.hash(rightTable, 1, true);
   return state;
 }
 
@@ -3718,7 +3723,7 @@ class AggregateTask {
           this.kernel = await instantiateKernel(
             stageEntrypoint(this.stage, 'agg_dispatch'), this.shared);
         }
-        this.state = createAggregateState(this.kernel, this.layout, this.stage);
+        this.state = createAggregateState(this.kernel, this.layout, this.stage, this.diagnostics);
       }
       this.pending = finishAggregateState(
         this.state, downstreamConsumesWasm(this.node));
@@ -3728,13 +3733,14 @@ class AggregateTask {
     if (!this.kernel) {
       this.kernel = await instantiateKernel(
         stageEntrypoint(this.stage, 'agg_dispatch'), this.shared);
-      this.state = createAggregateState(this.kernel, this.layout, this.stage);
+      this.state = createAggregateState(this.kernel, this.layout, this.stage, this.diagnostics);
     }
     if (fetched.rowSet.batch.wasm && !fetched.rowSet.batch.wasm.pinned) {
       assertStreamingWasmEdge(this.node.inbound[0]);
     }
     try {
       updateAggregateState(this.state, fetched.rowSet);
+      this.diagnostics?.hash(this.state.ht, 0, false);
       this.rows += fetched.rowSet.batch.rowCount;
     } finally {
       releaseWasmRowSet(fetched.rowSet);
@@ -3784,7 +3790,7 @@ class JoinTask {
         this.kernel = await instantiateKernel(
           stageEntrypoint(this.stage, 'jt_dispatch'), this.shared);
       }
-      this.state = createJoinState(this.kernel, this.layout, this.stage);
+      this.state = createJoinState(this.kernel, this.layout, this.stage, this.diagnostics);
     }
 
     const drained = drainJoinPairs(this.state, BROWSER_JOIN_OUTPUT_BATCH_ROWS, asWasm);
@@ -3817,6 +3823,10 @@ class JoinTask {
     }
 
     const progressed = this.pullOneInputBatch();
+    if (this.diagnostics && this.state) {
+      this.diagnostics.hash(this.state.leftTable, 0, true);
+      this.diagnostics.hash(this.state.rightTable, 1, true);
+    }
     if (progressed) {
       this.ready.push(...drainJoinPairs(this.state, BROWSER_JOIN_OUTPUT_BATCH_ROWS, asWasm));
       if (this.ready.length > 0) {
@@ -4531,6 +4541,150 @@ function taskNodeForStage(stage, layout, readSourceBatches, onProgress, shared) 
   throw new Error(`unsupported exec stage: ${stage.kind}`);
 }
 
+class OperatorDiagnostics {
+  constructor(stage, shared, layout, kernels) {
+    this.stage = stage;
+    this.shared = shared;
+    this.layout = layout;
+    this.kernels = kernels;
+    this.writer = new RowSetWriter(shared.arena, layout);
+    this.widths = shared.arena.alloc(Math.max(stage.diagnosticWidths.length, 1) * 8, 8);
+    this.scratch = shared.arena.alloc(24, 8);
+    this.stringBuffers = shared.arena.alloc(Math.max(stage.diagnosticStringBuffers?.length || 0, 1) * 8, 8);
+    const view = shared.arena.view();
+    stage.diagnosticWidths.forEach((width, i) => view.setBigInt64(this.widths + i * 8, BigInt(width), true));
+    (stage.diagnosticStringBuffers || []).forEach((index, i) =>
+      view.setBigInt64(this.stringBuffers + i * 8, BigInt(index), true));
+    this.inputs = [];
+    this.rowsOut = 0;
+    this.bytesOut = 0;
+    this.groups = null;
+    this.capacity = null;
+    this.growths = null;
+    this.memory = null;
+    this.previous = [0, 0];
+    this.sideGroups = [0, 0];
+    this.sideBytes = [0, 0];
+  }
+
+  measure(rowSet, widths) {
+    // Marshalling stays in the existing adapter; selection, validity, offset
+    // widths and payload measurement are interpreted by the common Oz code.
+    const wasm = wasmRowSetForSelection(rowSet.batch, rowSet.selection);
+    const pointer = wasm ? wasm.rowsetPtr : this.writer.write(
+      rowSet.batch.columns, rowSet.batch.rowCount, false, rowSet.selection).rowsetPtr;
+    const widthPtr = this.shared.arena.alloc(Math.max(widths.length, 1) * 8, 8);
+    try {
+      const view = this.shared.arena.view();
+      widths.forEach((width, i) => view.setBigInt64(widthPtr + i * 8, BigInt(width), true));
+      this.kernels.rows(toWasmPtr(pointer), toWasmPtr(widthPtr), toWasmPtr(this.scratch));
+      const result = this.shared.arena.view();
+      return [Number(result.getBigInt64(this.scratch, true)),
+        Number(result.getBigInt64(this.scratch + 8, true))];
+    } finally {
+      this.shared.arena.free(widthPtr);
+    }
+  }
+
+  input(rowSet, widths, index) {
+    const [rows, bytes] = this.measure(rowSet, widths);
+    const input = this.inputs[index] ||= { rows: 0, bytes: 0 };
+    input.rows += rows;
+    input.bytes += bytes;
+  }
+
+  output(rowSet) {
+    const [rows, bytes] = this.measure(rowSet, this.stage.diagnosticWidths);
+    this.rowsOut += rows;
+    this.bytesOut += bytes;
+  }
+
+  hash(table, side, join) {
+    this.kernels.hash(toWasmPtr(table), join ? 1n : 0n,
+      toWasmPtr(this.stringBuffers), BigInt(this.stage.diagnosticStringBuffers?.length || 0),
+      toWasmPtr(this.scratch));
+    const view = this.shared.arena.view();
+    const groups = Number(view.getBigInt64(this.scratch, true));
+    const capacity = Number(view.getBigInt64(this.scratch + 8, true));
+    const bytes = Number(view.getBigInt64(this.scratch + 16, true));
+    this.growths ??= 0;
+    if (this.previous[side]) {
+      for (let old = this.previous[side]; old < capacity; old *= 2) ++this.growths;
+    }
+    this.previous[side] = capacity;
+    this.sideGroups[side] = groups;
+    this.sideBytes[side] = bytes;
+    this.groups = this.sideGroups[0] + this.sideGroups[1];
+    this.capacity = this.previous[0] + this.previous[1];
+    this.memory = Math.max(this.memory || 0, this.sideBytes[0] + this.sideBytes[1]);
+  }
+
+  snapshot(node) {
+    const materializes = ['aggregate', 'join', 'cross-join', 'window', 'sort', 'top-sort'].includes(this.stage.kind);
+    return {
+      stage_id: this.stage.stageId ?? this.stage.id,
+      kind: this.stage.kind,
+      rows_in: this.inputs.reduce((sum, value) => sum + value.rows, 0),
+      rows_out: this.rowsOut,
+      bytes_in: this.inputs.reduce((sum, value) => sum + value.bytes, 0),
+      bytes_out: this.bytesOut,
+      inputs: this.inputs,
+      groups: this.groups,
+      hash_capacity: this.capacity,
+      hash_growth_events: this.growths,
+      rehashes: this.growths,
+      hash_memory_peak_bytes: this.memory,
+      materialized_bytes: materializes ? this.bytesOut : null,
+      execution_cpu_seconds: null,
+      task_elapsed_seconds: node.elapsedMs / 1000,
+      // The browser contracts physical lanes; a single task has no measured
+      // partition distribution and cannot claim native partition skew.
+      partition_skew: null,
+    };
+  }
+
+  destroy() {
+    this.writer.destroy();
+    this.shared.arena.free(this.widths);
+    this.shared.arena.free(this.stringBuffers);
+    this.shared.arena.free(this.scratch);
+  }
+}
+
+async function attachOperatorDiagnostics(exec, nodes, shared, layout) {
+  if (!exec.operatorDiagnostics) {
+    throw new Error('operator diagnostics require an export with options.operatorDiagnostics=true');
+  }
+  const rows = await instantiateKernel(exec.operatorDiagnostics.qdb_diagnostics_rows, shared);
+  const hash = await instantiateKernel(exec.operatorDiagnostics.qdb_diagnostics_hash, shared);
+  const kernels = { rows: rows.fn, hash: hash.fn };
+  for (const node of nodes) {
+    if (node.task.stage) {
+      node.diagnostics = new OperatorDiagnostics(node.task.stage, shared, layout, kernels);
+      node.task.diagnostics = node.diagnostics;
+    }
+  }
+  for (const node of nodes) {
+    for (const edge of node.outbound) {
+      const connection = edge.connection;
+      const push = connection.push.bind(connection);
+      const fetch = connection.fetch.bind(connection);
+      connection.push = rowSet => {
+        if (edge.src.diagnostics) edge.src.diagnostics.output(rowSet);
+        return push(rowSet);
+      };
+      connection.fetch = () => {
+        const result = fetch();
+        if (result.result === FetchResult.OK && edge.dst.diagnostics) {
+          edge.dst.diagnostics.input(result.rowSet, edge.src.task.stage.diagnosticWidths,
+            edge.dst.inbound.indexOf(edge));
+        }
+        return result;
+      };
+    }
+  }
+}
+
 function buildScheduledGraph(exec, readSourceBatches, options, layout, shared) {
   const nodesById = new Map();
   const nodes = [];
@@ -4619,12 +4773,24 @@ export async function executeBrowserPipelineScheduled(exec, readSourceBatches, o
   const { roots, sink, nodes } =
     buildScheduledGraph(exec, readSourceBatches, options, layout, shared);
   const scheduler = new SingleThreadedScheduler(roots);
+  if (options.operatorDiagnostics === true) {
+    await attachOperatorDiagnostics(exec, nodes, shared, layout);
+  }
   let result;
   try {
     await scheduler.run();
     result = sink.task.result();
+    if (options.operatorDiagnostics === true) {
+      result.operator_diagnostics = {
+        schema_version: 1,
+        bytes: 'logical_nonnull_payload',
+        memory: 'batch_boundary_hash_reservations',
+        stages: nodes.filter(node => node.diagnostics).map(node => node.diagnostics.snapshot(node)),
+      };
+    }
   } finally {
     cleanupScheduledGraph(nodes);
+    for (const node of nodes) node.diagnostics?.destroy();
   }
   result.timings = nodes.map(node => ({
     stage: node.label,

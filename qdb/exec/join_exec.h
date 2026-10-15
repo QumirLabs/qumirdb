@@ -1,6 +1,7 @@
 #pragma once
 
 #include <qdb/io/io.h>
+#include <qdb/exec/diagnostics.h>
 #include <qdb/kernel/compiler.h>
 
 #include <qumir/parser/type.h>
@@ -132,6 +133,8 @@ public:
     // streaming, Auto (both) for the symmetric/adaptive path. Lets the scheduler
     // skip waking the side not read yet.
     EJoinBuildSide RequiredInputSide() const;
+    void SetDiagnostics(TOperatorDiagnostics* diagnostics);
+    void ObserveDiagnostics();
 
 private:
     // Mirrors the PairBuffer external type (modules/qumirdb.cpp).
@@ -159,6 +162,7 @@ private:
 
 private:
     TJoinKernels Kernels_;
+    TOperatorDiagnostics* Diagnostics_ = nullptr;
     EJoinType JoinType_ = EJoinType::Inner;
     EJoinBuildSide BuildSide_ = EJoinBuildSide::Auto;
     bool OuterFinalized_ = false;

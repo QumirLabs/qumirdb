@@ -1,6 +1,7 @@
 #pragma once
 
 #include <qdb/kernel/compiler.h>
+#include <qdb/exec/diagnostics.h>
 
 #include <array>
 #include <cstdint>
@@ -19,6 +20,7 @@ public:
     TAggregateProcessor& operator=(const TAggregateProcessor&) = delete;
 
     void Add(TRowSet& rowSet);
+    void SetDiagnostics(TOperatorDiagnostics* diagnostics);
     bool Finish(TRowSet& rowSet);
 
 private:
@@ -27,6 +29,7 @@ private:
 
 private:
     TAggregateKernels Kernels_;
+    TOperatorDiagnostics* Diagnostics_ = nullptr;
     int64_t InitialCapacity_ = 4;
     std::array<uint8_t, TKernelCompiler::HashTableSize> HashTable_ = {};
     bool Initialized_ = false;
@@ -44,6 +47,7 @@ public:
         size_t numKeys);
 
     void Add(TRowSet& rowSet);
+    void SetDiagnostics(TOperatorDiagnostics* diagnostics);
     bool Finish(TRowSet& rowSet);
 
 private:

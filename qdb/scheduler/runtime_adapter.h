@@ -1,6 +1,7 @@
 #pragma once
 
 #include <qdb/exec/runtime_filter.h>
+#include <qdb/exec/diagnostics.h>
 #include <qdb/io/io.h>
 #include <qdb/scheduler/connection.h>
 #include <qdb/scheduler/state.h>
@@ -25,6 +26,7 @@ enum class ERequiredSide { Both = 0, Left = 1, Right = 2 };
 struct TInputPort {
     IConnection* Connection = nullptr;
     size_t Lane = 0;
+    TRowSetDiagnostics* Diagnostics = nullptr;
 
     EFetchResult Fetch(TRowSet& rowSet) const;
 };
@@ -32,6 +34,7 @@ struct TInputPort {
 struct TOutputPort {
     IConnection* Connection = nullptr;
     size_t Lane = 0;
+    TRowSetDiagnostics* Diagnostics = nullptr;
 
     bool CanPush() const;
     bool Push(TRowSet&& rowSet) const;
@@ -83,6 +86,8 @@ struct TBlockingCode {
 
     explicit TBlockingCode(TProcess process);
 
+    std::function<void(void*, TOperatorDiagnostics*)> ConfigureDiagnostics;
+
     TProcess Process;
 };
 
@@ -97,6 +102,8 @@ struct TBinaryBlockingCode {
     using TRequiredSide = std::function<ERequiredSide(void*)>;
 
     explicit TBinaryBlockingCode(TProcess process);
+
+    std::function<void(void*, TOperatorDiagnostics*)> ConfigureDiagnostics;
 
     TProcess Process;
     TRequiredSide RequiredSide;
@@ -148,6 +155,7 @@ public:
         TOutputPort output);
 
     ETaskResult Execute() override;
+    void ConfigureDiagnostics(TTaskDiagnosticSetup& setup) override;
 
 private:
     std::shared_ptr<const TSourceCode> Code_;
@@ -165,6 +173,7 @@ public:
     ~TRuntimeFilterTask() override;
 
     ETaskResult Execute() override;
+    void ConfigureDiagnostics(TTaskDiagnosticSetup& setup) override;
     bool WantsInput(const TTaskEdge& edge) const noexcept override;
     bool TryNotifyDependency() noexcept override;
 
@@ -191,6 +200,7 @@ public:
     ~TUnaryTask() override;
 
     ETaskResult Execute() override;
+    void ConfigureDiagnostics(TTaskDiagnosticSetup& setup) override;
 
     const std::shared_ptr<const TUnaryCode>& Code() const;
     const std::shared_ptr<void>& State() const;
@@ -214,6 +224,7 @@ public:
         TInputPort input);
 
     ETaskResult Execute() override;
+    void ConfigureDiagnostics(TTaskDiagnosticSetup& setup) override;
 
 private:
     std::shared_ptr<const TSinkCode> Code_;
@@ -232,6 +243,7 @@ public:
     ~TBlockingTask() override;
 
     ETaskResult Execute() override;
+    void ConfigureDiagnostics(TTaskDiagnosticSetup& setup) override;
 
 private:
     std::shared_ptr<const TBlockingCode> Code_;
@@ -254,6 +266,7 @@ public:
     ~TBinaryBlockingTask() override;
 
     ETaskResult Execute() override;
+    void ConfigureDiagnostics(TTaskDiagnosticSetup& setup) override;
     bool WantsInput(const TTaskEdge& edge) const noexcept override;
 
 private:
@@ -278,6 +291,7 @@ public:
     ~TMergeTask() override;
 
     ETaskResult Execute() override;
+    void ConfigureDiagnostics(TTaskDiagnosticSetup& setup) override;
 
 private:
     std::shared_ptr<const TMergeCode> Code_;
@@ -300,6 +314,7 @@ public:
     ~THashShuffleTask() override;
 
     ETaskResult Execute() override;
+    void ConfigureDiagnostics(TTaskDiagnosticSetup& setup) override;
 
 private:
     struct TBufferedBatch;
@@ -329,6 +344,7 @@ private:
     TInputPort Input_;
     THashShuffleConnection* Output_ = nullptr;
     size_t SourceLane_ = 0;
+    TRowSetDiagnostics* OutputDiagnostics_ = nullptr;
     std::optional<TRuntimeFilterBuilder> FilterBuilder_;
     std::vector<std::unique_ptr<TDestinationBuffer>> Buffers_;
     std::vector<TPendingOutput> Pending_;
@@ -360,6 +376,7 @@ public:
     TCteConsumerTask(std::shared_ptr<const TCteSharedState> state, TOutputPort output);
 
     ETaskResult Execute() override;
+    void ConfigureDiagnostics(TTaskDiagnosticSetup& setup) override;
 
 private:
     std::shared_ptr<const TCteSharedState> State_;

@@ -61,6 +61,7 @@ struct TGeneratedKernel {
     struct TAggValueMeta {
         bool IsNullable = false;
     };
+    std::vector<int64_t> AggStringMetadataBuffers;
     std::vector<TAggKeyMeta> AggKeys;
     std::vector<TAggValueMeta> AggValues;
 };

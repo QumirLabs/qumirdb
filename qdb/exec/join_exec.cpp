@@ -32,6 +32,17 @@ TInnerJoinProcessor::TInnerJoinProcessor(
 {
 }
 
+void TInnerJoinProcessor::SetDiagnostics(TOperatorDiagnostics* diagnostics) {
+    Diagnostics_ = diagnostics;
+}
+
+void TInnerJoinProcessor::ObserveDiagnostics() {
+    if (Diagnostics_ && Initialized_) {
+        Diagnostics_->ObserveHash(LeftTable_.data(), 0, true);
+        Diagnostics_->ObserveHash(RightTable_.data(), 1, true);
+    }
+}
+
 bool TInnerJoinProcessor::IsOuter() const {
     return JoinType_ == EJoinType::Left || JoinType_ == EJoinType::Right
         || JoinType_ == EJoinType::Full;
@@ -77,6 +88,7 @@ void TInnerJoinProcessor::EnsureInit() {
             JoinOp(EJoinKernelOp::Init))) {
         throw std::runtime_error("join hash table initialization failed");
     }
+    ObserveDiagnostics();
 }
 
 bool TInnerJoinProcessor::DrainReadyOutput(TRowSet& rowSet) {

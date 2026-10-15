@@ -189,6 +189,7 @@ struct TAggregateKernels {
     TAggregateDispatch Dispatch;
     TAggregateFinishRowSet FinishRowSet;
     size_t NumAggs = 0;
+    std::vector<int64_t> StringMetadataBuffers;
     std::vector<TAggregateOutputKey> OutputKeys;
     std::vector<TAggregateOutputAgg> OutputAggs;
 };
@@ -373,6 +374,8 @@ public:
     // pack TRowSet values into a byte buffer (e.g. top-sort's materialize
     // store) size the allocation off this instead of a bare literal.
     static constexpr size_t RowSetSize = 64;
+
+    std::shared_ptr<TKernelSlot> CompileDiagnostics();
 
     // Compiles a filter kernel for the given input struct type and predicate.
     // Returns a dispatch lambda that calls the compiled kernel.

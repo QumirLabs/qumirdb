@@ -1,0 +1,87 @@
+(block
+  ;; Called only by opt-in task instrumentation, never from an operator's
+  ;; ordinary row loop. Native and wasm use this same measurement program.
+  (fun qdb_diagnostics_rows
+       ((var batch <ref TRowSet>) (var widths <ptr i64>) (var output <ptr i64>))
+    (block
+      (var rows = (: 0 i64))
+      (var bytes = (: 0 i64))
+      (var i = (: 0 i64))
+      (while (< i (field batch RowCount))
+        (block
+          (var selected = #t)
+          (if (!= (cast (field batch Selection) i64) 0)
+            (block (= selected (!= (index (field batch Selection) i) 0))))
+          (if selected
+            (block
+              (= rows (+ rows 1))
+              (var c = (: 0 i64))
+              (while (< c (field batch ColumnCount))
+                (block
+                  (var col = (index (field batch Columns) c))
+                  (var valid = #t)
+                  (if (!= (cast (field col Mask) i64) 0)
+                    (block (= valid (call bitoff (field col Mask) i
+                      (cast (field col MaskBitOffset) i64)))))
+                  (if valid
+                    (block
+                      (var width = (index widths c))
+                      (if (< width 0)
+                        (block
+                          (if (== (field col OffsetWidth) 4)
+                            (block
+                              (var offsets = (cast (field col Offsets) <ptr i32>))
+                              (= bytes (+ bytes (cast
+                                (- (index offsets (+ i 1)) (index offsets i)) i64))))
+                            (block
+                              (var offsets = (field col Offsets))
+                              (= bytes (+ bytes
+                                (- (index offsets (+ i 1)) (index offsets i)))))))
+                        (block (= bytes (+ bytes width))))))
+                  (= c (+ c 1))))))
+          (= i (+ i 1))))
+      (= output [0] rows)
+      (= output [1] bytes)))
+
+  ;; Retained HashTable allocations at a batch boundary, including key arena,
+  ;; join row-id buckets, and string reducer buffers. Temporary rehash copies,
+  ;; allocator metadata, source rowsets and output buffers are not included.
+  (fun qdb_diagnostics_hash
+       ((var ht <ref HashTable>) (var join i64)
+        (var string_buffers <ptr i64>) (var string_count i64)
+        (var output <ptr i64>))
+    (block
+      (var capacity = (field ht Capacity))
+      (var size = (field ht Size))
+      (var aggs = (field ht NumAggs))
+      (var bytes = (+ (* capacity
+        (+ (* (field ht KeySize) 2) 9 (* aggs 8))) (* aggs 8)
+        (* (field ht OwnedBlockCapacity) 8)))
+      (var i = (: 0 i64))
+      (while (< i (field ht OwnedBlockCount))
+        (block
+          (var header = (cast (index (field ht OwnedBlocks) i) <ptr i64>))
+          (= bytes (+ bytes 24 (index header 1)))
+          (= i (+ i 1))))
+      (if (!= join 0)
+        (block
+          (var caps = (index (field ht AggBuffers) 1))
+          (= i 0)
+          (while (< i size)
+            (block
+              (= bytes (+ bytes (* (index caps i) 8)))
+              (= i (+ i 1))))))
+      (= i 0)
+      (while (< i string_count)
+        (block
+          (var metadata = (index (field ht AggBuffers) (index string_buffers i)))
+          (var g = (: 0 i64))
+          (while (< g capacity)
+            (block
+              (= bytes (+ bytes (cast
+                (>> (cast (index metadata g) u64) (: 32 u64)) i64)))
+              (= g (+ g 1))))
+          (= i (+ i 1))))
+      (= output [0] size)
+      (= output [1] capacity)
+      (= output [2] bytes))))
