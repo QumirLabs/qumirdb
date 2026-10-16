@@ -1,4 +1,4 @@
-#include <qdb/exec/diagnostics.h>
+#include <qdb/exec/instrumentation.h>
 
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
@@ -8,11 +8,11 @@
 
 namespace NQdb {
 
-std::vector<int64_t> DiagnosticColumnWidths(const NQumir::NAst::TTypePtr& type) {
+std::vector<int64_t> InstrumentationColumnWidths(const NQumir::NAst::TTypePtr& type) {
     using namespace NQumir::NAst;
     auto structure = TMaybeType<TStructType>(UnwrapNamedType(type));
     if (!structure) {
-        throw std::runtime_error("diagnostic rowset schema must be a struct");
+        throw std::runtime_error("instrumentation rowset schema must be a struct");
     }
     std::vector<int64_t> widths;
     for (const auto& [name, field] : structure.Cast()->Fields) {
@@ -28,15 +28,15 @@ std::vector<int64_t> DiagnosticColumnWidths(const NQumir::NAst::TTypePtr& type) 
         } else if (TMaybeType<TFloatType>(value)) {
             widths.push_back(8);
         } else {
-            throw std::runtime_error("unsupported diagnostic column: " + field->ToString());
+            throw std::runtime_error("unsupported instrumentation column: " + field->ToString());
         }
     }
     return widths;
 }
 
-void TRowSetDiagnostics::Add(const TRowSet& rowSet) {
+void TRowSetInstrumentation::Add(const TRowSet& rowSet) {
     if (rowSet.ColumnCount != static_cast<int64_t>(Widths.size())) {
-        throw std::runtime_error("diagnostic rowset/schema column count mismatch");
+        throw std::runtime_error("instrumentation rowset/schema column count mismatch");
     }
     using TMeasure = void(*)(const TRowSet*, const int64_t*, int64_t*);
     int64_t values[2] = {};
@@ -45,7 +45,7 @@ void TRowSetDiagnostics::Add(const TRowSet& rowSet) {
     Bytes += values[1];
 }
 
-uint64_t TOperatorDiagnostics::InputPayloadBytes(const TRowSet& rowSet, size_t input) const {
+uint64_t TOperatorInstrumentation::InputPayloadBytes(const TRowSet& rowSet, size_t input) const {
     auto counter = Inputs.at(input);
     counter.Rows = 0;
     counter.Bytes = 0;
@@ -55,19 +55,19 @@ uint64_t TOperatorDiagnostics::InputPayloadBytes(const TRowSet& rowSet, size_t i
     return counter.Bytes;
 }
 
-void TOperatorDiagnostics::SetRetainedInputBytes(uint64_t bytes) {
+void TOperatorInstrumentation::SetRetainedInputBytes(uint64_t bytes) {
     RetainedInputBytes = bytes;
     RetainedInputPeakBytes = std::max(RetainedInputPeakBytes, bytes);
     HasBuildMemory = true;
     BuildMemoryPeakBytes = std::max(BuildMemoryPeakBytes, bytes + Memory_[0] + Memory_[1]);
 }
 
-void TOperatorDiagnostics::RetainInput(const TRowSet& rowSet, size_t input, bool append) {
+void TOperatorInstrumentation::RetainInput(const TRowSet& rowSet, size_t input, bool append) {
     const auto bytes = InputPayloadBytes(rowSet, input);
     SetRetainedInputBytes(append ? RetainedInputBytes + bytes : bytes);
 }
 
-void TOperatorDiagnostics::ObserveHash(
+void TOperatorInstrumentation::ObserveHash(
     void* table,
     size_t side,
     bool join,

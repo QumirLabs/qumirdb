@@ -692,7 +692,7 @@ void PrintHelp() {
         "  --scheduler <mode>           Execution mode: single, threaded (default: threaded)\n"
         "  --scheduler-workers <n>      Worker count (default: logical CPU count, at least 1)\n"
         "  --scan-tasks <n>             Maximum parquet scan tasks per source (default: auto)\n"
-        "  --operator-diagnostics       Print opt-in per-task and per-stage counters\n"
+        "  --operator-instrumentation   Print opt-in per-task and per-stage counters\n"
         "  --scheduler-counters         Print scheduler and connection counters with --verbose\n"
         "  --cascade-aggregates         Parallelize global aggregates (partial->gather->combine)\n"
         "  --no-partial-aggregates      Disable statistics-selected local grouped aggregation\n"
@@ -738,8 +738,8 @@ int main(int argc, char** argv) {
 
     TConfig config;
     if (std::getenv("QDB_DEBUG_ROW_GROUP_PREDICATE")) {
-        config.Scheduler.Diagnostics.RowGroupPredicate = true;
-        config.Scheduler.Diagnostics.Output = &std::cerr;
+        config.Scheduler.Instrumentation.RowGroupPredicate = true;
+        config.Scheduler.Instrumentation.Output = &std::cerr;
     }
     NQdb::TExternalModuleCatalog catalog;
     std::string queryFile;
@@ -816,9 +816,9 @@ int main(int argc, char** argv) {
                 return 1;
             }
             config.Scheduler.ScanSplit.MaxScanTasks = static_cast<size_t>(tasks);
-        } else if (!std::strcmp(argv[i], "--operator-diagnostics")) {
-            config.Scheduler.Diagnostics.Operators = true;
-            config.Scheduler.Diagnostics.Output = &std::cerr;
+        } else if (!std::strcmp(argv[i], "--operator-instrumentation")) {
+            config.Scheduler.Instrumentation.Operators = true;
+            config.Scheduler.Instrumentation.Output = &std::cerr;
         } else if (!std::strcmp(argv[i], "--scheduler-counters")) {
             config.Scheduler.Queue.EnableDebugCounters = true;
         } else if (!std::strcmp(argv[i], "--cascade-aggregates")) {

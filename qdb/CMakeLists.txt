@@ -75,8 +75,8 @@ add_library(qumirdb
     kernel/compiler.cpp
     kernel/finalize.cpp
     kernel/finalize_fused.cpp
-    exec/diagnostics.cpp
-    scheduler/diagnostics.cpp
+    exec/instrumentation.cpp
+    scheduler/instrumentation.cpp
     exec/filter_exec.cpp
     exec/project_exec.cpp
     exec/aggregate_exec.cpp
@@ -127,7 +127,7 @@ install(FILES
     DESTINATION ${QDB_MODULES_DIR}
     COMPONENT engine)
 
-install(FILES kernel/diagnostics.oz DESTINATION ${QDB_MODULES_DIR} COMPONENT engine)
+install(FILES kernel/instrumentation.oz DESTINATION ${QDB_MODULES_DIR} COMPONENT engine)
 
 install(DIRECTORY
     kernel/aggregation

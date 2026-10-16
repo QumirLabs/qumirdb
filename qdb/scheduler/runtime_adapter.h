@@ -1,7 +1,7 @@
 #pragma once
 
 #include <qdb/exec/runtime_filter.h>
-#include <qdb/exec/diagnostics.h>
+#include <qdb/exec/instrumentation.h>
 #include <qdb/io/io.h>
 #include <qdb/scheduler/connection.h>
 #include <qdb/scheduler/state.h>
@@ -26,7 +26,7 @@ enum class ERequiredSide { Both = 0, Left = 1, Right = 2 };
 struct TInputPort {
     IConnection* Connection = nullptr;
     size_t Lane = 0;
-    TRowSetDiagnostics* Diagnostics = nullptr;
+    TRowSetInstrumentation* Instrumentation = nullptr;
 
     EFetchResult Fetch(TRowSet& rowSet) const;
 };
@@ -34,7 +34,7 @@ struct TInputPort {
 struct TOutputPort {
     IConnection* Connection = nullptr;
     size_t Lane = 0;
-    TRowSetDiagnostics* Diagnostics = nullptr;
+    TRowSetInstrumentation* Instrumentation = nullptr;
 
     bool CanPush() const;
     bool Push(TRowSet&& rowSet) const;
@@ -86,7 +86,7 @@ struct TBlockingCode {
 
     explicit TBlockingCode(TProcess process);
 
-    std::function<void(void*, TOperatorDiagnostics*)> ConfigureDiagnostics;
+    std::function<void(void*, TOperatorInstrumentation*)> ConfigureInstrumentation;
 
     TProcess Process;
 };
@@ -103,7 +103,7 @@ struct TBinaryBlockingCode {
 
     explicit TBinaryBlockingCode(TProcess process);
 
-    std::function<void(void*, TOperatorDiagnostics*)> ConfigureDiagnostics;
+    std::function<void(void*, TOperatorInstrumentation*)> ConfigureInstrumentation;
 
     TProcess Process;
     TRequiredSide RequiredSide;
@@ -143,7 +143,7 @@ struct TMergeCode {
         TRowSet&)>;
 
     explicit TMergeCode(TProcess process);
-    std::function<void(void*, TOperatorDiagnostics*)> ConfigureDiagnostics;
+    std::function<void(void*, TOperatorInstrumentation*)> ConfigureInstrumentation;
 
     TProcess Process;
 };
@@ -156,7 +156,7 @@ public:
         TOutputPort output);
 
     ETaskResult Execute() override;
-    void ConfigureDiagnostics(TTaskDiagnosticSetup& setup) override;
+    void ConfigureInstrumentation(TTaskInstrumentationSetup& setup) override;
 
 private:
     std::shared_ptr<const TSourceCode> Code_;
@@ -174,7 +174,7 @@ public:
     ~TRuntimeFilterTask() override;
 
     ETaskResult Execute() override;
-    void ConfigureDiagnostics(TTaskDiagnosticSetup& setup) override;
+    void ConfigureInstrumentation(TTaskInstrumentationSetup& setup) override;
     bool WantsInput(const TTaskEdge& edge) const noexcept override;
     bool TryNotifyDependency() noexcept override;
 
@@ -201,7 +201,7 @@ public:
     ~TUnaryTask() override;
 
     ETaskResult Execute() override;
-    void ConfigureDiagnostics(TTaskDiagnosticSetup& setup) override;
+    void ConfigureInstrumentation(TTaskInstrumentationSetup& setup) override;
 
     const std::shared_ptr<const TUnaryCode>& Code() const;
     const std::shared_ptr<void>& State() const;
@@ -225,7 +225,7 @@ public:
         TInputPort input);
 
     ETaskResult Execute() override;
-    void ConfigureDiagnostics(TTaskDiagnosticSetup& setup) override;
+    void ConfigureInstrumentation(TTaskInstrumentationSetup& setup) override;
 
 private:
     std::shared_ptr<const TSinkCode> Code_;
@@ -244,7 +244,7 @@ public:
     ~TBlockingTask() override;
 
     ETaskResult Execute() override;
-    void ConfigureDiagnostics(TTaskDiagnosticSetup& setup) override;
+    void ConfigureInstrumentation(TTaskInstrumentationSetup& setup) override;
 
 private:
     std::shared_ptr<const TBlockingCode> Code_;
@@ -267,7 +267,7 @@ public:
     ~TBinaryBlockingTask() override;
 
     ETaskResult Execute() override;
-    void ConfigureDiagnostics(TTaskDiagnosticSetup& setup) override;
+    void ConfigureInstrumentation(TTaskInstrumentationSetup& setup) override;
     bool WantsInput(const TTaskEdge& edge) const noexcept override;
 
 private:
@@ -292,7 +292,7 @@ public:
     ~TMergeTask() override;
 
     ETaskResult Execute() override;
-    void ConfigureDiagnostics(TTaskDiagnosticSetup& setup) override;
+    void ConfigureInstrumentation(TTaskInstrumentationSetup& setup) override;
 
 private:
     std::shared_ptr<const TMergeCode> Code_;
@@ -315,13 +315,13 @@ public:
     ~THashShuffleTask() override;
 
     ETaskResult Execute() override;
-    void ConfigureDiagnostics(TTaskDiagnosticSetup& setup) override;
+    void ConfigureInstrumentation(TTaskInstrumentationSetup& setup) override;
 
 private:
     struct TBufferedBatch;
     struct TDestinationBuffer;
     struct TPendingOutput;
-    struct TDiagnosticState;
+    struct TInstrumentationState;
 
     bool BatchingEnabled() const;
     std::shared_ptr<uint64_t> ComputeHashes(const std::shared_ptr<TRowSet>& input);
@@ -339,7 +339,7 @@ private:
     void FlushAllBuffers();
     ETaskResult PushPending();
     void ClearPending();
-    void ObserveDiagnostics();
+    void ObserveInstrumentation();
 
 private:
     std::shared_ptr<const THashShuffleCode> Code_;
@@ -347,8 +347,8 @@ private:
     TInputPort Input_;
     THashShuffleConnection* Output_ = nullptr;
     size_t SourceLane_ = 0;
-    TRowSetDiagnostics* OutputDiagnostics_ = nullptr;
-    std::unique_ptr<TDiagnosticState> ResourceDiagnostics_;
+    TRowSetInstrumentation* OutputInstrumentation_ = nullptr;
+    std::unique_ptr<TInstrumentationState> ResourceInstrumentation_;
     std::optional<TRuntimeFilterBuilder> FilterBuilder_;
     std::vector<std::unique_ptr<TDestinationBuffer>> Buffers_;
     std::vector<TPendingOutput> Pending_;
@@ -366,7 +366,7 @@ struct TCteSharedState {
     };
 
     std::atomic<EStatus> Status = EStatus::Building;
-    TOperatorDiagnostics* Diagnostics = nullptr;
+    TOperatorInstrumentation* Instrumentation = nullptr;
     std::vector<TRowSet> Batches;
 
     ~TCteSharedState() {
@@ -381,7 +381,7 @@ public:
     TCteConsumerTask(std::shared_ptr<const TCteSharedState> state, TOutputPort output);
 
     ETaskResult Execute() override;
-    void ConfigureDiagnostics(TTaskDiagnosticSetup& setup) override;
+    void ConfigureInstrumentation(TTaskInstrumentationSetup& setup) override;
 
 private:
     std::shared_ptr<const TCteSharedState> State_;

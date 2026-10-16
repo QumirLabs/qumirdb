@@ -1,7 +1,7 @@
 #pragma once
 
 #include <qdb/exec/stage.h>
-#include <qdb/exec/diagnostics.h>
+#include <qdb/exec/instrumentation.h>
 #include <qdb/scheduler/connection.h>
 #include <qdb/scheduler/state.h>
 
@@ -24,11 +24,11 @@ enum class ETaskEdgeKind { Rowset, Dependency };
 
 struct TTaskNode {
     ITaskNode* Task = nullptr;
-    std::unique_ptr<TOperatorDiagnostics> Diagnostics;
+    std::unique_ptr<TOperatorInstrumentation> Instrumentation;
     TExecStageId ExecStageId = InvalidExecStageId;
     // Stable physical grouping assigned monotonically during one lowering.
     // ExecStageId remains the semantic identity; this ID is only for grouping
-    // scheduler plumbing and physical lanes in diagnostics.
+    // scheduler plumbing and physical lanes in instrumentation.
     TTaskGroupId TaskGroupId = InvalidTaskGroupId;
     std::string DebugKind;
     std::string DebugLabel;

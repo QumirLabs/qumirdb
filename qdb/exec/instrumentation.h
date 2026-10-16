@@ -13,9 +13,9 @@ namespace NQdb {
 
 // Logical payload of selected, non-NULL values; metadata and allocator
 // overhead are excluded. Width -1 denotes variable-length string data.
-std::vector<int64_t> DiagnosticColumnWidths(const NQumir::NAst::TTypePtr& type);
+std::vector<int64_t> InstrumentationColumnWidths(const NQumir::NAst::TTypePtr& type);
 
-struct TRowSetDiagnostics {
+struct TRowSetInstrumentation {
     std::shared_ptr<TKernelSlot> Kernel;
     std::vector<int64_t> Widths;
     uint64_t Rows = 0;
@@ -26,10 +26,10 @@ struct TRowSetDiagnostics {
 
 // A task is executed by at most one worker at a time. Its counters migrate
 // with it; readers may take a snapshot only after execution has stopped.
-struct TOperatorDiagnostics {
+struct TOperatorInstrumentation {
     std::shared_ptr<TKernelSlot> Kernel;
-    std::vector<TRowSetDiagnostics> Inputs;
-    TRowSetDiagnostics Output;
+    std::vector<TRowSetInstrumentation> Inputs;
+    TRowSetInstrumentation Output;
     uint64_t ExecutionCpuNanoseconds = 0;
     uint64_t Groups = 0;
     uint64_t HashCapacity = 0;

@@ -260,8 +260,8 @@ mask instead of division.
 
 Each probe task owns its counters, selection scratch buffers, and weak-Bloom
 pause policy. Worker migration does not move this state between tasks. Aggregate
-diagnostics are read only after execution stops. Before allocating a mask or
-computing filter hashes, a task checks whether the filter is ready and active.
+instrumentation snapshots are read only after execution stops. Before allocating
+a mask or computing filter hashes, a task checks whether the filter is ready and active.
 An inactive filter passes the batch through. Source-computed hashes share the
 source rowset's lifetime through shuffle views; materialized shuffle batches
 gather their existing hashes alongside the columns.
@@ -293,11 +293,11 @@ unfiltered. These work weights are heuristics and need
 calibration against representative queries before relying on them for precise
 latency predictions.
 
-## Task-local diagnostics
+## Task-local instrumentation
 
 Runtime cardinalities belong to the task that reads or publishes a batch.
 Instrumentation is opt-in: ordinary execution does not emit the measurement
-program or visit rows for diagnostics. Prepared measurement code is immutable;
+program or visit rows for instrumentation. Prepared measurement code is immutable;
 selection-aware row and byte computation uses the same Oz program in native
 and browser execution.
 

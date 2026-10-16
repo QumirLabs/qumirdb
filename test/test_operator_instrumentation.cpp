@@ -2,7 +2,7 @@
 #include "plan_runner.h"
 
 #include <qdb/exec/aggregate_exec.h>
-#include <qdb/exec/diagnostics.h>
+#include <qdb/exec/instrumentation.h>
 #include <qdb/kernel/compiler.h>
 #include <qdb/kernel/builder.h>
 #include <qdb/kernel/spec.h>
@@ -12,7 +12,7 @@
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/passes/column_pruning.h>
 #include <qdb/plan/passes/typing.h>
-#include <qdb/scheduler/diagnostics.h>
+#include <qdb/scheduler/instrumentation.h>
 #include <qdb/sql/parser.h>
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
@@ -35,7 +35,7 @@ namespace {
 
 std::shared_ptr<TKernelSlot> MeasurementKernel() {
     // Prepared code may be shared; every test owns its mutable counters.
-    return TKernelCompiler().CompileDiagnostics();
+    return TKernelCompiler().CompileInstrumentation();
 }
 
 TOperatorPtr SqlPlan(const std::string& sql, ISource& source) {
@@ -69,7 +69,7 @@ uint64_t StageSum(const std::string& text, const std::string& kind, const std::s
         }
         auto begin = line.find(" " + field + "=");
         if (begin == std::string::npos) {
-            throw std::runtime_error("missing diagnostic field " + field);
+            throw std::runtime_error("missing instrumentation field " + field);
         }
         total += std::stoull(line.substr(begin + field.size() + 2));
     }
@@ -78,7 +78,7 @@ uint64_t StageSum(const std::string& text, const std::string& kind, const std::s
 
 } // namespace
 
-TEST(OperatorDiagnostics, ResolvesLogicalAndPhysicalColumnWidths) {
+TEST(OperatorInstrumentation, ResolvesLogicalAndPhysicalColumnWidths) {
     auto schema = std::make_shared<TStructType>(std::vector<std::pair<std::string, TTypePtr>>{
         {"decimal", std::make_shared<TNullable>(std::make_shared<TDecimal>(18, 2))},
         {"binint", BinIntStorageType()},
@@ -87,10 +87,10 @@ TEST(OperatorDiagnostics, ResolvesLogicalAndPhysicalColumnWidths) {
         {"text", std::make_shared<TNullable>(std::make_shared<TStringType>())},
         {"float", std::make_shared<TFloatType>()},
     });
-    EXPECT_EQ(DiagnosticColumnWidths(schema), (std::vector<int64_t>{16, 16, 4, 1, -1, 8}));
+    EXPECT_EQ(InstrumentationColumnWidths(schema), (std::vector<int64_t>{16, 16, 4, 1, -1, 8}));
 }
 
-TEST(OperatorDiagnostics, CountsSelectedNonNullPayloadAndBothOffsetWidths) {
+TEST(OperatorInstrumentation, CountsSelectedNonNullPayloadAndBothOffsetWidths) {
     auto kernel = MeasurementKernel();
     std::array<int32_t, 4> values = {10, 20, 30, 40};
     std::array<int32_t, 5> narrow = {0, 1, 4, 4, 9};
@@ -108,7 +108,7 @@ TEST(OperatorDiagnostics, CountsSelectedNonNullPayloadAndBothOffsetWidths) {
         };
         TRowSet batch{.Columns = columns, .ColumnCount = 2, .RowCount = 4,
             .Selection = selection.data(), .RefCount = 1};
-        TRowSetDiagnostics counters{.Kernel = kernel, .Widths = {4, -1}};
+        TRowSetInstrumentation counters{.Kernel = kernel, .Widths = {4, -1}};
         counters.Add(batch);
         EXPECT_EQ(counters.Rows, 3u);
         EXPECT_EQ(counters.Bytes, 11u);
@@ -122,17 +122,17 @@ TEST(OperatorDiagnostics, CountsSelectedNonNullPayloadAndBothOffsetWidths) {
     }
 }
 
-TEST(OperatorDiagnostics, BackpressureRetriesDoNotCountFailedPushOrEmptyFetch) {
+TEST(OperatorInstrumentation, BackpressureRetriesDoNotCountFailedPushOrEmptyFetch) {
     auto kernel = MeasurementKernel();
     TOneToOneConnection connection(1);
     connection.Resize(1, 1);
     int64_t value = 42;
     TColumn column{.Data = reinterpret_cast<char*>(&value)};
     TRowSet batch{.Columns = &column, .ColumnCount = 1, .RowCount = 1, .RefCount = 1};
-    TRowSetDiagnostics sent{.Kernel = kernel, .Widths = {8}};
-    TRowSetDiagnostics received{.Kernel = kernel, .Widths = {8}};
-    TOutputPort output{.Connection = &connection, .Diagnostics = &sent};
-    TInputPort input{.Connection = &connection, .Diagnostics = &received};
+    TRowSetInstrumentation sent{.Kernel = kernel, .Widths = {8}};
+    TRowSetInstrumentation received{.Kernel = kernel, .Widths = {8}};
+    TOutputPort output{.Connection = &connection, .Instrumentation = &sent};
+    TInputPort input{.Connection = &connection, .Instrumentation = &received};
     auto first = batch;
     EXPECT_TRUE(output.Push(std::move(first)));
     auto second = batch;
@@ -150,15 +150,15 @@ TEST(OperatorDiagnostics, BackpressureRetriesDoNotCountFailedPushOrEmptyFetch) {
     Release(&fetched);
 }
 
-TEST(OperatorDiagnostics, ObservesEveryGeometricGrowthInsideABatch) {
+TEST(OperatorInstrumentation, ObservesEveryGeometricGrowthInsideABatch) {
     auto i64 = std::make_shared<TIntegerType>();
     TStructType inputType({{"k", i64}});
     auto spec = NKernel::BuildAggregateKernelSpec(inputType, {"k"}, {{.Name = "n", .Func = "count"}});
     auto kernels = TKernelCompiler().CompileAggregate(spec);
-    TOperatorDiagnostics counters;
+    TOperatorInstrumentation counters;
     counters.Kernel = MeasurementKernel();
     TAggregateProcessor processor(kernels, 8);
-    processor.SetDiagnostics(&counters);
+    processor.SetInstrumentation(&counters);
     std::array<int64_t, 100> keys;
     std::iota(keys.begin(), keys.end(), 0);
     TColumn column{.Data = reinterpret_cast<char*>(keys.data())};
@@ -189,7 +189,7 @@ TEST(OperatorDiagnostics, ObservesEveryGeometricGrowthInsideABatch) {
     EXPECT_EQ(counters.Groups, 100u);
 }
 
-TEST(OperatorDiagnostics, MeasuresResidualSemiJoinMatchSetWithoutRowBuckets) {
+TEST(OperatorInstrumentation, MeasuresResidualSemiJoinMatchSetWithoutRowBuckets) {
     auto i64 = std::make_shared<TIntegerType>();
     TStructType leftType({{"lk", i64}});
     TStructType rightType({{"rk", i64}});
@@ -201,7 +201,7 @@ TEST(OperatorDiagnostics, MeasuresResidualSemiJoinMatchSetWithoutRowBuckets) {
     alignas(8) std::array<uint8_t, TKernelCompiler::PairBufferSize> pairs{};
     ASSERT_TRUE(kernels.Dispatch(left.data(), right.data(), nullptr, 0, pairs.data(),
         nullptr, nullptr, 8, static_cast<int64_t>(EJoinKernelOp::Init)));
-    TOperatorDiagnostics counters;
+    TOperatorInstrumentation counters;
     counters.Kernel = MeasurementKernel();
     counters.ObserveHash(left.data(), 0, true);
     counters.ObserveHash(right.data(), 1, true);
@@ -212,19 +212,19 @@ TEST(OperatorDiagnostics, MeasuresResidualSemiJoinMatchSetWithoutRowBuckets) {
         nullptr, nullptr, 0, static_cast<int64_t>(EJoinKernelOp::Destroy)));
 }
 
-TEST(OperatorDiagnostics, DisabledPlanHasNoMeasurementProgramOrCounters) {
+TEST(OperatorInstrumentation, DisabledPlanHasNoMeasurementProgramOrCounters) {
     TMockSource source({"k"});
     auto plan = SqlPlan("SELECT k FROM t", source);
     auto lowered = LowerPlanToGraph(plan, {}, nullptr);
     for (const auto& kernel : lowered.Kernels) {
-        EXPECT_NE(kernel.Name, "diagnostics");
+        EXPECT_NE(kernel.Name, "instrumentation");
     }
     for (const auto& node : lowered.Graph->Nodes()) {
-        EXPECT_EQ(node->Diagnostics, nullptr);
+        EXPECT_EQ(node->Instrumentation, nullptr);
     }
 }
 
-TEST(OperatorDiagnostics, ReportsFilterAggregateCardinalitiesInBothSchedulers) {
+TEST(OperatorInstrumentation, ReportsFilterAggregateCardinalitiesInBothSchedulers) {
     for (const auto mode : {EExecutionMode::SingleThreadedScheduler, EExecutionMode::ThreadedScheduler}) {
         std::array<int64_t, 100> keys;
         std::array<int64_t, 100> values;
@@ -241,9 +241,9 @@ TEST(OperatorDiagnostics, ReportsFilterAggregateCardinalitiesInBothSchedulers) {
         settings.Scheduler.Mode = mode;
         settings.Scheduler.WorkerCount = 2;
         settings.HashShuffle.PartitionCount = 4;
-        std::ostringstream diagnostics;
-        settings.Diagnostics.Operators = true;
-        settings.Diagnostics.Output = &diagnostics;
+        std::ostringstream instrumentation;
+        settings.Instrumentation.Operators = true;
+        settings.Instrumentation.Output = &instrumentation;
         auto runtime = RunPlan(plan, settings);
         TRowSet output{};
         size_t groups = 0;
@@ -257,20 +257,20 @@ TEST(OperatorDiagnostics, ReportsFilterAggregateCardinalitiesInBothSchedulers) {
             Release(&output);
         }
         EXPECT_EQ(groups, 10u);
-        EXPECT_EQ(StageSum(diagnostics.str(), "source", "rows_out"), 100u);
-        EXPECT_EQ(StageSum(diagnostics.str(), "filter", "rows_out"), 90u);
-        EXPECT_EQ(StageSum(diagnostics.str(), "aggregate", "groups"), 10u);
-        EXPECT_EQ(StageSum(diagnostics.str(), "aggregate", "rows_in"), 90u);
-        EXPECT_EQ(StageSum(diagnostics.str(), "aggregate", "rows_out"), 10u);
-        EXPECT_NE(diagnostics.str().find("partition_skew="), std::string::npos);
+        EXPECT_EQ(StageSum(instrumentation.str(), "source", "rows_out"), 100u);
+        EXPECT_EQ(StageSum(instrumentation.str(), "filter", "rows_out"), 90u);
+        EXPECT_EQ(StageSum(instrumentation.str(), "aggregate", "groups"), 10u);
+        EXPECT_EQ(StageSum(instrumentation.str(), "aggregate", "rows_in"), 90u);
+        EXPECT_EQ(StageSum(instrumentation.str(), "aggregate", "rows_out"), 10u);
+        EXPECT_NE(instrumentation.str().find("partition_skew="), std::string::npos);
     }
 }
 
-TEST(OperatorDiagnostics, ShuffleAccountsSparseRetainedOwnersOnceAcrossPartitions) {
+TEST(OperatorInstrumentation, ShuffleAccountsSparseRetainedOwnersOnceAcrossPartitions) {
     TTaskNode node;
-    node.Diagnostics = std::make_unique<TOperatorDiagnostics>();
-    node.Diagnostics->Kernel = MeasurementKernel();
-    node.Diagnostics->Inputs.reserve(1);
+    node.Instrumentation = std::make_unique<TOperatorInstrumentation>();
+    node.Instrumentation->Kernel = MeasurementKernel();
+    node.Instrumentation->Inputs.reserve(1);
     std::array<int64_t, 10000> keys;
     std::array<int64_t, 10000> values;
     std::array<uint8_t, 10000> selected{};
@@ -298,19 +298,19 @@ TEST(OperatorDiagnostics, ShuffleAccountsSparseRetainedOwnersOnceAcrossPartition
     THashShuffleTask task(code, nullptr, TInputPort{.Connection = &input}, output, 0);
     node.Task = &task;
     std::unordered_map<const IConnection*, TTypePtr> types{{&input, schema}, {&output, schema}};
-    TTaskDiagnosticSetup setup(node, types);
-    task.ConfigureDiagnostics(setup);
+    TTaskInstrumentationSetup setup(node, types);
+    task.ConfigureInstrumentation(setup);
     ASSERT_TRUE(input.Push(0, std::move(batch)));
     input.Finish(0);
     EXPECT_EQ(task.Execute(), ETaskResult::OK);
-    EXPECT_EQ(node.Diagnostics->Inputs[0].Rows, 2u);
-    EXPECT_EQ(node.Diagnostics->RetainedInputBytes, 160000u);
-    EXPECT_EQ(node.Diagnostics->RetainedInputPeakBytes, 160000u);
+    EXPECT_EQ(node.Instrumentation->Inputs[0].Rows, 2u);
+    EXPECT_EQ(node.Instrumentation->RetainedInputBytes, 160000u);
+    EXPECT_EQ(node.Instrumentation->RetainedInputPeakBytes, 160000u);
     EXPECT_EQ(task.Execute(), ETaskResult::FINISHED);
-    EXPECT_EQ(node.Diagnostics->Output.Rows, 2u);
-    EXPECT_EQ(node.Diagnostics->RetainedInputBytes, 0u);
-    EXPECT_EQ(node.Diagnostics->RetainedInputPeakBytes, 160000u);
-    EXPECT_EQ(node.Diagnostics->BuildMemoryPeakBytes, 160000u);
+    EXPECT_EQ(node.Instrumentation->Output.Rows, 2u);
+    EXPECT_EQ(node.Instrumentation->RetainedInputBytes, 0u);
+    EXPECT_EQ(node.Instrumentation->RetainedInputPeakBytes, 160000u);
+    EXPECT_EQ(node.Instrumentation->BuildMemoryPeakBytes, 160000u);
     for (size_t partition = 0; partition < 4; ++partition) {
         TRowSet rowSet{};
         while (output.Fetch(partition, rowSet) == EFetchResult::OK) {
@@ -319,7 +319,7 @@ TEST(OperatorDiagnostics, ShuffleAccountsSparseRetainedOwnersOnceAcrossPartition
     }
 }
 
-TEST(OperatorDiagnostics, ThreadCpuExcludesSleepingAndSurvivesWorkerMigration) {
+TEST(OperatorInstrumentation, ThreadCpuExcludesSleepingAndSurvivesWorkerMigration) {
     class TSleepTask final : public ITaskNode {
     public:
         ETaskResult Execute() override {
@@ -329,15 +329,15 @@ TEST(OperatorDiagnostics, ThreadCpuExcludesSleepingAndSurvivesWorkerMigration) {
     } task;
     TTaskNode node;
     node.Task = &task;
-    node.Diagnostics = std::make_unique<TOperatorDiagnostics>();
+    node.Instrumentation = std::make_unique<TOperatorInstrumentation>();
     const auto start = std::chrono::steady_clock::now();
     for (size_t worker = 0; worker < 2; ++worker) {
         std::thread([&] { EXPECT_EQ(ExecuteTask(node), ETaskResult::OK); }).join();
     }
     const auto wall = std::chrono::steady_clock::now() - start;
     EXPECT_GE(wall, std::chrono::milliseconds(100));
-    EXPECT_GT(node.Diagnostics->ExecutionCpuNanoseconds, 0u);
-    EXPECT_LT(node.Diagnostics->ExecutionCpuNanoseconds, 50'000'000u);
+    EXPECT_GT(node.Instrumentation->ExecutionCpuNanoseconds, 0u);
+    EXPECT_LT(node.Instrumentation->ExecutionCpuNanoseconds, 50'000'000u);
 }
 
 int main(int argc, char** argv) {

@@ -199,8 +199,8 @@ TRunResult RunQuery(
         settings.ScanSplit.TargetRowsPerTask = 1;
         settings.ScanSplit.TargetBytesPerTask = 0;
     }
-    settings.Diagnostics.RowGroupPredicate = enablePruning;
-    settings.Diagnostics.Output = &diagnostics;
+    settings.Instrumentation.RowGroupPredicate = enablePruning;
+    settings.Instrumentation.Output = &diagnostics;
 
     if (autoTasks) {
         const auto projectedGroups = source.ScanRowGroups(

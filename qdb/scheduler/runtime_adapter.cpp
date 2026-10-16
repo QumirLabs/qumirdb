@@ -1,7 +1,7 @@
 #include <qdb/scheduler/runtime_adapter.h>
 
 #include <qdb/scheduler/graph.h>
-#include <qdb/scheduler/diagnostics.h>
+#include <qdb/scheduler/instrumentation.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 
@@ -159,8 +159,8 @@ EFetchResult TInputPort::Fetch(TRowSet& rowSet) const {
     const auto result = Connection
         ? Connection->Fetch(Lane, rowSet)
         : EFetchResult::FINISHED;
-    if (result == EFetchResult::OK && Diagnostics) {
-        Diagnostics->Add(rowSet);
+    if (result == EFetchResult::OK && Instrumentation) {
+        Instrumentation->Add(rowSet);
     }
     return result;
 }
@@ -170,15 +170,15 @@ bool TOutputPort::CanPush() const {
 }
 
 bool TOutputPort::Push(TRowSet&& rowSet) const {
-    const auto rows = Diagnostics ? Diagnostics->Rows : 0;
-    const auto bytes = Diagnostics ? Diagnostics->Bytes : 0;
-    if (Diagnostics) {
-        Diagnostics->Add(rowSet);
+    const auto rows = Instrumentation ? Instrumentation->Rows : 0;
+    const auto bytes = Instrumentation ? Instrumentation->Bytes : 0;
+    if (Instrumentation) {
+        Instrumentation->Add(rowSet);
     }
     const bool pushed = !Connection || Connection->Push(Lane, std::move(rowSet));
-    if (!pushed && Diagnostics) {
-        Diagnostics->Rows = rows;
-        Diagnostics->Bytes = bytes;
+    if (!pushed && Instrumentation) {
+        Instrumentation->Rows = rows;
+        Instrumentation->Bytes = bytes;
     }
     return pushed;
 }
@@ -659,8 +659,8 @@ struct THashShuffleTask::TBufferedBatch {
     std::shared_ptr<uint64_t> Hashes; // nullptr if not computed for this batch
 };
 
-struct THashShuffleTask::TDiagnosticState {
-    TOperatorDiagnostics* Counters = nullptr;
+struct THashShuffleTask::TInstrumentationState {
+    TOperatorInstrumentation* Counters = nullptr;
     std::unordered_map<const void*, uint64_t> PayloadBytes;
 };
 
@@ -731,11 +731,11 @@ ETaskResult THashShuffleTask::Execute() {
     return PushPending();
 }
 
-void THashShuffleTask::ObserveDiagnostics() {
-    if (!ResourceDiagnostics_) {
+void THashShuffleTask::ObserveInstrumentation() {
+    if (!ResourceInstrumentation_) {
         return;
     }
-    auto& state = *ResourceDiagnostics_;
+    auto& state = *ResourceInstrumentation_;
     std::unordered_set<const void*> owners;
     uint64_t bytes = 0;
     auto retain = [&](const void* owner, const TRowSet& rowSet) {
@@ -823,7 +823,7 @@ void THashShuffleTask::Scatter(TRowSet& rowSet) {
     } else {
         ScatterViews(input);
     }
-    ObserveDiagnostics();
+    ObserveInstrumentation();
 }
 
 void THashShuffleTask::ScatterBuffered(const std::shared_ptr<TRowSet>& input) {
@@ -960,7 +960,7 @@ void THashShuffleTask::AddBufferedRows(size_t dst,
         .Rows = std::move(rows),
         .Hashes = hashes,
     });
-    ObserveDiagnostics();
+    ObserveInstrumentation();
 
     const size_t targetRows = Code_->TargetOutputBatchRows;
     const size_t maxRows = Code_->MaxOutputBatchRows;
@@ -1003,7 +1003,7 @@ void THashShuffleTask::FlushBuffer(size_t dst) {
         buffer.Batches.clear();
         buffer.RowCount = 0;
         buffer.ByteCount = 0;
-        ObserveDiagnostics();
+        ObserveInstrumentation();
         return;
     }
 
@@ -1141,7 +1141,7 @@ void THashShuffleTask::FlushBuffer(size_t dst) {
     buffer.Batches.clear();
     buffer.RowCount = 0;
     buffer.ByteCount = 0;
-    ObserveDiagnostics();
+    ObserveInstrumentation();
 }
 
 void THashShuffleTask::FlushAllBuffers() {
@@ -1156,20 +1156,20 @@ ETaskResult THashShuffleTask::PushPending() {
         if (!Output_->CanPushTo(SourceLane_, pending.DstLane)) {
             return ETaskResult::BLOCKED_OUTPUT;
         }
-        const auto rows = OutputDiagnostics_ ? OutputDiagnostics_->Rows : 0;
-        const auto bytes = OutputDiagnostics_ ? OutputDiagnostics_->Bytes : 0;
-        if (OutputDiagnostics_) {
-            OutputDiagnostics_->Add(pending.RowSet);
+        const auto rows = OutputInstrumentation_ ? OutputInstrumentation_->Rows : 0;
+        const auto bytes = OutputInstrumentation_ ? OutputInstrumentation_->Bytes : 0;
+        if (OutputInstrumentation_) {
+            OutputInstrumentation_->Add(pending.RowSet);
         }
         if (!Output_->PushTo(SourceLane_, pending.DstLane, std::move(pending.RowSet))) {
-            if (OutputDiagnostics_) {
-                OutputDiagnostics_->Rows = rows;
-                OutputDiagnostics_->Bytes = bytes;
+            if (OutputInstrumentation_) {
+                OutputInstrumentation_->Rows = rows;
+                OutputInstrumentation_->Bytes = bytes;
             }
             return ETaskResult::BLOCKED_OUTPUT;
         }
         ++PendingIndex_;
-        ObserveDiagnostics();
+        ObserveInstrumentation();
     }
     ClearPending();
     return ETaskResult::OK;
@@ -1183,7 +1183,7 @@ void THashShuffleTask::ClearPending() {
     }
     Pending_.clear();
     PendingIndex_ = 0;
-    ObserveDiagnostics();
+    ObserveInstrumentation();
 }
 
 TCteConsumerTask::TCteConsumerTask(
@@ -1221,59 +1221,59 @@ ETaskResult TCteConsumerTask::Execute() {
     return ETaskResult::OK;
 }
 
-void TSourceTask::ConfigureDiagnostics(TTaskDiagnosticSetup& setup) {
+void TSourceTask::ConfigureInstrumentation(TTaskInstrumentationSetup& setup) {
     setup.Output(Output_);
 }
 
-void TRuntimeFilterTask::ConfigureDiagnostics(TTaskDiagnosticSetup& setup) {
+void TRuntimeFilterTask::ConfigureInstrumentation(TTaskInstrumentationSetup& setup) {
     setup.Input(Input_);
     setup.Output(Output_);
 }
 
-void TUnaryTask::ConfigureDiagnostics(TTaskDiagnosticSetup& setup) {
+void TUnaryTask::ConfigureInstrumentation(TTaskInstrumentationSetup& setup) {
     setup.Input(Input_);
     setup.Output(Output_);
 }
 
-void TSinkTask::ConfigureDiagnostics(TTaskDiagnosticSetup& setup) {
+void TSinkTask::ConfigureInstrumentation(TTaskInstrumentationSetup& setup) {
     setup.Input(Input_);
 }
 
-void TBlockingTask::ConfigureDiagnostics(TTaskDiagnosticSetup& setup) {
+void TBlockingTask::ConfigureInstrumentation(TTaskInstrumentationSetup& setup) {
     setup.Input(Input_);
     setup.Output(Output_);
-    if (Code_->ConfigureDiagnostics) {
-        Code_->ConfigureDiagnostics(State_.get(), &setup.Counters());
+    if (Code_->ConfigureInstrumentation) {
+        Code_->ConfigureInstrumentation(State_.get(), &setup.Counters());
     }
 }
 
-void TBinaryBlockingTask::ConfigureDiagnostics(TTaskDiagnosticSetup& setup) {
+void TBinaryBlockingTask::ConfigureInstrumentation(TTaskInstrumentationSetup& setup) {
     setup.Input(Left_);
     setup.Input(Right_);
     setup.Output(Output_);
-    if (Code_->ConfigureDiagnostics) {
-        Code_->ConfigureDiagnostics(State_.get(), &setup.Counters());
+    if (Code_->ConfigureInstrumentation) {
+        Code_->ConfigureInstrumentation(State_.get(), &setup.Counters());
     }
 }
 
-void TMergeTask::ConfigureDiagnostics(TTaskDiagnosticSetup& setup) {
+void TMergeTask::ConfigureInstrumentation(TTaskInstrumentationSetup& setup) {
     setup.Output(Output_);
-    if (Code_->ConfigureDiagnostics) {
-        Code_->ConfigureDiagnostics(State_.get(), &setup.Counters());
+    if (Code_->ConfigureInstrumentation) {
+        Code_->ConfigureInstrumentation(State_.get(), &setup.Counters());
     }
     for (auto& input : Inputs_) {
         setup.Input(input);
     }
 }
 
-void THashShuffleTask::ConfigureDiagnostics(TTaskDiagnosticSetup& setup) {
+void THashShuffleTask::ConfigureInstrumentation(TTaskInstrumentationSetup& setup) {
     setup.Input(Input_);
-    OutputDiagnostics_ = &setup.Output(*Output_);
-    ResourceDiagnostics_ = std::make_unique<TDiagnosticState>();
-    ResourceDiagnostics_->Counters = &setup.Counters();
+    OutputInstrumentation_ = &setup.Output(*Output_);
+    ResourceInstrumentation_ = std::make_unique<TInstrumentationState>();
+    ResourceInstrumentation_->Counters = &setup.Counters();
 }
 
-void TCteConsumerTask::ConfigureDiagnostics(TTaskDiagnosticSetup& setup) {
+void TCteConsumerTask::ConfigureInstrumentation(TTaskInstrumentationSetup& setup) {
     setup.Output(Output_);
 }
 

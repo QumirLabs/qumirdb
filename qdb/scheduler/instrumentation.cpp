@@ -1,4 +1,4 @@
-#include <qdb/scheduler/diagnostics.h>
+#include <qdb/scheduler/instrumentation.h>
 
 #include <qdb/exec/plan_builder.h>
 #include <qdb/kernel/compiler.h>
@@ -15,44 +15,44 @@
 namespace NQdb {
 namespace NScheduler {
 
-TTaskDiagnosticSetup::TTaskDiagnosticSetup(
+TTaskInstrumentationSetup::TTaskInstrumentationSetup(
     TTaskNode& node,
     const std::unordered_map<const IConnection*, NQumir::NAst::TTypePtr>& types)
     : Node_(node)
     , Types_(types)
 {}
 
-void TTaskDiagnosticSetup::Input(TInputPort& port) {
+void TTaskInstrumentationSetup::Input(TInputPort& port) {
     if (!port.Connection) {
         return;
     }
-    auto& counter = Node_.Diagnostics->Inputs.emplace_back();
-    counter.Kernel = Node_.Diagnostics->Kernel;
-    counter.Widths = DiagnosticColumnWidths(Types_.at(port.Connection));
-    port.Diagnostics = &counter;
+    auto& counter = Node_.Instrumentation->Inputs.emplace_back();
+    counter.Kernel = Node_.Instrumentation->Kernel;
+    counter.Widths = InstrumentationColumnWidths(Types_.at(port.Connection));
+    port.Instrumentation = &counter;
 }
 
-void TTaskDiagnosticSetup::Output(TOutputPort& port) {
+void TTaskInstrumentationSetup::Output(TOutputPort& port) {
     if (port.Connection) {
-        port.Diagnostics = &Output(*port.Connection);
+        port.Instrumentation = &Output(*port.Connection);
     }
 }
 
-TRowSetDiagnostics& TTaskDiagnosticSetup::Output(IConnection& connection) {
-    auto& output = Node_.Diagnostics->Output;
-    output.Kernel = Node_.Diagnostics->Kernel;
-    output.Widths = DiagnosticColumnWidths(Types_.at(&connection));
+TRowSetInstrumentation& TTaskInstrumentationSetup::Output(IConnection& connection) {
+    auto& output = Node_.Instrumentation->Output;
+    output.Kernel = Node_.Instrumentation->Kernel;
+    output.Widths = InstrumentationColumnWidths(Types_.at(&connection));
     return output;
 }
 
-TOperatorDiagnostics& TTaskDiagnosticSetup::Counters() {
-    return *Node_.Diagnostics;
+TOperatorInstrumentation& TTaskInstrumentationSetup::Counters() {
+    return *Node_.Instrumentation;
 }
 
-void EnableOperatorDiagnostics(TLoweredPlan& lowered) {
+void EnableOperatorInstrumentation(TLoweredPlan& lowered) {
     auto plan = BuildExecPlan(lowered);
     if (!plan) {
-        throw std::runtime_error("operator diagnostics: " + plan.error());
+        throw std::runtime_error("operator instrumentation: " + plan.error());
     }
     std::unordered_map<TExecStageId, NQumir::NAst::TTypePtr> stages;
     for (const auto& node : plan->Nodes) {
@@ -91,10 +91,10 @@ void EnableOperatorDiagnostics(TLoweredPlan& lowered) {
         .BindNow = false,
         .ExternalCatalog = lowered.ExternalCatalog,
     });
-    auto kernel = compiler.CompileDiagnostics();
+    auto kernel = compiler.CompileInstrumentation();
     for (const auto& node : lowered.Graph->Nodes()) {
-        node->Diagnostics = std::make_unique<TOperatorDiagnostics>();
-        auto& counters = *node->Diagnostics;
+        node->Instrumentation = std::make_unique<TOperatorInstrumentation>();
+        auto& counters = *node->Instrumentation;
         counters.Kernel = kernel;
         counters.Inputs.reserve(node->Inbound.size() + 2);
         counters.MaterializesOutput = node->DebugKind == "aggregate" ||
@@ -102,8 +102,8 @@ void EnableOperatorDiagnostics(TLoweredPlan& lowered) {
             node->DebugKind == "sort" || node->DebugKind == "top-sort" ||
             node->DebugKind == "window" || node->DebugKind == "late-materialize" ||
             node->DebugKind == "hash-shuffle" || node->DebugKind == "cte-producer";
-        TTaskDiagnosticSetup setup(*node, types);
-        node->Task->ConfigureDiagnostics(setup);
+        TTaskInstrumentationSetup setup(*node, types);
+        node->Task->ConfigureInstrumentation(setup);
     }
 }
 
@@ -137,7 +137,7 @@ struct TStageSnapshot {
     bool HasBuildMemory = false;
     bool Materializes = false;
 
-    void Add(const TOperatorDiagnostics& counters) {
+    void Add(const TOperatorInstrumentation& counters) {
         uint64_t inputRows = 0;
         for (const auto& input : counters.Inputs) {
             inputRows += input.Rows;
@@ -207,26 +207,26 @@ void WriteSnapshot(std::ostream& out, const TStageSnapshot& value) {
 } // namespace
 
 ETaskResult ExecuteTask(TTaskNode& node) {
-    if (!node.Diagnostics) {
+    if (!node.Instrumentation) {
         return node.Task->Execute();
     }
     const auto start = ThreadCpuNanoseconds();
     const auto result = node.Task->Execute();
-    node.Diagnostics->ExecutionCpuNanoseconds += ThreadCpuNanoseconds() - start;
+    node.Instrumentation->ExecutionCpuNanoseconds += ThreadCpuNanoseconds() - start;
     return result;
 }
 
-void PrintOperatorDiagnostics(std::ostream& out, const TTaskGraph& graph) {
-    out << "\noperator-diagnostics schema_version=1 bytes=logical_nonnull_payload"
+void PrintOperatorInstrumentation(std::ostream& out, const TTaskGraph& graph) {
+    out << "\noperator-instrumentation schema_version=1 bytes=logical_nonnull_payload"
         << " memory=batch_boundary_hash_plus_retained_payload stage_memory=sum_task_peaks cpu=thread_execute\n";
     using TKey = std::tuple<TExecStageId, TTaskGroupId, std::string>;
     std::map<TKey, TStageSnapshot> stages;
     size_t task = 0;
     for (const auto& node : graph.Nodes()) {
-        if (!node->Diagnostics) {
+        if (!node->Instrumentation) {
             continue;
         }
-        const auto& counters = *node->Diagnostics;
+        const auto& counters = *node->Instrumentation;
         TStageSnapshot value;
         value.Add(counters);
         auto label = node->DebugLabel;

@@ -24,8 +24,8 @@ public:
         TSortRadixKernel kernel);
 
     void Add(TRowSet& rowSet);
-    void SetDiagnostics(TOperatorDiagnostics* diagnostics) {
-        Store_.SetDiagnostics(diagnostics, 0);
+    void SetInstrumentation(TOperatorInstrumentation* instrumentation) {
+        Store_.SetInstrumentation(instrumentation, 0);
     }
 
     void Finish();

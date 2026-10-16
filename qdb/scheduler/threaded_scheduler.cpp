@@ -1,4 +1,4 @@
-#include <qdb/scheduler/diagnostics.h>
+#include <qdb/scheduler/instrumentation.h>
 #include <qdb/scheduler/threaded_scheduler.h>
 
 #include <algorithm>

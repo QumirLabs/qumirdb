@@ -11,16 +11,16 @@ namespace NScheduler {
 
 struct TLoweredPlan;
 
-class TTaskDiagnosticSetup {
+class TTaskInstrumentationSetup {
 public:
-    TTaskDiagnosticSetup(
+    TTaskInstrumentationSetup(
         TTaskNode& node,
         const std::unordered_map<const IConnection*, NQumir::NAst::TTypePtr>& types);
 
     void Input(TInputPort& port);
     void Output(TOutputPort& port);
-    TRowSetDiagnostics& Output(IConnection& connection);
-    TOperatorDiagnostics& Counters();
+    TRowSetInstrumentation& Output(IConnection& connection);
+    TOperatorInstrumentation& Counters();
 
 private:
     TTaskNode& Node_;
@@ -28,9 +28,9 @@ private:
 };
 
 // Preparation mutates only this graph, before a scheduler starts. The common
-// Oz measurement kernel is emitted only when diagnostics are requested.
-void EnableOperatorDiagnostics(TLoweredPlan& lowered);
-void PrintOperatorDiagnostics(std::ostream& out, const TTaskGraph& graph);
+// Oz measurement kernel is emitted only when instrumentation is requested.
+void EnableOperatorInstrumentation(TLoweredPlan& lowered);
+void PrintOperatorInstrumentation(std::ostream& out, const TTaskGraph& graph);
 ETaskResult ExecuteTask(TTaskNode& node);
 
 } // namespace NScheduler

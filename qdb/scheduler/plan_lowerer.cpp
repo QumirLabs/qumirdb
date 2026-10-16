@@ -1,5 +1,5 @@
 #include <qdb/scheduler/plan_lowerer.h>
-#include <qdb/scheduler/diagnostics.h>
+#include <qdb/scheduler/instrumentation.h>
 #include <qdb/exec/aggregate_exec.h>
 #include <qdb/exec/join_exec.h>
 #include <qdb/exec/late_materialize_exec.h>
@@ -950,11 +950,11 @@ private:
                 }
                 return NScheduler::ETaskResult::FINISHED;
             });
-        if constexpr (requires(TState& state, TOperatorDiagnostics* diagnostics) {
-            state.Processor.SetDiagnostics(diagnostics);
+        if constexpr (requires(TState& state, TOperatorInstrumentation* instrumentation) {
+            state.Processor.SetInstrumentation(instrumentation);
         }) {
-            code->ConfigureDiagnostics = [](void* state, TOperatorDiagnostics* diagnostics) {
-                static_cast<TState*>(state)->Processor.SetDiagnostics(diagnostics);
+            code->ConfigureInstrumentation = [](void* state, TOperatorInstrumentation* instrumentation) {
+                static_cast<TState*>(state)->Processor.SetInstrumentation(instrumentation);
             };
         }
         return code;
@@ -1040,12 +1040,12 @@ private:
                 };
                 const auto result = s->Processor.Process(fetchLeft, fetchRight, output);
                 if constexpr (std::is_same_v<TState, TSchedulerInnerJoinState>) {
-                    s->Processor.ObserveDiagnostics();
+                    s->Processor.ObserveInstrumentation();
                 }
                 return MapJoinProcessResult(result);
             });
-        code->ConfigureDiagnostics = [](void* state, TOperatorDiagnostics* diagnostics) {
-            static_cast<TState*>(state)->Processor.SetDiagnostics(diagnostics);
+        code->ConfigureInstrumentation = [](void* state, TOperatorInstrumentation* instrumentation) {
+            static_cast<TState*>(state)->Processor.SetInstrumentation(instrumentation);
         };
         if constexpr (std::is_same_v<TState, TSchedulerInnerJoinState>) {
             code->RequiredSide = [](void* state) {
@@ -1118,8 +1118,8 @@ private:
             rowGroups = parquet->PruneRowGroups(
                 src.RowGroupPredicate(),
                 src.GetAlias(),
-                Settings_.Diagnostics.RowGroupPredicate
-                    ? Settings_.Diagnostics.Output
+                Settings_.Instrumentation.RowGroupPredicate
+                    ? Settings_.Instrumentation.Output
                     : nullptr,
                 columns ? &*columns : nullptr);
         } else {
@@ -1346,9 +1346,9 @@ private:
                     TRowSet batch{};
                     auto fetch = input.Fetch(batch);
                     if (fetch == NScheduler::EFetchResult::OK) {
-                        if (shared->Diagnostics) {
-                            shared->Diagnostics->RetainInput(batch, 0);
-                            shared->Diagnostics->Output.Add(batch);
+                        if (shared->Instrumentation) {
+                            shared->Instrumentation->RetainInput(batch, 0);
+                            shared->Instrumentation->Output.Add(batch);
                         }
                         shared->Batches.push_back(batch);
                         continue;
@@ -1362,8 +1362,8 @@ private:
                     return NScheduler::ETaskResult::FINISHED;
                 }
             });
-        code->ConfigureDiagnostics = [](void* state, TOperatorDiagnostics* diagnostics) {
-            static_cast<NScheduler::TCteSharedState*>(state)->Diagnostics = diagnostics;
+        code->ConfigureInstrumentation = [](void* state, TOperatorInstrumentation* instrumentation) {
+            static_cast<NScheduler::TCteSharedState*>(state)->Instrumentation = instrumentation;
         };
         if (materialization->RefCount == 0) {
             throw std::runtime_error(
@@ -1531,8 +1531,8 @@ private:
                     rowSet = {};
                 }
             });
-        code->ConfigureDiagnostics = [](void* state, TOperatorDiagnostics* diagnostics) {
-            static_cast<TGroupingSetsBlockingState*>(state)->Processor.SetDiagnostics(diagnostics);
+        code->ConfigureInstrumentation = [](void* state, TOperatorInstrumentation* instrumentation) {
+            static_cast<TGroupingSetsBlockingState*>(state)->Processor.SetInstrumentation(instrumentation);
         };
         return TBlockingTail{
             .Code = std::move(code),
@@ -1590,8 +1590,8 @@ private:
                     rowSet = {};
                 }
             });
-        code->ConfigureDiagnostics = [](void* state, TOperatorDiagnostics* diagnostics) {
-            static_cast<TAggregateBlockingState*>(state)->Processor.SetDiagnostics(diagnostics);
+        code->ConfigureInstrumentation = [](void* state, TOperatorInstrumentation* instrumentation) {
+            static_cast<TAggregateBlockingState*>(state)->Processor.SetInstrumentation(instrumentation);
         };
         return TBlockingTail{
             .Code = std::move(code),
@@ -2488,8 +2488,8 @@ private:
                 return NScheduler::ETaskResult::FINISHED;
             });
 
-        mergeCode->ConfigureDiagnostics = [](void* state, TOperatorDiagnostics* diagnostics) {
-            static_cast<TMergeState*>(state)->Processor.SetDiagnostics(diagnostics);
+        mergeCode->ConfigureInstrumentation = [](void* state, TOperatorInstrumentation* instrumentation) {
+            static_cast<TMergeState*>(state)->Processor.SetInstrumentation(instrumentation);
         };
         auto merge = std::make_unique<NScheduler::TMergeTask>(
             mergeCode,
@@ -3367,8 +3367,8 @@ bool RunPlanIntoSink(
     }
 
     lowered.Graph->Build();
-    if (settings.Diagnostics.Operators) {
-        EnableOperatorDiagnostics(lowered);
+    if (settings.Instrumentation.Operators) {
+        EnableOperatorInstrumentation(lowered);
     }
     JitFinalizeKernels(lowered.Kernels, diagnostics, lowered.ExternalCatalog);
     if (!lowered.Graph->Validate(error)) {
@@ -3392,8 +3392,8 @@ bool RunPlanIntoSink(
     if (!executor.Run(error)) {
         return false;
     }
-    if (settings.Diagnostics.Operators && settings.Diagnostics.Output) {
-        PrintOperatorDiagnostics(*settings.Diagnostics.Output, *lowered.Graph);
+    if (settings.Instrumentation.Operators && settings.Instrumentation.Output) {
+        PrintOperatorInstrumentation(*settings.Instrumentation.Output, *lowered.Graph);
     }
     if (settings.Queue.EnableDebugCounters && diagnostics) {
         PrintCounterDiagnostics(*diagnostics, *lowered.Graph, executor.Stats());

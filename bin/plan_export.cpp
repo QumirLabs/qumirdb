@@ -1,5 +1,5 @@
 #include "plan_export.h"
-#include <qdb/exec/diagnostics.h>
+#include <qdb/exec/instrumentation.h>
 
 #include <qdb/catalog/external_module.h>
 #include <qdb/exec/plan_builder.h>
@@ -996,7 +996,7 @@ NQdb::NScheduler::TSettings ParseSchedulerSettings(const llvm::json::Object& roo
             settings.HashShuffle.MaxPartitionCount = static_cast<size_t>(*shuffleParts);
         }
     }
-    settings.Diagnostics.Operators = options->getBoolean("operatorDiagnostics").value_or(false);
+    settings.Instrumentation.Operators = options->getBoolean("operatorInstrumentation").value_or(false);
     return settings;
 }
 
@@ -2297,7 +2297,7 @@ struct TExecPlanCodec {
     const NQdb::TExecPlan& Plan;
     const TKernelIndex& Kernels;
     bool EmbedWasm = false;
-    bool OperatorDiagnostics = false;
+    bool OperatorInstrumentation = false;
     std::optional<llvm::json::Object> Unsupported;
     llvm::json::Array Nodes;
     llvm::json::Array Edges;
@@ -2322,12 +2322,12 @@ struct TExecPlanCodec {
         if (typed.StageId != NQdb::InvalidExecStageId) {
             encoded["stageId"] = static_cast<int64_t>(typed.StageId);
         }
-        if (OperatorDiagnostics) {
+        if (OperatorInstrumentation) {
             llvm::json::Array widths;
-            for (const auto width : NQdb::DiagnosticColumnWidths(typed.OutputType)) {
+            for (const auto width : NQdb::InstrumentationColumnWidths(typed.OutputType)) {
                 widths.push_back(width);
             }
-            encoded["diagnosticWidths"] = std::move(widths);
+            encoded["instrumentationWidths"] = std::move(widths);
         }
         Nodes.push_back(std::move(encoded));
     }
@@ -2486,12 +2486,12 @@ struct TExecPlanCodec {
                     {"keyCount", static_cast<int64_t>(keyCount)},
                     {"output", std::move(output)},
                 };
-                if (OperatorDiagnostics) {
+                if (OperatorInstrumentation) {
                     llvm::json::Array buffers;
                     for (const auto index : ref->Kernel->AggStringMetadataBuffers) {
                         buffers.push_back(index);
                     }
-                    encoded["diagnosticStringBuffers"] = std::move(buffers);
+                    encoded["instrumentationStringBuffers"] = std::move(buffers);
                 }
                 if (!aggregate->GroupingSets().empty()) {
                     llvm::json::Array sets;
@@ -2798,14 +2798,14 @@ llvm::json::Object EncodeExecPlan(
     }
     try {
         auto kernelIndex = BuildKernelIndex(*plan, kernels, artifacts);
-        const bool diagnostic = std::ranges::any_of(kernels, [](const auto& kernel) {
-            return kernel.Name == "diagnostics";
+        const bool instrumentation = std::ranges::any_of(kernels, [](const auto& kernel) {
+            return kernel.Name == "instrumentation";
         });
         return TExecPlanCodec{
             .Plan = *plan,
             .Kernels = kernelIndex,
             .EmbedWasm = embedWasm,
-            .OperatorDiagnostics = diagnostic,
+            .OperatorInstrumentation = instrumentation,
         }.Encode(std::move(queryWasm), heapBase, wasmBits);
     } catch (const NQumir::TError& e) {
         return UnsupportedExec(e.ToString());
@@ -2890,13 +2890,13 @@ llvm::json::Object BuildBundle(
                 {"message", execPlanError},
             });
         }
-        if (request.Scheduler.Diagnostics.Operators && typedExecPlan) {
+        if (request.Scheduler.Instrumentation.Operators && typedExecPlan) {
             NQdb::TKernelCompiler compiler({
                 .Sink = &lowered.Kernels,
                 .BindNow = false,
                 .ExternalCatalog = externalCatalog,
             });
-            compiler.CompileDiagnostics();
+            compiler.CompileInstrumentation();
         }
         lowered.Graph->Build();
 
@@ -2947,8 +2947,8 @@ llvm::json::Object BuildBundle(
             wasmFinalized.HeapBase,
             request.WasmBits);
         for (size_t i = 0; i < loweredKernels.size(); ++i) {
-            if (loweredKernels[i].Name == "diagnostics") {
-                execPlan["operatorDiagnostics"] = EntrypointsJson({
+            if (loweredKernels[i].Name == "instrumentation") {
+                execPlan["operatorInstrumentation"] = EntrypointsJson({
                     &loweredKernels[i], &wasmFinalized.Kernels[i]});
             }
         }

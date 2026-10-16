@@ -375,7 +375,7 @@ public:
     // store) size the allocation off this instead of a bare literal.
     static constexpr size_t RowSetSize = 64;
 
-    std::shared_ptr<TKernelSlot> CompileDiagnostics();
+    std::shared_ptr<TKernelSlot> CompileInstrumentation();
 
     // Compiles a filter kernel for the given input struct type and predicate.
     // Returns a dispatch lambda that calls the compiled kernel.

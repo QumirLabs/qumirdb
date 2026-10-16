@@ -1,7 +1,7 @@
 (block
   ;; Called only by opt-in task instrumentation, never from an operator's
   ;; ordinary row loop. Native and wasm use this same measurement program.
-  (fun qdb_diagnostics_rows
+  (fun qdb_instrumentation_rows
        ((var batch <ref TRowSet>) (var widths <ptr i64>) (var output <ptr i64>))
     (block
       (var selection = (field batch Selection))
@@ -48,7 +48,7 @@
   ;; Retained HashTable allocations at a batch boundary, including key arena,
   ;; join row-id buckets, and string reducer buffers. Temporary rehash copies,
   ;; allocator metadata, source rowsets and output buffers are not included.
-  (fun qdb_diagnostics_hash
+  (fun qdb_instrumentation_hash
        ((var ht <ref HashTable>) (var join i64)
         (var string_buffers <ptr i64>) (var string_count i64)
         (var output <ptr i64>))

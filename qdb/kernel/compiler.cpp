@@ -105,7 +105,7 @@ std::unordered_map<std::string, void*> CompileKernelAst(
 namespace {
 constexpr const char* CacheSchemaVersion = "v1";
 // Bump when the generated key helpers or the .oz kernel libraries change.
-constexpr const char* KernelLibVersion = "31";
+constexpr const char* KernelLibVersion = "32";
 } // namespace
 
 NQumir::NCodeGen::TLlvmRunner::TLinkedModule CompileKernelAstCached(
@@ -121,11 +121,11 @@ NQumir::NCodeGen::TLlvmRunner::TLinkedModule CompileKernelAstCached(
         std::move(ast), entryNames, cacheDir, CacheSchemaVersion, KernelLibVersion, error);
 }
 
-std::shared_ptr<TKernelSlot> TKernelCompiler::CompileDiagnostics() {
-    auto source = NUtils::KernelFile(".", "diagnostics.oz");
+std::shared_ptr<TKernelSlot> TKernelCompiler::CompileInstrumentation() {
+    auto source = NUtils::KernelFile(".", "instrumentation.oz");
     std::ifstream input(source);
     if (!input) {
-        throw std::runtime_error("cannot open diagnostic kernel: " + source);
+        throw std::runtime_error("cannot open instrumentation kernel: " + source);
     }
     std::ostringstream text;
     text << input.rdbuf();
@@ -134,7 +134,7 @@ std::shared_ptr<TKernelSlot> TKernelCompiler::CompileDiagnostics() {
         throw library.error();
     }
     auto ast = NKernel::NOz::Block(std::move(*library));
-    return EmitKernel("diagnostics", {"qdb_diagnostics_rows", "qdb_diagnostics_hash"},
+    return EmitKernel("instrumentation", {"qdb_instrumentation_rows", "qdb_instrumentation_hash"},
         std::move(ast)).Slot;
 }
 

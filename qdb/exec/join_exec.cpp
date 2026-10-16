@@ -32,16 +32,16 @@ TInnerJoinProcessor::TInnerJoinProcessor(
 {
 }
 
-void TInnerJoinProcessor::SetDiagnostics(TOperatorDiagnostics* diagnostics) {
-    Diagnostics_ = diagnostics;
-    LeftRows_.SetDiagnostics(diagnostics, 0);
-    RightRows_.SetDiagnostics(diagnostics, 1);
+void TInnerJoinProcessor::SetInstrumentation(TOperatorInstrumentation* instrumentation) {
+    Instrumentation_ = instrumentation;
+    LeftRows_.SetInstrumentation(instrumentation, 0);
+    RightRows_.SetInstrumentation(instrumentation, 1);
 }
 
-void TInnerJoinProcessor::ObserveDiagnostics() {
-    if (Diagnostics_ && Initialized_) {
-        Diagnostics_->ObserveHash(LeftTable_.data(), 0, true);
-        Diagnostics_->ObserveHash(RightTable_.data(), 1, true);
+void TInnerJoinProcessor::ObserveInstrumentation() {
+    if (Instrumentation_ && Initialized_) {
+        Instrumentation_->ObserveHash(LeftTable_.data(), 0, true);
+        Instrumentation_->ObserveHash(RightTable_.data(), 1, true);
     }
 }
 
@@ -90,7 +90,7 @@ void TInnerJoinProcessor::EnsureInit() {
             JoinOp(EJoinKernelOp::Init))) {
         throw std::runtime_error("join hash table initialization failed");
     }
-    ObserveDiagnostics();
+    ObserveInstrumentation();
 }
 
 bool TInnerJoinProcessor::DrainReadyOutput(TRowSet& rowSet) {
@@ -538,9 +538,9 @@ EJoinBuildSide TInnerJoinProcessor::RequiredInputSide() const {
     return EJoinBuildSide::Auto;
 }
 
-void TCrossJoinProcessor::SetDiagnostics(TOperatorDiagnostics* diagnostics) {
-    LeftRows_.SetDiagnostics(diagnostics, 0);
-    RightRows_.SetDiagnostics(diagnostics, 1);
+void TCrossJoinProcessor::SetInstrumentation(TOperatorInstrumentation* instrumentation) {
+    LeftRows_.SetInstrumentation(instrumentation, 0);
+    RightRows_.SetInstrumentation(instrumentation, 1);
 }
 
 TCrossJoinProcessor::TCrossJoinProcessor(TCrossJoinKernels kernels)
