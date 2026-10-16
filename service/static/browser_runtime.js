@@ -2264,7 +2264,7 @@ export function runAggregate(kernel, layout, batch, selection, stage) {
   return finishAggregateState(state);
 }
 
-function createAggregateState(kernel, layout, stage) {
+function createAggregateState(kernel, layout, stage, instrumentation = null) {
   const dispatch = kernelExport(kernel, stage, 'agg_dispatch');
   const finishRowSet = kernelExport(kernel, stage, 'agg_finish_rowset');
 
@@ -2291,7 +2291,9 @@ function createAggregateState(kernel, layout, stage) {
     throw new Error('aggregate initialization failed');
   }
 
+  instrumentation?.hash(ht, 0, false);
   return {
+    instrumentation,
     kernel,
     layout,
     stage,
@@ -2505,7 +2507,7 @@ function dispatchJoin(state, batch, batchIdx, leftStore, rightStore, arg, op) {
     BigInt(op));
 }
 
-function createJoinState(kernel, layout, stage) {
+function createJoinState(kernel, layout, stage, instrumentation = null) {
   if (!browserRuntimeSupportsJoin(stage)) {
     throw new Error(`browser join type is not implemented: ${stage.joinType}` +
       (stage.hasResidual ? ' with residual' : ''));
@@ -2533,6 +2535,7 @@ function createJoinState(kernel, layout, stage) {
   }
 
   const state = {
+    instrumentation,
     kernel,
     layout,
     stage,
@@ -2557,6 +2560,8 @@ function createJoinState(kernel, layout, stage) {
   if (!dispatchJoin(state, 0, 0, 0, 0, 256, JoinOp.INIT)) {
     throw new Error('join hash table initialization failed');
   }
+  instrumentation?.hash(leftTable, 0, true);
+  instrumentation?.hash(rightTable, 1, true);
   return state;
 }
 
@@ -2623,6 +2628,7 @@ function updateJoinState(state, side, rowSet) {
   let stored = false;
   if (isLeft || !semiAnti) {
     const store = isLeft ? state.leftStore : state.rightStore;
+    state.instrumentation?.retain(rowSet, side);
     batchIdx = store.push(
       batch,
       rowsetPtr,
@@ -2721,11 +2727,12 @@ function finishJoinState(state) {
   // query (upstream joins finish before the final one peaks).
   state.leftStore.freeMarshalled();
   state.rightStore.freeMarshalled();
+  state.instrumentation?.releaseRetained();
   state.arena.free(state.leftKeyColumns);
   state.arena.free(state.rightKeyColumns);
 }
 
-function createCrossJoinState(kernel, layout, stage) {
+function createCrossJoinState(kernel, layout, stage, instrumentation = null) {
   const dispatch = kernelExport(kernel, stage, 'xj_dispatch');
   const materialize = kernelExport(kernel, stage, 'jt_materialize');
 
@@ -2733,6 +2740,7 @@ function createCrossJoinState(kernel, layout, stage) {
   const pairBuffer = arena.alloc(layout.pairBuffer.size, 8);
   new Uint8Array(arena.memory.buffer, pairBuffer, layout.pairBuffer.size).fill(0);
   return {
+    instrumentation,
     kernel,
     layout,
     stage,
@@ -2773,6 +2781,7 @@ function stableRowSetForStore(state, rowSet) {
 function updateCrossRightState(state, rowSet) {
   const { rowsetPtr, ownedPtr, wasmHandle, releaseInput } =
     stableRowSetForStore(state, rowSet);
+  state.instrumentation?.retain(rowSet, 1);
   state.rightStore.push(rowSet.batch, rowsetPtr, ownedPtr, wasmHandle);
   if (releaseInput) {
     releaseWasmRowSet(rowSet);
@@ -2787,6 +2796,7 @@ function updateCrossLeftState(state, rowSet) {
   }
   const { rowsetPtr, ownedPtr, wasmHandle, releaseInput } =
     stableRowSetForStore(state, rowSet);
+  state.instrumentation?.retain(rowSet, 0);
   const batchIdx = state.leftStore.push(rowSet.batch, rowsetPtr, ownedPtr, wasmHandle);
   const batchPtr = state.leftStore.dataPtr() + batchIdx * state.layout.rowset.size;
   try {
@@ -2838,6 +2848,7 @@ function finishCrossJoinState(state) {
     CrossJoinOp.DESTROY);
   state.leftStore.freeMarshalled();
   state.rightStore.freeMarshalled();
+  state.instrumentation?.releaseRetained();
 }
 
 function outputShapeFromRowSets(rowSets) {
@@ -3566,6 +3577,8 @@ class CteProducerTask {
     const fetched = input.fetch();
     if (fetched.result === FetchResult.NO_DATA) return TaskResult.NEED_DATA;
     if (fetched.result === FetchResult.OK) {
+      this.instrumentation?.retain(fetched.rowSet, 0);
+      this.instrumentation?.output(fetched.rowSet);
       this.spool.rowSets.push(fetched.rowSet);
       this.rows += fetched.rowSet.batch.rowCount;
       return TaskResult.OK;
@@ -3656,6 +3669,7 @@ class WindowTask {
     const fetched = input.fetch();
     if (fetched.result === FetchResult.NO_DATA) return TaskResult.NEED_DATA;
     if (fetched.result === FetchResult.OK) {
+      this.instrumentation?.retain(fetched.rowSet, 0);
       this.inputs.push(fetched.rowSet);
       this.rows += fetched.rowSet.batch.rowCount;
       return TaskResult.OK;
@@ -3671,6 +3685,7 @@ class WindowTask {
     this.inputs = [];
     this.pending = runWindowKernelRowSets(
       kernel, this.layout, inputs, this.stage);
+    this.instrumentation?.releaseRetained();
     return this.execute();
   }
 
@@ -3718,7 +3733,7 @@ class AggregateTask {
           this.kernel = await instantiateKernel(
             stageEntrypoint(this.stage, 'agg_dispatch'), this.shared);
         }
-        this.state = createAggregateState(this.kernel, this.layout, this.stage);
+        this.state = createAggregateState(this.kernel, this.layout, this.stage, this.instrumentation);
       }
       this.pending = finishAggregateState(
         this.state, downstreamConsumesWasm(this.node));
@@ -3728,13 +3743,14 @@ class AggregateTask {
     if (!this.kernel) {
       this.kernel = await instantiateKernel(
         stageEntrypoint(this.stage, 'agg_dispatch'), this.shared);
-      this.state = createAggregateState(this.kernel, this.layout, this.stage);
+      this.state = createAggregateState(this.kernel, this.layout, this.stage, this.instrumentation);
     }
     if (fetched.rowSet.batch.wasm && !fetched.rowSet.batch.wasm.pinned) {
       assertStreamingWasmEdge(this.node.inbound[0]);
     }
     try {
       updateAggregateState(this.state, fetched.rowSet);
+      this.instrumentation?.hash(this.state.ht, 0, false);
       this.rows += fetched.rowSet.batch.rowCount;
     } finally {
       releaseWasmRowSet(fetched.rowSet);
@@ -3784,7 +3800,7 @@ class JoinTask {
         this.kernel = await instantiateKernel(
           stageEntrypoint(this.stage, 'jt_dispatch'), this.shared);
       }
-      this.state = createJoinState(this.kernel, this.layout, this.stage);
+      this.state = createJoinState(this.kernel, this.layout, this.stage, this.instrumentation);
     }
 
     const drained = drainJoinPairs(this.state, BROWSER_JOIN_OUTPUT_BATCH_ROWS, asWasm);
@@ -3817,6 +3833,10 @@ class JoinTask {
     }
 
     const progressed = this.pullOneInputBatch();
+    if (this.instrumentation && this.state) {
+      this.instrumentation.hash(this.state.leftTable, 0, true);
+      this.instrumentation.hash(this.state.rightTable, 1, true);
+    }
     if (progressed) {
       this.ready.push(...drainJoinPairs(this.state, BROWSER_JOIN_OUTPUT_BATCH_ROWS, asWasm));
       if (this.ready.length > 0) {
@@ -4031,7 +4051,7 @@ class CrossJoinTask {
         this.kernel = await instantiateKernel(
           stageEntrypoint(this.stage, 'xj_dispatch'), this.shared);
       }
-      this.state = createCrossJoinState(this.kernel, this.layout, this.stage);
+      this.state = createCrossJoinState(this.kernel, this.layout, this.stage, this.instrumentation);
     }
 
     const drained = drainCrossJoinPairs(this.state, BROWSER_JOIN_OUTPUT_BATCH_ROWS, asWasm);
@@ -4234,6 +4254,7 @@ class SortTask {
     if (this.pending) {
       if (!output.canPush()) return TaskResult.BLOCKED_OUTPUT;
       output.push({ batch: this.pending, selection: null });
+      if (this.topSort) this.instrumentation?.releaseRetained();
       output.finish();
       this.pending = null;
       this.done = true;
@@ -4245,7 +4266,11 @@ class SortTask {
     if (fetched.result === FetchResult.OK) {
       if (this.topSort) {
         await this.topSort.add(fetched.rowSet);
+        if (this.instrumentation && this.topSort.stateBatch) {
+          this.instrumentation.retain({ batch: this.topSort.stateBatch, selection: null }, 0, false);
+        }
       } else {
+        this.instrumentation?.retain(fetched.rowSet, 0);
         this.inputs.push(fetched.rowSet);
       }
       this.rows += fetched.rowSet.batch.rowCount;
@@ -4269,6 +4294,7 @@ class SortTask {
     this.inputs = [];
     this.pending = runRadixSortRowSets(
       kernel, this.layout, inputs, this.stage.radixKeys, null);
+    this.instrumentation?.releaseRetained();
     return this.execute();
   }
 
@@ -4531,6 +4557,179 @@ function taskNodeForStage(stage, layout, readSourceBatches, onProgress, shared) 
   throw new Error(`unsupported exec stage: ${stage.kind}`);
 }
 
+class OperatorInstrumentation {
+  constructor(stage, shared, layout, kernels) {
+    this.stage = stage;
+    this.shared = shared;
+    this.layout = layout;
+    this.kernels = kernels;
+
+    this.scratch = shared.arena.alloc(24, 8);
+    this.stringBuffers = shared.arena.alloc(Math.max(stage.instrumentationStringBuffers?.length || 0, 1) * 8, 8);
+    const view = shared.arena.view();
+    (stage.instrumentationStringBuffers || []).forEach((index, i) =>
+      view.setBigInt64(this.stringBuffers + i * 8, BigInt(index), true));
+    this.inputs = [];
+    this.rowsOut = 0;
+    this.bytesOut = 0;
+    this.groups = null;
+    this.capacity = null;
+    this.growths = null;
+    this.memory = null;
+    this.previous = [0, 0];
+    this.sideGroups = [0, 0];
+    this.sideBytes = [0, 0];
+    this.inputWidths = [];
+    this.retainedBytes = 0;
+    this.retainedPeak = 0;
+    this.buildMemory = 0;
+    this.hasBuildMemory = false;
+  }
+
+  measure(rowSet, widths, allRows = false) {
+    // Marshalling stays in the existing adapter; selection, validity, offset
+    // widths and payload measurement are interpreted by the common Oz code.
+    const wasm = wasmRowSetForSelection(rowSet.batch, rowSet.selection);
+    const marshalled = wasm ? null : marshalRowSet(this.shared.arena, this.layout,
+      rowSet.batch.columns, rowSet.batch.rowCount, false, rowSet.selection);
+    let pointer = wasm ? wasm.rowsetPtr : marshalled.rowsetPtr;
+    let descriptor = 0;
+    if (allRows) {
+      descriptor = this.shared.arena.alloc(this.layout.rowset.size, 8);
+      this.shared.arena.bytes().copyWithin(descriptor, pointer, pointer + this.layout.rowset.size);
+      writePointer(this.shared.arena.view(), descriptor + this.layout.rowset.selection, 0);
+      pointer = descriptor;
+    }
+    const widthPtr = this.shared.arena.alloc(Math.max(widths.length, 1) * 8, 8);
+    try {
+      const view = this.shared.arena.view();
+      widths.forEach((width, i) => view.setBigInt64(widthPtr + i * 8, BigInt(width), true));
+      this.kernels.rows(toWasmPtr(pointer), toWasmPtr(widthPtr), toWasmPtr(this.scratch));
+      const result = this.shared.arena.view();
+      return [Number(result.getBigInt64(this.scratch, true)),
+        Number(result.getBigInt64(this.scratch + 8, true))];
+    } finally {
+      this.shared.arena.free(widthPtr);
+      if (descriptor) this.shared.arena.free(descriptor);
+      if (marshalled) freeMarshalledRowSet(this.shared.arena, this.layout, marshalled.rowsetPtr);
+    }
+  }
+
+  input(rowSet, widths, index) {
+    const [rows, bytes] = this.measure(rowSet, widths);
+    this.inputWidths[index] = widths;
+    const input = this.inputs[index] ||= { rows: 0, bytes: 0 };
+    input.rows += rows;
+    input.bytes += bytes;
+  }
+
+  output(rowSet) {
+    const [rows, bytes] = this.measure(rowSet, this.stage.instrumentationWidths);
+    this.rowsOut += rows;
+    this.bytesOut += bytes;
+  }
+
+  retain(rowSet, input, append = true) {
+    const [, bytes] = this.measure(rowSet, this.inputWidths[input], true);
+    this.retainedBytes = append ? this.retainedBytes + bytes : bytes;
+    this.hasBuildMemory = true;
+    this.retainedPeak = Math.max(this.retainedPeak, this.retainedBytes);
+    this.buildMemory = Math.max(this.buildMemory, this.retainedBytes + this.sideBytes[0] + this.sideBytes[1]);
+  }
+
+  releaseRetained() {
+    this.retainedBytes = 0;
+  }
+
+  hash(table, side, join) {
+    this.hasBuildMemory = true;
+    this.kernels.hash(toWasmPtr(table), join ? 1n : 0n,
+      toWasmPtr(this.stringBuffers), BigInt(this.stage.instrumentationStringBuffers?.length || 0),
+      toWasmPtr(this.scratch));
+    const view = this.shared.arena.view();
+    const groups = Number(view.getBigInt64(this.scratch, true));
+    const capacity = Number(view.getBigInt64(this.scratch + 8, true));
+    const bytes = Number(view.getBigInt64(this.scratch + 16, true));
+    this.growths ??= 0;
+    if (this.previous[side]) {
+      for (let old = this.previous[side]; old < capacity; old *= 2) ++this.growths;
+    }
+    this.previous[side] = capacity;
+    this.sideGroups[side] = groups;
+    this.sideBytes[side] = bytes;
+    this.groups = this.sideGroups[0] + this.sideGroups[1];
+    this.capacity = this.previous[0] + this.previous[1];
+    this.memory = Math.max(this.memory || 0, this.sideBytes[0] + this.sideBytes[1]);
+    this.buildMemory = Math.max(this.buildMemory, this.retainedBytes + this.sideBytes[0] + this.sideBytes[1]);
+  }
+
+  snapshot(node) {
+    const materializes = ['aggregate', 'join', 'cross-join', 'window', 'sort', 'top-sort', 'cte-producer'].includes(this.stage.kind);
+    return {
+      stage_id: this.stage.stageId ?? this.stage.id,
+      kind: this.stage.kind,
+      rows_in: this.inputs.reduce((sum, value) => sum + value.rows, 0),
+      rows_out: this.rowsOut,
+      bytes_in: this.inputs.reduce((sum, value) => sum + value.bytes, 0),
+      bytes_out: this.bytesOut,
+      inputs: this.inputs,
+      groups: this.groups,
+      hash_capacity: this.capacity,
+      hash_growth_events: this.growths,
+      rehashes: this.growths,
+      hash_memory_peak_bytes: this.memory,
+      retained_input_bytes: this.hasBuildMemory ? this.retainedBytes : null,
+      retained_input_peak_bytes: this.hasBuildMemory ? this.retainedPeak : null,
+      build_memory_peak_bytes: this.hasBuildMemory ? this.buildMemory : null,
+      materialized_bytes: materializes ? this.bytesOut : null,
+      execution_cpu_seconds: null,
+      task_elapsed_seconds: node.elapsedMs / 1000,
+      // The browser contracts physical lanes; a single task has no measured
+      // partition distribution and cannot claim native partition skew.
+      partition_skew: null,
+    };
+  }
+
+  destroy() {
+    this.shared.arena.free(this.stringBuffers);
+    this.shared.arena.free(this.scratch);
+  }
+}
+
+async function attachOperatorInstrumentation(exec, nodes, shared, layout) {
+  if (!exec.operatorInstrumentation) {
+    throw new Error('operator instrumentation requires an export with options.operatorInstrumentation=true');
+  }
+  const rows = await instantiateKernel(exec.operatorInstrumentation.qdb_instrumentation_rows, shared);
+  const hash = await instantiateKernel(exec.operatorInstrumentation.qdb_instrumentation_hash, shared);
+  const kernels = { rows: rows.fn, hash: hash.fn };
+  for (const node of nodes) {
+    if (node.task.stage) {
+      node.instrumentation = new OperatorInstrumentation(node.task.stage, shared, layout, kernels);
+      node.task.instrumentation = node.instrumentation;
+    }
+  }
+  for (const node of nodes) {
+    for (const edge of node.outbound) {
+      const connection = edge.connection;
+      const push = connection.push.bind(connection);
+      const fetch = connection.fetch.bind(connection);
+      connection.push = rowSet => {
+        if (edge.src.instrumentation) edge.src.instrumentation.output(rowSet);
+        return push(rowSet);
+      };
+      connection.fetch = () => {
+        const result = fetch();
+        if (result.result === FetchResult.OK && edge.dst.instrumentation) {
+          edge.dst.instrumentation.input(result.rowSet, edge.src.task.stage.instrumentationWidths,
+            edge.dst.inbound.indexOf(edge));
+        }
+        return result;
+      };
+    }
+  }
+}
+
 function buildScheduledGraph(exec, readSourceBatches, options, layout, shared) {
   const nodesById = new Map();
   const nodes = [];
@@ -4621,10 +4820,22 @@ export async function executeBrowserPipelineScheduled(exec, readSourceBatches, o
   const scheduler = new SingleThreadedScheduler(roots);
   let result;
   try {
+    if (options.operatorInstrumentation === true) {
+      await attachOperatorInstrumentation(exec, nodes, shared, layout);
+    }
     await scheduler.run();
     result = sink.task.result();
+    if (options.operatorInstrumentation === true) {
+      result.operator_instrumentation = {
+        schema_version: 1,
+        bytes: 'logical_nonnull_payload',
+        memory: 'batch_boundary_hash_reservations',
+        stages: nodes.filter(node => node.instrumentation).map(node => node.instrumentation.snapshot(node)),
+      };
+    }
   } finally {
     cleanupScheduledGraph(nodes);
+    for (const node of nodes) node.instrumentation?.destroy();
   }
   result.timings = nodes.map(node => ({
     stage: node.label,
