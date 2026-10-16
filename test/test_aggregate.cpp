@@ -19,6 +19,7 @@
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/passes/column_pruning.h>
 #include <qdb/plan/passes/typing.h>
+#include <qdb/plan/pipeline.h>
 #include <qdb/sexp/parser.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
@@ -70,7 +71,7 @@ TOperatorPtr ParsePlan(const std::string& sexp, ISource& source) {
     return root;
 }
 
-TOperatorPtr BuildSqlPlan(const std::string& sql, ISource& source) {
+TOperatorPtr BuildSqlPlan(const std::string& sql, const TTableSourceFactory& sources) {
     std::istringstream in(sql);
     NSql::TTokenStream tokens(in);
     NSql::TParser parser;
@@ -78,15 +79,19 @@ TOperatorPtr BuildSqlPlan(const std::string& sql, ISource& source) {
     if (!parsed) {
         throw std::runtime_error(parsed.error().ToString());
     }
-    auto plan = BuildPlan(*parsed, [&](std::string_view table)
-        -> std::expected<TOperatorPtr, NQumir::TError>
-    {
-        return std::make_shared<TSourceOperator>(source, std::string(table));
-    });
+    auto plan = BuildPlan(*parsed, sources);
     if (!plan) {
         throw std::runtime_error(plan.error().ToString());
     }
     return std::move(*plan);
+}
+
+TOperatorPtr BuildSqlPlan(const std::string& sql, ISource& source) {
+    return BuildSqlPlan(sql, [&](std::string_view table)
+        -> std::expected<TOperatorPtr, NQumir::TError>
+    {
+        return std::make_shared<TSourceOperator>(source, std::string(table));
+    });
 }
 
 std::shared_ptr<TAggregateOperator> FindAggregate(const TOperatorPtr& op) {
@@ -149,6 +154,98 @@ std::string StringAt(const TColumn& column, int64_t row) {
 }
 
 } // namespace
+
+TEST(AggregateE2E, GlobalIdentitySurvivesParallelCascade) {
+    for (bool nullable : {false, true}) {
+        for (bool cascade : {false, true}) {
+            // Two independent sources force the gather or partial/combine path.
+            for (int input : {0, 1, 2, 3}) {
+                if (!nullable && input == 3) {
+                    continue;
+                }
+                SCOPED_TRACE(::testing::Message() << "cascade=" << cascade << " nullable=" << nullable << " input=" << input);
+                std::array<int64_t, 3> values = {7, 0, -2};
+                std::array<uint8_t, 1> mask = {static_cast<uint8_t>(input == 3 ? 0 : 0b101)};
+                TColumn column{.Data = reinterpret_cast<char*>(values.data()), .Mask = nullable ? mask.data() : nullptr};
+                auto batches = [&]() {
+                    std::vector<TRowSet> result;
+                    if (input != 0) {
+                        result.push_back(TRowSet{
+                            .Columns = &column, .ColumnCount = 1, .RowCount = 3, .RefCount = 1});
+                    }
+                    return result;
+                };
+                TTypePtr type = std::make_shared<TIntegerType>();
+                if (nullable) {
+                    type = std::make_shared<TNullable>(type);
+                }
+                TMockSource left({"v"}, batches(), {type});
+                TMockSource right({"v"}, batches(), {type});
+                std::string sql = "SELECT COUNT(*), COUNT(v), SUM(v), MIN(v), MAX(v), AVG(v) "
+                    "FROM (SELECT v FROM l UNION ALL SELECT v FROM r) u";
+                if (input == 1) {
+                    sql += " WHERE v > 100";
+                }
+                auto root = BuildSqlPlan(sql, [&](std::string_view table)
+                    -> std::expected<TOperatorPtr, NQumir::TError>
+                {
+                    ISource& source = table == "l"
+                        ? left
+                        : right;
+                    return std::make_shared<TSourceOperator>(source, std::string(table));
+                });
+                ApplyPlanPasses(root);
+                NScheduler::TSettings settings;
+                settings.Scheduler.WorkerCount = 2;
+                settings.Aggregate.CascadeGlobal = cascade;
+                auto runtime = RunPlan(root, settings);
+                TRowSet result{};
+                ASSERT_TRUE(runtime->Next(result));
+                ASSERT_EQ(result.RowCount, 1);
+                ASSERT_EQ(result.ColumnCount, 6);
+                EXPECT_EQ(result.Columns[0].Mask, nullptr);
+                EXPECT_EQ(result.Columns[1].Mask, nullptr);
+                EXPECT_EQ(reinterpret_cast<int64_t*>(result.Columns[0].Data)[0], input >= 2 ? 6 : 0);
+                EXPECT_EQ(reinterpret_cast<int64_t*>(result.Columns[1].Data)[0], input == 2 ? (nullable ? 4 : 6) : 0);
+                for (int columnIndex = 2; columnIndex < 6; ++columnIndex) {
+                    EXPECT_EQ(IsValid(result.Columns[columnIndex], 0), input == 2);
+                }
+                if (input == 2) {
+                    EXPECT_EQ(reinterpret_cast<int64_t*>(result.Columns[2].Data)[0], 10);
+                    EXPECT_EQ(reinterpret_cast<int64_t*>(result.Columns[3].Data)[0], -2);
+                    EXPECT_EQ(reinterpret_cast<int64_t*>(result.Columns[4].Data)[0], 7);
+                    EXPECT_DOUBLE_EQ(reinterpret_cast<double*>(result.Columns[5].Data)[0], nullable ? 2.5 : 5.0 / 3.0);
+                }
+                Release(&result);
+                EXPECT_FALSE(runtime->Next(result));
+            }
+        }
+    }
+}
+
+TEST(AggregateE2E, EmptyExplicitGroupsHaveNoIdentityRow) {
+    for (bool cascade : {false, true}) {
+        for (const auto& sql : {
+            "SELECT v, COUNT(*) FROM t GROUP BY v",
+            "SELECT COUNT(*) FROM t GROUP BY 1 + 1"})
+        {
+            SCOPED_TRACE(::testing::Message() << "cascade=" << cascade << " sql=" << sql);
+            TMockSource source({"v"});
+            auto root = BuildSqlPlan(sql, source);
+            ASSERT_FALSE(FindAggregate(root)->IsGlobal());
+            ApplyPlanPasses(root);
+            NScheduler::TSettings settings;
+            settings.Scheduler.WorkerCount = 2;
+            settings.Aggregate.CascadeGlobal = cascade;
+            auto runtime = RunPlan(root, settings);
+            TRowSet result{};
+            while (runtime->Next(result)) {
+                EXPECT_EQ(result.RowCount, 0);
+                Release(&result);
+            }
+        }
+    }
+}
 
 TEST(AggregateLogical, ReusesSumAndCountForAffineIntegerSums) {
     std::ostringstream sql;

@@ -177,7 +177,8 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     NQumir::NAst::TTypePtr columnType,
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType,
-    bool hasPrecomputedHash = false);
+    bool hasPrecomputedHash = false,
+    bool global = false);
 
 // Builds the byte-oriented finalize ABI. C++ supplies one opaque u8 destination
 // per logical key field; the generated wrapper casts each destination to its

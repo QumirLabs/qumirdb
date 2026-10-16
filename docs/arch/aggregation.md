@@ -140,6 +140,21 @@ generic table does not dispatch on aggregate function names at runtime.
 `count(*)` counts rows; `count(arg)` skips NULLs. Other reducers track validity
 so an all-NULL contribution is distinguishable from a numeric zero.
 
+## Global aggregate identity
+
+A SQL aggregate without grouping has one group even when its input has no rows.
+The logical plan carries this property explicitly; a constant grouping expression
+in an ordinary `GROUP BY` does not have it. The generated initialization creates
+the global group without applying a reducer update. Its COUNT states are zero,
+and other reducers remain invalid until a non-NULL value contributes, so empty
+SUM, MIN, MAX, and AVG produce NULL even for non-nullable input columns.
+
+In a parallel global cascade, each partial aggregate owns this identity group.
+The combine stage merges their rows with the usual reducers. It does not create
+an additional identity contribution or count the seeded groups as input rows.
+A SUM that merges partial COUNT states preserves COUNT's zero identity; an
+ordinary SQL SUM remains NULL over an empty global input.
+
 ## Hash table
 
 The current implementation uses Swiss-style grouped control-byte probing. The

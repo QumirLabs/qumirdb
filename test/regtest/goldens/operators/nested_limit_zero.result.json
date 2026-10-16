@@ -1,4 +1,6 @@
 {
   "schema": "<struct (n i64)>",
-  "rows": []
+  "rows": [
+    ["0"]
+  ]
 }

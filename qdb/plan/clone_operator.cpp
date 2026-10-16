@@ -110,7 +110,8 @@ TOperatorPtr Reconstruct(const TOperatorPtr& op) {
     }
     if (auto n = TMaybeOp<TAggregateOperator>(op)) {
         auto agg = std::make_shared<TAggregateOperator>(
-            StructuralClone(n.Cast()->Input()), n.Cast()->GroupKeys(), n.Cast()->Aggs());
+            StructuralClone(n.Cast()->Input()), n.Cast()->GroupKeys(), n.Cast()->Aggs(),
+            n.Cast()->IsGlobal());
         agg->MutableGroupingSets() = n.Cast()->GroupingSets();
         return agg;
     }

@@ -2191,7 +2191,10 @@ std::expected<TRelation, TError> BuildAggregate(
                 const std::string innerName = names.Next("partial");
                 const std::string mergeFunc = spec.Func == "count" ? "sum" : spec.Func;
                 innerSpecs.push_back({ .Name = innerName, .Func = spec.Func, .Arg = std::move(spec.Arg) });
-                outerSpecs.push_back({ .Name = spec.Name, .Func = mergeFunc, .Arg = Ident({}, innerName) });
+                outerSpecs.push_back({
+                    .Name = spec.Name, .Func = mergeFunc, .Arg = Ident({}, innerName),
+                    .EmptyIsZero = spec.Func == "count" || spec.EmptyIsZero,
+                });
             }
             node = Relation(std::make_shared<TAggregateOperator>(
                 std::move(node.Plan), std::move(dedupKeys), std::move(innerSpecs)));
@@ -2264,7 +2267,7 @@ std::expected<TRelation, TError> BuildAggregate(
     }
 
     auto aggregate = std::make_shared<TAggregateOperator>(
-        std::move(node.Plan), std::move(keys), std::move(specs));
+        std::move(node.Plan), std::move(keys), std::move(specs), global);
     if (multiSet) {
         aggregate->MutableGroupingSets() = std::move(groupingSets);
         auto aggregateInput = aggregate->Input()->OutputColumns();

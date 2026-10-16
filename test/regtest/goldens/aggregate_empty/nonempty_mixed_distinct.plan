@@ -1,0 +1,5 @@
+project (cd, c, cn, s) (rows≈1 cost≈352)
+└─ aggregate keys=[__group__] aggs=[count_0=count, count_1=sum, count_2=sum, sum_0=sum] (rows≈1 cost≈320)
+   └─ project (t.n, partial_0, partial_1, partial_2, __group__) (rows≈2 cost≈240)
+      └─ aggregate keys=[t.n] aggs=[partial_0=count, partial_1=count, partial_2=sum] (rows≈2 cost≈160)
+         └─ source t AS t (rows≈4 cost≈32)

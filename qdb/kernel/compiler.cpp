@@ -1967,6 +1967,7 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
             .Name = agg.Name,
             .Func = agg.Func,
             .Arg = agg.ArgExpr,
+            .EmptyIsZero = agg.EmptyIsZero,
         });
     }
 
@@ -2060,7 +2061,8 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
                     : (isBool ? NKernel::EAggValueKind::Bool
                         : (isFloat ? NKernel::EAggValueKind::Float64
                                    : NKernel::EAggValueKind::Int64)));
-            arg.IsNullable = IsNullableType(type);
+            arg.IsNullable = IsNullableType(type) ||
+                (spec.IsGlobalAggregate && agg.Func != "count" && !agg.EmptyIsZero);
             arg.ColumnIndex = columnIndex(name);
         }
         args.push_back(arg);
@@ -2073,7 +2075,7 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
 
     auto program = NKernel::BuildGenericAggregateFusedProgramAst(
         inputType, keyDescriptor, layout,
-        columnType, rowSetType, hashTableType, spec.HasPrecomputedHash);
+        columnType, rowSetType, hashTableType, spec.HasPrecomputedHash, spec.IsGlobalAggregate);
     if (!program) {
         throw NQumir::TError(
             "CompileAggregate: " + program.error().ToString());

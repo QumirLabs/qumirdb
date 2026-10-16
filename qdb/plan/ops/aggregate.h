@@ -15,13 +15,15 @@ struct TAggregateSpec {
     std::string Name;            // output column name
     std::string Func;            // "count" | "sum" | "min" | "max"
     NQumir::NAst::TExprPtr Arg;  // parsed, unannotated; nullptr for count(*)
+    bool EmptyIsZero = false;   // merging partial COUNT states with SUM
 };
 
 class TAggregateOperator : public IOperator {
 public:
     static constexpr const char* OpId = "aggregate";
 
-    TAggregateOperator(TOperatorPtr input, std::vector<std::string> groupKeys, std::vector<TAggregateSpec> aggs);
+    TAggregateOperator(TOperatorPtr input, std::vector<std::string> groupKeys,
+        std::vector<TAggregateSpec> aggs, bool global = false);
 
     std::string_view RelName() const override { return OpId; }
     std::vector<TColumnReference> ColumnReferences() const override;
@@ -37,6 +39,8 @@ public:
     TOperatorPtr& MutableInput() { return Input_; }
     const std::vector<std::string>& GroupKeys() const { return GroupKeys_; }
     std::vector<std::string>& MutableGroupKeys() { return GroupKeys_; }
+    // A global aggregate owns one group even when no input row arrives.
+    bool IsGlobal() const { return Global_; }
     const std::vector<TAggregateSpec>& Aggs() const { return Aggs_; }
     std::vector<TAggregateSpec>& MutableAggs() { return Aggs_; }
 
@@ -57,6 +61,7 @@ private:
     TOperatorPtr Input_;
     std::vector<std::string> GroupKeys_;
     std::vector<TAggregateSpec> Aggs_;
+    bool Global_ = false;
     std::vector<std::vector<size_t>> GroupingSets_;
 };
 
@@ -74,7 +79,8 @@ NQumir::NAst::TTypePtr ComputeAggregateOutputType(
     const NQumir::NAst::TTypePtr& inputSchema,
     const std::vector<std::string>& groupKeys,
     const std::vector<TAggregateSpec>& aggs,
-    bool nullableKeys = false);
+    bool nullableKeys = false,
+    bool global = false);
 
 // aggs: (output_name, func, arg_expr_string) triples; arg_expr_string empty for count(*)
 std::expected<TOperatorPtr, NQumir::TError>

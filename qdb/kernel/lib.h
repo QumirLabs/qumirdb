@@ -121,7 +121,8 @@ BuildGenericAggregateFusedProgramAst(
     NQumir::NAst::TTypePtr columnType,
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType,
-    bool hasPrecomputedHash = false);
+    bool hasPrecomputedHash = false,
+    bool global = false);
 
 } // namespace NKernel
 } // namespace NQdb
