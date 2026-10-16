@@ -15,6 +15,7 @@ struct TAggregateSpec {
     std::string Name;            // output column name
     std::string Func;            // "count" | "sum" | "min" | "max"
     NQumir::NAst::TExprPtr Arg;  // parsed, unannotated; nullptr for count(*)
+    bool EmptyIsZero = false;   // merging partial COUNT states with SUM
 };
 
 class TAggregateOperator : public IOperator {

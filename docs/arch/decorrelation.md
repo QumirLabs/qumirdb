@@ -135,9 +135,18 @@ filter (< l_quantity __scalar_0__)
          └─ source lineitem            -- group by l_partkey, exposed as __corr_0_0__
 ```
 
-`LEFT` is required: a part with no matching lineitems yields `NULL`, and
-`l_quantity < NULL` is unknown → the row is filtered out, matching SQL scalar
-semantics. The comparison stays above the join because it spans both sides.
+`LEFT` preserves the outer row when no inner group exists. SUM, MIN, and AVG
+then yield NULL, so a comparison such as `l_quantity < NULL` is unknown and
+filters the row out. An ungrouped COUNT has a different identity: no matches
+mean zero. Its aggregate states pass through the LEFT join, COUNT states recover
+zero, and the scalar expression is evaluated afterward. This order also makes
+`COUNT(*) + 1` yield one for an empty input without changing a NULL produced by
+the scalar expression on an existing group.
+
+HAVING is evaluated after these identities are restored. If it rejects the
+aggregate row, the scalar subquery yields NULL. Explicit GROUP BY retains its
+ordinary missing-group behavior; it does not acquire an empty identity group.
+The surrounding comparison stays above the join because it spans both sides.
 
 Multiple correlation columns are supported (one group key + one join key each).
 The correlated subquery may itself sit inside an `IN` subquery — it is handled
@@ -164,4 +173,4 @@ statistics are estimated, so it is not costed as a selective predicate
   whole predicate requires;
 - the correlated subquery must reduce to a single value (one non-correlation
   output column);
-- `WITH RECURSIVE` and scalar subqueries in the SELECT list are not handled.
+- `WITH RECURSIVE` in scalar subqueries is not handled.

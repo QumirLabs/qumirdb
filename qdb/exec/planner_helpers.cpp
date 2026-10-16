@@ -169,6 +169,7 @@ std::shared_ptr<TAggregateOperator> BuildAggregateCombineOperator(
             .Func = std::move(func),
             .Arg = std::make_shared<NQumir::NAst::TIdentExpr>(
                 NQumir::TLocation{}, agg.Name),
+            .EmptyIsZero = agg.Func == "count" || agg.EmptyIsZero,
         });
     }
     return std::make_shared<TAggregateOperator>(
