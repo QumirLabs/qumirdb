@@ -25,7 +25,7 @@ from query_runner import TIMINGS, sha256
 RUNNER = Path(__file__).with_name("run_tpch.sh")
 REPO = RUNNER.parents[2]
 FORBIDDEN = {"--format", "--verbose", "--scheduler-counters", "--operator-diagnostics",
-             "--operator-instrumentation", "--sql", "--sexpr", "--data", "-i"}
+             "--operator-instrumentation", "--instrumentation", "--sql", "--sexpr", "--data", "-i"}
 SUM_METRICS = [*TIMINGS, "process_wall_seconds", "process_user_seconds", "process_system_seconds"]
 
 
