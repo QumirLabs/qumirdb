@@ -194,7 +194,7 @@ function run(command, args, input = undefined) {
   return result.stdout;
 }
 
-function exportBundle(name, mode, embedWasm, cacheDir = null, instrumentation = false) {
+function exportBundle(name, mode, embedWasm, cacheDir = null) {
   const fixture = fixtures[name];
   const multi = mode === 'threaded';
   const request = {
@@ -207,7 +207,6 @@ function exportBundle(name, mode, embedWasm, cacheDir = null, instrumentation = 
       shufflePartitions: multi ? 2 : 1,
       format: 'runtime-bundle',
       embedWasm,
-      ...(instrumentation ? { operatorInstrumentation: true } : {}),
     },
   };
   const exporterArgs = [...exporterBaseArgs];
@@ -656,7 +655,7 @@ function normalizeResult(result) {
   };
 }
 
-async function browserResult(name, exec, options = {}) {
+async function browserResult(name, exec) {
   const fixture = fixtures[name];
   const readSourceBatches = async function* (stage) {
     const table = fixture.tables[stage.table];
@@ -683,7 +682,7 @@ async function browserResult(name, exec, options = {}) {
       begin = end;
     }
   };
-  return executeBrowserPipelineScheduled(exec, readSourceBatches, options);
+  return executeBrowserPipelineScheduled(exec, readSourceBatches);
 }
 
 function countObjectFiles(dir) {
@@ -718,105 +717,6 @@ async function runWasmCacheContract() {
       'cached wasm execution changed the query result');
   } finally {
     rmSync(cacheDir, { recursive: true, force: true });
-  }
-}
-
-async function runInstrumentationPayloadContract() {
-  const request = {
-    sql: 'SELECT k, v FROM t WHERE k >= 2',
-    dataset: { tables: [{ name: 't', columns: [
-      { name: 'k', type: 'i64' },
-      { name: 'v', type: '<named Nullable [string]>' },
-    ], stats: { rows: 4, bytes: 37, rowGroups: 1 } }] },
-    options: { scheduler: 'single', scanTasks: 1, embedWasm: true, operatorInstrumentation: true },
-  };
-  const bundle = JSON.parse(run(exporter, exporterBaseArgs, JSON.stringify(request)));
-  assert.equal(bundle.ok, true, bundle.error?.message);
-  assert.equal(bundle.exec.supported, true, bundle.exec.reason);
-  const values = { k: [1, 2, 3, 4], v: ['x', 'аб', null, ''] };
-  const result = await executeBrowserPipelineScheduled(resolveExecArtifacts(bundle),
-    async function* (stage) {
-      yield { rowCount: 4, columns: stage.columns.map(column => ({ ...column, values: values[column.name] })) };
-    }, { operatorInstrumentation: true });
-  assert.deepEqual(normalizeResult(result), {
-    columns: ['k', 'v'], rows: [['2', 'аб'], ['3', ''], ['4', '']],
-  });
-  const stages = result.operator_instrumentation.stages;
-  const source = stages.find(stage => stage.kind === 'source');
-  const filter = stages.find(stage => stage.kind === 'filter');
-  assert.equal(source.rows_out, 4);
-  assert.equal(source.bytes_out, 37);
-  assert.equal(filter.rows_out, 3);
-  assert.equal(filter.bytes_out, 28);
-  assert.equal(result.memory.liveMB, '0.0');
-}
-
-async function runInstrumentationSemiJoinContract() {
-  const request = {
-    sql: 'SELECT l.k FROM l LEFT SEMI JOIN r ON l.k = r.rk AND l.v < r.w',
-    dataset: datasetFor(fixtures.join),
-    options: { scheduler: 'single', scanTasks: 1, shufflePartitions: 1,
-      embedWasm: true, operatorInstrumentation: true },
-  };
-  const bundle = JSON.parse(run(exporter, exporterBaseArgs, JSON.stringify(request)));
-  assert.equal(bundle.ok, true, bundle.error?.message);
-  assert.equal(bundle.exec.supported, true, bundle.exec.reason);
-  const result = await browserResult('join', resolveExecArtifacts(bundle), { operatorInstrumentation: true });
-  assert.deepEqual(normalizeResult(result), { columns: ['k'], rows: [['2'], ['4']] });
-  const join = result.operator_instrumentation.stages.find(stage => stage.kind === 'join');
-  assert.equal(join.rows_out, 2);
-  assert.ok(join.hash_memory_peak_bytes > 0);
-  assert.equal(join.retained_input_bytes, 0);
-  assert.ok(join.retained_input_peak_bytes > 0);
-  assert.equal(result.memory.liveMB, '0.0');
-}
-
-async function runOperatorInstrumentationContract() {
-  await runInstrumentationPayloadContract();
-  await runInstrumentationSemiJoinContract();
-  for (const name of ['filter_project', 'aggregate', 'join']) {
-    const bundle = exportBundle(name, 'single', true, null, true);
-    const exec = resolveExecArtifacts(bundle);
-    const result = await browserResult(name, exec, { operatorInstrumentation: true });
-    assert.deepEqual(normalizeResult(result), normalizeResult(nativeResult(name, 'single')));
-    const instrumentation = result.operator_instrumentation;
-    assert.equal(instrumentation.schema_version, 1);
-    assert.equal(instrumentation.bytes, 'logical_nonnull_payload');
-    const sourceRows = instrumentation.stages.filter(stage => stage.kind === 'source')
-      .reduce((sum, stage) => sum + stage.rows_out, 0);
-    assert.equal(sourceRows, name === 'join' ? 7 : name === 'aggregate' ? 5 : 4);
-    for (const stage of instrumentation.stages) {
-      assert.equal(stage.execution_cpu_seconds, null);
-      assert.ok(stage.task_elapsed_seconds >= 0);
-      assert.ok(stage.bytes_out >= 0);
-    }
-    if (name === 'filter_project') {
-      const filter = instrumentation.stages.find(stage => stage.kind === 'filter');
-      assert.equal(filter.rows_in, 4);
-      assert.equal(filter.rows_out, 3);
-      assert.equal(filter.bytes_in, 64);
-      assert.equal(filter.bytes_out, 48);
-    } else if (name === 'aggregate') {
-      const aggregate = instrumentation.stages.find(stage => stage.kind === 'aggregate');
-      assert.equal(aggregate.rows_in, 5);
-      assert.equal(aggregate.rows_out, 4);
-      assert.equal(aggregate.groups, 4);
-      assert.equal(aggregate.rehashes, 0);
-      assert.ok(aggregate.hash_memory_peak_bytes > 0);
-      assert.equal(aggregate.build_memory_peak_bytes, aggregate.hash_memory_peak_bytes);
-      assert.equal(aggregate.materialized_bytes, 64);
-    } else {
-      const join = instrumentation.stages.find(stage => stage.kind === 'join');
-      assert.equal(join.rows_in, 7);
-      assert.equal(join.rows_out, 2);
-      assert.equal(join.retained_input_bytes, 0);
-      assert.ok(join.retained_input_peak_bytes > 0);
-      assert.ok(join.build_memory_peak_bytes >= join.hash_memory_peak_bytes);
-    }
-    assert.equal(result.memory?.liveMB, '0.0', `${name}: instrumentation leaked wasm memory`);
-    const ordinary = exportBundle(name, 'single', false);
-    assert.equal(ordinary.exec.operatorInstrumentation, undefined);
-    assert.ok(ordinary.exec.nodes.every(stage => stage.instrumentationWidths === undefined));
   }
 }
 
@@ -1016,16 +916,6 @@ async function main() {
           error,
         });
         console.error(`[FAIL] wasm-cache\n${errorText(error)}`);
-      }
-    }
-    {
-      const started = performance.now();
-      try {
-        await runOperatorInstrumentationContract();
-        results.push({ name: 'operator-instrumentation', elapsedMs: performance.now() - started, error: null });
-      } catch (error) {
-        results.push({ name: 'operator-instrumentation', elapsedMs: performance.now() - started, error });
-        console.error(`[FAIL] operator-instrumentation\n${errorText(error)}`);
       }
     }
     for (const name of Object.keys(fixtures)) {

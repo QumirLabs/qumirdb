@@ -2,17 +2,20 @@
 #include "plan_runner.h"
 
 #include <qdb/exec/aggregate_exec.h>
-#include <qdb/exec/instrumentation.h>
+#include <qdb/exec/instrumentation/operator.h>
 #include <qdb/kernel/compiler.h>
 #include <qdb/kernel/builder.h>
 #include <qdb/kernel/spec.h>
 #include <qdb/plan/build.h>
-#include <qdb/plan/types/decimal.h>
-#include <qdb/plan/types/nullable.h>
+#include <qdb/plan/ops/join.h>
+#include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/source.h>
+#include <qdb/plan/ops/union.h>
 #include <qdb/plan/passes/column_pruning.h>
 #include <qdb/plan/passes/typing.h>
-#include <qdb/scheduler/instrumentation.h>
+#include <qdb/plan/types/decimal.h>
+#include <qdb/plan/types/nullable.h>
+#include <qdb/scheduler/instrumentation/task.h>
 #include <qdb/sql/parser.h>
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
@@ -263,6 +266,66 @@ TEST(OperatorInstrumentation, ReportsFilterAggregateCardinalitiesInBothScheduler
         EXPECT_EQ(StageSum(instrumentation.str(), "aggregate", "rows_in"), 90u);
         EXPECT_EQ(StageSum(instrumentation.str(), "aggregate", "rows_out"), 10u);
         EXPECT_NE(instrumentation.str().find("partition_skew="), std::string::npos);
+    }
+}
+
+TEST(OperatorInstrumentation, UnionShufflesKeepTheirOwnInputSchemas) {
+    for (const auto mode : {EExecutionMode::SingleThreadedScheduler, EExecutionMode::ThreadedScheduler}) {
+        std::array<int64_t, 100> keys;
+        std::array<int64_t, 100> values;
+        for (size_t i = 0; i < keys.size(); ++i) {
+            keys[i] = i % 10;
+            values[i] = i;
+        }
+        TColumn columns[] = {{.Data = reinterpret_cast<char*>(keys.data())},
+            {.Data = reinterpret_cast<char*>(values.data())}};
+        TRowSet batch{.Columns = columns, .ColumnCount = 2, .RowCount = 100, .RefCount = 1};
+        TMockSource first({"k", "v"}, {batch});
+        std::array<int64_t, 10> matches;
+        std::iota(matches.begin(), matches.end(), 0);
+        TColumn matchColumn{.Data = reinterpret_cast<char*>(matches.data())};
+        TRowSet matchBatch{.Columns = &matchColumn, .ColumnCount = 1, .RowCount = 10, .RefCount = 1};
+        TMockSource second({"r"}, {matchBatch});
+        TMockSource third({"k", "v"}, {batch});
+        TMockSource fourth({"r"}, {matchBatch});
+        auto branch = [](ISource& firstInput, ISource& secondInput) -> TOperatorPtr {
+            auto inputs = std::make_shared<TJoinOperator>(
+                std::make_shared<TSourceOperator>(firstInput, "t"),
+                std::make_shared<TSourceOperator>(secondInput, "u"),
+                std::vector<TJoinKey>{{"k", "r"}}, EJoinType::Inner, nullptr);
+            auto grouped = std::make_shared<TAggregateOperator>(inputs,
+                std::vector<std::string>{"k"}, std::vector<TAggregateSpec>{
+                    {.Name = "s", .Func = "sum", .Arg = std::make_shared<TIdentExpr>(NQumir::TLocation{}, "v")}});
+            return std::make_shared<TProjectOperator>(grouped,
+                std::vector<TProjectionSpec>{
+                    {.Name = "s", .Expression = std::make_shared<TIdentExpr>(NQumir::TLocation{}, "s")}});
+        };
+        auto plan = std::make_shared<TUnionAllOperator>(std::vector<TOperatorPtr>{
+            branch(first, second), branch(third, fourth)});
+        AnnotateTypes(plan);
+        ApplyColumnPruning(plan);
+        TSettings settings;
+        settings.Scheduler.Mode = mode;
+        settings.Scheduler.WorkerCount = 2;
+        settings.HashShuffle.PartitionCount = 4;
+        std::ostringstream instrumentation;
+        settings.Instrumentation.Operators = true;
+        settings.Instrumentation.Output = &instrumentation;
+        auto runtime = RunPlan(plan, settings);
+        std::unordered_map<int64_t, size_t> counts;
+        TRowSet output{};
+        while (runtime->Next(output)) {
+            ASSERT_EQ(output.ColumnCount, 1);
+            for (int64_t i = 0; i < output.RowCount; ++i) {
+                ++counts[reinterpret_cast<int64_t*>(output.Columns[0].Data)[i]];
+            }
+            Release(&output);
+        }
+        ASSERT_EQ(counts.size(), 10u);
+        for (int64_t key = 0; key < 10; ++key) {
+            EXPECT_EQ(counts[450 + key * 10], 2u);
+        }
+        EXPECT_EQ(StageSum(instrumentation.str(), "source", "rows_out"), 220u);
     }
 }
 

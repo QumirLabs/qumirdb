@@ -1,7 +1,7 @@
 #pragma once
 
 #include <qdb/exec/stage.h>
-#include <qdb/exec/instrumentation.h>
+#include <qdb/exec/instrumentation/operator.h>
 #include <qdb/scheduler/connection.h>
 #include <qdb/scheduler/state.h>
 

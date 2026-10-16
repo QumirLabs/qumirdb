@@ -1,7 +1,7 @@
 #pragma once
 
 #include <qdb/kernel/compiler.h>
-#include <qdb/exec/instrumentation.h>
+#include <qdb/exec/instrumentation/operator.h>
 
 #include <array>
 #include <cstdint>

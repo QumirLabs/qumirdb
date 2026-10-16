@@ -1,7 +1,7 @@
 #pragma once
 
 #include <qdb/io/io.h>
-#include <qdb/exec/instrumentation.h>
+#include <qdb/exec/instrumentation/operator.h>
 #include <qdb/kernel/compiler.h>
 
 #include <qumir/parser/type.h>

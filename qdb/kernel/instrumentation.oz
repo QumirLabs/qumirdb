@@ -6,9 +6,9 @@
     (block
       (var selection = (field batch Selection))
       (var columns = (field batch Columns))
-      (var rows = (: 0 i64))
-      (var bytes = (: 0 i64))
-      (var i = (: 0 i64))
+      (var rows = 0)
+      (var bytes = 0)
+      (var i = 0)
       (while (< i (field batch RowCount))
         (block
           (var selected = #t)
@@ -17,7 +17,7 @@
           (if selected
             (block
               (= rows (+ rows 1))
-              (var c = (: 0 i64))
+              (var c = 0)
               (while (< c (field batch ColumnCount))
                 (block
                   (var col = (index columns c))
@@ -61,7 +61,7 @@
       (var bytes = (+ (* capacity
         (+ (* (field ht KeySize) 2) 9 (* aggs 8))) (* aggs 8)
         (* (field ht OwnedBlockCapacity) 8)))
-      (var i = (: 0 i64))
+      (var i = 0)
       (while (< i (field ht OwnedBlockCount))
         (block
           (var header = (cast (index blocks i) <ptr i64>))
@@ -79,11 +79,11 @@
       (while (< i string_count)
         (block
           (var metadata = (index buffers (index string_buffers i)))
-          (var g = (: 0 i64))
+          (var g = 0)
           (while (< g capacity)
             (block
               (= bytes (+ bytes (cast
-                (>> (cast (index metadata g) u64) (: 32 u64)) i64)))
+                (>> (cast (index metadata g) u64) 32) i64)))
               (= g (+ g 1))))
           (= i (+ i 1))))
       (= output [0] size)

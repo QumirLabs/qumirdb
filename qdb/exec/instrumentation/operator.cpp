@@ -1,4 +1,4 @@
-#include <qdb/exec/instrumentation.h>
+#include <qdb/exec/instrumentation/operator.h>
 
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>

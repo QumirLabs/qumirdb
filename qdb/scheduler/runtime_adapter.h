@@ -1,10 +1,11 @@
 #pragma once
 
 #include <qdb/exec/runtime_filter.h>
-#include <qdb/exec/instrumentation.h>
+#include <qdb/exec/instrumentation/operator.h>
 #include <qdb/io/io.h>
 #include <qdb/scheduler/connection.h>
 #include <qdb/scheduler/state.h>
+#include <qdb/scheduler/task_state.h>
 
 #include <qumir/parser/type.h>
 
@@ -82,28 +83,24 @@ struct TSinkCode {
 };
 
 struct TBlockingCode {
-    using TProcess = std::function<ETaskResult(void*, TInputPort&, TRowSet&)>;
+    using TProcess = std::function<ETaskResult(ITaskState&, TInputPort&, TRowSet&)>;
 
     explicit TBlockingCode(TProcess process);
-
-    std::function<void(void*, TOperatorInstrumentation*)> ConfigureInstrumentation;
 
     TProcess Process;
 };
 
 struct TBinaryBlockingCode {
     using TProcess = std::function<ETaskResult(
-        void*,
+        ITaskState&,
         TInputPort&,
         TInputPort&,
         TRowSet&)>;
     // Which side Process will read next; empty => both. Consulted by the task's
     // WantsInput to gate readiness.
-    using TRequiredSide = std::function<ERequiredSide(void*)>;
+    using TRequiredSide = std::function<ERequiredSide(ITaskState&)>;
 
     explicit TBinaryBlockingCode(TProcess process);
-
-    std::function<void(void*, TOperatorInstrumentation*)> ConfigureInstrumentation;
 
     TProcess Process;
     TRequiredSide RequiredSide;
@@ -138,12 +135,11 @@ struct TRuntimeFilterCode {
 
 struct TMergeCode {
     using TProcess = std::function<ETaskResult(
-        void*,
+        ITaskState&,
         std::vector<TInputPort>&,
         TRowSet&)>;
 
     explicit TMergeCode(TProcess process);
-    std::function<void(void*, TOperatorInstrumentation*)> ConfigureInstrumentation;
 
     TProcess Process;
 };
@@ -238,7 +234,7 @@ class TBlockingTask final : public ITaskNode {
 public:
     TBlockingTask(
         std::shared_ptr<const TBlockingCode> code,
-        std::shared_ptr<void> state,
+        std::shared_ptr<ITaskState> state,
         TInputPort input,
         TOutputPort output);
     ~TBlockingTask() override;
@@ -248,7 +244,7 @@ public:
 
 private:
     std::shared_ptr<const TBlockingCode> Code_;
-    std::shared_ptr<void> State_;
+    std::shared_ptr<ITaskState> State_;
     TInputPort Input_;
     TOutputPort Output_;
     TRowSet CurrentOutput_ = {};
@@ -260,7 +256,7 @@ class TBinaryBlockingTask final : public ITaskNode {
 public:
     TBinaryBlockingTask(
         std::shared_ptr<const TBinaryBlockingCode> code,
-        std::shared_ptr<void> state,
+        std::shared_ptr<ITaskState> state,
         TInputPort left,
         TInputPort right,
         TOutputPort output);
@@ -272,7 +268,7 @@ public:
 
 private:
     std::shared_ptr<const TBinaryBlockingCode> Code_;
-    std::shared_ptr<void> State_;
+    std::shared_ptr<ITaskState> State_;
     TInputPort Left_;
     TInputPort Right_;
     TOutputPort Output_;
@@ -286,7 +282,7 @@ class TMergeTask final : public ITaskNode {
 public:
     TMergeTask(
         std::shared_ptr<const TMergeCode> code,
-        std::shared_ptr<void> state,
+        std::shared_ptr<ITaskState> state,
         std::vector<TInputPort> inputs,
         TOutputPort output);
     ~TMergeTask() override;
@@ -296,7 +292,7 @@ public:
 
 private:
     std::shared_ptr<const TMergeCode> Code_;
-    std::shared_ptr<void> State_;
+    std::shared_ptr<ITaskState> State_;
     std::vector<TInputPort> Inputs_;
     TOutputPort Output_;
     TRowSet CurrentOutput_ = {};
@@ -359,7 +355,7 @@ private:
 
 // Consumers push non-owning views of Batches, so the spool must outlive every
 // consumer's downstream (the graph owns both, so it does).
-struct TCteSharedState {
+struct TCteSharedState : ITaskState {
     enum class EStatus {
         Building,
         Ready,
@@ -369,7 +365,11 @@ struct TCteSharedState {
     TOperatorInstrumentation* Instrumentation = nullptr;
     std::vector<TRowSet> Batches;
 
-    ~TCteSharedState() {
+    void ConfigureInstrumentation(TOperatorInstrumentation* instrumentation) override {
+        Instrumentation = instrumentation;
+    }
+
+    ~TCteSharedState() override {
         for (auto& batch : Batches) {
             Release(&batch);
         }

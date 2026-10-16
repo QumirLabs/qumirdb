@@ -1,5 +1,5 @@
 #include "plan_export.h"
-#include <qdb/exec/instrumentation.h>
+#include <qdb/exec/instrumentation/operator.h>
 
 #include <qdb/catalog/external_module.h>
 #include <qdb/exec/plan_builder.h>

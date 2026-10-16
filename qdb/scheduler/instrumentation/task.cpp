@@ -1,4 +1,4 @@
-#include <qdb/scheduler/instrumentation.h>
+#include <qdb/scheduler/instrumentation/task.h>
 
 #include <qdb/exec/plan_builder.h>
 #include <qdb/kernel/compiler.h>
@@ -56,7 +56,11 @@ void EnableOperatorInstrumentation(TLoweredPlan& lowered) {
     }
     std::unordered_map<TExecStageId, NQumir::NAst::TTypePtr> stages;
     for (const auto& node : plan->Nodes) {
-        stages.emplace(node.StageId, node.OutputType);
+        // Synthetic plan nodes have no semantic stage. Their output schema
+        // must not become the schema of every physical routing task.
+        if (node.StageId != InvalidExecStageId) {
+            stages.emplace(node.StageId, node.OutputType);
+        }
     }
     std::unordered_map<const IConnection*, NQumir::NAst::TTypePtr> types;
     types.emplace(lowered.FinalGather, lowered.OutputType);

@@ -1,7 +1,7 @@
 #include <qdb/scheduler/runtime_adapter.h>
 
 #include <qdb/scheduler/graph.h>
-#include <qdb/scheduler/instrumentation.h>
+#include <qdb/scheduler/instrumentation/task.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 
@@ -522,7 +522,7 @@ ETaskResult TSinkTask::Execute() {
 
 TBlockingTask::TBlockingTask(
     std::shared_ptr<const TBlockingCode> code,
-    std::shared_ptr<void> state,
+    std::shared_ptr<ITaskState> state,
     TInputPort input,
     TOutputPort output)
     : Code_(std::move(code))
@@ -546,7 +546,7 @@ ETaskResult TBlockingTask::Execute() {
         return *result;
     }
 
-    auto result = Code_->Process(State_.get(), Input_, CurrentOutput_);
+    auto result = Code_->Process(*State_, Input_, CurrentOutput_);
     if (result == ETaskResult::OK) {
         HasOutput_ = true;
         return ETaskResult::OK;
@@ -560,7 +560,7 @@ ETaskResult TBlockingTask::Execute() {
 
 TBinaryBlockingTask::TBinaryBlockingTask(
     std::shared_ptr<const TBinaryBlockingCode> code,
-    std::shared_ptr<void> state,
+    std::shared_ptr<ITaskState> state,
     TInputPort left,
     TInputPort right,
     TOutputPort output)
@@ -586,7 +586,7 @@ ETaskResult TBinaryBlockingTask::Execute() {
         return *result;
     }
 
-    auto result = Code_->Process(State_.get(), Left_, Right_, CurrentOutput_);
+    auto result = Code_->Process(*State_, Left_, Right_, CurrentOutput_);
     if (result == ETaskResult::OK) {
         HasOutput_ = true;
         return ETaskResult::OK;
@@ -602,7 +602,7 @@ bool TBinaryBlockingTask::WantsInput(const TTaskEdge& edge) const noexcept {
     if (!Code_->RequiredSide) {
         return true;
     }
-    const auto side = Code_->RequiredSide(State_.get());
+    const auto side = Code_->RequiredSide(*State_);
     if (side == ERequiredSide::Both) {
         return true;
     }
@@ -612,7 +612,7 @@ bool TBinaryBlockingTask::WantsInput(const TTaskEdge& edge) const noexcept {
 
 TMergeTask::TMergeTask(
     std::shared_ptr<const TMergeCode> code,
-    std::shared_ptr<void> state,
+    std::shared_ptr<ITaskState> state,
     std::vector<TInputPort> inputs,
     TOutputPort output)
     : Code_(std::move(code))
@@ -636,7 +636,7 @@ ETaskResult TMergeTask::Execute() {
         return *result;
     }
 
-    auto result = Code_->Process(State_.get(), Inputs_, CurrentOutput_);
+    auto result = Code_->Process(*State_, Inputs_, CurrentOutput_);
     if (result == ETaskResult::OK) {
         HasOutput_ = true;
         return ETaskResult::OK;
@@ -1242,25 +1242,19 @@ void TSinkTask::ConfigureInstrumentation(TTaskInstrumentationSetup& setup) {
 void TBlockingTask::ConfigureInstrumentation(TTaskInstrumentationSetup& setup) {
     setup.Input(Input_);
     setup.Output(Output_);
-    if (Code_->ConfigureInstrumentation) {
-        Code_->ConfigureInstrumentation(State_.get(), &setup.Counters());
-    }
+    State_->ConfigureInstrumentation(&setup.Counters());
 }
 
 void TBinaryBlockingTask::ConfigureInstrumentation(TTaskInstrumentationSetup& setup) {
     setup.Input(Left_);
     setup.Input(Right_);
     setup.Output(Output_);
-    if (Code_->ConfigureInstrumentation) {
-        Code_->ConfigureInstrumentation(State_.get(), &setup.Counters());
-    }
+    State_->ConfigureInstrumentation(&setup.Counters());
 }
 
 void TMergeTask::ConfigureInstrumentation(TTaskInstrumentationSetup& setup) {
     setup.Output(Output_);
-    if (Code_->ConfigureInstrumentation) {
-        Code_->ConfigureInstrumentation(State_.get(), &setup.Counters());
-    }
+    State_->ConfigureInstrumentation(&setup.Counters());
     for (auto& input : Inputs_) {
         setup.Input(input);
     }
