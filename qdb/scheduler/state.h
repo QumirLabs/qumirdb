@@ -5,6 +5,7 @@
 namespace NQdb {
 namespace NScheduler {
 
+class TTaskInstrumentationSetup;
 struct TTaskEdge; // graph.h
 
 enum class ETaskResult {
@@ -27,6 +28,7 @@ public:
     virtual ~ITaskNode() = default;
 
     virtual ETaskResult Execute() = 0;
+    virtual void ConfigureInstrumentation(TTaskInstrumentationSetup&) {}
 
     // Whether the demand path should schedule this inbound edge's producer.
     // Default: all. Lets a task that reads one input at a time (asymmetric join:

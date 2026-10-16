@@ -32,6 +32,19 @@ TInnerJoinProcessor::TInnerJoinProcessor(
 {
 }
 
+void TInnerJoinProcessor::SetInstrumentation(TOperatorInstrumentation* instrumentation) {
+    Instrumentation_ = instrumentation;
+    LeftRows_.SetInstrumentation(instrumentation, 0);
+    RightRows_.SetInstrumentation(instrumentation, 1);
+}
+
+void TInnerJoinProcessor::ObserveInstrumentation() {
+    if (Instrumentation_ && Initialized_) {
+        Instrumentation_->ObserveHash(LeftTable_.data(), 0, true);
+        Instrumentation_->ObserveHash(RightTable_.data(), 1, true);
+    }
+}
+
 bool TInnerJoinProcessor::IsOuter() const {
     return JoinType_ == EJoinType::Left || JoinType_ == EJoinType::Right
         || JoinType_ == EJoinType::Full;
@@ -77,6 +90,7 @@ void TInnerJoinProcessor::EnsureInit() {
             JoinOp(EJoinKernelOp::Init))) {
         throw std::runtime_error("join hash table initialization failed");
     }
+    ObserveInstrumentation();
 }
 
 bool TInnerJoinProcessor::DrainReadyOutput(TRowSet& rowSet) {
@@ -522,6 +536,11 @@ EJoinBuildSide TInnerJoinProcessor::RequiredInputSide() const {
         return EJoinBuildSide::Right;
     }
     return EJoinBuildSide::Auto;
+}
+
+void TCrossJoinProcessor::SetInstrumentation(TOperatorInstrumentation* instrumentation) {
+    LeftRows_.SetInstrumentation(instrumentation, 0);
+    RightRows_.SetInstrumentation(instrumentation, 1);
 }
 
 TCrossJoinProcessor::TCrossJoinProcessor(TCrossJoinKernels kernels)

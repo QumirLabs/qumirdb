@@ -70,10 +70,11 @@ struct TAggregateSettings {
     size_t PartialMinReductionFactor = 8;
 };
 
-struct TDiagnosticsSettings {
+struct TInstrumentationSettings {
     // Disabled by default. Applications may opt in and provide the destination
     // explicitly; the execution library never reads process environment state.
     bool RowGroupPredicate = false;
+    bool Operators = false;
     std::ostream* Output = nullptr;
 };
 
@@ -83,7 +84,7 @@ struct TSettings {
     TScanSplitSettings ScanSplit;
     THashShuffleSettings HashShuffle;
     TAggregateSettings Aggregate;
-    TDiagnosticsSettings Diagnostics;
+    TInstrumentationSettings Instrumentation;
 };
 
 } // namespace NScheduler

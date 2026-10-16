@@ -75,6 +75,8 @@ add_library(qumirdb
     kernel/compiler.cpp
     kernel/finalize.cpp
     kernel/finalize_fused.cpp
+    exec/instrumentation/operator.cpp
+    scheduler/instrumentation/task.cpp
     exec/filter_exec.cpp
     exec/project_exec.cpp
     exec/aggregate_exec.cpp
@@ -124,6 +126,8 @@ install(FILES
     modules/row_group_interval.oz
     DESTINATION ${QDB_MODULES_DIR}
     COMPONENT engine)
+
+install(FILES kernel/instrumentation.oz DESTINATION ${QDB_MODULES_DIR} COMPONENT engine)
 
 install(DIRECTORY
     kernel/aggregation

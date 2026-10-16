@@ -35,6 +35,10 @@ public:
         int64_t batchRows = JoinOutputBatchRows);
 
     void Add(TRowSet& rowSet);
+    void SetInstrumentation(TOperatorInstrumentation* instrumentation) {
+        Store_.SetInstrumentation(instrumentation, 0);
+    }
+
     void Finish();
     bool Next(TRowSet& rowSet);
 
@@ -67,6 +71,10 @@ public:
         int64_t batchRows = JoinOutputBatchRows);
 
     void Add(TRowSet& rowSet, size_t run);
+    void SetInstrumentation(TOperatorInstrumentation* instrumentation) {
+        Store_.SetInstrumentation(instrumentation, 0);
+    }
+
     void Finish();
     bool Next(TRowSet& rowSet);
 
@@ -95,6 +103,7 @@ public:
     ~TTopSortProcessor();
 
     void Add(TRowSet& rowSet);
+    void SetInstrumentation(TOperatorInstrumentation* instrumentation);
     void Finish();
     bool Next(TRowSet& rowSet);
 
@@ -104,6 +113,7 @@ private:
     std::vector<TSortColumnRef> KeyColumns_;
     TSortRadixKernel RadixKernel_;
     int64_t Limit_ = 0;
+    TOperatorInstrumentation* Instrumentation_ = nullptr;
     int64_t BatchRows_ = JoinOutputBatchRows;
 
     bool Materialized_ = false;

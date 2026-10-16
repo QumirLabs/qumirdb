@@ -1,6 +1,7 @@
 #pragma once
 
 #include <qdb/exec/stage.h>
+#include <qdb/exec/instrumentation/operator.h>
 #include <qdb/scheduler/connection.h>
 #include <qdb/scheduler/state.h>
 
@@ -23,10 +24,11 @@ enum class ETaskEdgeKind { Rowset, Dependency };
 
 struct TTaskNode {
     ITaskNode* Task = nullptr;
+    std::unique_ptr<TOperatorInstrumentation> Instrumentation;
     TExecStageId ExecStageId = InvalidExecStageId;
     // Stable physical grouping assigned monotonically during one lowering.
     // ExecStageId remains the semantic identity; this ID is only for grouping
-    // scheduler plumbing and physical lanes in diagnostics.
+    // scheduler plumbing and physical lanes in instrumentation.
     TTaskGroupId TaskGroupId = InvalidTaskGroupId;
     std::string DebugKind;
     std::string DebugLabel;
@@ -84,9 +86,10 @@ public:
     TTaskNode* Root() const;
 
 private:
-    std::vector<std::unique_ptr<ITaskNode>> OwnedTasks_;
-    std::vector<std::unique_ptr<IConnection>> OwnedConnections_;
+    // Task-local observers and ports remain valid through task destruction.
     std::vector<std::unique_ptr<TTaskNode>> Nodes_;
+    std::vector<std::unique_ptr<IConnection>> OwnedConnections_;
+    std::vector<std::unique_ptr<ITaskNode>> OwnedTasks_;
     std::vector<std::unique_ptr<TTaskEdge>> Edges_;
     std::vector<TTaskNode*> Leaves_;
     TTaskNode* Root_ = nullptr;

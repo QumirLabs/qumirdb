@@ -31,6 +31,10 @@ tasks. Tasks own C++ state and call shared `*Code` objects. Connections are the
 only data transport between tasks; they carry `TRowSet` batches and finish
 signals.
 
+Prepared code is immutable and can serve several tasks. Configuration that
+depends on one task's lifetime belongs to its mutable state and is applied
+before scheduling starts; it must not be captured by the shared code object.
+
 The scheduler itself does not know SQL semantics. It only executes task nodes
 and reschedules their neighbors when a task returns `OK`, `NEED_DATA`,
 `BLOCKED_OUTPUT`, or `FINISHED`.
@@ -260,8 +264,8 @@ mask instead of division.
 
 Each probe task owns its counters, selection scratch buffers, and weak-Bloom
 pause policy. Worker migration does not move this state between tasks. Aggregate
-diagnostics are read only after execution stops. Before allocating a mask or
-computing filter hashes, a task checks whether the filter is ready and active.
+instrumentation snapshots are read only after execution stops. Before allocating
+a mask or computing filter hashes, a task checks whether the filter is ready and active.
 An inactive filter passes the batch through. Source-computed hashes share the
 source rowset's lifetime through shuffle views; materialized shuffle batches
 gather their existing hashes alongside the columns.

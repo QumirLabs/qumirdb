@@ -177,6 +177,4 @@ Lowering caches the resulting explicit split list per source. In that cache,
 `nullopt` means "use the original source", an engaged non-empty list means the
 chosen row groups, and an engaged empty list is a proven empty scan.
 
-The source hint is included in text plans and S-expression round-trips. Optional
-diagnostics are carried explicitly through scheduler settings; only the CLI maps
-`QDB_DEBUG_ROW_GROUP_PREDICATE` to that option.
+The source hint is included in text plans and S-expression round-trips.

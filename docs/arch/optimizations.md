@@ -447,7 +447,6 @@ filter (> |t.c| 40)                 filter (> |t.c| 40)
 └─ source t.parquet AS t            └─ source t.parquet AS t row-groups (> |t.c| 40)
 ```
 
-`QDB_DEBUG_ROW_GROUP_PREDICATE=1` reports what was skipped.
 See [predicate_pushdown.md](predicate_pushdown.md#parquet-row-group-pruning).
 
 ### 4.2 Scan splitting

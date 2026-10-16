@@ -24,6 +24,10 @@ public:
         TSortRadixKernel kernel);
 
     void Add(TRowSet& rowSet);
+    void SetInstrumentation(TOperatorInstrumentation* instrumentation) {
+        Store_.SetInstrumentation(instrumentation, 0);
+    }
+
     void Finish();
     bool Next(TRowSet& rowSet);
 

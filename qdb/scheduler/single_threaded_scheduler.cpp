@@ -1,3 +1,4 @@
+#include <qdb/scheduler/instrumentation/task.h>
 #include <qdb/scheduler/single_threaded_scheduler.h>
 
 #include <exception>
@@ -43,7 +44,7 @@ bool TSingleThreadedScheduler::Run(std::string* error) {
 
         ETaskResult state;
         try {
-            state = node->Task->Execute();
+            state = ExecuteTask(*node);
         } catch (const std::exception& e) {
             SetError(error, e.what());
             return false;

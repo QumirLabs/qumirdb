@@ -1,3 +1,4 @@
+#include <qdb/scheduler/instrumentation/task.h>
 #include <qdb/scheduler/threaded_scheduler.h>
 
 #include <algorithm>
@@ -210,7 +211,7 @@ void TThreadedScheduler::Work() {
 
         ETaskResult result;
         try {
-            result = node->Task->Execute();
+            result = ExecuteTask(*node);
         } catch (const std::exception& e) {
             bool expected = false;
             if (Failed_.compare_exchange_strong(

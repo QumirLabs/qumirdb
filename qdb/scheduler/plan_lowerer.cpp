@@ -1,4 +1,5 @@
 #include <qdb/scheduler/plan_lowerer.h>
+#include <qdb/scheduler/instrumentation/task.h>
 #include <qdb/exec/aggregate_exec.h>
 #include <qdb/exec/join_exec.h>
 #include <qdb/exec/late_materialize_exec.h>
@@ -60,7 +61,16 @@ struct TSchedulerUnaryStage {
     NQumir::NAst::TTypePtr OutputType;
 };
 
-struct TAggregateBlockingState {
+template <class TState>
+struct TProcessorTaskState : NScheduler::ITaskState {
+    void ConfigureInstrumentation(TOperatorInstrumentation* instrumentation) override {
+        if constexpr (requires(TState& state) { state.Processor.SetInstrumentation(instrumentation); }) {
+            static_cast<TState&>(*this).Processor.SetInstrumentation(instrumentation);
+        }
+    }
+};
+
+struct TAggregateBlockingState : TProcessorTaskState<TAggregateBlockingState> {
     explicit TAggregateBlockingState(
         TAggregateKernels kernels,
         int64_t initialCapacity)
@@ -71,7 +81,7 @@ struct TAggregateBlockingState {
     bool Done = false;
 };
 
-struct TGroupingSetsBlockingState {
+struct TGroupingSetsBlockingState : TProcessorTaskState<TGroupingSetsBlockingState> {
     TGroupingSetsBlockingState(
         TAggregateKernels kernels, std::vector<std::vector<size_t>> sets, size_t numKeys)
         : Processor(std::move(kernels), std::move(sets), numKeys)
@@ -81,7 +91,7 @@ struct TGroupingSetsBlockingState {
     bool Done = false;
 };
 
-struct TLimitBlockingState {
+struct TLimitBlockingState : TProcessorTaskState<TLimitBlockingState> {
     TLimitBlockingState(int64_t limit, int64_t offset)
         : Processor(limit, offset)
     {}
@@ -89,7 +99,7 @@ struct TLimitBlockingState {
     TLimitProcessor Processor;
 };
 
-struct TSortBlockingState {
+struct TSortBlockingState : TProcessorTaskState<TSortBlockingState> {
     TSortBlockingState(
         NQumir::NAst::TTypePtr outputType,
         std::vector<TSortKey> keys,
@@ -106,7 +116,7 @@ struct TSortBlockingState {
     bool InputFinished = false;
 };
 
-struct TWindowBlockingState {
+struct TWindowBlockingState : TProcessorTaskState<TWindowBlockingState> {
     TWindowBlockingState(
         NQumir::NAst::TTypePtr outputType,
         std::vector<TSortKey> keys,
@@ -123,7 +133,7 @@ struct TWindowBlockingState {
     bool InputFinished = false;
 };
 
-struct TMergeState {
+struct TMergeState : TProcessorTaskState<TMergeState> {
     TMergeState(
         NQumir::NAst::TTypePtr outputType,
         std::vector<TSortKey> keys,
@@ -142,7 +152,7 @@ struct TMergeState {
     bool InputsDone = false;
 };
 
-struct TTopSortBlockingState {
+struct TTopSortBlockingState : TProcessorTaskState<TTopSortBlockingState> {
     TTopSortBlockingState(
         NQumir::NAst::TTypePtr outputType,
         std::vector<TSortKey> keys,
@@ -161,7 +171,7 @@ struct TTopSortBlockingState {
     bool InputFinished = false;
 };
 
-struct TLateMaterializeBlockingState {
+struct TLateMaterializeBlockingState : TProcessorTaskState<TLateMaterializeBlockingState> {
     TLateMaterializeBlockingState(
         std::shared_ptr<const IPhysicalRowReader> reader,
         int32_t locatorColumn)
@@ -172,7 +182,7 @@ struct TLateMaterializeBlockingState {
     bool InputFinished = false;
 };
 
-struct TLateMaterializeMergeState {
+struct TLateMaterializeMergeState : NScheduler::ITaskState {
     explicit TLateMaterializeMergeState(size_t partitionCount)
         : Partitions(partitionCount)
         , Received(partitionCount, false)
@@ -193,7 +203,7 @@ struct TLateMaterializeMergeState {
     bool Emitted = false;
 };
 
-struct TSchedulerInnerJoinState {
+struct TSchedulerInnerJoinState : TProcessorTaskState<TSchedulerInnerJoinState> {
     TSchedulerInnerJoinState(
         TJoinKernels kernels,
         EJoinType joinType,
@@ -204,7 +214,7 @@ struct TSchedulerInnerJoinState {
     TInnerJoinProcessor Processor;
 };
 
-struct TSchedulerCrossJoinState {
+struct TSchedulerCrossJoinState : TProcessorTaskState<TSchedulerCrossJoinState> {
     explicit TSchedulerCrossJoinState(TCrossJoinKernels kernels)
         : Processor(std::move(kernels))
     {}
@@ -915,7 +925,7 @@ private:
 
     struct TBlockingTail {
         std::shared_ptr<const NScheduler::TBlockingCode> Code;
-        std::function<std::shared_ptr<void>()> MakeState;
+        std::function<std::shared_ptr<NScheduler::ITaskState>()> MakeState;
         NQumir::NAst::TTypePtr OutputType;
     };
 
@@ -928,9 +938,9 @@ private:
     // drains the input first, then emits processor output.
     template <class TState>
     std::shared_ptr<const NScheduler::TBlockingCode> MakeDrainBlockingCode() {
-        return std::make_shared<NScheduler::TBlockingCode>(
-            [](void* state, NScheduler::TInputPort& input, TRowSet& output) {
-                auto* s = static_cast<TState*>(state);
+        auto code = std::make_shared<NScheduler::TBlockingCode>(
+            [](NScheduler::ITaskState& state, NScheduler::TInputPort& input, TRowSet& output) {
+                auto* s = &static_cast<TState&>(state);
                 TRowSet rowSet{};
                 while (!s->InputFinished) {
                     auto fetch = input.Fetch(rowSet);
@@ -949,6 +959,7 @@ private:
                 }
                 return NScheduler::ETaskResult::FINISHED;
             });
+        return code;
     }
 
     // Blocking tail for a local sort (top-K when topLimit is set, otherwise a
@@ -966,7 +977,7 @@ private:
             return TBlockingTail{
                 .Code = MakeDrainBlockingCode<TTopSortBlockingState>(),
                 .MakeState = [childType, keys, keyColumns, radixKernel, limit]()
-                    -> std::shared_ptr<void>
+                    -> std::shared_ptr<NScheduler::ITaskState>
                 {
                     return std::make_shared<TTopSortBlockingState>(
                         childType, keys, keyColumns, radixKernel, limit);
@@ -977,7 +988,7 @@ private:
         return TBlockingTail{
             .Code = MakeDrainBlockingCode<TSortBlockingState>(),
             .MakeState = [childType, keys, keyColumns, radixKernel]()
-                -> std::shared_ptr<void>
+                -> std::shared_ptr<NScheduler::ITaskState>
             {
                 return std::make_shared<TSortBlockingState>(
                     childType, keys, keyColumns, radixKernel);
@@ -989,8 +1000,8 @@ private:
     // Blocking code for a limit/offset task.
     std::shared_ptr<const NScheduler::TBlockingCode> MakeLimitBlockingCode() {
         return std::make_shared<NScheduler::TBlockingCode>(
-            [](void* state, NScheduler::TInputPort& input, TRowSet& output) {
-                auto* s = static_cast<TLimitBlockingState*>(state);
+            [](NScheduler::ITaskState& state, NScheduler::TInputPort& input, TRowSet& output) {
+                auto* s = &static_cast<TLimitBlockingState&>(state);
                 if (s->Processor.Finished()) {
                     return NScheduler::ETaskResult::FINISHED;
                 }
@@ -1017,24 +1028,27 @@ private:
     template <class TState>
     std::shared_ptr<const NScheduler::TBinaryBlockingCode> MakeBinaryJoinCode() {
         auto code = std::make_shared<NScheduler::TBinaryBlockingCode>(
-            [](void* state,
+            [](NScheduler::ITaskState& state,
                NScheduler::TInputPort& left,
                NScheduler::TInputPort& right,
                TRowSet& output)
             {
-                auto* s = static_cast<TState*>(state);
+                auto* s = &static_cast<TState&>(state);
                 auto fetchLeft = [&](TRowSet& rowSet) {
                     return MapJoinFetch(left.Fetch(rowSet));
                 };
                 auto fetchRight = [&](TRowSet& rowSet) {
                     return MapJoinFetch(right.Fetch(rowSet));
                 };
-                return MapJoinProcessResult(
-                    s->Processor.Process(fetchLeft, fetchRight, output));
+                const auto result = s->Processor.Process(fetchLeft, fetchRight, output);
+                if constexpr (std::is_same_v<TState, TSchedulerInnerJoinState>) {
+                    s->Processor.ObserveInstrumentation();
+                }
+                return MapJoinProcessResult(result);
             });
         if constexpr (std::is_same_v<TState, TSchedulerInnerJoinState>) {
-            code->RequiredSide = [](void* state) {
-                switch (static_cast<TState*>(state)->Processor.RequiredInputSide()) {
+            code->RequiredSide = [](NScheduler::ITaskState& state) {
+                switch (static_cast<TState&>(state).Processor.RequiredInputSide()) {
                     case EJoinBuildSide::Left:
                         return NScheduler::ERequiredSide::Left;
                     case EJoinBuildSide::Right:
@@ -1103,8 +1117,8 @@ private:
             rowGroups = parquet->PruneRowGroups(
                 src.RowGroupPredicate(),
                 src.GetAlias(),
-                Settings_.Diagnostics.RowGroupPredicate
-                    ? Settings_.Diagnostics.Output
+                Settings_.Instrumentation.RowGroupPredicate
+                    ? Settings_.Instrumentation.Output
                     : nullptr,
                 columns ? &*columns : nullptr);
         } else {
@@ -1325,12 +1339,16 @@ private:
 
         auto state = std::make_shared<NScheduler::TCteSharedState>();
         auto code = std::make_shared<NScheduler::TBlockingCode>(
-            [](void* st, NScheduler::TInputPort& input, TRowSet&) {
-                auto* shared = static_cast<NScheduler::TCteSharedState*>(st);
+            [](NScheduler::ITaskState& st, NScheduler::TInputPort& input, TRowSet&) {
+                auto* shared = &static_cast<NScheduler::TCteSharedState&>(st);
                 for (;;) {
                     TRowSet batch{};
                     auto fetch = input.Fetch(batch);
                     if (fetch == NScheduler::EFetchResult::OK) {
+                        if (shared->Instrumentation) {
+                            shared->Instrumentation->RetainInput(batch, 0);
+                            shared->Instrumentation->Output.Add(batch);
+                        }
                         shared->Batches.push_back(batch);
                         continue;
                     }
@@ -1488,8 +1506,8 @@ private:
         auto sets = aggregate.GroupingSets();
 
         auto code = std::make_shared<NScheduler::TBlockingCode>(
-            [](void* state, NScheduler::TInputPort& input, TRowSet& output) {
-                auto* s = static_cast<TGroupingSetsBlockingState*>(state);
+            [](NScheduler::ITaskState& state, NScheduler::TInputPort& input, TRowSet& output) {
+                auto* s = &static_cast<TGroupingSetsBlockingState&>(state);
                 if (s->Done) {
                     return NScheduler::ETaskResult::FINISHED;
                 }
@@ -1511,7 +1529,7 @@ private:
             });
         return TBlockingTail{
             .Code = std::move(code),
-            .MakeState = [kernels, sets, numKeys]() -> std::shared_ptr<void> {
+            .MakeState = [kernels, sets, numKeys]() -> std::shared_ptr<NScheduler::ITaskState> {
                 return std::make_shared<TGroupingSetsBlockingState>(*kernels, sets, numKeys);
             },
             .OutputType = ComputeAggregateOutputType(
@@ -1544,8 +1562,8 @@ private:
         auto kernels = std::make_shared<TAggregateKernels>(
             compiler.CompileAggregate(spec));
         auto code = std::make_shared<NScheduler::TBlockingCode>(
-            [](void* state, NScheduler::TInputPort& input, TRowSet& output) {
-                auto* s = static_cast<TAggregateBlockingState*>(state);
+            [](NScheduler::ITaskState& state, NScheduler::TInputPort& input, TRowSet& output) {
+                auto* s = &static_cast<TAggregateBlockingState&>(state);
                 if (s->Done) {
                     return NScheduler::ETaskResult::FINISHED;
                 }
@@ -1567,7 +1585,7 @@ private:
             });
         return TBlockingTail{
             .Code = std::move(code),
-            .MakeState = [kernels, initialCapacity]() -> std::shared_ptr<void> {
+            .MakeState = [kernels, initialCapacity]() -> std::shared_ptr<NScheduler::ITaskState> {
                 return std::make_shared<TAggregateBlockingState>(
                     *kernels, initialCapacity);
             },
@@ -2046,7 +2064,7 @@ private:
                 return TBlockingTail{
                     .Code = MakeLimitBlockingCode(),
                     .MakeState = [limitValue, offsetValue]()
-                        -> std::shared_ptr<void>
+                        -> std::shared_ptr<NScheduler::ITaskState>
                     {
                         return std::make_shared<TLimitBlockingState>(
                             limitValue, offsetValue);
@@ -2220,11 +2238,11 @@ private:
         }
 
         auto mergeCode = std::make_shared<NScheduler::TMergeCode>(
-            [](void* state,
+            [](NScheduler::ITaskState& state,
                std::vector<NScheduler::TInputPort>& inputs,
                TRowSet& output)
             {
-                auto* merge = static_cast<TLateMaterializeMergeState*>(state);
+                auto* merge = &static_cast<TLateMaterializeMergeState&>(state);
                 if (merge->Emitted) {
                     return NScheduler::ETaskResult::FINISHED;
                 }
@@ -2423,11 +2441,11 @@ private:
         }
 
         auto mergeCode = std::make_shared<NScheduler::TMergeCode>(
-            [](void* state,
+            [](NScheduler::ITaskState& state,
                std::vector<NScheduler::TInputPort>& inputs,
                TRowSet& output)
             {
-                auto* s = static_cast<TMergeState*>(state);
+                auto* s = &static_cast<TMergeState&>(state);
                 if (!s->InputsDone) {
                     bool allDone = true;
                     for (size_t i = 0; i < inputs.size(); ++i) {
@@ -2894,7 +2912,7 @@ private:
         auto runtime = BuildWindowRuntimeProcess(window, childType, std::move(options));
         return TBlockingTail{
             .Code = MakeDrainBlockingCode<TWindowBlockingState>(),
-            .MakeState = [runtime]() -> std::shared_ptr<void> {
+            .MakeState = [runtime]() -> std::shared_ptr<NScheduler::ITaskState> {
                 return std::make_shared<TWindowBlockingState>(
                     runtime.OutputType,
                     runtime.Keys,
@@ -3321,11 +3339,6 @@ bool RunPlanIntoSink(
     std::ostream* diagnostics,
     std::string* error)
 {
-    // Bind every kernel generated during lowering before any task can execute
-    // (no-op for kernels the caller already finalized).
-    JitFinalizeKernels(
-        lowered.Kernels, diagnostics, lowered.ExternalCatalog);
-
     // Aliasing shared_ptr: the sink task's state points at the caller-owned
     // sink without taking ownership of it.
     std::shared_ptr<void> sinkState(std::shared_ptr<void>{}, &sink);
@@ -3334,12 +3347,17 @@ bool RunPlanIntoSink(
         std::move(sinkState),
         TInputPort{.Connection = lowered.FinalGather, .Lane = 0});
     auto& sinkNode = lowered.Graph->AddOwnedNode(std::move(sinkTask));
+    sinkNode.DebugKind = "sink";
     for (size_t p = 0; p < lowered.Lanes; ++p) {
         lowered.Graph->AddEdge(
             *lowered.Producers[p], sinkNode, *lowered.FinalGather, p, 0);
     }
 
     lowered.Graph->Build();
+    if (settings.Instrumentation.Operators) {
+        EnableOperatorInstrumentation(lowered);
+    }
+    JitFinalizeKernels(lowered.Kernels, diagnostics, lowered.ExternalCatalog);
     if (!lowered.Graph->Validate(error)) {
         return false;
     }
@@ -3360,6 +3378,9 @@ bool RunPlanIntoSink(
     TSchedulerExecutor executor(*lowered.Graph, settings);
     if (!executor.Run(error)) {
         return false;
+    }
+    if (settings.Instrumentation.Operators && settings.Instrumentation.Output) {
+        PrintOperatorInstrumentation(*settings.Instrumentation.Output, *lowered.Graph);
     }
     if (settings.Queue.EnableDebugCounters && diagnostics) {
         PrintCounterDiagnostics(*diagnostics, *lowered.Graph, executor.Stats());

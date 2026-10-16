@@ -609,6 +609,10 @@ TTopSortProcessor::~TTopSortProcessor()
     }
 }
 
+void TTopSortProcessor::SetInstrumentation(TOperatorInstrumentation* instrumentation) {
+    Instrumentation_ = instrumentation;
+}
+
 void TTopSortProcessor::Add(TRowSet& batch)
 {
     if (Materialized_) {
@@ -697,6 +701,9 @@ void TTopSortProcessor::Add(TRowSet& batch)
         next.Destroy = DestroyKernelOwnedRowSet;
         ReleaseKernelState(scratch.State);
         scratch.State = next;
+        if (Instrumentation_) {
+            Instrumentation_->RetainInput(scratch.State, 0, false);
+        }
     }
     Release(&batch);
     batch = {};

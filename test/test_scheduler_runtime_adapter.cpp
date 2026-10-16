@@ -103,7 +103,7 @@ struct TSinkState {
     int Batches = 0;
 };
 
-struct TBinaryState {
+struct TBinaryState : ITaskState {
     int LeftRows = 0;
     int RightRows = 0;
     bool LeftDone = false;
@@ -321,9 +321,8 @@ TEST(SchedulerRuntimeAdapter, RunsBinaryBlockingTask) {
         .Next = 10,
         .End = 11,
     });
-    auto binaryState = std::make_shared<TBinaryState>(TBinaryState{
-        .DestroyCount = destroyCount.get(),
-    });
+    auto binaryState = std::make_shared<TBinaryState>();
+    binaryState->DestroyCount = destroyCount.get();
     auto sinkState = std::make_shared<TSinkState>();
 
     auto sourceCode = std::make_shared<TSourceCode>(
@@ -337,8 +336,8 @@ TEST(SchedulerRuntimeAdapter, RunsBinaryBlockingTask) {
             return true;
         });
     auto binaryCode = std::make_shared<TBinaryBlockingCode>(
-        [](void* state, TInputPort& left, TInputPort& right, TRowSet& output) {
-            auto* binary = static_cast<TBinaryState*>(state);
+        [](ITaskState& state, TInputPort& left, TInputPort& right, TRowSet& output) {
+            auto* binary = &static_cast<TBinaryState&>(state);
             TRowSet rowSet{};
             while (!binary->LeftDone) {
                 auto fetch = left.Fetch(rowSet);
@@ -476,10 +475,11 @@ TGateResult RunAsymmetricGateGraph(bool gate) {
             return true;
         });
 
-    auto binaryState = std::make_shared<TBinaryState>(TBinaryState{.DestroyCount = destroy.get()});
+    auto binaryState = std::make_shared<TBinaryState>();
+    binaryState->DestroyCount = destroy.get();
     auto binaryCode = std::make_shared<TBinaryBlockingCode>(
-        [](void* state, TInputPort& left, TInputPort& right, TRowSet& output) {
-            auto* b = static_cast<TBinaryState*>(state);
+        [](ITaskState& state, TInputPort& left, TInputPort& right, TRowSet& output) {
+            auto* b = &static_cast<TBinaryState&>(state);
             TRowSet rowSet{};
             while (!b->RightDone) { // build side first
                 auto fetch = right.Fetch(rowSet);
@@ -505,8 +505,8 @@ TGateResult RunAsymmetricGateGraph(bool gate) {
             return ETaskResult::OK;
         });
     if (gate) {
-        binaryCode->RequiredSide = [](void* state) {
-            auto* b = static_cast<TBinaryState*>(state);
+        binaryCode->RequiredSide = [](ITaskState& state) {
+            auto* b = &static_cast<TBinaryState&>(state);
             return b->RightDone ? ERequiredSide::Left : ERequiredSide::Right;
         };
     }

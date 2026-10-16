@@ -675,6 +675,27 @@ int RunInteractive(
     return 0;
 }
 
+std::expected<NQdb::NScheduler::TInstrumentationSettings, std::string>
+ParseInstrumentation(std::string_view components) {
+    NQdb::NScheduler::TInstrumentationSettings settings;
+    while (true) {
+        const auto comma = components.find(',');
+        const auto component = components.substr(0, comma);
+        if (component == "operators") {
+            settings.Operators = true;
+        } else if (component == "group_predicate") {
+            settings.RowGroupPredicate = true;
+        } else {
+            return std::unexpected("Unknown instrumentation component '" + std::string(component) +
+                "' (expected operators or group_predicate)");
+        }
+        if (comma == std::string_view::npos) {
+            return settings;
+        }
+        components.remove_prefix(comma + 1);
+    }
+}
+
 void PrintHelp() {
     std::cout <<
         "qdb [options]\n"
@@ -692,6 +713,8 @@ void PrintHelp() {
         "  --scheduler <mode>           Execution mode: single, threaded (default: threaded)\n"
         "  --scheduler-workers <n>      Worker count (default: logical CPU count, at least 1)\n"
         "  --scan-tasks <n>             Maximum parquet scan tasks per source (default: auto)\n"
+        "  --instrumentation [list]     Enable instrumentation (default: operators)\n"
+        "                                Components: operators,group_predicate\n"
         "  --scheduler-counters         Print scheduler and connection counters with --verbose\n"
         "  --cascade-aggregates         Parallelize global aggregates (partial->gather->combine)\n"
         "  --no-partial-aggregates      Disable statistics-selected local grouped aggregation\n"
@@ -736,10 +759,6 @@ int main(int argc, char** argv) {
     NQumir::NCodeGen::TLLVMInitializer llvmInit;
 
     TConfig config;
-    if (std::getenv("QDB_DEBUG_ROW_GROUP_PREDICATE")) {
-        config.Scheduler.Diagnostics.RowGroupPredicate = true;
-        config.Scheduler.Diagnostics.Output = &std::cerr;
-    }
     NQdb::TExternalModuleCatalog catalog;
     std::string queryFile;
 
@@ -815,6 +834,22 @@ int main(int argc, char** argv) {
                 return 1;
             }
             config.Scheduler.ScanSplit.MaxScanTasks = static_cast<size_t>(tasks);
+        } else if (!std::strcmp(argv[i], "--instrumentation") ||
+            std::string_view(argv[i]).starts_with("--instrumentation="))
+        {
+            std::string_view components = "operators";
+            if (const auto argument = std::string_view(argv[i]); argument.starts_with("--instrumentation=")) {
+                components = argument.substr(std::string_view("--instrumentation=").size());
+            } else if (i + 1 < argc && !std::string_view(argv[i + 1]).starts_with('-')) {
+                components = argv[++i];
+            }
+            auto settings = ParseInstrumentation(components);
+            if (!settings) {
+                std::cerr << settings.error() << '\n';
+                return 1;
+            }
+            config.Scheduler.Instrumentation = *settings;
+            config.Scheduler.Instrumentation.Output = &std::cerr;
         } else if (!std::strcmp(argv[i], "--scheduler-counters")) {
             config.Scheduler.Queue.EnableDebugCounters = true;
         } else if (!std::strcmp(argv[i], "--cascade-aggregates")) {

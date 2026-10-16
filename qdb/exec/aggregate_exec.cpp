@@ -66,6 +66,17 @@ void TAggregateProcessor::EnsureInit()
         Destroyed_ = true;
         throw std::runtime_error("aggregate initialization failed");
     }
+    if (Instrumentation_) {
+        Instrumentation_->ObserveHash(HashTable_.data(), 0, false, Kernels_.StringMetadataBuffers);
+    }
+}
+
+void TAggregateProcessor::SetInstrumentation(TOperatorInstrumentation* instrumentation) {
+    Instrumentation_ = instrumentation;
+}
+
+void TGroupingSetsAggregateProcessor::SetInstrumentation(TOperatorInstrumentation* instrumentation) {
+    Inner_.SetInstrumentation(instrumentation);
 }
 
 void TAggregateProcessor::Add(TRowSet& rowSet)
@@ -76,6 +87,9 @@ void TAggregateProcessor::Add(TRowSet& rowSet)
     EnsureInit();
     if (Kernels_.Dispatch(HashTable_.data(), &rowSet, 0, OpUpdate) < 0) {
         throw std::runtime_error("aggregate update failed");
+    }
+    if (Instrumentation_) {
+        Instrumentation_->ObserveHash(HashTable_.data(), 0, false, Kernels_.StringMetadataBuffers);
     }
 }
 

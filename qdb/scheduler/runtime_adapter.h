@@ -1,9 +1,11 @@
 #pragma once
 
 #include <qdb/exec/runtime_filter.h>
+#include <qdb/exec/instrumentation/operator.h>
 #include <qdb/io/io.h>
 #include <qdb/scheduler/connection.h>
 #include <qdb/scheduler/state.h>
+#include <qdb/scheduler/task_state.h>
 
 #include <qumir/parser/type.h>
 
@@ -25,6 +27,7 @@ enum class ERequiredSide { Both = 0, Left = 1, Right = 2 };
 struct TInputPort {
     IConnection* Connection = nullptr;
     size_t Lane = 0;
+    TRowSetInstrumentation* Instrumentation = nullptr;
 
     EFetchResult Fetch(TRowSet& rowSet) const;
 };
@@ -32,6 +35,7 @@ struct TInputPort {
 struct TOutputPort {
     IConnection* Connection = nullptr;
     size_t Lane = 0;
+    TRowSetInstrumentation* Instrumentation = nullptr;
 
     bool CanPush() const;
     bool Push(TRowSet&& rowSet) const;
@@ -79,7 +83,7 @@ struct TSinkCode {
 };
 
 struct TBlockingCode {
-    using TProcess = std::function<ETaskResult(void*, TInputPort&, TRowSet&)>;
+    using TProcess = std::function<ETaskResult(ITaskState&, TInputPort&, TRowSet&)>;
 
     explicit TBlockingCode(TProcess process);
 
@@ -88,13 +92,13 @@ struct TBlockingCode {
 
 struct TBinaryBlockingCode {
     using TProcess = std::function<ETaskResult(
-        void*,
+        ITaskState&,
         TInputPort&,
         TInputPort&,
         TRowSet&)>;
     // Which side Process will read next; empty => both. Consulted by the task's
     // WantsInput to gate readiness.
-    using TRequiredSide = std::function<ERequiredSide(void*)>;
+    using TRequiredSide = std::function<ERequiredSide(ITaskState&)>;
 
     explicit TBinaryBlockingCode(TProcess process);
 
@@ -131,7 +135,7 @@ struct TRuntimeFilterCode {
 
 struct TMergeCode {
     using TProcess = std::function<ETaskResult(
-        void*,
+        ITaskState&,
         std::vector<TInputPort>&,
         TRowSet&)>;
 
@@ -148,6 +152,7 @@ public:
         TOutputPort output);
 
     ETaskResult Execute() override;
+    void ConfigureInstrumentation(TTaskInstrumentationSetup& setup) override;
 
 private:
     std::shared_ptr<const TSourceCode> Code_;
@@ -165,6 +170,7 @@ public:
     ~TRuntimeFilterTask() override;
 
     ETaskResult Execute() override;
+    void ConfigureInstrumentation(TTaskInstrumentationSetup& setup) override;
     bool WantsInput(const TTaskEdge& edge) const noexcept override;
     bool TryNotifyDependency() noexcept override;
 
@@ -191,6 +197,7 @@ public:
     ~TUnaryTask() override;
 
     ETaskResult Execute() override;
+    void ConfigureInstrumentation(TTaskInstrumentationSetup& setup) override;
 
     const std::shared_ptr<const TUnaryCode>& Code() const;
     const std::shared_ptr<void>& State() const;
@@ -214,6 +221,7 @@ public:
         TInputPort input);
 
     ETaskResult Execute() override;
+    void ConfigureInstrumentation(TTaskInstrumentationSetup& setup) override;
 
 private:
     std::shared_ptr<const TSinkCode> Code_;
@@ -226,16 +234,17 @@ class TBlockingTask final : public ITaskNode {
 public:
     TBlockingTask(
         std::shared_ptr<const TBlockingCode> code,
-        std::shared_ptr<void> state,
+        std::shared_ptr<ITaskState> state,
         TInputPort input,
         TOutputPort output);
     ~TBlockingTask() override;
 
     ETaskResult Execute() override;
+    void ConfigureInstrumentation(TTaskInstrumentationSetup& setup) override;
 
 private:
     std::shared_ptr<const TBlockingCode> Code_;
-    std::shared_ptr<void> State_;
+    std::shared_ptr<ITaskState> State_;
     TInputPort Input_;
     TOutputPort Output_;
     TRowSet CurrentOutput_ = {};
@@ -247,18 +256,19 @@ class TBinaryBlockingTask final : public ITaskNode {
 public:
     TBinaryBlockingTask(
         std::shared_ptr<const TBinaryBlockingCode> code,
-        std::shared_ptr<void> state,
+        std::shared_ptr<ITaskState> state,
         TInputPort left,
         TInputPort right,
         TOutputPort output);
     ~TBinaryBlockingTask() override;
 
     ETaskResult Execute() override;
+    void ConfigureInstrumentation(TTaskInstrumentationSetup& setup) override;
     bool WantsInput(const TTaskEdge& edge) const noexcept override;
 
 private:
     std::shared_ptr<const TBinaryBlockingCode> Code_;
-    std::shared_ptr<void> State_;
+    std::shared_ptr<ITaskState> State_;
     TInputPort Left_;
     TInputPort Right_;
     TOutputPort Output_;
@@ -272,16 +282,17 @@ class TMergeTask final : public ITaskNode {
 public:
     TMergeTask(
         std::shared_ptr<const TMergeCode> code,
-        std::shared_ptr<void> state,
+        std::shared_ptr<ITaskState> state,
         std::vector<TInputPort> inputs,
         TOutputPort output);
     ~TMergeTask() override;
 
     ETaskResult Execute() override;
+    void ConfigureInstrumentation(TTaskInstrumentationSetup& setup) override;
 
 private:
     std::shared_ptr<const TMergeCode> Code_;
-    std::shared_ptr<void> State_;
+    std::shared_ptr<ITaskState> State_;
     std::vector<TInputPort> Inputs_;
     TOutputPort Output_;
     TRowSet CurrentOutput_ = {};
@@ -300,11 +311,13 @@ public:
     ~THashShuffleTask() override;
 
     ETaskResult Execute() override;
+    void ConfigureInstrumentation(TTaskInstrumentationSetup& setup) override;
 
 private:
     struct TBufferedBatch;
     struct TDestinationBuffer;
     struct TPendingOutput;
+    struct TInstrumentationState;
 
     bool BatchingEnabled() const;
     std::shared_ptr<uint64_t> ComputeHashes(const std::shared_ptr<TRowSet>& input);
@@ -322,6 +335,7 @@ private:
     void FlushAllBuffers();
     ETaskResult PushPending();
     void ClearPending();
+    void ObserveInstrumentation();
 
 private:
     std::shared_ptr<const THashShuffleCode> Code_;
@@ -329,6 +343,8 @@ private:
     TInputPort Input_;
     THashShuffleConnection* Output_ = nullptr;
     size_t SourceLane_ = 0;
+    TRowSetInstrumentation* OutputInstrumentation_ = nullptr;
+    std::unique_ptr<TInstrumentationState> ResourceInstrumentation_;
     std::optional<TRuntimeFilterBuilder> FilterBuilder_;
     std::vector<std::unique_ptr<TDestinationBuffer>> Buffers_;
     std::vector<TPendingOutput> Pending_;
@@ -339,16 +355,21 @@ private:
 
 // Consumers push non-owning views of Batches, so the spool must outlive every
 // consumer's downstream (the graph owns both, so it does).
-struct TCteSharedState {
+struct TCteSharedState : ITaskState {
     enum class EStatus {
         Building,
         Ready,
     };
 
     std::atomic<EStatus> Status = EStatus::Building;
+    TOperatorInstrumentation* Instrumentation = nullptr;
     std::vector<TRowSet> Batches;
 
-    ~TCteSharedState() {
+    void ConfigureInstrumentation(TOperatorInstrumentation* instrumentation) override {
+        Instrumentation = instrumentation;
+    }
+
+    ~TCteSharedState() override {
         for (auto& batch : Batches) {
             Release(&batch);
         }
@@ -360,6 +381,7 @@ public:
     TCteConsumerTask(std::shared_ptr<const TCteSharedState> state, TOutputPort output);
 
     ETaskResult Execute() override;
+    void ConfigureInstrumentation(TTaskInstrumentationSetup& setup) override;
 
 private:
     std::shared_ptr<const TCteSharedState> State_;
