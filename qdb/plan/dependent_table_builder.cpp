@@ -122,6 +122,34 @@ std::unordered_set<std::string> TDependentTableBuilder::CollectDeclaredColumns(
     return names;
 }
 
+std::expected<void, TError> TDependentTableBuilder::ValidateJoinConditions(
+    const NSql::TSqlPtr<NSql::TSqlTableRef>& table,
+    const NAst::TConcreteTypePtr<NAst::TStructType>& outerSchema) const
+{
+    auto maybeJoin = NSql::TMaybeNode<NSql::TSqlJoin>(table);
+    if (!maybeJoin) {
+        return {};
+    }
+    const auto join = maybeJoin.Cast();
+    for (const auto& input : {join->Left, join->Right}) {
+        if (auto valid = ValidateJoinConditions(input, outerSchema); !valid) {
+            return valid;
+        }
+    }
+    if (join->Condition && join->Condition->On) {
+        // ON sees this join's operands, not sibling FROM items. Moving a
+        // correlated ON to the domain join would change null extension.
+        const auto local = CollectDeclaredColumns(table);
+        for (const auto& name : FindUnboundVars(join->Condition->On)) {
+            if (!local.contains(name) && Resolve(outerSchema, name)) {
+                return std::unexpected(TError(
+                    "outer references in JOIN ON inside dependent FROM are not supported: " + name));
+            }
+        }
+    }
+    return {};
+}
+
 bool TDependentTableBuilder::IsDeterministic(const NAst::TExprPtr& expr) {
     // The catalog has no volatility contract; domain copies require known calls.
     static const std::set<std::string> DeterministicCalls = {
@@ -314,6 +342,11 @@ std::expected<std::optional<TOperatorPtr>, TError> TDependentTableBuilder::Build
     auto outerSchema = left->OutputColumns();
     if (!outerSchema) {
         return std::unexpected(TError("dependent FROM requires resolved input schemas"));
+    }
+    for (const auto& table : original->From->Items) {
+        if (auto valid = ValidateJoinConditions(table, outerSchema); !valid) {
+            return std::unexpected(valid.error());
+        }
     }
     std::vector<NAst::TExprPtr> expressions{original->Where, original->Having};
     for (const auto& item : original->SelectList->Items) {

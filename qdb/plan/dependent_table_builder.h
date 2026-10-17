@@ -32,6 +32,9 @@ private:
         const std::string& name);
     std::unordered_set<std::string> CollectDeclaredColumns(
         const NSql::TSqlPtr<NSql::TSqlTableRef>& table) const;
+    std::expected<void, NQumir::TError> ValidateJoinConditions(
+        const NSql::TSqlPtr<NSql::TSqlTableRef>& table,
+        const NQumir::NAst::TConcreteTypePtr<NQumir::NAst::TStructType>& outerSchema) const;
     static bool IsDeterministic(const NQumir::NAst::TExprPtr& expr);
     static bool IsDeterministicPlan(const TOperatorPtr& op);
     static bool ContainsAggregate(const NQumir::NAst::TExprPtr& expr);

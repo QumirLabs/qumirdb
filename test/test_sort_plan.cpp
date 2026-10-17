@@ -1198,6 +1198,70 @@ TEST(DependentFromPlan, RejectsRightJoinDependency) {
     EXPECT_NE(std::string(result.error().what()).find("INNER, CROSS and LEFT"), std::string::npos);
 }
 
+TEST(DependentFromPlan, RejectsOuterReferencesInLocalJoinOn) {
+    auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
+    TMockSource source(TMockColumns{}, {{"k", i64}, {"v", i64}}, {});
+    for (const std::string lateral : {"LATERAL ", ""}) {
+        for (const std::string join : {"JOIN", "LEFT JOIN", "RIGHT JOIN", "FULL JOIN"}) {
+            for (const std::string where : {"", " WHERE a.k=t.k"}) {
+                const auto sql = "SELECT t.k, d.val FROM t, " + lateral
+                    + "(SELECT a.v AS val FROM v AS a " + join
+                    + " v AS b ON a.k=b.k AND b.k=t.k" + where + ") AS d";
+                SCOPED_TRACE(sql);
+                auto result = BuildSqlPlan(sql, source);
+                ASSERT_FALSE(result.has_value());
+                EXPECT_NE(std::string(result.error().what()).find(
+                    "outer references in JOIN ON inside dependent FROM are not supported: t.k"),
+                    std::string::npos);
+            }
+        }
+    }
+}
+
+TEST(DependentFromPlan, ChecksOnAtEachLocalJoinBoundary) {
+    auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
+    TMockSource source(TMockColumns{}, {{"k", i64}, {"v", i64}}, {});
+    for (const std::string from : {
+        "(v AS a JOIN v AS b ON a.k=b.k AND b.k=t.k) LEFT JOIN v AS c ON b.k=c.k",
+        "v AS c LEFT JOIN (v AS a JOIN v AS b ON a.k=b.k AND b.k=t.k) ON c.k=a.k",
+        "v AS t, v AS a LEFT JOIN v AS b ON a.k=b.k AND b.k=t.k"})
+    {
+        // A sibling named t must not hide the outer t at this ON boundary.
+        const auto sql = "SELECT t.k, d.val FROM t CROSS JOIN LATERAL "
+            "(SELECT a.v AS val FROM " + from + ") AS d";
+        SCOPED_TRACE(sql);
+        auto result = BuildSqlPlan(sql, source);
+        ASSERT_FALSE(result.has_value());
+        EXPECT_NE(std::string(result.error().what()).find(
+            "outer references in JOIN ON inside dependent FROM are not supported: t.k"),
+            std::string::npos);
+    }
+}
+
+TEST(DependentFromPlan, AllowsLocalJoinOnConditions) {
+    auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
+    TMockSource source(TMockColumns{}, {{"k", i64}, {"v", i64}}, {});
+    for (const std::string join : {"JOIN", "LEFT JOIN", "RIGHT JOIN", "FULL JOIN"}) {
+        for (const std::string where : {"", " WHERE a.k=t.k"}) {
+            const auto sql = "SELECT t.k, d.val FROM t CROSS JOIN LATERAL "
+                "(SELECT a.v AS val FROM v AS a " + join
+                + " v AS b ON a.k=b.k" + where + ") AS d";
+            SCOPED_TRACE(sql);
+            auto result = BuildSqlPlan(sql, source);
+            ASSERT_TRUE(result.has_value()) << result.error().ToString();
+        }
+    }
+    // The inner t shadows the outer alias; an unqualified local v also wins.
+    auto shadowed = BuildSqlPlan(
+        "SELECT t.k, d.val FROM t CROSS JOIN LATERAL "
+        "(SELECT a.v AS val FROM v AS a JOIN v AS t ON a.k=t.k) AS d", source);
+    ASSERT_TRUE(shadowed.has_value()) << shadowed.error().ToString();
+    auto unqualified = BuildSqlPlan(
+        "SELECT t.k, d.val FROM t CROSS JOIN LATERAL "
+        "(SELECT a.v AS val FROM v AS a JOIN (SELECT k FROM v) AS b ON v=b.k) AS d", source);
+    ASSERT_TRUE(unqualified.has_value()) << unqualified.error().ToString();
+}
+
 TEST(DependentFromPlan, LateralRequiresSubquery) {
     auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
     TMockSource source(TMockColumns{}, {{"k", i64}}, {});

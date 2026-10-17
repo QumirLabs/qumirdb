@@ -150,6 +150,11 @@ GROUP BY and HAVING. Per-parameter ORDER BY/LIMIT/OFFSET, windows, grouping sets
 nested subqueries and local WITH clauses are rejected rather than being evaluated
 once for the entire domain. It is a bounded FROM lowering, not a universal
 decorrelator. RIGHT/FULL dependent joins are also rejected.
+Outer references in ON conditions within the dependent SELECT's FROM tree are
+rejected, even when WHERE also references the outer input. Those conditions
+belong to their own join boundary: applying them after the domain joins the
+completed FROM input can change which rows an outer join preserves. Local ON
+conditions remain supported, including inside outer joins.
 LEFT dependent JOIN ON accepts equi-keys or deterministic predicates over the
 dependent output; other residual outer-join conditions remain unsupported.
 Domain reuse requires deterministic inputs. Until the function catalog exposes a
