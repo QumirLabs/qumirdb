@@ -1,25 +1,10 @@
 {
   "schema": "<struct (id i64) (val <named Nullable [i64]>)>",
   "rows": [
-    [
-      "1",
-      null
-    ],
-    [
-      "1",
-      null
-    ],
-    [
-      "2",
-      "7"
-    ],
-    [
-      "3",
-      null
-    ],
-    [
-      "4",
-      null
-    ]
+    ["1", null],
+    ["1", null],
+    ["2", "7"],
+    ["3", null],
+    ["4", null]
   ]
 }
