@@ -7,15 +7,23 @@
 #include <qdb/plan/ops/stats.h>
 #include <qdb/plan/passes/cbo/dpccp.h>
 #include <qdb/plan/passes/estimate_stats.h>
+#include <qdb/plan/build.h>
+#include <qdb/plan/pipeline.h>
+#include <qdb/plan/plan_print.h>
+#include <qdb/sql/parser.h>
 
 #include <qumir/parser/type.h>
 
 #include <algorithm>
 #include <bit>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <map>
 #include <memory>
+#include <set>
+#include <sstream>
+#include <stdexcept>
 #include <string>
 #include <tuple>
 #include <vector>
@@ -350,6 +358,127 @@ TEST(Cbo, RandomGraphsOptimal) {
         }
         ExpectOptimal(fx, edges);
     }
+}
+
+namespace {
+
+class TWidthSource final : public TMockSource {
+public:
+    TWidthSource(
+        std::vector<std::string> names,
+        std::vector<NQumir::NAst::TTypePtr> types,
+        uint64_t rows,
+        std::vector<uint64_t> ndvs)
+        : TMockSource(std::move(names), {}, std::move(types))
+        , Stats_(std::make_shared<TStats>())
+    {
+        Stats_->RowCount = rows;
+        for (size_t i = 0; i < Names.size(); ++i) {
+            auto column = std::make_shared<TStats::TColumnStats>();
+            column->Ndv = ndvs[i];
+            Stats_->ColumnStats[Names[i]] = std::move(column);
+        }
+    }
+
+    const TStatsPtr Stats() const override {
+        return Stats_;
+    }
+
+private:
+    TStatsPtr Stats_;
+};
+
+struct TWidthPlan {
+    std::string Text;
+    std::set<std::string> FirstPair;
+    bool UsedCbo = false;
+    size_t OutputColumns = 0;
+};
+
+TWidthPlan PlanWithPayload(size_t payloadColumns, bool demandPayload) {
+    using namespace NQumir::NAst;
+    auto integer = std::make_shared<TIntegerType>();
+    auto string = std::make_shared<TStringType>();
+    std::vector<std::string> aNames{"id"};
+    std::vector<TTypePtr> aTypes{integer};
+    std::vector<uint64_t> aNdvs{100};
+    std::string select = "select a.id, c.payload";
+    for (size_t i = 0; i < payloadColumns; ++i) {
+        auto name = "payload_" + std::to_string(i);
+        aNames.push_back(name);
+        aTypes.push_back(string);
+        aNdvs.push_back(100);
+        if (demandPayload) {
+            select += ", a." + name;
+        }
+    }
+    TWidthSource a(std::move(aNames), std::move(aTypes), 100, std::move(aNdvs));
+    TWidthSource b({"a_id", "c_id"}, {integer, integer}, 1000, {100, 1000});
+    TWidthSource c({"id", "payload"}, {integer, string}, 1000, {1000, 1000});
+    std::map<std::string, ISource*> sources{{"a", &a}, {"b", &b}, {"c", &c}};
+    std::istringstream sql(select
+        + " from a, b, c where a.id = b.a_id and b.c_id = c.id");
+    NSql::TTokenStream tokens(sql);
+    auto parsed = NSql::TParser{}.Parse(tokens);
+    if (!parsed) {
+        throw std::runtime_error(parsed.error().ToString());
+    }
+    auto built = BuildPlan(*parsed, [&](std::string_view table)
+        -> std::expected<TOperatorPtr, NQumir::TError>
+    {
+        return std::make_shared<TSourceOperator>(
+            *sources.at(std::string(table)), std::string(table));
+    });
+    if (!built) {
+        throw std::runtime_error(built.error().ToString());
+    }
+    auto plan = *built;
+    TPlanPassDiagnostics diagnostics;
+    ApplyPlanPasses(plan, {.EnableRuntimeFilters = false, .Diagnostics = &diagnostics});
+    TWidthPlan result;
+    result.UsedCbo = diagnostics.JoinReorder.UsedCbo;
+    result.OutputColumns = plan->OutputColumns()->Fields.size();
+    std::ostringstream text;
+    PrintPlanTree(text, plan);
+    result.Text = text.str();
+    std::function<std::set<std::string>(const TOperatorPtr&)> leaves =
+        [&](const TOperatorPtr& op) {
+        if (auto source = TMaybeOp<TSourceOperator>(op)) {
+            return std::set<std::string>{source.Cast()->GetAlias()};
+        }
+        std::set<std::string> names;
+        for (const auto& input : op->Inputs()) {
+            const auto child = leaves(input);
+            names.insert(child.begin(), child.end());
+        }
+        if (TMaybeOp<TJoinOperator>(op) && names.size() == 2) {
+            result.FirstPair = names;
+        }
+        return names;
+    };
+    leaves(plan);
+    return result;
+}
+
+} // namespace
+
+TEST(Cbo, UnusedPayloadDoesNotChangeProductionJoinOrder) {
+    const auto narrow = PlanWithPayload(0, false);
+    const auto unusedWide = PlanWithPayload(64, false);
+    ASSERT_TRUE(narrow.UsedCbo);
+    ASSERT_TRUE(unusedWide.UsedCbo);
+    EXPECT_EQ(narrow.FirstPair, (std::set<std::string>{"a", "b"}));
+    EXPECT_EQ(unusedWide.Text, narrow.Text);
+}
+
+TEST(Cbo, DemandedPayloadStillAffectsProductionJoinOrder) {
+    const auto unused = PlanWithPayload(64, false);
+    const auto demanded = PlanWithPayload(64, true);
+    ASSERT_TRUE(unused.UsedCbo);
+    ASSERT_TRUE(demanded.UsedCbo);
+    EXPECT_EQ(unused.FirstPair, (std::set<std::string>{"a", "b"}));
+    EXPECT_EQ(demanded.FirstPair, (std::set<std::string>{"b", "c"}));
+    EXPECT_EQ(demanded.OutputColumns, 66);
 }
 
 int main(int argc, char** argv) {

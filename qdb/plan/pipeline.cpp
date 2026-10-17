@@ -48,6 +48,11 @@ void OptimizeOne(TOperatorPtr& plan, TPlanPassOptions& options, TFoldedBounds& f
     plan = SimplifySelfEquality(plan); stage("SimplifySelfEquality");
     plan = PushDownPredicates(plan); stage("PushDownPredicates");
     AnnotateTypes(plan, options.Annotation); // re-annotate: pushdown moved filters onto leaves
+    if (options.EnableCbo) {
+        // Join widths must describe demanded scan/filter outputs. Unused source
+        // payload would otherwise bias the choice before final column pruning.
+        ApplyColumnPruning(plan); stage("PruneBeforeJoinOrder");
+    }
     EstimateStats(plan, foldedBounds); // leaf cardinalities for cost-based ReorderJoins
     plan = ReorderJoins(
         plan,
