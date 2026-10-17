@@ -1177,6 +1177,54 @@ TEST(SortExec, RespectsInputSelection) {
     Release(&out);
 }
 
+TEST(DependentFromPlan, RejectsPerDomainLimit) {
+    auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
+    TMockSource source(TMockColumns{}, {{"k", i64}, {"v", i64}}, {});
+    auto result = BuildSqlPlan(
+        "SELECT t.k FROM t, LATERAL "
+        "(SELECT v.v FROM v WHERE v.k=t.k LIMIT 1) AS d", source);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_NE(std::string(result.error().what()).find("dependent FROM"), std::string::npos);
+    EXPECT_NE(std::string(result.error().what()).find("LIMIT"), std::string::npos);
+}
+
+TEST(DependentFromPlan, RejectsRightJoinDependency) {
+    auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
+    TMockSource source(TMockColumns{}, {{"k", i64}, {"v", i64}}, {});
+    auto result = BuildSqlPlan(
+        "SELECT t.k FROM t RIGHT JOIN LATERAL "
+        "(SELECT v.v FROM v WHERE v.k=t.k) AS d ON t.k=d.v", source);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_NE(std::string(result.error().what()).find("INNER, CROSS and LEFT"), std::string::npos);
+}
+
+TEST(DependentFromPlan, LateralRequiresSubquery) {
+    auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
+    TMockSource source(TMockColumns{}, {{"k", i64}}, {});
+    auto result = BuildSqlPlan("SELECT t.k FROM t, LATERAL v", source);
+    ASSERT_FALSE(result.has_value());
+}
+
+TEST(DependentFromPlan, RejectsVolatileDependentFunction) {
+    auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
+    TMockSource source(TMockColumns{}, {{"k", i64}, {"v", i64}}, {});
+    auto result = BuildSqlPlan(
+        "SELECT t.k FROM t, LATERAL "
+        "(SELECT rand(10) AS r FROM v WHERE v.k=t.k) AS d", source);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_NE(std::string(result.error().what()).find("deterministic"), std::string::npos);
+}
+
+TEST(DependentFromPlan, RejectsVolatileOuterInput) {
+    auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
+    TMockSource source(TMockColumns{}, {{"k", i64}, {"v", i64}}, {});
+    auto result = BuildSqlPlan(
+        "SELECT t.k FROM (SELECT k, rand(10) AS r FROM t) AS t, LATERAL "
+        "(SELECT v.v FROM v WHERE v.k=t.r) AS d", source);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_NE(std::string(result.error().what()).find("deterministic"), std::string::npos);
+}
+
 int main(int argc, char** argv) {
     NQumir::NCodeGen::TLLVMInitializer initializer;
     ::testing::InitGoogleTest(&argc, argv);

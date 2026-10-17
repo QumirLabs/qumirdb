@@ -1,0 +1,81 @@
+{
+  "version": 1,
+  "fixtures": {
+    "outer": {
+      "json": "tables/outer.json",
+      "parquet": {
+        "row_group_rows": 2
+      }
+    },
+    "inner": {
+      "json": "tables/inner.json",
+      "parquet": {
+        "row_group_rows": 2
+      }
+    }
+  },
+  "tables": {
+    "t": "outer",
+    "v": "inner"
+  },
+  "variants": [
+    "single",
+    "threaded"
+  ],
+  "cases": {
+    "implicit_count.sql": {
+      "order": "unordered"
+    },
+    "explicit_count.sql": {
+      "order": "unordered"
+    },
+    "aggregate_values.sql": {
+      "order": "unordered"
+    },
+    "outer_arguments.sql": {
+      "order": "unordered"
+    },
+    "nonaggregate.sql": {
+      "order": "unordered"
+    },
+    "column_aliases.sql": {
+      "order": "unordered"
+    },
+    "non_equi.sql": {
+      "order": "unordered"
+    },
+    "null_parameter.sql": {
+      "order": "unordered"
+    },
+    "having_empty.sql": {
+      "order": "unordered"
+    },
+    "having_matches.sql": {
+      "order": "unordered"
+    },
+    "explicit_group.sql": {
+      "order": "unordered"
+    },
+    "left_nonaggregate.sql": {
+      "order": "unordered"
+    },
+    "select_star.sql": {
+      "order": "unordered"
+    },
+    "distinct.sql": {
+      "order": "unordered"
+    },
+    "empty_outer.sql": {
+      "order": "unordered"
+    },
+    "uncorrelated_control.sql": {
+      "order": "unordered"
+    },
+    "implicit_unaliased.sql": {
+      "order": "unordered"
+    },
+    "global_empty_expr.sql": {
+      "order": "unordered"
+    }
+  }
+}

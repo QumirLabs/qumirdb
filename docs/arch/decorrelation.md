@@ -117,7 +117,48 @@ column and turns it into `localCol IS NOT NULL` for a nullable one before
 statistics are estimated, so it is not costed as a selective predicate
 ([optimizations.md](optimizations.md)).
 
-## Limits
+## Dependent tables in FROM
+
+A derived table can reference preceding FROM items, either with explicit
+`LATERAL` or QDB's implicit comma-FROM compatibility syntax. Unlike a scalar
+subquery, it may produce several columns and any number of rows per outer row.
+INNER/CROSS and LEFT dependent joins use the same logical operators and compiled
+execution path in native and browser targets.
+
+The builder projects the referenced outer columns into a distinct parameter
+domain. The dependent SELECT runs over that domain and its own FROM input,
+retaining the parameter columns through projection, DISTINCT and aggregation.
+Its predicate stays inside this parameterized input, so non-equality and NULL
+predicates keep their ordinary SQL meaning. The result joins back to the original
+outer input on null-safe parameter keys. Deduplicating the domain avoids repeating
+the computation for equal parameters; joining back restores every original outer
+duplicate. Parameter identity treats NULLs as equal without changing SQL equality
+inside the dependent predicate.
+
+A global aggregate must return a group even when its parameter has no matching
+inner rows. Its input first INNER joins the domain to marked inner rows, applying
+the WHERE predicate there. A separate key-only LEFT join from the domain restores
+missing parameter groups without requiring a residual outer-join kernel.
+Aggregate arguments become NULL for the
+unmatched placeholder; COUNT(*) counts the match marker. Thus an empty group has
+COUNT zero and SUM NULL, including aggregates over constants or outer columns.
+HAVING and scalar expressions run after those states are finalized. An explicit
+GROUP BY uses an INNER parameterized input: missing groups produce no rows.
+
+This construction handles plain SELECT, WHERE, projection, DISTINCT, ordinary
+GROUP BY and HAVING. Per-parameter ORDER BY/LIMIT/OFFSET, windows, grouping sets,
+nested subqueries and local WITH clauses are rejected rather than being evaluated
+once for the entire domain. It is a bounded FROM lowering, not a universal
+decorrelator. RIGHT/FULL dependent joins are also rejected.
+LEFT dependent JOIN ON accepts equi-keys or deterministic predicates over the
+dependent output; other residual outer-join conditions remain unsupported.
+Domain reuse requires deterministic inputs. Until the function catalog exposes a
+volatility contract, this lowering accepts known deterministic SQL intrinsics and
+rejects other function calls, including external functions and `rand`/`irand`.
+This check includes the outer input copied into the parameter domain; outer
+windows are conservatively rejected too.
+
+## Scalar decorrelation limits
 
 - correlation is detected only from equality conjuncts (`localCol == outerCol`);
 - the correlated subquery must reduce to a single value (one non-correlation

@@ -378,6 +378,9 @@ struct TSqlPrinter {
         if (auto maybeSub = TMaybeNode<TSqlSubqueryTable>(ref)) {
             auto sub = maybeSub.Cast();
             std::string head = "(subquery-table";
+            if (sub->Lateral) {
+                head += " lateral";
+            }
             if (sub->Alias) {
                 head += " as " + *sub->Alias;
             }
