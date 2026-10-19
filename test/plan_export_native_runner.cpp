@@ -4,6 +4,7 @@
 #include <qdb/plan/build.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/pipeline.h>
+#include <qdb/plan/types/nullable.h>
 #include <qdb/sql/parser.h>
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
@@ -31,6 +32,8 @@ struct TFixtureTable {
     std::vector<std::string> Names;
     std::vector<std::vector<int64_t>> Values;
     std::vector<TColumn> Columns;
+    std::vector<std::vector<uint8_t>> BooleanData;
+    std::vector<uint8_t> ValidityData;
     TRowSet Batch{};
     std::unique_ptr<TMockSource> Source;
 
@@ -77,6 +80,39 @@ struct TFixture {
 
 TFixture MakeFixture(std::string_view name) {
     TFixture fixture;
+    if (name == "boolean_columns") {
+        fixture.Sql = "SELECT x, b, n, b = FALSE AS inv, n = FALSE AS ni "
+            "FROM t WHERE x % 3 <> 1 ORDER BY x";
+        std::vector<int64_t> x(145);
+        for (int64_t row = 0; row < 145; ++row) {
+            x[row] = row;
+        }
+        auto table = std::make_unique<TFixtureTable>(
+            std::vector<std::string>{"x", "b", "n"},
+            std::vector<std::vector<int64_t>>{x, x, x});
+        table->BooleanData.assign(2, std::vector<uint8_t>(19, 0));
+        table->ValidityData.assign(19, 0);
+        for (int64_t row = 0; row < 145; ++row) {
+            if (row % 2 == 1) {
+                table->BooleanData[0][row / 8] |= uint8_t{1} << (row % 8);
+            } else {
+                table->BooleanData[1][row / 8] |= uint8_t{1} << (row % 8);
+            }
+            if (row % 5 != 0) {
+                table->ValidityData[row / 8] |= uint8_t{1} << (row % 8);
+            }
+        }
+        table->Columns[1].Data = reinterpret_cast<char*>(table->BooleanData[0].data());
+        table->Columns[2].Data = reinterpret_cast<char*>(table->BooleanData[1].data());
+        table->Columns[2].Mask = table->ValidityData.data();
+        auto boolType = std::make_shared<TBoolType>();
+        table->Source = std::make_unique<TMockSource>(table->Names,
+            std::vector<TTypePtr>{std::make_shared<TIntegerType>(), boolType,
+                std::make_shared<TNullable>(boolType)},
+            std::vector<TRowSet>{table->Batch});
+        fixture.Tables.emplace("t", std::move(table));
+        return fixture;
+    }
     if (name == "filter_project") {
         fixture.Sql =
             "SELECT k AS k, v + 1 AS x FROM t WHERE v >= 20";
@@ -274,9 +310,16 @@ void PrintResult(TTestRuntime& runtime) {
                     PrintJsonString("");
                     continue;
                 }
-                const auto* values =
-                    reinterpret_cast<const int64_t*>(column.Data);
-                PrintJsonString(std::to_string(values[row]));
+                const auto type = UnwrapNamedType(UnwrapNullableType(
+                    output.Cast()->Fields[columnIndex].second));
+                if (TMaybeType<TBoolType>(type)) {
+                    const auto* bits = reinterpret_cast<const uint8_t*>(column.Data);
+                    const int64_t bit = row + column.DataBitOffset;
+                    PrintJsonString(std::to_string((bits[bit / 8] >> (bit % 8)) & 1));
+                } else {
+                    const auto* values = reinterpret_cast<const int64_t*>(column.Data);
+                    PrintJsonString(std::to_string(values[row]));
+                }
             }
             std::cout << ']';
         }

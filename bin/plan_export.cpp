@@ -1892,7 +1892,9 @@ llvm::json::Object ExecLayoutJson(int64_t heapBase, int wasmBits) {
             {"column", llvm::json::Object{
                 {"size", 24},
                 {"data", 0},
+                {"dataBitOffset", 4},
                 {"mask", 8},
+                {"maskBitOffset", 12},
                 {"offsets", 16},
                 {"offsetWidth", 20},
             }},
@@ -1927,7 +1929,9 @@ llvm::json::Object ExecLayoutJson(int64_t heapBase, int wasmBits) {
             {"column", llvm::json::Object{
                 {"size", 48},
                 {"data", 0},
+                {"dataBitOffset", 8},
                 {"mask", 16},
+                {"maskBitOffset", 24},
                 {"offsets", 32},
                 {"offsetWidth", 40},
             }},

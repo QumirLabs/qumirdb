@@ -66,6 +66,17 @@ NQumir::NAst::TTypePtr AggregateStorageType(
     return type;
 }
 
+NQumir::NAst::TTypePtr ColumnBufferElementType(
+    const NQumir::NAst::TTypePtr& valueType)
+{
+    using namespace NQumir::NAst;
+    // Bitmap buffers are byte-addressed; scalar bool storage is not their layout.
+    if (TMaybeType<TBoolType>(UnwrapNamedType(valueType))) {
+        return std::make_shared<TIntegerType>(TIntegerType::U8);
+    }
+    return valueType;
+}
+
 int64_t AggStateByteWidth(const TAggReducerInfo& reducer) {
     return reducer.IsBinInt() ? 16 : 8;
 }
@@ -1477,7 +1488,7 @@ NQumir::NAst::TExprPtr GenProjectKernelAst(
     for (size_t k = 0; k < numComputed; ++k) {
         const bool nullable = IsNullableType(outputTypes[k]);
         auto valueType = nullable ? UnwrapNullableType(outputTypes[k]) : outputTypes[k];
-        auto ptrTk = std::make_shared<TPointerType>(valueType);
+        auto ptrTk = std::make_shared<TPointerType>(ColumnBufferElementType(valueType));
         auto outK = std::make_shared<TIndexExpr>(loc, ident("out"), numI64(int64_t(k)));
         bodyStmts.push_back(var("out_" + std::to_string(k), ptrTk));
         bodyStmts.push_back(assign("out_" + std::to_string(k),
@@ -1496,23 +1507,32 @@ NQumir::NAst::TExprPtr GenProjectKernelAst(
     size_t outputIndex = 0;
     auto emitOutput = [&](TExprPtr value, const TTypePtr& type) {
         const size_t k = outputIndex++;
+        auto emitValue = [&](TExprPtr result) {
+            const auto valueType = UnwrapNullableType(type);
+            if (TMaybeType<TBoolType>(UnwrapNamedType(valueType))) {
+                loopSetup.push_back(std::make_shared<TCallExpr>(loc,
+                    ident("qdb_bitmap_set_valid"),
+                    std::vector<TExprPtr>{ident("out_" + std::to_string(k)),
+                        ident("i"), cast(std::move(result), valueType)}));
+            } else {
+                loopSetup.push_back(std::make_shared<TArrayAssignExpr>(loc,
+                    "out_" + std::to_string(k), std::vector<TExprPtr>{ident("i")},
+                    cast(std::move(result), valueType)));
+            }
+        };
         if (IsNullableType(type)) {
             // Split the Nullable[T] result: Value -> data buffer, Valid -> mask.
             auto nt = nullableType(UnwrapNullableType(type));
             const std::string rName = "r_" + std::to_string(k);
             loopSetup.push_back(var(rName, nt));
             loopSetup.push_back(assign(rName, std::move(value)));
-            loopSetup.push_back(std::make_shared<TArrayAssignExpr>(loc,
-                "out_" + std::to_string(k), std::vector<TExprPtr>{ident("i")},
-                field(rName, "Value")));
+            emitValue(field(rName, "Value"));
             loopSetup.push_back(std::make_shared<TCallExpr>(loc,
                 ident("qdb_bitmap_set_valid"),
                 std::vector<TExprPtr>{ident("out_mask_" + std::to_string(k)),
                     ident("i"), field(rName, "Valid")}));
         } else {
-            loopSetup.push_back(std::make_shared<TArrayAssignExpr>(loc,
-                "out_" + std::to_string(k), std::vector<TExprPtr>{ident("i")},
-                cast(std::move(value), type)));
+            emitValue(std::move(value));
         }
     };
     for (size_t k = 0; k < computedExprs.size(); ++k) {
@@ -2155,7 +2175,8 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
             continue;
         }
         const std::string name = "output_key_" + std::to_string(fieldIndex);
-        auto ptrFieldType = std::make_shared<TPointerType>(key.Fields[fieldIndex].Type);
+        auto ptrFieldType = std::make_shared<TPointerType>(
+            ColumnBufferElementType(key.Fields[fieldIndex].Type));
         project.push_back(std::make_shared<TVarStmt>(loc, name, ptrFieldType));
         column = std::make_shared<TIndexExpr>(loc, ident("columns"), fieldIndexLit());
         project.push_back(std::make_shared<TAssignExpr>(loc, name,
@@ -2247,6 +2268,14 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
         }
         const bool isString = TMaybeType<TStringType>(
             UnwrapNamedType(key.Fields[fieldIndex].Type));
+        if (TMaybeType<TBoolType>(UnwrapNamedType(key.Fields[fieldIndex].Type))) {
+            loopStmts.push_back(std::make_shared<TCallExpr>(loc,
+                ident("qdb_bitmap_set_valid"),
+                std::vector<TExprPtr>{
+                    ident("output_key_" + std::to_string(fieldIndex)),
+                    ident("slot"), std::move(value)}));
+            continue;
+        }
         if (!isString) {
             loopStmts.push_back(std::make_shared<TArrayAssignExpr>(
                 loc, "output_key_" + std::to_string(fieldIndex),
@@ -2708,6 +2737,11 @@ NQumir::NAst::TExprPtr GenGenericAggregateMeasureAst(
             body.push_back(std::make_shared<TArrayAssignExpr>(loc,
                 "output_key_bytes", std::vector<TExprPtr>{
                     number(static_cast<int64_t>(fieldIndex))}, number(0)));
+        } else if (TMaybeType<TBoolType>(logical)) {
+            body.push_back(std::make_shared<TArrayAssignExpr>(loc,
+                "output_key_bytes",
+                std::vector<TExprPtr>{number(static_cast<int64_t>(fieldIndex))},
+                binary(">>", binary("+", ident("size"), number(7)), number(3))));
         } else {
             body.push_back(std::make_shared<TArrayAssignExpr>(loc,
                 "output_key_bytes",

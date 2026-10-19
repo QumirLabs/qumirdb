@@ -1,0 +1,4 @@
+{
+  "schema": "<struct (x i64) (b bool) (n <named Nullable [bool]>) (inv bool) (ni <named Nullable [bool]>) (expr bool) (yes bool) (no bool)>",
+  "rows": []
+}

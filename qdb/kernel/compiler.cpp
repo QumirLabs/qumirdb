@@ -1938,10 +1938,10 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
         const auto type = UnwrapNamedType(valueType);
         if (!IsBinIntStorageType(valueType) &&
             !TMaybeType<TIntegerType>(type) && !TMaybeType<TFloatType>(type) &&
-            !TMaybeType<TStringType>(type)) {
+            !TMaybeType<TStringType>(type) && !TMaybeType<TBoolType>(type)) {
             throw NQumir::TError(
                 "CompileAggregate: group key column '" + field.ColumnName +
-                "' must be integer, f64, string, or BinInt");
+                "' must be integer, f64, bool, string, or BinInt");
         }
     }
     auto columnIndex = [&](const std::string& name) -> int32_t {
