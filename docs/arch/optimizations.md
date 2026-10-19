@@ -96,6 +96,14 @@ project (col0)
 group-by over the inner relation plus a LEFT join (Apply elimination).
 See [decorrelation.md](decorrelation.md).
 
+Dependent derived tables in FROM use a distinct outer-parameter domain, evaluate
+their SELECT over that domain, and join back with null-safe parameter identity.
+This preserves outer duplicates and ordinary SQL predicate NULL semantics.
+Global aggregate inputs retain an unmatched marker row per parameter so COUNT
+and SUM keep their empty-input identities before HAVING and projection. Explicit
+GROUP BY retains only actual groups. The supported shapes and their limits are
+described in [decorrelation.md](decorrelation.md#dependent-tables-in-from).
+
 ```sql
 SELECT t.a FROM t WHERE t.a IN (SELECT u.a FROM u);
 ```

@@ -1,5 +1,8 @@
 #include <qdb/plan/build.h>
 
+#include <qdb/plan/build_internal.h>
+#include <qdb/plan/dependent_table_builder.h>
+
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
@@ -38,7 +41,7 @@
 
 namespace NQdb {
 
-namespace {
+namespace NBuild {
 
 namespace NAst = NQumir::NAst;
 namespace NSql = NQdb::NSql;
@@ -51,7 +54,7 @@ bool IsReservedOutputColumnName(std::string_view name) {
 
 std::expected<void, TError> ValidateOutputColumnName(
     std::string_view name,
-    const TLocation& location = {})
+    const TLocation& location)
 {
     if (IsReservedOutputColumnName(name)) {
         return std::unexpected(TError(
@@ -73,13 +76,6 @@ bool IsAggFunc(const std::string& name) {
         "sum", "count", "avg", "min", "max", "stddev_samp"};
     return funcs.count(name) > 0;
 }
-
-struct TAggCall {
-    std::string Func;
-    NAst::TExprPtr Arg; // null for count(*)
-    bool Distinct = false;
-    bool Star = false;
-};
 
 std::optional<TAggCall> AsAggCall(const NAst::TExprPtr& expr) {
     auto call = NAst::TMaybeNode<NAst::TCallExpr>(expr);
@@ -1618,6 +1614,18 @@ std::expected<TOperatorPtr, TError> BuildTableRef(
         if (!left) {
             return std::unexpected(left.error());
         }
+        auto dependent = TDependentTableBuilder(sources).Build(
+            join->Right, *left, MapJoinType(join->Type),
+            join->Condition ? join->Condition->On : nullptr);
+        if (!dependent) {
+            return std::unexpected(dependent.error());
+        }
+        if (*dependent) {
+            if (join->Condition && join->Condition->UsingColumns) {
+                return std::unexpected(TError("USING is not supported with a dependent FROM subquery"));
+            }
+            return **dependent;
+        }
         auto right = BuildTableRef(join->Right, sources);
         if (!right) {
             return std::unexpected(right.error());
@@ -1663,6 +1671,15 @@ std::expected<TOperatorPtr, TError> BuildFrom(
     // predicate stays a single top-level filter (equi-join extraction is an
     // optimizer pass).
     for (size_t i = 1; i < from.Items.size(); ++i) {
+        auto dependent = TDependentTableBuilder(sources).Build(
+            from.Items[i], result, EJoinType::Inner);
+        if (!dependent) {
+            return std::unexpected(dependent.error());
+        }
+        if (*dependent) {
+            result = **dependent;
+            continue;
+        }
         auto right = BuildTableRef(from.Items[i], sources);
         if (!right) {
             return std::unexpected(right.error());
@@ -2178,7 +2195,8 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
 
 std::expected<TOperatorPtr, TError> BuildSelect(
     const NSql::TSqlSelect& select,
-    const TTableSourceFactory& sources)
+    const TTableSourceFactory& sources,
+    TOperatorPtr input)
 {
     if (!select.From) {
         return std::unexpected(TError("SELECT without FROM is not supported yet"));
@@ -2212,12 +2230,12 @@ std::expected<TOperatorPtr, TError> BuildSelect(
         }
         return {};
     };
-    // Builds the pre-aggregate input (FROM + joins + WHERE). Called once per
-    // aggregation branch so a mixed DISTINCT/non-DISTINCT split gets independent
-    // subtrees (there is no deep operator clone; rebuilding from the AST is the
-    // simplest way to duplicate the input).
+    // A dependent SELECT supplies its parameterized FROM input; both paths
+    // apply WHERE and expression-subquery lowering through the same builder.
     auto buildInput = [&]() -> std::expected<TOperatorPtr, TError> {
-        auto base = BuildFrom(*select.From, sources);
+        auto base = input
+            ? std::expected<TOperatorPtr, TError>(input)
+            : BuildFrom(*select.From, sources);
         if (!base) {
             return std::unexpected(base.error());
         }
@@ -2673,6 +2691,7 @@ std::expected<TOperatorPtr, TError> BuildSelect(
 }
 
 
+
 bool HasOutputColumn(const TOperatorPtr& op, const std::string& name) {
     auto&& output = op->OutputColumns();
     if (!output) {
@@ -3062,17 +3081,17 @@ std::expected<TOperatorPtr, TError> BuildQuery(
     return ApplyLimit(query, std::move(*ordered));
 }
 
-} // namespace
+} // namespace NBuild
 
-std::expected<TOperatorPtr, TError> BuildPlan(
+std::expected<TOperatorPtr, NQumir::TError> BuildPlan(
     const NQdb::NSql::TSqlNodePtr& query,
     const TTableSourceFactory& sources)
 {
     auto root = NSql::TMaybeNode<NSql::TSqlQuery>(query);
     if (!root) {
-        return std::unexpected(TError("expected a query"));
+        return std::unexpected(NQumir::TError("expected a query"));
     }
-    auto plan = BuildQuery(*root.Cast(), sources);
+    auto plan = NBuild::BuildQuery(*root.Cast(), sources);
     if (plan) {
         AssignCteIds(*plan);
     }

@@ -469,6 +469,80 @@ ORDER BY REGEXP_REPLACE(
   });
 }
 
+async function runCorrelatedFromContract() {
+  const tables = {
+    t: { id: [1, 1, 2, 3, 4], k: [1, 1, 2, 9, null], tag: [10, 10, 20, 30, 40] },
+    v: { k: [1, 1, 1, 2, null], v: [5, null, 5, 7, 99] },
+  };
+  const cases = [
+    { body: 'SELECT count(*) AS n FROM v WHERE v.k=t.k',
+      columns: ['id', 'n'], values: matches => [[matches.length]], implicit: true },
+    { body: 'SELECT count(*) AS n FROM v WHERE v.k=t.k',
+      columns: ['id', 'n'], values: matches => [[matches.length]] },
+    { body: 'SELECT count(v.v) AS n, sum(v.v) AS s, count(DISTINCT v.v) AS distinct_n FROM v WHERE v.k=t.k',
+      columns: ['id', 'n', 's', 'distinct_n'], values: matches => {
+        const values = matches.filter(value => value !== null);
+        return [[values.length, values.length ? values.reduce((a, b) => a + b, 0) : '', new Set(values).size]];
+      } },
+    { body: 'SELECT v.v AS val FROM v WHERE v.k=t.k',
+      columns: ['id', 'val'], values: matches => matches.map(value => [value ?? '']) },
+    { body: 'SELECT count(*) AS n FROM v WHERE v.k<t.k', less: true,
+      columns: ['id', 'n'], values: matches => [[matches.length]] },
+    { body: 'SELECT count(*) AS n FROM v WHERE v.k=t.k HAVING count(*)=0',
+      columns: ['id', 'n'], values: matches => matches.length ? [] : [[0]] },
+    { body: 'SELECT count(*) AS n FROM v WHERE v.k=t.k OR (v.k IS NULL AND t.k IS NULL)',
+      nullEqual: true, columns: ['id', 'n'], values: matches => [[matches.length]] },
+    { body: 'SELECT v.v AS val FROM v WHERE v.k=t.k', left: true,
+      columns: ['id', 'val'], values: matches => {
+        const values = matches.filter(value => value !== null && value > 5);
+        return values.length ? values.map(value => [value]) : [['']];
+      } },
+  ];
+  for (const mode of ['single', 'threaded']) {
+    for (const [index, fixture] of cases.entries()) {
+      const lateral = fixture.implicit ? '' : 'LATERAL ';
+      const join = fixture.left ? `LEFT JOIN ${lateral}(${fixture.body}) AS d ON d.val>5`
+        : `, ${lateral}(${fixture.body}) AS d`;
+      const request = {
+        sql: `SELECT t.id AS id, ${fixture.columns.slice(1).map(name => `d.${name} AS ${name}`).join(', ')} FROM t ${join}`,
+        dataset: { tables: Object.entries(tables).map(([name, columns]) => ({
+          name, columns: Object.keys(columns).map(column => ({name: column,
+            type: column === 'id' || column === 'tag' ? 'i64' : '<named Nullable [i64]>'})),
+          stats: {rows: 5, bytes: 128, rowGroups: 3},
+        })) },
+        options: {scheduler: mode, schedulerWorkers: 2, scanTasks: 2,
+          shufflePartitions: 2, format: 'runtime-bundle', embedWasm: true},
+      };
+      const bundle = JSON.parse(run(exporter, exporterBaseArgs, JSON.stringify(request)));
+      assert.equal(bundle.ok, true, bundle.error?.message);
+      assert.equal(bundle.exec?.supported, true, bundle.exec?.reason);
+      const result = await executeBrowserPipelineScheduled(resolveExecArtifacts(bundle),
+        async function* (stage) {
+          const table = tables[stage.table];
+          for (let begin = 0; begin < table.k.length; begin += 2) {
+            yield {rowCount: Math.min(2, table.k.length - begin),
+              columns: stage.columns.map(column => ({...column,
+                values: table[column.name].slice(begin, begin + 2)}))};
+          }
+        });
+      const expected = tables.t.id.flatMap((id, row) => {
+        const key = tables.t.k[row];
+        const matches = tables.v.k.flatMap((inner, i) => {
+          const equal = key !== null && inner === key;
+          const match = fixture.less ? key !== null && inner !== null && inner < key
+            : equal || (fixture.nullEqual && key === null && inner === null);
+          return match ? [tables.v.v[i]] : [];
+        });
+        return fixture.values(matches).map(values => [id, ...values].map(String));
+      });
+      expected.sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+      assert.deepEqual(normalizeResult(result), {columns: fixture.columns, rows: expected},
+        `${mode}/${index}: dependent FROM changed duplicates, NULL or empty aggregate semantics`);
+      assert.equal(result.memory?.liveMB, '0.0', `${mode}/${index}: leaked wasm memory`);
+    }
+  }
+}
+
 async function runStringAggregateBatchContract() {
   const request = {
     sql: 'SELECT k, MIN(v) AS mn, MAX(v) AS mx FROM t GROUP BY k',
@@ -1116,6 +1190,16 @@ async function main() {
       } catch (error) {
         results.push({ name: 'boolean-columns', elapsedMs: performance.now() - started, error });
         console.error(`[FAIL] boolean-columns\n${errorText(error)}`);
+      }
+    }
+    {
+      const started = performance.now();
+      try {
+        await runCorrelatedFromContract();
+        results.push({name: 'correlated-from', elapsedMs: performance.now() - started, error: null});
+      } catch (error) {
+        results.push({name: 'correlated-from', elapsedMs: performance.now() - started, error});
+        console.error(`[FAIL] correlated-from\n${errorText(error)}`);
       }
     }
     for (const name of Object.keys(fixtures)) {

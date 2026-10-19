@@ -102,6 +102,7 @@ struct TSqlSubqueryTable : TSqlTableRef {
 
     TSqlPtr<TSqlQuery> Query;
     TSqlPtr<TIdentList> ColumnAliases; // optional column rename list
+    bool Lateral = false;
 };
 
 enum class ESqlJoinType {

@@ -45,6 +45,7 @@ static const std::unordered_set<std::string> Keywords = {
     "RIGHT",
     "FULL",
     "CROSS",
+    "LATERAL",
     "OUTER",
     "SEMI",
     "ON",

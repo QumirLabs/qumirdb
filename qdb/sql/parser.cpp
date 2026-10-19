@@ -110,7 +110,7 @@
 
 <table_factor> ::=
       <qualified_name> [ [ "AS" ] <ident> ]
-    | "(" <select_stmt> ")" [ [ "AS" ] <ident> ]
+    | [ "LATERAL" ] "(" <select_stmt> ")" [ [ "AS" ] <ident> ]
     | "(" <table_ref> ")"
 
 <join_clause> ::=
@@ -1228,14 +1228,19 @@ TAstTask<TJoinCondition> join_condition(TParserContext& ctx) {
 
 // <table_factor> ::=
 //       <qualified_name> [ [ "AS" ] <ident> ]
-//     | "(" <select_stmt> ")" [ [ "AS" ] <ident> ]
+//     | [ "LATERAL" ] "(" <select_stmt> ")" [ [ "AS" ] <ident> ]
 //     | "(" <table_ref> ")"
 TAstTask<TSqlTableRef> table_factor(TParserContext& ctx) {
     auto token = ctx.Stream.Next();
+    const bool lateral = IsKeyword(token, "LATERAL");
+    if (lateral) {
+        token = ctx.Stream.Next();
+    }
 
     if (IsOp(token, '(')) {
         if (StartsQueryAfterOpenParen(ctx)) {
             auto sub = std::make_shared<TSqlSubqueryTable>();
+            sub->Lateral = lateral;
             sub->Query = co_await select_stmt(ctx);
 
             auto rparen = ctx.Stream.Next();
@@ -1258,6 +1263,9 @@ TAstTask<TSqlTableRef> table_factor(TParserContext& ctx) {
             co_return sub;
         }
 
+        if (lateral) {
+            co_return Error(token, "LATERAL requires a SELECT subquery");
+        }
         auto inner = co_await table_ref(ctx);
         auto rparen = ctx.Stream.Next();
         if (!IsOp(rparen, ')')) {
@@ -1266,6 +1274,9 @@ TAstTask<TSqlTableRef> table_factor(TParserContext& ctx) {
         co_return inner;
     }
 
+    if (lateral) {
+        co_return Error(token, "LATERAL requires a SELECT subquery");
+    }
     ctx.Stream.Unget(token);
 
     auto table = std::make_shared<TSqlTableName>();
