@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "fixtures": {
+    "values": {
+      "json": "tables/values.json",
+      "parquet": {
+        "row_group_rows": 73
+      }
+    },
+    "empty": {
+      "json": "tables/empty.json",
+      "parquet": {
+        "row_group_rows": 73
+      }
+    }
+  },
+  "tables": {
+    "t": "values"
+  },
+  "variants": [
+    "single",
+    "threaded"
+  ],
+  "cases": {
+    "project_values.sql": {
+      "order": "ordered"
+    },
+    "filter_projection.sql": {
+      "order": "ordered"
+    },
+    "group_boolean.sql": {
+      "order": "ordered"
+    },
+    "group_nullable.sql": {
+      "order": "ordered"
+    },
+    "group_computed.sql": {
+      "order": "ordered"
+    },
+    "group_computed_nullable.sql": {
+      "order": "ordered"
+    },
+    "empty_projection.sql": {
+      "tables": {
+        "t": "empty"
+      },
+      "order": "ordered"
+    },
+    "empty_group.sql": {
+      "tables": {
+        "t": "empty"
+      },
+      "order": "ordered"
+    }
+  }
+}

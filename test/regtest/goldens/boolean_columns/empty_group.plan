@@ -1,0 +1,4 @@
+sort [g asc]
+└─ project (g, n, c) (rows≈1 cost≈34)
+   └─ aggregate keys=[t.g, t.n] aggs=[count_0=count] (rows≈1 cost≈17)
+      └─ source t AS t (rows≈0 cost≈0)

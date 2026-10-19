@@ -1,0 +1,4 @@
+sort [x asc]
+└─ project (x, inv, ni, expr) (rows≈72 cost≈3.7K)
+   └─ filter (!= (% |t.x| 3) 1) (rows≈72 cost≈2.9K)
+      └─ source t AS t row-groups (!= (% |t.x| 3) 1) (rows≈144 cost≈1.4K)

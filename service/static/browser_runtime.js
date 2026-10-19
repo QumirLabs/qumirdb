@@ -102,6 +102,8 @@ function numericArrayConstructor(type) {
 }
 
 function typedColumnBytes(values, type, rowCount) {
+  // JS boolean arrays hold one value per element; kernel columns hold bits.
+  if (storageTypeName(type) === 'bool') return null;
   const Ctor = numericArrayConstructor(type);
   if (!Ctor || !(values instanceof Ctor) || values.length < rowCount) {
     return null;
@@ -242,7 +244,7 @@ class RowSetWriter {
           memBytes.set(bytes, this.dataPtrs[c]);
         } else {
           for (let i = 0; i < rowCount; ++i) {
-            writeNumericValue(dv, this.dataPtrs[c] + i * width, column, values[i]);
+            writeColumnValue(dv, this.dataPtrs[c], i, column, values[i]);
           }
         }
       }
@@ -425,11 +427,12 @@ export class WasmSourceBatchBuilder {
       const row = start + i;
       if (isNullish(value)) {
         clearValidityBit(memBytes, this.maskPtrs[index], row);
-        writeNumericValue(dv, this.dataPtrs[index] + row * width, column, 0);
+        writeColumnValue(dv, this.dataPtrs[index], row, column, 0);
       } else {
-        writeNumericValue(
+        writeColumnValue(
           dv,
-          this.dataPtrs[index] + row * width,
+          this.dataPtrs[index],
+          row,
           column,
           sourceNumericValue(column, value));
       }
@@ -1160,6 +1163,26 @@ function formatDecimalValue(raw, scale) {
   return `${neg ? '-' : ''}${whole}.${frac.toString().padStart(scale, '0')}`;
 }
 
+// Scalar bool ABI values occupy a byte. Only column buffers use bitmaps.
+function writeColumnValue(dv, dataPtr, row, type, value) {
+  if (storageTypeName(type) === 'bool') {
+    const address = dataPtr + (row >> 3);
+    const mask = 1 << (row & 7);
+    const byte = dv.getUint8(address);
+    dv.setUint8(address, Number(value) ? byte | mask : byte & ~mask);
+  } else {
+    writeNumericValue(dv, dataPtr + row * coreTypeWidth(type), type, value);
+  }
+}
+
+function readColumnValue(dv, dataPtr, row, type, bitOffset) {
+  if (storageTypeName(type) === 'bool') {
+    const bit = row + bitOffset;
+    return (dv.getUint8(dataPtr + (bit >> 3)) >> (bit & 7)) & 1;
+  }
+  return readNumericValue(dv, dataPtr + row * coreTypeWidth(type), type);
+}
+
 function writeNumericValue(dv, address, type, value) {
   const storage = storageTypeName(type);
   switch (storage) {
@@ -1812,7 +1835,7 @@ function marshalRowSet(arena, layout, columns, rowCount, wantSelection, selectio
         memBytes.set(bytes, dataPtrs[c]);
       } else {
         for (let i = 0; i < rowCount; ++i) {
-          writeNumericValue(dv, dataPtrs[c] + i * width, column, values[i]);
+          writeColumnValue(dv, dataPtrs[c], i, column, values[i]);
         }
       }
     }
@@ -2141,10 +2164,11 @@ export function runProject(kernel, layout, rowSet, output, arena) {
 }
 
 // Read `count` validity bits (LSB-first per byte, qdb_bitmap_set_valid order).
-function readValidityBits(memBytes, maskPtr, count) {
+function readValidityBits(memBytes, maskPtr, count, bitOffset = 0) {
   const valid = new Array(count);
   for (let i = 0; i < count; ++i) {
-    valid[i] = (memBytes[maskPtr + (i >> 3)] & (1 << (i & 7))) !== 0;
+    const bit = i + bitOffset;
+    valid[i] = (memBytes[maskPtr + (bit >> 3)] & (1 << (bit & 7))) !== 0;
   }
   return valid;
 }
@@ -2164,7 +2188,11 @@ function materializeWasmRowSet(arena, layout, output, rowsetPtr) {
     const maskPtr = readPointer(dv, colPtr + layout.column.mask);
     const offsetsPtr = readPointer(dv, colPtr + layout.column.offsets);
     const offsetWidth = dv.getUint8(colPtr + layout.column.offsetWidth);
-    const valid = maskPtr ? readValidityBits(memBytes, maskPtr, rowCount) : null;
+    const dataBitOffset = layout.column.dataBitOffset === undefined
+      ? 0 : dv.getInt32(colPtr + layout.column.dataBitOffset, true);
+    const maskBitOffset = layout.column.maskBitOffset === undefined
+      ? 0 : dv.getInt32(colPtr + layout.column.maskBitOffset, true);
+    const valid = maskPtr ? readValidityBits(memBytes, maskPtr, rowCount, maskBitOffset) : null;
     const values = new Array(rowCount);
 
     if (isStringColumn(spec)) {
@@ -2182,13 +2210,12 @@ function materializeWasmRowSet(arena, layout, output, rowsetPtr) {
         values[r] = decoder.decode(memBytes.subarray(dataPtr + begin, dataPtr + end));
       }
     } else {
-      const width = coreTypeWidth(spec);
       for (let r = 0; r < rowCount; ++r) {
         if (valid && !valid[r]) {
           values[r] = null;
           continue;
         }
-        const raw = readNumericValue(dv, dataPtr + r * width, spec);
+        const raw = readColumnValue(dv, dataPtr, r, spec, dataBitOffset);
         values[r] = isDecimalColumn(spec)
           ? formatDecimalValue(raw, decimalScale(spec))
           : raw;

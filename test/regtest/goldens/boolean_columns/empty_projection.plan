@@ -1,0 +1,3 @@
+sort [x asc]
+└─ project (x, b, n, inv, ni, expr, yes, no) (rows≈0 cost≈0)
+   └─ source t AS t (rows≈0 cost≈0)

@@ -1,0 +1,2 @@
+SELECT g, CASE WHEN g % 3 = 0 THEN NULL ELSE g % 2 = 1 END AS n, count(*) AS c
+FROM t GROUP BY g, CASE WHEN g % 3 = 0 THEN NULL ELSE g % 2 = 1 END ORDER BY g;

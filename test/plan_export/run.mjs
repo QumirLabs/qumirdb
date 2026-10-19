@@ -865,6 +865,86 @@ async function runFixture(name, mode) {
   }
 }
 
+async function runBooleanColumnContract() {
+  const rowCount = 145;
+  const values = {
+    x: Array.from({ length: rowCount }, (_, row) => row),
+    b: Uint8Array.from({ length: rowCount }, (_, row) => row % 2),
+    n: Array.from({ length: rowCount }, (_, row) => row % 5 === 0 ? null : 1 - row % 2),
+  };
+  const request = {
+    sql: 'SELECT x, b, n, b = FALSE AS inv, n = FALSE AS ni FROM t WHERE x % 3 <> 1 ORDER BY x',
+    dataset: { tables: [{ name: 't', columns: [
+      { name: 'x', type: 'i64' },
+      { name: 'b', type: 'bool' },
+      { name: 'n', type: '<named Nullable [bool]>' },
+    ], stats: { rows: rowCount, bytes: 2000, rowGroups: 1 } }] },
+    options: { scheduler: 'single', scanTasks: 1, embedWasm: true },
+  };
+  const bundle = JSON.parse(run(exporter, exporterBaseArgs, JSON.stringify(request)));
+  assert.equal(bundle.ok, true, bundle.error?.message);
+  assert.equal(bundle.exec.supported, true, bundle.exec.reason);
+  const expected = {
+    columns: ['x', 'b', 'n', 'inv', 'ni'],
+    rows: values.x.filter(row => row % 3 !== 1).map(row => [
+      String(row), String(values.b[row]),
+      values.n[row] === null ? '' : String(values.n[row]),
+      String(1 - values.b[row]),
+      values.n[row] === null ? '' : String(1 - values.n[row]),
+    ]),
+  };
+  assert.deepEqual(normalizeResult(nativeResult('boolean_columns', 'single')),
+    normalizeResult(expected));
+  const { WasmSourceBatchBuilder } = await import(pathToFileURL(runtimePath).href);
+  for (const chunked of [false, true]) {
+    const result = await executeBrowserPipelineScheduled(resolveExecArtifacts(bundle),
+      async function* (stage, onProgress, context) {
+        if (!chunked) {
+          yield { rowCount, columns: stage.columns.map(column => ({
+            ...column, values: values[column.name],
+          })) };
+          return;
+        }
+        const builder = new WasmSourceBatchBuilder(
+          context.shared.arena, context.layout, stage.columns, rowCount);
+        for (const column of stage.columns) {
+          let start = 0;
+          for (const end of [3, 10, 66, rowCount]) {
+            builder.writeChunk(column.name, values[column.name].slice(start, end), start, end);
+            start = end;
+          }
+        }
+        yield builder.finish();
+      });
+    assert.deepEqual(normalizeResult(result), normalizeResult(expected), `chunked=${chunked}`);
+    assert.equal(result.memory.liveMB, '0.0');
+  }
+  // Keep boolean keys inside the compiled pipeline; g makes the output span
+  // multiple bitmap bytes and a 64-bit word before the key is projected away.
+  for (const key of ['g % 2 = 1', 'CASE WHEN g % 3 = 0 THEN NULL ELSE g % 2 = 1 END']) {
+    const request = {
+      sql: `SELECT g, count(*) AS c FROM t GROUP BY g, ${key} ORDER BY g`,
+      dataset: { tables: [{ name: 't', columns: [
+        { name: 'g', type: 'i64' },
+      ], stats: { rows: 140, bytes: 1120, rowGroups: 1 } }] },
+      options: { scheduler: 'single', scanTasks: 1, embedWasm: true },
+    };
+    const bundle = JSON.parse(run(exporter, exporterBaseArgs, JSON.stringify(request)));
+    assert.equal(bundle.ok, true, bundle.error?.message);
+    assert.equal(bundle.exec.supported, true, bundle.exec.reason);
+    const result = await executeBrowserPipelineScheduled(resolveExecArtifacts(bundle),
+      async function* (stage) {
+        yield { rowCount: 140, columns: stage.columns.map(column => ({
+          ...column, values: Array.from({ length: 140 }, (_, row) => row % 70),
+        })) };
+      });
+    assert.deepEqual(result.columns.map(String), ['g', 'c']);
+    assert.deepEqual(result.rows.map(row => row.map(String)),
+      Array.from({ length: 70 }, (_, group) => [String(group), '2']), key);
+    assert.equal(result.memory.liveMB, '0.0');
+  }
+}
+
 async function main() {
   const suiteStarted = performance.now();
   const results = [];
@@ -1026,6 +1106,16 @@ async function main() {
       } catch (error) {
         results.push({ name: 'operator-instrumentation', elapsedMs: performance.now() - started, error });
         console.error(`[FAIL] operator-instrumentation\n${errorText(error)}`);
+      }
+    }
+    {
+      const started = performance.now();
+      try {
+        await runBooleanColumnContract();
+        results.push({ name: 'boolean-columns', elapsedMs: performance.now() - started, error: null });
+      } catch (error) {
+        results.push({ name: 'boolean-columns', elapsedMs: performance.now() - started, error });
+        console.error(`[FAIL] boolean-columns\n${errorText(error)}`);
       }
     }
     for (const name of Object.keys(fixtures)) {
