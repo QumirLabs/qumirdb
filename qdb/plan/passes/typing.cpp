@@ -210,6 +210,7 @@ void AnnotateOperatorType(
                     if (spec.ImplicitName) {
                         spec.Name = nextColName();
                     }
+                    spec.ImplicitName = false;
                     outFields.emplace_back(spec.Name, fieldType);
                     continue;
                 }
@@ -231,11 +232,18 @@ void AnnotateOperatorType(
                         + " column aliases were specified");
                 }
                 spec.Name = aliases.empty() ? nextColName() : aliases.front();
+                const auto offset = outFields.size();
                 for (size_t i = 0; i < structure->Fields.size(); ++i) {
                     outFields.emplace_back(
                         aliases.empty() ? nextColName() : aliases[i],
                         structure->Fields[i].second);
                 }
+                if (spec.ColumnAliases.empty()) {
+                    for (size_t i = offset; i < outFields.size(); ++i) {
+                        spec.ColumnAliases.push_back(outFields[i].first);
+                    }
+                }
+                spec.ImplicitName = false;
             }
         }
         root->Type = std::make_shared<TFunctionType>(

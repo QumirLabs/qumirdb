@@ -243,6 +243,24 @@ TEST(SexpParser, Project) {
     EXPECT_EQ(proj.Projections()[1].Name, "b");
 }
 
+TEST(SexpParser, ProjectColumnAliasesPrintRoundtrip) {
+    NQdb::TMockSource src({"pair"});
+    TRelParserOptions opts;
+    opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
+        return std::make_shared<TSourceOperator>(src, std::string(path));
+    };
+    auto parser = MakeParser(std::move(opts));
+    const std::string input =
+        "(rel project (rel source \"data.parquet\") (first pair (column-aliases first second)))";
+
+    auto expr = Parse(parser, input);
+    ASSERT_NE(expr, nullptr);
+    auto& proj = static_cast<TProjectOperator&>(*expr);
+    ASSERT_EQ(proj.Projections().size(), 1u);
+    EXPECT_EQ(proj.Projections()[0].ColumnAliases, (std::vector<std::string>{"first", "second"}));
+    EXPECT_EQ(PrintAst(expr, MakePrintOpts()), input);
+}
+
 TEST(SexpParser, LateMaterializePrintRoundtrip) {
     NQdb::TMockSource src({"x"});
     TRelParserOptions opts;
