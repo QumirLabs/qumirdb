@@ -1,16 +1,16 @@
 (rel project
   (rel aggregate
     (rel project
-      (rel source "t")
-      (k k)
-      (arg_0 (cast (+ a b) f64))
-      (arg_1 (* (cast (+ a b) f64) (cast (+ a b) f64)))
-      (arg_2 (+ a b)))
-    (keys k)
+      (rel source "t" "t")
+      (|t.k| |t.k|)
+      (arg_0 (cast (+ |t.a| |t.b|) f64))
+      (arg_1 (* (cast (+ |t.a| |t.b|) f64) (cast (+ |t.a| |t.b|) f64)))
+      (arg_2 (+ |t.a| |t.b|)))
+    (keys |t.k|)
     (agg sum_0 sum arg_0)
     (agg sum_1 sum arg_1)
     (agg count_2 count arg_2))
-  (k k)
+  (k |t.k|)
   (s (if
       (< count_2 2)
       (call qdb_sql_null)

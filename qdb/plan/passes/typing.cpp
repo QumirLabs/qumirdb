@@ -54,35 +54,6 @@ TTypePtr UnifyUnionColumn(const TTypePtr& a, const TTypePtr& b) {
         ? std::static_pointer_cast<TType>(std::make_shared<TNullable>(base)) : base;
 }
 
-void ResolveProjectionSortKeys(
-    std::vector<TSortKey>& keys,
-    const TOperatorPtr& input)
-{
-    auto project = TMaybeOp<TProjectOperator>(input);
-    auto&& output = input->OutputColumns();
-    if (!project || !output) {
-        return;
-    }
-    for (auto& key : keys) {
-        if (!key.ProjectionIndex) {
-            continue;
-        }
-        const auto& projections = project.Cast()->Projections();
-        if (*key.ProjectionIndex >= projections.size()) {
-            throw NQumir::TError("ORDER BY projection index is out of range");
-        }
-        size_t outputIndex = 0;
-        for (size_t i = 0; i < *key.ProjectionIndex; ++i) {
-            outputIndex += FlattenedProjectionArity(projections[i]);
-        }
-        if (outputIndex >= output->Fields.size()) {
-            throw NQumir::TError("ORDER BY flattened projection is out of range");
-        }
-        key.Column = output->Fields[outputIndex].first;
-        key.ProjectionIndex.reset();
-    }
-}
-
 } // namespace
 
 void AnnotateTypes(
@@ -134,7 +105,6 @@ void AnnotateOperatorType(
 
     if (auto maybe = TMaybeOp<TSortOperator>(root)) {
         auto sort = maybe.Cast();
-        ResolveProjectionSortKeys(sort->MutableKeys(), sort->Input());
         auto schema = sort->Input()->OutputColumns();
         root->Type = std::make_shared<TFunctionType>(
             std::vector<TTypePtr>{schema},
@@ -144,7 +114,6 @@ void AnnotateOperatorType(
 
     if (auto maybe = TMaybeOp<TTopSortOperator>(root)) {
         auto sort = maybe.Cast();
-        ResolveProjectionSortKeys(sort->MutableKeys(), sort->Input());
         auto schema = sort->Input()->OutputColumns();
         root->Type = std::make_shared<TFunctionType>(
             std::vector<TTypePtr>{schema},
@@ -194,10 +163,6 @@ void AnnotateOperatorType(
                 if (structType && IsNullableType(fieldType)) {
                     throw NQumir::TError(spec.Expression->Location,
                         "nullable struct-return projections are not supported");
-                }
-                if (structType && spec.RejectUnaliasedStructForDistinct) {
-                    throw NQumir::TError(spec.Expression->Location,
-                        "SELECT DISTINCT over a struct-return projection requires AS (...)");
                 }
                 auto nextColName = [&] {
                     return "col" + std::to_string(outFields.size());

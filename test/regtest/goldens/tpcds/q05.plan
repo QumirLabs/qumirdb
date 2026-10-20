@@ -1,7 +1,7 @@
 top-sort [channel asc, id asc] limit 100
 └─ project (channel, id, sales, returns, profit) (rows≈11 cost≈43.2K)
-   └─ aggregate keys=[channel, id] aggs=[sum_0=sum, sum_1=sum, sum_2=sum] (rows≈11 cost≈42.5K)
-      └─ project (channel, id, sales, returns, profit) (rows≈5 cost≈41.6K)
+   └─ aggregate keys=[x.channel, x.id] aggs=[sum_0=sum, sum_1=sum, sum_2=sum] (rows≈11 cost≈42.5K)
+      └─ project (x.channel, x.id, x.sales, x.returns, x.profit) (rows≈5 cost≈41.6K)
          └─ project (x.channel, x.id, x.sales, x.returns, x.profit) (rows≈5 cost≈41.4K)
             └─ union-all (rows≈5 cost≈41.1K)
                ├─ project (channel, id, sales, returns, profit) (rows≈2 cost≈12.2K)
@@ -48,7 +48,7 @@ top-sort [channel asc, id asc] limit 100
                               │  │  └─ union-all (rows≈20 cost≈6.9K)
                               │  │     ├─ project (wsr_web_site_sk, date_sk, sales_price, profit, return_amt, net_loss) (rows≈10 cost≈1K)
                               │  │     │  └─ project (wsr_web_site_sk, date_sk, sales_price, profit, return_amt, net_loss) (rows≈10 cost≈640)
-                              │  │     │     └─ source web_sales AS web_sales_0 use-filter 3 keys=[web_sales_0.ws_sold_date_sk] (rows≈10 cost≈240)
+                              │  │     │     └─ source web_sales AS web_sales use-filter 3 keys=[web_sales.ws_sold_date_sk] (rows≈10 cost≈240)
                               │  │     └─ project (wsr_web_site_sk, date_sk, sales_price, profit, return_amt, net_loss) (rows≈10 cost≈5.9K)
                               │  │        └─ project (wsr_web_site_sk, date_sk, sales_price, profit, return_amt, net_loss) (rows≈10 cost≈5.5K)
                               │  │           └─ join left [web_returns.wr_item_sk = web_sales_1.ws_item_sk, web_returns.wr_order_number = web_sales_1.ws_order_number] use-filter 3 keys=[web_returns.wr_returned_date_sk] (rows≈10 cost≈5.1K)

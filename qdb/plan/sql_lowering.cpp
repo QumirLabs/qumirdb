@@ -478,6 +478,54 @@ ESortNulls ConvertSortNulls(NSql::TSqlOrderItem::ENullOrder nulls) {
     return ESortNulls::Default;
 }
 
+bool HasAggregateCall(const NAst::TExprPtr& expression) {
+    if (!expression) {
+        return false;
+    }
+    if (NAst::TMaybeNode<NSql::TSubqueryExpr>(expression)) {
+        return false;
+    }
+    if (auto window = NAst::TMaybeNode<NSql::TWindowExpr>(expression)) {
+        if (auto call = NAst::TMaybeNode<NAst::TCallExpr>(window.Cast()->Expr)) {
+            if (std::ranges::any_of(call.Cast()->Args, HasAggregateCall)) {
+                return true;
+            }
+        }
+        const auto& spec = window.Cast()->WindowSpec;
+        if (spec && HasAggregateCall(spec->PartitionBy)) {
+            return true;
+        }
+        if (spec && spec->OrderBy) {
+            for (const auto& item : spec->OrderBy->Items) {
+                if (HasAggregateCall(item->Expr)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+    if (auto call = NAst::TMaybeNode<NAst::TCallExpr>(expression)) {
+        if (auto callee = NAst::TMaybeNode<NAst::TIdentExpr>(call.Cast()->Callee);
+            callee && IsAggFunc(ToLower(callee.Cast()->Name)))
+        {
+            return true;
+        }
+    }
+    return std::ranges::any_of(expression->Children(), HasAggregateCall);
+}
+
+bool HasOpaqueExpression(const NAst::TExprPtr& expression) {
+    if (!expression) {
+        return false;
+    }
+    if (NAst::TMaybeNode<NSql::TSubqueryExpr>(expression)
+        || NAst::TMaybeNode<NSql::TWindowExpr>(expression))
+    {
+        return true;
+    }
+    return std::ranges::any_of(expression->Children(), HasOpaqueExpression);
+}
+
 std::expected<NAst::TExprPtr, TError> TAggCollector::Rewrite(NAst::TExprPtr expr) {
     if (!expr) {
         return expr;
@@ -520,7 +568,19 @@ std::expected<NAst::TExprPtr, TError> TAggCollector::Rewrite(NAst::TExprPtr expr
         return w;
     }
     if (auto agg = AsAggCall(expr)) {
-        return Emit(*agg, expr->Location);
+        const auto key = NAst::NCore::PrintAst(expr);
+        if (auto found = Expressions_.find(key); found != Expressions_.end()) {
+            return CloneExpr(found->second);
+        }
+        if (Finished_) {
+            return std::unexpected(TError(expr->Location,
+                "aggregate expression is not available in this query output"));
+        }
+        auto result = Emit(*agg, expr->Location);
+        if (result) {
+            Expressions_.emplace(key, CloneExpr(*result));
+        }
+        return result;
     }
     for (auto* child : expr->MutableChildren()) {
         auto rewritten = Rewrite(*child);
@@ -530,6 +590,37 @@ std::expected<NAst::TExprPtr, TError> TAggCollector::Rewrite(NAst::TExprPtr expr
         *child = std::move(*rewritten);
     }
     return expr;
+}
+
+std::expected<void, TError> TAggCollector::Collect(
+    const NAst::TExprPtr& expression,
+    const std::function<std::expected<void, TError>(NAst::TExprPtr&)>& bind)
+{
+    if (!expression) {
+        return {};
+    }
+    NAst::TExprPtr copy;
+    if (auto window = NAst::TMaybeNode<NSql::TWindowExpr>(expression)) {
+        copy = CloneSqlWindowExpr(window.Cast());
+    } else if (AsAggCall(expression)) {
+        copy = CloneExpr(expression);
+    }
+    if (copy) {
+        if (auto bound = bind(copy); !bound) {
+            return bound;
+        }
+        auto rewritten = Rewrite(std::move(copy));
+        if (!rewritten) {
+            return std::unexpected(rewritten.error());
+        }
+        return {};
+    }
+    for (const auto& child : expression->Children()) {
+        if (auto collected = Collect(child, bind); !collected) {
+            return collected;
+        }
+    }
+    return {};
 }
 
 bool TAggCollector::IsIntegerColumn(const NAst::TExprPtr& expr) const {
@@ -758,13 +849,19 @@ std::expected<NAst::TExprPtr, TError> TAggCollector::Emit(const TAggCall& agg, T
     // avg has no aggregate kernel; express it as sum / count. The count is over the
     // argument (not count(*)): SQL avg(x) ignores rows where x IS NULL.
     if (agg.Func == "avg") {
+        NAst::TTypePtr argType;
+        try {
+            argType = NKernel::AnnotateExprType(agg.Arg, *InputSchema_, &Context_);
+        } catch (const TError& error) {
+            return std::unexpected(error);
+        }
         std::string sumName = NextName("sum");
         Specs_.push_back({ .Name = sumName, .Func = "sum", .Arg = agg.Arg });
         std::string countName = NextName("count");
         Specs_.push_back({ .Name = countName, .Func = "count", .Arg = CloneExpr(agg.Arg) });
 
         NAst::TExprPtr count = Ident(loc, countName);
-        if (!IsDecimalExprHint(agg.Arg)) {
+        if (!IsDecimalType(argType)) {
             count = std::make_shared<NAst::TCastExpr>(
                 loc, std::move(count), std::make_shared<NAst::TFloatType>());
         }
@@ -776,7 +873,17 @@ std::expected<NAst::TExprPtr, TError> TAggCollector::Emit(const TAggCall& agg, T
 }
 
 std::string TAggCollector::NextName(const std::string& func) {
-    return func + "_" + std::to_string(Counter_++);
+    while (true) {
+        auto name = func + "_" + std::to_string(Counter_++);
+        const bool occupied = InputSchema_
+            && std::ranges::any_of(InputSchema_->Fields, [&](const auto& field) {
+                const auto dot = field.first.rfind('.');
+                return field.first.substr(dot == std::string::npos ? 0 : dot + 1) == name;
+            });
+        if (!occupied) {
+            return name;
+        }
+    }
 }
 
 std::expected<NAst::TExprPtr, TError> TWindowCollector::Rewrite(NAst::TExprPtr expr) {
@@ -949,9 +1056,7 @@ std::string TWindowCollector::Signature(const TRaw& raw) const {
     return s;
 }
 
-// This normalization intentionally lives in the SQL builder rather than a
-// later optimizer pass: it must run after GROUP BY aliases are resolved but
-// before a computed expression is hidden behind its materialized gb_n column.
+// Narrow keys after SQL references are resolved and before materialization.
 // Removed expressions remain in SELECT/HAVING and are evaluated once per output
 // group from the retained base key.  Grouping sets are intentionally excluded:
 // their individual key subsets and GROUPING() bit positions are observable SQL
@@ -1057,8 +1162,10 @@ NAst::TExprPtr SubstituteGroupKeys(
     if (!expr) {
         return expr;
     }
-    if (auto it = byExpr.find(NAst::NCore::PrintAst(expr)); it != byExpr.end()) {
-        return Ident(expr->Location, it->second);
+    if (!HasOpaqueExpression(expr)) {
+        if (auto it = byExpr.find(NAst::NCore::PrintAst(expr)); it != byExpr.end()) {
+            return Ident(expr->Location, it->second);
+        }
     }
     for (auto* child : expr->MutableChildren()) {
         *child = SubstituteGroupKeys(*child, byExpr);

@@ -2,9 +2,9 @@ project (gross_margin, i_category, i_class, lochierarchy, rank_within_parent)
 └─ top-sort [lochierarchy desc, __sort_0 asc, rank_within_parent asc] limit 100
    └─ project (gross_margin, i_category, i_class, lochierarchy, rank_within_parent, __sort_0)
       └─ window partition=[wk_0, wk_1] order=[wk_2 asc] fns=[w_0=rank]
-         └─ project (__grouping_id__, i_category, i_class, sum_0, sum_1, wk_0, wk_2, wk_1) (rows≈7 cost≈15.4K)
-            └─ aggregate keys=[i_category, i_class] aggs=[sum_0=sum, sum_1=sum] (rows≈7 cost≈14.8K)
-               └─ project (i_category, i_class, ss_net_profit, ss_ext_sales_price) (rows≈3 cost≈14.4K)
+         └─ project (__grouping_id__, item.i_category, item.i_class, sum_0, sum_1, wk_0, wk_2, wk_1) (rows≈7 cost≈15.4K)
+            └─ aggregate keys=[item.i_category, item.i_class] aggs=[sum_0=sum, sum_1=sum] (rows≈7 cost≈14.8K)
+               └─ project (item.i_category, item.i_class, store_sales.ss_net_profit, store_sales.ss_ext_sales_price) (rows≈3 cost≈14.4K)
                   └─ join inner [store_sales.ss_item_sk = item.i_item_sk] (rows≈3 cost≈14.2K)
                      ├─ join inner [store_sales.ss_sold_date_sk = d1.d_date_sk] emit-filter 1 from left (rows≈3 cost≈9.4K)
                      │  ├─ join inner [store.s_store_sk = store_sales.ss_store_sk] (rows≈3 cost≈5K)

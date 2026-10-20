@@ -40,7 +40,7 @@
       "output": [
         {
           "inputIndex": 0,
-          "name": "__qdb_in__rk",
+          "name": "__qdb_in__",
           "nullable": false,
           "source": "passthrough",
           "type": "i64"
@@ -59,12 +59,12 @@
         {
           "left": "k",
           "leftIndex": 0,
-          "right": "__qdb_in__rk",
+          "right": "__qdb_in__",
           "rightIndex": 0
         }
       ],
       "kind": "join",
-      "label": "join left_semi [l.k = __qdb_in__rk]",
+      "label": "join left_semi [l.k = __qdb_in__]",
       "leftColumns": [
         {
           "name": "k",
@@ -91,7 +91,7 @@
       ],
       "rightColumns": [
         {
-          "name": "__qdb_in__rk",
+          "name": "__qdb_in__",
           "nullable": false,
           "type": "i64"
         }

@@ -32,8 +32,8 @@ separate pages for each benchmark.
 SQL → logical plan → typed rewrite passes → physical task graph and kernels
 → compilation → scheduled execution.
 
-1. **Build** — SQL AST → initial operator tree, including aggregate rewrites and
-   supported subquery decorrelation.
+1. **Build** — SQL AST → initial typed operator tree with bound column names,
+   including aggregate rewrites and supported subquery decorrelation.
    [logical_plan_build.md](logical_plan_build.md), [decorrelation.md](decorrelation.md).
 2. **AssignSourceAliases / QualifyColumns / AnnotateTypes** — resolve column
    ownership and schemas; re-annotate after structural rewrites.

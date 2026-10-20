@@ -311,10 +311,9 @@ TEST(SortPlan, BuildPlanSortsOrderByExpressionViaHiddenColumn) {
     EXPECT_EQ(project.Cast()->Projections()[1].Name, "__sort_0");
 }
 
-TEST(SortPlan, QualifyResolvesHiddenSortColumnToGroupKey) {
-    // ORDER BY on an unqualified name that matches a qualified group key: the
-    // hidden sort column carries the raw ident and QualifyColumns resolves it to
-    // the aggregate's group key, so it lands on an available column.
+TEST(SortPlan, BindingReusesSelectedGroupKeyForSort) {
+    // Binding recognizes the same input column behind both the GROUP BY key
+    // and the SELECT alias, so ORDER BY can reuse that selected output.
     auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
     NQdb::TMockSource source(TMockColumns{}, {{"a", i64}, {"b", i64}});
     auto plan = BuildSqlPlan(
@@ -324,15 +323,15 @@ TEST(SortPlan, QualifyResolvesHiddenSortColumnToGroupKey) {
     AssignSourceAliases(*plan);
     QualifyColumns(*plan);
 
-    auto strip = TMaybeOp<TProjectOperator>(*plan);
-    ASSERT_TRUE(strip);
-    auto sort = TMaybeOp<TSortOperator>(strip.Cast()->Input());
+    auto sort = TMaybeOp<TSortOperator>(*plan);
     ASSERT_TRUE(sort);
+    ASSERT_EQ(sort.Cast()->Keys().size(), 1);
+    EXPECT_EQ(sort.Cast()->Keys()[0].Column, "x");
     auto project = TMaybeOp<TProjectOperator>(sort.Cast()->Input());
     ASSERT_TRUE(project);
-    const auto& hidden = project.Cast()->Projections().back();
-    EXPECT_EQ(hidden.Name, "__sort_0");
-    EXPECT_EQ(NQumir::NAst::NCore::PrintAst(hidden.Expression), "|d1.a|");
+    ASSERT_EQ(project.Cast()->Projections().size(), 2);
+    EXPECT_EQ(project.Cast()->Projections()[0].Name, "x");
+    EXPECT_EQ(NQumir::NAst::NCore::PrintAst(project.Cast()->Projections()[0].Expression), "|d1.a|");
 }
 
 TEST(SortPlan, GroupByExpressionMaterializesKeyAndSubstitutesRefs) {
@@ -358,7 +357,7 @@ TEST(SortPlan, GroupByExpressionMaterializesKeyAndSubstitutesRefs) {
     auto keyProject = TMaybeOp<TProjectOperator>(aggregate.Cast()->Input());
     ASSERT_TRUE(keyProject);
     EXPECT_EQ(keyProject.Cast()->Projections()[0].Name, "gb_0");
-    EXPECT_EQ(NQumir::NAst::NCore::PrintAst(keyProject.Cast()->Projections()[0].Expression), "(+ a b)");
+    EXPECT_EQ(NQumir::NAst::NCore::PrintAst(keyProject.Cast()->Projections()[0].Expression), "(+ |t.a| |t.b|)");
 
     // full name/type resolution succeeds: no dangling base columns above the aggregate
     AssignSourceAliases(*plan);
@@ -391,7 +390,7 @@ TEST(SortPlan, GroupBySelectAliasMaterializesAliasedExpression) {
     EXPECT_EQ(
         NQumir::NAst::NCore::PrintAst(
             keyProject.Cast()->Projections()[0].Expression),
-        "(+ a b)");
+        "(+ |src.a| |src.b|)");
 
     AssignSourceAliases(*plan);
     QualifyColumns(*plan);
@@ -409,7 +408,7 @@ TEST(SortPlan, GroupByColumnAliasUsesInputColumnDirectly) {
     ASSERT_TRUE(topProject);
     auto aggregate = TMaybeOp<TAggregateOperator>(topProject.Cast()->Input());
     ASSERT_TRUE(aggregate);
-    EXPECT_EQ(aggregate.Cast()->GroupKeys(), (std::vector<std::string>{"a"}));
+    EXPECT_EQ(aggregate.Cast()->GroupKeys(), (std::vector<std::string>{"t.a"}));
     EXPECT_TRUE(TMaybeOp<TSourceOperator>(aggregate.Cast()->Input()));
 
     AssignSourceAliases(*plan);
@@ -433,7 +432,7 @@ TEST(SortPlan, GroupByDropsConstantFromCompositeKey) {
 
     auto aggregate = TMaybeOp<TAggregateOperator>(topProject.Cast()->Input());
     ASSERT_TRUE(aggregate);
-    EXPECT_EQ(aggregate.Cast()->GroupKeys(), (std::vector<std::string>{"url"}));
+    EXPECT_EQ(aggregate.Cast()->GroupKeys(), (std::vector<std::string>{"t.url"}));
     EXPECT_TRUE(TMaybeOp<TSourceOperator>(aggregate.Cast()->Input()));
 
     AssignSourceAliases(*plan);
@@ -456,13 +455,13 @@ TEST(SortPlan, GroupByDropsAffineKeysDeterminedByRetainedColumn) {
     EXPECT_EQ(
         NQumir::NAst::NCore::PrintAst(
             topProject.Cast()->Projections()[1].Expression),
-        "(- client_ip 1)");
+        "(- |t.client_ip| 1)");
 
     auto aggregate = TMaybeOp<TAggregateOperator>(topProject.Cast()->Input());
     ASSERT_TRUE(aggregate);
     EXPECT_EQ(
         aggregate.Cast()->GroupKeys(),
-        (std::vector<std::string>{"client_ip"}));
+        (std::vector<std::string>{"t.client_ip"}));
     EXPECT_TRUE(TMaybeOp<TSourceOperator>(aggregate.Cast()->Input()));
 
     AssignSourceAliases(*plan);

@@ -12,6 +12,7 @@
 
 #include <cstddef>
 #include <expected>
+#include <functional>
 #include <optional>
 #include <set>
 #include <string>
@@ -29,6 +30,12 @@ NQumir::NAst::TExprPtr Call(
 std::string ToLower(std::string s);
 
 ESortNulls ConvertSortNulls(NSql::TSqlOrderItem::ENullOrder nulls);
+
+// Aggregate calls outside subqueries, including those inside window arguments.
+bool HasAggregateCall(const NQumir::NAst::TExprPtr& expression);
+
+// SQL-only window and subquery nodes, which the core expression tools do not see into.
+bool HasOpaqueExpression(const NQumir::NAst::TExprPtr& expression);
 
 struct TAggCall;
 
@@ -64,12 +71,15 @@ public:
 
     std::expected<NQumir::NAst::TExprPtr, NQumir::TError> Rewrite(NQumir::NAst::TExprPtr expr);
 
-    std::vector<TAggregateSpec> TakeSpecs() {
-        return std::move(Specs_);
-    }
+    // Collects from bound copies: the SELECT and HAVING expressions themselves
+    // are bound and rewritten later by their consumers.
+    std::expected<void, NQumir::TError> Collect(
+        const NQumir::NAst::TExprPtr& expression,
+        const std::function<std::expected<void, NQumir::TError>(NQumir::NAst::TExprPtr&)>& bind);
 
-    bool Empty() const {
-        return Specs_.empty();
+    std::vector<TAggregateSpec> TakeSpecs() {
+        Finished_ = true;
+        return std::move(Specs_);
     }
 
     // Set when a count(distinct <col>) was collected: BuildSelect realizes it via
@@ -116,6 +126,8 @@ private:
     // (Func, PrintAst(Arg)) -> slot name, so the same plain aggregate in SELECT
     // and HAVING reuses one slot instead of emitting count_0/count_1.
     std::unordered_map<TPlainAggKey, std::string, TPlainAggKeyHash> PlainSpecNames_;
+    std::unordered_map<std::string, NQumir::NAst::TExprPtr> Expressions_;
+    bool Finished_ = false;
     const NKernel::TAnnotationContext& Context_;
 };
 
@@ -136,8 +148,6 @@ class TWindowCollector {
 
 public:
     std::expected<NQumir::NAst::TExprPtr, NQumir::TError> Rewrite(NQumir::NAst::TExprPtr expr);
-
-    bool Empty() const { return Raw_.empty(); }
 
     std::expected<TOperatorPtr, NQumir::TError> Build(TOperatorPtr input);
 

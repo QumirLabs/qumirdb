@@ -81,6 +81,9 @@ struct TSqlSelectItem : TSqlNode {
     // unused; StarPrefix holds the optional qualifier (empty for a bare "*").
     bool Star = false;
     std::vector<std::string> StarPrefix;
+
+    // Internal correlation outputs do not belong to the SQL-visible SELECT list.
+    bool Hidden = false;
 };
 
 struct TSqlTableRef : TSqlNode {

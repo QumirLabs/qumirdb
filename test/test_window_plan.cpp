@@ -121,9 +121,9 @@ TEST(WindowPlan, SingleSpecStructure) {
     auto* window = FindWindow(*plan);
     ASSERT_NE(window, nullptr);
     ASSERT_EQ(window->PartitionKeys().size(), 1u);
-    EXPECT_EQ(window->PartitionKeys()[0], "a");
+    EXPECT_EQ(window->PartitionKeys()[0], "t.a");
     ASSERT_EQ(window->OrderKeys().size(), 1u);
-    EXPECT_EQ(window->OrderKeys()[0].Column, "b");
+    EXPECT_EQ(window->OrderKeys()[0].Column, "t.b");
     EXPECT_EQ(window->OrderKeys()[0].Direction, ESortDirection::Desc);
     ASSERT_EQ(window->Functions().size(), 1u);
     EXPECT_EQ(window->Functions()[0].Func, "rank");

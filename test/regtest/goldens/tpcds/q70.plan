@@ -2,25 +2,24 @@ project (total_sum, s_state, s_county, lochierarchy, rank_within_parent)
 └─ top-sort [lochierarchy desc, __sort_0 asc, rank_within_parent asc] limit 100
    └─ project (total_sum, s_state, s_county, lochierarchy, rank_within_parent, __sort_0)
       └─ window partition=[wk_0, wk_1] order=[sum_0 desc] fns=[w_0=rank]
-         └─ project (__grouping_id__, s_state, s_county, sum_0, wk_0, wk_1)
-            └─ aggregate keys=[s_state, s_county] aggs=[sum_0=sum]
-               └─ project (s_state, s_county, ss_net_profit)
-                  └─ join left_semi [store_0.s_state = __qdb_in__s_state]
-                     ├─ join inner [store_0.s_store_sk = store_sales_0.ss_store_sk] emit-filter 1 from right (rows≈2 cost≈9.1K)
-                     │  ├─ source store AS store_0 use-filter 1 keys=[store_0.s_store_sk] (rows≈10 cost≈360)
-                     │  └─ join inner [d1.d_date_sk = store_sales_0.ss_sold_date_sk] (rows≈2 cost≈4.5K)
+         └─ project (__grouping_id__, store.s_state, store.s_county, sum_0, wk_0, wk_1)
+            └─ aggregate keys=[store.s_state, store.s_county] aggs=[sum_0=sum]
+               └─ project (store.s_state, store.s_county, store_sales.ss_net_profit)
+                  └─ join left_semi [store.s_state = __qdb_in__]
+                     ├─ join inner [store.s_store_sk = store_sales.ss_store_sk] emit-filter 1 from right (rows≈2 cost≈9.1K)
+                     │  ├─ source store AS store use-filter 1 keys=[store.s_store_sk] (rows≈10 cost≈360)
+                     │  └─ join inner [d1.d_date_sk = store_sales.ss_sold_date_sk] (rows≈2 cost≈4.5K)
                      │     ├─ filter (&& (<= 1212 |d1.d_month_seq|) (<= |d1.d_month_seq| (+ 1212 11))) (rows≈2 cost≈160)
                      │     │  └─ source date_dim AS d1 row-groups (&& (<= 1212 |d1.d_month_seq|) (<= |d1.d_month_seq| (+ 1212 11))) (rows≈10 cost≈80)
-                     │     └─ source store_sales AS store_sales_0 (rows≈10 cost≈160)
-                     └─ project (__qdb_in__s_state)
+                     │     └─ source store_sales AS store_sales (rows≈10 cost≈160)
+                     └─ project (__qdb_in__)
                         └─ project (tmp1.s_state)
-                           └─ project (s_state)
-                              └─ filter (<= w_0 5)
-                                 └─ window partition=[store_1.s_state] order=[sum_0 desc] fns=[w_0=rank]
-                                    └─ aggregate keys=[store_1.s_state] aggs=[sum_0=sum] (rows≈2 cost≈9K)
-                                       └─ join inner [store_sales_1.ss_store_sk = store_1.s_store_sk] emit-filter 2 from left (rows≈2 cost≈8.9K)
-                                          ├─ join inner [date_dim.d_date_sk = store_sales_1.ss_sold_date_sk] (rows≈2 cost≈4.5K)
-                                          │  ├─ filter (&& (<= 1212 |date_dim.d_month_seq|) (<= |date_dim.d_month_seq| (+ 1212 11))) (rows≈2 cost≈160)
-                                          │  │  └─ source date_dim AS date_dim row-groups (&& (<= 1212 |date_dim.d_month_seq|) (<= |date_dim.d_month_seq| (+ 1212 11))) (rows≈10 cost≈80)
-                                          │  └─ source store_sales AS store_sales_1 (rows≈10 cost≈160)
-                                          └─ source store AS store_1 use-filter 2 keys=[store_1.s_store_sk] (rows≈10 cost≈200)
+                           └─ filter (<= w_0 5)
+                              └─ window partition=[store_1.s_state] order=[sum_0 desc] fns=[w_0=rank]
+                                 └─ aggregate keys=[store_1.s_state] aggs=[sum_0=sum] (rows≈2 cost≈9K)
+                                    └─ join inner [store_sales_1.ss_store_sk = store_1.s_store_sk] emit-filter 2 from left (rows≈2 cost≈8.9K)
+                                       ├─ join inner [date_dim.d_date_sk = store_sales_1.ss_sold_date_sk] (rows≈2 cost≈4.5K)
+                                       │  ├─ filter (&& (<= 1212 |date_dim.d_month_seq|) (<= |date_dim.d_month_seq| (+ 1212 11))) (rows≈2 cost≈160)
+                                       │  │  └─ source date_dim AS date_dim row-groups (&& (<= 1212 |date_dim.d_month_seq|) (<= |date_dim.d_month_seq| (+ 1212 11))) (rows≈10 cost≈80)
+                                       │  └─ source store_sales AS store_sales_1 (rows≈10 cost≈160)
+                                       └─ source store AS store_1 use-filter 2 keys=[store_1.s_store_sk] (rows≈10 cost≈200)

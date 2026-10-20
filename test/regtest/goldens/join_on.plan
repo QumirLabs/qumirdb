@@ -1,1 +1,4 @@
-(rel project (rel join (rel source "t") (rel source "s") () (inner) (residual (== |t.id| |s.id|))) (a |t.a|) (b |s.b|))
+(rel project
+  (rel join (rel source "t" "t") (rel source "s" "s") () (inner) (residual (== |t.id| |s.id|)))
+  (a |t.a|)
+  (b |s.b|))

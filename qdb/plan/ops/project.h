@@ -21,9 +21,6 @@ struct TProjectionSpec {
     // Initial typing may shift its colN name when an earlier projection expands.
     // For a struct expression, Name anchors the group at its first flattened column.
     bool ImplicitName = false;
-    // SELECT DISTINCT is built before struct arity is known. Reject an unaliased
-    // struct during typing instead of silently deduplicating only its first field.
-    bool RejectUnaliasedStructForDistinct = false;
 };
 
 // Number of output columns occupied after flattening a struct-valued projection.

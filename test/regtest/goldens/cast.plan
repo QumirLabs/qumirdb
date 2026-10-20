@@ -1,1 +1,1 @@
-(rel project (rel source "t") (col0 (cast a i32)) (col1 (cast b f64)))
+(rel project (rel source "t" "t") (col0 (cast |t.a| i32)) (col1 (cast |t.b| f64)))
