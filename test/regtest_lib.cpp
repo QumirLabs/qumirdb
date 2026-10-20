@@ -80,6 +80,28 @@ std::string BuildAst(std::istream& input) {
     return NSql::PrintAst(*parsed);
 }
 
+std::unique_ptr<TMockSource> MakePlanSource(std::string_view table) {
+    // Plan-only cases type their plans. Keep their shared fixture
+    // schema explicit rather than inferring columns from the query under test.
+    if (table == "t") {
+        return std::make_unique<TMockSource>(
+            std::vector<std::string>{"a", "b", "c", "id", "k", "v"});
+    }
+    if (table == "s") {
+        return std::make_unique<TMockSource>(std::vector<std::string>{"a", "b", "id"});
+    }
+    if (table == "u") {
+        return std::make_unique<TMockSource>(std::vector<std::string>{"a"});
+    }
+    if (table == "customer_address") {
+        return std::make_unique<TMockSource>(
+            std::vector<std::string>{"ca_zip"},
+            std::vector<TRowSet>{},
+            std::vector<TTypePtr>{std::make_shared<TStringType>()});
+    }
+    throw std::runtime_error("unknown plan fixture table '" + std::string(table) + "'");
+}
+
 std::string BuildPlanText(std::istream& input) {
     NSql::TTokenStream tokens(input);
     NSql::TParser parser;
@@ -89,7 +111,7 @@ std::string BuildPlanText(std::istream& input) {
     auto factory = [&](std::string_view table)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
-        auto& source = sources.emplace_back(std::make_unique<TMockSource>());
+        auto& source = sources.emplace_back(MakePlanSource(table));
         return std::make_shared<TSourceOperator>(*source, std::string(table));
     };
     auto plan = BuildPlan(*parsed, factory);
