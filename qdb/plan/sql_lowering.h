@@ -61,6 +61,11 @@ public:
         , EnableAffineRewrite_(enableAffineRewrite)
         , Context_(context)
     { }
+    // The collector keeps a reference to the context.
+    TAggCollector(
+        const NQumir::NAst::TStructType* inputSchema,
+        bool enableAffineRewrite,
+        const NKernel::TAnnotationContext&& context) = delete;
 
     std::expected<NQumir::NAst::TExprPtr, NQumir::TError> Rewrite(NQumir::NAst::TExprPtr expr);
 

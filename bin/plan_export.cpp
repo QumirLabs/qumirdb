@@ -287,7 +287,7 @@ struct TExportRequest {
 
 struct TParsedSql {
     NQdb::TOperatorPtr Plan;
-    // Construction and the optimizer passes share one typing context.
+    // Plan construction and the optimizer passes type against the same catalog snapshot.
     NQdb::NKernel::TAnnotationContext Annotation;
 };
 
@@ -1109,7 +1109,9 @@ std::expected<TParsedSql, NQumir::TError> ParseSql(
     };
 
     NQdb::NKernel::TAnnotationContext annotation{
-        .ExternalCatalog = hasExternalDefinitions ? externalCatalog.Snapshot() : nullptr,
+        .ExternalCatalog = hasExternalDefinitions
+            ? externalCatalog.Snapshot()
+            : nullptr,
     };
     auto plan = NQdb::BuildPlan(query, sources, annotation);
     if (!plan) {
