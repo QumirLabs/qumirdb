@@ -37,6 +37,7 @@ add_library(qumirdb
     sql/printer.cpp
     plan/passes/const_fold.cpp
     plan/passes/unbound_vars.cpp
+    plan/passes/sql_binding.cpp
     plan/passes/typing.cpp
     plan/passes/column_pruning.cpp
     plan/passes/estimate_stats.cpp

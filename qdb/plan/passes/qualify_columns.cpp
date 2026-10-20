@@ -105,6 +105,12 @@ void QualifyExpr(TExprPtr& expr, const TStructType& schema) {
         ident.Cast()->Name = QualifyIdent(schema, ident.Cast()->Name);
         return;
     }
+    if (auto call = TMaybeNode<TCallExpr>(expr)) {
+        for (auto& argument : call.Cast()->Args) {
+            QualifyExpr(argument, schema);
+        }
+        return;
+    }
     for (TExprPtr* child : expr->MutableChildren()) {
         QualifyExpr(*child, schema);
     }
@@ -112,7 +118,12 @@ void QualifyExpr(TExprPtr& expr, const TStructType& schema) {
 
 // Bottom-up pass: returns the qualified output schema for each node.
 // Also modifies the node in-place (source Type, join keys, expression idents, etc.)
-std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op) {
+std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op, bool recursive = true) {
+    auto schemaOf = [&](const TOperatorPtr& input) -> std::shared_ptr<TStructType> {
+        return recursive
+            ? QualifyColumnsImpl(input)
+            : input->OutputColumns();
+    };
 
     // -- Source --------------------------------------------------------------
     if (auto maybe = TMaybeOp<TSourceOperator>(op)) {
@@ -146,7 +157,7 @@ std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op) {
     // -- Filter --------------------------------------------------------------
     if (auto maybe = TMaybeOp<TFilterOperator>(op)) {
         auto flt = maybe.Cast();
-        auto childSchema = QualifyColumnsImpl(flt->Input());
+        auto childSchema = schemaOf(flt->Input());
         if (childSchema) {
             QualifyExpr(flt->MutablePredicate(), *childSchema);
         }
@@ -156,7 +167,7 @@ std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op) {
     // -- Sort / TopSort / Limit ---------------------------------------------
     if (auto maybe = TMaybeOp<TSortOperator>(op)) {
         auto sort = maybe.Cast();
-        auto childSchema = QualifyColumnsImpl(sort->Input());
+        auto childSchema = schemaOf(sort->Input());
         if (childSchema) {
             for (auto& key : sort->MutableKeys()) {
                 key.Column = QualifyIdent(*childSchema, key.Column);
@@ -167,7 +178,7 @@ std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op) {
 
     if (auto maybe = TMaybeOp<TTopSortOperator>(op)) {
         auto topSort = maybe.Cast();
-        auto childSchema = QualifyColumnsImpl(topSort->Input());
+        auto childSchema = schemaOf(topSort->Input());
         if (childSchema) {
             for (auto& key : topSort->MutableKeys()) {
                 key.Column = QualifyIdent(*childSchema, key.Column);
@@ -178,14 +189,14 @@ std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op) {
 
     if (auto maybe = TMaybeOp<TLimitOperator>(op)) {
         auto limit = maybe.Cast();
-        return QualifyColumnsImpl(limit->Input());
+        return schemaOf(limit->Input());
     }
 
     // -- Join ----------------------------------------------------------------
     if (auto maybe = TMaybeOp<TJoinOperator>(op)) {
         auto join = maybe.Cast();
-        auto leftSchema  = QualifyColumnsImpl(join->Left());
-        auto rightSchema = QualifyColumnsImpl(join->Right());
+        auto leftSchema  = schemaOf(join->Left());
+        auto rightSchema = schemaOf(join->Right());
 
         // Update equi-join keys.
         if (leftSchema && rightSchema) {
@@ -236,7 +247,7 @@ std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op) {
     // -- Project -------------------------------------------------------------
     if (auto maybe = TMaybeOp<TProjectOperator>(op)) {
         auto proj = maybe.Cast();
-        auto childSchema = QualifyColumnsImpl(proj->Input());
+        auto childSchema = schemaOf(proj->Input());
         if (childSchema) {
             for (auto& spec : proj->MutableProjections()) {
                 QualifyExpr(spec.Expression, *childSchema);
@@ -259,7 +270,7 @@ std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op) {
     // -- Aggregate -----------------------------------------------------------
     if (auto maybe = TMaybeOp<TAggregateOperator>(op)) {
         auto agg = maybe.Cast();
-        auto childSchema = QualifyColumnsImpl(agg->Input());
+        auto childSchema = schemaOf(agg->Input());
         if (childSchema) {
             for (auto& key : agg->MutableGroupKeys()) {
                 key = QualifyIdent(*childSchema, key);
@@ -284,7 +295,7 @@ std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op) {
     // partition/order key names and the function arguments against the input.
     if (auto maybe = TMaybeOp<TWindowOperator>(op)) {
         auto window = maybe.Cast();
-        auto childSchema = QualifyColumnsImpl(window->Input());
+        auto childSchema = schemaOf(window->Input());
         if (childSchema) {
             for (auto& key : window->MutablePartitionKeys()) {
                 key = QualifyIdent(*childSchema, key);
@@ -315,7 +326,7 @@ std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op) {
         auto un = maybe.Cast();
         std::shared_ptr<TStructType> first;
         for (auto& branch : un->MutableInputs()) {
-            auto branchSchema = QualifyColumnsImpl(branch);
+            auto branchSchema = schemaOf(branch);
             if (!first) first = branchSchema;
         }
         return first;
@@ -323,7 +334,7 @@ std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op) {
 
     // Unknown operator: recurse into inputs to qualify sources beneath it.
     for (const auto& input : op->Inputs()) {
-        QualifyColumnsImpl(input);
+        schemaOf(input);
     }
     return nullptr;
 }
@@ -356,6 +367,14 @@ void AssignSourceAliases(const TOperatorPtr& root) {
             src->SetAlias(stem + "_" + std::to_string(idx));
         }
     }
+}
+
+void QualifyExpression(TExprPtr& expression, const TStructType& schema) {
+    QualifyExpr(expression, schema);
+}
+
+void QualifyOperatorColumns(const TOperatorPtr& root) {
+    QualifyColumnsImpl(root, false);
 }
 
 void QualifyColumns(const TOperatorPtr& root) {

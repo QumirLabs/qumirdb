@@ -16,4 +16,12 @@ void AssignSourceAliases(const TOperatorPtr& root);
 //   join residual predicates, and aggregate group keys / agg args
 void QualifyColumns(const TOperatorPtr& root);
 
+// Qualifies one node against the already bound schemas of its inputs.
+void QualifyOperatorColumns(const TOperatorPtr& root);
+
+// Bind expression column references against one input schema.
+void QualifyExpression(
+    NQumir::NAst::TExprPtr& expression,
+    const NQumir::NAst::TStructType& schema);
+
 } // namespace NQdb

@@ -6,8 +6,8 @@ top-sort [i_category asc, i_class asc, i_brand asc, i_product_name asc, d_year a
             └─ window partition=[dw1.i_category] order=[dw1.sumsales desc] fns=[w_0=rank]
                └─ project (dw1.i_category, dw1.i_class, dw1.i_brand, dw1.i_product_name, dw1.d_year, dw1.d_qoy, dw1.d_moy, dw1.s_store_id, dw1.sumsales) (rows≈17 cost≈19.9K)
                   └─ project (i_category, i_class, i_brand, i_product_name, d_year, d_qoy, d_moy, s_store_id, sumsales) (rows≈17 cost≈18.2K)
-                     └─ aggregate keys=[i_category, i_class, i_brand, i_product_name, d_year, d_qoy, d_moy, s_store_id] aggs=[sum_0=sum] (rows≈17 cost≈16.5K)
-                        └─ project (i_category, i_class, i_brand, i_product_name, d_year, d_qoy, d_moy, s_store_id, arg_0) (rows≈2 cost≈14.6K)
+                     └─ aggregate keys=[item.i_category, item.i_class, item.i_brand, item.i_product_name, date_dim.d_year, date_dim.d_qoy, date_dim.d_moy, store.s_store_id] aggs=[sum_0=sum] (rows≈17 cost≈16.5K)
+                        └─ project (item.i_category, item.i_class, item.i_brand, item.i_product_name, date_dim.d_year, date_dim.d_qoy, date_dim.d_moy, store.s_store_id, arg_0) (rows≈2 cost≈14.6K)
                            └─ join inner [item.i_item_sk = store_sales.ss_item_sk] emit-filter 1 from right (rows≈2 cost≈14.4K)
                               ├─ source item AS item use-filter 1 keys=[item.i_item_sk] (rows≈10 cost≈680)
                               └─ join inner [store.s_store_sk = store_sales.ss_store_sk] emit-filter 2 from right (rows≈2 cost≈9.3K)

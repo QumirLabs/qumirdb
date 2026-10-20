@@ -1,7 +1,7 @@
 cte #1 (materialized, ×2):
 project (d_week_seq, sun_sales, mon_sales, tue_sales, wed_sales, thu_sales, fri_sales, sat_sales) (rows≈2 cost≈8.7K)
-└─ aggregate keys=[d_week_seq] aggs=[sum_0=sum, sum_1=sum, sum_2=sum, sum_3=sum, sum_4=sum, sum_5=sum, sum_6=sum] (rows≈2 cost≈8.5K)
-   └─ project (d_week_seq, arg_0, arg_1, arg_2, arg_3, arg_4, arg_5, arg_6) (rows≈20 cost≈7.3K)
+└─ aggregate keys=[date_dim.d_week_seq] aggs=[sum_0=sum, sum_1=sum, sum_2=sum, sum_3=sum, sum_4=sum, sum_5=sum, sum_6=sum] (rows≈2 cost≈8.5K)
+   └─ project (date_dim.d_week_seq, arg_0, arg_1, arg_2, arg_3, arg_4, arg_5, arg_6) (rows≈20 cost≈7.3K)
       └─ join inner [date_dim.d_date_sk = wscs.sold_date_sk] (rows≈20 cost≈6.1K)
          ├─ source date_dim AS date_dim (rows≈10 cost≈240)
          └─ project (wscs.sold_date_sk, wscs.sales_price) (rows≈20 cost≈960)

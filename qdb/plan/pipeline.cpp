@@ -15,6 +15,7 @@
 #include <qdb/plan/passes/runtime_filters.h>
 #include <qdb/plan/passes/self_equality.h>
 #include <qdb/plan/passes/typing.h>
+#include <qdb/plan/passes/sql_binding.h>
 #include <qdb/plan/plan_print.h>
 
 #include <cstdlib>
@@ -98,6 +99,7 @@ void ForEachPlan(TOperatorPtr& main, TFn&& fn, bool includeMain = true) {
 } // namespace
 
 void ApplyPlanPasses(TOperatorPtr& plan, TPlanPassOptions options) {
+    ResolveSqlBindings(plan, options.Annotation);
     TFoldedBounds foldedBounds; // one per query: see TFoldedBounds
     ForEachPlan(plan, [&](TOperatorPtr& current, TCteDefinition* def) {
         OptimizeOne(current, options, foldedBounds);

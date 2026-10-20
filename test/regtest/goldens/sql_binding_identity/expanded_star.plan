@@ -1,0 +1,8 @@
+project (a, a, __output_0) (rows≈1 cost≈4.2K)
+└─ project (__output_3, __output_4, __output_5) (rows≈1 cost≈4.2K)
+   └─ join inner (rows≈1 cost≈4.2K)
+      ├─ project (__output_1, __output_2) (rows≈1 cost≈32)
+      │  └─ source t AS t (rows≈1 cost≈16)
+      └─ project (d.__output_0) (rows≈1 cost≈24)
+         └─ project (__output_0) (rows≈1 cost≈16)
+            └─ source u AS u (rows≈1 cost≈8)

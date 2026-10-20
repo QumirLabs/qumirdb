@@ -7,7 +7,7 @@ main:
 top-sort [order count asc] limit 100
 └─ project (order count, total shipping cost, total net profit) (rows≈1 cost≈39.5K)
    └─ aggregate keys=[__group__] aggs=[count_0=count, sum_1=sum, sum_2=sum] (rows≈1 cost≈39.5K)
-      └─ project (ws_order_number, partial_sum_1, partial_sum_2, __group__) (rows≈1 cost≈39.4K)
+      └─ project (ws1.ws_order_number, partial_sum_1, partial_sum_2, __group__) (rows≈1 cost≈39.4K)
          └─ aggregate keys=[ws1.ws_order_number] aggs=[partial_sum_1=sum, partial_sum_2=sum] (rows≈1 cost≈39.4K)
             └─ join left_semi [ws1.ws_order_number = __qdb_in__wr_order_number] (rows≈1 cost≈39.4K)
                ├─ join left_semi [ws1.ws_order_number = __qdb_in__ws_order_number] (rows≈1 cost≈24K)

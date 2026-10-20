@@ -5,9 +5,9 @@ in the pipeline of plan passes, in the CTE phase that runs after them, and at
 lowering/execution time outside the plan altogether. Each entry gives a minimal
 query and the plan before and after.
 
-## 1. During plan construction
+## 1. During plan construction and SQL binding
 
-These run during logical plan construction, before the pipeline passes. The "before" shapes below are what the
+These run during logical plan construction and SQL binding, before the pipeline passes. The "before" shapes below are what the
 straightforward translation would produce; they never exist as a plan.
 
 ### 1.1 Global aggregate as a constant group key

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <qdb/plan/ops/operator.h>
+#include <qdb/plan/sql_bindings.h>
 
 #include <qumir/error.h>
 
@@ -45,6 +46,11 @@ public:
     const std::vector<std::vector<size_t>>& GroupingSets() const { return GroupingSets_; }
     std::vector<std::vector<size_t>>& MutableGroupingSets() { return GroupingSets_; }
 
+    const std::optional<TAggregateBinding>& Binding() const { return Binding_; }
+    std::optional<TAggregateBinding>& MutableBinding() { return Binding_; }
+    bool GroupsAllColumns() const { return GroupsAllColumns_; }
+    void SetGroupsAllColumns(bool value) { GroupsAllColumns_ = value; }
+
     std::span<const TOperatorPtr> Inputs() const override {
         return std::span<const TOperatorPtr>(&Input_, 1);
     }
@@ -58,6 +64,8 @@ private:
     std::vector<std::string> GroupKeys_;
     std::vector<TAggregateSpec> Aggs_;
     std::vector<std::vector<size_t>> GroupingSets_;
+    std::optional<TAggregateBinding> Binding_;
+    bool GroupsAllColumns_ = false;
 };
 
 // Output schema = group key columns (types from inputSchema) followed by one

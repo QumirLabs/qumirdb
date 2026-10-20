@@ -28,6 +28,9 @@ std::string ExprLine(const NQumir::NAst::TExprPtr& expr) {
 
 std::string JoinPlanLabel(const TJoinOperator& join) {
     std::string label = "join " + std::string(JoinTypeName(join.JoinType()));
+    if (join.Binding()) {
+        label += " unresolved keys=[all output columns]";
+    }
     const auto& keys = join.Keys();
     for (size_t i = 0; i < keys.size(); ++i) {
         label += (i ? ", " : " [") + keys[i].Left
@@ -47,6 +50,17 @@ std::string JoinPlanLabel(const TJoinOperator& join) {
 }
 
 std::string AggregatePlanLabel(const TAggregateOperator& aggregate) {
+    if (aggregate.Binding()) {
+        std::string label = "aggregate unresolved keys=[";
+        const auto& keys = aggregate.Binding()->Keys;
+        for (size_t i = 0; i < keys.size(); ++i) {
+            label += (i ? ", " : "") + ExprLine(keys[i].Expression);
+        }
+        return label + "]";
+    }
+    if (aggregate.GroupsAllColumns()) {
+        return "aggregate unresolved keys=[all output columns]";
+    }
     std::string label = "aggregate";
     const auto& keys = aggregate.GroupKeys();
     for (size_t i = 0; i < keys.size(); ++i) {
@@ -169,7 +183,9 @@ std::string PlanLabel(const TOperatorPtr& op) {
         return "filter " + ExprLine(filter.Cast()->Predicate());
     }
     if (auto project = TMaybeOp<TProjectOperator>(op)) {
-        std::string label = "project (";
+        std::string label = project.Cast()->SelectBinding() || project.Cast()->OutputAliases()
+            ? "project unresolved ("
+            : "project (";
         const auto& specs = project.Cast()->Projections();
         for (size_t i = 0; i < specs.size(); ++i) {
             label += (i ? ", " : "") + specs[i].Name;
@@ -183,6 +199,15 @@ std::string PlanLabel(const TOperatorPtr& op) {
         return JoinPlanLabel(*join.Cast());
     }
     if (auto sort = TMaybeOp<TSortOperator>(op)) {
+        if (!sort.Cast()->UnresolvedKeys().empty()) {
+            std::string label = "sort unresolved [";
+            for (size_t i = 0; i < sort.Cast()->UnresolvedKeys().size(); ++i) {
+                const auto& key = sort.Cast()->UnresolvedKeys()[i];
+                label += (i ? ", " : "") + ExprLine(key.Expression)
+                    + " " + std::string(SortDirectionName(key.Direction));
+            }
+            return label + "]";
+        }
         return SortPlanLabel("sort", sort.Cast()->Keys());
     }
     if (auto sort = TMaybeOp<TTopSortOperator>(op)) {

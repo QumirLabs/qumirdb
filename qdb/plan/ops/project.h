@@ -1,6 +1,7 @@
 #pragma once
 
 #include <qdb/plan/ops/operator.h>
+#include <qdb/plan/sql_bindings.h>
 
 #include <qumir/error.h>
 
@@ -14,16 +15,14 @@ namespace NQdb {
 struct TProjectionSpec {
     std::string Name;
     NQumir::NAst::TExprPtr Expression; // parsed, unannotated
-    // Explicit names from `AS (x, y, z)`. Empty for scalar aliases and for the
-    // default colN naming of a flattened struct projection.
+    // Flattened group names, explicit from `AS (x, y, z)` or fixed at first typing.
+    // Empty for scalar projections and unbound default colN struct names.
     std::vector<std::string> ColumnAliases;
-    // True for an unnamed SQL expression (`SELECT a + b`). Type annotation may
-    // shift its synthetic colN name when an earlier projection expands a struct.
+    // True for an unnamed SQL expression (`SELECT a + b`) until first typing.
+    // Initial typing may shift its colN name when an earlier projection expands.
     // For a struct expression, Name anchors the group at its first flattened column.
     bool ImplicitName = false;
-    // SELECT DISTINCT is built before struct arity is known. Reject an unaliased
-    // struct during typing instead of silently deduplicating only its first field.
-    bool RejectUnaliasedStructForDistinct = false;
+    std::optional<std::string> StarPrefix;
 };
 
 // Number of output columns occupied after flattening a struct-valued projection.
@@ -50,6 +49,11 @@ public:
     const std::vector<TProjectionSpec>& Projections() const { return Projections_; }
     std::vector<TProjectionSpec>& MutableProjections() { return Projections_; }
 
+    const std::shared_ptr<const TSelectBinding>& SelectBinding() const { return SelectBinding_; }
+    void SetSelectBinding(std::shared_ptr<const TSelectBinding> binding) { SelectBinding_ = std::move(binding); }
+    const std::optional<TOutputAliasesBinding>& OutputAliases() const { return OutputAliases_; }
+    std::optional<TOutputAliasesBinding>& MutableOutputAliases() { return OutputAliases_; }
+
     std::span<const TOperatorPtr> Inputs() const override {
         return std::span<const TOperatorPtr>(&Input_, 1);
     }
@@ -61,6 +65,8 @@ public:
 private:
     TOperatorPtr Input_;
     std::vector<TProjectionSpec> Projections_;
+    std::shared_ptr<const TSelectBinding> SelectBinding_;
+    std::optional<TOutputAliasesBinding> OutputAliases_;
 };
 
 // projections: list of (output_name, expression_string) pairs

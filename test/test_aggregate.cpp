@@ -23,6 +23,7 @@
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/sql/parser.h>
+#include <qdb/plan/passes/sql_binding.h>
 
 #include <algorithm>
 #include <array>
@@ -86,6 +87,7 @@ TOperatorPtr BuildSqlPlan(const std::string& sql, ISource& source) {
     if (!plan) {
         throw std::runtime_error(plan.error().ToString());
     }
+    ResolveSqlBindings(*plan);
     return std::move(*plan);
 }
 
@@ -174,8 +176,8 @@ TEST(AggregateLogical, ReusesSumAndCountForAffineIntegerSums) {
     EXPECT_EQ(aggregate->Aggs()[1].Func, "count");
     ASSERT_TRUE(aggregate->Aggs()[0].Arg);
     ASSERT_TRUE(aggregate->Aggs()[1].Arg);
-    EXPECT_EQ(PrintAst(aggregate->Aggs()[0].Arg), "ResolutionWidth");
-    EXPECT_EQ(PrintAst(aggregate->Aggs()[1].Arg), "ResolutionWidth");
+    EXPECT_EQ(PrintAst(aggregate->Aggs()[0].Arg), "|hits.ResolutionWidth|");
+    EXPECT_EQ(PrintAst(aggregate->Aggs()[1].Arg), "|hits.ResolutionWidth|");
 
     auto argProject = TMaybeOp<TProjectOperator>(aggregate->Input());
     ASSERT_TRUE(argProject);

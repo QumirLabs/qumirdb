@@ -378,74 +378,50 @@ bool HasWindowExpr(const NSql::TSqlNodePtr& node) {
     return false;
 }
 
-// Renames a built sub-plan's output columns to the given list (CTE column lists
-// and derived-table column aliases). The sub-plan's top must be a projection.
+// Output aliases are bound against the typed flattened schema by the pass.
 std::expected<TOperatorPtr, TError> ApplyColumnAliases(
     TOperatorPtr plan, const std::vector<std::string>& aliases)
 {
-    auto project = TMaybeOp<TProjectOperator>(plan);
-    if (!project || project.Cast()->Projections().size() != aliases.size()) {
-        return std::unexpected(TError("column alias count does not match output columns"));
-    }
-    // Rebuild through the ctor so the operator's output Type is recomputed from
-    // the renamed columns (mutating Projections in place would leave it stale).
-    std::vector<TProjectionSpec> renamed = project.Cast()->Projections();
-    for (size_t i = 0; i < renamed.size(); ++i) {
+    std::vector<TProjectionSpec> provisional;
+    const auto fields = plan->OutputColumns()->Fields;
+    for (size_t i = 0; i < aliases.size(); ++i) {
         if (auto valid = ValidateOutputColumnName(aliases[i]); !valid) {
             return std::unexpected(valid.error());
         }
-        renamed[i].Name = aliases[i];
-        renamed[i].ImplicitName = false;
+        provisional.push_back({.Name = aliases[i],
+            .Expression = Ident({}, i < fields.size() ? fields[i].first : aliases[i])});
     }
-    return std::make_shared<TProjectOperator>(project.Cast()->Input(), std::move(renamed));
+    auto project = std::make_shared<TProjectOperator>(std::move(plan), std::move(provisional));
+    project->MutableOutputAliases() = TOutputAliasesBinding{.Columns = aliases};
+    return project;
 }
 
 // Qualifies a subplan's output columns as `alias.col`. Source tables get this from
 // AssignSourceAliases, but subqueries/CTEs used with an alias need it here so the
 // outer query can reference `alias.col` (and equi-join keys on them are extracted).
 TOperatorPtr AliasSubplan(TOperatorPtr plan, const std::string& alias) {
-    auto&& schema = plan->OutputColumns();
-    if (!schema) {
-        return plan;
+    std::vector<TProjectionSpec> provisional;
+    for (const auto& [name, _] : plan->OutputColumns()->Fields) {
+        const auto dot = name.rfind('.');
+        const auto bare = dot == std::string::npos ? name : name.substr(dot + 1);
+        provisional.push_back({.Name = alias + "." + bare, .Expression = Ident({}, name)});
     }
-    std::vector<TProjectionSpec> projections;
-    projections.reserve(schema->Fields.size());
-    for (const auto& [name, _] : schema->Fields) {
-        auto dot = name.rfind('.');
-        std::string bare = dot != std::string::npos ? name.substr(dot + 1) : name;
-        projections.push_back({ .Name = alias + "." + bare, .Expression = Ident({}, name) });
-    }
-    return std::make_shared<TProjectOperator>(std::move(plan), std::move(projections));
+    auto project = std::make_shared<TProjectOperator>(std::move(plan), std::move(provisional));
+    project->MutableOutputAliases() = TOutputAliasesBinding{.Qualifier = alias};
+    return project;
 }
 
-// SELECT DISTINCT: dedup by grouping on every output column. A pass-through project
-// on top keeps a project-typed root (scalar-subquery/CTE handling relies on it) and
-// preserves column order.
 TOperatorPtr ApplyDistinct(TOperatorPtr projected, const std::vector<std::string>& columns) {
-    auto agg = std::make_shared<TAggregateOperator>(
-        std::move(projected), columns, std::vector<TAggregateSpec>{});
-    std::vector<TProjectionSpec> passthrough;
-    passthrough.reserve(columns.size());
-    for (const auto& col : columns) {
-        passthrough.push_back({ .Name = col, .Expression = Ident({}, col) });
+    auto keys = columns;
+    if (keys.empty()) {
+        for (const auto& [name, _] : projected->OutputColumns()->Fields) {
+            keys.push_back(name);
+        }
     }
-    return std::make_shared<TProjectOperator>(std::move(agg), std::move(passthrough));
-}
-
-std::expected<std::vector<std::string>, TError> OutputColumnNames(
-    const TOperatorPtr& op,
-    const std::string& context)
-{
-    auto&& output = op->OutputColumns();
-    if (!output) {
-        return std::unexpected(TError(context + " output schema must be a struct"));
-    }
-    std::vector<std::string> names;
-    names.reserve(output->Fields.size());
-    for (const auto& [name, _] : output->Fields) {
-        names.push_back(name);
-    }
-    return names;
+    auto aggregate = std::make_shared<TAggregateOperator>(
+        std::move(projected), std::move(keys), std::vector<TAggregateSpec>{});
+    aggregate->SetGroupsAllColumns(true);
+    return aggregate;
 }
 
 std::expected<TOperatorPtr, TError> BuildTableRef(
@@ -640,58 +616,110 @@ std::expected<TOperatorPtr, TError> DecorrelateIn(
     if (!right) {
         return std::unexpected(right.error());
     }
-    auto project = TMaybeOp<TProjectOperator>(*right);
-    if (!project || project.Cast()->Projections().size() != 1) {
-        return std::unexpected(TError("IN subquery must return exactly one column"));
-    }
+    const auto rightSchema = (*right)->OutputColumns();
     // Rename the subquery's output to a synthetic name so the residual's two sides
     // never share a name: otherwise `x IN (SELECT x ...)` yields `x == x`, which
     // qualification cannot bind to the left side and key extraction drops entirely,
     // leaving a keyless (unschedulable, condition-less) semi-join. The name is
     // internal - a semi/anti join exposes only its left side.
-    auto& spec = project.Cast()->MutableProjections()[0];
-    spec.Name = "__qdb_in__" + spec.Name;
-    spec.ImplicitName = false;
-    auto column = Ident(subquery.Operand->Location, spec.Name);
+    const auto name = "__qdb_in__" + (rightSchema && rightSchema->Fields.size() == 1
+        ? rightSchema->Fields[0].first
+        : std::string("value"));
+    right = ApplyColumnAliases(std::move(*right), {name});
+    if (!right) {
+        return std::unexpected(right.error());
+    }
+    auto column = Ident(subquery.Operand->Location, name);
     auto residual = std::make_shared<NAst::TBinaryExpr>(
         subquery.Operand->Location, NAst::TOperator("=="), subquery.Operand, std::move(column));
     return std::make_shared<TJoinOperator>(
         std::move(left), *right, std::vector<TJoinKey>{}, type, std::move(residual));
 }
 
-// Columns produced by a subquery's own FROM tables (base tables, recursing into
-// joins). Used to tell a subquery's local columns from outer (correlated) ones.
+// Qualified references belong to a FROM scope independently of its output types.
+// Bare names need a complete schema; unresolved CTE/derived outputs can leave
+// their classification unknown until binding.
+enum class ESqlReferenceScope { Local, Outer, Unknown };
+
+struct TLocalSqlScope {
+    std::unordered_set<std::string> Qualifiers;
+    std::unordered_set<std::string> BareColumns;
+    bool CompleteBareColumns = true;
+
+    ESqlReferenceScope Classify(const std::string& name) const {
+        const auto dot = name.rfind('.');
+        if (dot != std::string::npos) {
+            return Qualifiers.contains(name.substr(0, dot))
+                ? ESqlReferenceScope::Local
+                : ESqlReferenceScope::Outer;
+        }
+        if (BareColumns.contains(name)) {
+            return ESqlReferenceScope::Local;
+        }
+        return CompleteBareColumns
+            ? ESqlReferenceScope::Outer
+            : ESqlReferenceScope::Unknown;
+    }
+};
+
+void CollectDeclaredOutputNames(
+    const NSql::TSqlNodePtr& body,
+    std::unordered_set<std::string>& names)
+{
+    if (auto query = NSql::TMaybeNode<NSql::TSqlQuery>(body)) {
+        CollectDeclaredOutputNames(query.Cast()->Body, names);
+    } else if (auto set = NSql::TMaybeNode<NSql::TSqlSetOp>(body)) {
+        CollectDeclaredOutputNames(set.Cast()->Left, names);
+    } else if (auto select = NSql::TMaybeNode<NSql::TSqlSelect>(body)) {
+        for (const auto& item : select.Cast()->SelectList->Items) {
+            if (!item->ColumnAliases.empty()) {
+                names.insert(item->ColumnAliases.begin(), item->ColumnAliases.end());
+            } else if (item->Alias) {
+                names.insert(*item->Alias);
+            } else if (!item->Star && NAst::TMaybeNode<NAst::TIdentExpr>(item->Expr)) {
+                names.insert(ItemName(*item, 0));
+            }
+        }
+    }
+}
+
 void CollectLocalColumns(
     const NSql::TSqlPtr<NSql::TSqlTableRef>& ref,
     const TTableSourceFactory& sources,
-    std::unordered_set<std::string>& out)
+    TLocalSqlScope& out)
 {
     if (auto table = NSql::TMaybeNode<NSql::TSqlTableName>(ref)) {
         auto node = table.Cast();
+        const std::string qualifier = node->Alias ? *node->Alias : node->Name.back();
+        out.Qualifiers.insert(qualifier);
         if (auto src = sources(TableName(node->Name))) {
-            // Qualify by the table's alias (or its name), so a local column of
-            // `item j` (`j.i_category`) is distinguishable from an outer column
-            // of another alias of the same table (`i.i_category`); a bare name
-            // is also kept for unqualified references.
-            const std::string prefix =
-                node->Alias ? *node->Alias : node->Name.back();
             if (auto source = TMaybeOp<TSourceOperator>(*src)) {
                 for (const auto& col : source.Cast()->GetSource().Schema().Columns) {
-                    out.insert(std::string(col.Name));
-                    out.insert(prefix + "." + std::string(col.Name));
+                    out.BareColumns.insert(std::string(col.Name));
                 }
             } else if (auto&& schema = (*src)->OutputColumns()) {
-                // CTE / subquery table inlined as a subplan: its columns are the
-                // subplan's output (projection) names; qualify them by the reference
-                // alias exactly as AliasSubplan does, so a correlated `ctr2.ctr_state`
-                // matches the outer `ctr1.ctr_state`.
+                // A CTE exposes its declared output names.
                 for (const auto& [name, _] : schema->Fields) {
                     auto dot = name.rfind('.');
                     std::string bare = dot != std::string::npos ? name.substr(dot + 1) : name;
-                    out.insert(bare);
-                    out.insert(prefix + "." + bare);
+                    out.BareColumns.insert(bare);
                 }
+            } else {
+                out.CompleteBareColumns = false;
             }
+        } else {
+            out.CompleteBareColumns = false;
+        }
+    } else if (auto derived = NSql::TMaybeNode<NSql::TSqlSubqueryTable>(ref)) {
+        if (derived.Cast()->Alias) {
+            out.Qualifiers.insert(*derived.Cast()->Alias);
+        }
+        out.CompleteBareColumns = false;
+        if (derived.Cast()->ColumnAliases) {
+            const auto& columns = derived.Cast()->ColumnAliases->Items;
+            out.BareColumns.insert(columns.begin(), columns.end());
+        } else {
+            CollectDeclaredOutputNames(derived.Cast()->Query, out.BareColumns);
         }
     } else if (auto join = NSql::TMaybeNode<NSql::TSqlJoin>(ref)) {
         CollectLocalColumns(join.Cast()->Left, sources, out);
@@ -704,7 +732,7 @@ void CollectLocalColumns(
 // lifted too (not only top-level conjuncts).
 void CollectCorrelations(
     const NAst::TExprPtr& expr,
-    const std::unordered_set<std::string>& local,
+    const TLocalSqlScope& local,
     std::vector<std::pair<std::string, std::string>>& out) // (outer, local)
 {
     if (!expr) {
@@ -718,13 +746,13 @@ void CollectCorrelations(
         if (left && right) {
             const std::string& ln = left.Cast()->Name;
             const std::string& rn = right.Cast()->Name;
-            bool lLocal = local.count(ln) > 0;
-            bool rLocal = local.count(rn) > 0;
-            if (lLocal && !rLocal) {
+            const auto leftScope = local.Classify(ln);
+            const auto rightScope = local.Classify(rn);
+            if (leftScope == ESqlReferenceScope::Local && rightScope == ESqlReferenceScope::Outer) {
                 out.emplace_back(rn, ln);
                 return;
             }
-            if (rLocal && !lLocal) {
+            if (rightScope == ESqlReferenceScope::Local && leftScope == ESqlReferenceScope::Outer) {
                 out.emplace_back(ln, rn);
                 return;
             }
@@ -810,7 +838,7 @@ std::expected<std::optional<TOperatorPtr>, TError> DecorrelateExistsOr(
         {
             return std::optional<TOperatorPtr>{};
         }
-        std::unordered_set<std::string> local;
+        TLocalSqlScope local;
         for (const auto& item : select->From->Items) {
             CollectLocalColumns(item, sources, local);
         }
@@ -851,10 +879,10 @@ std::expected<std::optional<TOperatorPtr>, TError> DecorrelateExistsOr(
 // covered by a correlation equality - that shape we cannot decorrelate).
 bool HasUnmappedOuter(
     const NAst::TExprPtr& expr,
-    const std::unordered_set<std::string>& local)
+    const TLocalSqlScope& local)
 {
     for (const auto& name : FindUnboundVars(expr)) {
-        if (!local.count(name)) {
+        if (local.Classify(name) != ESqlReferenceScope::Local) {
             return true;
         }
     }
@@ -884,17 +912,16 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
             if (!scalar->Operand || HasSubquery(scalar->Operand)) {
                 return std::unexpected(TError("unsupported IN operand"));
             }
-            // Only uncorrelated IN is supported here: a correlated body would leave
-            // outer columns unbound in the standalone subquery plan. (`!local.empty()`
-            // avoids misfiring on empty-schema mock builds - see the scalar guard.)
+            // Only uncorrelated IN is supported here: outer references must not
+            // survive in a standalone subquery plan.
             if (auto sel = NSql::TMaybeNode<NSql::TSqlSelect>(scalar->Query->Body);
                 sel && sel.Cast()->From && sel.Cast()->Where)
             {
-                std::unordered_set<std::string> local;
+                TLocalSqlScope local;
                 for (const auto& item : sel.Cast()->From->Items) {
                     CollectLocalColumns(item, sources, local);
                 }
-                if (!local.empty() && HasUnmappedOuter(sel.Cast()->Where, local)) {
+                if (HasUnmappedOuter(sel.Cast()->Where, local)) {
                     return std::unexpected(TError(
                         "correlated IN subquery in a boolean expression is not supported"));
                 }
@@ -903,14 +930,11 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
             if (!plan) {
                 return std::unexpected(plan.error());
             }
-            auto project = TMaybeOp<TProjectOperator>(*plan);
-            if (!project || project.Cast()->Projections().size() != 1) {
-                return std::unexpected(TError("IN subquery must return exactly one column"));
-            }
             std::string markName = "__in_mark_" + std::to_string(counter++) + "__";
-            auto& projection = project.Cast()->MutableProjections()[0];
-            projection.Name = markName;
-            projection.ImplicitName = false;
+            plan = ApplyColumnAliases(std::move(*plan), {markName});
+            if (!plan) {
+                return std::unexpected(plan.error());
+            }
             // Dedup so each outer row matches at most one right row (no duplication).
             auto distinct = ApplyDistinct(*plan, { markName });
             // Left join null-extends `markName` to NULL on non-match - the marker.
@@ -940,7 +964,7 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
             && maybeSelect.Cast()->From && maybeSelect.Cast()->Where)
         {
             auto sel = maybeSelect.Cast();
-            std::unordered_set<std::string> local;
+            TLocalSqlScope local;
             for (const auto& item : sel->From->Items) {
                 CollectLocalColumns(item, sources, local);
             }
@@ -974,6 +998,7 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
                     auto item = std::make_shared<NSql::TSqlSelectItem>();
                     item->Expr = Ident({}, localCol);
                     item->Alias = corrName;
+                    item->Hidden = true;
                     prepend.push_back(std::move(item));
                     sel->GroupBy->Items.push_back(
                         std::make_shared<NSql::TSqlGroupingExprOrList>(Ident({}, localCol)));
@@ -996,17 +1021,16 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
                 if (!plan) {
                     return std::unexpected(plan.error());
                 }
-                auto project = TMaybeOp<TProjectOperator>(*plan);
-                if (!project
-                    || project.Cast()->Projections().size() != correlation.size() + 1)
-                {
-                    return std::unexpected(
-                        TError("correlated scalar subquery must return one value"));
-                }
                 std::string scalarName = "__scalar_" + std::to_string(id) + "__";
-                auto& projection = project.Cast()->MutableProjections().back();
-                projection.Name = scalarName;
-                projection.ImplicitName = false;
+                std::vector<std::string> aliases;
+                for (const auto& key : joinKeys) {
+                    aliases.push_back(key.Right);
+                }
+                aliases.push_back(scalarName);
+                plan = ApplyColumnAliases(std::move(*plan), aliases);
+                if (!plan) {
+                    return std::unexpected(plan.error());
+                }
                 // LEFT join preserves outer rows; a missing match yields NULL, so
                 // the surrounding comparison filters the row out (SQL semantics).
                 node = std::make_shared<TJoinOperator>(
@@ -1014,13 +1038,9 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
                 return Ident(expr->Location, std::move(scalarName));
             }
 
-            // Correlation present but not liftable to an equi-key (a non-equality
-            // correlation, or an equality that isn't ident==ident): the outer column
-            // would be left unbound in the subquery. Fail loudly rather than silently
-            // cross-joining and dropping rows. Only when `local` is known (non-empty):
-            // if the subquery's own columns couldn't be resolved (e.g. an unschema'd
-            // source), every ident looks "outer" and we must not misfire - fall back.
-            if (!local.empty() && HasUnmappedOuter(sel->Where, local)) {
+            // Unknown bare references cannot safely be treated as uncorrelated.
+            // Full outer-scope binding belongs to algebraic decorrelation.
+            if (HasUnmappedOuter(sel->Where, local)) {
                 return std::unexpected(TError(
                     "unsupported correlated scalar subquery "
                     "(correlation must be an equality between subquery and outer columns)"));
@@ -1032,14 +1052,11 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
         if (!plan) {
             return std::unexpected(plan.error());
         }
-        auto project = TMaybeOp<TProjectOperator>(*plan);
-        if (!project || project.Cast()->Projections().size() != 1) {
-            return std::unexpected(TError("scalar subquery must return exactly one column"));
-        }
         std::string name = "__scalar_" + std::to_string(counter++) + "__";
-        auto& projection = project.Cast()->MutableProjections()[0];
-        projection.Name = name;
-        projection.ImplicitName = false;
+        plan = ApplyColumnAliases(std::move(*plan), {name});
+        if (!plan) {
+            return std::unexpected(plan.error());
+        }
         node = std::make_shared<TJoinOperator>(
             std::move(node), *plan, std::vector<TJoinKey>{}, EJoinType::Inner, nullptr);
         return Ident(expr->Location, std::move(name));
@@ -1094,12 +1111,14 @@ std::expected<TOperatorPtr, TError> BuildSelect(
     // aggregation branch so a mixed DISTINCT/non-DISTINCT split gets independent
     // subtrees (there is no deep operator clone; rebuilding from the AST is the
     // simplest way to duplicate the input).
+    TOperatorPtr fromInput;
     auto buildInput = [&]() -> std::expected<TOperatorPtr, TError> {
         auto base = BuildFrom(*select.From, sources);
         if (!base) {
             return std::unexpected(base.error());
         }
         TOperatorPtr node = *base;
+        fromInput = node;
         if (select.Where) {
             std::vector<NAst::TExprPtr> conjuncts;
             FlattenConjuncts(select.Where, conjuncts);
@@ -1145,554 +1164,114 @@ std::expected<TOperatorPtr, TError> BuildSelect(
     if (!base) {
         return std::unexpected(base.error());
     }
-    TOperatorPtr node = *base;
-
+    auto node = std::move(*base);
     if (!select.SelectList) {
         return std::unexpected(TError("empty select list"));
     }
-
-    std::optional<TGroupingParse> parsedGrouping;
+    std::optional<TGroupingParse> grouping;
     if (select.GroupBy) {
         auto parsed = ParseGrouping(*select.GroupBy);
         if (!parsed) {
             return std::unexpected(parsed.error());
         }
-        parsedGrouping = std::move(*parsed);
+        grouping = std::move(*parsed);
     }
-    const bool multiSet = parsedGrouping && parsedGrouping->Sets.size() > 1;
-
-    auto inputSchemaType = node->OutputColumns();
-    auto inputSchema = NAst::TMaybeType<NAst::TStructType>(inputSchemaType);
-    // Grouping-sets execution masks key columns for sets that omit them. Keep
-    // computed aggregate arguments materialized separately: collapsing `sum(k+1)`
-    // to reducers over `k` would make the subtotal consume the masked key.
-    TAggCollector collector(
-        inputSchema ? inputSchema.Cast().get() : nullptr,
-        !multiSet);
-    const bool distinct = select.Quantifier == NSql::ESetQuantifier::Distinct;
+    auto scope = std::make_shared<TSelectBinding>();
+    scope->Input = fromInput;
     std::vector<TProjectionSpec> projections;
-    std::unordered_map<std::string, NAst::TExprPtr> selectAliases;
-    std::unordered_set<std::string> ambiguousSelectAliases;
     for (size_t i = 0; i < select.SelectList->Items.size(); ++i) {
         const auto& item = select.SelectList->Items[i];
         if (item->Star) {
-            auto&& schema = node->OutputColumns();
-            if (!schema) {
-                return std::unexpected(TError("'*' over an unresolved input"));
-            }
             std::string prefix;
             for (const auto& part : item->StarPrefix) {
                 prefix += part + ".";
             }
-            for (const auto& [colName, _] : schema->Fields) {
-                if (!prefix.empty() && colName.rfind(prefix, 0) != 0) {
-                    continue;
-                }
-                auto dot = colName.rfind('.');
-                std::string bare = dot != std::string::npos ? colName.substr(dot + 1) : colName;
-                projections.push_back({ .Name = bare, .Expression = Ident({}, colName) });
-            }
+            projections.push_back({.Name = "*", .Expression = Ident({}, "*"), .StarPrefix = prefix});
+            scope->Items.push_back({.Name = "*", .Expression = Ident({}, "*"), .StarPrefix = prefix});
             continue;
         }
-        const auto outputLocation = item->Expr
-            ? item->Expr->Location
-            : TLocation{};
+        const auto location = item->Expr->Location;
         if (item->Alias) {
-            if (auto valid = ValidateOutputColumnName(
-                    *item->Alias, outputLocation); !valid)
-            {
+            if (auto valid = ValidateOutputColumnName(*item->Alias, location); !valid) {
                 return std::unexpected(valid.error());
             }
         }
         for (const auto& alias : item->ColumnAliases) {
-            if (auto valid = ValidateOutputColumnName(
-                    alias, outputLocation); !valid)
-            {
+            if (auto valid = ValidateOutputColumnName(alias, location); !valid) {
                 return std::unexpected(valid.error());
             }
         }
-        std::string name = ItemName(*item, i);
-        auto expr = collector.Rewrite(item->Expr);
-        if (!expr) {
-            return std::unexpected(expr.error());
-        }
-        if (item->Alias) {
-            auto [_, inserted] = selectAliases.emplace(*item->Alias, *expr);
-            if (!inserted) {
-                ambiguousSelectAliases.insert(*item->Alias);
-            }
-        }
-        projections.push_back({
-            .Name = std::move(name),
-            .Expression = std::move(*expr),
-            .ColumnAliases = item->ColumnAliases,
-            .ImplicitName = !item->Alias && item->ColumnAliases.empty()
-                && !NAst::TMaybeNode<NAst::TIdentExpr>(item->Expr),
-            .RejectUnaliasedStructForDistinct =
-                distinct && item->ColumnAliases.empty(),
+        const auto name = ItemName(*item, i);
+        const bool implicit = !item->Alias && item->ColumnAliases.empty()
+            && !NAst::TMaybeNode<NAst::TIdentExpr>(item->Expr);
+        // SQL-only nodes are opaque to the core expression cloner. They cannot
+        // be ordinal grouping targets or structural ORDER BY matches.
+        const bool opaque = HasWindowExpr(item->Expr) || HasSubquery(item->Expr);
+        auto original = opaque
+            ? item->Expr
+            : CloneExpr(item->Expr);
+        scope->Items.push_back({.Name = name, .Expression = std::move(original),
+            .ColumnAliases = item->ColumnAliases, .ImplicitName = implicit, .Opaque = opaque, .Hidden = item->Hidden});
+        projections.push_back({.Name = name, .Expression = item->Expr,
+            .ColumnAliases = item->ColumnAliases, .ImplicitName = implicit});
+    }
+    const bool aggregated = grouping.has_value() || HasAggregateCall(select.Having)
+        || std::ranges::any_of(projections, [](const auto& spec) {
+            return HasAggregateCall(spec.Expression);
         });
+    if (!aggregated && select.Having) {
+        return std::unexpected(TError("HAVING requires aggregation"));
     }
-
-    std::vector<std::string> outputNames;
-    for (const auto& p : projections) {
-        if (p.ColumnAliases.empty()) {
-            outputNames.push_back(p.Name);
-        } else {
-            outputNames.insert(
-                outputNames.end(), p.ColumnAliases.begin(), p.ColumnAliases.end());
+    if (aggregated) {
+        TAggregateBinding binding{.Select = scope};
+        if (grouping) {
+            binding.Keys = std::move(grouping->Keys);
+            binding.Sets = std::move(grouping->Sets);
+            binding.HasGroupingSyntax = grouping->HasGroupingSyntax;
         }
+        std::vector<std::string> keys;
+        for (const auto& key : binding.Keys) {
+            keys.push_back(key.Name);
+        }
+        auto aggregate = std::make_shared<TAggregateOperator>(node, std::move(keys), std::vector<TAggregateSpec>{});
+        aggregate->MutableBinding() = std::move(binding);
+        node = std::move(aggregate);
     }
-    // A scalar subquery in HAVING is left intact by the aggregate collector
-    // (it is opaque) and decorrelated below, once the aggregate node exists.
-    NAst::TExprPtr having;
     if (select.Having) {
-        auto rewritten = collector.Rewrite(select.Having);
+        auto rewritten = ExtractScalarSubqueries(select.Having, node, sources, scalarCounter);
         if (!rewritten) {
             return std::unexpected(rewritten.error());
         }
-        having = std::move(*rewritten);
-    }
-
-    // Window functions run after aggregation/HAVING and before the final project.
-    // Shared by both the aggregated and non-aggregated paths.
-    auto applyWindows = [&](TOperatorPtr n) -> std::expected<TOperatorPtr, TError> {
-        TWindowCollector windows;
-        for (auto& projection : projections) {
-            auto rewritten = windows.Rewrite(projection.Expression);
-            if (!rewritten) {
-                return std::unexpected(rewritten.error());
-            }
-            projection.Expression = std::move(*rewritten);
-        }
-        if (windows.Empty()) {
-            return n;
-        }
-        return windows.Build(std::move(n));
-    };
-
-    bool aggregated = select.GroupBy != nullptr || !collector.Empty();
-    if (!aggregated) {
-        for (const auto& projection : projections) {
-            if (HasGroupingCall(projection.Expression)) {
-                return std::unexpected(TError(projection.Expression->Location,
-                    "GROUPING() requires GROUPING SETS, ROLLUP, or CUBE"));
-            }
-        }
-        if (having) {
-            return std::unexpected(TError("HAVING requires aggregation"));
-        }
-        auto windowed = applyWindows(std::move(node));
-        if (!windowed) {
-            return std::unexpected(windowed.error());
-        }
-        node = std::move(*windowed);
-        if (auto ok = extractProjectionSubqueries(projections, node); !ok) {
-            return std::unexpected(ok.error());
-        }
-        TOperatorPtr projected =
-            std::make_shared<TProjectOperator>(std::move(node), std::move(projections));
-        return distinct ? ApplyDistinct(std::move(projected), outputNames) : projected;
-    }
-
-    std::vector<TGroupKey> groupKeys;
-    std::vector<std::vector<size_t>> groupingSets;
-    bool hasGroupingSyntax = false;
-    if (parsedGrouping) {
-        groupKeys = std::move(parsedGrouping->Keys);
-        groupingSets = std::move(parsedGrouping->Sets);
-        hasGroupingSyntax = parsedGrouping->HasGroupingSyntax;
-    }
-    auto inputHasColumn = [&](const std::string& name) {
-        if (!inputSchema) {
-            return false;
-        }
-        return std::ranges::any_of(inputSchema.Cast()->Fields, [&](const auto& field) {
-            if (field.first == name) {
-                return true;
-            }
-            const auto dot = field.first.rfind('.');
-            return name.find('.') == std::string::npos
-                && dot != std::string::npos
-                && field.first.substr(dot + 1) == name;
-        });
-    };
-    const bool inputSchemaKnown = inputSchema && !inputSchema.Cast()->Fields.empty();
-    for (auto& key : groupKeys) {
-        // PostgreSQL GROUP BY resolves an input-column name before a SELECT alias.
-        if (key.Computed || inputHasColumn(key.Name)) {
-            continue;
-        }
-        if (ambiguousSelectAliases.contains(key.Name)) {
-            return std::unexpected(TError(
-                key.Expression->Location,
-                "GROUP BY alias '" + key.Name + "' is ambiguous"));
-        }
-        auto alias = selectAliases.find(key.Name);
-        if (alias == selectAliases.end()) {
-            continue;
-        }
-        if (HasSubquery(alias->second) || HasWindowExprLocal(alias->second)) {
-            return std::unexpected(TError(
-                key.Expression->Location,
-                "GROUP BY alias '" + key.Name +
-                "' must refer to a scalar input expression"));
-        }
-        const auto refs = FindUnboundVars(alias->second);
-        if (!inputSchemaKnown && std::ranges::any_of(refs, [&](const auto& ref) {
-                const auto dot = ref.rfind('.');
-                return ref.substr(dot == std::string::npos ? 0 : dot + 1) == key.Name;
-            }))
-        {
-            // Schema-less golden plans cannot prove the input-column match.
-            continue;
-        }
-        for (const auto& ref : refs) {
-            if (!inputHasColumn(ref)) {
-                return std::unexpected(TError(
-                    key.Expression->Location,
-                    "GROUP BY alias '" + key.Name +
-                    "' must refer to a scalar input expression"));
-            }
-        }
-        if (auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(alias->second)) {
-            key.Name = ident.Cast()->Name;
-            key.Expression = CloneExpr(alias->second);
-            continue;
-        }
-        key.Expression = CloneExpr(alias->second);
-        key.Computed = true;
-    }
-    NarrowPlainGroupKeys(groupKeys, groupingSets, hasGroupingSyntax);
-    // A single set over all keys is a plain aggregate; >1 set needs the kernel's
-    // grouping-sets machinery (keys become nullable, masked per set).
-    std::unordered_map<std::string, std::string> computedKeys; // PrintAst -> name
-    for (const auto& key : groupKeys) {
-        if (key.Computed) {
-            computedKeys.emplace(NAst::NCore::PrintAst(key.Expression), key.Name);
-        }
-    }
-    if (!computedKeys.empty()) {
-        for (auto& projection : projections) {
-            projection.Expression = SubstituteGroupKeys(projection.Expression, computedKeys);
-        }
-        having = SubstituteGroupKeys(having, computedKeys);
-    }
-
-    auto groupingInfo = MakeGroupingRewriteInfo(groupKeys, groupingSets, hasGroupingSyntax);
-    for (auto& projection : projections) {
-        auto rewritten = RewriteGroupingCalls(projection.Expression, groupingInfo);
-        if (!rewritten) {
-            return std::unexpected(rewritten.error());
-        }
-        projection.Expression = std::move(*rewritten);
-    }
-    if (having) {
-        auto rewritten = RewriteGroupingCalls(having, groupingInfo);
-        if (!rewritten) {
-            return std::unexpected(rewritten.error());
-        }
-        having = std::move(*rewritten);
-    }
-
-    std::vector<std::string> keys;
-    keys.reserve(groupKeys.size());
-    for (const auto& key : groupKeys) {
-        keys.push_back(key.Name);
-    }
-
-    auto specs = collector.TakeSpecs();
-    for (const auto& spec : specs) {
-        if (HasGroupingCall(spec.Arg)) {
-            return std::unexpected(TError(spec.Arg->Location,
-                "GROUPING() inside aggregate arguments is not supported"));
-        }
-    }
-
-    // count(distinct col): dedup with an inner aggregate on (group keys + col),
-    // then count over the deduped rows above - the double aggregation the hand
-    // plans use.
-    if (multiSet && collector.DistinctColumn()) {
-        return std::unexpected(
-            TError("GROUPING SETS with COUNT(DISTINCT) is not supported yet"));
-    }
-
-    if (auto distinctColumn = collector.DistinctColumn()) {
-        if (!computedKeys.empty()) {
-            return std::unexpected(
-                TError("GROUP BY on an expression with COUNT(DISTINCT) is not supported yet"));
-        }
-        // Inner grouping keys: the group keys plus the distinct column, so each distinct
-        // value is one inner group (the dedup the hand plans use).
-        std::vector<std::string> dedupKeys = keys;
-        if (std::find(dedupKeys.begin(), dedupKeys.end(), *distinctColumn) == dedupKeys.end()) {
-            dedupKeys.push_back(*distinctColumn);
-        }
-
-        if (collector.HasNonDistinct()) {
-            // Mixed DISTINCT + non-DISTINCT (single distinct column): one input scan, a
-            // double aggregation with partials. The inner (grouped by group keys + col)
-            // computes the non-distinct aggregates per (group, distinct value); the outer
-            // (grouped by group keys) merges them - sum->sum, count->sum, min/max->min/max -
-            // alongside count(col) for the distinct. No join, no input clone.
-            std::vector<TAggregateSpec> innerSpecs;
-            std::vector<TAggregateSpec> outerSpecs;
-            for (auto& spec : specs) {
-                if (collector.IsDistinctSpec(spec.Name)) {
-                    // col is an inner group key; count(col) in the outer counts distinct
-                    // non-null values.
-                    outerSpecs.push_back(std::move(spec));
-                    continue;
-                }
-                if (spec.Arg && !NAst::TMaybeNode<NAst::TIdentExpr>(spec.Arg)) {
-                    return std::unexpected(TError(
-                        "mixing DISTINCT with a computed aggregate argument is not supported"));
-                }
-                const std::string innerName = "partial_" + spec.Name;
-                const std::string mergeFunc = spec.Func == "count" ? "sum" : spec.Func;
-                innerSpecs.push_back({ .Name = innerName, .Func = spec.Func, .Arg = std::move(spec.Arg) });
-                outerSpecs.push_back({ .Name = spec.Name, .Func = mergeFunc, .Arg = Ident({}, innerName) });
-            }
-            node = std::make_shared<TAggregateOperator>(
-                std::move(node), std::move(dedupKeys), std::move(innerSpecs));
-            // The normal construction below builds the OUTER aggregate over `node`
-            // (the inner result) with these merge specs, grouped by the group keys.
-            specs = std::move(outerSpecs);
-        } else {
-            // Lone count(distinct): dedup, then count over the deduped rows below.
-            node = std::make_shared<TAggregateOperator>(
-                std::move(node), std::move(dedupKeys), std::vector<TAggregateSpec>{});
-        }
-    }
-
-    // A global aggregate (no GROUP BY) still needs a grouping-key descriptor, so
-    // synthesize a constant key column and group by it, as the hand-written plans do.
-    {
-    bool global = keys.empty();
-
-    // The aggregate executor requires column-reference arguments, so materialize
-    // computed arguments (and pass the group keys through) in a project below.
-    // Grouping sets also force it so the input is exactly [keys..., args...], which
-    // the masked-batch driver relies on.
-    bool needsArgProject = global || !computedKeys.empty() || multiSet;
-    for (const auto& spec : specs) {
-        if (spec.Arg && !NAst::TMaybeNode<NAst::TIdentExpr>(spec.Arg)) {
-            needsArgProject = true;
-            break;
-        }
-    }
-    if (needsArgProject) {
-        std::vector<TProjectionSpec> argProjections;
-        std::set<std::string> projected;
-        auto passthrough = [&](const std::string& name) {
-            if (projected.insert(name).second) {
-                argProjections.push_back({ .Name = name, .Expression = Ident({}, name) });
-            }
-        };
-        for (const auto& key : groupKeys) {
-            if (projected.insert(key.Name).second) {
-                argProjections.push_back({ .Name = key.Name, .Expression = key.Expression });
-            }
-        }
-        int counter = 0;
-        for (auto& spec : specs) {
-            if (!spec.Arg) {
-                continue;
-            }
-            if (auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(spec.Arg)) {
-                passthrough(ident.Cast()->Name);
-            } else {
-                std::string name = "arg_" + std::to_string(counter++);
-                argProjections.push_back({ .Name = name, .Expression = spec.Arg });
-                spec.Arg = Ident(spec.Arg->Location, name);
-            }
-        }
-        if (global) {
-            argProjections.push_back({
-                .Name = "__group__",
-                .Expression = std::make_shared<NAst::TNumberExpr>(TLocation{}, static_cast<int64_t>(1)),
-            });
-            keys.push_back("__group__");
-        }
-        node = std::make_shared<TProjectOperator>(std::move(node), std::move(argProjections));
-    }
-
-    auto aggregate = std::make_shared<TAggregateOperator>(
-        std::move(node), std::move(keys), std::move(specs));
-    if (multiSet) {
-        aggregate->MutableGroupingSets() = std::move(groupingSets);
-        auto inputSchema = aggregate->Input()->OutputColumns();
-        aggregate->Type = std::make_shared<NAst::TFunctionType>(
-            std::vector<NAst::TTypePtr>{inputSchema},
-            ComputeAggregateOutputType(inputSchema, aggregate->GroupKeys(), aggregate->Aggs(),
-                !aggregate->GroupingSets().empty()));
-    }
-    node = aggregate;
-    }
-    if (having) {
-        auto rewritten = ExtractScalarSubqueries(having, node, sources, scalarCounter);
-        if (!rewritten) {
-            return std::unexpected(rewritten.error());
-        }
+        scope->Having = *rewritten;
         node = std::make_shared<TFilterOperator>(std::move(node), std::move(*rewritten));
-    }
-    {
-        auto windowed = applyWindows(std::move(node));
-        if (!windowed) {
-            return std::unexpected(windowed.error());
-        }
-        node = std::move(*windowed);
     }
     if (auto ok = extractProjectionSubqueries(projections, node); !ok) {
         return std::unexpected(ok.error());
     }
-    TOperatorPtr projected =
-        std::make_shared<TProjectOperator>(std::move(node), std::move(projections));
-    return distinct ? ApplyDistinct(std::move(projected), outputNames) : projected;
-}
-
-
-bool HasOutputColumn(const TOperatorPtr& op, const std::string& name) {
-    auto&& output = op->OutputColumns();
-    if (!output) {
-        return false;
+    for (size_t i = 0; i < projections.size(); ++i) {
+        scope->Items[i].Expression = projections[i].Expression;
     }
-    for (const auto& [fieldName, _] : output->Fields) {
-        if (fieldName == name) {
-            return true;
-        }
+    auto project = std::make_shared<TProjectOperator>(std::move(node), std::move(projections));
+    project->SetSelectBinding(std::move(scope));
+    if (select.Quantifier == NSql::ESetQuantifier::Distinct) {
+        return ApplyDistinct(project, {});
     }
-    return false;
+    return project;
 }
 
 std::expected<TOperatorPtr, TError> ApplyOrderBy(
-    const NSql::TSqlQuery& query,
-    TOperatorPtr plan)
+    const NSql::TSqlQuery& query, TOperatorPtr plan)
 {
     if (!query.OrderBy || query.OrderBy->Items.empty()) {
         return plan;
     }
-
-    // BuildSelect always tops the plan with a projection. An ORDER BY item is
-    // resolved in order of preference:
-    //   1. a plain output-column identifier -> sort on it directly;
-    //   2. an expression already computed in the select list (matched
-    //      structurally) -> sort on that output column, so aggregates and other
-    //      computed columns are reused rather than re-evaluated;
-    //   3. a pure-scalar expression over the projection's input -> materialized
-    //      as a hidden column, sorted on, then stripped by a final projection so
-    //      the output schema is unchanged.
-    // An aggregate not present in the select list cannot be sorted on (it would
-    // be re-applied as a scalar over already-grouped rows), so it is rejected.
-    auto topProject = TMaybeOp<TProjectOperator>(plan);
-
-    // Index the original (pre-lowering) select-list expressions by structure, so
-    // ORDER BY can match one and reuse its output column. The plan's projection
-    // expressions are unusable here: the aggregate collector has already
-    // rewritten e.g. sum(x) into a reference to a synthetic column.
-    struct TOutputRef {
-        std::string Name;
-        std::optional<size_t> ProjectionIndex;
-    };
-    std::unordered_map<std::string, TOutputRef> outputByExpr;
-    if (auto select = NSql::TMaybeNode<NSql::TSqlSelect>(query.Body);
-        select && select.Cast()->SelectList) {
-        const auto& items = select.Cast()->SelectList->Items;
-        for (size_t i = 0; i < items.size(); ++i) {
-            // A window select item is referenced by its output alias (handled by
-            // the ident branch below); it also cannot be core-printed for a
-            // structural match, so skip it here.
-            if (!items[i]->Star && !HasWindowExpr(items[i]->Expr)) {
-                auto name = ItemName(*items[i], i);
-                std::optional<size_t> projectionIndex;
-                if (!items[i]->Alias && items[i]->ColumnAliases.empty()
-                    && !NAst::TMaybeNode<NAst::TIdentExpr>(items[i]->Expr)
-                    && topProject)
-                {
-                    const auto& projections = topProject.Cast()->Projections();
-                    for (size_t p = 0; p < projections.size(); ++p) {
-                        if (projections[p].ImplicitName && projections[p].Name == name) {
-                            projectionIndex = p;
-                            break;
-                        }
-                    }
-                }
-                outputByExpr.emplace(
-                    NAst::NCore::PrintAst(items[i]->Expr),
-                    TOutputRef{std::move(name), projectionIndex});
-            }
-        }
-    }
-
-    std::vector<TSortKey> keys;
-    keys.reserve(query.OrderBy->Items.size());
-    std::vector<TProjectionSpec> hidden;
-    int sortCounter = 0;
-
+    auto sort = std::make_shared<TSortOperator>(std::move(plan), std::vector<TSortKey>{});
     for (const auto& item : query.OrderBy->Items) {
-        std::string column;
-        std::optional<size_t> projectionIndex;
-        auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(item->Expr);
-        if (ident && HasOutputColumn(plan, ident.Cast()->Name)) {
-            column = ident.Cast()->Name;
-        } else if (HasWindowExprLocal(item->Expr)) {
-            return std::unexpected(TError(item->Expr->Location,
-                "ORDER BY on a window expression must reference its select alias"));
-        } else if (auto it = outputByExpr.find(NAst::NCore::PrintAst(item->Expr));
-                   it != outputByExpr.end()) {
-            column = it->second.Name;
-            projectionIndex = it->second.ProjectionIndex;
-        } else {
-            if (!topProject) {
-                return std::unexpected(TError(item->Expr->Location,
-                    "ORDER BY on an expression is not supported here"));
-            }
-            if (HasGroupingCall(item->Expr)) {
-                return std::unexpected(TError(item->Expr->Location,
-                    "ORDER BY GROUPING() expression must appear in the select list"));
-            }
-            // Reuse the aggregate collector purely to detect aggregate calls:
-            // a non-empty result means the expression aggregates but is not in
-            // the select list, which cannot be materialized in a scalar project.
-            TAggCollector probe;
-            auto scalar = probe.Rewrite(item->Expr);
-            if (!scalar) {
-                return std::unexpected(scalar.error());
-            }
-            if (!probe.Empty()) {
-                return std::unexpected(TError(item->Expr->Location,
-                    "ORDER BY on an aggregate not in the select list is not supported"));
-            }
-            column = "__sort_" + std::to_string(sortCounter++);
-            hidden.push_back({ .Name = column, .Expression = item->Expr });
-        }
-
-        keys.push_back({
-            .Column = column,
+        sort->MutableUnresolvedKeys().push_back({.Expression = item->Expr,
             .Direction = item->Desc ? ESortDirection::Desc : ESortDirection::Asc,
-            .Nulls = ConvertSortNulls(item->NullOrder),
-            .ProjectionIndex = projectionIndex,
-        });
+            .Nulls = ConvertSortNulls(item->NullOrder)});
     }
-
-    if (hidden.empty()) {
-        return std::make_shared<TSortOperator>(std::move(plan), std::move(keys));
-    }
-
-    // Pass-through projection over the original outputs, captured before the
-    // hidden columns are appended; it becomes the strip projection above the sort.
-    std::vector<TProjectionSpec> outputProjections;
-    outputProjections.reserve(topProject.Cast()->Projections().size());
-    for (const auto& p : topProject.Cast()->Projections()) {
-        outputProjections.push_back({ .Name = p.Name, .Expression = Ident({}, p.Name) });
-    }
-
-    auto& projections = topProject.Cast()->MutableProjections();
-    for (auto& h : hidden) {
-        projections.push_back(std::move(h));
-    }
-
-    TOperatorPtr sorted = std::make_shared<TSortOperator>(std::move(plan), std::move(keys));
-    return std::make_shared<TProjectOperator>(std::move(sorted), std::move(outputProjections));
+    return sort;
 }
 
 std::expected<int64_t, TError> ConstNonNegativeI64(
@@ -1795,11 +1374,7 @@ std::expected<TOperatorPtr, TError> BuildSetOp(
             return unionAll;
         }
 
-        auto outputNames = OutputColumnNames(unionAll, "UNION");
-        if (!outputNames) {
-            return std::unexpected(outputNames.error());
-        }
-        return ApplyDistinct(std::move(unionAll), *outputNames);
+        return ApplyDistinct(std::move(unionAll), {});
     }
 
     if (setOp.Op == NSql::TSqlSetOp::EOp::Intersect
@@ -1820,40 +1395,13 @@ std::expected<TOperatorPtr, TError> BuildSetOp(
             return std::unexpected(right.error());
         }
 
-        auto leftNames = OutputColumnNames(*left, opName + " left branch");
-        if (!leftNames) {
-            return std::unexpected(leftNames.error());
-        }
-        auto rightNames = OutputColumnNames(*right, opName + " right branch");
-        if (!rightNames) {
-            return std::unexpected(rightNames.error());
-        }
-        if (leftNames->size() != rightNames->size()) {
-            return std::unexpected(TError(
-                opName + " branches must have the same number of columns"));
-        }
-
-        auto leftDistinct = ApplyDistinct(std::move(*left), *leftNames);
-        auto rightDistinct = ApplyDistinct(std::move(*right), *rightNames);
-
-        std::vector<std::pair<std::string, std::string>> keys;
-        keys.reserve(leftNames->size());
-        for (size_t i = 0; i < leftNames->size(); ++i) {
-            keys.emplace_back((*leftNames)[i], (*rightNames)[i]);
-        }
-
-        auto join = MakeJoin(
-            std::move(leftDistinct), std::move(rightDistinct),
-            std::move(keys),
-            isIntersect ? EJoinType::LeftSemi : EJoinType::LeftAnti);
-        if (!join) {
-            return std::unexpected(join.error());
-        }
-        // Set membership uses IS NOT DISTINCT FROM semantics, including NULLs.
-        for (auto& key : TMaybeOp<TJoinOperator>(*join).Cast()->MutableKeys()) {
-            key.NullsEqual = true;
-        }
-        return *join;
+        auto leftDistinct = ApplyDistinct(std::move(*left), {});
+        auto rightDistinct = ApplyDistinct(std::move(*right), {});
+        auto join = std::make_shared<TJoinOperator>(
+            std::move(leftDistinct), std::move(rightDistinct), std::vector<TJoinKey>{},
+            isIntersect ? EJoinType::LeftSemi : EJoinType::LeftAnti, nullptr);
+        join->MutableBinding() = TSetOperationBinding{};
+        return join;
     }
 
     return std::unexpected(TError("unsupported set operation"));

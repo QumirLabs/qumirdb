@@ -1,7 +1,7 @@
 project (excess discount amount)
 └─ limit
    └─ aggregate keys=[__group__] aggs=[sum_0=sum] (rows≈1 cost≈17.8K)
-      └─ project (cs_ext_discount_amt, __group__) (rows≈1 cost≈17.8K)
+      └─ project (catalog_sales_0.cs_ext_discount_amt, __group__) (rows≈1 cost≈17.8K)
          └─ filter (> |catalog_sales_0.cs_ext_discount_amt| __scalar_0__) (rows≈1 cost≈17.8K)
             └─ join left [item.i_item_sk = __corr_0_0__] emit-filter 1 from left (rows≈1 cost≈17.7K)
                ├─ join inner [date_dim_0.d_date_sk = catalog_sales_0.cs_sold_date_sk] (rows≈1 cost≈8.8K)

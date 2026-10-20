@@ -13,6 +13,7 @@
 #include <qdb/plan/passes/typing.h>
 #include <qdb/plan/pipeline.h>
 #include <qdb/sql/parser.h>
+#include <qdb/plan/passes/sql_binding.h>
 
 #include <qumir/parser/core/printer.h>
 
@@ -45,6 +46,7 @@ TOperatorPtr BuildSqlPlan(std::string_view sql, const std::map<std::string, ISou
     };
     auto plan = BuildPlan(parsed.value(), factory);
     EXPECT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
+    ResolveSqlBindings(*plan);
     return plan.value();
 }
 

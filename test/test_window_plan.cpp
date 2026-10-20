@@ -7,6 +7,7 @@
 #include <qdb/plan/ops/window.h>
 #include <qdb/plan/pipeline.h>
 #include <qdb/sql/parser.h>
+#include <qdb/plan/passes/sql_binding.h>
 
 #include <qumir/parser/ast.h>
 
@@ -40,7 +41,11 @@ std::expected<TOperatorPtr, NQumir::TError> BuildSqlPlan(
         }
         return std::make_shared<TSourceOperator>(*it->second, std::string(table));
     };
-    return BuildPlan(parsed.value(), factory);
+    auto plan = BuildPlan(parsed.value(), factory);
+    if (plan) {
+        ResolveSqlBindings(*plan);
+    }
+    return plan;
 }
 
 const TWindowOperator* FindWindow(const TOperatorPtr& op) {
@@ -121,9 +126,9 @@ TEST(WindowPlan, SingleSpecStructure) {
     auto* window = FindWindow(*plan);
     ASSERT_NE(window, nullptr);
     ASSERT_EQ(window->PartitionKeys().size(), 1u);
-    EXPECT_EQ(window->PartitionKeys()[0], "a");
+    EXPECT_EQ(window->PartitionKeys()[0], "t.a");
     ASSERT_EQ(window->OrderKeys().size(), 1u);
-    EXPECT_EQ(window->OrderKeys()[0].Column, "b");
+    EXPECT_EQ(window->OrderKeys()[0].Column, "t.b");
     EXPECT_EQ(window->OrderKeys()[0].Direction, ESortDirection::Desc);
     ASSERT_EQ(window->Functions().size(), 1u);
     EXPECT_EQ(window->Functions()[0].Func, "rank");

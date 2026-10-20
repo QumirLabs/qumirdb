@@ -1,7 +1,7 @@
 top-sort [qoh asc, i_product_name asc, i_brand asc, i_class asc, i_category asc] limit 100
 └─ project (i_product_name, i_brand, i_class, i_category, qoh) (rows≈9 cost≈11.1K)
-   └─ aggregate keys=[i_product_name, i_brand, i_class, i_category] aggs=[sum_0=sum, count_1=count] (rows≈9 cost≈10.4K)
-      └─ project (i_product_name, i_brand, i_class, i_category, inv_quantity_on_hand) (rows≈2 cost≈9.6K)
+   └─ aggregate keys=[item.i_product_name, item.i_brand, item.i_class, item.i_category] aggs=[sum_0=sum, count_1=count] (rows≈9 cost≈10.4K)
+      └─ project (item.i_product_name, item.i_brand, item.i_class, item.i_category, inventory.inv_quantity_on_hand) (rows≈2 cost≈9.6K)
          └─ join inner [item.i_item_sk = inventory.inv_item_sk] emit-filter 1 from right (rows≈2 cost≈9.5K)
             ├─ source item AS item use-filter 1 keys=[item.i_item_sk] (rows≈10 cost≈680)
             └─ join inner [date_dim.d_date_sk = inventory.inv_date_sk] (rows≈2 cost≈4.5K)

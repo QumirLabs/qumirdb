@@ -79,6 +79,8 @@ struct TSqlSelectItem : TSqlNode {
 
     // For "*" and "<qualified_name>.*". When Star is set, Expr and aliases are
     // unused; StarPrefix holds the optional qualifier (empty for a bare "*").
+    // Internal correlation outputs do not belong to the SQL-visible SELECT list.
+    bool Hidden = false;
     bool Star = false;
     std::vector<std::string> StarPrefix;
 };

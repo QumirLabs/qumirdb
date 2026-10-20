@@ -11,6 +11,7 @@
 #include <qdb/plan/pipeline.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/sql/parser.h>
+#include <qdb/plan/passes/sql_binding.h>
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
 
@@ -105,6 +106,7 @@ TOperatorPtr PlanSql(
     if (optimize) {
         ApplyPlanPasses(root);
     } else {
+        ResolveSqlBindings(root);
         AssignSourceAliases(root);
         QualifyColumns(root);
         AnnotateTypes(root);

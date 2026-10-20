@@ -18,7 +18,7 @@ size_t FlattenedProjectionArity(const TProjectionSpec& projection) {
     if (!projection.Expression || IsNullableType(projection.Expression->Type)) {
         return 1;
     }
-    if (auto structure = TMaybeType<TStructType>(projection.Expression->Type))
+    if (auto structure = TMaybeType<TStructType>(UnwrapNamedType(projection.Expression->Type)))
     {
         return structure.Cast()->Fields.size();
     }
@@ -33,6 +33,14 @@ TProjectOperator::TProjectOperator(TOperatorPtr input, std::vector<TProjectionSp
     std::vector<std::pair<std::string, NQumir::NAst::TTypePtr>> outFields;
     if (inputStruct) {
         for (const auto& proj : Projections_) {
+            if (proj.StarPrefix) {
+                for (const auto& field : inputStruct->Fields) {
+                    if (proj.StarPrefix->empty() || field.first.starts_with(*proj.StarPrefix)) {
+                        outFields.push_back(field);
+                    }
+                }
+                continue;
+            }
             NQumir::NAst::TTypePtr fieldType;
             if (auto ident = NQumir::NAst::TMaybeNode<NQumir::NAst::TIdentExpr>(proj.Expression)) {
                 for (const auto& [name, type] : inputStruct->Fields) {

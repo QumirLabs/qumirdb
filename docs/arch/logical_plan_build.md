@@ -1,22 +1,26 @@
 # Logical plan build
 
-SQL AST → an unqualified, untyped logical operator tree. The builder is
-deliberately naive: it never extracts join keys, pushes predicates, or reorders
-joins — those are optimizer passes that run afterwards (see
+Plan construction translates SQL into a logical operator tree. A separate
+binding pass resolves source columns, SELECT output names, and clause references
+against typed inputs before the optimizer runs. Join-key extraction, predicate
+placement, and join reordering remain optimizer decisions (see
 [join_reorder.md](join_reorder.md), [predicate_pushdown.md](predicate_pushdown.md),
 [decorrelation.md](decorrelation.md)).
 
 ## Pipeline position
 
 ```
-parse → BuildPlan → source aliases / column qualification / typing
+parse → logical plan construction → SQL binding
       → predicate pushdown → estimates → join ordering → equi-key extraction
       → semi/limit/top-sort rewrites → pruning → CTE optimization
       → physical lowering
 ```
 
-`BuildPlan` produces everything left of `AssignSourceAliases`. Column names are
-the raw SQL identifiers (bare or `alias.col`); no types are attached.
+Construction keeps unresolved SQL expressions on ordinary logical operators and
+does not infer expression types. Binding visits inputs before their consumers
+and applies the common qualification and type rules, so each query scope binds
+against the typed outputs of its inputs. The resulting plan uses column names
+throughout; optimizer rewrites recheck types when they change its structure.
 
 ## Operators produced
 
@@ -126,7 +130,7 @@ grouped empty input is not accidentally changed into a global aggregate. The
 removed expressions stay in SELECT/HAVING and are evaluated from the retained
 key once per output group.
 
-This rewrite intentionally runs inside `BuildSelect`, after GROUP BY aliases
+This rewrite runs during SQL binding, after GROUP BY aliases
 are resolved and before computed keys become materialized `gb_n` columns. A
 later plan pass would otherwise see only the synthetic column reference and
 would have to reconstruct its dependency through the lower project. In the
@@ -136,6 +140,25 @@ rewrite.
 
 `GROUPING SETS`, `ROLLUP`, and `CUBE` are excluded because their key subsets and
 `GROUPING()` bit positions are observable.
+
+### SQL binding and output labels
+
+The binding pass resolves grouping expressions and aggregate calls against the
+input schema, then types the SELECT output before binding DISTINCT and
+statement-level ORDER BY. Stars expand over the original FROM relation; helper
+columns added for subqueries do not become visible outputs. An ORDER BY
+expression that is already selected refers to that output, even when
+aggregation has changed how the expression is computed.
+
+Each SQL reference is bound once. Name lookup sees the labels of the input,
+qualified or bare, never physical names; star columns and other resolved
+references keep their identity. Projection output names are fixed once their
+layout is known, so pruning cannot renumber references during later typing.
+Repeated labels receive internal names unique across the plan, so sibling
+scopes can meet in joins and set operations, and a projection restores the
+public labels. Derived-table and CTE alias lists rename these typed outputs
+before the enclosing query binds its own expressions. After binding, optimizer
+passes and kernels see only ordinary column references.
 
 ### Affine integer aggregates
 

@@ -13,6 +13,7 @@
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/union.h>
 #include <qdb/plan/ops/window.h>
+#include <qdb/plan/passes/sql_binding.h>
 
 #include <stdexcept>
 
@@ -160,6 +161,9 @@ TOperatorPtr Reconstruct(const TOperatorPtr& op) {
 } // namespace
 
 TOperatorPtr CloneOperator(const TOperatorPtr& op) {
+    if (HasUnresolvedSqlBindings(op)) {
+        throw std::runtime_error("resolve SQL bindings before serializing or cloning the plan");
+    }
     auto clone = StructuralClone(op);
     CloneOperatorExprs(clone);
     return clone;

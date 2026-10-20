@@ -16,6 +16,10 @@ void AnnotateTypes(
     const TOperatorPtr& root,
     const NKernel::TAnnotationContext& context = {});
 
+// Applies the same type rules to one node whose inputs are already typed.
+void AnnotateOperatorType(
+    const TOperatorPtr& root, const NKernel::TAnnotationContext& context = {});
+
 // Inserts cast projections on UNION ALL branches so every branch produces the unified
 // column layout. Run after AnnotateTypes (needs the union's unified output type), then
 // re-annotate.

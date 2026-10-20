@@ -2,8 +2,6 @@
 
 #include <qdb/plan/ops/operator.h>
 
-#include <cstddef>
-#include <optional>
 #include <string>
 #include <vector>
 
@@ -20,13 +18,16 @@ enum class ESortNulls {
     Last,
 };
 
+struct TUnresolvedSortKey {
+    NQumir::NAst::TExprPtr Expression;
+    ESortDirection Direction = ESortDirection::Asc;
+    ESortNulls Nulls = ESortNulls::Default;
+};
+
 struct TSortKey {
     std::string Column;
     ESortDirection Direction = ESortDirection::Asc;
     ESortNulls Nulls = ESortNulls::Default;
-    // Set while ORDER BY structurally references an unnamed SELECT expression.
-    // Type annotation resolves it to the expression's first flattened output.
-    std::optional<size_t> ProjectionIndex;
 };
 
 class TSortOperator : public IOperator {
@@ -44,6 +45,8 @@ public:
     TOperatorPtr& MutableInput() { return Input_; }
     const std::vector<TSortKey>& Keys() const { return Keys_; }
     std::vector<TSortKey>& MutableKeys() { return Keys_; }
+    const std::vector<TUnresolvedSortKey>& UnresolvedKeys() const { return UnresolvedKeys_; }
+    std::vector<TUnresolvedSortKey>& MutableUnresolvedKeys() { return UnresolvedKeys_; }
 
     std::span<const TOperatorPtr> Inputs() const override {
         return std::span<const TOperatorPtr>(&Input_, 1);
@@ -56,6 +59,7 @@ public:
 private:
     TOperatorPtr Input_;
     std::vector<TSortKey> Keys_;
+    std::vector<TUnresolvedSortKey> UnresolvedKeys_;
 };
 
 class TTopSortOperator : public IOperator {

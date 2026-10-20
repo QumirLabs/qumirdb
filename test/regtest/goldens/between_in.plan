@@ -1,1 +1,3 @@
-(rel project (rel filter (rel source "t") (&& (&& (<= 1 a) (<= a 10)) (call qdb_in_list b 1 2 3))) (a a))
+(rel project
+  (rel filter (rel source "t" "t") (&& (&& (<= 1 |t.a|) (<= |t.a| 10)) (call qdb_in_list |t.b| 1 2 3)))
+  (a |t.a|))

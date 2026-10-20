@@ -17,6 +17,7 @@
 #include <qdb/plan/types/nullable.h>
 #include <qdb/scheduler/instrumentation/task.h>
 #include <qdb/sql/parser.h>
+#include <qdb/plan/passes/sql_binding.h>
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
 
@@ -57,6 +58,7 @@ TOperatorPtr SqlPlan(const std::string& sql, ISource& source) {
     if (!plan) {
         throw plan.error();
     }
+    ResolveSqlBindings(*plan);
     AnnotateTypes(*plan);
     ApplyColumnPruning(*plan);
     return *plan;

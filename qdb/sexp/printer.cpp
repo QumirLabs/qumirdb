@@ -13,6 +13,7 @@
 #include <qdb/plan/ops/window.h>
 #include <qdb/plan/ops/cte_ref.h>
 #include <qdb/plan/ops/cte_consumer.h>
+#include <qdb/plan/passes/sql_binding.h>
 
 #include <stdexcept>
 
@@ -83,6 +84,14 @@ void PrintRelBody(NQumir::NAst::TExpr& expr, TPrinter& printer, TPrintFrame fram
             printer.PrintIdentifier(spec.Name);
             printer.Space();
             printer.PrintExpr(spec.Expression, frame.AllowTypeWrap, frame.Level + 2);
+            if (!spec.ColumnAliases.empty()) {
+                out << " (column-aliases";
+                for (const auto& alias : spec.ColumnAliases) {
+                    printer.Space();
+                    printer.PrintIdentifier(alias);
+                }
+                out << ')';
+            }
             out << ')';
         }
         out << ')';
@@ -354,6 +363,9 @@ TPrintExprFactory MakeRelPrinters() {
 }
 
 void PrintRelPlan(std::ostream& out, const TOperatorPtr& plan) {
+    if (HasUnresolvedSqlBindings(plan)) {
+        throw std::runtime_error("resolve SQL bindings before serializing or cloning the plan");
+    }
     if (!CollectMaterializations(plan).empty()) {
         throw std::runtime_error(
             "PrintRelPlan: materialized CTE plans are not serializable yet");

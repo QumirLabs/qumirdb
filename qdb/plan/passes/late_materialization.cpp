@@ -297,7 +297,12 @@ TOperatorPtr ApplyLateMaterialization(
             return root;
         }
         for (size_t i = 0; i < output->Fields.size(); ++i) {
-            projectionByOutput.emplace(output->Fields[i].first, i);
+            // Relational plans may bypass SQL binding. Their ordering projection
+            // still needs unique names before this rewrite can reconstruct it.
+            if (!projectionByOutput.emplace(output->Fields[i].first, i).second) {
+                SetReason(diagnostics, "ordering projection has repeated output labels");
+                return root;
+            }
         }
         std::unordered_set<size_t> added;
         for (const auto& key : sortKeys) {

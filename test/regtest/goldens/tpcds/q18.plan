@@ -1,7 +1,7 @@
 top-sort [ca_country asc, ca_state asc, ca_county asc, i_item_id asc] limit 100
 └─ project (i_item_id, ca_country, ca_state, ca_county, agg1, agg2, agg3, agg4, agg5, agg6, agg7) (rows≈13 cost≈35.8K)
-   └─ aggregate keys=[i_item_id, ca_country, ca_state, ca_county] aggs=[sum_0=sum, count_1=count, sum_2=sum, count_3=count, sum_4=sum, count_5=count, sum_6=sum, count_7=count, sum_8=sum, count_9=count, sum_10=sum, count_11=count, sum_12=sum, count_13=count] (rows≈13 cost≈34.3K)
-      └─ project (i_item_id, ca_country, ca_state, ca_county, arg_0, arg_1, arg_2, arg_3, arg_4, arg_5, arg_6, arg_7, arg_8, arg_9, arg_10, arg_11, arg_12, arg_13) (rows≈3 cost≈31.6K)
+   └─ aggregate keys=[item.i_item_id, customer_address.ca_country, customer_address.ca_state, customer_address.ca_county] aggs=[sum_0=sum, count_1=count, sum_2=sum, count_3=count, sum_4=sum, count_5=count, sum_6=sum, count_7=count, sum_8=sum, count_9=count, sum_10=sum, count_11=count, sum_12=sum, count_13=count] (rows≈13 cost≈34.3K)
+      └─ project (item.i_item_id, customer_address.ca_country, customer_address.ca_state, customer_address.ca_county, arg_0, arg_1, arg_2, arg_3, arg_4, arg_5, arg_6, arg_7, arg_8, arg_9, arg_10, arg_11, arg_12, arg_13) (rows≈3 cost≈31.6K)
          └─ join inner [item.i_item_sk = catalog_sales.cs_item_sk] (rows≈3 cost≈31K)
             ├─ source item AS item (rows≈10 cost≈200)
             └─ join inner [customer.c_current_addr_sk = customer_address.ca_address_sk] (rows≈3 cost≈26.1K)

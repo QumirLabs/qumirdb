@@ -1,16 +1,20 @@
 #pragma once
 
+#include <qdb/kernel/annotate_type.h>
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/operator.h>
 #include <qdb/plan/ops/sort.h>
 #include <qdb/plan/ops/window.h>
+#include <qdb/plan/sql_bindings.h>
 #include <qdb/sql/ast.h>
 
 #include <qumir/error.h>
 #include <qumir/parser/ast.h>
 
 #include <cstddef>
+#include <cstdint>
 #include <expected>
+#include <functional>
 #include <optional>
 #include <set>
 #include <string>
@@ -26,8 +30,15 @@ NQumir::NAst::TExprPtr Ident(NQumir::TLocation loc, std::string name);
 NQumir::NAst::TExprPtr Call(
     NQumir::TLocation loc, std::string name, std::vector<NQumir::NAst::TExprPtr> args);
 std::string ToLower(std::string s);
+NQumir::NAst::TExprPtr I64Literal(NQumir::TLocation loc, int64_t value);
 
 ESortNulls ConvertSortNulls(NSql::TSqlOrderItem::ENullOrder nulls);
+
+// Aggregate calls outside subqueries, including those inside window arguments.
+bool HasAggregateCall(const NQumir::NAst::TExprPtr& expression);
+
+// SQL-only window and subquery nodes, which the core expression tools do not see into.
+bool HasOpaqueExpression(const NQumir::NAst::TExprPtr& expression);
 
 struct TAggCall;
 
@@ -53,20 +64,25 @@ struct TPlainAggKeyHash {
 class TAggCollector {
 public:
     explicit TAggCollector(
-        const NQumir::NAst::TStructType* inputSchema = nullptr,
-        bool enableAffineRewrite = true)
+        const NQumir::NAst::TStructType* inputSchema,
+        bool enableAffineRewrite,
+        const NKernel::TAnnotationContext& context)
         : InputSchema_(inputSchema)
         , EnableAffineRewrite_(enableAffineRewrite)
+        , Context_(context)
     { }
 
     std::expected<NQumir::NAst::TExprPtr, NQumir::TError> Rewrite(NQumir::NAst::TExprPtr expr);
 
-    std::vector<TAggregateSpec> TakeSpecs() {
-        return std::move(Specs_);
-    }
+    // Collects from bound copies: the SELECT and HAVING expressions themselves
+    // are bound and rewritten later by their consumers.
+    std::expected<void, NQumir::TError> Collect(
+        const NQumir::NAst::TExprPtr& expression,
+        const std::function<void(NQumir::NAst::TExprPtr&)>& bind);
 
-    bool Empty() const {
-        return Specs_.empty();
+    std::vector<TAggregateSpec> TakeSpecs() {
+        Finished_ = true;
+        return std::move(Specs_);
     }
 
     // Set when a count(distinct <col>) was collected: BuildSelect realizes it via
@@ -113,6 +129,9 @@ private:
     // (Func, PrintAst(Arg)) -> slot name, so the same plain aggregate in SELECT
     // and HAVING reuses one slot instead of emitting count_0/count_1.
     std::unordered_map<TPlainAggKey, std::string, TPlainAggKeyHash> PlainSpecNames_;
+    std::unordered_map<std::string, NQumir::NAst::TExprPtr> Expressions_;
+    bool Finished_ = false;
+    const NKernel::TAnnotationContext& Context_;
 };
 
 // Extracts window expressions from projection expressions into a stack of
@@ -133,8 +152,6 @@ class TWindowCollector {
 public:
     std::expected<NQumir::NAst::TExprPtr, NQumir::TError> Rewrite(NQumir::NAst::TExprPtr expr);
 
-    bool Empty() const { return Raw_.empty(); }
-
     std::expected<TOperatorPtr, NQumir::TError> Build(TOperatorPtr input);
 
 private:
@@ -148,11 +165,7 @@ private:
 
 // A plain column keeps its name; an expression is materialized into a synthetic
 // `gb_<n>` column below the aggregate, and references to it are rewritten to that.
-struct TGroupKey {
-    std::string Name;
-    NQumir::NAst::TExprPtr Expression; // Ident(Name) for a plain column
-    bool Computed = false;
-};
+using TGroupKey = TGroupingKeyBinding;
 
 // Drops plain GROUP BY keys determined by another retained key.
 void NarrowPlainGroupKeys(

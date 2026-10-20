@@ -18,6 +18,7 @@
 #include <qdb/plan/types/nullable.h>
 #include <qdb/sexp/parser.h>
 #include <qdb/sql/parser.h>
+#include <qdb/plan/passes/sql_binding.h>
 
 #include <algorithm>
 #include <array>
@@ -88,11 +89,16 @@ std::unique_ptr<TTestRuntime> SqlPlan(
     if (!root) {
         throw std::runtime_error(root.error().ToString());
     }
-    if (optimize) {
-        ApplyPlanPasses(*root);
-    } else {
-        AnnotateTypes(*root);
-        ApplyColumnPruning(*root);
+    try {
+        if (optimize) {
+            ApplyPlanPasses(*root);
+        } else {
+            ResolveSqlBindings(*root);
+            AnnotateTypes(*root);
+            ApplyColumnPruning(*root);
+        }
+    } catch (const NQumir::TError& error) {
+        throw std::runtime_error(error.ToString());
     }
     return RunPlan(*root, settings);
 }

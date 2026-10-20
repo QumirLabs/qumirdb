@@ -54,35 +54,6 @@ TTypePtr UnifyUnionColumn(const TTypePtr& a, const TTypePtr& b) {
         ? std::static_pointer_cast<TType>(std::make_shared<TNullable>(base)) : base;
 }
 
-void ResolveProjectionSortKeys(
-    std::vector<TSortKey>& keys,
-    const TOperatorPtr& input)
-{
-    auto project = TMaybeOp<TProjectOperator>(input);
-    auto&& output = input->OutputColumns();
-    if (!project || !output) {
-        return;
-    }
-    for (auto& key : keys) {
-        if (!key.ProjectionIndex) {
-            continue;
-        }
-        const auto& projections = project.Cast()->Projections();
-        if (*key.ProjectionIndex >= projections.size()) {
-            throw NQumir::TError("ORDER BY projection index is out of range");
-        }
-        size_t outputIndex = 0;
-        for (size_t i = 0; i < *key.ProjectionIndex; ++i) {
-            outputIndex += FlattenedProjectionArity(projections[i]);
-        }
-        if (outputIndex >= output->Fields.size()) {
-            throw NQumir::TError("ORDER BY flattened projection is out of range");
-        }
-        key.Column = output->Fields[outputIndex].first;
-        key.ProjectionIndex.reset();
-    }
-}
-
 } // namespace
 
 void AnnotateTypes(
@@ -94,6 +65,12 @@ void AnnotateTypes(
         AnnotateTypes(input, context);
     }
 
+    AnnotateOperatorType(root, context);
+}
+
+void AnnotateOperatorType(
+    const TOperatorPtr& root, const NKernel::TAnnotationContext& context)
+{
     if (auto maybe = TMaybeOp<TSourceOperator>(root)) {
         auto src = maybe.Cast();
         // If QualifyColumns has already set a qualified schema, keep it.
@@ -128,7 +105,9 @@ void AnnotateTypes(
 
     if (auto maybe = TMaybeOp<TSortOperator>(root)) {
         auto sort = maybe.Cast();
-        ResolveProjectionSortKeys(sort->MutableKeys(), sort->Input());
+        if (!sort->UnresolvedKeys().empty()) {
+            throw NQumir::TError("resolve SQL bindings before full plan typing");
+        }
         auto schema = sort->Input()->OutputColumns();
         root->Type = std::make_shared<TFunctionType>(
             std::vector<TTypePtr>{schema},
@@ -138,7 +117,6 @@ void AnnotateTypes(
 
     if (auto maybe = TMaybeOp<TTopSortOperator>(root)) {
         auto sort = maybe.Cast();
-        ResolveProjectionSortKeys(sort->MutableKeys(), sort->Input());
         auto schema = sort->Input()->OutputColumns();
         root->Type = std::make_shared<TFunctionType>(
             std::vector<TTypePtr>{schema},
@@ -169,6 +147,9 @@ void AnnotateTypes(
 
     if (auto maybe = TMaybeOp<TProjectOperator>(root)) {
         auto proj = maybe.Cast();
+        if (proj->SelectBinding() || proj->OutputAliases()) {
+            throw NQumir::TError("resolve SQL bindings before full plan typing");
+        }
         auto&& inputStruct = proj->Input()->OutputColumns();
         std::vector<std::pair<std::string, TTypePtr>> outFields;
         if (inputStruct) {
@@ -189,10 +170,6 @@ void AnnotateTypes(
                     throw NQumir::TError(spec.Expression->Location,
                         "nullable struct-return projections are not supported");
                 }
-                if (structType && spec.RejectUnaliasedStructForDistinct) {
-                    throw NQumir::TError(spec.Expression->Location,
-                        "SELECT DISTINCT over a struct-return projection requires AS (...)");
-                }
                 auto nextColName = [&] {
                     return "col" + std::to_string(outFields.size());
                 };
@@ -204,6 +181,7 @@ void AnnotateTypes(
                     if (spec.ImplicitName) {
                         spec.Name = nextColName();
                     }
+                    spec.ImplicitName = false;
                     outFields.emplace_back(spec.Name, fieldType);
                     continue;
                 }
@@ -225,11 +203,18 @@ void AnnotateTypes(
                         + " column aliases were specified");
                 }
                 spec.Name = aliases.empty() ? nextColName() : aliases.front();
+                const auto offset = outFields.size();
                 for (size_t i = 0; i < structure->Fields.size(); ++i) {
                     outFields.emplace_back(
                         aliases.empty() ? nextColName() : aliases[i],
                         structure->Fields[i].second);
                 }
+                if (spec.ColumnAliases.empty()) {
+                    for (size_t i = offset; i < outFields.size(); ++i) {
+                        spec.ColumnAliases.push_back(outFields[i].first);
+                    }
+                }
+                spec.ImplicitName = false;
             }
         }
         root->Type = std::make_shared<TFunctionType>(
@@ -240,6 +225,9 @@ void AnnotateTypes(
 
     if (auto maybe = TMaybeOp<TAggregateOperator>(root)) {
         auto agg = maybe.Cast();
+        if (agg->Binding() || agg->GroupsAllColumns()) {
+            throw NQumir::TError("resolve SQL bindings before full plan typing");
+        }
         auto inputSchema = agg->Input()->OutputColumns();
         root->Type = std::make_shared<TFunctionType>(
             std::vector<TTypePtr>{inputSchema},
@@ -259,6 +247,9 @@ void AnnotateTypes(
 
     if (auto maybe = TMaybeOp<TJoinOperator>(root)) {
         auto join = maybe.Cast();
+        if (join->Binding()) {
+            throw NQumir::TError("resolve SQL bindings before full plan typing");
+        }
         auto leftSchema = join->Left()->OutputColumns();
         auto rightSchema = join->Right()->OutputColumns();
         auto output = ComputeJoinOutputType(leftSchema, rightSchema, join->JoinType());

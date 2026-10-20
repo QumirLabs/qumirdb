@@ -1,1 +1,1 @@
-(rel project (rel filter (rel source "t") (&& (! (call qdb_is_null a)) (call qdb_is_null b))) (a a))
+(rel project (rel filter (rel source "t" "t") (&& (! (call qdb_is_null |t.a|)) (call qdb_is_null |t.b|))) (a |t.a|))

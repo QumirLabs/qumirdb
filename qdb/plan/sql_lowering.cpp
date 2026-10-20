@@ -21,6 +21,7 @@ namespace {
 
 namespace NAst = NQumir::NAst;
 namespace NSql = NQdb::NSql;
+using namespace NAst::NLiterals;
 using NQumir::TError;
 using NQumir::TLocation;
 
@@ -195,6 +196,9 @@ NSql::TSqlPtr<NSql::TWindowExpr> CloneSqlWindowExpr(
     return copy;
 }
 
+// TODO(#129): Move the affine coefficient arithmetic below to the common VM pipeline
+// (ConstFold / TVmFunction::Eval). Each evaluation there compiles a VM function
+// (~4 ms), and planning-time compilation is not optimized yet.
 struct TAffineForm {
     NAst::TExprPtr Base;
     int64_t Scale = 1;
@@ -202,11 +206,15 @@ struct TAffineForm {
 };
 
 std::optional<int64_t> IntegerLiteral(const NAst::TExprPtr& expr) {
-    auto number = NAst::TMaybeNode<NAst::TNumberExpr>(expr);
-    if (!number || number.Cast()->IsFloat()) {
+    auto maybeNumber = NAst::TMaybeNode<NAst::TNumberExpr>(expr);
+    if (!maybeNumber) {
         return std::nullopt;
     }
-    return number.Cast()->IntValue;
+    const auto number = maybeNumber.Cast();
+    if (number->IsFloat()) {
+        return std::nullopt;
+    }
+    return number->IntValue;
 }
 
 std::optional<int64_t> AddExact(int64_t left, int64_t right) {
@@ -238,32 +246,31 @@ std::optional<TAffineForm> ExtractAffine(const NAst::TExprPtr& expr) {
     if (NAst::TMaybeNode<NAst::TIdentExpr>(expr)) {
         return TAffineForm{.Base = expr};
     }
-    auto binary = NAst::TMaybeNode<NAst::TBinaryExpr>(expr);
-    if (!binary) {
+    auto maybeBinary = NAst::TMaybeNode<NAst::TBinaryExpr>(expr);
+    if (!maybeBinary) {
         return std::nullopt;
     }
+    const auto binary = maybeBinary.Cast();
 
-    const auto leftConstant = IntegerLiteral(binary.Cast()->Left);
-    const auto rightConstant = IntegerLiteral(binary.Cast()->Right);
+    const auto leftConstant = IntegerLiteral(binary->Left);
+    const auto rightConstant = IntegerLiteral(binary->Right);
     if (leftConstant.has_value() == rightConstant.has_value()) {
         return std::nullopt;
     }
     const bool constantOnLeft = leftConstant.has_value();
     const int64_t constant = constantOnLeft ? *leftConstant : *rightConstant;
-    auto affine = ExtractAffine(constantOnLeft
-        ? binary.Cast()->Right
-        : binary.Cast()->Left);
+    auto affine = ExtractAffine(constantOnLeft ? binary->Right : binary->Left);
     if (!affine) {
         return std::nullopt;
     }
 
-    if (binary.Cast()->Operator == "+") {
+    if (binary->Operator == "+"_op) {
         auto offset = AddExact(affine->Offset, constant);
         if (!offset) return std::nullopt;
         affine->Offset = *offset;
         return affine;
     }
-    if (binary.Cast()->Operator == "-") {
+    if (binary->Operator == "-"_op) {
         auto scale = constantOnLeft
             ? SubExact(0, affine->Scale)
             : std::optional<int64_t>(affine->Scale);
@@ -275,7 +282,7 @@ std::optional<TAffineForm> ExtractAffine(const NAst::TExprPtr& expr) {
         affine->Offset = *offset;
         return affine;
     }
-    if (binary.Cast()->Operator == "*") {
+    if (binary->Operator == "*"_op) {
         auto scale = MulExact(affine->Scale, constant);
         auto offset = MulExact(affine->Offset, constant);
         if (!scale || !offset) return std::nullopt;
@@ -342,24 +349,20 @@ std::optional<std::string> AffineGroupKeyBase(const NAst::TExprPtr& expr) {
     if (auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(expr)) {
         return ident.Cast()->Name;
     }
-    auto binary = NAst::TMaybeNode<NAst::TBinaryExpr>(expr);
-    if (!binary || (binary.Cast()->Operator != "+" &&
-                    binary.Cast()->Operator != "-" &&
-                    binary.Cast()->Operator != "*"))
-    {
+    auto maybeBinary = NAst::TMaybeNode<NAst::TBinaryExpr>(expr);
+    if (!maybeBinary) {
         return std::nullopt;
     }
-    auto isIntegerLiteral = [](const NAst::TExprPtr& candidate) {
-        auto number = NAst::TMaybeNode<NAst::TNumberExpr>(candidate);
-        return number && !number.Cast()->IsFloat();
-    };
-    const bool leftConstant = isIntegerLiteral(binary.Cast()->Left);
-    const bool rightConstant = isIntegerLiteral(binary.Cast()->Right);
+    const auto binary = maybeBinary.Cast();
+    if (binary->Operator != "+"_op && binary->Operator != "-"_op && binary->Operator != "*"_op) {
+        return std::nullopt;
+    }
+    const bool leftConstant = IntegerLiteral(binary->Left).has_value();
+    const bool rightConstant = IntegerLiteral(binary->Right).has_value();
     if (leftConstant == rightConstant) {
         return std::nullopt;
     }
-    return AffineGroupKeyBase(
-        leftConstant ? binary.Cast()->Right : binary.Cast()->Left);
+    return AffineGroupKeyBase(leftConstant ? binary->Right : binary->Left);
 }
 
 bool IsLiteralGroupKey(const NAst::TExprPtr& expr) {
@@ -383,10 +386,6 @@ bool IsGroupingCall(const NAst::TExprPtr& expr) {
     }
     auto callee = NAst::TMaybeNode<NAst::TIdentExpr>(call.Cast()->Callee);
     return callee && ToLower(callee.Cast()->Name) == "grouping";
-}
-
-NAst::TExprPtr I64Literal(TLocation loc, int64_t value) {
-    return std::make_shared<NAst::TNumberExpr>(std::move(loc), value);
 }
 
 NAst::TExprPtr I32Literal(TLocation loc, int32_t value) {
@@ -449,6 +448,10 @@ NAst::TExprPtr Call(TLocation loc, std::string name, std::vector<NAst::TExprPtr>
         loc, Ident(loc, std::move(name)), std::move(args));
 }
 
+NAst::TExprPtr I64Literal(TLocation loc, int64_t value) {
+    return std::make_shared<NAst::TNumberExpr>(std::move(loc), value);
+}
+
 std::string ToLower(std::string s) {
     for (char& c : s) {
         c = std::tolower(static_cast<unsigned char>(c));
@@ -466,6 +469,52 @@ ESortNulls ConvertSortNulls(NSql::TSqlOrderItem::ENullOrder nulls) {
             return ESortNulls::Last;
     }
     return ESortNulls::Default;
+}
+
+bool HasAggregateCall(const NAst::TExprPtr& expression) {
+    if (!expression) {
+        return false;
+    }
+    if (NAst::TMaybeNode<NSql::TSubqueryExpr>(expression)) {
+        return false;
+    }
+    if (auto window = NAst::TMaybeNode<NSql::TWindowExpr>(expression)) {
+        if (auto call = NAst::TMaybeNode<NAst::TCallExpr>(window.Cast()->Expr)) {
+            if (std::ranges::any_of(call.Cast()->Args, HasAggregateCall)) {
+                return true;
+            }
+        }
+        const auto& spec = window.Cast()->WindowSpec;
+        if (spec && HasAggregateCall(spec->PartitionBy)) {
+            return true;
+        }
+        if (spec && spec->OrderBy) {
+            for (const auto& item : spec->OrderBy->Items) {
+                if (HasAggregateCall(item->Expr)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+    if (auto call = NAst::TMaybeNode<NAst::TCallExpr>(expression)) {
+        if (auto callee = NAst::TMaybeNode<NAst::TIdentExpr>(call.Cast()->Callee);
+            callee && IsAggFunc(ToLower(callee.Cast()->Name)))
+        {
+            return true;
+        }
+    }
+    return std::ranges::any_of(expression->Children(), HasAggregateCall);
+}
+
+bool HasOpaqueExpression(const NAst::TExprPtr& expression) {
+    if (!expression) {
+        return false;
+    }
+    if (NAst::TMaybeNode<NSql::TSubqueryExpr>(expression) || NAst::TMaybeNode<NSql::TWindowExpr>(expression)) {
+        return true;
+    }
+    return std::ranges::any_of(expression->Children(), HasOpaqueExpression);
 }
 
 std::expected<NAst::TExprPtr, TError> TAggCollector::Rewrite(NAst::TExprPtr expr) {
@@ -510,7 +559,19 @@ std::expected<NAst::TExprPtr, TError> TAggCollector::Rewrite(NAst::TExprPtr expr
         return w;
     }
     if (auto agg = AsAggCall(expr)) {
-        return Emit(*agg, expr->Location);
+        const auto key = NAst::NCore::PrintAst(expr);
+        if (auto found = Expressions_.find(key); found != Expressions_.end()) {
+            return CloneExpr(found->second);
+        }
+        if (Finished_) {
+            return std::unexpected(TError(expr->Location,
+                "aggregate expression is not available in this query output"));
+        }
+        auto result = Emit(*agg, expr->Location);
+        if (result) {
+            Expressions_.emplace(key, CloneExpr(*result));
+        }
+        return result;
     }
     for (auto* child : expr->MutableChildren()) {
         auto rewritten = Rewrite(*child);
@@ -520,6 +581,35 @@ std::expected<NAst::TExprPtr, TError> TAggCollector::Rewrite(NAst::TExprPtr expr
         *child = std::move(*rewritten);
     }
     return expr;
+}
+
+std::expected<void, TError> TAggCollector::Collect(
+    const NAst::TExprPtr& expression,
+    const std::function<void(NAst::TExprPtr&)>& bind)
+{
+    if (!expression) {
+        return {};
+    }
+    NAst::TExprPtr copy;
+    if (auto window = NAst::TMaybeNode<NSql::TWindowExpr>(expression)) {
+        copy = CloneSqlWindowExpr(window.Cast());
+    } else if (AsAggCall(expression)) {
+        copy = CloneExpr(expression);
+    }
+    if (copy) {
+        bind(copy);
+        auto rewritten = Rewrite(std::move(copy));
+        if (!rewritten) {
+            return std::unexpected(rewritten.error());
+        }
+        return {};
+    }
+    for (const auto& child : expression->Children()) {
+        if (auto collected = Collect(child, bind); !collected) {
+            return collected;
+        }
+    }
+    return {};
 }
 
 bool TAggCollector::IsIntegerColumn(const NAst::TExprPtr& expr) const {
@@ -641,7 +731,7 @@ std::expected<NAst::TTypePtr, TError> TAggCollector::StddevArgType(
 
     NAst::TTypePtr type;
     try {
-        type = NKernel::AnnotateExprType(agg.Arg, *InputSchema_);
+        type = NKernel::AnnotateExprType(agg.Arg, *InputSchema_, &Context_);
     } catch (const TError& error) {
         return std::unexpected(error);
     }
@@ -748,13 +838,14 @@ std::expected<NAst::TExprPtr, TError> TAggCollector::Emit(const TAggCall& agg, T
     // avg has no aggregate kernel; express it as sum / count. The count is over the
     // argument (not count(*)): SQL avg(x) ignores rows where x IS NULL.
     if (agg.Func == "avg") {
+        const auto argType = NKernel::AnnotateExprType(agg.Arg, *InputSchema_, &Context_);
         std::string sumName = NextName("sum");
         Specs_.push_back({ .Name = sumName, .Func = "sum", .Arg = agg.Arg });
         std::string countName = NextName("count");
         Specs_.push_back({ .Name = countName, .Func = "count", .Arg = CloneExpr(agg.Arg) });
 
         NAst::TExprPtr count = Ident(loc, countName);
-        if (!IsDecimalExprHint(agg.Arg)) {
+        if (!IsDecimalType(argType)) {
             count = std::make_shared<NAst::TCastExpr>(
                 loc, std::move(count), std::make_shared<NAst::TFloatType>());
         }
@@ -766,7 +857,16 @@ std::expected<NAst::TExprPtr, TError> TAggCollector::Emit(const TAggCall& agg, T
 }
 
 std::string TAggCollector::NextName(const std::string& func) {
-    return func + "_" + std::to_string(Counter_++);
+    while (true) {
+        auto name = func + "_" + std::to_string(Counter_++);
+        const bool occupied = InputSchema_ && std::ranges::any_of(InputSchema_->Fields, [&](const auto& field) {
+            const auto dot = field.first.rfind('.');
+            return field.first.substr(dot == std::string::npos ? 0 : dot + 1) == name;
+        });
+        if (!occupied) {
+            return name;
+        }
+    }
 }
 
 std::expected<NAst::TExprPtr, TError> TWindowCollector::Rewrite(NAst::TExprPtr expr) {
@@ -939,9 +1039,7 @@ std::string TWindowCollector::Signature(const TRaw& raw) const {
     return s;
 }
 
-// This normalization intentionally lives in the SQL builder rather than a
-// later optimizer pass: it must run after GROUP BY aliases are resolved but
-// before a computed expression is hidden behind its materialized gb_n column.
+// Narrow keys after SQL references are resolved and before materialization.
 // Removed expressions remain in SELECT/HAVING and are evaluated once per output
 // group from the retained base key.  Grouping sets are intentionally excluded:
 // their individual key subsets and GROUPING() bit positions are observable SQL
@@ -1047,8 +1145,10 @@ NAst::TExprPtr SubstituteGroupKeys(
     if (!expr) {
         return expr;
     }
-    if (auto it = byExpr.find(NAst::NCore::PrintAst(expr)); it != byExpr.end()) {
-        return Ident(expr->Location, it->second);
+    if (!HasOpaqueExpression(expr)) {
+        if (auto it = byExpr.find(NAst::NCore::PrintAst(expr)); it != byExpr.end()) {
+            return Ident(expr->Location, it->second);
+        }
     }
     for (auto* child : expr->MutableChildren()) {
         *child = SubstituteGroupKeys(*child, byExpr);

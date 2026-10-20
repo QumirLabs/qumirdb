@@ -1,6 +1,7 @@
 #pragma once
 
 #include <qdb/plan/ops/operator.h>
+#include <qdb/plan/sql_bindings.h>
 
 #include <qumir/error.h>
 
@@ -88,6 +89,9 @@ public:
         return RuntimeFilter_;
     }
 
+    const std::optional<TSetOperationBinding>& Binding() const { return Binding_; }
+    std::optional<TSetOperationBinding>& MutableBinding() { return Binding_; }
+
     std::span<const TOperatorPtr> Inputs() const override {
         return std::span<const TOperatorPtr>(Inputs_);
     }
@@ -97,6 +101,7 @@ public:
     }
 
 private:
+    std::optional<TSetOperationBinding> Binding_;
     std::array<TOperatorPtr, 2> Inputs_{nullptr, nullptr};
     std::vector<TJoinKey> Keys_;
     EJoinType Type_;

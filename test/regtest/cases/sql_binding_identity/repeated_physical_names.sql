@@ -1,0 +1,3 @@
+SELECT *
+FROM (SELECT x FROM t),
+     (SELECT z AS x FROM u);

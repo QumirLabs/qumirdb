@@ -2,9 +2,9 @@ project (total_sum, s_state, s_county, lochierarchy, rank_within_parent)
 └─ top-sort [lochierarchy desc, __sort_0 asc, rank_within_parent asc] limit 100
    └─ project (total_sum, s_state, s_county, lochierarchy, rank_within_parent, __sort_0)
       └─ window partition=[wk_0, wk_1] order=[sum_0 desc] fns=[w_0=rank]
-         └─ project (__grouping_id__, s_state, s_county, sum_0, wk_0, wk_1)
-            └─ aggregate keys=[s_state, s_county] aggs=[sum_0=sum]
-               └─ project (s_state, s_county, ss_net_profit)
+         └─ project (__grouping_id__, store_0.s_state, store_0.s_county, sum_0, wk_0, wk_1)
+            └─ aggregate keys=[store_0.s_state, store_0.s_county] aggs=[sum_0=sum]
+               └─ project (store_0.s_state, store_0.s_county, store_sales_0.ss_net_profit)
                   └─ join left_semi [store_0.s_state = __qdb_in__s_state]
                      ├─ join inner [store_0.s_store_sk = store_sales_0.ss_store_sk] emit-filter 1 from right (rows≈2 cost≈9.1K)
                      │  ├─ source store AS store_0 use-filter 1 keys=[store_0.s_store_sk] (rows≈10 cost≈360)

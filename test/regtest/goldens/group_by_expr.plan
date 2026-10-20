@@ -1,6 +1,9 @@
 (rel project
   (rel filter
-    (rel aggregate (rel project (rel source "t") (gb_0 (+ a b)) (c c)) (keys gb_0) (agg sum_0 sum c))
+    (rel aggregate
+      (rel project (rel source "t" "t") (gb_0 (+ |t.a| |t.b|)) (|t.c| |t.c|))
+      (keys gb_0)
+      (agg sum_0 sum |t.c|))
     (> gb_0 5))
   (k gb_0)
   (s sum_0))

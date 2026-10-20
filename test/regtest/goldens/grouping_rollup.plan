@@ -1,7 +1,13 @@
 (rel project
-  (rel aggregate (rel project (rel source "t") (a a) (b b)) (keys a b) (set a b) (set a) (set) (agg count_0 count))
-  (a a)
-  (b b)
+  (rel aggregate
+    (rel project (rel source "t" "t") (|t.a| |t.a|) (|t.b| |t.b|))
+    (keys |t.a| |t.b|)
+    (set |t.a| |t.b|)
+    (set |t.a|)
+    (set)
+    (agg count_0 count))
+  (a |t.a|)
+  (b |t.b|)
   (ga (if (== __grouping_id__ (: 2 i32)) 1 0))
   (gb (if (== __grouping_id__ (: 1 i32)) 1 (if (== __grouping_id__ (: 2 i32)) 1 0)))
   (c count_0))

@@ -1,1 +1,1 @@
-(rel project (rel source "t"))
+(rel project (rel source "t" "t") (a |t.a|) (b |t.b|) (c |t.c|) (id |t.id|) (k |t.k|) (v |t.v|))
