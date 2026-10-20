@@ -11,7 +11,8 @@ namespace NQdb {
 //   Project: fun(input_schema) -> struct(projection specs)
 //
 // ParamTypes[0] = full input schema initially; narrowed by ApplyColumnPushdown.
-// Idempotent - safe to call again after plan modifications.
+// The first call fixes projection output names; later calls keep them, so it is
+// safe to call again after plan modifications.
 void AnnotateTypes(
     const TOperatorPtr& root,
     const NKernel::TAnnotationContext& context = {});

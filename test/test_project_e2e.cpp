@@ -10,6 +10,7 @@
 #include <qdb/io/io.h>
 #include <qdb/modules/qumirdb_runtime.h>
 #include <qdb/plan/build.h>
+#include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/passes/column_pruning.h>
 #include <qdb/plan/passes/typing.h>
@@ -758,6 +759,36 @@ TEST(SqlStddevSampE2E, DecimalInputIsRejected) {
             std::string(error.what()).find("stddev_samp(decimal) is not supported in qdb v1"),
             std::string::npos);
     }
+}
+
+TEST(ProjectE2E, NamedStructProjectionFreezesItsFlattenedLayout) {
+    auto i64 = std::make_shared<TIntegerType>();
+    auto structure = std::make_shared<TNamedType>("Pair", std::make_shared<TStructType>(
+        std::vector<std::pair<std::string, TTypePtr>>{{"first", i64}, {"second", i64}}));
+    TMockSource source(TMockColumns{}, {{"x", i64}, {"pair", structure}});
+    auto input = std::make_shared<TSourceOperator>(source, "t");
+    TOperatorPtr plan = std::make_shared<TProjectOperator>(input, std::vector<TProjectionSpec>{
+        {.Name = "unused", .Expression = std::make_shared<TIdentExpr>(NQumir::TLocation{}, "x")},
+        {.Expression = std::make_shared<TIdentExpr>(NQumir::TLocation{}, "pair"),
+            .ImplicitName = true},
+    });
+    AnnotateTypes(plan);
+    ASSERT_EQ(plan->OutputColumns()->Fields.size(), 3);
+
+    // Pruning the leading column must not renumber the struct's colN outputs
+    // that consumers already reference.
+    auto project = TMaybeOp<TProjectOperator>(plan);
+    ASSERT_TRUE(project);
+    EXPECT_EQ(project.Cast()->Projections()[1].ColumnAliases,
+        (std::vector<std::string>{"col1", "col2"}));
+    TColumnSet demand{"col2"};
+    ApplyColumnPruning(plan, &demand, nullptr);
+    AnnotateTypes(plan);
+    ASSERT_EQ(project.Cast()->Projections().size(), 1);
+    EXPECT_FALSE(project.Cast()->Projections()[0].ImplicitName);
+    ASSERT_EQ(plan->OutputColumns()->Fields.size(), 2);
+    EXPECT_EQ(plan->OutputColumns()->Fields[0].first, "col1");
+    EXPECT_EQ(plan->OutputColumns()->Fields[1].first, "col2");
 }
 
 TEST(ProjectE2E, IdentZeroCopyPlusComputed) {

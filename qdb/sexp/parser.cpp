@@ -271,8 +271,42 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
                     co_return IParseHandle::MakeError(projName, "expected projection output name");
                 }
                 auto projExpr = co_await h.Expr();
-                co_await h.Take(')');
-                specs.push_back({projName.Name, std::move(projExpr)});
+                TProjectionSpec spec{.Name = projName.Name, .Expression = std::move(projExpr)};
+                while (true) {
+                    auto attrTok = h.Next();
+                    if (IParseHandle::IsOp(attrTok, ')')) {
+                        break;
+                    }
+                    if (!IParseHandle::IsOp(attrTok, '(')) {
+                        co_return IParseHandle::MakeError(attrTok,
+                            "expected projection attribute or ')'");
+                    }
+                    auto attrNameTok = h.Next();
+                    auto attr = ReadIdentifier(h, attrNameTok);
+                    if (!attr || *attr != "column-aliases") {
+                        co_return IParseHandle::MakeError(attrNameTok, "unknown projection attribute"
+                            + (attr ? " '" + *attr + "'" : std::string()));
+                    }
+                    if (!spec.ColumnAliases.empty()) {
+                        co_return IParseHandle::MakeError(attrNameTok, "duplicate projection column aliases");
+                    }
+                    while (true) {
+                        auto aliasTok = h.Next();
+                        if (IParseHandle::IsOp(aliasTok, ')')) {
+                            break;
+                        }
+                        auto alias = ReadIdentifier(h, aliasTok);
+                        if (!alias) {
+                            co_return IParseHandle::MakeError(aliasTok,
+                                "expected projection column alias");
+                        }
+                        spec.ColumnAliases.push_back(std::move(*alias));
+                    }
+                    if (spec.ColumnAliases.empty()) {
+                        co_return IParseHandle::MakeError(attrNameTok, "empty projection column aliases");
+                    }
+                }
+                specs.push_back(std::move(spec));
             }
             co_return std::make_shared<TProjectOperator>(std::move(input), std::move(specs));
         }

@@ -18,7 +18,7 @@ size_t FlattenedProjectionArity(const TProjectionSpec& projection) {
     if (!projection.Expression || IsNullableType(projection.Expression->Type)) {
         return 1;
     }
-    if (auto structure = TMaybeType<TStructType>(projection.Expression->Type))
+    if (auto structure = TMaybeType<TStructType>(UnwrapNamedType(projection.Expression->Type)))
     {
         return structure.Cast()->Fields.size();
     }
