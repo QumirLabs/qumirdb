@@ -3,6 +3,7 @@
 #include <qdb/plan/build.h>
 #include <qdb/kernel/spec.h>
 #include <qdb/plan/passes/column_pruning.h>
+#include <qdb/plan/passes/sql_binding.h>
 #include <qdb/plan/passes/unbound_vars.h>
 #include <qdb/catalog/external_module.h>
 #include <qdb/plan/ops/source.h>
@@ -14,7 +15,6 @@
 #include <qdb/sexp/parser.h>
 #include <qdb/sexp/printer.h>
 #include <qdb/sql/parser.h>
-#include <qdb/plan/passes/sql_binding.h>
 
 #include <qumir/parser/core/lexer.h>
 #include <qumir/parser/core/parser.h>

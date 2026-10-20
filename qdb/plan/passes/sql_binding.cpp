@@ -18,6 +18,7 @@
 #include <qumir/parser/core/printer.h>
 
 #include <algorithm>
+#include <iterator>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -27,7 +28,6 @@ namespace {
 
 namespace NAst = NQumir::NAst;
 using NQumir::TError;
-using NQumir::TLocation;
 
 struct TNameBinding {
     std::shared_ptr<NAst::TStructType> Schema;
@@ -116,6 +116,22 @@ std::vector<std::string> ColumnNames(const TOperatorPtr& plan) {
     return names;
 }
 
+// Columns of a star with the given prefix (empty for a bare "*"): output name and
+// a reference to the physical input column.
+std::vector<TProjectionSpec> StarColumns(const std::string& prefix, const TNameBinding& input) {
+    std::vector<TProjectionSpec> columns;
+    for (size_t i = 0; i < input.Labels.size(); ++i) {
+        const auto& name = input.Labels[i];
+        if (!prefix.empty() && !name.starts_with(prefix)) {
+            continue;
+        }
+        const auto dot = name.rfind('.');
+        columns.push_back({.Name = dot == std::string::npos ? name : name.substr(dot + 1),
+            .Expression = Ident({}, input.Schema->Fields[i].first)});
+    }
+    return columns;
+}
+
 std::vector<TSelectItemBinding> ExpandItems(
     const std::vector<TSelectItemBinding>& items, const TNameBinding& input)
 {
@@ -125,16 +141,11 @@ std::vector<TSelectItemBinding> ExpandItems(
             expanded.push_back(item);
             continue;
         }
-        for (size_t i = 0; i < input.Labels.size(); ++i) {
-            const auto& name = input.Labels[i];
-            if (!item.StarPrefix->empty() && !name.starts_with(*item.StarPrefix)) {
-                continue;
-            }
-            // Star columns keep their prefix: they already reference physical
-            // input columns and must not go through SQL name lookup again.
-            const auto dot = name.rfind('.');
-            expanded.push_back({.Name = dot == std::string::npos ? name : name.substr(dot + 1),
-                .Expression = Ident({}, input.Schema->Fields[i].first), .StarPrefix = item.StarPrefix});
+        // Star columns keep their prefix: they already reference physical
+        // input columns and must not go through SQL name lookup again.
+        for (auto& column : StarColumns(*item.StarPrefix, input)) {
+            expanded.push_back({.Name = std::move(column.Name), .Expression = std::move(column.Expression),
+                .StarPrefix = item.StarPrefix});
         }
     }
     return expanded;
@@ -215,6 +226,15 @@ private:
         }
     }
 
+    // A physical name no SQL scope uses, for outputs whose labels collide.
+    std::string NextScopeName() {
+        std::string name;
+        do {
+            name = "__scope_" + std::to_string(NextScopeColumn_++);
+        } while (!BoundNames_.insert(name).second);
+        return name;
+    }
+
     // FROM items may expose equal physical names, for example two unaliased
     // derived tables. The labels stay; the right input gets unique physical names.
     TBoundPlan SeparateJoinInput(TBoundPlan right, const TBoundPlan& left) {
@@ -229,13 +249,7 @@ private:
         }
         std::vector<TProjectionSpec> renamed;
         for (const auto& [name, _] : fields) {
-            auto output = name;
-            if (taken.contains(name)) {
-                do {
-                    output = "__scope_" + std::to_string(NextScopeColumn_++);
-                } while (!BoundNames_.insert(output).second);
-            }
-            renamed.push_back({.Name = output, .Expression = Ident({}, name)});
+            renamed.push_back({.Name = taken.contains(name) ? NextScopeName() : name, .Expression = Ident({}, name)});
         }
         auto project = std::make_shared<TProjectOperator>(right.Plan, std::move(renamed));
         Type(project);
@@ -487,15 +501,7 @@ private:
         std::vector<TProjectionSpec> projections;
         for (auto spec : project->Projections()) {
             if (spec.StarPrefix) {
-                for (size_t i = 0; i < visibleNames.Labels.size(); ++i) {
-                    const auto& name = visibleNames.Labels[i];
-                    if (!spec.StarPrefix->empty() && !name.starts_with(*spec.StarPrefix)) {
-                        continue;
-                    }
-                    const auto dot = name.rfind('.');
-                    projections.push_back({.Name = dot == std::string::npos ? name : name.substr(dot + 1),
-                        .Expression = Ident({}, visibleNames.Schema->Fields[i].first)});
-                }
+                std::ranges::move(StarColumns(*spec.StarPrefix, visibleNames), std::back_inserter(projections));
             } else {
                 projections.push_back(std::move(spec));
             }
@@ -740,9 +746,7 @@ private:
                 }
                 if (used.size() != renamed.size()) {
                     for (auto& spec : renamed) {
-                        do {
-                            spec.Name = "__scope_" + std::to_string(NextScopeColumn_++);
-                        } while (!BoundNames_.insert(spec.Name).second);
+                        spec.Name = NextScopeName();
                     }
                 }
                 if (aliases.Columns && child.SelectProject && child.Plan == child.SelectProject) {
@@ -782,7 +786,7 @@ private:
             Type(plan);
             return {.Plan = plan, .Labels = std::move(children[0].Labels)};
         }
-        if (auto un = TMaybeOp<TUnionAllOperator>(plan)) {
+        if (TMaybeOp<TUnionAllOperator>(plan)) {
             Type(plan);
             return {.Plan = plan, .Labels = std::move(children[0].Labels)};
         }

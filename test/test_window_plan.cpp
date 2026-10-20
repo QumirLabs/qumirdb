@@ -5,9 +5,9 @@
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/window.h>
+#include <qdb/plan/passes/sql_binding.h>
 #include <qdb/plan/pipeline.h>
 #include <qdb/sql/parser.h>
-#include <qdb/plan/passes/sql_binding.h>
 
 #include <qumir/parser/ast.h>
 

@@ -18,12 +18,12 @@
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/passes/column_pruning.h>
+#include <qdb/plan/passes/sql_binding.h>
 #include <qdb/plan/passes/typing.h>
 #include <qdb/sexp/parser.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/sql/parser.h>
-#include <qdb/plan/passes/sql_binding.h>
 
 #include <algorithm>
 #include <array>

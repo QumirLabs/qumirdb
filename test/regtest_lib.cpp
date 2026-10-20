@@ -5,13 +5,13 @@
 #include <qdb/io/parquet/source.h>
 #include <qdb/plan/build.h>
 #include <qdb/plan/ops/source.h>
+#include <qdb/plan/passes/sql_binding.h>
 #include <qdb/plan/pipeline.h>
 #include <qdb/plan/plan_print.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/sql/parser.h>
 #include <qdb/sql/printer.h>
 #include <qdb/sexp/printer.h>
-#include <qdb/plan/passes/sql_binding.h>
 #include <qumir/parser/core/parser.h>
 #include <qumir/parser/core/printer.h>
 

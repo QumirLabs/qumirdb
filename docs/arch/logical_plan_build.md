@@ -112,7 +112,7 @@ inner project is then omitted unless a global key is needed (below).
 
 ### Functionally dependent group-key narrowing
 
-For a plain `GROUP BY`, the builder removes key components that cannot split a
+For a plain `GROUP BY`, SQL binding removes key components that cannot split a
 group already defined by another retained component:
 
 ```sql

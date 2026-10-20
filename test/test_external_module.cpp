@@ -8,10 +8,10 @@
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/sort.h>
 #include <qdb/plan/ops/source.h>
+#include <qdb/plan/passes/sql_binding.h>
 #include <qdb/plan/pipeline.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/sql/parser.h>
-#include <qdb/plan/passes/sql_binding.h>
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/parser/type.h>

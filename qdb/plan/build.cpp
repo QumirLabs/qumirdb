@@ -411,12 +411,12 @@ TOperatorPtr AliasSubplan(TOperatorPtr plan, const std::string& alias) {
     return project;
 }
 
-TOperatorPtr ApplyDistinct(TOperatorPtr projected, const std::vector<std::string>& columns) {
-    auto keys = columns;
-    if (keys.empty()) {
-        for (const auto& [name, _] : projected->OutputColumns()->Fields) {
-            keys.push_back(name);
-        }
+// SELECT DISTINCT groups on every output column. These keys describe the built
+// output; the binding pass replaces them with the bound columns.
+TOperatorPtr ApplyDistinct(TOperatorPtr projected) {
+    std::vector<std::string> keys;
+    for (const auto& [name, _] : projected->OutputColumns()->Fields) {
+        keys.push_back(name);
     }
     auto aggregate = std::make_shared<TAggregateOperator>(
         std::move(projected), std::move(keys), std::vector<TAggregateSpec>{});
@@ -616,15 +616,12 @@ std::expected<TOperatorPtr, TError> DecorrelateIn(
     if (!right) {
         return std::unexpected(right.error());
     }
-    const auto rightSchema = (*right)->OutputColumns();
     // Rename the subquery's output to a synthetic name so the residual's two sides
     // never share a name: otherwise `x IN (SELECT x ...)` yields `x == x`, which
     // qualification cannot bind to the left side and key extraction drops entirely,
     // leaving a keyless (unschedulable, condition-less) semi-join. The name is
     // internal - a semi/anti join exposes only its left side.
-    const auto name = "__qdb_in__" + (rightSchema && rightSchema->Fields.size() == 1
-        ? rightSchema->Fields[0].first
-        : std::string("value"));
+    const std::string name = "__qdb_in__";
     right = ApplyColumnAliases(std::move(*right), {name});
     if (!right) {
         return std::unexpected(right.error());
@@ -662,24 +659,45 @@ struct TLocalSqlScope {
     }
 };
 
-void CollectDeclaredOutputNames(
+void CollectLocalColumns(
+    const NSql::TSqlPtr<NSql::TSqlTableRef>& ref,
+    const TTableSourceFactory& sources,
+    TLocalSqlScope& out);
+
+// Output names of a FROM subquery as the builder assigns them (ItemName). An
+// unqualified star exposes the columns of its own FROM.
+void CollectOutputNames(
     const NSql::TSqlNodePtr& body,
-    std::unordered_set<std::string>& names)
+    const TTableSourceFactory& sources,
+    TLocalSqlScope& out)
 {
     if (auto query = NSql::TMaybeNode<NSql::TSqlQuery>(body)) {
-        CollectDeclaredOutputNames(query.Cast()->Body, names);
+        CollectOutputNames(query.Cast()->Body, sources, out);
     } else if (auto set = NSql::TMaybeNode<NSql::TSqlSetOp>(body)) {
-        CollectDeclaredOutputNames(set.Cast()->Left, names);
+        CollectOutputNames(set.Cast()->Left, sources, out);
     } else if (auto select = NSql::TMaybeNode<NSql::TSqlSelect>(body)) {
-        for (const auto& item : select.Cast()->SelectList->Items) {
-            if (!item->ColumnAliases.empty()) {
-                names.insert(item->ColumnAliases.begin(), item->ColumnAliases.end());
-            } else if (item->Alias) {
-                names.insert(*item->Alias);
-            } else if (!item->Star && NAst::TMaybeNode<NAst::TIdentExpr>(item->Expr)) {
-                names.insert(ItemName(*item, 0));
+        const auto& items = select.Cast()->SelectList->Items;
+        for (size_t i = 0; i < items.size(); ++i) {
+            const auto& item = *items[i];
+            if (!item.Star) {
+                if (item.ColumnAliases.empty()) {
+                    out.BareColumns.insert(ItemName(item, i));
+                } else {
+                    out.BareColumns.insert(item.ColumnAliases.begin(), item.ColumnAliases.end());
+                }
+            } else if (item.StarPrefix.empty() && select.Cast()->From) {
+                TLocalSqlScope from;
+                for (const auto& ref : select.Cast()->From->Items) {
+                    CollectLocalColumns(ref, sources, from);
+                }
+                out.BareColumns.insert(from.BareColumns.begin(), from.BareColumns.end());
+                out.CompleteBareColumns = out.CompleteBareColumns && from.CompleteBareColumns;
+            } else {
+                out.CompleteBareColumns = false;
             }
         }
+    } else {
+        out.CompleteBareColumns = false;
     }
 }
 
@@ -714,12 +732,11 @@ void CollectLocalColumns(
         if (derived.Cast()->Alias) {
             out.Qualifiers.insert(*derived.Cast()->Alias);
         }
-        out.CompleteBareColumns = false;
         if (derived.Cast()->ColumnAliases) {
             const auto& columns = derived.Cast()->ColumnAliases->Items;
             out.BareColumns.insert(columns.begin(), columns.end());
         } else {
-            CollectDeclaredOutputNames(derived.Cast()->Query, out.BareColumns);
+            CollectOutputNames(derived.Cast()->Query, sources, out);
         }
     } else if (auto join = NSql::TMaybeNode<NSql::TSqlJoin>(ref)) {
         CollectLocalColumns(join.Cast()->Left, sources, out);
@@ -936,7 +953,7 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
                 return std::unexpected(plan.error());
             }
             // Dedup so each outer row matches at most one right row (no duplication).
-            auto distinct = ApplyDistinct(*plan, { markName });
+            auto distinct = ApplyDistinct(*plan);
             // Left join null-extends `markName` to NULL on non-match - the marker.
             std::vector<TJoinKey> keys;
             NAst::TExprPtr residual;
@@ -1204,14 +1221,11 @@ std::expected<TOperatorPtr, TError> BuildSelect(
         const auto name = ItemName(*item, i);
         const bool implicit = !item->Alias && item->ColumnAliases.empty()
             && !NAst::TMaybeNode<NAst::TIdentExpr>(item->Expr);
-        // SQL-only nodes are opaque to the core expression cloner. They cannot
-        // be ordinal grouping targets or structural ORDER BY matches.
+        // Window and subquery items are SQL-only nodes: binding never matches
+        // them structurally.
         const bool opaque = HasWindowExpr(item->Expr) || HasSubquery(item->Expr);
-        auto original = opaque
-            ? item->Expr
-            : CloneExpr(item->Expr);
-        scope->Items.push_back({.Name = name, .Expression = std::move(original),
-            .ColumnAliases = item->ColumnAliases, .ImplicitName = implicit, .Opaque = opaque, .Hidden = item->Hidden});
+        scope->Items.push_back({.Name = name, .ColumnAliases = item->ColumnAliases,
+            .ImplicitName = implicit, .Opaque = opaque, .Hidden = item->Hidden});
         projections.push_back({.Name = name, .Expression = item->Expr,
             .ColumnAliases = item->ColumnAliases, .ImplicitName = implicit});
     }
@@ -1248,13 +1262,15 @@ std::expected<TOperatorPtr, TError> BuildSelect(
     if (auto ok = extractProjectionSubqueries(projections, node); !ok) {
         return std::unexpected(ok.error());
     }
+    // Scope items see the final projection expressions; binding clones them
+    // before it rewrites anything.
     for (size_t i = 0; i < projections.size(); ++i) {
         scope->Items[i].Expression = projections[i].Expression;
     }
     auto project = std::make_shared<TProjectOperator>(std::move(node), std::move(projections));
     project->SetSelectBinding(std::move(scope));
     if (select.Quantifier == NSql::ESetQuantifier::Distinct) {
-        return ApplyDistinct(project, {});
+        return ApplyDistinct(project);
     }
     return project;
 }
@@ -1374,7 +1390,7 @@ std::expected<TOperatorPtr, TError> BuildSetOp(
             return unionAll;
         }
 
-        return ApplyDistinct(std::move(unionAll), {});
+        return ApplyDistinct(std::move(unionAll));
     }
 
     if (setOp.Op == NSql::TSqlSetOp::EOp::Intersect
@@ -1395,8 +1411,8 @@ std::expected<TOperatorPtr, TError> BuildSetOp(
             return std::unexpected(right.error());
         }
 
-        auto leftDistinct = ApplyDistinct(std::move(*left), {});
-        auto rightDistinct = ApplyDistinct(std::move(*right), {});
+        auto leftDistinct = ApplyDistinct(std::move(*left));
+        auto rightDistinct = ApplyDistinct(std::move(*right));
         auto join = std::make_shared<TJoinOperator>(
             std::move(leftDistinct), std::move(rightDistinct), std::vector<TJoinKey>{},
             isIntersect ? EJoinType::LeftSemi : EJoinType::LeftAnti, nullptr);

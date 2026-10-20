@@ -7,11 +7,11 @@
 #include <qdb/plan/passes/column_pruning.h>
 #include <qdb/plan/passes/equijoin.h>
 #include <qdb/plan/passes/qualify_columns.h>
+#include <qdb/plan/passes/sql_binding.h>
 #include <qdb/plan/passes/typing.h>
 #include <qdb/plan/pipeline.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/sql/parser.h>
-#include <qdb/plan/passes/sql_binding.h>
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
 

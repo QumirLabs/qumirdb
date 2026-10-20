@@ -8,6 +8,7 @@
 #include <qdb/plan/passes/late_materialization.h>
 #include <qdb/plan/passes/qualify_columns.h>
 #include <qdb/plan/passes/cte_reuse.h>
+#include <qdb/plan/passes/sql_binding.h>
 #include <qdb/plan/passes/top_sort.h>
 #include <qdb/plan/passes/push_limit.h>
 #include <qdb/plan/ops/cte_consumer.h>
@@ -15,7 +16,6 @@
 #include <qdb/plan/passes/runtime_filters.h>
 #include <qdb/plan/passes/self_equality.h>
 #include <qdb/plan/passes/typing.h>
-#include <qdb/plan/passes/sql_binding.h>
 #include <qdb/plan/plan_print.h>
 
 #include <cstdlib>

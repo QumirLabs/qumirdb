@@ -667,6 +667,8 @@ int RunInteractive(
         try {
             std::istringstream in(buffer);
             RunQuery(ESyntax::Sql, in, config, catalog);
+        } catch (const NQumir::TError& e) {
+            std::cerr << e.ToString() << "\n";
         } catch (const std::exception& e) {
             std::cerr << e.what() << "\n";
         }
@@ -996,6 +998,10 @@ int main(int argc, char** argv) {
             return 1;
         }
         return RunQuery(config.Syntax, ifs, config, catalog);
+    } catch (const NQumir::TError& e) {
+        // SQL binding and typing report semantic errors with their location.
+        std::cerr << e.ToString() << "\n";
+        return 1;
     } catch (const std::exception& e) {
         std::cerr << e.what() << "\n";
         return 1;

@@ -17,13 +17,13 @@
 #include <qdb/plan/ops/window.h>
 #include <qdb/plan/passes/column_pruning.h>
 #include <qdb/plan/passes/qualify_columns.h>
+#include <qdb/plan/passes/sql_binding.h>
 #include <qdb/plan/passes/top_sort.h>
 #include <qdb/plan/passes/push_limit.h>
 #include <qdb/plan/passes/typing.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/sql/parser.h>
-#include <qdb/plan/passes/sql_binding.h>
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/parser/ast.h>
@@ -316,7 +316,7 @@ TEST(SortPlan, BuildPlanSortsOrderByExpressionViaHiddenColumn) {
     EXPECT_EQ(project.Cast()->Projections()[1].Name, "__sort_0");
 }
 
-TEST(SortPlan, QualifyResolvesHiddenSortColumnToGroupKey) {
+TEST(SortPlan, BindingReusesSelectedGroupKeyForSort) {
     // Binding recognizes the same input column behind both the GROUP BY key
     // and the SELECT alias, so ORDER BY can reuse that selected output.
     auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();

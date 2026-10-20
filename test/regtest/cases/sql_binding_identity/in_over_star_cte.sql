@@ -1,0 +1,4 @@
+WITH c AS (SELECT z AS x FROM u)
+SELECT x, y
+FROM t
+WHERE x NOT IN (SELECT * FROM c);

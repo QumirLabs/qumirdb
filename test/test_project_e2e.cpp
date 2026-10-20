@@ -12,13 +12,13 @@
 #include <qdb/plan/build.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/passes/column_pruning.h>
+#include <qdb/plan/passes/sql_binding.h>
 #include <qdb/plan/passes/typing.h>
 #include <qdb/plan/pipeline.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/sexp/parser.h>
 #include <qdb/sql/parser.h>
-#include <qdb/plan/passes/sql_binding.h>
 
 #include <algorithm>
 #include <array>
