@@ -524,7 +524,7 @@ async function runStringAggregateBatchContract() {
   });
 }
 
-async function runKumirModuleBatchContract() {
+async function runKumirModuleBatchContract(select, values, expected) {
   const request = {
     sql: `
 CREATE MODULE math LANGUAGE kumir AS $$
@@ -533,13 +533,13 @@ CREATE MODULE math LANGUAGE kumir AS $$
   знач := sqrt(x)
 кон
 $$;
-SELECT kumir_root(a) FROM t;
+${select}
 `,
     dataset: {
       tables: [{
         name: 't',
         columns: [{ name: 'a', type: 'f64' }],
-        stats: { rows: 2, bytes: 16, rowGroups: 1 },
+        stats: { rows: values.length, bytes: 8 * values.length, rowGroups: 1 },
       }],
     },
     options: {
@@ -565,17 +565,14 @@ SELECT kumir_root(a) FROM t;
     async function* (stage) {
       assert.equal(stage.table, 't');
       yield {
-        rowCount: 2,
+        rowCount: values.length,
         columns: stage.columns.map(column => ({
           ...column,
-          values: [4.0, 9.0],
+          values,
         })),
       };
     });
-  assert.deepEqual(normalizeResult(result), {
-    columns: ['col0'],
-    rows: [['2'], ['3']],
-  });
+  assert.deepEqual(normalizeResult(result), expected);
 }
 
 function normalizedExec(exec) {
@@ -1065,7 +1062,10 @@ async function main() {
     {
       const started = performance.now();
       try {
-        await runKumirModuleBatchContract();
+        await runKumirModuleBatchContract(
+          'SELECT kumir_root(a) FROM t;',
+          [4.0, 9.0],
+          { columns: ['col0'], rows: [['2'], ['3']] });
         results.push({
           name: 'kumir-module-batch',
           elapsedMs: performance.now() - started,
@@ -1078,6 +1078,28 @@ async function main() {
           error,
         });
         console.error(`[FAIL] kumir-module-batch\n${errorText(error)}`);
+      }
+    }
+    {
+      const started = performance.now();
+      try {
+        // The plan builder types the stddev_samp argument against the module catalog.
+        await runKumirModuleBatchContract(
+          'SELECT stddev_samp(kumir_root(a)) AS d FROM t;',
+          [4.0, 9.0, 16.0],
+          { columns: ['d'], rows: [['1']] });
+        results.push({
+          name: 'kumir-module-stddev',
+          elapsedMs: performance.now() - started,
+          error: null,
+        });
+      } catch (error) {
+        results.push({
+          name: 'kumir-module-stddev',
+          elapsedMs: performance.now() - started,
+          error,
+        });
+        console.error(`[FAIL] kumir-module-stddev\n${errorText(error)}`);
       }
     }
     {

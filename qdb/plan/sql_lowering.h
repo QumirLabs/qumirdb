@@ -1,5 +1,6 @@
 #pragma once
 
+#include <qdb/kernel/annotate_type.h>
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/operator.h>
 #include <qdb/plan/ops/sort.h>
@@ -53,11 +54,18 @@ struct TPlainAggKeyHash {
 class TAggCollector {
 public:
     explicit TAggCollector(
-        const NQumir::NAst::TStructType* inputSchema = nullptr,
-        bool enableAffineRewrite = true)
+        const NQumir::NAst::TStructType* inputSchema,
+        bool enableAffineRewrite,
+        const NKernel::TAnnotationContext& context)
         : InputSchema_(inputSchema)
         , EnableAffineRewrite_(enableAffineRewrite)
+        , Context_(context)
     { }
+    // The collector keeps a reference to the context.
+    TAggCollector(
+        const NQumir::NAst::TStructType* inputSchema,
+        bool enableAffineRewrite,
+        const NKernel::TAnnotationContext&& context) = delete;
 
     std::expected<NQumir::NAst::TExprPtr, NQumir::TError> Rewrite(NQumir::NAst::TExprPtr expr);
 
@@ -113,6 +121,7 @@ private:
     // (Func, PrintAst(Arg)) -> slot name, so the same plain aggregate in SELECT
     // and HAVING reuses one slot instead of emitting count_0/count_1.
     std::unordered_map<TPlainAggKey, std::string, TPlainAggKeyHash> PlainSpecNames_;
+    const NKernel::TAnnotationContext& Context_;
 };
 
 // Extracts window expressions from projection expressions into a stack of

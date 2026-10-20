@@ -287,7 +287,8 @@ struct TExportRequest {
 
 struct TParsedSql {
     NQdb::TOperatorPtr Plan;
-    std::shared_ptr<const NQdb::TExternalCatalogSnapshot> ExternalCatalog;
+    // Plan construction and the optimizer passes type against the same catalog snapshot.
+    NQdb::NKernel::TAnnotationContext Annotation;
 };
 
 struct TKernelArtifacts {
@@ -1107,15 +1108,18 @@ std::expected<TParsedSql, NQumir::TError> ParseSql(
         return std::make_shared<NQdb::TSourceOperator>(*it->second, std::string(table));
     };
 
-    auto plan = NQdb::BuildPlan(query, sources);
+    NQdb::NKernel::TAnnotationContext annotation{
+        .ExternalCatalog = hasExternalDefinitions
+            ? externalCatalog.Snapshot()
+            : nullptr,
+    };
+    auto plan = NQdb::BuildPlan(query, sources, annotation);
     if (!plan) {
         return std::unexpected(plan.error());
     }
     return TParsedSql{
         .Plan = std::move(*plan),
-        .ExternalCatalog = hasExternalDefinitions
-            ? externalCatalog.Snapshot()
-            : nullptr,
+        .Annotation = std::move(annotation),
     };
 }
 
@@ -2826,7 +2830,8 @@ llvm::json::Object BuildBundle(
     if (!plan) {
         return ErrorObject("parse", plan.error().ToString());
     }
-    auto externalCatalog = std::move(plan->ExternalCatalog);
+    auto annotation = std::move(plan->Annotation);
+    auto externalCatalog = annotation.ExternalCatalog;
     auto logicalPlan = std::move(plan->Plan);
 
     NQdb::TPlanPassDiagnostics planDiagnostics;
@@ -2837,7 +2842,7 @@ llvm::json::Object BuildBundle(
             .EnableRuntimeFilters = false,
             .LateMaterialization = {.Enabled = false},
             .Diagnostics = &planDiagnostics,
-            .Annotation = {.ExternalCatalog = externalCatalog},
+            .Annotation = annotation,
         });
     } catch (const NQumir::TError& e) {
         return ErrorObject("logical", e.ToString());

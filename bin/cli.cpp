@@ -277,7 +277,7 @@ std::chrono::duration<double> ProcessCpuTime() {
 int ExecutePlan(
     NQdb::TOperatorPtr plan,
     const TConfig& config,
-    std::shared_ptr<const NQdb::TExternalCatalogSnapshot> externalCatalog,
+    const NQdb::NKernel::TAnnotationContext& annotation,
     bool explain,
     std::chrono::steady_clock::time_point planStart)
 {
@@ -288,7 +288,7 @@ int ExecutePlan(
         .ForceRuntimeFilters = config.ForceRuntimeFilters,
         .LateMaterialization = config.LateMaterialization,
         .Diagnostics = &planDiagnostics,
-        .Annotation = {.ExternalCatalog = externalCatalog},
+        .Annotation = annotation,
     });
     auto planElapsed = std::chrono::steady_clock::now() - planStart;
     const bool sexprAvailable = NQdb::CollectMaterializations(plan).empty();
@@ -338,11 +338,11 @@ int ExecutePlan(
 
     auto buildStart = std::chrono::steady_clock::now();
     auto lowered = NQdb::NScheduler::LowerPlanToGraph(
-        plan, config.Scheduler, diagnostics, externalCatalog);
+        plan, config.Scheduler, diagnostics, annotation.ExternalCatalog);
     auto buildElapsed = std::chrono::steady_clock::now() - buildStart;
     auto llvmStart = std::chrono::steady_clock::now();
     NQdb::JitFinalizeKernels(
-        lowered.Kernels, diagnostics, externalCatalog);
+        lowered.Kernels, diagnostics, annotation.ExternalCatalog);
     auto llvmElapsed = std::chrono::steady_clock::now() - llvmStart;
 
     std::vector<std::string> outputNames;
@@ -435,15 +435,15 @@ int RunSqlStatement(
                 "cannot open table '" + std::string(table) + "': " + e.what()));
         }
     };
-    auto plan = NQdb::BuildPlan(statement, factory);
+    // Plan construction and the optimizer passes type against the same catalog snapshot.
+    NQdb::NKernel::TAnnotationContext annotation{.ExternalCatalog = catalog.Snapshot()};
+    auto plan = NQdb::BuildPlan(statement, factory, annotation);
 
     if (!plan) {
         std::cerr << plan.error().ToString() << "\n";
         return 1;
     }
-    auto snapshot = catalog.Snapshot();
-    return ExecutePlan(
-        std::move(*plan), config, std::move(snapshot), explain, planStart);
+    return ExecutePlan(std::move(*plan), config, annotation, explain, planStart);
 }
 
 int RunQuery(
@@ -487,7 +487,7 @@ int RunQuery(
         std::cerr << plan.error().ToString() << "\n";
         return 1;
     }
-    return ExecutePlan(std::move(*plan), config, nullptr, explain, planStart);
+    return ExecutePlan(std::move(*plan), config, {}, explain, planStart);
 }
 
 std::string HistoryPath() {

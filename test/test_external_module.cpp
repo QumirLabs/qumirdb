@@ -15,6 +15,7 @@
 #include <qumir/parser/type.h>
 
 #include <array>
+#include <cmath>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
@@ -357,6 +358,65 @@ TEST(ExternalModuleCatalog, OzlangFunctionsAreExportedAndRunWithoutCreateFunctio
     ASSERT_EQ(output.ColumnCount, 1);
     const auto* result = reinterpret_cast<const double*>(output.Columns[0].Data);
     EXPECT_DOUBLE_EQ(result[0], 9.0);
+    Release(&output);
+    EXPECT_FALSE(runtime->Next(output));
+}
+
+TEST(ExternalModuleCatalog, StddevArgumentTypesExternalFunctions) {
+    NQumir::NCodeGen::TLLVMInitializer llvmInit;
+    TExternalModuleCatalog catalog;
+    auto statements = ParseAll(
+        "CREATE MODULE math LANGUAGE ozlang AS $$\n"
+        "(block\n"
+        "  (fun oz_square ((var x f64)) -> f64\n"
+        "    (block (return (* x x)))))\n"
+        "$$;"
+        "SELECT stddev_samp(oz_square(x)) AS deviation FROM points;");
+    ApplyDefinitions(catalog, {statements[0]});
+
+    std::array<double, 3> values{1.0, 2.0, 3.0};
+    std::array<TColumn, 1> columns{
+        TColumn{.Data = reinterpret_cast<char*>(values.data())},
+    };
+    TRowSet batch{
+        .Columns = columns.data(),
+        .ColumnCount = 1,
+        .RowCount = 3,
+        .RefCount = 1,
+    };
+    TMockSource source(
+        {"x"}, {std::make_shared<TFloatType>()}, {batch});
+    auto build = [&](const NKernel::TAnnotationContext& annotation) {
+        return BuildPlan(statements[1], [&](std::string_view table)
+            -> std::expected<TOperatorPtr, NQumir::TError>
+        {
+            return std::make_shared<TSourceOperator>(source, std::string(table));
+        }, annotation);
+    };
+    // The aggregate argument is typed while the plan is built, so the builder
+    // needs the catalog that declares the function.
+    auto untyped = build({});
+    ASSERT_FALSE(untyped);
+    EXPECT_NE(untyped.error().ToString().find("oz_square"), std::string::npos)
+        << untyped.error().ToString();
+
+    auto snapshot = catalog.Snapshot();
+    NKernel::TAnnotationContext annotation{.ExternalCatalog = snapshot};
+    auto plan = build(annotation);
+    ASSERT_TRUE(plan) << plan.error().ToString();
+    ApplyPlanPasses(*plan, {
+        .EnableCbo = false,
+        .Annotation = annotation,
+    });
+    auto runtime = RunPlan(*plan, {}, snapshot);
+
+    TRowSet output{};
+    ASSERT_TRUE(runtime->Next(output));
+    ASSERT_EQ(output.RowCount, 1);
+    ASSERT_EQ(output.ColumnCount, 1);
+    const auto* result = reinterpret_cast<const double*>(output.Columns[0].Data);
+    // stddev_samp of {1, 4, 9}.
+    EXPECT_NEAR(result[0], std::sqrt(49.0 / 3.0), 1e-9);
     Release(&output);
     EXPECT_FALSE(runtime->Next(output));
 }

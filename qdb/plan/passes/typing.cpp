@@ -94,6 +94,13 @@ void AnnotateTypes(
         AnnotateTypes(input, context);
     }
 
+    AnnotateOperatorType(root, context);
+}
+
+void AnnotateOperatorType(
+    const TOperatorPtr& root,
+    const NKernel::TAnnotationContext& context)
+{
     if (auto maybe = TMaybeOp<TSourceOperator>(root)) {
         auto src = maybe.Cast();
         // If QualifyColumns has already set a qualified schema, keep it.
