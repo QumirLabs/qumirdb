@@ -1,1 +1,1 @@
-SELECT a FROM t LEFT JOIN s USING (id);
+SELECT t.a FROM t LEFT JOIN s USING (id);

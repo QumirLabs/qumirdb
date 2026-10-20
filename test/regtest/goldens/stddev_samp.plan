@@ -1,9 +1,9 @@
 (rel project
   (rel aggregate
-    (rel project (rel source "t") (v v) (arg_0 (* v v)) (__group__ 1))
+    (rel project (rel source "t") (arg_0 (cast v f64)) (arg_1 (* (cast v f64) (cast v f64))) (v v) (__group__ 1))
     (keys __group__)
-    (agg sum_0 sum v)
-    (agg sum_1 sum arg_0)
+    (agg sum_0 sum arg_0)
+    (agg sum_1 sum arg_1)
     (agg count_2 count v))
   (s (if
       (< count_2 2)
