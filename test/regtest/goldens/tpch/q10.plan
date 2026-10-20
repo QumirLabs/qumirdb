@@ -1,7 +1,7 @@
 top-sort [revenue desc] limit 20
 └─ project (c_custkey, c_name, revenue, c_acctbal, n_name, c_address, c_phone, c_comment) (rows≈1 cost≈15K)
-   └─ aggregate keys=[c_custkey, c_name, c_acctbal, c_phone, n_name, c_address, c_comment] aggs=[sum_0=sum] (rows≈1 cost≈14.9K)
-      └─ project (c_custkey, c_name, c_acctbal, c_phone, n_name, c_address, c_comment, arg_0) (rows≈1 cost≈14.8K)
+   └─ aggregate keys=[customer.c_custkey, customer.c_name, customer.c_acctbal, customer.c_phone, nation.n_name, customer.c_address, customer.c_comment] aggs=[sum_0=sum] (rows≈1 cost≈14.9K)
+      └─ project (customer.c_custkey, customer.c_name, customer.c_acctbal, customer.c_phone, nation.n_name, customer.c_address, customer.c_comment, arg_0) (rows≈1 cost≈14.8K)
          └─ join inner [nation.n_nationkey = customer.c_nationkey] emit-filter 1 from right (rows≈1 cost≈14.7K)
             ├─ source nation AS nation use-filter 1 keys=[nation.n_nationkey] (rows≈10 cost≈200)
             └─ join inner [orders.o_custkey = customer.c_custkey] emit-filter 2 from left (rows≈1 cost≈10.2K)

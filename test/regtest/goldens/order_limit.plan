@@ -1,1 +1,1 @@
-(rel limit (rel sort (rel project (rel source "t") (a a)) (a desc nulls-last)) (limit 10) (offset 5))
+(rel limit (rel sort (rel project (rel source "t" "t") (a |t.a|)) (a desc nulls-last)) (limit 10) (offset 5))

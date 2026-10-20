@@ -1,6 +1,6 @@
 project (a, g, c)
 └─ sort [g desc, __sort_0 asc nulls-first, c asc]
    └─ project (a, g, c, __sort_0) (rows≈4 cost≈464)
-      └─ aggregate keys=[a] aggs=[count_0=count] (rows≈4 cost≈336)
-         └─ project (a) (rows≈6 cost≈96)
+      └─ aggregate keys=[t.a] aggs=[count_0=count] (rows≈4 cost≈336)
+         └─ project (t.a) (rows≈6 cost≈96)
             └─ source t AS t (rows≈6 cost≈48)

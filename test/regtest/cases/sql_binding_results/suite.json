@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "fixtures": {
+    "left": {"json": "tables/t.json"},
+    "right": {"json": "tables/u.json"}
+  },
+  "tables": {
+    "t": "left",
+    "u": "right"
+  },
+  "variants": ["single", "threaded"],
+  "cases": {
+    "star_over_left_join.sql": {"order": "ordered"},
+    "order_by_with_selected_subquery.sql": {"order": "ordered"},
+    "exists_inner_name_shadows_outer.sql": {"order": "ordered"},
+    "order_by_qualified_distinct_output.sql": {"order": "ordered"},
+    "order_by_rebound_aggregate.sql": {"order": "ordered"},
+    "star_and_column_order_by.sql": {"order": "ordered"},
+    "parenthesized_body_order_by.sql": {"order": "ordered"}
+  }
+}

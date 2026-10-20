@@ -1,6 +1,6 @@
 (rel project
   (rel filter
-    (rel aggregate (rel source "t") (keys c) (agg sum_0 sum a) (agg sum_1 sum b))
+    (rel aggregate (rel source "t" "t") (keys |t.c|) (agg sum_0 sum |t.a|) (agg sum_1 sum |t.b|))
     (&& (> sum_0 1) (> sum_1 2)))
   (col0 sum_0)
   (col1 sum_1))

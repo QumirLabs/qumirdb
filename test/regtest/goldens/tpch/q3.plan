@@ -1,7 +1,7 @@
 top-sort [revenue desc, o_orderdate asc] limit 10
 └─ project (l_orderkey, revenue, o_orderdate, o_shippriority) (rows≈1 cost≈9.7K)
-   └─ aggregate keys=[l_orderkey, o_orderdate, o_shippriority] aggs=[sum_0=sum] (rows≈1 cost≈9.7K)
-      └─ project (l_orderkey, o_orderdate, o_shippriority, arg_0) (rows≈2 cost≈9.6K)
+   └─ aggregate keys=[lineitem.l_orderkey, orders.o_orderdate, orders.o_shippriority] aggs=[sum_0=sum] (rows≈1 cost≈9.7K)
+      └─ project (lineitem.l_orderkey, orders.o_orderdate, orders.o_shippriority, arg_0) (rows≈2 cost≈9.6K)
          └─ join inner [lineitem.l_orderkey = orders.o_orderkey] emit-filter 1 from right (rows≈2 cost≈9.6K)
             ├─ filter (> |lineitem.l_shipdate| (: 9209 i32)) (rows≈7 cost≈480)
             │  └─ source lineitem AS lineitem row-groups (> |lineitem.l_shipdate| (: 9209 i32)) use-filter 1 keys=[lineitem.l_orderkey] (rows≈10 cost≈240)

@@ -1,8 +1,10 @@
 # Logical plan build
 
-SQL AST → an unqualified, untyped logical operator tree. The builder is
-deliberately naive: it never extracts join keys, pushes predicates, or reorders
-joins — those are optimizer passes that run afterwards (see
+SQL AST → a typed logical operator tree whose expressions reference columns by
+name. The builder binds SQL names while it builds: FROM items, subqueries and
+each SELECT are built bottom-up, so every expression binds against the typed
+outputs of its inputs. It never extracts join keys, pushes predicates, or
+reorders joins — those are optimizer passes that run afterwards (see
 [join_reorder.md](join_reorder.md), [predicate_pushdown.md](predicate_pushdown.md),
 [decorrelation.md](decorrelation.md)).
 
@@ -15,8 +17,11 @@ parse → BuildPlan → source aliases / column qualification / typing
       → physical lowering
 ```
 
-`BuildPlan` produces everything left of `AssignSourceAliases`. Column names are
-the raw SQL identifiers (bare or `alias.col`); no types are attached.
+`BuildPlan` binds and types the plan: every operator is typed as it is
+created, and every SQL reference is rewritten to a physical column name. The
+source-alias and qualification passes that follow leave such a plan unchanged
+and serve plans written by hand; typing re-annotates it after rewrites change
+its structure.
 
 ## Operators produced
 
@@ -49,7 +54,7 @@ join inner            (empty keys)
 ```
 
 `a JOIN b ON <cond>` → one `join` whose whole `ON` is the **residual** (key
-extraction happens later). `USING (c)` → key `(c, c)`.
+extraction happens later). `USING (c)` → a key on the `c` column of each side.
 
 ### WHERE → conjuncts, decorrelation, filter
 
@@ -126,7 +131,7 @@ grouped empty input is not accidentally changed into a global aggregate. The
 removed expressions stay in SELECT/HAVING and are evaluated from the retained
 key once per output group.
 
-This rewrite intentionally runs inside `BuildAggregate`, after GROUP BY aliases
+This rewrite intentionally runs in the builder, after GROUP BY aliases
 are resolved and before computed keys become materialized `gb_n` columns. A
 later plan pass would otherwise see only the synthetic column reference and
 would have to reconstruct its dependency through the lower project. In the
@@ -136,6 +141,33 @@ rewrite.
 
 `GROUPING SETS`, `ROLLUP`, and `CUBE` are excluded because their key subsets and
 `GROUPING()` bit positions are observable.
+
+### Name binding and output labels
+
+A built relation carries, next to its typed plan, the SQL label of each output
+column: `alias.col` for a FROM item, the output name for a SELECT. Labels are
+what SQL references see. A reference matches a label by its qualified name or
+by its bare column part; an ambiguous name, or a name that is no label, is an
+error. Inside a subquery, names of its own FROM shadow those of the enclosing
+query. Physical names only need to be unique where relations meet: a join
+renames colliding columns of its right input, a SELECT with repeated labels
+gives its outputs internal names, and the query's final projection restores the
+public labels. Unaliased sources are named after their table and numbered when
+one CTE definition or the main query reads the table again (`date_dim`,
+`date_dim_1`).
+
+Grouping expressions and aggregate calls bind against the aggregate input, and
+the SELECT output is typed before DISTINCT and ORDER BY. Stars expand over the
+FROM relation; helper columns added for subqueries do not become visible
+outputs. An ORDER BY name matches an output label, and output columns that share
+the label must be the same expression. An ORDER BY expression bound like the
+SELECT list refers to a selected expression, even when aggregation has changed
+how that expression is computed; any other expression becomes a hidden column
+of the top projection, over the distinct rows under SELECT DISTINCT. A name in
+such an expression that is no input column of that projection stands for the
+expression of the explicitly named output it refers to. Derived-table
+aliases and CTE column lists rename typed outputs, in place when a projection is
+on top.
 
 ### Affine integer aggregates
 
@@ -255,7 +287,6 @@ materialized.
 ## What the builder never does
 
 - extract equi-keys from `ON`/`WHERE` (keys stay empty / in residuals);
-- push predicates onto sources or reorder joins;
-- attach types or qualify columns.
+- push predicates onto sources or reorder joins.
 
 These are separate, idempotent passes documented alongside.

@@ -1,0 +1,6 @@
+sort [y asc]
+└─ project (y) (rows≈2 cost≈4.4K)
+   └─ join left_semi [t.x = u.x] (rows≈2 cost≈4.3K)
+      ├─ source t AS t (rows≈4 cost≈64)
+      └─ filter (> |u.z| 150) (rows≈2 cost≈96)
+         └─ source u AS u row-groups (> |u.z| 150) (rows≈3 cost≈48)

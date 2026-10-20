@@ -37,11 +37,7 @@ namespace {
 std::vector<TColumnReference> SortKeyReferences(const std::vector<TSortKey>& keys) {
     std::vector<TColumnReference> references;
     for (const auto& key : keys) {
-        // A key that names an output by position has no column until typing
-        // resolves it.
-        if (!key.ProjectionIndex) {
-            references.push_back({.Name = key.Column});
-        }
+        references.push_back({.Name = key.Column});
     }
     return references;
 }

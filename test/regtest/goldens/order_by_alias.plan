@@ -1,1 +1,1 @@
-(rel sort (rel project (rel source "t") (k a)) (k asc nulls-default))
+(rel sort (rel project (rel source "t" "t") (k |t.a|)) (k asc nulls-default))

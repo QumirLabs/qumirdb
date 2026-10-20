@@ -249,6 +249,28 @@ TEST(LateMaterialization, RejectsLargeLimitAndComputedOutput) {
     EXPECT_FALSE(TMaybeOp<TLateMaterializeOperator>(*computed));
 }
 
+TEST(LateMaterialization, BindsRepeatedLabelsBeforeLookupRewrite) {
+    TLookupMockSource source;
+    auto plan = BuildSqlPlan(
+        "SELECT \"EventTime\" AS a, \"Payload0\" AS a FROM hits ORDER BY \"Payload0\" LIMIT 10",
+        source);
+    ASSERT_TRUE(plan) << plan.error().ToString();
+    TPlanPassDiagnostics diagnostics;
+    ApplyPlanPasses(*plan, LateMaterializationOptions(&diagnostics));
+    auto late = TMaybeOp<TLateMaterializeOperator>(*plan);
+    ASSERT_TRUE(late);
+    ASSERT_EQ(late.Cast()->Columns().size(), 2);
+    EXPECT_EQ(late.Cast()->Columns()[0].OutputName, "a");
+    EXPECT_EQ(late.Cast()->Columns()[1].OutputName, "a");
+    EXPECT_EQ(late.Cast()->Columns()[0].PhysicalName, "EventTime");
+    EXPECT_EQ(late.Cast()->Columns()[1].PhysicalName, "Payload0");
+    auto sort = TMaybeOp<TTopSortOperator>(late.Cast()->Input());
+    ASSERT_TRUE(sort);
+    EXPECT_EQ(sort.Cast()->Keys()[0].Column,
+        sort.Cast()->Input()->OutputColumns()->Fields[0].first);
+    EXPECT_TRUE(diagnostics.LateMaterialization.Applied);
+}
+
 TEST(LateMaterialization, RejectsReservedUserOutputNames) {
     TLookupMockSource source;
     auto selectAlias = BuildSqlPlan(

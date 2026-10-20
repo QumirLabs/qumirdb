@@ -1,1 +1,1 @@
-(rel project (rel source "t") (x (+ a (* b c))))
+(rel project (rel source "t" "t") (x (+ |t.a| (* |t.b| |t.c|))))

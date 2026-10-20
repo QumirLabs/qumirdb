@@ -1,4 +1,4 @@
 project (count_1, a, sd) (rows≈2 cost≈336)
-└─ aggregate keys=[count_1] aggs=[sum_1=sum, count_0=count, sum_2=sum, sum_3=sum, count_2=count] (rows≈2 cost≈288)
-   └─ project (count_1, y, arg_1, arg_2) (rows≈3 cost≈144)
+└─ aggregate keys=[t.count_1] aggs=[sum_1=sum, count_0=count, sum_2=sum, sum_3=sum, count_2=count] (rows≈2 cost≈288)
+   └─ project (t.count_1, t.y, arg_1, arg_2) (rows≈3 cost≈144)
       └─ source t AS t (rows≈3 cost≈48)
