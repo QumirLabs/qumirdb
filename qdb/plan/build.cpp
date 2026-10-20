@@ -383,6 +383,7 @@ struct TRelation {
 
 struct TBuildContext {
     TTableSourceFactory Sources;
+    const NKernel::TAnnotationContext& Annotation;
 };
 
 std::vector<std::string> ColumnNames(const TOperatorPtr& plan) {
@@ -1214,7 +1215,8 @@ std::expected<TRelation, TError> BuildSelect(
     // to reducers over `k` would make the subtotal consume the masked key.
     TAggCollector collector(
         inputSchema ? inputSchema.Cast().get() : nullptr,
-        !multiSet);
+        !multiSet,
+        context.Annotation);
     const bool distinct = select.Quantifier == NSql::ESetQuantifier::Distinct;
     std::vector<TProjectionSpec> projections;
     std::unordered_map<std::string, NAst::TExprPtr> selectAliases;
@@ -1600,7 +1602,8 @@ std::expected<TRelation, TError> BuildSelect(
 
 std::expected<TRelation, TError> ApplyOrderBy(
     const NSql::TSqlQuery& query,
-    TRelation relation)
+    TRelation relation,
+    const TBuildContext& context)
 {
     if (!query.OrderBy || query.OrderBy->Items.empty()) {
         return relation;
@@ -1687,7 +1690,7 @@ std::expected<TRelation, TError> ApplyOrderBy(
             // Reuse the aggregate collector purely to detect aggregate calls:
             // a non-empty result means the expression aggregates but is not in
             // the select list, which cannot be materialized in a scalar project.
-            TAggCollector probe;
+            TAggCollector probe(nullptr, true, context.Annotation);
             auto scalar = probe.Rewrite(item->Expr);
             if (!scalar) {
                 return std::unexpected(scalar.error());
@@ -1904,7 +1907,7 @@ std::expected<TRelation, TError> BuildQuery(
         if (!plan) {
             return plan;
         }
-        auto ordered = ApplyOrderBy(query, std::move(*plan));
+        auto ordered = ApplyOrderBy(query, std::move(*plan), context);
         if (!ordered) {
             return ordered;
         }
@@ -1924,7 +1927,7 @@ std::expected<TRelation, TError> BuildQuery(
     // sources. Nested CTEs memoize into a DAG. Stack-local - definitions survive
     // via the shared_ptr the TCteRef holds.
     std::map<std::string, TCteDefinitionPtr> builtDefs;
-    TBuildContext inner;
+    TBuildContext inner{.Annotation = context.Annotation};
     inner.Sources = [&](std::string_view name) -> std::expected<TOperatorPtr, TError> {
         const std::string lower = ToLower(std::string(name));
         auto it = ctes.find(lower);
@@ -1955,7 +1958,7 @@ std::expected<TRelation, TError> BuildQuery(
     if (!plan) {
         return plan;
     }
-    auto ordered = ApplyOrderBy(query, std::move(*plan));
+    auto ordered = ApplyOrderBy(query, std::move(*plan), inner);
     if (!ordered) {
         return ordered;
     }
@@ -1966,13 +1969,14 @@ std::expected<TRelation, TError> BuildQuery(
 
 std::expected<TOperatorPtr, TError> BuildPlan(
     const NQdb::NSql::TSqlNodePtr& query,
-    const TTableSourceFactory& sources)
+    const TTableSourceFactory& sources,
+    const NKernel::TAnnotationContext& annotation)
 {
     auto root = NSql::TMaybeNode<NSql::TSqlQuery>(query);
     if (!root) {
         return std::unexpected(TError("expected a query"));
     }
-    TBuildContext context{.Sources = sources};
+    TBuildContext context{.Sources = sources, .Annotation = annotation};
     auto relation = BuildQuery(*root.Cast(), context);
     if (!relation) {
         return std::unexpected(relation.error());

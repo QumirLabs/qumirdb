@@ -641,7 +641,7 @@ std::expected<NAst::TTypePtr, TError> TAggCollector::StddevArgType(
 
     NAst::TTypePtr type;
     try {
-        type = NKernel::AnnotateExprType(agg.Arg, *InputSchema_);
+        type = NKernel::AnnotateExprType(agg.Arg, *InputSchema_, &Context_);
     } catch (const TError& error) {
         return std::unexpected(error);
     }
