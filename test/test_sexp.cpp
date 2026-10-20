@@ -261,6 +261,32 @@ TEST(SexpParser, ProjectColumnAliasesPrintRoundtrip) {
     EXPECT_EQ(PrintAst(expr, MakePrintOpts()), input);
 }
 
+TEST(SexpParser, ProjectRejectsMalformedColumnAliases) {
+    NQdb::TMockSource src({"pair"});
+    TRelParserOptions opts;
+    opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
+        return std::make_shared<TSourceOperator>(src, std::string(path));
+    };
+    auto parser = MakeParser(std::move(opts));
+    for (const auto& [input, message] : std::vector<std::pair<std::string, std::string>>{
+        {"(rel project (rel source \"data.parquet\") (first pair (aliases first)))",
+            "unknown projection attribute 'aliases'"},
+        {"(rel project (rel source \"data.parquet\") (first pair (column-aliases)))",
+            "empty projection column aliases"},
+        {"(rel project (rel source \"data.parquet\") "
+            "(first pair (column-aliases first second) (column-aliases a b)))",
+            "duplicate projection column aliases"},
+    }) {
+        SCOPED_TRACE(input);
+        std::istringstream in(input);
+        TTokenStream tokens(in);
+        auto parsed = parser.Parse(tokens);
+        ASSERT_FALSE(parsed.has_value());
+        EXPECT_NE(parsed.error().ToString().find(message), std::string::npos)
+            << parsed.error().ToString();
+    }
+}
+
 TEST(SexpParser, LateMaterializePrintRoundtrip) {
     NQdb::TMockSource src({"x"});
     TRelParserOptions opts;
