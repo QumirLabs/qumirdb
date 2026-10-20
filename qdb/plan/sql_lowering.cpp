@@ -21,6 +21,7 @@ namespace {
 
 namespace NAst = NQumir::NAst;
 namespace NSql = NQdb::NSql;
+using namespace NAst::NLiterals;
 using NQumir::TError;
 using NQumir::TLocation;
 
@@ -195,6 +196,9 @@ NSql::TSqlPtr<NSql::TWindowExpr> CloneSqlWindowExpr(
     return copy;
 }
 
+// TODO(#129): Move the affine coefficient arithmetic below to the common VM pipeline
+// (ConstFold / TVmFunction::Eval). Each evaluation there compiles a VM function
+// (~4 ms), and planning-time compilation is not optimized yet.
 struct TAffineForm {
     NAst::TExprPtr Base;
     int64_t Scale = 1;
@@ -202,11 +206,15 @@ struct TAffineForm {
 };
 
 std::optional<int64_t> IntegerLiteral(const NAst::TExprPtr& expr) {
-    auto number = NAst::TMaybeNode<NAst::TNumberExpr>(expr);
-    if (!number || number.Cast()->IsFloat()) {
+    auto maybeNumber = NAst::TMaybeNode<NAst::TNumberExpr>(expr);
+    if (!maybeNumber) {
         return std::nullopt;
     }
-    return number.Cast()->IntValue;
+    const auto number = maybeNumber.Cast();
+    if (number->IsFloat()) {
+        return std::nullopt;
+    }
+    return number->IntValue;
 }
 
 std::optional<int64_t> AddExact(int64_t left, int64_t right) {
@@ -238,32 +246,31 @@ std::optional<TAffineForm> ExtractAffine(const NAst::TExprPtr& expr) {
     if (NAst::TMaybeNode<NAst::TIdentExpr>(expr)) {
         return TAffineForm{.Base = expr};
     }
-    auto binary = NAst::TMaybeNode<NAst::TBinaryExpr>(expr);
-    if (!binary) {
+    auto maybeBinary = NAst::TMaybeNode<NAst::TBinaryExpr>(expr);
+    if (!maybeBinary) {
         return std::nullopt;
     }
+    const auto binary = maybeBinary.Cast();
 
-    const auto leftConstant = IntegerLiteral(binary.Cast()->Left);
-    const auto rightConstant = IntegerLiteral(binary.Cast()->Right);
+    const auto leftConstant = IntegerLiteral(binary->Left);
+    const auto rightConstant = IntegerLiteral(binary->Right);
     if (leftConstant.has_value() == rightConstant.has_value()) {
         return std::nullopt;
     }
     const bool constantOnLeft = leftConstant.has_value();
     const int64_t constant = constantOnLeft ? *leftConstant : *rightConstant;
-    auto affine = ExtractAffine(constantOnLeft
-        ? binary.Cast()->Right
-        : binary.Cast()->Left);
+    auto affine = ExtractAffine(constantOnLeft ? binary->Right : binary->Left);
     if (!affine) {
         return std::nullopt;
     }
 
-    if (binary.Cast()->Operator == "+") {
+    if (binary->Operator == "+"_op) {
         auto offset = AddExact(affine->Offset, constant);
         if (!offset) return std::nullopt;
         affine->Offset = *offset;
         return affine;
     }
-    if (binary.Cast()->Operator == "-") {
+    if (binary->Operator == "-"_op) {
         auto scale = constantOnLeft
             ? SubExact(0, affine->Scale)
             : std::optional<int64_t>(affine->Scale);
@@ -275,7 +282,7 @@ std::optional<TAffineForm> ExtractAffine(const NAst::TExprPtr& expr) {
         affine->Offset = *offset;
         return affine;
     }
-    if (binary.Cast()->Operator == "*") {
+    if (binary->Operator == "*"_op) {
         auto scale = MulExact(affine->Scale, constant);
         auto offset = MulExact(affine->Offset, constant);
         if (!scale || !offset) return std::nullopt;
@@ -342,24 +349,20 @@ std::optional<std::string> AffineGroupKeyBase(const NAst::TExprPtr& expr) {
     if (auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(expr)) {
         return ident.Cast()->Name;
     }
-    auto binary = NAst::TMaybeNode<NAst::TBinaryExpr>(expr);
-    if (!binary || (binary.Cast()->Operator != "+" &&
-                    binary.Cast()->Operator != "-" &&
-                    binary.Cast()->Operator != "*"))
-    {
+    auto maybeBinary = NAst::TMaybeNode<NAst::TBinaryExpr>(expr);
+    if (!maybeBinary) {
         return std::nullopt;
     }
-    auto isIntegerLiteral = [](const NAst::TExprPtr& candidate) {
-        auto number = NAst::TMaybeNode<NAst::TNumberExpr>(candidate);
-        return number && !number.Cast()->IsFloat();
-    };
-    const bool leftConstant = isIntegerLiteral(binary.Cast()->Left);
-    const bool rightConstant = isIntegerLiteral(binary.Cast()->Right);
+    const auto binary = maybeBinary.Cast();
+    if (binary->Operator != "+"_op && binary->Operator != "-"_op && binary->Operator != "*"_op) {
+        return std::nullopt;
+    }
+    const bool leftConstant = IntegerLiteral(binary->Left).has_value();
+    const bool rightConstant = IntegerLiteral(binary->Right).has_value();
     if (leftConstant == rightConstant) {
         return std::nullopt;
     }
-    return AffineGroupKeyBase(
-        leftConstant ? binary.Cast()->Right : binary.Cast()->Left);
+    return AffineGroupKeyBase(leftConstant ? binary->Right : binary->Left);
 }
 
 bool IsLiteralGroupKey(const NAst::TExprPtr& expr) {
