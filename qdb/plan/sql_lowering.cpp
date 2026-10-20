@@ -197,8 +197,9 @@ NSql::TSqlPtr<NSql::TWindowExpr> CloneSqlWindowExpr(
 }
 
 // TODO(#129): Move the affine coefficient arithmetic below to the common VM pipeline
-// (ConstFold / TVmFunction::Eval). Each evaluation there compiles a VM function
-// (~4 ms), and planning-time compilation is not optimized yet.
+// once planning-time evaluation is fast: ConstFold compiles a fresh TVmFunction per
+// call (~4 ms). The move must keep rejecting coefficients that overflow i64, which
+// the VM would wrap.
 struct TAffineForm {
     NAst::TExprPtr Base;
     int64_t Scale = 1;
@@ -266,7 +267,9 @@ std::optional<TAffineForm> ExtractAffine(const NAst::TExprPtr& expr) {
 
     if (binary->Operator == "+"_op) {
         auto offset = AddExact(affine->Offset, constant);
-        if (!offset) return std::nullopt;
+        if (!offset) {
+            return std::nullopt;
+        }
         affine->Offset = *offset;
         return affine;
     }
@@ -277,7 +280,9 @@ std::optional<TAffineForm> ExtractAffine(const NAst::TExprPtr& expr) {
         auto offset = constantOnLeft
             ? SubExact(constant, affine->Offset)
             : SubExact(affine->Offset, constant);
-        if (!scale || !offset) return std::nullopt;
+        if (!scale || !offset) {
+            return std::nullopt;
+        }
         affine->Scale = *scale;
         affine->Offset = *offset;
         return affine;
@@ -285,7 +290,9 @@ std::optional<TAffineForm> ExtractAffine(const NAst::TExprPtr& expr) {
     if (binary->Operator == "*"_op) {
         auto scale = MulExact(affine->Scale, constant);
         auto offset = MulExact(affine->Offset, constant);
-        if (!scale || !offset) return std::nullopt;
+        if (!scale || !offset) {
+            return std::nullopt;
+        }
         affine->Scale = *scale;
         affine->Offset = *offset;
         return affine;
