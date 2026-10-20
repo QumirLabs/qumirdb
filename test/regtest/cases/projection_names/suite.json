@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "fixtures": {
+    "rows": {"json": "tables/t.json"}
+  },
+  "tables": {"t": "rows"},
+  "variants": ["single", "threaded"],
+  "cases": {
+    "pruned_subquery_column.sql": {"order": "unordered"},
+    "pruned_cte_column.sql": {"order": "unordered"}
+  }
+}

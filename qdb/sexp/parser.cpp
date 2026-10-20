@@ -281,9 +281,14 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
                         co_return IParseHandle::MakeError(attrTok,
                             "expected projection attribute or ')'");
                     }
-                    auto attr = ReadIdentifier(h, h.Next());
+                    auto attrNameTok = h.Next();
+                    auto attr = ReadIdentifier(h, attrNameTok);
                     if (!attr || *attr != "column-aliases") {
-                        co_return IParseHandle::MakeError(attrTok, "unknown projection attribute");
+                        co_return IParseHandle::MakeError(attrNameTok, "unknown projection attribute"
+                            + (attr ? " '" + *attr + "'" : std::string()));
+                    }
+                    if (!spec.ColumnAliases.empty()) {
+                        co_return IParseHandle::MakeError(attrNameTok, "duplicate projection column aliases");
                     }
                     while (true) {
                         auto aliasTok = h.Next();
@@ -296,6 +301,9 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
                                 "expected projection column alias");
                         }
                         spec.ColumnAliases.push_back(std::move(*alias));
+                    }
+                    if (spec.ColumnAliases.empty()) {
+                        co_return IParseHandle::MakeError(attrNameTok, "empty projection column aliases");
                     }
                 }
                 specs.push_back(std::move(spec));
