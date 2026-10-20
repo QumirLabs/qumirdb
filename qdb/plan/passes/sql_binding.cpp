@@ -27,7 +27,100 @@ namespace NQdb {
 namespace {
 
 namespace NAst = NQumir::NAst;
+using namespace NAst::NLiterals;
 using NQumir::TError;
+
+struct TSelectOrdinalItem {
+    NAst::TExprPtr Expression;
+    std::optional<size_t> Width = 1;
+    bool Scalar = true;
+    bool Opaque = false;
+    // Why the width is unknown; reported only when a position needs it.
+    std::optional<TError> WidthError;
+};
+
+std::expected<std::optional<size_t>, TError> SqlOutputOrdinal(
+    const NAst::TExprPtr& expression, std::string_view clause)
+{
+    auto operand = expression;
+    bool negative = false;
+    if (auto maybeUnary = NAst::TMaybeNode<NAst::TUnaryExpr>(expression)) {
+        const auto unary = maybeUnary.Cast();
+        if (unary->Operator == "-"_op) {
+            operand = unary->Operand;
+            negative = true;
+        }
+    }
+    auto maybeNumber = NAst::TMaybeNode<NAst::TNumberExpr>(operand);
+    if (!maybeNumber) {
+        return std::optional<size_t>{};
+    }
+    const auto number = maybeNumber.Cast();
+    if (!NAst::TMaybeType<NAst::TIntegerType>(number->Type)) {
+        return std::optional<size_t>{};
+    }
+    const auto value = number->IntValue;
+    if (negative || value <= 0 || !std::in_range<size_t>(value - 1)) {
+        return std::unexpected(TError(expression->Location,
+            std::string(clause) + " position must be a positive integer"));
+    }
+    return std::optional<size_t>{static_cast<size_t>(value - 1)};
+}
+
+std::expected<std::optional<NAst::TExprPtr>, TError> BindGroupByOrdinal(
+    const NAst::TExprPtr& expression,
+    const std::vector<TSelectOrdinalItem>& selectItems)
+{
+    auto ordinal = SqlOutputOrdinal(expression, "GROUP BY");
+    if (!ordinal) {
+        return std::unexpected(ordinal.error());
+    }
+    if (!*ordinal) {
+        return std::optional<NAst::TExprPtr>{};
+    }
+    size_t index = **ordinal;
+    for (const auto& item : selectItems) {
+        if (!item.Width) {
+            return std::unexpected(item.WidthError ? *item.WidthError : TError(expression->Location,
+                "GROUP BY position requires resolved SELECT projection widths"));
+        }
+        if (index >= *item.Width) {
+            index -= *item.Width;
+            continue;
+        }
+        if (item.Opaque) {
+            return std::unexpected(TError(expression->Location,
+                "GROUP BY position must refer to a scalar input expression"));
+        }
+        if (!item.Scalar) {
+            return std::unexpected(TError(expression->Location,
+                "GROUP BY position in a struct-return projection is not supported"));
+        }
+        return std::optional<NAst::TExprPtr>{item.Expression};
+    }
+    return std::unexpected(TError(expression->Location,
+        "GROUP BY position " + std::to_string(**ordinal + 1) + " is not in the select list"));
+}
+
+// GROUPING() is rewritten only after the keys are known. Its value is an i32
+// bit mask, so the width of an item does not depend on its arguments.
+NAst::TExprPtr TypeGroupingCalls(NAst::TExprPtr expression) {
+    if (!expression) {
+        return expression;
+    }
+    if (auto maybeCall = NAst::TMaybeNode<NAst::TCallExpr>(expression)) {
+        auto callee = NAst::TMaybeNode<NAst::TIdentExpr>(maybeCall.Cast()->Callee);
+        if (callee && ToLower(callee.Cast()->Name) == "grouping") {
+            auto mask = std::make_shared<NAst::TNumberExpr>(expression->Location, int64_t{0});
+            mask->Type = std::make_shared<NAst::TIntegerType>(NAst::TIntegerType::I32);
+            return mask;
+        }
+    }
+    for (auto* child : expression->MutableChildren()) {
+        *child = TypeGroupingCalls(std::move(*child));
+    }
+    return expression;
+}
 
 struct TNameBinding {
     std::shared_ptr<NAst::TStructType> Schema;
@@ -101,6 +194,7 @@ struct TBoundPlan {
     std::vector<std::string> Labels;
     std::unordered_map<std::string, size_t> SelectedExpressions;
     std::vector<std::optional<std::string>> Identities;
+    std::vector<size_t> VisibleOutputs;
     std::shared_ptr<TProjectOperator> SelectProject;
     std::optional<TNameBinding> SelectInput;
     std::optional<TGroupingResolution> Grouping;
@@ -304,8 +398,27 @@ private:
                 throw TError(spec.Arg->Location, "GROUPING() inside aggregate arguments is not supported");
             }
         }
+        std::vector<std::pair<std::string, NAst::TTypePtr>> argumentFields;
+        auto typedSpecs = specs;
+        for (size_t i = 0; i < typedSpecs.size(); ++i) {
+            auto& spec = typedSpecs[i];
+            if (spec.Arg) {
+                auto type = NKernel::AnnotateExprType(spec.Arg, *schema, &Context_);
+                auto name = "argument_" + std::to_string(i);
+                argumentFields.emplace_back(name, std::move(type));
+                spec.Arg = Ident({}, std::move(name));
+            }
+        }
+        auto argumentSchema = std::make_shared<NAst::TStructType>(std::move(argumentFields));
+        auto resultSchema = NAst::TMaybeType<NAst::TStructType>(
+            ComputeAggregateOutputType(argumentSchema, {}, typedSpecs));
+        auto expressionFields = schema->Fields;
+        expressionFields.insert(expressionFields.end(), resultSchema.Cast()->Fields.begin(),
+            resultSchema.Cast()->Fields.end());
+        const NAst::TStructType expressionSchema(std::move(expressionFields));
         const auto visible = Bound_.at(binding.Select->Input.get());
         auto selected = ExpandItems(binding.Select->Items, {visible.Plan->OutputColumns(), visible.Labels});
+        std::vector<TSelectOrdinalItem> ordinalItems;
         std::unordered_map<std::string, NAst::TExprPtr> aliases;
         std::unordered_set<std::string> ambiguous;
         for (auto& item : selected) {
@@ -316,6 +429,28 @@ private:
                 item.Expression = CloneExpr(item.Expression);
                 BindColumns(item.Expression, inputNames);
             }
+            TSelectOrdinalItem ordinal{.Expression = item.Expression, .Opaque = item.Opaque};
+            ordinal.Width = item.ColumnAliases.empty() ? 1 : item.ColumnAliases.size();
+            ordinal.Scalar = item.ColumnAliases.empty();
+            if (!item.Opaque) {
+                try {
+                    auto lowered = collector->Rewrite(TypeGroupingCalls(CloneExpr(item.Expression)));
+                    if (!lowered) {
+                        throw lowered.error();
+                    }
+                    auto type = NKernel::AnnotateExprType(*lowered, expressionSchema, &Context_);
+                    if (!type) {
+                        ordinal.Width.reset();
+                    } else if (auto structure = NAst::TMaybeType<NAst::TStructType>(NAst::UnwrapNamedType(type))) {
+                        ordinal.Width = structure.Cast()->Fields.size();
+                        ordinal.Scalar = false;
+                    }
+                } catch (const TError& error) {
+                    ordinal.Width.reset();
+                    ordinal.WidthError = error;
+                }
+            }
+            ordinalItems.push_back(std::move(ordinal));
             if (!item.ImplicitName && item.ColumnAliases.empty()) {
                 if (!aliases.emplace(item.Name, item.Expression).second) {
                     ambiguous.insert(item.Name);
@@ -335,19 +470,27 @@ private:
         }
         size_t nextGroupKey = 0;
         for (auto& key : keys) {
-            key.Expression = CloneExpr(key.Expression);
-            // Input columns take precedence; only an unknown name may be a SELECT alias.
-            auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(key.Expression);
-            if (!BindColumns(key.Expression, inputNames, static_cast<bool>(ident)) && ident) {
-                const auto name = ident.Cast()->Name;
-                if (ambiguous.contains(name)) {
-                    throw TError(key.Expression->Location, "GROUP BY alias is ambiguous: " + name);
+            auto target = BindGroupByOrdinal(key.Expression, ordinalItems);
+            if (!target) {
+                throw target.error();
+            }
+            if (*target) {
+                key.Expression = **target;
+            } else {
+                key.Expression = CloneExpr(key.Expression);
+                // Input columns take precedence; only an unknown name may be a SELECT alias.
+                auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(key.Expression);
+                if (!BindColumns(key.Expression, inputNames, static_cast<bool>(ident)) && ident) {
+                    const auto name = ident.Cast()->Name;
+                    if (ambiguous.contains(name)) {
+                        throw TError(key.Expression->Location, "GROUP BY alias is ambiguous: " + name);
+                    }
+                    auto alias = aliases.find(name);
+                    if (alias == aliases.end()) {
+                        throw TError(key.Expression->Location, "unknown input column: " + name);
+                    }
+                    key.Expression = alias->second;
                 }
-                auto alias = aliases.find(name);
-                if (alias == aliases.end()) {
-                    throw TError(key.Expression->Location, "unknown input column: " + name);
-                }
-                key.Expression = alias->second;
             }
             if (HasOpaqueExpression(key.Expression) || HasGroupingCall(key.Expression)) {
                 throw TError(key.Expression->Location, "GROUP BY key must refer to a scalar input expression");
@@ -569,6 +712,9 @@ private:
                 }
             }
             for (size_t field = 0; field < width; ++field) {
+                if (!originals[i].Hidden) {
+                    result.VisibleOutputs.push_back(offset + field);
+                }
                 result.Identities.push_back(canonical
                     ? std::optional<std::string>{*canonical + ":" + std::to_string(field)}
                     : std::nullopt);
@@ -598,8 +744,21 @@ private:
         }
         size_t next = 0;
         for (const auto& key : sort->UnresolvedKeys()) {
-            std::optional<size_t> index;
-            if (auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(key.Expression)) {
+            auto position = SqlOutputOrdinal(key.Expression, "ORDER BY");
+            if (!position) {
+                throw position.error();
+            }
+            std::optional<size_t> index = *position;
+            if (index) {
+                const auto count = child.VisibleOutputs.empty() ? fields.size() : child.VisibleOutputs.size();
+                if (*index >= count) {
+                    throw TError(key.Expression->Location, "ORDER BY position " + std::to_string(*index + 1)
+                        + " is not in the select list");
+                }
+                if (!child.VisibleOutputs.empty()) {
+                    index = child.VisibleOutputs[*index];
+                }
+            } else if (auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(key.Expression)) {
                 for (size_t i = 0; i < child.Labels.size(); ++i) {
                     if (child.Labels[i] != ident.Cast()->Name) {
                         continue;

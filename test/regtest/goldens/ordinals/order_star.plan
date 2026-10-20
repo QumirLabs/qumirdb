@@ -1,0 +1,3 @@
+top-sort [y desc] limit 2
+└─ project (x, y, n) (rows≈5 cost≈240)
+   └─ source t AS t (rows≈5 cost≈120)

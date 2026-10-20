@@ -1,0 +1,4 @@
+sort [y asc]
+└─ project (x, y, n) (rows≈5 cost≈360)
+   └─ aggregate keys=[t.x, t.y, t.n] (rows≈5 cost≈240)
+      └─ source t AS t (rows≈5 cost≈120)

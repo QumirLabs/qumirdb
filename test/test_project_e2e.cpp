@@ -160,6 +160,167 @@ TEST(SqlBindingE2E, RepeatedLabelsSortByInputExpressions) {
     }
 }
 
+TEST(SqlOrdinalsE2E, RepeatedOutputLabelsKeepSelectedFieldAndMultiplicity) {
+    for (auto mode : {
+        NScheduler::EExecutionMode::SingleThreadedScheduler,
+        NScheduler::EExecutionMode::ThreadedScheduler})
+    {
+        for (const auto& [sql, expected] : {
+            std::pair{"SELECT x AS a, y AS a FROM t ORDER BY 2, 1",
+                std::vector<int64_t>{2, 2, 1, 3}},
+            std::pair{"SELECT x AS a, y AS a FROM t ORDER BY 2 DESC LIMIT 2",
+                std::vector<int64_t>{3, 1}},
+            std::pair{"SELECT x AS a, n AS a FROM t ORDER BY 2 NULLS LAST, 1",
+                std::vector<int64_t>{2, 2, 3, 1}},
+            std::pair{"SELECT x AS a, n AS a FROM t ORDER BY 2 NULLS FIRST, 1 LIMIT 3",
+                std::vector<int64_t>{1, 2, 2}},
+        }) {
+            SCOPED_TRACE(sql);
+            std::array<int64_t, 4> x = {1, 2, 3, 2};
+            std::array<int64_t, 4> y = {20, 10, 30, 10};
+            uint8_t mask = 0b00001110;
+            std::array<TColumn, 3> columns = {
+                TColumn{.Data = reinterpret_cast<char*>(x.data())},
+                TColumn{.Data = reinterpret_cast<char*>(y.data())},
+                TColumn{.Data = reinterpret_cast<char*>(y.data()), .Mask = &mask},
+            };
+            auto i64 = std::make_shared<TIntegerType>();
+            TMockSource source({"x", "y", "n"},
+                {i64, i64, std::make_shared<TNullable>(i64)},
+                {TRowSet{.Columns = columns.data(), .ColumnCount = 3,
+                    .RowCount = 4, .RefCount = 1}});
+            NScheduler::TSettings settings;
+            settings.Scheduler.Mode = mode;
+            settings.Scheduler.WorkerCount = 2;
+            auto runtime = SqlPlan(sql, {{"t", &source}}, settings, true);
+            auto output = TMaybeType<TStructType>(runtime->OutputType());
+            ASSERT_TRUE(output);
+            ASSERT_EQ(output.Cast()->Fields.size(), 2);
+            EXPECT_EQ(output.Cast()->Fields[0].first, "a");
+            EXPECT_EQ(output.Cast()->Fields[1].first, "a");
+            EXPECT_EQ(ReadAllI64(*runtime), expected);
+        }
+    }
+}
+
+TEST(SqlOrdinalsE2E, UniqueComputedNamesSurvivePrunedSubqueryOutputs) {
+    for (auto mode : {
+        NScheduler::EExecutionMode::SingleThreadedScheduler,
+        NScheduler::EExecutionMode::ThreadedScheduler})
+    {
+        for (const auto& [sql, expected] : {
+            std::pair{"SELECT d.b FROM (SELECT x + 1, y + 1 FROM t) AS d(a, b) ORDER BY 1",
+                std::vector<int64_t>{11, 11, 21, 31}},
+            std::pair{"SELECT q.col1 FROM (SELECT x + 1, y + 1 FROM t ORDER BY 2) AS q",
+                std::vector<int64_t>{11, 11, 21, 31}},
+        }) {
+            SCOPED_TRACE(sql);
+            std::array<int64_t, 4> x = {1, 2, 3, 2};
+            std::array<int64_t, 4> y = {20, 10, 30, 10};
+            std::array<TColumn, 2> columns = {
+                TColumn{.Data = reinterpret_cast<char*>(x.data())},
+                TColumn{.Data = reinterpret_cast<char*>(y.data())},
+            };
+            TMockSource source({"x", "y"}, {TRowSet{.Columns = columns.data(),
+                .ColumnCount = 2, .RowCount = 4, .RefCount = 1}});
+            NScheduler::TSettings settings;
+            settings.Scheduler.Mode = mode;
+            settings.Scheduler.WorkerCount = 2;
+            auto runtime = SqlPlan(sql, {{"t", &source}}, settings, true);
+            EXPECT_EQ(ReadAllI64(*runtime), expected);
+        }
+    }
+}
+
+TEST(SqlOrdinalsE2E, HiddenOrderExpressionsPreserveBothRepeatedLabels) {
+    for (auto mode : {
+        NScheduler::EExecutionMode::SingleThreadedScheduler,
+        NScheduler::EExecutionMode::ThreadedScheduler})
+    {
+        for (const auto& sql : {
+            "SELECT x AS a, y AS a FROM t ORDER BY 2, x + y",
+            "SELECT x AS a, y AS a FROM t ORDER BY 2, x + y LIMIT 4",
+        }) {
+            SCOPED_TRACE(sql);
+            std::array<int64_t, 4> x = {1, 2, 3, 2};
+            std::array<int64_t, 4> y = {20, 10, 30, 10};
+            std::array<TColumn, 2> columns = {
+                TColumn{.Data = reinterpret_cast<char*>(x.data())},
+                TColumn{.Data = reinterpret_cast<char*>(y.data())},
+            };
+            TMockSource source({"x", "y"}, {TRowSet{.Columns = columns.data(),
+                .ColumnCount = 2, .RowCount = 4, .RefCount = 1}});
+            NScheduler::TSettings settings;
+            settings.Scheduler.Mode = mode;
+            settings.Scheduler.WorkerCount = 2;
+            auto runtime = SqlPlan(sql, {{"t", &source}}, settings, true);
+            std::vector<std::pair<int64_t, int64_t>> actual;
+            TRowSet batch{};
+            while (runtime->Next(batch)) {
+                ASSERT_EQ(batch.ColumnCount, 2);
+                const auto* first = reinterpret_cast<const int64_t*>(batch.Columns[0].Data);
+                const auto* second = reinterpret_cast<const int64_t*>(batch.Columns[1].Data);
+                for (int64_t row = 0; row < batch.RowCount; ++row) {
+                    actual.emplace_back(first[row], second[row]);
+                }
+                Release(&batch);
+            }
+            EXPECT_EQ(actual, (std::vector<std::pair<int64_t, int64_t>>{
+                {2, 10}, {2, 10}, {1, 20}, {3, 30}}));
+        }
+    }
+}
+
+TEST(SqlOrdinalsE2E, JoinedStarOrdersSecondEqualLabel) {
+    for (auto mode : {
+        NScheduler::EExecutionMode::SingleThreadedScheduler,
+        NScheduler::EExecutionMode::ThreadedScheduler})
+    {
+        std::array<int64_t, 3> left = {1, 2, 3};
+        std::array<int64_t, 3> right = {1, 2, 3};
+        TColumn leftColumn{.Data = reinterpret_cast<char*>(left.data())};
+        TColumn rightColumn{.Data = reinterpret_cast<char*>(right.data())};
+        TMockSource leftSource({"x"}, {TRowSet{.Columns = &leftColumn,
+            .ColumnCount = 1, .RowCount = 3, .RefCount = 1}});
+        TMockSource rightSource({"x"}, {TRowSet{.Columns = &rightColumn,
+            .ColumnCount = 1, .RowCount = 3, .RefCount = 1}});
+        NScheduler::TSettings settings;
+        settings.Scheduler.Mode = mode;
+        settings.Scheduler.WorkerCount = 2;
+        auto runtime = SqlPlan(
+            "SELECT * FROM l AS l JOIN r AS r ON l.x + r.x = 4 ORDER BY 2",
+            {{"l", &leftSource}, {"r", &rightSource}}, settings, true);
+        EXPECT_EQ(ReadAllI64(*runtime), (std::vector<int64_t>{3, 2, 1}));
+    }
+}
+
+TEST(SqlOrdinalsE2E, BooleanKeysRemainConstant) {
+    for (auto mode : {
+        NScheduler::EExecutionMode::SingleThreadedScheduler,
+        NScheduler::EExecutionMode::ThreadedScheduler})
+    {
+        for (const auto& [sql, expected] : {
+            std::pair{"SELECT count(*) FROM t GROUP BY TRUE", std::vector<int64_t>{3}},
+            std::pair{"SELECT count(*) FROM t GROUP BY FALSE", std::vector<int64_t>{3}},
+            std::pair{"SELECT x FROM t ORDER BY TRUE, x DESC", std::vector<int64_t>{3, 2, 1}},
+            std::pair{"SELECT x FROM t ORDER BY FALSE, x DESC", std::vector<int64_t>{3, 2, 1}},
+            std::pair{"SELECT count(*) FROM t WHERE x < 0 GROUP BY TRUE", std::vector<int64_t>{}},
+            std::pair{"SELECT count(*) FROM t WHERE x < 0 GROUP BY FALSE", std::vector<int64_t>{}},
+        }) {
+            SCOPED_TRACE(sql);
+            std::array<int64_t, 3> x = {1, 2, 3};
+            TColumn column{.Data = reinterpret_cast<char*>(x.data())};
+            TMockSource source({"x"}, {TRowSet{.Columns = &column,
+                .ColumnCount = 1, .RowCount = 3, .RefCount = 1}});
+            NScheduler::TSettings settings;
+            settings.Scheduler.Mode = mode;
+            settings.Scheduler.WorkerCount = 2;
+            auto runtime = SqlPlan(sql, {{"t", &source}}, settings, true);
+            EXPECT_EQ(ReadAllI64(*runtime), expected);
+        }
+    }
+}
+
 TEST(SqlDateE2E, CastDateComparisons) {
     struct TCase {
         std::string Operator;

@@ -12,6 +12,7 @@
   "cases": {
     "expanded_star.sql": {"order": "ordered"},
     "duplicate_scopes.sql": {"order": "ordered"},
+    "grouped_star.sql": {"order": "ordered"},
     "repeated_physical_names.sql": {"order": "ordered"},
     "correlated_cte_bare_outer.sql": {"order": "ordered"},
     "in_over_star_cte.sql": {"order": "ordered"},

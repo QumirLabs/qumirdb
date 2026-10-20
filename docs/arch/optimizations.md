@@ -44,7 +44,7 @@ aggregate keys=[a, gb_1]                project (a, col1, col2)
    └─ source t.parquet                     └─ source t.parquet
 ```
 
-A literal key is dropped only when another key survives, so `GROUP BY 1` over an
+A literal key is dropped only when another key survives, so `GROUP BY CAST(1 AS BIGINT)` over an
 empty input does not silently turn into a global aggregate.
 
 ### 1.3 Affine integer aggregates

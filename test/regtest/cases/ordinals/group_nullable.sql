@@ -1,0 +1,1 @@
+SELECT n, count(*) AS c FROM t GROUP BY 1 ORDER BY n NULLS FIRST;

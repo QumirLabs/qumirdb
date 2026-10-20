@@ -1,0 +1,4 @@
+project (x)
+└─ top-sort [__sort_0 asc, __sort_1 desc] limit 2
+   └─ project (x, __sort_0, __sort_1) (rows≈5 cost≈200)
+      └─ source t AS t (rows≈5 cost≈80)

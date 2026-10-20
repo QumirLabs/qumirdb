@@ -400,6 +400,43 @@ SELECT orbit_result(a) FROM t;
     columns: ['col0', 'col1', 'col2'],
     rows: [['2', '4', '1'], ['3', '9', '1']],
   });
+  for (const [statement, columns] of [
+    ['SELECT DISTINCT orbit_result(a), a + 1.0 FROM t ORDER BY 4 DESC;',
+      ['col0', 'col1', 'col2', 'col3']],
+    ['SELECT DISTINCT orbit_result(a) AS (root, square, positive), a + 1.0 FROM t ORDER BY 4 DESC;',
+      ['root', 'square', 'positive', 'col3']],
+  ]) {
+    const distinctRequest = {
+      ...request,
+      sql: request.sql.replace('SELECT orbit_result(a) FROM t;', statement),
+      dataset: {
+        tables: request.dataset.tables.map(table => ({
+          ...table,
+          stats: { ...table.stats, rows: 3, bytes: 24 },
+        })),
+      },
+    };
+    const distinctBundle = JSON.parse(run(
+      exporter, exporterBaseArgs, JSON.stringify(distinctRequest)));
+    assert.equal(distinctBundle.ok, true, distinctBundle.error?.message);
+    assert.equal(distinctBundle.exec?.supported, true, distinctBundle.exec?.reason);
+    const distinctResult = await executeBrowserPipelineScheduled(
+      resolveExecArtifacts(distinctBundle),
+      async function* (stage) {
+        yield {
+          rowCount: 3,
+          columns: stage.columns.map(column => ({
+            ...column,
+            values: [4.0, 9.0, 4.0],
+          })),
+        };
+      });
+    assert.deepEqual(normalizeResult(distinctResult, true), {
+      columns,
+      rows: [['3', '9', '1', '10'], ['2', '4', '1', '5']],
+    });
+  }
+
 }
 
 async function runRegexpReplaceBatchContract() {
@@ -646,10 +683,12 @@ function nativeResult(name, mode) {
   return JSON.parse(run(nativeRunner, [name, mode]));
 }
 
-function normalizeResult(result) {
+function normalizeResult(result, ordered = false) {
   const rows = result.rows.map(row => row.map(value => String(value)));
-  rows.sort((left, right) =>
-    JSON.stringify(left).localeCompare(JSON.stringify(right)));
+  if (!ordered) {
+    rows.sort((left, right) =>
+      JSON.stringify(left).localeCompare(JSON.stringify(right)));
+  }
   return {
     columns: result.columns.map(String),
     rows,
@@ -945,6 +984,70 @@ async function runBooleanColumnContract() {
   }
 }
 
+async function runOrdinalContract() {
+  const cases = [
+    ['SELECT k AS a, v AS b FROM t ORDER BY 2 DESC, 1 ASC LIMIT 3',
+      { columns: ['a', 'b'], rows: [['2', '20'], ['1', '10'], ['4', '5']] }],
+    ['SELECT k, sum(v) AS s FROM t GROUP BY 1 ORDER BY 2 DESC, 1 DESC',
+      { columns: ['k', 's'], rows: [['2', '20'], ['1', '10'], ['4', '9'], ['3', '3']] }],
+    ['SELECT k AS a FROM t WHERE k = 1 UNION ALL SELECT v AS a FROM t WHERE k = 2 ORDER BY 1 DESC LIMIT 1',
+      { columns: ['a'], rows: [['20']] }],
+    ['SELECT *, v + 1 FROM t ORDER BY 3 DESC LIMIT 2',
+      { columns: ['k', 'v', 'col2'], rows: [['2', '20', '21'], ['1', '10', '11']] }],
+    ['SELECT k AS a, v AS a FROM t ORDER BY 2 DESC, 1 DESC LIMIT 3',
+      { columns: ['a', 'a'], rows: [['2', '20'], ['1', '10'], ['4', '5']] }],
+    ['SELECT k AS a, v AS a FROM t ORDER BY 2, 1',
+      { columns: ['a', 'a'], rows: [['3', '3'], ['4', '4'], ['4', '5'], ['1', '10'], ['2', '20']] }],
+    ['SELECT d.b FROM (SELECT k + 1, v + 1 FROM t) AS d(a, b) ORDER BY 1',
+      { columns: ['b'], rows: [['4'], ['5'], ['6'], ['11'], ['21']] }],
+    ['SELECT q.col1 FROM (SELECT k + 1, v + 1 FROM t ORDER BY 2) AS q',
+      { columns: ['col1'], rows: [['4'], ['5'], ['6'], ['11'], ['21']] }],
+    ['SELECT count(*) AS c FROM t GROUP BY TRUE',
+      { columns: ['c'], rows: [['5']] }],
+    ['SELECT count(*) AS c FROM t GROUP BY FALSE',
+      { columns: ['c'], rows: [['5']] }],
+    ['SELECT k FROM t ORDER BY TRUE, k DESC',
+      { columns: ['k'], rows: [['4'], ['4'], ['3'], ['2'], ['1']] }],
+    ['SELECT k FROM t ORDER BY FALSE, k DESC',
+      { columns: ['k'], rows: [['4'], ['4'], ['3'], ['2'], ['1']] }],
+  ];
+  for (const [sql, expected] of cases) {
+    const request = {
+      sql, dataset: datasetFor(fixtures.aggregate),
+      options: { scheduler: 'single', scanTasks: 1, shufflePartitions: 1, embedWasm: true },
+    };
+    const bundle = JSON.parse(run(exporter, exporterBaseArgs, JSON.stringify(request)));
+    assert.equal(bundle.ok, true, bundle.error?.message);
+    assert.equal(bundle.exec.supported, true, bundle.exec.reason);
+    const result = await browserResult('aggregate', resolveExecArtifacts(bundle));
+    assert.deepEqual({
+      columns: result.columns.map(String),
+      rows: result.rows.map(row => row.map(String)),
+    }, expected, sql);
+    assert.equal(result.memory.liveMB, '0.0');
+  }
+  const nullableRequest = {
+    sql: 'SELECT k AS a, v AS a FROM t ORDER BY 2 NULLS LAST, 1',
+    dataset: { tables: [{ name: 't', columns: [
+      { name: 'k', type: 'i64' },
+      { name: 'v', type: '<named Nullable [i64]>' },
+    ], stats: { rows: 4, bytes: 64, rowGroups: 1 } }] },
+    options: { scheduler: 'single', scanTasks: 1, embedWasm: true },
+  };
+  const bundle = JSON.parse(run(exporter, exporterBaseArgs, JSON.stringify(nullableRequest)));
+  assert.equal(bundle.ok, true, bundle.error?.message);
+  assert.equal(bundle.exec.supported, true, bundle.exec.reason);
+  const values = { k: [1, 2, 3, 2], v: [null, 10, 30, 10] };
+  const result = await executeBrowserPipelineScheduled(resolveExecArtifacts(bundle),
+    async function* (stage) {
+      yield { rowCount: 4, columns: stage.columns.map(column => ({ ...column, values: values[column.name] })) };
+    });
+  assert.deepEqual(result.columns.map(String), ['a', 'a']);
+  assert.deepEqual(result.rows.map(row => String(row[0])), ['2', '2', '3', '1']);
+  assert.equal(result.memory.liveMB, '0.0');
+
+}
+
 async function main() {
   const suiteStarted = performance.now();
   const results = [];
@@ -1106,6 +1209,16 @@ async function main() {
       } catch (error) {
         results.push({ name: 'operator-instrumentation', elapsedMs: performance.now() - started, error });
         console.error(`[FAIL] operator-instrumentation\n${errorText(error)}`);
+      }
+    }
+    {
+      const started = performance.now();
+      try {
+        await runOrdinalContract();
+        results.push({ name: 'select-ordinals', elapsedMs: performance.now() - started, error: null });
+      } catch (error) {
+        results.push({ name: 'select-ordinals', elapsedMs: performance.now() - started, error });
+        console.error(`[FAIL] select-ordinals\n${errorText(error)}`);
       }
     }
     {

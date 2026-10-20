@@ -1,0 +1,1 @@
+SELECT * FROM t GROUP BY 1, 2, 3 ORDER BY y;

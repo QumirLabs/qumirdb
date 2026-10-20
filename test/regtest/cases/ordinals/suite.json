@@ -1,0 +1,98 @@
+{
+  "version": 1,
+  "fixtures": {
+    "numbers": {
+      "json": "tables/numbers.json",
+      "parquet": {
+        "row_group_rows": 2
+      }
+    }
+  },
+  "tables": {
+    "t": "numbers"
+  },
+  "variants": [
+    "single",
+    "threaded"
+  ],
+  "cases": {
+    "order_desc.sql": {
+      "order": "ordered"
+    },
+    "order_alias_multi.sql": {
+      "order": "ordered"
+    },
+    "order_star.sql": {
+      "order": "ordered"
+    },
+    "order_star_implicit.sql": {
+      "order": "ordered"
+    },
+    "order_distinct.sql": {
+      "order": "ordered"
+    },
+    "order_union.sql": {
+      "order": "ordered"
+    },
+    "order_nulls.sql": {
+      "order": "ordered"
+    },
+    "order_expression_constant.sql": {
+      "order": "ordered"
+    },
+    "order_identifier_control.sql": {
+      "order": "ordered"
+    },
+    "order_window.sql": {
+      "order": "ordered"
+    },
+    "group_basic.sql": {
+      "order": "ordered"
+    },
+    "group_alias.sql": {
+      "order": "ordered"
+    },
+    "group_second.sql": {
+      "order": "ordered"
+    },
+    "group_star.sql": {
+      "order": "ordered"
+    },
+    "group_mixed_keys.sql": {
+      "order": "ordered"
+    },
+    "group_having.sql": {
+      "order": "ordered"
+    },
+    "group_empty.sql": {
+      "order": "ordered"
+    },
+    "group_duplicate.sql": {
+      "order": "ordered"
+    },
+    "group_nullable.sql": {
+      "order": "ordered"
+    },
+    "group_identifier_control.sql": {
+      "order": "ordered"
+    },
+    "group_expression_constant.sql": {
+      "order": "ordered"
+    },
+    "group_rollup.sql": {
+      "order": "ordered"
+    },
+    "group_after_grouping.sql": {
+      "order": "ordered"
+    },
+    "window_order_constant.sql": {
+      "order": "ordered"
+    },
+    "group_selected_constant.sql": {
+      "order": "ordered"
+    },
+    "group_selected_constant_empty.sql": {
+      "order": "ordered"
+    }
+  }
+}

@@ -1,0 +1,4 @@
+top-sort [r desc] limit 2
+└─ project (x, r)
+   └─ window order=[t.y desc] fns=[w_0=rank]
+      └─ source t AS t (rows≈5 cost≈80)

@@ -1,0 +1,1 @@
+SELECT x + 1 AS a, y AS b FROM t ORDER BY 1 ASC, 2 DESC LIMIT 3;

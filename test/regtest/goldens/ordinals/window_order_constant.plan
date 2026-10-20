@@ -1,0 +1,6 @@
+project (x, r)
+└─ sort [x asc, __sort_0 asc]
+   └─ project (x, r, __sort_0)
+      └─ window order=[wk_0 asc] fns=[w_0=rank]
+         └─ project (t.x, t.y, wk_0) (rows≈5 cost≈200)
+            └─ source t AS t (rows≈5 cost≈80)

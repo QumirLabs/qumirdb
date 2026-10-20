@@ -116,7 +116,7 @@ For a plain `GROUP BY`, SQL binding removes key components that cannot split a
 group already defined by another retained component:
 
 ```sql
-GROUP BY 1, url
+GROUP BY CAST(1 AS BIGINT), url
 -- physical group key: url
 
 GROUP BY client_ip, client_ip - 1, client_ip - 2
@@ -133,10 +133,9 @@ key once per output group.
 This rewrite runs during SQL binding, after GROUP BY aliases
 are resolved and before computed keys become materialized `gb_n` columns. A
 later plan pass would otherwise see only the synthetic column reference and
-would have to reconstruct its dependency through the lower project. In the
-current qdb SQL dialect an integer in GROUP BY is a literal expression, not a
-SELECT-list ordinal; ordinal support must resolve such references before this
-rewrite.
+would have to reconstruct its dependency through the lower project. SELECT
+positions are resolved before this rewrite, so an integer that reaches it is a
+literal key.
 
 `GROUPING SETS`, `ROLLUP`, and `CUBE` are excluded because their key subsets and
 `GROUPING()` bit positions are observable.
@@ -159,6 +158,17 @@ scopes can meet in joins and set operations, and a projection restores the
 public labels. Derived-table and CTE alias lists rename these typed outputs
 before the enclosing query binds its own expressions. After binding, optimizer
 passes and kernels see only ordinary column references.
+
+### SELECT positions
+
+A bare positive integer in `GROUP BY` or `ORDER BY` refers to a visible SELECT
+output, counted after star expansion and struct flattening. A GROUP BY position
+takes the selected input expression as its key, so `GROUP BY 1` and `GROUP BY x`
+are the same grouping; it cannot refer to an aggregate, a window or a struct
+output. An ORDER BY position names the output field itself, which keeps repeated
+labels apart. Hidden sort expressions and helper columns of subqueries do not
+extend the position range. Zero, negative and out-of-range positions are errors;
+other constants such as `1 + 0` or `TRUE` remain constant keys.
 
 ### Affine integer aggregates
 
