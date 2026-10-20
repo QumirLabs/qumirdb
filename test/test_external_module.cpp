@@ -396,7 +396,10 @@ TEST(ExternalModuleCatalog, StddevArgumentTypesExternalFunctions) {
     };
     // The aggregate argument is typed while the plan is built, so the builder
     // needs the catalog that declares the function.
-    EXPECT_FALSE(build({}));
+    auto untyped = build({});
+    ASSERT_FALSE(untyped);
+    EXPECT_NE(untyped.error().ToString().find("oz_square"), std::string::npos)
+        << untyped.error().ToString();
 
     auto snapshot = catalog.Snapshot();
     NKernel::TAnnotationContext annotation{.ExternalCatalog = snapshot};

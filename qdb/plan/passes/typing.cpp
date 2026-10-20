@@ -69,7 +69,8 @@ void AnnotateTypes(
 }
 
 void AnnotateOperatorType(
-    const TOperatorPtr& root, const NKernel::TAnnotationContext& context)
+    const TOperatorPtr& root,
+    const NKernel::TAnnotationContext& context)
 {
     if (auto maybe = TMaybeOp<TSourceOperator>(root)) {
         auto src = maybe.Cast();

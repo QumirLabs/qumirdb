@@ -435,7 +435,7 @@ int RunSqlStatement(
                 "cannot open table '" + std::string(table) + "': " + e.what()));
         }
     };
-    // Construction and the optimizer passes share one typing context.
+    // Plan construction and the optimizer passes type against the same catalog snapshot.
     NQdb::NKernel::TAnnotationContext annotation{.ExternalCatalog = catalog.Snapshot()};
     auto plan = NQdb::BuildPlan(statement, factory, annotation);
 
