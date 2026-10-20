@@ -2,7 +2,7 @@
   (select
     (select-list
       (item
-        |t.a|
+        c
       )
     )
     (from

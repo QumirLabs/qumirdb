@@ -81,8 +81,8 @@ std::string BuildAst(std::istream& input) {
 }
 
 std::unique_ptr<TMockSource> MakePlanSource(std::string_view table) {
-    // Plan-only cases type their plans. Keep their shared fixture
-    // schema explicit rather than inferring columns from the query under test.
+    // Planning resolves and types columns, so plan-only cases need real schemas. One
+    // fixed schema per table keeps fixtures independent of the query under test.
     if (table == "t") {
         return std::make_unique<TMockSource>(
             std::vector<std::string>{"a", "b", "c", "id", "k", "v"});
