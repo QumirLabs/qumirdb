@@ -284,6 +284,15 @@ TEST(RegSuiteInfrastructure, NoManifestRunsPlanOnly) {
     EXPECT_TRUE(NRegTest::CheckCase(tests[0], false).Plan.Matches);
 }
 
+TEST(RegSuiteInfrastructure, NoManifestRejectsUnknownFixtureTable) {
+    TCaseDirectory dir;
+    fs::rename(dir.SuiteDir / "suite.json", dir.SuiteDir / "disabled.json");
+    dir.Write("query.sql", "SELECT v FROM missing;");
+    const auto tests = dir.Collect();
+    ASSERT_EQ(tests.size(), 1);
+    EXPECT_THROW(NRegTest::CheckCase(tests[0], false), std::runtime_error);
+}
+
 TEST(RegSuiteInfrastructure, PlanOnlyKeepsRealSchemasAndDoesNotReadOrCanonizeResults) {
     TCaseDirectory dir;
     dir.Write("suite.json", R"({

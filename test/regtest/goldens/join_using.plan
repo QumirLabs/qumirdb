@@ -1,1 +1,1 @@
-(rel project (rel join (rel source "t") (rel source "s") ((id id)) (left)) (a a))
+(rel project (rel join (rel source "t") (rel source "s") ((id id)) (left)) (c c))
