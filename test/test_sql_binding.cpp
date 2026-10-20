@@ -258,6 +258,33 @@ TEST(SqlBinding, InternalFieldsAreNotSqlInputNames) {
         "(SELECT x AS a, y AS a FROM t) GROUP BY __output_0").empty());
 }
 
+TEST(SqlBinding, RepeatedLabelsSortByInputExpression) {
+    auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
+    TMockSource source(TMockColumns{}, {{"x", i64}, {"y", i64}});
+    auto plan = Build("SELECT x AS a, y AS a FROM t ORDER BY y", source);
+    ASSERT_TRUE(plan) << plan.error().ToString();
+    ApplyPlanPasses(*plan);
+    auto output = TMaybeOp<TProjectOperator>(*plan);
+    ASSERT_TRUE(output);
+    auto sorted = output.Cast()->Input();
+    while (auto project = TMaybeOp<TProjectOperator>(sorted)) {
+        sorted = project.Cast()->Input();
+    }
+    auto sort = TMaybeOp<TSortOperator>(sorted);
+    ASSERT_TRUE(sort);
+    std::unordered_set<std::string> names;
+    for (const auto& [name, _] : sort.Cast()->Input()->OutputColumns()->Fields) {
+        EXPECT_TRUE(names.insert(name).second) << name;
+    }
+    ASSERT_EQ(sort.Cast()->Keys().size(), 1);
+    EXPECT_TRUE(names.contains(sort.Cast()->Keys()[0].Column)) << sort.Cast()->Keys()[0].Column;
+    ASSERT_EQ(output.Cast()->Projections().size(), 2);
+    EXPECT_EQ(output.Cast()->Projections()[0].Name, "a");
+    EXPECT_EQ(output.Cast()->Projections()[1].Name, "a");
+    EXPECT_NE(Failure("SELECT x AS a, y AS a FROM t ORDER BY a").find("ambiguous"),
+        std::string::npos);
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

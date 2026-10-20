@@ -126,6 +126,40 @@ bool IsValid(const TColumn& column, int64_t row) {
     return ((column.Mask[bit / 8] >> (bit % 8)) & 1) != 0;
 }
 
+TEST(SqlBindingE2E, RepeatedLabelsSortByInputExpressions) {
+    for (auto mode : {
+        NScheduler::EExecutionMode::SingleThreadedScheduler,
+        NScheduler::EExecutionMode::ThreadedScheduler})
+    {
+        std::array<int64_t, 4> x = {1, 2, 3, 2};
+        std::array<int64_t, 4> y = {20, 10, 30, 10};
+        std::array<TColumn, 2> columns = {
+            TColumn{.Data = reinterpret_cast<char*>(x.data())},
+            TColumn{.Data = reinterpret_cast<char*>(y.data())},
+        };
+        TMockSource source({"x", "y"}, {TRowSet{.Columns = columns.data(),
+            .ColumnCount = 2, .RowCount = 4, .RefCount = 1}});
+        NScheduler::TSettings settings;
+        settings.Scheduler.Mode = mode;
+        settings.Scheduler.WorkerCount = 2;
+        auto runtime = SqlPlan("SELECT x AS a, y AS a FROM t ORDER BY y, x + y",
+            {{"t", &source}}, settings, true);
+        std::vector<std::pair<int64_t, int64_t>> actual;
+        TRowSet batch{};
+        while (runtime->Next(batch)) {
+            ASSERT_EQ(batch.ColumnCount, 2);
+            const auto* first = reinterpret_cast<const int64_t*>(batch.Columns[0].Data);
+            const auto* second = reinterpret_cast<const int64_t*>(batch.Columns[1].Data);
+            for (int64_t row = 0; row < batch.RowCount; ++row) {
+                actual.emplace_back(first[row], second[row]);
+            }
+            Release(&batch);
+        }
+        EXPECT_EQ(actual, (std::vector<std::pair<int64_t, int64_t>>{
+            {2, 10}, {2, 10}, {1, 20}, {3, 30}}));
+    }
+}
+
 TEST(SqlDateE2E, CastDateComparisons) {
     struct TCase {
         std::string Operator;
