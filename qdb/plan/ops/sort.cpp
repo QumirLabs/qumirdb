@@ -4,6 +4,7 @@
 
 #include <memory>
 #include <utility>
+#include <vector>
 
 namespace NQdb {
 
@@ -31,6 +32,22 @@ std::string_view SortNullsName(ESortNulls nulls) {
     return "nulls-default";
 }
 
+namespace {
+
+std::vector<TColumnReference> SortKeyReferences(const std::vector<TSortKey>& keys) {
+    std::vector<TColumnReference> references;
+    for (const auto& key : keys) {
+        // A key that names an output by position has no column until typing
+        // resolves it.
+        if (!key.ProjectionIndex) {
+            references.push_back({.Name = key.Column});
+        }
+    }
+    return references;
+}
+
+} // namespace
+
 TSortOperator::TSortOperator(TOperatorPtr input, std::vector<TSortKey> keys)
     : Input_(std::move(input))
     , Keys_(std::move(keys))
@@ -41,12 +58,8 @@ TSortOperator::TSortOperator(TOperatorPtr input, std::vector<TSortKey> keys)
         inputSchema);
 }
 
-std::unordered_set<std::string> TSortOperator::ComputeReferencedColumns() const {
-    std::unordered_set<std::string> refs;
-    for (const auto& key : Keys_) {
-        refs.insert(key.Column);
-    }
-    return refs;
+std::vector<TColumnReference> TSortOperator::ColumnReferences() const {
+    return SortKeyReferences(Keys_);
 }
 
 const std::string TSortOperator::ToString() const {
@@ -72,12 +85,8 @@ TTopSortOperator::TTopSortOperator(TOperatorPtr input, std::vector<TSortKey> key
         inputSchema);
 }
 
-std::unordered_set<std::string> TTopSortOperator::ComputeReferencedColumns() const {
-    std::unordered_set<std::string> refs;
-    for (const auto& key : Keys_) {
-        refs.insert(key.Column);
-    }
-    return refs;
+std::vector<TColumnReference> TTopSortOperator::ColumnReferences() const {
+    return SortKeyReferences(Keys_);
 }
 
 const std::string TTopSortOperator::ToString() const {

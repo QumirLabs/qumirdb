@@ -1,6 +1,5 @@
 #include <qdb/plan/ops/project.h>
 
-#include <qdb/plan/passes/unbound_vars.h>
 #include <qdb/plan/types/nullable.h>
 
 #include <qumir/parser/ast.h>
@@ -54,14 +53,12 @@ TProjectOperator::TProjectOperator(TOperatorPtr input, std::vector<TProjectionSp
         std::make_shared<NQumir::NAst::TStructType>(std::move(outFields)));
 }
 
-std::unordered_set<std::string> TProjectOperator::ComputeReferencedColumns() const {
-    std::unordered_set<std::string> refs;
+std::vector<TColumnReference> TProjectOperator::ColumnReferences() const {
+    std::vector<TColumnReference> references;
     for (const auto& proj : Projections_) {
-        for (auto& col : FindUnboundVars(proj.Expression)) {
-            refs.insert(col);
-        }
+        AppendColumnReferences(references, proj.Expression);
     }
-    return refs;
+    return references;
 }
 
 const std::string TProjectOperator::ToString() const {

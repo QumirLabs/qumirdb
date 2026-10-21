@@ -29,7 +29,7 @@ public:
     explicit TCteRef(TCteDefinitionPtr def);
 
     std::string_view RelName() const override { return OpId; }
-    std::unordered_set<std::string> ComputeReferencedColumns() const override { return {}; }
+    std::vector<TColumnReference> ColumnReferences() const override { return {}; }
     const TCteDefinitionPtr& Def() const { return Def_; }
     const std::string ToString() const override;
 

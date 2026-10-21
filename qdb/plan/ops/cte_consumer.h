@@ -25,7 +25,7 @@ public:
     TCteConsumer(TCteDefinitionPtr def, TCteMaterializationPtr materialization);
 
     std::string_view RelName() const override { return OpId; }
-    std::unordered_set<std::string> ComputeReferencedColumns() const override { return {}; }
+    std::vector<TColumnReference> ColumnReferences() const override { return {}; }
     const TCteDefinitionPtr& Def() const { return Def_; }
     const TCteMaterializationPtr& Materialization() const { return Materialization_; }
     const std::string ToString() const override;

@@ -1,0 +1,1 @@
+SELECT id, rank() OVER (PARTITION BY zzz ORDER BY b) AS r FROM t;

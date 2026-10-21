@@ -1077,7 +1077,7 @@ TCaseResult CheckCase(const TQueryCase& test, bool canonize) {
         return std::make_shared<TSourceOperator>(*source, std::string(table));
     });
     // A planning error is the plan output of an invalid query: the plan golden
-    // holds the error, and the query is not executed.
+    // of a plan-only case holds the error.
     std::string planError;
     if (!plan) {
         planError = plan.error().ToString();
@@ -1091,6 +1091,10 @@ TCaseResult CheckCase(const TQueryCase& test, bool canonize) {
         }
     }
     const auto optimizeMs = mark();
+    if (!planError.empty() && test.Execute) {
+        // Canonizing must not turn an executed case into an error golden.
+        throw std::runtime_error(planError);
+    }
     std::ostringstream planOutput;
     if (planError.empty()) {
         PrintPlanTreeWithCtes(planOutput, *plan);
@@ -1109,7 +1113,7 @@ TCaseResult CheckCase(const TQueryCase& test, bool canonize) {
             << " execute_ms=" << runTimings.ExecuteMs << " result_golden_ms=" << resultGoldenMs
             << " total_ms=" << totalMs << '\n';
     };
-    if (!test.Execute || !planError.empty()) {
+    if (!test.Execute) {
         printTiming({}, 0);
         return {planComparison, std::nullopt};
     }

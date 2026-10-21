@@ -47,9 +47,8 @@ TLateMaterializeOperator::TLateMaterializeOperator(
         std::make_shared<TStructType>(std::move(fields)));
 }
 
-std::unordered_set<std::string>
-TLateMaterializeOperator::ComputeReferencedColumns() const {
-    return {LocatorColumn_};
+std::vector<TColumnReference> TLateMaterializeOperator::ColumnReferences() const {
+    return {{.Name = LocatorColumn_}};
 }
 
 std::unordered_set<std::string> TLateMaterializeOperator::RequiredColumnsForChild(

@@ -1,6 +1,5 @@
 #include <qdb/plan/ops/aggregate.h>
 
-#include <qdb/plan/passes/unbound_vars.h>
 #include <qdb/plan/types/nullable.h>
 
 #include <qumir/parser/ast.h>
@@ -82,19 +81,15 @@ TAggregateOperator::TAggregateOperator(TOperatorPtr input, std::vector<std::stri
         ComputeAggregateOutputType(inputSchema, GroupKeys_, Aggs_, !GroupingSets_.empty()));
 }
 
-std::unordered_set<std::string> TAggregateOperator::ComputeReferencedColumns() const {
-    std::unordered_set<std::string> refs;
+std::vector<TColumnReference> TAggregateOperator::ColumnReferences() const {
+    std::vector<TColumnReference> references;
     for (const auto& key : GroupKeys_) {
-        refs.insert(key);
+        references.push_back({.Name = key});
     }
     for (const auto& agg : Aggs_) {
-        if (agg.Arg) {
-            for (auto& col : FindUnboundVars(agg.Arg)) {
-                refs.insert(col);
-            }
-        }
+        AppendColumnReferences(references, agg.Arg);
     }
-    return refs;
+    return references;
 }
 
 const std::string TAggregateOperator::ToString() const {

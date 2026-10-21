@@ -13,7 +13,7 @@ public:
     TLimitOperator(TOperatorPtr input, int64_t limit, int64_t offset = 0);
 
     std::string_view RelName() const override { return OpId; }
-    std::unordered_set<std::string> ComputeReferencedColumns() const override { return {}; }
+    std::vector<TColumnReference> ColumnReferences() const override { return {}; }
     std::vector<NQumir::NAst::TExprPtr> Children() const override { return {Input_}; }
     const std::string ToString() const override;
 

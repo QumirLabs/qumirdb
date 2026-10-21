@@ -234,7 +234,7 @@ public:
         Type = std::make_shared<TFunctionType>(std::vector<TTypePtr>{}, schema);
     }
     std::string_view RelName() const override { return OpId; }
-    std::unordered_set<std::string> ComputeReferencedColumns() const override { return {}; }
+    std::vector<TColumnReference> ColumnReferences() const override { return {}; }
     std::vector<TExprPtr> Children() const override { return {}; }
     const std::string ToString() const override { return "(rel fake_source)"; }
 };

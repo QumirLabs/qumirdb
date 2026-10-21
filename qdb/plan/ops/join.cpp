@@ -141,20 +141,16 @@ TJoinOperator::TJoinOperator(TOperatorPtr left, TOperatorPtr right,
         output ? *output : nullptr);
 }
 
-std::unordered_set<std::string> TJoinOperator::ComputeReferencedColumns() const {
-    std::unordered_set<std::string> refs;
+std::vector<TColumnReference> TJoinOperator::ColumnReferences() const {
+    std::vector<TColumnReference> references;
     // Both sides' key columns are referenced regardless of which columns the
     // join emits (matching always needs both keys).
     for (const auto& key : Keys_) {
-        refs.insert(key.Left);
-        refs.insert(key.Right);
+        references.push_back({.Name = key.Left});
+        references.push_back({.Name = key.Right});
     }
-    if (Filter_) {
-        for (auto& col : FindUnboundVars(Filter_)) {
-            refs.insert(col);
-        }
-    }
-    return refs;
+    AppendColumnReferences(references, Filter_);
+    return references;
 }
 
 std::unordered_set<std::string> TJoinOperator::RequiredColumnsForChild(

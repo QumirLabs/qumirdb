@@ -11,7 +11,6 @@
 #include <qdb/plan/ops/cte_ref.h>
 #include <qdb/plan/ops/union.h>
 #include <qdb/plan/ops/window.h>
-#include <qdb/plan/passes/unbound_vars.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/kernel/annotate_type.h>
@@ -19,8 +18,7 @@
 #include <qumir/error.h>
 #include <qumir/parser/type.h>
 
-#include <algorithm>
-#include <optional>
+#include <stdexcept>
 #include <string>
 #include <unordered_set>
 
@@ -61,111 +59,34 @@ TTypePtr UnifyUnionColumn(const TTypePtr& a, const TTypePtr& b) {
         ? std::static_pointer_cast<TType>(std::make_shared<TNullable>(base)) : base;
 }
 
-struct TColumnReference {
-    std::string Name;
-    std::optional<NQumir::TLocation> Location;
-};
-
-// Locates the first reference to one of `names` in the order the operator lists
-// its keys and expressions. A key is a plain name without a source location; so is
-// an identifier the planner generated.
-std::optional<TColumnReference> FirstReference(
-    const TOperatorPtr& op,
-    const std::unordered_set<std::string>& names)
-{
-    std::optional<TColumnReference> first;
-    auto key = [&](const std::string& name) {
-        if (!first && names.contains(name)) {
-            first = TColumnReference{.Name = name};
-        }
-    };
-    auto expression = [&](const TExprPtr& expr) {
-        for (const auto& ident : FindUnboundIdents(expr)) {
-            if (!first && names.contains(ident->Name)) {
-                first = TColumnReference{.Name = ident->Name};
-                if (ident->Location.Line > 0) {
-                    first->Location = ident->Location;
-                }
-            }
-        }
-    };
-    if (auto filter = TMaybeOp<TFilterOperator>(op)) {
-        expression(filter.Cast()->Predicate());
-    } else if (auto join = TMaybeOp<TJoinOperator>(op)) {
-        for (const auto& joinKey : join.Cast()->Keys()) {
-            key(joinKey.Left);
-            key(joinKey.Right);
-        }
-        expression(join.Cast()->Filter());
-    } else if (auto project = TMaybeOp<TProjectOperator>(op)) {
-        for (const auto& projection : project.Cast()->Projections()) {
-            expression(projection.Expression);
-        }
-    } else if (auto aggregate = TMaybeOp<TAggregateOperator>(op)) {
-        for (const auto& groupKey : aggregate.Cast()->GroupKeys()) {
-            key(groupKey);
-        }
-        for (const auto& agg : aggregate.Cast()->Aggs()) {
-            expression(agg.Arg);
-        }
-    } else if (auto window = TMaybeOp<TWindowOperator>(op)) {
-        for (const auto& partitionKey : window.Cast()->PartitionKeys()) {
-            key(partitionKey);
-        }
-        for (const auto& orderKey : window.Cast()->OrderKeys()) {
-            key(orderKey.Column);
-        }
-        for (const auto& function : window.Cast()->Functions()) {
-            expression(function.Arg);
-        }
-    } else if (auto sort = TMaybeOp<TSortOperator>(op)) {
-        for (const auto& sortKey : sort.Cast()->Keys()) {
-            key(sortKey.Column);
-        }
-    } else if (auto topSort = TMaybeOp<TTopSortOperator>(op)) {
-        for (const auto& sortKey : topSort.Cast()->Keys()) {
-            key(sortKey.Column);
-        }
-    } else if (auto late = TMaybeOp<TLateMaterializeOperator>(op)) {
-        key(late.Cast()->LocatorColumn());
-    }
-    return first;
-}
-
 // An operator reads only columns its inputs produce. Kernel type inference types
 // any other name like a bare NULL, so a misspelled column would silently change
 // the result (a comparison over it is NULL, coalesce() picks its fallback) instead
-// of failing the query.
+// of failing the query. Checked before the operator itself is typed, so the
+// unknown name is reported rather than a type inference failure it causes.
 void RequireInputColumns(const TOperatorPtr& op) {
     std::unordered_set<std::string> available;
     for (const auto& input : op->Inputs()) {
         auto&& schema = input->OutputColumns();
         if (!schema) {
-            // Without an input schema the references cannot be checked.
-            return;
+            throw std::runtime_error(
+                std::string(op->RelName()) + " typing: an input has no schema");
         }
         for (const auto& [name, _] : schema->Fields) {
             available.insert(name);
         }
     }
-    std::unordered_set<std::string> unknown;
-    for (const auto& name : op->ComputeReferencedColumns()) {
-        if (!available.contains(name)) {
-            unknown.insert(name);
+    for (const auto& reference : op->ColumnReferences()) {
+        if (available.contains(reference.Name)) {
+            continue;
         }
+        const auto message = "unknown input column: " + reference.Name;
+        // Planner-generated identifiers carry no source location.
+        if (reference.Ident && reference.Ident->Location.Line > 0) {
+            throw NQumir::TError(reference.Ident->Location, message);
+        }
+        throw NQumir::TError(message);
     }
-    if (unknown.empty()) {
-        return;
-    }
-    // Every operator with references is located above; the fallback only keeps the
-    // message deterministic.
-    auto reference = FirstReference(op, unknown)
-        .value_or(TColumnReference{.Name = std::ranges::min(unknown)});
-    const auto message = "unknown input column: " + reference.Name;
-    if (reference.Location) {
-        throw NQumir::TError(*reference.Location, message);
-    }
-    throw NQumir::TError(message);
 }
 
 void ResolveProjectionSortKeys(
@@ -208,8 +129,8 @@ void AnnotateTypes(
         AnnotateTypes(input, context);
     }
 
-    AnnotateOperatorType(root, context);
     RequireInputColumns(root);
+    AnnotateOperatorType(root, context);
 }
 
 void AnnotateOperatorType(
@@ -392,9 +313,12 @@ void AnnotateOperatorType(
         auto leftSchema = join->Left()->OutputColumns();
         auto rightSchema = join->Right()->OutputColumns();
         auto output = ComputeJoinOutputType(leftSchema, rightSchema, join->JoinType());
+        if (!output) {
+            throw output.error();
+        }
         root->Type = std::make_shared<TFunctionType>(
             std::vector<TTypePtr>{leftSchema, rightSchema},
-            output ? *output : nullptr);
+            *output);
         return;
     }
 

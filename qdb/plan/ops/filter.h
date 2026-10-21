@@ -16,7 +16,7 @@ public:
     TFilterOperator(TOperatorPtr input, NQumir::NAst::TExprPtr predicate);
 
     std::string_view RelName() const override { return OpId; }
-    std::unordered_set<std::string> ComputeReferencedColumns() const override;
+    std::vector<TColumnReference> ColumnReferences() const override;
     std::vector<NQumir::NAst::TExprPtr> Children() const override { return {Input_}; }
     const std::string ToString() const override;
 
