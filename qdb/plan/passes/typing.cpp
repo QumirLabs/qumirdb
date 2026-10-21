@@ -16,13 +16,13 @@
 #include <qdb/plan/types/decimal.h>
 #include <qdb/kernel/annotate_type.h>
 
-#include <qumir/parser/core/printer.h>
+#include <qumir/error.h>
 #include <qumir/parser/type.h>
 
 #include <algorithm>
 #include <optional>
 #include <string>
-#include <string_view>
+#include <unordered_set>
 
 namespace NQdb {
 
@@ -61,28 +61,111 @@ TTypePtr UnifyUnionColumn(const TTypePtr& a, const TTypePtr& b) {
         ? std::static_pointer_cast<TType>(std::make_shared<TNullable>(base)) : base;
 }
 
-// Kernel type inference treats a name that is not an input column like a bare
-// NULL, and null-strict operators fold the predicate to NULL. A misspelled column
-// would then silently reject every row, so a predicate must name input columns.
-void RequireInputColumns(
-    const TExprPtr& predicate,
-    const TStructType& input,
-    std::string_view operatorName)
+struct TColumnReference {
+    std::string Name;
+    std::optional<NQumir::TLocation> Location;
+};
+
+// Locates the first reference to one of `names` in the order the operator lists
+// its keys and expressions. A key is a plain name without a source location; so is
+// an identifier the planner generated.
+std::optional<TColumnReference> FirstReference(
+    const TOperatorPtr& op,
+    const std::unordered_set<std::string>& names)
 {
-    // FindUnboundVars is unordered: report the smallest name so the error is stable.
-    std::optional<std::string> unknown;
-    for (const auto& name : FindUnboundVars(predicate)) {
-        const bool known = std::ranges::any_of(input.Fields,
-            [&](const auto& field) { return field.first == name; });
-        if (!known && (!unknown || name < *unknown)) {
-            unknown = name;
+    std::optional<TColumnReference> first;
+    auto key = [&](const std::string& name) {
+        if (!first && names.contains(name)) {
+            first = TColumnReference{.Name = name};
+        }
+    };
+    auto expression = [&](const TExprPtr& expr) {
+        for (const auto& ident : FindUnboundIdents(expr)) {
+            if (!first && names.contains(ident->Name)) {
+                first = TColumnReference{.Name = ident->Name};
+                if (ident->Location.Line > 0) {
+                    first->Location = ident->Location;
+                }
+            }
+        }
+    };
+    if (auto filter = TMaybeOp<TFilterOperator>(op)) {
+        expression(filter.Cast()->Predicate());
+    } else if (auto join = TMaybeOp<TJoinOperator>(op)) {
+        for (const auto& joinKey : join.Cast()->Keys()) {
+            key(joinKey.Left);
+            key(joinKey.Right);
+        }
+        expression(join.Cast()->Filter());
+    } else if (auto project = TMaybeOp<TProjectOperator>(op)) {
+        for (const auto& projection : project.Cast()->Projections()) {
+            expression(projection.Expression);
+        }
+    } else if (auto aggregate = TMaybeOp<TAggregateOperator>(op)) {
+        for (const auto& groupKey : aggregate.Cast()->GroupKeys()) {
+            key(groupKey);
+        }
+        for (const auto& agg : aggregate.Cast()->Aggs()) {
+            expression(agg.Arg);
+        }
+    } else if (auto window = TMaybeOp<TWindowOperator>(op)) {
+        for (const auto& partitionKey : window.Cast()->PartitionKeys()) {
+            key(partitionKey);
+        }
+        for (const auto& orderKey : window.Cast()->OrderKeys()) {
+            key(orderKey.Column);
+        }
+        for (const auto& function : window.Cast()->Functions()) {
+            expression(function.Arg);
+        }
+    } else if (auto sort = TMaybeOp<TSortOperator>(op)) {
+        for (const auto& sortKey : sort.Cast()->Keys()) {
+            key(sortKey.Column);
+        }
+    } else if (auto topSort = TMaybeOp<TTopSortOperator>(op)) {
+        for (const auto& sortKey : topSort.Cast()->Keys()) {
+            key(sortKey.Column);
+        }
+    } else if (auto late = TMaybeOp<TLateMaterializeOperator>(op)) {
+        key(late.Cast()->LocatorColumn());
+    }
+    return first;
+}
+
+// An operator reads only columns its inputs produce. Kernel type inference types
+// any other name like a bare NULL, so a misspelled column would silently change
+// the result (a comparison over it is NULL, coalesce() picks its fallback) instead
+// of failing the query.
+void RequireInputColumns(const TOperatorPtr& op) {
+    std::unordered_set<std::string> available;
+    for (const auto& input : op->Inputs()) {
+        auto&& schema = input->OutputColumns();
+        if (!schema) {
+            // Without an input schema the references cannot be checked.
+            return;
+        }
+        for (const auto& [name, _] : schema->Fields) {
+            available.insert(name);
         }
     }
-    if (unknown) {
-        throw NQumir::TError(std::string(operatorName) +
-            " type inference: unknown column '" + *unknown + "' in '" +
-            NCore::PrintAst(predicate) + "'");
+    std::unordered_set<std::string> unknown;
+    for (const auto& name : op->ComputeReferencedColumns()) {
+        if (!available.contains(name)) {
+            unknown.insert(name);
+        }
     }
+    if (unknown.empty()) {
+        return;
+    }
+    // Every operator with references is located above; the fallback only keeps the
+    // message deterministic.
+    auto reference = FirstReference(op, unknown)
+        .value_or(TColumnReference{.Name = std::ranges::min(unknown)});
+    const auto message = "unknown input column: " + reference.Name;
+    if (reference.Location) {
+        throw NQumir::TError(*reference.Location, message);
+    }
+    throw NQumir::TError(message);
 }
 
 void ResolveProjectionSortKeys(
@@ -126,6 +209,7 @@ void AnnotateTypes(
     }
 
     AnnotateOperatorType(root, context);
+    RequireInputColumns(root);
 }
 
 void AnnotateOperatorType(
@@ -157,11 +241,7 @@ void AnnotateOperatorType(
     }
 
     if (auto maybe = TMaybeOp<TFilterOperator>(root)) {
-        auto filter = maybe.Cast();
-        auto schema = filter->Input()->OutputColumns();
-        if (schema) {
-            RequireInputColumns(filter->Predicate(), *schema, "filter");
-        }
+        auto schema = maybe.Cast()->Input()->OutputColumns();
         root->Type = std::make_shared<TFunctionType>(
             std::vector<TTypePtr>{schema},
             schema);
@@ -311,14 +391,6 @@ void AnnotateOperatorType(
         auto join = maybe.Cast();
         auto leftSchema = join->Left()->OutputColumns();
         auto rightSchema = join->Right()->OutputColumns();
-        if (join->Filter() && leftSchema && rightSchema) {
-            // The residual reads the matched pair, including the side a semi or
-            // anti join does not emit.
-            auto fields = leftSchema->Fields;
-            fields.insert(
-                fields.end(), rightSchema->Fields.begin(), rightSchema->Fields.end());
-            RequireInputColumns(join->Filter(), TStructType(std::move(fields)), "join");
-        }
         auto output = ComputeJoinOutputType(leftSchema, rightSchema, join->JoinType());
         root->Type = std::make_shared<TFunctionType>(
             std::vector<TTypePtr>{leftSchema, rightSchema},

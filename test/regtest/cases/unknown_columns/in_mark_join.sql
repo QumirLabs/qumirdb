@@ -1,0 +1,1 @@
+SELECT id FROM t WHERE zzz + 0 IN (SELECT a FROM s) OR b > 25;

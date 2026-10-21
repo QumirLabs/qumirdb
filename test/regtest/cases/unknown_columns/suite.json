@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "fixtures": {
+    "t": {"json": "tables/t.json", "parquet": {"row_group_rows": 2}},
+    "s": {"json": "tables/s.json", "parquet": {"row_group_rows": 2}}
+  },
+  "tables": {"t": "t", "s": "s"},
+  "variants": ["single", "threaded"],
+  "cases": {
+    "where.sql": {"order": "unordered"},
+    "where_coalesce.sql": {"order": "unordered"},
+    "where_first_reference.sql": {"order": "unordered"},
+    "having.sql": {"order": "unordered"},
+    "select_coalesce.sql": {"order": "unordered"},
+    "order_by_case.sql": {"order": "unordered"},
+    "inner_join_residual.sql": {"order": "unordered"},
+    "left_join_residual.sql": {"order": "unordered"},
+    "join_using.sql": {"order": "unordered"},
+    "semi_join_residual.sql": {"order": "unordered"},
+    "anti_join_residual.sql": {"order": "unordered"},
+    "in_mark_join.sql": {"order": "unordered"},
+    "exists_or.sql": {"order": "unordered"},
+    "control_scalar_in_mark.sql": {"order": "unordered"},
+    "control_exists_or.sql": {"order": "unordered"}
+  }
+}

@@ -9,16 +9,15 @@ using namespace NQumir::NAst;
 void Collect(
     const TExprPtr& expr,
     const std::unordered_set<std::string>& bound,
-    std::unordered_set<std::string>& out)
+    std::vector<std::shared_ptr<TIdentExpr>>& out)
 {
     if (!expr) {
         return;
     }
 
     if (auto node = TMaybeNode<TIdentExpr>(expr)) {
-        const auto& name = node.Cast()->Name;
-        if (!bound.count(name)) {
-            out.insert(name);
+        if (!bound.count(node.Cast()->Name)) {
+            out.push_back(node.Cast());
         }
         return;
     }
@@ -95,6 +94,14 @@ void Collect(
 
 std::unordered_set<std::string> FindUnboundVars(const TExprPtr& expr) {
     std::unordered_set<std::string> result;
+    for (const auto& ident : FindUnboundIdents(expr)) {
+        result.insert(ident->Name);
+    }
+    return result;
+}
+
+std::vector<std::shared_ptr<TIdentExpr>> FindUnboundIdents(const TExprPtr& expr) {
+    std::vector<std::shared_ptr<TIdentExpr>> result;
     Collect(expr, {}, result);
     return result;
 }
