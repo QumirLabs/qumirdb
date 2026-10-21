@@ -43,9 +43,8 @@ if that cost needs to be added back.
   `clickhouse-local`; YQL was not run.
 - **TPC-H** — 22 queries at scale factors 1, 10 and 100.
 - **TPC-DS** — 99 queries. qdb runs 14, 23, 24 and 39 as two parts each; the parts
-  are summed within a run here so the query set matches DuckDB and YQL.
-  YQL has no scale-100 run. qdb has no result for q78 and q80 at scale 100:
-  both exhausted the machine's 64 GB.
+  are summed within a run here so the query set matches DuckDB. The qdb
+  scale-100 run excludes q78 and q80 because they are not working yet.
 
 ## About the YQL numbers
 
@@ -64,9 +63,9 @@ its results may differ from what is shown here.
 | TPC-H | 1 | 0.857 | 1.17 | — | 4.17 | 0.73× | qdb: one SQL run |
 | TPC-H | 10 | 4.733 | 4.03 | — | 29.21 | 1.17× | qdb: one SQL run |
 | TPC-H | 100 | 49.843 | 32.10 | — | 338.38 | 1.55× | qdb: one SQL run |
-| TPC-DS | 1 | 7.08 | 5.13 | — | 55.27 | 1.38× | YQL: 7 failed |
-| TPC-DS | 10 | 51.90 | 15.89 | — | 420.05 | 3.27× | YQL: 10 failed |
-| TPC-DS | 100 | 465.22 | 117.86 | — | — | 3.95× | qdb: 2 missing |
+| TPC-DS | 1 | 5.516 | 5.13 | — | — | 1.08× | qdb: one SQL run |
+| TPC-DS | 10 | 32.685 | 15.89 | — | — | 2.06× | qdb: one SQL run |
+| TPC-DS | 100 | 290.767 | 117.86 | — | — | 2.47× | qdb: one SQL run; q78/q80 skipped |
 
-Totals cover the queries each engine completed, so rows with failures compare
-different subsets — flagged in the Notes column.
+Totals cover the queries each engine completed. Rows with failures or skipped
+queries compare different subsets, as indicated in the Notes column.
