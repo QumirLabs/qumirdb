@@ -761,29 +761,73 @@ struct TLocalSqlScope {
     }
 };
 
-void CollectLocalColumns(
+// Table names visible to a FROM, scoped as BuildQuery scopes them: the CTEs of a
+// query's own WITH shadow those of enclosing queries, which shadow `Sources`.
+struct TSqlTableScope {
+    const TTableSourceFactory& Sources;
+    const TSqlTableScope* Parent = nullptr;
+    std::map<std::string, NSql::TSqlPtr<NSql::TSqlCte>> Ctes; // by lower-cased name
+};
+
+TSqlTableScope WithCtes(const TSqlTableScope& parent, const NSql::TSqlWithClause& with) {
+    TSqlTableScope tables{.Sources = parent.Sources, .Parent = &parent};
+    for (const auto& cte : with.Ctes) {
+        tables.Ctes[ToLower(cte->Name)] = cte;
+    }
+    return tables;
+}
+
+// The qualifier a FROM item answers to: its alias, or a table's own name.
+std::optional<std::string> ItemQualifier(const NSql::TSqlPtr<NSql::TSqlTableRef>& ref) {
+    if (auto table = NSql::TMaybeNode<NSql::TSqlTableName>(ref); table && !table.Cast()->Alias) {
+        return table.Cast()->Name.back();
+    }
+    return ref->Alias;
+}
+
+std::expected<void, TError> CollectLocalColumns(
     const NSql::TSqlPtr<NSql::TSqlTableRef>& ref,
-    const TTableSourceFactory& sources,
+    const TSqlTableScope& tables,
     TLocalSqlScope& out);
 
-// Output names of a FROM subquery as the builder assigns them (ItemName). An
-// unqualified star exposes the columns of its own FROM.
-void CollectOutputNames(
+// The columns `qualifier.*` expands to: those of the FROM items it names.
+std::expected<void, TError> CollectQualifiedColumns(
+    const NSql::TSqlPtr<NSql::TSqlTableRef>& ref,
+    const std::string& qualifier,
+    const TSqlTableScope& tables,
+    TLocalSqlScope& out)
+{
+    if (auto join = NSql::TMaybeNode<NSql::TSqlJoin>(ref)) {
+        auto left = CollectQualifiedColumns(join.Cast()->Left, qualifier, tables, out);
+        if (!left) {
+            return left;
+        }
+        return CollectQualifiedColumns(join.Cast()->Right, qualifier, tables, out);
+    }
+    if (ItemQualifier(ref) == qualifier) {
+        return CollectLocalColumns(ref, tables, out);
+    }
+    return {};
+}
+
+// Output names of a FROM subquery as the builder assigns them (ItemName). A star
+// exposes the bare columns of the FROM items it expands.
+std::expected<void, TError> CollectOutputNames(
     const NSql::TSqlNodePtr& body,
-    const TTableSourceFactory& sources,
+    const TSqlTableScope& tables,
     TLocalSqlScope& out)
 {
     if (auto query = NSql::TMaybeNode<NSql::TSqlQuery>(body)) {
-        if (query.Cast()->WithClause) {
-            // Its own CTEs shadow `sources`, so its FROM cannot be resolved here.
-            out.CompleteBareColumns = false;
-            return;
+        if (const auto& with = query.Cast()->WithClause) {
+            return CollectOutputNames(query.Cast()->Body, WithCtes(tables, *with), out);
         }
-        CollectOutputNames(query.Cast()->Body, sources, out);
-    } else if (auto set = NSql::TMaybeNode<NSql::TSqlSetOp>(body)) {
+        return CollectOutputNames(query.Cast()->Body, tables, out);
+    }
+    if (auto set = NSql::TMaybeNode<NSql::TSqlSetOp>(body)) {
         // A set operation is named by its first input.
-        CollectOutputNames(set.Cast()->Left, sources, out);
-    } else if (auto select = NSql::TMaybeNode<NSql::TSqlSelect>(body)) {
+        return CollectOutputNames(set.Cast()->Left, tables, out);
+    }
+    if (auto select = NSql::TMaybeNode<NSql::TSqlSelect>(body)) {
         const auto& items = select.Cast()->SelectList->Items;
         for (size_t i = 0; i < items.size(); ++i) {
             const auto& item = *items[i];
@@ -793,66 +837,107 @@ void CollectOutputNames(
                 } else {
                     out.BareColumns.insert(item.ColumnAliases.begin(), item.ColumnAliases.end());
                 }
-            } else if (item.StarPrefix.empty() && select.Cast()->From) {
-                TLocalSqlScope from;
-                for (const auto& ref : select.Cast()->From->Items) {
-                    CollectLocalColumns(ref, sources, from);
-                }
-                out.BareColumns.insert(from.BareColumns.begin(), from.BareColumns.end());
-                out.CompleteBareColumns = out.CompleteBareColumns && from.CompleteBareColumns;
-            } else {
-                out.CompleteBareColumns = false;
+                continue;
             }
+            if (!select.Cast()->From) {
+                continue; // BuildSelect rejects a SELECT without FROM.
+            }
+            TLocalSqlScope expanded;
+            for (const auto& ref : select.Cast()->From->Items) {
+                auto collected = item.StarPrefix.empty()
+                    ? CollectLocalColumns(ref, tables, expanded)
+                    : CollectQualifiedColumns(ref, TableName(item.StarPrefix), tables, expanded);
+                if (!collected) {
+                    return collected;
+                }
+            }
+            out.BareColumns.insert(expanded.BareColumns.begin(), expanded.BareColumns.end());
+            out.CompleteBareColumns = out.CompleteBareColumns && expanded.CompleteBareColumns;
         }
-    } else {
-        out.CompleteBareColumns = false;
     }
+    return {};
 }
 
 // The scope of a subquery's FROM item: base tables, CTEs and derived tables,
 // recursing into joins. Used to tell a subquery's local columns from outer
 // (correlated) ones.
-void CollectLocalColumns(
+std::expected<void, TError> CollectLocalColumns(
     const NSql::TSqlPtr<NSql::TSqlTableRef>& ref,
-    const TTableSourceFactory& sources,
+    const TSqlTableScope& tables,
     TLocalSqlScope& out)
 {
+    if (auto join = NSql::TMaybeNode<NSql::TSqlJoin>(ref)) {
+        auto left = CollectLocalColumns(join.Cast()->Left, tables, out);
+        if (!left) {
+            return left;
+        }
+        return CollectLocalColumns(join.Cast()->Right, tables, out);
+    }
+    // The alias (or the name) distinguishes a local column of `item j`
+    // (`j.i_category`) from an outer column of another alias of the same table.
+    if (auto qualifier = ItemQualifier(ref)) {
+        out.Qualifiers.insert(*qualifier);
+    }
     if (auto table = NSql::TMaybeNode<NSql::TSqlTableName>(ref)) {
-        auto node = table.Cast();
-        // The alias (or the name) distinguishes a local column of `item j`
-        // (`j.i_category`) from an outer column of another alias of the same table.
-        out.Qualifiers.insert(node->Alias ? *node->Alias : node->Name.back());
-        if (auto src = sources(TableName(node->Name))) {
-            if (auto source = TMaybeOp<TSourceOperator>(*src)) {
-                for (const auto& col : source.Cast()->GetSource().Schema().Columns) {
-                    out.BareColumns.insert(std::string(col.Name));
+        const std::string name = TableName(table.Cast()->Name);
+        const std::string key = ToLower(name);
+        for (const auto* scope = &tables; scope; scope = scope->Parent) {
+            if (auto cte = scope->Ctes.find(key); cte != scope->Ctes.end()) {
+                if (const auto& columns = cte->second->Columns) {
+                    out.BareColumns.insert(columns->Items.begin(), columns->Items.end());
+                    return {};
                 }
-            } else if (auto&& schema = (*src)->OutputColumns()) {
-                // A CTE inlined as a subplan exposes its output (projection) names.
-                for (const auto& [name, _] : schema->Fields) {
-                    auto dot = name.rfind('.');
-                    out.BareColumns.insert(dot != std::string::npos ? name.substr(dot + 1) : name);
-                }
-            } else {
-                out.CompleteBareColumns = false;
+                // As in BuildQuery, a CTE body sees the WITH that declares it.
+                return CollectOutputNames(cte->second->Query, *scope, out);
+            }
+        }
+        auto src = tables.Sources(name);
+        if (!src) {
+            return std::unexpected(src.error());
+        }
+        if (auto source = TMaybeOp<TSourceOperator>(*src)) {
+            for (const auto& col : source.Cast()->GetSource().Schema().Columns) {
+                out.BareColumns.insert(std::string(col.Name));
+            }
+        } else if (auto&& schema = (*src)->OutputColumns()) {
+            // A CTE of an enclosing query, inlined as a subplan, exposes its output
+            // (projection) names.
+            for (const auto& [column, _] : schema->Fields) {
+                auto dot = column.rfind('.');
+                out.BareColumns.insert(dot != std::string::npos ? column.substr(dot + 1) : column);
             }
         } else {
+            // A source that cannot list its columns before it is built.
             out.CompleteBareColumns = false;
         }
     } else if (auto derived = NSql::TMaybeNode<NSql::TSqlSubqueryTable>(ref)) {
-        if (derived.Cast()->Alias) {
-            out.Qualifiers.insert(*derived.Cast()->Alias);
-        }
         if (derived.Cast()->ColumnAliases) {
             const auto& columns = derived.Cast()->ColumnAliases->Items;
             out.BareColumns.insert(columns.begin(), columns.end());
         } else {
-            CollectOutputNames(derived.Cast()->Query, sources, out);
+            return CollectOutputNames(derived.Cast()->Query, tables, out);
         }
-    } else if (auto join = NSql::TMaybeNode<NSql::TSqlJoin>(ref)) {
-        CollectLocalColumns(join.Cast()->Left, sources, out);
-        CollectLocalColumns(join.Cast()->Right, sources, out);
     }
+    return {};
+}
+
+// The scope of the FROM of a subquery, with the subquery's own WITH in effect.
+std::expected<TLocalSqlScope, TError> CollectSubqueryScope(
+    const NSql::TSqlQuery& query,
+    const NSql::TSqlFrom& from,
+    const TTableSourceFactory& sources)
+{
+    const TSqlTableScope enclosing{.Sources = sources};
+    const auto tables = query.WithClause
+        ? WithCtes(enclosing, *query.WithClause)
+        : enclosing;
+    TLocalSqlScope local;
+    for (const auto& item : from.Items) {
+        if (auto collected = CollectLocalColumns(item, tables, local); !collected) {
+            return std::unexpected(collected.error());
+        }
+    }
+    return local;
 }
 
 // Collects correlation equalities (outer_col == local_col) anywhere in a subquery
@@ -966,12 +1051,12 @@ std::expected<std::optional<TRelation>, TError> DecorrelateExistsOr(
         {
             return std::optional<TRelation>{};
         }
-        TLocalSqlScope local;
-        for (const auto& item : select->From->Items) {
-            CollectLocalColumns(item, context.Sources, local);
+        auto local = CollectSubqueryScope(*sub->Query, *select->From, context.Sources);
+        if (!local) {
+            return std::unexpected(local.error());
         }
         std::vector<std::pair<std::string, std::string>> corrs;
-        CollectCorrelations(select->Where, local, corrs);
+        CollectCorrelations(select->Where, *local, corrs);
         std::set<std::pair<std::string, std::string>> uniq(corrs.begin(), corrs.end());
         if (uniq.size() != 1) {
             return std::optional<TRelation>{}; // need exactly one correlation
@@ -1041,16 +1126,15 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
                 return std::unexpected(TError("unsupported IN operand"));
             }
             // Only uncorrelated IN is supported here: a correlated body would leave
-            // outer columns unbound in the standalone subquery plan. A subquery with
-            // its own WITH is not classified: its CTEs shadow `context.Sources`.
+            // outer columns unbound in the standalone subquery plan.
             if (auto sel = NSql::TMaybeNode<NSql::TSqlSelect>(scalar->Query->Body);
-                sel && !scalar->Query->WithClause && sel.Cast()->From && sel.Cast()->Where)
+                sel && sel.Cast()->From && sel.Cast()->Where)
             {
-                TLocalSqlScope local;
-                for (const auto& item : sel.Cast()->From->Items) {
-                    CollectLocalColumns(item, context.Sources, local);
+                auto local = CollectSubqueryScope(*scalar->Query, *sel.Cast()->From, context.Sources);
+                if (!local) {
+                    return std::unexpected(local.error());
                 }
-                if (HasUnmappedOuter(sel.Cast()->Where, local)) {
+                if (HasUnmappedOuter(sel.Cast()->Where, *local)) {
                     return std::unexpected(TError(
                         "correlated IN subquery in a boolean expression is not supported"));
                 }
@@ -1095,10 +1179,11 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
             && maybeSelect.Cast()->From && maybeSelect.Cast()->Where)
         {
             auto sel = maybeSelect.Cast();
-            TLocalSqlScope local;
-            for (const auto& item : sel->From->Items) {
-                CollectLocalColumns(item, context.Sources, local);
+            auto scope = CollectSubqueryScope(*scalar->Query, *sel->From, context.Sources);
+            if (!scope) {
+                return std::unexpected(scope.error());
             }
+            const auto& local = *scope;
 
             // Correlation = an equality with one local and one outer column, found
             // anywhere in the predicate (deduplicated by the (outer, local) pair).

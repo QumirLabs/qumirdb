@@ -1,0 +1,3 @@
+SELECT x, y
+FROM t
+WHERE y < (SELECT max(k) FROM (WITH c AS (SELECT z AS k FROM u) SELECT k FROM c) d WHERE k > 1);

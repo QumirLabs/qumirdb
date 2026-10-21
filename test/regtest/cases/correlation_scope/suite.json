@@ -21,6 +21,14 @@
     "derived_column_list_shadows_outer.sql": {"order": "unordered"},
     "in_or_over_derived.sql": {"order": "unordered"},
     "exists_or_over_derived.sql": {"order": "unordered"},
-    "in_or_with_cte.sql": {"order": "unordered"}
+    "in_or_with_cte.sql": {"order": "unordered"},
+    "derived_with_cte.sql": {"order": "unordered"},
+    "derived_with_cte_star_outer.sql": {"order": "unordered"},
+    "derived_qualified_star.sql": {"order": "unordered"},
+    "derived_qualified_star_outer.sql": {"order": "unordered"},
+    "derived_set_op_outer.sql": {"order": "unordered"},
+    "derived_nested_shadows_outer.sql": {"order": "unordered"},
+    "join_using_outer.sql": {"order": "unordered"},
+    "alias_hides_table_name.sql": {"order": "unordered"}
   }
 }
