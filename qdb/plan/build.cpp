@@ -462,14 +462,44 @@ TRelation AliasSubplan(TRelation relation, const std::string& alias) {
     if (!schema) {
         return relation;
     }
-    std::vector<TProjectionSpec> projections;
-    projections.reserve(schema->Fields.size());
-    for (size_t i = 0; i < schema->Fields.size(); ++i) {
-        const auto& label = relation.Labels[i];
+    std::vector<std::string> names;
+    names.reserve(relation.Labels.size());
+    for (const auto& label : relation.Labels) {
         auto dot = label.rfind('.');
         std::string bare = dot != std::string::npos ? label.substr(dot + 1) : label;
+        names.push_back(alias + "." + bare);
+    }
+    // A projection on top was built for this subquery alone (its SELECT list, the
+    // DISTINCT pass-through or the ORDER BY strip; a CTE reference is a TCteRef),
+    // so it is renamed in place instead of under an identity projection. Its
+    // outputs must already be final: one per spec, or one per alias of a struct
+    // group, laid out over a known input schema. Typing still names an unnamed
+    // output colN and may flatten it into several columns, so such a projection
+    // keeps the identity projection. Rebuild through the ctor so the output Type
+    // is recomputed.
+    auto project = TMaybeOp<TProjectOperator>(relation.Plan);
+    if (project && project.Cast()->Input()->OutputColumns()
+        && std::ranges::none_of(project.Cast()->Projections(), &TProjectionSpec::ImplicitName))
+    {
+        std::vector<TProjectionSpec> renamed = project.Cast()->Projections();
+        auto name = names.begin();
+        for (auto& spec : renamed) {
+            if (spec.ColumnAliases.empty()) {
+                spec.Name = *name++;
+            } else {
+                for (auto& column : spec.ColumnAliases) {
+                    column = *name++;
+                }
+                spec.Name = spec.ColumnAliases.front();
+            }
+        }
+        return Relation(std::make_shared<TProjectOperator>(project.Cast()->Input(), std::move(renamed)));
+    }
+    std::vector<TProjectionSpec> projections;
+    projections.reserve(names.size());
+    for (size_t i = 0; i < names.size(); ++i) {
         projections.push_back({
-            .Name = alias + "." + bare, .Expression = Ident({}, schema->Fields[i].first) });
+            .Name = std::move(names[i]), .Expression = Ident({}, schema->Fields[i].first) });
     }
     return Relation(std::make_shared<TProjectOperator>(std::move(relation.Plan), std::move(projections)));
 }
