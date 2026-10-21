@@ -62,7 +62,7 @@ public:
         NQumir::NAst::TExprPtr filter);
 
     std::string_view RelName() const override { return OpId; }
-    std::unordered_set<std::string> ComputeReferencedColumns() const override;
+    std::vector<TColumnReference> ColumnReferences() const override;
     // Per-side split: child i needs its own key columns + (filter vars & side)
     // + (parent-required & side). childIdx 0 = left, 1 = right.
     std::unordered_set<std::string> RequiredColumnsForChild(

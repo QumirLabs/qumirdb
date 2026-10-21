@@ -2,8 +2,10 @@
 
 #include <qumir/parser/ast.h>
 
+#include <memory>
 #include <string>
 #include <unordered_set>
+#include <vector>
 
 namespace NQdb {
 
@@ -12,5 +14,10 @@ namespace NQdb {
 // variables are considered bound and excluded from the result.
 // Unbound names in a kernel expression correspond to input column references.
 std::unordered_set<std::string> FindUnboundVars(const NQumir::NAst::TExprPtr& expr);
+
+// The identifier nodes behind FindUnboundVars, in AST order (pre-order, left to
+// right), so a diagnostic can point at the first reference.
+std::vector<std::shared_ptr<NQumir::NAst::TIdentExpr>> FindUnboundIdents(
+    const NQumir::NAst::TExprPtr& expr);
 
 } // namespace NQdb

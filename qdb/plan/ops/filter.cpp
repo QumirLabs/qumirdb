@@ -1,7 +1,5 @@
 #include <qdb/plan/ops/filter.h>
 
-#include <qdb/plan/passes/unbound_vars.h>
-
 #include <qumir/parser/core/lexer.h>
 #include <qumir/parser/core/parser.h>
 #include <qumir/parser/core/printer.h>
@@ -22,8 +20,10 @@ TFilterOperator::TFilterOperator(TOperatorPtr input, NQumir::NAst::TExprPtr pred
         schema);
 }
 
-std::unordered_set<std::string> TFilterOperator::ComputeReferencedColumns() const {
-    return FindUnboundVars(Predicate_);
+std::vector<TColumnReference> TFilterOperator::ColumnReferences() const {
+    std::vector<TColumnReference> references;
+    AppendColumnReferences(references, Predicate_);
+    return references;
 }
 
 const std::string TFilterOperator::ToString() const {

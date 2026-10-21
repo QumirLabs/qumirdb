@@ -24,7 +24,7 @@ public:
     TAggregateOperator(TOperatorPtr input, std::vector<std::string> groupKeys, std::vector<TAggregateSpec> aggs);
 
     std::string_view RelName() const override { return OpId; }
-    std::unordered_set<std::string> ComputeReferencedColumns() const override;
+    std::vector<TColumnReference> ColumnReferences() const override;
     // Aggregate defines a new schema: child only needs group keys + agg args.
     std::unordered_set<std::string> RequiredColumnsForChild(
         size_t, const std::unordered_set<std::string>&) const override {
