@@ -18,6 +18,8 @@
     "alias_grouping.sql": {"order": "ordered"},
     "alias_window.sql": {"order": "ordered"},
     "alias_shadowed.sql": {"order": "ordered"},
+    "alias_aggregated_scope.sql": {"order": "ordered"},
+    "alias_subquery.sql": {"order": "ordered"},
     "empty.sql": {
       "tables": {"t": "empty"},
       "order": "ordered"

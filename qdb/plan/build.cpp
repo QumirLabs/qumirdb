@@ -980,28 +980,32 @@ void CollectCorrelations(
     }
 }
 
-// Renames identifier leaves in place per `rename` (outer column -> local column).
-void RenameIdents(
-    const NAst::TExprPtr& expr,
-    const std::unordered_map<std::string, std::string>& rename)
+// Replaces identifier leaves named in `replacements` with a copy of their
+// expression, placed at the identifier's location. A call's callee names a
+// function, not a column, so it is left alone.
+void ReplaceIdents(
+    NAst::TExprPtr& expr,
+    const std::unordered_map<std::string, NAst::TExprPtr>& replacements)
 {
     if (!expr) {
         return;
     }
     if (auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(expr)) {
-        if (auto it = rename.find(ident.Cast()->Name); it != rename.end()) {
-            ident.Cast()->Name = it->second;
+        if (auto it = replacements.find(ident.Cast()->Name); it != replacements.end()) {
+            const auto location = expr->Location;
+            expr = CloneExpr(it->second);
+            expr->Location = location;
         }
         return;
     }
     if (auto call = NAst::TMaybeNode<NAst::TCallExpr>(expr)) {
         for (auto& arg : call.Cast()->Args) {
-            RenameIdents(arg, rename);
+            ReplaceIdents(arg, replacements);
         }
         return;
     }
     for (auto* child : expr->MutableChildren()) {
-        RenameIdents(*child, rename);
+        ReplaceIdents(*child, replacements);
     }
 }
 
@@ -1072,7 +1076,7 @@ std::expected<std::optional<TRelation>, TError> DecorrelateExistsOr(
             return std::unexpected(body.error());
         }
         auto where = CloneExpr(select->Where);
-        RenameIdents(where, {{outer, inner}}); // correlation -> inner=inner (tautology)
+        ReplaceIdents(where, {{outer, Ident({}, inner)}}); // correlation -> inner=inner (tautology)
         TOperatorPtr filtered = std::make_shared<TFilterOperator>(std::move(body->Plan), std::move(where));
         std::vector<TProjectionSpec> projs{
             { .Name = "__exists_key__", .Expression = Ident(sub->Location, inner) }};
@@ -1203,7 +1207,7 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
                 }
                 std::vector<NSql::TSqlPtr<NSql::TSqlSelectItem>> prepend;
                 std::vector<TJoinKey> joinKeys;
-                std::unordered_map<std::string, std::string> outerToLocal;
+                std::unordered_map<std::string, NAst::TExprPtr> outerToLocal;
                 for (size_t k = 0; k < correlation.size(); ++k) {
                     const auto& [outerCol, localCol] = correlation[k];
                     std::string corrName =
@@ -1215,7 +1219,7 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
                     sel->GroupBy->Items.push_back(
                         std::make_shared<NSql::TSqlGroupingExprOrList>(Ident({}, localCol)));
                     joinKeys.push_back({ .Left = outerCol, .Right = corrName });
-                    outerToLocal[outerCol] = localCol;
+                    outerToLocal[outerCol] = Ident({}, localCol);
                 }
                 sel->SelectList->Items.insert(
                     sel->SelectList->Items.begin(), prepend.begin(), prepend.end());
@@ -1223,7 +1227,7 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
                 // buried in a disjunction (`a = out AND P1) OR (a = out AND P2)`)
                 // becomes fully local; the correlation itself is enforced by the
                 // group-by + join keys above.
-                RenameIdents(sel->Where, outerToLocal);
+                ReplaceIdents(sel->Where, outerToLocal);
                 if (HasUnmappedOuter(sel->Where, local)) {
                     return std::unexpected(
                         TError("unsupported correlated subquery (outer column outside an equality)"));
@@ -1827,41 +1831,19 @@ std::expected<TRelation, TError> BuildSelect(
     return distinct ? ApplyDistinct(std::move(projected), outputNames) : projected;
 }
 
-// Replaces identifier leaves named in `exprs` with a copy of their expression.
-// A call's callee names a function, not a column, so it is left alone.
-void ReplaceIdents(
-    NAst::TExprPtr& expr,
-    const std::unordered_map<std::string, NAst::TExprPtr>& exprs)
-{
-    if (!expr) {
-        return;
-    }
-    if (auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(expr)) {
-        if (auto it = exprs.find(ident.Cast()->Name); it != exprs.end()) {
-            expr = CloneExpr(it->second);
-        }
-        return;
-    }
-    if (auto call = NAst::TMaybeNode<NAst::TCallExpr>(expr)) {
-        for (auto& arg : call.Cast()->Args) {
-            ReplaceIdents(arg, exprs);
-        }
-        return;
-    }
-    for (auto* child : expr->MutableChildren()) {
-        ReplaceIdents(*child, exprs);
-    }
-}
-
-// An ORDER BY expression is evaluated over the final projection's input. As for a
-// GROUP BY name, a name that is not an input column falls back to a SELECT alias.
-// The alias stands for its expression in that projection, which already reads the
-// aggregate, GROUPING() and window outputs. Returns `expr` itself when it uses no
-// alias.
+// Binds the names of an ORDER BY expression that is materialized in the final
+// projection, so it reads that projection's input: the FROM columns of a plain
+// SELECT, or the group keys and the aggregate and window results of an aggregated
+// one. A name that is not such a column falls back to an output column with an
+// explicit name (an alias or a plain column item); it is replaced by that column's
+// expression, which already reads the aggregate, GROUPING() and window results.
+// An ungrouped FROM column is not readable here, so in an aggregated SELECT its
+// name may resolve to an alias of the same name, where PostgreSQL and DuckDB
+// reject the query. A name given to several output columns is ambiguous. Returns
+// `expr` itself when it uses no alias.
 std::expected<NAst::TExprPtr, TError> BindOrderByAliases(
     const NAst::TExprPtr& expr,
-    const TProjectOperator& project,
-    const std::unordered_map<std::string, size_t>& aliasCounts)
+    const TProjectOperator& project)
 {
     auto&& input = project.Input()->OutputColumns();
     if (!input || input->Fields.empty()) {
@@ -1869,27 +1851,32 @@ std::expected<NAst::TExprPtr, TError> BindOrderByAliases(
         return expr;
     }
     std::unordered_map<std::string, NAst::TExprPtr> aliases;
-    for (const auto& name : FindUnboundVars(expr)) {
-        auto count = aliasCounts.find(name);
-        if (count == aliasCounts.end() || SchemaHasColumn(*input, name)) {
+    std::unordered_set<std::string> ambiguous;
+    for (const auto& projection : project.Projections()) {
+        if (projection.ImplicitName || !projection.ColumnAliases.empty()) {
             continue;
         }
-        if (count->second > 1) {
+        if (!aliases.emplace(projection.Name, projection.Expression).second) {
+            ambiguous.insert(projection.Name);
+        }
+    }
+    std::unordered_map<std::string, NAst::TExprPtr> replacements;
+    for (const auto& name : FindUnboundVars(expr)) {
+        auto alias = aliases.find(name);
+        if (alias == aliases.end() || SchemaHasColumn(*input, name)) {
+            continue;
+        }
+        if (ambiguous.contains(name)) {
             return std::unexpected(TError(expr->Location,
                 "ORDER BY alias '" + name + "' is ambiguous"));
         }
-        for (const auto& projection : project.Projections()) {
-            if (projection.Name == name) {
-                aliases.emplace(name, projection.Expression);
-                break;
-            }
-        }
+        replacements.emplace(name, alias->second);
     }
-    if (aliases.empty()) {
+    if (replacements.empty()) {
         return expr;
     }
     auto bound = CloneExpr(expr);
-    ReplaceIdents(bound, aliases);
+    ReplaceIdents(bound, replacements);
     return bound;
 }
 
@@ -1924,14 +1911,10 @@ std::expected<TRelation, TError> ApplyOrderBy(
         std::optional<size_t> ProjectionIndex;
     };
     std::unordered_map<std::string, TOutputRef> outputByExpr;
-    std::unordered_map<std::string, size_t> aliasCounts;
     if (auto select = NSql::TMaybeNode<NSql::TSqlSelect>(query.Body);
         select && select.Cast()->SelectList) {
         const auto& items = select.Cast()->SelectList->Items;
         for (size_t i = 0; i < items.size(); ++i) {
-            if (items[i]->Alias) {
-                ++aliasCounts[*items[i]->Alias];
-            }
             // A window select item is referenced by its output alias (handled by
             // the ident branch below); it also cannot be core-printed for a
             // structural match, so skip it here.
@@ -1990,7 +1973,7 @@ std::expected<TRelation, TError> ApplyOrderBy(
                 return std::unexpected(TError(item->Expr->Location,
                     "ORDER BY on an aggregate not in the select list is not supported"));
             }
-            auto bound = BindOrderByAliases(item->Expr, *topProject.Cast(), aliasCounts);
+            auto bound = BindOrderByAliases(item->Expr, *topProject.Cast());
             if (!bound) {
                 return std::unexpected(bound.error());
             }

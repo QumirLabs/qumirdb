@@ -1,0 +1,6 @@
+(rel project
+  (rel sort
+    (rel project (rel source "t") (col0 (+ b 2)) (col0 (- 70 b)) (__sort_0 (- 0 (- 70 b))))
+    (__sort_0 asc nulls-default))
+  (col0 col0)
+  (col0 col0))
