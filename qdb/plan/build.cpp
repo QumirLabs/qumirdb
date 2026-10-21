@@ -1671,8 +1671,7 @@ std::expected<TRelation, TError> BuildSelect(
 
 std::expected<TRelation, TError> ApplyOrderBy(
     const NSql::TSqlQuery& query,
-    TRelation relation,
-    const TBuildContext& context)
+    TRelation relation)
 {
     if (!query.OrderBy || query.OrderBy->Items.empty()) {
         return relation;
@@ -1756,16 +1755,9 @@ std::expected<TRelation, TError> ApplyOrderBy(
                 return std::unexpected(TError(item->Expr->Location,
                     "ORDER BY GROUPING() expression must appear in the select list"));
             }
-            // Reuse the aggregate collector purely to detect aggregate calls:
-            // a non-empty result means the expression aggregates but is not in
-            // the select list, which cannot be materialized in a scalar project.
-            TFreshNames names;
-            TAggCollector probe(nullptr, true, names, context.Annotation);
-            auto scalar = probe.Rewrite(item->Expr);
-            if (!scalar) {
-                return std::unexpected(scalar.error());
-            }
-            if (!probe.Empty()) {
+            // An aggregate missing from the select list cannot be materialized in
+            // the scalar project above the aggregate.
+            if (HasAggregateCall(item->Expr)) {
                 return std::unexpected(TError(item->Expr->Location,
                     "ORDER BY on an aggregate not in the select list is not supported"));
             }
@@ -1977,7 +1969,7 @@ std::expected<TRelation, TError> BuildQuery(
         if (!plan) {
             return plan;
         }
-        auto ordered = ApplyOrderBy(query, std::move(*plan), context);
+        auto ordered = ApplyOrderBy(query, std::move(*plan));
         if (!ordered) {
             return ordered;
         }
@@ -2028,7 +2020,7 @@ std::expected<TRelation, TError> BuildQuery(
     if (!plan) {
         return plan;
     }
-    auto ordered = ApplyOrderBy(query, std::move(*plan), inner);
+    auto ordered = ApplyOrderBy(query, std::move(*plan));
     if (!ordered) {
         return ordered;
     }

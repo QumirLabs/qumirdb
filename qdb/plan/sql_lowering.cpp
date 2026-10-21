@@ -494,6 +494,7 @@ std::expected<NAst::TExprPtr, TError> TAggCollector::Rewrite(NAst::TExprPtr expr
     // A window function evaluates after aggregation: keep the window node in
     // place, but hoist any aggregates from its arguments and PARTITION/ORDER
     // (e.g. `sum(sum(x)) over (...)`, `rank() over (order by sum(x))`).
+    // HasAggregateCall follows the same traversal.
     if (auto window = NAst::TMaybeNode<NSql::TWindowExpr>(expr)) {
         auto w = CloneSqlWindowExpr(window.Cast());
         if (auto call = NAst::TMaybeNode<NAst::TCallExpr>(w->Expr)) {
@@ -1003,6 +1004,38 @@ void NarrowPlainGroupKeys(
     for (size_t i = 0; i < keys.size(); ++i) {
         sets.front().push_back(i);
     }
+}
+
+bool HasAggregateCall(const NAst::TExprPtr& expr) {
+    if (!expr) {
+        return false;
+    }
+    // The window's own function does not aggregate the query, but its arguments,
+    // PARTITION BY and ORDER BY run over the aggregated rows and may, as in
+    // `rank() OVER (ORDER BY sum(x))`.
+    if (auto window = NAst::TMaybeNode<NSql::TWindowExpr>(expr)) {
+        if (auto call = NAst::TMaybeNode<NAst::TCallExpr>(window.Cast()->Expr)) {
+            if (std::ranges::any_of(call.Cast()->Args, HasAggregateCall)) {
+                return true;
+            }
+        }
+        const auto& spec = window.Cast()->WindowSpec;
+        if (spec && HasAggregateCall(spec->PartitionBy)) {
+            return true;
+        }
+        if (spec && spec->OrderBy) {
+            for (const auto& item : spec->OrderBy->Items) {
+                if (item && HasAggregateCall(item->Expr)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+    if (AsAggCall(expr)) {
+        return true;
+    }
+    return std::ranges::any_of(expr->Children(), HasAggregateCall);
 }
 
 bool HasGroupingCall(const NAst::TExprPtr& expr) {
