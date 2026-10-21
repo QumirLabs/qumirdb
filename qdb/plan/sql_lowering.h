@@ -31,11 +31,6 @@ std::string ToLower(std::string s);
 
 ESortNulls ConvertSortNulls(NSql::TSqlOrderItem::ENullOrder nulls);
 
-// Whether `expression` calls an aggregate of its own query level, the calls
-// TAggCollector collects: those inside subquery bodies do not count, those inside
-// window arguments, PARTITION BY and window ORDER BY do.
-bool HasAggregateCall(const NQumir::NAst::TExprPtr& expression);
-
 struct TAggCall;
 
 // Key for reusing a plain aggregate slot across SELECT/HAVING (no printer-format
@@ -192,6 +187,11 @@ void NarrowPlainGroupKeys(
     std::vector<TGroupKey>& keys,
     std::vector<std::vector<size_t>>& sets,
     bool hasGroupingSyntax);
+
+// Whether `expr` calls an aggregate of its own query level, the calls TAggCollector
+// collects: those inside subquery bodies do not count, those inside window
+// arguments, PARTITION BY and window ORDER BY do.
+bool HasAggregateCall(const NQumir::NAst::TExprPtr& expr);
 
 bool HasGroupingCall(const NQumir::NAst::TExprPtr& expr);
 
