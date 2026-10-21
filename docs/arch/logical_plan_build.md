@@ -126,7 +126,7 @@ grouped empty input is not accidentally changed into a global aggregate. The
 removed expressions stay in SELECT/HAVING and are evaluated from the retained
 key once per output group.
 
-This rewrite intentionally runs inside `BuildSelect`, after GROUP BY aliases
+This rewrite intentionally runs inside `BuildAggregate`, after GROUP BY aliases
 are resolved and before computed keys become materialized `gb_n` columns. A
 later plan pass would otherwise see only the synthetic column reference and
 would have to reconstruct its dependency through the lower project. In the

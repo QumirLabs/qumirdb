@@ -1106,9 +1106,12 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
 
 // Builds the aggregate of an aggregated SELECT over its input `node`: resolves the
 // GROUP BY keys (a name missing from the input falls back to a SELECT alias) and
-// realizes the specs taken from `collector`; without `grouping` the aggregate is
-// global. `projections` and `having` already reference the collector's aggregate
-// columns and are rewritten onto computed group keys and GROUPING() values.
+// realizes the specs taken from `collector`; with no group keys the aggregate is
+// global. `collector` must be built over the output schema of `node`, with affine
+// rewriting disabled when `grouping` has several sets, and take its slot names from
+// `names`, which also names the materialized arguments and partial aggregates.
+// `projections` and `having` already reference the collector's aggregate columns
+// and are rewritten onto computed group keys and GROUPING() values.
 std::expected<TRelation, TError> BuildAggregate(
     TRelation node,
     TAggCollector& collector,
@@ -1127,6 +1130,8 @@ std::expected<TRelation, TError> BuildAggregate(
         groupingSets = std::move(grouping->Sets);
         hasGroupingSyntax = grouping->HasGroupingSyntax;
     }
+    // A single set over all keys is a plain aggregate; >1 set needs the kernel's
+    // grouping-sets machinery (keys become nullable, masked per set).
     const bool multiSet = groupingSets.size() > 1;
     auto inputSchemaType = node.Plan->OutputColumns();
     auto inputSchema = NAst::TMaybeType<NAst::TStructType>(inputSchemaType);
@@ -1186,8 +1191,6 @@ std::expected<TRelation, TError> BuildAggregate(
         key.Computed = true;
     }
     NarrowPlainGroupKeys(groupKeys, groupingSets, hasGroupingSyntax);
-    // A single set over all keys is a plain aggregate; >1 set needs the kernel's
-    // grouping-sets machinery (keys become nullable, masked per set).
     std::unordered_map<std::string, std::string> computedKeys; // PrintAst -> name
     for (const auto& key : groupKeys) {
         if (key.Computed) {
@@ -1346,10 +1349,10 @@ std::expected<TRelation, TError> BuildAggregate(
         std::move(node.Plan), std::move(keys), std::move(specs));
     if (multiSet) {
         aggregate->MutableGroupingSets() = std::move(groupingSets);
-        auto inputSchema = aggregate->Input()->OutputColumns();
+        auto aggregateInput = aggregate->Input()->OutputColumns();
         aggregate->Type = std::make_shared<NAst::TFunctionType>(
-            std::vector<NAst::TTypePtr>{inputSchema},
-            ComputeAggregateOutputType(inputSchema, aggregate->GroupKeys(), aggregate->Aggs(),
+            std::vector<NAst::TTypePtr>{aggregateInput},
+            ComputeAggregateOutputType(aggregateInput, aggregate->GroupKeys(), aggregate->Aggs(),
                 !aggregate->GroupingSets().empty()));
     }
     return Relation(aggregate);
@@ -1611,8 +1614,15 @@ std::expected<TRelation, TError> BuildSelect(
         return distinct ? ApplyDistinct(std::move(projected), outputNames) : projected;
     }
 
-    auto aggregate = BuildAggregate(std::move(node), collector, names, std::move(parsedGrouping),
-        selectAliases, ambiguousSelectAliases, projections, having);
+    auto aggregate = BuildAggregate(
+        std::move(node),
+        collector,
+        names,
+        std::move(parsedGrouping),
+        selectAliases,
+        ambiguousSelectAliases,
+        projections,
+        having);
     if (!aggregate) {
         return std::unexpected(aggregate.error());
     }
