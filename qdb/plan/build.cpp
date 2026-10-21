@@ -421,6 +421,15 @@ TRelation Relation(TOperatorPtr plan) {
     return {.Plan = std::move(plan), .Labels = std::move(labels)};
 }
 
+// A bare name also matches a qualified column: references are qualified only later,
+// by QualifyColumns.
+bool SchemaHasColumn(const NAst::TStructType& schema, const std::string& name) {
+    return std::ranges::any_of(schema.Fields, [&](const auto& field) {
+        return field.first == name
+            || (name.find('.') == std::string::npos && BareColumnName(field.first) == name);
+    });
+}
+
 // Labels follow the join's output: both inputs, or the preserved side of a
 // semi/anti join.
 TRelation JoinRelations(
@@ -1311,13 +1320,7 @@ std::expected<TRelation, TError> BuildAggregate(
     auto inputSchemaType = node.Plan->OutputColumns();
     auto inputSchema = NAst::TMaybeType<NAst::TStructType>(inputSchemaType);
     auto inputHasColumn = [&](const std::string& name) {
-        if (!inputSchema) {
-            return false;
-        }
-        return std::ranges::any_of(inputSchema.Cast()->Fields, [&](const auto& field) {
-            return field.first == name
-                || (name.find('.') == std::string::npos && BareColumnName(field.first) == name);
-        });
+        return inputSchema && SchemaHasColumn(*inputSchema.Cast(), name);
     };
     const bool inputSchemaKnown = inputSchema && !inputSchema.Cast()->Fields.empty();
     for (auto& key : groupKeys) {
@@ -1824,6 +1827,72 @@ std::expected<TRelation, TError> BuildSelect(
     return distinct ? ApplyDistinct(std::move(projected), outputNames) : projected;
 }
 
+// Replaces identifier leaves named in `exprs` with a copy of their expression.
+// A call's callee names a function, not a column, so it is left alone.
+void ReplaceIdents(
+    NAst::TExprPtr& expr,
+    const std::unordered_map<std::string, NAst::TExprPtr>& exprs)
+{
+    if (!expr) {
+        return;
+    }
+    if (auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(expr)) {
+        if (auto it = exprs.find(ident.Cast()->Name); it != exprs.end()) {
+            expr = CloneExpr(it->second);
+        }
+        return;
+    }
+    if (auto call = NAst::TMaybeNode<NAst::TCallExpr>(expr)) {
+        for (auto& arg : call.Cast()->Args) {
+            ReplaceIdents(arg, exprs);
+        }
+        return;
+    }
+    for (auto* child : expr->MutableChildren()) {
+        ReplaceIdents(*child, exprs);
+    }
+}
+
+// An ORDER BY expression is evaluated over the final projection's input. As for a
+// GROUP BY name, a name that is not an input column falls back to a SELECT alias.
+// The alias stands for its expression in that projection, which already reads the
+// aggregate, GROUPING() and window outputs. Returns `expr` itself when it uses no
+// alias.
+std::expected<NAst::TExprPtr, TError> BindOrderByAliases(
+    const NAst::TExprPtr& expr,
+    const TProjectOperator& project,
+    const std::unordered_map<std::string, size_t>& aliasCounts)
+{
+    auto&& input = project.Input()->OutputColumns();
+    if (!input || input->Fields.empty()) {
+        // Without the input schema an input column cannot take precedence.
+        return expr;
+    }
+    std::unordered_map<std::string, NAst::TExprPtr> aliases;
+    for (const auto& name : FindUnboundVars(expr)) {
+        auto count = aliasCounts.find(name);
+        if (count == aliasCounts.end() || SchemaHasColumn(*input, name)) {
+            continue;
+        }
+        if (count->second > 1) {
+            return std::unexpected(TError(expr->Location,
+                "ORDER BY alias '" + name + "' is ambiguous"));
+        }
+        for (const auto& projection : project.Projections()) {
+            if (projection.Name == name) {
+                aliases.emplace(name, projection.Expression);
+                break;
+            }
+        }
+    }
+    if (aliases.empty()) {
+        return expr;
+    }
+    auto bound = CloneExpr(expr);
+    ReplaceIdents(bound, aliases);
+    return bound;
+}
+
 std::expected<TRelation, TError> ApplyOrderBy(
     const NSql::TSqlQuery& query,
     TRelation relation)
@@ -1838,9 +1907,10 @@ std::expected<TRelation, TError> ApplyOrderBy(
     //   2. an expression already computed in the select list (matched
     //      structurally) -> sort on that output column, so aggregates and other
     //      computed columns are reused rather than re-evaluated;
-    //   3. a pure-scalar expression over the projection's input -> materialized
-    //      as a hidden column, sorted on, then stripped by a final projection so
-    //      the output schema is unchanged.
+    //   3. a pure-scalar expression over the projection's input, where a SELECT
+    //      alias may stand for a missing input column -> materialized as a hidden
+    //      column, sorted on, then stripped by a final projection so the output
+    //      schema is unchanged.
     // An aggregate not present in the select list cannot be sorted on (it would
     // be re-applied as a scalar over already-grouped rows), so it is rejected.
     auto topProject = TMaybeOp<TProjectOperator>(relation.Plan);
@@ -1854,10 +1924,14 @@ std::expected<TRelation, TError> ApplyOrderBy(
         std::optional<size_t> ProjectionIndex;
     };
     std::unordered_map<std::string, TOutputRef> outputByExpr;
+    std::unordered_map<std::string, size_t> aliasCounts;
     if (auto select = NSql::TMaybeNode<NSql::TSqlSelect>(query.Body);
         select && select.Cast()->SelectList) {
         const auto& items = select.Cast()->SelectList->Items;
         for (size_t i = 0; i < items.size(); ++i) {
+            if (items[i]->Alias) {
+                ++aliasCounts[*items[i]->Alias];
+            }
             // A window select item is referenced by its output alias (handled by
             // the ident branch below); it also cannot be core-printed for a
             // structural match, so skip it here.
@@ -1916,8 +1990,12 @@ std::expected<TRelation, TError> ApplyOrderBy(
                 return std::unexpected(TError(item->Expr->Location,
                     "ORDER BY on an aggregate not in the select list is not supported"));
             }
+            auto bound = BindOrderByAliases(item->Expr, *topProject.Cast(), aliasCounts);
+            if (!bound) {
+                return std::unexpected(bound.error());
+            }
             column = "__sort_" + std::to_string(sortCounter++);
-            hidden.push_back({ .Name = column, .Expression = item->Expr });
+            hidden.push_back({ .Name = column, .Expression = std::move(*bound) });
         }
 
         keys.push_back({

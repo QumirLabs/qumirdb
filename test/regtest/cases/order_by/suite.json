@@ -13,6 +13,11 @@
     "expression.sql": {"order": "ordered"},
     "duplicates.sql": {"order": "unordered"},
     "self_join.sql": {"order": "ordered"},
+    "alias_expression.sql": {"order": "ordered"},
+    "alias_aggregate.sql": {"order": "ordered"},
+    "alias_grouping.sql": {"order": "ordered"},
+    "alias_window.sql": {"order": "ordered"},
+    "alias_shadowed.sql": {"order": "ordered"},
     "empty.sql": {
       "tables": {"t": "empty"},
       "order": "ordered"
