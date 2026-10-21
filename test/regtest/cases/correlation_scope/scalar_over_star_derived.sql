@@ -1,0 +1,3 @@
+SELECT x, y
+FROM t
+WHERE y < (SELECT max(w) FROM (SELECT * FROM u) d WHERE z < 100);

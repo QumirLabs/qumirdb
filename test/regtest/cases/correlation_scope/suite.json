@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "fixtures": {
+    "outer": {"json": "tables/t.json"},
+    "inner": {"json": "tables/u.json"}
+  },
+  "tables": {
+    "t": "outer",
+    "u": "inner"
+  },
+  "variants": ["single", "threaded"],
+  "cases": {
+    "correlated_cte_bare_outer.sql": {"order": "unordered"},
+    "scalar_over_star_derived.sql": {"order": "unordered"},
+    "scalar_over_unnamed_derived.sql": {"order": "unordered"},
+    "derived_bare_outer.sql": {"order": "unordered"},
+    "derived_qualified_outer.sql": {"order": "unordered"},
+    "derived_star_outer.sql": {"order": "unordered"},
+    "derived_beside_table_outer.sql": {"order": "unordered"},
+    "derived_shadows_outer.sql": {"order": "unordered"},
+    "derived_column_list_shadows_outer.sql": {"order": "unordered"},
+    "in_or_over_derived.sql": {"order": "unordered"},
+    "exists_or_over_derived.sql": {"order": "unordered"},
+    "in_or_with_cte.sql": {"order": "unordered"}
+  }
+}
