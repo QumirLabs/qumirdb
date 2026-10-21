@@ -1,0 +1,3 @@
+project (sum_0, s) (rows≈2 cost≈128)
+└─ aggregate keys=[t.sum_0] aggs=[sum_1=sum] (rows≈2 cost≈96)
+   └─ source t AS t (rows≈3 cost≈48)

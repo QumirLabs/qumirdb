@@ -189,7 +189,7 @@ TEST(AggregateLogical, ReusesSumAndCountForAffineIntegerSums) {
     EXPECT_EQ(PrintAst(output.Cast()->Projections()[0].Expression), "sum_0");
     EXPECT_EQ(
         PrintAst(output.Cast()->Projections()[89].Expression),
-        "(+ sum_0 (* 89 count_1))");
+        "(+ sum_0 (* 89 count_0))");
 }
 
 TEST(AggregateLogical, ReusesReducersAcrossAffineSumAverageAndCount) {
@@ -209,13 +209,13 @@ TEST(AggregateLogical, ReusesReducersAcrossAffineSumAverageAndCount) {
     ASSERT_EQ(output.Cast()->Projections().size(), 6u);
     EXPECT_EQ(
         PrintAst(output.Cast()->Projections()[0].Expression),
-        "(+ sum_0 (* 10 count_1))");
+        "(+ sum_0 (* 10 count_0))");
     EXPECT_EQ(
         PrintAst(output.Cast()->Projections()[3].Expression),
-        "(/ (+ sum_0 (* 123 count_1)) (cast count_1 f64))");
+        "(/ (+ sum_0 (* 123 count_0)) (cast count_0 f64))");
     EXPECT_EQ(
         PrintAst(output.Cast()->Projections()[5].Expression),
-        "count_1");
+        "count_0");
 }
 
 TEST(AggregateE2E, AffineIntegerAggregateRewritePreservesNullSemantics) {

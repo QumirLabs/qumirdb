@@ -168,7 +168,10 @@ ExpandGroupingElement(const NSql::TSqlNodePtr& element) {
     return std::unexpected(TError("unsupported grouping element"));
 }
 
-std::expected<TGroupingParse, TError> ParseGrouping(const NSql::TSqlGroupBy& groupBy) {
+std::expected<TGroupingParse, TError> ParseGrouping(
+    const NSql::TSqlGroupBy& groupBy,
+    TFreshNames& names)
+{
     // Multiple grouping elements combine as a cross product of their set-lists.
     std::vector<std::vector<NAst::TExprPtr>> combos = {{}};
     for (const auto& item : groupBy.Items) {
@@ -206,7 +209,7 @@ std::expected<TGroupingParse, TError> ParseGrouping(const NSql::TSqlGroupBy& gro
         } else if (HasSubquery(expr)) {
             return std::unexpected(TError(expr->Location, "GROUP BY on a subquery is not supported"));
         } else {
-            gk = { .Name = "gb_" + std::to_string(result.Keys.size()), .Expression = expr, .Computed = true };
+            gk = { .Name = names.Next("gb"), .Expression = expr, .Computed = true };
         }
         size_t idx = result.Keys.size();
         result.Keys.push_back(std::move(gk));
@@ -1198,9 +1201,21 @@ std::expected<TRelation, TError> BuildSelect(
         return std::unexpected(TError("empty select list"));
     }
 
+    // A GROUP BY alias names its key, which HAVING and GROUPING() refer to, so
+    // generated names avoid every SELECT alias as well as the input columns.
+    TFreshNames names;
+    for (const auto& column : ColumnNames(node.Plan)) {
+        names.Reserve(BareColumnName(column));
+    }
+    for (const auto& item : select.SelectList->Items) {
+        if (item->Alias) {
+            names.Reserve(*item->Alias);
+        }
+    }
+
     std::optional<TGroupingParse> parsedGrouping;
     if (select.GroupBy) {
-        auto parsed = ParseGrouping(*select.GroupBy);
+        auto parsed = ParseGrouping(*select.GroupBy, names);
         if (!parsed) {
             return std::unexpected(parsed.error());
         }
@@ -1216,6 +1231,7 @@ std::expected<TRelation, TError> BuildSelect(
     TAggCollector collector(
         inputSchema ? inputSchema.Cast().get() : nullptr,
         !multiSet,
+        names,
         context.Annotation);
     const bool distinct = select.Quantifier == NSql::ESetQuantifier::Distinct;
     std::vector<TProjectionSpec> projections;
@@ -1357,13 +1373,8 @@ std::expected<TRelation, TError> BuildSelect(
             return false;
         }
         return std::ranges::any_of(inputSchema.Cast()->Fields, [&](const auto& field) {
-            if (field.first == name) {
-                return true;
-            }
-            const auto dot = field.first.rfind('.');
-            return name.find('.') == std::string::npos
-                && dot != std::string::npos
-                && field.first.substr(dot + 1) == name;
+            return field.first == name
+                || (name.find('.') == std::string::npos && BareColumnName(field.first) == name);
         });
     };
     const bool inputSchemaKnown = inputSchema && !inputSchema.Cast()->Fields.empty();
@@ -1497,7 +1508,7 @@ std::expected<TRelation, TError> BuildSelect(
                     return std::unexpected(TError(
                         "mixing DISTINCT with a computed aggregate argument is not supported"));
                 }
-                const std::string innerName = "partial_" + spec.Name;
+                const std::string innerName = names.Next("partial");
                 const std::string mergeFunc = spec.Func == "count" ? "sum" : spec.Func;
                 innerSpecs.push_back({ .Name = innerName, .Func = spec.Func, .Arg = std::move(spec.Arg) });
                 outerSpecs.push_back({ .Name = spec.Name, .Func = mergeFunc, .Arg = Ident({}, innerName) });
@@ -1543,15 +1554,19 @@ std::expected<TRelation, TError> BuildSelect(
                 argProjections.push_back({ .Name = key.Name, .Expression = key.Expression });
             }
         }
-        int counter = 0;
         for (auto& spec : specs) {
             if (!spec.Arg) {
                 continue;
             }
-            if (auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(spec.Arg)) {
+            // The constant global key keeps its name, which the scheduler and the
+            // estimates recognize, so an input `__group__` argument is
+            // materialized under a generated name instead of passed through.
+            if (auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(spec.Arg);
+                ident && !(global && BareColumnName(ident.Cast()->Name) == "__group__"))
+            {
                 passthrough(ident.Cast()->Name);
             } else {
-                std::string name = "arg_" + std::to_string(counter++);
+                std::string name = names.Next("arg");
                 argProjections.push_back({ .Name = name, .Expression = spec.Arg });
                 spec.Arg = Ident(spec.Arg->Location, name);
             }
@@ -1690,7 +1705,8 @@ std::expected<TRelation, TError> ApplyOrderBy(
             // Reuse the aggregate collector purely to detect aggregate calls:
             // a non-empty result means the expression aggregates but is not in
             // the select list, which cannot be materialized in a scalar project.
-            TAggCollector probe(nullptr, true, context.Annotation);
+            TFreshNames names;
+            TAggCollector probe(nullptr, true, names, context.Annotation);
             auto scalar = probe.Rewrite(item->Expr);
             if (!scalar) {
                 return std::unexpected(scalar.error());

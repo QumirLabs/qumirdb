@@ -1,6 +1,6 @@
 cte #1 (materialized, ×2):
 project (product_name, item_sk, store_name, store_zip, b_street_number, b_street_name, b_city, b_zip, c_street_number, c_street_name, c_city, c_zip, syear, cnt, s1, s2, s3) (rows≈1 cost≈85.1K)
-└─ aggregate keys=[item.i_product_name, item.i_item_sk, store.s_store_name, store.s_zip, ad1.ca_street_number, ad1.ca_street_name, ad1.ca_city, ad1.ca_zip, ad2.ca_street_number, ad2.ca_street_name, ad2.ca_city, ad2.ca_zip, d1.d_year, d2.d_year, d3.d_year] aggs=[count_0=count, sum_1=sum, sum_2=sum, sum_3=sum] (rows≈1 cost≈84.9K)
+└─ aggregate keys=[item.i_product_name, item.i_item_sk, store.s_store_name, store.s_zip, ad1.ca_street_number, ad1.ca_street_name, ad1.ca_city, ad1.ca_zip, ad2.ca_street_number, ad2.ca_street_name, ad2.ca_city, ad2.ca_zip, d1.d_year, d2.d_year, d3.d_year] aggs=[count_0=count, sum_0=sum, sum_1=sum, sum_2=sum] (rows≈1 cost≈84.9K)
    └─ join inner [customer.c_first_shipto_date_sk = d3.d_date_sk] emit-filter 1 from left (rows≈1 cost≈84.7K)
       ├─ join inner [customer.c_first_sales_date_sk = d2.d_date_sk] emit-filter 2 from left (rows≈1 cost≈80K)
       │  ├─ join inner [store_sales.ss_item_sk = item.i_item_sk] (rows≈1 cost≈75.4K)

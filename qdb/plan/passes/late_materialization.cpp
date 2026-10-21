@@ -20,11 +20,6 @@ namespace {
 
 using namespace NQumir::NAst;
 
-std::string BareName(const std::string& name) {
-    const auto dot = name.rfind('.');
-    return dot == std::string::npos ? name : name.substr(dot + 1);
-}
-
 struct TRowChain {
     std::shared_ptr<TSourceOperator> Source;
     std::unordered_set<std::string> EarlyColumns;
@@ -35,7 +30,7 @@ std::optional<TRowChain> MatchRowChain(const TOperatorPtr& root) {
     TOperatorPtr current = root;
     while (auto filter = TMaybeOp<TFilterOperator>(current)) {
         for (const auto& column : filter.Cast()->ComputeReferencedColumns()) {
-            result.EarlyColumns.insert(BareName(column));
+            result.EarlyColumns.insert(BareColumnName(column));
         }
         current = filter.Cast()->Input();
     }
@@ -84,7 +79,7 @@ std::optional<std::vector<TLateMaterializeColumn>> DirectOutputColumns(
             if (!prefix.empty() && ident.Cast()->Name.rfind(prefix, 0) != 0) {
                 return std::nullopt;
             }
-            const std::string physical = BareName(ident.Cast()->Name);
+            const std::string physical = BareColumnName(ident.Cast()->Name);
             if (!physicalColumns.contains(physical) ||
                 physical == InternalRowIdColumnName)
             {
@@ -118,7 +113,7 @@ std::optional<std::vector<TLateMaterializeColumn>> DirectOutputColumns(
             if (!prefix.empty() && ident.Cast()->Name.rfind(prefix, 0) != 0) {
                 return std::nullopt;
             }
-            physical = BareName(ident.Cast()->Name);
+            physical = BareColumnName(ident.Cast()->Name);
         }
         if (!physicalColumns.contains(physical) ||
             physical == InternalRowIdColumnName)
@@ -311,7 +306,7 @@ TOperatorPtr ApplyLateMaterialization(
                     candidate->OrderingProject->Projections()[it->second];
                 narrowProjections.push_back(orderingProjection);
                 auto ident = TMaybeNode<TIdentExpr>(orderingProjection.Expression);
-                chain->EarlyColumns.insert(BareName(ident.Cast()->Name));
+                chain->EarlyColumns.insert(BareColumnName(ident.Cast()->Name));
             }
         }
     }

@@ -16,6 +16,7 @@
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace NQdb {
@@ -49,6 +50,22 @@ struct TPlainAggKeyHash {
     }
 };
 
+// Generated column names of one aggregation (slots, computed keys, materialized
+// arguments, partial aggregates): each differs from the input columns, the SELECT
+// aliases and every other generated name, because they share one plan scope.
+class TFreshNames {
+public:
+    void Reserve(std::string name) {
+        Taken_.insert(std::move(name));
+    }
+
+    // Takes the first `<prefix>_<n>` that is still free.
+    std::string Next(const std::string& prefix);
+
+private:
+    std::unordered_set<std::string> Taken_;
+};
+
 // Replaces aggregate calls in an expression with references to synthetic
 // aggregate output columns, collecting the corresponding specs.
 class TAggCollector {
@@ -56,15 +73,18 @@ public:
     explicit TAggCollector(
         const NQumir::NAst::TStructType* inputSchema,
         bool enableAffineRewrite,
+        TFreshNames& names,
         const NKernel::TAnnotationContext& context)
         : InputSchema_(inputSchema)
         , EnableAffineRewrite_(enableAffineRewrite)
+        , Names_(names)
         , Context_(context)
     { }
     // The collector keeps a reference to the context.
     TAggCollector(
         const NQumir::NAst::TStructType* inputSchema,
         bool enableAffineRewrite,
+        TFreshNames& names,
         const NKernel::TAnnotationContext&& context) = delete;
 
     std::expected<NQumir::NAst::TExprPtr, NQumir::TError> Rewrite(NQumir::NAst::TExprPtr expr);
@@ -109,12 +129,11 @@ private:
         const TAggCall& agg, NQumir::TLocation loc);
     std::expected<NQumir::NAst::TExprPtr, NQumir::TError> Emit(
         const TAggCall& agg, NQumir::TLocation loc);
-    std::string NextName(const std::string& func);
 
     std::vector<TAggregateSpec> Specs_;
     const NQumir::NAst::TStructType* InputSchema_ = nullptr;
     bool EnableAffineRewrite_ = true;
-    int Counter_ = 0;
+    TFreshNames& Names_;
     std::optional<std::string> DistinctColumn_;
     std::set<std::string> DistinctSpecNames_;
     bool HasNonDistinct_ = false;

@@ -39,8 +39,8 @@ SELECT a, a + 1, count(*) FROM t GROUP BY a, a + 1;
 
 ```
 before                                  after (===== initial =====)
-aggregate keys=[a, gb_1]                project (a, col1, col2)
-└─ project (a, gb_1 = a + 1)            └─ aggregate keys=[a] aggs=[count_0=count]
+aggregate keys=[a, gb_0]                project (a, col1, col2)
+└─ project (a, gb_0 = a + 1)            └─ aggregate keys=[a] aggs=[count_0=count]
    └─ source t.parquet                     └─ source t.parquet
 ```
 
@@ -67,7 +67,7 @@ SELECT sum(c * 2 + 3), avg(c + 10) FROM t;
 before                                            after (===== initial =====)
 aggregate aggs=[sum(c*2+3), sum(c+10),            project (col0, col1)
                 count(c+10)]                      └─ aggregate keys=[__group__]
-└─ project (c*2+3, c+10)                             aggs=[sum_0=sum, count_1=count]
+└─ project (c*2+3, c+10)                             aggs=[sum_0=sum, count_0=count]
    └─ source t.parquet                               └─ project (c, __group__)
                                                         └─ source t.parquet
 ```
@@ -120,7 +120,7 @@ project (a)
    └─ join left [t.a = __corr_0_0__]
       ├─ source t.parquet
       └─ project (__corr_0_0__, __scalar_0__)
-         └─ aggregate keys=[v.a] aggs=[sum_0=sum, count_1=count]
+         └─ aggregate keys=[v.a] aggs=[sum_0=sum, count_0=count]
             └─ filter (== |v.a| |v.a|)
                └─ source v.parquet
 ```

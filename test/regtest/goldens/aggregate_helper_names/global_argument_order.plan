@@ -1,0 +1,4 @@
+project (a, xy) (rows≈1 cost≈232)
+└─ aggregate keys=[__group__] aggs=[sum_1=sum, sum_2=sum] (rows≈1 cost≈216)
+   └─ project (arg_0, arg_1, __group__) (rows≈3 cost≈144)
+      └─ source t AS t (rows≈3 cost≈72)

@@ -22,7 +22,7 @@ sort [c_last_name asc, c_first_name asc, s_store_name asc]
       │     └─ filter (== i_color (cast "chiffon" <named StringView>)) (rows≈1 cost≈25.1K)
       │        └─ cte-consumer #0 (×2)
       └─ project (__scalar_0__) (rows≈1 cost≈25.1K)
-         └─ aggregate keys=[__group__] aggs=[sum_0=sum, count_1=count] (rows≈1 cost≈25.1K)
+         └─ aggregate keys=[__group__] aggs=[sum_0=sum, count_0=count] (rows≈1 cost≈25.1K)
             └─ project (netpaid, __group__) (rows≈1 cost≈25.1K)
                └─ project (ssales.netpaid) (rows≈1 cost≈25.1K)
                   └─ cte-consumer #0 (×2)

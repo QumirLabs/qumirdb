@@ -9,9 +9,9 @@
     (keys k)
     (agg sum_0 sum arg_0)
     (agg sum_1 sum arg_1)
-    (agg count_2 count arg_2))
+    (agg count_0 count arg_2))
   (k k)
   (s (if
-      (< count_2 2)
+      (< count_0 2)
       (call qdb_sql_null)
-      (call qdb_sqrt (/ (- sum_1 (/ (* sum_0 sum_0) (cast count_2 f64))) (- (cast count_2 f64) 1.0))))))
+      (call qdb_sqrt (/ (- sum_1 (/ (* sum_0 sum_0) (cast count_0 f64))) (- (cast count_0 f64) 1.0))))))

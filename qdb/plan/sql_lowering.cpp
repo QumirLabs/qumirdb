@@ -478,6 +478,15 @@ ESortNulls ConvertSortNulls(NSql::TSqlOrderItem::ENullOrder nulls) {
     return ESortNulls::Default;
 }
 
+std::string TFreshNames::Next(const std::string& prefix) {
+    for (int index = 0;; ++index) {
+        auto name = prefix + "_" + std::to_string(index);
+        if (Taken_.insert(name).second) {
+            return name;
+        }
+    }
+}
+
 std::expected<NAst::TExprPtr, TError> TAggCollector::Rewrite(NAst::TExprPtr expr) {
     if (!expr) {
         return expr;
@@ -560,7 +569,7 @@ NAst::TExprPtr TAggCollector::EmitPlain(
     if (auto it = PlainSpecNames_.find(key); it != PlainSpecNames_.end()) {
         return Ident(std::move(loc), it->second);
     }
-    std::string name = NextName(func);
+    std::string name = Names_.Next(func);
     Specs_.push_back({ .Name = name, .Func = func, .Arg = std::move(arg) });
     PlainSpecNames_.emplace(std::move(key), name);
     return Ident(std::move(loc), std::move(name));
@@ -677,14 +686,14 @@ std::expected<NAst::TExprPtr, TError> TAggCollector::EmitStddevSamp(const TAggCa
         return needsCast ? CastF64(std::move(argLoc), std::move(arg)) : arg;
     };
 
-    std::string sumName = NextName("sum");
+    std::string sumName = Names_.Next("sum");
     Specs_.push_back({
         .Name = sumName,
         .Func = "sum",
         .Arg = valueArg(loc),
     });
 
-    std::string sumSqName = NextName("sum");
+    std::string sumSqName = Names_.Next("sum");
     auto squared = Binary(loc, "*", valueArg(loc), valueArg(loc));
     Specs_.push_back({
         .Name = sumSqName,
@@ -692,7 +701,7 @@ std::expected<NAst::TExprPtr, TError> TAggCollector::EmitStddevSamp(const TAggCa
         .Arg = std::move(squared),
     });
 
-    std::string countName = NextName("count");
+    std::string countName = Names_.Next("count");
     Specs_.push_back({
         .Name = countName,
         .Func = "count",
@@ -731,7 +740,7 @@ std::expected<NAst::TExprPtr, TError> TAggCollector::Emit(const TAggCall& agg, T
             return std::unexpected(TError(loc, "multiple distinct columns are not supported"));
         }
         DistinctColumn_ = column;
-        std::string name = NextName("count");
+        std::string name = Names_.Next("count");
         DistinctSpecNames_.insert(name);
         Specs_.push_back({ .Name = name, .Func = "count", .Arg = agg.Arg });
         return Ident(loc, name);
@@ -758,9 +767,9 @@ std::expected<NAst::TExprPtr, TError> TAggCollector::Emit(const TAggCall& agg, T
     // avg has no aggregate kernel; express it as sum / count. The count is over the
     // argument (not count(*)): SQL avg(x) ignores rows where x IS NULL.
     if (agg.Func == "avg") {
-        std::string sumName = NextName("sum");
+        std::string sumName = Names_.Next("sum");
         Specs_.push_back({ .Name = sumName, .Func = "sum", .Arg = agg.Arg });
-        std::string countName = NextName("count");
+        std::string countName = Names_.Next("count");
         Specs_.push_back({ .Name = countName, .Func = "count", .Arg = CloneExpr(agg.Arg) });
 
         NAst::TExprPtr count = Ident(loc, countName);
@@ -773,10 +782,6 @@ std::expected<NAst::TExprPtr, TError> TAggCollector::Emit(const TAggCall& agg, T
     }
 
     return EmitPlain(agg.Func, std::move(arg), std::move(loc));
-}
-
-std::string TAggCollector::NextName(const std::string& func) {
-    return func + "_" + std::to_string(Counter_++);
 }
 
 std::expected<NAst::TExprPtr, TError> TWindowCollector::Rewrite(NAst::TExprPtr expr) {
