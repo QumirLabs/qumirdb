@@ -11,11 +11,18 @@
 #include <qdb/plan/ops/cte_ref.h>
 #include <qdb/plan/ops/union.h>
 #include <qdb/plan/ops/window.h>
+#include <qdb/plan/passes/unbound_vars.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/kernel/annotate_type.h>
 
+#include <qumir/parser/core/printer.h>
 #include <qumir/parser/type.h>
+
+#include <algorithm>
+#include <optional>
+#include <string>
+#include <string_view>
 
 namespace NQdb {
 
@@ -52,6 +59,30 @@ TTypePtr UnifyUnionColumn(const TTypePtr& a, const TTypePtr& b) {
     if (!base) return nullptr;
     return (IsNullableType(a) || IsNullableType(b))
         ? std::static_pointer_cast<TType>(std::make_shared<TNullable>(base)) : base;
+}
+
+// Kernel type inference treats a name that is not an input column like a bare
+// NULL, and null-strict operators fold the predicate to NULL. A misspelled column
+// would then silently reject every row, so a predicate must name input columns.
+void RequireInputColumns(
+    const TExprPtr& predicate,
+    const TStructType& input,
+    std::string_view operatorName)
+{
+    // FindUnboundVars is unordered: report the smallest name so the error is stable.
+    std::optional<std::string> unknown;
+    for (const auto& name : FindUnboundVars(predicate)) {
+        const bool known = std::ranges::any_of(input.Fields,
+            [&](const auto& field) { return field.first == name; });
+        if (!known && (!unknown || name < *unknown)) {
+            unknown = name;
+        }
+    }
+    if (unknown) {
+        throw NQumir::TError(std::string(operatorName) +
+            " type inference: unknown column '" + *unknown + "' in '" +
+            NCore::PrintAst(predicate) + "'");
+    }
 }
 
 void ResolveProjectionSortKeys(
@@ -126,7 +157,11 @@ void AnnotateOperatorType(
     }
 
     if (auto maybe = TMaybeOp<TFilterOperator>(root)) {
-        auto schema = maybe.Cast()->Input()->OutputColumns();
+        auto filter = maybe.Cast();
+        auto schema = filter->Input()->OutputColumns();
+        if (schema) {
+            RequireInputColumns(filter->Predicate(), *schema, "filter");
+        }
         root->Type = std::make_shared<TFunctionType>(
             std::vector<TTypePtr>{schema},
             schema);
@@ -276,6 +311,14 @@ void AnnotateOperatorType(
         auto join = maybe.Cast();
         auto leftSchema = join->Left()->OutputColumns();
         auto rightSchema = join->Right()->OutputColumns();
+        if (join->Filter() && leftSchema && rightSchema) {
+            // The residual reads the matched pair, including the side a semi or
+            // anti join does not emit.
+            auto fields = leftSchema->Fields;
+            fields.insert(
+                fields.end(), rightSchema->Fields.begin(), rightSchema->Fields.end());
+            RequireInputColumns(join->Filter(), TStructType(std::move(fields)), "join");
+        }
         auto output = ComputeJoinOutputType(leftSchema, rightSchema, join->JoinType());
         root->Type = std::make_shared<TFunctionType>(
             std::vector<TTypePtr>{leftSchema, rightSchema},

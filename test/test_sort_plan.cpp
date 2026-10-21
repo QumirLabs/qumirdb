@@ -118,6 +118,25 @@ std::vector<std::string> FieldNames(const NQumir::NAst::TTypePtr& type) {
     return names;
 }
 
+// Types `sql` over a table with columns a and b; returns the typing error, or an
+// empty string when the plan types.
+std::string PlanTypingError(std::string_view sql) {
+    auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
+    NQdb::TMockSource source(TMockColumns{}, {{"a", i64}, {"b", i64}});
+    auto plan = BuildSqlPlan(sql, source);
+    if (!plan) {
+        return "build: " + plan.error().ToString();
+    }
+    AssignSourceAliases(*plan);
+    QualifyColumns(*plan);
+    try {
+        AnnotateTypes(*plan);
+    } catch (const NQumir::TError& error) {
+        return error.what();
+    }
+    return {};
+}
+
 } // namespace
 
 TEST(SortPlan, BuildPlanWrapsOrderByAfterProjection) {
@@ -517,6 +536,39 @@ TEST(SortPlan, ColumnPruningKeepsSortKeyColumns) {
 
     EXPECT_EQ(FieldNames(sourceOp->OutputColumns()), (std::vector<std::string>{"a", "b"}));
     EXPECT_EQ(FieldNames(sort->RequiredColumns()), (std::vector<std::string>{"a", "b"}));
+}
+
+TEST(PlanTyping, RejectsUnknownColumnInWhere) {
+    EXPECT_EQ(PlanTypingError("SELECT a FROM t WHERE zzz > 1"),
+        "filter type inference: unknown column 'zzz' in '(> zzz 1)'");
+}
+
+TEST(PlanTyping, RejectsUnknownColumnInHaving) {
+    EXPECT_EQ(PlanTypingError(
+            "SELECT a, count(*) AS c FROM t GROUP BY a HAVING zzz > 1"),
+        "filter type inference: unknown column 'zzz' in '(> zzz 1)'");
+}
+
+TEST(PlanTyping, RejectsUnknownColumnInJoinResidual) {
+    const auto error = PlanTypingError(
+        "SELECT x.a FROM t x JOIN t y ON x.a = y.a AND x.zzz > y.b");
+    EXPECT_TRUE(error.starts_with("join type inference: unknown column 'x.zzz' in ")) << error;
+}
+
+TEST(PlanTyping, RejectsUnknownColumnInSemiJoinResidual) {
+    const auto error = PlanTypingError(
+        "SELECT x.a FROM t x WHERE EXISTS (SELECT 1 FROM t y WHERE y.a = x.a AND y.zzz > 1)");
+    EXPECT_TRUE(error.starts_with("join type inference: unknown column 'y.zzz' in ")) << error;
+}
+
+TEST(PlanTyping, AcceptsPredicatesOverInputColumns) {
+    EXPECT_EQ(PlanTypingError("SELECT a FROM t WHERE b > 1"), "");
+    EXPECT_EQ(PlanTypingError(
+        "SELECT a, count(*) AS c FROM t GROUP BY a HAVING count(*) > 1"), "");
+    EXPECT_EQ(PlanTypingError(
+        "SELECT x.a FROM t x JOIN t y ON x.a = y.a AND x.b > y.b"), "");
+    EXPECT_EQ(PlanTypingError(
+        "SELECT x.a FROM t x WHERE EXISTS (SELECT 1 FROM t y WHERE y.a = x.a AND y.b > 1)"), "");
 }
 
 TEST(SortExec, SortsStringAndNumericKeysAcrossBatches) {
