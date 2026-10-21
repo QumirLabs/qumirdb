@@ -1,0 +1,5 @@
+project (id, b) (rows≈3 cost≈4.4K)
+└─ project (d.id, d.b) (rows≈3 cost≈4.3K)
+   └─ join inner [u.id = t.id] (rows≈3 cost≈4.3K)
+      ├─ source u AS u (rows≈3 cost≈48)
+      └─ source t AS t (rows≈3 cost≈24)

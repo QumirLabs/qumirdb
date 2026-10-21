@@ -458,48 +458,38 @@ std::expected<TRelation, TError> ApplyColumnAliases(
 // AssignSourceAliases, but subqueries/CTEs used with an alias need it here so the
 // outer query can reference `alias.col` (and equi-join keys on them are extracted).
 TRelation AliasSubplan(TRelation relation, const std::string& alias) {
-    auto&& schema = relation.Plan->OutputColumns();
-    if (!schema) {
-        return relation;
-    }
-    std::vector<std::string> names;
-    names.reserve(relation.Labels.size());
-    for (const auto& label : relation.Labels) {
-        auto dot = label.rfind('.');
-        std::string bare = dot != std::string::npos ? label.substr(dot + 1) : label;
-        names.push_back(alias + "." + bare);
-    }
-    // A projection on top was built for this subquery alone (its SELECT list, the
-    // DISTINCT pass-through or the ORDER BY strip; a CTE reference is a TCteRef),
-    // so it is renamed in place instead of under an identity projection. Its
-    // outputs must already be final: one per spec, or one per alias of a struct
-    // group, laid out over a known input schema. Typing still names an unnamed
-    // output colN and may flatten it into several columns, so such a projection
-    // keeps the identity projection. Rebuild through the ctor so the output Type
-    // is recomputed.
+    auto qualify = [&](const std::string& name) {
+        auto dot = name.rfind('.');
+        std::string bare = dot != std::string::npos ? name.substr(dot + 1) : name;
+        return alias + "." + bare;
+    };
+    // The top projection belongs to this subquery alone, so rename it in place
+    // instead of stacking an identity projection. Unnamed outputs are named and
+    // flattened only at typing, so their projection is renamed from above.
     auto project = TMaybeOp<TProjectOperator>(relation.Plan);
-    if (project && project.Cast()->Input()->OutputColumns()
-        && std::ranges::none_of(project.Cast()->Projections(), &TProjectionSpec::ImplicitName))
-    {
+    if (project && std::ranges::none_of(project.Cast()->Projections(), &TProjectionSpec::ImplicitName)) {
         std::vector<TProjectionSpec> renamed = project.Cast()->Projections();
-        auto name = names.begin();
         for (auto& spec : renamed) {
             if (spec.ColumnAliases.empty()) {
-                spec.Name = *name++;
+                spec.Name = qualify(spec.Name);
             } else {
                 for (auto& column : spec.ColumnAliases) {
-                    column = *name++;
+                    column = qualify(column);
                 }
                 spec.Name = spec.ColumnAliases.front();
             }
         }
         return Relation(std::make_shared<TProjectOperator>(project.Cast()->Input(), std::move(renamed)));
     }
+    auto&& schema = relation.Plan->OutputColumns();
+    if (!schema) {
+        return relation;
+    }
     std::vector<TProjectionSpec> projections;
-    projections.reserve(names.size());
-    for (size_t i = 0; i < names.size(); ++i) {
+    projections.reserve(schema->Fields.size());
+    for (size_t i = 0; i < schema->Fields.size(); ++i) {
         projections.push_back({
-            .Name = std::move(names[i]), .Expression = Ident({}, schema->Fields[i].first) });
+            .Name = qualify(relation.Labels[i]), .Expression = Ident({}, schema->Fields[i].first) });
     }
     return Relation(std::make_shared<TProjectOperator>(std::move(relation.Plan), std::move(projections)));
 }

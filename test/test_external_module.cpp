@@ -14,6 +14,7 @@
 #include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/parser/type.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <memory>
@@ -250,6 +251,80 @@ TEST(ExternalModuleCatalog, RustFunctionRunsThroughSqlPlan) {
     EXPECT_DOUBLE_EQ(ordered[1], 10.5);
     Release(&output);
     EXPECT_FALSE(runtime->Next(output));
+}
+
+TEST(ExternalModuleCatalog, DerivedTableQualifiesStructAliasGroup) {
+    NQumir::NCodeGen::TLLVMInitializer llvmInit;
+    TExternalModuleCatalog catalog;
+    auto statements = ParseAll(
+        "CREATE MODULE orbital LANGUAGE rust AS $$\n"
+        "#[repr(C)]\n"
+        "pub struct OrbitVector { pub x: f64, pub y: f64, pub z: f64 }\n"
+        "#[no_mangle]\n"
+        "pub extern \"C\" fn orbit_vector(x: f64) -> OrbitVector {\n"
+        "    OrbitVector { x, y: 2.0 * x, z: 3.0 * x }\n"
+        "}\n"
+        "$$;"
+        "CREATE FUNCTION orbit_vector(DOUBLE) RETURNS (DOUBLE, DOUBLE, DOUBLE) "
+        "SET MODULE TO orbital SET SYMBOL TO orbit_vector;"
+        "SELECT d.vector_z, d.x FROM (SELECT x, orbit_vector(x) "
+        "AS (vector_x, vector_y, vector_z) FROM points) d;"
+        "SELECT d.vector_y FROM (SELECT DISTINCT orbit_vector(x) "
+        "AS (vector_x, vector_y, vector_z) FROM points) d;");
+    ApplyDefinitions(catalog, {statements[0], statements[1]});
+    auto snapshot = catalog.Snapshot();
+    NKernel::TAnnotationContext annotation{.ExternalCatalog = snapshot};
+
+    // Runs a query over points(x) = {1, 2, 1} and returns its rows sorted.
+    auto run = [&](const TSqlNodePtr& statement) {
+        std::vector<std::vector<double>> rows;
+        std::array<double, 3> values{1.0, 2.0, 1.0};
+        std::array<TColumn, 1> columns{
+            TColumn{.Data = reinterpret_cast<char*>(values.data())},
+        };
+        TRowSet batch{
+            .Columns = columns.data(),
+            .ColumnCount = 1,
+            .RowCount = 3,
+            .RefCount = 1,
+        };
+        TMockSource source(
+            {"x"}, {std::make_shared<TFloatType>()}, {batch});
+        auto plan = BuildPlan(statement, [&](std::string_view table)
+            -> std::expected<TOperatorPtr, NQumir::TError>
+        {
+            return std::make_shared<TSourceOperator>(source, std::string(table));
+        }, annotation);
+        if (!plan) {
+            ADD_FAILURE() << plan.error().ToString();
+            return rows;
+        }
+        ApplyPlanPasses(*plan, {
+            .EnableCbo = false,
+            .Annotation = annotation,
+        });
+        auto runtime = RunPlan(*plan, {}, snapshot);
+        TRowSet output{};
+        while (runtime->Next(output)) {
+            for (int64_t row = 0; row < output.RowCount; ++row) {
+                if (output.Selection && !output.Selection[row]) {
+                    continue;
+                }
+                auto& cells = rows.emplace_back();
+                for (int64_t column = 0; column < output.ColumnCount; ++column) {
+                    cells.push_back(
+                        reinterpret_cast<const double*>(output.Columns[column].Data)[row]);
+                }
+            }
+            Release(&output);
+        }
+        std::ranges::sort(rows);
+        return rows;
+    };
+
+    EXPECT_EQ(run(statements[2]),
+        (std::vector<std::vector<double>>{{3.0, 1.0}, {3.0, 1.0}, {6.0, 2.0}}));
+    EXPECT_EQ(run(statements[3]), (std::vector<std::vector<double>>{{2.0}, {4.0}}));
 }
 
 TEST(ExternalModuleCatalog, KumirFunctionsAreExportedAndRunWithoutCreateFunction) {

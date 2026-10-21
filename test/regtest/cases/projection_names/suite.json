@@ -7,6 +7,7 @@
   "variants": ["single", "threaded"],
   "cases": {
     "pruned_subquery_column.sql": {"order": "unordered"},
-    "pruned_cte_column.sql": {"order": "unordered"}
+    "pruned_cte_column.sql": {"order": "unordered"},
+    "subquery_over_shared_names.sql": {"tables": {"u": "rows"}, "order": "unordered"}
   }
 }
