@@ -458,6 +458,29 @@ std::expected<TRelation, TError> ApplyColumnAliases(
 // AssignSourceAliases, but subqueries/CTEs used with an alias need it here so the
 // outer query can reference `alias.col` (and equi-join keys on them are extracted).
 TRelation AliasSubplan(TRelation relation, const std::string& alias) {
+    auto qualify = [&](const std::string& name) {
+        auto dot = name.rfind('.');
+        std::string bare = dot != std::string::npos ? name.substr(dot + 1) : name;
+        return alias + "." + bare;
+    };
+    // The top projection belongs to this subquery alone, so rename it in place
+    // instead of stacking an identity projection. Unnamed outputs are named and
+    // flattened only at typing, so their projection is renamed from above.
+    auto project = TMaybeOp<TProjectOperator>(relation.Plan);
+    if (project && std::ranges::none_of(project.Cast()->Projections(), &TProjectionSpec::ImplicitName)) {
+        std::vector<TProjectionSpec> renamed = project.Cast()->Projections();
+        for (auto& spec : renamed) {
+            if (spec.ColumnAliases.empty()) {
+                spec.Name = qualify(spec.Name);
+            } else {
+                for (auto& column : spec.ColumnAliases) {
+                    column = qualify(column);
+                }
+                spec.Name = spec.ColumnAliases.front();
+            }
+        }
+        return Relation(std::make_shared<TProjectOperator>(project.Cast()->Input(), std::move(renamed)));
+    }
     auto&& schema = relation.Plan->OutputColumns();
     if (!schema) {
         return relation;
@@ -465,11 +488,8 @@ TRelation AliasSubplan(TRelation relation, const std::string& alias) {
     std::vector<TProjectionSpec> projections;
     projections.reserve(schema->Fields.size());
     for (size_t i = 0; i < schema->Fields.size(); ++i) {
-        const auto& label = relation.Labels[i];
-        auto dot = label.rfind('.');
-        std::string bare = dot != std::string::npos ? label.substr(dot + 1) : label;
         projections.push_back({
-            .Name = alias + "." + bare, .Expression = Ident({}, schema->Fields[i].first) });
+            .Name = qualify(relation.Labels[i]), .Expression = Ident({}, schema->Fields[i].first) });
     }
     return Relation(std::make_shared<TProjectOperator>(std::move(relation.Plan), std::move(projections)));
 }
