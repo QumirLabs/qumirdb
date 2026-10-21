@@ -59,7 +59,7 @@ its results may differ from what is shown here.
 
 | Benchmark | Scale | qdb (s) | DuckDB (s) | ClickHouse (s) | YQL (s) | qdb ÷ DuckDB | Notes |
 |---|---|---|---|---|---|---|---|
-| ClickBench | — | 15.31 | 14.44 | 14.95 | — | 1.06× | — |
+| ClickBench | — | 14.734 | 14.44 | 14.95 | — | 1.02× | qdb: one SQL run |
 | TPC-H | 1 | 0.857 | 1.17 | — | 4.17 | 0.73× | qdb: one SQL run |
 | TPC-H | 10 | 4.733 | 4.03 | — | 29.21 | 1.17× | qdb: one SQL run |
 | TPC-H | 100 | 49.843 | 32.10 | — | 338.38 | 1.55× | qdb: one SQL run |
