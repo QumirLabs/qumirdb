@@ -65,10 +65,15 @@ Used by q11 (HAVING), q15, q22.
 A correlated scalar subquery references outer columns. It is decorrelated by
 grouping the subquery on its correlation columns and `LEFT JOIN`-ing it back.
 
-Detection: `CollectLocalColumns` gathers the columns of the subquery's own FROM
-tables. A `WHERE` equality with exactly one **local** and one **outer** ident is
-a correlation pair `(outerCol, localCol)`; the rest stay as the subquery's local
-filter.
+Detection: `CollectLocalColumns` builds the scope of the subquery's FROM: the
+qualifiers of its items and the bare column names of its tables, CTEs and derived
+tables. A qualified ident is local iff its qualifier is; a bare one is local if
+the scope exposes it, so an inner column shadows an outer one of the same name.
+A `WHERE` equality with exactly one **local** and one **outer** ident is a
+correlation pair `(outerCol, localCol)`; the rest stay as the subquery's local
+filter. When the scope cannot list a derived table's bare names (a qualified
+star, its own `WITH`), a bare ident it does not expose rejects the subquery
+rather than being planned as uncorrelated.
 
 Rewrite of the subquery:
 - `GROUP BY` each `localCol`;
