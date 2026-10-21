@@ -1104,6 +1104,257 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
     return expr;
 }
 
+// Builds the aggregate of an aggregated SELECT over its input `node`: resolves the
+// GROUP BY keys (a name missing from the input falls back to a SELECT alias) and
+// realizes the specs taken from `collector`; without `grouping` the aggregate is
+// global. `projections` and `having` already reference the collector's aggregate
+// columns and are rewritten onto computed group keys and GROUPING() values.
+std::expected<TRelation, TError> BuildAggregate(
+    TRelation node,
+    TAggCollector& collector,
+    TFreshNames& names,
+    std::optional<TGroupingParse> grouping,
+    const std::unordered_map<std::string, NAst::TExprPtr>& selectAliases,
+    const std::unordered_set<std::string>& ambiguousSelectAliases,
+    std::vector<TProjectionSpec>& projections,
+    NAst::TExprPtr& having)
+{
+    std::vector<TGroupKey> groupKeys;
+    std::vector<std::vector<size_t>> groupingSets;
+    bool hasGroupingSyntax = false;
+    if (grouping) {
+        groupKeys = std::move(grouping->Keys);
+        groupingSets = std::move(grouping->Sets);
+        hasGroupingSyntax = grouping->HasGroupingSyntax;
+    }
+    const bool multiSet = groupingSets.size() > 1;
+    auto inputSchemaType = node.Plan->OutputColumns();
+    auto inputSchema = NAst::TMaybeType<NAst::TStructType>(inputSchemaType);
+    auto inputHasColumn = [&](const std::string& name) {
+        if (!inputSchema) {
+            return false;
+        }
+        return std::ranges::any_of(inputSchema.Cast()->Fields, [&](const auto& field) {
+            return field.first == name
+                || (name.find('.') == std::string::npos && BareColumnName(field.first) == name);
+        });
+    };
+    const bool inputSchemaKnown = inputSchema && !inputSchema.Cast()->Fields.empty();
+    for (auto& key : groupKeys) {
+        // PostgreSQL GROUP BY resolves an input-column name before a SELECT alias.
+        if (key.Computed || inputHasColumn(key.Name)) {
+            continue;
+        }
+        if (ambiguousSelectAliases.contains(key.Name)) {
+            return std::unexpected(TError(
+                key.Expression->Location,
+                "GROUP BY alias '" + key.Name + "' is ambiguous"));
+        }
+        auto alias = selectAliases.find(key.Name);
+        if (alias == selectAliases.end()) {
+            continue;
+        }
+        if (HasSubquery(alias->second) || HasWindowExprLocal(alias->second)) {
+            return std::unexpected(TError(
+                key.Expression->Location,
+                "GROUP BY alias '" + key.Name +
+                "' must refer to a scalar input expression"));
+        }
+        const auto refs = FindUnboundVars(alias->second);
+        if (!inputSchemaKnown && std::ranges::any_of(refs, [&](const auto& ref) {
+                const auto dot = ref.rfind('.');
+                return ref.substr(dot == std::string::npos ? 0 : dot + 1) == key.Name;
+            }))
+        {
+            // Schema-less golden plans cannot prove the input-column match.
+            continue;
+        }
+        for (const auto& ref : refs) {
+            if (!inputHasColumn(ref)) {
+                return std::unexpected(TError(
+                    key.Expression->Location,
+                    "GROUP BY alias '" + key.Name +
+                    "' must refer to a scalar input expression"));
+            }
+        }
+        if (auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(alias->second)) {
+            key.Name = ident.Cast()->Name;
+            key.Expression = CloneExpr(alias->second);
+            continue;
+        }
+        key.Expression = CloneExpr(alias->second);
+        key.Computed = true;
+    }
+    NarrowPlainGroupKeys(groupKeys, groupingSets, hasGroupingSyntax);
+    // A single set over all keys is a plain aggregate; >1 set needs the kernel's
+    // grouping-sets machinery (keys become nullable, masked per set).
+    std::unordered_map<std::string, std::string> computedKeys; // PrintAst -> name
+    for (const auto& key : groupKeys) {
+        if (key.Computed) {
+            computedKeys.emplace(NAst::NCore::PrintAst(key.Expression), key.Name);
+        }
+    }
+    if (!computedKeys.empty()) {
+        for (auto& projection : projections) {
+            projection.Expression = SubstituteGroupKeys(projection.Expression, computedKeys);
+        }
+        having = SubstituteGroupKeys(having, computedKeys);
+    }
+
+    auto groupingInfo = MakeGroupingRewriteInfo(groupKeys, groupingSets, hasGroupingSyntax);
+    for (auto& projection : projections) {
+        auto rewritten = RewriteGroupingCalls(projection.Expression, groupingInfo);
+        if (!rewritten) {
+            return std::unexpected(rewritten.error());
+        }
+        projection.Expression = std::move(*rewritten);
+    }
+    if (having) {
+        auto rewritten = RewriteGroupingCalls(having, groupingInfo);
+        if (!rewritten) {
+            return std::unexpected(rewritten.error());
+        }
+        having = std::move(*rewritten);
+    }
+
+    std::vector<std::string> keys;
+    keys.reserve(groupKeys.size());
+    for (const auto& key : groupKeys) {
+        keys.push_back(key.Name);
+    }
+
+    auto specs = collector.TakeSpecs();
+    for (const auto& spec : specs) {
+        if (HasGroupingCall(spec.Arg)) {
+            return std::unexpected(TError(spec.Arg->Location,
+                "GROUPING() inside aggregate arguments is not supported"));
+        }
+    }
+
+    // count(distinct col): dedup with an inner aggregate on (group keys + col),
+    // then count over the deduped rows above - the double aggregation the hand
+    // plans use.
+    if (multiSet && collector.DistinctColumn()) {
+        return std::unexpected(
+            TError("GROUPING SETS with COUNT(DISTINCT) is not supported yet"));
+    }
+
+    if (auto distinctColumn = collector.DistinctColumn()) {
+        if (!computedKeys.empty()) {
+            return std::unexpected(
+                TError("GROUP BY on an expression with COUNT(DISTINCT) is not supported yet"));
+        }
+        // Inner grouping keys: the group keys plus the distinct column, so each distinct
+        // value is one inner group (the dedup the hand plans use).
+        std::vector<std::string> dedupKeys = keys;
+        if (std::find(dedupKeys.begin(), dedupKeys.end(), *distinctColumn) == dedupKeys.end()) {
+            dedupKeys.push_back(*distinctColumn);
+        }
+
+        if (collector.HasNonDistinct()) {
+            // Mixed DISTINCT + non-DISTINCT (single distinct column): one input scan, a
+            // double aggregation with partials. The inner (grouped by group keys + col)
+            // computes the non-distinct aggregates per (group, distinct value); the outer
+            // (grouped by group keys) merges them - sum->sum, count->sum, min/max->min/max -
+            // alongside count(col) for the distinct. No join, no input clone.
+            std::vector<TAggregateSpec> innerSpecs;
+            std::vector<TAggregateSpec> outerSpecs;
+            for (auto& spec : specs) {
+                if (collector.IsDistinctSpec(spec.Name)) {
+                    // col is an inner group key; count(col) in the outer counts distinct
+                    // non-null values.
+                    outerSpecs.push_back(std::move(spec));
+                    continue;
+                }
+                if (spec.Arg && !NAst::TMaybeNode<NAst::TIdentExpr>(spec.Arg)) {
+                    return std::unexpected(TError(
+                        "mixing DISTINCT with a computed aggregate argument is not supported"));
+                }
+                const std::string innerName = names.Next("partial");
+                const std::string mergeFunc = spec.Func == "count" ? "sum" : spec.Func;
+                innerSpecs.push_back({ .Name = innerName, .Func = spec.Func, .Arg = std::move(spec.Arg) });
+                outerSpecs.push_back({ .Name = spec.Name, .Func = mergeFunc, .Arg = Ident({}, innerName) });
+            }
+            node = Relation(std::make_shared<TAggregateOperator>(
+                std::move(node.Plan), std::move(dedupKeys), std::move(innerSpecs)));
+            // The normal construction below builds the OUTER aggregate over `node`
+            // (the inner result) with these merge specs, grouped by the group keys.
+            specs = std::move(outerSpecs);
+        } else {
+            // Lone count(distinct): dedup, then count over the deduped rows below.
+            node = Relation(std::make_shared<TAggregateOperator>(
+                std::move(node.Plan), std::move(dedupKeys), std::vector<TAggregateSpec>{}));
+        }
+    }
+
+    // A global aggregate (no GROUP BY) still needs a grouping-key descriptor, so
+    // synthesize a constant key column and group by it, as the hand-written plans do.
+    bool global = keys.empty();
+
+    // The aggregate executor requires column-reference arguments, so materialize
+    // computed arguments (and pass the group keys through) in a project below.
+    // Grouping sets also force it so the input is exactly [keys..., args...], which
+    // the masked-batch driver relies on.
+    bool needsArgProject = global || !computedKeys.empty() || multiSet;
+    for (const auto& spec : specs) {
+        if (spec.Arg && !NAst::TMaybeNode<NAst::TIdentExpr>(spec.Arg)) {
+            needsArgProject = true;
+            break;
+        }
+    }
+    if (needsArgProject) {
+        std::vector<TProjectionSpec> argProjections;
+        std::set<std::string> projected;
+        auto passthrough = [&](const std::string& name) {
+            if (projected.insert(name).second) {
+                argProjections.push_back({ .Name = name, .Expression = Ident({}, name) });
+            }
+        };
+        for (const auto& key : groupKeys) {
+            if (projected.insert(key.Name).second) {
+                argProjections.push_back({ .Name = key.Name, .Expression = key.Expression });
+            }
+        }
+        for (auto& spec : specs) {
+            if (!spec.Arg) {
+                continue;
+            }
+            // The constant global key keeps its name, which the scheduler and the
+            // estimates recognize, so an input `__group__` argument is
+            // materialized under a generated name instead of passed through.
+            if (auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(spec.Arg);
+                ident && !(global && BareColumnName(ident.Cast()->Name) == "__group__"))
+            {
+                passthrough(ident.Cast()->Name);
+            } else {
+                std::string name = names.Next("arg");
+                argProjections.push_back({ .Name = name, .Expression = spec.Arg });
+                spec.Arg = Ident(spec.Arg->Location, name);
+            }
+        }
+        if (global) {
+            argProjections.push_back({
+                .Name = "__group__",
+                .Expression = std::make_shared<NAst::TNumberExpr>(TLocation{}, static_cast<int64_t>(1)),
+            });
+            keys.push_back("__group__");
+        }
+        node = Relation(std::make_shared<TProjectOperator>(std::move(node.Plan), std::move(argProjections)));
+    }
+
+    auto aggregate = std::make_shared<TAggregateOperator>(
+        std::move(node.Plan), std::move(keys), std::move(specs));
+    if (multiSet) {
+        aggregate->MutableGroupingSets() = std::move(groupingSets);
+        auto inputSchema = aggregate->Input()->OutputColumns();
+        aggregate->Type = std::make_shared<NAst::TFunctionType>(
+            std::vector<NAst::TTypePtr>{inputSchema},
+            ComputeAggregateOutputType(inputSchema, aggregate->GroupKeys(), aggregate->Aggs(),
+                !aggregate->GroupingSets().empty()));
+    }
+    return Relation(aggregate);
+}
+
 std::expected<TRelation, TError> BuildSelect(
     const NSql::TSqlSelect& select,
     TBuildContext& context)
@@ -1360,239 +1611,12 @@ std::expected<TRelation, TError> BuildSelect(
         return distinct ? ApplyDistinct(std::move(projected), outputNames) : projected;
     }
 
-    std::vector<TGroupKey> groupKeys;
-    std::vector<std::vector<size_t>> groupingSets;
-    bool hasGroupingSyntax = false;
-    if (parsedGrouping) {
-        groupKeys = std::move(parsedGrouping->Keys);
-        groupingSets = std::move(parsedGrouping->Sets);
-        hasGroupingSyntax = parsedGrouping->HasGroupingSyntax;
+    auto aggregate = BuildAggregate(std::move(node), collector, names, std::move(parsedGrouping),
+        selectAliases, ambiguousSelectAliases, projections, having);
+    if (!aggregate) {
+        return std::unexpected(aggregate.error());
     }
-    auto inputHasColumn = [&](const std::string& name) {
-        if (!inputSchema) {
-            return false;
-        }
-        return std::ranges::any_of(inputSchema.Cast()->Fields, [&](const auto& field) {
-            return field.first == name
-                || (name.find('.') == std::string::npos && BareColumnName(field.first) == name);
-        });
-    };
-    const bool inputSchemaKnown = inputSchema && !inputSchema.Cast()->Fields.empty();
-    for (auto& key : groupKeys) {
-        // PostgreSQL GROUP BY resolves an input-column name before a SELECT alias.
-        if (key.Computed || inputHasColumn(key.Name)) {
-            continue;
-        }
-        if (ambiguousSelectAliases.contains(key.Name)) {
-            return std::unexpected(TError(
-                key.Expression->Location,
-                "GROUP BY alias '" + key.Name + "' is ambiguous"));
-        }
-        auto alias = selectAliases.find(key.Name);
-        if (alias == selectAliases.end()) {
-            continue;
-        }
-        if (HasSubquery(alias->second) || HasWindowExprLocal(alias->second)) {
-            return std::unexpected(TError(
-                key.Expression->Location,
-                "GROUP BY alias '" + key.Name +
-                "' must refer to a scalar input expression"));
-        }
-        const auto refs = FindUnboundVars(alias->second);
-        if (!inputSchemaKnown && std::ranges::any_of(refs, [&](const auto& ref) {
-                const auto dot = ref.rfind('.');
-                return ref.substr(dot == std::string::npos ? 0 : dot + 1) == key.Name;
-            }))
-        {
-            // Schema-less golden plans cannot prove the input-column match.
-            continue;
-        }
-        for (const auto& ref : refs) {
-            if (!inputHasColumn(ref)) {
-                return std::unexpected(TError(
-                    key.Expression->Location,
-                    "GROUP BY alias '" + key.Name +
-                    "' must refer to a scalar input expression"));
-            }
-        }
-        if (auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(alias->second)) {
-            key.Name = ident.Cast()->Name;
-            key.Expression = CloneExpr(alias->second);
-            continue;
-        }
-        key.Expression = CloneExpr(alias->second);
-        key.Computed = true;
-    }
-    NarrowPlainGroupKeys(groupKeys, groupingSets, hasGroupingSyntax);
-    // A single set over all keys is a plain aggregate; >1 set needs the kernel's
-    // grouping-sets machinery (keys become nullable, masked per set).
-    std::unordered_map<std::string, std::string> computedKeys; // PrintAst -> name
-    for (const auto& key : groupKeys) {
-        if (key.Computed) {
-            computedKeys.emplace(NAst::NCore::PrintAst(key.Expression), key.Name);
-        }
-    }
-    if (!computedKeys.empty()) {
-        for (auto& projection : projections) {
-            projection.Expression = SubstituteGroupKeys(projection.Expression, computedKeys);
-        }
-        having = SubstituteGroupKeys(having, computedKeys);
-    }
-
-    auto groupingInfo = MakeGroupingRewriteInfo(groupKeys, groupingSets, hasGroupingSyntax);
-    for (auto& projection : projections) {
-        auto rewritten = RewriteGroupingCalls(projection.Expression, groupingInfo);
-        if (!rewritten) {
-            return std::unexpected(rewritten.error());
-        }
-        projection.Expression = std::move(*rewritten);
-    }
-    if (having) {
-        auto rewritten = RewriteGroupingCalls(having, groupingInfo);
-        if (!rewritten) {
-            return std::unexpected(rewritten.error());
-        }
-        having = std::move(*rewritten);
-    }
-
-    std::vector<std::string> keys;
-    keys.reserve(groupKeys.size());
-    for (const auto& key : groupKeys) {
-        keys.push_back(key.Name);
-    }
-
-    auto specs = collector.TakeSpecs();
-    for (const auto& spec : specs) {
-        if (HasGroupingCall(spec.Arg)) {
-            return std::unexpected(TError(spec.Arg->Location,
-                "GROUPING() inside aggregate arguments is not supported"));
-        }
-    }
-
-    // count(distinct col): dedup with an inner aggregate on (group keys + col),
-    // then count over the deduped rows above - the double aggregation the hand
-    // plans use.
-    if (multiSet && collector.DistinctColumn()) {
-        return std::unexpected(
-            TError("GROUPING SETS with COUNT(DISTINCT) is not supported yet"));
-    }
-
-    if (auto distinctColumn = collector.DistinctColumn()) {
-        if (!computedKeys.empty()) {
-            return std::unexpected(
-                TError("GROUP BY on an expression with COUNT(DISTINCT) is not supported yet"));
-        }
-        // Inner grouping keys: the group keys plus the distinct column, so each distinct
-        // value is one inner group (the dedup the hand plans use).
-        std::vector<std::string> dedupKeys = keys;
-        if (std::find(dedupKeys.begin(), dedupKeys.end(), *distinctColumn) == dedupKeys.end()) {
-            dedupKeys.push_back(*distinctColumn);
-        }
-
-        if (collector.HasNonDistinct()) {
-            // Mixed DISTINCT + non-DISTINCT (single distinct column): one input scan, a
-            // double aggregation with partials. The inner (grouped by group keys + col)
-            // computes the non-distinct aggregates per (group, distinct value); the outer
-            // (grouped by group keys) merges them - sum->sum, count->sum, min/max->min/max -
-            // alongside count(col) for the distinct. No join, no input clone.
-            std::vector<TAggregateSpec> innerSpecs;
-            std::vector<TAggregateSpec> outerSpecs;
-            for (auto& spec : specs) {
-                if (collector.IsDistinctSpec(spec.Name)) {
-                    // col is an inner group key; count(col) in the outer counts distinct
-                    // non-null values.
-                    outerSpecs.push_back(std::move(spec));
-                    continue;
-                }
-                if (spec.Arg && !NAst::TMaybeNode<NAst::TIdentExpr>(spec.Arg)) {
-                    return std::unexpected(TError(
-                        "mixing DISTINCT with a computed aggregate argument is not supported"));
-                }
-                const std::string innerName = names.Next("partial");
-                const std::string mergeFunc = spec.Func == "count" ? "sum" : spec.Func;
-                innerSpecs.push_back({ .Name = innerName, .Func = spec.Func, .Arg = std::move(spec.Arg) });
-                outerSpecs.push_back({ .Name = spec.Name, .Func = mergeFunc, .Arg = Ident({}, innerName) });
-            }
-            node = Relation(std::make_shared<TAggregateOperator>(
-                std::move(node.Plan), std::move(dedupKeys), std::move(innerSpecs)));
-            // The normal construction below builds the OUTER aggregate over `node`
-            // (the inner result) with these merge specs, grouped by the group keys.
-            specs = std::move(outerSpecs);
-        } else {
-            // Lone count(distinct): dedup, then count over the deduped rows below.
-            node = Relation(std::make_shared<TAggregateOperator>(
-                std::move(node.Plan), std::move(dedupKeys), std::vector<TAggregateSpec>{}));
-        }
-    }
-
-    // A global aggregate (no GROUP BY) still needs a grouping-key descriptor, so
-    // synthesize a constant key column and group by it, as the hand-written plans do.
-    {
-    bool global = keys.empty();
-
-    // The aggregate executor requires column-reference arguments, so materialize
-    // computed arguments (and pass the group keys through) in a project below.
-    // Grouping sets also force it so the input is exactly [keys..., args...], which
-    // the masked-batch driver relies on.
-    bool needsArgProject = global || !computedKeys.empty() || multiSet;
-    for (const auto& spec : specs) {
-        if (spec.Arg && !NAst::TMaybeNode<NAst::TIdentExpr>(spec.Arg)) {
-            needsArgProject = true;
-            break;
-        }
-    }
-    if (needsArgProject) {
-        std::vector<TProjectionSpec> argProjections;
-        std::set<std::string> projected;
-        auto passthrough = [&](const std::string& name) {
-            if (projected.insert(name).second) {
-                argProjections.push_back({ .Name = name, .Expression = Ident({}, name) });
-            }
-        };
-        for (const auto& key : groupKeys) {
-            if (projected.insert(key.Name).second) {
-                argProjections.push_back({ .Name = key.Name, .Expression = key.Expression });
-            }
-        }
-        for (auto& spec : specs) {
-            if (!spec.Arg) {
-                continue;
-            }
-            // The constant global key keeps its name, which the scheduler and the
-            // estimates recognize, so an input `__group__` argument is
-            // materialized under a generated name instead of passed through.
-            if (auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(spec.Arg);
-                ident && !(global && BareColumnName(ident.Cast()->Name) == "__group__"))
-            {
-                passthrough(ident.Cast()->Name);
-            } else {
-                std::string name = names.Next("arg");
-                argProjections.push_back({ .Name = name, .Expression = spec.Arg });
-                spec.Arg = Ident(spec.Arg->Location, name);
-            }
-        }
-        if (global) {
-            argProjections.push_back({
-                .Name = "__group__",
-                .Expression = std::make_shared<NAst::TNumberExpr>(TLocation{}, static_cast<int64_t>(1)),
-            });
-            keys.push_back("__group__");
-        }
-        node = Relation(std::make_shared<TProjectOperator>(std::move(node.Plan), std::move(argProjections)));
-    }
-
-    auto aggregate = std::make_shared<TAggregateOperator>(
-        std::move(node.Plan), std::move(keys), std::move(specs));
-    if (multiSet) {
-        aggregate->MutableGroupingSets() = std::move(groupingSets);
-        auto inputSchema = aggregate->Input()->OutputColumns();
-        aggregate->Type = std::make_shared<NAst::TFunctionType>(
-            std::vector<NAst::TTypePtr>{inputSchema},
-            ComputeAggregateOutputType(inputSchema, aggregate->GroupKeys(), aggregate->Aggs(),
-                !aggregate->GroupingSets().empty()));
-    }
-    node = Relation(aggregate);
-    }
+    node = std::move(*aggregate);
     if (having) {
         auto rewritten = ExtractScalarSubqueries(having, node, context, scalarCounter);
         if (!rewritten) {
