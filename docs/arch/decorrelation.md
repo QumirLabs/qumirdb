@@ -12,10 +12,10 @@ subquery's `WHERE` against the subquery's own `FROM` first, as SQL scoping does.
 qualified reference is local when its qualifier names a `FROM` item. A bare
 reference is local when a `FROM` item - a table, a CTE or a derived table - has a
 column of that name, so an inner column shadows an outer one. Every other
-reference is outer. A bare name whose scope cannot be decided is never taken for
-a correlation, and a scalar or `IN` subquery that contains one is refused rather
-than planned as uncorrelated: the name may be an outer column, which the
-standalone subquery plan cannot bind.
+reference is outer. Table names resolve as in the plan itself: the subquery's own
+CTEs shadow those of enclosing queries and the base tables. The columns of every
+`FROM` item are known before the subquery is built, from the table schema or the
+select list of a CTE or derived table, so no reference is left unclassified.
 
 ## EXISTS / IN → semi / anti join
 

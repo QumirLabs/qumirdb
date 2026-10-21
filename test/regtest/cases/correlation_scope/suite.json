@@ -29,6 +29,10 @@
     "derived_set_op_outer.sql": {"order": "unordered"},
     "derived_nested_shadows_outer.sql": {"order": "unordered"},
     "join_using_outer.sql": {"order": "unordered"},
-    "alias_hides_table_name.sql": {"order": "unordered"}
+    "alias_hides_table_name.sql": {"order": "unordered"},
+    "scalar_with_cte_outer.sql": {"order": "unordered"},
+    "scalar_with_cte_column_list_outer.sql": {"order": "unordered"},
+    "scalar_with_sibling_cte_outer.sql": {"order": "unordered"},
+    "derived_with_cte_shadows_table.sql": {"order": "unordered"}
   }
 }

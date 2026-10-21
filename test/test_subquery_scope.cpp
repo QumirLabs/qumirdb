@@ -45,18 +45,19 @@ std::string PlanningError(std::string_view sql) {
 
 } // namespace
 
-// A bare name of undecidable scope may be an outer column, which the standalone
-// subquery plan would leave unbound, so it is refused rather than planned as
-// uncorrelated.
-TEST(SubqueryScope, RefusesBareNameOfUnknownScope) {
-    EXPECT_NE(
-        PlanningError("SELECT x FROM t WHERE x < (SELECT max(k) FROM opaque WHERE k > 0)")
-            .find("unsupported correlated scalar subquery"),
-        std::string::npos);
-    EXPECT_NE(
-        PlanningError("SELECT x FROM t WHERE x IN (SELECT k FROM opaque WHERE k > 0) OR y = 0")
-            .find("correlated IN subquery in a boolean expression is not supported"),
-        std::string::npos);
+// Classification needs every column of a FROM item. A source that cannot list them
+// is an error: taken as columnless, its bare names would look outer and could be
+// mistaken for correlations.
+TEST(SubqueryScope, RejectsSourceWithUnresolvedColumns) {
+    for (const auto sql : {
+        "SELECT x FROM t WHERE x < (SELECT max(k) FROM opaque WHERE k > 0)",
+        "SELECT x FROM t WHERE x IN (SELECT k FROM opaque WHERE k > 0) OR y = 0",
+    }) {
+        EXPECT_NE(
+            PlanningError(sql).find("subquery source 'opaque' has unresolved columns"),
+            std::string::npos)
+            << sql;
+    }
 }
 
 TEST(SubqueryScope, ReportsUnknownTable) {
