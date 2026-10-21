@@ -466,6 +466,13 @@ std::string ToLower(std::string s) {
     return s;
 }
 
+std::string BareColumnName(const std::string& name) {
+    const auto dot = name.rfind('.');
+    return dot == std::string::npos
+        ? name
+        : name.substr(dot + 1);
+}
+
 ESortNulls ConvertSortNulls(NSql::TSqlOrderItem::ENullOrder nulls) {
     switch (nulls) {
         case NSql::TSqlOrderItem::ENullOrder::Default:
@@ -776,7 +783,18 @@ std::expected<NAst::TExprPtr, TError> TAggCollector::Emit(const TAggCall& agg, T
 }
 
 std::string TAggCollector::NextName(const std::string& func) {
-    return func + "_" + std::to_string(Counter_++);
+    // Slots share the aggregate output with the plain group keys, which are
+    // input columns, so a slot cannot take an input column's name.
+    auto isInputColumn = [&](const std::string& name) {
+        return InputSchema_ && std::ranges::any_of(InputSchema_->Fields, [&](const auto& field) {
+            return BareColumnName(field.first) == name;
+        });
+    };
+    std::string name;
+    do {
+        name = func + "_" + std::to_string(Counter_++);
+    } while (isInputColumn(name));
+    return name;
 }
 
 std::expected<NAst::TExprPtr, TError> TWindowCollector::Rewrite(NAst::TExprPtr expr) {

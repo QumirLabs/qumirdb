@@ -27,6 +27,9 @@ NQumir::NAst::TExprPtr Ident(NQumir::TLocation loc, std::string name);
 NQumir::NAst::TExprPtr Call(
     NQumir::TLocation loc, std::string name, std::vector<NQumir::NAst::TExprPtr> args);
 std::string ToLower(std::string s);
+// Input columns may be qualified (`t.x`) while an unqualified reference to them
+// is not, so generated helper names are checked against this part.
+std::string BareColumnName(const std::string& name);
 
 ESortNulls ConvertSortNulls(NSql::TSqlOrderItem::ENullOrder nulls);
 

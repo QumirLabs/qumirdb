@@ -1413,6 +1413,26 @@ std::expected<TRelation, TError> BuildSelect(
         key.Computed = true;
     }
     NarrowPlainGroupKeys(groupKeys, groupingSets, hasGroupingSyntax);
+    auto specs = collector.TakeSpecs();
+    // A computed key is named gb_N or after its SELECT alias. It shares the
+    // aggregate input with passed-through input columns and the aggregate output
+    // with the slots and the other keys, so a taken name is replaced.
+    std::unordered_set<std::string> takenNames;
+    for (const auto& name : ColumnNames(node.Plan)) {
+        takenNames.insert(BareColumnName(name));
+    }
+    for (const auto& spec : specs) {
+        takenNames.insert(spec.Name);
+    }
+    size_t nextKey = 0;
+    for (auto& key : groupKeys) {
+        if (!key.Computed) {
+            continue;
+        }
+        while (!takenNames.insert(key.Name).second) {
+            key.Name = "gb_" + std::to_string(nextKey++);
+        }
+    }
     // A single set over all keys is a plain aggregate; >1 set needs the kernel's
     // grouping-sets machinery (keys become nullable, masked per set).
     std::unordered_map<std::string, std::string> computedKeys; // PrintAst -> name
@@ -1450,7 +1470,6 @@ std::expected<TRelation, TError> BuildSelect(
         keys.push_back(key.Name);
     }
 
-    auto specs = collector.TakeSpecs();
     for (const auto& spec : specs) {
         if (HasGroupingCall(spec.Arg)) {
             return std::unexpected(TError(spec.Arg->Location,
@@ -1543,15 +1562,29 @@ std::expected<TRelation, TError> BuildSelect(
                 argProjections.push_back({ .Name = key.Name, .Expression = key.Expression });
             }
         }
+        // A materialized argument cannot take the name of a key or of an input
+        // column passed through next to it.
+        std::unordered_set<std::string> occupied(projected.begin(), projected.end());
+        for (const auto& name : ColumnNames(node.Plan)) {
+            occupied.insert(BareColumnName(name));
+        }
         int counter = 0;
         for (auto& spec : specs) {
             if (!spec.Arg) {
                 continue;
             }
-            if (auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(spec.Arg)) {
+            // The constant global key keeps its name, which the scheduler and the
+            // estimates recognize, so an input `__group__` argument is
+            // materialized under a generated name instead of passed through.
+            if (auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(spec.Arg);
+                ident && !(global && BareColumnName(ident.Cast()->Name) == "__group__"))
+            {
                 passthrough(ident.Cast()->Name);
             } else {
-                std::string name = "arg_" + std::to_string(counter++);
+                std::string name;
+                do {
+                    name = "arg_" + std::to_string(counter++);
+                } while (!occupied.insert(name).second);
                 argProjections.push_back({ .Name = name, .Expression = spec.Arg });
                 spec.Arg = Ident(spec.Arg->Location, name);
             }

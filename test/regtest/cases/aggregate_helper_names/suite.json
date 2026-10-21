@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "fixtures": {
+    "rows": {"json": "tables/t.json"}
+  },
+  "tables": {"t": "rows"},
+  "variants": ["single", "threaded"],
+  "cases": {
+    "global_arguments.sql": {"order": "ordered"},
+    "global_argument_order.sql": {"order": "ordered"},
+    "global_group_column.sql": {"order": "ordered"},
+    "plain_key_slot.sql": {"order": "unordered"},
+    "qualified_input_key_slot.sql": {"order": "unordered"},
+    "alias_key_slot.sql": {"order": "unordered"},
+    "computed_key_argument.sql": {"order": "unordered"},
+    "computed_key_plain_key.sql": {"order": "unordered"},
+    "alias_key_generated_key.sql": {"order": "unordered"},
+    "alias_key_argument.sql": {"order": "unordered"}
+  }
+}
