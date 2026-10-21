@@ -50,10 +50,9 @@ struct TPlainAggKeyHash {
     }
 };
 
-// Generated column names of one aggregation. Aggregate slots, computed group
-// keys, materialized arguments and partial aggregates share projections and
-// aggregate outputs with input columns, with keys named by SELECT aliases and
-// with each other, so every generated name differs from all of them.
+// Generated column names of one aggregation (slots, computed keys, materialized
+// arguments, partial aggregates): each differs from the input columns, the SELECT
+// aliases and every other generated name, because they share one plan scope.
 class TFreshNames {
 public:
     void Reserve(std::string name) {
