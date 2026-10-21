@@ -31,7 +31,6 @@ The engines log different quantities, which matters when reading the tables:
 | qdb | `exec` | execution only — planning, kernel build and JIT compilation are **excluded** |
 | DuckDB | `real` | full wall-clock time |
 | ClickHouse | wall clock | full wall-clock time of `clickhouse-local` per query |
-| YQL | `proc` | processing time, without the fixed per-query startup cost (~0.6–0.8 s for YQL) |
 
 So qdb is shown in its most favourable light: its JIT compilation is left out.
 The qdb TPC-H, TPC-DS and ClickBench logs do carry a `plan`/`kbuild`/`llvm` breakdown
@@ -40,32 +39,23 @@ if that cost needs to be added back.
 ## Coverage
 
 - **ClickBench** — 43 queries over `hits.parquet`. Run by qdb, DuckDB and
-  `clickhouse-local`; YQL was not run.
+  `clickhouse-local`.
 - **TPC-H** — 22 queries at scale factors 1, 10 and 100.
 - **TPC-DS** — 99 queries. qdb runs 14, 23, 24 and 39 as two parts each; the parts
   are summed within a run here so the query set matches DuckDB. The qdb
   scale-100 run excludes q78 and q80 because they are not working yet.
 
-## About the YQL numbers
-
-[YQL](https://ydb.tech/docs/en/yql/reference/) is the query language and engine
-of [YDB](https://ydb.tech/). These numbers come from the `dqrun` utility in the
-[YDB repository](https://github.com/ydb-platform/ydb), reading the same Parquet
-files as qdb and DuckDB. `dqrun` is a standalone query runner, not a YDB cluster:
-a real YDB deployment reads its own storage and distributes work differently, so
-its results may differ from what is shown here.
-
 ## Summary
 
-| Benchmark | Scale | qdb (s) | DuckDB (s) | ClickHouse (s) | YQL (s) | qdb ÷ DuckDB | Notes |
-|---|---|---|---|---|---|---|---|
-| ClickBench | — | 14.734 | 14.44 | 14.95 | — | 1.02× | qdb: one SQL run |
-| TPC-H | 1 | 0.857 | 1.17 | — | 4.17 | 0.73× | qdb: one SQL run |
-| TPC-H | 10 | 4.733 | 4.03 | — | 29.21 | 1.17× | qdb: one SQL run |
-| TPC-H | 100 | 49.843 | 32.10 | — | 338.38 | 1.55× | qdb: one SQL run |
-| TPC-DS | 1 | 5.516 | 5.13 | — | — | 1.08× | qdb: one SQL run |
-| TPC-DS | 10 | 32.685 | 15.89 | — | — | 2.06× | qdb: one SQL run |
-| TPC-DS | 100 | 290.767 | 117.86 | — | — | 2.47× | qdb: one SQL run; q78/q80 skipped |
+| Benchmark | Scale | qdb (s) | DuckDB (s) | ClickHouse (s) | qdb ÷ DuckDB | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| ClickBench | — | 14.734 | 14.44 | 14.95 | 1.02× | qdb: one SQL run |
+| TPC-H | 1 | 0.857 | 1.17 | — | 0.73× | qdb: one SQL run |
+| TPC-H | 10 | 4.733 | 4.03 | — | 1.17× | qdb: one SQL run |
+| TPC-H | 100 | 49.843 | 32.10 | — | 1.55× | qdb: one SQL run |
+| TPC-DS | 1 | 5.516 | 5.13 | — | 1.08× | qdb: one SQL run |
+| TPC-DS | 10 | 32.685 | 15.89 | — | 2.06× | qdb: one SQL run |
+| TPC-DS | 100 | 290.767 | 117.86 | — | 2.47× | qdb: one SQL run; q78/q80 skipped |
 
 Totals cover the queries each engine completed. Rows with failures or skipped
 queries compare different subsets, as indicated in the Notes column.
