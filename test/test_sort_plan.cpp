@@ -311,6 +311,20 @@ TEST(SortPlan, BuildPlanSortsOrderByExpressionViaHiddenColumn) {
     EXPECT_EQ(project.Cast()->Projections()[1].Name, "__sort_0");
 }
 
+TEST(SortPlan, BuildPlanRejectsOrderByAggregateMissingFromSelectList) {
+    auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
+    NQdb::TMockSource source(TMockColumns{}, {{"a", i64}, {"b", i64}});
+    // The item is rejected without lowering its aggregate, so a malformed one
+    // reports the same error.
+    for (const char* orderBy : {"sum(b) + 1", "sum(DISTINCT b)"}) {
+        auto plan = BuildSqlPlan(std::string("SELECT a FROM t GROUP BY a ORDER BY ") + orderBy, source);
+        ASSERT_FALSE(plan.has_value()) << orderBy;
+        EXPECT_NE(plan.error().ToString().find(
+            "ORDER BY on an aggregate not in the select list is not supported"),
+            std::string::npos) << plan.error().ToString();
+    }
+}
+
 TEST(SortPlan, QualifyResolvesHiddenSortColumnToGroupKey) {
     // ORDER BY on an unqualified name that matches a qualified group key: the
     // hidden sort column carries the raw ident and QualifyColumns resolves it to
