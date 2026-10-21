@@ -97,7 +97,7 @@ public:
         return Specs_.empty();
     }
 
-    // Set when a count(distinct <col>) was collected: BuildSelect realizes it via
+    // Set when a count(distinct <col>) was collected: BuildAggregate realizes it via
     // a double aggregation (inner dedup on the group keys + <col>, then count).
     const std::optional<std::string>& DistinctColumn() const {
         return DistinctColumn_;
