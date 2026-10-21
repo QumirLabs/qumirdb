@@ -4,6 +4,19 @@ Subqueries are removed at **build time**, before the optimizer passes, so the
 resulting joins flow through [join_reorder.md](join_reorder.md) and
 [predicate_pushdown.md](predicate_pushdown.md) like any other.
 
+## Local and outer references
+
+Rewrites that need a subquery's correlation - a scalar subquery, an `IN` nested in
+a boolean expression, a disjunction of `EXISTS` - resolve each identifier in the
+subquery's `WHERE` against the subquery's own `FROM` first, as SQL scoping does. A
+qualified reference is local when its qualifier names a `FROM` item. A bare
+reference is local when a `FROM` item - a table, a CTE or a derived table - has a
+column of that name, so an inner column shadows an outer one. Every other
+reference is outer. Table names resolve as in the plan itself: the subquery's own
+CTEs shadow those of enclosing queries and the base tables. The columns of every
+`FROM` item are known before the subquery is built, from the table schema or the
+select list of a CTE or derived table, so no reference is left unclassified.
+
 ## EXISTS / IN → semi / anti join
 
 A top-level `WHERE` conjunct that is `EXISTS`/`IN` (or its negation) wraps the
@@ -65,10 +78,9 @@ Used by q11 (HAVING), q15, q22.
 A correlated scalar subquery references outer columns. It is decorrelated by
 grouping the subquery on its correlation columns and `LEFT JOIN`-ing it back.
 
-Detection: `CollectLocalColumns` gathers the columns of the subquery's own FROM
-tables. A `WHERE` equality with exactly one **local** and one **outer** ident is
-a correlation pair `(outerCol, localCol)`; the rest stay as the subquery's local
-filter.
+Detection: a `WHERE` equality between one **local** and one **outer** ident (see
+[Local and outer references](#local-and-outer-references)) is a correlation pair
+`(outerCol, localCol)`; the rest stay as the subquery's local filter.
 
 Rewrite of the subquery:
 - `GROUP BY` each `localCol`;

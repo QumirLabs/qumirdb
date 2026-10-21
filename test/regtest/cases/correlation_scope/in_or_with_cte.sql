@@ -1,0 +1,3 @@
+SELECT x, y
+FROM t
+WHERE x IN (WITH c AS (SELECT z - 8 AS k FROM u) SELECT k FROM c WHERE k = 1) OR y = 4;
