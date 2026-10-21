@@ -27,8 +27,8 @@ Try it live at **[db.qumir.dev](https://db.qumir.dev)**.
    database ideas. Beauty, clarity, and coherence of code and architecture
    are the project's highest priority.
 
-2. **All computation in oz-lang.** Operator computation is expressed in
-   oz-lang and executed through a pipeline compiled by the JIT.
+2. **All computation in [oz-lang](https://github.com/QumirLabs/qumir/blob/master/docs/arch/core-lang.md).** Operator computation is expressed in
+   [oz-lang](https://github.com/QumirLabs/qumir/blob/master/docs/arch/core-lang.md) and executed through a pipeline compiled by the JIT.
 
 3. **A pipeline split into operators and tasks.** Explicit execution
    boundaries and data exchange contracts provide the foundation for
