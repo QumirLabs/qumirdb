@@ -15,6 +15,11 @@
     "computed_key_argument.sql": {"order": "unordered"},
     "computed_key_plain_key.sql": {"order": "unordered"},
     "alias_key_generated_key.sql": {"order": "unordered"},
-    "alias_key_argument.sql": {"order": "unordered"}
+    "alias_key_argument.sql": {"order": "unordered"},
+    "mixed_distinct_partial.sql": {"order": "unordered"},
+    "alias_key_having.sql": {"order": "unordered"},
+    "alias_key_grouping.sql": {"order": "unordered"},
+    "plain_key_having.sql": {"order": "unordered"},
+    "several_slots.sql": {"order": "unordered"}
   }
 }

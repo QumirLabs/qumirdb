@@ -1,8 +1,8 @@
 top-sort [order count asc] limit 100
 └─ project (order count, total shipping cost, total net profit) (rows≈1 cost≈22.6K)
-   └─ aggregate keys=[__group__] aggs=[count_0=count, sum_1=sum, sum_2=sum] (rows≈1 cost≈22.6K)
-      └─ project (cs_order_number, partial_sum_1, partial_sum_2, __group__) (rows≈1 cost≈22.5K)
-         └─ aggregate keys=[cs1.cs_order_number] aggs=[partial_sum_1=sum, partial_sum_2=sum] (rows≈1 cost≈22.5K)
+   └─ aggregate keys=[__group__] aggs=[count_0=count, sum_0=sum, sum_1=sum] (rows≈1 cost≈22.6K)
+      └─ project (cs_order_number, partial_0, partial_1, __group__) (rows≈1 cost≈22.5K)
+         └─ aggregate keys=[cs1.cs_order_number] aggs=[partial_0=sum, partial_1=sum] (rows≈1 cost≈22.5K)
             └─ join left_anti [cs1.cs_order_number = cr1.cr_order_number] (rows≈1 cost≈22.5K)
                ├─ join left_semi [cs1.cs_order_number = cs2.cs_order_number] residual (!= |cs1.cs_warehouse_sk| |cs2.cs_warehouse_sk|) (rows≈1 cost≈18.2K)
                │  ├─ join inner [cs1.cs_ship_date_sk = date_dim.d_date_sk] (rows≈1 cost≈13.9K)

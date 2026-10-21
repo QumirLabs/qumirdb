@@ -90,6 +90,15 @@ inline NQumir::NAst::TTypePtr FieldType(
     return nullptr;
 }
 
+// Plan columns may be qualified (`t.x`); an unqualified reference reaches a
+// column by this part.
+inline std::string BareColumnName(const std::string& name) {
+    const auto dot = name.rfind('.');
+    return dot == std::string::npos
+        ? name
+        : name.substr(dot + 1);
+}
+
 // Analogous to TMaybeNode<T> in qumir.
 // Checks NodeName() == "Rel" AND RelName() == T::OpId.
 template<typename T>

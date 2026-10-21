@@ -1,0 +1,7 @@
+{
+  "schema": "<struct (count_1 i64) (a f64) (sd <named Nullable [f64]>)>",
+  "rows": [
+    ["3", 10, null],
+    ["4", 25, 7.0710678118654755]
+  ]
+}

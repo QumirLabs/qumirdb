@@ -16,6 +16,7 @@
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace NQdb {
@@ -27,9 +28,6 @@ NQumir::NAst::TExprPtr Ident(NQumir::TLocation loc, std::string name);
 NQumir::NAst::TExprPtr Call(
     NQumir::TLocation loc, std::string name, std::vector<NQumir::NAst::TExprPtr> args);
 std::string ToLower(std::string s);
-// Input columns may be qualified (`t.x`) while an unqualified reference to them
-// is not, so generated helper names are checked against this part.
-std::string BareColumnName(const std::string& name);
 
 ESortNulls ConvertSortNulls(NSql::TSqlOrderItem::ENullOrder nulls);
 
@@ -52,6 +50,23 @@ struct TPlainAggKeyHash {
     }
 };
 
+// Generated column names of one aggregation. Aggregate slots, computed group
+// keys, materialized arguments and partial aggregates share projections and
+// aggregate outputs with input columns, with keys named by SELECT aliases and
+// with each other, so every generated name differs from all of them.
+class TFreshNames {
+public:
+    void Reserve(std::string name) {
+        Taken_.insert(std::move(name));
+    }
+
+    // Takes the first `<prefix>_<n>` that is still free.
+    std::string Next(const std::string& prefix);
+
+private:
+    std::unordered_set<std::string> Taken_;
+};
+
 // Replaces aggregate calls in an expression with references to synthetic
 // aggregate output columns, collecting the corresponding specs.
 class TAggCollector {
@@ -59,15 +74,18 @@ public:
     explicit TAggCollector(
         const NQumir::NAst::TStructType* inputSchema,
         bool enableAffineRewrite,
+        TFreshNames& names,
         const NKernel::TAnnotationContext& context)
         : InputSchema_(inputSchema)
         , EnableAffineRewrite_(enableAffineRewrite)
+        , Names_(names)
         , Context_(context)
     { }
     // The collector keeps a reference to the context.
     TAggCollector(
         const NQumir::NAst::TStructType* inputSchema,
         bool enableAffineRewrite,
+        TFreshNames& names,
         const NKernel::TAnnotationContext&& context) = delete;
 
     std::expected<NQumir::NAst::TExprPtr, NQumir::TError> Rewrite(NQumir::NAst::TExprPtr expr);
@@ -112,12 +130,11 @@ private:
         const TAggCall& agg, NQumir::TLocation loc);
     std::expected<NQumir::NAst::TExprPtr, NQumir::TError> Emit(
         const TAggCall& agg, NQumir::TLocation loc);
-    std::string NextName(const std::string& func);
 
     std::vector<TAggregateSpec> Specs_;
     const NQumir::NAst::TStructType* InputSchema_ = nullptr;
     bool EnableAffineRewrite_ = true;
-    int Counter_ = 0;
+    TFreshNames& Names_;
     std::optional<std::string> DistinctColumn_;
     std::set<std::string> DistinctSpecNames_;
     bool HasNonDistinct_ = false;

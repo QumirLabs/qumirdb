@@ -1,6 +1,6 @@
 top-sort [channel asc, col_name asc, d_year asc, d_qoy asc, i_category asc] limit 100
 └─ project (channel, col_name, d_year, d_qoy, i_category, sales_cnt, sales_amt) (rows≈3 cost≈28.1K)
-   └─ aggregate keys=[foo.channel, foo.col_name, foo.d_year, foo.d_qoy, foo.i_category] aggs=[count_0=count, sum_1=sum] (rows≈3 cost≈27.9K)
+   └─ aggregate keys=[foo.channel, foo.col_name, foo.d_year, foo.d_qoy, foo.i_category] aggs=[count_0=count, sum_0=sum] (rows≈3 cost≈27.9K)
       └─ project (foo.channel, foo.col_name, foo.d_year, foo.d_qoy, foo.i_category, foo.ext_sales_price) (rows≈3 cost≈27.6K)
          └─ union-all (rows≈3 cost≈27.4K)
             ├─ project (channel, col_name, d_year, d_qoy, i_category, ext_sales_price) (rows≈1 cost≈9.1K)

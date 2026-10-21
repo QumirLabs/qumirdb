@@ -1,0 +1,4 @@
+project (partial_0, d, s) (rows≈2 cost≈264)
+└─ aggregate keys=[t.partial_0] aggs=[count_0=count, sum_1=sum] (rows≈2 cost≈216)
+   └─ aggregate keys=[t.partial_0, t.partial_sum_1] aggs=[partial_1=sum] (rows≈3 cost≈144)
+      └─ source t AS t (rows≈3 cost≈72)

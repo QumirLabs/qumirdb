@@ -1,6 +1,6 @@
 sort [l_returnflag asc, l_linestatus asc]
 └─ project (l_returnflag, l_linestatus, sum_qty, sum_base_price, sum_disc_price, sum_charge, avg_qty, avg_price, avg_disc, count_order) (rows≈6 cost≈3.9K)
-   └─ aggregate keys=[l_returnflag, l_linestatus] aggs=[sum_0=sum, sum_1=sum, sum_2=sum, sum_3=sum, sum_4=sum, count_5=count, sum_6=sum, count_7=count, sum_8=sum, count_9=count, count_10=count] (rows≈6 cost≈3.3K)
+   └─ aggregate keys=[l_returnflag, l_linestatus] aggs=[sum_0=sum, sum_1=sum, sum_2=sum, sum_3=sum, sum_4=sum, count_0=count, sum_5=sum, count_1=count, sum_6=sum, count_2=count, count_3=count] (rows≈6 cost≈3.3K)
       └─ project (l_returnflag, l_linestatus, l_quantity, l_extendedprice, arg_0, arg_1, l_discount) (rows≈10 cost≈2.1K)
          └─ filter (<= |lineitem.l_shipdate| (- (: 10561 i32) (: 81 i32))) (rows≈10 cost≈1.4K)
             └─ source lineitem AS lineitem row-groups (<= |lineitem.l_shipdate| (- (: 10561 i32) (: 81 i32))) (rows≈10 cost≈680)

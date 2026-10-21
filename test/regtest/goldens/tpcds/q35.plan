@@ -1,6 +1,6 @@
 top-sort [ca_state asc, cd_gender asc, cd_marital_status asc, cd_dep_count asc, cd_dep_employed_count asc, cd_dep_college_count asc] limit 100
 └─ project (ca_state, cd_gender, cd_marital_status, cd_dep_count, cnt1, aggone1, aggtwo1, aggthree1, cd_dep_employed_count, cnt2, aggone2, aggtwo2, aggthree2, cd_dep_college_count, cnt3, aggone3, aggtwo3, aggthree3) (rows≈1 cost≈31.8K)
-   └─ aggregate keys=[ca.ca_state, customer_demographics.cd_gender, customer_demographics.cd_marital_status, customer_demographics.cd_dep_count, customer_demographics.cd_dep_employed_count, customer_demographics.cd_dep_college_count] aggs=[count_0=count, sum_1=sum, count_2=count, max_3=max, sum_4=sum, count_5=count, max_6=max, sum_7=sum, count_8=count, max_9=max] (rows≈1 cost≈31.6K)
+   └─ aggregate keys=[ca.ca_state, customer_demographics.cd_gender, customer_demographics.cd_marital_status, customer_demographics.cd_dep_count, customer_demographics.cd_dep_employed_count, customer_demographics.cd_dep_college_count] aggs=[count_0=count, sum_0=sum, count_1=count, max_0=max, sum_1=sum, count_2=count, max_1=max, sum_2=sum, count_3=count, max_2=max] (rows≈1 cost≈31.6K)
       └─ join left_semi [c.c_customer_sk = __exists_key__] (rows≈1 cost≈31.5K)
          ├─ join inner [customer_demographics.cd_demo_sk = c.c_current_cdemo_sk] emit-filter 1 from right (rows≈1 cost≈17.9K)
          │  ├─ source customer_demographics AS customer_demographics use-filter 1 keys=[customer_demographics.cd_demo_sk] (rows≈10 cost≈480)
