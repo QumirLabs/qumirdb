@@ -7,9 +7,10 @@ Results are organized by benchmark:
 - [TPC-DS](tpcds.md) — 99 queries at scale factors 1, 10, and 100.
 
 All runs on one machine: an Apple M5 Pro with 18 cores and 64 GB of memory,
-with every engine set to 18 threads. For every query the **best** of the
-available runs is reported. Benchmarks are re-run independently, so each section
-on the benchmark pages carries its own run date.
+with every engine set to 18 threads. Unless a benchmark section states
+otherwise, each query reports the **best** of the available runs. Benchmarks are
+re-run independently, so each section on the benchmark pages carries its own
+run date.
 
 Engine builds: DuckDB v1.5.5 (Variegata) `d8cdaa33fd`; ClickHouse
 `clickhouse-local` 26.9.1.347 (official build); qdb built from this repository.
@@ -33,7 +34,7 @@ The engines log different quantities, which matters when reading the tables:
 | YQL | `proc` | processing time, without the fixed per-query startup cost (~0.6–0.8 s for YQL) |
 
 So qdb is shown in its most favourable light: its JIT compilation is left out.
-The qdb TPC-DS and ClickBench logs do carry a `plan`/`kbuild`/`llvm` breakdown
+The qdb TPC-H, TPC-DS and ClickBench logs do carry a `plan`/`kbuild`/`llvm` breakdown
 if that cost needs to be added back.
 
 ## Coverage
@@ -60,9 +61,9 @@ its results may differ from what is shown here.
 | Benchmark | Scale | qdb (s) | DuckDB (s) | ClickHouse (s) | YQL (s) | qdb ÷ DuckDB | Notes |
 |---|---|---|---|---|---|---|---|
 | ClickBench | — | 15.31 | 14.44 | 14.95 | — | 1.06× | — |
-| TPC-H | 1 | 0.93 | 1.17 | — | 4.17 | 0.80× | — |
-| TPC-H | 10 | 7.54 | 4.03 | — | 29.21 | 1.87× | — |
-| TPC-H | 100 | 93.28 | 32.10 | — | 338.38 | 2.91× | — |
+| TPC-H | 1 | 0.857 | 1.17 | — | 4.17 | 0.73× | qdb: one SQL run |
+| TPC-H | 10 | 4.733 | 4.03 | — | 29.21 | 1.17× | qdb: one SQL run |
+| TPC-H | 100 | 49.843 | 32.10 | — | 338.38 | 1.55× | qdb: one SQL run |
 | TPC-DS | 1 | 7.08 | 5.13 | — | 55.27 | 1.38× | YQL: 7 failed |
 | TPC-DS | 10 | 51.90 | 15.89 | — | 420.05 | 3.27× | YQL: 10 failed |
 | TPC-DS | 100 | 465.22 | 117.86 | — | — | 3.95× | qdb: 2 missing |
