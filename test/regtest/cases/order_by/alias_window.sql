@@ -1,0 +1,2 @@
+SELECT id AS id, rank() OVER (ORDER BY b DESC) AS r FROM t
+ORDER BY CASE WHEN r <= 2 THEN 0 ELSE 1 END, id;

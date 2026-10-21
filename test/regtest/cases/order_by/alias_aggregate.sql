@@ -1,0 +1,3 @@
+SELECT a AS a, count(*) AS c, sum(b) AS s FROM t
+GROUP BY a
+ORDER BY CASE WHEN c > 1 THEN s END DESC NULLS LAST, a NULLS FIRST;

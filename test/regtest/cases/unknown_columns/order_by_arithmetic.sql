@@ -1,0 +1,1 @@
+SELECT id FROM t ORDER BY zzz + 1;

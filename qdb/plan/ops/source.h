@@ -15,7 +15,7 @@ public:
     explicit TSourceOperator(ISource& source, std::string path = {});
 
     std::string_view RelName() const override { return OpId; }
-    std::unordered_set<std::string> ComputeReferencedColumns() const override { return {}; }
+    std::vector<TColumnReference> ColumnReferences() const override { return {}; }
     ISource& GetSource() const { return Source_; }
     const std::string& SourcePath() const { return SourcePath_; }
     const std::string& GetAlias() const { return Alias_; }

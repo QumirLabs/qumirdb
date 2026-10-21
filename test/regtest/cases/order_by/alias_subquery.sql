@@ -1,0 +1,2 @@
+SELECT id AS id, b - (SELECT min(b) FROM t) AS d FROM t
+ORDER BY CASE WHEN d > 15 THEN 0 ELSE 1 END, id;

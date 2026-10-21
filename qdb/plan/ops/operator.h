@@ -1,10 +1,12 @@
 #pragma once
 
 #include <qdb/io/io.h>
+#include <qdb/plan/passes/unbound_vars.h>
 
 #include <qumir/parser/ast.h>
 #include <qumir/parser/type.h>
 
+#include <memory>
 #include <string>
 #include <unordered_set>
 #include <span>
@@ -17,6 +19,23 @@ namespace NQdb {
 
 struct IOperator;
 using TOperatorPtr = std::shared_ptr<IOperator>;
+
+// A column read by an operator's own keys or expressions. Ident is the
+// expression node that names the column; a key is a plain name and has none.
+struct TColumnReference {
+    std::string Name;
+    std::shared_ptr<NQumir::NAst::TIdentExpr> Ident;
+};
+
+// Appends a reference for each free identifier of `expr`, in AST order.
+inline void AppendColumnReferences(
+    std::vector<TColumnReference>& references,
+    const NQumir::NAst::TExprPtr& expr)
+{
+    for (auto& ident : FindUnboundIdents(expr)) {
+        references.push_back({.Name = ident->Name, .Ident = std::move(ident)});
+    }
+}
 
 struct TRuntimeFilterUseSpec {
     uint32_t Id = 0;
@@ -36,9 +55,18 @@ struct IOperator : NQumir::NAst::TExpr {
     virtual std::string_view RelName() const = 0;
     void Accept(NQumir::NAst::IVisitor& visitor) override { visitor.VisitOtherwise(*this); }
 
-    // Columns referenced in this node's own expressions (predicate / projections).
-    // Excludes what input operators produce - only own references.
-    virtual std::unordered_set<std::string> ComputeReferencedColumns() const = 0;
+    // Columns referenced in this node's own keys and expressions, in the order
+    // they appear. Excludes what input operators produce - only own references.
+    virtual std::vector<TColumnReference> ColumnReferences() const = 0;
+
+    // The names of ColumnReferences().
+    std::unordered_set<std::string> ComputeReferencedColumns() const {
+        std::unordered_set<std::string> names;
+        for (const auto& reference : ColumnReferences()) {
+            names.insert(reference.Name);
+        }
+        return names;
+    }
 
     // Columns the child at `childIdx` must produce, given what this node's
     // consumer needs (`needed`). Default = pass-through (needed + own refs),

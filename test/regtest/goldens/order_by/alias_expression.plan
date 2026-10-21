@@ -1,0 +1,4 @@
+project (id, r)
+└─ sort [__sort_0 asc, id desc]
+   └─ project (id, r, __sort_0) (rows≈6 cost≈192)
+      └─ source t AS t (rows≈6 cost≈72)

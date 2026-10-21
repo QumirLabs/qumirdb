@@ -15,7 +15,12 @@
 #include <qdb/plan/types/decimal.h>
 #include <qdb/kernel/annotate_type.h>
 
+#include <qumir/error.h>
 #include <qumir/parser/type.h>
+
+#include <stdexcept>
+#include <string>
+#include <unordered_set>
 
 namespace NQdb {
 
@@ -52,6 +57,36 @@ TTypePtr UnifyUnionColumn(const TTypePtr& a, const TTypePtr& b) {
     if (!base) return nullptr;
     return (IsNullableType(a) || IsNullableType(b))
         ? std::static_pointer_cast<TType>(std::make_shared<TNullable>(base)) : base;
+}
+
+// An operator reads only columns its inputs produce. Kernel type inference types
+// any other name like a bare NULL, so a misspelled column would silently change
+// the result (a comparison over it is NULL, coalesce() picks its fallback) instead
+// of failing the query. Checked before the operator itself is typed, so the
+// unknown name is reported rather than a type inference failure it causes.
+void RequireInputColumns(const TOperatorPtr& op) {
+    std::unordered_set<std::string> available;
+    for (const auto& input : op->Inputs()) {
+        auto&& schema = input->OutputColumns();
+        if (!schema) {
+            throw std::runtime_error(
+                std::string(op->RelName()) + " typing: an input has no schema");
+        }
+        for (const auto& [name, _] : schema->Fields) {
+            available.insert(name);
+        }
+    }
+    for (const auto& reference : op->ColumnReferences()) {
+        if (available.contains(reference.Name)) {
+            continue;
+        }
+        const auto message = "unknown input column: " + reference.Name;
+        // Planner-generated identifiers carry no source location.
+        if (reference.Ident && reference.Ident->Location.Line > 0) {
+            throw NQumir::TError(reference.Ident->Location, message);
+        }
+        throw NQumir::TError(message);
+    }
 }
 
 void ResolveProjectionSortKeys(
@@ -94,6 +129,7 @@ void AnnotateTypes(
         AnnotateTypes(input, context);
     }
 
+    RequireInputColumns(root);
     AnnotateOperatorType(root, context);
 }
 
@@ -277,9 +313,12 @@ void AnnotateOperatorType(
         auto leftSchema = join->Left()->OutputColumns();
         auto rightSchema = join->Right()->OutputColumns();
         auto output = ComputeJoinOutputType(leftSchema, rightSchema, join->JoinType());
+        if (!output) {
+            throw output.error();
+        }
         root->Type = std::make_shared<TFunctionType>(
             std::vector<TTypePtr>{leftSchema, rightSchema},
-            output ? *output : nullptr);
+            *output);
         return;
     }
 

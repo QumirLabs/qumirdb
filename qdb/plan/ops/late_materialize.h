@@ -26,7 +26,7 @@ public:
         std::vector<TLateMaterializeColumn> columns);
 
     std::string_view RelName() const override { return OpId; }
-    std::unordered_set<std::string> ComputeReferencedColumns() const override;
+    std::vector<TColumnReference> ColumnReferences() const override;
     std::unordered_set<std::string> RequiredColumnsForChild(
         size_t childIdx,
         const std::unordered_set<std::string>& needed) const override;

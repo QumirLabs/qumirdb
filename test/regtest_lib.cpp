@@ -11,6 +11,7 @@
 #include <qdb/sql/parser.h>
 #include <qdb/sql/printer.h>
 #include <qdb/sexp/printer.h>
+#include <qumir/error.h>
 #include <qumir/parser/core/parser.h>
 #include <qumir/parser/core/printer.h>
 
@@ -1075,12 +1076,31 @@ TCaseResult CheckCase(const TQueryCase& test, bool canonize) {
         auto& source = sources.emplace_back(fixture.File->MakeSource());
         return std::make_shared<TSourceOperator>(*source, std::string(table));
     });
-    if (!plan) throw std::runtime_error(plan.error().ToString());
+    // A planning error is the plan output of an invalid query: the plan golden
+    // of a plan-only case holds the error.
+    std::string planError;
+    if (!plan) {
+        planError = plan.error().ToString();
+    }
     const auto buildMs = mark();
-    ApplyPlanPasses(*plan);
+    if (planError.empty()) {
+        try {
+            ApplyPlanPasses(*plan);
+        } catch (const NQumir::TError& error) {
+            planError = error.ToString();
+        }
+    }
     const auto optimizeMs = mark();
+    if (!planError.empty() && test.Execute) {
+        // Canonizing must not turn an executed case into an error golden.
+        throw std::runtime_error(planError);
+    }
     std::ostringstream planOutput;
-    PrintPlanTreeWithCtes(planOutput, *plan);
+    if (planError.empty()) {
+        PrintPlanTreeWithCtes(planOutput, *plan);
+    } else {
+        planOutput << planError << '\n';
+    }
     const auto planComparison = ComparePlan(test, planOutput.str(), canonize);
     const auto planGoldenMs = mark();
     auto printTiming = [&](const TPlanRunTimings& runTimings, double resultGoldenMs) {

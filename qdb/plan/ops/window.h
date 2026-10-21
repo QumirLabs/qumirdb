@@ -66,7 +66,7 @@ public:
         return OpId;
     }
 
-    std::unordered_set<std::string> ComputeReferencedColumns() const override;
+    std::vector<TColumnReference> ColumnReferences() const override;
     // Window forwards every input column and appends its own outputs, so (unlike
     // aggregate) it must not drop `needed`: the child has to produce every needed
     // column it actually owns, plus this node's own references. Mirrors join.

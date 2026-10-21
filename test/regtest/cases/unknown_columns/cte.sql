@@ -1,0 +1,1 @@
+WITH c AS (SELECT zzz + 1 AS x FROM t) SELECT x FROM c;

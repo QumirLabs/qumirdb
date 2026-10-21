@@ -1,6 +1,5 @@
 #include <qdb/plan/ops/window.h>
 
-#include <qdb/plan/passes/unbound_vars.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/plan/types/decimal.h>
 
@@ -142,22 +141,18 @@ TWindowOperator::TWindowOperator(TOperatorPtr input,
         ComputeWindowOutputType(inputSchema, Functions_));
 }
 
-std::unordered_set<std::string> TWindowOperator::ComputeReferencedColumns() const {
-    std::unordered_set<std::string> refs;
+std::vector<TColumnReference> TWindowOperator::ColumnReferences() const {
+    std::vector<TColumnReference> references;
     for (const auto& key : PartitionKeys_) {
-        refs.insert(key);
+        references.push_back({.Name = key});
     }
     for (const auto& key : OrderKeys_) {
-        refs.insert(key.Column);
+        references.push_back({.Name = key.Column});
     }
     for (const auto& func : Functions_) {
-        if (func.Arg) {
-            for (auto& col : FindUnboundVars(func.Arg)) {
-                refs.insert(col);
-            }
-        }
+        AppendColumnReferences(references, func.Arg);
     }
-    return refs;
+    return references;
 }
 
 std::unordered_set<std::string> TWindowOperator::RequiredColumnsForChild(

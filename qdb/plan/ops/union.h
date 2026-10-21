@@ -18,7 +18,7 @@ public:
     explicit TUnionAllOperator(std::vector<TOperatorPtr> inputs);
 
     std::string_view RelName() const override { return OpId; }
-    std::unordered_set<std::string> ComputeReferencedColumns() const override { return {}; }
+    std::vector<TColumnReference> ColumnReferences() const override { return {}; }
     // Each branch defines its own schema, so parent-required names (in the first
     // branch's namespace) do not translate; keep every column the branch produces.
     std::unordered_set<std::string> RequiredColumnsForChild(

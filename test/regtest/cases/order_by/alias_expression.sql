@@ -1,0 +1,2 @@
+SELECT id AS id, 70 - b AS r FROM t
+ORDER BY CASE WHEN r > 30 THEN 0 ELSE 1 END, id DESC;
