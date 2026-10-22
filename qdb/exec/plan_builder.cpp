@@ -337,21 +337,11 @@ private:
                     !aggregate->GroupingSets().empty());
                 break;
             }
-            case EExecPlanNodeKind::Join: {
+            case EExecPlanNodeKind::Join:
+            case EExecPlanNodeKind::CrossJoin: {
                 auto* join = static_cast<const TJoinOperator*>(stage.Operator);
                 auto result = ComputeJoinOutputType(
                     inputs[0].OutputType, inputs[1].OutputType, join->JoinType());
-                if (!result) {
-                    throw result.error();
-                }
-                outputType = *result;
-                break;
-            }
-            case EExecPlanNodeKind::CrossJoin: {
-                auto result = ComputeJoinOutputType(
-                    inputs[0].OutputType,
-                    inputs[1].OutputType,
-                    EJoinType::Inner);
                 if (!result) {
                     throw result.error();
                 }

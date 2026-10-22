@@ -40,10 +40,12 @@ std::string ReadSortKernel(const std::string& name);
 std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError>
 BuildJoinKernelLibrary();
 
-// Cross join library: the shared HashTable/pair-buffer base plus
-// join_cross.oz. Deliberately excludes join_update.oz / join_semi_anti.oz -
-// cross join has no keys, and those helpers' bodies name the dual-key and
-// per-key-overload functions that a cross program does not define.
+// Cross (nested-loop) join library: the shared HashTable/pair-buffer base,
+// the default residual filter, and join_cross.oz. Deliberately excludes
+// join_update.oz / join_semi_anti.oz - cross join has no keys, and those
+// helpers' bodies name the dual-key and per-key-overload functions that a
+// cross program does not define. The per-type xj_dispatch entry is generated in
+// join_gen.cpp and appended by TKernelCompiler::CompileCrossJoin.
 std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError>
 BuildCrossJoinKernelLibrary();
 

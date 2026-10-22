@@ -257,20 +257,26 @@ struct TJoinKernels {
 enum class ECrossJoinKernelOp : int64_t {
     Emit = 0,
     Destroy = 1,
+    EmitUnmatchedRight = 2,
 };
 
 using TCrossJoinDispatch = std::function<bool(
-    TRowSet* batch,
+    TRowSet* leftStore,
     int64_t batchIdx,
     TRowSet* rightStore,
     int64_t rightBatchCount,
+    uint8_t* rightMatched,
     void* pairs,
     int64_t op)>;
 
 struct TCrossJoinKernels {
-    // xj_dispatch(batch, batchIdx, rightStore, rightBatchCount, pairs, op) -> bool.
-    // Emit appends canonical row-id pairs for one left batch against the buffered
-    // right store. Destroy frees PairBuffer storage.
+    // xj_dispatch(leftStore, batchIdx, rightStore, rightBatchCount,
+    //             rightMatched, pairs, op) -> bool.
+    // Emit appends the canonical row-id pairs of left batch `batchIdx` against
+    // the buffered right store, as the compiled join type emits them. RIGHT and
+    // FULL joins also flag the matched right rows in rightMatched, one byte per
+    // right row in store order, which EmitUnmatchedRight reads after the last
+    // left batch. Destroy frees PairBuffer storage.
     TCrossJoinDispatch Dispatch;
 
     // Same generated materializer as equi-join: cross emits row-id pairs and

@@ -41,7 +41,7 @@ Current production support:
 | `Right` | Supported | Symmetric path plus unmatched-right final scan |
 | `Full` | Supported | Symmetric path plus unmatched scans on both sides |
 | `RightSemi` / `RightAnti` | Not implemented in runtime | Logical enum exists, runtime guard rejects it |
-| Cross join | Supported for `Inner` only | Separate `TCrossJoinProcessor` path |
+| No equi-keys | Supported except `RightSemi` / `RightAnti` | Nested-loop `TCrossJoinProcessor` path |
 
 Residual predicates are supported for inner, semi/anti, and outer joins.
 Only pairs passing the residual count as matches for outer finalization.
@@ -170,11 +170,32 @@ Outer joins use symmetric probe+insert while inputs are live, then call
 The finalize kernel emits rows with no opposite-side match as `(row_id, -1)`.
 The generated output materializer emits NULL values for the absent side.
 
-### Cross join
+### Joins without equi-keys
 
-`TCrossJoinProcessor` is separate from hash join. It buffers the entire right
-side, then streams left batches and emits the Cartesian product through
-the generated output materializer. Cross join is accepted only for `Inner`.
+A join without equi-keys, such as a cross join, `LEFT JOIN ... ON a < b`, or
+the semi join of an uncorrelated `EXISTS`, is a nested-loop join in
+`TCrossJoinProcessor`, separate from the hash join. It buffers the entire right
+side, then streams left batches; the kernel compares each selected left row
+with every selected right row and emits row-id pairs through the generated
+output materializer. The join type fixes what the kernel emits:
+
+- `Inner`: every pair; the residual is a separate filter over the product;
+- `Left` / `Full`: every matching pair, and `(left, -1)` for a left row
+  without a match;
+- `LeftSemi` / `LeftAnti`: the left row once, when it has a match or has none;
+  the scan of the right side stops at the first match;
+- `Right` / `Full`: the kernel flags each matched right row, one byte per
+  buffered right row, and after the last left batch emits `(-1, right)` for the
+  unmatched ones.
+
+For every type except `Inner` the residual decides which pairs match, so the
+kernel evaluates it with the same generated predicate as the hash join.
+
+In a parallel plan the right side is broadcast to every left lane. `Inner`,
+`Left`, `LeftSemi` and `LeftAnti` keep the left partition count, because the
+output for a left row depends on that row alone. `Right` and `Full` run on one
+lane: a right row is unmatched only if no row of the whole left input matches
+it. The browser runtime executes only the `Inner` form.
 
 ## Memory and lifetime invariants
 

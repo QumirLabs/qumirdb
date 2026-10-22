@@ -426,15 +426,23 @@ TOperatorKernelSpec BuildJoinKernelSpec(
 
 TOperatorKernelSpec BuildCrossJoinKernelSpec(
     const NQumir::NAst::TStructType& leftType,
-    const NQumir::NAst::TStructType& rightType)
+    const NQumir::NAst::TStructType& rightType,
+    EJoinType type,
+    const NQumir::NAst::TExprPtr& residualPredicate)
 {
+    RejectRegexCall(residualPredicate, "join");
     auto outputType = ComputeJoinOutputType(
         std::make_shared<NQumir::NAst::TStructType>(leftType.Fields),
         std::make_shared<NQumir::NAst::TStructType>(rightType.Fields),
-        EJoinType::Inner);
+        type);
     if (!outputType) {
         throw std::runtime_error(
             "cross join kernel spec: " + outputType.error().ToString());
+    }
+
+    std::vector<NQumir::NAst::TExprPtr> expressions;
+    if (residualPredicate) {
+        expressions.push_back(residualPredicate);
     }
 
     return TOperatorKernelSpec{
@@ -445,9 +453,10 @@ TOperatorKernelSpec BuildCrossJoinKernelSpec(
             std::make_shared<NQumir::NAst::TStructType>(rightType.Fields),
         },
         .OutputSchema = std::move(*outputType),
-        .JoinType = EJoinType::Inner,
+        .Expressions = std::move(expressions),
+        .JoinType = type,
         .Entrypoints = {
-            {.Name = "xj_dispatch", .Abi = "bool(ptr TRowSet, i64, ptr TRowSet, i64, ptr PairBuffer, i64)"},
+            {.Name = "xj_dispatch", .Abi = "bool(ptr TRowSet, i64, ptr TRowSet, i64, ptr u8, ptr PairBuffer, i64)"},
             {.Name = "jt_materialize", .Abi = "i64(ptr PairBuffer, ptr TRowSet, ptr TRowSet, ptr TRowSet, ptr TRowSet, i64, i64, ptr TRowSet)"},
         },
         .SourceModules = {"qumirdb"},

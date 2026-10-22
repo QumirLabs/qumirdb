@@ -1,0 +1,4 @@
+project (id, x) (rows≈12 cost≈4.7K)
+└─ join left residual (< |t.a| |u.x|) (rows≈12 cost≈4.5K)
+   ├─ source t AS t (rows≈4 cost≈64)
+   └─ source u AS u (rows≈3 cost≈24)

@@ -1,0 +1,4 @@
+project (id, x) (rows≈4 cost≈4.3K)
+└─ join full residual (< |t.id| |e.x|) (rows≈4 cost≈4.2K)
+   ├─ source t AS t (rows≈4 cost≈32)
+   └─ source e AS e (rows≈0 cost≈0)

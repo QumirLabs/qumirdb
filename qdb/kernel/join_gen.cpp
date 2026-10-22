@@ -1083,6 +1083,78 @@ GenJoinDispatchAst(int64_t keySize, EJoinType type, bool hasResidual,
 }
 
 NQumir::NAst::TExprPtr
+GenCrossJoinDispatchAst(EJoinType type, NQumir::NAst::TTypePtr rowSetType,
+                        NQumir::NAst::TTypePtr pairBufferType) {
+  namespace Oz = NKernel::NOz;
+
+  auto i64Type = std::make_shared<TIntegerType>(TIntegerType::I64);
+  auto boolType = std::make_shared<TBoolType>();
+  auto u8PtrType = std::make_shared<TPointerType>(
+      std::make_shared<TIntegerType>(TIntegerType::U8));
+  auto rowSetPtrType =
+      std::make_shared<TPointerType>(AsNamed("TRowSet", rowSetType));
+  auto pairBufferRefType =
+      std::make_shared<TReferenceType>(AsNamed("PairBuffer", pairBufferType));
+
+  const bool keepsUnmatchedLeft = type == EJoinType::Left ||
+                                  type == EJoinType::Full ||
+                                  type == EJoinType::LeftAnti;
+  const bool keepsUnmatchedRight =
+      type == EJoinType::Right || type == EJoinType::Full;
+  const bool emitsPairs = type == EJoinType::Inner ||
+                          type == EJoinType::Left || keepsUnmatchedRight;
+  if (!emitsPairs && type != EJoinType::LeftSemi &&
+      type != EJoinType::LeftAnti) {
+    throw NQumir::TError("cross join: unsupported join type " +
+                         std::string(JoinTypeName(type)));
+  }
+
+  auto opIs = [&](int64_t op) -> TExprPtr {
+    return Oz::Bin(TOperator("=="), Oz::Ident("op"), Oz::TypedInt(op, i64Type));
+  };
+  TExprPtr emitUnmatchedRight =
+      keepsUnmatchedRight
+          ? Oz::Call("xj_emit_unmatched_right", {
+                                                    Oz::Ident("right_store"),
+                                                    Oz::Ident("right_batch_count"),
+                                                    Oz::Ident("right_matched"),
+                                                    Oz::Ident("pairs"),
+                                                })
+          : Oz::Bool(true);
+
+  Oz::TFunBuilder builder("xj_dispatch");
+  builder.Param("left_store", rowSetPtrType)
+      .Param("batch_idx", i64Type)
+      .Param("right_store", rowSetPtrType)
+      .Param("right_batch_count", i64Type)
+      .Param("right_matched", u8PtrType)
+      .Param("pairs", pairBufferRefType)
+      .Param("op", i64Type)
+      .Return(boolType)
+      .Stmt(Oz::If(opIs(0), Oz::Block({Oz::Return(Oz::Call(
+                                "xj_emit", {
+                                               Oz::Ident("left_store"),
+                                               Oz::Ident("batch_idx"),
+                                               Oz::Ident("right_store"),
+                                               Oz::Ident("right_batch_count"),
+                                               Oz::Ident("right_matched"),
+                                               Oz::Ident("pairs"),
+                                               Oz::Bool(emitsPairs),
+                                               Oz::Bool(type == EJoinType::LeftSemi),
+                                               Oz::Bool(keepsUnmatchedLeft),
+                                               Oz::Bool(keepsUnmatchedRight),
+                                           }))})))
+      .Stmt(Oz::If(opIs(1), Oz::Block({
+                                Oz::Call("pb_destroy", {Oz::Ident("pairs")}),
+                                Oz::Return(Oz::Bool(true)),
+                            })))
+      .Stmt(Oz::If(opIs(2), Oz::Block({Oz::Return(std::move(emitUnmatchedRight))})))
+      .Stmt(Oz::Return(Oz::Bool(false)));
+
+  return std::move(builder).Build();
+}
+
+NQumir::NAst::TExprPtr
 GenKeyHashBatchAst(const TAggregateKeyDescriptor &key, const std::string &funcName,
                    NQumir::NAst::TTypePtr columnType,
                    NQumir::NAst::TTypePtr rowSetType,

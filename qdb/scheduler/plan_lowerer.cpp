@@ -215,8 +215,8 @@ struct TSchedulerInnerJoinState : TProcessorTaskState<TSchedulerInnerJoinState> 
 };
 
 struct TSchedulerCrossJoinState : TProcessorTaskState<TSchedulerCrossJoinState> {
-    explicit TSchedulerCrossJoinState(TCrossJoinKernels kernels)
-        : Processor(std::move(kernels))
+    TSchedulerCrossJoinState(TCrossJoinKernels kernels, EJoinType joinType)
+        : Processor(std::move(kernels), joinType)
     {}
 
     TCrossJoinProcessor Processor;
@@ -497,10 +497,8 @@ public:
         }
         if (auto n = TMaybeOp<TJoinOperator>(op)) {
             auto join = n.Cast();
-            // Keyless join: cross join, parallelizable only with a scalar
-            // (broadcast) side; keeps the vector-side partition count.
             if (join->Keys().empty()) {
-                return CrossScalarLanes(*join);
+                return KeylessJoinLanes(*join);
             }
             // Inner, left/right/full outer, and left semi/anti equi-joins are
             // hash-partitionable (matches co-locate by key).
@@ -552,18 +550,31 @@ public:
         return true;
     }
 
-    // Vector-side lane count for a keyless inner join. This mirrors the old
-    // cross-join executor: buffer/gather the right side, then stream the left.
-    size_t CrossScalarLanes(TJoinOperator& join) const {
-        if (join.JoinType() != EJoinType::Inner || !join.Keys().empty()) {
-            return 0;
-        }
+    // A keyless (nested-loop) join broadcasts its right side to every lane of
+    // the left side, which keeps its partition count when each left row's
+    // output depends only on that row: inner, left outer, and left semi/anti.
+    // RIGHT / FULL pad the right rows no left row matched, which only the
+    // whole left input decides, so they run on one lane.
+    size_t KeylessJoinLanes(TJoinOperator& join) const {
         const size_t lanes = OutputLanes(join.Left());
         const size_t rightLanes = OutputLanes(join.Right());
         if (lanes == 0 || rightLanes == 0) {
             return 0;
         }
-        return lanes;
+        switch (join.JoinType()) {
+            case EJoinType::Inner:
+            case EJoinType::Left:
+            case EJoinType::LeftSemi:
+            case EJoinType::LeftAnti:
+                return lanes;
+            case EJoinType::Right:
+            case EJoinType::Full:
+                return 1;
+            case EJoinType::RightSemi:
+            case EJoinType::RightAnti:
+                return 0;
+        }
+        return 0;
     }
 
     // outLaneOffset shifts this operator's producer lanes within outConn, so a
@@ -2552,10 +2563,13 @@ private:
         };
     }
 
-    // Cross join with a scalar (broadcast) right side:
+    // Keyless (nested-loop) join with a scalar (broadcast) right side:
     //   vector[N] x Broadcast(scalar) -> local cross[N] -> filter(residual) ->
     //   parent gather. The scalar side is lowered, gathered to one lane, and
     //   forwarded into a broadcast connection replicated to every vector lane.
+    //   RIGHT / FULL gather the vector side to one lane (KeylessJoinLanes).
+    //   Only an inner join filters the product by its residual; the other
+    //   types evaluate the residual in the kernel, where it decides matches.
     TLoweredOutput LowerCrossJoin(
         TJoinOperator& join,
         NScheduler::IConnection& outConn,
@@ -2563,12 +2577,20 @@ private:
     {
         const auto crossStageId = NewExecStage(
             &join, EExecPlanNodeKind::CrossJoin);
-        const size_t lanes = OutputLanes(join.Left());
+        const size_t leftLanes = OutputLanes(join.Left());
+        const size_t lanes = KeylessJoinLanes(join);
+        const bool gatherVector = lanes != leftLanes;
 
         // Vector (streamed, partitioned) side.
-        auto& vectorRef = AddConn<NScheduler::TOneToOneConnection>(
-            lanes, lanes, "cross-vector-input");
-        auto vectorOut = Lower(join.Left(), vectorRef);
+        NScheduler::IConnection* vectorRef = nullptr;
+        if (gatherVector) {
+            vectorRef = &AddConn<NScheduler::TGatherConnection>(
+                leftLanes, lanes, "cross-vector-gather");
+        } else {
+            vectorRef = &AddConn<NScheduler::TOneToOneConnection>(
+                lanes, lanes, "cross-vector-input");
+        }
+        auto vectorOut = Lower(join.Left(), *vectorRef);
 
         const size_t scalarLanes = OutputLanes(join.Right());
         TLoweredOutput scalarOut;
@@ -2625,7 +2647,11 @@ private:
         if (!leftStruct || !rightStruct) {
             throw std::runtime_error("scheduler cross join inputs must have TStructType");
         }
-        auto kernelSpec = NKernel::BuildCrossJoinKernelSpec(*leftStruct, *rightStruct);
+        const bool filtersProduct =
+            join.JoinType() == EJoinType::Inner && join.Filter() != nullptr;
+        auto kernelSpec = NKernel::BuildCrossJoinKernelSpec(
+            *leftStruct, *rightStruct, join.JoinType(),
+            join.JoinType() == EJoinType::Inner ? nullptr : join.Filter());
         const auto crossGroup = StageLabel("cross-join", crossStageId);
         TKernelCompiler compiler(
             KernelOptions(crossGroup, crossStageId));
@@ -2636,10 +2662,9 @@ private:
             }());
         auto crossCode = MakeBinaryJoinCode<TSchedulerCrossJoinState>();
 
-        const bool hasResidual = join.Filter() != nullptr;
         NScheduler::IConnection* crossOut = &outConn;
         NScheduler::IConnection* residualConn = nullptr;
-        if (hasResidual) {
+        if (filtersProduct) {
             residualConn = &AddConn<NScheduler::TOneToOneConnection>(
                 lanes, lanes, "cross-residual-input");
             crossOut = residualConn;
@@ -2650,8 +2675,9 @@ private:
         for (size_t m = 0; m < lanes; ++m) {
             auto task = std::make_unique<NScheduler::TBinaryBlockingTask>(
                 crossCode,
-                std::make_shared<TSchedulerCrossJoinState>(*crossKernels),
-                NScheduler::TInputPort{.Connection = &vectorRef, .Lane = m},
+                std::make_shared<TSchedulerCrossJoinState>(
+                    *crossKernels, join.JoinType()),
+                NScheduler::TInputPort{.Connection = vectorRef, .Lane = m},
                 NScheduler::TInputPort{.Connection = scalarInput, .Lane = m},
                 NScheduler::TOutputPort{.Connection = crossOut, .Lane = m});
             auto& node = Graph_.AddOwnedNode(std::move(task));
@@ -2660,7 +2686,13 @@ private:
                 crossStageId,
                 JoinDebugLabel(join),
                 crossStageId);
-            Graph_.AddEdge(*vectorOut.Producers[m], node, vectorRef, m, m);
+            if (gatherVector) {
+                for (size_t s = 0; s < leftLanes; ++s) {
+                    Graph_.AddEdge(*vectorOut.Producers[s], node, *vectorRef, s, m);
+                }
+            } else {
+                Graph_.AddEdge(*vectorOut.Producers[m], node, *vectorRef, m, m);
+            }
             if (directScalar) {
                 Graph_.AddEdge(
                     *scalarOut.Producers[0], node, *scalarInput, 0, 0, 1);
@@ -2671,7 +2703,7 @@ private:
             crossNodes.push_back(&node);
         }
 
-        if (!hasResidual) {
+        if (!filtersProduct) {
             return TLoweredOutput{
                 .Producers = std::move(crossNodes),
                 .OutputType = std::move(crossType),

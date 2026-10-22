@@ -543,8 +543,11 @@ void TCrossJoinProcessor::SetInstrumentation(TOperatorInstrumentation* instrumen
     RightRows_.SetInstrumentation(instrumentation, 1);
 }
 
-TCrossJoinProcessor::TCrossJoinProcessor(TCrossJoinKernels kernels)
+TCrossJoinProcessor::TCrossJoinProcessor(
+    TCrossJoinKernels kernels,
+    EJoinType joinType)
     : Kernels_(std::move(kernels))
+    , JoinType_(joinType)
 {
 }
 
@@ -559,9 +562,31 @@ TCrossJoinProcessor::~TCrossJoinProcessor() {
             0,
             nullptr,
             0,
+            nullptr,
             &PairBuffer_,
             CrossJoinOp(ECrossJoinKernelOp::Destroy));
     }
+}
+
+// Left rows without a match still produce output: NULL padding or ANTI rows.
+bool TCrossJoinProcessor::KeepsUnmatchedLeft() const {
+    return JoinType_ == EJoinType::Left || JoinType_ == EJoinType::Full
+        || JoinType_ == EJoinType::LeftAnti;
+}
+
+bool TCrossJoinProcessor::KeepsUnmatchedRight() const {
+    return JoinType_ == EJoinType::Right || JoinType_ == EJoinType::Full;
+}
+
+bool TCrossJoinProcessor::Dispatch(int32_t leftBatch, ECrossJoinKernelOp op) {
+    return Kernels_.Dispatch(
+        const_cast<TRowSet*>(LeftRows_.Data()),
+        leftBatch,
+        const_cast<TRowSet*>(RightRows_.Data()),
+        RightRows_.BatchCount(),
+        RightMatched_.data(),
+        &PairBuffer_,
+        CrossJoinOp(op));
 }
 
 bool TCrossJoinProcessor::DrainMaterialized(TRowSet& rowSet) {
@@ -606,6 +631,9 @@ EJoinProcessorResult TCrossJoinProcessor::Process(
             }
             if (fetch == EJoinFetchResult::FINISHED) {
                 RightDrained_ = true;
+                if (KeepsUnmatchedRight()) {
+                    RightMatched_.assign(RightTotalRows_, 0);
+                }
                 break;
             }
             RightTotalRows_ += batch.RowCount;
@@ -613,8 +641,8 @@ EJoinProcessorResult TCrossJoinProcessor::Process(
         }
     }
 
-    // Phase 2: stream left, pairing each selected left row with every selected
-    // right row.
+    // Phase 2: stream left, comparing each selected left row with every
+    // selected right row.
     for (;;) {
         if (DrainMaterialized(output)) {
             return EJoinProcessorResult::OK;
@@ -629,20 +657,18 @@ EJoinProcessorResult TCrossJoinProcessor::Process(
         }
         if (fetch == EJoinFetchResult::FINISHED) {
             LeftDone_ = true;
+            if (KeepsUnmatchedRight() &&
+                !Dispatch(0, ECrossJoinKernelOp::EmitUnmatchedRight)) {
+                throw std::runtime_error("cross join unmatched-right emission failed");
+            }
             continue;
         }
-        if (RightTotalRows_ == 0) {
+        if (RightTotalRows_ == 0 && !KeepsUnmatchedLeft()) {
             Release(&batch);
             continue;
         }
         const int32_t li = LeftRows_.PushBatch(batch);
-        if (!Kernels_.Dispatch(
-                const_cast<TRowSet*>(&LeftRows_.Batch(li)),
-                li,
-                const_cast<TRowSet*>(RightRows_.Data()),
-                RightRows_.BatchCount(),
-                &PairBuffer_,
-                CrossJoinOp(ECrossJoinKernelOp::Emit))) {
+        if (!Dispatch(li, ECrossJoinKernelOp::Emit)) {
             throw std::runtime_error("cross join kernel update failed");
         }
         if (DrainMaterialized(output)) {

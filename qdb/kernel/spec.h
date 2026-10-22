@@ -116,9 +116,13 @@ TOperatorKernelSpec BuildJoinKernelSpec(
     EJoinType type,
     const NQumir::NAst::TExprPtr& residualPredicate = nullptr);
 
+// A keyless (nested-loop) join. The residual decides matches, so it is given
+// only to joins other than Inner, whose residual is a filter over the product.
 TOperatorKernelSpec BuildCrossJoinKernelSpec(
     const NQumir::NAst::TStructType& leftType,
-    const NQumir::NAst::TStructType& rightType);
+    const NQumir::NAst::TStructType& rightType,
+    EJoinType type = EJoinType::Inner,
+    const NQumir::NAst::TExprPtr& residualPredicate = nullptr);
 
 void PrintKernelSpec(std::ostream& out, const TOperatorKernelSpec& spec);
 

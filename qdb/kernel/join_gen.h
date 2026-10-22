@@ -197,4 +197,14 @@ NQumir::NAst::TExprPtr GenJoinDispatchAst(
     NQumir::NAst::TTypePtr hashTableType,
     NQumir::NAst::TTypePtr pairBufferType);
 
+// Generates the nested-loop (keyless) join entrypoint:
+//   xj_dispatch(left_store, batch_idx, right_store, right_batch_count,
+//               right_matched, pairs, op) -> bool
+// It passes the emission flags of `type` (Inner, Left, Right, Full,
+// LeftSemi or LeftAnti) to the join_cross.oz helpers as constants.
+NQumir::NAst::TExprPtr GenCrossJoinDispatchAst(
+    EJoinType type,
+    NQumir::NAst::TTypePtr rowSetType,
+    NQumir::NAst::TTypePtr pairBufferType);
+
 } // namespace NQdb::NKernel
