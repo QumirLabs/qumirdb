@@ -1,0 +1,2 @@
+Error: correlated equality inside OR or NOT is not supported @ Line: 1, Byte: 24, Column: 24
+

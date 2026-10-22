@@ -1,0 +1,1 @@
+SELECT id FROM t WHERE EXISTS (SELECT 1 FROM s WHERE s.k = t.id AND s.v > 8) OR EXISTS (SELECT 1 FROM u WHERE u.x = t.id);

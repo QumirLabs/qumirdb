@@ -1365,36 +1365,48 @@ std::expected<TLocalSqlScope, TError> CollectSubqueryScope(
     return local;
 }
 
+using TCorrelation = std::pair<std::string, std::string>; // (outer, local)
+
+// `expr` as a correlation equality: `outer_col == local_col` in either order.
+std::optional<TCorrelation> AsCorrelation(
+    const NAst::TExprPtr& expr,
+    const TLocalSqlScope& local)
+{
+    auto binary = NAst::TMaybeNode<NAst::TBinaryExpr>(expr);
+    if (!binary || binary.Cast()->Operator != "==") {
+        return std::nullopt;
+    }
+    auto left = NAst::TMaybeNode<NAst::TIdentExpr>(binary.Cast()->Left);
+    auto right = NAst::TMaybeNode<NAst::TIdentExpr>(binary.Cast()->Right);
+    if (!left || !right) {
+        return std::nullopt;
+    }
+    const std::string& ln = left.Cast()->Name;
+    const std::string& rn = right.Cast()->Name;
+    const bool lLocal = local.IsLocal(ln);
+    const bool rLocal = local.IsLocal(rn);
+    if (lLocal && !rLocal) {
+        return TCorrelation{rn, ln};
+    }
+    if (rLocal && !lLocal) {
+        return TCorrelation{ln, rn};
+    }
+    return std::nullopt;
+}
+
 // Collects correlation equalities (outer_col == local_col) anywhere in a subquery
-// predicate - including inside OR/AND - so a correlation buried in a disjunction is
-// lifted too (not only top-level conjuncts).
+// predicate, including inside OR and NOT.
 void CollectCorrelations(
     const NAst::TExprPtr& expr,
     const TLocalSqlScope& local,
-    std::vector<std::pair<std::string, std::string>>& out) // (outer, local)
+    std::vector<TCorrelation>& out)
 {
     if (!expr) {
         return;
     }
-    if (auto binary = NAst::TMaybeNode<NAst::TBinaryExpr>(expr);
-        binary && binary.Cast()->Operator == "==")
-    {
-        auto left = NAst::TMaybeNode<NAst::TIdentExpr>(binary.Cast()->Left);
-        auto right = NAst::TMaybeNode<NAst::TIdentExpr>(binary.Cast()->Right);
-        if (left && right) {
-            const std::string& ln = left.Cast()->Name;
-            const std::string& rn = right.Cast()->Name;
-            bool lLocal = local.IsLocal(ln);
-            bool rLocal = local.IsLocal(rn);
-            if (lLocal && !rLocal) {
-                out.emplace_back(rn, ln);
-                return;
-            }
-            if (rLocal && !lLocal) {
-                out.emplace_back(ln, rn);
-                return;
-            }
-        }
+    if (auto correlation = AsCorrelation(expr, local)) {
+        out.push_back(std::move(*correlation));
+        return;
     }
     if (auto call = NAst::TMaybeNode<NAst::TCallExpr>(expr)) {
         for (const auto& arg : call.Cast()->Args) {
@@ -1405,6 +1417,49 @@ void CollectCorrelations(
     for (auto* child : expr->MutableChildren()) {
         CollectCorrelations(*child, local, out);
     }
+}
+
+// The correlation equalities that every row satisfying `expr` satisfies, in order
+// of appearance and without repeats: those among its conjuncts, and those common to
+// both branches of an OR. Only these may become grouping and join keys. An equality
+// in one branch of an OR, as in `local = outer OR local2 = 1`, holds just for the
+// rows of that branch.
+std::vector<TCorrelation> RequiredCorrelations(
+    const NAst::TExprPtr& expr,
+    const TLocalSqlScope& local)
+{
+    if (auto correlation = AsCorrelation(expr, local)) {
+        return {std::move(*correlation)};
+    }
+    auto binary = NAst::TMaybeNode<NAst::TBinaryExpr>(expr);
+    if (!binary || (binary.Cast()->Operator != "&&" && binary.Cast()->Operator != "||")) {
+        return {};
+    }
+    auto result = RequiredCorrelations(binary.Cast()->Left, local);
+    const auto right = RequiredCorrelations(binary.Cast()->Right, local);
+    if (binary.Cast()->Operator == "||") {
+        std::erase_if(result, [&](const TCorrelation& correlation) {
+            return std::ranges::find(right, correlation) == right.end();
+        });
+        return result;
+    }
+    for (const auto& correlation : right) {
+        if (std::ranges::find(result, correlation) == result.end()) {
+            result.push_back(correlation);
+        }
+    }
+    return result;
+}
+
+// True if `expr` has a correlation equality that only some of its rows satisfy, one
+// inside OR or NOT that RequiredCorrelations does not return.
+bool HasConditionalCorrelation(const NAst::TExprPtr& expr, const TLocalSqlScope& local) {
+    std::vector<TCorrelation> found;
+    CollectCorrelations(expr, local, found);
+    const auto required = RequiredCorrelations(expr, local);
+    return std::ranges::any_of(found, [&](const TCorrelation& correlation) {
+        return std::ranges::find(required, correlation) == required.end();
+    });
 }
 
 // Replaces identifier leaves named in `replacements` with a copy of their
@@ -1486,13 +1541,16 @@ std::expected<std::optional<TRelation>, TError> DecorrelateExistsOr(
         if (!local) {
             return std::unexpected(local.error());
         }
-        std::vector<std::pair<std::string, std::string>> corrs;
-        CollectCorrelations(select->Where, *local, corrs);
-        std::set<std::pair<std::string, std::string>> uniq(corrs.begin(), corrs.end());
-        if (uniq.size() != 1) {
+        // The branch's correlation must hold for all its rows to become the key.
+        if (HasConditionalCorrelation(select->Where, *local)) {
+            return std::unexpected(TError(
+                sub->Location, "correlated equality inside OR or NOT is not supported"));
+        }
+        const auto corrs = RequiredCorrelations(select->Where, *local);
+        if (corrs.size() != 1) {
             return std::optional<TRelation>{}; // need exactly one correlation
         }
-        const auto& [outer, inner] = *uniq.begin();
+        const auto& [outer, inner] = corrs.front();
         if (!outerKey) {
             outerKey = outer;
         } else if (*outerKey != outer) {
@@ -1654,19 +1712,19 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
             }
             const auto& local = *scope;
 
-            // Correlation = an equality with one local and one outer column, found
-            // anywhere in the predicate (deduplicated by the (outer, local) pair).
-            std::vector<std::pair<std::string, std::string>> correlation; // (outer, local)
-            {
-                std::vector<std::pair<std::string, std::string>> found;
-                CollectCorrelations(sel->Where, local, found);
-                std::set<std::pair<std::string, std::string>> seen;
-                for (auto& pair : found) {
-                    if (seen.insert(pair).second) {
-                        correlation.push_back(pair);
-                    }
-                }
-            }
+            // Correlation = an equality with one local and one outer column that the
+            // whole predicate requires; it becomes a grouping and a join key.
+            const auto correlation = RequiredCorrelations(sel->Where, local);
+            // An outer column left after the rewrite cannot be bound in the subquery.
+            // When it is in an equality inside OR or NOT, that correlation holds only
+            // for some rows, and lifting it as a key would drop the rows of the other
+            // branch.
+            // TODO: general unnesting (#158) decorrelates such predicates.
+            auto unsupported = [&](const char* message) {
+                return HasConditionalCorrelation(sel->Where, local)
+                    ? TError(expr->Location, "correlated equality inside OR or NOT is not supported")
+                    : TError(message);
+            };
 
             if (!correlation.empty()) {
                 int id = extracted.Counter++;
@@ -1705,7 +1763,7 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
                 ReplaceIdents(sel->Where, outerToLocal);
                 if (HasUnmappedOuter(sel->Where, local)) {
                     return std::unexpected(
-                        TError("unsupported correlated subquery (outer column outside an equality)"));
+                        unsupported("unsupported correlated subquery (outer column outside an equality)"));
                 }
 
                 auto plan = BuildQuery(*scalar->Query, context);
@@ -1738,7 +1796,7 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
             // would be left unbound in the subquery. Fail loudly rather than silently
             // cross-joining and dropping rows.
             if (HasUnmappedOuter(sel->Where, local)) {
-                return std::unexpected(TError(
+                return std::unexpected(unsupported(
                     "unsupported correlated scalar subquery "
                     "(correlation must be an equality between subquery and outer columns)"));
             }
