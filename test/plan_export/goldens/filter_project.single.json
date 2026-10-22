@@ -4,8 +4,16 @@
   "nodes": [
     {
       "columns": [
-        { "name": "k", "nullable": false, "type": "i64" },
-        { "name": "v", "nullable": false, "type": "i64" }
+        {
+          "name": "k",
+          "nullable": false,
+          "type": "i64"
+        },
+        {
+          "name": "v",
+          "nullable": false,
+          "type": "i64"
+        }
       ],
       "id": 0,
       "kind": "source",
@@ -46,8 +54,30 @@
     }
   ],
   "edges": [
-    { "from": 0, "input": 0, "kind": "one-to-one", "to": 1 },
-    { "from": 1, "input": 0, "kind": "one-to-one", "to": 2 }
+    {
+      "from": 0,
+      "input": 0,
+      "kind": "one-to-one",
+      "to": 1
+    },
+    {
+      "from": 1,
+      "input": 0,
+      "kind": "one-to-one",
+      "to": 2
+    }
   ],
-  "root": 2
+  "root": 2,
+  "output": [
+    {
+      "name": "k",
+      "nullable": false,
+      "type": "i64"
+    },
+    {
+      "name": "x",
+      "nullable": false,
+      "type": "i64"
+    }
+  ]
 }

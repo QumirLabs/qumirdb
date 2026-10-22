@@ -81,10 +81,6 @@ ut(test_window test_window.cpp)
 ut(test_window_plan test_window_plan.cpp)
 ut(test_window_exec test_window_exec.cpp)
 
-add_executable(plan_export_native_runner plan_export_native_runner.cpp)
-target_link_libraries(plan_export_native_runner PRIVATE qumirdb)
-target_compile_features(plan_export_native_runner PRIVATE cxx_std_23)
-
 # JavaScript execution tests (Node.js required), matching externals/qumir.
 find_program(QDB_NODE_EXECUTABLE node)
 if(QDB_NODE_EXECUTABLE)
@@ -92,8 +88,8 @@ if(QDB_NODE_EXECUTABLE)
         NAME test_plan_export_integration
         COMMAND ${QDB_NODE_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test/plan_export/run.mjs
             $<TARGET_FILE:qdb>
-            $<TARGET_FILE:plan_export_native_runner>
             ${CMAKE_SOURCE_DIR}/service/static/browser_runtime.js
+            ${CMAKE_SOURCE_DIR}/test/regtest
             ${CMAKE_SOURCE_DIR}/test/plan_export/goldens
             --xml ${CMAKE_CURRENT_BINARY_DIR}/test_plan_export_integration.xml
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}

@@ -9,7 +9,6 @@ import path from 'node:path';
 
 import { TestFailure } from './js_harness.mjs';
 
-const NATIVE_VARIANTS = ['single', 'threaded'];
 const JS_VARIANT = 'js';
 const DEFAULT_ROW_GROUP_ROWS = 128;
 const DEFAULT_TOLERANCE = Object.freeze({ abs: 1e-12, rel: 1e-12 });
@@ -47,7 +46,7 @@ function printColumnType({ type, nullable }) {
   return nullable ? `<named Nullable [${type}]>` : type;
 }
 
-export function printSchema(columns) {
+function printSchema(columns) {
   const fields = columns.map(column =>
     ` (${printIdentifier(column.name)} ${printColumnType(column)})`);
   return `<struct${fields.join('')}>`;
@@ -64,7 +63,7 @@ function scalarColumn(name, typeText) {
 
 // Fields of a `<struct (name type) ...>` schema. Fixture and result types are
 // scalars, optionally wrapped in Nullable, as in the native fixture reader.
-export function parseSchema(text) {
+function parseSchema(text) {
   const source = String(text).trim();
   if (!source.startsWith('<struct') || !source.endsWith('>')) {
     throw new Error(`schema must be a Qumir struct type: ${source}`);
@@ -176,7 +175,7 @@ function loadFixture(file, rowGroupRows) {
 }
 
 // Mirrors NRegTest::TestName so that both runners name a case alike.
-export function testName(base) {
+function testName(base) {
   return base.replace(/[^A-Za-z0-9_]/g, '_');
 }
 
@@ -256,7 +255,7 @@ export function caseTables(test) {
     ([table, fixture]) => [table, test.suite.fixture(fixture)]));
 }
 
-export function datasetFor(tables) {
+function datasetFor(tables) {
   return {
     tables: Object.entries(tables).map(([name, table]) => ({
       name,
@@ -272,6 +271,13 @@ export function datasetFor(tables) {
     })),
   };
 }
+
+// Exporter options of the native scheduler presets; the browser executes
+// either plan on one thread.
+export const SCHEDULER_PRESETS = Object.freeze({
+  single: { scheduler: 'single', schedulerWorkers: 1, scanTasks: 1, shufflePartitions: 1 },
+  threaded: { scheduler: 'threaded', schedulerWorkers: 4, scanTasks: 4, shufflePartitions: 2 },
+});
 
 export function exportRequest(sql, tables, options = {}) {
   return {
@@ -331,14 +337,12 @@ export function browserExec(bundle) {
 
 // Source batches cut at Parquet row-group boundaries, as the native fixture
 // file is split.
-export function fixtureSource(tables, batchSizes = {}) {
+export function fixtureSource(tables) {
   return async function* (stage) {
     const table = tables[stage.table];
     if (!table) throw new Error(`browser requested unknown table ${stage.table}`);
-    const sizes = batchSizes[stage.table] ?? [];
-    let begin = 0;
-    for (let batch = 0; begin < table.rowCount; ++batch) {
-      const end = Math.min(table.rowCount, begin + (sizes[batch] ?? table.rowGroupRows));
+    for (let begin = 0; begin < table.rowCount;) {
+      const end = Math.min(table.rowCount, begin + table.rowGroupRows);
       yield {
         rowCount: end - begin,
         columns: stage.columns.map(column => {
@@ -461,7 +465,7 @@ function resultsMatch(actual, expected, ordered, tol) {
 }
 
 // The golden layout: one result row per line.
-export function renderResult(result) {
+function renderResult(result) {
   const rows = result.rows.map(row => `    [${row.map(cell => JSON.stringify(cell)).join(', ')}]`);
   return `{\n  "schema": ${JSON.stringify(result.schema)},\n  "rows": [`
     + (rows.length ? `\n${rows.join(',\n')}\n  ` : '')
@@ -497,35 +501,59 @@ function lineDiff(expectedText, actualText) {
   return lines.join('\n');
 }
 
-export function compareWithGolden(actualResult, goldenFile, { ordered = true, tol = DEFAULT_TOLERANCE } = {}) {
+// Typed results compared like the native runner: exact cells except finite
+// floats within the tolerance, rows in order or as a multiset.
+export function compareResults(actualResult, expectedResult, {
+  ordered = true,
+  tol = DEFAULT_TOLERANCE,
+  expectedName = 'the expected result',
+} = {}) {
   const actual = normalize(actualResult, ordered);
-  const expected = normalize(readJson(goldenFile), ordered);
+  const expected = normalize(expectedResult, ordered);
   if (resultsMatch(actual, expected, ordered, tol)) return;
-  throw new TestFailure(`result differs from ${goldenFile} `
+  throw new TestFailure(`result differs from ${expectedName} `
     + `(${ordered ? 'ordered' : 'unordered'}, tol abs=${tol.abs} rel=${tol.rel})\n`
     + lineDiff(renderResult(expected), renderResult(actual)));
 }
 
 // The exported bundle of a shared case. Export runs in a child process, so a
 // runner may prepare several cases while it executes another.
-export async function exportCase(test, qdb, exporterArgs = []) {
+export async function exportCase(test, qdb, { args = [], options = {} } = {}) {
   const tables = caseTables(test);
   const sql = readFileSync(test.sql, 'utf8');
-  return { tables, bundle: await runExporter(qdb, exportRequest(sql, tables), exporterArgs) };
+  return { tables, bundle: await runExporter(qdb, exportRequest(sql, tables, options), args) };
 }
 
-export function assertNoLiveMemory(result) {
+// A browser result of a shared case against its golden, and the WASM memory
+// it must have released.
+export function checkResult(test, exec, result) {
   if (result.memory?.liveMB !== '0.0') {
     throw new TestFailure(`browser runtime leaked wasm memory: ${result.memory?.liveMB} MB live`);
   }
+  compareResults(typedResult(exec, result), readJson(test.golden), {
+    ordered: test.ordered,
+    tol: test.tol,
+    expectedName: test.golden,
+  });
 }
 
-// Executes an exported case in the browser runtime and checks its golden.
-export async function checkCase(test, { tables, bundle }, runtime) {
+// Executes an exported case with its fixture rows and checks the result.
+export async function checkCase(test, { tables, bundle }, runtime, runOptions = {}) {
   const exec = browserExec(bundle);
-  const result = await runtime.executeBrowserPipelineScheduled(exec, fixtureSource(tables));
-  assertNoLiveMemory(result);
-  compareWithGolden(typedResult(exec, result), test.golden, test);
+  const result = await runtime.executeBrowserPipelineScheduled(
+    exec, fixtureSource(tables), runOptions);
+  checkResult(test, exec, result);
+  return result;
 }
 
-export { NATIVE_VARIANTS, JS_VARIANT };
+const collected = new Map();
+
+// A js case of the shared suites by its path below cases/, without extension.
+export function sharedCase(root, base) {
+  if (!collected.has(root)) {
+    collected.set(root, collectCases(root).cases);
+  }
+  const test = collected.get(root).find(item => item.base === base);
+  if (!test) throw new Error(`no js case ${base} under ${root}`);
+  return test;
+}

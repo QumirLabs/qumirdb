@@ -162,5 +162,12 @@
       "to": 7
     }
   ],
-  "root": 7
+  "root": 7,
+  "output": [
+    {
+      "name": "n",
+      "nullable": false,
+      "type": "i64"
+    }
+  ]
 }
