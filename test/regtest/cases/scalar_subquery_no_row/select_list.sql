@@ -1,0 +1,1 @@
+SELECT id, (SELECT x FROM u WHERE x > 100) AS m FROM t;

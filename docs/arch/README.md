@@ -74,7 +74,7 @@ Detailed algorithm docs:
   equivalence classes, per-side predicate pushdown, disjunction factoring and
   derived side filters, outer-join residual handling.
 - [Decorrelation](decorrelation.md) - EXISTS/IN → semi/anti joins; scalar
-  subqueries → broadcast cross join (uncorrelated) or group-by + LEFT join
+  subqueries → broadcast join (uncorrelated) or group-by + LEFT join
   (correlated, Apply elimination).
 
 Physical execution:

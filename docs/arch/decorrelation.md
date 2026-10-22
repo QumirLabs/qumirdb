@@ -57,10 +57,31 @@ the residual is `operand == <that column>`.
 replaced by a reference to a fresh column, and the subquery is attached to the
 node. Two cases.
 
-### Uncorrelated → broadcast cross join
+### Uncorrelated → broadcast join
 
-The subquery returns one row, so a cross join just appends its value to every
-outer row. Its single output column is renamed `__scalar_N__`:
+The subquery is evaluated once, and a keyless join appends its value to every
+outer row. Its single output column is renamed `__scalar_N__`. A subquery that
+returns no row has the value NULL, so the join is a `LEFT` join in general: with
+an empty right side the outer rows survive with `__scalar_N__` NULL
+([join.md](join.md#joins-without-equi-keys)):
+
+```
+SELECT id, (SELECT x FROM u WHERE x > 100) AS m FROM t
+=>
+project (id, m)                            # m is NULL for every row
+└─ join left
+   ├─ source t
+   └─ project (__scalar_0__)
+      └─ filter (> u.x 100)
+         └─ source u
+```
+
+A filter keeps a row only when its predicate is TRUE. When the subquery is a
+conjunct of `WHERE` or `HAVING`, or an operand of a comparison, an arithmetic
+operator or `NOT` on the way up to one, a NULL value makes the conjunct NULL and
+drops the row anyway. There the join is `inner`, which join reordering can move
+and equi-join extraction can key (q6 and q15 compare a column with the
+subquery):
 
 ```
 ... AND c_acctbal > (SELECT avg(c_acctbal) FROM customer WHERE c_acctbal>0)
@@ -71,7 +92,8 @@ filter (> c_acctbal __scalar_0__)
    └─ project (__scalar_0__ = avg…)        # global aggregate, one row
 ```
 
-Used by q11 (HAVING), q15, q22.
+Used by q11 (HAVING), q15, q22. Under `OR`, `IS NULL`, `CASE` or a function such
+as `coalesce`, and in the SELECT list, the join stays `LEFT`.
 
 ### Correlated → group-by + LEFT join (Apply elimination)
 

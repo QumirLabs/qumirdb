@@ -1,5 +1,5 @@
 {
-  "schema": "<struct (x i64) (y i64) (n <named Nullable [i64]>) (m i64)>",
+  "schema": "<struct (x i64) (y i64) (n <named Nullable [i64]>) (m <named Nullable [i64]>)>",
   "rows": [
     ["2", "50", "1", "0"],
     ["1", "40", null, "10"],

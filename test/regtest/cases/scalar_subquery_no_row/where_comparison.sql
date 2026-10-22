@@ -1,0 +1,1 @@
+SELECT id FROM t WHERE id < (SELECT x FROM u WHERE x > 100);
