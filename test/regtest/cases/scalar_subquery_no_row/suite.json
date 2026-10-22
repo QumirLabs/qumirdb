@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "fixtures": {
+    "t": {"json": "tables/t.json", "parquet": {"row_group_rows": 2}},
+    "u": {"json": "tables/u.json"}
+  },
+  "tables": {"t": "t", "u": "u"},
+  "variants": ["single", "threaded"],
+  "cases": {
+    "select_list.sql": {"order": "unordered"},
+    "select_list_coalesce.sql": {"order": "unordered"},
+    "where_is_null.sql": {"order": "unordered"},
+    "where_under_or.sql": {"order": "unordered"},
+    "where_comparison.sql": {"order": "unordered"},
+    "where_negated_comparison.sql": {"order": "unordered"},
+    "having_under_or.sql": {"order": "unordered"}
+  }
+}

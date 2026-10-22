@@ -1,6 +1,6 @@
 sort [g asc]
 └─ project (g, m) (rows≈4 cost≈4.4K)
-   └─ join inner (rows≈4 cost≈4.4K)
+   └─ join left (rows≈4 cost≈4.4K)
       ├─ aggregate keys=[gb_0] (rows≈4 cost≈96)
       │  └─ project (gb_0) (rows≈4 cost≈64)
       │     └─ source t AS t (rows≈4 cost≈32)

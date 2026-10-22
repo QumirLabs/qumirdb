@@ -1,0 +1,1 @@
+SELECT id FROM t WHERE NOT (id < (SELECT x FROM u WHERE x > 100));

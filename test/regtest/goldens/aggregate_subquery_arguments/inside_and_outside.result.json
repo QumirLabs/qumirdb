@@ -1,5 +1,5 @@
 {
-  "schema": "<struct (n i64)>",
+  "schema": "<struct (n <named Nullable [i64]>)>",
   "rows": [
     ["180"]
   ]

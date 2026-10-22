@@ -1,0 +1,8 @@
+project (a, c) (rows≈1 cost≈4.3K)
+└─ filter (|| (call qdb_is_null |t.a|) (> count_0 __scalar_0__)) (rows≈1 cost≈4.3K)
+   └─ join left (rows≈2 cost≈4.3K)
+      ├─ aggregate keys=[t.a] aggs=[count_0=count] (rows≈2 cost≈96)
+      │  └─ source t AS t (rows≈4 cost≈32)
+      └─ project (__scalar_0__) (rows≈1 cost≈40)
+         └─ filter (> |u.x| 100) (rows≈1 cost≈32)
+            └─ source u AS u row-groups (> |u.x| 100) (rows≈2 cost≈16)

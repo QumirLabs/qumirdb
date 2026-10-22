@@ -1,7 +1,7 @@
 project (id, d)
 └─ sort [__sort_0 asc, id asc]
    └─ project (id, d, __sort_0) (rows≈6 cost≈4.6K)
-      └─ join inner (rows≈6 cost≈4.5K)
+      └─ join left (rows≈6 cost≈4.5K)
          ├─ source t AS t (rows≈6 cost≈72)
          └─ project (__scalar_0__) (rows≈1 cost≈200)
             └─ aggregate keys=[__group__] aggs=[min_0=min] (rows≈1 cost≈192)

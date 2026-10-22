@@ -1610,15 +1610,34 @@ struct TExtractedSubqueries {
     std::unordered_map<const NSql::TSubqueryExpr*, NAst::TExprPtr> Columns;
 };
 
+// True if `expr` is NULL whenever one of its operands is NULL: a comparison, an
+// arithmetic operator, NOT, or a negation.
+bool PropagatesNull(const NAst::TExprPtr& expr) {
+    if (auto binary = NAst::TMaybeNode<NAst::TBinaryExpr>(expr)) {
+        const auto& op = binary.Cast()->Operator;
+        return op == "==" || op == "!=" || op == "<" || op == "<=" || op == ">" || op == ">="
+            || op == "+" || op == "-" || op == "*" || op == "/" || op == "%";
+    }
+    if (auto unary = NAst::TMaybeNode<NAst::TUnaryExpr>(expr)) {
+        return unary.Cast()->Operator == "!" || unary.Cast()->Operator == "-";
+    }
+    return false;
+}
+
 // Replaces each scalar subquery in a bound expression with a reference to a fresh
-// column. Uncorrelated subqueries broadcast via a cross join (a single row).
-// Correlated ones are decorrelated: the subquery is grouped by its correlation
-// columns and LEFT-joined onto `node` (Apply elimination).
+// column. An uncorrelated subquery is broadcast onto `node` by a keyless join: a
+// LEFT join, so that a subquery with no row yields NULL. `rejectsNull` says that
+// `expr` is a conjunct of a filter, which keeps only rows where it is TRUE; there,
+// and in operands that propagate NULL up to it, a NULL subquery value drops the
+// row anyway, so the join is inner, which join ordering may move and key.
+// Correlated subqueries are decorrelated: the subquery is grouped by its
+// correlation columns and LEFT-joined onto `node` (Apply elimination).
 std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
     NAst::TExprPtr expr,
     TRelation& node,
     TBuildContext& context,
-    TExtractedSubqueries& extracted)
+    TExtractedSubqueries& extracted,
+    bool rejectsNull)
 {
     if (!expr) {
         return expr;
@@ -1793,7 +1812,7 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
             }
         }
 
-        // Uncorrelated: the subquery yields one row, broadcast via a cross join.
+        // Uncorrelated: the subquery's row is broadcast to every row of `node`.
         auto plan = BuildQuery(*scalar->Query, context);
         if (!plan) {
             return std::unexpected(plan.error());
@@ -1807,11 +1826,13 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
             return std::unexpected(right.error());
         }
         const auto column = ColumnNames(right->Plan).front();
-        node = JoinRelations(std::move(node), std::move(*right), {}, EJoinType::Inner, nullptr);
+        node = JoinRelations(std::move(node), std::move(*right), {},
+            rejectsNull ? EJoinType::Inner : EJoinType::Left, nullptr);
         return extract(Ident(expr->Location, column));
     }
+    const bool childRejectsNull = rejectsNull && PropagatesNull(expr);
     for (NAst::TExprPtr* child : expr->MutableChildren()) {
-        auto rewritten = ExtractScalarSubqueries(*child, node, context, extracted);
+        auto rewritten = ExtractScalarSubqueries(*child, node, context, extracted, childRejectsNull);
         if (!rewritten) {
             return std::unexpected(rewritten.error());
         }
@@ -1851,7 +1872,7 @@ std::expected<void, TError> ExtractAggregateArgumentSubqueries(
     }
     if (IsAggregateCall(expr)) {
         for (auto& arg : NAst::TMaybeNode<NAst::TCallExpr>(expr).Cast()->Args) {
-            auto rewritten = ExtractScalarSubqueries(arg, node, context, extracted);
+            auto rewritten = ExtractScalarSubqueries(arg, node, context, extracted, false);
             if (!rewritten) {
                 return std::unexpected(rewritten.error());
             }
@@ -2236,7 +2257,7 @@ std::expected<TRelation, TError> BuildSelect(
     }
     TExtractedSubqueries subqueries;
     // Extracts scalar subqueries out of a finished projection list, broadcasting
-    // each onto `n` (uncorrelated -> keyless cross join; correlated -> decorrelated
+    // each onto `n` (uncorrelated -> keyless left join; correlated -> decorrelated
     // left join). Shares `subqueries` with the WHERE/HAVING extraction so the
     // __scalar_N__ names stay unique. Called just before the final project so the
     // broadcast joins attach above any aggregate (matching HAVING).
@@ -2244,7 +2265,7 @@ std::expected<TRelation, TError> BuildSelect(
         [&](std::vector<TProjectionSpec>& projs, TRelation& n)
         -> std::expected<void, TError> {
         for (auto& p : projs) {
-            auto rewritten = ExtractScalarSubqueries(p.Expression, n, context, subqueries);
+            auto rewritten = ExtractScalarSubqueries(p.Expression, n, context, subqueries, false);
             if (!rewritten) {
                 return std::unexpected(rewritten.error());
             }
@@ -2292,7 +2313,7 @@ std::expected<TRelation, TError> BuildSelect(
                     }
                     // Unsupported EXISTS-OR shape: fall through to the residual path.
                 }
-                auto rewritten = ExtractScalarSubqueries(conjunct, node, context, subqueries);
+                auto rewritten = ExtractScalarSubqueries(conjunct, node, context, subqueries, true);
                 if (!rewritten) {
                     return std::unexpected(rewritten.error());
                 }
@@ -2637,11 +2658,16 @@ std::expected<TRelation, TError> BuildSelect(
         return std::unexpected(grouped.error());
     }
     if (having) {
-        auto rewritten = ExtractScalarSubqueries(having, node, context, subqueries);
-        if (!rewritten) {
-            return std::unexpected(rewritten.error());
+        std::vector<NAst::TExprPtr> conjuncts;
+        FlattenConjuncts(having, conjuncts);
+        for (auto& conjunct : conjuncts) {
+            auto rewritten = ExtractScalarSubqueries(conjunct, node, context, subqueries, true);
+            if (!rewritten) {
+                return std::unexpected(rewritten.error());
+            }
+            conjunct = std::move(*rewritten);
         }
-        node.Plan = std::make_shared<TFilterOperator>(std::move(node.Plan), std::move(*rewritten));
+        node.Plan = std::make_shared<TFilterOperator>(std::move(node.Plan), Conjoin(conjuncts));
     }
     {
         auto windowed = applyWindows(node);
