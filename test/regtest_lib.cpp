@@ -1258,6 +1258,23 @@ void CommitGoldens(const std::vector<TQueryCase>& tests) {
         for (const auto& [path, plan] : test.Suite->CanonizedPlans) WriteAll(path, plan);
         for (const auto& [path, error] : test.Suite->CanonizedErrors) WriteAll(path, error);
     }
+    // A case holds a result or an error, never both: when the outcome changes,
+    // the golden of the previous one is stale. Report what is removed.
+    std::set<fs::path> removed;
+    for (const auto& test : tests) {
+        if (!test.Suite) continue;
+        const auto& suite = *test.Suite;
+        const bool hasResult = suite.Canonized.contains(test.Golden);
+        const bool hasError = suite.CanonizedErrors.contains(test.ErrorGolden);
+        for (const auto& [stale, wanted] : {std::pair{test.Golden, hasResult},
+                std::pair{test.ErrorGolden, hasError}})
+        {
+            if (!wanted && fs::exists(stale) && removed.insert(stale).second) {
+                fs::remove(stale);
+                std::cerr << "[regtest] removed stale golden " << stale.string() << '\n';
+            }
+        }
+    }
 }
 
 } // namespace NRegTest

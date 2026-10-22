@@ -79,7 +79,9 @@ The text of an error is one of:
 The outcome must match the declaration. A case without `expect_error` that
 fails, and a case with it that succeeds, fail with the message (the SQL file
 and the error). With `"execute": false` the error can only be a planning
-error; `expect_error` there makes a successful plan fail the case. Failures of
+error; `expect_error` there makes a successful plan fail the case. `--canonize` also removes the golden of the
+previous outcome (a `.error` of a case that now succeeds, a result of a case
+that now fails) and reports each removed file on stderr. Failures of
 the harness (a broken fixture, an unmapped table) are never goldens.
 
 The browser runner checks the same cases. A planning error of the exporter is

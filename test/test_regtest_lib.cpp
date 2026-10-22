@@ -379,6 +379,32 @@ TEST(RegSuiteInfrastructure, RuntimeErrorIsCanonizedInErrorGolden) {
     EXPECT_FALSE(NRegTest::CheckCase(tests[0], false).Error->Matches);
 }
 
+TEST(RegSuiteInfrastructure, CanonizeRemovesGoldensOfThePreviousOutcome) {
+    TCaseDirectory dir;
+    const auto errorGolden = dir.GoldensDir / "group/query.error";
+    // A success case loses a stale error golden.
+    std::ofstream(errorGolden) << "Runtime error: old\n";
+    auto tests = dir.Collect();
+    NRegTest::PrepareCases(tests);
+    EXPECT_TRUE(NRegTest::CheckCase(tests[0], true).Result->Matches);
+    NRegTest::CommitGoldens(tests);
+    EXPECT_FALSE(fs::exists(errorGolden));
+    EXPECT_TRUE(fs::exists(dir.Golden));
+    // An error case loses the result golden.
+    dir.Write("suite.json", ErrorManifest(R"("expect_error":true)"));
+    dir.Write("table.json", R"({
+        "version":1,"schema":"<struct (v i64)>",
+        "rows":[["-9223372036854775808"]]
+    })");
+    dir.Write("query.sql", "SELECT abs(v) AS v FROM t;");
+    tests = dir.Collect();
+    NRegTest::PrepareCases(tests);
+    NRegTest::CheckCase(tests[0], true);
+    NRegTest::CommitGoldens(tests);
+    EXPECT_TRUE(fs::exists(errorGolden));
+    EXPECT_FALSE(fs::exists(dir.Golden));
+}
+
 TEST(RegSuiteInfrastructure, UnexpectedOutcomesAreReportedWithTheirMessage) {
     TCaseDirectory dir;
     auto message = [&](std::string_view sql, std::string_view options) {
