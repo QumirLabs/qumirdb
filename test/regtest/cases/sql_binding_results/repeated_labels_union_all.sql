@@ -1,0 +1,3 @@
+SELECT y FROM (SELECT * FROM t JOIN u ON t.x = u.x) d
+UNION ALL
+SELECT z FROM (SELECT * FROM t JOIN u ON t.x = u.x) e;
