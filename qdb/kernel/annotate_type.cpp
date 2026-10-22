@@ -417,6 +417,16 @@ TTypePtr NullableQ(const TTypePtr& value) {
         : ToQumirType(nullable);
 }
 
+// A predicate is a boolean context, so its bare NULL is NULL[bool] (`WHERE NULL`,
+// `CASE WHEN NULL`): the kernel then tests it like any other nullable predicate.
+TExprPtr TypeNullPredicate(const TExprPtr& predicate) {
+    if (!IsNullLiteral(predicate)) {
+        return predicate;
+    }
+    return std::make_shared<TCastExpr>(predicate->Location, predicate,
+        NullableQ(std::make_shared<TBoolType>()));
+}
+
 std::string PlanTypeKey(const TTypePtr& type) {
     if (!type) {
         return "unknown";
@@ -1142,10 +1152,15 @@ TTypePtr Expand(TExprPtr& e, const TStructType& inputType, uint64_t& counter) {
         auto node = up.Cast();
         TTypePtr ot = Expand(node->Operand, inputType, counter);
         TOperator op = node->Operator;
-        if (!ot || !IsNullableType(ot)) {
-            return ot ? ResultTypeUnary(op, ot) : nullptr;
-        }
         TTypePtr R = ResultTypeUnary(op, ot);
+        if (IsNullLiteral(node->Operand) && R) {
+            // `!` fixes the type of a bare-NULL operand: NOT NULL is NULL[bool].
+            e = std::make_shared<TCastExpr>(node->Location, MakeNull(node->Location), NullableQ(R));
+            return std::make_shared<TNullable>(R);
+        }
+        if (!ot || !IsNullableType(ot)) {
+            return ot ? R : nullptr;
+        }
         TExprPtr operand = node->Operand;
         e = BuildNullStrict({{operand, true}},
             [op, node](std::vector<TExprPtr> a) {
@@ -1162,6 +1177,11 @@ TTypePtr Expand(TExprPtr& e, const TStructType& inputType, uint64_t& counter) {
         TTypePtr target = IsNullableType(node->Type)
             ? UnwrapNullableType(node->Type)
             : FromQumirType(node->Type);
+        if (IsNullLiteral(node->Operand)) {
+            // CAST(NULL AS T) is the NULL of T.
+            e = std::make_shared<TCastExpr>(node->Location, node->Operand, NullableQ(target));
+            return std::make_shared<TNullable>(target);
+        }
         if (!ot || !IsNullableType(ot)) {
             // Non-nullable operand cast to a nullable target (e.g. a UNION-branch
             // coercion `cast(i32, Nullable[i32])`): emit nullable_from_value. The cast
@@ -1249,6 +1269,9 @@ TTypePtr Expand(TExprPtr& e, const TStructType& inputType, uint64_t& counter) {
         std::vector<TTypePtr> argTypes;
         for (auto& arg : node->Args) {
             argTypes.push_back(Expand(arg, inputType, counter));
+        }
+        if (name == "qdb_is_true" && node->Args.size() == 1) {
+            node->Args[0] = TypeNullPredicate(node->Args[0]);
         }
         if (IsExcludedCall(name)) {
             return InferType(e, inputType); // e.g. is_null/is_true -> non-null bool
@@ -1846,6 +1869,20 @@ std::pair<TExprPtr, TTypePtr> ExpandKernelExpr(const TExprPtr& expr,
         return nullable;
     }
     return ExpandDecimal(nullable.first, inputType);
+}
+
+std::pair<TExprPtr, TTypePtr> ExpandKernelPredicate(const TExprPtr& expr,
+    const TStructType& inputType,
+    const TExternalCatalogSnapshot* externalCatalog)
+{
+    auto expanded = ExpandKernelExpr(expr, inputType, externalCatalog);
+    if (IsNullLiteral(expanded.first)) {
+        expanded = {
+            TypeNullPredicate(expanded.first),
+            std::make_shared<TNullable>(std::make_shared<TBoolType>()),
+        };
+    }
+    return expanded;
 }
 
 } // namespace NQdb::NKernel

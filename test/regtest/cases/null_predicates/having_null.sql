@@ -1,0 +1,1 @@
+SELECT count(*) AS c FROM t HAVING NULL;

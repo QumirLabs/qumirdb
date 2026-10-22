@@ -1,0 +1,6 @@
+sort [id asc]
+└─ project (id) (rows≈2 cost≈4.3K)
+   └─ join left_semi [t.id = s.k] (rows≈2 cost≈4.2K)
+      ├─ filter (call qdb_sql_null) (rows≈2 cost≈64)
+      │  └─ source t AS t row-groups (call qdb_sql_null) (rows≈4 cost≈32)
+      └─ source s AS s (rows≈3 cost≈24)

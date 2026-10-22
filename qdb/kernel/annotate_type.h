@@ -76,4 +76,11 @@ std::pair<NQumir::NAst::TExprPtr, NQumir::NAst::TTypePtr> ExpandKernelExpr(
     const NQumir::NAst::TStructType& inputType,
     const TExternalCatalogSnapshot* externalCatalog = nullptr);
 
+// ExpandKernelExpr for a filter or join residual predicate. A predicate is a boolean
+// context: a bare NULL predicate (`WHERE NULL`) becomes NULL[bool], which selects no rows.
+std::pair<NQumir::NAst::TExprPtr, NQumir::NAst::TTypePtr> ExpandKernelPredicate(
+    const NQumir::NAst::TExprPtr& expr,
+    const NQumir::NAst::TStructType& inputType,
+    const TExternalCatalogSnapshot* externalCatalog = nullptr);
+
 } // namespace NQdb::NKernel

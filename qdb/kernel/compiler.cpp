@@ -91,7 +91,7 @@ TJoinResidual PrepareJoinResidual(
     }
     const auto* innerType = static_cast<const TStructType*>(innerOutput->get());
     return TJoinResidual{
-        .Predicate = NKernel::ExpandKernelExpr(
+        .Predicate = NKernel::ExpandKernelPredicate(
             ClonePredicate(spec.Expressions[0]), *innerType, externalCatalog).first,
         .InnerType = *innerOutput,
         .LeftFieldCount =
