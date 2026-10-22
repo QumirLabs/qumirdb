@@ -2,9 +2,7 @@
   (select
     (select-list
       (item as s
-        (block
-          (var __qdb_sql_case = (+ a b))
-          (if (call qdb_is_true (== __qdb_sql_case 10)) 1 (if (call qdb_is_true (== __qdb_sql_case 20)) 2 0)))
+        (if (call qdb_is_true (== (+ a b) 10)) 1 (if (call qdb_is_true (== (+ a b) 20)) 2 0))
       )
     )
     (from

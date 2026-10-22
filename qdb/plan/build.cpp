@@ -654,10 +654,9 @@ public:
     // Rewrites the column references of `expression` to physical columns, in
     // place. A name no input has is an error unless `fallback` resolves it.
     std::expected<void, TError> Bind(NAst::TExprPtr& expression, const TFallback& fallback = {}) const {
-        // The parser shares subtrees, e.g. the operand of BETWEEN; each binds once.
+        // The parser shares subtrees, e.g. the operand of BETWEEN or of a simple
+        // CASE; each binds once.
         std::unordered_set<const NAst::TExpr*> visited;
-        // Names declared by enclosing blocks: the operand of a CASE with a computed operand.
-        std::vector<std::string> locals;
         auto bind = [&](const auto& self, NAst::TExprPtr& node) -> std::expected<void, TError> {
             if (!node || !visited.insert(node.get()).second) {
                 return {};
@@ -665,7 +664,7 @@ public:
             if (auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(node)) {
                 const auto name = ident.Cast()->Name;
                 // count(*) takes a synthetic `*` argument.
-                if (name == "*" || std::ranges::find(locals, name) != locals.end()) {
+                if (name == "*") {
                     return {};
                 }
                 auto resolved = Resolve(node);
@@ -687,23 +686,6 @@ public:
                         return bound;
                     }
                 }
-                return {};
-            }
-            if (auto block = NAst::TMaybeNode<NAst::TBlockExpr>(node)) {
-                const auto depth = locals.size();
-                for (auto& statement : block.Cast()->Stmts) {
-                    auto var = NAst::TMaybeNode<NAst::TVarStmt>(statement);
-                    auto bound = var
-                        ? self(self, var.Cast()->Init)
-                        : self(self, statement);
-                    if (!bound) {
-                        return bound;
-                    }
-                    if (var) {
-                        locals.push_back(var.Cast()->Name);
-                    }
-                }
-                locals.resize(depth);
                 return {};
             }
             for (auto* child : node->MutableChildren()) {
@@ -1554,8 +1536,9 @@ bool HasUnmappedOuter(
 }
 
 // The scalar and IN subqueries extracted from the expressions of one SELECT, whose
-// columns are numbered apart. The parser shares the operand of BETWEEN between two
-// comparisons, so each subquery is extracted once and referenced by both.
+// columns are numbered apart. The parser shares the operand of BETWEEN or of a
+// simple CASE between its comparisons, so each subquery is extracted once and
+// referenced by all of them.
 struct TExtractedSubqueries {
     int Counter = 0;
     std::unordered_map<const NSql::TSubqueryExpr*, NAst::TExprPtr> Columns;
