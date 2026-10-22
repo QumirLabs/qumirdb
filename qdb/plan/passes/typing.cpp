@@ -20,6 +20,7 @@
 
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace NQdb {
@@ -66,6 +67,7 @@ TTypePtr UnifyUnionColumn(const TTypePtr& a, const TTypePtr& b) {
 // unknown name is reported rather than a type inference failure it causes.
 void RequireInputColumns(const TOperatorPtr& op) {
     std::unordered_set<std::string> available;
+    std::unordered_map<std::string, size_t> bareNameCounts;
     for (const auto& input : op->Inputs()) {
         auto&& schema = input->OutputColumns();
         if (!schema) {
@@ -74,13 +76,22 @@ void RequireInputColumns(const TOperatorPtr& op) {
         }
         for (const auto& [name, _] : schema->Fields) {
             available.insert(name);
+            ++bareNameCounts[BareColumnName(name)];
         }
     }
     for (const auto& reference : op->ColumnReferences()) {
         if (available.contains(reference.Name)) {
             continue;
         }
-        const auto message = "unknown input column: " + reference.Name;
+        // QualifyColumns leaves a bare name unresolved when it matches several
+        // qualified columns, as in a self-join.
+        const auto bare = bareNameCounts.find(reference.Name);
+        const bool ambiguous = reference.Name.find('.') == std::string::npos
+            && bare != bareNameCounts.end()
+            && bare->second > 1;
+        const auto message = (ambiguous)
+            ? "ambiguous input column: " + reference.Name
+            : "unknown input column: " + reference.Name;
         // Planner-generated identifiers carry no source location.
         if (reference.Ident && reference.Ident->Location.Line > 0) {
             throw NQumir::TError(reference.Ident->Location, message);

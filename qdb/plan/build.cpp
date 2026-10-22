@@ -1847,7 +1847,9 @@ std::expected<NAst::TExprPtr, TError> BindOrderByAliases(
 {
     auto&& input = project.Input()->OutputColumns();
     if (!input || input->Fields.empty()) {
-        // Without the input schema an input column cannot take precedence.
+        // Without the input schema an input column cannot take precedence, so an
+        // alias stays unbound. This happens over a join of two unaliased derived
+        // tables whose columns collide, which typing leaves untyped.
         return expr;
     }
     std::unordered_map<std::string, NAst::TExprPtr> aliases;
@@ -1861,13 +1863,14 @@ std::expected<NAst::TExprPtr, TError> BindOrderByAliases(
         }
     }
     std::unordered_map<std::string, NAst::TExprPtr> replacements;
-    for (const auto& name : FindUnboundVars(expr)) {
+    for (const auto& ident : FindUnboundIdents(expr)) {
+        const auto& name = ident->Name;
         auto alias = aliases.find(name);
         if (alias == aliases.end() || SchemaHasColumn(*input, name)) {
             continue;
         }
         if (ambiguous.contains(name)) {
-            return std::unexpected(TError(expr->Location,
+            return std::unexpected(TError(ident->Location,
                 "ORDER BY alias '" + name + "' is ambiguous"));
         }
         replacements.emplace(name, alias->second);

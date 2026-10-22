@@ -1,5 +1,6 @@
 #include <qdb/plan/ops/project.h>
 
+#include <qdb/plan/passes/unbound_vars.h>
 #include <qdb/plan/types/nullable.h>
 
 #include <qumir/parser/ast.h>
