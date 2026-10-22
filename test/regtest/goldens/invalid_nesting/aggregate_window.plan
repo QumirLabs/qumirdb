@@ -1,0 +1,2 @@
+Error: aggregate function calls cannot contain window function calls @ Line: 1, Byte: 12, Column: 12
+

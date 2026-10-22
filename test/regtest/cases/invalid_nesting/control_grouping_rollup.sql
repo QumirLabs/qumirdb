@@ -1,0 +1,1 @@
+SELECT a, GROUPING(a) AS g, sum(b) AS s FROM t GROUP BY ROLLUP (a) ORDER BY g, a;
