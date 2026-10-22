@@ -8,7 +8,7 @@ on:
 
 jobs:
   text-check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
 
     steps:
     - uses: actions/checkout@v4
@@ -23,7 +23,7 @@ jobs:
       pull-requests: write
       contents: read
 
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
 
     env:
       QDB_JIT_CACHE_DIR: ${{ github.workspace }}/build/jit-cache
@@ -45,23 +45,23 @@ jobs:
     - name: apt-get update
       run: sudo apt-get update
     - name: Install packages
-      run: sudo apt-get install -y cmake ninja-build pkg-config llvm-20-dev lld libgtest-dev libarrow-dev libparquet-dev libreadline-dev g++-14
+      run: sudo apt-get install -y cmake ninja-build pkg-config llvm-22-dev lld libgtest-dev libarrow-dev libparquet-dev libreadline-dev g++-16
     - name: Configure
       run: |
         cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-          -DLLVM_DIR="$(llvm-config-20 --cmakedir)" \
-          -DCMAKE_PREFIX_PATH="$(llvm-config-20 --prefix)" \
-          -DCMAKE_CXX_COMPILER=g++-14 \
-          -DCMAKE_C_COMPILER=gcc-14 \
+          -DLLVM_DIR="$(llvm-config-22 --cmakedir)" \
+          -DCMAKE_PREFIX_PATH="$(llvm-config-22 --prefix)" \
+          -DCMAKE_CXX_COMPILER=g++-16 \
+          -DCMAKE_C_COMPILER=gcc-16 \
           -DQDB_LLVM_LINK_SHARED=ON \
           -DQDB_BUILD_TESTS=ON
     - name: Build
       run: cmake --build build
-    - name: Install Rust LLVM 20 toolchain
-      run: rustup toolchain install 1.90.0 --profile minimal --component rust-src
+    - name: Install Rust LLVM 22 toolchain
+      run: rustup toolchain install 1.98.1 --profile minimal --component rust-src
     - name: Test
       env:
-        RUSTUP_TOOLCHAIN: 1.90.0
+        RUSTUP_TOOLCHAIN: 1.98.1
       run: cmake --build build --target test
     - name: Test log on failure
       if: failure()

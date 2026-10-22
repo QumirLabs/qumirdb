@@ -35,9 +35,10 @@ Run one test binary directly:
 ## External modules
 
 Rust `CREATE MODULE` queries require a local toolchain whose LLVM bitcode is
-compatible with QDB's linked LLVM. The current LLVM 20 CI build uses Rust 1.90.0
-with `rust-src` for wasm64 standard-library compilation. Service-user setup and
-toolchain troubleshooting are documented in the project wiki.
+compatible with QDB's linked LLVM. The current LLVM 22 CI build uses Rust 1.98.1
+(the last release on LLVM 22; 1.99 moved to LLVM 23) with `rust-src` for wasm64
+standard-library compilation. Service-user setup and toolchain troubleshooting
+are documented in the project wiki.
 
 ## CLI
 
