@@ -482,6 +482,24 @@ TEST(RegSuiteInfrastructure, RejectsUnmappedSqlTable) {
     EXPECT_THROW(dir.Run(), std::runtime_error);
 }
 
+TEST(RegSuiteInfrastructure, QueryMayFollowModuleDefinitions) {
+    TCaseDirectory dir;
+    dir.Write("query.sql",
+        "CREATE MODULE math LANGUAGE kumir AS $$\n"
+        "алг цел twice(цел x)\n"
+        "нач\n"
+        "  знач := x * 2\n"
+        "кон\n"
+        "$$;\n"
+        "SELECT twice(v) AS v FROM t ORDER BY v DESC;");
+    dir.WriteGolden(R"({"schema":"<struct (v i64)>","rows":[["4"],["2"]]})");
+    const auto result = dir.Run();
+    EXPECT_TRUE(result.Matches) << result.Actual;
+
+    dir.Write("query.sql", "SELECT v FROM t; SELECT v AS v FROM t ORDER BY v DESC;");
+    EXPECT_THROW(dir.Run(), std::runtime_error);
+}
+
 TEST(RegSuiteInfrastructure, SchemaUsesCoreParserAndPrinter) {
     TCaseDirectory dir;
     dir.WriteGolden(R"({

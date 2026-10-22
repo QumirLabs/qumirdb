@@ -10,6 +10,9 @@ read them:
 - `test/test_reg.mjs` checks results through `qdb --plan-export` and the browser
   WASM runtime in `service/static/browser_runtime.js`.
 
+A case's SQL file may start with `CREATE MODULE` and `CREATE FUNCTION`
+definitions; both runners plan and execute the final query against them.
+
 The manifest format, fixture types, statistics and canonization are described
 in the [SQL regression tests](https://github.com/resetius/qumirdb/wiki/SQL-regression-tests)
 wiki page.

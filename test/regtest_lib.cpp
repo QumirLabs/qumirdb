@@ -2,6 +2,7 @@
 #include "mock_source.h"
 #include "plan_runner.h"
 
+#include <qdb/catalog/external_module.h>
 #include <qdb/io/parquet/source.h>
 #include <qdb/plan/build.h>
 #include <qdb/plan/ops/source.h>
@@ -837,6 +838,39 @@ fs::path TableFile(const TQueryCase& test, const std::string& table) {
 
 namespace {
 
+struct TParsedQuery {
+    NSql::TSqlNodePtr Query;
+    NKernel::TAnnotationContext Annotation;
+};
+
+// A suite query may follow CREATE MODULE and CREATE FUNCTION definitions, as in
+// the CLI and the plan exporter; planning and execution use their catalog.
+TParsedQuery ParseQuery(const fs::path& sql) {
+    std::istringstream input(ReadAll(sql));
+    NSql::TTokenStream tokens(input);
+    NSql::TParser parser;
+    auto statements = parser.ParseAll(tokens);
+    if (!statements) throw std::runtime_error(statements.error().ToString());
+    if (statements->empty()) throw std::runtime_error("SQL file has no query");
+    TExternalModuleCatalog catalog;
+    for (size_t i = 0; i + 1 < statements->size(); ++i) {
+        const auto& statement = (*statements)[i];
+        std::expected<std::monostate, NQumir::TError> applied;
+        if (auto module = NSql::TMaybeNode<NSql::TSqlExternalModule>(statement)) {
+            applied = catalog.Apply(*module.Cast());
+        } else if (auto function = NSql::TMaybeNode<NSql::TSqlExternalFunction>(statement)) {
+            applied = catalog.Apply(*function.Cast());
+        } else {
+            throw std::runtime_error("only CREATE MODULE and CREATE FUNCTION may precede the query");
+        }
+        if (!applied) throw std::runtime_error(applied.error().ToString());
+    }
+    return {
+        .Query = statements->back(),
+        .Annotation = {.ExternalCatalog = statements->size() > 1 ? catalog.Snapshot() : nullptr},
+    };
+}
+
 TComparison ComparePlan(const TQueryCase& test, const std::string& actual, bool canonize) {
     std::string expected;
     if (canonize) {
@@ -1068,13 +1102,9 @@ TCaseResult CheckCase(const TQueryCase& test, bool canonize) {
         return elapsed;
     };
     std::vector<std::unique_ptr<TParquetSource>> sources;
-    std::istringstream input(ReadAll(test.Sql));
-    NSql::TTokenStream tokens(input);
-    NSql::TParser parser;
-    auto parsed = parser.Parse(tokens);
-    if (!parsed) throw std::runtime_error(parsed.error().ToString());
+    const auto parsed = ParseQuery(test.Sql);
     const auto parseMs = mark();
-    auto plan = BuildPlan(*parsed, [&](std::string_view table)
+    auto plan = BuildPlan(parsed.Query, [&](std::string_view table)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
         const auto binding = test.Tables.find(std::string(table));
@@ -1086,7 +1116,7 @@ TCaseResult CheckCase(const TQueryCase& test, bool canonize) {
         if (!fixture.File) throw std::runtime_error("fixture was not prepared");
         auto& source = sources.emplace_back(fixture.File->MakeSource());
         return std::make_shared<TSourceOperator>(*source, std::string(table));
-    });
+    }, parsed.Annotation);
     // A planning error is the plan output of an invalid query: the plan golden
     // of a plan-only case holds the error.
     std::string planError;
@@ -1096,7 +1126,7 @@ TCaseResult CheckCase(const TQueryCase& test, bool canonize) {
     const auto buildMs = mark();
     if (planError.empty()) {
         try {
-            ApplyPlanPasses(*plan);
+            ApplyPlanPasses(*plan, {.Annotation = parsed.Annotation});
         } catch (const NQumir::TError& error) {
             planError = error.ToString();
         }
@@ -1136,7 +1166,8 @@ TCaseResult CheckCase(const TQueryCase& test, bool canonize) {
     settings.ScanSplit.Strategy = NScheduler::EScanSplitStrategy::RowGroupRange;
     settings.ScanSplit.MaxScanTasks = test.Variant == "single" ? 1 : 4;
     TPlanRunTimings runTimings;
-    auto runtime = RunPlan(*plan, settings, nullptr, nullptr, timing ? &runTimings : nullptr);
+    auto runtime = RunPlan(
+        *plan, settings, parsed.Annotation.ExternalCatalog, nullptr, timing ? &runTimings : nullptr);
     mark();
     auto actual = Result(*runtime);
     Normalize(actual, test.Ordered);
