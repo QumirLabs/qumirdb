@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "fixtures": {
+    "values": {"json": "tables/t.json", "parquet": {"row_group_rows": 4}},
+    "pairs": {"json": "tables/s.json"}
+  },
+  "tables": {"t": "values", "s": "pairs"},
+  "variants": ["single", "threaded"],
+  "cases": {
+    "project_required.sql": {"order": "ordered"},
+    "project_nullable.sql": {"order": "ordered"},
+    "filter_nullable.sql": {"order": "ordered"},
+    "join_residual_nullable.sql": {"order": "ordered"}
+  }
+}

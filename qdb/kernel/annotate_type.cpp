@@ -614,9 +614,9 @@ std::pair<TTypePtr, bool> CoalesceValueType(const std::vector<TTypePtr>& argType
 }
 
 // The plain (non-null-propagated) result value type of a binary op, matching qumir's
-// AnnotateBinary: `/` -> float, `%` -> i64 (both int), `+ - *`/bitwise -> CommonNumeric,
-// comparisons/logical -> bool. Integer-literal operands adopt the other operand's int
-// type (qumir's RetypeIntegerLiteralOperands; the fit-check is approximated as "always").
+// AnnotateBinary: `/` -> float, `+ - * %`/bitwise -> CommonNumeric, comparisons/logical
+// -> bool. Integer-literal operands adopt the other operand's int type (qumir's
+// RetypeIntegerLiteralOperands; the fit-check is approximated as "always").
 TTypePtr BinaryValueType(TOperator op, const TExprPtr& le, const TExprPtr& re,
     const TTypePtr& lt, const TTypePtr& rt)
 {
@@ -637,11 +637,6 @@ TTypePtr BinaryValueType(TOperator op, const TExprPtr& le, const TExprPtr& re,
     }
     if (op == "/") {
         return std::make_shared<TFloatType>();
-    }
-    if (op == "%") {
-        return IsInt(vl) && IsInt(vr)
-            ? std::static_pointer_cast<TType>(std::make_shared<TIntegerType>())
-            : CommonNumeric(vl, vr);
     }
     return CommonNumeric(vl, vr);
 }
