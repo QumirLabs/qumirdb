@@ -459,6 +459,21 @@ bool IsExcludedCall(const std::string& name) {
            name == "coalesce" || name == "nullif" || name == "nvl" || name == "ifnull";
 }
 
+// SQL string functions that produce new bytes: `strcat` (the parser's `a || b`),
+// `upper` and `lower` become a runtime call taking the kernel's scratch arena first.
+const char* ArenaStringFunction(const std::string& name) {
+    if (name == "strcat") {
+        return "qdb_string_concat";
+    }
+    if (name == "upper") {
+        return "qdb_string_upper";
+    }
+    if (name == "lower") {
+        return "qdb_string_lower";
+    }
+    return nullptr;
+}
+
 bool IsComparison(TOperator op) {
     return op == "<" || op == ">" || op == "<=" || op == ">=" || op == "==" || op == "!=";
 }
@@ -876,7 +891,12 @@ TTypePtr InferType(const TExprPtr& e, const TStructType& schema) {
                 ? std::static_pointer_cast<TType>(std::make_shared<TNullable>(result))
                 : std::static_pointer_cast<TType>(result);
         }
-        if (name == "strcat") {
+        if (ArenaStringFunction(name)) {
+            if (name != "strcat" &&
+                (at.size() != 1 || (at[0] && !TMaybeType<TStringType>(ValueType(at[0])))))
+            {
+                throw NQumir::TError(name + " expects one string argument");
+            }
             bool nullable = false;
             for (const auto& t : at) nullable = nullable || !t || IsNullableType(t);
             TTypePtr s = std::make_shared<TStringType>();
@@ -1429,28 +1449,27 @@ TTypePtr Expand(TExprPtr& e, const TStructType& inputType, uint64_t& counter) {
             e = expr;
             return type;
         }
-        if (name == "strcat") {
-            // `strcat(a, b)` (parser lowering of `a || b`) -> the runtime call
-            // `qdb_string_concat(__arena__, a, b)`. __arena__ is a placeholder the
-            // codegen binds to the kernel's scratch arena. Null-strict: NULL if either
-            // operand is NULL (SQL `NULL || x = NULL`).
+        if (const char* runtimeName = ArenaStringFunction(name)) {
+            // E.g. `strcat(a, b)` -> the runtime call `qdb_string_concat(__arena__, a, b)`.
+            // __arena__ is a placeholder the codegen binds to the kernel's scratch
+            // arena. Null-strict: NULL if any operand is NULL (SQL `NULL || x = NULL`).
             std::vector<std::pair<TExprPtr, bool>> ops;
             for (auto& arg : node->Args) {
                 auto t = Expand(arg, inputType, counter);
                 ops.emplace_back(arg, !t || IsNullableType(t));
             }
             TLocation loc = node->Location;
-            auto apply = [loc](std::vector<TExprPtr> a) -> TExprPtr {
+            auto apply = [loc, runtimeName](std::vector<TExprPtr> a) -> TExprPtr {
                 std::vector<TExprPtr> callArgs = { std::make_shared<TIdentExpr>(loc, "__arena__") };
                 for (auto& x : a) callArgs.push_back(std::move(x));
                 return std::make_shared<TCallExpr>(loc,
-                    std::make_shared<TIdentExpr>(loc, "qdb_string_concat"), std::move(callArgs));
+                    std::make_shared<TIdentExpr>(loc, runtimeName), std::move(callArgs));
             };
             TTypePtr R = std::make_shared<TStringType>();
             bool anyNull = false;
             for (const auto& [expr, nullable] : ops) anyNull = anyNull || nullable;
             if (!anyNull) {
-                e = apply({node->Args[0], node->Args[1]});
+                e = apply(node->Args);
                 return R;
             }
             e = BuildNullStrict(ops, apply, R, counter, loc);
@@ -2003,16 +2022,18 @@ bool ContainsNull(const TExprPtr& e) {
 
 // Constructs Expand always rewrites regardless of nullability - the fast path must not
 // skip Expand when one is present: coalesce -> if-chain, qdb_in_list -> typed
-// comparisons, strcat -> qdb_string_concat, qdb_string_view_sql_like -> a constant-pattern
-// fast path, a cast to a nullable target -> nullable_from_value (the raw planner
-// TNullable won't compile), and a `%` or decimal `/` by what may be zero -> a NULLIF
-// guard. Float division keeps the fast path: it has no such rewrite.
+// comparisons, strcat/upper/lower -> their arena calls, qdb_string_view_sql_like -> a
+// constant-pattern fast path, a cast to a nullable target -> nullable_from_value (the raw
+// planner TNullable won't compile), and a `%` or decimal `/` by what may be zero -> a
+// NULLIF guard. Float division keeps the fast path: it has no such rewrite.
 bool ContainsMustExpandCall(const TExprPtr& e, const TStructType& inputType) {
     if (!e) return false;
     if (auto call = TMaybeNode<TCallExpr>(e)) {
         if (auto id = TMaybeNode<TIdentExpr>(call.Cast()->Callee)) {
             const std::string& name = id.Cast()->Name;
-            if (name == "coalesce" || name == "qdb_in_list" || name == "strcat" || name == "qdb_string_view_sql_like") {
+            if (name == "coalesce" || name == "qdb_in_list" || ArenaStringFunction(name) ||
+                name == "qdb_string_view_sql_like")
+            {
                 return true;
             }
         }
