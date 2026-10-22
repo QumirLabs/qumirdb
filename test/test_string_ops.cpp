@@ -124,6 +124,61 @@ TEST(QumirDbStringOps, LikeContainsKernelMatchesReference) {
     }
 }
 
+TEST(QumirDbStringOps, CaseMappingRewritesUtf8Characters) {
+    auto compile = [](const std::string& function, void*& entry) {
+        auto library = NQdb::NKernel::ParseFunctionLibrary(
+            "(block (fun case_entry ((var arena <ptr i8>) (var str StringView)) -> StringView"
+            " (block (return (call " + function + " arena str)))))");
+        if (!library) {
+            ADD_FAILURE() << library.error().ToString();
+            return std::unique_ptr<NQumir::TLLVMRunner>();
+        }
+        NQumir::TLLVMRunnerOptions options;
+        options.CoreInput = true;
+        options.NativeCode = true;
+        options.AllowOverloads = true;
+        NQdb::NTest::ConfigureQumirDbSourceModule(options);
+        auto runner = std::make_unique<NQumir::TLLVMRunner>(options);
+        auto program = std::make_shared<NQumir::NAst::TBlockExpr>(
+            NQumir::TLocation{}, std::move(*library));
+        NQdb::NTest::AddQumirDbUse(program);
+        std::string error;
+        entry = runner->CompileKernelAst(program, "case_entry", &error);
+        EXPECT_NE(entry, nullptr) << error;
+        return runner;
+    };
+    void* upperEntry = nullptr;
+    auto upperRunner = compile("qdb_string_upper", upperEntry);
+    ASSERT_NE(upperEntry, nullptr);
+    void* lowerEntry = nullptr;
+    auto lowerRunner = compile("qdb_string_lower", lowerEntry);
+    ASSERT_NE(lowerEntry, nullptr);
+    using TCaseFn = NQdb::TStringView(*)(void*, NQdb::TStringView);
+    TStringArena arena;
+    auto apply = [&](void* entry, const std::string& value) {
+        const auto result = reinterpret_cast<TCaseFn>(entry)(&arena, View(value));
+        return std::string(reinterpret_cast<const char*>(result.Data), result.Size);
+    };
+    auto upper = [&](const std::string& value) { return apply(upperEntry, value); };
+    auto lower = [&](const std::string& value) { return apply(lowerEntry, value); };
+
+    EXPECT_EQ(upper(""), "");
+    EXPECT_EQ(upper(std::string("a\0b", 3)), std::string("A\0B", 3));
+    EXPECT_EQ(upper("Привет, мир! Ёлка ёж"), "ПРИВЕТ, МИР! ЁЛКА ЁЖ");
+    EXPECT_EQ(lower("Привет, МИР! ЁЛКА Ёж"), "привет, мир! ёлка ёж");
+    EXPECT_EQ(upper("Tiếng Việt"), "TIẾNG VIỆT");
+    // The result can be longer or shorter than the input: sharp s, dotted I.
+    EXPECT_EQ(upper("straße"), "STRAẞE");
+    EXPECT_EQ(lower("STRAẞE"), "straße");
+    EXPECT_EQ(lower("İstanbul"), "istanbul");
+    // Unmapped three- and four-byte characters (euro sign, Deseret) are kept.
+    EXPECT_EQ(upper("€a\xf0\x90\x90\xa8"), "€A\xf0\x90\x90\xa8");
+    // Bytes that are not UTF-8 are copied: a lone continuation byte (not the micro
+    // sign U+00B5), lead bytes without their continuations, an overlong 'A'.
+    EXPECT_EQ(upper("a\xb5" "b\xc3" "c\xe1\xba" "d\xc3"), "A\xb5" "B\xc3" "C\xe1\xba" "D\xc3");
+    EXPECT_EQ(lower("\xe0\x81\x81"), "\xe0\x81\x81");
+}
+
 // Hash value is an implementation detail, so check properties, not magic numbers.
 TEST(QumirDbStringOps, HashIsDeterministicAndContentSensitive) {
     auto hash = qdb_string_hash_bytes;

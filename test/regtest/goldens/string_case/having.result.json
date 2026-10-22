@@ -1,0 +1,8 @@
+{
+  "schema": "<struct (l string) (c i64)>",
+  "rows": [
+    ["abc", "2"],
+    ["tiếng việt", "2"],
+    ["ёлка", "2"]
+  ]
+}

@@ -1,0 +1,10 @@
+sort [k asc, id asc]
+└─ union-all (rows≈196 cost≈21.7K)
+   ├─ project (k, id) (rows≈98 cost≈10.9K)
+   │  └─ join inner residual (== (call lower |t.s|) (call lower |n.name|)) (rows≈98 cost≈9.3K)
+   │     ├─ source t AS t (rows≈14 cost≈336)
+   │     └─ source n AS n (rows≈7 cost≈168)
+   └─ project (k, id) (rows≈98 cost≈10.9K)
+      └─ join inner residual (== (call upper |t_1.t|) |n_1.name|) (rows≈98 cost≈9.3K)
+         ├─ source t AS t_1 (rows≈14 cost≈336)
+         └─ source n AS n_1 (rows≈7 cost≈168)
