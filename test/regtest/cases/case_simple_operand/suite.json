@@ -11,6 +11,6 @@
     "nullable_expression_without_else.sql": {"order": "ordered"},
     "nested.sql": {"order": "ordered"},
     "aggregate_operand.sql": {"order": "ordered"},
-    "subquery_operand.sql": {"variants": ["single", "threaded"], "order": "ordered"}
+    "subquery_operand.sql": {"order": "ordered"}
   }
 }

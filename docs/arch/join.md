@@ -263,7 +263,7 @@ In a parallel plan the right side is broadcast to every left lane. `Inner`,
 `Left`, `LeftSemi` and `LeftAnti` keep the left partition count, because the
 output for a left row depends on that row alone. `Right` and `Full` run on one
 lane: a right row is unmatched only if no row of the whole left input matches
-it. The browser runtime executes only the `Inner` form.
+it. The browser runtime runs the same kernel for every type.
 
 ## Memory and lifetime invariants
 

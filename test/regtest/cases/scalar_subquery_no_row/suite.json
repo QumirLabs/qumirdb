@@ -7,12 +7,12 @@
   "tables": {"t": "t", "u": "u"},
   "variants": ["single", "threaded", "js"],
   "cases": {
-    "select_list.sql": {"variants": ["single", "threaded"], "order": "unordered"},
-    "select_list_coalesce.sql": {"variants": ["single", "threaded"], "order": "unordered"},
-    "where_is_null.sql": {"variants": ["single", "threaded"], "order": "unordered"},
-    "where_under_or.sql": {"variants": ["single", "threaded"], "order": "unordered"},
+    "select_list.sql": {"order": "unordered"},
+    "select_list_coalesce.sql": {"order": "unordered"},
+    "where_is_null.sql": {"order": "unordered"},
+    "where_under_or.sql": {"order": "unordered"},
     "where_comparison.sql": {"order": "unordered"},
     "where_negated_comparison.sql": {"order": "unordered"},
-    "having_under_or.sql": {"variants": ["single", "threaded"], "order": "unordered"}
+    "having_under_or.sql": {"order": "unordered"}
   }
 }

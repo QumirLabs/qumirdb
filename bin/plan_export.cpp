@@ -2584,12 +2584,6 @@ struct TExecPlanCodec {
             case NQdb::EExecPlanNodeKind::CrossJoin: {
                 auto* join = static_cast<const NQdb::TJoinOperator*>(
                     node.Operator);
-                if (join->JoinType() != NQdb::EJoinType::Inner) {
-                    Unsupported = UnsupportedExec(
-                        "browser keyless join type is not supported yet: " +
-                        std::string(JoinTypeName(join->JoinType())));
-                    return;
-                }
                 const auto* ref = FindKernel(
                     Kernels, node.StageId, "cross-join");
                 if (!ref) {
@@ -2611,6 +2605,7 @@ struct TExecPlanCodec {
                 AddNode(node, llvm::json::Object{
                     {"kind", "cross-join"},
                     {"label", JoinPlanLabel(*join)},
+                    {"joinType", std::string(JoinTypeName(join->JoinType()))},
                     {"entrypoints", EntrypointsJson(*ref)},
                     {"leftColumns", StructColumnsJson(*left)},
                     {"rightColumns", StructColumnsJson(*right)},
