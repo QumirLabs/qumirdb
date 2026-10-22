@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "fixtures": {
+    "extremes": {"json": "tables/extremes.json"}
+  },
+  "tables": {"t": "extremes"},
+  "variants": ["single", "threaded", "js"],
+  "cases": {
+    "abs_overflow.sql": {"expect_error": true}
+  }
+}

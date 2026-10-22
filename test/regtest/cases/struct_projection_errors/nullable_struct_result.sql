@@ -1,0 +1,3 @@
+CREATE MODULE orbital LANGUAGE rust AS $$$$;
+CREATE FUNCTION orbit_vector(DOUBLE) RETURNS (DOUBLE, DOUBLE, DOUBLE) SET MODULE TO orbital;
+SELECT orbit_vector(x) FROM points;

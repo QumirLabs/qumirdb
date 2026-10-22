@@ -1,0 +1,2 @@
+Error: GROUP BY position 2 refers to a field of a struct item @ Line: 3, Byte: 57, Column: 57
+

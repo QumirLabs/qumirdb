@@ -39,35 +39,7 @@ std::expected<TOperatorPtr, NQumir::TError> Build(
     }, annotation);
 }
 
-std::string Failure(std::string_view sql) {
-    auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
-    TMockSource source(TMockColumns{}, {{"x", i64}, {"y", i64}});
-    try {
-        auto plan = Build(sql, source);
-        if (!plan) {
-            return plan.error().ToString();
-        }
-        ApplyPlanPasses(*plan);
-    } catch (const NQumir::TError& error) {
-        return error.ToString();
-    }
-    return {};
-}
-
 } // namespace
-
-TEST(SqlBinding, DistinctSortsOnDistinctOutputsOnly) {
-    // A hidden sort column over SELECT DISTINCT is computed from the distinct rows,
-    // so it may read their columns but no other FROM column.
-    EXPECT_NE(Failure("SELECT DISTINCT x FROM t ORDER BY y").find("SELECT DISTINCT output"),
-        std::string::npos);
-    EXPECT_TRUE(Failure("SELECT DISTINCT x, y FROM t ORDER BY x + y").empty());
-}
-
-TEST(SqlBinding, ReusesAggregateExpressionBeforeCollectorMutation) {
-    EXPECT_TRUE(Failure("SELECT sum(x) + 1 AS s FROM t ORDER BY sum(x) + 1").empty());
-    EXPECT_TRUE(Failure("SELECT DISTINCT sum(x) + 1 AS s FROM t ORDER BY sum(x) + 1").empty());
-}
 
 TEST(SqlBinding, EquivalentQualifiedExpressionsBindToTheSelectedOutput) {
     TMockSource source(std::vector<std::string>{"x", "y"});
@@ -147,59 +119,6 @@ TEST(SqlBinding, SubqueryWidthsUseResolvedDistinctOutputs) {
         ASSERT_TRUE(plan) << plan.error().ToString();
         EXPECT_EQ((*plan)->OutputColumns()->Fields.size(), 1);
     }
-    for (const auto* sql : {
-        "SELECT x FROM t WHERE x IN (SELECT DISTINCT x, y FROM u)",
-        "SELECT (SELECT DISTINCT x, y FROM u LIMIT 1) FROM t",
-    }) {
-        SCOPED_TRACE(sql);
-        EXPECT_NE(Failure(sql).find("must return exactly one column"), std::string::npos);
-    }
-}
-
-TEST(SqlBinding, AmbiguousInputsDoNotFallBackToGroupingAliases) {
-    for (const auto* sql : {
-        "SELECT l.x AS x, count(*) FROM t AS l JOIN t AS r ON l.y = r.y GROUP BY x",
-        "SELECT l.a AS a, count(*) FROM "
-            "(SELECT x AS a, y FROM t) AS l JOIN "
-            "(SELECT x AS a, y FROM t) AS r ON l.y = r.y GROUP BY a",
-    }) {
-        SCOPED_TRACE(sql);
-        EXPECT_NE(Failure(sql).find("ambiguous input column"), std::string::npos);
-    }
-    for (const auto* sql : {
-        "SELECT l.x AS a, count(*) FROM t AS l JOIN t AS r ON l.y = r.y GROUP BY a",
-        "SELECT l.x AS x, count(*) FROM t AS l JOIN t AS r ON l.y = r.y GROUP BY l.x",
-        "SELECT x AS y, count(*) FROM t GROUP BY y, x",
-    }) {
-        SCOPED_TRACE(sql);
-        EXPECT_TRUE(Failure(sql).empty());
-    }
-}
-
-TEST(SqlBinding, InternalFieldsAreNotSqlInputNames) {
-    for (const auto* sql : {
-        "SELECT 1 FROM (SELECT x AS a, y AS a FROM t) WHERE __scope_0 = 1",
-        "SELECT count(*) FROM (SELECT x AS a, y AS a FROM t) GROUP BY __scope_0",
-        "SELECT * FROM (SELECT x AS a, y AS a FROM t) ORDER BY __scope_0",
-    }) {
-        SCOPED_TRACE(sql);
-        EXPECT_NE(Failure(sql).find("unknown input column"), std::string::npos);
-    }
-    EXPECT_TRUE(Failure("SELECT 1 AS __scope_0 FROM "
-        "(SELECT x AS a, y AS a FROM t) GROUP BY __scope_0").empty());
-}
-
-TEST(SqlBinding, UngroupedColumnsAreReportedByTheirSqlNames) {
-    for (const auto* sql : {
-        "SELECT x * 2, count(*) FROM t GROUP BY x % 2",
-        "SELECT y, count(*) FROM t GROUP BY x",
-        "SELECT count(*) FROM t GROUP BY x HAVING y > 0",
-    }) {
-        SCOPED_TRACE(sql);
-        EXPECT_NE(Failure(sql).find("must appear in GROUP BY or be used in an aggregate function"),
-            std::string::npos) << Failure(sql);
-    }
-    EXPECT_NE(Failure("SELECT y, count(*) FROM t AS a GROUP BY x").find("column a.y"), std::string::npos);
 }
 
 TEST(SqlBinding, RepeatedLabelsSortByInputExpression) {
@@ -225,8 +144,6 @@ TEST(SqlBinding, RepeatedLabelsSortByInputExpression) {
     ASSERT_EQ(output.Cast()->Projections().size(), 2);
     EXPECT_EQ(output.Cast()->Projections()[0].Name, "a");
     EXPECT_EQ(output.Cast()->Projections()[1].Name, "a");
-    EXPECT_NE(Failure("SELECT x AS a, y AS a FROM t ORDER BY a").find("ambiguous"),
-        std::string::npos);
 }
 
 TEST(SqlPositions, StructItemsCountTheirFields) {
@@ -279,21 +196,6 @@ TEST(SqlPositions, StructItemsCountTheirFields) {
         auto aggregate = TMaybeOp<TAggregateOperator>(project.Cast()->Input());
         ASSERT_TRUE(aggregate);
         EXPECT_EQ(aggregate.Cast()->GroupKeys(), keys);
-    }
-    // A position into a struct item or past the outputs is an error. A struct over
-    // a window result is typed only above the aggregate, so it needs AS (...).
-    for (const auto& [sql, expected] : std::vector<std::pair<const char*, const char*>>{
-        {"SELECT pair(x), y FROM t GROUP BY 2", "GROUP BY position 2 refers to a field of a struct item"},
-        {"SELECT pair(x) AS (p, q), count(*) FROM t GROUP BY 2",
-            "GROUP BY position 2 refers to a field of a struct item"},
-        {"SELECT pair(x), y FROM t GROUP BY 4", "GROUP BY position 4 is not in the select list"},
-        {"SELECT pair(sum(sum(x)) OVER (ORDER BY y)), y FROM t GROUP BY 2",
-            "GROUP BY position 2 requires AS (...) on a struct-return projection typed above the aggregate"},
-    }) {
-        SCOPED_TRACE(sql);
-        auto plan = Build(sql, source, annotation);
-        ASSERT_FALSE(plan);
-        EXPECT_NE(plan.error().ToString().find(expected), std::string::npos) << plan.error().ToString();
     }
     auto aliased = Build(
         "SELECT pair(sum(sum(x)) OVER (ORDER BY y)) AS (p, q), y FROM t GROUP BY 3", source, annotation);

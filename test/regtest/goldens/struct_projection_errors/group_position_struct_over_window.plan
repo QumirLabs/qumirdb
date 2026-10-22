@@ -1,0 +1,2 @@
+Error: GROUP BY position 2 requires AS (...) on a struct-return projection typed above the aggregate @ Line: 3, Byte: 8, Column: 8
+

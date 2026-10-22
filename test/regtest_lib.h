@@ -23,12 +23,17 @@ struct TQueryCase {
     std::filesystem::path Sql;
     std::filesystem::path PlanGolden;
     std::filesystem::path Golden;
+    // Holds the error of a case that fails while it runs (see README.md).
+    std::filesystem::path ErrorGolden;
     std::shared_ptr<TSuite> Suite;
     std::map<std::string, std::string> Tables;
     std::string Variant;
     bool Ordered = true;
     bool Execute = true;
     TFloatTolerance Tol;
+    // The case must fail: planning errors in the .plan golden, running errors in
+    // the .error golden. A success is reported as a failure of the case.
+    bool ExpectError = false;
 
     bool HasTables() const { return !Tables.empty(); }
 };
@@ -48,6 +53,8 @@ std::string TestName(const std::filesystem::path& path);
 struct TCaseResult {
     TComparison Plan;
     std::optional<TComparison> Result;
+    // The error raised after planning, compared with the .error golden.
+    std::optional<TComparison> Error;
 };
 
 std::vector<TQueryCase> CollectCases(

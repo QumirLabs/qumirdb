@@ -271,25 +271,6 @@ TEST(LateMaterialization, BindsRepeatedLabelsBeforeLookupRewrite) {
     EXPECT_TRUE(diagnostics.LateMaterialization.Applied);
 }
 
-TEST(LateMaterialization, RejectsReservedUserOutputNames) {
-    TLookupMockSource source;
-    auto selectAlias = BuildSqlPlan(
-        "SELECT \"EventTime\" AS \"__row_id__\" FROM hits", source);
-    ASSERT_FALSE(selectAlias);
-    EXPECT_NE(
-        selectAlias.error().ToString().find("is reserved"),
-        std::string::npos);
-
-    auto cteAlias = BuildSqlPlan(
-        "WITH x(\"__row_id__\") AS "
-        "(SELECT \"EventTime\" FROM hits) SELECT * FROM x",
-        source);
-    ASSERT_FALSE(cteAlias);
-    EXPECT_NE(
-        cteAlias.error().ToString().find("is reserved"),
-        std::string::npos);
-}
-
 TEST(LateMaterialization, AppliesAfterCteOutputPruning) {
     TLookupMockSource source;
     auto plan = BuildSqlPlan(

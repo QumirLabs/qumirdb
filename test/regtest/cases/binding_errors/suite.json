@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "expect_error": true,
+  "fixtures": {
+    "xy": {"json": "tables/xy.json"}
+  },
+  "tables": {"t": "xy", "u": "xy"},
+  "variants": ["single", "threaded", "js"],
+  "cases": {
+    "aggregate_order_by_same_expression_control.sql": {"expect_error": false, "order": "ordered"},
+    "distinct_aggregate_order_by_control.sql": {"expect_error": false, "order": "ordered"},
+    "distinct_order_by_other_column.sql": {},
+    "distinct_order_by_outputs_control.sql": {"expect_error": false, "order": "unordered"},
+    "group_alias_ambiguous_derived_input.sql": {},
+    "group_alias_ambiguous_input.sql": {},
+    "group_alias_and_input_key_control.sql": {"expect_error": false, "order": "unordered"},
+    "group_alias_new_name_control.sql": {"expect_error": false, "order": "unordered"},
+    "group_qualified_key_control.sql": {"expect_error": false, "order": "unordered"},
+    "in_subquery_distinct_two_columns.sql": {},
+    "internal_scope_alias_control.sql": {"expect_error": false, "order": "unordered"},
+    "internal_scope_in_group_by.sql": {},
+    "internal_scope_in_order_by.sql": {},
+    "internal_scope_in_where.sql": {},
+    "order_by_repeated_label.sql": {},
+    "reserved_cte_column.sql": {},
+    "reserved_select_alias.sql": {},
+    "scalar_subquery_distinct_two_columns.sql": {},
+    "ungrouped_column.sql": {},
+    "ungrouped_column_in_having.sql": {},
+    "ungrouped_column_qualified.sql": {},
+    "ungrouped_expression.sql": {}
+  }
+}

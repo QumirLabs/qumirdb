@@ -286,17 +286,6 @@ TEST(SqlParser, StructProjectionColumnAliases) {
         (std::vector<std::string>{"position_x", "position_y", "position_z"}));
 }
 
-TEST(SqlParser, EmptyStructProjectionAliasListIsRejected) {
-    std::istringstream in(
-        "SELECT orbit_vector(x) AS () FROM points;");
-    TTokenStream tokens(in);
-    TParser parser;
-    auto parsed = parser.Parse(tokens);
-    ASSERT_FALSE(parsed);
-    EXPECT_NE(parsed.error().ToString().find("column alias list cannot be empty"),
-        std::string::npos);
-}
-
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

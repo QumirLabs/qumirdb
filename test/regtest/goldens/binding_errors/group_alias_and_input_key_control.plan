@@ -1,0 +1,3 @@
+project (y, col1) (rows≈3 cost≈168)
+└─ aggregate keys=[t.y, t.x] aggs=[count_0=count] (rows≈3 cost≈120)
+   └─ source t AS t (rows≈3 cost≈48)

@@ -1,0 +1,2 @@
+Error: SELECT DISTINCT over a struct-return projection requires AS (...) @ Line: 3, Byte: 17, Column: 17
+
