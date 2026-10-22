@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "fixtures": {
+    "t": {"json": "tables/t.json"},
+    "u": {"json": "tables/u.json"},
+    "w": {"json": "tables/w.json"}
+  },
+  "tables": {"t": "t", "u": "u", "w": "w"},
+  "variants": ["single", "threaded"],
+  "cases": {
+    "star_inner.sql": {"order": "ordered"},
+    "star_left.sql": {"order": "ordered"},
+    "star_right.sql": {"order": "ordered"},
+    "star_full.sql": {"order": "ordered"},
+    "qualified_star_full.sql": {"order": "ordered"},
+    "bare_left.sql": {"order": "ordered"},
+    "bare_right.sql": {"order": "ordered"},
+    "bare_full.sql": {"order": "ordered"},
+    "two_columns_full.sql": {"order": "ordered"},
+    "nested_inner_star.sql": {"order": "ordered"},
+    "nested_full.sql": {"order": "ordered"},
+    "nested_right_input.sql": {"order": "ordered"},
+    "where_group_by.sql": {"order": "ordered"},
+    "order_by_input.sql": {"order": "ordered"},
+    "other_column_ambiguous.sql": {"execute": false}
+  }
+}

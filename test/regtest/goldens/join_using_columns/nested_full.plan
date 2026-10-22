@@ -1,0 +1,9 @@
+sort [x asc]
+└─ project (x, tx, ux, wx, p, q, r) (rows≈9 cost≈11.2K)
+   └─ project (x, t.x, t.p, u.x, u.q, w.x, w.r) (rows≈9 cost≈10.6K)
+      └─ join full [x = w.x] (rows≈9 cost≈9.9K)
+         ├─ project (x, t.x, t.p, u.x, u.q) (rows≈6 cost≈4.9K)
+         │  └─ join full [t.x = u.x] (rows≈6 cost≈4.6K)
+         │     ├─ source t AS t (rows≈3 cost≈60)
+         │     └─ source u AS u (rows≈3 cost≈60)
+         └─ source w AS w (rows≈3 cost≈60)

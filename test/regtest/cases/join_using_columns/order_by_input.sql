@@ -1,0 +1,1 @@
+SELECT t.id FROM t JOIN u USING (x) ORDER BY x DESC;

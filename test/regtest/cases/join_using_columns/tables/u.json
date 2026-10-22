@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "schema": "<struct (x string) (q i32) (id i32)>",
+  "rows": [
+    ["b", 200, 2],
+    ["c", 300, 3],
+    ["d", 400, 4]
+  ]
+}

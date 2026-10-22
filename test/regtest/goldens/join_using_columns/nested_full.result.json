@@ -1,0 +1,10 @@
+{
+  "schema": "<struct (x <named Nullable [string]>) (tx <named Nullable [string]>) (ux <named Nullable [string]>) (wx <named Nullable [string]>) (p <named Nullable [i32]>) (q <named Nullable [i32]>) (r <named Nullable [i32]>)>",
+  "rows": [
+    ["a", "a", null, null, 10, null, null],
+    ["b", "b", "b", null, 20, 200, null],
+    ["c", "c", "c", "c", 30, 300, 3000],
+    ["d", null, "d", "d", null, 400, 4000],
+    ["e", null, null, "e", null, null, 5000]
+  ]
+}

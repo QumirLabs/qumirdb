@@ -1,0 +1,6 @@
+project (id, x, p, q, id, r) (rows≈3 cost≈9K)
+└─ join inner [t.x = u.x] (rows≈3 cost≈8.9K)
+   ├─ join inner [w.x = t.x] (rows≈3 cost≈4.5K)
+   │  ├─ source w AS w (rows≈3 cost≈60)
+   │  └─ source t AS t (rows≈3 cost≈72)
+   └─ source u AS u (rows≈3 cost≈72)

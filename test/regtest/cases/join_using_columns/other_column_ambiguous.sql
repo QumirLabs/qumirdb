@@ -1,0 +1,1 @@
+SELECT id FROM t JOIN u USING (x);

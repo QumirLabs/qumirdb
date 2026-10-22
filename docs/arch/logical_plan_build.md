@@ -54,7 +54,11 @@ join inner            (empty keys)
 ```
 
 `a JOIN b ON <cond>` → one `join` whose whole `ON` is the **residual** (key
-extraction happens later). `USING (c)` → a key on the `c` column of each side.
+extraction happens later). `USING (c)` → a key on the `c` column of each side,
+and the join exposes `c` once, as SQL requires: a bare `c` and `*` see the left
+column of an inner or left join, while for a right or full join a projection
+above the join computes `c` from the right column or as `COALESCE(a.c, b.c)`.
+`a.c` and `b.c` still name each side.
 
 ### WHERE → conjuncts, decorrelation, filter
 

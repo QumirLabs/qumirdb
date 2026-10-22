@@ -1,0 +1,8 @@
+{
+  "schema": "<struct (id i32) (x string) (p i32) (q <named Nullable [i32]>) (id <named Nullable [i32]>)>",
+  "rows": [
+    [1, "a", 10, null, null],
+    [2, "b", 20, 200, 2],
+    [3, "c", 30, 300, 3]
+  ]
+}

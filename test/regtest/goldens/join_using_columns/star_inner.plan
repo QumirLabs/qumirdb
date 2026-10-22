@@ -1,0 +1,6 @@
+project (id, x, p, q, id)
+└─ sort [__scope_2 asc]
+   └─ project (__scope_0, __scope_1, __scope_2, __scope_3, __scope_4) (rows≈3 cost≈4.6K)
+      └─ join inner [u.x = t.x] (rows≈3 cost≈4.5K)
+         ├─ source u AS u (rows≈3 cost≈72)
+         └─ source t AS t (rows≈3 cost≈72)
