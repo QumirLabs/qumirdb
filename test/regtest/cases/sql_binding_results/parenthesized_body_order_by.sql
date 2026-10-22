@@ -1,0 +1,2 @@
+(SELECT x AS k FROM t)
+ORDER BY k + 1 DESC;

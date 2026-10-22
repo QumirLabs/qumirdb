@@ -1,7 +1,7 @@
 top-sort [i_item_id asc, s_state asc] limit 100
 └─ project (i_item_id, s_state, g_state, agg1, agg2, agg3, agg4) (rows≈3 cost≈19.8K)
-   └─ aggregate keys=[i_item_id, s_state] aggs=[sum_0=sum, count_0=count, sum_1=sum, count_1=count, sum_2=sum, count_2=count, sum_3=sum, count_3=count] (rows≈3 cost≈19.6K)
-      └─ project (i_item_id, s_state, ss_quantity, ss_list_price, ss_coupon_amt, ss_sales_price) (rows≈1 cost≈19.3K)
+   └─ aggregate keys=[item.i_item_id, store.s_state] aggs=[sum_0=sum, count_0=count, sum_1=sum, count_1=count, sum_2=sum, count_2=count, sum_3=sum, count_3=count] (rows≈3 cost≈19.6K)
+      └─ project (item.i_item_id, store.s_state, store_sales.ss_quantity, store_sales.ss_list_price, store_sales.ss_coupon_amt, store_sales.ss_sales_price) (rows≈1 cost≈19.3K)
          └─ join inner [item.i_item_sk = store_sales.ss_item_sk] emit-filter 1 from right (rows≈1 cost≈19.3K)
             ├─ source item AS item use-filter 1 keys=[item.i_item_sk] (rows≈10 cost≈200)
             └─ join inner [store_sales.ss_sold_date_sk = date_dim.d_date_sk] emit-filter 2 from left (rows≈1 cost≈14.8K)

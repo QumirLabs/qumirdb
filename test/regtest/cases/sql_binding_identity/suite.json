@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "fixtures": {
+    "left": {"json": "tables/t.json"},
+    "right": {"json": "tables/u.json"}
+  },
+  "tables": {
+    "t": "left",
+    "u": "right"
+  },
+  "variants": ["single", "threaded"],
+  "cases": {
+    "expanded_star.sql": {"order": "ordered"},
+    "duplicate_scopes.sql": {"order": "ordered"},
+    "repeated_physical_names.sql": {"order": "ordered"},
+    "in_over_star_cte.sql": {"order": "ordered"}
+  }
+}

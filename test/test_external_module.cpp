@@ -186,6 +186,8 @@ TEST(ExternalModuleCatalog, RustFunctionRunsThroughSqlPlan) {
     };
     TMockSource source(
         {"x"}, {std::make_shared<TFloatType>()}, {batch});
+    auto snapshot = catalog.Snapshot();
+    NKernel::TAnnotationContext annotation{.ExternalCatalog = snapshot};
     auto plan = BuildPlan(statements[3], [&](std::string_view table)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
@@ -193,17 +195,15 @@ TEST(ExternalModuleCatalog, RustFunctionRunsThroughSqlPlan) {
             return std::unexpected(NQumir::TError("unknown test table"));
         }
         return std::make_shared<TSourceOperator>(source, std::string(table));
-    });
+    }, annotation);
     ASSERT_TRUE(plan) << plan.error().ToString();
 
     auto sort = TMaybeOp<TSortOperator>(*plan);
     ASSERT_TRUE(sort);
     ASSERT_EQ(sort.Cast()->Keys().size(), 2);
-    EXPECT_EQ(sort.Cast()->Keys()[0].Column, "col2");
+    EXPECT_EQ(sort.Cast()->Keys()[0].Column, "col4");
     EXPECT_EQ(sort.Cast()->Keys()[1].Column, "vector_y");
 
-    auto snapshot = catalog.Snapshot();
-    NKernel::TAnnotationContext annotation{.ExternalCatalog = snapshot};
     AnnotateTypes(*plan, annotation);
     EXPECT_EQ(sort.Cast()->Keys()[0].Column, "col4");
     EXPECT_EQ(sort.Cast()->Keys()[1].Column, "vector_y");
@@ -359,6 +359,7 @@ TEST(ExternalModuleCatalog, KumirFunctionsAreExportedAndRunWithoutCreateFunction
     };
     TMockSource source(
         {"x"}, {std::make_shared<TFloatType>()}, {batch});
+    NKernel::TAnnotationContext annotation{.ExternalCatalog = snapshot};
     auto plan = BuildPlan(statements[1], [&](std::string_view table)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
@@ -366,10 +367,9 @@ TEST(ExternalModuleCatalog, KumirFunctionsAreExportedAndRunWithoutCreateFunction
             return std::unexpected(NQumir::TError("unknown test table"));
         }
         return std::make_shared<TSourceOperator>(source, std::string(table));
-    });
+    }, annotation);
     ASSERT_TRUE(plan) << plan.error().ToString();
 
-    NKernel::TAnnotationContext annotation{.ExternalCatalog = snapshot};
     AnnotateTypes(*plan, annotation);
     ApplyPlanPasses(*plan, {
         .EnableCbo = false,
@@ -412,14 +412,14 @@ TEST(ExternalModuleCatalog, OzlangFunctionsAreExportedAndRunWithoutCreateFunctio
     TMockSource source(
         {"x"}, {std::make_shared<TFloatType>()}, {batch});
     auto snapshot = catalog.Snapshot();
+    NKernel::TAnnotationContext annotation{.ExternalCatalog = snapshot};
     auto plan = BuildPlan(statements[1], [&](std::string_view table)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
         return std::make_shared<TSourceOperator>(source, std::string(table));
-    });
+    }, annotation);
     ASSERT_TRUE(plan) << plan.error().ToString();
 
-    NKernel::TAnnotationContext annotation{.ExternalCatalog = snapshot};
     AnnotateTypes(*plan, annotation);
     ApplyPlanPasses(*plan, {
         .EnableCbo = false,
@@ -515,19 +515,11 @@ TEST(ExternalModuleCatalog, NullableStructProjectionFailsDuringTyping) {
             return std::unexpected(NQumir::TError("unknown test table"));
         }
         return std::make_shared<TSourceOperator>(source, std::string(table));
-    });
-    ASSERT_TRUE(plan) << plan.error().ToString();
-
-    try {
-        AnnotateTypes(*plan, {
-            .ExternalCatalog = catalog.Snapshot(),
-        });
-        FAIL() << "expected nullable struct projection to fail during typing";
-    } catch (const NQumir::TError& error) {
-        EXPECT_NE(error.ToString().find(
-            "nullable struct-return projections are not supported"),
-            std::string::npos);
-    }
+    }, {.ExternalCatalog = catalog.Snapshot()});
+    ASSERT_FALSE(plan);
+    EXPECT_NE(plan.error().ToString().find(
+        "nullable struct-return projections are not supported"),
+        std::string::npos);
 }
 
 TEST(ExternalModuleCatalog, StructProjectionAliasCountFailsDuringTyping) {
@@ -549,19 +541,11 @@ TEST(ExternalModuleCatalog, StructProjectionAliasCountFailsDuringTyping) {
             return std::unexpected(NQumir::TError("unknown test table"));
         }
         return std::make_shared<TSourceOperator>(source, std::string(table));
-    });
-    ASSERT_TRUE(plan) << plan.error().ToString();
-
-    try {
-        AnnotateTypes(*plan, {
-            .ExternalCatalog = catalog.Snapshot(),
-        });
-        FAIL() << "expected struct projection alias count mismatch";
-    } catch (const NQumir::TError& error) {
-        EXPECT_NE(error.ToString().find(
-            "3 fields but 2 column aliases were specified"),
-            std::string::npos);
-    }
+    }, {.ExternalCatalog = catalog.Snapshot()});
+    ASSERT_FALSE(plan);
+    EXPECT_NE(plan.error().ToString().find(
+        "3 fields but 2 column aliases were specified"),
+        std::string::npos);
 }
 
 TEST(ExternalModuleCatalog, DistinctStructProjectionRequiresColumnAliases) {
@@ -586,21 +570,14 @@ TEST(ExternalModuleCatalog, DistinctStructProjectionRequiresColumnAliases) {
                 return std::unexpected(NQumir::TError("unknown test table"));
             }
             return std::make_shared<TSourceOperator>(source, std::string(table));
-        });
+        }, {.ExternalCatalog = catalog.Snapshot()});
     };
 
     auto unaliased = build(statements[2]);
-    ASSERT_TRUE(unaliased) << unaliased.error().ToString();
-    try {
-        AnnotateTypes(*unaliased, {
-            .ExternalCatalog = catalog.Snapshot(),
-        });
-        FAIL() << "expected DISTINCT struct projection without aliases to fail";
-    } catch (const NQumir::TError& error) {
-        EXPECT_NE(error.ToString().find(
-            "SELECT DISTINCT over a struct-return projection requires AS (...)"),
-            std::string::npos);
-    }
+    ASSERT_FALSE(unaliased);
+    EXPECT_NE(unaliased.error().ToString().find(
+        "SELECT DISTINCT over a struct-return projection requires AS (...)"),
+        std::string::npos);
 
     auto aliased = build(statements[3]);
     ASSERT_TRUE(aliased) << aliased.error().ToString();
@@ -629,16 +606,10 @@ TEST(ExternalModuleCatalog, ScalarProjectionRejectsColumnAliasList) {
         }
         return std::make_shared<TSourceOperator>(source, std::string(table));
     });
-    ASSERT_TRUE(plan) << plan.error().ToString();
-
-    try {
-        AnnotateTypes(*plan);
-        FAIL() << "expected scalar projection to reject a column alias list";
-    } catch (const NQumir::TError& error) {
-        EXPECT_NE(error.ToString().find(
-            "a column alias list requires a struct-return projection"),
-            std::string::npos);
-    }
+    ASSERT_FALSE(plan);
+    EXPECT_NE(plan.error().ToString().find(
+        "a column alias list requires a struct-return projection"),
+        std::string::npos);
 }
 
 TEST(ExternalModuleCatalog, RustFunctionRunsInFilter) {

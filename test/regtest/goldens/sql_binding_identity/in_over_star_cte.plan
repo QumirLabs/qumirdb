@@ -1,0 +1,7 @@
+project (x, y) (rows≈1 cost≈4.2K)
+└─ join left_anti [t.x = __qdb_in__x] (rows≈1 cost≈4.2K)
+   ├─ source t AS t (rows≈1 cost≈16)
+   └─ project (__qdb_in__x) (rows≈1 cost≈32)
+      └─ project (c.x) (rows≈1 cost≈24)
+         └─ project (x) (rows≈1 cost≈16)
+            └─ source u AS u (rows≈1 cost≈8)

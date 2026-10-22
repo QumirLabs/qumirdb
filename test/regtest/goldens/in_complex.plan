@@ -1,5 +1,9 @@
 (rel project
   (rel filter
-    (rel source "customer_address")
-    (call qdb_in_list (call substr ca_zip 1 5) (cast "89436" <named StringView>) (cast "30868" <named StringView>)))
-  (ca_zip ca_zip))
+    (rel source "customer_address" "customer_address")
+    (call
+      qdb_in_list
+      (call substr |customer_address.ca_zip| 1 5)
+      (cast "89436" <named StringView>)
+      (cast "30868" <named StringView>)))
+  (ca_zip |customer_address.ca_zip|))

@@ -15,9 +15,10 @@ namespace NQdb {
 using TTableSourceFactory =
     std::function<std::expected<TOperatorPtr, NQumir::TError>(std::string_view table)>;
 
-// Builds an unqualified, untyped logical plan from a parsed SQL query. The
-// annotation context types expressions the builder inspects, such as aggregate
-// arguments that call external functions.
+// Builds a typed logical plan from a parsed SQL query. SQL names are bound while
+// the plan is built: every expression references columns by physical name. The
+// plan shares expression nodes with `query` and binds them in place, so a query
+// is built once.
 std::expected<TOperatorPtr, NQumir::TError> BuildPlan(
     const NQdb::NSql::TSqlNodePtr& query,
     const TTableSourceFactory& sources,

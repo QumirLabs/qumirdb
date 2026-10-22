@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "schema": "<struct (x i64) (y i64)>",
+  "rows": [
+    ["1", "2"]
+  ]
+}

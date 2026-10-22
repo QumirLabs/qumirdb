@@ -1,1 +1,1 @@
-(rel project (rel source "t") (s (if (call qdb_is_true (> a 0)) 1 0)))
+(rel project (rel source "t" "t") (s (if (call qdb_is_true (> |t.a| 0)) 1 0)))

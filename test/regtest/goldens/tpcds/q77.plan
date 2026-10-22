@@ -1,7 +1,7 @@
 top-sort [channel asc, id asc] limit 100
 └─ project (channel, id, sales, returns, profit) (rows≈7 cost≈58.3K)
-   └─ aggregate keys=[channel, id] aggs=[sum_0=sum, sum_1=sum, sum_2=sum] (rows≈7 cost≈58K)
-      └─ project (channel, id, sales, returns, profit) (rows≈3 cost≈57.6K)
+   └─ aggregate keys=[x.channel, x.id] aggs=[sum_0=sum, sum_1=sum, sum_2=sum] (rows≈7 cost≈58K)
+      └─ project (x.channel, x.id, x.sales, x.returns, x.profit) (rows≈3 cost≈57.6K)
          └─ project (x.channel, x.id, x.sales, x.returns, x.profit) (rows≈3 cost≈57.4K)
             └─ union-all (rows≈3 cost≈57.3K)
                ├─ project (channel, id, sales, returns, profit) (rows≈1 cost≈21.9K)

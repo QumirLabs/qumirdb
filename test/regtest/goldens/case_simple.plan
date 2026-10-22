@@ -1,5 +1,5 @@
 (rel project
-  (rel source "t")
+  (rel source "t" "t")
   (s (block
-      (var __qdb_sql_case = (+ a b))
+      (var __qdb_sql_case = (+ |t.a| |t.b|))
       (if (call qdb_is_true (== __qdb_sql_case 10)) 1 (if (call qdb_is_true (== __qdb_sql_case 20)) 2 0)))))

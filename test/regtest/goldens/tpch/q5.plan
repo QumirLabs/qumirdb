@@ -1,7 +1,7 @@
 sort [revenue desc]
 └─ project (n_name, revenue) (rows≈1 cost≈22.2K)
-   └─ aggregate keys=[n_name] aggs=[sum_0=sum] (rows≈1 cost≈22.2K)
-      └─ project (n_name, arg_0) (rows≈1 cost≈22.1K)
+   └─ aggregate keys=[nation.n_name] aggs=[sum_0=sum] (rows≈1 cost≈22.2K)
+      └─ project (nation.n_name, arg_0) (rows≈1 cost≈22.1K)
          └─ join inner [region.r_regionkey = nation.n_regionkey] (rows≈1 cost≈22.1K)
             ├─ filter (== |region.r_name| (cast "MIDDLE EAST" <named StringView>)) (rows≈1 cost≈200)
             │  └─ source region AS region row-groups (== |region.r_name| (cast "MIDDLE EAST" <named StringView>)) (rows≈5 cost≈100)

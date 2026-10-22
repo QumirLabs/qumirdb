@@ -25,9 +25,9 @@ public:
     void SetRowGroupPredicate(NQumir::NAst::TExprPtr predicate) {
         RowGroupPredicate_ = std::move(predicate);
     }
-    // Re-qualifies the output columns as alias.col right away, so build-time
-    // schemas (e.g. a join between two aliases of the same table) don't collide
-    // before the QualifyColumns pass runs.
+    // Re-qualifies the output columns as alias.col right away, so the builder binds
+    // references to these physical names and two aliases of one table do not
+    // collide.
     void SetAlias(std::string alias);
     void EnableRowId();
     bool EmitsRowId() const { return EmitRowId_; }

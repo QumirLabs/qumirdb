@@ -94,35 +94,6 @@ void RequireInputColumns(const TOperatorPtr& op) {
     }
 }
 
-void ResolveProjectionSortKeys(
-    std::vector<TSortKey>& keys,
-    const TOperatorPtr& input)
-{
-    auto project = TMaybeOp<TProjectOperator>(input);
-    auto&& output = input->OutputColumns();
-    if (!project || !output) {
-        return;
-    }
-    for (auto& key : keys) {
-        if (!key.ProjectionIndex) {
-            continue;
-        }
-        const auto& projections = project.Cast()->Projections();
-        if (*key.ProjectionIndex >= projections.size()) {
-            throw NQumir::TError("ORDER BY projection index is out of range");
-        }
-        size_t outputIndex = 0;
-        for (size_t i = 0; i < *key.ProjectionIndex; ++i) {
-            outputIndex += FlattenedProjectionArity(projections[i]);
-        }
-        if (outputIndex >= output->Fields.size()) {
-            throw NQumir::TError("ORDER BY flattened projection is out of range");
-        }
-        key.Column = output->Fields[outputIndex].first;
-        key.ProjectionIndex.reset();
-    }
-}
-
 // Types the subtree bottom-up and returns whether all of it is typed. A join
 // whose sides output the same column name, as two unaliased derived tables can,
 // stays untyped: column pruning may still drop the colliding columns, and building
@@ -191,7 +162,6 @@ void AnnotateOperatorType(
 
     if (auto maybe = TMaybeOp<TSortOperator>(root)) {
         auto sort = maybe.Cast();
-        ResolveProjectionSortKeys(sort->MutableKeys(), sort->Input());
         auto schema = sort->Input()->OutputColumns();
         root->Type = std::make_shared<TFunctionType>(
             std::vector<TTypePtr>{schema},
@@ -201,7 +171,6 @@ void AnnotateOperatorType(
 
     if (auto maybe = TMaybeOp<TTopSortOperator>(root)) {
         auto sort = maybe.Cast();
-        ResolveProjectionSortKeys(sort->MutableKeys(), sort->Input());
         auto schema = sort->Input()->OutputColumns();
         root->Type = std::make_shared<TFunctionType>(
             std::vector<TTypePtr>{schema},
