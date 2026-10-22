@@ -373,8 +373,8 @@ std::optional<std::string> AffineGroupKeyBase(const NAst::TExprPtr& expr) {
 }
 
 bool IsLiteralGroupKey(const NAst::TExprPtr& expr) {
-    // In the current qdb dialect GROUP BY 1 is the literal 1, not a SELECT-list
-    // ordinal.  If ordinals are added, they must be resolved before this check.
+    // GROUP BY positions are resolved to SELECT expressions before this check, so
+    // a number here is a constant.
     if (NAst::TMaybeNode<NAst::TNumberExpr>(expr) ||
         NAst::TMaybeNode<NAst::TStringLiteralExpr>(expr))
     {

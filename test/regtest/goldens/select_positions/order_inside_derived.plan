@@ -1,0 +1,5 @@
+project (col1)
+└─ project (q.col1)
+   └─ sort [col1 asc]
+      └─ project (col1) (rows≈4 cost≈64)
+         └─ source p AS p (rows≈4 cost≈32)

@@ -1,0 +1,1 @@
+(SELECT x AS a, y AS a FROM p LIMIT 10) ORDER BY 2;

@@ -1,0 +1,4 @@
+project (a, a)
+└─ top-sort [__scope_1 asc nulls-first, __scope_0 asc] limit 3
+   └─ project (__scope_0, __scope_1) (rows≈4 cost≈128)
+      └─ source p AS p (rows≈4 cost≈64)

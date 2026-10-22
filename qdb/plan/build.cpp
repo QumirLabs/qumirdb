@@ -28,6 +28,7 @@
 #include <memory>
 #include <optional>
 #include <set>
+#include <span>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -42,6 +43,7 @@ namespace {
 
 namespace NAst = NQumir::NAst;
 namespace NSql = NQdb::NSql;
+using namespace NAst::NLiterals;
 using NQumir::TError;
 using NQumir::TLocation;
 
@@ -121,6 +123,52 @@ std::map<std::string, NSql::TSqlPtr<NSql::TSqlCte>> CteMap(const NSql::TSqlWithC
         ctes[ToLower(cte->Name)] = cte;
     }
     return ctes;
+}
+
+// A bare integer in GROUP BY or ORDER BY is the 1-based position of a SELECT
+// output, negative with a sign. TRUE and FALSE are numbers of another type and
+// stay constants, as does any other expression, such as 1 + 0.
+std::optional<int64_t> SelectPosition(const NAst::TExprPtr& expr) {
+    auto operand = expr;
+    int64_t sign = 1;
+    if (auto unary = NAst::TMaybeNode<NAst::TUnaryExpr>(expr); unary && unary.Cast()->Operator == "-"_op) {
+        operand = unary.Cast()->Operand;
+        sign = -1;
+    }
+    auto number = NAst::TMaybeNode<NAst::TNumberExpr>(operand);
+    if (!number || !NAst::TMaybeType<NAst::TIntegerType>(number.Cast()->Type)) {
+        return std::nullopt;
+    }
+    return sign * number.Cast()->IntValue;
+}
+
+// The output columns a SELECT projection has before it is typed: the names of
+// its column alias list, or one.
+size_t DeclaredWidth(const TProjectionSpec& projection) {
+    return std::max<size_t>(projection.ColumnAliases.size(), 1);
+}
+
+// The SELECT projection whose output a GROUP BY position names. The projections
+// read the aggregate and are typed only above it, so each counts its declared
+// width; BuildSelect checks the typed projection against that count.
+std::expected<const TProjectionSpec*, TError> PositionedProjection(
+    std::span<const TProjectionSpec> projections,
+    int64_t position,
+    const TLocation& location)
+{
+    const auto reference = "GROUP BY position " + std::to_string(position);
+    int64_t first = 1;
+    for (const auto& projection : projections) {
+        const auto width = static_cast<int64_t>(DeclaredWidth(projection));
+        if (position >= first && position < first + width) {
+            if (width > 1) {
+                return std::unexpected(TError(location, reference + " refers to a field of a struct item"));
+            }
+            return &projection;
+        }
+        first += width;
+    }
+    return std::unexpected(TError(location, reference + " is not in the select list"));
 }
 
 // All distinct group keys (G) plus the grouping sets as index lists into them.
@@ -247,6 +295,36 @@ std::expected<TGroupingParse, TError> ParseGrouping(
         result.Sets.push_back(std::move(set));
     }
     return result;
+}
+
+// Bound GROUP BY keys that read the same input column, e.g. a position and the
+// column's name, are one key, listed once by each grouping set, as ParseGrouping
+// does for keys of equal text. Computed keys stay apart: HAVING and GROUPING()
+// may refer to each by its own name.
+void MergeColumnKeys(std::vector<TGroupKey>& keys, std::vector<std::vector<size_t>>& sets) {
+    std::vector<TGroupKey> merged;
+    std::vector<size_t> index;
+    std::unordered_map<std::string, size_t> columns;
+    for (auto& key : keys) {
+        if (!key.Computed) {
+            if (auto [column, inserted] = columns.emplace(key.Name, merged.size()); !inserted) {
+                index.push_back(column->second);
+                continue;
+            }
+        }
+        index.push_back(merged.size());
+        merged.push_back(std::move(key));
+    }
+    for (auto& set : sets) {
+        std::vector<size_t> remapped;
+        for (const auto key : set) {
+            if (std::ranges::find(remapped, index[key]) == remapped.end()) {
+                remapped.push_back(index[key]);
+            }
+        }
+        set = std::move(remapped);
+    }
+    keys = std::move(merged);
 }
 
 EJoinType MapJoinType(NSql::ESqlJoinType type) {
@@ -1565,6 +1643,7 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
                 }
                 sel->SelectList->Items.insert(
                     sel->SelectList->Items.begin(), prepend.begin(), prepend.end());
+                sel->SelectList->HelperItems += prepend.size();
                 // Rewrite outer refs to their correlated local columns: a correlation
                 // buried in a disjunction (`a = out AND P1) OR (a = out AND P2)`)
                 // becomes fully local; the correlation itself is enforced by the
@@ -1646,7 +1725,8 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
 // `names`, which also names the materialized arguments and partial aggregates.
 // `projections` and `having` are bound against `node`, already reference the
 // collector's aggregate columns and are rewritten onto computed group keys and
-// GROUPING() values.
+// GROUPING() values. A GROUP BY position names one of `selectOutputs`, the
+// projections that SQL positions count.
 std::expected<TRelation, TError> BuildAggregate(
     TRelation node,
     TAggCollector& collector,
@@ -1655,6 +1735,7 @@ std::expected<TRelation, TError> BuildAggregate(
     const std::unordered_map<std::string, NAst::TExprPtr>& selectAliases,
     const std::unordered_set<std::string>& ambiguousSelectAliases,
     std::vector<TProjectionSpec>& projections,
+    std::span<const TProjectionSpec> selectOutputs,
     NAst::TExprPtr& having,
     const TBuildContext& context)
 {
@@ -1673,7 +1754,41 @@ std::expected<TRelation, TError> BuildAggregate(
     const TNameScope inputNames({input});
     const auto inputColumns = ColumnNames(input.Plan);
     const std::unordered_set<std::string> physicalColumns(inputColumns.begin(), inputColumns.end());
+    // A GROUP BY alias or position names a SELECT output, whose bound expression
+    // becomes the key. It must be a scalar over input columns: any other name in
+    // it is an aggregate slot.
+    auto selectedKey = [&](TGroupKey& key, const NAst::TExprPtr& selected, const std::string& reference)
+        -> std::expected<void, TError>
+    {
+        const bool scalar = !HasSubquery(selected) && !HasWindowExprLocal(selected) && !HasGroupingCall(selected)
+            && std::ranges::all_of(FindUnboundVars(selected), [&](const auto& ref) {
+                return physicalColumns.contains(ref);
+            });
+        if (!scalar) {
+            return std::unexpected(TError(
+                key.Expression->Location, reference + " must refer to a scalar input expression"));
+        }
+        auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(selected);
+        if (ident) {
+            key.Name = ident.Cast()->Name;
+        }
+        key.Expression = CloneExpr(selected);
+        key.Computed = !ident;
+        return {};
+    };
     for (auto& key : groupKeys) {
+        if (auto position = SelectPosition(key.Expression)) {
+            auto projection = PositionedProjection(selectOutputs, *position, key.Expression->Location);
+            if (!projection) {
+                return std::unexpected(projection.error());
+            }
+            auto selected = selectedKey(
+                key, (*projection)->Expression, "GROUP BY position " + std::to_string(*position));
+            if (!selected) {
+                return std::unexpected(selected.error());
+            }
+            continue;
+        }
         if (key.Computed) {
             if (auto bound = inputNames.Bind(key.Expression); !bound) {
                 return std::unexpected(bound.error());
@@ -1700,29 +1815,11 @@ std::expected<TRelation, TError> BuildAggregate(
             return std::unexpected(TError(
                 key.Expression->Location, "unknown input column: " + key.Name));
         }
-        if (HasSubquery(alias->second) || HasWindowExprLocal(alias->second)) {
-            return std::unexpected(TError(
-                key.Expression->Location,
-                "GROUP BY alias '" + key.Name +
-                "' must refer to a scalar input expression"));
+        if (auto selected = selectedKey(key, alias->second, "GROUP BY alias '" + key.Name + "'"); !selected) {
+            return std::unexpected(selected.error());
         }
-        // The alias expression is bound: anything but input columns are aggregate slots.
-        for (const auto& ref : FindUnboundVars(alias->second)) {
-            if (!physicalColumns.contains(ref)) {
-                return std::unexpected(TError(
-                    key.Expression->Location,
-                    "GROUP BY alias '" + key.Name +
-                    "' must refer to a scalar input expression"));
-            }
-        }
-        if (auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(alias->second)) {
-            key.Name = ident.Cast()->Name;
-            key.Expression = CloneExpr(alias->second);
-            continue;
-        }
-        key.Expression = CloneExpr(alias->second);
-        key.Computed = true;
     }
+    MergeColumnKeys(groupKeys, groupingSets);
     NarrowPlainGroupKeys(groupKeys, groupingSets, hasGroupingSyntax);
     std::unordered_map<std::string, std::string> computedKeys; // PrintAst -> name
     for (const auto& key : groupKeys) {
@@ -2215,23 +2312,51 @@ std::expected<TRelation, TError> BuildSelect(
         return CarryLabels(n, std::move(*windowed));
     };
 
+    // SQL positions count the projections after those of helper items, which
+    // are plain columns. BuildAggregate counts the greatest position GROUP BY
+    // names in declared widths, before the projection is typed.
+    const size_t helpers = select.SelectList->HelperItems;
+    std::optional<int64_t> groupPosition;
+    if (parsedGrouping) {
+        for (const auto& key : parsedGrouping->Keys) {
+            if (auto position = SelectPosition(key.Expression)) {
+                groupPosition = std::max(*position, groupPosition.value_or(*position));
+            }
+        }
+    }
+
     // The projection is typed as it is built, so its output names, struct fields
     // included, are the labels of the SELECT. Repeated labels get physical names
     // that stay unique where sibling SELECTs meet.
     auto project = [&](const TRelation& n) -> std::expected<TRelation, TError> {
         std::vector<bool> named;
+        std::vector<size_t> declared;
         for (const auto& projection : projections) {
             named.push_back(!projection.ImplicitName && projection.ColumnAliases.empty());
+            declared.push_back(DeclaredWidth(projection));
         }
         auto plan = std::make_shared<TProjectOperator>(n.Plan, std::move(projections));
         if (auto annotated = Annotate(plan, context); !annotated) {
             return std::unexpected(annotated.error());
+        }
+        // GROUP BY counted its positions in declared widths; the typed outputs up
+        // to the last of them must lie where they were counted.
+        int64_t first = 1;
+        for (size_t i = helpers; groupPosition && i < declared.size() && first <= *groupPosition; ++i) {
+            const auto& projection = plan->Projections()[i];
+            if (FlattenedProjectionArity(projection) != declared[i]) {
+                return std::unexpected(TError(projection.Expression->Location,
+                    "a struct-return projection before GROUP BY position "
+                    + std::to_string(*groupPosition) + " requires AS (...)"));
+            }
+            first += static_cast<int64_t>(declared[i]);
         }
         auto labels = ColumnNames(plan);
         auto projected = Relabel(TRelation{.Plan = plan}, labels, context);
         if (!projected) {
             return projected;
         }
+        std::fill_n(projected->Labels.begin(), helpers, std::string());
         if (output) {
             auto& selected = output->emplace();
             selected.From = from;
@@ -2295,6 +2420,7 @@ std::expected<TRelation, TError> BuildSelect(
         selectAliases,
         ambiguousSelectAliases,
         projections,
+        std::span<const TProjectionSpec>(projections).subspan(helpers),
         having,
         context);
     if (!aggregate) {
@@ -2336,7 +2462,8 @@ std::expected<TRelation, TError> ApplyOrderBy(
 
     // BuildSelect always tops the plan with a projection. An ORDER BY item is
     // resolved in order of preference:
-    //   1. a plain output-column identifier -> sort on it directly;
+    //   1. a SELECT position or a plain output-column identifier -> sort on that
+    //      output column directly;
     //   2. an expression already computed in the select list (matched
     //      structurally) -> sort on that output column, so aggregates and other
     //      computed columns are reused rather than re-evaluated;
@@ -2355,13 +2482,28 @@ std::expected<TRelation, TError> ApplyOrderBy(
         sortNames.Reserve(column);
     }
 
+    // SQL positions count the outputs that have a label; the hidden sort columns
+    // are added only below.
+    std::vector<size_t> positioned;
+    for (size_t i = 0; i < relation.Labels.size(); ++i) {
+        if (!relation.Labels[i].empty()) {
+            positioned.push_back(i);
+        }
+    }
+
     std::vector<TSortKey> keys;
     keys.reserve(query.OrderBy->Items.size());
     std::vector<TProjectionSpec> hidden;
 
     for (const auto& item : query.OrderBy->Items) {
         std::optional<size_t> index;
-        if (auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(item->Expr)) {
+        if (auto position = SelectPosition(item->Expr)) {
+            if (*position < 1 || *position > static_cast<int64_t>(positioned.size())) {
+                return std::unexpected(TError(item->Expr->Location,
+                    "ORDER BY position " + std::to_string(*position) + " is not in the select list"));
+            }
+            index = positioned[*position - 1];
+        } else if (auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(item->Expr)) {
             for (size_t i = 0; i < relation.Labels.size(); ++i) {
                 if (relation.Labels[i] != ident.Cast()->Name) {
                     continue;

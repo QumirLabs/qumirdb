@@ -1,0 +1,1 @@
+SELECT d.* FROM (SELECT x AS a, y AS a FROM p) AS d ORDER BY 2;

@@ -1,0 +1,5 @@
+sort [x asc nulls-last, n asc nulls-last, c asc]
+└─ project (x, n, c) (rows≈6 cost≈584)
+   └─ aggregate keys=[t.x, t.n] aggs=[count_0=count] (rows≈6 cost≈440)
+      └─ project (t.x, t.n) (rows≈5 cost≈160)
+         └─ source t AS t (rows≈5 cost≈80)

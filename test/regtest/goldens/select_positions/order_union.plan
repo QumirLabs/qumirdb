@@ -1,0 +1,9 @@
+sort [k desc]
+└─ project (k) (rows≈7 cost≈288)
+   └─ aggregate keys=[k] (rows≈7 cost≈232)
+      └─ union-all (rows≈7 cost≈176)
+         ├─ project (k) (rows≈5 cost≈80)
+         │  └─ source t AS t (rows≈5 cost≈40)
+         └─ project (y) (rows≈2 cost≈96)
+            └─ filter (< |t_1.y| 30) (rows≈2 cost≈80)
+               └─ source t AS t_1 row-groups (< |t_1.y| 30) (rows≈5 cost≈40)

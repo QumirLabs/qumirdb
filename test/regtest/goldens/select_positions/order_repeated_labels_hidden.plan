@@ -1,0 +1,4 @@
+project (a, a)
+└─ sort [__scope_1 asc, __sort_0 asc]
+   └─ project (__scope_0, __scope_1, __sort_0) (rows≈4 cost≈160)
+      └─ source p AS p (rows≈4 cost≈64)

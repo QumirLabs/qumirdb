@@ -1,0 +1,1 @@
+SELECT rank() OVER (ORDER BY y) FROM t GROUP BY 1;

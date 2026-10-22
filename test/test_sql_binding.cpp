@@ -1,7 +1,9 @@
 #include "mock_source.h"
 
+#include <qdb/catalog/external_module.h>
 #include <qdb/plan/build.h>
 #include <qdb/plan/passes/unbound_vars.h>
+#include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/sort.h>
@@ -18,7 +20,10 @@ using namespace NQdb;
 
 namespace {
 
-std::expected<TOperatorPtr, NQumir::TError> Build(std::string_view text, TMockSource& source)
+std::expected<TOperatorPtr, NQumir::TError> Build(
+    std::string_view text,
+    TMockSource& source,
+    const NKernel::TAnnotationContext& annotation = {})
 {
     std::istringstream input{std::string(text)};
     NSql::TTokenStream tokens(input);
@@ -31,7 +36,7 @@ std::expected<TOperatorPtr, NQumir::TError> Build(std::string_view text, TMockSo
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
         return std::make_shared<TSourceOperator>(source, std::string(name));
-    });
+    }, annotation);
 }
 
 std::string Failure(std::string_view sql) {
@@ -222,6 +227,70 @@ TEST(SqlBinding, RepeatedLabelsSortByInputExpression) {
     EXPECT_EQ(output.Cast()->Projections()[1].Name, "a");
     EXPECT_NE(Failure("SELECT x AS a, y AS a FROM t ORDER BY a").find("ambiguous"),
         std::string::npos);
+}
+
+TEST(SqlPositions, StructItemsCountTheirFields) {
+    TExternalModuleCatalog catalog;
+    std::istringstream definitions(
+        "CREATE MODULE m LANGUAGE rust AS $$$$;"
+        "CREATE FUNCTION pair(DOUBLE) RETURNS (DOUBLE, DOUBLE) "
+        "SET MODULE TO m SET SYMBOL TO pair;");
+    NSql::TTokenStream tokens(definitions);
+    NSql::TParser parser;
+    auto statements = parser.ParseAll(tokens);
+    ASSERT_TRUE(statements) << statements.error().ToString();
+    ASSERT_TRUE(catalog.Apply(*NSql::TMaybeNode<NSql::TSqlExternalModule>((*statements)[0]).Cast()));
+    ASSERT_TRUE(catalog.Apply(*NSql::TMaybeNode<NSql::TSqlExternalFunction>((*statements)[1]).Cast()));
+    const NKernel::TAnnotationContext annotation{.ExternalCatalog = catalog.Snapshot()};
+    auto f64 = std::make_shared<NQumir::NAst::TFloatType>();
+    TMockSource source(TMockColumns{}, {{"x", f64}, {"y", f64}});
+
+    // ORDER BY reads the typed outputs, a struct item's fields included.
+    for (const auto& [sql, expected] : std::vector<std::pair<const char*, std::vector<std::string>>>{
+        {"SELECT pair(x), x + 1.0 AS z FROM t ORDER BY 2 DESC, 3", {"col1", "z"}},
+        {"SELECT DISTINCT pair(x) AS (p, q), x + 1.0 FROM t ORDER BY 3 DESC", {"col2"}},
+    }) {
+        SCOPED_TRACE(sql);
+        auto plan = Build(sql, source, annotation);
+        ASSERT_TRUE(plan) << plan.error().ToString();
+        auto sort = TMaybeOp<TSortOperator>(*plan);
+        ASSERT_TRUE(sort);
+        std::vector<std::string> keys;
+        for (const auto& key : sort.Cast()->Keys()) {
+            keys.push_back(key.Column);
+        }
+        EXPECT_EQ(keys, expected);
+    }
+
+    // GROUP BY counts positions before the projection is typed: a struct item
+    // before the position names its fields with AS (...).
+    for (const auto& [sql, keys] : std::vector<std::pair<const char*, std::vector<std::string>>>{
+        {"SELECT pair(x) AS (p, q), x + 1.0 AS z, count(*) FROM t GROUP BY x, 3", {"t.x", "gb_0"}},
+        {"SELECT pair(sum(x)) AS (p, q), y FROM t GROUP BY 3", {"t.y"}},
+        {"SELECT x, pair(x), count(*) FROM t GROUP BY 1", {"t.x"}},
+    }) {
+        SCOPED_TRACE(sql);
+        auto plan = Build(sql, source, annotation);
+        ASSERT_TRUE(plan) << plan.error().ToString();
+        auto project = TMaybeOp<TProjectOperator>(*plan);
+        ASSERT_TRUE(project);
+        auto aggregate = TMaybeOp<TAggregateOperator>(project.Cast()->Input());
+        ASSERT_TRUE(aggregate);
+        EXPECT_EQ(aggregate.Cast()->GroupKeys(), keys);
+    }
+    for (const auto& [sql, expected] : std::vector<std::pair<const char*, const char*>>{
+        {"SELECT pair(x), x + 1.0 AS z, count(*) FROM t GROUP BY x, 2",
+            "a struct-return projection before GROUP BY position 2 requires AS (...)"},
+        {"SELECT pair(sum(x)), y FROM t GROUP BY 2",
+            "a struct-return projection before GROUP BY position 2 requires AS (...)"},
+        {"SELECT pair(x) AS (p, q), count(*) FROM t GROUP BY 2",
+            "GROUP BY position 2 refers to a field of a struct item"},
+    }) {
+        SCOPED_TRACE(sql);
+        auto plan = Build(sql, source, annotation);
+        ASSERT_FALSE(plan);
+        EXPECT_NE(plan.error().ToString().find(expected), std::string::npos) << plan.error().ToString();
+    }
 }
 
 int main(int argc, char** argv) {

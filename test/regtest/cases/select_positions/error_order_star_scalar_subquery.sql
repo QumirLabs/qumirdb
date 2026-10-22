@@ -1,0 +1,1 @@
+SELECT *, (SELECT max(y) FROM t) AS m FROM t ORDER BY 5;

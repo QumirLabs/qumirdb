@@ -117,8 +117,8 @@ For a plain `GROUP BY`, the builder removes key components that cannot split a
 group already defined by another retained component:
 
 ```sql
-GROUP BY 1, url
--- physical group key: url
+SELECT 1, url, count(*) FROM hits GROUP BY 1, url
+-- position 1 names the literal 1; physical group key: url
 
 GROUP BY client_ip, client_ip - 1, client_ip - 2
 -- physical group key: client_ip
@@ -134,10 +134,9 @@ key once per output group.
 This rewrite intentionally runs in the builder, after GROUP BY aliases
 are resolved and before computed keys become materialized `gb_n` columns. A
 later plan pass would otherwise see only the synthetic column reference and
-would have to reconstruct its dependency through the lower project. In the
-current qdb SQL dialect an integer in GROUP BY is a literal expression, not a
-SELECT-list ordinal; ordinal support must resolve such references before this
-rewrite.
+would have to reconstruct its dependency through the lower project. GROUP BY
+positions are resolved first, so a number that reaches this rewrite is a
+constant.
 
 `GROUPING SETS`, `ROLLUP`, and `CUBE` are excluded because their key subsets and
 `GROUPING()` bit positions are observable.
@@ -168,6 +167,17 @@ such an expression that is no input column of that projection stands for the
 expression of the explicitly named output it refers to. Derived-table
 aliases and CTE column lists rename typed outputs, in place when a projection is
 on top.
+
+A bare integer in GROUP BY or ORDER BY is the position of a SELECT output,
+counted after star expansion and struct flattening; other constants, such as
+`TRUE` or `1 + 0`, stay constants. An ORDER BY position names the output column
+itself, so repeated labels stay apart. A GROUP BY position, like an alias, makes
+the item's bound expression the key, and keys that bind to one input column are
+one key. The items are typed only above the aggregate they read, so GROUP BY
+counts an item as the names of its `AS (...)` list, or as one column: a struct
+item before a GROUP BY position needs `AS (...)`. Hidden sort columns and the
+correlation outputs that decorrelation adds to a subquery's SELECT list are not
+positions.
 
 ### Affine integer aggregates
 

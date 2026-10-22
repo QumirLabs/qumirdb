@@ -151,6 +151,9 @@ struct TSqlQuery : TSqlNode {
 
 struct TSqlSelectList : TSqlNode {
     std::vector<TSqlPtr<TSqlSelectItem>> Items;
+    // Leading items a rewrite adds for outputs of its own, such as the correlation
+    // keys of a decorrelated subquery. SQL positions do not count them.
+    size_t HelperItems = 0;
 };
 
 struct TSqlFrameBound : TSqlNode {

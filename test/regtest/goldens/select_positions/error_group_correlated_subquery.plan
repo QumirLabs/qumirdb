@@ -1,0 +1,2 @@
+Error: GROUP BY position 1 must refer to a scalar input expression @ Line: 1, Byte: 67, Column: 67
+

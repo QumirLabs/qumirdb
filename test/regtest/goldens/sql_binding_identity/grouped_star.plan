@@ -1,0 +1,7 @@
+project (a, a, b, n) (rows≈1 cost≈4.2K)
+└─ aggregate keys=[__scope_0, __scope_1, b] aggs=[count_0=count] (rows≈1 cost≈4.2K)
+   └─ join inner (rows≈1 cost≈4.2K)
+      ├─ project (__scope_0, __scope_1) (rows≈1 cost≈32)
+      │  └─ source t AS t (rows≈1 cost≈16)
+      └─ project (b) (rows≈1 cost≈16)
+         └─ source u AS u (rows≈1 cost≈8)

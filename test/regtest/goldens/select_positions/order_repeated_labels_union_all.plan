@@ -1,0 +1,7 @@
+project (a, a)
+└─ sort [__scope_1 asc]
+   └─ union-all (rows≈8 cost≈256)
+      ├─ project (__scope_0, __scope_1) (rows≈4 cost≈128)
+      │  └─ source p AS p (rows≈4 cost≈64)
+      └─ project (b, c) (rows≈4 cost≈128)
+         └─ source p AS p_1 (rows≈4 cost≈64)

@@ -1,0 +1,8 @@
+sort [y asc]
+└─ project (x, y, n) (rows≈5 cost≈4.7K)
+   └─ join inner residual (> |t.x| __scalar_0__) (rows≈5 cost≈4.6K)
+      ├─ source t AS t (rows≈5 cost≈120)
+      └─ project (__scalar_0__) (rows≈1 cost≈208)
+         └─ aggregate keys=[__group__] aggs=[min_0=min] (rows≈1 cost≈200)
+            └─ project (t_1.x, __group__) (rows≈5 cost≈120)
+               └─ source t AS t_1 (rows≈5 cost≈40)

@@ -1,0 +1,1 @@
+SELECT * FROM t WHERE x > (SELECT min(x) FROM t) ORDER BY 2;
