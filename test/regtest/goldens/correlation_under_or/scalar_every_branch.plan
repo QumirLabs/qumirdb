@@ -1,0 +1,7 @@
+project (id, c) (rows≈4 cost≈4.6K)
+└─ join left [t.id = __corr_0_0__] (rows≈4 cost≈4.5K)
+   ├─ source t AS t (rows≈4 cost≈32)
+   └─ project (__corr_0_0__, __scalar_0__) (rows≈2 cost≈224)
+      └─ aggregate keys=[s.k] aggs=[sum_0=sum] (rows≈2 cost≈192)
+         └─ filter (|| (> |s.v| 4) (< |s.v| 2)) (rows≈2 cost≈160)
+            └─ source s AS s row-groups (|| (> |s.v| 4) (< |s.v| 2)) (rows≈5 cost≈80)

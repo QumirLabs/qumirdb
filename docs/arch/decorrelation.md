@@ -80,7 +80,14 @@ grouping the subquery on its correlation columns and `LEFT JOIN`-ing it back.
 
 Detection: a `WHERE` equality between one **local** and one **outer** ident (see
 [Local and outer references](#local-and-outer-references)) is a correlation pair
-`(outerCol, localCol)`; the rest stay as the subquery's local filter.
+`(outerCol, localCol)` when every row passing the `WHERE` satisfies it: it is a
+conjunct, or every branch of an `OR` requires it, as in
+`(a = out AND P1) OR (a = out AND P2)`. The rest stay as the subquery's local
+filter. An equality inside only some branches of an `OR`, or under `NOT`, holds
+just for some rows: as a group and join key it would drop the rows of the other
+branches, so such a subquery is rejected with an error until general unnesting
+handles it. The same rule picks the correlation of each `EXISTS` in a disjunction
+of `EXISTS`.
 
 Rewrite of the subquery:
 - `GROUP BY` each `localCol`;
@@ -131,7 +138,8 @@ statistics are estimated, so it is not costed as a selective predicate
 
 ## Limits
 
-- correlation is detected only from equality conjuncts (`localCol == outerCol`);
+- correlation is detected only from equalities (`localCol == outerCol`) that the
+  whole predicate requires;
 - the correlated subquery must reduce to a single value (one non-correlation
   output column);
 - `WITH RECURSIVE` and scalar subqueries in the SELECT list are not handled.
