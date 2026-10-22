@@ -173,11 +173,12 @@ counted after star expansion and struct flattening; other constants, such as
 `TRUE` or `1 + 0`, stay constants. An ORDER BY position names the output column
 itself, so repeated labels stay apart. A GROUP BY position, like an alias, makes
 the item's bound expression the key, and keys that bind to one input column are
-one key. The items are typed only above the aggregate they read, so GROUP BY
-counts an item as the names of its `AS (...)` list, or as one column: a struct
-item before a GROUP BY position needs `AS (...)`. Hidden sort columns and the
-correlation outputs that decorrelation adds to a subquery's SELECT list are not
-positions.
+one key. GROUP BY resolves its positions before the aggregate that the items read
+exists, so it types them over the input columns and the aggregate results. An
+item that reads a window, subquery or `GROUPING()` result is typed only above the
+aggregate and counts as one column, so a struct-return item of that kind before a
+GROUP BY position needs `AS (...)`. Hidden sort columns and the correlation
+outputs that decorrelation adds to a subquery's SELECT list are not positions.
 
 ### Affine integer aggregates
 

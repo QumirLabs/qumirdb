@@ -785,6 +785,25 @@ std::expected<NAst::TExprPtr, TError> TAggCollector::Emit(const TAggCall& agg, T
     return EmitPlain(agg.Func, std::move(arg), std::move(loc));
 }
 
+std::expected<std::vector<std::pair<std::string, NAst::TTypePtr>>, TError>
+TAggCollector::SlotTypes() const
+{
+    std::vector<std::pair<std::string, NAst::TTypePtr>> slots;
+    slots.reserve(Specs_.size());
+    for (const auto& spec : Specs_) {
+        NAst::TTypePtr argType;
+        if (spec.Arg && InputSchema_) {
+            try {
+                argType = NKernel::AnnotateExprType(spec.Arg, *InputSchema_, &Context_);
+            } catch (const TError& error) {
+                return std::unexpected(error);
+            }
+        }
+        slots.emplace_back(spec.Name, AggregateResultType(spec.Func, argType));
+    }
+    return slots;
+}
+
 std::expected<NAst::TExprPtr, TError> TWindowCollector::Rewrite(NAst::TExprPtr expr) {
     if (!expr) {
         return expr;

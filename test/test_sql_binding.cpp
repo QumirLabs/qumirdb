@@ -262,11 +262,13 @@ TEST(SqlPositions, StructItemsCountTheirFields) {
         EXPECT_EQ(keys, expected);
     }
 
-    // GROUP BY counts positions before the projection is typed: a struct item
-    // before the position names its fields with AS (...).
+    // GROUP BY counts positions before the aggregate the projection reads exists,
+    // so it types each item over the input columns and the aggregate columns.
     for (const auto& [sql, keys] : std::vector<std::pair<const char*, std::vector<std::string>>>{
+        {"SELECT pair(x), y, count(*) FROM t GROUP BY x, 3", {"t.x", "t.y"}},
         {"SELECT pair(x) AS (p, q), x + 1.0 AS z, count(*) FROM t GROUP BY x, 3", {"t.x", "gb_0"}},
-        {"SELECT pair(sum(x)) AS (p, q), y FROM t GROUP BY 3", {"t.y"}},
+        {"SELECT pair(sum(x)), y, count(*) FROM t GROUP BY 3", {"t.y"}},
+        {"SELECT CASE WHEN x > 0.0 THEN pair(x) ELSE pair(y) END, y FROM t GROUP BY x, 3", {"t.x", "t.y"}},
         {"SELECT x, pair(x), count(*) FROM t GROUP BY 1", {"t.x"}},
     }) {
         SCOPED_TRACE(sql);
@@ -278,19 +280,24 @@ TEST(SqlPositions, StructItemsCountTheirFields) {
         ASSERT_TRUE(aggregate);
         EXPECT_EQ(aggregate.Cast()->GroupKeys(), keys);
     }
+    // A position into a struct item or past the outputs is an error. A struct over
+    // a window result is typed only above the aggregate, so it needs AS (...).
     for (const auto& [sql, expected] : std::vector<std::pair<const char*, const char*>>{
-        {"SELECT pair(x), x + 1.0 AS z, count(*) FROM t GROUP BY x, 2",
-            "a struct-return projection before GROUP BY position 2 requires AS (...)"},
-        {"SELECT pair(sum(x)), y FROM t GROUP BY 2",
-            "a struct-return projection before GROUP BY position 2 requires AS (...)"},
+        {"SELECT pair(x), y FROM t GROUP BY 2", "GROUP BY position 2 refers to a field of a struct item"},
         {"SELECT pair(x) AS (p, q), count(*) FROM t GROUP BY 2",
             "GROUP BY position 2 refers to a field of a struct item"},
+        {"SELECT pair(x), y FROM t GROUP BY 4", "GROUP BY position 4 is not in the select list"},
+        {"SELECT pair(sum(sum(x)) OVER (ORDER BY y)), y FROM t GROUP BY 2",
+            "GROUP BY position 2 requires AS (...) on a struct-return projection typed above the aggregate"},
     }) {
         SCOPED_TRACE(sql);
         auto plan = Build(sql, source, annotation);
         ASSERT_FALSE(plan);
         EXPECT_NE(plan.error().ToString().find(expected), std::string::npos) << plan.error().ToString();
     }
+    auto aliased = Build(
+        "SELECT pair(sum(sum(x)) OVER (ORDER BY y)) AS (p, q), y FROM t GROUP BY 3", source, annotation);
+    EXPECT_TRUE(aliased) << aliased.error().ToString();
 }
 
 int main(int argc, char** argv) {

@@ -15,9 +15,7 @@ namespace NQdb {
 
 using namespace NQumir::NAst;
 
-namespace {
-
-TTypePtr AggResultType(const std::string& func, const TTypePtr& argType) {
+TTypePtr AggregateResultType(const std::string& func, const TTypePtr& argType) {
     if (func == "count") {
         return std::make_shared<TIntegerType>(); // i64
     }
@@ -36,8 +34,6 @@ TTypePtr AggResultType(const std::string& func, const TTypePtr& argType) {
     // Non-integer reducers are not connected yet; preserve the declared type.
     return argType;
 }
-
-} // namespace
 
 TTypePtr ComputeAggregateOutputType(
     const TTypePtr& inputSchema,
@@ -66,7 +62,7 @@ TTypePtr ComputeAggregateOutputType(
                 argType = FieldType(inputStruct, ident.Cast()->Name);
             }
         }
-        outFields.emplace_back(agg.Name, AggResultType(agg.Func, argType));
+        outFields.emplace_back(agg.Name, AggregateResultType(agg.Func, argType));
     }
     return std::make_shared<TStructType>(std::move(outFields));
 }

@@ -13,16 +13,21 @@
 
 namespace NQdb {
 
-size_t FlattenedProjectionArity(const TProjectionSpec& projection) {
+size_t FlattenedArity(const NQumir::NAst::TTypePtr& type) {
     using namespace NQumir::NAst;
-    if (!projection.Expression || IsNullableType(projection.Expression->Type)) {
+    if (IsNullableType(type)) {
         return 1;
     }
-    if (auto structure = TMaybeType<TStructType>(UnwrapNamedType(projection.Expression->Type)))
-    {
+    if (auto structure = TMaybeType<TStructType>(UnwrapNamedType(type))) {
         return structure.Cast()->Fields.size();
     }
     return 1;
+}
+
+size_t FlattenedProjectionArity(const TProjectionSpec& projection) {
+    return projection.Expression
+        ? FlattenedArity(projection.Expression->Type)
+        : 1;
 }
 
 TProjectOperator::TProjectOperator(TOperatorPtr input, std::vector<TProjectionSpec> projections)
