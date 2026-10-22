@@ -1,0 +1,2 @@
+Error: subquery in a window function is not supported @ Line: 1, Byte: 36, Column: 36
+

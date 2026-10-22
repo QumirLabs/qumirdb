@@ -61,19 +61,21 @@ std::expected<void, TError> ValidateOutputColumnName(
     return {};
 }
 
-bool HasSubquery(const NAst::TExprPtr& expr) {
-    if (!expr) {
-        return false;
-    }
-    if (NAst::TMaybeNode<NSql::TSubqueryExpr>(expr)) {
-        return true;
+// The first subquery in `expr`, or null.
+NAst::TExprPtr FindSubquery(const NAst::TExprPtr& expr) {
+    if (!expr || NAst::TMaybeNode<NSql::TSubqueryExpr>(expr)) {
+        return expr;
     }
     for (const auto& child : expr->Children()) {
-        if (HasSubquery(child)) {
-            return true;
+        if (auto subquery = FindSubquery(child)) {
+            return subquery;
         }
     }
-    return false;
+    return nullptr;
+}
+
+bool HasSubquery(const NAst::TExprPtr& expr) {
+    return FindSubquery(expr) != nullptr;
 }
 
 std::string ItemName(const NSql::TSqlSelectItem& item, size_t index) {
@@ -1599,7 +1601,7 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
                     return std::unexpected(local.error());
                 }
                 if (HasUnmappedOuter(sel.Cast()->Where, *local)) {
-                    return std::unexpected(TError(
+                    return std::unexpected(TError(expr->Location,
                         "correlated IN subquery in a boolean expression is not supported"));
                 }
             }
@@ -1639,7 +1641,8 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
                 Call(expr->Location, "qdb_is_null", { Ident(expr->Location, markName) })));
         }
         if (scalar->Kind != NSql::TSubqueryExpr::EKind::Scalar) {
-            return std::unexpected(TError("subquery is not supported in this position"));
+            return std::unexpected(TError(expr->Location,
+                "subquery is not supported in this position"));
         }
 
         auto maybeSelect = NSql::TMaybeNode<NSql::TSqlSelect>(scalar->Query->Body);
@@ -1766,6 +1769,53 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
         *child = std::move(*rewritten);
     }
     return expr;
+}
+
+// Extracts the subqueries in the aggregate arguments of a bound `expr` onto
+// `node`, the aggregate input, in place. An aggregate argument is evaluated once
+// per input row, and so is a subquery in it; the aggregate then reads the
+// extracted column. A subquery outside an aggregate reads the aggregated rows and
+// is extracted above the aggregate, with HAVING and the projections. Aggregates
+// are found as HasAggregateCall finds them. Any other subquery of a window reads
+// the window input, which in an aggregated SELECT is the aggregate output; it is
+// not supported yet.
+std::expected<void, TError> ExtractAggregateArgumentSubqueries(
+    const NAst::TExprPtr& expr,
+    TRelation& node,
+    TBuildContext& context,
+    TExtractedSubqueries& extracted)
+{
+    if (!expr) {
+        return {};
+    }
+    if (auto window = NAst::TMaybeNode<NSql::TWindowExpr>(expr)) {
+        for (auto* input : WindowInputs(*window.Cast())) {
+            if (auto done = ExtractAggregateArgumentSubqueries(*input, node, context, extracted); !done) {
+                return done;
+            }
+        }
+        if (auto subquery = FindSubquery(expr)) {
+            return std::unexpected(TError(subquery->Location,
+                "subquery in a window function is not supported"));
+        }
+        return {};
+    }
+    if (IsAggregateCall(expr)) {
+        for (auto& arg : NAst::TMaybeNode<NAst::TCallExpr>(expr).Cast()->Args) {
+            auto rewritten = ExtractScalarSubqueries(arg, node, context, extracted);
+            if (!rewritten) {
+                return std::unexpected(rewritten.error());
+            }
+            arg = std::move(*rewritten);
+        }
+        return {};
+    }
+    for (const auto& child : expr->Children()) {
+        if (auto done = ExtractAggregateArgumentSubqueries(child, node, context, extracted); !done) {
+            return done;
+        }
+    }
+    return {};
 }
 
 // Builds the aggregate of an aggregated SELECT over its input `node`: binds the
@@ -2219,16 +2269,6 @@ std::expected<TRelation, TError> BuildSelect(
     }
     const bool multiSet = parsedGrouping && parsedGrouping->Sets.size() > 1;
 
-    auto inputSchemaType = node.Plan->OutputColumns();
-    auto inputSchema = NAst::TMaybeType<NAst::TStructType>(inputSchemaType);
-    // Grouping-sets execution masks key columns for sets that omit them. Keep
-    // computed aggregate arguments materialized separately: collapsing `sum(k+1)`
-    // to reducers over `k` would make the subtotal consume the masked key.
-    TAggCollector collector(
-        inputSchema ? inputSchema.Cast().get() : nullptr,
-        !multiSet,
-        names,
-        context.Annotation);
     const bool distinct = select.Quantifier == NSql::ESetQuantifier::Distinct;
     // SELECT and HAVING bind against the aggregate input. A GROUP BY name that is
     // no input column is a SELECT alias naming its key, which HAVING and GROUPING()
@@ -2246,6 +2286,52 @@ std::expected<TRelation, TError> BuildSelect(
     auto groupAlias = [&](NAst::TExprPtr& reference) -> std::expected<bool, TError> {
         return groupAliases.contains(NAst::TMaybeNode<NAst::TIdentExpr>(reference).Cast()->Name);
     };
+    // Binds every SELECT expression and HAVING first: the subqueries of their
+    // aggregate arguments then join the input before the collector reads its
+    // schema and turns the arguments into aggregate specs.
+    std::vector<NAst::TExprPtr> bound(select.SelectList->Items.size());
+    // The printed text of each projection's bound SELECT expression, for ORDER BY.
+    std::vector<std::optional<std::string>> boundTexts(select.SelectList->Items.size());
+    for (size_t i = 0; i < select.SelectList->Items.size(); ++i) {
+        const auto& item = select.SelectList->Items[i];
+        if (item->Star) {
+            continue;
+        }
+        bound[i] = item->Expr;
+        if (auto ok = input.Bind(bound[i], groupAlias); !ok) {
+            return std::unexpected(ok.error());
+        }
+        // Window and subquery items cannot be core-printed; ORDER BY refers to them
+        // by their aliases.
+        if (!HasWindowExpr(item->Expr) && !HasSubquery(item->Expr)) {
+            boundTexts[i] = NAst::NCore::PrintAst(bound[i]);
+        }
+    }
+    NAst::TExprPtr having = select.Having;
+    if (having) {
+        if (auto ok = input.Bind(having, groupAlias); !ok) {
+            return std::unexpected(ok.error());
+        }
+    }
+    for (const auto& expr : bound) {
+        if (auto extracted = ExtractAggregateArgumentSubqueries(expr, node, context, subqueries); !extracted) {
+            return std::unexpected(extracted.error());
+        }
+    }
+    if (auto extracted = ExtractAggregateArgumentSubqueries(having, node, context, subqueries); !extracted) {
+        return std::unexpected(extracted.error());
+    }
+
+    auto inputSchemaType = node.Plan->OutputColumns();
+    auto inputSchema = NAst::TMaybeType<NAst::TStructType>(inputSchemaType);
+    // Grouping-sets execution masks key columns for sets that omit them. Keep
+    // computed aggregate arguments materialized separately: collapsing `sum(k+1)`
+    // to reducers over `k` would make the subtotal consume the masked key.
+    TAggCollector collector(
+        inputSchema ? inputSchema.Cast().get() : nullptr,
+        !multiSet,
+        names,
+        context.Annotation);
     std::vector<TProjectionSpec> projections;
     // The printed text of each projection's bound SELECT expression, for ORDER BY.
     std::vector<std::optional<std::string>> texts;
@@ -2254,7 +2340,7 @@ std::expected<TRelation, TError> BuildSelect(
     for (size_t i = 0; i < select.SelectList->Items.size(); ++i) {
         const auto& item = select.SelectList->Items[i];
         if (item->Star) {
-            auto&& schema = node.Plan->OutputColumns();
+            auto&& schema = from.Plan->OutputColumns();
             if (!schema) {
                 return std::unexpected(TError("'*' over an unresolved input"));
             }
@@ -2264,7 +2350,7 @@ std::expected<TRelation, TError> BuildSelect(
             }
             const auto expanded = projections.size();
             for (size_t column = 0; column < schema->Fields.size(); ++column) {
-                const auto& label = node.Labels[column];
+                const auto& label = from.Labels[column];
                 if (label.empty() || (!prefix.empty() && label.rfind(prefix, 0) != 0)) {
                     continue;
                 }
@@ -2296,16 +2382,8 @@ std::expected<TRelation, TError> BuildSelect(
             }
         }
         std::string name = ItemName(*item, i);
-        NAst::TExprPtr bound = item->Expr;
-        if (auto ok = input.Bind(bound, groupAlias); !ok) {
-            return std::unexpected(ok.error());
-        }
-        // Window and subquery items cannot be core-printed; ORDER BY refers to them
-        // by their aliases.
-        texts.push_back(HasWindowExpr(item->Expr) || HasSubquery(item->Expr)
-            ? std::nullopt
-            : std::optional<std::string>(NAst::NCore::PrintAst(bound)));
-        auto expr = collector.Rewrite(std::move(bound));
+        texts.push_back(std::move(boundTexts[i]));
+        auto expr = collector.Rewrite(std::move(bound[i]));
         if (!expr) {
             return std::unexpected(expr.error());
         }
@@ -2328,12 +2406,7 @@ std::expected<TRelation, TError> BuildSelect(
 
     // A scalar subquery in HAVING is left intact by the aggregate collector
     // (it is opaque) and decorrelated below, once the aggregate node exists.
-    NAst::TExprPtr having;
-    if (select.Having) {
-        having = select.Having;
-        if (auto bound = input.Bind(having, groupAlias); !bound) {
-            return std::unexpected(bound.error());
-        }
+    if (having) {
         auto rewritten = collector.Rewrite(std::move(having));
         if (!rewritten) {
             return std::unexpected(rewritten.error());

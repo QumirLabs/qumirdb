@@ -1,0 +1,2 @@
+Error: correlated IN subquery in a boolean expression is not supported @ Line: 1, Byte: 30, Column: 30
+

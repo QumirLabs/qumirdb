@@ -1,0 +1,1 @@
+SELECT t.id, sum(CASE WHEN t.a IN (SELECT s.k FROM s) THEN 1 ELSE 0 END) OVER (ORDER BY t.id) AS n FROM t;

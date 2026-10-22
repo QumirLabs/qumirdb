@@ -194,6 +194,15 @@ void NarrowPlainGroupKeys(
     std::vector<std::vector<size_t>>& sets,
     bool hasGroupingSyntax);
 
+// Whether `expr` is itself an aggregate call. A window's own function also looks
+// like one; callers descend into a window through WindowInputs, which leaves it out.
+bool IsAggregateCall(const NQumir::NAst::TExprPtr& expr);
+
+// The expressions of a window whose aggregates belong to the window's query level:
+// the function's arguments, PARTITION BY and the ORDER BY keys. The function itself
+// and the frame bounds are not among them.
+std::vector<NQumir::NAst::TExprPtr*> WindowInputs(NSql::TWindowExpr& window);
+
 // Whether `expr` calls an aggregate of its own query level, the calls TAggCollector
 // collects: those inside subquery bodies do not count, those inside window
 // arguments, PARTITION BY and window ORDER BY do.

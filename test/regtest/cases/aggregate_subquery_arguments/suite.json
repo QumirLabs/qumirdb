@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "fixtures": {
+    "t": {"json": "tables/t.json", "parquet": {"row_group_rows": 2}},
+    "s": {"json": "tables/s.json", "parquet": {"row_group_rows": 2}},
+    "empty": {"json": "tables/empty.json", "parquet": {"row_group_rows": 2}}
+  },
+  "tables": {"t": "t", "s": "s"},
+  "variants": ["single", "threaded"],
+  "cases": {
+    "in_case.sql": {"order": "unordered"},
+    "in_case_empty_subquery.sql": {"tables": {"t": "t", "s": "empty"}, "order": "unordered"},
+    "in_nested_case.sql": {"order": "unordered"},
+    "in_case_without_else.sql": {"order": "unordered"},
+    "in_grouped.sql": {"order": "ordered"},
+    "in_rollup.sql": {"order": "unordered"},
+    "having.sql": {"order": "unordered"},
+    "scalar_uncorrelated.sql": {"order": "unordered"},
+    "scalar_correlated.sql": {"order": "unordered"},
+    "scalar_correlated_grouped.sql": {"order": "unordered"},
+    "scalar_correlated_comparison.sql": {"order": "unordered"},
+    "count_distinct.sql": {"order": "unordered"},
+    "count_distinct_subquery.sql": {"order": "unordered"},
+    "inside_and_outside.sql": {"order": "unordered"},
+    "where_and_argument.sql": {"order": "unordered"},
+    "window_argument_aggregate.sql": {"order": "unordered"},
+    "window_order_aggregate.sql": {"order": "unordered"},
+    "exists_argument.sql": {"execute": false},
+    "correlated_in_argument.sql": {"execute": false},
+    "window_argument.sql": {"execute": false},
+    "window_partition_key.sql": {"execute": false}
+  }
+}
