@@ -51,9 +51,10 @@ struct TPlainAggKeyHash {
     }
 };
 
-// Generated column names of one aggregation (slots, computed keys, materialized
-// arguments, partial aggregates): each differs from the input columns, the SELECT
-// aliases and every other generated name, because they share one plan scope.
+// Generated column names of one SELECT (aggregate slots, computed keys,
+// materialized arguments, partial aggregates, window outputs and keys): each
+// differs from the input columns, the SELECT aliases and every other generated
+// name, because they share one plan scope.
 class TFreshNames {
 public:
     void Reserve(std::string name) {
@@ -165,6 +166,10 @@ class TWindowCollector {
     };
 
 public:
+    explicit TWindowCollector(TFreshNames& names)
+        : Names_(names)
+    { }
+
     std::expected<NQumir::NAst::TExprPtr, NQumir::TError> Rewrite(NQumir::NAst::TExprPtr expr);
 
     bool Empty() const { return Raw_.empty(); }
@@ -177,7 +182,7 @@ private:
     std::string Signature(const TRaw& raw) const;
 
     std::vector<TRaw> Raw_;
-    int Counter_ = 0;
+    TFreshNames& Names_;
 };
 
 // A plain column keeps its name; an expression is materialized into a synthetic

@@ -2418,7 +2418,7 @@ std::expected<TRelation, TError> BuildSelect(
     // Shared by both the aggregated and non-aggregated paths. Their outputs are
     // helper columns.
     auto applyWindows = [&](const TRelation& n) -> std::expected<TRelation, TError> {
-        TWindowCollector windows;
+        TWindowCollector windows(names);
         for (auto& projection : projections) {
             auto rewritten = windows.Rewrite(projection.Expression);
             if (!rewritten) {
