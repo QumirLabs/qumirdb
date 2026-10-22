@@ -98,4 +98,14 @@ if(QDB_NODE_EXECUTABLE)
             --xml ${CMAKE_CURRENT_BINARY_DIR}/test_plan_export_integration.xml
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     )
+    # The shared regression suites whose variants list "js".
+    add_test(
+        NAME test_reg_js
+        COMMAND ${QDB_NODE_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test/test_reg.mjs
+            $<TARGET_FILE:qdb>
+            ${CMAKE_SOURCE_DIR}/service/static/browser_runtime.js
+            ${CMAKE_SOURCE_DIR}/test/regtest
+            --xml ${CMAKE_CURRENT_BINARY_DIR}/test_reg_js.xml
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    )
 endif()

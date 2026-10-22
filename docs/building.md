@@ -32,6 +32,11 @@ Run one test binary directly:
 ./build/test/test_sort
 ```
 
+When Node.js is installed, CTest also runs the browser WASM runtime checks:
+`test_reg_js` runs the shared SQL regression suites (see
+[test/regtest/README.md](../test/regtest/README.md)), and
+`test_plan_export_integration` covers browser-only contracts.
+
 ## External modules
 
 Rust `CREATE MODULE` queries require a local toolchain whose LLVM bitcode is

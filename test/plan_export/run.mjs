@@ -710,7 +710,7 @@ function nativeResult(name, mode) {
 }
 
 function normalizeResult(result) {
-  const rows = result.rows.map(row => row.map(value => String(value)));
+  const rows = result.rows.map(row => row.map(value => (value === null ? '' : String(value))));
   rows.sort((left, right) =>
     JSON.stringify(left).localeCompare(JSON.stringify(right)));
   return {
