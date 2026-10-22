@@ -2267,7 +2267,10 @@ TCrossJoinKernels TKernelCompiler::CompileCrossJoin(
         program.push_back(NKernel::GenCrossJoinDispatchAst(
             spec.JoinType, rowSetType, pairBufferType));
         program.push_back(NKernel::GenJoinMaterializeAst(
-            *leftType.Cast(), *rightType.Cast(), includeRight,
+            *leftType.Cast(), *rightType.Cast(),
+            includeRight
+                ? NKernel::EJoinOutputColumns::LeftRight
+                : NKernel::EJoinOutputColumns::Left,
             columnType, rowSetType, pairBufferType, stringViewType));
         return program;
     };
@@ -2476,9 +2479,10 @@ TJoinKernels TKernelCompiler::CompileJoin(
     const bool isResidualSemiAnti = isSemiAnti && static_cast<bool>(residualPredicate);
     const bool isOuter =
         (type == EJoinType::Left || type == EJoinType::Right || type == EJoinType::Full);
-    if (!isSemiAnti && !isOuter && type != EJoinType::Inner) {
+    const bool isMark = type == EJoinType::LeftMark;
+    if (!isSemiAnti && !isOuter && !isMark && type != EJoinType::Inner) {
         throw NQumir::TError(
-            "CompileJoin: only Inner, Left, Right, Full, LeftSemi, and LeftAnti join types are supported");
+            "CompileJoin: only Inner, Left, Right, Full, LeftSemi, LeftAnti, and LeftMark join types are supported");
     }
 
     // Unified key descriptor (reuses the aggregation key machinery). Throws on
@@ -2492,7 +2496,21 @@ TJoinKernels TKernelCompiler::CompileJoin(
     for (size_t i = 0; i < keys.size(); ++i) {
         keyDesc.Fields[i].NullsEqual = keys[i].NullsEqual;
     }
-    const int64_t keySize = static_cast<int64_t>(keyDesc.Size);
+    if (isMark) {
+        // IN compares with SQL equality.
+        if (std::ranges::any_of(keys, [](const auto& key) { return key.NullsEqual; })) {
+            throw NQumir::TError("CompileJoin: left_mark join does not support NULL-safe keys");
+        }
+        // With several components a NULL makes the row comparison unknown only
+        // against right rows that match the other components, which the single
+        // NULL group of the right key set cannot tell.
+        const bool nullableKey = std::ranges::any_of(
+            keyDesc.Fields, [](const auto& field) { return field.IsNullable; });
+        if (nullableKey && keyDesc.Fields.size() > 1) {
+            throw NQumir::TError(
+                "CompileJoin: left_mark join does not support a nullable multi-column key");
+        }
+    }
     auto leftKeyColumns = std::make_shared<std::vector<int64_t>>();
     auto rightKeyColumns = std::make_shared<std::vector<int64_t>>();
     leftKeyColumns->reserve(keyDesc.Fields.size());
@@ -2526,7 +2544,7 @@ TJoinKernels TKernelCompiler::CompileJoin(
         // (rh_hash / rh_key_equal / key_owned_bytes / key_clone_owned), the
         // generic dual-key HashTable helpers they instantiate, then the join
         // library and the generated per-query functions.
-        const bool includeRight = !isSemiAnti;
+        const bool includeRight = !isSemiAnti && !isMark;
         const bool hasStringOutput = [&] {
             auto isString = [](const auto& field) {
                 return static_cast<bool>(TMaybeType<TStringType>(
@@ -2599,12 +2617,32 @@ TJoinKernels TKernelCompiler::CompileJoin(
                 keyDesc, /*isAnti=*/true,
                 "jt_finalize_outer", hashTableType, pairBufferType));
         }
+        if (isMark) {
+            program.push_back(NKernel::GenJoinInsertRowsOnlyAst(
+                keyDesc, /*isLeft=*/true, "jt_insert_left_only",
+                columnType, rowSetType, hashTableType, pairBufferType,
+                stringViewType, hasPrecomputedHash));
+            program.push_back(NKernel::GenJoinInsertKeyOnlyAst(
+                keyDesc, "jt_insert_key_only",
+                columnType, rowSetType, hashTableType, pairBufferType,
+                stringViewType));
+            program.push_back(NKernel::GenMarkJoinProbeAst(
+                keyDesc, "mj_probe_left", columnType, rowSetType, hashTableType,
+                pairBufferType, stringViewType, hasPrecomputedHash));
+        }
         program.push_back(NKernel::GenJoinDispatchAst(
-            keySize, type, isResidualSemiAnti,
+            keyDesc, type, isResidualSemiAnti,
             rowSetType, hashTableType, pairBufferType));
-        // Output materializer: semi/anti joins emit only the left columns.
+        // Output materializer: semi/anti joins emit only the left columns, a
+        // mark join the left columns and its marker.
+        auto output = NKernel::EJoinOutputColumns::LeftRight;
+        if (isSemiAnti) {
+            output = NKernel::EJoinOutputColumns::Left;
+        } else if (isMark) {
+            output = NKernel::EJoinOutputColumns::LeftMarker;
+        }
         program.push_back(NKernel::GenJoinMaterializeAst(
-            leftType, rightType, includeRight,
+            leftType, rightType, output,
             columnType, rowSetType, pairBufferType, stringViewType));
         return program;
     };

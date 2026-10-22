@@ -98,6 +98,19 @@ NQumir::NAst::TExprPtr GenJoinProbeSemiAst(
     NQumir::NAst::TTypePtr stringViewType,
     bool hasPrecomputedHash = false);
 
+// Generates the mark-join left stream probe (same ABI as GenJoinProbeSemiAst):
+// probes the complete right key set and pushes (left row id, marker code) for
+// every selected row, NULL keys included (join_mark.oz).
+NQumir::NAst::TExprPtr GenMarkJoinProbeAst(
+    const TJoinKeyDescriptor& key,
+    const std::string& funcName,
+    NQumir::NAst::TTypePtr columnType,
+    NQumir::NAst::TTypePtr rowSetType,
+    NQumir::NAst::TTypePtr hashTableType,
+    NQumir::NAst::TTypePtr pairBufferType,
+    NQumir::NAst::TTypePtr stringViewType,
+    bool hasPrecomputedHash = false);
+
 // Generates residual SEMI/ANTI right-side probe: reads right batch keys, probes
 // the left build table, applies jt_residual_filter, and marks matched left row
 // ids in the matched-id table instead of emitting output pairs.
@@ -161,6 +174,14 @@ std::vector<NQumir::NAst::TExprPtr> GenJoinKeyOwnershipFunDecls(
 std::vector<NQumir::NAst::TExprPtr> GenKeyTypeDecls(const TAggregateKeyDescriptor& key);
 std::vector<NQumir::NAst::TExprPtr> GenJoinKeyTypeDecls(const TJoinKeyDescriptor& key);
 
+// Output columns of the join materializer: the left fields, followed by the
+// right fields, by the mark-join marker, or by nothing (semi/anti).
+enum class EJoinOutputColumns {
+    Left,
+    LeftRight,
+    LeftMarker,
+};
+
 // Generates the output materializer entrypoint:
 //   jt_materialize(pairs, left_store, right_store, stream_left, stream_right,
 //                  start, limit, out) -> i64
@@ -169,16 +190,16 @@ std::vector<NQumir::NAst::TExprPtr> GenJoinKeyTypeDecls(const TJoinKeyDescriptor
 // an owners list stored in out.Private), decodes packed row ids (id == -1 is
 // outer-join null padding; batch index -1 reads the stream_* batch instead of
 // the store), and calls cacheable physical-type workers for fixed-width, bool,
-// BinInt, and string columns. Output columns are the left fields followed by
-// the right fields (right omitted for semi/anti); source column positions and
-// pair sides are runtime worker arguments, while fixed-width worker types are
-// selected through a pointer witness. Returns the number of rows materialized
-// (0 leaves `out` untouched). The caller assigns out.Destroy (the kernel sets
-// it to null).
+// BinInt, and string columns. `output` selects the columns; the marker column
+// reads the marker code from the right half of each pair. Source column
+// positions and pair sides are runtime worker arguments, while fixed-width
+// worker types are selected through a pointer witness. Returns the number of
+// rows materialized (0 leaves `out` untouched). The caller assigns out.Destroy
+// (the kernel sets it to null).
 NQumir::NAst::TExprPtr GenJoinMaterializeAst(
     const NQumir::NAst::TStructType& leftType,
     const NQumir::NAst::TStructType& rightType,
-    bool includeRight,
+    EJoinOutputColumns output,
     NQumir::NAst::TTypePtr columnType,
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr pairBufferType,
@@ -188,9 +209,14 @@ NQumir::NAst::TExprPtr GenJoinMaterializeAst(
 //   jt_dispatch(left, right, batch, batch_idx, pairs, left_store, right_store,
 //               left_key_columns, right_key_columns, arg, op) -> bool
 // It dispatches init/update/stream/finalize/destroy to the internal generated
-// and library helpers. Join type and key size are compile-time constants.
+// and library helpers. Join type and key layout are compile-time constants.
+//
+// LeftMark: UpdateLeft stores left rows, UpdateRight builds the key-only right
+// set. A marker needs the complete right set, so StreamLeft and Finalize may
+// run only after the last UpdateRight. StreamRight, probing right rows against
+// stored left rows without keeping them, is unsupported and returns false.
 NQumir::NAst::TExprPtr GenJoinDispatchAst(
-    int64_t keySize,
+    const TJoinKeyDescriptor& key,
     EJoinType type,
     bool hasResidual,
     NQumir::NAst::TTypePtr rowSetType,

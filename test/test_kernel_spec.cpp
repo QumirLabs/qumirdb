@@ -3,6 +3,7 @@
 #include <qdb/kernel/annotate_type.h>
 #include <qdb/kernel/builder.h>
 #include <qdb/kernel/spec.h>
+#include <qdb/plan/types/nullable.h>
 
 #include <qumir/parser/ast.h>
 #include <qumir/parser/core/printer.h>
@@ -266,6 +267,56 @@ TEST(KernelSpec, BuildsJoinSpecFromEquiKeys) {
     EXPECT_EQ(spec.Entrypoints[1].Name, "jt_materialize");
     ASSERT_EQ(spec.SourceModules.size(), 1u);
     EXPECT_EQ(spec.SourceModules[0], "qumirdb");
+}
+
+TEST(KernelSpec, BuildsMarkJoinSpec) {
+    using namespace NQumir::NAst;
+
+    auto i64 = std::make_shared<TIntegerType>();
+    TStructType left({
+        {"lk", i64},
+        {"lv", i64},
+    });
+    TStructType right({
+        {"rk", i64},
+        {"rv", i64},
+    });
+
+    auto spec = NKernel::BuildJoinKernelSpec(
+        left, right, {{.Left = "lk", .Right = "rk"}}, EJoinType::LeftMark,
+        nullptr, "marker");
+
+    EXPECT_EQ(spec.Kind, NKernel::EOperatorKernelKind::Binary);
+    EXPECT_EQ(spec.OperatorName, "join");
+    EXPECT_EQ(spec.JoinType, EJoinType::LeftMark);
+    ASSERT_EQ(spec.InputSchemas.size(), 2u);
+    ASSERT_EQ(spec.JoinKeys.size(), 1u);
+    EXPECT_EQ(spec.JoinKeys[0].Left.Name, "lk");
+    EXPECT_EQ(spec.JoinKeys[0].Right.Name, "rk");
+    auto output = TMaybeType<TStructType>(spec.OutputSchema);
+    ASSERT_TRUE(output);
+    ASSERT_EQ(output.Cast()->Fields.size(), 3u);
+    EXPECT_EQ(output.Cast()->Fields[0].first, "lk");
+    EXPECT_EQ(output.Cast()->Fields[1].first, "lv");
+    EXPECT_EQ(output.Cast()->Fields[2].first, "marker");
+    EXPECT_TRUE(TMaybeType<TBoolType>(output.Cast()->Fields[2].second));
+    ASSERT_EQ(spec.Entrypoints.size(), 2u);
+    EXPECT_EQ(spec.Entrypoints[0].Name, "jt_dispatch");
+    EXPECT_EQ(spec.Entrypoints[1].Name, "jt_materialize");
+
+    // A NULL key on either side can make the marker NULL.
+    TStructType nullableRight({
+        {"rk", std::make_shared<TNullable>(i64)},
+    });
+    auto nullableSpec = NKernel::BuildJoinKernelSpec(
+        left, nullableRight, {{.Left = "lk", .Right = "rk"}},
+        EJoinType::LeftMark, nullptr, "marker");
+    auto nullableOutput = TMaybeType<TStructType>(nullableSpec.OutputSchema);
+    ASSERT_TRUE(nullableOutput);
+    ASSERT_EQ(nullableOutput.Cast()->Fields.size(), 3u);
+    const auto& marker = nullableOutput.Cast()->Fields[2].second;
+    EXPECT_TRUE(IsNullableType(marker));
+    EXPECT_TRUE(TMaybeType<TBoolType>(UnwrapNullableType(marker)));
 }
 
 TEST(KernelSpec, BuildsCrossJoinSpec) {

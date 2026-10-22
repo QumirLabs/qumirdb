@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <tuple>
@@ -1604,6 +1605,753 @@ TEST(JoinStringKey, CompositeStringIntKey) {
 
   kernels.Dispatch(&left, &right, nullptr, 0, &pairs, nullptr, nullptr, 0,
                    JoinOpCode(EJoinKernelOp::Destroy));
+}
+
+namespace {
+
+using TMarker = std::optional<bool>;
+
+// SQL `key IN keys`; nullopt is NULL.
+template <class T>
+TMarker InReference(const std::optional<T> &key,
+                    const std::vector<std::optional<T>> &keys) {
+  if (keys.empty()) {
+    return false;
+  }
+  if (!key) {
+    return std::nullopt;
+  }
+  bool hasNull = false;
+  for (const auto &value : keys) {
+    if (!value) {
+      hasNull = true;
+    } else if (*value == *key) {
+      return true;
+    }
+  }
+  if (hasNull) {
+    return std::nullopt;
+  }
+  return false;
+}
+
+// Expected mark join output: every left row once with its marker, as
+// (row index, marker) pairs.
+template <class T>
+std::vector<std::pair<int64_t, TMarker>>
+MarkJoinReference(const std::vector<std::optional<T>> &leftKeys,
+                  const std::vector<std::optional<T>> &rightKeys) {
+  std::vector<std::pair<int64_t, TMarker>> rows;
+  for (size_t i = 0; i < leftKeys.size(); ++i) {
+    rows.emplace_back(static_cast<int64_t>(i),
+                      InReference(leftKeys[i], rightKeys));
+  }
+  return rows;
+}
+
+TMarker ReadMarker(const TColumn &col, int64_t row) {
+  if (!MaskBit(col, row)) {
+    return std::nullopt;
+  }
+  return ((static_cast<uint8_t>(col.Data[row / 8]) >> (row % 8)) & 1) != 0;
+}
+
+std::vector<uint8_t> ValidityMask(const std::vector<bool> &valid) {
+  std::vector<uint8_t> mask((valid.size() + 7) / 8, 0);
+  for (size_t i = 0; i < valid.size(); ++i) {
+    if (valid[i]) {
+      mask[i / 8] |= static_cast<uint8_t>(1u << (i % 8));
+    }
+  }
+  return mask;
+}
+
+// Backing storage for a nullable fixed-width column. A NULL row keeps
+// `nullPayload` in its data slot: the kernel must ignore it.
+template <class T> struct TNullableColumn {
+  std::vector<T> Values;
+  std::vector<uint8_t> Mask;
+
+  TNullableColumn(const std::vector<std::optional<T>> &values,
+                  T nullPayload = T{}) {
+    std::vector<bool> valid;
+    for (const auto &value : values) {
+      Values.push_back(value.value_or(nullPayload));
+      valid.push_back(value.has_value());
+    }
+    Mask = ValidityMask(valid);
+  }
+
+  TColumn Column() {
+    return TColumn{.Data = reinterpret_cast<char *>(Values.data()),
+                   .Mask = Mask.data()};
+  }
+};
+
+std::vector<int64_t> RowIndices(size_t count) {
+  std::vector<int64_t> indices(count);
+  for (size_t i = 0; i < count; ++i) {
+    indices[i] = static_cast<int64_t>(i);
+  }
+  return indices;
+}
+
+NKernel::TOperatorKernelSpec
+MarkJoinSpec(const NQumir::NAst::TStructType &leftType,
+             const NQumir::NAst::TStructType &rightType,
+             const std::vector<TJoinKey> &keys) {
+  return NKernel::BuildJoinKernelSpec(leftType, rightType, keys,
+                                      EJoinType::LeftMark, nullptr, "marker");
+}
+
+// Dispatch orders a mark join can be driven in. The right side always goes
+// through UpdateRight with batch index -1 (a key-only build that keeps no
+// rows), and Finalize always runs last.
+enum class EMarkJoinShape {
+  // The right set is complete before any left row; left rows are streamed.
+  ProbeLeft,
+  // Left rows are stored through UpdateLeft and marked by Finalize.
+  Symmetric,
+  // The first half of the left rows is stored, the second half is streamed.
+  Mixed,
+};
+
+const char *ShapeName(EMarkJoinShape shape) {
+  switch (shape) {
+  case EMarkJoinShape::ProbeLeft:
+    return "probe-left";
+  case EMarkJoinShape::Symmetric:
+    return "symmetric";
+  case EMarkJoinShape::Mixed:
+    return "mixed";
+  }
+  return "";
+}
+
+constexpr EMarkJoinShape AllMarkJoinShapes[] = {
+    EMarkJoinShape::ProbeLeft,
+    EMarkJoinShape::Symmetric,
+    EMarkJoinShape::Mixed,
+};
+
+struct TMarkJoinRun {
+  // (left row index read from the last left column, marker), sorted.
+  std::vector<std::pair<int64_t, TMarker>> Rows;
+  int64_t InitialCapacity = 0;
+  int64_t LeftCapacity = 0;
+  int64_t RightCapacity = 0;
+};
+
+TMarkJoinRun RunMarkJoin(const TJoinKernels &kernels, const TRowSet &left,
+                         const TRowSet &right, EMarkJoinShape shape) {
+  // Mixed splits the left batch through two complementary selections.
+  std::vector<uint8_t> firstHalf(left.RowCount);
+  std::vector<uint8_t> secondHalf(left.RowCount);
+  for (int64_t i = 0; i < left.RowCount; ++i) {
+    const bool selected = !left.Selection || left.Selection[i] != 0;
+    firstHalf[i] = selected && i < left.RowCount / 2;
+    secondHalf[i] = selected && i >= left.RowCount / 2;
+  }
+  TRowSet stored = left;
+  TRowSet streamed = left;
+  if (shape == EMarkJoinShape::Mixed) {
+    stored.Selection = firstHalf.data();
+    streamed.Selection = secondHalf.data();
+  }
+  TRowSet rightBatch = right;
+
+  THashTable leftTable{}, rightTable{};
+  TPairBuffer pairs{};
+  auto dispatch = [&](TRowSet *batch, int64_t batchIdx, int64_t arg,
+                      EJoinKernelOp op) {
+    return kernels.Dispatch(&leftTable, &rightTable, batch, batchIdx, &pairs,
+                            &stored, nullptr, arg, JoinOpCode(op));
+  };
+
+  TMarkJoinRun run;
+  EXPECT_TRUE(dispatch(nullptr, 0, 8, EJoinKernelOp::Init));
+  run.InitialCapacity = rightTable.Capacity;
+  if (shape != EMarkJoinShape::ProbeLeft) {
+    EXPECT_TRUE(dispatch(&stored, 0, 0, EJoinKernelOp::UpdateLeft));
+  }
+  EXPECT_TRUE(dispatch(&rightBatch, -1, 0, EJoinKernelOp::UpdateRight));
+  if (shape != EMarkJoinShape::Symmetric) {
+    EXPECT_TRUE(dispatch(&streamed, -1, 0, EJoinKernelOp::StreamLeft));
+  }
+  EXPECT_TRUE(dispatch(nullptr, 0, 0, EJoinKernelOp::Finalize));
+  run.LeftCapacity = leftTable.Capacity;
+  run.RightCapacity = rightTable.Capacity;
+
+  if (pairs.Count > 0) {
+    TRowSet out{};
+    EXPECT_EQ(kernels.Materialize(&pairs, &stored, nullptr, &streamed, nullptr,
+                                  0, pairs.Count, &out),
+              pairs.Count);
+    EXPECT_EQ(out.ColumnCount, left.ColumnCount + 1);
+    const auto *rowIndex = reinterpret_cast<const int64_t *>(
+        out.Columns[left.ColumnCount - 1].Data);
+    for (int64_t row = 0; row < out.RowCount; ++row) {
+      run.Rows.emplace_back(rowIndex[row],
+                            ReadMarker(out.Columns[left.ColumnCount], row));
+    }
+    FreeMaterializedRowSet(out);
+  }
+  dispatch(nullptr, 0, 0, EJoinKernelOp::Destroy);
+  std::sort(run.Rows.begin(), run.Rows.end());
+  return run;
+}
+
+// Random nullable keys in [0, domain); about one in `nullEvery` is NULL
+// (never when nullEvery is 0).
+std::vector<std::optional<int64_t>>
+RandomNullableKeys(uint32_t &seed, size_t count, uint32_t domain,
+                   uint32_t nullEvery) {
+  auto rnd = [&]() {
+    seed = (seed * 1103515245u + 12345u) & 0x7fffffffu;
+    return seed;
+  };
+  std::vector<std::optional<int64_t>> keys;
+  for (size_t i = 0; i < count; ++i) {
+    const uint32_t value = rnd();
+    if (nullEvery != 0 && value % nullEvery == 0) {
+      keys.push_back(std::nullopt);
+    } else {
+      keys.push_back(static_cast<int64_t>((value / 7) % domain));
+    }
+  }
+  return keys;
+}
+
+} // namespace
+
+TEST(MarkJoinKernel, NullableKeyFollowsThreeValuedIn) {
+  using namespace NQumir::NAst;
+  auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
+  auto nullableI64 = std::make_shared<TNullable>(i64);
+  TStructType leftType({{"lk", nullableI64}, {"lv", i64}});
+  TStructType rightType({{"rk", nullableI64}});
+
+  TKernelCompiler compiler;
+  auto kernels = compiler.CompileJoin(
+      MarkJoinSpec(leftType, rightType, {{"lk", "rk"}}));
+
+  struct TCase {
+    std::string Name;
+    std::vector<std::optional<int64_t>> Left;
+    std::vector<std::optional<int64_t>> Right;
+    std::vector<uint8_t> RightSelection; // empty = every row
+    std::vector<TMarker> Expected;
+  };
+  const std::vector<TCase> cases = {
+      {
+          .Name = "match, miss, NULL key, duplicate keys in S",
+          .Left = {1, 4, std::nullopt, 2, 1},
+          .Right = {1, 2, 2, 3, 1},
+          .Expected = {true, false, std::nullopt, true, true},
+      },
+      {
+          .Name = "S contains NULL",
+          .Left = {1, 5, std::nullopt},
+          .Right = {std::nullopt, 1},
+          .Expected = {true, std::nullopt, std::nullopt},
+      },
+      {
+          .Name = "S holds only NULLs",
+          .Left = {7, 1, std::nullopt},
+          .Right = {std::nullopt, std::nullopt},
+          .Expected = {std::nullopt, std::nullopt, std::nullopt},
+      },
+      {
+          .Name = "empty S",
+          .Left = {1, std::nullopt},
+          .Right = {},
+          .Expected = {false, false},
+      },
+      {
+          .Name = "S emptied by the selection",
+          .Left = {1, std::nullopt},
+          .Right = {std::nullopt, 1},
+          .RightSelection = {0, 0},
+          .Expected = {false, false},
+      },
+  };
+
+  for (const auto &c : cases) {
+    std::vector<std::optional<int64_t>> selectedRight;
+    for (size_t i = 0; i < c.Right.size(); ++i) {
+      if (c.RightSelection.empty() || c.RightSelection[i] != 0) {
+        selectedRight.push_back(c.Right[i]);
+      }
+    }
+    std::vector<std::pair<int64_t, TMarker>> expected;
+    for (size_t i = 0; i < c.Expected.size(); ++i) {
+      expected.emplace_back(static_cast<int64_t>(i), c.Expected[i]);
+    }
+    ASSERT_EQ(MarkJoinReference(c.Left, selectedRight), expected) << c.Name;
+
+    // NULL rows carry the payload 1, a key of S in most cases.
+    TNullableColumn<int64_t> lk(c.Left, 1);
+    std::vector<int64_t> lv = RowIndices(c.Left.size());
+    std::vector<TColumn> lcols = {
+        lk.Column(), TColumn{.Data = reinterpret_cast<char *>(lv.data())}};
+    TRowSet lbatch{.Columns = lcols.data(),
+                   .ColumnCount = 2,
+                   .RowCount = static_cast<int64_t>(c.Left.size()),
+                   .RefCount = 1};
+    TNullableColumn<int64_t> rk(c.Right, 1);
+    std::vector<TColumn> rcols = {rk.Column()};
+    auto rightSelection = c.RightSelection;
+    TRowSet rbatch{.Columns = rcols.data(),
+                   .ColumnCount = 1,
+                   .RowCount = static_cast<int64_t>(c.Right.size()),
+                   .Selection = rightSelection.empty() ? nullptr
+                                                       : rightSelection.data(),
+                   .RefCount = 1};
+
+    for (auto shape : AllMarkJoinShapes) {
+      EXPECT_EQ(RunMarkJoin(kernels, lbatch, rbatch, shape).Rows, expected)
+          << c.Name << ", " << ShapeName(shape);
+    }
+  }
+}
+
+TEST(MarkJoinKernel, NonNullableCompositeKeyIsTwoValued) {
+  using namespace NQumir::NAst;
+  auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
+  auto i32 = std::make_shared<TIntegerType>(TIntegerType::I32);
+  TStructType leftType({{"la", i64}, {"lb", i32}, {"lv", i64}});
+  TStructType rightType({{"rb", i32}, {"ra", i64}});
+
+  TKernelCompiler compiler;
+  auto kernels = compiler.CompileJoin(
+      MarkJoinSpec(leftType, rightType, {{"la", "ra"}, {"lb", "rb"}}));
+
+  uint32_t seed = 777;
+  auto rnd = [&]() {
+    seed = (seed * 1103515245u + 12345u) & 0x7fffffffu;
+    return seed;
+  };
+  std::vector<int64_t> la, ra;
+  std::vector<int32_t> lb, rb;
+  std::vector<std::optional<std::pair<int64_t, int32_t>>> leftKeys, rightKeys;
+  for (int i = 0; i < 40; ++i) {
+    la.push_back(rnd() % 5);
+    lb.push_back(static_cast<int32_t>(rnd() % 4));
+    leftKeys.emplace_back(std::pair{la.back(), lb.back()});
+  }
+  for (int i = 0; i < 15; ++i) {
+    ra.push_back(rnd() % 5);
+    rb.push_back(static_cast<int32_t>(rnd() % 4));
+    rightKeys.emplace_back(std::pair{ra.back(), rb.back()});
+  }
+  std::vector<int64_t> lv = RowIndices(la.size());
+  std::vector<TColumn> lcols = {
+      TColumn{.Data = reinterpret_cast<char *>(la.data())},
+      TColumn{.Data = reinterpret_cast<char *>(lb.data())},
+      TColumn{.Data = reinterpret_cast<char *>(lv.data())},
+  };
+  TRowSet lbatch{.Columns = lcols.data(),
+                 .ColumnCount = 3,
+                 .RowCount = static_cast<int64_t>(la.size()),
+                 .RefCount = 1};
+  std::vector<TColumn> rcols = {
+      TColumn{.Data = reinterpret_cast<char *>(rb.data())},
+      TColumn{.Data = reinterpret_cast<char *>(ra.data())},
+  };
+  TRowSet rbatch{.Columns = rcols.data(),
+                 .ColumnCount = 2,
+                 .RowCount = static_cast<int64_t>(ra.size()),
+                 .RefCount = 1};
+
+  const auto expected = MarkJoinReference(leftKeys, rightKeys);
+  ASSERT_TRUE(std::ranges::any_of(expected, [](const auto &row) {
+    return row.second == TMarker(true);
+  }));
+  ASSERT_TRUE(std::ranges::any_of(expected, [](const auto &row) {
+    return row.second == TMarker(false);
+  }));
+  for (auto shape : AllMarkJoinShapes) {
+    EXPECT_EQ(RunMarkJoin(kernels, lbatch, rbatch, shape).Rows, expected)
+        << ShapeName(shape);
+  }
+}
+
+TEST(MarkJoinKernel, NullableStringKeys) {
+  using namespace NQumir::NAst;
+  auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
+  auto nullableString =
+      std::make_shared<TNullable>(std::make_shared<TStringType>());
+  TStructType leftType({{"lk", nullableString}, {"lv", i64}});
+  TStructType rightType({{"rk", nullableString}});
+
+  TKernelCompiler compiler;
+  auto kernels = compiler.CompileJoin(
+      MarkJoinSpec(leftType, rightType, {{"lk", "rk"}}));
+
+  // A NULL row keeps a payload that equals a key of the other side.
+  const std::vector<std::optional<std::string>> leftKeys = {
+      "apple", "cherry", std::nullopt, "banana", "apple"};
+  const std::vector<std::string> leftPayload = {"apple", "cherry", "banana",
+                                                "banana", "apple"};
+  const std::vector<std::optional<std::string>> withNull = {
+      "banana", std::nullopt, "apple", "banana"};
+  const std::vector<std::string> withNullPayload = {"banana", "cherry",
+                                                    "apple", "banana"};
+  const std::vector<std::optional<std::string>> withoutNull = {"banana",
+                                                               "apple"};
+
+  TStringColumn lk(leftPayload);
+  std::vector<bool> leftValid;
+  for (const auto &key : leftKeys) {
+    leftValid.push_back(key.has_value());
+  }
+  const auto leftMask = ValidityMask(leftValid);
+  std::vector<int64_t> lv = RowIndices(leftKeys.size());
+  std::vector<TColumn> lcols = {
+      lk.Column(), TColumn{.Data = reinterpret_cast<char *>(lv.data())}};
+  lcols[0].Mask = leftMask.data();
+  TRowSet lbatch{.Columns = lcols.data(),
+                 .ColumnCount = 2,
+                 .RowCount = static_cast<int64_t>(leftKeys.size()),
+                 .RefCount = 1};
+
+  TStringColumn rkWithNull(withNullPayload);
+  const auto withNullMask = ValidityMask({true, false, true, true});
+  std::vector<TColumn> rcolsWithNull = {rkWithNull.Column()};
+  rcolsWithNull[0].Mask = withNullMask.data();
+  TRowSet rbatchWithNull{.Columns = rcolsWithNull.data(),
+                         .ColumnCount = 1,
+                         .RowCount = 4,
+                         .RefCount = 1};
+
+  TStringColumn rkWithoutNull({"banana", "apple"});
+  std::vector<TColumn> rcolsWithoutNull = {rkWithoutNull.Column()};
+  TRowSet rbatchWithoutNull{.Columns = rcolsWithoutNull.data(),
+                            .ColumnCount = 1,
+                            .RowCount = 2,
+                            .RefCount = 1};
+
+  const std::vector<std::pair<int64_t, TMarker>> expectedWithNull = {
+      {0, true}, {1, std::nullopt}, {2, std::nullopt}, {3, true}, {4, true}};
+  const std::vector<std::pair<int64_t, TMarker>> expectedWithoutNull = {
+      {0, true}, {1, false}, {2, std::nullopt}, {3, true}, {4, true}};
+  ASSERT_EQ(MarkJoinReference(leftKeys, withNull), expectedWithNull);
+  ASSERT_EQ(MarkJoinReference(leftKeys, withoutNull), expectedWithoutNull);
+  for (auto shape : AllMarkJoinShapes) {
+    EXPECT_EQ(RunMarkJoin(kernels, lbatch, rbatchWithNull, shape).Rows,
+              expectedWithNull)
+        << ShapeName(shape);
+    EXPECT_EQ(RunMarkJoin(kernels, lbatch, rbatchWithoutNull, shape).Rows,
+              expectedWithoutNull)
+        << ShapeName(shape);
+  }
+}
+
+TEST(MarkJoinKernel, RehashSizedSidesMatchReference) {
+  using namespace NQumir::NAst;
+  auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
+  auto nullableI64 = std::make_shared<TNullable>(i64);
+  TStructType leftType({{"lk", nullableI64}, {"lv", i64}});
+  TStructType rightType({{"rk", nullableI64}});
+
+  TKernelCompiler compiler;
+  auto kernels = compiler.CompileJoin(
+      MarkJoinSpec(leftType, rightType, {{"lk", "rk"}}));
+
+  uint32_t seed = 2024;
+  const auto leftKeys = RandomNullableKeys(seed, 300, 400, 10);
+  TNullableColumn<int64_t> lk(leftKeys);
+  std::vector<int64_t> lv = RowIndices(leftKeys.size());
+  std::vector<TColumn> lcols = {
+      lk.Column(), TColumn{.Data = reinterpret_cast<char *>(lv.data())}};
+  TRowSet lbatch{.Columns = lcols.data(),
+                 .ColumnCount = 2,
+                 .RowCount = static_cast<int64_t>(leftKeys.size()),
+                 .RefCount = 1};
+
+  // Enough distinct keys a side to rehash either table; once without NULLs
+  // (misses are FALSE) and once with NULLs (misses are NULL).
+  for (uint32_t nullEvery : {0u, 10u}) {
+    const auto rightKeys = RandomNullableKeys(seed, 200, 300, nullEvery);
+    TNullableColumn<int64_t> rk(rightKeys);
+    std::vector<TColumn> rcols = {rk.Column()};
+    TRowSet rbatch{.Columns = rcols.data(),
+                   .ColumnCount = 1,
+                   .RowCount = static_cast<int64_t>(rightKeys.size()),
+                   .RefCount = 1};
+
+    const auto expected = MarkJoinReference(leftKeys, rightKeys);
+    ASSERT_TRUE(std::ranges::any_of(expected, [](const auto &row) {
+      return row.second == TMarker(true);
+    }));
+    ASSERT_TRUE(std::ranges::any_of(expected, [&](const auto &row) {
+      return row.second == (nullEvery == 0 ? TMarker(false) : std::nullopt);
+    }));
+    for (auto shape : AllMarkJoinShapes) {
+      const auto run = RunMarkJoin(kernels, lbatch, rbatch, shape);
+      EXPECT_EQ(run.Rows, expected) << nullEvery << ", " << ShapeName(shape);
+      EXPECT_GT(run.RightCapacity, run.InitialCapacity);
+      if (shape == EMarkJoinShape::Symmetric) {
+        EXPECT_GT(run.LeftCapacity, run.InitialCapacity);
+      }
+    }
+  }
+}
+
+TEST(MarkJoinKernel, ReadsPrecomputedLeftHashes) {
+  using namespace NQumir::NAst;
+  auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
+  auto nullableI64 = std::make_shared<TNullable>(i64);
+  TStructType leftType({{"lk", nullableI64}, {"lv", i64}});
+  TStructType rightType({{"rk", nullableI64}});
+
+  TKernelCompiler compiler;
+  auto spec = MarkJoinSpec(leftType, rightType, {{"lk", "rk"}});
+  auto hash = compiler.CompileJoinHash(spec);
+  spec.HasPrecomputedHash = true;
+  auto kernels = compiler.CompileJoin(spec);
+
+  uint32_t seed = 99;
+  const auto leftKeys = RandomNullableKeys(seed, 60, 30, 8);
+  const auto rightKeys = RandomNullableKeys(seed, 20, 30, 8);
+  TNullableColumn<int64_t> lk(leftKeys);
+  std::vector<int64_t> lv = RowIndices(leftKeys.size());
+  std::vector<TColumn> lcols = {
+      lk.Column(), TColumn{.Data = reinterpret_cast<char *>(lv.data())}};
+  TRowSet lbatch{.Columns = lcols.data(),
+                 .ColumnCount = 2,
+                 .RowCount = static_cast<int64_t>(leftKeys.size()),
+                 .RefCount = 1};
+  std::vector<uint64_t> leftHashes(leftKeys.size());
+  ASSERT_TRUE(hash.Left(&lbatch, leftHashes.data()));
+  lbatch.Hash = leftHashes.data();
+
+  TNullableColumn<int64_t> rk(rightKeys);
+  std::vector<TColumn> rcols = {rk.Column()};
+  TRowSet rbatch{.Columns = rcols.data(),
+                 .ColumnCount = 1,
+                 .RowCount = static_cast<int64_t>(rightKeys.size()),
+                 .RefCount = 1};
+
+  const auto expected = MarkJoinReference(leftKeys, rightKeys);
+  for (auto shape : AllMarkJoinShapes) {
+    EXPECT_EQ(RunMarkJoin(kernels, lbatch, rbatch, shape).Rows, expected)
+        << ShapeName(shape);
+  }
+}
+
+TEST(MarkJoinKernel, RejectsUnsupportedSpecs) {
+  using namespace NQumir::NAst;
+  auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
+  auto nullableI64 = std::make_shared<TNullable>(i64);
+  TStructType leftType({{"lk", nullableI64}, {"ln", i64}, {"lv", i64}});
+  TStructType rightType({{"rk", nullableI64}, {"rn", i64}});
+  TKernelCompiler compiler;
+
+  auto expectError = [&](const NKernel::TOperatorKernelSpec &spec,
+                         const std::string &message) {
+    try {
+      compiler.CompileJoin(spec);
+      ADD_FAILURE() << "expected error: " << message;
+    } catch (const NQumir::TError &error) {
+      EXPECT_NE(error.ToString().find(message), std::string::npos)
+          << error.ToString();
+    }
+  };
+
+  expectError(NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}},
+                                           EJoinType::LeftMark,
+                                           ParseExpr("(> lv rn)"), "marker"),
+              "residual filter is not yet supported for this join type");
+  expectError(
+      MarkJoinSpec(leftType, rightType,
+                   {{.Left = "lk", .Right = "rk", .NullsEqual = true}}),
+      "left_mark join does not support NULL-safe keys");
+  expectError(MarkJoinSpec(leftType, rightType, {{"lk", "rk"}, {"ln", "rn"}}),
+              "left_mark join does not support a nullable multi-column key");
+  EXPECT_THROW(NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}},
+                                            EJoinType::LeftMark),
+               std::runtime_error);
+
+  // Without equi-keys there is no key set to answer IN: the nested-loop kernel
+  // rejects the type.
+  EXPECT_THROW(
+      NKernel::BuildCrossJoinKernelSpec(leftType, rightType, EJoinType::LeftMark),
+      std::runtime_error);
+  auto keyless = NKernel::BuildCrossJoinKernelSpec(leftType, rightType);
+  keyless.JoinType = EJoinType::LeftMark;
+  EXPECT_THROW(compiler.CompileCrossJoin(keyless), NQumir::TError);
+
+  // Right rows cannot be streamed past stored left rows: a marker needs the
+  // complete right side.
+  auto kernels =
+      compiler.CompileJoin(MarkJoinSpec(leftType, rightType, {{"ln", "rn"}}));
+  THashTable left{}, right{};
+  TPairBuffer pairs{};
+  std::vector<int64_t> rn = {1};
+  std::vector<TColumn> rcols = {
+      TColumn{.Data = reinterpret_cast<char *>(rn.data())},
+      TColumn{.Data = reinterpret_cast<char *>(rn.data())}};
+  TRowSet rbatch{
+      .Columns = rcols.data(), .ColumnCount = 2, .RowCount = 1, .RefCount = 1};
+  ASSERT_TRUE(kernels.Dispatch(&left, &right, nullptr, 0, &pairs, nullptr,
+                               nullptr, 8, JoinOpCode(EJoinKernelOp::Init)));
+  EXPECT_FALSE(kernels.Dispatch(&left, &right, &rbatch, -1, &pairs, nullptr,
+                                nullptr, 0,
+                                JoinOpCode(EJoinKernelOp::StreamRight)));
+  EXPECT_EQ(pairs.Count, 0);
+  kernels.Dispatch(&left, &right, nullptr, 0, &pairs, nullptr, nullptr, 0,
+                   JoinOpCode(EJoinKernelOp::Destroy));
+}
+
+namespace {
+
+// Rows of `rowSet` an ordinary compiled filter keeps for `predicate`, read
+// against the column types of `type`.
+std::vector<int64_t> FilterRows(const NQumir::NAst::TTypePtr &type,
+                                TRowSet rowSet, const std::string &predicate) {
+  auto schema = NQumir::NAst::TMaybeType<NQumir::NAst::TStructType>(type);
+  EXPECT_TRUE(schema);
+  auto dispatch = TKernelCompiler().CompileFilter(
+      NKernel::BuildFilterKernelSpec(*schema.Cast(), ParseExpr(predicate)));
+  std::vector<uint8_t> selection(rowSet.RowCount);
+  rowSet.Selection = selection.data();
+  dispatch(rowSet, nullptr);
+  std::vector<int64_t> rows;
+  for (int64_t row = 0; row < rowSet.RowCount; ++row) {
+    if (selection[row] != 0) {
+      rows.push_back(row);
+    }
+  }
+  return rows;
+}
+
+} // namespace
+
+// The materialized marker column must read back through the ordinary column
+// ABI (bit-packed Data, Mask bit 1 = valid) as the type the spec declares.
+TEST(MarkJoinKernel, MarkerColumnReadsBackAsDeclaredType) {
+  using namespace NQumir::NAst;
+  auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
+  auto nullableI64 = std::make_shared<TNullable>(i64);
+
+  auto materialize = [](const NKernel::TOperatorKernelSpec &spec,
+                        const TRowSet &left, const TRowSet &right,
+                        TPairBuffer &pairs, THashTable &leftTable,
+                        THashTable &rightTable, TRowSet &out) {
+    auto kernels = TKernelCompiler().CompileJoin(spec);
+    TRowSet leftBatch = left;
+    TRowSet rightBatch = right;
+    ASSERT_TRUE(kernels.Dispatch(&leftTable, &rightTable, nullptr, 0, &pairs,
+                                 nullptr, nullptr, 8,
+                                 JoinOpCode(EJoinKernelOp::Init)));
+    ASSERT_TRUE(kernels.Dispatch(&leftTable, &rightTable, &rightBatch, -1,
+                                 &pairs, nullptr, nullptr, 0,
+                                 JoinOpCode(EJoinKernelOp::UpdateRight)));
+    ASSERT_TRUE(kernels.Dispatch(&leftTable, &rightTable, &leftBatch, -1,
+                                 &pairs, nullptr, nullptr, 0,
+                                 JoinOpCode(EJoinKernelOp::StreamLeft)));
+    ASSERT_EQ(kernels.Materialize(&pairs, nullptr, nullptr, &leftBatch,
+                                  nullptr, 0, pairs.Count, &out),
+              left.RowCount);
+    kernels.Dispatch(&leftTable, &rightTable, nullptr, 0, &pairs, nullptr,
+                     nullptr, 0, JoinOpCode(EJoinKernelOp::Destroy));
+  };
+
+  // Nullable keys, S with NULL: TRUE, NULL (missing key), NULL (NULL key),
+  // TRUE. The streamed probe keeps the left row order.
+  {
+    TStructType leftType({{"lk", nullableI64}, {"lv", i64}});
+    TStructType rightType({{"rk", nullableI64}});
+    auto spec = MarkJoinSpec(leftType, rightType, {{"lk", "rk"}});
+    TNullableColumn<int64_t> lk({1, 5, std::nullopt, 2});
+    std::vector<int64_t> lv = RowIndices(4);
+    std::vector<TColumn> lcols = {
+        lk.Column(), TColumn{.Data = reinterpret_cast<char *>(lv.data())}};
+    TRowSet left{
+        .Columns = lcols.data(), .ColumnCount = 2, .RowCount = 4, .RefCount = 1};
+    TNullableColumn<int64_t> rk({1, std::nullopt, 2});
+    std::vector<TColumn> rcols = {rk.Column()};
+    TRowSet right{
+        .Columns = rcols.data(), .ColumnCount = 1, .RowCount = 3, .RefCount = 1};
+
+    THashTable leftTable{}, rightTable{};
+    TPairBuffer pairs{};
+    TRowSet out{};
+    materialize(spec, left, right, pairs, leftTable, rightTable, out);
+    ASSERT_EQ(out.RowCount, 4);
+    EXPECT_EQ(FilterRows(spec.OutputSchema, out, "marker"),
+              (std::vector<int64_t>{0, 3}));
+    EXPECT_EQ(FilterRows(spec.OutputSchema, out, "(! marker)"),
+              (std::vector<int64_t>{}));
+    EXPECT_EQ(FilterRows(spec.OutputSchema, out, "(call qdb_is_null marker)"),
+              (std::vector<int64_t>{1, 2}));
+    EXPECT_EQ(FilterRows(spec.OutputSchema, out,
+                         "(! (call coalesce marker #f))"),
+              (std::vector<int64_t>{1, 2}));
+    FreeMaterializedRowSet(out);
+  }
+
+  // Nullable keys, S without NULL: the missing key is FALSE, the NULL key NULL.
+  {
+    TStructType leftType({{"lk", nullableI64}, {"lv", i64}});
+    TStructType rightType({{"rk", i64}});
+    auto spec = MarkJoinSpec(leftType, rightType, {{"lk", "rk"}});
+    TNullableColumn<int64_t> lk({1, 5, std::nullopt});
+    std::vector<int64_t> lv = RowIndices(3);
+    std::vector<TColumn> lcols = {
+        lk.Column(), TColumn{.Data = reinterpret_cast<char *>(lv.data())}};
+    TRowSet left{
+        .Columns = lcols.data(), .ColumnCount = 2, .RowCount = 3, .RefCount = 1};
+    std::vector<int64_t> rk = {1, 2};
+    std::vector<TColumn> rcols = {
+        TColumn{.Data = reinterpret_cast<char *>(rk.data())}};
+    TRowSet right{
+        .Columns = rcols.data(), .ColumnCount = 1, .RowCount = 2, .RefCount = 1};
+
+    THashTable leftTable{}, rightTable{};
+    TPairBuffer pairs{};
+    TRowSet out{};
+    materialize(spec, left, right, pairs, leftTable, rightTable, out);
+    ASSERT_EQ(out.RowCount, 3);
+    EXPECT_EQ(FilterRows(spec.OutputSchema, out, "marker"),
+              (std::vector<int64_t>{0}));
+    EXPECT_EQ(FilterRows(spec.OutputSchema, out, "(! marker)"),
+              (std::vector<int64_t>{1}));
+    EXPECT_EQ(FilterRows(spec.OutputSchema, out, "(call qdb_is_null marker)"),
+              (std::vector<int64_t>{2}));
+    FreeMaterializedRowSet(out);
+  }
+
+  // Non-nullable keys: a plain bool marker.
+  {
+    TStructType leftType({{"lk", i64}, {"lv", i64}});
+    TStructType rightType({{"rk", i64}});
+    auto spec = MarkJoinSpec(leftType, rightType, {{"lk", "rk"}});
+    std::vector<int64_t> lk = {1, 5, 2, 7};
+    std::vector<int64_t> lv = RowIndices(4);
+    std::vector<TColumn> lcols = {
+        TColumn{.Data = reinterpret_cast<char *>(lk.data())},
+        TColumn{.Data = reinterpret_cast<char *>(lv.data())}};
+    TRowSet left{
+        .Columns = lcols.data(), .ColumnCount = 2, .RowCount = 4, .RefCount = 1};
+    std::vector<int64_t> rk = {2, 1};
+    std::vector<TColumn> rcols = {
+        TColumn{.Data = reinterpret_cast<char *>(rk.data())}};
+    TRowSet right{
+        .Columns = rcols.data(), .ColumnCount = 1, .RowCount = 2, .RefCount = 1};
+
+    THashTable leftTable{}, rightTable{};
+    TPairBuffer pairs{};
+    TRowSet out{};
+    materialize(spec, left, right, pairs, leftTable, rightTable, out);
+    ASSERT_EQ(out.RowCount, 4);
+    EXPECT_EQ(FilterRows(spec.OutputSchema, out, "marker"),
+              (std::vector<int64_t>{0, 2}));
+    EXPECT_EQ(FilterRows(spec.OutputSchema, out, "(! marker)"),
+              (std::vector<int64_t>{1, 3}));
+    FreeMaterializedRowSet(out);
+  }
 }
 
 int main(int argc, char **argv) {

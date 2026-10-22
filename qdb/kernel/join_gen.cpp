@@ -452,6 +452,7 @@ enum class EJoinBatchMode {
   InsertOnly,
   ProbeMark,
   SemiProbe,
+  MarkJoinProbe,
 };
 
 NQumir::NAst::TExprPtr GenJoinBatchAst(
@@ -564,6 +565,16 @@ NQumir::NAst::TExprPtr GenJoinBatchAst(
   // generic dual-key call sites; a zero value works for every mode.
   body.push_back(var("stored_witness", key.StoredType));
   body.push_back(assign("stored_witness", ZeroValueExpr(key.StoredType)));
+  if (mode == EJoinBatchMode::MarkJoinProbe) {
+    // The marker of every unmatched row depends on whether the complete right
+    // set contains NULL, so that is looked up once per batch. The zero
+    // StoredKey is the NULL key (mj_set_has_null).
+    body.push_back(var("build_has_null", boolType));
+    body.push_back(
+        assign("build_has_null",
+               call("mj_set_has_null",
+                    {ident("build"), ZeroValueExpr(key.StoredType)})));
+  }
   if (hasPrecomputedHash) {
     body.push_back(var("hash_ptr", ptrU64Type));
     body.push_back(assign("hash_ptr", field("batch", "Hash")));
@@ -676,6 +687,19 @@ NQumir::NAst::TExprPtr GenJoinBatchAst(
                                          ident("pairs"),
                                          ident("hash_value"),
                                      });
+  } else if (mode == EJoinBatchMode::MarkJoinProbe) {
+    emitCall = call("pb_push", {
+                                   ident("pairs"),
+                                   std::move(ownRowId),
+                                   call("mj_marker",
+                                        {
+                                            ident("build"),
+                                            ident("key_value"),
+                                            ident("stored_witness"),
+                                            ident("build_has_null"),
+                                            ident("hash_value"),
+                                        }),
+                               });
   } else {
     emitCall = call("jt_probe_and_mark", {
                                              ident("build"),
@@ -775,6 +799,17 @@ NQumir::NAst::TExprPtr GenJoinProbeSemiAst(
                          EJoinBatchMode::SemiProbe, hasPrecomputedHash, isAnti);
 }
 
+NQumir::NAst::TExprPtr GenMarkJoinProbeAst(
+    const TJoinKeyDescriptor &key, const std::string &funcName,
+    NQumir::NAst::TTypePtr columnType, NQumir::NAst::TTypePtr rowSetType,
+    NQumir::NAst::TTypePtr hashTableType, NQumir::NAst::TTypePtr pairBufferType,
+    NQumir::NAst::TTypePtr stringViewType, bool hasPrecomputedHash) {
+  return GenJoinBatchAst(key, /*isLeft=*/true, funcName, std::move(columnType),
+                         std::move(rowSetType), std::move(hashTableType),
+                         std::move(pairBufferType), std::move(stringViewType),
+                         EJoinBatchMode::MarkJoinProbe, hasPrecomputedHash);
+}
+
 NQumir::NAst::TExprPtr GenJoinProbeMarkAst(
     const TJoinKeyDescriptor &key, bool isLeft, const std::string &funcName,
     NQumir::NAst::TTypePtr columnType, NQumir::NAst::TTypePtr rowSetType,
@@ -787,8 +822,8 @@ NQumir::NAst::TExprPtr GenJoinProbeMarkAst(
 }
 
 NQumir::NAst::TExprPtr
-GenJoinDispatchAst(int64_t keySize, EJoinType type, bool hasResidual,
-                   NQumir::NAst::TTypePtr rowSetType,
+GenJoinDispatchAst(const TJoinKeyDescriptor &key, EJoinType type,
+                   bool hasResidual, NQumir::NAst::TTypePtr rowSetType,
                    NQumir::NAst::TTypePtr hashTableType,
                    NQumir::NAst::TTypePtr pairBufferType) {
   namespace Oz = NKernel::NOz;
@@ -814,12 +849,14 @@ GenJoinDispatchAst(int64_t keySize, EJoinType type, bool hasResidual,
   auto boolReturn = [&](bool value) -> TExprPtr {
     return Oz::Return(Oz::Bool(value));
   };
+  const int64_t keySize = static_cast<int64_t>(key.Size);
   const bool isSemiAnti =
       type == EJoinType::LeftSemi || type == EJoinType::LeftAnti;
   const bool isResidualSemiAnti = isSemiAnti && hasResidual;
+  const bool isMark = type == EJoinType::LeftMark;
 
   auto processLeft = [&]() {
-    if (isResidualSemiAnti) {
+    if (isResidualSemiAnti || isMark) {
       return Oz::Call("jt_insert_left_only", {
                                                  Oz::Ident("left"),
                                                  Oz::Ident("right"),
@@ -855,6 +892,17 @@ GenJoinDispatchAst(int64_t keySize, EJoinType type, bool hasResidual,
                                         });
   };
   auto streamLeft = [&]() {
+    if (isMark) {
+      return Oz::Call("mj_probe_left", {
+                                           Oz::Ident("right"),
+                                           Oz::Ident("batch"),
+                                           Oz::Ident("left_key_columns"),
+                                           Oz::Ident("batch_idx"),
+                                           Oz::Ident("pairs"),
+                                           Oz::Ident("left_store"),
+                                           Oz::Ident("right_store"),
+                                       });
+    }
     if (isSemiAnti && !isResidualSemiAnti) {
       return Oz::Call("jt_probe_left_semi", {
                                                 Oz::Ident("right"),
@@ -877,6 +925,9 @@ GenJoinDispatchAst(int64_t keySize, EJoinType type, bool hasResidual,
                                             });
   };
   auto streamRight = [&]() {
+    if (isMark) {
+      return Oz::Bool(false);
+    }
     if (isResidualSemiAnti) {
       return Oz::Call("jt_probe_right_mark", {
                                                  Oz::Ident("left"),
@@ -911,7 +962,7 @@ GenJoinDispatchAst(int64_t keySize, EJoinType type, bool hasResidual,
   };
 
   auto updateRight = [&]() -> TExprPtr {
-    if (isSemiAnti && !hasResidual) {
+    if ((isSemiAnti && !hasResidual) || isMark) {
       return insertRightKeyOnly();
     }
     if (isResidualSemiAnti) {
@@ -1032,6 +1083,15 @@ GenJoinDispatchAst(int64_t keySize, EJoinType type, bool hasResidual,
     }
     if (type == EJoinType::Full) {
       return fullOuterFinalize();
+    }
+    if (isMark) {
+      // The zero StoredKey is the NULL key (mj_set_has_null).
+      return Oz::Return(Oz::Call("mj_finalize", {
+                                                    Oz::Ident("left"),
+                                                    Oz::Ident("right"),
+                                                    ZeroValueExpr(key.StoredType),
+                                                    Oz::Ident("pairs"),
+                                                }));
     }
     return boolReturn(true);
   };
@@ -1380,6 +1440,7 @@ struct TJoinOutputColumn {
     Bool,
     BinInt,
     String,
+    Marker,
   };
 
   bool IsLeft = true;
@@ -1392,7 +1453,8 @@ struct TJoinOutputColumn {
 
 std::vector<TJoinOutputColumn>
 BuildJoinOutputColumns(const TStructType &leftType,
-                       const TStructType &rightType, bool includeRight) {
+                       const TStructType &rightType,
+                       EJoinOutputColumns output) {
   auto classify = [](const TTypePtr &type, TJoinOutputColumn &col) {
     if (DecimalSpecOfValueType(UnwrapNullableType(type))) {
       col.Kind = TJoinOutputColumn::EKind::BinInt;
@@ -1423,7 +1485,7 @@ BuildJoinOutputColumns(const TStructType &leftType,
     classify(col.Type, col);
     columns.push_back(std::move(col));
   }
-  if (includeRight) {
+  if (output == EJoinOutputColumns::LeftRight) {
     for (int32_t i = 0; i < static_cast<int32_t>(rightType.Fields.size());
          ++i) {
       TJoinOutputColumn col{
@@ -1431,6 +1493,9 @@ BuildJoinOutputColumns(const TStructType &leftType,
       classify(col.Type, col);
       columns.push_back(std::move(col));
     }
+  }
+  if (output == EJoinOutputColumns::LeftMarker) {
+    columns.push_back({.Kind = TJoinOutputColumn::EKind::Marker});
   }
   return columns;
 }
@@ -1440,7 +1505,8 @@ BuildJoinOutputColumns(const TStructType &leftType,
 NQumir::NAst::TExprPtr
 GenJoinMaterializeAst(const NQumir::NAst::TStructType &leftType,
                       const NQumir::NAst::TStructType &rightType,
-                      bool includeRight, NQumir::NAst::TTypePtr columnType,
+                      EJoinOutputColumns output,
+                      NQumir::NAst::TTypePtr columnType,
                       NQumir::NAst::TTypePtr rowSetType,
                       NQumir::NAst::TTypePtr pairBufferType,
                       NQumir::NAst::TTypePtr stringViewType) {
@@ -1448,8 +1514,7 @@ GenJoinMaterializeAst(const NQumir::NAst::TStructType &leftType,
 
   (void)stringViewType;
 
-  const auto columns =
-      BuildJoinOutputColumns(leftType, rightType, includeRight);
+  const auto columns = BuildJoinOutputColumns(leftType, rightType, output);
   const int64_t columnCount = static_cast<int64_t>(columns.size());
   int64_t ownedPtrCount = 1; // columns, recorded by jm_begin
   for (const auto &column : columns) {
@@ -1538,6 +1603,19 @@ GenJoinMaterializeAst(const NQumir::NAst::TStructType &leftType,
       args.push_back(number(ownerIndex++));
       args.push_back(number(ownerIndex++));
       builder.Stmt(Oz::Call("jt_materialize_string_column", std::move(args)));
+      break;
+    case TJoinOutputColumn::EKind::Marker:
+      builder.Stmt(
+          Oz::Call("mj_materialize_marker_column", {
+                                                       Oz::Ident("pairs"),
+                                                       Oz::Ident("start"),
+                                                       Oz::Ident("n"),
+                                                       outputColumn(index),
+                                                       Oz::Ident("out"),
+                                                       number(ownerIndex),
+                                                       number(ownerIndex + 1),
+                                                   }));
+      ownerIndex += 2;
       break;
     }
   }

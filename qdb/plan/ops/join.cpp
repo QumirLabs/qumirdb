@@ -50,6 +50,7 @@ std::string_view JoinTypeName(EJoinType type) {
         case EJoinType::RightSemi: return "right_semi";
         case EJoinType::LeftAnti: return "left_anti";
         case EJoinType::RightAnti: return "right_anti";
+        case EJoinType::LeftMark: return "left_mark";
     }
     return "inner";
 }
@@ -77,6 +78,7 @@ std::optional<EJoinType> ParseJoinType(std::string_view name) {
     if (name == "right_semi") return EJoinType::RightSemi;
     if (name == "left_anti") return EJoinType::LeftAnti;
     if (name == "right_anti") return EJoinType::RightAnti;
+    if (name == "left_mark") return EJoinType::LeftMark;
     return std::nullopt;
 }
 
@@ -94,6 +96,9 @@ std::expected<TTypePtr, NQumir::TError> ComputeJoinOutputType(
         case EJoinType::RightSemi:
         case EJoinType::RightAnti:
             return std::make_shared<TStructType>(CopyFields(rightStruct));
+        case EJoinType::LeftMark:
+            return std::unexpected(NQumir::TError(
+                "left_mark join output is not supported in plans yet"));
         default:
             break;
     }

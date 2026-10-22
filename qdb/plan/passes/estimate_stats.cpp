@@ -734,7 +734,7 @@ TStatsPtr ComputeJoinStats(const std::shared_ptr<TJoinOperator>& join) {
     auto outputStats = std::make_shared<TStats>();
 
     auto jt = join->JoinType();
-    if (jt == EJoinType::Inner || jt == EJoinType::Left || jt == EJoinType::Full || jt == EJoinType::LeftSemi || jt == EJoinType::LeftAnti) {
+    if (jt == EJoinType::Inner || jt == EJoinType::Left || jt == EJoinType::Full || jt == EJoinType::LeftSemi || jt == EJoinType::LeftAnti || jt == EJoinType::LeftMark) {
         for (const auto& [colName, colStats] : leftStats->ColumnStats) {
             // assume qualification
             outputStats->ColumnStats[colName] = colStats;
@@ -774,6 +774,10 @@ TStatsPtr ComputeJoinStats(const std::shared_ptr<TJoinOperator>& join) {
             break;
         case EJoinType::Full:
             rowCount = std::max(rowCount, leftStats->RowCount + rightStats->RowCount);
+            break;
+        case EJoinType::LeftMark:
+            // Every left row, exactly once.
+            rowCount = std::max<uint64_t>(1, leftStats->RowCount);
             break;
         default:
             break;

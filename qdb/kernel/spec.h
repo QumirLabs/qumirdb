@@ -109,12 +109,15 @@ TOperatorKernelSpec BuildSortKernelSpec(
     const std::vector<TSortKey>& keys,
     std::string operatorName = "sort");
 
+// `markerName` names the marker column a LeftMark join appends to the left
+// columns; other join types do not use it.
 TOperatorKernelSpec BuildJoinKernelSpec(
     const NQumir::NAst::TStructType& leftType,
     const NQumir::NAst::TStructType& rightType,
     const std::vector<TJoinKey>& keys,
     EJoinType type,
-    const NQumir::NAst::TExprPtr& residualPredicate = nullptr);
+    const NQumir::NAst::TExprPtr& residualPredicate = nullptr,
+    const std::string& markerName = {});
 
 // A keyless (nested-loop) join. The residual decides matches, so it is given
 // only to joins other than Inner, whose residual is a filter over the product.

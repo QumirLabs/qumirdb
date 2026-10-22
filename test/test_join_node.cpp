@@ -111,6 +111,13 @@ TEST(JoinNode, SemiAndAntiKeepOnlyPreservedSide) {
     EXPECT_EQ(antiOut->Fields[1].first, "d");
 }
 
+// The plan has no marker column to name yet; only the join kernel runs it.
+TEST(JoinNode, MarkJoinIsNotTypedInPlansYet) {
+    auto join = MakeJoin(LeftAB(), RightCD(), {{"a", "c"}}, EJoinType::LeftMark);
+    ASSERT_FALSE(join);
+    EXPECT_NE(join.error().ToString().find("left_mark"), std::string::npos);
+}
+
 TEST(JoinNode, OverlappingColumnNamesAreRejected) {
     auto l = Source({{"a", I64()}, {"shared", Str()}});
     auto r = Source({{"c", I64()}, {"shared", Str()}});
@@ -158,7 +165,8 @@ TEST(JoinNode, ToStringRoundTripsTypeAndFilter) {
 TEST(JoinNode, JoinTypeNameParseRoundTrip) {
     for (auto type : {EJoinType::Inner, EJoinType::Left, EJoinType::Right,
                       EJoinType::Full, EJoinType::LeftSemi, EJoinType::RightSemi,
-                      EJoinType::LeftAnti, EJoinType::RightAnti}) {
+                      EJoinType::LeftAnti, EJoinType::RightAnti,
+                      EJoinType::LeftMark}) {
         auto parsed = ParseJoinType(JoinTypeName(type));
         ASSERT_TRUE(parsed);
         EXPECT_EQ(*parsed, type);

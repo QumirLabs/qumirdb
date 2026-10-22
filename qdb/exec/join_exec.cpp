@@ -30,6 +30,10 @@ TInnerJoinProcessor::TInnerJoinProcessor(
     // Asymmetry needs the streaming (drop-one-side) path, which outer joins skip.
     , BuildSide_(IsOuter() ? EJoinBuildSide::Auto : buildSide)
 {
+    // Its markers need the complete right side; no input order is wired yet.
+    if (JoinType_ == EJoinType::LeftMark) {
+        throw std::runtime_error("left_mark join is not supported by the join processor yet");
+    }
 }
 
 void TInnerJoinProcessor::SetInstrumentation(TOperatorInstrumentation* instrumentation) {
@@ -549,6 +553,10 @@ TCrossJoinProcessor::TCrossJoinProcessor(
     : Kernels_(std::move(kernels))
     , JoinType_(joinType)
 {
+    // The nested-loop kernel has no marker emission.
+    if (JoinType_ == EJoinType::LeftMark) {
+        throw std::runtime_error("left_mark join is not supported by the nested-loop join processor");
+    }
 }
 
 TCrossJoinProcessor::~TCrossJoinProcessor() {
