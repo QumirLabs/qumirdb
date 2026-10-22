@@ -1008,6 +1008,130 @@ TEST(SchedulerRuntimeAdapter, HashShuffleInputBudgetCountsUnselectedStringPayloa
     }
 }
 
+// Every partition of a dense input references the whole input owner. Above the
+// byte target each partition is compacted and the owner is released at once;
+// below it the partitions stay views of the owner until EOF.
+TEST(SchedulerRuntimeAdapter, HashShuffleBoundsDenseInputSplitAcrossPartitions) {
+    using namespace NQumir::NAst;
+    for (bool overBudget : {true, false}) {
+        SCOPED_TRACE(overBudget);
+        std::atomic<int> destroyed = 0;
+        TOneToOneConnection input(1);
+        THashShuffleConnection output(1);
+        output.Resize(1, 4);
+        auto schema = std::make_shared<TStructType>(
+            std::vector<std::pair<std::string, TTypePtr>>{
+                {"value", std::make_shared<TIntegerType>()}});
+        auto code = std::make_shared<THashShuffleCode>(
+            HashSelectedValues, schema, 64, 64, overBudget ? 200 : 1 << 20);
+        THashShuffleTask task(code, nullptr, TInputPort{.Connection = &input}, output, 0);
+        std::vector<int64_t> values(64);
+        for (int64_t i = 0; i < 64; ++i) {
+            values[i] = i;
+        }
+        auto rowSet = MakeInt64RowSet(std::move(values), &destroyed);
+        const char* sourceData = rowSet.Columns[0].Data;
+        ASSERT_TRUE(input.Push(0, std::move(rowSet)));
+        EXPECT_EQ(task.Execute(), ETaskResult::OK);
+        EXPECT_EQ(destroyed.load(), overBudget ? 1 : 0);
+        if (!overBudget) {
+            TRowSet absent{};
+            EXPECT_EQ(output.Fetch(0, absent), EFetchResult::NO_DATA);
+            input.Finish(0);
+            EXPECT_EQ(task.Execute(), ETaskResult::FINISHED);
+        }
+
+        std::vector<TRowSet> results(4);
+        for (size_t partition = 0; partition < 4; ++partition) {
+            auto& result = results[partition];
+            ASSERT_EQ(output.Fetch(partition, result), EFetchResult::OK);
+            EXPECT_EQ(result.Columns[0].Data == sourceData, !overBudget);
+            EXPECT_EQ(result.Selection == nullptr, overBudget);
+            EXPECT_EQ(result.RowCount, overBudget ? 16 : 64);
+            std::vector<int64_t> selected;
+            const auto* data = reinterpret_cast<const int64_t*>(result.Columns[0].Data);
+            for (int64_t row = 0; row < result.RowCount; ++row) {
+                if (!result.Selection || result.Selection[row] != 0) {
+                    selected.push_back(data[row]);
+                    EXPECT_EQ(result.Hash[row], static_cast<uint64_t>(data[row]));
+                }
+            }
+            std::vector<int64_t> expected;
+            for (int64_t value = static_cast<int64_t>(partition); value < 64; value += 4) {
+                expected.push_back(value);
+            }
+            EXPECT_EQ(selected, expected);
+        }
+        for (auto& result : results) {
+            EXPECT_EQ(destroyed.load(), overBudget ? 1 : 0);
+            Release(&result);
+        }
+        EXPECT_EQ(destroyed.load(), 1);
+        if (overBudget) {
+            input.Finish(0);
+            EXPECT_EQ(task.Execute(), ETaskResult::FINISHED);
+        }
+    }
+}
+
+// A zero byte target disables both the byte bound and the retention budget:
+// sparse inputs accumulate up to the row target, and at EOF a single sparse
+// input is forwarded as a view of its owner.
+TEST(SchedulerRuntimeAdapter, HashShuffleZeroByteTargetKeepsRowBatching) {
+    using namespace NQumir::NAst;
+    std::atomic<int> destroyed = 0;
+    TOneToOneConnection input(1);
+    THashShuffleConnection output(1);
+    output.Resize(1, 1);
+    auto schema = std::make_shared<TStructType>(
+        std::vector<std::pair<std::string, TTypePtr>>{
+            {"value", std::make_shared<TIntegerType>()}});
+    auto code = std::make_shared<THashShuffleCode>(HashSelectedValues, schema, 4, 64, 0);
+    THashShuffleTask task(code, nullptr, TInputPort{.Connection = &input}, output, 0);
+    std::vector<uint8_t> selection(64, 0);
+    selection[7] = 1;
+    const char* lastData = nullptr;
+    auto push = [&](int64_t value) {
+        std::vector<int64_t> values(64, -1);
+        values[7] = value;
+        auto rowSet = MakeInt64RowSet(std::move(values), &destroyed);
+        rowSet.Selection = selection.data();
+        lastData = rowSet.Columns[0].Data;
+        ASSERT_TRUE(input.Push(0, std::move(rowSet)));
+        EXPECT_EQ(task.Execute(), ETaskResult::OK);
+    };
+    for (int64_t value = 0; value < 3; ++value) {
+        push(value);
+        TRowSet absent{};
+        EXPECT_EQ(output.Fetch(0, absent), EFetchResult::NO_DATA);
+        EXPECT_EQ(destroyed.load(), 0);
+    }
+    push(3);
+    EXPECT_EQ(destroyed.load(), 4);
+    TRowSet result{};
+    ASSERT_EQ(output.Fetch(0, result), EFetchResult::OK);
+    EXPECT_EQ(result.RowCount, 4);
+    EXPECT_EQ(result.Selection, nullptr);
+    EXPECT_EQ(std::vector<int64_t>(
+        reinterpret_cast<const int64_t*>(result.Columns[0].Data),
+        reinterpret_cast<const int64_t*>(result.Columns[0].Data) + 4),
+        (std::vector<int64_t>{0, 1, 2, 3}));
+    Release(&result);
+
+    push(4);
+    input.Finish(0);
+    EXPECT_EQ(task.Execute(), ETaskResult::FINISHED);
+    result = {};
+    ASSERT_EQ(output.Fetch(0, result), EFetchResult::OK);
+    EXPECT_EQ(result.Columns[0].Data, lastData);
+    EXPECT_EQ(result.RowCount, 64);
+    ASSERT_NE(result.Selection, nullptr);
+    EXPECT_NE(result.Selection[7], 0);
+    EXPECT_EQ(destroyed.load(), 4);
+    Release(&result);
+    EXPECT_EQ(destroyed.load(), 5);
+}
+
 TEST(SchedulerRuntimeAdapter, HashShuffleCancellationReleasesInputOwners) {
     using namespace NQumir::NAst;
     for (bool pending : {false, true}) {
