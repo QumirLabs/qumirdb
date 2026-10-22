@@ -1,0 +1,1 @@
+SELECT sum(y) FROM t GROUP BY 1;

@@ -26,6 +26,9 @@ struct TProjectionSpec {
     bool RejectUnaliasedStructForDistinct = false;
 };
 
+// Number of output columns a value of `type` occupies once a struct is flattened.
+size_t FlattenedArity(const NQumir::NAst::TTypePtr& type);
+
 // Number of output columns occupied after flattening a struct-valued projection.
 size_t FlattenedProjectionArity(const TProjectionSpec& projection);
 

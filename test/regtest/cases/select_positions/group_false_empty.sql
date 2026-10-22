@@ -1,0 +1,1 @@
+SELECT count(*) AS c FROM t WHERE y < 0 GROUP BY FALSE;

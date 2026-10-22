@@ -1,0 +1,1 @@
+SELECT (SELECT max(y) FROM t), x FROM t GROUP BY 1;

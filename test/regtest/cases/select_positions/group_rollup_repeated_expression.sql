@@ -1,0 +1,1 @@
+SELECT x + 1 AS a, sum(y) AS s FROM t GROUP BY ROLLUP(1, a) ORDER BY a NULLS LAST, s;

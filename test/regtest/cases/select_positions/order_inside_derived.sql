@@ -1,0 +1,1 @@
+SELECT q.col1 FROM (SELECT x + 1, y + 1 FROM p ORDER BY 2) AS q;

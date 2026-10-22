@@ -60,6 +60,12 @@ private:
     std::vector<std::vector<size_t>> GroupingSets_;
 };
 
+// The result type of aggregate `func` over an argument of `argType`, which is
+// null for count(*).
+NQumir::NAst::TTypePtr AggregateResultType(
+    const std::string& func,
+    const NQumir::NAst::TTypePtr& argType);
+
 // Output schema = group key columns (types from inputSchema) followed by one
 // column per aggregate (type derived from Func/Arg). Used both by the
 // constructor and by AnnotateTypes (after column pruning narrows inputSchema).

@@ -1,0 +1,8 @@
+top-sort [k desc] limit 2
+└─ union-all (rows≈2 cost≈256)
+   ├─ project (k) (rows≈1 cost≈168)
+   │  └─ filter (<= |t.y| 20) (rows≈1 cost≈160)
+   │     └─ source t AS t row-groups (<= |t.y| 20) (rows≈5 cost≈80)
+   └─ project (k) (rows≈1 cost≈88)
+      └─ filter (== |t_1.y| 30) (rows≈1 cost≈80)
+         └─ source t AS t_1 row-groups (== |t_1.y| 30) (rows≈5 cost≈40)

@@ -1,0 +1,1 @@
+SELECT sum(y) AS s, x FROM t GROUP BY 2 ORDER BY x;

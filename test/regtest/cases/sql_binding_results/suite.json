@@ -16,6 +16,8 @@
     "order_by_qualified_distinct_output.sql": {"order": "ordered"},
     "order_by_rebound_aggregate.sql": {"order": "ordered"},
     "star_and_column_order_by.sql": {"order": "ordered"},
-    "parenthesized_body_order_by.sql": {"order": "ordered"}
+    "parenthesized_body_order_by.sql": {"order": "ordered"},
+    "group_alias_and_column.sql": {"order": "ordered"},
+    "group_alias_and_column_rollup.sql": {"order": "ordered"}
   }
 }

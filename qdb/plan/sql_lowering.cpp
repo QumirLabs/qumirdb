@@ -373,8 +373,8 @@ std::optional<std::string> AffineGroupKeyBase(const NAst::TExprPtr& expr) {
 }
 
 bool IsLiteralGroupKey(const NAst::TExprPtr& expr) {
-    // In the current qdb dialect GROUP BY 1 is the literal 1, not a SELECT-list
-    // ordinal.  If ordinals are added, they must be resolved before this check.
+    // GROUP BY positions are resolved to SELECT expressions before this check, so
+    // a number here is a constant.
     if (NAst::TMaybeNode<NAst::TNumberExpr>(expr) ||
         NAst::TMaybeNode<NAst::TStringLiteralExpr>(expr))
     {
@@ -783,6 +783,25 @@ std::expected<NAst::TExprPtr, TError> TAggCollector::Emit(const TAggCall& agg, T
     }
 
     return EmitPlain(agg.Func, std::move(arg), std::move(loc));
+}
+
+std::expected<std::vector<std::pair<std::string, NAst::TTypePtr>>, TError>
+TAggCollector::SlotTypes() const
+{
+    std::vector<std::pair<std::string, NAst::TTypePtr>> slots;
+    slots.reserve(Specs_.size());
+    for (const auto& spec : Specs_) {
+        NAst::TTypePtr argType;
+        if (spec.Arg && InputSchema_) {
+            try {
+                argType = NKernel::AnnotateExprType(spec.Arg, *InputSchema_, &Context_);
+            } catch (const TError& error) {
+                return std::unexpected(error);
+            }
+        }
+        slots.emplace_back(spec.Name, AggregateResultType(spec.Func, argType));
+    }
+    return slots;
 }
 
 std::expected<NAst::TExprPtr, TError> TWindowCollector::Rewrite(NAst::TExprPtr expr) {

@@ -17,6 +17,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace NQdb {
@@ -111,6 +112,11 @@ public:
     bool IsDistinctSpec(const std::string& name) const {
         return DistinctSpecNames_.count(name) != 0;
     }
+
+    // The aggregate columns collected so far, typed as the aggregate will produce
+    // them from the input schema.
+    std::expected<std::vector<std::pair<std::string, NQumir::NAst::TTypePtr>>, NQumir::TError>
+    SlotTypes() const;
 
 private:
     bool IsIntegerColumn(const NQumir::NAst::TExprPtr& expr) const;
