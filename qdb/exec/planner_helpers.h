@@ -86,8 +86,8 @@ void PrintRuntimePlan(std::ostream& out, const TOperatorPtr& root);
 
 NQumir::NAst::TTypePtr BuildSourceRuntimeType(TSourceOperator& src);
 
-// Build-side selection for an inner join. Shared by native lowering and the
-// browser plan export so the JoinAsymmetryRatio threshold has one home (C++).
+// Build-side selection for a join. Shared by native lowering and the browser
+// plan export so the JoinAsymmetryRatio threshold has one home (C++).
 EJoinBuildSide ChooseJoinBuildSide(const TJoinOperator& join);
 std::string_view JoinBuildSideName(EJoinBuildSide side);
 

@@ -76,6 +76,8 @@ NQumir::NAst::TExprPtr GenJoinInsertRowsOnlyAst(
 // Generates one side's probe-only function (jt_probe_left_stream /
 // jt_probe_right_stream): reads stream batch keys, probes the already-built
 // opposite table, and emits pairs without inserting stream rows into any table.
+// markMatched also marks the matched build rows, for a streaming outer join
+// that emits the unmarked ones at EOF.
 NQumir::NAst::TExprPtr GenJoinProbeAst(
     const TJoinKeyDescriptor& key,
     bool isLeft,
@@ -85,7 +87,8 @@ NQumir::NAst::TExprPtr GenJoinProbeAst(
     NQumir::NAst::TTypePtr hashTableType,
     NQumir::NAst::TTypePtr pairBufferType,
     NQumir::NAst::TTypePtr stringViewType,
-    bool hasPrecomputedHash = false);
+    bool hasPrecomputedHash = false,
+    bool markMatched = false);
 
 NQumir::NAst::TExprPtr GenJoinProbeSemiAst(
     const TJoinKeyDescriptor& key,

@@ -2051,8 +2051,10 @@ bool BrowserSupportsJoin(NQdb::EJoinType type, bool hasResidual) {
     if (type == EJoinType::Inner) {
         return true;
     }
-    if ((type == EJoinType::Left || type == EJoinType::Right ||
-         type == EJoinType::Full) && !hasResidual) {
+    if (type == EJoinType::Left || type == EJoinType::Right) {
+        return true;
+    }
+    if (type == EJoinType::Full && !hasResidual) {
         return true;
     }
     if (type == EJoinType::LeftSemi || type == EJoinType::LeftAnti) {

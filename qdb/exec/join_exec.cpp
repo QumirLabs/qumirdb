@@ -19,6 +19,23 @@ constexpr int64_t CrossJoinOp(ECrossJoinKernelOp op) {
     return static_cast<int64_t>(op);
 }
 
+// An outer join may drop its stream side only when the build side is the
+// preserved one: the matched marks of the build then give the unmatched rows.
+EJoinBuildSide StreamableBuildSide(EJoinType type, EJoinBuildSide buildSide) {
+    switch (type) {
+        case EJoinType::Left:
+            return buildSide == EJoinBuildSide::Left
+                ? buildSide : EJoinBuildSide::Auto;
+        case EJoinType::Right:
+            return buildSide == EJoinBuildSide::Right
+                ? buildSide : EJoinBuildSide::Auto;
+        case EJoinType::Full:
+            return EJoinBuildSide::Auto;
+        default:
+            return buildSide;
+    }
+}
+
 } // namespace
 
 TInnerJoinProcessor::TInnerJoinProcessor(
@@ -27,8 +44,7 @@ TInnerJoinProcessor::TInnerJoinProcessor(
     EJoinBuildSide buildSide)
     : Kernels_(std::move(kernels))
     , JoinType_(joinType)
-    // Asymmetry needs the streaming (drop-one-side) path, which outer joins skip.
-    , BuildSide_(IsOuter() ? EJoinBuildSide::Auto : buildSide)
+    , BuildSide_(StreamableBuildSide(joinType, buildSide))
 {
     // Its markers need the complete right side; no input order is wired yet.
     if (JoinType_ == EJoinType::LeftMark) {
@@ -313,8 +329,10 @@ bool TInnerJoinProcessor::PullOneInputBatch(
         return true;
     };
 
-    // Outer joins need both sides for unmatched rows.
-    const bool allowStreaming = !IsOuter();
+    // Without a preserved build side an outer join keeps both sides for the
+    // unmatched scan.
+    const bool allowStreaming =
+        !IsOuter() || BuildSide_ != EJoinBuildSide::Auto;
 
     for (;;) {
         if (allowStreaming &&
@@ -367,6 +385,10 @@ bool TInnerJoinProcessor::PullOneInputBatch(
 }
 
 void TInnerJoinProcessor::FinalizeOuterJoin() {
+    // A streamed join has no table of the other side to look keys up in; its
+    // build rows carry matched marks instead.
+    const auto op = BuildSide_ == EJoinBuildSide::Auto
+        ? EJoinKernelOp::Finalize : EJoinKernelOp::FinalizeStream;
     if (!Kernels_.Dispatch(
             LeftTable_.data(),
             RightTable_.data(),
@@ -376,7 +398,7 @@ void TInnerJoinProcessor::FinalizeOuterJoin() {
             const_cast<TRowSet*>(LeftRows_.Data()),
             const_cast<TRowSet*>(RightRows_.Data()),
             0,
-            JoinOp(EJoinKernelOp::Finalize))) {
+            JoinOp(op))) {
         throw std::runtime_error("join outer finalize failed");
     }
     OuterFinalized_ = true;

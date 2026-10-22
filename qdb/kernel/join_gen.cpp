@@ -460,7 +460,7 @@ NQumir::NAst::TExprPtr GenJoinBatchAst(
     NQumir::NAst::TTypePtr columnType, NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType, NQumir::NAst::TTypePtr pairBufferType,
     NQumir::NAst::TTypePtr stringViewType, EJoinBatchMode mode,
-    bool hasPrecomputedHash, bool isAnti = false) {
+    bool hasPrecomputedHash, bool isAnti = false, bool markMatched = false) {
   NQumir::TLocation loc{};
 
   auto i64Type = std::make_shared<TIntegerType>();
@@ -662,6 +662,7 @@ NQumir::NAst::TExprPtr GenJoinBatchAst(
                                              ident("stored_witness"),
                                              std::move(ownRowId),
                                              numI64(isLeft ? 1 : 0),
+                                             numI64(markMatched ? 1 : 0),
                                              ident("pairs"),
                                              ident("left_store"),
                                              ident("right_store"),
@@ -781,11 +782,13 @@ NQumir::NAst::TExprPtr GenJoinProbeAst(const TJoinKeyDescriptor &key,
                                        NQumir::NAst::TTypePtr hashTableType,
                                        NQumir::NAst::TTypePtr pairBufferType,
                                        NQumir::NAst::TTypePtr stringViewType,
-                                       bool hasPrecomputedHash) {
+                                       bool hasPrecomputedHash,
+                                       bool markMatched) {
   return GenJoinBatchAst(key, isLeft, funcName, std::move(columnType),
                          std::move(rowSetType), std::move(hashTableType),
                          std::move(pairBufferType), std::move(stringViewType),
-                         EJoinBatchMode::ProbeOnly, hasPrecomputedHash);
+                         EJoinBatchMode::ProbeOnly, hasPrecomputedHash,
+                         /*isAnti=*/false, markMatched);
 }
 
 NQumir::NAst::TExprPtr GenJoinProbeSemiAst(
@@ -1052,6 +1055,11 @@ GenJoinDispatchAst(const TJoinKeyDescriptor &key, EJoinType type,
   };
 
   auto finalize = [&]() -> TExprPtr {
+    // Key existence cannot identify unmatched rows after a residual rejected
+    // all candidate pairs. Those joins must use marked streaming finalization.
+    if (hasResidual && (type == EJoinType::Left || type == EJoinType::Right)) {
+      return boolReturn(false);
+    }
     if (isSemiAnti && !hasResidual) {
       return Oz::Return(
           Oz::Call("jt_finalize_semi_anti", {
@@ -1096,6 +1104,21 @@ GenJoinDispatchAst(const TJoinKeyDescriptor &key, EJoinType type,
     return boolReturn(true);
   };
 
+  // A streaming LEFT/RIGHT join builds its preserved side; the stream probe
+  // marks the build rows it matches and this emits the rest.
+  auto finalizeStream = [&]() -> TExprPtr {
+    if (type != EJoinType::Left && type != EJoinType::Right) {
+      return boolReturn(false);
+    }
+    const bool buildIsLeft = type == EJoinType::Left;
+    return Oz::Return(
+        Oz::Call("jt_emit_unmarked", {
+                                         Oz::Ident(buildIsLeft ? "left" : "right"),
+                                         number(buildIsLeft ? 1 : 0),
+                                         Oz::Ident("pairs"),
+                                     }));
+  };
+
   Oz::TFunBuilder builder("jt_dispatch");
   TExprPtr initBody =
       isResidualSemiAnti
@@ -1137,6 +1160,7 @@ GenJoinDispatchAst(const TJoinKeyDescriptor &key, EJoinType type,
       .Stmt(Oz::If(opIs(4), Oz::Block({Oz::Return(streamRight())})))
       .Stmt(Oz::If(opIs(5), finalize()))
       .Stmt(Oz::If(opIs(6), Oz::Block(std::move(destroyBody))))
+      .Stmt(Oz::If(opIs(7), finalizeStream()))
       .Stmt(boolReturn(false));
 
   return std::move(builder).Build();

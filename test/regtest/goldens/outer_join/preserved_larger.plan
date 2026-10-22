@@ -1,0 +1,5 @@
+sort [ov asc, cv asc]
+└─ project (ok, ov, ck, cv) (rows≈20 cost≈6K)
+   └─ join left [o.ok = c.ck] (rows≈20 cost≈5.4K)
+      ├─ source o AS o (rows≈20 cost≈320)
+      └─ source c AS c (rows≈8 cost≈128)

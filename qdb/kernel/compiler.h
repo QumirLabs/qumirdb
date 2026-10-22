@@ -202,6 +202,9 @@ enum class EJoinKernelOp : int64_t {
     StreamRight = 4,
     Finalize = 5,
     Destroy = 6,
+    // LEFT/RIGHT join that streamed against its preserved side: emit the build
+    // rows the stream probes left unmarked.
+    FinalizeStream = 7,
 };
 
 using TJoinDispatch = std::function<bool(

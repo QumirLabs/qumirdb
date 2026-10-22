@@ -118,6 +118,63 @@ const fixtures = {
     },
     browserBatchSizes: { l: [2, 2] },
   },
+  left_outer_join: {
+    sql: 'SELECT l.k AS k, l.v AS v, r.rk AS rk, r.w AS w '
+      + 'FROM l LEFT JOIN r ON l.k = r.rk',
+    tables: {
+      l: { k: [1, 1, 2, 3, 4], v: [10, 30, 20, 40, 50] },
+      r: { rk: [1, 1, 2, 4, 5, 6], w: [5, 15, 25, 1, 100, 200] },
+    },
+    browserBatchSizes: { l: [2, 3], r: [2, 1, 3] },
+    expectedBuildSide: 'left',
+    expectedRows: [
+      [1, 10, 1, 5], [1, 10, 1, 15], [1, 30, 1, 5], [1, 30, 1, 15],
+      [2, 20, 2, 25], [3, 40, '', ''], [4, 50, 4, 1],
+    ],
+  },
+  left_outer_residual: {
+    sql: 'SELECT l.k AS k, l.v AS v, r.rk AS rk, r.w AS w '
+      + 'FROM l LEFT JOIN r ON l.k = r.rk AND l.v < r.w',
+    tables: {
+      l: { k: [1, 1, 2, 3, 4], v: [10, 30, 20, 40, 50] },
+      r: { rk: [1, 1, 2, 4, 5, 6], w: [5, 15, 25, 1, 100, 200] },
+    },
+    browserBatchSizes: { l: [2, 3], r: [2, 1, 3] },
+    expectedBuildSide: 'left',
+    expectedRows: [
+      [1, 10, 1, 15], [1, 30, '', ''], [2, 20, 2, 25],
+      [3, 40, '', ''], [4, 50, '', ''],
+    ],
+  },
+  right_outer_join: {
+    sql: 'SELECT l.k AS k, l.v AS v, r.rk AS rk, r.w AS w '
+      + 'FROM l RIGHT JOIN r ON l.k = r.rk',
+    tables: {
+      l: { k: [1, 1, 2, 4, 5, 6], v: [5, 15, 25, 1, 100, 200] },
+      r: { rk: [1, 1, 2, 3, 4], w: [10, 30, 20, 40, 50] },
+    },
+    browserBatchSizes: { l: [2, 1, 3], r: [2, 3] },
+    expectedBuildSide: 'right',
+    expectedRows: [
+      [1, 5, 1, 10], [1, 15, 1, 10], [1, 5, 1, 30], [1, 15, 1, 30],
+      [2, 25, 2, 20], ['', '', 3, 40], [4, 1, 4, 50],
+    ],
+  },
+  // The preserved side is larger, so residual correctness must force its build.
+  right_outer_residual: {
+    sql: 'SELECT l.k AS k, l.v AS v, r.rk AS rk, r.w AS w '
+      + 'FROM l RIGHT JOIN r ON l.k = r.rk AND l.v < r.w',
+    tables: {
+      l: { k: [1, 1, 2, 3, 4], v: [10, 30, 20, 40, 50] },
+      r: { rk: [1, 1, 2, 4, 5, 6], w: [5, 15, 25, 1, 100, 200] },
+    },
+    browserBatchSizes: { l: [2, 3], r: [2, 1, 3] },
+    expectedBuildSide: 'right',
+    expectedRows: [
+      ['', '', 1, 5], [1, 10, 1, 15], [2, 20, 2, 25],
+      ['', '', 4, 1], ['', '', 5, 100], ['', '', 6, 200],
+    ],
+  },
   // Force right-build SEMI with a ratio above JoinAsymmetryRatio.
   semi_join: {
     sql: 'SELECT k AS k, v AS v FROM l WHERE k IN (SELECT rk FROM r)',
@@ -777,7 +834,27 @@ async function runInstrumentationSemiJoinContract() {
   assert.equal(result.memory.liveMB, '0.0');
 }
 
+async function runOuterJoinInstrumentationContract() {
+  for (const name of ['left_outer_join', 'left_outer_residual', 'right_outer_join', 'right_outer_residual']) {
+    for (const mode of ['single', 'threaded']) {
+      const bundle = exportBundle(name, mode, true, null, true);
+      const result = await browserResult(name, resolveExecArtifacts(bundle), { operatorInstrumentation: true });
+      assert.deepEqual(normalizeResult(result), normalizeResult({
+        columns: ['k', 'v', 'rk', 'w'], rows: fixtures[name].expectedRows,
+      }), `${name}/${mode}: instrumented outer result`);
+      const joins = result.operator_instrumentation.stages.filter(stage => stage.kind === 'join');
+      assert.ok(joins.length > 0);
+      assert.equal(joins.reduce((sum, stage) => sum + stage.rows_out, 0), fixtures[name].expectedRows.length);
+      assert.ok(joins.some(stage => stage.hash_memory_peak_bytes > 0));
+      assert.ok(joins.some(stage => stage.retained_input_peak_bytes > 0));
+      assert.ok(joins.every(stage => stage.retained_input_bytes === 0));
+      assert.equal(result.memory?.liveMB, '0.0', `${name}/${mode}: instrumented outer leak`);
+    }
+  }
+}
+
 async function runOperatorInstrumentationContract() {
+  await runOuterJoinInstrumentationContract();
   await runInstrumentationPayloadContract();
   await runInstrumentationSemiJoinContract();
   for (const name of ['filter_project', 'aggregate', 'join']) {
@@ -831,6 +908,14 @@ async function runFixture(name, mode) {
     name, mode, fixtures[name].needsWasm === true);
   assertStablePhysicalGroups(name, mode, snapshotBundle);
   const snapshot = normalizedExec(snapshotBundle.exec);
+  if (fixtures[name].expectedBuildSide) {
+    const joins = snapshot.nodes.filter(node => node.kind === 'join');
+    assert.ok(joins.length > 0, `${name}/${mode}: join stage is missing`);
+    for (const join of joins) {
+      assert.equal(join.buildSide, fixtures[name].expectedBuildSide,
+        `${name}/${mode}: preserved build side changed`);
+    }
+  }
   if (printGoldens) {
     console.log(`=== ${name}.${mode}.json ===`);
     console.log(JSON.stringify(snapshot, null, 2));
@@ -860,6 +945,12 @@ async function runFixture(name, mode) {
     normalizeResult(browser),
     normalizeResult(nativeResult(name, mode)),
     `${name}/${mode}: browser and native results differ`);
+  if (fixtures[name].expectedRows) {
+    assert.deepEqual(normalizeResult(browser), normalizeResult({
+      columns: ['k', 'v', 'rk', 'w'],
+      rows: fixtures[name].expectedRows,
+    }), `${name}/${mode}: unexpected outer match or NULL extension`);
+  }
 
   // Canonize only a snapshot that passed the same stability and execution
   // checks as the normal test. The temporary-file rename keeps each golden

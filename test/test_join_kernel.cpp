@@ -325,6 +325,36 @@ TEST(CompileJoin, NormalizesNullableResidualIfBranch) {
   EXPECT_TRUE(static_cast<bool>(kernels.Dispatch));
 }
 
+TEST(CompileJoin, RejectsGeneralOuterFinalizationWithResidual) {
+    using namespace NQumir::NAst;
+    auto i64 = [] { return std::make_shared<TIntegerType>(TIntegerType::I64); };
+    TStructType leftType({{"lk", i64()}, {"lv", i64()}});
+    TStructType rightType({{"rk", i64()}, {"rv", i64()}});
+    TKernelCompiler compiler;
+
+    for (auto type : {EJoinType::Left, EJoinType::Right}) {
+        SCOPED_TRACE(static_cast<int>(type));
+        auto spec = NKernel::BuildJoinKernelSpec(
+            leftType, rightType, {{"lk", "rk"}}, type, ParseExpr("(< lv rv)"));
+        auto kernels = compiler.CompileJoin(spec);
+        THashTable left{}, right{};
+        TPairBuffer pairs{};
+        ASSERT_TRUE(kernels.Dispatch(
+            &left, &right, nullptr, 0, &pairs, nullptr, nullptr, 8,
+            JoinOpCode(EJoinKernelOp::Init)));
+        EXPECT_FALSE(kernels.Dispatch(
+            &left, &right, nullptr, 0, &pairs, nullptr, nullptr, 0,
+            JoinOpCode(EJoinKernelOp::Finalize)));
+        EXPECT_TRUE(kernels.Dispatch(
+            &left, &right, nullptr, 0, &pairs, nullptr, nullptr, 0,
+            JoinOpCode(EJoinKernelOp::FinalizeStream)));
+        EXPECT_EQ(pairs.Count, 0);
+        EXPECT_TRUE(kernels.Dispatch(
+            &left, &right, nullptr, 0, &pairs, nullptr, nullptr, 0,
+            JoinOpCode(EJoinKernelOp::Destroy)));
+    }
+}
+
 TEST(CompileJoinHash, ProducesMatchingSideHashes) {
   using namespace NQumir::NAst;
   auto i64 = [] { return std::make_shared<TIntegerType>(TIntegerType::I64); };

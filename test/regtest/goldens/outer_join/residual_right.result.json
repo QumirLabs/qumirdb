@@ -1,0 +1,14 @@
+{
+  "schema": "<struct (ok <named Nullable [i64]>) (ov <named Nullable [i64]>) (ck <named Nullable [i64]>) (cv i64)>",
+  "rows": [
+    ["1", "101", "1", "10"],
+    ["1", "102", "1", "10"],
+    [null, null, "1", "11"],
+    [null, null, "2", "20"],
+    [null, null, "3", "30"],
+    [null, null, "3", "31"],
+    [null, null, null, "40"],
+    [null, null, null, "41"],
+    ["5", "501", "5", "50"]
+  ]
+}
