@@ -156,7 +156,7 @@ TOperatorKernelSpec BuildFilterKernelSpec(
     TRuntimeContext* runtimeContext)
 {
     // Make NULL propagation explicit right before compilation (never in logical planning).
-    auto expanded = NKernel::ExpandKernelExpr(
+    auto expanded = NKernel::ExpandKernelPredicate(
         predicate, inputType, externalCatalog).first;
     expanded = LowerRegexExpression(
         expanded, runtimeContext ? &runtimeContext->Regexes : nullptr);

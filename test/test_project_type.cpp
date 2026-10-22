@@ -151,6 +151,15 @@ TEST(ProjectType, NullableIsNullAnnotates) {
     EXPECT_TRUE(IsBool(AnnotateExprType(Parse("(call qdb_is_null a)"), NullableSchema())));
 }
 
+TEST(ProjectType, NullPredicateIsNullableBool) {
+    for (const char* src : {"(call qdb_sql_null)", "(! (call qdb_sql_null))", "(cast (call qdb_sql_null) bool)"}) {
+        auto [expr, type] = ExpandKernelPredicate(Parse(src), Schema());
+        ASSERT_TRUE(IsNullable(type)) << src;
+        EXPECT_TRUE(IsBool(NullableInner(type))) << src;
+        EXPECT_TRUE(TMaybeNode<TCastExpr>(expr)) << src;
+    }
+}
+
 TEST(ProjectType, InListResultTracksOperandNullability) {
     auto nullable = AnnotateExprType(
         Parse("(call qdb_in_list a 1 2 3)"), NullableSchema());
