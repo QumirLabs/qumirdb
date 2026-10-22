@@ -8,7 +8,6 @@
   "cases": {
     "output_input_column.sql": {"order": "ordered"},
     "output_aggregate_key.sql": {"order": "ordered"},
-    "output_select_alias.sql": {"order": "ordered"},
     "computed_key_input_column.sql": {"order": "ordered"}
   }
 }
