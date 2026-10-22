@@ -1,0 +1,1 @@
+SELECT id FROM t WHERE a % 2 = 1 ORDER BY id;

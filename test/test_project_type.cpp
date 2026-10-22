@@ -126,6 +126,15 @@ TEST(ProjectType, NullableAdditionWithLiteralAnnotates) {
     EXPECT_TRUE(IsI32(NullableInner(type)));
 }
 
+TEST(ProjectType, RemainderKeepsOperandWidth) {
+    for (const char* src : {"(% a b)", "(% a 2)", "(% 7 a)"}) {
+        auto type = AnnotateExprType(Parse(src), NullableSchema());
+        ASSERT_TRUE(IsNullable(type)) << src;
+        EXPECT_TRUE(IsI32(NullableInner(type))) << src;
+    }
+    EXPECT_TRUE(IsI32(AnnotateExprType(Parse("(% k 3)"), Schema())));
+}
+
 TEST(ProjectType, NullableDivisionAnnotates) {
     auto type = AnnotateExprType(Parse("(/ a b)"), NullableSchema());
     ASSERT_TRUE(IsNullable(type));
