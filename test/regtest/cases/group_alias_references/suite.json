@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "fixtures": {
+    "t": {"json": "tables/t.json"}
+  },
+  "tables": {"t": "t"},
+  "variants": ["single", "threaded"],
+  "cases": {
+    "grouping_rollup.sql": {"order": "ordered"},
+    "grouping_rollup_merged_key.sql": {"order": "ordered"},
+    "grouping_plain.sql": {"order": "ordered"},
+    "grouping_plain_column.sql": {"order": "ordered"},
+    "grouping_plain_narrowed_key.sql": {"order": "ordered"},
+    "having.sql": {"order": "ordered"},
+    "having_rollup.sql": {"order": "ordered"},
+    "select_expression.sql": {"order": "ordered"}
+  }
+}

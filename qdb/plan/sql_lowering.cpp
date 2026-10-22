@@ -429,11 +429,6 @@ std::expected<NAst::TExprPtr, TError> BuildGroupingValue(
     if (!call || call.Cast()->Args.size() != 1) {
         return std::unexpected(TError(expr->Location, "GROUPING() expects exactly one argument"));
     }
-    if (!info.HasGroupingSyntax) {
-        return std::unexpected(TError(expr->Location,
-            "GROUPING() requires GROUPING SETS, ROLLUP, or CUBE"));
-    }
-
     auto arg = call.Cast()->Args[0];
     auto key = info.KeyIndex.find(NAst::NCore::PrintAst(arg));
     if (key == info.KeyIndex.end()) {
@@ -1074,11 +1069,9 @@ bool HasGroupingCall(const NAst::TExprPtr& expr) {
 
 TGroupingRewriteInfo MakeGroupingRewriteInfo(
     const std::vector<TGroupKey>& keys,
-    const std::vector<std::vector<size_t>>& sets,
-    bool hasGroupingSyntax)
+    const std::vector<std::vector<size_t>>& sets)
 {
     TGroupingRewriteInfo info;
-    info.HasGroupingSyntax = hasGroupingSyntax;
     info.Sets = sets;
     for (size_t i = 0; i < keys.size(); ++i) {
         info.KeyIndex.emplace(NAst::NCore::PrintAst(keys[i].Expression), i);

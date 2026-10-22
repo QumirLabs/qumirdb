@@ -1926,6 +1926,9 @@ std::expected<TRelation, TError> BuildAggregate(
         key.Computed = !ident;
         return {};
     };
+    // A GROUP BY alias of an input column names the column's key, which SELECT,
+    // HAVING and GROUPING() refer to by the alias.
+    std::unordered_map<std::string, std::string> aliasColumns;
     for (auto& key : groupKeys) {
         if (auto position = SelectPosition(key.Expression)) {
             auto projection = PositionedProjection(projections, positioned, *position, key.Expression->Location);
@@ -1968,23 +1971,26 @@ std::expected<TRelation, TError> BuildAggregate(
         if (auto selected = selectedKey(key, alias->second, "GROUP BY alias '" + key.Name + "'"); !selected) {
             return std::unexpected(selected.error());
         }
+        if (!key.Computed) {
+            aliasColumns.emplace(alias->first, key.Name);
+        }
     }
+    auto bindAliases = [&](const NAst::TExprPtr& expression) {
+        for (const auto& ident : FindUnboundIdents(expression)) {
+            if (auto column = aliasColumns.find(ident->Name); column != aliasColumns.end()) {
+                ident->Name = column->second;
+            }
+        }
+    };
+    for (const auto& projection : projections) {
+        bindAliases(projection.Expression);
+    }
+    bindAliases(having);
     MergeColumnKeys(groupKeys, groupingSets);
-    NarrowPlainGroupKeys(groupKeys, groupingSets, hasGroupingSyntax);
-    std::unordered_map<std::string, std::string> computedKeys; // PrintAst -> name
-    for (const auto& key : groupKeys) {
-        if (key.Computed) {
-            computedKeys.emplace(NAst::NCore::PrintAst(key.Expression), key.Name);
-        }
-    }
-    if (!computedKeys.empty()) {
-        for (auto& projection : projections) {
-            projection.Expression = SubstituteGroupKeys(projection.Expression, computedKeys);
-        }
-        having = SubstituteGroupKeys(having, computedKeys);
-    }
 
-    auto groupingInfo = MakeGroupingRewriteInfo(groupKeys, groupingSets, hasGroupingSyntax);
+    // GROUPING() reads every GROUP BY key: the keys that narrowing drops below are
+    // still keys of the single grouping set of a plain GROUP BY.
+    auto groupingInfo = MakeGroupingRewriteInfo(groupKeys, groupingSets);
     for (auto& projection : projections) {
         auto rewritten = RewriteGroupingCalls(projection.Expression, groupingInfo);
         if (!rewritten) {
@@ -1998,6 +2004,20 @@ std::expected<TRelation, TError> BuildAggregate(
             return std::unexpected(rewritten.error());
         }
         having = std::move(*rewritten);
+    }
+
+    NarrowPlainGroupKeys(groupKeys, groupingSets, hasGroupingSyntax);
+    std::unordered_map<std::string, std::string> computedKeys; // PrintAst -> name
+    for (const auto& key : groupKeys) {
+        if (key.Computed) {
+            computedKeys.emplace(NAst::NCore::PrintAst(key.Expression), key.Name);
+        }
+    }
+    if (!computedKeys.empty()) {
+        for (auto& projection : projections) {
+            projection.Expression = SubstituteGroupKeys(projection.Expression, computedKeys);
+        }
+        having = SubstituteGroupKeys(having, computedKeys);
     }
 
     std::vector<std::string> keys;
@@ -2581,7 +2601,7 @@ std::expected<TRelation, TError> BuildSelect(
         for (const auto& projection : projections) {
             if (HasGroupingCall(projection.Expression)) {
                 return std::unexpected(TError(projection.Expression->Location,
-                    "GROUPING() requires GROUPING SETS, ROLLUP, or CUBE"));
+                    "GROUPING() requires GROUP BY"));
             }
         }
         if (having) {

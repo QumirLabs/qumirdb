@@ -1,0 +1,5 @@
+sort [g asc nulls-last, gg asc, s asc]
+└─ project (g, gg, s) (rows≈5 cost≈488)
+   └─ aggregate keys=[t.a] aggs=[sum_0=sum] (rows≈5 cost≈368)
+      └─ project (t.a, t.b) (rows≈4 cost≈128)
+         └─ source t AS t (rows≈4 cost≈64)

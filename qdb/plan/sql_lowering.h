@@ -216,15 +216,13 @@ bool HasAggregateCall(const NQumir::NAst::TExprPtr& expr);
 bool HasGroupingCall(const NQumir::NAst::TExprPtr& expr);
 
 struct TGroupingRewriteInfo {
-    bool HasGroupingSyntax = false;
     std::unordered_map<std::string, size_t> KeyIndex;
     std::vector<std::vector<size_t>> Sets;
 };
 
 TGroupingRewriteInfo MakeGroupingRewriteInfo(
     const std::vector<TGroupKey>& keys,
-    const std::vector<std::vector<size_t>>& sets,
-    bool hasGroupingSyntax);
+    const std::vector<std::vector<size_t>>& sets);
 
 std::expected<NQumir::NAst::TExprPtr, NQumir::TError> RewriteGroupingCalls(
     NQumir::NAst::TExprPtr expr,

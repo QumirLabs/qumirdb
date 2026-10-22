@@ -1,0 +1,8 @@
+{
+  "schema": "<struct (g <named Nullable [i64]>) (h <named Nullable [i64]>) (s i64)>",
+  "rows": [
+    ["1", "2", "50"],
+    ["2", "4", "20"],
+    [null, null, "30"]
+  ]
+}
