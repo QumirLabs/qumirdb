@@ -210,6 +210,33 @@ TEST(ProjectType, NullPredicateIsNullableBool) {
     }
 }
 
+TEST(ProjectType, UntypedNullValueIsNullableInteger) {
+    for (const char* src : {
+        "(call qdb_sql_null)",
+        "(if (< k 1) (call qdb_sql_null) (call qdb_sql_null))",
+        "(call coalesce (call qdb_sql_null) (call qdb_sql_null))",
+        "(+ (call qdb_sql_null) (call qdb_sql_null))",
+    }) {
+        auto annotated = AnnotateExprType(Parse(src), Schema());
+        ASSERT_TRUE(IsNullable(annotated)) << src;
+        EXPECT_TRUE(IsI32(NullableInner(annotated))) << src;
+        auto [expr, type] = ExpandKernelValue(Parse(src), Schema());
+        ASSERT_TRUE(IsNullable(type)) << src;
+        EXPECT_TRUE(IsI32(NullableInner(type))) << src;
+    }
+    EXPECT_THROW(
+        AnnotateExprType(Parse("(call missing_fn (call qdb_sql_null))"), Schema()),
+        NQumir::TError);
+}
+
+TEST(ProjectType, NullOperandTakesOtherOperandType) {
+    for (const char* src : {"(+ (call qdb_sql_null) k)", "(+ k (call qdb_sql_null))"}) {
+        auto type = AnnotateExprType(Parse(src), Schema());
+        ASSERT_TRUE(IsNullable(type)) << src;
+        EXPECT_TRUE(IsI32(NullableInner(type))) << src;
+    }
+}
+
 TEST(ProjectType, InListResultTracksOperandNullability) {
     auto nullable = AnnotateExprType(
         Parse("(call qdb_in_list a 1 2 3)"), NullableSchema());

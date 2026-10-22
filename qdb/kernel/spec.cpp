@@ -206,7 +206,7 @@ TOperatorKernelSpec BuildProjectKernelSpec(
     std::vector<NQumir::NAst::TExprPtr> expanded;
     expanded.reserve(computedExprs.size());
     for (const auto& expr : computedExprs) {
-        auto kernelExpr = NKernel::ExpandKernelExpr(
+        auto kernelExpr = NKernel::ExpandKernelValue(
             expr, inputType, externalCatalog).first;
         expanded.push_back(LowerRegexExpression(
             kernelExpr, runtimeContext ? &runtimeContext->Regexes : nullptr));
@@ -272,7 +272,7 @@ TOperatorKernelSpec BuildAggregateKernelSpec(
         RejectRegexCall(agg.Arg, "aggregate");
         // Expand NULL propagation in the argument expression before compilation.
         auto argExpr = agg.Arg
-            ? NKernel::ExpandKernelExpr(agg.Arg, inputType, externalCatalog).first
+            ? NKernel::ExpandKernelValue(agg.Arg, inputType, externalCatalog).first
             : agg.Arg;
         TKernelAggregateSpec spec{
             .Name = agg.Name,

@@ -39,7 +39,8 @@ struct TAnnotationContext {
 // `inputType`. Operators use local promotion rules; catalog calls use the reusable
 // resolver in TAnnotationContext. No AST rewrite is performed, and NULL propagates as
 // if ExpandNullable had already run. The logical AST therefore stays clean for passes
-// such as equi-join extraction. Throws on a null expression.
+// such as equi-join extraction. An untyped NULL value (`SELECT NULL AS x`) is
+// NULL[INTEGER], as in ExpandKernelValue. Throws on a null expression.
 NQumir::NAst::TTypePtr AnnotateExprType(
     const NQumir::NAst::TExprPtr& expr,
     const NQumir::NAst::TStructType& inputType,
@@ -79,8 +80,16 @@ std::pair<NQumir::NAst::TExprPtr, NQumir::NAst::TTypePtr> ExpandKernelExpr(
     const TExternalCatalogSnapshot* externalCatalog = nullptr);
 
 // ExpandKernelExpr for a filter or join residual predicate. A predicate is a boolean
-// context: a bare NULL predicate (`WHERE NULL`) becomes NULL[bool], which selects no rows.
+// context: an untyped NULL predicate (`WHERE NULL`) becomes NULL[bool], which selects no rows.
 std::pair<NQumir::NAst::TExprPtr, NQumir::NAst::TTypePtr> ExpandKernelPredicate(
+    const NQumir::NAst::TExprPtr& expr,
+    const NQumir::NAst::TStructType& inputType,
+    const TExternalCatalogSnapshot* externalCatalog = nullptr);
+
+// ExpandKernelExpr for a projected column or an aggregate argument. Nothing there types
+// an untyped NULL (`SELECT NULL AS x`), so it becomes NULL[INTEGER], the type
+// AnnotateExprType gives the column.
+std::pair<NQumir::NAst::TExprPtr, NQumir::NAst::TTypePtr> ExpandKernelValue(
     const NQumir::NAst::TExprPtr& expr,
     const NQumir::NAst::TStructType& inputType,
     const TExternalCatalogSnapshot* externalCatalog = nullptr);
