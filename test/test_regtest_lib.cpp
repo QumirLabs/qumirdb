@@ -322,6 +322,125 @@ TEST(RegSuiteInfrastructure, PlanOnlyKeepsRealSchemasAndDoesNotReadOrCanonizeRes
     EXPECT_FALSE(checked.Result);
 }
 
+std::string ErrorManifest(std::string_view options) {
+    return R"({
+        "version":1,
+        "fixtures":{"data":{"json":"table.json"}},
+        "tables":{"t":"data"},"variants":["single"],
+        "cases":{"query.sql":{)" + std::string(options) + "}}}";
+}
+
+TEST(RegSuiteInfrastructure, PlanningErrorIsCanonizedInPlanGolden) {
+    TCaseDirectory dir;
+    dir.Write("suite.json", ErrorManifest(R"("expect_error":true)"));
+    dir.Write("query.sql", "SELECT missing FROM t;");
+    const auto tests = dir.Collect();
+    ASSERT_EQ(tests.size(), 1);
+    EXPECT_TRUE(tests[0].ExpectError);
+    NRegTest::PrepareCases(tests);
+    const auto canonized = NRegTest::CheckCase(tests[0], true);
+    EXPECT_EQ(canonized.Plan.Actual.rfind("Error: ", 0), 0u) << canonized.Plan.Actual;
+    EXPECT_NE(canonized.Plan.Actual.find(" @ Line: 1, Byte: "), std::string::npos);
+    EXPECT_FALSE(canonized.Result);
+    EXPECT_FALSE(canonized.Error);
+    NRegTest::CommitGoldens(tests);
+    const auto checked = NRegTest::CheckCase(tests[0], false);
+    EXPECT_TRUE(checked.Plan.Matches);
+    // Another message is a mismatch, not an exception.
+    dir.Write("query.sql", "SELECT other FROM t;");
+    EXPECT_FALSE(NRegTest::CheckCase(tests[0], false).Plan.Matches);
+}
+
+TEST(RegSuiteInfrastructure, RuntimeErrorIsCanonizedInErrorGolden) {
+    TCaseDirectory dir;
+    dir.Write("suite.json", ErrorManifest(R"("expect_error":true)"));
+    dir.Write("table.json", R"({
+        "version":1,"schema":"<struct (v i64)>",
+        "rows":[["-9223372036854775808"]]
+    })");
+    dir.Write("query.sql", "SELECT abs(v) AS v FROM t;");
+    fs::remove(dir.Golden);
+    const auto tests = dir.Collect();
+    NRegTest::PrepareCases(tests);
+    const auto canonized = NRegTest::CheckCase(tests[0], true);
+    EXPECT_TRUE(canonized.Plan.Matches);
+    EXPECT_NE(canonized.Plan.Actual.find("source t"), std::string::npos);
+    EXPECT_FALSE(canonized.Result);
+    ASSERT_TRUE(canonized.Error);
+    // An exception that is not a TError has no location.
+    EXPECT_EQ(canonized.Error->Actual, "Runtime error: abs overflow for i64\n");
+    NRegTest::CommitGoldens(tests);
+    EXPECT_TRUE(fs::is_regular_file(tests[0].ErrorGolden));
+    EXPECT_FALSE(fs::exists(dir.Golden));
+    const auto checked = NRegTest::CheckCase(tests[0], false);
+    ASSERT_TRUE(checked.Error);
+    EXPECT_TRUE(checked.Error->Matches);
+    std::ofstream(tests[0].ErrorGolden) << "Runtime error: other\n";
+    EXPECT_FALSE(NRegTest::CheckCase(tests[0], false).Error->Matches);
+}
+
+TEST(RegSuiteInfrastructure, CanonizeRemovesGoldensOfThePreviousOutcome) {
+    TCaseDirectory dir;
+    const auto errorGolden = dir.GoldensDir / "group/query.error";
+    // A success case loses a stale error golden.
+    std::ofstream(errorGolden) << "Runtime error: old\n";
+    auto tests = dir.Collect();
+    NRegTest::PrepareCases(tests);
+    EXPECT_TRUE(NRegTest::CheckCase(tests[0], true).Result->Matches);
+    NRegTest::CommitGoldens(tests);
+    EXPECT_FALSE(fs::exists(errorGolden));
+    EXPECT_TRUE(fs::exists(dir.Golden));
+    // An error case loses the result golden.
+    dir.Write("suite.json", ErrorManifest(R"("expect_error":true)"));
+    dir.Write("table.json", R"({
+        "version":1,"schema":"<struct (v i64)>",
+        "rows":[["-9223372036854775808"]]
+    })");
+    dir.Write("query.sql", "SELECT abs(v) AS v FROM t;");
+    tests = dir.Collect();
+    NRegTest::PrepareCases(tests);
+    NRegTest::CheckCase(tests[0], true);
+    NRegTest::CommitGoldens(tests);
+    EXPECT_TRUE(fs::exists(errorGolden));
+    EXPECT_FALSE(fs::exists(dir.Golden));
+}
+
+TEST(RegSuiteInfrastructure, UnexpectedOutcomesAreReportedWithTheirMessage) {
+    TCaseDirectory dir;
+    auto message = [&](std::string_view sql, std::string_view options) {
+        dir.Write("suite.json", ErrorManifest(options));
+        dir.Write("query.sql", sql);
+        const auto tests = dir.Collect();
+        NRegTest::PrepareCases(tests);
+        try {
+            NRegTest::CheckCase(tests[0], true);
+        } catch (const std::runtime_error& error) {
+            return std::string(error.what());
+        }
+        return std::string();
+    };
+    const auto planning = message("SELECT missing FROM t;", "");
+    EXPECT_NE(planning.find("unexpected planning error"), std::string::npos) << planning;
+    EXPECT_NE(planning.find("Error: "), std::string::npos) << planning;
+    dir.Write("table.json", R"({
+        "version":1,"schema":"<struct (v i64)>",
+        "rows":[["-9223372036854775808"]]
+    })");
+    const auto running = message("SELECT abs(v) AS v FROM t;", "");
+    EXPECT_NE(running.find("unexpected error"), std::string::npos) << running;
+    EXPECT_NE(running.find("abs overflow for i64"), std::string::npos) << running;
+    const auto success = message("SELECT v FROM t;", R"("expect_error":true)");
+    EXPECT_NE(success.find("expected an error but the case succeeded"), std::string::npos) << success;
+    const auto planned = message("SELECT v FROM t;", R"("expect_error":true,"execute":false)");
+    EXPECT_NE(planned.find("expected a planning error"), std::string::npos) << planned;
+}
+
+TEST(RegSuiteInfrastructure, RejectsNonBooleanExpectError) {
+    TCaseDirectory dir;
+    dir.Write("suite.json", ErrorManifest(R"("expect_error":"yes")"));
+    EXPECT_THROW(dir.Collect(), std::runtime_error);
+}
+
 TEST(RegSuiteInfrastructure, CaseExecutionOverridesSuiteDefault) {
     TCaseDirectory dir;
     dir.Write("run.sql", "SELECT v AS v FROM t ORDER BY v DESC;");

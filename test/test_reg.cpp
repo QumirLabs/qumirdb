@@ -71,9 +71,17 @@ private:
                 std::cout << "=== " << Case.Sql << " (.result.json, " << Case.Variant << ") ===\n"
                     << result.Result->Actual;
             }
+            if (result.Error) {
+                std::cout << "=== " << Case.Sql << " (.error, " << Case.Variant << ") ===\n"
+                    << result.Error->Actual;
+            }
         }
         EXPECT_TRUE(result.Plan.Matches) << "SQL: " << Case.Sql << "\nGolden: " << Case.PlanGolden
             << "\nVariant: " << Case.Variant << '\n' << ComparisonDiff(result.Plan);
+        if (result.Error) {
+            EXPECT_TRUE(result.Error->Matches) << "SQL: " << Case.Sql << "\nGolden: " << Case.ErrorGolden
+                << "\nVariant: " << Case.Variant << '\n' << ComparisonDiff(*result.Error);
+        }
         if (result.Result) {
             EXPECT_TRUE(result.Result->Matches) << "SQL: " << Case.Sql << "\nGolden: " << Case.Golden
                 << "\nVariant: " << Case.Variant << "\nTolerance: abs=" << Case.Tol.Absolute

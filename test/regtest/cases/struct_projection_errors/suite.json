@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "expect_error": true,
+  "fixtures": {
+    "points": {"json": "tables/points.json"},
+    "nullable_points": {"json": "tables/nullable_points.json"}
+  },
+  "tables": {"points": "points"},
+  "variants": ["single", "threaded", "js"],
+  "cases": {
+    "nullable_struct_result.sql": {"tables": {"points": "nullable_points"}},
+    "alias_count_mismatch.sql": {},
+    "distinct_without_aliases.sql": {},
+    "scalar_alias_list.sql": {},
+    "group_position_struct_field.sql": {},
+    "group_position_aliased_struct_field.sql": {},
+    "group_position_past_struct.sql": {},
+    "group_position_struct_over_window.sql": {},
+    "empty_alias_list.sql": {}
+  }
+}

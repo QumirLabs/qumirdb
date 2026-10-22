@@ -1,7 +1,7 @@
 # SQL regression suites
 
 `cases/` holds SQL files, `suite.json` manifests and JSON table fixtures;
-`goldens/` holds the expected AST, plan and `.result.json` files. Two runners
+`goldens/` holds the expected AST, plan, `.result.json` and `.error` files. Two runners
 read them:
 
 - `test/test_reg.cpp` (`build/test/test_reg`) checks ASTs, optimized plans and
@@ -44,6 +44,52 @@ executed case without `js` as skipped together with the list that excludes it.
 Today the browser exporter cannot run non-inner joins without equi-keys
 ("browser keyless join type is not supported yet"); the `keyless_joins` suite
 and the cases that decorrelate into such joins leave out `js`.
+
+## Expected errors
+
+An invalid query is a regular result. A case that must fail sets
+`"expect_error": true` (per case, or as a suite default that a case overrides):
+
+```json
+"expect_error": true,
+"cases": {
+  "ungrouped_column.sql": {},
+  "group_qualified_key_control.sql": {"expect_error": false, "order": "unordered"}
+}
+```
+
+The stage that fails decides the golden, and `test_reg --canonize` writes it:
+
+- Parsing, binding and optimization errors go to the `.plan` golden, as in
+  plan-only suites; there is no result golden.
+- Errors of lowering, compilation and execution go to the `.error` golden; the
+  `.plan` golden then holds the optimized plan as usual.
+
+Every variant renders the error and the variants must agree, like results.
+
+The text of an error is one of:
+
+- `Error: <message> @ Line: L, Byte: B, Column: C` for a `TError`, like Qumir's
+  regression tests (the location is absent when the error has none);
+- `Runtime error: <message>` for any other exception, for example a
+  `std::runtime_error` thrown by lowering or `abs overflow for i64`. It has no
+  location and the prefix marks it as an error of the engine, not of the query
+  text.
+
+The outcome must match the declaration. A case without `expect_error` that
+fails, and a case with it that succeeds, fail with the message (the SQL file
+and the error). With `"execute": false` the error can only be a planning
+error; `expect_error` there makes a successful plan fail the case. `--canonize` also removes the golden of the
+previous outcome (a `.error` of a case that now succeeds, a result of a case
+that now fails) and reports each removed file on stderr. Failures of
+the harness (a broken fixture, an unmapped table) are never goldens.
+
+The browser runner checks the same cases. A planning error of the exporter is
+compared with the `.plan` golden exactly; an error that the exporter reports
+for lowering is compared with the `.error` golden. The WASM runtime words its
+errors differently from the native one, so a run that must fail with an
+`.error` golden only has to fail, whatever it says; a `js` run that succeeds
+fails the case.
 
 ## Browser runner
 

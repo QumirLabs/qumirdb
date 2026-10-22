@@ -25,9 +25,9 @@
     "where_and_argument.sql": {"order": "unordered"},
     "window_argument_aggregate.sql": {"order": "unordered"},
     "window_order_aggregate.sql": {"order": "unordered"},
-    "exists_argument.sql": {"execute": false},
-    "correlated_in_argument.sql": {"execute": false},
-    "window_argument.sql": {"execute": false},
-    "window_partition_key.sql": {"execute": false}
+    "exists_argument.sql": {"execute": false, "expect_error": true},
+    "correlated_in_argument.sql": {"execute": false, "expect_error": true},
+    "window_argument.sql": {"execute": false, "expect_error": true},
+    "window_partition_key.sql": {"execute": false, "expect_error": true}
   }
 }

@@ -528,11 +528,11 @@ std::map<std::string, std::string> Bindings(const TObject& object) {
     return result;
 }
 
-bool ExecuteOption(const TObject& object, bool fallback) {
-    const auto* value = object.get("execute");
+bool BoolOption(const TObject& object, llvm::StringRef name, bool fallback) {
+    const auto* value = object.get(name);
     if (!value) return fallback;
     const auto enabled = value->getAsBoolean();
-    if (!enabled) throw std::runtime_error("execute must be a boolean");
+    if (!enabled) throw std::runtime_error(name.str() + " must be a boolean");
     return *enabled;
 }
 
@@ -639,6 +639,7 @@ struct TSuite {
     std::map<std::pair<fs::path, int64_t>, std::pair<fs::path, std::shared_ptr<TParquetFile>>> Files;
     std::map<fs::path, TValue> Canonized;
     std::map<fs::path, std::string> CanonizedPlans;
+    std::map<fs::path, std::string> CanonizedErrors;
 
     void Prepare(const std::string& name) {
         auto& fixture = Fixtures.at(name);
@@ -709,15 +710,17 @@ std::vector<TQueryCase> CollectCases(const fs::path& root, const fs::path& golde
         result.push_back({fs::path(relative).replace_extension(), sql,
             fs::path(goldenRoot / relative).replace_extension(".plan"),
             fs::path(goldenRoot / relative).replace_extension(".result.json"),
+            fs::path(goldenRoot / relative).replace_extension(".error"),
             nullptr, {}, "plan", true});
     }
     for (const auto& manifest : manifests) {
         try {
             auto json = ReadJson(manifest);
             const auto& object = Object(json);
-            Fields(object, {"version", "fixtures", "tables", "variants", "cases", "execute", "tol"});
+            Fields(object, {"version", "fixtures", "tables", "variants", "cases", "execute", "tol", "expect_error"});
+            const bool suiteExpectError = BoolOption(object, "expect_error", false);
             Version(object);
-            const bool suiteExecute = ExecuteOption(object, true);
+            const bool suiteExecute = BoolOption(object, "execute", true);
             const auto suiteTol = ToleranceOption(object, {});
             auto suite = std::make_shared<TSuite>();
             suite->Manifest = manifest;
@@ -759,9 +762,10 @@ std::vector<TQueryCase> CollectCases(const fs::path& root, const fs::path& golde
             std::set<fs::path> queries;
             for (const auto& [name, value] : Object(Required(object, "cases"))) {
                 const auto& definition = Object(value);
-                Fields(definition, {"tables", "order", "execute", "tol", "variants"});
-                const bool execute = ExecuteOption(definition, suiteExecute);
+                Fields(definition, {"tables", "order", "execute", "tol", "variants", "expect_error"});
+                const bool execute = BoolOption(definition, "execute", suiteExecute);
                 const auto tol = ToleranceOption(definition, suiteTol);
+                const bool expectError = BoolOption(definition, "expect_error", suiteExpectError);
                 const auto* caseVariants = definition.get("variants");
                 const auto executed = caseVariants ? NativeVariants(*caseVariants) : variants;
                 const auto sql = File(dir, TValue(name.str()));
@@ -780,11 +784,12 @@ std::vector<TQueryCase> CollectCases(const fs::path& root, const fs::path& golde
                 const auto base = fs::path(relativeSql).replace_extension();
                 const auto golden = fs::path(goldenRoot / relativeSql).replace_extension(".result.json");
                 const auto planGolden = fs::path(goldenRoot / relativeSql).replace_extension(".plan");
+                const auto errorGolden = fs::path(goldenRoot / relativeSql).replace_extension(".error");
                 const auto runs = bindings.empty() || !execute
                     ? std::set<std::string>{"plan"} : executed;
                 for (const auto& variant : runs) {
-                    result.push_back({base, sql, planGolden,
-                        golden, suite, bindings, variant, order == "ordered", execute, tol});
+                    result.push_back({base, sql, planGolden, golden, errorGolden,
+                        suite, bindings, variant, order == "ordered", execute, tol, expectError});
                 }
             }
             for (const auto& entry : fs::directory_iterator(dir)) {
@@ -850,7 +855,7 @@ TParsedQuery ParseQuery(const fs::path& sql) {
     NSql::TTokenStream tokens(input);
     NSql::TParser parser;
     auto statements = parser.ParseAll(tokens);
-    if (!statements) throw std::runtime_error(statements.error().ToString());
+    if (!statements) throw statements.error();
     if (statements->empty()) throw std::runtime_error("SQL file has no query");
     TExternalModuleCatalog catalog;
     for (size_t i = 0; i + 1 < statements->size(); ++i) {
@@ -863,7 +868,7 @@ TParsedQuery ParseQuery(const fs::path& sql) {
         } else {
             throw std::runtime_error("only CREATE MODULE and CREATE FUNCTION may precede the query");
         }
-        if (!applied) throw std::runtime_error(applied.error().ToString());
+        if (!applied) throw applied.error();
     }
     return {
         .Query = statements->back(),
@@ -871,20 +876,53 @@ TParsedQuery ParseQuery(const fs::path& sql) {
     };
 }
 
-TComparison ComparePlan(const TQueryCase& test, const std::string& actual, bool canonize) {
+// A text golden. Canonizing a suite case records the text and CommitGoldens
+// writes it once every variant agreed; a variant that renders other text than
+// the first one fails the comparison.
+TComparison CompareText(const TQueryCase& test, const fs::path& golden,
+    std::map<fs::path, std::string> TSuite::* canonized, const std::string& actual, bool canonize)
+{
     std::string expected;
     if (canonize) {
         if (test.Suite) {
-            auto [it, inserted] = test.Suite->CanonizedPlans.emplace(test.PlanGolden, actual);
+            auto [it, inserted] = ((*test.Suite).*canonized).emplace(golden, actual);
             expected = it->second;
         } else {
-            WriteAll(test.PlanGolden, actual);
+            WriteAll(golden, actual);
             expected = actual;
         }
-    } else if (!fs::is_regular_file(test.PlanGolden)) {
-        return {false, actual, "Missing golden file: " + test.PlanGolden.string() + "\n"};
-    } else expected = ReadAll(test.PlanGolden);
+    } else if (!fs::is_regular_file(golden)) {
+        return {false, actual, "Missing golden file: " + golden.string() + "\n"};
+    } else expected = ReadAll(golden);
     return {actual == expected, actual, expected};
+}
+
+TComparison ComparePlan(const TQueryCase& test, const std::string& actual, bool canonize) {
+    return CompareText(test, test.PlanGolden, &TSuite::CanonizedPlans, actual, canonize);
+}
+
+// A failure of the harness itself (a broken fixture, an unmapped table) is not an
+// error of the query: it is never compared with a golden.
+class THarnessError : public std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+
+// Runs a stage of a case and returns the text of its error, if any. A TError
+// renders as `Error: <message> @ Line: L, Byte: B, Column: C`, like Qumir's
+// regression tests. Any other exception has no location and renders as
+// `Runtime error: <message>`.
+template<typename TFunc>
+std::optional<std::string> CaptureError(TFunc&& stage) {
+    try {
+        stage();
+    } catch (const THarnessError&) {
+        throw;
+    } catch (const NQumir::TError& error) {
+        return error.ToString() + "\n";
+    } catch (const std::exception& error) {
+        return std::string("Runtime error: ") + error.what() + "\n";
+    }
+    return std::nullopt;
 }
 
 } // namespace
@@ -1089,7 +1127,7 @@ TComparison CompareResults(const std::string& actual, const std::string& expecte
 TCaseResult CheckCase(const TQueryCase& test, bool canonize) {
     if (!test.HasTables()) {
         std::istringstream input(ReadAll(test.Sql));
-        return {ComparePlan(test, BuildPlanText(input), canonize), std::nullopt};
+        return {ComparePlan(test, BuildPlanText(input), canonize), std::nullopt, std::nullopt};
     }
     const char* timingEnv = std::getenv("QDB_REGTEST_TIMING");
     const bool timing = timingEnv && *timingEnv && std::string_view(timingEnv) != "0";
@@ -1102,48 +1140,55 @@ TCaseResult CheckCase(const TQueryCase& test, bool canonize) {
         return elapsed;
     };
     std::vector<std::unique_ptr<TParquetSource>> sources;
-    const auto parsed = ParseQuery(test.Sql);
-    const auto parseMs = mark();
-    auto plan = BuildPlan(parsed.Query, [&](std::string_view table)
-        -> std::expected<TOperatorPtr, NQumir::TError>
-    {
-        const auto binding = test.Tables.find(std::string(table));
-        if (binding == test.Tables.end()) {
-            throw std::runtime_error("unknown suite table '" + std::string(table) + "'");
-        }
-        auto& fixture = test.Suite->Fixtures.at(binding->second);
-        if (!fixture.Error.empty()) throw std::runtime_error(fixture.Error);
-        if (!fixture.File) throw std::runtime_error("fixture was not prepared");
-        auto& source = sources.emplace_back(fixture.File->MakeSource());
-        return std::make_shared<TSourceOperator>(*source, std::string(table));
-    }, parsed.Annotation);
-    // A planning error is the plan output of an invalid query: the plan golden
-    // of a plan-only case holds the error.
-    std::string planError;
-    if (!plan) {
-        planError = plan.error().ToString();
-    }
-    const auto buildMs = mark();
-    if (planError.empty()) {
-        try {
-            ApplyPlanPasses(*plan, {.Annotation = parsed.Annotation});
-        } catch (const NQumir::TError& error) {
-            planError = error.ToString();
-        }
-    }
-    const auto optimizeMs = mark();
-    if (!planError.empty() && test.Execute) {
+    std::optional<TParsedQuery> parsed;
+    TOperatorPtr plan;
+    // Parsing, binding and optimization are the planning stage: its error is the
+    // plan output of an invalid query, as in plan-only suites.
+    double parseMs = 0;
+    double buildMs = 0;
+    double optimizeMs = 0;
+    const auto planError = CaptureError([&] {
+        parsed.emplace(ParseQuery(test.Sql));
+        parseMs = mark();
+        auto built = BuildPlan(parsed->Query, [&](std::string_view table)
+            -> std::expected<TOperatorPtr, NQumir::TError>
+        {
+            const auto binding = test.Tables.find(std::string(table));
+            if (binding == test.Tables.end()) {
+                throw THarnessError("unknown suite table '" + std::string(table) + "'");
+            }
+            auto& fixture = test.Suite->Fixtures.at(binding->second);
+            if (!fixture.Error.empty()) throw THarnessError(fixture.Error);
+            if (!fixture.File) throw THarnessError("fixture was not prepared");
+            auto& source = sources.emplace_back(fixture.File->MakeSource());
+            return std::make_shared<TSourceOperator>(*source, std::string(table));
+        }, parsed->Annotation);
+        buildMs = mark();
+        if (!built) throw built.error();
+        plan = std::move(*built);
+        ApplyPlanPasses(plan, {.Annotation = parsed->Annotation});
+        optimizeMs = mark();
+    });
+    const std::string where = " (" + test.Sql.string() + ", " + test.Variant + ")";
+    if (planError && !test.ExpectError && test.Execute) {
         // Canonizing must not turn an executed case into an error golden.
-        throw std::runtime_error(planError);
+        throw std::runtime_error("unexpected planning error" + where
+            + "; declare \"expect_error\" if it is intended:\n" + *planError);
     }
     std::ostringstream planOutput;
-    if (planError.empty()) {
-        PrintPlanTreeWithCtes(planOutput, *plan);
+    if (planError) {
+        planOutput << *planError;
     } else {
-        planOutput << planError << '\n';
+        PrintPlanTreeWithCtes(planOutput, plan);
     }
     const auto planComparison = ComparePlan(test, planOutput.str(), canonize);
     const auto planGoldenMs = mark();
+    if (planError && test.ExpectError) {
+        return {planComparison, std::nullopt, std::nullopt};
+    }
+    if (!planError && !test.Execute && test.ExpectError) {
+        throw std::runtime_error("expected a planning error but the plan was built" + where);
+    }
     auto printTiming = [&](const TPlanRunTimings& runTimings, double resultGoldenMs) {
         if (!timing) return;
         const auto totalMs = std::chrono::duration<double, std::milli>(point - started).count();
@@ -1156,7 +1201,7 @@ TCaseResult CheckCase(const TQueryCase& test, bool canonize) {
     };
     if (!test.Execute) {
         printTiming({}, 0);
-        return {planComparison, std::nullopt};
+        return {planComparison, std::nullopt, std::nullopt};
     }
     NScheduler::TSettings settings;
     settings.Scheduler.Mode = test.Variant == "single"
@@ -1166,10 +1211,25 @@ TCaseResult CheckCase(const TQueryCase& test, bool canonize) {
     settings.ScanSplit.Strategy = NScheduler::EScanSplitStrategy::RowGroupRange;
     settings.ScanSplit.MaxScanTasks = test.Variant == "single" ? 1 : 4;
     TPlanRunTimings runTimings;
-    auto runtime = RunPlan(
-        *plan, settings, parsed.Annotation.ExternalCatalog, nullptr, timing ? &runTimings : nullptr);
-    mark();
-    auto actual = Result(*runtime);
+    TValue actual = nullptr;
+    // Lowering, JIT compilation and the run itself.
+    const auto runError = CaptureError([&] {
+        auto runtime = RunPlan(
+            plan, settings, parsed->Annotation.ExternalCatalog, nullptr, timing ? &runTimings : nullptr);
+        mark();
+        actual = Result(*runtime);
+    });
+    if (runError) {
+        if (!test.ExpectError) {
+            throw std::runtime_error("unexpected error" + where
+                + "; declare \"expect_error\" if it is intended:\n" + *runError);
+        }
+        return {planComparison, std::nullopt,
+            CompareText(test, test.ErrorGolden, &TSuite::CanonizedErrors, *runError, canonize)};
+    }
+    if (test.ExpectError) {
+        throw std::runtime_error("expected an error but the case succeeded" + where);
+    }
     Normalize(actual, test.Ordered);
     TValue expected = nullptr;
     if (canonize) {
@@ -1184,7 +1244,7 @@ TCaseResult CheckCase(const TQueryCase& test, bool canonize) {
         RenderResult(actual), RenderResult(expected)};
     const auto resultGoldenMs = mark();
     printTiming(runTimings, resultGoldenMs);
-    return {planComparison, std::move(comparison)};
+    return {planComparison, std::move(comparison), std::nullopt};
 }
 
 void CommitGoldens(const std::vector<TQueryCase>& tests) {
@@ -1196,6 +1256,24 @@ void CommitGoldens(const std::vector<TQueryCase>& tests) {
             WriteAll(path, RenderResult(result));
         }
         for (const auto& [path, plan] : test.Suite->CanonizedPlans) WriteAll(path, plan);
+        for (const auto& [path, error] : test.Suite->CanonizedErrors) WriteAll(path, error);
+    }
+    // A case holds a result or an error, never both: when the outcome changes,
+    // the golden of the previous one is stale. Report what is removed.
+    std::set<fs::path> removed;
+    for (const auto& test : tests) {
+        if (!test.Suite) continue;
+        const auto& suite = *test.Suite;
+        const bool hasResult = suite.Canonized.contains(test.Golden);
+        const bool hasError = suite.CanonizedErrors.contains(test.ErrorGolden);
+        for (const auto& [stale, wanted] : {std::pair{test.Golden, hasResult},
+                std::pair{test.ErrorGolden, hasError}})
+        {
+            if (!wanted && fs::exists(stale) && removed.insert(stale).second) {
+                fs::remove(stale);
+                std::cerr << "[regtest] removed stale golden " << stale.string() << '\n';
+            }
+        }
     }
 }
 

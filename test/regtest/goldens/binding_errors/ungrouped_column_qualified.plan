@@ -1,0 +1,2 @@
+Error: column a.y must appear in GROUP BY or be used in an aggregate function @ Line: 1, Byte: 8, Column: 8
+

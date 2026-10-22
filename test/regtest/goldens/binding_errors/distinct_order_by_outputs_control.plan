@@ -1,0 +1,6 @@
+project (x, y)
+└─ sort [__sort_0 asc]
+   └─ project (x, y, __sort_0) (rows≈3 cost≈216)
+      └─ aggregate keys=[x, y] (rows≈3 cost≈144)
+         └─ project (x, y) (rows≈3 cost≈96)
+            └─ source t AS t (rows≈3 cost≈48)

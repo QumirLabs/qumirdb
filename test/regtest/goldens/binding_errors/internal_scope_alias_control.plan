@@ -1,0 +1,5 @@
+project (__scope_0) (rows≈3 cost≈168)
+└─ aggregate keys=[__scope_0] (rows≈3 cost≈144)
+   └─ project (__scope_0) (rows≈3 cost≈120)
+      └─ project (__scope_0, __scope_1) (rows≈3 cost≈96)
+         └─ source t AS t (rows≈3 cost≈48)

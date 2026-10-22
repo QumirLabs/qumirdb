@@ -1,0 +1,3 @@
+CREATE MODULE orbital LANGUAGE rust AS $$$$;
+CREATE FUNCTION pair(DOUBLE) RETURNS (DOUBLE, DOUBLE) SET MODULE TO orbital;
+SELECT pair(x) AS (p, q), count(*) FROM points GROUP BY 2;

@@ -1,0 +1,5 @@
+project (a, col1) (rows≈2 cost≈4.4K)
+└─ aggregate keys=[l.x] aggs=[count_0=count] (rows≈2 cost≈4.3K)
+   └─ join inner [r.y = l.y] (rows≈3 cost≈4.3K)
+      ├─ source t AS r (rows≈3 cost≈24)
+      └─ source t AS l (rows≈3 cost≈48)

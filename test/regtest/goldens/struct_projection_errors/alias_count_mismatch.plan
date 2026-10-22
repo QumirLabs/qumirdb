@@ -1,0 +1,2 @@
+Error: struct-return projection has 3 fields but 2 column aliases were specified @ Line: 3, Byte: 8, Column: 8
+

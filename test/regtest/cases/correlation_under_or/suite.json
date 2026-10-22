@@ -8,11 +8,11 @@
   "tables": {"t": "t", "s": "s", "u": "u"},
   "variants": ["single", "threaded", "js"],
   "cases": {
-    "scalar_count.sql": {"execute": false},
-    "scalar_sum.sql": {"execute": false},
-    "scalar_second_correlation.sql": {"execute": false},
-    "scalar_negated.sql": {"execute": false},
-    "exists_or_branch.sql": {"execute": false},
+    "scalar_count.sql": {"execute": false, "expect_error": true},
+    "scalar_sum.sql": {"execute": false, "expect_error": true},
+    "scalar_second_correlation.sql": {"execute": false, "expect_error": true},
+    "scalar_negated.sql": {"execute": false, "expect_error": true},
+    "exists_or_branch.sql": {"execute": false, "expect_error": true},
     "scalar_every_branch.sql": {"order": "unordered"},
     "scalar_conjunct_and_branch.sql": {"order": "unordered"},
     "exists_or_conjuncts.sql": {"order": "unordered"}

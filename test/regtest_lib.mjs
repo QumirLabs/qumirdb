@@ -237,6 +237,9 @@ export function collectCases(root) {
         base,
         sql,
         golden: path.join(goldensDir, `${base}.result.json`),
+        planGolden: path.join(goldensDir, `${base}.plan`),
+        errorGolden: path.join(goldensDir, `${base}.error`),
+        expectError: options.expect_error ?? json.expect_error ?? false,
         suite,
         tables,
         ordered: (options.order ?? 'ordered') === 'ordered',
@@ -537,8 +540,62 @@ export function checkResult(test, exec, result) {
   });
 }
 
+// The golden text of an error, as the native test_reg renders it: a TError
+// already reads `Error: <message> [@ Line: L, Byte: B, Column: C]`; the exporter
+// reports any other exception by its bare message, which the native runner
+// marks as `Runtime error: <message>`.
+function errorText(message) {
+  const text = String(message);
+  return `${text.startsWith('Error: ') ? text : `Runtime error: ${text}`}\n`;
+}
+
+function isErrorText(text) {
+  return text.startsWith('Error: ') || text.startsWith('Runtime error: ');
+}
+
+function compareText(actual, goldenFile) {
+  const expected = readFileSync(goldenFile, 'utf8');
+  if (actual !== expected) {
+    throw new TestFailure(`error differs from ${goldenFile}\n${lineDiff(expected, actual)}`);
+  }
+}
+
+// A case that must fail. The `.plan` golden holds a planning error, which the
+// exporter reports with the same text, so the two are compared exactly. An
+// error after planning is in the `.error` golden. The exporter reports an
+// error of lowering as an unsupported plan and the text is compared; the WASM
+// runtime has its own messages, so a run only has to fail, whatever it says.
+async function checkExpectedError(test, { tables, bundle }, runtime, runOptions) {
+  const planGolden = readFileSync(test.planGolden, 'utf8');
+  if (isErrorText(planGolden)) {
+    if (bundle.ok === true) {
+      throw new TestFailure(`expected a planning error but the exporter planned the query\n${planGolden}`);
+    }
+    compareText(errorText(bundle.error?.message), test.planGolden);
+    return null;
+  }
+  if (bundle.ok !== true) {
+    throw new TestFailure(`unexpected planning error: ${bundle.error?.message ?? 'unknown error'}`);
+  }
+  if (bundle.exec?.supported !== true) {
+    compareText(errorText(bundle.exec?.reason), test.errorGolden);
+    return null;
+  }
+  const exec = browserExec(bundle);
+  try {
+    await runtime.executeBrowserPipelineScheduled(exec, fixtureSource(tables), runOptions);
+  } catch {
+    return null;
+  }
+  throw new TestFailure(`expected an error (${test.errorGolden}) but the browser run succeeded`);
+}
+
 // Executes an exported case with its fixture rows and checks the result.
-export async function checkCase(test, { tables, bundle }, runtime, runOptions = {}) {
+export async function checkCase(test, exported, runtime, runOptions = {}) {
+  if (test.expectError) {
+    return checkExpectedError(test, exported, runtime, runOptions);
+  }
+  const { tables, bundle } = exported;
   const exec = browserExec(bundle);
   const result = await runtime.executeBrowserPipelineScheduled(
     exec, fixtureSource(tables), runOptions);

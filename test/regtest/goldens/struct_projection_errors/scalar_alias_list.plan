@@ -1,0 +1,2 @@
+Error: a column alias list requires a struct-return projection @ Line: 3, Byte: 8, Column: 8
+

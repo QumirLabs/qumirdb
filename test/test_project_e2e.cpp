@@ -109,19 +109,6 @@ bool IsValid(const TColumn& column, int64_t row) {
     return ((column.Mask[bit / 8] >> (bit % 8)) & 1) != 0;
 }
 
-TEST(SqlStddevSampE2E, DecimalInputIsRejected) {
-    TMockSource t({"v"}, {std::make_shared<TDecimal>(12, 2)}, {});
-
-    try {
-        (void)SqlPlan("select stddev_samp(v) as s from t;", {{"t", &t}});
-        FAIL() << "stddev_samp(decimal) unexpectedly planned";
-    } catch (const std::runtime_error& error) {
-        EXPECT_NE(
-            std::string(error.what()).find("stddev_samp(decimal) is not supported in qdb v1"),
-            std::string::npos);
-    }
-}
-
 TEST(ProjectE2E, NamedStructProjectionFreezesItsFlattenedLayout) {
     auto i64 = std::make_shared<TIntegerType>();
     auto structure = std::make_shared<TNamedType>("Pair", std::make_shared<TStructType>(

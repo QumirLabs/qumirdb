@@ -1,0 +1,1 @@
+SELECT DISTINCT x, y FROM t ORDER BY x + y;
