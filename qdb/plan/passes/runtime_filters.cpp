@@ -977,8 +977,15 @@ void ReuseInnerRegion(const TOperatorPtr& root,
                     || !target->Stats_->RowCount
                     || (own && (own->BuildSide != side
                         || consumer->Keys().size() != producer->Keys().size()))
-                    || HasOtherFilterUse(target, replacedId)
                     || (own && HasFilterUseOutside(root, target, own->Id))) {
+                    continue;
+                }
+                // Estimates precede runtime filters: a target that already
+                // probes another filter still counts the rows it rejects, and
+                // two domains may restrict the same key class. Without a joint
+                // selectivity the saving of a second probe would be overstated.
+                // The consumer's own filter is exempt; reuse replaces it.
+                if (HasOtherFilterUse(target, replacedId)) {
                     continue;
                 }
                 std::vector<std::string> candidates;
