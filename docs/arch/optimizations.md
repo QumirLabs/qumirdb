@@ -524,7 +524,8 @@ unmarked build rows are emitted once with NULLs for the absent side. Lowering
 chooses this path when the preserved side is estimated no larger than the other
 input, or when a residual or runtime filter requires it. Building first delays
 the probe input but avoids retaining and hashing it; other outer joins keep
-the symmetric path. FULL joins reject residuals. See [join.md](join.md).
+the symmetric path. A FULL join with a residual marks matched rows on both
+sides of that path. See [join.md](join.md).
 
 ```
 SELECT big.c, u.d FROM big, u WHERE big.a = u.a;   -- threaded, 4 scan tasks

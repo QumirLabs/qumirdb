@@ -57,7 +57,7 @@ async function outerJoin(context, name, mode) {
   assert.ok(joins.every(stage => stage.retained_input_bytes === 0));
 }
 
-const OUTER_JOINS = ['left_outer_join', 'left_outer_residual', 'right_outer_join', 'right_outer_residual'];
+const OUTER_JOINS = ['left_outer_join', 'left_outer_residual', 'right_outer_join', 'right_outer_residual', 'full_outer_residual'];
 
 const OPERATORS = {
   filter_project(stages) {

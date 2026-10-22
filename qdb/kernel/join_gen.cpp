@@ -650,6 +650,7 @@ NQumir::NAst::TExprPtr GenJoinBatchAst(
                                               ident("stored_witness"),
                                               std::move(ownRowId),
                                               numI64(isLeft ? 1 : 0),
+                                              numI64(markMatched ? 1 : 0),
                                               ident("pairs"),
                                               ident("left_store"),
                                               ident("right_store"),
@@ -757,11 +758,13 @@ NQumir::NAst::TExprPtr GenJoinProcessAst(
     const TJoinKeyDescriptor &key, bool isLeft, const std::string &funcName,
     NQumir::NAst::TTypePtr columnType, NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType, NQumir::NAst::TTypePtr pairBufferType,
-    NQumir::NAst::TTypePtr stringViewType, bool hasPrecomputedHash) {
+    NQumir::NAst::TTypePtr stringViewType, bool hasPrecomputedHash,
+    bool markMatched) {
   return GenJoinBatchAst(key, isLeft, funcName, std::move(columnType),
                          std::move(rowSetType), std::move(hashTableType),
                          std::move(pairBufferType), std::move(stringViewType),
-                         EJoinBatchMode::ProbeInsert, hasPrecomputedHash);
+                         EJoinBatchMode::ProbeInsert, hasPrecomputedHash,
+                         /*isAnti=*/false, markMatched);
 }
 
 NQumir::NAst::TExprPtr GenJoinInsertRowsOnlyAst(
@@ -1056,9 +1059,18 @@ GenJoinDispatchAst(const TJoinKeyDescriptor &key, EJoinType type,
 
   auto finalize = [&]() -> TExprPtr {
     // Key existence cannot identify unmatched rows after a residual rejected
-    // all candidate pairs. Those joins must use marked streaming finalization.
+    // all candidate pairs. LEFT/RIGHT joins must use marked streaming
+    // finalization; FULL marks the matched rows of both tables.
     if (hasResidual && (type == EJoinType::Left || type == EJoinType::Right)) {
       return boolReturn(false);
+    }
+    if (hasResidual && type == EJoinType::Full) {
+      return Oz::Return(Oz::Bin(
+          TOperator("&&"),
+          Oz::Call("jt_emit_unmarked",
+                   {Oz::Ident("left"), number(1), Oz::Ident("pairs")}),
+          Oz::Call("jt_emit_unmarked",
+                   {Oz::Ident("right"), number(0), Oz::Ident("pairs")})));
     }
     if (isSemiAnti && !hasResidual) {
       return Oz::Return(

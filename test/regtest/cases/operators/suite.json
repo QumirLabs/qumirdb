@@ -30,6 +30,7 @@
     "left_outer_residual.sql": {"tables": {"l": "outer_short", "r": "outer_long"}, "order": "unordered"},
     "right_outer_join.sql": {"tables": {"l": "outer_short", "r": "outer_long"}, "order": "unordered"},
     "right_outer_residual.sql": {"tables": {"l": "outer_short", "r": "outer_long"}, "order": "unordered"},
+    "full_outer_residual.sql": {"tables": {"l": "outer_short", "r": "outer_long"}, "order": "unordered"},
     "nested_limit.sql": {"tables": {"t": "sequence_rows"}, "order": "ordered"},
     "nested_limit_zero.sql": {"tables": {"t": "sequence_rows"}, "order": "ordered"},
     "source_limit.sql": {"tables": {"t": "sequence"}, "variants": ["single", "js"], "order": "unordered"},

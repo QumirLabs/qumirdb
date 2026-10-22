@@ -17,6 +17,9 @@
     "preserved_larger.sql": {"order": "ordered"},
     "residual.sql": {"order": "ordered"},
     "residual_right.sql": {"order": "ordered"},
-    "residual_preserved_larger.sql": {"order": "ordered"}
+    "residual_preserved_larger.sql": {"order": "ordered"},
+    "full_residual.sql": {"order": "unordered"},
+    "full_residual_one_side.sql": {"order": "unordered"},
+    "full_residual_false.sql": {"order": "unordered"}
   }
 }

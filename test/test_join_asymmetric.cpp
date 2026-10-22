@@ -1166,11 +1166,11 @@ private:
 // on the join processor.
 class OuterStreamJoin : public testing::Test {
 protected:
-    TJoinKernels Compile(EJoinType type) {
+    TJoinKernels Compile(EJoinType type, const TExprPtr& residual = nullptr) {
         auto spec = NKernel::BuildJoinKernelSpec(
             static_cast<TStructType&>(*LeftType_),
             static_cast<TStructType&>(*RightType_),
-            {{"lk", "rk", false}}, type, nullptr);
+            {{"lk", "rk", false}}, type, residual);
         return Compiler_.CompileJoin(spec);
     }
 
@@ -1191,9 +1191,10 @@ protected:
     // Runs the join to completion and returns its rows in sorted order.
     std::vector<TOuterRow> Run(
         EJoinType type, EJoinBuildSide buildSide,
-        TSideInput& left, TSideInput& right)
+        TSideInput& left, TSideInput& right,
+        const TExprPtr& residual = nullptr)
     {
-        TInnerJoinProcessor processor(Compile(type), type, buildSide);
+        TInnerJoinProcessor processor(Compile(type, residual), type, buildSide);
         auto fetchLeft = [&](TRowSet& rowSet) { return left.Fetch(rowSet); };
         auto fetchRight = [&](TRowSet& rowSet) { return right.Fetch(rowSet); };
         std::vector<TOuterRow> rows;
@@ -1385,6 +1386,66 @@ TEST_F(OuterStreamJoin, NonPreservedBuildSideFallsBackToGeneralPath) {
             {1, 10, std::nullopt, std::nullopt},
             {2, 20, 2, 200},
             {std::nullopt, std::nullopt, 3, 300}}));
+}
+
+// A FULL join stores both inputs, and the later row of a pair finds the
+// earlier one. Both are marked when the residual accepts the pair, so the
+// arrival order cannot change which rows come out NULL-extended.
+TEST_F(OuterStreamJoin, FullResidualMarksBothSidesInAnyArrivalOrder) {
+    const TSideRows leftRows = {
+        {{1, 10}, {1, 30}, {2, 20}}, {{3, 40}, {std::nullopt, 50}, {1, 5}}};
+    const TSideRows rightRows = {
+        {{1, 15}, {1, 5}}, {{2, 25}, {std::nullopt, 60}, {4, 1}, {1, 3}}};
+    const auto residual = std::make_shared<TBinaryExpr>(
+        NQumir::TLocation{}, "<"_op,
+        std::make_shared<TIdentExpr>(NQumir::TLocation{}, "lv"),
+        std::make_shared<TIdentExpr>(NQumir::TLocation{}, "rv"));
+
+    std::vector<TOuterRow> expected;
+    std::vector<bool> rightMatched;
+    for (const auto& batch : rightRows) {
+        rightMatched.resize(rightMatched.size() + batch.size());
+    }
+    for (const auto& lb : leftRows) {
+        for (const auto& l : lb) {
+            bool matched = false;
+            size_t r = 0;
+            for (const auto& rb : rightRows) {
+                for (const auto& row : rb) {
+                    if (l.Key && l.Key == row.Key && l.Val < row.Val) {
+                        expected.push_back({l.Key, l.Val, row.Key, row.Val});
+                        matched = true;
+                        rightMatched[r] = true;
+                    }
+                    ++r;
+                }
+            }
+            if (!matched) {
+                expected.push_back({l.Key, l.Val, std::nullopt, std::nullopt});
+            }
+        }
+    }
+    size_t r = 0;
+    for (const auto& rb : rightRows) {
+        for (const auto& row : rb) {
+            if (!rightMatched[r++]) {
+                expected.push_back({std::nullopt, std::nullopt, row.Key, row.Val});
+            }
+        }
+    }
+    expected = Sorted(std::move(expected));
+    ASSERT_EQ(expected.size(), 10u);
+
+    for (const auto& [leftStalls, rightStalls] :
+            {std::pair{0, 0}, std::pair{3, 0}, std::pair{0, 3}, std::pair{1, 2}}) {
+        SCOPED_TRACE(leftStalls);
+        SCOPED_TRACE(rightStalls);
+        TSideInput left(leftRows, leftStalls);
+        TSideInput right(rightRows, rightStalls);
+        EXPECT_EQ(
+            Run(EJoinType::Full, EJoinBuildSide::Auto, left, right, residual),
+            expected);
+    }
 }
 
 // Each join partition builds its own slice of the preserved side and marks the

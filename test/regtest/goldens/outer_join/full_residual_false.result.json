@@ -1,0 +1,33 @@
+{
+  "schema": "<struct (ck <named Nullable [i64]>) (cv <named Nullable [i64]>) (ok <named Nullable [i64]>) (ov <named Nullable [i64]>)>",
+  "rows": [
+    ["1", "10", null, null],
+    ["1", "11", null, null],
+    ["2", "20", null, null],
+    ["3", "30", null, null],
+    ["3", "31", null, null],
+    ["5", "50", null, null],
+    [null, "40", null, null],
+    [null, "41", null, null],
+    [null, null, "1", "100"],
+    [null, null, "1", "101"],
+    [null, null, "1", "102"],
+    [null, null, "10", "1000"],
+    [null, null, "10", "1001"],
+    [null, null, "11", "1100"],
+    [null, null, "11", "1101"],
+    [null, null, "12", "1200"],
+    [null, null, "12", "1201"],
+    [null, null, "2", "200"],
+    [null, null, "5", "500"],
+    [null, null, "5", "501"],
+    [null, null, "7", "700"],
+    [null, null, "7", "701"],
+    [null, null, "8", "800"],
+    [null, null, "8", "801"],
+    [null, null, "9", "900"],
+    [null, null, "9", "901"],
+    [null, null, null, "600"],
+    [null, null, null, "601"]
+  ]
+}

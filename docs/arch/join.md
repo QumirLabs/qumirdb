@@ -40,17 +40,19 @@ Current production support:
 | `LeftAnti` | Supported | Left-preserving, emits left columns only |
 | `Left` | Supported | Preserved-left build with matched marks; symmetric fallback |
 | `Right` | Supported | Preserved-right build with matched marks; symmetric fallback |
-| `Full` | Supported | Symmetric path plus unmatched scans on both sides |
+| `Full` | Supported | Symmetric path plus unmatched scans on both sides; matched marks with a residual |
 | `RightSemi` / `RightAnti` | Not implemented in runtime | Logical enum exists, runtime guard rejects it |
 | `LeftMark` | Kernel only | Left rows plus a three-valued `IN` marker; not planned yet |
 | No equi-keys | Supported except `RightSemi` / `RightAnti` / `LeftMark` | Nested-loop `TCrossJoinProcessor` path |
 
-Residual predicates are supported for `Inner`, `LeftSemi`, `LeftAnti`, `Left`
-and `Right`. A `Left` or `Right` join with a residual always takes the streaming
-path with its preserved side as the build side. A build row is marked only
-after the residual accepted a pair, so a row whose key matches were all
-rejected is emitted as unmatched. The general outer path finds unmatched rows
-by key alone and cannot run a residual. `Full` joins reject one.
+Residual predicates are supported for every join type above except `LeftMark`,
+which still rejects a residual. A `Left` or
+`Right` join with a residual always takes the streaming path with its preserved
+side as the build side. A build row is marked only after the residual accepted
+a pair, so a row whose key matches were all rejected is emitted as unmatched.
+The general outer path finds unmatched rows by key alone and cannot run a
+residual, so a `Full` join with a residual marks the rows of both tables on its
+symmetric path (see [Full outer](#full-outer)).
 
 String, fixed-width, and nullable keys are supported, including composite keys.
 Ordinary equality skips NULL keys; explicit null-safe keys use their declared
@@ -188,6 +190,17 @@ The symmetric fallback retains both inputs, emits matches while inserting rows,
 and finds unmatched preserved rows by checking the opposite table at EOF. It
 supports joins without a residual; a residual requires the streaming path.
 
+### Full outer
+
+A FULL join preserves both inputs, so it cannot drop either one and always runs
+symmetric: each row probes the table of the other side, then is inserted into
+its own. Every pair is found once, by whichever of its two rows arrives later.
+Without a residual, the unmatched rows of each table are those whose key the
+other table lacks. With a residual, a key match no longer means a match, so the
+probe marks each stored row of the other table whose pair the residual accepts,
+and the arriving row is stored marked if it got any pair. At EOF both tables
+emit their unmarked rows, NULL-key rows included, with NULLs for the other side.
+
 ### LeftMark
 
 A mark join (Neumann, Leis, and Kemper, "The Complete Story of Joins (in
@@ -290,7 +303,6 @@ The implementation relies on these invariants:
 ## Current limitations
 
 - Runtime kernels do not directly execute `RightSemi` / `RightAnti`.
-- FULL joins reject residual predicates.
 - LEFT/RIGHT streaming requires a preserved build side selected before execution;
   outer joins do not switch adaptively when an input happens to end first.
 - Intermediate rowsets remain explicit between operators; compiling kernels in

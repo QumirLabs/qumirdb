@@ -165,8 +165,8 @@ std::unordered_map<std::string, void*> CompileKernelAst(
 namespace {
 constexpr const char* CacheSchemaVersion = "v1";
 // Bump when the generated key helpers or the .oz kernel libraries change.
-// Streaming outer probes add matched-row marking and op 7 to the current libraries.
-constexpr const char* KernelLibVersion = "35";
+// FULL residual marking changes jt_emit_and_insert.
+constexpr const char* KernelLibVersion = "38";
 } // namespace
 
 NQumir::NCodeGen::TLlvmRunner::TLinkedModule CompileKernelAstCached(
@@ -2170,15 +2170,9 @@ TJoinKernels TKernelCompiler::CompileJoin(
         keys.push_back({key.Left.Name, key.Right.Name, key.NullsEqual});
     }
 
-    // Left and Right run a residual only on the streaming path, where a build
-    // row counts as matched after the predicate passed. ChooseJoinBuildSide
-    // selects that path; their generated general finalizer rejects a residual.
-    if (!spec.Expressions.empty() &&
-        spec.JoinType != EJoinType::Inner &&
-        spec.JoinType != EJoinType::Left &&
-        spec.JoinType != EJoinType::Right &&
-        spec.JoinType != EJoinType::LeftSemi &&
-        spec.JoinType != EJoinType::LeftAnti) {
+    // A mark join with a residual needs the marker of a correlated IN, which
+    // belongs to general unnesting.
+    if (!spec.Expressions.empty() && spec.JoinType == EJoinType::LeftMark) {
         throw NQumir::TError(
             "CompileJoin: residual filter is not yet supported for this join type");
     }
@@ -2582,12 +2576,16 @@ TJoinKernels TKernelCompiler::CompileJoin(
         }
         for (auto& f : *dualKeyLibrary) program.push_back(std::move(f));
         for (auto& f : *library) program.push_back(std::move(f));
+        // Left and Right run a residual only on the streaming path below;
+        // ChooseJoinBuildSide selects it. FULL streams neither side, so its
+        // symmetric probes mark the rows a residual accepted on both sides.
+        const bool markBoth = type == EJoinType::Full && residualPredicate;
         program.push_back(NKernel::GenJoinProcessAst(keyDesc, /*isLeft=*/true,
             "jt_process_left", columnType, rowSetType, hashTableType, pairBufferType,
-            stringViewType, hasPrecomputedHash));
+            stringViewType, hasPrecomputedHash, markBoth));
         program.push_back(NKernel::GenJoinProcessAst(keyDesc, /*isLeft=*/false,
             "jt_process_right", columnType, rowSetType, hashTableType, pairBufferType,
-            stringViewType, hasPrecomputedHash));
+            stringViewType, hasPrecomputedHash, markBoth));
         // A streaming outer join builds its preserved side, so the stream of
         // the other side marks the build rows it matches.
         program.push_back(NKernel::GenJoinProbeAst(keyDesc, /*isLeft=*/true,
