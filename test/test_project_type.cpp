@@ -135,6 +135,21 @@ TEST(ProjectType, RemainderKeepsOperandWidth) {
     EXPECT_TRUE(IsI32(AnnotateExprType(Parse("(% k 3)"), Schema())));
 }
 
+TEST(ProjectType, OutOfRangeLiteralWidensOperation) {
+    for (const char* src : {"(* a 10000000000)", "(* 10000000000 a)", "(+ a 3000000000)"}) {
+        auto type = AnnotateExprType(Parse(src), NullableSchema());
+        ASSERT_TRUE(IsNullable(type)) << src;
+        auto integer = TMaybeType<TIntegerType>(NullableInner(type)).Cast();
+        ASSERT_TRUE(integer) << src;
+        EXPECT_EQ(integer->Kind, TIntegerType::I64) << src;
+    }
+    auto required = TMaybeType<TIntegerType>(
+        AnnotateExprType(Parse("(* k 10000000000)"), Schema())).Cast();
+    ASSERT_TRUE(required);
+    EXPECT_EQ(required->Kind, TIntegerType::I64);
+    EXPECT_TRUE(IsI32(AnnotateExprType(Parse("(* k 2147483647)"), Schema())));
+}
+
 TEST(ProjectType, NullableDivisionAnnotates) {
     auto type = AnnotateExprType(Parse("(/ a b)"), NullableSchema());
     ASSERT_TRUE(IsNullable(type));

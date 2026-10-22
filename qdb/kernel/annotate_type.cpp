@@ -456,9 +456,22 @@ TTypePtr Propagate(std::initializer_list<TTypePtr> operands, const TTypePtr& R) 
 
 bool IsInt(const TTypePtr& t) { return static_cast<bool>(TMaybeType<TIntegerType>(t)); }
 bool IsFloat(const TTypePtr& t) { return static_cast<bool>(TMaybeType<TFloatType>(t)); }
-bool IsIntLiteral(const TExprPtr& e) {
+// Whether `e` is an integer literal whose value `type` can represent (Qumir's
+// IntegerLiteralFits). Such a literal adopts the other operand's integer type; one that
+// does not fit keeps i64 and widens the operation.
+bool IntLiteralFits(const TExprPtr& e, const TTypePtr& type) {
     auto n = TMaybeNode<TNumberExpr>(e);
-    return n && !n.Cast()->IsFloat();
+    auto integer = TMaybeType<TIntegerType>(type);
+    if (!n || n.Cast()->IsFloat() || !integer) {
+        return false;
+    }
+    const int64_t value = n.Cast()->IntValue;
+    const int bits = integer.Cast()->BitWidth();
+    if (!integer.Cast()->IsSigned()) {
+        return value >= 0 && (bits >= 64 || value < (int64_t{1} << bits));
+    }
+    return bits >= 64 ||
+        (value >= -(int64_t{1} << (bits - 1)) && value < (int64_t{1} << (bits - 1)));
 }
 
 TTypePtr NumericPreservingUnaryCall(
@@ -625,8 +638,8 @@ std::pair<TTypePtr, bool> CoalesceValueType(const std::vector<TTypePtr>& argType
 
 // The plain (non-null-propagated) result value type of a binary op, matching qumir's
 // AnnotateBinary: `/` -> float, `+ - * %`/bitwise -> CommonNumeric, comparisons/logical
-// -> bool. Integer-literal operands adopt the other operand's int type (qumir's
-// RetypeIntegerLiteralOperands; the fit-check is approximated as "always").
+// -> bool. An integer-literal operand adopts the other operand's int type when its value
+// fits it (qumir's RetypeIntegerLiteralOperands).
 TTypePtr BinaryValueType(TOperator op, const TExprPtr& le, const TExprPtr& re,
     const TTypePtr& lt, const TTypePtr& rt)
 {
@@ -642,8 +655,8 @@ TTypePtr BinaryValueType(TOperator op, const TExprPtr& le, const TExprPtr& re,
         return std::make_shared<TStringType>(); // string concatenation
     }
     if (IsInt(vl) && IsInt(vr)) {
-        if (IsIntLiteral(re)) vr = vl;
-        else if (IsIntLiteral(le)) vl = vr;
+        if (IntLiteralFits(re, vl)) vr = vl;
+        else if (IntLiteralFits(le, vr)) vl = vr;
     }
     if (op == "/") {
         return std::make_shared<TFloatType>();
@@ -1721,9 +1734,9 @@ TTypePtr EffectiveBinaryNumericType(
     TTypePtr leftType = UnwrapNamedType(ValueType(left->Type));
     TTypePtr rightType = UnwrapNamedType(ValueType(right->Type));
     if (IsInt(leftType) && IsInt(rightType)) {
-        if (IsIntLiteral(right)) {
+        if (IntLiteralFits(right, leftType)) {
             rightType = leftType;
-        } else if (IsIntLiteral(left)) {
+        } else if (IntLiteralFits(left, rightType)) {
             leftType = rightType;
         }
     }
@@ -1756,9 +1769,9 @@ TTypePtr AnnotateExprTreeTypes(
             auto leftType = UnwrapNamedType(ValueType(binary.Cast()->Left->Type));
             auto rightType = UnwrapNamedType(ValueType(binary.Cast()->Right->Type));
             if (IsInt(leftType) && IsInt(rightType)) {
-                if (IsIntLiteral(binary.Cast()->Right)) {
+                if (IntLiteralFits(binary.Cast()->Right, leftType)) {
                     binary.Cast()->Right->Type = leftType;
-                } else if (IsIntLiteral(binary.Cast()->Left)) {
+                } else if (IntLiteralFits(binary.Cast()->Left, rightType)) {
                     binary.Cast()->Left->Type = rightType;
                 }
             }

@@ -1,0 +1,4 @@
+sort [id asc]
+└─ project (id) (rows≈2 cost≈72)
+   └─ filter (> (cast (* |t.a| 10000000000) <named DECIMAL [38 10]>) 15000000000) (rows≈2 cost≈64)
+      └─ source t AS t row-groups (> (cast (* |t.a| 10000000000) <named DECIMAL [38 10]>) 15000000000) (rows≈4 cost≈32)
