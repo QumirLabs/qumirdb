@@ -1,0 +1,5 @@
+project (k) (rows≈2 cost≈4.3K)
+└─ join left_anti [sa.k = sb.k] (rows≈2 cost≈4.3K)
+   ├─ source sa AS sa (rows≈3 cost≈12)
+   └─ filter (== (call substr |sb.s| 2 1) (cast "x" <named StringView>)) (rows≈1 cost≈120)
+      └─ source sb AS sb row-groups (== (call substr |sb.s| 2 1) (cast "x" <named StringView>)) (rows≈3 cost≈60)

@@ -358,6 +358,23 @@ TTypePtr ExternalReturnType(
     return *resolved ? **resolved : nullptr;
 }
 
+// A call is typed by a compiled-module function from the external catalog or by a
+// qumirdb.oz function. Any other name is an unknown function: left untyped, the call
+// would read as a bare NULL and turn the expression around it into NULL.
+TTypePtr CallReturnType(
+    const TCallExpr& call,
+    const std::string& name,
+    const std::vector<TTypePtr>& argTypes)
+{
+    if (auto type = ExternalReturnType(name, argTypes)) {
+        return type;
+    }
+    if (auto type = Context().ExternReturnType(name)) {
+        return type;
+    }
+    throw NQumir::TError(call.Location, "unknown function: " + name);
+}
+
 using NQumir::TLocation;
 
 // --- small AST builders ---------------------------------------------------------
@@ -717,12 +734,12 @@ TTypePtr InferType(const TExprPtr& e, const TStructType& schema) {
         if (auto cid = TMaybeNode<TIdentExpr>(node->Callee)) {
             name = cid.Cast()->Name;
         }
-        if (name == "qdb_is_null" || name == "qdb_is_true") {
-            return std::make_shared<TBoolType>(); // non-null bool regardless of args
-        }
         std::vector<TTypePtr> at;
         for (const auto& a : node->Args) {
             at.push_back(InferType(a, schema));
+        }
+        if (name == "qdb_is_null" || name == "qdb_is_true") {
+            return std::make_shared<TBoolType>(); // non-null bool regardless of args
         }
         if (name == "coalesce") {
             auto [v, allNullable] = CoalesceValueType(at);
@@ -750,21 +767,18 @@ TTypePtr InferType(const TExprPtr& e, const TStructType& schema) {
         if (auto value = NumericPreservingUnaryCall(name, at)) {
             return Propagate({at[0]}, value);
         }
-        TTypePtr ret = ExternalReturnType(name, at);
-        if (!ret) {
-            ret = Context().ExternReturnType(name);
-        }
+        TTypePtr ret = CallReturnType(*node, name, at);
         bool nullable = false;
         for (const auto& t : at) nullable = nullable || !t || IsNullableType(t);
-        if (!ret) {
-            return nullptr;
-        }
         TTypePtr base = UnwrapNullableType(ret);
         return (nullable || IsNullableType(ret))
             ? std::static_pointer_cast<TType>(std::make_shared<TNullable>(base)) : base;
     }
     if (auto ifp = TMaybeNode<TIfExpr>(e)) {
         auto node =ifp.Cast();
+        // The condition does not shape the result type, but it is typed too: it may
+        // call an unknown function.
+        InferType(node->Cond, schema);
         TTypePtr tt = InferType(node->Then, schema);
         TTypePtr et = node->Else ? InferType(node->Else, schema) : nullptr;
         TTypePtr base = UnifyBranchTypes(tt, et);
@@ -1308,13 +1322,7 @@ TTypePtr Expand(TExprPtr& e, const TStructType& inputType, uint64_t& counter) {
                 }, value, counter, node->Location);
             return std::make_shared<TNullable>(value);
         }
-        TTypePtr ret = ExternalReturnType(name, argTypes);
-        if (!ret) {
-            ret = Context().ExternReturnType(name);
-        }
-        if (!ret) {
-            return InferType(e, inputType); // unknown extern: leave the call, best-effort type
-        }
+        TTypePtr ret = CallReturnType(*node, name, argTypes);
         TTypePtr R = UnwrapNullableType(ret);
         if (!anyNull) {
             return ret;
@@ -1776,7 +1784,14 @@ TTypePtr AnnotateExprTreeTypes(
                 }
             }
         }
-        auto type = InferType(node, inputType);
+        TTypePtr type;
+        try {
+            type = InferType(node, inputType);
+        } catch (const NQumir::TError&) {
+            // Row-group pruning types its predicate without the external catalog,
+            // where a compiled-module call is unknown. Such a node keeps its type,
+            // and pruning treats what it cannot type as unknown.
+        }
         if (type) {
             node->Type = type;
         }
