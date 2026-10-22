@@ -1,0 +1,1 @@
+SELECT sum(CASE WHEN t.a IN (SELECT s.k FROM s WHERE s.v > t.b) THEN 1 ELSE 0 END) AS n FROM t;

@@ -487,45 +487,43 @@ std::string TFreshNames::Next(const std::string& prefix) {
     }
 }
 
+std::vector<NAst::TExprPtr*> WindowInputs(NSql::TWindowExpr& window) {
+    std::vector<NAst::TExprPtr*> inputs;
+    if (auto call = NAst::TMaybeNode<NAst::TCallExpr>(window.Expr)) {
+        for (auto& arg : call.Cast()->Args) {
+            inputs.push_back(&arg);
+        }
+    }
+    if (const auto& spec = window.WindowSpec) {
+        if (spec->PartitionBy) {
+            inputs.push_back(&spec->PartitionBy);
+        }
+        if (spec->OrderBy) {
+            for (const auto& item : spec->OrderBy->Items) {
+                if (item && item->Expr) {
+                    inputs.push_back(&item->Expr);
+                }
+            }
+        }
+    }
+    return inputs;
+}
+
 std::expected<NAst::TExprPtr, TError> TAggCollector::Rewrite(NAst::TExprPtr expr) {
     if (!expr) {
         return expr;
     }
     // A window function evaluates after aggregation: keep the window node in
-    // place, but hoist any aggregates from its arguments and PARTITION/ORDER
-    // (e.g. `sum(sum(x)) over (...)`, `rank() over (order by sum(x))`).
-    // HasAggregateCall follows the same traversal.
+    // place, but hoist any aggregates from its inputs (e.g. `sum(sum(x)) over
+    // (...)`, `rank() over (order by sum(x))`).
     if (auto window = NAst::TMaybeNode<NSql::TWindowExpr>(expr)) {
         auto w = CloneSqlWindowExpr(window.Cast());
-        if (auto call = NAst::TMaybeNode<NAst::TCallExpr>(w->Expr)) {
-            for (auto& arg : call.Cast()->Args) {
-                auto rewritten = Rewrite(arg);
-                if (!rewritten) {
-                    return std::unexpected(rewritten.error());
-                }
-                arg = std::move(*rewritten);
+        for (auto* input : WindowInputs(*w)) {
+            auto rewritten = Rewrite(*input);
+            if (!rewritten) {
+                return std::unexpected(rewritten.error());
             }
-        }
-        if (w->WindowSpec) {
-            if (w->WindowSpec->PartitionBy) {
-                auto rewritten = Rewrite(w->WindowSpec->PartitionBy);
-                if (!rewritten) {
-                    return std::unexpected(rewritten.error());
-                }
-                w->WindowSpec->PartitionBy = std::move(*rewritten);
-            }
-            if (w->WindowSpec->OrderBy) {
-                for (auto& item : w->WindowSpec->OrderBy->Items) {
-                    if (!item || !item->Expr) {
-                        continue;
-                    }
-                    auto rewritten = Rewrite(item->Expr);
-                    if (!rewritten) {
-                        return std::unexpected(rewritten.error());
-                    }
-                    item->Expr = std::move(*rewritten);
-                }
-            }
+            *input = std::move(*rewritten);
         }
         return w;
     }
@@ -1006,6 +1004,10 @@ void NarrowPlainGroupKeys(
     }
 }
 
+bool IsAggregateCall(const NAst::TExprPtr& expr) {
+    return AsAggCall(expr).has_value();
+}
+
 bool HasAggregateCall(const NAst::TExprPtr& expr) {
     if (!expr) {
         return false;
@@ -1014,25 +1016,11 @@ bool HasAggregateCall(const NAst::TExprPtr& expr) {
     // PARTITION BY and ORDER BY run over the aggregated rows and may, as in
     // `rank() OVER (ORDER BY sum(x))`.
     if (auto window = NAst::TMaybeNode<NSql::TWindowExpr>(expr)) {
-        if (auto call = NAst::TMaybeNode<NAst::TCallExpr>(window.Cast()->Expr)) {
-            if (std::ranges::any_of(call.Cast()->Args, HasAggregateCall)) {
-                return true;
-            }
-        }
-        const auto& spec = window.Cast()->WindowSpec;
-        if (spec && HasAggregateCall(spec->PartitionBy)) {
-            return true;
-        }
-        if (spec && spec->OrderBy) {
-            for (const auto& item : spec->OrderBy->Items) {
-                if (item && HasAggregateCall(item->Expr)) {
-                    return true;
-                }
-            }
-        }
-        return false;
+        return std::ranges::any_of(WindowInputs(*window.Cast()), [](const NAst::TExprPtr* input) {
+            return HasAggregateCall(*input);
+        });
     }
-    if (AsAggCall(expr)) {
+    if (IsAggregateCall(expr)) {
         return true;
     }
     return std::ranges::any_of(expr->Children(), HasAggregateCall);
