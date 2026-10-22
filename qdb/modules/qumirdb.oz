@@ -454,6 +454,11 @@
   (fun qdb_is_null [T] ((var x T)) -> bool
     (block (return #f)))
 
+  ;; An untyped NULL (a bare NULL, or a CASE/COALESCE with only NULL values) is
+  ;; null_tag. The concrete overload wins over the generic one above.
+  (fun qdb_is_null ((var x null_tag)) -> bool
+    (block (return #t)))
+
   ;; SQL WHERE truthiness: a row passes iff the predicate is TRUE (NULL is not TRUE).
   (fun qdb_is_true ((var x bool)) -> bool
     (block (return x)))

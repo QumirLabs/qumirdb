@@ -1,0 +1,4 @@
+sort [id asc]
+└─ project (id) (rows≈2 cost≈80)
+   └─ filter (call qdb_is_null (call qdb_sql_null)) (rows≈2 cost≈64)
+      └─ source t AS t row-groups (call qdb_is_null (call qdb_sql_null)) (rows≈4 cost≈32)
