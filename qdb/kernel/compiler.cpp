@@ -165,7 +165,8 @@ std::unordered_map<std::string, void*> CompileKernelAst(
 namespace {
 constexpr const char* CacheSchemaVersion = "v1";
 // Bump when the generated key helpers or the .oz kernel libraries change.
-constexpr const char* KernelLibVersion = "34";
+// Streaming outer probes add matched-row marking and op 7 to the current libraries.
+constexpr const char* KernelLibVersion = "35";
 } // namespace
 
 NQumir::NCodeGen::TLlvmRunner::TLinkedModule CompileKernelAstCached(
@@ -2169,8 +2170,13 @@ TJoinKernels TKernelCompiler::CompileJoin(
         keys.push_back({key.Left.Name, key.Right.Name, key.NullsEqual});
     }
 
+    // Left and Right run a residual only on the streaming path, where a build
+    // row counts as matched after the predicate passed. ChooseJoinBuildSide
+    // selects that path; their generated general finalizer rejects a residual.
     if (!spec.Expressions.empty() &&
         spec.JoinType != EJoinType::Inner &&
+        spec.JoinType != EJoinType::Left &&
+        spec.JoinType != EJoinType::Right &&
         spec.JoinType != EJoinType::LeftSemi &&
         spec.JoinType != EJoinType::LeftAnti) {
         throw NQumir::TError(
@@ -2582,12 +2588,14 @@ TJoinKernels TKernelCompiler::CompileJoin(
         program.push_back(NKernel::GenJoinProcessAst(keyDesc, /*isLeft=*/false,
             "jt_process_right", columnType, rowSetType, hashTableType, pairBufferType,
             stringViewType, hasPrecomputedHash));
+        // A streaming outer join builds its preserved side, so the stream of
+        // the other side marks the build rows it matches.
         program.push_back(NKernel::GenJoinProbeAst(keyDesc, /*isLeft=*/true,
             "jt_probe_left_stream", columnType, rowSetType, hashTableType, pairBufferType,
-            stringViewType, hasPrecomputedHash));
+            stringViewType, hasPrecomputedHash, /*markMatched=*/type == EJoinType::Right));
         program.push_back(NKernel::GenJoinProbeAst(keyDesc, /*isLeft=*/false,
             "jt_probe_right_stream", columnType, rowSetType, hashTableType, pairBufferType,
-            stringViewType, hasPrecomputedHash));
+            stringViewType, hasPrecomputedHash, /*markMatched=*/type == EJoinType::Left));
         if (isResidualSemiAnti) {
             program.push_back(NKernel::GenJoinInsertRowsOnlyAst(
                 keyDesc, /*isLeft=*/true, "jt_insert_left_only",
@@ -2631,7 +2639,7 @@ TJoinKernels TKernelCompiler::CompileJoin(
                 pairBufferType, stringViewType, hasPrecomputedHash));
         }
         program.push_back(NKernel::GenJoinDispatchAst(
-            keyDesc, type, isResidualSemiAnti,
+            keyDesc, type, static_cast<bool>(residualPredicate),
             rowSetType, hashTableType, pairBufferType));
         // Output materializer: semi/anti joins emit only the left columns, a
         // mark join the left columns and its marker.

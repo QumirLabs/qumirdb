@@ -23,10 +23,11 @@ reaches EOF:
   stream batch is still alive.
 
 This can avoid materializing the large side without a cardinality estimate.
-Lowering can also choose build-first inner execution when estimates show strong
-asymmetry; a runtime filter may require completing its build input first. In
-that path, the build side finishes before the probe stream starts. Poor estimates
-can still affect work and memory.
+Lowering can also choose build-first execution: inner joins use it for strong
+asymmetry, while LEFT/RIGHT outer joins build their preserved side when it is
+estimated no larger than the other input. A runtime filter may also require
+completing its build input first. The build side finishes before the probe stream
+starts; poor estimates can still affect work and memory.
 
 ## Supported join forms
 
@@ -37,15 +38,19 @@ Current production support:
 | `Inner` | Supported | Adaptive symmetric/probe-only hash join |
 | `LeftSemi` | Supported | Left-preserving, emits left columns only |
 | `LeftAnti` | Supported | Left-preserving, emits left columns only |
-| `Left` | Supported | Symmetric path plus unmatched-left final scan |
-| `Right` | Supported | Symmetric path plus unmatched-right final scan |
+| `Left` | Supported | Preserved-left build with matched marks; symmetric fallback |
+| `Right` | Supported | Preserved-right build with matched marks; symmetric fallback |
 | `Full` | Supported | Symmetric path plus unmatched scans on both sides |
 | `RightSemi` / `RightAnti` | Not implemented in runtime | Logical enum exists, runtime guard rejects it |
 | `LeftMark` | Kernel only | Left rows plus a three-valued `IN` marker; not planned yet |
 | No equi-keys | Supported except `RightSemi` / `RightAnti` / `LeftMark` | Nested-loop `TCrossJoinProcessor` path |
 
-Residual predicates are supported for inner, semi/anti, and outer joins.
-Only pairs passing the residual count as matches for outer finalization.
+Residual predicates are supported for `Inner`, `LeftSemi`, `LeftAnti`, `Left`
+and `Right`. A `Left` or `Right` join with a residual always takes the streaming
+path with its preserved side as the build side. A build row is marked only
+after the residual accepted a pair, so a row whose key matches were all
+rejected is emitted as unmatched. The general outer path finds unmatched rows
+by key alone and cannot run a residual. `Full` joins reject one.
 
 String, fixed-width, and nullable keys are supported, including composite keys.
 Ordinary equality skips NULL keys; explicit null-safe keys use their declared
@@ -123,9 +128,17 @@ When one side returns EOF:
 
 Completion requires EOF on both build and stream inputs.
 
-Outer joins currently keep the older symmetric scheduling path. They need the
-retained opposite table for final unmatched scans, so probe-only streaming is
-not enabled there.
+LEFT/RIGHT outer joins can build the preserved side to EOF and stream the
+other input. Without a residual, lowering chooses this path when the preserved
+side is estimated no larger than the other input, or when a runtime filter
+requires building it first. A residual always requires this build side.
+
+Build-first execution delays the other input, but retains and hashes only the
+preserved side. The symmetric outer path avoids that initial wait and retains
+both sides. Unlike inner execution, it cannot drop the remaining input after
+one side ends, so the outer build-side rule needs no large asymmetry margin.
+Unknown estimates or a larger preserved side keep the symmetric path unless a
+residual or runtime filter requires streaming. FULL keeps the symmetric path.
 
 ## Execution by join type
 
@@ -163,15 +176,17 @@ The right side is not retained and is not inserted into `RightTable_`.
 
 ### Left / Right outer
 
-Outer joins use symmetric probe+insert while inputs are live, then call
-`FinalizeOuter` on the preserved side:
+The streaming path retains and hashes the preserved side, then probes it with
+the other input. Each build row counts as matched only after a candidate pair
+passes the residual predicate. Marks are per row, so duplicates sharing a key
+can have different match outcomes. After the stream reaches EOF, the join emits
+every unmarked build row once with NULLs for the absent side, including NULL-key
+rows. Output pairs still refer to the retained build store and are drained in
+batches before its storage is released.
 
-- `Left`: `FinalizeOuter(LeftTable_, RightTable_, pairs)`;
-- `Right`: `FinalizeOuter(RightTable_, LeftTable_, pairs)`, then pair halves
-  are swapped before materialization.
-
-The finalize kernel emits rows with no opposite-side match as `(row_id, -1)`.
-The generated output materializer emits NULL values for the absent side.
+The symmetric fallback retains both inputs, emits matches while inserting rows,
+and finds unmatched preserved rows by checking the opposite table at EOF. It
+supports joins without a residual; a residual requires the streaming path.
 
 ### LeftMark
 
@@ -254,6 +269,9 @@ it. The browser runtime executes only the `Inner` form.
 
 The implementation relies on these invariants:
 
+- each hash partition is one task, and a task runs on one worker at a time, so
+  matched marks in its build table have one writer;
+- outer unmatched pairs refer to the retained build rows until output is drained;
 - a `TRowId` with non-negative batch index always refers to a retained
   `TRowStore` batch;
 - a `TRowId` with batch index `-1` is valid only during one probe-only kernel
@@ -272,6 +290,8 @@ The implementation relies on these invariants:
 ## Current limitations
 
 - Runtime kernels do not directly execute `RightSemi` / `RightAnti`.
-- Outer joins retain the symmetric path rather than adaptive probe-only streaming.
+- FULL joins reject residual predicates.
+- LEFT/RIGHT streaming requires a preserved build side selected before execution;
+  outer joins do not switch adaptively when an input happens to end first.
 - Intermediate rowsets remain explicit between operators; compiling kernels in
   one module does not imply cross-operator row-loop fusion.

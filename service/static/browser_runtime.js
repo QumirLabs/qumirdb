@@ -2504,6 +2504,7 @@ const JoinOp = Object.freeze({
   STREAM_RIGHT: 4n,
   FINALIZE: 5n,
   DESTROY: 6n,
+  FINALIZE_STREAM: 7n,
 });
 
 const JoinStreamMode = Object.freeze({
@@ -2635,7 +2636,8 @@ function streamJoinBatch(state, side, rowSet, asWasm = false) {
 
 function browserRuntimeSupportsJoin(stage) {
   if (stage.joinType === 'inner') return true;
-  if (isOuterJoin(stage) && !stage.hasResidual) return true;
+  if (stage.joinType === 'left' || stage.joinType === 'right') return true;
+  if (stage.joinType === 'full' && !stage.hasResidual) return true;
   return isLeftSemiAntiJoin(stage);
 }
 
@@ -2698,6 +2700,11 @@ function isOuterJoin(stage) {
     stage.joinType === 'full';
 }
 
+function streamsOuterJoin(stage) {
+  return (stage.joinType === 'left' && stage.buildSide === 'left') ||
+    (stage.joinType === 'right' && stage.buildSide === 'right');
+}
+
 function finalizeSemiAntiJoinState(state) {
   if (state.semiAntiFinalized) {
     return;
@@ -2720,7 +2727,7 @@ function finalizeOuterJoinState(state) {
   }
   const ok = dispatchJoin(
     state, 0, 0, state.leftStore.dataPtr(), state.rightStore.dataPtr(),
-    0, JoinOp.FINALIZE);
+    0, streamsOuterJoin(state.stage) ? JoinOp.FINALIZE_STREAM : JoinOp.FINALIZE);
   if (!ok) {
     throw new Error('join outer finalize failed');
   }
@@ -3888,7 +3895,7 @@ class JoinTask {
     }
     return this.pullOneSymmetricInputBatch(
       downstreamConsumesWasm(this.node),
-      isInnerJoin(this.stage) || streamSemiAnti);
+      isInnerJoin(this.stage) || streamSemiAnti || streamsOuterJoin(this.stage));
   }
 
   chooseSymmetricPullSide() {

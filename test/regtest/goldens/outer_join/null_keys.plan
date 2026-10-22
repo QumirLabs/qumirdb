@@ -1,0 +1,6 @@
+sort [cv asc, ov asc]
+└─ project (ck, cv, ok, ov) (rows≈4 cost≈5.3K)
+   └─ join left [c.ck = o.ok] emit-filter 1 from left (rows≈4 cost≈5.1K)
+      ├─ filter (== |c.grp| 4) (rows≈2 cost≈384)
+      │  └─ source c AS c row-groups (== |c.grp| 4) (rows≈8 cost≈192)
+      └─ source o AS o use-filter 1 keys=[o.ok] (rows≈20 cost≈320)

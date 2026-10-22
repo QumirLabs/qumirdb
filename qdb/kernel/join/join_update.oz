@@ -14,13 +14,16 @@
 
   ;; Probe `build` for `key` and emit one pair per matching stored row. is_left
   ;; orders the emitted pair as (left, right): non-zero means the current row is
-  ;; left, zero means it is right. Returns #f only on PairBuffer allocation
-  ;; failure.
+  ;; left, zero means it is right. A non-zero `mark` sets the sign bit of the
+  ;; stored row id of every build row that gets a pair, so jt_emit_unmarked can
+  ;; find the rows of a streaming outer join that never matched. Returns #f only
+  ;; on PairBuffer allocation failure.
   (fun jt_probe_and_emit [LookupKey StoredKey] ((var build <ref HashTable>)
                           (var key LookupKey)
                           (var stored_witness StoredKey)
                           (var row_id i64)
                           (var is_left i64)
+                          (var mark i64)
                           (var pairs <ref PairBuffer>)
                           (var left_store <ptr TRowSet>)
                           (var right_store <ptr TRowSet>)
@@ -45,7 +48,9 @@
           (= k (: 0 i64))
           (while (< k bcount)
             (block
-              (var build_row_id = (index bdata k))
+              ;; Row ids are non-negative, so this only drops a mark.
+              (var build_row_id =
+                (& (index bdata k) (: 9223372036854775807 i64)))
               (var flt_l i64)
               (= flt_l row_id)
               (var flt_r i64)
@@ -57,6 +62,10 @@
               (if (call jt_residual_filter left_store right_store
                     stream_left_batch stream_right_batch flt_l flt_r)
                 (block
+                  (if (!= mark (: 0 i64))
+                    (block
+                      (= bdata [k]
+                        (| build_row_id (<< (: 1 i64) (: 63 i64))))))
                   (if (!= is_left (: 0 i64))
                     (block
                       (if (! (call pb_push pairs row_id build_row_id))
@@ -82,7 +91,7 @@
                            (var hash u64)) -> bool
     (block
       (if (! (call jt_probe_and_emit opp key stored_witness own_row_id is_left
-                    pairs left_store right_store
+                    (: 0 i64) pairs left_store right_store
                     (index left_store (: 0 i64))
                     (index right_store (: 0 i64))
                     hash))
@@ -93,6 +102,41 @@
       (if (== own_slot (: -1 i64)) (block (return #f)))
       (if (! (call jb_append own own_slot own_row_id))
         (block (return #f)))
+      (return #t)))
+
+  ;; Streaming outer join finalizer: push every stored row of `build` that
+  ;; jt_probe_and_emit left unmarked, with the null row id on the stream side.
+  ;; is_left is non-zero when `build` holds the left rows.
+  (fun jt_emit_unmarked ((var build <ref HashTable>)
+                         (var is_left i64)
+                         (var pairs <ref PairBuffer>)) -> bool
+    (block
+      (var aggs = (field build AggBuffers))
+      (var counts = (index aggs (: 0 i64)))
+      (var datas = (index aggs (: 2 i64)))
+      (var size = (field build Size))
+      (var slot i64)
+      (= slot (: 0 i64))
+      (while (< slot size)
+        (block
+          (var bcount = (index counts slot))
+          (var bdata = (cast (index datas slot) <ptr i64>))
+          (var k i64)
+          (= k (: 0 i64))
+          (while (< k bcount)
+            (block
+              (var build_row_id = (index bdata k))
+              (if (>= build_row_id (: 0 i64))
+                (block
+                  (if (!= is_left (: 0 i64))
+                    (block
+                      (if (! (call pb_push pairs build_row_id (: -1 i64)))
+                        (block (return #f))))
+                    (block
+                      (if (! (call pb_push pairs (: -1 i64) build_row_id))
+                        (block (return #f)))))))
+              (= k (+ k (: 1 i64)))))
+          (= slot (+ slot (: 1 i64)))))
       (return #t)))
 
   ;; Insert a stored row under `key` without probing the opposite table.

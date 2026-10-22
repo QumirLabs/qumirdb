@@ -155,6 +155,29 @@ TFixture MakeFixture(std::string_view name) {
             std::vector<std::vector<int64_t>>{{15, 35}}));
         return fixture;
     }
+    if (name == "left_outer_join" || name == "left_outer_residual" ||
+        name == "right_outer_join" || name == "right_outer_residual")
+    {
+        const bool rightJoin = name.starts_with("right_");
+        const bool residual = name.ends_with("_residual");
+        fixture.Sql =
+            "SELECT l.k AS k, l.v AS v, r.rk AS rk, r.w AS w FROM l ";
+        fixture.Sql += rightJoin ? "RIGHT" : "LEFT";
+        fixture.Sql += " JOIN r ON l.k = r.rk";
+        if (residual) {
+            fixture.Sql += " AND l.v < r.w";
+        }
+        const std::vector<std::vector<int64_t>> shortSide = {
+            {1, 1, 2, 3, 4}, {10, 30, 20, 40, 50}};
+        const std::vector<std::vector<int64_t>> longSide = {
+            {1, 1, 2, 4, 5, 6}, {5, 15, 25, 1, 100, 200}};
+        const bool mirror = name == "right_outer_join";
+        fixture.Tables.emplace("l", std::make_unique<TFixtureTable>(
+            std::vector<std::string>{"k", "v"}, mirror ? longSide : shortSide));
+        fixture.Tables.emplace("r", std::make_unique<TFixtureTable>(
+            std::vector<std::string>{"rk", "w"}, mirror ? shortSide : longSide));
+        return fixture;
+    }
     if (name == "semi_join") {
         fixture.Sql =
             "SELECT k AS k, v AS v FROM l WHERE k IN (SELECT rk FROM r)";

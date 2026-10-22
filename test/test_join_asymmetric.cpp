@@ -1,4 +1,6 @@
 #include <gtest/gtest.h>
+#include "mock_source.h"
+#include "plan_runner.h"
 
 #include <qdb/exec/join_exec.h>
 #include <qdb/exec/planner_helpers.h>
@@ -8,24 +10,31 @@
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/operator.h>
 #include <qdb/plan/ops/project.h>
+#include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/union.h>
 #include <qdb/plan/ops/stats.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/plan/passes/runtime_filters.h>
+#include <qdb/plan/passes/typing.h>
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/parser/type.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
+#include <deque>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <vector>
 
 using namespace NQdb;
 using namespace NQumir::NAst;
+using namespace NQumir::NAst::NLiterals;
 
 namespace {
 
@@ -552,7 +561,7 @@ TEST(AttachRuntimeFilters, LeftOuterFiltersOnlyNullableRightInput) {
     auto emitted = AttachTo(join);
     ASSERT_TRUE(emitted);
     EXPECT_EQ(emitted->BuildSide, EJoinFilterSide::Left);
-    EXPECT_EQ(ChooseJoinBuildSide(*j), EJoinBuildSide::Auto);
+    EXPECT_EQ(ChooseJoinBuildSide(*j), EJoinBuildSide::Left);
     EXPECT_TRUE(j->Left()->RuntimeFilterUses.empty());
     ASSERT_EQ(j->Right()->RuntimeFilterUses.size(), 1u);
     EXPECT_EQ(j->Right()->RuntimeFilterUses[0].ProbeKeys,
@@ -971,6 +980,83 @@ TEST(ChooseJoinBuildSide, PicksSmallerSideWhenRatioMet) {
     EXPECT_EQ(ChooseJoinBuildSide(*j), EJoinBuildSide::Left);
 }
 
+// An outer join streams only against its preserved side. The general path
+// stores both inputs, so the preserved side needs no size margin to be built
+// first; it only must not be the larger one.
+TEST(ChooseJoinBuildSide, OuterBuildsThePreservedSideWhenItIsNotLarger) {
+    for (auto type : {EJoinType::Left, EJoinType::Right}) {
+        SCOPED_TRACE(JoinTypeName(type));
+        auto join = JoinOfType(type);
+        ASSERT_TRUE(join);
+        auto* j = static_cast<TJoinOperator*>(join.get());
+        const bool isLeft = type == EJoinType::Left;
+        const auto& preserved = isLeft ? j->Left() : j->Right();
+        const auto& other = isLeft ? j->Right() : j->Left();
+        const auto preservedSide =
+            isLeft ? EJoinBuildSide::Left : EJoinBuildSide::Right;
+
+        preserved->Stats_ = Rows(1000);
+        other->Stats_ = Rows(1000);
+        EXPECT_EQ(ChooseJoinBuildSide(*j), preservedSide);
+
+        other->Stats_ = Rows(999);
+        EXPECT_EQ(ChooseJoinBuildSide(*j), EJoinBuildSide::Auto)
+            << "the other side is smaller but cannot be the build side";
+
+        other->Stats_ = nullptr;
+        EXPECT_EQ(ChooseJoinBuildSide(*j), EJoinBuildSide::Auto);
+    }
+
+    auto full = JoinOfType(EJoinType::Full);
+    ASSERT_TRUE(full);
+    auto* f = static_cast<TJoinOperator*>(full.get());
+    f->Left()->Stats_ = Rows(1);
+    f->Right()->Stats_ = Rows(1000);
+    EXPECT_EQ(ChooseJoinBuildSide(*f), EJoinBuildSide::Auto);
+}
+
+// The general path finds unmatched rows by key alone, so a residual predicate
+// needs the streaming path whatever the sizes are.
+TEST(ChooseJoinBuildSide, OuterWithResidualBuildsThePreservedSide) {
+    for (auto type : {EJoinType::Left, EJoinType::Right}) {
+        SCOPED_TRACE(JoinTypeName(type));
+        auto join = JoinOfType(type);
+        ASSERT_TRUE(join);
+        auto* j = static_cast<TJoinOperator*>(join.get());
+        const bool isLeft = type == EJoinType::Left;
+        (isLeft ? j->Left() : j->Right())->Stats_ = Rows(1000);
+        (isLeft ? j->Right() : j->Left())->Stats_ = Rows(10);
+        ASSERT_EQ(ChooseJoinBuildSide(*j), EJoinBuildSide::Auto);
+
+        j->MutableFilter() = std::make_shared<TBinaryExpr>(
+            NQumir::TLocation{}, "<"_op,
+            std::make_shared<TIdentExpr>(NQumir::TLocation{}, "lv"),
+            std::make_shared<TIdentExpr>(NQumir::TLocation{}, "rv"));
+        EXPECT_EQ(ChooseJoinBuildSide(*j),
+            isLeft ? EJoinBuildSide::Left : EJoinBuildSide::Right);
+
+        (isLeft ? j->Left() : j->Right())->Stats_ = nullptr;
+        EXPECT_EQ(ChooseJoinBuildSide(*j),
+            isLeft ? EJoinBuildSide::Left : EJoinBuildSide::Right)
+            << "the choice must not depend on statistics";
+    }
+}
+
+// A runtime filter already makes the probe input wait for the preserved side,
+// so streaming costs no extra wait whatever the sizes are.
+TEST(ChooseJoinBuildSide, OuterWithRuntimeFilterBuildsItsProducerSide) {
+    auto join = JoinOfType(EJoinType::Left);
+    ASSERT_TRUE(join);
+    auto* j = static_cast<TJoinOperator*>(join.get());
+    j->Left()->Stats_ = Rows(1000);
+    j->Right()->Stats_ = Rows(10);
+    ASSERT_EQ(ChooseJoinBuildSide(*j), EJoinBuildSide::Auto);
+
+    j->MutableRuntimeFilter() = TRuntimeFilterSpec{
+        .Id = 7, .BuildSide = EJoinFilterSide::Left};
+    EXPECT_EQ(ChooseJoinBuildSide(*j), EJoinBuildSide::Left);
+}
+
 TEST(ChooseJoinBuildSide, AutoWhenBalancedOrStatsMissing) {
     auto join = InnerJoin();
     ASSERT_TRUE(join);
@@ -984,6 +1070,436 @@ TEST(ChooseJoinBuildSide, AutoWhenBalancedOrStatsMissing) {
     // Missing stats fall back to the adaptive symmetric path.
     j->Right()->Stats_ = nullptr;
     EXPECT_EQ(ChooseJoinBuildSide(*j), EJoinBuildSide::Auto);
+}
+
+namespace {
+
+// One input row of a join side: a nullable key and a payload.
+struct TKeyVal {
+    std::optional<int64_t> Key;
+    int64_t Val = 0;
+};
+
+using TSideRows = std::vector<std::vector<TKeyVal>>;
+
+// One output row of a LEFT/RIGHT join; a NULL column reads as nullopt.
+struct TOuterRow {
+    std::optional<int64_t> Lk, Lv, Rk, Rv;
+    auto operator<=>(const TOuterRow&) const = default;
+};
+
+std::vector<TOuterRow> Sorted(std::vector<TOuterRow> rows) {
+    std::sort(rows.begin(), rows.end());
+    return rows;
+}
+
+// Serves the batches of one join input and counts how many of them the
+// processor has taken and how many it has given back.
+class TSideInput {
+public:
+    // `stalls` NO_DATA answers come before every batch and before EOF.
+    explicit TSideInput(const TSideRows& batches, int stalls = 0)
+        : Stalls_(stalls)
+        , StallsLeft_(stalls)
+    {
+        for (const auto& rows : batches) {
+            auto& batch = Batches_.emplace_back();
+            batch.KeyMask.assign((rows.size() + 7) / 8, 0);
+            for (size_t i = 0; i < rows.size(); ++i) {
+                batch.Keys.push_back(rows[i].Key.value_or(0));
+                batch.Vals.push_back(rows[i].Val);
+                if (rows[i].Key) {
+                    batch.KeyMask[i / 8] |= static_cast<uint8_t>(1u << (i % 8));
+                }
+            }
+            batch.Columns = {
+                TColumn{.Data = reinterpret_cast<char*>(batch.Keys.data()),
+                        .Mask = batch.KeyMask.data()},
+                TColumn{.Data = reinterpret_cast<char*>(batch.Vals.data())}};
+        }
+    }
+    TSideInput(const TSideInput&) = delete;
+    TSideInput& operator=(const TSideInput&) = delete;
+
+    EJoinFetchResult Fetch(TRowSet& rowSet) {
+        if (StallsLeft_ > 0) {
+            --StallsLeft_;
+            return EJoinFetchResult::NO_DATA;
+        }
+        StallsLeft_ = Stalls_;
+        if (Fetched_ == Batches_.size()) {
+            return EJoinFetchResult::FINISHED;
+        }
+        auto& batch = Batches_[Fetched_++];
+        rowSet = TRowSet{
+            .Columns = batch.Columns.data(),
+            .ColumnCount = 2,
+            .RowCount = static_cast<int64_t>(batch.Keys.size()),
+            .Destroy = [](TRowSet* released) {
+                ++static_cast<TSideInput*>(released->Private)->Released_;
+            },
+            .Private = this,
+            .RefCount = 1};
+        return EJoinFetchResult::OK;
+    }
+
+    size_t Fetched() const { return Fetched_; }
+    size_t Released() const { return Released_; }
+
+private:
+    struct TBatch {
+        std::vector<int64_t> Keys;
+        std::vector<int64_t> Vals;
+        std::vector<uint8_t> KeyMask;
+        std::array<TColumn, 2> Columns;
+    };
+
+    // A deque keeps the column arrays of earlier batches in place.
+    std::deque<TBatch> Batches_;
+    int Stalls_ = 0;
+    int StallsLeft_ = 0;
+    size_t Fetched_ = 0;
+    size_t Released_ = 0;
+};
+
+// LEFT/RIGHT joins of (lk, lv) with (rk, rv) on nullable lk = rk, run directly
+// on the join processor.
+class OuterStreamJoin : public testing::Test {
+protected:
+    TJoinKernels Compile(EJoinType type) {
+        auto spec = NKernel::BuildJoinKernelSpec(
+            static_cast<TStructType&>(*LeftType_),
+            static_cast<TStructType&>(*RightType_),
+            {{"lk", "rk", false}}, type, nullptr);
+        return Compiler_.CompileJoin(spec);
+    }
+
+    static void AppendRows(const TRowSet& out, std::vector<TOuterRow>& rows) {
+        auto cell = [&](int column, int64_t row) -> std::optional<int64_t> {
+            const auto& col = out.Columns[column];
+            if (col.Mask && !((col.Mask[row / 8] >> (row % 8)) & 1)) {
+                return std::nullopt;
+            }
+            return reinterpret_cast<const int64_t*>(col.Data)[row];
+        };
+        ASSERT_EQ(out.ColumnCount, 4);
+        for (int64_t i = 0; i < out.RowCount; ++i) {
+            rows.push_back({cell(0, i), cell(1, i), cell(2, i), cell(3, i)});
+        }
+    }
+
+    // Runs the join to completion and returns its rows in sorted order.
+    std::vector<TOuterRow> Run(
+        EJoinType type, EJoinBuildSide buildSide,
+        TSideInput& left, TSideInput& right)
+    {
+        TInnerJoinProcessor processor(Compile(type), type, buildSide);
+        auto fetchLeft = [&](TRowSet& rowSet) { return left.Fetch(rowSet); };
+        auto fetchRight = [&](TRowSet& rowSet) { return right.Fetch(rowSet); };
+        std::vector<TOuterRow> rows;
+        TRowSet out{};
+        for (;;) {
+            auto result = processor.Process(fetchLeft, fetchRight, out);
+            if (result == EJoinProcessorResult::FINISHED) {
+                break;
+            }
+            if (result == EJoinProcessorResult::OK) {
+                AppendRows(out, rows);
+                Release(&out);
+            }
+        }
+        return Sorted(std::move(rows));
+    }
+
+    std::vector<TOuterRow> Run(
+        EJoinType type, EJoinBuildSide buildSide,
+        const TSideRows& leftRows, const TSideRows& rightRows)
+    {
+        TSideInput left(leftRows);
+        TSideInput right(rightRows);
+        return Run(type, buildSide, left, right);
+    }
+
+    // The streaming path must agree with the general (keep both sides) path.
+    void ExpectStreamingMatchesGeneral(
+        const TSideRows& left, const TSideRows& right)
+    {
+        const auto leftJoin =
+            Run(EJoinType::Left, EJoinBuildSide::Auto, left, right);
+        const auto rightJoin =
+            Run(EJoinType::Right, EJoinBuildSide::Auto, left, right);
+        // An outer join returns at least one row per preserved row.
+        EXPECT_GE(leftJoin.size(), RowCount(left));
+        EXPECT_GE(rightJoin.size(), RowCount(right));
+        EXPECT_EQ(Run(EJoinType::Left, EJoinBuildSide::Left, left, right),
+                  leftJoin);
+        EXPECT_EQ(Run(EJoinType::Right, EJoinBuildSide::Right, left, right),
+                  rightJoin);
+    }
+
+    static size_t RowCount(const TSideRows& batches) {
+        size_t rows = 0;
+        for (const auto& batch : batches) {
+            rows += batch.size();
+        }
+        return rows;
+    }
+
+    TKernelCompiler Compiler_;
+    TTypePtr LeftType_ = std::make_shared<TStructType>(
+        std::vector<std::pair<std::string, TTypePtr>>{
+            {"lk", std::make_shared<TNullable>(I64Type())}, {"lv", I64Type()}});
+    TTypePtr RightType_ = std::make_shared<TStructType>(
+        std::vector<std::pair<std::string, TTypePtr>>{
+            {"rk", std::make_shared<TNullable>(I64Type())}, {"rv", I64Type()}});
+};
+
+} // namespace
+
+// The SQL-level results are fixed by the outer_join regression suite. This runs
+// the same inputs through both implementations of the processor.
+TEST_F(OuterStreamJoin, MatchesGeneralPathOnTheSameInputs) {
+    const TSideRows duplicates = {
+        {{1, 10}, {1, 11}, {2, 20}}, {{3, 40}, {1, 12}}};
+    const TSideRows moreDuplicates = {
+        {{1, 100}, {1, 101}}, {{4, 400}, {3, 500}, {3, 501}}};
+    const TSideRows nullKeys = {
+        {{1, 10}, {std::nullopt, 20}}, {{std::nullopt, 30}}};
+    const TSideRows moreNullKeys = {
+        {{std::nullopt, 100}, {1, 200}}, {{std::nullopt, 300}}};
+    const TSideRows disjoint = {{{7, 700}}, {{8, 800}, {9, 900}}};
+
+    ExpectStreamingMatchesGeneral(duplicates, moreDuplicates);
+    ExpectStreamingMatchesGeneral(nullKeys, moreNullKeys);
+    ExpectStreamingMatchesGeneral(duplicates, duplicates);
+    ExpectStreamingMatchesGeneral(duplicates, disjoint);
+    ExpectStreamingMatchesGeneral({}, duplicates);
+    ExpectStreamingMatchesGeneral(duplicates, {});
+    ExpectStreamingMatchesGeneral({}, {});
+}
+
+// The probe input can be at EOF before the build has delivered anything, and
+// either input can run dry in between; neither changes the result.
+TEST_F(OuterStreamJoin, InputStallsAndEofOrderDoNotChangeTheResult) {
+    const TSideRows build = {{{1, 10}, {2, 20}}, {{3, 30}}};
+    const TSideRows probe = {{{2, 200}}, {{2, 201}, {9, 900}}};
+    const auto expected = Run(
+        EJoinType::Left, EJoinBuildSide::Left, build, probe);
+    ASSERT_EQ(expected.size(), 4u);
+
+    for (const auto& [buildStalls, probeStalls] :
+            {std::pair{3, 0}, std::pair{0, 3}, std::pair{2, 2}}) {
+        SCOPED_TRACE(buildStalls);
+        SCOPED_TRACE(probeStalls);
+        TSideInput left(build, buildStalls);
+        TSideInput right(probe, probeStalls);
+        EXPECT_EQ(Run(EJoinType::Left, EJoinBuildSide::Left, left, right),
+                  expected);
+    }
+
+    TSideInput slowBuild(build, 3);
+    TSideInput finishedProbe(TSideRows{});
+    EXPECT_EQ(
+        Run(EJoinType::Left, EJoinBuildSide::Left, slowBuild, finishedProbe),
+        Sorted({
+            {1, 10, std::nullopt, std::nullopt},
+            {2, 20, std::nullopt, std::nullopt},
+            {3, 30, std::nullopt, std::nullopt}}));
+}
+
+// Unmatched rows leave in output-sized batches, so the task can block on its
+// output in between. The stream side is given back batch by batch, while the
+// build batches behind the pending rows stay alive.
+TEST_F(OuterStreamJoin, EmitsUnmatchedRowsInBatchesFromLiveBuildRows) {
+    const int64_t buildRows = 3 * JoinOutputBatchRows;
+    TSideRows build(3);
+    for (int64_t key = 0; key < buildRows; ++key) {
+        build[key % 3].push_back({key, key * 10});
+    }
+    const TSideRows probe = {{{0, 1}, {1, 2}}, {{1, 3}, {buildRows, 4}}};
+    TSideInput left(build);
+    TSideInput right(probe);
+
+    int64_t matched = 0;
+    std::vector<int64_t> unmatchedKeys;
+    {
+        TInnerJoinProcessor processor(
+            Compile(EJoinType::Left), EJoinType::Left, EJoinBuildSide::Left);
+        auto fetchLeft = [&](TRowSet& rowSet) { return left.Fetch(rowSet); };
+        auto fetchRight = [&](TRowSet& rowSet) { return right.Fetch(rowSet); };
+        TRowSet out{};
+        for (;;) {
+            if (processor.RequiredInputSide() == EJoinBuildSide::Left) {
+                EXPECT_EQ(right.Fetched(), 0u) << "probe read during the build";
+            }
+            auto result = processor.Process(fetchLeft, fetchRight, out);
+            EXPECT_EQ(right.Released(), right.Fetched())
+                << "a probe batch outlived its stream call";
+            EXPECT_EQ(left.Released(), 0u);
+            if (result == EJoinProcessorResult::FINISHED) {
+                break;
+            }
+            if (result != EJoinProcessorResult::OK) {
+                continue;
+            }
+            EXPECT_LE(out.RowCount, JoinOutputBatchRows);
+            std::vector<TOuterRow> rows;
+            AppendRows(out, rows);
+            Release(&out);
+            for (const auto& row : rows) {
+                ASSERT_TRUE(row.Lk.has_value());
+                EXPECT_EQ(row.Lv, *row.Lk * 10);
+                if (row.Rk) {
+                    ++matched;
+                } else {
+                    unmatchedKeys.push_back(*row.Lk);
+                }
+            }
+        }
+        EXPECT_EQ(left.Fetched(), 3u);
+        EXPECT_EQ(right.Fetched(), 2u);
+    }
+    EXPECT_EQ(left.Released(), 3u);
+
+    EXPECT_EQ(matched, 3);
+    std::sort(unmatchedKeys.begin(), unmatchedKeys.end());
+    std::vector<int64_t> expectedUnmatched;
+    for (int64_t key = 2; key < buildRows; ++key) {
+        expectedUnmatched.push_back(key);
+    }
+    EXPECT_EQ(unmatchedKeys, expectedUnmatched);
+}
+
+// Only the preserved side can be the build side of a streaming outer join; any
+// other request runs the general path and still returns the right rows.
+TEST_F(OuterStreamJoin, NonPreservedBuildSideFallsBackToGeneralPath) {
+    const TSideRows left = {{{1, 10}, {2, 20}}};
+    const TSideRows right = {{{2, 200}, {3, 300}}};
+
+    EXPECT_EQ(Run(EJoinType::Left, EJoinBuildSide::Right, left, right),
+        Sorted({{1, 10, std::nullopt, std::nullopt}, {2, 20, 2, 200}}));
+    EXPECT_EQ(Run(EJoinType::Right, EJoinBuildSide::Left, left, right),
+        Sorted({{2, 20, 2, 200}, {std::nullopt, std::nullopt, 3, 300}}));
+    EXPECT_EQ(Run(EJoinType::Full, EJoinBuildSide::Left, left, right),
+        Sorted({
+            {1, 10, std::nullopt, std::nullopt},
+            {2, 20, 2, 200},
+            {std::nullopt, std::nullopt, 3, 300}}));
+}
+
+// Each join partition builds its own slice of the preserved side and marks the
+// rows its probe matches. Together the partitions must return every unmatched
+// row exactly once, as the general path does.
+TEST(OuterStreamJoinPlan, MatchesGeneralPathAcrossPartitions) {
+    // Keys repeat on both sides; keys below 40 exist only on the left and keys
+    // above 96 only on the right.
+    std::vector<int64_t> lk, lv, rk, rv;
+    for (int64_t i = 0; i < 400; ++i) {
+        lk.push_back(i % 97);
+        lv.push_back(i);
+    }
+    for (int64_t i = 0; i < 600; ++i) {
+        rk.push_back((i * 7) % 150 + 40);
+        rv.push_back(1000 + i);
+    }
+
+    using TRow = std::tuple<std::optional<int64_t>, std::optional<int64_t>,
+        std::optional<int64_t>, std::optional<int64_t>>;
+    auto expected = [&](EJoinType type) {
+        std::vector<TRow> rows;
+        std::vector<bool> rightMatched(rk.size());
+        for (size_t l = 0; l < lk.size(); ++l) {
+            bool matched = false;
+            for (size_t r = 0; r < rk.size(); ++r) {
+                if (lk[l] == rk[r]) {
+                    rows.emplace_back(lk[l], lv[l], rk[r], rv[r]);
+                    matched = true;
+                    rightMatched[r] = true;
+                }
+            }
+            if (!matched && type == EJoinType::Left) {
+                rows.emplace_back(lk[l], lv[l], std::nullopt, std::nullopt);
+            }
+        }
+        for (size_t r = 0; type == EJoinType::Right && r < rk.size(); ++r) {
+            if (!rightMatched[r]) {
+                rows.emplace_back(std::nullopt, std::nullopt, rk[r], rv[r]);
+            }
+        }
+        std::sort(rows.begin(), rows.end());
+        return rows;
+    };
+
+    auto run = [&](EJoinType type, bool streaming,
+                   NScheduler::EExecutionMode mode) {
+        std::vector<TColumn> lc0, lc1, rc0, rc1, rc2;
+        TMockSource left({"lk", "lv"}, {
+            KeyValBatch(lk.data(), lv.data(), 200, lc0),
+            KeyValBatch(lk.data() + 200, lv.data() + 200, 200, lc1)});
+        TMockSource right({"rk", "rv"}, {
+            KeyValBatch(rk.data(), rv.data(), 200, rc0),
+            KeyValBatch(rk.data() + 200, rv.data() + 200, 200, rc1),
+            KeyValBatch(rk.data() + 400, rv.data() + 400, 200, rc2)});
+        auto join = std::make_shared<TJoinOperator>(
+            std::make_shared<TSourceOperator>(left, "L"),
+            std::make_shared<TSourceOperator>(right, "R"),
+            std::vector<TJoinKey>{{"lk", "rk"}}, type, nullptr);
+        TOperatorPtr root = join;
+        AnnotateTypes(root);
+
+        const bool isLeft = type == EJoinType::Left;
+        if (streaming) {
+            // Only the estimates steer the plan: make the preserved side the
+            // smaller one.
+            (isLeft ? join->Left() : join->Right())->Stats_ = Rows(1);
+            (isLeft ? join->Right() : join->Left())->Stats_ = Rows(2);
+        }
+        const auto preserved =
+            isLeft ? EJoinBuildSide::Left : EJoinBuildSide::Right;
+        EXPECT_EQ(ChooseJoinBuildSide(*join),
+            streaming ? preserved : EJoinBuildSide::Auto);
+
+        NScheduler::TSettings settings;
+        settings.Scheduler.Mode = mode;
+        settings.Scheduler.WorkerCount = mode
+                == NScheduler::EExecutionMode::SingleThreadedScheduler
+            ? 1 : 4;
+        settings.HashShuffle.PartitionCount = 4;
+        settings.HashShuffle.MaxPartitionCount = 4;
+        auto plan = RunPlan(root, settings);
+
+        std::vector<TRow> got;
+        TRowSet out{};
+        while (plan->Next(out)) {
+            auto cell = [&](int column, int64_t row) -> std::optional<int64_t> {
+                const auto& col = out.Columns[column];
+                if (col.Mask && !((col.Mask[row / 8] >> (row % 8)) & 1)) {
+                    return std::nullopt;
+                }
+                return reinterpret_cast<const int64_t*>(col.Data)[row];
+            };
+            for (int64_t i = 0; i < out.RowCount; ++i) {
+                if (!out.Selection || out.Selection[i]) {
+                    got.emplace_back(
+                        cell(0, i), cell(1, i), cell(2, i), cell(3, i));
+                }
+            }
+            Release(&out);
+        }
+        std::sort(got.begin(), got.end());
+        return got;
+    };
+
+    for (auto type : {EJoinType::Left, EJoinType::Right}) {
+        for (auto mode : {NScheduler::EExecutionMode::SingleThreadedScheduler,
+                          NScheduler::EExecutionMode::ThreadedScheduler}) {
+            SCOPED_TRACE(JoinTypeName(type));
+            SCOPED_TRACE(static_cast<int>(mode));
+            const auto want = expected(type);
+            EXPECT_EQ(run(type, /*streaming=*/true, mode), want);
+            EXPECT_EQ(run(type, /*streaming=*/false, mode), want);
+        }
+    }
 }
 
 int main(int argc, char** argv) {

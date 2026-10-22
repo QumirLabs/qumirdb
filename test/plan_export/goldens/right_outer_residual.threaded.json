@@ -1,0 +1,164 @@
+{
+  "supported": true,
+  "embedWasm": false,
+  "nodes": [
+    {
+      "columns": [
+        {
+          "name": "k",
+          "nullable": false,
+          "type": "i64"
+        },
+        {
+          "name": "v",
+          "nullable": false,
+          "type": "i64"
+        }
+      ],
+      "id": 0,
+      "kind": "source",
+      "stageId": 2,
+      "table": "l"
+    },
+    {
+      "columns": [
+        {
+          "name": "rk",
+          "nullable": false,
+          "type": "i64"
+        },
+        {
+          "name": "w",
+          "nullable": false,
+          "type": "i64"
+        }
+      ],
+      "id": 1,
+      "kind": "source",
+      "stageId": 3,
+      "table": "r"
+    },
+    {
+      "buildSide": "right",
+      "entrypoints": {},
+      "hasResidual": true,
+      "id": 2,
+      "joinType": "right",
+      "keySize": 8,
+      "keys": [
+        {
+          "left": "k",
+          "leftIndex": 0,
+          "right": "rk",
+          "rightIndex": 0
+        }
+      ],
+      "kind": "join",
+      "label": "join right [l.k = r.rk] residual (< |l.v| |r.w|)",
+      "leftColumns": [
+        {
+          "name": "k",
+          "nullable": false,
+          "type": "i64"
+        },
+        {
+          "name": "v",
+          "nullable": false,
+          "type": "i64"
+        }
+      ],
+      "output": [
+        {
+          "name": "k",
+          "nullable": true,
+          "type": "i64"
+        },
+        {
+          "name": "v",
+          "nullable": true,
+          "type": "i64"
+        },
+        {
+          "name": "rk",
+          "nullable": false,
+          "type": "i64"
+        },
+        {
+          "name": "w",
+          "nullable": false,
+          "type": "i64"
+        }
+      ],
+      "rightColumns": [
+        {
+          "name": "rk",
+          "nullable": false,
+          "type": "i64"
+        },
+        {
+          "name": "w",
+          "nullable": false,
+          "type": "i64"
+        }
+      ],
+      "stageId": 4
+    },
+    {
+      "entrypoints": {},
+      "id": 3,
+      "kind": "project",
+      "output": [
+        {
+          "inputIndex": 0,
+          "name": "k",
+          "nullable": true,
+          "source": "passthrough",
+          "type": "i64"
+        },
+        {
+          "inputIndex": 1,
+          "name": "v",
+          "nullable": true,
+          "source": "passthrough",
+          "type": "i64"
+        },
+        {
+          "inputIndex": 2,
+          "name": "rk",
+          "nullable": false,
+          "source": "passthrough",
+          "type": "i64"
+        },
+        {
+          "inputIndex": 3,
+          "name": "w",
+          "nullable": false,
+          "source": "passthrough",
+          "type": "i64"
+        }
+      ],
+      "stageId": 1
+    }
+  ],
+  "edges": [
+    {
+      "from": 0,
+      "input": 0,
+      "kind": "one-to-one",
+      "to": 2
+    },
+    {
+      "from": 1,
+      "input": 1,
+      "kind": "one-to-one",
+      "to": 2
+    },
+    {
+      "from": 2,
+      "input": 0,
+      "kind": "one-to-one",
+      "to": 3
+    }
+  ],
+  "root": 3
+}

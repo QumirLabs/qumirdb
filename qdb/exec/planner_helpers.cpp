@@ -248,10 +248,8 @@ NQumir::NAst::TTypePtr BuildSourceRuntimeType(TSourceOperator& src)
 
 EJoinBuildSide ChooseJoinBuildSide(const TJoinOperator& join) {
     const auto type = join.JoinType();
-    // Outer joins retain both sides until finalization. Their runtime filter
-    // has a producer side, but it does not change the join processor's mode.
-    if (type == EJoinType::Left || type == EJoinType::Right
-        || type == EJoinType::Full) {
+    // FULL preserves both sides, so it cannot drop either one while streaming.
+    if (type == EJoinType::Full) {
         return EJoinBuildSide::Auto;
     }
     // Publishing requires the build side to finish before probing.
@@ -264,8 +262,16 @@ EJoinBuildSide ChooseJoinBuildSide(const TJoinOperator& join) {
     const bool semiAnti =
         type == EJoinType::LeftSemi || type == EJoinType::LeftAnti;
     const bool streamable = semiAnti && !join.Filter();
-    if ((type != EJoinType::Inner && !streamable) || join.Keys().empty()) {
+    const bool outer = type == EJoinType::Left || type == EJoinType::Right;
+    if ((type != EJoinType::Inner && !outer && !streamable)
+        || join.Keys().empty()) {
         return EJoinBuildSide::Auto;
+    }
+    // The general outer path finds unmatched rows by key alone. Only the row
+    // marks of the streaming path know that a residual rejected a key match.
+    if (outer && join.Filter()) {
+        return type == EJoinType::Left
+            ? EJoinBuildSide::Left : EJoinBuildSide::Right;
     }
     auto leftStats = join.Left()->Stats_;
     auto rightStats = join.Right()->Stats_;
@@ -275,6 +281,18 @@ EJoinBuildSide ChooseJoinBuildSide(const TJoinOperator& join) {
     }
     const double l = static_cast<double>(leftStats->RowCount);
     const double r = static_cast<double>(rightStats->RowCount);
+    if (outer) {
+        // An outer join can stream only against its preserved side: the build
+        // rows that no stream row matched are known when the stream ends.
+        // Reading one input first makes the other wait, which the general path
+        // avoids by reading both at once. It pays for that by storing and
+        // hashing both inputs, so streaming is worth the wait when the input
+        // it frees is at least as large as the one it reads first.
+        if (type == EJoinType::Left) {
+            return l <= r ? EJoinBuildSide::Left : EJoinBuildSide::Auto;
+        }
+        return r <= l ? EJoinBuildSide::Right : EJoinBuildSide::Auto;
+    }
     if (r * JoinAsymmetryRatio <= l) {
         return EJoinBuildSide::Right;
     }
@@ -858,9 +876,16 @@ void PrintRuntimePlanNode(
         return;
     }
     if (auto node = TMaybeOp<TJoinOperator>(root)) {
-        out << "join [symmetric hash, JIT probe+insert]\n";
-        PrintRuntimePlanNode(out, node.Cast()->Left(), depth + 1);
-        PrintRuntimePlanNode(out, node.Cast()->Right(), depth + 1);
+        auto join = node.Cast();
+        const auto buildSide = ChooseJoinBuildSide(*join);
+        if (buildSide == EJoinBuildSide::Auto) {
+            out << "join [symmetric hash, JIT probe+insert]\n";
+        } else {
+            out << "join [hash build " << JoinBuildSideName(buildSide)
+                << ", JIT stream probe]\n";
+        }
+        PrintRuntimePlanNode(out, join->Left(), depth + 1);
+        PrintRuntimePlanNode(out, join->Right(), depth + 1);
         return;
     }
     if (auto node = TMaybeOp<TSortOperator>(root)) {

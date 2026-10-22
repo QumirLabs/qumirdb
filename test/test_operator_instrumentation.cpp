@@ -33,6 +33,7 @@
 using namespace NQdb;
 using namespace NQdb::NScheduler;
 using namespace NQumir::NAst;
+using namespace NQumir::NAst::NLiterals;
 
 namespace {
 
@@ -266,6 +267,55 @@ TEST(OperatorInstrumentation, ReportsFilterAggregateCardinalitiesInBothScheduler
         EXPECT_EQ(StageSum(instrumentation.str(), "aggregate", "rows_in"), 90u);
         EXPECT_EQ(StageSum(instrumentation.str(), "aggregate", "rows_out"), 10u);
         EXPECT_NE(instrumentation.str().find("partition_skew="), std::string::npos);
+    }
+}
+
+TEST(OperatorInstrumentation, StreamingOuterResidualsKeepCountersAcrossFinalization) {
+    for (const auto mode : {EExecutionMode::SingleThreadedScheduler, EExecutionMode::ThreadedScheduler}) {
+        for (const auto joinType : {EJoinType::Left, EJoinType::Right}) {
+            std::array<int64_t, 4> leftKeys = {1, 1, 2, 3};
+            std::array<int64_t, 4> leftValues = {10, 30, 20, 40};
+            std::array<int64_t, 4> rightKeys = {1, 1, 2, 4};
+            std::array<int64_t, 4> rightValues = {5, 15, 25, 50};
+            TColumn leftColumns[] = {{.Data = reinterpret_cast<char*>(leftKeys.data())},
+                {.Data = reinterpret_cast<char*>(leftValues.data())}};
+            TColumn rightColumns[] = {{.Data = reinterpret_cast<char*>(rightKeys.data())},
+                {.Data = reinterpret_cast<char*>(rightValues.data())}};
+            TRowSet leftBatch{.Columns = leftColumns, .ColumnCount = 2, .RowCount = 4, .RefCount = 1};
+            TRowSet rightBatch{.Columns = rightColumns, .ColumnCount = 2, .RowCount = 4, .RefCount = 1};
+            TMockSource left({"lk", "lv"}, {leftBatch});
+            TMockSource right({"rk", "rv"}, {rightBatch});
+            auto residual = NKernel::NOz::Bin("<"_op, NKernel::NOz::Ident("lv"), NKernel::NOz::Ident("rv"));
+            auto plan = std::make_shared<TJoinOperator>(
+                std::make_shared<TSourceOperator>(left, "l"),
+                std::make_shared<TSourceOperator>(right, "r"),
+                std::vector<TJoinKey>{{"lk", "rk"}}, joinType, std::move(residual));
+            AnnotateTypes(plan);
+            ApplyColumnPruning(plan);
+            TSettings settings;
+            settings.Scheduler.Mode = mode;
+            settings.Scheduler.WorkerCount = 2;
+            settings.HashShuffle.PartitionCount = 1;
+            std::ostringstream instrumentation;
+            settings.Instrumentation.Operators = true;
+            settings.Instrumentation.Output = &instrumentation;
+            auto runtime = RunPlan(plan, settings);
+            TRowSet output{};
+            size_t rows = 0;
+            while (runtime->Next(output)) {
+                rows += output.RowCount;
+                Release(&output);
+            }
+            EXPECT_EQ(rows, 4u);
+            EXPECT_EQ(StageSum(instrumentation.str(), "source", "rows_out"), 8u);
+            EXPECT_EQ(StageSum(instrumentation.str(), "join", "rows_in"), 8u);
+            EXPECT_EQ(StageSum(instrumentation.str(), "join", "rows_out"), 4u);
+            // The report precedes graph teardown; only the four preserved
+            // two-column rows remain owned by the join at this boundary.
+            EXPECT_EQ(StageSum(instrumentation.str(), "join", "retained_input_bytes"), 64u);
+            EXPECT_GT(StageSum(instrumentation.str(), "join", "retained_input_peak_bytes"), 0u);
+            EXPECT_GT(StageSum(instrumentation.str(), "join", "hash_memory_peak_bytes"), 0u);
+        }
     }
 }
 

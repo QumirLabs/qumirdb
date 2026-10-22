@@ -601,7 +601,7 @@ TOperatorPtr ProcessJoin(std::shared_ptr<TJoinOperator> join, TContext ctx)
 // side (Left keeps left, Right keeps right, Full neither). The ON residual is
 // different: a non-key ON conjunct constraining only the null-extended side can
 // be filtered on that side before the join - equivalent for an outer join, and
-// what the executor needs (it has no join-residual support for outer joins).
+// it keeps the conjunct out of the join residual.
 TOperatorPtr ProcessOuterJoin(std::shared_ptr<TJoinOperator> join, TContext ctx) {
     EJoinType type = join->JoinType();
     auto leftCols = JoinColumns(0, join);

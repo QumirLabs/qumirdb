@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "fixtures": {
+    "c": {"json": "tables/c.json", "parquet": {"row_group_rows": 2}},
+    "o": {"json": "tables/o.json", "parquet": {"row_group_rows": 4}}
+  },
+  "tables": {"c": "c", "o": "o"},
+  "variants": ["single", "threaded"],
+  "cases": {
+    "duplicates.sql": {"order": "ordered"},
+    "null_keys.sql": {"order": "ordered"},
+    "all_matched.sql": {"order": "ordered"},
+    "none_matched.sql": {"order": "ordered"},
+    "empty_build.sql": {"order": "ordered"},
+    "empty_probe.sql": {"order": "ordered"},
+    "right_join.sql": {"order": "ordered"},
+    "preserved_larger.sql": {"order": "ordered"},
+    "residual.sql": {"order": "ordered"},
+    "residual_right.sql": {"order": "ordered"},
+    "residual_preserved_larger.sql": {"order": "ordered"}
+  }
+}

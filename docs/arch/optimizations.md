@@ -514,9 +514,17 @@ distinct. Unlike the global cascade this one is not behind a flag.
 
 The inner join starts symmetric — both sides build and probe — and switches to
 probe-only streaming for the remaining side as soon as one input is exhausted,
-which is normally the smaller one. the
-adaptation is a scheduling property, so a wrong cardinality estimate costs
-nothing here. See [join.md](join.md).
+which is normally the smaller one. This adaptation requires no cardinality
+estimate. Lowering can instead choose build-first execution when an input is
+estimated much smaller or a runtime filter requires its completion first.
+
+LEFT/RIGHT outer joins can build their preserved side, stream the other input,
+and mark each build row only after its residual accepts a match. At stream EOF,
+unmarked build rows are emitted once with NULLs for the absent side. Lowering
+chooses this path when the preserved side is estimated no larger than the other
+input, or when a residual or runtime filter requires it. Building first delays
+the probe input but avoids retaining and hashing it; other outer joins keep
+the symmetric path. FULL joins reject residuals. See [join.md](join.md).
 
 ```
 SELECT big.c, u.d FROM big, u WHERE big.a = u.a;   -- threaded, 4 scan tasks
