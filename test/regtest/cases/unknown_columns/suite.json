@@ -32,6 +32,7 @@
     "in_mark_join.sql": {"execute": false},
     "exists_or.sql": {"execute": false},
     "control_scalar_in_mark.sql": {"order": "unordered"},
-    "control_exists_or.sql": {"order": "unordered"}
+    "control_exists_or.sql": {"order": "unordered"},
+    "control_derived_table_collision.sql": {"order": "unordered"}
   }
 }

@@ -18,7 +18,6 @@
 #include <qumir/error.h>
 #include <qumir/parser/type.h>
 
-#include <stdexcept>
 #include <string>
 #include <unordered_set>
 
@@ -67,12 +66,7 @@ TTypePtr UnifyUnionColumn(const TTypePtr& a, const TTypePtr& b) {
 void RequireInputColumns(const TOperatorPtr& op) {
     std::unordered_set<std::string> available;
     for (const auto& input : op->Inputs()) {
-        auto&& schema = input->OutputColumns();
-        if (!schema) {
-            throw std::runtime_error(
-                std::string(op->RelName()) + " typing: an input has no schema");
-        }
-        for (const auto& [name, _] : schema->Fields) {
+        for (const auto& [name, _] : input->OutputColumns()->Fields) {
             available.insert(name);
         }
     }
@@ -118,19 +112,34 @@ void ResolveProjectionSortKeys(
     }
 }
 
+// Types the subtree bottom-up and returns whether all of it is typed. A join
+// whose sides output the same column name, as two unaliased derived tables can,
+// stays untyped: column pruning may still drop the colliding columns, and building
+// the execution plan reports the collision otherwise. The operators above such a
+// join are typed against incomplete schemas, so their references are not checked
+// until then.
+bool AnnotateSubtree(
+    const TOperatorPtr& root,
+    const NKernel::TAnnotationContext& context)
+{
+    bool typed = true;
+    for (const auto& input : root->Inputs()) {
+        typed = AnnotateSubtree(input, context) && typed;
+    }
+    if (typed) {
+        RequireInputColumns(root);
+    }
+    AnnotateOperatorType(root, context);
+    return typed && root->OutputColumns();
+}
+
 } // namespace
 
 void AnnotateTypes(
     const TOperatorPtr& root,
     const NKernel::TAnnotationContext& context)
 {
-    // Bottom-up: children first.
-    for (const auto& input : root->Inputs()) {
-        AnnotateTypes(input, context);
-    }
-
-    RequireInputColumns(root);
-    AnnotateOperatorType(root, context);
+    AnnotateSubtree(root, context);
 }
 
 void AnnotateOperatorType(
@@ -313,12 +322,9 @@ void AnnotateOperatorType(
         auto leftSchema = join->Left()->OutputColumns();
         auto rightSchema = join->Right()->OutputColumns();
         auto output = ComputeJoinOutputType(leftSchema, rightSchema, join->JoinType());
-        if (!output) {
-            throw output.error();
-        }
         root->Type = std::make_shared<TFunctionType>(
             std::vector<TTypePtr>{leftSchema, rightSchema},
-            *output);
+            output ? *output : nullptr);
         return;
     }
 
