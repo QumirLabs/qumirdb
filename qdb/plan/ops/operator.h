@@ -1,7 +1,6 @@
 #pragma once
 
 #include <qdb/io/io.h>
-#include <qdb/plan/passes/unbound_vars.h>
 
 #include <qumir/parser/ast.h>
 #include <qumir/parser/type.h>
@@ -26,16 +25,6 @@ struct TColumnReference {
     std::string Name;
     std::shared_ptr<NQumir::NAst::TIdentExpr> Ident;
 };
-
-// Appends a reference for each free identifier of `expr`, in AST order.
-inline void AppendColumnReferences(
-    std::vector<TColumnReference>& references,
-    const NQumir::NAst::TExprPtr& expr)
-{
-    for (auto& ident : FindUnboundIdents(expr)) {
-        references.push_back({.Name = ident->Name, .Ident = std::move(ident)});
-    }
-}
 
 struct TRuntimeFilterUseSpec {
     uint32_t Id = 0;

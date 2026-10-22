@@ -1,5 +1,7 @@
 #include <qdb/plan/passes/unbound_vars.h>
 
+#include <qdb/plan/ops/operator.h>
+
 namespace NQdb {
 
 namespace {
@@ -104,6 +106,15 @@ std::vector<std::shared_ptr<TIdentExpr>> FindUnboundIdents(const TExprPtr& expr)
     std::vector<std::shared_ptr<TIdentExpr>> result;
     Collect(expr, {}, result);
     return result;
+}
+
+void AppendColumnReferences(
+    std::vector<TColumnReference>& references,
+    const TExprPtr& expr)
+{
+    for (auto& ident : FindUnboundIdents(expr)) {
+        references.push_back({.Name = ident->Name, .Ident = std::move(ident)});
+    }
 }
 
 } // namespace NQdb

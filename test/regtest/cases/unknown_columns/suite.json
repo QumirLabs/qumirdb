@@ -21,6 +21,8 @@
     "window_partition_key.sql": {"execute": false},
     "window_order_key.sql": {"execute": false},
     "window_argument.sql": {"execute": false},
+    "window_first_reference.sql": {"execute": false},
+    "ambiguous_self_join.sql": {"execute": false},
     "cte.sql": {"execute": false},
     "union_branch.sql": {"execute": false},
     "in_subquery.sql": {"execute": false},

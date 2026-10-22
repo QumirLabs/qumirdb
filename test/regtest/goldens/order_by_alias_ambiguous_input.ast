@@ -1,0 +1,20 @@
+(query
+  (select
+    (select-list
+      (item as a
+        b
+      )
+      (item as a
+        c
+      )
+    )
+    (from
+      (table t)
+    )
+  )
+  (order-by
+    (order asc
+      (+ a 0)
+    )
+  )
+)

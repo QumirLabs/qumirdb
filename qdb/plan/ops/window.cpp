@@ -1,5 +1,6 @@
 #include <qdb/plan/ops/window.h>
 
+#include <qdb/plan/passes/unbound_vars.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/plan/types/decimal.h>
 
@@ -143,14 +144,14 @@ TWindowOperator::TWindowOperator(TOperatorPtr input,
 
 std::vector<TColumnReference> TWindowOperator::ColumnReferences() const {
     std::vector<TColumnReference> references;
+    for (const auto& func : Functions_) {
+        AppendColumnReferences(references, func.Arg);
+    }
     for (const auto& key : PartitionKeys_) {
         references.push_back({.Name = key});
     }
     for (const auto& key : OrderKeys_) {
         references.push_back({.Name = key.Column});
-    }
-    for (const auto& func : Functions_) {
-        AppendColumnReferences(references, func.Arg);
     }
     return references;
 }
