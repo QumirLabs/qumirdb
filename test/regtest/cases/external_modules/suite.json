@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "fixtures": {
+    "pair": {"json": "tables/pair.json"},
+    "triple": {"json": "tables/triple.json"}
+  },
+  "tables": {"t": "pair"},
+  "variants": ["single", "threaded", "js"],
+  "cases": {
+    "rust_struct_result.sql": {"order": "unordered"},
+    "kumir_function.sql": {"order": "unordered"},
+    "kumir_aggregate_argument.sql": {"tables": {"t": "triple"}, "order": "ordered"}
+  }
+}

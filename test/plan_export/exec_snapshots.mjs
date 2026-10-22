@@ -1,19 +1,14 @@
 // Pins the exec plan that the exporter hands to the browser runtime, per
-// scheduler preset, for one shared case of each browser stage kind. Every
-// exported plan also runs in the browser against the case's result golden.
+// scheduler preset, for one shared case of each browser stage kind. Results
+// are test_reg.mjs's job: it runs these cases with the single preset that the
+// workbench uses for browser execution.
 
 import assert from 'node:assert/strict';
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 
-import {
-  SCHEDULER_PRESETS,
-  browserExec,
-  checkCase,
-  exportCase,
-  sharedCase,
-} from '../regtest_lib.mjs';
+import { SCHEDULER_PRESETS, browserExec, exportCase, sharedCase } from '../regtest_lib.mjs';
 
 const CASES = [
   'filter_project',
@@ -110,7 +105,6 @@ async function checkSnapshot(context, name, mode) {
     assert.deepEqual(exported.bundle.graphs.physical, repeated.bundle.graphs.physical,
       'physical graph changed across exporter processes');
   }
-  await checkCase(test, await exportCase(test, context.qdb, { options: SCHEDULER_PRESETS[mode] }), context.runtime);
   // Canonize only a snapshot that passed the same checks as the normal run.
   if (context.canonize) {
     let current = null;

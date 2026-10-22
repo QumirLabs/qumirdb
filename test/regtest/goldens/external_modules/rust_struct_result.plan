@@ -1,0 +1,2 @@
+project (col0) (rows≈2 cost≈50)
+└─ source t AS t (rows≈2 cost≈16)

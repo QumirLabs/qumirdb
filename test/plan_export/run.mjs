@@ -1,8 +1,8 @@
 // Browser-only contracts of `qdb --plan-export` and the WASM runtime. SQL
 // results are checked by test/test_reg.mjs on the shared regression suites;
 // these modules cover what a result golden cannot: the exported exec plan,
-// input ABIs, instrumentation, the kernel cache, exporter diagnostics and
-// external modules. They reuse shared cases for their queries and data.
+// input ABIs, instrumentation, the kernel cache and exporter diagnostics.
+// They reuse shared cases for their queries and data.
 //
 // usage: node test/plan_export/run.mjs <qdb> <browser_runtime.js> <regtest root>
 //            <exec goldens> [--canonize] [--xml <junit.xml>]
@@ -15,7 +15,6 @@ import { errorText, runTests, takeXmlOption } from '../js_harness.mjs';
 import * as bitmapAbi from './bitmap_abi.mjs';
 import * as execSnapshots from './exec_snapshots.mjs';
 import * as exporterContract from './exporter_contract.mjs';
-import * as externalModules from './external_modules.mjs';
 import * as instrumentation from './instrumentation.mjs';
 import * as wasmCache from './wasm_cache.mjs';
 
@@ -43,7 +42,7 @@ async function main() {
     runtime: await import(pathToFileURL(runtimeFile).href),
     ozType: await import(pathToFileURL(path.join(path.dirname(runtimeFile), 'oz_type.js')).href),
   };
-  const tests = [execSnapshots, exporterContract, bitmapAbi, instrumentation, wasmCache, externalModules]
+  const tests = [execSnapshots, exporterContract, bitmapAbi, instrumentation, wasmCache]
     .flatMap(module => module.tests(context));
   return runTests('plan-export-integration', tests, { xml });
 }
