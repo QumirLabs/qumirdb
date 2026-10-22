@@ -1,0 +1,9 @@
+{
+  "schema": "<struct (id i32) (q bool) (z bool)>",
+  "rows": [
+    [1, true, true],
+    [2, false, true],
+    [3, true, true],
+    [4, false, true]
+  ]
+}

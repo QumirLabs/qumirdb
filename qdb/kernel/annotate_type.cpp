@@ -651,6 +651,28 @@ TTypePtr BinaryValueType(TOperator op, const TExprPtr& le, const TExprPtr& re,
     return CommonNumeric(vl, vr);
 }
 
+// SQL `%` on exact numbers and decimal `/` have no value for a zero divisor, and unlike
+// DOUBLE (NaN, infinity) their result types cannot stand for one. They yield NULL, as in
+// DuckDB. PostgreSQL raises "division by zero"; qdb has no runtime error channel yet.
+bool IsNullOnZeroDivisor(TOperator op, const TTypePtr& result) {
+    const TTypePtr value = ValueType(result);
+    if (DecimalSpecOfValueType(value)) {
+        return op == "%" || op == "/";
+    }
+    return op == "%" && IsInt(UnwrapNamedType(value));
+}
+
+// Anything but a non-zero numeric literal can be a zero divisor.
+bool MayBeZero(const TExprPtr& divisor) {
+    auto n = TMaybeNode<TNumberExpr>(divisor);
+    if (!n) {
+        return true;
+    }
+    return n.Cast()->IsFloat()
+        ? n.Cast()->FloatValue == 0.0
+        : n.Cast()->IntValue == 0;
+}
+
 // Lightweight, rule-based SQL type inference - no AST rewrite and no per-node qumirdb.oz
 // compose. Types operators/calls "as if" ExpandNullable had run: a nullable operand makes
 // the result Nullable[R]. Extern-call returns come from the resolver (ExternReturnType).
@@ -677,8 +699,12 @@ TTypePtr InferType(const TExprPtr& e, const TStructType& schema) {
         auto node =bin.Cast();
         TTypePtr lt = InferType(node->Left, schema);
         TTypePtr rt = InferType(node->Right, schema);
-        return Propagate({lt, rt},
-            BinaryValueType(node->Operator, node->Left, node->Right, lt, rt));
+        TTypePtr R = BinaryValueType(node->Operator, node->Left, node->Right, lt, rt);
+        TTypePtr type = Propagate({lt, rt}, R);
+        if (type && IsNullOnZeroDivisor(node->Operator, R) && MayBeZero(node->Right)) {
+            return std::make_shared<TNullable>(UnwrapNullableType(type));
+        }
+        return type;
     }
     if (auto un = TMaybeNode<TUnaryExpr>(e)) {
         auto node =un.Cast();
@@ -867,6 +893,27 @@ TExprPtr Build3VL(bool isAnd, const TExprPtr& a, const TTypePtr& at,
             std::make_shared<TIfExpr>(loc, bothValid, nFalse, nNull));
     }
     stmts.push_back(result);
+    return std::make_shared<TBlockExpr>(loc, std::move(stmts));
+}
+
+// NULLIF(divisor, 0) as Nullable[value]: a zero divisor becomes one more NULL operand of
+// the division, so the null-strict guard skips computing it.
+TExprPtr NullIfZero(const TExprPtr& divisor, const TTypePtr& type, uint64_t& counter,
+    TLocation loc)
+{
+    std::vector<TExprPtr> stmts;
+    TExprPtr ref = BindTemp(divisor, stmts, counter, loc);
+    auto nq = NullableQ(ValueType(type));
+    TExprPtr nonZero = Bin("!=", OpValue(ref, type, loc),
+        std::make_shared<TNumberExpr>(loc, int64_t{0}), loc);
+    TExprPtr kept = CloneExpr(ref);
+    if (IsNullableType(type)) {
+        nonZero = Bin("&&", FieldOf(ref, "Valid", loc), nonZero, loc);
+    } else {
+        kept = std::make_shared<TCastExpr>(loc, kept, nq);
+    }
+    stmts.push_back(std::make_shared<TIfExpr>(loc, nonZero, kept,
+        std::make_shared<TCastExpr>(loc, MakeNull(loc), nq)));
     return std::make_shared<TBlockExpr>(loc, std::move(stmts));
 }
 
@@ -1121,13 +1168,26 @@ TTypePtr Expand(TExprPtr& e, const TStructType& inputType, uint64_t& counter) {
         TTypePtr rt = Expand(node->Right, inputType, counter);
         TOperator op = node->Operator;
         const bool lNull = !lt || IsNullableType(lt);
-        const bool rNull = !rt || IsNullableType(rt);
+        bool rNull = !rt || IsNullableType(rt);
         if (IsLogical(op)) {
             if (!lNull && !rNull) {
                 return std::make_shared<TBoolType>();
             }
             e = Build3VL(op == "&&", node->Left, lt, node->Right, rt, counter, node->Location);
             return std::make_shared<TNullable>(std::make_shared<TBoolType>());
+        }
+        if (lt && rt && MayBeZero(node->Right)) {
+            TTypePtr R = BinaryValueType(op, node->Left, node->Right, lt, rt);
+            if (IsNullOnZeroDivisor(op, R)) {
+                if (TMaybeNode<TNumberExpr>(node->Right)) {
+                    // `x % 0`: NULL on every row.
+                    e = std::make_shared<TCastExpr>(node->Location, MakeNull(node->Location), NullableQ(R));
+                    return std::make_shared<TNullable>(R);
+                }
+                node->Right = NullIfZero(node->Right, rt, counter, node->Location);
+                rt = std::make_shared<TNullable>(ValueType(rt));
+                rNull = true;
+            }
         }
         if (!lNull && !rNull) {
             return BinaryValueType(op, node->Left, node->Right, lt, rt);
@@ -1787,8 +1847,8 @@ bool ContainsNull(const TExprPtr& e) {
 // Constructs Expand always rewrites regardless of nullability - the fast path must not
 // skip Expand when one is present: coalesce -> if-chain, qdb_in_list -> typed
 // comparisons, strcat -> qdb_string_concat, qdb_string_view_sql_like -> a constant-pattern
-// fast path, and a cast to a nullable target -> nullable_from_value (the raw planner
-// TNullable won't compile).
+// fast path, a cast to a nullable target -> nullable_from_value (the raw planner
+// TNullable won't compile), and a division by what may be zero -> a NULLIF guard.
 bool ContainsMustExpandCall(const TExprPtr& e) {
     if (!e) return false;
     if (auto call = TMaybeNode<TCallExpr>(e)) {
@@ -1801,6 +1861,12 @@ bool ContainsMustExpandCall(const TExprPtr& e) {
     }
     if (auto cast = TMaybeNode<TCastExpr>(e)) {
         if (IsNullableType(cast.Cast()->Type)) return true;
+    }
+    if (auto bin = TMaybeNode<TBinaryExpr>(e)) {
+        const TOperator op = bin.Cast()->Operator;
+        if ((op == "%" || op == "/") && MayBeZero(bin.Cast()->Right)) {
+            return true;
+        }
     }
     for (const auto& child : e->Children()) {
         if (ContainsMustExpandCall(child)) return true;
