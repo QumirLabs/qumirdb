@@ -101,6 +101,12 @@ Residual evaluation reads retained rows or the current transient probe batch.
 Output involving the transient batch is materialized before that batch is
 released; the join need not retain it just to evaluate the residual.
 
+A residual may build strings, as in `a.s || 'x' = b.s`. They go to the string
+scratch arena of the kernel call, as in a filter kernel. Only the truth of a
+pair outlives its evaluation, so the residual releases its strings before it
+returns. One call may test many candidate pairs, and its scratch stays the size
+of one pair.
+
 ## Scheduling
 
 `TInnerJoinProcessor` has three inner-join modes:

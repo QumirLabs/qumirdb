@@ -243,7 +243,8 @@ using TJoinMaterialize = std::function<int64_t(
 // baked into the generated jt_dispatch function.
 struct TJoinKernels {
     // jt_dispatch(left, right, batch, batchIdx, pairs, leftStore, rightStore,
-    //             leftKeyColumns, rightKeyColumns, arg, op) -> bool.
+    //             arena, leftKeyColumns, rightKeyColumns, arg, op) -> bool.
+    // The closure binds the key columns and a string arena for the call.
     // Init uses arg as initial capacity. Residual SEMI/ANTI Finalize uses arg
     // as left-store batch count so the kernel can scan selected left rows.
     // UpdateRight/Finalize are specialized by the compiled join type, so host
@@ -274,7 +275,8 @@ using TCrossJoinDispatch = std::function<bool(
 
 struct TCrossJoinKernels {
     // xj_dispatch(leftStore, batchIdx, rightStore, rightBatchCount,
-    //             rightMatched, pairs, op) -> bool.
+    //             rightMatched, pairs, arena, op) -> bool, the closure
+    //             binding a string arena for the call.
     // Emit appends the canonical row-id pairs of left batch `batchIdx` against
     // the buffered right store, as the compiled join type emits them. RIGHT and
     // FULL joins also flag the matched right rows in rightMatched, one byte per

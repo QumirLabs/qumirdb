@@ -212,7 +212,7 @@ NQumir::NAst::TExprPtr GenJoinMaterializeAst(
 
 // Generates the single external join entrypoint:
 //   jt_dispatch(left, right, batch, batch_idx, pairs, left_store, right_store,
-//               left_key_columns, right_key_columns, arg, op) -> bool
+//               arena, left_key_columns, right_key_columns, arg, op) -> bool
 // It dispatches init/update/stream/finalize/destroy to the internal generated
 // and library helpers. Join type and key layout are compile-time constants.
 //
@@ -220,6 +220,7 @@ NQumir::NAst::TExprPtr GenJoinMaterializeAst(
 // set. A marker needs the complete right set, so StreamLeft and Finalize may
 // run only after the last UpdateRight. StreamRight, probing right rows against
 // stored left rows without keeping them, is unsupported and returns false.
+// arena is the TStringArena the residual builds its strings in.
 NQumir::NAst::TExprPtr GenJoinDispatchAst(
     const TJoinKeyDescriptor& key,
     EJoinType type,
@@ -310,7 +311,7 @@ NQumir::NAst::TExprPtr GenRowJoinMaterializeAst(
 
 // Generates the nested-loop (keyless) join entrypoint:
 //   xj_dispatch(left_store, batch_idx, right_store, right_batch_count,
-//               right_matched, pairs, op) -> bool
+//               right_matched, pairs, arena, op) -> bool
 // It passes the emission flags of `type` (Inner, Left, Right, Full,
 // LeftSemi or LeftAnti) to the join_cross.oz helpers as constants.
 NQumir::NAst::TExprPtr GenCrossJoinDispatchAst(

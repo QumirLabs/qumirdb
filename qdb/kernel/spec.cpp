@@ -441,7 +441,7 @@ TOperatorKernelSpec BuildJoinKernelSpec(
         .JoinKeys = std::move(joinKeys),
         .JoinType = type,
         .Entrypoints = {
-            {.Name = "jt_dispatch", .Abi = "bool(ptr HashTable, ptr HashTable, ptr TRowSet, i64, ptr PairBuffer, ptr TRowSet, ptr TRowSet, ptr i64, ptr i64, i64, i64)"},
+            {.Name = "jt_dispatch", .Abi = "bool(ptr HashTable, ptr HashTable, ptr TRowSet, i64, ptr PairBuffer, ptr TRowSet, ptr TRowSet, ptr i8, ptr i64, ptr i64, i64, i64)"},
             {.Name = "jt_materialize", .Abi = "i64(ptr PairBuffer, ptr TRowSet, ptr TRowSet, ptr TRowSet, ptr TRowSet, i64, i64, ptr TRowSet)"},
         },
         .SourceModules = {"qumirdb"},
@@ -480,7 +480,7 @@ TOperatorKernelSpec BuildCrossJoinKernelSpec(
         .Expressions = std::move(expressions),
         .JoinType = type,
         .Entrypoints = {
-            {.Name = "xj_dispatch", .Abi = "bool(ptr TRowSet, i64, ptr TRowSet, i64, ptr u8, ptr PairBuffer, i64)"},
+            {.Name = "xj_dispatch", .Abi = "bool(ptr TRowSet, i64, ptr TRowSet, i64, ptr u8, ptr PairBuffer, ptr i8, i64)"},
             {.Name = "jt_materialize", .Abi = "i64(ptr PairBuffer, ptr TRowSet, ptr TRowSet, ptr TRowSet, ptr TRowSet, i64, i64, ptr TRowSet)"},
         },
         .SourceModules = {"qumirdb"},
