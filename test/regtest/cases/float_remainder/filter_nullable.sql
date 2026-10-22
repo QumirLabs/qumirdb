@@ -1,0 +1,1 @@
+SELECT id FROM f WHERE x % 2 > 1 ORDER BY id;

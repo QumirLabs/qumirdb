@@ -1,0 +1,9 @@
+{
+  "schema": "<struct (id i64) (a <named Nullable [f64]>) (b <named Nullable [f64]>) (c <named Nullable [f64]>)>",
+  "rows": [
+    ["1", 1.5, 1.5, 2],
+    ["2", -1.5, -1.5, 2],
+    ["3", {"$float":"nan"}, 1.5, 0],
+    ["4", null, null, null]
+  ]
+}

@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -22,6 +23,7 @@
 namespace NQdb::NKernel {
 
 using namespace NQumir::NAst;
+using namespace NQumir::NAst::NLiterals;
 
 namespace {
 
@@ -518,7 +520,35 @@ TDecimalSpec DecimalDivisionSpec(const TDecimalSpec& left, const TDecimalSpec& r
     };
 }
 
-TTypePtr DecimalBinaryValueType(TOperator op, const TTypePtr& vl, const TTypePtr& vr) {
+// An integer operand of a decimal remainder counts as DECIMAL(w, 0), w being the digits
+// of its SQL integer type (INTEGER is DECIMAL(10, 0)). An integer literal is INTEGER when
+// its value fits, as SQL types integer literals.
+TDecimalSpec IntegerDecimalSpec(const TExprPtr& e, const TTypePtr& type) {
+    int bits = TMaybeType<TIntegerType>(type).Cast()->BitWidth();
+    if (auto n = TMaybeNode<TNumberExpr>(e); n && !n.Cast()->IsFloat()) {
+        const int64_t value = n.Cast()->IntValue;
+        const bool fitsInteger = value >= std::numeric_limits<int32_t>::min()
+            && value <= std::numeric_limits<int32_t>::max();
+        bits = fitsInteger
+            ? 32
+            : 64;
+    }
+    switch (bits) {
+        case 8:
+            return {.Precision = 3, .Scale = 0};
+        case 16:
+            return {.Precision = 5, .Scale = 0};
+        case 32:
+            return {.Precision = 10, .Scale = 0};
+        case 64:
+            return {.Precision = 19, .Scale = 0};
+    }
+    return {.Precision = MaxDecimalPrecision, .Scale = 0};
+}
+
+TTypePtr DecimalBinaryValueType(TOperator op, const TExprPtr& le, const TExprPtr& re,
+    const TTypePtr& vl, const TTypePtr& vr)
+{
     auto dl = DecimalSpecOfValueType(vl);
     auto dr = DecimalSpecOfValueType(vr);
     if (!dl && !dr) {
@@ -537,7 +567,18 @@ TTypePtr DecimalBinaryValueType(TOperator op, const TTypePtr& vl, const TTypePtr
         ThrowDecimalUnsupported(op, "only decimal / decimal and decimal / integer are implemented in qdb v1");
     }
     if (op == "%") {
-        ThrowDecimalUnsupported(op, "remainder on decimal values is not implemented");
+        if ((!dl && !IsInt(vl)) || (!dr && !IsInt(vr))) {
+            ThrowDecimalUnsupported(op, "only decimal % decimal and decimal % integer are implemented");
+        }
+        // DuckDB's rule: the common scale and the larger integer part of the operands.
+        const TDecimalSpec l = dl ? *dl : IntegerDecimalSpec(le, vl);
+        const TDecimalSpec r = dr ? *dr : IntegerDecimalSpec(re, vr);
+        const int32_t scale = std::max(l.Scale, r.Scale);
+        const int32_t intDigits = std::max(l.Precision - l.Scale, r.Precision - r.Scale);
+        return MakeDecimalType({
+            .Precision = std::min(MaxDecimalPrecision, intDigits + scale),
+            .Scale = scale,
+        });
     }
     if (op == "*" && dl && dr) {
         ThrowDecimalUnsupported(op, "decimal * decimal is intentionally absent in v1");
@@ -635,7 +676,7 @@ TTypePtr BinaryValueType(TOperator op, const TExprPtr& le, const TExprPtr& re,
     }
     TTypePtr vl = UnwrapNamedType(ValueType(lt));
     TTypePtr vr = UnwrapNamedType(ValueType(rt));
-    if (auto decimal = DecimalBinaryValueType(op, ValueType(lt), ValueType(rt))) {
+    if (auto decimal = DecimalBinaryValueType(op, le, re, ValueType(lt), ValueType(rt))) {
         return decimal;
     }
     if (op == "+" && (TMaybeType<TStringType>(vl) || TMaybeType<TStringType>(vr))) {
@@ -1521,7 +1562,7 @@ TTypePtr ExpandDecimalNode(TExprPtr& e, const TStructType& inputType, TTypeEnv& 
         if (!resultDecimal) {
             return Propagate({lt, rt}, result);
         }
-        if (node->Operator == "+" || node->Operator == "-") {
+        if (node->Operator == "+"_op || node->Operator == "-"_op || node->Operator == "%"_op) {
             const int32_t scale = DecimalCommonScale(lt, rt, *resultDecimal);
             node->Left = DecimalValueAtScale(node->Left, lt, scale, node->Location);
             node->Right = DecimalValueAtScale(node->Right, rt, scale, node->Location);

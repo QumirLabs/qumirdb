@@ -207,6 +207,29 @@ TEST(ProjectType, DecimalArithmeticAnnotates) {
     EXPECT_THROW(AnnotateExprType(Parse("(* amount tax)"), sc), NQumir::TError);
 }
 
+TEST(ProjectType, DecimalRemainderFollowsDuckDB) {
+    TStructType sc({
+        {"amount", std::make_shared<NQdb::TDecimal>(10, 2)},
+        {"tax", std::make_shared<NQdb::TDecimal>(5, 3)},
+        {"wide", std::make_shared<NQdb::TDecimal>(38, 2)},
+        {"k", std::make_shared<TIntegerType>(TIntegerType::I32)},
+        {"qty", std::make_shared<TIntegerType>()},
+        {"p", std::make_shared<TFloatType>()},
+    });
+
+    // Common scale; the integer part of the wider operand. INTEGER is DECIMAL(10, 0),
+    // BIGINT DECIMAL(19, 0), and an integer literal that fits is INTEGER.
+    EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(% amount k)"), sc), 12, 2));
+    EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(% amount 2)"), sc), 12, 2));
+    EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(% 7 amount)"), sc), 12, 2));
+    EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(% amount qty)"), sc), 21, 2));
+    EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(% amount 3000000000)"), sc), 21, 2));
+    EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(% amount amount)"), sc), 10, 2));
+    EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(% amount tax)"), sc), 11, 3));
+    EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(% wide k)"), sc), 38, 2));
+    EXPECT_THROW(AnnotateExprType(Parse("(% amount p)"), sc), NQumir::TError);
+}
+
 TEST(ProjectType, ExpandKernelExprErasesDecimalCasts) {
     TStructType sc({
         {"amount", std::make_shared<NQdb::TDecimal>(7, 2)},
