@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "fixtures": {
+    "t": {"json": "tables/t.json"}
+  },
+  "tables": {"t": "t"},
+  "variants": ["single", "threaded", "js"],
+  "cases": {
+    "null_semantics.sql": {"order": "unordered"}
+  }
+}

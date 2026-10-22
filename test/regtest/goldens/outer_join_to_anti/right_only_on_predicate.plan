@@ -1,0 +1,5 @@
+project (value) (rows≈1 cost≈4.2K)
+└─ join left_anti [s.key = r.key] (rows≈1 cost≈4.2K)
+   ├─ source sales AS s (rows≈2 cost≈32)
+   └─ filter (> |r.value| 1000) (rows≈1 cost≈32)
+      └─ source returns AS r row-groups (> |r.value| 1000) (rows≈1 cost≈16)

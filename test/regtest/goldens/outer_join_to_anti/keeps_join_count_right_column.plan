@@ -1,0 +1,7 @@
+project (n) (rows≈1 cost≈4.4K)
+└─ aggregate keys=[__group__] aggs=[count_0=count] (rows≈1 cost≈4.4K)
+   └─ project (r.key, __group__) (rows≈2 cost≈4.4K)
+      └─ filter (call qdb_is_null |r.key|) (rows≈2 cost≈4.3K)
+         └─ join left [s.key = r.key] (rows≈4 cost≈4.3K)
+            ├─ source sales AS s (rows≈4 cost≈32)
+            └─ source returns AS r (rows≈2 cost≈16)

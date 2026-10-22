@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "fixtures": {
+    "f": {"json": "tables/f.json"},
+    "i": {"json": "tables/i.json"},
+    "n": {"json": "tables/n.json"}
+  },
+  "tables": {"f": "f", "i": "i", "n": "n"},
+  "variants": ["single", "threaded", "js"],
+  "cases": {
+    "global_float.sql": {"order": "ordered"},
+    "global_integer.sql": {"order": "ordered"},
+    "nullable_groups.sql": {"order": "ordered"}
+  }
+}

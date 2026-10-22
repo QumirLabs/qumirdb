@@ -1,0 +1,4 @@
+project (value) (rows≈3 cost≈4.2K)
+└─ join left_anti [s.key = r.key] (rows≈3 cost≈4.2K)
+   ├─ source sales AS s (rows≈3 cost≈48)
+   └─ source returns AS r (rows≈0 cost≈0)

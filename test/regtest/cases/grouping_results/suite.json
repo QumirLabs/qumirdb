@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "fixtures": {
+    "g": {"json": "tables/g.json"},
+    "w": {"json": "tables/w.json"}
+  },
+  "tables": {"g": "g", "w": "w"},
+  "variants": ["single", "threaded", "js"],
+  "cases": {
+    "rollup_grouping_columns.sql": {"order": "unordered"},
+    "rollup_computed_aggregate_arguments.sql": {"order": "unordered"},
+    "duplicate_grouping_sets.sql": {"order": "unordered"},
+    "grouping_in_window_expression.sql": {"order": "unordered"}
+  }
+}

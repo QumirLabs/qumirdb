@@ -1,0 +1,3 @@
+project (value) (rows≈2 cost≈144)
+└─ filter (! (== |t.key| |t.key|)) (rows≈2 cost≈128)
+   └─ source t AS t row-groups (! (== |t.key| |t.key|)) (rows≈4 cost≈64)

@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "schema": "<struct (category string) (class i64) (value i64)>",
+  "rows": [
+    ["a", "10", "5"],
+    ["a", "20", "7"],
+    ["b", "10", "11"],
+    ["b", "20", "13"]
+  ]
+}

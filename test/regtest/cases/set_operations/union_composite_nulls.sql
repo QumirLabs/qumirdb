@@ -1,0 +1,1 @@
+SELECT a, b FROM lc UNION SELECT a, b FROM rc;

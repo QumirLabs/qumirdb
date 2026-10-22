@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "schema": "<struct (d <named Nullable [i32]>)>",
+  "rows": [
+    [10441],
+    [10442],
+    [10443],
+    [10444],
+    [null]
+  ]
+}

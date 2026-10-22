@@ -1,0 +1,2 @@
+project (value) (rows≈4 cost≈64)
+└─ source t AS t (rows≈4 cost≈32)

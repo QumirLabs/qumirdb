@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "fixtures": {
+    "l": {"json": "tables/l.json"},
+    "r": {"json": "tables/r.json"},
+    "ln": {"json": "tables/ln.json"},
+    "rn": {"json": "tables/rn.json"},
+    "lc": {"json": "tables/lc.json"},
+    "rc": {"json": "tables/rc.json"}
+  },
+  "tables": {"l": "l", "r": "r", "ln": "ln", "rn": "rn", "lc": "lc", "rc": "rc"},
+  "variants": ["single", "threaded", "js"],
+  "cases": {
+    "union_all.sql": {"order": "unordered"},
+    "union.sql": {"order": "unordered"},
+    "union_nulls.sql": {"order": "unordered"},
+    "intersect.sql": {"order": "unordered"},
+    "intersect_nulls.sql": {"order": "unordered"},
+    "except.sql": {"order": "unordered"},
+    "except_nulls.sql": {"order": "unordered"},
+    "intersect_composite_nulls.sql": {"order": "unordered"},
+    "except_composite_nulls.sql": {"order": "unordered"},
+    "union_composite_nulls.sql": {"order": "unordered"}
+  }
+}
