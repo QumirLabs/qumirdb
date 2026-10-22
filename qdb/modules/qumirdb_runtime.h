@@ -94,6 +94,10 @@ qdb_string_view qdb_string_concat(void* arena, qdb_string_view left, qdb_string_
 // join residual, once the strings of the current row are dead.
 void qdb_string_arena_reset(void* arena);
 
+// Bytes for a string an oz-lang kernel function produces (upper/lower), taken
+// from the TStringArena `arena` like the bytes of qdb_string_concat.
+uint8_t* qdb_string_arena_alloc(void* arena, int64_t size);
+
 // regex is compiled once while the query is lowered. arena owns bytes produced
 // by replacements until the current kernel invocation has consumed them.
 qdb_string_view qdb_regexp_replace(

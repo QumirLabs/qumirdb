@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "fixtures": {
+    "words": {
+      "json": "tables/words.json",
+      "parquet": {
+        "row_group_rows": 5
+      }
+    },
+    "names": {
+      "json": "tables/names.json"
+    }
+  },
+  "tables": {
+    "t": "words",
+    "n": "names"
+  },
+  "variants": [
+    "single",
+    "threaded",
+    "js"
+  ],
+  "cases": {
+    "project.sql": {
+      "order": "ordered"
+    },
+    "filter.sql": {
+      "order": "ordered"
+    },
+    "group_by.sql": {
+      "order": "ordered"
+    },
+    "join.sql": {
+      "order": "ordered"
+    },
+    "having.sql": {
+      "order": "ordered"
+    },
+    "nested.sql": {
+      "order": "ordered"
+    }
+  }
+}

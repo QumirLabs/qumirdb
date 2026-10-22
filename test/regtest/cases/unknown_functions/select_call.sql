@@ -1,1 +1,1 @@
-SELECT k, upper(s) AS u FROM sa;
+SELECT k, initcap(s) AS u FROM sa;

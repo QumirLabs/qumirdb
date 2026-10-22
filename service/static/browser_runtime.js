@@ -1584,6 +1584,7 @@ function createQdbEnv(getMemory, holder) {
       }
       allocations.length = 0;
     },
+    qdb_string_arena_alloc: (_arena, size) => toWasmPtr(allocStringScratch(size)),
     qdb_regexp_replace: regexpReplace,
     qdb_date_year: dateYear,
     qdb_sql_date: sqlDate,
