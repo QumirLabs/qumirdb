@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "fixtures": {
+    "pairs": {"json": "tables/pairs.json", "parquet": {"row_group_rows": 2}},
+    "groups": {"json": "tables/groups.json"},
+    "matches": {"json": "tables/matches.json"},
+    "bounds": {"json": "tables/bounds.json"},
+    "repeated": {"json": "tables/repeated.json", "parquet": {"row_group_rows": 16}},
+    "sequence": {"json": "tables/sequence.json", "parquet": {"row_group_rows": 4}},
+    "sequence_rows": {"json": "tables/sequence.json", "parquet": {"row_group_rows": 1}},
+    "ranked": {"json": "tables/ranked.json", "parquet": {"row_group_rows": 3}},
+    "urls": {"json": "tables/urls.json"},
+    "labels": {"json": "tables/labels.json"},
+    "words": {"json": "tables/words.json", "parquet": {"row_group_rows": 4}},
+    "outer_short": {"json": "tables/outer_short.json", "parquet": {"row_group_rows": 2}},
+    "outer_long": {"json": "tables/outer_long.json", "parquet": {"row_group_rows": 2}}
+  },
+  "tables": {"t": "pairs", "l": "pairs", "r": "matches"},
+  "variants": ["single", "threaded", "js"],
+  "cases": {
+    "filter_project.sql": {"order": "unordered"},
+    "filter_strings.sql": {"tables": {"t": "labels"}, "order": "unordered"},
+    "aggregate.sql": {"tables": {"t": "groups"}, "order": "unordered"},
+    "string_min_max.sql": {"tables": {"t": "words"}, "order": "unordered"},
+    "join.sql": {"order": "unordered"},
+    "cross_join.sql": {"tables": {"r": "bounds"}, "order": "unordered"},
+    "semi_join.sql": {"tables": {"l": "repeated"}, "order": "unordered"},
+    "semi_join_residual.sql": {"order": "unordered"},
+    "left_outer_join.sql": {"tables": {"l": "outer_short", "r": "outer_long"}, "order": "unordered"},
+    "left_outer_residual.sql": {"tables": {"l": "outer_short", "r": "outer_long"}, "order": "unordered"},
+    "right_outer_join.sql": {"tables": {"l": "outer_short", "r": "outer_long"}, "order": "unordered"},
+    "right_outer_residual.sql": {"tables": {"l": "outer_short", "r": "outer_long"}, "order": "unordered"},
+    "nested_limit.sql": {"tables": {"t": "sequence_rows"}, "order": "ordered"},
+    "nested_limit_zero.sql": {"tables": {"t": "sequence_rows"}, "order": "ordered"},
+    "source_limit.sql": {"tables": {"t": "sequence"}, "variants": ["single", "js"], "order": "unordered"},
+    "top_sort.sql": {"tables": {"t": "ranked"}, "order": "ordered"},
+    "regexp_replace.sql": {"tables": {"t": "urls"}, "order": "ordered"}
+  }
+}

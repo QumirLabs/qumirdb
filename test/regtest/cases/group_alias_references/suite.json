@@ -4,7 +4,7 @@
     "t": {"json": "tables/t.json"}
   },
   "tables": {"t": "t"},
-  "variants": ["single", "threaded"],
+  "variants": ["single", "threaded", "js"],
   "cases": {
     "grouping_rollup.sql": {"order": "ordered"},
     "grouping_rollup_merged_key.sql": {"order": "ordered"},

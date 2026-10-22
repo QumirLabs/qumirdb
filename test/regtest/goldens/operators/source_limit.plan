@@ -1,0 +1,3 @@
+project (k)
+└─ limit
+   └─ source t AS t (rows≈12 cost≈96)

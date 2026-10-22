@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "schema": "<struct (url string)>",
+  "rows": [
+    ["https://www.example.com/a"],
+    ["http://openai.com/x"],
+    ["not-a-url"]
+  ]
+}

@@ -38,6 +38,9 @@ goldens that `js` checks. `test_reg` validates `js` and does not execute it.
 List `js` only where the case passes in the browser; the browser runner fails a
 `js` case whose plan the exporter cannot run in the browser, and reports every
 executed case without `js` as skipped together with the list that excludes it.
+Today the browser exporter cannot run non-inner joins without equi-keys
+("browser keyless join type is not supported yet"); the `keyless_joins` suite
+and the cases that decorrelate into such joins leave out `js`.
 
 ## Browser runner
 

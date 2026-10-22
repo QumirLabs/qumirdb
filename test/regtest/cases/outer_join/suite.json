@@ -5,7 +5,7 @@
     "o": {"json": "tables/o.json", "parquet": {"row_group_rows": 4}}
   },
   "tables": {"c": "c", "o": "o"},
-  "variants": ["single", "threaded"],
+  "variants": ["single", "threaded", "js"],
   "cases": {
     "duplicates.sql": {"order": "ordered"},
     "null_keys.sql": {"order": "ordered"},

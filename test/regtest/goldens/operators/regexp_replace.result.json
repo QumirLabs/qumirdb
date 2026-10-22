@@ -1,0 +1,8 @@
+{
+  "schema": "<struct (domain string)>",
+  "rows": [
+    ["example.com"],
+    ["not-a-url"],
+    ["openai.com"]
+  ]
+}

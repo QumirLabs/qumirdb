@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "schema": "<struct (k i64) (v string)>",
+  "rows": [
+    ["1", "m"],
+    ["1", "alphabet"],
+    ["2", "z"],
+    ["2", ""],
+    ["1", "a"],
+    ["1", "zzzzzzzz"],
+    ["2", "aardvark"],
+    ["2", "yak"]
+  ]
+}

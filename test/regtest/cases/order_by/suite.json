@@ -5,7 +5,7 @@
     "empty": {"json": "tables/empty.json"}
   },
   "tables": {"t": "numbers"},
-  "variants": ["single", "threaded"],
+  "variants": ["single", "threaded", "js"],
   "cases": {
     "nulls_first.sql": {"order": "ordered"},
     "limit_offset.sql": {"order": "ordered"},
@@ -19,7 +19,7 @@
     "alias_window.sql": {"order": "ordered"},
     "alias_shadowed.sql": {"order": "ordered"},
     "alias_aggregated_scope.sql": {"order": "ordered"},
-    "alias_subquery.sql": {"order": "ordered"},
+    "alias_subquery.sql": {"variants": ["single", "threaded"], "order": "ordered"},
     "empty.sql": {
       "tables": {"t": "empty"},
       "order": "ordered"

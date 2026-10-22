@@ -5,7 +5,7 @@
     "s": {"json": "tables/s.json", "parquet": {"row_group_rows": 2}}
   },
   "tables": {"t": "t", "s": "s"},
-  "variants": ["single", "threaded"],
+  "variants": ["single", "threaded", "js"],
   "cases": {
     "where.sql": {"execute": false},
     "where_coalesce.sql": {"execute": false},

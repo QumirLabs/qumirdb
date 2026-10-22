@@ -8,7 +8,7 @@
     "t": "left",
     "u": "right"
   },
-  "variants": ["single", "threaded"],
+  "variants": ["single", "threaded", "js"],
   "cases": {
     "star_over_left_join.sql": {"order": "ordered"},
     "order_by_with_selected_subquery.sql": {"order": "ordered"},
