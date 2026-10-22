@@ -1,7 +1,7 @@
 top-sort [numwait desc, s_name asc] limit 100
 └─ project (s_name, numwait) (rows≈1 cost≈22.8K)
    └─ aggregate keys=[supplier.s_name] aggs=[count_0=count] (rows≈1 cost≈22.8K)
-      └─ join left_anti [orders.o_orderkey = l3.l_orderkey] residual (!= |l3.l_suppkey| |l1.l_suppkey|) (rows≈1 cost≈22.7K)
+      └─ join left_anti [l1.l_orderkey = l3.l_orderkey] residual (!= |l3.l_suppkey| |l1.l_suppkey|) (rows≈1 cost≈22.7K)
          ├─ join left_semi [orders.o_orderkey = l2.l_orderkey] residual (!= |l2.l_suppkey| |l1.l_suppkey|) (rows≈1 cost≈18.2K)
          │  ├─ join inner [l1.l_orderkey = orders.o_orderkey] (rows≈1 cost≈13.9K)
          │  │  ├─ join inner [supplier.s_suppkey = l1.l_suppkey] (rows≈1 cost≈9.3K)

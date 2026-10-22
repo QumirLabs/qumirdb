@@ -87,6 +87,10 @@ covers(cols, rightCols) → push to right
 otherwise               → residual on the join (+ DeriveSideFilter, below)
 ```
 
+An anti join preserves one input, so it keeps the conjuncts from above out of
+the pool and places its own conjuncts by the rule in
+[Preserved inputs](#preserved-inputs).
+
 ### Worked example
 
 ```
@@ -143,10 +147,38 @@ join left [c_custkey = o_custkey]
 - `WHERE` conjuncts from above are pushed only onto the **preserved** side; the
   rest are materialized above the join.
 
+## Preserved inputs
+
+A join preserves an input when it returns that input's rows that match
+nothing: LEFT preserves the left input, RIGHT the right one, FULL both, and an
+anti join the input it returns. Inner and semi joins preserve neither. The
+join's own condition (`ON`, or the `WHERE` of a decorrelated subquery) decides
+which pairs match, so:
+
+- a condition conjunct is pushed only onto an input the join does not
+  preserve; one that reads only a preserved input stays in the residual;
+- a constant conjunct reads no column and narrows a non-preserved input, so
+  `NOT EXISTS (SELECT 1 FROM s WHERE s.k = t.id AND false)` empties `s` and
+  returns every row of `t`;
+- a `DeriveSideFilter` condition goes only to a non-preserved input.
+
+Predicates from above filter the join's output instead. They may go to an input
+whose rows the join never null-extends: the preserved input of LEFT, RIGHT and
+anti joins, either input of inner and semi joins, neither input of FULL.
+
+```
+NOT EXISTS (SELECT 1 FROM s WHERE s.k = t.id AND t.a = 1)
+=>
+join left_anti [t.id = s.k] residual (== |t.a| 1)
+├─ source t           # t.a = 1 here would drop rows NOT EXISTS keeps
+└─ source s
+```
+
 ## Invariants after the pass
 
 - inner/semi/anti joins may carry keys and a residual;
-- outer joins retain ON residuals that cannot safely move to an input;
+- outer and anti joins retain condition conjuncts that cannot safely move to an
+  input;
 - a `filter` remains only where a predicate could not be pushed further down.
 
 ## Parquet row-group pruning

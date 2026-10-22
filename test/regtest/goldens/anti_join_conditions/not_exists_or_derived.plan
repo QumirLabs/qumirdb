@@ -1,0 +1,5 @@
+project (id) (rows≈2 cost≈4.4K)
+└─ join left_anti [t.id = s.k] residual (|| (&& (== |t.a| 1) (== |s.v| 5)) (&& (== |t.a| 2) (== |s.v| 7))) (rows≈2 cost≈4.4K)
+   ├─ source t AS t (rows≈4 cost≈64)
+   └─ filter (|| (== |s.v| 5) (== |s.v| 7)) (rows≈2 cost≈160)
+      └─ source s AS s row-groups (|| (== |s.v| 5) (== |s.v| 7)) (rows≈5 cost≈80)

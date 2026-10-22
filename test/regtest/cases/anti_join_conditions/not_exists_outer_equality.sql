@@ -1,0 +1,1 @@
+SELECT id FROM t WHERE NOT EXISTS (SELECT 1 FROM s WHERE s.k = t.id AND s.k = t.a);

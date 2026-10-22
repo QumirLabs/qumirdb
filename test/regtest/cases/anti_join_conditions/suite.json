@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "fixtures": {
+    "t": {"json": "tables/t.json", "parquet": {"row_group_rows": 2}},
+    "s": {"json": "tables/s.json", "parquet": {"row_group_rows": 2}}
+  },
+  "tables": {"t": "t", "s": "s"},
+  "variants": ["single", "threaded"],
+  "cases": {
+    "not_exists_false.sql": {"order": "unordered"},
+    "not_exists_constant.sql": {"order": "unordered"},
+    "not_exists_uncorrelated_false.sql": {"order": "unordered"},
+    "not_exists_outer_column.sql": {"order": "unordered"},
+    "not_exists_only_outer_column.sql": {"order": "unordered"},
+    "not_exists_or_derived.sql": {"order": "unordered"},
+    "not_exists_outer_equality.sql": {"order": "unordered"},
+    "not_exists_filter_above.sql": {"order": "unordered"},
+    "exists_outer_column.sql": {"order": "unordered"}
+  }
+}
