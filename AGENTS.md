@@ -240,44 +240,11 @@ that does the job well: a fast model for reviews of small PRs, bug verification,
 filing issues, and rebases; the strongest model for design work such as new
 operators, optimizer passes, unnesting, and non-trivial kernel changes. Give one
 agent a queue of related items in a single worktree with a warm build instead of
-starting a fresh worktree and full build per item. Claude Code agent definitions
-for these roles live in `.claude/agents/`.
+starting a fresh worktree and full build per item.
+
+The roles and their procedures are in [agents/](agents/): bug fixer, reviewer,
+verifier, and rebaser.
 
 Commits are authored by the human the work is done for. Never commit as a bot or
 AI identity and never add `Co-authored-by` trailers or "Generated with" lines;
 `externals/qumir/tools/check_commits.py` rejects them.
-
-### Bug fix
-
-Reproduce the issue on `origin/master` and compare with an independent engine
-(DuckDB). Fix the general cause, not the query. Add a regression case that fails
-before the fix and passes after it; check results, not only plans. Run `ctest`,
-`test_reg`, `check_text.py` and `check_commits.py origin/master..HEAD`. One PR per
-issue with `Fixes #N`; do not merge it.
-
-### Independent review
-
-Build the PR head, run its tests, and verify suspicions with concrete queries
-against DuckDB on small fixtures. Report correctness first (wrong results,
-crashes, NULL and empty-input semantics, single versus threaded scheduler, the
-browser path), then design and test gaps. Post one PR comment that starts with
-"Independent review of head `<sha>`. Verdict: …", lists what was checked, and
-gives P1/P2/P3 findings with file:line and a failing query for P1/P2. Label the
-PR `agent-reviewed` when there is no P1/P2 finding, otherwise
-`agent-review-findings`. Do not remove other labels such as `hold-until-98`.
-
-### Verifying and filing findings
-
-Reproduce each candidate on current `origin/master`, compare with DuckDB, search
-existing issues for duplicates, and file confirmed ones with a short statement,
-the fixture SQL, qdb and DuckDB output, a suspected location and the master SHA.
-Use the `bug` label for wrong results and crashes and `enhancement` for missing
-features. Side findings found while fixing or reviewing are filed the same way
-right away.
-
-### Rebase
-
-Rebase onto `origin/master`, keep the intent of both sides in each conflict, and
-rebuild and rerun the checks before pushing with `git push --force-with-lease`.
-When two PRs change `KernelLibVersion`, the one merged second must bump it again.
-A stacked PR is moved with `git rebase --onto` once its base has been merged.
