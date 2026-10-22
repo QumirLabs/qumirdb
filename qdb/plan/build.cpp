@@ -78,6 +78,8 @@ bool HasSubquery(const NAst::TExprPtr& expr) {
     return FindSubquery(expr) != nullptr;
 }
 
+bool HasWindowExprLocal(const NAst::TExprPtr& expr);
+
 std::string ItemName(const NSql::TSqlSelectItem& item, size_t index) {
     if (!item.ColumnAliases.empty()) {
         return item.ColumnAliases.front();
@@ -240,6 +242,13 @@ std::expected<TGroupingParse, TError> ParseGrouping(
     }
     std::unordered_map<std::string, size_t> keyIndex; // PrintAst -> index in Keys
     auto keyFor = [&](const NAst::TExprPtr& expr) -> std::expected<size_t, TError> {
+        // Rejected before printing: the core printer prints neither SQL node.
+        if (HasSubquery(expr)) {
+            return std::unexpected(TError(expr->Location, "GROUP BY on a subquery is not supported"));
+        }
+        if (HasWindowExprLocal(expr)) {
+            return std::unexpected(TError(expr->Location, "window functions are not allowed in GROUP BY"));
+        }
         std::string k = NAst::NCore::PrintAst(expr);
         if (auto it = keyIndex.find(k); it != keyIndex.end()) {
             return it->second;
@@ -247,8 +256,6 @@ std::expected<TGroupingParse, TError> ParseGrouping(
         TGroupKey gk;
         if (auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(expr)) {
             gk = { .Name = ident.Cast()->Name, .Expression = Ident(expr->Location, ident.Cast()->Name) };
-        } else if (HasSubquery(expr)) {
-            return std::unexpected(TError(expr->Location, "GROUP BY on a subquery is not supported"));
         } else {
             gk = { .Name = names.Next("gb"), .Expression = expr, .Computed = true };
         }
@@ -352,7 +359,8 @@ bool HasWindowExpr(const NAst::TExprPtr& expr) {
 
 // True if `expr` contains a window function in its OWN scope - not descending
 // into nested subqueries, whose windows belong to that subquery. Used to reject
-// windows in WHERE/HAVING and in ORDER BY over an independent scalar subquery.
+// windows in WHERE/GROUP BY/HAVING and in ORDER BY over an independent scalar
+// subquery.
 bool HasWindowExprLocal(const NAst::TExprPtr& expr) {
     if (!expr) {
         return false;

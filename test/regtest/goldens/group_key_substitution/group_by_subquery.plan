@@ -1,0 +1,2 @@
+Error: GROUP BY on a subquery is not supported @ Line: 1, Byte: 38, Column: 38
+

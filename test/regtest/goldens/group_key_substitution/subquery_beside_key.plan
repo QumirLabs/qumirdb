@@ -1,0 +1,10 @@
+sort [g asc]
+└─ project (g, d) (rows≈4 cost≈4.4K)
+   └─ join inner (rows≈4 cost≈4.4K)
+      ├─ aggregate keys=[gb_0] (rows≈4 cost≈96)
+      │  └─ project (gb_0) (rows≈4 cost≈64)
+      │     └─ source t AS t (rows≈4 cost≈32)
+      └─ project (__scalar_0__) (rows≈1 cost≈128)
+         └─ aggregate keys=[__group__] aggs=[max_0=max] (rows≈1 cost≈120)
+            └─ project (u.x, __group__) (rows≈3 cost≈72)
+               └─ source u AS u (rows≈3 cost≈24)

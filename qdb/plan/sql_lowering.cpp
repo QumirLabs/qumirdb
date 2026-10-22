@@ -405,6 +405,18 @@ NAst::TExprPtr I32Literal(TLocation loc, int32_t value) {
     return ret;
 }
 
+// Whether `expr` holds no SQL subquery or window node: the core printer prints
+// only core nodes.
+bool IsCoreExpr(const NAst::TExprPtr& expr) {
+    if (!expr) {
+        return true;
+    }
+    if (NAst::TMaybeNode<NSql::TSubqueryExpr>(expr) || NAst::TMaybeNode<NSql::TWindowExpr>(expr)) {
+        return false;
+    }
+    return std::ranges::all_of(expr->Children(), IsCoreExpr);
+}
+
 bool GroupingSetContainsKey(const std::vector<size_t>& set, size_t keyIndex) {
     return std::find(set.begin(), set.end(), keyIndex) != set.end();
 }
@@ -1102,8 +1114,12 @@ NAst::TExprPtr SubstituteGroupKeys(
     if (!expr) {
         return expr;
     }
-    if (auto it = byExpr.find(NAst::NCore::PrintAst(expr)); it != byExpr.end()) {
-        return Ident(expr->Location, it->second);
+    // A key holds no subquery or window, so an expression with one is no key; its
+    // operands, such as the keys of a window over the grouped rows, may be.
+    if (IsCoreExpr(expr)) {
+        if (auto it = byExpr.find(NAst::NCore::PrintAst(expr)); it != byExpr.end()) {
+            return Ident(expr->Location, it->second);
+        }
     }
     for (auto* child : expr->MutableChildren()) {
         *child = SubstituteGroupKeys(*child, byExpr);
