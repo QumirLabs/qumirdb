@@ -570,7 +570,7 @@ TRelation Relation(TOperatorPtr plan) {
 }
 
 // Labels follow the join's output: both inputs, or the preserved side of a
-// semi/anti join.
+// semi/anti/mark join (the marker belongs to no input relation).
 TRelation JoinRelations(
     TRelation left,
     TRelation right,
@@ -583,6 +583,7 @@ TRelation JoinRelations(
     switch (type) {
         case EJoinType::LeftSemi:
         case EJoinType::LeftAnti:
+        case EJoinType::LeftMark:
             joined.Labels = std::move(left.Labels);
             break;
         case EJoinType::RightSemi:

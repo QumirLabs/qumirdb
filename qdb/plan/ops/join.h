@@ -24,6 +24,10 @@ enum class EJoinType {
     RightSemi,
     LeftAnti,
     RightAnti,
+    // Every left row once, followed by a marker with the SQL value of
+    // `left keys IN right keys` (TRUE / FALSE / NULL). Only the join kernel
+    // supports it so far; plans do not produce it.
+    LeftMark,
 };
 
 // Equi-join key: a pair of column names, one from each side
@@ -111,6 +115,7 @@ private:
 //   Full:  nullable(left) ++ nullable(right)
 //   Left{Semi,Anti}:  left columns only
 //   Right{Semi,Anti}: right columns only
+//   LeftMark: an error, the plan has no marker column to name yet
 // Returns an error if both sides contribute columns and column names overlap
 // (no automatic prefixing/aliasing yet).
 std::expected<NQumir::NAst::TTypePtr, NQumir::TError> ComputeJoinOutputType(

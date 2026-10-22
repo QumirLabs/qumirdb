@@ -133,6 +133,9 @@ BuildJoinKernelLibrary() {
     if (auto e = AddParsedKernel(*library, ReadJoinKernel("join_semi_anti.oz"))) {
         return std::unexpected(*e);
     }
+    if (auto e = AddParsedKernel(*library, ReadJoinKernel("join_mark.oz"))) {
+        return std::unexpected(*e);
+    }
     return library;
 }
 

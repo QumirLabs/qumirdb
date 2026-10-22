@@ -572,6 +572,7 @@ public:
                 return 1;
             case EJoinType::RightSemi:
             case EJoinType::RightAnti:
+            case EJoinType::LeftMark:
                 return 0;
         }
         return 0;
@@ -700,6 +701,10 @@ public:
             return LowerLateMaterialize(*n.Cast(), outConn, outLaneOffset);
         }
         if (auto n = TMaybeOp<TJoinOperator>(op)) {
+            // The mark join kernel exists, but no join processor drives it yet.
+            if (n.Cast()->JoinType() == EJoinType::LeftMark) {
+                throw std::runtime_error("left_mark join is not supported by execution yet");
+            }
             if (n.Cast()->Keys().empty()) {
                 return LowerCrossJoin(*n.Cast(), outConn, outLaneOffset);
             }

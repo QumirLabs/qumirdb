@@ -41,7 +41,8 @@ Current production support:
 | `Right` | Supported | Symmetric path plus unmatched-right final scan |
 | `Full` | Supported | Symmetric path plus unmatched scans on both sides |
 | `RightSemi` / `RightAnti` | Not implemented in runtime | Logical enum exists, runtime guard rejects it |
-| No equi-keys | Supported except `RightSemi` / `RightAnti` | Nested-loop `TCrossJoinProcessor` path |
+| `LeftMark` | Kernel only | Left rows plus a three-valued `IN` marker; not planned yet |
+| No equi-keys | Supported except `RightSemi` / `RightAnti` / `LeftMark` | Nested-loop `TCrossJoinProcessor` path |
 
 Residual predicates are supported for inner, semi/anti, and outer joins.
 Only pairs passing the residual count as matches for outer finalization.
@@ -60,7 +61,9 @@ hash/equality semantics.
 - `RightSemi` / `RightAnti`: right columns only, typed but not executed;
 - `Left`: left columns followed by nullable right columns;
 - `Right`: nullable left columns followed by right columns;
-- `Full`: nullable columns from both sides.
+- `Full`: nullable columns from both sides;
+- `LeftMark`: not typed in plans yet; its kernel emits the left columns
+  followed by the marker.
 
 For joins that emit both sides, duplicate column names are an error. The
 column-qualification pass normally prevents accidental collisions by rewriting
@@ -169,6 +172,56 @@ Outer joins use symmetric probe+insert while inputs are live, then call
 
 The finalize kernel emits rows with no opposite-side match as `(row_id, -1)`.
 The generated output materializer emits NULL values for the absent side.
+
+### LeftMark
+
+A mark join (Neumann, Leis, and Kemper, "The Complete Story of Joins (in
+HyPer)", BTW 2017, section 3.3) emits every left row exactly once, followed by
+a marker holding the SQL value of `key IN S`, where S is the multiset of right
+keys: TRUE when S contains an equal key; otherwise NULL when S is non-empty and
+the key is NULL or S contains NULL; otherwise FALSE. A NULL key against an empty
+S is therefore FALSE. A NULL-aware `NOT IN` keeps the rows whose marker is
+FALSE, which `LeftAnti` cannot express because it keeps every NULL key. The
+marker column is `Nullable<bool>`, or `bool` when no key column on either side
+is nullable and the marker therefore can never be NULL.
+
+The join kernel is driven by a few operations. An update stores a batch of one
+side in that side's hash table. A probe takes a batch of one side, looks its
+rows up in the other side's table, which must already be complete, and emits
+the results without storing the batch; the scheduler calls this streaming one
+side against the other. Finalize runs after both inputs have ended.
+
+For a mark join the right update stores only the distinct keys of S, as for
+semi/anti, so duplicate right keys do not duplicate left rows. The marker of a
+left row with no equal key depends on two facts about the whole of S: whether
+S is empty, and whether S contains NULL. Both are known only after the last
+right row, and the key set answers them: S is non-empty when the set's size is
+not zero, and S contains NULL when the NULL key finds a slot, because ordinary
+key equality groups all NULL keys into one slot. Left rows therefore get their
+markers only once S is complete, in one of two ways that one run may combine:
+stored by the left update and marked by finalize, or probed against the
+finished set and marked immediately. The opposite direction, keeping the left
+rows and passing S's rows by without storing them, is not supported: it would
+need a match flag for every stored left key and the two facts about S kept
+outside the key set.
+
+The paper's hash mark join (section 5.6) takes that opposite direction: it
+builds on the left input, streams the right one while marking left tuples, and
+remembers whether the right input was empty or contained NULL. QDB builds S
+instead, so the usually larger left input can be streamed. Each emitted pair
+carries the left row id and, in place of a right row id, the marker code, so
+the pair buffer and the generated materializer are shared with the other joins;
+the materializer writes the marker as an ordinary bool column, bit-packed data
+with a validity bitmap.
+
+The kernel supports equi-keys without a residual predicate. A single key column
+may be nullable on either side. A multi-column key must be non-nullable: with a
+NULL component, the row comparison is unknown only against right rows that
+match the other components, which the single NULL slot cannot tell. A mark
+join without equi-keys is rejected: the nested-loop kernel has no marker. Plans
+do not produce `LeftMark` yet: `ComputeJoinOutputType` rejects it because the
+plan has no marker column name, and lowering rejects it because no join
+processor drives it.
 
 ### Joins without equi-keys
 

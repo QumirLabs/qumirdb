@@ -4,6 +4,7 @@
 #include <qdb/exec/runtime_context.h>
 #include <qdb/plan/clone_expr.h>
 #include <qdb/plan/passes/unbound_vars.h>
+#include <qdb/plan/types/nullable.h>
 
 #include <qumir/parser/core/printer.h>
 
@@ -367,7 +368,8 @@ TOperatorKernelSpec BuildJoinKernelSpec(
     const NQumir::NAst::TStructType& rightType,
     const std::vector<TJoinKey>& keys,
     EJoinType type,
-    const NQumir::NAst::TExprPtr& residualPredicate)
+    const NQumir::NAst::TExprPtr& residualPredicate,
+    const std::string& markerName)
 {
     RejectRegexCall(residualPredicate, "join");
     auto columnRef = [](const NQumir::NAst::TStructType& inputType,
@@ -397,12 +399,31 @@ TOperatorKernelSpec BuildJoinKernelSpec(
         expressions.push_back(residualPredicate);
     }
 
-    auto outputType = ComputeJoinOutputType(
-        std::make_shared<NQumir::NAst::TStructType>(leftType.Fields),
-        std::make_shared<NQumir::NAst::TStructType>(rightType.Fields),
-        type);
-    if (!outputType) {
-        throw std::runtime_error("join kernel spec: " + outputType.error().ToString());
+    NQumir::NAst::TTypePtr outputType;
+    if (type == EJoinType::LeftMark) {
+        if (markerName.empty()) {
+            throw std::runtime_error("join kernel spec: left_mark needs a marker column name");
+        }
+        // Without a nullable key column the marker is never NULL.
+        const bool nullableMarker = std::ranges::any_of(joinKeys, [](const auto& key) {
+            return IsNullableType(key.Left.Type) || IsNullableType(key.Right.Type);
+        });
+        NQumir::NAst::TTypePtr markerType = std::make_shared<NQumir::NAst::TBoolType>();
+        if (nullableMarker) {
+            markerType = std::make_shared<TNullable>(std::move(markerType));
+        }
+        auto fields = leftType.Fields;
+        fields.emplace_back(markerName, std::move(markerType));
+        outputType = std::make_shared<NQumir::NAst::TStructType>(std::move(fields));
+    } else {
+        auto output = ComputeJoinOutputType(
+            std::make_shared<NQumir::NAst::TStructType>(leftType.Fields),
+            std::make_shared<NQumir::NAst::TStructType>(rightType.Fields),
+            type);
+        if (!output) {
+            throw std::runtime_error("join kernel spec: " + output.error().ToString());
+        }
+        outputType = std::move(*output);
     }
 
     return TOperatorKernelSpec{
@@ -412,7 +433,7 @@ TOperatorKernelSpec BuildJoinKernelSpec(
             std::make_shared<NQumir::NAst::TStructType>(leftType.Fields),
             std::make_shared<NQumir::NAst::TStructType>(rightType.Fields),
         },
-        .OutputSchema = std::move(*outputType),
+        .OutputSchema = std::move(outputType),
         .Expressions = std::move(expressions),
         .JoinKeys = std::move(joinKeys),
         .JoinType = type,

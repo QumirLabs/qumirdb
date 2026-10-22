@@ -217,6 +217,9 @@ std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op) {
             case EJoinType::RightAnti:
                 outFields = rightSchema->Fields;
                 break;
+            case EJoinType::LeftMark:
+                // Untyped, as ComputeJoinOutputType rejects it for now.
+                return nullptr;
             default:
                 outFields = leftSchema->Fields;
                 for (auto& f : rightSchema->Fields) outFields.push_back(f);

@@ -32,9 +32,10 @@ std::string ReadSortKernel(const std::string& name);
 // Assembles the keyed-join kernel library: generic Robin Hood helpers, the
 // reused aggregation HashTable lifecycle, pair buffers, the dual-key-generic
 // join update/probe helpers (join_update.oz templates over LookupKey /
-// StoredKey), and residual semi/anti helpers. Function-name resolution is
-// eager, so programs using this library must also include the per-key
-// overloads and BuildJoinDualKeyLibrary. Per-query key readers and the
+// StoredKey), residual semi/anti helpers, and the mark join helpers
+// (join_mark.oz). Function-name resolution is eager, so programs using this
+// library must also include the per-key overloads and
+// BuildJoinDualKeyLibrary. Per-query key readers and the
 // external jt_dispatch entry are generated in join_gen.cpp and appended by
 // TKernelCompiler::CompileJoin.
 std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError>
