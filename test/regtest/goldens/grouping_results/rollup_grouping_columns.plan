@@ -1,0 +1,4 @@
+project (ga, gb, c) (rows≈6 cost≈492)
+└─ aggregate keys=[g.a, g.b] aggs=[count_0=count] (rows≈6 cost≈348)
+   └─ project (g.a, g.b) (rows≈3 cost≈96)
+      └─ source g AS g (rows≈3 cost≈48)

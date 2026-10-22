@@ -1,0 +1,1 @@
+SELECT a, b FROM lc EXCEPT SELECT a, b FROM rc;

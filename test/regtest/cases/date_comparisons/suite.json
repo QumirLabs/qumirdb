@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "fixtures": {
+    "dates": {"json": "tables/dates.json"},
+    "dates_nullable": {"json": "tables/dates_nullable.json"},
+    "spans": {"json": "tables/spans.json"},
+    "spans_nullable": {"json": "tables/spans_nullable.json"}
+  },
+  "tables": {"dates": "dates", "dates_nullable": "dates_nullable", "spans": "spans", "spans_nullable": "spans_nullable"},
+  "variants": ["single", "threaded", "js"],
+  "cases": {
+    "column_first.sql": {"order": "unordered"},
+    "column_first_nullable.sql": {"order": "unordered"},
+    "literal_first.sql": {"order": "unordered"},
+    "literal_first_nullable.sql": {"order": "unordered"},
+    "cast_column.sql": {"order": "unordered"},
+    "cast_column_nullable.sql": {"order": "unordered"},
+    "between_plus_interval.sql": {"order": "ordered"},
+    "between_plus_interval_nullable.sql": {"order": "ordered"},
+    "between_minus_interval.sql": {"order": "ordered"},
+    "between_minus_interval_nullable.sql": {"order": "ordered"}
+  }
+}

@@ -1,0 +1,1 @@
+SELECT a FROM ln UNION SELECT a FROM rn;

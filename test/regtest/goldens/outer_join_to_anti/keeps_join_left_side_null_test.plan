@@ -1,0 +1,5 @@
+project (value) (rows≈1 cost≈4.4K)
+└─ join left [s.key = r.key] (rows≈1 cost≈4.4K)
+   ├─ filter (call qdb_is_null |s.key|) (rows≈1 cost≈160)
+   │  └─ source sales AS s row-groups (call qdb_is_null |s.key|) (rows≈5 cost≈80)
+   └─ source returns AS r (rows≈4 cost≈32)

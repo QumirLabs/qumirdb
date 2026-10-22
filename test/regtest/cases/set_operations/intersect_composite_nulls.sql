@@ -1,0 +1,1 @@
+SELECT a, b FROM lc INTERSECT SELECT a, b FROM rc;

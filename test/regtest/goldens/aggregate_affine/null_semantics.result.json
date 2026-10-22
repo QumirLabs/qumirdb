@@ -1,0 +1,7 @@
+{
+  "schema": "<struct (k i64) (col1 <named Nullable [i64]>) (col2 <named Nullable [i64]>) (col3 <named Nullable [i64]>) (col4 <named Nullable [i64]>) (col5 <named Nullable [i64]>) (col6 <named Nullable [f64]>) (col7 <named Nullable [i64]>) (col8 <named Nullable [i64]>) (col9 i64)>",
+  "rows": [
+    ["1", "14", "16", "42", "6", "34", 17, "0", "6", "2"],
+    ["2", null, null, null, null, null, null, null, null, "0"]
+  ]
+}

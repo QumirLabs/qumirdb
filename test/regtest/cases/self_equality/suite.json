@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "fixtures": {
+    "plain": {"json": "tables/plain.json"},
+    "nulls": {"json": "tables/nulls.json"},
+    "floats": {"json": "tables/floats.json"},
+    "other": {"json": "tables/other.json"},
+    "sub_t": {"json": "tables/sub_t.json"},
+    "sub_u": {"json": "tables/sub_u.json"},
+    "sub_t_nulls": {"json": "tables/sub_t_nulls.json"},
+    "sub_u_nulls": {"json": "tables/sub_u_nulls.json"}
+  },
+  "tables": {"t": "plain", "u": "other"},
+  "variants": ["single", "threaded", "js"],
+  "cases": {
+    "non_nullable_column.sql": {"order": "unordered"},
+    "nullable_column.sql": {"order": "unordered", "tables": {"t": "nulls"}},
+    "or_other_branch.sql": {"order": "unordered", "tables": {"t": "nulls"}},
+    "or_every_branch.sql": {"order": "unordered", "tables": {"t": "nulls"}},
+    "or_non_nullable_column.sql": {"order": "unordered"},
+    "negated.sql": {"order": "unordered", "tables": {"t": "nulls"}},
+    "float_nan.sql": {"order": "unordered", "tables": {"t": "floats"}},
+    "left_join_null_extended.sql": {"order": "unordered", "tables": {"u": "other"}},
+    "decorrelated_subquery.sql": {"order": "unordered", "tables": {"t": "sub_t", "u": "sub_u"}},
+    "decorrelated_subquery_null_keys.sql": {"order": "unordered", "tables": {"t": "sub_t_nulls", "u": "sub_u_nulls"}}
+  }
+}

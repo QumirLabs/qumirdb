@@ -1,0 +1,6 @@
+project (n) (rows≈1 cost≈4.2K)
+└─ aggregate keys=[__group__] aggs=[count_0=count] (rows≈1 cost≈4.2K)
+   └─ project (__group__) (rows≈1 cost≈4.2K)
+      └─ join left_anti [s.key = r.key] (rows≈1 cost≈4.2K)
+         ├─ source sales AS s (rows≈3 cost≈24)
+         └─ source returns AS r (rows≈1 cost≈8)

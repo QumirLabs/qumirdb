@@ -1,0 +1,5 @@
+project (n) (rows≈1 cost≈64)
+└─ aggregate keys=[__group__] aggs=[count_0=count] (rows≈1 cost≈56)
+   └─ project (__group__) (rows≈1 cost≈40)
+      └─ filter (&& (<= (cast (cast "1998-08-04" <named StringView>) <named DATE>) |spans.d|) (<= |spans.d| (+ (cast (cast "1998-08-04" <named StringView>) <named DATE>) (: 14 i32)))) (rows≈1 cost≈32)
+         └─ source spans AS spans row-groups (&& (<= (cast (cast "1998-08-04" <named StringView>) <named DATE>) |spans.d|) (<= |spans.d| (+ (cast (cast "1998-08-04" <named StringView>) <named DATE>) (: 14 i32)))) (rows≈4 cost≈16)
