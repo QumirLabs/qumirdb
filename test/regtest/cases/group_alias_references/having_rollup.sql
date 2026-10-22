@@ -1,0 +1,2 @@
+SELECT a AS g, sum(b) AS s FROM t GROUP BY ROLLUP (g) HAVING g IS NULL OR g > 1
+ORDER BY g NULLS LAST, s;

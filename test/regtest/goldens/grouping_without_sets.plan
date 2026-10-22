@@ -1,2 +1,1 @@
-Error: GROUPING() requires GROUPING SETS, ROLLUP, or CUBE @ Line: 1, Byte: 8, Column: 8
-
+(rel project (rel aggregate (rel source "t" "t") (keys |t.a|)) (col0 0))

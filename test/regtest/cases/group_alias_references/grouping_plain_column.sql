@@ -1,0 +1,1 @@
+SELECT a, GROUPING(a) AS gg, sum(b) AS s FROM t GROUP BY a ORDER BY a NULLS LAST;
