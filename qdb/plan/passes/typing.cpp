@@ -31,9 +31,32 @@ namespace {
 bool IsIntType(const TTypePtr& t) { return static_cast<bool>(TMaybeType<TIntegerType>(t)); }
 bool IsFloatType(const TTypePtr& t) { return static_cast<bool>(TMaybeType<TFloatType>(t)); }
 
+// Narrowest integer type holding both operands, as in DuckDB: the wider of two
+// integers of one signedness, and for mixed signedness the signed type wider than
+// the unsigned operand (UINTEGER with INTEGER gives BIGINT). nullptr when no
+// 128-bit-or-narrower type holds both.
+TTypePtr UnifyIntegers(const TIntegerType& a, const TIntegerType& b) {
+    using EKind = TIntegerType::EKind;
+    if (a.IsSigned() == b.IsSigned()) {
+        return std::make_shared<TIntegerType>(a.BitWidth() >= b.BitWidth() ? a.Kind : b.Kind);
+    }
+    const auto& sig = a.IsSigned() ? a : b;
+    const auto& uns = a.IsSigned() ? b : a;
+    if (sig.BitWidth() > uns.BitWidth()) {
+        return std::make_shared<TIntegerType>(sig.Kind);
+    }
+    switch (uns.BitWidth()) {
+        case 8: return std::make_shared<TIntegerType>(EKind::I16);
+        case 16: return std::make_shared<TIntegerType>(EKind::I32);
+        case 32: return std::make_shared<TIntegerType>(EKind::I64);
+        case 64: return std::make_shared<TIntegerType>(EKind::I128);
+        default: return nullptr;
+    }
+}
+
 // Common numeric type for a UNION column across branches: any decimal -> decimal
 // (scale = max branch scale, precision widened to 38 to avoid overflow when a float/int
-// branch is cast in); else any float -> float; else keep. Returns nullptr if the base
+// branch is cast in); else any float -> float; else the wider integer. Returns nullptr if the base
 // types are not a compatible numeric mix (caller reports the mismatch).
 TTypePtr UnifyUnionBase(const TTypePtr& a, const TTypePtr& b) {
     if (!a || !b) return nullptr;
@@ -48,7 +71,7 @@ TTypePtr UnifyUnionBase(const TTypePtr& a, const TTypePtr& b) {
         return std::make_shared<TDecimal>(MaxDecimalPrecision, scale);
     }
     if (IsFloatType(a) || IsFloatType(b)) return std::make_shared<TFloatType>();
-    return a; // both integer
+    return UnifyIntegers(*TMaybeType<TIntegerType>(a).Cast(), *TMaybeType<TIntegerType>(b).Cast());
 }
 
 // Unify two UNION column types (nullability + numeric base). nullptr -> incompatible.
