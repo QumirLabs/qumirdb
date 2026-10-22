@@ -127,6 +127,26 @@ class BenchmarkTest(unittest.TestCase):
         self.assertEqual(self.compare(left, [header, *reversed(left[1:])])["status"], "equal")
         self.assertEqual(self.compare(left, [header, *left[1:3]])["status"], "different")
 
+    def test_null_is_an_exact_value_in_numeric_columns(self):
+        header = ["value"]
+        # One NULL cell must not turn the column into a text comparison.
+        self.assertEqual(self.compare([header, ["1.0"], ["NULL"]], [header, ["NULL"], ["1.0000000001"]])["status"], "equal")
+        self.assertEqual(self.compare([header, ["1.0"], ["NULL"]], [header, ["1.0"], ["2.0"]])["status"], "different")
+        self.assertEqual(self.compare([header, ["0.0"], ["1.0"]], [header, ["NULL"], ["1.0"]])["status"], "different")
+        self.assertEqual(self.compare([header, ["NULL"]], [header, ["NULL"]])["status"], "equal")
+
+    def test_row_order_is_checked_only_for_ordered_queries(self):
+        header = ["key", "value"]
+        left = [header, ["a", "1.0"], ["b", "NULL"], ["c", "3.0"]]
+        reordered = [header, ["c", "3.0"], ["a", "1.0"], ["b", "NULL"]]
+        self.assertEqual(self.compare(left, reordered, "select key, value from t")["status"], "equal")
+        self.assertEqual(self.compare(left, reordered, "select key from (select * from t order by 1) x")["status"], "equal")
+        self.assertEqual(self.compare(left, reordered, "select sum(v) over (order by k) from t")["status"], "equal")
+        self.assertEqual(self.compare(left, left, "select key, value from t order by key")["status"], "equal")
+        ordered = self.compare(left, reordered, "select key, value from t -- x\norder  by key")
+        self.assertEqual(ordered["status"], "different")
+        self.assertEqual(ordered["reason"], "row order differs")
+
     def test_large_integers_are_exact(self):
         self.assertEqual(self.compare([["key"], ["9007199254740992"]], [["key"], ["9007199254740993"]])["status"], "different")
 
