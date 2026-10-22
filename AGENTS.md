@@ -232,3 +232,19 @@ the conceptual change, not the number of modified lines.
 
 Keep fundamental architectural descriptions concise and readable. Updating
 `docs/arch` is not a requirement to document every implementation detail there.
+
+## Delegated agent work
+
+A coordinating agent may hand routine work to sub-agents. Use the cheapest model
+that does the job well: a fast model for reviews of small PRs, bug verification,
+filing issues, and rebases; the strongest model for design work such as new
+operators, optimizer passes, unnesting, and non-trivial kernel changes. Give one
+agent a queue of related items in a single worktree with a warm build instead of
+starting a fresh worktree and full build per item.
+
+The roles and their procedures are in [agents/](agents/): bug fixer, reviewer,
+verifier, and rebaser.
+
+Commits are authored by the human the work is done for. Never commit as a bot or
+AI identity and never add `Co-authored-by` trailers or "Generated with" lines;
+`externals/qumir/tools/check_commits.py` rejects them.
