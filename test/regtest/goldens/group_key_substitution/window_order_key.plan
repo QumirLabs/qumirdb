@@ -1,0 +1,6 @@
+sort [g asc]
+└─ project (g, w)
+   └─ window order=[gb_0 asc] fns=[w_0=sum]
+      └─ aggregate keys=[gb_0] aggs=[sum_0=sum] (rows≈4 cost≈192)
+         └─ project (gb_0, t.b) (rows≈4 cost≈128)
+            └─ source t AS t (rows≈4 cost≈64)

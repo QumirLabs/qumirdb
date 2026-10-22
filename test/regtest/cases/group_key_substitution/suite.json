@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "fixtures": {
+    "t": {"json": "tables/t.json"},
+    "u": {"json": "tables/u.json"}
+  },
+  "tables": {"t": "t", "u": "u"},
+  "variants": ["single", "threaded"],
+  "cases": {
+    "scalar_subquery.sql": {"order": "ordered"},
+    "subquery_beside_key.sql": {"order": "ordered"},
+    "in_subquery_operand.sql": {"order": "ordered"},
+    "window_order_key.sql": {"order": "ordered"},
+    "window_argument_partition_key.sql": {"order": "ordered"},
+    "group_by_subquery.sql": {"execute": false},
+    "group_by_window.sql": {"execute": false}
+  }
+}
