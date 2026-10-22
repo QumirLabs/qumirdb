@@ -1,0 +1,6 @@
+sort [k asc]
+└─ project (k, c) (rows≈50 cost≈7.5K)
+   └─ filter max_0 (rows≈50 cost≈6.7K)
+      └─ aggregate keys=[gb_0] aggs=[count_0=count, max_0=max] (rows≈100 cost≈5K)
+         └─ project (gb_0, t.n) (rows≈144 cost≈2.6K)
+            └─ source t AS t (rows≈144 cost≈1.3K)

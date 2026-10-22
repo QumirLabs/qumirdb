@@ -20,6 +20,8 @@ enum class EAggValueKind {
     Float64,
     BinInt,
     String,
+    // FALSE < TRUE: the state is the i64 0/1, the output a bitmap column.
+    Bool,
 };
 
 // Per-reducer layout for the generic aggregation kernel. One TAggReducerInfo
@@ -52,6 +54,10 @@ struct TAggReducerInfo {
 
     bool IsString() const {
         return ValueKind == EAggValueKind::String;
+    }
+
+    bool IsBool() const {
+        return ValueKind == EAggValueKind::Bool;
     }
 };
 

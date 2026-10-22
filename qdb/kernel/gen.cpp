@@ -1704,7 +1704,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
         EAggValueKind ValueKind = EAggValueKind::Int64;
         bool Nullable = false;
         bool NeedValue = false;
-        std::optional<TColumnValueAst> Mat; // nullable or variable-width column
+        std::optional<TColumnValueAst> Mat; // nullable or packed column
     };
     std::map<int32_t, TArgColumn> argColumns;
     for (const auto& r : layout.Reducers) {
@@ -1726,9 +1726,14 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
             ac.ValueKind = EAggValueKind::Float64;
         } else if (TMaybeType<TStringType>(UnwrapNamedType(valueType))) {
             ac.ValueKind = EAggValueKind::String;
+        } else if (TMaybeType<TBoolType>(UnwrapNamedType(valueType))) {
+            ac.ValueKind = EAggValueKind::Bool;
         }
         ac.Nullable = IsNullableType(colType);
-        if (ac.Nullable || (ac.NeedValue && ac.ValueKind == EAggValueKind::String)) {
+        // A string is variable-width and a bool bit-packed: neither is indexed.
+        const bool packed = ac.ValueKind == EAggValueKind::String ||
+            ac.ValueKind == EAggValueKind::Bool;
+        if (ac.Nullable || (ac.NeedValue && packed)) {
             const std::string colName = "arg_column_" + std::to_string(idx);
             update.push_back(var(colName, columnValueType));
             update.push_back(assign(colName, columnAt(idx)));
@@ -1847,7 +1852,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
         std::make_move_iterator(keyValueSetup.begin()),
         std::make_move_iterator(keyValueSetup.end()));
     // Compute each arg column's value and validity once per row. Scalar
-    // integers/floats are carried as i64 bits; BinInt stays typed.
+    // integers/floats are carried as i64 bits, booleans as 0/1; BinInt stays typed.
     for (auto& [idx, ac] : argColumns) {
         if (ac.Mat) {
             materialize.insert(materialize.end(),
@@ -1870,6 +1875,9 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
                 valExpr = ac.Mat->Value;
             } else if (ac.ValueKind == EAggValueKind::Float64) {
                 valExpr = bitcast(ac.Mat->Value, i64Type);
+            } else if (ac.ValueKind == EAggValueKind::Bool) {
+                // Not a cast: an integer cast sign-extends TRUE to -1.
+                valExpr = std::make_shared<TIfExpr>(loc, ac.Mat->Value, numI64(1), numI64(0));
             } else {
                 valExpr = cast(ac.Mat->Value, i64Type);
             }
@@ -2207,9 +2215,19 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
                 project.push_back(std::make_shared<TAssignExpr>(loc, srcName,
                     index(ident("agg_buffers"),
                         numI64(static_cast<int64_t>(r.ValueBufIdx)))));
-                project.push_back(std::make_shared<TVarStmt>(loc, dstName, ptrI64Type));
-                project.push_back(std::make_shared<TAssignExpr>(loc, dstName,
-                    index(ident("output_buffers"), numI64(static_cast<int64_t>(i)))));
+                auto output = index(ident("output_buffers"), numI64(static_cast<int64_t>(i)));
+                if (r.IsBool()) {
+                    // A boolean output column is a bitmap, not one word per row.
+                    project.push_back(std::make_shared<TVarStmt>(loc, dstName, ptrU8Type));
+                    project.push_back(std::make_shared<TAssignExpr>(loc, dstName,
+                        std::make_shared<TCastExpr>(loc,
+                            std::make_shared<TCastExpr>(loc, std::move(output), i64Type),
+                            ptrU8Type)));
+                } else {
+                    project.push_back(std::make_shared<TVarStmt>(loc, dstName, ptrI64Type));
+                    project.push_back(std::make_shared<TAssignExpr>(
+                        loc, dstName, std::move(output)));
+                }
                 if (r.IsBinInt()) {
                     const std::string hiName = "agg_hi_" + std::to_string(i);
                     project.push_back(std::make_shared<TVarStmt>(loc, hiName, ptrI64Type));
@@ -2329,6 +2347,12 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
                 loopStmts.push_back(std::make_shared<TArrayAssignExpr>(loc, dstName,
                     std::vector<TExprPtr>{std::move(outHiSlot)},
                     index(ident(hiName), stateSlot())));
+            } else if (r.IsBool()) {
+                loopStmts.push_back(std::make_shared<TCallExpr>(loc,
+                    ident("qdb_bitmap_set_valid"),
+                    std::vector<TExprPtr>{
+                        ident(dstName), ident("slot"),
+                        binary("!=", index(ident(srcName), stateSlot()), numI64(0))}));
             } else {
                 loopStmts.push_back(std::make_shared<TArrayAssignExpr>(loc, dstName,
                     std::vector<TExprPtr>{ident("slot")},
@@ -2765,6 +2789,8 @@ NQumir::NAst::TExprPtr GenGenericAggregateMeasureAst(
                     std::make_shared<TIndexExpr>(loc, ident("agg_buffers"),
                         number(static_cast<int64_t>(reducer.ExtraBufIdx))),
                     ident("size")});
+        } else if (reducer.IsBool()) {
+            bytes = binary(">>", binary("+", ident("size"), number(7)), number(3));
         } else {
             bytes = binary("*", ident("size"), number(AggStateByteWidth(reducer)));
         }

@@ -52,6 +52,36 @@
         "t": "empty"
       },
       "order": "ordered"
+    },
+    "aggregate_scalar.sql": {
+      "order": "ordered"
+    },
+    "aggregate_grouped.sql": {
+      "order": "ordered"
+    },
+    "aggregate_distinct.sql": {
+      "order": "ordered"
+    },
+    "aggregate_having.sql": {
+      "order": "ordered"
+    },
+    "aggregate_empty.sql": {
+      "tables": {
+        "t": "empty"
+      },
+      "order": "ordered"
+    },
+    "aggregate_error_integer_argument.sql": {
+      "execute": false,
+      "expect_error": true
+    },
+    "aggregate_error_every_integer_argument.sql": {
+      "execute": false,
+      "expect_error": true
+    },
+    "aggregate_error_star_argument.sql": {
+      "execute": false,
+      "expect_error": true
     }
   }
 }

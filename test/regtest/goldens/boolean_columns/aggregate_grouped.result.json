@@ -1,0 +1,11 @@
+{
+  "schema": "<struct (k i64) (mn <named Nullable [bool]>) (mx <named Nullable [bool]>) (ba <named Nullable [bool]>) (bo <named Nullable [bool]>) (c i64) (mn4 bool) (mx4 bool) (bb bool) (bo4 bool)>",
+  "rows": [
+    ["0", null, null, null, null, "0", false, false, false, false],
+    ["1", true, true, true, true, "24", false, true, true, true],
+    ["2", false, false, false, false, "24", false, false, false, false],
+    ["3", null, null, null, null, "0", false, true, true, true],
+    ["4", false, false, false, false, "24", false, false, false, false],
+    ["5", true, true, true, true, "24", false, true, true, true]
+  ]
+}

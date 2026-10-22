@@ -134,6 +134,9 @@ private:
         NQumir::TLocation loc) const;
     std::expected<NQumir::NAst::TExprPtr, NQumir::TError> EmitStddevSamp(
         const TAggCall& agg, NQumir::TLocation loc);
+    // bool_and, bool_or and every, lowered to min/max over BOOLEAN.
+    std::expected<NQumir::NAst::TExprPtr, NQumir::TError> EmitBoolAggregate(
+        const TAggCall& agg, NQumir::TLocation loc);
     std::expected<NQumir::NAst::TExprPtr, NQumir::TError> Emit(
         const TAggCall& agg, NQumir::TLocation loc);
 
