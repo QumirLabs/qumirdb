@@ -2773,6 +2773,10 @@ struct TExecPlanCodec {
                 });
             }
         }
+        // Batches carry column types only while rows flow; the result schema
+        // types an empty result too.
+        const auto* output = static_cast<const NQumir::NAst::TStructType*>(
+            Plan.Nodes.at(Plan.Root).OutputType.get());
         llvm::json::Object out{
             {"supported", true},
             {"embedWasm", EmbedWasm},
@@ -2780,6 +2784,7 @@ struct TExecPlanCodec {
             {"nodes", std::move(Nodes)},
             {"edges", std::move(Edges)},
             {"root", static_cast<int64_t>(Plan.Root)},
+            {"output", StructColumnsJson(*output)},
         };
         if (EmbedWasm && !queryWasm.empty()) {
             out["wasm"] = std::move(queryWasm);

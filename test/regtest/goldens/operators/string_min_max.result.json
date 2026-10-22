@@ -1,0 +1,7 @@
+{
+  "schema": "<struct (k i64) (mn string) (mx string)>",
+  "rows": [
+    ["1", "a", "zzzzzzzz"],
+    ["2", "", "z"]
+  ]
+}

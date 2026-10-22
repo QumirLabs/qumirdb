@@ -4,8 +4,16 @@
   "nodes": [
     {
       "columns": [
-        { "name": "k", "nullable": false, "type": "i64" },
-        { "name": "v", "nullable": false, "type": "i64" }
+        {
+          "name": "k",
+          "nullable": false,
+          "type": "i64"
+        },
+        {
+          "name": "v",
+          "nullable": false,
+          "type": "i64"
+        }
       ],
       "id": 0,
       "kind": "source",
@@ -14,15 +22,25 @@
     },
     {
       "entrypoints": {},
-      "groupKeys": ["t.k"],
+      "groupKeys": [
+        "t.k"
+      ],
       "id": 1,
       "initialCapacity": 8,
       "keyCount": 1,
       "kind": "aggregate",
       "label": "aggregate keys=[t.k] aggs=[sum_0=sum]",
       "output": [
-        { "name": "k", "nullable": false, "type": "i64" },
-        { "name": "sum_0", "nullable": false, "type": "i64" }
+        {
+          "name": "k",
+          "nullable": false,
+          "type": "i64"
+        },
+        {
+          "name": "sum_0",
+          "nullable": false,
+          "type": "i64"
+        }
       ],
       "stageId": 2
     },
@@ -50,8 +68,30 @@
     }
   ],
   "edges": [
-    { "from": 0, "input": 0, "kind": "one-to-one", "to": 1 },
-    { "from": 1, "input": 0, "kind": "one-to-one", "to": 2 }
+    {
+      "from": 0,
+      "input": 0,
+      "kind": "one-to-one",
+      "to": 1
+    },
+    {
+      "from": 1,
+      "input": 0,
+      "kind": "one-to-one",
+      "to": 2
+    }
   ],
-  "root": 2
+  "root": 2,
+  "output": [
+    {
+      "name": "k",
+      "nullable": false,
+      "type": "i64"
+    },
+    {
+      "name": "s",
+      "nullable": false,
+      "type": "i64"
+    }
+  ]
 }

@@ -379,6 +379,39 @@ TEST(RegSuiteInfrastructure, RejectsUnknownFixturesAndVariants) {
     EXPECT_THROW(dir.Collect(), std::runtime_error);
 }
 
+TEST(RegSuiteInfrastructure, JsVariantIsLeftToTheBrowserRunner) {
+    TCaseDirectory dir;
+    dir.Write("other.sql", "SELECT v AS v FROM t;");
+    dir.Write("suite.json", R"({
+        "version":1,
+        "fixtures":{"data":{"json":"table.json"}},
+        "tables":{"t":"data"},"variants":["single","js"],
+        "cases":{"query.sql":{},"other.sql":{"variants":["threaded","single"]}}
+    })");
+    const auto tests = dir.Collect();
+    ASSERT_EQ(tests.size(), 3);
+    EXPECT_EQ(tests[0].Base, "group/other");
+    EXPECT_EQ(tests[0].Variant, "single");
+    EXPECT_EQ(tests[1].Base, "group/other");
+    EXPECT_EQ(tests[1].Variant, "threaded");
+    EXPECT_EQ(tests[2].Base, "group/query");
+    EXPECT_EQ(tests[2].Variant, "single");
+}
+
+TEST(RegSuiteInfrastructure, VariantsNeedANativeVariant) {
+    TCaseDirectory dir;
+    for (const auto* variants : {R"(["js"])", R"([])", R"(["single","single"])", R"(["single","wasm"])"}) {
+        auto manifest = std::string(TCaseDirectory::Manifest);
+        manifest.replace(manifest.find(R"(["single"])"), 10, variants);
+        dir.Write("suite.json", manifest);
+        EXPECT_THROW(dir.Collect(), std::runtime_error) << "suite variants " << variants;
+        manifest = TCaseDirectory::Manifest;
+        manifest.insert(manifest.find("\"order\":\"ordered\""), "\"variants\":" + std::string(variants) + ',');
+        dir.Write("suite.json", manifest);
+        EXPECT_THROW(dir.Collect(), std::runtime_error) << "case variants " << variants;
+    }
+}
+
 TEST(RegSuiteInfrastructure, RejectsUnlistedQueries) {
     TCaseDirectory dir;
     dir.Write("unlisted.sql", "SELECT v FROM t;");

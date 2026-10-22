@@ -19,7 +19,8 @@
   },
   "variants": [
     "single",
-    "threaded"
+    "threaded",
+    "js"
   ],
   "cases": {
     "project_values.sql": {

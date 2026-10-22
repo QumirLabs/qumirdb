@@ -148,5 +148,12 @@
       "to": 6
     }
   ],
-  "root": 6
+  "root": 6,
+  "output": [
+    {
+      "name": "n",
+      "nullable": false,
+      "type": "i64"
+    }
+  ]
 }

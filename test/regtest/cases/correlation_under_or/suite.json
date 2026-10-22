@@ -6,7 +6,7 @@
     "u": {"json": "tables/u.json"}
   },
   "tables": {"t": "t", "s": "s", "u": "u"},
-  "variants": ["single", "threaded"],
+  "variants": ["single", "threaded", "js"],
   "cases": {
     "scalar_count.sql": {"execute": false},
     "scalar_sum.sql": {"execute": false},

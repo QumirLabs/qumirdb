@@ -4955,9 +4955,11 @@ function materializeRowSets(rowSets, limit, layout, arena) {
   return { columns, rows };
 }
 
+// SQL NULL stays null so that it differs from an empty string; the result
+// table renders it as an empty cell.
 function formatValue(value) {
   if (value === null || value === undefined) {
-    return '';
+    return null;
   }
   if (typeof value === 'bigint') {
     return value.toString();

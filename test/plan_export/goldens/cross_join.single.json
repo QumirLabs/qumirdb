@@ -133,5 +133,17 @@
       "to": 4
     }
   ],
-  "root": 4
+  "root": 4,
+  "output": [
+    {
+      "name": "k",
+      "nullable": false,
+      "type": "i64"
+    },
+    {
+      "name": "w",
+      "nullable": false,
+      "type": "i64"
+    }
+  ]
 }

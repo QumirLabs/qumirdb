@@ -160,5 +160,27 @@
       "to": 3
     }
   ],
-  "root": 3
+  "root": 3,
+  "output": [
+    {
+      "name": "k",
+      "nullable": false,
+      "type": "i64"
+    },
+    {
+      "name": "v",
+      "nullable": false,
+      "type": "i64"
+    },
+    {
+      "name": "rk",
+      "nullable": true,
+      "type": "i64"
+    },
+    {
+      "name": "w",
+      "nullable": true,
+      "type": "i64"
+    }
+  ]
 }

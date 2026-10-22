@@ -1,0 +1,4 @@
+project (k, v, rk, w) (rows≈6 cost≈4.7K)
+└─ join right [r.rk = l.k] (rows≈6 cost≈4.6K)
+   ├─ source r AS r (rows≈6 cost≈96)
+   └─ source l AS l (rows≈5 cost≈80)

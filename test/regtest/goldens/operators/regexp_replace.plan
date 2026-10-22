@@ -1,0 +1,4 @@
+sort [domain asc]
+└─ project (domain) (rows≈1 cost≈112)
+   └─ filter (!= (call regexp_replace |t.url| (cast "^https?://(?:www\\.)?([^/]+)/.*$" <named StringView>) (cast "\\1" <named StringView>)) (cast "blocked" <named StringView>)) (rows≈1 cost≈96)
+      └─ source t AS t row-groups (!= (call regexp_replace |t.url| (cast "^https?://(?:www\\.)?([^/]+)/.*$" <named StringView>) (cast "\\1" <named StringView>)) (cast "blocked" <named StringView>)) (rows≈3 cost≈48)

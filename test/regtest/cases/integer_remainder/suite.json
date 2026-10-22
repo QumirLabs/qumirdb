@@ -5,7 +5,7 @@
     "pairs": {"json": "tables/s.json"}
   },
   "tables": {"t": "values", "s": "pairs"},
-  "variants": ["single", "threaded"],
+  "variants": ["single", "threaded", "js"],
   "cases": {
     "project_required.sql": {"order": "ordered"},
     "project_nullable.sql": {"order": "ordered"},

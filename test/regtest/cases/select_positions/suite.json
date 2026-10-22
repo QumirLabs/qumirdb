@@ -6,7 +6,7 @@
     "keys": {"json": "tables/keys.json"}
   },
   "tables": {"t": "numbers", "p": "pairs", "k": "keys"},
-  "variants": ["single", "threaded"],
+  "variants": ["single", "threaded", "js"],
   "cases": {
     "order_desc.sql": {"order": "ordered"},
     "order_identifier_control.sql": {"order": "ordered"},
@@ -36,7 +36,7 @@
     "order_joined_star.sql": {"order": "ordered"},
     "order_derived_column_aliases.sql": {"order": "ordered"},
     "order_inside_derived.sql": {"order": "unordered"},
-    "order_star_scalar_subquery.sql": {"order": "ordered"},
+    "order_star_scalar_subquery.sql": {"variants": ["single", "threaded"], "order": "ordered"},
     "order_star_where_subquery.sql": {"order": "ordered"},
     "order_correlated_subquery.sql": {"order": "ordered"},
     "group_correlated_subquery.sql": {"order": "ordered"},

@@ -4,7 +4,7 @@
     "numbers": {"json": "tables/numbers.json"}
   },
   "tables": {"t": "numbers"},
-  "variants": ["single", "threaded"],
+  "variants": ["single", "threaded", "js"],
   "cases": {
     "bound_date_interval.sql": {"order": "ordered"},
     "bound_cast_date.sql": {"order": "ordered"},

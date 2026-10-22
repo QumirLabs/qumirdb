@@ -7,7 +7,7 @@
     "inner_pairs": {"json": "tables/inner_pairs.json", "parquet": {"row_group_rows": 8}}
   },
   "tables": {"t": "outer", "v": "inner"},
-  "variants": ["single", "threaded"],
+  "variants": ["single", "threaded", "js"],
   "cases": {
     "sum_matches.sql": {"order": "unordered"},
     "min_matches.sql": {"order": "unordered"},

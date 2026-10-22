@@ -4,7 +4,7 @@
     "rows": {"json": "tables/t.json"}
   },
   "tables": {"t": "rows"},
-  "variants": ["single", "threaded"],
+  "variants": ["single", "threaded", "js"],
   "cases": {
     "pruned_subquery_column.sql": {"order": "unordered"},
     "pruned_cte_column.sql": {"order": "unordered"},

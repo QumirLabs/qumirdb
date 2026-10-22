@@ -4,7 +4,7 @@
     "rows": {"json": "tables/t.json"}
   },
   "tables": {"t": "rows"},
-  "variants": ["single", "threaded"],
+  "variants": ["single", "threaded", "js"],
   "cases": {
     "global_arguments.sql": {"order": "ordered"},
     "global_argument_order.sql": {"order": "ordered"},

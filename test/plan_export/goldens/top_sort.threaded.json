@@ -96,5 +96,17 @@
       "to": 2
     }
   ],
-  "root": 2
+  "root": 2,
+  "output": [
+    {
+      "name": "k",
+      "nullable": false,
+      "type": "i64"
+    },
+    {
+      "name": "v",
+      "nullable": false,
+      "type": "i64"
+    }
+  ]
 }

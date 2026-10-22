@@ -5,10 +5,10 @@
     "u": {"json": "tables/u.json"}
   },
   "tables": {"t": "t", "u": "u"},
-  "variants": ["single", "threaded"],
+  "variants": ["single", "threaded", "js"],
   "cases": {
-    "scalar_subquery.sql": {"order": "ordered"},
-    "subquery_beside_key.sql": {"order": "ordered"},
+    "scalar_subquery.sql": {"variants": ["single", "threaded"], "order": "ordered"},
+    "subquery_beside_key.sql": {"variants": ["single", "threaded"], "order": "ordered"},
     "in_subquery_operand.sql": {"order": "ordered"},
     "window_order_key.sql": {"order": "ordered"},
     "window_argument_partition_key.sql": {"order": "ordered"},

@@ -1,0 +1,4 @@
+project (k, w) (rows≈8 cost≈4.5K)
+└─ join inner residual (< |l.v| |r.w|) (rows≈8 cost≈4.4K)
+   ├─ source l AS l (rows≈4 cost≈64)
+   └─ source r AS r (rows≈2 cost≈16)

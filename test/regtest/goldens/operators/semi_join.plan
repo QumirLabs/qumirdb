@@ -1,0 +1,5 @@
+project (k, v) (rows≈20 cost≈5.8K)
+└─ join left_semi [l.k = __qdb_in__rk] emit-filter 1 from right (rows≈20 cost≈5.4K)
+   ├─ source l AS l use-filter 1 keys=[l.k] (rows≈40 cost≈640)
+   └─ project (__qdb_in__rk) (rows≈3 cost≈48)
+      └─ source r AS r (rows≈3 cost≈24)

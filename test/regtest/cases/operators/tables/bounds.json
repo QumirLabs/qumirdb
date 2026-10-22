@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "schema": "<struct (w i64)>",
+  "rows": [
+    ["15"],
+    ["35"]
+  ]
+}

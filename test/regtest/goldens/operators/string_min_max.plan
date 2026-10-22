@@ -1,0 +1,3 @@
+project (k, mn, mx) (rows≈2 cost≈592)
+└─ aggregate keys=[t.k] aggs=[min_0=min, max_0=max] (rows≈2 cost≈512)
+   └─ source t AS t (rows≈8 cost≈192)

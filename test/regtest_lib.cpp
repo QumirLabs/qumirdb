@@ -561,6 +561,22 @@ TFloatTolerance ToleranceOption(const TObject& object, TFloatTolerance fallback)
     return fallback;
 }
 
+// The variants this runner executes. "js" belongs to the browser runner
+// (test/test_reg.mjs), which checks the same goldens; a native variant must
+// remain, because only native runs canonize them.
+std::set<std::string> NativeVariants(const TValue& value) {
+    std::set<std::string> variants;
+    for (const auto& item : Array(value)) {
+        const auto variant = String(item);
+        if ((variant != "single" && variant != "threaded" && variant != "js") || !variants.insert(variant).second) {
+            throw std::runtime_error("unknown or duplicate execution variant '" + variant + "'");
+        }
+    }
+    variants.erase("js");
+    if (variants.empty()) throw std::runtime_error("variants need a native execution variant (single or threaded)");
+    return variants;
+}
+
 fs::path File(const fs::path& dir, const TValue& value) {
     const auto path = (dir / String(value)).lexically_normal();
     if (!fs::is_regular_file(path)) throw std::runtime_error("missing file " + path.string());
@@ -738,20 +754,15 @@ std::vector<TQueryCase> CollectCases(const fs::path& root, const fs::path& golde
                 }
             };
             validateTables(tables);
-            std::set<std::string> variants;
-            for (const auto& value : Array(Required(object, "variants"))) {
-                const auto variant = String(value);
-                if ((variant != "single" && variant != "threaded") || !variants.insert(variant).second) {
-                    throw std::runtime_error("unknown or duplicate execution variant '" + variant + "'");
-                }
-            }
-            if (variants.empty()) throw std::runtime_error("suite needs at least one execution variant");
+            const auto variants = NativeVariants(Required(object, "variants"));
             std::set<fs::path> queries;
             for (const auto& [name, value] : Object(Required(object, "cases"))) {
                 const auto& definition = Object(value);
-                Fields(definition, {"tables", "order", "execute", "tol"});
+                Fields(definition, {"tables", "order", "execute", "tol", "variants"});
                 const bool execute = ExecuteOption(definition, suiteExecute);
                 const auto tol = ToleranceOption(definition, suiteTol);
+                const auto* caseVariants = definition.get("variants");
+                const auto executed = caseVariants ? NativeVariants(*caseVariants) : variants;
                 const auto sql = File(dir, TValue(name.str()));
                 if (sql.extension() != ".sql" || sql.parent_path() != dir) {
                     throw std::runtime_error("suite SQL cases must be .sql files in the manifest directory");
@@ -768,9 +779,9 @@ std::vector<TQueryCase> CollectCases(const fs::path& root, const fs::path& golde
                 const auto base = fs::path(relativeSql).replace_extension();
                 const auto golden = fs::path(goldenRoot / relativeSql).replace_extension(".result.json");
                 const auto planGolden = fs::path(goldenRoot / relativeSql).replace_extension(".plan");
-                const auto caseVariants = bindings.empty() || !execute
-                    ? std::set<std::string>{"plan"} : variants;
-                for (const auto& variant : caseVariants) {
+                const auto runs = bindings.empty() || !execute
+                    ? std::set<std::string>{"plan"} : executed;
+                for (const auto& variant : runs) {
                     result.push_back({base, sql, planGolden,
                         golden, suite, bindings, variant, order == "ordered", execute, tol});
                 }

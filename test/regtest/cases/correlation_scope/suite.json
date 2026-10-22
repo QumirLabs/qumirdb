@@ -8,7 +8,7 @@
     "t": "outer",
     "u": "inner"
   },
-  "variants": ["single", "threaded"],
+  "variants": ["single", "threaded", "js"],
   "cases": {
     "correlated_cte_bare_outer.sql": {"order": "unordered"},
     "scalar_over_star_derived.sql": {"order": "unordered"},
