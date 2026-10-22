@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "fixtures": {
+    "t": {"json": "tables/t.json"},
+    "u": {"json": "tables/u.json"}
+  },
+  "tables": {"t": "t", "u": "u"},
+  "variants": ["single", "threaded"],
+  "cases": {
+    "nullable_expression.sql": {"order": "ordered"},
+    "nullable_expression_without_else.sql": {"order": "ordered"},
+    "nested.sql": {"order": "ordered"},
+    "aggregate_operand.sql": {"order": "ordered"},
+    "subquery_operand.sql": {"order": "ordered"}
+  }
+}

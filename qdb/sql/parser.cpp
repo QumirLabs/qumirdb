@@ -1998,32 +1998,25 @@ TAstExprTask function_args(TParserContext& ctx) {
 
 // <case_expr> ::= "CASE" [ <expr> ] { "WHEN" <expr> "THEN" <expr> } [ "ELSE" <expr> ] "END"
 // (the leading "CASE" is consumed by <primary_expr>)
-// Desugars to a chain of if-expressions.
+// Desugars to a chain of if-expressions. A simple CASE is the searched CASE whose
+// conditions compare the operand with each WHEN value, as the SQL standard defines
+// it, so a NULL operand matches no WHEN; the comparisons share the operand node.
 TAstExprTask case_expr(TParserContext& ctx) {
     std::vector<std::pair<NQumir::NAst::TExprPtr, NQumir::NAst::TExprPtr>> branches;
 
     auto token = ctx.Stream.Next();
     auto loc = token.Location;
     NQumir::NAst::TExprPtr operand;
-    std::shared_ptr<NQumir::NAst::TIdentExpr> operandIdent;
-    bool tempOperand = false;
-    const std::string tempName = "__qdb_sql_case";
     if (!IsKeyword(token, "WHEN")) {
         ctx.Stream.Unget(token);
         operand = co_await expr(ctx);
-        if (auto maybeIdent = NQumir::NAst::TMaybeNode<NQumir::NAst::TIdentExpr>(operand)) {
-            operandIdent = maybeIdent.Cast();
-        } else {
-            tempOperand = true;
-            operandIdent = std::make_shared<NQumir::NAst::TIdentExpr>(loc, tempName);
-        }
         token = ctx.Stream.Next();
     }
 
     while (IsKeyword(token, "WHEN")) {
         auto cond = co_await expr(ctx);
         if (operand) {
-            cond = binary(token.Location, "=="_op, operandIdent, cond);
+            cond = binary(token.Location, "=="_op, operand, cond);
         }
 
         auto then = ctx.Stream.Next();
@@ -2057,15 +2050,6 @@ TAstExprTask case_expr(TParserContext& ctx) {
         // coerces it to a plain bool for the `if` (identity for a non-nullable bool).
         auto cond = call(loc, "qdb_is_true", {it->first});
         ret = std::make_shared<NQumir::NAst::TIfExpr>(loc, std::move(cond), it->second, ret);
-    }
-    if (tempOperand) {
-        auto temp = std::make_shared<NQumir::NAst::TVarStmt>(loc, tempName, NQumir::NAst::TTypePtr{});
-        temp->Init = std::move(operand);
-        std::vector<NQumir::NAst::TExprPtr> stmts;
-        stmts.reserve(2);
-        stmts.push_back(std::move(temp));
-        stmts.push_back(std::move(ret));
-        ret = std::make_shared<NQumir::NAst::TBlockExpr>(loc, std::move(stmts));
     }
     co_return ret;
 }
