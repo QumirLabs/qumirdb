@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "fixtures": {
+    "rows": {"json": "tables/t.json"}
+  },
+  "tables": {"t": "rows"},
+  "variants": ["single", "threaded"],
+  "cases": {
+    "output_input_column.sql": {"order": "ordered"},
+    "output_aggregate_key.sql": {"order": "ordered"},
+    "computed_key_input_column.sql": {"order": "ordered"}
+  }
+}

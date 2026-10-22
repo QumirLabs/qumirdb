@@ -830,7 +830,7 @@ std::expected<TOperatorPtr, TError> TWindowCollector::Build(TOperatorPtr input) 
         auto printed = NAst::NCore::PrintAst(expr);
         auto it = computed.find(printed);
         if (it == computed.end()) {
-            std::string name = "wk_" + std::to_string(computed.size());
+            std::string name = Names_.Next("wk");
             computed.emplace(printed, std::make_pair(name, expr));
             return name;
         }
@@ -949,7 +949,7 @@ std::expected<NAst::TExprPtr, TError> TWindowCollector::Emit(const NSql::TSqlPtr
         }
         raw.Frame = ConvertFrame(w->WindowSpec->Frame);
     }
-    raw.Name = "w_" + std::to_string(Counter_++);
+    raw.Name = Names_.Next("w");
     raw.Signature = Signature(raw);
     auto loc = w->Location;
     Raw_.push_back(std::move(raw));
