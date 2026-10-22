@@ -1,0 +1,137 @@
+{
+  "supported": true,
+  "embedWasm": false,
+  "nodes": [
+    {
+      "columns": [
+        {
+          "name": "k",
+          "nullable": false,
+          "type": "i64"
+        },
+        {
+          "name": "v",
+          "nullable": false,
+          "type": "i64"
+        }
+      ],
+      "id": 0,
+      "kind": "source",
+      "stageId": 3,
+      "table": "l"
+    },
+    {
+      "columns": [
+        {
+          "name": "w",
+          "nullable": false,
+          "type": "i64"
+        }
+      ],
+      "id": 1,
+      "kind": "source",
+      "stageId": 4,
+      "table": "r"
+    },
+    {
+      "entrypoints": {},
+      "id": 2,
+      "kind": "cross-join",
+      "label": "join inner residual (< |l.v| |r.w|)",
+      "leftColumns": [
+        {
+          "name": "k",
+          "nullable": false,
+          "type": "i64"
+        },
+        {
+          "name": "v",
+          "nullable": false,
+          "type": "i64"
+        }
+      ],
+      "output": [
+        {
+          "name": "k",
+          "nullable": false,
+          "type": "i64"
+        },
+        {
+          "name": "v",
+          "nullable": false,
+          "type": "i64"
+        },
+        {
+          "name": "w",
+          "nullable": false,
+          "type": "i64"
+        }
+      ],
+      "rightColumns": [
+        {
+          "name": "w",
+          "nullable": false,
+          "type": "i64"
+        }
+      ],
+      "stageId": 2
+    },
+    {
+      "entrypoints": {},
+      "id": 3,
+      "kind": "filter",
+      "label": "filter (< |l.v| |r.w|)",
+      "predicate": "(< |l.v| |r.w|)",
+      "stageId": 5
+    },
+    {
+      "entrypoints": {},
+      "id": 4,
+      "kind": "project",
+      "output": [
+        {
+          "inputIndex": 0,
+          "name": "k",
+          "nullable": false,
+          "source": "passthrough",
+          "type": "i64"
+        },
+        {
+          "inputIndex": 2,
+          "name": "w",
+          "nullable": false,
+          "source": "passthrough",
+          "type": "i64"
+        }
+      ],
+      "stageId": 1
+    }
+  ],
+  "edges": [
+    {
+      "from": 0,
+      "input": 0,
+      "kind": "one-to-one",
+      "to": 2
+    },
+    {
+      "from": 1,
+      "input": 1,
+      "kind": "one-to-one",
+      "to": 2
+    },
+    {
+      "from": 2,
+      "input": 0,
+      "kind": "one-to-one",
+      "to": 3
+    },
+    {
+      "from": 3,
+      "input": 0,
+      "kind": "one-to-one",
+      "to": 4
+    }
+  ],
+  "root": 4
+}

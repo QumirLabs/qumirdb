@@ -109,6 +109,15 @@ const fixtures = {
       r: { rk: [2, 4, 5], w: [200, 400, 500] },
     },
   },
+  // A join without equi-keys: the nested-loop kernel and its residual filter.
+  cross_join: {
+    sql: 'SELECT l.k AS k, r.w AS w FROM l, r WHERE l.v < r.w',
+    tables: {
+      l: { k: [1, 2, 3, 4], v: [10, 20, 30, 40] },
+      r: { w: [15, 35] },
+    },
+    browserBatchSizes: { l: [2, 2] },
+  },
   // Force right-build SEMI with a ratio above JoinAsymmetryRatio.
   semi_join: {
     sql: 'SELECT k AS k, v AS v FROM l WHERE k IN (SELECT rk FROM r)',

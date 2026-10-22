@@ -1,0 +1,1 @@
+SELECT id, id + 1 IN (SELECT x FROM u WHERE x IS NOT NULL) AS m FROM t;

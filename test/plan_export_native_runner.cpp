@@ -144,6 +144,17 @@ TFixture MakeFixture(std::string_view name) {
                 {2, 4, 5}, {200, 400, 500}}));
         return fixture;
     }
+    if (name == "cross_join") {
+        fixture.Sql = "SELECT l.k AS k, r.w AS w FROM l, r WHERE l.v < r.w";
+        fixture.Tables.emplace("l", std::make_unique<TFixtureTable>(
+            std::vector<std::string>{"k", "v"},
+            std::vector<std::vector<int64_t>>{
+                {1, 2, 3, 4}, {10, 20, 30, 40}}));
+        fixture.Tables.emplace("r", std::make_unique<TFixtureTable>(
+            std::vector<std::string>{"w"},
+            std::vector<std::vector<int64_t>>{{15, 35}}));
+        return fixture;
+    }
     if (name == "semi_join") {
         fixture.Sql =
             "SELECT k AS k, v AS v FROM l WHERE k IN (SELECT rk FROM r)";

@@ -1,0 +1,4 @@
+project (ex, ux) (rows≈3 cost≈4.2K)
+└─ join full residual (< |e.x| |u.x|) (rows≈3 cost≈4.2K)
+   ├─ source e AS e (rows≈0 cost≈0)
+   └─ source u AS u (rows≈3 cost≈24)

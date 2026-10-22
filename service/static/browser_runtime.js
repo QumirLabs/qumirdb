@@ -2825,13 +2825,14 @@ function updateCrossLeftState(state, rowSet) {
     stableRowSetForStore(state, rowSet);
   state.instrumentation?.retain(rowSet, 0);
   const batchIdx = state.leftStore.push(rowSet.batch, rowsetPtr, ownedPtr, wasmHandle);
-  const batchPtr = state.leftStore.dataPtr() + batchIdx * state.layout.rowset.size;
   try {
+    // Plan export sends only inner cross joins here, which flag no right rows.
     const ok = state.dispatch(
-      toWasmPtr(batchPtr),
+      toWasmPtr(state.leftStore.dataPtr()),
       BigInt(batchIdx),
       toWasmPtr(state.rightStore.dataPtr()),
       BigInt(state.rightStore.batches.length),
+      toWasmPtr(0),
       toWasmPtr(state.pairBuffer),
       CrossJoinOp.EMIT);
     if (!ok) {
@@ -2871,6 +2872,7 @@ function finishCrossJoinState(state) {
     0n,
     toWasmPtr(0),
     0n,
+    toWasmPtr(0),
     toWasmPtr(state.pairBuffer),
     CrossJoinOp.DESTROY);
   state.leftStore.freeMarshalled();

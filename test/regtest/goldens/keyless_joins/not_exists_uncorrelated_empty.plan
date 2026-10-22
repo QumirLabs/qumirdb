@@ -1,0 +1,5 @@
+project (id) (rows≈1 cost≈4.2K)
+└─ join left_anti (rows≈1 cost≈4.2K)
+   ├─ source t AS t (rows≈4 cost≈32)
+   └─ filter (== |s.k| 9) (rows≈1 cost≈80)
+      └─ source s AS s row-groups (== |s.k| 9) (rows≈5 cost≈40)

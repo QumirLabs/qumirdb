@@ -1,0 +1,4 @@
+project (id) (rows≈4 cost≈4.3K)
+└─ join left_semi residual (|| (== |s.k| |t.id|) (== |s.v| 1)) (rows≈4 cost≈4.2K)
+   ├─ source t AS t (rows≈4 cost≈32)
+   └─ source s AS s (rows≈5 cost≈80)

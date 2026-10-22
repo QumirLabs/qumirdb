@@ -142,6 +142,12 @@ BuildCrossJoinKernelLibrary() {
     if (!library) {
         return library;
     }
+    // Default always-true residual filter, called by join_cross.oz. Inner
+    // keeps it (its residual filters the product downstream); CompileCrossJoin
+    // replaces it with the residual that decides matches of the other types.
+    if (auto e = AddParsedKernel(*library, ReadJoinKernel("join_residual_default.oz"))) {
+        return std::unexpected(*e);
+    }
     if (auto e = AddParsedKernel(*library, ReadJoinKernel("join_cross.oz"))) {
         return std::unexpected(*e);
     }

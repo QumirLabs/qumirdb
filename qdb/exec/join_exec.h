@@ -198,15 +198,20 @@ private:
     int64_t LastRightBatchRows_ = 0;
 };
 
-// Fetch-driven Cartesian product join for the scheduler cross-scalar path.
-// Buffers the broadcast right side, emits row-id pairs in xj_dispatch, then
-// materializes through the shared jt_materialize kernel. Residual filtering is
-// applied downstream (cross -> filter).
+// Fetch-driven nested-loop join for joins without equi-keys. Buffers the
+// (broadcast) right side, streams left batches through xj_dispatch, which
+// emits row-id pairs as the compiled join type requires, then materializes
+// through the shared jt_materialize kernel. An inner join's residual is
+// applied downstream (cross -> filter); the other types evaluate it in the
+// kernel, where it decides matches. RIGHT / FULL pad the unmatched right rows
+// after the last left batch, so they must see the whole left input.
 class TCrossJoinProcessor {
 public:
     using TFetch = std::function<EJoinFetchResult(TRowSet&)>;
 
-    explicit TCrossJoinProcessor(TCrossJoinKernels kernels);
+    explicit TCrossJoinProcessor(
+        TCrossJoinKernels kernels,
+        EJoinType joinType = EJoinType::Inner);
     void SetInstrumentation(TOperatorInstrumentation* instrumentation);
     TCrossJoinProcessor(const TCrossJoinProcessor&) = delete;
     TCrossJoinProcessor& operator=(const TCrossJoinProcessor&) = delete;
@@ -226,11 +231,17 @@ private:
     static_assert(sizeof(TPairBufferState) == TKernelCompiler::PairBufferSize);
 
     bool DrainMaterialized(TRowSet& rowSet);
+    bool KeepsUnmatchedLeft() const;
+    bool KeepsUnmatchedRight() const;
+    bool Dispatch(int32_t leftBatch, ECrossJoinKernelOp op);
 
 private:
     TCrossJoinKernels Kernels_;
+    EJoinType JoinType_ = EJoinType::Inner;
     TRowStore LeftRows_;
     TRowStore RightRows_;
+    // One match flag per buffered right row, in store order (RIGHT / FULL).
+    std::vector<uint8_t> RightMatched_;
     TPairBufferState PairBuffer_;
     int64_t MaterializeCursor_ = 0;
     bool RightDrained_ = false;

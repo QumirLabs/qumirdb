@@ -1238,7 +1238,7 @@ TEST(CompileCrossJoin, EmitsSelectedPairsAndMaterializesStringPayload) {
                  .RefCount = 1};
 
   TPairBuffer pairs{};
-  ASSERT_TRUE(kernels.Dispatch(&lbatch, 0, &rbatch, 1, &pairs,
+  ASSERT_TRUE(kernels.Dispatch(&lbatch, 0, &rbatch, 1, nullptr, &pairs,
                                static_cast<int64_t>(ECrossJoinKernelOp::Emit)));
   ASSERT_EQ(pairs.Count, 2);
   EXPECT_EQ(pairs.Data[0], PackRowId(0, 0));
@@ -1267,8 +1267,102 @@ TEST(CompileCrossJoin, EmitsSelectedPairsAndMaterializesStringPayload) {
   EXPECT_EQ(outRv[1], 20);
 
   FreeMaterializedRowSet(out);
-  kernels.Dispatch(nullptr, 0, nullptr, 0, &pairs,
+  kernels.Dispatch(nullptr, 0, nullptr, 0, nullptr, &pairs,
                    static_cast<int64_t>(ECrossJoinKernelOp::Destroy));
+}
+
+namespace {
+
+// Nested-loop fixture for the residual lk < rv: left lk = {1, 5, 3} with row
+// 2 unselected; right rv = {2, 4} and {0, 6} with row 6 unselected. Left row
+// 0 matches right rows (0, 0) and (0, 1); left row 1 and right row (1, 0)
+// match nothing.
+struct TCrossJoinResidualInput {
+  std::vector<int64_t> Lk = {1, 5, 3};
+  std::vector<uint8_t> LeftSelection = {1, 1, 0};
+  std::vector<int64_t> Rv0 = {2, 4};
+  std::vector<int64_t> Rv1 = {0, 6};
+  std::vector<uint8_t> RightSelection1 = {1, 0};
+  std::vector<TColumn> LeftColumns = {
+      TColumn{.Data = reinterpret_cast<char *>(Lk.data())}};
+  std::vector<TColumn> RightColumns0 = {
+      TColumn{.Data = reinterpret_cast<char *>(Rv0.data())}};
+  std::vector<TColumn> RightColumns1 = {
+      TColumn{.Data = reinterpret_cast<char *>(Rv1.data())}};
+  TRowSet Left{.Columns = LeftColumns.data(),
+               .ColumnCount = 1,
+               .RowCount = 3,
+               .Selection = LeftSelection.data(),
+               .RefCount = 1};
+  std::vector<TRowSet> Right = {
+      TRowSet{.Columns = RightColumns0.data(),
+              .ColumnCount = 1,
+              .RowCount = 2,
+              .RefCount = 1},
+      TRowSet{.Columns = RightColumns1.data(),
+              .ColumnCount = 1,
+              .RowCount = 2,
+              .Selection = RightSelection1.data(),
+              .RefCount = 1},
+  };
+  // One flag per right row in store order.
+  std::vector<uint8_t> RightMatched = std::vector<uint8_t>(4, 0);
+};
+
+TCrossJoinKernels CompileResidualCrossJoin(EJoinType type) {
+  using namespace NQumir::NAst;
+  auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
+  TStructType leftType({{"lk", i64}});
+  TStructType rightType({{"rv", i64}});
+  TKernelCompiler compiler;
+  return compiler.CompileCrossJoin(NKernel::BuildCrossJoinKernelSpec(
+      leftType, rightType, type, ParseExpr("(< lk rv)")));
+}
+
+std::vector<int64_t> CrossJoinPairs(TCrossJoinKernels &kernels,
+                                    TCrossJoinResidualInput &input,
+                                    ECrossJoinKernelOp op, TPairBuffer &pairs) {
+  EXPECT_TRUE(kernels.Dispatch(&input.Left, 0, input.Right.data(), 2,
+                               input.RightMatched.data(), &pairs,
+                               static_cast<int64_t>(op)));
+  return std::vector<int64_t>(pairs.Data, pairs.Data + 2 * pairs.Count);
+}
+
+} // namespace
+
+TEST(CompileCrossJoin, FullJoinPadsUnmatchedRowsOfBothSides) {
+  auto kernels = CompileResidualCrossJoin(EJoinType::Full);
+  TCrossJoinResidualInput input;
+  TPairBuffer pairs{};
+
+  EXPECT_EQ(CrossJoinPairs(kernels, input, ECrossJoinKernelOp::Emit, pairs),
+            (std::vector<int64_t>{PackRowId(0, 0), PackRowId(0, 0),
+                                  PackRowId(0, 0), PackRowId(0, 1),
+                                  PackRowId(0, 1), -1}));
+  EXPECT_EQ(input.RightMatched, (std::vector<uint8_t>{1, 1, 0, 0}));
+  pairs.Count = 0;
+  EXPECT_EQ(CrossJoinPairs(kernels, input,
+                           ECrossJoinKernelOp::EmitUnmatchedRight, pairs),
+            (std::vector<int64_t>{-1, PackRowId(1, 0)}));
+
+  kernels.Dispatch(nullptr, 0, nullptr, 0, nullptr, &pairs,
+                   static_cast<int64_t>(ECrossJoinKernelOp::Destroy));
+}
+
+TEST(CompileCrossJoin, SemiAndAntiEmitEachLeftRowOnceByMatch) {
+  for (const auto [type, row] :
+       {std::pair{EJoinType::LeftSemi, 0}, std::pair{EJoinType::LeftAnti, 1}}) {
+    auto kernels = CompileResidualCrossJoin(type);
+    TCrossJoinResidualInput input;
+    TPairBuffer pairs{};
+
+    EXPECT_EQ(CrossJoinPairs(kernels, input, ECrossJoinKernelOp::Emit, pairs),
+              (std::vector<int64_t>{PackRowId(0, row), -1}))
+        << JoinTypeName(type);
+
+    kernels.Dispatch(nullptr, 0, nullptr, 0, nullptr, &pairs,
+                     static_cast<int64_t>(ECrossJoinKernelOp::Destroy));
+  }
 }
 
 namespace {

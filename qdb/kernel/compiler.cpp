@@ -61,6 +61,66 @@ NQumir::NAst::TExprPtr ClonePredicate(
     return CloneExpr(predicate);
 }
 
+// A join residual prepared for the generated jt_residual_filter, which reads
+// the inner join row (left fields ++ right fields, split at LeftFieldCount)
+// from both row stores. Predicate is null when the join has no residual.
+struct TJoinResidual {
+    NQumir::NAst::TExprPtr Predicate;
+    NQumir::NAst::TTypePtr InnerType;
+    size_t LeftFieldCount = 0;
+
+    const NQumir::NAst::TStructType* Inner() const {
+        return static_cast<const NQumir::NAst::TStructType*>(InnerType.get());
+    }
+};
+
+TJoinResidual PrepareJoinResidual(
+    const NKernel::TOperatorKernelSpec& spec,
+    const TExternalCatalogSnapshot* externalCatalog,
+    const std::string& kernel)
+{
+    using namespace NQumir::NAst;
+    if (spec.Expressions.empty()) {
+        return {};
+    }
+    auto innerOutput = ComputeJoinOutputType(
+        spec.InputSchemas[0], spec.InputSchemas[1], EJoinType::Inner);
+    if (!innerOutput) {
+        throw NQumir::TError(
+            kernel + ": residual filter: " + innerOutput.error().ToString());
+    }
+    const auto* innerType = static_cast<const TStructType*>(innerOutput->get());
+    return TJoinResidual{
+        .Predicate = NKernel::ExpandKernelExpr(
+            ClonePredicate(spec.Expressions[0]), *innerType, externalCatalog).first,
+        .InnerType = *innerOutput,
+        .LeftFieldCount =
+            static_cast<const TStructType*>(spec.InputSchemas[0].get())->Fields.size(),
+    };
+}
+
+// Replaces the library's default jt_residual_filter (join_residual_default.oz)
+// with the generated one, keeping its position before the helpers that call it.
+void InjectJoinResidualFilter(
+    std::vector<NQumir::NAst::TExprPtr>& library,
+    const NQumir::NAst::TExprPtr& predicate,
+    const NQumir::NAst::TStructType& innerType,
+    size_t leftFieldCount,
+    const NQumir::NAst::TTypePtr& columnType,
+    const NQumir::NAst::TTypePtr& rowSetType,
+    const NQumir::NAst::TTypePtr& stringViewType)
+{
+    for (auto& f : library) {
+        auto fun = NQumir::NAst::TMaybeNode<NQumir::NAst::TFunDecl>(f);
+        if (fun && fun.Cast()->Name == "jt_residual_filter") {
+            f = NKernel::GenJoinResidualFilterAst(
+                predicate, innerType, leftFieldCount,
+                columnType, rowSetType, stringViewType);
+            return;
+        }
+    }
+}
+
 void EnsureQumirDbUse(const NQumir::NAst::TExprPtr& ast) {
     using namespace NQumir::NAst;
     auto block = TMaybeNode<TBlockExpr>(ast);
@@ -105,7 +165,7 @@ std::unordered_map<std::string, void*> CompileKernelAst(
 namespace {
 constexpr const char* CacheSchemaVersion = "v1";
 // Bump when the generated key helpers or the .oz kernel libraries change.
-constexpr const char* KernelLibVersion = "33";
+constexpr const char* KernelLibVersion = "34";
 } // namespace
 
 NQumir::NCodeGen::TLlvmRunner::TLinkedModule CompileKernelAstCached(
@@ -2109,32 +2169,14 @@ TJoinKernels TKernelCompiler::CompileJoin(
         keys.push_back({key.Left.Name, key.Right.Name, key.NullsEqual});
     }
 
-    TExprPtr residualPredicate =
-        spec.Expressions.empty() ? nullptr : ClonePredicate(spec.Expressions[0]);
-    if (residualPredicate &&
+    if (!spec.Expressions.empty() &&
         spec.JoinType != EJoinType::Inner &&
         spec.JoinType != EJoinType::LeftSemi &&
         spec.JoinType != EJoinType::LeftAnti) {
         throw NQumir::TError(
             "CompileJoin: residual filter is not yet supported for this join type");
     }
-
-    TTypePtr innerOutputType;
-    TStructType* innerType = nullptr;
-    size_t leftFieldCount = 0;
-    if (residualPredicate) {
-        auto innerOutput = ComputeJoinOutputType(
-            spec.InputSchemas[0], spec.InputSchemas[1], EJoinType::Inner);
-        if (!innerOutput) {
-            throw NQumir::TError(
-                "CompileJoin: residual filter: " + innerOutput.error().ToString());
-        }
-        innerOutputType = *innerOutput;
-        innerType = static_cast<TStructType*>(innerOutputType.get());
-        leftFieldCount = leftType.Cast()->Fields.size();
-        residualPredicate = NKernel::ExpandKernelExpr(
-            residualPredicate, *innerType, ExternalCatalog_.get()).first;
-    }
+    const auto residual = PrepareJoinResidual(spec, ExternalCatalog_.get(), "CompileJoin");
 
     if (Diagnostics_) {
         *Diagnostics_ << "\n========== KERNEL SPEC ==========\n";
@@ -2144,7 +2186,8 @@ TJoinKernels TKernelCompiler::CompileJoin(
 
     return CompileJoin(
         *leftType.Cast(), *rightType.Cast(), keys, spec.JoinType,
-        residualPredicate, innerType, leftFieldCount, spec.HasPrecomputedHash);
+        residual.Predicate, residual.Inner(), residual.LeftFieldCount,
+        spec.HasPrecomputedHash);
 }
 
 TCrossJoinKernels TKernelCompiler::CompileCrossJoin(
@@ -2176,12 +2219,21 @@ TCrossJoinKernels TKernelCompiler::CompileCrossJoin(
     auto rowSetType = QumirDbNamedType("TRowSet");
     auto pairBufferType = QumirDbNamedType("PairBuffer");
     auto stringViewType = QumirDbNamedType("StringView");
+    const auto residual = PrepareJoinResidual(
+        spec, ExternalCatalog_.get(), "CompileCrossJoin");
+    const bool includeRight =
+        spec.JoinType != EJoinType::LeftSemi && spec.JoinType != EJoinType::LeftAnti;
 
     auto buildProgram = [&]() -> std::vector<TExprPtr> {
         auto library = NKernel::BuildCrossJoinKernelLibrary();
         if (!library) {
             throw NQumir::TError(
                 "CompileCrossJoin: " + library.error().ToString());
+        }
+        if (residual.Predicate) {
+            InjectJoinResidualFilter(
+                *library, residual.Predicate, *residual.Inner(), residual.LeftFieldCount,
+                columnType, rowSetType, stringViewType);
         }
 
         std::vector<TExprPtr> program;
@@ -2212,8 +2264,10 @@ TCrossJoinKernels TKernelCompiler::CompileCrossJoin(
             }
         }
 
+        program.push_back(NKernel::GenCrossJoinDispatchAst(
+            spec.JoinType, rowSetType, pairBufferType));
         program.push_back(NKernel::GenJoinMaterializeAst(
-            *leftType.Cast(), *rightType.Cast(), /*includeRight=*/true,
+            *leftType.Cast(), *rightType.Cast(), includeRight,
             columnType, rowSetType, pairBufferType, stringViewType));
         return program;
     };
@@ -2226,20 +2280,22 @@ TCrossJoinKernels TKernelCompiler::CompileCrossJoin(
     FinishKernelDiagnostics(Diagnostics_);
 
     auto slot = kernel.Slot;
-    using TDispatchFn = bool(*)(TRowSet*, int64_t, TRowSet*, int64_t, void*, int64_t);
+    using TDispatchFn = bool(*)(
+        TRowSet*, int64_t, TRowSet*, int64_t, uint8_t*, void*, int64_t);
     using TMaterializeFn = int64_t(*)(
         void*, TRowSet*, TRowSet*, TRowSet*, TRowSet*, int64_t, int64_t, TRowSet*);
 
     TCrossJoinKernels kernels;
     kernels.Dispatch = [slot](
-        TRowSet* batch,
+        TRowSet* leftStore,
         int64_t batchIdx,
         TRowSet* rightStore,
         int64_t rightBatchCount,
+        uint8_t* rightMatched,
         void* pairs,
         int64_t op) {
         return reinterpret_cast<TDispatchFn>(slot->Fns[0])(
-            batch, batchIdx, rightStore, rightBatchCount, pairs, op);
+            leftStore, batchIdx, rightStore, rightBatchCount, rightMatched, pairs, op);
     };
     kernels.Materialize = [slot](
         void* pairs,
@@ -2459,19 +2515,10 @@ TJoinKernels TKernelCompiler::CompileJoin(
         if (!library) {
             throw NQumir::TError("CompileJoin: " + library.error().ToString());
         }
-        // When a residual predicate is given, replace the library's default
-        // jt_residual_filter (join_residual_default.oz) with the generated one,
-        // keeping its position (before join_update.oz, which calls it).
         if (residualPredicate && innerType) {
-            for (auto& f : *library) {
-                auto fun = NQumir::NAst::TMaybeNode<NQumir::NAst::TFunDecl>(f);
-                if (fun && fun.Cast()->Name == "jt_residual_filter") {
-                    f = NKernel::GenJoinResidualFilterAst(
-                        residualPredicate, *innerType, leftFieldCount,
-                        columnType, rowSetType, stringViewType);
-                    break;
-                }
-            }
+            InjectJoinResidualFilter(
+                *library, residualPredicate, *innerType, leftFieldCount,
+                columnType, rowSetType, stringViewType);
         }
 
         // Program order follows BuildGenericAggregateProgramAst: type decls,

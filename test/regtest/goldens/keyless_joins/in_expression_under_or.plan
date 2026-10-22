@@ -1,0 +1,8 @@
+project (id) (rows≈4 cost≈4.5K)
+└─ filter (|| (== |t.id| 3) (! (call qdb_is_null __in_mark_0__))) (rows≈4 cost≈4.5K)
+   └─ join left residual (== (+ |t.id| 1) __in_mark_0__) (rows≈8 cost≈4.3K)
+      ├─ source t AS t (rows≈4 cost≈32)
+      └─ project (__in_mark_0__) (rows≈2 cost≈88)
+         └─ aggregate keys=[__in_mark_0__] (rows≈2 cost≈72)
+            └─ project (__in_mark_0__) (rows≈3 cost≈48)
+               └─ source u AS u (rows≈3 cost≈24)

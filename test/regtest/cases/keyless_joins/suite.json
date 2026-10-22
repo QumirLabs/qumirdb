@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "fixtures": {
+    "t": {"json": "tables/t.json", "parquet": {"row_group_rows": 2}},
+    "s": {"json": "tables/s.json", "parquet": {"row_group_rows": 2}},
+    "u": {"json": "tables/u.json", "parquet": {"row_group_rows": 1}},
+    "e": {"json": "tables/e.json"}
+  },
+  "tables": {"t": "t", "s": "s", "u": "u", "e": "e"},
+  "variants": ["single", "threaded"],
+  "cases": {
+    "in_expression_operand.sql": {"order": "unordered"},
+    "in_expression_marker.sql": {"order": "unordered"},
+    "in_expression_under_or.sql": {"order": "unordered"},
+    "exists_uncorrelated.sql": {"order": "unordered"},
+    "not_exists_uncorrelated_empty.sql": {"order": "unordered"},
+    "exists_non_equality.sql": {"order": "unordered"},
+    "not_exists_null_comparison.sql": {"order": "unordered"},
+    "exists_or_correlation.sql": {"order": "unordered"},
+    "left_join_non_equality.sql": {"order": "unordered"},
+    "right_join_non_equality.sql": {"order": "unordered"},
+    "full_join_non_equality.sql": {"order": "unordered"},
+    "full_join_empty_right.sql": {"order": "unordered"},
+    "full_join_empty_left.sql": {"order": "unordered"}
+  }
+}
