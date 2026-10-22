@@ -269,6 +269,9 @@
   (fun qdb_string_concat ((var arena <ptr i8>) (var l StringView) (var r StringView)) -> StringView
        (attrs extern) (block))
 
+  ;; Releases every string of arena; a join residual calls it after each pair.
+  (fun qdb_string_arena_reset ((var arena <ptr i8>)) -> void (attrs extern) (block))
+
   ;; REGEXP_REPLACE is typed here under its SQL name, then kernel lowering
   ;; replaces it with qdb_regexp_replace(arena, compiled_regex, str).
   (fun regexp_replace

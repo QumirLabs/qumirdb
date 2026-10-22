@@ -470,6 +470,8 @@ NQumir::NAst::TExprPtr GenJoinBatchAst(
   auto ptrU8Type = std::make_shared<TPointerType>(u8Type);
   auto ptrU64Type = std::make_shared<TPointerType>(u64Type);
   auto ptrI64Type = std::make_shared<TPointerType>(i64Type);
+  auto ptrI8Type = std::make_shared<TPointerType>(
+      std::make_shared<TIntegerType>(TIntegerType::I8));
 
   auto ident = [&](const std::string &name) -> TExprPtr {
     return std::make_shared<TIdentExpr>(loc, name);
@@ -535,6 +537,7 @@ NQumir::NAst::TExprPtr GenJoinBatchAst(
       std::make_shared<TVarStmt>(loc, "left_store", rowSetPtrType));
   params.push_back(
       std::make_shared<TVarStmt>(loc, "right_store", rowSetPtrType));
+  params.push_back(std::make_shared<TVarStmt>(loc, "arena", ptrI8Type));
 
   auto ptrColumnType = ColumnPointerType(columnType, rowSetType);
   auto columnValueType = PointerPointeeOr(ptrColumnType, columnType);
@@ -654,6 +657,7 @@ NQumir::NAst::TExprPtr GenJoinBatchAst(
                                               ident("pairs"),
                                               ident("left_store"),
                                               ident("right_store"),
+                                              ident("arena"),
                                               ident("hash_value"),
                                           });
   } else if (mode == EJoinBatchMode::ProbeOnly) {
@@ -667,6 +671,7 @@ NQumir::NAst::TExprPtr GenJoinBatchAst(
                                              ident("pairs"),
                                              ident("left_store"),
                                              ident("right_store"),
+                                             ident("arena"),
                                              ident("batch"),
                                              ident("batch"),
                                              ident("hash_value"),
@@ -711,6 +716,7 @@ NQumir::NAst::TExprPtr GenJoinBatchAst(
                                              std::move(ownRowId),
                                              ident("left_store"),
                                              ident("right_store"),
+                                             ident("arena"),
                                              ident("batch"),
                                              ident("hash_value"),
                                          });
@@ -837,6 +843,8 @@ GenJoinDispatchAst(const TJoinKeyDescriptor &key, EJoinType type,
   auto i64Type = std::make_shared<TIntegerType>(TIntegerType::I64);
   auto boolType = std::make_shared<TBoolType>();
   auto ptrI64Type = std::make_shared<TPointerType>(i64Type);
+  auto ptrI8Type = std::make_shared<TPointerType>(
+      std::make_shared<TIntegerType>(TIntegerType::I8));
   auto hashTableRefType =
       std::make_shared<TReferenceType>(AsNamed("HashTable", hashTableType));
   auto rowSetRefType =
@@ -872,6 +880,7 @@ GenJoinDispatchAst(const TJoinKeyDescriptor &key, EJoinType type,
                                                  Oz::Ident("pairs"),
                                                  Oz::Ident("left_store"),
                                                  Oz::Ident("right_store"),
+                                                 Oz::Ident("arena"),
                                              });
     }
     return Oz::Call("jt_process_left", {
@@ -883,6 +892,7 @@ GenJoinDispatchAst(const TJoinKeyDescriptor &key, EJoinType type,
                                            Oz::Ident("pairs"),
                                            Oz::Ident("left_store"),
                                            Oz::Ident("right_store"),
+                                           Oz::Ident("arena"),
                                        });
   };
   auto processRight = [&]() {
@@ -895,6 +905,7 @@ GenJoinDispatchAst(const TJoinKeyDescriptor &key, EJoinType type,
                                             Oz::Ident("pairs"),
                                             Oz::Ident("left_store"),
                                             Oz::Ident("right_store"),
+                                            Oz::Ident("arena"),
                                         });
   };
   auto streamLeft = [&]() {
@@ -907,6 +918,7 @@ GenJoinDispatchAst(const TJoinKeyDescriptor &key, EJoinType type,
                                            Oz::Ident("pairs"),
                                            Oz::Ident("left_store"),
                                            Oz::Ident("right_store"),
+                                           Oz::Ident("arena"),
                                        });
     }
     if (isSemiAnti && !isResidualSemiAnti) {
@@ -918,6 +930,7 @@ GenJoinDispatchAst(const TJoinKeyDescriptor &key, EJoinType type,
                                                 Oz::Ident("pairs"),
                                                 Oz::Ident("left_store"),
                                                 Oz::Ident("right_store"),
+                                                Oz::Ident("arena"),
                                             });
     }
     return Oz::Call("jt_probe_left_stream", {
@@ -928,6 +941,7 @@ GenJoinDispatchAst(const TJoinKeyDescriptor &key, EJoinType type,
                                                 Oz::Ident("pairs"),
                                                 Oz::Ident("left_store"),
                                                 Oz::Ident("right_store"),
+                                                Oz::Ident("arena"),
                                             });
   };
   auto streamRight = [&]() {
@@ -944,6 +958,7 @@ GenJoinDispatchAst(const TJoinKeyDescriptor &key, EJoinType type,
                                                  Oz::Ident("pairs"),
                                                  Oz::Ident("left_store"),
                                                  Oz::Ident("right_store"),
+                                                 Oz::Ident("arena"),
                                              });
     }
     return Oz::Call("jt_probe_right_stream", {
@@ -954,6 +969,7 @@ GenJoinDispatchAst(const TJoinKeyDescriptor &key, EJoinType type,
                                                  Oz::Ident("pairs"),
                                                  Oz::Ident("left_store"),
                                                  Oz::Ident("right_store"),
+                                                 Oz::Ident("arena"),
                                              });
   };
   auto insertRightKeyOnly = [&]() {
@@ -1160,6 +1176,7 @@ GenJoinDispatchAst(const TJoinKeyDescriptor &key, EJoinType type,
       .Param("pairs", pairBufferRefType)
       .Param("left_store", rowSetPtrType)
       .Param("right_store", rowSetPtrType)
+      .Param("arena", ptrI8Type)
       .Param("left_key_columns", ptrI64Type)
       .Param("right_key_columns", ptrI64Type)
       .Param("arg", i64Type)
@@ -1187,6 +1204,8 @@ GenCrossJoinDispatchAst(EJoinType type, NQumir::NAst::TTypePtr rowSetType,
   auto boolType = std::make_shared<TBoolType>();
   auto u8PtrType = std::make_shared<TPointerType>(
       std::make_shared<TIntegerType>(TIntegerType::U8));
+  auto ptrI8Type = std::make_shared<TPointerType>(
+      std::make_shared<TIntegerType>(TIntegerType::I8));
   auto rowSetPtrType =
       std::make_shared<TPointerType>(AsNamed("TRowSet", rowSetType));
   auto pairBufferRefType =
@@ -1225,6 +1244,7 @@ GenCrossJoinDispatchAst(EJoinType type, NQumir::NAst::TTypePtr rowSetType,
       .Param("right_batch_count", i64Type)
       .Param("right_matched", u8PtrType)
       .Param("pairs", pairBufferRefType)
+      .Param("arena", ptrI8Type)
       .Param("op", i64Type)
       .Return(boolType)
       .Stmt(Oz::If(opIs(0), Oz::Block({Oz::Return(Oz::Call(
@@ -1235,6 +1255,7 @@ GenCrossJoinDispatchAst(EJoinType type, NQumir::NAst::TTypePtr rowSetType,
                                                Oz::Ident("right_batch_count"),
                                                Oz::Ident("right_matched"),
                                                Oz::Ident("pairs"),
+                                               Oz::Ident("arena"),
                                                Oz::Bool(emitsPairs),
                                                Oz::Bool(type == EJoinType::LeftSemi),
                                                Oz::Bool(keepsUnmatchedLeft),

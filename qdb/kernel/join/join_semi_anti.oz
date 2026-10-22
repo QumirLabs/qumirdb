@@ -53,6 +53,7 @@
                           (var right_row_id i64)
                           (var left_store <ptr TRowSet>)
                           (var right_store <ptr TRowSet>)
+                          (var arena <ptr i8>)
                           (var stream_right_batch <ref TRowSet>)
                           (var hash u64)) -> bool
     (block
@@ -74,7 +75,7 @@
           (while (< k bcount)
             (block
               (var left_row_id = (index bdata k))
-              (if (call jt_residual_filter left_store right_store
+              (if (call jt_residual_filter left_store right_store arena
                     (index left_store (: 0 i64)) stream_right_batch
                     left_row_id right_row_id)
                 (block

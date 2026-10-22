@@ -30,6 +30,7 @@
                 (var right_batch_count i64)
                 (var right_matched <ptr u8>)
                 (var pairs <ref PairBuffer>)
+                (var arena <ptr i8>)
                 (var emit_pairs bool)
                 (var emit_matched bool)
                 (var emit_unmatched bool)
@@ -61,7 +62,7 @@
                       (if (call xj_selected right_batch r)
                         (block
                           (var right_id = (call xj_row_id rb r))
-                          (if (call jt_residual_filter left_store right_store
+                          (if (call jt_residual_filter left_store right_store arena
                                 batch right_batch left_id right_id)
                             (block
                               (= matched #t)

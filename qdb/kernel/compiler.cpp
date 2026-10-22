@@ -166,7 +166,7 @@ namespace {
 constexpr const char* CacheSchemaVersion = "v1";
 // Bump when the generated key helpers or the .oz kernel libraries change.
 // FULL residual marking changes jt_emit_and_insert.
-constexpr const char* KernelLibVersion = "41";
+constexpr const char* KernelLibVersion = "42";
 } // namespace
 
 NQumir::NCodeGen::TLlvmRunner::TLinkedModule CompileKernelAstCached(
@@ -2285,7 +2285,7 @@ TCrossJoinKernels TKernelCompiler::CompileCrossJoin(
 
     auto slot = kernel.Slot;
     using TDispatchFn = bool(*)(
-        TRowSet*, int64_t, TRowSet*, int64_t, uint8_t*, void*, int64_t);
+        TRowSet*, int64_t, TRowSet*, int64_t, uint8_t*, void*, void*, int64_t);
     using TMaterializeFn = int64_t(*)(
         void*, TRowSet*, TRowSet*, TRowSet*, TRowSet*, int64_t, int64_t, TRowSet*);
 
@@ -2298,8 +2298,11 @@ TCrossJoinKernels TKernelCompiler::CompileCrossJoin(
         uint8_t* rightMatched,
         void* pairs,
         int64_t op) {
+        // Scratch of the residual's strings, which do not outlive the call.
+        TStringArena arena;
         return reinterpret_cast<TDispatchFn>(slot->Fns[0])(
-            leftStore, batchIdx, rightStore, rightBatchCount, rightMatched, pairs, op);
+            leftStore, batchIdx, rightStore, rightBatchCount, rightMatched, pairs,
+            &arena, op);
     };
     kernels.Materialize = [slot](
         void* pairs,
@@ -2664,7 +2667,7 @@ TJoinKernels TKernelCompiler::CompileJoin(
 
     auto slot = kernel.Slot;
     using TDispatchFn = bool(*)(
-        void*, void*, TRowSet*, int64_t, void*, TRowSet*, TRowSet*,
+        void*, void*, TRowSet*, int64_t, void*, TRowSet*, TRowSet*, void*,
         const int64_t*, const int64_t*, int64_t, int64_t);
     using TMaterializeFn = int64_t(*)(
         void*, TRowSet*, TRowSet*, TRowSet*, TRowSet*, int64_t, int64_t, TRowSet*);
@@ -2682,8 +2685,10 @@ TJoinKernels TKernelCompiler::CompileJoin(
         TRowSet* rightStore,
         int64_t arg,
         int64_t op) {
+        // Scratch of the residual's strings, which do not outlive the call.
+        TStringArena arena;
         return reinterpret_cast<TDispatchFn>(slot->Fns[0])(
-            left, right, batch, batchIdx, pairs, leftStore, rightStore,
+            left, right, batch, batchIdx, pairs, leftStore, rightStore, &arena,
             leftKeyColumns->data(), rightKeyColumns->data(), arg, op);
     };
     kernels.Materialize = [slot](

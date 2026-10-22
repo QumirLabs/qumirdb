@@ -1199,9 +1199,12 @@ NQumir::NAst::TExprPtr GenJoinResidualFilterAst(
         AsNamed("TRowSet", rowSetType));
     auto rowSetRefType = std::make_shared<TReferenceType>(
         AsNamed("TRowSet", rowSetType));
+    auto ptrI8Type = std::make_shared<TPointerType>(
+        std::make_shared<TIntegerType>(TIntegerType::I8));
     std::vector<TParam> params = {
         std::make_shared<TVarStmt>(loc, "left_store", rowSetPtrType),
         std::make_shared<TVarStmt>(loc, "right_store", rowSetPtrType),
+        std::make_shared<TVarStmt>(loc, "__arena__", ptrI8Type),
         std::make_shared<TVarStmt>(loc, "stream_left_batch", rowSetRefType),
         std::make_shared<TVarStmt>(loc, "stream_right_batch", rowSetRefType),
         std::make_shared<TVarStmt>(loc, "left_row_id", i64Type),
@@ -1316,7 +1319,17 @@ NQumir::NAst::TExprPtr GenJoinResidualFilterAst(
             std::make_shared<TIdentExpr>(loc, "qdb_is_true"),
             std::vector<TExprPtr>{std::move(predicate)});
     }
-    auto castedResult = std::make_shared<TCastExpr>(loc, std::move(result), boolType);
+    TExprPtr castedResult = std::make_shared<TCastExpr>(loc, std::move(result), boolType);
+    if (referenced.contains("__arena__")) {
+        // The strings of one pair are dead once its truth is known. Releasing
+        // them keeps the scratch of a kernel call at one pair, however many
+        // pairs the call evaluates.
+        body.push_back(var("pair_matched", boolType));
+        body.push_back(assign("pair_matched", std::move(castedResult)));
+        body.push_back(std::make_shared<TCallExpr>(loc,
+            ident("qdb_string_arena_reset"), std::vector<TExprPtr>{ident("__arena__")}));
+        castedResult = ident("pair_matched");
+    }
     body.push_back(std::make_shared<TReturnExpr>(loc, std::move(castedResult)));
 
     return std::make_shared<TFunDecl>(loc, "jt_residual_filter",

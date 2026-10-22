@@ -27,6 +27,7 @@
                           (var pairs <ref PairBuffer>)
                           (var left_store <ptr TRowSet>)
                           (var right_store <ptr TRowSet>)
+                          (var arena <ptr i8>)
                           (var stream_left_batch <ref TRowSet>)
                           (var stream_right_batch <ref TRowSet>)
                           (var hash u64)) -> bool
@@ -59,7 +60,7 @@
                 (block
                   (= flt_l build_row_id)
                   (= flt_r row_id)))
-              (if (call jt_residual_filter left_store right_store
+              (if (call jt_residual_filter left_store right_store arena
                     stream_left_batch stream_right_batch flt_l flt_r)
                 (block
                   (if (!= mark (: 0 i64))
@@ -92,11 +93,12 @@
                            (var pairs <ref PairBuffer>)
                            (var left_store <ptr TRowSet>)
                            (var right_store <ptr TRowSet>)
+                           (var arena <ptr i8>)
                            (var hash u64)) -> bool
     (block
       (var pairs_before = (field pairs Count))
       (if (! (call jt_probe_and_emit opp key stored_witness own_row_id is_left
-                    mark pairs left_store right_store
+                    mark pairs left_store right_store arena
                     (index left_store (: 0 i64))
                     (index right_store (: 0 i64))
                     hash))
