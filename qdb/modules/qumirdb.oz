@@ -333,12 +333,12 @@
         (block (= rounded (cast (- scaled 0.5) i128)))
         (block (= rounded (cast (+ scaled 0.5) i128))))
       (return (cast (struct ((V rounded))) BinInt))))
-  ;; value / 10^scale as the nearest double. Below 2^53 the scaled value and, for
-  ;; scale <= 22, the power of ten are exact doubles, so the single division is
-  ;; correctly rounded. Above it, dividing the converted value would round twice:
-  ;; the integer part is converted instead, with a sticky bit for the dropped
-  ;; fraction once the double spacing exceeds 2 (integer part >= 2^55). Between 2^53
-  ;; and 2^55 the fraction is added as a double, which can differ in the last bit.
+  ;; value / 10^scale as the nearest double, ties to even. When the scaled value is
+  ;; below 2^53 and scale <= 22, both operands are exact doubles and the single
+  ;; division is correctly rounded. Otherwise the quotient is computed in integers:
+  ;; |value| // 10^scale gets fraction bits by long division until it has at least
+  ;; 55 bits (k bits appended), then it is rounded to 53 bits using the dropped bits
+  ;; and the remainder as guard and sticky, and scaled by a power of two, which is exact.
   (fun qdb_decimal_to_f64 ((var value BinInt) (var scale i64)) -> f64
     (block
       (var factor BinInt)
@@ -353,19 +353,48 @@
       (= mag v)
       (if negative (block (= mag (- (: 0 i128) v))))
       (var result f64)
+      (= result 0.0)
       (if (&& (< mag (: 9007199254740992 i128)) (<= scale 22))
         (block (= result (/ (cast mag f64) (cast p f64))))
-        (block
-          (var q i128)
-          (= q (// mag p))
-          (var r i128)
-          (= r (- mag (* q p)))
-          (if (>= q (: 36028797018963968 i128))
-            (block
-              (if (!= r (: 0 i128)) (block (= q (| q (: 1 i128)))))
-              (= result (cast q f64)))
-            (block
-              (= result (+ (cast q f64) (/ (cast r f64) (cast p f64))))))))
+        (if (!= mag (: 0 i128))
+          (block
+            (var q i128)
+            (= q (// mag p))
+            (var r i128)
+            (= r (- mag (* q p)))
+            (var e i64)
+            (= e 0)
+            ;; r < p <= 10^38, so 2r may overflow i128: compare r with p - r instead.
+            (while (< q (: 18014398509481984 i128))
+              (block
+                (= q (* q (: 2 i128)))
+                (if (>= r (- p r))
+                  (block
+                    (= q (+ q (: 1 i128)))
+                    (= r (- r (- p r))))
+                  (block (= r (+ r r))))
+                (= e (- e 1))))
+            (var guard i64)
+            (= guard 0)
+            (var low i64)
+            (= low 0)
+            (if (!= r (: 0 i128)) (block (= low 1)))
+            (while (>= q (: 9007199254740992 i128))
+              (block
+                (if (!= guard 0) (block (= low 1)))
+                (= guard 0)
+                (if (!= (& q (: 1 i128)) (: 0 i128)) (block (= guard 1)))
+                (= q (// q (: 2 i128)))
+                (= e (+ e 1))))
+            (if (!= guard 0)
+              (block
+                (if (|| (!= low 0) (!= (& q (: 1 i128)) (: 0 i128)))
+                  (block (= q (+ q (: 1 i128)))))))
+            (= result (cast q f64))
+            (while (> e 0)
+              (block (= result (* result 2.0)) (= e (- e 1))))
+            (while (< e 0)
+              (block (= result (* result 0.5)) (= e (+ e 1)))))))
       (if negative (block (= result (- 0.0 result))))
       (return result)))
   (fun qdb_decimal_scale_up ((var value BinInt) (var delta i64)) -> BinInt
