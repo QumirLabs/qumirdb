@@ -465,6 +465,13 @@ bool IsComparison(TOperator op) {
 bool IsLogical(TOperator op) { return op == "&&" || op == "||"; }
 
 TTypePtr ValueType(const TTypePtr& t) { return t ? UnwrapNullableType(t) : t; }
+// The type a value cast targets before ExpandDecimal runs. A decimal keeps its precision
+// and scale: its erased storage type could not tell the decimal pass which scale to
+// convert the operand to.
+TTypePtr CastTargetQ(const TTypePtr& value) {
+    return IsDecimalType(value) ? value : ToQumirType(value);
+}
+
 TTypePtr NullableQ(const TTypePtr& value) {
     auto nullable = std::make_shared<TNullable>(value);
     return IsDecimalType(value)
@@ -1040,7 +1047,7 @@ TExprPtr CoerceBranch(const TExprPtr& branch, const TTypePtr& branchType, bool i
     if (isNull) {
         return std::make_shared<TCastExpr>(loc, branch ? branch : MakeNull(loc), nq);
     }
-    auto tv = ToQumirType(value);
+    auto tv = CastTargetQ(value);
     if (!branchType || !IsNullableType(branchType)) {
         TExprPtr v = branch;
         if (branchType && PlanTypeKey(branchType) != PlanTypeKey(value)) {
@@ -1160,7 +1167,7 @@ std::pair<TExprPtr, TTypePtr> ExpandCoalesce(const TCallExpr& node,
         return {MakeNull(loc), nullptr}; // degenerate (all NULL) - untyped
     }
     const bool resultNullable = allNullable;
-    auto tq = ToQumirType(T);
+    auto tq = CastTargetQ(T);
 
     // Terminator = first non-nullable arg (guaranteed value), else the last arg.
     size_t m = args.size() - 1;

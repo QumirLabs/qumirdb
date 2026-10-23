@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "fixtures": {
+    "values": {"json": "tables/t.json", "parquet": {"row_group_rows": 2}}
+  },
+  "tables": {"t": "values"},
+  "variants": ["single", "threaded", "js"],
+  "cases": {
+    "coalesce_scales.sql": {"order": "ordered"},
+    "coalesce_constant.sql": {"order": "ordered"},
+    "coalesce_remainder.sql": {"order": "ordered"},
+    "coalesce_integer.sql": {"order": "ordered"},
+    "case_scales.sql": {"order": "ordered"}
+  }
+}

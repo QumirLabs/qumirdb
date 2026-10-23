@@ -383,6 +383,25 @@ TEST(ProjectType, RejectsUnknownFunction) {
     }).starts_with(expected));
 }
 
+// COALESCE and CASE of decimals with different precision or scale take the common
+// decimal type, as in DuckDB.
+TEST(ProjectType, CoalesceDecimalBranchesOfDifferentScale) {
+    auto i64 = std::make_shared<TIntegerType>();
+    TStructType sc({
+        {"a", std::make_shared<NQdb::TNullable>(i64)},
+    });
+
+    auto [wide, wideType] = ExpandKernelExpr(Parse(
+        "(call coalesce (cast a <named DECIMAL [12 2]>) (cast -1 <named DECIMAL [10 2]>))"), sc);
+    EXPECT_TRUE(IsDecimal(wideType, 12, 2));
+
+    auto [scaled, scaledType] = ExpandKernelExpr(Parse(
+        "(call coalesce (cast a <named DECIMAL [10 2]>) (cast 1 <named DECIMAL [8 4]>))"), sc);
+    EXPECT_TRUE(IsDecimal(scaledType, 12, 4));
+    EXPECT_NE(NQumir::NAst::NCore::PrintAst(scaled).find("qdb_decimal_scale_up"),
+        std::string::npos);
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

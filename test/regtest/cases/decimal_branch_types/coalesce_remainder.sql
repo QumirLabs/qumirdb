@@ -1,0 +1,1 @@
+SELECT id, v = 1 AS e1, v = 0 AS e0, v = -1 AS em1, v IS NULL AS n FROM (SELECT id, COALESCE(CAST(a AS DECIMAL(10,2)) % 2, CAST(-1 AS DECIMAL(10,2))) AS v FROM t) ORDER BY id;
