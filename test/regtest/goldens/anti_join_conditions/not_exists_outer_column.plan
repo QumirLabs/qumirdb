@@ -1,0 +1,4 @@
+project (id) (rows≈1 cost≈4.3K)
+└─ join left_anti [t.id = s.k] residual (== |t.a| 1) (rows≈1 cost≈4.3K)
+   ├─ source t AS t (rows≈4 cost≈64)
+   └─ source s AS s (rows≈5 cost≈40)

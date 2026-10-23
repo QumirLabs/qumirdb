@@ -22,6 +22,7 @@
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 namespace NQdb {
 
@@ -470,6 +471,18 @@ TOperatorPtr ProcessJoin(std::shared_ptr<TJoinOperator> join, TContext ctx)
         return Materialize(join, keep);
     }
 
+    // An anti join returns the rows of one input that match nothing, and its
+    // own condition decides what matches. A conjunct of that condition may
+    // narrow only the other input; one that reads just the preserved input
+    // stays in the residual. Predicates from above read only the output, which
+    // is the preserved input, and go there.
+    const bool preservesLeft = join->JoinType() == EJoinType::LeftAnti;
+    const bool preservesRight = join->JoinType() == EJoinType::RightAnti;
+    std::vector<TConjuct> above;
+    if (preservesLeft || preservesRight) {
+        above = std::exchange(ctx.Conjucts, {});
+    }
+
     // Fold the join's own residual into the pool so explicit JOIN ON and
     // decorrelated semi/anti correlations feed key extraction too.
     std::vector<TConjuct>& pool = ctx.Conjucts;
@@ -571,21 +584,28 @@ TOperatorPtr ProcessJoin(std::shared_ptr<TJoinOperator> join, TContext ctx)
     std::vector<TConjuct> residualConjucts;
     for (const auto& conj : newConjucts) {
         auto cols = ColumnsOf(conj);
-        if (Covers(cols, leftCols)) {
+        if (!preservesLeft && Covers(cols, leftCols)) {
             leftConjucts.emplace_back(conj);
-        } else if (Covers(cols, rightCols)) {
+        } else if (!preservesRight && Covers(cols, rightCols)) {
             rightConjucts.emplace_back(conj);
         } else {
             residualConjucts.emplace_back(conj);
-            if (conj.Expr) {
+            if (conj.Expr && !preservesLeft) {
                 if (auto derived = DeriveSideFilter(conj.Expr, leftCols)) {
                     leftConjucts.emplace_back(TConjuct{derived});
                 }
+            }
+            if (conj.Expr && !preservesRight) {
                 if (auto derived = DeriveSideFilter(conj.Expr, rightCols)) {
                     rightConjucts.emplace_back(TConjuct{derived});
                 }
             }
         }
+    }
+    if (preservesLeft) {
+        leftConjucts.insert(leftConjucts.end(), above.begin(), above.end());
+    } else if (preservesRight) {
+        rightConjucts.insert(rightConjucts.end(), above.begin(), above.end());
     }
 
     if (!residualConjucts.empty()) {
