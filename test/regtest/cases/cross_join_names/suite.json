@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "fixtures": {
+    "t": {"json": "tables/t.json"},
+    "e": {"json": "tables/e.json"},
+    "u": {"json": "tables/u.json"},
+    "w": {"json": "tables/w.json"},
+    "z": {"json": "tables/z.json"}
+  },
+  "tables": {"t": "t", "e": "e", "u": "u", "w": "w", "z": "z"},
+  "variants": ["single", "threaded", "js"],
+  "cases": {
+    "cross_both_keys.sql": {"order": "unordered"},
+    "cross_count.sql": {},
+    "cross_count_filter.sql": {},
+    "shared_cross_count.sql": {},
+    "shared_cross3_count.sql": {},
+    "shared_cross_limit_count.sql": {},
+    "shared_semi_count.sql": {},
+    "shared_anti_count.sql": {},
+    "shared_single_count.sql": {}
+  }
+}
