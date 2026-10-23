@@ -1,0 +1,2 @@
+WITH c AS (SELECT k FROM i WHERE v > 0)
+SELECT k, count(*) AS n FROM c WHERE k IS NOT NULL GROUP BY k;

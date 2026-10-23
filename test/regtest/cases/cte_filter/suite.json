@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "fixtures": {
+    "i": {"json": "tables/i.json"}
+  },
+  "tables": {"i": "i"},
+  "variants": ["single", "threaded", "js"],
+  "cases": {
+    "cte_filter_group.sql": {"order": "unordered"},
+    "cte_filter_rows.sql": {"order": "unordered"}
+  }
+}

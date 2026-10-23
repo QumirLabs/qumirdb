@@ -1,0 +1,7 @@
+project (k, n) (rows≈1 cost≈312)
+└─ aggregate keys=[c.k] aggs=[count_0=count] (rows≈1 cost≈296)
+   └─ project (c.k) (rows≈1 cost≈280)
+      └─ filter (! (call qdb_is_null k)) (rows≈1 cost≈272)
+         └─ project (k) (rows≈3 cost≈248)
+            └─ filter (> |i.v| 0) (rows≈3 cost≈224)
+               └─ source i AS i row-groups (> |i.v| 0) (rows≈7 cost≈112)
