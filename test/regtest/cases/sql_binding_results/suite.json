@@ -18,6 +18,12 @@
     "star_and_column_order_by.sql": {"order": "ordered"},
     "parenthesized_body_order_by.sql": {"order": "ordered"},
     "group_alias_and_column.sql": {"order": "ordered"},
-    "group_alias_and_column_rollup.sql": {"order": "ordered"}
+    "group_alias_and_column_rollup.sql": {"order": "ordered"},
+    "repeated_labels_cte_columns.sql": {"order": "ordered"},
+    "repeated_labels_derived_group_by.sql": {"order": "ordered"},
+    "repeated_labels_nested.sql": {"order": "ordered"},
+    "repeated_labels_nested_star.sql": {"order": "ordered"},
+    "repeated_labels_star.sql": {"order": "ordered"},
+    "repeated_labels_union_all.sql": {"order": "unordered"}
   }
 }

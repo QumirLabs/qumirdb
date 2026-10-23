@@ -2383,11 +2383,15 @@ std::expected<TRelation, TError> BuildSelect(
     std::vector<NAst::TExprPtr> bound(select.SelectList->Items.size());
     // The printed text of each projection's bound SELECT expression, for ORDER BY.
     std::vector<std::optional<std::string>> boundTexts(select.SelectList->Items.size());
+    // Output names are SQL names, read before binding rewrites a column item to its
+    // physical column.
+    std::vector<std::string> itemNames(select.SelectList->Items.size());
     for (size_t i = 0; i < select.SelectList->Items.size(); ++i) {
         const auto& item = select.SelectList->Items[i];
         if (item->Star) {
             continue;
         }
+        itemNames[i] = ItemName(*item, i);
         bound[i] = item->Expr;
         if (auto ok = input.Bind(bound[i], groupAlias); !ok) {
             return std::unexpected(ok.error());
@@ -2472,7 +2476,7 @@ std::expected<TRelation, TError> BuildSelect(
                 return std::unexpected(valid.error());
             }
         }
-        std::string name = ItemName(*item, i);
+        std::string name = std::move(itemNames[i]);
         texts.push_back(std::move(boundTexts[i]));
         auto expr = collector.Rewrite(std::move(bound[i]));
         if (!expr) {
