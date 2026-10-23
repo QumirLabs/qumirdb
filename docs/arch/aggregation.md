@@ -128,8 +128,8 @@ the same `rh_hash` result.
 ## Reducer injection
 
 Reducers are query-specific generated functions for `count`, `sum`, `min`, and
-`max`. Their state and arguments use the appropriate types, including nullable
-and string values. Each selected row updates the reducer slots for its group:
+`max`. Their state and arguments use the appropriate types, including nullable,
+string and boolean values. Each selected row updates the reducer slots for its group:
 
 ```text
 lookup group -> dense group slot -> update each reducer -> finalize values
@@ -251,6 +251,7 @@ last bits can differ from the result of the first plan. Integer functions and
 - Aggregate arguments at this boundary are column references; planning
   materializes computed arguments first.
 - Built-in reducer kernels implement `count`, `sum`, `min`, and `max`; planning
-  expresses `avg` using `sum` and `count` of its argument.
+  expresses `avg` using `sum` and `count` of its argument, and `bool_and`
+  (`every`) and `bool_or` as `min` and `max` of a BOOLEAN (FALSE < TRUE).
 - String and nullable keys are supported. Matching key equality and hashing,
   plus owned storage for retained strings, are required for every key type.

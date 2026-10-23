@@ -27,7 +27,8 @@ using NQumir::TLocation;
 
 bool IsAggFunc(const std::string& name) {
     static const std::set<std::string> funcs = {
-        "sum", "count", "avg", "min", "max", "stddev_samp"};
+        "sum", "count", "avg", "min", "max", "stddev_samp",
+        "bool_and", "bool_or", "every"};
     return funcs.count(name) > 0;
 }
 
@@ -762,6 +763,29 @@ std::expected<NAst::TExprPtr, TError> TAggCollector::EmitStddevSamp(const TAggCa
         std::move(stddev));
 }
 
+std::expected<NAst::TExprPtr, TError> TAggCollector::EmitBoolAggregate(
+    const TAggCall& agg,
+    TLocation loc)
+{
+    if (!agg.Arg) {
+        return std::unexpected(TError(loc, agg.Func + " requires one argument"));
+    }
+    if (InputSchema_ && !InputSchema_->Fields.empty()) {
+        NAst::TTypePtr type;
+        try {
+            type = NKernel::AnnotateExprType(agg.Arg, *InputSchema_, &Context_);
+        } catch (const TError& error) {
+            return std::unexpected(error);
+        }
+        if (!NAst::TMaybeType<NAst::TBoolType>(NAst::UnwrapNamedType(UnwrapNullableType(type)))) {
+            return std::unexpected(TError(loc, agg.Func + " argument must be BOOLEAN"));
+        }
+    }
+    // FALSE < TRUE, so over BOOLEAN bool_and (every) is min and bool_or is max,
+    // with the same NULL handling: NULLs are skipped, no non-NULL value gives NULL.
+    return EmitPlain(agg.Func == "bool_or" ? "max" : "min", agg.Arg, std::move(loc));
+}
+
 std::expected<NAst::TExprPtr, TError> TAggCollector::Emit(const TAggCall& agg, TLocation loc) {
     if (agg.Distinct) {
         if (agg.Func != "count") {
@@ -786,6 +810,9 @@ std::expected<NAst::TExprPtr, TError> TAggCollector::Emit(const TAggCall& agg, T
 
     if (agg.Func == "stddev_samp") {
         return EmitStddevSamp(agg, loc);
+    }
+    if (agg.Func == "bool_and" || agg.Func == "bool_or" || agg.Func == "every") {
+        return EmitBoolAggregate(agg, loc);
     }
 
     NAst::TExprPtr arg = (agg.Func == "count" && agg.Star)

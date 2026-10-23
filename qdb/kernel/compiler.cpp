@@ -2043,22 +2043,23 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
             const bool isFloat = static_cast<bool>(TMaybeType<TFloatType>(unwrapped));
             const bool isInteger = static_cast<bool>(TMaybeType<TIntegerType>(unwrapped));
             const bool isString = static_cast<bool>(TMaybeType<TStringType>(unwrapped));
-            if (isString && agg.Func != "count" &&
-                agg.Func != "min" && agg.Func != "max") {
+            const bool isBool = static_cast<bool>(TMaybeType<TBoolType>(unwrapped));
+            if ((isString || isBool) && agg.Func == "sum") {
                 throw NQumir::TError(
-                    "CompileAggregate: '" + agg.Func +
-                    "' does not support string arguments");
+                    "CompileAggregate: 'sum' does not support " +
+                    std::string(isString ? "string" : "boolean") + " arguments");
             }
-            if (!isInteger && !isFloat && !isBinInt && !isString) {
+            if (!isInteger && !isFloat && !isBinInt && !isString && !isBool) {
                 throw NQumir::TError(
                     "CompileAggregate: aggregate argument column '" + name +
-                    "' must be integer, f64, string, or BinInt");
+                    "' must be integer, f64, bool, string, or BinInt");
             }
             arg.ValueKind = isBinInt
                 ? NKernel::EAggValueKind::BinInt
                 : (isString ? NKernel::EAggValueKind::String
-                    : (isFloat ? NKernel::EAggValueKind::Float64
-                               : NKernel::EAggValueKind::Int64));
+                    : (isBool ? NKernel::EAggValueKind::Bool
+                        : (isFloat ? NKernel::EAggValueKind::Float64
+                                   : NKernel::EAggValueKind::Int64)));
             arg.IsNullable = IsNullableType(type);
             arg.ColumnIndex = columnIndex(name);
         }
