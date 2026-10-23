@@ -729,7 +729,7 @@ void PrintHelp() {
         "  --shuffle-queue <n>          Rowset queue capacity per shuffle lane\n"
         "  --shuffle-target-rows <n>    Target rows per materialized shuffle batch\n"
         "  --shuffle-max-rows <n>       Maximum rows per materialized shuffle batch\n"
-        "  --shuffle-target-bytes <n>   Target bytes per materialized shuffle batch\n"
+        "  --shuffle-target-bytes <n>   Byte target for shuffle output and retained inputs\n"
         "  --nocbo                      Disable cost-based join reordering\n"
         "  --no-runtime-filters         Disable join runtime filters (for A/B runs)\n"
         "  --force-runtime-filters      Emit a join runtime filter wherever a build\n"

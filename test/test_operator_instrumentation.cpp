@@ -380,54 +380,63 @@ TEST(OperatorInstrumentation, UnionShufflesKeepTheirOwnInputSchemas) {
 }
 
 TEST(OperatorInstrumentation, ShuffleAccountsSparseRetainedOwnersOnceAcrossPartitions) {
-    TTaskNode node;
-    node.Instrumentation = std::make_unique<TOperatorInstrumentation>();
-    node.Instrumentation->Kernel = MeasurementKernel();
-    node.Instrumentation->Inputs.reserve(1);
-    std::array<int64_t, 10000> keys;
-    std::array<int64_t, 10000> values;
-    std::array<uint8_t, 10000> selected{};
-    for (size_t i = 0; i < keys.size(); ++i) {
-        keys[i] = i % 2;
-        values[i] = i;
-    }
-    selected[9998] = selected[9999] = 0xff;
-    TColumn columns[] = {{.Data = reinterpret_cast<char*>(keys.data())},
-        {.Data = reinterpret_cast<char*>(values.data())}};
-    TRowSet batch{.Columns = columns, .ColumnCount = 2, .RowCount = 10000,
-        .Selection = selected.data(), .RefCount = 1};
-    auto i64 = std::make_shared<TIntegerType>();
-    auto schema = std::make_shared<TStructType>(std::vector<std::pair<std::string, TTypePtr>>{
-        {"k", i64}, {"v", i64}});
-    auto hash = TKernelCompiler().CompileAggregateHash(*schema, {"k"});
-    std::vector<uint64_t> hashes(10000);
-    ASSERT_TRUE(hash(&batch, hashes.data()));
-    ASSERT_NE(hashes[9998] % 4, hashes[9999] % 4);
-    auto code = std::make_shared<THashShuffleCode>(hash, schema, 16384, 65536, 1048576);
-    TOneToOneConnection input(1);
-    input.Resize(1, 1);
-    THashShuffleConnection output(1);
-    output.Resize(1, 4);
-    THashShuffleTask task(code, nullptr, TInputPort{.Connection = &input}, output, 0);
-    node.Task = &task;
-    std::unordered_map<const IConnection*, TTypePtr> types{{&input, schema}, {&output, schema}};
-    TTaskInstrumentationSetup setup(node, types);
-    task.ConfigureInstrumentation(setup);
-    ASSERT_TRUE(input.Push(0, std::move(batch)));
-    input.Finish(0);
-    EXPECT_EQ(task.Execute(), ETaskResult::OK);
-    EXPECT_EQ(node.Instrumentation->Inputs[0].Rows, 2u);
-    EXPECT_EQ(node.Instrumentation->RetainedInputBytes, 160000u);
-    EXPECT_EQ(node.Instrumentation->RetainedInputPeakBytes, 160000u);
-    EXPECT_EQ(task.Execute(), ETaskResult::FINISHED);
-    EXPECT_EQ(node.Instrumentation->Output.Rows, 2u);
-    EXPECT_EQ(node.Instrumentation->RetainedInputBytes, 0u);
-    EXPECT_EQ(node.Instrumentation->RetainedInputPeakBytes, 160000u);
-    EXPECT_EQ(node.Instrumentation->BuildMemoryPeakBytes, 160000u);
-    for (size_t partition = 0; partition < 4; ++partition) {
-        TRowSet rowSet{};
-        while (output.Fetch(partition, rowSet) == EFetchResult::OK) {
-            Release(&rowSet);
+    for (size_t retentionBudget : {1048576u, 1u}) {
+        SCOPED_TRACE(retentionBudget);
+        TTaskNode node;
+        node.Instrumentation = std::make_unique<TOperatorInstrumentation>();
+        node.Instrumentation->Kernel = MeasurementKernel();
+        node.Instrumentation->Inputs.reserve(1);
+        std::array<int64_t, 10000> keys;
+        std::array<int64_t, 10000> values;
+        std::array<uint8_t, 10000> selected{};
+        for (size_t i = 0; i < keys.size(); ++i) {
+            keys[i] = i % 2;
+            values[i] = i;
+        }
+        selected[9998] = selected[9999] = 0xff;
+        TColumn columns[] = {{.Data = reinterpret_cast<char*>(keys.data())},
+            {.Data = reinterpret_cast<char*>(values.data())}};
+        TRowSet batch{.Columns = columns, .ColumnCount = 2, .RowCount = 10000,
+            .Selection = selected.data(), .RefCount = 1};
+        auto i64 = std::make_shared<TIntegerType>();
+        auto schema = std::make_shared<TStructType>(std::vector<std::pair<std::string, TTypePtr>>{
+            {"k", i64}, {"v", i64}});
+        auto hash = TKernelCompiler().CompileAggregateHash(*schema, {"k"});
+        std::vector<uint64_t> hashes(10000);
+        ASSERT_TRUE(hash(&batch, hashes.data()));
+        ASSERT_NE(hashes[9998] % 4, hashes[9999] % 4);
+        auto code = std::make_shared<THashShuffleCode>(hash, schema, 16384, 65536, retentionBudget);
+        TOneToOneConnection input(1);
+        input.Resize(1, 1);
+        THashShuffleConnection output(1);
+        output.Resize(1, 4);
+        THashShuffleTask task(code, nullptr, TInputPort{.Connection = &input}, output, 0);
+        node.Task = &task;
+        std::unordered_map<const IConnection*, TTypePtr> types{{&input, schema}, {&output, schema}};
+        TTaskInstrumentationSetup setup(node, types);
+        task.ConfigureInstrumentation(setup);
+        ASSERT_TRUE(input.Push(0, std::move(batch)));
+        input.Finish(0);
+        EXPECT_EQ(task.Execute(), ETaskResult::OK);
+        EXPECT_EQ(node.Instrumentation->Inputs[0].Rows, 2u);
+        const bool flushedBeforeEof = retentionBudget < 160000;
+        // A pending copied row can overlap the original shared input owner.
+        const uint64_t expectedPeak = flushedBeforeEof ? 160016u : 160000u;
+        EXPECT_EQ(node.Instrumentation->Output.Rows, flushedBeforeEof ? 2u : 0u);
+        EXPECT_EQ(node.Instrumentation->RetainedInputBytes, flushedBeforeEof ? 0u : 160000u);
+        EXPECT_EQ(node.Instrumentation->RetainedInputPeakBytes, expectedPeak);
+        EXPECT_EQ(task.Execute(), ETaskResult::FINISHED);
+        EXPECT_EQ(node.Instrumentation->Output.Rows, 2u);
+        EXPECT_EQ(node.Instrumentation->RetainedInputBytes, 0u);
+        EXPECT_EQ(node.Instrumentation->RetainedInputPeakBytes, expectedPeak);
+        EXPECT_EQ(node.Instrumentation->BuildMemoryPeakBytes, expectedPeak);
+        for (size_t partition = 0; partition < 4; ++partition) {
+            TRowSet rowSet{};
+            while (output.Fetch(partition, rowSet) == EFetchResult::OK) {
+                EXPECT_EQ(rowSet.RowCount, flushedBeforeEof ? 1 : 10000);
+                EXPECT_EQ(rowSet.Selection == nullptr, flushedBeforeEof);
+                Release(&rowSet);
+            }
         }
     }
 }

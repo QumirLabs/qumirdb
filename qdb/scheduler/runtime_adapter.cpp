@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -143,6 +144,54 @@ size_t EstimateShuffleRowBytes(const TStructType& inputType) {
         }
     }
     return std::max<size_t>(total, 1);
+}
+
+void AddPayloadBytes(size_t& total, size_t count, size_t width = 1) {
+    const size_t limit = std::numeric_limits<size_t>::max();
+    if (width != 0 && count > (limit - total) / width) {
+        total = limit;
+    } else {
+        total += count * width;
+    }
+}
+
+// A sparse view retains the full visible input, not just its selected rows.
+// Count each destination's reference conservatively: shared input storage may
+// be charged more than once, and opaque source ancestors are not visible here.
+size_t ReferencedInputBytes(
+    const TRowSet& input,
+    const TStructType& type,
+    const std::shared_ptr<uint64_t>& hashes)
+{
+    const size_t rows = static_cast<size_t>(input.RowCount);
+    size_t bytes = 0;
+    for (size_t index = 0; index < type.Fields.size(); ++index) {
+        const auto& column = input.Columns[index];
+        const auto& fieldType = type.Fields[index].second;
+        const auto valueType = ShuffleValueType(fieldType);
+        if (TMaybeType<TStringType>(valueType)) {
+            AddPayloadBytes(bytes, rows + 1, column.OffsetWidth);
+            AddPayloadBytes(bytes, static_cast<size_t>(
+                OffsetAt(column, input.RowCount) - OffsetAt(column, 0)));
+        } else if (TMaybeType<TBoolType>(valueType)) {
+            AddPayloadBytes(bytes, (rows + column.DataBitOffset % 8 + 7) / 8);
+        } else {
+            AddPayloadBytes(bytes, rows, ShuffleColumnFixedWidth(fieldType));
+        }
+        if (column.Mask) {
+            AddPayloadBytes(bytes, (rows + column.MaskBitOffset % 8 + 7) / 8);
+        }
+    }
+    if (input.Selection) {
+        AddPayloadBytes(bytes, rows);
+    }
+    if (input.Hash) {
+        AddPayloadBytes(bytes, rows, sizeof(uint64_t));
+    }
+    if (hashes && hashes.get() != input.Hash) {
+        AddPayloadBytes(bytes, rows, sizeof(uint64_t));
+    }
+    return bytes;
 }
 
 const TStructType& ShuffleInputStruct(const TTypePtr& type) {
@@ -668,6 +717,7 @@ struct THashShuffleTask::TDestinationBuffer {
     std::vector<TBufferedBatch> Batches;
     size_t RowCount = 0;
     size_t ByteCount = 0;
+    size_t ReferencedInputBytes = 0;
 };
 
 THashShuffleTask::THashShuffleTask(
@@ -851,7 +901,8 @@ void THashShuffleTask::ScatterBuffered(const std::shared_ptr<TRowSet>& input) {
         bytes[0] = rows[0].size() * estimatedRowBytes;
         const auto hashes = Code_->UseInputHash && input->Hash
             ? std::shared_ptr<uint64_t>(input, input->Hash) : nullptr;
-        AddBufferedRows(0, input, std::move(rows[0]), bytes[0], hashes);
+        const size_t inputBytes = ReferencedInputBytes(*input, inputType, hashes);
+        AddBufferedRows(0, input, std::move(rows[0]), bytes[0], hashes, inputBytes);
         return;
     }
 
@@ -867,9 +918,10 @@ void THashShuffleTask::ScatterBuffered(const std::shared_ptr<TRowSet>& input) {
         rows[dst].push_back(static_cast<int32_t>(row));
     }
 
+    const size_t inputBytes = ReferencedInputBytes(*input, inputType, hashes);
     for (size_t dst = 0; dst < partitions; ++dst) {
         bytes[dst] = rows[dst].size() * estimatedRowBytes;
-        AddBufferedRows(dst, input, std::move(rows[dst]), bytes[dst], hashes);
+        AddBufferedRows(dst, input, std::move(rows[dst]), bytes[dst], hashes, inputBytes);
     }
 }
 
@@ -943,11 +995,13 @@ void THashShuffleTask::ScatterViews(const std::shared_ptr<TRowSet>& input) {
     }
 }
 
-void THashShuffleTask::AddBufferedRows(size_t dst,
+void THashShuffleTask::AddBufferedRows(
+    size_t dst,
     const std::shared_ptr<TRowSet>& input,
     std::vector<int32_t>&& rows,
     size_t bytes,
-    const std::shared_ptr<uint64_t>& hashes)
+    const std::shared_ptr<uint64_t>& hashes,
+    size_t inputBytes)
 {
     if (rows.empty()) {
         return;
@@ -955,6 +1009,7 @@ void THashShuffleTask::AddBufferedRows(size_t dst,
     auto& buffer = *Buffers_[dst];
     buffer.RowCount += rows.size();
     buffer.ByteCount += bytes;
+    AddPayloadBytes(buffer.ReferencedInputBytes, inputBytes);
     buffer.Batches.push_back(TBufferedBatch{
         .Input = input,
         .Rows = std::move(rows),
@@ -965,20 +1020,26 @@ void THashShuffleTask::AddBufferedRows(size_t dst,
     const size_t targetRows = Code_->TargetOutputBatchRows;
     const size_t maxRows = Code_->MaxOutputBatchRows;
     const size_t targetBytes = Code_->TargetOutputBatchBytes;
+    const bool releaseInputs = targetBytes > 0
+        && buffer.ReferencedInputBytes >= targetBytes;
     if ((targetRows > 0 && buffer.RowCount >= targetRows) ||
         (maxRows > 0 && buffer.RowCount >= maxRows) ||
-        (targetBytes > 0 && buffer.ByteCount >= targetBytes)) {
-        FlushBuffer(dst);
+        (targetBytes > 0 && buffer.ByteCount >= targetBytes) || releaseInputs) {
+        FlushBuffer(dst, releaseInputs);
     }
 }
 
-void THashShuffleTask::FlushBuffer(size_t dst) {
+void THashShuffleTask::FlushBuffer(size_t dst, bool releaseInputs) {
     auto& buffer = *Buffers_[dst];
     if (buffer.RowCount == 0) {
         return;
     }
 
-    if (buffer.Batches.size() == 1) {
+    // Forwarding a sparse view at the retention limit would move the large
+    // owner into a downstream blocking operator instead of releasing it.
+    if (buffer.Batches.size() == 1 && (!releaseInputs
+            || buffer.Batches[0].Rows.size()
+                == static_cast<size_t>(buffer.Batches[0].Input->RowCount))) {
         auto& batch = buffer.Batches[0];
         auto* data = new THashShuffleRowSetData;
         data->Input = batch.Input;
@@ -1003,6 +1064,7 @@ void THashShuffleTask::FlushBuffer(size_t dst) {
         buffer.Batches.clear();
         buffer.RowCount = 0;
         buffer.ByteCount = 0;
+        buffer.ReferencedInputBytes = 0;
         ObserveInstrumentation();
         return;
     }
@@ -1141,6 +1203,7 @@ void THashShuffleTask::FlushBuffer(size_t dst) {
     buffer.Batches.clear();
     buffer.RowCount = 0;
     buffer.ByteCount = 0;
+    buffer.ReferencedInputBytes = 0;
     ObserveInstrumentation();
 }
 

@@ -147,6 +147,17 @@ flowchart LR
 
 The shuffle computes hashes first, then either emits selection-view rowsets or
 materializes accumulated rows when batching crosses the configured thresholds.
+The byte threshold also bounds the full visible input payload referenced by
+each destination buffer. A sparse selection can retain far more input than its
+selected output contains; counting only output would pin scan batches until
+EOF. References shared across destinations are charged conservatively. A single
+input at the retention limit is copied when its view selects only part of the
+input, so a downstream blocking operator does not inherit the large owner.
+Dense single-input batches can remain views. One oversized input can exceed
+the threshold. Queued dense views keep their input alive until consumed.
+Pending output is drained before reading another input,
+so backpressure does not grow the buffered set. This bounds visible references,
+not opaque source allocations or process RSS.
 Aggregate tasks own separate hash table state; compiled aggregate kernels are
 shared.
 
