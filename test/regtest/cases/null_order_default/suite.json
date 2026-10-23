@@ -1,9 +1,10 @@
 {
   "version": 1,
   "fixtures": {
-    "values": {"json": "tables/t.json", "parquet": {"row_group_rows": 2}}
+    "values": {"json": "tables/t.json", "parquet": {"row_group_rows": 2}},
+    "big": {"json": "tables/big.json", "parquet": {"row_group_rows": 25}}
   },
-  "tables": {"t": "values"},
+  "tables": {"t": "values", "big": "big"},
   "variants": ["single", "threaded", "js"],
   "cases": {
     "alias_key.sql": {"order": "ordered"},
@@ -49,6 +50,18 @@
     "window_sum_range_peers.sql": {"order": "ordered"},
     "window_sum_rows_frame.sql": {"order": "ordered"},
     "window_sum_running_asc.sql": {"order": "ordered"},
-    "window_sum_running_desc.sql": {"order": "ordered"}
+    "window_sum_running_desc.sql": {"order": "ordered"},
+    "big_sort_i_asc.sql": {"order": "ordered"},
+    "big_sort_i_desc.sql": {"order": "ordered"},
+    "big_sort_f_asc.sql": {"order": "ordered"},
+    "big_sort_f_desc.sql": {"order": "ordered"},
+    "big_sort_s_asc.sql": {"order": "ordered"},
+    "big_sort_s_desc.sql": {"order": "ordered"},
+    "big_sort_multi_key.sql": {"order": "ordered"},
+    "big_sort_multi_key_mixed.sql": {"order": "ordered"},
+    "big_top_i_asc.sql": {"order": "ordered"},
+    "big_top_f_desc_offset.sql": {"order": "ordered"},
+    "big_top_s_desc_offset.sql": {"order": "ordered"},
+    "big_top_multi_key.sql": {"order": "ordered"}
   }
 }

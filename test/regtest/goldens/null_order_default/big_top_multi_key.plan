@@ -1,0 +1,4 @@
+limit
+└─ sort [s desc, i asc, id asc]
+   └─ project (id, s, i) (rows≈400 cost≈25.6K)
+      └─ source big AS big (rows≈400 cost≈12.8K)

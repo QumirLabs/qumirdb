@@ -194,7 +194,7 @@ bool LessByKey(const TRowStore& store, TRowId leftId, TRowId rightId,
         if (leftValid == rightValid) {
             return false;
         }
-        return EffectiveNulls(key) == ESortNulls::First ? !leftValid : leftValid;
+        return EffectiveSortNulls(key.Direction, key.Nulls) == ESortNulls::First ? !leftValid : leftValid;
     }
 
     int cmp = CompareValues(leftColumn, leftRow, rightColumn, rightRow, keyColumn.Type);
@@ -396,7 +396,7 @@ bool TSortProcessor::TryRadixSort()
     auto nullsFirsts = std::make_unique<bool[]>(Keys_.size());
     for (size_t k = 0; k < Keys_.size(); ++k) {
         descs[k] = Keys_[k].Direction == ESortDirection::Desc;
-        nullsFirsts[k] = EffectiveNulls(Keys_[k]) == ESortNulls::First;
+        nullsFirsts[k] = EffectiveSortNulls(Keys_[k].Direction, Keys_[k].Nulls) == ESortNulls::First;
     }
 
     auto* store = const_cast<TRowSet*>(Store_.Data());

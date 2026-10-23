@@ -1,0 +1,3 @@
+top-sort [i asc, id asc] limit 25
+└─ project (id, i) (rows≈400 cost≈12.8K)
+   └─ source big AS big (rows≈400 cost≈6.4K)

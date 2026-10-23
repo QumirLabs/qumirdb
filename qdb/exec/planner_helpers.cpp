@@ -82,10 +82,6 @@ bool IsRadixSortableType(const NQumir::NAst::TTypePtr& type) {
         static_cast<bool>(TMaybeType<TStringType>(inner));
 }
 
-bool SortNullsFirst(const NKernel::TKernelSortKeySpec& key) {
-    return EffectiveSortNulls(key.Direction, key.Nulls) == ESortNulls::First;
-}
-
 struct TSortKernelInputs {
     std::vector<TSortColumnRef> KeyColumns;
     std::vector<TSortRadixKeyInput> RadixKeys;
@@ -103,7 +99,7 @@ TSortKernelInputs BuildSortKernelInputs(const NKernel::TOperatorKernelSpec& spec
             .ColumnIndex = key.Column.Index,
             .Type = key.Column.Type,
             .Desc = key.Direction == ESortDirection::Desc,
-            .NullsFirst = SortNullsFirst(key),
+            .NullsFirst = EffectiveSortNulls(key.Direction, key.Nulls) == ESortNulls::First,
         });
         inputs.KeyColumns.push_back({
             .Index = key.Column.Index,
@@ -690,7 +686,7 @@ TWindowRuntimeProcess BuildWindowRuntimeProcess(
             .ColumnIndex = idx,
             .Type = type,
             .Desc = key.Direction == ESortDirection::Desc,
-            .NullsFirst = SortNullsFirst(key),
+            .NullsFirst = EffectiveSortNulls(key.Direction, key.Nulls) == ESortNulls::First,
         };
         keyColumns.push_back({.Index = idx, .Type = type});
         if (partitionRadixKeys.size() < window.PartitionKeys().size()) {

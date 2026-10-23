@@ -1,0 +1,1 @@
+SELECT id, s, i FROM big ORDER BY s DESC, i, id LIMIT 60 OFFSET 20;

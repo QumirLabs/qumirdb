@@ -12,10 +12,6 @@ bool RowSelected(const TRowSet& batch, int32_t row) {
     return !batch.Selection || batch.Selection[row] != 0;
 }
 
-ESortNulls EffectiveNulls(const TSortKey& key) {
-    return EffectiveSortNulls(key.Direction, key.Nulls);
-}
-
 namespace {
 
 bool IsStringKeyType(const TTypePtr& type) {
