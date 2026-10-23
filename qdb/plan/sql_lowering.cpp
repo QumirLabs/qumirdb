@@ -417,6 +417,22 @@ bool IsCoreExpr(const NAst::TExprPtr& expr) {
     return std::ranges::all_of(expr->Children(), IsCoreExpr);
 }
 
+// The first window function call in `expr`, not counting those of its subqueries.
+NSql::TSqlPtr<NSql::TWindowExpr> FindWindow(const NAst::TExprPtr& expr) {
+    if (!expr) {
+        return nullptr;
+    }
+    if (auto window = NAst::TMaybeNode<NSql::TWindowExpr>(expr)) {
+        return window.Cast();
+    }
+    for (const auto& child : expr->Children()) {
+        if (auto window = FindWindow(child)) {
+            return window;
+        }
+    }
+    return nullptr;
+}
+
 bool GroupingSetContainsKey(const std::vector<size_t>& set, size_t keyIndex) {
     return std::find(set.begin(), set.end(), keyIndex) != set.end();
 }
@@ -430,7 +446,10 @@ std::expected<NAst::TExprPtr, TError> BuildGroupingValue(
         return std::unexpected(TError(expr->Location, "GROUPING() expects exactly one argument"));
     }
     auto arg = call.Cast()->Args[0];
-    auto key = info.KeyIndex.find(NAst::NCore::PrintAst(arg));
+    // A key holds no subquery or window, so an argument with one names no key.
+    auto key = IsCoreExpr(arg)
+        ? info.KeyIndex.find(NAst::NCore::PrintAst(arg))
+        : info.KeyIndex.end();
     if (key == info.KeyIndex.end()) {
         return std::unexpected(TError(arg->Location,
             "GROUPING() argument must be a GROUP BY key"));
@@ -524,6 +543,12 @@ std::expected<NAst::TExprPtr, TError> TAggCollector::Rewrite(NAst::TExprPtr expr
     // place, but hoist any aggregates from its inputs (e.g. `sum(sum(x)) over
     // (...)`, `rank() over (order by sum(x))`).
     if (auto window = NAst::TMaybeNode<NSql::TWindowExpr>(expr)) {
+        for (const auto& child : expr->Children()) {
+            if (auto nested = FindWindow(child)) {
+                return std::unexpected(TError(nested->Location,
+                    "window function calls cannot be nested"));
+            }
+        }
         auto w = CloneSqlWindowExpr(window.Cast());
         for (auto* input : WindowInputs(*w)) {
             auto rewritten = Rewrite(*input);
@@ -535,6 +560,11 @@ std::expected<NAst::TExprPtr, TError> TAggCollector::Rewrite(NAst::TExprPtr expr
         return w;
     }
     if (auto agg = AsAggCall(expr)) {
+        // The aggregate runs before the windows over its result.
+        if (auto window = FindWindow(expr)) {
+            return std::unexpected(TError(window->Location,
+                "aggregate function calls cannot contain window function calls"));
+        }
         return Emit(*agg, expr->Location);
     }
     for (auto* child : expr->MutableChildren()) {

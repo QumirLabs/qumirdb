@@ -1,0 +1,1 @@
+SELECT a, GROUPING(rank() OVER (ORDER BY a)) AS g FROM t GROUP BY a;

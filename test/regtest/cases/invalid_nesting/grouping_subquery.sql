@@ -1,0 +1,1 @@
+SELECT a, GROUPING((SELECT max(v) FROM s)) AS g FROM t GROUP BY a;

@@ -225,8 +225,10 @@ struct TWindowExpr : NQumir::NAst::TExpr {
     NQumir::NAst::TExprPtr Expr;
     TSqlPtr<TSqlWindowSpec> WindowSpec;
 
+    // A window call is located at its function call.
     explicit TWindowExpr(NQumir::NAst::TExprPtr expr, TSqlPtr<TSqlWindowSpec> spec)
-        : Expr(std::move(expr))
+        : NQumir::NAst::TExpr(expr ? expr->Location : NQumir::TLocation{})
+        , Expr(std::move(expr))
         , WindowSpec(std::move(spec))
     { }
 
