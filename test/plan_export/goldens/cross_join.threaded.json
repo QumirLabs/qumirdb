@@ -36,6 +36,7 @@
     {
       "entrypoints": {},
       "id": 2,
+      "joinType": "inner",
       "kind": "cross-join",
       "label": "join inner residual (< |l.v| |r.w|)",
       "leftColumns": [

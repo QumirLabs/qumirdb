@@ -2518,6 +2518,7 @@ const BROWSER_JOIN_OUTPUT_BATCH_ROWS = 4096;
 const CrossJoinOp = Object.freeze({
   EMIT: 0n,
   DESTROY: 1n,
+  EMIT_UNMATCHED_RIGHT: 2n,
 });
 
 function dispatchJoin(state, batch, batchIdx, leftStore, rightStore, arg, op) {
@@ -2783,10 +2784,34 @@ function createCrossJoinState(kernel, layout, stage, instrumentation = null) {
     pairBuffer,
     leftStore: new WasmRowStore(arena, layout),
     rightStore: new WasmRowStore(arena, layout),
+    // Left rows without a match still produce output: NULL padding or ANTI
+    // rows. RIGHT / FULL pad the right rows no left row matched.
+    keepsUnmatchedLeft: ['left', 'full', 'left_anti'].includes(stage.joinType),
+    keepsUnmatchedRight: ['right', 'full'].includes(stage.joinType),
+    // One match flag per buffered right row, in store order (RIGHT / FULL).
+    rightMatched: 0,
     materializeCursor: 0,
     rightRows: 0,
     finalized: false,
   };
+}
+
+function dispatchCrossJoin(state, batchIdx, op) {
+  // Every type except inner evaluates the residual in the kernel; the strings
+  // it builds live in the call's string scratch.
+  const releaseStringScratch = beginKernelStringScratch(state.kernel);
+  try {
+    return state.dispatch(
+      toWasmPtr(state.leftStore.dataPtr()),
+      BigInt(batchIdx),
+      toWasmPtr(state.rightStore.dataPtr()),
+      BigInt(state.rightStore.batches.length),
+      toWasmPtr(state.rightMatched),
+      toWasmPtr(state.pairBuffer),
+      op);
+  } finally {
+    releaseStringScratch();
+  }
 }
 
 function stableRowSetForStore(state, rowSet) {
@@ -2822,8 +2847,18 @@ function updateCrossRightState(state, rowSet) {
   state.rightRows += rowSet.batch.rowCount;
 }
 
+// The right input is complete: the match flags cover every buffered right row.
+function closeCrossRightState(state) {
+  if (!state.keepsUnmatchedRight) {
+    return;
+  }
+  const bytes = Math.max(state.rightRows, 1);
+  state.rightMatched = state.arena.alloc(bytes, 8);
+  new Uint8Array(state.arena.memory.buffer, state.rightMatched, bytes).fill(0);
+}
+
 function updateCrossLeftState(state, rowSet) {
-  if (state.rightRows === 0) {
+  if (state.rightRows === 0 && !state.keepsUnmatchedLeft) {
     releaseWasmRowSet(rowSet);
     return;
   }
@@ -2832,15 +2867,7 @@ function updateCrossLeftState(state, rowSet) {
   state.instrumentation?.retain(rowSet, 0);
   const batchIdx = state.leftStore.push(rowSet.batch, rowsetPtr, ownedPtr, wasmHandle);
   try {
-    // Plan export sends only inner cross joins here, which flag no right rows.
-    const ok = state.dispatch(
-      toWasmPtr(state.leftStore.dataPtr()),
-      BigInt(batchIdx),
-      toWasmPtr(state.rightStore.dataPtr()),
-      BigInt(state.rightStore.batches.length),
-      toWasmPtr(0),
-      toWasmPtr(state.pairBuffer),
-      CrossJoinOp.EMIT);
+    const ok = dispatchCrossJoin(state, batchIdx, CrossJoinOp.EMIT);
     if (!ok) {
       throw new Error('cross join kernel update failed');
     }
@@ -2868,21 +2895,28 @@ function drainCrossJoinPairs(state, maxRows = BROWSER_JOIN_OUTPUT_BATCH_ROWS, as
   return [batch];
 }
 
+// After the last left batch: a right row is unmatched only if no row of the
+// whole left input matched it (RIGHT / FULL).
+function finalizeCrossJoinState(state) {
+  if (!state.keepsUnmatchedRight) {
+    return;
+  }
+  if (!dispatchCrossJoin(state, 0, CrossJoinOp.EMIT_UNMATCHED_RIGHT)) {
+    throw new Error('cross join unmatched-right emission failed');
+  }
+}
+
 function finishCrossJoinState(state) {
   if (state.finalized) {
     return;
   }
   state.finalized = true;
-  state.dispatch(
-    toWasmPtr(0),
-    0n,
-    toWasmPtr(0),
-    0n,
-    toWasmPtr(0),
-    toWasmPtr(state.pairBuffer),
-    CrossJoinOp.DESTROY);
+  dispatchCrossJoin(state, 0, CrossJoinOp.DESTROY);
   state.leftStore.freeMarshalled();
   state.rightStore.freeMarshalled();
+  if (state.rightMatched) {
+    state.arena.free(state.rightMatched);
+  }
   state.instrumentation?.releaseRetained();
 }
 
@@ -4051,9 +4085,10 @@ class JoinTask {
   }
 }
 
-// Cross product of two inputs (in practice: a scalar-subquery broadcast, the
-// right side is one row). The kernel emits row-id pairs; jt_materialize gathers
-// the left ++ right output columns.
+// Nested-loop join without equi-keys, as TCrossJoinProcessor: buffers the
+// right input, then streams left batches through xj_dispatch, which emits
+// row-id pairs as the compiled join type requires; jt_materialize gathers the
+// output columns.
 class CrossJoinTask {
   constructor(stage, layout, shared) {
     this.stage = stage;
@@ -4104,6 +4139,7 @@ class CrossJoinTask {
       }
       if (fetched.result === FetchResult.FINISHED) {
         this.rightDone = true;
+        closeCrossRightState(this.state);
         return TaskResult.OK;
       }
     }
@@ -4121,6 +4157,9 @@ class CrossJoinTask {
       }
       if (fetched.result === FetchResult.FINISHED) {
         this.leftDone = true;
+        // The unmatched right rows drain before the output finishes.
+        finalizeCrossJoinState(this.state);
+        return TaskResult.OK;
       }
     }
 

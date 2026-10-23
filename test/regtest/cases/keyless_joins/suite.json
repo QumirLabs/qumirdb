@@ -7,7 +7,7 @@
     "e": {"json": "tables/e.json"}
   },
   "tables": {"t": "t", "s": "s", "u": "u", "e": "e"},
-  "variants": ["single", "threaded"],
+  "variants": ["single", "threaded", "js"],
   "cases": {
     "in_expression_operand.sql": {"order": "unordered"},
     "in_expression_marker.sql": {"order": "unordered"},
