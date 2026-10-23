@@ -2,12 +2,16 @@ find_package(PkgConfig REQUIRED)
 
 pkg_check_modules(GTEST gtest REQUIRED)
 
-macro(ut name source)
+macro(ut_executable name source)
     add_executable(${name} ${source})
     target_link_libraries(${name} qumirdb ${GTEST_LIBRARIES})
     target_include_directories(${name} PRIVATE ${GTEST_INCLUDE_DIRS})
     target_link_directories(${name} PRIVATE ${GTEST_LIBRARY_DIRS})
     target_compile_options(${name} PRIVATE -Wno-character-conversion)
+endmacro()
+
+macro(ut name source)
+    ut_executable(${name} ${source})
     add_test(NAME ${name} COMMAND ${name} ${ARGN} --gtest_output=xml:${CMAKE_CURRENT_BINARY_DIR}/${name}.xml)
 endmacro()
 
@@ -59,9 +63,17 @@ add_library(regtest_lib STATIC regtest_lib.cpp)
 target_link_libraries(regtest_lib PUBLIC qumirdb)
 target_include_directories(regtest_lib PRIVATE ${LLVM_INCLUDE_DIRS})
 target_compile_options(regtest_lib PRIVATE -Wno-character-conversion)
-ut(test_reg test_reg.cpp ${CMAKE_SOURCE_DIR}/test/regtest)
+ut_executable(test_reg test_reg.cpp)
 target_sources(test_reg PRIVATE test_regtest_lib.cpp)
 target_link_libraries(test_reg regtest_lib)
+# The longest test by far: gtest shards that ctest -j runs in parallel.
+foreach(shard RANGE 3)
+    add_test(NAME test_reg_${shard} COMMAND test_reg ${CMAKE_SOURCE_DIR}/test/regtest
+        --gtest_output=xml:${CMAKE_CURRENT_BINARY_DIR}/test_reg_${shard}.xml)
+    # COST starts the long tests first when ctest has no timing history, as in CI.
+    set_tests_properties(test_reg_${shard} PROPERTIES COST 100
+        ENVIRONMENT "GTEST_TOTAL_SHARDS=4;GTEST_SHARD_INDEX=${shard}")
+endforeach()
 ut(test_equijoin test_equijoin.cpp)
 ut(test_outer_join_to_anti test_outer_join_to_anti.cpp)
 ut(test_subquery_scope test_subquery_scope.cpp)
@@ -118,4 +130,5 @@ if(QDB_NODE_EXECUTABLE)
             --xml ${CMAKE_CURRENT_BINARY_DIR}/test_reg_js.xml
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     )
+    set_tests_properties(test_reg_js PROPERTIES COST 100)
 endif()
