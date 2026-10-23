@@ -1,0 +1,8 @@
+sort [x asc nulls-first]
+└─ union-all (rows≈6 cost≈120)
+   ├─ project (x) (rows≈3 cost≈48)
+   │  └─ project (x) (rows≈3 cost≈24)
+   │     └─ source t AS t (rows≈3 cost≈12)
+   └─ project (big) (rows≈3 cost≈72)
+      └─ project (big) (rows≈3 cost≈48)
+         └─ source t AS t_1 (rows≈3 cost≈24)

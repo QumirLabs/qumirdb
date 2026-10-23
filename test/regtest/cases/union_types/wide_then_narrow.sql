@@ -1,0 +1,4 @@
+SELECT big AS x FROM t
+UNION ALL
+SELECT id FROM t
+ORDER BY x;
