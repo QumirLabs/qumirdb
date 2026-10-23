@@ -576,8 +576,21 @@ function compareText(actual, goldenFile) {
 // native runner: a planning error of the exporter is compared with the `.plan`
 // golden; an error that the exporter reports for lowering, and an error of the
 // run in the browser, with the `.error` golden. A run that succeeds fails the case.
-// The WASM runtime wraps its message (`project: <message> (wasm reserved ...)`),
-// so the message of the golden must occur in the error of the run.
+// The WASM scheduler wraps the message of a failed task as
+// `<label>: <message>`, plus an optional ` (wasm reserved ...MB, peak live ...MB)`
+// suffix. The golden `Runtime error: <message>` is compared exactly, as in the
+// native runner, once that wrapper is removed. The label is a free-form stage
+// name, so it is matched as whatever precedes the last `: <message>`.
+const wasmErrorSuffix = / \(wasm reserved [\d.]+MB, peak live [\d.]+MB\)$/;
+const runtimeErrorPrefix = 'Runtime error: ';
+
+function matchesRuntimeError(message, golden) {
+  if (!golden.startsWith(runtimeErrorPrefix)) return false;
+  const expected = golden.slice(runtimeErrorPrefix.length).trimEnd();
+  if (expected.length === 0) return false;
+  return message.replace(wasmErrorSuffix, '').endsWith(`: ${expected}`);
+}
+
 async function checkExpectedError(test, { tables, bundle }, runtime, runOptions) {
   if (bundle.ok !== true) {
     compareText(errorText(bundle.error?.message), test.planGolden);
@@ -593,7 +606,7 @@ async function checkExpectedError(test, { tables, bundle }, runtime, runOptions)
   } catch (error) {
     const message = String(error?.message);
     const golden = readGolden(test.errorGolden, errorText(message));
-    if (!message.includes(golden.replace(/^Runtime error: /, '').trimEnd())) {
+    if (!matchesRuntimeError(message, golden)) {
       throw new TestFailure(`error differs from ${test.errorGolden}\n${lineDiff(golden, errorText(message))}`);
     }
     return null;

@@ -119,6 +119,23 @@ function tests() {
       },
     },
     {
+      name: 'a failed run is compared exactly, not by containment',
+      run: async () => {
+        const wrapped = 'project: abs overflow for i64 (wasm reserved 1.5MB, peak live 0.2MB)';
+        const fails = golden => failsWith(/error differs from .*case\.error/,
+          checkCase(errorCase({ error: golden }), exported(planned), runtime(wrapped)));
+        await checkCase(errorCase({ error: 'Runtime error: abs overflow for i64\n' }),
+          exported(planned), runtime(wrapped));
+        await checkCase(errorCase({ error: 'Runtime error: abs overflow for i64\n' }),
+          exported(planned), runtime('project: abs overflow for i64'));
+        await fails('');
+        await fails('Runtime error: \n');
+        await fails('Runtime error: abs\n');
+        await fails('Runtime error: abs overflow for i64 (wasm reserved 1.5MB, peak live 0.2MB)\n');
+        await fails('abs overflow for i64\n');
+      },
+    },
+    {
       name: 'a run that succeeds fails the case',
       run: async () => {
         const test = errorCase({ error: 'Runtime error: boom\n' });
