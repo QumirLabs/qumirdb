@@ -1848,8 +1848,9 @@ bool ContainsNull(const TExprPtr& e) {
 // skip Expand when one is present: coalesce -> if-chain, qdb_in_list -> typed
 // comparisons, strcat -> qdb_string_concat, qdb_string_view_sql_like -> a constant-pattern
 // fast path, a cast to a nullable target -> nullable_from_value (the raw planner
-// TNullable won't compile), and a division by what may be zero -> a NULLIF guard.
-bool ContainsMustExpandCall(const TExprPtr& e) {
+// TNullable won't compile), and a `%` or decimal `/` by what may be zero -> a NULLIF
+// guard. Float division keeps the fast path: it has no such rewrite.
+bool ContainsMustExpandCall(const TExprPtr& e, const TStructType& inputType) {
     if (!e) return false;
     if (auto call = TMaybeNode<TCallExpr>(e)) {
         if (auto id = TMaybeNode<TIdentExpr>(call.Cast()->Callee)) {
@@ -1865,11 +1866,13 @@ bool ContainsMustExpandCall(const TExprPtr& e) {
     if (auto bin = TMaybeNode<TBinaryExpr>(e)) {
         const TOperator op = bin.Cast()->Operator;
         if ((op == "%" || op == "/") && MayBeZero(bin.Cast()->Right)) {
-            return true;
+            if (TTypePtr type = InferType(e, inputType); type && IsNullOnZeroDivisor(op, type)) {
+                return true;
+            }
         }
     }
     for (const auto& child : e->Children()) {
-        if (ContainsMustExpandCall(child)) return true;
+        if (ContainsMustExpandCall(child, inputType)) return true;
     }
     return false;
 }
@@ -1914,7 +1917,7 @@ std::pair<TExprPtr, TTypePtr> ExpandNullable(
     for (const auto& [name, type] : inputType.Fields) {
         if (IsNullableType(type)) { anyNullable = true; break; }
     }
-    if (!anyNullable && !ContainsNull(expr) && !ContainsMustExpandCall(expr)) {
+    if (!anyNullable && !ContainsNull(expr) && !ContainsMustExpandCall(expr, inputType)) {
         return {expr, InferType(expr, inputType)};
     }
     // Rewrite a clone - this runs at kernel build on the plan's shared expression, which

@@ -125,6 +125,21 @@ TEST(ProjectType, ZeroDivisorMakesExactDivisionNullable) {
     EXPECT_TRUE(IsF64(AnnotateExprType(Parse("(% p p)"), sc)));
 }
 
+// The fast path returns the expression itself. Only a division that Expand guards
+// with NULLIF leaves it; float division by a column has no such rewrite.
+TEST(ProjectType, OnlyGuardedDivisionLeavesExpandFastPath) {
+    TStructType sc({
+        {"k", std::make_shared<TIntegerType>(TIntegerType::I32)},
+        {"p", std::make_shared<TFloatType>()},
+    });
+    for (const char* src : {"(/ p p)", "(/ k k)", "(% p p)"}) {
+        auto input = Parse(src);
+        EXPECT_EQ(ExpandNullable(input, sc).first, input) << src;
+    }
+    auto input = Parse("(% k k)");
+    EXPECT_NE(ExpandNullable(input, sc).first, input);
+}
+
 TEST(ProjectType, ComparisonIsBool) {
     EXPECT_TRUE(IsBool(AnnotateExprType(Parse("(< p 5.0)"), Schema())));
 }
