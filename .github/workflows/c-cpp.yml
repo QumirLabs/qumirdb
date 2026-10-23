@@ -62,7 +62,7 @@ jobs:
         update_packager_index: false
         prepend_symlinks_to_path: false
         # Only pushes to master save the cache; pull requests restore it.
-        store_cache: ${{ github.event_name == 'push' }}
+        store_cache: true
         remove_stale_cache: false
         ccache_options: |
           max_size=2G
