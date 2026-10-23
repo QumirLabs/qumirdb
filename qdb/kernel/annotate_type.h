@@ -79,6 +79,14 @@ std::pair<NQumir::NAst::TExprPtr, NQumir::NAst::TTypePtr> ExpandKernelExpr(
     const NQumir::NAst::TStructType& inputType,
     const TExternalCatalogSnapshot* externalCatalog = nullptr);
 
+// Whether `expr` is an untyped NULL value (`NULL`, `CASE WHEN c THEN NULL END`): AnnotateExprType
+// types it NULL[INTEGER] only because nothing else gives it a type. A UNION takes the type of
+// such a column from its other branches.
+bool IsUntypedNullValue(
+    const NQumir::NAst::TExprPtr& expr,
+    const NQumir::NAst::TStructType& inputType,
+    const TAnnotationContext* context = nullptr);
+
 // ExpandKernelExpr for a filter or join residual predicate. A predicate is a boolean
 // context: an untyped NULL predicate (`WHERE NULL`) becomes NULL[bool], which selects no rows.
 std::pair<NQumir::NAst::TExprPtr, NQumir::NAst::TTypePtr> ExpandKernelPredicate(

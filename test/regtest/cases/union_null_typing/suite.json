@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "fixtures": {
+    "values": {"json": "tables/t.json", "parquet": {"row_group_rows": 2}}
+  },
+  "tables": {"t": "values"},
+  "variants": ["single", "threaded", "js"],
+  "cases": {
+    "null_then_bigint.sql": {"order": "unordered"},
+    "bigint_then_null.sql": {"order": "unordered"},
+    "null_then_date.sql": {"order": "unordered"},
+    "null_then_varchar.sql": {"order": "unordered"},
+    "varchar_then_null.sql": {"order": "unordered"},
+    "columns_null_in_different_branches.sql": {"order": "unordered"},
+    "all_null.sql": {"order": "unordered"}
+  }
+}

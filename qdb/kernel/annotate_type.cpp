@@ -1897,6 +1897,15 @@ TTypePtr AnnotateExprType(
     return t;
 }
 
+bool IsUntypedNullValue(
+    const TExprPtr& expr,
+    const TStructType& inputType,
+    const TAnnotationContext* context)
+{
+    TAnnotationScope scope(context);
+    return expr && IsUntypedNull(expr, InferType(expr, inputType));
+}
+
 TTypePtr EffectiveBinaryNumericType(
     const TExprPtr& left,
     const TExprPtr& right)
