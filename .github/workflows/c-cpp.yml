@@ -75,6 +75,7 @@ jobs:
           -DCMAKE_C_COMPILER=gcc-16 \
           -DCMAKE_C_COMPILER_LAUNCHER=ccache \
           -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+          -DCMAKE_CXX_SCAN_FOR_MODULES=OFF \
           -DQDB_LLVM_LINK_SHARED=ON \
           -DQDB_BUILD_TESTS=ON
     - name: Build
