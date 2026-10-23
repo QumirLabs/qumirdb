@@ -106,6 +106,40 @@ TEST(ProjectType, DivisionForAvgIsF64) {
     EXPECT_TRUE(IsF64(AnnotateExprType(Parse("(/ p k)"), Schema())));
 }
 
+TEST(ProjectType, ZeroDivisorMakesExactDivisionNullable) {
+    TStructType sc({
+        {"k", std::make_shared<TIntegerType>(TIntegerType::I32)},
+        {"amount", std::make_shared<NQdb::TDecimal>(7, 2)},
+        {"qty", std::make_shared<TIntegerType>()},
+        {"p", std::make_shared<TFloatType>()},
+    });
+    for (const char* src : {"(% k k)", "(% k 0)", "(/ amount qty)", "(/ amount amount)"}) {
+        EXPECT_TRUE(IsNullable(AnnotateExprType(Parse(src), sc))) << src;
+    }
+    // A non-zero literal divisor cannot make the result NULL, and float division
+    // has NaN and infinity for a zero divisor.
+    EXPECT_TRUE(IsI32(AnnotateExprType(Parse("(% k 3)"), sc)));
+    EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(/ amount 2)"), sc), 7, 2));
+    EXPECT_FALSE(IsNullable(AnnotateExprType(Parse("(/ amount 2)"), sc)));
+    EXPECT_TRUE(IsF64(AnnotateExprType(Parse("(/ k k)"), sc)));
+    EXPECT_TRUE(IsF64(AnnotateExprType(Parse("(% p p)"), sc)));
+}
+
+// The fast path returns the expression itself. Only a division that Expand guards
+// with NULLIF leaves it; float division by a column has no such rewrite.
+TEST(ProjectType, OnlyGuardedDivisionLeavesExpandFastPath) {
+    TStructType sc({
+        {"k", std::make_shared<TIntegerType>(TIntegerType::I32)},
+        {"p", std::make_shared<TFloatType>()},
+    });
+    for (const char* src : {"(/ p p)", "(/ k k)", "(% p p)"}) {
+        auto input = Parse(src);
+        EXPECT_EQ(ExpandNullable(input, sc).first, input) << src;
+    }
+    auto input = Parse("(% k k)");
+    EXPECT_NE(ExpandNullable(input, sc).first, input);
+}
+
 TEST(ProjectType, ComparisonIsBool) {
     EXPECT_TRUE(IsBool(AnnotateExprType(Parse("(< p 5.0)"), Schema())));
 }

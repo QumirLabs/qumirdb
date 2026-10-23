@@ -441,6 +441,62 @@ TEST(ProjectE2E, NullableDecimalProjectPropagatesValidity) {
     EXPECT_FALSE(plan->Next(out));
 }
 
+TEST(ProjectE2E, DecimalDivisionByZeroIsNull) {
+    std::array<qdb_bin_int, 3> amount = {{
+        {.Lo = 1000, .Hi = 0}, // 10.00
+        {.Lo = 1250, .Hi = 0}, // 12.50
+        {.Lo = 2500, .Hi = 0}, // 25.00
+    }};
+    std::array<qdb_bin_int, 3> divisor = {{
+        {.Lo = 0, .Hi = 0}, // 0.00
+        {.Lo = 250, .Hi = 0}, // 2.50
+        {.Lo = 500, .Hi = 0}, // 5.00
+    }};
+    std::array<int64_t, 3> count = {2, 0, 5};
+    std::array<TColumn, 3> cols = {
+        TColumn{.Data = reinterpret_cast<char*>(amount.data())},
+        TColumn{.Data = reinterpret_cast<char*>(divisor.data())},
+        TColumn{.Data = reinterpret_cast<char*>(count.data())},
+    };
+    TRowSet batch{.Columns = cols.data(), .ColumnCount = 3, .RowCount = 3, .RefCount = 1};
+    NQdb::TMockSource src(
+        {"amount", "divisor", "cnt"},
+        {std::make_shared<NQdb::TDecimal>(7, 2),
+         std::make_shared<NQdb::TDecimal>(7, 2),
+         std::make_shared<TIntegerType>()},
+        {batch});
+
+    auto plan = Plan(
+        "(rel project (rel source \"L\") "
+        "(ratio (/ amount divisor)) "
+        "(share (/ amount cnt)))",
+        src);
+
+    auto* outType = static_cast<TStructType*>(plan->OutputType().get());
+    ASSERT_EQ(outType->Fields.size(), 2u);
+    EXPECT_TRUE(NQdb::IsNullableType(outType->Fields[0].second));
+    EXPECT_TRUE(NQdb::IsNullableType(outType->Fields[1].second));
+
+    TRowSet out{};
+    ASSERT_TRUE(plan->Next(out));
+    ASSERT_EQ(out.ColumnCount, 2);
+    ASSERT_EQ(out.RowCount, 3);
+    const auto* ratio = reinterpret_cast<const qdb_bin_int*>(out.Columns[0].Data);
+    const auto* share = reinterpret_cast<const qdb_bin_int*>(out.Columns[1].Data);
+    EXPECT_FALSE(IsValid(out.Columns[0], 0));
+    EXPECT_TRUE(IsValid(out.Columns[0], 1));
+    EXPECT_TRUE(IsValid(out.Columns[0], 2));
+    EXPECT_EQ(ratio[1].Lo, 50000000000u); // 5.0000000000
+    EXPECT_EQ(ratio[2].Lo, 50000000000u);
+    EXPECT_TRUE(IsValid(out.Columns[1], 0));
+    EXPECT_FALSE(IsValid(out.Columns[1], 1));
+    EXPECT_TRUE(IsValid(out.Columns[1], 2));
+    EXPECT_EQ(share[0].Lo, 500u); // 5.00
+    EXPECT_EQ(share[2].Lo, 500u);
+    Release(&out);
+    EXPECT_FALSE(plan->Next(out));
+}
+
 TEST(FilterE2E, DecimalFilterAlignsIntegerLiteralScale) {
     std::array<qdb_bin_int, 3> amount = {{
         {.Lo = 1000, .Hi = 0}, // 10.00
