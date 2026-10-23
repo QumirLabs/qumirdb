@@ -405,6 +405,18 @@ TEST(RegSuiteInfrastructure, CanonizeRemovesGoldensOfThePreviousOutcome) {
     EXPECT_FALSE(fs::exists(dir.Golden));
 }
 
+TEST(RegSuiteInfrastructure, CanonizeKeepsGoldensOfCasesThatDidNotRun) {
+    TCaseDirectory dir;
+    const auto errorGolden = dir.GoldensDir / "group/query.error";
+    std::ofstream(errorGolden) << "Runtime error: old\n";
+    const auto tests = dir.Collect();
+    ASSERT_EQ(tests.size(), 1);
+    // A filter skipped the case: nothing was canonized and nothing is stale.
+    NRegTest::CommitGoldens(tests);
+    EXPECT_TRUE(fs::exists(errorGolden));
+    EXPECT_TRUE(fs::exists(dir.Golden));
+}
+
 TEST(RegSuiteInfrastructure, UnexpectedOutcomesAreReportedWithTheirMessage) {
     TCaseDirectory dir;
     auto message = [&](std::string_view sql, std::string_view options) {
