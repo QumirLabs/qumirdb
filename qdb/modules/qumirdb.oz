@@ -415,10 +415,10 @@
     (block (return (cast (struct ((V (* (cast left i128) (field right V))))) BinInt))))
   (fun qdb_decimal_div_i64 ((var left BinInt) (var right i64)) -> BinInt
     (attrs (operator "/"))
-    (block (return (cast (struct ((V (/ (field left V) (cast right i128))))) BinInt))))
+    (block (return (cast (struct ((V (// (field left V) (cast right i128))))) BinInt))))
   (fun qdb_decimal_div ((var left BinInt) (var right BinInt)) -> BinInt
     (attrs (operator "/"))
-    (block (return (cast (struct ((V (/ (field left V) (field right V))))) BinInt))))
+    (block (return (cast (struct ((V (// (field left V) (field right V))))) BinInt))))
 
   ;; Operands share a scale, so the remainder of the scaled values is the remainder
   ;; at that scale; like SQL `%` it takes the dividend's sign.
