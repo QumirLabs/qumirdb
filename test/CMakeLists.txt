@@ -101,6 +101,13 @@ if(QDB_NODE_EXECUTABLE)
             --xml ${CMAKE_CURRENT_BINARY_DIR}/test_plan_export_integration.xml
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     )
+    # The browser runner's own handling of expected errors.
+    add_test(
+        NAME test_reg_lib_js
+        COMMAND ${QDB_NODE_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test/regtest_lib_self_test.mjs
+            --xml ${CMAKE_CURRENT_BINARY_DIR}/test_reg_lib_js.xml
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    )
     # The shared regression suites whose variants list "js".
     add_test(
         NAME test_reg_js

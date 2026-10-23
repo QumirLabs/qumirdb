@@ -51,12 +51,11 @@ bool IsReservedOutputColumnName(std::string_view name) {
 
 std::expected<void, TError> ValidateOutputColumnName(
     std::string_view name,
-    const TLocation& location = {})
+    const std::optional<TLocation>& location = {})
 {
     if (IsReservedOutputColumnName(name)) {
-        return std::unexpected(TError(
-            location,
-            "output column name '" + std::string(name) + "' is reserved"));
+        const auto message = "output column name '" + std::string(name) + "' is reserved";
+        return std::unexpected(location ? TError(*location, message) : TError(message));
     }
     return {};
 }
@@ -2558,8 +2557,8 @@ std::expected<TRelation, TError> BuildSelect(
             continue;
         }
         const auto outputLocation = item->Expr
-            ? item->Expr->Location
-            : TLocation{};
+            ? std::optional<TLocation>(item->Expr->Location)
+            : std::nullopt;
         if (item->Alias) {
             if (auto valid = ValidateOutputColumnName(
                     *item->Alias, outputLocation); !valid)

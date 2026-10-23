@@ -447,6 +447,47 @@ TEST(RegSuiteInfrastructure, UnexpectedOutcomesAreReportedWithTheirMessage) {
     EXPECT_NE(planned.find("expected a planning error"), std::string::npos) << planned;
 }
 
+TEST(RegSuiteInfrastructure, PlanOnlyCasesFollowExpectError) {
+    TCaseDirectory dir;
+    auto check = [&](std::string_view sql, std::string_view tables, std::string_view options) {
+        dir.Write("suite.json", R"({
+            "version":1,"execute":false,
+            "fixtures":{"data":{"json":"table.json"}},
+            "tables":)" + std::string(tables) + R"(,"variants":["single"],
+            "cases":{"query.sql":{)" + std::string(options) + "}}}");
+        dir.Write("query.sql", sql);
+        const auto tests = dir.Collect();
+        NRegTest::PrepareCases(tests);
+        try {
+            NRegTest::CheckCase(tests[0], true);
+        } catch (const std::runtime_error& error) {
+            return std::string(error.what());
+        }
+        return std::string();
+    };
+    for (const char* tables : {R"({"t":"data"})", "{}"}) {
+        const auto unexpected = check("SELECT missing FROM t;", tables, "");
+        EXPECT_NE(unexpected.find("unexpected planning error"), std::string::npos) << tables << unexpected;
+        const auto planned = check("SELECT v FROM t;", tables, R"("expect_error":true)");
+        EXPECT_NE(planned.find("expected a planning error"), std::string::npos) << tables << planned;
+        EXPECT_EQ(check("SELECT missing FROM t;", tables, R"("expect_error":true)"), "") << tables;
+        EXPECT_EQ(check("SELECT v FROM t;", tables, ""), "") << tables;
+    }
+    // A query without FROM is a planning error as well.
+    EXPECT_NE(check("SELECT 1;", "{}", "").find("unexpected planning error"), std::string::npos);
+    EXPECT_EQ(check("SELECT 1;", "{}", R"("expect_error":true)"), "");
+}
+
+TEST(RegSuiteInfrastructure, ErrorWithoutLocationHasNoLocationSuffix) {
+    TCaseDirectory dir;
+    dir.Write("suite.json", ErrorManifest(R"("expect_error":true)"));
+    dir.Write("query.sql", R"(WITH c("__row_id__") AS (SELECT v FROM t) SELECT * FROM c;)");
+    const auto tests = dir.Collect();
+    NRegTest::PrepareCases(tests);
+    const auto result = NRegTest::CheckCase(tests[0], true);
+    EXPECT_EQ(result.Plan.Actual, "Error: output column name '__row_id__' is reserved\n\n");
+}
+
 TEST(RegSuiteInfrastructure, RejectsNonBooleanExpectError) {
     TCaseDirectory dir;
     dir.Write("suite.json", ErrorManifest(R"("expect_error":"yes")"));
