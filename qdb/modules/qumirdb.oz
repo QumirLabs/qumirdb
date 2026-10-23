@@ -333,6 +333,41 @@
         (block (= rounded (cast (- scaled 0.5) i128)))
         (block (= rounded (cast (+ scaled 0.5) i128))))
       (return (cast (struct ((V rounded))) BinInt))))
+  ;; value / 10^scale as the nearest double. Below 2^53 the scaled value and, for
+  ;; scale <= 22, the power of ten are exact doubles, so the single division is
+  ;; correctly rounded. Above it, dividing the converted value would round twice:
+  ;; the integer part is converted instead, with a sticky bit for the dropped
+  ;; fraction once the double spacing exceeds 2 (integer part >= 2^55). Between 2^53
+  ;; and 2^55 the fraction is added as a double, which can differ in the last bit.
+  (fun qdb_decimal_to_f64 ((var value BinInt) (var scale i64)) -> f64
+    (block
+      (var factor BinInt)
+      (= factor (call qdb_pow10_i128 scale))
+      (var p i128)
+      (= p (field factor V))
+      (var v i128)
+      (= v (field value V))
+      (var negative bool)
+      (= negative (< v (: 0 i128)))
+      (var mag i128)
+      (= mag v)
+      (if negative (block (= mag (- (: 0 i128) v))))
+      (var result f64)
+      (if (&& (< mag (: 9007199254740992 i128)) (<= scale 22))
+        (block (= result (/ (cast mag f64) (cast p f64))))
+        (block
+          (var q i128)
+          (= q (// mag p))
+          (var r i128)
+          (= r (- mag (* q p)))
+          (if (>= q (: 36028797018963968 i128))
+            (block
+              (if (!= r (: 0 i128)) (block (= q (| q (: 1 i128)))))
+              (= result (cast q f64)))
+            (block
+              (= result (+ (cast q f64) (/ (cast r f64) (cast p f64))))))))
+      (if negative (block (= result (- 0.0 result))))
+      (return result)))
   (fun qdb_decimal_scale_up ((var value BinInt) (var delta i64)) -> BinInt
     (block
       (var factor BinInt)

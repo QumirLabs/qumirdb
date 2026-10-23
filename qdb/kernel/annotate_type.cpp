@@ -1742,6 +1742,14 @@ TTypePtr ExpandDecimalNode(TExprPtr& e, const TStructType& inputType, TTypeEnv& 
             e = DecimalValueAtScale(node->Operand, ot, decimal->Scale, node->Location);
             return MakeDecimalType(*decimal);
         }
+        if (ot && IsFloat(UnwrapNamedType(ValueType(target)))) {
+            if (auto decimal = DecimalSpecOfValueType(ValueType(ot))) {
+                e = Call("qdb_decimal_to_f64", {
+                    std::move(node->Operand),
+                    DecimalScaleLiteral(node->Location, decimal->Scale),
+                }, node->Location);
+            }
+        }
         return Propagate({ot}, target);
     }
     if (auto cl = TMaybeNode<TCallExpr>(e)) {

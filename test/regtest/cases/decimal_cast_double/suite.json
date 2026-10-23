@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "fixtures": {
+    "values": {"json": "tables/t.json", "parquet": {"row_group_rows": 2}}
+  },
+  "tables": {"t": "values"},
+  "variants": ["single", "threaded", "js"],
+  "cases": {
+    "cast_double.sql": {"order": "ordered"},
+    "cast_double_scales.sql": {"order": "ordered"},
+    "cast_double_expression.sql": {"order": "ordered"},
+    "cast_double_aggregate.sql": {"order": "ordered"}
+  }
+}
