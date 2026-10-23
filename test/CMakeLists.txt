@@ -11,6 +11,14 @@ macro(ut name source)
     add_test(NAME ${name} COMMAND ${name} ${ARGN} --gtest_output=xml:${CMAKE_CURRENT_BINARY_DIR}/${name}.xml)
 endmacro()
 
+find_program(QDB_PYTHON_EXECUTABLE python3)
+if(QDB_PYTHON_EXECUTABLE)
+    add_test(
+        NAME test_benchmark_runner
+        COMMAND ${QDB_PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_benchmark_runner.py -v
+    )
+endif()
+
 ut(test_io test_io.cpp)
 ut(test_parquet_row_reader test_parquet_row_reader.cpp)
 ut(test_stats test_stats.cpp)

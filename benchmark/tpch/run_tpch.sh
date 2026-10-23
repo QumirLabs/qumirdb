@@ -9,6 +9,9 @@ PARAMS_DIR="$SCRIPT_DIR/params"
 OUT_DIR="${OUT_DIR:-./results}"
 MODE="${MODE:-sexpr}"
 QDB_ARGS="${QDB_ARGS:-}"
+QDB_ARGS_FILE="${QDB_ARGS_FILE:-}"
+RENDER_ONLY="${RENDER_ONLY:-0}"
+FROZEN_QUERY_DIR="${FROZEN_QUERY_DIR:-}"
 
 usage() {
     echo "Usage: $0 <base_dir> [scale] [query_filter]"
@@ -18,6 +21,9 @@ usage() {
     echo "Env:"
     echo "  MODE          — sexpr (default, runs queries/sexpr/*.sexp) or sql (runs queries/sql/*.sql via --sql)"
     echo "  QDB_ARGS      — extra arguments passed to qdb, e.g. '--scheduler threaded --scheduler-workers 4'"
+    echo "  QDB_ARGS_FILE — optional NUL-separated arguments (preserves spaces; overrides QDB_ARGS)"
+    echo "  RENDER_ONLY=1 — save queries under OUT_DIR/queries without executing qdb"
+    echo "  FROZEN_QUERY_DIR — execute previously rendered queries from this directory"
     exit 1
 }
 
@@ -27,6 +33,12 @@ BASE_DIR="$(cd "$1" && pwd)"
 SCALE_FILTER="${2:-}"
 QUERY_FILTER="${3:-}"
 read -r -a EXTRA_QDB_ARGS <<< "$QDB_ARGS"
+if [[ -n "$QDB_ARGS_FILE" ]]; then
+    EXTRA_QDB_ARGS=()
+    while IFS= read -r -d '' argument; do
+        EXTRA_QDB_ARGS+=("$argument")
+    done < "$QDB_ARGS_FILE"
+fi
 
 # Discover scale subdirectories (pq<N>)
 ALL_SCALES=()
@@ -65,33 +77,8 @@ query_enabled() {
 # LOG_FILE. Echoes "<exec> <cpu> <plan> <kernel-build> <llvm> <return-code>".
 run_query() {
     local label="$1"; shift
-    local out_file err_file rc seconds cpu plan build llvm
-    out_file="$(mktemp "$tmpdir/qdb_output.XXXXXX")"
-    err_file="$(mktemp "$tmpdir/qdb_stderr.XXXXXX")"
-    set +e
-    "$QDB_BIN" --timing "$@" > "$out_file" 2> "$err_file"
-    rc=$?
-    set -e
-    printf '\n=== %s (rc=%s) ===\n' "$label" "$rc" >> "$RESULT_FILE"
-    cat "$out_file" >> "$RESULT_FILE"
-    printf '\n=== %s (rc=%s) ===\n' "$label" "$rc" >> "$LOG_FILE"
-    cat "$err_file" >> "$LOG_FILE"
-    printf '\n' >> "$LOG_FILE"
-    # Execution total (processing only) — the metric the tables report.
-    seconds=$(
-        sed -nE \
-            -e 's/.*Returned [0-9]+ rows in ([0-9]+([.][0-9]+)?) seconds.*/\1/p' \
-            -e 's/.*Processed [0-9]+ rowsets in ([0-9]+([.][0-9]+)?).*/\1/p' \
-            "$err_file" | tail -n 1
-    )
-    cpu=$(sed -nE 's/.*Cpu: ([0-9]+([.][0-9]+)?) seconds.*/\1/p' "$err_file" | tail -n 1)
-    # Per-phase compile timings (--timing), excluded from the processing total.
-    plan=$(sed -nE 's/.*Planning: ([0-9]+([.][0-9]+)?) seconds.*/\1/p' "$err_file" | tail -n 1)
-    build=$(sed -nE 's/.*KernelBuild: ([0-9]+([.][0-9]+)?) seconds.*/\1/p' "$err_file" | tail -n 1)
-    llvm=$(sed -nE 's/.*JitLLVM: ([0-9]+([.][0-9]+)?) seconds.*/\1/p' "$err_file" | tail -n 1)
-    seconds="${seconds:-0}"; cpu="${cpu:-0}"
-    plan="${plan:-0}"; build="${build:-0}"; llvm="${llvm:-0}"
-    echo "$seconds $cpu $plan $build $llvm $rc"
+    python3 "$SCRIPT_DIR/../query_runner.py" \
+        "$QDB_BIN" "$label" "$RESULT_FILE" "$LOG_FILE" "$METRICS_FILE" "$@"
 }
 
 # Substitute scale params (and, for sexpr, table paths) into a template (stdout).
@@ -169,8 +156,7 @@ render() {
 
 mkdir -p "$OUT_DIR"
 
-tmpdir="$(mktemp -d)"
-trap 'rm -rf "$tmpdir"' EXIT
+mkdir -p "$OUT_DIR/queries"
 
 for scale in "${SCALES[@]}"; do
     sf_num="${scale#pq}"
@@ -189,6 +175,8 @@ for scale in "${SCALES[@]}"; do
     RESULT_FILE="$OUT_DIR/tpch_${MODE}_sf${sf_num}.results" # query result rows
     : > "$LOG_FILE"
     : > "$RESULT_FILE"
+    METRICS_FILE="$OUT_DIR/tpch_${MODE}_sf${sf_num}.jsonl"
+    : > "$METRICS_FILE"
 
     echo "[qdb] mode=$MODE scale=$sf_num parquet=$data_dir" | tee -a "$LOG_FILE" >&2
 
@@ -207,16 +195,27 @@ for scale in "${SCALES[@]}"; do
 
         if [[ "$MODE" == "sql" ]]; then
             template="$SQL_DIR/q${q_num}.sql"
-            [[ -f "$template" ]] || continue
-            tmp_sql="$tmpdir/q${q_num}_sf${sf_num}.sql"
-            render "$template" "$data_dir" > "$tmp_sql"
-            read -r seconds cpu plan build llvm rc <<< "$(run_query "Q${q_num} sf${sf_num}" ${EXTRA_QDB_ARGS[@]+"${EXTRA_QDB_ARGS[@]}"} --sql -i "$tmp_sql" --data "$data_dir")"
+            extension=sql
         else
             template="$SEXPR_DIR/q${q_num}.sexp"
-            [[ -f "$template" ]] || continue
-            tmp_sexp="$tmpdir/q${q_num}_sf${sf_num}.sexp"
-            render "$template" "$data_dir" > "$tmp_sexp"
-            read -r seconds cpu plan build llvm rc <<< "$(run_query "Q${q_num} sf${sf_num}" ${EXTRA_QDB_ARGS[@]+"${EXTRA_QDB_ARGS[@]}"} -i "$tmp_sexp")"
+            extension=sexp
+        fi
+        [[ -f "$template" ]] || continue
+        if [[ -n "$FROZEN_QUERY_DIR" ]]; then
+            query="$FROZEN_QUERY_DIR/q${q_num}_sf${sf_num}.$extension"
+            [[ -f "$query" ]] || { echo "Missing frozen query: $query" >&2; exit 1; }
+        else
+            query="$OUT_DIR/queries/q${q_num}_sf${sf_num}.$extension"
+            render "$template" "$data_dir" > "$query"
+        fi
+        if [[ "$RENDER_ONLY" == "1" ]]; then
+            printf '%s\n' "$query"
+            continue
+        fi
+        if [[ "$MODE" == "sql" ]]; then
+            read -r seconds cpu plan build llvm rc <<< "$(run_query "Q${q_num} sf${sf_num}" ${EXTRA_QDB_ARGS[@]+"${EXTRA_QDB_ARGS[@]}"} --sql -i "$query" --data "$data_dir")"
+        else
+            read -r seconds cpu plan build llvm rc <<< "$(run_query "Q${q_num} sf${sf_num}" ${EXTRA_QDB_ARGS[@]+"${EXTRA_QDB_ARGS[@]}"} -i "$query")"
         fi
 
         total_s=$(python3 -c "print(round($total_s + $seconds, 3))")
@@ -231,6 +230,7 @@ for scale in "${SCALES[@]}"; do
         echo "[qdb] q${q_num} plan=${plan}s kbuild=${build}s llvm=${llvm}s exec=${seconds}s cpu=${cpu}s ${status}" >> "$LOG_FILE"
     done
 
+    [[ "$RENDER_ONLY" == "1" ]] && continue
     printf "Total (processing): %ss,  Cpu: %ss,  Failed: %s\n" "$total_s" "$cpu_s" "$failed"
     printf "Compile (excluded from processing): plan=%ss  kbuild=%ss  llvm=%ss\n" "$plan_s" "$build_s" "$llvm_s"
     echo "[qdb] log: $LOG_FILE  results: $RESULT_FILE" >&2
