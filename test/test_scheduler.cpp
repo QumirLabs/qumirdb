@@ -196,7 +196,7 @@ struct TOneToOne : IConnection {
     void Resize(size_t srcSize, size_t dstSize) override {
         assert(srcSize == dstSize);
         Size_ = srcSize;
-        Finished_.assign(Size_, 0);
+        Finished_ = std::vector<std::atomic<bool>>(Size_);
         Outputs_.clear();
         Outputs_.reserve(Size_);
         for (size_t i = 0; i < Size_; ++i) {
@@ -218,7 +218,7 @@ struct TOneToOne : IConnection {
 
     void Finish(int src_id) override {
         assert(src_id >= 0 && static_cast<size_t>(src_id) < Size_);
-        Finished_[src_id] = 1;
+        Finished_[src_id].store(true, std::memory_order_release);
     }
 
     // Input
@@ -227,12 +227,15 @@ struct TOneToOne : IConnection {
         if (Outputs_[dst_id]->TryPop(rowSet)) {
             return EFetchState::OK;
         }
-
-        return Finished_[dst_id] ? EFetchState::FINISHED : EFetchState::NO_DATA;
+        if (!Finished_[dst_id].load(std::memory_order_acquire)) {
+            return EFetchState::NO_DATA;
+        }
+        // The last batch may have been pushed after the failed pop above.
+        return Outputs_[dst_id]->TryPop(rowSet) ? EFetchState::OK : EFetchState::FINISHED;
     }
 
     size_t Size_ = 0;
-    std::vector<int> Finished_;
+    std::vector<std::atomic<bool>> Finished_;
     std::vector<std::unique_ptr<TSPSC<TRowSet>>> Outputs_;
 };
 
@@ -265,10 +268,11 @@ struct TGather : IConnection {
     }
 
     void Finish(int src_id) override {
+        // Sources finish on different threads; only the counter is shared.
         if (Flags_[src_id] == 0) {
-            NFinished_ ++;
+            Flags_[src_id] = 1;
+            NFinished_.fetch_add(1, std::memory_order_release);
         }
-        Flags_[src_id] = 1;
     }
 
     void Push(int src_id, TRowSet&& rowSet) override {
@@ -279,23 +283,31 @@ struct TGather : IConnection {
     EFetchState Fetch(int dst_id, TRowSet& batch) override {
         assert(dst_id == 0);
 
-        auto from = (FetchId_ + 1) % Size_;
-        FetchId_ = from;
-        for (size_t i = 0; i < Size_; ++i) {
-            auto index = (from + i) % Size_;
-            if (Outputs_[index]->TryPop(batch)) {
-                return EFetchState::OK;
+        auto fetch = [&]() {
+            auto from = (FetchId_ + 1) % Size_;
+            FetchId_ = from;
+            for (size_t i = 0; i < Size_; ++i) {
+                auto index = (from + i) % Size_;
+                if (Outputs_[index]->TryPop(batch)) {
+                    return true;
+                }
             }
-        }
+            return false;
+        };
 
-        return NFinished_ == Size_
-            ? EFetchState::FINISHED
-            : EFetchState::NO_DATA;
+        if (fetch()) {
+            return EFetchState::OK;
+        }
+        if (NFinished_.load(std::memory_order_acquire) != Size_) {
+            return EFetchState::NO_DATA;
+        }
+        // The last batches may have been pushed after the failed fetch above.
+        return fetch() ? EFetchState::OK : EFetchState::FINISHED;
     }
 
     size_t Size_;
     size_t FetchId_ = 0;
-    size_t NFinished_ = 0;
+    std::atomic<size_t> NFinished_ = 0;
     std::vector<int> Flags_;
     std::vector<std::unique_ptr<TSPSC<TRowSet>>> Outputs_;
 };
@@ -1000,8 +1012,11 @@ struct TThreadedScheduler {
             }
         }
 
-        auto pushed = Ready.TryPush(node);
-        assert(pushed);
+        // A worker preempted inside TryPop still holds its cell, so the ring
+        // can be full while fewer than Graph.Size nodes are queued.
+        while (!Ready.TryPush(node)) {
+            std::this_thread::yield();
+        }
     }
 
     TDagNode* PopReady() {
