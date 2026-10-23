@@ -4,7 +4,7 @@
 // test_reg owns manifest validation and canonization; this module only reads.
 
 import { spawn } from 'node:child_process';
-import { readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 
 import { TestFailure } from './js_harness.mjs';
@@ -201,6 +201,13 @@ class Suite {
   }
 }
 
+// A boolean option, as the native runner reads it: other JSON values are rejected.
+function booleanOption(where, object, name, fallback) {
+  const value = object[name] ?? fallback;
+  if (typeof value !== 'boolean') throw new Error(`${where}: "${name}" must be a boolean`);
+  return value;
+}
+
 // Cases whose suite (or case) variants list "js" and that execute against
 // tables. Executed cases without js are returned as skipped so that the runner
 // reports them; plan-only cases have no result golden to check.
@@ -213,7 +220,9 @@ export function collectCases(root) {
     const json = readJson(manifestPath);
     const suiteVariants = json.variants ?? [];
     const suite = new Suite(manifestPath, json);
+    const suiteExpectError = booleanOption(manifestPath, json, 'expect_error', false);
     for (const [sqlFile, options] of Object.entries(json.cases)) {
+      const expectError = booleanOption(`${manifestPath}: ${sqlFile}`, options, 'expect_error', suiteExpectError);
       const variants = options.variants ?? suiteVariants;
       const sql = path.join(suite.dir, sqlFile);
       const relative = path.relative(casesDir, sql);
@@ -239,7 +248,7 @@ export function collectCases(root) {
         golden: path.join(goldensDir, `${base}.result.json`),
         planGolden: path.join(goldensDir, `${base}.plan`),
         errorGolden: path.join(goldensDir, `${base}.error`),
-        expectError: options.expect_error ?? json.expect_error ?? false,
+        expectError,
         suite,
         tables,
         ordered: (options.order ?? 'ordered') === 'ordered',
@@ -549,33 +558,30 @@ function errorText(message) {
   return `${text.startsWith('Error: ') ? text : `Runtime error: ${text}`}\n`;
 }
 
-function isErrorText(text) {
-  return text.startsWith('Error: ') || text.startsWith('Runtime error: ');
+function readGolden(goldenFile, actual) {
+  if (!existsSync(goldenFile)) {
+    throw new TestFailure(`missing golden ${goldenFile} for the error\n${actual}`);
+  }
+  return readFileSync(goldenFile, 'utf8');
 }
 
 function compareText(actual, goldenFile) {
-  const expected = readFileSync(goldenFile, 'utf8');
+  const expected = readGolden(goldenFile, actual);
   if (actual !== expected) {
     throw new TestFailure(`error differs from ${goldenFile}\n${lineDiff(expected, actual)}`);
   }
 }
 
-// A case that must fail. The `.plan` golden holds a planning error, which the
-// exporter reports with the same text, so the two are compared exactly. An
-// error after planning is in the `.error` golden. The exporter reports an
-// error of lowering as an unsupported plan and the text is compared; the WASM
-// runtime has its own messages, so a run only has to fail, whatever it says.
+// A case that must fail. The stage that failed decides the golden, as in the
+// native runner: a planning error of the exporter is compared with the `.plan`
+// golden; an error that the exporter reports for lowering, and an error of the
+// run in the browser, with the `.error` golden. A run that succeeds fails the case.
+// The WASM runtime wraps its message (`project: <message> (wasm reserved ...)`),
+// so the message of the golden must occur in the error of the run.
 async function checkExpectedError(test, { tables, bundle }, runtime, runOptions) {
-  const planGolden = readFileSync(test.planGolden, 'utf8');
-  if (isErrorText(planGolden)) {
-    if (bundle.ok === true) {
-      throw new TestFailure(`expected a planning error but the exporter planned the query\n${planGolden}`);
-    }
+  if (bundle.ok !== true) {
     compareText(errorText(bundle.error?.message), test.planGolden);
     return null;
-  }
-  if (bundle.ok !== true) {
-    throw new TestFailure(`unexpected planning error: ${bundle.error?.message ?? 'unknown error'}`);
   }
   if (bundle.exec?.supported !== true) {
     compareText(errorText(bundle.exec?.reason), test.errorGolden);
@@ -584,7 +590,12 @@ async function checkExpectedError(test, { tables, bundle }, runtime, runOptions)
   const exec = browserExec(bundle);
   try {
     await runtime.executeBrowserPipelineScheduled(exec, fixtureSource(tables), runOptions);
-  } catch {
+  } catch (error) {
+    const message = String(error?.message);
+    const golden = readGolden(test.errorGolden, errorText(message));
+    if (!message.includes(golden.replace(/^Runtime error: /, '').trimEnd())) {
+      throw new TestFailure(`error differs from ${test.errorGolden}\n${lineDiff(golden, errorText(message))}`);
+    }
     return null;
   }
   throw new TestFailure(`expected an error (${test.errorGolden}) but the browser run succeeded`);

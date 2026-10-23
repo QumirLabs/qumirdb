@@ -104,11 +104,12 @@ std::unique_ptr<TMockSource> MakePlanSource(std::string_view table) {
     throw std::runtime_error("unknown plan fixture table '" + std::string(table) + "'");
 }
 
-std::string BuildPlanText(std::istream& input) {
+// The plan text, or the text of the planning error.
+std::expected<std::string, std::string> BuildPlanText(std::istream& input) {
     NSql::TTokenStream tokens(input);
     NSql::TParser parser;
     auto parsed = parser.Parse(tokens);
-    if (!parsed) return parsed.error().ToString() + "\n";
+    if (!parsed) return std::unexpected(parsed.error().ToString() + "\n");
     std::vector<std::unique_ptr<TMockSource>> sources;
     auto factory = [&](std::string_view table)
         -> std::expected<TOperatorPtr, NQumir::TError>
@@ -117,7 +118,7 @@ std::string BuildPlanText(std::istream& input) {
         return std::make_shared<TSourceOperator>(*source, std::string(table));
     };
     auto plan = BuildPlan(*parsed, factory);
-    if (!plan) return plan.error().ToString() + "\n";
+    if (!plan) return std::unexpected(plan.error().ToString() + "\n");
     std::ostringstream output;
     NSexp::PrintRelPlan(output, *plan);
     output << '\n';
@@ -1129,7 +1130,19 @@ TComparison CompareResults(const std::string& actual, const std::string& expecte
 TCaseResult CheckCase(const TQueryCase& test, bool canonize) {
     if (!test.HasTables()) {
         std::istringstream input(ReadAll(test.Sql));
-        return {ComparePlan(test, BuildPlanText(input), canonize), std::nullopt, std::nullopt};
+        const auto plan = BuildPlanText(input);
+        // Cases without a manifest cannot declare `expect_error` and record either outcome.
+        if (test.Suite) {
+            const std::string where = " (" + test.Sql.string() + ", " + test.Variant + ")";
+            if (!plan && !test.ExpectError) {
+                throw std::runtime_error("unexpected planning error" + where
+                    + "; declare \"expect_error\" if it is intended:\n" + plan.error());
+            }
+            if (plan && test.ExpectError) {
+                throw std::runtime_error("expected a planning error but the plan was built" + where);
+            }
+        }
+        return {ComparePlan(test, plan ? *plan : plan.error(), canonize), std::nullopt, std::nullopt};
     }
     if (canonize) test.Suite->Ran.insert(test.Golden);
     const char* timingEnv = std::getenv("QDB_REGTEST_TIMING");
@@ -1173,8 +1186,8 @@ TCaseResult CheckCase(const TQueryCase& test, bool canonize) {
         optimizeMs = mark();
     });
     const std::string where = " (" + test.Sql.string() + ", " + test.Variant + ")";
-    if (planError && !test.ExpectError && test.Execute) {
-        // Canonizing must not turn an executed case into an error golden.
+    if (planError && !test.ExpectError) {
+        // Canonizing must not turn a case into an error golden.
         throw std::runtime_error("unexpected planning error" + where
             + "; declare \"expect_error\" if it is intended:\n" + *planError);
     }

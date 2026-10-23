@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "expect_error": true,
+  "execute": false,
+  "fixtures": {
+    "amounts": {"parquet_file": "tables/amounts.parquet"}
+  },
+  "tables": {"t": "amounts"},
+  "variants": ["single", "threaded"],
+  "cases": {
+    "stddev_samp_column.sql": {}
+  }
+}

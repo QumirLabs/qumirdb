@@ -75,18 +75,23 @@ The text of an error is one of:
 
 The outcome must match the declaration. A case without `expect_error` that
 fails, and a case with it that succeeds, fail with the message (the SQL file
-and the error). With `"execute": false` the error can only be a planning
-error; `expect_error` there makes a successful plan fail the case. `--canonize` also removes the golden of the
+and the error). With `"execute": false` the error can only be a planning error; a planning error
+without `expect_error` fails the case, and `expect_error` makes a successful plan
+fail it. The same holds for a suite case without tables. A SQL file outside
+a suite has no manifest, cannot declare `expect_error` and records either plan.
+`--canonize` also removes the golden of the
 previous outcome (a `.error` of a case that now succeeds, a result of a case
 that now fails) and reports each removed file on stderr. Failures of
 the harness (a broken fixture, an unmapped table) are never goldens.
 
-The browser runner checks the same cases. A planning error of the exporter is
-compared with the `.plan` golden exactly; an error that the exporter reports
-for lowering is compared with the `.error` golden. The WASM runtime words its
-errors differently from the native one, so a run that must fail with an
-`.error` golden only has to fail, whatever it says; a `js` run that succeeds
-fails the case.
+The browser runner checks the same cases and validates `expect_error` as a
+boolean. The stage that failed decides the golden: a planning error of the exporter
+is compared with the `.plan` golden exactly, and so is an error that the exporter
+reports for lowering with the `.error` golden. The WASM runtime wraps the message
+of a failed run (`project: <message> (wasm reserved ...)`), so the message of the
+`.error` golden must occur in it; a case whose error reads differently in the
+WASM runtime must not list `js`. A `js` run that succeeds fails the case.
+`test/regtest_lib_self_test.mjs` (`test_reg_lib_js`) covers these stages.
 
 ## Browser runner
 

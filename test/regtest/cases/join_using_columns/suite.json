@@ -22,6 +22,6 @@
     "nested_right_input.sql": {"order": "ordered"},
     "where_group_by.sql": {"order": "ordered"},
     "order_by_input.sql": {"order": "ordered"},
-    "other_column_ambiguous.sql": {"execute": false}
+    "other_column_ambiguous.sql": {"execute": false, "expect_error": true}
   }
 }
