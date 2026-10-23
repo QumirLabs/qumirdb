@@ -1,0 +1,10 @@
+project (id, x, p, q, id, r)
+└─ sort [__scope_1 asc]
+   └─ project (__scope_0, __scope_1, __scope_2, __scope_3, __scope_4, __scope_5) (rows≈9 cost≈10.2K)
+      └─ project (t.id, x, t.p, u.q, u.id, w.r) (rows≈9 cost≈9.9K)
+         └─ join full [t.x = x] (rows≈9 cost≈9.5K)
+            ├─ source t AS t (rows≈3 cost≈72)
+            └─ project (x, u.q, u.id, w.r) (rows≈6 cost≈4.8K)
+               └─ join full [u.x = w.x] (rows≈6 cost≈4.6K)
+                  ├─ source u AS u (rows≈3 cost≈72)
+                  └─ source w AS w (rows≈3 cost≈60)

@@ -1,0 +1,9 @@
+{
+  "schema": "<struct (x <named Nullable [string]>) (tx <named Nullable [string]>) (ux <named Nullable [string]>)>",
+  "rows": [
+    ["a", "a", null],
+    ["b", "b", "b"],
+    ["c", "c", "c"],
+    ["d", null, "d"]
+  ]
+}

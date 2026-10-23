@@ -1,0 +1,6 @@
+{
+  "schema": "<struct (id i32) (x string) (p i32) (q i32) (id i32) (r i32)>",
+  "rows": [
+    [3, "c", 30, 300, 3, 3000]
+  ]
+}

@@ -1,0 +1,1 @@
+SELECT * FROM t JOIN u USING (x) ORDER BY p;

@@ -542,6 +542,9 @@ std::expected<const TProjectionSpec*, TError> PositionedProjection(
 struct TRelation {
     TOperatorPtr Plan;
     std::vector<std::string> Labels;
+    // Labels SQL reaches only qualified: the inputs of a USING column, which the
+    // join exposes once under its bare name. A bare `*` skips them.
+    std::unordered_set<std::string> QualifiedOnly;
 };
 
 // Tables by name: base tables, and the CTEs in scope with their labels.
@@ -585,14 +588,18 @@ TRelation JoinRelations(
         case EJoinType::LeftAnti:
         case EJoinType::LeftMark:
             joined.Labels = std::move(left.Labels);
+            joined.QualifiedOnly = std::move(left.QualifiedOnly);
             break;
         case EJoinType::RightSemi:
         case EJoinType::RightAnti:
             joined.Labels = std::move(right.Labels);
+            joined.QualifiedOnly = std::move(right.QualifiedOnly);
             break;
         default:
             joined.Labels = std::move(left.Labels);
             joined.Labels.insert(joined.Labels.end(), right.Labels.begin(), right.Labels.end());
+            joined.QualifiedOnly = std::move(left.QualifiedOnly);
+            joined.QualifiedOnly.insert(right.QualifiedOnly.begin(), right.QualifiedOnly.end());
             break;
     }
     return joined;
@@ -610,7 +617,7 @@ std::expected<void, TError> Annotate(const TOperatorPtr& plan, const TBuildConte
 }
 
 // The SQL names an expression sees: the labels of its inputs, each by its
-// qualified name and by its bare column part.
+// qualified name and, unless it is qualified only, by its bare column part.
 class TNameScope {
 public:
     // Resolves a reference that no input matches, or returns false to report it.
@@ -625,7 +632,7 @@ public:
                     continue;
                 }
                 Add(label, columns[i]);
-                if (label.find('.') != std::string::npos) {
+                if (label.find('.') != std::string::npos && !input.QualifiedOnly.contains(label)) {
                     Add(BareColumnName(label), columns[i]);
                 }
             }
@@ -873,7 +880,7 @@ TRelation CarryLabels(const TRelation& input, TOperatorPtr plan) {
     for (size_t i = 0; i < columns.size(); ++i) {
         labels.emplace(columns[i], input.Labels[i]);
     }
-    TRelation relation{.Plan = std::move(plan)};
+    TRelation relation{.Plan = std::move(plan), .QualifiedOnly = input.QualifiedOnly};
     for (const auto& name : ColumnNames(relation.Plan)) {
         auto label = labels.find(name);
         relation.Labels.push_back(label == labels.end() ? std::string() : label->second);
@@ -939,6 +946,89 @@ std::expected<TRelation, TError> BuildQuery(
     const NSql::TSqlQuery& query,
     TBuildContext& context,
     std::optional<TSelectOutput>* output = nullptr);
+
+// A USING column is one column of the join: the left input of an inner or left
+// join, the right input of a right join, or the COALESCE of both for a full join.
+// As in DuckDB, it takes the place of the left input. The inputs stay reachable
+// by their qualified labels only, as `t.c` and `u.c`.
+std::expected<TRelation, TError> ShareUsingColumns(
+    TRelation joined,
+    const std::vector<TJoinKey>& keys,
+    EJoinType type,
+    const TBuildContext& context)
+{
+    const auto columns = ColumnNames(joined.Plan);
+    auto labelOf = [&](const std::string& column) -> std::string& {
+        return joined.Labels[std::ranges::find(columns, column) - columns.begin()];
+    };
+    // An unqualified input, such as the shared column of a nested USING join, has
+    // no other name, so it is hidden.
+    auto qualifyOnly = [&](std::string& label) {
+        if (label.find('.') == std::string::npos) {
+            label.clear();
+        } else {
+            joined.QualifiedOnly.insert(label);
+        }
+    };
+    switch (type) {
+        case EJoinType::Inner:
+        case EJoinType::Left:
+            for (const auto& key : keys) {
+                qualifyOnly(labelOf(key.Right));
+            }
+            return joined;
+        case EJoinType::Right:
+        case EJoinType::Full:
+            break;
+        default:
+            // A semi join outputs one input only.
+            return joined;
+    }
+    // Left input -> the SQL name of its shared column.
+    std::unordered_map<std::string, std::string> sharedNames;
+    std::unordered_set<std::string> names;
+    for (const auto& key : keys) {
+        auto name = BareColumnName(labelOf(key.Left));
+        names.insert(name);
+        sharedNames.emplace(key.Left, std::move(name));
+    }
+    for (const auto& key : keys) {
+        qualifyOnly(labelOf(key.Left));
+        qualifyOnly(labelOf(key.Right));
+    }
+    // A shared column is named by its SQL name, which is then its output name. An
+    // input of that name, a hidden shared column of a nested join, is renamed.
+    TFreshNames fresh;
+    for (const auto& column : columns) {
+        fresh.Reserve(column);
+    }
+    for (const auto& name : names) {
+        fresh.Reserve(name);
+    }
+    std::vector<TProjectionSpec> projections;
+    std::vector<std::string> labels;
+    for (size_t i = 0; i < columns.size(); ++i) {
+        if (auto shared = sharedNames.find(columns[i]); shared != sharedNames.end()) {
+            const auto& right = std::ranges::find(keys, columns[i], &TJoinKey::Left)->Right;
+            auto value = type == EJoinType::Right
+                ? Ident({}, right)
+                : Call({}, "coalesce", {Ident({}, columns[i]), Ident({}, right)});
+            projections.push_back({.Name = shared->second, .Expression = std::move(value)});
+            labels.push_back(shared->second);
+        }
+        const auto name = names.contains(columns[i])
+            ? fresh.Next("__scope")
+            : columns[i];
+        projections.push_back({.Name = name, .Expression = Ident({}, columns[i])});
+        labels.push_back(joined.Labels[i]);
+    }
+    joined.Plan = std::make_shared<TProjectOperator>(std::move(joined.Plan), std::move(projections));
+    joined.Labels = std::move(labels);
+    if (auto annotated = Annotate(joined.Plan, context); !annotated) {
+        return std::unexpected(annotated.error());
+    }
+    return joined;
+}
 
 std::expected<TRelation, TError> BuildTableRef(
     const NSql::TSqlPtr<NSql::TSqlTableRef>& ref,
@@ -1026,8 +1116,12 @@ std::expected<TRelation, TError> BuildTableRef(
                 }
             }
         }
-        return JoinRelations(std::move(*left), std::move(*right), std::move(keys),
+        auto joined = JoinRelations(std::move(*left), std::move(*right), keys,
             MapJoinType(join->Type), std::move(residual));
+        if (join->Condition && join->Condition->UsingColumns) {
+            return ShareUsingColumns(std::move(joined), keys, MapJoinType(join->Type), context);
+        }
+        return joined;
     }
 
     return std::unexpected(TError("unsupported table reference"));
@@ -2231,8 +2325,10 @@ struct TSelectOutput {
     // Output columns with an explicit name (an alias or a plain column item), by
     // that name -> projection; nullopt for a name given to several of them.
     std::unordered_map<std::string, std::optional<size_t>> Aliases;
-    // Labels of the input of the top projection, which hidden sort columns extend.
+    // Labels of the input of the top projection, which hidden sort columns extend,
+    // and those of them SQL reaches only qualified.
     std::vector<std::string> InputLabels;
+    std::unordered_set<std::string> InputQualifiedOnly;
     // Over SELECT DISTINCT, hidden sort columns read only the distinct outputs.
     bool Distinct = false;
 };
@@ -2446,7 +2542,9 @@ std::expected<TRelation, TError> BuildSelect(
             const auto expanded = projections.size();
             for (size_t column = 0; column < schema->Fields.size(); ++column) {
                 const auto& label = from.Labels[column];
-                if (label.empty() || (!prefix.empty() && label.rfind(prefix, 0) != 0)) {
+                if (label.empty() || (!prefix.empty() && label.rfind(prefix, 0) != 0)
+                    || (prefix.empty() && from.QualifiedOnly.contains(label)))
+                {
                     continue;
                 }
                 projections.push_back({
@@ -2613,6 +2711,9 @@ std::expected<TRelation, TError> BuildSelect(
                 offset += arity;
             }
             selected.InputLabels = distinct ? labels : n.Labels;
+            if (!distinct) {
+                selected.InputQualifiedOnly = n.QualifiedOnly;
+            }
             selected.Distinct = distinct;
         }
         if (!distinct) {
@@ -2795,7 +2896,11 @@ std::expected<TRelation, TError> ApplyOrderBy(
                     "ORDER BY on an aggregate not in the select list is not supported"));
             }
             if (!input) {
-                projectionInput = TRelation{.Plan = topProject.Cast()->Input(), .Labels = select->InputLabels};
+                projectionInput = TRelation{
+                    .Plan = topProject.Cast()->Input(),
+                    .Labels = select->InputLabels,
+                    .QualifiedOnly = select->InputQualifiedOnly,
+                };
                 input.emplace(std::initializer_list<std::reference_wrapper<const TRelation>>{*projectionInput});
             }
             // The expression is materialized in the final projection, so it reads

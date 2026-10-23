@@ -1,0 +1,1 @@
+SELECT * FROM t FULL JOIN u USING (x, id) ORDER BY x;
