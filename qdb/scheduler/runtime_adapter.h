@@ -357,8 +357,7 @@ private:
     bool OutputFinished_ = false;
 };
 
-// Consumers push non-owning views of Batches, so the spool must outlive every
-// consumer's downstream (the graph owns both, so it does).
+// Consumers push views of Batches that keep the spool alive until released.
 struct TCteSharedState : ITaskState {
     enum class EStatus {
         Building,

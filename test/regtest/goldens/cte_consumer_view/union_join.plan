@@ -1,0 +1,13 @@
+cte #0 (materialized, ×2):
+project (y, z) (rows≈4 cost≈4.5K)
+└─ join inner [ju.x = jt.x] (rows≈4 cost≈4.4K)
+   ├─ source ju AS ju (rows≈3 cost≈48)
+   └─ source jt AS jt (rows≈4 cost≈64)
+main:
+union-all (rows≈8 cost≈9K)
+├─ project (y) (rows≈4 cost≈4.5K)
+│  └─ project (j.y) (rows≈4 cost≈4.5K)
+│     └─ cte-consumer #0 (×2)
+└─ project (z) (rows≈4 cost≈4.5K)
+   └─ project (j.z) (rows≈4 cost≈4.5K)
+      └─ cte-consumer #0 (×2)

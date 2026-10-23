@@ -1,0 +1,18 @@
+cte #0 (materialized, ×3):
+project (k, v) (rows≈3 cost≈240)
+└─ filter (> |t.v| 0) (rows≈3 cost≈192)
+   └─ source t AS t (rows≈6 cost≈96)
+main:
+union-all (rows≈4 cost≈992)
+├─ project (k, v) (rows≈2 cost≈352)
+│  └─ project (a.k, a.v) (rows≈2 cost≈320)
+│     └─ filter (< v 8) (rows≈2 cost≈288)
+│        └─ cte-consumer #0 (×3)
+├─ project (k, v) (rows≈1 cost≈320)
+│  └─ project (a.k, a.v) (rows≈1 cost≈304)
+│     └─ filter (> v 8) (rows≈1 cost≈288)
+│        └─ cte-consumer #0 (×3)
+└─ project (k, v) (rows≈1 cost≈320)
+   └─ project (a.k, a.v) (rows≈1 cost≈304)
+      └─ filter (call qdb_is_null k) (rows≈1 cost≈288)
+         └─ cte-consumer #0 (×3)
