@@ -1,0 +1,1 @@
+WITH a AS (SELECT k, v * 2 AS w FROM r WHERE v IS NOT NULL) SELECT k, w FROM a WHERE w > 4 AND k <> 1;
