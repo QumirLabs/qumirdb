@@ -2636,8 +2636,7 @@ function streamJoinBatch(state, side, rowSet, asWasm = false) {
 
 function browserRuntimeSupportsJoin(stage) {
   if (stage.joinType === 'inner') return true;
-  if (stage.joinType === 'left' || stage.joinType === 'right') return true;
-  if (stage.joinType === 'full' && !stage.hasResidual) return true;
+  if (isOuterJoin(stage)) return true;
   return isLeftSemiAntiJoin(stage);
 }
 

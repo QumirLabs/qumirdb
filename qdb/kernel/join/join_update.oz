@@ -78,35 +78,45 @@
 
   ;; Probe the opposite table for `key`, emit one pair per matching stored row,
   ;; then insert `own_row_id` under `key` into the own table. is_left orders the
-  ;; emitted pair as (left, right). Returns #f only on allocation failure.
+  ;; emitted pair as (left, right). A non-zero `mark` marks the matched rows of
+  ;; the opposite table and stores `own_row_id` marked when it matched, so a
+  ;; FULL join with a residual finds the unmatched rows of both tables with
+  ;; jt_emit_unmarked. Returns #f only on allocation failure.
   (fun jt_emit_and_insert [LookupKey StoredKey] ((var own <ref HashTable>)
                            (var opp <ref HashTable>)
                            (var key LookupKey)
                            (var stored_witness StoredKey)
                            (var own_row_id i64)
                            (var is_left i64)
+                           (var mark i64)
                            (var pairs <ref PairBuffer>)
                            (var left_store <ptr TRowSet>)
                            (var right_store <ptr TRowSet>)
                            (var hash u64)) -> bool
     (block
+      (var pairs_before = (field pairs Count))
       (if (! (call jt_probe_and_emit opp key stored_witness own_row_id is_left
-                    (: 0 i64) pairs left_store right_store
+                    mark pairs left_store right_store
                     (index left_store (: 0 i64))
                     (index right_store (: 0 i64))
                     hash))
         (block (return #f)))
+      ;; Each accepted match pushed one pair.
+      (var stored_row_id = own_row_id)
+      (if (&& (!= mark 0) (> (field pairs Count) pairs_before))
+        (block (= stored_row_id (| own_row_id (<< 1 63)))))
       (var is_new i64)
       (= is_new (: 0 i64))
       (var own_slot = (call aht_upsert_dual own key stored_witness is_new hash))
       (if (== own_slot (: -1 i64)) (block (return #f)))
-      (if (! (call jb_append own own_slot own_row_id))
+      (if (! (call jb_append own own_slot stored_row_id))
         (block (return #f)))
       (return #t)))
 
-  ;; Streaming outer join finalizer: push every stored row of `build` that
-  ;; jt_probe_and_emit left unmarked, with the null row id on the stream side.
-  ;; is_left is non-zero when `build` holds the left rows.
+  ;; Finalizer of an outer join that marks matched rows (a streaming LEFT/RIGHT
+  ;; join, a FULL join with a residual): push every stored row of `build` left
+  ;; unmarked, with the null row id on the other side. is_left is non-zero
+  ;; when `build` holds the left rows.
   (fun jt_emit_unmarked ((var build <ref HashTable>)
                          (var is_left i64)
                          (var pairs <ref PairBuffer>)) -> bool

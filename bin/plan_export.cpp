@@ -2046,15 +2046,12 @@ llvm::json::Object UnsupportedExec(
     return result;
 }
 
-bool BrowserSupportsJoin(NQdb::EJoinType type, bool hasResidual) {
+bool BrowserSupportsJoin(NQdb::EJoinType type) {
     using NQdb::EJoinType;
     if (type == EJoinType::Inner) {
         return true;
     }
-    if (type == EJoinType::Left || type == EJoinType::Right) {
-        return true;
-    }
-    if (type == EJoinType::Full && !hasResidual) {
+    if (type == EJoinType::Left || type == EJoinType::Right || type == EJoinType::Full) {
         return true;
     }
     if (type == EJoinType::LeftSemi || type == EJoinType::LeftAnti) {
@@ -2523,11 +2520,10 @@ struct TExecPlanCodec {
                 auto* join = static_cast<const NQdb::TJoinOperator*>(
                     node.Operator);
                 const bool hasResidual = join->Filter() != nullptr;
-                if (!BrowserSupportsJoin(join->JoinType(), hasResidual)) {
+                if (!BrowserSupportsJoin(join->JoinType())) {
                     Unsupported = UnsupportedExec(
                         "browser join type is not supported yet: " +
-                        std::string(JoinTypeName(join->JoinType())) +
-                        (hasResidual ? " with residual" : ""));
+                        std::string(JoinTypeName(join->JoinType())));
                     return;
                 }
                 const auto* ref = FindKernel(Kernels, node.StageId, "join");

@@ -1,0 +1,4 @@
+project (ck, cv, ok, ov) (rows≈28 cost≈6.6K)
+└─ join full [c.ck = o.ok] residual (< (* |c.cv| 10) |o.ov|) (rows≈28 cost≈5.7K)
+   ├─ source c AS c (rows≈8 cost≈128)
+   └─ source o AS o (rows≈20 cost≈320)

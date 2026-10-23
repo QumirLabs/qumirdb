@@ -19,6 +19,7 @@ const CASES = [
   'left_outer_residual',
   'right_outer_join',
   'right_outer_residual',
+  'full_outer_residual',
   'semi_join',
   'nested_limit',
   'nested_limit_zero',

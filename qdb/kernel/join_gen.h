@@ -47,7 +47,8 @@ NQumir::NAst::TExprPtr GenJoinFinalizeSemiAntiAst(
 //
 // hasPrecomputedHash: read batch.Hash[i] instead of calling rh_hash(key) -
 // set when this batch comes straight from a hash shuffle keyed on the same
-// join columns (plan_lowerer.cpp decides this).
+// join columns (plan_lowerer.cpp decides this). markMatched marks the matched
+// rows of both tables, for a FULL join with a residual.
 NQumir::NAst::TExprPtr GenJoinProcessAst(
     const TJoinKeyDescriptor& key,
     bool isLeft,
@@ -57,7 +58,8 @@ NQumir::NAst::TExprPtr GenJoinProcessAst(
     NQumir::NAst::TTypePtr hashTableType,
     NQumir::NAst::TTypePtr pairBufferType,
     NQumir::NAst::TTypePtr stringViewType,
-    bool hasPrecomputedHash = false);
+    bool hasPrecomputedHash = false,
+    bool markMatched = false);
 
 // Generates one side's insert-only function (same ABI as GenJoinProcessAst):
 // reads keys from the batch and inserts row ids into the own table without
