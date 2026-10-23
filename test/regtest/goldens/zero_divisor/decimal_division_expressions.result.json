@@ -1,0 +1,9 @@
+{
+  "schema": "<struct (id i32) (c bool) (k i64) (e <named Nullable [bool]>)>",
+  "rows": [
+    [1, true, "0", null],
+    [2, false, "1", true],
+    [3, true, "0", null],
+    [4, true, "1", false]
+  ]
+}
