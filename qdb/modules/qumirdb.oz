@@ -435,6 +435,9 @@
     (block (return (call qdb_decimal_to_int_sat value scale (: 64 i64)))))
   (fun qdb_decimal_to_i32 ((var value BinInt) (var scale i64)) -> i32
     (block (return (cast (call qdb_decimal_to_int_sat value scale (: 32 i64)) i32))))
+  ;; A decimal constant given by its unscaled value; the scale is tracked by typing.
+  (fun qdb_decimal_from_unscaled ((var value i64)) -> BinInt
+    (block (return (cast (struct ((V (cast value i128)))) BinInt))))
   (fun qdb_decimal_scale_up ((var value BinInt) (var delta i64)) -> BinInt
     (block
       (var factor BinInt)

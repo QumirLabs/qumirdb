@@ -335,7 +335,7 @@ TEST(ProjectType, ExpandKernelExprPreservesNullableDecimalComparisonWithFloat) {
     EXPECT_TRUE(IsBool(NullableInner(type)));
     const std::string printed = NQumir::NAst::NCore::PrintAst(expr);
     EXPECT_NE(printed.find("qdb_decimal_div"), std::string::npos);
-    EXPECT_NE(printed.find("qdb_decimal_from_f64"), std::string::npos);
+    EXPECT_NE(printed.find("qdb_decimal_from_unscaled"), std::string::npos);
     EXPECT_EQ(printed.find("DECIMAL"), std::string::npos);
 }
 

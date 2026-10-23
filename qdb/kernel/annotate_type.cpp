@@ -12,6 +12,8 @@
 #include <qumir/frontend/source_module_loader.h>
 
 #include <algorithm>
+#include <charconv>
+#include <cmath>
 #include <functional>
 #include <limits>
 #include <memory>
@@ -600,6 +602,52 @@ TDecimalSpec DecimalDivisionSpec(const TDecimalSpec& left, const TDecimalSpec& r
     };
 }
 
+// A fractional literal beside a DECIMAL is a decimal of its own digits, as in DuckDB
+// (0.125 is DECIMAL(3,3)), instead of being rounded to the other operand's scale. The
+// lexeme is gone by now, so the digits are the shortest decimal form that round-trips
+// the double. Literals needing more than 18 digits stay doubles.
+struct TDecimalLiteral {
+    int64_t Unscaled;
+    TDecimalSpec Spec;
+};
+
+std::optional<TDecimalLiteral> DecimalLiteralOf(const TExprPtr& e) {
+    bool negative = false;
+    TExprPtr inner = e;
+    if (auto un = TMaybeNode<TUnaryExpr>(e); un && un.Cast()->Operator == "-") {
+        negative = true;
+        inner = un.Cast()->Operand;
+    }
+    auto num = TMaybeNode<TNumberExpr>(inner);
+    if (!num || !num.Cast()->IsFloat() || !std::isfinite(num.Cast()->FloatValue)) {
+        return std::nullopt;
+    }
+    char buf[400];
+    auto res = std::to_chars(buf, buf + sizeof(buf), std::fabs(num.Cast()->FloatValue),
+        std::chars_format::fixed);
+    if (res.ec != std::errc()) {
+        return std::nullopt;
+    }
+    std::string_view text(buf, res.ptr - buf);
+    const size_t dot = text.find('.');
+    const std::string_view intPart = text.substr(0, dot);
+    const std::string_view fracPart = dot == std::string_view::npos
+        ? std::string_view() : text.substr(dot + 1);
+    const int32_t scale = static_cast<int32_t>(fracPart.size());
+    const bool intIsZero = intPart == "0";
+    const int32_t precision = intIsZero ? std::max(scale, 1) : static_cast<int32_t>(intPart.size()) + scale;
+    if (precision > 18) {
+        return std::nullopt;
+    }
+    int64_t unscaled = 0;
+    for (std::string_view part : {intPart, fracPart}) {
+        for (char c : part) {
+            unscaled = unscaled * 10 + (c - '0');
+        }
+    }
+    return TDecimalLiteral{negative ? -unscaled : unscaled, {.Precision = precision, .Scale = scale}};
+}
+
 // An integer operand of a decimal remainder counts as DECIMAL(w, 0), w being the digits
 // of its SQL integer type (INTEGER is DECIMAL(10, 0)). An integer literal is INTEGER when
 // its value fits, as SQL types integer literals.
@@ -627,10 +675,21 @@ TDecimalSpec IntegerDecimalSpec(const TExprPtr& e, const TTypePtr& type) {
 }
 
 TTypePtr DecimalBinaryValueType(TOperator op, const TExprPtr& le, const TExprPtr& re,
-    const TTypePtr& vl, const TTypePtr& vr)
+    TTypePtr vl, TTypePtr vr)
 {
     auto dl = DecimalSpecOfValueType(vl);
     auto dr = DecimalSpecOfValueType(vr);
+    if (dl && !dr && IsFloat(UnwrapNamedType(vr))) {
+        if (auto lit = DecimalLiteralOf(re)) {
+            dr = lit->Spec;
+            vr = MakeDecimalType(lit->Spec);
+        }
+    } else if (dr && !dl && IsFloat(UnwrapNamedType(vl))) {
+        if (auto lit = DecimalLiteralOf(le)) {
+            dl = lit->Spec;
+            vl = MakeDecimalType(lit->Spec);
+        }
+    }
     if (!dl && !dr) {
         return nullptr;
     }
@@ -1650,6 +1709,10 @@ TTypePtr ExpandDecimalBlock(TBlockExpr& node, const TStructType& inputType, TTyp
     return last;
 }
 
+TExprPtr DecimalConstant(const TDecimalLiteral& lit, TLocation loc) {
+    return Call("qdb_decimal_from_unscaled", {Int64(loc, lit.Unscaled)}, loc);
+}
+
 TTypePtr ExpandDecimalNode(TExprPtr& e, const TStructType& inputType, TTypeEnv& env) {
     if (!e || IsNullLiteral(e)) {
         return nullptr;
@@ -1706,6 +1769,17 @@ TTypePtr ExpandDecimalNode(TExprPtr& e, const TStructType& inputType, TTypeEnv& 
         auto node = bp.Cast();
         TTypePtr lt = ExpandDecimalNode(node->Left, inputType, env);
         TTypePtr rt = ExpandDecimalNode(node->Right, inputType, env);
+        if (DecimalSpecOfValueType(ValueType(lt)) && IsFloat(UnwrapNamedType(ValueType(rt)))) {
+            if (auto lit = DecimalLiteralOf(node->Right)) {
+                node->Right = DecimalConstant(*lit, node->Location);
+                rt = MakeDecimalType(lit->Spec);
+            }
+        } else if (DecimalSpecOfValueType(ValueType(rt)) && IsFloat(UnwrapNamedType(ValueType(lt)))) {
+            if (auto lit = DecimalLiteralOf(node->Left)) {
+                node->Left = DecimalConstant(*lit, node->Location);
+                lt = MakeDecimalType(lit->Spec);
+            }
+        }
         const auto dl = DecimalSpecOfValueType(ValueType(lt));
         const auto dr = DecimalSpecOfValueType(ValueType(rt));
         if (!dl && !dr) {
