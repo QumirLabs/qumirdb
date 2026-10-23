@@ -16,6 +16,9 @@
     "left_join_on_null.sql": {"order": "ordered"},
     "exists_null.sql": {"order": "ordered"},
     "case_when_null.sql": {"order": "ordered"},
-    "select_not_null.sql": {"order": "ordered"}
+    "select_not_null.sql": {"order": "ordered"},
+    "where_null_is_null.sql": {"order": "ordered"},
+    "where_null_is_not_null.sql": {"order": "ordered"},
+    "select_null_is_null.sql": {"order": "ordered"}
   }
 }
