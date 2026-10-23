@@ -583,8 +583,10 @@ void TParquetSource::RefreshSchema()
     int numFields = Reader_->schema()->num_fields();
     Names_.clear();
     Columns_.clear();
-    Names_.reserve(numFields);
-    Columns_.reserve(numFields);
+    // Columns_ views Names_: leave room for the row-id column so that adding
+    // it does not move the names, short ones stored inline included.
+    Names_.reserve(numFields + 1);
+    Columns_.reserve(numFields + 1);
     for (const auto& field : Reader_->schema()->fields()) {
         Names_.push_back(field->name());
         Columns_.push_back({
