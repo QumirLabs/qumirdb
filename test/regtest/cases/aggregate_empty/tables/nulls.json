@@ -2,11 +2,7 @@
   "version": 1,
   "schema": "<struct (n <named Nullable [i64]>)>",
   "rows": [
-    [
-      null
-    ],
-    [
-      null
-    ]
+    [null],
+    [null]
   ]
 }
