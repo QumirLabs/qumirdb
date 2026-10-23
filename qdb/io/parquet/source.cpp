@@ -8,7 +8,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
-#include <memory>
 #include <stdexcept>
 
 #include <arrow/api.h>
@@ -106,7 +105,7 @@ char* FixedByteWidthData(const std::shared_ptr<arrow::Array>& arr, int32_t byteW
 // column is expanded here. Decoding dictionary codes and gathering the values
 // in one tight loop costs several times less than Arrow's value-by-value
 // string builder. Values up to GatherWidth bytes are copied with one
-// fixed-width move into padded buffers.
+// fixed-width move.
 void ExpandStringDictionary(const arrow::DictionaryArray& array, TColumn& col, TBatchData& owner) {
     constexpr int64_t GatherWidth = 16;
     const auto& type = static_cast<const arrow::DictionaryType&>(*array.type());
@@ -121,14 +120,10 @@ void ExpandStringDictionary(const arrow::DictionaryArray& array, TColumn& col, T
     auto valueOffset = [&](int64_t entry) {
         return static_cast<int64_t>(dictionary.value_offset(entry));
     };
-    auto padded = std::make_unique_for_overwrite<char[]>(
-        static_cast<size_t>(valueOffset(entries) - valueOffset(0) + GatherWidth));
-    std::memcpy(padded.get(), dictionary.raw_data() + valueOffset(0),
-        static_cast<size_t>(valueOffset(entries) - valueOffset(0)));
-    int64_t maxLength = 0;
-    for (int64_t entry = 0; entry < entries; ++entry) {
-        maxLength = std::max<int64_t>(maxLength, dictionary.value_length(entry));
-    }
+    // The dictionary is shared by all batches of a row group, so nothing here
+    // may depend on its size: the work per batch is proportional to the rows.
+    const auto* dictionaryBytes = reinterpret_cast<const char*>(dictionary.raw_data());
+    const char* dictionaryEnd = dictionaryBytes + valueOffset(entries);
 
     // A null row keeps an arbitrary code, so it expands to an empty value.
     const bool hasNulls = array.null_count() > 0;
@@ -165,11 +160,15 @@ void ExpandStringDictionary(const arrow::DictionaryArray& array, TColumn& col, T
         out[row] = position;
         const int64_t entry = entryOf(row);
         const int64_t size = length(entry);
-        const char* value = padded.get() + (entry < 0 ? 0 : valueOffset(entry) - valueOffset(0));
-        if (maxLength <= GatherWidth) {
-            std::memcpy(bytesOut + position, value, GatherWidth);
-        } else {
-            std::memcpy(bytesOut + position, value, static_cast<size_t>(size));
+        if (size > 0) {
+            const char* value = dictionaryBytes + valueOffset(entry);
+            // A fixed-width move is only safe while it stays inside the
+            // dictionary bytes; the last values are copied exactly.
+            if (size <= GatherWidth && value + GatherWidth <= dictionaryEnd) {
+                std::memcpy(bytesOut + position, value, GatherWidth);
+            } else {
+                std::memcpy(bytesOut + position, value, static_cast<size_t>(size));
+            }
         }
         position += static_cast<int32_t>(size);
     }
@@ -442,7 +441,12 @@ void TParquetFileData::Open()
         for (int rg = 0; rg < metadata->num_row_groups() && dictionaryPagesOnly; ++rg) {
             auto chunk = metadata->RowGroup(rg)->ColumnChunk(column);
             const auto& pages = chunk->encoding_stats();
+            // A dictionary that takes half of the chunk or more has few
+            // repeated values, so expanding it only adds a copy of every
+            // string that the plain read would have returned in place.
             dictionaryPagesOnly = chunk->has_dictionary_page() && !pages.empty() &&
+                2 * (chunk->data_page_offset() - chunk->dictionary_page_offset()) <
+                    chunk->total_compressed_size() &&
                 std::ranges::all_of(pages, [](const parquet::PageEncodingStats& page) {
                     return page.page_type == parquet::PageType::DICTIONARY_PAGE ||
                         page.encoding == parquet::Encoding::RLE_DICTIONARY ||
