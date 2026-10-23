@@ -1,0 +1,9 @@
+project (col0)
+└─ aggregate keys=[__group__] aggs=[count_0=count]
+   └─ project (__group__)
+      └─ project (x.one)
+         └─ project (one)
+            └─ limit
+               └─ join inner (rows≈12 cost≈4.1K)
+                  ├─ source u AS u (rows≈4 cost≈4)
+                  └─ source w AS w (rows≈3 cost≈3)

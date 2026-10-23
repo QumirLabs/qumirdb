@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "schema": "<struct (k <named Nullable [i64]>) (v i64) (s string)>",
+  "rows": [
+    ["1", "10", "a"],
+    ["2", "20", "b"],
+    [null, "30", "c"],
+    ["2", "40", "d"]
+  ]
+}
