@@ -1,0 +1,12 @@
+cte #0 (materialized, ×2):
+project (k, v) (rows≈150 cost≈12K)
+└─ filter (> |r.v| 0) (rows≈150 cost≈9.6K)
+   └─ source r AS r (rows≈300 cost≈4.8K)
+main:
+project (k, v) (rows≈150 cost≈44.9K)
+└─ join inner [y.k = x.k, y.v = x.v] (rows≈150 cost≈42.5K)
+   ├─ project (y.k, y.v) (rows≈150 cost≈14.4K)
+   │  └─ cte-consumer #0 (×2)
+   └─ project (x.k, x.v) (rows≈75 cost≈15.6K)
+      └─ filter (! (call qdb_is_null k)) (rows≈75 cost≈14.4K)
+         └─ cte-consumer #0 (×2)

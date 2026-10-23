@@ -1,0 +1,6 @@
+project (k, w) (rows≈114 cost≈22.4K)
+└─ project (a.k, a.w) (rows≈114 cost≈20.6K)
+   └─ filter (&& (> w 4) (!= k 1)) (rows≈114 cost≈18.8K)
+      └─ project (k, w) (rows≈287 cost≈14.2K)
+         └─ filter (! (call qdb_is_null |r.v|)) (rows≈287 cost≈9.6K)
+            └─ source r AS r row-groups (! (call qdb_is_null |r.v|)) (rows≈300 cost≈4.8K)

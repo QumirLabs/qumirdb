@@ -1,12 +1,17 @@
 {
   "version": 1,
   "fixtures": {
-    "i": {"json": "tables/i.json"}
+    "i": {"json": "tables/i.json"},
+    "r": {"json": "tables/r.json", "parquet": {"row_group_rows": 40}}
   },
-  "tables": {"i": "i"},
+  "tables": {"i": "i", "r": "r"},
   "variants": ["single", "threaded", "js"],
   "cases": {
     "cte_filter_group.sql": {"order": "unordered"},
-    "cte_filter_rows.sql": {"order": "unordered"}
+    "cte_filter_rows.sql": {"order": "unordered"},
+    "cte_chain3.sql": {"order": "unordered"},
+    "cte_like.sql": {"order": "unordered"},
+    "cte_twice.sql": {"order": "unordered"},
+    "cte_computed.sql": {"order": "unordered"}
   }
 }

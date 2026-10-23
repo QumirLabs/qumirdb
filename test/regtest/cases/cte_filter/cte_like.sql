@@ -1,0 +1,1 @@
+WITH a AS (SELECT k, v, s FROM r WHERE s LIKE 'a%'), b AS (SELECT k, s FROM a WHERE s NOT LIKE '%o%') SELECT k, s FROM b WHERE k IS NOT NULL;
