@@ -8,6 +8,7 @@
 #include <qdb/plan/types/nullable.h>
 
 #include <functional>
+#include <limits>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -594,6 +595,14 @@ TEST(IOTest, ParquetDictionaryStrings) {
         NQdb::Release(&rowSet);
     }
     EXPECT_EQ(row, rows);
+}
+
+TEST(IOTest, ParquetDictionaryOffsetWidth) {
+    constexpr int64_t limit = std::numeric_limits<int32_t>::max();
+    EXPECT_EQ(NQdb::DictionaryOffsetWidth(0), 4);
+    EXPECT_EQ(NQdb::DictionaryOffsetWidth(limit), 4);
+    EXPECT_EQ(NQdb::DictionaryOffsetWidth(limit + 1), 8);
+    EXPECT_EQ(NQdb::DictionaryOffsetWidth(10 * limit), 8);
 }
 
 // A nested leaf can share its name with a top-level column.

@@ -18,6 +18,10 @@ namespace arrow { class RecordBatchReader; }
 
 namespace NQdb {
 
+// Offset width in bytes (4 or 8) of an expanded dictionary batch holding
+// totalBytes of string data: 32-bit offsets cannot address more than 2 GiB.
+uint8_t DictionaryOffsetWidth(int64_t totalBytes);
+
 class TParquetSource;
 struct TParquetFileData;
 

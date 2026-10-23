@@ -32,6 +32,10 @@
 
 namespace NQdb {
 
+uint8_t DictionaryOffsetWidth(int64_t totalBytes) {
+    return totalBytes > std::numeric_limits<int32_t>::max() ? 8 : 4;
+}
+
 namespace {
 
 using NQumir::NAst::TIntegerType;
@@ -138,9 +142,7 @@ void ExpandStringDictionary(const arrow::DictionaryArray& array, TColumn& col, T
     for (int64_t row = 0; row < rows; ++row) {
         bytes += length(entryOf(row));
     }
-    if (bytes > std::numeric_limits<int32_t>::max()) {
-        throw std::runtime_error("expanded parquet dictionary batch exceeds 2 GiB");
-    }
+    const uint8_t offsetWidth = DictionaryOffsetWidth(bytes);
 
     // The Arrow pool keeps freed batch memory mapped; fresh heap pages would
     // fault and be zeroed by the kernel for every batch.
@@ -151,31 +153,36 @@ void ExpandStringDictionary(const arrow::DictionaryArray& array, TColumn& col, T
         }
         return std::shared_ptr<arrow::Buffer>(std::move(*buffer));
     };
-    auto offsets = allocate((rows + 1) * static_cast<int64_t>(sizeof(int32_t)));
+    auto offsets = allocate((rows + 1) * static_cast<int64_t>(offsetWidth));
     auto data = allocate(bytes + GatherWidth);
-    auto* out = reinterpret_cast<int32_t*>(offsets->mutable_data());
     auto* bytesOut = reinterpret_cast<char*>(data->mutable_data());
-    int32_t position = 0;
-    for (int64_t row = 0; row < rows; ++row) {
-        out[row] = position;
-        const int64_t entry = entryOf(row);
-        const int64_t size = length(entry);
-        if (size > 0) {
-            const char* value = dictionaryBytes + valueOffset(entry);
-            // A fixed-width move is only safe while it stays inside the
-            // dictionary bytes; the last values are copied exactly.
-            if (size <= GatherWidth && value + GatherWidth <= dictionaryEnd) {
-                std::memcpy(bytesOut + position, value, GatherWidth);
-            } else {
-                std::memcpy(bytesOut + position, value, static_cast<size_t>(size));
+    auto gather = [&](auto* out) {
+        int64_t position = 0;
+        for (int64_t row = 0; row < rows; ++row) {
+            out[row] = position;
+            const int64_t entry = entryOf(row);
+            const int64_t size = length(entry);
+            if (size > 0) {
+                const char* value = dictionaryBytes + valueOffset(entry);
+                // A fixed-width move is only safe while it stays inside the
+                // dictionary bytes; the last values are copied exactly.
+                if (size <= GatherWidth && value + GatherWidth <= dictionaryEnd) {
+                    std::memcpy(bytesOut + position, value, GatherWidth);
+                } else {
+                    std::memcpy(bytesOut + position, value, static_cast<size_t>(size));
+                }
             }
+            position += size;
         }
-        position += static_cast<int32_t>(size);
+        out[rows] = position;
+        col.Offsets = out;
+    };
+    if (offsetWidth == 8) {
+        gather(reinterpret_cast<int64_t*>(offsets->mutable_data()));
+    } else {
+        gather(reinterpret_cast<int32_t*>(offsets->mutable_data()));
     }
-    out[rows] = position;
-
-    col.Offsets = out;
-    col.OffsetWidth = 4;
+    col.OffsetWidth = offsetWidth;
     col.Data = bytesOut;
     owner.Expanded.push_back(std::move(offsets));
     owner.Expanded.push_back(std::move(data));
