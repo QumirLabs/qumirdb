@@ -47,7 +47,9 @@ NQumir::NAst::TTypePtr AnnotateExprType(
 
 // Annotates every node in an expression tree with the same rule-based type
 // inference used by kernels. Integer literals adopt the adjacent integer
-// operand type when their value fits it, matching Qumir overload resolution.
+// operand type when their value fits it, matching Qumir overload resolution. A
+// node that cannot be typed, such as a call to a function outside the catalog,
+// keeps its type.
 NQumir::NAst::TTypePtr AnnotateExprTreeTypes(
     const NQumir::NAst::TExprPtr& expr,
     const NQumir::NAst::TStructType& inputType,

@@ -1,0 +1,4 @@
+project (k) (rows≈1 cost≈4.2K)
+└─ join left_anti [sa.k = sb.k] residual (== (call nosuchfn |sb.k|) |sa.k|) (rows≈1 cost≈4.1K)
+   ├─ source sa AS sa (rows≈3 cost≈12)
+   └─ source sb AS sb (rows≈3 cost≈12)

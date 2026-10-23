@@ -10,6 +10,7 @@
 #include <qumir/parser/core/printer.h>
 #include <qumir/parser/type.h>
 
+#include <functional>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
@@ -304,6 +305,32 @@ TEST(ProjectType, ExpandNullableWrapsPlainSiblingOfNullableBranch) {
 
 TEST(ProjectType, RejectsUnknownColumn) {
     EXPECT_THROW(AnnotateExprType(Parse("missing"), Schema()), NQumir::TError);
+}
+
+// An unknown function is an error at its call, not a bare NULL that turns the
+// comparison, COALESCE or CASE around it into NULL.
+TEST(ProjectType, RejectsUnknownFunction) {
+    auto error = [](const std::function<void()>& typing) {
+        try {
+            typing();
+        } catch (const NQumir::TError& error) {
+            return error.ToString();
+        }
+        return std::string();
+    };
+    const std::string expected = "Error: unknown function: nosuchfn @ Line: 1";
+    EXPECT_TRUE(error([] {
+        AnnotateExprType(Parse("(call coalesce (call nosuchfn a) 0)"), NullableSchema());
+    }).starts_with(expected));
+    EXPECT_TRUE(error([] {
+        ExpandKernelPredicate(Parse("(== (call nosuchfn a) 1)"), NullableSchema());
+    }).starts_with(expected));
+    EXPECT_TRUE(error([] {
+        ExpandKernelPredicate(Parse("(call qdb_is_null (call nosuchfn k))"), Schema());
+    }).starts_with(expected));
+    EXPECT_TRUE(error([] {
+        ExpandKernelExpr(Parse("(if (== (call nosuchfn k) 1) 1 0)"), Schema());
+    }).starts_with(expected));
 }
 
 int main(int argc, char** argv) {

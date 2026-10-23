@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "fixtures": {
+    "sa": {"json": "tables/sa.json"},
+    "sb": {"json": "tables/sb.json"},
+    "ta": {"json": "tables/ta.json"},
+    "tb": {"json": "tables/tb.json"}
+  },
+  "tables": {"sa": "sa", "sb": "sb", "ta": "ta", "tb": "tb"},
+  "variants": ["single", "threaded"],
+  "cases": {
+    "select_call.sql": {"execute": false, "expect_error": true},
+    "select_coalesce.sql": {"execute": false, "expect_error": true},
+    "aggregate_argument.sql": {"execute": false, "expect_error": true},
+    "control_where.sql": {"order": "unordered"},
+    "control_not_exists.sql": {"order": "unordered"},
+    "control_coalesce_case.sql": {"order": "ordered"},
+    "error_where_eq.sql": {"expect_error": true},
+    "error_where_eq_nullable.sql": {"expect_error": true},
+    "error_where_or.sql": {"expect_error": true},
+    "error_where_or_nullable.sql": {"expect_error": true},
+    "error_where_arithmetic.sql": {"expect_error": true},
+    "error_where_arithmetic_nullable.sql": {"expect_error": true},
+    "error_coalesce.sql": {"expect_error": true},
+    "error_coalesce_nullable.sql": {"expect_error": true},
+    "error_case.sql": {"expect_error": true},
+    "error_case_nullable.sql": {"expect_error": true},
+    "error_join_residual.sql": {"expect_error": true},
+    "error_join_residual_nullable.sql": {"expect_error": true},
+    "error_not_exists.sql": {"expect_error": true},
+    "error_not_exists_nullable.sql": {"expect_error": true}
+  }
+}
