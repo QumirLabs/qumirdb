@@ -2,33 +2,12 @@
   "version": 1,
   "schema": "<struct (id i64) (name <named Nullable [string]>)>",
   "rows": [
-    [
-      "1",
-      "ПРИВЕТ"
-    ],
-    [
-      "2",
-      "abc"
-    ],
-    [
-      "3",
-      "ёлка"
-    ],
-    [
-      "4",
-      null
-    ],
-    [
-      "5",
-      "STRASSE"
-    ],
-    [
-      "6",
-      "İSTANBUL"
-    ],
-    [
-      "7",
-      "tiếng việt"
-    ]
+    ["1", "ПРИВЕТ"],
+    ["2", "abc"],
+    ["3", "ёлка"],
+    ["4", null],
+    ["5", "STRASSE"],
+    ["6", "İSTANBUL"],
+    ["7", "tiếng việt"]
   ]
 }
