@@ -640,6 +640,8 @@ struct TSuite {
     std::map<fs::path, TValue> Canonized;
     std::map<fs::path, std::string> CanonizedPlans;
     std::map<fs::path, std::string> CanonizedErrors;
+    // Result goldens of the cases checked in canonize mode; a filter skips the rest.
+    std::set<fs::path> Ran;
 
     void Prepare(const std::string& name) {
         auto& fixture = Fixtures.at(name);
@@ -1129,6 +1131,7 @@ TCaseResult CheckCase(const TQueryCase& test, bool canonize) {
         std::istringstream input(ReadAll(test.Sql));
         return {ComparePlan(test, BuildPlanText(input), canonize), std::nullopt, std::nullopt};
     }
+    if (canonize) test.Suite->Ran.insert(test.Golden);
     const char* timingEnv = std::getenv("QDB_REGTEST_TIMING");
     const bool timing = timingEnv && *timingEnv && std::string_view(timingEnv) != "0";
     const auto started = std::chrono::steady_clock::now();
@@ -1264,6 +1267,7 @@ void CommitGoldens(const std::vector<TQueryCase>& tests) {
     for (const auto& test : tests) {
         if (!test.Suite) continue;
         const auto& suite = *test.Suite;
+        if (!suite.Ran.contains(test.Golden)) continue;
         const bool hasResult = suite.Canonized.contains(test.Golden);
         const bool hasError = suite.CanonizedErrors.contains(test.ErrorGolden);
         for (const auto& [stale, wanted] : {std::pair{test.Golden, hasResult},
