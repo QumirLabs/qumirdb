@@ -1898,15 +1898,25 @@ export function runFilter(kernel, layout, rowSet, writer, options = {}) {
     rowsetPtr = written.rowsetPtr;
     selectionPtr = written.selectionPtr;
   }
+  // The kernel evaluates only the rows the input selects and writes the result
+  // into the rowset's Selection, which may be the very buffer the input
+  // selection lives in (a rowset reused from the previous filter). The input
+  // mask must not overlap the output, so the kernel reads a private copy.
+  let inputMaskPtr = 0;
+  if (selection) {
+    inputMaskPtr = arena.alloc(Math.max(batch.rowCount, 1), 8);
+    copySelectionToMemory(arena, inputMaskPtr, selection, batch.rowCount);
+  }
   const releaseStringScratch = beginKernelStringScratch(kernel);
   try {
-    // The last argument is the input mask; null makes the kernel evaluate
-    // every row, as this runtime always did.
     kernel.fn(
       toWasmPtr(rowsetPtr), toWasmPtr(0), toWasmPtr(kernel.regexHandles || 0),
-      toWasmPtr(0));
+      toWasmPtr(inputMaskPtr));
   } finally {
     releaseStringScratch();
+    if (inputMaskPtr) {
+      arena.free(inputMaskPtr);
+    }
   }
   attachBatchWasm(batch, rowsetPtr, {
     pinned: wasm ? wasm.pinned : pinned,
