@@ -1,12 +1,15 @@
 {
   "version": 1,
   "fixtures": {
-    "t": {"json": "tables/t.json"}
+    "t": {"json": "tables/t.json"},
+    "jt": {"json": "tables/jt.json"},
+    "ju": {"json": "tables/ju.json"}
   },
-  "tables": {"t": "t"},
+  "tables": {"t": "t", "jt": "jt", "ju": "ju"},
   "variants": ["single", "threaded", "js"],
   "cases": {
     "union_two.sql": {"order": "unordered"},
-    "union_three.sql": {"order": "unordered"}
+    "union_three.sql": {"order": "unordered"},
+    "union_join.sql": {"order": "unordered"}
   }
 }
