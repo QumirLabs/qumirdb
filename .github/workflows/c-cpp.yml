@@ -62,7 +62,7 @@ jobs:
         update_packager_index: false
         prepend_symlinks_to_path: false
         # Only pushes to master save the cache; pull requests restore it.
-        store_cache: true
+        store_cache: ${{ github.event_name == 'push' }}
         remove_stale_cache: false
         ccache_options: |
           max_size=2G
@@ -75,6 +75,7 @@ jobs:
           -DCMAKE_C_COMPILER=gcc-16 \
           -DCMAKE_C_COMPILER_LAUNCHER=ccache \
           -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+          -DCMAKE_CXX_SCAN_FOR_MODULES=OFF \
           -DQDB_LLVM_LINK_SHARED=ON \
           -DQDB_BUILD_TESTS=ON
     - name: Build
