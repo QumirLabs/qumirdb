@@ -237,7 +237,8 @@ void RecordBatchToRowSet(
             }
             case arrow::Type::STRING: {
                 auto typed = std::static_pointer_cast<arrow::StringArray>(arr);
-                const int32_t* src = typed->raw_value_offsets() + arr->offset();
+                // raw_value_offsets() already accounts for the array offset.
+                const int32_t* src = typed->raw_value_offsets();
                 int32_t base = src[0];
                 col.Offsets = const_cast<int32_t*>(src);
                 col.OffsetWidth = 4;
@@ -246,7 +247,7 @@ void RecordBatchToRowSet(
             }
             case arrow::Type::LARGE_STRING: {
                 auto typed = std::static_pointer_cast<arrow::LargeStringArray>(arr);
-                const int64_t* src = typed->raw_value_offsets() + arr->offset();
+                const int64_t* src = typed->raw_value_offsets();
                 int64_t base = src[0];
                 col.Offsets = const_cast<int64_t*>(src);
                 col.OffsetWidth = 8;
@@ -431,7 +432,11 @@ void TParquetFileData::Open()
     auto scanProps = arrowProps;
     for (int column = 0; column < metadata->num_columns(); ++column) {
         const auto* descriptor = metadata->schema()->Column(column);
-        auto field = FileSchema->GetFieldByName(descriptor->name());
+        // Only a top-level leaf is named by its schema field. A nested leaf
+        // may share its name with another field.
+        auto field = descriptor->path()->ToDotVector().size() == 1
+            ? FileSchema->GetFieldByName(descriptor->name())
+            : nullptr;
         if (descriptor->max_repetition_level() != 0 || !field ||
             field->type()->id() != arrow::Type::STRING)
         {
