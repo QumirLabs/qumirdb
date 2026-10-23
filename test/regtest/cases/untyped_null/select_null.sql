@@ -1,0 +1,1 @@
+SELECT id, NULL AS x FROM t ORDER BY id;

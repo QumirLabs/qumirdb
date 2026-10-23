@@ -68,7 +68,7 @@ void OptimizeOne(TOperatorPtr& plan, TPlanPassOptions& options, TFoldedBounds& f
     AnnotateTypes(plan, options.Annotation); // re-annotate: limit moved below strip projections
     plan = ApplyTopSort(plan);
     AnnotateTypes(plan, options.Annotation); // re-annotate: top-sort replaces limit(sort(...))
-    CoerceSetOpBranches(plan); stage("CoerceSetOpBranches");
+    CoerceSetOpBranches(plan, options.Annotation); stage("CoerceSetOpBranches");
     AnnotateTypes(plan, options.Annotation); // re-annotate: coercion added cast projections on union branches
     ApplyColumnPruning(plan); stage("ApplyColumnPruning");
 

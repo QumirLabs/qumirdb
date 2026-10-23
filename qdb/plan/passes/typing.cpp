@@ -117,6 +117,27 @@ void RequireInputColumns(const TOperatorPtr& op) {
     }
 }
 
+// Which output columns of a UNION branch are untyped NULLs: a projected expression that
+// derives from bare NULLs only (see NKernel::IsUntypedNullValue).
+std::vector<bool> UntypedNullColumns(
+    const TOperatorPtr& branch,
+    const NKernel::TAnnotationContext& context)
+{
+    auto schema = branch->OutputColumns();
+    std::vector<bool> result(schema ? schema->Fields.size() : 0, false);
+    auto proj = TMaybeOp<TProjectOperator>(branch);
+    if (!proj || proj.Cast()->Projections().size() != result.size()) {
+        return result;
+    }
+    auto input = proj.Cast()->Input()->OutputColumns();
+    for (size_t i = 0; input && i < result.size(); ++i) {
+        const auto& expr = proj.Cast()->Projections()[i].Expression;
+        result[i] = !TMaybeNode<TIdentExpr>(expr)
+            && NKernel::IsUntypedNullValue(expr, *input, &context);
+    }
+    return result;
+}
+
 // Types the subtree bottom-up and returns whether all of it is typed. A join
 // whose sides output the same column name, as two unaliased derived tables can,
 // stays untyped: column pruning may still drop the colliding columns, and building
@@ -344,28 +365,44 @@ void AnnotateOperatorType(
         // promoted to a common type (any decimal -> decimal), and a column is nullable if
         // any branch's is. CoerceSetOpBranches then inserts casts so every branch
         // physically produces this layout (the union just routes branch rowsets).
+        // A branch column that is an untyped NULL (`SELECT NULL AS x`) takes its type from the
+        // other branches and only makes the column nullable; a column NULL in every branch
+        // keeps the first branch's NULL[INTEGER].
         std::vector<std::pair<std::string, TTypePtr>> unified;
         if (first && !first->Fields.empty()) {
             unified = first->Fields;
-        }
-        for (size_t b = 1; b < inputs.size(); ++b) {
-            auto* other = static_cast<TStructType*>(paramTypes[b].get());
-            // A branch with no resolved schema means an upstream typing failure;
-            // let that surface on its own rather than reporting a count mismatch.
-            if (!first || !other || first->Fields.empty() || other->Fields.empty()) {
-                continue;
-            }
-            if (first->Fields.size() != other->Fields.size()) {
-                throw NQumir::TError("UNION ALL branches must have the same number of columns");
-            }
-            for (size_t i = 0; i < first->Fields.size(); ++i) {
-                auto merged = UnifyUnionColumn(unified[i].second, other->Fields[i].second);
-                if (!merged) {
-                    throw NQumir::TError(
-                        "UNION ALL branch " + std::to_string(b) + " column " +
-                        std::to_string(i) + " type mismatch");
+            std::vector<bool> typed(unified.size(), false);
+            std::vector<bool> sawNull(unified.size(), false);
+            for (size_t b = 0; b < inputs.size(); ++b) {
+                auto* other = static_cast<TStructType*>(paramTypes[b].get());
+                // A branch with no resolved schema means an upstream typing failure;
+                // let that surface on its own rather than reporting a count mismatch.
+                if (!other || other->Fields.empty()) {
+                    continue;
                 }
-                unified[i].second = merged;
+                if (first->Fields.size() != other->Fields.size()) {
+                    throw NQumir::TError("UNION ALL branches must have the same number of columns");
+                }
+                const auto nulls = UntypedNullColumns(inputs[b], context);
+                for (size_t i = 0; i < first->Fields.size(); ++i) {
+                    if (nulls[i]) {
+                        sawNull[i] = true;
+                    } else if (!typed[i]) {
+                        unified[i].second = other->Fields[i].second;
+                        typed[i] = true;
+                    } else if (auto merged = UnifyUnionColumn(unified[i].second, other->Fields[i].second)) {
+                        unified[i].second = merged;
+                    } else {
+                        throw NQumir::TError(
+                            "UNION ALL branch " + std::to_string(b) + " column " +
+                            std::to_string(i) + " type mismatch");
+                    }
+                }
+            }
+            for (size_t i = 0; i < unified.size(); ++i) {
+                if (typed[i] && sawNull[i] && !IsNullableType(unified[i].second)) {
+                    unified[i].second = std::make_shared<TNullable>(unified[i].second);
+                }
             }
         }
         auto output = (first && !first->Fields.empty())
@@ -379,9 +416,9 @@ void AnnotateOperatorType(
 // After types are known, wrap each UNION ALL branch whose column types differ from the
 // unified output in a projection that casts them, so every branch physically emits the
 // same layout (the union operator only routes branch rowsets, it does not coerce).
-void CoerceSetOpBranches(const TOperatorPtr& root) {
+void CoerceSetOpBranches(const TOperatorPtr& root, const NKernel::TAnnotationContext& context) {
     for (const auto& input : root->Inputs()) {
-        CoerceSetOpBranches(input);
+        CoerceSetOpBranches(input, context);
     }
     auto un = TMaybeOp<TUnionAllOperator>(root);
     if (!un) return;
@@ -395,11 +432,20 @@ void CoerceSetOpBranches(const TOperatorPtr& root) {
         auto* bs = static_cast<TStructType*>(branchSchema.get());
         if (!bs || bs->Fields.size() != unified->Fields.size()) continue;
 
+        // An untyped-NULL column is cast in the branch's own projection, where the cast
+        // makes it the NULL of the unified type; the branch schema still says NULL[INTEGER].
+        const auto nulls = UntypedNullColumns(branch, context);
         bool needs = false;
         for (size_t i = 0; i < bs->Fields.size(); ++i) {
             const auto& bt = bs->Fields[i].second;
             const auto& ut = unified->Fields[i].second;
-            if (bt && ut && bt->ToString() != ut->ToString()) { needs = true; break; }
+            if (!bt || !ut || bt->ToString() == ut->ToString()) continue;
+            if (nulls[i]) {
+                auto& expr = TMaybeOp<TProjectOperator>(branch).Cast()->MutableProjections()[i].Expression;
+                expr = std::make_shared<TCastExpr>(NQumir::TLocation{}, expr, ut);
+            } else {
+                needs = true;
+            }
         }
         if (!needs) continue;
 
@@ -410,7 +456,7 @@ void CoerceSetOpBranches(const TOperatorPtr& root) {
             TExprPtr expr = std::make_shared<TIdentExpr>(NQumir::TLocation{}, colName);
             const auto& bt = bs->Fields[i].second;
             const auto& ut = unified->Fields[i].second;
-            if (bt && ut && bt->ToString() != ut->ToString()) {
+            if (!nulls[i] && bt && ut && bt->ToString() != ut->ToString()) {
                 expr = std::make_shared<TCastExpr>(NQumir::TLocation{}, expr, ut);
             }
             projs.push_back({.Name = colName, .Expression = std::move(expr)});

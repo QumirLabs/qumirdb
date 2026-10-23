@@ -416,6 +416,42 @@ bool IsNullLiteral(const TExprPtr& e) {
     return false;
 }
 
+// Whether every value of `e` derives from bare NULLs: a CASE/`if`, COALESCE or operator
+// over such values only is NULL on every row.
+bool IsNullOnly(const TExprPtr& e) {
+    if (IsNullLiteral(e)) {
+        return true;
+    }
+    if (auto ifp = TMaybeNode<TIfExpr>(e)) {
+        return IsNullOnly(ifp.Cast()->Then) && IsNullOnly(ifp.Cast()->Else);
+    }
+    if (auto un = TMaybeNode<TUnaryExpr>(e)) {
+        return IsNullOnly(un.Cast()->Operand);
+    }
+    if (auto bin = TMaybeNode<TBinaryExpr>(e)) {
+        return IsNullOnly(bin.Cast()->Left) && IsNullOnly(bin.Cast()->Right);
+    }
+    if (auto call = TMaybeNode<TCallExpr>(e)) {
+        auto id = TMaybeNode<TIdentExpr>(call.Cast()->Callee);
+        return id && id.Cast()->Name == "coalesce" &&
+            std::ranges::all_of(call.Cast()->Args, IsNullOnly);
+    }
+    return false;
+}
+
+// An untyped NULL is a NULL-only expression that no operand gives a type (`NULL`,
+// `CASE WHEN c THEN NULL END`, `NULL + NULL`). The context that consumes it supplies one.
+bool IsUntypedNull(const TExprPtr& e, const TTypePtr& type) {
+    return !type && IsNullOnly(e);
+}
+
+// A value context with nothing to type an untyped NULL (`SELECT NULL AS x`) gives it
+// INTEGER, the type DuckDB resolves such a column to: every value is NULL, and a plain
+// fixed-width column composes with the operators and outputs downstream.
+TTypePtr UntypedNullValueType() {
+    return std::make_shared<TIntegerType>(TIntegerType::I32);
+}
+
 // Calls whose result is NOT null-strict (never wrapped by the pass): they return a
 // non-null bool or have bespoke NULL semantics handled in qumirdb.oz / elsewhere.
 bool IsExcludedCall(const std::string& name) {
@@ -436,14 +472,21 @@ TTypePtr NullableQ(const TTypePtr& value) {
         : ToQumirType(nullable);
 }
 
-// A predicate is a boolean context, so its bare NULL is NULL[bool] (`WHERE NULL`,
+// An expanded untyped NULL becomes the NULL of the value type its context gives it. A
+// predicate is a boolean context, so its untyped NULL is NULL[bool] (`WHERE NULL`,
 // `CASE WHEN NULL`): the kernel then tests it like any other nullable predicate.
-TExprPtr TypeNullPredicate(const TExprPtr& predicate) {
-    if (!IsNullLiteral(predicate)) {
-        return predicate;
+std::pair<TExprPtr, TTypePtr> TypeUntypedNull(
+    std::pair<TExprPtr, TTypePtr> expanded,
+    const TTypePtr& value)
+{
+    if (!IsUntypedNull(expanded.first, expanded.second)) {
+        return expanded;
     }
-    return std::make_shared<TCastExpr>(predicate->Location, predicate,
-        NullableQ(std::make_shared<TBoolType>()));
+    const TLocation loc = expanded.first->Location;
+    return {
+        std::make_shared<TCastExpr>(loc, MakeNull(loc), NullableQ(value)),
+        std::make_shared<TNullable>(value),
+    };
 }
 
 std::string PlanTypeKey(const TTypePtr& type) {
@@ -1266,6 +1309,11 @@ TTypePtr Expand(TExprPtr& e, const TStructType& inputType, uint64_t& counter) {
         if (!lt || !rt) {
             TTypePtr R = BinaryValueType(op, node->Left, node->Right,
                 lt ? lt : rt, rt ? rt : lt);
+            if (!R) {
+                // No operand has a type (`NULL + NULL`): the result is an untyped NULL.
+                e = MakeNull(node->Location);
+                return nullptr;
+            }
             e = std::make_shared<TCastExpr>(node->Location, MakeNull(node->Location), NullableQ(R));
             return std::make_shared<TNullable>(R);
         }
@@ -1283,8 +1331,13 @@ TTypePtr Expand(TExprPtr& e, const TStructType& inputType, uint64_t& counter) {
         TTypePtr ot = Expand(node->Operand, inputType, counter);
         TOperator op = node->Operator;
         TTypePtr R = ResultTypeUnary(op, ot);
-        if (IsNullLiteral(node->Operand) && R) {
-            // `!` fixes the type of a bare-NULL operand: NOT NULL is NULL[bool].
+        if (IsUntypedNull(node->Operand, ot)) {
+            // `!` fixes the type of an untyped-NULL operand: NOT NULL is NULL[bool], while
+            // `-NULL` stays untyped.
+            if (!R) {
+                e = MakeNull(node->Location);
+                return nullptr;
+            }
             e = std::make_shared<TCastExpr>(node->Location, MakeNull(node->Location), NullableQ(R));
             return std::make_shared<TNullable>(R);
         }
@@ -1307,9 +1360,9 @@ TTypePtr Expand(TExprPtr& e, const TStructType& inputType, uint64_t& counter) {
         TTypePtr target = IsNullableType(node->Type)
             ? UnwrapNullableType(node->Type)
             : FromQumirType(node->Type);
-        if (IsNullLiteral(node->Operand)) {
+        if (IsUntypedNull(node->Operand, ot)) {
             // CAST(NULL AS T) is the NULL of T.
-            e = std::make_shared<TCastExpr>(node->Location, node->Operand, NullableQ(target));
+            e = std::make_shared<TCastExpr>(node->Location, MakeNull(node->Location), NullableQ(target));
             return std::make_shared<TNullable>(target);
         }
         if (!ot || !IsNullableType(ot)) {
@@ -1401,7 +1454,8 @@ TTypePtr Expand(TExprPtr& e, const TStructType& inputType, uint64_t& counter) {
             argTypes.push_back(Expand(arg, inputType, counter));
         }
         if (name == "qdb_is_true" && node->Args.size() == 1) {
-            node->Args[0] = TypeNullPredicate(node->Args[0]);
+            node->Args[0] = TypeUntypedNull(
+                {node->Args[0], argTypes[0]}, std::make_shared<TBoolType>()).first;
         }
         if (name == "qdb_is_null" || name == "qdb_is_true") {
             // Non-null bool. The arguments are expanded already: typing them again with
@@ -1833,11 +1887,23 @@ TTypePtr AnnotateExprType(
         throw NQumir::TError("project type inference: null expression");
     }
     TTypePtr t = InferType(expr, inputType);
+    if (IsUntypedNull(expr, t)) {
+        t = std::make_shared<TNullable>(UntypedNullValueType());
+    }
     if (!t) {
         throw NQumir::TError("project type inference: could not infer type of '" +
             NQumir::NAst::NCore::PrintAst(expr) + "'");
     }
     return t;
+}
+
+bool IsUntypedNullValue(
+    const TExprPtr& expr,
+    const TStructType& inputType,
+    const TAnnotationContext* context)
+{
+    TAnnotationScope scope(context);
+    return expr && IsUntypedNull(expr, InferType(expr, inputType));
 }
 
 TTypePtr EffectiveBinaryNumericType(
@@ -2020,14 +2086,18 @@ std::pair<TExprPtr, TTypePtr> ExpandKernelPredicate(const TExprPtr& expr,
     const TStructType& inputType,
     const TExternalCatalogSnapshot* externalCatalog)
 {
-    auto expanded = ExpandKernelExpr(expr, inputType, externalCatalog);
-    if (IsNullLiteral(expanded.first)) {
-        expanded = {
-            TypeNullPredicate(expanded.first),
-            std::make_shared<TNullable>(std::make_shared<TBoolType>()),
-        };
-    }
-    return expanded;
+    return TypeUntypedNull(
+        ExpandKernelExpr(expr, inputType, externalCatalog),
+        std::make_shared<TBoolType>());
+}
+
+std::pair<TExprPtr, TTypePtr> ExpandKernelValue(const TExprPtr& expr,
+    const TStructType& inputType,
+    const TExternalCatalogSnapshot* externalCatalog)
+{
+    return TypeUntypedNull(
+        ExpandKernelExpr(expr, inputType, externalCatalog),
+        UntypedNullValueType());
 }
 
 } // namespace NQdb::NKernel

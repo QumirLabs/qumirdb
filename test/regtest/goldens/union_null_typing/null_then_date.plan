@@ -1,0 +1,6 @@
+union-all (rows≈6 cost≈96)
+├─ project (id, x) (rows≈3 cost≈36)
+│  └─ source t AS t (rows≈3 cost≈12)
+└─ project (id, col1) (rows≈3 cost≈60)
+   └─ project (id, col1) (rows≈3 cost≈36)
+      └─ source t AS t_1 (rows≈3 cost≈12)

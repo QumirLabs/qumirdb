@@ -25,6 +25,8 @@ void AnnotateOperatorType(
 // Inserts cast projections on UNION ALL branches so every branch produces the unified
 // column layout. Run after AnnotateTypes (needs the union's unified output type), then
 // re-annotate.
-void CoerceSetOpBranches(const TOperatorPtr& root);
+void CoerceSetOpBranches(
+    const TOperatorPtr& root,
+    const NKernel::TAnnotationContext& context = {});
 
 } // namespace NQdb
