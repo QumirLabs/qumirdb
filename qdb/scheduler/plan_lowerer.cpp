@@ -354,20 +354,25 @@ size_t ChooseRuntimeBloomBytes(const TJoinOperator& join,
     constexpr size_t totalBudget = 128u << 20;
     const size_t maximum = std::bit_floor(std::max<size_t>(
         64, totalBudget / (producerCount + 1)));
-    const size_t minimum = std::min(
-        TRuntimeFilter::DefaultBloomBytes, maximum);
     const auto& build = buildSide == EJoinFilterSide::Left
         ? join.Left() : join.Right();
     if (!build->Stats_) {
-        return minimum;
+        return std::min(TRuntimeFilter::DefaultBloomBytes, maximum);
     }
-    // The builder needs a fixed size before its lanes begin. Reserve up to
-    // twelve bits per estimated build row, bounded across all lane-local
-    // fragments and the merged filter. A saturated filter is disabled later.
-    const auto estimatedBytes = static_cast<size_t>(std::min<long double>(
+    // Producers fix their fragments before they see a key. Publication folds
+    // the merged filter down to the keys it holds, so a fragment needs the
+    // published density only for the estimated rows, which keys never
+    // outnumber. After a low estimate the filter publishes denser than the
+    // target, or is disabled once saturated. A fragment exists only once a
+    // producer has more than MaxKeys keys. Lane-local fragments and the
+    // merged filter share the memory budget.
+    const long double keys = std::max<long double>(
+        static_cast<long double>(build->Stats_->RowCount),
+        TRuntimeFilter::DefaultMaxKeys + 1);
+    const auto bytes = static_cast<size_t>(std::min<long double>(
         static_cast<long double>(maximum),
-        static_cast<long double>(build->Stats_->RowCount) * 1.5L));
-    return std::bit_ceil(std::clamp(estimatedBytes, minimum, maximum));
+        keys * TRuntimeFilter::PublishedBloomBitsPerKey / 8));
+    return std::bit_ceil(std::clamp<size_t>(bytes, 64, maximum));
 }
 
 bool CanReuseRuntimeFilterHash(const TOperatorPtr& probe, uint32_t filterId) {
@@ -3436,6 +3441,7 @@ bool RunPlanIntoSink(
                 << " paused_probe=" << stats.PausedProbeRows
                 << " exact_keys=" << stats.ExactKeys
                 << " bloom_bytes=" << stats.BloomBytes
+                << " bloom_fragment_bytes=" << stats.BloomFragmentBytes
                 << " bloom_set_bits=" << stats.BloomSetBits
                 << " ready_ms=" << stats.ReadyLatencyMs
                 << " ready=" << stats.Ready
