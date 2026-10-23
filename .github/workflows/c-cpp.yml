@@ -24,6 +24,7 @@ jobs:
       contents: read
 
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     env:
       QDB_JIT_CACHE_DIR: ${{ github.workspace }}/build/jit-cache
@@ -45,7 +46,26 @@ jobs:
     - name: apt-get update
       run: sudo apt-get update
     - name: Install packages
-      run: sudo apt-get install -y cmake ninja-build pkg-config llvm-22-dev lld libgtest-dev libarrow-dev libparquet-dev libreadline-dev g++-16
+      timeout-minutes: 16
+      run: |
+        # A slow mirror can stall the download for tens of minutes. Each retry
+        # keeps the packages that were already fetched.
+        for attempt in 1 2 3; do
+          sudo timeout 300 apt-get install -y ccache cmake ninja-build pkg-config llvm-22-dev lld libgtest-dev libarrow-dev libparquet-dev libreadline-dev g++-16 && exit 0
+          sudo dpkg --configure -a || true
+        done
+        exit 1
+    - name: Set up ccache
+      uses: Chocobo1/setup-ccache-action@a4d08616f5b614053bce228ddf881592f69d61d4 # v1.5.9
+      with:
+        install_ccache: false
+        update_packager_index: false
+        prepend_symlinks_to_path: false
+        # Only pushes to master save the cache; pull requests restore it.
+        store_cache: true
+        remove_stale_cache: false
+        ccache_options: |
+          max_size=2G
     - name: Configure
       run: |
         cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
@@ -53,6 +73,8 @@ jobs:
           -DCMAKE_PREFIX_PATH="$(llvm-config-22 --prefix)" \
           -DCMAKE_CXX_COMPILER=g++-16 \
           -DCMAKE_C_COMPILER=gcc-16 \
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
           -DQDB_LLVM_LINK_SHARED=ON \
           -DQDB_BUILD_TESTS=ON
     - name: Build
@@ -62,7 +84,7 @@ jobs:
     - name: Test
       env:
         RUSTUP_TOOLCHAIN: 1.98.1
-      run: cmake --build build --target test
+      run: ctest --test-dir build -j "$(nproc)"
     - name: Test log on failure
       if: failure()
       run: cat build/Testing/Temporary/LastTest.log

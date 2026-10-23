@@ -161,7 +161,7 @@ for each run. Use the same build configuration for baseline and candidate.
 Run checks appropriate to the change and the user's instructions. Examples:
 
 ```sh
-ctest --test-dir build -R '^test_reg$' --output-on-failure
+ctest --test-dir build -R '^test_reg_[0-9]$' -j 4 --output-on-failure
 ./build/test/test_reg test/regtest --gtest_filter='RegQuery.correlated_aggregate_*'
 ```
 
