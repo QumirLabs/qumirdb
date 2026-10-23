@@ -292,6 +292,10 @@
   (fun round ((var value f64)) -> f64
       (block (call qdb_round value (: 0 i32))))
   (fun qdb_sqrt ((var value f64)) -> f64 (attrs (extern sqrt)) (block))
+  ;; Qumir's `%` takes integers only. SQL `%` on DOUBLE is C fmod, as in DuckDB: the
+  ;; result takes the dividend's sign, and x % 0.0 is NaN.
+  (fun qdb_fmod ((var left f64) (var right f64)) -> f64
+    (attrs (extern fmod) (operator "%")) (block))
 
   ;; Decimal kernel storage. qdb logical Decimal(p,s) is erased to this signed
   ;; 128-bit two's-complement value before qumir compilation; precision/scale
@@ -380,6 +384,12 @@
   (fun qdb_decimal_div ((var left BinInt) (var right BinInt)) -> BinInt
     (attrs (operator "/"))
     (block (return (cast (struct ((V (/ (field left V) (field right V))))) BinInt))))
+
+  ;; Operands share a scale, so the remainder of the scaled values is the remainder
+  ;; at that scale; like SQL `%` it takes the dividend's sign.
+  (fun qdb_decimal_rem ((var left BinInt) (var right BinInt)) -> BinInt
+    (attrs (operator "%"))
+    (block (return (cast (struct ((V (% (field left V) (field right V))))) BinInt))))
 
   (fun qdb_decimal_eq ((var left BinInt) (var right BinInt)) -> bool
     (attrs (operator "==")) (block (return (== (field left V) (field right V)))))

@@ -358,6 +358,64 @@ TEST(ProjectE2E, DecimalDecimalDivisionComputesWithScaledBinIntStorage) {
     EXPECT_FALSE(plan->Next(out));
 }
 
+TEST(ProjectE2E, DecimalRemainderAlignsScalesAndKeepsDividendSign) {
+    auto binInt = [](int64_t value) {
+        return qdb_bin_int{
+            .Lo = static_cast<uint64_t>(value),
+            .Hi = value < 0 ? ~uint64_t{0} : 0,
+        };
+    };
+    // 7.50, -7.50, 7.25 at scale 2; 0.300, 2.000, -2.000 at scale 3.
+    std::array<qdb_bin_int, 3> amount = {{binInt(750), binInt(-750), binInt(725)}};
+    std::array<qdb_bin_int, 3> divisor = {{binInt(300), binInt(2000), binInt(-2000)}};
+    std::array<TColumn, 2> cols = {
+        TColumn{.Data = reinterpret_cast<char*>(amount.data())},
+        TColumn{.Data = reinterpret_cast<char*>(divisor.data())},
+    };
+    TRowSet batch{.Columns = cols.data(), .ColumnCount = 2, .RowCount = 3, .RefCount = 1};
+    NQdb::TMockSource src(
+        {"amount", "divisor"},
+        {std::make_shared<NQdb::TDecimal>(10, 2),
+         std::make_shared<NQdb::TDecimal>(5, 3)},
+        {batch});
+
+    auto plan = Plan(
+        "(rel project (rel source \"L\") "
+        "(by_int (% amount 2)) "
+        "(by_decimal (% amount divisor)))",
+        src);
+
+    auto* outType = static_cast<TStructType*>(plan->OutputType().get());
+    ASSERT_EQ(outType->Fields.size(), 2u);
+    auto byIntSpec = NQdb::DecimalSpecOf(outType->Fields[0].second);
+    ASSERT_TRUE(byIntSpec.has_value());
+    EXPECT_EQ(byIntSpec->Precision, 12);
+    EXPECT_EQ(byIntSpec->Scale, 2);
+    auto byDecimalSpec = NQdb::DecimalSpecOf(outType->Fields[1].second);
+    ASSERT_TRUE(byDecimalSpec.has_value());
+    EXPECT_EQ(byDecimalSpec->Precision, 11);
+    EXPECT_EQ(byDecimalSpec->Scale, 3);
+
+    TRowSet out{};
+    ASSERT_TRUE(plan->Next(out));
+    ASSERT_EQ(out.ColumnCount, 2);
+    ASSERT_EQ(out.RowCount, 3);
+    const auto* byInt = reinterpret_cast<const qdb_bin_int*>(out.Columns[0].Data);
+    const auto* byDecimal = reinterpret_cast<const qdb_bin_int*>(out.Columns[1].Data);
+    // 1.50, -1.50, 1.25
+    const std::array<int64_t, 3> expectedByInt = {150, -150, 125};
+    // 7.500 % 0.300 = 0.000, -7.500 % 2.000 = -1.500, 7.250 % -2.000 = 1.250
+    const std::array<int64_t, 3> expectedByDecimal = {0, -1500, 1250};
+    for (int i = 0; i < 3; ++i) {
+        EXPECT_EQ(byInt[i].Lo, binInt(expectedByInt[i]).Lo) << i;
+        EXPECT_EQ(byInt[i].Hi, binInt(expectedByInt[i]).Hi) << i;
+        EXPECT_EQ(byDecimal[i].Lo, binInt(expectedByDecimal[i]).Lo) << i;
+        EXPECT_EQ(byDecimal[i].Hi, binInt(expectedByDecimal[i]).Hi) << i;
+    }
+    Release(&out);
+    EXPECT_FALSE(plan->Next(out));
+}
+
 TEST(ProjectE2E, DecimalAverageShapeDividesSumByCount) {
     std::array<int64_t, 3> keys = {1, 1, 1};
     std::array<qdb_bin_int, 3> amount = {{
