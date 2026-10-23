@@ -765,6 +765,21 @@ TTypePtr BinaryValueType(TOperator op, const TExprPtr& le, const TExprPtr& re,
     return CommonNumeric(vl, vr);
 }
 
+// BinaryValueType of an operation with a bare-NULL operand (null type). A null-strict
+// operator turns it into NULL whatever the NULL stands for, so the operand only has to give
+// the operation a result type. It takes the other operand's type, except next to a decimal
+// in `*`: decimal * decimal is not implemented, so such a NULL is an integer, as SQL
+// types a bare NULL.
+TTypePtr BinaryValueTypeWithNull(TOperator op, const TExprPtr& le, const TExprPtr& re,
+    const TTypePtr& lt, const TTypePtr& rt)
+{
+    TTypePtr nullType = lt ? lt : rt;
+    if (op == "*" && nullType && DecimalSpecOfValueType(ValueType(nullType))) {
+        nullType = std::make_shared<TIntegerType>();
+    }
+    return BinaryValueType(op, le, re, lt ? lt : nullType, rt ? rt : nullType);
+}
+
 // SQL `%` on exact numbers and decimal `/` have no value for a zero divisor, and unlike
 // DOUBLE (NaN, infinity) their result types cannot stand for one. They yield NULL, as in
 // DuckDB. PostgreSQL raises "division by zero"; qdb has no runtime error channel yet.
@@ -813,9 +828,8 @@ TTypePtr InferType(const TExprPtr& e, const TStructType& schema) {
         auto node =bin.Cast();
         TTypePtr lt = InferType(node->Left, schema);
         TTypePtr rt = InferType(node->Right, schema);
-        // A bare-NULL operand takes the other operand's type, as Expand does.
-        TTypePtr R = BinaryValueType(node->Operator, node->Left, node->Right,
-            lt ? lt : rt, rt ? rt : lt);
+        // A bare-NULL operand is typed as Expand types it.
+        TTypePtr R = BinaryValueTypeWithNull(node->Operator, node->Left, node->Right, lt, rt);
         TTypePtr type = Propagate({lt, rt}, R);
         if (type && IsNullOnZeroDivisor(node->Operator, R) && MayBeZero(node->Right)) {
             return std::make_shared<TNullable>(UnwrapNullableType(type));
@@ -1307,8 +1321,7 @@ TTypePtr Expand(TExprPtr& e, const TStructType& inputType, uint64_t& counter) {
         }
         // Bare-NULL operand => the whole op is unconditionally NULL[R].
         if (!lt || !rt) {
-            TTypePtr R = BinaryValueType(op, node->Left, node->Right,
-                lt ? lt : rt, rt ? rt : lt);
+            TTypePtr R = BinaryValueTypeWithNull(op, node->Left, node->Right, lt, rt);
             if (!R) {
                 // No operand has a type (`NULL + NULL`): the result is an untyped NULL.
                 e = MakeNull(node->Location);

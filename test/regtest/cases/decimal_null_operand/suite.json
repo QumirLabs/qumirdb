@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "fixtures": {
+    "values": {"json": "tables/t.json", "parquet": {"row_group_rows": 2}}
+  },
+  "tables": {"t": "values"},
+  "variants": ["single", "threaded", "js"],
+  "cases": {
+    "multiply.sql": {"order": "ordered"},
+    "operators.sql": {"order": "ordered"},
+    "nested.sql": {"order": "ordered"}
+  }
+}
