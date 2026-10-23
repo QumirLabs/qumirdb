@@ -1,0 +1,1 @@
+SELECT i, count(*) AS n FROM t GROUP BY i ORDER BY i DESC;

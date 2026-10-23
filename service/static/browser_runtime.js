@@ -3750,6 +3750,7 @@ class WindowTask {
     const kernel = await instantiateKernel(
       stageEntrypoint(this.stage, 'qdb_window_run'),
       this.shared);
+    kernel.nullable = !!this.stage.radixNullable;
     const inputs = this.inputs;
     this.inputs = [];
     this.pending = runWindowKernelRowSets(

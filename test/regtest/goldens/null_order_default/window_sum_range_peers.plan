@@ -1,0 +1,4 @@
+sort [id asc]
+└─ project (id, s)
+   └─ window order=[t.i asc] fns=[w_0=sum]
+      └─ source t AS t (rows≈8 cost≈128)

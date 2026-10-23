@@ -2216,9 +2216,8 @@ std::optional<llvm::json::Object> BuildSortStageJson(
     for (size_t i = 0; i < wasmKernel->Kernel->SortKeys.size(); ++i) {
         const auto& key = wasmKernel->Kernel->SortKeys[i];
         const auto& sortKey = sortKeys[i];
-        const bool nullsFirst = sortKey.Nulls == NQdb::ESortNulls::First ||
-            (sortKey.Nulls == NQdb::ESortNulls::Default &&
-                sortKey.Direction == NQdb::ESortDirection::Desc);
+        const bool nullsFirst =
+            NQdb::EffectiveSortNulls(sortKey.Direction, sortKey.Nulls) == NQdb::ESortNulls::First;
         keys.push_back(llvm::json::Object{
             {"index", key.Index},
             {"width", key.WidthBytes},
@@ -2274,13 +2273,17 @@ std::optional<llvm::json::Object> BuildWindowStageJson(
         return std::nullopt;
     }
 
+    // The nullable radix needs a 257th bucket for the segregated NULL rows, as in
+    // the native window executor.
+    bool anyNullableKey = false;
     llvm::json::Array keys;
     for (size_t i = 0; i < wasmKernel->Kernel->SortKeys.size(); ++i) {
         const auto& key = wasmKernel->Kernel->SortKeys[i];
         const auto& sortKey = sortKeys[i];
-        const bool nullsFirst = sortKey.Nulls == NQdb::ESortNulls::First ||
-            (sortKey.Nulls == NQdb::ESortNulls::Default &&
-                sortKey.Direction == NQdb::ESortDirection::Desc);
+        const bool nullsFirst =
+            NQdb::EffectiveSortNulls(sortKey.Direction, sortKey.Nulls) == NQdb::ESortNulls::First;
+        anyNullableKey = anyNullableKey ||
+            NQdb::IsNullableType(inputStruct.Fields[key.Index].second);
         keys.push_back(llvm::json::Object{
             {"index", key.Index},
             {"width", key.WidthBytes},
@@ -2292,6 +2295,7 @@ std::optional<llvm::json::Object> BuildWindowStageJson(
 
     return llvm::json::Object{
         {"entrypoints", EntrypointsJson(*wasmKernel)},
+        {"radixNullable", anyNullableKey},
         {"partitionKeys", StringArray(window.PartitionKeys())},
         {"sortKeys", SortKeysJson(sortKeys)},
         {"radixKeys", std::move(keys)},

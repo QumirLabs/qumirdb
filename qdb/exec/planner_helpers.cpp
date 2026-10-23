@@ -83,10 +83,7 @@ bool IsRadixSortableType(const NQumir::NAst::TTypePtr& type) {
 }
 
 bool SortNullsFirst(const NKernel::TKernelSortKeySpec& key) {
-    if (key.Nulls != ESortNulls::Default) {
-        return key.Nulls == ESortNulls::First;
-    }
-    return key.Direction == ESortDirection::Desc;
+    return EffectiveSortNulls(key.Direction, key.Nulls) == ESortNulls::First;
 }
 
 struct TSortKernelInputs {

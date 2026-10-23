@@ -1,0 +1,4 @@
+sort [id asc]
+└─ project (id, m)
+   └─ window order=[t.d desc, t.id asc] fns=[w_0=max]
+      └─ source t AS t (rows≈8 cost≈160)

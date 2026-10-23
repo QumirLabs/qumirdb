@@ -1,0 +1,6 @@
+sort [id asc]
+└─ project (id)
+   └─ project (q.id)
+      └─ top-sort [i desc, id asc] limit 3
+         └─ project (id, i) (rows≈8 cost≈256)
+            └─ source t AS t (rows≈8 cost≈128)

@@ -184,6 +184,19 @@ aggregate and counts as one column, so a struct-return item of that kind before 
 GROUP BY position needs `AS (...)`. Hidden sort columns and the correlation
 outputs that decorrelation adds to a subquery's SELECT list are not positions.
 
+### NULL order in sort keys
+
+NULL sorts as larger than every value, as in PostgreSQL: an ORDER BY key without
+a modifier is `NULLS LAST` when ascending and `NULLS FIRST` when descending, and
+an explicit `NULLS FIRST` or `NULLS LAST` overrides that. The builder records
+what the query said (`nulls-default`, `nulls-first`, `nulls-last` in the plan)
+and `EffectiveSortNulls` resolves the default from the direction, so every
+consumer of a sort key applies one rule: the sort operator, the top-N under
+`LIMIT` and `OFFSET`, the merge of sorted partitions, the window `PARTITION BY` /
+`ORDER BY` sort and peer detection, and the browser runtime. The default decides
+which rows `LIMIT` keeps. DuckDB differs: it puts NULLs last in both directions,
+so a comparison with DuckDB spells out `NULLS FIRST` for a descending key.
+
 ### Affine integer aggregates
 
 Before argument materialization, aggregates over one integer column and integer

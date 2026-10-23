@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "schema": "<struct (id i64) (g i64) (i <named Nullable [i64]>) (f <named Nullable [f64]>) (s <named Nullable [string]>) (d <named Nullable [i32]>) (b <named Nullable [bool]>)>",
+  "rows": [
+    ["1", "1", "3", 1.5, "b", 10441, true],
+    ["2", "1", null, null, null, null, null],
+    ["3", "1", "1", -2.0, "a", 10443, false],
+    ["4", "1", "3", 0.5, "c", 10442, true],
+    ["5", "2", null, 2.5, null, 10441, null],
+    ["6", "2", "2", null, "b", null, false],
+    ["7", "2", "1", 3.5, "a", 10444, true],
+    ["8", "2", null, null, "c", 10443, null]
+  ]
+}

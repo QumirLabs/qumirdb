@@ -1,0 +1,1 @@
+SELECT id, CAST(d AS DATE) AS x FROM t ORDER BY x, id;
