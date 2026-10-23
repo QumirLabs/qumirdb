@@ -1,0 +1,7 @@
+project (col0) (rows≈1 cost≈4.3K)
+└─ aggregate keys=[__group__] aggs=[count_0=count] (rows≈1 cost≈4.3K)
+   └─ project (__group__) (rows≈6 cost≈4.2K)
+      └─ join inner (rows≈6 cost≈4.2K)
+         ├─ filter (> |t.v| 10) (rows≈3 cost≈48)
+         │  └─ source t AS t row-groups (> |t.v| 10) (rows≈3 cost≈24)
+         └─ source e AS e (rows≈2 cost≈2)

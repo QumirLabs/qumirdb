@@ -225,10 +225,6 @@ public:
     }
 
     void RestrictColumns(const std::unordered_set<std::string>& names) override {
-        if (names.empty()) {
-            return;
-        }
-
         Columns_.clear();
         for (const auto& column : AllColumns_) {
             if (names.contains(std::string(column.Name))) {

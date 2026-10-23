@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "fixtures": {
+    "t": {"json": "tables/t.json"},
+    "e": {"json": "tables/e.json"}
+  },
+  "tables": {"t": "t", "e": "e"},
+  "variants": ["single", "threaded", "js"],
+  "cases": {
+    "cross_both_keys.sql": {"order": "unordered"},
+    "cross_count.sql": {},
+    "cross_count_filter.sql": {}
+  }
+}

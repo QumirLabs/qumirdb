@@ -1,0 +1,4 @@
+project (k, ek) (rows≈6 cost≈4.3K)
+└─ join inner (rows≈6 cost≈4.2K)
+   ├─ source t AS t (rows≈3 cost≈24)
+   └─ source e AS e (rows≈2 cost≈16)
