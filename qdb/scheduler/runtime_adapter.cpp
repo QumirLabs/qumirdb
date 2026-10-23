@@ -1249,6 +1249,20 @@ void THashShuffleTask::ClearPending() {
     ObserveInstrumentation();
 }
 
+namespace {
+
+// A consumer's view of a spooled batch keeps the spool alive, so a rowset
+// retained past the end of the plan (by a sink, for example) stays valid.
+struct TCteViewData {
+    std::shared_ptr<const TCteSharedState> State;
+};
+
+void DestroyCteView(TRowSet* rowSet) {
+    delete static_cast<TCteViewData*>(rowSet->Private);
+}
+
+} // namespace
+
 TCteConsumerTask::TCteConsumerTask(
     std::shared_ptr<const TCteSharedState> state, TOutputPort output)
     : State_(std::move(state))
@@ -1274,10 +1288,11 @@ ETaskResult TCteConsumerTask::Execute() {
     }
 
     TRowSet view = State_->Batches[NextBatch_];
-    view.Destroy = nullptr;
-    view.Private = nullptr;
+    view.Destroy = DestroyCteView;
+    view.Private = new TCteViewData{State_};
     view.RefCount = 1;
     if (!Output_.Push(std::move(view))) {
+        Release(&view);
         return ETaskResult::BLOCKED_OUTPUT;
     }
     ++NextBatch_;

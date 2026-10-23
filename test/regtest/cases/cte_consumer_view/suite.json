@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "fixtures": {
+    "t": {"json": "tables/t.json"}
+  },
+  "tables": {"t": "t"},
+  "variants": ["single", "threaded", "js"],
+  "cases": {
+    "union_two.sql": {"order": "unordered"},
+    "union_three.sql": {"order": "unordered"}
+  }
+}

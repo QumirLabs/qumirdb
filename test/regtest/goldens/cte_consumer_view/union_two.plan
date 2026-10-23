@@ -1,0 +1,12 @@
+cte #0 (materialized, ×2):
+project (v) (rows≈3 cost≈120)
+└─ filter (> |t.v| 0) (rows≈3 cost≈96)
+   └─ source t AS t (rows≈6 cost≈48)
+main:
+union-all (rows≈6 cost≈336)
+├─ project (v) (rows≈3 cost≈168)
+│  └─ project (a.v) (rows≈3 cost≈144)
+│     └─ cte-consumer #0 (×2)
+└─ project (v) (rows≈3 cost≈168)
+   └─ project (a.v) (rows≈3 cost≈144)
+      └─ cte-consumer #0 (×2)
