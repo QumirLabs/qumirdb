@@ -1,0 +1,1 @@
+SELECT id FROM (SELECT id, i FROM t ORDER BY i, id LIMIT 6) AS q ORDER BY id;

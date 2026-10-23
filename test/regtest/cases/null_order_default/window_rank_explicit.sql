@@ -1,0 +1,1 @@
+SELECT id, rank() OVER (ORDER BY i NULLS FIRST) AS r FROM t ORDER BY id;

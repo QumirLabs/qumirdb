@@ -1,0 +1,1 @@
+SELECT id, rank() OVER (PARTITION BY g ORDER BY f DESC) AS r FROM t ORDER BY id;

@@ -69,7 +69,7 @@ bool TWindowProcessor::Next(TRowSet& rowSet)
     auto nullsFirsts = std::make_unique<bool[]>(Keys_.size());
     for (size_t k = 0; k < Keys_.size(); ++k) {
         descs[k] = Keys_[k].Direction == ESortDirection::Desc;
-        nullsFirsts[k] = SortNullsFirst(Keys_[k]);
+        nullsFirsts[k] = EffectiveSortNulls(Keys_[k].Direction, Keys_[k].Nulls) == ESortNulls::First;
     }
 
     // One call: sort the row-ids in place, then materialize the whole partition

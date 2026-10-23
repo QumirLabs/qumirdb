@@ -1,0 +1,1 @@
+SELECT id, i FROM t ORDER BY i, id LIMIT 6;

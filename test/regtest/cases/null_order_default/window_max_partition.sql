@@ -1,0 +1,1 @@
+SELECT id, max(id) OVER (PARTITION BY g ORDER BY s DESC, id) AS m FROM t ORDER BY id;

@@ -1,0 +1,4 @@
+sort [id asc]
+└─ project (id, m)
+   └─ window partition=[t.g] order=[t.s desc, t.id asc] fns=[w_0=max]
+      └─ source t AS t (rows≈8 cost≈256)

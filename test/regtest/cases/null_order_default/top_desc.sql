@@ -1,0 +1,1 @@
+SELECT id, i FROM t ORDER BY i DESC, id LIMIT 3;

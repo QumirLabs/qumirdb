@@ -1,0 +1,1 @@
+SELECT id, i FROM big ORDER BY i, id LIMIT 25;

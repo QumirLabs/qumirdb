@@ -1,0 +1,1 @@
+SELECT id, f * 2 AS j FROM t ORDER BY j DESC, id LIMIT 3;

@@ -1,0 +1,1 @@
+SELECT id, s FROM t ORDER BY s DESC, id LIMIT 2;

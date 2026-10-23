@@ -1,0 +1,3 @@
+sort [f desc, id asc]
+└─ project (id, f) (rows≈400 cost≈12.8K)
+   └─ source big AS big (rows≈400 cost≈6.4K)

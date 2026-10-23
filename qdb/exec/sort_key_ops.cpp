@@ -12,14 +12,6 @@ bool RowSelected(const TRowSet& batch, int32_t row) {
     return !batch.Selection || batch.Selection[row] != 0;
 }
 
-ESortNulls EffectiveNulls(const TSortKey& key) {
-    if (key.Nulls != ESortNulls::Default) {
-        return key.Nulls;
-    }
-    // Matches PostgreSQL's default: ASC puts NULLS LAST, DESC puts NULLS FIRST.
-    return key.Direction == ESortDirection::Desc ? ESortNulls::First : ESortNulls::Last;
-}
-
 namespace {
 
 bool IsStringKeyType(const TTypePtr& type) {

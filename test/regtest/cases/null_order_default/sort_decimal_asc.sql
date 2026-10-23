@@ -1,0 +1,1 @@
+SELECT id FROM t ORDER BY CAST(f AS DECIMAL(10, 2)), id;

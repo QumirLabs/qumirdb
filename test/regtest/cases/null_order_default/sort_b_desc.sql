@@ -1,0 +1,1 @@
+SELECT id, b FROM t ORDER BY b DESC, id;

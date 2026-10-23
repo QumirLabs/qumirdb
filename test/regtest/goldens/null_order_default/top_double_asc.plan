@@ -1,0 +1,3 @@
+top-sort [f asc, id asc] limit 7
+└─ project (id, f) (rows≈8 cost≈256)
+   └─ source t AS t (rows≈8 cost≈128)
