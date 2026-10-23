@@ -1,0 +1,7 @@
+{
+  "schema": "<struct (g bool) (c i64) (r i64)>",
+  "rows": [
+    [false, "2", "2"],
+    [true, "0", "0"]
+  ]
+}

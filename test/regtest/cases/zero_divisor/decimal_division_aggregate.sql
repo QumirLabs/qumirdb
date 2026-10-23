@@ -1,0 +1,1 @@
+SELECT CAST(x AS DECIMAL(10,2)) / y IS NULL AS g, count(CAST(x AS DECIMAL(10,2)) / y) AS c, count(CAST(x AS DECIMAL(10,2)) % y) AS r FROM t GROUP BY 1 ORDER BY 1;

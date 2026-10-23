@@ -10,6 +10,11 @@
     "remainder_nullable.sql": {"order": "ordered"},
     "remainder_filter.sql": {"order": "ordered"},
     "remainder_aggregate.sql": {"order": "ordered"},
-    "decimal_division.sql": {"order": "ordered"}
+    "decimal_division.sql": {"order": "ordered"},
+    "decimal_division_nullable.sql": {"order": "ordered"},
+    "decimal_remainder.sql": {"order": "ordered"},
+    "decimal_division_expressions.sql": {"order": "ordered"},
+    "decimal_division_filter.sql": {"order": "ordered"},
+    "decimal_division_aggregate.sql": {"order": "ordered"}
   }
 }

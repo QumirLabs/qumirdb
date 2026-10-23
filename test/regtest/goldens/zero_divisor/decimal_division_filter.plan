@@ -1,0 +1,4 @@
+sort [id asc]
+└─ project (id) (rows≈2 cost≈168)
+   └─ filter (|| (call qdb_is_null (/ (cast |t.x| <named DECIMAL [10 2]>) |t.y|)) (== (% (cast |t.a| <named DECIMAL [10 2]>) |t.b|) 1)) (rows≈2 cost≈160)
+      └─ source t AS t row-groups (|| (call qdb_is_null (/ (cast |t.x| <named DECIMAL [10 2]>) |t.y|)) (== (% (cast |t.a| <named DECIMAL [10 2]>) |t.b|) 1)) (rows≈4 cost≈80)

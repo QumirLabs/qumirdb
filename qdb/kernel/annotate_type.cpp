@@ -770,7 +770,9 @@ TTypePtr InferType(const TExprPtr& e, const TStructType& schema) {
         auto node =bin.Cast();
         TTypePtr lt = InferType(node->Left, schema);
         TTypePtr rt = InferType(node->Right, schema);
-        TTypePtr R = BinaryValueType(node->Operator, node->Left, node->Right, lt, rt);
+        // A bare-NULL operand takes the other operand's type, as Expand does.
+        TTypePtr R = BinaryValueType(node->Operator, node->Left, node->Right,
+            lt ? lt : rt, rt ? rt : lt);
         TTypePtr type = Propagate({lt, rt}, R);
         if (type && IsNullOnZeroDivisor(node->Operator, R) && MayBeZero(node->Right)) {
             return std::make_shared<TNullable>(UnwrapNullableType(type));
@@ -1401,8 +1403,13 @@ TTypePtr Expand(TExprPtr& e, const TStructType& inputType, uint64_t& counter) {
         if (name == "qdb_is_true" && node->Args.size() == 1) {
             node->Args[0] = TypeNullPredicate(node->Args[0]);
         }
+        if (name == "qdb_is_null" || name == "qdb_is_true") {
+            // Non-null bool. The arguments are expanded already: typing them again with
+            // InferType would not see the temporaries the expansion introduced.
+            return std::make_shared<TBoolType>();
+        }
         if (IsExcludedCall(name)) {
-            return InferType(e, inputType); // e.g. is_null/is_true -> non-null bool
+            return InferType(e, inputType);
         }
         bool anyNull = false;
         for (const auto& t : argTypes) {
