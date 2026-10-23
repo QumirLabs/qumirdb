@@ -272,8 +272,41 @@ EAuxInputStatus TAuxInput::Poll() const {
     return EAuxInputStatus::Waiting;
 }
 
-TSourceCode::TSourceCode(TNext next)
+bool TAuxInput::WantsInput(const TTaskEdge& edge) const noexcept {
+    switch (Poll()) {
+        case EAuxInputStatus::Ready:
+            return edge.Kind == ETaskEdgeKind::Rowset;
+        case EAuxInputStatus::NeedProducer:
+            return edge.Kind == ETaskEdgeKind::Dependency;
+        case EAuxInputStatus::Waiting:
+        case EAuxInputStatus::Failed:
+            return false;
+    }
+    return false;
+}
+
+bool TAuxInput::Settled() const noexcept {
+    const auto status = Poll();
+    return status == EAuxInputStatus::Ready || status == EAuxInputStatus::Failed;
+}
+
+bool TAuxInput::CheckReady() const {
+    switch (Poll()) {
+        case EAuxInputStatus::Ready:
+            return true;
+        case EAuxInputStatus::NeedProducer:
+        case EAuxInputStatus::Waiting:
+            return false;
+        case EAuxInputStatus::Failed:
+            break;
+    }
+    throw std::runtime_error(
+        "auxiliary producers finished without publishing input");
+}
+
+TSourceCode::TSourceCode(TNext next, std::shared_ptr<TAuxInput> auxInput)
     : Next(std::move(next))
+    , AuxInput(std::move(auxInput))
 {}
 
 TUnaryCode::TUnaryCode(TProcess process)
@@ -321,9 +354,28 @@ TSourceTask::TSourceTask(
     , Output_(output)
 {}
 
+bool TSourceTask::WantsInput(const TTaskEdge& edge) const noexcept {
+    return !Code_->AuxInput || Code_->AuxInput->WantsInput(edge);
+}
+
+bool TSourceTask::TryNotifyDependency() noexcept {
+    if (!Code_->AuxInput) {
+        return true;
+    }
+    if (!Code_->AuxInput->Settled()) {
+        return false;
+    }
+    bool expected = false;
+    return DependencyNotified_.compare_exchange_strong(expected, true,
+        std::memory_order_acq_rel);
+}
+
 ETaskResult TSourceTask::Execute() {
     if (Finished_) {
         return ETaskResult::FINISHED;
+    }
+    if (Code_->AuxInput && !Code_->AuxInput->CheckReady()) {
+        return ETaskResult::NEED_DATA;
     }
     if (!Output_.CanPush()) {
         return ETaskResult::BLOCKED_OUTPUT;
@@ -375,22 +427,11 @@ TRuntimeFilterTask::~TRuntimeFilterTask() {
 }
 
 bool TRuntimeFilterTask::WantsInput(const TTaskEdge& edge) const noexcept {
-    switch (Code_->AuxInput->Poll()) {
-        case EAuxInputStatus::Ready:
-            return edge.Kind == ETaskEdgeKind::Rowset;
-        case EAuxInputStatus::NeedProducer:
-            return edge.Kind == ETaskEdgeKind::Dependency;
-        case EAuxInputStatus::Waiting:
-        case EAuxInputStatus::Failed:
-            return false;
-    }
-    return false;
+    return Code_->AuxInput->WantsInput(edge);
 }
 
 bool TRuntimeFilterTask::TryNotifyDependency() noexcept {
-    const auto status = Code_->AuxInput->Poll();
-    if (status != EAuxInputStatus::Ready
-        && status != EAuxInputStatus::Failed) {
+    if (!Code_->AuxInput->Settled()) {
         return false;
     }
     bool expected = false;
@@ -402,13 +443,8 @@ ETaskResult TRuntimeFilterTask::Execute() {
     if (OutputFinished_) {
         return ETaskResult::FINISHED;
     }
-    switch (Code_->AuxInput->Poll()) {
-        case EAuxInputStatus::Ready: break;
-        case EAuxInputStatus::NeedProducer:
-        case EAuxInputStatus::Waiting: return ETaskResult::NEED_DATA;
-        case EAuxInputStatus::Failed:
-            throw std::runtime_error(
-                "auxiliary producers finished without publishing input");
+    if (!Code_->AuxInput->CheckReady()) {
+        return ETaskResult::NEED_DATA;
     }
 
     if (!HasInput_ && !InputFinished_) {
@@ -431,34 +467,20 @@ ETaskResult TRuntimeFilterTask::Execute() {
     }
 
     if (!Prepared_) {
-        if (!Code_->Probe || !Code_->Hash) {
-            throw std::runtime_error("runtime filter consumer is not bound");
+        std::vector<uint64_t> hashes;
+        std::vector<uint8_t> selection;
+        const auto kept = ProbeRuntimeFilter(
+            *Code_, ProbeState_, CurrentInput_, hashes, selection);
+        if (kept && !*kept) {
+            Release(&CurrentInput_);
+            CurrentInput_ = {};
+            HasInput_ = false;
+            return ETaskResult::OK;
         }
-        if (!ProbeState_) {
-            ProbeState_ = Code_->Probe->CreateProbeState();
-        }
-        const size_t rows = static_cast<size_t>(CurrentInput_.RowCount);
-        const std::span<const uint8_t> selection = CurrentInput_.Selection
-            ? std::span<const uint8_t>(CurrentInput_.Selection, rows)
-            : std::span<const uint8_t>{};
-        const size_t selected = selection.empty() ? rows : static_cast<size_t>(
-            std::count_if(selection.begin(), selection.end(),
-                [](uint8_t value) { return value != 0; }));
-        if (Code_->Probe->BeginBatch(*ProbeState_, selected)) {
+        if (kept) {
             auto data = std::make_unique<TRuntimeFilterRowSetData>();
-            data->Hashes.resize(rows);
-            if (!Code_->Hash(&CurrentInput_, data->Hashes.data())) {
-                throw std::runtime_error("runtime filter hash kernel failed");
-            }
-            data->Selection.resize(rows);
-            const size_t kept = Code_->Probe->MayContainBatch(
-                data->Hashes, data->Selection, *ProbeState_, selection);
-            if (!kept) {
-                Release(&CurrentInput_);
-                CurrentInput_ = {};
-                HasInput_ = false;
-                return ETaskResult::OK;
-            }
+            data->Hashes = std::move(hashes);
+            data->Selection = std::move(selection);
             data->Input = CurrentInput_;
             CurrentInput_.Selection = data->Selection.data();
             CurrentInput_.Hash = data->Hashes.data();
@@ -478,6 +500,76 @@ ETaskResult TRuntimeFilterTask::Execute() {
     HasInput_ = false;
     Prepared_ = false;
     return ETaskResult::OK;
+}
+
+std::optional<size_t> ProbeRuntimeFilter(
+    const TRuntimeFilterCode& code,
+    std::shared_ptr<TRuntimeFilterProbeState>& state,
+    TRowSet& rowSet,
+    std::vector<uint64_t>& hashes,
+    std::vector<uint8_t>& selection)
+{
+    if (!code.Probe || !code.Hash) {
+        throw std::runtime_error("runtime filter consumer is not bound");
+    }
+    if (!state) {
+        state = code.Probe->CreateProbeState();
+    }
+    const size_t rows = static_cast<size_t>(rowSet.RowCount);
+    const std::span<const uint8_t> input = rowSet.Selection
+        ? std::span<const uint8_t>(rowSet.Selection, rows)
+        : std::span<const uint8_t>{};
+    const size_t selected = input.empty() ? rows : static_cast<size_t>(
+        std::count_if(input.begin(), input.end(),
+            [](uint8_t value) { return value != 0; }));
+    if (!code.Probe->BeginBatch(*state, selected)) {
+        return std::nullopt;
+    }
+    hashes.resize(rows);
+    if (!code.Hash(&rowSet, hashes.data())) {
+        throw std::runtime_error("runtime filter hash kernel failed");
+    }
+    selection.resize(rows);
+    return code.Probe->MayContainBatch(hashes, selection, *state, input);
+}
+
+TRuntimeFilterScan::TRuntimeFilterScan(
+    std::vector<std::shared_ptr<const TRuntimeFilterCode>> codes,
+    std::vector<size_t> columns)
+    : Columns_(std::move(columns))
+{
+    Uses_.reserve(codes.size());
+    for (auto& code : codes) {
+        Uses_.push_back({.Code = std::move(code)});
+    }
+}
+
+std::span<const size_t> TRuntimeFilterScan::Columns() const {
+    return Columns_;
+}
+
+size_t TRuntimeFilterScan::Select(const TRowSet& batch, TScanSelection& selection) {
+    TRowSet input = batch;
+    size_t kept = static_cast<size_t>(batch.RowCount);
+    std::vector<uint64_t> hashes;
+    std::vector<uint8_t> rows;
+    for (auto& use : Uses_) {
+        input.Selection = selection.Rows.empty() ? nullptr : selection.Rows.data();
+        const auto accepted = ProbeRuntimeFilter(
+            *use.Code, use.State, input, hashes, rows);
+        if (!accepted) {
+            // Only the last filter that tested the batch may supply hashes.
+            selection.Hashes.clear();
+            continue;
+        }
+        if (!*accepted) {
+            return 0;
+        }
+        kept = *accepted;
+        selection.Rows.swap(rows);
+        selection.Hashes.swap(hashes);
+    }
+    return kept;
 }
 
 TUnaryTask::TUnaryTask(

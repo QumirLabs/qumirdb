@@ -1,0 +1,12 @@
+{
+  "schema": "<struct (k i32) (w <named Nullable [i64]>) (s <named Nullable [string]>) (label string)>",
+  "rows": [
+    [7, "70000000049", "", "label-7"],
+    [8, "80000000056", "ab", "label-8"],
+    [10, "100000000070", "s10", "label-10"],
+    [11, "110000000077", "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy", "label-11"],
+    [14, "140000000098", "ab", "label-14"],
+    [16, "160000000112", "s16", "label-16"],
+    [19, "190000000133", "", "label-19"]
+  ]
+}

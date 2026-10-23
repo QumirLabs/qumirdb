@@ -52,6 +52,13 @@ public:
     void AddProducer(TTaskNode& producer);
     bool Ready() const;
     EAuxInputStatus Poll() const;
+    // A waiting consumer wants its idle producers; a ready one, its rowsets.
+    bool WantsInput(const TTaskEdge& edge) const noexcept;
+    // Whether a producer's progress can change the consumer's state.
+    bool Settled() const noexcept;
+    // Ready() for a consumer's Execute: throws when every producer finished
+    // without publishing.
+    bool CheckReady() const;
 
 private:
     std::vector<std::shared_ptr<IRuntimeFilterProbe>> Filters_;
@@ -61,9 +68,12 @@ private:
 struct TSourceCode {
     using TNext = std::function<bool(void*, TRowSet&)>;
 
-    explicit TSourceCode(TNext next);
+    explicit TSourceCode(TNext next, std::shared_ptr<TAuxInput> auxInput = nullptr);
 
     TNext Next;
+    // Runtime filters the source applies while it reads. The task reads
+    // nothing before they are published.
+    std::shared_ptr<TAuxInput> AuxInput;
 };
 
 struct TUnaryCode {
@@ -135,6 +145,41 @@ struct TRuntimeFilterCode {
     std::shared_ptr<TAuxInput> AuxInput;
 };
 
+// Probes the keys of rowSet against the filter; state is created on first use,
+// after publication. nullopt when the filter does not test this batch
+// (unpublished, PassAll or paused): every row passes and no hashes are
+// computed. Otherwise fills hashes and selection,
+// the input selection narrowed to rows the filter may contain, and returns
+// the number of those rows.
+std::optional<size_t> ProbeRuntimeFilter(
+    const TRuntimeFilterCode& code,
+    std::shared_ptr<TRuntimeFilterProbeState>& state,
+    TRowSet& rowSet,
+    std::vector<uint64_t>& hashes,
+    std::vector<uint8_t>& selection);
+
+// The runtime filters placed on a scan, applied by its reader in placement
+// order with the result a chain of TRuntimeFilterTask would produce. One
+// instance and its probe states belong to one scan task.
+class TRuntimeFilterScan final : public IScanFilter {
+public:
+    TRuntimeFilterScan(
+        std::vector<std::shared_ptr<const TRuntimeFilterCode>> codes,
+        std::vector<size_t> columns);
+
+    std::span<const size_t> Columns() const override;
+    size_t Select(const TRowSet& batch, TScanSelection& selection) override;
+
+private:
+    struct TUse {
+        std::shared_ptr<const TRuntimeFilterCode> Code;
+        std::shared_ptr<TRuntimeFilterProbeState> State;
+    };
+
+    std::vector<TUse> Uses_;
+    std::vector<size_t> Columns_;
+};
+
 struct TMergeCode {
     using TProcess = std::function<ETaskResult(
         ITaskState&,
@@ -155,12 +200,15 @@ public:
 
     ETaskResult Execute() override;
     void ConfigureInstrumentation(TTaskInstrumentationSetup& setup) override;
+    bool WantsInput(const TTaskEdge& edge) const noexcept override;
+    bool TryNotifyDependency() noexcept override;
 
 private:
     std::shared_ptr<const TSourceCode> Code_;
     std::shared_ptr<void> State_;
     TOutputPort Output_;
     bool Finished_ = false;
+    std::atomic<bool> DependencyNotified_ = false;
 };
 
 class TRuntimeFilterTask final : public ITaskNode {
