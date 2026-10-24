@@ -279,17 +279,10 @@ NQumir::NAst::TExprPtr GenRowJoinAppendAst(
     const TRowJoinGenTypes& types,
     bool hasPrecomputedHash);
 
-// jr_build_table(table, arena) -> bool: sizes the pointer table for the arena
-// and inserts every row, chaining rows with equal keys.
-NQumir::NAst::TExprPtr GenRowJoinBuildAst(
-    const TJoinKeyDescriptor& key,
-    const TRowJoinLayout& layout,
-    const std::string& funcName,
-    const TRowJoinGenTypes& types);
-
-// jr_probe_batch(table, scratch, batch, key_columns, pairs) -> bool: the
-// three-pass probe (hashes, salted entry lookup, key comparison of the
-// candidates) that pushes one (left, right) pair per matching build row.
+// jr_probe_batch(table, scratch, batch, key_columns, pairs) -> bool: reads the
+// key and hash of every selected probe row into the scratch, then runs the
+// pointer and key passes of join_rows.oz (jr_seek_all, jr_probe_candidates),
+// which push one (left, right) pair per matching build row.
 NQumir::NAst::TExprPtr GenRowJoinProbeAst(
     const TJoinKeyDescriptor& key,
     const TRowJoinLayout& layout,
@@ -301,6 +294,7 @@ NQumir::NAst::TExprPtr GenRowJoinProbeAst(
 // jr_dispatch(arena, table, scratch, pairs, batch, key_columns, op) -> bool
 // (ERowJoinKernelOp).
 NQumir::NAst::TExprPtr GenRowJoinDispatchAst(
+    const TJoinKeyDescriptor& key,
     const TRowJoinLayout& layout,
     const TRowJoinGenTypes& types);
 

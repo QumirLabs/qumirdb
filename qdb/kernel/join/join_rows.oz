@@ -198,16 +198,19 @@
           (call qdb_free (cast (field s Offsets) <ptr i8>))
           (call qdb_free (cast (field s Entries) <ptr i8>))
           (call qdb_free (cast (field s Rows) <ptr i8>))
-          (call qdb_free (cast (field s Work) <ptr i8>))))
+          (call qdb_free (cast (field s Work) <ptr i8>))
+          (call qdb_free (cast (field s Keys) <ptr i8>))))
       (field_assign s Hashes (cast 0 <ptr u64>))
       (field_assign s Salts (cast 0 <ptr u64>))
       (field_assign s Offsets (cast 0 <ptr u64>))
       (field_assign s Entries (cast 0 <ptr u64>))
       (field_assign s Rows (cast 0 <ptr i64>))
       (field_assign s Work (cast 0 <ptr i64>))
+      (field_assign s Keys (cast 0 <ptr u8>))
       (field_assign s Capacity 0)))
 
-  (fun jr_scratch_reserve ((var s <ref JoinScratch>) (var n i64)) -> bool
+  ;; key_bytes is the size of the join's LookupKey struct.
+  (fun jr_scratch_reserve ((var s <ref JoinScratch>) (var n i64) (var key_bytes i64)) -> bool
     (block
       (if (<= n (field s Capacity)) (block (return #t)))
       (call jr_scratch_destroy s)
@@ -218,12 +221,14 @@
       (field_assign s Entries (cast (call qdb_alloc bytes) <ptr u64>))
       (field_assign s Rows (cast (call qdb_alloc bytes) <ptr i64>))
       (field_assign s Work (cast (call qdb_alloc bytes) <ptr i64>))
+      (field_assign s Keys (cast (call qdb_alloc (* n key_bytes)) <ptr u8>))
       (if (|| (== (cast (field s Hashes) i64) 0)
               (|| (== (cast (field s Salts) i64) 0)
               (|| (== (cast (field s Offsets) i64) 0)
               (|| (== (cast (field s Entries) i64) 0)
               (|| (== (cast (field s Rows) i64) 0)
-                  (== (cast (field s Work) i64) 0))))))
+              (|| (== (cast (field s Work) i64) 0)
+                  (== (cast (field s Keys) i64) 0)))))))
         (block (return #f)))
       (field_assign s Capacity n)
       (return #t)))
@@ -267,6 +272,112 @@
           (= offsets [j] off)
           (= found [j] e)
           (= q (+ q 1))))))
+
+  ;; ---- build and probe, generic over the join's LookupKey ----
+  ;; The key struct of a build row sits at key_offset. rh_key_equal is the
+  ;; join's overload for that key; witness only names the key type.
+
+  ;; Sizes the table and links every arena row into it: an empty entry starts
+  ;; a new key, a salt match with an equal key chains the row in front of that
+  ;; key's rows, anything else moves to the next entry.
+  (fun jr_build_rows [Key] ((var table <ref JoinTable>) (var arena <ref JoinArena>)
+                            (var key_offset i64) (var witness <ptr Key>)) -> bool
+    (block
+      (if (! (call jrt_init table (field arena Rows))) (block (return #f)))
+      (var blocks = (field arena Blocks))
+      (var count = (field arena BlockCount))
+      (var row_bytes = (field arena RowBytes))
+      (var shift = (cast (field table Shift) u64))
+      (var mask = (field table Mask))
+      (var b = 0)
+      (while (< b count)
+        (block
+          (var rows_in_block = (field arena BlockRows))
+          (if (== b (- count 1)) (block (= rows_in_block (field arena CurRows))))
+          (var base = (cast (index blocks b) i64))
+          (var k = 0)
+          (while (< k rows_in_block)
+            (block
+              (var row = (cast (+ base (* k row_bytes)) <ptr u8>))
+              (var h = (call jrt_mix (call jr_row_hash row)))
+              (var salt = (call jrt_salt h))
+              (var off = (: 0 u64))
+              (var e = (call jrt_seek table (>> h shift) salt off))
+              (var row_key = (cast (+ (cast row i64) key_offset) <ptr Key>))
+              (var done = #f)
+              (while (! done)
+                (block
+                  (if (== e (: 0 u64))
+                    (block
+                      (call jrt_link table off salt row (cast 0 <ptr u8>))
+                      (= done #t))
+                    (block
+                      (var head = (call jrt_entry_row e))
+                      (var head_key = (cast (+ (cast head i64) key_offset) <ptr Key>))
+                      (if (call rh_key_equal (index head_key 0) (index row_key 0))
+                        (block
+                          (call jrt_link table off salt row head)
+                          (= done #t))
+                        (block
+                          (= off (& (+ off (: 1 u64)) mask))
+                          (= e (call jrt_seek table off salt off))))))))
+              (= k (+ k 1))))
+          (= b (+ b 1))))
+      (return #t)))
+
+  ;; Key pass of the probe over Entries[0, count), after jr_seek_all. Keys[j]
+  ;; is the key of probe row Rows[j]. A match emits the whole chain; a salt
+  ;; collision advances the row's offset and seeks again, until every row
+  ;; reached an empty entry. Pairs are (stream row id, row pointer) in
+  ;; (left, right) order.
+  (fun jr_probe_candidates [Key] ((var table <ref JoinTable>) (var s <ref JoinScratch>)
+                                  (var pairs <ref PairBuffer>) (var count i64)
+                                  (var key_offset i64) (var probe_is_left bool)
+                                  (var witness <ptr Key>)) -> bool
+    (block
+      (var keys = (cast (field s Keys) <ptr Key>))
+      (var rows = (field s Rows))
+      (var work = (field s Work))
+      (var entries = (field s Entries))
+      (var offsets = (field s Offsets))
+      (var mask = (field table Mask))
+      (var k = count)
+      (var first = #t)
+      (while (> k 0)
+        (block
+          (var m = 0)
+          (var q = 0)
+          (while (< q k)
+            (block
+              (var j = q)
+              (if (! first) (block (= j (index work q))))
+              (var e = (index entries j))
+              (if (!= e (: 0 u64))
+                (block
+                  (var row = (call jrt_entry_row e))
+                  (var row_key = (cast (+ (cast row i64) key_offset) <ptr Key>))
+                  (if (call rh_key_equal (index row_key 0) (index keys j))
+                    (block
+                      ;; A stream row id: batch index -1, row Rows[j].
+                      (var stream_id = (+ (<< -1 32) (index rows j)))
+                      (var cur = row)
+                      (while (!= (cast cur i64) 0)
+                        (block
+                          (var pushed = #f)
+                          (if probe_is_left
+                            (block (= pushed (call pb_push pairs stream_id (cast cur i64))))
+                            (block (= pushed (call pb_push pairs (cast cur i64) stream_id))))
+                          (if (! pushed) (block (return #f)))
+                          (= cur (call jr_row_next cur)))))
+                    (block
+                      (= offsets [j] (& (+ (index offsets j) (: 1 u64)) mask))
+                      (= work [m] j)
+                      (= m (+ m 1))))))
+              (= q (+ q 1))))
+          (= k m)
+          (= first #f)
+          (if (> k 0) (block (call jr_seek_work table s k)))))
+      (return #t)))
 
   ;; ---- payload: column -> row ----
 

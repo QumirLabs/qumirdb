@@ -150,6 +150,7 @@ std::vector<TExternalType> BuildQumirDbExternalTypes() {
             {"Entries", ptrU64Type},
             {"Rows", ptrI64Type},
             {"Work", ptrI64Type},
+            {"Keys", ptrU8Type},
             {"Capacity", i64Type},
         });
 

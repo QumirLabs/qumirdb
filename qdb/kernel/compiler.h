@@ -428,7 +428,7 @@ public:
     // buffers this large.
     static constexpr size_t JoinArenaSize = 56;
     static constexpr size_t JoinTableSize = 48;
-    static constexpr size_t JoinScratchSize = 56;
+    static constexpr size_t JoinScratchSize = 64;
 
     // sizeof(TRowSet) per io.h / modules/qumirdb.oz - generated kernels that
     // pack TRowSet values into a byte buffer (e.g. top-sort's materialize

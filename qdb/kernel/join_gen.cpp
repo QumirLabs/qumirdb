@@ -1953,124 +1953,6 @@ NQumir::NAst::TExprPtr GenRowJoinAppendAst(const TJoinKeyDescriptor &key,
   return std::move(builder).Build();
 }
 
-NQumir::NAst::TExprPtr GenRowJoinBuildAst(const TJoinKeyDescriptor &key,
-                                          const TRowJoinLayout &layout,
-                                          const std::string &funcName,
-                                          const TRowJoinGenTypes &types) {
-  auto i64Type = std::make_shared<TIntegerType>(TIntegerType::I64);
-  auto u8Type = std::make_shared<TIntegerType>(TIntegerType::U8);
-  auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
-  auto boolType = std::make_shared<TBoolType>();
-  auto ptrU8Type = std::make_shared<TPointerType>(u8Type);
-  auto ptrKeyType = std::make_shared<TPointerType>(key.LookupType);
-  auto number = [&](int64_t value) { return Oz::TypedInt(value, i64Type); };
-  auto u64 = [&](int64_t value) { return Oz::TypedInt(value, u64Type); };
-
-  // Linear probing from the top bits of the row's mixed hash: an empty entry starts a new
-  // key, a salt match with an equal key chains the row in front of that key's
-  // rows, anything else moves to the next entry.
-  std::vector<TExprPtr> insert = {
-      Oz::Var("row", ptrU8Type),
-      Oz::Assign("row", Oz::Cast(Oz::Add(Oz::Ident("base"),
-                                         Oz::Mul(Oz::Ident("k"), Oz::Ident("row_bytes"))),
-                                 ptrU8Type)),
-      Oz::Var("h", u64Type),
-      Oz::Assign("h", Oz::Call("jrt_mix", {Oz::Call("jr_row_hash", {Oz::Ident("row")})})),
-      Oz::Var("salt", u64Type),
-      Oz::Assign("salt", Oz::Call("jrt_salt", {Oz::Ident("h")})),
-      Oz::Var("off", u64Type),
-      Oz::Assign("off", u64(0)),
-      Oz::Var("e", u64Type),
-      Oz::Assign("e", Oz::Call("jrt_seek", {Oz::Ident("table"),
-                                            Oz::Bin(TOperator(">>"), Oz::Ident("h"),
-                                                    Oz::Ident("shift")),
-                                            Oz::Ident("salt"), Oz::Ident("off")})),
-      Oz::Var("row_key", ptrKeyType),
-      Oz::Assign("row_key", RowFieldPointer("row", layout.KeyOffset, key.LookupType)),
-      Oz::Var("done", boolType),
-      Oz::Assign("done", Oz::Bool(false)),
-      Oz::While(
-          Oz::Unary(TOperator("!"), Oz::Ident("done")),
-          Oz::Block({
-              Oz::If(
-                  Oz::Bin(TOperator("=="), Oz::Ident("e"), u64(0)),
-                  Oz::Block({
-                      Oz::Call("jrt_link",
-                                        {Oz::Ident("table"), Oz::Ident("off"),
-                                         Oz::Ident("salt"), Oz::Ident("row"),
-                                         Oz::Cast(number(0), ptrU8Type)}),
-                      Oz::Assign("done", Oz::Bool(true)),
-                  }),
-                  Oz::Block({
-                      Oz::Var("head", ptrU8Type),
-                      Oz::Assign("head", Oz::Call("jrt_entry_row", {Oz::Ident("e")})),
-                      Oz::Var("head_key", ptrKeyType),
-                      Oz::Assign("head_key",
-                                 RowFieldPointer("head", layout.KeyOffset, key.LookupType)),
-                      Oz::If(
-                          Oz::Call("rh_key_equal", {Oz::Index("head_key", number(0)),
-                                                    Oz::Index("row_key", number(0))}),
-                          Oz::Block({
-                              Oz::Call("jrt_link",
-                                                {Oz::Ident("table"), Oz::Ident("off"),
-                                                 Oz::Ident("salt"), Oz::Ident("row"),
-                                                 Oz::Ident("head")}),
-                              Oz::Assign("done", Oz::Bool(true)),
-                          }),
-                          Oz::Block({
-                              Oz::Assign("off", Oz::Bin(TOperator("&"),
-                                                        Oz::Add(Oz::Ident("off"), u64(1)),
-                                                        Oz::Ident("mask"))),
-                              Oz::Assign("e", Oz::Call("jrt_seek",
-                                                       {Oz::Ident("table"), Oz::Ident("off"),
-                                                        Oz::Ident("salt"), Oz::Ident("off")})),
-                          })),
-                  })),
-          })),
-      Oz::Assign("k", Oz::Add(Oz::Ident("k"), number(1))),
-  };
-
-  Oz::TFunBuilder builder(funcName);
-  builder.Param("table", RefType("JoinTable", types.Table))
-      .Param("arena", RefType("JoinArena", types.Arena))
-      .Return(boolType)
-      .Stmt(Oz::If(Oz::Unary(TOperator("!"),
-                             Oz::Call("jrt_init", {Oz::Ident("table"),
-                                                   Oz::Field("arena", "Rows")})),
-                   Oz::Block({Oz::Return(Oz::Bool(false))})))
-      .Var("blocks", std::make_shared<TPointerType>(ptrU8Type))
-      .Assign("blocks", Oz::Field("arena", "Blocks"))
-      .Var("count", i64Type)
-      .Assign("count", Oz::Field("arena", "BlockCount"))
-      .Var("row_bytes", i64Type)
-      .Assign("row_bytes", Oz::Field("arena", "RowBytes"))
-      .Var("shift", u64Type)
-      .Assign("shift", Oz::Cast(Oz::Field("table", "Shift"), u64Type))
-      .Var("mask", u64Type)
-      .Assign("mask", Oz::Field("table", "Mask"))
-      .Var("b", i64Type)
-      .Assign("b", number(0))
-      .Stmt(Oz::While(
-          Oz::Bin(TOperator("<"), Oz::Ident("b"), Oz::Ident("count")),
-          Oz::Block({
-              Oz::Var("rows_in_block", i64Type),
-              Oz::Assign("rows_in_block", Oz::Field("arena", "BlockRows")),
-              Oz::If(Oz::Bin(TOperator("=="), Oz::Ident("b"),
-                             Oz::Sub(Oz::Ident("count"), number(1))),
-                     Oz::Block({Oz::Assign("rows_in_block",
-                                           Oz::Field("arena", "CurRows"))})),
-              Oz::Var("base", i64Type),
-              Oz::Assign("base", Oz::Cast(Oz::Index("blocks", Oz::Ident("b")), i64Type)),
-              Oz::Var("k", i64Type),
-              Oz::Assign("k", number(0)),
-              Oz::While(Oz::Bin(TOperator("<"), Oz::Ident("k"), Oz::Ident("rows_in_block")),
-                        Oz::Block(std::move(insert))),
-              Oz::Assign("b", Oz::Add(Oz::Ident("b"), number(1))),
-          })))
-      .Stmt(Oz::Return(Oz::Bool(true)));
-  return std::move(builder).Build();
-}
-
 NQumir::NAst::TExprPtr GenRowJoinProbeAst(const TJoinKeyDescriptor &key,
                                           const TRowJoinLayout &layout,
                                           bool probeIsLeft,
@@ -2078,13 +1960,10 @@ NQumir::NAst::TExprPtr GenRowJoinProbeAst(const TJoinKeyDescriptor &key,
                                           const TRowJoinGenTypes &types,
                                           bool hasPrecomputedHash) {
   auto i64Type = std::make_shared<TIntegerType>(TIntegerType::I64);
-  auto u8Type = std::make_shared<TIntegerType>(TIntegerType::U8);
   auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
   auto boolType = std::make_shared<TBoolType>();
-  auto ptrU8Type = std::make_shared<TPointerType>(u8Type);
   auto ptrKeyType = std::make_shared<TPointerType>(key.LookupType);
   auto number = [&](int64_t value) { return Oz::TypedInt(value, i64Type); };
-  auto u64 = [&](int64_t value) { return Oz::TypedInt(value, u64Type); };
 
   Oz::TFunBuilder builder(funcName);
   builder.Param("table", RefType("JoinTable", types.Table))
@@ -2097,18 +1976,21 @@ NQumir::NAst::TExprPtr GenRowJoinProbeAst(const TJoinKeyDescriptor &key,
   builder
       .Stmt(Oz::If(Oz::Unary(TOperator("!"),
                              Oz::Call("jr_scratch_reserve",
-                                      {Oz::Ident("scratch"), Oz::Ident("n")})),
+                                      {Oz::Ident("scratch"), Oz::Ident("n"),
+                                       number(static_cast<int64_t>(key.Size))})),
                    Oz::Block({Oz::Return(Oz::Bool(false))})))
       .Var("hashes", std::make_shared<TPointerType>(u64Type))
       .Assign("hashes", Oz::Field("scratch", "Hashes"))
       .Var("rows", std::make_shared<TPointerType>(i64Type))
       .Assign("rows", Oz::Field("scratch", "Rows"))
-      .Var("work", std::make_shared<TPointerType>(i64Type))
-      .Assign("work", Oz::Field("scratch", "Work"))
+      .Var("keys", ptrKeyType)
+      .Assign("keys", Oz::Cast(Oz::Field("scratch", "Keys"), ptrKeyType))
       .Var("cnt", i64Type)
       .Assign("cnt", number(0));
 
-  // Pass 1: the hash of every selected row with a valid key.
+  // Pass 1, the only one that reads the batch: the key and hash of every
+  // selected row with a valid key. The pointer and key passes are
+  // jr_seek_all and jr_probe_candidates in join_rows.oz.
   auto keyRead = GenKeyReadAst(key, "i", "key_value_", types.StringView);
   std::vector<TExprPtr> collect = std::move(keyRead.Setup);
   collect.push_back(Oz::Var("key_value", key.LookupType));
@@ -2116,6 +1998,7 @@ NQumir::NAst::TExprPtr GenRowJoinProbeAst(const TJoinKeyDescriptor &key,
   std::vector<TExprPtr> valid = GenHashValue("i", "key_value", hasPrecomputedHash);
   valid.push_back(Oz::ArrayAssign("rows", Oz::Ident("cnt"), Oz::Ident("i")));
   valid.push_back(Oz::ArrayAssign("hashes", Oz::Ident("cnt"), Oz::Ident("hash_value")));
+  valid.push_back(Oz::ArrayAssign("keys", Oz::Ident("cnt"), Oz::Ident("key_value")));
   valid.push_back(Oz::Assign("cnt", Oz::Add(Oz::Ident("cnt"), number(1))));
   collect.push_back(Oz::If(Oz::Call("jt_key_valid", {Oz::Ident("key_value")}),
                            Oz::Block(std::move(valid))));
@@ -2126,99 +2009,19 @@ NQumir::NAst::TExprPtr GenRowJoinProbeAst(const TJoinKeyDescriptor &key,
           Oz::Block({
               Oz::If(RowSelected("i"), Oz::Block(std::move(collect))),
               Oz::Assign("i", Oz::Add(Oz::Ident("i"), number(1))),
-          })));
-
-  // Pass 2: the salted entry of every row.
-  builder.Stmt(Oz::Call("jr_seek_all", {Oz::Ident("table"), Oz::Ident("scratch"),
-                                        Oz::Ident("cnt")}));
-
-  // Pass 3: compare the keys of the candidates; emit the chain of a match,
-  // advance a mismatch and seek again until every row hit an empty entry.
-  auto probeKey = GenKeyReadAst(key, "pi", "probe_key_", types.StringView);
-  std::vector<TExprPtr> candidate = {
-      Oz::Var("row", ptrU8Type),
-      Oz::Assign("row", Oz::Call("jrt_entry_row", {Oz::Ident("e")})),
-      Oz::Var("pi", i64Type),
-      Oz::Assign("pi", Oz::Index("rows", Oz::Ident("j"))),
-  };
-  candidate.insert(candidate.end(),
-                   std::make_move_iterator(probeKey.Setup.begin()),
-                   std::make_move_iterator(probeKey.Setup.end()));
-  candidate.push_back(Oz::Var("probe_key", key.LookupType));
-  candidate.push_back(Oz::Assign("probe_key", std::move(probeKey.Value)));
-  candidate.push_back(Oz::Var("row_key", ptrKeyType));
-  candidate.push_back(Oz::Assign("row_key",
-                                 RowFieldPointer("row", layout.KeyOffset, key.LookupType)));
-  // stream row id: batch index -1, row pi
-  auto streamId = Oz::Add(Oz::Bin(TOperator("<<"), number(-1), number(32)), Oz::Ident("pi"));
-  auto rowId = Oz::Cast(Oz::Ident("cur"), i64Type);
-  auto push = probeIsLeft
-      ? Oz::Call("pb_push", {Oz::Ident("pairs"), streamId, rowId})
-      : Oz::Call("pb_push", {Oz::Ident("pairs"), rowId, streamId});
-  candidate.push_back(Oz::If(
-      Oz::Call("rh_key_equal", {Oz::Index("row_key", number(0)), Oz::Ident("probe_key")}),
-      Oz::Block({
-          Oz::Var("cur", ptrU8Type),
-          Oz::Assign("cur", Oz::Ident("row")),
-          Oz::While(
-              Oz::Bin(TOperator("!="), Oz::Cast(Oz::Ident("cur"), i64Type), number(0)),
-              Oz::Block({
-                  Oz::If(Oz::Unary(TOperator("!"), std::move(push)),
-                         Oz::Block({Oz::Return(Oz::Bool(false))})),
-                  Oz::Assign("cur", Oz::Call("jr_row_next", {Oz::Ident("cur")})),
-              })),
-      }),
-      Oz::Block({
-          Oz::ArrayAssign("offsets", Oz::Ident("j"),
-                          Oz::Bin(TOperator("&"),
-                                  Oz::Add(Oz::Index("offsets", Oz::Ident("j")), u64(1)),
-                                  Oz::Ident("mask"))),
-          Oz::ArrayAssign("work", Oz::Ident("m"), Oz::Ident("j")),
-          Oz::Assign("m", Oz::Add(Oz::Ident("m"), number(1))),
-      })));
-
-  builder.Var("entries", std::make_shared<TPointerType>(u64Type))
-      .Assign("entries", Oz::Field("scratch", "Entries"))
-      .Var("offsets", std::make_shared<TPointerType>(u64Type))
-      .Assign("offsets", Oz::Field("scratch", "Offsets"))
-      .Var("mask", u64Type)
-      .Assign("mask", Oz::Field("table", "Mask"))
-      .Var("k", i64Type)
-      .Assign("k", Oz::Ident("cnt"))
-      .Var("first", boolType)
-      .Assign("first", Oz::Bool(true))
-      .Stmt(Oz::While(
-          Oz::Bin(TOperator(">"), Oz::Ident("k"), number(0)),
-          Oz::Block({
-              Oz::Var("m", i64Type),
-              Oz::Assign("m", number(0)),
-              Oz::Var("q", i64Type),
-              Oz::Assign("q", number(0)),
-              Oz::While(
-                  Oz::Bin(TOperator("<"), Oz::Ident("q"), Oz::Ident("k")),
-                  Oz::Block({
-                      Oz::Var("j", i64Type),
-                      Oz::Assign("j", Oz::Ident("q")),
-                      Oz::If(Oz::Unary(TOperator("!"), Oz::Ident("first")),
-                             Oz::Block({Oz::Assign("j", Oz::Index("work", Oz::Ident("q")))})),
-                      Oz::Var("e", u64Type),
-                      Oz::Assign("e", Oz::Index("entries", Oz::Ident("j"))),
-                      Oz::If(Oz::Bin(TOperator("!="), Oz::Ident("e"), u64(0)),
-                             Oz::Block(std::move(candidate))),
-                      Oz::Assign("q", Oz::Add(Oz::Ident("q"), number(1))),
-                  })),
-              Oz::Assign("k", Oz::Ident("m")),
-              Oz::Assign("first", Oz::Bool(false)),
-              Oz::If(Oz::Bin(TOperator(">"), Oz::Ident("k"), number(0)),
-                     Oz::Block({Oz::Call("jr_seek_work",
-                                                  {Oz::Ident("table"), Oz::Ident("scratch"),
-                                                   Oz::Ident("k")})})),
           })))
-      .Stmt(Oz::Return(Oz::Bool(true)));
+      .Stmt(Oz::Call("jr_seek_all", {Oz::Ident("table"), Oz::Ident("scratch"),
+                                     Oz::Ident("cnt")}))
+      .Stmt(Oz::Return(Oz::Call(
+          "jr_probe_candidates",
+          {Oz::Ident("table"), Oz::Ident("scratch"), Oz::Ident("pairs"),
+           Oz::Ident("cnt"), number(layout.KeyOffset), Oz::Bool(probeIsLeft),
+           Oz::Cast(number(0), ptrKeyType)})));
   return std::move(builder).Build();
 }
 
-NQumir::NAst::TExprPtr GenRowJoinDispatchAst(const TRowJoinLayout &layout,
+NQumir::NAst::TExprPtr GenRowJoinDispatchAst(const TJoinKeyDescriptor &key,
+                                             const TRowJoinLayout &layout,
                                              const TRowJoinGenTypes &types) {
   auto i64Type = std::make_shared<TIntegerType>(TIntegerType::I64);
   auto boolType = std::make_shared<TBoolType>();
@@ -2248,7 +2051,11 @@ NQumir::NAst::TExprPtr GenRowJoinDispatchAst(const TRowJoinLayout &layout,
                                 "jr_append_batch", {Oz::Ident("arena"), Oz::Ident("batch"),
                                                     Oz::Ident("key_columns")}))})))
       .Stmt(Oz::If(opIs(2), Oz::Block({Oz::Return(Oz::Call(
-                                "jr_build_table", {Oz::Ident("table"), Oz::Ident("arena")}))})))
+                                "jr_build_rows",
+                                {Oz::Ident("table"), Oz::Ident("arena"),
+                                 number(layout.KeyOffset),
+                                 Oz::Cast(number(0),
+                                          std::make_shared<TPointerType>(key.LookupType))}))})))
       .Stmt(Oz::If(opIs(3), Oz::Block({Oz::Return(Oz::Call(
                                 "jr_probe_batch", {Oz::Ident("table"), Oz::Ident("scratch"),
                                                    Oz::Ident("batch"), Oz::Ident("key_columns"),

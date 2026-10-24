@@ -85,6 +85,7 @@
     (Entries <ptr u64>)
     (Rows <ptr i64>)
     (Work <ptr i64>)
+    (Keys <ptr u8>)
     (Capacity i64)>)
 
   (fun bitoff ((var bitmap <ptr u8>) (var index i64) (var bit_offset i64)) -> bool

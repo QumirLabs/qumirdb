@@ -166,7 +166,7 @@ namespace {
 constexpr const char* CacheSchemaVersion = "v1";
 // Bump when the generated key helpers or the .oz kernel libraries change.
 // The row join table adds join_rows.oz and the lookup-key equality overload.
-constexpr const char* KernelLibVersion = "46";
+constexpr const char* KernelLibVersion = "47";
 } // namespace
 
 NQumir::NCodeGen::TLlvmRunner::TLinkedModule CompileKernelAstCached(
@@ -2556,12 +2556,10 @@ TRowJoinKernels TKernelCompiler::CompileRowJoin(
         for (auto& f : *library) program.push_back(std::move(f));
         program.push_back(NKernel::GenRowJoinAppendAst(
             keyDesc, layout, "jr_append_batch", types, spec.HasPrecomputedHash));
-        program.push_back(NKernel::GenRowJoinBuildAst(
-            keyDesc, layout, "jr_build_table", types));
         program.push_back(NKernel::GenRowJoinProbeAst(
             keyDesc, layout, /*probeIsLeft=*/!buildIsLeft, "jr_probe_batch", types,
             spec.HasPrecomputedHash));
-        program.push_back(NKernel::GenRowJoinDispatchAst(layout, types));
+        program.push_back(NKernel::GenRowJoinDispatchAst(keyDesc, layout, types));
         program.push_back(NKernel::GenRowJoinMaterializeAst(
             *leftType.Cast(), *rightType.Cast(), buildIsLeft, layout, types));
         return program;

@@ -71,6 +71,7 @@ private:
         uint64_t* Entries = nullptr;
         int64_t* Rows = nullptr;
         int64_t* Work = nullptr;
+        uint8_t* Keys = nullptr;
         int64_t Capacity = 0;
     };
     static_assert(sizeof(TScratchState) == TKernelCompiler::JoinScratchSize);
