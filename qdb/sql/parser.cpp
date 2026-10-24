@@ -115,6 +115,7 @@
 
 <join_clause> ::=
     [ <join_type> ] "JOIN" <table_factor> <join_condition>
+    | "NATURAL" [ <join_type> ] "JOIN" <table_factor>
 
 <join_type> ::=
       "INNER"
@@ -1148,9 +1149,19 @@ TAstTask<TSqlTableRef> table_ref(TParserContext& ctx) {
     };
 
     ESqlJoinType joinType = ESqlJoinType::Inner;
+    bool natural = false;
+    TLocation naturalLocation;
     auto isJoinStart = [&]() -> NQumir::TExpectedTask<bool, TError, TLocation> {
         auto first = ctx.Stream.Next();
         joinType = ESqlJoinType::Inner;
+        natural = IsKeyword(first, "NATURAL");
+        if (natural) {
+            naturalLocation = first.Location;
+            first = ctx.Stream.Next();
+            if (IsKeyword(first, "CROSS")) {
+                co_return Error(first, "NATURAL CROSS JOIN is not supported");
+            }
+        }
 
         for (const auto& [kw, type] : joinStart) {
             if (IsKeyword(first, kw)) {
@@ -1180,6 +1191,9 @@ TAstTask<TSqlTableRef> table_ref(TParserContext& ctx) {
         }
 
         auto ret = IsKeyword(first, "JOIN");
+        if (natural && !ret) {
+            co_return Error(first, "`JOIN' keyword expected after NATURAL");
+        }
         ctx.Stream.Unget(first);
         co_return ret;
     };
@@ -1192,10 +1206,20 @@ TAstTask<TSqlTableRef> table_ref(TParserContext& ctx) {
 
         auto join = std::make_shared<TSqlJoin>();
         join->Type = joinType;
+        join->Natural = natural;
+        join->NaturalLocation = naturalLocation;
 
         join->Left = left;
         join->Right = co_await table_factor(ctx);
-        join->Condition = co_await join_condition(ctx);
+        if (natural) {
+            auto after = ctx.Stream.Next();
+            if (IsKeyword(after, "ON") || IsKeyword(after, "USING")) {
+                co_return Error(after, "NATURAL JOIN cannot have an ON or USING clause");
+            }
+            ctx.Stream.Unget(after);
+        } else {
+            join->Condition = co_await join_condition(ctx);
+        }
 
         left = join;
     }

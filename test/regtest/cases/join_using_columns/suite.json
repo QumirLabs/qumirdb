@@ -16,6 +16,7 @@
     "bare_left.sql": {"order": "ordered"},
     "bare_right.sql": {"order": "ordered"},
     "bare_full.sql": {"order": "ordered"},
+    "natural_full.sql": {"order": "ordered"},
     "two_columns_full.sql": {"order": "ordered"},
     "nested_inner_star.sql": {"order": "ordered"},
     "nested_full.sql": {"order": "ordered"},

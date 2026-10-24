@@ -132,6 +132,11 @@ struct TSqlJoin : TSqlTableRef {
 
     ESqlJoinType Type = ESqlJoinType::Inner;
 
+    // NATURAL: the join is USING over the columns both inputs share. The
+    // location of the keyword reports a natural join with nothing to join on.
+    bool Natural = false;
+    NQumir::TLocation NaturalLocation;
+
     TSqlPtr<TJoinCondition> Condition;
 };
 

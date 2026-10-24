@@ -1034,6 +1034,35 @@ std::expected<TRelation, TError> ShareUsingColumns(
     return joined;
 }
 
+// The column names both inputs expose to SQL, in the order of `left`: the
+// USING columns of a NATURAL JOIN.
+std::vector<std::string> CommonColumns(const TRelation& left, const TRelation& right) {
+    auto visibleNames = [](const TRelation& relation) {
+        std::vector<std::string> names;
+        for (const auto& label : relation.Labels) {
+            if (label.empty()) {
+                continue;
+            }
+            if (label.find('.') == std::string::npos) {
+                names.push_back(label);
+            } else if (!relation.QualifiedOnly.contains(label)) {
+                names.push_back(BareColumnName(label));
+            }
+        }
+        return names;
+    };
+    const auto rightNames = visibleNames(right);
+    std::vector<std::string> common;
+    for (auto& name : visibleNames(left)) {
+        if (std::ranges::find(rightNames, name) != rightNames.end() &&
+            std::ranges::find(common, name) == common.end())
+        {
+            common.push_back(std::move(name));
+        }
+    }
+    return common;
+}
+
 std::expected<TRelation, TError> BuildTableRef(
     const NSql::TSqlPtr<NSql::TSqlTableRef>& ref,
     TBuildContext& context)
@@ -1097,21 +1126,31 @@ std::expected<TRelation, TError> BuildTableRef(
         // becomes a residual that the optimizer later turns into join keys.
         std::vector<TJoinKey> keys;
         NAst::TExprPtr residual;
-        if (join->Condition) {
-            if (join->Condition->On) {
-                if (auto window = FindWindowExprLocal(join->Condition->On)) {
+        auto condition = join->Condition;
+        if (join->Natural) {
+            condition = std::make_shared<NSql::TJoinCondition>();
+            condition->UsingColumns = std::make_shared<NSql::TIdentList>();
+            condition->UsingColumns->Items = CommonColumns(*left, *right);
+            if (condition->UsingColumns->Items.empty()) {
+                return std::unexpected(TError(join->NaturalLocation,
+                    "No columns found to join on in NATURAL JOIN"));
+            }
+        }
+        if (condition) {
+            if (condition->On) {
+                if (auto window = FindWindowExprLocal(condition->On)) {
                     return std::unexpected(TError(window->Location,
                         "window functions are not allowed in JOIN conditions"));
                 }
-                if (HasSubquery(join->Condition->On)) {
+                if (HasSubquery(condition->On)) {
                     return std::unexpected(TError("subqueries are not supported yet"));
                 }
-                residual = join->Condition->On;
+                residual = condition->On;
                 if (auto bound = TNameScope({*left, *right}).Bind(residual); !bound) {
                     return std::unexpected(bound.error());
                 }
-            } else if (join->Condition->UsingColumns) {
-                for (const auto& column : join->Condition->UsingColumns->Items) {
+            } else if (condition->UsingColumns) {
+                for (const auto& column : condition->UsingColumns->Items) {
                     auto leftKey = BindColumn(column, *left);
                     if (!leftKey) {
                         return std::unexpected(leftKey.error());
@@ -1126,7 +1165,7 @@ std::expected<TRelation, TError> BuildTableRef(
         }
         auto joined = JoinRelations(std::move(*left), std::move(*right), keys,
             MapJoinType(join->Type), std::move(residual));
-        if (join->Condition && join->Condition->UsingColumns) {
+        if (condition && condition->UsingColumns) {
             return ShareUsingColumns(std::move(joined), keys, MapJoinType(join->Type), context);
         }
         return joined;
