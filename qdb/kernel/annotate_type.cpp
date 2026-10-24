@@ -1123,6 +1123,21 @@ TExprPtr Build3VL(bool isAnd, const TExprPtr& a, const TTypePtr& at,
     return std::make_shared<TBlockExpr>(loc, std::move(stmts));
 }
 
+// CAST(boolean AS number): qumir lowers a bool-to-integer cast as a sign extension of
+// the i1, so TRUE would become -1 (and a float cast -1.0). Select 1 or 0 instead.
+bool IsBoolToNumberCast(const TTypePtr& operandType, const TTypePtr& target) {
+    if (!operandType || !target) return false;
+    return TMaybeType<TBoolType>(UnwrapNullableType(operandType))
+        && (TMaybeType<TIntegerType>(target) || TMaybeType<TFloatType>(target));
+}
+
+TExprPtr BoolToNumber(const TExprPtr& value, const TTypePtr& target, TLocation loc) {
+    auto literal = [&](int64_t v) -> TExprPtr {
+        return std::make_shared<TCastExpr>(loc, std::make_shared<TNumberExpr>(loc, v), target);
+    };
+    return std::make_shared<TIfExpr>(loc, value, literal(1), literal(0));
+}
+
 // NULLIF(divisor, 0) as Nullable[value]: a zero divisor becomes one more NULL operand of
 // the division, so the null-strict guard skips computing it.
 TExprPtr NullIfZero(const TExprPtr& divisor, const TTypePtr& type, uint64_t& counter,
@@ -1495,6 +1510,9 @@ TTypePtr Expand(TExprPtr& e, const TStructType& inputType, uint64_t& counter) {
                 e = std::make_shared<TCastExpr>(node->Location, val, ToQumirType(node->Type));
                 return std::make_shared<TNullable>(base);
             }
+            if (IsBoolToNumberCast(ot, target)) {
+                e = BoolToNumber(node->Operand, target, node->Location);
+            }
             return ot ? target : nullptr;
         }
         TExprPtr operand = node->Operand;
@@ -1503,7 +1521,10 @@ TTypePtr Expand(TExprPtr& e, const TStructType& inputType, uint64_t& counter) {
         // can still lower a decimal conversion).
         TTypePtr tt = target;
         e = BuildNullStrict({{operand, true}},
-            [tt, node](std::vector<TExprPtr> a) {
+            [tt, node, boolToNumber = IsBoolToNumberCast(ot, target)](std::vector<TExprPtr> a) -> TExprPtr {
+                if (boolToNumber) {
+                    return BoolToNumber(a[0], tt, node->Location);
+                }
                 return std::make_shared<TCastExpr>(node->Location, a[0], tt);
             }, target, counter, node->Location);
         return std::make_shared<TNullable>(target);
