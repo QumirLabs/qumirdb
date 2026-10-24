@@ -16,6 +16,7 @@
 #include <qdb/plan/passes/column_pruning.h>
 #include <qdb/plan/passes/runtime_filters.h>
 #include <qdb/plan/passes/typing.h>
+#include <qdb/plan/types/nullable.h>
 #include <qdb/sexp/parser.h>
 
 #include <algorithm>
@@ -595,6 +596,113 @@ TEST(JoinPlanner, OneRuntimeFilterServesTwoLeftJoinInputs) {
         ASSERT_TRUE(bindings->Filter);
         EXPECT_EQ(bindings->Filter->StatsSnapshot().ProbeRows, 5u);
         EXPECT_EQ(bindings->Filter->StatsSnapshot().RejectedRows, 2u);
+    }
+}
+
+TEST(JoinPlanner, ReusedInnerDomainPreservesDuplicatesNullsAndEmptyBuilds) {
+    for (auto mode : {NScheduler::EExecutionMode::SingleThreadedScheduler,
+             NScheduler::EExecutionMode::ThreadedScheduler}) {
+        for (bool empty : {false, true}) {
+            SCOPED_TRACE(static_cast<int>(mode));
+            SCOPED_TRACE(empty);
+            std::vector<int64_t> lk = {1, 1, 9, 5}, lv = {10, 20, 90, 50};
+            std::vector<int64_t> rk = {1, 1, 2, 8, 7}, rv = {100, 200, 300, 400, 700};
+            std::vector<int64_t> ck = {1, 1, 1, 3, 6}, cv = {1000, 2000, 3000, 4000, 6000};
+            std::vector<TColumn> lcols, rcols, ccols;
+            auto leftBatch = KeyValBatch(lk.data(), lv.data(), 4, lcols);
+            auto rightBatch = KeyValBatch(rk.data(), rv.data(), 5, rcols);
+            auto thirdBatch = KeyValBatch(ck.data(), cv.data(), 5, ccols);
+            uint8_t leftValid = 0b00001011;
+            uint8_t rightValid = 0b00010111;
+            uint8_t thirdValid = 0b00001111;
+            lcols[0].Mask = &leftValid;
+            rcols[0].Mask = &rightValid;
+            ccols[0].Mask = &thirdValid;
+            auto nullable = std::make_shared<TNullable>(
+                std::make_shared<TIntegerType>(TIntegerType::I64));
+            std::vector<TTypePtr> types{nullable,
+                std::make_shared<TIntegerType>(TIntegerType::I64)};
+            TMockSource left({"lk", "lv"},
+                empty ? std::vector<TRowSet>{} : std::vector<TRowSet>{leftBatch}, types);
+            TMockSource middle({"rk", "rv"}, {rightBatch}, types);
+            TMockSource third({"ck", "cv"}, {thirdBatch}, types);
+            auto bindings = std::make_shared<TCountingFilterBindingFactory>();
+            NScheduler::TSettings settings;
+            settings.Scheduler.Mode = mode;
+            settings.Scheduler.WorkerCount = 2;
+            settings.Queue.RowsetCapacityPerLane = 1;
+            settings.HashShuffle.MaxQueuedRowsetsPerLane = 1;
+            settings.HashShuffle.PartitionCount = 2;
+            settings.HashShuffle.MaxPartitionCount = 2;
+            auto plan = PlanJoinMany(
+                "(rel join (rel join (rel source \"L\") (rel source \"R\") "
+                "((lk rk)) (inner)) (rel source \"C\") ((rk ck)) (inner))",
+                {{"L", &left}, {"R", &middle}, {"C", &third}},
+                settings, bindings, [](const TOperatorPtr& root) {
+                    auto& outer = static_cast<TJoinOperator&>(*root);
+                    auto& first = static_cast<TJoinOperator&>(*outer.Left());
+                    auto stats = [](uint64_t rows, const std::string& key,
+                                     uint64_t ndv) {
+                        auto value = std::make_shared<TStats>();
+                        value->RowCount = rows;
+                        auto column = std::make_shared<TStats::TColumnStats>();
+                        column->Ndv = ndv;
+                        value->ColumnStats[key] = std::move(column);
+                        return value;
+                    };
+                    first.Left()->Stats_ = stats(100, "lk", 100);
+                    first.Right()->Stats_ = stats(1'000'000, "rk", 1'000'000);
+                    first.Stats_ = stats(3'000'000, "rk", 1'000'000);
+                    outer.Right()->Stats_ = stats(1'000'000, "ck", 1'000'000);
+                    uint32_t nextId = 1;
+                    AttachRuntimeFilters(root, nextId);
+                    ASSERT_TRUE(first.RuntimeFilter());
+                    EXPECT_FALSE(outer.RuntimeFilter());
+                    ASSERT_EQ(outer.Right()->RuntimeFilterUses.size(), 1u);
+                    EXPECT_EQ(outer.Right()->RuntimeFilterUses[0].Id,
+                        first.RuntimeFilter()->Id);
+                });
+            std::vector<std::tuple<int64_t, int64_t, int64_t>> got;
+            TRowSet out{};
+            while (plan->Next(out)) {
+                for (int64_t i = 0; i < out.RowCount; ++i) {
+                    if (out.Selection && !out.Selection[i]) {
+                        continue;
+                    }
+                    for (size_t key : {0u, 2u, 4u}) {
+                        EXPECT_TRUE(!out.Columns[key].Mask
+                            || ((out.Columns[key].Mask[i / 8] >> (i % 8)) & 1));
+                        EXPECT_EQ(reinterpret_cast<const int64_t*>(
+                            out.Columns[key].Data)[i], 1);
+                    }
+                    got.emplace_back(
+                        reinterpret_cast<const int64_t*>(out.Columns[1].Data)[i],
+                        reinterpret_cast<const int64_t*>(out.Columns[3].Data)[i],
+                        reinterpret_cast<const int64_t*>(out.Columns[5].Data)[i]);
+                }
+                Release(&out);
+            }
+            std::vector<std::tuple<int64_t, int64_t, int64_t>> expected;
+            if (!empty) {
+                for (auto l : {10, 20}) {
+                    for (auto r : {100, 200}) {
+                        for (auto c : {1000, 2000, 3000}) {
+                            expected.emplace_back(l, r, c);
+                        }
+                    }
+                }
+            }
+            std::sort(got.begin(), got.end());
+            std::sort(expected.begin(), expected.end());
+            EXPECT_EQ(got, expected);
+            ASSERT_EQ(bindings->Created, 1u);
+            ASSERT_TRUE(bindings->Filter);
+            if (!empty) {
+                // A NULL hash can pass the domain as a false positive; the
+                // ordinary joins above must still reject its NULL matches.
+                EXPECT_EQ(bindings->Filter->StatsSnapshot().RejectedRows, 3u);
+            }
+        }
     }
 }
 

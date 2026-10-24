@@ -8,12 +8,14 @@
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/stats.h>
 #include <qdb/plan/ops/union.h>
+#include <qdb/utils/union_find.h>
 
 #include <algorithm>
 #include <cstdint>
 #include <iterator>
 #include <optional>
 #include <stdexcept>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
@@ -73,6 +75,7 @@ std::vector<TConsumerPlacement> PlacementCandidates(
 void AttachPlacement(const TConsumerPlacement& placement, uint32_t id);
 void RemoveFilterUse(const TOperatorPtr& root, uint32_t id);
 void ReuseRuntimeFilters(const TOperatorPtr& root);
+void ReuseInnerKeyDomains(const TOperatorPtr& root);
 
 bool HasFilteredBuildInput(const TOperatorPtr& op) {
     if (TMaybeOp<TFilterOperator>(op)) {
@@ -404,6 +407,7 @@ void AttachRuntimeFilters(
     Attach(root, nextId, force);
     if (!force) {
         ReuseRuntimeFilters(root);
+        ReuseInnerKeyDomains(root);
     }
 }
 
@@ -799,6 +803,263 @@ void ReuseRuntimeFilters(const TOperatorPtr& root) {
         }
         AttachPlacement(best->Placement.Targets, best->Id);
     }
+}
+
+bool ContainsOperator(const TOperatorPtr& root, const IOperator* target) {
+    if (root.get() == target) {
+        return true;
+    }
+    return std::any_of(root->Inputs().begin(), root->Inputs().end(),
+        [&](const auto& input) { return ContainsOperator(input, target); });
+}
+
+bool HasOtherFilterUse(const TOperatorPtr& root, std::optional<uint32_t> ignoredId) {
+    if (std::any_of(root->RuntimeFilterUses.begin(), root->RuntimeFilterUses.end(),
+            [&](const auto& use) { return !ignoredId || use.Id != *ignoredId; })) {
+        return true;
+    }
+    return std::any_of(root->Inputs().begin(), root->Inputs().end(),
+        [&](const auto& input) { return HasOtherFilterUse(input, ignoredId); });
+}
+
+bool HasFilterUseOutside(const TOperatorPtr& root,
+    const TOperatorPtr& excluded, uint32_t id)
+{
+    if (root == excluded) {
+        return false;
+    }
+    if (std::any_of(root->RuntimeFilterUses.begin(), root->RuntimeFilterUses.end(),
+            [&](const auto& use) { return use.Id == id; })) {
+        return true;
+    }
+    return std::any_of(root->Inputs().begin(), root->Inputs().end(),
+        [&](const auto& input) {
+            return HasFilterUseOutside(input, excluded, id);
+        });
+}
+
+using TFilterBuilds = std::unordered_map<uint32_t, TOperatorPtr>;
+
+void CollectFilterBuilds(const TOperatorPtr& root, TFilterBuilds& builds,
+    std::optional<uint32_t> ignoredId)
+{
+    if (auto join = TMaybeOp<TJoinOperator>(root)) {
+        if (const auto& filter = join.Cast()->RuntimeFilter();
+            filter && (!ignoredId || filter->Id != *ignoredId)) {
+            builds.emplace(filter->Id,
+                filter->BuildSide == EJoinFilterSide::Left
+                    ? join.Cast()->Left() : join.Cast()->Right());
+        }
+    }
+    for (const auto& input : root->Inputs()) {
+        CollectFilterBuilds(input, builds, ignoredId);
+    }
+}
+
+bool FilterDependsOn(uint32_t id, uint32_t dependency,
+    const TFilterBuilds& builds, std::unordered_set<uint32_t>& visited)
+{
+    if (id == dependency) {
+        return true;
+    }
+    if (!visited.insert(id).second || !builds.contains(id)) {
+        return false;
+    }
+    auto usesDependency = [&](auto&& self, const TOperatorPtr& node) -> bool {
+        for (const auto& use : node->RuntimeFilterUses) {
+            if (FilterDependsOn(use.Id, dependency, builds, visited)) {
+                return true;
+            }
+        }
+        return std::any_of(node->Inputs().begin(), node->Inputs().end(),
+            [&](const auto& input) { return self(self, input); });
+    };
+    return usesDependency(usesDependency, builds.at(id));
+}
+
+bool ReuseIsAcyclic(const TOperatorPtr& root, uint32_t id,
+    const TConsumerPlacement& placement, std::optional<uint32_t> replacedId)
+{
+    TFilterBuilds builds;
+    CollectFilterBuilds(root, builds, replacedId);
+    for (const auto& [other, build] : builds) {
+        const bool affected = std::any_of(placement.begin(), placement.end(),
+            [&](const auto& target) {
+                return ContainsOperator(build, target.Operator.get());
+            });
+        if (affected) {
+            std::unordered_set<uint32_t> visited;
+            if (FilterDependsOn(id, other, builds, visited)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+void CollectInnerRegion(const TOperatorPtr& root,
+    std::vector<std::shared_ptr<TJoinOperator>>& joins,
+    std::vector<TOperatorPtr>& boundaries, TUnionFind<std::string>& equal)
+{
+    auto join = TMaybeOp<TJoinOperator>(root);
+    if (!join || join.Cast()->JoinType() != EJoinType::Inner) {
+        boundaries.push_back(root);
+        return;
+    }
+    joins.push_back(join.Cast());
+    for (const auto& key : join.Cast()->Keys()) {
+        // Matching types preserve the producer's hash protocol. NULL-safe
+        // equality has a different key contract and is not inferred here.
+        if (!key.NullsEqual && SameKeyType(*join.Cast()->Left()->OutputColumns(),
+                key.Left, *join.Cast()->Right()->OutputColumns(), key.Right)) {
+            equal.Union(key.Left, key.Right);
+        }
+    }
+    CollectInnerRegion(join.Cast()->Left(), joins, boundaries, equal);
+    CollectInnerRegion(join.Cast()->Right(), joins, boundaries, equal);
+}
+
+std::optional<std::vector<std::string>> DomainProbeKeys(
+    const TJoinOperator& producer, const TOperatorPtr& target,
+    const std::vector<std::string>& candidates,
+    TUnionFind<std::string>& equal)
+{
+    const auto& spec = *producer.RuntimeFilter();
+    const auto original = ProbeInput(producer, spec.BuildSide)->OutputColumns();
+    std::vector<std::string> result;
+    std::vector<bool> used(candidates.size(), false);
+    for (const auto& key : ProbeKeys(producer, spec.BuildSide)) {
+        size_t i = 0;
+        while (i < candidates.size() && (used[i]
+                || !equal.Connected(key, candidates[i])
+                || !SameKeyType(*original, key,
+                    *target->OutputColumns(), candidates[i]))) {
+            ++i;
+        }
+        if (i == candidates.size()) {
+            return std::nullopt;
+        }
+        used[i] = true;
+        result.push_back(candidates[i]);
+    }
+    return result;
+}
+
+void ReuseInnerRegion(const TOperatorPtr& root,
+    const std::vector<std::shared_ptr<TJoinOperator>>& joins,
+    TUnionFind<std::string>& equal)
+{
+    for (const auto& consumer : joins) {
+        std::optional<TReusablePlacement> best;
+        const auto own = consumer->RuntimeFilter();
+        const auto replacedId = own.transform([](const auto& filter) {
+            return filter.Id;
+        });
+        for (const auto& producer : joins) {
+            const auto& filter = producer->RuntimeFilter();
+            if (producer == consumer || !filter
+                || std::any_of(producer->Keys().begin(), producer->Keys().end(),
+                    [](const auto& key) { return key.NullsEqual; })) {
+                continue;
+            }
+            const auto build = filter->BuildSide == EJoinFilterSide::Left
+                ? producer->Left() : producer->Right();
+            if (!build->Stats_ || !build->Stats_->RowCount) {
+                continue;
+            }
+            for (auto side : {EJoinFilterSide::Left, EJoinFilterSide::Right}) {
+                const auto branch = side == EJoinFilterSide::Left
+                    ? consumer->Left() : consumer->Right();
+                const auto target = ProbeInput(*consumer, side);
+                // Reuse an earlier domain on a sibling branch, never on its
+                // own producer/probe inputs or across a join-type boundary.
+                if (!ContainsOperator(branch, producer.get()) || !target->Stats_
+                    || !target->Stats_->RowCount
+                    || (own && (own->BuildSide != side
+                        || consumer->Keys().size() != producer->Keys().size()))
+                    || (own && HasFilterUseOutside(root, target, own->Id))) {
+                    continue;
+                }
+                // Estimates precede runtime filters: a target that already
+                // probes another filter still counts the rows it rejects, and
+                // two domains may restrict the same key class. Without a joint
+                // selectivity the saving of a second probe would be overstated.
+                // The consumer's own filter is exempt; reuse replaces it.
+                if (HasOtherFilterUse(target, replacedId)) {
+                    continue;
+                }
+                std::vector<std::string> candidates;
+                if (own) {
+                    // Replacing a producer must cover its complete key
+                    // tuple, not compete with an unrelated restriction.
+                    candidates = ProbeKeys(*consumer, side);
+                } else {
+                    for (const auto& [name, type] : target->OutputColumns()->Fields) {
+                        candidates.push_back(name);
+                    }
+                }
+                auto keys = DomainProbeKeys(*producer, target, candidates, equal);
+                if (!keys) {
+                    continue;
+                }
+                auto buildNdv = KeyNdv(build->Stats_,
+                    JoinSideKeys(*producer, filter->BuildSide));
+                auto probeNdv = KeyNdv(target->Stats_, *keys);
+                if (!buildNdv || !probeNdv) {
+                    continue;
+                }
+                const double buildRows = static_cast<double>(build->Stats_->RowCount);
+                const double probeRows = static_cast<double>(target->Stats_->RowCount);
+                auto pass = EstimatedPassFraction(buildRows, probeRows,
+                    *buildNdv, *probeNdv);
+                if (!pass) {
+                    continue;
+                }
+                auto placement = BestReusePlacement(target, *keys,
+                    buildRows, *pass, *buildNdv);
+                if (placement && (!best
+                        || placement->Benefit > best->Placement.Benefit)
+                    && ReuseIsAcyclic(root, filter->Id, placement->Targets,
+                        replacedId)) {
+                    best = TReusablePlacement{
+                        .Id = filter->Id, .Placement = std::move(*placement)};
+                }
+            }
+        }
+        if (!best) {
+            continue;
+        }
+        if (own) {
+            auto ownDecision = ChooseRuntimeFilter(*consumer, false);
+            if (ownDecision && ownDecision->Benefit >= best->Placement.Benefit) {
+                continue;
+            }
+            RemoveFilterUse(root, own->Id);
+            consumer->MutableRuntimeFilter() = std::nullopt;
+        }
+        AttachPlacement(best->Placement.Targets, best->Id);
+    }
+}
+
+void ReuseInnerKeyDomains(const TOperatorPtr& root) {
+    auto visit = [&](auto&& self, const TOperatorPtr& node) -> void {
+        auto join = TMaybeOp<TJoinOperator>(node);
+        if (join && join.Cast()->JoinType() == EJoinType::Inner) {
+            std::vector<std::shared_ptr<TJoinOperator>> joins;
+            std::vector<TOperatorPtr> boundaries;
+            TUnionFind<std::string> equal;
+            CollectInnerRegion(node, joins, boundaries, equal);
+            ReuseInnerRegion(root, joins, equal);
+            for (const auto& boundary : boundaries) {
+                self(self, boundary);
+            }
+        } else {
+            for (const auto& input : node->Inputs()) {
+                self(self, input);
+            }
+        }
+    };
+    visit(visit, root);
 }
 
 } // namespace

@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "fixtures": {
+    "dimension": {"json": "tables/dimension.json", "parquet": {"row_group_rows": 2}},
+    "facts": {"json": "tables/facts.json", "parquet": {"row_group_rows": 2}},
+    "witness": {"json": "tables/witness.json", "parquet": {"row_group_rows": 2}},
+    "large_facts": {"json": "tables/large_facts.json", "parquet": {"row_group_rows": 8}},
+    "large_witness": {"json": "tables/large_witness.json", "parquet": {"row_group_rows": 8}}
+  },
+  "tables": {"d": "dimension", "f": "facts", "g": "witness", "lf": "large_facts", "lg": "large_witness"},
+  "variants": ["single", "threaded"],
+  "cases": {
+    "duplicates.sql": {"order": "unordered"},
+    "composite.sql": {"order": "unordered"},
+    "projection.sql": {"order": "unordered"},
+    "coerced.sql": {"order": "unordered"},
+    "empty.sql": {"order": "unordered"},
+    "outer.sql": {"order": "unordered"},
+    "semi.sql": {"order": "unordered"},
+    "anti.sql": {"order": "unordered"},
+    "reuse.sql": {"order": "unordered"}
+  }
+}
