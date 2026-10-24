@@ -1005,6 +1005,109 @@ TEST_P(SemiAntiOrientation, LeftBuildMarksOnlyPairsTheResidualAccepts) {
     EXPECT_EQ(got, expected);
 }
 
+namespace {
+
+// The kernels of a join with a shared build table: precomputed hashes are enabled, and
+// batches without TRowSet::Hash are hashed by the kernel.
+TJoinKernels CompileSharedJoin(TKernelCompiler& compiler,
+    const TTypePtr& leftType, const TTypePtr& rightType, EJoinType type)
+{
+    auto spec = NKernel::BuildJoinKernelSpec(
+        static_cast<TStructType&>(*leftType),
+        static_cast<TStructType&>(*rightType),
+        {{"lk", "rk", false}}, type, nullptr);
+    spec.HasPrecomputedHash = true;
+    return compiler.CompileJoin(spec);
+}
+
+// One sealed build table probed by two independent lanes, each with its own
+// probe batch; the output must equal the single-processor join.
+template <class TOut>
+std::vector<TOut> RunSharedJoin(EJoinType type, EJoinSide buildSide,
+    std::vector<TRowSet> build, std::vector<TRowSet> probes,
+    const TTypePtr& leftType, const TTypePtr& rightType)
+{
+    TKernelCompiler compiler;
+    auto kernels = CompileSharedJoin(compiler, leftType, rightType, type);
+    auto table = std::make_shared<TJoinBuildTable>(kernels, type, buildSide);
+    for (auto& batch : build) {
+        table->Add(batch);
+    }
+    table->Seal();
+    std::vector<std::unique_ptr<TJoinProbeProcessor>> lanes;
+    for (size_t i = 0; i < probes.size(); ++i) {
+        lanes.push_back(std::make_unique<TJoinProbeProcessor>(
+            kernels, table, /*useInputHash=*/false));
+    }
+    std::vector<TOut> got;
+    for (size_t i = 0; i < probes.size(); ++i) {
+        // A stale hash of another key must not be read.
+        std::vector<uint64_t> garbage(probes[i].RowCount, 0x5eed);
+        probes[i].Hash = garbage.data();
+        lanes[i]->Probe(probes[i]);
+        TRowSet out{};
+        while (lanes[i]->Next(out)) {
+            for (int64_t r = 0; r < out.RowCount; ++r) {
+                TOut row{};
+                auto* fields = reinterpret_cast<int64_t*>(&row);
+                for (size_t c = 0; c < sizeof(TOut) / sizeof(int64_t); ++c) {
+                    fields[c] = reinterpret_cast<const int64_t*>(out.Columns[c].Data)[r];
+                }
+                got.push_back(row);
+            }
+            Release(&out);
+        }
+    }
+    std::sort(got.begin(), got.end());
+    return got;
+}
+
+} // namespace
+
+TEST(SharedBuildJoin, InnerProbesOneSharedTableFromEitherSide) {
+    std::vector<int64_t> lk0 = {1, 2}, lv0 = {10, 20};
+    std::vector<int64_t> lk1 = {1}, lv1 = {30};
+    std::vector<int64_t> rk0 = {1, 1}, rv0 = {100, 200};
+    std::vector<int64_t> rk1 = {3}, rv1 = {300};
+    std::vector<TColumn> lc0, lc1, rc0, rc1;
+    auto leftType = KeyValSchema("lk", "lv");
+    auto rightType = KeyValSchema("rk", "rv");
+    auto l0 = KeyValBatch(lk0.data(), lv0.data(), 2, lc0);
+    auto l1 = KeyValBatch(lk1.data(), lv1.data(), 1, lc1);
+    auto r0 = KeyValBatch(rk0.data(), rv0.data(), 2, rc0);
+    auto r1 = KeyValBatch(rk1.data(), rv1.data(), 1, rc1);
+    EXPECT_EQ((RunSharedJoin<TOut4>(EJoinType::Inner, EJoinSide::Right,
+        {r0, r1}, {l0, l1}, leftType, rightType)), ExpectedInner());
+    EXPECT_EQ((RunSharedJoin<TOut4>(EJoinType::Inner, EJoinSide::Left,
+        {l0, l1}, {r0, r1}, leftType, rightType)), ExpectedInner());
+}
+
+TEST_P(SemiAntiOrientation, SharedBuildJoinProbesTheRightKeySet) {
+    std::vector<int64_t> lk0 = {1, 2}, lv0 = {10, 20};
+    std::vector<int64_t> lk1 = {1, 3}, lv1 = {30, 40};
+    std::vector<int64_t> rk0 = {1, 1}, rv0 = {100, 200};
+    std::vector<int64_t> rk1 = {2}, rv1 = {300};
+    std::vector<TColumn> lc0, lc1, rc0, rc1;
+    auto leftType = KeyValSchema("lk", "lv");
+    auto rightType = KeyValSchema("rk", "rv");
+    auto l0 = KeyValBatch(lk0.data(), lv0.data(), 2, lc0);
+    auto l1 = KeyValBatch(lk1.data(), lv1.data(), 2, lc1);
+    auto r0 = KeyValBatch(rk0.data(), rv0.data(), 2, rc0);
+    auto r1 = KeyValBatch(rk1.data(), rv1.data(), 1, rc1);
+    EXPECT_EQ((RunSharedJoin<TOut2>(GetParam(), EJoinSide::Right,
+        {r0, r1}, {l0, l1}, leftType, rightType)), ExpectedSemiAnti(GetParam()));
+}
+
+TEST(SharedBuildJoin, SemiAntiRejectLeftBuild) {
+    auto leftType = KeyValSchema("lk", "lv");
+    auto rightType = KeyValSchema("rk", "rv");
+    TKernelCompiler compiler;
+    auto kernels = CompileSharedJoin(compiler, leftType, rightType, EJoinType::LeftSemi);
+    EXPECT_THROW(
+        { TJoinBuildTable table(kernels, EJoinType::LeftSemi, EJoinSide::Left); },
+        std::runtime_error);
+}
+
 // Every join type has the same three options: build the left input, build the
 // right one, or run symmetric. SEMI/ANTI builds the side estimated
 // JoinAsymmetryRatio times smaller, like an inner join.

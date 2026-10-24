@@ -204,6 +204,98 @@ private:
     int64_t LastRightBatchRows_ = 0;
 };
 
+// Join processors of a hash join with a shared build table, which builds one
+// table for all lanes of the probe input instead of hash-partitioning both
+// inputs:
+//
+//   build lanes -> one build task: TJoinBuildTable::Add ... Seal
+//   probe lane i -> TJoinProbeProcessor i: Probe(batch) against the sealed table
+//
+// The hash table and its kernels are those of TInnerJoinProcessor; only the
+// execution strategy differs.
+// The build table is the only shared object. It is written by one task and
+// sealed before any probe starts; afterwards it is read-only. Every probe lane
+// owns its pair buffer and output queue, so the lanes need no synchronization
+// beyond the publication of the sealed table.
+
+// Mirrors the PairBuffer external type (modules/qumirdb.cpp).
+struct TJoinPairBuffer {
+    int64_t Count = 0;
+    int64_t Capacity = 0;
+    int64_t* Data = nullptr;
+};
+static_assert(sizeof(TJoinPairBuffer) == TKernelCompiler::PairBufferSize);
+
+class TJoinBuildTable {
+public:
+    // Inner joins may build either side. LEFT SEMI/ANTI build the key set of
+    // the right side and keep no right rows.
+    TJoinBuildTable(TJoinKernels kernels, EJoinType joinType, EJoinSide buildSide);
+    TJoinBuildTable(const TJoinBuildTable&) = delete;
+    TJoinBuildTable& operator=(const TJoinBuildTable&) = delete;
+    ~TJoinBuildTable();
+
+    // Build task only, before Seal. Takes ownership of one reference.
+    void Add(TRowSet batch);
+    void Seal();
+    void SetInstrumentation(TOperatorInstrumentation* instrumentation);
+
+    EJoinType JoinType() const { return JoinType_; }
+    EJoinSide BuildSide() const { return BuildSide_; }
+    bool Sealed() const { return Sealed_; }
+
+    // Read-only views for the probes of a sealed table. The kernel ABI takes
+    // mutable pointers; the inner and semi/anti stream probes only read them.
+    void* Table() const;
+    TRowSet* Store() const;
+
+private:
+    void EnsureInit();
+
+private:
+    TJoinKernels Kernels_;
+    EJoinType JoinType_;
+    EJoinSide BuildSide_;
+    TOperatorInstrumentation* Instrumentation_ = nullptr;
+    TRowStore Rows_;
+    // The kernel addresses the tables of both sides. A build-first update
+    // probes the other side's table before inserting, and that table stays
+    // empty, so the update emits no pairs.
+    std::array<uint8_t, TKernelCompiler::HashTableSize> LeftTable_{};
+    std::array<uint8_t, TKernelCompiler::HashTableSize> RightTable_{};
+    TJoinPairBuffer PairBuffer_;
+    bool Initialized_ = false;
+    bool Sealed_ = false;
+};
+
+class TJoinProbeProcessor {
+public:
+    // useInputHash: TRowSet::Hash of the probe batches holds this join's key
+    // hash (a runtime filter for this join computed it). Otherwise the kernel
+    // hashes the keys itself; a hash left by another key must not be read.
+    TJoinProbeProcessor(
+        TJoinKernels kernels,
+        std::shared_ptr<const TJoinBuildTable> table,
+        bool useInputHash);
+    TJoinProbeProcessor(const TJoinProbeProcessor&) = delete;
+    TJoinProbeProcessor& operator=(const TJoinProbeProcessor&) = delete;
+    ~TJoinProbeProcessor();
+
+    // Probes one batch against the sealed table and materializes its output
+    // before releasing it. Takes ownership of one reference.
+    void Probe(TRowSet batch);
+    bool Next(TRowSet& output);
+
+private:
+    TJoinKernels Kernels_;
+    std::shared_ptr<const TJoinBuildTable> Table_;
+    bool UseInputHash_ = false;
+    // The probe side has no table; the kernel ABI still takes one.
+    std::array<uint8_t, TKernelCompiler::HashTableSize> NoTable_{};
+    TJoinPairBuffer PairBuffer_;
+    std::deque<TRowSet> ReadyOutput_;
+};
+
 // Fetch-driven nested-loop join for joins without equi-keys. Buffers the
 // (broadcast) right side, streams left batches through xj_dispatch, which
 // emits row-id pairs as the compiled join type requires, then materializes
