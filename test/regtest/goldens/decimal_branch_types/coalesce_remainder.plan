@@ -1,4 +1,4 @@
 sort [id asc]
-└─ project (id, e1, e0, em1, n) (rows≈5 cost≈140)
+└─ project (id, v) (rows≈5 cost≈160)
    └─ project (id, v) (rows≈5 cost≈100)
       └─ source t AS t (rows≈5 cost≈40)

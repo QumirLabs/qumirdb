@@ -1,10 +1,10 @@
 {
-  "schema": "<struct (id i32) (e5 bool) (em1 bool) (em2 bool) (e7 bool) (n bool)>",
+  "schema": "<struct (id i32) (v <named DECIMAL [12 2]>)>",
   "rows": [
-    [1, true, false, false, false, false],
-    [2, false, true, false, false, false],
-    [3, false, true, false, false, false],
-    [4, false, false, true, false, false],
-    [5, false, false, false, true, false]
+    [1, "5.00"],
+    [2, "-1.00"],
+    [3, "-1.00"],
+    [4, "-2.00"],
+    [5, "7.00"]
   ]
 }
