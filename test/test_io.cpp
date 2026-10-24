@@ -7,12 +7,17 @@
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/types/nullable.h>
 
+#include <functional>
+#include <limits>
+#include <optional>
 #include <sstream>
+#include <string>
 #include <vector>
 
 #include <arrow/api.h>
 #include <arrow/io/api.h>
 #include <parquet/arrow/writer.h>
+#include <parquet/properties.h>
 
 using namespace NQdb;
 
@@ -499,4 +504,139 @@ TEST(IOTest, EstimateLookupChargesPagesNotWholeChunks) {
     ASSERT_TRUE(everyGroup);
     EXPECT_EQ(everyGroup->EagerBytes,
         everyGroup->NarrowBytes + everyGroup->LookupBytes);
+}
+
+namespace {
+
+using TStringGenerator = std::function<std::optional<std::string>(int64_t)>;
+
+std::shared_ptr<arrow::Array> MakeStrings(int64_t rows, const TStringGenerator& generate) {
+    arrow::StringBuilder builder;
+    for (int64_t row = 0; row < rows; ++row) {
+        const auto value = generate(row);
+        EXPECT_TRUE((value ? builder.Append(*value) : builder.AppendNull()).ok());
+    }
+    return builder.Finish().ValueOrDie();
+}
+
+} // namespace
+
+// Arrow writes dictionary pages by default, and the scan reads fully
+// dictionary-encoded string columns as dictionaries. A small dictionary page
+// limit makes the high-cardinality columns overflow into plain pages midway.
+TEST(IOTest, ParquetDictionaryStrings) {
+    const std::string path = "/tmp/test_io_qdb_dictionary.parquet";
+    // The first row group spans two scan batches that share one dictionary.
+    constexpr int64_t rows = 150000;
+    constexpr int64_t rowGroupRows = 100000;
+    const std::string longValue(40, 'x');
+
+    const std::vector<std::pair<std::string, TStringGenerator>> columns = {
+        {"low", [&](int64_t row) -> std::optional<std::string> {
+            static const std::vector<std::string> values = {"", "a", "bc", "0123456789abcdef", "0123456789abcdefg"};
+            return values[row % values.size()];
+        }},
+        {"low_long", [&](int64_t row) -> std::optional<std::string> {
+            return row % 4 == 0 ? longValue + "tail" : std::string("s") + std::to_string(row % 3);
+        }},
+        {"low_nulls", [](int64_t row) -> std::optional<std::string> {
+            if (row % 3 == 0) return std::nullopt;
+            return row % 11 == 0 ? std::string() : "n" + std::to_string(row % 7);
+        }},
+        {"medium", [](int64_t row) -> std::optional<std::string> {
+            return "m" + std::to_string(row * 7919 % 6000);
+        }},
+        {"unique", [](int64_t row) -> std::optional<std::string> {
+            return "key-" + std::to_string(row) + "-payload";
+        }},
+        {"all_null", [](int64_t) -> std::optional<std::string> { return std::nullopt; }},
+    };
+    std::vector<std::shared_ptr<arrow::Field>> fields;
+    std::vector<std::shared_ptr<arrow::Array>> arrays;
+    for (const auto& [name, generate] : columns) {
+        fields.push_back(arrow::field(name, arrow::utf8()));
+        arrays.push_back(MakeStrings(rows, generate));
+    }
+    auto table = arrow::Table::Make(arrow::schema(fields), arrays);
+    auto properties = parquet::WriterProperties::Builder()
+        .enable_dictionary()
+        ->dictionary_pagesize_limit(4096)
+        ->build();
+    auto outfile = arrow::io::FileOutputStream::Open(path).ValueOrDie();
+    ASSERT_TRUE(parquet::arrow::WriteTable(
+        *table, arrow::default_memory_pool(), outfile, rowGroupRows, properties).ok());
+    ASSERT_TRUE(outfile->Close().ok());
+
+    NQdb::TParquetSource source(path);
+    ASSERT_EQ(source.Schema().Columns.size(), columns.size());
+    int64_t row = 0;
+    TRowSet rowSet = {};
+    while (source.Next(rowSet)) {
+        for (size_t column = 0; column < columns.size(); ++column) {
+            const auto& col = rowSet.Columns[column];
+            ASSERT_EQ(col.OffsetWidth, 4);
+            const auto* offsets = static_cast<const int32_t*>(col.Offsets);
+            int64_t mismatches = 0;
+            for (int64_t i = 0; i < rowSet.RowCount; ++i) {
+                const auto expected = columns[column].second(row + i);
+                const bool valid = !col.Mask ||
+                    ((col.Mask[(col.MaskBitOffset + i) / 8] >> ((col.MaskBitOffset + i) % 8)) & 1);
+                if (valid != expected.has_value()) {
+                    ++mismatches;
+                } else if (expected &&
+                    std::string_view(col.Data + (offsets[i] - offsets[0]), offsets[i + 1] - offsets[i]) != *expected) {
+                    ++mismatches;
+                }
+            }
+            EXPECT_EQ(mismatches, 0) << columns[column].first << " rows " << row << ".."
+                << row + rowSet.RowCount;
+        }
+        row += rowSet.RowCount;
+        NQdb::Release(&rowSet);
+    }
+    EXPECT_EQ(row, rows);
+}
+
+TEST(IOTest, ParquetDictionaryOffsetWidth) {
+    constexpr int64_t limit = std::numeric_limits<int32_t>::max();
+    EXPECT_EQ(NQdb::DictionaryOffsetWidth(0), 4);
+    EXPECT_EQ(NQdb::DictionaryOffsetWidth(limit), 4);
+    EXPECT_EQ(NQdb::DictionaryOffsetWidth(limit + 1), 8);
+    EXPECT_EQ(NQdb::DictionaryOffsetWidth(10 * limit), 8);
+}
+
+// A nested leaf can share its name with a top-level column.
+TEST(IOTest, ParquetNestedLeafSharesName) {
+    const std::string path = "/tmp/test_io_qdb_nested_leaf.parquet";
+    constexpr int64_t rows = 1000;
+    auto top = MakeStrings(rows, [](int64_t row) -> std::optional<std::string> {
+        return "t" + std::to_string(row);
+    });
+    auto inner = MakeStrings(rows, [](int64_t row) -> std::optional<std::string> {
+        return "i" + std::to_string(row % 3);
+    });
+    auto structType = arrow::struct_({arrow::field("name", arrow::utf8())});
+    auto nested = std::make_shared<arrow::StructArray>(
+        structType, rows, std::vector<std::shared_ptr<arrow::Array>>{inner});
+    auto table = arrow::Table::Make(
+        arrow::schema({arrow::field("name", arrow::utf8()), arrow::field("nested", structType)}),
+        {top, nested});
+    auto properties = parquet::WriterProperties::Builder().disable_dictionary("name")->build();
+    auto outfile = arrow::io::FileOutputStream::Open(path).ValueOrDie();
+    ASSERT_TRUE(parquet::arrow::WriteTable(
+        *table, arrow::default_memory_pool(), outfile, rows, properties).ok());
+    ASSERT_TRUE(outfile->Close().ok());
+
+    NQdb::TParquetSource source(path);
+    ASSERT_GE(source.Schema().Columns.size(), 1u);
+    EXPECT_EQ(source.Schema().Columns[0].Name, "name");
+    TRowSet rowSet = {};
+    ASSERT_TRUE(source.Next(rowSet));
+    const auto& col = rowSet.Columns[0];
+    const auto* offsets = static_cast<const int32_t*>(col.Offsets);
+    for (int64_t i = 0; i < rowSet.RowCount; ++i) {
+        EXPECT_EQ(std::string_view(col.Data + (offsets[i] - offsets[0]), offsets[i + 1] - offsets[i]),
+            "t" + std::to_string(i));
+    }
+    NQdb::Release(&rowSet);
 }
