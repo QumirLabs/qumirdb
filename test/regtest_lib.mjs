@@ -42,8 +42,15 @@ function printIdentifier(name) {
   return name.includes(' ') || name.includes('.') ? `|${name}|` : name;
 }
 
-function printColumnType({ type, nullable }) {
-  return nullable ? `<named Nullable [${type}]>` : type;
+// A DECIMAL column keeps its precision and scale: the exact decimal string of a
+// cell is meaningless without the scale it was written with.
+function printValueType({ type, precision, scale }) {
+  return type === 'decimal' ? `<named DECIMAL [${precision} ${scale}]>` : type;
+}
+
+function printColumnType(column) {
+  const type = printValueType(column);
+  return column.nullable ? `<named Nullable [${type}]>` : type;
 }
 
 function printSchema(columns) {
@@ -55,6 +62,13 @@ function printSchema(columns) {
 function scalarColumn(name, typeText) {
   const nullable = typeText.match(/^<named Nullable \[(.*)\]>$/);
   const type = nullable ? nullable[1].trim() : typeText;
+  const decimal = type.match(/^<named DECIMAL \[(\d+) (\d+)\]>$/);
+  if (decimal) {
+    return {
+      name, type: 'decimal', precision: Number(decimal[1]), scale: Number(decimal[2]),
+      nullable: Boolean(nullable),
+    };
+  }
   if (!SCALAR_TYPES.has(type)) {
     throw new Error(`column ${name}: unsupported type ${typeText}`);
   }
@@ -395,10 +409,17 @@ function resultCell(column, value) {
 // exported plan so that an empty result is typed too.
 export function typedResult(exec, result) {
   const columns = exec.output.map(column => {
+    const nullable = column.nullable === true;
+    if (column.type === 'decimal') {
+      return {
+        name: column.name, type: 'decimal', precision: column.precision, scale: column.scale,
+        nullable,
+      };
+    }
     if (!SCALAR_TYPES.has(column.type)) {
       throw new Error(`result column ${column.name}: unsupported type ${column.type}`);
     }
-    return { name: column.name, type: column.type, nullable: column.nullable === true };
+    return { name: column.name, type: column.type, nullable };
   });
   const names = JSON.stringify(columns.map(column => column.name));
   if (result.columns.length > 0 && JSON.stringify(result.columns) !== names) {

@@ -1,5 +1,5 @@
 {
-  "schema": "<struct (s bool)>",
+  "schema": "<struct (s <named Nullable [bool]>)>",
   "rows": [
     [true]
   ]

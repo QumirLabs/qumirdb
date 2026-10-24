@@ -8,6 +8,7 @@
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/pipeline.h>
 #include <qdb/plan/plan_print.h>
+#include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/sql/parser.h>
 #include <qdb/sql/printer.h>
@@ -32,6 +33,7 @@
 #include <chrono>
 #include <cctype>
 #include <cmath>
+#include <cstring>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -932,12 +934,34 @@ std::optional<std::string> CaptureError(TFunc&& stage) {
 
 namespace {
 
+// The exact text of a DECIMAL, as DuckDB prints it: the scaled integer with the
+// decimal point placed `scale` digits from the right. A result is compared as
+// this string, so no digit is lost to a binary float.
+std::string DecimalText(const char* storage, int32_t scale) {
+    __int128 value;
+    std::memcpy(&value, storage, sizeof(value));
+    const bool negative = value < 0;
+    auto magnitude = static_cast<unsigned __int128>(negative ? -value : value);
+    std::string digits;
+    do {
+        digits.push_back(static_cast<char>('0' + static_cast<int>(magnitude % 10)));
+        magnitude /= 10;
+    } while (magnitude != 0);
+    if (digits.size() <= static_cast<size_t>(scale)) digits.resize(scale + 1, '0');
+    if (scale > 0) digits.insert(digits.begin() + scale, '.');
+    if (negative) digits.push_back('-');
+    return std::string(digits.rbegin(), digits.rend());
+}
+
 TValue Cell(const TColumn& column, int64_t row, const TTypePtr& type) {
     if (column.Mask) {
         const auto bit = column.MaskBitOffset + row;
         if (!(column.Mask[bit / 8] & (uint8_t{1} << (bit % 8)))) return nullptr;
     }
     const auto valueType = UnwrapNullableType(type);
+    if (const auto decimal = DecimalSpecOfValueType(valueType)) {
+        return DecimalText(column.Data + row * 16, decimal->Scale);
+    }
     if (auto integer = TMaybeType<TIntegerType>(valueType)) {
         switch (integer.Cast()->Kind) {
             case TIntegerType::I8: return reinterpret_cast<const int8_t*>(column.Data)[row];

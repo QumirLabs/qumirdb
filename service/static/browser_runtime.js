@@ -2932,10 +2932,7 @@ function finishCrossJoinState(state) {
 
 function outputShapeFromRowSets(rowSets) {
   const first = rowSets.find(rowSet => rowSet.batch.columns.length > 0);
-  return first ? first.batch.columns.map(col => ({
-    name: col.name,
-    type: col.type,
-  })) : [];
+  return first ? shapeColumns(first.batch.columns) : [];
 }
 
 function emptyBatchForRowSets(rowSets) {
