@@ -1,0 +1,13 @@
+{
+  "schema": "<struct (id i64) (n <named Nullable [i64]>)>",
+  "rows": [
+    ["10", "12"],
+    ["11", "12"],
+    ["12", null],
+    ["13", null],
+    ["14", null],
+    ["15", null],
+    ["16", null],
+    ["16", null]
+  ]
+}
