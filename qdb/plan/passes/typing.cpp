@@ -465,4 +465,81 @@ void CoerceSetOpBranches(const TOperatorPtr& root, const NKernel::TAnnotationCon
     }
 }
 
+namespace {
+
+// Wraps `input` in a projection that passes every column through and adds
+// `alias` = CAST(`column` AS `target`), keeping the original column's type for
+// the operators above the join.
+TOperatorPtr AddCastedKey(
+    const TOperatorPtr& input, const std::string& column, const TTypePtr& target, const std::string& alias)
+{
+    auto* schema = static_cast<TStructType*>(input->OutputColumns().get());
+    std::vector<TProjectionSpec> projections;
+    projections.reserve(schema->Fields.size() + 1);
+    for (const auto& [name, type] : schema->Fields) {
+        projections.push_back({
+            .Name = name,
+            .Expression = std::make_shared<TIdentExpr>(NQumir::TLocation{}, name),
+        });
+    }
+    projections.push_back({
+        .Name = alias,
+        .Expression = std::make_shared<TCastExpr>(NQumir::TLocation{},
+            std::make_shared<TIdentExpr>(NQumir::TLocation{}, column), target),
+    });
+    return std::make_shared<TProjectOperator>(input, std::move(projections));
+}
+
+TTypePtr ColumnType(const TOperatorPtr& input, const std::string& column) {
+    for (const auto& [name, type] : static_cast<TStructType*>(input->OutputColumns().get())->Fields) {
+        if (name == column) {
+            return type;
+        }
+    }
+    return nullptr;
+}
+
+} // namespace
+
+void CoerceJoinKeys(const TOperatorPtr& root) {
+    for (const auto& input : root->Inputs()) {
+        CoerceJoinKeys(input);
+    }
+    auto join = TMaybeOp<TJoinOperator>(root);
+    if (!join) {
+        return;
+    }
+    size_t counter = 0;
+    for (auto& key : join.Cast()->MutableKeys()) {
+        const auto leftType = ColumnType(join.Cast()->Left(), key.Left);
+        const auto rightType = ColumnType(join.Cast()->Right(), key.Right);
+        if (!leftType || !rightType) {
+            continue;
+        }
+        auto leftInt = TMaybeType<TIntegerType>(UnwrapNullableType(leftType));
+        auto rightInt = TMaybeType<TIntegerType>(UnwrapNullableType(rightType));
+        if (!leftInt || !rightInt || leftInt.Cast()->Kind == rightInt.Cast()->Kind) {
+            continue;
+        }
+        const auto common = UnifyIntegers(*leftInt.Cast(), *rightInt.Cast());
+        if (!common) {
+            continue;
+        }
+        // A key wider than the common type is left alone; the narrower side widens.
+        for (const bool isLeft : {true, false}) {
+            const auto& sideType = isLeft ? leftType : rightType;
+            if (UnwrapNullableType(sideType)->ToString() == common->ToString()) {
+                continue;
+            }
+            auto& column = isLeft ? key.Left : key.Right;
+            auto& side = isLeft ? join.Cast()->MutableLeft() : join.Cast()->MutableRight();
+            const auto target = IsNullableType(sideType)
+                ? std::static_pointer_cast<TType>(std::make_shared<TNullable>(common)) : common;
+            const auto alias = "__join_key_" + std::to_string(counter++) + "__";
+            side = AddCastedKey(side, column, target, alias);
+            column = alias;
+        }
+    }
+}
+
 } // namespace NQdb

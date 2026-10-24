@@ -1,0 +1,1 @@
+SELECT x.b FROM (SELECT CAST(a AS INTEGER) AS a32, b FROM t) x WHERE x.a32 = (SELECT max(s.k) - 1 FROM s);

@@ -23,6 +23,7 @@
     "count_distinct_subquery.sql": {"order": "unordered"},
     "inside_and_outside.sql": {"order": "unordered"},
     "where_and_argument.sql": {"order": "unordered"},
+    "where_narrow_key.sql": {"order": "unordered"},
     "window_argument_aggregate.sql": {"order": "unordered"},
     "window_order_aggregate.sql": {"order": "unordered"},
     "exists_argument.sql": {"execute": false, "expect_error": true},

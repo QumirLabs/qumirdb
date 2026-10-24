@@ -62,6 +62,8 @@ void OptimizeOne(TOperatorPtr& plan, TPlanPassOptions& options, TFoldedBounds& f
     AnnotateTypes(plan, options.Annotation); // re-annotate: reordering rebuilt the join tree
     plan = ExtractEquiJoins(plan); stage("ExtractEquiJoins");
     AnnotateTypes(plan, options.Annotation); // re-annotate: equi-join extraction adds/removes nodes
+    CoerceJoinKeys(plan); stage("CoerceJoinKeys");
+    AnnotateTypes(plan, options.Annotation); // re-annotate: key casts add projections below joins
     plan = PushDownSemiJoins(plan); stage("PushDownSemiJoins");
     AnnotateTypes(plan, options.Annotation); // re-annotate: semi pushdown restructured joins
     plan = PushDownLimits(plan);
