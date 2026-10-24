@@ -2252,8 +2252,13 @@ std::expected<TRelation, TError> BuildAggregate(
             // The constant global key keeps its name, which the scheduler and the
             // estimates recognize, so an input `__group__` argument is
             // materialized under a generated name instead of passed through.
-            if (auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(spec.Arg);
-                ident && !(global && BareColumnName(ident.Cast()->Name) == "__group__"))
+            // Under grouping sets the executor masks a key column to NULL in the sets
+            // that do not group by it, so an argument naming a key reads its own copy.
+            auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(spec.Arg);
+            const bool readsMaskedKey = multiSet && ident
+                && std::find(keys.begin(), keys.end(), ident.Cast()->Name) != keys.end();
+            if (ident && !readsMaskedKey
+                && !(global && BareColumnName(ident.Cast()->Name) == "__group__"))
             {
                 passthrough(ident.Cast()->Name);
             } else {
