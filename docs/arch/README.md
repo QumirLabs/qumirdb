@@ -81,6 +81,8 @@ Physical execution:
 
 - [Scan parallelism](scan_parallelism.md) - automatic per-source scan sizing,
   join fan-in, explicit limits, and the comparison with DuckDB.
+- [Parquet decoding](parquet_decoding.md) - the oz-lang page decoder, its host
+  boundary, dictionary strings, plan-driven batch size, and the Arrow fallback.
 - [Aggregation](aggregation.md) - aggregation planning, generated Qumir AST,
   generic Oz kernels, type-specific hash injection, runtime ABI and memory.
 - [Join](join.md) - supported join forms, adaptive symmetric/probe-only hash
