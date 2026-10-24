@@ -121,11 +121,47 @@ std::vector<TExternalType> BuildQumirDbExternalTypes() {
             {"Data", ptrI64Type},
         });
 
+    // Row join table (kernel/join/join_rows.oz); mirrored by
+    // TRowJoinProcessor's state structs in exec/row_join_exec.h.
+    auto joinArenaType = std::make_shared<TStructType>(
+        std::vector<std::pair<std::string, TTypePtr>>{
+            {"Blocks", ptrPtrU8Type},
+            {"BlockCount", i64Type},
+            {"BlockCapacity", i64Type},
+            {"BlockRows", i64Type},
+            {"RowBytes", i64Type},
+            {"Rows", i64Type},
+            {"CurRows", i64Type},
+        });
+    auto joinTableType = std::make_shared<TStructType>(
+        std::vector<std::pair<std::string, TTypePtr>>{
+            {"Entries", ptrU64Type},
+            {"Capacity", i64Type},
+            {"Mask", u64Type},
+            {"Shift", i64Type},
+            {"Rows", i64Type},
+            {"Keys", i64Type},
+        });
+    auto joinScratchType = std::make_shared<TStructType>(
+        std::vector<std::pair<std::string, TTypePtr>>{
+            {"Hashes", ptrU64Type},
+            {"Salts", ptrU64Type},
+            {"Offsets", ptrU64Type},
+            {"Entries", ptrU64Type},
+            {"Rows", ptrI64Type},
+            {"Work", ptrI64Type},
+            {"Keys", ptrU8Type},
+            {"Capacity", i64Type},
+        });
+
     return {
         { .Name = "TColumn", .Type = columnType },
         { .Name = "TRowSet", .Type = rowSetType },
         { .Name = "HashTable", .Type = hashTableType },
         { .Name = "PairBuffer", .Type = pairBufferType },
+        { .Name = "JoinArena", .Type = joinArenaType },
+        { .Name = "JoinTable", .Type = joinTableType },
+        { .Name = "JoinScratch", .Type = joinScratchType },
         { .Name = "StringView", .Type = stringViewType },
         { .Name = "OwnedString", .Type = ownedStringType },
     };

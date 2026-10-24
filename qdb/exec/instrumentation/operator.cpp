@@ -97,4 +97,21 @@ void TOperatorInstrumentation::ObserveHash(
     BuildMemoryPeakBytes = std::max(BuildMemoryPeakBytes, RetainedInputBytes + Memory_[0] + Memory_[1]);
 }
 
+void TOperatorInstrumentation::ObserveBuildTable(
+    size_t side,
+    uint64_t keys,
+    uint64_t capacity,
+    uint64_t bytes)
+{
+    HasHash = true;
+    HasBuildMemory = true;
+    Capacities_[side] = capacity;
+    Groups_[side] = keys;
+    Memory_[side] = bytes;
+    Groups = Groups_[0] + Groups_[1];
+    HashCapacity = Capacities_[0] + Capacities_[1];
+    HashMemoryPeakBytes = std::max(HashMemoryPeakBytes, Memory_[0] + Memory_[1]);
+    BuildMemoryPeakBytes = std::max(BuildMemoryPeakBytes, RetainedInputBytes + Memory_[0] + Memory_[1]);
+}
+
 } // namespace NQdb

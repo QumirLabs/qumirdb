@@ -728,6 +728,9 @@ std::vector<NQumir::NAst::TExprPtr> GenKeyOperationFunDecls(
     if (key.HasDistinctLookupType()) {
         result.push_back(makeHash(key.StoredType));
         result.push_back(makeEqual(key.StoredType, key.LookupType));
+        // The row join table stores lookup keys (StringView handles into the
+        // retained batch) and compares them with probe lookup keys.
+        result.push_back(makeEqual(key.LookupType, key.LookupType));
     }
     result.push_back(makeEqual(key.StoredType, key.StoredType));
     return result;

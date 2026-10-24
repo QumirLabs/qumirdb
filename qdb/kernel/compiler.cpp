@@ -165,8 +165,8 @@ std::unordered_map<std::string, void*> CompileKernelAst(
 namespace {
 constexpr const char* CacheSchemaVersion = "v1";
 // Bump when the generated key helpers or the .oz kernel libraries change.
-// FULL residual marking changes jt_emit_and_insert.
-constexpr const char* KernelLibVersion = "43";
+// The row join table adds join_rows.oz and the lookup-key equality overload.
+constexpr const char* KernelLibVersion = "48";
 } // namespace
 
 NQumir::NCodeGen::TLlvmRunner::TLinkedModule CompileKernelAstCached(
@@ -1393,6 +1393,79 @@ NQumir::NAst::TExprPtr BuildHeapTopKEntryAst()
     return std::move(builder).Build();
 }
 
+// The two struct input schemas of a binary join kernel spec.
+std::pair<std::shared_ptr<NQumir::NAst::TStructType>, std::shared_ptr<NQumir::NAst::TStructType>>
+JoinInputTypes(const NKernel::TOperatorKernelSpec& spec, const std::string& caller) {
+    using namespace NQumir::NAst;
+    if (spec.Kind != NKernel::EOperatorKernelKind::Binary || spec.OperatorName != "join") {
+        throw NQumir::TError(caller + ": expected join kernel spec");
+    }
+    if (spec.InputSchemas.size() != 2) {
+        throw NQumir::TError(caller + ": expected two input schemas");
+    }
+    auto leftType = TMaybeType<TStructType>(spec.InputSchemas[0]);
+    auto rightType = TMaybeType<TStructType>(spec.InputSchemas[1]);
+    if (!leftType || !rightType) {
+        throw NQumir::TError(caller + ": input schemas must be structs");
+    }
+    return {leftType.Cast(), rightType.Cast()};
+}
+
+std::vector<TJoinKey> JoinKeysOf(const NKernel::TOperatorKernelSpec& spec) {
+    std::vector<TJoinKey> keys;
+    keys.reserve(spec.JoinKeys.size());
+    for (const auto& key : spec.JoinKeys) {
+        keys.push_back({key.Left.Name, key.Right.Name, key.NullsEqual});
+    }
+    return keys;
+}
+
+// The key descriptor of an equi-join, with each key's NULL-safe flag. Throws
+// on incompatible types or missing columns.
+NKernel::TJoinKeyDescriptor JoinKeyDescriptorOf(
+    const NQumir::NAst::TStructType& leftType,
+    const NQumir::NAst::TStructType& rightType,
+    const std::vector<TJoinKey>& keys)
+{
+    std::vector<std::pair<std::string, std::string>> keyNames;
+    keyNames.reserve(keys.size());
+    for (const auto& key : keys) {
+        keyNames.emplace_back(key.Left, key.Right);
+    }
+    auto keyDesc = NKernel::BuildJoinKeyDescriptor(leftType, rightType, keyNames);
+    for (size_t i = 0; i < keys.size(); ++i) {
+        keyDesc.Fields[i].NullsEqual = keys[i].NullsEqual;
+    }
+    return keyDesc;
+}
+
+// The head of a join program: key type declarations, the string operations
+// the key overloads call (when a key or the output has strings), then the
+// per-key overloads (rh_hash, rh_key_equal).
+void AppendJoinKeyDecls(
+    std::vector<NQumir::NAst::TExprPtr>& program,
+    const NKernel::TJoinKeyDescriptor& keyDesc,
+    bool hasString,
+    const std::string& caller)
+{
+    for (auto& f : NKernel::GenJoinKeyTypeDecls(keyDesc)) {
+        program.push_back(std::move(f));
+    }
+    if (hasString || keyDesc.HasDistinctLookupType()) {
+        auto stringOps = NKernel::ParseFunctionLibrary(
+            NKernel::ReadAggregationKernel("string_ops.oz"));
+        if (!stringOps) {
+            throw NQumir::TError(caller + ": string_ops.oz: " + stringOps.error().ToString());
+        }
+        for (auto& f : *stringOps) {
+            program.push_back(std::move(f));
+        }
+    }
+    for (auto& f : NKernel::GenJoinKeyOpsFunDecls(keyDesc)) {
+        program.push_back(std::move(f));
+    }
+}
+
 } // namespace
 
 NQumir::NAst::TExprPtr BuildSortRowIdLessAst(
@@ -2153,25 +2226,8 @@ TJoinKernels TKernelCompiler::CompileJoin(
 {
     using namespace NQumir::NAst;
 
-    if (spec.Kind != NKernel::EOperatorKernelKind::Binary ||
-        spec.OperatorName != "join") {
-        throw NQumir::TError("CompileJoin: expected join kernel spec");
-    }
-    if (spec.InputSchemas.size() != 2) {
-        throw NQumir::TError("CompileJoin: expected two input schemas");
-    }
-
-    auto leftType = TMaybeType<TStructType>(spec.InputSchemas[0]);
-    auto rightType = TMaybeType<TStructType>(spec.InputSchemas[1]);
-    if (!leftType || !rightType) {
-        throw NQumir::TError("CompileJoin: input schemas must be structs");
-    }
-
-    std::vector<TJoinKey> keys;
-    keys.reserve(spec.JoinKeys.size());
-    for (const auto& key : spec.JoinKeys) {
-        keys.push_back({key.Left.Name, key.Right.Name, key.NullsEqual});
-    }
+    const auto [leftType, rightType] = JoinInputTypes(spec, "CompileJoin");
+    const auto keys = JoinKeysOf(spec);
 
     // A mark join with a residual needs the marker of a correlated IN, which
     // belongs to general unnesting.
@@ -2188,7 +2244,7 @@ TJoinKernels TKernelCompiler::CompileJoin(
     }
 
     return CompileJoin(
-        *leftType.Cast(), *rightType.Cast(), keys, spec.JoinType,
+        *leftType, *rightType, keys, spec.JoinType,
         residual.Predicate, residual.Inner(), residual.LeftFieldCount,
         spec.HasPrecomputedHash);
 }
@@ -2466,6 +2522,116 @@ std::function<bool(TRowSet*, uint64_t*)> TKernelCompiler::CompileAggregateHash(
     };
 }
 
+TRowJoinKernels TKernelCompiler::CompileRowJoin(
+    const NKernel::TOperatorKernelSpec& spec,
+    bool buildIsLeft)
+{
+    using namespace NQumir::NAst;
+
+    const auto [leftType, rightType] = JoinInputTypes(spec, "CompileRowJoin");
+    if (spec.JoinType != EJoinType::Inner || !spec.Expressions.empty() ||
+        spec.JoinKeys.empty()) {
+        throw NQumir::TError(
+            "CompileRowJoin: only inner equi-joins without a residual are supported");
+    }
+
+    const auto keyDesc = JoinKeyDescriptorOf(*leftType, *rightType, JoinKeysOf(spec));
+    const auto& buildType = buildIsLeft
+        ? *leftType
+        : *rightType;
+    const auto layout = NKernel::BuildRowJoinLayout(buildType, keyDesc);
+
+    auto buildKeyColumns = std::make_shared<std::vector<int64_t>>();
+    auto probeKeyColumns = std::make_shared<std::vector<int64_t>>();
+    for (const auto& field : keyDesc.Fields) {
+        buildKeyColumns->push_back(buildIsLeft ? field.LeftColumnIndex : field.RightColumnIndex);
+        probeKeyColumns->push_back(buildIsLeft ? field.RightColumnIndex : field.LeftColumnIndex);
+    }
+
+    if (Diagnostics_) {
+        *Diagnostics_ << "\n========== KERNEL SPEC ==========\n";
+        NKernel::PrintKernelSpec(*Diagnostics_, spec);
+        *Diagnostics_ << "=================================\n";
+    }
+
+    const NKernel::TRowJoinGenTypes types{
+        .Column = QumirDbNamedType("TColumn"),
+        .RowSet = QumirDbNamedType("TRowSet"),
+        .PairBuffer = QumirDbNamedType("PairBuffer"),
+        .StringView = QumirDbNamedType("StringView"),
+        .Arena = QumirDbNamedType("JoinArena"),
+        .Table = QumirDbNamedType("JoinTable"),
+        .Scratch = QumirDbNamedType("JoinScratch"),
+    };
+    auto buildProgram = [&]() -> std::vector<TExprPtr> {
+        auto library = NKernel::BuildRowJoinKernelLibrary();
+        if (!library) {
+            throw NQumir::TError("CompileRowJoin: " + library.error().ToString());
+        }
+        const bool hasString = [&] {
+            auto isString = [](const auto& field) {
+                return static_cast<bool>(TMaybeType<TStringType>(
+                    UnwrapNamedType(UnwrapNullableType(field.second))));
+            };
+            return std::ranges::any_of(leftType->Fields, isString) ||
+                std::ranges::any_of(rightType->Fields, isString);
+        }();
+
+        // Same order as CompileJoin: the key declarations, then the library
+        // and the generated functions.
+        std::vector<TExprPtr> program;
+        AppendJoinKeyDecls(program, keyDesc, hasString, "CompileRowJoin");
+        for (auto& f : *library) {
+            program.push_back(std::move(f));
+        }
+        program.push_back(NKernel::GenRowJoinAppendAst(
+            keyDesc, layout, "jr_append_batch", types, spec.HasPrecomputedHash));
+        program.push_back(NKernel::GenRowJoinProbeAst(
+            keyDesc, layout, /*probeIsLeft=*/!buildIsLeft, "jr_probe_batch", types,
+            spec.HasPrecomputedHash));
+        program.push_back(NKernel::GenRowJoinDispatchAst(keyDesc, layout, types));
+        program.push_back(NKernel::GenRowJoinMaterializeAst(
+            *leftType, *rightType, buildIsLeft, layout, types));
+        return program;
+    };
+
+    std::vector<std::string> entries = {"jr_dispatch", "jr_materialize"};
+    auto program = std::make_shared<TBlockExpr>(NQumir::TLocation{}, buildProgram());
+    PrintKernelAst(Diagnostics_, "row-join", program);
+    auto kernel = EmitKernel("row-join", entries, std::move(program));
+    FinishKernelDiagnostics(Diagnostics_);
+
+    auto slot = kernel.Slot;
+    using TDispatchFn = bool(*)(
+        void*, void*, void*, void*, TRowSet*, const int64_t*, int64_t);
+    using TMaterializeFn = int64_t(*)(void*, TRowSet*, int64_t, int64_t, TRowSet*);
+
+    TRowJoinKernels kernels;
+    kernels.RetainsBuildBatches = layout.HasString;
+    kernels.Dispatch = [slot, buildKeyColumns, probeKeyColumns](
+        void* arena,
+        void* table,
+        void* scratch,
+        void* pairs,
+        TRowSet* batch,
+        int64_t op) {
+        const auto* keyColumns = op == static_cast<int64_t>(ERowJoinKernelOp::Append)
+            ? buildKeyColumns->data() : probeKeyColumns->data();
+        return reinterpret_cast<TDispatchFn>(slot->Fns[0])(
+            arena, table, scratch, pairs, batch, keyColumns, op);
+    };
+    kernels.Materialize = [slot](
+        void* pairs,
+        TRowSet* stream,
+        int64_t start,
+        int64_t limit,
+        TRowSet* out) {
+        return reinterpret_cast<TMaterializeFn>(slot->Fns[1])(
+            pairs, stream, start, limit, out);
+    };
+    return kernels;
+}
+
 TJoinKernels TKernelCompiler::CompileJoin(
     const NQumir::NAst::TStructType& leftType,
     const NQumir::NAst::TStructType& rightType,
@@ -2488,17 +2654,8 @@ TJoinKernels TKernelCompiler::CompileJoin(
             "CompileJoin: only Inner, Left, Right, Full, LeftSemi, LeftAnti, and LeftMark join types are supported");
     }
 
-    // Unified key descriptor (reuses the aggregation key machinery). Throws on
-    // incompatible types / missing columns.
-    std::vector<std::pair<std::string, std::string>> keyNames;
-    keyNames.reserve(keys.size());
-    for (const auto& key : keys) {
-        keyNames.emplace_back(key.Left, key.Right);
-    }
-    auto keyDesc = NKernel::BuildJoinKeyDescriptor(leftType, rightType, keyNames);
-    for (size_t i = 0; i < keys.size(); ++i) {
-        keyDesc.Fields[i].NullsEqual = keys[i].NullsEqual;
-    }
+    // Unified key descriptor (reuses the aggregation key machinery).
+    auto keyDesc = JoinKeyDescriptorOf(leftType, rightType, keys);
     if (isMark) {
         // IN compares with SQL equality.
         if (std::ranges::any_of(keys, [](const auto& key) { return key.NullsEqual; })) {
@@ -2559,17 +2716,7 @@ TJoinKernels TKernelCompiler::CompileJoin(
         }();
 
         std::vector<TExprPtr> program;
-        for (auto& f : NKernel::GenJoinKeyTypeDecls(keyDesc)) program.push_back(std::move(f));
-        if (hasStringOutput || keyDesc.HasDistinctLookupType()) {
-            auto stringOps = NKernel::ParseFunctionLibrary(
-                NKernel::ReadAggregationKernel("string_ops.oz"));
-            if (!stringOps) {
-                throw NQumir::TError(
-                    "CompileJoin: string_ops.oz: " + stringOps.error().ToString());
-            }
-            for (auto& f : *stringOps) program.push_back(std::move(f));
-        }
-        for (auto& f : NKernel::GenJoinKeyOpsFunDecls(keyDesc)) program.push_back(std::move(f));
+        AppendJoinKeyDecls(program, keyDesc, hasStringOutput, "CompileJoin");
         for (auto& f : NKernel::GenJoinKeyOwnershipFunDecls(keyDesc)) {
             program.push_back(std::move(f));
         }

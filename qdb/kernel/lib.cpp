@@ -158,6 +158,18 @@ BuildCrossJoinKernelLibrary() {
 }
 
 std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError>
+BuildRowJoinKernelLibrary() {
+    auto library = BuildJoinLibraryBase();
+    if (!library) {
+        return library;
+    }
+    if (auto e = AddParsedKernel(*library, ReadJoinKernel("join_rows.oz"))) {
+        return std::unexpected(*e);
+    }
+    return library;
+}
+
+std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError>
 BuildJoinDualKeyLibrary() {
     std::vector<NQumir::NAst::TExprPtr> library;
     for (const char* name : {"owned_blocks.oz", "robin_hood_dual_key.oz"}) {

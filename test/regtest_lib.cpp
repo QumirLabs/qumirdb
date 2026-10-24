@@ -1250,6 +1250,12 @@ TCaseResult CheckCase(const TQueryCase& test, bool canonize) {
     settings.Scheduler.WorkerCount = test.Variant == "single" ? 1 : 4;
     settings.ScanSplit.Strategy = NScheduler::EScanSplitStrategy::RowGroupRange;
     settings.ScanSplit.MaxScanTasks = test.Variant == "single" ? 1 : 4;
+    // QDB_JOIN_TABLE=legacy runs the suites over the symmetric join table.
+    if (const char* joinTable = std::getenv("QDB_JOIN_TABLE")) {
+        settings.Join.Table = std::string_view(joinTable) == "legacy"
+            ? NScheduler::EJoinTableKind::Legacy
+            : NScheduler::EJoinTableKind::Row;
+    }
     TPlanRunTimings runTimings;
     TValue actual = nullptr;
     // Lowering, JIT compilation and the run itself.
