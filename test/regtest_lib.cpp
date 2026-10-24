@@ -1318,4 +1318,24 @@ void CommitGoldens(const std::vector<TQueryCase>& tests) {
     }
 }
 
+void RemoveOrphanGoldens(const std::vector<TQueryCase>& tests, const fs::path& goldensDir) {
+    if (!fs::exists(goldensDir)) return;
+    std::set<fs::path> owned;
+    for (const auto& test : tests) {
+        owned.insert(test.PlanGolden);
+        owned.insert(fs::path(test.PlanGolden).replace_extension(".ast"));
+        owned.insert(test.Golden);
+        owned.insert(test.ErrorGolden);
+    }
+    const auto root = fs::absolute(goldensDir).lexically_normal();
+    std::set<fs::path> orphans;
+    for (const auto& entry : fs::recursive_directory_iterator(root)) {
+        if (entry.is_regular_file() && !owned.contains(entry.path())) orphans.insert(entry.path());
+    }
+    for (const auto& orphan : orphans) {
+        fs::remove(orphan);
+        std::cerr << "[regtest] removed orphan golden " << orphan.string() << '\n';
+    }
+}
+
 } // namespace NRegTest

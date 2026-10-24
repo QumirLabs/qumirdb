@@ -136,7 +136,11 @@ int main(int argc, char** argv) {
         NQumir::NCodeGen::TLLVMInitializer llvmInit;
         NRegTest::InitializeJitCache(argv[0]);
         const auto result = RUN_ALL_TESTS();
-        if (result == 0 && updateGoldens) NRegTest::CommitGoldens(cases);
+        if (result == 0 && updateGoldens) {
+            NRegTest::CommitGoldens(cases);
+            // A filter registers the cases it selects only; the rest are not orphans.
+            if (::testing::GTEST_FLAG(filter) == "*") NRegTest::RemoveOrphanGoldens(cases, GoldensDir);
+        }
         return result;
     } catch (const std::exception& error) {
         std::cerr << "Regression test setup failed: " << error.what() << '\n';
