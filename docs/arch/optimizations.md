@@ -517,9 +517,6 @@ probe-only streaming for the remaining side as soon as one input is exhausted,
 which is normally the smaller one. This adaptation requires no cardinality
 estimate. Lowering can instead choose build-first execution when an input is
 estimated much smaller or a runtime filter requires its completion first.
-An inner join with a fixed build side runs on the row join table: an arena of
-build rows behind a salted pointer table, two cache lines per probe
-(see [join.md](join.md#row-join-table)).
 
 LEFT/RIGHT outer joins can build their preserved side, stream the other input,
 and mark each build row only after its residual accepts a match. At stream EOF,

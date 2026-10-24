@@ -6,8 +6,9 @@ join modes.
 ## Overview
 
 QDB implements equi-joins with a JIT-compiled hash join. An inner join with a
-fixed build side uses the [row join table](#row-join-table); the other forms
-use the symmetric hash join described here. The runtime
+fixed build side uses the row join table, an arena of build rows behind a
+salted pointer table ([wiki](https://github.com/QumirLabs/qumirdb/wiki/Join-implementation#row-join-table));
+the other forms use the symmetric hash join described here. The runtime
 owns row storage, hash table headers, pair buffers, and output materialization.
 Reusable Oz code implements the generic hash-table probe/insert logic, while
 C++ generates query-specific key extraction, key hash/equality functions, and
@@ -30,40 +31,6 @@ asymmetry, while LEFT/RIGHT outer joins build their preserved side when it is
 estimated no larger than the other input. A runtime filter may also require
 completing its build input first. The build side finishes before the probe stream
 starts; poor estimates can still affect work and memory.
-
-## Row join table
-
-An inner equi-join whose build side lowering has fixed (the `JoinAsymmetryRatio`
-rule or a runtime filter, see [Scheduling](#scheduling)) runs on a second
-table, the row join table of `kernel/join/join_rows.oz`, unless
-`--join-table legacy` selects the symmetric table. Its design follows DuckDB's
-`JoinHashTable`: the build rows are copied into an arena in row format, one
-8-byte entry per table slot holds a 16-bit salt of the hash above a 48-bit row
-pointer, and rows with equal keys form a chain through the first word of the
-row. A probe therefore touches one entry and, when the salt matches, one row;
-the symmetric table needs six dependent reads (control byte, key, slot id,
-bucket length, bucket pointer, bucket, then the retained batch) for the same
-lookup, which is why it loses to DuckDB on join-heavy TPC-H queries.
-
-A build row is `[hash or next pointer][LookupKey struct][validity bytes][payload
-values]`. Fixed-width values are copied; a string payload is a `StringView` into
-the input batch, which the processor keeps alive for that reason, so string
-bytes are copied once, into the output. The table is sized to at most half
-full after the build side ends (`capacity = next power of two >= 2 x rows`),
-indexed by the top hash bits because the hash shuffle partitions a join by the
-low bits, and never rehashes.
-
-The probe runs in three passes over a batch: the hashes of the selected rows
-with valid keys (from `TRowSet::Hash` when the shuffle computed them), the
-salted entry of every row, and the key comparison of the candidates, which
-emits the whole chain of a hit and seeks again for a salt collision. The
-probe side's columns are gathered from the live probe batch by the same
-`jt_materialize_*` workers as the symmetric join, the build side's from the
-rows. The processor (`TRowJoinProcessor`) builds to EOF and then streams the
-probe side; outer, semi, anti and mark joins, residual predicates and joins
-without an estimate for either side stay on the symmetric table below. The
-browser runtime drives only the symmetric protocol, so the plan export selects
-the legacy table.
 
 ## Supported join forms
 
