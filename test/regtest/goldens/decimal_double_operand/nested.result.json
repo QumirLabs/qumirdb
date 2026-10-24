@@ -1,0 +1,12 @@
+{
+  "schema": "<struct (id i32) (neg <named Nullable [f64]>) (bt <named Nullable [bool]>) (inn <named Nullable [bool]>) (combo <named Nullable [bool]>)>",
+  "rows": [
+    [1, -0.90000000000000002, false, false, false],
+    [2, -0.75, false, false, true],
+    [3, null, null, null, null],
+    [4, null, null, null, null],
+    [5, -2.5, false, true, true],
+    [6, 0.25, true, false, false],
+    [7, 0, true, true, false]
+  ]
+}
