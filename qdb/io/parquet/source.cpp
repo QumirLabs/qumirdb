@@ -45,7 +45,6 @@ TTypePtr ArrowTypeToQumir(const std::shared_ptr<arrow::DataType>& type) {
         case arrow::Type::UINT16: return std::make_shared<TIntegerType>(TIntegerType::U16);
         case arrow::Type::UINT32: return std::make_shared<TIntegerType>(TIntegerType::U32);
         case arrow::Type::UINT64: return std::make_shared<TIntegerType>(TIntegerType::U64);
-        case arrow::Type::FLOAT:
         case arrow::Type::DOUBLE: return std::make_shared<NQumir::NAst::TFloatType>();
         case arrow::Type::BOOL: return std::make_shared<NQumir::NAst::TBoolType>();
         case arrow::Type::STRING:
@@ -63,6 +62,13 @@ TTypePtr ArrowTypeToQumir(const std::shared_ptr<arrow::DataType>& type) {
 }
 
 TTypePtr ArrowFieldToQumir(const std::shared_ptr<arrow::Field>& field) {
+    // The kernels have no 32-bit float type yet; mapping FLOAT to f64 would hand
+    // them a 4-byte buffer. Reject the column instead of reading garbage.
+    if (field->type()->id() == arrow::Type::FLOAT) {
+        throw std::runtime_error(
+            "Parquet column '" + field->name() +
+            "' has type FLOAT (32-bit), which is not supported yet (#218)");
+    }
     auto type = ArrowTypeToQumir(field->type());
     if (type && field->nullable()) {
         return std::make_shared<TNullable>(std::move(type));
