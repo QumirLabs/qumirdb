@@ -166,7 +166,7 @@ namespace {
 constexpr const char* CacheSchemaVersion = "v1";
 // Bump when the generated key helpers or the .oz kernel libraries change.
 // The row join table adds join_rows.oz and the lookup-key equality overload.
-constexpr const char* KernelLibVersion = "44";
+constexpr const char* KernelLibVersion = "45";
 } // namespace
 
 NQumir::NCodeGen::TLlvmRunner::TLinkedModule CompileKernelAstCached(
