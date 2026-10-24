@@ -417,6 +417,19 @@ TEST(RegSuiteInfrastructure, CanonizeKeepsGoldensOfCasesThatDidNotRun) {
     EXPECT_TRUE(fs::exists(dir.Golden));
 }
 
+TEST(RegSuiteInfrastructure, RemoveOrphanGoldensKeepsGoldensOfRegisteredCases) {
+    TCaseDirectory dir;
+    const auto orphan = dir.GoldensDir / "group/ghost.plan";
+    std::ofstream(orphan) << "ghost\n";
+    const auto tests = dir.Collect();
+    NRegTest::PrepareCases(tests);
+    NRegTest::CheckCase(tests[0], true);
+    NRegTest::CommitGoldens(tests);
+    NRegTest::RemoveOrphanGoldens(tests, dir.GoldensDir);
+    EXPECT_FALSE(fs::exists(orphan));
+    EXPECT_TRUE(fs::exists(dir.Golden));
+}
+
 TEST(RegSuiteInfrastructure, UnexpectedOutcomesAreReportedWithTheirMessage) {
     TCaseDirectory dir;
     auto message = [&](std::string_view sql, std::string_view options) {

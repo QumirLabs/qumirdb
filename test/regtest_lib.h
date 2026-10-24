@@ -71,5 +71,9 @@ NQdb::TStatsPtr TableStats(const TQueryCase& test, const std::string& table);
 std::filesystem::path TableFile(const TQueryCase& test, const std::string& table);
 // Called only after all selected tests passed, including cross-variant checks.
 void CommitGoldens(const std::vector<TQueryCase>& tests);
+// Removes the golden files under `goldensDir` that belong to none of `tests`: the
+// goldens of cases that were deleted or renamed. Only a canonize run over every
+// case may call it, since a filtered run registers fewer cases.
+void RemoveOrphanGoldens(const std::vector<TQueryCase>& tests, const std::filesystem::path& goldensDir);
 
 } // namespace NRegTest
