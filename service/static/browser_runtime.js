@@ -1584,6 +1584,20 @@ function createQdbEnv(getMemory, holder) {
       const x = value * factor;
       return (Math.sign(x) * Math.round(Math.abs(x))) / factor;
     },
+    qdb_abs_i8: (value) => {
+      value = Number(value) | 0;
+      if (value === -128) {
+        throw new Error('abs overflow for i8');
+      }
+      return Math.abs(value);
+    },
+    qdb_abs_i16: (value) => {
+      value = Number(value) | 0;
+      if (value === -32768) {
+        throw new Error('abs overflow for i16');
+      }
+      return Math.abs(value);
+    },
     qdb_abs_i32: (value) => {
       value = Number(value) | 0;
       if (value === -2147483648) {

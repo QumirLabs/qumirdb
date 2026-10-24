@@ -1,11 +1,13 @@
 {
   "version": 1,
   "fixtures": {
-    "extremes": {"json": "tables/extremes.json"}
+    "extremes": {"json": "tables/extremes.json"},
+    "narrow": {"json": "tables/narrow.json"}
   },
   "tables": {"t": "extremes"},
   "variants": ["single", "threaded", "js"],
   "cases": {
-    "abs_overflow.sql": {"expect_error": true}
+    "abs_overflow.sql": {"expect_error": true},
+    "abs_narrow.sql": {"tables": {"t": "narrow"}, "order": "ordered"}
   }
 }

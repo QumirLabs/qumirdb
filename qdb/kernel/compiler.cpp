@@ -166,7 +166,7 @@ namespace {
 constexpr const char* CacheSchemaVersion = "v1";
 // Bump when the generated key helpers or the .oz kernel libraries change.
 // FULL residual marking changes jt_emit_and_insert.
-constexpr const char* KernelLibVersion = "42";
+constexpr const char* KernelLibVersion = "43";
 } // namespace
 
 NQumir::NCodeGen::TLlvmRunner::TLinkedModule CompileKernelAstCached(

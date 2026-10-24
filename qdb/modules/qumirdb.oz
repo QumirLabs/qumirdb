@@ -455,6 +455,11 @@
   (fun qdb_decimal_neg ((var value BinInt)) -> BinInt
     (attrs (operator "-"))
     (block (return (cast (struct ((V (- (field value V))))) BinInt))))
+  ;; Narrow abs goes through i32: extern i8/i16 parameters carry no signext.
+  (fun qdb_abs_i8 ((var value i32)) -> i32
+    (attrs extern) (block))
+  (fun qdb_abs_i16 ((var value i32)) -> i32
+    (attrs extern) (block))
   (fun qdb_abs_i32 ((var value i32)) -> i32
     (attrs extern) (block))
   (fun qdb_abs_i64 ((var value i64)) -> i64
@@ -464,6 +469,10 @@
   ;; TODO(qumir): `abs [T]` should work as `zero = cast(0, T); zero - value`,
   ;; but generic arithmetic is still rejected in real kernels. Keep concrete
   ;; overloads until generic numeric constraints/body checking are fixed.
+  (fun abs ((var value i8)) -> i8
+    (block (return (cast (call qdb_abs_i8 (cast value i32)) i8))))
+  (fun abs ((var value i16)) -> i16
+    (block (return (cast (call qdb_abs_i16 (cast value i32)) i16))))
   (fun abs ((var value i32)) -> i32
     (block (return (call qdb_abs_i32 value))))
   (fun abs ((var value i64)) -> i64
