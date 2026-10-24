@@ -70,6 +70,68 @@ TAggregateKeyDescriptor JoinKeyAggregateShim(const TJoinKeyDescriptor& key) {
     return shim;
 }
 
+
+// A join key read from batch row `rowVar` of the key_column_N columns: Setup
+// declares the per-field temporaries (prefix + N), Value builds the
+// <named LookupKey> struct in the order the struct declares its fields
+// (key_N <- value, valid_N <- validity). TKeyDescriptor is TJoinKeyDescriptor
+// or its TAggregateKeyDescriptor shim.
+struct TKeyReadAst {
+    std::vector<TExprPtr> Setup;
+    TExprPtr Value;
+};
+
+template <typename TKeyDescriptor>
+TKeyReadAst GenKeyReadAst(
+    const TKeyDescriptor& key,
+    const std::string& rowVar,
+    const std::string& temporaryPrefix,
+    const TTypePtr& stringViewType)
+{
+    NQumir::TLocation loc{};
+    std::vector<TColumnValueAst> keyFields;
+    keyFields.reserve(key.Fields.size());
+    for (size_t fieldIndex = 0; fieldIndex < key.Fields.size(); ++fieldIndex) {
+        auto logicalType = key.Fields[fieldIndex].IsNullable
+            ? std::make_shared<TNullable>(key.Fields[fieldIndex].Type)
+            : key.Fields[fieldIndex].Type;
+        keyFields.push_back(BuildColumnValueAst(
+            "key_column_" + std::to_string(fieldIndex),
+            rowVar,
+            temporaryPrefix + std::to_string(fieldIndex),
+            std::move(logicalType),
+            stringViewType));
+    }
+    auto namedKey = TMaybeType<TNamedType>(key.LookupType);
+    auto keyStruct = namedKey
+        ? TMaybeType<TStructType>(namedKey.Cast()->UnderlyingType)
+        : TMaybeType<TStructType>(key.LookupType);
+    if (!keyStruct) {
+        throw NQumir::TError("join key must be a struct");
+    }
+    std::vector<TExprPtr> structFields;
+    structFields.reserve(keyStruct.Cast()->Fields.size());
+    for (const auto& [fieldName, fieldType] : keyStruct.Cast()->Fields) {
+        const bool validity = fieldName.starts_with("valid_");
+        const std::string_view prefix = validity
+            ? "valid_"
+            : "key_";
+        const size_t fieldIndex = std::stoull(fieldName.substr(prefix.size()));
+        structFields.push_back(
+            validity ? keyFields[fieldIndex].IsValid : keyFields[fieldIndex].Value);
+    }
+    TKeyReadAst result;
+    for (auto& keyField : keyFields) {
+        result.Setup.insert(
+            result.Setup.end(),
+            std::make_move_iterator(keyField.Setup.begin()),
+            std::make_move_iterator(keyField.Setup.end()));
+    }
+    result.Value =
+        std::make_shared<TStructConstructExpr>(loc, key.LookupType, std::move(structFields));
+    return result;
+}
+
 } // namespace
 
 std::vector<NQumir::NAst::TExprPtr> GenKeyTypeDecls(const TAggregateKeyDescriptor& key) {
@@ -217,40 +279,7 @@ NQumir::NAst::TExprPtr GenJoinInsertKeyOnlyAst(
     body.push_back(var("i", i64Type));
     body.push_back(assign("i", numI64(0)));
 
-    std::vector<TColumnValueAst> keyFields;
-    keyFields.reserve(key.Fields.size());
-    for (size_t fi = 0; fi < key.Fields.size(); ++fi) {
-        auto logicalType = key.Fields[fi].IsNullable
-            ? std::make_shared<TNullable>(key.Fields[fi].Type)
-            : key.Fields[fi].Type;
-        keyFields.push_back(BuildColumnValueAst(
-            "key_column_" + std::to_string(fi),
-            "i",
-            "key_value_" + std::to_string(fi),
-            std::move(logicalType),
-            stringViewType));
-    }
-
-    auto namedKey = TMaybeType<TNamedType>(key.LookupType);
-    auto keyStruct = namedKey
-        ? TMaybeType<TStructType>(namedKey.Cast()->UnderlyingType)
-        : TMaybeType<TStructType>(key.LookupType);
-    if (!keyStruct) {
-        throw NQumir::TError("GenJoinInsertKeyOnlyAst: key must be a struct");
-    }
-    std::vector<TExprPtr> structFields;
-    structFields.reserve(keyStruct.Cast()->Fields.size());
-    for (const auto& [fieldName, fieldType] : keyStruct.Cast()->Fields) {
-        const bool validity = fieldName.starts_with("valid_");
-        const std::string_view prefix = validity
-            ? "valid_"
-            : "key_";
-        const size_t fieldIndex = std::stoull(fieldName.substr(prefix.size()));
-        structFields.push_back(
-            validity ? keyFields[fieldIndex].IsValid : keyFields[fieldIndex].Value);
-    }
-    TExprPtr keyValue =
-        std::make_shared<TStructConstructExpr>(loc, key.LookupType, std::move(structFields));
+    auto keyRead = GenKeyReadAst(key, "i", "key_value_", stringViewType);
 
     body.push_back(var("stored_witness", key.StoredType));
     body.push_back(assign("stored_witness", ZeroValueExpr(key.StoredType)));
@@ -266,14 +295,12 @@ NQumir::NAst::TExprPtr GenJoinInsertKeyOnlyAst(
         });
 
     std::vector<TExprPtr> process;
-    for (auto& kf : keyFields) {
-        process.insert(
-            process.end(),
-            std::make_move_iterator(kf.Setup.begin()),
-            std::make_move_iterator(kf.Setup.end()));
-    }
+    process.insert(
+        process.end(),
+        std::make_move_iterator(keyRead.Setup.begin()),
+        std::make_move_iterator(keyRead.Setup.end()));
     process.push_back(var("key_value", key.LookupType));
-    process.push_back(assign("key_value", std::move(keyValue)));
+    process.push_back(assign("key_value", std::move(keyRead.Value)));
     process.push_back(
         std::make_shared<TIfExpr>(
             loc,
@@ -621,43 +648,7 @@ NQumir::NAst::TExprPtr GenJoinBatchAst(
     body.push_back(var("i", i64Type));
     body.push_back(assign("i", numI64(0)));
 
-    // Per-row key materialization, reusing the shared column value builder.
-    std::vector<TColumnValueAst> keyFields;
-    keyFields.reserve(key.Fields.size());
-    for (size_t fieldIndex = 0; fieldIndex < key.Fields.size(); ++fieldIndex) {
-        auto logicalType = key.Fields[fieldIndex].IsNullable
-            ? std::make_shared<TNullable>(key.Fields[fieldIndex].Type)
-            : key.Fields[fieldIndex].Type;
-        keyFields.push_back(BuildColumnValueAst(
-            "key_column_" + std::to_string(fieldIndex),
-            "i",
-            "key_value_" + std::to_string(fieldIndex),
-            std::move(logicalType),
-            stringViewType));
-    }
-
-    // Build the <named Key> struct value (key_N <- Value, valid_N <- IsValid,
-    // padding <- 0), in the order the Key struct declares.
-    auto namedKey = TMaybeType<TNamedType>(key.LookupType);
-    auto keyStruct = namedKey
-        ? TMaybeType<TStructType>(namedKey.Cast()->UnderlyingType)
-        : TMaybeType<TStructType>(key.LookupType);
-    if (!keyStruct) {
-        throw NQumir::TError("GenJoinBatchAst: key must be a struct");
-    }
-    std::vector<TExprPtr> structFields;
-    structFields.reserve(keyStruct.Cast()->Fields.size());
-    for (const auto& [fieldName, fieldType] : keyStruct.Cast()->Fields) {
-        const bool validity = fieldName.starts_with("valid_");
-        const std::string_view prefix = validity
-            ? "valid_"
-            : "key_";
-        const size_t fieldIndex = std::stoull(fieldName.substr(prefix.size()));
-        structFields.push_back(
-            validity ? keyFields[fieldIndex].IsValid : keyFields[fieldIndex].Value);
-    }
-    TExprPtr keyValue =
-        std::make_shared<TStructConstructExpr>(loc, key.LookupType, std::move(structFields));
+    auto keyRead = GenKeyReadAst(key, "i", "key_value_", stringViewType);
 
     // own_row_id = (batch_idx << 32) | (i & 0xffffffff)
     auto ownRowId = binary(
@@ -667,7 +658,7 @@ NQumir::NAst::TExprPtr GenJoinBatchAst(
 
     std::vector<TExprPtr> keyValueSetup = {
         var("key_value", key.LookupType),
-        assign("key_value", std::move(keyValue)),
+        assign("key_value", std::move(keyRead.Value)),
         var("hash_value", u64Type),
     };
     if (hasPrecomputedHash) {
@@ -779,12 +770,10 @@ NQumir::NAst::TExprPtr GenJoinBatchAst(
     }
 
     std::vector<TExprPtr> process;
-    for (auto& keyField : keyFields) {
-        process.insert(
-            process.end(),
-            std::make_move_iterator(keyField.Setup.begin()),
-            std::make_move_iterator(keyField.Setup.end()));
-    }
+    process.insert(
+        process.end(),
+        std::make_move_iterator(keyRead.Setup.begin()),
+        std::make_move_iterator(keyRead.Setup.end()));
     process.insert(
         process.end(),
         std::make_move_iterator(keyValueSetup.begin()),
@@ -1525,54 +1514,19 @@ NQumir::NAst::TExprPtr GenKeyHashBatchAst(
     body.push_back(var("i", i64Type));
     body.push_back(assign("i", numI64(0)));
 
-    std::vector<TColumnValueAst> keyFields;
-    keyFields.reserve(key.Fields.size());
-    for (size_t fieldIndex = 0; fieldIndex < key.Fields.size(); ++fieldIndex) {
-        auto logicalType = key.Fields[fieldIndex].IsNullable
-            ? std::make_shared<TNullable>(key.Fields[fieldIndex].Type)
-            : key.Fields[fieldIndex].Type;
-        keyFields.push_back(BuildColumnValueAst(
-            "key_column_" + std::to_string(fieldIndex),
-            "i",
-            "hash_key_value_" + std::to_string(fieldIndex),
-            std::move(logicalType),
-            stringViewType));
-    }
-
-    auto namedKey = TMaybeType<TNamedType>(key.LookupType);
-    auto keyStruct = namedKey
-        ? TMaybeType<TStructType>(namedKey.Cast()->UnderlyingType)
-        : TMaybeType<TStructType>(key.LookupType);
-    if (!keyStruct) {
-        throw NQumir::TError("GenJoinHashBatchAst: key must be a struct");
-    }
-    std::vector<TExprPtr> structFields;
-    structFields.reserve(keyStruct.Cast()->Fields.size());
-    for (const auto& [fieldName, fieldType] : keyStruct.Cast()->Fields) {
-        const bool validity = fieldName.starts_with("valid_");
-        const std::string_view prefix = validity
-            ? "valid_"
-            : "key_";
-        const size_t fieldIndex = std::stoull(fieldName.substr(prefix.size()));
-        structFields.push_back(
-            validity ? keyFields[fieldIndex].IsValid : keyFields[fieldIndex].Value);
-    }
-    TExprPtr keyValue =
-        std::make_shared<TStructConstructExpr>(loc, key.LookupType, std::move(structFields));
+    auto keyRead = GenKeyReadAst(key, "i", "hash_key_value_", stringViewType);
 
     std::vector<TExprPtr> process;
-    for (auto& keyField : keyFields) {
-        process.insert(
-            process.end(),
-            std::make_move_iterator(keyField.Setup.begin()),
-            std::make_move_iterator(keyField.Setup.end()));
-    }
+    process.insert(
+        process.end(),
+        std::make_move_iterator(keyRead.Setup.begin()),
+        std::make_move_iterator(keyRead.Setup.end()));
     process.push_back(
         std::make_shared<TArrayAssignExpr>(
             loc,
             "hashes",
             std::vector<TExprPtr>{ident("i")},
-            cast(call("rh_hash", {std::move(keyValue)}), u64Type)));
+            cast(call("rh_hash", {std::move(keyRead.Value)}), u64Type)));
 
     // A rejected row gets no hash: its slot keeps what the caller left there.
     auto selected = binary(
@@ -1941,63 +1895,6 @@ void ClassifyRowJoinColumn(
 
 int64_t AlignUpI64(int64_t value, int64_t alignment) {
     return (value + alignment - 1) / alignment * alignment;
-}
-
-// The key struct the probe and build sides share, read from a batch row:
-// declares the temporaries in Setup and yields the <named LookupKey> value.
-struct TKeyReadAst {
-    std::vector<TExprPtr> Setup;
-    TExprPtr Value;
-};
-
-TKeyReadAst GenKeyReadAst(
-    const TJoinKeyDescriptor& key,
-    const std::string& rowVar,
-    const std::string& temporaryPrefix,
-    const TTypePtr& stringViewType)
-{
-    NQumir::TLocation loc{};
-    std::vector<TColumnValueAst> keyFields;
-    keyFields.reserve(key.Fields.size());
-    for (size_t fieldIndex = 0; fieldIndex < key.Fields.size(); ++fieldIndex) {
-        auto logicalType = key.Fields[fieldIndex].IsNullable
-            ? std::make_shared<TNullable>(key.Fields[fieldIndex].Type)
-            : key.Fields[fieldIndex].Type;
-        keyFields.push_back(BuildColumnValueAst(
-            "key_column_" + std::to_string(fieldIndex),
-            rowVar,
-            temporaryPrefix + std::to_string(fieldIndex),
-            std::move(logicalType),
-            stringViewType));
-    }
-    auto namedKey = TMaybeType<TNamedType>(key.LookupType);
-    auto keyStruct = namedKey
-        ? TMaybeType<TStructType>(namedKey.Cast()->UnderlyingType)
-        : TMaybeType<TStructType>(key.LookupType);
-    if (!keyStruct) {
-        throw NQumir::TError("GenKeyReadAst: key must be a struct");
-    }
-    std::vector<TExprPtr> structFields;
-    structFields.reserve(keyStruct.Cast()->Fields.size());
-    for (const auto& [fieldName, fieldType] : keyStruct.Cast()->Fields) {
-        const bool validity = fieldName.starts_with("valid_");
-        const std::string_view prefix = validity
-            ? "valid_"
-            : "key_";
-        const size_t fieldIndex = std::stoull(fieldName.substr(prefix.size()));
-        structFields.push_back(
-            validity ? keyFields[fieldIndex].IsValid : keyFields[fieldIndex].Value);
-    }
-    TKeyReadAst result;
-    for (auto& keyField : keyFields) {
-        result.Setup.insert(
-            result.Setup.end(),
-            std::make_move_iterator(keyField.Setup.begin()),
-            std::make_move_iterator(keyField.Setup.end()));
-    }
-    result.Value =
-        std::make_shared<TStructConstructExpr>(loc, key.LookupType, std::move(structFields));
-    return result;
 }
 
 // Batch prologue shared by append and probe: n, selection, cols, the key
