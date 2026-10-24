@@ -1,0 +1,6 @@
+sort [l asc]
+└─ project (l, c) (rows≈7 cost≈2.2K)
+   └─ filter (|| (> count_0 1) (== max_0 (cast "ABC" <named StringView>))) (rows≈7 cost≈2K)
+      └─ aggregate keys=[gb_0] aggs=[count_0=count, max_0=max] (rows≈14 cost≈1.5K)
+         └─ project (gb_0, arg_0) (rows≈14 cost≈896)
+            └─ source t AS t (rows≈14 cost≈448)

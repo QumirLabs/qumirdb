@@ -353,6 +353,21 @@ TEST(ProjectType, ExpandNullableWrapsPlainSiblingOfNullableBranch) {
     EXPECT_TRUE(IsF64(NullableInner(type)));
 }
 
+TEST(ProjectType, CaseMappingCallsTakeTheStringArena) {
+    EXPECT_TRUE(TMaybeType<TStringType>(AnnotateExprType(Parse("(call upper s)"), Schema())));
+    TStructType nullable({
+        {"n", std::make_shared<NQdb::TNullable>(std::make_shared<TStringType>())},
+    });
+    auto [expr, type] = ExpandNullable(Parse("(call lower n)"), nullable);
+    ASSERT_TRUE(IsNullable(type));
+    EXPECT_TRUE(TMaybeType<TStringType>(NullableInner(type)));
+    const std::string printed = NQumir::NAst::NCore::PrintAst(expr);
+    EXPECT_NE(printed.find("(call qdb_string_lower __arena__ (field __nx0 Value))"),
+        std::string::npos) << printed;
+    EXPECT_THROW(AnnotateExprType(Parse("(call upper k)"), Schema()), NQumir::TError);
+    EXPECT_THROW(AnnotateExprType(Parse("(call lower s s)"), Schema()), NQumir::TError);
+}
+
 TEST(ProjectType, RejectsUnknownColumn) {
     EXPECT_THROW(AnnotateExprType(Parse("missing"), Schema()), NQumir::TError);
 }

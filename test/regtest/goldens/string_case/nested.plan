@@ -1,0 +1,3 @@
+sort [k asc]
+└─ project (k, x, y, d) (rows≈14 cost≈1.2K)
+   └─ source t AS t (rows≈14 cost≈560)

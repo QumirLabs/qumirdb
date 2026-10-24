@@ -1574,6 +1574,7 @@ function createQdbEnv(getMemory, holder) {
       BigInt(likeContains(svBytes(str), svBytes(lit))),
     qdb_substring: substring,
     qdb_string_concat: stringConcat,
+    qdb_string_arena_alloc: (_arena, size) => toWasmPtr(allocStringScratch(size)),
     qdb_regexp_replace: regexpReplace,
     qdb_date_year: dateYear,
     qdb_sql_date: sqlDate,
