@@ -507,6 +507,22 @@ double qdb_round(double value, int32_t digits) {
     return std::round(value * factor) / factor;
 }
 
+// The narrow variants take and return i32: an extern i8/i16 parameter is declared
+// without signext, so the callee may see a zero-extended value on arm64.
+int32_t qdb_abs_i8(int32_t value) {
+    if (value == std::numeric_limits<int8_t>::min()) {
+        throw std::overflow_error("abs overflow for i8");
+    }
+    return value < 0 ? -value : value;
+}
+
+int32_t qdb_abs_i16(int32_t value) {
+    if (value == std::numeric_limits<int16_t>::min()) {
+        throw std::overflow_error("abs overflow for i16");
+    }
+    return value < 0 ? -value : value;
+}
+
 int32_t qdb_abs_i32(int32_t value) {
     if (value == std::numeric_limits<int32_t>::min()) {
         throw std::overflow_error("abs overflow for i32");

@@ -104,6 +104,8 @@ int32_t qdb_sql_interval(qdb_string_view amount, qdb_string_view unit);
 // SQL ROUND(x, digits) -> round half away from zero.
 double qdb_round(double value, int32_t digits);
 
+int32_t qdb_abs_i8(int32_t value);
+int32_t qdb_abs_i16(int32_t value);
 int32_t qdb_abs_i32(int32_t value);
 int64_t qdb_abs_i64(int64_t value);
 double qdb_fabs(double value);
