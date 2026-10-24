@@ -674,6 +674,33 @@ TDecimalSpec IntegerDecimalSpec(const TExprPtr& e, const TTypePtr& type) {
     return {.Precision = MaxDecimalPrecision, .Scale = 0};
 }
 
+// A DECIMAL beside a non-literal DOUBLE is an approximate-number operation: as in DuckDB, the
+// decimal is converted to DOUBLE and the result is DOUBLE, instead of rounding the DOUBLE to
+// the decimal's scale. A fractional literal is not such an operand: it is a decimal of its
+// own digits (see TDecimalLiteral), so by now it has a decimal spec.
+bool IsDecimalBesideFloat(const std::optional<TDecimalSpec>& dl, const std::optional<TDecimalSpec>& dr,
+    const TTypePtr& vl, const TTypePtr& vr)
+{
+    return (dl && !dr && IsFloat(UnwrapNamedType(vr))) || (dr && !dl && IsFloat(UnwrapNamedType(vl)));
+}
+
+bool IsFloatLiteral(TExprPtr e) {
+    if (auto un = TMaybeNode<TUnaryExpr>(e); un && un.Cast()->Operator == "-") {
+        e = un.Cast()->Operand;
+    }
+    auto num = TMaybeNode<TNumberExpr>(e);
+    return num && num.Cast()->IsFloat();
+}
+
+// IsDecimalBesideFloat for a binary operation. A float literal is a constant, not an
+// approximate column: one that DecimalLiteralOf could not read as a decimal (more than 18
+// digits) keeps meeting the decimal at the decimal's scale.
+bool IsDecimalBesideFloat(const std::optional<TDecimalSpec>& dl, const std::optional<TDecimalSpec>& dr,
+    const TTypePtr& vl, const TTypePtr& vr, const TExprPtr& le, const TExprPtr& re)
+{
+    return IsDecimalBesideFloat(dl, dr, vl, vr) && !IsFloatLiteral(dl ? re : le);
+}
+
 TTypePtr DecimalBinaryValueType(TOperator op, const TExprPtr& le, const TExprPtr& re,
     TTypePtr vl, TTypePtr vr)
 {
@@ -695,6 +722,10 @@ TTypePtr DecimalBinaryValueType(TOperator op, const TExprPtr& le, const TExprPtr
     }
     if (IsComparison(op)) {
         return std::make_shared<TBoolType>();
+    }
+    // DOUBLE % is not implemented (see the `%` check below), so it stays an error.
+    if (op != "%" && IsDecimalBesideFloat(dl, dr, vl, vr, le, re)) {
+        return std::make_shared<TFloatType>();
     }
     if (op == "/") {
         if (dl && dr) {
@@ -780,6 +811,9 @@ TTypePtr UnifyBranchTypes(const TTypePtr& a, const TTypePtr& b) {
                 .Precision = std::min(MaxDecimalPrecision, intDigits + scale),
                 .Scale = scale,
             });
+        }
+        if (IsDecimalBesideFloat(da, db, va, vb)) {
+            return std::make_shared<TFloatType>();
         }
         return MakeDecimalType(da ? *da : *db);
     }
@@ -1679,6 +1713,18 @@ int32_t DecimalCommonScale(const TTypePtr& left, const TTypePtr& right,
     return scale;
 }
 
+// The expression as a DOUBLE: a decimal is converted like CAST(... AS DOUBLE), anything else
+// already is one or is converted by the caller's cast.
+TExprPtr DecimalValueAsDouble(TExprPtr expr, const TTypePtr& type, TLocation loc) {
+    if (auto decimal = DecimalSpecOfValueType(ValueType(type))) {
+        return Call("qdb_decimal_to_f64", {
+            std::move(expr),
+            DecimalScaleLiteral(loc, decimal->Scale),
+        }, loc);
+    }
+    return expr;
+}
+
 TTypePtr ExpandDecimalNode(TExprPtr& e, const TStructType& inputType, TTypeEnv& env);
 
 TTypePtr ExpandDecimalBlock(TBlockExpr& node, const TStructType& inputType, TTypeEnv& env) {
@@ -1759,6 +1805,11 @@ TTypePtr ExpandDecimalNode(TExprPtr& e, const TStructType& inputType, TTypeEnv& 
             if (node->Else) {
                 node->Else = DecimalValueAtScale(node->Else, elseT, decimal->Scale, node->Location);
             }
+        } else if (result && IsFloat(result)) {
+            node->Then = DecimalValueAsDouble(node->Then, thenT, node->Location);
+            if (node->Else) {
+                node->Else = DecimalValueAsDouble(node->Else, elseT, node->Location);
+            }
         }
         bool nullable = !thenT || !elseT || IsNullableType(thenT) || IsNullableType(elseT);
         return result && nullable
@@ -1780,8 +1831,21 @@ TTypePtr ExpandDecimalNode(TExprPtr& e, const TStructType& inputType, TTypeEnv& 
                 lt = MakeDecimalType(lit->Spec);
             }
         }
-        const auto dl = DecimalSpecOfValueType(ValueType(lt));
-        const auto dr = DecimalSpecOfValueType(ValueType(rt));
+        auto dl = DecimalSpecOfValueType(ValueType(lt));
+        auto dr = DecimalSpecOfValueType(ValueType(rt));
+        if (node->Operator != "%"_op &&
+            IsDecimalBesideFloat(dl, dr, ValueType(lt), ValueType(rt), node->Left, node->Right)) {
+            // The comparison or arithmetic then runs on DOUBLEs, with the decimal converted
+            // like CAST(... AS DOUBLE). The converted operand keeps its nullability.
+            auto& decimalOperand = dl ? node->Left : node->Right;
+            auto& decimalType = dl ? lt : rt;
+            decimalOperand = DecimalValueAsDouble(std::move(decimalOperand), decimalType, node->Location);
+            TTypePtr floatType = std::make_shared<TFloatType>();
+            decimalType = IsNullableType(decimalType)
+                ? std::static_pointer_cast<TType>(std::make_shared<TNullable>(floatType))
+                : floatType;
+            dl = dr = std::nullopt;
+        }
         if (!dl && !dr) {
             return Propagate({lt, rt},
                 BinaryValueType(node->Operator, node->Left, node->Right, lt, rt));

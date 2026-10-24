@@ -1,0 +1,1 @@
+SELECT id, CAST(n AS DECIMAL(10,0)) < x AS lt1, x < CAST(n AS DECIMAL(10,0)) AS lt2, CAST(n AS DECIMAL(10,0)) = x AS eq1, x >= CAST(n AS DECIMAL(10,0)) AS ge2, CAST(n AS DECIMAL(10,0)) <> x AS ne1, CAST(n AS DECIMAL(10,1)) + 0.5 > x AS gt3 FROM t ORDER BY id;

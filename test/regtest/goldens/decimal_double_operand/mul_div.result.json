@@ -1,0 +1,11 @@
+{
+  "schema": "<struct (id i32) (m1 <named Nullable [f64]>) (m2 <named Nullable [f64]>) (d1 <named Nullable [f64]>) (d2 <named Nullable [f64]>)>",
+  "rows": [
+    [1, 0.10000000000000001, 0.10000000000000001, 10, 0.10000000000000001],
+    [2, 2.5, 2.5, 1.6000000000000001, 0.625],
+    [3, null, null, null, null],
+    [4, null, null, null, null],
+    [5, 12.5, 12.5, 2, 0.5],
+    [6, 15, 15, 1.0666666666666667, 0.9375]
+  ]
+}

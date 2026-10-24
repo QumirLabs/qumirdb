@@ -1,0 +1,1 @@
+SELECT id, -CAST(n AS DECIMAL(10,0)) + x AS neg, x BETWEEN CAST(n AS DECIMAL(10,0)) AND 3 AS bt, x IN (CAST(n AS DECIMAL(10,0)), 2.5) AS inn, CAST(n AS DECIMAL(10,2)) + x > 1.2 AS combo FROM t ORDER BY id;

@@ -1,0 +1,1 @@
+SELECT id, CAST(n AS DECIMAL(10,2)) + 0.25 + x AS a1, x + (CAST(n AS DECIMAL(10,0)) + 0.5) AS a2, CAST(n AS DECIMAL(10,0)) - x AS s1, x - CAST(n AS DECIMAL(10,0)) AS s2 FROM t ORDER BY id;
