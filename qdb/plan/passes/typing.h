@@ -29,4 +29,10 @@ void CoerceSetOpBranches(
     const TOperatorPtr& root,
     const NKernel::TAnnotationContext& context = {});
 
+// Equi-join keys compare equal bytes, so INTEGER = BIGINT cannot share a key. Casts the
+// narrower integer key of each join to the common integer type in a projection below
+// that side and re-points the key at the casted column. Run after AnnotateTypes, then
+// re-annotate.
+void CoerceJoinKeys(const TOperatorPtr& root);
+
 } // namespace NQdb
