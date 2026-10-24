@@ -1222,7 +1222,7 @@ TEST(JoinMaterialize, PropagatesSourceNullsAndReadsStreamBatches) {
         PackRowId(0, 0),
         PackRowId(0, 0), // store right row -> 7
         PackRowId(0, 1),
-        PackRowId(-1, 1), // stream right row -> 43,
+        PackRowId(-1, 1), // stream right row -> 43
     };
     TPairBuffer pairs{.Count = 2, .Capacity = 2, .Data = pairData.data()};
 
