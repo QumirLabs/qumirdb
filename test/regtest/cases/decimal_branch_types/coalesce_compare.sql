@@ -1,0 +1,1 @@
+SELECT id, v = 5 AS e5, 5 = v AS r5, v = -2 AS em2, v < 3 AS lt3, v >= -2 AS gem2, v <> 7 AS ne7, v IS NULL AS n FROM (SELECT id, COALESCE(CAST(a AS DECIMAL(12,2)), CAST(b AS DECIMAL(10,4))) AS v FROM t) ORDER BY id;

@@ -10,6 +10,9 @@
     "coalesce_constant.sql": {"order": "ordered"},
     "coalesce_remainder.sql": {"order": "ordered"},
     "coalesce_integer.sql": {"order": "ordered"},
-    "case_scales.sql": {"order": "ordered"}
+    "case_scales.sql": {"order": "ordered"},
+    "coalesce_compare.sql": {"order": "ordered"},
+    "case_compare.sql": {"order": "ordered"},
+    "remainder_compare.sql": {"order": "ordered"}
   }
 }
