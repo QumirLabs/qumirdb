@@ -15,7 +15,8 @@
   ;;   values at their natural alignment; strings are StringView handles that
   ;;   point into the retained input batch, so string bytes are not copied.
   ;;
-  ;; Table index = hash >> Shift (the top bits), salt = bits 16..31 of the hash.
+  ;; Table index = mixed hash >> Shift (the top bits), salt = bits 16..31 of
+  ;; the mixed hash (jrt_mix).
   ;; The hash shuffle partitions a join by the low bits, so a partition's table
   ;; must not index by them; the top bits stay uniform inside a partition.
   ;; Linear probing stops at an empty entry or a salt match; only then is the
@@ -141,6 +142,14 @@
       (field_assign table Capacity 0)
       (field_assign table Rows 0)))
 
+  ;; The table takes its index and salt from the top half of the hash, where a
+  ;; key hash may carry little entropy: a string of up to 16 bytes hashes to
+  ;; byte-swapped products, whose top 16 bits depend on four of its bytes. A
+  ;; Fibonacci multiply spreads every bit of the hash over the top bits.
+  (fun jrt_mix ((var hash u64)) -> u64
+    (attrs inline)
+    (block (return (* hash (: -7046029254386353131 u64)))))
+
   (fun jrt_salt ((var hash u64)) -> u64
     (attrs inline)
     (block (return (& (>> hash (: 16 u64)) (: 65535 u64)))))
@@ -232,7 +241,7 @@
       (var j = 0)
       (while (< j count)
         (block
-          (var h = (index hashes j))
+          (var h = (call jrt_mix (index hashes j)))
           (var salt = (call jrt_salt h))
           (var off = (: 0 u64))
           (var e = (call jrt_seek table (>> h shift) salt off))

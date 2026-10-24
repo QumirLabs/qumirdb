@@ -1966,7 +1966,7 @@ NQumir::NAst::TExprPtr GenRowJoinBuildAst(const TJoinKeyDescriptor &key,
   auto number = [&](int64_t value) { return Oz::TypedInt(value, i64Type); };
   auto u64 = [&](int64_t value) { return Oz::TypedInt(value, u64Type); };
 
-  // Linear probing from the row's top hash bits: an empty entry starts a new
+  // Linear probing from the top bits of the row's mixed hash: an empty entry starts a new
   // key, a salt match with an equal key chains the row in front of that key's
   // rows, anything else moves to the next entry.
   std::vector<TExprPtr> insert = {
@@ -1975,7 +1975,7 @@ NQumir::NAst::TExprPtr GenRowJoinBuildAst(const TJoinKeyDescriptor &key,
                                          Oz::Mul(Oz::Ident("k"), Oz::Ident("row_bytes"))),
                                  ptrU8Type)),
       Oz::Var("h", u64Type),
-      Oz::Assign("h", Oz::Call("jr_row_hash", {Oz::Ident("row")})),
+      Oz::Assign("h", Oz::Call("jrt_mix", {Oz::Call("jr_row_hash", {Oz::Ident("row")})})),
       Oz::Var("salt", u64Type),
       Oz::Assign("salt", Oz::Call("jrt_salt", {Oz::Ident("h")})),
       Oz::Var("off", u64Type),
