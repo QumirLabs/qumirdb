@@ -7,6 +7,7 @@
   "tables": {"t": "xy", "u": "xy"},
   "variants": ["single", "threaded", "js"],
   "cases": {
+    "aggregate_extra_argument_sum.sql": {},
     "aggregate_order_by_same_expression_control.sql": {"expect_error": false, "order": "ordered"},
     "distinct_aggregate_order_by_control.sql": {"expect_error": false, "order": "ordered"},
     "distinct_order_by_other_column.sql": {},
