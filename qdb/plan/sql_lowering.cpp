@@ -39,6 +39,7 @@ struct TAggCall {
     NAst::TExprPtr Arg; // null for count(*)
     bool Distinct = false;
     bool Star = false;
+    size_t ArgCount = 0; // arguments written at the call, DISTINCT's own included
 };
 
 namespace {
@@ -60,6 +61,7 @@ std::optional<TAggCall> AsAggCall(const NAst::TExprPtr& expr) {
     TAggCall agg;
     agg.Func = func;
     const auto& args = call.Cast()->Args;
+    agg.ArgCount = args.size();
     if (!args.empty()) {
         const auto& arg = args[0];
         auto star = NAst::TMaybeNode<NAst::TIdentExpr>(arg);
@@ -71,6 +73,7 @@ std::optional<TAggCall> AsAggCall(const NAst::TExprPtr& expr) {
             if (distinctCallee && ToLower(distinctCallee.Cast()->Name) == "distinct") {
                 agg.Distinct = true;
                 const auto& distinctArgs = distinct.Cast()->Args;
+                agg.ArgCount = distinctArgs.size();
                 agg.Arg = distinctArgs.empty() ? nullptr : distinctArgs[0];
             } else {
                 agg.Arg = arg;
@@ -787,6 +790,12 @@ std::expected<NAst::TExprPtr, TError> TAggCollector::EmitBoolAggregate(
 }
 
 std::expected<NAst::TExprPtr, TError> TAggCollector::Emit(const TAggCall& agg, TLocation loc) {
+    // Every supported aggregate takes one argument; a further one would be
+    // dropped silently and compute the one-argument aggregate.
+    if (agg.ArgCount > 1 || (agg.ArgCount == 0 && agg.Func != "count")) {
+        return std::unexpected(TError(loc, agg.Func + "() takes 1 argument, got " +
+            std::to_string(agg.ArgCount)));
+    }
     if (agg.Distinct) {
         if (agg.Func != "count") {
             return std::unexpected(TError(loc, "only count(distinct ...) is supported"));
@@ -988,6 +997,12 @@ std::expected<NAst::TExprPtr, TError> TWindowCollector::Emit(const NSql::TSqlPtr
     TRaw raw;
     raw.Func = func;
     const auto& args = call.Cast()->Args;
+    const size_t arity = func == "rank" ? 0 : 1;
+    if (args.size() > arity) {
+        return std::unexpected(TError(w->Location, func + "() takes " +
+            std::to_string(arity) + " argument" + (arity == 1 ? "" : "s") +
+            ", got " + std::to_string(args.size())));
+    }
     if (!args.empty()) {
         raw.Arg = args[0];
     }
