@@ -75,7 +75,7 @@
     (Mask u64)
     (Shift i64)
     (Rows i64)
-    (ChainsLongerThanOne i64)>)
+    (Keys i64)>)
 
   ;; Per-probe-batch scratch of the row join, one slot per selected row.
   (type JoinScratch <struct

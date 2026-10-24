@@ -99,14 +99,14 @@ void TOperatorInstrumentation::ObserveHash(
 
 void TOperatorInstrumentation::ObserveBuildTable(
     size_t side,
-    uint64_t rows,
+    uint64_t keys,
     uint64_t capacity,
     uint64_t bytes)
 {
     HasHash = true;
     HasBuildMemory = true;
     Capacities_[side] = capacity;
-    Groups_[side] = rows;
+    Groups_[side] = keys;
     Memory_[side] = bytes;
     Groups = Groups_[0] + Groups_[1];
     HashCapacity = Capacities_[0] + Capacities_[1];

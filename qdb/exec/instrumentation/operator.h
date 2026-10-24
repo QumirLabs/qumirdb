@@ -54,8 +54,9 @@ struct TOperatorInstrumentation {
         std::span<const int64_t> stringBuffers = {});
 
     // A row join table (exec/row_join_exec.cpp) reports its size directly:
-    // the entry table never grows, so there are no rehashes to count.
-    void ObserveBuildTable(size_t side, uint64_t rows, uint64_t capacity, uint64_t bytes);
+    // distinct keys as groups; the entry table never grows, so there are no
+    // rehashes to count.
+    void ObserveBuildTable(size_t side, uint64_t keys, uint64_t capacity, uint64_t bytes);
 
 private:
     std::array<uint64_t, 2> Capacities_ = {};

@@ -2758,12 +2758,6 @@ TEST(MarkJoinKernel, MarkerColumnReadsBackAsDeclaredType) {
     }
 }
 
-int main(int argc, char** argv) {
-    testing::InitGoogleTest(&argc, argv);
-    NQumir::NCodeGen::TLLVMInitializer initializer;
-    return RUN_ALL_TESTS();
-}
-
 // The row join table (kernel/join/join_rows.oz): rows with an equal key chain
 // behind one entry, NULL keys never match, and a string payload is gathered
 // from the retained batch through the row's StringView.
@@ -2862,4 +2856,179 @@ TEST(RowJoinProcessor, ChainsNullKeysAndStringPayload) {
     std::sort(got.begin(), got.end());
     std::sort(expected.begin(), expected.end());
     EXPECT_EQ(got, expected);
+}
+
+namespace {
+
+// Runs a row join over the given batches of each side; the build side is read
+// to its end before the first probe batch. Returns the output batches, which
+// the caller releases.
+std::vector<TRowSet> RunRowJoin(
+    const NKernel::TOperatorKernelSpec& spec,
+    EJoinBuildSide buildSide,
+    std::vector<TRowSet> leftBatches,
+    std::vector<TRowSet> rightBatches)
+{
+    TKernelCompiler compiler;
+    TRowJoinProcessor processor(
+        compiler.CompileRowJoin(spec, buildSide == EJoinBuildSide::Left),
+        buildSide);
+    size_t nextLeft = 0;
+    size_t nextRight = 0;
+    auto left = [&](TRowSet& rowSet) {
+        if (nextLeft == leftBatches.size()) {
+            return EJoinFetchResult::FINISHED;
+        }
+        rowSet = leftBatches[nextLeft++];
+        return EJoinFetchResult::OK;
+    };
+    auto right = [&](TRowSet& rowSet) {
+        if (nextRight == rightBatches.size()) {
+            return EJoinFetchResult::FINISHED;
+        }
+        rowSet = rightBatches[nextRight++];
+        return EJoinFetchResult::OK;
+    };
+    std::vector<TRowSet> outputs;
+    for (;;) {
+        TRowSet out{};
+        auto result = processor.Process(left, right, out);
+        if (result == EJoinProcessorResult::FINISHED) {
+            break;
+        }
+        if (result == EJoinProcessorResult::OK) {
+            outputs.push_back(out);
+        }
+    }
+    return outputs;
+}
+
+std::string StringAt(const TColumn& column, int64_t row) {
+    const auto* offsets = reinterpret_cast<const int64_t*>(column.Offsets);
+    return std::string(
+        column.Data + (offsets[row] - offsets[0]),
+        offsets[row + 1] - offsets[row]);
+}
+
+} // namespace
+
+// Build on the left with a string payload: the build side's strings are
+// gathered from the retained build batch, and the rows of one key come out in
+// build order.
+TEST(RowJoinProcessor, BuildLeftStringPayloadInBuildOrder) {
+    using namespace NQumir::NAst;
+    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
+    TStructType leftType({{"lk", i64}, {"lname", std::make_shared<TStringType>()}});
+    TStructType rightType({{"rk", i64}, {"rv", i64}});
+
+    std::vector<int64_t> lk = {5, 5, 6, 5};
+    std::string lnameBytes = "xyywzzz"; // "x", "yy", "w", "zzz"
+    std::vector<int64_t> lnameOffsets = {0, 1, 3, 4, 7};
+    std::vector<TColumn> lcols = {
+        TColumn{.Data = reinterpret_cast<char*>(lk.data())},
+        TColumn{.Data = lnameBytes.data(), .Offsets = lnameOffsets.data(), .OffsetWidth = 8},
+    };
+    TRowSet build{.Columns = lcols.data(), .ColumnCount = 2, .RowCount = 4, .RefCount = 1};
+
+    std::vector<int64_t> rk = {5, 6, 8};
+    std::vector<int64_t> rv = {50, 60, 80};
+    std::vector<TColumn> rcols = {
+        TColumn{.Data = reinterpret_cast<char*>(rk.data())},
+        TColumn{.Data = reinterpret_cast<char*>(rv.data())},
+    };
+    TRowSet probe{.Columns = rcols.data(), .ColumnCount = 2, .RowCount = 3, .RefCount = 1};
+
+    auto spec = NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
+    using TRow = std::tuple<int64_t, std::string, int64_t, int64_t>;
+    std::vector<TRow> got;
+    for (auto& out : RunRowJoin(spec, EJoinBuildSide::Left, {build}, {probe})) {
+        ASSERT_EQ(out.ColumnCount, 4);
+        const auto* c0 = reinterpret_cast<const int64_t*>(out.Columns[0].Data);
+        const auto* c2 = reinterpret_cast<const int64_t*>(out.Columns[2].Data);
+        const auto* c3 = reinterpret_cast<const int64_t*>(out.Columns[3].Data);
+        for (int64_t i = 0; i < out.RowCount; ++i) {
+            got.emplace_back(c0[i], StringAt(out.Columns[1], i), c2[i], c3[i]);
+        }
+        Release(&out);
+    }
+
+    std::vector<TRow> expected = {
+        {5, "x", 5, 50},
+        {5, "yy", 5, 50},
+        {5, "zzz", 5, 50},
+        {6, "w", 6, 60},
+    };
+    EXPECT_EQ(got, expected);
+}
+
+// A build side of 500,000 rows spans 31 arena blocks of 16,384 rows and fills
+// its 2^20-entry table to 0.48. Two million probe keys, three quarters of them
+// absent, meet about thirty entries whose salt matches a different key; the
+// key comparison must reject those and keep probing.
+TEST(RowJoinProcessor, ManyArenaBlocksAndSaltCollisions) {
+    using namespace NQumir::NAst;
+    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
+    TStructType leftType({{"lk", i64}});
+    TStructType rightType({{"rk", i64}, {"rv", i64}});
+
+    constexpr int64_t buildRows = 500000;
+    constexpr int64_t probeRows = 2000000;
+    constexpr int64_t probeBatchRows = 65536;
+    std::vector<int64_t> rk(buildRows);
+    std::vector<int64_t> rv(buildRows);
+    for (int64_t i = 0; i < buildRows; ++i) {
+        rk[i] = 2 * i;
+        rv[i] = 3 * rk[i];
+    }
+    std::vector<TColumn> rcols = {
+        TColumn{.Data = reinterpret_cast<char*>(rk.data())},
+        TColumn{.Data = reinterpret_cast<char*>(rv.data())},
+    };
+    TRowSet build{.Columns = rcols.data(), .ColumnCount = 2, .RowCount = buildRows, .RefCount = 1};
+
+    std::vector<int64_t> lk(probeRows);
+    for (int64_t i = 0; i < probeRows; ++i) {
+        lk[i] = i;
+    }
+    std::vector<std::vector<TColumn>> lcols;
+    std::vector<TRowSet> probes;
+    for (int64_t start = 0; start < probeRows; start += probeBatchRows) {
+        lcols.push_back({TColumn{.Data = reinterpret_cast<char*>(lk.data() + start)}});
+    }
+    for (size_t b = 0; b < lcols.size(); ++b) {
+        const int64_t start = static_cast<int64_t>(b) * probeBatchRows;
+        probes.push_back(TRowSet{
+            .Columns = lcols[b].data(),
+            .ColumnCount = 1,
+            .RowCount = std::min(probeBatchRows, probeRows - start),
+            .RefCount = 1,
+        });
+    }
+
+    auto spec = NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
+    int64_t matches = 0;
+    int64_t keySum = 0;
+    int64_t wrong = 0;
+    for (auto& out : RunRowJoin(spec, EJoinBuildSide::Right, probes, {build})) {
+        ASSERT_EQ(out.ColumnCount, 3);
+        const auto* c0 = reinterpret_cast<const int64_t*>(out.Columns[0].Data);
+        const auto* c1 = reinterpret_cast<const int64_t*>(out.Columns[1].Data);
+        const auto* c2 = reinterpret_cast<const int64_t*>(out.Columns[2].Data);
+        for (int64_t i = 0; i < out.RowCount; ++i) {
+            wrong += c0[i] != c1[i] || c2[i] != 3 * c1[i];
+            keySum += c0[i];
+        }
+        matches += out.RowCount;
+        Release(&out);
+    }
+
+    EXPECT_EQ(wrong, 0);
+    EXPECT_EQ(matches, buildRows);
+    EXPECT_EQ(keySum, buildRows * (buildRows - 1)); // the sum of 2i for i < buildRows
+}
+
+int main(int argc, char** argv) {
+    testing::InitGoogleTest(&argc, argv);
+    NQumir::NCodeGen::TLLVMInitializer initializer;
+    return RUN_ALL_TESTS();
 }

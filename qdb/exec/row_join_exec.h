@@ -60,7 +60,7 @@ private:
         uint64_t Mask = 0;
         int64_t Shift = 0;
         int64_t Rows = 0;
-        int64_t ChainsLongerThanOne = 0;
+        int64_t Keys = 0;
     };
     static_assert(sizeof(TTableState) == TKernelCompiler::JoinTableSize);
 

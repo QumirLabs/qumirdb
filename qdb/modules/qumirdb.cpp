@@ -140,7 +140,7 @@ std::vector<TExternalType> BuildQumirDbExternalTypes() {
             {"Mask", u64Type},
             {"Shift", i64Type},
             {"Rows", i64Type},
-            {"ChainsLongerThanOne", i64Type},
+            {"Keys", i64Type},
         });
     auto joinScratchType = std::make_shared<TStructType>(
         std::vector<std::pair<std::string, TTypePtr>>{

@@ -51,7 +51,7 @@ void TRowJoinProcessor::ObserveInstrumentation() {
         const auto side = BuildSide_ == EJoinBuildSide::Left ? 0 : 1;
         Instrumentation_->ObserveBuildTable(
             side,
-            static_cast<uint64_t>(Arena_.Rows),
+            static_cast<uint64_t>(Table_.Keys),
             static_cast<uint64_t>(Table_.Capacity),
             static_cast<uint64_t>(Table_.Capacity) * sizeof(uint64_t)
                 + static_cast<uint64_t>(Arena_.Rows) * static_cast<uint64_t>(Arena_.RowBytes));

@@ -21,7 +21,9 @@
   ;; must not index by them; the top bits stay uniform inside a partition.
   ;; Linear probing stops at an empty entry or a salt match; only then is the
   ;; row's key compared. Rows with equal keys are chained through their first
-  ;; word, so every row of a chain matches once its head matched.
+  ;; word, so every row of a chain matches once its head matched. The build
+  ;; links rows from the last to the first, so a chain lists them in build
+  ;; order, like the symmetric table's buckets.
   ;;
   ;; C++ (qdb/exec/row_join_exec.cpp) owns the zeroed JoinArena / JoinTable /
   ;; JoinScratch structs and the retained input batches; every buffer they point
@@ -131,7 +133,7 @@
       (field_assign table Mask (cast (- capacity 1) u64))
       (field_assign table Shift shift)
       (field_assign table Rows rows)
-      (field_assign table ChainsLongerThanOne 0)
+      (field_assign table Keys 0)
       (return #t)))
 
   (fun jrt_destroy ((var table <ref JoinTable>))
@@ -177,13 +179,14 @@
       (= out_off off)
       (return e)))
 
-  ;; Stores `row` at `off`, chained in front of `head` (null for a new key).
+  ;; Stores `row` at `off`, chained in front of `head` (null for a new key,
+  ;; which Keys counts).
   (fun jrt_link ((var table <ref JoinTable>) (var off u64) (var salt u64)
                  (var row <ptr u8>) (var head <ptr u8>))
     (block
       (call jr_row_set_next row head)
-      (if (!= (cast head i64) 0)
-        (block (field_assign table ChainsLongerThanOne 1)))
+      (if (== (cast head i64) 0)
+        (block (field_assign table Keys (+ (field table Keys) 1))))
       (var entries = (field table Entries))
       (= entries [(cast off i64)] (call jrt_entry salt row))))
 
@@ -277,9 +280,10 @@
   ;; The key struct of a build row sits at key_offset. rh_key_equal is the
   ;; join's overload for that key; witness only names the key type.
 
-  ;; Sizes the table and links every arena row into it: an empty entry starts
-  ;; a new key, a salt match with an equal key chains the row in front of that
-  ;; key's rows, anything else moves to the next entry.
+  ;; Sizes the table and links every arena row into it, from the last row to
+  ;; the first: an empty entry starts a new key, a salt match with an equal key
+  ;; chains the row in front of that key's rows, anything else moves to the
+  ;; next entry.
   (fun jr_build_rows [Key] ((var table <ref JoinTable>) (var arena <ref JoinArena>)
                             (var key_offset i64) (var witness <ptr Key>)) -> bool
     (block
@@ -289,14 +293,14 @@
       (var row_bytes = (field arena RowBytes))
       (var shift = (cast (field table Shift) u64))
       (var mask = (field table Mask))
-      (var b = 0)
-      (while (< b count)
+      (var b = (- count 1))
+      (while (>= b 0)
         (block
           (var rows_in_block = (field arena BlockRows))
           (if (== b (- count 1)) (block (= rows_in_block (field arena CurRows))))
           (var base = (cast (index blocks b) i64))
-          (var k = 0)
-          (while (< k rows_in_block)
+          (var k = (- rows_in_block 1))
+          (while (>= k 0)
             (block
               (var row = (cast (+ base (* k row_bytes)) <ptr u8>))
               (var h = (call jrt_mix (call jr_row_hash row)))
@@ -321,8 +325,8 @@
                         (block
                           (= off (& (+ off (: 1 u64)) mask))
                           (= e (call jrt_seek table off salt off))))))))
-              (= k (+ k 1))))
-          (= b (+ b 1))))
+              (= k (- k 1))))
+          (= b (- b 1))))
       (return #t)))
 
   ;; Key pass of the probe over Entries[0, count), after jr_seek_all. Keys[j]
