@@ -1574,6 +1574,16 @@ function createQdbEnv(getMemory, holder) {
       BigInt(likeContains(svBytes(str), svBytes(lit))),
     qdb_substring: substring,
     qdb_string_concat: stringConcat,
+    // Frees the strings of the current kernel call, as releasing its string
+    // scratch would; the call may keep allocating afterwards.
+    qdb_string_arena_reset: () => {
+      const allocations = holder.stringScratchAllocs;
+      if (!allocations) return;
+      for (const ptr of allocations) {
+        holder.arena.free(ptr);
+      }
+      allocations.length = 0;
+    },
     qdb_regexp_replace: regexpReplace,
     qdb_date_year: dateYear,
     qdb_sql_date: sqlDate,
@@ -2532,18 +2542,26 @@ const CrossJoinOp = Object.freeze({
 });
 
 function dispatchJoin(state, batch, batchIdx, leftStore, rightStore, arg, op) {
-  return state.dispatch(
-    toWasmPtr(state.leftTable),
-    toWasmPtr(state.rightTable),
-    toWasmPtr(batch),
-    BigInt(batchIdx),
-    toWasmPtr(state.pairBuffer),
-    toWasmPtr(leftStore),
-    toWasmPtr(rightStore),
-    toWasmPtr(state.leftKeyColumns),
-    toWasmPtr(state.rightKeyColumns),
-    BigInt(arg),
-    BigInt(op));
+  // The residual's strings live in the call's string scratch (the arena
+  // argument is unused here, as for filters).
+  const releaseStringScratch = beginKernelStringScratch(state.kernel);
+  try {
+    return state.dispatch(
+      toWasmPtr(state.leftTable),
+      toWasmPtr(state.rightTable),
+      toWasmPtr(batch),
+      BigInt(batchIdx),
+      toWasmPtr(state.pairBuffer),
+      toWasmPtr(leftStore),
+      toWasmPtr(rightStore),
+      toWasmPtr(0),
+      toWasmPtr(state.leftKeyColumns),
+      toWasmPtr(state.rightKeyColumns),
+      BigInt(arg),
+      BigInt(op));
+  } finally {
+    releaseStringScratch();
+  }
 }
 
 function createJoinState(kernel, layout, stage, instrumentation = null) {
@@ -2818,6 +2836,7 @@ function dispatchCrossJoin(state, batchIdx, op) {
       BigInt(state.rightStore.batches.length),
       toWasmPtr(state.rightMatched),
       toWasmPtr(state.pairBuffer),
+      toWasmPtr(0),
       op);
   } finally {
     releaseStringScratch();
