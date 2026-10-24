@@ -1,0 +1,12 @@
+{
+  "schema": "<struct (s <named Nullable [string]>) (n i64) (b i64) (t string)>",
+  "rows": [
+    ["", "2", "2000", "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"],
+    ["ab", "2", "-2000", "same"],
+    ["long-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "1", "-3000", "t9"],
+    ["s10", "1", "-2000", "same"],
+    ["s16", "1", "4000", ""],
+    ["yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy", "2", "4000", "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"],
+    [null, "3", "18000", "same"]
+  ]
+}

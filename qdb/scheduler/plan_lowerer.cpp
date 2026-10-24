@@ -571,6 +571,12 @@ public:
         if (op->RuntimeFilterUses.empty()) {
             return LowerRaw(op, outConn, outLaneOffset);
         }
+        if (auto source = TMaybeOp<TSourceOperator>(op);
+            source && dynamic_cast<TParquetSource*>(&source.Cast()->GetSource()))
+        {
+            // The scan applies these filters while it reads.
+            return LowerSource(*source.Cast(), outConn, outLaneOffset);
+        }
         const size_t lanes = OutputLanes(op);
         auto& firstInput = AddConn<NScheduler::TOneToOneConnection>(
             lanes, lanes, "runtime-filter-input");
@@ -1228,11 +1234,45 @@ private:
         auto splitPlan = ScanSplits(src);
         auto* sourcePtr = &src.GetSource();
         auto* parquetSource = dynamic_cast<TParquetSource*>(sourcePtr);
+        // Runtime filters placed on a Parquet scan run inside its reader, so
+        // that columns other than the probe keys are decoded only for the
+        // rows the filters keep. The scan waits for their publication.
+        std::span<const TRuntimeFilterUseSpec> filterUses;
+        if (parquetSource) {
+            filterUses = src.RuntimeFilterUses;
+        }
+        std::shared_ptr<NScheduler::TAuxInput> filterInput;
+        std::vector<std::shared_ptr<NScheduler::TRuntimeFilterCode>> filterCodes;
+        std::vector<size_t> filterColumns;
+        if (!filterUses.empty()) {
+            filterInput = std::make_shared<NScheduler::TAuxInput>();
+            const auto& fields = static_cast<const NQumir::NAst::TStructType&>(
+                *outputType).Fields;
+            for (const auto& use : filterUses) {
+                auto filterCode = std::make_shared<NScheduler::TRuntimeFilterCode>();
+                filterCode->AuxInput = filterInput;
+                filterCodes.push_back(std::move(filterCode));
+                for (const auto& key : use.ProbeKeys) {
+                    const auto field = std::ranges::find(fields, key,
+                        &std::pair<std::string, NQumir::NAst::TTypePtr>::first);
+                    if (field == fields.end()) {
+                        throw std::runtime_error(
+                            "runtime filter probe key is not a scanned column");
+                    }
+                    const auto column = static_cast<size_t>(
+                        std::distance(fields.begin(), field));
+                    if (std::ranges::find(filterColumns, column) == filterColumns.end()) {
+                        filterColumns.push_back(column);
+                    }
+                }
+            }
+        }
         auto code = std::make_shared<NScheduler::TSourceCode>(
             [](void* state, TRowSet& rowSet) {
                 auto* sourceState = static_cast<TSchedulerSourceState*>(state);
                 return sourceState->Source->Next(rowSet);
-            });
+            },
+            filterInput);
 
         const size_t lanes = std::max<size_t>(
             splitPlan ? splitPlan->size() : 0, 1);
@@ -1244,16 +1284,26 @@ private:
                 ? &(*splitPlan)[p]
                 : nullptr;
             std::shared_ptr<void> state;
+            std::unique_ptr<TParquetSource> owned;
             if (parquetSource && split && !split->RowGroups.empty()) {
-                auto owned = parquetSource->MakeRowGroupsSource(split->RowGroups);
-                auto* ptr = owned.get();
-                state = std::make_shared<TSchedulerSourceState>(
-                    TSchedulerSourceState{
-                        .Source = ptr,
-                        .OwnedSource = std::move(owned),
-                    });
+                owned = parquetSource->MakeRowGroupsSource(split->RowGroups);
             } else if (parquetSource && splitPlan && splitPlan->empty()) {
-                auto owned = parquetSource->MakeRowGroupsSource({});
+                owned = parquetSource->MakeRowGroupsSource({});
+            } else if (!filterUses.empty()) {
+                // Filter state belongs to the task, not to a shared source.
+                std::vector<size_t> rowGroups;
+                for (const auto& group : parquetSource->ScanRowGroups()) {
+                    rowGroups.push_back(group.RowGroup);
+                }
+                owned = parquetSource->MakeRowGroupsSource(rowGroups);
+            }
+            if (owned) {
+                if (!filterUses.empty()) {
+                    owned->SetScanFilter(std::make_shared<NScheduler::TRuntimeFilterScan>(
+                        std::vector<std::shared_ptr<const NScheduler::TRuntimeFilterCode>>(
+                            filterCodes.begin(), filterCodes.end()),
+                        filterColumns));
+                }
                 auto* ptr = owned.get();
                 state = std::make_shared<TSchedulerSourceState>(
                     TSchedulerSourceState{
@@ -1275,6 +1325,15 @@ private:
                 src.GetAlias().empty() ? "source" : "source " + src.GetAlias(),
                 execStageId);
             result.Producers.push_back(&node);
+        }
+        for (size_t index = 0; index < filterUses.size(); ++index) {
+            FilterConsumers_[filterUses[index].Id].push_back({
+                .Code = filterCodes[index],
+                .Nodes = result.Producers,
+                .ProbeKeys = filterUses[index].ProbeKeys,
+                .OutputType = result.OutputType,
+                .AtSource = true,
+            });
         }
         return result;
     }

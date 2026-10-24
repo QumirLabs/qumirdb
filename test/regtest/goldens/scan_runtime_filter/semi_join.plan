@@ -1,0 +1,7 @@
+sort [k asc, x asc]
+└─ project (k, s, x) (rows≈1 cost≈5.6K)
+   └─ join left_semi [f.k = __qdb_in__k] emit-filter 1 from right (rows≈1 cost≈5.5K)
+      ├─ source f AS f use-filter 1 keys=[f.k] (rows≈24 cost≈672)
+      └─ project (__qdb_in__k) (rows≈1 cost≈628)
+         └─ filter (== |d.keep| 1) (rows≈1 cost≈624)
+            └─ source d AS d row-groups (== |d.keep| 1) (rows≈26 cost≈312)

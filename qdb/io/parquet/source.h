@@ -57,6 +57,10 @@ public:
         const std::unordered_set<std::string>* columnNames = nullptr) const;
     std::unique_ptr<TParquetSource> MakeRowGroupsSource(
         const std::vector<size_t>& rowGroups) const;
+    // Reads each batch in two stages: the filter's columns, then the other
+    // columns only for the rows the filter keeps. Columns the selective
+    // reader does not support are read in the first stage.
+    void SetScanFilter(std::shared_ptr<IScanFilter> filter);
     std::shared_ptr<const IPhysicalRowReader> CompileReader(
         std::span<const std::string> columnNames) const override;
 
@@ -81,6 +85,9 @@ private:
         const std::unordered_set<std::string>* columnNames) const;
     void RefreshSchema();
     bool RowIdRequested() const;
+    void ConfigureFilteredScan();
+    bool NextFiltered(TRowSet& rowSet);
+    void OpenFilteredRowGroup();
 
     std::shared_ptr<TParquetFileData> File_;
     // nullopt means the full file; an engaged empty vector is an empty scan.
@@ -93,6 +100,8 @@ private:
     std::vector<std::string> Names_;
     std::vector<TColumnSchema> Columns_;
     TSchema Schema_;
+    struct TFilteredScan;
+    std::unique_ptr<TFilteredScan> Filtered_;
 };
 
 } // namespace NQdb

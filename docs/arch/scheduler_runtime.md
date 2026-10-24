@@ -281,6 +281,35 @@ An inactive filter passes the batch through. Source-computed hashes share the
 source rowset's lifetime through shuffle views; materialized shuffle batches
 gather their existing hashes alongside the columns.
 
+A filter placed directly on a Parquet scan is applied by the scan task itself,
+so that columns other than the probe keys are not materialized for rejected
+rows: late materialization inside a batch, as in [Materialization Strategies
+in a Column-Oriented DBMS (ICDE 2007)](https://dspace.mit.edu/handle/1721.1/34929).
+Velox similarly processes a table scan's filtered columns first and pushes a
+hash join's keys into a colocated scan as a filter ([Velox: Meta's Unified
+Execution Engine (PVLDB 2022)](https://www.vldb.org/pvldb/vol15/p3372-pedreira.pdf)).
+The scan reads each batch of a row group in two stages. The first decodes the
+probe-key columns, which the scan hashes and probes exactly as a consumer task
+does: same kernels, task-owned probe state, pause policy and counters, and a
+pass-through of PassAll and paused batches. Several filters on one scan apply
+in placement order, each to the rows the previous one kept, and the batch keeps
+the hashes of the last filter that tested it. The second stage reads every
+other column with a Parquet column reader that follows the first stage batch
+by batch. Parquet cannot decode part of a page, so values still pass through a
+cache-sized buffer, and only kept rows are copied into the batch: strings of
+rejected rows are never copied, and fixed-width values are scattered only when
+few rows survive, since past that share decoding every value in place is
+cheaper. Rejected rows read as zeros and empty strings, because kernels may
+evaluate unselected rows. A batch that every row fails is dropped and its other
+columns are skipped; pages the skip passes entirely are still decompressed, but
+their values are not decoded. The batch leaves the scan with the selection and
+hashes a consumer task would attach, so shuffles and joins are unchanged. The
+scan task waits for publication through the same auxiliary input and
+dependency edges as a consumer task, so no row bypasses a filter. Columns the
+second stage does not support, such as decimals, are read in the first stage;
+scans without filters and filters above other operators keep their previous
+form.
+
 Every operation on filter contents runs in the `runtime-filter` kernel
 (`qdb/kernel/join/runtime_filter.oz`): key accumulation and deduplication, the
 exact table, Bloom insertion, merging and probing. It compiles with the query

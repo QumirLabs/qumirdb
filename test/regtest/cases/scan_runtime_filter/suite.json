@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "fixtures": {
+    "f": {"json": "tables/f.json", "parquet": {"row_group_rows": 6}},
+    "d": {"json": "tables/d.json", "parquet": {"row_group_rows": 8}}
+  },
+  "tables": {"f": "f", "d": "d"},
+  "variants": ["single", "threaded", "js"],
+  "cases": {
+    "join_all_types.sql": {"order": "ordered"},
+    "semi_join.sql": {"order": "ordered"},
+    "string_groups.sql": {"order": "unordered"},
+    "nullable_key.sql": {"order": "ordered"},
+    "every_row_kept.sql": {"order": "ordered"},
+    "no_row_kept.sql": {"order": "ordered"}
+  }
+}
