@@ -397,7 +397,7 @@ struct TSqlPrinter {
     }
 
     void JoinNode(int ind, const TSqlPtr<TSqlJoin>& j) {
-        Line(ind, "(join " + JoinTypeName(j->Type));
+        Line(ind, std::string("(join ") + (j->Natural ? "natural " : "") + JoinTypeName(j->Type));
         TableRef(ind + 2, j->Left);
         TableRef(ind + 2, j->Right);
         if (j->Condition) {
