@@ -967,6 +967,10 @@ std::string SchedulerModeName(NQdb::NScheduler::EExecutionMode mode) {
 
 NQdb::NScheduler::TSettings ParseSchedulerSettings(const llvm::json::Object& root) {
     NQdb::NScheduler::TSettings settings;
+    // The browser runtime drives the symmetric join protocol
+    // (service/static/browser_runtime.js); the row join table is native-only
+    // until it is ported there.
+    settings.Join.Table = NQdb::NScheduler::EJoinTableKind::Legacy;
 
     const auto* optionsValue = root.get("options");
     const auto* options = optionsValue ? optionsValue->getAsObject() : nullptr;

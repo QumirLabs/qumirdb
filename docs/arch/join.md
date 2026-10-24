@@ -5,7 +5,10 @@ join modes.
 
 ## Overview
 
-QDB implements equi-joins with a JIT-compiled symmetric hash join. The runtime
+QDB implements equi-joins with a JIT-compiled hash join. An inner join with a
+fixed build side uses the row join table, an arena of build rows behind a
+salted pointer table ([wiki](https://github.com/QumirLabs/qumirdb/wiki/Join-implementation#row-join-table));
+the other forms use the symmetric hash join described here. The runtime
 owns row storage, hash table headers, pair buffers, and output materialization.
 Reusable Oz code implements the generic hash-table probe/insert logic, while
 C++ generates query-specific key extraction, key hash/equality functions, and

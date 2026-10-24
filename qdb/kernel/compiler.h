@@ -287,6 +287,50 @@ struct TCrossJoinKernels {
     TJoinMaterialize Materialize;
 };
 
+enum class ERowJoinKernelOp : int64_t {
+    Init = 0,
+    // Append the selected rows of `batch` (the build side) to the arena.
+    Append = 1,
+    // Build the pointer table over the arena; no Append may follow.
+    Build = 2,
+    // Probe `batch` (the probe side) and emit pairs of (stream row id, row
+    // pointer) in (left, right) order.
+    Probe = 3,
+    Destroy = 4,
+};
+
+// jr_dispatch(arena, table, scratch, pairs, batch, key_columns, op) -> bool.
+// The bound closure passes the build-side key columns for Append and the
+// probe-side key columns for Probe; the other operations ignore `batch`.
+using TRowJoinDispatch = std::function<bool(
+    void* arena,
+    void* table,
+    void* scratch,
+    void* pairs,
+    TRowSet* batch,
+    int64_t op)>;
+
+// jr_materialize(pairs, stream, start, limit, out) -> i64: like jt_materialize,
+// but the build side of every pair is a row pointer into the arena and the
+// probe side a stream row id of `stream`.
+using TRowJoinMaterialize = std::function<int64_t(
+    void* pairs,
+    TRowSet* stream,
+    int64_t start,
+    int64_t limit,
+    TRowSet* out)>;
+
+// The compiled kernels of an inner equi-join over the row join table
+// (kernel/join/join_rows.oz). The caller owns zero-initialized JoinArena,
+// JoinTable, JoinScratch and PairBuffer buffers of the sizes below.
+struct TRowJoinKernels {
+    TRowJoinDispatch Dispatch;
+    TRowJoinMaterialize Materialize;
+    // String payload rows point into the build batches, which the caller then
+    // keeps alive until Destroy.
+    bool RetainsBuildBatches = false;
+};
+
 struct TJoinHashKernels {
     using TDispatch = std::function<bool(TRowSet* batch, uint64_t* hashes)>;
 
@@ -379,6 +423,13 @@ public:
     // the output pair buffer.
     static constexpr size_t PairBufferSize = 24;
 
+    // sizeof(JoinArena) / sizeof(JoinTable) / sizeof(JoinScratch) per
+    // modules/qumirdb.cpp - callers of CompileRowJoin allocate zero-initialized
+    // buffers this large.
+    static constexpr size_t JoinArenaSize = 56;
+    static constexpr size_t JoinTableSize = 48;
+    static constexpr size_t JoinScratchSize = 64;
+
     // sizeof(TRowSet) per io.h / modules/qumirdb.oz - generated kernels that
     // pack TRowSet values into a byte buffer (e.g. top-sort's materialize
     // store) size the allocation off this instead of a bare literal.
@@ -432,6 +483,13 @@ public:
     // Compiles the symmetric hash join kernels described by `spec`.
     TJoinKernels CompileJoin(
         const NKernel::TOperatorKernelSpec& spec);
+
+    // Compiles the row join table kernels for an inner equi-join without a
+    // residual whose build side is fixed to the left (buildIsLeft) or right
+    // input; the other input is probed as a stream.
+    TRowJoinKernels CompileRowJoin(
+        const NKernel::TOperatorKernelSpec& spec,
+        bool buildIsLeft);
 
     // Compiles the keyless cross join kernels described by `spec`.
     TCrossJoinKernels CompileCrossJoin(

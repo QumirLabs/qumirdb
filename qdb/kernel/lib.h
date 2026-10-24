@@ -50,6 +50,14 @@ BuildJoinKernelLibrary();
 std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError>
 BuildCrossJoinKernelLibrary();
 
+// Row join library: the shared HashTable/pair-buffer base, the output
+// materializer and join_rows.oz (row arena, salted pointer table, probe scratch
+// and the row gather/store helpers). The per-query append/build/probe
+// functions and the jr_dispatch entry are generated in join_gen.cpp and
+// appended by TKernelCompiler::CompileRowJoin.
+std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError>
+BuildRowJoinKernelLibrary();
+
 // The dual lookup/stored-key HashTable helpers (owned_blocks.oz,
 // robin_hood_dual_key.oz) that join_update.oz calls. Every program that
 // includes BuildJoinKernelLibrary must also include these (after the per-key

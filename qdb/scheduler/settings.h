@@ -45,6 +45,18 @@ struct TScanSplitSettings {
     size_t TinyInputRowsThreshold = 0;
 };
 
+// Which hash table an inner equi-join with a fixed build side uses. Row is the
+// arena of build rows behind a salted pointer table (kernel/join/join_rows.oz);
+// Legacy is the symmetric Robin Hood table with per-key row-id buckets.
+enum class EJoinTableKind {
+    Row = 0,
+    Legacy = 1,
+};
+
+struct TJoinSettings {
+    EJoinTableKind Table = EJoinTableKind::Row;
+};
+
 struct THashShuffleSettings {
     size_t PartitionCount = 0;
     size_t MaxPartitionCount = 0;
@@ -83,6 +95,7 @@ struct TSettings {
     TQueueSettings Queue;
     TScanSplitSettings ScanSplit;
     THashShuffleSettings HashShuffle;
+    TJoinSettings Join;
     TAggregateSettings Aggregate;
     TInstrumentationSettings Instrumentation;
 };

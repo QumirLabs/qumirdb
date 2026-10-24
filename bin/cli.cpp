@@ -732,6 +732,7 @@ void PrintHelp() {
         "  --shuffle-target-bytes <n>   Byte target for shuffle output and retained inputs\n"
         "  --nocbo                      Disable cost-based join reordering\n"
         "  --no-runtime-filters         Disable join runtime filters (for A/B runs)\n"
+        "  --join-table <kind>          Inner join hash table: row (default) or legacy\n"
         "  --force-runtime-filters      Emit a join runtime filter wherever a build\n"
         "                               side exists, ignoring selectivity estimates\n"
         "  --explain-mode <mode>        explain output: text (default), sexpr, both\n"
@@ -967,6 +968,20 @@ int main(int argc, char** argv) {
             config.EnableCbo = false;
         } else if (!std::strcmp(argv[i], "--no-runtime-filters")) {
             config.EnableRuntimeFilters = false;
+        } else if (!std::strcmp(argv[i], "--join-table")) {
+            if (i + 1 >= argc) {
+                std::cerr << "--join-table requires row or legacy\n";
+                return 1;
+            }
+            const std::string_view kind = argv[++i];
+            if (kind == "row") {
+                config.Scheduler.Join.Table = NQdb::NScheduler::EJoinTableKind::Row;
+            } else if (kind == "legacy") {
+                config.Scheduler.Join.Table = NQdb::NScheduler::EJoinTableKind::Legacy;
+            } else {
+                std::cerr << "--join-table requires row or legacy\n";
+                return 1;
+            }
         } else if (!std::strcmp(argv[i], "--force-runtime-filters")) {
             config.ForceRuntimeFilters = true;
         } else if (!std::strcmp(argv[i], "--verbose")) {
