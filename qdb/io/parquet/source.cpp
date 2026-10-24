@@ -1,4 +1,5 @@
 #include <qdb/io/parquet/source.h>
+#include <qdb/io/parquet/kernel_scan.h>
 #include <qdb/io/parquet/row_reader.h>
 #include <qdb/io/parquet/row_id.h>
 #include <qdb/io/parquet/row_group_predicate.h>
@@ -273,6 +274,8 @@ struct TParquetFileData {
     std::vector<NScheduler::TScanRowGroup> RowGroups;
     std::vector<std::vector<TRowGroupColumnRange>> RowGroupRanges;
     TStatsPtr Stats;
+    // What the decoder kernel path reads; shares the file with FileReader.
+    std::shared_ptr<const TParquetScanFile> ScanFile;
 };
 
 void TParquetFileData::Open()
@@ -312,6 +315,11 @@ void TParquetFileData::Open()
     if (!schemaStatus.ok()) {
         throw std::runtime_error(schemaStatus.ToString());
     }
+    ScanFile = std::make_shared<TParquetScanFile>(TParquetScanFile{
+        .Input = infile,
+        .Metadata = FileReader->parquet_reader()->metadata(),
+        .Fields = FileSchema->fields(),
+    });
     FileNames.reserve(FileSchema->num_fields());
     for (const auto& field : FileSchema->fields()) {
         if (field->name() == InternalRowIdColumnName) {
@@ -519,10 +527,12 @@ TParquetSource::TParquetSource(const std::string& path)
 TParquetSource::TParquetSource(
     std::shared_ptr<TParquetFileData> file,
     std::optional<std::vector<int>> rowGroups,
-    std::optional<std::unordered_set<std::string>> restrictedColumns)
+    std::optional<std::unordered_set<std::string>> restrictedColumns,
+    TParquetDecoding decoding)
     : File_(std::move(file))
     , RowGroups_(std::move(rowGroups))
     , RestrictedColumns_(std::move(restrictedColumns))
+    , Decoding_(std::move(decoding))
 {
     ResetReader();
 }
@@ -542,6 +552,21 @@ std::vector<int> TParquetSource::EffectiveRowGroups() const
 void TParquetSource::ResetReader()
 {
     auto rowGroups = EffectiveRowGroups();
+    KernelScan_.reset();
+    Reader_.reset();
+    if (Decoding_.Kernel && !KernelDecodingUnsupported()) {
+        auto fields = ScanFields();
+        std::vector<std::shared_ptr<arrow::Field>> schema;
+        schema.reserve(fields.size());
+        for (int field : fields) {
+            schema.push_back(File_->FileSchema->field(field));
+        }
+        KernelScan_ = std::make_unique<TParquetKernelScan>(
+            File_->ScanFile, std::move(rowGroups), std::move(fields),
+            RowIdRequested(), Decoding_.Kernel, Decoding_.BatchRows);
+        RefreshSchema(schema);
+        return;
+    }
     auto fileColumnIndexes = EffectiveFileColumnIndexes();
     auto batchReaderResult = !RestrictedColumns_
         ? File_->FileReader->GetRecordBatchReader(rowGroups)
@@ -555,7 +580,23 @@ void TParquetSource::ResetReader()
     ReaderRowGroupIndex_ = 0;
     ReaderRowOffset_ = 0;
 
-    RefreshSchema();
+    RefreshSchema(Reader_->schema()->fields());
+}
+
+std::vector<int> TParquetSource::ScanFields() const
+{
+    if (RestrictedColumns_) {
+        return EffectiveFileColumnIndexes();
+    }
+    std::vector<int> fields(File_->FileNames.size());
+    std::iota(fields.begin(), fields.end(), 0);
+    return fields;
+}
+
+std::optional<std::string> TParquetSource::KernelDecodingUnsupported() const
+{
+    return TParquetKernelScan::Unsupported(
+        *File_->ScanFile, EffectiveRowGroups(), ScanFields());
 }
 
 bool TParquetSource::RowIdRequested() const {
@@ -584,14 +625,15 @@ std::vector<int> TParquetSource::EffectiveFileColumnIndexes(
     return indices;
 }
 
-void TParquetSource::RefreshSchema()
+void TParquetSource::RefreshSchema(
+    const std::vector<std::shared_ptr<arrow::Field>>& fields)
 {
-    int numFields = Reader_->schema()->num_fields();
     Names_.clear();
     Columns_.clear();
-    Names_.reserve(numFields);
-    Columns_.reserve(numFields);
-    for (const auto& field : Reader_->schema()->fields()) {
+    // Names_ must not reallocate: Columns_ entries point into it.
+    Names_.reserve(fields.size() + 1);
+    Columns_.reserve(fields.size() + 1);
+    for (const auto& field : fields) {
         Names_.push_back(field->name());
         Columns_.push_back({
             .Name = Names_.back(),
@@ -926,7 +968,8 @@ std::vector<NScheduler::TScanRowGroup> TParquetSource::PruneRowGroups(
 }
 
 std::unique_ptr<TParquetSource> TParquetSource::MakeRowGroupsSource(
-    const std::vector<size_t>& selectedRowGroups) const
+    const std::vector<size_t>& selectedRowGroups,
+    TParquetDecoding decoding) const
 {
     std::vector<int> rowGroups;
     rowGroups.reserve(selectedRowGroups.size());
@@ -935,7 +978,7 @@ std::unique_ptr<TParquetSource> TParquetSource::MakeRowGroupsSource(
     }
     return std::unique_ptr<TParquetSource>(new TParquetSource(
         File_, std::optional<std::vector<int>>(std::move(rowGroups)),
-        RestrictedColumns_));
+        RestrictedColumns_, std::move(decoding)));
 }
 
 std::shared_ptr<const IPhysicalRowReader> TParquetSource::CompileReader(
@@ -1065,6 +1108,9 @@ const TSchema& TParquetSource::Schema() const {
 }
 
 bool TParquetSource::Next(TRowSet& rowSet) {
+    if (KernelScan_) {
+        return KernelScan_->Next(rowSet);
+    }
     std::shared_ptr<arrow::RecordBatch> batch;
     if (!Reader_->ReadNext(&batch).ok() || !batch) {
         return false;

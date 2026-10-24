@@ -967,6 +967,9 @@ std::string SchedulerModeName(NQdb::NScheduler::EExecutionMode mode) {
 
 NQdb::NScheduler::TSettings ParseSchedulerSettings(const llvm::json::Object& root) {
     NQdb::NScheduler::TSettings settings;
+    // The browser decodes parquet itself; exported plans keep Arrow-shaped
+    // sources until the browser runtime supplies the decoder's host primitive.
+    settings.ParquetScan.KernelDecoding = false;
 
     const auto* optionsValue = root.get("options");
     const auto* options = optionsValue ? optionsValue->getAsObject() : nullptr;

@@ -393,6 +393,9 @@ public:
     // Entry points follow RuntimeFilterKernelEntrypoints.
     std::shared_ptr<TKernelSlot> CompileRuntimeFilter();
 
+    // The parquet page decoder; entry points follow ParquetDecoderEntrypoints.
+    std::shared_ptr<TKernelSlot> CompileParquetDecoder();
+
     // Compiles a project kernel for the computed (non-ident) projections.
     // computedExprs and computedTypes are parallel; computedTypes[k] is the
     // inferred output type of computedExprs[k] (see AnnotateExprType). The

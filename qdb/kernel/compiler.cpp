@@ -14,6 +14,7 @@
 #include <qdb/kernel/spec.h>
 #include <qdb/exec/runtime_context.h>
 #include <qdb/exec/runtime_filter.h>
+#include <qdb/io/parquet/kernel_scan.h>
 #include <qdb/modules/qumirdb.h>
 #include <qdb/modules/qumirdb_runtime.h>
 #include <qdb/utils/module_path.h>
@@ -166,7 +167,7 @@ namespace {
 constexpr const char* CacheSchemaVersion = "v1";
 // Bump when the generated key helpers or the .oz kernel libraries change.
 // FULL residual marking changes jt_emit_and_insert.
-constexpr const char* KernelLibVersion = "43";
+constexpr const char* KernelLibVersion = "44";
 } // namespace
 
 NQumir::NCodeGen::TLlvmRunner::TLinkedModule CompileKernelAstCached(
@@ -1645,6 +1646,31 @@ std::shared_ptr<TKernelSlot> TKernelCompiler::CompileRuntimeFilter() {
         std::move(ast));
     FinishKernelDiagnostics(Diagnostics_);
 
+    return kernel.Slot;
+}
+
+std::shared_ptr<TKernelSlot> TKernelCompiler::CompileParquetDecoder() {
+    using namespace NQumir::NAst;
+    auto library = NKernel::ParseFunctionLibrary(NKernel::ReadParquetKernel("decode.oz"));
+    if (!library) {
+        throw NQumir::TError("CompileParquetDecoder: " + library.error().ToString());
+    }
+    // Type declarations go first, as in a source file.
+    std::vector<TExprPtr> programStmts;
+    std::vector<TExprPtr> functions;
+    for (auto& stmt : *library) {
+        (TMaybeNode<TTypeDeclStmt>(stmt) ? programStmts : functions)
+            .push_back(std::move(stmt));
+    }
+    programStmts.insert(programStmts.end(),
+        std::make_move_iterator(functions.begin()), std::make_move_iterator(functions.end()));
+    auto ast = std::make_shared<TBlockExpr>(
+        NQumir::TLocation{}, std::move(programStmts));
+    PrintKernelAst(Diagnostics_, "parquet-decoder", ast);
+    auto kernel = EmitKernel("parquet-decoder",
+        {ParquetDecoderEntrypoints.begin(), ParquetDecoderEntrypoints.end()},
+        std::move(ast));
+    FinishKernelDiagnostics(Diagnostics_);
     return kernel.Slot;
 }
 

@@ -70,6 +70,14 @@
   (fun qdb_alloc ((var size i64)) -> <ptr i8> (attrs extern) (block))
   (fun qdb_free ((var ptr <ptr i8>)) -> void (attrs extern) (block))
 
+  ;; Host primitive of the parquet decoder kernel (kernel/parquet/decode.oz):
+  ;; decompresses src into exactly dst_size bytes of dst using the codec
+  ;; context the host passed in. Returns the bytes produced, or -1.
+  (fun qdb_parquet_decompress
+       ((var codecs <ptr i8>) (var codec i64) (var src <ptr u8>) (var src_size i64)
+        (var dst <ptr u8>) (var dst_size i64)) -> i64
+       (attrs extern) (block))
+
   ;; realloc implemented in Oz on top of qdb_alloc/qdb_free: the caller passes
   ;; the number of live bytes to preserve (old_size), so we copy only that much
   ;; instead of the whole old allocation. Word-copy the 8-byte-aligned bulk, then

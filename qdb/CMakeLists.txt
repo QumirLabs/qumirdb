@@ -2,6 +2,8 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(ARROW REQUIRED IMPORTED_TARGET arrow)
 pkg_check_modules(PARQUET REQUIRED IMPORTED_TARGET parquet)
 pkg_check_modules(PCRE2 REQUIRED IMPORTED_TARGET libpcre2-8)
+pkg_check_modules(ZSTD REQUIRED IMPORTED_TARGET libzstd)
+pkg_check_modules(SNAPPY REQUIRED IMPORTED_TARGET snappy)
 find_package(LLVM REQUIRED CONFIG)
 
 add_library(qumirdb
@@ -14,6 +16,7 @@ add_library(qumirdb
     modules/qumirdb.cpp
     modules/qumirdb_runtime.cpp
     io/parquet/source.cpp
+    io/parquet/kernel_scan.cpp
     io/parquet/row_reader.cpp
     io/parquet/row_group_predicate.cpp
     io/text/sink.cpp
@@ -117,6 +120,8 @@ target_link_libraries(qumirdb PUBLIC
     PkgConfig::ARROW
     PkgConfig::PARQUET
     PkgConfig::PCRE2
+    PkgConfig::ZSTD
+    PkgConfig::SNAPPY
     ${CMAKE_DL_LIBS}
 )
 
@@ -133,6 +138,7 @@ install(FILES kernel/instrumentation.oz DESTINATION ${QDB_MODULES_DIR} COMPONENT
 install(DIRECTORY
     kernel/aggregation
     kernel/join
+    kernel/parquet
     kernel/sort
     DESTINATION ${QDB_MODULES_DIR}
     COMPONENT engine

@@ -348,6 +348,42 @@ std::unordered_set<const TSourceOperator*> SourcesFeedingJoins(
     return sources;
 }
 
+// Sources whose pipeline - the source and the filters and projections fused
+// after it - ends in a join input. Any other operator ends the pipeline.
+std::unordered_set<const TSourceOperator*> SourcesPipelinedIntoJoins(
+    const TOperatorPtr& root)
+{
+    std::unordered_set<const TSourceOperator*> sources;
+    // A shared subtree can be reached both from a join and from elsewhere.
+    std::unordered_map<const IOperator*, unsigned> visited;
+    std::function<void(const TOperatorPtr&, bool)> visit =
+        [&](const TOperatorPtr& op, bool intoJoin) {
+            if (!op) {
+                return;
+            }
+            const unsigned state = intoJoin ? 2 : 1;
+            auto& seen = visited[op.get()];
+            if (seen & state) {
+                return;
+            }
+            seen |= state;
+            if (auto source = TMaybeOp<TSourceOperator>(op); source && intoJoin) {
+                sources.insert(source.Cast().get());
+            }
+            if (auto consumer = TMaybeOp<TCteConsumer>(op)) {
+                visit(consumer.Cast()->Materialization()->Plan, false);
+            }
+            const bool streaming = TMaybeOp<TFilterOperator>(op)
+                || TMaybeOp<TProjectOperator>(op);
+            const bool join = static_cast<bool>(TMaybeOp<TJoinOperator>(op));
+            for (const auto& input : op->Inputs()) {
+                visit(input, join || (streaming && intoJoin));
+            }
+        };
+    visit(root, false);
+    return sources;
+}
+
 size_t ChooseRuntimeBloomBytes(const TJoinOperator& join,
     EJoinFilterSide buildSide, size_t producerCount)
 {
@@ -426,6 +462,7 @@ public:
         , SourcesFeedingJoins_(Settings_.ScanSplit.MaxScanTasks == 0
             ? SourcesFeedingJoins(root)
             : std::unordered_set<const TSourceOperator*>{})
+        , SourcesPipelinedIntoJoins_(SourcesPipelinedIntoJoins(root))
     {}
 
     // Kernel options for one stage: generation only (deferred finalization),
@@ -1217,6 +1254,41 @@ private:
             srcLanes, dstLanes, std::move(name), QueueCapacity());
     }
 
+    // Page decoding for the scan tasks of a parquet source: the decoder
+    // kernel, compiled once per query, when it supports the source.
+    TParquetDecoding ParquetDecoding(
+        const TSourceOperator& src,
+        const TParquetSource& parquet,
+        TExecStageId execStageId)
+    {
+        if (!Settings_.ParquetScan.KernelDecoding) {
+            return {};
+        }
+        auto unsupported = parquet.KernelDecodingUnsupported();
+        if (Diagnostics_) {
+            *Diagnostics_ << "parquet decoding: source="
+                << (src.GetAlias().empty() ? src.SourcePath() : src.GetAlias())
+                << " decoder=" << (unsupported ? "arrow (" + *unsupported + ")" : "kernel")
+                << " into_join=" << SourcesPipelinedIntoJoins_.contains(&src)
+                << '\n';
+        }
+        if (unsupported) {
+            return {};
+        }
+        if (!RuntimeContext_->ParquetDecoder) {
+            TKernelCompiler compiler(KernelOptions(
+                StageLabel("parquet-decoder", execStageId), execStageId));
+            RuntimeContext_->ParquetDecoder = compiler.CompileParquetDecoder();
+        }
+        const bool intoJoin = SourcesPipelinedIntoJoins_.contains(&src);
+        return {
+            .Kernel = RuntimeContext_->ParquetDecoder,
+            .BatchRows = static_cast<int64_t>(intoJoin
+                ? Settings_.ParquetScan.JoinBatchRows
+                : Settings_.ParquetScan.BatchRows),
+        };
+    }
+
     TLoweredOutput LowerSource(
         TSourceOperator& src,
         NScheduler::IConnection& outConn,
@@ -1228,6 +1300,9 @@ private:
         auto splitPlan = ScanSplits(src);
         auto* sourcePtr = &src.GetSource();
         auto* parquetSource = dynamic_cast<TParquetSource*>(sourcePtr);
+        const auto decoding = parquetSource
+            ? ParquetDecoding(src, *parquetSource, execStageId)
+            : TParquetDecoding{};
         auto code = std::make_shared<NScheduler::TSourceCode>(
             [](void* state, TRowSet& rowSet) {
                 auto* sourceState = static_cast<TSchedulerSourceState*>(state);
@@ -1245,7 +1320,8 @@ private:
                 : nullptr;
             std::shared_ptr<void> state;
             if (parquetSource && split && !split->RowGroups.empty()) {
-                auto owned = parquetSource->MakeRowGroupsSource(split->RowGroups);
+                auto owned = parquetSource->MakeRowGroupsSource(
+                    split->RowGroups, decoding);
                 auto* ptr = owned.get();
                 state = std::make_shared<TSchedulerSourceState>(
                     TSchedulerSourceState{
@@ -3122,6 +3198,7 @@ private:
     std::shared_ptr<IRuntimeFilterBindingFactory> RuntimeFilterBindings_;
     std::shared_ptr<TRuntimeContext> RuntimeContext_;
     std::unordered_set<const TSourceOperator*> SourcesFeedingJoins_;
+    std::unordered_set<const TSourceOperator*> SourcesPipelinedIntoJoins_;
     // Split planning includes Parquet predicate compilation and evaluation;
     // OutputLanes and LowerSource both query it. nullopt means "use the original
     // source", while an engaged empty vector is a proven empty scan.

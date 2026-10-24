@@ -45,6 +45,19 @@ struct TScanSplitSettings {
     size_t TinyInputRowsThreshold = 0;
 };
 
+struct TParquetScanSettings {
+    // Decode parquet pages with the decoder kernel wherever it supports a
+    // source's columns; Arrow decodes the other sources.
+    bool KernelDecoding = true;
+    // Rows per batch of the kernel path. A small batch keeps its decoded
+    // columns in the core's cache until the next kernel of the pipeline
+    // reads them.
+    size_t BatchRows = 2048;
+    // Rows per batch of a scan whose pipeline ends in a join: the join's input
+    // scheduling, runtime filters and shuffle are tuned for large batches.
+    size_t JoinBatchRows = 1 << 18;
+};
+
 struct THashShuffleSettings {
     size_t PartitionCount = 0;
     size_t MaxPartitionCount = 0;
@@ -82,6 +95,7 @@ struct TSettings {
     TSchedulerSettings Scheduler;
     TQueueSettings Queue;
     TScanSplitSettings ScanSplit;
+    TParquetScanSettings ParquetScan;
     THashShuffleSettings HashShuffle;
     TAggregateSettings Aggregate;
     TInstrumentationSettings Instrumentation;

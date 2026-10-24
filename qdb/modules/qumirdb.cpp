@@ -12,6 +12,7 @@ using namespace NAst;
 const void* const QumirDbRuntimeSymbolAnchors[] __attribute__((used)) = {
     reinterpret_cast<const void*>(&qdb_alloc),
     reinterpret_cast<const void*>(&qdb_free),
+    reinterpret_cast<const void*>(&qdb_parquet_decompress),
     reinterpret_cast<const void*>(&qdb_filter_string_compare),
     reinterpret_cast<const void*>(&qdb_string_hash_bytes),
     reinterpret_cast<const void*>(&qdb_string_view_sql_like),

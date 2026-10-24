@@ -15,6 +15,8 @@ struct TRuntimeContext {
     NKernel::TRegexRegistry Regexes;
     // The query's runtime-filter kernel; set before any filter is created.
     std::shared_ptr<TKernelSlot> RuntimeFilterKernels;
+    // The query's parquet decoder kernel, shared by its parquet sources.
+    std::shared_ptr<TKernelSlot> ParquetDecoder;
 };
 
 } // namespace NQdb

@@ -713,6 +713,11 @@ void PrintHelp() {
         "  --scheduler <mode>           Execution mode: single, threaded (default: threaded)\n"
         "  --scheduler-workers <n>      Worker count (default: logical CPU count, at least 1)\n"
         "  --scan-tasks <n>             Maximum parquet scan tasks per source (default: auto)\n"
+        "  --parquet-decoder <d>        Parquet page decoding: kernel (default) or arrow\n"
+        "  --parquet-batch-rows <n>     Rows per batch of the kernel decoder (default: 2048)\n"
+        "  --parquet-join-batch-rows <n>\n"
+        "                                Rows per batch of a scan pipelined into a join\n"
+        "                                (default: 262144)\n"
         "  --instrumentation [list]     Enable instrumentation (default: operators)\n"
         "                                Components: operators,group_predicate\n"
         "  --scheduler-counters         Print scheduler and connection counters with --verbose\n"
@@ -834,6 +839,27 @@ int main(int argc, char** argv) {
                 return 1;
             }
             config.Scheduler.ScanSplit.MaxScanTasks = static_cast<size_t>(tasks);
+        } else if (!std::strcmp(argv[i], "--parquet-decoder")) {
+            const std::string_view decoder = i + 1 < argc ? argv[++i] : "";
+            if (decoder != "kernel" && decoder != "arrow") {
+                std::cerr << "--parquet-decoder requires kernel or arrow\n";
+                return 1;
+            }
+            config.Scheduler.ParquetScan.KernelDecoding = decoder == "kernel";
+        } else if (!std::strcmp(argv[i], "--parquet-batch-rows")) {
+            const auto rows = i + 1 < argc ? std::atoll(argv[++i]) : 0;
+            if (rows <= 0) {
+                std::cerr << "--parquet-batch-rows requires a positive integer\n";
+                return 1;
+            }
+            config.Scheduler.ParquetScan.BatchRows = static_cast<size_t>(rows);
+        } else if (!std::strcmp(argv[i], "--parquet-join-batch-rows")) {
+            const auto rows = i + 1 < argc ? std::atoll(argv[++i]) : 0;
+            if (rows <= 0) {
+                std::cerr << "--parquet-join-batch-rows requires a positive integer\n";
+                return 1;
+            }
+            config.Scheduler.ParquetScan.JoinBatchRows = static_cast<size_t>(rows);
         } else if (!std::strcmp(argv[i], "--instrumentation") ||
             std::string_view(argv[i]).starts_with("--instrumentation="))
         {

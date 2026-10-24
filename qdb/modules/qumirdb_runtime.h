@@ -50,6 +50,13 @@ extern "C" {
 void* qdb_alloc(int64_t size);
 void qdb_free(void* ptr);
 
+// The host primitive of the parquet decoder kernel: decompresses src into
+// exactly dstSize bytes of dst with a TParquetCodecs context
+// (qdb/io/parquet/kernel_scan.h). Returns the bytes produced, or -1.
+int64_t qdb_parquet_decompress(
+    void* codecs, int64_t codec, const uint8_t* src, int64_t srcSize,
+    uint8_t* dst, int64_t dstSize);
+
 int64_t qdb_filter_string_compare(
     const uint8_t* left, int64_t leftSize,
     const uint8_t* right, int64_t rightSize);

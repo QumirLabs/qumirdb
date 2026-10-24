@@ -29,6 +29,8 @@ std::string ReadJoinKernel(const std::string& name);
 // to this source file's location.
 std::string ReadSortKernel(const std::string& name);
 
+std::string ReadParquetKernel(const std::string& name);
+
 // Assembles the keyed-join kernel library: generic Robin Hood helpers, the
 // reused aggregation HashTable lifecycle, pair buffers, the dual-key-generic
 // join update/probe helpers (join_update.oz templates over LookupKey /

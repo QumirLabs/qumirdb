@@ -45,6 +45,10 @@ std::string ReadSortKernel(const std::string& name) {
     return ReadKernel("sort", name, "sort");
 }
 
+std::string ReadParquetKernel(const std::string& name) {
+    return ReadKernel("parquet", name, "parquet");
+}
+
 namespace {
 
 bool HasStringReducer(const TAggReducerLayout& layout) {
