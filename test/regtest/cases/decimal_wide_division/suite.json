@@ -8,6 +8,7 @@
   "cases": {
     "div_integer.sql": {"order": "ordered"},
     "div_decimal.sql": {"order": "ordered"},
+    "div_scale.sql": {"order": "ordered"},
     "rem.sql": {"order": "ordered"},
     "sum_wide.sql": {"order": "ordered"}
   }

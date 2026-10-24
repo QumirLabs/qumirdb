@@ -279,7 +279,7 @@ TEST(ProjectType, DecimalArithmeticAnnotates) {
     EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(/ amount qty)"), sc), 7, 2));
     EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(/ amount tax)"), sc), 17, 9));
     EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(/ sales prev)"), sc), 37, 20));
-    EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(/ wide wide2)"), sc), 38, 0));
+    EXPECT_TRUE(TMaybeType<TFloatType>(AnnotateExprType(Parse("(/ wide wide2)"), sc)));
     EXPECT_TRUE(IsBool(AnnotateExprType(Parse("(< amount tax)"), sc)));
     EXPECT_THROW(AnnotateExprType(Parse("(* amount tax)"), sc), NQumir::TError);
 }

@@ -602,6 +602,15 @@ TDecimalSpec DecimalDivisionSpec(const TDecimalSpec& left, const TDecimalSpec& r
     };
 }
 
+// DECIMAL(38, s) operands leave no room for fractional digits in the quotient, and
+// the reduced scale would truncate it below the dividend's own scale (150 / 8 at
+// DECIMAL(38,30) gave 18). Such a quotient is a DOUBLE, as in DuckDB. A reduced
+// scale that still holds the dividend's scale stays a DECIMAL: the division is then
+// exact at that scale, and widening it would overflow the 128-bit dividend.
+bool IsDecimalQuotientDouble(const TDecimalSpec& left, const TDecimalSpec& right) {
+    return DecimalDivisionSpec(left, right).Scale < left.Scale;
+}
+
 // A fractional literal beside a DECIMAL is a decimal of its own digits, as in DuckDB
 // (0.125 is DECIMAL(3,3)), instead of being rounded to the other operand's scale. The
 // lexeme is gone by now, so the digits are the shortest decimal form that round-trips
@@ -729,6 +738,9 @@ TTypePtr DecimalBinaryValueType(TOperator op, const TExprPtr& le, const TExprPtr
     }
     if (op == "/") {
         if (dl && dr) {
+            if (IsDecimalQuotientDouble(*dl, *dr)) {
+                return std::make_shared<TFloatType>();
+            }
             return MakeDecimalType(DecimalDivisionSpec(*dl, *dr));
         }
         if (dl && !dr && IsInt(vr)) {
@@ -1865,6 +1877,17 @@ TTypePtr ExpandDecimalNode(TExprPtr& e, const TStructType& inputType, TTypeEnv& 
             decimalType = IsNullableType(decimalType)
                 ? std::static_pointer_cast<TType>(std::make_shared<TNullable>(floatType))
                 : floatType;
+            dl = dr = std::nullopt;
+        }
+        if (node->Operator == "/"_op && dl && dr && IsDecimalQuotientDouble(*dl, *dr)) {
+            // Both operands convert like CAST(... AS DOUBLE); nullability is kept.
+            TTypePtr floatType = std::make_shared<TFloatType>();
+            for (auto [operand, type] : {std::pair{&node->Left, &lt}, std::pair{&node->Right, &rt}}) {
+                *operand = DecimalValueAsDouble(std::move(*operand), *type, node->Location);
+                *type = IsNullableType(*type)
+                    ? std::static_pointer_cast<TType>(std::make_shared<TNullable>(floatType))
+                    : floatType;
+            }
             dl = dr = std::nullopt;
         }
         if (!dl && !dr) {
