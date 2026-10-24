@@ -1,0 +1,5 @@
+project (k, c) (rows≈1 cost≈76)
+└─ filter (== count_0 0) (rows≈1 cost≈64)
+   └─ aggregate keys=[t.k] aggs=[count_0=count] (rows≈2 cost≈32)
+      └─ project (t.k) (rows≈0 cost≈0)
+         └─ source t AS t (rows≈0 cost≈0)

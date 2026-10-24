@@ -81,8 +81,11 @@ struct TOperatorKernelSpec {
     // dispatch reads batch.Hash[i] instead of recomputing rh_hash(key).
     bool HasPrecomputedHash = false;
 
-    // Seed the SQL global group without consuming a row or updating reducers.
-    bool IsGlobalAggregate = false;
+    // Groups that exist over an empty input, created by the generated init without
+    // consuming a row or updating reducers. Each entry is the value of the leading
+    // integer key column; the other key columns are NULL. A SQL global aggregate seeds
+    // its constant marker (1); a grouping-sets aggregate seeds its empty sets.
+    std::vector<int64_t> EmptyInputGroups;
 };
 
 std::string_view KernelKindName(EOperatorKernelKind kind);
@@ -107,7 +110,7 @@ TOperatorKernelSpec BuildAggregateKernelSpec(
     const std::vector<std::string>& groupKeys,
     const std::vector<TAggregateSpec>& aggs,
     const TExternalCatalogSnapshot* externalCatalog = nullptr,
-    bool global = false);
+    std::vector<int64_t> emptyInputGroups = {});
 
 TOperatorKernelSpec BuildSortKernelSpec(
     const NQumir::NAst::TStructType& inputType,

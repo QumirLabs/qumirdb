@@ -1607,7 +1607,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType,
     bool hasPrecomputedHash,
-    bool global)
+    const std::vector<int64_t>& emptyInputGroups)
 {
     using namespace NQumir::NAst;
     NQumir::TLocation loc{};
@@ -2029,39 +2029,57 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
         numI64(static_cast<int64_t>(layout.NumAggBuffers)),
         numI64(static_cast<int64_t>(key.Size)),
     }), i64Type);
-    if (global) {
-        // Seed the SQL global group, without pretending an input row arrived.
-        // Reducer buffers remain at their identity (COUNT 0, validity 0).
-        if (key.Fields.size() != 1 || key.Fields[0].IsNullable ||
+    if (!emptyInputGroups.empty()) {
+        // Seed the groups that exist over an empty input, without pretending an input
+        // row arrived. The leading key column holds the group's id and every other key
+        // column is NULL, which is how the update loop encodes a NULL key. Reducer
+        // buffers remain at their identity (COUNT 0, validity 0).
+        if (key.Fields.empty() || key.Fields[0].IsNullable ||
             !TMaybeType<TIntegerType>(UnwrapNamedType(key.Fields[0].Type)))
         {
-            throw std::invalid_argument("global aggregate requires one integer marker key");
+            throw std::invalid_argument(
+                "an aggregate with empty-input groups requires a leading integer key");
         }
-        auto marker = std::make_shared<TStructConstructExpr>(
-            loc, key.LookupType, std::vector<TExprPtr>{number(1, key.Fields[0].Type)});
-        init = block({
+        auto namedSeedKey = TMaybeType<TNamedType>(key.LookupType);
+        auto seedKeyStruct = namedSeedKey
+            ? TMaybeType<TStructType>(namedSeedKey.Cast()->UnderlyingType)
+            : TMaybeType<TStructType>(key.LookupType);
+        if (!seedKeyStruct) {
+            throw std::invalid_argument("GenGenericAggregateDispatchAst: key must be a struct");
+        }
+        std::vector<TExprPtr> seed = {
             var("initialized", i64Type),
             assign("initialized", std::move(init)),
             std::make_shared<TIfExpr>(loc,
                 binary("==", ident("initialized"), numI64(0)),
                 block({std::make_shared<TReturnExpr>(loc, numI64(0))}), nullptr),
-            var("global_key", key.LookupType),
-            assign("global_key", std::move(marker)),
+            var("seed_key", key.LookupType),
             var("stored_witness", key.StoredType),
             assign("stored_witness", ZeroValueExpr(key.StoredType)),
             var("is_new", i64Type),
             assign("is_new", numI64(0)),
             var("state_slot", i64Type),
-            assign("state_slot", call(upsertName, {
-                ident("ht"), ident("global_key"), ident("stored_witness"),
-                ident("is_new"), cast(call("rh_hash", {ident("global_key")}), u64Type),
-            })),
-            std::make_shared<TIfExpr>(loc,
+        };
+        for (const int64_t id : emptyInputGroups) {
+            std::vector<TExprPtr> fields;
+            for (const auto& [fieldName, fieldType] : seedKeyStruct.Cast()->Fields) {
+                fields.push_back(fieldName == "key_0"
+                    ? number(id, key.Fields[0].Type)
+                    : ZeroValueExpr(fieldType));
+            }
+            seed.push_back(assign("seed_key", std::make_shared<TStructConstructExpr>(
+                loc, key.LookupType, std::move(fields))));
+            seed.push_back(assign("state_slot", call(upsertName, {
+                ident("ht"), ident("seed_key"), ident("stored_witness"),
+                ident("is_new"), cast(call("rh_hash", {ident("seed_key")}), u64Type),
+            })));
+            seed.push_back(std::make_shared<TIfExpr>(loc,
                 binary("<", ident("state_slot"), numI64(0)),
                 block({call("aht_destroy", {ident("ht")}),
-                    std::make_shared<TReturnExpr>(loc, numI64(0))}), nullptr),
-            numI64(1),
-        });
+                    std::make_shared<TReturnExpr>(loc, numI64(0))}), nullptr));
+        }
+        seed.push_back(numI64(1));
+        init = block(std::move(seed));
     }
     auto destroyStmts = StringCleanupCalls(layout);
     destroyStmts.push_back(call("aht_destroy", {ident("ht")}));

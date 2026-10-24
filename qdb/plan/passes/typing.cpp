@@ -328,7 +328,7 @@ void AnnotateOperatorType(
         root->Type = std::make_shared<TFunctionType>(
             std::vector<TTypePtr>{inputSchema},
             ComputeAggregateOutputType(inputSchema, agg->GroupKeys(), agg->Aggs(),
-                !agg->GroupingSets().empty(), agg->IsGlobal()));
+                !agg->GroupingSets().empty(), !agg->EmptyInputGroups().empty()));
         return;
     }
 

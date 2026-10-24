@@ -122,7 +122,7 @@ BuildGenericAggregateFusedProgramAst(
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType,
     bool hasPrecomputedHash = false,
-    bool global = false);
+    const std::vector<int64_t>& emptyInputGroups = {});
 
 } // namespace NKernel
 } // namespace NQdb

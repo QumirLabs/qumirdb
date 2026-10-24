@@ -249,7 +249,7 @@ TOperatorKernelSpec BuildAggregateKernelSpec(
     const std::vector<std::string>& groupKeys,
     const std::vector<TAggregateSpec>& aggs,
     const TExternalCatalogSnapshot* externalCatalog,
-    bool global)
+    std::vector<int64_t> emptyInputGroups)
 {
     auto columnRef = [&](const std::string& name) -> TKernelColumnRef {
         for (int32_t i = 0; i < static_cast<int32_t>(inputType.Fields.size()); ++i) {
@@ -311,7 +311,7 @@ TOperatorKernelSpec BuildAggregateKernelSpec(
         .InputSchemas = {std::make_shared<NQumir::NAst::TStructType>(inputType.Fields)},
         .OutputSchema = ComputeAggregateOutputType(
             std::make_shared<NQumir::NAst::TStructType>(inputType.Fields),
-            groupKeys, aggs, false, global),
+            groupKeys, aggs, false, !emptyInputGroups.empty()),
         .ReferencedColumns = std::move(referenced),
         .Keys = {
             {.Name = "group-keys", .Columns = std::move(groupColumns)},
@@ -322,7 +322,7 @@ TOperatorKernelSpec BuildAggregateKernelSpec(
             {.Name = "agg_finish_rowset", .Abi = "i64(ptr HashTable, ptr TRowSet)"},
         },
         .SourceModules = {"qumirdb"},
-        .IsGlobalAggregate = global,
+        .EmptyInputGroups = std::move(emptyInputGroups),
     };
 }
 
@@ -502,7 +502,7 @@ void PrintKernelSpec(std::ostream& out, const TOperatorKernelSpec& spec) {
     }
 
     out << "  output: " << TypeName(spec.OutputSchema) << "\n";
-    if (spec.IsGlobalAggregate) {
+    if (!spec.EmptyInputGroups.empty()) {
         out << "  global-group: seeded\n";
     }
 

@@ -1,0 +1,5 @@
+project (k, c, sv) (rows≈2 cost≈192)
+└─ aggregate keys=[t.k] aggs=[count_0=count, sum_0=sum] (rows≈2 cost≈152)
+   └─ project (t.k, t.v) (rows≈1 cost≈104)
+      └─ filter (> |t.v| 1000) (rows≈1 cost≈96)
+         └─ source t AS t row-groups (> |t.v| 1000) (rows≈6 cost≈48)

@@ -155,6 +155,13 @@ an additional identity contribution or count the seeded groups as input rows.
 A SUM that merges partial COUNT states preserves COUNT's zero identity; an
 ordinary SQL SUM remains NULL over an empty global input.
 
+The empty grouping set of ROLLUP and CUBE (the grand total) has the same property.
+Grouping sets share one table keyed by the set index followed by the group keys, so
+its group is the key `(index, NULL, ...)`. The generated initialization seeds it for
+every empty set, in each partial aggregate of a parallel cascade as well. The
+combine stage then needs no special case, and ROLLUP over an empty input returns the
+grand-total row, as `SELECT count(*)` does.
+
 ## Hash table
 
 The current implementation uses Swiss-style grouped control-byte probing. The
