@@ -1,0 +1,1 @@
+SELECT count(DISTINCT n) AS c FROM t;

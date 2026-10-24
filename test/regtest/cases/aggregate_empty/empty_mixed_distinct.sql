@@ -1,0 +1,1 @@
+SELECT COUNT(DISTINCT n) AS cd, COUNT(*) AS c, COUNT(n) AS cn, SUM(n) AS s FROM t;

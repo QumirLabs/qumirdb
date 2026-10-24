@@ -334,7 +334,7 @@ private:
                     inputs[0].OutputType,
                     aggregate->GroupKeys(),
                     aggregate->Aggs(),
-                    !aggregate->GroupingSets().empty());
+                    !aggregate->GroupingSets().empty(), aggregate->IsGlobal());
                 break;
             }
             case EExecPlanNodeKind::Join:

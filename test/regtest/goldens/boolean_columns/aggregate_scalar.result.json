@@ -1,5 +1,5 @@
 {
-  "schema": "<struct (mnb bool) (mxb bool) (mnn <named Nullable [bool]>) (mxn <named Nullable [bool]>) (cb i64) (cn i64) (ban <named Nullable [bool]>) (bon <named Nullable [bool]>) (ball bool) (evb bool) (sub bool)>",
+  "schema": "<struct (mnb <named Nullable [bool]>) (mxb <named Nullable [bool]>) (mnn <named Nullable [bool]>) (mxn <named Nullable [bool]>) (cb i64) (cn i64) (ban <named Nullable [bool]>) (bon <named Nullable [bool]>) (ball <named Nullable [bool]>) (evb <named Nullable [bool]>) (sub <named Nullable [bool]>)>",
   "rows": [
     [false, true, false, true, "144", "96", false, true, true, false, false]
   ]

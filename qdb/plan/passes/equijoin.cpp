@@ -253,10 +253,12 @@ TOperatorPtr ProcessAggregate(std::shared_ptr<TAggregateOperator> aggregate, TCo
     std::unordered_set<std::string> groupCols(
         aggregate->GroupKeys().begin(), aggregate->GroupKeys().end());
 
+    // A global aggregate owns its group even when the input is empty, so a
+    // predicate on it (HAVING NULL) must not be pushed below it.
     std::vector<TConjuct> pushable;
     std::vector<TConjuct> keep;
     for (auto& conj : ctx.Conjucts) {
-        if (!groupCols.empty() && Covers(ColumnsOf(conj), groupCols)) {
+        if (!aggregate->IsGlobal() && !groupCols.empty() && Covers(ColumnsOf(conj), groupCols)) {
             pushable.push_back(std::move(conj));
         } else {
             keep.push_back(std::move(conj));

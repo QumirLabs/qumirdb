@@ -46,6 +46,7 @@ struct TKernelAggregateSpec {
     bool HasArg = false;
     TKernelColumnRef Arg;
     NQumir::NAst::TExprPtr ArgExpr;
+    bool EmptyIsZero = false;
 };
 
 struct TKernelSortKeySpec {
@@ -79,6 +80,9 @@ struct TOperatorKernelSpec {
     // downstream of a hash shuffle keyed on the same columns: the generated
     // dispatch reads batch.Hash[i] instead of recomputing rh_hash(key).
     bool HasPrecomputedHash = false;
+
+    // Seed the SQL global group without consuming a row or updating reducers.
+    bool IsGlobalAggregate = false;
 };
 
 std::string_view KernelKindName(EOperatorKernelKind kind);
@@ -102,7 +106,8 @@ TOperatorKernelSpec BuildAggregateKernelSpec(
     const NQumir::NAst::TStructType& inputType,
     const std::vector<std::string>& groupKeys,
     const std::vector<TAggregateSpec>& aggs,
-    const TExternalCatalogSnapshot* externalCatalog = nullptr);
+    const TExternalCatalogSnapshot* externalCatalog = nullptr,
+    bool global = false);
 
 TOperatorKernelSpec BuildSortKernelSpec(
     const NQumir::NAst::TStructType& inputType,

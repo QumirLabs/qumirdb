@@ -1,0 +1,102 @@
+{
+  "version": 1,
+  "fixtures": {
+    "empty": {
+      "json": "tables/empty.json"
+    },
+    "values": {
+      "json": "tables/values.json"
+    },
+    "nulls": {
+      "json": "tables/nulls.json"
+    },
+    "nonnullable_empty": {
+      "json": "tables/nonnullable_empty.json"
+    },
+    "nonnullable_values": {
+      "json": "tables/nonnullable_values.json"
+    }
+  },
+  "tables": {
+    "t": "empty"
+  },
+  "variants": [
+    "single",
+    "threaded",
+    "js"
+  ],
+  "cases": {
+    "empty_count.sql": {
+      "order": "ordered"
+    },
+    "filter_count.sql": {
+      "order": "ordered",
+      "tables": {
+        "t": "values"
+      }
+    },
+    "empty_mixed.sql": {
+      "order": "ordered"
+    },
+    "filter_mixed.sql": {
+      "order": "ordered",
+      "tables": {
+        "t": "values"
+      }
+    },
+    "having_zero.sql": {
+      "order": "ordered"
+    },
+    "having_nonzero.sql": {
+      "order": "ordered"
+    },
+    "empty_distinct.sql": {
+      "order": "ordered"
+    },
+    "grouped_empty.sql": {
+      "order": "ordered"
+    },
+    "constant_group_empty.sql": {
+      "order": "ordered"
+    },
+    "nonempty_mixed.sql": {
+      "order": "ordered",
+      "tables": {
+        "t": "values"
+      }
+    },
+    "all_null_mixed.sql": {
+      "order": "ordered",
+      "tables": {
+        "t": "nulls"
+      }
+    },
+    "nonnullable_empty.sql": {
+      "tables": {
+        "t": "nonnullable_empty"
+      },
+      "order": "ordered"
+    },
+    "nonnullable_values.sql": {
+      "tables": {
+        "t": "nonnullable_values"
+      },
+      "order": "ordered"
+    },
+    "empty_mixed_distinct.sql": {
+      "order": "ordered"
+    },
+    "nonempty_mixed_distinct.sql": {
+      "order": "ordered",
+      "tables": {
+        "t": "values"
+      }
+    },
+    "all_null_mixed_distinct.sql": {
+      "order": "ordered",
+      "tables": {
+        "t": "nulls"
+      }
+    }
+  }
+}

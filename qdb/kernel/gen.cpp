@@ -1606,7 +1606,8 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     NQumir::NAst::TTypePtr columnType,
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType,
-    bool hasPrecomputedHash)
+    bool hasPrecomputedHash,
+    bool global)
 {
     using namespace NQumir::NAst;
     NQumir::TLocation loc{};
@@ -1934,7 +1935,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
                                : numI64(0);
         };
         auto validI = [&]() -> TExprPtr {
-            return info.NeedsValidity
+            return info.NeedsValidity && argColumns.at(info.ArgColumnIndex).Nullable
                 ? ident("arg_valid_" + std::to_string(info.ArgColumnIndex))
                 : number(1, boolType);
         };
@@ -2023,11 +2024,45 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
         loc, binary("<", ident("i"), ident("n")), std::move(loop)));
     update.push_back(numI64(0));
 
-    auto init = cast(call("aht_init", {
+    TExprPtr init = cast(call("aht_init", {
         ident("ht"), ident("arg"),
         numI64(static_cast<int64_t>(layout.NumAggBuffers)),
         numI64(static_cast<int64_t>(key.Size)),
     }), i64Type);
+    if (global) {
+        // Seed the SQL global group, without pretending an input row arrived.
+        // Reducer buffers remain at their identity (COUNT 0, validity 0).
+        if (key.Fields.size() != 1 || key.Fields[0].IsNullable ||
+            !TMaybeType<TIntegerType>(UnwrapNamedType(key.Fields[0].Type)))
+        {
+            throw std::invalid_argument("global aggregate requires one integer marker key");
+        }
+        auto marker = std::make_shared<TStructConstructExpr>(
+            loc, key.LookupType, std::vector<TExprPtr>{number(1, key.Fields[0].Type)});
+        init = block({
+            var("initialized", i64Type),
+            assign("initialized", std::move(init)),
+            std::make_shared<TIfExpr>(loc,
+                binary("==", ident("initialized"), numI64(0)),
+                block({std::make_shared<TReturnExpr>(loc, numI64(0))}), nullptr),
+            var("global_key", key.LookupType),
+            assign("global_key", std::move(marker)),
+            var("stored_witness", key.StoredType),
+            assign("stored_witness", ZeroValueExpr(key.StoredType)),
+            var("is_new", i64Type),
+            assign("is_new", numI64(0)),
+            var("state_slot", i64Type),
+            assign("state_slot", call(upsertName, {
+                ident("ht"), ident("global_key"), ident("stored_witness"),
+                ident("is_new"), cast(call("rh_hash", {ident("global_key")}), u64Type),
+            })),
+            std::make_shared<TIfExpr>(loc,
+                binary("<", ident("state_slot"), numI64(0)),
+                block({call("aht_destroy", {ident("ht")}),
+                    std::make_shared<TReturnExpr>(loc, numI64(0))}), nullptr),
+            numI64(1),
+        });
+    }
     auto destroyStmts = StringCleanupCalls(layout);
     destroyStmts.push_back(call("aht_destroy", {ident("ht")}));
     destroyStmts.push_back(numI64(1));

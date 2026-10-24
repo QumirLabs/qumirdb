@@ -469,7 +469,7 @@ public:
             // output keeps the shuffle partition count. Global aggregates
             // (`__group__` constant) stay single. Grouping sets shuffle their
             // partials by (__grouping_id__ + keys), so they too keep the count.
-            if (!IsGlobalAggregate(*n.Cast()) &&
+            if (!n.Cast()->IsGlobal() &&
                 !n.Cast()->GroupKeys().empty() && childLanes > 1)
             {
                 return n.Cast()->GroupingSets().empty()
@@ -531,23 +531,6 @@ public:
             return total;
         }
         return 0;
-    }
-
-    // A "global" aggregate is a decorrelated ungrouped aggregate: its only
-    // group key is the constant `__group__` marker (a projected 1). It produces
-    // one row, so hash-shuffling it (all rows to one partition) is pure
-    // overhead - treat it as ungrouped and gather to a single aggregate.
-    bool IsGlobalAggregate(TAggregateOperator& aggregate) const {
-        const auto& keys = aggregate.GroupKeys();
-        if (keys.empty()) {
-            return false;
-        }
-        for (const auto& key : keys) {
-            if (key != "__group__") {
-                return false;
-            }
-        }
-        return true;
     }
 
     // A keyless (nested-loop) join broadcasts its right side to every lane of
@@ -1571,7 +1554,8 @@ private:
                 childType, *inputType, aggregate, std::move(stage), execStageId);
         }
         auto spec = NKernel::BuildAggregateKernelSpec(
-            *inputType, aggregate.GroupKeys(), aggregate.Aggs(), ExternalCatalog_.get());
+            *inputType, aggregate.GroupKeys(), aggregate.Aggs(), ExternalCatalog_.get(),
+            aggregate.IsGlobal());
         spec.HasPrecomputedHash = hasPrecomputedHash;
         TKernelCompiler compiler(
             KernelOptions(std::move(stage), execStageId));
@@ -1605,8 +1589,7 @@ private:
                 return std::make_shared<TAggregateBlockingState>(
                     *kernels, initialCapacity);
             },
-            .OutputType = ComputeAggregateOutputType(
-                childType, aggregate.GroupKeys(), aggregate.Aggs()),
+            .OutputType = spec.OutputSchema,
         };
     }
 
@@ -1973,7 +1956,7 @@ private:
         // Opt-in cascade (partial -> gather -> combine) parallelizes the
         // aggregate; otherwise gather every lane into a single aggregate, which
         // is faster for cheap aggregates (the common case).
-        if (aggregate.GroupKeys().empty() || IsGlobalAggregate(aggregate)) {
+        if (aggregate.GroupKeys().empty() || aggregate.IsGlobal()) {
             if (Settings_.Aggregate.CascadeGlobal) {
                 return LowerAggregateCascade(aggregate, childLanes, outConn, outLaneOffset);
             }
