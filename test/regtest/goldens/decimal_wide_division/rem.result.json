@@ -1,0 +1,10 @@
+{
+  "schema": "<struct (id i32) (a <named Nullable [bool]>) (b <named Nullable [bool]>)>",
+  "rows": [
+    [1, true, true],
+    [2, true, true],
+    [3, true, true],
+    [4, true, true],
+    [5, true, true]
+  ]
+}

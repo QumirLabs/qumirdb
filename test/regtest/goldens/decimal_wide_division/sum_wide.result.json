@@ -1,0 +1,6 @@
+{
+  "schema": "<struct (s bool)>",
+  "rows": [
+    [true]
+  ]
+}

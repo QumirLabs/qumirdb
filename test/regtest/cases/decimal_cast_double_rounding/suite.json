@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "tol": {"abs": 0, "rel": 0},
+  "fixtures": {
+    "values": {"json": "tables/t.json", "parquet": {"row_group_rows": 2}}
+  },
+  "tables": {"t": "values"},
+  "variants": ["single", "threaded", "js"],
+  "cases": {
+    "scale2.sql": {"order": "ordered"},
+    "scale18.sql": {"order": "ordered"},
+    "scale24.sql": {"order": "ordered"}
+  }
+}
