@@ -2,6 +2,7 @@
 #include <qdb/scheduler/instrumentation/task.h>
 #include <qdb/exec/aggregate_exec.h>
 #include <qdb/exec/join_exec.h>
+#include <qdb/exec/row_join_exec.h>
 #include <qdb/exec/late_materialize_exec.h>
 #include <qdb/exec/planner_helpers.h>
 #include <qdb/exec/runtime_filter.h>
@@ -212,6 +213,14 @@ struct TSchedulerInnerJoinState : TProcessorTaskState<TSchedulerInnerJoinState> 
     {}
 
     TInnerJoinProcessor Processor;
+};
+
+struct TSchedulerRowJoinState : TProcessorTaskState<TSchedulerRowJoinState> {
+    TSchedulerRowJoinState(TRowJoinKernels kernels, EJoinBuildSide buildSide)
+        : Processor(std::move(kernels), buildSide)
+    {}
+
+    TRowJoinProcessor Processor;
 };
 
 struct TSchedulerCrossJoinState : TProcessorTaskState<TSchedulerCrossJoinState> {
@@ -1040,12 +1049,12 @@ private:
                     return MapJoinFetch(right.Fetch(rowSet));
                 };
                 const auto result = s->Processor.Process(fetchLeft, fetchRight, output);
-                if constexpr (std::is_same_v<TState, TSchedulerInnerJoinState>) {
+                if constexpr (requires { s->Processor.ObserveInstrumentation(); }) {
                     s->Processor.ObserveInstrumentation();
                 }
                 return MapJoinProcessResult(result);
             });
-        if constexpr (std::is_same_v<TState, TSchedulerInnerJoinState>) {
+        if constexpr (requires(TState& s) { s.Processor.RequiredInputSide(); }) {
             code->RequiredSide = [](NScheduler::ITaskState& state) {
                 switch (static_cast<TState&>(state).Processor.RequiredInputSide()) {
                     case EJoinBuildSide::Left:
@@ -1154,6 +1163,17 @@ private:
             : TSourceSplits{std::move(splits)};
         ScanSplitCache_.emplace(&src, result);
         return result;
+    }
+
+    // The row join table (kernel/join/join_rows.oz) serves inner equi-joins
+    // whose build side lowering fixed; a residual, an outer/semi/anti type or
+    // an adaptive build side keep the symmetric Robin Hood join.
+    bool UsesRowJoinTable(const TJoinOperator& join, EJoinBuildSide buildSide) const {
+        return Settings_.Join.Table == NScheduler::EJoinTableKind::Row
+            && join.JoinType() == EJoinType::Inner
+            && !join.Filter()
+            && !join.Keys().empty()
+            && buildSide != EJoinBuildSide::Auto;
     }
 
     // Number of hash-shuffle partitions for a shuffled operator (grouped
@@ -2773,21 +2793,38 @@ private:
         const auto joinGroup = StageLabel("join", execStageId);
         TKernelCompiler compiler(
             KernelOptions(joinGroup, execStageId));
-        auto joinCode = MakeBinaryJoinCode<TSchedulerInnerJoinState>();
+        const auto buildSide = ChooseJoinBuildSide(join);
+        const bool rowTable = UsesRowJoinTable(join, buildSide);
+        auto joinCode = rowTable
+            ? MakeBinaryJoinCode<TSchedulerRowJoinState>()
+            : MakeBinaryJoinCode<TSchedulerInnerJoinState>();
+        std::shared_ptr<TJoinKernels> joinKernels;
+        std::shared_ptr<TRowJoinKernels> rowJoinKernels;
+        auto compileJoinKernels = [&]() {
+            TStageDiagnosticsScope diagnosticsScope(Diagnostics_, joinGroup);
+            if (rowTable) {
+                rowJoinKernels = std::make_shared<TRowJoinKernels>(
+                    compiler.CompileRowJoin(kernelSpec, buildSide == EJoinBuildSide::Left));
+            } else {
+                joinKernels = std::make_shared<TJoinKernels>(compiler.CompileJoin(kernelSpec));
+            }
+        };
+        auto makeJoinState = [&]() -> std::shared_ptr<NScheduler::ITaskState> {
+            if (rowTable) {
+                return std::make_shared<TSchedulerRowJoinState>(*rowJoinKernels, buildSide);
+            }
+            return std::make_shared<TSchedulerInnerJoinState>(
+                *joinKernels, join.JoinType(), buildSide);
+        };
 
         // A filtered join still needs the hash-shuffle tasks to publish and
         // apply the filter, even when both inputs have only one lane.
         if (leftLanes == 1 && rightLanes == 1 && joinParts == 1
             && !join.RuntimeFilter()) {
-            auto joinKernels = std::make_shared<TJoinKernels>(
-                [&]() {
-                    TStageDiagnosticsScope diagnosticsScope(Diagnostics_, joinGroup);
-                    return compiler.CompileJoin(kernelSpec);
-                }());
+            compileJoinKernels();
             auto task = std::make_unique<NScheduler::TBinaryBlockingTask>(
                 joinCode,
-                std::make_shared<TSchedulerInnerJoinState>(
-                    *joinKernels, join.JoinType(), ChooseJoinBuildSide(join)),
+                makeJoinState(),
                 NScheduler::TInputPort{
                     .Connection = &leftPipeRef, .Lane = 0},
                 NScheduler::TInputPort{
@@ -2810,11 +2847,7 @@ private:
 
         auto hashKernels = compiler.CompileJoinHash(kernelSpec);
         kernelSpec.HasPrecomputedHash = true;
-        auto joinKernels = std::make_shared<TJoinKernels>(
-            [&]() {
-                TStageDiagnosticsScope diagnosticsScope(Diagnostics_, joinGroup);
-                return compiler.CompileJoin(kernelSpec);
-            }());
+        compileJoinKernels();
         std::vector<std::string> leftPartitionKeys;
         std::vector<std::string> rightPartitionKeys;
         leftPartitionKeys.reserve(join.Keys().size());
@@ -2898,8 +2931,7 @@ private:
         for (size_t j = 0; j < joinParts; ++j) {
             auto task = std::make_unique<NScheduler::TBinaryBlockingTask>(
                 joinCode,
-                std::make_shared<TSchedulerInnerJoinState>(
-                    *joinKernels, join.JoinType(), ChooseJoinBuildSide(join)),
+                makeJoinState(),
                 NScheduler::TInputPort{
                     .Connection = leftShuf.Connection, .Lane = j},
                 NScheduler::TInputPort{

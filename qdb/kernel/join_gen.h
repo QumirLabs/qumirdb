@@ -228,6 +228,92 @@ NQumir::NAst::TExprPtr GenJoinDispatchAst(
     NQumir::NAst::TTypePtr hashTableType,
     NQumir::NAst::TTypePtr pairBufferType);
 
+// Row join table (kernel/join/join_rows.oz): the layout of one build row.
+// Every field of the build side is a payload column, in field order; the
+// LookupKey struct sits at KeyOffset, after the hash/next word.
+struct TRowJoinColumn {
+    enum class EKind {
+        Fixed,
+        Bool,
+        BinInt,
+        String,
+    };
+
+    EKind Kind = EKind::Fixed;
+    int32_t SrcColIdx = 0;
+    int64_t Offset = 0;
+    // Byte offset of the validity byte; -1 for a column that cannot be NULL.
+    int64_t ValidOffset = -1;
+    int64_t FixedWidth = 0;
+    NQumir::NAst::TTypePtr StorageType;
+};
+
+struct TRowJoinLayout {
+    int64_t KeyOffset = 8;
+    int64_t RowBytes = 0;
+    bool HasString = false;
+    std::vector<TRowJoinColumn> Columns;
+};
+
+TRowJoinLayout BuildRowJoinLayout(
+    const NQumir::NAst::TStructType& buildType,
+    const TJoinKeyDescriptor& key);
+
+// External types the row join generators refer to by name.
+struct TRowJoinGenTypes {
+    NQumir::NAst::TTypePtr Column;
+    NQumir::NAst::TTypePtr RowSet;
+    NQumir::NAst::TTypePtr PairBuffer;
+    NQumir::NAst::TTypePtr StringView;
+    NQumir::NAst::TTypePtr Arena;
+    NQumir::NAst::TTypePtr Table;
+    NQumir::NAst::TTypePtr Scratch;
+};
+
+// jr_append_batch(arena, batch, key_columns) -> bool: appends every selected
+// row with a valid key to the arena with its hash, key and payload.
+NQumir::NAst::TExprPtr GenRowJoinAppendAst(
+    const TJoinKeyDescriptor& key,
+    const TRowJoinLayout& layout,
+    const std::string& funcName,
+    const TRowJoinGenTypes& types,
+    bool hasPrecomputedHash);
+
+// jr_build_table(table, arena) -> bool: sizes the pointer table for the arena
+// and inserts every row, chaining rows with equal keys.
+NQumir::NAst::TExprPtr GenRowJoinBuildAst(
+    const TJoinKeyDescriptor& key,
+    const TRowJoinLayout& layout,
+    const std::string& funcName,
+    const TRowJoinGenTypes& types);
+
+// jr_probe_batch(table, scratch, batch, key_columns, pairs) -> bool: the
+// three-pass probe (hashes, salted entry lookup, key comparison of the
+// candidates) that pushes one (left, right) pair per matching build row.
+NQumir::NAst::TExprPtr GenRowJoinProbeAst(
+    const TJoinKeyDescriptor& key,
+    const TRowJoinLayout& layout,
+    bool probeIsLeft,
+    const std::string& funcName,
+    const TRowJoinGenTypes& types,
+    bool hasPrecomputedHash);
+
+// jr_dispatch(arena, table, scratch, pairs, batch, key_columns, op) -> bool
+// (ERowJoinKernelOp).
+NQumir::NAst::TExprPtr GenRowJoinDispatchAst(
+    const TRowJoinLayout& layout,
+    const TRowJoinGenTypes& types);
+
+// jr_materialize(pairs, stream, start, limit, out) -> i64: the probe side's
+// columns come from the stream batch through the jt_materialize_* workers,
+// the build side's from the rows through the jr_gather_* workers.
+NQumir::NAst::TExprPtr GenRowJoinMaterializeAst(
+    const NQumir::NAst::TStructType& leftType,
+    const NQumir::NAst::TStructType& rightType,
+    bool buildIsLeft,
+    const TRowJoinLayout& layout,
+    const TRowJoinGenTypes& types);
+
 // Generates the nested-loop (keyless) join entrypoint:
 //   xj_dispatch(left_store, batch_idx, right_store, right_batch_count,
 //               right_matched, pairs, op) -> bool

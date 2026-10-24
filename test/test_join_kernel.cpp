@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <qdb/io/io.h>
+#include <qdb/exec/row_join_exec.h>
 #include <qdb/kernel/compiler.h>
 #include <qdb/kernel/join_gen.h>
 #include <qdb/kernel/join_key.h>
@@ -123,19 +124,24 @@ CompileJoinEntry(const std::string &entryName, void *&entry) {
 
 TEST(JoinKernel, PairBufferLayout) {
   std::shared_ptr<NQumir::NAst::TStructType> pairBuffer;
-  bool hasJoinTable = false;
+  std::shared_ptr<NQumir::NAst::TStructType> joinTable;
   for (const auto &type : NQumir::NRegistry::QumirDbExternalTypes()) {
     if (type.Name == "PairBuffer") {
       pairBuffer =
           NQumir::NAst::TMaybeType<NQumir::NAst::TStructType>(type.Type).Cast();
     } else if (type.Name == "JoinTable") {
-      hasJoinTable = true;
+      joinTable =
+          NQumir::NAst::TMaybeType<NQumir::NAst::TStructType>(type.Type).Cast();
     }
   }
   ASSERT_NE(pairBuffer, nullptr);
   ASSERT_EQ(pairBuffer->Fields.size(), 3u);
   EXPECT_EQ(pairBuffer->Fields[2].first, "Data");
-  EXPECT_FALSE(hasJoinTable); // join reuses HashTable, no separate type
+  // The symmetric join reuses HashTable; the row join table (join_rows.oz)
+  // has its own entry table type, mirrored by TRowJoinProcessor.
+  ASSERT_NE(joinTable, nullptr);
+  ASSERT_EQ(joinTable->Fields.size(), 6u);
+  EXPECT_EQ(joinTable->Fields[0].first, "Entries");
 }
 
 TEST(JoinKernel, MaterializeLibraryMarksPhysicalWorkersCacheable) {
@@ -2388,4 +2394,111 @@ int main(int argc, char **argv) {
   testing::InitGoogleTest(&argc, argv);
   NQumir::NCodeGen::TLLVMInitializer initializer;
   return RUN_ALL_TESTS();
+}
+
+// The row join table (kernel/join/join_rows.oz): rows with an equal key chain
+// behind one entry, NULL keys never match, and a string payload is gathered
+// from the retained batch through the row's StringView.
+TEST(RowJoinProcessor, ChainsNullKeysAndStringPayload) {
+  using namespace NQumir::NAst;
+  auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
+  auto nullableI64 = std::make_shared<TNullable>(i64);
+  TStructType leftType(
+      {{"lk", nullableI64}, {"lname", std::make_shared<TStringType>()}});
+  TStructType rightType({{"rk", nullableI64}, {"rv", i64}});
+
+  // Probe (left): keys 1, 2, NULL, 1, 7 with string payloads.
+  std::vector<int64_t> lk = {1, 2, 0, 1, 7};
+  std::vector<uint8_t> lkMask = {0b11011};
+  std::string lnameBytes = "abbcdddd"; // "a", "bb", "", "c", "dddd"
+  std::vector<int64_t> lnameOffsets = {0, 1, 3, 3, 4, 8};
+  std::vector<TColumn> lcols = {
+      TColumn{.Data = reinterpret_cast<char *>(lk.data()), .Mask = lkMask.data()},
+      TColumn{.Data = lnameBytes.data(),
+              .Offsets = lnameOffsets.data(),
+              .OffsetWidth = 8},
+  };
+  TRowSet leftBatch{
+      .Columns = lcols.data(), .ColumnCount = 2, .RowCount = 5, .RefCount = 1};
+
+  // Build (right): key 1 twice (a chain), NULL, 2, 9.
+  std::vector<int64_t> rk = {1, 1, 0, 2, 9};
+  std::vector<uint8_t> rkMask = {0b11011};
+  std::vector<int64_t> rv = {100, 200, 300, 400, 500};
+  std::vector<TColumn> rcols = {
+      TColumn{.Data = reinterpret_cast<char *>(rk.data()), .Mask = rkMask.data()},
+      TColumn{.Data = reinterpret_cast<char *>(rv.data())},
+  };
+  TRowSet rightBatch{
+      .Columns = rcols.data(), .ColumnCount = 2, .RowCount = 5, .RefCount = 1};
+
+  TKernelCompiler compiler;
+  auto spec = NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}},
+                                           EJoinType::Inner);
+  TRowJoinProcessor processor(
+      compiler.CompileRowJoin(spec, /*buildIsLeft=*/false),
+      EJoinBuildSide::Right);
+
+  bool leftDone = false;
+  bool rightDone = false;
+  bool rightFinished = false;
+  auto left = [&](TRowSet &rowSet) {
+    // The build side must be complete before the probe side is read.
+    EXPECT_TRUE(rightFinished);
+    if (leftDone) {
+      return EJoinFetchResult::FINISHED;
+    }
+    rowSet = leftBatch;
+    leftDone = true;
+    return EJoinFetchResult::OK;
+  };
+  auto right = [&](TRowSet &rowSet) {
+    if (rightDone) {
+      rightFinished = true;
+      return EJoinFetchResult::FINISHED;
+    }
+    rowSet = rightBatch;
+    rightDone = true;
+    return EJoinFetchResult::OK;
+  };
+
+  using TRow = std::tuple<int64_t, std::string, int64_t, int64_t>;
+  std::vector<TRow> got;
+  TRowSet out{};
+  for (;;) {
+    EXPECT_EQ(processor.RequiredInputSide(),
+              rightFinished ? EJoinBuildSide::Left : EJoinBuildSide::Right);
+    auto result = processor.Process(left, right, out);
+    if (result == EJoinProcessorResult::NEED_DATA) {
+      continue;
+    }
+    if (result == EJoinProcessorResult::FINISHED) {
+      break;
+    }
+    ASSERT_EQ(out.ColumnCount, 4);
+    const auto *c0 = reinterpret_cast<const int64_t *>(out.Columns[0].Data);
+    const auto *c2 = reinterpret_cast<const int64_t *>(out.Columns[2].Data);
+    const auto *c3 = reinterpret_cast<const int64_t *>(out.Columns[3].Data);
+    const auto &lname = out.Columns[1];
+    ASSERT_EQ(lname.OffsetWidth, 8);
+    const auto *offsets = reinterpret_cast<const int64_t *>(lname.Offsets);
+    for (int64_t i = 0; i < out.RowCount; ++i) {
+      EXPECT_TRUE((out.Columns[0].Mask[i / 8] >> (i % 8)) & 1);
+      EXPECT_TRUE((out.Columns[2].Mask[i / 8] >> (i % 8)) & 1);
+      got.emplace_back(c0[i],
+                       std::string(lname.Data + (offsets[i] - offsets[0]),
+                                   offsets[i + 1] - offsets[i]),
+                       c2[i], c3[i]);
+    }
+    Release(&out);
+  }
+
+  std::vector<TRow> expected = {{1, "a", 1, 100},
+                                {1, "a", 1, 200},
+                                {1, "c", 1, 100},
+                                {1, "c", 1, 200},
+                                {2, "bb", 2, 400}};
+  std::sort(got.begin(), got.end());
+  std::sort(expected.begin(), expected.end());
+  EXPECT_EQ(got, expected);
 }
