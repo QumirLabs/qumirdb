@@ -1,5 +1,5 @@
 {
-  "schema": "<struct (s f64)>",
+  "schema": "<struct (s <named Nullable [f64]>)>",
   "rows": [
     [7.4000000000000004]
   ]
