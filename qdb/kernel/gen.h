@@ -170,6 +170,8 @@ NQumir::NAst::TExprPtr GenProjectKernelAst(
 // hasPrecomputedHash: read batch.Hash[i] instead of calling rh_hash(key) -
 // set when the caller knows this batch comes straight from a hash shuffle
 // keyed on the same group keys (plan_lowerer.cpp decides this).
+// emptyInputGroups: ids (leading integer key values) of the groups the init op creates
+// before any row arrives, with all other key columns NULL; see TOperatorKernelSpec.
 NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     const NQumir::NAst::TStructType& inputType,
     const TAggregateKeyDescriptor& key,
@@ -178,7 +180,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType,
     bool hasPrecomputedHash = false,
-    bool global = false);
+    const std::vector<int64_t>& emptyInputGroups = {});
 
 // Builds the byte-oriented finalize ABI. C++ supplies one opaque u8 destination
 // per logical key field; the generated wrapper casts each destination to its

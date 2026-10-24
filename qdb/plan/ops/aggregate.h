@@ -41,6 +41,11 @@ public:
     std::vector<std::string>& MutableGroupKeys() { return GroupKeys_; }
     // A global aggregate owns one group even when no input row arrives.
     bool IsGlobal() const { return Global_; }
+    // Ids of the groups that exist over an empty input: the global group (id 1, the
+    // constant `__group__` key), or the sets of GroupingSets() that group by no key
+    // (ROLLUP's and CUBE's grand total), identified by their index, which is the
+    // `__grouping_id__` the executor feeds. Their aggregates are NULL (COUNT 0) there.
+    std::vector<int64_t> EmptyInputGroups() const;
     const std::vector<TAggregateSpec>& Aggs() const { return Aggs_; }
     std::vector<TAggregateSpec>& MutableAggs() { return Aggs_; }
 

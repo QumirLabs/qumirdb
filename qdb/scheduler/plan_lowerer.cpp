@@ -1498,7 +1498,8 @@ private:
         }
 
         auto spec = NKernel::BuildAggregateKernelSpec(
-            *extInput, extKeys, aggregate.Aggs(), ExternalCatalog_.get());
+            *extInput, extKeys, aggregate.Aggs(), ExternalCatalog_.get(),
+            aggregate.EmptyInputGroups());
         TKernelCompiler compiler(
             KernelOptions(std::move(stage), execStageId));
         auto kernels = std::make_shared<TAggregateKernels>(compiler.CompileAggregate(spec));
@@ -1532,7 +1533,8 @@ private:
                 return std::make_shared<TGroupingSetsBlockingState>(*kernels, sets, numKeys);
             },
             .OutputType = ComputeAggregateOutputType(
-                childType, aggregate.GroupKeys(), aggregate.Aggs(), true),
+                childType, aggregate.GroupKeys(), aggregate.Aggs(), true,
+                !aggregate.EmptyInputGroups().empty()),
         };
     }
 
@@ -1555,7 +1557,7 @@ private:
         }
         auto spec = NKernel::BuildAggregateKernelSpec(
             *inputType, aggregate.GroupKeys(), aggregate.Aggs(), ExternalCatalog_.get(),
-            aggregate.IsGlobal());
+            aggregate.EmptyInputGroups());
         spec.HasPrecomputedHash = hasPrecomputedHash;
         TKernelCompiler compiler(
             KernelOptions(std::move(stage), execStageId));

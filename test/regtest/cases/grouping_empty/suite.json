@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "fixtures": {
+    "empty": {"json": "tables/empty.json"},
+    "values": {"json": "tables/values.json", "parquet": {"row_group_rows": 2}}
+  },
+  "tables": {"t": "empty"},
+  "variants": ["single", "threaded", "js"],
+  "cases": {
+    "rollup_one_key.sql": {"order": "unordered"},
+    "rollup_two_keys.sql": {"order": "unordered"},
+    "rollup_string_key.sql": {"order": "unordered"},
+    "cube_two_keys.sql": {"order": "unordered"},
+    "grouping_sets_without_empty_set.sql": {"order": "unordered"},
+    "rollup_having_zero.sql": {"order": "unordered"},
+    "rollup_filtered_to_empty.sql": {"order": "unordered", "tables": {"t": "values"}},
+    "rollup_one_key_values.sql": {"order": "unordered", "tables": {"t": "values"}},
+    "rollup_string_key_values.sql": {"order": "unordered", "tables": {"t": "values"}},
+    "cube_two_keys_values.sql": {"order": "unordered", "tables": {"t": "values"}}
+  }
+}

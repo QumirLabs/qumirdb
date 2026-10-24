@@ -1,0 +1,4 @@
+project (k, s, c, sv, gk, gs) (rows≈9 cost≈1.7K)
+└─ aggregate keys=[t.k, t.s] aggs=[count_0=count, sum_0=sum] (rows≈9 cost≈1.2K)
+   └─ project (t.k, t.s, t.v) (rows≈6 cost≈288)
+      └─ source t AS t (rows≈6 cost≈144)

@@ -84,7 +84,23 @@ TAggregateOperator::TAggregateOperator(TOperatorPtr input, std::vector<std::stri
     auto inputSchema = Input_->OutputColumns();
     Type = std::make_shared<TFunctionType>(
         std::vector<TTypePtr>{inputSchema},
-        ComputeAggregateOutputType(inputSchema, GroupKeys_, Aggs_, !GroupingSets_.empty(), Global_));
+        ComputeAggregateOutputType(inputSchema, GroupKeys_, Aggs_, !GroupingSets_.empty(), !EmptyInputGroups().empty()));
+}
+
+std::vector<int64_t> TAggregateOperator::EmptyInputGroups() const {
+    std::vector<int64_t> groups;
+    if (GroupingSets_.empty()) {
+        if (Global_) {
+            groups.push_back(1);
+        }
+        return groups;
+    }
+    for (size_t id = 0; id < GroupingSets_.size(); ++id) {
+        if (GroupingSets_[id].empty()) {
+            groups.push_back(static_cast<int64_t>(id));
+        }
+    }
+    return groups;
 }
 
 std::vector<TColumnReference> TAggregateOperator::ColumnReferences() const {
