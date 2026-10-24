@@ -16,6 +16,7 @@
     "rollup_filtered_to_empty.sql": {"order": "unordered", "tables": {"t": "values"}},
     "rollup_one_key_values.sql": {"order": "unordered", "tables": {"t": "values"}},
     "rollup_string_key_values.sql": {"order": "unordered", "tables": {"t": "values"}},
-    "cube_two_keys_values.sql": {"order": "unordered", "tables": {"t": "values"}}
+    "cube_two_keys_values.sql": {"order": "unordered", "tables": {"t": "values"}},
+    "rollup_key_argument_values.sql": {"order": "unordered", "tables": {"t": "values"}}
   }
 }
