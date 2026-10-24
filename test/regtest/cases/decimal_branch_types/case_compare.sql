@@ -1,0 +1,1 @@
+SELECT id, v = 5 AS e5, 3 = v AS r3, v = -2 AS em2, v > 1 AS gt1, v <= 3 AS le3, v <> 7 AS ne7, v IS NULL AS n FROM (SELECT id, CASE WHEN b > 2 THEN CAST(a AS DECIMAL(10,2)) ELSE CAST(b AS DECIMAL(8,4)) END AS v FROM t) ORDER BY id;
