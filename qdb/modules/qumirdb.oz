@@ -397,6 +397,44 @@
               (block (= result (* result 0.5)) (= e (+ e 1)))))))
       (if negative (block (= result (- 0.0 result))))
       (return result)))
+  ;; CAST(decimal AS integer): round half away from zero, as DuckDB and PostgreSQL do.
+  ;; qdb has no runtime error channel, so a value outside the signed `bits`-wide range
+  ;; saturates to its nearest bound, like CAST(double AS integer) does.
+  (fun qdb_decimal_to_int_sat ((var value BinInt) (var scale i64) (var bits i64)) -> i64
+    (block
+      (var factor BinInt)
+      (= factor (call qdb_pow10_i128 scale))
+      (var p i128)
+      (= p (field factor V))
+      (var v i128)
+      (= v (field value V))
+      (var negative bool)
+      (= negative (< v (: 0 i128)))
+      (var mag i128)
+      (= mag v)
+      (if negative (block (= mag (- (: 0 i128) v))))
+      (var q i128)
+      (= q (// mag p))
+      (var r i128)
+      (= r (- mag (* q p)))
+      (if (>= r (- p r)) (block (= q (+ q (: 1 i128)))))
+      (var limit i128)
+      (= limit (: 1 i128))
+      (var n i64)
+      (= n (- bits 1))
+      (while (> n 0)
+        (block (= limit (* limit (: 2 i128))) (= n (- n 1))))
+      (if negative
+        (block
+          (if (> q limit) (block (= q limit)))
+          (= q (- (: 0 i128) q)))
+        (block
+          (if (>= q limit) (block (= q (- limit (: 1 i128)))))))
+      (return (cast q i64))))
+  (fun qdb_decimal_to_i64 ((var value BinInt) (var scale i64)) -> i64
+    (block (return (call qdb_decimal_to_int_sat value scale (: 64 i64)))))
+  (fun qdb_decimal_to_i32 ((var value BinInt) (var scale i64)) -> i32
+    (block (return (cast (call qdb_decimal_to_int_sat value scale (: 32 i64)) i32))))
   (fun qdb_decimal_scale_up ((var value BinInt) (var delta i64)) -> BinInt
     (block
       (var factor BinInt)

@@ -1824,6 +1824,23 @@ TTypePtr ExpandDecimalNode(TExprPtr& e, const TStructType& inputType, TTypeEnv& 
                 }, node->Location);
             }
         }
+        if (ot) {
+            auto integer = TMaybeType<TIntegerType>(UnwrapNamedType(ValueType(target)));
+            auto decimal = DecimalSpecOfValueType(ValueType(ot));
+            if (integer && decimal) {
+                // Only i32 and i64 are SQL integer types; qdb_decimal_to_i32/i64 round
+                // half away from zero and saturate.
+                const int bits = integer.Cast()->BitWidth();
+                if (bits != 32 && bits != 64) {
+                    throw NQumir::TError("decimal cast to a " + std::to_string(bits) +
+                        "-bit integer is not implemented; only INTEGER and BIGINT exist");
+                }
+                e = Call(bits == 32 ? "qdb_decimal_to_i32" : "qdb_decimal_to_i64", {
+                    std::move(node->Operand),
+                    DecimalScaleLiteral(node->Location, decimal->Scale),
+                }, node->Location);
+            }
+        }
         return Propagate({ot}, target);
     }
     if (auto cl = TMaybeNode<TCallExpr>(e)) {
