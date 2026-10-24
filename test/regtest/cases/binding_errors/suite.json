@@ -28,6 +28,7 @@
     "ungrouped_column.sql": {},
     "ungrouped_column_in_having.sql": {},
     "ungrouped_column_qualified.sql": {},
-    "ungrouped_expression.sql": {}
+    "ungrouped_expression.sql": {},
+    "window_in_join_on.sql": {}
   }
 }

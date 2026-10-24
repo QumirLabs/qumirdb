@@ -78,6 +78,7 @@ bool HasSubquery(const NAst::TExprPtr& expr) {
 }
 
 bool HasWindowExprLocal(const NAst::TExprPtr& expr);
+NAst::TExprPtr FindWindowExprLocal(const NAst::TExprPtr& expr);
 
 std::string ItemName(const NSql::TSqlSelectItem& item, size_t index) {
     if (!item.ColumnAliases.empty()) {
@@ -360,22 +361,26 @@ bool HasWindowExpr(const NAst::TExprPtr& expr) {
 // into nested subqueries, whose windows belong to that subquery. Used to reject
 // windows in WHERE/GROUP BY/HAVING and in ORDER BY over an independent scalar
 // subquery.
-bool HasWindowExprLocal(const NAst::TExprPtr& expr) {
+NAst::TExprPtr FindWindowExprLocal(const NAst::TExprPtr& expr) {
     if (!expr) {
-        return false;
+        return nullptr;
     }
     if (NAst::TMaybeNode<NSql::TWindowExpr>(expr)) {
-        return true;
+        return expr;
     }
     if (NAst::TMaybeNode<NSql::TSubqueryExpr>(expr)) {
-        return false;
+        return nullptr;
     }
     for (const auto& child : expr->Children()) {
-        if (HasWindowExprLocal(child)) {
-            return true;
+        if (auto found = FindWindowExprLocal(child)) {
+            return found;
         }
     }
-    return false;
+    return nullptr;
+}
+
+bool HasWindowExprLocal(const NAst::TExprPtr& expr) {
+    return FindWindowExprLocal(expr) != nullptr;
 }
 
 bool HasWindowExpr(const NSql::TSqlQuery& query) {
@@ -1094,6 +1099,10 @@ std::expected<TRelation, TError> BuildTableRef(
         NAst::TExprPtr residual;
         if (join->Condition) {
             if (join->Condition->On) {
+                if (auto window = FindWindowExprLocal(join->Condition->On)) {
+                    return std::unexpected(TError(window->Location,
+                        "window functions are not allowed in JOIN conditions"));
+                }
                 if (HasSubquery(join->Condition->On)) {
                     return std::unexpected(TError("subqueries are not supported yet"));
                 }
@@ -2348,11 +2357,11 @@ std::expected<TRelation, TError> BuildSelect(
     // only), so reject them with a clear message instead of crashing later in
     // type annotation. Use the local check so a window inside an independent
     // subquery in WHERE/HAVING (its own scope) is not mistaken for one here.
-    if (HasWindowExprLocal(select.Where)) {
-        return std::unexpected(TError("window functions are not allowed in WHERE"));
+    if (auto window = FindWindowExprLocal(select.Where)) {
+        return std::unexpected(TError(window->Location, "window functions are not allowed in WHERE"));
     }
-    if (HasWindowExprLocal(select.Having)) {
-        return std::unexpected(TError("window functions are not allowed in HAVING"));
+    if (auto window = FindWindowExprLocal(select.Having)) {
+        return std::unexpected(TError(window->Location, "window functions are not allowed in HAVING"));
     }
     TExtractedSubqueries subqueries;
     // Extracts scalar subqueries out of a finished projection list, broadcasting
