@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "fixtures": {
+    "sa": {"json": "tables/sa.json", "parquet": {"row_group_rows": 2}},
+    "sb": {"json": "tables/sb.json", "parquet": {"row_group_rows": 2}}
+  },
+  "tables": {"sa": "sa", "sb": "sb"},
+  "variants": ["single", "threaded"],
+  "cases": {
+    "keyed_inner.sql": {"order": "unordered"},
+    "keyed_exists.sql": {"order": "unordered"},
+    "keyed_not_exists.sql": {"order": "unordered"},
+    "keyless_left.sql": {"order": "unordered"},
+    "keyless_full.sql": {"order": "unordered"},
+    "keyless_not_exists.sql": {"order": "unordered"}
+  }
+}

@@ -198,6 +198,13 @@ char* TStringArena::Alloc(int64_t size) {
     return ptr;
 }
 
+void TStringArena::Reset() {
+    if (Blocks_.size() > 1) {
+        Blocks_.erase(Blocks_.begin(), Blocks_.end() - 1);
+    }
+    Used_ = 0;
+}
+
 extern "C" {
 
 void* qdb_alloc(int64_t size) {
@@ -425,6 +432,10 @@ qdb_string_view qdb_string_concat(void* arena, qdb_string_view left, qdb_string_
         std::memcpy(dst + left.Size, right.Data, static_cast<size_t>(right.Size));
     }
     return {reinterpret_cast<const uint8_t*>(dst), size};
+}
+
+void qdb_string_arena_reset(void* arena) {
+    static_cast<TStringArena*>(arena)->Reset();
 }
 
 qdb_string_view qdb_regexp_replace(

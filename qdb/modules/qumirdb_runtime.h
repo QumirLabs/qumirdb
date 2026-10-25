@@ -13,11 +13,14 @@ struct qdb_string_view;
 // concatenation via qdb_string_concat). It never moves bytes it has already handed
 // out - new blocks are appended, existing blocks stay put - so every StringView it
 // returns stays valid for the whole batch, until the executor copies the bytes into
-// the owned output column. One instance lives per kernel invocation (owned by the
-// executor) and frees all blocks on destruction.
+// the owned output column, or until a row-at-a-time kernel calls Reset. One instance
+// lives per kernel invocation (owned by the executor) and frees all blocks on
+// destruction.
 class TStringArena {
 public:
     char* Alloc(int64_t size);
+    // Invalidates every view handed out so far and keeps one block for reuse.
+    void Reset();
     NQdb::NUtils::TRegexContext& RegexContext() { return RegexContext_; }
 
 private:
@@ -86,6 +89,10 @@ qdb_string_view qdb_substring(qdb_string_view str, int32_t start, int32_t length
 // kernel row loop. Null propagation is handled by the caller (ExpandNullable), so this
 // is unconditional: it always concatenates both operands.
 qdb_string_view qdb_string_concat(void* arena, qdb_string_view left, qdb_string_view right);
+
+// TStringArena::Reset for a kernel that evaluates one row at a time, such as a
+// join residual, once the strings of the current row are dead.
+void qdb_string_arena_reset(void* arena);
 
 // regex is compiled once while the query is lowered. arena owns bytes produced
 // by replacements until the current kernel invocation has consumed them.

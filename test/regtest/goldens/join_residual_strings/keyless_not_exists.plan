@@ -1,0 +1,4 @@
+project (k) (rows≈1 cost≈4.3K)
+└─ join left_anti residual (== |sb.s| (call strcat |sa.s| (cast "x" <named StringView>))) (rows≈1 cost≈4.3K)
+   ├─ source sa AS sa (rows≈4 cost≈96)
+   └─ source sb AS sb (rows≈6 cost≈96)
