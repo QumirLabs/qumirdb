@@ -1,0 +1,4 @@
+{
+  "schema": "<struct (call_center string) (call_center_name <named Nullable [string]>) (manager <named Nullable [string]>) (returns_loss <named Nullable [f64]>)>",
+  "rows": []
+}

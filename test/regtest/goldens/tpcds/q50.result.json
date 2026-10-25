@@ -1,0 +1,4 @@
+{
+  "schema": "<struct (s_store_name <named Nullable [string]>) (s_company_id <named Nullable [i32]>) (s_street_number <named Nullable [string]>) (s_street_name <named Nullable [string]>) (s_street_type <named Nullable [string]>) (s_suite_number <named Nullable [string]>) (s_city <named Nullable [string]>) (s_county <named Nullable [string]>) (s_state <named Nullable [string]>) (s_zip <named Nullable [string]>) (|30 days| i64) (|31-60 days| i64) (|61-90 days| i64) (|91-120 days| i64) (|>120 days| i64)>",
+  "rows": []
+}

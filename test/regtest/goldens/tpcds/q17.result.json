@@ -1,0 +1,4 @@
+{
+  "schema": "<struct (i_item_id string) (i_item_desc <named Nullable [string]>) (s_state <named Nullable [string]>) (store_sales_quantitycount i64) (store_sales_quantityave <named Nullable [f64]>) (store_sales_quantitystdev <named Nullable [f64]>) (store_sales_quantitycov <named Nullable [f64]>) (store_returns_quantitycount i64) (store_returns_quantityave <named Nullable [f64]>) (store_returns_quantitystdev <named Nullable [f64]>) (store_returns_quantitycov <named Nullable [f64]>) (catalog_sales_quantitycount i64) (catalog_sales_quantityave <named Nullable [f64]>) (catalog_sales_quantitystdev <named Nullable [f64]>) (catalog_sales_quantitycov <named Nullable [f64]>)>",
+  "rows": []
+}

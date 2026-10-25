@@ -1,0 +1,4 @@
+{
+  "schema": "<struct (c_last_name <named Nullable [string]>) (c_first_name <named Nullable [string]>) (col2 <named Nullable [string]>) (ss_ticket_number i32) (amt <named Nullable [f64]>) (profit <named Nullable [f64]>)>",
+  "rows": []
+}

@@ -1,0 +1,6 @@
+{
+  "schema": "<struct (|Excess Discount Amount| <named Nullable [f64]>)>",
+  "rows": [
+    [null]
+  ]
+}

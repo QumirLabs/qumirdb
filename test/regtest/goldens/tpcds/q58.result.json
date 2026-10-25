@@ -1,0 +1,4 @@
+{
+  "schema": "<struct (item_id string) (ss_item_rev <named Nullable [f64]>) (ss_dev <named Nullable [f64]>) (cs_item_rev <named Nullable [f64]>) (cs_dev <named Nullable [f64]>) (ws_item_rev <named Nullable [f64]>) (ws_dev <named Nullable [f64]>) (average <named Nullable [f64]>)>",
+  "rows": []
+}

@@ -1,0 +1,4 @@
+{
+  "schema": "<struct (ss_sold_year <named Nullable [i32]>) (ss_item_sk i32) (ss_customer_sk <named Nullable [i32]>) (ratio <named Nullable [f64]>) (store_qty <named Nullable [i64]>) (store_wholesale_cost <named Nullable [f64]>) (store_sales_price <named Nullable [f64]>) (other_chan_qty i64) (other_chan_wholesale_cost f64) (other_chan_sales_price f64)>",
+  "rows": []
+}

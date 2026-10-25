@@ -1,0 +1,4 @@
+{
+  "schema": "<struct (customer_id string) (customername string)>",
+  "rows": []
+}

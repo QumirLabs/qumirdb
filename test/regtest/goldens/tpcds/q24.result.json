@@ -1,0 +1,4 @@
+{
+  "schema": "<struct (c_last_name <named Nullable [string]>) (c_first_name <named Nullable [string]>) (s_store_name <named Nullable [string]>) (paid <named Nullable [f64]>)>",
+  "rows": []
+}

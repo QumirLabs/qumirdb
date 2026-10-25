@@ -1,0 +1,4 @@
+{
+  "schema": "<struct (ca_state <named Nullable [string]>) (cd_gender <named Nullable [string]>) (cd_marital_status <named Nullable [string]>) (cd_dep_count <named Nullable [i32]>) (cnt1 i64) (aggone1 <named Nullable [f64]>) (aggtwo1 <named Nullable [i64]>) (aggthree1 <named Nullable [i64]>) (cd_dep_employed_count <named Nullable [i32]>) (cnt2 i64) (aggone2 <named Nullable [f64]>) (aggtwo2 <named Nullable [i64]>) (aggthree2 <named Nullable [i64]>) (cd_dep_college_count <named Nullable [i32]>) (cnt3 i64) (aggone3 <named Nullable [f64]>) (aggtwo3 <named Nullable [i64]>) (aggthree3 <named Nullable [i64]>)>",
+  "rows": []
+}
