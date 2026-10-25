@@ -9,6 +9,7 @@
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/stats.h>
 #include <qdb/plan/pipeline.h>
+#include <qdb/plan/passes/cbo/dpccp.h>
 #include <qdb/plan/passes/estimate_stats.h>
 #include <qdb/plan/passes/qualify_columns.h>
 #include <qdb/plan/passes/row_group_predicate.h>
@@ -700,6 +701,38 @@ TEST_F(SharedKeyRangeStats, SelectedKeysAreNotSpreadByTheBaseHistogram) {
     const double selectedRows = static_cast<double>((*selected)->Stats_->RowCount);
     EXPECT_NEAR(selectedRows, 10.0, 1.0);
     EXPECT_NEAR(static_cast<double>(stats->RowCount), selectedRows * 100000.0 / 101.0, 100.0);
+}
+
+// Join ordering estimates a join as the plan does. The dimension rows that
+// the 10-row table selects keep their keys within the fact's range, so each
+// finds 100000 / 101 fact rows. Fixed selectivities of the two pairs would
+// spread the selected keys over the dimension's range and give a tenth of
+// that.
+TEST_F(SharedKeyRangeStats, JoinOrderEstimatesKeysAnotherJoinSelected) {
+    TStatsSource small({{"z", 10}}, 10);
+    std::vector<NQdb::TOperatorPtr> leaves{
+        std::make_shared<NQdb::TSourceOperator>(Dim, "d"),
+        std::make_shared<NQdb::TSourceOperator>(small, "s"),
+        std::make_shared<NQdb::TSourceOperator>(Fact, "f"),
+    };
+    for (auto& leaf : leaves) {
+        NQdb::AssignSourceAliases(leaf);
+        NQdb::QualifyColumns(leaf);
+        NQdb::AnnotateTypes(leaf);
+        NQdb::EstimateStats(leaf);
+    }
+    NQdb::TFoldedBounds foldedBounds;
+    auto tree = NQdb::NCbo::DpccpJoinOrder(
+        leaves, {{"d.y", "s.z"}, {"d.x", "f.k"}}, {}, foldedBounds);
+    ASSERT_TRUE(tree && tree->Stats_);
+    auto join = NQdb::TMaybeOp<NQdb::TJoinOperator>(tree);
+    ASSERT_TRUE(join);
+    auto selected = NQdb::TMaybeOp<NQdb::TJoinOperator>(join.Cast()->Left())
+        ? join.Cast()->Left()
+        : join.Cast()->Right();
+    const double selectedRows = static_cast<double>(selected->Stats_->RowCount);
+    EXPECT_NEAR(selectedRows, 10.0, 1.0);
+    EXPECT_NEAR(static_cast<double>(tree->Stats_->RowCount), selectedRows * 100000.0 / 101.0, 100.0);
 }
 
 TEST_F(SharedKeyRangeStats, DisjointKeyRangesMatchNothing) {

@@ -18,12 +18,20 @@
 namespace NQdb {
 
 using namespace NQumir::NAst;
+using namespace NQumir::NAst::NLiterals;
 
 namespace {
 
 struct TEdge {
     std::string Left;
     std::string Right;
+};
+
+// The conjuncts of the filters above a join chain: key equalities, which form
+// the join graph, and the other conjuncts, which only scale its joins.
+struct TJoinPredicates {
+    std::vector<TEdge> Edges;
+    std::vector<TExprPtr> Residuals;
 };
 
 struct TOwnedEdge {
@@ -35,21 +43,24 @@ struct TOwnedEdge {
 struct TContext {
     bool EnableCbo = true;
     TJoinReorderDiagnostics* Diagnostics = nullptr;
+    TFoldedBounds& FoldedBounds;
 };
 
-void CollectEquiEdges(const TExprPtr& predicate, std::vector<TEdge>& out) {
+void CollectJoinPredicates(const TExprPtr& predicate, TJoinPredicates& out) {
     std::vector<TExprPtr> conjucts;
     FactorConjuncts(predicate, conjucts);
     for (const auto& conj : conjucts) {
-        auto binary = TMaybeNode<TBinaryExpr>(conj);
-        if (!binary || binary.Cast()->Operator != "==") {
-            continue;
+        auto maybeBinary = TMaybeNode<TBinaryExpr>(conj);
+        if (maybeBinary) {
+            auto binary = maybeBinary.Cast();
+            auto left = TMaybeNode<TIdentExpr>(binary->Left);
+            auto right = TMaybeNode<TIdentExpr>(binary->Right);
+            if (binary->Operator == "=="_op && left && right) {
+                out.Edges.push_back({left.Cast()->Name, right.Cast()->Name});
+                continue;
+            }
         }
-        auto left = TMaybeNode<TIdentExpr>(binary.Cast()->Left);
-        auto right = TMaybeNode<TIdentExpr>(binary.Cast()->Right);
-        if (left && right) {
-            out.push_back({left.Cast()->Name, right.Cast()->Name});
-        }
+        out.Residuals.push_back(conj);
     }
 }
 
@@ -214,7 +225,7 @@ void RecordJoinReorderChain(
 
 TOperatorPtr BuildChain(
     const std::vector<TOperatorPtr>& leaves,
-    const std::vector<TEdge>& edges,
+    const TJoinPredicates& predicates,
     TContext& ctx)
 {
     const size_t n = leaves.size();
@@ -233,7 +244,7 @@ TOperatorPtr BuildChain(
 
     std::vector<std::unordered_set<size_t>> adjacency(n);
     std::vector<TOwnedEdge> graphEdges;
-    for (const auto& edge : edges) {
+    for (const auto& edge : predicates.Edges) {
         auto left = owner.find(edge.Left);
         auto right = owner.find(edge.Right);
         if (left == owner.end() || right == owner.end() || left->second == right->second) {
@@ -302,7 +313,7 @@ TOperatorPtr BuildChain(
     for (int c = 0; c < components; ++c) {
         TOperatorPtr tree = compLeaves[c].size() == 1
             ? compLeaves[c].front()
-            : NCbo::DpccpJoinOrder(compLeaves[c], compEdges[c]);
+            : NCbo::DpccpJoinOrder(compLeaves[c], compEdges[c], predicates.Residuals, ctx.FoldedBounds);
         if (!tree) {
             RecordJoinReorderChain(
                 ctx, leaves.size(), graphEdges.size(), false, "heuristic",
@@ -323,14 +334,15 @@ TOperatorPtr BuildChain(
     return result;
 }
 
-// `edges` are equality edges threaded down from enclosing filters, so an
-// inner-join chain can be reordered even when a filter is separated from it by
-// other operators (e.g. a decorrelation LEFT JOIN). Edges are reset across
-// project/aggregate, which redefine columns; BuildChain ignores edges whose
-// endpoints aren't owned by the chain's leaves (qualified names disambiguate).
+// `predicates` are threaded down from enclosing filters, so an inner-join
+// chain can be reordered even when a filter is separated from it by other
+// operators (e.g. a decorrelation LEFT JOIN). They are reset across
+// project/aggregate, which redefine columns; BuildChain ignores the edges and
+// DPccp the residuals that read columns the chain's leaves do not own
+// (qualified names disambiguate).
 TOperatorPtr Reorder(
     TOperatorPtr node,
-    std::vector<TEdge> edges,
+    TJoinPredicates predicates,
     TContext& ctx)
 {
     if (!node) {
@@ -338,9 +350,9 @@ TOperatorPtr Reorder(
     }
     if (auto maybeFilter = TMaybeOp<TFilterOperator>(node)) {
         auto filter = maybeFilter.Cast();
-        CollectEquiEdges(filter->Predicate(), edges);
+        CollectJoinPredicates(filter->Predicate(), predicates);
         filter->MutableInput() = Reorder(
-            filter->Input(), std::move(edges), ctx);
+            filter->Input(), std::move(predicates), ctx);
         return filter;
     }
     if (IsReorderableJoin(node)) {
@@ -349,12 +361,12 @@ TOperatorPtr Reorder(
         for (auto& leaf : leaves) {
             leaf = Reorder(std::move(leaf), {}, ctx);
         }
-        return BuildChain(leaves, edges, ctx);
+        return BuildChain(leaves, predicates, ctx);
     }
     if (auto maybeJoin = TMaybeOp<TJoinOperator>(node)) {
         auto join = maybeJoin.Cast();
-        join->MutableLeft() = Reorder(join->Left(), edges, ctx);
-        join->MutableRight() = Reorder(join->Right(), edges, ctx);
+        join->MutableLeft() = Reorder(join->Left(), predicates, ctx);
+        join->MutableRight() = Reorder(join->Right(), predicates, ctx);
         return join;
     }
     for (auto& input : node->MutableInputs()) {
@@ -463,6 +475,7 @@ TOperatorPtr PushDown(TOperatorPtr node) {
 
 TOperatorPtr ReorderJoins(
     TOperatorPtr root,
+    TFoldedBounds& foldedBounds,
     bool enableCbo,
     TJoinReorderDiagnostics* diagnostics)
 {
@@ -473,6 +486,7 @@ TOperatorPtr ReorderJoins(
     TContext ctx{
         .EnableCbo = enableCbo,
         .Diagnostics = diagnostics,
+        .FoldedBounds = foldedBounds,
     };
     return Reorder(std::move(root), {}, ctx);
 }

@@ -330,7 +330,9 @@ The `u` branch, the union and the filter all disappear.
 
 Turns a cross-join chain into a connected order, threading equalities down the
 chain; with the CBO on, DPccp picks the order by estimated cost using
-`EstimateStats` cardinalities. See [join_reorder.md](join_reorder.md).
+`EstimateStats` cardinalities. Every join it considers is estimated by the
+rules that estimate the plan, residuals included, and a set of relations keeps
+the largest estimate of its splits. See [join_reorder.md](join_reorder.md).
 
 Column demand is propagated before cost-based enumeration, so unused source
 payload does not inflate a join input's width. Predicate-only columns remain
@@ -680,6 +682,10 @@ bucket, and a predicate the statistics cannot answer gets a default, 0.5 here.
 - `NOT p` keeps the rows where `p` is FALSE. That is the complement of TRUE only
   when `p` cannot be NULL; otherwise the UNKNOWN rows are not known, and
   `NOT p` gets the default.
+- `x < y` for two columns takes them as independent. The fraction is the mean,
+  over the rows of `y`, of the fraction of `x` below them: each equi-depth
+  bucket of `y` holds an equal share of its rows and contributes the mean of
+  `x`'s histogram at its two boundaries.
 
 ### Join cardinality
 
@@ -730,3 +736,11 @@ column's NDV, to the matched keys or to its output rows, keeps a selection of
 the values its histogram described, without saying where they lie, so the
 column keeps its min/max and drops the histogram. Otherwise a date column that
 a join cut to one year's rows would still look spread over two centuries.
+
+A join's residual, the part of its condition other than key equalities, keeps
+the share of the key matches it accepts. It is estimated by the filter rules
+over the joined row and taken as independent of the keys. In TPC-DS SF10,
+`inv_quantity_on_hand < cs_quantity` keeps about 5% of the `catalog_sales ⋈
+inventory` matches on the item key, read from the two quantity histograms. A
+semi or anti join keeps a row whose key matches include one the residual
+accepts: a row with `m` matches loses them all with probability `(1 - s)^m`.

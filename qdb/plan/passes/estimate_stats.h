@@ -23,6 +23,12 @@ using TFoldedBounds = std::unordered_map<
 TStatsPtr EstimateStats(TOperatorPtr op);
 TStatsPtr EstimateStats(TOperatorPtr op, TFoldedBounds& foldedBounds);
 
+class TJoinOperator;
+
+// Statistics of `join` from the estimated stats of its inputs, which the join
+// order search also uses for the joins it considers.
+TStatsPtr EstimateJoinStats(const std::shared_ptr<TJoinOperator>& join, TFoldedBounds& foldedBounds);
+
 // Width estimate used by the CBO cost model. Strings are costed as the
 // materialized StringView (ptr + size), not as their payload bytes.
 double EstimateTypeWidth(const NQumir::NAst::TTypePtr& type);
@@ -43,44 +49,5 @@ double EstimateJoinCost(
     double outputRows,
     double outputRowWidth,
     double keyWidth);
-
-// Fallback NDV for a join key column that has no statistics.
-constexpr double UnknownNdv = 100.0;
-
-struct TJoinCardinality {
-    double Rows = 0.0;
-    double NdvL = 1.0; // \prod ndv over left key columns, clamped to leftRows
-    double NdvR = 1.0;
-};
-
-// One side of an equi-join key pair.
-struct TJoinKeySide {
-    double Ndv = UnknownNdv;
-    // Fraction of the side's rows whose key lies in the range of values both
-    // sides' keys span; 1 when a range is unknown.
-    double SharedFraction = 1.0;
-};
-
-struct TJoinKeyStats {
-    TJoinKeySide Left;
-    TJoinKeySide Right;
-};
-
-// Statistics of the key pair `leftColumn = rightColumn` of two inputs whose
-// stats are estimated.
-TJoinKeyStats EstimateJoinKey(
-    const TOperatorPtr& left,
-    const std::string& leftColumn,
-    const TOperatorPtr& right,
-    const std::string& rightColumn);
-
-// Inner equi-join cardinality over the range both sides' keys span: rows =
-// sharedL*sharedR / max(domainL, domainR), where a side's domain is its key ndv
-// inside that range and its shared rows are the rows there. See "Join
-// cardinality" in docs/arch/optimizations.md.
-TJoinCardinality EstimateEquiJoin(
-    double leftRows,
-    double rightRows,
-    const std::vector<TJoinKeyStats>& keys);
 
 } // namespace NQdb

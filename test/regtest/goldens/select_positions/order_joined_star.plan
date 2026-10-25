@@ -1,6 +1,6 @@
 project (x, x)
 └─ sort [__scope_1 asc]
-   └─ project (__scope_0, __scope_1) (rows≈9 cost≈4.4K)
-      └─ join inner residual (== (+ |l.x| |r.x|) 4) (rows≈9 cost≈4.3K)
+   └─ project (__scope_0, __scope_1) (rows≈4 cost≈4.3K)
+      └─ join inner residual (== (+ |l.x| |r.x|) 4) (rows≈4 cost≈4.2K)
          ├─ source k AS l (rows≈3 cost≈24)
          └─ source k AS r (rows≈3 cost≈24)

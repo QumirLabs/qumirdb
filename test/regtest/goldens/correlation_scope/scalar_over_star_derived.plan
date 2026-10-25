@@ -1,5 +1,5 @@
-project (x, y) (rows≈5 cost≈4.7K)
-└─ join inner residual (< |t.y| __scalar_0__) (rows≈5 cost≈4.6K)
+project (x, y) (rows≈2 cost≈4.6K)
+└─ join inner residual (< |t.y| __scalar_0__) (rows≈2 cost≈4.5K)
    ├─ source t AS t (rows≈5 cost≈80)
    └─ project (__scalar_0__) (rows≈1 cost≈296)
       └─ aggregate keys=[__group__] aggs=[max_0=max] (rows≈1 cost≈288)

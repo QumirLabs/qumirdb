@@ -241,7 +241,8 @@ TEST(JoinOrder, ReordersThroughLimitAndSort) {
 
     QualifyColumns(root);
     AnnotateTypes(root);
-    root = ReorderJoins(root);
+    TFoldedBounds foldedBounds;
+    root = ReorderJoins(root, foldedBounds);
 
     auto limit = AsLimit(root);
     ASSERT_NE(limit, nullptr);

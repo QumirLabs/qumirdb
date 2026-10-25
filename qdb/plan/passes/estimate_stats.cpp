@@ -296,6 +296,9 @@ private:
                 ? bound->End.Below
                 : 1.0 - bound->End.Below;
         }
+        if (auto fraction = EstimateColumnComparison(binary)) {
+            return *fraction;
+        }
         return 0.5;
     }
 
@@ -469,33 +472,92 @@ private:
         if (!num) {
             return std::nullopt;
         }
+        return num->IsFloat()
+            ? FractionBelowValue(*colIt->second, type, num->FloatValue, strict)
+            : FractionBelowValue(*colIt->second, type, num->IntValue, strict);
+    }
+
+    // Fraction of a numeric column's non-NULL rows below an integer or a
+    // double value.
+    template <class TValue>
+    static std::optional<double> FractionBelowValue(
+        const TStats::TColumnStats& stats,
+        const TTypePtr& columnType,
+        TValue value,
+        bool strict)
+    {
+        const auto type = UnwrapNullableType(columnType);
         if (TMaybeType<TFloatType>(type)) {
-            double c = num->IsFloat()
-                ? num->FloatValue
-                : static_cast<double>(num->IntValue);
-            return colIt->second->FractionBelow(c, strict);
+            return stats.FractionBelow(static_cast<double>(value), strict);
         }
-        if (TMaybeType<TIntegerType>(type)) {
-            if (num->IsFloat()) {
-                const double value = num->FloatValue;
-                if (std::isnan(value)) {
-                    return std::nullopt;
-                }
-                // Outside the int64 range the bound is above or below every value.
-                if (value >= 0x1p63) {
-                    return 1.0;
-                }
-                if (value < -0x1p63) {
-                    return 0.0;
-                }
-                // An integer is below 24.5 exactly when it is <= 24.
-                const double whole = std::floor(value);
-                return colIt->second->FractionBelow(
-                    static_cast<int64_t>(whole), strict && whole == value);
+        if (!TMaybeType<TIntegerType>(type)) {
+            return std::nullopt;
+        }
+        if constexpr (std::is_floating_point_v<TValue>) {
+            if (std::isnan(value)) {
+                return std::nullopt;
             }
-            return colIt->second->FractionBelow(num->IntValue, strict);
+            // Outside the int64 range the bound is above or below every value.
+            if (value >= 0x1p63) {
+                return 1.0;
+            }
+            if (value < -0x1p63) {
+                return 0.0;
+            }
+            // An integer is below 24.5 exactly when it is <= 24.
+            const double whole = std::floor(value);
+            return stats.FractionBelow(static_cast<int64_t>(whole), strict && whole == value);
+        } else {
+            return stats.FractionBelow(value, strict);
         }
-        return std::nullopt;
+    }
+
+    // `x < y` for two columns taken as independent: the mean, over the rows
+    // of y, of the fraction of x below them. Each bucket of y's equi-depth
+    // histogram holds an equal share of its rows, spread evenly between its
+    // boundaries, so it contributes the mean fraction at its two ends. The
+    // histograms describe non-NULL values; the NULLs are not counted here.
+    std::optional<double> EstimateColumnComparison(const TBinaryExpr& binary) const {
+        const bool less = binary.Operator == "<"_op || binary.Operator == "<="_op;
+        const bool greater = binary.Operator == ">"_op || binary.Operator == ">="_op;
+        auto maybeLeft = TMaybeNode<TIdentExpr>(binary.Left);
+        auto maybeRight = TMaybeNode<TIdentExpr>(binary.Right);
+        if ((!less && !greater) || !maybeLeft || !maybeRight) {
+            return std::nullopt;
+        }
+        // `x > y` is `y < x`, and `<` counts the rows of x strictly below y.
+        const bool strict = binary.Operator == "<"_op || binary.Operator == ">"_op;
+        const auto& lowerName = (less ? maybeLeft : maybeRight).Cast()->Name;
+        const auto& upperName = (less ? maybeRight : maybeLeft).Cast()->Name;
+        auto lowerIt = InputStats_.ColumnStats.find(lowerName);
+        auto upperIt = InputStats_.ColumnStats.find(upperName);
+        if (lowerIt == InputStats_.ColumnStats.end() || upperIt == InputStats_.ColumnStats.end()) {
+            return std::nullopt;
+        }
+        const auto& lower = *lowerIt->second;
+        const auto& upper = *upperIt->second;
+        const auto lowerType = ColumnType(lowerName);
+        const auto upperType = UnwrapNullableType(ColumnType(upperName));
+        const bool upperFloat = static_cast<bool>(TMaybeType<TFloatType>(upperType));
+        if (upper.Histogram.size() < 2 || !(upperFloat || TMaybeType<TIntegerType>(upperType))) {
+            return std::nullopt;
+        }
+        auto below = [&](size_t boundary) {
+            return upperFloat
+                ? FractionBelowValue(lower, lowerType, *upper.GetHistogramValue<double>(boundary), strict)
+                : FractionBelowValue(lower, lowerType, *upper.GetHistogramValue<int64_t>(boundary), strict);
+        };
+        const size_t buckets = upper.Histogram.size() - 1;
+        double sum = 0.0;
+        for (size_t bucket = 0; bucket < buckets; ++bucket) {
+            auto start = below(bucket);
+            auto end = below(bucket + 1);
+            if (!start || !end) {
+                return std::nullopt;
+            }
+            sum += (*start + *end) / 2.0;
+        }
+        return sum / static_cast<double>(buckets);
     }
 
     std::optional<TRangeBound> RangeBound(const TExprPtr& expr) {
@@ -665,6 +727,28 @@ private:
     TFoldedBounds& FoldedBounds_;
 };
 
+// Selectivity of a join's residual over the joined rows: the columns of both
+// inputs side by side, the cross product of their rows.
+double EstimateResidual(const TJoinOperator& join, TFoldedBounds& foldedBounds) {
+    TStats stats;
+    std::vector<std::pair<std::string, TTypePtr>> fields;
+    double rows = 1.0;
+    for (const auto& input : join.Inputs()) {
+        auto structure = TMaybeType<TStructType>(input->OutputColumns());
+        if (!input->Stats_ || !structure) {
+            return 0.5;
+        }
+        stats.ColumnStats.insert(input->Stats_->ColumnStats.begin(), input->Stats_->ColumnStats.end());
+        const auto& inputFields = structure.Cast()->Fields;
+        fields.insert(fields.end(), inputFields.begin(), inputFields.end());
+        rows *= static_cast<double>(input->Stats_->RowCount);
+    }
+    stats.RowCount = static_cast<uint64_t>(std::min(rows, 0x1p63));
+    const TStructType type(std::move(fields));
+    const double selectivity = TSelectivityEstimator(stats, type, false, foldedBounds).Estimate(join.Filter());
+    return std::clamp(selectivity, 0.0, 1.0);
+}
+
 // A source's null counts and row count describe the same rows.
 double EstimateSelectivity(
     const TExprPtr& atom,
@@ -718,6 +802,28 @@ TStatsPtr ComputeProjectStats(const std::shared_ptr<TProjectOperator>& project) 
     }
     return outputStats;
 }
+
+// Fallback NDV for a join key column that has no statistics.
+constexpr double UnknownNdv = 100.0;
+
+struct TJoinCardinality {
+    double Rows = 0.0;
+    double NdvL = 1.0; // \prod ndv over left key columns, clamped to leftRows
+    double NdvR = 1.0;
+};
+
+// One side of an equi-join key pair.
+struct TJoinKeySide {
+    double Ndv = UnknownNdv;
+    // Fraction of the side's rows whose key lies in the range of values both
+    // sides' keys span; 1 when a range is unknown.
+    double SharedFraction = 1.0;
+};
+
+struct TJoinKeyStats {
+    TJoinKeySide Left;
+    TJoinKeySide Right;
+};
 
 TStats::TColumnStatsPtr ColumnStatsOf(const TOperatorPtr& op, const std::string& name) {
     if (!op || !op->Stats_) {
@@ -798,7 +904,162 @@ double FractionWithin(const TStats::TColumnStats& stats, const TValueRange& rang
         : within(static_cast<uint64_t>(lo), static_cast<uint64_t>(hi));
 }
 
-TStatsPtr ComputeJoinStats(const std::shared_ptr<TJoinOperator>& join) {
+// Statistics of the key pair `leftColumn = rightColumn` of two inputs whose
+// stats are estimated.
+TJoinKeyStats EstimateJoinKey(
+    const TOperatorPtr& left,
+    const std::string& leftColumn,
+    const TOperatorPtr& right,
+    const std::string& rightColumn)
+{
+    TJoinKeyStats key;
+    auto leftStats = ColumnStatsOf(left, leftColumn);
+    auto rightStats = ColumnStatsOf(right, rightColumn);
+    if (leftStats && leftStats->Ndv) {
+        key.Left.Ndv = static_cast<double>(*leftStats->Ndv);
+    }
+    if (rightStats && rightStats->Ndv) {
+        key.Right.Ndv = static_cast<double>(*rightStats->Ndv);
+    }
+    auto leftRange = ValueRange(left, leftColumn);
+    auto rightRange = ValueRange(right, rightColumn);
+    if (leftRange && rightRange) {
+        const double lo = std::max(leftRange->Min, rightRange->Min);
+        const double hi = std::min(leftRange->Max, rightRange->Max);
+        key.Left.SharedFraction = FractionWithin(*leftStats, *leftRange, lo, hi);
+        key.Right.SharedFraction = FractionWithin(*rightStats, *rightRange, lo, hi);
+    }
+    return key;
+}
+
+// Inner equi-join cardinality over the range both sides' keys span: rows =
+// sharedL*sharedR / max(domainL, domainR), where a side's domain is its key ndv
+// inside that range and its shared rows are the rows there. `twoRelations`
+// tells that every key pair joins the same two relations. See "Join
+// cardinality" in docs/arch/optimizations.md.
+TJoinCardinality EstimateEquiJoin(
+    double leftRows,
+    double rightRows,
+    const std::vector<TJoinKeyStats>& keys,
+    bool twoRelations)
+{
+    double ndvL = 1.0;
+    double ndvR = 1.0;
+    double sharedL = 1.0;
+    double sharedR = 1.0;
+    for (const auto& key : keys) {
+        ndvL *= key.Left.Ndv;
+        ndvR *= key.Right.Ndv;
+        sharedL *= key.Left.SharedFraction;
+        sharedR *= key.Right.SharedFraction;
+    }
+    // The inner-join denominator uses the key DOMAIN (uncapped ndv). A filter
+    // reduces a side's row count but not its key domain (ColumnStats ndv is not
+    // rescaled), so capping ndv to the filtered row count would collapse the
+    // domain and make a PK-FK join look non-reducing - e.g. a filtered dimension
+    // whose surviving rows exceed the fact-side FK ndv (TPC-DS q72). For an
+    // unfiltered base table ndv <= rows already, so this leaves it unchanged.
+    //
+    // Only keys inside the range both sides span can match, so each side's
+    // domain is restricted to that range: a fact references a few years of a
+    // date dimension that spans two centuries.
+    const double domainL = ndvL * sharedL;
+    const double domainR = ndvR * sharedR;
+    // An input's distinct keys are placed inside the shared range as far as
+    // it holds them, and its rows follow its keys. Unfiltered, an input has
+    // its whole NDV, and the range holds the fraction measured above. A
+    // filtered input keeps fewer keys, which are taken to fit: a query filters
+    // a dimension for the rows it joins, so a filter on the date dimension is
+    // judged against the dates the fact references, not against all of them.
+    auto sharedRows = [](double rows, double ndv, double domain) {
+        const double distinct = std::min(ndv, rows);
+        return distinct > domain
+            ? rows * domain / distinct
+            : rows;
+    };
+    const double sharedRowsL = sharedRows(leftRows, ndvL, domainL);
+    const double sharedRowsR = sharedRows(rightRows, ndvR, domainR);
+    double rows = sharedRowsL * sharedRowsR / std::max({domainL, domainR, 1.0});
+    // Several pairs between two relations whose NDVs match can be a composite
+    // key, whose columns are not independent. Pairs from different relations
+    // on one side are separate keys, and their independence stands.
+    if (keys.size() > 1 && twoRelations) {
+        bool sameCompositeDomain = true;
+        for (const auto& key : keys) {
+            const double lo = std::max(1.0, std::min(key.Left.Ndv, key.Right.Ndv));
+            const double hi = std::max(key.Left.Ndv, key.Right.Ndv);
+            if (hi / lo > 4.0) {
+                sameCompositeDomain = false;
+                break;
+            }
+        }
+        if (sameCompositeDomain) {
+            rows = std::max(rows, std::max(sharedRowsL, sharedRowsR));
+        }
+    }
+    // Returned distinct counts are clamped to input rows (distinct-in-input) for
+    // semi/anti fractions and output column stats.
+    ndvL = std::min(ndvL, leftRows);
+    ndvR = std::min(ndvR, rightRows);
+    return {rows, ndvL, ndvR};
+}
+
+// The relation that produces `column` in the rows of `op`: the operator that
+// computes it, reached through the joins, filters and renaming projections
+// that pass it on.
+const IOperator* ColumnRelation(const TOperatorPtr& op, const std::string& column) {
+    if (auto maybeJoin = TMaybeOp<TJoinOperator>(op)) {
+        auto join = maybeJoin.Cast();
+        return ColumnRelation(
+            FieldType(join->Left()->OutputColumns().get(), column) ? join->Left() : join->Right(),
+            column);
+    }
+    if (auto maybeFilter = TMaybeOp<TFilterOperator>(op)) {
+        return ColumnRelation(maybeFilter.Cast()->Input(), column);
+    }
+    if (auto maybeProject = TMaybeOp<TProjectOperator>(op)) {
+        auto project = maybeProject.Cast();
+        for (const auto& projection : project->Projections()) {
+            if (projection.Name != column) {
+                continue;
+            }
+            if (auto ident = TMaybeNode<TIdentExpr>(projection.Expression)) {
+                return ColumnRelation(project->Input(), ident.Cast()->Name);
+            }
+            break;
+        }
+    }
+    return op.get();
+}
+
+// Whether every key pair joins the same two relations.
+bool KeysJoinTwoRelations(const TJoinOperator& join) {
+    const IOperator* left = nullptr;
+    const IOperator* right = nullptr;
+    for (const auto& key : join.Keys()) {
+        const auto* keyLeft = ColumnRelation(join.Left(), key.Left);
+        const auto* keyRight = ColumnRelation(join.Right(), key.Right);
+        if ((left && keyLeft != left) || (right && keyRight != right)) {
+            return false;
+        }
+        left = keyLeft;
+        right = keyRight;
+    }
+    return true;
+}
+
+// Fraction of the rows with key matches that keep one the residual accepts.
+// A row with m matches, each accepted with probability s, loses them all
+// with probability (1 - s)^m.
+double MatchAccepted(double selectivity, double matches, double matchedRows) {
+    if (selectivity >= 1.0) {
+        return 1.0;
+    }
+    const double perRow = std::max(1.0, matches / std::max(matchedRows, 1.0));
+    return 1.0 - std::pow(1.0 - selectivity, perRow);
+}
+
+TStatsPtr ComputeJoinStats(const std::shared_ptr<TJoinOperator>& join, TFoldedBounds& foldedBounds) {
     auto leftStats = join->Left()->Stats_;
     auto rightStats = join->Right()->Stats_;
     if (!leftStats || !rightStats) {
@@ -808,7 +1069,13 @@ TStatsPtr ComputeJoinStats(const std::shared_ptr<TJoinOperator>& join) {
     for (const auto& key : join->Keys()) {
         keyStats.push_back(EstimateJoinKey(join->Left(), key.Left, join->Right(), key.Right));
     }
-    auto card = EstimateEquiJoin(leftStats->RowCount, rightStats->RowCount, keyStats);
+    auto card = EstimateEquiJoin(
+        leftStats->RowCount, rightStats->RowCount, keyStats, KeysJoinTwoRelations(*join));
+    // The residual accepts a share of the key matches, taken as independent
+    // of the keys.
+    const double residual = join->Filter()
+        ? EstimateResidual(*join, foldedBounds)
+        : 1.0;
     double ndvL = card.NdvL;
     double ndvR = card.NdvR;
     auto outputStats = std::make_shared<TStats>();
@@ -826,11 +1093,12 @@ TStatsPtr ComputeJoinStats(const std::shared_ptr<TJoinOperator>& join) {
             outputStats->ColumnStats[colName] = colStats;
         }
     }
-    uint64_t rowCount = std::max<uint64_t>(1, (uint64_t)card.Rows);
+    uint64_t rowCount = std::max<uint64_t>(1, (uint64_t)(card.Rows * residual));
     switch (join->JoinType()) {
         case EJoinType::LeftSemi:
         case EJoinType::LeftAnti: {
             double semiFrac = std::min(1.0, ndvR / std::max(ndvL, 1.0));
+            semiFrac *= MatchAccepted(residual, card.Rows, semiFrac * (double)leftStats->RowCount);
             if (join->JoinType() == EJoinType::LeftAnti) {
                 semiFrac = 1.0 - semiFrac;
             }
@@ -840,6 +1108,7 @@ TStatsPtr ComputeJoinStats(const std::shared_ptr<TJoinOperator>& join) {
         case EJoinType::RightSemi:
         case EJoinType::RightAnti: {
             double semiFrac = std::min(1.0, ndvL / std::max(ndvR, 1.0));
+            semiFrac *= MatchAccepted(residual, card.Rows, semiFrac * (double)rightStats->RowCount);
             if (join->JoinType() == EJoinType::RightAnti) {
                 semiFrac = 1.0 - semiFrac;
             }
@@ -1078,7 +1347,7 @@ TStatsPtr ComputeStatsFor(TOperatorPtr op, TFoldedBounds& foldedBounds) {
         return ComputeProjectStats(maybeProject.Cast());
     }
     if (auto maybeJoin = TMaybeOp<TJoinOperator>(op)) {
-        return ComputeJoinStats(maybeJoin.Cast());
+        return ComputeJoinStats(maybeJoin.Cast(), foldedBounds);
     }
     if (auto maybeAggregate = TMaybeOp<TAggregateOperator>(op)) {
         return ComputeAggregateStats(maybeAggregate.Cast());
@@ -1097,93 +1366,8 @@ TStatsPtr ComputeStatsFor(TOperatorPtr op, TFoldedBounds& foldedBounds) {
 
 } // namespace
 
-TJoinKeyStats EstimateJoinKey(
-    const TOperatorPtr& left,
-    const std::string& leftColumn,
-    const TOperatorPtr& right,
-    const std::string& rightColumn)
-{
-    TJoinKeyStats key;
-    auto leftStats = ColumnStatsOf(left, leftColumn);
-    auto rightStats = ColumnStatsOf(right, rightColumn);
-    if (leftStats && leftStats->Ndv) {
-        key.Left.Ndv = static_cast<double>(*leftStats->Ndv);
-    }
-    if (rightStats && rightStats->Ndv) {
-        key.Right.Ndv = static_cast<double>(*rightStats->Ndv);
-    }
-    auto leftRange = ValueRange(left, leftColumn);
-    auto rightRange = ValueRange(right, rightColumn);
-    if (leftRange && rightRange) {
-        const double lo = std::max(leftRange->Min, rightRange->Min);
-        const double hi = std::min(leftRange->Max, rightRange->Max);
-        key.Left.SharedFraction = FractionWithin(*leftStats, *leftRange, lo, hi);
-        key.Right.SharedFraction = FractionWithin(*rightStats, *rightRange, lo, hi);
-    }
-    return key;
-}
-
-TJoinCardinality EstimateEquiJoin(
-    double leftRows,
-    double rightRows,
-    const std::vector<TJoinKeyStats>& keys)
-{
-    double ndvL = 1.0;
-    double ndvR = 1.0;
-    double sharedL = 1.0;
-    double sharedR = 1.0;
-    for (const auto& key : keys) {
-        ndvL *= key.Left.Ndv;
-        ndvR *= key.Right.Ndv;
-        sharedL *= key.Left.SharedFraction;
-        sharedR *= key.Right.SharedFraction;
-    }
-    // The inner-join denominator uses the key DOMAIN (uncapped ndv). A filter
-    // reduces a side's row count but not its key domain (ColumnStats ndv is not
-    // rescaled), so capping ndv to the filtered row count would collapse the
-    // domain and make a PK-FK join look non-reducing - e.g. a filtered dimension
-    // whose surviving rows exceed the fact-side FK ndv (TPC-DS q72). For an
-    // unfiltered base table ndv <= rows already, so this leaves it unchanged.
-    //
-    // Only keys inside the range both sides span can match, so each side's
-    // domain is restricted to that range: a fact references a few years of a
-    // date dimension that spans two centuries.
-    const double domainL = ndvL * sharedL;
-    const double domainR = ndvR * sharedR;
-    // An input's distinct keys are placed inside the shared range as far as
-    // it holds them, and its rows follow its keys. Unfiltered, an input has
-    // its whole NDV, and the range holds the fraction measured above. A
-    // filtered input keeps fewer keys, which are taken to fit: a query filters
-    // a dimension for the rows it joins, so a filter on the date dimension is
-    // judged against the dates the fact references, not against all of them.
-    auto sharedRows = [](double rows, double ndv, double domain) {
-        const double distinct = std::min(ndv, rows);
-        return distinct > domain
-            ? rows * domain / distinct
-            : rows;
-    };
-    const double sharedRowsL = sharedRows(leftRows, ndvL, domainL);
-    const double sharedRowsR = sharedRows(rightRows, ndvR, domainR);
-    double rows = sharedRowsL * sharedRowsR / std::max({domainL, domainR, 1.0});
-    if (keys.size() > 1) {
-        bool sameCompositeDomain = true;
-        for (const auto& key : keys) {
-            const double lo = std::max(1.0, std::min(key.Left.Ndv, key.Right.Ndv));
-            const double hi = std::max(key.Left.Ndv, key.Right.Ndv);
-            if (hi / lo > 4.0) {
-                sameCompositeDomain = false;
-                break;
-            }
-        }
-        if (sameCompositeDomain) {
-            rows = std::max(rows, std::max(sharedRowsL, sharedRowsR));
-        }
-    }
-    // Returned distinct counts are clamped to input rows (distinct-in-input) for
-    // semi/anti fractions and output column stats.
-    ndvL = std::min(ndvL, leftRows);
-    ndvR = std::min(ndvR, rightRows);
-    return {rows, ndvL, ndvR};
+TStatsPtr EstimateJoinStats(const std::shared_ptr<TJoinOperator>& join, TFoldedBounds& foldedBounds) {
+    return ComputeJoinStats(join, foldedBounds);
 }
 
 TStatsPtr EstimateStats(TOperatorPtr op, TFoldedBounds& foldedBounds) {

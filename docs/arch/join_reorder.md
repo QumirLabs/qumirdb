@@ -28,6 +28,23 @@ best(A union B) = min over connected splits:
     cost(best(A)) + cost(best(B)) + estimated join work(A, B)
 ```
 
+A candidate join is estimated as the plan will estimate it ("Join cardinality"
+in [optimizations.md](optimizations.md)). Its keys are the equalities between
+the two subsets, and its residual is the other `WHERE` conjuncts over relations
+of both subsets and of no other relation, so a residual counts once, at the
+join that brings its relations together. The estimate reads the statistics of
+the two subplans, which depend on the joins inside them: a dimension key that a
+join with a filtered table has already selected is matched within the range
+of the fact it joins next. Fixed selectivities per relation pair cannot express
+that. In TPC-DS q72 they estimated `inventory ⋈ (d1 ⋈ d2)` at 4.6M rows, while
+the plan estimate is 133M and the join returns 186M.
+
+The splits of one subset estimate the same rows from different statistics and
+can disagree. The subset keeps the largest estimate, so that a set of
+relations has one cardinality, as the search over subsets assumes, and an order
+is not chosen for an estimate that the other orders of the same relations
+contradict. An over-estimate is also the safer error for the build side.
+
 This is the connected-subgraph/complement search space described by Moerkotte
 and Neumann in [Analysis of Two Existing and One New Dynamic Programming
 Algorithm for the Generation of Optimal Bushy Join Trees without Cross Products
@@ -59,13 +76,15 @@ semi/anti and outer joins are opaque).
 
 ### 1. Collect edges and leaves
 
-`Reorder(node, edges)` threads equality edges down from enclosing filters:
+`Reorder(node, predicates)` threads the conjuncts of enclosing filters down,
+equality edges and the other conjuncts (residuals) apart:
 
-- `filter`     → add the predicate's `col == col` equalities to `edges`, recurse.
-- `join` (any) → pass `edges` to both children.
-- `project`/`aggregate` → recurse with **empty** edges (columns are redefined).
-- reorderable chain → flatten to its leaf operators, reorder each leaf with empty
-  edges, then rebuild (phase 2).
+- `filter`     → add the predicate's `col == col` equalities to `edges` and its
+  other conjuncts to the residuals, recurse.
+- `join` (any) → pass them to both children.
+- `project`/`aggregate` → recurse with **none** (columns are redefined).
+- reorderable chain → flatten to its leaf operators, reorder each leaf with
+  none, then rebuild (phase 2).
 
 Edges are collected with `FactorConjuncts` (so an equality factored out of a
 disjunction also counts) and keep both operand names. Because names are

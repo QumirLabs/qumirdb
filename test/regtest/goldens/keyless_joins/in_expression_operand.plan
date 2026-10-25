@@ -1,5 +1,5 @@
-project (id) (rows≈4 cost≈4.2K)
-└─ join left_semi residual (== (+ |t.id| 1) __qdb_in__x) (rows≈4 cost≈4.2K)
+project (id) (rows≈3 cost≈4.2K)
+└─ join left_semi residual (== (+ |t.id| 1) __qdb_in__x) (rows≈3 cost≈4.2K)
    ├─ source t AS t (rows≈4 cost≈32)
    └─ project (__qdb_in__x) (rows≈3 cost≈48)
       └─ source u AS u (rows≈3 cost≈24)
