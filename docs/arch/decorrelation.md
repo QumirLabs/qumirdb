@@ -76,12 +76,12 @@ project (id, m)                            # m is NULL for every row
          └─ source u
 ```
 
-A filter keeps a row only when its predicate is TRUE. When the subquery is a
-conjunct of `WHERE` or `HAVING`, or an operand of a comparison, an arithmetic
-operator or `NOT` on the way up to one, a NULL value makes the conjunct NULL and
-drops the row anyway. There the join is `inner`, which join reordering can move
-and equi-join extraction can key (q6 and q15 compare a column with the
-subquery):
+A filter keeps a row only when its predicate is TRUE. When a `WHERE` or
+`HAVING` conjunct compares a column with the subquery value, a NULL value makes
+the conjunct NULL and drops the row anyway. Outer-join simplification
+([optimizations.md](optimizations.md)) then turns the join into an `inner`
+one, which join reordering can move and equi-join extraction can key (q6 and
+q15 compare a column with the subquery):
 
 ```
 ... AND c_acctbal > (SELECT avg(c_acctbal) FROM customer WHERE c_acctbal>0)
@@ -92,8 +92,10 @@ filter (> c_acctbal __scalar_0__)
    └─ project (__scalar_0__ = avg…)        # global aggregate, one row
 ```
 
-Used by q11 (HAVING), q15, q22. Under `OR`, `IS NULL`, `CASE` or a function such
-as `coalesce`, and in the SELECT list, the join stays `LEFT`.
+Used by q11 (HAVING), q15, q22. Under `IS NULL`, `CASE` or `coalesce`, in an
+`OR` whose other branch does not reject the NULL, and in the SELECT list, the
+join stays `LEFT`. The same rule applies to the LEFT join of a correlated
+subquery below.
 
 ### Correlated → group-by + LEFT join (Apply elimination)
 
