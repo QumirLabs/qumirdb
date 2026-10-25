@@ -34,6 +34,13 @@
     "simplify_nested_chain.sql": {"order": "unordered", "execute": true},
     "simplify_nested_null_side.sql": {"order": "unordered", "execute": true},
     "simplify_parent_inner_on.sql": {"order": "unordered", "execute": true},
-    "simplify_empty_side.sql": {"order": "unordered", "execute": true}
+    "simplify_empty_side.sql": {"order": "unordered", "execute": true},
+    "simplify_anti_subquery_join.sql": {"order": "unordered", "execute": true},
+    "simplify_semi_condition.sql": {"order": "unordered", "execute": true},
+    "simplify_anti_keeps_left.sql": {"order": "unordered", "execute": true},
+    "simplify_right_to_inner.sql": {"order": "unordered", "execute": true},
+    "simplify_full_keeps_full.sql": {"order": "unordered", "execute": true},
+    "simplify_case_keeps_left.sql": {"order": "unordered", "execute": true},
+    "simplify_in_item_keeps_left.sql": {"order": "unordered", "execute": true}
   }
 }

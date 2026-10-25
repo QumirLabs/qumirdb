@@ -1,0 +1,6 @@
+project (cv, ov) (rows≈15 cost≈10.8K)
+└─ join left_anti [o.flag = p.pk] (rows≈15 cost≈10.5K)
+   ├─ join left [c.ck = o.ok] (rows≈17 cost≈5.6K)
+   │  ├─ source c AS c (rows≈8 cost≈128)
+   │  └─ source o AS o (rows≈20 cost≈480)
+   └─ source p AS p (rows≈6 cost≈48)

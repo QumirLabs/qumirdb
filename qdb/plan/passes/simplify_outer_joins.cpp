@@ -193,6 +193,9 @@ TOperatorPtr SimplifyJoin(
             break;
         case EJoinType::Left:
         case EJoinType::LeftAnti:
+            // For an anti join the condition goes to the subquery side. That is valid for
+            // NOT EXISTS semantics only: once NOT IN is null-aware (#154), a NULL key on
+            // the subquery side changes the result, so the condition must not go there.
             left = std::move(above);
             right = std::move(condition);
             break;

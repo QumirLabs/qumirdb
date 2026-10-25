@@ -456,6 +456,9 @@ TTypePtr UntypedNullValueType() {
 
 // Calls whose result is NOT null-strict (never wrapped by the pass): they return a
 // non-null bool or have bespoke NULL semantics handled in qumirdb.oz / elsewhere.
+// SimplifyOuterJoins relies on this list: every call outside it is assumed null-strict.
+// A future non-strict function (one that can return non-NULL on a NULL argument, such as
+// concat, greatest, least) must be added here, or the pass will drop rows.
 bool IsExcludedCall(const std::string& name) {
     return name == "qdb_is_null" || name == "qdb_is_true" ||
            name == "coalesce" || name == "nullif" || name == "nvl" || name == "ifnull";

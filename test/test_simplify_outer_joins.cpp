@@ -18,8 +18,16 @@ NQumir::NAst::TExprPtr Predicate(const std::string& where) {
     if (!parsed) {
         throw std::runtime_error(parsed.error().ToString());
     }
-    auto query = NSql::TMaybeNode<NSql::TSqlQuery>(*parsed);
-    return NSql::TMaybeNode<NSql::TSqlSelect>(query.Cast()->Body).Cast()->Where;
+    auto maybeQuery = NSql::TMaybeNode<NSql::TSqlQuery>(*parsed);
+    if (!maybeQuery) {
+        throw std::runtime_error("not a query");
+    }
+    auto query = maybeQuery.Cast();
+    auto maybeSelect = NSql::TMaybeNode<NSql::TSqlSelect>(query->Body);
+    if (!maybeSelect) {
+        throw std::runtime_error("not a select");
+    }
+    return maybeSelect.Cast()->Where;
 }
 
 // The columns of r are the null-extended side, as in `s LEFT JOIN r`.
