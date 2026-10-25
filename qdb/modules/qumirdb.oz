@@ -310,8 +310,10 @@
   ;; Supplement, Latin Extended-A, Latin Extended Additional, the Greek alphabet
   ;; U+0386-U+03CE, Cyrillic and Cyrillic Supplement. Every other character is
   ;; kept: Latin Extended-B, the rest of Greek and Coptic, Greek Extended,
-  ;; Armenian, Georgian, fullwidth Latin and others. ExpandNullable passes the
-  ;; kernel's scratch arena as for `||`.
+  ;; Armenian, Georgian, fullwidth Latin and others. DuckDB maps some of them
+  ;; (Latin Extended-B, IPA, U+0345, Greek U+0370-U+0385 and U+03CF-U+03FF,
+  ;; Armenian), so there the results differ. ExpandNullable passes the kernel's
+  ;; scratch arena as for `||`.
   (fun qdb_string_upper ((var arena <ptr i8>) (var str StringView)) -> StringView
     (block (return (call qdb_string_case arena str #t))))
 
