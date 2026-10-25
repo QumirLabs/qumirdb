@@ -5,21 +5,19 @@ measurement definitions, coverage, and summary across benchmarks.
 
 DataFusion CLI 55.2.0 was run on 2026-10-25 with 18 target partitions. Its
 column shows the fastest complete run by reported total: the third run at
-scales 1 and 10 and the second at scale 100. From `~/Projects/tpch`, run
-`./run_datafusion_tpch.sh <scale> 18`; the runner adapts SQL syntax before
-timing each query. Each timing includes CLI startup, Parquet table registration,
-query execution, and CSV output. Ratios to DataFusion use the rounded values
-shown in the tables. [All individual DataFusion runs](tpch_datafusion_runs_2026-10-25.csv)
+scales 1 and 10 and the second at scale 100. Before timing, the runner removes
+the precision suffix from Q1's day interval and translates qgen's trailing
+`ROWNUM` clause to `LIMIT` (or removes its `-1` no-limit sentinel). It also
+materializes Q15's `revenue0` aggregate once so both references use the same
+floating-point result. Each timing includes CLI startup, Parquet table
+registration, query execution, and CSV output. Ratios to DataFusion use the
+rounded values shown in the tables. [All individual DataFusion runs](tpch_datafusion_runs_2026-10-25.csv)
 are retained, including the complete-run totals.
 
 ## Scale 1
 
-qdb re-run 2026-10-25 in SQL mode, one run per query on the Apple M5 Pro.
-Command from `build/`:
-
-```sh
-MODE=sql ../benchmark/tpch/run_tpch.sh ~/Projects/tpch 1
-```
+qdb re-run 2026-10-25 in SQL mode at scale 1, one run per query on the
+Apple M5 Pro.
 
 All 22 queries completed with status `OK`; no failures. Runner-reported totals:
 processing **0.777 s**, CPU **5.335 s**. Compilation is excluded from processing:
@@ -56,12 +54,8 @@ DataFusion complete-run totals: 0.970, 0.980, and 0.960 s.
 
 ## Scale 10
 
-qdb re-run 2026-10-25 in SQL mode, one run per query on the Apple M5 Pro.
-Command from `build/`:
-
-```sh
-MODE=sql ../benchmark/tpch/run_tpch.sh ~/Projects/tpch 10
-```
+qdb re-run 2026-10-25 in SQL mode at scale 10, one run per query on the
+Apple M5 Pro.
 
 All 22 queries completed with status `OK`; no failures. Runner-reported totals:
 processing **3.864 s**, CPU **53.211 s**. Compilation is excluded from processing:
@@ -98,12 +92,8 @@ DataFusion complete-run totals: 4.220, 4.250, and 4.180 s.
 
 ## Scale 100
 
-qdb re-run 2026-10-25 in SQL mode, one run per query on the Apple M5 Pro.
-Command from `build/`:
-
-```sh
-MODE=sql ../benchmark/tpch/run_tpch.sh ~/Projects/tpch 100
-```
+qdb re-run 2026-10-25 in SQL mode at scale 100, one run per query on the
+Apple M5 Pro.
 
 All 22 queries completed with status `OK`; no failures. Runner-reported totals:
 processing **36.645 s**, CPU **580.401 s**. Compilation is excluded from processing:

@@ -6,11 +6,6 @@ measurement definitions, coverage, and summary across benchmarks.
 ## Results
 
 qdb re-run 2026-10-21 in SQL mode, one run per query on the Apple M5 Pro.
-Command from `build/`:
-
-```sh
-MODE=sql ../benchmark/clickbench/run_clickbench.sh ~/Projects/clickbench
-```
 
 All 43 queries completed with status `OK`; no failures or skipped queries.
 Runner-reported totals: processing **14.734 s**, CPU **202.658 s**.

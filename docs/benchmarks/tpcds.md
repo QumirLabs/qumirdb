@@ -5,12 +5,8 @@ measurement definitions, coverage, and summary across benchmarks.
 
 ## Scale 1
 
-qdb re-run 2026-10-25 in SQL mode, one run per query on the Apple M5 Pro.
-Command from `build/`:
-
-```sh
-MODE=sql ../benchmark/tpcds/run_tpcds.sh ~/Projects/tpcds 1
-```
+qdb re-run 2026-10-25 in SQL mode at scale 1, one run per query on the
+Apple M5 Pro.
 
 All 99 queries (103 query executions) completed with status `OK`; no failures.
 For q14, q23, q24 and q39, the table sums both parts before rounding.
@@ -125,12 +121,8 @@ The DuckDB column is still the 2026-08-22 run.
 
 ## Scale 10
 
-qdb re-run 2026-10-25 in SQL mode, one run per query on the Apple M5 Pro.
-Command from `build/`:
-
-```sh
-MODE=sql ../benchmark/tpcds/run_tpcds.sh ~/Projects/tpcds 10
-```
+qdb re-run 2026-10-25 in SQL mode at scale 10, one run per query on the
+Apple M5 Pro.
 
 All 99 queries (103 query executions) completed with status `OK`; no failures.
 For q14, q23, q24 and q39, the table sums both parts before rounding.
@@ -245,12 +237,8 @@ The DuckDB column is still the 2026-08-22 run.
 
 ## Scale 100
 
-qdb re-run 2026-10-25 in SQL mode, one run per query on the Apple M5 Pro.
-Command from `build/`:
-
-```sh
-MODE=sql ../benchmark/tpcds/run_tpcds.sh ~/Projects/tpcds 100
-```
+qdb re-run 2026-10-25 in SQL mode at scale 100, one run per query on the
+Apple M5 Pro.
 
 All 99 queries (103 query executions), including q78 and q80, completed with
 status `OK`; no failures. For q14, q23, q24 and q39, the table sums both parts
