@@ -11,6 +11,6 @@ top-sort [i_category asc, i_class asc, i_brand asc, i_product_name asc, d_year a
                         └─ join inner [store.s_store_sk = store_sales.ss_store_sk] emit-filter 2 from right (rows≈1 cost≈9.2K)
                            ├─ source store AS store use-filter 2 keys=[store.s_store_sk] (rows≈10 cost≈200)
                            └─ join inner [date_dim.d_date_sk = store_sales.ss_sold_date_sk] (rows≈1 cost≈4.8K)
-                              ├─ filter (&& (<= 1212 |date_dim.d_month_seq|) (<= |date_dim.d_month_seq| (+ 1212 11))) (rows≈2 cost≈400)
+                              ├─ filter (&& (<= 1212 |date_dim.d_month_seq|) (<= |date_dim.d_month_seq| (+ 1212 11))) (rows≈1 cost≈400)
                               │  └─ source date_dim AS date_dim row-groups (&& (<= 1212 |date_dim.d_month_seq|) (<= |date_dim.d_month_seq| (+ 1212 11))) (rows≈10 cost≈200)
                               └─ source store_sales AS store_sales (rows≈10 cost≈240)

@@ -10,6 +10,6 @@ top-sort [w_warehouse_name asc, i_item_id asc] limit 100
                   │  │  ├─ filter (&& (<= (- (cast (cast "1998-04-08" <named StringView>) <named DATE>) (: 30 i32)) |date_dim.d_date|) (<= |date_dim.d_date| (+ (cast (cast "1998-04-08" <named StringView>) <named DATE>) (: 30 i32)))) (rows≈1 cost≈160)
                   │  │  │  └─ source date_dim AS date_dim row-groups (&& (<= (- (cast (cast "1998-04-08" <named StringView>) <named DATE>) (: 30 i32)) |date_dim.d_date|) (<= |date_dim.d_date| (+ (cast (cast "1998-04-08" <named StringView>) <named DATE>) (: 30 i32)))) (rows≈10 cost≈80)
                   │  │  └─ source inventory AS inventory (rows≈10 cost≈160)
-                  │  └─ filter (&& (<= 0.98999999999999999 |item.i_current_price|) (<= |item.i_current_price| 1.49)) (rows≈2 cost≈560)
+                  │  └─ filter (&& (<= 0.98999999999999999 |item.i_current_price|) (<= |item.i_current_price| 1.49)) (rows≈1 cost≈560)
                   │     └─ source item AS item row-groups (&& (<= 0.98999999999999999 |item.i_current_price|) (<= |item.i_current_price| 1.49)) (rows≈10 cost≈280)
                   └─ source warehouse AS warehouse use-filter 1 keys=[warehouse.w_warehouse_sk] (rows≈10 cost≈200)

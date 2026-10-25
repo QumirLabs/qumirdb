@@ -9,5 +9,5 @@ top-sort [i_item_id asc] limit 100
          └─ join inner [date_dim.d_date_sk = inventory.inv_date_sk] (rows≈1 cost≈4.5K)
             ├─ filter (&& (<= (cast (cast "2001-06-02" <named StringView>) <named DATE>) |date_dim.d_date|) (<= |date_dim.d_date| (+ (cast (cast "2001-06-02" <named StringView>) <named DATE>) (: 60 i32)))) (rows≈1 cost≈160)
             │  └─ source date_dim AS date_dim row-groups (&& (<= (cast (cast "2001-06-02" <named StringView>) <named DATE>) |date_dim.d_date|) (<= |date_dim.d_date| (+ (cast (cast "2001-06-02" <named StringView>) <named DATE>) (: 60 i32)))) (rows≈10 cost≈80)
-            └─ filter (&& (<= 100 |inventory.inv_quantity_on_hand|) (<= |inventory.inv_quantity_on_hand| 500)) (rows≈2 cost≈240)
+            └─ filter (&& (<= 100 |inventory.inv_quantity_on_hand|) (<= |inventory.inv_quantity_on_hand| 500)) (rows≈1 cost≈240)
                └─ source inventory AS inventory row-groups (&& (<= 100 |inventory.inv_quantity_on_hand|) (<= |inventory.inv_quantity_on_hand| 500)) (rows≈10 cost≈120)

@@ -665,7 +665,9 @@ bucket, and a predicate the statistics cannot answer gets a default, 0.5 here.
   may be a closed expression such as `date '1995-01-01' + interval '1' year`;
   it is folded to a number once per query, and the plan keeps the expression.
   `<` and `>=` count the rows strictly below the constant, so a heavy value
-  that repeats as a bucket boundary falls on the correct side.
+  that repeats as a bucket boundary falls on the correct side. The histogram
+  describes the values of a nullable column, so its NULLs, which compare as
+  UNKNOWN, are excluded by the column's null fraction where it is known.
 - The bounds on one column form one range rather than two independent
   predicates, whose product can be far from the narrow range they describe.
   The histogram cannot resolve a range narrower than a bucket, so a range that

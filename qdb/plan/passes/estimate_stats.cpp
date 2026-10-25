@@ -293,9 +293,10 @@ private:
             return EstimateEquality(binary);
         }
         if (auto bound = RangeBound(atom)) {
-            return bound->Upper
+            const double fraction = bound->Upper
                 ? bound->End.Below
                 : 1.0 - bound->End.Below;
+            return fraction * NonNullFraction(bound->Column);
         }
         if (auto fraction = EstimateColumnComparison(binary)) {
             return *fraction;
@@ -353,7 +354,7 @@ private:
                     upper,
                     1.0 - lower});
             }
-            selectivity *= fraction;
+            selectivity *= fraction * NonNullFraction(column);
         }
         return selectivity;
     }
@@ -430,13 +431,29 @@ private:
         return FindUnboundVars(expr).empty();
     }
 
+    // The type of a column's values; a nullable column's NULLs have no value.
     TTypePtr ColumnType(const std::string& colName) const {
         for (const auto& [col, type] : OperatorType_.Fields) {
             if (col == colName) {
-                return type;
+                return UnwrapNullableType(type);
             }
         }
         return nullptr;
+    }
+
+    // Fraction of the rows where a column is not NULL. A source's null count
+    // describes its rows; above other operators the NULLs left are not known,
+    // and they are not counted.
+    double NonNullFraction(const std::string& colName) const {
+        auto it = InputStats_.ColumnStats.find(colName);
+        if (
+            !OverSource_ || InputStats_.RowCount == 0 ||
+            it == InputStats_.ColumnStats.end() || !it->second->NullCount)
+        {
+            return 1.0;
+        }
+        return 1.0 - std::min(1.0,
+            static_cast<double>(*it->second->NullCount) / static_cast<double>(InputStats_.RowCount));
     }
 
     std::shared_ptr<TNumberExpr> ConstNumber(const TExprPtr& expr) {
@@ -483,11 +500,10 @@ private:
     template <class TValue>
     static std::optional<double> FractionBelowValue(
         const TStats::TColumnStats& stats,
-        const TTypePtr& columnType,
+        const TTypePtr& type,
         TValue value,
         bool strict)
     {
-        const auto type = UnwrapNullableType(columnType);
         if (TMaybeType<TFloatType>(type)) {
             return stats.FractionBelow(static_cast<double>(value), strict);
         }
@@ -516,8 +532,8 @@ private:
     // `x < y` for two columns taken as independent: the mean, over the rows
     // of y, of the fraction of x below them. Each bucket of y's equi-depth
     // histogram holds an equal share of its rows, spread evenly between its
-    // boundaries, so it contributes the mean fraction at its two ends. The
-    // histograms describe non-NULL values; the NULLs are not counted here.
+    // boundaries, so it contributes the mean fraction at its two ends. A NULL
+    // on either side compares as UNKNOWN.
     std::optional<double> EstimateColumnComparison(const TBinaryExpr& binary) const {
         const bool less = binary.Operator == "<"_op || binary.Operator == "<="_op;
         const bool greater = binary.Operator == ">"_op || binary.Operator == ">="_op;
@@ -538,7 +554,7 @@ private:
         const auto& lower = *lowerIt->second;
         const auto& upper = *upperIt->second;
         const auto lowerType = ColumnType(lowerName);
-        const auto upperType = UnwrapNullableType(ColumnType(upperName));
+        const auto upperType = ColumnType(upperName);
         const bool upperFloat = static_cast<bool>(TMaybeType<TFloatType>(upperType));
         if (upper.Histogram.size() < 2 || !(upperFloat || TMaybeType<TIntegerType>(upperType))) {
             return std::nullopt;
@@ -558,7 +574,8 @@ private:
             }
             sum += (*start + *end) / 2.0;
         }
-        return sum / static_cast<double>(buckets);
+        return sum / static_cast<double>(buckets)
+            * NonNullFraction(lowerName) * NonNullFraction(upperName);
     }
 
     std::optional<TRangeBound> RangeBound(const TExprPtr& expr) {

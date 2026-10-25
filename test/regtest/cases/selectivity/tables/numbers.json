@@ -50,7 +50,7 @@
       {"name": "day", "ndv": 41, "ndv_exact": true, "histogram": [9131, 9181, 9231, 9281, 9331, 9381, 9431, 9481, 9531]},
       {"name": "grp", "ndv": 5, "ndv_exact": true, "histogram": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 4]},
       {"name": "quad", "ndv": 11, "ndv_exact": true, "histogram": [0, 5, 10]},
-      {"name": "n", "ndv": 33, "ndv_exact": true},
+      {"name": "n", "ndv": 33, "ndv_exact": true, "histogram": [0, 5, 10, 15, 20, 25, 30, 35, 40]},
       {"name": "tag", "ndv": 4, "ndv_exact": true},
       {"name": "w", "ndv": 0, "histogram": [0, 5, 10, 15, 20, 25, 30, 35, 40]}
     ]
