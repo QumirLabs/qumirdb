@@ -283,11 +283,15 @@ NQumir::NAst::TExprPtr GenRowJoinAppendAst(
 // jr_probe_batch(table, scratch, batch, key_columns, pairs) -> bool: reads the
 // key and hash of every selected probe row into the scratch, then runs the
 // pointer and key passes of join_rows.oz (jr_seek_all, jr_probe_candidates),
-// which push one (left, right) pair per matching build row.
+// which push one (left, right) pair per matching build row. With
+// emitUnmatched, the probe side is the preserved side of an outer join: a
+// selected row without a match, NULL keys included, gets one pair with a null
+// row pointer.
 NQumir::NAst::TExprPtr GenRowJoinProbeAst(
     const TJoinKeyDescriptor& key,
     const TRowJoinLayout& layout,
     bool probeIsLeft,
+    bool emitUnmatched,
     const std::string& funcName,
     const TRowJoinGenTypes& types,
     bool hasPrecomputedHash);

@@ -296,7 +296,8 @@ enum class ERowJoinKernelOp : int64_t {
     // Build the pointer table over the arena; no Append may follow.
     Build = 2,
     // Probe `batch` (the probe side) and emit pairs of (stream row id, row
-    // pointer) in (left, right) order.
+    // pointer) in (left, right) order. The row pointer of an unmatched row of
+    // an outer join is null.
     Probe = 3,
     Destroy = 4,
 };
@@ -322,7 +323,7 @@ using TRowJoinMaterialize = std::function<int64_t(
     int64_t limit,
     TRowSet* out)>;
 
-// The compiled kernels of an inner equi-join over the row join table
+// The compiled kernels of an inner or outer equi-join over the row join table
 // (kernel/join/join_rows.oz). The caller owns zero-initialized JoinArena,
 // JoinTable, JoinScratch and PairBuffer buffers of the sizes below.
 struct TRowJoinKernels {
@@ -486,9 +487,11 @@ public:
     TJoinKernels CompileJoin(
         const NKernel::TOperatorKernelSpec& spec);
 
-    // Compiles the row join table kernels for an inner equi-join without a
-    // residual whose build side is fixed to the left (buildIsLeft) or right
-    // input; the other input is probed as a stream.
+    // Compiles the row join table kernels for an equi-join without a residual
+    // whose build side is fixed to the left (buildIsLeft) or right input; the
+    // other input is probed as a stream. The join is inner, or LEFT / RIGHT
+    // with its null-supplying side built: the preserved probe rows that match
+    // nothing are emitted with NULLs for the build side.
     TRowJoinKernels CompileRowJoin(
         const NKernel::TOperatorKernelSpec& spec,
         bool buildIsLeft);

@@ -168,7 +168,8 @@ constexpr const char* CacheSchemaVersion = "v1";
 // The row join table adds join_rows.oz and the lookup-key equality overload.
 // Join dispatch entrypoints take the residual's string arena.
 // qumirdb.oz gains upper and lower, which map strings in blocks of 16 bytes.
-constexpr const char* KernelLibVersion = "51";
+// The row join table pads the unmatched probe rows of an outer join.
+constexpr const char* KernelLibVersion = "52";
 } // namespace
 
 NQumir::NCodeGen::TLlvmRunner::TLinkedModule CompileKernelAstCached(
@@ -2534,10 +2535,15 @@ TRowJoinKernels TKernelCompiler::CompileRowJoin(
     using namespace NQumir::NAst;
 
     const auto [leftType, rightType] = JoinInputTypes(spec, "CompileRowJoin");
-    if (spec.JoinType != EJoinType::Inner || !spec.Expressions.empty() ||
-        spec.JoinKeys.empty()) {
+    // An outer join streams its preserved side, so it builds the other one.
+    const bool streamsPreserved = buildIsLeft
+        ? spec.JoinType == EJoinType::Right
+        : spec.JoinType == EJoinType::Left;
+    if ((spec.JoinType != EJoinType::Inner && !streamsPreserved)
+        || !spec.Expressions.empty() || spec.JoinKeys.empty()) {
         throw NQumir::TError(
-            "CompileRowJoin: only inner equi-joins without a residual are supported");
+            "CompileRowJoin: only inner joins and outer joins that build their null-supplying "
+            "side are supported, as equi-joins without a residual");
     }
 
     const auto keyDesc = JoinKeyDescriptorOf(*leftType, *rightType, JoinKeysOf(spec));
@@ -2592,7 +2598,8 @@ TRowJoinKernels TKernelCompiler::CompileRowJoin(
         program.push_back(NKernel::GenRowJoinAppendAst(
             keyDesc, layout, "jr_append_batch", types, spec.HasPrecomputedHash));
         program.push_back(NKernel::GenRowJoinProbeAst(
-            keyDesc, layout, /*probeIsLeft=*/!buildIsLeft, "jr_probe_batch", types,
+            keyDesc, layout, /*probeIsLeft=*/!buildIsLeft,
+            /*emitUnmatched=*/streamsPreserved, "jr_probe_batch", types,
             spec.HasPrecomputedHash));
         program.push_back(NKernel::GenRowJoinDispatchAst(keyDesc, layout, types));
         program.push_back(NKernel::GenRowJoinMaterializeAst(

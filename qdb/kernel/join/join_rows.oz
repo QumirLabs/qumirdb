@@ -1,11 +1,16 @@
 (block
   (pragma language overloads)
 
-  ;; Row join table: the build side of an inner equi-join stored as rows in an
+  ;; Row join table: the build side of an equi-join stored as rows in an
   ;; arena, indexed by a table of 8-byte entries (16-bit salt, 48-bit row
   ;; pointer). A probe touches one entry and, on a salt match, one row, so a
   ;; hit costs about two cache lines and a miss one. The layout follows
   ;; DuckDB's JoinHashTable (join_hashtable.cpp, ht_entry.hpp).
+  ;;
+  ;; It serves inner joins and the LEFT / RIGHT joins that build their
+  ;; null-supplying side. Such a join streams its preserved side: a probe row
+  ;; that matches nothing is emitted once with a null row pointer, which the
+  ;; gathers read as NULL build columns.
   ;;
   ;; Row layout, fixed per join and generated in join_gen.cpp:
   ;;   [0, 8)        hash of the key while the arena is built, then the pointer
@@ -329,14 +334,28 @@
           (= b (- b 1))))
       (return #t)))
 
+  ;; Emits pair (stream row `row`, `build`) in (left, right) order; a null
+  ;; `build` pads an unmatched probe row of an outer join.
+  (fun jr_push_pair ((var pairs <ref PairBuffer>) (var row i64) (var build <ptr u8>)
+                     (var probe_is_left bool)) -> bool
+    (attrs inline)
+    (block
+      ;; A stream row id: batch index -1, row `row`.
+      (var stream_id = (+ (<< -1 32) row))
+      (if probe_is_left
+        (block (return (call pb_push pairs stream_id (cast build i64)))))
+      (return (call pb_push pairs (cast build i64) stream_id))))
+
   ;; Key pass of the probe over Entries[0, count), after jr_seek_all. Keys[j]
   ;; is the key of probe row Rows[j]. A match emits the whole chain; a salt
   ;; collision advances the row's offset and seeks again, until every row
-  ;; reached an empty entry. Pairs are (stream row id, row pointer) in
-  ;; (left, right) order.
+  ;; reached an empty entry. A row that reaches one without a match is emitted
+  ;; with a null row pointer when emit_unmatched is set. Pairs are (stream row
+  ;; id, row pointer) in (left, right) order.
   (fun jr_probe_candidates [Key] ((var table <ref JoinTable>) (var s <ref JoinScratch>)
                                   (var pairs <ref PairBuffer>) (var count i64)
                                   (var key_offset i64) (var probe_is_left bool)
+                                  (var emit_unmatched bool)
                                   (var witness <ptr Key>)) -> bool
     (block
       (var keys = (cast (field s Keys) <ptr Key>))
@@ -362,21 +381,21 @@
                   (var row_key = (cast (+ (cast row i64) key_offset) <ptr Key>))
                   (if (call rh_key_equal (index row_key 0) (index keys j))
                     (block
-                      ;; A stream row id: batch index -1, row Rows[j].
-                      (var stream_id = (+ (<< -1 32) (index rows j)))
                       (var cur = row)
                       (while (!= (cast cur i64) 0)
                         (block
-                          (var pushed = #f)
-                          (if probe_is_left
-                            (block (= pushed (call pb_push pairs stream_id (cast cur i64))))
-                            (block (= pushed (call pb_push pairs (cast cur i64) stream_id))))
-                          (if (! pushed) (block (return #f)))
+                          (if (! (call jr_push_pair pairs (index rows j) cur probe_is_left))
+                            (block (return #f)))
                           (= cur (call jr_row_next cur)))))
                     (block
                       (= offsets [j] (& (+ (index offsets j) (: 1 u64)) mask))
                       (= work [m] j)
-                      (= m (+ m 1))))))
+                      (= m (+ m 1)))))
+                (block
+                  (if (&& emit_unmatched
+                          (! (call jr_push_pair pairs (index rows j) (cast 0 <ptr u8>)
+                                   probe_is_left)))
+                    (block (return #f)))))
               (= q (+ q 1))))
           (= k m)
           (= first #f)
@@ -465,7 +484,8 @@
 
   ;; ---- output: row -> column ----
   ;; Same output format as jt_materialize_*_column (materialize.oz); the pair
-  ;; side `pair_offset` holds the row pointer as an i64.
+  ;; side `pair_offset` holds the row pointer as an i64, null for the build side
+  ;; of an unmatched outer probe row, whose columns are all NULL.
 
   (fun jr_pair_row ((var pair_data <ptr i64>) (var start i64) (var i i64)
                     (var pair_offset i64)) -> <ptr u8>
@@ -476,7 +496,8 @@
   (fun jr_row_valid ((var row <ptr u8>) (var valid_offset i64)) -> bool
     (attrs inline)
     (block
-      (return (|| (< valid_offset 0) (!= (index row valid_offset) (: 0 u8))))))
+      (return (&& (!= (cast row i64) 0)
+                  (|| (< valid_offset 0) (!= (index row valid_offset) (: 0 u8)))))))
 
   (fun jr_gather_fixed_column [Value]
        ((var pairs <ref PairBuffer>) (var start i64) (var n i64) (var pair_offset i64)

@@ -2134,11 +2134,13 @@ NQumir::NAst::TExprPtr GenRowJoinProbeAst(
     const TJoinKeyDescriptor& key,
     const TRowJoinLayout& layout,
     bool probeIsLeft,
+    bool emitUnmatched,
     const std::string& funcName,
     const TRowJoinGenTypes& types,
     bool hasPrecomputedHash)
 {
     auto i64Type = std::make_shared<TIntegerType>(TIntegerType::I64);
+    auto u8Type = std::make_shared<TIntegerType>(TIntegerType::U8);
     auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
     auto boolType = std::make_shared<TBoolType>();
     auto ptrKeyType = std::make_shared<TPointerType>(key.LookupType);
@@ -2188,8 +2190,28 @@ NQumir::NAst::TExprPtr GenRowJoinProbeAst(
     valid.push_back(Oz::ArrayAssign("hashes", Oz::Ident("cnt"), Oz::Ident("hash_value")));
     valid.push_back(Oz::ArrayAssign("keys", Oz::Ident("cnt"), Oz::Ident("key_value")));
     valid.push_back(Oz::Assign("cnt", Oz::Add(Oz::Ident("cnt"), number(1))));
+    TExprPtr nullKey;
+    if (emitUnmatched) {
+        // A NULL key matches nothing, so its preserved row is padded at once.
+        auto padded = Oz::Call(
+            "jr_push_pair",
+            {
+                Oz::Ident("pairs"),
+                Oz::Ident("i"),
+                Oz::NullPtr(std::make_shared<TPointerType>(u8Type)),
+                Oz::Bool(probeIsLeft),
+            });
+        nullKey = Oz::Block({
+            Oz::If(
+                Oz::Unary(TOperator("!"), std::move(padded)),
+                Oz::Block({Oz::Return(Oz::Bool(false))})),
+        });
+    }
     collect.push_back(
-        Oz::If(Oz::Call("jt_key_valid", {Oz::Ident("key_value")}), Oz::Block(std::move(valid))));
+        Oz::If(
+            Oz::Call("jt_key_valid", {Oz::Ident("key_value")}),
+            Oz::Block(std::move(valid)),
+            std::move(nullKey)));
     builder.Var("i", i64Type)
         .Assign("i", number(0))
         .Stmt(
@@ -2211,6 +2233,7 @@ NQumir::NAst::TExprPtr GenRowJoinProbeAst(
                         Oz::Ident("cnt"),
                         number(layout.KeyOffset),
                         Oz::Bool(probeIsLeft),
+                        Oz::Bool(emitUnmatched),
                         Oz::Cast(number(0), ptrKeyType),
                     })));
     return std::move(builder).Build();
