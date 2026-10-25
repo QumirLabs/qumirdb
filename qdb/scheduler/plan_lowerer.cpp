@@ -1331,7 +1331,7 @@ private:
     // The row join table (kernel/join/join_rows.oz) serves a join that
     // RowJoinTableServes accepts once lowering has fixed its build side, by
     // estimates or by a runtime filter. A join without estimates keeps the
-    // symmetric Robin Hood join.
+    // symmetric swiss table join.
     bool UsesRowJoinTable(const TJoinOperator& join, EJoinBuildSide buildSide) const {
         return RowJoinTableServes(join, Settings_.Join.Table, buildSide);
     }

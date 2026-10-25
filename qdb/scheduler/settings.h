@@ -68,7 +68,7 @@ struct TScanSplitSettings {
 
 // Which hash table an inner equi-join with a fixed build side uses. Row is the
 // arena of build rows behind a salted pointer table (kernel/join/join_rows.oz);
-// Legacy is the symmetric Robin Hood table with per-key row-id buckets.
+// Legacy is the symmetric swiss table with per-key row-id buckets.
 enum class EJoinTableKind {
     Row = 0,
     Legacy = 1,
