@@ -14,6 +14,7 @@
 #include <qdb/kernel/spec.h>
 #include <qdb/exec/runtime_context.h>
 #include <qdb/exec/runtime_filter.h>
+#include <qdb/exec/instrumentation/operator.h>
 #include <qdb/modules/qumirdb.h>
 #include <qdb/modules/qumirdb_runtime.h>
 #include <qdb/utils/module_path.h>
@@ -2620,6 +2621,7 @@ TRowJoinKernels TKernelCompiler::CompileRowJoin(
 
     TRowJoinKernels kernels;
     kernels.RetainsBuildBatches = layout.HasString;
+    kernels.ProbeColumnWidths = InstrumentationColumnWidths(buildIsLeft ? rightType : leftType);
     kernels.Dispatch = [slot, buildKeyColumns, probeKeyColumns](
         void* arena,
         void* table,

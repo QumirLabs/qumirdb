@@ -19,9 +19,13 @@ constexpr int64_t RowJoinOp(ERowJoinKernelOp op) {
 
 } // namespace
 
-TRowJoinProcessor::TRowJoinProcessor(TRowJoinKernels kernels, EJoinBuildSide buildSide)
+TRowJoinProcessor::TRowJoinProcessor(
+    TRowJoinKernels kernels,
+    EJoinBuildSide buildSide,
+    size_t probeHoldBytes)
     : Kernels_(std::move(kernels))
     , BuildSide_(buildSide)
+    , ProbeHoldBytes_(probeHoldBytes)
 {
     if (BuildSide_ == EJoinBuildSide::Auto) {
         throw std::runtime_error("row join requires a fixed build side");
@@ -43,6 +47,34 @@ TRowJoinProcessor::~TRowJoinProcessor() {
     for (auto& batch : PendingProbe_) {
         Release(&batch);
     }
+}
+
+bool TRowJoinProcessor::CanHoldProbe() const {
+    return HeldProbeBytes_ < ProbeHoldBytes_;
+}
+
+uint64_t TRowJoinProcessor::ProbeBatchBytes(const TRowSet& batch) const {
+    const auto rows = static_cast<uint64_t>(batch.RowCount);
+    uint64_t bytes = 0;
+    for (size_t i = 0; i < Kernels_.ProbeColumnWidths.size() && i < static_cast<size_t>(batch.ColumnCount); ++i) {
+        const auto width = Kernels_.ProbeColumnWidths[i];
+        const auto& column = batch.Columns[i];
+        if (width >= 0) {
+            bytes += rows * static_cast<uint64_t>(width);
+        } else if (column.Offsets && rows > 0) {
+            // Offsets of a string column: rows + 1 entries; the bytes are the span they cover.
+            const auto offsetWidth = static_cast<uint64_t>(column.OffsetWidth);
+            bytes += (rows + 1) * offsetWidth;
+            if (column.OffsetWidth == 8) {
+                const auto* offsets = static_cast<const int64_t*>(column.Offsets);
+                bytes += static_cast<uint64_t>(offsets[rows] - offsets[0]);
+            } else {
+                const auto* offsets = static_cast<const int32_t*>(column.Offsets);
+                bytes += static_cast<uint64_t>(offsets[rows] - offsets[0]);
+            }
+        }
+    }
+    return bytes;
 }
 
 void TRowJoinProcessor::SetInstrumentation(TOperatorInstrumentation* instrumentation) {
@@ -129,6 +161,7 @@ bool TRowJoinProcessor::PullProbeBatch(const TFetch& probe) {
         if (Instrumentation_) {
             Instrumentation_->RetainInput(batch, BuildSide_ == EJoinBuildSide::Left ? 1 : 0);
         }
+        HeldProbeBytes_ += ProbeBatchBytes(batch);
         PendingProbe_.push_back(batch);
         return true;
     }
@@ -173,8 +206,8 @@ EJoinProcessorResult TRowJoinProcessor::Process(
     const TFetch& probe = BuildSide_ == EJoinBuildSide::Left ? right : left;
     if (!BuildDone_) {
         // A probe batch is taken only when the build side has none ready, so
-        // the probe side never delays the build.
-        if (!PullBuildBatch(build) && !ProbeDone_) {
+        // the probe side never delays the build, and only below the budget.
+        if (!PullBuildBatch(build) && !ProbeDone_ && CanHoldProbe()) {
             PullProbeBatch(probe);
         }
         if (!BuildDone_) {
@@ -184,6 +217,7 @@ EJoinProcessorResult TRowJoinProcessor::Process(
     while (!PendingProbe_.empty()) {
         TRowSet batch = PendingProbe_.front();
         PendingProbe_.pop_front();
+        HeldProbeBytes_ -= ProbeBatchBytes(batch);
         if (Instrumentation_) {
             const size_t input = BuildSide_ == EJoinBuildSide::Left ? 1 : 0;
             Instrumentation_->SetRetainedInputBytes(
@@ -209,7 +243,7 @@ EJoinProcessorResult TRowJoinProcessor::Process(
 
 EJoinBuildSide TRowJoinProcessor::RequiredInputSide() const {
     if (!BuildDone_) {
-        return ProbeDone_ ? BuildSide_ : EJoinBuildSide::Auto;
+        return ProbeDone_ || !CanHoldProbe() ? BuildSide_ : EJoinBuildSide::Auto;
     }
     return BuildSide_ == EJoinBuildSide::Left ? EJoinBuildSide::Right : EJoinBuildSide::Left;
 }

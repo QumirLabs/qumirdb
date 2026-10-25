@@ -216,8 +216,8 @@ struct TSchedulerInnerJoinState : TProcessorTaskState<TSchedulerInnerJoinState> 
 };
 
 struct TSchedulerRowJoinState : TProcessorTaskState<TSchedulerRowJoinState> {
-    TSchedulerRowJoinState(TRowJoinKernels kernels, EJoinBuildSide buildSide)
-        : Processor(std::move(kernels), buildSide)
+    TSchedulerRowJoinState(TRowJoinKernels kernels, EJoinBuildSide buildSide, size_t probeHoldBytes)
+        : Processor(std::move(kernels), buildSide, probeHoldBytes)
     {}
 
     TRowJoinProcessor Processor;
@@ -2805,7 +2805,8 @@ private:
         };
         auto makeJoinState = [&]() -> std::shared_ptr<NScheduler::ITaskState> {
             if (rowTable) {
-                return std::make_shared<TSchedulerRowJoinState>(*rowJoinKernels, buildSide);
+                return std::make_shared<TSchedulerRowJoinState>(
+                    *rowJoinKernels, buildSide, Settings_.Join.RowJoinProbeHoldBytes);
             }
             return std::make_shared<TSchedulerInnerJoinState>(
                 *joinKernels, join.JoinType(), buildSide);

@@ -332,6 +332,9 @@ struct TRowJoinKernels {
     // String payload rows point into the build batches, which the caller then
     // keeps alive until Destroy.
     bool RetainsBuildBatches = false;
+    // Payload width of each probe column in bytes, -1 for strings; lets the
+    // processor size a held probe batch without instrumentation.
+    std::vector<int64_t> ProbeColumnWidths;
 };
 
 struct TJoinHashKernels {
