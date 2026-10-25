@@ -1,5 +1,5 @@
-project (cv, ov) (rows≈8 cost≈6K)
-└─ filter (call qdb_is_null |o.ov|) (rows≈8 cost≈5.9K)
-   └─ join left [c.ck = o.ok] (rows≈17 cost≈5.3K)
+project (cv, ov) (rows≈5 cost≈5.6K)
+└─ filter (call qdb_is_null |o.ov|) (rows≈5 cost≈5.5K)
+   └─ join left [c.ck = o.ok] (rows≈11 cost≈5.1K)
       ├─ source c AS c (rows≈8 cost≈128)
       └─ source o AS o (rows≈20 cost≈320)

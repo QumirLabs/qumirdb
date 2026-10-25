@@ -31,18 +31,6 @@ struct TDpEntry {
     double Cost = 0.0;
 };
 
-double Ndv(const TOperatorPtr& leaf, const std::string& col) {
-    const auto& stats = leaf->Stats_;
-    if (!stats) {
-        return UnknownNdv;
-    }
-    auto it = stats->ColumnStats.find(col);
-    if (it == stats->ColumnStats.end() || !it->second || !it->second->Ndv) {
-        return UnknownNdv;
-    }
-    return static_cast<double>(*it->second->Ndv);
-}
-
 // DP over subsets ordered by increasing bitmask, so every proper subset is
 // solved before its supersets. Optimal bushy tree; DPccp's csg-cmp enumeration
 // (see header link) is a drop-in optimization for large n.
@@ -126,7 +114,7 @@ private:
         // pairwise join cardinality; its ratio to the cross product is the pair's
         // fixed selectivity (keeps the DP cost split-independent, composite keys
         // collapsed by the propagator's row-count clamp).
-        std::map<std::pair<size_t, size_t>, std::vector<std::pair<double, double>>> pairKeys;
+        std::map<std::pair<size_t, size_t>, std::vector<TJoinKeyStats>> pairKeys;
         std::map<std::pair<size_t, size_t>, double> pairKeyWidths;
         for (const auto& e : edges) {
             auto la = owner.find(e.LeftCol);
@@ -136,13 +124,15 @@ private:
             }
             const size_t a = la->second;
             const size_t b = lb->second;
-            const double na = Ndv(Leaves_[a], e.LeftCol);
-            const double nb = Ndv(Leaves_[b], e.RightCol);
+            auto keyStats = EstimateJoinKey(Leaves_[a], e.LeftCol, Leaves_[b], e.RightCol);
             const double wa = ColumnWidth(Leaves_[a], e.LeftCol);
             const double wb = ColumnWidth(Leaves_[b], e.RightCol);
             const size_t i = std::min(a, b);
             const size_t j = std::max(a, b);
-            pairKeys[{i, j}].emplace_back(a == i ? na : nb, a == i ? nb : na);
+            if (a != i) {
+                std::swap(keyStats.Left, keyStats.Right);
+            }
+            pairKeys[{i, j}].push_back(keyStats);
             pairKeyWidths[{i, j}] += std::max(wa, wb);
             Neighbors_[a] |= TSubset{1} << b;
             Neighbors_[b] |= TSubset{1} << a;

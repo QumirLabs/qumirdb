@@ -53,13 +53,34 @@ struct TJoinCardinality {
     double NdvR = 1.0;
 };
 
-// Inner equi-join cardinality: rows = leftRows*rightRows / max(NdvL, NdvR),
-// where each side's ndv product is clamped to that side's row count (so a
-// composite key does not multiply correlated selectivities below the row count).
-// keyNdvs holds per key pair the (leftNdv, rightNdv).
+// One side of an equi-join key pair.
+struct TJoinKeySide {
+    double Ndv = UnknownNdv;
+    // Fraction of the side's rows whose key lies in the range of values both
+    // sides' keys span; 1 when a range is unknown.
+    double SharedFraction = 1.0;
+};
+
+struct TJoinKeyStats {
+    TJoinKeySide Left;
+    TJoinKeySide Right;
+};
+
+// Statistics of the key pair `leftColumn = rightColumn` of two inputs whose
+// stats are estimated.
+TJoinKeyStats EstimateJoinKey(
+    const TOperatorPtr& left,
+    const std::string& leftColumn,
+    const TOperatorPtr& right,
+    const std::string& rightColumn);
+
+// Inner equi-join cardinality over the range both sides' keys span: rows =
+// sharedL*sharedR / max(domainL, domainR), where a side's domain is its key ndv
+// inside that range and its shared rows are the rows there. See "Join
+// cardinality" in docs/arch/optimizations.md.
 TJoinCardinality EstimateEquiJoin(
     double leftRows,
     double rightRows,
-    const std::vector<std::pair<double, double>>& keyNdvs);
+    const std::vector<TJoinKeyStats>& keys);
 
 } // namespace NQdb

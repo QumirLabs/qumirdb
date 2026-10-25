@@ -1,4 +1,4 @@
-project (k, total) (rows≈3 cost≈4.4K)
-└─ join inner [r.rk = l.k] (rows≈3 cost≈4.4K)
+project (k, total) (rows≈1 cost≈4.3K)
+└─ join inner [r.rk = l.k] (rows≈1 cost≈4.3K)
    ├─ source r AS r (rows≈3 cost≈48)
    └─ source l AS l (rows≈4 cost≈64)

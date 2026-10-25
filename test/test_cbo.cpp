@@ -90,16 +90,18 @@ struct TModel {
                 owner[name] = i;
             }
         }
-        std::map<std::pair<size_t, size_t>, std::vector<std::pair<double, double>>> pairKeys;
+        std::map<std::pair<size_t, size_t>, std::vector<NQdb::TJoinKeyStats>> pairKeys;
         std::map<std::pair<size_t, size_t>, double> pairKeyWidths;
         for (const auto& e : edges) {
             size_t a = owner.at(e.LeftCol);
             size_t b = owner.at(e.RightCol);
-            double na = Ndv(a, e.LeftCol);
-            double nb = Ndv(b, e.RightCol);
+            auto keyStats = NQdb::EstimateJoinKey(Leaves[a], e.LeftCol, Leaves[b], e.RightCol);
             size_t i = std::min(a, b);
             size_t j = std::max(a, b);
-            pairKeys[{i, j}].emplace_back(a == i ? na : nb, a == i ? nb : na);
+            if (a != i) {
+                std::swap(keyStats.Left, keyStats.Right);
+            }
+            pairKeys[{i, j}].push_back(keyStats);
             pairKeyWidths[{i, j}] += std::max(
                 NQdb::ColumnWidth(Leaves[a], e.LeftCol),
                 NQdb::ColumnWidth(Leaves[b], e.RightCol));
@@ -113,13 +115,6 @@ struct TModel {
             double sel = ri * rj > 0.0 ? rows / (ri * rj) : 1.0;
             Edges.push_back({key.first, key.second, sel, pairKeyWidths[key]});
         }
-    }
-
-    double Ndv(size_t idx, const std::string& col) const {
-        const auto& stats = Leaves[idx]->Stats_;
-        auto it = stats->ColumnStats.find(col);
-        return (it != stats->ColumnStats.end() && it->second->Ndv)
-            ? static_cast<double>(*it->second->Ndv) : NQdb::UnknownNdv;
     }
 
     double LeafRows(size_t idx) const {

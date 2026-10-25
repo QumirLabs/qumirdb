@@ -1,5 +1,5 @@
-project (value) (rows≈2 cost≈4.4K)
-└─ join inner [__corr_0_0__ = t.key] residual (> |t.value| __scalar_0__) (rows≈2 cost≈4.4K)
+project (value) (rows≈1 cost≈4.4K)
+└─ join inner [__corr_0_0__ = t.key] residual (> |t.value| __scalar_0__) (rows≈1 cost≈4.3K)
    ├─ project (__corr_0_0__, __scalar_0__) (rows≈2 cost≈128)
    │  └─ aggregate keys=[u.key] aggs=[min_0=min] (rows≈2 cost≈96)
    │     └─ source u AS u (rows≈3 cost≈48)

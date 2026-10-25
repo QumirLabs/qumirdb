@@ -680,3 +680,53 @@ bucket, and a predicate the statistics cannot answer gets a default, 0.5 here.
 - `NOT p` keeps the rows where `p` is FALSE. That is the complement of TRUE only
   when `p` cannot be NULL; otherwise the UNKNOWN rows are not known, and
   `NOT p` gets the default.
+
+### Join cardinality
+
+An equi-join is estimated from each input's row count and the NDV, min/max and
+histogram of its key. System R (Selinger et al., cited above) divides the cross
+product by the larger NDV of the two keys, assuming that every value of the key
+with fewer distinct values has a match. QDB takes the NDVs of the tables, not
+of the filtered rows: a filter reduces a side's rows but not its key domain.
+Otherwise a filtered dimension that keeps more keys than the fact references
+would look like a join that keeps every fact row.
+
+The two keys rarely span the same values. A TPC-DS sales table references five
+years of a date dimension that spans two centuries. Only keys inside the range
+both sides span can match, so each side is restricted to the intersection of
+the two min/max ranges, as in the coarse histogram alignment of SQL Server's
+cardinality estimator, described by Paul White in [Join Estimation using
+Histogram Coarse Alignment](https://sqlperformance.com/2018/11/sql-optimizer/histogram-coarse-alignment).
+A side's domain is its NDV times the fraction of its rows inside the
+intersection, read from its histogram:
+
+```text
+rows = rows_L(inside) * rows_R(inside) / max(domain_L, domain_R)
+```
+
+Per-column statistics do not say where a filter's rows fall: `d_year = 2000`
+is correlated with the date key, `d_moy = 12` is not. An unfiltered input
+spreads its keys over its range as its histogram says. A filtered input has
+fewer keys, and they are placed inside the intersection as far as it holds
+them, because a query filters a dimension for the rows it joins. This is
+the "simple containment" of SQL Server's legacy estimator, applied only to the
+range; its newer estimator assumes filters independent of the join ("base
+containment"), see [Join containment assumption in the New Cardinality
+Estimator](https://learn.microsoft.com/en-us/troubleshoot/sql/database-engine/performance/cardinality-estimator-degrades-query-performance).
+In TPC-DS SF10, `d_year = 2000` keeps 363 of 73,049 dates and `store_sales`
+references 1,823 of them, so the join keeps about 363/1,823 of `store_sales`:
+5.7M rows against 5.5M actual, where independence gives 143K. The trade-off is
+a filter independent of the key that keeps more keys than the intersection
+holds: `d_moy = 12` alone is estimated to keep every date the fact references.
+That over-estimate is the safer error for a hash join that builds the smaller
+estimated input: over-estimating a side can only make it build the other side,
+whose estimate is no larger, while an under-estimate makes it build an input
+far larger than estimated.
+
+When the ranges coincide, as for most dimension keys, the estimate is the
+System R one. Without a histogram, min/max only bound a column and the
+estimate makes no claim beyond an empty intersection. A join that lowers a
+column's NDV, to the matched keys or to its output rows, keeps a selection of
+the values its histogram described, without saying where they lie, so the
+column keeps its min/max and drops the histogram. Otherwise a date column that
+a join cut to one year's rows would still look spread over two centuries.

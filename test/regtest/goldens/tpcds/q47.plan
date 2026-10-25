@@ -2,15 +2,15 @@ cte #0 (materialized, ×3):
 project (i_category, i_brand, s_store_name, s_company_name, d_year, d_moy, sum_sales, avg_monthly_sales, rn)
 └─ window partition=[item.i_category, item.i_brand, store.s_store_name, store.s_company_name] order=[date_dim.d_year asc, date_dim.d_moy asc] fns=[w_1=rank]
    └─ window partition=[item.i_category, item.i_brand, store.s_store_name, store.s_company_name, date_dim.d_year] fns=[w_0=avg]
-      └─ aggregate keys=[item.i_category, item.i_brand, store.s_store_name, store.s_company_name, date_dim.d_year, date_dim.d_moy] aggs=[sum_0=sum] (rows≈5 cost≈15K)
-         └─ join inner [store_sales.ss_item_sk = item.i_item_sk] (rows≈5 cost≈14.6K)
-            ├─ join inner [store.s_store_sk = store_sales.ss_store_sk] (rows≈5 cost≈9.6K)
-            │  ├─ source store AS store (rows≈10 cost≈360)
-            │  └─ join inner [date_dim.d_date_sk = store_sales.ss_sold_date_sk] (rows≈5 cost≈4.8K)
-            │     ├─ filter (|| (|| (== |date_dim.d_year| 2000) (&& (== |date_dim.d_year| (- 2000 1)) (== |date_dim.d_moy| 12))) (&& (== |date_dim.d_year| (+ 2000 1)) (== |date_dim.d_moy| 1))) (rows≈5 cost≈240)
-            │     │  └─ source date_dim AS date_dim (rows≈10 cost≈120)
-            │     └─ source store_sales AS store_sales (rows≈10 cost≈200)
-            └─ source item AS item (rows≈10 cost≈360)
+      └─ aggregate keys=[item.i_category, item.i_brand, store.s_store_name, store.s_company_name, date_dim.d_year, date_dim.d_moy] aggs=[sum_0=sum] (rows≈1 cost≈13.9K)
+         └─ join inner [store_sales.ss_item_sk = item.i_item_sk] emit-filter 1 from left (rows≈1 cost≈13.8K)
+            ├─ join inner [store_sales.ss_sold_date_sk = date_dim.d_date_sk] (rows≈1 cost≈9.2K)
+            │  ├─ join inner [store.s_store_sk = store_sales.ss_store_sk] (rows≈1 cost≈4.8K)
+            │  │  ├─ source store AS store (rows≈10 cost≈360)
+            │  │  └─ source store_sales AS store_sales (rows≈10 cost≈200)
+            │  └─ filter (|| (|| (== |date_dim.d_year| 2000) (&& (== |date_dim.d_year| (- 2000 1)) (== |date_dim.d_moy| 12))) (&& (== |date_dim.d_year| (+ 2000 1)) (== |date_dim.d_moy| 1))) (rows≈5 cost≈240)
+            │     └─ source date_dim AS date_dim (rows≈10 cost≈120)
+            └─ source item AS item use-filter 1 keys=[item.i_item_sk] (rows≈10 cost≈360)
 main:
 project (i_category, i_brand, d_year, d_moy, avg_monthly_sales, sum_sales, psum, nsum)
 └─ top-sort [__sort_0 asc, nsum asc] limit 100

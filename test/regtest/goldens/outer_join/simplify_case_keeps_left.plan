@@ -1,5 +1,5 @@
-project (cv, ov) (rows≈8 cost≈6.4K)
-└─ filter (== (if (call qdb_is_true (== |o.flag| 3)) 1 0) 1) (rows≈8 cost≈6.3K)
-   └─ join left [c.ck = o.ok] (rows≈17 cost≈5.6K)
+project (cv, ov) (rows≈5 cost≈5.9K)
+└─ filter (== (if (call qdb_is_true (== |o.flag| 3)) 1 0) 1) (rows≈5 cost≈5.8K)
+   └─ join left [c.ck = o.ok] (rows≈11 cost≈5.4K)
       ├─ source c AS c (rows≈8 cost≈128)
       └─ source o AS o (rows≈20 cost≈480)

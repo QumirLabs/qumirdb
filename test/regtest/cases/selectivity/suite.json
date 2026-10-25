@@ -37,6 +37,8 @@
     "not_in_list_all_values.sql": {"order": "ordered"},
     "not_equal_chain.sql": {"order": "ordered"},
     "not_nullable_range.sql": {"order": "ordered"},
-    "not_in_list_with_null.sql": {"order": "ordered"}
+    "not_in_list_with_null.sql": {"order": "ordered"},
+    "join_shared_key_range.sql": {"order": "ordered"},
+    "join_shared_key_range_independent.sql": {"order": "ordered"}
   }
 }

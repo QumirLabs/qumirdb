@@ -1,5 +1,5 @@
 sort [cv asc, ov asc]
-└─ project (ok, ov, ck, cv) (rows≈17 cost≈5.9K)
-   └─ join right [o.ok = c.ck] residual (< (* |c.cv| 10) |o.ov|) (rows≈17 cost≈5.3K)
+└─ project (ok, ov, ck, cv) (rows≈11 cost≈5.5K)
+   └─ join right [o.ok = c.ck] residual (< (* |c.cv| 10) |o.ov|) (rows≈11 cost≈5.1K)
       ├─ source o AS o (rows≈20 cost≈320)
       └─ source c AS c (rows≈8 cost≈128)

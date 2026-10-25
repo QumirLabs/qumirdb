@@ -1,5 +1,5 @@
-project (cv, ov) (rows≈17 cost≈10.7K)
-└─ join inner [o.ok = c.ck] (rows≈17 cost≈10.4K)
+project (cv, ov) (rows≈11 cost≈10.4K)
+└─ join inner [o.ok = c.ck] (rows≈11 cost≈10.2K)
    ├─ join left_semi [o.flag = p.pk] (rows≈20 cost≈5.3K)
    │  ├─ source o AS o (rows≈20 cost≈480)
    │  └─ source p AS p (rows≈6 cost≈48)

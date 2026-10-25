@@ -605,6 +605,110 @@ TEST(StatsTest, JoinKeyNdvCollapse) {
     EXPECT_EQ(right.Stats_->ColumnStats.at("y")->Ndv.value_or(0), 10u);
 }
 
+namespace {
+
+// A dimension with keys x in [0, 1000) and a fact of 100000 rows whose key k
+// references only [100, 200]: 101 keys, every one used.
+class SharedKeyRangeStats : public ::testing::Test {
+protected:
+    SharedKeyRangeStats() {
+        SetFactRange(100);
+    }
+
+    void SetFactRange(int64_t min) {
+        auto& key = *Fact.Stats_->ColumnStats.at("k");
+        key.MinValue = std::bit_cast<uint64_t>(min);
+        key.MaxValue = std::bit_cast<uint64_t>(min + 100);
+        key.Histogram.clear();
+        for (int64_t v = min; v <= min + 100; v += 10) {
+            key.Histogram.push_back(std::bit_cast<uint64_t>(v));
+        }
+    }
+
+    // Estimated stats of `dimension JOIN fact ON x = k`, the dimension
+    // filtered by `predicate` when there is one.
+    NQdb::TStatsPtr Join(const char* predicate = nullptr) {
+        NQdb::TOperatorPtr dimension = std::make_shared<NQdb::TSourceOperator>(Dim, "d");
+        if (predicate) {
+            auto filter = NQdb::MakeFilter(dimension, predicate);
+            EXPECT_TRUE(filter.has_value()) << filter.error().ToString();
+            dimension = *filter;
+        }
+        auto fact = std::make_shared<NQdb::TSourceOperator>(Fact, "f");
+        auto join = NQdb::MakeJoin(dimension, fact, {{"x", "k"}}, NQdb::EJoinType::Inner);
+        EXPECT_TRUE(join.has_value()) << join.error().ToString();
+        NQdb::TOperatorPtr plan = *join;
+        NQdb::ApplyPlanPasses(plan);
+        return plan->Stats_;
+    }
+
+    TStatsSource Dim{{{"x", 1000}, {"y", 1000}}, 1000};
+    TStatsSource Fact{{{"k", 101}}, 100000};
+};
+
+} // namespace
+
+// Every fact row finds its dimension row: the keys outside the fact's range
+// do not multiply it.
+TEST_F(SharedKeyRangeStats, UnfilteredDimensionMatchesEachFactRowOnce) {
+    auto stats = Join();
+    ASSERT_TRUE(stats);
+    EXPECT_NEAR(static_cast<double>(stats->RowCount), 100000.0, 1000.0);
+}
+
+// The 50 dimension rows a filter keeps are judged against the 101 keys the
+// fact references, not against all 1000 keys of the dimension.
+TEST_F(SharedKeyRangeStats, FilteredDimensionIsJudgedWithinTheFactRange) {
+    auto stats = Join("(< y 50)");
+    ASSERT_TRUE(stats);
+    EXPECT_NEAR(static_cast<double>(stats->RowCount), 50.0 * 100000.0 / 101.0, 1000.0);
+}
+
+// The join keeps 101 of the dimension's 1000 keys. The histogram described
+// all of them, so the joined key keeps only its bounds.
+TEST_F(SharedKeyRangeStats, CappedKeyDropsItsHistogram) {
+    auto stats = Join();
+    ASSERT_TRUE(stats);
+    const auto& key = *stats->ColumnStats.at("d.x");
+    EXPECT_EQ(key.Ndv, 101u);
+    EXPECT_TRUE(key.Histogram.empty());
+    EXPECT_EQ(key.GetMinValue<int64_t>(), 0);
+    EXPECT_EQ(key.GetMaxValue<int64_t>(), 999);
+    // The dimension's own statistics stay as they are.
+    EXPECT_FALSE(Dim.Stats_->ColumnStats.at("x")->Histogram.empty());
+}
+
+// A join with a 10-row table keeps about 10 dimension rows, and the
+// statistics do not say where their keys lie. The fact's range must not
+// shrink them to the tenth the dimension's histogram would place inside it.
+TEST_F(SharedKeyRangeStats, SelectedKeysAreNotSpreadByTheBaseHistogram) {
+    TStatsSource small({{"z", 10}}, 10);
+    NQdb::TOperatorPtr dimension = std::make_shared<NQdb::TSourceOperator>(Dim, "d");
+    NQdb::TOperatorPtr selector = std::make_shared<NQdb::TSourceOperator>(small, "s");
+    NQdb::TOperatorPtr fact = std::make_shared<NQdb::TSourceOperator>(Fact, "f");
+    auto selected = NQdb::MakeJoin(dimension, selector, {{"y", "z"}}, NQdb::EJoinType::Inner);
+    ASSERT_TRUE(selected.has_value()) << selected.error().ToString();
+    auto join = NQdb::MakeJoin(*selected, fact, {{"x", "k"}}, NQdb::EJoinType::Inner);
+    ASSERT_TRUE(join.has_value()) << join.error().ToString();
+    // No reordering: the dimension is joined with the 10 rows first.
+    NQdb::TOperatorPtr plan = *join;
+    NQdb::AssignSourceAliases(plan);
+    NQdb::QualifyColumns(plan);
+    NQdb::AnnotateTypes(plan);
+    auto stats = NQdb::EstimateStats(plan);
+    ASSERT_TRUE(stats);
+    const double selectedRows = static_cast<double>((*selected)->Stats_->RowCount);
+    EXPECT_NEAR(selectedRows, 10.0, 1.0);
+    EXPECT_NEAR(static_cast<double>(stats->RowCount), selectedRows * 100000.0 / 101.0, 100.0);
+}
+
+TEST_F(SharedKeyRangeStats, DisjointKeyRangesMatchNothing) {
+    SetFactRange(2000);
+    auto stats = Join();
+    ASSERT_TRUE(stats);
+    EXPECT_EQ(stats->RowCount, 1u);
+}
+
 // 1000 rows; x is i64, n is Nullable<i64> with 250 NULLs, f and g are f64;
 // ndv 100 each.
 class SelfEqualityStats : public ::testing::Test {
