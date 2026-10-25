@@ -25,6 +25,7 @@ endif()
 
 ut(test_io test_io.cpp)
 ut(test_parquet_row_reader test_parquet_row_reader.cpp)
+ut(test_parquet_scan_filter test_parquet_scan_filter.cpp)
 ut(test_stats test_stats.cpp)
 ut(test_row_group_predicate test_row_group_predicate.cpp)
 ut(test_row_group_pushdown_e2e test_row_group_pushdown_e2e.cpp)

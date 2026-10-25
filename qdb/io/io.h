@@ -9,6 +9,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_set>
+#include <vector>
 
 #include <qdb/io/schema.h>
 #include <qdb/plan/ops/stats.h>
@@ -48,6 +49,27 @@ inline void Release(TRowSet* rs) {
         rs->Destroy(rs);
     }
 }
+
+// Rows a scan filter keeps from one batch. The batch owns the buffers.
+struct TScanSelection {
+    // One byte per row, non-zero for a kept row; empty keeps every row.
+    std::vector<uint8_t> Rows;
+    // Becomes TRowSet::Hash; empty for none.
+    std::vector<uint64_t> Hashes;
+};
+
+// A filter a source applies while it reads a batch: the source decodes the
+// filter's columns first and the other columns only for the rows it keeps.
+// One instance serves one scan task.
+class IScanFilter {
+public:
+    virtual ~IScanFilter() = default;
+    // Positions in the source schema of the columns Select reads.
+    virtual std::span<const size_t> Columns() const = 0;
+    // batch has the source schema; only Columns() are decoded. Returns the
+    // number of kept rows; zero drops the batch.
+    virtual size_t Select(const TRowSet& batch, TScanSelection& selection) = 0;
+};
 
 struct ISource {
     virtual ~ISource() = default;

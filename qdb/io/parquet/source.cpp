@@ -2,6 +2,7 @@
 #include <qdb/io/parquet/row_reader.h>
 #include <qdb/io/parquet/row_id.h>
 #include <qdb/io/parquet/row_group_predicate.h>
+#include <qdb/io/parquet/selective_reader.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 
@@ -13,6 +14,7 @@
 #include <arrow/memory_pool.h>
 #include <arrow/util/key_value_metadata.h>
 #include <parquet/arrow/reader.h>
+#include <parquet/arrow/schema.h>
 #include <parquet/metadata.h>
 #include <parquet/schema.h>
 #include <parquet/statistics.h>
@@ -97,6 +99,72 @@ char* FixedByteWidthData(const std::shared_ptr<arrow::Array>& arr, int32_t byteW
     return const_cast<char*>(reinterpret_cast<const char*>(raw)) + arr->offset() * byteWidth;
 }
 
+void ArrayToColumn(const std::shared_ptr<arrow::Array>& arr, TColumn& col) {
+    col.Offsets = nullptr;
+    col.OffsetWidth = 0;
+    col.DataBitOffset = 0;
+    col.Mask = nullptr;
+    col.MaskBitOffset = 0;
+
+    if (arr->null_count() > 0) {
+        col.Mask = arr->null_bitmap_data();
+        col.MaskBitOffset = static_cast<int32_t>(arr->offset());
+    }
+
+    switch (arr->type_id()) {
+        case arrow::Type::INT8:
+        case arrow::Type::INT16:
+        case arrow::Type::INT32:
+        case arrow::Type::INT64:
+        case arrow::Type::UINT8:
+        case arrow::Type::UINT16:
+        case arrow::Type::UINT32:
+        case arrow::Type::UINT64:
+        case arrow::Type::DOUBLE:
+        case arrow::Type::DATE32:
+        case arrow::Type::DATE64: {
+            col.Data = NumericData(arr);
+            break;
+        }
+        case arrow::Type::DECIMAL128: {
+            col.Data = FixedByteWidthData(arr, 16);
+            break;
+        }
+        case arrow::Type::FLOAT: {
+            col.Data = NumericData(arr);
+            break;
+        }
+        case arrow::Type::BOOL: {
+            auto bitmap = arr->data()->buffers[1];
+            col.Data = const_cast<char*>(reinterpret_cast<const char*>(bitmap->data()));
+            col.DataBitOffset = static_cast<int32_t>(arr->offset());
+            break;
+        }
+        case arrow::Type::STRING: {
+            auto typed = std::static_pointer_cast<arrow::StringArray>(arr);
+            const int32_t* src = typed->raw_value_offsets() + arr->offset();
+            int32_t base = src[0];
+            col.Offsets = const_cast<int32_t*>(src);
+            col.OffsetWidth = 4;
+            col.Data = const_cast<char*>(reinterpret_cast<const char*>(typed->raw_data()) + base);
+            break;
+        }
+        case arrow::Type::LARGE_STRING: {
+            auto typed = std::static_pointer_cast<arrow::LargeStringArray>(arr);
+            const int64_t* src = typed->raw_value_offsets() + arr->offset();
+            int64_t base = src[0];
+            col.Offsets = const_cast<int64_t*>(src);
+            col.OffsetWidth = 8;
+            col.Data = const_cast<char*>(reinterpret_cast<const char*>(typed->raw_data()) + base);
+            break;
+        }
+        default: {
+            col.Data = nullptr;
+            break;
+        }
+    }
+}
+
 void RecordBatchToRowSet(
     std::shared_ptr<arrow::RecordBatch> batch,
     TRowSet& rowSet)
@@ -109,71 +177,7 @@ void RecordBatchToRowSet(
     data->Columns.resize(numCols);
 
     for (int32_t i = 0; i < numCols; ++i) {
-        auto arr = data->Batch->column(i);
-        TColumn& col = data->Columns[i];
-        col.Offsets = nullptr;
-        col.OffsetWidth = 0;
-        col.DataBitOffset = 0;
-        col.Mask = nullptr;
-        col.MaskBitOffset = 0;
-
-        if (arr->null_count() > 0) {
-            col.Mask = arr->null_bitmap_data();
-            col.MaskBitOffset = static_cast<int32_t>(arr->offset());
-        }
-
-        switch (arr->type_id()) {
-            case arrow::Type::INT8:
-            case arrow::Type::INT16:
-            case arrow::Type::INT32:
-            case arrow::Type::INT64:
-            case arrow::Type::UINT8:
-            case arrow::Type::UINT16:
-            case arrow::Type::UINT32:
-            case arrow::Type::UINT64:
-            case arrow::Type::DOUBLE:
-            case arrow::Type::DATE32:
-            case arrow::Type::DATE64: {
-                col.Data = NumericData(arr);
-                break;
-            }
-            case arrow::Type::DECIMAL128: {
-                col.Data = FixedByteWidthData(arr, 16);
-                break;
-            }
-            case arrow::Type::FLOAT: {
-                col.Data = NumericData(arr);
-                break;
-            }
-            case arrow::Type::BOOL: {
-                auto bitmap = arr->data()->buffers[1];
-                col.Data = const_cast<char*>(reinterpret_cast<const char*>(bitmap->data()));
-                col.DataBitOffset = static_cast<int32_t>(arr->offset());
-                break;
-            }
-            case arrow::Type::STRING: {
-                auto typed = std::static_pointer_cast<arrow::StringArray>(arr);
-                const int32_t* src = typed->raw_value_offsets() + arr->offset();
-                int32_t base = src[0];
-                col.Offsets = const_cast<int32_t*>(src);
-                col.OffsetWidth = 4;
-                col.Data = const_cast<char*>(reinterpret_cast<const char*>(typed->raw_data()) + base);
-                break;
-            }
-            case arrow::Type::LARGE_STRING: {
-                auto typed = std::static_pointer_cast<arrow::LargeStringArray>(arr);
-                const int64_t* src = typed->raw_value_offsets() + arr->offset();
-                int64_t base = src[0];
-                col.Offsets = const_cast<int64_t*>(src);
-                col.OffsetWidth = 8;
-                col.Data = const_cast<char*>(reinterpret_cast<const char*>(typed->raw_data()) + base);
-                break;
-            }
-            default: {
-                col.Data = nullptr;
-                break;
-            }
-        }
+        ArrayToColumn(data->Batch->column(i), data->Columns[i]);
     }
 
     rowSet = {
@@ -185,6 +189,30 @@ void RecordBatchToRowSet(
         .Private = data,
         .RefCount = 1,
     };
+}
+
+// The Arrow reader selects a field by the Parquet leaf columns it stores.
+void AppendLeafColumns(const parquet::arrow::SchemaField& field, std::vector<int>& columns) {
+    if (field.is_leaf()) {
+        columns.push_back(field.column_index);
+        return;
+    }
+    for (const auto& child : field.children) {
+        AppendLeafColumns(child, columns);
+    }
+}
+
+// A batch of a filtered scan: the first-stage Arrow arrays, the selectively
+// read columns and the filter's selection, all owned by the rowset.
+struct TFilteredBatchData {
+    std::shared_ptr<arrow::RecordBatch> Early;
+    std::vector<std::shared_ptr<arrow::Buffer>> Buffers;
+    TScanSelection Selection;
+    std::vector<TColumn> Columns;
+};
+
+void DestroyFilteredBatch(TRowSet* rs) {
+    delete static_cast<TFilteredBatchData*>(rs->Private);
 }
 
 class TParquetPhysicalRowReader final : public IPhysicalRowReader {
@@ -556,6 +584,9 @@ void TParquetSource::ResetReader()
     ReaderRowOffset_ = 0;
 
     RefreshSchema();
+    if (Filtered_) {
+        ConfigureFilteredScan();
+    }
 }
 
 bool TParquetSource::RowIdRequested() const {
@@ -589,8 +620,10 @@ void TParquetSource::RefreshSchema()
     int numFields = Reader_->schema()->num_fields();
     Names_.clear();
     Columns_.clear();
-    Names_.reserve(numFields);
-    Columns_.reserve(numFields);
+    // Columns_ views Names_: leave room for the row-id column so that adding
+    // it does not move the names, short ones stored inline included.
+    Names_.reserve(numFields + 1);
+    Columns_.reserve(numFields + 1);
     for (const auto& field : Reader_->schema()->fields()) {
         Names_.push_back(field->name());
         Columns_.push_back({
@@ -832,7 +865,225 @@ void TParquetFileData::LoadColumnStats()
     }
 }
 
+// Two-stage reading of a filtered scan. Each batch comes from one row group:
+// an Arrow reader of that group decodes the first-stage columns, and one
+// selective reader per remaining column follows it batch by batch.
+struct TParquetSource::TFilteredScan {
+    enum class EStage { Early, Late, RowId };
+
+    struct TOutputColumn {
+        EStage Stage;
+        // Column of the first-stage batch, or index into Late.
+        size_t Index = 0;
+    };
+
+    std::shared_ptr<IScanFilter> Filter;
+    std::vector<TOutputColumn> Output;
+    // Parquet leaf columns of each stage.
+    std::vector<int> EarlyColumns;
+    std::vector<int> LateColumns;
+    std::vector<std::shared_ptr<arrow::DataType>> LateTypes;
+
+    // Position in ReaderRowGroups_ and in its row group.
+    size_t RowGroup = 0;
+    int64_t RowOffset = 0;
+    std::shared_ptr<arrow::RecordBatchReader> Early;
+    std::vector<TSelectiveColumnReader> Late;
+    // Positions of the current batch's kept rows, shared by its late columns.
+    std::vector<int32_t> Kept;
+};
+
 TParquetSource::~TParquetSource() = default;
+
+void TParquetSource::SetScanFilter(std::shared_ptr<IScanFilter> filter) {
+    if (!filter) {
+        Filtered_.reset();
+        return;
+    }
+    Filtered_ = std::make_unique<TFilteredScan>();
+    Filtered_->Filter = std::move(filter);
+    ConfigureFilteredScan();
+}
+
+void TParquetSource::ConfigureFilteredScan() {
+    auto& scan = *Filtered_;
+    const auto filterColumns = scan.Filter->Columns();
+    const size_t fileFields = Reader_->schema()->num_fields();
+    std::vector<bool> early(Columns_.size(), false);
+    for (size_t column : filterColumns) {
+        if (column >= fileFields) {
+            throw std::invalid_argument(
+                "parquet scan filter reads a column the file does not store");
+        }
+        early[column] = true;
+    }
+
+    std::unordered_map<std::string_view, int> fileIndexes;
+    for (size_t i = 0; i < File_->FileNames.size(); ++i) {
+        fileIndexes.emplace(File_->FileNames[i], static_cast<int>(i));
+    }
+    const auto& manifest = File_->FileReader->manifest();
+    const auto metadata = File_->FileReader->parquet_reader()->metadata();
+    scan.Output.clear();
+    size_t earlyFields = 0;
+    scan.EarlyColumns.clear();
+    scan.LateColumns.clear();
+    scan.LateTypes.clear();
+    for (size_t column = 0; column < fileFields; ++column) {
+        const int field = fileIndexes.at(Names_[column]);
+        const auto& schemaField = manifest.schema_fields[static_cast<size_t>(field)];
+        const auto& type = File_->FileSchema->field(field)->type();
+        const bool late = !early[column] && schemaField.is_leaf()
+            && schemaField.column_index >= 0
+            && TSelectiveColumnReader::Supports(
+                *metadata->schema()->Column(schemaField.column_index), *type);
+        if (late) {
+            scan.Output.push_back({TFilteredScan::EStage::Late, scan.LateColumns.size()});
+            scan.LateColumns.push_back(schemaField.column_index);
+            scan.LateTypes.push_back(type);
+        } else {
+            scan.Output.push_back({TFilteredScan::EStage::Early, earlyFields++});
+            AppendLeafColumns(schemaField, scan.EarlyColumns);
+        }
+    }
+    if (RowIdRequested()) {
+        scan.Output.push_back({TFilteredScan::EStage::RowId});
+    }
+    scan.RowGroup = 0;
+    scan.RowOffset = 0;
+    scan.Early.reset();
+    scan.Late.clear();
+}
+
+void TParquetSource::OpenFilteredRowGroup() {
+    auto& scan = *Filtered_;
+    const int rowGroup = ReaderRowGroups_[scan.RowGroup];
+    auto early = File_->FileReader->GetRecordBatchReader(
+        std::vector<int>{rowGroup}, scan.EarlyColumns);
+    if (!early.ok()) {
+        throw std::runtime_error(early.status().ToString());
+    }
+    scan.Early = std::move(*early);
+    scan.Late.clear();
+    if (scan.LateColumns.empty()) {
+        return;
+    }
+    auto reader = File_->FileReader->parquet_reader()->RowGroup(rowGroup);
+    scan.Late.reserve(scan.LateColumns.size());
+    for (size_t i = 0; i < scan.LateColumns.size(); ++i) {
+        scan.Late.emplace_back(
+            reader, scan.LateColumns[i], *scan.LateTypes[i], GetMemoryPool());
+    }
+}
+
+bool TParquetSource::NextFiltered(TRowSet& rowSet) {
+    auto& scan = *Filtered_;
+    for (;;) {
+        if (!scan.Early) {
+            if (scan.RowGroup == ReaderRowGroups_.size()) {
+                return false;
+            }
+            OpenFilteredRowGroup();
+        }
+        std::shared_ptr<arrow::RecordBatch> early;
+        if (auto status = scan.Early->ReadNext(&early); !status.ok()) {
+            throw std::runtime_error(status.ToString());
+        }
+        const int rowGroup = ReaderRowGroups_[scan.RowGroup];
+        if (!early) {
+            if (scan.RowOffset != File_->RowGroups[static_cast<size_t>(rowGroup)].RowCount) {
+                throw std::runtime_error(
+                    "parquet row group ended before its metadata row count");
+            }
+            scan.Early.reset();
+            scan.Late.clear();
+            ++scan.RowGroup;
+            scan.RowOffset = 0;
+            continue;
+        }
+
+        const int64_t rows = early->num_rows();
+        auto data = std::make_unique<TFilteredBatchData>();
+        data->Columns.resize(scan.Output.size(), TColumn{});
+        for (size_t column = 0; column < scan.Output.size(); ++column) {
+            const auto& output = scan.Output[column];
+            if (output.Stage == TFilteredScan::EStage::Early) {
+                ArrayToColumn(early->column(static_cast<int>(output.Index)),
+                    data->Columns[column]);
+            } else if (output.Stage == TFilteredScan::EStage::RowId) {
+                auto buffer = arrow::AllocateBuffer(
+                    rows * static_cast<int64_t>(sizeof(uint64_t)), GetMemoryPool());
+                if (!buffer.ok()) {
+                    throw std::runtime_error(buffer.status().ToString());
+                }
+                auto* rowIds = reinterpret_cast<uint64_t*>((*buffer)->mutable_data());
+                for (int64_t i = 0; i < rows; ++i) {
+                    // TParquetFileData checked that locators fit the fields.
+                    rowIds[i] = MakeParquetRowIdUnchecked(
+                        static_cast<uint32_t>(rowGroup),
+                        static_cast<uint32_t>(scan.RowOffset + i));
+                }
+                data->Columns[column].Data = reinterpret_cast<char*>(rowIds);
+                data->Buffers.push_back(std::move(*buffer));
+            }
+        }
+        data->Early = std::move(early);
+
+        const TRowSet batch{
+            .Columns = data->Columns.data(),
+            .ColumnCount = static_cast<int64_t>(data->Columns.size()),
+            .RowCount = rows,
+        };
+        const size_t kept = scan.Filter->Select(batch, data->Selection);
+        const auto& selection = data->Selection;
+        if ((!selection.Rows.empty() && selection.Rows.size() != static_cast<size_t>(rows))
+            || (!selection.Hashes.empty() && selection.Hashes.size() != static_cast<size_t>(rows)))
+        {
+            throw std::runtime_error("parquet scan filter returned a batch of a wrong size");
+        }
+        scan.RowOffset += rows;
+        if (!kept) {
+            for (auto& late : scan.Late) {
+                late.Skip(rows);
+            }
+            continue;
+        }
+        const bool all = selection.Rows.empty() || kept == static_cast<size_t>(rows);
+        if (!all && !scan.Late.empty()) {
+            scan.Kept.clear();
+            for (int64_t row = 0; row < rows; ++row) {
+                if (selection.Rows[static_cast<size_t>(row)]) {
+                    scan.Kept.push_back(static_cast<int32_t>(row));
+                }
+            }
+        }
+        for (size_t column = 0; column < scan.Output.size(); ++column) {
+            const auto& output = scan.Output[column];
+            if (output.Stage != TFilteredScan::EStage::Late) {
+                continue;
+            }
+            auto& late = scan.Late[output.Index];
+            if (all) {
+                late.ReadAll(rows, data->Columns[column], data->Buffers);
+            } else {
+                late.ReadKept(rows, scan.Kept, data->Columns[column], data->Buffers);
+            }
+        }
+
+        auto* owned = data.release();
+        rowSet = {
+            .Columns = owned->Columns.data(),
+            .ColumnCount = static_cast<int64_t>(owned->Columns.size()),
+            .RowCount = rows,
+            .Selection = owned->Selection.Rows.empty() ? nullptr : owned->Selection.Rows.data(),
+            .Hash = owned->Selection.Hashes.empty() ? nullptr : owned->Selection.Hashes.data(),
+            .Destroy = DestroyFilteredBatch,
+            .Private = owned,
+            .RefCount = 1,
+        };
+        return true;
+    }
+}
 
 const TStatsPtr TParquetSource::Stats() const
 {
@@ -1065,6 +1316,9 @@ const TSchema& TParquetSource::Schema() const {
 }
 
 bool TParquetSource::Next(TRowSet& rowSet) {
+    if (Filtered_) {
+        return NextFiltered(rowSet);
+    }
     std::shared_ptr<arrow::RecordBatch> batch;
     if (!Reader_->ReadNext(&batch).ok() || !batch) {
         return false;

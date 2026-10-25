@@ -1,0 +1,7 @@
+project (k, c, flag, s, label)
+└─ sort [k asc, __sort_0 asc]
+   └─ project (k, c, flag, s, label, __sort_0) (rows≈1 cost≈6K)
+      └─ join inner [d.k = f.k] emit-filter 1 from left (rows≈1 cost≈5.9K)
+         ├─ filter (call qdb_string_view_sql_like |d.label| (cast "label-%" <named StringView>)) (rows≈1 cost≈1K)
+         │  └─ source d AS d row-groups (call qdb_string_view_sql_like |d.label| (cast "label-%" <named StringView>)) (rows≈26 cost≈520)
+         └─ source f AS f use-filter 1 keys=[f.k] (rows≈24 cost≈648)

@@ -1365,6 +1365,160 @@ TEST_F(RuntimeFilterTask, BlockedOutputProbesTheBatchOnce) {
     EXPECT_EQ(stats.RejectedRows, 1u);
 }
 
+TEST_F(SchedulerRuntimeFilter, SourceReadsNothingBeforeItsFiltersArePublished) {
+    auto filter = std::make_shared<TRuntimeFilter>(Context_, 16, 1024);
+    TTaskNode producer;
+    auto auxInput = std::make_shared<TAuxInput>();
+    auxInput->AddFilter(filter);
+    auxInput->AddProducer(producer);
+    std::atomic<int> destroyCount = 0;
+    int reads = 0;
+    auto code = std::make_shared<TSourceCode>(
+        [&](void*, TRowSet& rowSet) {
+            if (reads++) {
+                return false;
+            }
+            rowSet = MakeInt64RowSet({1, 2}, &destroyCount);
+            return true;
+        },
+        auxInput);
+    TOneToOneConnection output(2);
+    output.Resize(1, 1);
+    TSourceTask source(code, nullptr, TOutputPort{.Connection = &output});
+    TTaskEdge dependency{.Kind = ETaskEdgeKind::Dependency};
+
+    EXPECT_EQ(source.Execute(), ETaskResult::NEED_DATA);
+    EXPECT_EQ(reads, 0);
+    EXPECT_TRUE(source.WantsInput(dependency));
+    EXPECT_FALSE(source.TryNotifyDependency());
+
+    filter->FinishProducer(std::move(filter->MakeBuilder()).TakePartial());
+    producer.State.store(ETaskState::Finished);
+    EXPECT_FALSE(source.WantsInput(dependency));
+    EXPECT_TRUE(source.TryNotifyDependency());
+    EXPECT_EQ(source.Execute(), ETaskResult::OK);
+    EXPECT_EQ(source.Execute(), ETaskResult::FINISHED);
+    EXPECT_EQ(FetchSelectedRows(output, 0).Values, (std::vector<int64_t>{1, 2}));
+}
+
+// Two runtime filters applied by a scan, as two chained consumer tasks would.
+class RuntimeFilterScan : public NTest::TRuntimeFilterTest {
+protected:
+    std::shared_ptr<TRuntimeFilter> Publish(std::vector<uint64_t> keys,
+        size_t maxKeys = TRuntimeFilter::DefaultMaxKeys, size_t bloomBytes = 1024)
+    {
+        auto filter = std::make_shared<TRuntimeFilter>(Context_, maxKeys, bloomBytes);
+        auto builder = filter->MakeBuilder();
+        builder.Add(keys);
+        filter->FinishProducer(std::move(builder).TakePartial());
+        return filter;
+    }
+
+    std::shared_ptr<const TRuntimeFilterCode> Code(std::shared_ptr<TRuntimeFilter> filter) {
+        auto code = std::make_shared<TRuntimeFilterCode>();
+        code->Hash = HashSelectedValues;
+        code->Probe = std::move(filter);
+        return code;
+    }
+
+    struct TResult {
+        size_t Kept = 0;
+        std::vector<uint8_t> Rows;
+        std::vector<uint64_t> Hashes;
+    };
+
+    TResult Select(TRuntimeFilterScan& scan, std::vector<int64_t> values) {
+        auto rowSet = MakeInt64RowSet(std::move(values), &DestroyCount_);
+        TScanSelection selection;
+        TResult result;
+        result.Kept = scan.Select(rowSet, selection);
+        Release(&rowSet);
+        for (uint8_t row : selection.Rows) {
+            result.Rows.push_back(row != 0);
+        }
+        result.Hashes = std::move(selection.Hashes);
+        return result;
+    }
+
+    std::atomic<int> DestroyCount_ = 0;
+};
+
+TEST_F(RuntimeFilterScan, LaterFilterNarrowsTheSelectionAndOwnsTheHashes) {
+    auto first = Publish({11, 22, 33});
+    auto second = Publish({22, 33, 44});
+    TRuntimeFilterScan scan({Code(first), Code(second)}, {0});
+    EXPECT_EQ(std::vector<size_t>(scan.Columns().begin(), scan.Columns().end()),
+        (std::vector<size_t>{0}));
+
+    const auto result = Select(scan, {11, 22, 33, 44, 55});
+    EXPECT_EQ(result.Kept, 2u);
+    EXPECT_EQ(result.Rows, (std::vector<uint8_t>{0, 1, 1, 0, 0}));
+    ASSERT_EQ(result.Hashes.size(), 5u);
+    EXPECT_EQ(result.Hashes[1], 22u);
+    EXPECT_EQ(result.Hashes[2], 33u);
+    // The second filter probes only the rows the first one kept.
+    EXPECT_EQ(first->StatsSnapshot().ProbeRows, 5u);
+    EXPECT_EQ(first->StatsSnapshot().RejectedRows, 2u);
+    EXPECT_EQ(second->StatsSnapshot().ProbeRows, 3u);
+    EXPECT_EQ(second->StatsSnapshot().RejectedRows, 1u);
+}
+
+TEST_F(RuntimeFilterScan, RejectingEveryRowDropsTheBatch) {
+    auto first = Publish({11});
+    auto second = Publish({11, 22});
+    TRuntimeFilterScan scan({Code(first), Code(second)}, {0});
+    EXPECT_EQ(Select(scan, {11, 33}).Kept, 1u);
+    EXPECT_EQ(Select(scan, {33, 44}).Kept, 0u);
+    // A batch the first filter drops never reaches the second.
+    EXPECT_EQ(second->StatsSnapshot().ProbeRows, 1u);
+}
+
+TEST_F(RuntimeFilterScan, InactiveFilterKeepsRowsWithoutHashes) {
+    // More distinct keys than the exact set holds and no Bloom storage.
+    auto passAll = Publish({1, 2, 3, 4, 5, 6, 7, 8, 9}, 8, 0);
+    ASSERT_TRUE(passAll->StatsSnapshot().BloomDisabled);
+    auto exact = Publish({11, 22});
+
+    TRuntimeFilterScan alone({Code(passAll)}, {0});
+    const auto all = Select(alone, {11, 33});
+    EXPECT_EQ(all.Kept, 2u);
+    EXPECT_TRUE(all.Rows.empty());
+    EXPECT_TRUE(all.Hashes.empty());
+
+    // A later filter that does not test the batch keeps the earlier selection
+    // but not its hashes, which are of a different key.
+    TRuntimeFilterScan chain({Code(exact), Code(passAll)}, {0});
+    const auto narrowed = Select(chain, {11, 33, 22});
+    EXPECT_EQ(narrowed.Kept, 2u);
+    EXPECT_EQ(narrowed.Rows, (std::vector<uint8_t>{1, 0, 1}));
+    EXPECT_TRUE(narrowed.Hashes.empty());
+    EXPECT_EQ(passAll->StatsSnapshot().SkippedProbeRows, 4u);
+}
+
+TEST_F(RuntimeFilterScan, WeakBloomFilterPausesLikeAConsumerTask) {
+    std::vector<uint64_t> keys;
+    for (uint64_t key = 1; key <= 200; ++key) {
+        keys.push_back(key * 0x9e3779b97f4a7c15ull);
+    }
+    auto bloom = Publish(keys, 8, 512);
+    ASSERT_TRUE(bloom->UsesBloom());
+    TRuntimeFilterScan scan({Code(bloom)}, {0});
+    const std::vector<int64_t> matching(8192, static_cast<int64_t>(keys[0]));
+    for (size_t batch = 0; batch < 6; ++batch) {
+        const auto result = Select(scan, matching);
+        EXPECT_EQ(result.Kept, matching.size());
+        EXPECT_FALSE(result.Hashes.empty());
+    }
+    for (size_t batch = 0; batch < 4; ++batch) {
+        const auto result = Select(scan, matching);
+        EXPECT_EQ(result.Kept, matching.size());
+        EXPECT_TRUE(result.Rows.empty());
+        EXPECT_TRUE(result.Hashes.empty());
+    }
+    EXPECT_FALSE(Select(scan, matching).Hashes.empty());
+    EXPECT_EQ(bloom->StatsSnapshot().PausedProbeRows, matching.size() * 4);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {

@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "schema": "<struct (k i32) (a <named Nullable [i8]>) (b i16) (c <named Nullable [i32]>) (w <named Nullable [i64]>) (x <named Nullable [f64]>) (flag <named Nullable [bool]>) (s <named Nullable [string]>) (t string)>",
+  "rows": [
+    ["1", "-91", "-11000", "100003", "10000000007", -1.75, null, "", "t1"],
+    ["2", "-54", "-10000", "200006", "20000000014", -1.5, true, "ab", "same"],
+    ["3", "-17", "-9000", "300009", null, -1.25, false, "long-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"],
+    ["4", "20", "-8000", null, "40000000028", -1.0, true, "s4", ""],
+    ["5", null, "-7000", "500015", "50000000035", -0.75, false, "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy", "t5"],
+    ["6", "94", "-6000", "600018", null, -0.5, true, null, "same"],
+    ["7", "-125", "-5000", "700021", "70000000049", null, null, "", "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"],
+    ["8", "-88", "-4000", null, "80000000056", 0.0, true, "ab", ""],
+    ["9", "-51", "-3000", "900027", null, 0.25, false, "long-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "t9"],
+    ["10", null, "-2000", "1000030", "100000000070", 0.5, true, "s10", "same"],
+    ["11", "23", "-1000", "1100033", "110000000077", 0.75, false, "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy", "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"],
+    ["12", "60", "0", null, null, 1.0, true, null, ""],
+    ["13", "97", "1000", "1300039", "130000000091", 1.25, null, "", "t13"],
+    ["14", "-122", "2000", "1400042", "140000000098", null, true, "ab", "same"],
+    ["15", null, "3000", "1500045", null, 1.75, false, "long-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"],
+    ["16", "-48", "4000", null, "160000000112", 2.0, true, "s16", ""],
+    ["16", "-11", "5000", "1700051", "170000000119", 2.25, false, "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy", "t17"],
+    ["18", "26", "6000", "1800054", null, 2.5, true, null, "same"],
+    ["19", "63", "7000", "1900057", "190000000133", 2.75, null, "", "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"],
+    ["20", null, "8000", null, "200000000140", 3.0, true, "ab", ""],
+    ["21", "-119", "9000", "2100063", null, null, false, "long-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "t21"],
+    ["22", "-82", "10000", "2200066", "220000000154", 3.5, true, "s22", "same"],
+    ["23", "-45", "11000", "2300069", "230000000161", 3.75, false, "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy", "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"],
+    ["24", "-8", "12000", null, null, 4.0, true, null, ""]
+  ]
+}

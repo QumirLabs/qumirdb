@@ -1,0 +1,17 @@
+{
+  "schema": "<struct (k i32) (a <named Nullable [i8]>) (b i16) (c <named Nullable [i32]>) (w <named Nullable [i64]>) (x <named Nullable [f64]>) (flag <named Nullable [bool]>) (s <named Nullable [string]>) (t string) (label string)>",
+  "rows": [
+    [7, -125, -5000, 700021, "70000000049", null, null, "", "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy", "label-7"],
+    [8, -88, -4000, null, "80000000056", 0, true, "ab", "", "label-8"],
+    [9, -51, -3000, 900027, null, 0.25, false, "long-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "t9", "label-9"],
+    [10, null, -2000, 1000030, "100000000070", 0.5, true, "s10", "same", "label-10"],
+    [11, 23, -1000, 1100033, "110000000077", 0.75, false, "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy", "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy", "label-11"],
+    [12, 60, 0, null, null, 1, true, null, "", "label-12"],
+    [14, -122, 2000, 1400042, "140000000098", null, true, "ab", "same", "label-14"],
+    [16, -48, 4000, null, "160000000112", 2, true, "s16", "", "label-16"],
+    [16, -11, 5000, 1700051, "170000000119", 2.25, false, "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy", "t17", "label-16"],
+    [18, 26, 6000, 1800054, null, 2.5, true, null, "same", "label-18"],
+    [19, 63, 7000, 1900057, "190000000133", 2.75, null, "", "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy", "label-19"],
+    [24, -8, 12000, null, null, 4, true, null, "", "label-24"]
+  ]
+}

@@ -1,0 +1,6 @@
+sort [k asc, b asc]
+└─ project (k, a, b, c, w, x, flag, s, t, label) (rows≈1 cost≈7.3K)
+   └─ join inner [d.k = f.k] emit-filter 1 from left (rows≈1 cost≈7.2K)
+      ├─ filter (== |d.keep| 1) (rows≈1 cost≈1.5K)
+      │  └─ source d AS d row-groups (== |d.keep| 1) (rows≈26 cost≈728)
+      └─ source f AS f use-filter 1 keys=[f.k] (rows≈24 cost≈1.4K)

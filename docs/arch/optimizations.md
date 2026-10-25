@@ -550,6 +550,16 @@ Group keys of string type are copied into a bump arena owned by the hash table
 instead of individually allocated, so building a table over many distinct string
 keys does not turn into a malloc storm. See [aggregation.md](aggregation.md).
 
+### 4.9 Runtime filters inside the scan
+
+A runtime join filter placed on a Parquet source is applied by the scan task
+while it reads. The scan decodes the probe keys, probes the filter, and only
+then materializes the other columns, for the kept rows alone. The batch leaves
+the scan with the same selection and hashes a separate filter task would
+attach. Parquet pages are still decompressed and decoded in full, so the gain
+is the copying of rejected rows, largest for strings and for very selective
+filters. See [scheduler_runtime.md](scheduler_runtime.md#border-for-a-distributed-scheduler).
+
 ## 5. Helpers that are not optimizations
 
 - `ConstFold` is a helper, not a pipeline pass. UNION ALL pushdown uses it
