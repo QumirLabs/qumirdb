@@ -261,8 +261,9 @@ EJoinBuildSide ChooseJoinBuildSide(const TJoinOperator& join) {
         || join.Keys().empty()) {
         return EJoinBuildSide::Auto;
     }
-    // The general outer path finds unmatched rows by key alone. Only the row
-    // marks of the streaming path know that a residual rejected a key match.
+    // The general outer path finds unmatched rows by key alone, and the row
+    // join table runs no residual. Only the row marks of a preserved build
+    // side know that a residual rejected a key match.
     if (outer && join.Filter()) {
         return type == EJoinType::Left
             ? EJoinBuildSide::Left : EJoinBuildSide::Right;
@@ -276,16 +277,20 @@ EJoinBuildSide ChooseJoinBuildSide(const TJoinOperator& join) {
     const double l = static_cast<double>(leftStats->RowCount);
     const double r = static_cast<double>(rightStats->RowCount);
     if (outer) {
-        // An outer join can stream only against its preserved side: the build
-        // rows that no stream row matched are known when the stream ends.
-        // Reading one input first makes the other wait, which the general path
-        // avoids by reading both at once. It pays for that by storing and
-        // hashing both inputs, so streaming is worth the wait when the input
-        // it frees is at least as large as the one it reads first.
+        // An outer join builds its smaller input and streams the other. A
+        // preserved build side marks the rows the stream matched and emits the
+        // unmarked ones when the stream ends; a null-supplying one pads each
+        // unmatched stream row at once. Either way the join stores and hashes
+        // one input, which beats the general path that reads both at once
+        // but stores both, so no asymmetry margin applies.
         if (type == EJoinType::Left) {
-            return l <= r ? EJoinBuildSide::Left : EJoinBuildSide::Auto;
+            return l <= r
+                ? EJoinBuildSide::Left
+                : EJoinBuildSide::Right;
         }
-        return r <= l ? EJoinBuildSide::Right : EJoinBuildSide::Auto;
+        return r <= l
+            ? EJoinBuildSide::Right
+            : EJoinBuildSide::Left;
     }
     if (r * JoinAsymmetryRatio <= l) {
         return EJoinBuildSide::Right;

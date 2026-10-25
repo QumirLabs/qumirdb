@@ -6,8 +6,9 @@ join modes.
 ## Overview
 
 QDB implements equi-joins with a JIT-compiled hash join. An inner join with a
-fixed build side uses the row join table, an arena of build rows behind a
-salted pointer table ([wiki](https://github.com/QumirLabs/qumirdb/wiki/Join-implementation#row-join-table));
+fixed build side, and a LEFT or RIGHT join that builds its null-supplying side,
+use the row join table, an arena of build rows behind a salted pointer table
+([wiki](https://github.com/QumirLabs/qumirdb/wiki/Join-implementation#row-join-table));
 the other forms use the symmetric hash join described here. The runtime
 owns row storage, hash table headers, pair buffers, and output materialization.
 Reusable Oz code implements the generic hash-table probe/insert logic, while
@@ -27,10 +28,10 @@ reaches EOF:
 
 This can avoid materializing the large side without a cardinality estimate.
 Lowering can also choose build-first execution: inner joins use it for strong
-asymmetry, while LEFT/RIGHT outer joins build their preserved side when it is
-estimated no larger than the other input. A runtime filter may also require
-completing its build input first. The build side finishes before the probe stream
-starts; poor estimates can still affect work and memory.
+asymmetry, while LEFT/RIGHT outer joins build whichever input is estimated
+smaller. A runtime filter may also require completing its build input first.
+The build side finishes before the probe stream starts; poor estimates can
+still affect work and memory.
 
 ## Supported join forms
 
@@ -41,18 +42,19 @@ Current production support:
 | `Inner` | Supported | Adaptive symmetric/probe-only hash join |
 | `LeftSemi` | Supported | Left-preserving, emits left columns only |
 | `LeftAnti` | Supported | Left-preserving, emits left columns only |
-| `Left` | Supported | Preserved-left build with matched marks; symmetric fallback |
-| `Right` | Supported | Preserved-right build with matched marks; symmetric fallback |
+| `Left` | Supported | Null-supplying build that pads unmatched stream rows, or preserved build with matched marks; symmetric fallback |
+| `Right` | Supported | Same as `Left`, with the sides swapped |
 | `Full` | Supported | Symmetric path plus unmatched scans on both sides; matched marks with a residual |
 | `RightSemi` / `RightAnti` | Not implemented in runtime | Logical enum exists, runtime guard rejects it |
 | `LeftMark` | Kernel only | Left rows plus a three-valued `IN` marker; not planned yet |
 | No equi-keys | Supported except `RightSemi` / `RightAnti` / `LeftMark` | Nested-loop `TCrossJoinProcessor` path |
 
 Residual predicates are supported for every join type above except `LeftMark`,
-which still rejects a residual. A `Left` or
-`Right` join with a residual always takes the streaming path with its preserved
-side as the build side. A build row is marked only after the residual accepted
-a pair, so a row whose key matches were all rejected is emitted as unmatched.
+which still rejects a residual. A `Left` or `Right` join with a residual always
+takes the streaming path with its preserved side as the build side, because the
+row join table evaluates no residual. A build row is marked only after the
+residual accepted a pair, so a row whose key matches were all rejected is
+emitted as unmatched.
 The general outer path finds unmatched rows by key alone and cannot run a
 residual, so a `Full` join with a residual marks the rows of both tables on its
 symmetric path (see [Full outer](#full-outer)).
@@ -139,17 +141,16 @@ When one side returns EOF:
 
 Completion requires EOF on both build and stream inputs.
 
-LEFT/RIGHT outer joins can build the preserved side to EOF and stream the
-other input. Without a residual, lowering chooses this path when the preserved
-side is estimated no larger than the other input, or when a runtime filter
-requires building it first. A residual always requires this build side.
+LEFT/RIGHT outer joins can build either input to EOF and stream the other.
+Without a residual or runtime filter, lowering builds the input with the
+smaller estimate, the preserved one on a tie. A residual or a runtime filter,
+which is published from the preserved side, requires the preserved build side.
 
-Build-first execution delays the other input, but retains and hashes only the
-preserved side. The symmetric outer path avoids that initial wait and retains
-both sides. Unlike inner execution, it cannot drop the remaining input after
-one side ends, so the outer build-side rule needs no large asymmetry margin.
-Unknown estimates or a larger preserved side keep the symmetric path unless a
-residual or runtime filter requires streaming. FULL keeps the symmetric path.
+Build-first execution delays the other input, but retains and hashes only one
+of them. The symmetric outer path avoids that initial wait and retains both
+sides. Unlike inner execution, it cannot drop the remaining input after one
+side ends, so the outer build-side rule needs no large asymmetry margin.
+Unknown estimates keep the symmetric path, and so does FULL.
 
 ## Execution by join type
 
@@ -187,8 +188,21 @@ The right side is not retained and is not inserted into `RightTable_`.
 
 ### Left / Right outer
 
-The streaming path retains and hashes the preserved side, then probes it with
-the other input. Each build row counts as matched only after a candidate pair
+A streaming LEFT or RIGHT join builds one input and probes it with the other.
+
+Building the null-supplying side is the usual hash outer join, as in DuckDB's
+`PhysicalHashJoin`: the row join table stores the null-supplying input, and
+each preserved stream row emits its matches, or one pair whose build row is
+absent when it has none. A NULL key matches nothing and takes the second way at
+once. The absent row materializes as NULLs in every build column. A stream
+row's output is complete when its probe returns, so this path needs no marks,
+keeps no preserved rows and has nothing left to emit at EOF. It is the only
+path whose memory does not grow with the preserved input, which in a
+fact-to-returns join such as `store_sales LEFT JOIN store_returns` is the
+large one.
+
+Building the preserved side retains and hashes it, then probes it with the
+other input. Each build row counts as matched only after a candidate pair
 passes the residual predicate. Marks are per row, so duplicates sharing a key
 can have different match outcomes. After the stream reaches EOF, the join emits
 every unmarked build row once with NULLs for the absent side, including NULL-key
@@ -197,7 +211,9 @@ batches before its storage is released.
 
 The symmetric fallback retains both inputs, emits matches while inserting rows,
 and finds unmatched preserved rows by checking the opposite table at EOF. It
-supports joins without a residual; a residual requires the streaming path.
+supports joins without a residual; a residual requires the streaming path. It
+also runs a null-supplying build side where the row join table is not
+available, as in the browser runtime.
 
 ### Full outer
 
@@ -312,7 +328,12 @@ The implementation relies on these invariants:
 ## Current limitations
 
 - Runtime kernels do not directly execute `RightSemi` / `RightAnti`.
-- LEFT/RIGHT streaming requires a preserved build side selected before execution;
-  outer joins do not switch adaptively when an input happens to end first.
+- LEFT/RIGHT streaming requires a build side selected before execution; outer
+  joins do not switch adaptively when an input happens to end first.
+- A LEFT/RIGHT join with a residual cannot build its null-supplying side: the
+  row join table evaluates no residual, so such a join stores its preserved
+  input.
+- FULL joins always run symmetric and store both inputs; building one side with
+  matched marks and streaming the other is not implemented.
 - Intermediate rowsets remain explicit between operators; compiling kernels in
   one module does not imply cross-operator row-loop fusion.

@@ -1165,12 +1165,18 @@ private:
         return result;
     }
 
-    // The row join table (kernel/join/join_rows.oz) serves inner equi-joins
-    // whose build side lowering fixed; a residual, an outer/semi/anti type or
-    // an adaptive build side keep the symmetric Robin Hood join.
+    // The row join table (kernel/join/join_rows.oz) serves the equi-joins
+    // whose build side lowering fixed: inner joins, and LEFT / RIGHT joins
+    // that build their null-supplying side. A residual, a preserved build side
+    // (it needs matched marks), another join type or an adaptive build side
+    // keep the Robin Hood join.
     bool UsesRowJoinTable(const TJoinOperator& join, EJoinBuildSide buildSide) const {
+        const auto type = join.JoinType();
+        const bool rowTableType = type == EJoinType::Inner
+            || (type == EJoinType::Left && buildSide == EJoinBuildSide::Right)
+            || (type == EJoinType::Right && buildSide == EJoinBuildSide::Left);
         return Settings_.Join.Table == NScheduler::EJoinTableKind::Row
-            && join.JoinType() == EJoinType::Inner
+            && rowTableType
             && !join.Filter()
             && !join.Keys().empty()
             && buildSide != EJoinBuildSide::Auto;

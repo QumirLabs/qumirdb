@@ -1,0 +1,5 @@
+sort [sname asc, sk asc, rname asc]
+└─ project (sk, sname, sq, rk, rname, rq) (rows≈16 cost≈7K)
+   └─ join left [s.sk = r.rk] residual (< |s.sq| |r.rq|) (rows≈16 cost≈6K)
+      ├─ source s AS s (rows≈16 cost≈512)
+      └─ source r AS r (rows≈6 cost≈192)

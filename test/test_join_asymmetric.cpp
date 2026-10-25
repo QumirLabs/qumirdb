@@ -4,6 +4,7 @@
 
 #include <qdb/exec/join_exec.h>
 #include <qdb/exec/planner_helpers.h>
+#include <qdb/exec/row_join_exec.h>
 #include <qdb/io/io.h>
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/filter.h>
@@ -980,10 +981,10 @@ TEST(ChooseJoinBuildSide, PicksSmallerSideWhenRatioMet) {
     EXPECT_EQ(ChooseJoinBuildSide(*j), EJoinBuildSide::Left);
 }
 
-// An outer join streams only against its preserved side. The general path
-// stores both inputs, so the preserved side needs no size margin to be built
-// first; it only must not be the larger one.
-TEST(ChooseJoinBuildSide, OuterBuildsThePreservedSideWhenItIsNotLarger) {
+// An outer join builds its smaller input: the preserved one with matched
+// marks, or the null-supplying one that pads unmatched stream rows. The general
+// path stores both inputs, so neither side needs a size margin.
+TEST(ChooseJoinBuildSide, OuterBuildsTheSmallerSide) {
     for (auto type : {EJoinType::Left, EJoinType::Right}) {
         SCOPED_TRACE(JoinTypeName(type));
         auto join = JoinOfType(type);
@@ -994,14 +995,16 @@ TEST(ChooseJoinBuildSide, OuterBuildsThePreservedSideWhenItIsNotLarger) {
         const auto& other = isLeft ? j->Right() : j->Left();
         const auto preservedSide =
             isLeft ? EJoinBuildSide::Left : EJoinBuildSide::Right;
+        const auto otherSide =
+            isLeft ? EJoinBuildSide::Right : EJoinBuildSide::Left;
 
         preserved->Stats_ = Rows(1000);
         other->Stats_ = Rows(1000);
         EXPECT_EQ(ChooseJoinBuildSide(*j), preservedSide);
 
         other->Stats_ = Rows(999);
-        EXPECT_EQ(ChooseJoinBuildSide(*j), EJoinBuildSide::Auto)
-            << "the other side is smaller but cannot be the build side";
+        EXPECT_EQ(ChooseJoinBuildSide(*j), otherSide)
+            << "the null-supplying side is smaller";
 
         other->Stats_ = nullptr;
         EXPECT_EQ(ChooseJoinBuildSide(*j), EJoinBuildSide::Auto);
@@ -1015,8 +1018,9 @@ TEST(ChooseJoinBuildSide, OuterBuildsThePreservedSideWhenItIsNotLarger) {
     EXPECT_EQ(ChooseJoinBuildSide(*f), EJoinBuildSide::Auto);
 }
 
-// The general path finds unmatched rows by key alone, so a residual predicate
-// needs the streaming path whatever the sizes are.
+// The general path finds unmatched rows by key alone and the row join table
+// runs no residual, so a residual predicate needs the preserved build side
+// whatever the sizes are.
 TEST(ChooseJoinBuildSide, OuterWithResidualBuildsThePreservedSide) {
     for (auto type : {EJoinType::Left, EJoinType::Right}) {
         SCOPED_TRACE(JoinTypeName(type));
@@ -1026,7 +1030,8 @@ TEST(ChooseJoinBuildSide, OuterWithResidualBuildsThePreservedSide) {
         const bool isLeft = type == EJoinType::Left;
         (isLeft ? j->Left() : j->Right())->Stats_ = Rows(1000);
         (isLeft ? j->Right() : j->Left())->Stats_ = Rows(10);
-        ASSERT_EQ(ChooseJoinBuildSide(*j), EJoinBuildSide::Auto);
+        ASSERT_EQ(ChooseJoinBuildSide(*j),
+            isLeft ? EJoinBuildSide::Right : EJoinBuildSide::Left);
 
         j->MutableFilter() = std::make_shared<TBinaryExpr>(
             NQumir::TLocation{}, "<"_op,
@@ -1050,7 +1055,7 @@ TEST(ChooseJoinBuildSide, OuterWithRuntimeFilterBuildsItsProducerSide) {
     auto* j = static_cast<TJoinOperator*>(join.get());
     j->Left()->Stats_ = Rows(1000);
     j->Right()->Stats_ = Rows(10);
-    ASSERT_EQ(ChooseJoinBuildSide(*j), EJoinBuildSide::Auto);
+    ASSERT_EQ(ChooseJoinBuildSide(*j), EJoinBuildSide::Right);
 
     j->MutableRuntimeFilter() = TRuntimeFilterSpec{
         .Id = 7, .BuildSide = EJoinFilterSide::Left};
@@ -1221,7 +1226,43 @@ protected:
         return Run(type, buildSide, left, right);
     }
 
-    // The streaming path must agree with the general (keep both sides) path.
+    // Runs the join on the row join table, which builds the null-supplying
+    // side and streams the preserved one.
+    std::vector<TOuterRow> RunRowTable(
+        EJoinType type, const TSideRows& leftRows, const TSideRows& rightRows)
+    {
+        auto spec = NKernel::BuildJoinKernelSpec(
+            static_cast<TStructType&>(*LeftType_),
+            static_cast<TStructType&>(*RightType_),
+            {{"lk", "rk", false}}, type);
+        const auto buildSide = type == EJoinType::Left
+            ? EJoinBuildSide::Right
+            : EJoinBuildSide::Left;
+        TRowJoinProcessor processor(
+            Compiler_.CompileRowJoin(spec, buildSide == EJoinBuildSide::Left), buildSide);
+        TSideInput left(leftRows);
+        TSideInput right(rightRows);
+        auto& probe = buildSide == EJoinBuildSide::Left ? right : left;
+        auto fetchLeft = [&](TRowSet& rowSet) { return left.Fetch(rowSet); };
+        auto fetchRight = [&](TRowSet& rowSet) { return right.Fetch(rowSet); };
+        std::vector<TOuterRow> rows;
+        TRowSet out{};
+        for (;;) {
+            auto result = processor.Process(fetchLeft, fetchRight, out);
+            EXPECT_EQ(probe.Released(), probe.Fetched())
+                << "a preserved batch outlived its probe call";
+            if (result == EJoinProcessorResult::FINISHED) {
+                break;
+            }
+            if (result == EJoinProcessorResult::OK) {
+                AppendRows(out, rows);
+                Release(&out);
+            }
+        }
+        return Sorted(std::move(rows));
+    }
+
+    // The streaming paths must agree with the general (keep both sides) path.
     void ExpectStreamingMatchesGeneral(
         const TSideRows& left, const TSideRows& right)
     {
@@ -1236,6 +1277,8 @@ protected:
                   leftJoin);
         EXPECT_EQ(Run(EJoinType::Right, EJoinBuildSide::Right, left, right),
                   rightJoin);
+        EXPECT_EQ(RunRowTable(EJoinType::Left, left, right), leftJoin);
+        EXPECT_EQ(RunRowTable(EJoinType::Right, left, right), rightJoin);
     }
 
     static size_t RowCount(const TSideRows& batches) {
@@ -1258,7 +1301,7 @@ protected:
 } // namespace
 
 // The SQL-level results are fixed by the outer_join regression suite. This runs
-// the same inputs through both implementations of the processor.
+// the same inputs through every implementation of the outer join.
 TEST_F(OuterStreamJoin, MatchesGeneralPathOnTheSameInputs) {
     const TSideRows duplicates = {
         {{1, 10}, {1, 11}, {2, 20}}, {{3, 40}, {1, 12}}};
@@ -1371,7 +1414,7 @@ TEST_F(OuterStreamJoin, EmitsUnmatchedRowsInBatchesFromLiveBuildRows) {
     EXPECT_EQ(unmatchedKeys, expectedUnmatched);
 }
 
-// Only the preserved side can be the build side of a streaming outer join; any
+// This processor streams an outer join only against its preserved side; any
 // other request runs the general path and still returns the right rows.
 TEST_F(OuterStreamJoin, NonPreservedBuildSideFallsBackToGeneralPath) {
     const TSideRows left = {{{1, 10}, {2, 20}}};

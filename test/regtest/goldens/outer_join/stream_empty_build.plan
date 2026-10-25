@@ -1,0 +1,6 @@
+sort [sname asc, sk asc, rname asc]
+└─ project (sk, sname, rk, rname) (rows≈16 cost≈6.7K)
+   └─ join left [s.sk = r.rk] (rows≈16 cost≈5.9K)
+      ├─ source s AS s (rows≈16 cost≈384)
+      └─ filter (== |r.rq| 3) (rows≈3 cost≈384)
+         └─ source r AS r row-groups (== |r.rq| 3) (rows≈6 cost≈192)

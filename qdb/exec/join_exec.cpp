@@ -19,8 +19,9 @@ constexpr int64_t CrossJoinOp(ECrossJoinKernelOp op) {
     return static_cast<int64_t>(op);
 }
 
-// An outer join may drop its stream side only when the build side is the
-// preserved one: the matched marks of the build then give the unmatched rows.
+// This processor streams an outer join only against its preserved side, whose
+// matched marks give the unmatched rows. A null-supplying build side, which
+// the row join table serves, falls back to the symmetric path here.
 EJoinBuildSide StreamableBuildSide(EJoinType type, EJoinBuildSide buildSide) {
     switch (type) {
         case EJoinType::Left:
