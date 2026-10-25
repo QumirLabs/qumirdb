@@ -310,188 +310,413 @@
   ;; Supplement, Latin Extended-A, Latin Extended Additional, the Greek alphabet
   ;; U+0386-U+03CE, Cyrillic and Cyrillic Supplement. Every other character is
   ;; kept: Latin Extended-B, the rest of Greek and Coptic, Greek Extended,
-  ;; Armenian, Georgian, fullwidth Latin and others. ExpandNullable passes the
-  ;; kernel's scratch arena as for `||`.
+  ;; Armenian, Georgian, fullwidth Latin and others. DuckDB maps some of them
+  ;; (Latin Extended-B, IPA, U+0345, Greek U+0370-U+0385 and U+03CF-U+03FF,
+  ;; Armenian), so there the results differ. ExpandNullable passes the kernel's
+  ;; scratch arena as for `||`.
   (fun qdb_string_upper ((var arena <ptr i8>) (var str StringView)) -> StringView
     (block (return (call qdb_string_case arena str #t))))
 
   (fun qdb_string_lower ((var arena <ptr i8>) (var str StringView)) -> StringView
     (block (return (call qdb_string_case arena str #f))))
 
+  ;; A mapped character keeps its UTF-8 length but for U+00DF sharp s, which
+  ;; grows from two bytes to three in upper case, and U+0130, U+0131, U+017F
+  ;; and U+1E9E, which shrink. So one pass writes the result into as many bytes
+  ;; as the input has; only an upper-cased string with a sharp s is mapped
+  ;; again, into a byte more for each of them.
   (fun qdb_string_case ((var arena <ptr i8>) (var str StringView) (var to_upper bool)) -> StringView
+    (attrs cacheable)
     (block
-      (var size = (call qdb_string_case_pass str to_upper (cast 0 <ptr u8>)))
-      (if (== size 0) (block (return str)))
-      (var out = (call qdb_string_arena_alloc arena size))
-      (return (call qdb_sv_from_ptr out (call qdb_string_case_pass str to_upper out)))))
+      (var n = (field str Size))
+      (if (== n 0) (block (return str)))
+      (var out = (call qdb_string_arena_alloc arena n))
+      (var size = (call qdb_string_case_into str to_upper out #f))
+      (if (< size 0)
+        (block
+          (= out (call qdb_string_arena_alloc arena (+ n (call qdb_count_sharp_s str))))
+          (= size (call qdb_string_case_into str to_upper out #t))))
+      (return (cast (struct ((Data out) (Size size))) StringView))))
 
-  ;; Returns the UTF-8 size of str with its case mapped and, unless out is null,
-  ;; writes those bytes to out. Mapped characters take at most three bytes, so
-  ;; four-byte characters and bytes that are not UTF-8 are copied unchanged.
-  (fun qdb_string_case_pass ((var str StringView) (var to_upper bool) (var out <ptr u8>)) -> i64
+  ;; C3 is never a continuation byte, so every C3 9F is a U+00DF sharp s.
+  (fun qdb_count_sharp_s ((var str StringView)) -> i64
+    (attrs cacheable)
+    (block
+      (var data = (field str Data))
+      (var count = 0)
+      (var i = 1)
+      (while (< i (field str Size))
+        (block
+          (if (&& (== (index data i) (: 159 u8)) (== (index data (- i 1)) (: 195 u8)))
+            (block (= count (+ count 1))))
+          (= i (+ i 1))))
+      (return count)))
+
+  ;; Writes str with its case mapped to out and returns the size written. out
+  ;; holds as many bytes as str and, if grow is set, one more for each sharp s;
+  ;; without grow a sharp s to upper-case returns -1.
+  (fun qdb_string_case_into
+       ((var str StringView) (var to_upper bool) (var out <ptr u8>) (var grow bool)) -> i64
+    (attrs cacheable)
     (block
       (var data = (field str Data))
       (var n = (field str Size))
-      (var write = (!= (cast out i64) 0))
+      (var src = (cast data i64))
+      (var dst = (cast out i64))
+      ;; The ASCII letters that change: a-z to upper case, A-Z to lower case.
+      (var first = (: 65 u8))
+      (if to_upper (block (= first (: 97 u8))))
       (var i = 0)
-      (var size = 0)
+      (var o = 0)
+      ;; A string shorter than a block of 16 bytes that is ASCII is covered by
+      ;; two overlapping blocks of 8 or 4 bytes.
+      (if (&& (>= n 8) (< n 16))
+        (block
+          (if (call qdb_case_ascii_block (cast src <ptr <vec u8 8>>) (cast dst <ptr <vec u8 8>>) first)
+            (block
+              (if (call qdb_case_ascii_block (cast (- (+ src n) 8) <ptr <vec u8 8>>)
+                    (cast (- (+ dst n) 8) <ptr <vec u8 8>>) first)
+                (block (return n)))
+              (= i 8)
+              (= o 8)))))
+      (if (&& (>= n 4) (< n 8))
+        (block
+          (if (call qdb_case_ascii_block (cast src <ptr <vec u8 4>>) (cast dst <ptr <vec u8 4>>) first)
+            (block
+              (if (call qdb_case_ascii_block (cast (- (+ src n) 4) <ptr <vec u8 4>>)
+                    (cast (- (+ dst n) 4) <ptr <vec u8 4>>) first)
+                (block (return n)))
+              (= i 4)
+              (= o 4)))))
       (while (< i n)
         (block
-          (var c = (cast (index data i) i64))
-          (var length = (call qdb_utf8_length data n i))
-          (if (== length 2)
-            (block (= c (| (<< (& c 31) 6) (& (cast (index data (+ i 1)) i64) 63)))))
-          (if (== length 3)
+          (var end = n)
+          (if (<= (+ i 16) n)
             (block
-              (= c (| (| (<< (& c 15) 12) (<< (& (cast (index data (+ i 1)) i64) 63) 6))
-                      (& (cast (index data (+ i 2)) i64) 63)))))
-          (if (&& (>= c 128) (== length 1))
+              (var block_src = (cast (+ src i) <ptr <vec u8 16>>))
+              (var block_dst = (cast (+ dst o) <ptr <vec u8 16>>))
+              (var done = 16)
+              (if (! (call qdb_case_ascii_block block_src block_dst first))
+                (block (= done (call qdb_case_utf8_block block_src block_dst to_upper 0))))
+              (if (> done 0)
+                (block
+                  (= i (+ i done))
+                  (= o (+ o done))
+                  continue))
+              (= end (+ i 16)))
             (block
-              (if write (block (= out [size] (cast c u8))))
-              (= size (+ size 1)))
+              ;; The last block ends at n and so starts back bytes before i and
+              ;; o. When it is ASCII, those bytes were written one to one, o - i
+              ;; bytes away, and mapping them again writes the same bytes;
+              ;; otherwise the block keeps them.
+              (var back = (- (+ i 16) n))
+              (if (&& (>= i back) (>= o back))
+                (block
+                  (var block_src = (cast (- (+ src i) back) <ptr <vec u8 16>>))
+                  (var block_dst = (cast (- (+ dst o) back) <ptr <vec u8 16>>))
+                  (if (|| (call qdb_case_ascii_block block_src block_dst first)
+                          (> (call qdb_case_utf8_block block_src block_dst to_upper back) 0))
+                    (block (return (+ o (- n i)))))))))
+          ;; One character at a time up to end; the last one may cross it.
+          (while (< i end)
             (block
-              (var mapped = c)
-              (if to_upper
-                (block (= mapped (call qdb_upper_code_point c)))
-                (block (= mapped (call qdb_lower_code_point c))))
-              (= size (+ size (call qdb_utf8_put out write size mapped)))))
-          (= i (+ i length))))
-      (return size)))
+              (var byte = (index data i))
+              (if (< byte (: 128 u8))
+                (block
+                  (if (< (- byte first) (: 26 u8)) (block (= byte (^ byte (: 32 u8)))))
+                  (= out [o] byte)
+                  (= i (+ i 1))
+                  (= o (+ o 1))
+                  continue))
+              (var c = (cast byte i64))
+              (var length = (call qdb_case_utf8_length data n i))
+              (if (== length 1)
+                (block
+                  (= out [o] (cast c u8))
+                  (= i (+ i 1))
+                  (= o (+ o 1))
+                  continue))
+              (if (== length 2)
+                (block (= c (| (<< (& c 31) 6) (& (cast (index data (+ i 1)) i64) 63)))))
+              (if (== length 3)
+                (block
+                  (= c (| (| (<< (& c 15) 12) (<< (& (cast (index data (+ i 1)) i64) 63) 6))
+                          (& (cast (index data (+ i 2)) i64) 63)))))
+              (var mapped = (call qdb_case_code_point c to_upper))
+              ;; Of the two-byte characters only the sharp s maps to three bytes.
+              (if (&& (> mapped 2047) (&& (== length 2) (! grow))) (block (return -1)))
+              (= o (+ o (call qdb_utf8_put out o mapped)))
+              (= i (+ i length))))))
+      (return o)))
 
-  ;; Byte length of the character at data[i] when it is a well-formed two- or
-  ;; three-byte UTF-8 sequence, else 1.
-  (fun qdb_utf8_length ((var data <ptr u8>) (var n i64) (var i i64)) -> i64
+  ;; Maps a block of N bytes from src to dst if they are all ASCII; otherwise
+  ;; returns false and writes nothing. first is the first letter that changes.
+  (fun qdb_case_ascii_block [(const N i64)]
+       ((var src <ptr <vec u8 N>>) (var dst <ptr <vec u8 N>>) (var first u8)) -> bool
     (attrs inline)
     (block
+      (var bytes = (index src 0))
+      (if (call builtin::any (>= bytes (: 128 u8))) (block (return #f)))
+      (= dst [0] (call builtin::select (< (- bytes first) (: 26 u8)) (^ bytes (: 32 u8)) bytes))
+      (return #t)))
+
+  ;; Byte length of the character at data[i] if case mapping may change it: a
+  ;; two-byte character with the lead C2-C5 or CE-D4, a three-byte one from
+  ;; U+1E00-U+1EFF. Every other byte, a byte of a character that keeps its
+  ;; case or one that is not UTF-8, is copied alone: the length is 1.
+  (fun qdb_case_utf8_length ((var data <ptr u8>) (var n i64) (var i i64)) -> i64
+    (attrs cacheable inline)
+    (block
       (var lead = (cast (index data i) i64))
-      (if (&& (call qdb_case_in lead 194 223) (call qdb_utf8_tail data n (+ i 1)))
+      (if (&& (|| (call qdb_case_in lead 194 197) (call qdb_case_in lead 206 212))
+              (call qdb_utf8_tail data n (+ i 1)))
         (block (return 2)))
-      (if (&& (call qdb_case_in lead 224 239)
-              (&& (call qdb_utf8_tail data n (+ i 1)) (call qdb_utf8_tail data n (+ i 2))))
-        (block
-          ;; After the lead byte E0 a second byte below A0 is an overlong encoding.
-          (if (|| (!= lead 224) (>= (cast (index data (+ i 1)) i64) 160))
-            (block (return 3)))))
+      (if (&& (== lead 225)
+              (&& (call qdb_utf8_tail data n (+ i 2))
+                  (call qdb_case_in (cast (index data (+ i 1)) i64) 184 187)))
+        (block (return 3)))
       (return 1)))
 
+  (fun qdb_case_in ((var c i64) (var lo i64) (var hi i64)) -> bool
+    (attrs cacheable inline)
+    (block (return (&& (>= c lo) (<= c hi)))))
+
   (fun qdb_utf8_tail ((var data <ptr u8>) (var n i64) (var at i64)) -> bool
-    (attrs inline)
+    (attrs cacheable inline)
     (block (return (&& (< at n) (== (& (cast (index data at) i64) 192) 128)))))
 
-  ;; Writes the code point c, below U+10000, as UTF-8 at out[at] if write is set;
-  ;; returns its byte length.
-  (fun qdb_utf8_put ((var out <ptr u8>) (var write bool) (var at i64) (var c i64)) -> i64
-    (attrs inline)
+  ;; Writes the code point c, below U+10000, as UTF-8 at out[at]; returns its
+  ;; byte length.
+  (fun qdb_utf8_put ((var out <ptr u8>) (var at i64) (var c i64)) -> i64
+    (attrs cacheable inline)
     (block
       (if (< c 128)
         (block
-          (if write (block (= out [at] (cast c u8))))
+          (= out [at] (cast c u8))
           (return 1)))
       (if (< c 2048)
         (block
-          (if write
-            (block
-              (= out [at] (cast (| 192 (>> c 6)) u8))
-              (= out [(+ at 1)] (cast (| 128 (& c 63)) u8))))
+          (= out [at] (cast (| 192 (>> c 6)) u8))
+          (= out [(+ at 1)] (cast (| 128 (& c 63)) u8))
           (return 2)))
-      (if write
-        (block
-          (= out [at] (cast (| 224 (>> c 12)) u8))
-          (= out [(+ at 1)] (cast (| 128 (& (>> c 6) 63)) u8))
-          (= out [(+ at 2)] (cast (| 128 (& c 63)) u8))))
+      (= out [at] (cast (| 224 (>> c 12)) u8))
+      (= out [(+ at 1)] (cast (| 128 (& (>> c 6) 63)) u8))
+      (= out [(+ at 2)] (cast (| 128 (& c 63)) u8))
       (return 3)))
 
-  (fun qdb_case_in ((var c i64) (var lo i64) (var hi i64)) -> bool
-    (attrs inline)
-    (block (return (&& (>= c lo) (<= c hi)))))
-
-  ;; Case mapping in a run of upper/lower case pairs whose first letter, at lo, is
-  ;; upper case: c is upper case at an even distance from lo.
-  (fun qdb_case_pair ((var c i64) (var lo i64) (var to_upper bool)) -> i64
-    (attrs inline)
+  ;; Case mapping of one code point below U+10000 by the tables for a block.
+  (fun qdb_case_code_point ((var c i64) (var to_upper bool)) -> i64
+    (attrs cacheable)
     (block
-      (var is_upper = (== (& (- c lo) 1) 0))
-      (if (&& to_upper (! is_upper)) (block (return (- c 1))))
-      (if (&& (! to_upper) is_upper) (block (return (+ c 1))))
-      (return c)))
+      (var lanes = (+ (: (vec 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0) <vec u16 16>) (cast c u16)))
+      (if to_upper (block (return (cast (index (call qdb_upper_code_points lanes) 0) i64))))
+      (return (cast (index (call qdb_lower_code_points lanes) 0) i64))))
 
-  (fun qdb_upper_code_point ((var c i64)) -> i64
+  ;; Maps a block of 16 bytes of ASCII and two-byte characters from src to dst,
+  ;; keeping the first keep bytes of dst. Returns how many bytes it mapped: 16,
+  ;; or 15 when the last byte is a lead byte. Returns 0 and writes nothing if a
+  ;; character of the block changes its UTF-8 length or the block has the lead
+  ;; byte E1 of U+1000-U+1FFF, which holds Latin Extended Additional.
+  (fun qdb_case_utf8_block
+       ((var src <ptr <vec u8 16>>) (var dst <ptr <vec u8 16>>) (var to_upper bool) (var keep i64)) -> i64
+    (attrs cacheable)
     (block
-      (if (< c 128)
+      (var bytes = (index src 0))
+      (if (call builtin::any (== bytes (: 225 u8))) (block (return 0)))
+      ;; The neighbours of each byte. The first byte has no previous one in the
+      ;; block and the last byte no next one: they see themselves instead, which
+      ;; never pairs a lead byte with a continuation byte.
+      (var prev = (call builtin::shuffle bytes (vec 0 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14)))
+      (var next = (call builtin::shuffle bytes (vec 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 15)))
+      ;; lead marks the first byte of a two-byte character, tail its second.
+      (var lead = (&& (call qdb_utf8_lead2 bytes) (call qdb_utf8_cont next)))
+      (var tail = (&& (call qdb_utf8_cont bytes) (call qdb_utf8_lead2 prev)))
+      (var wide = (cast bytes <vec u16 16>))
+      ;; The code point of each character at its first byte; zero, which no
+      ;; rule changes, at the other bytes.
+      (var ascii = (< bytes (: 128 u8)))
+      (var code = (call builtin::select lead
+                    (| (<< (& wide 31) 6) (& (cast next <vec u16 16>) 63))
+                    (call builtin::select ascii wide
+                      (: (vec 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0) <vec u16 16>))))
+      (var mapped = code)
+      (if to_upper
+        (block (= mapped (call qdb_upper_code_points code)))
+        (block (= mapped (call qdb_lower_code_points code))))
+      (if (call builtin::any (&& lead (|| (< mapped 128) (> mapped 2047))))
+        (block (return 0)))
+      ;; Other bytes, a continuation without its lead or a byte of a longer
+      ;; character, stay as they are.
+      (var result = (call builtin::select ascii (cast mapped <vec u8 16>) bytes))
+      (= result (call builtin::select lead (cast (| (>> mapped 6) 192) <vec u8 16>) result))
+      (var second = (cast (| (& mapped 63) 128) <vec u8 16>))
+      (= result (call builtin::select tail
+                  (call builtin::shuffle second (vec 0 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14)) result))
+      (if (> keep 0)
         (block
-          (if (call qdb_case_in c 97 122) (block (return (- c 32))))
-          (return c)))
-      ;; Latin-1 Supplement U+0080-U+00FF: U+00B5 micro sign, U+00DF sharp s (to
-      ;; U+1E9E, as DuckDB), U+00FF y with diaeresis, the rest but U+00F7 division sign.
-      (if (== c 181) (block (return 924)))
-      (if (== c 223) (block (return 7838)))
-      (if (== c 255) (block (return 376)))
-      (if (&& (call qdb_case_in c 224 254) (!= c 247)) (block (return (- c 32))))
-      ;; Latin Extended-A U+0100-U+017F: U+0131 dotless i, U+017F long s, case pairs.
-      (if (== c 305) (block (return 73)))
-      (if (== c 383) (block (return 83)))
-      (if (call qdb_case_in c 256 311) (block (return (call qdb_case_pair c 256 #t))))
-      (if (call qdb_case_in c 313 328) (block (return (call qdb_case_pair c 313 #t))))
-      (if (call qdb_case_in c 330 375) (block (return (call qdb_case_pair c 330 #t))))
-      (if (call qdb_case_in c 377 382) (block (return (call qdb_case_pair c 377 #t))))
-      ;; Latin Extended Additional U+1E00-U+1EFF: U+1E9B long s with dot above, case pairs.
-      (if (== c 7835) (block (return 7776)))
-      (if (call qdb_case_in c 7680 7829) (block (return (call qdb_case_pair c 7680 #t))))
-      (if (call qdb_case_in c 7840 7935) (block (return (call qdb_case_pair c 7840 #t))))
+          (var lane = (: (vec 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15) <vec u8 16>))
+          (= result (call builtin::select (< lane (cast keep u8)) (index dst 0) result))))
+      (= dst [0] result)
+      (if (>= (index bytes 15) (: 192 u8)) (block (return 15)))
+      (return 16)))
+
+  ;; Lead bytes C2-DF of two-byte characters.
+  (fun qdb_utf8_lead2 ((var bytes <vec u8 16>)) -> <vec bool 16>
+    (attrs cacheable inline)
+    (block (return (< (- bytes (: 194 u8)) (: 30 u8)))))
+
+  ;; Continuation bytes 80-BF.
+  (fun qdb_utf8_cont ((var bytes <vec u8 16>)) -> <vec bool 16>
+    (attrs cacheable inline)
+    (block (return (== (& bytes (: 192 u8)) (: 128 u8)))))
+
+  ;; The rules of the case mapping tables below. Each takes the result so far
+  ;; and the code points c of a block, and replaces the result where the rule
+  ;; applies: here with c + delta for c from lo to hi.
+  (fun qdb_case_shift
+       ((var result <vec u16 16>) (var c <vec u16 16>) (var lo i64) (var hi i64) (var delta i64))
+       -> <vec u16 16>
+    (attrs cacheable inline)
+    (block
+      (return (call builtin::select (&& (>= c (cast lo u16)) (<= c (cast hi u16)))
+                (+ c (cast delta u16)) result))))
+
+  ;; to for the code point from.
+  (fun qdb_case_set
+       ((var result <vec u16 16>) (var c <vec u16 16>) (var from i64) (var to i64)) -> <vec u16 16>
+    (attrs cacheable inline)
+    (block (return (call builtin::select (== c (cast from u16)) (+ c (cast (- to from) u16)) result))))
+
+  ;; A run of case pairs from lo to hi starts with an upper case letter, and
+  ;; each lower case letter follows its upper case one: the lower case letters
+  ;; are at an odd distance from lo.
+  (fun qdb_case_pairs_upper
+       ((var result <vec u16 16>) (var c <vec u16 16>) (var lo i64) (var hi i64)) -> <vec u16 16>
+    (attrs cacheable inline)
+    (block
+      (return (call builtin::select
+                (&& (&& (>= c (cast lo u16)) (<= c (cast hi u16)))
+                    (== (& (- c (cast lo u16)) (: 1 u16)) (: 1 u16)))
+                (- c (: 1 u16)) result))))
+
+  (fun qdb_case_pairs_lower
+       ((var result <vec u16 16>) (var c <vec u16 16>) (var lo i64) (var hi i64)) -> <vec u16 16>
+    (attrs cacheable inline)
+    (block
+      (return (call builtin::select
+                (&& (&& (>= c (cast lo u16)) (<= c (cast hi u16)))
+                    (== (& (- c (cast lo u16)) (: 1 u16)) (: 0 u16)))
+                (+ c (: 1 u16)) result))))
+
+  ;; Whether a code point of c is from lo to hi.
+  (fun qdb_case_any_in ((var c <vec u16 16>) (var lo i64) (var hi i64)) -> bool
+    (attrs cacheable inline)
+    (block (return (call builtin::any (&& (>= c (cast lo u16)) (<= c (cast hi u16)))))))
+
+  ;; Case mapping of the code points of a block. Each rule replaces the result
+  ;; for the code points it covers; a later rule overrides an earlier one. The
+  ;; rules are grouped by alphabet, and a group is skipped unless a code point
+  ;; of the block is in its range.
+  (fun qdb_upper_code_points ((var c <vec u16 16>)) -> <vec u16 16>
+    (attrs cacheable)
+    (block
+      (var r = (call qdb_case_shift c c 97 122 -32))
+      ;; Latin-1 Supplement: all but U+00F7 division sign, U+00B5 micro sign,
+      ;; U+00DF sharp s (to U+1E9E, as DuckDB), U+00FF y with diaeresis.
+      (if (call qdb_case_any_in c 181 255)
+        (block
+          (= r (call qdb_case_shift r c 224 254 -32))
+          (= r (call qdb_case_set r c 247 247))
+          (= r (call qdb_case_set r c 181 924))
+          (= r (call qdb_case_set r c 223 7838))
+          (= r (call qdb_case_set r c 255 376))))
+      ;; Latin Extended-A U+0100-U+017F: case pairs, U+0131 dotless i, U+017F long s.
+      (if (call qdb_case_any_in c 256 383)
+        (block
+          (= r (call qdb_case_pairs_upper r c 256 311))
+          (= r (call qdb_case_pairs_upper r c 313 328))
+          (= r (call qdb_case_pairs_upper r c 330 375))
+          (= r (call qdb_case_pairs_upper r c 377 382))
+          (= r (call qdb_case_set r c 305 73))
+          (= r (call qdb_case_set r c 383 83))))
       ;; Greek alphabet U+0386-U+03CE, with tonos and U+03C2 final sigma.
-      (if (== c 940) (block (return 902)))
-      (if (call qdb_case_in c 941 943) (block (return (- c 37))))
-      (if (== c 962) (block (return 931)))
-      (if (|| (call qdb_case_in c 945 961) (call qdb_case_in c 963 971))
-        (block (return (- c 32))))
-      (if (== c 972) (block (return 908)))
-      (if (call qdb_case_in c 973 974) (block (return (- c 63))))
-      ;; Cyrillic and Cyrillic Supplement U+0400-U+052F: U+04CF palochka, case pairs.
-      (if (call qdb_case_in c 1072 1103) (block (return (- c 32))))
-      (if (call qdb_case_in c 1104 1119) (block (return (- c 80))))
-      (if (== c 1231) (block (return 1216)))
-      (if (call qdb_case_in c 1120 1153) (block (return (call qdb_case_pair c 1120 #t))))
-      (if (call qdb_case_in c 1162 1215) (block (return (call qdb_case_pair c 1162 #t))))
-      (if (call qdb_case_in c 1217 1230) (block (return (call qdb_case_pair c 1217 #t))))
-      (if (call qdb_case_in c 1232 1327) (block (return (call qdb_case_pair c 1232 #t))))
-      (return c)))
-
-  (fun qdb_lower_code_point ((var c i64)) -> i64
-    (block
-      (if (< c 128)
+      (if (call qdb_case_any_in c 940 974)
         (block
-          (if (call qdb_case_in c 65 90) (block (return (+ c 32))))
-          (return c)))
-      ;; Latin-1 Supplement U+0080-U+00FF but U+00D7 multiplication sign.
-      (if (&& (call qdb_case_in c 192 222) (!= c 215)) (block (return (+ c 32))))
-      ;; Latin Extended-A U+0100-U+017F: U+0130 I with dot above, U+0178 Y with
-      ;; diaeresis, case pairs.
-      (if (== c 304) (block (return 105)))
-      (if (== c 376) (block (return 255)))
-      (if (call qdb_case_in c 256 311) (block (return (call qdb_case_pair c 256 #f))))
-      (if (call qdb_case_in c 313 328) (block (return (call qdb_case_pair c 313 #f))))
-      (if (call qdb_case_in c 330 375) (block (return (call qdb_case_pair c 330 #f))))
-      (if (call qdb_case_in c 377 382) (block (return (call qdb_case_pair c 377 #f))))
-      ;; Latin Extended Additional U+1E00-U+1EFF: U+1E9E capital sharp s, case pairs.
-      (if (== c 7838) (block (return 223)))
-      (if (call qdb_case_in c 7680 7829) (block (return (call qdb_case_pair c 7680 #f))))
-      (if (call qdb_case_in c 7840 7935) (block (return (call qdb_case_pair c 7840 #f))))
+          (= r (call qdb_case_shift r c 945 971 -32))
+          (= r (call qdb_case_set r c 962 931))
+          (= r (call qdb_case_set r c 940 902))
+          (= r (call qdb_case_shift r c 941 943 -37))
+          (= r (call qdb_case_set r c 972 908))
+          (= r (call qdb_case_shift r c 973 974 -63))))
+      ;; Cyrillic U+0400-U+045F.
+      (if (call qdb_case_any_in c 1072 1119)
+        (block
+          (= r (call qdb_case_shift r c 1072 1103 -32))
+          (= r (call qdb_case_shift r c 1104 1119 -80))))
+      ;; Cyrillic U+0460-U+04FF and Cyrillic Supplement: case pairs, U+04CF palochka.
+      (if (call qdb_case_any_in c 1120 1327)
+        (block
+          (= r (call qdb_case_pairs_upper r c 1120 1153))
+          (= r (call qdb_case_pairs_upper r c 1162 1215))
+          (= r (call qdb_case_pairs_upper r c 1217 1230))
+          (= r (call qdb_case_pairs_upper r c 1232 1327))
+          (= r (call qdb_case_set r c 1231 1216))))
+      ;; Latin Extended Additional U+1E00-U+1EFF: case pairs, U+1E9B long s with dot above.
+      (if (call qdb_case_any_in c 7680 7935)
+        (block
+          (= r (call qdb_case_pairs_upper r c 7680 7829))
+          (= r (call qdb_case_pairs_upper r c 7840 7935))
+          (= r (call qdb_case_set r c 7835 7776))))
+      (return r)))
+
+  (fun qdb_lower_code_points ((var c <vec u16 16>)) -> <vec u16 16>
+    (attrs cacheable)
+    (block
+      (var r = (call qdb_case_shift c c 65 90 32))
+      ;; Latin-1 Supplement: all but U+00D7 multiplication sign.
+      (if (call qdb_case_any_in c 192 222)
+        (block
+          (= r (call qdb_case_shift r c 192 222 32))
+          (= r (call qdb_case_set r c 215 215))))
+      ;; Latin Extended-A U+0100-U+017F: case pairs, U+0130 I with dot above,
+      ;; U+0178 Y with diaeresis.
+      (if (call qdb_case_any_in c 256 382)
+        (block
+          (= r (call qdb_case_pairs_lower r c 256 311))
+          (= r (call qdb_case_pairs_lower r c 313 328))
+          (= r (call qdb_case_pairs_lower r c 330 375))
+          (= r (call qdb_case_pairs_lower r c 377 382))
+          (= r (call qdb_case_set r c 304 105))
+          (= r (call qdb_case_set r c 376 255))))
       ;; Greek alphabet U+0386-U+03CE, with tonos.
-      (if (== c 902) (block (return 940)))
-      (if (call qdb_case_in c 904 906) (block (return (+ c 37))))
-      (if (|| (call qdb_case_in c 913 929) (call qdb_case_in c 931 939))
-        (block (return (+ c 32))))
-      (if (== c 908) (block (return 972)))
-      (if (call qdb_case_in c 910 911) (block (return (+ c 63))))
-      ;; Cyrillic and Cyrillic Supplement U+0400-U+052F: U+04C0 palochka, case pairs.
-      (if (call qdb_case_in c 1024 1039) (block (return (+ c 80))))
-      (if (call qdb_case_in c 1040 1071) (block (return (+ c 32))))
-      (if (== c 1216) (block (return 1231)))
-      (if (call qdb_case_in c 1120 1153) (block (return (call qdb_case_pair c 1120 #f))))
-      (if (call qdb_case_in c 1162 1215) (block (return (call qdb_case_pair c 1162 #f))))
-      (if (call qdb_case_in c 1217 1230) (block (return (call qdb_case_pair c 1217 #f))))
-      (if (call qdb_case_in c 1232 1327) (block (return (call qdb_case_pair c 1232 #f))))
-      (return c)))
+      (if (call qdb_case_any_in c 902 939)
+        (block
+          (= r (call qdb_case_set r c 902 940))
+          (= r (call qdb_case_shift r c 904 906 37))
+          (= r (call qdb_case_set r c 908 972))
+          (= r (call qdb_case_shift r c 910 911 63))
+          (= r (call qdb_case_shift r c 913 929 32))
+          (= r (call qdb_case_shift r c 931 939 32))))
+      ;; Cyrillic U+0400-U+045F.
+      (if (call qdb_case_any_in c 1024 1071)
+        (block
+          (= r (call qdb_case_shift r c 1024 1039 80))
+          (= r (call qdb_case_shift r c 1040 1071 32))))
+      ;; Cyrillic U+0460-U+04FF and Cyrillic Supplement: case pairs, U+04C0 palochka.
+      (if (call qdb_case_any_in c 1120 1327)
+        (block
+          (= r (call qdb_case_pairs_lower r c 1120 1153))
+          (= r (call qdb_case_pairs_lower r c 1162 1215))
+          (= r (call qdb_case_pairs_lower r c 1217 1230))
+          (= r (call qdb_case_pairs_lower r c 1232 1327))
+          (= r (call qdb_case_set r c 1216 1231))))
+      ;; Latin Extended Additional U+1E00-U+1EFF: case pairs, U+1E9E capital sharp s.
+      (if (call qdb_case_any_in c 7680 7935)
+        (block
+          (= r (call qdb_case_pairs_lower r c 7680 7829))
+          (= r (call qdb_case_pairs_lower r c 7840 7935))
+          (= r (call qdb_case_set r c 7838 223))))
+      (return r)))
 
   ;; REGEXP_REPLACE is typed here under its SQL name, then kernel lowering
   ;; replaces it with qdb_regexp_replace(arena, compiled_regex, str).
