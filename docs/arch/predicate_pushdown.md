@@ -123,6 +123,11 @@ side, their `OR` is a valid filter for it.
 
 ## ProcessOuterJoin (left / right / full)
 
+Outer-join simplification runs earlier in the pipeline. It narrows an outer
+join under a `WHERE` conjunct that rejects the NULLs of a null-extended input,
+unless a projection separates them ([optimizations.md](optimizations.md)). This
+section covers the outer joins that remain.
+
 An outer join's keys and residual together preserve its ON condition.
 Residual matching is supported: only candidates passing both keys and residual
 count as matches, including for unmatched-row finalization.

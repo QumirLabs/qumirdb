@@ -135,9 +135,11 @@ filter (< l_quantity __scalar_0__)
          └─ source lineitem            -- group by l_partkey, exposed as __corr_0_0__
 ```
 
-`LEFT` is required: a part with no matching lineitems yields `NULL`, and
-`l_quantity < NULL` is unknown → the row is filtered out, matching SQL scalar
-semantics. The comparison stays above the join because it spans both sides.
+`LEFT` keeps the outer rows wherever the subquery appears: a part with no
+matching lineitems yields `NULL`. Here `l_quantity < NULL` is unknown and the
+row is filtered out, matching SQL scalar semantics, so outer-join
+simplification later makes the join inner (see below). The comparison spans
+both sides and stays above the join or in its residual.
 
 Multiple correlation columns are supported (one group key + one join key each).
 The correlated subquery may itself sit inside an `IN` subquery — it is handled
@@ -146,11 +148,15 @@ recursively while that `IN`'s body is built (q20: correlation on `ps_partkey` an
 
 ### Interaction with the optimizer
 
-The decorrelation LEFT join separates the outer WHERE filter from the inner FROM
-chain. Reorder threads the filter's equalities **through** the LEFT join so the
-inner chain still reorders connectedly; equijoin pushes the preserved-side
-conjuncts down and keeps the scalar comparison above the join. See the q2 example
-in [join_reorder.md](join_reorder.md).
+When the WHERE comparison with `__scalar_N__` rejects its NULL, the usual case,
+outer-join simplification makes the decorrelation join inner before join
+ordering. The aggregated subquery is then one more relation of the inner region,
+and the comparison becomes a key of the join that brings it in when it is an
+equality (TPC-H q2), or its residual otherwise (q17, q20). A decorrelation join
+that stays LEFT separates the outer WHERE filter from the inner FROM chain.
+Reorder threads the filter's equalities **through** the LEFT join so the inner
+chain still reorders connectedly, as in the q72 example in
+[join_reorder.md](join_reorder.md).
 
 The renamed equality `localCol = localCol` only rejects NULL keys, which the
 join would not match anyway. `SimplifySelfEquality` drops it for a non-nullable

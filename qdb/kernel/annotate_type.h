@@ -72,6 +72,11 @@ std::pair<NQumir::NAst::TExprPtr, NQumir::NAst::TTypePtr> ExpandNullable(
     const NQumir::NAst::TStructType& inputType,
     const TExternalCatalogSnapshot* externalCatalog = nullptr);
 
+// Whether ExpandNullable makes a call NULL whenever its argument `index` is NULL.
+// Calls with their own NULL semantics (`qdb_is_null`, `coalesce`, ...) are not
+// strict; an IN list is NULL for a NULL operand, but a NULL item does not decide it.
+bool IsNullStrictCallArgument(const std::string& name, size_t index);
+
 // Final expression rewrite for kernel compilation. Applies the existing nullable
 // normalization and then qdb-only decimal erasure (Decimal -> qumirdb.oz BinInt).
 std::pair<NQumir::NAst::TExprPtr, NQumir::NAst::TTypePtr> ExpandKernelExpr(

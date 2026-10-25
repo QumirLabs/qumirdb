@@ -2,9 +2,10 @@
   "version": 1,
   "fixtures": {
     "c": {"json": "tables/c.json", "parquet": {"row_group_rows": 2}},
-    "o": {"json": "tables/o.json", "parquet": {"row_group_rows": 4}}
+    "o": {"json": "tables/o.json", "parquet": {"row_group_rows": 4}},
+    "p": {"json": "tables/p.json", "parquet": {"row_group_rows": 2}}
   },
-  "tables": {"c": "c", "o": "o"},
+  "tables": {"c": "c", "o": "o", "p": "p"},
   "variants": ["single", "threaded", "js"],
   "cases": {
     "duplicates.sql": {"order": "ordered"},
@@ -20,6 +21,19 @@
     "residual_preserved_larger.sql": {"order": "ordered"},
     "full_residual.sql": {"order": "unordered"},
     "full_residual_one_side.sql": {"order": "unordered"},
-    "full_residual_false.sql": {"order": "unordered"}
+    "full_residual_false.sql": {"order": "unordered"},
+    "simplify_where_left.sql": {"order": "unordered", "execute": true},
+    "simplify_is_null_keeps_left.sql": {"order": "unordered", "execute": true},
+    "simplify_coalesce_keeps_left.sql": {"order": "unordered", "execute": true},
+    "simplify_or_keeps_left.sql": {"order": "unordered", "execute": true},
+    "simplify_or_both_reject.sql": {"order": "unordered", "execute": true},
+    "simplify_not_in.sql": {"order": "unordered", "execute": true},
+    "simplify_full_to_left.sql": {"order": "unordered", "execute": true},
+    "simplify_full_to_right.sql": {"order": "unordered", "execute": true},
+    "simplify_full_to_inner.sql": {"order": "unordered", "execute": true},
+    "simplify_nested_chain.sql": {"order": "unordered", "execute": true},
+    "simplify_nested_null_side.sql": {"order": "unordered", "execute": true},
+    "simplify_parent_inner_on.sql": {"order": "unordered", "execute": true},
+    "simplify_empty_side.sql": {"order": "unordered", "execute": true}
   }
 }

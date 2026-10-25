@@ -2318,6 +2318,13 @@ std::pair<TExprPtr, TTypePtr> ExpandNullable(
     return {e, t};
 }
 
+bool IsNullStrictCallArgument(const std::string& name, size_t index) {
+    if (IsExcludedCall(name)) {
+        return false;
+    }
+    return name != "qdb_in_list" || index == 0;
+}
+
 std::pair<TExprPtr, TTypePtr> ExpandKernelExpr(const TExprPtr& expr,
     const TStructType& inputType,
     const TExternalCatalogSnapshot* externalCatalog)

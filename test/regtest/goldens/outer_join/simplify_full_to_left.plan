@@ -1,0 +1,5 @@
+project (cv, ov) (rows≈11 cost≈5.6K)
+└─ join left [c.ck = o.ok] (rows≈11 cost≈5.4K)
+   ├─ filter (<= |c.grp| 2) (rows≈5 cost≈384)
+   │  └─ source c AS c row-groups (<= |c.grp| 2) (rows≈8 cost≈192)
+   └─ source o AS o (rows≈20 cost≈320)
