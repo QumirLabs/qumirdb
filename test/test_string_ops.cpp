@@ -15,6 +15,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace {
 
@@ -177,6 +178,152 @@ TEST(QumirDbStringOps, CaseMappingRewritesUtf8Characters) {
     // sign U+00B5), lead bytes without their continuations, an overlong 'A'.
     EXPECT_EQ(upper("a\xb5" "b\xc3" "c\xe1\xba" "d\xc3"), "A\xb5" "B\xc3" "C\xe1\xba" "D\xc3");
     EXPECT_EQ(lower("\xe0\x81\x81"), "\xe0\x81\x81");
+}
+
+// Compiles a kernel entry that calls the case function qdb_string_upper or
+// qdb_string_lower.
+std::unique_ptr<NQumir::TLLVMRunner> CompileCaseFunction(const std::string& function, void*& entry) {
+    auto library = NQdb::NKernel::ParseFunctionLibrary(
+        "(block (fun case_entry ((var arena <ptr i8>) (var str StringView)) -> StringView"
+        " (block (return (call " + function + " arena str)))))");
+    if (!library) {
+        ADD_FAILURE() << library.error().ToString();
+        return {};
+    }
+    NQumir::TLLVMRunnerOptions options;
+    options.CoreInput = true;
+    options.NativeCode = true;
+    options.AllowOverloads = true;
+    NQdb::NTest::ConfigureQumirDbSourceModule(options);
+    auto runner = std::make_unique<NQumir::TLLVMRunner>(options);
+    auto program = std::make_shared<NQumir::NAst::TBlockExpr>(
+        NQumir::TLocation{}, std::move(*library));
+    NQdb::NTest::AddQumirDbUse(program);
+    std::string error;
+    entry = runner->CompileKernelAst(program, "case_entry", &error);
+    EXPECT_NE(entry, nullptr) << error;
+    return runner;
+}
+
+std::string ApplyCaseFunction(void* entry, TStringArena& arena, std::string_view value) {
+    using TCaseFn = NQdb::TStringView(*)(void*, NQdb::TStringView);
+    const NQdb::TStringView view{
+        .Data = reinterpret_cast<uint8_t*>(const_cast<char*>(value.data())),
+        .Size = static_cast<int64_t>(value.size()),
+    };
+    const auto result = reinterpret_cast<TCaseFn>(entry)(&arena, view);
+    return std::string(reinterpret_cast<const char*>(result.Data), result.Size);
+}
+
+// A string maps as its pieces map one by one wherever they fall: in the blocks
+// of 4, 8 and 16 bytes, across the edge of a block, in the last block, which
+// overlaps the one before it, and in the loop over characters that a block
+// falls back to.
+TEST(QumirDbStringOps, CaseMappingAgreesAcrossBlocks) {
+    void* upperEntry = nullptr;
+    auto upperRunner = CompileCaseFunction("qdb_string_upper", upperEntry);
+    ASSERT_NE(upperEntry, nullptr);
+    void* lowerEntry = nullptr;
+    auto lowerRunner = CompileCaseFunction("qdb_string_lower", lowerEntry);
+    ASSERT_NE(lowerEntry, nullptr);
+
+    struct TPiece {
+        std::string Text;
+        std::string Upper;
+        std::string Lower;
+    };
+    // A piece never joins a neighbour into one character: a lead byte without
+    // its continuation is followed by ASCII, and a continuation byte follows a
+    // whole character.
+    const std::vector<TPiece> pieces = {
+        {"a", "A", "a"}, {"Z", "Z", "z"}, {"@", "@", "@"}, {"[", "[", "["}, {"`", "`", "`"},
+        {"{", "{", "{"}, {std::string(1, '\0'), std::string(1, '\0'), std::string(1, '\0')},
+        // Latin-1 Supplement and Latin Extended-A, with the characters that
+        // change their length: sharp s, dotless i, dotted I, long s.
+        {"é", "É", "é"}, {"É", "É", "é"}, {"÷", "÷", "÷"}, {"×", "×", "×"}, {"µ", "Μ", "µ"},
+        {"ÿ", "Ÿ", "ÿ"}, {"ß", "ẞ", "ß"}, {"ā", "Ā", "ā"}, {"Ł", "Ł", "ł"}, {"ŉ", "ŉ", "ŉ"},
+        {"ı", "I", "ı"}, {"İ", "İ", "i"}, {"ſ", "S", "ſ"}, {"Ÿ", "Ÿ", "ÿ"},
+        // Greek and Cyrillic.
+        {"α", "Α", "α"}, {"Ω", "Ω", "ω"}, {"ς", "Σ", "ς"}, {"ά", "Ά", "ά"}, {"ώ", "Ώ", "ώ"},
+        {"ΐ", "ΐ", "ΐ"}, {"я", "Я", "я"}, {"Ё", "Ё", "ё"}, {"ґ", "Ґ", "ґ"}, {"Ӏ", "Ӏ", "ӏ"},
+        {"ӏ", "Ӏ", "ӏ"}, {"ԯ", "Ԯ", "ԯ"},
+        // Latin Extended Additional, and characters that keep their case:
+        // Armenian, Georgian, Greek Extended, euro sign, fullwidth A, an emoji.
+        {"ạ", "Ạ", "ạ"}, {"ẞ", "ẞ", "ß"}, {"ẛ", "Ṡ", "ẛ"}, {"Ա", "Ա", "Ա"}, {"ა", "ა", "ა"},
+        {"ἀ", "ἀ", "ἀ"}, {"€", "€", "€"}, {"Ａ", "Ａ", "Ａ"},
+        {"\xf0\x9f\x98\x80", "\xf0\x9f\x98\x80", "\xf0\x9f\x98\x80"},
+        // Bytes that are not UTF-8.
+        {"\x80", "\x80", "\x80"}, {"\xbf", "\xbf", "\xbf"}, {"\xff", "\xff", "\xff"},
+        {"\xc3" "z", "\xc3" "Z", "\xc3" "z"}, {"\xd1!", "\xd1!", "\xd1!"},
+        {"\xe1\xba!", "\xe1\xba!", "\xe1\xba!"}, {"\xe0\x81\x81", "\xe0\x81\x81", "\xe0\x81\x81"},
+        {"\xc0\x80", "\xc0\x80", "\xc0\x80"},
+    };
+    const std::vector<TPiece> fillers = {{"q", "Q", "q"}, {"W", "W", "w"}, {"ж", "Ж", "ж"}, {"Λ", "Λ", "λ"}};
+
+    TStringArena arena;
+    // The text starts at an offset into a buffer, so that blocks fall at
+    // every alignment.
+    auto check = [&](const std::vector<const TPiece*>& parts, size_t offset) {
+        std::string buffer(offset, '#');
+        std::string upper;
+        std::string lower;
+        for (const auto* part : parts) {
+            buffer += part->Text;
+            upper += part->Upper;
+            lower += part->Lower;
+        }
+        const std::string_view text = std::string_view(buffer).substr(offset);
+        EXPECT_EQ(ApplyCaseFunction(upperEntry, arena, text), upper) << testing::PrintToString(std::string(text));
+        EXPECT_EQ(ApplyCaseFunction(lowerEntry, arena, text), lower) << testing::PrintToString(std::string(text));
+    };
+
+    // Every piece after 0 to 40 filler characters, alone and followed by more.
+    for (const auto& piece : pieces) {
+        for (const auto& filler : fillers) {
+            for (size_t before = 0; before <= 40; ++before) {
+                std::vector<const TPiece*> parts(before, &filler);
+                parts.push_back(&piece);
+                check(parts, before % 16);
+                parts.insert(parts.end(), 20, &filler);
+                check(parts, 0);
+            }
+        }
+    }
+
+    // A lead byte that ends the string is copied.
+    const TPiece lead{"\xd0", "\xd0", "\xd0"};
+    for (const auto& filler : fillers) {
+        for (size_t before = 0; before <= 40; ++before) {
+            std::vector<const TPiece*> parts(before, &filler);
+            parts.push_back(&lead);
+            check(parts, 0);
+        }
+    }
+
+    // Random mixes of the pieces and fillers, 0 to 70 bytes long.
+    std::vector<const TPiece*> all;
+    for (const auto& piece : pieces) {
+        all.push_back(&piece);
+    }
+    for (const auto& filler : fillers) {
+        all.push_back(&filler);
+        all.push_back(&filler);
+    }
+    uint64_t random = 1;
+    auto next = [&random]() {
+        random = random * 6364136223846793005ULL + 1442695040888963407ULL;
+        return random >> 33;
+    };
+    for (size_t round = 0; round < 5000; ++round) {
+        const size_t size = round % 71;
+        std::vector<const TPiece*> parts;
+        size_t bytes = 0;
+        while (bytes < size) {
+            parts.push_back(all[next() % all.size()]);
+            bytes += parts.back()->Text.size();
+        }
+        check(parts, round % 16);
+    }
 }
 
 // Hash value is an implementation detail, so check properties, not magic numbers.
