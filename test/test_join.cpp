@@ -10,8 +10,10 @@
 #include <format>
 #include <iostream>
 #include <memory>
+#include <new>
 #include <random>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -409,6 +411,8 @@ size_t RowOf(TRowId id) {
 // keys, and for each key a bucket of the row ids stored under it. It is the
 // aggregation HashTable with three dense int64 columns (join_table.oz): bucket
 // length, capacity and pointer. The rows stay in their retained batches.
+// Left out: NULL keys (jt_key_valid), the matched marks of outer joins and
+// residuals, which do not change the table.
 template <CJoinKey TKey>
 class TSwissJoinTable {
 public:
@@ -465,7 +469,8 @@ public:
 private:
     // JoinInitialCapacity in join_exec.cpp.
     static constexpr size_t InitialCapacity = 256;
-    // Groups of 8 slots, the NEON and portable width; SSE2 uses 16.
+    // Groups of 8 slots matched by portable SWAR. The kernel matches the same
+    // 8-slot groups with NEON on arm64, and 16-slot groups with SSE2 on x86.
     static constexpr size_t GroupShift = 3;
     static constexpr uint8_t Empty = 0x80;
     static constexpr uint64_t LowBits = 0x0101010101010101;
@@ -513,11 +518,25 @@ private:
         return -1;
     }
 
+    // The first empty slot of a probe sequence, for a key known to be absent
+    // (rh_find_empty_slot): no key compares.
+    int64_t FindEmptySlot(uint64_t hash) const {
+        size_t groupMask = (Capacity() >> GroupShift) - 1;
+        size_t group = (hash >> 7) & groupMask;
+        for (size_t step = 1; step <= groupMask + 1; ++step) {
+            if (uint64_t empty = MatchEmpty(Group(group)); empty != 0) {
+                return static_cast<int64_t>((group << GroupShift) + std::countr_zero(empty) / 8);
+            }
+            group = (group + step) & groupMask;
+        }
+        return -1;
+    }
+
     int64_t AddKey(const TKey& key, uint64_t hash, int64_t emptySlot) {
         // At 7/8 load the table doubles; the saved empty slot is then stale.
         if (Size_ + 1 > Capacity() - Capacity() / 8) {
             Grow();
-            FindSlot(key, hash, &emptySlot);
+            emptySlot = FindEmptySlot(hash);
         }
         int64_t id = static_cast<int64_t>(Size_++);
         TKey stored = CloneJoinKey(key, Arena_);
@@ -534,7 +553,11 @@ private:
             int64_t capacity = (Capacities_[id] == 0)
                 ? 4
                 : Capacities_[id] + Capacities_[id] / 2;
-            Buckets_[id] = static_cast<TRowId*>(std::realloc(Buckets_[id], capacity * sizeof(TRowId)));
+            void* bucket = std::realloc(Buckets_[id], capacity * sizeof(TRowId));
+            if (bucket == nullptr) {
+                throw std::bad_alloc();
+            }
+            Buckets_[id] = static_cast<TRowId*>(bucket);
             Capacities_[id] = capacity;
         }
         Buckets_[id][Counts_[id]++] = row;
@@ -563,8 +586,7 @@ private:
                 continue;
             }
             uint64_t hash = HashJoinKey(keys[slot]);
-            int64_t emptySlot = -1;
-            FindSlot(keys[slot], hash, &emptySlot);
+            int64_t emptySlot = FindEmptySlot(hash);
             Ctrl_[emptySlot] = static_cast<uint8_t>(hash & 127);
             Keys_[emptySlot] = keys[slot];
             SlotId_[emptySlot] = slotId[slot];
@@ -685,6 +707,9 @@ private:
     size_t Rows_ = 0;
 };
 
+// jrt_mix multiplies by this odd constant, 2^64 divided by the golden ratio.
+constexpr uint64_t FibonacciMultiplier = 0x9E3779B97F4A7C15;
+
 // The row join table of a fixed build side (join_rows.oz), after DuckDB's
 // JoinHashTable: one 8-byte entry per slot, a 16-bit salt above a 48-bit row
 // pointer, at most half full. A probe reads one entry and, on a salt match,
@@ -712,8 +737,11 @@ public:
     // jr_build_rows: an empty entry starts a new key; a salt match with an
     // equal key chains the row in front of that key's rows; anything else
     // moves to the next entry. Linking from the last row to the first leaves
-    // every chain in build order.
+    // every chain in build order. It runs once: linking overwrites the hashes.
     void Build() {
+        if (!Entries_.empty()) {
+            throw std::logic_error("a row join table is built once");
+        }
         size_t capacity = 1024;
         while (capacity < 2 * Arena_.Rows()) {
             capacity *= 2;
@@ -742,6 +770,9 @@ public:
     // matching build row. Each pass loops over independent rows, so the cache
     // misses of different rows overlap.
     void Probe(std::span<const TKey> keys, std::vector<TMatch>& matches) {
+        if (Entries_.empty()) {
+            throw std::logic_error("a row join table is probed after Build");
+        }
         size_t count = keys.size();
         Hashes_.resize(count);
         Salts_.resize(count);
@@ -807,13 +838,14 @@ public:
 
 private:
     static constexpr uint64_t PointerMask = (uint64_t{1} << 48) - 1;
+    static_assert(sizeof(uintptr_t) == sizeof(uint64_t), "an entry holds a 64-bit pointer");
 
     // The index is the top bits of the hash: the hash shuffle routes rows by
     // the low bits, which are thus nearly constant inside a partition. A key
     // hash can carry little entropy in its top bits, so a Fibonacci multiply
     // first spreads every bit over them (jrt_mix).
     static uint64_t Mix(uint64_t hash) {
-        return hash * 0x9E3779B97F4A7C15;
+        return hash * FibonacciMultiplier;
     }
 
     static uint64_t Salt(uint64_t mixed) {
@@ -862,9 +894,22 @@ private:
     std::vector<size_t> Work_;
 };
 
-// A key whose hash takes one of two values: every row then shares its salt
-// with half of the others, which exercises the collision walk of the row
-// join table and the group walk of the swiss table.
+// The multiplicative inverse of FibonacciMultiplier modulo 2^64. Each Newton
+// step doubles the correct low bits; an odd number is its own inverse modulo 8.
+constexpr uint64_t InverseFibonacciMultiplier() {
+    uint64_t inverse = FibonacciMultiplier;
+    for (int step = 0; step < 5; ++step) {
+        inverse *= 2 - FibonacciMultiplier * inverse;
+    }
+    return inverse;
+}
+
+static_assert(FibonacciMultiplier * InverseFibonacciMultiplier() == 1);
+
+// A key whose hash the row join table mixes to a chosen value: top bits 0, so
+// every row has entry 0 as its home, and one of two salts. All rows then form
+// one cluster in which both salts alternate, which exercises the collision
+// walk of the row join table and the group walk of the swiss table.
 struct TCollidingKey {
     int64_t Value;
 
@@ -872,7 +917,8 @@ struct TCollidingKey {
 };
 
 uint64_t HashJoinKey(const TCollidingKey& key) {
-    return static_cast<uint64_t>(key.Value & 1);
+    uint64_t mixed = static_cast<uint64_t>(key.Value & 1) << 16;
+    return mixed * InverseFibonacciMultiplier();
 }
 
 TCollidingKey CloneJoinKey(const TCollidingKey& key, TKeyArena&) {
@@ -1060,10 +1106,18 @@ TEST(JoinTablePrototype, BothTablesAgreeUnderSaltCollisions) {
     for (const auto& match : matches) {
         actual.emplace_back(match.ProbeRow, match.Row->Payload);
     }
-    std::vector<std::pair<size_t, int64_t>> expected;
+    std::vector<std::pair<size_t, int64_t>> fromSwiss;
     for (size_t j = 0; j < probe.size(); ++j) {
         for (TRowId row : swiss.Find(probe[j], HashJoinKey(probe[j]))) {
-            expected.emplace_back(j, row);
+            fromSwiss.emplace_back(j, row);
+        }
+    }
+    std::vector<std::pair<size_t, int64_t>> expected;
+    for (size_t j = 0; j < probe.size(); ++j) {
+        for (size_t row = 0; row < buildKeys.size(); ++row) {
+            if (buildKeys[row] == probe[j].Value) {
+                expected.emplace_back(j, static_cast<int64_t>(row));
+            }
         }
     }
     // A row that met a salt collision emits its matches in a later round, so
@@ -1071,6 +1125,7 @@ TEST(JoinTablePrototype, BothTablesAgreeUnderSaltCollisions) {
     std::ranges::stable_sort(actual, {}, &std::pair<size_t, int64_t>::first);
     EXPECT_FALSE(expected.empty());
     EXPECT_EQ(actual, expected);
+    EXPECT_EQ(fromSwiss, expected);
 }
 
 // Build and probe cost per row of both tables on one thread, for growing
@@ -1173,7 +1228,8 @@ TEST(JoinTablePrototype, DISABLED_Microbenchmark) {
 
                 EXPECT_EQ(swissSum, rowSum);
                 std::cout << std::format(
-                    "{:>10} {:>4} {:>5} {:>12.2f} {:>12.2f} {:>12.2f} {:>12.2f} {:>8.2f} {:>10.1f} {:>10.1f}\n",
+                    "{:>10} {:>4} {:>5} {:>12.2f} {:>12.2f} {:>12.2f} {:>12.2f}"
+                    " {:>8.2f} {:>10.1f} {:>10.1f}\n",
                     buildRows,
                     duplicates,
                     hitPercent,
