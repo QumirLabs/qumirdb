@@ -683,6 +683,14 @@ bucket, and a predicate the statistics cannot answer gets a default, 0.5 here.
   counts the distinct non-NULL constants inside min/max. `NOT IN` is estimated
   as the chain of `<>` it stands for, `(1 - 1/NDV)` per constant, so it cannot
   reach zero from a list longer than the NDV.
+- Equalities with constants and IN lists allow a column a set of values. An OR
+  of them on one column is the union of the sets, counted as one IN list:
+  `d_year = 2001 OR d_year = 2002` is two values. Conjuncts on one column
+  intersect their sets, and a range on the column keeps the values inside it,
+  so a column constrained twice is not counted twice.
+- Other disjuncts are taken as independent: `a OR b` drops the rows that both
+  drop, so it keeps `1 - (1 - s_a)(1 - s_b) = s_a + s_b - s_a * s_b`, the OR
+  selectivity of Selinger et al. (cited above).
 - A NULL compares as UNKNOWN, so a comparison, `=`, `<>`, a range or an `IN`
   list, keeps only non-NULL rows. The NDV and the histogram describe the
   non-NULL values, and the share of them a comparison keeps is scaled by the

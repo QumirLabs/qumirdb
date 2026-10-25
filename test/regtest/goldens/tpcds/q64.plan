@@ -1,6 +1,6 @@
 cte #1 (materialized, ×2):
 project (product_name, item_sk, store_name, store_zip, b_street_number, b_street_name, b_city, b_zip, c_street_number, c_street_name, c_city, c_zip, syear, cnt, s1, s2, s3) (rows≈1 cost≈85.5K)
-└─ aggregate keys=[item.i_product_name, item.i_item_sk, store.s_store_name, store.s_zip, ad1.ca_street_number, ad1.ca_street_name, ad1.ca_city, ad1.ca_zip, ad2.ca_street_number, ad2.ca_street_name, ad2.ca_city, ad2.ca_zip, d1.d_year, d2.d_year, d3.d_year] aggs=[count_0=count, sum_0=sum, sum_1=sum, sum_2=sum] (rows≈1 cost≈85.3K)
+└─ aggregate keys=[item.i_product_name, item.i_item_sk, store.s_store_name, store.s_zip, ad1.ca_street_number, ad1.ca_street_name, ad1.ca_city, ad1.ca_zip, ad2.ca_street_number, ad2.ca_street_name, ad2.ca_city, ad2.ca_zip, d1.d_year, d2.d_year, d3.d_year] aggs=[count_0=count, sum_0=sum, sum_1=sum, sum_2=sum] (rows≈1 cost≈85.2K)
    └─ join inner [customer.c_first_shipto_date_sk = d3.d_date_sk] emit-filter 1 from left (rows≈1 cost≈85K)
       ├─ join inner [customer.c_first_sales_date_sk = d2.d_date_sk] emit-filter 2 from left (rows≈1 cost≈80.4K)
       │  ├─ join inner [store_sales.ss_item_sk = item.i_item_sk] (rows≈1 cost≈75.8K)
@@ -28,7 +28,7 @@ project (product_name, item_sk, store_name, store_zip, b_street_number, b_street
       │  │  │  │  │  │  │  │  │  │  │  │  │  │  │                 └─ join inner [catalog_returns.cr_item_sk = catalog_sales.cs_item_sk, catalog_returns.cr_order_number = catalog_sales.cs_order_number] (rows≈10 cost≈5.2K)
       │  │  │  │  │  │  │  │  │  │  │  │  │  │  │                    ├─ source catalog_returns AS catalog_returns (rows≈10 cost≈320)
       │  │  │  │  │  │  │  │  │  │  │  │  │  │  │                    └─ source catalog_sales AS catalog_sales (rows≈10 cost≈160)
-      │  │  │  │  │  │  │  │  │  │  │  │  │  │  └─ filter (|| (== |d1.d_year| (+ 2000 1)) (== |d1.d_year| 2000)) (rows≈5 cost≈160)
+      │  │  │  │  │  │  │  │  │  │  │  │  │  │  └─ filter (|| (== |d1.d_year| (+ 2000 1)) (== |d1.d_year| 2000)) (rows≈1 cost≈160)
       │  │  │  │  │  │  │  │  │  │  │  │  │  │     └─ source date_dim AS d1 (rows≈10 cost≈80)
       │  │  │  │  │  │  │  │  │  │  │  │  │  └─ source store AS store use-filter 13 keys=[store.s_store_sk] (rows≈10 cost≈360)
       │  │  │  │  │  │  │  │  │  │  │  │  └─ source customer AS customer use-filter 12 keys=[customer.c_customer_sk] (rows≈10 cost≈240)
@@ -50,7 +50,7 @@ project (product_name, store_name, store_zip, b_street_number, b_street_name, b_
 └─ sort [__scope_0 asc, __scope_1 asc, __scope_20 asc, __scope_13 asc, __scope_16 asc]
    └─ project (__scope_0, __scope_1, __scope_2, __scope_3, __scope_4, __scope_5, __scope_6, __scope_7, __scope_8, __scope_9, __scope_10, __scope_11, __scope_12, __scope_13, __scope_14, __scope_15, __scope_16, __scope_17, __scope_18, __scope_19, __scope_20) (rows≈1 cost≈176K)
       └─ join inner [cs2.item_sk = cs1.item_sk, cs2.store_name = cs1.store_name, cs2.store_zip = cs1.store_zip] residual (<= |cs2.cnt| |cs1.cnt|) (rows≈1 cost≈176K)
-         ├─ project (cs2.item_sk, cs2.store_name, cs2.store_zip, cs2.syear, cs2.cnt, cs2.s1, cs2.s2, cs2.s3) (rows≈1 cost≈85.8K)
+         ├─ project (cs2.item_sk, cs2.store_name, cs2.store_zip, cs2.syear, cs2.cnt, cs2.s1, cs2.s2, cs2.s3) (rows≈1 cost≈85.7K)
          │  └─ filter (== syear (+ 2000 1)) (rows≈1 cost≈85.7K)
          │     └─ cte-consumer #1 (×2)
          └─ project (cs1.product_name, cs1.item_sk, cs1.store_name, cs1.store_zip, cs1.b_street_number, cs1.b_street_name, cs1.b_city, cs1.b_zip, cs1.c_street_number, cs1.c_street_name, cs1.c_city, cs1.c_zip, cs1.syear, cs1.cnt, cs1.s1, cs1.s2, cs1.s3) (rows≈1 cost≈85.9K)

@@ -1,6 +1,7 @@
 #include "estimate_stats.h"
 #include "const_fold.h"
 #include "flatten_conjuncts.h"
+#include "flatten_disjuncts.h"
 #include "unbound_vars.h"
 
 #include <qdb/plan/ops/source.h>
@@ -17,6 +18,7 @@
 #include <cmath>
 #include <limits>
 #include <set>
+#include <span>
 #include <unordered_set>
 
 namespace NQdb {
@@ -163,18 +165,44 @@ struct TRangeBound {
     TRangeEnd End;
 };
 
-// The distinct non-NULL constants inside min/max that an IN list allows a
-// column.
-struct TInList {
-    std::string Column;
-    double Values = 0.0;
-    double Ndv = 1.0;
-};
-
 // The tightest ends of a range on a column.
 struct TColumnRange {
     std::optional<TRangeEnd> Lower;
     std::optional<TRangeEnd> Upper;
+
+    bool Holds(double value) const {
+        return (!Lower || value > Lower->Value || (value == Lower->Value && Lower->Inclusive))
+            && (!Upper || value < Upper->Value || (value == Upper->Value && Upper->Inclusive));
+    }
+};
+
+// The constants a predicate allows a column, each keeping 1/ndv of its
+// non-NULL rows.
+struct TValueSet {
+    std::string Column;
+    double Ndv = 1.0;
+    // The fraction of the rows where the column is not NULL.
+    double NonNull = 1.0;
+    std::set<double> Numbers;
+    std::set<std::string> Strings;
+
+    double Size() const {
+        return static_cast<double>(Numbers.size() + Strings.size());
+    }
+
+    double Selectivity() const {
+        return std::min(1.0, Size() / Ndv) * NonNull;
+    }
+
+    void Unite(TValueSet other) {
+        Numbers.merge(other.Numbers);
+        Strings.merge(other.Strings);
+    }
+
+    void Intersect(const TValueSet& other) {
+        std::erase_if(Numbers, [&](double value) { return !other.Numbers.contains(value); });
+        std::erase_if(Strings, [&](const std::string& value) { return !other.Strings.contains(value); });
+    }
 };
 
 // Whether expr can be NULL, which makes a predicate over it UNKNOWN rather than
@@ -257,8 +285,8 @@ private:
         }
         // NOT IN is the chain of `<>` it stands for: each value keeps
         // 1 - 1/ndv of the rows.
-        if (auto values = InListValues(unary.Operand)) {
-            return std::pow(1.0 - 1.0 / values->Ndv, values->Values);
+        if (auto values = ValueSet(unary.Operand)) {
+            return std::pow(1.0 - 1.0 / values->Ndv, values->Size());
         }
         return 1.0 - Estimate(unary.Operand);
     }
@@ -285,9 +313,9 @@ private:
                 }
             }
         }
-        // A NULL is in no list.
-        if (auto values = InListValues(atom)) {
-            return std::min(1.0, values->Values / values->Ndv) * NonNullFraction(values->Column);
+        // A NULL is in no set.
+        if (auto values = ValueSet(atom)) {
+            return values->Selectivity();
         }
         return 0.5;
     }
@@ -295,6 +323,9 @@ private:
     double EstimateBinary(const TExprPtr& atom, const TBinaryExpr& binary) {
         if (binary.Operator == "&&"_op) {
             return EstimateConjunction(atom);
+        }
+        if (binary.Operator == "||"_op) {
+            return EstimateDisjunction(atom);
         }
         if (binary.Operator == "=="_op || binary.Operator == "!="_op) {
             return EstimateEquality(binary);
@@ -314,9 +345,12 @@ private:
     double EstimateConjunction(const TExprPtr& atom) {
         std::vector<TExprPtr> conjuncts;
         FlattenConjuncts(atom, conjuncts);
-        // Bounds on one column form one range. Multiplying them as
-        // independent predicates distorts a narrow range a lot.
+        // Bounds on one column form one range, and the sets of values allowed
+        // one column intersect. Multiplying them as independent predicates
+        // distorts a narrow range a lot, and counts a column constrained
+        // twice twice.
         std::map<std::string, TColumnRange> ranges;
+        std::map<std::string, TValueSet> sets;
         double selectivity = 1.0;
         for (const auto& conjunct : conjuncts) {
             if (auto bound = RangeBound(conjunct)) {
@@ -336,9 +370,22 @@ private:
                 {
                     range.Lower = end;
                 }
+            } else if (auto values = ValueSet(conjunct)) {
+                auto [it, inserted] = sets.try_emplace(values->Column, *values);
+                if (!inserted) {
+                    it->second.Intersect(*values);
+                }
             } else {
                 selectivity *= Estimate(conjunct);
             }
+        }
+        // A range on a column with a set of values keeps the values inside it.
+        for (auto& [column, values] : sets) {
+            if (auto it = ranges.find(column); it != ranges.end()) {
+                std::erase_if(values.Numbers, [&](double value) { return !it->second.Holds(value); });
+                ranges.erase(it);
+            }
+            selectivity *= values.Selectivity();
         }
         for (const auto& [column, range] : ranges) {
             const double upper = range.Upper
@@ -364,6 +411,31 @@ private:
             selectivity *= fraction * NonNullFraction(column);
         }
         return selectivity;
+    }
+
+    // OR keeps the rows that any disjunct keeps. The values allowed one
+    // column are one set, and an OR on the column is their union; disjuncts
+    // on different columns are taken as independent, so the rows that none of
+    // them keeps are the product of their complements.
+    double EstimateDisjunction(const TExprPtr& atom) {
+        std::vector<TExprPtr> disjuncts;
+        FlattenDisjuncts(atom, disjuncts);
+        std::map<std::string, TValueSet> sets;
+        double none = 1.0;
+        for (const auto& disjunct : disjuncts) {
+            if (auto values = ValueSet(disjunct)) {
+                auto [it, inserted] = sets.try_emplace(values->Column, *values);
+                if (!inserted) {
+                    it->second.Unite(std::move(*values));
+                }
+            } else {
+                none *= 1.0 - Estimate(disjunct);
+            }
+        }
+        for (const auto& [column, values] : sets) {
+            none *= 1.0 - values.Selectivity();
+        }
+        return 1.0 - none;
     }
 
     // A NULL compares as UNKNOWN, so `=` and `!=` keep only non-NULL rows:
@@ -690,7 +762,45 @@ private:
             && number.IntValue <= *stats.GetMaxValue<TValue>();
     }
 
-    std::optional<TInList> InListValues(const TExprPtr& expr) {
+    // The values `expr` allows a column, when it allows constants: `col = c`,
+    // `col IN (...)` and an OR of these on one column. A NULL, a NaN and a
+    // number outside the column's min/max match no row and are left out. Only
+    // a column with an NDV has a set.
+    std::optional<TValueSet> ValueSet(const TExprPtr& expr) {
+        if (auto maybeBinary = TMaybeNode<TBinaryExpr>(expr)) {
+            auto binary = maybeBinary.Cast();
+            if (binary->Operator == "||"_op) {
+                std::vector<TExprPtr> disjuncts;
+                FlattenDisjuncts(expr, disjuncts);
+                std::optional<TValueSet> values;
+                for (const auto& disjunct : disjuncts) {
+                    auto part = ValueSet(disjunct);
+                    if (!part || (values && part->Column != values->Column)) {
+                        return std::nullopt;
+                    }
+                    if (values) {
+                        values->Unite(std::move(*part));
+                    } else {
+                        values = std::move(part);
+                    }
+                }
+                return values;
+            }
+            if (binary->Operator != "=="_op) {
+                return std::nullopt;
+            }
+            auto maybeLeft = TMaybeNode<TIdentExpr>(binary->Left);
+            auto maybeRight = TMaybeNode<TIdentExpr>(binary->Right);
+            if (maybeLeft && !maybeRight && IsConstExpr(binary->Right)) {
+                auto left = maybeLeft.Cast();
+                return ColumnValues(left->Name, std::span(&binary->Right, 1));
+            }
+            if (maybeRight && !maybeLeft && IsConstExpr(binary->Left)) {
+                auto right = maybeRight.Cast();
+                return ColumnValues(right->Name, std::span(&binary->Left, 1));
+            }
+            return std::nullopt;
+        }
         auto maybeCall = TMaybeNode<TCallExpr>(expr);
         if (!maybeCall) {
             return std::nullopt;
@@ -704,15 +814,20 @@ private:
         if (!column) {
             return std::nullopt;
         }
-        const auto& name = column.Cast()->Name;
+        return ColumnValues(column.Cast()->Name, std::span(call->Args).subspan(1));
+    }
+
+    std::optional<TValueSet> ColumnValues(const std::string& name, std::span<const TExprPtr> items) {
         auto colIt = InputStats_.ColumnStats.find(name);
         if (colIt == InputStats_.ColumnStats.end() || !colIt->second->Ndv || *colIt->second->Ndv == 0) {
             return std::nullopt;
         }
-        std::set<double> numbers;
-        std::set<std::string> strings;
-        for (size_t i = 1; i < call->Args.size(); ++i) {
-            const auto& item = call->Args[i];
+        TValueSet values{
+            .Column = name,
+            .Ndv = static_cast<double>(*colIt->second->Ndv),
+            .NonNull = NonNullFraction(name),
+        };
+        for (const auto& item : items) {
             if (auto maybeNull = TMaybeNode<TCallExpr>(item)) {
                 auto nullCallee = TMaybeNode<TIdentExpr>(maybeNull.Cast()->Callee);
                 if (nullCallee && nullCallee.Cast()->Name == "qdb_sql_null") {
@@ -721,7 +836,7 @@ private:
             }
             if (auto maybeCast = TMaybeNode<TCastExpr>(item)) {
                 if (auto literal = TMaybeNode<TStringLiteralExpr>(maybeCast.Cast()->Operand)) {
-                    strings.insert(literal.Cast()->Value);
+                    values.Strings.insert(literal.Cast()->Value);
                     continue;
                 }
             }
@@ -735,13 +850,9 @@ private:
             if (std::isnan(value) || InRange(item, name) == false) {
                 continue;
             }
-            numbers.insert(value);
+            values.Numbers.insert(value);
         }
-        return TInList{
-            .Column = name,
-            .Values = static_cast<double>(numbers.size() + strings.size()),
-            .Ndv = static_cast<double>(*colIt->second->Ndv),
-        };
+        return values;
     }
 
     const TStats& InputStats_;

@@ -3,7 +3,7 @@ sort [ext_price desc, brand_id asc]
    └─ aggregate keys=[item.i_brand, item.i_brand_id, time_dim.t_hour, time_dim.t_minute] aggs=[sum_0=sum] (rows≈1 cost≈23.4K)
       └─ join inner [tmp.sold_item_sk = item.i_item_sk] (rows≈1 cost≈23.4K)
          ├─ join inner [time_dim.t_time_sk = tmp.time_sk] (rows≈1 cost≈18.7K)
-         │  ├─ filter (|| (== |time_dim.t_meal_time| (cast "breakfast" <named StringView>)) (== |time_dim.t_meal_time| (cast "dinner" <named StringView>))) (rows≈5 cost≈560)
+         │  ├─ filter (|| (== |time_dim.t_meal_time| (cast "breakfast" <named StringView>)) (== |time_dim.t_meal_time| (cast "dinner" <named StringView>))) (rows≈1 cost≈560)
          │  │  └─ source time_dim AS time_dim row-groups (|| (== |time_dim.t_meal_time| (cast "breakfast" <named StringView>)) (== |time_dim.t_meal_time| (cast "dinner" <named StringView>))) (rows≈10 cost≈280)
          │  └─ project (tmp.ext_price, tmp.sold_item_sk, tmp.time_sk) (rows≈3 cost≈13.9K)
          │     └─ union-all (rows≈3 cost≈13.9K)

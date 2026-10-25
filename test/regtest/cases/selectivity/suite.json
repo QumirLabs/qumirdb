@@ -42,6 +42,8 @@
     "join_shared_key_range_independent.sql": {"order": "ordered"},
     "join_residual.sql": {"order": "ordered"},
     "scalar_subquery_one_row.sql": {"order": "ordered"},
-    "in_list_nullable.sql": {"order": "ordered"}
+    "in_list_nullable.sql": {"order": "ordered"},
+    "or_same_column.sql": {"order": "ordered"},
+    "or_columns.sql": {"order": "ordered"}
   }
 }

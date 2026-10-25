@@ -7,7 +7,7 @@ project (i_category, i_brand, cc_name, d_year, d_moy, sum_sales, avg_monthly_sal
             ├─ join inner [call_center.cc_call_center_sk = catalog_sales.cs_call_center_sk] emit-filter 2 from right (rows≈1 cost≈9K)
             │  ├─ source call_center AS call_center use-filter 2 keys=[call_center.cc_call_center_sk] (rows≈10 cost≈200)
             │  └─ join inner [date_dim.d_date_sk = catalog_sales.cs_sold_date_sk] (rows≈1 cost≈4.6K)
-            │     ├─ filter (|| (|| (== |date_dim.d_year| 2000) (&& (== |date_dim.d_year| (- 2000 1)) (== |date_dim.d_moy| 12))) (&& (== |date_dim.d_year| (+ 2000 1)) (== |date_dim.d_moy| 1))) (rows≈5 cost≈240)
+            │     ├─ filter (|| (|| (== |date_dim.d_year| 2000) (&& (== |date_dim.d_year| (- 2000 1)) (== |date_dim.d_moy| 12))) (&& (== |date_dim.d_year| (+ 2000 1)) (== |date_dim.d_moy| 1))) (rows≈1 cost≈240)
             │     │  └─ source date_dim AS date_dim (rows≈10 cost≈120)
             │     └─ source catalog_sales AS catalog_sales (rows≈10 cost≈200)
             └─ source item AS item use-filter 1 keys=[item.i_item_sk] (rows≈10 cost≈360)
