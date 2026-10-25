@@ -319,6 +319,53 @@ TEST(OperatorInstrumentation, StreamingOuterResidualsKeepCountersAcrossFinalizat
     }
 }
 
+TEST(OperatorInstrumentation, SharedBuildTableReportsTheJoinStage) {
+    for (const auto mode : {EExecutionMode::SingleThreadedScheduler, EExecutionMode::ThreadedScheduler}) {
+        std::array<int64_t, 4> leftKeys = {1, 1, 2, 3};
+        std::array<int64_t, 4> leftValues = {10, 30, 20, 40};
+        std::array<int64_t, 4> rightKeys = {1, 1, 2, 4};
+        std::array<int64_t, 4> rightValues = {5, 15, 25, 50};
+        TColumn leftColumns[] = {{.Data = reinterpret_cast<char*>(leftKeys.data())},
+            {.Data = reinterpret_cast<char*>(leftValues.data())}};
+        TColumn rightColumns[] = {{.Data = reinterpret_cast<char*>(rightKeys.data())},
+            {.Data = reinterpret_cast<char*>(rightValues.data())}};
+        TRowSet leftBatch{.Columns = leftColumns, .ColumnCount = 2, .RowCount = 4, .RefCount = 1};
+        TRowSet rightBatch{.Columns = rightColumns, .ColumnCount = 2, .RowCount = 4, .RefCount = 1};
+        TMockSource left({"lk", "lv"}, {leftBatch});
+        TMockSource right({"rk", "rv"}, {rightBatch});
+        auto plan = std::make_shared<TJoinOperator>(
+            std::make_shared<TSourceOperator>(left, "l"),
+            std::make_shared<TSourceOperator>(right, "r"),
+            std::vector<TJoinKey>{{"lk", "rk"}}, EJoinType::Inner, nullptr);
+        AnnotateTypes(plan);
+        ApplyColumnPruning(plan);
+        TSettings settings;
+        settings.Scheduler.Mode = mode;
+        settings.Scheduler.WorkerCount = 2;
+        // The right side, the join's second input, builds the shared table.
+        settings.Join.Mode = EJoinMode::Shared;
+        settings.Join.SharedForce = true;
+        std::ostringstream instrumentation;
+        settings.Instrumentation.Operators = true;
+        settings.Instrumentation.Output = &instrumentation;
+        auto runtime = RunPlan(plan, settings);
+        TRowSet output{};
+        size_t rows = 0;
+        while (runtime->Next(output)) {
+            rows += output.RowCount;
+            Release(&output);
+        }
+        EXPECT_EQ(rows, 5u);
+        // The build task reports the table; the probe tasks report the
+        // stream and the output.
+        EXPECT_EQ(StageSum(instrumentation.str(), "join-build", "rows_in"), 4u);
+        EXPECT_GT(StageSum(instrumentation.str(), "join-build", "hash_memory_peak_bytes"), 0u);
+        EXPECT_GT(StageSum(instrumentation.str(), "join-build", "retained_input_peak_bytes"), 0u);
+        EXPECT_EQ(StageSum(instrumentation.str(), "join-probe", "rows_in"), 4u);
+        EXPECT_EQ(StageSum(instrumentation.str(), "join-probe", "rows_out"), 5u);
+    }
+}
+
 TEST(OperatorInstrumentation, UnionShufflesKeepTheirOwnInputSchemas) {
     for (const auto mode : {EExecutionMode::SingleThreadedScheduler, EExecutionMode::ThreadedScheduler}) {
         std::array<int64_t, 100> keys;

@@ -611,9 +611,10 @@ TJoinBuildTable::~TJoinBuildTable() {
 }
 
 void TJoinBuildTable::SetInstrumentation(TOperatorInstrumentation* instrumentation) {
+    // These are the build task's counters, whose only input is the build
+    // side, whichever side of the join that is.
     Instrumentation_ = instrumentation;
-    Rows_.SetInstrumentation(
-        instrumentation, BuildSide_ == EJoinSide::Left ? 0 : 1);
+    Rows_.SetInstrumentation(instrumentation, 0);
 }
 
 void TJoinBuildTable::EnsureInit() {
@@ -671,7 +672,7 @@ void TJoinBuildTable::Add(TRowSet batch) {
     // The other side's table is empty, so a build update emits no pairs.
     PairBuffer_.Count = 0;
     if (Instrumentation_) {
-        Instrumentation_->ObserveHash(Table(), buildLeft ? 0 : 1, true);
+        Instrumentation_->ObserveHash(Table(), 0, true);
     }
 }
 
