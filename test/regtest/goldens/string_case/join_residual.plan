@@ -1,0 +1,5 @@
+sort [k asc]
+└─ project (k, id) (rows≈7 cost≈5.2K)
+   └─ join inner [n.id = t.k] residual (!= |t.t| (call upper |n.name|)) (rows≈7 cost≈5.1K)
+      ├─ source n AS n (rows≈7 cost≈168)
+      └─ source t AS t (rows≈14 cost≈336)
