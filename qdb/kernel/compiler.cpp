@@ -165,8 +165,8 @@ std::unordered_map<std::string, void*> CompileKernelAst(
 namespace {
 constexpr const char* CacheSchemaVersion = "v1";
 // Bump when the generated key helpers or the .oz kernel libraries change.
-// FULL residual marking changes jt_emit_and_insert.
-constexpr const char* KernelLibVersion = "38";
+// SQL upper and lower map strings in blocks of 16 bytes.
+constexpr const char* KernelLibVersion = "39";
 } // namespace
 
 NQumir::NCodeGen::TLlvmRunner::TLinkedModule CompileKernelAstCached(
