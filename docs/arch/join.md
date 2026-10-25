@@ -30,8 +30,10 @@ This can avoid materializing the large side without a cardinality estimate.
 Lowering can also choose build-first execution: inner joins use it for strong
 asymmetry, while LEFT/RIGHT outer joins build whichever input is estimated
 smaller. A runtime filter may also require completing its build input first.
-The build side finishes before the probe stream starts; poor estimates can
-still affect work and memory.
+While the build input of a row join has no batch ready, the join keeps pulling
+probe batches and holds them until the table exists, so a slow build input does
+not stall the probe pipeline. The build side finishes before the probe stream
+starts; poor estimates can still affect work and memory.
 
 ## Supported join forms
 

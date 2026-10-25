@@ -2800,7 +2800,8 @@ TEST(RowJoinProcessor, ChainsNullKeysAndStringPayload) {
     bool rightDone = false;
     bool rightFinished = false;
     auto left = [&](TRowSet& rowSet) {
-        // The build side must be complete before the probe side is read.
+        // The build side never runs dry here, so the probe side is read only
+        // after it ended.
         EXPECT_TRUE(rightFinished);
         if (leftDone) {
             return EJoinFetchResult::FINISHED;
@@ -2825,7 +2826,7 @@ TEST(RowJoinProcessor, ChainsNullKeysAndStringPayload) {
     for (;;) {
         EXPECT_EQ(
             processor.RequiredInputSide(),
-            rightFinished ? EJoinBuildSide::Left : EJoinBuildSide::Right);
+            rightFinished ? EJoinBuildSide::Left : EJoinBuildSide::Auto);
         auto result = processor.Process(left, right, out);
         if (result == EJoinProcessorResult::NEED_DATA) {
             continue;
@@ -2959,6 +2960,117 @@ TEST(RowJoinProcessor, BuildLeftStringPayloadInBuildOrder) {
         {5, "zzz", 5, 50},
         {6, "w", 6, 60},
     };
+    EXPECT_EQ(got, expected);
+}
+
+// While the build side has no batch ready, probe batches are pulled and held,
+// so the probe pipeline does not wait for the build. They are probed once the
+// table exists, also when the probe side ended first.
+TEST(RowJoinProcessor, HoldsProbeBatchesUntilTheTableIsBuilt) {
+    using namespace NQumir::NAst;
+    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
+    TStructType leftType({{"lk", i64}, {"lv", i64}});
+    TStructType rightType({{"rk", i64}, {"rv", i64}});
+
+    std::vector<int64_t> lk1 = {1, 2};
+    std::vector<int64_t> lv1 = {10, 20};
+    std::vector<int64_t> lk2 = {2, 3};
+    std::vector<int64_t> lv2 = {30, 40};
+    std::vector<TColumn> lcols1 = {
+        TColumn{.Data = reinterpret_cast<char*>(lk1.data())},
+        TColumn{.Data = reinterpret_cast<char*>(lv1.data())},
+    };
+    std::vector<TColumn> lcols2 = {
+        TColumn{.Data = reinterpret_cast<char*>(lk2.data())},
+        TColumn{.Data = reinterpret_cast<char*>(lv2.data())},
+    };
+    std::vector<TRowSet> probes = {
+        TRowSet{.Columns = lcols1.data(), .ColumnCount = 2, .RowCount = 2, .RefCount = 1},
+        TRowSet{.Columns = lcols2.data(), .ColumnCount = 2, .RowCount = 2, .RefCount = 1},
+    };
+    std::vector<int64_t> rk = {2, 3, 3};
+    std::vector<int64_t> rv = {200, 300, 301};
+    std::vector<TColumn> rcols = {
+        TColumn{.Data = reinterpret_cast<char*>(rk.data())},
+        TColumn{.Data = reinterpret_cast<char*>(rv.data())},
+    };
+    TRowSet build{.Columns = rcols.data(), .ColumnCount = 2, .RowCount = 3, .RefCount = 1};
+
+    TKernelCompiler compiler;
+    auto spec = NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
+    TRowJoinProcessor processor(
+        compiler.CompileRowJoin(spec, /*buildIsLeft=*/false),
+        EJoinBuildSide::Right);
+
+    // The build side is not ready for two calls, then delivers its batch,
+    // is not ready again and ends.
+    const std::vector<EJoinFetchResult> buildSteps = {
+        EJoinFetchResult::NO_DATA,
+        EJoinFetchResult::NO_DATA,
+        EJoinFetchResult::OK,
+        EJoinFetchResult::NO_DATA,
+        EJoinFetchResult::FINISHED,
+    };
+    size_t buildStep = 0;
+    bool buildFinished = false;
+    size_t nextProbe = 0;
+    size_t probesBeforeBuild = 0;
+    bool probeFinished = false;
+    auto left = [&](TRowSet& rowSet) {
+        EXPECT_FALSE(probeFinished) << "the probe side is read after it ended";
+        if (nextProbe == probes.size()) {
+            probeFinished = true;
+            return EJoinFetchResult::FINISHED;
+        }
+        probesBeforeBuild += buildFinished ? 0 : 1;
+        rowSet = probes[nextProbe++];
+        return EJoinFetchResult::OK;
+    };
+    auto right = [&](TRowSet& rowSet) {
+        EXPECT_LT(buildStep, buildSteps.size());
+        const auto step = buildSteps[std::min(buildStep++, buildSteps.size() - 1)];
+        if (step == EJoinFetchResult::OK) {
+            rowSet = build;
+        }
+        buildFinished = step == EJoinFetchResult::FINISHED;
+        return step;
+    };
+
+    using TRow = std::tuple<int64_t, int64_t, int64_t, int64_t>;
+    std::vector<TRow> got;
+    bool finished = false;
+    for (int calls = 0; calls < 100 && !finished; ++calls) {
+        if (!buildFinished) {
+            EXPECT_EQ(
+                processor.RequiredInputSide(),
+                probeFinished ? EJoinBuildSide::Right : EJoinBuildSide::Auto);
+        }
+        TRowSet out{};
+        const auto result = processor.Process(left, right, out);
+        if (result == EJoinProcessorResult::FINISHED) {
+            finished = true;
+        } else if (result == EJoinProcessorResult::OK) {
+            ASSERT_EQ(out.ColumnCount, 4);
+            std::array<const int64_t*, 4> cols;
+            for (size_t c = 0; c < cols.size(); ++c) {
+                cols[c] = reinterpret_cast<const int64_t*>(out.Columns[c].Data);
+            }
+            for (int64_t i = 0; i < out.RowCount; ++i) {
+                got.emplace_back(cols[0][i], cols[1][i], cols[2][i], cols[3][i]);
+            }
+            Release(&out);
+        }
+    }
+
+    EXPECT_TRUE(finished);
+    EXPECT_EQ(probesBeforeBuild, probes.size()) << "both probe batches wait for the table";
+    std::vector<TRow> expected = {
+        {2, 20, 2, 200},
+        {2, 30, 2, 200},
+        {3, 40, 3, 300},
+        {3, 40, 3, 301},
+    };
+    std::sort(got.begin(), got.end());
     EXPECT_EQ(got, expected);
 }
 
