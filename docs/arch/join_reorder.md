@@ -11,8 +11,10 @@ keys onto that tree (see [predicate_pushdown.md](predicate_pushdown.md)).
 
 Runs after column qualification, typing, predicate pushdown, and input
 estimation, and before `ExtractEquiJoins`. With CBO enabled, inner-join
-flattening first exposes reassociation opportunities. Types are re-annotated
-after ordering because the tree is rebuilt.
+flattening first exposes reassociation opportunities; outer-join simplification
+runs before it, so an outer join that a predicate above makes inner joins the
+region ([optimizations.md](optimizations.md)). Types are re-annotated after
+ordering because the tree is rebuilt.
 
 ## Cost-based order and fallback
 
@@ -108,30 +110,31 @@ part, lineitem, supplier, partsupp, orders, nation
 Every join now has a direct equality; equijoin lifts a key on each. `supplier`
 attaches via `s_suppkey=l_suppkey`, `nation` via `s_nationkey=n_nationkey`, etc.
 
-### Chain under a decorrelation LEFT JOIN (q2)
+### Chain under an outer join (q72)
 
-Scalar decorrelation wraps the outer query in a `LEFT JOIN`, leaving the WHERE
-filter *above* it and the inner chain *under* its left input:
-
-```
-filter (... AND ps_supplycost == __scalar_0__)         -- holds the chain's edges
-└─ join left [p_partkey = __corr_0_0__]
-   ├─ <inner chain: part, supplier, partsupp, nation, region>   (cross)
-   └─ <decorrelated subquery>
-```
-
-The filter's edges (`p_partkey=ps_partkey`, `s_suppkey=ps_suppkey`,
-`s_nationkey=n_nationkey`, `n_regionkey=r_regionkey`) are threaded **through** the
-LEFT join into the inner chain. `ps_supplycost == __scalar_0__` is also an edge
-but `__scalar_0__` is not a chain leaf, so it is ignored when ordering the chain.
-Result:
+A `WHERE` filter above an outer join can hold edges of the inner chain under the
+join's preserved input. TPC-DS q72 joins nine relations with `JOIN ... ON`,
+then LEFT-joins `promotion` and `catalog_returns`; its `WHERE` compares
+`d1.d_week_seq = d2.d_week_seq`. No `WHERE` conjunct rejects the NULLs of the
+two outer inputs, so both joins stay LEFT:
 
 ```
-((((part × partsupp) × supplier) × nation) × region)
+filter (d1.d_week_seq == d2.d_week_seq AND ...)        -- holds a chain edge
+└─ join left (cs_item_sk == cr_item_sk AND cs_order_number == cr_order_number)
+   ├─ join left (cs_promo_sk == p_promo_sk)
+   │  ├─ <inner chain: catalog_sales, inventory, warehouse, item, ..., d1, d2, d3>
+   │  └─ promotion
+   └─ catalog_returns
 ```
 
-The subquery on the right side is reordered independently using its own filter's
-edges (edges reset across the project/aggregate above it).
+The edge `d1.d_week_seq = d2.d_week_seq` is threaded **through** both LEFT joins
+into the inner chain. Ordering uses it as an edge between `d1` and `d2`, and
+equi-key extraction lifts it into a key of the join that brings in `d1`.
+
+When a `WHERE` conjunct does reject the NULLs of an outer input, as the
+comparison with a scalar subquery value does after decorrelation (TPC-H q2),
+outer-join simplification has already made that join inner, and its input is one
+more relation of the region.
 
 ## Non-goals
 

@@ -456,6 +456,9 @@ TTypePtr UntypedNullValueType() {
 
 // Calls whose result is NOT null-strict (never wrapped by the pass): they return a
 // non-null bool or have bespoke NULL semantics handled in qumirdb.oz / elsewhere.
+// SimplifyOuterJoins relies on this list: every call outside it is assumed null-strict.
+// A future non-strict function (one that can return non-NULL on a NULL argument, such as
+// concat, greatest, least) must be added here, or the pass will drop rows.
 bool IsExcludedCall(const std::string& name) {
     return name == "qdb_is_null" || name == "qdb_is_true" ||
            name == "coalesce" || name == "nullif" || name == "nvl" || name == "ifnull";
@@ -2316,6 +2319,13 @@ std::pair<TExprPtr, TTypePtr> ExpandNullable(
     uint64_t counter = 0; // per-query temp-name counter (unique within this expansion)
     TTypePtr t = Expand(e, inputType, counter);
     return {e, t};
+}
+
+bool IsNullStrictCallArgument(const std::string& name, size_t index) {
+    if (IsExcludedCall(name)) {
+        return false;
+    }
+    return name != "qdb_in_list" || index == 0;
 }
 
 std::pair<TExprPtr, TTypePtr> ExpandKernelExpr(const TExprPtr& expr,

@@ -76,12 +76,12 @@ project (id, m)                            # m is NULL for every row
          └─ source u
 ```
 
-A filter keeps a row only when its predicate is TRUE. When the subquery is a
-conjunct of `WHERE` or `HAVING`, or an operand of a comparison, an arithmetic
-operator or `NOT` on the way up to one, a NULL value makes the conjunct NULL and
-drops the row anyway. There the join is `inner`, which join reordering can move
-and equi-join extraction can key (q6 and q15 compare a column with the
-subquery):
+A filter keeps a row only when its predicate is TRUE. When a `WHERE` or
+`HAVING` conjunct compares a column with the subquery value, a NULL value makes
+the conjunct NULL and drops the row anyway. Outer-join simplification
+([optimizations.md](optimizations.md)) then turns the join into an `inner`
+one, which join reordering can move and equi-join extraction can key (q6 and
+q15 compare a column with the subquery):
 
 ```
 ... AND c_acctbal > (SELECT avg(c_acctbal) FROM customer WHERE c_acctbal>0)
@@ -92,8 +92,10 @@ filter (> c_acctbal __scalar_0__)
    └─ project (__scalar_0__ = avg…)        # global aggregate, one row
 ```
 
-Used by q11 (HAVING), q15, q22. Under `OR`, `IS NULL`, `CASE` or a function such
-as `coalesce`, and in the SELECT list, the join stays `LEFT`.
+Used by q11 (HAVING), q15, q22. Under `IS NULL`, `CASE` or `coalesce`, in an
+`OR` whose other branch does not reject the NULL, and in the SELECT list, the
+join stays `LEFT`. The same rule applies to the LEFT join of a correlated
+subquery below.
 
 ### Correlated → group-by + LEFT join (Apply elimination)
 
@@ -135,9 +137,11 @@ filter (< l_quantity __scalar_0__)
          └─ source lineitem            -- group by l_partkey, exposed as __corr_0_0__
 ```
 
-`LEFT` is required: a part with no matching lineitems yields `NULL`, and
-`l_quantity < NULL` is unknown → the row is filtered out, matching SQL scalar
-semantics. The comparison stays above the join because it spans both sides.
+`LEFT` keeps the outer rows wherever the subquery appears: a part with no
+matching lineitems yields `NULL`. Here `l_quantity < NULL` is unknown and the
+row is filtered out, matching SQL scalar semantics, so outer-join
+simplification later makes the join inner (see below). The comparison spans
+both sides and stays above the join or in its residual.
 
 Multiple correlation columns are supported (one group key + one join key each).
 The correlated subquery may itself sit inside an `IN` subquery — it is handled
@@ -146,11 +150,15 @@ recursively while that `IN`'s body is built (q20: correlation on `ps_partkey` an
 
 ### Interaction with the optimizer
 
-The decorrelation LEFT join separates the outer WHERE filter from the inner FROM
-chain. Reorder threads the filter's equalities **through** the LEFT join so the
-inner chain still reorders connectedly; equijoin pushes the preserved-side
-conjuncts down and keeps the scalar comparison above the join. See the q2 example
-in [join_reorder.md](join_reorder.md).
+When the WHERE comparison with `__scalar_N__` rejects its NULL, the usual case,
+outer-join simplification makes the decorrelation join inner before join
+ordering. The aggregated subquery is then one more relation of the inner region,
+and the comparison becomes a key of the join that brings it in when it is an
+equality (TPC-H q2), or its residual otherwise (q17, q20). A decorrelation join
+that stays LEFT separates the outer WHERE filter from the inner FROM chain.
+Reorder threads the filter's equalities **through** the LEFT join so the inner
+chain still reorders connectedly, as in the q72 example in
+[join_reorder.md](join_reorder.md).
 
 The renamed equality `localCol = localCol` only rejects NULL keys, which the
 join would not match anyway. `SimplifySelfEquality` drops it for a non-nullable

@@ -37,6 +37,8 @@ SQL → logical plan → typed rewrite passes → physical task graph and kernel
    [logical_plan_build.md](logical_plan_build.md), [decorrelation.md](decorrelation.md).
 2. **AssignSourceAliases / QualifyColumns / AnnotateTypes** — resolve column
    ownership and schemas; re-annotate after structural rewrites.
+   **SimplifyOuterJoins** then narrows LEFT/RIGHT/FULL joins to weaker types
+   under predicates that reject NULL-extended rows.
 3. **FlattenInnerJoins** (with CBO), **SimplifySelfEquality**, then
    **PushDownPredicates** — expose join regions and filtered leaf inputs.
 4. **EstimateStats / ReorderJoins** — choose a cost-based connected join tree,

@@ -14,6 +14,7 @@
 #include <qdb/plan/passes/row_group_predicate.h>
 #include <qdb/plan/passes/runtime_filters.h>
 #include <qdb/plan/passes/self_equality.h>
+#include <qdb/plan/passes/simplify_outer_joins.h>
 #include <qdb/plan/passes/typing.h>
 #include <qdb/plan/plan_print.h>
 
@@ -39,6 +40,12 @@ void OptimizeOne(TOperatorPtr& plan, TPlanPassOptions& options, TFoldedBounds& f
     AssignSourceAliases(plan); stage("AssignSourceAliases");
     QualifyColumns(plan); stage("QualifyColumns");
     AnnotateTypes(plan, options.Annotation);
+    // Before inner-join flattening, so that a join narrowed to INNER joins its
+    // inner region, where join ordering, pushdown and runtime filters apply.
+    if (SimplifyOuterJoins(plan)) {
+        stage("SimplifyOuterJoins");
+        AnnotateTypes(plan, options.Annotation); // re-annotate: narrowed joins null-extend fewer columns
+    }
     if (options.EnableCbo) {
         plan = FlattenInnerJoins(plan); stage("FlattenInnerJoins");
         AnnotateTypes(plan, options.Annotation); // re-annotate: inner-join regions were reassociated

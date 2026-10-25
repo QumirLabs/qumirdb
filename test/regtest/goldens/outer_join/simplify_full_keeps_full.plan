@@ -1,0 +1,5 @@
+project (cv, ov) (rows≈14 cost≈7.9K)
+└─ filter (|| (== |c.grp| 1) (== |o.flag| 3)) (rows≈14 cost≈7.7K)
+   └─ join full [c.ck = o.ok] (rows≈28 cost≈6.3K)
+      ├─ source c AS c (rows≈8 cost≈192)
+      └─ source o AS o (rows≈20 cost≈480)

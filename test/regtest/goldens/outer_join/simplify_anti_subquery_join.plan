@@ -1,0 +1,7 @@
+project (cv) (rows≈1 cost≈10.3K)
+└─ join left_anti [c.ck = o.ok] (rows≈1 cost≈10.3K)
+   ├─ source c AS c (rows≈8 cost≈128)
+   └─ join inner [p.pk = o.flag] (rows≈30 cost≈5.8K)
+      ├─ filter (> |p.pv| 0) (rows≈3 cost≈192)
+      │  └─ source p AS p row-groups (> |p.pv| 0) (rows≈6 cost≈96)
+      └─ source o AS o (rows≈20 cost≈320)

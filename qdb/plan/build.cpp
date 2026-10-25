@@ -1752,34 +1752,17 @@ struct TExtractedSubqueries {
     std::unordered_map<const NSql::TSubqueryExpr*, NAst::TExprPtr> Columns;
 };
 
-// True if `expr` is NULL whenever one of its operands is NULL: a comparison, an
-// arithmetic operator, NOT, or a negation.
-bool PropagatesNull(const NAst::TExprPtr& expr) {
-    if (auto binary = NAst::TMaybeNode<NAst::TBinaryExpr>(expr)) {
-        const auto& op = binary.Cast()->Operator;
-        return op == "==" || op == "!=" || op == "<" || op == "<=" || op == ">" || op == ">="
-            || op == "+" || op == "-" || op == "*" || op == "/" || op == "%";
-    }
-    if (auto unary = NAst::TMaybeNode<NAst::TUnaryExpr>(expr)) {
-        return unary.Cast()->Operator == "!" || unary.Cast()->Operator == "-";
-    }
-    return false;
-}
-
 // Replaces each scalar subquery in a bound expression with a reference to a fresh
 // column. An uncorrelated subquery is broadcast onto `node` by a keyless join: a
-// LEFT join, so that a subquery with no row yields NULL. `rejectsNull` says that
-// `expr` is a conjunct of a filter, which keeps only rows where it is TRUE; there,
-// and in operands that propagate NULL up to it, a NULL subquery value drops the
-// row anyway, so the join is inner, which join ordering may move and key.
-// Correlated subqueries are decorrelated: the subquery is grouped by its
-// correlation columns and LEFT-joined onto `node` (Apply elimination).
+// LEFT join, so that a subquery with no row yields NULL. Correlated subqueries are
+// decorrelated: the subquery is grouped by its correlation columns and LEFT-joined
+// onto `node` (Apply elimination). Where a filter above rejects the NULL value,
+// outer-join simplification turns either join into an inner one.
 std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
     NAst::TExprPtr expr,
     TRelation& node,
     TBuildContext& context,
-    TExtractedSubqueries& extracted,
-    bool rejectsNull)
+    TExtractedSubqueries& extracted)
 {
     if (!expr) {
         return expr;
@@ -1968,13 +1951,11 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
             return std::unexpected(right.error());
         }
         const auto column = ColumnNames(right->Plan).front();
-        node = JoinRelations(std::move(node), std::move(*right), {},
-            rejectsNull ? EJoinType::Inner : EJoinType::Left, nullptr);
+        node = JoinRelations(std::move(node), std::move(*right), {}, EJoinType::Left, nullptr);
         return extract(Ident(expr->Location, column));
     }
-    const bool childRejectsNull = rejectsNull && PropagatesNull(expr);
     for (NAst::TExprPtr* child : expr->MutableChildren()) {
-        auto rewritten = ExtractScalarSubqueries(*child, node, context, extracted, childRejectsNull);
+        auto rewritten = ExtractScalarSubqueries(*child, node, context, extracted);
         if (!rewritten) {
             return std::unexpected(rewritten.error());
         }
@@ -2014,7 +1995,7 @@ std::expected<void, TError> ExtractAggregateArgumentSubqueries(
     }
     if (IsAggregateCall(expr)) {
         for (auto& arg : NAst::TMaybeNode<NAst::TCallExpr>(expr).Cast()->Args) {
-            auto rewritten = ExtractScalarSubqueries(arg, node, context, extracted, false);
+            auto rewritten = ExtractScalarSubqueries(arg, node, context, extracted);
             if (!rewritten) {
                 return std::unexpected(rewritten.error());
             }
@@ -2417,7 +2398,7 @@ std::expected<TRelation, TError> BuildSelect(
         [&](std::vector<TProjectionSpec>& projs, TRelation& n)
         -> std::expected<void, TError> {
         for (auto& p : projs) {
-            auto rewritten = ExtractScalarSubqueries(p.Expression, n, context, subqueries, false);
+            auto rewritten = ExtractScalarSubqueries(p.Expression, n, context, subqueries);
             if (!rewritten) {
                 return std::unexpected(rewritten.error());
             }
@@ -2465,7 +2446,7 @@ std::expected<TRelation, TError> BuildSelect(
                     }
                     // Unsupported EXISTS-OR shape: fall through to the residual path.
                 }
-                auto rewritten = ExtractScalarSubqueries(conjunct, node, context, subqueries, true);
+                auto rewritten = ExtractScalarSubqueries(conjunct, node, context, subqueries);
                 if (!rewritten) {
                     return std::unexpected(rewritten.error());
                 }
@@ -2822,7 +2803,7 @@ std::expected<TRelation, TError> BuildSelect(
         std::vector<NAst::TExprPtr> conjuncts;
         FlattenConjuncts(having, conjuncts);
         for (auto& conjunct : conjuncts) {
-            auto rewritten = ExtractScalarSubqueries(conjunct, node, context, subqueries, true);
+            auto rewritten = ExtractScalarSubqueries(conjunct, node, context, subqueries);
             if (!rewritten) {
                 return std::unexpected(rewritten.error());
             }

@@ -128,19 +128,103 @@ project (a)
 The correlated predicate is replaced by an equi-join on the correlation column,
 so the subquery is evaluated once per distinct value instead of once per row.
 What is left of it inside the subquery is `v.a = v.a`: the outer column was
-renamed onto the subquery's own one. `SimplifySelfEquality` (§2.2) removes it.
+renamed onto the subquery's own one. `SimplifySelfEquality` (§2.3) removes it.
 
 ## 2. Pipeline passes
 
 The pass order below is the per-plan optimizer sequence. Passes are
 idempotent; `AnnotateTypes` re-runs after each structural rewrite.
 
-### 2.1 FlattenInnerJoins
+### 2.1 SimplifyOuterJoins
+
+Outer-join simplification, from Galindo-Legaria and Rosenthal,
+[Outerjoin Simplification and Reordering for Query Optimization (ACM TODS 22(1),
+1997)](https://doi.org/10.1145/244810.244812); PostgreSQL does the same in
+`reduce_outer_joins`. A predicate is *null-rejecting* for a set of columns when
+it cannot be TRUE on a row where all of those columns are NULL. The row an outer
+join adds for an unmatched row of one input has NULL in every column of the
+other input. If a null-rejecting predicate must hold above the join, it drops
+all such rows, so the join need not produce them:
+
+| join | the predicate rejects NULLs of | becomes |
+|---|---|---|
+| `A LEFT JOIN B` | `B` | `A JOIN B` |
+| `A RIGHT JOIN B` | `A` | `A JOIN B` |
+| `A FULL JOIN B` | `A` | `A LEFT JOIN B` |
+| `A FULL JOIN B` | `B` | `A RIGHT JOIN B` |
+| `A FULL JOIN B` | `A` and `B` | `A JOIN B` |
+
+The narrower join returns the rows of the outer join without the
+null-extended rows that the predicate drops. Nothing else changes: duplicates,
+NULL keys, matched rows and empty inputs behave as before, and the predicate
+stays in the plan.
+
+The pass runs after column qualification and typing, before
+`FlattenInnerJoins`. A join it makes inner then belongs to the surrounding inner
+region: DPccp can reorder it, predicate pushdown and equi-key extraction treat
+it as an inner join, and runtime filters can enter it. Typing runs again after a
+rewrite, because the columns of an input that is no longer null-extended may
+become non-nullable.
+
+```sql
+SELECT t.c, u.d FROM t LEFT JOIN u ON t.a = u.a WHERE u.d <> 'p';
+```
+
+```
+before                              after
+project (c, d)                      project (c, d)
+└─ filter (!= |u.d| "p")            └─ join inner [t.a = u.a]
+   └─ join left [t.a = u.a]            ├─ source t.parquet AS t
+      ├─ source t.parquet AS t         └─ filter (!= |u.d| "p")
+      └─ source u.parquet AS u            └─ source u.parquet AS u
+```
+
+The pass walks the plan top-down and carries the predicates that every row of
+the current subtree must satisfy to reach the result. A `WHERE` filter adds its
+predicate. An inner join passes the predicates from above, its `ON` condition
+and its keys to both inputs: the condition filters the pairs. A LEFT or RIGHT
+join passes the predicates from above to its preserved input, and its own
+condition to the null-extended input, where a row that matches nothing is never
+output. A semi or anti join passes the predicates from above to the input it
+returns; a semi join also passes its condition to both inputs, an anti join
+only to the input it does not return. A FULL join passes nothing. So a join made
+inner can make the joins under it inner: in
+
+```sql
+SELECT ... FROM a LEFT JOIN b ON a.x = b.x LEFT JOIN c ON b.y = c.y WHERE c.z = 1;
+```
+
+the `WHERE` makes the upper join inner, and its `ON` then rejects the NULLs of
+`b`. Projections, aggregates, windows, limits and unions stop the walk, so a
+predicate above a derived table does not narrow a join inside it. The usual
+case is decorrelation (§1.5): the comparison with a scalar subquery value
+rejects its NULL, and the decorrelation LEFT join becomes inner (TPC-H q2, q17,
+q20; TPC-DS q1, q6, q81).
+
+The null-rejection test follows the NULL semantics of the kernels, which
+evaluate an operator, a cast or a function on a NULL argument as NULL, except
+for the calls with their own NULL handling. It accepts:
+
+- comparisons, arithmetic, casts, `LIKE` and functions over a column of the
+  set, nested to any depth;
+- `x IN (...)` when the operand `x` is NULL;
+- `IS NOT NULL` of such an expression, and `NOT` of such an expression, which
+  is NULL as well;
+- `p AND q` when `p` or `q` rejects, `p OR q` only when both do.
+
+It refuses `IS NULL`, `coalesce`, `ifnull`, `nvl`, `nullif`, `CASE`, an `IN`
+list that has the column only among its items, `NOT` over anything that may be
+TRUE or FALSE on a NULL argument, and any expression it does not know. A
+refused predicate keeps the join outer. `IS NULL` on a join key is the
+anti-join pattern that `RewriteOuterJoinAsAnti` handles at the end of the
+pipeline.
+
+### 2.2 FlattenInnerJoins
 
 Only with the cost-based optimizer (default; `--nocbo` disables it). Collapses a
 left-deep inner-join chain into one region so DPccp can reassociate it freely.
 
-### 2.2 SimplifySelfEquality
+### 2.3 SimplifySelfEquality
 
 A filter that compares a column with itself only rejects NULLs, but the
 estimator would cost it as an equality of two columns, `1/NDV`. Decorrelation
@@ -173,7 +257,7 @@ while `NOT (v.a IS NOT NULL)` would be true.
 A comparison that is kept is estimated by `EstimateStats` as the non-NULL
 fraction of the column, never through its NDV.
 
-### 2.3 PushDownPredicates
+### 2.4 PushDownPredicates
 
 A conjunction above a join is split per side: conjuncts referencing only one
 side sink onto that side, the rest stays above as a residual. This is the
@@ -242,7 +326,7 @@ filter (== |x.tag| "s")                     project (x.a, x.tag)
 
 The `u` branch, the union and the filter all disappear.
 
-### 2.4 ReorderJoins
+### 2.5 ReorderJoins
 
 Turns a cross-join chain into a connected order, threading equalities down the
 chain; with the CBO on, DPccp picks the order by estimated cost using
@@ -267,7 +351,7 @@ join inner                        join inner
 └─ source u AS u                  └─ source v AS v        (rows≈3)
 ```
 
-### 2.5 ExtractEquiJoins
+### 2.6 ExtractEquiJoins
 
 Lifts equalities out of the residual filter into join keys, using equivalence
 classes: `t.a = u.a AND u.a = v.a` yields a key for the upper join even though
@@ -327,7 +411,7 @@ Each `nation` scan gets `n_name = 'FRANCE' OR n_name = 'UNITED KINGDOM'`, so 23
 of 25 nations — and everything joined through them — are dropped before the
 join, while the pairing condition is still enforced by the residual above.
 
-### 2.6 PushDownSemiJoins
+### 2.7 PushDownSemiJoins
 
 A semi join whose keys touch one side of an inner join below it is pushed onto
 that side, so the semi filter shrinks the input before the inner join runs.
@@ -345,7 +429,7 @@ join left_semi [t.a = u.a]          join inner [t.a = v.a]
 └─ source u AS u                    └─ source v AS v
 ```
 
-### 2.7 PushDownLimits
+### 2.8 PushDownLimits
 
 `LIMIT` sinks through row-preserving projections down to the source, so the scan
 stops early instead of after the whole projection chain.
@@ -363,7 +447,7 @@ limit                     project (a)
          └─ source t                └─ source t AS t
 ```
 
-### 2.8 ApplyTopSort
+### 2.9 ApplyTopSort
 
 `limit(sort(...))` collapses into a single top-K operator, which keeps a bounded
 heap instead of materializing and sorting the whole input.
@@ -380,7 +464,7 @@ limit 2                                project (a)
       └─ source t AS t                       └─ source t AS t
 ```
 
-### 2.9 ApplyColumnPruning
+### 2.10 ApplyColumnPruning
 
 Narrows each operator's required input columns, which for a Parquet source means
 fewer column chunks are read. It does not change the tree shape, so it shows up
