@@ -765,6 +765,20 @@ the values its histogram described, without saying where they lie, so the
 column keeps its min/max and drops the histogram. Otherwise a date column that
 a join cut to one year's rows would still look spread over two centuries.
 
+A key of several pairs multiplies the NDVs of its columns. That is right for
+separate keys, but the columns of a composite key are correlated: TPC-H
+`(ps_partkey, ps_suppkey)` has 8M combinations, not 2M × 100K. When all pairs
+join the same two relations and their NDVs agree within 4x, the key is taken
+as a foreign key from the larger relation into the smaller, whose every row
+then has a match. The filters and joins below the join keep each input's
+share of those matches, taken as independent, so the join keeps at least
+`rows_L * rows_R / rows(smaller relation)`, which is the larger input when
+both relations are whole. Which relations a pair joins is a property of its
+equivalence class: a key column stands for every relation whose column the
+joins below equate with it, whichever column `ExtractEquiJoins` chose as the
+key. Pairs whose classes share no relation on one side, as a join of a join
+can have, are separate keys.
+
 A join's residual, the part of its condition other than key equalities, keeps
 the share of the key matches it accepts. It is estimated by the filter rules
 over the joined row and taken as independent of the keys. In TPC-DS SF10,

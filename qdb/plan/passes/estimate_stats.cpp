@@ -1033,6 +1033,19 @@ struct TJoinKeyStats {
     TJoinKeySide Right;
 };
 
+// A column as the relation that produces it names it.
+struct TColumnOrigin {
+    const IOperator* Relation = nullptr;
+    std::string Column;
+};
+
+// The relation one side of a multi-key join takes its key from, and its
+// columns, by key pair.
+struct TKeyRelation {
+    const IOperator* Relation = nullptr;
+    std::vector<std::string> Columns;
+};
+
 TStats::TColumnStatsPtr ColumnStatsOf(const TOperatorPtr& op, const std::string& name) {
     if (!op || !op->Stats_) {
         return nullptr;
@@ -1142,14 +1155,15 @@ TJoinKeyStats EstimateJoinKey(
 
 // Inner equi-join cardinality over the range both sides' keys span: rows =
 // sharedL*sharedR / max(domainL, domainR), where a side's domain is its key ndv
-// inside that range and its shared rows are the rows there. `twoRelations`
-// tells that every key pair joins the same two relations. See "Join
-// cardinality" in docs/arch/optimizations.md.
+// inside that range and its shared rows are the rows there. `referencedRows`
+// are the rows of the relation a composite key references, when every key
+// pair joins the same two relations. See "Join cardinality" in
+// docs/arch/optimizations.md.
 TJoinCardinality EstimateEquiJoin(
     double leftRows,
     double rightRows,
     const std::vector<TJoinKeyStats>& keys,
-    bool twoRelations)
+    std::optional<double> referencedRows)
 {
     double ndvL = 1.0;
     double ndvR = 1.0;
@@ -1191,7 +1205,7 @@ TJoinCardinality EstimateEquiJoin(
     // Several pairs between two relations whose NDVs match can be a composite
     // key, whose columns are not independent. Pairs from different relations
     // on one side are separate keys, and their independence stands.
-    if (keys.size() > 1 && twoRelations) {
+    if (keys.size() > 1 && referencedRows) {
         bool sameCompositeDomain = true;
         for (const auto& key : keys) {
             const double lo = std::max(1.0, std::min(key.Left.Ndv, key.Right.Ndv));
@@ -1201,8 +1215,14 @@ TJoinCardinality EstimateEquiJoin(
                 break;
             }
         }
+        // The key is taken as a foreign key: every row of the referencing
+        // relation has its match in the referenced one. The filters and joins
+        // below keep each input's share of those matches, taken as
+        // independent, so the join keeps sharedL * sharedR / (the referenced
+        // relation's rows). With both relations whole, that is the
+        // referencing relation.
         if (sameCompositeDomain) {
-            rows = std::max(rows, std::max(sharedRowsL, sharedRowsR));
+            rows = std::max(rows, sharedRowsL * sharedRowsR / std::max(*referencedRows, 1.0));
         }
     }
     // Returned distinct counts are clamped to input rows (distinct-in-input) for
@@ -1212,18 +1232,18 @@ TJoinCardinality EstimateEquiJoin(
     return {rows, ndvL, ndvR};
 }
 
-// The relation that produces `column` in the rows of `op`: the operator that
+// The relation that produces `column` in the rows of `op`, the operator that
 // computes it, reached through the joins, filters and renaming projections
-// that pass it on.
-const IOperator* ColumnRelation(const TOperatorPtr& op, const std::string& column) {
+// that pass it on, and the column's name there.
+TColumnOrigin ColumnOrigin(const TOperatorPtr& op, const std::string& column) {
     if (auto maybeJoin = TMaybeOp<TJoinOperator>(op)) {
         auto join = maybeJoin.Cast();
-        return ColumnRelation(
+        return ColumnOrigin(
             FieldType(join->Left()->OutputColumns().get(), column) ? join->Left() : join->Right(),
             column);
     }
     if (auto maybeFilter = TMaybeOp<TFilterOperator>(op)) {
-        return ColumnRelation(maybeFilter.Cast()->Input(), column);
+        return ColumnOrigin(maybeFilter.Cast()->Input(), column);
     }
     if (auto maybeProject = TMaybeOp<TProjectOperator>(op)) {
         auto project = maybeProject.Cast();
@@ -1232,12 +1252,32 @@ const IOperator* ColumnRelation(const TOperatorPtr& op, const std::string& colum
                 continue;
             }
             if (auto maybeIdent = TMaybeNode<TIdentExpr>(projection.Expression)) {
-                return ColumnRelation(project->Input(), maybeIdent.Cast()->Name);
+                return ColumnOrigin(project->Input(), maybeIdent.Cast()->Name);
             }
             break;
         }
     }
-    return op.get();
+    return {op.get(), column};
+}
+
+// The rows of a key's relation, before the filters and joins above it; 0
+// when unknown.
+double RelationRows(const TKeyRelation& key) {
+    return key.Relation->Stats_
+        ? static_cast<double>(key.Relation->Stats_->RowCount)
+        : 0.0;
+}
+
+// The NDV of a key's column of the pair `i` in its relation.
+std::optional<double> RelationNdv(const TKeyRelation& key, size_t i) {
+    if (!key.Relation->Stats_) {
+        return std::nullopt;
+    }
+    auto it = key.Relation->Stats_->ColumnStats.find(key.Columns[i]);
+    if (it == key.Relation->Stats_->ColumnStats.end() || !it->second->Ndv) {
+        return std::nullopt;
+    }
+    return static_cast<double>(*it->second->Ndv);
 }
 
 // The key equalities that hold in the rows of `op`: the keys of the inner
@@ -1262,8 +1302,8 @@ void CollectKeyEqualities(const TOperatorPtr& op, std::vector<const TJoinKey*>& 
     CollectKeyEqualities(join->Right(), out);
 }
 
-// The relations of the columns that `column` equals in the rows of `op`.
-std::vector<const IOperator*> EquatedRelations(
+// The origins of the columns that `column` equals in the rows of `op`.
+std::vector<TColumnOrigin> EquatedColumns(
     const TOperatorPtr& op,
     const std::string& column,
     const std::vector<const TJoinKey*>& equalities)
@@ -1279,46 +1319,79 @@ std::vector<const IOperator*> EquatedRelations(
             }
         }
     }
-    std::vector<const IOperator*> relations;
+    std::vector<TColumnOrigin> origins;
+    origins.reserve(members.size());
     for (const auto member : members) {
-        const auto* relation = ColumnRelation(op, std::string(member));
-        if (std::ranges::find(relations, relation) == relations.end()) {
-            relations.push_back(relation);
-        }
+        origins.push_back(ColumnOrigin(op, std::string(member)));
     }
-    return relations;
+    return origins;
 }
 
-// Whether every key pair joins the same two relations: whether a relation on
-// each side holds a column of every pair's equivalence class. ExtractEquiJoins
-// keys a join with one column of a class on each side, and the joins below
-// can equate it with columns of other relations, so which relations a key
-// joins is a property of its class, not of the column chosen.
-bool KeysJoinTwoRelations(
+// The relation of one side of a multi-key join that holds a column of every
+// key pair's equivalence class, and those columns. ExtractEquiJoins keys a
+// join with one column of a class on each side, and the joins below can equate
+// it with columns of other relations, so which relation a key joins is a
+// property of its class, not of the column chosen. Of several such relations,
+// joined below on the whole key, the one with the fewest rows bounds the keys
+// the side holds.
+std::optional<TKeyRelation> KeyRelation(
+    const TOperatorPtr& input,
+    const std::vector<TJoinKey>& keys,
+    std::string TJoinKey::* side)
+{
+    std::vector<const TJoinKey*> equalities;
+    CollectKeyEqualities(input, equalities);
+    std::vector<std::vector<TColumnOrigin>> classes;
+    classes.reserve(keys.size());
+    for (const auto& key : keys) {
+        classes.push_back(EquatedColumns(input, key.*side, equalities));
+    }
+    auto columnOf = [](const std::vector<TColumnOrigin>& origins, const IOperator* relation) {
+        auto it = std::ranges::find(origins, relation, &TColumnOrigin::Relation);
+        return it == origins.end()
+            ? nullptr
+            : &it->Column;
+    };
+    std::optional<TKeyRelation> best;
+    for (const auto& candidate : classes.front()) {
+        TKeyRelation relation{.Relation = candidate.Relation};
+        for (const auto& origins : classes) {
+            const auto* column = columnOf(origins, candidate.Relation);
+            if (!column) {
+                break;
+            }
+            relation.Columns.push_back(*column);
+        }
+        if (relation.Columns.size() == keys.size() && (!best || RelationRows(relation) < RelationRows(*best))) {
+            best = std::move(relation);
+        }
+    }
+    return best;
+}
+
+// The rows of the relation that a composite key references, when every key
+// pair joins the same two relations: the key is taken as a foreign key from
+// the larger relation into the smaller.
+std::optional<double> ReferencedRows(
     const TOperatorPtr& left,
     const TOperatorPtr& right,
     const std::vector<TJoinKey>& keys)
 {
-    auto oneRelation = [&](const TOperatorPtr& input, std::string TJoinKey::* side) {
-        std::vector<const TJoinKey*> equalities;
-        CollectKeyEqualities(input, equalities);
-        std::vector<const IOperator*> shared;
-        for (size_t i = 0; i < keys.size(); ++i) {
-            auto relations = EquatedRelations(input, keys[i].*side, equalities);
-            if (i == 0) {
-                shared = std::move(relations);
-            } else {
-                std::erase_if(shared, [&](const IOperator* relation) {
-                    return std::ranges::find(relations, relation) == relations.end();
-                });
-            }
-            if (shared.empty()) {
-                return false;
-            }
-        }
-        return true;
+    auto keyLeft = KeyRelation(left, keys, &TJoinKey::Left);
+    if (!keyLeft) {
+        return std::nullopt;
+    }
+    auto keyRight = KeyRelation(right, keys, &TJoinKey::Right);
+    if (!keyRight) {
+        return std::nullopt;
+    }
+    auto rowsOf = [](const TKeyRelation& key, const TOperatorPtr& input) {
+        const double rows = RelationRows(key);
+        return rows > 0.0
+            ? rows
+            : static_cast<double>(input->Stats_->RowCount);
     };
-    return oneRelation(left, &TJoinKey::Left) && oneRelation(right, &TJoinKey::Right);
+    return std::min(rowsOf(*keyLeft, left), rowsOf(*keyRight, right));
 }
 
 // Fraction of the rows with key matches that keep one the residual accepts.
@@ -1377,7 +1450,7 @@ uint64_t JoinRows(
         leftStats.RowCount,
         rightStats.RowCount,
         keyStats,
-        keys.size() > 1 && KeysJoinTwoRelations(left, right, keys));
+        keys.size() > 1 ? ReferencedRows(left, right, keys) : std::nullopt);
     // The residual accepts a share of the key matches, taken as independent
     // of the keys.
     const double residual = ResidualSelectivity(
