@@ -222,36 +222,29 @@ flowchart LR
     P1 --> O
 ```
 
-When the build side is fixed and estimated small, lowering does not partition
-the join (see [join](join.md#shared-build-table)); `--join:mode=partitioned`
-turns this off. The build lanes keep their hash-shuffle tasks with one
-destination: they compact sparse batches and produce the join's runtime
-filter. One `join-build` task owns a `TJoinBuildTable` (the build row store and
-one hash table, the same table and kernels as a partition of the partitioned
-join), inserts every row and seals it. Each probe lane gets a `join-probe` task
-with its own `TJoinProbeProcessor` reading the shared table; it emits in the
-lane it reads, so the parent sees the probe side's lane count, and
-`OutputLanes` takes the shared or partitioned decision from the same function
-as lowering.
+Lowering does not partition a join whose build side is known before execution
+and estimated small. [join.md](join.md#shared-build-table) explains when and
+why. The graph has three parts:
 
-The table is published, not sent. A `TBroadcastConnection` from the build task
-to every probe task carries no rowsets: the build task seals the table and
-finishes the connection, and a probe task reads the table only after it fetched
-that finish, which orders the table's writes before its reads. The edge is an
-ordinary rowset edge, so the schedulers need nothing new: a waiting probe task
-demands its build task through it, and the finish wakes every probe task. Until
-then a probe task reports that it wants only that input, so its probe lanes do
-not read ahead. The build task and the probe tasks belong to one exec stage;
-the publication edge carries the build input's index, so the exec plan sees an
-ordinary binary join.
+- **Build.** The build lanes keep their hash-shuffle tasks, with one
+  destination. One `join-build` task inserts every row into one table and seals
+  it.
+- **Publication.** A broadcast connection goes from the build task to every
+  probe task and carries no rows. The build task finishes it after it seals the
+  table, and a probe task reads the table only after it has seen that finish.
+  It is an ordinary rowset edge, so the schedulers need nothing new: a waiting
+  probe task asks for its build task through it, and the finish wakes every
+  probe task. Until then a probe task asks only for this input and does not
+  read ahead from its lane.
+- **Probe.** Each probe lane gets its own `join-probe` task. It takes the
+  lane's batches as they arrive, often whole scan batches, and materializes
+  their output before it releases them. It emits in the lane it reads, so the
+  parent sees the lane count of the probe side.
 
-A probe task consumes its lane's batches as they arrive, often whole scan
-batches, and materializes their output before releasing them.
-
-When the only consumer of the join's own runtime filter sits on the probe
-input, lowering drops that consumer and the filter build: the probe right
-after it rejects the same rows exactly, so the filter would only add a lookup
-per row.
+The build task and the probe tasks belong to one exec stage. The publication
+edge carries the index of the build input, so the exec plan sees an ordinary
+binary join. The join's own runtime filter on the probe input is usually
+dropped; see [join.md](join.md#runtime-filter).
 
 ### Partitioned sort / top-sort
 

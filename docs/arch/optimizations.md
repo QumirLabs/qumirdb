@@ -686,15 +686,14 @@ conn join-right-shuffle hash-shuffle src=1 dst=2
 
 ### 4.7 Shared build table
 
-On by default (`--join:mode=shared`; `--join:mode=partitioned` turns it off). An
-inner or LEFT SEMI/ANTI equi-join whose build side is fixed before execution
-(build-first above, or the build of a runtime filter) and estimated at most
-`TJoinSettings::SharedMaxBuildRows` rows is not partitioned. One task builds
-one hash table from the whole build side, and every lane of the probe side
-probes it in place, so the join emits in the probe lanes. The table and kernels
-are those of the partitioned join. The join's own runtime filter on its probe
-input is dropped, since the probe right after it rejects the same rows. Other
-joins stay partitioned. See [join.md](join.md#shared-build-table) and
+On by default; `--join:mode=partitioned` turns it off. An inner or LEFT
+SEMI/ANTI equi-join is not partitioned when its build side is known before
+execution (build-first above) and estimated small. One task builds one hash
+table from all build rows, and every probe lane probes that same table. The
+large probe side is not shuffled, and the join emits in the probe lanes. The
+join's own runtime filter on the probe input is dropped, because the probe
+right after it rejects the same rows. Other joins stay partitioned. See
+[join.md](join.md#shared-build-table) and
 [scheduler_runtime.md](scheduler_runtime.md#equi-join-with-a-shared-build-table).
 
 ```
