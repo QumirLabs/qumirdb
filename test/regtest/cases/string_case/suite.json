@@ -33,6 +33,9 @@
     "join.sql": {
       "order": "ordered"
     },
+    "join_residual.sql": {
+      "order": "ordered"
+    },
     "having.sql": {
       "order": "ordered"
     },
