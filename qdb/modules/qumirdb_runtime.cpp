@@ -438,6 +438,10 @@ void qdb_string_arena_reset(void* arena) {
     static_cast<TStringArena*>(arena)->Reset();
 }
 
+uint8_t* qdb_string_arena_alloc(void* arena, int64_t size) {
+    return reinterpret_cast<uint8_t*>(static_cast<TStringArena*>(arena)->Alloc(size));
+}
+
 qdb_string_view qdb_regexp_replace(
     void* arena, const TCompiledRegex* regex, qdb_string_view input)
 {

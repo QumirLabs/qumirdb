@@ -167,7 +167,8 @@ constexpr const char* CacheSchemaVersion = "v1";
 // Bump when the generated key helpers or the .oz kernel libraries change.
 // The row join table adds join_rows.oz and the lookup-key equality overload.
 // Join dispatch entrypoints take the residual's string arena.
-constexpr const char* KernelLibVersion = "49";
+// qumirdb.oz gains upper and lower.
+constexpr const char* KernelLibVersion = "50";
 } // namespace
 
 NQumir::NCodeGen::TLlvmRunner::TLinkedModule CompileKernelAstCached(
