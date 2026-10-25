@@ -6,6 +6,8 @@
 #include <qdb/plan/types/nullable.h>
 
 #include <cstdlib>
+#include <cstring>
+#include <limits>
 #include <stdexcept>
 
 #include <arrow/api.h>
@@ -29,6 +31,10 @@
 #include <qumir/parser/type.h>
 
 namespace NQdb {
+
+uint8_t DictionaryOffsetWidth(int64_t totalBytes) {
+    return totalBytes > std::numeric_limits<int32_t>::max() ? 8 : 4;
+}
 
 namespace {
 
@@ -57,6 +63,10 @@ TTypePtr ArrowTypeToQumir(const std::shared_ptr<arrow::DataType>& type) {
         }
         case arrow::Type::DECIMAL256:
             throw std::runtime_error("DECIMAL256 parquet columns are not supported");
+        case arrow::Type::DICTIONARY:
+            // Scans expand dictionaries into plain values; see ExpandStringDictionary.
+            return ArrowTypeToQumir(
+                std::static_pointer_cast<arrow::DictionaryType>(type)->value_type());
         default: return nullptr;
     }
 }
@@ -76,9 +86,13 @@ TTypePtr ArrowFieldToQumir(const std::shared_ptr<arrow::Field>& field) {
     return type;
 }
 
+arrow::MemoryPool* GetMemoryPool();
+
 struct TBatchData {
     std::shared_ptr<arrow::RecordBatch> Batch;
     std::vector<TColumn> Columns;
+    // Plain offsets and bytes of expanded dictionary columns.
+    std::vector<std::shared_ptr<arrow::Buffer>> Expanded;
 };
 
 void DestroyBatch(TRowSet* rs) {
@@ -95,6 +109,89 @@ char* NumericData(const std::shared_ptr<arrow::Array>& arr) {
 char* FixedByteWidthData(const std::shared_ptr<arrow::Array>& arr, int32_t byteWidth) {
     const uint8_t* raw = arr->data()->buffers[1]->data();
     return const_cast<char*>(reinterpret_cast<const char*>(raw)) + arr->offset() * byteWidth;
+}
+
+// Kernels read strings as offsets into contiguous bytes, so a dictionary
+// column is expanded here. Decoding dictionary codes and gathering the values
+// in one tight loop costs several times less than Arrow's value-by-value
+// string builder. Values up to GatherWidth bytes are copied with one
+// fixed-width move.
+void ExpandStringDictionary(const arrow::DictionaryArray& array, TColumn& col, TBatchData& owner) {
+    constexpr int64_t GatherWidth = 16;
+    const auto& type = static_cast<const arrow::DictionaryType&>(*array.type());
+    if (type.index_type()->id() != arrow::Type::INT32 || type.value_type()->id() != arrow::Type::STRING) {
+        throw std::runtime_error("unsupported parquet dictionary type " + type.ToString());
+    }
+    const auto& dictionary = static_cast<const arrow::StringArray&>(*array.dictionary());
+    const int32_t* codes = std::static_pointer_cast<arrow::Int32Array>(array.indices())->raw_values();
+    const int64_t rows = array.length();
+    const int64_t entries = dictionary.length();
+
+    auto valueOffset = [&](int64_t entry) {
+        return static_cast<int64_t>(dictionary.value_offset(entry));
+    };
+    // The dictionary is shared by all batches of a row group, so nothing here
+    // may depend on its size: the work per batch is proportional to the rows.
+    const auto* dictionaryBytes = reinterpret_cast<const char*>(dictionary.raw_data());
+    const char* dictionaryEnd = dictionaryBytes + valueOffset(entries);
+
+    // A null row keeps an arbitrary code, so it expands to an empty value.
+    const bool hasNulls = array.null_count() > 0;
+    auto entryOf = [&](int64_t row) -> int64_t {
+        return hasNulls && array.IsNull(row) ? -1 : codes[row];
+    };
+    auto length = [&](int64_t entry) -> int64_t {
+        return entry < 0 ? 0 : dictionary.value_length(entry);
+    };
+
+    int64_t bytes = 0;
+    for (int64_t row = 0; row < rows; ++row) {
+        bytes += length(entryOf(row));
+    }
+    const uint8_t offsetWidth = DictionaryOffsetWidth(bytes);
+
+    // The Arrow pool keeps freed batch memory mapped; fresh heap pages would
+    // fault and be zeroed by the kernel for every batch.
+    auto allocate = [](int64_t size) {
+        auto buffer = arrow::AllocateBuffer(size, GetMemoryPool());
+        if (!buffer.ok()) {
+            throw std::runtime_error(buffer.status().ToString());
+        }
+        return std::shared_ptr<arrow::Buffer>(std::move(*buffer));
+    };
+    auto offsets = allocate((rows + 1) * static_cast<int64_t>(offsetWidth));
+    auto data = allocate(bytes + GatherWidth);
+    auto* bytesOut = reinterpret_cast<char*>(data->mutable_data());
+    auto gather = [&](auto* out) {
+        int64_t position = 0;
+        for (int64_t row = 0; row < rows; ++row) {
+            out[row] = position;
+            const int64_t entry = entryOf(row);
+            const int64_t size = length(entry);
+            if (size > 0) {
+                const char* value = dictionaryBytes + valueOffset(entry);
+                // A fixed-width move is only safe while it stays inside the
+                // dictionary bytes; the last values are copied exactly.
+                if (size <= GatherWidth && value + GatherWidth <= dictionaryEnd) {
+                    std::memcpy(bytesOut + position, value, GatherWidth);
+                } else {
+                    std::memcpy(bytesOut + position, value, static_cast<size_t>(size));
+                }
+            }
+            position += size;
+        }
+        out[rows] = position;
+        col.Offsets = out;
+    };
+    if (offsetWidth == 8) {
+        gather(reinterpret_cast<int64_t*>(offsets->mutable_data()));
+    } else {
+        gather(reinterpret_cast<int32_t*>(offsets->mutable_data()));
+    }
+    col.OffsetWidth = offsetWidth;
+    col.Data = bytesOut;
+    owner.Expanded.push_back(std::move(offsets));
+    owner.Expanded.push_back(std::move(data));
 }
 
 void RecordBatchToRowSet(
@@ -153,7 +250,8 @@ void RecordBatchToRowSet(
             }
             case arrow::Type::STRING: {
                 auto typed = std::static_pointer_cast<arrow::StringArray>(arr);
-                const int32_t* src = typed->raw_value_offsets() + arr->offset();
+                // raw_value_offsets() already accounts for the array offset.
+                const int32_t* src = typed->raw_value_offsets();
                 int32_t base = src[0];
                 col.Offsets = const_cast<int32_t*>(src);
                 col.OffsetWidth = 4;
@@ -162,11 +260,16 @@ void RecordBatchToRowSet(
             }
             case arrow::Type::LARGE_STRING: {
                 auto typed = std::static_pointer_cast<arrow::LargeStringArray>(arr);
-                const int64_t* src = typed->raw_value_offsets() + arr->offset();
+                const int64_t* src = typed->raw_value_offsets();
                 int64_t base = src[0];
                 col.Offsets = const_cast<int64_t*>(src);
                 col.OffsetWidth = 8;
                 col.Data = const_cast<char*>(reinterpret_cast<const char*>(typed->raw_data()) + base);
+                break;
+            }
+            case arrow::Type::DICTIONARY: {
+                ExpandStringDictionary(
+                    static_cast<const arrow::DictionaryArray&>(*arr), col, *data);
                 break;
             }
             default: {
@@ -266,6 +369,9 @@ struct TParquetFileData {
 
     std::string Path;
     std::shared_ptr<parquet::arrow::FileReader> FileReader;
+    // Sequential scans read fully dictionary-encoded string columns as
+    // dictionaries. Row lookup keeps FileReader and its plain arrays.
+    std::shared_ptr<parquet::arrow::FileReader> ScanReader;
     std::shared_ptr<arrow::Schema> FileSchema;
     std::vector<std::string> FileNames;
     std::vector<TColumnSchema> FileColumns;
@@ -278,10 +384,13 @@ struct TParquetFileData {
 void TParquetFileData::Open()
 {
     // Compiled physical readers share this FileReader across scheduler tasks.
-    // That concurrency contract relies on a ReadableFile, disabled Arrow
-    // pre-buffering, and lookup code that uses neither page-index nor bloom-
-    // filter readers. Revisit sharing if any of those conditions changes.
-    auto infileResult = arrow::io::ReadableFile::Open(Path);
+    // That concurrency contract relies on a positional-read file, disabled
+    // Arrow pre-buffering, and lookup code that uses neither page-index nor
+    // bloom-filter readers. Revisit sharing if any of those conditions changes.
+    // A read-only mapping serves column chunks as slices of the page cache;
+    // a ReadableFile would copy every compressed chunk into a fresh buffer
+    // first, which is costly on bandwidth-limited machines.
+    auto infileResult = arrow::io::MemoryMappedFile::Open(Path, arrow::io::FileMode::READ);
     if (!infileResult.ok()) {
         throw std::runtime_error(infileResult.status().ToString());
     }
@@ -329,10 +438,60 @@ void TParquetFileData::Open()
     }
     FullSchema = TSchema{FileColumns};
 
+    // Asked for a column with plain-encoded pages, Arrow would hash every
+    // value to build a dictionary, so only fully dictionary-encoded string
+    // columns qualify.
+    auto metadata = FileReader->parquet_reader()->metadata();
+    auto scanProps = arrowProps;
+    for (int column = 0; column < metadata->num_columns(); ++column) {
+        const auto* descriptor = metadata->schema()->Column(column);
+        // Only a top-level leaf is named by its schema field. A nested leaf
+        // may share its name with another field.
+        auto field = descriptor->path()->ToDotVector().size() == 1
+            ? FileSchema->GetFieldByName(descriptor->name())
+            : nullptr;
+        if (descriptor->max_repetition_level() != 0 || !field ||
+            field->type()->id() != arrow::Type::STRING)
+        {
+            continue;
+        }
+        bool dictionaryPagesOnly = true;
+        for (int rg = 0; rg < metadata->num_row_groups() && dictionaryPagesOnly; ++rg) {
+            auto chunk = metadata->RowGroup(rg)->ColumnChunk(column);
+            const auto& pages = chunk->encoding_stats();
+            // A dictionary that takes half of the chunk or more has few
+            // repeated values, so expanding it only adds a copy of every
+            // string that the plain read would have returned in place.
+            dictionaryPagesOnly = chunk->has_dictionary_page() && !pages.empty() &&
+                2 * (chunk->data_page_offset() - chunk->dictionary_page_offset()) <
+                    chunk->total_compressed_size() &&
+                std::ranges::all_of(pages, [](const parquet::PageEncodingStats& page) {
+                    return page.page_type == parquet::PageType::DICTIONARY_PAGE ||
+                        page.encoding == parquet::Encoding::RLE_DICTIONARY ||
+                        page.encoding == parquet::Encoding::PLAIN_DICTIONARY;
+                });
+        }
+        if (dictionaryPagesOnly) {
+            scanProps.set_read_dictionary(column, true);
+        }
+    }
+    parquet::arrow::FileReaderBuilder scanBuilder;
+    status = scanBuilder
+        .memory_pool(GetMemoryPool())
+        ->properties(scanProps)
+        ->Open(infile, parquet::default_reader_properties(), metadata);
+    if (!status.ok()) {
+        throw std::runtime_error(status.ToString());
+    }
+    auto scanReaderResult = scanBuilder.Build();
+    if (!scanReaderResult.ok()) {
+        throw std::runtime_error(scanReaderResult.status().ToString());
+    }
+    ScanReader = std::move(*scanReaderResult);
+
     LoadColumnStats();
     LoadRowGroupRanges();
 
-    auto metadata = FileReader->parquet_reader()->metadata();
     RowGroups.reserve(static_cast<size_t>(metadata->num_row_groups()));
     for (int i = 0; i < metadata->num_row_groups(); ++i) {
         auto rowGroup = metadata->RowGroup(i);
@@ -544,8 +703,8 @@ void TParquetSource::ResetReader()
     auto rowGroups = EffectiveRowGroups();
     auto fileColumnIndexes = EffectiveFileColumnIndexes();
     auto batchReaderResult = !RestrictedColumns_
-        ? File_->FileReader->GetRecordBatchReader(rowGroups)
-        : File_->FileReader->GetRecordBatchReader(
+        ? File_->ScanReader->GetRecordBatchReader(rowGroups)
+        : File_->ScanReader->GetRecordBatchReader(
             rowGroups, fileColumnIndexes);
     if (!batchReaderResult.ok()) {
         throw std::runtime_error(batchReaderResult.status().ToString());
