@@ -1077,6 +1077,38 @@ TEST(ChooseJoinBuildSide, AutoWhenBalancedOrStatsMissing) {
     EXPECT_EQ(ChooseJoinBuildSide(*j), EJoinBuildSide::Auto);
 }
 
+// The row join table needs a fixed build side, so an inner equi-join on it
+// builds its smaller input at any ratio. Missing estimates and a residual,
+// which runs on the symmetric table, keep the adaptive build-up.
+TEST(ChooseJoinBuildSide, RowTableBuildsTheSmallerSideAtAnyRatio) {
+    const auto row = NScheduler::EJoinTableKind::Row;
+    auto join = InnerJoin();
+    ASSERT_TRUE(join);
+    auto* j = static_cast<TJoinOperator*>(join.get());
+
+    j->Left()->Stats_ = Rows(1200);
+    j->Right()->Stats_ = Rows(1000);
+    EXPECT_EQ(ChooseJoinBuildSide(*j, row), EJoinBuildSide::Right);
+    EXPECT_EQ(ChooseJoinBuildSide(*j), EJoinBuildSide::Auto)
+        << "the symmetric table keeps its ratio";
+
+    j->Left()->Stats_ = Rows(999);
+    EXPECT_EQ(ChooseJoinBuildSide(*j, row), EJoinBuildSide::Left);
+
+    j->Left()->Stats_ = Rows(1000);
+    EXPECT_EQ(ChooseJoinBuildSide(*j, row), EJoinBuildSide::Right);
+
+    j->Right()->Stats_ = nullptr;
+    EXPECT_EQ(ChooseJoinBuildSide(*j, row), EJoinBuildSide::Auto);
+
+    j->Right()->Stats_ = Rows(1200);
+    j->MutableFilter() = std::make_shared<TBinaryExpr>(
+        NQumir::TLocation{}, "<"_op,
+        std::make_shared<TIdentExpr>(NQumir::TLocation{}, "lv"),
+        std::make_shared<TIdentExpr>(NQumir::TLocation{}, "rv"));
+    EXPECT_EQ(ChooseJoinBuildSide(*j, row), EJoinBuildSide::Auto);
+}
+
 namespace {
 
 // One input row of a join side: a nullable key and a payload.

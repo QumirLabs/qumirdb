@@ -100,7 +100,8 @@ enum class EJoinSide { Left, Right };
 // Build the hash table on the side with fewer estimated rows and stream the
 // other when it is at least this many times larger. Hash-table cost is roughly
 // per build row, so rows (not bytes) is the right metric. Auto keeps the
-// adaptive symmetric build-up.
+// adaptive symmetric build-up. An inner join on the row join table builds its
+// smaller side at any ratio (ChooseJoinBuildSide).
 inline constexpr double JoinAsymmetryRatio = 10.0;
 enum class EJoinBuildSide { Auto, Left, Right };
 
