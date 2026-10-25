@@ -1,0 +1,6 @@
+{
+  "schema": "<struct (i_item_id <named Nullable [string]>) (ca_country <named Nullable [string]>) (ca_state <named Nullable [string]>) (ca_county <named Nullable [string]>) (agg1 <named Nullable [<named DECIMAL [12 2]>]>) (agg2 <named Nullable [<named DECIMAL [12 2]>]>) (agg3 <named Nullable [<named DECIMAL [12 2]>]>) (agg4 <named Nullable [<named DECIMAL [12 2]>]>) (agg5 <named Nullable [<named DECIMAL [12 2]>]>) (agg6 <named Nullable [<named DECIMAL [12 2]>]>) (agg7 <named Nullable [<named DECIMAL [12 2]>]>)>",
+  "rows": [
+    [null, null, null, null, null, null, null, null, null, null, null]
+  ]
+}

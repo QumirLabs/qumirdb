@@ -1,0 +1,4 @@
+{
+  "schema": "<struct (i_item_id string) (i_item_desc <named Nullable [string]>) (s_store_id string) (s_store_name <named Nullable [string]>) (store_sales_profit <named Nullable [f64]>) (store_returns_loss <named Nullable [f64]>) (catalog_sales_profit <named Nullable [f64]>)>",
+  "rows": []
+}

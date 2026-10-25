@@ -1,0 +1,6 @@
+{
+  "schema": "<struct (am_pm_ratio <named Nullable [<named DECIMAL [35 20]>]>)>",
+  "rows": [
+    [null]
+  ]
+}

@@ -1,0 +1,4 @@
+{
+  "schema": "<struct (c_customer_id string) (c_salutation <named Nullable [string]>) (c_first_name <named Nullable [string]>) (c_last_name <named Nullable [string]>) (ca_street_number <named Nullable [string]>) (ca_street_name <named Nullable [string]>) (ca_street_type <named Nullable [string]>) (ca_suite_number <named Nullable [string]>) (ca_city <named Nullable [string]>) (ca_county <named Nullable [string]>) (ca_state <named Nullable [string]>) (ca_zip <named Nullable [string]>) (ca_country <named Nullable [string]>) (ca_gmt_offset <named Nullable [f64]>) (ca_location_type <named Nullable [string]>) (ctr_total_return <named Nullable [f64]>)>",
+  "rows": []
+}

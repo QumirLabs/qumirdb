@@ -1,0 +1,4 @@
+{
+  "schema": "<struct (ca_zip <named Nullable [string]>) (col1 <named Nullable [f64]>)>",
+  "rows": []
+}

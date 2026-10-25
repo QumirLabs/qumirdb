@@ -1,0 +1,4 @@
+{
+  "schema": "<struct (i_item_desc <named Nullable [string]>) (w_warehouse_name <named Nullable [string]>) (d_week_seq <named Nullable [i32]>) (no_promo i64) (promo i64) (total_cnt i64)>",
+  "rows": []
+}

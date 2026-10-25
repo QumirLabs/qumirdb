@@ -1,0 +1,4 @@
+{
+  "schema": "<struct (i_item_id string) (total_sales <named Nullable [f64]>)>",
+  "rows": []
+}

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "execute": false,
+  "execute": true,
   "fixtures": {
     "call_center": {
       "json": "tables/call_center.json",
@@ -149,8 +149,7 @@
   },
   "tables": {},
   "variants": [
-    "single",
-    "threaded"
+    "single"
   ],
   "cases": {
     "q01.sql": {

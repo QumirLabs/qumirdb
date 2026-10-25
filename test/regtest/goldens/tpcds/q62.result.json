@@ -1,0 +1,4 @@
+{
+  "schema": "<struct (col0 <named Nullable [string]>) (sm_type <named Nullable [string]>) (web_name <named Nullable [string]>) (|30 days| i64) (|31-60 days| i64) (|61-90 days| i64) (|91-120 days| i64) (|>120 days| i64)>",
+  "rows": []
+}

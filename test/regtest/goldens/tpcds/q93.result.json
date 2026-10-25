@@ -1,0 +1,4 @@
+{
+  "schema": "<struct (ss_customer_sk <named Nullable [i32]>) (sumsales <named Nullable [f64]>)>",
+  "rows": []
+}

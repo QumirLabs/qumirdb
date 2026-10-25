@@ -1,0 +1,6 @@
+{
+  "schema": "<struct (store_only <named Nullable [i64]>) (catalog_only <named Nullable [i64]>) (store_and_catalog <named Nullable [i64]>)>",
+  "rows": [
+    [null, null, null]
+  ]
+}

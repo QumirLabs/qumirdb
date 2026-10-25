@@ -1,0 +1,4 @@
+{
+  "schema": "<struct (d_year <named Nullable [i32]>) (i_category_id <named Nullable [i32]>) (i_category <named Nullable [string]>) (col3 <named Nullable [f64]>)>",
+  "rows": []
+}
