@@ -240,6 +240,22 @@ NQumir::NAst::TTypePtr BuildSourceRuntimeType(TSourceOperator& src)
     return std::make_shared<NQumir::NAst::TStructType>(std::move(fields));
 }
 
+bool RowJoinTableServes(
+    const TJoinOperator& join,
+    NScheduler::EJoinTableKind table,
+    EJoinBuildSide buildSide)
+{
+    const auto type = join.JoinType();
+    const bool rowTableType = type == EJoinType::Inner
+        || (type == EJoinType::Left && buildSide == EJoinBuildSide::Right)
+        || (type == EJoinType::Right && buildSide == EJoinBuildSide::Left);
+    return table == NScheduler::EJoinTableKind::Row
+        && rowTableType
+        && !join.Filter()
+        && !join.Keys().empty()
+        && buildSide != EJoinBuildSide::Auto;
+}
+
 EJoinBuildSide ChooseJoinBuildSide(
     const TJoinOperator& join,
     NScheduler::EJoinTableKind table)
@@ -300,8 +316,8 @@ EJoinBuildSide ChooseJoinBuildSide(
     // on the symmetric table (a residual, or the legacy table) keep both
     // inputs growing until one is clearly smaller, because a fixed build side
     // there makes the probe input wait for it.
-    if (table == NScheduler::EJoinTableKind::Row
-        && type == EJoinType::Inner && !join.Filter())
+    if (type == EJoinType::Inner
+        && RowJoinTableServes(join, table, EJoinBuildSide::Left))
     {
         return r <= l ? EJoinBuildSide::Right : EJoinBuildSide::Left;
     }

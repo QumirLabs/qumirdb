@@ -86,7 +86,7 @@ struct TSortRuntimeProcess {
 void PrintRuntimePlan(
     std::ostream& out,
     const TOperatorPtr& root,
-    NScheduler::EJoinTableKind table = NScheduler::EJoinTableKind::Legacy);
+    NScheduler::EJoinTableKind table);
 
 NQumir::NAst::TTypePtr BuildSourceRuntimeType(TSourceOperator& src);
 
@@ -97,7 +97,16 @@ NQumir::NAst::TTypePtr BuildSourceRuntimeType(TSourceOperator& src);
 // builds the smaller side whenever both inputs have estimates.
 EJoinBuildSide ChooseJoinBuildSide(
     const TJoinOperator& join,
-    NScheduler::EJoinTableKind table = NScheduler::EJoinTableKind::Legacy);
+    NScheduler::EJoinTableKind table);
+
+// Whether the row join table (kernel/join/join_rows.oz) serves a join under
+// this table setting and build side: an equi-join without a residual that is
+// inner, or outer with a null-supplying build side (a preserved one needs
+// matched marks). The table has no adaptive mode, so the build side is fixed.
+bool RowJoinTableServes(
+    const TJoinOperator& join,
+    NScheduler::EJoinTableKind table,
+    EJoinBuildSide buildSide);
 std::string_view JoinBuildSideName(EJoinBuildSide side);
 
 TUnaryRuntimeProcess BuildFilterRuntimeProcess(

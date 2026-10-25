@@ -3074,6 +3074,56 @@ TEST(RowJoinProcessor, HoldsProbeBatchesUntilTheTableIsBuilt) {
     EXPECT_EQ(got, expected);
 }
 
+// A query can be torn down while the build is still running, for example after
+// an error elsewhere or a satisfied LIMIT. The probe batches the join holds for
+// the table must then be released with it.
+TEST(RowJoinProcessor, ReleasesHeldProbeBatchesWhenDestroyedBeforeTheBuild) {
+    using namespace NQumir::NAst;
+    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
+    TStructType leftType({{"lk", i64}});
+    TStructType rightType({{"rk", i64}});
+
+    std::vector<int64_t> keys = {1, 2};
+    std::vector<TColumn> cols = {TColumn{.Data = reinterpret_cast<char*>(keys.data())}};
+    int destroyed = 0;
+    auto countDestroy = [](TRowSet* rs) {
+        ++*static_cast<int*>(rs->Private);
+    };
+    TKernelCompiler compiler;
+    auto spec = NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
+    {
+        TRowJoinProcessor processor(
+            compiler.CompileRowJoin(spec, /*buildIsLeft=*/false),
+            EJoinBuildSide::Right);
+        int probesSent = 0;
+        auto left = [&](TRowSet& rowSet) {
+            if (probesSent == 2) {
+                return EJoinFetchResult::NO_DATA;
+            }
+            ++probesSent;
+            rowSet = TRowSet{
+                .Columns = cols.data(),
+                .ColumnCount = 1,
+                .RowCount = 2,
+                .Destroy = countDestroy,
+                .Private = &destroyed,
+                .RefCount = 1,
+            };
+            return EJoinFetchResult::OK;
+        };
+        auto right = [](TRowSet&) {
+            return EJoinFetchResult::NO_DATA;
+        };
+        for (int calls = 0; calls < 4; ++calls) {
+            TRowSet out{};
+            EXPECT_EQ(processor.Process(left, right, out), EJoinProcessorResult::NEED_DATA);
+        }
+        EXPECT_EQ(probesSent, 2);
+        EXPECT_EQ(destroyed, 0) << "held probe batches stay alive until the table is built";
+    }
+    EXPECT_EQ(destroyed, 2);
+}
+
 // A build side of 500,000 rows spans 31 arena blocks of 16,384 rows and fills
 // its 2^20-entry table to 0.48. Two million probe keys, three quarters of them
 // absent, meet about thirty entries whose salt matches a different key; the

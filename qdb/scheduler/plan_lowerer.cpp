@@ -1162,22 +1162,12 @@ private:
         return result;
     }
 
-    // The row join table (kernel/join/join_rows.oz) serves the equi-joins
-    // whose build side lowering fixed: by estimates or by a runtime filter.
-    // These are inner joins, and LEFT / RIGHT joins that build their
-    // null-supplying side. A residual, a preserved build side (it needs
-    // matched marks), another join type or a join without estimates keep the
+    // The row join table (kernel/join/join_rows.oz) serves a join that
+    // RowJoinTableServes accepts once lowering has fixed its build side, by
+    // estimates or by a runtime filter. A join without estimates keeps the
     // symmetric Robin Hood join.
     bool UsesRowJoinTable(const TJoinOperator& join, EJoinBuildSide buildSide) const {
-        const auto type = join.JoinType();
-        const bool rowTableType = type == EJoinType::Inner
-            || (type == EJoinType::Left && buildSide == EJoinBuildSide::Right)
-            || (type == EJoinType::Right && buildSide == EJoinBuildSide::Left);
-        return Settings_.Join.Table == NScheduler::EJoinTableKind::Row
-            && rowTableType
-            && !join.Filter()
-            && !join.Keys().empty()
-            && buildSide != EJoinBuildSide::Auto;
+        return RowJoinTableServes(join, Settings_.Join.Table, buildSide);
     }
 
     // Number of hash-shuffle partitions for a shuffled operator (grouped
