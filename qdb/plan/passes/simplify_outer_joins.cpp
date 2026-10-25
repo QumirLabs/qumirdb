@@ -12,6 +12,7 @@
 namespace NQdb {
 
 using namespace NQumir::NAst;
+using namespace NQumir::NAst::NLiterals;
 
 namespace {
 
@@ -21,28 +22,32 @@ using TColumns = std::unordered_set<std::string>;
 // casts and calls are strict as ExpandNullable evaluates them. AND and OR follow
 // three-valued logic: FALSE AND NULL is FALSE, TRUE OR NULL is TRUE.
 bool YieldsNull(const TExprPtr& expr, const TColumns& columns) {
-    if (auto ident = TMaybeNode<TIdentExpr>(expr)) {
-        return columns.contains(ident.Cast()->Name);
+    if (auto maybeIdent = TMaybeNode<TIdentExpr>(expr)) {
+        return columns.contains(maybeIdent.Cast()->Name);
     }
-    if (auto binary = TMaybeNode<TBinaryExpr>(expr)) {
-        const auto& node = binary.Cast();
-        if (node->Operator == "&&" || node->Operator == "||") {
-            return YieldsNull(node->Left, columns) && YieldsNull(node->Right, columns);
+    if (auto maybeBinary = TMaybeNode<TBinaryExpr>(expr)) {
+        auto binary = maybeBinary.Cast();
+        if (binary->Operator == "&&"_op || binary->Operator == "||"_op) {
+            return YieldsNull(binary->Left, columns) && YieldsNull(binary->Right, columns);
         }
-        return YieldsNull(node->Left, columns) || YieldsNull(node->Right, columns);
+        return YieldsNull(binary->Left, columns) || YieldsNull(binary->Right, columns);
     }
-    if (auto unary = TMaybeNode<TUnaryExpr>(expr)) {
-        return YieldsNull(unary.Cast()->Operand, columns);
+    if (auto maybeUnary = TMaybeNode<TUnaryExpr>(expr)) {
+        return YieldsNull(maybeUnary.Cast()->Operand, columns);
     }
-    if (auto cast = TMaybeNode<TCastExpr>(expr)) {
-        return YieldsNull(cast.Cast()->Operand, columns);
+    if (auto maybeCast = TMaybeNode<TCastExpr>(expr)) {
+        return YieldsNull(maybeCast.Cast()->Operand, columns);
     }
-    if (auto call = TMaybeNode<TCallExpr>(expr)) {
-        auto callee = TMaybeNode<TIdentExpr>(call.Cast()->Callee);
-        const auto& args = call.Cast()->Args;
-        for (size_t index = 0; callee && index < args.size(); ++index) {
-            if (NKernel::IsNullStrictCallArgument(callee.Cast()->Name, index)
-                && YieldsNull(args[index], columns))
+    if (auto maybeCall = TMaybeNode<TCallExpr>(expr)) {
+        auto call = maybeCall.Cast();
+        auto maybeCallee = TMaybeNode<TIdentExpr>(call->Callee);
+        if (!maybeCallee) {
+            return false;
+        }
+        auto callee = maybeCallee.Cast();
+        for (size_t index = 0; index < call->Args.size(); ++index) {
+            if (NKernel::IsNullStrictCallArgument(callee->Name, index)
+                && YieldsNull(call->Args[index], columns))
             {
                 return true;
             }
@@ -52,26 +57,44 @@ bool YieldsNull(const TExprPtr& expr, const TColumns& columns) {
     return false;
 }
 
+// The operand of IS NOT NULL, which reaches the planner as !qdb_is_null(x),
+// or null for any other predicate.
+TExprPtr IsNotNullOperand(const TExprPtr& predicate) {
+    auto maybeUnary = TMaybeNode<TUnaryExpr>(predicate);
+    if (!maybeUnary) {
+        return nullptr;
+    }
+    auto unary = maybeUnary.Cast();
+    if (unary->Operator != "!"_op) {
+        return nullptr;
+    }
+    auto maybeCall = TMaybeNode<TCallExpr>(unary->Operand);
+    if (!maybeCall) {
+        return nullptr;
+    }
+    auto call = maybeCall.Cast();
+    auto maybeCallee = TMaybeNode<TIdentExpr>(call->Callee);
+    if (!maybeCallee || maybeCallee.Cast()->Name != "qdb_is_null" || call->Args.size() != 1) {
+        return nullptr;
+    }
+    return call->Args.front();
+}
+
 } // namespace
 
 bool RejectsNulls(const TExprPtr& predicate, const TColumns& columns) {
-    if (auto binary = TMaybeNode<TBinaryExpr>(predicate)) {
-        const auto& node = binary.Cast();
-        if (node->Operator == "&&") {
-            return RejectsNulls(node->Left, columns) || RejectsNulls(node->Right, columns);
+    if (auto maybeBinary = TMaybeNode<TBinaryExpr>(predicate)) {
+        auto binary = maybeBinary.Cast();
+        if (binary->Operator == "&&"_op) {
+            return RejectsNulls(binary->Left, columns) || RejectsNulls(binary->Right, columns);
         }
-        if (node->Operator == "||") {
-            return RejectsNulls(node->Left, columns) && RejectsNulls(node->Right, columns);
+        if (binary->Operator == "||"_op) {
+            return RejectsNulls(binary->Left, columns) && RejectsNulls(binary->Right, columns);
         }
     }
     // IS NOT NULL is FALSE, not NULL, on a NULL operand.
-    if (auto unary = TMaybeNode<TUnaryExpr>(predicate); unary && unary.Cast()->Operator == "!") {
-        if (auto call = TMaybeNode<TCallExpr>(unary.Cast()->Operand)) {
-            auto callee = TMaybeNode<TIdentExpr>(call.Cast()->Callee);
-            if (callee && callee.Cast()->Name == "qdb_is_null" && call.Cast()->Args.size() == 1) {
-                return YieldsNull(call.Cast()->Args.front(), columns);
-            }
-        }
+    if (auto operand = IsNotNullOperand(predicate)) {
+        return YieldsNull(operand, columns);
     }
     // A filter drops a row whose predicate is NULL as it drops FALSE.
     return YieldsNull(predicate, columns);
@@ -149,7 +172,7 @@ TOperatorPtr SimplifyJoin(
     }
     for (const auto& key : join->Keys()) {
         if (!key.NullsEqual) {
-            condition.push_back(std::make_shared<TBinaryExpr>(NQumir::TLocation{}, TOperator("=="),
+            condition.push_back(std::make_shared<TBinaryExpr>(NQumir::TLocation{}, "=="_op,
                 std::make_shared<TIdentExpr>(NQumir::TLocation{}, key.Left),
                 std::make_shared<TIdentExpr>(NQumir::TLocation{}, key.Right)));
         }
@@ -208,13 +231,14 @@ TOperatorPtr SimplifyJoin(
 }
 
 TOperatorPtr Simplify(TOperatorPtr node, TPredicates above, bool& changed) {
-    if (auto filter = TMaybeOp<TFilterOperator>(node)) {
-        above.push_back(filter.Cast()->Predicate());
-        filter.Cast()->MutableInput() = Simplify(filter.Cast()->Input(), std::move(above), changed);
+    if (auto maybeFilter = TMaybeOp<TFilterOperator>(node)) {
+        auto filter = maybeFilter.Cast();
+        above.push_back(filter->Predicate());
+        filter->MutableInput() = Simplify(filter->Input(), std::move(above), changed);
         return node;
     }
-    if (auto join = TMaybeOp<TJoinOperator>(node)) {
-        return SimplifyJoin(join.Cast(), std::move(above), changed);
+    if (auto maybeJoin = TMaybeOp<TJoinOperator>(node)) {
+        return SimplifyJoin(maybeJoin.Cast(), std::move(above), changed);
     }
     // Other operators compute new columns or decide which rows reach the
     // predicates (a limit), so the predicates do not pass into their inputs.
