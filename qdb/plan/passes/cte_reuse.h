@@ -25,14 +25,18 @@ struct TCteReuseDecision {
 };
 using TCteReuseDecisions = std::unordered_map<TCteDefinition*, TCteReuseDecision>;
 
-// For each definition, pushes the disjunction of its references' predicates over
-// the CTE output columns into the shared plan. The disjunction is row-superset:
-// it drops only rows no consumer keeps, so the materialized producer stays
-// correct for every reference. Pushed only when every reference constrains the
-// column; delegates the descent (branch pruning, const-folding) to
-// PushDownPredicates. Run after main+definition optimization, before ChooseCteReuse.
+// For each definition, pushes its consumers' predicates into its plan. The
+// filter of a single reference moves into the definition, as for a derived
+// table. With several references, the disjunction of their predicates over the
+// CTE output columns is pushed and every consumer keeps its filter. The
+// disjunction is row-superset: it drops only rows no consumer keeps, so the
+// materialized producer stays correct for every reference. Pushed only when
+// every reference constrains the column. Consumers go before the definitions
+// they read, so a pushed predicate reaches nested definitions. Delegates the
+// descent (branch pruning, const-folding) to PushDownPredicates. Run after
+// main+definition optimization, before ChooseCteReuse.
 void PushConsumerPredicatesIntoDefinitions(
-    const TOperatorPtr& main,
+    TOperatorPtr& main,
     const NKernel::TAnnotationContext& context,
     TConstFolder& folder);
 
