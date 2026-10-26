@@ -4,6 +4,7 @@ enable_testing()
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(QDB_BUILD_SERVICE "Build QumirDB web service" OFF)
+option(QDB_BUILD_DAEMON "Build QumirDB daemon" OFF)
 option(QDB_BUILD_TESTS "Build QumirDB tests" OFF)
 option(QDB_USE_CCACHE "Compile through ccache when it is installed" ON)
 # Static LLVM archives add ~50 MB to every binary linking the codegen; the shared
@@ -59,9 +60,9 @@ else()
     message(STATUS "ccache: disabled")
 endif()
 
+add_subdirectory(externals)
 add_subdirectory(qdb)
 add_subdirectory(bin)
-add_subdirectory(externals)
 if(QDB_BUILD_TESTS)
     add_subdirectory(test)
 endif()
