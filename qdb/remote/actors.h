@@ -8,6 +8,7 @@ namespace NRemote {
 enum class EWellKnownActors : uint32_t {
     LocalScheduler = 1,
     Scheduler = 2,
+    Gateway = 3,
 };
 
 
