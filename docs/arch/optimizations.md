@@ -683,6 +683,16 @@ bucket, and a predicate the statistics cannot answer gets a default, 0.5 here.
   counts the distinct non-NULL constants inside min/max. `NOT IN` is estimated
   as the chain of `<>` it stands for, `(1 - 1/NDV)` per constant, so it cannot
   reach zero from a list longer than the NDV.
+- Equalities with constants and IN lists allow a column a set of values. An OR
+  of them on one column is the union of the sets, counted as one IN list:
+  `d_year = 2001 OR d_year = 2002` is two values. Conjuncts on one column
+  intersect their sets, a range on the column keeps the values inside it, and
+  `<>` or `NOT IN` takes its values out, so a column constrained twice is not
+  counted twice: `x IN (1, 2, 3) AND x <> 2` is two values. With a NULL among
+  them, `NOT IN` is never TRUE and leaves none.
+- Other disjuncts are taken as independent: `a OR b` drops the rows that both
+  drop, so it keeps `1 - (1 - s_a)(1 - s_b) = s_a + s_b - s_a * s_b`, the OR
+  selectivity of Selinger et al. (cited above).
 - A NULL compares as UNKNOWN, so a comparison, `=`, `<>`, a range or an `IN`
   list, keeps only non-NULL rows. The NDV and the histogram describe the
   non-NULL values, and the share of them a comparison keeps is scaled by the
@@ -763,3 +773,14 @@ inventory` matches on the item key, read from the two quantity histograms. A
 semi or anti join keeps a row whose key matches include one the residual
 accepts: with its matches taken as independent, a row with `m` matches loses
 them all with probability `(1 - s)^m`.
+
+A residual OR whose every branch constrains an input gives that input a
+necessary condition, which predicate pushdown applies below the join
+([predicate_pushdown.md](predicate_pushdown.md)). The join's rows then already
+satisfy those side filters `D`. The residual `R` implies them, so over those
+rows it keeps `P(R | D) = P(R) / P(D)` of the matches, not `P(R)` once more,
+which would count the conditions of each branch twice. In TPC-DS q48,
+`store_sales ⋈ customer_demographics` with its OR residual is estimated at
+113K rows against 123K actual, where counting both gave 2.6K. Join ordering
+estimates its joins before pushdown derives the side filters, so the residual
+keeps `P(R)` there and the two estimates agree.

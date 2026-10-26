@@ -1,4 +1,4 @@
 sort [k asc]
-└─ project (k) (rows≈7 cost≈1.2K)
-   └─ filter (|| (|| (== (call upper |t.s|) (call upper |t.t|)) (call qdb_string_view_sql_like (call lower |t.s|) (cast "%ё%" <named StringView>))) (== (call lower |t.t|) (cast "abc" <named StringView>))) (rows≈7 cost≈1.1K)
+└─ project (k) (rows≈10 cost≈1.2K)
+   └─ filter (|| (|| (== (call upper |t.s|) (call upper |t.t|)) (call qdb_string_view_sql_like (call lower |t.s|) (cast "%ё%" <named StringView>))) (== (call lower |t.t|) (cast "abc" <named StringView>))) (rows≈10 cost≈1.1K)
       └─ source t AS t row-groups (|| (|| (== (call upper |t.s|) (call upper |t.t|)) (call qdb_string_view_sql_like (call lower |t.s|) (cast "%ё%" <named StringView>))) (== (call lower |t.t|) (cast "abc" <named StringView>))) (rows≈14 cost≈560)

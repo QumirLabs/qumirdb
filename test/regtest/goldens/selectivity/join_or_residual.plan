@@ -1,0 +1,8 @@
+project (cnt) (rows≈1 cost≈8.6K)
+└─ aggregate keys=[__group__] aggs=[count_0=count] (rows≈1 cost≈8.6K)
+   └─ project (__group__) (rows≈13 cost≈8.4K)
+      └─ join inner [b.tag = a.tag] residual (|| (&& (== |a.grp| 0) (== |b.quad| 0)) (&& (== |a.grp| 1) (== |b.quad| 1))) (rows≈13 cost≈8.3K)
+         ├─ filter (|| (== |b.quad| 0) (== |b.quad| 1)) (rows≈7 cost≈1.6K)
+         │  └─ source t AS b row-groups (|| (== |b.quad| 0) (== |b.quad| 1)) (rows≈41 cost≈820)
+         └─ filter (|| (== |a.grp| 0) (== |a.grp| 1)) (rows≈16 cost≈1.6K)
+            └─ source t AS a row-groups (|| (== |a.grp| 0) (== |a.grp| 1)) (rows≈41 cost≈820)

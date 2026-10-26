@@ -121,6 +121,7 @@ TOperatorPtr Reconstruct(const TOperatorPtr& op) {
             StructuralClone(n.Cast()->Left()), StructuralClone(n.Cast()->Right()),
             n.Cast()->Keys(), n.Cast()->JoinType(), n.Cast()->Filter());
         // The constructor omits plan annotations.
+        join->MutableDerivedSideFilters() = n.Cast()->DerivedSideFilters();
         join->MutableRuntimeFilter() = n.Cast()->RuntimeFilter();
         return join;
     }

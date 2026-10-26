@@ -1,5 +1,5 @@
 top-sort [c_last_name asc, ss_ticket_number asc] limit 100
-└─ project (c_last_name, c_first_name, ca_city, bought_city, ss_ticket_number, extended_price, extended_tax, list_price) (rows≈1 cost≈27.7K)
+└─ project (c_last_name, c_first_name, ca_city, bought_city, ss_ticket_number, extended_price, extended_tax, list_price) (rows≈1 cost≈27.6K)
    └─ join inner [customer.c_customer_sk = dn.ss_customer_sk] residual (!= |current_addr.ca_city| |dn.bought_city|) (rows≈1 cost≈27.6K)
       ├─ join inner [current_addr.ca_address_sk = customer.c_current_addr_sk] (rows≈1 cost≈4.8K)
       │  ├─ source customer_address AS current_addr (rows≈10 cost≈200)
@@ -11,7 +11,7 @@ top-sort [c_last_name asc, ss_ticket_number asc] limit 100
                └─ join inner [store_sales.ss_sold_date_sk = date_dim.d_date_sk] (rows≈1 cost≈14K)
                   ├─ join inner [store_sales.ss_store_sk = store.s_store_sk] (rows≈1 cost≈9.5K)
                   │  ├─ join inner [household_demographics.hd_demo_sk = store_sales.ss_hdemo_sk] (rows≈1 cost≈4.9K)
-                  │  │  ├─ filter (|| (== |household_demographics.hd_dep_count| 5) (== |household_demographics.hd_vehicle_count| 3)) (rows≈5 cost≈240)
+                  │  │  ├─ filter (|| (== |household_demographics.hd_dep_count| 5) (== |household_demographics.hd_vehicle_count| 3)) (rows≈1 cost≈240)
                   │  │  │  └─ source household_demographics AS household_demographics row-groups (|| (== |household_demographics.hd_dep_count| 5) (== |household_demographics.hd_vehicle_count| 3)) (rows≈10 cost≈120)
                   │  │  └─ source store_sales AS store_sales (rows≈10 cost≈480)
                   │  └─ filter (call qdb_in_list |store.s_city| (cast "Midway" <named StringView>) (cast "Fairview" <named StringView>)) (rows≈5 cost≈400)

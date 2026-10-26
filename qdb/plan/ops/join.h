@@ -85,6 +85,15 @@ public:
     // Residual predicate, applied before emit; nullptr if absent.
     const NQumir::NAst::TExprPtr& Filter() const { return Filter_; }
     NQumir::NAst::TExprPtr& MutableFilter() { return Filter_; }
+    // Conditions over one input that the residual implies and that predicate
+    // pushdown has applied to that input. The residual is evaluated over rows
+    // that already satisfy them, which estimates must not count twice.
+    const std::vector<NQumir::NAst::TExprPtr>& DerivedSideFilters() const {
+        return DerivedSideFilters_;
+    }
+    std::vector<NQumir::NAst::TExprPtr>& MutableDerivedSideFilters() {
+        return DerivedSideFilters_;
+    }
     const std::optional<TRuntimeFilterSpec>& RuntimeFilter() const {
         return RuntimeFilter_;
     }
@@ -105,6 +114,7 @@ private:
     std::vector<TJoinKey> Keys_;
     EJoinType Type_;
     NQumir::NAst::TExprPtr Filter_; // parsed, unannotated; may be null
+    std::vector<NQumir::NAst::TExprPtr> DerivedSideFilters_;
     std::optional<TRuntimeFilterSpec> RuntimeFilter_;
 };
 

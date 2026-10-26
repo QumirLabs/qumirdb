@@ -1,0 +1,5 @@
+project (cnt) (rows≈1 cost≈1.9K)
+└─ aggregate keys=[__group__] aggs=[count_0=count] (rows≈1 cost≈1.9K)
+   └─ project (__group__) (rows≈11 cost≈1.7K)
+      └─ filter (|| (== |t.id| 3) (== |t.tag| (cast "blue" <named StringView>))) (rows≈11 cost≈1.6K)
+         └─ source t AS t row-groups (|| (== |t.id| 3) (== |t.tag| (cast "blue" <named StringView>))) (rows≈41 cost≈820)

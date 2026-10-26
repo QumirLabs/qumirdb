@@ -1,5 +1,5 @@
-project (x, y) (rows≈2 cost≈9.1K)
-└─ filter (|| (! (call qdb_is_null __in_mark_0__)) (== |t.y| 4)) (rows≈2 cost≈9K)
+project (x, y) (rows≈3 cost≈9.1K)
+└─ filter (|| (! (call qdb_is_null __in_mark_0__)) (== |t.y| 4)) (rows≈3 cost≈9K)
    └─ join left [t.x = __in_mark_0__] (rows≈5 cost≈8.9K)
       ├─ source t AS t (rows≈5 cost≈80)
       └─ project (__in_mark_0__) (rows≈8 cost≈4.5K)

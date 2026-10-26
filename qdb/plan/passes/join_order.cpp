@@ -446,6 +446,8 @@ TOperatorPtr SinkSemi(std::shared_ptr<TJoinOperator> semi) {
     auto& target = toLeft ? inner->MutableLeft() : inner->MutableRight();
     auto pushed = std::make_shared<TJoinOperator>(
         target, semi->Right(), semi->Keys(), semi->JoinType(), semi->Filter());
+    // The filters derived from the residual lie in `target` and the build side.
+    pushed->MutableDerivedSideFilters() = semi->DerivedSideFilters();
     target = SinkSemi(std::move(pushed));
     return inner;
 }
