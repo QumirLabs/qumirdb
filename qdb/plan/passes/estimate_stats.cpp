@@ -1370,8 +1370,12 @@ std::optional<TKeyRelation> KeyRelation(
 }
 
 // The rows of the relation that a composite key references, when every key
-// pair joins the same two relations: the key is taken as a foreign key from
-// the larger relation into the smaller.
+// pair joins the same two relations. A referencing key holds a subset of the
+// referenced key's values, which is unique there. Uniqueness shows when a key
+// column has about as many values as its relation has rows; a composite key
+// is rarely unique by one column, and then the NDVs show the containment: the
+// referenced side's are no smaller on any pair and larger on some. Only when
+// they agree is the smaller relation taken as the referenced one.
 std::optional<double> ReferencedRows(
     const TOperatorPtr& left,
     const TOperatorPtr& right,
@@ -1391,7 +1395,47 @@ std::optional<double> ReferencedRows(
             ? rows
             : static_cast<double>(input->Stats_->RowCount);
     };
-    return std::min(rowsOf(*keyLeft, left), rowsOf(*keyRight, right));
+    const double rowsL = rowsOf(*keyLeft, left);
+    const double rowsR = rowsOf(*keyRight, right);
+    std::vector<std::pair<double, double>> ndvs;
+    for (size_t i = 0; i < keys.size(); ++i) {
+        auto ndvL = RelationNdv(*keyLeft, i);
+        auto ndvR = RelationNdv(*keyRight, i);
+        if (!ndvL || !ndvR) {
+            return std::min(rowsL, rowsR);
+        }
+        ndvs.emplace_back(*ndvL, *ndvR);
+    }
+    // NDVs are estimates: values within this factor are taken as equal.
+    constexpr double NdvTolerance = 1.1;
+    auto unique = [&](bool leftSide) {
+        const double rows = leftSide ? rowsL : rowsR;
+        return std::ranges::any_of(ndvs, [&](const auto& pair) {
+            return (leftSide ? pair.first : pair.second) * NdvTolerance >= rows;
+        });
+    };
+    if (const bool uniqueL = unique(true), uniqueR = unique(false); uniqueL != uniqueR) {
+        return uniqueL ? rowsL : rowsR;
+    }
+    auto contains = [&](bool leftSide) {
+        bool larger = false;
+        for (const auto& [ndvL, ndvR] : ndvs) {
+            const double own = leftSide ? ndvL : ndvR;
+            const double other = leftSide ? ndvR : ndvL;
+            if (own * NdvTolerance < other) {
+                return false;
+            }
+            larger = larger || own > other * NdvTolerance;
+        }
+        return larger;
+    };
+    if (contains(true)) {
+        return rowsL;
+    }
+    if (contains(false)) {
+        return rowsR;
+    }
+    return std::min(rowsL, rowsR);
 }
 
 // Fraction of the rows with key matches that keep one the residual accepts.
