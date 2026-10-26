@@ -686,8 +686,10 @@ bucket, and a predicate the statistics cannot answer gets a default, 0.5 here.
 - Equalities with constants and IN lists allow a column a set of values. An OR
   of them on one column is the union of the sets, counted as one IN list:
   `d_year = 2001 OR d_year = 2002` is two values. Conjuncts on one column
-  intersect their sets, and a range on the column keeps the values inside it,
-  so a column constrained twice is not counted twice.
+  intersect their sets, a range on the column keeps the values inside it, and
+  `<>` or `NOT IN` takes its values out, so a column constrained twice is not
+  counted twice: `x IN (1, 2, 3) AND x <> 2` is two values. With a NULL among
+  them, `NOT IN` is never TRUE and leaves none.
 - Other disjuncts are taken as independent: `a OR b` drops the rows that both
   drop, so it keeps `1 - (1 - s_a)(1 - s_b) = s_a + s_b - s_a * s_b`, the OR
   selectivity of Selinger et al. (cited above).

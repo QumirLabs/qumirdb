@@ -185,6 +185,8 @@ struct TValueSet {
     double NonNull = 1.0;
     std::set<double> Numbers;
     std::set<std::string> Strings;
+    // A NULL among the constants, which no value equals.
+    bool HasNull = false;
 
     double Size() const {
         return static_cast<double>(Numbers.size() + Strings.size());
@@ -202,6 +204,18 @@ struct TValueSet {
     void Intersect(const TValueSet& other) {
         std::erase_if(Numbers, [&](double value) { return !other.Numbers.contains(value); });
         std::erase_if(Strings, [&](const std::string& value) { return !other.Strings.contains(value); });
+    }
+
+    // Takes out the values `x <> c` or `x NOT IN (...)` rule out; with a NULL
+    // among them the predicate is never TRUE.
+    void Subtract(const TValueSet& other) {
+        if (other.HasNull) {
+            Numbers.clear();
+            Strings.clear();
+            return;
+        }
+        std::erase_if(Numbers, [&](double value) { return other.Numbers.contains(value); });
+        std::erase_if(Strings, [&](const std::string& value) { return other.Strings.contains(value); });
     }
 };
 
@@ -351,6 +365,7 @@ private:
         // twice twice.
         std::map<std::string, TColumnRange> ranges;
         std::map<std::string, TValueSet> sets;
+        std::map<std::string, std::vector<std::pair<TExprPtr, TValueSet>>> exclusions;
         double selectivity = 1.0;
         for (const auto& conjunct : conjuncts) {
             if (auto bound = RangeBound(conjunct)) {
@@ -375,8 +390,22 @@ private:
                 if (!inserted) {
                     it->second.Intersect(*values);
                 }
+            } else if (auto excluded = ExcludedValues(conjunct)) {
+                exclusions[excluded->Column].emplace_back(conjunct, std::move(*excluded));
             } else {
                 selectivity *= Estimate(conjunct);
+            }
+        }
+        // The values `<>` and `NOT IN` rule out leave a column's set; without
+        // a set, each keeps its own share of the rows.
+        for (const auto& [column, excluded] : exclusions) {
+            auto it = sets.find(column);
+            for (const auto& [conjunct, values] : excluded) {
+                if (it != sets.end()) {
+                    it->second.Subtract(values);
+                } else {
+                    selectivity *= Estimate(conjunct);
+                }
             }
         }
         // A range on a column with a set of values keeps the values inside it.
@@ -786,20 +815,9 @@ private:
                 }
                 return values;
             }
-            if (binary->Operator != "=="_op) {
-                return std::nullopt;
-            }
-            auto maybeLeft = TMaybeNode<TIdentExpr>(binary->Left);
-            auto maybeRight = TMaybeNode<TIdentExpr>(binary->Right);
-            if (maybeLeft && !maybeRight && IsConstExpr(binary->Right)) {
-                auto left = maybeLeft.Cast();
-                return ColumnValues(left->Name, std::span(&binary->Right, 1));
-            }
-            if (maybeRight && !maybeLeft && IsConstExpr(binary->Left)) {
-                auto right = maybeRight.Cast();
-                return ColumnValues(right->Name, std::span(&binary->Left, 1));
-            }
-            return std::nullopt;
+            return binary->Operator == "=="_op
+                ? ComparedValue(*binary)
+                : std::nullopt;
         }
         auto maybeCall = TMaybeNode<TCallExpr>(expr);
         if (!maybeCall) {
@@ -817,6 +835,40 @@ private:
         return ColumnValues(column.Cast()->Name, std::span(call->Args).subspan(1));
     }
 
+    // The values a conjunct rules out of a column: `col <> c`, `NOT IN` and
+    // the NOT of an OR of equalities on one column.
+    std::optional<TValueSet> ExcludedValues(const TExprPtr& expr) {
+        if (auto maybeUnary = TMaybeNode<TUnaryExpr>(expr)) {
+            auto unary = maybeUnary.Cast();
+            return unary->Operator == "!"_op
+                ? ValueSet(unary->Operand)
+                : std::nullopt;
+        }
+        auto maybeBinary = TMaybeNode<TBinaryExpr>(expr);
+        if (!maybeBinary) {
+            return std::nullopt;
+        }
+        auto binary = maybeBinary.Cast();
+        return binary->Operator == "!="_op
+            ? ComparedValue(*binary)
+            : std::nullopt;
+    }
+
+    // The constant a column is compared with, as a set of one value.
+    std::optional<TValueSet> ComparedValue(const TBinaryExpr& binary) {
+        auto maybeLeft = TMaybeNode<TIdentExpr>(binary.Left);
+        auto maybeRight = TMaybeNode<TIdentExpr>(binary.Right);
+        if (maybeLeft && !maybeRight && IsConstExpr(binary.Right)) {
+            auto left = maybeLeft.Cast();
+            return ColumnValues(left->Name, std::span(&binary.Right, 1));
+        }
+        if (maybeRight && !maybeLeft && IsConstExpr(binary.Left)) {
+            auto right = maybeRight.Cast();
+            return ColumnValues(right->Name, std::span(&binary.Left, 1));
+        }
+        return std::nullopt;
+    }
+
     std::optional<TValueSet> ColumnValues(const std::string& name, std::span<const TExprPtr> items) {
         auto colIt = InputStats_.ColumnStats.find(name);
         if (colIt == InputStats_.ColumnStats.end() || !colIt->second->Ndv || *colIt->second->Ndv == 0) {
@@ -831,6 +883,7 @@ private:
             if (auto maybeNull = TMaybeNode<TCallExpr>(item)) {
                 auto nullCallee = TMaybeNode<TIdentExpr>(maybeNull.Cast()->Callee);
                 if (nullCallee && nullCallee.Cast()->Name == "qdb_sql_null") {
+                    values.HasNull = true;
                     continue;
                 }
             }
