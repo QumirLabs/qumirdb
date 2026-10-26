@@ -642,7 +642,12 @@ keys does not turn into a malloc storm. See [aggregation.md](aggregation.md).
   after substituting closed projections to decide whether a branch is dead,
   needs the filter, or trivially satisfies it. `EstimateStats` uses it for
   constant comparison bounds. An expression it cannot type or evaluate is
-  returned unfolded, so folding never fails a query.
+  returned unfolded, so folding never fails a query. It evaluates through the
+  Qumir VM, as the kernels compute: an expression over Qumir's own types, such
+  as integer arithmetic on a date literal already folded to a number, is
+  compiled alone, while one that uses a qdb type, function or operator is
+  compiled with the qumirdb module, whose composition costs most of a
+  compilation (about 13 ms against 0.05 ms).
 - `AssignSourceAliases`, `QualifyColumns`, `AnnotateTypes`,
   `CoerceSetOpBranches`, `unbound_vars`, `typing` — normalization and checking.
 - `EstimateStats` — produces the row counts,

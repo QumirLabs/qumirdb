@@ -23,16 +23,51 @@ namespace {
 
 constexpr const char* EvalFn = "__const_fold_eval__";
 
-std::optional<std::string> EvalClosed(const TExprPtr& expr, const TTypePtr& retType) {
+// A frontend without source modules. Compiling against the qumirdb module
+// composes, checks and lowers all of it again, about 13 ms; an expression over
+// Qumir's own types compiles alone in about 0.05 ms.
+TVmFrontendContext& BareVmContext() {
+    static TVmFrontendContext context;
+    return context;
+}
+
+TTypePtr DetachedType(const TTypePtr& type) {
+    if (auto maybeNamed = TMaybeType<TNamedType>(type)) {
+        return std::make_shared<TNamedType>(*maybeNamed.Cast());
+    }
+    return type;
+}
+
+// CloneExpr shares types with the original, and compiling resolves named types
+// in place. Give the clone its own, so that folding leaves the caller's
+// expression as it was.
+void DetachNamedTypes(const TExprPtr& expr) {
+    expr->Type = DetachedType(expr->Type);
+    for (auto* child : expr->MutableChildren()) {
+        if (*child) {
+            DetachNamedTypes(*child);
+        }
+    }
+}
+
+// A compilation rewrites its expression, so each one gets its own copy.
+std::optional<std::string> EvalClosed(
+    TVmFrontendContext& context,
+    std::vector<std::string> imports,
+    const TExprPtr& expr,
+    const TTypePtr& retType)
+{
+    auto copy = CloneExpr(expr);
+    DetachNamedTypes(copy);
     NQumir::TLocation loc{};
     auto body = std::make_shared<TBlockExpr>(
-        loc, std::vector<TExprPtr>{expr});
-    auto compiled = TVmFunction::Compile(QumirdbVmContext(), {
+        loc, std::vector<TExprPtr>{std::move(copy)});
+    auto compiled = TVmFunction::Compile(context, {
         .NamePrefix = EvalFn,
         .Params = {},
         .Body = std::move(body),
-        .ReturnType = retType,
-        .Imports = {"qumirdb"},
+        .ReturnType = DetachedType(retType),
+        .Imports = std::move(imports),
     });
     if (!compiled) {
         return std::nullopt;
@@ -40,18 +75,17 @@ std::optional<std::string> EvalClosed(const TExprPtr& expr, const TTypePtr& retT
     return (*compiled)->Eval({});
 }
 
-// CloneExpr shares types with the original, and compiling resolves named types
-// in place. Give the clone its own, so that folding leaves the caller's
-// expression as it was.
-void DetachNamedTypes(const TExprPtr& expr) {
-    if (auto maybeNamed = TMaybeType<TNamedType>(expr->Type)) {
-        expr->Type = std::make_shared<TNamedType>(*maybeNamed.Cast());
+// Integer, float and boolean arithmetic, comparisons and casts, date
+// arithmetic on folded date literals among them, need no qdb module. An
+// expression with a qdb type, function or operator does not compile without
+// the module and is compiled with it. The module defines operators only for
+// its own types and `%` on doubles, which Qumir does not accept, so an
+// expression that compiles without the module means the same as with it.
+std::optional<std::string> EvalClosed(const TExprPtr& expr, const TTypePtr& retType) {
+    if (auto result = EvalClosed(BareVmContext(), {}, expr, retType)) {
+        return result;
     }
-    for (auto* child : expr->MutableChildren()) {
-        if (*child) {
-            DetachNamedTypes(*child);
-        }
-    }
+    return EvalClosed(QumirdbVmContext(), {"qumirdb"}, expr, retType);
 }
 
 TExprPtr LiteralFromResult(const std::string& s) {
