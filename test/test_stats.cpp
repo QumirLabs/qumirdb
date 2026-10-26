@@ -743,6 +743,62 @@ TEST_F(SharedKeyRangeStats, DisjointKeyRangesMatchNothing) {
     EXPECT_EQ(stats->RowCount, 1u);
 }
 
+namespace {
+
+// A relation with a composite key (item, ticket) of the given NDVs.
+struct TKeyedRelation {
+    std::string Name;
+    TStatsSource Source;
+
+    TKeyedRelation(std::string name, uint64_t rows, uint64_t items, uint64_t tickets)
+        : Name(name)
+        , Source({{name + "_item", items}, {name + "_ticket", tickets}}, rows)
+    {}
+};
+
+// Rows of `left JOIN right` on the composite key.
+uint64_t CompositeKeyJoinRows(TKeyedRelation& left, TKeyedRelation& right) {
+    auto join = NQdb::MakeJoin(
+        std::make_shared<NQdb::TSourceOperator>(left.Source, left.Name),
+        std::make_shared<NQdb::TSourceOperator>(right.Source, right.Name),
+        {{left.Name + "_item", right.Name + "_item"}, {left.Name + "_ticket", right.Name + "_ticket"}},
+        NQdb::EJoinType::Inner);
+    EXPECT_TRUE(join.has_value()) << join.error().ToString();
+    NQdb::TOperatorPtr plan = *join;
+    NQdb::AssignSourceAliases(plan);
+    NQdb::QualifyColumns(plan);
+    NQdb::AnnotateTypes(plan);
+    return NQdb::EstimateStats(plan)->RowCount;
+}
+
+} // namespace
+
+// Returns reference a subset of the sales tickets, so the smaller relation
+// references the larger: each return finds its sale, and the join keeps the
+// returns, not the sales.
+TEST(CompositeKeyStats, SmallerRelationCanReferenceTheLarger) {
+    TKeyedRelation sales("s", 1000, 100, 400);
+    TKeyedRelation returns("r", 300, 100, 200);
+    EXPECT_NEAR(static_cast<double>(CompositeKeyJoinRows(sales, returns)), 300.0, 3.0);
+    EXPECT_NEAR(static_cast<double>(CompositeKeyJoinRows(returns, sales)), 300.0, 3.0);
+}
+
+// A key column with as many values as rows makes its relation, here the
+// larger one, the referenced one.
+TEST(CompositeKeyStats, UniqueKeyColumnIsReferenced) {
+    TKeyedRelation orders("o", 1000, 100, 1000);
+    TKeyedRelation lines("l", 600, 100, 300);
+    EXPECT_NEAR(static_cast<double>(CompositeKeyJoinRows(lines, orders)), 600.0, 6.0);
+}
+
+// When the NDVs agree, as for lineitem and partsupp, the smaller relation is
+// taken as the referenced one.
+TEST(CompositeKeyStats, EqualDomainsReferenceTheSmallerRelation) {
+    TKeyedRelation lineitem("l", 6000, 200, 10);
+    TKeyedRelation partsupp("p", 800, 200, 10);
+    EXPECT_NEAR(static_cast<double>(CompositeKeyJoinRows(lineitem, partsupp)), 6000.0, 60.0);
+}
+
 // 1000 rows; x is i64, n is Nullable<i64> with 250 NULLs, f and g are f64;
 // ndv 100 each.
 class SelfEqualityStats : public ::testing::Test {
