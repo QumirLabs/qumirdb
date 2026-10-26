@@ -240,10 +240,8 @@
   ;; max - min <= 2^20, Direct holds the row of key k at k - DirectMin and
   ;; null for an absent key. A probe needs no hash, salt or key comparison: a
   ;; key outside the range costs one bounds check, a key inside it one load.
-  ;; The conditions and the limit are those of DuckDB's PerfectHashJoinExecutor
-  ;; (perfect_hash_join_executor.cpp), which stores the payload columns per
-  ;; slot; here a slot points to the arena row. Entries stays null; Capacity
-  ;; is the slot count, so the table reports its real size.
+  ;; A slot points to the arena row. Entries stays null; Capacity is the slot
+  ;; count, so the table reports its real size.
 
   ;; The key of `row` as an i64; Value is the key's integer type.
   (fun jr_row_int [Value] ((var row <ptr u8>) (var value_offset i64)
@@ -288,7 +286,7 @@
       (if (> rows slots) (block (return #f)))
       ;; Pass 2: a bitmap of the range finds a repeated key before the index
       ;; is allocated, so a failed attempt costs one bit per slot, not eight
-      ;; bytes (as DuckDB's bitmap_build_idx).
+      ;; bytes.
       (var words = (>> (+ slots 63) 6))
       (var seen = (cast (call qdb_alloc (* words 8)) <ptr u64>))
       (if (== (cast seen i64) 0) (block (return #f)))
