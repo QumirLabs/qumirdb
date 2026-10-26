@@ -638,11 +638,18 @@ keys does not turn into a malloc storm. See [aggregation.md](aggregation.md).
 
 ## 5. Helpers that are not optimizations
 
-- `ConstFold` is a helper, not a pipeline pass. UNION ALL pushdown uses it
+- `TConstFolder` is a helper, not a pipeline pass. UNION ALL pushdown uses it
   after substituting closed projections to decide whether a branch is dead,
   needs the filter, or trivially satisfies it. `EstimateStats` uses it for
   constant comparison bounds. An expression it cannot type or evaluate is
-  returned unfolded, so folding never fails a query.
+  returned unfolded, so folding never fails a query. It evaluates through the
+  Qumir VM, as the kernels compute: an expression over Qumir's own types, such
+  as integer arithmetic on a date literal already folded to a number, is
+  compiled alone, while one that uses a qdb type, function or operator is
+  compiled with the qumirdb module, whose composition costs most of a
+  compilation (about 13 ms against 0.05 ms). The planner creates one folder
+  per query and passes it to these passes; the folder owns the VM frontends
+  it compiles in and folds each constant of the estimates once.
 - `AssignSourceAliases`, `QualifyColumns`, `AnnotateTypes`,
   `CoerceSetOpBranches`, `unbound_vars`, `typing` — normalization and checking.
 - `EstimateStats` — produces the row counts,
@@ -676,6 +683,11 @@ bucket, and a predicate the statistics cannot answer gets a default, 0.5 here.
   counts the distinct non-NULL constants inside min/max. `NOT IN` is estimated
   as the chain of `<>` it stands for, `(1 - 1/NDV)` per constant, so it cannot
   reach zero from a list longer than the NDV.
+- A NULL compares as UNKNOWN, so a comparison, `=`, `<>`, a range or an `IN`
+  list, keeps only non-NULL rows. The NDV and the histogram describe the
+  non-NULL values, and the share of them a comparison keeps is scaled by the
+  column's non-NULL fraction where the null count describes the rows, as for
+  `IS NULL` below.
 - `col IS NULL` is the null fraction of the column, used only directly above
   the scan: the null count describes the table and is not rescaled by the
   operators in between.

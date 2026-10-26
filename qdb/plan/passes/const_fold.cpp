@@ -4,9 +4,11 @@
 #include <qdb/kernel/vm_function.h>
 #include <qdb/plan/clone_expr.h>
 #include <qdb/plan/passes/unbound_vars.h>
+#include <qdb/utils/module_path.h>
 
 #include <qumir/error.h>
 #include <qumir/parser/ast.h>
+#include <qumir/parser/core/printer.h>
 
 #include <charconv>
 #include <memory>
@@ -23,35 +25,48 @@ namespace {
 
 constexpr const char* EvalFn = "__const_fold_eval__";
 
-std::optional<std::string> EvalClosed(const TExprPtr& expr, const TTypePtr& retType) {
-    NQumir::TLocation loc{};
-    auto body = std::make_shared<TBlockExpr>(
-        loc, std::vector<TExprPtr>{expr});
-    auto compiled = TVmFunction::Compile(QumirdbVmContext(), {
-        .NamePrefix = EvalFn,
-        .Params = {},
-        .Body = std::move(body),
-        .ReturnType = retType,
-        .Imports = {"qumirdb"},
-    });
-    if (!compiled) {
-        return std::nullopt;
+TTypePtr DetachedType(const TTypePtr& type) {
+    if (auto maybeNamed = TMaybeType<TNamedType>(type)) {
+        return std::make_shared<TNamedType>(*maybeNamed.Cast());
     }
-    return (*compiled)->Eval({});
+    return type;
 }
 
 // CloneExpr shares types with the original, and compiling resolves named types
 // in place. Give the clone its own, so that folding leaves the caller's
 // expression as it was.
 void DetachNamedTypes(const TExprPtr& expr) {
-    if (auto maybeNamed = TMaybeType<TNamedType>(expr->Type)) {
-        expr->Type = std::make_shared<TNamedType>(*maybeNamed.Cast());
-    }
+    expr->Type = DetachedType(expr->Type);
     for (auto* child : expr->MutableChildren()) {
         if (*child) {
             DetachNamedTypes(*child);
         }
     }
+}
+
+// A compilation rewrites its expression, so each one gets its own copy.
+std::optional<std::string> EvalClosed(
+    TVmFrontendContext& context,
+    std::vector<std::string> imports,
+    const TExprPtr& expr,
+    const TTypePtr& retType)
+{
+    auto copy = CloneExpr(expr);
+    DetachNamedTypes(copy);
+    NQumir::TLocation loc{};
+    auto body = std::make_shared<TBlockExpr>(
+        loc, std::vector<TExprPtr>{std::move(copy)});
+    auto compiled = TVmFunction::Compile(context, {
+        .NamePrefix = EvalFn,
+        .Params = {},
+        .Body = std::move(body),
+        .ReturnType = DetachedType(retType),
+        .Imports = std::move(imports),
+    });
+    if (!compiled) {
+        return std::nullopt;
+    }
+    return (*compiled)->Eval({});
 }
 
 TExprPtr LiteralFromResult(const std::string& s) {
@@ -77,7 +92,31 @@ TExprPtr LiteralFromResult(const std::string& s) {
 
 } // namespace
 
-TExprPtr ConstFold(TExprPtr expr) {
+TConstFolder::TConstFolder() = default;
+
+TConstFolder::~TConstFolder() = default;
+
+// Integer, float and boolean arithmetic, comparisons and casts, date
+// arithmetic on folded date literals among them, need no qdb module. An
+// expression with a qdb type, function or operator does not compile without
+// the module and is compiled with it. The module defines operators only for
+// its own types and `%` on doubles, which Qumir does not accept, so an
+// expression that compiles without the module means the same as with it.
+std::optional<std::string> TConstFolder::Eval(const TExprPtr& expr, const TTypePtr& type) {
+    if (!Builtin_) {
+        Builtin_ = std::make_unique<TVmFrontendContext>();
+    }
+    if (auto result = EvalClosed(*Builtin_, {}, expr, type)) {
+        return result;
+    }
+    if (!Qumirdb_) {
+        Qumirdb_ = std::make_unique<TVmFrontendContext>(
+            std::vector<std::string>{NUtils::ModuleFile("qumirdb.oz")});
+    }
+    return EvalClosed(*Qumirdb_, {"qumirdb"}, expr, type);
+}
+
+TExprPtr TConstFolder::Fold(TExprPtr expr) {
     if (!expr || !FindUnboundVars(expr).empty()) {
         return expr;
     }
@@ -98,12 +137,22 @@ TExprPtr ConstFold(TExprPtr expr) {
     if (!rewrittenType) {
         return expr;
     }
-    auto result = EvalClosed(rewritten, rewrittenType);
+    auto result = Eval(rewritten, rewrittenType);
     if (!result) {
         return expr;
     }
     auto literal = LiteralFromResult(*result);
     return literal ? literal : expr;
+}
+
+std::shared_ptr<TNumberExpr> TConstFolder::FoldNumber(const TExprPtr& expr) {
+    auto [it, inserted] = Numbers_.try_emplace(NCore::PrintAst(expr));
+    if (inserted) {
+        if (auto folded = TMaybeNode<TNumberExpr>(Fold(expr))) {
+            it->second = folded.Cast();
+        }
+    }
+    return it->second;
 }
 
 } // namespace NQdb

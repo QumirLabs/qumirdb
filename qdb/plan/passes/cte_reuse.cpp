@@ -225,7 +225,7 @@ TExprPtr BuildPushablePredicate(
 void PushConsumerPredicatesIntoDefinitions(
     const TOperatorPtr& main,
     const NKernel::TAnnotationContext& context,
-    TFoldedBounds& foldedBounds)
+    TConstFolder& folder)
 {
     TRefPredicates refs;
     CollectRefPredicates(main, refs);
@@ -243,9 +243,9 @@ void PushConsumerPredicatesIntoDefinitions(
             continue;
         }
         def->Plan = PushDownPredicates(
-            std::make_shared<TFilterOperator>(def->Plan, std::move(pushable)));
+            std::make_shared<TFilterOperator>(def->Plan, std::move(pushable)), folder);
         AnnotateTypes(def->Plan, context);
-        EstimateStats(def->Plan, foldedBounds);
+        EstimateStats(def->Plan, folder);
     }
 }
 

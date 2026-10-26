@@ -13,8 +13,6 @@
 #include <qdb/plan/ops/union.h>
 #include <qdb/plan/types/nullable.h>
 
-#include <qumir/parser/core/printer.h>
-
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -165,6 +163,14 @@ struct TRangeBound {
     TRangeEnd End;
 };
 
+// The distinct non-NULL constants inside min/max that an IN list allows a
+// column.
+struct TInList {
+    std::string Column;
+    double Values = 0.0;
+    double Ndv = 1.0;
+};
+
 // The tightest ends of a range on a column.
 struct TColumnRange {
     std::optional<TRangeEnd> Lower;
@@ -212,18 +218,18 @@ bool MayBeNull(const TExprPtr& expr, const TStructType& input) {
     });
 }
 
-// One filter's statistics and schema, with the folding memo shared by the query.
+// One filter's statistics and schema, with the constant folder shared by the query.
 class TSelectivityEstimator {
 public:
     TSelectivityEstimator(
         const TStats& inputStats,
         const TStructType& operatorType,
         bool overSource,
-        TFoldedBounds& foldedBounds)
+        TConstFolder& folder)
         : InputStats_(inputStats)
         , OperatorType_(operatorType)
         , OverSource_(overSource)
-        , FoldedBounds_(foldedBounds) {}
+        , Folder_(folder) {}
 
     double Estimate(const TExprPtr& atom) {
         if (auto maybeUnary = TMaybeNode<TUnaryExpr>(atom)) {
@@ -252,7 +258,7 @@ private:
         // NOT IN is the chain of `<>` it stands for: each value keeps
         // 1 - 1/ndv of the rows.
         if (auto values = InListValues(unary.Operand)) {
-            return std::pow(1.0 - 1.0 / values->second, values->first);
+            return std::pow(1.0 - 1.0 / values->Ndv, values->Values);
         }
         return 1.0 - Estimate(unary.Operand);
     }
@@ -279,8 +285,9 @@ private:
                 }
             }
         }
+        // A NULL is in no list.
         if (auto values = InListValues(atom)) {
-            return std::min(1.0, values->first / values->second);
+            return std::min(1.0, values->Values / values->Ndv) * NonNullFraction(values->Column);
         }
         return 0.5;
     }
@@ -293,9 +300,10 @@ private:
             return EstimateEquality(binary);
         }
         if (auto bound = RangeBound(atom)) {
-            return bound->Upper
+            const double fraction = bound->Upper
                 ? bound->End.Below
                 : 1.0 - bound->End.Below;
+            return fraction * NonNullFraction(bound->Column);
         }
         if (auto fraction = EstimateColumnComparison(binary)) {
             return *fraction;
@@ -353,29 +361,37 @@ private:
                     upper,
                     1.0 - lower});
             }
-            selectivity *= fraction;
+            selectivity *= fraction * NonNullFraction(column);
         }
         return selectivity;
     }
 
+    // A NULL compares as UNKNOWN, so `=` and `!=` keep only non-NULL rows:
+    // their share of the column's values, of its non-NULL rows.
     double EstimateEquality(const TBinaryExpr& binary) {
-        double selectivity = 0.5;
+        const bool negated = binary.Operator == "!="_op;
         auto leftIdent = TMaybeNode<TIdentExpr>(binary.Left);
         auto rightIdent = TMaybeNode<TIdentExpr>(binary.Right);
         if (leftIdent && rightIdent) {
             return EstimateColumnEquality(
                 leftIdent.Cast()->Name,
                 rightIdent.Cast()->Name,
-                binary.Operator == "!="_op);
+                negated);
         }
+        const std::string* column = nullptr;
+        const TExprPtr* value = nullptr;
         if (leftIdent && IsConstExpr(binary.Right)) {
-            selectivity = EstimateConstantEquality(leftIdent.Cast()->Name, binary.Right);
+            column = &leftIdent.Cast()->Name;
+            value = &binary.Right;
         } else if (rightIdent && IsConstExpr(binary.Left)) {
-            selectivity = EstimateConstantEquality(rightIdent.Cast()->Name, binary.Left);
+            column = &rightIdent.Cast()->Name;
+            value = &binary.Left;
         }
-        return binary.Operator == "!="_op
-            ? 1.0 - selectivity
-            : selectivity;
+        if (!column) {
+            return 0.5;
+        }
+        const double selectivity = EstimateConstantEquality(*column, *value);
+        return (negated ? 1.0 - selectivity : selectivity) * NonNullFraction(*column);
     }
 
     double EstimateColumnEquality(
@@ -390,14 +406,9 @@ private:
         if (leftName == rightName && !mayBeNaN) {
             // A column equals itself on every non-NULL row, whatever its
             // NDV; `x != x` holds on no row.
-            auto it = InputStats_.ColumnStats.find(leftName);
-            const double nulls = it != InputStats_.ColumnStats.end()
-                ? static_cast<double>(it->second->NullCount.value_or(0))
-                : 0.0;
-            const double rows = std::max(1.0, static_cast<double>(InputStats_.RowCount));
             return negated
                 ? 0.0
-                : 1.0 - std::min(1.0, nulls / rows);
+                : NonNullFraction(leftName);
         }
         double selectivity = 0.5;
         if (InputStats_.ColumnStats.count(leftName) > 0 && InputStats_.ColumnStats.count(rightName) > 0) {
@@ -407,9 +418,8 @@ private:
                 selectivity = 1.0 / std::max(*leftNdv, *rightNdv);
             }
         }
-        return negated
-            ? 1.0 - selectivity
-            : selectivity;
+        return (negated ? 1.0 - selectivity : selectivity)
+            * NonNullFraction(leftName) * NonNullFraction(rightName);
     }
 
     double EstimateConstantEquality(const std::string& colName, const TExprPtr& value) {
@@ -430,13 +440,29 @@ private:
         return FindUnboundVars(expr).empty();
     }
 
+    // The type of a column's values; a nullable column's NULLs have no value.
     TTypePtr ColumnType(const std::string& colName) const {
         for (const auto& [col, type] : OperatorType_.Fields) {
             if (col == colName) {
-                return type;
+                return UnwrapNullableType(type);
             }
         }
         return nullptr;
+    }
+
+    // Fraction of the rows where a column is not NULL. A source's null count
+    // describes its rows; above other operators the NULLs left are not known,
+    // and they are not counted.
+    double NonNullFraction(const std::string& colName) const {
+        auto it = InputStats_.ColumnStats.find(colName);
+        if (
+            !OverSource_ || InputStats_.RowCount == 0 ||
+            it == InputStats_.ColumnStats.end() || !it->second->NullCount)
+        {
+            return 1.0;
+        }
+        return 1.0 - std::min(1.0,
+            static_cast<double>(*it->second->NullCount) / static_cast<double>(InputStats_.RowCount));
     }
 
     std::shared_ptr<TNumberExpr> ConstNumber(const TExprPtr& expr) {
@@ -446,13 +472,7 @@ private:
         if (!IsConstExpr(expr)) {
             return nullptr;
         }
-        auto [it, inserted] = FoldedBounds_.try_emplace(NCore::PrintAst(expr));
-        if (inserted) {
-            if (auto folded = TMaybeNode<TNumberExpr>(ConstFold(expr))) {
-                it->second = folded.Cast();
-            }
-        }
-        return it->second;
+        return Folder_.FoldNumber(expr);
     }
 
     std::optional<double> FractionBelow(
@@ -483,11 +503,10 @@ private:
     template <class TValue>
     static std::optional<double> FractionBelowValue(
         const TStats::TColumnStats& stats,
-        const TTypePtr& columnType,
+        const TTypePtr& type,
         TValue value,
         bool strict)
     {
-        const auto type = UnwrapNullableType(columnType);
         if (TMaybeType<TFloatType>(type)) {
             return stats.FractionBelow(static_cast<double>(value), strict);
         }
@@ -516,8 +535,8 @@ private:
     // `x < y` for two columns taken as independent: the mean, over the rows
     // of y, of the fraction of x below them. Each bucket of y's equi-depth
     // histogram holds an equal share of its rows, spread evenly between its
-    // boundaries, so it contributes the mean fraction at its two ends. The
-    // histograms describe non-NULL values; the NULLs are not counted here.
+    // boundaries, so it contributes the mean fraction at its two ends. A NULL
+    // on either side compares as UNKNOWN.
     std::optional<double> EstimateColumnComparison(const TBinaryExpr& binary) const {
         const bool less = binary.Operator == "<"_op || binary.Operator == "<="_op;
         const bool greater = binary.Operator == ">"_op || binary.Operator == ">="_op;
@@ -538,7 +557,7 @@ private:
         const auto& lower = *lowerIt->second;
         const auto& upper = *upperIt->second;
         const auto lowerType = ColumnType(lowerName);
-        const auto upperType = UnwrapNullableType(ColumnType(upperName));
+        const auto upperType = ColumnType(upperName);
         const bool upperFloat = static_cast<bool>(TMaybeType<TFloatType>(upperType));
         if (upper.Histogram.size() < 2 || !(upperFloat || TMaybeType<TIntegerType>(upperType))) {
             return std::nullopt;
@@ -558,7 +577,8 @@ private:
             }
             sum += (*start + *end) / 2.0;
         }
-        return sum / static_cast<double>(buckets);
+        return sum / static_cast<double>(buckets)
+            * NonNullFraction(lowerName) * NonNullFraction(upperName);
     }
 
     std::optional<TRangeBound> RangeBound(const TExprPtr& expr) {
@@ -670,7 +690,7 @@ private:
             && number.IntValue <= *stats.GetMaxValue<TValue>();
     }
 
-    std::optional<std::pair<double, double>> InListValues(const TExprPtr& expr) {
+    std::optional<TInList> InListValues(const TExprPtr& expr) {
         auto maybeCall = TMaybeNode<TCallExpr>(expr);
         if (!maybeCall) {
             return std::nullopt;
@@ -717,15 +737,17 @@ private:
             }
             numbers.insert(value);
         }
-        return std::pair{
-            static_cast<double>(numbers.size() + strings.size()),
-            static_cast<double>(*colIt->second->Ndv)};
+        return TInList{
+            .Column = name,
+            .Values = static_cast<double>(numbers.size() + strings.size()),
+            .Ndv = static_cast<double>(*colIt->second->Ndv),
+        };
     }
 
     const TStats& InputStats_;
     const TStructType& OperatorType_;
     const bool OverSource_;
-    TFoldedBounds& FoldedBounds_;
+    TConstFolder& Folder_;
 };
 
 // Selectivity of a join's residual over the joined rows: the columns of both
@@ -735,7 +757,7 @@ double EstimateResidual(
     const TOperatorPtr& left,
     const TOperatorPtr& right,
     const TExprPtr& residual,
-    TFoldedBounds& foldedBounds)
+    TConstFolder& folder)
 {
     if (!left->Stats_ || !right->Stats_) {
         return 0.5;
@@ -757,7 +779,7 @@ double EstimateResidual(
         * static_cast<double>(right->Stats_->RowCount);
     stats.RowCount = static_cast<uint64_t>(std::min(rows, 0x1p63));
     const TStructType type(std::move(fields));
-    const double selectivity = TSelectivityEstimator(stats, type, false, foldedBounds).Estimate(residual);
+    const double selectivity = TSelectivityEstimator(stats, type, false, folder).Estimate(residual);
     return std::clamp(selectivity, 0.0, 1.0);
 }
 
@@ -767,22 +789,22 @@ double EstimateSelectivity(
     const TStatsPtr& inputStats,
     const std::shared_ptr<TStructType>& operatorType,
     bool overSource,
-    TFoldedBounds& foldedBounds)
+    TConstFolder& folder)
 {
     if (!operatorType) {
         return 0.5;
     }
-    return TSelectivityEstimator(*inputStats, *operatorType, overSource, foldedBounds).Estimate(atom);
+    return TSelectivityEstimator(*inputStats, *operatorType, overSource, folder).Estimate(atom);
 }
 
-TStatsPtr ComputeFilterStats(const std::shared_ptr<TFilterOperator>& filter, TFoldedBounds& foldedBounds) {
+TStatsPtr ComputeFilterStats(const std::shared_ptr<TFilterOperator>& filter, TConstFolder& folder) {
     auto inputStats = filter->Input()->Stats_;
     if (!inputStats) {
         return nullptr;
     }
     double selectivity = EstimateSelectivity(filter->Predicate(), inputStats,
         TMaybeType<TStructType>(filter->Input()->OutputColumns()).Cast(),
-        TMaybeOp<TSourceOperator>(filter->Input()), foldedBounds);
+        TMaybeOp<TSourceOperator>(filter->Input()), folder);
     selectivity = std::clamp(selectivity, 0.0, 1.0);
     auto outputStats = std::make_shared<TStats>();
     outputStats->ColumnStats = inputStats->ColumnStats;
@@ -1143,7 +1165,7 @@ uint64_t JoinRows(
     const std::vector<TJoinKey>& keys,
     EJoinType type,
     const TExprPtr& residualPredicate,
-    TFoldedBounds& foldedBounds)
+    TConstFolder& folder)
 {
     const auto& leftStats = *left->Stats_;
     const auto& rightStats = *right->Stats_;
@@ -1160,7 +1182,7 @@ uint64_t JoinRows(
     // The residual accepts a share of the key matches, taken as independent
     // of the keys.
     const double residual = residualPredicate
-        ? EstimateResidual(left, right, residualPredicate, foldedBounds)
+        ? EstimateResidual(left, right, residualPredicate, folder)
         : 1.0;
     const double ndvL = card.NdvL;
     const double ndvR = card.NdvR;
@@ -1207,7 +1229,7 @@ uint64_t JoinRows(
 
 TStatsPtr ComputeJoinStats(
     const std::shared_ptr<TJoinOperator>& join,
-    TFoldedBounds& foldedBounds,
+    TConstFolder& folder,
     const std::unordered_set<std::string>* columns = nullptr)
 {
     auto leftStats = join->Left()->Stats_;
@@ -1221,7 +1243,7 @@ TStatsPtr ComputeJoinStats(
         join->Keys(),
         join->JoinType(),
         join->Filter(),
-        foldedBounds);
+        folder);
     auto outputStats = std::make_shared<TStats>();
 
     auto keep = [&](const std::string& column) {
@@ -1459,7 +1481,7 @@ TStatsPtr BoundToOneRow(const TStats& stats) {
     return bounded;
 }
 
-TStatsPtr ComputeStatsFor(TOperatorPtr op, TFoldedBounds& foldedBounds) {
+TStatsPtr ComputeStatsFor(TOperatorPtr op, TConstFolder& folder) {
     if (auto source = TMaybeOp<TSourceOperator>(op)) {
         return ComputeSourceStats(source.Cast());
     }
@@ -1471,13 +1493,13 @@ TStatsPtr ComputeStatsFor(TOperatorPtr op, TFoldedBounds& foldedBounds) {
     }
 
     if (auto maybeFilter = TMaybeOp<TFilterOperator>(op)) {
-        return ComputeFilterStats(maybeFilter.Cast(), foldedBounds);
+        return ComputeFilterStats(maybeFilter.Cast(), folder);
     }
     if (auto maybeProject = TMaybeOp<TProjectOperator>(op)) {
         return ComputeProjectStats(maybeProject.Cast());
     }
     if (auto maybeJoin = TMaybeOp<TJoinOperator>(op)) {
-        return ComputeJoinStats(maybeJoin.Cast(), foldedBounds);
+        return ComputeJoinStats(maybeJoin.Cast(), folder);
     }
     if (auto maybeAggregate = TMaybeOp<TAggregateOperator>(op)) {
         return ComputeAggregateStats(maybeAggregate.Cast());
@@ -1498,10 +1520,10 @@ TStatsPtr ComputeStatsFor(TOperatorPtr op, TFoldedBounds& foldedBounds) {
 
 TStatsPtr EstimateJoinStats(
     const std::shared_ptr<TJoinOperator>& join,
-    TFoldedBounds& foldedBounds,
+    TConstFolder& folder,
     const std::unordered_set<std::string>* columns)
 {
-    return ComputeJoinStats(join, foldedBounds, columns);
+    return ComputeJoinStats(join, folder, columns);
 }
 
 uint64_t EstimateInnerJoinRows(
@@ -1509,16 +1531,16 @@ uint64_t EstimateInnerJoinRows(
     const TOperatorPtr& right,
     const std::vector<TJoinKey>& keys,
     const TExprPtr& residual,
-    TFoldedBounds& foldedBounds)
+    TConstFolder& folder)
 {
-    return JoinRows(left, right, keys, EJoinType::Inner, residual, foldedBounds);
+    return JoinRows(left, right, keys, EJoinType::Inner, residual, folder);
 }
 
-TStatsPtr EstimateStats(TOperatorPtr op, TFoldedBounds& foldedBounds) {
+TStatsPtr EstimateStats(TOperatorPtr op, TConstFolder& folder) {
     for (const auto& input : op->Inputs()) {
-        input->Stats_ = EstimateStats(input, foldedBounds);
+        input->Stats_ = EstimateStats(input, folder);
     }
-    auto stats = ComputeStatsFor(op, foldedBounds);
+    auto stats = ComputeStatsFor(op, folder);
     if (stats && op->AtMostOneRow) {
         stats = BoundToOneRow(*stats);
     }
@@ -1526,8 +1548,8 @@ TStatsPtr EstimateStats(TOperatorPtr op, TFoldedBounds& foldedBounds) {
 }
 
 TStatsPtr EstimateStats(TOperatorPtr op) {
-    TFoldedBounds foldedBounds;
-    return EstimateStats(op, foldedBounds);
+    TConstFolder folder;
+    return EstimateStats(op, folder);
 }
 
 } // namespace NQdb

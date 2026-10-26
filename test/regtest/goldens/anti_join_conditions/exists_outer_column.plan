@@ -1,5 +1,5 @@
-project (id) (rows≈2 cost≈4.4K)
-└─ join left_semi [t.id = s.k] (rows≈2 cost≈4.4K)
-   ├─ filter (== |t.a| 1) (rows≈2 cost≈128)
+project (id) (rows≈1 cost≈4.3K)
+└─ join left_semi [t.id = s.k] (rows≈1 cost≈4.3K)
+   ├─ filter (== |t.a| 1) (rows≈1 cost≈128)
    │  └─ source t AS t row-groups (== |t.a| 1) (rows≈4 cost≈64)
    └─ source s AS s (rows≈5 cost≈40)

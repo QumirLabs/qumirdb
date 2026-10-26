@@ -23,7 +23,7 @@
     "default_no_histogram.sql": {"order": "ordered"},
     "default_in_list_no_ndv.sql": {"order": "ordered"},
     "default_not_constant.sql": {"order": "ordered"},
-    "default_nullable_range.sql": {"order": "ordered"},
+    "range_nullable.sql": {"order": "ordered"},
     "bound_nan.sql": {"order": "ordered"},
     "bound_beyond_int64.sql": {"order": "ordered"},
     "bound_fractional.sql": {"order": "ordered"},
@@ -41,6 +41,7 @@
     "join_shared_key_range.sql": {"order": "ordered"},
     "join_shared_key_range_independent.sql": {"order": "ordered"},
     "join_residual.sql": {"order": "ordered"},
-    "scalar_subquery_one_row.sql": {"order": "ordered"}
+    "scalar_subquery_one_row.sql": {"order": "ordered"},
+    "in_list_nullable.sql": {"order": "ordered"}
   }
 }

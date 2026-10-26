@@ -10,6 +10,6 @@ top-sort [w_state asc, i_item_id asc] limit 100
             │  │  └─ join left [catalog_sales.cs_item_sk = catalog_returns.cr_item_sk, catalog_sales.cs_order_number = catalog_returns.cr_order_number] (rows≈10 cost≈5.1K)
             │  │     ├─ source catalog_sales AS catalog_sales (rows≈10 cost≈240)
             │  │     └─ source catalog_returns AS catalog_returns (rows≈10 cost≈160)
-            │  └─ filter (&& (<= 0.98999999999999999 |item.i_current_price|) (<= |item.i_current_price| 1.49)) (rows≈2 cost≈560)
+            │  └─ filter (&& (<= 0.98999999999999999 |item.i_current_price|) (<= |item.i_current_price| 1.49)) (rows≈1 cost≈560)
             │     └─ source item AS item row-groups (&& (<= 0.98999999999999999 |item.i_current_price|) (<= |item.i_current_price| 1.49)) (rows≈10 cost≈280)
             └─ source warehouse AS warehouse use-filter 1 keys=[warehouse.w_warehouse_sk] (rows≈10 cost≈200)

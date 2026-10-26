@@ -1,6 +1,7 @@
 #include <qdb/plan/pipeline.h>
 
 #include <qdb/plan/passes/column_pruning.h>
+#include <qdb/plan/passes/const_fold.h>
 #include <qdb/plan/passes/equijoin.h>
 #include <qdb/plan/passes/estimate_stats.h>
 #include <qdb/plan/passes/flatten_joins.h>
@@ -25,7 +26,7 @@ namespace NQdb {
 
 namespace {
 
-void OptimizeOne(TOperatorPtr& plan, TPlanPassOptions& options, TFoldedBounds& foldedBounds) {
+void OptimizeOne(TOperatorPtr& plan, TPlanPassOptions& options, TConstFolder& folder) {
     // QDB_DUMP_PASSES=1 dumps the plan after each pass to stderr (debugging).
     const bool dump = std::getenv("QDB_DUMP_PASSES") != nullptr;
     auto stage = [&](const char* name) {
@@ -53,22 +54,22 @@ void OptimizeOne(TOperatorPtr& plan, TPlanPassOptions& options, TFoldedBounds& f
     // Before pushdown and the first EstimateStats: a self-equality left by
     // decorrelation would otherwise be costed as a selective predicate.
     plan = SimplifySelfEquality(plan); stage("SimplifySelfEquality");
-    plan = PushDownPredicates(plan); stage("PushDownPredicates");
+    plan = PushDownPredicates(plan, folder); stage("PushDownPredicates");
     AnnotateTypes(plan, options.Annotation); // re-annotate: pushdown moved filters onto leaves
     if (options.EnableCbo) {
         // Join widths must describe demanded scan/filter outputs. Unused source
         // payload would otherwise bias the choice before final column pruning.
         ApplyColumnPruning(plan); stage("PruneBeforeJoinOrder");
     }
-    EstimateStats(plan, foldedBounds); // leaf cardinalities for cost-based ReorderJoins
+    EstimateStats(plan, folder); // leaf cardinalities for cost-based ReorderJoins
     plan = ReorderJoins(
         plan,
-        foldedBounds,
+        folder,
         options.EnableCbo,
         options.Diagnostics ? &options.Diagnostics->JoinReorder : nullptr);
     stage("ReorderJoins");
     AnnotateTypes(plan, options.Annotation); // re-annotate: reordering rebuilt the join tree
-    plan = ExtractEquiJoins(plan); stage("ExtractEquiJoins");
+    plan = ExtractEquiJoins(plan, folder); stage("ExtractEquiJoins");
     AnnotateTypes(plan, options.Annotation); // re-annotate: equi-join extraction adds/removes nodes
     CoerceJoinKeys(plan); stage("CoerceJoinKeys");
     AnnotateTypes(plan, options.Annotation); // re-annotate: key casts add projections below joins
@@ -92,7 +93,7 @@ void OptimizeOne(TOperatorPtr& plan, TPlanPassOptions& options, TFoldedBounds& f
         ApplyColumnPruning(plan);
     }
 
-    EstimateStats(plan, foldedBounds);
+    EstimateStats(plan, folder);
 }
 
 template <class TFn>
@@ -108,14 +109,14 @@ void ForEachPlan(TOperatorPtr& main, TFn&& fn, bool includeMain = true) {
 } // namespace
 
 void ApplyPlanPasses(TOperatorPtr& plan, TPlanPassOptions options) {
-    TFoldedBounds foldedBounds; // one per query: see TFoldedBounds
+    TConstFolder folder; // one per query: see TConstFolder
     ForEachPlan(plan, [&](TOperatorPtr& current, TCteDefinition* def) {
-        OptimizeOne(current, options, foldedBounds);
+        OptimizeOne(current, options, folder);
         if (def) {
             def->OutputType = current->OutputColumns();
         }
     });
-    PushConsumerPredicatesIntoDefinitions(plan, options.Annotation, foldedBounds);
+    PushConsumerPredicatesIntoDefinitions(plan, options.Annotation, folder);
     auto usage = PropagateCteDemands(plan);
 
     // CTE output demand is only known after PropagateCteDemands. Apply the
@@ -145,7 +146,7 @@ void ApplyPlanPasses(TOperatorPtr& plan, TPlanPassOptions options) {
         if (def) {
             def->OutputType = current->OutputColumns();
         }
-        EstimateStats(current, foldedBounds);
+        EstimateStats(current, folder);
 
         const int rank = local.Applied ? 3
             : local.Considered ? 2

@@ -1,4 +1,4 @@
 sort [id asc]
-└─ project (id, a, b) (rows≈3 cost≈360)
-   └─ filter (&& (&& (< |t.id| 13) (< |t.n| 1000000000000)) (> |t.n| (- 1000000000000))) (rows≈3 cost≈312)
+└─ project (id, a, b) (rows≈9 cost≈456)
+   └─ filter (&& (&& (< |t.id| 13) (< |t.n| 1000000000000)) (> |t.n| (- 1000000000000))) (rows≈9 cost≈312)
       └─ source t AS t row-groups (&& (< |t.id| 13) (&& (< |t.n| 1000000000000) (> |t.n| (- 1000000000000)))) (rows≈13 cost≈156)

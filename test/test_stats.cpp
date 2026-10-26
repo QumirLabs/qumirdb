@@ -10,6 +10,7 @@
 #include <qdb/plan/ops/stats.h>
 #include <qdb/plan/pipeline.h>
 #include <qdb/plan/passes/cbo/dpccp.h>
+#include <qdb/plan/passes/const_fold.h>
 #include <qdb/plan/passes/estimate_stats.h>
 #include <qdb/plan/passes/qualify_columns.h>
 #include <qdb/plan/passes/row_group_predicate.h>
@@ -721,9 +722,9 @@ TEST_F(SharedKeyRangeStats, JoinOrderEstimatesKeysAnotherJoinSelected) {
         NQdb::AnnotateTypes(leaf);
         NQdb::EstimateStats(leaf);
     }
-    NQdb::TFoldedBounds foldedBounds;
+    NQdb::TConstFolder folder;
     auto tree = NQdb::NCbo::DpccpJoinOrder(
-        leaves, {{"d.y", "s.z"}, {"d.x", "f.k"}}, {}, foldedBounds);
+        leaves, {{"d.y", "s.z"}, {"d.x", "f.k"}}, {}, folder);
     ASSERT_TRUE(tree && tree->Stats_);
     auto join = NQdb::TMaybeOp<NQdb::TJoinOperator>(tree);
     ASSERT_TRUE(join);
@@ -769,8 +770,9 @@ protected:
 TEST_F(SelfEqualityStats, ColumnEqualToItselfKeepsNonNullRows) {
     EXPECT_EQ(Rows("(== |t.x| |t.x|)"), 1000u);
     EXPECT_EQ(Rows("(== |t.n| |t.n|)"), 750u);
-    // Two different columns are still estimated through NDV.
-    EXPECT_EQ(Rows("(== |t.x| |t.n|)"), 10u);
+    // Two different columns are still estimated through NDV, over the rows
+    // where neither is NULL: 1000 * 0.75 / 100.
+    EXPECT_EQ(Rows("(== |t.x| |t.n|)"), 7u);
 }
 
 TEST_F(SelfEqualityStats, ColumnUnequalToItselfKeepsNoRows) {
