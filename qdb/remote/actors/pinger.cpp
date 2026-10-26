@@ -9,6 +9,8 @@ namespace NRemote {
 using namespace NNet::NActors;
 using namespace std::chrono;
 
+namespace {
+
 struct TPingerActor : public IBehaviorActor {
     struct TDefaultBehavior : public TBehavior<TDefaultBehavior, TWakeUp> {
         TDefaultBehavior(std::shared_ptr<TRuntimeResources> resources, NNet::NActors::TActorId pingTo, uint64_t periodMs)
@@ -50,6 +52,8 @@ struct TPingerActor : public IBehaviorActor {
     NNet::NActors::TActorId PingTo;
     TDefaultBehavior Behavior;
 };
+
+} // namespace
 
 NNet::NActors::IActor* CreatePinger(
     std::shared_ptr<TRuntimeResources> resources,

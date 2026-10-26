@@ -4,12 +4,16 @@
 #include <qdb/remote/messages.h>
 
 #include "pinger.h"
+#include "compute.h"
+#include "local_scheduler.h"
 
 namespace NQdb {
 namespace NRemote {
 
 using namespace NNet::NActors;
 using namespace std::chrono;
+
+namespace {
 
 struct TLocalSchedulerActor : public IBehaviorActor {
     struct TDefaultBehavior : public TBehavior<TDefaultBehavior, TSpawnComputeActor> {
@@ -21,7 +25,11 @@ struct TLocalSchedulerActor : public IBehaviorActor {
 
         void Receive(TSpawnComputeActor&&, TBlob, TActorContext::TPtr ctx)
         {
-            // TODO: implement
+            auto actor = CreateComputeActor();
+            auto actorId = ctx->Register(std::unique_ptr<IActor>(actor));
+            ctx->Send<TSpawnComputeActorResponse>(ctx->Sender(), TSpawnComputeActorResponse {
+                .ActorId = actorId
+            });
         }
 
         void HandleUnknownMessage(TMessageId messageId, TBlob blob, TActorContext::TPtr ctx) { }
@@ -44,7 +52,9 @@ struct TLocalSchedulerActor : public IBehaviorActor {
 
     TLocalSchedulerActor(TNodeId leader, uint64_t pingPeriodMs)
         : Behavior(leader, pingPeriodMs)
-    { }
+    {
+        Become(&Behavior);
+    }
 
     void AfterRegister(TActorContext::TPtr ctx) override {
         Behavior.StartPinger(ctx);
@@ -56,6 +66,13 @@ struct TLocalSchedulerActor : public IBehaviorActor {
 
     TDefaultBehavior Behavior;
 };
+
+} // namespace
+
+NNet::NActors::IActor* CreateLocalScheduler(TNodeId leader, uint64_t pingPeriodMs)
+{
+    return new TLocalSchedulerActor(leader, pingPeriodMs);
+}
 
 } // namespace NRemote
 } // namespace NQdb
