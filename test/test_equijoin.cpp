@@ -12,6 +12,7 @@
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/union.h>
 #include <qdb/plan/ops/window.h>
+#include <qdb/plan/passes/const_fold.h>
 #include <qdb/plan/passes/equijoin.h>
 #include <qdb/plan/passes/join_order.h>
 #include <qdb/plan/passes/qualify_columns.h>
@@ -66,7 +67,8 @@ TOperatorPtr BuildAnnotated(const std::string& sexp, const std::map<std::string,
 }
 
 TOperatorPtr Optimize(const std::string& sexp, const std::map<std::string, ISource*>& tables) {
-    return ExtractEquiJoins(BuildAnnotated(sexp, tables));
+    TConstFolder folder;
+    return ExtractEquiJoins(BuildAnnotated(sexp, tables), folder);
 }
 
 void CollectKeys(const TOperatorPtr& op, std::vector<std::pair<std::string, std::string>>& out) {
@@ -208,7 +210,8 @@ TEST(EquiJoin, ExtractsKeysThroughLimitAndSort) {
 
     QualifyColumns(root);
     AnnotateTypes(root);
-    root = ExtractEquiJoins(root);
+    TConstFolder folder;
+    root = ExtractEquiJoins(root, folder);
 
     EXPECT_EQ(Keys(root), (TKeys{{"a.aid", "b.bid"}}));
 }
@@ -241,8 +244,8 @@ TEST(JoinOrder, ReordersThroughLimitAndSort) {
 
     QualifyColumns(root);
     AnnotateTypes(root);
-    TFoldedBounds foldedBounds;
-    root = ReorderJoins(root, foldedBounds);
+    TConstFolder folder;
+    root = ReorderJoins(root, folder);
 
     auto limit = AsLimit(root);
     ASSERT_NE(limit, nullptr);
@@ -270,11 +273,12 @@ TEST(PushDown, SingleTableToLeafEqualityStaysAbove) {
     NQdb::TMockSource b({"bid", "bval"});
     std::map<std::string, ISource*> tables = {{"A", &a}, {"B", &b}};
 
+    TConstFolder folder;
     auto root = PushDownPredicates(BuildAnnotated(
         "(rel filter"
         "  (rel join (rel source \"A\" \"a\") (rel source \"B\" \"b\") () (inner))"
         "  (&& (== aid bid) (< aval 5)))",
-        tables));
+        tables), folder);
 
     // equality stays materialized above the join (edge source for ReorderJoins)
     auto topFilter = AsFilter(root);
@@ -301,11 +305,12 @@ TEST(PushDown, PartitionPredicateThroughWindow) {
     NQdb::TMockSource t({"a", "b"});
     std::map<std::string, ISource*> tables = {{"T", &t}};
 
+    TConstFolder folder;
     auto root = PushDownPredicates(BuildAnnotated(
         "(rel filter"
         "  (rel window (rel source \"T\" \"t\") (partition a) (fn w_0 rank))"
         "  (&& (== a 5) (== w_0 1)))",
-        tables));
+        tables), folder);
 
     auto topFilter = AsFilter(root);
     ASSERT_NE(topFilter, nullptr);
@@ -342,11 +347,12 @@ TEST(PushDown, ProjectRewritesAndPushesPredicate) {
     NQdb::TMockSource a({"aid"});
     std::map<std::string, ISource*> tables = {{"A", &a}};
 
+    TConstFolder folder;
     auto root = PushDownPredicates(BuildAnnotated(
         "(rel filter"
         "  (rel project (rel source \"A\" \"a\") (x aid))"
         "  (< x 5))",
-        tables));
+        tables), folder);
 
     ASSERT_EQ(AsFilter(root), nullptr);
     auto project = dynamic_cast<const TProjectOperator*>(root.get());
@@ -369,13 +375,14 @@ TEST(PushDown, UnionAllPrunesConstantBranch) {
     NQdb::TMockSource b({"bid"});
     std::map<std::string, ISource*> tables = {{"A", &a}, {"B", &b}};
 
+    TConstFolder folder;
     auto root = PushDownPredicates(BuildAnnotated(
         "(rel filter"
         "  (rel union-all"
         "    (rel project (rel source \"A\" \"a\") (tag 1))"
         "    (rel project (rel source \"B\" \"b\") (tag 2)))"
         "  (== tag 1))",
-        tables));
+        tables), folder);
 
     // Only the first branch matches tag==1; the union collapses to it, with no
     // residual filter and no union node left.
@@ -393,6 +400,7 @@ TEST(PushDown, UnionAllShrinksToMultipleSurvivingBranches) {
     NQdb::TMockSource c({"cid"});
     std::map<std::string, ISource*> tables = {{"A", &a}, {"B", &b}, {"C", &c}};
 
+    TConstFolder folder;
     auto root = PushDownPredicates(BuildAnnotated(
         "(rel filter"
         "  (rel union-all"
@@ -400,7 +408,7 @@ TEST(PushDown, UnionAllShrinksToMultipleSurvivingBranches) {
         "    (rel project (rel source \"B\" \"b\") (tag 2))"
         "    (rel project (rel source \"C\" \"c\") (tag 1)))"
         "  (== tag 1))",
-        tables));
+        tables), folder);
 
     auto unionAll = TMaybeOp<TUnionAllOperator>(root);
     ASSERT_TRUE(unionAll);
@@ -423,13 +431,14 @@ TEST(PushDown, UnionAllPrunesAllBranchesToEmpty) {
     NQdb::TMockSource b({"bid"});
     std::map<std::string, ISource*> tables = {{"A", &a}, {"B", &b}};
 
+    TConstFolder folder;
     auto root = PushDownPredicates(BuildAnnotated(
         "(rel filter"
         "  (rel union-all"
         "    (rel project (rel source \"A\" \"a\") (tag 1))"
         "    (rel project (rel source \"B\" \"b\") (tag 2)))"
         "  (== tag 3))",
-        tables));
+        tables), folder);
 
     auto limit = AsLimit(root);
     ASSERT_NE(limit, nullptr);

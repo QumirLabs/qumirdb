@@ -6,6 +6,7 @@
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/stats.h>
 #include <qdb/plan/passes/cbo/dpccp.h>
+#include <qdb/plan/passes/const_fold.h>
 #include <qdb/plan/passes/estimate_stats.h>
 #include <qdb/plan/passes/unbound_vars.h>
 #include <qdb/plan/build.h>
@@ -115,7 +116,7 @@ struct TModel {
     std::vector<TResidual> Residuals;
     // A join tree of each connected set, carrying the set's statistics.
     mutable std::map<TSubset, TOperatorPtr> Sets;
-    mutable TFoldedBounds FoldedBounds;
+    mutable TConstFolder Folder;
 
     TModel(
         const std::vector<TOperatorPtr>& leaves,
@@ -244,7 +245,7 @@ struct TModel {
             }
             auto join = std::make_shared<TJoinOperator>(
                 Set(s1), Set(s2), std::move(keys), EJoinType::Inner, CrossingResidual(s1, s2));
-            join->Stats_ = NQdb::EstimateJoinStats(join, FoldedBounds);
+            join->Stats_ = NQdb::EstimateJoinStats(join, Folder);
             if (!largest || join->Stats_->RowCount > largest->Stats_->RowCount) {
                 largest = join;
             }
@@ -347,8 +348,8 @@ void ExpectOptimal(
     const std::vector<NCbo::TJoinEdge>& edges,
     const std::vector<NQumir::NAst::TExprPtr>& residuals = {})
 {
-    TFoldedBounds foldedBounds;
-    auto tree = NCbo::DpccpJoinOrder(fx.Leaves, edges, residuals, foldedBounds);
+    TConstFolder folder;
+    auto tree = NCbo::DpccpJoinOrder(fx.Leaves, edges, residuals, folder);
     ASSERT_NE(tree, nullptr);
 
     TModel model(fx.Leaves, edges, residuals);
@@ -419,9 +420,9 @@ TEST(Cbo, ResidualScalesTheJoinItCompletes) {
         NQumir::TLocation{}, NQumir::NAst::TOperator("!="),
         std::make_shared<NQumir::NAst::TIdentExpr>(NQumir::TLocation{}, "a_x"),
         std::make_shared<NQumir::NAst::TIdentExpr>(NQumir::TLocation{}, "c_y"));
-    TFoldedBounds foldedBounds;
+    TConstFolder folder;
     auto tree = NCbo::DpccpJoinOrder(
-        fx.Leaves, {{"a_b", "b_id"}, {"b_c", "c_id"}}, {residual}, foldedBounds);
+        fx.Leaves, {{"a_b", "b_id"}, {"b_c", "c_id"}}, {residual}, folder);
     ASSERT_TRUE(tree && tree->Stats_);
     // 1000 rows find their b and their c; a_x != c_y keeps half of them.
     EXPECT_EQ(tree->Stats_->RowCount, 500u);
@@ -429,7 +430,7 @@ TEST(Cbo, ResidualScalesTheJoinItCompletes) {
     TFixture pair;
     pair.Add({1000, {{"a_x", 2}}});
     pair.Add({10, {{"c_y", 2}}});
-    EXPECT_EQ(NCbo::DpccpJoinOrder(pair.Leaves, {}, {residual}, foldedBounds), nullptr);
+    EXPECT_EQ(NCbo::DpccpJoinOrder(pair.Leaves, {}, {residual}, folder), nullptr);
 }
 
 TEST(Cbo, DisconnectedReturnsNull) {
@@ -437,15 +438,15 @@ TEST(Cbo, DisconnectedReturnsNull) {
     fx.Add({100, {{"a_id", 100}}});
     fx.Add({100, {{"b_id", 100}}}); // isolated
     fx.Add({100, {{"c_a", 100}}});
-    TFoldedBounds foldedBounds;
-    EXPECT_EQ(NCbo::DpccpJoinOrder(fx.Leaves, {{"a_id", "c_a"}}, {}, foldedBounds), nullptr);
+    TConstFolder folder;
+    EXPECT_EQ(NCbo::DpccpJoinOrder(fx.Leaves, {{"a_id", "c_a"}}, {}, folder), nullptr);
 }
 
 TEST(Cbo, SingleLeafReturnsLeaf) {
     TFixture fx;
     auto leaf = fx.Add({100, {{"a_id", 100}}});
-    TFoldedBounds foldedBounds;
-    EXPECT_EQ(NCbo::DpccpJoinOrder(fx.Leaves, {}, {}, foldedBounds), leaf);
+    TConstFolder folder;
+    EXPECT_EQ(NCbo::DpccpJoinOrder(fx.Leaves, {}, {}, folder), leaf);
 }
 
 TEST(Cbo, FallbackAboveMaxRelations) {
@@ -453,8 +454,8 @@ TEST(Cbo, FallbackAboveMaxRelations) {
     for (size_t i = 0; i < NCbo::MaxRelations + 1; ++i) {
         fx.Add({100, {{"c" + std::to_string(i), 100}}});
     }
-    TFoldedBounds foldedBounds;
-    EXPECT_EQ(NCbo::DpccpJoinOrder(fx.Leaves, {}, {}, foldedBounds), nullptr);
+    TConstFolder folder;
+    EXPECT_EQ(NCbo::DpccpJoinOrder(fx.Leaves, {}, {}, folder), nullptr);
 }
 
 // Random connected graphs (spanning tree + extra edges) must all be optimal.
@@ -541,16 +542,16 @@ TEST(Cbo, CompositeKeyThroughAnEquatedColumn) {
         {"s_suppkey", "l_suppkey"}, {"ps_suppkey", "l_suppkey"}, {"ps_partkey", "l_partkey"}};
     ExpectOptimal(fx, edges);
 
-    TFoldedBounds foldedBounds;
+    TConstFolder folder;
     auto lineitemSupplier = std::make_shared<TJoinOperator>(
         fx.Leaves[0], fx.Leaves[1], std::vector<TJoinKey>{{"l_suppkey", "s_suppkey"}},
         EJoinType::Inner, nullptr);
-    lineitemSupplier->Stats_ = EstimateJoinStats(lineitemSupplier, foldedBounds);
+    lineitemSupplier->Stats_ = EstimateJoinStats(lineitemSupplier, folder);
     // Every lineitem row has its partsupp row: the composite key keeps the
     // larger input, whichever supplier key column is the key.
     for (const auto* suppkey : {"l_suppkey", "s_suppkey"}) {
         const std::vector<TJoinKey> keys{{suppkey, "ps_suppkey"}, {"l_partkey", "ps_partkey"}};
-        EXPECT_EQ(EstimateInnerJoinRows(lineitemSupplier, fx.Leaves[2], keys, nullptr, foldedBounds), 60000u)
+        EXPECT_EQ(EstimateInnerJoinRows(lineitemSupplier, fx.Leaves[2], keys, nullptr, folder), 60000u)
             << suppkey;
     }
 }

@@ -34,7 +34,7 @@ using TCteReuseDecisions = std::unordered_map<TCteDefinition*, TCteReuseDecision
 void PushConsumerPredicatesIntoDefinitions(
     const TOperatorPtr& main,
     const NKernel::TAnnotationContext& context,
-    TFoldedBounds& foldedBounds);
+    TConstFolder& folder);
 
 // >=2 references -> Materialize, else Inline.
 TCteReuseDecisions ChooseCteReuse(const TCteUsageMap& usage);

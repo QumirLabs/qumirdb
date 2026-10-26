@@ -3,6 +3,7 @@
 #include <qdb/kernel/vm_function.h>
 #include <qdb/modules/qumirdb.h>
 #include <qdb/plan/types/decimal.h>
+#include <qdb/utils/module_path.h>
 
 #include <qumir/parser/core/lexer.h>
 #include <qumir/parser/core/parser.h>
@@ -20,8 +21,8 @@ using namespace NQumir::NAst::NLiterals;
 
 namespace {
 
-// ConstFold takes untyped expressions (it types closed ones itself), so no
-// annotation here - parse and hand the raw AST straight to ConstFold.
+// TConstFolder takes untyped expressions (it types closed ones itself), so no
+// annotation here - parse and hand the raw AST straight to it.
 TExprPtr Parse(const std::string& src) {
     std::istringstream in(src);
     NCore::TTokenStream tokens(in);
@@ -33,8 +34,13 @@ TExprPtr Parse(const std::string& src) {
     return *parsed;
 }
 
+TExprPtr Fold(TExprPtr expr) {
+    NQdb::TConstFolder folder;
+    return folder.Fold(std::move(expr));
+}
+
 int64_t FoldToInt(const std::string& src) {
-    auto folded = NQdb::ConstFold(Parse(src));
+    auto folded = Fold(Parse(src));
     auto number = TMaybeNode<TNumberExpr>(folded);
     EXPECT_TRUE(number) << "not folded to a number: " << NCore::PrintAst(folded);
     return number ? number.Cast()->IntValue : -999;
@@ -78,7 +84,7 @@ TEST(ConstFold, FoldsDecimalComparison) {
     };
     auto eq = [&](int64_t l, int64_t r) {
         auto cmp = std::make_shared<TBinaryExpr>(loc, "=="_op, decLit(l), decLit(r));
-        auto folded = NQdb::ConstFold(cmp);
+        auto folded = Fold(cmp);
         auto number = TMaybeNode<TNumberExpr>(folded);
         EXPECT_TRUE(number) << "not folded: " << NCore::PrintAst(folded);
         return number ? number.Cast()->IntValue : -999;
@@ -94,7 +100,7 @@ TEST(ConstFold, FoldsNullableIsNull) {
 TEST(ConstFold, LeavesNamedTypesOfTheArgumentUnresolved) {
     auto expr = Parse("(call strlen (cast \"hello\" StringView))");
     const std::string before = NCore::PrintAst(expr);
-    NQdb::ConstFold(expr);
+    Fold(expr);
     EXPECT_EQ(NCore::PrintAst(expr), before);
 }
 
@@ -107,12 +113,13 @@ TEST(ConstFold, LeavesExpressionItCannotTypeUnfolded) {
             std::make_shared<NQdb::TDecimal>(10, 2));
     };
     auto product = std::make_shared<TBinaryExpr>(loc, "*"_op, decLit(5), decLit(2));
-    EXPECT_EQ(NQdb::ConstFold(product), product);
+    EXPECT_EQ(Fold(product), product);
 }
 
 // Arithmetic over Qumir's own types compiles without the qumirdb module; the
 // fold must give what the module's compilation gives.
 TEST(ConstFold, BuiltinArithmeticFoldsAsWithTheModule) {
+    NQdb::TVmFrontendContext module({NQdb::NUtils::ModuleFile("qumirdb.oz")});
     for (const char* src : {
         "(+ 1212 11)", "(// 7 2)", "(% -7 2)", "(* 9223372036854775807 2)",
         "(cast -3.7 i32)", "(- (cast 5 u8) (cast 6 u8))", "(cast (cast 300 i32) i8)",
@@ -120,7 +127,7 @@ TEST(ConstFold, BuiltinArithmeticFoldsAsWithTheModule) {
     {
         auto [expanded, type] = NQdb::NKernel::ExpandKernelExpr(Parse(src), TStructType({}));
         NQumir::TLocation loc{};
-        auto compiled = NQdb::TVmFunction::Compile(NQdb::QumirdbVmContext(), {
+        auto compiled = NQdb::TVmFunction::Compile(module, {
             .NamePrefix = "__module_eval__",
             .Params = {},
             .Body = std::make_shared<TBlockExpr>(loc, std::vector<TExprPtr>{expanded}),
@@ -130,7 +137,7 @@ TEST(ConstFold, BuiltinArithmeticFoldsAsWithTheModule) {
         ASSERT_TRUE(compiled) << src << ": " << compiled.error();
         auto expected = (*compiled)->Eval({});
         ASSERT_TRUE(expected) << src;
-        auto folded = TMaybeNode<TNumberExpr>(NQdb::ConstFold(Parse(src)));
+        auto folded = TMaybeNode<TNumberExpr>(Fold(Parse(src)));
         ASSERT_TRUE(folded) << src;
         const auto& number = *folded.Cast();
         if (number.IsFloat()) {
@@ -146,14 +153,25 @@ TEST(ConstFold, BuiltinArithmeticFoldsAsWithTheModule) {
 // SQL `%` on doubles is the qumirdb module's operator; Qumir takes integers
 // only, so the fold compiles it with the module.
 TEST(ConstFold, FoldsDoubleRemainderWithTheModule) {
-    auto folded = TMaybeNode<TNumberExpr>(NQdb::ConstFold(Parse("(% 7.5 2.0)")));
+    auto folded = TMaybeNode<TNumberExpr>(Fold(Parse("(% 7.5 2.0)")));
     ASSERT_TRUE(folded);
     EXPECT_DOUBLE_EQ(folded.Cast()->FloatValue, 1.5);
 }
 
+// The estimates of a query read the same constants for every plan the join
+// order search considers; the query's folder folds each of them once.
+TEST(ConstFold, FoldsEachNumberOnce) {
+    NQdb::TConstFolder folder;
+    auto first = folder.FoldNumber(Parse("(+ 1212 11)"));
+    ASSERT_TRUE(first);
+    EXPECT_EQ(first->IntValue, 1223);
+    EXPECT_EQ(folder.FoldNumber(Parse("(+ 1212 11)")), first);
+    EXPECT_EQ(folder.FoldNumber(Parse("(+ a 1)")), nullptr);
+}
+
 TEST(ConstFold, LeavesOpenExpressionUntouched) {
     auto expr = Parse("(+ a 1)"); // free variable `a` -> not closed, left as-is
-    auto folded = NQdb::ConstFold(expr);
+    auto folded = Fold(expr);
     EXPECT_EQ(folded, expr);
     EXPECT_TRUE(TMaybeNode<TBinaryExpr>(folded));
 }

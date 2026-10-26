@@ -638,7 +638,7 @@ keys does not turn into a malloc storm. See [aggregation.md](aggregation.md).
 
 ## 5. Helpers that are not optimizations
 
-- `ConstFold` is a helper, not a pipeline pass. UNION ALL pushdown uses it
+- `TConstFolder` is a helper, not a pipeline pass. UNION ALL pushdown uses it
   after substituting closed projections to decide whether a branch is dead,
   needs the filter, or trivially satisfies it. `EstimateStats` uses it for
   constant comparison bounds. An expression it cannot type or evaluate is
@@ -647,7 +647,9 @@ keys does not turn into a malloc storm. See [aggregation.md](aggregation.md).
   as integer arithmetic on a date literal already folded to a number, is
   compiled alone, while one that uses a qdb type, function or operator is
   compiled with the qumirdb module, whose composition costs most of a
-  compilation (about 13 ms against 0.05 ms).
+  compilation (about 13 ms against 0.05 ms). The planner creates one folder
+  per query and passes it to these passes; the folder owns the VM frontends
+  it compiles in and folds each constant of the estimates once.
 - `AssignSourceAliases`, `QualifyColumns`, `AnnotateTypes`,
   `CoerceSetOpBranches`, `unbound_vars`, `typing` — normalization and checking.
 - `EstimateStats` — produces the row counts,

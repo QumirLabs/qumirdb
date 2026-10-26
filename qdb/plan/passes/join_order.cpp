@@ -43,7 +43,7 @@ struct TOwnedEdge {
 struct TContext {
     bool EnableCbo = true;
     TJoinReorderDiagnostics* Diagnostics = nullptr;
-    TFoldedBounds& FoldedBounds;
+    TConstFolder& Folder;
 };
 
 void CollectJoinPredicates(const TExprPtr& predicate, TJoinPredicates& out) {
@@ -315,7 +315,7 @@ TOperatorPtr BuildChain(
     for (int c = 0; c < components; ++c) {
         TOperatorPtr tree = compLeaves[c].size() == 1
             ? compLeaves[c].front()
-            : NCbo::DpccpJoinOrder(compLeaves[c], compEdges[c], predicates.Residuals, ctx.FoldedBounds);
+            : NCbo::DpccpJoinOrder(compLeaves[c], compEdges[c], predicates.Residuals, ctx.Folder);
         if (!tree) {
             RecordJoinReorderChain(
                 ctx, leaves.size(), graphEdges.size(), false, "heuristic",
@@ -477,7 +477,7 @@ TOperatorPtr PushDown(TOperatorPtr node) {
 
 TOperatorPtr ReorderJoins(
     TOperatorPtr root,
-    TFoldedBounds& foldedBounds,
+    TConstFolder& folder,
     bool enableCbo,
     TJoinReorderDiagnostics* diagnostics)
 {
@@ -488,7 +488,7 @@ TOperatorPtr ReorderJoins(
     TContext ctx{
         .EnableCbo = enableCbo,
         .Diagnostics = diagnostics,
-        .FoldedBounds = foldedBounds,
+        .Folder = folder,
     };
     return Reorder(std::move(root), {}, ctx);
 }

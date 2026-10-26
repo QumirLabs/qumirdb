@@ -4,9 +4,11 @@
 #include <qdb/kernel/vm_function.h>
 #include <qdb/plan/clone_expr.h>
 #include <qdb/plan/passes/unbound_vars.h>
+#include <qdb/utils/module_path.h>
 
 #include <qumir/error.h>
 #include <qumir/parser/ast.h>
+#include <qumir/parser/core/printer.h>
 
 #include <charconv>
 #include <memory>
@@ -22,14 +24,6 @@ using namespace NQumir::NAst;
 namespace {
 
 constexpr const char* EvalFn = "__const_fold_eval__";
-
-// A frontend without source modules. Compiling against the qumirdb module
-// composes, checks and lowers all of it again, about 13 ms; an expression over
-// Qumir's own types compiles alone in about 0.05 ms.
-TVmFrontendContext& BareVmContext() {
-    static TVmFrontendContext context;
-    return context;
-}
 
 TTypePtr DetachedType(const TTypePtr& type) {
     if (auto maybeNamed = TMaybeType<TNamedType>(type)) {
@@ -75,19 +69,6 @@ std::optional<std::string> EvalClosed(
     return (*compiled)->Eval({});
 }
 
-// Integer, float and boolean arithmetic, comparisons and casts, date
-// arithmetic on folded date literals among them, need no qdb module. An
-// expression with a qdb type, function or operator does not compile without
-// the module and is compiled with it. The module defines operators only for
-// its own types and `%` on doubles, which Qumir does not accept, so an
-// expression that compiles without the module means the same as with it.
-std::optional<std::string> EvalClosed(const TExprPtr& expr, const TTypePtr& retType) {
-    if (auto result = EvalClosed(BareVmContext(), {}, expr, retType)) {
-        return result;
-    }
-    return EvalClosed(QumirdbVmContext(), {"qumirdb"}, expr, retType);
-}
-
 TExprPtr LiteralFromResult(const std::string& s) {
     NQumir::TLocation loc{};
     if (s == "true") {
@@ -111,7 +92,31 @@ TExprPtr LiteralFromResult(const std::string& s) {
 
 } // namespace
 
-TExprPtr ConstFold(TExprPtr expr) {
+TConstFolder::TConstFolder() = default;
+
+TConstFolder::~TConstFolder() = default;
+
+// Integer, float and boolean arithmetic, comparisons and casts, date
+// arithmetic on folded date literals among them, need no qdb module. An
+// expression with a qdb type, function or operator does not compile without
+// the module and is compiled with it. The module defines operators only for
+// its own types and `%` on doubles, which Qumir does not accept, so an
+// expression that compiles without the module means the same as with it.
+std::optional<std::string> TConstFolder::Eval(const TExprPtr& expr, const TTypePtr& type) {
+    if (!Builtin_) {
+        Builtin_ = std::make_unique<TVmFrontendContext>();
+    }
+    if (auto result = EvalClosed(*Builtin_, {}, expr, type)) {
+        return result;
+    }
+    if (!Qumirdb_) {
+        Qumirdb_ = std::make_unique<TVmFrontendContext>(
+            std::vector<std::string>{NUtils::ModuleFile("qumirdb.oz")});
+    }
+    return EvalClosed(*Qumirdb_, {"qumirdb"}, expr, type);
+}
+
+TExprPtr TConstFolder::Fold(TExprPtr expr) {
     if (!expr || !FindUnboundVars(expr).empty()) {
         return expr;
     }
@@ -132,12 +137,22 @@ TExprPtr ConstFold(TExprPtr expr) {
     if (!rewrittenType) {
         return expr;
     }
-    auto result = EvalClosed(rewritten, rewrittenType);
+    auto result = Eval(rewritten, rewrittenType);
     if (!result) {
         return expr;
     }
     auto literal = LiteralFromResult(*result);
     return literal ? literal : expr;
+}
+
+std::shared_ptr<TNumberExpr> TConstFolder::FoldNumber(const TExprPtr& expr) {
+    auto [it, inserted] = Numbers_.try_emplace(NCore::PrintAst(expr));
+    if (inserted) {
+        if (auto folded = TMaybeNode<TNumberExpr>(Fold(expr))) {
+            it->second = folded.Cast();
+        }
+    }
+    return it->second;
 }
 
 } // namespace NQdb

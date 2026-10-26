@@ -240,13 +240,14 @@ void RemapIdents(NQumir::NAst::TExprPtr& expr, const std::unordered_map<std::str
 struct TContext {
     std::vector<TConjuct> Conjucts;
     EMode Mode = EMode::ExtractKeys;
+    TConstFolder& Folder;
 };
 
 TOperatorPtr Process(TOperatorPtr node, TContext ctx);
 
 TOperatorPtr ProcessAggregate(std::shared_ptr<TAggregateOperator> aggregate, TContext ctx) {
     if (!aggregate->GroupingSets().empty()) {
-        aggregate->MutableInput() = Process(aggregate->Input(), {{}, ctx.Mode});
+        aggregate->MutableInput() = Process(aggregate->Input(), {{}, ctx.Mode, ctx.Folder});
         return Materialize(aggregate, ctx.Conjucts);
     }
 
@@ -265,12 +266,12 @@ TOperatorPtr ProcessAggregate(std::shared_ptr<TAggregateOperator> aggregate, TCo
         }
     }
 
-    aggregate->MutableInput() = Process(aggregate->Input(), {pushable, ctx.Mode});
+    aggregate->MutableInput() = Process(aggregate->Input(), {pushable, ctx.Mode, ctx.Folder});
     return Materialize(aggregate, keep);
 }
 
 TOperatorPtr ProcessLimit(std::shared_ptr<TLimitOperator> limit, TContext ctx) {
-    limit->MutableInput() = Process(limit->Input(), {{}, ctx.Mode});
+    limit->MutableInput() = Process(limit->Input(), {{}, ctx.Mode, ctx.Folder});
     return Materialize(limit, ctx.Conjucts);
 }
 
@@ -282,7 +283,7 @@ TOperatorPtr ProcessProject(std::shared_ptr<TProjectOperator> project, TContext 
     // `equiv` flag lifted into join keys downstream); rewriting `col == col`
     // through the projection would flatten it to a plain predicate and lose keys.
     if (ctx.Mode != EMode::PushOnly) {
-        project->MutableInput() = Process(project->Input(), {{}, ctx.Mode});
+        project->MutableInput() = Process(project->Input(), {{}, ctx.Mode, ctx.Folder});
         return Materialize(project, ctx.Conjucts);
     }
 
@@ -310,17 +311,17 @@ TOperatorPtr ProcessProject(std::shared_ptr<TProjectOperator> project, TContext 
         pushable.push_back(TConjuct{std::move(rewritten)});
     }
 
-    project->MutableInput() = Process(project->Input(), {std::move(pushable), ctx.Mode});
+    project->MutableInput() = Process(project->Input(), {std::move(pushable), ctx.Mode, ctx.Folder});
     return Materialize(project, keep);
 }
 
 TOperatorPtr ProcessSort(std::shared_ptr<TSortOperator> sort, TContext ctx) {
-    sort->MutableInput() = Process(sort->Input(), {{}, ctx.Mode});
+    sort->MutableInput() = Process(sort->Input(), {{}, ctx.Mode, ctx.Folder});
     return Materialize(sort, ctx.Conjucts);
 }
 
 TOperatorPtr ProcessTopSort(std::shared_ptr<TTopSortOperator> topSort, TContext ctx) {
-    topSort->MutableInput() = Process(topSort->Input(), {{}, ctx.Mode});
+    topSort->MutableInput() = Process(topSort->Input(), {{}, ctx.Mode, ctx.Folder});
     return Materialize(topSort, ctx.Conjucts);
 }
 
@@ -342,7 +343,7 @@ TOperatorPtr ProcessWindow(std::shared_ptr<TWindowOperator> window, TContext ctx
         }
     }
 
-    window->MutableInput() = Process(window->Input(), {std::move(pushable), ctx.Mode});
+    window->MutableInput() = Process(window->Input(), {std::move(pushable), ctx.Mode, ctx.Folder});
     return Materialize(window, keep);
 }
 
@@ -405,7 +406,7 @@ TOperatorPtr ProcessUnion(std::shared_ptr<TUnionAllOperator> unionAll, TContext 
 
             auto cloned = CloneExpr(conj.Expr);
             RemapIdents(cloned, remapFromTo);
-            cloned = ConstFold(cloned);
+            cloned = ctx.Folder.Fold(cloned);
             std::optional<bool> branchValue;
             if (auto maybeNumber = TMaybeNode<TNumberExpr>(cloned)) {
                 auto number = maybeNumber.Cast();
@@ -428,7 +429,7 @@ TOperatorPtr ProcessUnion(std::shared_ptr<TUnionAllOperator> unionAll, TContext 
         }
 
         if (!branchIsDead) {
-            newInputs.emplace_back(Process(branch, {std::move(branchConjucts), ctx.Mode}));
+            newInputs.emplace_back(Process(branch, {std::move(branchConjucts), ctx.Mode, ctx.Folder}));
         }
     }
 
@@ -468,8 +469,8 @@ TOperatorPtr ProcessJoin(std::shared_ptr<TJoinOperator> join, TContext ctx)
                 keep.emplace_back(conj);
             }
         }
-        join->MutableLeft() = Process(join->Left(), {std::move(leftConjucts), ctx.Mode});
-        join->MutableRight() = Process(join->Right(), {std::move(rightConjucts), ctx.Mode});
+        join->MutableLeft() = Process(join->Left(), {std::move(leftConjucts), ctx.Mode, ctx.Folder});
+        join->MutableRight() = Process(join->Right(), {std::move(rightConjucts), ctx.Mode, ctx.Folder});
         return Materialize(join, keep);
     }
 
@@ -614,8 +615,8 @@ TOperatorPtr ProcessJoin(std::shared_ptr<TJoinOperator> join, TContext ctx)
         join->MutableFilter() = Conjoin(residualConjucts);
     }
 
-    join->MutableLeft() = Process(join->Left(), {std::move(leftConjucts), ctx.Mode});
-    join->MutableRight() = Process(join->Right(), {std::move(rightConjucts), ctx.Mode});
+    join->MutableLeft() = Process(join->Left(), {std::move(leftConjucts), ctx.Mode, ctx.Folder});
+    join->MutableRight() = Process(join->Right(), {std::move(rightConjucts), ctx.Mode, ctx.Folder});
     return join;
 }
 
@@ -686,8 +687,8 @@ TOperatorPtr ProcessOuterJoin(std::shared_ptr<TJoinOperator> join, TContext ctx)
         }
     }
 
-    join->MutableLeft() = Process(join->Left(), {std::move(leftConjucts), ctx.Mode});
-    join->MutableRight() = Process(join->Right(), {std::move(rightConjucts), ctx.Mode});
+    join->MutableLeft() = Process(join->Left(), {std::move(leftConjucts), ctx.Mode, ctx.Folder});
+    join->MutableRight() = Process(join->Right(), {std::move(rightConjucts), ctx.Mode, ctx.Folder});
     return Materialize(join, keep);
 }
 
@@ -831,12 +832,12 @@ TOperatorPtr RewriteAntiJoins(
 
 } // namespace
 
-TOperatorPtr PushDownPredicates(TOperatorPtr root) {
-    return Process(root, {{}, EMode::PushOnly});
+TOperatorPtr PushDownPredicates(TOperatorPtr root, TConstFolder& folder) {
+    return Process(root, {{}, EMode::PushOnly, folder});
 }
 
-TOperatorPtr ExtractEquiJoins(TOperatorPtr root) {
-    return Process(root, {{}, EMode::ExtractKeys});
+TOperatorPtr ExtractEquiJoins(TOperatorPtr root, TConstFolder& folder) {
+    return Process(root, {{}, EMode::ExtractKeys, folder});
 }
 
 bool RewriteOuterJoinAsAnti(TOperatorPtr& root) {

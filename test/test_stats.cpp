@@ -10,6 +10,7 @@
 #include <qdb/plan/ops/stats.h>
 #include <qdb/plan/pipeline.h>
 #include <qdb/plan/passes/cbo/dpccp.h>
+#include <qdb/plan/passes/const_fold.h>
 #include <qdb/plan/passes/estimate_stats.h>
 #include <qdb/plan/passes/qualify_columns.h>
 #include <qdb/plan/passes/row_group_predicate.h>
@@ -721,9 +722,9 @@ TEST_F(SharedKeyRangeStats, JoinOrderEstimatesKeysAnotherJoinSelected) {
         NQdb::AnnotateTypes(leaf);
         NQdb::EstimateStats(leaf);
     }
-    NQdb::TFoldedBounds foldedBounds;
+    NQdb::TConstFolder folder;
     auto tree = NQdb::NCbo::DpccpJoinOrder(
-        leaves, {{"d.y", "s.z"}, {"d.x", "f.k"}}, {}, foldedBounds);
+        leaves, {{"d.y", "s.z"}, {"d.x", "f.k"}}, {}, folder);
     ASSERT_TRUE(tree && tree->Stats_);
     auto join = NQdb::TMaybeOp<NQdb::TJoinOperator>(tree);
     ASSERT_TRUE(join);

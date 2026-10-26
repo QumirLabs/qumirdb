@@ -13,8 +13,6 @@
 #include <qdb/plan/ops/union.h>
 #include <qdb/plan/types/nullable.h>
 
-#include <qumir/parser/core/printer.h>
-
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -220,18 +218,18 @@ bool MayBeNull(const TExprPtr& expr, const TStructType& input) {
     });
 }
 
-// One filter's statistics and schema, with the folding memo shared by the query.
+// One filter's statistics and schema, with the constant folder shared by the query.
 class TSelectivityEstimator {
 public:
     TSelectivityEstimator(
         const TStats& inputStats,
         const TStructType& operatorType,
         bool overSource,
-        TFoldedBounds& foldedBounds)
+        TConstFolder& folder)
         : InputStats_(inputStats)
         , OperatorType_(operatorType)
         , OverSource_(overSource)
-        , FoldedBounds_(foldedBounds) {}
+        , Folder_(folder) {}
 
     double Estimate(const TExprPtr& atom) {
         if (auto maybeUnary = TMaybeNode<TUnaryExpr>(atom)) {
@@ -474,13 +472,7 @@ private:
         if (!IsConstExpr(expr)) {
             return nullptr;
         }
-        auto [it, inserted] = FoldedBounds_.try_emplace(NCore::PrintAst(expr));
-        if (inserted) {
-            if (auto folded = TMaybeNode<TNumberExpr>(ConstFold(expr))) {
-                it->second = folded.Cast();
-            }
-        }
-        return it->second;
+        return Folder_.FoldNumber(expr);
     }
 
     std::optional<double> FractionBelow(
@@ -755,7 +747,7 @@ private:
     const TStats& InputStats_;
     const TStructType& OperatorType_;
     const bool OverSource_;
-    TFoldedBounds& FoldedBounds_;
+    TConstFolder& Folder_;
 };
 
 // Selectivity of a join's residual over the joined rows: the columns of both
@@ -765,7 +757,7 @@ double EstimateResidual(
     const TOperatorPtr& left,
     const TOperatorPtr& right,
     const TExprPtr& residual,
-    TFoldedBounds& foldedBounds)
+    TConstFolder& folder)
 {
     if (!left->Stats_ || !right->Stats_) {
         return 0.5;
@@ -787,7 +779,7 @@ double EstimateResidual(
         * static_cast<double>(right->Stats_->RowCount);
     stats.RowCount = static_cast<uint64_t>(std::min(rows, 0x1p63));
     const TStructType type(std::move(fields));
-    const double selectivity = TSelectivityEstimator(stats, type, false, foldedBounds).Estimate(residual);
+    const double selectivity = TSelectivityEstimator(stats, type, false, folder).Estimate(residual);
     return std::clamp(selectivity, 0.0, 1.0);
 }
 
@@ -797,22 +789,22 @@ double EstimateSelectivity(
     const TStatsPtr& inputStats,
     const std::shared_ptr<TStructType>& operatorType,
     bool overSource,
-    TFoldedBounds& foldedBounds)
+    TConstFolder& folder)
 {
     if (!operatorType) {
         return 0.5;
     }
-    return TSelectivityEstimator(*inputStats, *operatorType, overSource, foldedBounds).Estimate(atom);
+    return TSelectivityEstimator(*inputStats, *operatorType, overSource, folder).Estimate(atom);
 }
 
-TStatsPtr ComputeFilterStats(const std::shared_ptr<TFilterOperator>& filter, TFoldedBounds& foldedBounds) {
+TStatsPtr ComputeFilterStats(const std::shared_ptr<TFilterOperator>& filter, TConstFolder& folder) {
     auto inputStats = filter->Input()->Stats_;
     if (!inputStats) {
         return nullptr;
     }
     double selectivity = EstimateSelectivity(filter->Predicate(), inputStats,
         TMaybeType<TStructType>(filter->Input()->OutputColumns()).Cast(),
-        TMaybeOp<TSourceOperator>(filter->Input()), foldedBounds);
+        TMaybeOp<TSourceOperator>(filter->Input()), folder);
     selectivity = std::clamp(selectivity, 0.0, 1.0);
     auto outputStats = std::make_shared<TStats>();
     outputStats->ColumnStats = inputStats->ColumnStats;
@@ -1173,7 +1165,7 @@ uint64_t JoinRows(
     const std::vector<TJoinKey>& keys,
     EJoinType type,
     const TExprPtr& residualPredicate,
-    TFoldedBounds& foldedBounds)
+    TConstFolder& folder)
 {
     const auto& leftStats = *left->Stats_;
     const auto& rightStats = *right->Stats_;
@@ -1190,7 +1182,7 @@ uint64_t JoinRows(
     // The residual accepts a share of the key matches, taken as independent
     // of the keys.
     const double residual = residualPredicate
-        ? EstimateResidual(left, right, residualPredicate, foldedBounds)
+        ? EstimateResidual(left, right, residualPredicate, folder)
         : 1.0;
     const double ndvL = card.NdvL;
     const double ndvR = card.NdvR;
@@ -1237,7 +1229,7 @@ uint64_t JoinRows(
 
 TStatsPtr ComputeJoinStats(
     const std::shared_ptr<TJoinOperator>& join,
-    TFoldedBounds& foldedBounds,
+    TConstFolder& folder,
     const std::unordered_set<std::string>* columns = nullptr)
 {
     auto leftStats = join->Left()->Stats_;
@@ -1251,7 +1243,7 @@ TStatsPtr ComputeJoinStats(
         join->Keys(),
         join->JoinType(),
         join->Filter(),
-        foldedBounds);
+        folder);
     auto outputStats = std::make_shared<TStats>();
 
     auto keep = [&](const std::string& column) {
@@ -1489,7 +1481,7 @@ TStatsPtr BoundToOneRow(const TStats& stats) {
     return bounded;
 }
 
-TStatsPtr ComputeStatsFor(TOperatorPtr op, TFoldedBounds& foldedBounds) {
+TStatsPtr ComputeStatsFor(TOperatorPtr op, TConstFolder& folder) {
     if (auto source = TMaybeOp<TSourceOperator>(op)) {
         return ComputeSourceStats(source.Cast());
     }
@@ -1501,13 +1493,13 @@ TStatsPtr ComputeStatsFor(TOperatorPtr op, TFoldedBounds& foldedBounds) {
     }
 
     if (auto maybeFilter = TMaybeOp<TFilterOperator>(op)) {
-        return ComputeFilterStats(maybeFilter.Cast(), foldedBounds);
+        return ComputeFilterStats(maybeFilter.Cast(), folder);
     }
     if (auto maybeProject = TMaybeOp<TProjectOperator>(op)) {
         return ComputeProjectStats(maybeProject.Cast());
     }
     if (auto maybeJoin = TMaybeOp<TJoinOperator>(op)) {
-        return ComputeJoinStats(maybeJoin.Cast(), foldedBounds);
+        return ComputeJoinStats(maybeJoin.Cast(), folder);
     }
     if (auto maybeAggregate = TMaybeOp<TAggregateOperator>(op)) {
         return ComputeAggregateStats(maybeAggregate.Cast());
@@ -1528,10 +1520,10 @@ TStatsPtr ComputeStatsFor(TOperatorPtr op, TFoldedBounds& foldedBounds) {
 
 TStatsPtr EstimateJoinStats(
     const std::shared_ptr<TJoinOperator>& join,
-    TFoldedBounds& foldedBounds,
+    TConstFolder& folder,
     const std::unordered_set<std::string>* columns)
 {
-    return ComputeJoinStats(join, foldedBounds, columns);
+    return ComputeJoinStats(join, folder, columns);
 }
 
 uint64_t EstimateInnerJoinRows(
@@ -1539,16 +1531,16 @@ uint64_t EstimateInnerJoinRows(
     const TOperatorPtr& right,
     const std::vector<TJoinKey>& keys,
     const TExprPtr& residual,
-    TFoldedBounds& foldedBounds)
+    TConstFolder& folder)
 {
-    return JoinRows(left, right, keys, EJoinType::Inner, residual, foldedBounds);
+    return JoinRows(left, right, keys, EJoinType::Inner, residual, folder);
 }
 
-TStatsPtr EstimateStats(TOperatorPtr op, TFoldedBounds& foldedBounds) {
+TStatsPtr EstimateStats(TOperatorPtr op, TConstFolder& folder) {
     for (const auto& input : op->Inputs()) {
-        input->Stats_ = EstimateStats(input, foldedBounds);
+        input->Stats_ = EstimateStats(input, folder);
     }
-    auto stats = ComputeStatsFor(op, foldedBounds);
+    auto stats = ComputeStatsFor(op, folder);
     if (stats && op->AtMostOneRow) {
         stats = BoundToOneRow(*stats);
     }
@@ -1556,8 +1548,8 @@ TStatsPtr EstimateStats(TOperatorPtr op, TFoldedBounds& foldedBounds) {
 }
 
 TStatsPtr EstimateStats(TOperatorPtr op) {
-    TFoldedBounds foldedBounds;
-    return EstimateStats(op, foldedBounds);
+    TConstFolder folder;
+    return EstimateStats(op, folder);
 }
 
 } // namespace NQdb

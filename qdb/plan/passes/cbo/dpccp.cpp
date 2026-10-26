@@ -52,11 +52,11 @@ public:
         const std::vector<TOperatorPtr>& leaves,
         const std::vector<TJoinEdge>& edges,
         const std::vector<NQumir::NAst::TExprPtr>& residuals,
-        TFoldedBounds& foldedBounds)
+        TConstFolder& folder)
         : Leaves_(leaves)
         , N_(leaves.size())
         , Neighbors_(leaves.size(), 0)
-        , FoldedBounds_(foldedBounds)
+        , Folder_(folder)
     {
         BuildGraph(edges, residuals);
     }
@@ -88,7 +88,7 @@ public:
             // Only the rows of each split were estimated; the statistics of
             // the set are those of the largest split.
             auto largestJoin = Join(largest, s ^ largest, dp);
-            auto stats = EstimateJoinStats(largestJoin, FoldedBounds_, &EstimatedColumns_);
+            auto stats = EstimateJoinStats(largestJoin, Folder_, &EstimatedColumns_);
             const double jc = static_cast<double>(stats->RowCount);
             TSubset best = 0;
             double bestCost = 0.0;
@@ -215,7 +215,7 @@ private:
                 dp[s2].Tree,
                 CrossingKeys(s1, s2),
                 CrossingResidual(s1, s2),
-                FoldedBounds_);
+                Folder_);
             if (!largest || rows > largestRows) {
                 largest = s1;
                 largestRows = rows;
@@ -324,7 +324,7 @@ private:
     // The columns whose statistics the estimates of joins read: those of the
     // classes and of the residuals. A subset's statistics keep only them.
     std::unordered_set<std::string> EstimatedColumns_;
-    TFoldedBounds& FoldedBounds_;
+    TConstFolder& Folder_;
 };
 
 } // namespace
@@ -333,7 +333,7 @@ TOperatorPtr DpccpJoinOrder(
     const std::vector<TOperatorPtr>& leaves,
     const std::vector<TJoinEdge>& edges,
     const std::vector<NQumir::NAst::TExprPtr>& residuals,
-    TFoldedBounds& foldedBounds)
+    TConstFolder& folder)
 {
     if (leaves.empty()) {
         return nullptr;
@@ -344,7 +344,7 @@ TOperatorPtr DpccpJoinOrder(
     if (leaves.size() > MaxRelations) {
         return nullptr;
     }
-    return TDpccp(leaves, edges, residuals, foldedBounds).Solve();
+    return TDpccp(leaves, edges, residuals, folder).Solve();
 }
 
 } // namespace NCbo

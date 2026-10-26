@@ -33,7 +33,7 @@ TOperatorPtr DpccpJoinOrder(
     const std::vector<TOperatorPtr>& leaves,
     const std::vector<TJoinEdge>& edges,
     const std::vector<NQumir::NAst::TExprPtr>& residuals,
-    TFoldedBounds& foldedBounds);
+    TConstFolder& folder);
 
 } // namespace NCbo
 } // namespace NQdb

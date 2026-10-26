@@ -201,7 +201,7 @@ NSql::TSqlPtr<NSql::TWindowExpr> CloneSqlWindowExpr(
 }
 
 // TODO(#129): Move the affine coefficient arithmetic below to the common VM pipeline
-// once planning-time evaluation is fast: ConstFold compiles a fresh TVmFunction per
+// once planning-time evaluation is fast: TConstFolder compiles a fresh TVmFunction per
 // call (~4 ms). The move must keep rejecting coefficients that overflow i64, which
 // the VM would wrap.
 struct TAffineForm {

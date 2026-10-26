@@ -5,6 +5,7 @@
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/passes/column_pruning.h>
+#include <qdb/plan/passes/const_fold.h>
 #include <qdb/plan/passes/equijoin.h>
 #include <qdb/plan/passes/qualify_columns.h>
 #include <qdb/plan/passes/typing.h>
@@ -108,7 +109,8 @@ TOperatorPtr PlanSql(
         AssignSourceAliases(root);
         QualifyColumns(root);
         AnnotateTypes(root);
-        root = ExtractEquiJoins(root);
+        TConstFolder folder;
+        root = ExtractEquiJoins(root, folder);
         AnnotateTypes(root);
         ApplyColumnPruning(root);
     }

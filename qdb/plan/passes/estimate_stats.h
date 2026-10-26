@@ -8,22 +8,18 @@
 #include <cstdint>
 #include <memory>
 #include <string>
-#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
 namespace NQdb {
 
-// Closed comparison bounds already folded to numbers, by printed expression;
-// null for a bound that is not a number. Folding compiles the bound and the
-// planner estimates a plan several times, so the estimates of one query share
-// one set and each bound is folded once.
-using TFoldedBounds = std::unordered_map<
-    std::string, std::shared_ptr<NQumir::NAst::TNumberExpr>>;
+class TConstFolder;
 
+// `folder` folds the constants of the estimated predicates; the estimates of
+// one query share it.
 TStatsPtr EstimateStats(TOperatorPtr op);
-TStatsPtr EstimateStats(TOperatorPtr op, TFoldedBounds& foldedBounds);
+TStatsPtr EstimateStats(TOperatorPtr op, TConstFolder& folder);
 
 class TJoinOperator;
 struct TJoinKey;
@@ -34,7 +30,7 @@ struct TJoinKey;
 // residuals.
 TStatsPtr EstimateJoinStats(
     const std::shared_ptr<TJoinOperator>& join,
-    TFoldedBounds& foldedBounds,
+    TConstFolder& folder,
     const std::unordered_set<std::string>* columns = nullptr);
 
 // The row count EstimateJoinStats gives an inner join of `left` and `right`
@@ -45,7 +41,7 @@ uint64_t EstimateInnerJoinRows(
     const TOperatorPtr& right,
     const std::vector<TJoinKey>& keys,
     const NQumir::NAst::TExprPtr& residual,
-    TFoldedBounds& foldedBounds);
+    TConstFolder& folder);
 
 // Width estimate used by the CBO cost model. Strings are costed as the
 // materialized StringView (ptr + size), not as their payload bytes.

@@ -62,7 +62,7 @@ private:
     std::unique_ptr<TImpl> Impl_;
 };
 
-// Shared default context used by both expression annotation and ConstFold.
+// Shared default context used by expression annotation.
 TVmFrontendContext& QumirdbVmContext();
 
 // Reusable AST -> compose -> resolve -> IR -> interpreter pipeline for small

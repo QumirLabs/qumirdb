@@ -31,11 +31,11 @@ struct TJoinReorderDiagnostics {
 //
 // Runs after QualifyColumns, AnnotateTypes and EstimateStats (it needs leaf
 // output schemas to map columns to relations, and leaf statistics) and before
-// ExtractEquiJoins. `foldedBounds` is the query's memo of folded constants.
+// ExtractEquiJoins. `folder` folds the query's constants.
 // Returns the new root.
 TOperatorPtr ReorderJoins(
     TOperatorPtr root,
-    TFoldedBounds& foldedBounds,
+    TConstFolder& folder,
     bool enableCbo = true,
     TJoinReorderDiagnostics* diagnostics = nullptr);
 
