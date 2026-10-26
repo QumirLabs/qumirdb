@@ -7,10 +7,12 @@
 #include <qdb/kernel/finalize.h>
 #include <qdb/scheduler/plan_lowerer.h>
 #include <qdb/plan/build.h>
+#include <qdb/plan/build2.h>
 #include <qdb/plan/pipeline.h>
 #include <qdb/plan/plan_print.h>
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/cte_consumer.h>
+#include <qdb/plan/ops/dependent_join.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/project.h>
@@ -151,6 +153,17 @@ std::optional<EExplainMode> ParseExplainMode(std::string_view value) {
     return std::nullopt;
 }
 
+// Legacy: BuildPlan decorrelates subqueries by pattern rewrites. New:
+// BuildCanonicalPlan attaches them with dependent joins, which an unnesting
+// pass is to remove; until it exists such a plan is only explained.
+enum class EDecorrelation { Legacy, New };
+
+std::optional<EDecorrelation> ParseDecorrelation(std::string_view value) {
+    if (value == "legacy") return EDecorrelation::Legacy;
+    if (value == "new") return EDecorrelation::New;
+    return std::nullopt;
+}
+
 struct TCliOptions {
     ESyntax Syntax = ESyntax::Sexpr;
     std::string DataDir = ".";
@@ -158,6 +171,7 @@ struct TCliOptions {
     bool Verbose = false;
     bool Timing = false;
     EExplainMode ExplainMode = EExplainMode::Text;
+    EDecorrelation Decorrelation = EDecorrelation::Legacy;
     NQdb::TEngineSettings Engine;
 };
 
@@ -261,6 +275,19 @@ std::chrono::duration<double> ProcessCpuTime() {
     return std::chrono::duration<double>(seconds(usage.ru_utime) + seconds(usage.ru_stime));
 }
 
+void PrintExplain(const NQdb::TOperatorPtr& plan, EExplainMode mode) {
+    const bool sexprAvailable = NQdb::CollectMaterializations(plan).empty();
+    const bool wantSexpr = mode != EExplainMode::Text && sexprAvailable;
+    const bool wantText = mode != EExplainMode::Sexpr || !sexprAvailable;
+    if (wantSexpr) {
+        NQdb::NSexp::PrintRelPlan(std::cout, plan);
+        std::cout << (wantText ? "\n\n" : "\n");
+    }
+    if (wantText) {
+        PrintPlanTreeWithCtes(std::cout, plan);
+    }
+}
+
 int ExecutePlan(
     NQdb::TOperatorPtr plan,
     const TCliOptions& config,
@@ -268,6 +295,17 @@ int ExecutePlan(
     bool explain,
     std::chrono::steady_clock::time_point planStart)
 {
+    // The optimizer passes and execution need an unnested plan: a dependent
+    // join left by the new builder stops the pipeline here.
+    if (auto unnested = NQdb::RequireNoDependentJoins(plan); !unnested) {
+        if (explain) {
+            std::cerr << "note: the plan has dependent joins; it is shown before the optimizer passes\n";
+            PrintExplain(plan, config.ExplainMode);
+            return 0;
+        }
+        std::cerr << unnested.error().ToString() << "\n";
+        return 1;
+    }
     NQdb::TPlanPassDiagnostics planDiagnostics;
     auto passOptions = config.Engine.Optimizer;
     passOptions.Diagnostics = &planDiagnostics;
@@ -300,17 +338,7 @@ int ExecutePlan(
     }
 
     if (explain) {
-        const bool wantSexpr =
-            config.ExplainMode != EExplainMode::Text && sexprAvailable;
-        const bool wantText =
-            config.ExplainMode != EExplainMode::Sexpr || !sexprAvailable;
-        if (wantSexpr) {
-            NQdb::NSexp::PrintRelPlan(std::cout, plan);
-            std::cout << (wantText ? "\n\n" : "\n");
-        }
-        if (wantText) {
-            PrintPlanTreeWithCtes(std::cout, plan);
-        }
+        PrintExplain(plan, config.ExplainMode);
         return 0;
     }
 
@@ -421,7 +449,9 @@ int RunSqlStatement(
     };
     // Plan construction and the optimizer passes type against the same catalog snapshot.
     NQdb::NKernel::TAnnotationContext annotation{.ExternalCatalog = catalog.Snapshot()};
-    auto plan = NQdb::BuildPlan(statement, factory, annotation);
+    auto plan = config.Decorrelation == EDecorrelation::New
+        ? NQdb::BuildCanonicalPlan(statement, factory, annotation)
+        : NQdb::BuildPlan(statement, factory, annotation);
 
     if (!plan) {
         std::cerr << plan.error().ToString() << "\n";
@@ -696,6 +726,8 @@ void PrintHelp() {
         "    <separator=X>csv           CSV with custom separator X\n"
         "    null                       Consume rows without output\n"
         "  --explain-mode <mode>        explain output: text (default), sexpr, both\n"
+        "  --decorrelation <mode>       SQL subqueries: legacy (default, build-time rewrites)\n"
+        "                               or new (dependent joins; plans with them are explain-only)\n"
         "  --verbose                    Print the logical and runtime plans and the effective settings\n"
         "  --timing                     Print per-phase timings (planning, kernel build, JIT LLVM, CPU)\n"
         "  --config <path>              Ini file with engine settings\n"
@@ -757,6 +789,17 @@ int main(int argc, char** argv) {
                 return 1;
             }
             config.ExplainMode = *mode;
+        } else if (!std::strcmp(argv[i], "--decorrelation")) {
+            if (i + 1 >= argc) {
+                std::cerr << "--decorrelation requires an argument\n";
+                return 1;
+            }
+            auto mode = ParseDecorrelation(argv[++i]);
+            if (!mode) {
+                std::cerr << "Invalid decorrelation mode (legacy|new)\n";
+                return 1;
+            }
+            config.Decorrelation = *mode;
         } else if (!std::strcmp(argv[i], "--data")) {
             if (i + 1 >= argc) {
                 std::cerr << "--data requires a directory argument\n";
