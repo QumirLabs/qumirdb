@@ -7,7 +7,7 @@
 #include <qdb/kernel/finalize.h>
 #include <qdb/scheduler/plan_lowerer.h>
 #include <qdb/plan/build.h>
-#include <qdb/plan/build2.h>
+#include <qdb/plan/build/build.h>
 #include <qdb/plan/pipeline.h>
 #include <qdb/plan/plan_print.h>
 #include <qdb/plan/ops/aggregate.h>
