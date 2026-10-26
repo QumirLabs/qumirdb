@@ -1,5 +1,6 @@
 #pragma once
 #include <coroio/actors/actor.hpp>
+#include <qdb/io/io.h>
 
 namespace NQdb {
 namespace NRemote {
@@ -22,6 +23,25 @@ struct TSpawnComputeActor {
 struct TSpawnComputeActorResponse {
     static constexpr NNet::NActors::TMessageId MessageId = 101;
     NNet::NActors::TActorId ActorId;
+};
+
+// compute-actor
+struct TDataChunk {
+    static constexpr NNet::NActors::TMessageId MessageId = 200;
+    uint32_t TaskId;
+    uint32_t ChannelId;
+    TRowSet RowSet;
+};
+
+// client-side
+struct TExecuteQuery {
+    static constexpr NNet::NActors::TMessageId MessageId = 1000;
+    std::string Query;
+};
+
+struct TExecuteQueryResponse {
+    static constexpr NNet::NActors::TMessageId MessageId = 1001;
+    std::string Response;
 };
 
 } // namespace NRemote
