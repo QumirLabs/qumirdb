@@ -427,13 +427,13 @@ private:
             // The histogram cannot resolve a range narrower than a bucket,
             // but a range that can hold a value of the column keeps one
             // distinct value. It never keeps more than either end alone.
-            auto ndv = InputStats_.ColumnStats.at(column)->Ndv;
+            auto ndv = KnownNdv(column);
             if (
-                range.Lower && range.Upper && ndv && *ndv > 0 &&
+                range.Lower && range.Upper && ndv &&
                 RangeCanHoldValue(column, *range.Lower, *range.Upper))
             {
                 fraction = std::min({
-                    std::max(fraction, 1.0 / static_cast<double>(*ndv)),
+                    std::max(fraction, 1.0 / *ndv),
                     upper,
                     1.0 - lower});
             }
@@ -512,12 +512,10 @@ private:
                 : NonNullFraction(leftName);
         }
         double selectivity = 0.5;
-        if (InputStats_.ColumnStats.count(leftName) > 0 && InputStats_.ColumnStats.count(rightName) > 0) {
-            auto leftNdv = InputStats_.ColumnStats.at(leftName)->Ndv;
-            auto rightNdv = InputStats_.ColumnStats.at(rightName)->Ndv;
-            if (leftNdv && rightNdv) {
-                selectivity = 1.0 / std::max(*leftNdv, *rightNdv);
-            }
+        auto leftNdv = KnownNdv(leftName);
+        auto rightNdv = KnownNdv(rightName);
+        if (leftNdv && rightNdv) {
+            selectivity = 1.0 / std::max(*leftNdv, *rightNdv);
         }
         return (negated ? 1.0 - selectivity : selectivity)
             * NonNullFraction(leftName) * NonNullFraction(rightName);
@@ -532,8 +530,9 @@ private:
         if (inRangeResult.has_value() && !*inRangeResult) {
             return 0.0;
         }
-        return it->second->Ndv
-            ? 1.0 / *it->second->Ndv
+        auto ndv = KnownNdv(colName);
+        return ndv
+            ? 1.0 / *ndv
             : 0.5;
     }
 
@@ -549,6 +548,17 @@ private:
             }
         }
         return nullptr;
+    }
+
+    // The NDV a column's non-NULL rows are divided among, when the statistics
+    // have one. An NDV of 0 divides nothing and counts as unknown: an all-NULL
+    // column keeps no rows through its null count instead.
+    std::optional<double> KnownNdv(const std::string& colName) const {
+        auto it = InputStats_.ColumnStats.find(colName);
+        if (it == InputStats_.ColumnStats.end() || !it->second->Ndv || *it->second->Ndv == 0) {
+            return std::nullopt;
+        }
+        return static_cast<double>(*it->second->Ndv);
     }
 
     // Fraction of the rows where a column is not NULL. A source's null count
@@ -870,13 +880,13 @@ private:
     }
 
     std::optional<TValueSet> ColumnValues(const std::string& name, std::span<const TExprPtr> items) {
-        auto colIt = InputStats_.ColumnStats.find(name);
-        if (colIt == InputStats_.ColumnStats.end() || !colIt->second->Ndv || *colIt->second->Ndv == 0) {
+        auto ndv = KnownNdv(name);
+        if (!ndv) {
             return std::nullopt;
         }
         TValueSet values{
             .Column = name,
-            .Ndv = static_cast<double>(*colIt->second->Ndv),
+            .Ndv = *ndv,
             .NonNull = NonNullFraction(name),
         };
         for (const auto& item : items) {

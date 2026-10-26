@@ -46,6 +46,7 @@
     "or_same_column.sql": {"order": "ordered"},
     "or_columns.sql": {"order": "ordered"},
     "join_or_residual.sql": {"order": "ordered"},
-    "in_list_not_equal.sql": {"order": "ordered"}
+    "in_list_not_equal.sql": {"order": "ordered"},
+    "or_ndv_zero.sql": {"order": "ordered"}
   }
 }
