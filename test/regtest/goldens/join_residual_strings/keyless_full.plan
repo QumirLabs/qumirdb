@@ -1,4 +1,4 @@
-project (k, k2) (rows≈24 cost≈5.9K)
-└─ join full residual (== (call strcat |sa.s| (cast "x" <named StringView>)) |sb.s|) (rows≈24 cost≈5.5K)
+project (k, k2) (rows≈12 cost≈5.1K)
+└─ join full residual (== (call strcat |sa.s| (cast "x" <named StringView>)) |sb.s|) (rows≈12 cost≈4.9K)
    ├─ source sa AS sa (rows≈4 cost≈96)
    └─ source sb AS sb (rows≈6 cost≈144)

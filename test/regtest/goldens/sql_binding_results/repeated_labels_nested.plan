@@ -1,8 +1,8 @@
 sort [y asc]
-└─ project (y, z) (rows≈4 cost≈4.6K)
-   └─ project (e.y, e.z) (rows≈4 cost≈4.6K)
-      └─ project (__scope_1, __scope_3) (rows≈4 cost≈4.5K)
-         └─ join inner [u.x = t.x] (rows≈4 cost≈4.4K)
+└─ project (y, z) (rows≈3 cost≈4.6K)
+   └─ project (e.y, e.z) (rows≈3 cost≈4.5K)
+      └─ project (__scope_1, __scope_3) (rows≈3 cost≈4.5K)
+         └─ join inner [u.x = t.x] (rows≈3 cost≈4.4K)
             ├─ filter (> |u.z| 100) (rows≈3 cost≈96)
             │  └─ source u AS u row-groups (> |u.z| 100) (rows≈3 cost≈48)
             └─ source t AS t (rows≈4 cost≈64)

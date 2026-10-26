@@ -1,5 +1,5 @@
-project (id, m) (rows≈8 cost≈4.4K)
-└─ join left residual (== (+ |t.id| 1) __in_mark_0__) (rows≈8 cost≈4.4K)
+project (id, m) (rows≈4 cost≈4.3K)
+└─ join left residual (== (+ |t.id| 1) __in_mark_0__) (rows≈4 cost≈4.3K)
    ├─ source t AS t (rows≈4 cost≈32)
    └─ project (__in_mark_0__) (rows≈2 cost≈96)
       └─ aggregate keys=[__in_mark_0__] (rows≈2 cost≈80)

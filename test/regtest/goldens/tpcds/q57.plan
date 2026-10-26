@@ -2,15 +2,15 @@ cte #0 (materialized, ×3):
 project (i_category, i_brand, cc_name, d_year, d_moy, sum_sales, avg_monthly_sales, rn)
 └─ window partition=[item.i_category, item.i_brand, call_center.cc_name] order=[date_dim.d_year asc, date_dim.d_moy asc] fns=[w_1=rank]
    └─ window partition=[item.i_category, item.i_brand, call_center.cc_name, date_dim.d_year] fns=[w_0=avg]
-      └─ aggregate keys=[item.i_category, item.i_brand, call_center.cc_name, date_dim.d_year, date_dim.d_moy] aggs=[sum_0=sum] (rows≈5 cost≈14.6K)
-         └─ join inner [catalog_sales.cs_item_sk = item.i_item_sk] (rows≈5 cost≈14.3K)
-            ├─ join inner [call_center.cc_call_center_sk = catalog_sales.cs_call_center_sk] (rows≈5 cost≈9.4K)
-            │  ├─ source call_center AS call_center (rows≈10 cost≈200)
-            │  └─ join inner [date_dim.d_date_sk = catalog_sales.cs_sold_date_sk] (rows≈5 cost≈4.8K)
+      └─ aggregate keys=[item.i_category, item.i_brand, call_center.cc_name, date_dim.d_year, date_dim.d_moy] aggs=[sum_0=sum] (rows≈1 cost≈13.7K)
+         └─ join inner [catalog_sales.cs_item_sk = item.i_item_sk] emit-filter 1 from left (rows≈1 cost≈13.6K)
+            ├─ join inner [call_center.cc_call_center_sk = catalog_sales.cs_call_center_sk] emit-filter 2 from right (rows≈1 cost≈9K)
+            │  ├─ source call_center AS call_center use-filter 2 keys=[call_center.cc_call_center_sk] (rows≈10 cost≈200)
+            │  └─ join inner [date_dim.d_date_sk = catalog_sales.cs_sold_date_sk] (rows≈1 cost≈4.6K)
             │     ├─ filter (|| (|| (== |date_dim.d_year| 2000) (&& (== |date_dim.d_year| (- 2000 1)) (== |date_dim.d_moy| 12))) (&& (== |date_dim.d_year| (+ 2000 1)) (== |date_dim.d_moy| 1))) (rows≈5 cost≈240)
             │     │  └─ source date_dim AS date_dim (rows≈10 cost≈120)
             │     └─ source catalog_sales AS catalog_sales (rows≈10 cost≈200)
-            └─ source item AS item (rows≈10 cost≈360)
+            └─ source item AS item use-filter 1 keys=[item.i_item_sk] (rows≈10 cost≈360)
 main:
 project (cc_name, d_year, d_moy, avg_monthly_sales, sum_sales, psum, nsum)
 └─ top-sort [__sort_0 asc, nsum asc] limit 100

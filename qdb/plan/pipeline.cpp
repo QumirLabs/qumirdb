@@ -63,6 +63,7 @@ void OptimizeOne(TOperatorPtr& plan, TPlanPassOptions& options, TFoldedBounds& f
     EstimateStats(plan, foldedBounds); // leaf cardinalities for cost-based ReorderJoins
     plan = ReorderJoins(
         plan,
+        foldedBounds,
         options.EnableCbo,
         options.Diagnostics ? &options.Diagnostics->JoinReorder : nullptr);
     stage("ReorderJoins");

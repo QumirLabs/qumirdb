@@ -36,6 +36,9 @@ struct IOperator : NQumir::NAst::TExpr {
     // Type: TFunctionType : (TStructType) -> TStructType
     static constexpr const char* NodeId = "Rel";
     TStatsPtr Stats_;
+    // The relation yields at most one row: SQL gives a scalar subquery a value
+    // only then. Row estimates take it as a bound.
+    bool AtMostOneRow = false;
     // Query-local, approximate consumer bindings placed after optimization.
     // They do not change SQL semantics or row-count estimates.
     std::vector<TRuntimeFilterUseSpec> RuntimeFilterUses;

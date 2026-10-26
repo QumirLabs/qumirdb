@@ -7,6 +7,7 @@
 #include <qdb/plan/ops/stats.h>
 #include <qdb/plan/passes/cbo/dpccp.h>
 #include <qdb/plan/passes/estimate_stats.h>
+#include <qdb/plan/passes/unbound_vars.h>
 #include <qdb/plan/build.h>
 #include <qdb/plan/pipeline.h>
 #include <qdb/plan/plan_print.h>
@@ -34,9 +35,19 @@ namespace {
 
 using TSubset = uint32_t;
 
+struct TColumnSpec {
+    std::string Name;
+    uint64_t Ndv;
+    // Integer values in [Min, Max] with an equi-depth histogram of `Buckets`
+    // buckets, uniform over the range; no range when Buckets is 0.
+    int64_t Min = 0;
+    int64_t Max = 0;
+    size_t Buckets = 0;
+};
+
 struct TLeafSpec {
     uint64_t Rows;
-    std::vector<std::pair<std::string, uint64_t>> Cols; // (column, ndv)
+    std::vector<TColumnSpec> Cols;
 };
 
 // Owns mock sources; builds leaf operators with Stats_ set.
@@ -47,16 +58,25 @@ struct TFixture {
     TOperatorPtr Add(const TLeafSpec& spec) {
         std::vector<std::string> names;
         for (const auto& col : spec.Cols) {
-            names.push_back(col.first);
+            names.push_back(col.Name);
         }
         Sources.push_back(std::make_unique<TMockSource>(names));
         auto op = std::make_shared<TSourceOperator>(*Sources.back(), std::string{});
         auto stats = std::make_shared<TStats>();
         stats->RowCount = spec.Rows;
-        for (const auto& [col, ndv] : spec.Cols) {
+        for (const auto& col : spec.Cols) {
             auto cs = std::make_shared<TStats::TColumnStats>();
-            cs->Ndv = ndv;
-            stats->ColumnStats[col] = cs;
+            cs->Ndv = col.Ndv;
+            if (col.Buckets > 0) {
+                cs->MinValue = std::bit_cast<uint64_t>(col.Min);
+                cs->MaxValue = std::bit_cast<uint64_t>(col.Max);
+                for (size_t i = 0; i <= col.Buckets; ++i) {
+                    const int64_t value = col.Min
+                        + (col.Max - col.Min) * static_cast<int64_t>(i) / static_cast<int64_t>(col.Buckets);
+                    cs->Histogram.push_back(std::bit_cast<uint64_t>(value));
+                }
+            }
+            stats->ColumnStats[col.Name] = cs;
         }
         op->Stats_ = stats;
         Leaves.push_back(op);
@@ -64,21 +84,43 @@ struct TFixture {
     }
 };
 
-// Independent Cout model - mirrors dpccp's cost, used to check optimality.
+NQumir::NAst::TExprPtr Compare(const char* op, const std::string& left, const std::string& right) {
+    return std::make_shared<NQumir::NAst::TBinaryExpr>(
+        NQumir::TLocation{}, NQumir::NAst::TOperator(op),
+        std::make_shared<NQumir::NAst::TIdentExpr>(NQumir::TLocation{}, left),
+        std::make_shared<NQumir::NAst::TIdentExpr>(NQumir::TLocation{}, right));
+}
+
+// Independent Cout model - mirrors dpccp's cost, used to check optimality. A
+// set of leaves has one cardinality: the largest join estimate over its
+// splits into two connected sets. A join is keyed by the equivalence classes
+// of the edge columns that have columns on both sides, and a residual scales
+// the join that first has all its leaves.
 struct TModel {
-    struct TEdge {
-        size_t A;
-        size_t B;
-        double Sel;
-        double KeyWidth;
+    struct TMember {
+        size_t Leaf;
+        std::string Column;
+        double Width;
+    };
+
+    struct TResidual {
+        TSubset Leaves;
+        NQumir::NAst::TExprPtr Predicate;
     };
 
     const std::vector<TOperatorPtr>& Leaves;
     std::map<const IOperator*, size_t> LeafIdx;
     std::vector<TSubset> Neighbors;
-    std::vector<TEdge> Edges;
+    std::vector<std::vector<TMember>> Classes;
+    std::vector<TResidual> Residuals;
+    // A join tree of each connected set, carrying the set's statistics.
+    mutable std::map<TSubset, TOperatorPtr> Sets;
+    mutable TFoldedBounds FoldedBounds;
 
-    TModel(const std::vector<TOperatorPtr>& leaves, const std::vector<NCbo::TJoinEdge>& edges)
+    TModel(
+        const std::vector<TOperatorPtr>& leaves,
+        const std::vector<NCbo::TJoinEdge>& edges,
+        const std::vector<NQumir::NAst::TExprPtr>& residuals)
         : Leaves(leaves)
         , Neighbors(leaves.size(), 0)
     {
@@ -90,36 +132,49 @@ struct TModel {
                 owner[name] = i;
             }
         }
-        std::map<std::pair<size_t, size_t>, std::vector<std::pair<double, double>>> pairKeys;
-        std::map<std::pair<size_t, size_t>, double> pairKeyWidths;
+        // Classes by repeated merging, in the order the columns appear.
+        std::vector<std::set<std::string>> classes;
+        std::vector<std::string> columns;
         for (const auto& e : edges) {
             size_t a = owner.at(e.LeftCol);
             size_t b = owner.at(e.RightCol);
-            double na = Ndv(a, e.LeftCol);
-            double nb = Ndv(b, e.RightCol);
-            size_t i = std::min(a, b);
-            size_t j = std::max(a, b);
-            pairKeys[{i, j}].emplace_back(a == i ? na : nb, a == i ? nb : na);
-            pairKeyWidths[{i, j}] += std::max(
-                NQdb::ColumnWidth(Leaves[a], e.LeftCol),
-                NQdb::ColumnWidth(Leaves[b], e.RightCol));
             Neighbors[a] |= TSubset{1} << b;
             Neighbors[b] |= TSubset{1} << a;
+            for (const auto& column : {e.LeftCol, e.RightCol}) {
+                if (std::ranges::find(columns, column) == columns.end()) {
+                    columns.push_back(column);
+                }
+            }
+            std::set<std::string> merged{e.LeftCol, e.RightCol};
+            std::erase_if(classes, [&](const std::set<std::string>& cls) {
+                if (cls.contains(e.LeftCol) || cls.contains(e.RightCol)) {
+                    merged.insert(cls.begin(), cls.end());
+                    return true;
+                }
+                return false;
+            });
+            classes.push_back(std::move(merged));
         }
-        for (const auto& [key, keys] : pairKeys) {
-            double ri = LeafRows(key.first);
-            double rj = LeafRows(key.second);
-            double rows = EstimateEquiJoin(ri, rj, keys).Rows;
-            double sel = ri * rj > 0.0 ? rows / (ri * rj) : 1.0;
-            Edges.push_back({key.first, key.second, sel, pairKeyWidths[key]});
+        std::map<size_t, size_t> classOf; // index in `classes` -> index in Classes
+        for (const auto& column : columns) {
+            size_t cls = 0;
+            while (!classes[cls].contains(column)) {
+                ++cls;
+            }
+            auto [it, inserted] = classOf.try_emplace(cls, Classes.size());
+            if (inserted) {
+                Classes.emplace_back();
+            }
+            size_t leaf = owner.at(column);
+            Classes[it->second].push_back({leaf, column, NQdb::ColumnWidth(Leaves[leaf], column)});
         }
-    }
-
-    double Ndv(size_t idx, const std::string& col) const {
-        const auto& stats = Leaves[idx]->Stats_;
-        auto it = stats->ColumnStats.find(col);
-        return (it != stats->ColumnStats.end() && it->second->Ndv)
-            ? static_cast<double>(*it->second->Ndv) : NQdb::UnknownNdv;
+        for (const auto& predicate : residuals) {
+            TSubset mask = 0;
+            for (const auto& column : FindUnboundVars(predicate)) {
+                mask |= TSubset{1} << owner.at(column);
+            }
+            Residuals.push_back({mask, predicate});
+        }
     }
 
     double LeafRows(size_t idx) const {
@@ -134,26 +189,77 @@ struct TModel {
         return Leaves[idx]->Stats_ ? Leaves[idx]->Stats_->Cost : 0.0;
     }
 
-    double CrossingSel(TSubset a, TSubset b) const {
-        double sel = 1.0;
-        for (const auto& e : Edges) {
-            TSubset ma = TSubset{1} << e.A;
-            TSubset mb = TSubset{1} << e.B;
-            if (((ma & a) && (mb & b)) || ((ma & b) && (mb & a))) {
-                sel *= e.Sel;
+    std::vector<std::pair<const TMember*, const TMember*>> CrossingClasses(TSubset a, TSubset b) const {
+        std::vector<std::pair<const TMember*, const TMember*>> crossing;
+        for (const auto& members : Classes) {
+            const TMember* left = nullptr;
+            const TMember* right = nullptr;
+            for (const auto& member : members) {
+                TSubset bit = TSubset{1} << member.Leaf;
+                if (!left && (bit & a)) {
+                    left = &member;
+                } else if (!right && (bit & b)) {
+                    right = &member;
+                }
+            }
+            if (left && right) {
+                crossing.emplace_back(left, right);
             }
         }
-        return sel;
+        return crossing;
+    }
+
+    NQumir::NAst::TExprPtr CrossingResidual(TSubset a, TSubset b) const {
+        NQumir::NAst::TExprPtr conjunction;
+        for (const auto& r : Residuals) {
+            if ((r.Leaves & (a | b)) != r.Leaves || (r.Leaves & a) == r.Leaves || (r.Leaves & b) == r.Leaves) {
+                continue;
+            }
+            conjunction = conjunction
+                ? std::make_shared<NQumir::NAst::TBinaryExpr>(
+                    NQumir::TLocation{}, NQumir::NAst::TOperator("&&"), conjunction, r.Predicate)
+                : r.Predicate;
+        }
+        return conjunction;
+    }
+
+    const TOperatorPtr& Set(TSubset s) const {
+        if (std::popcount(s) == 1) {
+            return Leaves[std::countr_zero(s)];
+        }
+        auto it = Sets.find(s);
+        if (it != Sets.end()) {
+            return it->second;
+        }
+        TOperatorPtr largest;
+        const TSubset lowest = s & (~s + 1);
+        for (TSubset s1 = (s - 1) & s; s1; s1 = (s1 - 1) & s) {
+            TSubset s2 = s ^ s1;
+            if (!(s1 & lowest) || !Connected(s1) || !Connected(s2)) {
+                continue;
+            }
+            std::vector<TJoinKey> keys;
+            for (const auto& [left, right] : CrossingClasses(s1, s2)) {
+                keys.push_back({left->Column, right->Column});
+            }
+            auto join = std::make_shared<TJoinOperator>(
+                Set(s1), Set(s2), std::move(keys), EJoinType::Inner, CrossingResidual(s1, s2));
+            join->Stats_ = NQdb::EstimateJoinStats(join, FoldedBounds);
+            if (!largest || join->Stats_->RowCount > largest->Stats_->RowCount) {
+                largest = join;
+            }
+        }
+        return Sets[s] = largest;
+    }
+
+    double Card(TSubset s) const {
+        return static_cast<double>(Set(s)->Stats_->RowCount);
     }
 
     double CrossingKeyWidth(TSubset a, TSubset b) const {
         double width = 0.0;
-        for (const auto& e : Edges) {
-            TSubset ma = TSubset{1} << e.A;
-            TSubset mb = TSubset{1} << e.B;
-            if (((ma & a) && (mb & b)) || ((ma & b) && (mb & a))) {
-                width += e.KeyWidth;
-            }
+        for (const auto& [left, right] : CrossingClasses(a, b)) {
+            width += std::max(left->Width, right->Width);
         }
         return width;
     }
@@ -185,7 +291,7 @@ struct TModel {
         if (auto join = TMaybeOp<TJoinOperator>(node)) {
             auto left = Eval(join.Cast()->Left());
             auto right = Eval(join.Cast()->Right());
-            double card = left.Card * right.Card * CrossingSel(left.Mask, right.Mask);
+            double card = Card(left.Mask | right.Mask);
             double width = left.Width + right.Width;
             double cost = NQdb::EstimateJoinCost(
                 left.Cost, right.Cost, left.Card, right.Card, card, width,
@@ -220,7 +326,7 @@ struct TModel {
             }
             double c1 = BruteMin(s1, cost, card, width);
             double c2 = BruteMin(s2, cost, card, width);
-            double jc = card[s1] * card[s2] * CrossingSel(s1, s2);
+            double jc = Card(s);
             double jw = width[s1] + width[s2];
             double c = NQdb::EstimateJoinCost(
                 c1, c2, card[s1], card[s2], jc, jw, CrossingKeyWidth(s1, s2));
@@ -234,15 +340,23 @@ struct TModel {
     }
 };
 
-// DPccp result must be an optimal-cost tree covering every leaf.
-void ExpectOptimal(const TFixture& fx, const std::vector<NCbo::TJoinEdge>& edges) {
-    auto tree = NCbo::DpccpJoinOrder(fx.Leaves, edges);
+// DPccp result must be an optimal-cost tree covering every leaf, and its
+// estimate must be the model's estimate of the whole set.
+void ExpectOptimal(
+    const TFixture& fx,
+    const std::vector<NCbo::TJoinEdge>& edges,
+    const std::vector<NQumir::NAst::TExprPtr>& residuals = {})
+{
+    TFoldedBounds foldedBounds;
+    auto tree = NCbo::DpccpJoinOrder(fx.Leaves, edges, residuals, foldedBounds);
     ASSERT_NE(tree, nullptr);
 
-    TModel model(fx.Leaves, edges);
+    TModel model(fx.Leaves, edges, residuals);
     auto ev = model.Eval(tree);
     TSubset full = (TSubset{1} << fx.Leaves.size()) - 1;
     EXPECT_EQ(ev.Mask, full) << "tree does not cover all leaves";
+    ASSERT_TRUE(tree->Stats_);
+    EXPECT_EQ(static_cast<double>(tree->Stats_->RowCount), model.Card(full));
 
     std::vector<double> cost(full + 1, -1.0);
     std::vector<double> card(full + 1, 0.0);
@@ -293,18 +407,45 @@ TEST(Cbo, PkFkChainFiveOptimal) {
         {"ps_sk", "s_sk"}, {"s_nk", "n_nk"}, {"n_rk", "r_rk"}, {"ps_pk", "p_pk"}});
 }
 
+// A conjunct other than a key equality scales the join that brings its
+// relations together, as it scales the join's estimate in the plan, and does
+// not connect relations.
+TEST(Cbo, ResidualScalesTheJoinItCompletes) {
+    TFixture fx;
+    fx.Add({1000, {{"a_b", 100}, {"a_x", 2}}});
+    fx.Add({100, {{"b_id", 100}, {"b_c", 10}}});
+    fx.Add({10, {{"c_id", 10}, {"c_y", 2}}});
+    auto residual = std::make_shared<NQumir::NAst::TBinaryExpr>(
+        NQumir::TLocation{}, NQumir::NAst::TOperator("!="),
+        std::make_shared<NQumir::NAst::TIdentExpr>(NQumir::TLocation{}, "a_x"),
+        std::make_shared<NQumir::NAst::TIdentExpr>(NQumir::TLocation{}, "c_y"));
+    TFoldedBounds foldedBounds;
+    auto tree = NCbo::DpccpJoinOrder(
+        fx.Leaves, {{"a_b", "b_id"}, {"b_c", "c_id"}}, {residual}, foldedBounds);
+    ASSERT_TRUE(tree && tree->Stats_);
+    // 1000 rows find their b and their c; a_x != c_y keeps half of them.
+    EXPECT_EQ(tree->Stats_->RowCount, 500u);
+
+    TFixture pair;
+    pair.Add({1000, {{"a_x", 2}}});
+    pair.Add({10, {{"c_y", 2}}});
+    EXPECT_EQ(NCbo::DpccpJoinOrder(pair.Leaves, {}, {residual}, foldedBounds), nullptr);
+}
+
 TEST(Cbo, DisconnectedReturnsNull) {
     TFixture fx;
     fx.Add({100, {{"a_id", 100}}});
     fx.Add({100, {{"b_id", 100}}}); // isolated
     fx.Add({100, {{"c_a", 100}}});
-    EXPECT_EQ(NCbo::DpccpJoinOrder(fx.Leaves, {{"a_id", "c_a"}}), nullptr);
+    TFoldedBounds foldedBounds;
+    EXPECT_EQ(NCbo::DpccpJoinOrder(fx.Leaves, {{"a_id", "c_a"}}, {}, foldedBounds), nullptr);
 }
 
 TEST(Cbo, SingleLeafReturnsLeaf) {
     TFixture fx;
     auto leaf = fx.Add({100, {{"a_id", 100}}});
-    EXPECT_EQ(NCbo::DpccpJoinOrder(fx.Leaves, {}), leaf);
+    TFoldedBounds foldedBounds;
+    EXPECT_EQ(NCbo::DpccpJoinOrder(fx.Leaves, {}, {}, foldedBounds), leaf);
 }
 
 TEST(Cbo, FallbackAboveMaxRelations) {
@@ -312,22 +453,38 @@ TEST(Cbo, FallbackAboveMaxRelations) {
     for (size_t i = 0; i < NCbo::MaxRelations + 1; ++i) {
         fx.Add({100, {{"c" + std::to_string(i), 100}}});
     }
-    EXPECT_EQ(NCbo::DpccpJoinOrder(fx.Leaves, {}), nullptr);
+    TFoldedBounds foldedBounds;
+    EXPECT_EQ(NCbo::DpccpJoinOrder(fx.Leaves, {}, {}, foldedBounds), nullptr);
 }
 
 // Random connected graphs (spanning tree + extra edges) must all be optimal.
+// Their key columns have ranges and histograms, so range alignment and the
+// histograms dropped by joins shape the estimates; an extra edge may reuse a
+// column, which puts three or more columns in one equivalence class; and a
+// residual may compare two leaves.
 TEST(Cbo, RandomGraphsOptimal) {
     uint32_t seed = 987654321;
     auto rnd = [&](int lo, int hi) {
         seed = seed * 1103515245u + 12345u;
         return lo + static_cast<int>((seed & 0x7fffffff) % static_cast<uint32_t>(hi - lo + 1));
     };
-    for (int iter = 0; iter < 100; ++iter) {
+    auto column = [&](std::string name, uint64_t rows) {
+        TColumnSpec spec{std::move(name), static_cast<uint64_t>(rnd(1, static_cast<int>(rows)))};
+        if (rnd(0, 2) > 0) {
+            spec.Min = rnd(0, 1000);
+            spec.Max = spec.Min + rnd(0, 2000);
+            spec.Buckets = rnd(1, 8);
+            spec.Ndv = std::min<uint64_t>(spec.Ndv, spec.Max - spec.Min + 1);
+        }
+        return spec;
+    };
+    for (int iter = 0; iter < 200; ++iter) {
         size_t n = rnd(2, 6);
         std::vector<uint64_t> rows(n);
-        std::vector<std::vector<std::pair<std::string, uint64_t>>> cols(n);
+        std::vector<std::vector<TColumnSpec>> cols(n);
         for (size_t i = 0; i < n; ++i) {
             rows[i] = rnd(1, 100000);
+            cols[i].push_back(column("v" + std::to_string(i), rows[i]));
         }
         std::vector<std::pair<size_t, size_t>> pairs;
         for (size_t i = 1; i < n; ++i) {                 // spanning tree -> connected
@@ -345,18 +502,56 @@ TEST(Cbo, RandomGraphsOptimal) {
             auto [i, j] = pairs[e];
             std::string cl = "e" + std::to_string(e) + "l";
             std::string cr = "e" + std::to_string(e) + "r";
-            cols[i].emplace_back(cl, rnd(1, static_cast<int>(rows[i])));
-            cols[j].emplace_back(cr, rnd(1, static_cast<int>(rows[j])));
+            if (cols[i].size() > 1 && rnd(0, 3) == 0) {
+                cl = cols[i][rnd(1, static_cast<int>(cols[i].size()) - 1)].Name;
+            } else {
+                cols[i].push_back(column(cl, rows[i]));
+            }
+            cols[j].push_back(column(cr, rows[j]));
             edges.push_back({cl, cr});
+        }
+        std::vector<NQumir::NAst::TExprPtr> residuals;
+        for (int k = 0, count = rnd(0, 2); k < count && n > 2; ++k) {
+            size_t i = rnd(0, static_cast<int>(n) - 1);
+            size_t j = (i + rnd(1, static_cast<int>(n) - 1)) % n;
+            static const char* ops[] = {"<", ">=", "!="};
+            residuals.push_back(Compare(
+                ops[rnd(0, 2)],
+                cols[i][rnd(0, static_cast<int>(cols[i].size()) - 1)].Name,
+                cols[j][rnd(0, static_cast<int>(cols[j].size()) - 1)].Name));
         }
         TFixture fx;
         for (size_t i = 0; i < n; ++i) {
-            if (cols[i].empty()) {
-                cols[i].emplace_back("x" + std::to_string(i), rows[i]);
-            }
             fx.Add({rows[i], cols[i]});
         }
-        ExpectOptimal(fx, edges);
+        ExpectOptimal(fx, edges, residuals);
+    }
+}
+
+// A join of a composite foreign key whose column another relation's column
+// equals: lineitem's supplier key is also supplier's. Whichever column of the
+// class keys the join, the key pairs join lineitem and partsupp, and DPccp
+// estimates the join as the plan estimates it.
+TEST(Cbo, CompositeKeyThroughAnEquatedColumn) {
+    TFixture fx;
+    fx.Add({60000, {{"l_partkey", 2000}, {"l_suppkey", 100}}});
+    fx.Add({100, {{"s_suppkey", 100}}});
+    fx.Add({8000, {{"ps_partkey", 2000}, {"ps_suppkey", 100}}});
+    const std::vector<NCbo::TJoinEdge> edges{
+        {"s_suppkey", "l_suppkey"}, {"ps_suppkey", "l_suppkey"}, {"ps_partkey", "l_partkey"}};
+    ExpectOptimal(fx, edges);
+
+    TFoldedBounds foldedBounds;
+    auto lineitemSupplier = std::make_shared<TJoinOperator>(
+        fx.Leaves[0], fx.Leaves[1], std::vector<TJoinKey>{{"l_suppkey", "s_suppkey"}},
+        EJoinType::Inner, nullptr);
+    lineitemSupplier->Stats_ = EstimateJoinStats(lineitemSupplier, foldedBounds);
+    // Every lineitem row has its partsupp row: the composite key keeps the
+    // larger input, whichever supplier key column is the key.
+    for (const auto* suppkey : {"l_suppkey", "s_suppkey"}) {
+        const std::vector<TJoinKey> keys{{suppkey, "ps_suppkey"}, {"l_partkey", "ps_partkey"}};
+        EXPECT_EQ(EstimateInnerJoinRows(lineitemSupplier, fx.Leaves[2], keys, nullptr, foldedBounds), 60000u)
+            << suppkey;
     }
 }
 

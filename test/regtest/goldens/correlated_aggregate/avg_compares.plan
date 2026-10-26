@@ -1,5 +1,5 @@
-project (a, c) (rows≈6 cost≈8.3K)
-└─ join inner [__corr_0_0__ = t.a] emit-filter 1 from right residual (< |t.c| __scalar_0__) (rows≈6 cost≈8.2K)
+project (a, c) (rows≈3 cost≈8.1K)
+└─ join inner [__corr_0_0__ = t.a] emit-filter 1 from right residual (< |t.c| __scalar_0__) (rows≈3 cost≈8.1K)
    ├─ project (__corr_0_0__, __scalar_0__) (rows≈45 cost≈3.4K)
    │  └─ aggregate keys=[v.a] aggs=[sum_0=sum, count_0=count] (rows≈45 cost≈2.7K)
    │     └─ filter (! (call qdb_is_null |v.a|)) (rows≈47 cost≈1.5K)

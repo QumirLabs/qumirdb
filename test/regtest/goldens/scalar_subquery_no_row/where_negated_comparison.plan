@@ -1,5 +1,5 @@
-project (id) (rows≈4 cost≈4.3K)
-└─ join inner residual (! (< |t.id| __scalar_0__)) (rows≈4 cost≈4.2K)
+project (id) (rows≈2 cost≈4.2K)
+└─ join inner residual (! (< |t.id| __scalar_0__)) (rows≈2 cost≈4.2K)
    ├─ source t AS t (rows≈4 cost≈32)
    └─ project (__scalar_0__) (rows≈1 cost≈40)
       └─ filter (> |u.x| 100) (rows≈1 cost≈32)

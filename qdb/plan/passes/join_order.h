@@ -1,6 +1,7 @@
 #pragma once
 
 #include <qdb/plan/ops/operator.h>
+#include <qdb/plan/passes/estimate_stats.h>
 
 #include <string>
 #include <vector>
@@ -28,10 +29,13 @@ struct TJoinReorderDiagnostics {
 // relation it shares an equality with, so the subsequent equi-join extraction
 // can lift a key for every connected adjacency.
 //
-// Runs after QualifyColumns and AnnotateTypes (it needs leaf output schemas to
-// map columns to relations) and before ExtractEquiJoins. Returns the new root.
+// Runs after QualifyColumns, AnnotateTypes and EstimateStats (it needs leaf
+// output schemas to map columns to relations, and leaf statistics) and before
+// ExtractEquiJoins. `foldedBounds` is the query's memo of folded constants.
+// Returns the new root.
 TOperatorPtr ReorderJoins(
     TOperatorPtr root,
+    TFoldedBounds& foldedBounds,
     bool enableCbo = true,
     TJoinReorderDiagnostics* diagnostics = nullptr);
 

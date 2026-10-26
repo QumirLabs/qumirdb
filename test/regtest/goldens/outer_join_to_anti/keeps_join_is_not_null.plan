@@ -1,5 +1,5 @@
-project (value) (rows≈2 cost≈4.3K)
-└─ join inner [r.key = s.key] (rows≈2 cost≈4.3K)
+project (value) (rows≈1 cost≈4.3K)
+└─ join inner [r.key = s.key] (rows≈1 cost≈4.3K)
    ├─ filter (! (call qdb_is_null |r.key|)) (rows≈2 cost≈32)
    │  └─ source returns AS r row-groups (! (call qdb_is_null |r.key|)) (rows≈2 cost≈16)
    └─ source sales AS s (rows≈4 cost≈64)

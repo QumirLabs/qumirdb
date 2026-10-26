@@ -1,5 +1,5 @@
-project (value) (rows≈10 cost≈5.2K)
-└─ filter (call qdb_is_null |r.key|) (rows≈10 cost≈5.2K)
-   └─ join left residual (== (call coalesce |s.key| 0) (call coalesce |r.key| 0)) (rows≈20 cost≈4.7K)
+project (value) (rows≈5 cost≈4.7K)
+└─ filter (call qdb_is_null |r.key|) (rows≈5 cost≈4.7K)
+   └─ join left residual (== (call coalesce |s.key| 0) (call coalesce |r.key| 0)) (rows≈10 cost≈4.4K)
       ├─ source sales AS s (rows≈5 cost≈80)
       └─ source returns AS r (rows≈4 cost≈32)

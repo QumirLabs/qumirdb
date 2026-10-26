@@ -74,6 +74,7 @@ TOperatorPtr StructuralClone(const TOperatorPtr& op) {
     auto clone = Reconstruct(op);
     clone->Type = op->Type;
     clone->Stats_ = op->Stats_;
+    clone->AtMostOneRow = op->AtMostOneRow;
     clone->RuntimeFilterUses = op->RuntimeFilterUses;
     return clone;
 }

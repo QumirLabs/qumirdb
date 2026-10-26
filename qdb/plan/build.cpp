@@ -1951,6 +1951,7 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
             return std::unexpected(right.error());
         }
         const auto column = ColumnNames(right->Plan).front();
+        right->Plan->AtMostOneRow = true;
         node = JoinRelations(std::move(node), std::move(*right), {}, EJoinType::Left, nullptr);
         return extract(Ident(expr->Location, column));
     }
