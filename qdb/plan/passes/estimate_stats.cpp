@@ -19,6 +19,7 @@
 #include <cmath>
 #include <limits>
 #include <set>
+#include <unordered_set>
 
 namespace NQdb {
 
@@ -728,24 +729,35 @@ private:
 };
 
 // Selectivity of a join's residual over the joined rows: the columns of both
-// inputs side by side, the cross product of their rows.
-double EstimateResidual(const TJoinOperator& join, TFoldedBounds& foldedBounds) {
+// inputs side by side, the cross product of their rows. Only the residual's
+// own columns are read.
+double EstimateResidual(
+    const TOperatorPtr& left,
+    const TOperatorPtr& right,
+    const TExprPtr& residual,
+    TFoldedBounds& foldedBounds)
+{
+    if (!left->Stats_ || !right->Stats_) {
+        return 0.5;
+    }
     TStats stats;
     std::vector<std::pair<std::string, TTypePtr>> fields;
-    double rows = 1.0;
-    for (const auto& input : join.Inputs()) {
-        auto structure = TMaybeType<TStructType>(input->OutputColumns());
-        if (!input->Stats_ || !structure) {
-            return 0.5;
+    for (const auto& column : FindUnboundVars(residual)) {
+        for (const auto& input : {left, right}) {
+            if (auto type = FieldType(input->OutputColumns().get(), column)) {
+                fields.emplace_back(column, std::move(type));
+                if (auto it = input->Stats_->ColumnStats.find(column); it != input->Stats_->ColumnStats.end()) {
+                    stats.ColumnStats.insert(*it);
+                }
+                break;
+            }
         }
-        stats.ColumnStats.insert(input->Stats_->ColumnStats.begin(), input->Stats_->ColumnStats.end());
-        const auto& inputFields = structure.Cast()->Fields;
-        fields.insert(fields.end(), inputFields.begin(), inputFields.end());
-        rows *= static_cast<double>(input->Stats_->RowCount);
     }
+    const double rows = static_cast<double>(left->Stats_->RowCount)
+        * static_cast<double>(right->Stats_->RowCount);
     stats.RowCount = static_cast<uint64_t>(std::min(rows, 0x1p63));
     const TStructType type(std::move(fields));
-    const double selectivity = TSelectivityEstimator(stats, type, false, foldedBounds).Estimate(join.Filter());
+    const double selectivity = TSelectivityEstimator(stats, type, false, foldedBounds).Estimate(residual);
     return std::clamp(selectivity, 0.0, 1.0);
 }
 
@@ -1023,8 +1035,8 @@ const IOperator* ColumnRelation(const TOperatorPtr& op, const std::string& colum
             if (projection.Name != column) {
                 continue;
             }
-            if (auto ident = TMaybeNode<TIdentExpr>(projection.Expression)) {
-                return ColumnRelation(project->Input(), ident.Cast()->Name);
+            if (auto maybeIdent = TMaybeNode<TIdentExpr>(projection.Expression)) {
+                return ColumnRelation(project->Input(), maybeIdent.Cast()->Name);
             }
             break;
         }
@@ -1032,20 +1044,85 @@ const IOperator* ColumnRelation(const TOperatorPtr& op, const std::string& colum
     return op.get();
 }
 
-// Whether every key pair joins the same two relations.
-bool KeysJoinTwoRelations(const TJoinOperator& join) {
-    const IOperator* left = nullptr;
-    const IOperator* right = nullptr;
-    for (const auto& key : join.Keys()) {
-        const auto* keyLeft = ColumnRelation(join.Left(), key.Left);
-        const auto* keyRight = ColumnRelation(join.Right(), key.Right);
-        if ((left && keyLeft != left) || (right && keyRight != right)) {
-            return false;
-        }
-        left = keyLeft;
-        right = keyRight;
+// The key equalities that hold in the rows of `op`: the keys of the inner
+// joins below it, through the filters that pass their rows on.
+void CollectKeyEqualities(const TOperatorPtr& op, std::vector<const TJoinKey*>& out) {
+    if (auto maybeFilter = TMaybeOp<TFilterOperator>(op)) {
+        CollectKeyEqualities(maybeFilter.Cast()->Input(), out);
+        return;
     }
-    return true;
+    auto maybeJoin = TMaybeOp<TJoinOperator>(op);
+    if (!maybeJoin) {
+        return;
+    }
+    auto join = maybeJoin.Cast();
+    if (join->JoinType() != EJoinType::Inner) {
+        return;
+    }
+    for (const auto& key : join->Keys()) {
+        out.push_back(&key);
+    }
+    CollectKeyEqualities(join->Left(), out);
+    CollectKeyEqualities(join->Right(), out);
+}
+
+// The relations of the columns that `column` equals in the rows of `op`.
+std::vector<const IOperator*> EquatedRelations(
+    const TOperatorPtr& op,
+    const std::string& column,
+    const std::vector<const TJoinKey*>& equalities)
+{
+    std::vector<std::string_view> members{column};
+    for (size_t i = 0; i < members.size(); ++i) {
+        for (const auto* key : equalities) {
+            const auto other = key->Left == members[i] ? std::string_view(key->Right)
+                : key->Right == members[i] ? std::string_view(key->Left)
+                : std::string_view();
+            if (!other.empty() && std::ranges::find(members, other) == members.end()) {
+                members.push_back(other);
+            }
+        }
+    }
+    std::vector<const IOperator*> relations;
+    for (const auto member : members) {
+        const auto* relation = ColumnRelation(op, std::string(member));
+        if (std::ranges::find(relations, relation) == relations.end()) {
+            relations.push_back(relation);
+        }
+    }
+    return relations;
+}
+
+// Whether every key pair joins the same two relations: whether a relation on
+// each side holds a column of every pair's equivalence class. ExtractEquiJoins
+// keys a join with one column of a class on each side, and the joins below
+// can equate it with columns of other relations, so which relations a key
+// joins is a property of its class, not of the column chosen.
+bool KeysJoinTwoRelations(
+    const TOperatorPtr& left,
+    const TOperatorPtr& right,
+    const std::vector<TJoinKey>& keys)
+{
+    auto oneRelation = [&](const TOperatorPtr& input, std::string TJoinKey::* side) {
+        std::vector<const TJoinKey*> equalities;
+        CollectKeyEqualities(input, equalities);
+        std::vector<const IOperator*> shared;
+        for (size_t i = 0; i < keys.size(); ++i) {
+            auto relations = EquatedRelations(input, keys[i].*side, equalities);
+            if (i == 0) {
+                shared = std::move(relations);
+            } else {
+                std::erase_if(shared, [&](const IOperator* relation) {
+                    return std::ranges::find(relations, relation) == relations.end();
+                });
+            }
+            if (shared.empty()) {
+                return false;
+            }
+        }
+        return true;
+    };
+    return oneRelation(left, &TJoinKey::Left) && oneRelation(right, &TJoinKey::Right);
 }
 
 // Fraction of the rows with key matches that keep one the residual accepts.
@@ -1059,77 +1136,113 @@ double MatchAccepted(double selectivity, double matches, double matchedRows) {
     return 1.0 - std::pow(1.0 - selectivity, perRow);
 }
 
-TStatsPtr ComputeJoinStats(const std::shared_ptr<TJoinOperator>& join, TFoldedBounds& foldedBounds) {
-    auto leftStats = join->Left()->Stats_;
-    auto rightStats = join->Right()->Stats_;
-    if (!leftStats || !rightStats) {
-        return nullptr;
-    }
+// Rows of a join of two inputs whose stats are estimated.
+uint64_t JoinRows(
+    const TOperatorPtr& left,
+    const TOperatorPtr& right,
+    const std::vector<TJoinKey>& keys,
+    EJoinType type,
+    const TExprPtr& residualPredicate,
+    TFoldedBounds& foldedBounds)
+{
+    const auto& leftStats = *left->Stats_;
+    const auto& rightStats = *right->Stats_;
     std::vector<TJoinKeyStats> keyStats;
-    for (const auto& key : join->Keys()) {
-        keyStats.push_back(EstimateJoinKey(join->Left(), key.Left, join->Right(), key.Right));
+    keyStats.reserve(keys.size());
+    for (const auto& key : keys) {
+        keyStats.push_back(EstimateJoinKey(left, key.Left, right, key.Right));
     }
     auto card = EstimateEquiJoin(
-        leftStats->RowCount, rightStats->RowCount, keyStats, KeysJoinTwoRelations(*join));
+        leftStats.RowCount,
+        rightStats.RowCount,
+        keyStats,
+        keys.size() > 1 && KeysJoinTwoRelations(left, right, keys));
     // The residual accepts a share of the key matches, taken as independent
     // of the keys.
-    const double residual = join->Filter()
-        ? EstimateResidual(*join, foldedBounds)
+    const double residual = residualPredicate
+        ? EstimateResidual(left, right, residualPredicate, foldedBounds)
         : 1.0;
-    double ndvL = card.NdvL;
-    double ndvR = card.NdvR;
-    auto outputStats = std::make_shared<TStats>();
-
-    auto jt = join->JoinType();
-    if (jt == EJoinType::Inner || jt == EJoinType::Left || jt == EJoinType::Full || jt == EJoinType::LeftSemi || jt == EJoinType::LeftAnti || jt == EJoinType::LeftMark) {
-        for (const auto& [colName, colStats] : leftStats->ColumnStats) {
-            // assume qualification
-            outputStats->ColumnStats[colName] = colStats;
-        }
-    }
-    if (jt == EJoinType::Inner || jt == EJoinType::Right || jt == EJoinType::Full || jt == EJoinType::RightSemi || jt == EJoinType::RightAnti) {
-        for (const auto& [colName, colStats] : rightStats->ColumnStats) {
-            // assume qualification
-            outputStats->ColumnStats[colName] = colStats;
-        }
-    }
+    const double ndvL = card.NdvL;
+    const double ndvR = card.NdvR;
     uint64_t rowCount = std::max<uint64_t>(1, (uint64_t)(card.Rows * residual));
-    switch (join->JoinType()) {
+    switch (type) {
         case EJoinType::LeftSemi:
         case EJoinType::LeftAnti: {
             double semiFrac = std::min(1.0, ndvR / std::max(ndvL, 1.0));
-            semiFrac *= MatchAccepted(residual, card.Rows, semiFrac * (double)leftStats->RowCount);
-            if (join->JoinType() == EJoinType::LeftAnti) {
+            semiFrac *= MatchAccepted(residual, card.Rows, semiFrac * (double)leftStats.RowCount);
+            if (type == EJoinType::LeftAnti) {
                 semiFrac = 1.0 - semiFrac;
             }
-            rowCount = std::max<uint64_t>(1, (uint64_t)(semiFrac * (double)leftStats->RowCount));
+            rowCount = std::max<uint64_t>(1, (uint64_t)(semiFrac * (double)leftStats.RowCount));
             break;
         }
         case EJoinType::RightSemi:
         case EJoinType::RightAnti: {
             double semiFrac = std::min(1.0, ndvL / std::max(ndvR, 1.0));
-            semiFrac *= MatchAccepted(residual, card.Rows, semiFrac * (double)rightStats->RowCount);
-            if (join->JoinType() == EJoinType::RightAnti) {
+            semiFrac *= MatchAccepted(residual, card.Rows, semiFrac * (double)rightStats.RowCount);
+            if (type == EJoinType::RightAnti) {
                 semiFrac = 1.0 - semiFrac;
             }
-            rowCount = std::max<uint64_t>(1, (uint64_t)(semiFrac * (double)rightStats->RowCount));
+            rowCount = std::max<uint64_t>(1, (uint64_t)(semiFrac * (double)rightStats.RowCount));
             break;
         }
         case EJoinType::Left:
-            rowCount = std::max(rowCount, leftStats->RowCount);
+            rowCount = std::max(rowCount, leftStats.RowCount);
             break;
         case EJoinType::Right:
-            rowCount = std::max(rowCount, rightStats->RowCount);
+            rowCount = std::max(rowCount, rightStats.RowCount);
             break;
         case EJoinType::Full:
-            rowCount = std::max(rowCount, leftStats->RowCount + rightStats->RowCount);
+            rowCount = std::max(rowCount, leftStats.RowCount + rightStats.RowCount);
             break;
         case EJoinType::LeftMark:
             // Every left row, exactly once.
-            rowCount = std::max<uint64_t>(1, leftStats->RowCount);
+            rowCount = std::max<uint64_t>(1, leftStats.RowCount);
             break;
         default:
             break;
+    }
+    return rowCount;
+}
+
+TStatsPtr ComputeJoinStats(
+    const std::shared_ptr<TJoinOperator>& join,
+    TFoldedBounds& foldedBounds,
+    const std::unordered_set<std::string>* columns = nullptr)
+{
+    auto leftStats = join->Left()->Stats_;
+    auto rightStats = join->Right()->Stats_;
+    if (!leftStats || !rightStats) {
+        return nullptr;
+    }
+    const uint64_t rowCount = JoinRows(
+        join->Left(),
+        join->Right(),
+        join->Keys(),
+        join->JoinType(),
+        join->Filter(),
+        foldedBounds);
+    auto outputStats = std::make_shared<TStats>();
+
+    auto keep = [&](const std::string& column) {
+        return !columns || columns->contains(column);
+    };
+    auto jt = join->JoinType();
+    if (jt == EJoinType::Inner || jt == EJoinType::Left || jt == EJoinType::Full || jt == EJoinType::LeftSemi || jt == EJoinType::LeftAnti || jt == EJoinType::LeftMark) {
+        for (const auto& [colName, colStats] : leftStats->ColumnStats) {
+            // assume qualification
+            if (keep(colName)) {
+                outputStats->ColumnStats[colName] = colStats;
+            }
+        }
+    }
+    if (jt == EJoinType::Inner || jt == EJoinType::Right || jt == EJoinType::Full || jt == EJoinType::RightSemi || jt == EJoinType::RightAnti) {
+        for (const auto& [colName, colStats] : rightStats->ColumnStats) {
+            // assume qualification
+            if (keep(colName)) {
+                outputStats->ColumnStats[colName] = colStats;
+            }
+        }
     }
     outputStats->RowCount = rowCount;
     outputStats->Cost = EstimateJoinCost(
@@ -1366,8 +1479,22 @@ TStatsPtr ComputeStatsFor(TOperatorPtr op, TFoldedBounds& foldedBounds) {
 
 } // namespace
 
-TStatsPtr EstimateJoinStats(const std::shared_ptr<TJoinOperator>& join, TFoldedBounds& foldedBounds) {
-    return ComputeJoinStats(join, foldedBounds);
+TStatsPtr EstimateJoinStats(
+    const std::shared_ptr<TJoinOperator>& join,
+    TFoldedBounds& foldedBounds,
+    const std::unordered_set<std::string>* columns)
+{
+    return ComputeJoinStats(join, foldedBounds, columns);
+}
+
+uint64_t EstimateInnerJoinRows(
+    const TOperatorPtr& left,
+    const TOperatorPtr& right,
+    const std::vector<TJoinKey>& keys,
+    const TExprPtr& residual,
+    TFoldedBounds& foldedBounds)
+{
+    return JoinRows(left, right, keys, EJoinType::Inner, residual, foldedBounds);
 }
 
 TStatsPtr EstimateStats(TOperatorPtr op, TFoldedBounds& foldedBounds) {

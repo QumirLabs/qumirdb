@@ -29,10 +29,12 @@ best(A union B) = min over connected splits:
 ```
 
 A candidate join is estimated as the plan will estimate it ("Join cardinality"
-in [optimizations.md](optimizations.md)). Its keys are the equalities between
-the two subsets, and its residual is the other `WHERE` conjuncts over relations
-of both subsets and of no other relation, so a residual counts once, at the
-join that brings its relations together. The estimate reads the statistics of
+in [optimizations.md](optimizations.md)). The equalities form equivalence
+classes of columns, and the join has the keys that `ExtractEquiJoins` will give
+it: one pair for each class with columns in both subsets. Its residual is the
+other `WHERE` conjuncts over relations of both subsets and of no other
+relation, so a residual counts once, at the join that brings its relations
+together. The estimate reads the statistics of
 the two subplans, which depend on the joins inside them: a dimension key that a
 join with a filtered table has already selected is matched within the range
 of the fact it joins next. Fixed selectivities per relation pair cannot express
@@ -43,7 +45,9 @@ The splits of one subset estimate the same rows from different statistics and
 can disagree. The subset keeps the largest estimate, so that a set of
 relations has one cardinality, as the search over subsets assumes, and an order
 is not chosen for an estimate that the other orders of the same relations
-contradict. An over-estimate is also the safer error for the build side.
+contradict. An over-estimate is also the safer error for the build side. Each
+split is estimated for its row count only; the column statistics of a subset,
+which its supersets read, are built once, from its largest split.
 
 This is the connected-subgraph/complement search space described by Moerkotte
 and Neumann in [Analysis of Two Existing and One New Dynamic Programming

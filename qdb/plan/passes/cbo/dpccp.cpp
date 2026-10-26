@@ -3,6 +3,7 @@
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/passes/estimate_stats.h>
 #include <qdb/plan/passes/unbound_vars.h>
+#include <qdb/utils/union_find.h>
 
 #include <qumir/parser/type.h>
 
@@ -11,6 +12,7 @@
 #include <cstdint>
 #include <memory>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace NQdb {
@@ -19,13 +21,11 @@ namespace {
 
 using TSubset = uint32_t; // bitmask over leaf indices
 
-// A key equality between columns of two leaves.
-struct TGraphEdge {
-    size_t A;
-    size_t B;
-    std::string ColumnA;
-    std::string ColumnB;
-    double KeyWidth;
+// A leaf's column that a key equality names.
+struct TClassMember {
+    size_t Leaf;
+    std::string Column;
+    double Width;
 };
 
 // A conjunct other than a key equality, over the leaves it reads.
@@ -35,8 +35,12 @@ struct TGraphResidual {
 };
 
 struct TDpEntry {
+    // The cheapest join tree of the subset, keyed as the plan keys it and
+    // carrying the subset's statistics.
     TOperatorPtr Tree;
     double Cost = 0.0;
+    // The leaves of the left input of the tree's top join; 0 for a leaf.
+    TSubset Left = 0;
 };
 
 // DP over subsets ordered by increasing bitmask, so every proper subset is
@@ -68,8 +72,8 @@ public:
             card[s] = Leaves_[i]->Stats_ ? static_cast<double>(Leaves_[i]->Stats_->RowCount) : 0.0;
             width[s] = EstimateTypeWidth(Leaves_[i]->OutputColumns());
             dp[s] = {
-                Leaves_[i],
-                Leaves_[i]->Stats_ ? Leaves_[i]->Stats_->Cost : 0.0,
+                .Tree = Leaves_[i],
+                .Cost = Leaves_[i]->Stats_ ? Leaves_[i]->Stats_->Cost : 0.0,
             };
         }
 
@@ -77,11 +81,17 @@ public:
             if (std::popcount(s) < 2 || !Connected(s)) {
                 continue;
             }
-            auto stats = SubsetStats(s, dp);
-            if (!stats) {
+            const TSubset largest = LargestSplit(s, dp);
+            if (!largest) {
                 continue;
             }
+            // Only the rows of each split were estimated; the statistics of
+            // the set are those of the largest split.
+            auto largestJoin = Join(largest, s ^ largest, dp);
+            auto stats = EstimateJoinStats(largestJoin, FoldedBounds_, &EstimatedColumns_);
             const double jc = static_cast<double>(stats->RowCount);
+            TSubset best = 0;
+            double bestCost = 0.0;
             for (TSubset s1 = (s - 1) & s; s1; s1 = (s1 - 1) & s) {
                 const TSubset s2 = s ^ s1;
                 if (!dp[s1].Tree || !dp[s2].Tree) {
@@ -96,18 +106,23 @@ public:
                     jc,
                     jw,
                     CrossingKeyWidth(s1, s2));
-                if (!dp[s].Tree || cost < dp[s].Cost) {
-                    auto tree = MakeJoin(dp[s1].Tree, dp[s2].Tree);
-                    auto treeStats = std::make_shared<TStats>(*stats);
-                    treeStats->Cost = cost;
-                    tree->Stats_ = std::move(treeStats);
-                    dp[s] = {std::move(tree), cost};
-                    card[s] = jc;
-                    width[s] = jw;
+                if (!best || cost < bestCost) {
+                    best = s1;
+                    bestCost = cost;
                 }
             }
+            auto tree = best == largest
+                ? std::move(largestJoin)
+                : Join(best, s ^ best, dp);
+            stats->Cost = bestCost;
+            tree->Stats_ = std::move(stats);
+            dp[s] = {.Tree = std::move(tree), .Cost = bestCost, .Left = best};
+            card[s] = jc;
+            width[s] = width[best] + width[s ^ best];
         }
-        return dp[full].Tree; // null when the graph is disconnected
+        return dp[full].Tree
+            ? Unkeyed(full, dp)
+            : nullptr; // the graph is disconnected
     }
 
 private:
@@ -125,20 +140,36 @@ private:
                 owner.emplace(name, i);
             }
         }
+        // The equalities form equivalence classes of columns, and a join
+        // between two subsets is keyed by every class with columns on both
+        // sides, as ExtractEquiJoins keys it.
+        TUnionFind<std::string> classes;
+        std::vector<std::string> columns;
+        std::unordered_set<std::string> seen;
         for (const auto& e : edges) {
             auto la = owner.find(e.LeftCol);
             auto lb = owner.find(e.RightCol);
             if (la == owner.end() || lb == owner.end() || la->second == lb->second) {
                 continue;
             }
-            const size_t a = la->second;
-            const size_t b = lb->second;
-            const double keyWidth = std::max(
-                ColumnWidth(Leaves_[a], e.LeftCol),
-                ColumnWidth(Leaves_[b], e.RightCol));
-            Edges_.push_back({a, b, e.LeftCol, e.RightCol, keyWidth});
-            Neighbors_[a] |= TSubset{1} << b;
-            Neighbors_[b] |= TSubset{1} << a;
+            Neighbors_[la->second] |= TSubset{1} << lb->second;
+            Neighbors_[lb->second] |= TSubset{1} << la->second;
+            classes.Union(e.LeftCol, e.RightCol);
+            for (const auto& column : {e.LeftCol, e.RightCol}) {
+                if (seen.insert(column).second) {
+                    columns.push_back(column);
+                }
+            }
+        }
+        std::unordered_map<int, size_t> classIndex;
+        for (const auto& column : columns) {
+            auto [it, inserted] = classIndex.try_emplace(classes.Find(column), Classes_.size());
+            if (inserted) {
+                Classes_.emplace_back();
+            }
+            const size_t leaf = owner.at(column);
+            Classes_[it->second].push_back({leaf, column, ColumnWidth(Leaves_[leaf], column)});
+            EstimatedColumns_.insert(column);
         }
         for (const auto& predicate : residuals) {
             TSubset leaves = 0;
@@ -152,21 +183,26 @@ private:
             }
             if (std::popcount(leaves) >= 2) {
                 Residuals_.push_back({leaves, predicate});
+                for (auto& column : FindUnboundVars(predicate)) {
+                    EstimatedColumns_.insert(std::move(column));
+                }
             }
         }
     }
 
-    // The plan's estimate of a join of two subsets: its keys are the edges
-    // between them, its residual the conjuncts that the join is the first to
-    // see whole. The estimate reads the inputs' statistics, so a key a join
-    // has already selected is estimated as such.
+    // The split of `s` with the largest estimate, by its left input.
     //
     // Each split of `s` estimates the same rows from different statistics, and
     // their estimates differ. DP needs one cardinality per set of relations,
     // and the largest one keeps an order from being chosen for an estimate the
-    // other orders contradict.
-    TStatsPtr SubsetStats(TSubset s, const std::vector<TDpEntry>& dp) const {
-        TStatsPtr largest;
+    // other orders contradict. Each join is estimated as the plan estimates it:
+    // its keys are the classes the two subsets share, its residual the
+    // conjuncts that the join is the first to see whole, and the estimate reads
+    // the inputs' statistics, so a key a join has already selected is
+    // estimated as such.
+    TSubset LargestSplit(TSubset s, const std::vector<TDpEntry>& dp) const {
+        TSubset largest = 0;
+        uint64_t largestRows = 0;
         const TSubset lowest = s & (~s + 1);
         for (TSubset s1 = (s - 1) & s; s1; s1 = (s1 - 1) & s) {
             const TSubset s2 = s ^ s1;
@@ -174,29 +210,79 @@ private:
             if (!(s1 & lowest) || !dp[s1].Tree || !dp[s2].Tree) {
                 continue;
             }
-            auto join = std::make_shared<TJoinOperator>(
-                dp[s1].Tree, dp[s2].Tree, CrossingKeys(s1, s2), EJoinType::Inner,
-                CrossingResidual(s1, s2));
-            auto stats = EstimateJoinStats(join, FoldedBounds_);
-            if (stats && (!largest || stats->RowCount > largest->RowCount)) {
-                largest = std::move(stats);
+            const uint64_t rows = EstimateInnerJoinRows(
+                dp[s1].Tree,
+                dp[s2].Tree,
+                CrossingKeys(s1, s2),
+                CrossingResidual(s1, s2),
+                FoldedBounds_);
+            if (!largest || rows > largestRows) {
+                largest = s1;
+                largestRows = rows;
             }
         }
         return largest;
     }
 
-    std::vector<TJoinKey> CrossingKeys(TSubset s1, TSubset s2) const {
-        std::vector<TJoinKey> keys;
-        for (const auto& e : Edges_) {
-            const TSubset a = TSubset{1} << e.A;
-            const TSubset b = TSubset{1} << e.B;
-            if ((a & s1) && (b & s2)) {
-                keys.push_back({e.ColumnA, e.ColumnB});
-            } else if ((a & s2) && (b & s1)) {
-                keys.push_back({e.ColumnB, e.ColumnA});
+    std::shared_ptr<TJoinOperator> Join(TSubset s1, TSubset s2, const std::vector<TDpEntry>& dp) const {
+        return std::make_shared<TJoinOperator>(
+            dp[s1].Tree,
+            dp[s2].Tree,
+            CrossingKeys(s1, s2),
+            EJoinType::Inner,
+            CrossingResidual(s1, s2));
+    }
+
+    // The tree of `s` without keys and residuals: ExtractEquiJoins places
+    // them in the plan.
+    TOperatorPtr Unkeyed(TSubset s, const std::vector<TDpEntry>& dp) const {
+        if (std::popcount(s) == 1) {
+            return dp[s].Tree;
+        }
+        auto join = std::make_shared<TJoinOperator>(
+            Unkeyed(dp[s].Left, dp),
+            Unkeyed(s ^ dp[s].Left, dp),
+            std::vector<TJoinKey>{},
+            EJoinType::Inner,
+            nullptr);
+        join->Stats_ = dp[s].Tree->Stats_;
+        return join;
+    }
+
+    // A column of each class that has columns on both sides.
+    template <class TFn>
+    void ForEachCrossingClass(TSubset s1, TSubset s2, TFn&& fn) const {
+        for (const auto& members : Classes_) {
+            const TClassMember* left = nullptr;
+            const TClassMember* right = nullptr;
+            for (const auto& member : members) {
+                const TSubset leaf = TSubset{1} << member.Leaf;
+                if (!left && (leaf & s1)) {
+                    left = &member;
+                } else if (!right && (leaf & s2)) {
+                    right = &member;
+                }
+            }
+            if (left && right) {
+                fn(*left, *right);
             }
         }
+    }
+
+    std::vector<TJoinKey> CrossingKeys(TSubset s1, TSubset s2) const {
+        std::vector<TJoinKey> keys;
+        ForEachCrossingClass(s1, s2, [&](const TClassMember& left, const TClassMember& right) {
+            keys.push_back({left.Column, right.Column});
+        });
         return keys;
+    }
+
+    double CrossingKeyWidth(TSubset s1, TSubset s2) const {
+        double width = 0.0;
+        ForEachCrossingClass(s1, s2, [&](const TClassMember& left, const TClassMember& right) {
+            width += std::max(left.Width, right.Width);
+        });
+        return width;
     }
 
     // The residuals over leaves of both subsets and of no other relation.
@@ -230,28 +316,14 @@ private:
         return visited == s;
     }
 
-    double CrossingKeyWidth(TSubset s1, TSubset s2) const {
-        double width = 0.0;
-        for (const auto& e : Edges_) {
-            const TSubset a = TSubset{1} << e.A;
-            const TSubset b = TSubset{1} << e.B;
-            if (((a & s1) && (b & s2)) || ((a & s2) && (b & s1))) {
-                width += e.KeyWidth;
-            }
-        }
-        return width;
-    }
-
-    static TOperatorPtr MakeJoin(const TOperatorPtr& l, const TOperatorPtr& r) {
-        return std::make_shared<TJoinOperator>(
-            l, r, std::vector<TJoinKey>{}, EJoinType::Inner, nullptr);
-    }
-
     const std::vector<TOperatorPtr>& Leaves_;
     size_t N_;
     std::vector<TSubset> Neighbors_;
-    std::vector<TGraphEdge> Edges_;
+    std::vector<std::vector<TClassMember>> Classes_;
     std::vector<TGraphResidual> Residuals_;
+    // The columns whose statistics the estimates of joins read: those of the
+    // classes and of the residuals. A subset's statistics keep only them.
+    std::unordered_set<std::string> EstimatedColumns_;
     TFoldedBounds& FoldedBounds_;
 };
 
