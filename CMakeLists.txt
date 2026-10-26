@@ -4,6 +4,7 @@ enable_testing()
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(QDB_BUILD_SERVICE "Build QumirDB web service" OFF)
+option(QDB_BUILD_DAEMON "Build QumirDB daemon" OFF)
 option(QDB_BUILD_TESTS "Build QumirDB tests" OFF)
 # Static LLVM archives add ~50 MB to every binary linking the codegen; the shared
 # libLLVM trades that for a runtime dependency on the LLVM package.
@@ -41,9 +42,9 @@ set(QDB_PRIVATE_DIR "lib/qumirdb-${QDB_RELEASE}")
 set(QDB_PRIVATE_BINDIR "${QDB_PRIVATE_DIR}/bin")
 set(QDB_MODULES_DIR "${QDB_PRIVATE_DIR}/modules")
 
+add_subdirectory(externals)
 add_subdirectory(qdb)
 add_subdirectory(bin)
-add_subdirectory(externals)
 if(QDB_BUILD_TESTS)
     add_subdirectory(test)
 endif()
