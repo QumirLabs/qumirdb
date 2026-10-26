@@ -2,9 +2,7 @@
 
 Subqueries are removed at **build time**, before the optimizer passes, so the
 resulting joins flow through [join_reorder.md](join_reorder.md) and
-[predicate_pushdown.md](predicate_pushdown.md) like any other. A pipeline that
-replaces these rewrites with an explicit unnesting pass is being built next to
-them; see [New pipeline](#new-pipeline-dependent-joins).
+[predicate_pushdown.md](predicate_pushdown.md) like any other.
 
 ## Local and outer references
 
@@ -181,64 +179,3 @@ statistics are estimated, so it is not costed as a selective predicate
 - the correlated subquery must reduce to a single value (one non-correlation
   output column);
 - `WITH RECURSIVE` and scalar subqueries in the SELECT list are not handled.
-
-## New pipeline: dependent joins
-
-The rewrites above recognize subquery shapes, and each new shape needs a new
-template. The new pipeline separates the two concerns. A builder of its own
-only removes SQL semantics: it binds names and translates SQL into algebra
-without rewriting anything. Unnesting then becomes an explicit pass over that
-algebra, followed by the existing optimizer passes. It is selected with
-`qdb --decorrelation new`; the default `legacy` is the build-time rewriting.
-
-The builder follows the canonical translation of Neumann, Leis and Kemper
-(["The Complete Story of Joins (in HyPer)", BTW 2017](https://dl.gi.de/handle/20.500.12116/657),
-section 3.4). Each query block is translated clause by clause onto one tree.
-FROM items are combined left to right, by a cross product, or by a *dependent
-join* when an item reads the items before it (an implicit LATERAL). An `EXISTS`
-or `IN` subquery anywhere in WHERE, HAVING or SELECT becomes a dependent *mark
-join* over the current tree, and the expression reads its marker. A scalar
-subquery becomes a dependent *single join*, and the expression reads its value.
-A subquery in an aggregate argument attaches below the aggregate, others above
-it. Nothing is decorrelated, so a subquery keeps its aggregates, `ORDER BY`
-and `LIMIT`, and a disjunction or a negation over it stays an expression.
-
-```
-SELECT count(*) FROM nation
-WHERE NOT EXISTS (SELECT * FROM supplier WHERE s_nationkey = n_nationkey)
-   OR n_regionkey = 0
-=>
-filter (|| (! __mark_0) (== n_regionkey 0))
-└─ dependent-join mark scope=1 marker=__mark_0
-   ├─ source nation
-   └─ project (s_suppkey, ...)
-      └─ filter (== s_nationkey (outer 1 n_nationkey))
-         └─ source supplier
-```
-
-A dependent join evaluates its right side for every left row (Neumann and
-Kemper, ["Unnesting Arbitrary Queries", BTW 2015](https://dl.gi.de/handle/20.500.12116/2418)).
-The right side reads that row through *outer references*: expression nodes that
-name a column of the tree of a given query block and carry its type. The
-dependent join records the block whose tree is its left input, so the joins of
-that block bind its outer references. The kinds are inner, left, semi, anti,
-mark and single. The marker of a mark join is three-valued: TRUE when the
-predicate holds for some right row, otherwise NULL when it is NULL for some row,
-otherwise FALSE. `NOT IN` is therefore the negated marker and keeps its NULL
-semantics; it is not lowered to an anti join. A single join is a left join that
-fails when a left row has more than one right row.
-
-Names are bound by scope: a name resolves against the tree of its own block
-first and then against those of the enclosing blocks, so an inner column shadows
-an outer one, and a qualified name whose qualifier is a FROM item of a block
-must be found in that item. Derived tables and CTEs expose the columns of their
-select lists. Every subquery becomes a dependent join, correlated or not; one
-whose right side has no outer reference of its scope is an ordinary join, which
-is the first rule of unnesting.
-
-Status: there is no unnesting pass yet, so the optimizer passes and execution
-reject a plan that still has a dependent join, and `EXPLAIN` shows it as built.
-A plan without subqueries goes through the usual passes and executes. Set
-operations, window functions, grouping sets, subqueries in JOIN conditions,
-GROUP BY and ORDER BY, CTEs that read an enclosing query, and aggregates over
-outer columns are rejected with an error.
