@@ -17,11 +17,11 @@ struct TPing {
 };
 
 struct TSpawnComputeActor {
-    static constexpr NNet::NActors::TMessageId MessageId = 100;
+    static constexpr NNet::NActors::TMessageId MessageId = 101;
 };
 
 struct TSpawnComputeActorResponse {
-    static constexpr NNet::NActors::TMessageId MessageId = 101;
+    static constexpr NNet::NActors::TMessageId MessageId = 102;
     NNet::NActors::TActorId ActorId;
 };
 
