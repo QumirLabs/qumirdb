@@ -190,8 +190,10 @@ The right side is not retained and is not inserted into `RightTable_`.
 
 A streaming LEFT or RIGHT join builds one input and probes it with the other.
 
-Building the null-supplying side is the usual hash outer join, as in DuckDB's
-`PhysicalHashJoin`: the row join table stores the null-supplying input, and
+Building the null-supplying side is the classic hash outer join, with the
+preserved input as the probe input ([Graefe, "Query Evaluation Techniques for
+Large Databases", ACM Computing Surveys 25(2), 1993](https://doi.org/10.1145/152610.152611)):
+the row join table stores the null-supplying input, and
 each preserved stream row emits its matches, or one pair whose build row is
 absent when it has none. A NULL key matches nothing and takes the second way at
 once. The absent row materializes as NULLs in every build column. A stream
