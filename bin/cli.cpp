@@ -450,7 +450,7 @@ int RunSqlStatement(
     // Plan construction and the optimizer passes type against the same catalog snapshot.
     NQdb::NKernel::TAnnotationContext annotation{.ExternalCatalog = catalog.Snapshot()};
     auto plan = config.Decorrelation == EDecorrelation::New
-        ? NQdb::BuildCanonicalPlan(statement, factory, annotation)
+        ? NQdb::NBuild::BuildCanonicalPlan(statement, factory, annotation)
         : NQdb::BuildPlan(statement, factory, annotation);
 
     if (!plan) {

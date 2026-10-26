@@ -10,6 +10,7 @@
 #include <expected>
 
 namespace NQdb {
+namespace NBuild {
 
 // Builds the canonical plan of a SQL query for the new decorrelation pipeline
 // (Neumann, Leis and Kemper, "The Complete Story of Joins (in HyPer)", BTW
@@ -26,4 +27,5 @@ std::expected<TOperatorPtr, NQumir::TError> BuildCanonicalPlan(
     const TTableSourceFactory& sources,
     const NKernel::TAnnotationContext& annotation = {});
 
+} // namespace NBuild
 } // namespace NQdb

@@ -64,7 +64,11 @@ add_library(qumirdb
     plan/pipeline.cpp
     plan/plan_print.cpp
     plan/build.cpp
+    plan/build/aggregate.cpp
+    plan/build/binder.cpp
     plan/build/build.cpp
+    plan/build/expr.cpp
+    plan/build/relation.cpp
     plan/sql_lowering.cpp
     kernel/vm_function.cpp
     kernel/column_value.cpp
