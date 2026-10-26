@@ -12,11 +12,14 @@
 
 namespace NQdb {
 
-// Inner equi-join over the row join table (kernel/join/join_rows.oz): the
-// build side is appended to an arena of rows until it ends, the pointer table
-// is built once, then every probe batch is looked up and materialized while it
-// is alive. The build side is fixed by lowering; the processor never switches
-// roles, which is what lets it keep one compact table instead of two.
+// Equi-join over the row join table (kernel/join/join_rows.oz): the build
+// side is appended to an arena of rows until it ends, the pointer table is
+// built once, then every probe batch is looked up and materialized while it is
+// alive. The build side is fixed by lowering; the processor never switches
+// roles, which is what lets it keep one compact table instead of two. An outer
+// join builds its null-supplying side, and the probe kernel pads the preserved
+// rows without a match, so the output of a probe batch is complete when it is
+// released and nothing is left to emit at the end.
 //
 // Ownership: the kernel qdb_alloc's every buffer behind the zeroed state
 // structs and frees them on Destroy. Build batches are retained only when a

@@ -3,9 +3,11 @@
   "fixtures": {
     "c": {"json": "tables/c.json", "parquet": {"row_group_rows": 2}},
     "o": {"json": "tables/o.json", "parquet": {"row_group_rows": 4}},
-    "p": {"json": "tables/p.json", "parquet": {"row_group_rows": 2}}
+    "p": {"json": "tables/p.json", "parquet": {"row_group_rows": 2}},
+    "r": {"json": "tables/r.json", "parquet": {"row_group_rows": 2}},
+    "s": {"json": "tables/s.json", "parquet": {"row_group_rows": 4}}
   },
-  "tables": {"c": "c", "o": "o", "p": "p"},
+  "tables": {"c": "c", "o": "o", "p": "p", "r": "r", "s": "s"},
   "variants": ["single", "threaded", "js"],
   "cases": {
     "duplicates.sql": {"order": "ordered"},
@@ -22,6 +24,14 @@
     "full_residual.sql": {"order": "unordered"},
     "full_residual_one_side.sql": {"order": "unordered"},
     "full_residual_false.sql": {"order": "unordered"},
+    "stream_null_keys.sql": {"order": "ordered"},
+    "stream_multi_key.sql": {"order": "ordered"},
+    "stream_right.sql": {"order": "ordered"},
+    "stream_empty_build.sql": {"order": "ordered"},
+    "stream_empty_probe.sql": {"order": "ordered"},
+    "stream_none_matched.sql": {"order": "ordered"},
+    "stream_all_matched.sql": {"order": "ordered"},
+    "stream_residual.sql": {"order": "ordered"},
     "simplify_where_left.sql": {"order": "unordered", "execute": true},
     "simplify_is_null_keeps_left.sql": {"order": "unordered", "execute": true},
     "simplify_coalesce_keeps_left.sql": {"order": "unordered", "execute": true},

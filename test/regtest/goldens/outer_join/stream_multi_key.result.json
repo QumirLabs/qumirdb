@@ -1,0 +1,23 @@
+{
+  "schema": "<struct (sk <named Nullable [i64]>) (sn i64) (sname <named Nullable [string]>) (rk <named Nullable [i64]>) (rn <named Nullable [i64]>) (rname <named Nullable [string]>)>",
+  "rows": [
+    ["1", "1", "ant", "1", "1", "one"],
+    ["1", "1", "ant", "1", "1", "uno"],
+    ["1", "2", "bee", null, null, null],
+    ["2", "1", "cat", null, null, null],
+    ["3", "1", "dog", null, null, null],
+    ["4", "1", "eel", null, null, null],
+    [null, "1", "fox", null, null, null],
+    [null, "2", "gnu", null, null, null],
+    ["5", "1", "hen", null, null, null],
+    ["6", "2", "ibis", null, null, null],
+    ["7", "1", "jay", null, null, null],
+    ["9", "1", "kiwi", null, null, null],
+    ["10", "2", "lark", null, null, null],
+    ["1", "1", "mole", "1", "1", "one"],
+    ["1", "1", "mole", "1", "1", "uno"],
+    ["2", "1", "newt", null, null, null],
+    ["2", "2", null, "2", "2", null],
+    ["8", "2", null, null, null, null]
+  ]
+}

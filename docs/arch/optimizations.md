@@ -604,14 +604,16 @@ which is normally the smaller one. This adaptation requires no cardinality
 estimate. Lowering can instead choose build-first execution when an input is
 estimated much smaller or a runtime filter requires its completion first.
 
-LEFT/RIGHT outer joins can build their preserved side, stream the other input,
-and mark each build row only after its residual accepts a match. At stream EOF,
-unmarked build rows are emitted once with NULLs for the absent side. Lowering
-chooses this path when the preserved side is estimated no larger than the other
-input, or when a residual or runtime filter requires it. Building first delays
-the probe input but avoids retaining and hashing it; other outer joins keep
-the symmetric path. A FULL join with a residual marks matched rows on both
-sides of that path. See [join.md](join.md).
+LEFT/RIGHT outer joins build the input with the smaller estimate and stream
+the other. A null-supplying build side lives in the row join table, which emits
+each unmatched stream row at once with NULLs for the build columns, so the
+preserved input is never stored. A preserved build side marks each build row
+only after its residual accepts a match, and at stream EOF the unmarked build
+rows are emitted once with NULLs for the absent side. A residual or runtime
+filter requires the preserved build side. Building first delays the probe input
+but avoids retaining and hashing it; outer joins without estimates and FULL
+joins keep the symmetric path. A FULL join with a residual marks matched rows
+on both sides of that path. See [join.md](join.md).
 
 ```
 SELECT big.c, u.d FROM big, u WHERE big.a = u.a;   -- threaded, 4 scan tasks

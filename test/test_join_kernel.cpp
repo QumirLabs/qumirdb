@@ -19,6 +19,7 @@
 #include <qumir/runner/runner_llvm.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -3025,6 +3026,250 @@ TEST(RowJoinProcessor, ManyArenaBlocksAndSaltCollisions) {
     EXPECT_EQ(wrong, 0);
     EXPECT_EQ(matches, buildRows);
     EXPECT_EQ(keySum, buildRows * (buildRows - 1)); // the sum of 2i for i < buildRows
+}
+
+namespace {
+
+std::optional<int64_t> I64At(const TColumn& column, int64_t row) {
+    if (column.Mask && !((column.Mask[row / 8] >> (row % 8)) & 1)) {
+        return std::nullopt;
+    }
+    return reinterpret_cast<const int64_t*>(column.Data)[row];
+}
+
+std::optional<std::string> StringOrNullAt(const TColumn& column, int64_t row) {
+    if (column.Mask && !((column.Mask[row / 8] >> (row % 8)) & 1)) {
+        return std::nullopt;
+    }
+    return StringAt(column, row);
+}
+
+} // namespace
+
+// A LEFT join that builds its null-supplying right side: every selected
+// preserved row comes out with its matches, or once with NULLs for the right
+// columns. NULL keys on both sides match nothing, a build key with two rows
+// yields two pairs, and the build side's string and nullable payloads read as
+// NULL on a padded row. The unselected probe row is not part of the input.
+TEST(RowJoinProcessor, LeftOuterPadsUnmatchedProbeRows) {
+    using namespace NQumir::NAst;
+    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
+    auto nullableI64 = std::make_shared<TNullable>(i64);
+    auto nullableString = std::make_shared<TNullable>(std::make_shared<TStringType>());
+    TStructType leftType({{"lk", nullableI64}, {"lname", std::make_shared<TStringType>()}});
+    TStructType rightType({{"rk", nullableI64}, {"rv", nullableI64}, {"rs", nullableString}});
+
+    // Probe batch 1: keys 1, NULL, 2, 7, 1 (unselected).
+    std::vector<int64_t> lk1 = {1, 0, 2, 7, 1};
+    std::vector<uint8_t> lk1Mask = {0b11101};
+    std::string lname1Bytes = "anbbsevenz"; // "a", "n", "bb", "seven", "z"
+    std::vector<int64_t> lname1Offsets = {0, 1, 2, 4, 9, 10};
+    std::vector<uint8_t> selection1 = {1, 1, 1, 1, 0};
+    std::vector<TColumn> lcols1 = {
+        TColumn{.Data = reinterpret_cast<char*>(lk1.data()), .Mask = lk1Mask.data()},
+        TColumn{.Data = lname1Bytes.data(), .Offsets = lname1Offsets.data(), .OffsetWidth = 8},
+    };
+    TRowSet probe1{
+        .Columns = lcols1.data(),
+        .ColumnCount = 2,
+        .RowCount = 5,
+        .Selection = selection1.data(),
+        .RefCount = 1,
+    };
+    // Probe batch 2: keys 1, NULL.
+    std::vector<int64_t> lk2 = {1, 0};
+    std::vector<uint8_t> lk2Mask = {0b01};
+    std::string lname2Bytes = "cm";
+    std::vector<int64_t> lname2Offsets = {0, 1, 2};
+    std::vector<TColumn> lcols2 = {
+        TColumn{.Data = reinterpret_cast<char*>(lk2.data()), .Mask = lk2Mask.data()},
+        TColumn{.Data = lname2Bytes.data(), .Offsets = lname2Offsets.data(), .OffsetWidth = 8},
+    };
+    TRowSet probe2{.Columns = lcols2.data(), .ColumnCount = 2, .RowCount = 2, .RefCount = 1};
+
+    // Build: (1, 100, "x"), (1, NULL, "yy"), (NULL, 300, "null"), (2, 400, NULL), (9, 500, "nine").
+    std::vector<int64_t> rk = {1, 1, 0, 2, 9};
+    std::vector<uint8_t> rkMask = {0b11011};
+    std::vector<int64_t> rv = {100, 0, 300, 400, 500};
+    std::vector<uint8_t> rvMask = {0b11101};
+    std::string rsBytes = "xyynullnine";
+    std::vector<int64_t> rsOffsets = {0, 1, 3, 7, 7, 11};
+    std::vector<uint8_t> rsMask = {0b10111};
+    std::vector<TColumn> rcols = {
+        TColumn{.Data = reinterpret_cast<char*>(rk.data()), .Mask = rkMask.data()},
+        TColumn{.Data = reinterpret_cast<char*>(rv.data()), .Mask = rvMask.data()},
+        TColumn{
+            .Data = rsBytes.data(),
+            .Mask = rsMask.data(),
+            .Offsets = rsOffsets.data(),
+            .OffsetWidth = 8,
+        },
+    };
+    TRowSet build{.Columns = rcols.data(), .ColumnCount = 3, .RowCount = 5, .RefCount = 1};
+
+    auto spec = NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}}, EJoinType::Left);
+    using TRow = std::tuple<
+        std::optional<int64_t>,
+        std::string,
+        std::optional<int64_t>,
+        std::optional<int64_t>,
+        std::optional<std::string>>;
+    std::vector<TRow> got;
+    for (auto& out : RunRowJoin(spec, EJoinBuildSide::Right, {probe1, probe2}, {build})) {
+        EXPECT_EQ(out.ColumnCount, 5);
+        for (int64_t i = 0; i < out.RowCount; ++i) {
+            got.emplace_back(
+                I64At(out.Columns[0], i),
+                StringAt(out.Columns[1], i),
+                I64At(out.Columns[2], i),
+                I64At(out.Columns[3], i),
+                StringOrNullAt(out.Columns[4], i));
+        }
+        Release(&out);
+    }
+
+    const auto null = std::nullopt;
+    std::vector<TRow> expected = {
+        {1, "a", 1, 100, "x"},
+        {1, "a", 1, null, "yy"},
+        {null, "n", null, null, null},
+        {2, "bb", 2, 400, null},
+        {7, "seven", null, null, null},
+        {1, "c", 1, 100, "x"},
+        {1, "c", 1, null, "yy"},
+        {null, "m", null, null, null},
+    };
+    std::sort(got.begin(), got.end());
+    std::sort(expected.begin(), expected.end());
+    EXPECT_EQ(got, expected);
+}
+
+// A RIGHT join builds its null-supplying left side. With a two-column key a
+// row matches only on both components: a probe row that agrees on one of them
+// is padded, and so is one whose nullable component is NULL.
+TEST(RowJoinProcessor, RightOuterMultiColumnKeyBuildsLeft) {
+    using namespace NQumir::NAst;
+    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
+    auto nullableI64 = std::make_shared<TNullable>(i64);
+    TStructType leftType({{"la", i64}, {"lb", nullableI64}, {"lv", i64}});
+    TStructType rightType({{"ra", i64}, {"rb", nullableI64}, {"rv", i64}});
+
+    // Build: (1, 10, 100), (1, 20, 200), (2, 10, 300), (1, 10, 400), (3, NULL, 500).
+    std::vector<int64_t> la = {1, 1, 2, 1, 3};
+    std::vector<int64_t> lb = {10, 20, 10, 10, 0};
+    std::vector<uint8_t> lbMask = {0b01111};
+    std::vector<int64_t> lv = {100, 200, 300, 400, 500};
+    std::vector<TColumn> lcols = {
+        TColumn{.Data = reinterpret_cast<char*>(la.data())},
+        TColumn{.Data = reinterpret_cast<char*>(lb.data()), .Mask = lbMask.data()},
+        TColumn{.Data = reinterpret_cast<char*>(lv.data())},
+    };
+    TRowSet build{.Columns = lcols.data(), .ColumnCount = 3, .RowCount = 5, .RefCount = 1};
+
+    // Probe: (1, 10, 1), (1, 30, 2), (2, 20, 3), (3, NULL, 4), (2, 10, 5).
+    std::vector<int64_t> ra = {1, 1, 2, 3, 2};
+    std::vector<int64_t> rb = {10, 30, 20, 0, 10};
+    std::vector<uint8_t> rbMask = {0b10111};
+    std::vector<int64_t> rv = {1, 2, 3, 4, 5};
+    std::vector<TColumn> rcols = {
+        TColumn{.Data = reinterpret_cast<char*>(ra.data())},
+        TColumn{.Data = reinterpret_cast<char*>(rb.data()), .Mask = rbMask.data()},
+        TColumn{.Data = reinterpret_cast<char*>(rv.data())},
+    };
+    TRowSet probe{.Columns = rcols.data(), .ColumnCount = 3, .RowCount = 5, .RefCount = 1};
+
+    auto spec = NKernel::BuildJoinKernelSpec(
+        leftType, rightType, {{"la", "ra"}, {"lb", "rb"}}, EJoinType::Right);
+    using TRow = std::array<std::optional<int64_t>, 6>;
+    std::vector<TRow> got;
+    for (auto& out : RunRowJoin(spec, EJoinBuildSide::Left, {build}, {probe})) {
+        EXPECT_EQ(out.ColumnCount, 6);
+        for (int64_t i = 0; i < out.RowCount; ++i) {
+            TRow row;
+            for (int c = 0; c < 6; ++c) {
+                row[c] = I64At(out.Columns[c], i);
+            }
+            got.push_back(row);
+        }
+        Release(&out);
+    }
+
+    const auto null = std::nullopt;
+    std::vector<TRow> expected = {
+        TRow{1, 10, 100, 1, 10, 1},
+        TRow{1, 10, 400, 1, 10, 1},
+        TRow{null, null, null, 1, 30, 2},
+        TRow{null, null, null, 2, 20, 3},
+        TRow{null, null, null, 3, null, 4},
+        TRow{2, 10, 300, 2, 10, 5},
+    };
+    std::sort(got.begin(), got.end());
+    std::sort(expected.begin(), expected.end());
+    EXPECT_EQ(got, expected);
+}
+
+// An empty build side pads every preserved row; an empty preserved side
+// produces nothing.
+TEST(RowJoinProcessor, LeftOuterEmptySides) {
+    using namespace NQumir::NAst;
+    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
+    TStructType leftType({{"lk", i64}});
+    TStructType rightType({{"rk", i64}, {"rs", std::make_shared<TStringType>()}});
+    auto spec = NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}}, EJoinType::Left);
+
+    std::vector<int64_t> lk = {4, 5, 4};
+    std::vector<TColumn> lcols = {TColumn{.Data = reinterpret_cast<char*>(lk.data())}};
+    TRowSet probe{.Columns = lcols.data(), .ColumnCount = 1, .RowCount = 3, .RefCount = 1};
+    std::vector<std::pair<int64_t, std::optional<std::string>>> got;
+    for (auto& out : RunRowJoin(spec, EJoinBuildSide::Right, {probe}, {})) {
+        for (int64_t i = 0; i < out.RowCount; ++i) {
+            EXPECT_EQ(I64At(out.Columns[1], i), std::nullopt);
+            got.emplace_back(*I64At(out.Columns[0], i), StringOrNullAt(out.Columns[2], i));
+        }
+        Release(&out);
+    }
+    std::sort(got.begin(), got.end());
+    EXPECT_EQ(got, (std::vector<std::pair<int64_t, std::optional<std::string>>>{
+        {4, std::nullopt}, {4, std::nullopt}, {5, std::nullopt}}));
+
+    std::vector<int64_t> rk = {4};
+    std::string rsBytes = "four";
+    std::vector<int64_t> rsOffsets = {0, 4};
+    std::vector<TColumn> rcols = {
+        TColumn{.Data = reinterpret_cast<char*>(rk.data())},
+        TColumn{.Data = rsBytes.data(), .Offsets = rsOffsets.data(), .OffsetWidth = 8},
+    };
+    TRowSet build{.Columns = rcols.data(), .ColumnCount = 2, .RowCount = 1, .RefCount = 1};
+    EXPECT_TRUE(RunRowJoin(spec, EJoinBuildSide::Right, {}, {build}).empty());
+}
+
+// The row join table has no matched marks and runs no residual, so it cannot
+// build the preserved side of an outer join or decide a residual's matches.
+TEST(RowJoinProcessor, RejectsJoinsItCannotStream) {
+    using namespace NQumir::NAst;
+    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
+    TStructType leftType({{"lk", i64}, {"lv", i64}});
+    TStructType rightType({{"rk", i64}, {"rv", i64}});
+    TKernelCompiler compiler;
+    auto spec = [&](EJoinType type, TExprPtr residual = nullptr) {
+        return NKernel::BuildJoinKernelSpec(
+            leftType, rightType, {{"lk", "rk"}}, type, residual);
+    };
+    EXPECT_THROW(compiler.CompileRowJoin(spec(EJoinType::Left), /*buildIsLeft=*/true),
+        NQumir::TError);
+    EXPECT_THROW(compiler.CompileRowJoin(spec(EJoinType::Right), /*buildIsLeft=*/false),
+        NQumir::TError);
+    EXPECT_THROW(compiler.CompileRowJoin(spec(EJoinType::Full), /*buildIsLeft=*/false),
+        NQumir::TError);
+    using namespace NQumir::NAst::NLiterals;
+    auto residual = std::make_shared<TBinaryExpr>(
+        NQumir::TLocation{},
+        "<"_op,
+        std::make_shared<TIdentExpr>(NQumir::TLocation{}, "lv"),
+        std::make_shared<TIdentExpr>(NQumir::TLocation{}, "rv"));
+    EXPECT_THROW(
+        compiler.CompileRowJoin(spec(EJoinType::Left, residual), /*buildIsLeft=*/false),
+        NQumir::TError);
 }
 
 int main(int argc, char** argv) {
