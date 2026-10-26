@@ -1,5 +1,5 @@
 #pragma once
-#include <coroio/actors/actorsystem.hpp>
+#include <coroio/actors/actor.hpp>
 
 namespace NQdb {
 namespace NRemote {
@@ -17,6 +17,11 @@ struct TPing {
 
 struct TSpawnComputeActor {
     static constexpr NNet::NActors::TMessageId MessageId = 100;
+};
+
+struct TSpawnComputeActorResponse {
+    static constexpr NNet::NActors::TMessageId MessageId = 101;
+    NNet::NActors::TActorId ActorId;
 };
 
 } // namespace NRemote
