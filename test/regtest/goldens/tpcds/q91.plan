@@ -9,7 +9,7 @@ sort [returns_loss desc]
          │  │  │  │  ├─ filter (call qdb_string_view_sql_like |household_demographics.hd_buy_potential| (cast "0-500%" <named StringView>)) (rows≈1 cost≈400)
          │  │  │  │  │  └─ source household_demographics AS household_demographics row-groups (call qdb_string_view_sql_like |household_demographics.hd_buy_potential| (cast "0-500%" <named StringView>)) (rows≈10 cost≈200)
          │  │  │  │  └─ source customer AS customer use-filter 2 keys=[customer.c_current_hdemo_sk] (rows≈10 cost≈160)
-         │  │  │  └─ filter (== |customer_address.ca_gmt_offset| (- 7)) (rows≈2 cost≈240)
+         │  │  │  └─ filter (== |customer_address.ca_gmt_offset| (- 7)) (rows≈1 cost≈240)
          │  │  │     └─ source customer_address AS customer_address row-groups (== |customer_address.ca_gmt_offset| (- 7)) (rows≈10 cost≈120)
          │  │  └─ join inner [date_dim.d_date_sk = catalog_returns.cr_returned_date_sk] emit-filter 3 from left (rows≈1 cost≈4.6K)
          │  │     ├─ filter (&& (== |date_dim.d_year| 1999) (== |date_dim.d_moy| 11)) (rows≈1 cost≈240)

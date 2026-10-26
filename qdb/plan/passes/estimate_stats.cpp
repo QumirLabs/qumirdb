@@ -165,6 +165,14 @@ struct TRangeBound {
     TRangeEnd End;
 };
 
+// The distinct non-NULL constants inside min/max that an IN list allows a
+// column.
+struct TInList {
+    std::string Column;
+    double Values = 0.0;
+    double Ndv = 1.0;
+};
+
 // The tightest ends of a range on a column.
 struct TColumnRange {
     std::optional<TRangeEnd> Lower;
@@ -252,7 +260,7 @@ private:
         // NOT IN is the chain of `<>` it stands for: each value keeps
         // 1 - 1/ndv of the rows.
         if (auto values = InListValues(unary.Operand)) {
-            return std::pow(1.0 - 1.0 / values->second, values->first);
+            return std::pow(1.0 - 1.0 / values->Ndv, values->Values);
         }
         return 1.0 - Estimate(unary.Operand);
     }
@@ -279,8 +287,9 @@ private:
                 }
             }
         }
+        // A NULL is in no list.
         if (auto values = InListValues(atom)) {
-            return std::min(1.0, values->first / values->second);
+            return std::min(1.0, values->Values / values->Ndv) * NonNullFraction(values->Column);
         }
         return 0.5;
     }
@@ -359,24 +368,32 @@ private:
         return selectivity;
     }
 
+    // A NULL compares as UNKNOWN, so `=` and `!=` keep only non-NULL rows:
+    // their share of the column's values, of its non-NULL rows.
     double EstimateEquality(const TBinaryExpr& binary) {
-        double selectivity = 0.5;
+        const bool negated = binary.Operator == "!="_op;
         auto leftIdent = TMaybeNode<TIdentExpr>(binary.Left);
         auto rightIdent = TMaybeNode<TIdentExpr>(binary.Right);
         if (leftIdent && rightIdent) {
             return EstimateColumnEquality(
                 leftIdent.Cast()->Name,
                 rightIdent.Cast()->Name,
-                binary.Operator == "!="_op);
+                negated);
         }
+        const std::string* column = nullptr;
+        const TExprPtr* value = nullptr;
         if (leftIdent && IsConstExpr(binary.Right)) {
-            selectivity = EstimateConstantEquality(leftIdent.Cast()->Name, binary.Right);
+            column = &leftIdent.Cast()->Name;
+            value = &binary.Right;
         } else if (rightIdent && IsConstExpr(binary.Left)) {
-            selectivity = EstimateConstantEquality(rightIdent.Cast()->Name, binary.Left);
+            column = &rightIdent.Cast()->Name;
+            value = &binary.Left;
         }
-        return binary.Operator == "!="_op
-            ? 1.0 - selectivity
-            : selectivity;
+        if (!column) {
+            return 0.5;
+        }
+        const double selectivity = EstimateConstantEquality(*column, *value);
+        return (negated ? 1.0 - selectivity : selectivity) * NonNullFraction(*column);
     }
 
     double EstimateColumnEquality(
@@ -391,14 +408,9 @@ private:
         if (leftName == rightName && !mayBeNaN) {
             // A column equals itself on every non-NULL row, whatever its
             // NDV; `x != x` holds on no row.
-            auto it = InputStats_.ColumnStats.find(leftName);
-            const double nulls = it != InputStats_.ColumnStats.end()
-                ? static_cast<double>(it->second->NullCount.value_or(0))
-                : 0.0;
-            const double rows = std::max(1.0, static_cast<double>(InputStats_.RowCount));
             return negated
                 ? 0.0
-                : 1.0 - std::min(1.0, nulls / rows);
+                : NonNullFraction(leftName);
         }
         double selectivity = 0.5;
         if (InputStats_.ColumnStats.count(leftName) > 0 && InputStats_.ColumnStats.count(rightName) > 0) {
@@ -408,9 +420,8 @@ private:
                 selectivity = 1.0 / std::max(*leftNdv, *rightNdv);
             }
         }
-        return negated
-            ? 1.0 - selectivity
-            : selectivity;
+        return (negated ? 1.0 - selectivity : selectivity)
+            * NonNullFraction(leftName) * NonNullFraction(rightName);
     }
 
     double EstimateConstantEquality(const std::string& colName, const TExprPtr& value) {
@@ -687,7 +698,7 @@ private:
             && number.IntValue <= *stats.GetMaxValue<TValue>();
     }
 
-    std::optional<std::pair<double, double>> InListValues(const TExprPtr& expr) {
+    std::optional<TInList> InListValues(const TExprPtr& expr) {
         auto maybeCall = TMaybeNode<TCallExpr>(expr);
         if (!maybeCall) {
             return std::nullopt;
@@ -734,9 +745,11 @@ private:
             }
             numbers.insert(value);
         }
-        return std::pair{
-            static_cast<double>(numbers.size() + strings.size()),
-            static_cast<double>(*colIt->second->Ndv)};
+        return TInList{
+            .Column = name,
+            .Values = static_cast<double>(numbers.size() + strings.size()),
+            .Ndv = static_cast<double>(*colIt->second->Ndv),
+        };
     }
 
     const TStats& InputStats_;

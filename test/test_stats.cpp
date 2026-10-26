@@ -769,8 +769,9 @@ protected:
 TEST_F(SelfEqualityStats, ColumnEqualToItselfKeepsNonNullRows) {
     EXPECT_EQ(Rows("(== |t.x| |t.x|)"), 1000u);
     EXPECT_EQ(Rows("(== |t.n| |t.n|)"), 750u);
-    // Two different columns are still estimated through NDV.
-    EXPECT_EQ(Rows("(== |t.x| |t.n|)"), 10u);
+    // Two different columns are still estimated through NDV, over the rows
+    // where neither is NULL: 1000 * 0.75 / 100.
+    EXPECT_EQ(Rows("(== |t.x| |t.n|)"), 7u);
 }
 
 TEST_F(SelfEqualityStats, ColumnUnequalToItselfKeepsNoRows) {

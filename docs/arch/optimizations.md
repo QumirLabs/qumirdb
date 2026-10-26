@@ -670,9 +670,7 @@ bucket, and a predicate the statistics cannot answer gets a default, 0.5 here.
   may be a closed expression such as `date '1995-01-01' + interval '1' year`;
   it is folded to a number once per query, and the plan keeps the expression.
   `<` and `>=` count the rows strictly below the constant, so a heavy value
-  that repeats as a bucket boundary falls on the correct side. The histogram
-  describes the values of a nullable column, so its NULLs, which compare as
-  UNKNOWN, are excluded by the column's null fraction where it is known.
+  that repeats as a bucket boundary falls on the correct side.
 - The bounds on one column form one range rather than two independent
   predicates, whose product can be far from the narrow range they describe.
   The histogram cannot resolve a range narrower than a bucket, so a range that
@@ -683,6 +681,11 @@ bucket, and a predicate the statistics cannot answer gets a default, 0.5 here.
   counts the distinct non-NULL constants inside min/max. `NOT IN` is estimated
   as the chain of `<>` it stands for, `(1 - 1/NDV)` per constant, so it cannot
   reach zero from a list longer than the NDV.
+- A NULL compares as UNKNOWN, so a comparison, `=`, `<>`, a range or an `IN`
+  list, keeps only non-NULL rows. The NDV and the histogram describe the
+  non-NULL values, and the share of them a comparison keeps is scaled by the
+  column's non-NULL fraction where the null count describes the rows, as for
+  `IS NULL` below.
 - `col IS NULL` is the null fraction of the column, used only directly above
   the scan: the null count describes the table and is not rescaled by the
   operators in between.
