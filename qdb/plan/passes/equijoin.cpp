@@ -9,7 +9,9 @@
 #include <qdb/plan/ops/union.h>
 #include <qdb/plan/ops/window.h>
 #include <qdb/plan/clone_expr.h>
+#include <qdb/plan/passes/simplify_outer_joins.h>
 #include <qdb/plan/passes/unbound_vars.h>
+#include <qdb/plan/types/nullable.h>
 #include <qdb/utils/union_find.h>
 
 #include "factor_conjuncts.h"
@@ -625,6 +627,81 @@ TOperatorPtr ProcessJoin(std::shared_ptr<TJoinOperator> join, TContext ctx)
     return join;
 }
 
+// The columns of a null-extended input that the ON condition of a LEFT or RIGHT
+// join equates with columns of the preserved input, keyed by the preserved
+// column: the keys and the column equalities of the residual. Only columns of
+// one type pair up, so that equal values satisfy the same predicates.
+std::unordered_map<std::string, TRemapTarget> EquatedNullExtendedColumns(
+    const TJoinOperator& join, bool preservesLeft)
+{
+    std::unordered_map<std::string, TTypePtr> leftTypes;
+    std::unordered_map<std::string, TTypePtr> rightTypes;
+    for (const auto& [name, type] : join.Left()->OutputColumns()->Fields) {
+        leftTypes.emplace(name, type);
+    }
+    for (const auto& [name, type] : join.Right()->OutputColumns()->Fields) {
+        rightTypes.emplace(name, type);
+    }
+
+    std::unordered_map<std::string, TRemapTarget> equated;
+    auto equate = [&](const std::string& left, const std::string& right) {
+        auto leftType = leftTypes.find(left);
+        auto rightType = rightTypes.find(right);
+        if (leftType == leftTypes.end() || rightType == rightTypes.end()
+            || UnwrapNullableType(leftType->second)->ToString()
+                != UnwrapNullableType(rightType->second)->ToString())
+        {
+            return;
+        }
+        if (preservesLeft) {
+            equated.emplace(left, TRemapTarget{.Name = right});
+        } else {
+            equated.emplace(right, TRemapTarget{.Name = left});
+        }
+    };
+    for (const auto& key : join.Keys()) {
+        equate(key.Left, key.Right);
+    }
+    if (join.Filter()) {
+        std::vector<TConjuct> on;
+        ExtractConjucts(on, join.Filter());
+        for (const auto& conj : on) {
+            if (conj.equiv) {
+                equate(conj.left, conj.right);
+                equate(conj.right, conj.left);
+            }
+        }
+    }
+    return equated;
+}
+
+// A predicate over preserved columns that the ON condition equates with
+// null-extended ones also restricts the null-extended input. A row of that
+// input matches only preserved rows whose equated columns hold the same
+// non-NULL values, and every preserved row satisfies the predicate. The rows
+// the restriction drops therefore match nothing, and a LEFT or RIGHT join never
+// returns unmatched rows of its null-extended input. Only a null-rejecting
+// predicate is transferred: it also drops the rows whose equated columns are
+// NULL, so it is the whole restriction the matches imply. This is the inference
+// through equalities of predicate move-around (Levy, Mumick and Sagiv, VLDB
+// 1994) in the one direction an outer join allows: an unmatched preserved row
+// is returned whatever the other input holds.
+void TransferThroughEqualities(
+    const TConjuct& conj,
+    const std::unordered_set<std::string>& cols,
+    const std::unordered_map<std::string, TRemapTarget>& equated,
+    std::vector<TConjuct>& out)
+{
+    if (!std::ranges::all_of(cols, [&](const auto& col) { return equated.contains(col); })
+        || !RejectsNulls(ConjuctExpr(conj), cols))
+    {
+        return;
+    }
+    auto transferred = CloneExpr(ConjuctExpr(conj));
+    RemapIdents(transferred, equated);
+    ExtractConjucts(out, transferred);
+}
+
 // Outer join. WHERE predicates from above may only be pushed onto the preserved
 // side (Left keeps left, Right keeps right, Full neither). The ON residual is
 // different: a non-key ON conjunct constraining only the null-extended side can
@@ -680,13 +757,19 @@ TOperatorPtr ProcessOuterJoin(std::shared_ptr<TJoinOperator> join, TContext ctx)
         join->MutableFilter() = residual.empty() ? nullptr : Conjoin(residual);
     }
 
+    std::unordered_map<std::string, TRemapTarget> equated;
+    if (type == EJoinType::Left || type == EJoinType::Right) {
+        equated = EquatedNullExtendedColumns(*join, type == EJoinType::Left);
+    }
     std::vector<TConjuct> keep;
     for (const auto& conj : ctx.Conjucts) {
         auto cols = ColumnsOf(conj);
         if (type == EJoinType::Left && Covers(cols, leftCols)) {
             leftConjucts.emplace_back(conj);
+            TransferThroughEqualities(conj, cols, equated, rightConjucts);
         } else if (type == EJoinType::Right && Covers(cols, rightCols)) {
             rightConjucts.emplace_back(conj);
+            TransferThroughEqualities(conj, cols, equated, leftConjucts);
         } else {
             keep.emplace_back(conj);
         }

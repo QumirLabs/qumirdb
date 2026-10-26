@@ -3,5 +3,5 @@ sort [sname asc, sk asc, rname asc]
    └─ join left [s.sk = r.rk] (rows≈4 cost≈5.5K)
       ├─ filter (call qdb_in_list |s.sk| 1 2 4) (rows≈4 cost≈768)
       │  └─ source s AS s row-groups (call qdb_in_list |s.sk| 1 2 4) (rows≈16 cost≈384)
-      └─ filter (== |r.rq| 1) (rows≈3 cost≈384)
-         └─ source r AS r row-groups (== |r.rq| 1) (rows≈6 cost≈192)
+      └─ filter (&& (== |r.rq| 1) (call qdb_in_list |r.rk| 1 2 4)) (rows≈1 cost≈384)
+         └─ source r AS r row-groups (&& (call qdb_in_list |r.rk| 1 2 4) (== |r.rq| 1)) (rows≈6 cost≈192)

@@ -297,6 +297,25 @@ The pass also pushes into derived tables and factors disjunctions
 : from
 `(a=1 AND x) OR (a=1 AND y)` it extracts the common `a=1` so it can sink.
 
+**Through the keys of an outer join.** A null-rejecting conjunct pushed onto
+the preserved side of a LEFT or RIGHT join is also copied onto the
+null-extended side when the `ON` equates its columns with null-extended columns:
+rows the copy drops cannot match a preserved row. See
+[predicate_pushdown.md](predicate_pushdown.md#processouterjoin-left--right--full).
+
+```sql
+SELECT s.k, r.n FROM s LEFT JOIN r ON r.k = s.k WHERE s.k = 1;
+```
+
+```
+before                              after
+filter (== |s.k| 1)                 join left [s.k = r.k]
+└─ join left [s.k = r.k]            ├─ filter (== |s.k| 1)
+   ├─ source s AS s                 │  └─ source s AS s
+   └─ source r AS r                 └─ filter (== |r.k| 1)
+                                       └─ source r AS r
+```
+
 **Into UNION ALL branches, with dead-branch elimination.** `ProcessUnion`
  rewrites each pushed conjunct into the branch's own column
 names, substitutes *closed* projections — a branch column whose expression
