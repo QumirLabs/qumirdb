@@ -97,6 +97,12 @@ Used by q11 (HAVING), q15, q22. Under `IS NULL`, `CASE` or `coalesce`, in an
 join stays `LEFT`. The same rule applies to the LEFT join of a correlated
 subquery below.
 
+SQL gives a scalar subquery a value only when it returns at most one row, so
+its relation is marked as yielding at most one row, and the estimates take that
+as a bound. In TPC-DS q6, `(SELECT DISTINCT d_month_seq FROM date_dim WHERE
+d_year = 2000 AND d_moy = 2)` is one row; its aggregate alone would be estimated
+at the 30 dates of that month, and the dates equal to it at 912 instead of 29.
+
 ### Correlated → group-by + LEFT join (Apply elimination)
 
 A correlated scalar subquery references outer columns. It is decorrelated by

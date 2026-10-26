@@ -40,6 +40,7 @@
     "not_in_list_with_null.sql": {"order": "ordered"},
     "join_shared_key_range.sql": {"order": "ordered"},
     "join_shared_key_range_independent.sql": {"order": "ordered"},
-    "join_residual.sql": {"order": "ordered"}
+    "join_residual.sql": {"order": "ordered"},
+    "scalar_subquery_one_row.sql": {"order": "ordered"}
   }
 }

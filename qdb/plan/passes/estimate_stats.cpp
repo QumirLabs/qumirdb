@@ -1442,6 +1442,23 @@ TStatsPtr ComputeAggregateStats(const std::shared_ptr<TAggregateOperator>& aggre
     return outputStats;
 }
 
+// The statistics of a relation that yields at most one row, such as a scalar
+// subquery: however many rows its operators would produce, each column holds
+// at most one value.
+TStatsPtr BoundToOneRow(const TStats& stats) {
+    auto bounded = std::make_shared<TStats>(stats);
+    bounded->RowCount = std::min<uint64_t>(bounded->RowCount, 1);
+    for (auto& [name, column] : bounded->ColumnStats) {
+        if (column && column->Ndv && *column->Ndv > 1) {
+            auto copy = std::make_shared<TStats::TColumnStats>(*column);
+            copy->Ndv = 1;
+            copy->Histogram.clear();
+            column = std::move(copy);
+        }
+    }
+    return bounded;
+}
+
 TStatsPtr ComputeStatsFor(TOperatorPtr op, TFoldedBounds& foldedBounds) {
     if (auto source = TMaybeOp<TSourceOperator>(op)) {
         return ComputeSourceStats(source.Cast());
@@ -1501,8 +1518,11 @@ TStatsPtr EstimateStats(TOperatorPtr op, TFoldedBounds& foldedBounds) {
     for (const auto& input : op->Inputs()) {
         input->Stats_ = EstimateStats(input, foldedBounds);
     }
-
-    return op->Stats_ = ComputeStatsFor(op, foldedBounds);
+    auto stats = ComputeStatsFor(op, foldedBounds);
+    if (stats && op->AtMostOneRow) {
+        stats = BoundToOneRow(*stats);
+    }
+    return op->Stats_ = std::move(stats);
 }
 
 TStatsPtr EstimateStats(TOperatorPtr op) {
