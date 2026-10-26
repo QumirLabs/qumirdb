@@ -492,6 +492,7 @@ TOperatorPtr ProcessJoin(std::shared_ptr<TJoinOperator> join, TContext ctx)
     if (join->Filter()) {
         ExtractConjucts(pool, join->Filter());
         join->MutableFilter() = nullptr;
+        join->MutableDerivedSideFilters().clear();
     }
 
     TUnionFind<std::string> unionFind;
@@ -585,6 +586,7 @@ TOperatorPtr ProcessJoin(std::shared_ptr<TJoinOperator> join, TContext ctx)
     std::vector<TConjuct> leftConjucts;
     std::vector<TConjuct> rightConjucts;
     std::vector<TConjuct> residualConjucts;
+    std::vector<TExprPtr> derivedFilters;
     for (const auto& conj : newConjucts) {
         auto cols = ColumnsOf(conj);
         if (!preservesLeft && Covers(cols, leftCols)) {
@@ -596,11 +598,13 @@ TOperatorPtr ProcessJoin(std::shared_ptr<TJoinOperator> join, TContext ctx)
             if (conj.Expr && !preservesLeft) {
                 if (auto derived = DeriveSideFilter(conj.Expr, leftCols)) {
                     leftConjucts.emplace_back(TConjuct{derived});
+                    derivedFilters.push_back(std::move(derived));
                 }
             }
             if (conj.Expr && !preservesRight) {
                 if (auto derived = DeriveSideFilter(conj.Expr, rightCols)) {
                     rightConjucts.emplace_back(TConjuct{derived});
+                    derivedFilters.push_back(std::move(derived));
                 }
             }
         }
@@ -613,6 +617,7 @@ TOperatorPtr ProcessJoin(std::shared_ptr<TJoinOperator> join, TContext ctx)
 
     if (!residualConjucts.empty()) {
         join->MutableFilter() = Conjoin(residualConjucts);
+        join->MutableDerivedSideFilters() = std::move(derivedFilters);
     }
 
     join->MutableLeft() = Process(join->Left(), {std::move(leftConjucts), ctx.Mode, ctx.Folder});

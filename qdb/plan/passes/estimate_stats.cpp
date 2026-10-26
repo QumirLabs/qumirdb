@@ -1269,6 +1269,30 @@ double MatchAccepted(double selectivity, double matches, double matchedRows) {
     return 1.0 - std::pow(1.0 - selectivity, perRow);
 }
 
+// Selectivity of a join's residual over its inputs. The inputs are already
+// filtered by the side filters derived from it, which it implies: over them
+// it keeps P(residual) / P(side filters) of the key matches, rather than its
+// P(residual) once more.
+double ResidualSelectivity(
+    const TOperatorPtr& left,
+    const TOperatorPtr& right,
+    const TExprPtr& residual,
+    const std::vector<TExprPtr>& derivedSideFilters,
+    TConstFolder& folder)
+{
+    if (!residual) {
+        return 1.0;
+    }
+    double selectivity = EstimateResidual(left, right, residual, folder);
+    for (const auto& filter : derivedSideFilters) {
+        const double implied = EstimateResidual(left, right, filter, folder);
+        if (implied > 0.0) {
+            selectivity /= implied;
+        }
+    }
+    return std::min(selectivity, 1.0);
+}
+
 // Rows of a join of two inputs whose stats are estimated.
 uint64_t JoinRows(
     const TOperatorPtr& left,
@@ -1276,6 +1300,7 @@ uint64_t JoinRows(
     const std::vector<TJoinKey>& keys,
     EJoinType type,
     const TExprPtr& residualPredicate,
+    const std::vector<TExprPtr>& derivedSideFilters,
     TConstFolder& folder)
 {
     const auto& leftStats = *left->Stats_;
@@ -1292,9 +1317,12 @@ uint64_t JoinRows(
         keys.size() > 1 && KeysJoinTwoRelations(left, right, keys));
     // The residual accepts a share of the key matches, taken as independent
     // of the keys.
-    const double residual = residualPredicate
-        ? EstimateResidual(left, right, residualPredicate, folder)
-        : 1.0;
+    const double residual = ResidualSelectivity(
+        left,
+        right,
+        residualPredicate,
+        derivedSideFilters,
+        folder);
     const double ndvL = card.NdvL;
     const double ndvR = card.NdvR;
     uint64_t rowCount = std::max<uint64_t>(1, (uint64_t)(card.Rows * residual));
@@ -1354,6 +1382,7 @@ TStatsPtr ComputeJoinStats(
         join->Keys(),
         join->JoinType(),
         join->Filter(),
+        join->DerivedSideFilters(),
         folder);
     auto outputStats = std::make_shared<TStats>();
 
@@ -1644,7 +1673,7 @@ uint64_t EstimateInnerJoinRows(
     const TExprPtr& residual,
     TConstFolder& folder)
 {
-    return JoinRows(left, right, keys, EJoinType::Inner, residual, folder);
+    return JoinRows(left, right, keys, EJoinType::Inner, residual, {}, folder);
 }
 
 TStatsPtr EstimateStats(TOperatorPtr op, TConstFolder& folder) {

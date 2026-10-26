@@ -771,3 +771,14 @@ inventory` matches on the item key, read from the two quantity histograms. A
 semi or anti join keeps a row whose key matches include one the residual
 accepts: with its matches taken as independent, a row with `m` matches loses
 them all with probability `(1 - s)^m`.
+
+A residual OR whose every branch constrains an input gives that input a
+necessary condition, which predicate pushdown applies below the join
+([predicate_pushdown.md](predicate_pushdown.md)). The join's rows then already
+satisfy those side filters `D`. The residual `R` implies them, so over those
+rows it keeps `P(R | D) = P(R) / P(D)` of the matches, not `P(R)` once more,
+which would count the conditions of each branch twice. In TPC-DS q48,
+`store_sales ⋈ customer_demographics` with its OR residual is estimated at
+113K rows against 123K actual, where counting both gave 2.6K. Join ordering
+estimates its joins before pushdown derives the side filters, so the residual
+keeps `P(R)` there and the two estimates agree.
