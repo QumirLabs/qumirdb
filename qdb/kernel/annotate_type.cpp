@@ -1062,7 +1062,11 @@ TTypePtr InferType(const TExprPtr& e, const TStructType& schema) {
         const auto& s = blk.Cast()->Stmts;
         return s.empty() ? nullptr : InferType(s.back(), schema);
     }
-    return nullptr;
+    // A leaf the rules above do not know has the type it carries, as the outer
+    // reference of a correlated plan does.
+    return e->Children().empty()
+        ? e->Type
+        : nullptr;
 }
 
 TTypePtr ResultTypeUnary(TOperator op, const TTypePtr& ot) {

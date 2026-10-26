@@ -1,6 +1,7 @@
 #include <qdb/plan/passes/typing.h>
 
 #include <qdb/plan/ops/aggregate.h>
+#include <qdb/plan/ops/dependent_join.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/late_materialize.h>
@@ -346,6 +347,18 @@ void AnnotateOperatorType(
         auto leftSchema = join->Left()->OutputColumns();
         auto rightSchema = join->Right()->OutputColumns();
         auto output = ComputeJoinOutputType(leftSchema, rightSchema, join->JoinType());
+        root->Type = std::make_shared<TFunctionType>(
+            std::vector<TTypePtr>{leftSchema, rightSchema},
+            output ? *output : nullptr);
+        return;
+    }
+
+    if (auto maybe = TMaybeOp<TDependentJoinOperator>(root)) {
+        auto join = maybe.Cast();
+        auto leftSchema = join->Left()->OutputColumns();
+        auto rightSchema = join->Right()->OutputColumns();
+        auto output = ComputeDependentJoinOutputType(leftSchema, rightSchema, join->Kind(),
+            join->Predicate(), join->Marker(), context);
         root->Type = std::make_shared<TFunctionType>(
             std::vector<TTypePtr>{leftSchema, rightSchema},
             output ? *output : nullptr);

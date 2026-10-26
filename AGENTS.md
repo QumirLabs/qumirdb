@@ -94,7 +94,7 @@ or in the wiki; architectural chapters should explain the algorithms themselves.
 | Area | Starting points |
 |---|---|
 | Logical operators and schemas | `qdb/plan/ops/` |
-| SQL-to-plan construction and decorrelation | `qdb/plan/build.cpp` |
+| SQL-to-plan construction and decorrelation | `qdb/plan/build.cpp`; new pipeline: `qdb/plan/build2.cpp`, `qdb/plan/ops/dependent_join.h` |
 | Optimizer order and CTE decisions | `qdb/plan/pipeline.cpp`, `qdb/plan/passes/cte_reuse.cpp` |
 | Join ordering, DPccp, and estimates | `qdb/plan/passes/join_order.cpp`, `qdb/plan/passes/cbo/dpccp.cpp`, `qdb/plan/passes/estimate_stats.cpp` |
 | Predicate placement and join keys | `qdb/plan/passes/equijoin.cpp` |
