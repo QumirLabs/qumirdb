@@ -171,7 +171,8 @@ constexpr const char* CacheSchemaVersion = "v1";
 // qumirdb.oz gains upper and lower, which map strings in blocks of 16 bytes.
 // The row join table pads the unmatched probe rows of an outer join.
 // Semi and anti joins can build their left side and mark its rows.
-constexpr const char* KernelLibVersion = "53";
+// The row table moves to kernel/row_table.oz under row names.
+constexpr const char* KernelLibVersion = "54";
 } // namespace
 
 NQumir::NCodeGen::TLlvmRunner::TLinkedModule CompileKernelAstCached(
@@ -2577,9 +2578,9 @@ TRowJoinKernels TKernelCompiler::CompileRowJoin(
         .RowSet = QumirDbNamedType("TRowSet"),
         .PairBuffer = QumirDbNamedType("PairBuffer"),
         .StringView = QumirDbNamedType("StringView"),
-        .Arena = QumirDbNamedType("JoinArena"),
-        .Table = QumirDbNamedType("JoinTable"),
-        .Scratch = QumirDbNamedType("JoinScratch"),
+        .Arena = QumirDbNamedType("RowArena"),
+        .Table = QumirDbNamedType("RowTable"),
+        .Scratch = QumirDbNamedType("RowScratch"),
     };
     auto buildProgram = [&]() -> std::vector<TExprPtr> {
         auto library = NKernel::BuildRowJoinKernelLibrary();

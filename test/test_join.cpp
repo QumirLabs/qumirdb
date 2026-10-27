@@ -703,7 +703,7 @@ struct TBuildRow {
     TPayload Payload;
 };
 
-// Build rows in fixed blocks (ja_new_row). Rows never move, so table entries
+// Build rows in fixed blocks (ra_new_row). Rows never move, so table entries
 // and chains can point at them.
 template <class TRow>
 class TRowArena {
@@ -752,7 +752,7 @@ public:
     }
 
 private:
-    // The block size join_gen.cpp passes to ja_init.
+    // The block size join_gen.cpp passes to ra_init.
     static constexpr size_t BlockRows = 16384;
 
     std::vector<std::unique_ptr<TRow[]>> Blocks_;
@@ -760,7 +760,7 @@ private:
     size_t Rows_ = 0;
 };
 
-// jrt_mix multiplies by this odd constant, 2^64 divided by the golden ratio.
+// rt_mix multiplies by this odd constant, 2^64 divided by the golden ratio.
 constexpr uint64_t FibonacciMultiplier = 0x9E3779B97F4A7C15;
 
 // The entries of a row table (join_rows.oz): one 8-byte word per slot, 0 when
@@ -786,7 +786,7 @@ public:
     // The index is the top bits of the hash: the hash shuffle routes rows by
     // the low bits, which are thus nearly constant inside a partition. A key
     // hash can carry little entropy in its top bits, so a Fibonacci multiply
-    // first spreads every bit over them (jrt_mix).
+    // first spreads every bit over them (rt_mix).
     static uint64_t Mix(uint64_t hash) {
         return hash * FibonacciMultiplier;
     }
@@ -816,7 +816,7 @@ public:
         return reinterpret_cast<TRow*>(entry & PointerMask);
     }
 
-    // jrt_seek: from off to the first entry that is empty (0) or carries the
+    // rt_seek: from off to the first entry that is empty (0) or carries the
     // salt; off is left at that entry.
     uint64_t Seek(uint64_t& off, uint64_t salt) const {
         uint64_t entry = Entries_[off];
@@ -841,10 +841,10 @@ private:
     int Shift_ = 64;
 };
 
-// The row join table of a fixed build side (join_rows.oz), after DuckDB's
-// JoinHashTable: one 8-byte entry per slot, a 16-bit salt above a 48-bit row
-// pointer, at most half full. A probe reads one entry and, on a salt match,
-// one row, so a hit costs about two cache lines and a miss one.
+// The row join table of a fixed build side (join_rows.oz): one 8-byte entry
+// per slot, a 16-bit salt above a 48-bit row pointer, at most half full. A
+// probe reads one entry and, on a salt match, one row, so a hit costs about
+// two cache lines and a miss one.
 template <CJoinKey TKey, class TPayload>
 class TRowJoinTable {
 public:
@@ -909,11 +909,11 @@ public:
         Found_.resize(count);
         Work_.resize(count);
         // Pass 1, generated per join: the hash of every key. The kernel also
-        // copies the keys into JoinScratch.
+        // copies the keys into RowScratch.
         for (size_t j = 0; j < count; ++j) {
             Hashes_[j] = HashJoinKey(keys[j]);
         }
-        // Pass 2 (jr_seek_all): the first entry that is empty or carries the
+        // Pass 2 (rt_seek_all): the first entry that is empty or carries the
         // row's salt.
         for (size_t j = 0; j < count; ++j) {
             uint64_t mixed = TRowEntries::Mix(Hashes_[j]);
@@ -923,7 +923,7 @@ public:
         }
         // Pass 3 (jr_probe_candidates): compare the key of each candidate. A
         // match emits its whole chain; a salt collision moves past its entry
-        // and seeks again (jr_seek_work), until every row reached an empty
+        // and seeks again (rt_seek_work), until every row reached an empty
         // entry or its key.
         size_t pending = count;
         for (bool first = true; pending > 0; first = false) {
@@ -981,7 +981,7 @@ private:
     TRowArena<TRow> Arena_;
     TRowEntries Entries_;
     size_t Keys_ = 0;
-    // Probe scratch, one slot per probe row (JoinScratch).
+    // Probe scratch, one slot per probe row (RowScratch).
     std::vector<uint64_t> Hashes_;
     std::vector<uint64_t> Salts_;
     std::vector<uint64_t> Offsets_;

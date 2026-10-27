@@ -339,7 +339,7 @@ using TRowJoinMaterialize = std::function<int64_t(
 
 // The compiled kernels of an inner, outer, semi or anti equi-join over the row
 // join table (kernel/join/join_rows.oz). The caller owns zero-initialized
-// JoinArena, JoinTable, JoinScratch and PairBuffer buffers of the sizes below.
+// RowArena, RowTable, RowScratch and PairBuffer buffers of the sizes below.
 struct TRowJoinKernels {
     TRowJoinDispatch Dispatch;
     TRowJoinMaterialize Materialize;
@@ -449,12 +449,12 @@ public:
     // the output pair buffer.
     static constexpr size_t PairBufferSize = 24;
 
-    // sizeof(JoinArena) / sizeof(JoinTable) / sizeof(JoinScratch) per
+    // sizeof(RowArena) / sizeof(RowTable) / sizeof(RowScratch) per
     // modules/qumirdb.cpp - callers of CompileRowJoin allocate zero-initialized
     // buffers this large.
-    static constexpr size_t JoinArenaSize = 56;
-    static constexpr size_t JoinTableSize = 48;
-    static constexpr size_t JoinScratchSize = 64;
+    static constexpr size_t RowArenaSize = 56;
+    static constexpr size_t RowTableSize = 48;
+    static constexpr size_t RowScratchSize = 64;
 
     // sizeof(TRowSet) per io.h / modules/qumirdb.oz - generated kernels that
     // pack TRowSet values into a byte buffer (e.g. top-sort's materialize

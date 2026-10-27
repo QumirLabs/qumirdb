@@ -29,6 +29,10 @@ std::string ReadJoinKernel(const std::string& name);
 // to this source file's location.
 std::string ReadSortKernel(const std::string& name);
 
+// Reads the row table kernel source (qdb/kernel/row_table.oz), shared by the
+// row join kernels.
+std::string ReadRowTableKernel();
+
 // Assembles the keyed-join kernel library: generic Robin Hood helpers, the
 // reused aggregation HashTable lifecycle, pair buffers, the dual-key-generic
 // join update/probe helpers (join_update.oz templates over LookupKey /
