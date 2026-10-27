@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <chrono>
 #include <concepts>
@@ -9,13 +10,16 @@
 #include <cstring>
 #include <format>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <new>
+#include <numeric>
 #include <random>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -407,6 +411,96 @@ size_t RowOf(TRowId id) {
     return static_cast<size_t>(id & 0xFFFFFFFF);
 }
 
+// The control bytes of a swiss table (swiss_group.oz), one per slot. The
+// tables keep their keys and values in arrays indexed by the same slots.
+class TSwissControl {
+public:
+    // A power of two, at least one group.
+    void Assign(size_t capacity) {
+        Ctrl_.assign(capacity, Empty);
+    }
+
+    size_t Capacity() const {
+        return Ctrl_.size();
+    }
+
+    bool IsFull(size_t slot) const {
+        return Ctrl_[slot] != Empty;
+    }
+
+    void Set(size_t slot, uint64_t hash) {
+        Ctrl_[slot] = static_cast<uint8_t>(hash & 127);
+    }
+
+    // The slot isKey accepts, or -1 and the first empty slot of the probe
+    // sequence. Groups are walked with triangular steps, which visit every
+    // group once (rh_lookup_or_empty_physical).
+    template <class TIsKey>
+    int64_t FindSlot(uint64_t hash, TIsKey&& isKey, int64_t* emptySlot) const {
+        size_t groupMask = (Capacity() >> GroupShift) - 1;
+        size_t group = (hash >> 7) & groupMask;
+        for (size_t step = 1; step <= groupMask + 1; ++step) {
+            uint64_t word = Group(group);
+            for (uint64_t m = Match(word, hash & 127); m != 0; m &= m - 1) {
+                size_t slot = (group << GroupShift) + std::countr_zero(m) / 8;
+                if (isKey(slot)) {
+                    return static_cast<int64_t>(slot);
+                }
+            }
+            if (uint64_t empty = MatchEmpty(word); empty != 0) {
+                *emptySlot = static_cast<int64_t>((group << GroupShift) + std::countr_zero(empty) / 8);
+                return -1;
+            }
+            group = (group + step) & groupMask;
+        }
+        return -1;
+    }
+
+    // The first empty slot of a probe sequence, for a key known to be absent
+    // (rh_find_empty_slot): no key compares.
+    int64_t FindEmptySlot(uint64_t hash) const {
+        size_t groupMask = (Capacity() >> GroupShift) - 1;
+        size_t group = (hash >> 7) & groupMask;
+        for (size_t step = 1; step <= groupMask + 1; ++step) {
+            if (uint64_t empty = MatchEmpty(Group(group)); empty != 0) {
+                return static_cast<int64_t>((group << GroupShift) + std::countr_zero(empty) / 8);
+            }
+            group = (group + step) & groupMask;
+        }
+        return -1;
+    }
+
+private:
+    // Groups of 8 slots matched by portable SWAR. The kernel matches the same
+    // 8-slot groups with NEON on arm64, and 16-slot groups with SSE2 on x86.
+    static constexpr size_t GroupShift = 3;
+    static constexpr uint8_t Empty = 0x80;
+    static constexpr uint64_t LowBits = 0x0101010101010101;
+    static constexpr uint64_t HighBits = LowBits << 7;
+
+    uint64_t Group(size_t group) const {
+        uint64_t word;
+        std::memcpy(&word, Ctrl_.data() + (group << GroupShift), sizeof(word));
+        return word;
+    }
+
+    // One high bit per control byte equal to h2 (swiss_match, portable
+    // backend). A byte after a borrow can match falsely; the key compare
+    // that follows rejects it.
+    static uint64_t Match(uint64_t group, uint64_t h2) {
+        uint64_t x = group ^ (LowBits * h2);
+        return (x - LowBits) & ~x & HighBits;
+    }
+
+    // There are no tombstones, so only an empty byte has its high bit set.
+    static uint64_t MatchEmpty(uint64_t group) {
+        return group & HighBits;
+    }
+
+    // Per slot: Empty or the low 7 bits of the hash.
+    std::vector<uint8_t> Ctrl_;
+};
+
 // The table of one side of the symmetric join: a swiss table of the distinct
 // keys, and for each key a bucket of the row ids stored under it. It is the
 // aggregation HashTable with three dense int64 columns (join_table.oz): bucket
@@ -455,7 +549,7 @@ public:
     }
 
     size_t Capacity() const {
-        return Ctrl_.size();
+        return Ctrl_.Capacity();
     }
 
     size_t MemoryBytes() const {
@@ -469,78 +563,25 @@ public:
 private:
     // JoinInitialCapacity in join_exec.cpp.
     static constexpr size_t InitialCapacity = 256;
-    // Groups of 8 slots matched by portable SWAR. The kernel matches the same
-    // 8-slot groups with NEON on arm64, and 16-slot groups with SSE2 on x86.
-    static constexpr size_t GroupShift = 3;
-    static constexpr uint8_t Empty = 0x80;
-    static constexpr uint64_t LowBits = 0x0101010101010101;
-    static constexpr uint64_t HighBits = LowBits << 7;
-
-    uint64_t Group(size_t group) const {
-        uint64_t word;
-        std::memcpy(&word, Ctrl_.data() + (group << GroupShift), sizeof(word));
-        return word;
-    }
-
-    // One high bit per control byte equal to h2 (swiss_match, portable
-    // backend). A byte after a borrow can match falsely; the key compare
-    // that follows rejects it.
-    static uint64_t Match(uint64_t group, uint64_t h2) {
-        uint64_t x = group ^ (LowBits * h2);
-        return (x - LowBits) & ~x & HighBits;
-    }
-
-    // There are no tombstones, so only an empty byte has its high bit set.
-    static uint64_t MatchEmpty(uint64_t group) {
-        return group & HighBits;
-    }
 
     // The physical slot of the key, or -1 and the first empty slot of its
-    // probe sequence. Groups are walked with triangular steps, which visit
-    // every group once (rh_lookup_or_empty_physical).
+    // probe sequence.
     int64_t FindSlot(const TKey& key, uint64_t hash, int64_t* emptySlot) const {
-        size_t groupMask = (Capacity() >> GroupShift) - 1;
-        size_t group = (hash >> 7) & groupMask;
-        for (size_t step = 1; step <= groupMask + 1; ++step) {
-            uint64_t word = Group(group);
-            for (uint64_t m = Match(word, hash & 127); m != 0; m &= m - 1) {
-                size_t slot = (group << GroupShift) + std::countr_zero(m) / 8;
-                if (Keys_[slot] == key) {
-                    return static_cast<int64_t>(slot);
-                }
-            }
-            if (uint64_t empty = MatchEmpty(word); empty != 0) {
-                *emptySlot = static_cast<int64_t>((group << GroupShift) + std::countr_zero(empty) / 8);
-                return -1;
-            }
-            group = (group + step) & groupMask;
-        }
-        return -1;
-    }
-
-    // The first empty slot of a probe sequence, for a key known to be absent
-    // (rh_find_empty_slot): no key compares.
-    int64_t FindEmptySlot(uint64_t hash) const {
-        size_t groupMask = (Capacity() >> GroupShift) - 1;
-        size_t group = (hash >> 7) & groupMask;
-        for (size_t step = 1; step <= groupMask + 1; ++step) {
-            if (uint64_t empty = MatchEmpty(Group(group)); empty != 0) {
-                return static_cast<int64_t>((group << GroupShift) + std::countr_zero(empty) / 8);
-            }
-            group = (group + step) & groupMask;
-        }
-        return -1;
+        auto isKey = [&](size_t slot) {
+            return Keys_[slot] == key;
+        };
+        return Ctrl_.FindSlot(hash, isKey, emptySlot);
     }
 
     int64_t AddKey(const TKey& key, uint64_t hash, int64_t emptySlot) {
         // At 7/8 load the table doubles; the saved empty slot is then stale.
         if (Size_ + 1 > Capacity() - Capacity() / 8) {
             Grow();
-            emptySlot = FindEmptySlot(hash);
+            emptySlot = Ctrl_.FindEmptySlot(hash);
         }
         int64_t id = static_cast<int64_t>(Size_++);
         TKey stored = CloneJoinKey(key, Arena_);
-        Ctrl_[emptySlot] = static_cast<uint8_t>(hash & 127);
+        Ctrl_.Set(emptySlot, hash);
         Keys_[emptySlot] = stored;
         SlotId_[emptySlot] = id;
         GroupKeys_[id] = stored;
@@ -564,7 +605,7 @@ private:
     }
 
     void Allocate(size_t capacity) {
-        Ctrl_.assign(capacity, Empty);
+        Ctrl_.Assign(capacity);
         Keys_.assign(capacity, TKey{});
         SlotId_.assign(capacity, -1);
         GroupKeys_.resize(capacity);
@@ -577,24 +618,23 @@ private:
     // under its recomputed hash, so a stored copy must hash like the key it
     // copies. The dense columns keep their ids and are only extended.
     void Grow() {
-        std::vector<uint8_t> ctrl = std::move(Ctrl_);
+        TSwissControl ctrl = std::move(Ctrl_);
         std::vector<TKey> keys = std::move(Keys_);
         std::vector<int64_t> slotId = std::move(SlotId_);
-        Allocate(ctrl.size() * 2);
-        for (size_t slot = 0; slot < ctrl.size(); ++slot) {
-            if (ctrl[slot] == Empty) {
+        Allocate(ctrl.Capacity() * 2);
+        for (size_t slot = 0; slot < ctrl.Capacity(); ++slot) {
+            if (!ctrl.IsFull(slot)) {
                 continue;
             }
             uint64_t hash = HashJoinKey(keys[slot]);
-            int64_t emptySlot = FindEmptySlot(hash);
-            Ctrl_[emptySlot] = static_cast<uint8_t>(hash & 127);
+            int64_t emptySlot = Ctrl_.FindEmptySlot(hash);
+            Ctrl_.Set(emptySlot, hash);
             Keys_[emptySlot] = keys[slot];
             SlotId_[emptySlot] = slotId[slot];
         }
     }
 
-    // Per physical slot: Empty or the low 7 bits of the hash.
-    std::vector<uint8_t> Ctrl_;
+    TSwissControl Ctrl_;
     // Per physical slot: the stored key and its dense id.
     std::vector<TKey> Keys_;
     std::vector<int64_t> SlotId_;
@@ -685,6 +725,19 @@ public:
         return Blocks_.size() * BlockRows * sizeof(TRow);
     }
 
+    // From the first row to the last.
+    template <class TVisit>
+    void Visit(TVisit&& visit) const {
+        for (size_t block = 0; block < Blocks_.size(); ++block) {
+            size_t rows = (block + 1 == Blocks_.size())
+                ? CurRows_
+                : BlockRows;
+            for (size_t row = 0; row < rows; ++row) {
+                visit(std::as_const(Blocks_[block][row]));
+            }
+        }
+    }
+
     // From the last row to the first.
     template <class TVisit>
     void VisitBackward(TVisit&& visit) {
@@ -709,6 +762,84 @@ private:
 
 // jrt_mix multiplies by this odd constant, 2^64 divided by the golden ratio.
 constexpr uint64_t FibonacciMultiplier = 0x9E3779B97F4A7C15;
+
+// The entries of a row table (join_rows.oz): one 8-byte word per slot, 0 when
+// empty, else a 16-bit salt above a 48-bit pointer to a row that lives
+// elsewhere. Probing is linear from the home slot.
+class TRowEntries {
+public:
+    // A power of two.
+    void Assign(size_t capacity) {
+        Entries_.assign(capacity, 0);
+        Mask_ = capacity - 1;
+        Shift_ = 64 - std::countr_zero(capacity);
+    }
+
+    size_t Capacity() const {
+        return Entries_.size();
+    }
+
+    size_t MemoryBytes() const {
+        return Entries_.size() * sizeof(uint64_t);
+    }
+
+    // The index is the top bits of the hash: the hash shuffle routes rows by
+    // the low bits, which are thus nearly constant inside a partition. A key
+    // hash can carry little entropy in its top bits, so a Fibonacci multiply
+    // first spreads every bit over them (jrt_mix).
+    static uint64_t Mix(uint64_t hash) {
+        return hash * FibonacciMultiplier;
+    }
+
+    static uint64_t Salt(uint64_t mixed) {
+        return (mixed >> 16) & 0xFFFF;
+    }
+
+    uint64_t Home(uint64_t mixed) const {
+        return mixed >> Shift_;
+    }
+
+    uint64_t Next(uint64_t off) const {
+        return (off + 1) & Mask_;
+    }
+
+    uint64_t operator[](uint64_t off) const {
+        return Entries_[off];
+    }
+
+    static uint64_t SaltOf(uint64_t entry) {
+        return entry >> 48;
+    }
+
+    template <class TRow>
+    static TRow* Row(uint64_t entry) {
+        return reinterpret_cast<TRow*>(entry & PointerMask);
+    }
+
+    // jrt_seek: from off to the first entry that is empty (0) or carries the
+    // salt; off is left at that entry.
+    uint64_t Seek(uint64_t& off, uint64_t salt) const {
+        uint64_t entry = Entries_[off];
+        while (entry != 0 && SaltOf(entry) != salt) {
+            off = Next(off);
+            entry = Entries_[off];
+        }
+        return entry;
+    }
+
+    // jrt_link: a user-space pointer fits in 48 bits.
+    void Set(uint64_t off, uint64_t salt, const void* row) {
+        Entries_[off] = salt << 48 | reinterpret_cast<uintptr_t>(row);
+    }
+
+private:
+    static constexpr uint64_t PointerMask = (uint64_t{1} << 48) - 1;
+    static_assert(sizeof(uintptr_t) == sizeof(uint64_t), "an entry holds a 64-bit pointer");
+
+    std::vector<uint64_t> Entries_;
+    uint64_t Mask_ = 0;
+    int Shift_ = 64;
+};
 
 // The row join table of a fixed build side (join_rows.oz), after DuckDB's
 // JoinHashTable: one 8-byte entry per slot, a 16-bit salt above a 48-bit row
@@ -739,29 +870,27 @@ public:
     // moves to the next entry. Linking from the last row to the first leaves
     // every chain in build order. It runs once: linking overwrites the hashes.
     void Build() {
-        if (!Entries_.empty()) {
+        if (Entries_.Capacity() != 0) {
             throw std::logic_error("a row join table is built once");
         }
         size_t capacity = 1024;
         while (capacity < 2 * Arena_.Rows()) {
             capacity *= 2;
         }
-        Entries_.assign(capacity, 0);
-        Mask_ = capacity - 1;
-        Shift_ = 64 - std::countr_zero(capacity);
+        Entries_.Assign(capacity);
         Keys_ = 0;
         Arena_.VisitBackward([&](TRow& row) {
-            uint64_t mixed = Mix(row.HashOrNext);
-            uint64_t salt = Salt(mixed);
-            uint64_t off = mixed >> Shift_;
+            uint64_t mixed = TRowEntries::Mix(row.HashOrNext);
+            uint64_t salt = TRowEntries::Salt(mixed);
+            uint64_t off = Entries_.Home(mixed);
             for (;;) {
-                uint64_t entry = Seek(off, salt);
-                TRow* head = EntryRow(entry);
+                uint64_t entry = Entries_.Seek(off, salt);
+                TRow* head = TRowEntries::Row<TRow>(entry);
                 if (entry == 0 || head->Key == row.Key) {
                     Link(off, salt, row, head);
                     return;
                 }
-                off = (off + 1) & Mask_;
+                off = Entries_.Next(off);
             }
         });
     }
@@ -770,7 +899,7 @@ public:
     // matching build row. Each pass loops over independent rows, so the cache
     // misses of different rows overlap.
     void Probe(std::span<const TKey> keys, std::vector<TMatch>& matches) {
-        if (Entries_.empty()) {
+        if (Entries_.Capacity() == 0) {
             throw std::logic_error("a row join table is probed after Build");
         }
         size_t count = keys.size();
@@ -787,10 +916,10 @@ public:
         // Pass 2 (jr_seek_all): the first entry that is empty or carries the
         // row's salt.
         for (size_t j = 0; j < count; ++j) {
-            uint64_t mixed = Mix(Hashes_[j]);
-            Salts_[j] = Salt(mixed);
-            Offsets_[j] = mixed >> Shift_;
-            Found_[j] = Seek(Offsets_[j], Salts_[j]);
+            uint64_t mixed = TRowEntries::Mix(Hashes_[j]);
+            Salts_[j] = TRowEntries::Salt(mixed);
+            Offsets_[j] = Entries_.Home(mixed);
+            Found_[j] = Entries_.Seek(Offsets_[j], Salts_[j]);
         }
         // Pass 3 (jr_probe_candidates): compare the key of each candidate. A
         // match emits its whole chain; a salt collision moves past its entry
@@ -803,7 +932,7 @@ public:
                 size_t j = first
                     ? q
                     : Work_[q];
-                const TRow* row = EntryRow(Found_[j]);
+                const TRow* row = TRowEntries::Row<TRow>(Found_[j]);
                 if (row == nullptr) {
                     continue;
                 }
@@ -812,14 +941,14 @@ public:
                         matches.push_back({j, row});
                     }
                 } else {
-                    Offsets_[j] = (Offsets_[j] + 1) & Mask_;
+                    Offsets_[j] = Entries_.Next(Offsets_[j]);
                     Work_[collided++] = j;
                 }
             }
             pending = collided;
             for (size_t q = 0; q < pending; ++q) {
                 size_t j = Work_[q];
-                Found_[j] = Seek(Offsets_[j], Salts_[j]);
+                Found_[j] = Entries_.Seek(Offsets_[j], Salts_[j]);
             }
         }
     }
@@ -829,62 +958,28 @@ public:
     }
 
     size_t Capacity() const {
-        return Entries_.size();
+        return Entries_.Capacity();
     }
 
     size_t MemoryBytes() const {
-        return Entries_.size() * sizeof(uint64_t) + Arena_.MemoryBytes();
+        return Entries_.MemoryBytes() + Arena_.MemoryBytes();
     }
 
 private:
-    static constexpr uint64_t PointerMask = (uint64_t{1} << 48) - 1;
-    static_assert(sizeof(uintptr_t) == sizeof(uint64_t), "an entry holds a 64-bit pointer");
-
-    // The index is the top bits of the hash: the hash shuffle routes rows by
-    // the low bits, which are thus nearly constant inside a partition. A key
-    // hash can carry little entropy in its top bits, so a Fibonacci multiply
-    // first spreads every bit over them (jrt_mix).
-    static uint64_t Mix(uint64_t hash) {
-        return hash * FibonacciMultiplier;
-    }
-
-    static uint64_t Salt(uint64_t mixed) {
-        return (mixed >> 16) & 0xFFFF;
-    }
-
-    static TRow* EntryRow(uint64_t entry) {
-        return reinterpret_cast<TRow*>(entry & PointerMask);
-    }
-
     static const TRow* Next(const TRow* row) {
         return reinterpret_cast<const TRow*>(row->HashOrNext);
     }
 
-    // jrt_seek: from off to the first entry that is empty (0) or carries the
-    // salt; off is left at that entry.
-    uint64_t Seek(uint64_t& off, uint64_t salt) const {
-        uint64_t entry = Entries_[off];
-        while (entry != 0 && (entry >> 48) != salt) {
-            off = (off + 1) & Mask_;
-            entry = Entries_[off];
-        }
-        return entry;
-    }
-
-    // jrt_link: as in the kernel and in DuckDB, a user-space pointer fits in
-    // 48 bits.
     void Link(uint64_t off, uint64_t salt, TRow& row, TRow* head) {
         row.HashOrNext = reinterpret_cast<uintptr_t>(head);
         if (head == nullptr) {
             ++Keys_;
         }
-        Entries_[off] = salt << 48 | reinterpret_cast<uintptr_t>(&row);
+        Entries_.Set(off, salt, &row);
     }
 
     TRowArena<TRow> Arena_;
-    std::vector<uint64_t> Entries_;
-    uint64_t Mask_ = 0;
-    int Shift_ = 64;
+    TRowEntries Entries_;
     size_t Keys_ = 0;
     // Probe scratch, one slot per probe row (JoinScratch).
     std::vector<uint64_t> Hashes_;
@@ -1242,6 +1337,754 @@ TEST(JoinTablePrototype, DISABLED_Microbenchmark) {
                     static_cast<double>(rows.MemoryBytes()) / buildRows);
             }
         }
+    }
+}
+
+// C++ prototypes of two aggregate hash tables (#352), tested and measured like
+// the join tables above:
+// - TSwissAggregateTable: the table of QDB's hash aggregate with fixed-width
+//   states (aht_upsert_aggregate in robin_hood_dual_key.oz, and the update and
+//   finalize loops gen.cpp generates around it);
+// - TRowAggregateTable: the same aggregate on the layout of TRowJoinTable.
+// Both compute the first 1 to 4 of sum, count, min and max over one int64
+// argument.
+
+namespace {
+
+// The aggregates in the order a table of n aggregates takes the first n.
+enum class EAggregate {
+    Sum,
+    Count,
+    Min,
+    Max,
+};
+
+constexpr std::array<EAggregate, 4> PrototypeAggregates = {
+    EAggregate::Sum,
+    EAggregate::Count,
+    EAggregate::Min,
+    EAggregate::Max,
+};
+
+// The scalar reducers of gen.cpp: the states of a new group are zero, and its
+// first value replaces the zero of min and max.
+int64_t Reduce(EAggregate aggregate, int64_t state, int64_t value, bool isNew) {
+    switch (aggregate) {
+        case EAggregate::Sum:
+            return state + value;
+        case EAggregate::Count:
+            return state + 1;
+        case EAggregate::Min:
+            return (isNew || value < state)
+                ? value
+                : state;
+        case EAggregate::Max:
+            return (isNew || value > state)
+                ? value
+                : state;
+    }
+    std::unreachable();
+}
+
+// The output of finalization: a column of keys and one per aggregate. The
+// caller sizes it to the group count, as the host sizes the output rowset
+// before agg_finish_rowset.
+template <class TKey, size_t AggregateCount>
+struct TAggregateColumns {
+    explicit TAggregateColumns(size_t groups)
+        : Keys(groups)
+    {
+        for (std::vector<int64_t>& states : States) {
+            states.resize(groups);
+        }
+    }
+
+    std::vector<TKey> Keys;
+    std::array<std::vector<int64_t>, AggregateCount> States;
+};
+
+// A composite key of two integer columns, as the GROUP BY ss_item_sk,
+// ss_customer_sk of TPC-DS q78.
+struct TItemCustomerKey {
+    int64_t Item;
+    int64_t Customer;
+
+    bool operator==(const TItemCustomerKey&) const = default;
+};
+
+uint64_t HashJoinKey(const TItemCustomerKey& key) {
+    uint64_t h = HashJoinKey(key.Item);
+    return h ^ (HashJoinKey(key.Customer) + 0x9E3779B97F4A7C15 + (h << 6) + (h >> 2));
+}
+
+TItemCustomerKey CloneJoinKey(const TItemCustomerKey& key, TKeyArena&) {
+    return key;
+}
+
+static_assert(CJoinKey<TItemCustomerKey>);
+
+// The table of QDB's hash aggregate (aggregation_hashtable_generic.oz) with
+// the states at the probe slot, where aht_upsert_aggregate keeps fixed-width
+// states. Per slot: the control byte, the stored key, and one state in the
+// array of each aggregate. Per group, in insertion order: the key (GroupKeys)
+// and its slot (SlotId), which only growth reads. An update out of cache
+// misses on the control group, the key and every state: 2 + n cache lines.
+template <CJoinKey TKey, size_t AggregateCount>
+class TSwissAggregateTable {
+public:
+    // From one group of 8 slots (aggregate_exec.cpp), or pre-sized for the
+    // given groups as EstimateAggregateInitialCapacity sizes it for an
+    // estimate.
+    explicit TSwissAggregateTable(size_t groups = 0) {
+        size_t capacity = InitialCapacity;
+        while (groups > capacity - capacity / 8) {
+            capacity *= 2;
+        }
+        Allocate(capacity);
+    }
+
+    // Row after row, as the update loop of agg_dispatch: find or insert the
+    // group, then apply every reducer at its slot.
+    void Update(std::span<const TKey> keys, std::span<const int64_t> values) {
+        for (size_t j = 0; j < keys.size(); ++j) {
+            uint64_t hash = HashJoinKey(keys[j]);
+            auto isKey = [&](size_t slot) {
+                return Keys_[slot] == keys[j];
+            };
+            int64_t emptySlot = -1;
+            int64_t slot = Ctrl_.FindSlot(hash, isKey, &emptySlot);
+            bool isNew = slot < 0;
+            if (isNew) {
+                slot = AddGroup(keys[j], hash, emptySlot);
+            }
+            for (size_t a = 0; a < AggregateCount; ++a) {
+                States_[a][slot] = Reduce(PrototypeAggregates[a], States_[a][slot], values[j], isNew);
+            }
+        }
+    }
+
+    // agg_finish_rowset for fixed-width keys: the slots in order, so the keys
+    // and the states are scanned, not gathered through SlotId.
+    void Finalize(TAggregateColumns<TKey, AggregateCount>& output) const {
+        size_t group = 0;
+        for (size_t slot = 0; slot < Capacity(); ++slot) {
+            if (!Ctrl_.IsFull(slot)) {
+                continue;
+            }
+            output.Keys[group] = Keys_[slot];
+            for (size_t a = 0; a < AggregateCount; ++a) {
+                output.States[a][group] = States_[a][slot];
+            }
+            ++group;
+        }
+    }
+
+    size_t Groups() const {
+        return Size_;
+    }
+
+    size_t Capacity() const {
+        return Ctrl_.Capacity();
+    }
+
+    size_t MemoryBytes() const {
+        return Capacity() * (1 + 2 * sizeof(TKey) + (1 + AggregateCount) * sizeof(int64_t)) + Arena_.Bytes();
+    }
+
+private:
+    static constexpr size_t InitialCapacity = 8;
+
+    // aht_insert_dual for physical states: at 7/8 load the table doubles and
+    // the saved empty slot is stale; the new group then zeroes its states.
+    int64_t AddGroup(const TKey& key, uint64_t hash, int64_t emptySlot) {
+        if (Size_ + 1 > Capacity() - Capacity() / 8) {
+            Grow();
+            emptySlot = Ctrl_.FindEmptySlot(hash);
+        }
+        TKey stored = CloneJoinKey(key, Arena_);
+        Ctrl_.Set(emptySlot, hash);
+        Keys_[emptySlot] = stored;
+        SlotId_[Size_] = emptySlot;
+        GroupKeys_[Size_] = stored;
+        for (std::vector<int64_t>& states : States_) {
+            states[emptySlot] = 0;
+        }
+        ++Size_;
+        return emptySlot;
+    }
+
+    void Allocate(size_t capacity) {
+        Ctrl_.Assign(capacity);
+        Keys_.assign(capacity, TKey{});
+        SlotId_.assign(capacity, -1);
+        GroupKeys_.resize(capacity);
+        for (std::vector<int64_t>& states : States_) {
+            states.assign(capacity, 0);
+        }
+    }
+
+    // rh_rehash_aggregate: every group key is hashed again into a table twice
+    // as large, then every state moves from its old slot to its new one.
+    void Grow() {
+        std::vector<int64_t> slotId = std::move(SlotId_);
+        std::array<std::vector<int64_t>, AggregateCount> states = std::move(States_);
+        Allocate(2 * Capacity());
+        for (size_t id = 0; id < Size_; ++id) {
+            uint64_t hash = HashJoinKey(GroupKeys_[id]);
+            int64_t slot = Ctrl_.FindEmptySlot(hash);
+            Ctrl_.Set(slot, hash);
+            Keys_[slot] = GroupKeys_[id];
+            SlotId_[id] = slot;
+        }
+        for (size_t a = 0; a < AggregateCount; ++a) {
+            for (size_t id = 0; id < Size_; ++id) {
+                States_[a][SlotId_[id]] = states[a][slotId[id]];
+            }
+        }
+    }
+
+    TSwissControl Ctrl_;
+    // Per physical slot.
+    std::vector<TKey> Keys_;
+    std::array<std::vector<int64_t>, AggregateCount> States_;
+    // Per group, sized like the slots.
+    std::vector<TKey> GroupKeys_;
+    std::vector<int64_t> SlotId_;
+    size_t Size_ = 0;
+    TKeyArena Arena_;
+};
+
+// A group of the row aggregate table: the key hash, the key and every state
+// in one arena row. Growth places the row by its hash without hashing the key
+// again.
+template <CJoinKey TKey, size_t AggregateCount>
+struct TGroupRow {
+    uint64_t Hash;
+    TKey Key;
+    std::array<int64_t, AggregateCount> States;
+};
+
+// The aggregate on the layout of TRowJoinTable: a group is a row of an arena,
+// and the table holds entries that point at the rows, at most half full. An
+// update reads one entry and, on a salt match, the row with the key and every
+// state: about two cache lines whatever the number of aggregates. Rows never
+// move, so growth rewrites only the entries.
+template <CJoinKey TKey, size_t AggregateCount>
+class TRowAggregateTable {
+public:
+    using TRow = TGroupRow<TKey, AggregateCount>;
+
+    // From 8 entries, or pre-sized for the given groups.
+    explicit TRowAggregateTable(size_t groups = 0) {
+        Entries_.Assign(CapacityFor(groups));
+    }
+
+    // Finds or inserts the group of every row of a batch in three passes and
+    // applies the row to its states. Each pass loops over independent rows,
+    // so the cache misses of different rows overlap.
+    void Update(std::span<const TKey> keys, std::span<const int64_t> values) {
+        size_t count = keys.size();
+        Hashes_.resize(count);
+        Salts_.resize(count);
+        Offsets_.resize(count);
+        Work_.resize(count);
+        // Pass 1: the hash of every key and its home entry.
+        for (size_t j = 0; j < count; ++j) {
+            Hashes_[j] = HashJoinKey(keys[j]);
+            uint64_t mixed = TRowEntries::Mix(Hashes_[j]);
+            Salts_[j] = TRowEntries::Salt(mixed);
+            Offsets_[j] = Entries_.Home(mixed);
+            Work_[j] = j;
+        }
+        size_t pending = count;
+        while (pending > 0) {
+            // Pass 2: the first entry that is empty or carries the row's salt.
+            size_t empty = 0;
+            for (size_t q = 0; q < pending; ++q) {
+                size_t j = Work_[q];
+                if (Entries_.Seek(Offsets_[j], Salts_[j]) == 0) {
+                    ++empty;
+                }
+            }
+            // Only a row at an empty entry inserts a group, at most one, so
+            // growing here keeps the table at most half full. Growth moves
+            // the home entries, and the pending rows seek again.
+            if (Groups() + empty > Entries_.Capacity() / 2) {
+                Grow(Groups() + empty);
+                for (size_t q = 0; q < pending; ++q) {
+                    size_t j = Work_[q];
+                    Offsets_[j] = Entries_.Home(TRowEntries::Mix(Hashes_[j]));
+                }
+                continue;
+            }
+            // Pass 3: compare the key at each candidate entry, or insert at an
+            // empty one. The entry is read again because an earlier row of the
+            // batch may have inserted there since pass 2, with this row's key
+            // or another. A salt collision moves past its entry and seeks again,
+            // until every row found or inserted its group.
+            size_t collided = 0;
+            for (size_t q = 0; q < pending; ++q) {
+                size_t j = Work_[q];
+                uint64_t entry = Entries_[Offsets_[j]];
+                TRow* row = TRowEntries::Row<TRow>(entry);
+                if (entry == 0) {
+                    Accumulate(Insert(Offsets_[j], Salts_[j], Hashes_[j], keys[j]), values[j], true);
+                } else if (TRowEntries::SaltOf(entry) == Salts_[j] && row->Key == keys[j]) {
+                    Accumulate(*row, values[j], false);
+                } else {
+                    Offsets_[j] = Entries_.Next(Offsets_[j]);
+                    Work_[collided++] = j;
+                }
+            }
+            pending = collided;
+        }
+    }
+
+    // A scan of the arena: the groups in insertion order.
+    void Finalize(TAggregateColumns<TKey, AggregateCount>& output) const {
+        size_t group = 0;
+        Arena_.Visit([&](const TRow& row) {
+            output.Keys[group] = row.Key;
+            for (size_t a = 0; a < AggregateCount; ++a) {
+                output.States[a][group] = row.States[a];
+            }
+            ++group;
+        });
+    }
+
+    // The row of a key, or null.
+    const TRow* Find(const TKey& key) const {
+        uint64_t mixed = TRowEntries::Mix(HashJoinKey(key));
+        uint64_t salt = TRowEntries::Salt(mixed);
+        for (uint64_t off = Entries_.Home(mixed);; off = Entries_.Next(off)) {
+            const TRow* row = TRowEntries::Row<const TRow>(Entries_.Seek(off, salt));
+            if (row == nullptr || row->Key == key) {
+                return row;
+            }
+        }
+    }
+
+    size_t Groups() const {
+        return Arena_.Rows();
+    }
+
+    size_t Capacity() const {
+        return Entries_.Capacity();
+    }
+
+    size_t MemoryBytes() const {
+        return Entries_.MemoryBytes() + Arena_.MemoryBytes() + KeyArena_.Bytes();
+    }
+
+private:
+    static constexpr size_t InitialCapacity = 8;
+
+    static size_t CapacityFor(size_t groups) {
+        size_t capacity = InitialCapacity;
+        while (capacity / 2 < groups) {
+            capacity *= 2;
+        }
+        return capacity;
+    }
+
+    // A new group: its row with zero states, then the entry that points at it.
+    TRow& Insert(uint64_t off, uint64_t salt, uint64_t hash, const TKey& key) {
+        TRow& row = Arena_.Append();
+        row.Hash = hash;
+        row.Key = CloneJoinKey(key, KeyArena_);
+        row.States.fill(0);
+        Entries_.Set(off, salt, &row);
+        return row;
+    }
+
+    static void Accumulate(TRow& row, int64_t value, bool isNew) {
+        for (size_t a = 0; a < AggregateCount; ++a) {
+            row.States[a] = Reduce(PrototypeAggregates[a], row.States[a], value, isNew);
+        }
+    }
+
+    // Entries for the given groups, filled by a scan of the arena. Keys are
+    // unique, so every row takes the first empty entry from its home.
+    void Grow(size_t groups) {
+        Entries_.Assign(CapacityFor(groups));
+        Arena_.Visit([&](const TRow& row) {
+            uint64_t mixed = TRowEntries::Mix(row.Hash);
+            uint64_t off = Entries_.Home(mixed);
+            while (Entries_[off] != 0) {
+                off = Entries_.Next(off);
+            }
+            Entries_.Set(off, TRowEntries::Salt(mixed), &row);
+        });
+    }
+
+    TRowArena<TRow> Arena_;
+    TRowEntries Entries_;
+    TKeyArena KeyArena_;
+    // Update scratch, one slot per input row.
+    std::vector<uint64_t> Hashes_;
+    std::vector<uint64_t> Salts_;
+    std::vector<uint64_t> Offsets_;
+    std::vector<size_t> Work_;
+};
+
+// Input rows per Update call.
+constexpr size_t AggregateBatchRows = 2048;
+
+template <class TTable, class TKey>
+void UpdateInBatches(TTable& table, std::span<const TKey> keys, std::span<const int64_t> values) {
+    for (size_t begin = 0; begin < keys.size(); begin += AggregateBatchRows) {
+        size_t rows = std::min(AggregateBatchRows, keys.size() - begin);
+        table.Update(keys.subspan(begin, rows), values.subspan(begin, rows));
+    }
+}
+
+struct TJoinKeyHasher {
+    template <CJoinKey TKey>
+    size_t operator()(const TKey& key) const {
+        return HashJoinKey(key);
+    }
+};
+
+// The states of every group.
+template <class TKey, size_t AggregateCount>
+using TGroupStates = std::unordered_map<TKey, std::array<int64_t, AggregateCount>, TJoinKeyHasher>;
+
+// Aggregate arguments in [-1000, 1000], so min and max see both signs.
+std::vector<int64_t> RandomValues(size_t count, uint64_t seed) {
+    std::vector<int64_t> values = RandomKeys(count, 2001, seed);
+    for (int64_t& value : values) {
+        value -= 1000;
+    }
+    return values;
+}
+
+// Sum, count, min and max of every key, computed directly.
+template <class TKey, size_t AggregateCount>
+TGroupStates<TKey, AggregateCount> ReferenceAggregate(std::span<const TKey> keys, std::span<const int64_t> values) {
+    constexpr int64_t minIdentity = std::numeric_limits<int64_t>::max();
+    constexpr int64_t maxIdentity = std::numeric_limits<int64_t>::min();
+    TGroupStates<TKey, 4> all;
+    for (size_t j = 0; j < keys.size(); ++j) {
+        std::array<int64_t, 4>& states = all.try_emplace(keys[j], std::array<int64_t, 4>{0, 0, minIdentity, maxIdentity})
+            .first->second;
+        states[0] += values[j];
+        states[1] += 1;
+        states[2] = std::min(states[2], values[j]);
+        states[3] = std::max(states[3], values[j]);
+    }
+    TGroupStates<TKey, AggregateCount> groups;
+    for (const auto& [key, states] : all) {
+        std::copy_n(states.begin(), AggregateCount, groups[key].begin());
+    }
+    return groups;
+}
+
+// The finalized groups of a table. A group output twice would collapse in the
+// map, so the map must keep every output row.
+template <class TKey, size_t AggregateCount, class TTable>
+TGroupStates<TKey, AggregateCount> FinalizedGroups(const TTable& table) {
+    TAggregateColumns<TKey, AggregateCount> output(table.Groups());
+    table.Finalize(output);
+    TGroupStates<TKey, AggregateCount> groups;
+    for (size_t group = 0; group < output.Keys.size(); ++group) {
+        std::array<int64_t, AggregateCount>& states = groups[output.Keys[group]];
+        for (size_t a = 0; a < AggregateCount; ++a) {
+            states[a] = output.States[a][group];
+        }
+    }
+    EXPECT_EQ(groups.size(), output.Keys.size());
+    return groups;
+}
+
+// Both tables, grown from 8 slots and pre-sized for the exact group count.
+template <class TKey, size_t AggregateCount>
+void ExpectTablesMatchReference(std::span<const TKey> keys, std::span<const int64_t> values) {
+    TGroupStates<TKey, AggregateCount> expected = ReferenceAggregate<TKey, AggregateCount>(keys, values);
+    for (size_t groups : {size_t{0}, expected.size()}) {
+        TSwissAggregateTable<TKey, AggregateCount> swiss(groups);
+        UpdateInBatches(swiss, keys, values);
+        EXPECT_EQ(swiss.Groups(), expected.size());
+        EXPECT_EQ((FinalizedGroups<TKey, AggregateCount>(swiss)), expected);
+
+        TRowAggregateTable<TKey, AggregateCount> rows(groups);
+        UpdateInBatches(rows, keys, values);
+        EXPECT_EQ(rows.Groups(), expected.size());
+        EXPECT_EQ((FinalizedGroups<TKey, AggregateCount>(rows)), expected);
+    }
+}
+
+// Keys 0 to range - 1, key k with a frequency proportional to 1 / (k + 1).
+std::vector<int64_t> ZipfKeys(size_t count, int64_t range, uint64_t seed) {
+    std::vector<double> weights(range);
+    for (int64_t key = 0; key < range; ++key) {
+        weights[key] = 1.0 / static_cast<double>(key + 1);
+    }
+    std::discrete_distribution<int64_t> zipf(weights.begin(), weights.end());
+    std::mt19937_64 random(seed);
+    std::vector<int64_t> keys(count);
+    for (int64_t& key : keys) {
+        key = zipf(random);
+    }
+    return keys;
+}
+
+// The two columns split the bits of the key, so distinct keys stay distinct.
+std::vector<TItemCustomerKey> ItemCustomerKeys(std::span<const int64_t> keys) {
+    std::vector<TItemCustomerKey> pairs;
+    pairs.reserve(keys.size());
+    for (int64_t key : keys) {
+        pairs.push_back({key & 0xFFFF, key >> 16});
+    }
+    return pairs;
+}
+
+// One table over one input: a run that warms up, then the better of two.
+struct TAggregateRun {
+    double UpdateNanosPerRow = std::numeric_limits<double>::infinity();
+    double FinalizeNanosPerGroup = std::numeric_limits<double>::infinity();
+    double BytesPerGroup = 0;
+    size_t Groups = 0;
+    uint64_t Checksum = 0;
+};
+
+// Independent of the group order, so the two tables can be compared.
+template <class TKey, size_t AggregateCount>
+uint64_t Checksum(const TAggregateColumns<TKey, AggregateCount>& output) {
+    uint64_t sum = 0;
+    for (size_t group = 0; group < output.Keys.size(); ++group) {
+        uint64_t h = HashJoinKey(output.Keys[group]);
+        for (const std::vector<int64_t>& states : output.States) {
+            h = HashJoinKey(static_cast<int64_t>(h ^ static_cast<uint64_t>(states[group])));
+        }
+        sum += h;
+    }
+    return sum;
+}
+
+// Every run builds a new table, grown from 8 slots or pre-sized for the given
+// groups, so allocation and growth count as update time.
+template <class TTable, class TKey, size_t AggregateCount>
+TAggregateRun MeasureAggregateTable(
+    std::span<const TKey> keys,
+    std::span<const int64_t> values,
+    size_t presizedGroups)
+{
+    using TClock = std::chrono::steady_clock;
+    auto nanosSince = [](TClock::time_point start) {
+        return std::chrono::duration<double, std::nano>(TClock::now() - start).count();
+    };
+    TAggregateRun best;
+    for (int run = 0; run < 3; ++run) {
+        auto start = TClock::now();
+        TTable table(presizedGroups);
+        UpdateInBatches(table, keys, values);
+        double update = nanosSince(start) / keys.size();
+        TAggregateColumns<TKey, AggregateCount> output(table.Groups());
+        start = TClock::now();
+        table.Finalize(output);
+        double finalize = nanosSince(start) / table.Groups();
+        if (run == 0) {
+            continue;
+        }
+        best.UpdateNanosPerRow = std::min(best.UpdateNanosPerRow, update);
+        best.FinalizeNanosPerGroup = std::min(best.FinalizeNanosPerGroup, finalize);
+        best.BytesPerGroup = static_cast<double>(table.MemoryBytes()) / table.Groups();
+        best.Groups = table.Groups();
+        best.Checksum = Checksum(output);
+    }
+    return best;
+}
+
+// One line of the benchmark: both tables over one input, grown and pre-sized.
+template <class TKey, size_t AggregateCount>
+void PrintAggregateComparison(
+    std::string_view distribution,
+    std::string_view keyName,
+    std::span<const TKey> keys,
+    std::span<const int64_t> values)
+{
+    using TSwiss = TSwissAggregateTable<TKey, AggregateCount>;
+    using TRows = TRowAggregateTable<TKey, AggregateCount>;
+    TAggregateRun swiss = MeasureAggregateTable<TSwiss, TKey, AggregateCount>(keys, values, 0);
+    TAggregateRun rows = MeasureAggregateTable<TRows, TKey, AggregateCount>(keys, values, 0);
+    // The grown runs counted the groups that the pre-sized tables are sized for.
+    TAggregateRun swissPresized = MeasureAggregateTable<TSwiss, TKey, AggregateCount>(keys, values, swiss.Groups);
+    TAggregateRun rowsPresized = MeasureAggregateTable<TRows, TKey, AggregateCount>(keys, values, swiss.Groups);
+    EXPECT_EQ(rows.Groups, swiss.Groups);
+    EXPECT_EQ(rows.Checksum, swiss.Checksum);
+    EXPECT_EQ(swissPresized.Checksum, swiss.Checksum);
+    EXPECT_EQ(rowsPresized.Checksum, swiss.Checksum);
+    std::cout << std::format(
+        "{:>9} {:>9} {:>4} {:>4} {:>2} {:>7.2f} {:>7.2f} {:>5.2f} {:>7.2f} {:>7.2f} {:>5.2f}"
+        " {:>7.2f} {:>7.2f} {:>5.2f} {:>6.1f} {:>6.1f}\n",
+        keys.size(),
+        swiss.Groups,
+        distribution,
+        keyName,
+        AggregateCount,
+        swiss.UpdateNanosPerRow,
+        rows.UpdateNanosPerRow,
+        swiss.UpdateNanosPerRow / rows.UpdateNanosPerRow,
+        swissPresized.UpdateNanosPerRow,
+        rowsPresized.UpdateNanosPerRow,
+        swissPresized.UpdateNanosPerRow / rowsPresized.UpdateNanosPerRow,
+        swiss.FinalizeNanosPerGroup,
+        rows.FinalizeNanosPerGroup,
+        swiss.FinalizeNanosPerGroup / rows.FinalizeNanosPerGroup,
+        swiss.BytesPerGroup,
+        rows.BytesPerGroup);
+}
+
+} // namespace
+
+TEST(AggregateTablePrototype, BothTablesMatchReferenceOnRandomKeys) {
+    std::vector<int64_t> keys = RandomKeys(100000, 20000, 1);
+    std::vector<int64_t> values = RandomValues(keys.size(), 2);
+    ExpectTablesMatchReference<int64_t, 4>(keys, values);
+    ExpectTablesMatchReference<TItemCustomerKey, 4>(ItemCustomerKeys(keys), values);
+}
+
+TEST(AggregateTablePrototype, BothTablesMatchReferenceOnDistinctKeys) {
+    // Every row starts a group.
+    std::vector<int64_t> keys(50000);
+    std::iota(keys.begin(), keys.end(), -25000);
+    std::shuffle(keys.begin(), keys.end(), std::mt19937_64(3));
+    ExpectTablesMatchReference<int64_t, 1>(keys, RandomValues(keys.size(), 4));
+}
+
+TEST(AggregateTablePrototype, BothTablesMatchReferenceOnHotKeys) {
+    // Nineteen rows in twenty fall on three keys.
+    std::vector<int64_t> keys = RandomKeys(100000, 20000, 5);
+    for (int64_t& key : keys) {
+        if (key % 20 != 0) {
+            key %= 3;
+        }
+    }
+    ExpectTablesMatchReference<int64_t, 3>(keys, RandomValues(keys.size(), 6));
+}
+
+TEST(AggregateTablePrototype, BothTablesMergeInBatchDuplicatesOfNewKeys) {
+    // Every batch brings 64 keys no earlier batch had, each in 32 of its rows.
+    std::vector<int64_t> keys;
+    std::mt19937_64 random(7);
+    for (int64_t batch = 0; batch < 16; ++batch) {
+        size_t begin = keys.size();
+        for (size_t row = 0; row < AggregateBatchRows; ++row) {
+            keys.push_back(batch * 64 + static_cast<int64_t>(row % 64));
+        }
+        std::shuffle(keys.begin() + begin, keys.end(), random);
+    }
+    ExpectTablesMatchReference<int64_t, 4>(keys, RandomValues(keys.size(), 8));
+    // The smallest case: one new key twice in a batch.
+    std::vector<int64_t> twice = {42, 42};
+    std::vector<int64_t> values = {5, -3};
+    ExpectTablesMatchReference<int64_t, 4>(twice, values);
+}
+
+TEST(AggregateTablePrototype, BothTablesMatchReferenceUnderSaltCollisions) {
+    std::vector<TCollidingKey> keys;
+    for (int64_t key : RandomKeys(5000, 1000, 9)) {
+        keys.push_back({key});
+    }
+    ExpectTablesMatchReference<TCollidingKey, 2>(keys, RandomValues(keys.size(), 10));
+}
+
+TEST(AggregateTablePrototype, BothTablesGrowAcrossSeveralDoublings) {
+    // 100000 keys, each in two rows, grow both tables from 8 slots: the swiss
+    // table to 131072 at 7/8 load, the row table to 262144 at 1/2.
+    std::vector<int64_t> distinct(100000);
+    std::iota(distinct.begin(), distinct.end(), 0);
+    std::shuffle(distinct.begin(), distinct.end(), std::mt19937_64(11));
+    std::vector<int64_t> keys = distinct;
+    keys.insert(keys.end(), distinct.rbegin(), distinct.rend());
+    std::vector<int64_t> values = RandomValues(keys.size(), 12);
+    std::span<const int64_t> keySpan(keys);
+    std::span<const int64_t> valueSpan(values);
+
+    TSwissAggregateTable<int64_t, 4> swiss;
+    UpdateInBatches(swiss, keySpan, valueSpan);
+    EXPECT_EQ(swiss.Capacity(), 131072u);
+
+    // The rows of the first batch keep their addresses while the row table
+    // grows from 4096 entries: growth rewrites only the entries.
+    TRowAggregateTable<int64_t, 4> rows;
+    rows.Update(keySpan.first(AggregateBatchRows), valueSpan.first(AggregateBatchRows));
+    EXPECT_EQ(rows.Capacity(), 4096u);
+    std::vector<const TRowAggregateTable<int64_t, 4>::TRow*> firstRows;
+    for (int64_t key : keySpan.first(AggregateBatchRows)) {
+        firstRows.push_back(rows.Find(key));
+        ASSERT_NE(firstRows.back(), nullptr);
+    }
+    UpdateInBatches(rows, keySpan.subspan(AggregateBatchRows), valueSpan.subspan(AggregateBatchRows));
+    EXPECT_EQ(rows.Capacity(), 262144u);
+    for (size_t row = 0; row < AggregateBatchRows; ++row) {
+        EXPECT_EQ(rows.Find(keys[row]), firstRows[row]);
+    }
+    EXPECT_EQ(rows.Find(-1), nullptr);
+
+    TGroupStates<int64_t, 4> expected = ReferenceAggregate<int64_t, 4>(keySpan, valueSpan);
+    EXPECT_EQ((FinalizedGroups<int64_t, 4>(swiss)), expected);
+    EXPECT_EQ((FinalizedGroups<int64_t, 4>(rows)), expected);
+}
+
+// Update cost per input row and finalize cost per group of both aggregate
+// tables on one thread, and their memory per group, for 1K to 24M groups of
+// uniform keys and one Zipf-skewed input; 1 and 4 aggregates; an int64 and a
+// two-column key; tables grown from 8 slots or pre-sized for the exact group
+// count (#342). Each configuration runs once to warm up and twice measured,
+// and the better run counts. Not run by ctest; measure a Release build:
+// test_join --gtest_also_run_disabled_tests --gtest_filter='*AggregateMicrobenchmark*'
+TEST(AggregateTablePrototype, DISABLED_AggregateMicrobenchmark) {
+#ifndef NDEBUG
+    GTEST_SKIP() << "the aggregate microbenchmark measures a Release build";
+#endif
+    struct TInput {
+        int64_t Keys;
+        bool Zipf;
+    };
+    std::cout << std::format(
+        "{:>9} {:>9} {:>4} {:>4} {:>2} {:>7} {:>7} {:>5} {:>7} {:>7} {:>5}"
+        " {:>7} {:>7} {:>5} {:>6} {:>6}\n",
+        "rows",
+        "groups",
+        "dist",
+        "key",
+        "n",
+        "sw_grow",
+        "row_grow",
+        "x",
+        "sw_pre",
+        "row_pre",
+        "x",
+        "sw_fin",
+        "row_fin",
+        "x",
+        "sw_B",
+        "row_B");
+    std::vector<TInput> inputs = {
+        {int64_t{1} << 10, false},
+        {int64_t{1} << 16, false},
+        {int64_t{1} << 20, false},
+        {int64_t{1} << 22, false},
+        {int64_t{1} << 24, false},
+        {int64_t{24} << 20, false},
+        {int64_t{1} << 22, true},
+    };
+    for (const TInput& input : inputs) {
+        size_t rows = std::max<size_t>(size_t{1} << 24, 4 * input.Keys);
+        uint64_t seed = static_cast<uint64_t>(input.Keys) + input.Zipf;
+        std::vector<int64_t> keys = input.Zipf
+            ? ZipfKeys(rows, input.Keys, seed)
+            : RandomKeys(rows, input.Keys, seed);
+        std::vector<TItemCustomerKey> pairs = ItemCustomerKeys(keys);
+        std::vector<int64_t> values = RandomKeys(rows, 1000, seed + 1);
+        std::string_view distribution = input.Zipf
+            ? "zipf"
+            : "unif";
+        PrintAggregateComparison<int64_t, 1>(distribution, "i64", keys, values);
+        PrintAggregateComparison<int64_t, 4>(distribution, "i64", keys, values);
+        PrintAggregateComparison<TItemCustomerKey, 1>(distribution, "pair", pairs, values);
+        PrintAggregateComparison<TItemCustomerKey, 4>(distribution, "pair", pairs, values);
     }
 }
 
