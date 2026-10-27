@@ -51,7 +51,20 @@
     (Size i64)
     (NumAggs i64)
     (NumKeys i64)
-    (KeySize i64)>)
+    (KeySize i64)
+    ;; The row layout of an aggregate (kernel/aggregation/aggregation_rows.oz):
+    ;; one arena row per group, holding its key and states, indexed by salted
+    ;; entries. The table is in this layout once RowTable has entries; the
+    ;; swiss arrays above are then null. Joins do not use it.
+    (RowArena RowArena)
+    (RowTable RowTable)
+    (RowScratch RowScratch)
+    ;; Groups at which a swiss table that must grow moves to the row layout
+    ;; instead; 0 keeps it swiss.
+    (RowSwitchGroups i64)
+    ;; Groups the row entries are sized for at that move, when more than
+    ;; twice the groups moved.
+    (RowExpectedGroups i64)>)
 
   (type PairBuffer <struct
     (Count i64)

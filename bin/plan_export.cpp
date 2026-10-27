@@ -1921,7 +1921,7 @@ llvm::json::Object ExecLayoutJson(int64_t heapBase, int wasmBits) {
                 {"length", 8},
             }},
             {"hashTable", llvm::json::Object{
-                {"size", 80},
+                {"size", 240},
                 {"sizeOffset", 48},
             }},
             {"pairBuffer", llvm::json::Object{

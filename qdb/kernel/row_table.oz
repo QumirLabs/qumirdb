@@ -4,9 +4,10 @@
   ;; Row table: rows in an arena of fixed-size blocks, indexed by a table of
   ;; 8-byte entries, each a 16-bit salt above a 48-bit row pointer. A lookup
   ;; touches one entry and, on a salt match, one row. The row join table
-  ;; (join/join_rows.oz) is built on it and lays out its own rows after the
-  ;; first word, which holds the hash of the row's key when the row is
-  ;; appended.
+  ;; (join/join_rows.oz) and the row layout of the aggregate table
+  ;; (aggregation/aggregation_rows.oz) are built on it; each lays out its own
+  ;; rows after the first word, which holds the hash of the row's key when the
+  ;; row is appended.
   ;;
   ;; Table index = mixed hash >> Shift (the top bits), salt = bits 16..31 of
   ;; the mixed hash (rt_mix). The hash shuffle partitions by the low bits, so a

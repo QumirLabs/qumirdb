@@ -30,7 +30,7 @@ std::string ReadJoinKernel(const std::string& name);
 std::string ReadSortKernel(const std::string& name);
 
 // Reads the row table kernel source (qdb/kernel/row_table.oz), shared by the
-// row join kernels.
+// row join and the row layout of the aggregate table.
 std::string ReadRowTableKernel();
 
 // Assembles the keyed-join kernel library: generic Robin Hood helpers, the
@@ -124,7 +124,8 @@ BuildGenericAggregateMeasureProgramAst(
 
 // One program with aggregate update/finalize entries sharing a single copy of
 // the type decls and libraries. Internal measure/finalize helpers stay in the
-// module; external callers use agg_dispatch and agg_finish_rowset.
+// module; external callers use agg_dispatch and agg_finish_rowset. With a row
+// layout (BuildAggRowLayout), the program serves both table layouts.
 std::expected<NQumir::NAst::TExprPtr, NQumir::TError>
 BuildGenericAggregateFusedProgramAst(
     const NQumir::NAst::TStructType& inputType,
@@ -134,7 +135,8 @@ BuildGenericAggregateFusedProgramAst(
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType,
     bool hasPrecomputedHash = false,
-    const std::vector<int64_t>& emptyInputGroups = {});
+    const std::vector<int64_t>& emptyInputGroups = {},
+    const std::optional<TAggRowLayout>& rows = std::nullopt);
 
 } // namespace NKernel
 } // namespace NQdb

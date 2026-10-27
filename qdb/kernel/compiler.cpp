@@ -172,7 +172,8 @@ constexpr const char* CacheSchemaVersion = "v1";
 // The row join table pads the unmatched probe rows of an outer join.
 // Semi and anti joins can build their left side and mark its rows.
 // The row table moves to kernel/row_table.oz under row names.
-constexpr const char* KernelLibVersion = "54";
+// The aggregate table gains the row layout; HashTable embeds it.
+constexpr const char* KernelLibVersion = "55";
 } // namespace
 
 NQumir::NCodeGen::TLlvmRunner::TLinkedModule CompileKernelAstCached(
@@ -2152,9 +2153,13 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
     auto rowSetType = QumirDbNamedType("TRowSet");
     auto hashTableType = QumirDbNamedType("HashTable");
 
+    const auto rows = spec.AggregateRowLayout
+        ? NKernel::BuildAggRowLayout(keyDescriptor, layout, !spec.EmptyInputGroups.empty())
+        : std::nullopt;
     auto program = NKernel::BuildGenericAggregateFusedProgramAst(
         inputType, keyDescriptor, layout,
-        columnType, rowSetType, hashTableType, spec.HasPrecomputedHash, spec.EmptyInputGroups);
+        columnType, rowSetType, hashTableType, spec.HasPrecomputedHash, spec.EmptyInputGroups,
+        rows);
     if (!program) {
         throw NQumir::TError(
             "CompileAggregate: " + program.error().ToString());
@@ -2162,6 +2167,8 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
 
     TAggregateKernels kernels;
     kernels.NumAggs = funcs.size();
+    kernels.StateWords = layout.NumAggBuffers;
+    kernels.RowBytes = rows ? rows->RowBytes : 0;
     for (const auto& reducer : layout.Reducers) {
         if (reducer.IsString()) {
             kernels.StringMetadataBuffers.push_back(reducer.ExtraBufIdx);

@@ -250,7 +250,7 @@ TEST(OwnedBlocks, HashTableUsesFormerScratchSlots) {
         }
     }
     ASSERT_NE(hashTable, nullptr);
-    ASSERT_EQ(hashTable->Fields.size(), 13u);
+    ASSERT_EQ(hashTable->Fields.size(), 18u);
     EXPECT_EQ(hashTable->Fields[5].first, "OwnedBlocks");
     EXPECT_EQ(hashTable->Fields[6].first, "OwnedBlockCount");
     EXPECT_EQ(hashTable->Fields[7].first, "OwnedBlockCapacity");
