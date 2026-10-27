@@ -385,7 +385,13 @@ bool TInnerJoinProcessor::PullOneInputBatch(
     }
 }
 
-void TInnerJoinProcessor::FinalizeOuterJoin() {
+// The preserved rows an outer join leaves unmatched, and the left rows of a
+// SEMI/ANTI join that built them, are known only once both inputs end.
+bool TInnerJoinProcessor::FinalizesPreservedRows() const {
+    return IsOuter() || StreamsSemiAntiRight();
+}
+
+void TInnerJoinProcessor::FinalizePreservedRows() {
     // A streamed join has no table of the other side to look keys up in; its
     // build rows carry matched marks instead.
     const auto op = BuildSide_ == EJoinBuildSide::Auto
@@ -400,16 +406,21 @@ void TInnerJoinProcessor::FinalizeOuterJoin() {
             const_cast<TRowSet*>(RightRows_.Data()),
             0,
             JoinOp(op))) {
-        throw std::runtime_error("join outer finalize failed");
+        throw std::runtime_error("join finalize of preserved rows failed");
     }
-    OuterFinalized_ = true;
+    PreservedFinalized_ = true;
 }
 
 bool TInnerJoinProcessor::StreamsSemiAntiLeft() const {
     return IsSemiAnti() && BuildSide_ == EJoinBuildSide::Right;
 }
 
-// Left rows must survive until the final membership scan.
+bool TInnerJoinProcessor::StreamsSemiAntiRight() const {
+    return IsSemiAnti() && BuildSide_ == EJoinBuildSide::Left;
+}
+
+// The symmetric path stores the left rows and the distinct right keys; the left
+// rows must survive until the final membership scan.
 bool TInnerJoinProcessor::PullSemiAntiBatch(
     const TFetch& left,
     const TFetch& right)
@@ -481,7 +492,7 @@ void TInnerJoinProcessor::FinalizeSemiAntiJoin() {
             &PairBuffer_,
             const_cast<TRowSet*>(LeftRows_.Data()),
             const_cast<TRowSet*>(RightRows_.Data()),
-            LeftRows_.BatchCount(),
+            0,
             JoinOp(EJoinKernelOp::Finalize))) {
         throw std::runtime_error("join semi/anti finalize failed");
     }
@@ -518,14 +529,15 @@ EJoinProcessorResult TInnerJoinProcessor::Process(
 {
     EnsureInit();
 
-    if (IsSemiAnti() && !StreamsSemiAntiLeft()) {
+    if (IsSemiAnti() && BuildSide_ == EJoinBuildSide::Auto) {
         return ProcessSemiAnti(left, right, output);
     }
 
-    // Once both inputs are drained, outer joins emit their unmatched rows.
+    // Once both inputs are drained, outer joins emit their unmatched rows and
+    // SEMI/ANTI joins that built their left side the rows its marks select.
     auto finishedResult = [&]() -> EJoinProcessorResult {
-        if (IsOuter() && !OuterFinalized_) {
-            FinalizeOuterJoin();
+        if (FinalizesPreservedRows() && !PreservedFinalized_) {
+            FinalizePreservedRows();
             if (DrainReadyOutput(output) || DrainMaterialized(output)) {
                 return EJoinProcessorResult::OK;
             }

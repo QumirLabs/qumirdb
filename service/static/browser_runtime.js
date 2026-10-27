@@ -2748,13 +2748,15 @@ function streamsOuterJoin(stage) {
     (stage.joinType === 'right' && stage.buildSide === 'right');
 }
 
+// A semi/anti join that built its left side emits the rows its marks select;
+// the symmetric path looks each left key up in the right key set.
 function finalizeSemiAntiJoinState(state) {
   if (state.semiAntiFinalized) {
     return;
   }
   const ok = dispatchJoin(
     state, 0, 0, state.leftStore.dataPtr(), state.rightStore.dataPtr(),
-    state.leftStore.batches.length, JoinOp.FINALIZE);
+    0, state.stage.buildSide === 'left' ? JoinOp.FINALIZE_STREAM : JoinOp.FINALIZE);
   if (!ok) {
     throw new Error('join semi/anti finalize failed');
   }
@@ -3964,7 +3966,7 @@ class JoinTask {
   }
 
   pullOneInputBatch() {
-    const streamSemiAnti = this.streamsSemiAntiLeft();
+    const streamSemiAnti = isLeftSemiAntiJoin(this.stage) && this.stage.buildSide !== 'auto';
     if (isLeftSemiAntiJoin(this.stage) && !streamSemiAnti) {
       return this.pullOneSemiAntiInputBatch();
     }

@@ -12,13 +12,21 @@
   ;; that matches nothing is emitted once with a null row pointer, which the
   ;; gathers read as NULL build columns.
   ;;
+  ;; It also serves the SEMI / ANTI joins that build their preserved left side.
+  ;; Their rows carry a mark byte: a probe marks the rows it matches and emits
+  ;; nothing, and once the probe side ends the arena is scanned for the marked
+  ;; rows (SEMI) or the unmarked ones (ANTI). A row with a NULL key matches
+  ;; nothing, so the arena keeps only rows with a valid key; an ANTI join keeps
+  ;; its NULL-key rows in a second arena that no table indexes.
+  ;;
   ;; Row layout, fixed per join and generated in join_gen.cpp:
   ;;   [0, 8)        hash of the key while the arena is built, then the pointer
   ;;                 to the next row with an equal key (0 ends the chain);
   ;;   [8, 8 + key)  the LookupKey struct of the row;
-  ;;   then one validity byte per nullable payload column and the payload
-  ;;   values at their natural alignment; strings are StringView handles that
-  ;;   point into the retained input batch, so string bytes are not copied.
+  ;;   then one validity byte per nullable payload column, the mark byte of a
+  ;;   SEMI / ANTI build side, and the payload values at their natural
+  ;;   alignment; strings are StringView handles that point into the retained
+  ;;   input batch, so string bytes are not copied.
   ;;
   ;; Table index = mixed hash >> Shift (the top bits), salt = bits 16..31 of
   ;; the mixed hash (jrt_mix).
@@ -346,16 +354,29 @@
         (block (return (call pb_push pairs stream_id (cast build i64)))))
       (return (call pb_push pairs (cast build i64) stream_id))))
 
+  ;; Marks the rows of the chain that starts at `row`. A probe marks a whole
+  ;; chain at once, so the walk stops at the first marked row: a chain matched
+  ;; before costs one byte read.
+  (fun jr_mark_chain ((var row <ptr u8>) (var mark_offset i64))
+    (attrs inline)
+    (block
+      (var cur = row)
+      (while (&& (!= (cast cur i64) 0) (== (index cur mark_offset) (: 0 u8)))
+        (block
+          (= cur [mark_offset] (: 1 u8))
+          (= cur (call jr_row_next cur))))))
+
   ;; Key pass of the probe over Entries[0, count), after jr_seek_all. Keys[j]
-  ;; is the key of probe row Rows[j]. A match emits the whole chain; a salt
-  ;; collision advances the row's offset and seeks again, until every row
-  ;; reached an empty entry. A row that reaches one without a match is emitted
-  ;; with a null row pointer when emit_unmatched is set. Pairs are (stream row
-  ;; id, row pointer) in (left, right) order.
+  ;; is the key of probe row Rows[j]. A match emits the whole chain, or marks
+  ;; it when mark_offset is not negative; a salt collision advances the row's
+  ;; offset and seeks again, until every row reached an empty entry. A row that
+  ;; reaches one without a match is emitted with a null row pointer when
+  ;; emit_unmatched is set. Pairs are (stream row id, row pointer) in
+  ;; (left, right) order.
   (fun jr_probe_candidates [Key] ((var table <ref JoinTable>) (var s <ref JoinScratch>)
                                   (var pairs <ref PairBuffer>) (var count i64)
                                   (var key_offset i64) (var probe_is_left bool)
-                                  (var emit_unmatched bool)
+                                  (var emit_unmatched bool) (var mark_offset i64)
                                   (var witness <ptr Key>)) -> bool
     (block
       (var keys = (cast (field s Keys) <ptr Key>))
@@ -381,12 +402,15 @@
                   (var row_key = (cast (+ (cast row i64) key_offset) <ptr Key>))
                   (if (call rh_key_equal (index row_key 0) (index keys j))
                     (block
-                      (var cur = row)
-                      (while (!= (cast cur i64) 0)
+                      (if (>= mark_offset 0)
+                        (block (call jr_mark_chain row mark_offset))
                         (block
-                          (if (! (call jr_push_pair pairs (index rows j) cur probe_is_left))
-                            (block (return #f)))
-                          (= cur (call jr_row_next cur)))))
+                          (var cur = row)
+                          (while (!= (cast cur i64) 0)
+                            (block
+                              (if (! (call jr_push_pair pairs (index rows j) cur probe_is_left))
+                                (block (return #f)))
+                              (= cur (call jr_row_next cur)))))))
                     (block
                       (= offsets [j] (& (+ (index offsets j) (: 1 u64)) mask))
                       (= work [m] j)
@@ -400,6 +424,33 @@
           (= k m)
           (= first #f)
           (if (> k 0) (block (call jr_seek_work table s k)))))
+      (return #t)))
+
+  ;; Pushes (row pointer, -1) for every arena row whose mark is `marked`, in
+  ;; build order: the matched rows of a SEMI join, the unmatched ones of an
+  ;; ANTI join. Such a join builds its left side and emits no probe columns.
+  (fun jr_emit_by_mark ((var arena <ref JoinArena>) (var pairs <ref PairBuffer>)
+                        (var mark_offset i64) (var marked bool)) -> bool
+    (block
+      (var blocks = (field arena Blocks))
+      (var count = (field arena BlockCount))
+      (var row_bytes = (field arena RowBytes))
+      (var b = 0)
+      (while (< b count)
+        (block
+          (var rows_in_block = (field arena BlockRows))
+          (if (== b (- count 1)) (block (= rows_in_block (field arena CurRows))))
+          (var row = (cast (index blocks b) i64))
+          (var end = (+ row (* rows_in_block row_bytes)))
+          (while (< row end)
+            (block
+              (var bytes = (cast row <ptr u8>))
+              (var emit = (!= (index bytes mark_offset) (: 0 u8)))
+              (if (! marked) (block (= emit (! emit))))
+              (if (&& emit (! (call pb_push pairs row -1)))
+                (block (return #f)))
+              (= row (+ row row_bytes))))
+          (= b (+ b 1))))
       (return #t)))
 
   ;; ---- payload: column -> row ----

@@ -109,9 +109,11 @@ std::vector<TOut2> RunSemiAnti(
     TInnerJoinProcessor processor(std::move(kernels), type, buildSide);
 
     int leftFetches = 0;
+    int rightFetches = 0;
     int rightIndex = 0;
     int leftIndex = 0;
     auto right = [&](TRowSet& rowSet) {
+        ++rightFetches;
         if (rightIndex == 0) { rowSet = rightBatch0; ++rightIndex; return EJoinFetchResult::OK; }
         if (rightIndex == 1) { rowSet = rightBatch1; ++rightIndex; return EJoinFetchResult::OK; }
         return EJoinFetchResult::FINISHED;
@@ -129,6 +131,10 @@ std::vector<TOut2> RunSemiAnti(
         if (buildSide == EJoinBuildSide::Right &&
             processor.RequiredInputSide() == EJoinBuildSide::Right) {
             EXPECT_EQ(leftFetches, 0) << "left streamed before the right was built";
+        }
+        if (buildSide == EJoinBuildSide::Left &&
+            processor.RequiredInputSide() == EJoinBuildSide::Left) {
+            EXPECT_EQ(rightFetches, 0) << "right streamed before the left was built";
         }
         auto result = processor.Process(left, right, out);
         if (result == EJoinProcessorResult::NEED_DATA) continue;
@@ -904,18 +910,24 @@ INSTANTIATE_TEST_SUITE_P(
         return info.param == EJoinType::LeftAnti ? "Anti" : "Semi";
     });
 
+// Building the right keys, building the left rows and the symmetric path give
+// the same rows: a left key matched by two right rows comes out once, and each
+// left duplicate of a matched key comes out.
 TEST_P(SemiAntiOrientation, BuildRightMatchesBuildLeft) {
-    EXPECT_EQ(RunSemiAnti(GetParam(), EJoinBuildSide::Right),
-              ExpectedSemiAnti(GetParam()));
-    EXPECT_EQ(RunSemiAnti(GetParam(), EJoinBuildSide::Auto),
-              ExpectedSemiAnti(GetParam()));
+    for (auto buildSide : {EJoinBuildSide::Auto, EJoinBuildSide::Left, EJoinBuildSide::Right}) {
+        SCOPED_TRACE(JoinBuildSideName(buildSide));
+        EXPECT_EQ(RunSemiAnti(GetParam(), buildSide), ExpectedSemiAnti(GetParam()));
+    }
 }
 
+// A NULL key matches nothing: SEMI drops the left rows with one, ANTI keeps
+// them, NOT EXISTS style, whichever side is built.
 TEST_P(SemiAntiOrientation, NullKeysNeverMatchInEitherOrientation) {
     const std::vector<TOut2> expected = GetParam() == EJoinType::LeftAnti
         ? std::vector<TOut2>{{0, 20}, {0, 40}}
         : std::vector<TOut2>{{1, 10}, {1, 30}};
-    for (auto buildSide : {EJoinBuildSide::Auto, EJoinBuildSide::Right}) {
+    for (auto buildSide : {EJoinBuildSide::Auto, EJoinBuildSide::Left, EJoinBuildSide::Right}) {
+        SCOPED_TRACE(JoinBuildSideName(buildSide));
         EXPECT_EQ(RunSemiAnti(GetParam(), buildSide, true), expected);
     }
 }
@@ -924,17 +936,84 @@ TEST_P(SemiAntiOrientation, NullEqualKeysMatchInEitherOrientation) {
     const std::vector<TOut2> expected = GetParam() == EJoinType::LeftSemi
         ? std::vector<TOut2>{{0, 20}, {0, 40}, {1, 10}, {1, 30}}
         : std::vector<TOut2>{};
-    for (auto buildSide : {EJoinBuildSide::Auto, EJoinBuildSide::Right}) {
+    for (auto buildSide : {EJoinBuildSide::Auto, EJoinBuildSide::Left, EJoinBuildSide::Right}) {
+        SCOPED_TRACE(JoinBuildSideName(buildSide));
         EXPECT_EQ(RunSemiAnti(GetParam(), buildSide, true, true), expected);
     }
 }
 
-// Only right-build can stream the left output.
-TEST(ChooseJoinBuildSide, SemiAntiTakesRightBuildOnly) {
+// A residual decides each pair: a left build row is marked only by a right row
+// the residual accepts, so a left row whose key matches only rejected pairs is
+// unmatched. The second right batch matches key 1 again, which a marked row
+// must survive without a second output row.
+TEST_P(SemiAntiOrientation, LeftBuildMarksOnlyPairsTheResidualAccepts) {
+    const auto type = GetParam();
+    std::vector<int64_t> lk = {1, 1, 2, 3}, lv = {10, 20, 30, 40};
+    std::vector<int64_t> rk0 = {1, 2}, rv0 = {10, 30};
+    std::vector<int64_t> rk1 = {1, 1, 4}, rv1 = {30, 30, 0};
+    std::vector<TColumn> lcols, rcols0, rcols1;
+    auto leftType = KeyValSchema("lk", "lv");
+    auto rightType = KeyValSchema("rk", "rv");
+    std::deque<TRowSet> leftBatches = {KeyValBatch(lk.data(), lv.data(), 4, lcols)};
+    std::deque<TRowSet> rightBatches = {
+        KeyValBatch(rk0.data(), rv0.data(), 2, rcols0),
+        KeyValBatch(rk1.data(), rv1.data(), 3, rcols1),
+    };
+
+    auto residual = std::make_shared<TBinaryExpr>(
+        NQumir::TLocation{}, "!="_op,
+        std::make_shared<TIdentExpr>(NQumir::TLocation{}, "lv"),
+        std::make_shared<TIdentExpr>(NQumir::TLocation{}, "rv"));
+    auto spec = NKernel::BuildJoinKernelSpec(
+        static_cast<TStructType&>(*leftType),
+        static_cast<TStructType&>(*rightType),
+        {{"lk", "rk"}}, type, residual);
+    TKernelCompiler compiler;
+    TInnerJoinProcessor processor(compiler.CompileJoin(spec), type, EJoinBuildSide::Left);
+
+    auto fetch = [](std::deque<TRowSet>& batches) {
+        return [&batches](TRowSet& rowSet) {
+            if (batches.empty()) {
+                return EJoinFetchResult::FINISHED;
+            }
+            rowSet = batches.front();
+            batches.pop_front();
+            return EJoinFetchResult::OK;
+        };
+    };
+    auto left = fetch(leftBatches);
+    auto right = fetch(rightBatches);
+    std::vector<TOut2> got;
+    TRowSet out{};
+    for (;;) {
+        auto result = processor.Process(left, right, out);
+        if (result == EJoinProcessorResult::NEED_DATA) continue;
+        if (result == EJoinProcessorResult::FINISHED) break;
+        const auto* c0 = reinterpret_cast<const int64_t*>(out.Columns[0].Data);
+        const auto* c1 = reinterpret_cast<const int64_t*>(out.Columns[1].Data);
+        for (int64_t i = 0; i < out.RowCount; ++i) {
+            got.push_back({c0[i], c1[i]});
+        }
+        Release(&out);
+    }
+    std::sort(got.begin(), got.end());
+    // (1, 10) is rejected by right row (1, 10) and accepted by (1, 30); (2, 30)
+    // meets only (2, 30); (3, 40) has no key match.
+    const std::vector<TOut2> expected = type == EJoinType::LeftSemi
+        ? std::vector<TOut2>{{1, 10}, {1, 20}}
+        : std::vector<TOut2>{{2, 30}, {3, 40}};
+    EXPECT_EQ(got, expected);
+}
+
+// Every join type has the same three options: build the left input, build the
+// right one, or run symmetric. SEMI/ANTI builds the side estimated
+// JoinAsymmetryRatio times smaller, like an inner join.
+TEST(ChooseJoinBuildSide, SemiAntiBuildsTheSmallerSide) {
     const uint64_t small = 1000;
     const uint64_t big = static_cast<uint64_t>(std::ceil(small * JoinAsymmetryRatio)) + 1;
 
     for (auto type : {EJoinType::LeftSemi, EJoinType::LeftAnti}) {
+        SCOPED_TRACE(JoinTypeName(type));
         auto join = JoinOfType(type);
         ASSERT_TRUE(join);
         auto* j = static_cast<TJoinOperator*>(join.get());
@@ -945,24 +1024,37 @@ TEST(ChooseJoinBuildSide, SemiAntiTakesRightBuildOnly) {
 
         j->Left()->Stats_ = Rows(small);
         j->Right()->Stats_ = Rows(big);
+        EXPECT_EQ(ChooseJoinBuildSide(*j, LegacyTable), EJoinBuildSide::Left);
+
+        j->Left()->Stats_ = Rows(small);
+        j->Right()->Stats_ = Rows(small * 2);
+        EXPECT_EQ(ChooseJoinBuildSide(*j, LegacyTable), EJoinBuildSide::Auto);
+
+        j->Right()->Stats_ = nullptr;
         EXPECT_EQ(ChooseJoinBuildSide(*j, LegacyTable), EJoinBuildSide::Auto);
     }
 }
 
-// A residual predicate needs right rows, which key-only build discards.
-TEST(ChooseJoinBuildSide, SemiAntiWithResidualStaysAuto) {
-    auto join = JoinOfType(EJoinType::LeftSemi);
-    ASSERT_TRUE(join);
-    auto* j = static_cast<TJoinOperator*>(join.get());
-    j->Left()->Stats_ = Rows(1000000);
-    j->Right()->Stats_ = Rows(1);
-    ASSERT_EQ(ChooseJoinBuildSide(*j, LegacyTable), EJoinBuildSide::Right);
+// A residual needs right rows, which the key-only right table discards, so a
+// residual SEMI/ANTI builds its preserved left side whatever the estimates.
+TEST(ChooseJoinBuildSide, SemiAntiWithResidualBuildsLeft) {
+    for (auto type : {EJoinType::LeftSemi, EJoinType::LeftAnti}) {
+        SCOPED_TRACE(JoinTypeName(type));
+        auto join = JoinOfType(type);
+        ASSERT_TRUE(join);
+        auto* j = static_cast<TJoinOperator*>(join.get());
+        j->Left()->Stats_ = Rows(1000000);
+        j->Right()->Stats_ = Rows(1);
+        ASSERT_EQ(ChooseJoinBuildSide(*j, LegacyTable), EJoinBuildSide::Right);
 
-    j->MutableFilter() = std::make_shared<TBinaryExpr>(
-        NQumir::TLocation{}, TOperator("!="),
-        std::make_shared<TIdentExpr>(NQumir::TLocation{}, "lv"),
-        std::make_shared<TIdentExpr>(NQumir::TLocation{}, "rv"));
-    EXPECT_EQ(ChooseJoinBuildSide(*j, LegacyTable), EJoinBuildSide::Auto);
+        j->MutableFilter() = std::make_shared<TBinaryExpr>(
+            NQumir::TLocation{}, "!="_op,
+            std::make_shared<TIdentExpr>(NQumir::TLocation{}, "lv"),
+            std::make_shared<TIdentExpr>(NQumir::TLocation{}, "rv"));
+        EXPECT_EQ(ChooseJoinBuildSide(*j, LegacyTable), EJoinBuildSide::Left);
+        j->Left()->Stats_ = nullptr;
+        EXPECT_EQ(ChooseJoinBuildSide(*j, LegacyTable), EJoinBuildSide::Left);
+    }
 }
 
 // Decision reads JoinAsymmetryRatio so it tracks the constant rather than a

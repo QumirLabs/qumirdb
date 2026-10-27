@@ -203,8 +203,9 @@ enum class EJoinKernelOp : int64_t {
     StreamRight = 4,
     Finalize = 5,
     Destroy = 6,
-    // LEFT/RIGHT join that streamed against its preserved side: emit the build
-    // rows the stream probes left unmarked.
+    // A join that streamed against its marked build side (the preserved side of
+    // a LEFT/RIGHT join, the left side of a SEMI/ANTI join): emit the build
+    // rows the stream probes left unmarked, or the marked ones of a SEMI join.
     FinalizeStream = 7,
 };
 
@@ -246,8 +247,7 @@ struct TJoinKernels {
     // jt_dispatch(left, right, batch, batchIdx, pairs, leftStore, rightStore,
     //             arena, leftKeyColumns, rightKeyColumns, arg, op) -> bool.
     // The closure binds the key columns and a string arena for the call.
-    // Init uses arg as initial capacity. Residual SEMI/ANTI Finalize uses arg
-    // as left-store batch count so the kernel can scan selected left rows.
+    // Init uses arg as initial capacity.
     // UpdateRight/Finalize are specialized by the compiled join type, so host
     // code does not select jt_insert_key_only vs jt_process_right or
     // left/right outer finalization itself.
@@ -291,21 +291,34 @@ struct TCrossJoinKernels {
 };
 
 enum class ERowJoinKernelOp : int64_t {
+    // Initialize `arena`.
     Init = 0,
-    // Append the selected rows of `batch` (the build side) to the arena.
+    // Append the selected rows of `batch` (the build side) with a valid key to
+    // the arena.
     Append = 1,
     // Build the pointer table over the arena; no Append may follow.
     Build = 2,
     // Probe `batch` (the probe side) and emit pairs of (stream row id, row
     // pointer) in (left, right) order. The row pointer of an unmatched row of
-    // an outer join is null.
+    // an outer join is null. A SEMI/ANTI join marks the build rows it matches
+    // instead and emits nothing.
     Probe = 3,
+    // Free `arena` and the table, scratch and pair buffers. A buffer already
+    // freed is skipped, so a join with two arenas destroys each.
     Destroy = 4,
+    // ANTI only: append the selected rows of `batch` whose key is NULL to
+    // `arena`, which no table indexes.
+    AppendNullKeys = 5,
+    // SEMI/ANTI only: emit (row pointer, -1) for every row of `arena` that the
+    // join outputs, the marked rows of a SEMI join or the unmarked ones of an
+    // ANTI join.
+    EmitByMark = 6,
 };
 
 // jr_dispatch(arena, table, scratch, pairs, batch, key_columns, op) -> bool.
-// The bound closure passes the build-side key columns for Append and the
-// probe-side key columns for Probe; the other operations ignore `batch`.
+// The bound closure passes the build-side key columns for Append and
+// AppendNullKeys and the probe-side key columns for Probe; the other
+// operations ignore `batch`.
 using TRowJoinDispatch = std::function<bool(
     void* arena,
     void* table,
@@ -324,9 +337,9 @@ using TRowJoinMaterialize = std::function<int64_t(
     int64_t limit,
     TRowSet* out)>;
 
-// The compiled kernels of an inner or outer equi-join over the row join table
-// (kernel/join/join_rows.oz). The caller owns zero-initialized JoinArena,
-// JoinTable, JoinScratch and PairBuffer buffers of the sizes below.
+// The compiled kernels of an inner, outer, semi or anti equi-join over the row
+// join table (kernel/join/join_rows.oz). The caller owns zero-initialized
+// JoinArena, JoinTable, JoinScratch and PairBuffer buffers of the sizes below.
 struct TRowJoinKernels {
     TRowJoinDispatch Dispatch;
     TRowJoinMaterialize Materialize;
@@ -336,6 +349,12 @@ struct TRowJoinKernels {
     // The instrumentation measure kernel over the probe schema: sizes a held
     // probe batch the way retained_input_bytes does, with instrumentation off.
     TRowSetInstrumentation ProbeMeasure;
+    // The build side is the left side of a SEMI/ANTI join: the probe marks its
+    // rows, and EmitByMark emits the output once the probe side has ended.
+    bool EmitsByMark = false;
+    // An ANTI join keeps its NULL-key build rows in a second arena
+    // (AppendNullKeys), whose rows EmitByMark emits as well.
+    bool KeepsNullKeyRows = false;
 };
 
 struct TJoinHashKernels {
@@ -493,9 +512,10 @@ public:
 
     // Compiles the row join table kernels for an equi-join without a residual
     // whose build side is fixed to the left (buildIsLeft) or right input; the
-    // other input is probed as a stream. The join is inner, or LEFT / RIGHT
-    // with its null-supplying side built: the preserved probe rows that match
-    // nothing are emitted with NULLs for the build side.
+    // other input is probed as a stream. The join is inner; LEFT / RIGHT with
+    // its null-supplying side built, whose preserved probe rows that match
+    // nothing are emitted with NULLs for the build side; or SEMI / ANTI with
+    // its left side built, whose rows the probe marks.
     TRowJoinKernels CompileRowJoin(
         const NKernel::TOperatorKernelSpec& spec,
         bool buildIsLeft);

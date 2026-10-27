@@ -6,8 +6,9 @@ join modes.
 ## Overview
 
 QDB implements equi-joins with a JIT-compiled hash join. An inner join with a
-fixed build side, and a LEFT or RIGHT join that builds its null-supplying side,
-use the row join table, an arena of build rows behind a salted pointer table
+fixed build side, a LEFT or RIGHT join that builds its null-supplying side, and
+a semi or anti join without a residual that builds its left side use the row
+join table, an arena of build rows behind a salted pointer table
 ([wiki](https://github.com/QumirLabs/qumirdb/wiki/Join-implementation#row-join-table));
 the other forms use the symmetric hash join described here. The runtime
 owns row storage, hash table headers, pair buffers, and output materialization.
@@ -32,19 +33,23 @@ residual builds the smaller input whenever both inputs have estimates, the
 classic choice of build input for a hash join ([Graefe, "Query Evaluation
 Techniques for Large Databases", ACM Computing Surveys 25(2), 1993](https://doi.org/10.1145/152610.152611)):
 storing one input and streaming the other costs less than storing both, and the
-row join table has no adaptive mode. While the build input has no batch ready, the row join keeps
-pulling probe batches and holds them until the table exists, so a slow build
-input does not stall the probe pipeline. The hold is bounded per task by
-`--row-join-probe-hold-bytes` (16 MiB by default, 0 disables it): at the
+row join table has no adaptive mode. While the build input has no batch ready,
+the row join keeps pulling probe batches and holds them until the table exists,
+so a slow build input does not stall the probe pipeline. The hold is bounded per
+task by `--row-join-probe-hold-bytes` (16 MiB by default, 0 disables it): at the
 budget the join asks for the build side only, as it did before the hold. A
 batch is taken while the held bytes are below the budget, so the batch that
 crosses it is still accepted (a batch larger than the budget too, when nothing
-is held) and the peak can exceed the budget by one batch per task. A residual join, which runs on the
-symmetric table, and the legacy table (`--join-table legacy`, the browser) fix
-an inner build side only at a 10:1 asymmetry. LEFT/RIGHT outer joins build
-whichever input is estimated smaller. A runtime filter may also require
-completing its build input first. The build side finishes before the probe
-stream starts; poor estimates can still affect work and memory.
+is held) and the peak can exceed the budget by one batch per task. A residual
+join, which runs on the symmetric table, and the legacy table (`--join-table
+legacy`, the browser) fix an inner build side only at a 10:1 asymmetry.
+LEFT/RIGHT outer joins build whichever input is estimated smaller. SEMI/ANTI
+joins choose among the right side (key-only table), the left side and the
+symmetric path by the same 10:1 margin; a left build side stores the left rows,
+marks the ones the right stream matches and emits the marked (SEMI) or unmarked
+(ANTI) rows when the stream ends. A runtime filter may also require completing
+its build input first. The build side finishes before the probe stream starts;
+poor estimates can still affect work and memory.
 
 ## Supported join forms
 
@@ -53,8 +58,8 @@ Current production support:
 | Join type | Status | Notes |
 |---|---|---|
 | `Inner` | Supported | Adaptive symmetric/probe-only hash join |
-| `LeftSemi` | Supported | Left-preserving, emits left columns only |
-| `LeftAnti` | Supported | Left-preserving, emits left columns only |
+| `LeftSemi` | Supported | Left-preserving, emits left columns only; builds the right keys, the left rows with matched marks, or both |
+| `LeftAnti` | Supported | Same as `LeftSemi`, emitting the unmatched left rows |
 | `Left` | Supported | Null-supplying build that pads unmatched stream rows, or preserved build with matched marks; symmetric fallback |
 | `Right` | Supported | Same as `Left`, with the sides swapped |
 | `Full` | Supported | Symmetric path plus unmatched scans on both sides; matched marks with a residual |
@@ -63,9 +68,10 @@ Current production support:
 | No equi-keys | Supported except `RightSemi` / `RightAnti` / `LeftMark` | Nested-loop `TCrossJoinProcessor` path |
 
 Residual predicates are supported for every join type above except `LeftMark`,
-which still rejects a residual. A `Left` or `Right` join with a residual always
-takes the streaming path with its preserved side as the build side, because the
-row join table evaluates no residual. A build row is marked only after the
+which still rejects a residual. A `Left`, `Right`, `LeftSemi` or `LeftAnti`
+join with a residual always takes the streaming path with its preserved side as
+the build side, because the row join table and the key-only right table of a
+semi or anti join evaluate no residual. A build row is marked only after the
 residual accepted a pair, so a row whose key matches were all rejected is
 emitted as unmatched.
 The general outer path finds unmatched rows by key alone and cannot run a
@@ -165,6 +171,13 @@ sides. Unlike inner execution, it cannot drop the remaining input after one
 side ends, so the outer build-side rule needs no large asymmetry margin.
 Unknown estimates keep the symmetric path, and so does FULL.
 
+Semi and anti joins have the same three options: build the right input, build
+the left one, or run symmetric. Lowering builds the input estimated
+`JoinAsymmetryRatio` (10) times smaller, as for an inner join, and runs the
+symmetric path otherwise or without estimates. A residual requires the left
+build side, and a runtime filter, which a semi join publishes from its right
+keys, requires the right one.
+
 ## Execution by join type
 
 ### Inner
@@ -173,31 +186,46 @@ Unknown estimates keep the symmetric path, and so does FULL.
 through the generated output materializer. Stream/stored matches are materialized
 immediately into `ReadyOutput_`.
 
-### LeftSemi / LeftAnti without residual
+### LeftSemi / LeftAnti
 
-The non-residual path is blocking but memory-efficient:
+A semi or anti join emits each left row at most once, so a right row counts
+only through its key, or through the pairs a residual accepts. It has three
+plans:
 
-1. consume all left batches into `LeftRows_` and `LeftTable_`;
-2. consume right batches through `InsertKeyOnly` into `RightTable_`, releasing
-   each right batch immediately;
-3. call `FinalizeAntiSemi(LeftTable_, RightTable_, pairs)`;
-4. emit left rows from the resulting pair buffer.
+- Building the right side inserts the distinct right keys into the right table
+  through `InsertKeyOnly` and releases each right batch at once. Every left
+  stream row then probes the key set and is emitted at once when it has a match
+  (semi) or none (anti). No left row is stored.
+- Building the left side stores and hashes the left rows. Every right stream
+  row probes them and marks each left row it matches; the right batch is
+  released at once, and nothing is emitted while the stream runs. When the
+  stream ends, one scan of the build rows emits the marked ones (semi) or the
+  unmarked ones (anti). This plan suits a small outer query against a large
+  subquery: the build stays cache-resident, and the large input is probed but
+  never stored or inserted into a table.
+- The symmetric plan stores the left rows first, then the distinct right keys,
+  and its finalize looks each left key up in the right key set.
 
-The right side is never retained because only key existence is needed.
+A NULL key matches nothing, on either side: semi drops a left row with one and
+anti emits it, with the semantics of `NOT EXISTS`. A left build side keeps such
+rows unmarked, so its emit scan decides them with the others.
 
-### LeftSemi / LeftAnti with residual
+The build-left plan emits a semi join's rows at the stream end rather than at
+a row's first match. The probe then only sets marks for both types, and one
+scan emits the rows whose mark state the type selects. Marks are set once per
+key without a residual: the first match marks every left row of the key, so a
+key that the stream matches again costs one mark check. With a residual the
+probe evaluates each candidate pair and marks a left row only when the residual
+accepts it, as a streaming outer join marks its preserved build rows; a row
+already marked needs no further residual call. A residual needs right rows,
+which the key-only right table lacks, so a semi or anti join with a residual
+always builds its left side.
 
-Residual semi/anti cannot use `InsertKeyOnly`, because the residual predicate
-may reference right-side non-key columns. The blocking path (alongside supported build-first streaming paths):
-
-1. consumes all left batches into `LeftRows_` and `LeftTable_`;
-2. streams every right batch through `ProbeRightStream`;
-3. the generated residual predicate reads left rows from `LeftRows_` and right
-   rows from the transient stream batch;
-4. filtered pairs contribute their left row ids to `MatchedLeftIds_`;
-5. the executor emits each left row once based on membership.
-
-The right side is not retained and is not inserted into `RightTable_`.
+On the symmetric table a mark is the sign bit of the stored row id, as for
+outer joins. The row join table gives each build row a mark byte. Its arena
+holds only rows with a valid key, which the pointer table indexes; an anti join
+keeps its NULL-key rows in a second arena that no table indexes and emits them
+with the unmarked ones.
 
 ### Left / Right outer
 

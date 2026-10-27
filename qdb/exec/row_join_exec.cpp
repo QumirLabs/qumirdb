@@ -40,6 +40,9 @@ TRowJoinProcessor::~TRowJoinProcessor() {
     if (Initialized_) {
         TRowSet none{};
         Dispatch(ERowJoinKernelOp::Destroy, &none);
+        if (Kernels_.KeepsNullKeyRows) {
+            Dispatch(ERowJoinKernelOp::Destroy, &none, NullKeyArena_);
+        }
     }
     for (auto& batch : BuildBatches_) {
         Release(&batch);
@@ -74,7 +77,8 @@ void TRowJoinProcessor::ObserveInstrumentation() {
             static_cast<uint64_t>(Table_.Keys),
             static_cast<uint64_t>(Table_.Capacity),
             static_cast<uint64_t>(Table_.Capacity) * sizeof(uint64_t)
-                + static_cast<uint64_t>(Arena_.Rows) * static_cast<uint64_t>(Arena_.RowBytes));
+                + static_cast<uint64_t>(Arena_.Rows + NullKeyArena_.Rows)
+                    * static_cast<uint64_t>(Arena_.RowBytes));
     }
 }
 
@@ -84,13 +88,20 @@ void TRowJoinProcessor::EnsureInit() {
     }
     Initialized_ = true;
     TRowSet none{};
-    if (!Dispatch(ERowJoinKernelOp::Init, &none)) {
+    if (!Dispatch(ERowJoinKernelOp::Init, &none)
+        || (Kernels_.KeepsNullKeyRows
+            && !Dispatch(ERowJoinKernelOp::Init, &none, NullKeyArena_)))
+    {
         throw std::runtime_error("row join initialization failed");
     }
 }
 
 bool TRowJoinProcessor::Dispatch(ERowJoinKernelOp op, TRowSet* batch) {
-    return Kernels_.Dispatch(&Arena_, &Table_, &Scratch_, &PairBuffer_, batch, RowJoinOp(op));
+    return Dispatch(op, batch, Arena_);
+}
+
+bool TRowJoinProcessor::Dispatch(ERowJoinKernelOp op, TRowSet* batch, TArenaState& arena) {
+    return Kernels_.Dispatch(&arena, &Table_, &Scratch_, &PairBuffer_, batch, RowJoinOp(op));
 }
 
 bool TRowJoinProcessor::DrainReadyOutput(TRowSet& rowSet) {
@@ -117,7 +128,10 @@ bool TRowJoinProcessor::PullBuildBatch(const TFetch& build) {
         ObserveInstrumentation();
         return true;
     }
-    if (!Dispatch(ERowJoinKernelOp::Append, &batch)) {
+    if (!Dispatch(ERowJoinKernelOp::Append, &batch)
+        || (Kernels_.KeepsNullKeyRows
+            && !Dispatch(ERowJoinKernelOp::AppendNullKeys, &batch, NullKeyArena_)))
+    {
         Release(&batch);
         throw std::runtime_error("row join append failed");
     }
@@ -179,6 +193,38 @@ void TRowJoinProcessor::ProbeBatch(TRowSet& batch) {
     Release(&batch);
 }
 
+// The output of a SEMI/ANTI join is known only once the probe side has ended.
+// It is materialized from the pair buffer one batch per call, as the build
+// rows stay in the arena until Destroy.
+EJoinProcessorResult TRowJoinProcessor::Finish(TRowSet& output) {
+    if (!Kernels_.EmitsByMark) {
+        return EJoinProcessorResult::FINISHED;
+    }
+    TRowSet none{};
+    if (!MarksEmitted_) {
+        if (!Dispatch(ERowJoinKernelOp::EmitByMark, &none)
+            || (Kernels_.KeepsNullKeyRows
+                && !Dispatch(ERowJoinKernelOp::EmitByMark, &none, NullKeyArena_)))
+        {
+            throw std::runtime_error("row join emit by mark failed");
+        }
+        MarksEmitted_ = true;
+    }
+    if (EmitCursor_ >= PairBuffer_.Count) {
+        return EJoinProcessorResult::FINISHED;
+    }
+    TRowSet out{};
+    const int64_t produced = Kernels_.Materialize(
+        &PairBuffer_, &none, EmitCursor_, RowJoinOutputBatchRows, &out);
+    if (produced <= 0) {
+        throw std::runtime_error("row join materialize failed");
+    }
+    out.Destroy = DestroyKernelOwnedRowSet;
+    EmitCursor_ += produced;
+    output = out;
+    return EJoinProcessorResult::OK;
+}
+
 EJoinProcessorResult TRowJoinProcessor::Process(
     const TFetch& left,
     const TFetch& right,
@@ -216,7 +262,7 @@ EJoinProcessorResult TRowJoinProcessor::Process(
         }
     }
     if (ProbeDone_) {
-        return EJoinProcessorResult::FINISHED;
+        return Finish(output);
     }
     if (!PullProbeBatch(probe)) {
         return EJoinProcessorResult::NEED_DATA;
@@ -224,7 +270,7 @@ EJoinProcessorResult TRowJoinProcessor::Process(
     if (DrainReadyOutput(output)) {
         return EJoinProcessorResult::OK;
     }
-    return ProbeDone_ ? EJoinProcessorResult::FINISHED : EJoinProcessorResult::NEED_DATA;
+    return ProbeDone_ ? Finish(output) : EJoinProcessorResult::NEED_DATA;
 }
 
 EJoinBuildSide TRowJoinProcessor::RequiredInputSide() const {

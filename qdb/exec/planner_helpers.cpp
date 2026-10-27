@@ -248,7 +248,9 @@ bool RowJoinTableServes(
     const auto type = join.JoinType();
     const bool rowTableType = type == EJoinType::Inner
         || (type == EJoinType::Left && buildSide == EJoinBuildSide::Right)
-        || (type == EJoinType::Right && buildSide == EJoinBuildSide::Left);
+        || (type == EJoinType::Right && buildSide == EJoinBuildSide::Left)
+        || ((type == EJoinType::LeftSemi || type == EJoinType::LeftAnti)
+            && buildSide == EJoinBuildSide::Left);
     return table == NScheduler::EJoinTableKind::Row
         && rowTableType
         && !join.Filter()
@@ -271,21 +273,19 @@ EJoinBuildSide ChooseJoinBuildSide(
             ? EJoinBuildSide::Left
             : EJoinBuildSide::Right;
     }
-    // A residual predicate needs right rows, not just key membership.
-    const bool semiAnti =
-        type == EJoinType::LeftSemi || type == EJoinType::LeftAnti;
-    const bool streamable = semiAnti && !join.Filter();
     const bool outer = type == EJoinType::Left || type == EJoinType::Right;
-    if ((type != EJoinType::Inner && !outer && !streamable)
-        || join.Keys().empty()) {
+    const bool semiAnti = type == EJoinType::LeftSemi || type == EJoinType::LeftAnti;
+    if ((type != EJoinType::Inner && !outer && !semiAnti) || join.Keys().empty()) {
         return EJoinBuildSide::Auto;
     }
-    // The general outer path finds unmatched rows by key alone, and the row
-    // join table runs no residual. Only the row marks of a preserved build
-    // side know that a residual rejected a key match.
-    if (outer && join.Filter()) {
-        return type == EJoinType::Left
-            ? EJoinBuildSide::Left : EJoinBuildSide::Right;
+    // A residual decides each pair, not each key. Only the row marks of a
+    // preserved build side know that a residual rejected every key match: the
+    // general outer path and the key-only right table of SEMI/ANTI decide by
+    // key alone, and the row join table runs no residual.
+    if (join.Filter() && type != EJoinType::Inner) {
+        return type == EJoinType::Right
+            ? EJoinBuildSide::Right
+            : EJoinBuildSide::Left;
     }
     auto leftStats = join.Left()->Stats_;
     auto rightStats = join.Right()->Stats_;
@@ -293,39 +293,46 @@ EJoinBuildSide ChooseJoinBuildSide(
         || leftStats->RowCount == 0 || rightStats->RowCount == 0) {
         return EJoinBuildSide::Auto;
     }
+    // Every join type above can build either input and stream the other, or
+    // run symmetric. Building one input stores and hashes it alone but makes
+    // the other wait for it. The join builds the input estimated smaller once
+    // it is `margin` times smaller, and runs symmetric otherwise.
+    //
+    // The symmetric outer path stores both inputs and cannot drop either one
+    // when the other ends, so an outer join builds its smaller input at any
+    // ratio. A preserved build side marks the rows the stream matched and emits
+    // the unmarked ones when the stream ends; a null-supplying one pads each
+    // unmatched stream row at once.
+    //
+    // The row join table has no adaptive mode: it needs a fixed build side, so
+    // an inner join it serves builds its smaller input at any ratio. The
+    // symmetric inner path (a residual, or the legacy table) stops storing the
+    // other input once one ends, and a fixed build side there makes the probe
+    // input wait, so it fixes a build side only at JoinAsymmetryRatio. SEMI/ANTI
+    // uses the same margin. Its symmetric path stores the left rows and the
+    // distinct right keys; a right build side stores the right keys alone, and
+    // a left build side stores the left rows, marks the ones the right stream
+    // matches and emits the marked (SEMI) or unmarked (ANTI) ones at its end.
+    const bool rowTableInner = type == EJoinType::Inner
+        && RowJoinTableServes(join, table, EJoinBuildSide::Left);
+    const double margin = outer || rowTableInner ? 1.0 : JoinAsymmetryRatio;
     const double l = static_cast<double>(leftStats->RowCount);
     const double r = static_cast<double>(rightStats->RowCount);
-    if (outer) {
-        // An outer join builds its smaller input and streams the other. A
-        // preserved build side marks the rows the stream matched and emits the
-        // unmarked ones when the stream ends; a null-supplying one pads each
-        // unmatched stream row at once. Either way the join stores and hashes
-        // one input, which beats the general path that reads both at once
-        // but stores both, so no asymmetry margin applies.
-        if (type == EJoinType::Left) {
-            return l <= r
-                ? EJoinBuildSide::Left
-                : EJoinBuildSide::Right;
-        }
-        return r <= l
-            ? EJoinBuildSide::Right
-            : EJoinBuildSide::Left;
+    auto rows = [&](EJoinBuildSide side) {
+        return side == EJoinBuildSide::Left ? l : r;
+    };
+    // The side checked first wins a tie: the preserved side of an outer join.
+    const auto first = type == EJoinType::Left
+        ? EJoinBuildSide::Left
+        : EJoinBuildSide::Right;
+    const auto second = first == EJoinBuildSide::Left
+        ? EJoinBuildSide::Right
+        : EJoinBuildSide::Left;
+    if (rows(first) * margin <= rows(second)) {
+        return first;
     }
-    // The row join table has no adaptive mode: it needs a fixed build side,
-    // so it builds the smaller input whatever the ratio. Joins on the
-    // symmetric table (a residual, or the legacy table) keep both inputs
-    // growing until one is clearly smaller, because a fixed build side there
-    // makes the probe input wait for it.
-    if (type == EJoinType::Inner
-        && RowJoinTableServes(join, table, EJoinBuildSide::Left))
-    {
-        return r <= l ? EJoinBuildSide::Right : EJoinBuildSide::Left;
-    }
-    if (r * JoinAsymmetryRatio <= l) {
-        return EJoinBuildSide::Right;
-    }
-    if (!semiAnti && l * JoinAsymmetryRatio <= r) {
-        return EJoinBuildSide::Left;
+    if (rows(second) * margin <= rows(first)) {
+        return second;
     }
     return EJoinBuildSide::Auto;
 }

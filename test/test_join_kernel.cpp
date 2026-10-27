@@ -3603,8 +3603,187 @@ TEST(RowJoinProcessor, LeftOuterEmptySides) {
     EXPECT_TRUE(RunRowJoin(spec, EJoinBuildSide::Right, {}, {build}).empty());
 }
 
-// The row join table has no matched marks and runs no residual, so it cannot
-// build the preserved side of an outer join or decide a residual's matches.
+namespace {
+
+using TSemiAntiRow = std::tuple<std::optional<int64_t>, std::string, std::optional<int64_t>>;
+
+// Collects (lk, lname, lv) from the output batches of a SEMI/ANTI row join,
+// which carry the left columns only, and releases them.
+std::vector<TSemiAntiRow> SemiAntiRows(std::vector<TRowSet> outputs) {
+    std::vector<TSemiAntiRow> got;
+    for (auto& out : outputs) {
+        EXPECT_EQ(out.ColumnCount, 3);
+        for (int64_t i = 0; i < out.RowCount; ++i) {
+            got.emplace_back(
+                I64At(out.Columns[0], i),
+                StringAt(out.Columns[1], i),
+                I64At(out.Columns[2], i));
+        }
+        Release(&out);
+    }
+    std::sort(got.begin(), got.end());
+    return got;
+}
+
+} // namespace
+
+// A SEMI/ANTI join that builds its left side marks the build rows the probe
+// matches and emits them once the probe side ends: SEMI the marked rows, ANTI
+// the others. Key 1 has two build rows and four probe rows in two batches, and
+// each build row comes out once. A NULL key matches nothing, on either side:
+// ANTI emits its build rows, NOT EXISTS style, with their string and nullable
+// payloads. Unselected rows of both sides take no part.
+TEST(RowJoinProcessor, SemiAntiBuildLeftEmitsEachLeftRowOnce) {
+    using namespace NQumir::NAst;
+    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
+    auto nullableI64 = std::make_shared<TNullable>(i64);
+    TStructType leftType(
+        {{"lk", nullableI64}, {"lname", std::make_shared<TStringType>()}, {"lv", nullableI64}});
+    TStructType rightType({{"rk", nullableI64}});
+
+    // Build batch 1: (1, "a", 10), (2, "bb", NULL), (NULL, "n", 30), (1, "c", 40).
+    TNullableColumn<int64_t> lk1({1, 2, std::nullopt, 1});
+    TStringColumn lname1({"a", "bb", "n", "c"});
+    TNullableColumn<int64_t> lv1({10, std::nullopt, 30, 40});
+    std::vector<TColumn> lcols1 = {lk1.Column(), lname1.Column(), lv1.Column()};
+    TRowSet build1{.Columns = lcols1.data(), .ColumnCount = 3, .RowCount = 4, .RefCount = 1};
+    // Build batch 2: (5, "e", 50), (7, "z", 70) unselected, (NULL, "m", NULL), (2, "d", 80).
+    TNullableColumn<int64_t> lk2({5, 7, std::nullopt, 2});
+    TStringColumn lname2({"e", "z", "m", "d"});
+    TNullableColumn<int64_t> lv2({50, 70, std::nullopt, 80});
+    std::vector<uint8_t> selection2 = {1, 0, 1, 1};
+    std::vector<TColumn> lcols2 = {lk2.Column(), lname2.Column(), lv2.Column()};
+    TRowSet build2{
+        .Columns = lcols2.data(),
+        .ColumnCount = 3,
+        .RowCount = 4,
+        .Selection = selection2.data(),
+        .RefCount = 1,
+    };
+
+    // Probe batch 1: 1, 1, NULL, 9. Probe batch 2: 1, 2, 5 (unselected), 1, NULL.
+    TNullableColumn<int64_t> rk1({1, 1, std::nullopt, 9});
+    std::vector<TColumn> rcols1 = {rk1.Column()};
+    TRowSet probe1{.Columns = rcols1.data(), .ColumnCount = 1, .RowCount = 4, .RefCount = 1};
+    TNullableColumn<int64_t> rk2({1, 2, 5, 1, std::nullopt});
+    std::vector<uint8_t> probeSelection2 = {1, 1, 0, 1, 1};
+    std::vector<TColumn> rcols2 = {rk2.Column()};
+    TRowSet probe2{
+        .Columns = rcols2.data(),
+        .ColumnCount = 1,
+        .RowCount = 5,
+        .Selection = probeSelection2.data(),
+        .RefCount = 1,
+    };
+
+    const auto null = std::nullopt;
+    for (auto type : {EJoinType::LeftSemi, EJoinType::LeftAnti}) {
+        SCOPED_TRACE(JoinTypeName(type));
+        for (auto* batch : {&build1, &build2, &probe1, &probe2}) {
+            batch->RefCount = 1;
+        }
+        auto spec = NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}}, type);
+        auto got = SemiAntiRows(
+            RunRowJoin(spec, EJoinBuildSide::Left, {build1, build2}, {probe1, probe2}));
+        std::vector<TSemiAntiRow> expected = type == EJoinType::LeftSemi
+            ? std::vector<TSemiAntiRow>{{1, "a", 10}, {1, "c", 40}, {2, "bb", null}, {2, "d", 80}}
+            : std::vector<TSemiAntiRow>{{null, "m", null}, {null, "n", 30}, {5, "e", 50}};
+        std::sort(expected.begin(), expected.end());
+        EXPECT_EQ(got, expected);
+    }
+}
+
+// Without probe rows SEMI emits nothing and ANTI every selected build row,
+// NULL keys included; without build rows neither emits anything.
+TEST(RowJoinProcessor, SemiAntiBuildLeftEmptySides) {
+    using namespace NQumir::NAst;
+    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
+    auto nullableI64 = std::make_shared<TNullable>(i64);
+    TStructType leftType(
+        {{"lk", nullableI64}, {"lname", std::make_shared<TStringType>()}, {"lv", nullableI64}});
+    TStructType rightType({{"rk", nullableI64}});
+
+    TNullableColumn<int64_t> lk({4, std::nullopt, 4});
+    TStringColumn lname({"x", "y", "z"});
+    TNullableColumn<int64_t> lv({1, 2, std::nullopt});
+    std::vector<TColumn> lcols = {lk.Column(), lname.Column(), lv.Column()};
+    TRowSet build{.Columns = lcols.data(), .ColumnCount = 3, .RowCount = 3, .RefCount = 1};
+    TNullableColumn<int64_t> rk({4});
+    std::vector<TColumn> rcols = {rk.Column()};
+    TRowSet probe{.Columns = rcols.data(), .ColumnCount = 1, .RowCount = 1, .RefCount = 1};
+
+    const auto null = std::nullopt;
+    for (auto type : {EJoinType::LeftSemi, EJoinType::LeftAnti}) {
+        SCOPED_TRACE(JoinTypeName(type));
+        auto spec = NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}}, type);
+        build.RefCount = 1;
+        const auto got = SemiAntiRows(RunRowJoin(spec, EJoinBuildSide::Left, {build}, {}));
+        const std::vector<TSemiAntiRow> expected = type == EJoinType::LeftSemi
+            ? std::vector<TSemiAntiRow>{}
+            : std::vector<TSemiAntiRow>{{null, "y", 2}, {4, "x", 1}, {4, "z", null}};
+        EXPECT_EQ(got, expected);
+        probe.RefCount = 1;
+        EXPECT_TRUE(RunRowJoin(spec, EJoinBuildSide::Left, {}, {probe}).empty());
+    }
+}
+
+// 40,000 unique dense keys fill three arena blocks, and the emit scan must
+// read the full ones and the partly filled last one. Every third key is probed
+// three times, in batches that each match it once, so a SEMI row is emitted
+// once however often its key is matched.
+TEST(RowJoinProcessor, SemiAntiBuildLeftManyBlocksUniqueKeys) {
+    using namespace NQumir::NAst;
+    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
+    TStructType leftType({{"lk", i64}, {"lv", i64}});
+    TStructType rightType({{"rk", i64}});
+
+    constexpr int64_t buildRows = 40000;
+    std::vector<int64_t> lk(buildRows), lv(buildRows);
+    for (int64_t i = 0; i < buildRows; ++i) {
+        lk[i] = i;
+        lv[i] = i * 10;
+    }
+    std::vector<TColumn> lcols = {
+        TColumn{.Data = reinterpret_cast<char*>(lk.data())},
+        TColumn{.Data = reinterpret_cast<char*>(lv.data())},
+    };
+    TRowSet build{.Columns = lcols.data(), .ColumnCount = 2, .RowCount = buildRows, .RefCount = 1};
+    std::vector<int64_t> rk;
+    for (int64_t i = 0; i < buildRows; i += 3) {
+        rk.push_back(i);
+    }
+    const auto probeRows = static_cast<int64_t>(rk.size());
+    std::vector<TColumn> rcols = {TColumn{.Data = reinterpret_cast<char*>(rk.data())}};
+
+    for (auto type : {EJoinType::LeftSemi, EJoinType::LeftAnti}) {
+        SCOPED_TRACE(JoinTypeName(type));
+        build.RefCount = 1;
+        std::vector<TRowSet> probes(3, TRowSet{
+            .Columns = rcols.data(), .ColumnCount = 1, .RowCount = probeRows, .RefCount = 1});
+        auto spec = NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}}, type);
+        std::vector<int64_t> got;
+        for (auto& out : RunRowJoin(spec, EJoinBuildSide::Left, {build}, probes)) {
+            for (int64_t i = 0; i < out.RowCount; ++i) {
+                const auto key = *I64At(out.Columns[0], i);
+                EXPECT_EQ(*I64At(out.Columns[1], i), key * 10);
+                got.push_back(key);
+            }
+            Release(&out);
+        }
+        std::vector<int64_t> expected;
+        for (int64_t i = 0; i < buildRows; ++i) {
+            if ((i % 3 == 0) == (type == EJoinType::LeftSemi)) {
+                expected.push_back(i);
+            }
+        }
+        // EmitByMark scans the arena in build order.
+        EXPECT_EQ(got, expected);
+    }
+}
+
+// The row join table marks only the left rows of a SEMI/ANTI join and runs no
+// residual, so it cannot build the preserved side of an outer join, the right
+// side of a SEMI/ANTI join, or decide a residual's matches.
 TEST(RowJoinProcessor, RejectsJoinsItCannotStream) {
     using namespace NQumir::NAst;
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
@@ -3621,6 +3800,10 @@ TEST(RowJoinProcessor, RejectsJoinsItCannotStream) {
         NQumir::TError);
     EXPECT_THROW(compiler.CompileRowJoin(spec(EJoinType::Full), /*buildIsLeft=*/false),
         NQumir::TError);
+    EXPECT_THROW(compiler.CompileRowJoin(spec(EJoinType::LeftSemi), /*buildIsLeft=*/false),
+        NQumir::TError);
+    EXPECT_THROW(compiler.CompileRowJoin(spec(EJoinType::LeftAnti), /*buildIsLeft=*/false),
+        NQumir::TError);
     using namespace NQumir::NAst::NLiterals;
     auto residual = std::make_shared<TBinaryExpr>(
         NQumir::TLocation{},
@@ -3629,6 +3812,9 @@ TEST(RowJoinProcessor, RejectsJoinsItCannotStream) {
         std::make_shared<TIdentExpr>(NQumir::TLocation{}, "rv"));
     EXPECT_THROW(
         compiler.CompileRowJoin(spec(EJoinType::Left, residual), /*buildIsLeft=*/false),
+        NQumir::TError);
+    EXPECT_THROW(
+        compiler.CompileRowJoin(spec(EJoinType::LeftSemi, residual), /*buildIsLeft=*/true),
         NQumir::TError);
 }
 

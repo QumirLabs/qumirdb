@@ -21,6 +21,12 @@ namespace NQdb {
 // rows without a match, so the output of a probe batch is complete when it is
 // released and nothing is left to emit at the end.
 //
+// A SEMI/ANTI join builds its preserved left side instead. The probe kernel
+// marks the build rows the stream matches and emits nothing; once the probe
+// side ends, the processor emits the marked rows (SEMI) or the unmarked ones
+// (ANTI), each once. An ANTI join also keeps the build rows whose key is NULL,
+// which match nothing, in an arena of their own and emits them with the rest.
+//
 // While the build side has no batch ready, probe batches are pulled and kept
 // until the table exists, so the probe pipeline does not stall on a slow build
 // input; the symmetric join overlaps its inputs the same way. The hold is
@@ -94,7 +100,9 @@ private:
     static_assert(sizeof(TPairBufferState) == TKernelCompiler::PairBufferSize);
 
     void EnsureInit();
+    // Runs `op` on Arena_, or on `arena`.
     bool Dispatch(ERowJoinKernelOp op, TRowSet* batch);
+    bool Dispatch(ERowJoinKernelOp op, TRowSet* batch, TArenaState& arena);
     bool DrainReadyOutput(TRowSet& rowSet);
     // Pulls one build batch; true when the build side made progress or ended.
     bool PullBuildBatch(const TFetch& build);
@@ -108,12 +116,17 @@ private:
     bool CanHoldProbe() const;
     // Payload bytes of the batch, by the instrumentation measure kernel.
     uint64_t ProbeBatchBytes(const TRowSet& batch) const;
+    // After the probe side ended: emits the build rows a SEMI/ANTI join
+    // selects by their marks, one output batch per call.
+    EJoinProcessorResult Finish(TRowSet& output);
 
 private:
     TRowJoinKernels Kernels_;
     EJoinBuildSide BuildSide_;
     TOperatorInstrumentation* Instrumentation_ = nullptr;
     TArenaState Arena_;
+    // The NULL-key build rows of an ANTI join (TRowJoinKernels::KeepsNullKeyRows).
+    TArenaState NullKeyArena_;
     TTableState Table_;
     TScratchState Scratch_;
     TPairBufferState PairBuffer_;
@@ -131,6 +144,9 @@ private:
     bool BuildDone_ = false;
     // The probe input ended; batches may still wait in PendingProbe_.
     bool ProbeDone_ = false;
+    bool MarksEmitted_ = false;
+    // Next pair of the EmitByMark output to materialize.
+    int64_t EmitCursor_ = 0;
 };
 
 } // namespace NQdb

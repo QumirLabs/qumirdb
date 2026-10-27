@@ -534,7 +534,8 @@ NQumir::NAst::TExprPtr GenJoinBatchAst(
     EJoinBatchMode mode,
     bool hasPrecomputedHash,
     bool isAnti = false,
-    bool markMatched = false)
+    bool markMatched = false,
+    bool keyDecides = false)
 {
     NQumir::TLocation loc{};
 
@@ -589,9 +590,6 @@ NQumir::NAst::TExprPtr GenJoinBatchAst(
     if (mode == EJoinBatchMode::ProbeInsert || mode == EJoinBatchMode::InsertOnly) {
         params.push_back(std::make_shared<TVarStmt>(loc, "own", hashTableRefType));
         params.push_back(std::make_shared<TVarStmt>(loc, "opp", hashTableRefType));
-    } else if (mode == EJoinBatchMode::ProbeMark) {
-        params.push_back(std::make_shared<TVarStmt>(loc, "build", hashTableRefType));
-        params.push_back(std::make_shared<TVarStmt>(loc, "matched", hashTableRefType));
     } else {
         params.push_back(std::make_shared<TVarStmt>(loc, "build", hashTableRefType));
     }
@@ -762,10 +760,10 @@ NQumir::NAst::TExprPtr GenJoinBatchAst(
             "jt_probe_and_mark",
             {
                 ident("build"),
-                ident("matched"),
                 ident("key_value"),
                 ident("stored_witness"),
                 std::move(ownRowId),
+                numI64(keyDecides ? 1 : 0),
                 ident("left_store"),
                 ident("right_store"),
                 ident("arena"),
@@ -949,7 +947,7 @@ NQumir::NAst::TExprPtr GenMarkJoinProbeAst(
 
 NQumir::NAst::TExprPtr GenJoinProbeMarkAst(
     const TJoinKeyDescriptor& key,
-    bool isLeft,
+    bool keyDecides,
     const std::string& funcName,
     NQumir::NAst::TTypePtr columnType,
     NQumir::NAst::TTypePtr rowSetType,
@@ -960,7 +958,7 @@ NQumir::NAst::TExprPtr GenJoinProbeMarkAst(
 {
     return GenJoinBatchAst(
         key,
-        isLeft,
+        /*isLeft=*/false,
         funcName,
         std::move(columnType),
         std::move(rowSetType),
@@ -968,7 +966,10 @@ NQumir::NAst::TExprPtr GenJoinProbeMarkAst(
         std::move(pairBufferType),
         std::move(stringViewType),
         EJoinBatchMode::ProbeMark,
-        hasPrecomputedHash);
+        hasPrecomputedHash,
+        /*isAnti=*/false,
+        /*markMatched=*/false,
+        keyDecides);
 }
 
 NQumir::NAst::TExprPtr GenJoinDispatchAst(
@@ -1002,11 +1003,12 @@ NQumir::NAst::TExprPtr GenJoinDispatchAst(
     };
     const int64_t keySize = static_cast<int64_t>(key.Size);
     const bool isSemiAnti = type == EJoinType::LeftSemi || type == EJoinType::LeftAnti;
-    const bool isResidualSemiAnti = isSemiAnti && hasResidual;
     const bool isMark = type == EJoinType::LeftMark;
 
+    // The left rows of a SEMI/ANTI or mark join are stored before any right
+    // row is, so storing them probes nothing.
     auto processLeft = [&]() {
-        if (isResidualSemiAnti || isMark) {
+        if (isSemiAnti || isMark) {
             return Oz::Call(
                 "jt_insert_left_only",
                 {
@@ -1065,7 +1067,11 @@ NQumir::NAst::TExprPtr GenJoinDispatchAst(
                     Oz::Ident("arena"),
                 });
         }
-        if (isSemiAnti && !isResidualSemiAnti) {
+        // A residual needs right rows, which the key-only right table lacks.
+        if (isSemiAnti && hasResidual) {
+            return Oz::Bool(false);
+        }
+        if (isSemiAnti) {
             return Oz::Call(
                 "jt_probe_left_semi",
                 {
@@ -1096,12 +1102,13 @@ NQumir::NAst::TExprPtr GenJoinDispatchAst(
         if (isMark) {
             return Oz::Bool(false);
         }
-        if (isResidualSemiAnti) {
+        // A SEMI/ANTI join that built its left side marks the left rows the
+        // right stream matches.
+        if (isSemiAnti) {
             return Oz::Call(
                 "jt_probe_right_mark",
                 {
                     Oz::Ident("left"),
-                    Oz::Ident("right"),
                     Oz::Ident("batch"),
                     Oz::Ident("right_key_columns"),
                     Oz::Ident("batch_idx"),
@@ -1137,12 +1144,14 @@ NQumir::NAst::TExprPtr GenJoinDispatchAst(
             });
     };
 
+    // The symmetric SEMI/ANTI path stores the distinct right keys; a residual
+    // needs the right rows, so it streams them against the left side instead.
     auto updateRight = [&]() -> TExprPtr {
-        if ((isSemiAnti && !hasResidual) || isMark) {
-            return insertRightKeyOnly();
+        if (isSemiAnti && hasResidual) {
+            return Oz::Bool(false);
         }
-        if (isResidualSemiAnti) {
-            return streamRight();
+        if (isSemiAnti || isMark) {
+            return insertRightKeyOnly();
         }
         return processRight();
     };
@@ -1227,9 +1236,11 @@ NQumir::NAst::TExprPtr GenJoinDispatchAst(
 
     auto finalize = [&]() -> TExprPtr {
         // Key existence cannot identify unmatched rows after a residual rejected
-        // all candidate pairs. LEFT/RIGHT joins must use marked streaming
-        // finalization; FULL marks the matched rows of both tables.
-        if (hasResidual && (type == EJoinType::Left || type == EJoinType::Right)) {
+        // all candidate pairs. LEFT/RIGHT and SEMI/ANTI joins must use marked
+        // streaming finalization; FULL marks the matched rows of both tables.
+        if (hasResidual
+            && (type == EJoinType::Left || type == EJoinType::Right || isSemiAnti))
+        {
             return boolReturn(false);
         }
         if (hasResidual && type == EJoinType::Full) {
@@ -1237,31 +1248,19 @@ NQumir::NAst::TExprPtr GenJoinDispatchAst(
                 Oz::Bin(
                     TOperator("&&"),
                     Oz::Call(
-                        "jt_emit_unmarked",
-                        {Oz::Ident("left"), number(1), Oz::Ident("pairs")}),
+                        "jt_emit_by_mark",
+                        {Oz::Ident("left"), number(1), Oz::Bool(false), Oz::Ident("pairs")}),
                     Oz::Call(
-                        "jt_emit_unmarked",
-                        {Oz::Ident("right"), number(0), Oz::Ident("pairs")})));
+                        "jt_emit_by_mark",
+                        {Oz::Ident("right"), number(0), Oz::Bool(false), Oz::Ident("pairs")})));
         }
-        if (isSemiAnti && !hasResidual) {
+        if (isSemiAnti) {
             return Oz::Return(
                 Oz::Call(
                     "jt_finalize_semi_anti",
                     {
                         Oz::Ident("left"),
                         Oz::Ident("right"),
-                        Oz::Ident("pairs"),
-                    }));
-        }
-        if (isResidualSemiAnti) {
-            return Oz::Return(
-                Oz::Call(
-                    "jt_finalize_residual_semi_anti",
-                    {
-                        Oz::Ident("right"),
-                        Oz::Ident("left_store"),
-                        Oz::Ident("arg"),
-                        number(type == EJoinType::LeftAnti ? 1 : 0),
                         Oz::Ident("pairs"),
                     }));
         }
@@ -1296,41 +1295,34 @@ NQumir::NAst::TExprPtr GenJoinDispatchAst(
         return boolReturn(true);
     };
 
-    // A streaming LEFT/RIGHT join builds its preserved side; the stream probe
-    // marks the build rows it matches and this emits the rest.
+    // A streaming LEFT/RIGHT join builds its preserved side, a streaming
+    // SEMI/ANTI join its left side; the stream probe marks the build rows it
+    // matches. This emits the unmarked rows, or the marked ones of a SEMI join.
     auto finalizeStream = [&]() -> TExprPtr {
-        if (type != EJoinType::Left && type != EJoinType::Right) {
+        if (type != EJoinType::Left && type != EJoinType::Right && !isSemiAnti) {
             return boolReturn(false);
         }
-        const bool buildIsLeft = type == EJoinType::Left;
+        const bool buildIsLeft = type != EJoinType::Right;
         return Oz::Return(
             Oz::Call(
-                "jt_emit_unmarked",
+                "jt_emit_by_mark",
                 {
                     Oz::Ident(buildIsLeft ? "left" : "right"),
                     number(buildIsLeft ? 1 : 0),
+                    Oz::Bool(type == EJoinType::LeftSemi),
                     Oz::Ident("pairs"),
                 }));
     };
 
     Oz::TFunBuilder builder("jt_dispatch");
-    TExprPtr initBody = isResidualSemiAnti
-        ? Oz::Return(
-            Oz::Bin(
-                TOperator("&&"),
-                Oz::Call("jt_init", {Oz::Ident("left"), Oz::Ident("arg"), number(keySize)}),
-                Oz::Call("jt_init_matched", {Oz::Ident("right"), Oz::Ident("arg")})))
-        : Oz::Return(
-            Oz::Bin(
-                TOperator("&&"),
-                Oz::Call("jt_init", {Oz::Ident("left"), Oz::Ident("arg"), number(keySize)}),
-                Oz::Call("jt_init", {Oz::Ident("right"), Oz::Ident("arg"), number(keySize)})));
+    TExprPtr initBody = Oz::Return(
+        Oz::Bin(
+            TOperator("&&"),
+            Oz::Call("jt_init", {Oz::Ident("left"), Oz::Ident("arg"), number(keySize)}),
+            Oz::Call("jt_init", {Oz::Ident("right"), Oz::Ident("arg"), number(keySize)})));
     std::vector<TExprPtr> destroyBody;
     destroyBody.push_back(Oz::Call("jt_destroy", {Oz::Ident("left")}));
-    destroyBody.push_back(
-        isResidualSemiAnti
-            ? Oz::Call("jt_destroy_matched", {Oz::Ident("right")})
-            : Oz::Call("jt_destroy", {Oz::Ident("right")}));
+    destroyBody.push_back(Oz::Call("jt_destroy", {Oz::Ident("right")}));
     destroyBody.push_back(Oz::Call("pb_destroy", {Oz::Ident("pairs")}));
     destroyBody.push_back(boolReturn(true));
     builder.Param("left", hashTableRefType)
@@ -2008,7 +2000,11 @@ TTypePtr RefType(const char* name, const TTypePtr& type) {
 
 } // namespace
 
-TRowJoinLayout BuildRowJoinLayout(const TStructType& buildType, const TJoinKeyDescriptor& key) {
+TRowJoinLayout BuildRowJoinLayout(
+    const TStructType& buildType,
+    const TJoinKeyDescriptor& key,
+    bool marked)
+{
     TRowJoinLayout layout;
     bool hasBinInt = false;
     int64_t cursor = 0;
@@ -2037,6 +2033,9 @@ TRowJoinLayout BuildRowJoinLayout(const TStructType& buildType, const TJoinKeyDe
             layout.Columns[i].ValidOffset = cursor++;
         }
     }
+    if (marked) {
+        layout.MarkOffset = cursor++;
+    }
     for (size_t i = 0; i < layout.Columns.size(); ++i) {
         cursor = AlignUpI64(cursor, sizes[i].second);
         layout.Columns[i].Offset = cursor;
@@ -2051,7 +2050,8 @@ NQumir::NAst::TExprPtr GenRowJoinAppendAst(
     const TRowJoinLayout& layout,
     const std::string& funcName,
     const TRowJoinGenTypes& types,
-    bool hasPrecomputedHash)
+    bool hasPrecomputedHash,
+    bool nullKeys)
 {
     auto i64Type = std::make_shared<TIntegerType>(TIntegerType::I64);
     auto u8Type = std::make_shared<TIntegerType>(TIntegerType::U8);
@@ -2073,9 +2073,14 @@ NQumir::NAst::TExprPtr GenRowJoinAppendAst(
     store.push_back(Oz::Var("key_value", key.LookupType));
     store.push_back(Oz::Assign("key_value", std::move(keyRead.Value)));
 
+    // A row that no table indexes needs no hash.
     std::vector<TExprPtr> valid;
-    auto hash = GenHashValue("i", "key_value", hasPrecomputedHash);
-    valid.insert(valid.end(), hash.begin(), hash.end());
+    if (nullKeys) {
+        valid.push_back(Oz::Var("hash_value", u64Type));
+        valid.push_back(Oz::Assign("hash_value", Oz::TypedInt(0, u64Type)));
+    } else {
+        valid = GenHashValue("i", "key_value", hasPrecomputedHash);
+    }
     valid.push_back(Oz::Var("row", std::make_shared<TPointerType>(u8Type)));
     valid.push_back(Oz::Assign("row", Oz::Call("ja_new_row", {Oz::Ident("arena")})));
     valid.push_back(
@@ -2090,6 +2095,10 @@ NQumir::NAst::TExprPtr GenRowJoinAppendAst(
     valid.push_back(
         Oz::Assign("key_slot", RowFieldPointer("row", layout.KeyOffset, key.LookupType)));
     valid.push_back(Oz::ArrayAssign("key_slot", number(0), Oz::Ident("key_value")));
+    if (layout.MarkOffset >= 0) {
+        valid.push_back(
+            Oz::ArrayAssign("row", number(layout.MarkOffset), Oz::TypedInt(0, u8Type)));
+    }
     for (const auto& col : layout.Columns) {
         std::vector<TExprPtr> args = {
             Oz::Ident("row"),
@@ -2114,8 +2123,11 @@ NQumir::NAst::TExprPtr GenRowJoinAppendAst(
             break;
         }
     }
+    auto keyValid = Oz::Call("jt_key_valid", {Oz::Ident("key_value")});
     store.push_back(
-        Oz::If(Oz::Call("jt_key_valid", {Oz::Ident("key_value")}), Oz::Block(std::move(valid))));
+        Oz::If(
+            nullKeys ? Oz::Unary(TOperator("!"), std::move(keyValid)) : std::move(keyValid),
+            Oz::Block(std::move(valid))));
 
     builder.Var("i", i64Type)
         .Assign("i", number(0))
@@ -2234,6 +2246,7 @@ NQumir::NAst::TExprPtr GenRowJoinProbeAst(
                         number(layout.KeyOffset),
                         Oz::Bool(probeIsLeft),
                         Oz::Bool(emitUnmatched),
+                        number(layout.MarkOffset),
                         Oz::Cast(number(0), ptrKeyType),
                     })));
     return std::move(builder).Build();
@@ -2242,7 +2255,8 @@ NQumir::NAst::TExprPtr GenRowJoinProbeAst(
 NQumir::NAst::TExprPtr GenRowJoinDispatchAst(
     const TJoinKeyDescriptor& key,
     const TRowJoinLayout& layout,
-    const TRowJoinGenTypes& types)
+    const TRowJoinGenTypes& types,
+    EJoinType type)
 {
     auto i64Type = std::make_shared<TIntegerType>(TIntegerType::I64);
     auto boolType = std::make_shared<TBoolType>();
@@ -2320,8 +2334,35 @@ NQumir::NAst::TExprPtr GenRowJoinDispatchAst(
                     Oz::Call("jr_scratch_destroy", {Oz::Ident("scratch")}),
                     Oz::Call("pb_destroy", {Oz::Ident("pairs")}),
                     Oz::Return(Oz::Bool(true)),
-                })))
-        .Stmt(Oz::Return(Oz::Bool(false)));
+                })));
+    if (layout.MarkOffset >= 0) {
+        if (type == EJoinType::LeftAnti) {
+            builder.Stmt(
+                Oz::If(
+                    opIs(5),
+                    Oz::Block({
+                        Oz::Return(
+                            Oz::Call(
+                                "jr_append_null_keys",
+                                {Oz::Ident("arena"), Oz::Ident("batch"), Oz::Ident("key_columns")})),
+                    })));
+        }
+        builder.Stmt(
+            Oz::If(
+                opIs(6),
+                Oz::Block({
+                    Oz::Return(
+                        Oz::Call(
+                            "jr_emit_by_mark",
+                            {
+                                Oz::Ident("arena"),
+                                Oz::Ident("pairs"),
+                                number(layout.MarkOffset),
+                                Oz::Bool(type == EJoinType::LeftSemi),
+                            })),
+                })));
+    }
+    builder.Stmt(Oz::Return(Oz::Bool(false)));
     return std::move(builder).Build();
 }
 
@@ -2329,6 +2370,7 @@ NQumir::NAst::TExprPtr GenRowJoinMaterializeAst(
     const TStructType& leftType,
     const TStructType& rightType,
     bool buildIsLeft,
+    EJoinOutputColumns output,
     const TRowJoinLayout& layout,
     const TRowJoinGenTypes& types)
 {
@@ -2342,16 +2384,19 @@ NQumir::NAst::TExprPtr GenRowJoinMaterializeAst(
     const auto& probeType = buildIsLeft
         ? rightType
         : leftType;
-    const auto probeColumns =
-        BuildJoinOutputColumns(probeType, probeType, EJoinOutputColumns::Left);
+    const auto probeColumns = output == EJoinOutputColumns::LeftRight
+        ? BuildJoinOutputColumns(probeType, probeType, EJoinOutputColumns::Left)
+        : std::vector<TJoinOutputColumn>{};
     const int64_t probePair = buildIsLeft
         ? 1
         : 0;
     const int64_t buildPair = buildIsLeft
         ? 0
         : 1;
-    const int64_t columnCount =
-        static_cast<int64_t>(leftType.Fields.size() + rightType.Fields.size());
+    const int64_t columnCount = static_cast<int64_t>(leftType.Fields.size())
+        + (output == EJoinOutputColumns::LeftRight
+            ? static_cast<int64_t>(rightType.Fields.size())
+            : 0);
     int64_t ownedPtrCount = 1; // columns, recorded by jm_begin
     for (const auto& column : probeColumns) {
         ownedPtrCount += column.Kind == TJoinOutputColumn::EKind::String
