@@ -65,6 +65,17 @@ std::string Describe(const TConfigKey& key) {
         }
         return std::format("an integer in {}..{}", key.Min, key.Max);
     case EConfigType::Double:
+        if (key.MinValue != std::numeric_limits<double>::lowest() &&
+            key.MaxValue != std::numeric_limits<double>::max())
+        {
+            return std::format("a number in {}..{}", key.MinValue, key.MaxValue);
+        }
+        if (key.MinValue != std::numeric_limits<double>::lowest()) {
+            return std::format("a number >= {}", key.MinValue);
+        }
+        if (key.MaxValue != std::numeric_limits<double>::max()) {
+            return std::format("a number <= {}", key.MaxValue);
+        }
         return "a number";
     case EConfigType::String:
         return "a string";
@@ -109,6 +120,9 @@ std::expected<TParsed, std::string> ParseValue(const TConfigKey& key, std::strin
         errno = 0;
         const double value = std::strtod(copy.c_str(), &end);
         if (copy.empty() || end != copy.c_str() + copy.size() || errno != 0 || !std::isfinite(value)) {
+            return bad();
+        }
+        if (value < key.MinValue || value > key.MaxValue) {
             return bad();
         }
         return TParsed(value);
@@ -210,12 +224,20 @@ TConfigSchema& TConfigSchema::Int(
     });
 }
 
-TConfigSchema& TConfigSchema::Double(std::string name, double def, std::string description) {
+TConfigSchema& TConfigSchema::Double(
+    std::string name,
+    double def,
+    std::string description,
+    double min,
+    double max)
+{
     return Add({
         .Name = std::move(name),
         .Type = EConfigType::Double,
         .Default = std::format("{}", def),
         .Description = std::move(description),
+        .MinValue = min,
+        .MaxValue = max,
     });
 }
 
@@ -282,6 +304,12 @@ std::string TConfigSchema::Help() const {
                 break;
             case EConfigType::Double:
                 type = "number";
+                if (key.MinValue != std::numeric_limits<double>::lowest()) {
+                    type += std::format(", min {}", key.MinValue);
+                }
+                if (key.MaxValue != std::numeric_limits<double>::max()) {
+                    type += std::format(", max {}", key.MaxValue);
+                }
                 break;
             case EConfigType::String:
                 type = "string";
@@ -410,6 +438,7 @@ TConfig::TResult TConfig::LoadString(std::string_view text, std::string_view ori
     }
 
     for (auto& [mapKey, value] : parsed) {
+        Set_.insert(mapKey);
         Values_[mapKey] = std::move(value);
     }
     return {};
@@ -448,6 +477,7 @@ TConfig::TResult TConfig::Override(std::string_view spec) {
         return fail(result.error());
     }
     Values_[MapKey(sectionName, keyName)] = std::move(*result);
+    Set_.insert(MapKey(sectionName, keyName));
     return {};
 }
 
@@ -479,6 +509,10 @@ double TConfig::GetDouble(std::string_view section, std::string_view key) const 
 
 const std::string& TConfig::GetString(std::string_view section, std::string_view key) const {
     return std::get<std::string>(Get(section, key, EConfigType::String));
+}
+
+bool TConfig::IsSet(std::string_view section, std::string_view key) const {
+    return Set_.contains(MapKey(section, key));
 }
 
 std::string TConfig::Dump() const {

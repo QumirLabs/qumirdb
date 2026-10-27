@@ -19,7 +19,7 @@ TConfigSchema MakeSchema() {
     schema.Section("scan")
         .Int("max_tasks", 0, "Scan task cap.")
         .Bool("prefetch", true, "Read ahead.")
-        .Double("ratio", 0.5, "A ratio.")
+        .Double("ratio", 0.5, "A ratio.", 0.0, 2.0)
         .String("dir", "", "A directory.");
     return schema;
 }
@@ -128,8 +128,9 @@ TEST(Config, WrongTypeAndRange) {
              TCase{ "[scan]\nmax_tasks = 1.5\n", "an integer >= 0" },
              TCase{ "[scan]\nmax_tasks = -1\n", "an integer >= 0" },
              TCase{ "[scan]\nmax_tasks =\n", "an integer >= 0" },
-             TCase{ "[scan]\nratio = fast\n", "a number" },
-             TCase{ "[scan]\nratio = nan\n", "a number" },
+             TCase{ "[scan]\nratio = fast\n", "a number in 0..2" },
+             TCase{ "[scan]\nratio = 2.5\n", "a number in 0..2" },
+             TCase{ "[scan]\nratio = nan\n", "a number in 0..2" },
              TCase{ "[scheduler]\nworkers = 0\n", "an integer in 1..256" },
              TCase{ "[scheduler]\nworkers = 257\n", "an integer in 1..256" },
              TCase{ "[scheduler]\nworkers = 9999999999999999999999\n", "an integer in 1..256" },
@@ -170,6 +171,19 @@ TEST(Config, SourcesOverrideInOrder) {
     EXPECT_EQ(config.GetInt("scan", "max_tasks"), 9);
     EXPECT_EQ(config.GetDouble("scan", "ratio"), 1.0);
     EXPECT_EQ(config.GetString("scheduler", "mode"), "threaded");
+}
+
+TEST(Config, IsSetTellsFilesAndOverridesFromDefaults) {
+    const auto schema = MakeSchema();
+    TConfig config(schema);
+    EXPECT_FALSE(config.IsSet("scan", "max_tasks"));
+    ASSERT_TRUE(config.LoadString("[scan]\nmax_tasks = 0\n").has_value());
+    EXPECT_TRUE(config.IsSet("scan", "max_tasks"));
+    EXPECT_FALSE(config.IsSet("scan", "prefetch"));
+    ASSERT_TRUE(config.Override("scan:prefetch=true").has_value());
+    EXPECT_TRUE(config.IsSet("scan", "prefetch"));
+    EXPECT_FALSE(config.LoadString("[scan]\nratio = 9\n").has_value());
+    EXPECT_FALSE(config.IsSet("scan", "ratio"));
 }
 
 TEST(Config, OverrideErrors) {
@@ -236,7 +250,7 @@ TEST(Config, HelpListsEveryKey) {
         "      Scan task cap. (default: 0)\n"
         "  --scan:prefetch=<true|false>\n"
         "      Read ahead. (default: true)\n"
-        "  --scan:ratio=<number>\n"
+        "  --scan:ratio=<number, min 0, max 2>\n"
         "      A ratio. (default: 0.5)\n"
         "  --scan:dir=<string>\n"
         "      A directory. (default: empty)\n");

@@ -4,6 +4,7 @@
 #include <expected>
 #include <limits>
 #include <map>
+#include <set>
 #include <string>
 #include <string_view>
 #include <variant>
@@ -28,6 +29,9 @@ struct TConfigKey {
     // Inclusive bounds of an Int key.
     int64_t Min = 0;
     int64_t Max = std::numeric_limits<int64_t>::max();
+    // Inclusive bounds of a Double key.
+    double MinValue = std::numeric_limits<double>::lowest();
+    double MaxValue = std::numeric_limits<double>::max();
     // The accepted spellings of an Enum key.
     std::vector<std::string> Values;
 };
@@ -52,7 +56,12 @@ public:
         std::string description,
         int64_t min = 0,
         int64_t max = std::numeric_limits<int64_t>::max());
-    TConfigSchema& Double(std::string name, double def, std::string description);
+    TConfigSchema& Double(
+        std::string name,
+        double def,
+        std::string description,
+        double min = std::numeric_limits<double>::lowest(),
+        double max = std::numeric_limits<double>::max());
     TConfigSchema& String(std::string name, std::string def, std::string description);
     TConfigSchema& Enum(
         std::string name,
@@ -102,6 +111,9 @@ public:
     // Also the accessor of Enum keys.
     const std::string& GetString(std::string_view section, std::string_view key) const;
 
+    // Whether a file or an override set the key, rather than its default.
+    bool IsSet(std::string_view section, std::string_view key) const;
+
     // Every key with its effective value, as ini text that loads back.
     std::string Dump() const;
 
@@ -113,6 +125,8 @@ private:
     const TConfigSchema* Schema_;
     // Keyed by `section:key`.
     std::map<std::string, TValue> Values_;
+    // The keys a file or an override has set, for callers that apply only those.
+    std::set<std::string> Set_;
 };
 
 } // namespace NQdb::NUtils
