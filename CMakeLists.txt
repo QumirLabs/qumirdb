@@ -5,6 +5,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(QDB_BUILD_SERVICE "Build QumirDB web service" OFF)
 option(QDB_BUILD_TESTS "Build QumirDB tests" OFF)
+option(QDB_USE_CCACHE "Compile through ccache when it is installed" ON)
 # Static LLVM archives add ~50 MB to every binary linking the codegen; the shared
 # libLLVM trades that for a runtime dependency on the LLVM package.
 option(QDB_LLVM_LINK_SHARED "Link the shared libLLVM instead of static LLVM archives" OFF)
@@ -40,6 +41,23 @@ message(STATUS "QumirDB version string: ${QDB_VERSION_STRING}")
 set(QDB_PRIVATE_DIR "lib/qumirdb-${QDB_RELEASE}")
 set(QDB_PRIVATE_BINDIR "${QDB_PRIVATE_DIR}/bin")
 set(QDB_MODULES_DIR "${QDB_PRIVATE_DIR}/modules")
+
+# Set before any target exists; the submodules under externals/ inherit it.
+# A launcher passed on the command line (CI does) takes precedence.
+if(QDB_USE_CCACHE AND NOT CMAKE_C_COMPILER_LAUNCHER AND NOT CMAKE_CXX_COMPILER_LAUNCHER)
+    find_program(CCACHE_PROGRAM ccache)
+    if(CCACHE_PROGRAM)
+        set(CMAKE_C_COMPILER_LAUNCHER ${CCACHE_PROGRAM})
+        set(CMAKE_CXX_COMPILER_LAUNCHER ${CCACHE_PROGRAM})
+        message(STATUS "ccache: using ${CCACHE_PROGRAM}")
+    else()
+        message(STATUS "ccache: not found, compiling directly")
+    endif()
+elseif(CMAKE_CXX_COMPILER_LAUNCHER)
+    message(STATUS "ccache: compiler launcher already set (${CMAKE_CXX_COMPILER_LAUNCHER})")
+else()
+    message(STATUS "ccache: disabled")
+endif()
 
 add_subdirectory(qdb)
 add_subdirectory(bin)

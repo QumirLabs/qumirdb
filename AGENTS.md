@@ -122,6 +122,21 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DQDB_BUILD_TESTS
 cmake --build build --target qdb test_reg -j 6
 ```
 
+CMake compiles through ccache automatically when it is installed (turn it off
+with `-DQDB_USE_CCACHE=OFF`; an explicit `CMAKE_*_COMPILER_LAUNCHER` wins). To
+share one cache across worktrees, put this in `ccache.conf` (`ccache -sv` shows
+its path):
+
+```ini
+base_dir = /path/to/workspace-root
+hash_dir = false
+sloppiness = include_file_ctime,include_file_mtime,time_macros
+max_size = 40G
+```
+
+With `hash_dir = false` the debug info of a cache hit names the worktree that
+compiled the object first.
+
 SQL table names resolve to `<table>.parquet` in the data directory. Enable the
 persistent JIT cache for normal execution runs. Run a SQL file with phase timings:
 
