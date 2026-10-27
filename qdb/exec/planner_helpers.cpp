@@ -312,10 +312,10 @@ EJoinBuildSide ChooseJoinBuildSide(
             : EJoinBuildSide::Left;
     }
     // The row join table has no adaptive mode: it needs a fixed build side,
-    // so it builds the smaller input whatever the ratio, as DuckDB does. Joins
-    // on the symmetric table (a residual, or the legacy table) keep both
-    // inputs growing until one is clearly smaller, because a fixed build side
-    // there makes the probe input wait for it.
+    // so it builds the smaller input whatever the ratio. Joins on the
+    // symmetric table (a residual, or the legacy table) keep both inputs
+    // growing until one is clearly smaller, because a fixed build side there
+    // makes the probe input wait for it.
     if (type == EJoinType::Inner
         && RowJoinTableServes(join, table, EJoinBuildSide::Left))
     {
