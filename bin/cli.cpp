@@ -151,7 +151,7 @@ std::optional<EExplainMode> ParseExplainMode(std::string_view value) {
     return std::nullopt;
 }
 
-struct TConfig {
+struct TCliOptions {
     ESyntax Syntax = ESyntax::Sexpr;
     std::string DataDir = ".";
     TFormatSpec Format;
@@ -263,7 +263,7 @@ std::chrono::duration<double> ProcessCpuTime() {
 
 int ExecutePlan(
     NQdb::TOperatorPtr plan,
-    const TConfig& config,
+    const TCliOptions& config,
     const NQdb::NKernel::TAnnotationContext& annotation,
     bool explain,
     std::chrono::steady_clock::time_point planStart)
@@ -371,7 +371,7 @@ int ExecutePlan(
 
 int RunSqlStatement(
     const NQdb::NSql::TSqlNodePtr& statement,
-    const TConfig& config,
+    const TCliOptions& config,
     NQdb::TExternalModuleCatalog& catalog,
     bool explain)
 {
@@ -433,7 +433,7 @@ int RunSqlStatement(
 int RunQuery(
     ESyntax syntax,
     std::istream& in,
-    const TConfig& config,
+    const TCliOptions& config,
     NQdb::TExternalModuleCatalog& catalog)
 {
     std::string text{
@@ -541,7 +541,7 @@ std::string_view Trim(std::string_view s) {
 }
 
 // `\d <table>`: open the table and print its column names and types.
-void DescribeTable(std::string_view table, const TConfig& config) {
+void DescribeTable(std::string_view table, const TCliOptions& config) {
     if (table.empty()) {
         std::cerr << "usage: \\d <table>\n";
         return;
@@ -587,7 +587,7 @@ bool HasCompleteSqlStatement(const std::string& text) {
 
 // Reads SQL statements from readline and runs complete batches terminated by ';'.
 int RunInteractive(
-    TConfig config,
+    TCliOptions config,
     NQdb::TExternalModuleCatalog& catalog)
 {
     const std::string historyPath = HistoryPath();
@@ -729,10 +729,10 @@ int main(int argc, char** argv) {
 
     NQumir::NCodeGen::TLLVMInitializer llvmInit;
 
-    TConfig config;
+    TCliOptions config;
     NQdb::TExternalModuleCatalog catalog;
     std::string queryFile;
-    std::string configPath;
+    std::optional<std::string> configPath;
     std::vector<std::string> overrides;
 
     for (int i = 1; i < argc; ++i) {
@@ -799,25 +799,9 @@ int main(int argc, char** argv) {
     }
 
     NQdb::NUtils::TConfig engineConfig(NQdb::EngineConfigSchema());
-    {
-        const auto defaultPath = DefaultConfigPath();
-        std::error_code ignored;
-        auto loaded = (!defaultPath.empty() && std::filesystem::exists(defaultPath, ignored))
-            ? engineConfig.LoadFile(defaultPath.string())
-            : NQdb::NUtils::TConfig::TResult();
-        if (loaded && !configPath.empty()) {
-            loaded = engineConfig.LoadFile(configPath);
-        }
-        for (const auto& spec : overrides) {
-            if (!loaded) {
-                break;
-            }
-            loaded = engineConfig.Override(spec);
-        }
-        if (!loaded) {
-            std::cerr << loaded.error() << "\n";
-            return 1;
-        }
+    if (auto loaded = NQdb::LoadEngineConfig(engineConfig, DefaultConfigPath(), configPath, overrides); !loaded) {
+        std::cerr << loaded.error() << "\n";
+        return 1;
     }
     NQdb::ApplyEngineConfig(engineConfig, config.Engine);
     NQdb::SetArrowMemoryPool(config.Engine.ArrowMemoryPool);

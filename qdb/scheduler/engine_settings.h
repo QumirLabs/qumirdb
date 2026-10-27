@@ -5,6 +5,11 @@
 #include <qdb/scheduler/settings.h>
 #include <qdb/utils/config.h>
 
+#include <filesystem>
+#include <optional>
+#include <span>
+#include <string>
+
 namespace NQdb {
 
 // Everything an application tunes in the engine, from the optimizer to the
@@ -25,5 +30,15 @@ const NUtils::TConfigSchema& EngineConfigSchema();
 // Applies the keys that files or overrides set onto `settings`; the others leave
 // it as it is, so a caller can set its own defaults first.
 void ApplyEngineConfig(const NUtils::TConfig& config, TEngineSettings& settings);
+
+// Loads the sources in their order, later ones overriding earlier ones: the default
+// file (skipped when `defaultPath` is empty or the file does not exist; an existing
+// path that is not a regular file is an error), then `configPath` (an empty path is
+// an error), then the `section:key=value` overrides.
+NUtils::TConfig::TResult LoadEngineConfig(
+    NUtils::TConfig& config,
+    const std::filesystem::path& defaultPath,
+    const std::optional<std::string>& configPath,
+    std::span<const std::string> overrides);
 
 } // namespace NQdb

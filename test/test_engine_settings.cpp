@@ -2,6 +2,8 @@
 
 #include <qdb/scheduler/engine_settings.h>
 
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 
 using namespace NQdb;
@@ -131,6 +133,64 @@ TEST(EngineSettings, BadSettingsAreErrorsThatListTheAccepted) {
     EXPECT_NE(message("scheduler:workers=0").find("an integer >= 1"), std::string::npos);
     EXPECT_NE(message("late_materialization:min_savings=0.5").find("a number >= 1"), std::string::npos);
     EXPECT_NE(message("io:arrow_memory_pool=tcmalloc").find("jemalloc"), std::string::npos);
+}
+
+namespace {
+
+std::filesystem::path WriteIni(const std::string& name, const std::string& text) {
+    const auto path = std::filesystem::temp_directory_path() / name;
+    std::ofstream(path) << text;
+    return path;
+}
+
+} // namespace
+
+TEST(EngineSettings, SourcesApplyInOrder) {
+    // defaults < default file < --config file < overrides
+    const auto defaultFile = WriteIni(
+        "qdb_test_default.ini", "[scan]\nmax_tasks = 1\n[queue]\ndepth = 2\n[shuffle]\nqueue = 3\n");
+    const auto configFile = WriteIni("qdb_test_config.ini", "[scan]\nmax_tasks = 5\n[queue]\ndepth = 6\n");
+    auto config = MakeConfig();
+    const std::vector<std::string> overrides = { "scan:max_tasks=9" };
+    const auto loaded = LoadEngineConfig(config, defaultFile, configFile.string(), overrides);
+    ASSERT_TRUE(loaded.has_value()) << loaded.error();
+    EXPECT_EQ(config.GetInt("scan", "max_tasks"), 9);
+    EXPECT_EQ(config.GetInt("queue", "depth"), 6);
+    EXPECT_EQ(config.GetInt("shuffle", "queue"), 3);
+    EXPECT_EQ(config.GetInt("shuffle", "target_rows"), 16 * 1024);
+    std::filesystem::remove(defaultFile);
+    std::filesystem::remove(configFile);
+}
+
+TEST(EngineSettings, MissingDefaultFileIsSkipped) {
+    auto config = MakeConfig();
+    const auto missing = std::filesystem::temp_directory_path() / "qdb_test_no_such.ini";
+    EXPECT_TRUE(LoadEngineConfig(config, missing, std::nullopt, {}).has_value());
+    EXPECT_TRUE(LoadEngineConfig(config, {}, std::nullopt, {}).has_value());
+}
+
+TEST(EngineSettings, DefaultPathThatIsNotAFileIsAnError) {
+    auto config = MakeConfig();
+    const auto result = LoadEngineConfig(config, std::filesystem::temp_directory_path(), std::nullopt, {});
+    ASSERT_FALSE(result.has_value());
+    EXPECT_NE(result.error().find("not a regular file"), std::string::npos);
+}
+
+TEST(EngineSettings, EmptyOrMissingConfigPathIsAnError) {
+    auto config = MakeConfig();
+    EXPECT_FALSE(LoadEngineConfig(config, {}, std::string(), {}).has_value());
+    EXPECT_FALSE(LoadEngineConfig(config, {}, std::string("/no/such/qdb.ini"), {}).has_value());
+}
+
+TEST(EngineSettings, BadDefaultFileStopsBeforeLaterSources) {
+    const auto bad = WriteIni("qdb_test_bad_default.ini", "[scan]\nnope = 1\n");
+    auto config = MakeConfig();
+    const std::vector<std::string> overrides = { "scan:max_tasks=9" };
+    const auto result = LoadEngineConfig(config, bad, std::nullopt, overrides);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_NE(result.error().find("unknown key 'nope'"), std::string::npos);
+    EXPECT_FALSE(config.IsSet("scan", "max_tasks"));
+    std::filesystem::remove(bad);
 }
 
 int main(int argc, char** argv) {

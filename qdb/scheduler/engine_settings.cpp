@@ -236,4 +236,35 @@ void ApplyEngineConfig(const NUtils::TConfig& config, TEngineSettings& settings)
         : nullptr;
 }
 
+NUtils::TConfig::TResult LoadEngineConfig(
+    NUtils::TConfig& config,
+    const std::filesystem::path& defaultPath,
+    const std::optional<std::string>& configPath,
+    std::span<const std::string> overrides)
+{
+    std::error_code error;
+    if (!defaultPath.empty() && std::filesystem::exists(defaultPath, error)) {
+        if (!std::filesystem::is_regular_file(defaultPath, error)) {
+            return std::unexpected("default config path '" + defaultPath.string() + "' is not a regular file");
+        }
+        if (auto loaded = config.LoadFile(defaultPath.string()); !loaded) {
+            return loaded;
+        }
+    }
+    if (configPath) {
+        if (configPath->empty()) {
+            return std::unexpected("the config path is empty");
+        }
+        if (auto loaded = config.LoadFile(*configPath); !loaded) {
+            return loaded;
+        }
+    }
+    for (const auto& spec : overrides) {
+        if (auto applied = config.Override(spec); !applied) {
+            return applied;
+        }
+    }
+    return {};
+}
+
 } // namespace NQdb

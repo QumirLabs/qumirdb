@@ -606,50 +606,89 @@ fs::path InitializeJitCache(const char* executable, const TRegTestOptions& optio
     return path;
 }
 
+namespace {
+
+// The run options: one table drives the checks and the error message. A kept
+// option stays in argv for main to handle.
+struct TRunOption {
+    std::string_view Name;
+    bool TakesValue;
+    bool Keep;
+};
+
+constexpr TRunOption RunOptions[] = {
+    { "--config", true, false },
+    { "--timing", false, false },
+    { "--trace-fixtures", false, false },
+    { "--canonize", false, true },
+    { "--print", false, true },
+    { "--help", false, true },
+};
+
+std::string KnownRunOptions() {
+    std::string names;
+    for (const auto& option : RunOptions) {
+        names += std::string(option.Name) + ", ";
+    }
+    return names + "--section:key=value and the --gtest_ flags";
+}
+
+} // namespace
+
 TRegTestOptions ParseRegTestOptions(int& argc, char** argv) {
     TRegTestOptions options;
     std::vector<std::string> overrides;
     std::string configPath;
+    bool hasConfig = false;
     int kept = 1;
     for (int i = 1; i < argc; ++i) {
         std::string_view arg = argv[i];
+        if (!arg.starts_with("--") || arg.starts_with("--gtest_")) {
+            argv[kept++] = argv[i];
+            continue;
+        }
         const auto equals = arg.find('=');
+        if (arg.find(':') < equals) {
+            overrides.emplace_back(arg.substr(2));
+            continue;
+        }
         const auto name = arg.substr(0, equals);
-        auto flag = [&]() {
+        const auto* option = std::find_if(std::begin(RunOptions), std::end(RunOptions),
+            [&](const TRunOption& candidate) { return candidate.Name == name; });
+        if (option == std::end(RunOptions)) {
+            throw std::invalid_argument("unknown option '" + std::string(arg) + "'; known options: "
+                + KnownRunOptions());
+        }
+        std::string_view value;
+        if (option->TakesValue) {
             if (equals != std::string_view::npos) {
-                throw std::invalid_argument(std::string(name) + " takes no value");
-            }
-        };
-        if (name == "--config") {
-            if (equals != std::string_view::npos) {
-                configPath = arg.substr(equals + 1);
+                value = arg.substr(equals + 1);
             } else if (i + 1 < argc && !std::string_view(argv[i + 1]).starts_with("--")) {
-                configPath = argv[++i];
+                value = argv[++i];
             } else {
-                throw std::invalid_argument("--config requires a path");
+                throw std::invalid_argument(std::string(name) + " requires a value");
             }
+            if (value.empty()) {
+                throw std::invalid_argument(std::string(name) + " requires a non-empty value");
+            }
+        } else if (equals != std::string_view::npos) {
+            throw std::invalid_argument(std::string(name) + " takes no value");
+        }
+        if (option->Keep) {
+            argv[kept++] = argv[i];
+        } else if (name == "--config") {
+            configPath = value;
+            hasConfig = true;
         } else if (name == "--timing") {
-            flag();
             options.Timing = true;
         } else if (name == "--trace-fixtures") {
-            flag();
             options.TraceFixtures = true;
-        } else if (arg.starts_with("--") && arg.find(':') < equals) {
-            overrides.emplace_back(arg.substr(2));
-        } else if (arg.starts_with("--") && !arg.starts_with("--gtest_")
-            && name != "--canonize" && name != "--print" && name != "--help")
-        {
-            throw std::invalid_argument("unknown option '" + std::string(arg) + "'; known options: "
-                "--config, --section:key=value, --timing, --trace-fixtures, --canonize, --print, "
-                "and the --gtest_ flags");
-        } else {
-            argv[kept++] = argv[i];
         }
     }
     argc = kept;
     argv[argc] = nullptr;
     // The default file of qdb is not read: a run must not depend on the user's home.
-    if (!configPath.empty()) {
+    if (hasConfig) {
         if (auto loaded = options.Engine.LoadFile(configPath); !loaded) {
             throw std::invalid_argument(loaded.error());
         }

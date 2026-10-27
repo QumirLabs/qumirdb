@@ -91,6 +91,106 @@ std::string FloatResult(std::string_view rows, std::string_view schema = "<struc
     return "{\"schema\":\"" + std::string(schema) + "\",\"rows\":" + std::string(rows) + '}';
 }
 
+namespace {
+
+NRegTest::TRegTestOptions ParseOptions(std::vector<std::string> arguments, int* remaining = nullptr) {
+    arguments.insert(arguments.begin(), "test_reg");
+    std::vector<char*> argv;
+    for (auto& argument : arguments) argv.push_back(argument.data());
+    argv.push_back(nullptr);
+    int argc = static_cast<int>(arguments.size());
+    auto options = NRegTest::ParseRegTestOptions(argc, argv.data());
+    if (remaining) *remaining = argc;
+    return options;
+}
+
+std::string OptionError(std::vector<std::string> arguments) {
+    try {
+        ParseOptions(std::move(arguments));
+    } catch (const std::invalid_argument& error) {
+        return error.what();
+    }
+    return {};
+}
+
+} // namespace
+
+TEST(RegTestOptions, ParsesOptionsAndKeepsTheOthers) {
+    int remaining = 0;
+    const auto options = ParseOptions(
+        {"root", "--timing", "--join:table=legacy", "--gtest_filter=*", "--print", "--canonize", "--help"},
+        &remaining);
+    EXPECT_TRUE(options.Timing);
+    EXPECT_TRUE(options.Engine.IsSet("join", "table"));
+    EXPECT_EQ(options.Engine.GetString("join", "table"), "legacy");
+    // test_reg, root, --gtest_filter, --print, --canonize, --help remain for main and gtest.
+    EXPECT_EQ(remaining, 6);
+}
+
+TEST(RegTestOptions, ExemptionsAreNotErrors) {
+    EXPECT_EQ(OptionError({"--help"}), "");
+    EXPECT_EQ(OptionError({"--canonize"}), "");
+    EXPECT_EQ(OptionError({"--print"}), "");
+    EXPECT_EQ(OptionError({"--gtest_list_tests", "--gtest_filter=a:b"}), "");
+}
+
+TEST(RegTestOptions, ConfigTakesAFileInBothForms) {
+    const auto path = std::filesystem::temp_directory_path() / "qdb_test_reg_options.ini";
+    {
+        std::ofstream out(path);
+        out << "[scan]\nmax_tasks = 7\n";
+    }
+    for (const auto& arguments : {
+             std::vector<std::string>{"--config", path.string()},
+             std::vector<std::string>{"--config=" + path.string()},
+         })
+    {
+        EXPECT_EQ(ParseOptions(arguments).Engine.GetInt("scan", "max_tasks"), 7);
+    }
+    std::filesystem::remove(path);
+}
+
+TEST(RegTestOptions, ConfigFileComesBeforeOverridesInAnyPosition) {
+    const auto path = std::filesystem::temp_directory_path() / "qdb_test_reg_order.ini";
+    {
+        std::ofstream out(path);
+        out << "[scan]\nmax_tasks = 7\n[queue]\ndepth = 2\n";
+    }
+    const auto options = ParseOptions({"--scan:max_tasks=9", "--config", path.string()});
+    EXPECT_EQ(options.Engine.GetInt("scan", "max_tasks"), 9);
+    EXPECT_EQ(options.Engine.GetInt("queue", "depth"), 2);
+    std::filesystem::remove(path);
+}
+
+TEST(RegTestOptions, ValueOptionRejectsMissingEmptyOrFollowingOption) {
+    EXPECT_NE(OptionError({"--config"}).find("requires a value"), std::string::npos);
+    EXPECT_NE(OptionError({"--config", "--gtest_list_tests"}).find("requires a value"), std::string::npos);
+    EXPECT_NE(OptionError({"--config", "--timing"}).find("requires a value"), std::string::npos);
+    EXPECT_NE(OptionError({"--config="}).find("non-empty"), std::string::npos);
+    EXPECT_NE(OptionError({"--config", ""}).find("non-empty"), std::string::npos);
+}
+
+TEST(RegTestOptions, FlagRejectsAValue) {
+    EXPECT_NE(OptionError({"--timing=1"}).find("takes no value"), std::string::npos);
+    EXPECT_NE(OptionError({"--print="}).find("takes no value"), std::string::npos);
+}
+
+TEST(RegTestOptions, UnknownOptionFailsAndListsKnownOptionsFromTheTable) {
+    const auto error = OptionError({"--trace-fixture"});
+    for (const char* name : {"--config", "--timing", "--trace-fixtures", "--canonize", "--print", "--help",
+        "--section:key=value", "--gtest_"})
+    {
+        EXPECT_NE(error.find(name), std::string::npos) << name << " in: " << error;
+    }
+    EXPECT_NE(OptionError({"--bogus"}), "");
+}
+
+TEST(RegTestOptions, BadOverrideNamesTheKeyAndAcceptedValues) {
+    const auto error = OptionError({"--join:table=hash"});
+    EXPECT_NE(error.find("one of: row, legacy"), std::string::npos) << error;
+    EXPECT_NE(OptionError({"--join:tabel=row"}).find("accepted keys"), std::string::npos);
+}
+
 TEST(RegResultComparison, DefaultToleranceAcceptsAggregateRoundingWithoutChangingGolden) {
     const auto actual = FloatResult("[[306804.95999999996]]");
     const auto expected = FloatResult("[[306804.96000000002]]");
