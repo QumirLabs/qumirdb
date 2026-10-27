@@ -4122,49 +4122,6 @@ TEST(RowJoinProcessor, DirectIndexSemiAntiBuildLeftMarksRows) {
     }
 }
 
-// The row join table marks only the left rows of a SEMI/ANTI join and runs no
-// residual, so it cannot build the preserved side of an outer join, the right
-// side of a SEMI/ANTI join, or decide a residual's matches.
-TEST(RowJoinProcessor, RejectsJoinsItCannotStream) {
-    using namespace NQumir::NAst;
-    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
-    TStructType leftType({{"lk", i64}, {"lv", i64}});
-    TStructType rightType({{"rk", i64}, {"rv", i64}});
-    TKernelCompiler compiler;
-    auto spec = [&](EJoinType type, TExprPtr residual = nullptr) {
-        return NKernel::BuildJoinKernelSpec(
-            leftType, rightType, {{"lk", "rk"}}, type, residual);
-    };
-    EXPECT_THROW(compiler.CompileRowJoin(spec(EJoinType::Left), /*buildIsLeft=*/true),
-        NQumir::TError);
-    EXPECT_THROW(compiler.CompileRowJoin(spec(EJoinType::Right), /*buildIsLeft=*/false),
-        NQumir::TError);
-    EXPECT_THROW(compiler.CompileRowJoin(spec(EJoinType::Full), /*buildIsLeft=*/false),
-        NQumir::TError);
-    EXPECT_THROW(compiler.CompileRowJoin(spec(EJoinType::LeftSemi), /*buildIsLeft=*/false),
-        NQumir::TError);
-    EXPECT_THROW(compiler.CompileRowJoin(spec(EJoinType::LeftAnti), /*buildIsLeft=*/false),
-        NQumir::TError);
-    using namespace NQumir::NAst::NLiterals;
-    auto residual = std::make_shared<TBinaryExpr>(
-        NQumir::TLocation{},
-        "<"_op,
-        std::make_shared<TIdentExpr>(NQumir::TLocation{}, "lv"),
-        std::make_shared<TIdentExpr>(NQumir::TLocation{}, "rv"));
-    EXPECT_THROW(
-        compiler.CompileRowJoin(spec(EJoinType::Left, residual), /*buildIsLeft=*/false),
-        NQumir::TError);
-    EXPECT_THROW(
-        compiler.CompileRowJoin(spec(EJoinType::LeftSemi, residual), /*buildIsLeft=*/true),
-        NQumir::TError);
-}
-
-int main(int argc, char** argv) {
-    testing::InitGoogleTest(&argc, argv);
-    NQumir::NCodeGen::TLLVMInitializer initializer;
-    return RUN_ALL_TESTS();
-}
-
 // A LEFT join that builds its null-supplying side over a direct index pads the
 // preserved rows whose key is absent, outside the range or NULL.
 TEST(RowJoinProcessor, DirectIndexLeftOuterPadsUnmatchedProbeRows) {
@@ -4209,4 +4166,47 @@ TEST(RowJoinProcessor, DirectIndexLeftOuterPadsUnmatchedProbeRows) {
     std::sort(expected.begin(), expected.end());
     EXPECT_EQ(got, expected);
     EXPECT_EQ(counters.HashCapacity, 4u) << "the join did not use the direct index";
+}
+
+// The row join table marks only the left rows of a SEMI/ANTI join and runs no
+// residual, so it cannot build the preserved side of an outer join, the right
+// side of a SEMI/ANTI join, or decide a residual's matches.
+TEST(RowJoinProcessor, RejectsJoinsItCannotStream) {
+    using namespace NQumir::NAst;
+    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
+    TStructType leftType({{"lk", i64}, {"lv", i64}});
+    TStructType rightType({{"rk", i64}, {"rv", i64}});
+    TKernelCompiler compiler;
+    auto spec = [&](EJoinType type, TExprPtr residual = nullptr) {
+        return NKernel::BuildJoinKernelSpec(
+            leftType, rightType, {{"lk", "rk"}}, type, residual);
+    };
+    EXPECT_THROW(compiler.CompileRowJoin(spec(EJoinType::Left), /*buildIsLeft=*/true),
+        NQumir::TError);
+    EXPECT_THROW(compiler.CompileRowJoin(spec(EJoinType::Right), /*buildIsLeft=*/false),
+        NQumir::TError);
+    EXPECT_THROW(compiler.CompileRowJoin(spec(EJoinType::Full), /*buildIsLeft=*/false),
+        NQumir::TError);
+    EXPECT_THROW(compiler.CompileRowJoin(spec(EJoinType::LeftSemi), /*buildIsLeft=*/false),
+        NQumir::TError);
+    EXPECT_THROW(compiler.CompileRowJoin(spec(EJoinType::LeftAnti), /*buildIsLeft=*/false),
+        NQumir::TError);
+    using namespace NQumir::NAst::NLiterals;
+    auto residual = std::make_shared<TBinaryExpr>(
+        NQumir::TLocation{},
+        "<"_op,
+        std::make_shared<TIdentExpr>(NQumir::TLocation{}, "lv"),
+        std::make_shared<TIdentExpr>(NQumir::TLocation{}, "rv"));
+    EXPECT_THROW(
+        compiler.CompileRowJoin(spec(EJoinType::Left, residual), /*buildIsLeft=*/false),
+        NQumir::TError);
+    EXPECT_THROW(
+        compiler.CompileRowJoin(spec(EJoinType::LeftSemi, residual), /*buildIsLeft=*/true),
+        NQumir::TError);
+}
+
+int main(int argc, char** argv) {
+    testing::InitGoogleTest(&argc, argv);
+    NQumir::NCodeGen::TLLVMInitializer initializer;
+    return RUN_ALL_TESTS();
 }
