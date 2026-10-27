@@ -9,11 +9,15 @@
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/pipeline.h>
+#include <qdb/scheduler/graph.h>
+#include <qdb/scheduler/plan_lowerer.h>
+#include <qdb/scheduler/scan_split.h>
 #include <qdb/sql/parser.h>
 
 #include <algorithm>
 #include <cstdint>
 #include <expected>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -155,6 +159,39 @@ std::vector<int64_t> CollectFirstColumnSorted(TTestRuntime& runtime) {
     return out;
 }
 
+// Four row groups give the source four scan lanes. The lanes share one batch
+// cursor, so threaded lanes can read it concurrently.
+class TSplitSource final
+    : public TMockSource
+    , public NScheduler::IScanMetadataSource
+{
+public:
+    using TMockSource::TMockSource;
+
+    bool Next(TRowSet& rowSet) override {
+        std::lock_guard lock(Mutex_);
+        return TMockSource::Next(rowSet);
+    }
+
+    std::vector<NScheduler::TScanRowGroup> ScanRowGroups() const override {
+        return {
+            {.RowGroup = 0, .RowCount = 10, .ByteSize = 160},
+            {.RowGroup = 1, .RowCount = 10, .ByteSize = 160},
+            {.RowGroup = 2, .RowCount = 10, .ByteSize = 160},
+            {.RowGroup = 3, .RowCount = 10, .ByteSize = 160},
+        };
+    }
+
+private:
+    std::mutex Mutex_;
+};
+
+size_t CountTasks(const NScheduler::TTaskGraph& graph, std::string_view kind) {
+    return std::ranges::count_if(graph.Nodes(), [&](const auto& node) {
+        return node->DebugKind == kind;
+    });
+}
+
 } // namespace
 
 // A source drained more than once yields nothing the second time, so a correct
@@ -235,6 +272,43 @@ TEST(CteMaterialize, RuntimeFilterAfterSharedReaderDoesNotDeadlock) {
             expected.push_back(key);
         }
         EXPECT_EQ(keys, expected) << "threaded=" << threaded;
+    }
+}
+
+// Every lane of the definition writes its own spool segment, and every
+// reference reads the spool on as many lanes, each batch on one of them.
+TEST(CteMaterialize, ParallelSpoolKeepsDefinitionLanes) {
+    for (bool threaded : {false, true}) {
+        auto table = MakeTable(/*rows=*/40, /*batches=*/20);
+        TSplitSource t({"k", "v"}, std::move(table->Batches));
+        std::unordered_map<std::string, ISource*> sources = {{"t", &t}};
+        const std::string sql =
+            "WITH x AS (SELECT k, v FROM t WHERE v > 0) "
+            "SELECT k FROM x UNION ALL SELECT k FROM x";
+
+        NScheduler::TSettings settings;
+        settings.Queue.RowsetCapacityPerLane = 1;
+        settings.ScanSplit.Strategy = NScheduler::EScanSplitStrategy::RowGroupRange;
+        settings.ScanSplit.MaxScanTasks = 4;
+        if (threaded) {
+            settings.Scheduler.Mode = NScheduler::EExecutionMode::ThreadedScheduler;
+            settings.Scheduler.WorkerCount = 4;
+        }
+        auto lowered = NScheduler::LowerPlanToGraph(
+            BuildSqlPlan(sql, sources), settings, nullptr);
+        EXPECT_EQ(CountTasks(*lowered.Graph, "source"), 4u);
+        EXPECT_EQ(CountTasks(*lowered.Graph, "cte-producer"), 4u);
+        EXPECT_EQ(CountTasks(*lowered.Graph, "cte-consumer"), 8u);
+        EXPECT_EQ(lowered.Lanes, 8u);
+
+        auto runtime = RunSql(sql, sources, settings);
+        std::vector<int64_t> expected;
+        for (int64_t key = 1; key <= 40; ++key) {
+            expected.push_back(key);
+            expected.push_back(key);
+        }
+        EXPECT_EQ(CollectFirstColumnSorted(*runtime), expected)
+            << "threaded=" << threaded;
     }
 }
 
