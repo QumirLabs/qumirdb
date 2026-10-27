@@ -137,6 +137,9 @@
       (return (call aht_insert_dual ht key stored_witness out_is_new
         hash empty_slot #f))))
 
+  ;; Returns -2 instead of growing a table that holds RowSwitchGroups groups
+  ;; or more: the aggregate moves to the row layout (aggregation_rows.oz) and
+  ;; continues there with this key.
   (fun aht_upsert_aggregate [LookupKey StoredKey]
        ((var ht <ref HashTable>) (var key LookupKey)
         (var stored_witness StoredKey) (var out_is_new <ref i64>)
@@ -150,8 +153,18 @@
         (field ht Capacity) key hash empty_slot))
       (if (>= slot 0)
         (block (return slot)))
+      (var switch_groups = (field ht RowSwitchGroups))
+      (if (&& (> switch_groups 0) (>= (field ht Size) switch_groups))
+        (block
+          (if (call aht_insert_grows (field ht Size) (field ht Capacity))
+            (block (return -2)))))
       (return (call aht_insert_dual ht key stored_witness out_is_new
         hash empty_slot #t))))
+
+  ;; An insert grows the table before it would cross 7/8 of the capacity.
+  (fun aht_insert_grows ((var size i64) (var capacity i64)) -> bool
+    (attrs inline)
+    (block (return (> (+ size 1) (- capacity (>> capacity 3))))))
 
   ;; Keep ownership, allocation, and growth off the common hit path.
   (fun aht_insert_dual [LookupKey StoredKey]
@@ -162,8 +175,7 @@
       (var capacity = (field ht Capacity))
       (var keys = (cast (field ht Keys) <ptr StoredKey>))
       (var dense_slot = (field ht Size))
-      (if (> (+ dense_slot (: 1 i64))
-             (- capacity (>> capacity (: 3 i64))))
+      (if (call aht_insert_grows dense_slot capacity)
         (block
           (if (> capacity (: 576460752303423487 i64))
             (block (return (: -1 i64))))

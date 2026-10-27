@@ -3,6 +3,7 @@
 #include <qdb/modules/qumirdb_runtime.h>
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cstdint>
 #include <stdexcept>
@@ -12,7 +13,8 @@ namespace NQdb {
 
 namespace {
 
-// Mirrors the HashTable C layout from qdb/modules/qumirdb.cpp.
+// Mirrors the HashTable C layout from qdb/modules/qumirdb.cpp. The processor
+// reads only Size; the row layout's structs are the kernel's.
 struct THashTable {
     uint8_t* Keys = nullptr;
     uint8_t* Ctrl = nullptr;
@@ -27,6 +29,10 @@ struct THashTable {
     int64_t NumAggs = 0;
     int64_t NumKeys = 0;
     int64_t KeySize = 0;
+    std::array<uint8_t, TKernelCompiler::RowArenaSize + TKernelCompiler::RowTableSize
+        + TKernelCompiler::RowScratchSize> RowLayout = {};
+    int64_t RowSwitchGroups = 0;
+    int64_t RowExpectedGroups = 0;
 };
 static_assert(sizeof(THashTable) == TKernelCompiler::HashTableSize);
 

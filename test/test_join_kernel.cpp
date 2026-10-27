@@ -51,6 +51,11 @@ struct THashTable {
     int64_t NumAggs = 0;
     int64_t NumKeys = 0;
     int64_t KeySize = 0;
+    // The row layout of an aggregate, which a join does not use.
+    std::array<uint8_t, TKernelCompiler::RowArenaSize + TKernelCompiler::RowTableSize
+        + TKernelCompiler::RowScratchSize> RowLayout = {};
+    int64_t RowSwitchGroups = 0;
+    int64_t RowExpectedGroups = 0;
 };
 static_assert(sizeof(THashTable) == TKernelCompiler::HashTableSize);
 

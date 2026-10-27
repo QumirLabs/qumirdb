@@ -1615,11 +1615,43 @@ TAggReducerLayout BuildAggReducerLayout(
     return layout;
 }
 
+std::optional<TAggRowLayout> BuildAggRowLayout(
+    const TAggregateKeyDescriptor& key,
+    const TAggReducerLayout& layout,
+    bool hasEmptyInputGroups)
+{
+    const bool stringKey = std::ranges::any_of(key.Fields, [](const auto& field) {
+        return ContainsLogicalString(field.Type);
+    });
+    if (stringKey || HasStringReducer(layout) || hasEmptyInputGroups) {
+        return std::nullopt;
+    }
+    const bool wideKey = std::ranges::any_of(key.Fields, [](const auto& field) {
+        return IsBinIntStorageType(field.Type);
+    });
+    TAggRowLayout rows;
+    rows.KeyAlignment = wideKey ? 16 : 8;
+    const auto alignment = static_cast<size_t>(rows.KeyAlignment);
+    rows.KeyOffset = static_cast<int64_t>(AlignUp(8, alignment));
+    rows.KeyStride = static_cast<int64_t>(AlignUp(key.Size, alignment));
+    rows.StateOffset = rows.KeyOffset + rows.KeyStride;
+    rows.RowBytes = static_cast<int64_t>(AlignUp(
+        static_cast<size_t>(rows.StateOffset) + 8 * layout.NumAggBuffers, alignment));
+    return rows;
+}
+
 namespace {
 
-// The per-row parts of the aggregate update, which agg_dispatch places in its
-// loop over the rows of a batch. Each call builds new AST nodes, so a part
-// can be placed more than once.
+// Rows of a batch that one find-or-insert of the row layout takes at a time.
+// A chunk bounds the lookup scratch, and the groups it touches are still in
+// the cache when its last pass applies the values to them.
+constexpr int64_t AggRowChunkRows = 2048;
+// Rows per arena block of the row layout, as in the row join table.
+constexpr int64_t AggRowBlockRows = 16384;
+
+// The per-row parts of the aggregate update, shared by the swiss loop of
+// agg_dispatch and the passes of agg_rows_update. Each call builds new AST
+// nodes, so a part can be placed in both functions.
 class TAggregateUpdateAst {
 public:
     TAggregateUpdateAst(
@@ -1978,6 +2010,19 @@ private:
     std::map<int32_t, TArgColumn> ArgColumns_;
 };
 
+// A pointer to state word `word` of the group row `rowVar` (tagged as in
+// agr_find_or_insert: the caller masks bit 0 off first).
+NQumir::NAst::TExprPtr RowStateWord(
+    const std::string& rowVar, const TAggRowLayout& rows, int word)
+{
+    using namespace NQumir::NAst;
+    auto i64Type = std::make_shared<TIntegerType>();
+    return NOz::Cast(
+        NOz::Add(NOz::Cast(NOz::Ident(rowVar), i64Type),
+            NOz::TypedInt(rows.StateOffset + 8 * static_cast<int64_t>(word), i64Type)),
+        std::make_shared<TPointerType>(i64Type));
+}
+
 } // namespace
 
 NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
@@ -1988,7 +2033,8 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType,
     bool hasPrecomputedHash,
-    const std::vector<int64_t>& emptyInputGroups)
+    const std::vector<int64_t>& emptyInputGroups,
+    const std::optional<TAggRowLayout>& rows)
 {
     using namespace NQumir::NAst;
     NQumir::TLocation loc{};
@@ -1996,6 +2042,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     auto i64Type = std::make_shared<TIntegerType>();
     auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
     auto ptrI64Type = std::make_shared<TPointerType>(i64Type);
+    auto ptrKeyType = std::make_shared<TPointerType>(key.LookupType);
 
     auto ident = [&](const std::string& name) -> TExprPtr {
         return std::make_shared<TIdentExpr>(loc, name);
@@ -2042,7 +2089,15 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
 
     const TAggregateUpdateAst row(
         inputType, key, layout, columnType, rowSetType, hasPrecomputedHash);
-    std::vector<TExprPtr> update = row.Prologue();
+    std::vector<TExprPtr> update;
+    if (rows) {
+        update.push_back(NOz::If(call("agr_active", {ident("ht")}), block({
+            NOz::Return(call("agg_rows_update", {ident("ht"), ident("batch"), numI64(0)})),
+        })));
+    }
+    for (auto& stmt : row.Prologue()) {
+        update.push_back(std::move(stmt));
+    }
     update.push_back(var("state_slot", i64Type));
     update.push_back(assign("state_slot", numI64(-1)));
     update.push_back(var("is_new", i64Type));
@@ -2069,10 +2124,26 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
             ident("is_new"),
             ident("hash_value"),
         })),
-        std::make_shared<TIfExpr>(loc,
-            binary("<", ident("state_slot"), numI64(0)),
-            block({std::make_shared<TReturnExpr>(loc, numI64(-1))}), nullptr),
     };
+    if (rows) {
+        // The table moves to the row layout instead of growing; the rest of
+        // the batch, this row included, goes there.
+        validBody.push_back(NOz::If(binary("==", ident("state_slot"), numI64(-2)), block({
+            NOz::If(NOz::Unary(TOperator("!"), call("agr_from_swiss", {
+                    ident("ht"),
+                    numI64(rows->KeyOffset),
+                    numI64(rows->StateOffset),
+                    numI64(rows->RowBytes),
+                    numI64(AggRowBlockRows),
+                    cast(numI64(0), ptrKeyType),
+                })),
+                block({NOz::Return(numI64(-1))})),
+            NOz::Return(call("agg_rows_update", {ident("ht"), ident("batch"), ident("i")})),
+        })));
+    }
+    validBody.push_back(std::make_shared<TIfExpr>(loc,
+        binary("<", ident("state_slot"), numI64(0)),
+        block({std::make_shared<TReturnExpr>(loc, numI64(-1))}), nullptr));
     auto ptrPtrI64Type = std::make_shared<TPointerType>(ptrI64Type);
     validBody.push_back(var("agg_buffers", ptrPtrI64Type));
     validBody.push_back(assign("agg_buffers", field("ht", "AggBuffers")));
@@ -2149,14 +2220,35 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
         init = block(std::move(seed));
     }
     auto destroyStmts = StringCleanupCalls(layout);
-    destroyStmts.push_back(call("aht_destroy", {ident("ht")}));
+    // agr_destroy frees a table in either layout.
+    destroyStmts.push_back(call(rows ? "agr_destroy" : "aht_destroy", {ident("ht")}));
     destroyStmts.push_back(numI64(1));
-    auto destroy = block(std::move(destroyStmts));
-    auto dispatch = std::make_shared<TIfExpr>(loc,
-        binary("==", ident("op"), numI64(0)), std::move(init),
-        std::make_shared<TIfExpr>(loc,
-            binary("==", ident("op"), numI64(1)), block(std::move(update)),
-            std::move(destroy)));
+
+    // The operations of EAggregateKernelOp (compiler.h); any other returns 0.
+    auto opIs = [&](int64_t op) {
+        return binary("==", ident("op"), numI64(op));
+    };
+    TExprPtr dispatch = numI64(0);
+    if (rows) {
+        dispatch = NOz::If(opIs(5),
+            block({NOz::FieldAssign(ident("ht"), "RowExpectedGroups", ident("arg")), numI64(1)}),
+            std::move(dispatch));
+        dispatch = NOz::If(opIs(4),
+            block({NOz::FieldAssign(ident("ht"), "RowSwitchGroups", ident("arg")), numI64(1)}),
+            std::move(dispatch));
+        dispatch = NOz::If(opIs(3),
+            cast(call("agr_init", {
+                ident("ht"), ident("arg"),
+                numI64(static_cast<int64_t>(layout.NumAggBuffers)),
+                numI64(static_cast<int64_t>(key.Size)),
+                numI64(rows->RowBytes),
+                numI64(AggRowBlockRows),
+            }), i64Type),
+            std::move(dispatch));
+    }
+    dispatch = NOz::If(opIs(2), block(std::move(destroyStmts)), std::move(dispatch));
+    dispatch = NOz::If(opIs(1), block(std::move(update)), std::move(dispatch));
+    dispatch = NOz::If(opIs(0), std::move(init), std::move(dispatch));
     auto body = std::make_shared<TBlockExpr>(loc,
         std::vector<TExprPtr>{std::make_shared<TReturnExpr>(loc, dispatch)});
     auto function = std::make_shared<TFunDecl>(
@@ -2164,11 +2256,138 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     return std::make_shared<TBlockExpr>(loc, std::vector<TExprPtr>{function});
 }
 
+NQumir::NAst::TExprPtr GenGenericAggregateRowsUpdateAst(
+    const NQumir::NAst::TStructType& inputType,
+    const TAggregateKeyDescriptor& key,
+    const TAggReducerLayout& layout,
+    const TAggRowLayout& rows,
+    NQumir::NAst::TTypePtr columnType,
+    NQumir::NAst::TTypePtr rowSetType,
+    NQumir::NAst::TTypePtr hashTableType,
+    bool hasPrecomputedHash)
+{
+    using namespace NQumir::NAst;
+    auto i64Type = std::make_shared<TIntegerType>();
+    auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
+    auto u8Type = std::make_shared<TIntegerType>(TIntegerType::U8);
+    auto ptrKeyType = std::make_shared<TPointerType>(key.LookupType);
+    auto numI64 = [&](int64_t value) { return NOz::TypedInt(value, i64Type); };
+    auto binary = [&](const char* op, TExprPtr left, TExprPtr right) {
+        return NOz::Bin(TOperator(op), std::move(left), std::move(right));
+    };
+    auto scratch = [&](const std::string& name) {
+        return NOz::Field(NOz::Field("ht", "RowScratch"), name);
+    };
+    auto failure = [&]() {
+        return NOz::Block({NOz::Return(numI64(-1))});
+    };
+
+    const TAggregateUpdateAst row(
+        inputType, key, layout, columnType, rowSetType, hasPrecomputedHash);
+    NOz::TFunBuilder builder("agg_rows_update");
+    builder.Param("ht", std::make_shared<TReferenceType>(AsNamed("HashTable", hashTableType)))
+        .Param("batch", std::make_shared<TReferenceType>(AsNamed("TRowSet", rowSetType)))
+        .Param("start", i64Type)
+        .Return(i64Type);
+    for (auto& stmt : row.Prologue()) {
+        builder.Stmt(std::move(stmt));
+    }
+    builder
+        .Stmt(NOz::If(NOz::Unary(TOperator("!"), NOz::Call("rt_scratch_reserve", {
+                NOz::Field("ht", "RowScratch"),
+                numI64(AggRowChunkRows),
+                numI64(rows.KeyStride),
+            })),
+            failure()))
+        .Var("hashes", std::make_shared<TPointerType>(u64Type))
+        .Assign("hashes", scratch("Hashes"))
+        .Var("rows", std::make_shared<TPointerType>(i64Type))
+        .Assign("rows", scratch("Rows"))
+        .Var("keys", std::make_shared<TPointerType>(u8Type))
+        .Assign("keys", scratch("Keys"))
+        .Var("groups", std::make_shared<TPointerType>(u64Type))
+        .Assign("groups", scratch("Entries"))
+        .Var("i", i64Type)
+        .Assign("i", NOz::Ident("start"));
+
+    // Pass 1, the only one that reads the keys: the key and hash of every
+    // selected row of the chunk.
+    std::vector<TExprPtr> collect = row.Key("i");
+    collect.push_back(NOz::ArrayAssign("rows", NOz::Ident("cnt"), NOz::Ident("i")));
+    collect.push_back(NOz::ArrayAssign("hashes", NOz::Ident("cnt"), NOz::Ident("hash_value")));
+    // The scratch keys keep the row layout's key alignment (KeyStride).
+    collect.push_back(NOz::Var("key_slot", ptrKeyType));
+    collect.push_back(NOz::Assign("key_slot", NOz::Cast(
+        NOz::Add(NOz::Cast(NOz::Ident("keys"), i64Type),
+            NOz::Mul(NOz::Ident("cnt"), numI64(rows.KeyStride))),
+        ptrKeyType)));
+    collect.push_back(NOz::ArrayAssign("key_slot", numI64(0), NOz::Ident("key_value")));
+    collect.push_back(NOz::Assign("cnt", NOz::Add(NOz::Ident("cnt"), numI64(1))));
+
+    // The last pass applies every row to its group: the row's states are the
+    // buffers, at slot 0.
+    std::vector<TExprPtr> apply = {
+        NOz::Var("r", i64Type),
+        NOz::Assign("r", NOz::Index("rows", NOz::Ident("j"))),
+        NOz::Var("group", u64Type),
+        NOz::Assign("group", NOz::Index("groups", NOz::Ident("j"))),
+        NOz::Var("is_new", i64Type),
+        NOz::Assign("is_new", NOz::Cast(
+            binary("&", NOz::Ident("group"), NOz::TypedInt(1, u64Type)), i64Type)),
+        NOz::Var("group_row", std::make_shared<TPointerType>(u8Type)),
+        NOz::Assign("group_row", NOz::Cast(NOz::Cast(
+            binary("&", NOz::Ident("group"), NOz::TypedInt(-2, u64Type)), i64Type),
+            std::make_shared<TPointerType>(u8Type))),
+        NOz::Var("state_slot", i64Type),
+        NOz::Assign("state_slot", numI64(0)),
+    };
+    for (auto& stmt : row.Arguments("r")) {
+        apply.push_back(std::move(stmt));
+    }
+    for (auto& stmt : row.Reducers([&](int word) {
+             return RowStateWord("group_row", rows, word);
+         }))
+    {
+        apply.push_back(std::move(stmt));
+    }
+    apply.push_back(NOz::Assign("j", NOz::Add(NOz::Ident("j"), numI64(1))));
+
+    auto chunk = NOz::Block({
+        NOz::Var("cnt", i64Type),
+        NOz::Assign("cnt", numI64(0)),
+        NOz::While(
+            binary("&&", binary("<", NOz::Ident("i"), NOz::Ident("n")),
+                binary("<", NOz::Ident("cnt"), numI64(AggRowChunkRows))),
+            NOz::Block({
+                NOz::If(row.Selected("i"), NOz::Block(std::move(collect))),
+                NOz::Assign("i", NOz::Add(NOz::Ident("i"), numI64(1))),
+            })),
+        // Passes 2 and 3: agr_find_or_insert in aggregation_rows.oz.
+        NOz::If(NOz::Unary(TOperator("!"), NOz::Call("agr_find_or_insert", {
+                NOz::Ident("ht"),
+                NOz::Ident("cnt"),
+                numI64(rows.KeyOffset),
+                numI64(rows.KeyStride),
+                numI64(rows.StateOffset),
+                NOz::Cast(numI64(0), ptrKeyType),
+            })),
+            failure()),
+        NOz::Var("j", i64Type),
+        NOz::Assign("j", numI64(0)),
+        NOz::While(binary("<", NOz::Ident("j"), NOz::Ident("cnt")), NOz::Block(std::move(apply))),
+    });
+    builder
+        .Stmt(NOz::While(binary("<", NOz::Ident("i"), NOz::Ident("n")), std::move(chunk)))
+        .Stmt(NOz::Return(numI64(0)));
+    return NOz::Block({std::move(builder).Build()});
+}
+
 NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
     const TAggregateKeyDescriptor& key,
     const TAggReducerLayout& layout,
     NQumir::NAst::TTypePtr hashTableType,
-    NQumir::NAst::TTypePtr columnType)
+    NQumir::NAst::TTypePtr columnType,
+    const std::optional<TAggRowLayout>& rows)
 {
     using namespace NQumir::NAst;
     NQumir::TLocation loc{};
@@ -2230,19 +2449,24 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
                 TMaybeType<TStringType>(UnwrapNamedType(field.Type)));
         });
     const char* keyIndex = slotOrder ? "phys" : "slot";
+    // The output columns, which both layouts fill.
     std::vector<TExprPtr> project;
-    project.push_back(std::make_shared<TVarStmt>(loc, "group_keys", ptrKeyType));
-    project.push_back(std::make_shared<TAssignExpr>(loc, "group_keys",
+    // The swiss table's keys and states; with a row layout, they are read
+    // only while the table is swiss.
+    std::vector<TExprPtr> swissOnly;
+    auto& swiss = rows ? swissOnly : project;
+    swiss.push_back(std::make_shared<TVarStmt>(loc, "group_keys", ptrKeyType));
+    swiss.push_back(std::make_shared<TAssignExpr>(loc, "group_keys",
         std::make_shared<TCastExpr>(loc,
             std::make_shared<TFieldAccessExpr>(
                 loc, ident("ht"), slotOrder ? "Keys" : "GroupKeys"),
             ptrKeyType)));
     if (slotOrder) {
-        project.push_back(std::make_shared<TVarStmt>(loc, "ctrl", ptrU8Type));
-        project.push_back(std::make_shared<TAssignExpr>(loc, "ctrl",
+        swiss.push_back(std::make_shared<TVarStmt>(loc, "ctrl", ptrU8Type));
+        swiss.push_back(std::make_shared<TAssignExpr>(loc, "ctrl",
             std::make_shared<TFieldAccessExpr>(loc, ident("ht"), "Ctrl")));
-        project.push_back(std::make_shared<TVarStmt>(loc, "phys", i64Type));
-        project.push_back(std::make_shared<TAssignExpr>(loc, "phys", numI64(0)));
+        swiss.push_back(std::make_shared<TVarStmt>(loc, "phys", i64Type));
+        swiss.push_back(std::make_shared<TAssignExpr>(loc, "phys", numI64(0)));
     }
     if (!ptrColumnType) {
         throw std::invalid_argument(
@@ -2315,8 +2539,8 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
                 ptrFieldType)));
     }
     if (!layout.Reducers.empty()) {
-        project.push_back(std::make_shared<TVarStmt>(loc, "agg_buffers", ptrPtrI64Type));
-        project.push_back(std::make_shared<TAssignExpr>(loc, "agg_buffers",
+        swiss.push_back(std::make_shared<TVarStmt>(loc, "agg_buffers", ptrPtrI64Type));
+        swiss.push_back(std::make_shared<TAssignExpr>(loc, "agg_buffers",
             std::make_shared<TFieldAccessExpr>(loc, ident("ht"), "AggBuffers")));
         for (size_t i = 0; i < layout.Reducers.size(); ++i) {
             const auto& r = layout.Reducers[i];
@@ -2331,8 +2555,8 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
                             index(ident("output_buffers"), numI64(i)), i64Type),
                         ident("result")}));
             } else {
-                project.push_back(std::make_shared<TVarStmt>(loc, srcName, ptrI64Type));
-                project.push_back(std::make_shared<TAssignExpr>(loc, srcName,
+                swiss.push_back(std::make_shared<TVarStmt>(loc, srcName, ptrI64Type));
+                swiss.push_back(std::make_shared<TAssignExpr>(loc, srcName,
                     index(ident("agg_buffers"),
                         numI64(static_cast<int64_t>(r.ValueBufIdx)))));
                 auto output = index(ident("output_buffers"), numI64(static_cast<int64_t>(i)));
@@ -2350,8 +2574,8 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
                 }
                 if (r.IsBinInt()) {
                     const std::string hiName = "agg_hi_" + std::to_string(i);
-                    project.push_back(std::make_shared<TVarStmt>(loc, hiName, ptrI64Type));
-                    project.push_back(std::make_shared<TAssignExpr>(loc, hiName,
+                    swiss.push_back(std::make_shared<TVarStmt>(loc, hiName, ptrI64Type));
+                    swiss.push_back(std::make_shared<TAssignExpr>(loc, hiName,
                         index(ident("agg_buffers"),
                             numI64(static_cast<int64_t>(r.ExtraBufIdx)))));
                 }
@@ -2362,8 +2586,8 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
             // Bind the internal valid-count buffer so the slot loop can derive a
             // nullable aggregate's output mask (zero valid args => NULL result).
             const std::string validName = "validbuf_" + std::to_string(i);
-            project.push_back(std::make_shared<TVarStmt>(loc, validName, ptrI64Type));
-            project.push_back(std::make_shared<TAssignExpr>(loc, validName,
+            swiss.push_back(std::make_shared<TVarStmt>(loc, validName, ptrI64Type));
+            swiss.push_back(std::make_shared<TAssignExpr>(loc, validName,
                 index(ident("agg_buffers"), numI64(static_cast<int64_t>(r.ValidBufIdx)))));
         }
     }
@@ -2373,8 +2597,8 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
 
     // Dense output order is independent of the physical aggregate-state slot.
     if (!HasStringReducer(layout) && !slotOrder) {
-        project.push_back(std::make_shared<TVarStmt>(loc, "state_slots", ptrI64Type));
-        project.push_back(std::make_shared<TAssignExpr>(loc, "state_slots",
+        swiss.push_back(std::make_shared<TVarStmt>(loc, "state_slots", ptrI64Type));
+        swiss.push_back(std::make_shared<TAssignExpr>(loc, "state_slots",
             std::make_shared<TFieldAccessExpr>(loc, ident("ht"), "SlotId")));
     }
     auto stateSlot = [&]() -> TExprPtr {
@@ -2519,10 +2743,55 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
                 binary("+", ident("phys"), numI64(1))),
         };
     }
-    project.push_back(std::make_shared<TWhileStmtExpr>(loc,
+    swiss.push_back(std::make_shared<TWhileStmtExpr>(loc,
         std::make_shared<TBinaryExpr>(loc, TOperator("<"),
             ident("slot"), ident("result")),
         std::make_shared<TBlockExpr>(loc, std::move(loopStmts))));
+
+    if (rows) {
+        // A table in the row layout: a scan of the arena, in insertion order.
+        auto arena = [&](const std::string& name) {
+            return NOz::Field(NOz::Field("ht", "RowArena"), name);
+        };
+        auto rowStmts = groupStatements(
+            [&] { return NOz::Index("row_key", numI64(0)); },
+            [&](const std::string&, int word) {
+                return NOz::Index("row_states", numI64(word));
+            });
+        rowStmts.insert(rowStmts.begin(), {
+            NOz::Var("row_key", ptrKeyType),
+            NOz::Assign("row_key", NOz::Cast(
+                NOz::Add(NOz::Ident("row"), numI64(rows->KeyOffset)), ptrKeyType)),
+            NOz::Var("row_states", ptrI64Type),
+            NOz::Assign("row_states", NOz::Cast(
+                NOz::Add(NOz::Ident("row"), numI64(rows->StateOffset)), ptrI64Type)),
+        });
+        rowStmts.push_back(NOz::Assign("row", NOz::Add(NOz::Ident("row"), numI64(rows->RowBytes))));
+        std::vector<TExprPtr> scan = {
+            NOz::Var("blocks", std::make_shared<TPointerType>(ptrU8Type)),
+            NOz::Assign("blocks", arena("Blocks")),
+            NOz::Var("block_count", i64Type),
+            NOz::Assign("block_count", arena("BlockCount")),
+            NOz::Var("b", i64Type),
+            NOz::Assign("b", numI64(0)),
+            NOz::While(binary("<", NOz::Ident("b"), NOz::Ident("block_count")), NOz::Block({
+                NOz::Var("rows_in_block", i64Type),
+                NOz::Assign("rows_in_block", arena("BlockRows")),
+                NOz::If(binary("==", NOz::Ident("b"), binary("-", NOz::Ident("block_count"), numI64(1))),
+                    NOz::Block({NOz::Assign("rows_in_block", arena("CurRows"))})),
+                NOz::Var("row", i64Type),
+                NOz::Assign("row", NOz::Cast(NOz::Index("blocks", NOz::Ident("b")), i64Type)),
+                NOz::Var("end", i64Type),
+                NOz::Assign("end", NOz::Add(NOz::Ident("row"),
+                    NOz::Mul(NOz::Ident("rows_in_block"), numI64(rows->RowBytes)))),
+                NOz::While(binary("<", NOz::Ident("row"), NOz::Ident("end")),
+                    NOz::Block(std::move(rowStmts))),
+                NOz::Assign("b", NOz::Add(NOz::Ident("b"), numI64(1))),
+            })),
+        };
+        project.push_back(NOz::If(NOz::Call("agr_active", {NOz::Ident("ht")}),
+            NOz::Block(std::move(scan)), NOz::Block(std::move(swissOnly))));
+    }
 
     bodyStmts.push_back(std::make_shared<TIfExpr>(loc,
         std::make_shared<TBinaryExpr>(loc, TOperator(">="), ident("result"),
@@ -2540,10 +2809,13 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinishRowSetAst(
     const TAggReducerLayout& layout,
     NQumir::NAst::TTypePtr hashTableType,
     NQumir::NAst::TTypePtr columnType,
-    NQumir::NAst::TTypePtr rowSetType)
+    NQumir::NAst::TTypePtr rowSetType,
+    bool rowLayout)
 {
     using namespace NQumir::NAst;
     namespace Oz = NKernel::NOz;
+    // agr_destroy frees a table in either layout.
+    const char* destroy = rowLayout ? "agr_destroy" : "aht_destroy";
 
     // Conservative (native/wasm64) sizes, used only for qdb_alloc calls.
     // Real strides can be smaller under wasm32 (24 and 4 bytes), never
@@ -2689,7 +2961,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinishRowSetAst(
             Oz::Ident("ht"), Oz::Ident("key_bytes"), Oz::Ident("agg_bytes"),
             Oz::Ident("size")}));
     auto measureFailure = StringCleanupCalls(layout);
-    measureFailure.push_back(Oz::Call("aht_destroy", {Oz::Ident("ht")}));
+    measureFailure.push_back(Oz::Call(destroy, {Oz::Ident("ht")}));
     measureFailure.push_back(Oz::Return(number(-1)));
     builder.Stmt(Oz::If(
         Oz::Bin(TOperator("!="), Oz::Ident("measured"), Oz::Ident("size")),
@@ -2812,7 +3084,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinishRowSetAst(
         builder.Stmt(std::move(cleanup));
     }
     builder
-        .Stmt(Oz::Call("aht_destroy", {Oz::Ident("ht")}))
+        .Stmt(Oz::Call(destroy, {Oz::Ident("ht")}))
         .Stmt(Oz::If(
             Oz::Bin(TOperator("!="), Oz::Ident("finalized"), Oz::Ident("size")),
             Oz::Block({Oz::Return(number(-1))})))

@@ -86,6 +86,11 @@ struct TOperatorKernelSpec {
     // integer key column; the other key columns are NULL. A SQL global aggregate seeds
     // its constant marker (1); a grouping-sets aggregate seeds its empty sets.
     std::vector<int64_t> EmptyInputGroups;
+
+    // An aggregate's kernels also serve the row layout of its table
+    // (kernel/aggregation/aggregation_rows.oz) when it can have one; without
+    // it, the table is always swiss.
+    bool AggregateRowLayout = false;
 };
 
 std::string_view KernelKindName(EOperatorKernelKind kind);
