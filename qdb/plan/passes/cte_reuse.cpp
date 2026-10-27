@@ -183,69 +183,86 @@ ECteReuseMode ChooseMode(const TCteDefinition& def, const TCteUsageInfo& usage) 
 
 namespace {
 
-using TRefPredicates = std::unordered_map<TCteDefinition*, std::vector<TExprPtr>>;
-
-// One entry per reference; nullptr marks a reference with no filter directly
-// above it (needs every row, so nothing is shareable for its definition).
-void CollectRefPredicates(const TOperatorPtr& op, TRefPredicates& out) {
+// The plan slots that hold the references to `def`: each holds the filter
+// directly above a reference or, when there is none, the reference itself.
+void CollectReferenceSlots(
+    TOperatorPtr& op, const TCteDefinition& def, std::vector<TOperatorPtr*>& out)
+{
     if (!op) {
         return;
     }
-    if (auto filter = TMaybeOp<TFilterOperator>(op)) {
-        if (auto ref = TMaybeOp<TCteRef>(filter.Cast()->Input())) {
-            out[ref.Cast()->Def().get()].push_back(filter.Cast()->Predicate());
+    if (auto maybeFilter = TMaybeOp<TFilterOperator>(op)) {
+        auto maybeRef = TMaybeOp<TCteRef>(maybeFilter.Cast()->Input());
+        if (maybeRef && maybeRef.Cast()->Def().get() == &def) {
+            out.push_back(&op);
             return;
         }
     }
-    if (auto ref = TMaybeOp<TCteRef>(op)) {
-        out[ref.Cast()->Def().get()].push_back(nullptr);
+    if (auto maybeRef = TMaybeOp<TCteRef>(op)) {
+        if (maybeRef.Cast()->Def().get() == &def) {
+            out.push_back(&op);
+        }
         return;
     }
-    for (const auto& input : op->Inputs()) {
-        CollectRefPredicates(input, out);
+    for (auto& input : op->MutableInputs()) {
+        CollectReferenceSlots(input, def, out);
     }
 }
 
-TExprPtr BuildPushablePredicate(
-    const TCteDefinition& def,
-    const std::vector<TExprPtr>& refs)
+// The predicate the definition can apply for its consumers. The only consumer
+// owns the definition's rows, so its filter moves into the definition whole.
+// Several consumers share the rows: the definition gets the superset of their
+// filters, and each consumer keeps its own. A reference without a filter needs
+// every row, so nothing is pushed then.
+TExprPtr TakePushablePredicate(
+    const TCteDefinition& def, const std::vector<TOperatorPtr*>& slots)
 {
-    if (refs.size() < 2) {
-        return nullptr;
+    if (slots.size() == 1) {
+        auto maybeFilter = TMaybeOp<TFilterOperator>(*slots.front());
+        if (!maybeFilter) {
+            return nullptr;
+        }
+        auto filter = maybeFilter.Cast();
+        *slots.front() = filter->Input();
+        return filter->Predicate();
     }
     auto* schema = static_cast<TStructType*>(def.OutputType.get());
     if (!schema) {
         return nullptr;
     }
-    return BuildPredicateSuperset(*schema, refs);
+    std::vector<TExprPtr> predicates;
+    for (auto* slot : slots) {
+        auto maybeFilter = TMaybeOp<TFilterOperator>(*slot);
+        predicates.push_back(maybeFilter ? maybeFilter.Cast()->Predicate() : nullptr);
+    }
+    return BuildPredicateSuperset(*schema, predicates);
 }
 
 } // namespace
 
 void PushConsumerPredicatesIntoDefinitions(
-    const TOperatorPtr& main,
+    TOperatorPtr& main,
     const NKernel::TAnnotationContext& context,
     TConstFolder& folder)
 {
-    TRefPredicates refs;
-    CollectRefPredicates(main, refs);
-    auto defs = CollectCteDefinitions(main);
-    for (const auto& def : defs) {
-        CollectRefPredicates(def->Plan, refs);
-    }
-    for (const auto& def : defs) {
-        auto it = refs.find(def.get());
-        if (it == refs.end()) {
-            continue;
+    auto defs = CollectCteDefinitions(main); // dependency-first
+    // Consumers first: a predicate pushed into a definition can reach the
+    // references in its plan and go on into the definitions they read.
+    for (auto it = defs.rbegin(); it != defs.rend(); ++it) {
+        auto& def = **it;
+        std::vector<TOperatorPtr*> slots;
+        CollectReferenceSlots(main, def, slots);
+        for (const auto& other : defs) {
+            CollectReferenceSlots(other->Plan, def, slots);
         }
-        auto pushable = BuildPushablePredicate(*def, it->second);
+        auto pushable = TakePushablePredicate(def, slots);
         if (!pushable) {
             continue;
         }
-        def->Plan = PushDownPredicates(
-            std::make_shared<TFilterOperator>(def->Plan, std::move(pushable)), folder);
-        AnnotateTypes(def->Plan, context);
-        EstimateStats(def->Plan, folder);
+        def.Plan = PushDownPredicates(
+            std::make_shared<TFilterOperator>(def.Plan, std::move(pushable)), folder);
+        AnnotateTypes(def.Plan, context);
+        EstimateStats(def.Plan, folder);
     }
 }
 

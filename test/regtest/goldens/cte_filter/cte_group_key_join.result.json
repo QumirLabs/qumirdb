@@ -1,0 +1,21 @@
+{
+  "schema": "<struct (form string) (iv <named Nullable [i64]>) (s <named Nullable [string]>) (total <named Nullable [i64]>)>",
+  "rows": [
+    ["cte", "10", "aaa", "56"],
+    ["cte", "10", "apple", "56"],
+    ["cte", "10", "apricot", "14"],
+    ["cte", "10", "avocado", "41"],
+    ["cte", "10", "banana", "67"],
+    ["cte", "10", "blue", "35"],
+    ["cte", "10", "cherry", "7"],
+    ["cte", "10", null, "45"],
+    ["derived", "10", "aaa", "56"],
+    ["derived", "10", "apple", "56"],
+    ["derived", "10", "apricot", "14"],
+    ["derived", "10", "avocado", "41"],
+    ["derived", "10", "banana", "67"],
+    ["derived", "10", "blue", "35"],
+    ["derived", "10", "cherry", "7"],
+    ["derived", "10", null, "45"]
+  ]
+}

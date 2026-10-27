@@ -12,6 +12,7 @@
     "cte_chain3.sql": {"order": "unordered"},
     "cte_like.sql": {"order": "unordered"},
     "cte_twice.sql": {"order": "unordered"},
-    "cte_computed.sql": {"order": "unordered"}
+    "cte_computed.sql": {"order": "unordered"},
+    "cte_group_key_join.sql": {"order": "unordered"}
   }
 }

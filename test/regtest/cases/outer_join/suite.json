@@ -51,6 +51,7 @@
     "simplify_right_to_inner.sql": {"order": "unordered", "execute": true},
     "simplify_full_keeps_full.sql": {"order": "unordered", "execute": true},
     "simplify_case_keeps_left.sql": {"order": "unordered", "execute": true},
-    "simplify_in_item_keeps_left.sql": {"order": "unordered", "execute": true}
+    "simplify_in_item_keeps_left.sql": {"order": "unordered", "execute": true},
+    "key_transfer.sql": {"order": "ordered"}
   }
 }

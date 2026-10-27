@@ -151,6 +151,32 @@ join left [c_custkey = o_custkey]
   appearing null-extended with `count = 0`.
 - `WHERE` conjuncts from above are pushed only onto the **preserved** side; the
   rest are materialized above the join.
+- A conjunct pushed onto the preserved side also restricts the null-extended
+  side when the `ON` equates each of its columns with a null-extended column of
+  the same type and the conjunct rejects NULLs. A null-extended row matches
+  only preserved rows that hold the same non-NULL values in those columns, and
+  every preserved row passes the conjunct, so the rows the copy drops match
+  nothing; the join never returns unmatched rows of the null-extended side.
+  The copy never goes the other way: an unmatched preserved row is returned
+  whatever the other side holds. This is the inference through equalities of
+  predicate move-around (Levy, Mumick and Sagiv, "Query Optimization by
+  Predicate Move-Around", VLDB 1994, pp. 96-107), in the one direction an outer
+  join allows.
+
+```
+customer LEFT JOIN orders ON c_custkey = o_custkey WHERE c_custkey < 100
+=>
+join left [c_custkey = o_custkey]
+├─ filter (< c_custkey 100)
+│  └─ source customer
+└─ filter (< o_custkey 100)                 # copied through the ON equality
+   └─ source orders
+```
+
+  Over aggregated inputs the copy passes the aggregate when the column is a
+  grouping key. TPC-DS q78 joins three per-year aggregates `ss`, `ws` and `cs`
+  with `ss LEFT JOIN ws ON ws_sold_year = ss_sold_year ...` and filters
+  `ss_sold_year = 2000`; the copies make `ws` and `cs` aggregate one year too.
 
 ## Preserved inputs
 

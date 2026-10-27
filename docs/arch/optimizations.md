@@ -297,6 +297,25 @@ The pass also pushes into derived tables and factors disjunctions
 : from
 `(a=1 AND x) OR (a=1 AND y)` it extracts the common `a=1` so it can sink.
 
+**Through the keys of an outer join.** A null-rejecting conjunct pushed onto
+the preserved side of a LEFT or RIGHT join is also copied onto the
+null-extended side when the `ON` equates its columns with null-extended columns:
+rows the copy drops cannot match a preserved row. See
+[predicate_pushdown.md](predicate_pushdown.md#processouterjoin-left--right--full).
+
+```sql
+SELECT s.k, r.n FROM s LEFT JOIN r ON r.k = s.k WHERE s.k = 1;
+```
+
+```
+before                              after
+filter (== |s.k| 1)                 join left [s.k = r.k]
+└─ join left [s.k = r.k]            ├─ filter (== |s.k| 1)
+   ├─ source s AS s                 │  └─ source s AS s
+   └─ source r AS r                 └─ filter (== |r.k| 1)
+                                       └─ source r AS r
+```
+
 **Into UNION ALL branches, with dead-branch elimination.** `ProcessUnion`
  rewrites each pushed conjunct into the branch's own column
 names, substitutes *closed* projections — a branch column whose expression
@@ -490,8 +509,38 @@ Runs once after every plan (main plus each definition) has been optimized.
 
 ### 3.1 PushConsumerPredicatesIntoDefinitions / PropagateCteDemands
 
-A predicate that every consumer applies is pushed into the definition, and the
-definition's output schema is narrowed to the union of what consumers demand.
+A definition is optimized as its own plan, so a consumer's filter first stops
+at its `cte-ref`. This pass then pushes consumer filters into the definition
+with the regular predicate pushdown. The filter of a single reference moves
+into the definition whole: its rows belong to that one consumer, so the
+predicate goes as deep as in the same query written with a derived table. The
+definition keeps the join order it got without the predicate. With several
+references the definition gets the disjunction of their filters, which keeps
+every row some consumer needs, and each consumer keeps its own filter.
+Consumers go before the definitions they read, so a predicate pushed into one
+definition goes on into the definitions it references.
+
+```sql
+WITH s AS (SELECT d.y AS y, f.item AS item, sum(f.q) AS q
+           FROM f JOIN d ON f.dk = d.k GROUP BY d.y, f.item)
+SELECT * FROM s WHERE y = 2000;
+```
+
+```
+before (projections omitted)            after
+filter (== y 2000)                      aggregate keys=[d.y, f.item]
+└─ aggregate keys=[d.y, f.item]         └─ join inner [d.k = f.dk]
+   └─ join inner [d.k = f.dk]              ├─ filter (== |d.y| 2000)
+      ├─ source d AS d                     │  └─ source d AS d
+      └─ source f AS f                     └─ source f AS f
+```
+
+The filter passes the aggregate because it constrains a grouping key, then
+reaches the `d` scan, where row-group pruning and the join's runtime filter
+pick it up.
+
+The definition's output schema is then narrowed to the union of what consumers
+demand.
 
 ### 3.2 ApplyLateMaterialization
 
