@@ -1,0 +1,5 @@
+{
+  "version": 1,
+  "schema": "<struct (k <named Nullable [i64]>) (part i32) (enabled bool) (value i64)>",
+  "rows": [["1", "1", true, "10"], ["1", "2", true, "20"], ["2", "1", false, "30"], [null, "1", true, "40"], ["3", "1", true, "50"]]
+}

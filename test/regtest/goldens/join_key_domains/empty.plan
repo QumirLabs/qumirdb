@@ -1,0 +1,7 @@
+project (value, v, w) (rows≈2 cost≈8.8K)
+└─ join inner [g.k = f.k] emit-filter 1 from right (rows≈2 cost≈8.8K)
+   ├─ source g AS g use-filter 1 keys=[g.k] (rows≈6 cost≈96)
+   └─ join inner [f.k = d.k] (rows≈1 cost≈4.4K)
+      ├─ source f AS f (rows≈5 cost≈80)
+      └─ filter (&& |d.enabled| (== |d.k| 999)) (rows≈1 cost≈170)
+         └─ source d AS d row-groups (&& |d.enabled| (== |d.k| 999)) (rows≈5 cost≈85)

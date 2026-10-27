@@ -1,0 +1,7 @@
+project (value, v, w) (rows≈60 cost≈12.9K)
+└─ join inner residual (== |f.part| (cast |g.k| i32)) (rows≈60 cost≈11.5K)
+   ├─ join inner residual (== (cast |d.k| i32) |f.part|) (rows≈10 cost≈4.6K)
+   │  ├─ filter |d.enabled| (rows≈2 cost≈170)
+   │  │  └─ source d AS d row-groups |d.enabled| (rows≈5 cost≈85)
+   │  └─ source f AS f (rows≈5 cost≈60)
+   └─ source g AS g (rows≈6 cost≈96)

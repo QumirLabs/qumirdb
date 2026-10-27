@@ -741,6 +741,184 @@ TEST(AttachRuntimeFilters, ReuseMapsCompositeKeysInProducerOrder) {
         (std::vector<std::string>{"u", "v"}));
 }
 
+struct TInnerDomainChain {
+    std::shared_ptr<TJoinOperator> Root;
+    std::shared_ptr<TJoinOperator> First;
+    TOperatorPtr Third;
+};
+
+TInnerDomainChain MakeInnerDomainChain(EJoinType type = EJoinType::Inner,
+    TTypePtr thirdType = I64Type())
+{
+    auto first = std::make_shared<TFakeSource>(
+        std::vector<std::pair<std::string, TTypePtr>>{{"a", I64Type()}});
+    auto second = std::make_shared<TFakeSource>(
+        std::vector<std::pair<std::string, TTypePtr>>{{"b", I64Type()}});
+    auto third = std::make_shared<TFakeSource>(
+        std::vector<std::pair<std::string, TTypePtr>>{{"c", thirdType}});
+    auto joined = MakeJoin(first, second, {{"a", "b"}}, EJoinType::Inner);
+    EXPECT_TRUE(joined.has_value());
+    auto root = MakeJoin(*joined, third, {{"b", "c"}}, type);
+    EXPECT_TRUE(root.has_value());
+    first->Stats_ = RowsWithKeyNdv(100, "a", 100);
+    second->Stats_ = RowsWithKeyNdv(1'000'000, "b", 1'000'000);
+    third->Stats_ = RowsWithKeyNdv(1'000'000, "c", 1'000'000);
+    // Deliberately uncertain intermediate estimates: the reuse rule must use
+    // the earlier domain's statistics rather than require accurate fanout.
+    (*joined)->Stats_ = RowsWithKeyNdv(3'000'000, "a", 1'000'000);
+    (*joined)->Stats_->ColumnStats["b"] =
+        RowsWithKeyNdv(3'000'000, "b", 1'000'000)->ColumnStats.at("b");
+    return {std::static_pointer_cast<TJoinOperator>(*root),
+        std::static_pointer_cast<TJoinOperator>(*joined), third};
+}
+
+TEST(AttachRuntimeFilters, ReusesInnerDomainThroughTransitiveKeys) {
+    for (uint32_t nextId : {0u, 1u}) {
+        auto chain = MakeInnerDomainChain();
+        AttachRuntimeFilters(chain.Root, nextId);
+        ASSERT_TRUE(chain.First->RuntimeFilter());
+        EXPECT_FALSE(chain.Root->RuntimeFilter());
+        ASSERT_EQ(chain.Third->RuntimeFilterUses.size(), 1u);
+        EXPECT_EQ(chain.Third->RuntimeFilterUses[0].Id,
+            chain.First->RuntimeFilter()->Id);
+        EXPECT_EQ(chain.Third->RuntimeFilterUses[0].ProbeKeys,
+            (std::vector<std::string>{"c"}));
+        EXPECT_TRUE(chain.First->Left()->RuntimeFilterUses.empty());
+        ASSERT_EQ(chain.First->Right()->RuntimeFilterUses.size(), 1u);
+    }
+}
+
+TEST(AttachRuntimeFilters, InnerDomainReuseRequiresSavedWorkAndStatistics) {
+    for (bool known : {false, true}) {
+        auto chain = MakeInnerDomainChain();
+        chain.First->Stats_ = RowsWithKeyNdv(3'000'000, "b", 100);
+        chain.Third->Stats_ = known
+            ? RowsWithKeyNdv(1'000'000, "c", 100) : nullptr;
+        uint32_t nextId = 1;
+        AttachRuntimeFilters(chain.Root, nextId);
+        ASSERT_TRUE(chain.First->RuntimeFilter());
+        EXPECT_TRUE(chain.Third->RuntimeFilterUses.empty());
+    }
+}
+
+TEST(AttachRuntimeFilters, InnerDomainDoesNotCrossJoinTypeBarriers) {
+    for (auto type : {EJoinType::Left, EJoinType::Right, EJoinType::Full,
+             EJoinType::LeftSemi, EJoinType::RightSemi,
+             EJoinType::LeftAnti, EJoinType::RightAnti}) {
+        SCOPED_TRACE(static_cast<int>(type));
+        auto chain = MakeInnerDomainChain(type);
+        uint32_t nextId = 1;
+        AttachRuntimeFilters(chain.Root, nextId);
+        ASSERT_TRUE(chain.First->RuntimeFilter());
+        EXPECT_TRUE(chain.Third->RuntimeFilterUses.empty());
+    }
+}
+
+TEST(AttachRuntimeFilters, InnerDomainRequiresMatchingTypesAndNullSemantics) {
+    for (int variant = 0; variant < 3; ++variant) {
+        auto chain = MakeInnerDomainChain(EJoinType::Inner,
+            variant == 0
+                ? std::make_shared<TIntegerType>(TIntegerType::I32) : I64Type());
+        if (variant == 1) {
+            chain.Root->MutableKeys()[0].NullsEqual = true;
+        } else if (variant == 2) {
+            chain.First->MutableKeys()[0].NullsEqual = true;
+        }
+        uint32_t nextId = 1;
+        AttachRuntimeFilters(chain.Root, nextId);
+        ASSERT_TRUE(chain.First->RuntimeFilter());
+        EXPECT_TRUE(chain.Third->RuntimeFilterUses.empty());
+    }
+}
+
+TEST(AttachRuntimeFilters, InnerDomainRespectsComputedProjectionBoundary) {
+    for (const auto& expression : {"c", "(+ c 1)"}) {
+        auto chain = MakeInnerDomainChain();
+        auto projected = MakeProject(chain.Third, {{"mapped", expression}});
+        ASSERT_TRUE(projected.has_value());
+        AnnotateTypes(*projected);
+        (*projected)->Stats_ = RowsWithKeyNdv(1'000'000, "mapped", 1'000'000);
+        chain.Root->MutableRight() = *projected;
+        chain.Root->MutableKeys()[0].Right = "mapped";
+        uint32_t nextId = 1;
+        AttachRuntimeFilters(chain.Root, nextId);
+        ASSERT_TRUE(chain.First->RuntimeFilter());
+        const bool direct = expression == std::string("c");
+        ASSERT_EQ(chain.Third->RuntimeFilterUses.size(), direct ? 1u : 0u);
+        ASSERT_EQ((*projected)->RuntimeFilterUses.size(), direct ? 0u : 1u);
+        const auto& use = direct
+            ? chain.Third->RuntimeFilterUses[0]
+            : (*projected)->RuntimeFilterUses[0];
+        EXPECT_EQ(use.Id, chain.First->RuntimeFilter()->Id);
+        EXPECT_EQ(use.ProbeKeys,
+            (std::vector<std::string>{direct ? "c" : "mapped"}));
+    }
+}
+
+TEST(AttachRuntimeFilters, KeepsAnExistingBuildIndependentOfItsProbeDomain) {
+    auto chain = MakeInnerDomainChain();
+    chain.Root->MutableKeys()[0].Left = "a";
+    chain.First->Stats_ = RowsWithKeyNdv(10'000'000, "a", 1'000'000);
+    chain.Third->Stats_ = RowsWithKeyNdv(100'000, "c", 100'000);
+    uint32_t nextId = 1;
+    AttachRuntimeFilters(chain.Root, nextId);
+    ASSERT_TRUE(chain.Root->RuntimeFilter());
+    ASSERT_TRUE(chain.First->RuntimeFilter());
+    EXPECT_EQ(chain.Root->RuntimeFilter()->BuildSide, EJoinFilterSide::Right);
+    ASSERT_EQ(chain.First->Left()->RuntimeFilterUses.size(), 1u);
+    EXPECT_EQ(chain.First->Left()->RuntimeFilterUses[0].Id,
+        chain.Root->RuntimeFilter()->Id);
+    // The first domain waits for C. Making C consume that domain would cycle.
+    EXPECT_TRUE(chain.Third->RuntimeFilterUses.empty());
+}
+
+TEST(AttachRuntimeFilters, ReplacesARepeatedInnerDomainBuildWhenCheaper) {
+    auto chain = MakeInnerDomainChain();
+    chain.First->Stats_ = RowsWithKeyNdv(1'000'000, "b", 100);
+    chain.Third->Stats_ = RowsWithKeyNdv(5'000'000, "c", 5'000'000);
+    uint32_t nextId = 1;
+    AttachRuntimeFilters(chain.Root, nextId);
+    ASSERT_TRUE(chain.First->RuntimeFilter());
+    EXPECT_FALSE(chain.Root->RuntimeFilter());
+    ASSERT_EQ(chain.Third->RuntimeFilterUses.size(), 1u);
+    EXPECT_EQ(chain.Third->RuntimeFilterUses[0].Id,
+        chain.First->RuntimeFilter()->Id);
+    EXPECT_EQ(nextId, 3u) << "the redundant producer was removed, not rebuilt";
+}
+
+TEST(AttachRuntimeFilters, InnerDomainMapsTheCompleteTupleInProducerOrder) {
+    auto source = [](const std::string& a, const std::string& b) {
+        return std::make_shared<TFakeSource>(
+            std::vector<std::pair<std::string, TTypePtr>>{
+                {a, I64Type()}, {b, I64Type()}});
+    };
+    auto stats = [](uint64_t rows, const std::string& a,
+                     const std::string& b, uint64_t ndv) {
+        auto value = RowsWithKeyNdv(rows, a, ndv);
+        value->ColumnStats[b] = RowsWithKeyNdv(rows, b, ndv)->ColumnStats.at(b);
+        return value;
+    };
+    auto a = source("a", "b");
+    auto b = source("x", "y");
+    auto c = source("u", "v");
+    auto first = MakeJoin(a, b, {{"a", "x"}, {"b", "y"}}, EJoinType::Inner);
+    ASSERT_TRUE(first.has_value());
+    auto root = MakeJoin(*first, c,
+        {{"y", "v"}, {"x", "u"}}, EJoinType::Inner);
+    ASSERT_TRUE(root.has_value());
+    a->Stats_ = stats(100, "a", "b", 5);
+    b->Stats_ = stats(1'000'000, "x", "y", 1'000);
+    c->Stats_ = stats(1'000'000, "u", "v", 1'000);
+    (*first)->Stats_ = stats(3'000'000, "x", "y", 1'000'000);
+    uint32_t nextId = 1;
+    AttachRuntimeFilters(*root, nextId);
+    ASSERT_EQ(c->RuntimeFilterUses.size(), 1u);
+    EXPECT_EQ(c->RuntimeFilterUses[0].Id,
+        static_cast<TJoinOperator&>(**first).RuntimeFilter()->Id);
+    EXPECT_EQ(c->RuntimeFilterUses[0].ProbeKeys,
+        (std::vector<std::string>{"u", "v"}));
+}
+
 TEST(AttachRuntimeFilters, RejectsUnsafeManualOuterDirection) {
     auto join = JoinOfType(EJoinType::Left);
     ASSERT_TRUE(join);
