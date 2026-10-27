@@ -166,8 +166,15 @@ NQumir::NAst::TExprPtr GenProjectKernelAst(
 // Byte layout of a group in the row layout of the aggregate table
 // (kernel/aggregation/aggregation_rows.oz): the hash word, the key at
 // KeyOffset, then one i64 state word per AggBuffers slot from StateOffset.
+// LLVM aligns a key that holds a decimal (an i128) to 16 bytes and may load it
+// with instructions that require that alignment, so such a key starts at a
+// multiple of 16 in the row and in the lookup scratch, and rows and scratch
+// keys keep it by their strides, multiples of KeyAlignment.
 struct TAggRowLayout {
+    int64_t KeyAlignment = 8;
     int64_t KeyOffset = 0;
+    // The stride of the keys in the lookup scratch.
+    int64_t KeyStride = 0;
     int64_t StateOffset = 0;
     int64_t RowBytes = 0;
 };

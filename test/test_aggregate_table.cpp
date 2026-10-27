@@ -9,7 +9,9 @@
 #include <qdb/exec/instrumentation/operator.h>
 #include <qdb/exec/planner_helpers.h>
 #include <qdb/io/io.h>
+#include <qdb/kernel/aggregate_key.h>
 #include <qdb/kernel/compiler.h>
+#include <qdb/kernel/gen.h>
 #include <qdb/kernel/lib.h>
 #include <qdb/kernel/spec.h>
 #include <qdb/plan/types/decimal.h>
@@ -115,7 +117,7 @@ constexpr const char* RowEntries = R"(
   (fun test_rows_reserve ((var ht <ref HashTable>) (var n i64)) -> bool
     (block (return (call jr_scratch_reserve (field ht RowScratch) n 8))))
   (fun test_rows_find ((var ht <ref HashTable>) (var count i64)) -> bool
-    (block (return (call agr_find_or_insert ht count 8 16 (cast 0 <ptr i64>)))))
+    (block (return (call agr_find_or_insert ht count 8 8 16 (cast 0 <ptr i64>)))))
   (fun test_rows_from_swiss ((var ht <ref HashTable>)) -> bool
     (block (return (call agr_from_swiss ht 8 16 24 4 (cast 0 <ptr i64>)))))
   (fun test_swiss_init ((var ht <ref HashTable>) (var capacity i64)) -> bool
@@ -772,6 +774,41 @@ TEST(AggregateTable, MovesToRowsInsideABatch) {
         EXPECT_EQ(run.EndedInRows, plan.Layout == EAggregateTableLayout::Row || plan.RowSwitchGroups);
         EXPECT_EQ(Sorted(run.Rows), rows);
     }
+}
+
+TEST(AggregateTable, RowLayoutAlignsKeysThatHoldADecimal) {
+    auto i64 = std::make_shared<TIntegerType>();
+    auto i32 = std::make_shared<TIntegerType>(TIntegerType::I32);
+    TStructType input({
+        {"d", std::make_shared<TDecimal>(20, 0)},
+        {"b", i32},
+        {"k", i64},
+    });
+    const auto states = NKernel::BuildAggReducerLayout(
+        {"count", "sum"}, {NKernel::TAggArg{}, NKernel::TAggArg{.ColumnIndex = 2}});
+    // LLVM loads an i128 key field with instructions that need 16-byte
+    // alignment on x86-64, so the key's offset in the row, the row stride and
+    // the stride of the scratch keys are multiples of 16.
+    for (const std::vector<std::string>& keys : std::vector<std::vector<std::string>>{
+             {"d"}, {"d", "b"}, {"d", "b", "k"}})
+    {
+        const auto key = NKernel::BuildAggregateKeyDescriptor(input, keys);
+        const auto rows = NKernel::BuildAggRowLayout(key, states, false);
+        ASSERT_TRUE(rows);
+        EXPECT_EQ(rows->KeyAlignment, 16);
+        EXPECT_EQ(rows->KeyOffset % 16, 0);
+        EXPECT_EQ(rows->KeyStride % 16, 0);
+        EXPECT_EQ(rows->RowBytes % 16, 0);
+        EXPECT_GE(rows->KeyStride, static_cast<int64_t>(key.Size));
+        EXPECT_EQ(rows->StateOffset, rows->KeyOffset + rows->KeyStride);
+        EXPECT_GE(rows->RowBytes, rows->StateOffset + 16);
+    }
+    const auto narrow = NKernel::BuildAggRowLayout(
+        NKernel::BuildAggregateKeyDescriptor(input, {"k", "b"}), states, false);
+    ASSERT_TRUE(narrow);
+    EXPECT_EQ(narrow->KeyOffset, 8);
+    EXPECT_EQ(narrow->KeyStride, 16);
+    EXPECT_EQ(narrow->RowBytes, 40);
 }
 
 TEST(AggregateTable, RowLayoutReportsItsMemory) {

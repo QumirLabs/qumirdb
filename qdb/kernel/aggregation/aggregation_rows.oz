@@ -102,7 +102,9 @@
           (= q (+ q 1))))))
 
   ;; Finds or inserts the group of every row j in [0, count) of the scratch,
-  ;; whose Keys[j] and Hashes[j] the caller stored. Afterwards Entries[j] is the
+  ;; whose key (at Keys + j * key_stride) and Hashes[j] the caller stored. The
+  ;; stride keeps the key at the alignment its type needs, as key_offset does
+  ;; in the row. Afterwards Entries[j] is the
   ;; group's row; bit 0 is set for the row that inserted the group, so that the
   ;; caller applies it to zero states as a new group (rows are 8-byte aligned).
   ;;
@@ -112,15 +114,15 @@
   ;; them inserts the group and the others find it. A row whose candidate holds
   ;; another key moves past it and seeks again with the next pass.
   (fun agr_find_or_insert [Key] ((var ht <ref HashTable>) (var count i64)
-                                 (var key_offset i64) (var state_offset i64)
-                                 (var witness <ptr Key>)) -> bool
+                                 (var key_offset i64) (var key_stride i64)
+                                 (var state_offset i64) (var witness <ptr Key>)) -> bool
     (block
       (var hashes = (field (field ht RowScratch) Hashes))
       (var salts = (field (field ht RowScratch) Salts))
       (var offsets = (field (field ht RowScratch) Offsets))
       (var found = (field (field ht RowScratch) Entries))
       (var work = (field (field ht RowScratch) Work))
-      (var keys = (cast (field (field ht RowScratch) Keys) <ptr Key>))
+      (var keys = (cast (field (field ht RowScratch) Keys) i64))
       (var num_aggs = (field ht NumAggs))
       (call jr_seek_all (field ht RowIndex) (field ht RowScratch) count)
       (var k = count)
@@ -159,6 +161,7 @@
               (var j = q)
               (if (! first) (block (= j (index work q))))
               (var off = (index offsets j))
+              (var key = (cast (+ keys (* j key_stride)) <ptr Key>))
               (var e = (index entries (cast off i64)))
               (if (== e (: 0 u64))
                 (block
@@ -167,7 +170,7 @@
                   (var words = (cast row <ptr u64>))
                   (= words [0] (index hashes j))
                   (var row_key = (cast (+ (cast row i64) key_offset) <ptr Key>))
-                  (= row_key [0] (index keys j))
+                  (= row_key [0] (index key 0))
                   (var states = (cast (+ (cast row i64) state_offset) <ptr i64>))
                   (var w = 0)
                   (while (< w num_aggs)
@@ -183,7 +186,7 @@
                   (if (== (>> e (: 48 u64)) (index salts j))
                     (block
                       (var row_key = (cast (+ (cast row i64) key_offset) <ptr Key>))
-                      (= matched (call rh_key_equal (index row_key 0) (index keys j)))))
+                      (= matched (call rh_key_equal (index row_key 0) (index key 0)))))
                   (if matched
                     (block (= found [j] (cast (cast row i64) u64)))
                     (block

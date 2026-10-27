@@ -1626,10 +1626,17 @@ std::optional<TAggRowLayout> BuildAggRowLayout(
     if (stringKey || HasStringReducer(layout) || hasEmptyInputGroups) {
         return std::nullopt;
     }
+    const bool wideKey = std::ranges::any_of(key.Fields, [](const auto& field) {
+        return IsBinIntStorageType(field.Type);
+    });
     TAggRowLayout rows;
-    rows.KeyOffset = 8;
-    rows.StateOffset = static_cast<int64_t>(AlignUp(8 + key.Size, 8));
-    rows.RowBytes = rows.StateOffset + 8 * static_cast<int64_t>(layout.NumAggBuffers);
+    rows.KeyAlignment = wideKey ? 16 : 8;
+    const auto alignment = static_cast<size_t>(rows.KeyAlignment);
+    rows.KeyOffset = static_cast<int64_t>(AlignUp(8, alignment));
+    rows.KeyStride = static_cast<int64_t>(AlignUp(key.Size, alignment));
+    rows.StateOffset = rows.KeyOffset + rows.KeyStride;
+    rows.RowBytes = static_cast<int64_t>(AlignUp(
+        static_cast<size_t>(rows.StateOffset) + 8 * layout.NumAggBuffers, alignment));
     return rows;
 }
 
@@ -2282,15 +2289,15 @@ NQumir::NAst::TExprPtr GenGenericAggregateRowsUpdateAst(
         .Stmt(NOz::If(NOz::Unary(TOperator("!"), NOz::Call("jr_scratch_reserve", {
                 NOz::Field("ht", "RowScratch"),
                 numI64(AggRowChunkRows),
-                numI64(static_cast<int64_t>(key.Size)),
+                numI64(rows.KeyStride),
             })),
             failure()))
         .Var("hashes", std::make_shared<TPointerType>(u64Type))
         .Assign("hashes", scratch("Hashes"))
         .Var("rows", std::make_shared<TPointerType>(i64Type))
         .Assign("rows", scratch("Rows"))
-        .Var("keys", ptrKeyType)
-        .Assign("keys", NOz::Cast(scratch("Keys"), ptrKeyType))
+        .Var("keys", std::make_shared<TPointerType>(u8Type))
+        .Assign("keys", scratch("Keys"))
         .Var("groups", std::make_shared<TPointerType>(u64Type))
         .Assign("groups", scratch("Entries"))
         .Var("i", i64Type)
@@ -2301,7 +2308,13 @@ NQumir::NAst::TExprPtr GenGenericAggregateRowsUpdateAst(
     std::vector<TExprPtr> collect = row.Key("i");
     collect.push_back(NOz::ArrayAssign("rows", NOz::Ident("cnt"), NOz::Ident("i")));
     collect.push_back(NOz::ArrayAssign("hashes", NOz::Ident("cnt"), NOz::Ident("hash_value")));
-    collect.push_back(NOz::ArrayAssign("keys", NOz::Ident("cnt"), NOz::Ident("key_value")));
+    // The scratch keys keep the row layout's key alignment (KeyStride).
+    collect.push_back(NOz::Var("key_slot", ptrKeyType));
+    collect.push_back(NOz::Assign("key_slot", NOz::Cast(
+        NOz::Add(NOz::Cast(NOz::Ident("keys"), i64Type),
+            NOz::Mul(NOz::Ident("cnt"), numI64(rows.KeyStride))),
+        ptrKeyType)));
+    collect.push_back(NOz::ArrayAssign("key_slot", numI64(0), NOz::Ident("key_value")));
     collect.push_back(NOz::Assign("cnt", NOz::Add(NOz::Ident("cnt"), numI64(1))));
 
     // The last pass applies every row to its group: the row's states are the
@@ -2347,6 +2360,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateRowsUpdateAst(
                 NOz::Ident("ht"),
                 NOz::Ident("cnt"),
                 numI64(rows.KeyOffset),
+                numI64(rows.KeyStride),
                 numI64(rows.StateOffset),
                 NOz::Cast(numI64(0), ptrKeyType),
             })),
