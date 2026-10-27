@@ -664,7 +664,16 @@ rows are emitted once with NULLs for the absent side. A residual or runtime
 filter requires the preserved build side. Building first delays the probe input
 but avoids retaining and hashing it; outer joins without estimates and FULL
 joins keep the symmetric path. A FULL join with a residual marks matched rows
-on both sides of that path. See [join.md](join.md).
+on both sides of that path.
+
+Semi and anti joins choose among the same three options with the inner join's
+margin. A right build side stores the distinct right keys and emits each left
+stream row once at its probe. A left build side stores the left rows, marks the
+ones the right stream matches, and emits the marked (semi) or unmarked (anti)
+rows when the stream ends, so a small outer query never hashes its large
+subquery. The symmetric path stores the left rows and the distinct right keys.
+A residual requires the left build side, whose marks only accepted pairs set.
+See [join.md](join.md).
 
 ```
 SELECT big.c, u.d FROM big, u WHERE big.a = u.a;   -- threaded, 4 scan tasks

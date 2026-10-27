@@ -101,8 +101,9 @@ EJoinBuildSide ChooseJoinBuildSide(
 
 // Whether the row join table (kernel/join/join_rows.oz) serves a join under
 // this table setting and build side: an equi-join without a residual that is
-// inner, or outer with a null-supplying build side (a preserved one needs
-// matched marks). The table has no adaptive mode, so the build side is fixed.
+// inner, outer with a null-supplying build side, or SEMI/ANTI with its left
+// side built (a preserved outer build side needs matched marks). The table has
+// no adaptive mode, so the build side is fixed.
 bool RowJoinTableServes(
     const TJoinOperator& join,
     NScheduler::EJoinTableKind table,

@@ -170,7 +170,8 @@ constexpr const char* CacheSchemaVersion = "v1";
 // Join dispatch entrypoints take the residual's string arena.
 // qumirdb.oz gains upper and lower, which map strings in blocks of 16 bytes.
 // The row join table pads the unmatched probe rows of an outer join.
-constexpr const char* KernelLibVersion = "52";
+// Semi and anti joins can build their left side and mark its rows.
+constexpr const char* KernelLibVersion = "53";
 } // namespace
 
 NQumir::NCodeGen::TLlvmRunner::TLinkedModule CompileKernelAstCached(
@@ -2540,18 +2541,23 @@ TRowJoinKernels TKernelCompiler::CompileRowJoin(
     const bool streamsPreserved = buildIsLeft
         ? spec.JoinType == EJoinType::Right
         : spec.JoinType == EJoinType::Left;
-    if ((spec.JoinType != EJoinType::Inner && !streamsPreserved)
+    // A SEMI/ANTI join that builds its left side marks the rows it matches.
+    const bool marksBuild = buildIsLeft
+        && (spec.JoinType == EJoinType::LeftSemi || spec.JoinType == EJoinType::LeftAnti);
+    if ((spec.JoinType != EJoinType::Inner && !streamsPreserved && !marksBuild)
         || !spec.Expressions.empty() || spec.JoinKeys.empty()) {
         throw NQumir::TError(
-            "CompileRowJoin: only inner joins and outer joins that build their null-supplying "
-            "side are supported, as equi-joins without a residual");
+            "CompileRowJoin: only inner joins, outer joins that build their null-supplying "
+            "side and semi/anti joins that build their left side are supported, as "
+            "equi-joins without a residual");
     }
 
     const auto keyDesc = JoinKeyDescriptorOf(*leftType, *rightType, JoinKeysOf(spec));
     const auto& buildType = buildIsLeft
         ? *leftType
         : *rightType;
-    const auto layout = NKernel::BuildRowJoinLayout(buildType, keyDesc);
+    const auto layout = NKernel::BuildRowJoinLayout(buildType, keyDesc, marksBuild);
+    const bool keepsNullKeyRows = marksBuild && spec.JoinType == EJoinType::LeftAnti;
 
     auto buildKeyColumns = std::make_shared<std::vector<int64_t>>();
     auto probeKeyColumns = std::make_shared<std::vector<int64_t>>();
@@ -2597,14 +2603,22 @@ TRowJoinKernels TKernelCompiler::CompileRowJoin(
             program.push_back(std::move(f));
         }
         program.push_back(NKernel::GenRowJoinAppendAst(
-            keyDesc, layout, "jr_append_batch", types, spec.HasPrecomputedHash));
+            keyDesc, layout, "jr_append_batch", types, spec.HasPrecomputedHash,
+            /*nullKeys=*/false));
+        if (keepsNullKeyRows) {
+            program.push_back(NKernel::GenRowJoinAppendAst(
+                keyDesc, layout, "jr_append_null_keys", types, spec.HasPrecomputedHash,
+                /*nullKeys=*/true));
+        }
         program.push_back(NKernel::GenRowJoinProbeAst(
             keyDesc, layout, /*probeIsLeft=*/!buildIsLeft,
             /*emitUnmatched=*/streamsPreserved, "jr_probe_batch", types,
             spec.HasPrecomputedHash));
-        program.push_back(NKernel::GenRowJoinDispatchAst(keyDesc, layout, types));
+        program.push_back(NKernel::GenRowJoinDispatchAst(keyDesc, layout, types, spec.JoinType));
         program.push_back(NKernel::GenRowJoinMaterializeAst(
-            *leftType, *rightType, buildIsLeft, layout, types));
+            *leftType, *rightType, buildIsLeft,
+            marksBuild ? NKernel::EJoinOutputColumns::Left : NKernel::EJoinOutputColumns::LeftRight,
+            layout, types));
         return program;
     };
 
@@ -2623,6 +2637,8 @@ TRowJoinKernels TKernelCompiler::CompileRowJoin(
     kernels.RetainsBuildBatches = layout.HasString;
     kernels.ProbeMeasure.Kernel = CompileInstrumentation();
     kernels.ProbeMeasure.Widths = InstrumentationColumnWidths(buildIsLeft ? rightType : leftType);
+    kernels.EmitsByMark = marksBuild;
+    kernels.KeepsNullKeyRows = keepsNullKeyRows;
     kernels.Dispatch = [slot, buildKeyColumns, probeKeyColumns](
         void* arena,
         void* table,
@@ -2630,7 +2646,9 @@ TRowJoinKernels TKernelCompiler::CompileRowJoin(
         void* pairs,
         TRowSet* batch,
         int64_t op) {
-        const auto* keyColumns = op == static_cast<int64_t>(ERowJoinKernelOp::Append)
+        const bool appends = op == static_cast<int64_t>(ERowJoinKernelOp::Append)
+            || op == static_cast<int64_t>(ERowJoinKernelOp::AppendNullKeys);
+        const auto* keyColumns = appends
             ? buildKeyColumns->data() : probeKeyColumns->data();
         return reinterpret_cast<TDispatchFn>(slot->Fns[0])(
             arena, table, scratch, pairs, batch, keyColumns, op);
@@ -2660,7 +2678,6 @@ TJoinKernels TKernelCompiler::CompileJoin(
     using namespace NQumir::NAst;
 
     const bool isSemiAnti = (type == EJoinType::LeftSemi || type == EJoinType::LeftAnti);
-    const bool isResidualSemiAnti = isSemiAnti && static_cast<bool>(residualPredicate);
     const bool isOuter =
         (type == EJoinType::Left || type == EJoinType::Right || type == EJoinType::Full);
     const bool isMark = type == EJoinType::LeftMark;
@@ -2759,17 +2776,17 @@ TJoinKernels TKernelCompiler::CompileJoin(
         program.push_back(NKernel::GenJoinProbeAst(keyDesc, /*isLeft=*/false,
             "jt_probe_right_stream", columnType, rowSetType, hashTableType, pairBufferType,
             stringViewType, hasPrecomputedHash, /*markMatched=*/type == EJoinType::Left));
-        if (isResidualSemiAnti) {
+        if (isSemiAnti) {
             program.push_back(NKernel::GenJoinInsertRowsOnlyAst(
                 keyDesc, /*isLeft=*/true, "jt_insert_left_only",
                 columnType, rowSetType, hashTableType, pairBufferType,
                 stringViewType, hasPrecomputedHash));
             program.push_back(NKernel::GenJoinProbeMarkAst(
-                keyDesc, /*isLeft=*/false, "jt_probe_right_mark",
+                keyDesc, /*keyDecides=*/!residualPredicate, "jt_probe_right_mark",
                 columnType, rowSetType, hashTableType, pairBufferType,
                 stringViewType, hasPrecomputedHash));
         }
-        if (isSemiAnti && !isResidualSemiAnti) {
+        if (isSemiAnti && !residualPredicate) {
             program.push_back(NKernel::GenJoinInsertKeyOnlyAst(
                 keyDesc, "jt_insert_key_only",
                 columnType, rowSetType, hashTableType, pairBufferType,

@@ -15,7 +15,7 @@
   ;; Probe `build` for `key` and emit one pair per matching stored row. is_left
   ;; orders the emitted pair as (left, right): non-zero means the current row is
   ;; left, zero means it is right. A non-zero `mark` sets the sign bit of the
-  ;; stored row id of every build row that gets a pair, so jt_emit_unmarked can
+  ;; stored row id of every build row that gets a pair, so jt_emit_by_mark can
   ;; find the rows of a streaming outer join that never matched. Returns #f only
   ;; on PairBuffer allocation failure.
   (fun jt_probe_and_emit [LookupKey StoredKey] ((var build <ref HashTable>)
@@ -82,7 +82,7 @@
   ;; emitted pair as (left, right). A non-zero `mark` marks the matched rows of
   ;; the opposite table and stores `own_row_id` marked when it matched, so a
   ;; FULL join with a residual finds the unmatched rows of both tables with
-  ;; jt_emit_unmarked. Returns #f only on allocation failure.
+  ;; jt_emit_by_mark. Returns #f only on allocation failure.
   (fun jt_emit_and_insert [LookupKey StoredKey] ((var own <ref HashTable>)
                            (var opp <ref HashTable>)
                            (var key LookupKey)
@@ -115,13 +115,15 @@
         (block (return #f)))
       (return #t)))
 
-  ;; Finalizer of an outer join that marks matched rows (a streaming LEFT/RIGHT
-  ;; join, a FULL join with a residual): push every stored row of `build` left
-  ;; unmarked, with the null row id on the other side. is_left is non-zero
-  ;; when `build` holds the left rows.
-  (fun jt_emit_unmarked ((var build <ref HashTable>)
-                         (var is_left i64)
-                         (var pairs <ref PairBuffer>)) -> bool
+  ;; Finalizer of a join that marks its build rows (a streaming LEFT/RIGHT
+  ;; join, a FULL join with a residual, a SEMI / ANTI join that builds its
+  ;; left side): push every stored row of `build` whose mark is `marked`, with
+  ;; the null row id on the other side. is_left is non-zero when `build` holds
+  ;; the left rows.
+  (fun jt_emit_by_mark ((var build <ref HashTable>)
+                        (var is_left i64)
+                        (var marked bool)
+                        (var pairs <ref PairBuffer>)) -> bool
     (block
       (var aggs = (field build AggBuffers))
       (var counts = (index aggs (: 0 i64)))
@@ -137,9 +139,13 @@
           (= k (: 0 i64))
           (while (< k bcount)
             (block
-              (var build_row_id = (index bdata k))
-              (if (>= build_row_id (: 0 i64))
+              (var stored = (index bdata k))
+              (var emit = (< stored (: 0 i64)))
+              (if (! marked) (block (= emit (! emit))))
+              (if emit
                 (block
+                  ;; Row ids are non-negative, so this only drops a mark.
+                  (var build_row_id = (& stored (: 9223372036854775807 i64)))
                   (if (!= is_left (: 0 i64))
                     (block
                       (if (! (call pb_push pairs build_row_id (: -1 i64)))
@@ -151,9 +157,8 @@
           (= slot (+ slot (: 1 i64)))))
       (return #t)))
 
-  ;; Insert a stored row under `key` without probing the opposite table.
-  ;; Used by residual SEMI / ANTI: the right table is an i64 matched-id set, not
-  ;; a join-key table, so left build must not call jt_probe_and_emit first.
+  ;; Insert a stored row under `key` without probing the opposite table: the
+  ;; left rows of a SEMI / ANTI or mark join, whose right table holds no rows.
   (fun jt_insert_row_only [LookupKey StoredKey] ((var own <ref HashTable>)
                            (var key LookupKey)
                            (var stored_witness StoredKey)

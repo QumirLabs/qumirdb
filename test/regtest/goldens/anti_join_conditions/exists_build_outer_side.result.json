@@ -1,0 +1,13 @@
+{
+  "schema": "<struct (kind string) (id i64)>",
+  "rows": [
+    ["anti residual", "2"],
+    ["anti residual", "3"],
+    ["anti residual", "4"],
+    ["anti", "2"],
+    ["anti", "3"],
+    ["semi residual", "1"],
+    ["semi", "1"],
+    ["semi", "4"]
+  ]
+}

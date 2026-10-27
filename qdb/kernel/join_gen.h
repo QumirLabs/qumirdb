@@ -116,12 +116,14 @@ NQumir::NAst::TExprPtr GenMarkJoinProbeAst(
     NQumir::NAst::TTypePtr stringViewType,
     bool hasPrecomputedHash = false);
 
-// Generates residual SEMI/ANTI right-side probe: reads right batch keys, probes
-// the left build table, applies jt_residual_filter, and marks matched left row
-// ids in the matched-id table instead of emitting output pairs.
+// Generates the right stream probe of a SEMI/ANTI join that builds its left
+// side: reads right batch keys, probes the left build table and marks the left
+// rows that jt_residual_filter accepts instead of emitting output pairs
+// (jt_probe_and_mark). keyDecides says the join has no residual, so a key
+// match marks a whole bucket.
 NQumir::NAst::TExprPtr GenJoinProbeMarkAst(
     const TJoinKeyDescriptor& key,
-    bool isLeft,
+    bool keyDecides,
     const std::string& funcName,
     NQumir::NAst::TTypePtr columnType,
     NQumir::NAst::TTypePtr rowSetType,
@@ -254,11 +256,16 @@ struct TRowJoinLayout {
     int64_t RowBytes = 0;
     bool HasString = false;
     std::vector<TRowJoinColumn> Columns;
+    // Byte offset of the mark byte of a SEMI/ANTI build side, which a probe
+    // sets on the rows it matches; -1 when the rows carry no mark.
+    int64_t MarkOffset = -1;
 };
 
+// `marked` gives the rows a mark byte.
 TRowJoinLayout BuildRowJoinLayout(
     const NQumir::NAst::TStructType& buildType,
-    const TJoinKeyDescriptor& key);
+    const TJoinKeyDescriptor& key,
+    bool marked);
 
 // External types the row join generators refer to by name.
 struct TRowJoinGenTypes {
@@ -272,13 +279,17 @@ struct TRowJoinGenTypes {
 };
 
 // jr_append_batch(arena, batch, key_columns) -> bool: appends every selected
-// row with a valid key to the arena with its hash, key and payload.
+// row with a valid key to the arena with its hash, key and payload, and an
+// unset mark when the layout has one. With nullKeys it appends the selected
+// rows whose key is NULL instead: the rows an ANTI join emits without a probe,
+// which it keeps in an arena that no table indexes.
 NQumir::NAst::TExprPtr GenRowJoinAppendAst(
     const TJoinKeyDescriptor& key,
     const TRowJoinLayout& layout,
     const std::string& funcName,
     const TRowJoinGenTypes& types,
-    bool hasPrecomputedHash);
+    bool hasPrecomputedHash,
+    bool nullKeys);
 
 // jr_probe_batch(table, scratch, batch, key_columns, pairs) -> bool: reads the
 // key and hash of every selected probe row into the scratch, then runs the
@@ -286,7 +297,8 @@ NQumir::NAst::TExprPtr GenRowJoinAppendAst(
 // which push one (left, right) pair per matching build row. With
 // emitUnmatched, the probe side is the preserved side of an outer join: a
 // selected row without a match, NULL keys included, gets one pair with a null
-// row pointer.
+// row pointer. When the layout has a mark, the build side is the preserved
+// side of a SEMI/ANTI join: a match marks the build rows and pushes no pair.
 NQumir::NAst::TExprPtr GenRowJoinProbeAst(
     const TJoinKeyDescriptor& key,
     const TRowJoinLayout& layout,
@@ -297,19 +309,24 @@ NQumir::NAst::TExprPtr GenRowJoinProbeAst(
     bool hasPrecomputedHash);
 
 // jr_dispatch(arena, table, scratch, pairs, batch, key_columns, op) -> bool
-// (ERowJoinKernelOp).
+// (ERowJoinKernelOp). A layout with a mark adds EmitByMark, which emits the
+// marked rows of a LeftSemi join or the unmarked ones of a LeftAnti join, and
+// for LeftAnti AppendNullKeys.
 NQumir::NAst::TExprPtr GenRowJoinDispatchAst(
     const TJoinKeyDescriptor& key,
     const TRowJoinLayout& layout,
-    const TRowJoinGenTypes& types);
+    const TRowJoinGenTypes& types,
+    EJoinType type);
 
 // jr_materialize(pairs, stream, start, limit, out) -> i64: the probe side's
 // columns come from the stream batch through the jt_materialize_* workers,
-// the build side's from the rows through the jr_gather_* workers.
+// the build side's from the rows through the jr_gather_* workers. A SEMI/ANTI
+// join outputs the Left columns only, which it builds.
 NQumir::NAst::TExprPtr GenRowJoinMaterializeAst(
     const NQumir::NAst::TStructType& leftType,
     const NQumir::NAst::TStructType& rightType,
     bool buildIsLeft,
+    EJoinOutputColumns output,
     const TRowJoinLayout& layout,
     const TRowJoinGenTypes& types);
 

@@ -164,8 +164,13 @@ private:
     void DrainStreamingPairs(const TRowSet& streamBatch, EJoinSide streamSide);
     bool PullOneInputBatch(const TFetch& left, const TFetch& right);
     bool PullSemiAntiBatch(const TFetch& left, const TFetch& right);
+    // A SEMI/ANTI join that builds its right keys streams the left input; one
+    // that builds its left rows streams the right input and marks the left rows
+    // it matches. Auto runs the symmetric path, which stores both.
     bool StreamsSemiAntiLeft() const;
-    void FinalizeOuterJoin();
+    bool StreamsSemiAntiRight() const;
+    bool FinalizesPreservedRows() const;
+    void FinalizePreservedRows();
     void FinalizeSemiAntiJoin();
     EJoinProcessorResult ProcessSemiAnti(
         const TFetch& left, const TFetch& right, TRowSet& output);
@@ -176,7 +181,7 @@ private:
     TOperatorInstrumentation* Instrumentation_ = nullptr;
     EJoinType JoinType_ = EJoinType::Inner;
     EJoinBuildSide BuildSide_ = EJoinBuildSide::Auto;
-    bool OuterFinalized_ = false;
+    bool PreservedFinalized_ = false;
     bool SemiAntiFinalized_ = false;
     TRowStore LeftRows_;
     TRowStore RightRows_;
