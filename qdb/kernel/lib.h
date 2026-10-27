@@ -55,10 +55,10 @@ std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError>
 BuildCrossJoinKernelLibrary();
 
 // Row join library: the shared HashTable/pair-buffer base, the output
-// materializer and join_rows.oz (row arena, salted pointer table, probe scratch
-// and the row gather/store helpers). The per-query append/build/probe
-// functions and the jr_dispatch entry are generated in join_gen.cpp and
-// appended by TKernelCompiler::CompileRowJoin.
+// materializer, row_table.oz (row arena, salted pointer table, lookup scratch)
+// and join_rows.oz (the join's chains, marks and the row gather/store
+// helpers). The per-query append/build/probe functions and the jr_dispatch
+// entry are generated in join_gen.cpp and appended by TKernelCompiler::CompileRowJoin.
 std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError>
 BuildRowJoinKernelLibrary();
 

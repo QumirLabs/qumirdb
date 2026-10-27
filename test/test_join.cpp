@@ -763,7 +763,7 @@ private:
 // rt_mix multiplies by this odd constant, 2^64 divided by the golden ratio.
 constexpr uint64_t FibonacciMultiplier = 0x9E3779B97F4A7C15;
 
-// The entries of a row table (join_rows.oz): one 8-byte word per slot, 0 when
+// The entries of a row table (row_table.oz): one 8-byte word per slot, 0 when
 // empty, else a 16-bit salt above a 48-bit pointer to a row that lives
 // elsewhere. Probing is linear from the home slot.
 class TRowEntries {
