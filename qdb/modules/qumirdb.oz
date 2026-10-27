@@ -58,8 +58,8 @@
     (Capacity i64)
     (Data <ptr i64>)>)
 
-  ;; Row join table (kernel/join/join_rows.oz): build rows in fixed-size blocks.
-  (type JoinArena <struct
+  ;; Row table (kernel/row_table.oz): rows in fixed-size blocks.
+  (type RowArena <struct
     (Blocks <ptr <ptr u8>>)
     (BlockCount i64)
     (BlockCapacity i64)
@@ -69,7 +69,7 @@
     (CurRows i64)>)
 
   ;; Entries hold a 16-bit salt above a 48-bit row pointer; index = hash >> Shift.
-  (type JoinTable <struct
+  (type RowTable <struct
     (Entries <ptr u64>)
     (Capacity i64)
     (Mask u64)
@@ -77,8 +77,8 @@
     (Rows i64)
     (Keys i64)>)
 
-  ;; Per-probe-batch scratch of the row join, one slot per selected row.
-  (type JoinScratch <struct
+  ;; Per-batch lookup scratch of the row table, one slot per looked-up row.
+  (type RowScratch <struct
     (Hashes <ptr u64>)
     (Salts <ptr u64>)
     (Offsets <ptr u64>)

@@ -132,7 +132,7 @@ TEST(JoinKernel, PairBufferLayout) {
     for (const auto& type : NQumir::NRegistry::QumirDbExternalTypes()) {
         if (type.Name == "PairBuffer") {
             pairBuffer = NQumir::NAst::TMaybeType<NQumir::NAst::TStructType>(type.Type).Cast();
-        } else if (type.Name == "JoinTable") {
+        } else if (type.Name == "RowTable") {
             joinTable = NQumir::NAst::TMaybeType<NQumir::NAst::TStructType>(type.Type).Cast();
         }
     }

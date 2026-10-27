@@ -29,6 +29,10 @@ std::string ReadJoinKernel(const std::string& name);
 // to this source file's location.
 std::string ReadSortKernel(const std::string& name);
 
+// Reads the row table kernel source (qdb/kernel/row_table.oz), shared by the
+// row join kernels.
+std::string ReadRowTableKernel();
+
 // Assembles the keyed-join kernel library: generic Robin Hood helpers, the
 // reused aggregation HashTable lifecycle, pair buffers, the dual-key-generic
 // join update/probe helpers (join_update.oz templates over LookupKey /
@@ -51,10 +55,10 @@ std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError>
 BuildCrossJoinKernelLibrary();
 
 // Row join library: the shared HashTable/pair-buffer base, the output
-// materializer and join_rows.oz (row arena, salted pointer table, probe scratch
-// and the row gather/store helpers). The per-query append/build/probe
-// functions and the jr_dispatch entry are generated in join_gen.cpp and
-// appended by TKernelCompiler::CompileRowJoin.
+// materializer, row_table.oz (row arena, salted pointer table, lookup scratch)
+// and join_rows.oz (the join's chains, marks and the row gather/store
+// helpers). The per-query append/build/probe functions and the jr_dispatch
+// entry are generated in join_gen.cpp and appended by TKernelCompiler::CompileRowJoin.
 std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError>
 BuildRowJoinKernelLibrary();
 

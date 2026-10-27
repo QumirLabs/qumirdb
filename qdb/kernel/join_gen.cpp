@@ -2062,7 +2062,7 @@ NQumir::NAst::TExprPtr GenRowJoinAppendAst(
     };
 
     Oz::TFunBuilder builder(funcName);
-    builder.Param("arena", RefType("JoinArena", types.Arena))
+    builder.Param("arena", RefType("RowArena", types.Arena))
         .Param("batch", RefType("TRowSet", types.RowSet))
         .Param("key_columns", std::make_shared<TPointerType>(i64Type))
         .Return(boolType);
@@ -2082,7 +2082,7 @@ NQumir::NAst::TExprPtr GenRowJoinAppendAst(
         valid = GenHashValue("i", "key_value", hasPrecomputedHash);
     }
     valid.push_back(Oz::Var("row", std::make_shared<TPointerType>(u8Type)));
-    valid.push_back(Oz::Assign("row", Oz::Call("ja_new_row", {Oz::Ident("arena")})));
+    valid.push_back(Oz::Assign("row", Oz::Call("ra_new_row", {Oz::Ident("arena")})));
     valid.push_back(
         Oz::If(
             Oz::Bin(TOperator("=="), Oz::Cast(Oz::Ident("row"), i64Type), number(0)),
@@ -2161,8 +2161,8 @@ NQumir::NAst::TExprPtr GenRowJoinProbeAst(
     };
 
     Oz::TFunBuilder builder(funcName);
-    builder.Param("table", RefType("JoinTable", types.Table))
-        .Param("scratch", RefType("JoinScratch", types.Scratch))
+    builder.Param("table", RefType("RowTable", types.Table))
+        .Param("scratch", RefType("RowScratch", types.Scratch))
         .Param("batch", RefType("TRowSet", types.RowSet))
         .Param("key_columns", std::make_shared<TPointerType>(i64Type))
         .Param("pairs", RefType("PairBuffer", types.PairBuffer))
@@ -2174,7 +2174,7 @@ NQumir::NAst::TExprPtr GenRowJoinProbeAst(
                 Oz::Unary(
                     TOperator("!"),
                     Oz::Call(
-                        "jr_scratch_reserve",
+                        "rt_scratch_reserve",
                         {
                             Oz::Ident("scratch"),
                             Oz::Ident("n"),
@@ -2192,7 +2192,7 @@ NQumir::NAst::TExprPtr GenRowJoinProbeAst(
 
     // Pass 1, the only one that reads the batch: the key and hash of every
     // selected row with a valid key. The pointer and key passes are
-    // jr_seek_all and jr_probe_candidates in join_rows.oz.
+    // rt_seek_all of the row table and jr_probe_candidates of join_rows.oz.
     auto keyRead = GenKeyReadAst(key, "i", "key_value_", types.StringView);
     std::vector<TExprPtr> collect = std::move(keyRead.Setup);
     collect.push_back(Oz::Var("key_value", key.LookupType));
@@ -2233,7 +2233,7 @@ NQumir::NAst::TExprPtr GenRowJoinProbeAst(
                     Oz::If(RowSelected("i"), Oz::Block(std::move(collect))),
                     Oz::Assign("i", Oz::Add(Oz::Ident("i"), number(1))),
                 })))
-        .Stmt(Oz::Call("jr_seek_all", {Oz::Ident("table"), Oz::Ident("scratch"), Oz::Ident("cnt")}))
+        .Stmt(Oz::Call("rt_seek_all", {Oz::Ident("table"), Oz::Ident("scratch"), Oz::Ident("cnt")}))
         .Stmt(
             Oz::Return(
                 Oz::Call(
@@ -2270,9 +2270,9 @@ NQumir::NAst::TExprPtr GenRowJoinDispatchAst(
     constexpr int64_t blockRows = 16384;
 
     Oz::TFunBuilder builder("jr_dispatch");
-    builder.Param("arena", RefType("JoinArena", types.Arena))
-        .Param("table", RefType("JoinTable", types.Table))
-        .Param("scratch", RefType("JoinScratch", types.Scratch))
+    builder.Param("arena", RefType("RowArena", types.Arena))
+        .Param("table", RefType("RowTable", types.Table))
+        .Param("scratch", RefType("RowScratch", types.Scratch))
         .Param("pairs", RefType("PairBuffer", types.PairBuffer))
         .Param("batch", RefType("TRowSet", types.RowSet))
         .Param("key_columns", std::make_shared<TPointerType>(i64Type))
@@ -2283,7 +2283,7 @@ NQumir::NAst::TExprPtr GenRowJoinDispatchAst(
                 opIs(0),
                 Oz::Block({
                     Oz::Call(
-                        "ja_init",
+                        "ra_init",
                         {Oz::Ident("arena"), number(layout.RowBytes), number(blockRows)}),
                     Oz::Return(Oz::Bool(true)),
                 })))
@@ -2329,9 +2329,9 @@ NQumir::NAst::TExprPtr GenRowJoinDispatchAst(
             Oz::If(
                 opIs(4),
                 Oz::Block({
-                    Oz::Call("ja_destroy", {Oz::Ident("arena")}),
-                    Oz::Call("jrt_destroy", {Oz::Ident("table")}),
-                    Oz::Call("jr_scratch_destroy", {Oz::Ident("scratch")}),
+                    Oz::Call("ra_destroy", {Oz::Ident("arena")}),
+                    Oz::Call("rt_destroy", {Oz::Ident("table")}),
+                    Oz::Call("rt_scratch_destroy", {Oz::Ident("scratch")}),
                     Oz::Call("pb_destroy", {Oz::Ident("pairs")}),
                     Oz::Return(Oz::Bool(true)),
                 })));

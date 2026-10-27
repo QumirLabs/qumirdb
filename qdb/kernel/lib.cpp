@@ -45,6 +45,10 @@ std::string ReadSortKernel(const std::string& name) {
     return ReadKernel("sort", name, "sort");
 }
 
+std::string ReadRowTableKernel() {
+    return ReadKernel(".", "row_table.oz", "row table");
+}
+
 namespace {
 
 bool HasStringReducer(const TAggReducerLayout& layout) {
@@ -162,6 +166,9 @@ BuildRowJoinKernelLibrary() {
     auto library = BuildJoinLibraryBase();
     if (!library) {
         return library;
+    }
+    if (auto e = AddParsedKernel(*library, ReadRowTableKernel())) {
+        return std::unexpected(*e);
     }
     if (auto e = AddParsedKernel(*library, ReadJoinKernel("join_rows.oz"))) {
         return std::unexpected(*e);

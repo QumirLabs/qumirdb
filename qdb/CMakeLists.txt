@@ -131,7 +131,11 @@ install(FILES
     DESTINATION ${QDB_MODULES_DIR}
     COMPONENT engine)
 
-install(FILES kernel/instrumentation.oz DESTINATION ${QDB_MODULES_DIR} COMPONENT engine)
+install(FILES
+    kernel/instrumentation.oz
+    kernel/row_table.oz
+    DESTINATION ${QDB_MODULES_DIR}
+    COMPONENT engine)
 
 install(DIRECTORY
     kernel/aggregation

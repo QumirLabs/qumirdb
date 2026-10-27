@@ -57,7 +57,7 @@ public:
     void ObserveInstrumentation();
 
 private:
-    // Mirror the JoinArena / JoinTable / JoinScratch / PairBuffer external
+    // Mirror the RowArena / RowTable / RowScratch / PairBuffer external
     // types (modules/qumirdb.cpp).
     struct TArenaState {
         uint8_t** Blocks = nullptr;
@@ -68,7 +68,7 @@ private:
         int64_t Rows = 0;
         int64_t CurRows = 0;
     };
-    static_assert(sizeof(TArenaState) == TKernelCompiler::JoinArenaSize);
+    static_assert(sizeof(TArenaState) == TKernelCompiler::RowArenaSize);
 
     struct TTableState {
         uint64_t* Entries = nullptr;
@@ -78,7 +78,7 @@ private:
         int64_t Rows = 0;
         int64_t Keys = 0;
     };
-    static_assert(sizeof(TTableState) == TKernelCompiler::JoinTableSize);
+    static_assert(sizeof(TTableState) == TKernelCompiler::RowTableSize);
 
     struct TScratchState {
         uint64_t* Hashes = nullptr;
@@ -90,7 +90,7 @@ private:
         uint8_t* Keys = nullptr;
         int64_t Capacity = 0;
     };
-    static_assert(sizeof(TScratchState) == TKernelCompiler::JoinScratchSize);
+    static_assert(sizeof(TScratchState) == TKernelCompiler::RowScratchSize);
 
     struct TPairBufferState {
         int64_t Count = 0;

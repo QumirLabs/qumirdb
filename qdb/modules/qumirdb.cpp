@@ -123,9 +123,9 @@ std::vector<TExternalType> BuildQumirDbExternalTypes() {
             {"Data", ptrI64Type},
         });
 
-    // Row join table (kernel/join/join_rows.oz); mirrored by
-    // TRowJoinProcessor's state structs in exec/row_join_exec.h.
-    auto joinArenaType = std::make_shared<TStructType>(
+    // Row table (kernel/row_table.oz); mirrored by TRowJoinProcessor's
+    // state structs in exec/row_join_exec.h.
+    auto rowArenaType = std::make_shared<TStructType>(
         std::vector<std::pair<std::string, TTypePtr>>{
             {"Blocks", ptrPtrU8Type},
             {"BlockCount", i64Type},
@@ -135,7 +135,7 @@ std::vector<TExternalType> BuildQumirDbExternalTypes() {
             {"Rows", i64Type},
             {"CurRows", i64Type},
         });
-    auto joinTableType = std::make_shared<TStructType>(
+    auto rowTableType = std::make_shared<TStructType>(
         std::vector<std::pair<std::string, TTypePtr>>{
             {"Entries", ptrU64Type},
             {"Capacity", i64Type},
@@ -144,7 +144,7 @@ std::vector<TExternalType> BuildQumirDbExternalTypes() {
             {"Rows", i64Type},
             {"Keys", i64Type},
         });
-    auto joinScratchType = std::make_shared<TStructType>(
+    auto rowScratchType = std::make_shared<TStructType>(
         std::vector<std::pair<std::string, TTypePtr>>{
             {"Hashes", ptrU64Type},
             {"Salts", ptrU64Type},
@@ -161,9 +161,9 @@ std::vector<TExternalType> BuildQumirDbExternalTypes() {
         { .Name = "TRowSet", .Type = rowSetType },
         { .Name = "HashTable", .Type = hashTableType },
         { .Name = "PairBuffer", .Type = pairBufferType },
-        { .Name = "JoinArena", .Type = joinArenaType },
-        { .Name = "JoinTable", .Type = joinTableType },
-        { .Name = "JoinScratch", .Type = joinScratchType },
+        { .Name = "RowArena", .Type = rowArenaType },
+        { .Name = "RowTable", .Type = rowTableType },
+        { .Name = "RowScratch", .Type = rowScratchType },
         { .Name = "StringView", .Type = stringViewType },
         { .Name = "OwnedString", .Type = ownedStringType },
     };
