@@ -66,14 +66,28 @@ target_compile_options(regtest_lib PRIVATE -Wno-character-conversion)
 ut_executable(test_reg test_reg.cpp)
 target_sources(test_reg PRIVATE test_regtest_lib.cpp)
 target_link_libraries(test_reg regtest_lib)
+# The JIT cache of the regression runs; empty runs test_reg with its own default.
+set(QDB_JIT_CACHE_DIR "" CACHE PATH "Persistent JIT cache directory passed to test_reg by ctest")
+set(QDB_REG_ARGS ${CMAKE_SOURCE_DIR}/test/regtest)
+if(QDB_JIT_CACHE_DIR)
+    list(APPEND QDB_REG_ARGS --jit-cache-dir ${QDB_JIT_CACHE_DIR})
+endif()
 # The longest test by far: gtest shards that ctest -j runs in parallel.
 foreach(shard RANGE 3)
-    add_test(NAME test_reg_${shard} COMMAND test_reg ${CMAKE_SOURCE_DIR}/test/regtest
+    add_test(NAME test_reg_${shard} COMMAND test_reg ${QDB_REG_ARGS}
         --gtest_output=xml:${CMAKE_CURRENT_BINARY_DIR}/test_reg_${shard}.xml)
     # COST starts the long tests first when ctest has no timing history, as in CI.
     set_tests_properties(test_reg_${shard} PROPERTIES COST 100
         ENVIRONMENT "GTEST_TOTAL_SHARDS=4;GTEST_SHARD_INDEX=${shard}")
 endforeach()
+# The whole suite over the symmetric join table. A full pass costs as much as
+# test_reg_0..3 together, so it is registered only on request.
+option(QDB_TEST_REG_VARIANTS "Register the regression suite variants (test_reg_legacy_join)" OFF)
+if(QDB_TEST_REG_VARIANTS)
+    add_test(NAME test_reg_legacy_join COMMAND test_reg ${QDB_REG_ARGS} --join-table legacy
+        --gtest_output=xml:${CMAKE_CURRENT_BINARY_DIR}/test_reg_legacy_join.xml)
+    set_tests_properties(test_reg_legacy_join PROPERTIES COST 400 LABELS variant)
+endif()
 ut(test_equijoin test_equijoin.cpp)
 ut(test_outer_join_to_anti test_outer_join_to_anti.cpp)
 ut(test_simplify_outer_joins test_simplify_outer_joins.cpp)

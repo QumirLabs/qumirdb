@@ -138,11 +138,12 @@ With `hash_dir = false` the debug info of a cache hit names the worktree that
 compiled the object first.
 
 SQL table names resolve to `<table>.parquet` in the data directory. Enable the
-persistent JIT cache for normal execution runs. Run a SQL file with phase timings:
+persistent JIT cache for normal execution runs with `--jit-cache-dir`. Run a SQL
+file with phase timings:
 
 ```sh
-export QDB_JIT_CACHE_DIR="$PWD/build/jit-cache"
-./build/bin/qdb --sql --data /path/to/parquet -i query.sql --timing
+./build/bin/qdb --sql --data /path/to/parquet -i query.sql --timing \
+  --jit-cache-dir "$PWD/build/jit-cache"
 ```
 
 Omit `-i` for the interactive SQL prompt; terminate statements with `;`. Use
@@ -162,10 +163,10 @@ and keep the same output mode in comparisons. Use the benchmark runners to rende
 TPC-H templates with their scale parameters:
 
 ```sh
-MODE=sql QDB_JIT_CACHE_DIR="$PWD/build/jit-cache" \
+MODE=sql QDB_ARGS="--jit-cache-dir $PWD/build/jit-cache" \
   OUT_DIR="$PWD/build/results/tpch" \
   bash benchmark/tpch/run_tpch.sh /path/to/tpch 100
-QDB_JIT_CACHE_DIR="$PWD/build/jit-cache" OUT_DIR="$PWD/build/results/tpcds" \
+QDB_ARGS="--jit-cache-dir $PWD/build/jit-cache" OUT_DIR="$PWD/build/results/tpcds" \
   bash benchmark/tpcds/run_tpcds.sh /path/to/tpcds 10
 ```
 
@@ -180,8 +181,13 @@ ctest --test-dir build -R '^test_reg_[0-9]$' -j 4 --output-on-failure
 ./build/test/test_reg test/regtest --gtest_filter='RegQuery.correlated_aggregate_*'
 ```
 
-`test_reg` enables its persistent JIT cache automatically; `QDB_JIT_CACHE_DIR`
-overrides its location. Use `--canonize` only for understood, intended expectation
+`test_reg` enables its persistent JIT cache automatically; `--jit-cache-dir <path>`
+overrides its location. Run settings are flags, never environment variables:
+`--join-table row|legacy`, `--timing`, `--trace-fixtures`, `--dump-passes` and
+`--arrow-memory-pool`; an unknown value fails at once and lists the accepted ones.
+`ctest` passes the CMake variable `QDB_JIT_CACHE_DIR` as `--jit-cache-dir`, and
+`-DQDB_TEST_REG_VARIANTS=ON` adds `test_reg_legacy_join`, the full suite over the
+legacy join table. Use `--canonize` only for understood, intended expectation
 changes, then review the golden diff and check the affected cases again. Do not
 canonize away an unexplained failure. Documentation-only edits need text/link
 checks, not an engine rebuild or benchmark.

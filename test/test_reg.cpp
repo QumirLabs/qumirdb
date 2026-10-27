@@ -24,6 +24,7 @@ fs::path GoldensDir = RootDir / "goldens";
 std::vector<NRegTest::TQueryCase> AstCases;
 bool updateGoldens = false;
 bool printOutput = false;
+NRegTest::TRegTestOptions Options;
 
 std::string ComparisonDiff(const NRegTest::TComparison& result) {
     if (result.Matches) return {};
@@ -63,7 +64,7 @@ public:
 
 private:
     void TestBody() override {
-        const auto result = NRegTest::CheckCase(Case, updateGoldens);
+        const auto result = NRegTest::CheckCase(Case, updateGoldens, Options);
         if (printOutput) {
             std::cout << "=== " << Case.Sql << " (.plan, " << Case.Variant << ") ===\n"
                 << result.Plan.Actual;
@@ -101,11 +102,17 @@ public:
         for (const auto& [test, info] : Cases) {
             if (info->should_run()) selected.push_back(test);
         }
-        NRegTest::PrepareCases(selected);
+        NRegTest::PrepareCases(selected, Options);
     }
 };
 
 int main(int argc, char** argv) {
+    try {
+        Options = NRegTest::ParseRegTestOptions(argc, argv);
+    } catch (const std::exception& error) {
+        std::cerr << "test_reg: " << error.what() << '\n';
+        return 1;
+    }
     if (argc > 1 && argv[1][0] != '-') {
         RootDir = argv[1];
         CasesDir = RootDir / "cases";
@@ -134,7 +141,7 @@ int main(int argc, char** argv) {
         ::testing::AddGlobalTestEnvironment(environment.release());
         ::testing::InitGoogleTest(&argc, argv);
         NQumir::NCodeGen::TLLVMInitializer llvmInit;
-        NRegTest::InitializeJitCache(argv[0]);
+        Options.JitCacheDir = NRegTest::InitializeJitCache(argv[0], Options).string();
         const auto result = RUN_ALL_TESTS();
         if (result == 0 && updateGoldens) {
             NRegTest::CommitGoldens(cases);

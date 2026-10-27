@@ -121,17 +121,16 @@ def run_sample(config, manifest, arm, kind, index, queries, env):
     out.mkdir(parents=True)
     info = manifest["arms"]["a" if arm == "control" else arm]
     engine_args = [] if arm == "control" else info["engine_args"]
-    arguments = ["--format", "<escape>csv", *engine_args]
-    args_file = out / "arguments.nul"
-    args_file.write_bytes(b"".join(argument.encode() + b"\0" for argument in arguments))
     cache_dir = config.out / "jit-cache" / arm
     cache_dir.mkdir(parents=True, exist_ok=True)
+    arguments = ["--format", "<escape>csv", "--jit-cache-dir", str(cache_dir), *engine_args]
+    args_file = out / "arguments.nul"
+    args_file.write_bytes(b"".join(argument.encode() + b"\0" for argument in arguments))
     run_env = {**env, "MODE": "sql", "QDB_BIN": info["path"], "QDB_ARGS_FILE": str(args_file),
-               "FROZEN_QUERY_DIR": str(config.out / "rendered/queries"), "OUT_DIR": str(out),
-               "QDB_JIT_CACHE_DIR": str(cache_dir)}
+               "FROZEN_QUERY_DIR": str(config.out / "rendered/queries"), "OUT_DIR": str(out)}
     command = ["bash", str(RUNNER), str(config.data), str(config.scale), ",".join(map(str, queries))]
     write_json(out / "invocation.json", {"argv": command, "environment": {key: run_env[key] for key in
-               ("MODE", "QDB_BIN", "QDB_ARGS_FILE", "FROZEN_QUERY_DIR", "OUT_DIR", "QDB_JIT_CACHE_DIR")}})
+               ("MODE", "QDB_BIN", "QDB_ARGS_FILE", "FROZEN_QUERY_DIR", "OUT_DIR")}})
     started = time.perf_counter()
     execute(command, out, run_env, config.timeout)
     records = [json.loads(line) for line in (out / f"tpch_sql_sf{config.scale}.jsonl").read_text().splitlines()]

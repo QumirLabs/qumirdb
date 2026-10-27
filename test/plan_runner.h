@@ -94,7 +94,8 @@ inline std::unique_ptr<TTestRuntime> RunPlan(
         auto now = TClock::now();
         timings->LowerMs = std::chrono::duration<double, std::milli>(now - started).count();
         started = now;
-        JitFinalizeKernels(lowered.Kernels, nullptr, lowered.ExternalCatalog);
+        JitFinalizeKernels(
+            lowered.Kernels, nullptr, lowered.ExternalCatalog, settings.Jit.CacheDir);
         now = TClock::now();
         timings->JitMs = std::chrono::duration<double, std::milli>(now - started).count();
         started = now;

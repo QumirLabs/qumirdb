@@ -36,6 +36,8 @@ struct TKernelCompilerOptions {
     bool BindNow = true;
     std::shared_ptr<const TExternalCatalogSnapshot> ExternalCatalog;
     std::shared_ptr<TRuntimeContext> RuntimeContext;
+    // Persistent JIT cache used when BindNow finalizes; empty disables it.
+    std::string JitCacheDir;
 };
 
 // Shared kernel-pipeline options; caller overrides NativeCode/TargetTriple.
@@ -377,6 +379,7 @@ public:
         , ExecStageId_(options.ExecStageId)
         , Sink_(options.Sink)
         , BindNow_(options.BindNow)
+        , JitCacheDir_(std::move(options.JitCacheDir))
         , ExternalCatalog_(std::move(options.ExternalCatalog))
         , RuntimeContext_(std::move(options.RuntimeContext))
     {
@@ -569,6 +572,7 @@ private:
     TExecStageId ExecStageId_ = InvalidExecStageId;
     std::vector<TGeneratedKernel>* Sink_ = nullptr;
     bool BindNow_ = true;
+    std::string JitCacheDir_;
     std::shared_ptr<const TExternalCatalogSnapshot> ExternalCatalog_;
     std::shared_ptr<TRuntimeContext> RuntimeContext_;
     NQumir::TLLVMRunnerOptions Opts_;

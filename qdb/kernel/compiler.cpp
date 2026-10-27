@@ -226,7 +226,7 @@ TGeneratedKernel TKernelCompiler::EmitKernel(
     }
     if (BindNow_) {
         JitFinalizeKernels(
-            std::span(&kernel, 1), Diagnostics_, ExternalCatalog_);
+            std::span(&kernel, 1), Diagnostics_, ExternalCatalog_, JitCacheDir_);
     }
     return kernel;
 }

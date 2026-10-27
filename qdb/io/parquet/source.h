@@ -21,6 +21,25 @@ namespace NQdb {
 class TParquetSource;
 struct TParquetFileData;
 
+// Allocator behind Arrow's parquet reads. Auto prefers jemalloc and falls back
+// to Arrow's default pool; the others fall back to it when not compiled in.
+enum class EArrowMemoryPool {
+    Auto,
+    System,
+    Default,
+    Jemalloc,
+    Mimalloc,
+};
+
+// The names the command lines accept, shared by qdb and test_reg.
+inline constexpr std::string_view ArrowMemoryPoolNames = "auto, system, default, jemalloc, mimalloc";
+
+std::optional<EArrowMemoryPool> ParseArrowMemoryPool(std::string_view name);
+
+// Arrow memory pools are process singletons, so the choice is process-wide.
+// Call it once at startup, before the first parquet file is opened.
+void SetArrowMemoryPool(EArrowMemoryPool pool);
+
 // Opened parquet file shared by all of its scan sources. The file schema and
 // statistics are loaded once; each source creates its own record-batch reader.
 class TParquetFile {
