@@ -12,6 +12,7 @@
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/sort.h>
 #include <qdb/plan/ops/window.h>
+#include <qdb/scheduler/settings.h>
 
 #include <cstdint>
 #include <iosfwd>
@@ -82,13 +83,30 @@ struct TSortRuntimeProcess {
 };
 
 // Print a human-readable runtime-plan tree for diagnostics (--verbose).
-void PrintRuntimePlan(std::ostream& out, const TOperatorPtr& root);
+void PrintRuntimePlan(
+    std::ostream& out,
+    const TOperatorPtr& root,
+    NScheduler::EJoinTableKind table);
 
 NQumir::NAst::TTypePtr BuildSourceRuntimeType(TSourceOperator& src);
 
 // Build-side selection for a join. Shared by native lowering and the browser
-// plan export so the JoinAsymmetryRatio threshold has one home (C++).
-EJoinBuildSide ChooseJoinBuildSide(const TJoinOperator& join);
+// plan export so the JoinAsymmetryRatio threshold has one home (C++). An
+// inner join on the symmetric table, which the browser runtime drives, fixes
+// its build side only at that ratio; an inner equi-join on the row join table
+// builds the smaller side whenever both inputs have estimates.
+EJoinBuildSide ChooseJoinBuildSide(
+    const TJoinOperator& join,
+    NScheduler::EJoinTableKind table);
+
+// Whether the row join table (kernel/join/join_rows.oz) serves a join under
+// this table setting and build side: an equi-join without a residual that is
+// inner, or outer with a null-supplying build side (a preserved one needs
+// matched marks). The table has no adaptive mode, so the build side is fixed.
+bool RowJoinTableServes(
+    const TJoinOperator& join,
+    NScheduler::EJoinTableKind table,
+    EJoinBuildSide buildSide);
 std::string_view JoinBuildSideName(EJoinBuildSide side);
 
 TUnaryRuntimeProcess BuildFilterRuntimeProcess(

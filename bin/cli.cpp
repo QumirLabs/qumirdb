@@ -333,7 +333,7 @@ int ExecutePlan(
 
     auto* diagnostics = config.Verbose ? &std::cerr : nullptr;
     if (diagnostics) {
-        NQdb::PrintRuntimePlan(*diagnostics, plan);
+        NQdb::PrintRuntimePlan(*diagnostics, plan, config.Scheduler.Join.Table);
     }
 
     auto buildStart = std::chrono::steady_clock::now();

@@ -650,8 +650,10 @@ distinct. Unlike the global cascade this one is not behind a flag.
 The inner join starts symmetric — both sides build and probe — and switches to
 probe-only streaming for the remaining side as soon as one input is exhausted,
 which is normally the smaller one. This adaptation requires no cardinality
-estimate. Lowering can instead choose build-first execution when an input is
-estimated much smaller or a runtime filter requires its completion first.
+estimate. Lowering instead chooses build-first execution of the smaller input
+when both inputs of an inner equi-join without a residual have estimates (with
+a residual or on the legacy table only when one is estimated ten times
+smaller), or when a runtime filter requires its completion first.
 
 LEFT/RIGHT outer joins build the input with the smaller estimate and stream
 the other. A null-supplying build side lives in the row join table, which emits

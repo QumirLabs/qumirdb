@@ -27,11 +27,19 @@ reaches EOF:
   stream batch is still alive.
 
 This can avoid materializing the large side without a cardinality estimate.
-Lowering can also choose build-first execution: inner joins use it for strong
-asymmetry, while LEFT/RIGHT outer joins build whichever input is estimated
-smaller. A runtime filter may also require completing its build input first.
-The build side finishes before the probe stream starts; poor estimates can
-still affect work and memory.
+Lowering can also choose build-first execution. An inner equi-join without a
+residual builds the smaller input whenever both inputs have estimates, the
+classic choice of build input for a hash join ([Graefe, "Query Evaluation
+Techniques for Large Databases", ACM Computing Surveys 25(2), 1993](https://doi.org/10.1145/152610.152611)):
+storing one input and streaming the other costs less than storing both, and the
+row join table has no adaptive mode. While the build input has no batch ready, the row join keeps
+pulling probe batches and holds them until the table exists, so a slow build
+input does not stall the probe pipeline. A residual join, which runs on the
+symmetric table, and the legacy table (`--join-table legacy`, the browser) fix
+an inner build side only at a 10:1 asymmetry. LEFT/RIGHT outer joins build
+whichever input is estimated smaller. A runtime filter may also require
+completing its build input first. The build side finishes before the probe
+stream starts; poor estimates can still affect work and memory.
 
 ## Supported join forms
 

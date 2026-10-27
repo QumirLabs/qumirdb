@@ -235,6 +235,9 @@ std::vector<TOut4> ExpectedInner() {
     return e;
 }
 
+// The symmetric table keeps the asymmetry rule that most of these tests check.
+constexpr auto LegacyTable = NScheduler::EJoinTableKind::Legacy;
+
 // Minimal operator carrying a schema and Stats_, to exercise ChooseJoinBuildSide.
 class TFakeSource : public IOperator {
 public:
@@ -313,14 +316,14 @@ TEST(AttachRuntimeFilters, EmitsFromTheSideWithFewerDistinctKeys) {
     ASSERT_TRUE(emitted.has_value());
     EXPECT_EQ(emitted->Id, 1u);
     EXPECT_EQ(emitted->BuildSide, EJoinFilterSide::Right);
-    EXPECT_EQ(ChooseJoinBuildSide(*j), EJoinBuildSide::Right);
+    EXPECT_EQ(ChooseJoinBuildSide(*j, LegacyTable), EJoinBuildSide::Right);
 
     j->Left()->Stats_ = RowsWithKeyNdv(40000, "lk", 10000);
     j->Right()->Stats_ = RowsWithKeyNdv(400000, "rk", 400000);
     emitted = AttachTo(join);
     ASSERT_TRUE(emitted.has_value());
     EXPECT_EQ(emitted->BuildSide, EJoinFilterSide::Left);
-    EXPECT_EQ(ChooseJoinBuildSide(*j), EJoinBuildSide::Left);
+    EXPECT_EQ(ChooseJoinBuildSide(*j, LegacyTable), EJoinBuildSide::Left);
 }
 
 TEST(AttachRuntimeFilters, JudgesDistinctKeysNotRows) {
@@ -562,7 +565,7 @@ TEST(AttachRuntimeFilters, LeftOuterFiltersOnlyNullableRightInput) {
     auto emitted = AttachTo(join);
     ASSERT_TRUE(emitted);
     EXPECT_EQ(emitted->BuildSide, EJoinFilterSide::Left);
-    EXPECT_EQ(ChooseJoinBuildSide(*j), EJoinBuildSide::Left);
+    EXPECT_EQ(ChooseJoinBuildSide(*j, LegacyTable), EJoinBuildSide::Left);
     EXPECT_TRUE(j->Left()->RuntimeFilterUses.empty());
     ASSERT_EQ(j->Right()->RuntimeFilterUses.size(), 1u);
     EXPECT_EQ(j->Right()->RuntimeFilterUses[0].ProbeKeys,
@@ -938,11 +941,11 @@ TEST(ChooseJoinBuildSide, SemiAntiTakesRightBuildOnly) {
 
         j->Left()->Stats_ = Rows(big);
         j->Right()->Stats_ = Rows(small);
-        EXPECT_EQ(ChooseJoinBuildSide(*j), EJoinBuildSide::Right);
+        EXPECT_EQ(ChooseJoinBuildSide(*j, LegacyTable), EJoinBuildSide::Right);
 
         j->Left()->Stats_ = Rows(small);
         j->Right()->Stats_ = Rows(big);
-        EXPECT_EQ(ChooseJoinBuildSide(*j), EJoinBuildSide::Auto);
+        EXPECT_EQ(ChooseJoinBuildSide(*j, LegacyTable), EJoinBuildSide::Auto);
     }
 }
 
@@ -953,13 +956,13 @@ TEST(ChooseJoinBuildSide, SemiAntiWithResidualStaysAuto) {
     auto* j = static_cast<TJoinOperator*>(join.get());
     j->Left()->Stats_ = Rows(1000000);
     j->Right()->Stats_ = Rows(1);
-    ASSERT_EQ(ChooseJoinBuildSide(*j), EJoinBuildSide::Right);
+    ASSERT_EQ(ChooseJoinBuildSide(*j, LegacyTable), EJoinBuildSide::Right);
 
     j->MutableFilter() = std::make_shared<TBinaryExpr>(
         NQumir::TLocation{}, TOperator("!="),
         std::make_shared<TIdentExpr>(NQumir::TLocation{}, "lv"),
         std::make_shared<TIdentExpr>(NQumir::TLocation{}, "rv"));
-    EXPECT_EQ(ChooseJoinBuildSide(*j), EJoinBuildSide::Auto);
+    EXPECT_EQ(ChooseJoinBuildSide(*j, LegacyTable), EJoinBuildSide::Auto);
 }
 
 // Decision reads JoinAsymmetryRatio so it tracks the constant rather than a
@@ -974,11 +977,11 @@ TEST(ChooseJoinBuildSide, PicksSmallerSideWhenRatioMet) {
 
     j->Left()->Stats_ = Rows(big);
     j->Right()->Stats_ = Rows(small);
-    EXPECT_EQ(ChooseJoinBuildSide(*j), EJoinBuildSide::Right);
+    EXPECT_EQ(ChooseJoinBuildSide(*j, LegacyTable), EJoinBuildSide::Right);
 
     j->Left()->Stats_ = Rows(small);
     j->Right()->Stats_ = Rows(big);
-    EXPECT_EQ(ChooseJoinBuildSide(*j), EJoinBuildSide::Left);
+    EXPECT_EQ(ChooseJoinBuildSide(*j, LegacyTable), EJoinBuildSide::Left);
 }
 
 // An outer join builds its smaller input: the preserved one with matched
@@ -1000,14 +1003,14 @@ TEST(ChooseJoinBuildSide, OuterBuildsTheSmallerSide) {
 
         preserved->Stats_ = Rows(1000);
         other->Stats_ = Rows(1000);
-        EXPECT_EQ(ChooseJoinBuildSide(*j), preservedSide);
+        EXPECT_EQ(ChooseJoinBuildSide(*j, LegacyTable), preservedSide);
 
         other->Stats_ = Rows(999);
-        EXPECT_EQ(ChooseJoinBuildSide(*j), otherSide)
+        EXPECT_EQ(ChooseJoinBuildSide(*j, LegacyTable), otherSide)
             << "the null-supplying side is smaller";
 
         other->Stats_ = nullptr;
-        EXPECT_EQ(ChooseJoinBuildSide(*j), EJoinBuildSide::Auto);
+        EXPECT_EQ(ChooseJoinBuildSide(*j, LegacyTable), EJoinBuildSide::Auto);
     }
 
     auto full = JoinOfType(EJoinType::Full);
@@ -1015,7 +1018,7 @@ TEST(ChooseJoinBuildSide, OuterBuildsTheSmallerSide) {
     auto* f = static_cast<TJoinOperator*>(full.get());
     f->Left()->Stats_ = Rows(1);
     f->Right()->Stats_ = Rows(1000);
-    EXPECT_EQ(ChooseJoinBuildSide(*f), EJoinBuildSide::Auto);
+    EXPECT_EQ(ChooseJoinBuildSide(*f, LegacyTable), EJoinBuildSide::Auto);
 }
 
 // The general path finds unmatched rows by key alone and the row join table
@@ -1030,18 +1033,18 @@ TEST(ChooseJoinBuildSide, OuterWithResidualBuildsThePreservedSide) {
         const bool isLeft = type == EJoinType::Left;
         (isLeft ? j->Left() : j->Right())->Stats_ = Rows(1000);
         (isLeft ? j->Right() : j->Left())->Stats_ = Rows(10);
-        ASSERT_EQ(ChooseJoinBuildSide(*j),
+        ASSERT_EQ(ChooseJoinBuildSide(*j, LegacyTable),
             isLeft ? EJoinBuildSide::Right : EJoinBuildSide::Left);
 
         j->MutableFilter() = std::make_shared<TBinaryExpr>(
             NQumir::TLocation{}, "<"_op,
             std::make_shared<TIdentExpr>(NQumir::TLocation{}, "lv"),
             std::make_shared<TIdentExpr>(NQumir::TLocation{}, "rv"));
-        EXPECT_EQ(ChooseJoinBuildSide(*j),
+        EXPECT_EQ(ChooseJoinBuildSide(*j, LegacyTable),
             isLeft ? EJoinBuildSide::Left : EJoinBuildSide::Right);
 
         (isLeft ? j->Left() : j->Right())->Stats_ = nullptr;
-        EXPECT_EQ(ChooseJoinBuildSide(*j),
+        EXPECT_EQ(ChooseJoinBuildSide(*j, LegacyTable),
             isLeft ? EJoinBuildSide::Left : EJoinBuildSide::Right)
             << "the choice must not depend on statistics";
     }
@@ -1055,11 +1058,11 @@ TEST(ChooseJoinBuildSide, OuterWithRuntimeFilterBuildsItsProducerSide) {
     auto* j = static_cast<TJoinOperator*>(join.get());
     j->Left()->Stats_ = Rows(1000);
     j->Right()->Stats_ = Rows(10);
-    ASSERT_EQ(ChooseJoinBuildSide(*j), EJoinBuildSide::Right);
+    ASSERT_EQ(ChooseJoinBuildSide(*j, LegacyTable), EJoinBuildSide::Right);
 
     j->MutableRuntimeFilter() = TRuntimeFilterSpec{
         .Id = 7, .BuildSide = EJoinFilterSide::Left};
-    EXPECT_EQ(ChooseJoinBuildSide(*j), EJoinBuildSide::Left);
+    EXPECT_EQ(ChooseJoinBuildSide(*j, LegacyTable), EJoinBuildSide::Left);
 }
 
 TEST(ChooseJoinBuildSide, AutoWhenBalancedOrStatsMissing) {
@@ -1070,11 +1073,43 @@ TEST(ChooseJoinBuildSide, AutoWhenBalancedOrStatsMissing) {
     // Equal sizes: ratio (>1) is never met.
     j->Left()->Stats_ = Rows(1000);
     j->Right()->Stats_ = Rows(1000);
-    EXPECT_EQ(ChooseJoinBuildSide(*j), EJoinBuildSide::Auto);
+    EXPECT_EQ(ChooseJoinBuildSide(*j, LegacyTable), EJoinBuildSide::Auto);
 
     // Missing stats fall back to the adaptive symmetric path.
     j->Right()->Stats_ = nullptr;
-    EXPECT_EQ(ChooseJoinBuildSide(*j), EJoinBuildSide::Auto);
+    EXPECT_EQ(ChooseJoinBuildSide(*j, LegacyTable), EJoinBuildSide::Auto);
+}
+
+// The row join table needs a fixed build side, so an inner equi-join on it
+// builds its smaller input at any ratio. Missing estimates and a residual,
+// which runs on the symmetric table, keep the adaptive build-up.
+TEST(ChooseJoinBuildSide, RowTableBuildsTheSmallerSideAtAnyRatio) {
+    const auto row = NScheduler::EJoinTableKind::Row;
+    auto join = InnerJoin();
+    ASSERT_TRUE(join);
+    auto* j = static_cast<TJoinOperator*>(join.get());
+
+    j->Left()->Stats_ = Rows(1200);
+    j->Right()->Stats_ = Rows(1000);
+    EXPECT_EQ(ChooseJoinBuildSide(*j, row), EJoinBuildSide::Right);
+    EXPECT_EQ(ChooseJoinBuildSide(*j, LegacyTable), EJoinBuildSide::Auto)
+        << "the symmetric table keeps its ratio";
+
+    j->Left()->Stats_ = Rows(999);
+    EXPECT_EQ(ChooseJoinBuildSide(*j, row), EJoinBuildSide::Left);
+
+    j->Left()->Stats_ = Rows(1000);
+    EXPECT_EQ(ChooseJoinBuildSide(*j, row), EJoinBuildSide::Right);
+
+    j->Right()->Stats_ = nullptr;
+    EXPECT_EQ(ChooseJoinBuildSide(*j, row), EJoinBuildSide::Auto);
+
+    j->Right()->Stats_ = Rows(1200);
+    j->MutableFilter() = std::make_shared<TBinaryExpr>(
+        NQumir::TLocation{}, "<"_op,
+        std::make_shared<TIdentExpr>(NQumir::TLocation{}, "lv"),
+        std::make_shared<TIdentExpr>(NQumir::TLocation{}, "rv"));
+    EXPECT_EQ(ChooseJoinBuildSide(*j, row), EJoinBuildSide::Auto);
 }
 
 namespace {
@@ -1560,7 +1595,7 @@ TEST(OuterStreamJoinPlan, MatchesGeneralPathAcrossPartitions) {
         }
         const auto preserved =
             isLeft ? EJoinBuildSide::Left : EJoinBuildSide::Right;
-        EXPECT_EQ(ChooseJoinBuildSide(*join),
+        EXPECT_EQ(ChooseJoinBuildSide(*join, LegacyTable),
             streaming ? preserved : EJoinBuildSide::Auto);
 
         NScheduler::TSettings settings;

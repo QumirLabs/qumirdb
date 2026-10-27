@@ -40,6 +40,9 @@ TRowJoinProcessor::~TRowJoinProcessor() {
     for (auto& batch : BuildBatches_) {
         Release(&batch);
     }
+    for (auto& batch : PendingProbe_) {
+        Release(&batch);
+    }
 }
 
 void TRowJoinProcessor::SetInstrumentation(TOperatorInstrumentation* instrumentation) {
@@ -122,6 +125,18 @@ bool TRowJoinProcessor::PullProbeBatch(const TFetch& probe) {
         ProbeDone_ = true;
         return true;
     }
+    if (!BuildDone_) {
+        if (Instrumentation_) {
+            Instrumentation_->RetainInput(batch, BuildSide_ == EJoinBuildSide::Left ? 1 : 0);
+        }
+        PendingProbe_.push_back(batch);
+        return true;
+    }
+    ProbeBatch(batch);
+    return true;
+}
+
+void TRowJoinProcessor::ProbeBatch(TRowSet& batch) {
     if (!Dispatch(ERowJoinKernelOp::Probe, &batch)) {
         Release(&batch);
         throw std::runtime_error("row join probe failed");
@@ -143,7 +158,6 @@ bool TRowJoinProcessor::PullProbeBatch(const TFetch& probe) {
     }
     PairBuffer_.Count = 0;
     Release(&batch);
-    return true;
 }
 
 EJoinProcessorResult TRowJoinProcessor::Process(
@@ -155,14 +169,34 @@ EJoinProcessorResult TRowJoinProcessor::Process(
     if (DrainReadyOutput(output)) {
         return EJoinProcessorResult::OK;
     }
-    if (ProbeDone_) {
-        return EJoinProcessorResult::FINISHED;
-    }
     const TFetch& build = BuildSide_ == EJoinBuildSide::Left ? left : right;
     const TFetch& probe = BuildSide_ == EJoinBuildSide::Left ? right : left;
     if (!BuildDone_) {
-        PullBuildBatch(build);
-        return EJoinProcessorResult::NEED_DATA;
+        // A probe batch is taken only when the build side has none ready, so
+        // the probe side never delays the build.
+        if (!PullBuildBatch(build) && !ProbeDone_) {
+            PullProbeBatch(probe);
+        }
+        if (!BuildDone_) {
+            return EJoinProcessorResult::NEED_DATA;
+        }
+    }
+    while (!PendingProbe_.empty()) {
+        TRowSet batch = PendingProbe_.front();
+        PendingProbe_.pop_front();
+        if (Instrumentation_) {
+            const size_t input = BuildSide_ == EJoinBuildSide::Left ? 1 : 0;
+            Instrumentation_->SetRetainedInputBytes(
+                Instrumentation_->RetainedInputBytes
+                - Instrumentation_->InputPayloadBytes(batch, input));
+        }
+        ProbeBatch(batch);
+        if (DrainReadyOutput(output)) {
+            return EJoinProcessorResult::OK;
+        }
+    }
+    if (ProbeDone_) {
+        return EJoinProcessorResult::FINISHED;
     }
     if (!PullProbeBatch(probe)) {
         return EJoinProcessorResult::NEED_DATA;
@@ -175,7 +209,7 @@ EJoinProcessorResult TRowJoinProcessor::Process(
 
 EJoinBuildSide TRowJoinProcessor::RequiredInputSide() const {
     if (!BuildDone_) {
-        return BuildSide_;
+        return ProbeDone_ ? BuildSide_ : EJoinBuildSide::Auto;
     }
     return BuildSide_ == EJoinBuildSide::Left ? EJoinBuildSide::Right : EJoinBuildSide::Left;
 }

@@ -911,9 +911,6 @@ private:
         node.DebugLabel = std::move(label);
     }
 
-    // Build the hash table on the side with fewer estimated rows when the other
-    // is >= JoinAsymmetryRatio times larger; that side then streams without
-    // being stored. Inner only.
     static std::string JoinDebugLabel(const TJoinOperator& join) {
         if (join.Keys().empty()) {
             return "cross-join " + std::string(JoinTypeName(join.JoinType()));
@@ -1165,21 +1162,12 @@ private:
         return result;
     }
 
-    // The row join table (kernel/join/join_rows.oz) serves the equi-joins
-    // whose build side lowering fixed: inner joins, and LEFT / RIGHT joins
-    // that build their null-supplying side. A residual, a preserved build side
-    // (it needs matched marks), another join type or an adaptive build side
-    // keep the Robin Hood join.
+    // The row join table (kernel/join/join_rows.oz) serves a join that
+    // RowJoinTableServes accepts once lowering has fixed its build side, by
+    // estimates or by a runtime filter. A join without estimates keeps the
+    // symmetric Robin Hood join.
     bool UsesRowJoinTable(const TJoinOperator& join, EJoinBuildSide buildSide) const {
-        const auto type = join.JoinType();
-        const bool rowTableType = type == EJoinType::Inner
-            || (type == EJoinType::Left && buildSide == EJoinBuildSide::Right)
-            || (type == EJoinType::Right && buildSide == EJoinBuildSide::Left);
-        return Settings_.Join.Table == NScheduler::EJoinTableKind::Row
-            && rowTableType
-            && !join.Filter()
-            && !join.Keys().empty()
-            && buildSide != EJoinBuildSide::Auto;
+        return RowJoinTableServes(join, Settings_.Join.Table, buildSide);
     }
 
     // Number of hash-shuffle partitions for a shuffled operator (grouped
@@ -2799,7 +2787,7 @@ private:
         const auto joinGroup = StageLabel("join", execStageId);
         TKernelCompiler compiler(
             KernelOptions(joinGroup, execStageId));
-        const auto buildSide = ChooseJoinBuildSide(join);
+        const auto buildSide = ChooseJoinBuildSide(join, Settings_.Join.Table);
         const bool rowTable = UsesRowJoinTable(join, buildSide);
         auto joinCode = rowTable
             ? MakeBinaryJoinCode<TSchedulerRowJoinState>()

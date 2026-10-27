@@ -240,7 +240,26 @@ NQumir::NAst::TTypePtr BuildSourceRuntimeType(TSourceOperator& src)
     return std::make_shared<NQumir::NAst::TStructType>(std::move(fields));
 }
 
-EJoinBuildSide ChooseJoinBuildSide(const TJoinOperator& join) {
+bool RowJoinTableServes(
+    const TJoinOperator& join,
+    NScheduler::EJoinTableKind table,
+    EJoinBuildSide buildSide)
+{
+    const auto type = join.JoinType();
+    const bool rowTableType = type == EJoinType::Inner
+        || (type == EJoinType::Left && buildSide == EJoinBuildSide::Right)
+        || (type == EJoinType::Right && buildSide == EJoinBuildSide::Left);
+    return table == NScheduler::EJoinTableKind::Row
+        && rowTableType
+        && !join.Filter()
+        && !join.Keys().empty()
+        && buildSide != EJoinBuildSide::Auto;
+}
+
+EJoinBuildSide ChooseJoinBuildSide(
+    const TJoinOperator& join,
+    NScheduler::EJoinTableKind table)
+{
     const auto type = join.JoinType();
     // FULL preserves both sides, so it cannot drop either one while streaming.
     if (type == EJoinType::Full) {
@@ -291,6 +310,16 @@ EJoinBuildSide ChooseJoinBuildSide(const TJoinOperator& join) {
         return r <= l
             ? EJoinBuildSide::Right
             : EJoinBuildSide::Left;
+    }
+    // The row join table has no adaptive mode: it needs a fixed build side,
+    // so it builds the smaller input whatever the ratio. Joins on the
+    // symmetric table (a residual, or the legacy table) keep both inputs
+    // growing until one is clearly smaller, because a fixed build side there
+    // makes the probe input wait for it.
+    if (type == EJoinType::Inner
+        && RowJoinTableServes(join, table, EJoinBuildSide::Left))
+    {
+        return r <= l ? EJoinBuildSide::Right : EJoinBuildSide::Left;
     }
     if (r * JoinAsymmetryRatio <= l) {
         return EJoinBuildSide::Right;
@@ -851,7 +880,10 @@ TWindowRuntimeProcess BuildWindowRuntimeProcess(
 namespace {
 
 void PrintRuntimePlanNode(
-    std::ostream& out, const TOperatorPtr& root, int depth)
+    std::ostream& out,
+    const TOperatorPtr& root,
+    int depth,
+    NScheduler::EJoinTableKind table)
 {
     const std::string indent(static_cast<size_t>(depth) * 2, ' ');
     out << indent;
@@ -861,52 +893,52 @@ void PrintRuntimePlanNode(
     }
     if (auto node = TMaybeOp<TFilterOperator>(root)) {
         out << "filter [JIT: AST -> IR -> LLVM]\n";
-        PrintRuntimePlanNode(out, node.Cast()->Input(), depth + 1);
+        PrintRuntimePlanNode(out, node.Cast()->Input(), depth + 1, table);
         return;
     }
     if (auto node = TMaybeOp<TProjectOperator>(root)) {
         out << "project [column mapping]\n";
-        PrintRuntimePlanNode(out, node.Cast()->Input(), depth + 1);
+        PrintRuntimePlanNode(out, node.Cast()->Input(), depth + 1, table);
         return;
     }
     if (auto node = TMaybeOp<TAggregateOperator>(root)) {
         out << "aggregate [JIT: update + finalize]\n";
-        PrintRuntimePlanNode(out, node.Cast()->Input(), depth + 1);
+        PrintRuntimePlanNode(out, node.Cast()->Input(), depth + 1, table);
         return;
     }
     if (auto node = TMaybeOp<TJoinOperator>(root)) {
         auto join = node.Cast();
-        const auto buildSide = ChooseJoinBuildSide(*join);
+        const auto buildSide = ChooseJoinBuildSide(*join, table);
         if (buildSide == EJoinBuildSide::Auto) {
             out << "join [symmetric hash, JIT probe+insert]\n";
         } else {
             out << "join [hash build " << JoinBuildSideName(buildSide)
                 << ", JIT stream probe]\n";
         }
-        PrintRuntimePlanNode(out, join->Left(), depth + 1);
-        PrintRuntimePlanNode(out, join->Right(), depth + 1);
+        PrintRuntimePlanNode(out, join->Left(), depth + 1, table);
+        PrintRuntimePlanNode(out, join->Right(), depth + 1, table);
         return;
     }
     if (auto node = TMaybeOp<TSortOperator>(root)) {
         out << "sort [stable indices]\n";
-        PrintRuntimePlanNode(out, node.Cast()->Input(), depth + 1);
+        PrintRuntimePlanNode(out, node.Cast()->Input(), depth + 1, table);
         return;
     }
     if (auto node = TMaybeOp<TTopSortOperator>(root)) {
         out << "top-sort [bounded stable state]\n";
-        PrintRuntimePlanNode(out, node.Cast()->Input(), depth + 1);
+        PrintRuntimePlanNode(out, node.Cast()->Input(), depth + 1, table);
         return;
     }
     if (auto node = TMaybeOp<TLimitOperator>(root)) {
         out << "limit [" << node.Cast()->Limit()
             << ", offset " << node.Cast()->Offset() << "]\n";
-        PrintRuntimePlanNode(out, node.Cast()->Input(), depth + 1);
+        PrintRuntimePlanNode(out, node.Cast()->Input(), depth + 1, table);
         return;
     }
     if (auto node = TMaybeOp<TLateMaterializeOperator>(root)) {
         out << "late-materialize [" << node.Cast()->Columns().size()
             << " columns]\n";
-        PrintRuntimePlanNode(out, node.Cast()->Input(), depth + 1);
+        PrintRuntimePlanNode(out, node.Cast()->Input(), depth + 1, table);
         return;
     }
     out << "unknown\n";
@@ -914,9 +946,13 @@ void PrintRuntimePlanNode(
 
 } // namespace
 
-void PrintRuntimePlan(std::ostream& out, const TOperatorPtr& root) {
+void PrintRuntimePlan(
+    std::ostream& out,
+    const TOperatorPtr& root,
+    NScheduler::EJoinTableKind table)
+{
     out << "\n========== RUNTIME PLAN ==========\n";
-    PrintRuntimePlanNode(out, root, 0);
+    PrintRuntimePlanNode(out, root, 0, table);
     out << "==================================\n";
 }
 

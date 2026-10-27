@@ -21,6 +21,10 @@ namespace NQdb {
 // rows without a match, so the output of a probe batch is complete when it is
 // released and nothing is left to emit at the end.
 //
+// While the build side has no batch ready, probe batches are pulled and kept
+// until the table exists, so the probe pipeline does not stall on a slow build
+// input; the symmetric join overlaps its inputs the same way.
+//
 // Ownership: the kernel qdb_alloc's every buffer behind the zeroed state
 // structs and frees them on Destroy. Build batches are retained only when a
 // build row carries a StringView into them (TRowJoinKernels::RetainsBuildBatches).
@@ -38,7 +42,7 @@ public:
         const TFetch& right,
         TRowSet& output);
 
-    // The build side until it ends, then the probe side.
+    // Either side until the build side ends, then the probe side.
     EJoinBuildSide RequiredInputSide() const;
     void SetInstrumentation(TOperatorInstrumentation* instrumentation);
     void ObserveInstrumentation();
@@ -91,8 +95,12 @@ private:
     bool DrainReadyOutput(TRowSet& rowSet);
     // Pulls one build batch; true when the build side made progress or ended.
     bool PullBuildBatch(const TFetch& build);
-    // Pulls one probe batch and materializes its matches into ReadyOutput_.
+    // Pulls one probe batch: kept in PendingProbe_ while the table is not
+    // built, probed otherwise. True when the probe side made progress or ended.
     bool PullProbeBatch(const TFetch& probe);
+    // Looks the batch up, materializes its matches into ReadyOutput_ and
+    // releases it.
+    void ProbeBatch(TRowSet& batch);
 
 private:
     TRowJoinKernels Kernels_;
@@ -103,9 +111,11 @@ private:
     TScratchState Scratch_;
     TPairBufferState PairBuffer_;
     std::vector<TRowSet> BuildBatches_;
+    std::deque<TRowSet> PendingProbe_;
     std::deque<TRowSet> ReadyOutput_;
     bool Initialized_ = false;
     bool BuildDone_ = false;
+    // The probe input ended; batches may still wait in PendingProbe_.
     bool ProbeDone_ = false;
 };
 

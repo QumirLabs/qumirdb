@@ -85,6 +85,9 @@ namespace {
 
 using namespace NQdb;
 
+// The browser runtime drives only the symmetric join table.
+constexpr auto BrowserJoinTable = NQdb::NScheduler::EJoinTableKind::Legacy;
+
 constexpr int64_t WasmPageSize = 65536;
 constexpr int64_t WasmSlot0 = 1 << 20;
 constexpr int64_t WasmStackSize = 262144;
@@ -1351,7 +1354,8 @@ llvm::json::Object LogicalNodeDetails(const NQdb::TOperatorPtr& op) {
         }
         return llvm::json::Object{
             {"joinType", std::string(JoinTypeName(j->JoinType()))},
-            {"buildSide", std::string(JoinBuildSideName(ChooseJoinBuildSide(*j)))},
+            {"buildSide",
+                std::string(JoinBuildSideName(ChooseJoinBuildSide(*j, BrowserJoinTable)))},
             {"keys", std::move(keys)},
             {"residual", SafeExprLine(j->Filter())},
         };
@@ -2570,7 +2574,7 @@ struct TExecPlanCodec {
                     {"label", JoinPlanLabel(*join)},
                     {"joinType", std::string(JoinTypeName(join->JoinType()))},
                     {"buildSide", std::string(JoinBuildSideName(
-                        ChooseJoinBuildSide(*join)))},
+                        ChooseJoinBuildSide(*join, BrowserJoinTable)))},
                     {"entrypoints", EntrypointsJson(*ref)},
                     {"keySize", static_cast<int64_t>(keyDesc.Size)},
                     {"hasResidual", hasResidual},
@@ -2854,7 +2858,7 @@ llvm::json::Object BuildBundle(
 
     std::ostringstream runtimeText;
     try {
-        NQdb::PrintRuntimePlan(runtimeText, logicalPlan);
+        NQdb::PrintRuntimePlan(runtimeText, logicalPlan, BrowserJoinTable);
     } catch (const std::exception& e) {
         runtimeText << "<unprintable runtime plan: " << e.what() << ">\n";
     }
