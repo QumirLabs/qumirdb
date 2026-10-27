@@ -1179,7 +1179,7 @@ private:
     // half the worker count: small inputs stay narrow, large inputs fan out, and
     // the half-worker cap guards against shuffle over-sharding on big inputs
     // (measured to regress a few queries at cap = WorkerCount).
-    // `--shuffle-partitions` overrides.
+    // `[shuffle] partitions` overrides.
     size_t JoinPartitions(size_t inputLanes) const {
         auto partitions = Settings_.HashShuffle.PartitionCount;
         if (partitions == 0) {
@@ -3199,7 +3199,7 @@ size_t ChooseAggregatePartitionCount(
     const size_t workers = std::max<size_t>(settings.Scheduler.WorkerCount, 1);
     const size_t base = std::min(inputLanes, std::max<size_t>(workers / 2, 1));
 
-    // An explicit --shuffle-partitions is an exact user override, matching the
+    // An explicit [shuffle] partitions is an exact user override, matching the
     // existing join behavior.
     if (settings.HashShuffle.PartitionCount != 0) {
         const size_t maxPartitions = settings.HashShuffle.MaxPartitionCount == 0

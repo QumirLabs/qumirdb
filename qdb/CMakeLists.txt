@@ -94,6 +94,7 @@ add_library(qumirdb
     exec/plan_builder.cpp
     scheduler/connection.cpp
     scheduler/cte_spool.cpp
+    scheduler/engine_settings.cpp
     scheduler/executor.cpp
     scheduler/graph.cpp
     scheduler/plan_lowerer.cpp
