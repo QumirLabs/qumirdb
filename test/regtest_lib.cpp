@@ -623,7 +623,7 @@ TRegTestOptions ParseRegTestOptions(int& argc, char** argv) {
         if (name == "--config") {
             if (equals != std::string_view::npos) {
                 configPath = arg.substr(equals + 1);
-            } else if (i + 1 < argc) {
+            } else if (i + 1 < argc && !std::string_view(argv[i + 1]).starts_with("--")) {
                 configPath = argv[++i];
             } else {
                 throw std::invalid_argument("--config requires a path");
@@ -636,6 +636,12 @@ TRegTestOptions ParseRegTestOptions(int& argc, char** argv) {
             options.TraceFixtures = true;
         } else if (arg.starts_with("--") && arg.find(':') < equals) {
             overrides.emplace_back(arg.substr(2));
+        } else if (arg.starts_with("--") && !arg.starts_with("--gtest_")
+            && name != "--canonize" && name != "--print" && name != "--help")
+        {
+            throw std::invalid_argument("unknown option '" + std::string(arg) + "'; known options: "
+                "--config, --section:key=value, --timing, --trace-fixtures, --canonize, --print, "
+                "and the --gtest_ flags");
         } else {
             argv[kept++] = argv[i];
         }
