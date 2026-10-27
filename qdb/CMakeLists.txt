@@ -8,6 +8,7 @@ add_library(qumirdb
     stub.cpp
     utils/sha1.cpp
     utils/regex.cpp
+    utils/config.cpp
     utils/module_path.cpp
     utils/rust_std_loader.cpp
     catalog/external_module.cpp
