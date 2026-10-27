@@ -1274,7 +1274,9 @@ protected:
             ? EJoinBuildSide::Right
             : EJoinBuildSide::Left;
         TRowJoinProcessor processor(
-            Compiler_.CompileRowJoin(spec, buildSide == EJoinBuildSide::Left), buildSide);
+            Compiler_.CompileRowJoin(spec, buildSide == EJoinBuildSide::Left),
+            buildSide,
+            /*probeHoldBytes=*/1 << 20);
         TSideInput left(leftRows);
         TSideInput right(rightRows);
         auto& probe = buildSide == EJoinBuildSide::Left ? right : left;

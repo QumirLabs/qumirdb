@@ -19,9 +19,13 @@ constexpr int64_t RowJoinOp(ERowJoinKernelOp op) {
 
 } // namespace
 
-TRowJoinProcessor::TRowJoinProcessor(TRowJoinKernels kernels, EJoinBuildSide buildSide)
+TRowJoinProcessor::TRowJoinProcessor(
+    TRowJoinKernels kernels,
+    EJoinBuildSide buildSide,
+    size_t probeHoldBytes)
     : Kernels_(std::move(kernels))
     , BuildSide_(buildSide)
+    , ProbeHoldBytes_(probeHoldBytes)
 {
     if (BuildSide_ == EJoinBuildSide::Auto) {
         throw std::runtime_error("row join requires a fixed build side");
@@ -40,9 +44,22 @@ TRowJoinProcessor::~TRowJoinProcessor() {
     for (auto& batch : BuildBatches_) {
         Release(&batch);
     }
-    for (auto& batch : PendingProbe_) {
-        Release(&batch);
+    for (auto& held : PendingProbe_) {
+        Release(&held.Batch);
     }
+}
+
+bool TRowJoinProcessor::CanHoldProbe() const {
+    return HeldProbeBytes_ < ProbeHoldBytes_;
+}
+
+uint64_t TRowJoinProcessor::ProbeBatchBytes(const TRowSet& batch) const {
+    // The same measure as the retained_input counters: all rows, no selection.
+    auto measure = Kernels_.ProbeMeasure;
+    auto allRows = batch;
+    allRows.Selection = nullptr;
+    measure.Add(allRows);
+    return measure.Bytes;
 }
 
 void TRowJoinProcessor::SetInstrumentation(TOperatorInstrumentation* instrumentation) {
@@ -129,7 +146,9 @@ bool TRowJoinProcessor::PullProbeBatch(const TFetch& probe) {
         if (Instrumentation_) {
             Instrumentation_->RetainInput(batch, BuildSide_ == EJoinBuildSide::Left ? 1 : 0);
         }
-        PendingProbe_.push_back(batch);
+        const auto bytes = ProbeBatchBytes(batch);
+        HeldProbeBytes_ += bytes;
+        PendingProbe_.push_back({batch, bytes});
         return true;
     }
     ProbeBatch(batch);
@@ -173,8 +192,8 @@ EJoinProcessorResult TRowJoinProcessor::Process(
     const TFetch& probe = BuildSide_ == EJoinBuildSide::Left ? right : left;
     if (!BuildDone_) {
         // A probe batch is taken only when the build side has none ready, so
-        // the probe side never delays the build.
-        if (!PullBuildBatch(build) && !ProbeDone_) {
+        // the probe side never delays the build, and only below the budget.
+        if (!PullBuildBatch(build) && !ProbeDone_ && CanHoldProbe()) {
             PullProbeBatch(probe);
         }
         if (!BuildDone_) {
@@ -182,7 +201,8 @@ EJoinProcessorResult TRowJoinProcessor::Process(
         }
     }
     while (!PendingProbe_.empty()) {
-        TRowSet batch = PendingProbe_.front();
+        TRowSet batch = PendingProbe_.front().Batch;
+        HeldProbeBytes_ -= PendingProbe_.front().Bytes;
         PendingProbe_.pop_front();
         if (Instrumentation_) {
             const size_t input = BuildSide_ == EJoinBuildSide::Left ? 1 : 0;
@@ -209,7 +229,7 @@ EJoinProcessorResult TRowJoinProcessor::Process(
 
 EJoinBuildSide TRowJoinProcessor::RequiredInputSide() const {
     if (!BuildDone_) {
-        return ProbeDone_ ? BuildSide_ : EJoinBuildSide::Auto;
+        return ProbeDone_ || !CanHoldProbe() ? BuildSide_ : EJoinBuildSide::Auto;
     }
     return BuildSide_ == EJoinBuildSide::Left ? EJoinBuildSide::Right : EJoinBuildSide::Left;
 }

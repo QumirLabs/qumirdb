@@ -34,7 +34,12 @@ Techniques for Large Databases", ACM Computing Surveys 25(2), 1993](https://doi.
 storing one input and streaming the other costs less than storing both, and the
 row join table has no adaptive mode. While the build input has no batch ready, the row join keeps
 pulling probe batches and holds them until the table exists, so a slow build
-input does not stall the probe pipeline. A residual join, which runs on the
+input does not stall the probe pipeline. The hold is bounded per task by
+`--row-join-probe-hold-bytes` (16 MiB by default, 0 disables it): at the
+budget the join asks for the build side only, as it did before the hold. A
+batch is taken while the held bytes are below the budget, so the batch that
+crosses it is still accepted (a batch larger than the budget too, when nothing
+is held) and the peak can exceed the budget by one batch per task. A residual join, which runs on the
 symmetric table, and the legacy table (`--join-table legacy`, the browser) fix
 an inner build side only at a 10:1 asymmetry. LEFT/RIGHT outer joins build
 whichever input is estimated smaller. A runtime filter may also require

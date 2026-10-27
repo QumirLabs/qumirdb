@@ -38,6 +38,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <charconv>
 #include <cstring>
 #include <expected>
 #include <fstream>
@@ -733,6 +734,9 @@ void PrintHelp() {
         "  --nocbo                      Disable cost-based join reordering\n"
         "  --no-runtime-filters         Disable join runtime filters (for A/B runs)\n"
         "  --join-table <kind>          Inner join hash table: row (default) or legacy\n"
+        "  --row-join-probe-hold-bytes <n>\n"
+        "                               Probe bytes a row join task holds while its build\n"
+        "                               runs; 0 disables the hold\n"
         "  --force-runtime-filters      Emit a join runtime filter wherever a build\n"
         "                               side exists, ignoring selectivity estimates\n"
         "  --explain-mode <mode>        explain output: text (default), sexpr, both\n"
@@ -982,6 +986,19 @@ int main(int argc, char** argv) {
                 std::cerr << "--join-table requires row or legacy\n";
                 return 1;
             }
+        } else if (!std::strcmp(argv[i], "--row-join-probe-hold-bytes")) {
+            if (i + 1 >= argc) {
+                std::cerr << "--row-join-probe-hold-bytes requires a non-negative integer\n";
+                return 1;
+            }
+            const std::string_view value = argv[++i];
+            size_t bytes = 0;
+            const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), bytes);
+            if (error != std::errc() || end != value.data() + value.size()) {
+                std::cerr << "--row-join-probe-hold-bytes requires a non-negative integer\n";
+                return 1;
+            }
+            config.Scheduler.Join.RowJoinProbeHoldBytes = bytes;
         } else if (!std::strcmp(argv[i], "--force-runtime-filters")) {
             config.ForceRuntimeFilters = true;
         } else if (!std::strcmp(argv[i], "--verbose")) {

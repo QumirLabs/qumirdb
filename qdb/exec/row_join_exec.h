@@ -23,7 +23,9 @@ namespace NQdb {
 //
 // While the build side has no batch ready, probe batches are pulled and kept
 // until the table exists, so the probe pipeline does not stall on a slow build
-// input; the symmetric join overlaps its inputs the same way.
+// input; the symmetric join overlaps its inputs the same way. The hold is
+// bounded: once the held batches reach probeHoldBytes the processor asks for
+// the build side only, as it would without the hold.
 //
 // Ownership: the kernel qdb_alloc's every buffer behind the zeroed state
 // structs and frees them on Destroy. Build batches are retained only when a
@@ -32,7 +34,7 @@ class TRowJoinProcessor {
 public:
     using TFetch = std::function<EJoinFetchResult(TRowSet&)>;
 
-    TRowJoinProcessor(TRowJoinKernels kernels, EJoinBuildSide buildSide);
+    TRowJoinProcessor(TRowJoinKernels kernels, EJoinBuildSide buildSide, size_t probeHoldBytes);
     TRowJoinProcessor(const TRowJoinProcessor&) = delete;
     TRowJoinProcessor& operator=(const TRowJoinProcessor&) = delete;
     ~TRowJoinProcessor();
@@ -42,7 +44,8 @@ public:
         const TFetch& right,
         TRowSet& output);
 
-    // Either side until the build side ends, then the probe side.
+    // Either side until the build side ends, then the probe side. The build
+    // side only, while the held probe batches are at the budget.
     EJoinBuildSide RequiredInputSide() const;
     void SetInstrumentation(TOperatorInstrumentation* instrumentation);
     void ObserveInstrumentation();
@@ -101,6 +104,10 @@ private:
     // Looks the batch up, materializes its matches into ReadyOutput_ and
     // releases it.
     void ProbeBatch(TRowSet& batch);
+    // The probe side may be read ahead of the build: the budget is not reached.
+    bool CanHoldProbe() const;
+    // Payload bytes of the batch, by the instrumentation measure kernel.
+    uint64_t ProbeBatchBytes(const TRowSet& batch) const;
 
 private:
     TRowJoinKernels Kernels_;
@@ -111,7 +118,14 @@ private:
     TScratchState Scratch_;
     TPairBufferState PairBuffer_;
     std::vector<TRowSet> BuildBatches_;
-    std::deque<TRowSet> PendingProbe_;
+    // A probe batch held for the table, with the bytes measured when it was put here.
+    struct THeldProbe {
+        TRowSet Batch;
+        uint64_t Bytes;
+    };
+    std::deque<THeldProbe> PendingProbe_;
+    size_t ProbeHoldBytes_;
+    uint64_t HeldProbeBytes_ = 0;
     std::deque<TRowSet> ReadyOutput_;
     bool Initialized_ = false;
     bool BuildDone_ = false;

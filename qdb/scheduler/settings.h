@@ -55,6 +55,19 @@ enum class EJoinTableKind {
 
 struct TJoinSettings {
     EJoinTableKind Table = EJoinTableKind::Row;
+    // Probe bytes one row join task may hold while its table is being built.
+    // At or above it the task waits for the build input, as it did before
+    // probe batches were held; below it, it takes probe batches again. Zero
+    // disables the hold. The bound is per task, so a join over P partitions
+    // holds about P times this. A batch is taken while the held bytes are
+    // below the budget, so the one that crosses it is still accepted (a single
+    // batch larger than the budget too, when nothing is held): the peak can
+    // exceed the budget by one batch per task.
+    // 16 MiB: measured on TPC-DS SF10 q74 and TPC-H SF100 Q15/Q18, where the
+    // hold peaks at 40, 62 and 37 MB per task. Budgets of 4 to 64 MiB gave the
+    // same time and peak RSS there, so the default is the one that keeps the
+    // worst case small: 16 partitions hold about 256 MiB.
+    size_t RowJoinProbeHoldBytes = 16 * 1024 * 1024;
 };
 
 struct THashShuffleSettings {
