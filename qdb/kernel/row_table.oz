@@ -125,7 +125,11 @@
     (block
       (var entries = (field table Entries))
       (if (!= (cast entries i64) 0) (block (call qdb_free (cast entries <ptr i8>))))
+      (var direct = (field table Direct))
+      (if (!= (cast direct i64) 0) (block (call qdb_free (cast direct <ptr i8>))))
       (field_assign table Entries (cast 0 <ptr u64>))
+      (field_assign table Direct (cast 0 <ptr <ptr u8>>))
+      (field_assign table DirectSlots (: 0 u64))
       (field_assign table Capacity 0)
       (field_assign table Rows 0)))
 
@@ -153,6 +157,7 @@
   ;; Returns that entry (0 when empty) and leaves its offset in out_off.
   (fun rt_seek ((var table <ref RowTable>) (var off u64) (var salt u64)
                  (var out_off <ref u64>)) -> u64
+    (attrs inline)
     (block
       (var entries = (field table Entries))
       (var mask = (field table Mask))

@@ -2042,6 +2042,14 @@ TRowJoinLayout BuildRowJoinLayout(
         cursor += sizes[i].first;
     }
     layout.RowBytes = AlignUpI64(cursor, rowAlignment);
+    if (key.IsScalar()) {
+        const auto& field = key.Fields[0];
+        auto integer = TMaybeType<TIntegerType>(UnwrapNamedType(field.Type));
+        if (integer && !(field.IsNullable && field.NullsEqual)) {
+            layout.DirectKeyOffset = layout.KeyOffset + static_cast<int64_t>(field.Offset);
+            layout.DirectKeyType = integer.Cast();
+        }
+    }
     return layout;
 }
 
@@ -2168,6 +2176,72 @@ NQumir::NAst::TExprPtr GenRowJoinProbeAst(
         .Param("pairs", RefType("PairBuffer", types.PairBuffer))
         .Return(boolType);
     GenBatchPrologue(builder, key, types, hasPrecomputedHash);
+    // A NULL key matches nothing, so the preserved row of an outer join is
+    // padded at once.
+    auto padNullKey = [&](const std::string& row) -> TExprPtr {
+        if (!emitUnmatched) {
+            return nullptr;
+        }
+        auto padded = Oz::Call(
+            "jr_push_pair",
+            {
+                Oz::Ident("pairs"),
+                Oz::Ident(row),
+                Oz::NullPtr(std::make_shared<TPointerType>(u8Type)),
+                Oz::Bool(probeIsLeft),
+            });
+        return Oz::Block({
+            Oz::If(
+                Oz::Unary(TOperator("!"), std::move(padded)),
+                Oz::Block({Oz::Return(Oz::Bool(false))})),
+        });
+    };
+    if (layout.DirectKeyOffset >= 0) {
+        // A direct index (jr_build_direct) needs neither the hash nor the
+        // scratch: every key is looked up as it is read.
+        auto directRead = GenKeyReadAst(key, "d", "direct_key_", types.StringView);
+        std::vector<TExprPtr> lookup = std::move(directRead.Setup);
+        lookup.push_back(Oz::Var("direct_key", key.LookupType));
+        lookup.push_back(Oz::Assign("direct_key", std::move(directRead.Value)));
+        lookup.push_back(
+            Oz::If(
+                Oz::Call("jt_key_valid", {Oz::Ident("direct_key")}),
+                Oz::Block({
+                    Oz::If(
+                        Oz::Unary(
+                            TOperator("!"),
+                            Oz::Call(
+                                "jr_direct_probe",
+                                {
+                                    Oz::Ident("table"),
+                                    Oz::Ident("pairs"),
+                                    Oz::Cast(Oz::Field("direct_key", "key_0"), i64Type),
+                                    Oz::Ident("d"),
+                                    Oz::Bool(probeIsLeft),
+                                    Oz::Bool(emitUnmatched),
+                                    number(layout.MarkOffset),
+                                })),
+                        Oz::Block({Oz::Return(Oz::Bool(false))})),
+                }),
+                padNullKey("d")));
+        builder.Stmt(
+            Oz::If(
+                Oz::Bin(
+                    TOperator("!="),
+                    Oz::Cast(Oz::Field("table", "Direct"), i64Type),
+                    number(0)),
+                Oz::Block({
+                    Oz::Var("d", i64Type),
+                    Oz::Assign("d", number(0)),
+                    Oz::While(
+                        Oz::Bin(TOperator("<"), Oz::Ident("d"), Oz::Ident("n")),
+                        Oz::Block({
+                            Oz::If(RowSelected("d"), Oz::Block(std::move(lookup))),
+                            Oz::Assign("d", Oz::Add(Oz::Ident("d"), number(1))),
+                        })),
+                    Oz::Return(Oz::Bool(true)),
+                })));
+    }
     builder
         .Stmt(
             Oz::If(
@@ -2202,28 +2276,11 @@ NQumir::NAst::TExprPtr GenRowJoinProbeAst(
     valid.push_back(Oz::ArrayAssign("hashes", Oz::Ident("cnt"), Oz::Ident("hash_value")));
     valid.push_back(Oz::ArrayAssign("keys", Oz::Ident("cnt"), Oz::Ident("key_value")));
     valid.push_back(Oz::Assign("cnt", Oz::Add(Oz::Ident("cnt"), number(1))));
-    TExprPtr nullKey;
-    if (emitUnmatched) {
-        // A NULL key matches nothing, so its preserved row is padded at once.
-        auto padded = Oz::Call(
-            "jr_push_pair",
-            {
-                Oz::Ident("pairs"),
-                Oz::Ident("i"),
-                Oz::NullPtr(std::make_shared<TPointerType>(u8Type)),
-                Oz::Bool(probeIsLeft),
-            });
-        nullKey = Oz::Block({
-            Oz::If(
-                Oz::Unary(TOperator("!"), std::move(padded)),
-                Oz::Block({Oz::Return(Oz::Bool(false))})),
-        });
-    }
     collect.push_back(
         Oz::If(
             Oz::Call("jt_key_valid", {Oz::Ident("key_value")}),
             Oz::Block(std::move(valid)),
-            std::move(nullKey)));
+            padNullKey("i")));
     builder.Var("i", i64Type)
         .Assign("i", number(0))
         .Stmt(
@@ -2269,6 +2326,33 @@ NQumir::NAst::TExprPtr GenRowJoinDispatchAst(
     // Rows per arena block: a few hundred KiB per block for typical rows.
     constexpr int64_t blockRows = 16384;
 
+    // Build: the direct index when the key and the build keys allow one,
+    // otherwise the salted table.
+    std::vector<TExprPtr> build;
+    if (layout.DirectKeyOffset >= 0) {
+        build.push_back(
+            Oz::If(
+                Oz::Call(
+                    "jr_build_direct",
+                    {
+                        Oz::Ident("table"),
+                        Oz::Ident("arena"),
+                        number(layout.DirectKeyOffset),
+                        Oz::Cast(number(0), std::make_shared<TPointerType>(layout.DirectKeyType)),
+                    }),
+                Oz::Block({Oz::Return(Oz::Bool(true))})));
+    }
+    build.push_back(
+        Oz::Return(
+            Oz::Call(
+                "jr_build_rows",
+                {
+                    Oz::Ident("table"),
+                    Oz::Ident("arena"),
+                    number(layout.KeyOffset),
+                    Oz::Cast(number(0), std::make_shared<TPointerType>(key.LookupType)),
+                })));
+
     Oz::TFunBuilder builder("jr_dispatch");
     builder.Param("arena", RefType("RowArena", types.Arena))
         .Param("table", RefType("RowTable", types.Table))
@@ -2296,20 +2380,7 @@ NQumir::NAst::TExprPtr GenRowJoinDispatchAst(
                             "jr_append_batch",
                             {Oz::Ident("arena"), Oz::Ident("batch"), Oz::Ident("key_columns")})),
                 })))
-        .Stmt(
-            Oz::If(
-                opIs(2),
-                Oz::Block({
-                    Oz::Return(
-                        Oz::Call(
-                            "jr_build_rows",
-                            {
-                                Oz::Ident("table"),
-                                Oz::Ident("arena"),
-                                number(layout.KeyOffset),
-                                Oz::Cast(number(0), std::make_shared<TPointerType>(key.LookupType)),
-                            })),
-                })))
+        .Stmt(Oz::If(opIs(2), Oz::Block(std::move(build))))
         .Stmt(
             Oz::If(
                 opIs(3),

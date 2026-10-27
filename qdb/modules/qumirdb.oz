@@ -87,13 +87,18 @@
     (CurRows i64)>)
 
   ;; Entries hold a 16-bit salt above a 48-bit row pointer; index = hash >> Shift.
+  ;; Direct, when not null, replaces Entries: the row of key k at k - DirectMin
+  ;; (the row join of kernel/join/join_rows.oz).
   (type RowTable <struct
     (Entries <ptr u64>)
     (Capacity i64)
     (Mask u64)
     (Shift i64)
     (Rows i64)
-    (Keys i64)>)
+    (Keys i64)
+    (Direct <ptr <ptr u8>>)
+    (DirectMin i64)
+    (DirectSlots u64)>)
 
   ;; Per-batch lookup scratch of the row table, one slot per looked-up row.
   (type RowScratch <struct

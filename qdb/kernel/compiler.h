@@ -469,7 +469,7 @@ public:
     // CompileAggregate must allocate a zero-initialized buffer this large
     // for `ht`. It embeds the row layout's RowArena, RowTable and
     // RowScratch (sizes below).
-    static constexpr size_t HashTableSize = 304;
+    static constexpr size_t HashTableSize = 328;
 
     // The symmetric hash join reuses the aggregation HashTable (HashTableSize)
     // as each side's hash map. sizeof(PairBuffer) per modules/qumirdb.cpp -
@@ -481,7 +481,7 @@ public:
     // modules/qumirdb.cpp - callers of CompileRowJoin allocate zero-initialized
     // buffers this large.
     static constexpr size_t RowArenaSize = 56;
-    static constexpr size_t RowTableSize = 48;
+    static constexpr size_t RowTableSize = 72;
     static constexpr size_t RowScratchSize = 64;
 
     // sizeof(TRowSet) per io.h / modules/qumirdb.oz - generated kernels that

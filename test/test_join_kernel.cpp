@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -149,7 +150,7 @@ TEST(JoinKernel, PairBufferLayout) {
     // The symmetric join reuses HashTable; the row join table (join_rows.oz)
     // has its own entry table type, mirrored by TRowJoinProcessor.
     ASSERT_NE(joinTable, nullptr);
-    ASSERT_EQ(joinTable->Fields.size(), 6u);
+    ASSERT_EQ(joinTable->Fields.size(), 9u);
     EXPECT_EQ(joinTable->Fields[0].first, "Entries");
 }
 
@@ -2876,18 +2877,22 @@ namespace {
 
 // Runs a row join over the given batches of each side; the build side is read
 // to its end before the first probe batch. Returns the output batches, which
-// the caller releases.
+// the caller releases. The table reports its size to `counters`: a direct
+// index has one slot per key of its range, a salted table a power of two of
+// at least 1024 entries.
 std::vector<TRowSet> RunRowJoin(
     const NKernel::TOperatorKernelSpec& spec,
     EJoinBuildSide buildSide,
     std::vector<TRowSet> leftBatches,
-    std::vector<TRowSet> rightBatches)
+    std::vector<TRowSet> rightBatches,
+    TOperatorInstrumentation* counters = nullptr)
 {
     TKernelCompiler compiler;
     TRowJoinProcessor processor(
         compiler.CompileRowJoin(spec, buildSide == EJoinBuildSide::Left),
         buildSide,
         TestProbeHoldBytes);
+    processor.SetInstrumentation(counters);
     size_t nextLeft = 0;
     size_t nextRight = 0;
     auto left = [&](TRowSet& rowSet) {
@@ -3329,23 +3334,24 @@ TEST(RowJoinProcessor, ReleasesHeldProbeBatchesWhenDestroyedBeforeTheBuild) {
     EXPECT_EQ(destroyed, 2);
 }
 
-// A build side of 500,000 rows spans 31 arena blocks of 16,384 rows and fills
-// its 2^20-entry table to 0.48. Two million probe keys, three quarters of them
-// absent, meet about thirty entries whose salt matches a different key; the
-// key comparison must reject those and keep probing.
-TEST(RowJoinProcessor, ManyArenaBlocksAndSaltCollisions) {
+namespace {
+
+// A build side of 500,000 rows with keys stride * i spans 31 arena blocks of
+// 16,384 rows; two million probe keys 0, 1, 2, ... find every build row.
+// Returns the capacity the table reported.
+uint64_t CheckManyArenaBlocks(int64_t stride) {
     using namespace NQumir::NAst;
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     TStructType leftType({{"lk", i64}});
     TStructType rightType({{"rk", i64}, {"rv", i64}});
 
     constexpr int64_t buildRows = 500000;
-    constexpr int64_t probeRows = 2000000;
+    const int64_t probeRows = buildRows * stride;
     constexpr int64_t probeBatchRows = 65536;
     std::vector<int64_t> rk(buildRows);
     std::vector<int64_t> rv(buildRows);
     for (int64_t i = 0; i < buildRows; ++i) {
-        rk[i] = 2 * i;
+        rk[i] = stride * i;
         rv[i] = 3 * rk[i];
     }
     std::vector<TColumn> rcols = {
@@ -3374,11 +3380,12 @@ TEST(RowJoinProcessor, ManyArenaBlocksAndSaltCollisions) {
     }
 
     auto spec = NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
+    TOperatorInstrumentation counters;
     int64_t matches = 0;
     int64_t keySum = 0;
     int64_t wrong = 0;
-    for (auto& out : RunRowJoin(spec, EJoinBuildSide::Right, probes, {build})) {
-        ASSERT_EQ(out.ColumnCount, 3);
+    for (auto& out : RunRowJoin(spec, EJoinBuildSide::Right, probes, {build}, &counters)) {
+        EXPECT_EQ(out.ColumnCount, 3);
         const auto* c0 = reinterpret_cast<const int64_t*>(out.Columns[0].Data);
         const auto* c1 = reinterpret_cast<const int64_t*>(out.Columns[1].Data);
         const auto* c2 = reinterpret_cast<const int64_t*>(out.Columns[2].Data);
@@ -3392,7 +3399,295 @@ TEST(RowJoinProcessor, ManyArenaBlocksAndSaltCollisions) {
 
     EXPECT_EQ(wrong, 0);
     EXPECT_EQ(matches, buildRows);
-    EXPECT_EQ(keySum, buildRows * (buildRows - 1)); // the sum of 2i for i < buildRows
+    // The sum of stride * i for i < buildRows.
+    EXPECT_EQ(keySum, stride * buildRows * (buildRows - 1) / 2);
+    EXPECT_EQ(counters.Groups, static_cast<uint64_t>(buildRows));
+    return counters.HashCapacity;
+}
+
+// The rows of row join outputs whose columns all hold integers of type T,
+// in output order, with NULL read as -1; releases the outputs.
+template <typename T>
+std::vector<std::vector<int64_t>> CollectRows(std::vector<TRowSet> outputs) {
+    std::vector<std::vector<int64_t>> rows;
+    for (auto& out : outputs) {
+        for (int64_t i = 0; i < out.RowCount; ++i) {
+            std::vector<int64_t> row;
+            for (int64_t c = 0; c < out.ColumnCount; ++c) {
+                const auto& column = out.Columns[c];
+                const bool valid = !column.Mask || ((column.Mask[i / 8] >> (i % 8)) & 1);
+                const auto* data = reinterpret_cast<const T*>(column.Data);
+                row.push_back(valid
+                    ? static_cast<int64_t>(data[i])
+                    : -1);
+            }
+            rows.push_back(std::move(row));
+        }
+        Release(&out);
+    }
+    return rows;
+}
+
+// One i64 column per vector; the columns of one batch.
+std::vector<TColumn> I64Columns(std::vector<std::vector<int64_t>>& values) {
+    std::vector<TColumn> columns;
+    for (auto& column : values) {
+        columns.push_back(TColumn{.Data = reinterpret_cast<char*>(column.data())});
+    }
+    return columns;
+}
+
+// A join of probe (lk) with build (rk, rv), all i64, the build on the right:
+// returns the sorted (lk, rk, rv) output rows and the capacity the table
+// reported.
+std::pair<std::vector<std::vector<int64_t>>, uint64_t> JoinI64(
+    std::vector<int64_t> buildKeys,
+    std::vector<int64_t> probeKeys)
+{
+    using namespace NQumir::NAst;
+    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
+    TStructType leftType({{"lk", i64}});
+    TStructType rightType({{"rk", i64}, {"rv", i64}});
+    std::vector<int64_t> buildValues;
+    for (auto key : buildKeys) {
+        buildValues.push_back(key * 10 + 1);
+    }
+    std::vector<std::vector<int64_t>> buildData = {buildKeys, buildValues};
+    std::vector<std::vector<int64_t>> probeData = {probeKeys};
+    auto rcols = I64Columns(buildData);
+    auto lcols = I64Columns(probeData);
+    TRowSet build{
+        .Columns = rcols.data(),
+        .ColumnCount = 2,
+        .RowCount = static_cast<int64_t>(buildKeys.size()),
+        .RefCount = 1,
+    };
+    TRowSet probe{
+        .Columns = lcols.data(),
+        .ColumnCount = 1,
+        .RowCount = static_cast<int64_t>(probeKeys.size()),
+        .RefCount = 1,
+    };
+    auto spec = NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
+    TOperatorInstrumentation counters;
+    auto rows = CollectRows<int64_t>(
+        RunRowJoin(spec, EJoinBuildSide::Right, {probe}, {build}, &counters));
+    std::sort(rows.begin(), rows.end());
+    return {std::move(rows), counters.HashCapacity};
+}
+
+} // namespace
+
+// Keys 4i span more than 2^20, so the build makes the salted table: its 2^20
+// entries are filled to 0.48, and the three quarters of the probe keys that
+// are absent meet about thirty entries whose salt matches a different key;
+// the key comparison must reject those and keep probing.
+TEST(RowJoinProcessor, ManyArenaBlocksAndSaltCollisions) {
+    EXPECT_EQ(CheckManyArenaBlocks(4), 1u << 20);
+}
+
+// Keys 2i are unique and span less than 2^20: the direct index is built over
+// all 31 arena blocks, and every odd probe key lands on an empty slot.
+TEST(RowJoinProcessor, ManyArenaBlocksDirectIndex) {
+    EXPECT_EQ(CheckManyArenaBlocks(2), 999999u);
+}
+
+// Unique dense keys get a direct index of max - min + 1 slots. Two build
+// batches arrive in any key order; probe keys repeat, and a selection vector
+// hides some probe rows.
+TEST(RowJoinProcessor, DirectIndexDenseKeys) {
+    using namespace NQumir::NAst;
+    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
+    TStructType leftType({{"lk", i64}, {"lv", i64}});
+    TStructType rightType({{"rk", i64}, {"rv", i64}});
+
+    std::vector<std::vector<int64_t>> build1 = {{7, 3, 1, 5}, {70, 30, 10, 50}};
+    std::vector<std::vector<int64_t>> build2 = {{2, 6, 4, 8}, {20, 60, 40, 80}};
+    std::vector<std::vector<int64_t>> probeData = {
+        {1, 8, 8, 4, 0, 9, 4, 2},
+        {0, 1, 2, 3, 4, 5, 6, 7},
+    };
+    // Row 3 (key 4) and row 7 (key 2) are not selected.
+    std::vector<uint8_t> selection = {1, 1, 1, 0, 1, 1, 1, 0};
+    auto b1 = I64Columns(build1);
+    auto b2 = I64Columns(build2);
+    auto p = I64Columns(probeData);
+    TRowSet buildBatch1{.Columns = b1.data(), .ColumnCount = 2, .RowCount = 4, .RefCount = 1};
+    TRowSet buildBatch2{.Columns = b2.data(), .ColumnCount = 2, .RowCount = 4, .RefCount = 1};
+    TRowSet probe{
+        .Columns = p.data(),
+        .ColumnCount = 2,
+        .RowCount = 8,
+        .Selection = selection.data(),
+        .RefCount = 1,
+    };
+
+    auto spec = NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
+    TOperatorInstrumentation counters;
+    auto rows = CollectRows<int64_t>(
+        RunRowJoin(spec, EJoinBuildSide::Right, {probe}, {buildBatch1, buildBatch2}, &counters));
+    std::vector<std::vector<int64_t>> expected = {
+        {1, 0, 1, 10},
+        {8, 1, 8, 80},
+        {8, 2, 8, 80},
+        {4, 6, 4, 40},
+    };
+    EXPECT_EQ(rows, expected);
+    EXPECT_EQ(counters.HashCapacity, 8u);
+    EXPECT_EQ(counters.Groups, 8u);
+}
+
+// A gap-heavy range: 40 keys spread over 3,901 slots, built on the left.
+// Probes of every key in and around the range match only the 40 keys.
+TEST(RowJoinProcessor, DirectIndexGapHeavyRangeBuildLeft) {
+    using namespace NQumir::NAst;
+    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
+    TStructType leftType({{"lk", i64}, {"lv", i64}});
+    TStructType rightType({{"rk", i64}});
+
+    std::vector<std::vector<int64_t>> buildData(2);
+    for (int64_t i = 0; i < 40; ++i) {
+        buildData[0].push_back(100 + 100 * i);
+        buildData[1].push_back(i);
+    }
+    std::vector<std::vector<int64_t>> probeData(1);
+    for (int64_t key = 0; key < 4200; ++key) {
+        probeData[0].push_back(key);
+    }
+    auto b = I64Columns(buildData);
+    auto p = I64Columns(probeData);
+    TRowSet build{.Columns = b.data(), .ColumnCount = 2, .RowCount = 40, .RefCount = 1};
+    TRowSet probe{.Columns = p.data(), .ColumnCount = 1, .RowCount = 4200, .RefCount = 1};
+
+    auto spec = NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
+    TOperatorInstrumentation counters;
+    auto rows = CollectRows<int64_t>(
+        RunRowJoin(spec, EJoinBuildSide::Left, {build}, {probe}, &counters));
+    std::vector<std::vector<int64_t>> expected;
+    for (int64_t i = 0; i < 40; ++i) {
+        expected.push_back({100 + 100 * i, i, 100 + 100 * i});
+    }
+    EXPECT_EQ(rows, expected);
+    EXPECT_EQ(counters.HashCapacity, 3901u);
+}
+
+// Probe keys outside the range, including the extremes of i64, where
+// key - min wraps, find nothing.
+TEST(RowJoinProcessor, DirectIndexOutOfRangeProbeKeys) {
+    constexpr int64_t minKey = std::numeric_limits<int64_t>::min();
+    constexpr int64_t maxKey = std::numeric_limits<int64_t>::max();
+    auto [rows, capacity] = JoinI64(
+        {10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20},
+        {9, 21, -1, minKey, maxKey, minKey + 10, 10, 20, -10, 1 << 20});
+    std::vector<std::vector<int64_t>> expected = {{10, 10, 101}, {20, 20, 201}};
+    EXPECT_EQ(rows, expected);
+    EXPECT_EQ(capacity, 11u);
+}
+
+// Negative keys, and a range that crosses zero, as i64 and as i32 keys,
+// whose values are sign-extended.
+TEST(RowJoinProcessor, DirectIndexNegativeKeys) {
+    {
+        auto [rows, capacity] = JoinI64(
+            {-1000005, -1000003, -1000001},
+            {-1000003, -1000002, -1000001, 3});
+        std::vector<std::vector<int64_t>> expected = {
+            {-1000003, -1000003, -10000029},
+            {-1000001, -1000001, -10000009},
+        };
+        EXPECT_EQ(rows, expected);
+        EXPECT_EQ(capacity, 5u);
+    }
+
+    using namespace NQumir::NAst;
+    auto i32 = std::make_shared<TIntegerType>(TIntegerType::I32);
+    TStructType leftType({{"lk", i32}});
+    TStructType rightType({{"rk", i32}, {"rv", i32}});
+    std::vector<int32_t> rk = {-3, -2, -1, 0, 1, 2};
+    std::vector<int32_t> rv = {30, 20, 10, 0, -10, -20};
+    std::vector<int32_t> lk = {-4, -3, 0, 2, 3, std::numeric_limits<int32_t>::min()};
+    std::vector<TColumn> rcols = {
+        TColumn{.Data = reinterpret_cast<char*>(rk.data())},
+        TColumn{.Data = reinterpret_cast<char*>(rv.data())},
+    };
+    std::vector<TColumn> lcols = {TColumn{.Data = reinterpret_cast<char*>(lk.data())}};
+    TRowSet build{.Columns = rcols.data(), .ColumnCount = 2, .RowCount = 6, .RefCount = 1};
+    TRowSet probe{.Columns = lcols.data(), .ColumnCount = 1, .RowCount = 6, .RefCount = 1};
+    auto spec = NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
+    TOperatorInstrumentation counters;
+    auto rows = CollectRows<int32_t>(
+        RunRowJoin(spec, EJoinBuildSide::Right, {probe}, {build}, &counters));
+    std::vector<std::vector<int64_t>> expected = {{-3, -3, 30}, {0, 0, 0}, {2, 2, -20}};
+    EXPECT_EQ(rows, expected);
+    EXPECT_EQ(counters.HashCapacity, 6u);
+}
+
+// NULL keys never reach the index: several NULL build rows are not repeated
+// keys, and a NULL probe key matches nothing.
+TEST(RowJoinProcessor, DirectIndexNullKeys) {
+    using namespace NQumir::NAst;
+    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
+    auto nullableI64 = std::make_shared<TNullable>(i64);
+    TStructType leftType({{"lk", nullableI64}});
+    TStructType rightType({{"rk", nullableI64}, {"rv", i64}});
+
+    // Build: 1, NULL, 2, NULL, 3; the NULL rows hold a key 2 in their data.
+    std::vector<int64_t> rk = {1, 2, 2, 2, 3};
+    std::vector<uint8_t> rkMask = {0b10101};
+    std::vector<int64_t> rv = {10, 99, 20, 98, 30};
+    std::vector<TColumn> rcols = {
+        TColumn{.Data = reinterpret_cast<char*>(rk.data()), .Mask = rkMask.data()},
+        TColumn{.Data = reinterpret_cast<char*>(rv.data())},
+    };
+    // Probe: 2, NULL (data 1), 3, NULL (data 0).
+    std::vector<int64_t> lk = {2, 1, 3, 0};
+    std::vector<uint8_t> lkMask = {0b0101};
+    std::vector<TColumn> lcols = {
+        TColumn{.Data = reinterpret_cast<char*>(lk.data()), .Mask = lkMask.data()},
+    };
+    TRowSet build{.Columns = rcols.data(), .ColumnCount = 2, .RowCount = 5, .RefCount = 1};
+    TRowSet probe{.Columns = lcols.data(), .ColumnCount = 1, .RowCount = 4, .RefCount = 1};
+
+    auto spec = NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
+    TOperatorInstrumentation counters;
+    auto rows = CollectRows<int64_t>(
+        RunRowJoin(spec, EJoinBuildSide::Right, {probe}, {build}, &counters));
+    std::vector<std::vector<int64_t>> expected = {{2, 2, 20}, {3, 3, 30}};
+    EXPECT_EQ(rows, expected);
+    EXPECT_EQ(counters.HashCapacity, 3u);
+}
+
+// A repeated build key gives up the direct index: the salted table chains
+// both rows of the key.
+TEST(RowJoinProcessor, DirectIndexDuplicateKeyUsesSaltedTable) {
+    auto [rows, capacity] = JoinI64({1, 2, 3, 4, 2}, {2, 4, 5});
+    std::vector<std::vector<int64_t>> expected = {{2, 2, 21}, {2, 2, 21}, {4, 4, 41}};
+    EXPECT_EQ(rows, expected);
+    EXPECT_EQ(capacity, 1024u);
+}
+
+// max - min = 2^20 still gets a direct index of 2^20 + 1 slots; one more key
+// of range makes the salted table.
+TEST(RowJoinProcessor, DirectIndexRangeLimit) {
+    constexpr int64_t limit = int64_t{1} << 20;
+    {
+        auto [rows, capacity] = JoinI64({-5, -5 + limit}, {-5, -4, -5 + limit, -4 + limit});
+        std::vector<std::vector<int64_t>> expected = {
+            {-5, -5, -49},
+            {-5 + limit, -5 + limit, (-5 + limit) * 10 + 1},
+        };
+        EXPECT_EQ(rows, expected);
+        EXPECT_EQ(capacity, static_cast<uint64_t>(limit + 1));
+    }
+    {
+        auto [rows, capacity] = JoinI64({-5, -4 + limit}, {-5, -4, -5 + limit, -4 + limit});
+        std::vector<std::vector<int64_t>> expected = {
+            {-5, -5, -49},
+            {-4 + limit, -4 + limit, (-4 + limit) * 10 + 1},
+        };
+        EXPECT_EQ(rows, expected);
+        EXPECT_EQ(capacity, 1024u);
+    }
 }
 
 namespace {
@@ -3788,6 +4083,45 @@ TEST(RowJoinProcessor, SemiAntiBuildLeftManyBlocksUniqueKeys) {
     }
 }
 
+// Over unique dense keys a SEMI/ANTI join that builds its left side marks its
+// rows through the direct index: SEMI emits the rows whose key a probe finds,
+// ANTI the others and the NULL-key row, which the index does not hold. Probe
+// keys repeat, hit an empty slot, fall outside the range or are NULL.
+TEST(RowJoinProcessor, DirectIndexSemiAntiBuildLeftMarksRows) {
+    using namespace NQumir::NAst;
+    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
+    auto nullableI64 = std::make_shared<TNullable>(i64);
+    TStructType leftType({{"lk", nullableI64}, {"lv", nullableI64}});
+    TStructType rightType({{"rk", nullableI64}});
+
+    // Build keys 3, 1, NULL, 4, 6: six slots, those of keys 2 and 5 empty.
+    TNullableColumn<int64_t> lk({3, 1, std::nullopt, 4, 6});
+    TNullableColumn<int64_t> lv({30, 10, 99, std::nullopt, 60});
+    std::vector<TColumn> lcols = {lk.Column(), lv.Column()};
+    TRowSet build{.Columns = lcols.data(), .ColumnCount = 2, .RowCount = 5, .RefCount = 1};
+    // Probe: 4 twice, 2 (an empty slot), 0 and 9 (outside the range), NULL, 1.
+    TNullableColumn<int64_t> rk({4, 4, 2, 0, 9, std::nullopt, 1});
+    std::vector<TColumn> rcols = {rk.Column()};
+    TRowSet probe{.Columns = rcols.data(), .ColumnCount = 1, .RowCount = 7, .RefCount = 1};
+
+    for (auto type : {EJoinType::LeftSemi, EJoinType::LeftAnti}) {
+        SCOPED_TRACE(JoinTypeName(type));
+        build.RefCount = 1;
+        probe.RefCount = 1;
+        auto spec = NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}}, type);
+        TOperatorInstrumentation counters;
+        // (lk, lv) with NULL read as -1.
+        auto rows = CollectRows<int64_t>(
+            RunRowJoin(spec, EJoinBuildSide::Left, {build}, {probe}, &counters));
+        std::sort(rows.begin(), rows.end());
+        const std::vector<std::vector<int64_t>> expected = type == EJoinType::LeftSemi
+            ? std::vector<std::vector<int64_t>>{{1, 10}, {4, -1}}
+            : std::vector<std::vector<int64_t>>{{-1, 99}, {3, 30}, {6, 60}};
+        EXPECT_EQ(rows, expected);
+        EXPECT_EQ(counters.HashCapacity, 6u) << "the join did not use the direct index";
+    }
+}
+
 // The row join table marks only the left rows of a SEMI/ANTI join and runs no
 // residual, so it cannot build the preserved side of an outer join, the right
 // side of a SEMI/ANTI join, or decide a residual's matches.
@@ -3829,4 +4163,50 @@ int main(int argc, char** argv) {
     testing::InitGoogleTest(&argc, argv);
     NQumir::NCodeGen::TLLVMInitializer initializer;
     return RUN_ALL_TESTS();
+}
+
+// A LEFT join that builds its null-supplying side over a direct index pads the
+// preserved rows whose key is absent, outside the range or NULL.
+TEST(RowJoinProcessor, DirectIndexLeftOuterPadsUnmatchedProbeRows) {
+    using namespace NQumir::NAst;
+    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
+    auto nullableI64 = std::make_shared<TNullable>(i64);
+    TStructType leftType({{"lk", nullableI64}});
+    TStructType rightType({{"rk", i64}, {"rv", i64}});
+
+    // Build keys 1, 3, 4: the slot of key 2 is empty.
+    std::vector<int64_t> rk = {1, 3, 4};
+    std::vector<int64_t> rv = {10, 30, 40};
+    std::vector<TColumn> rcols = {
+        TColumn{.Data = reinterpret_cast<char*>(rk.data())},
+        TColumn{.Data = reinterpret_cast<char*>(rv.data())},
+    };
+    // Probe: 3, 2 (empty slot), 0 and 9 (outside the range), NULL (data 3).
+    std::vector<int64_t> lk = {3, 2, 0, 9, 3};
+    std::vector<uint8_t> lkMask = {0b01111};
+    std::vector<TColumn> lcols = {
+        TColumn{.Data = reinterpret_cast<char*>(lk.data()), .Mask = lkMask.data()},
+    };
+    TRowSet build{.Columns = rcols.data(), .ColumnCount = 2, .RowCount = 3, .RefCount = 1};
+    TRowSet probe{.Columns = lcols.data(), .ColumnCount = 1, .RowCount = 5, .RefCount = 1};
+
+    auto spec = NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}}, EJoinType::Left);
+    TOperatorInstrumentation counters;
+    using TRow = std::tuple<std::optional<int64_t>, std::optional<int64_t>, std::optional<int64_t>>;
+    std::vector<TRow> got;
+    for (auto& out : RunRowJoin(spec, EJoinBuildSide::Right, {probe}, {build}, &counters)) {
+        for (int64_t i = 0; i < out.RowCount; ++i) {
+            got.emplace_back(
+                I64At(out.Columns[0], i), I64At(out.Columns[1], i), I64At(out.Columns[2], i));
+        }
+        Release(&out);
+    }
+    const auto null = std::nullopt;
+    std::vector<TRow> expected = {
+        {3, 3, 30}, {2, null, null}, {0, null, null}, {9, null, null}, {null, null, null},
+    };
+    std::sort(got.begin(), got.end());
+    std::sort(expected.begin(), expected.end());
+    EXPECT_EQ(got, expected);
+    EXPECT_EQ(counters.HashCapacity, 4u) << "the join did not use the direct index";
 }

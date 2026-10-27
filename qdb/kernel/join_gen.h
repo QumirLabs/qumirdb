@@ -299,7 +299,8 @@ NQumir::NAst::TExprPtr GenRowJoinAppendAst(
 // join: a selected row without a match, NULL keys included, gets one pair with
 // a null row pointer. When the layout has a mark, the build side is the
 // preserved side of a SEMI/ANTI join: a match marks the build rows and pushes
-// no pair.
+// no pair. Over a direct index it looks every key up as it reads it
+// (jr_direct_probe) instead of running the pointer pass.
 NQumir::NAst::TExprPtr GenRowJoinProbeAst(
     const TJoinKeyDescriptor& key,
     const TRowJoinLayout& layout,

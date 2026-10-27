@@ -126,6 +126,9 @@ std::vector<TExternalType> BuildQumirDbExternalTypes() {
             {"Shift", i64Type},
             {"Rows", i64Type},
             {"Keys", i64Type},
+            {"Direct", ptrPtrU8Type},
+            {"DirectMin", i64Type},
+            {"DirectSlots", u64Type},
         });
     auto rowScratchType = std::make_shared<TStructType>(
         std::vector<std::pair<std::string, TTypePtr>>{
