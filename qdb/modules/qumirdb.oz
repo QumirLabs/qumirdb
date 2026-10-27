@@ -58,7 +58,7 @@
     (Capacity i64)
     (Data <ptr i64>)>)
 
-  ;; Row join table (kernel/join/join_rows.oz): build rows in fixed-size blocks.
+  ;; Row table (kernel/join/row_table.oz): rows in fixed-size blocks.
   (type JoinArena <struct
     (Blocks <ptr <ptr u8>>)
     (BlockCount i64)
@@ -77,7 +77,7 @@
     (Rows i64)
     (Keys i64)>)
 
-  ;; Per-probe-batch scratch of the row join, one slot per selected row.
+  ;; Per-batch lookup scratch of the row table, one slot per looked-up row.
   (type JoinScratch <struct
     (Hashes <ptr u64>)
     (Salts <ptr u64>)

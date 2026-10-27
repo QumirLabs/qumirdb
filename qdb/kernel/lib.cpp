@@ -163,8 +163,10 @@ BuildRowJoinKernelLibrary() {
     if (!library) {
         return library;
     }
-    if (auto e = AddParsedKernel(*library, ReadJoinKernel("join_rows.oz"))) {
-        return std::unexpected(*e);
+    for (const char* name : {"row_table.oz", "join_rows.oz"}) {
+        if (auto e = AddParsedKernel(*library, ReadJoinKernel(name))) {
+            return std::unexpected(*e);
+        }
     }
     return library;
 }

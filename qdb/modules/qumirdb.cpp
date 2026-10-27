@@ -123,8 +123,8 @@ std::vector<TExternalType> BuildQumirDbExternalTypes() {
             {"Data", ptrI64Type},
         });
 
-    // Row join table (kernel/join/join_rows.oz); mirrored by
-    // TRowJoinProcessor's state structs in exec/row_join_exec.h.
+    // Row table (kernel/join/row_table.oz); mirrored by TRowJoinProcessor's
+    // state structs in exec/row_join_exec.h.
     auto joinArenaType = std::make_shared<TStructType>(
         std::vector<std::pair<std::string, TTypePtr>>{
             {"Blocks", ptrPtrU8Type},
