@@ -44,8 +44,8 @@ TRowJoinProcessor::~TRowJoinProcessor() {
     for (auto& batch : BuildBatches_) {
         Release(&batch);
     }
-    for (auto& batch : PendingProbe_) {
-        Release(&batch);
+    for (auto& held : PendingProbe_) {
+        Release(&held.Batch);
     }
 }
 
@@ -54,27 +54,12 @@ bool TRowJoinProcessor::CanHoldProbe() const {
 }
 
 uint64_t TRowJoinProcessor::ProbeBatchBytes(const TRowSet& batch) const {
-    const auto rows = static_cast<uint64_t>(batch.RowCount);
-    uint64_t bytes = 0;
-    for (size_t i = 0; i < Kernels_.ProbeColumnWidths.size() && i < static_cast<size_t>(batch.ColumnCount); ++i) {
-        const auto width = Kernels_.ProbeColumnWidths[i];
-        const auto& column = batch.Columns[i];
-        if (width >= 0) {
-            bytes += rows * static_cast<uint64_t>(width);
-        } else if (column.Offsets && rows > 0) {
-            // Offsets of a string column: rows + 1 entries; the bytes are the span they cover.
-            const auto offsetWidth = static_cast<uint64_t>(column.OffsetWidth);
-            bytes += (rows + 1) * offsetWidth;
-            if (column.OffsetWidth == 8) {
-                const auto* offsets = static_cast<const int64_t*>(column.Offsets);
-                bytes += static_cast<uint64_t>(offsets[rows] - offsets[0]);
-            } else {
-                const auto* offsets = static_cast<const int32_t*>(column.Offsets);
-                bytes += static_cast<uint64_t>(offsets[rows] - offsets[0]);
-            }
-        }
-    }
-    return bytes;
+    // The same measure as the retained_input counters: all rows, no selection.
+    auto measure = Kernels_.ProbeMeasure;
+    auto allRows = batch;
+    allRows.Selection = nullptr;
+    measure.Add(allRows);
+    return measure.Bytes;
 }
 
 void TRowJoinProcessor::SetInstrumentation(TOperatorInstrumentation* instrumentation) {
@@ -161,8 +146,9 @@ bool TRowJoinProcessor::PullProbeBatch(const TFetch& probe) {
         if (Instrumentation_) {
             Instrumentation_->RetainInput(batch, BuildSide_ == EJoinBuildSide::Left ? 1 : 0);
         }
-        HeldProbeBytes_ += ProbeBatchBytes(batch);
-        PendingProbe_.push_back(batch);
+        const auto bytes = ProbeBatchBytes(batch);
+        HeldProbeBytes_ += bytes;
+        PendingProbe_.push_back({batch, bytes});
         return true;
     }
     ProbeBatch(batch);
@@ -215,9 +201,9 @@ EJoinProcessorResult TRowJoinProcessor::Process(
         }
     }
     while (!PendingProbe_.empty()) {
-        TRowSet batch = PendingProbe_.front();
+        TRowSet batch = PendingProbe_.front().Batch;
+        HeldProbeBytes_ -= PendingProbe_.front().Bytes;
         PendingProbe_.pop_front();
-        HeldProbeBytes_ -= ProbeBatchBytes(batch);
         if (Instrumentation_) {
             const size_t input = BuildSide_ == EJoinBuildSide::Left ? 1 : 0;
             Instrumentation_->SetRetainedInputBytes(

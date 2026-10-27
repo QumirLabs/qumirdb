@@ -1,5 +1,6 @@
 #pragma once
 
+#include <qdb/exec/instrumentation/operator.h>
 #include <qdb/io/io.h>
 #include <qdb/kernel/generated.h>
 #include <qdb/kernel/spec.h>
@@ -332,9 +333,9 @@ struct TRowJoinKernels {
     // String payload rows point into the build batches, which the caller then
     // keeps alive until Destroy.
     bool RetainsBuildBatches = false;
-    // Payload width of each probe column in bytes, -1 for strings; lets the
-    // processor size a held probe batch without instrumentation.
-    std::vector<int64_t> ProbeColumnWidths;
+    // The instrumentation measure kernel over the probe schema: sizes a held
+    // probe batch the way retained_input_bytes does, with instrumentation off.
+    TRowSetInstrumentation ProbeMeasure;
 };
 
 struct TJoinHashKernels {

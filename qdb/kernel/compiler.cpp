@@ -2621,7 +2621,8 @@ TRowJoinKernels TKernelCompiler::CompileRowJoin(
 
     TRowJoinKernels kernels;
     kernels.RetainsBuildBatches = layout.HasString;
-    kernels.ProbeColumnWidths = InstrumentationColumnWidths(buildIsLeft ? rightType : leftType);
+    kernels.ProbeMeasure.Kernel = CompileInstrumentation();
+    kernels.ProbeMeasure.Widths = InstrumentationColumnWidths(buildIsLeft ? rightType : leftType);
     kernels.Dispatch = [slot, buildKeyColumns, probeKeyColumns](
         void* arena,
         void* table,

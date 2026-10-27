@@ -106,7 +106,7 @@ private:
     void ProbeBatch(TRowSet& batch);
     // The probe side may be read ahead of the build: the budget is not reached.
     bool CanHoldProbe() const;
-    // Bytes of the batch's column buffers, measured from the batch itself.
+    // Payload bytes of the batch, by the instrumentation measure kernel.
     uint64_t ProbeBatchBytes(const TRowSet& batch) const;
 
 private:
@@ -118,7 +118,12 @@ private:
     TScratchState Scratch_;
     TPairBufferState PairBuffer_;
     std::vector<TRowSet> BuildBatches_;
-    std::deque<TRowSet> PendingProbe_;
+    // A probe batch held for the table, with the bytes measured when it was put here.
+    struct THeldProbe {
+        TRowSet Batch;
+        uint64_t Bytes;
+    };
+    std::deque<THeldProbe> PendingProbe_;
     size_t ProbeHoldBytes_;
     uint64_t HeldProbeBytes_ = 0;
     std::deque<TRowSet> ReadyOutput_;

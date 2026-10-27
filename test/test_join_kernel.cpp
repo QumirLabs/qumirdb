@@ -3095,10 +3095,20 @@ struct THeldProbeRun {
 
 // Joins `probeBatches` batches of two rows (32 bytes each) with a build side
 // that is not ready for `idleSteps` calls, then delivers its batch and ends.
-THeldProbeRun RunHeldProbe(size_t probeHoldBytes, size_t probeBatches, size_t idleSteps) {
+// The probe side is the left input, or the right one when `buildLeft`. With
+// `stringProbe` the left probe batch is {lk i64, lname string} with two
+// 8-byte names, 32 payload bytes again, so the string offsets are measured.
+THeldProbeRun RunHeldProbe(
+    size_t probeHoldBytes,
+    size_t probeBatches,
+    size_t idleSteps,
+    bool buildLeft = false,
+    bool stringProbe = false)
+{
     using namespace NQumir::NAst;
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
-    TStructType leftType({{"lk", i64}, {"lv", i64}});
+    TStructType leftType({{"lk", i64}, {stringProbe ? "lname" : "lv", stringProbe
+        ? std::static_pointer_cast<TType>(std::make_shared<TStringType>()) : i64}});
     TStructType rightType({{"rk", i64}, {"rv", i64}});
 
     std::vector<int64_t> lk = {1, 2};
@@ -3107,6 +3117,13 @@ THeldProbeRun RunHeldProbe(size_t probeHoldBytes, size_t probeBatches, size_t id
         TColumn{.Data = reinterpret_cast<char*>(lk.data())},
         TColumn{.Data = reinterpret_cast<char*>(lv.data())},
     };
+    // Names of lengths 8 and 8; the key 2 row carries the second.
+    const char names[] = "aaaaaaaabbbbbbbb";
+    int32_t nameOffsets[] = {0, 8, 16};
+    if (stringProbe) {
+        lcols[1] = TColumn{
+            .Data = const_cast<char*>(names), .Offsets = nameOffsets, .OffsetWidth = 4};
+    }
     std::vector<int64_t> rk = {2, 3};
     std::vector<int64_t> rv = {200, 300};
     std::vector<TColumn> rcols = {
@@ -3117,16 +3134,18 @@ THeldProbeRun RunHeldProbe(size_t probeHoldBytes, size_t probeBatches, size_t id
     TKernelCompiler compiler;
     auto spec = NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
     TRowJoinProcessor processor(
-        compiler.CompileRowJoin(spec, /*buildIsLeft=*/false),
-        EJoinBuildSide::Right,
+        compiler.CompileRowJoin(spec, buildLeft),
+        buildLeft ? EJoinBuildSide::Left : EJoinBuildSide::Right,
         probeHoldBytes);
 
+    const auto& probeCols = buildLeft ? rcols : lcols;
+    const auto& buildCols = buildLeft ? lcols : rcols;
     THeldProbeRun run;
     size_t buildStep = 0;
     bool buildFinished = false;
     size_t nextProbe = 0;
     bool probeFinished = false;
-    auto left = [&](TRowSet& rowSet) {
+    auto probe = [&](TRowSet& rowSet) {
         if (nextProbe == probeBatches) {
             probeFinished = true;
             return EJoinFetchResult::FINISHED;
@@ -3134,21 +3153,35 @@ THeldProbeRun RunHeldProbe(size_t probeHoldBytes, size_t probeBatches, size_t id
         ++nextProbe;
         run.ProbesBeforeBuild += buildFinished ? 0 : 1;
         // Each batch is released by the join, so each gets its own count.
-        rowSet = TRowSet{.Columns = lcols.data(), .ColumnCount = 2, .RowCount = 2, .RefCount = 1};
+        rowSet = TRowSet{
+            .Columns = const_cast<TColumn*>(probeCols.data()),
+            .ColumnCount = 2,
+            .RowCount = 2,
+            .RefCount = 1,
+        };
         return EJoinFetchResult::OK;
     };
-    auto right = [&](TRowSet& rowSet) {
+    auto build = [&](TRowSet& rowSet) {
         if (buildStep < idleSteps) {
             ++buildStep;
             return EJoinFetchResult::NO_DATA;
         }
         if (buildStep++ == idleSteps) {
-            rowSet = TRowSet{.Columns = rcols.data(), .ColumnCount = 2, .RowCount = 2, .RefCount = 1};
+            rowSet = TRowSet{
+                .Columns = const_cast<TColumn*>(buildCols.data()),
+                .ColumnCount = 2,
+                .RowCount = 2,
+                .RefCount = 1,
+            };
             return EJoinFetchResult::OK;
         }
         buildFinished = true;
         return EJoinFetchResult::FINISHED;
     };
+    const TRowJoinProcessor::TFetch buildFetch = build;
+    const TRowJoinProcessor::TFetch probeFetch = probe;
+    const auto& left = buildLeft ? buildFetch : probeFetch;
+    const auto& right = buildLeft ? probeFetch : buildFetch;
 
     for (int calls = 0; calls < 100 && !run.Finished; ++calls) {
         if (!buildFinished && !probeFinished) {
@@ -3164,7 +3197,14 @@ THeldProbeRun RunHeldProbe(size_t probeHoldBytes, size_t probeBatches, size_t id
             const auto* c2 = reinterpret_cast<const int64_t*>(out.Columns[2].Data);
             const auto* c3 = reinterpret_cast<const int64_t*>(out.Columns[3].Data);
             for (int64_t i = 0; i < out.RowCount; ++i) {
-                run.Rows.emplace_back(c0[i], c1[i], c2[i], c3[i]);
+                // A string column is recorded as its length, in place of lv.
+                int64_t second = stringProbe ? 0 : c1[i];
+                if (stringProbe) {
+                    EXPECT_EQ(out.Columns[1].OffsetWidth, 8);
+                    const auto* offsets = static_cast<const int64_t*>(out.Columns[1].Offsets);
+                    second = offsets[i + 1] - offsets[i];
+                }
+                run.Rows.emplace_back(c0[i], second, c2[i], c3[i]);
             }
             Release(&out);
         }
@@ -3190,6 +3230,28 @@ TEST(RowJoinProcessor, StopsHoldingProbeBatchesAtTheBudget) {
     // All four probe batches match key 2 once: the budget changes no result.
     EXPECT_EQ(run.Rows, (std::vector<std::tuple<int64_t, int64_t, int64_t, int64_t>>(
         4, {2, 20, 2, 200})));
+
+    // A left build holds the right probe batches by the same budget.
+    const auto left = RunHeldProbe(
+        /*probeHoldBytes=*/64, /*probeBatches=*/4, /*idleSteps=*/6, /*buildLeft=*/true);
+    EXPECT_TRUE(left.Finished);
+    EXPECT_EQ(left.ProbesBeforeBuild, 2u);
+    ASSERT_GE(left.Required.size(), 5u);
+    for (size_t i = 2; i < left.Required.size(); ++i) {
+        EXPECT_EQ(left.Required[i], EJoinBuildSide::Left) << "call " << i;
+    }
+    EXPECT_EQ(left.Rows, run.Rows);
+
+    // A string probe column counts its payload, not its offsets: four batches
+    // of 32 bytes (16 of key, 16 of names) are held below a 100-byte budget
+    // until 96 bytes are held; the offsets (12 per batch) would stop it at 3.
+    const auto strings = RunHeldProbe(
+        /*probeHoldBytes=*/100, /*probeBatches=*/5, /*idleSteps=*/8,
+        /*buildLeft=*/false, /*stringProbe=*/true);
+    EXPECT_TRUE(strings.Finished);
+    EXPECT_EQ(strings.ProbesBeforeBuild, 4u);
+    EXPECT_EQ(strings.Rows, (std::vector<std::tuple<int64_t, int64_t, int64_t, int64_t>>(
+        5, {2, 8, 2, 200})));
 }
 
 // A batch larger than the budget is still taken when nothing is held, so the
