@@ -4682,7 +4682,9 @@ class OperatorInstrumentation {
     this.layout = layout;
     this.kernels = kernels;
 
-    this.scratch = shared.arena.alloc(24, 8);
+    // qdb_instrumentation_hash writes four words: groups, capacity, bytes and
+    // whether the table is in the row layout.
+    this.scratch = shared.arena.alloc(32, 8);
     this.stringBuffers = shared.arena.alloc(Math.max(stage.instrumentationStringBuffers?.length || 0, 1) * 8, 8);
     const view = shared.arena.view();
     (stage.instrumentationStringBuffers || []).forEach((index, i) =>

@@ -974,6 +974,8 @@ NQdb::NScheduler::TSettings ParseSchedulerSettings(const llvm::json::Object& roo
     // (service/static/browser_runtime.js); the row join table is native-only
     // until it is ported there.
     settings.Join.Table = NQdb::NScheduler::EJoinTableKind::Legacy;
+    // It also initializes every aggregate as a swiss table.
+    settings.Aggregate.Table = NQdb::NScheduler::EAggregateTableKind::Swiss;
 
     const auto* optionsValue = root.get("options");
     const auto* options = optionsValue ? optionsValue->getAsObject() : nullptr;
@@ -1921,7 +1923,7 @@ llvm::json::Object ExecLayoutJson(int64_t heapBase, int wasmBits) {
                 {"length", 8},
             }},
             {"hashTable", llvm::json::Object{
-                {"size", 80},
+                {"size", 232},
                 {"sizeOffset", 48},
             }},
             {"pairBuffer", llvm::json::Object{

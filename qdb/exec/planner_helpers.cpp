@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cmath>
 #include <limits>
 #include <ostream>
 #include <stdexcept>
@@ -204,6 +205,66 @@ int64_t EstimateAggregateInitialCapacity(
 
     return static_cast<int64_t>(
         std::bit_ceil(std::max(required, DefaultCapacity)));
+}
+
+TAggregateTaskEstimate EstimateAggregateTask(
+    const TAggregateOperator& aggregate,
+    size_t partitionCount)
+{
+    TAggregateTaskEstimate estimate{
+        .InitialCapacity = EstimateAggregateInitialCapacity(aggregate, partitionCount),
+    };
+    if (const auto groups = EstimateAggregateGroupCount(aggregate)) {
+        const uint64_t partitions = std::max<uint64_t>(partitionCount, 1);
+        estimate.Groups = *groups / partitions + (*groups % partitions != 0);
+    }
+    return estimate;
+}
+
+int64_t AggregateRowLayoutMinGroups(int64_t rowBytes, size_t stateWords)
+{
+    // The swiss table reads one array per state word, so the more words a
+    // group has, the smaller the table from which the row layout is faster.
+    // AggregateTable.DISABLED_LayoutMicrobenchmark measured the crossover
+    // with one task per worker (18), as a parallel aggregate runs: the row
+    // table holds about 8 MiB there with one state word, 3 MiB with two,
+    // 1-1.5 MiB with four, and rows are faster at every size with eight, for
+    // i64 and (i64, i32) keys alike. 8 MiB / words^1.5 follows those points.
+    constexpr double OneWordBytes = 8 << 20;
+    const double words = static_cast<double>(std::max<size_t>(stateWords, 1));
+    const double bytes = OneWordBytes / (words * std::sqrt(words));
+    return std::max<int64_t>(static_cast<int64_t>(bytes) / std::max<int64_t>(rowBytes, 1), 1);
+}
+
+TAggregateTablePlan PlanAggregateTable(
+    const TAggregateTaskEstimate& estimate,
+    const TAggregateKernels& kernels,
+    NScheduler::EAggregateTableKind table)
+{
+    // Entries for the estimated groups, within the swiss table's byte budget:
+    // a well estimated table ends at a load near one half.
+    const int64_t capacityGroups = estimate.InitialCapacity - estimate.InitialCapacity / 8;
+    TAggregateTablePlan plan{
+        .InitialCapacity = estimate.InitialCapacity,
+        .InitialGroups = std::min<int64_t>(
+            static_cast<int64_t>(std::min<uint64_t>(
+                estimate.Groups.value_or(0), std::numeric_limits<int64_t>::max())),
+            capacityGroups),
+    };
+    if (kernels.RowBytes == 0 || table == NScheduler::EAggregateTableKind::Swiss) {
+        return plan;
+    }
+    if (table == NScheduler::EAggregateTableKind::Row) {
+        plan.Layout = EAggregateTableLayout::Row;
+        return plan;
+    }
+    const int64_t minGroups = AggregateRowLayoutMinGroups(kernels.RowBytes, kernels.StateWords);
+    if (estimate.Groups && *estimate.Groups >= static_cast<uint64_t>(minGroups)) {
+        plan.Layout = EAggregateTableLayout::Row;
+    } else {
+        plan.RowSwitchGroups = minGroups;
+    }
+    return plan;
 }
 
 NQumir::NAst::TTypePtr BuildSourceRuntimeType(TSourceOperator& src)

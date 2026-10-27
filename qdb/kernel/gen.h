@@ -163,6 +163,22 @@ NQumir::NAst::TExprPtr GenProjectKernelAst(
     NQumir::NAst::TTypePtr stringViewType,
     std::vector<std::shared_ptr<std::string>>& literalStorage);
 
+// Byte layout of a group in the row layout of the aggregate table
+// (kernel/aggregation/aggregation_rows.oz): the hash word, the key at
+// KeyOffset, then one i64 state word per AggBuffers slot from StateOffset.
+struct TAggRowLayout {
+    int64_t KeyOffset = 0;
+    int64_t StateOffset = 0;
+    int64_t RowBytes = 0;
+};
+
+// The row layout of an aggregate, or nullopt when it cannot have one: its key
+// or a reducer holds a string, or it has groups that exist over an empty input.
+std::optional<TAggRowLayout> BuildAggRowLayout(
+    const TAggregateKeyDescriptor& key,
+    const TAggReducerLayout& layout,
+    bool hasEmptyInputGroups);
+
 // Builds the generic aggregation dispatch entry over aht_init/aht_upsert_dual/
 // aht_destroy. Key extraction uses the common TColumn materializer and the
 // descriptor's borrowed LookupType/stored StoredType representations. Aggregate
@@ -174,6 +190,10 @@ NQumir::NAst::TExprPtr GenProjectKernelAst(
 // keyed on the same group keys (plan_lowerer.cpp decides this).
 // emptyInputGroups: ids (leading integer key values) of the groups the init op creates
 // before any row arrives, with all other key columns NULL; see TOperatorKernelSpec.
+// rows: the row layout, when the aggregate has one. The dispatch then also
+// serves InitRows and SwitchToRowsAt, sends the batches of a table in that
+// layout to agg_rows_update, and moves a swiss table there when it must grow
+// past its RowSwitchGroups.
 NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     const NQumir::NAst::TStructType& inputType,
     const TAggregateKeyDescriptor& key,
@@ -182,16 +202,34 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType,
     bool hasPrecomputedHash = false,
-    const std::vector<int64_t>& emptyInputGroups = {});
+    const std::vector<int64_t>& emptyInputGroups = {},
+    const std::optional<TAggRowLayout>& rows = std::nullopt);
+
+// Builds agg_rows_update(ht, batch, start) -> i64, the update of a table in
+// the row layout from batch row `start` on: chunks of selected rows go through
+// agr_find_or_insert, then each row is applied to its group's states. Returns
+// 0, or -1 when an allocation fails.
+NQumir::NAst::TExprPtr GenGenericAggregateRowsUpdateAst(
+    const NQumir::NAst::TStructType& inputType,
+    const TAggregateKeyDescriptor& key,
+    const TAggReducerLayout& layout,
+    const TAggRowLayout& rows,
+    NQumir::NAst::TTypePtr columnType,
+    NQumir::NAst::TTypePtr rowSetType,
+    NQumir::NAst::TTypePtr hashTableType,
+    bool hasPrecomputedHash);
 
 // Builds the byte-oriented finalize ABI. C++ supplies one opaque u8 destination
 // per logical key field; the generated wrapper casts each destination to its
 // concrete pointer type and projects dense AoS Key values into SoA columns.
+// With a row layout, a table in that layout is projected by a scan of its
+// arena.
 NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
     const TAggregateKeyDescriptor& key,
     const TAggReducerLayout& layout,
     NQumir::NAst::TTypePtr hashTableType,
-    NQumir::NAst::TTypePtr columnType = nullptr);
+    NQumir::NAst::TTypePtr columnType = nullptr,
+    const std::optional<TAggRowLayout>& rows = std::nullopt);
 
 // Builds agg_finish_rowset(ht, out_rowset) -> i64. The generated function
 // allocates output TColumn buffers with qdb_alloc, calls

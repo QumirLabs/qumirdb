@@ -155,14 +155,27 @@ NQumir::NAst::TExprPtr BuildWindowProgramAst(
     const std::vector<TSortRadixKeyInput>& orderKeys,
     const std::vector<TWindowFuncInput>& funcs);
 
-// agg_dispatch(ref HashTable ht, ref TRowSet batch, i64 arg, i64 op) -> i64
-//   op == 0: init(ht, capacity = arg)
-//   op == 1: update ht from *batch (arg ignored)
-//   otherwise: destroy(ht)
-// `ht` must point to a caller-owned, zero-initialized buffer of
-// TKernelCompiler::HashTableSize bytes (the HashTable layout from
-// modules/qumirdb.cpp).
+// agg_dispatch(ref HashTable ht, ref TRowSet batch, i64 arg, i64 op) -> i64,
+// with op an EAggregateKernelOp. `ht` must point to a caller-owned,
+// zero-initialized buffer of TKernelCompiler::HashTableSize bytes (the
+// HashTable layout from modules/qumirdb.cpp).
 using TAggregateDispatch = std::function<int64_t(void* ht, TRowSet* batch, int64_t arg, int64_t op)>;
+
+// The agg_dispatch operations; arg is ignored unless an operation names it.
+// Init, InitRows and SwitchToRowsAt return 0 on failure, Update a negative
+// value.
+enum class EAggregateKernelOp : int64_t {
+    // A swiss table of `arg` slots, a power of two of at least 8.
+    Init = 0,
+    Update = 1,
+    Destroy = 2,
+    // A table in the row layout (kernel/aggregation/aggregation_rows.oz) with
+    // entries for `arg` groups. Only for kernels with RowBytes > 0.
+    InitRows = 3,
+    // A swiss table that must grow while it holds `arg` groups or more moves
+    // to the row layout instead. Only for kernels with RowBytes > 0.
+    SwitchToRowsAt = 4,
+};
 
 // Finalizes ht into a complete TRowSet and destroys ht.
 using TAggregateFinishRowSet = std::function<int64_t(void* ht, TRowSet* output)>;
@@ -190,6 +203,12 @@ struct TAggregateKernels {
     TAggregateDispatch Dispatch;
     TAggregateFinishRowSet FinishRowSet;
     size_t NumAggs = 0;
+    // The i64 state words of a group, one swiss state array each.
+    size_t StateWords = 0;
+    // Bytes of a group in the row layout, or 0 when the aggregate cannot use
+    // it: its key or a reducer holds a string, or it has groups that exist
+    // over an empty input.
+    int64_t RowBytes = 0;
     std::vector<int64_t> StringMetadataBuffers;
     std::vector<TAggregateOutputKey> OutputKeys;
     std::vector<TAggregateOutputAgg> OutputAggs;
@@ -440,8 +459,9 @@ public:
 
     // sizeof(HashTable) per modules/qumirdb.cpp's layout - callers of
     // CompileAggregate must allocate a zero-initialized buffer this large
-    // for `ht`.
-    static constexpr size_t HashTableSize = 104;
+    // for `ht`. It embeds the row layout's JoinArena, JoinTable and
+    // JoinScratch (sizes below).
+    static constexpr size_t HashTableSize = 280;
 
     // The symmetric hash join reuses the aggregation HashTable (HashTableSize)
     // as each side's hash map. sizeof(PairBuffer) per modules/qumirdb.cpp -

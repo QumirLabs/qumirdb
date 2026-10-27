@@ -67,6 +67,18 @@ std::optional<NQumir::TError> AddParsedKernel(
     return std::nullopt;
 }
 
+// The row table (join/row_table.oz) and the row layout of the aggregate table
+// over it. agr_destroy frees the table in either layout, so every aggregate
+// program has them.
+std::optional<NQumir::TError> AddRowLayoutLibrary(
+    std::vector<NQumir::NAst::TExprPtr>& library)
+{
+    if (auto error = AddParsedKernel(library, ReadJoinKernel("row_table.oz"))) {
+        return error;
+    }
+    return AddParsedKernel(library, ReadAggregationKernel("aggregation_rows.oz"));
+}
+
 std::optional<NQumir::TError> AddStringReducerLibrary(
     std::vector<NQumir::NAst::TExprPtr>& library,
     const TAggReducerLayout& layout)
@@ -356,6 +368,9 @@ BuildGenericAggregateProgramAst(
         }
         stmts.insert(stmts.end(), parsed->begin(), parsed->end());
     }
+    if (auto error = AddRowLayoutLibrary(stmts)) {
+        return std::unexpected(*error);
+    }
 
     auto entry = GenGenericAggregateDispatchAst(
         inputType, key, layout, std::move(columnType),
@@ -423,7 +438,8 @@ BuildGenericAggregateFusedProgramAst(
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType,
     bool hasPrecomputedHash,
-    const std::vector<int64_t>& emptyInputGroups)
+    const std::vector<int64_t>& emptyInputGroups,
+    const std::optional<TAggRowLayout>& rows)
 {
     using namespace NQumir::NAst;
 
@@ -498,6 +514,9 @@ BuildGenericAggregateFusedProgramAst(
         }
         stmts.insert(stmts.end(), parsed->begin(), parsed->end());
     }
+    if (auto error = AddRowLayoutLibrary(stmts)) {
+        return std::unexpected(*error);
+    }
 
     auto appendEntry = [&](TExprPtr entry,
                            const char* what) -> std::optional<NQumir::TError> {
@@ -509,10 +528,20 @@ BuildGenericAggregateFusedProgramAst(
         stmts.push_back(block.Cast()->Stmts.front());
         return std::nullopt;
     };
+    // The row layout's update precedes the dispatch that calls it.
+    if (rows) {
+        if (auto err = appendEntry(
+                GenGenericAggregateRowsUpdateAst(
+                    inputType, key, layout, *rows, columnType, rowSetType, hashTableType,
+                    hasPrecomputedHash),
+                "row layout aggregate update")) {
+            return std::unexpected(*err);
+        }
+    }
     if (auto err = appendEntry(
             GenGenericAggregateDispatchAst(
                 inputType, key, layout, columnType, rowSetType, hashTableType,
-                hasPrecomputedHash, emptyInputGroups),
+                hasPrecomputedHash, emptyInputGroups, rows),
             "generic aggregate dispatch")) {
         return std::unexpected(*err);
     }
@@ -522,7 +551,7 @@ BuildGenericAggregateFusedProgramAst(
         return std::unexpected(*err);
     }
     if (auto err = appendEntry(
-            GenGenericAggregateFinalizeAst(key, layout, hashTableType, columnType),
+            GenGenericAggregateFinalizeAst(key, layout, hashTableType, columnType, rows),
             "generic aggregate finalize")) {
         return std::unexpected(*err);
     }

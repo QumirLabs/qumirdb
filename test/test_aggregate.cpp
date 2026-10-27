@@ -1834,7 +1834,7 @@ void CheckAggregateStatesAcrossRepeatedGrowth(bool stringKeys) {
     }};
     TKernelCompiler compiler;
     TAggregateProcessor processor(compiler.CompileAggregate(
-        NKernel::BuildAggregateKernelSpec(input, {"k"}, aggs)), 8);
+        NKernel::BuildAggregateKernelSpec(input, {"k"}, aggs)), {.InitialCapacity = 8});
     std::map<int64_t, int64_t> expected;
     std::vector<int64_t> insertionOrder;
     // Interleave inserts with updates across enough batches to grow repeatedly.
@@ -1924,7 +1924,7 @@ TEST(AggregateE2E, NullableFloatAndWideStatesSurviveRepeatedGrowth) {
     }
     TKernelCompiler compiler;
     TAggregateProcessor processor(compiler.CompileAggregate(
-        NKernel::BuildAggregateKernelSpec(input, {"k"}, aggs)), 8);
+        NKernel::BuildAggregateKernelSpec(input, {"k"}, aggs)), {.InitialCapacity = 8});
     struct TReference {
         int64_t Count = 0;
         int64_t ValidCount = 0;
@@ -2034,7 +2034,7 @@ TEST(AggregateE2E, MixedStringAndNumericReducersSurviveRepeatedGrowth) {
     };
     TKernelCompiler compiler;
     TAggregateProcessor processor(compiler.CompileAggregate(
-        NKernel::BuildAggregateKernelSpec(input, {"k"}, aggs)), 8);
+        NKernel::BuildAggregateKernelSpec(input, {"k"}, aggs)), {.InitialCapacity = 8});
     struct TReference {
         int64_t Sum = 0;
         std::string Min;

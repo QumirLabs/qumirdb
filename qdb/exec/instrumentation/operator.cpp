@@ -74,11 +74,12 @@ void TOperatorInstrumentation::ObserveHash(
     std::span<const int64_t> stringBuffers)
 {
     using TMeasure = void(*)(void*, int64_t, const int64_t*, int64_t, int64_t*);
-    int64_t values[3] = {};
+    int64_t values[4] = {};
     reinterpret_cast<TMeasure>(Kernel->Fns[1])(
         table, join, stringBuffers.data(), stringBuffers.size(), values);
     HasHash = true;
     HasBuildMemory = true;
+    RowLayout = values[3] != 0;
     const uint64_t capacity = values[1];
     if (Capacities_[side]) {
         // Tables only grow by doubling, including multiple growths inside one
@@ -105,6 +106,7 @@ void TOperatorInstrumentation::ObserveBuildTable(
 {
     HasHash = true;
     HasBuildMemory = true;
+    RowLayout = true;
     Capacities_[side] = capacity;
     Groups_[side] = keys;
     Memory_[side] = bytes;

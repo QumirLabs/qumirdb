@@ -1615,6 +1615,411 @@ TAggReducerLayout BuildAggReducerLayout(
     return layout;
 }
 
+std::optional<TAggRowLayout> BuildAggRowLayout(
+    const TAggregateKeyDescriptor& key,
+    const TAggReducerLayout& layout,
+    bool hasEmptyInputGroups)
+{
+    const bool stringKey = std::ranges::any_of(key.Fields, [](const auto& field) {
+        return ContainsLogicalString(field.Type);
+    });
+    if (stringKey || HasStringReducer(layout) || hasEmptyInputGroups) {
+        return std::nullopt;
+    }
+    TAggRowLayout rows;
+    rows.KeyOffset = 8;
+    rows.StateOffset = static_cast<int64_t>(AlignUp(8 + key.Size, 8));
+    rows.RowBytes = rows.StateOffset + 8 * static_cast<int64_t>(layout.NumAggBuffers);
+    return rows;
+}
+
+namespace {
+
+// Rows of a batch that one find-or-insert of the row layout takes at a time.
+// A chunk bounds the lookup scratch, and the groups it touches are still in
+// the cache when its last pass applies the values to them.
+constexpr int64_t AggRowChunkRows = 2048;
+// Rows per arena block of the row layout, as in the row join table.
+constexpr int64_t AggRowBlockRows = 16384;
+
+// The per-row parts of the aggregate update, shared by the swiss loop of
+// agg_dispatch and the passes of agg_rows_update. Each call builds new AST
+// nodes, so a part can be placed in both functions.
+class TAggregateUpdateAst {
+public:
+    TAggregateUpdateAst(
+        const NQumir::NAst::TStructType& inputType,
+        const TAggregateKeyDescriptor& key,
+        const TAggReducerLayout& layout,
+        const NQumir::NAst::TTypePtr& columnType,
+        const NQumir::NAst::TTypePtr& rowSetType,
+        bool hasPrecomputedHash)
+        : Key_(key)
+        , Layout_(layout)
+        , PtrColumnType_(ColumnPointerType(columnType, rowSetType))
+        , ColumnValueType_(PointerPointeeOr(PtrColumnType_, columnType))
+        , StringViewType_(FindStringViewType(key.LookupType))
+        , HasPrecomputedHash_(hasPrecomputedHash)
+    {
+        using namespace NQumir::NAst;
+        if (!StringViewType_ && HasStringReducer(layout)) {
+            StringViewType_ = std::make_shared<TNamedType>("StringView", nullptr);
+        }
+        // Each argument column is read at most once per row. Count-only
+        // arguments need no value; nullable ones read only their validity.
+        for (const auto& r : layout.Reducers) {
+            if (r.ArgColumnIndex < 0 || ArgColumns_.contains(r.ArgColumnIndex)) {
+                continue;
+            }
+            const int32_t idx = r.ArgColumnIndex;
+            TArgColumn ac;
+            ac.Type = inputType.Fields[idx].second;
+            ac.NeedValue = std::ranges::any_of(layout.Reducers,
+                [&](const auto& candidate) {
+                    return candidate.ArgColumnIndex == idx &&
+                        candidate.Func != "count";
+                });
+            const auto valueType = UnwrapNullableType(ac.Type);
+            if (IsBinIntValueType(valueType)) {
+                ac.ValueKind = EAggValueKind::BinInt;
+            } else if (TMaybeType<TFloatType>(UnwrapNamedType(valueType))) {
+                ac.ValueKind = EAggValueKind::Float64;
+            } else if (TMaybeType<TStringType>(UnwrapNamedType(valueType))) {
+                ac.ValueKind = EAggValueKind::String;
+            } else if (TMaybeType<TBoolType>(UnwrapNamedType(valueType))) {
+                ac.ValueKind = EAggValueKind::Bool;
+            }
+            ac.Nullable = IsNullableType(ac.Type);
+            // A string is variable-width and a bool bit-packed: neither is indexed.
+            const bool packed = ac.ValueKind == EAggValueKind::String ||
+                ac.ValueKind == EAggValueKind::Bool;
+            ac.Materialized = ac.Nullable || (ac.NeedValue && packed);
+            ArgColumns_.emplace(idx, std::move(ac));
+        }
+    }
+
+    // The batch row count, selection and the columns the update reads.
+    std::vector<NQumir::NAst::TExprPtr> Prologue() const {
+        using namespace NQumir::NAst;
+        auto u8Type = std::make_shared<TIntegerType>(TIntegerType::U8);
+        auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
+        std::vector<TExprPtr> stmts;
+        auto bind = [&](const std::string& name, TTypePtr type, TExprPtr value) {
+            stmts.push_back(NOz::Var(name, std::move(type)));
+            stmts.push_back(NOz::Assign(name, std::move(value)));
+        };
+        bind("n", I64(), NOz::Field("batch", "RowCount"));
+        bind("selection", std::make_shared<TPointerType>(u8Type),
+            NOz::Field("batch", "Selection"));
+        bind("cols", PtrColumnType_, NOz::Field("batch", "Columns"));
+        if (HasPrecomputedHash_) {
+            bind("hash_ptr", std::make_shared<TPointerType>(u64Type),
+                NOz::Field("batch", "Hash"));
+        }
+        for (size_t fieldIndex = 0; fieldIndex < Key_.Fields.size(); ++fieldIndex) {
+            bind("key_column_" + std::to_string(fieldIndex), ColumnValueType_,
+                ColumnAt(Key_.Fields[fieldIndex].ColumnIndex));
+        }
+        for (const auto& [idx, ac] : ArgColumns_) {
+            if (ac.Materialized) {
+                bind("arg_column_" + std::to_string(idx), ColumnValueType_, ColumnAt(idx));
+            } else if (ac.NeedValue) {
+                auto ptrValType = std::make_shared<TPointerType>(
+                    AggregateStorageType(UnwrapNullableType(ac.Type)));
+                bind("values_" + std::to_string(idx), ptrValType, NOz::Cast(
+                    NOz::Cast(NOz::Field(ColumnAt(idx), "Data"), I64()), ptrValType));
+            }
+        }
+        bind("selection_is_null", std::make_shared<TBoolType>(),
+            NOz::Bin(TOperator("=="), NOz::Cast(NOz::Ident("selection"), I64()),
+                NOz::TypedInt(0, I64())));
+        return stmts;
+    }
+
+    NQumir::NAst::TExprPtr Selected(const std::string& row) const {
+        using namespace NQumir::NAst;
+        auto u8Type = std::make_shared<TIntegerType>(TIntegerType::U8);
+        return NOz::Bin(TOperator("||"), NOz::Ident("selection_is_null"),
+            NOz::Bin(TOperator("!="), NOz::Index("selection", NOz::Ident(row)),
+                NOz::TypedInt(0, u8Type)));
+    }
+
+    // key_value and hash_value of batch row `row`.
+    std::vector<NQumir::NAst::TExprPtr> Key(const std::string& row) const {
+        using namespace NQumir::NAst;
+        NQumir::TLocation loc{};
+        auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
+        std::vector<TExprPtr> stmts;
+        std::vector<TColumnValueAst> keyFields;
+        keyFields.reserve(Key_.Fields.size());
+        for (size_t fieldIndex = 0; fieldIndex < Key_.Fields.size(); ++fieldIndex) {
+            auto logicalType = Key_.Fields[fieldIndex].IsNullable
+                ? std::make_shared<TNullable>(Key_.Fields[fieldIndex].Type)
+                : Key_.Fields[fieldIndex].Type;
+            keyFields.push_back(BuildColumnValueAst(
+                "key_column_" + std::to_string(fieldIndex), row,
+                "key_value_" + std::to_string(fieldIndex),
+                std::move(logicalType), StringViewType_));
+            stmts.insert(stmts.end(),
+                std::make_move_iterator(keyFields.back().Setup.begin()),
+                std::make_move_iterator(keyFields.back().Setup.end()));
+        }
+        auto namedKey = TMaybeType<TNamedType>(Key_.LookupType);
+        auto keyStruct = namedKey
+            ? TMaybeType<TStructType>(namedKey.Cast()->UnderlyingType)
+            : TMaybeType<TStructType>(Key_.LookupType);
+        if (!keyStruct) {
+            throw std::invalid_argument(
+                "GenGenericAggregateDispatchAst: key must be a struct");
+        }
+        std::vector<TExprPtr> fields;
+        fields.reserve(keyStruct.Cast()->Fields.size());
+        for (const auto& [fieldName, fieldType] : keyStruct.Cast()->Fields) {
+            const bool validity = fieldName.starts_with("valid_");
+            const std::string_view prefix = validity ? "valid_" : "key_";
+            if (!fieldName.starts_with(prefix)) {
+                throw std::invalid_argument(
+                    "GenGenericAggregateDispatchAst: unexpected key field '" +
+                    fieldName + "'");
+            }
+            const size_t fieldIndex = std::stoull(fieldName.substr(prefix.size()));
+            if (fieldIndex >= Key_.Fields.size()) {
+                throw std::invalid_argument(
+                    "GenGenericAggregateDispatchAst: invalid key field '" +
+                    fieldName + "'");
+            }
+            fields.push_back(validity
+                ? keyFields[fieldIndex].IsValid
+                : keyFields[fieldIndex].Value);
+        }
+        stmts.push_back(NOz::Var("key_value", Key_.LookupType));
+        stmts.push_back(NOz::Assign("key_value", std::make_shared<TStructConstructExpr>(
+            loc, Key_.LookupType, std::move(fields))));
+        stmts.push_back(NOz::Var("hash_value", u64Type));
+        auto computed = NOz::Cast(NOz::Call("rh_hash", {NOz::Ident("key_value")}), u64Type);
+        if (HasPrecomputedHash_) {
+            // hash_ptr is only guaranteed non-null when the shuffle upstream
+            // produced a single-batch (view) output; the rarer multi-batch
+            // gather path leaves it null, so fall back to rh_hash per row.
+            stmts.push_back(NOz::If(
+                NOz::Bin(TOperator("!="), NOz::Cast(NOz::Ident("hash_ptr"), I64()),
+                    NOz::TypedInt(0, I64())),
+                NOz::Block({NOz::Assign("hash_value",
+                    NOz::Index("hash_ptr", NOz::Ident(row)))}),
+                NOz::Block({NOz::Assign("hash_value", std::move(computed))})));
+        } else {
+            stmts.push_back(NOz::Assign("hash_value", std::move(computed)));
+        }
+        return stmts;
+    }
+
+    // arg_val_<c> and arg_valid_<c> of batch row `row`. Scalar integers and
+    // floats are carried as i64 bits, booleans as 0/1; BinInt stays typed.
+    std::vector<NQumir::NAst::TExprPtr> Arguments(const std::string& row) const {
+        using namespace NQumir::NAst;
+        NQumir::TLocation loc{};
+        auto boolType = std::make_shared<TBoolType>();
+        std::vector<TExprPtr> stmts;
+        for (const auto& [idx, ac] : ArgColumns_) {
+            std::optional<TColumnValueAst> mat;
+            if (ac.Materialized) {
+                mat = BuildColumnValueAst(
+                    "arg_column_" + std::to_string(idx), row,
+                    "arg_value_" + std::to_string(idx), ac.Type,
+                    StringViewType_, ac.NeedValue);
+                stmts.insert(stmts.end(),
+                    std::make_move_iterator(mat->Setup.begin()),
+                    std::make_move_iterator(mat->Setup.end()));
+            }
+            const std::string validName = "arg_valid_" + std::to_string(idx);
+            if (!ac.NeedValue) {
+                if (ac.Nullable) {
+                    stmts.push_back(NOz::Var(validName, boolType));
+                    stmts.push_back(NOz::Assign(validName, mat->IsValid));
+                }
+                continue;
+            }
+            TExprPtr valExpr;
+            if (mat) {
+                if (ac.ValueKind == EAggValueKind::BinInt ||
+                    ac.ValueKind == EAggValueKind::String) {
+                    valExpr = mat->Value;
+                } else if (ac.ValueKind == EAggValueKind::Float64) {
+                    valExpr = std::make_shared<TBitcastExpr>(loc, mat->Value, I64());
+                } else if (ac.ValueKind == EAggValueKind::Bool) {
+                    // Not a cast: an integer cast sign-extends TRUE to -1.
+                    valExpr = NOz::If(mat->Value, NOz::TypedInt(1, I64()), NOz::TypedInt(0, I64()));
+                } else {
+                    valExpr = NOz::Cast(mat->Value, I64());
+                }
+            } else {
+                auto cell = NOz::Index("values_" + std::to_string(idx), NOz::Ident(row));
+                if (ac.ValueKind == EAggValueKind::BinInt) {
+                    valExpr = std::move(cell);
+                } else if (ac.ValueKind == EAggValueKind::Float64) {
+                    valExpr = std::make_shared<TBitcastExpr>(loc, std::move(cell), I64());
+                } else {
+                    valExpr = NOz::Cast(std::move(cell), I64());
+                }
+            }
+            auto argType = ac.ValueKind == EAggValueKind::BinInt
+                ? BinIntStorageType()
+                : (ac.ValueKind == EAggValueKind::String
+                    ? AsNamed("StringView", StringViewType_)
+                    : I64());
+            const std::string vname = "arg_val_" + std::to_string(idx);
+            stmts.push_back(NOz::Var(vname, argType));
+            stmts.push_back(NOz::Assign(vname, std::move(valExpr)));
+            if (ac.Nullable) {
+                stmts.push_back(NOz::Var(validName, boolType));
+                stmts.push_back(NOz::Assign(validName, mat->IsValid));
+            }
+        }
+        return stmts;
+    }
+
+    // Applies the arguments to the states at state_slot of the state buffers,
+    // `buffer(i)` being AggBuffers slot i; is_new is non-zero for a new group.
+    // A failing string reducer returns -1 from the enclosing function.
+    std::vector<NQumir::NAst::TExprPtr> Reducers(
+        const std::function<NQumir::NAst::TExprPtr(int)>& buffer) const
+    {
+        using namespace NQumir::NAst;
+        NQumir::TLocation loc{};
+        auto boolType = std::make_shared<TBoolType>();
+        auto ptrI64Type = std::make_shared<TPointerType>(I64());
+        auto numI64 = [&](int64_t value) { return NOz::TypedInt(value, I64()); };
+        auto binary = [&](const char* op, TExprPtr left, TExprPtr right) {
+            return NOz::Bin(TOperator(op), std::move(left), std::move(right));
+        };
+        auto slotIndex = [&](const std::string& buf) {
+            return NOz::Index(buf, NOz::Ident("state_slot"));
+        };
+        auto isNew = [&]() {
+            return binary("!=", NOz::Ident("is_new"), numI64(0));
+        };
+        auto failure = [&]() {
+            return NOz::Block({NOz::Return(numI64(-1))});
+        };
+        std::vector<TExprPtr> stmts;
+        auto bindBuffer = [&](const std::string& name, int index) {
+            stmts.push_back(NOz::Var(name, ptrI64Type));
+            stmts.push_back(NOz::Assign(name, buffer(index)));
+        };
+        for (size_t ri = 0; ri < Layout_.Reducers.size(); ++ri) {
+            const auto& info = Layout_.Reducers[ri];
+            const std::string bufName = "buf_" + std::to_string(ri);
+            const std::string reduceName = "reduce_" + std::to_string(ri);
+            const std::string validBufName = "validbuf_" + std::to_string(ri);
+            bindBuffer(bufName, info.ValueBufIdx);
+            std::string hiBufName;
+            if (info.IsBinInt() || info.IsString()) {
+                hiBufName = "hibuf_" + std::to_string(ri);
+                bindBuffer(hiBufName, info.ExtraBufIdx);
+            }
+            auto valueI = [&]() -> TExprPtr {
+                if (info.Func == "count") {
+                    return numI64(0);
+                }
+                return info.HasArg ? NOz::Ident("arg_val_" + std::to_string(info.ArgColumnIndex))
+                                   : numI64(0);
+            };
+            auto validI = [&]() -> TExprPtr {
+                return info.NeedsValidity && ArgColumns_.at(info.ArgColumnIndex).Nullable
+                    ? NOz::Ident("arg_valid_" + std::to_string(info.ArgColumnIndex))
+                    : NOz::Bool(true);
+            };
+            if (info.IsString()) {
+                auto invoke = [&](TExprPtr seed) -> TExprPtr {
+                    return NOz::Call("agg_string_reduce", {
+                        NOz::Ident(bufName), NOz::Ident(hiBufName), NOz::Ident("state_slot"),
+                        valueI(), NOz::Bool(info.Func == "min"), std::move(seed)});
+                };
+                if (!info.NeedsValidity) {
+                    stmts.push_back(NOz::If(
+                        NOz::Unary(TOperator("!"), invoke(isNew())), failure()));
+                    continue;
+                }
+                bindBuffer(validBufName, info.ValidBufIdx);
+                stmts.push_back(NOz::If(validI(), NOz::Block({
+                    NOz::If(NOz::Unary(TOperator("!"),
+                            invoke(binary("==", slotIndex(validBufName), numI64(0)))),
+                        failure()),
+                    NOz::ArrayAssign(validBufName, NOz::Ident("state_slot"),
+                        binary("+", slotIndex(validBufName), numI64(1))),
+                })));
+                continue;
+            }
+            if (info.IsBinInt()) {
+                if (!info.NeedsValidity) {
+                    stmts.push_back(NOz::Call(reduceName, {
+                        NOz::Ident(bufName), NOz::Ident(hiBufName), NOz::Ident("state_slot"),
+                        valueI(), isNew()}));
+                    continue;
+                }
+                bindBuffer(validBufName, info.ValidBufIdx);
+                stmts.push_back(NOz::Call(reduceName, {
+                    NOz::Ident(bufName), NOz::Ident(hiBufName), NOz::Ident("state_slot"),
+                    NOz::Ident(validBufName), valueI(), validI()}));
+                continue;
+            }
+            if (!info.NeedsValidity) {
+                stmts.push_back(NOz::ArrayAssign(bufName, NOz::Ident("state_slot"),
+                    NOz::Call(reduceName, {slotIndex(bufName), valueI(), isNew()})));
+            } else if (info.Func == "count") {
+                stmts.push_back(NOz::Call(reduceName,
+                    {NOz::Ident(bufName), NOz::Ident("state_slot"), validI()}));
+            } else {
+                bindBuffer(validBufName, info.ValidBufIdx);
+                stmts.push_back(NOz::Call(reduceName, {NOz::Ident(bufName),
+                    NOz::Ident(validBufName), NOz::Ident("state_slot"), valueI(), validI()}));
+            }
+        }
+        return stmts;
+    }
+
+private:
+    struct TArgColumn {
+        NQumir::NAst::TTypePtr Type;
+        EAggValueKind ValueKind = EAggValueKind::Int64;
+        bool Nullable = false;
+        bool NeedValue = false;
+        // Read through BuildColumnValueAst: a nullable or packed column.
+        bool Materialized = false;
+    };
+
+    static NQumir::NAst::TTypePtr I64() {
+        return std::make_shared<NQumir::NAst::TIntegerType>();
+    }
+
+    static NQumir::NAst::TExprPtr ColumnAt(int32_t index) {
+        return NOz::Index("cols", NOz::TypedInt(index, I64()));
+    }
+
+    const TAggregateKeyDescriptor& Key_;
+    const TAggReducerLayout& Layout_;
+    NQumir::NAst::TTypePtr PtrColumnType_;
+    NQumir::NAst::TTypePtr ColumnValueType_;
+    NQumir::NAst::TTypePtr StringViewType_;
+    bool HasPrecomputedHash_ = false;
+    std::map<int32_t, TArgColumn> ArgColumns_;
+};
+
+// A pointer to state word `word` of the group row `rowVar` (tagged as in
+// agr_find_or_insert: the caller masks bit 0 off first).
+NQumir::NAst::TExprPtr RowStateWord(
+    const std::string& rowVar, const TAggRowLayout& rows, int word)
+{
+    using namespace NQumir::NAst;
+    auto i64Type = std::make_shared<TIntegerType>();
+    return NOz::Cast(
+        NOz::Add(NOz::Cast(NOz::Ident(rowVar), i64Type),
+            NOz::TypedInt(rows.StateOffset + 8 * static_cast<int64_t>(word), i64Type)),
+        std::make_shared<TPointerType>(i64Type));
+}
+
+} // namespace
+
 NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     const NQumir::NAst::TStructType& inputType,
     const TAggregateKeyDescriptor& key,
@@ -1623,52 +2028,44 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType,
     bool hasPrecomputedHash,
-    const std::vector<int64_t>& emptyInputGroups)
+    const std::vector<int64_t>& emptyInputGroups,
+    const std::optional<TAggRowLayout>& rows)
 {
     using namespace NQumir::NAst;
     NQumir::TLocation loc{};
 
     auto i64Type = std::make_shared<TIntegerType>();
-    auto u8Type = std::make_shared<TIntegerType>(TIntegerType::U8);
     auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
-    auto boolType = std::make_shared<TBoolType>();
-    auto ptrU8Type = std::make_shared<TPointerType>(u8Type);
-    auto ptrU64Type = std::make_shared<TPointerType>(u64Type);
     auto ptrI64Type = std::make_shared<TPointerType>(i64Type);
+    auto ptrKeyType = std::make_shared<TPointerType>(key.LookupType);
 
     auto ident = [&](const std::string& name) -> TExprPtr {
-        return std::make_shared<TIdentExpr>(loc, name);
+        return NOz::Ident(name);
     };
     auto number = [&](int64_t value, TTypePtr type) -> TExprPtr {
-        auto result = std::make_shared<TNumberExpr>(loc, value);
-        result->Type = std::move(type);
-        return result;
+        return NOz::TypedInt(value, std::move(type));
     };
     auto numI64 = [&](int64_t value) { return number(value, i64Type); };
     auto binary = [&](const char* op, TExprPtr left, TExprPtr right) -> TExprPtr {
-        return std::make_shared<TBinaryExpr>(
-            loc, TOperator(op), std::move(left), std::move(right));
+        return NOz::Bin(TOperator(op), std::move(left), std::move(right));
     };
     auto call = [&](const std::string& name, std::vector<TExprPtr> args) -> TExprPtr {
-        return std::make_shared<TCallExpr>(loc, ident(name), std::move(args));
+        return NOz::Call(name, std::move(args));
     };
     auto cast = [&](TExprPtr expr, TTypePtr type) -> TExprPtr {
-        return std::make_shared<TCastExpr>(loc, std::move(expr), std::move(type));
-    };
-    auto bitcast = [&](TExprPtr expr, TTypePtr type) -> TExprPtr {
-        return std::make_shared<TBitcastExpr>(loc, std::move(expr), std::move(type));
+        return NOz::Cast(std::move(expr), std::move(type));
     };
     auto assign = [&](const std::string& name, TExprPtr value) -> TExprPtr {
-        return std::make_shared<TAssignExpr>(loc, name, std::move(value));
+        return NOz::Assign(name, std::move(value));
     };
     auto var = [&](const std::string& name, TTypePtr type) -> TExprPtr {
-        return std::make_shared<TVarStmt>(loc, name, std::move(type));
+        return NOz::Var(name, std::move(type));
     };
     auto block = [&](std::vector<TExprPtr> stmts) -> TExprPtr {
-        return std::make_shared<TBlockExpr>(loc, std::move(stmts));
+        return NOz::Block(std::move(stmts));
     };
-    auto field = [&](const std::string& object, const std::string& name) -> TExprPtr {
-        return std::make_shared<TFieldAccessExpr>(loc, ident(object), name);
+    auto returnValue = [&](TExprPtr value) -> TExprPtr {
+        return NOz::Return(std::move(value));
     };
 
     auto hashTableRefType = std::make_shared<TReferenceType>(
@@ -1682,93 +2079,17 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
         std::make_shared<TVarStmt>(loc, "op", i64Type),
     };
 
-    auto ptrColumnType = ColumnPointerType(columnType, rowSetType);
-    auto columnValueType = PointerPointeeOr(ptrColumnType, columnType);
-    auto columnAt = [&](int32_t index) -> TExprPtr {
-        return std::make_shared<TIndexExpr>(loc, ident("cols"), numI64(index));
-    };
-    auto columnData = [&](int32_t index, TTypePtr pointerType) -> TExprPtr {
-        auto column = columnAt(index);
-        auto data = std::make_shared<TFieldAccessExpr>(loc, column, "Data");
-        return cast(cast(data, i64Type), std::move(pointerType));
-    };
-
+    const TAggregateUpdateAst row(
+        inputType, key, layout, columnType, rowSetType, hasPrecomputedHash);
     std::vector<TExprPtr> update;
-    update.push_back(var("n", i64Type));
-    update.push_back(assign("n", field("batch", "RowCount")));
-    update.push_back(var("selection", ptrU8Type));
-    update.push_back(assign("selection", field("batch", "Selection")));
-    update.push_back(var("cols", ptrColumnType));
-    update.push_back(assign("cols", field("batch", "Columns")));
-    if (hasPrecomputedHash) {
-        update.push_back(var("hash_ptr", ptrU64Type));
-        update.push_back(assign("hash_ptr", field("batch", "Hash")));
+    if (rows) {
+        update.push_back(NOz::If(call("agr_active", {ident("ht")}), block({
+            returnValue(call("agg_rows_update", {ident("ht"), ident("batch"), numI64(0)})),
+        })));
     }
-    for (size_t fieldIndex = 0; fieldIndex < key.Fields.size(); ++fieldIndex) {
-        const auto& keyField = key.Fields[fieldIndex];
-        const std::string name = "key_column_" + std::to_string(fieldIndex);
-        update.push_back(var(name, columnValueType));
-        update.push_back(assign(name, columnAt(keyField.ColumnIndex)));
+    for (auto& stmt : row.Prologue()) {
+        update.push_back(std::move(stmt));
     }
-    auto stringViewType = FindStringViewType(key.LookupType);
-    if (!stringViewType && HasStringReducer(layout)) {
-        stringViewType = std::make_shared<TNamedType>("StringView", nullptr);
-    }
-
-    // Materialize each aggregate argument column at most once. Count-only
-    // arguments need no value; nullable ones read only their validity bitmap.
-    struct TArgColumn {
-        EAggValueKind ValueKind = EAggValueKind::Int64;
-        bool Nullable = false;
-        bool NeedValue = false;
-        std::optional<TColumnValueAst> Mat; // nullable or packed column
-    };
-    std::map<int32_t, TArgColumn> argColumns;
-    for (const auto& r : layout.Reducers) {
-        if (r.ArgColumnIndex < 0 || argColumns.contains(r.ArgColumnIndex)) {
-            continue;
-        }
-        const int32_t idx = r.ArgColumnIndex;
-        const auto& colType = inputType.Fields[idx].second;
-        TArgColumn ac;
-        ac.NeedValue = std::ranges::any_of(layout.Reducers,
-            [&](const auto& candidate) {
-                return candidate.ArgColumnIndex == idx &&
-                    candidate.Func != "count";
-            });
-        const auto valueType = UnwrapNullableType(colType);
-        if (IsBinIntValueType(valueType)) {
-            ac.ValueKind = EAggValueKind::BinInt;
-        } else if (TMaybeType<TFloatType>(UnwrapNamedType(valueType))) {
-            ac.ValueKind = EAggValueKind::Float64;
-        } else if (TMaybeType<TStringType>(UnwrapNamedType(valueType))) {
-            ac.ValueKind = EAggValueKind::String;
-        } else if (TMaybeType<TBoolType>(UnwrapNamedType(valueType))) {
-            ac.ValueKind = EAggValueKind::Bool;
-        }
-        ac.Nullable = IsNullableType(colType);
-        // A string is variable-width and a bool bit-packed: neither is indexed.
-        const bool packed = ac.ValueKind == EAggValueKind::String ||
-            ac.ValueKind == EAggValueKind::Bool;
-        if (ac.Nullable || (ac.NeedValue && packed)) {
-            const std::string colName = "arg_column_" + std::to_string(idx);
-            update.push_back(var(colName, columnValueType));
-            update.push_back(assign(colName, columnAt(idx)));
-            ac.Mat = BuildColumnValueAst(
-                colName, "i", "arg_value_" + std::to_string(idx), colType,
-                stringViewType, ac.NeedValue);
-        } else if (ac.NeedValue) {
-            auto valType = AggregateStorageType(UnwrapNullableType(colType));
-            auto ptrValType = std::make_shared<TPointerType>(valType);
-            const std::string ptrName = "values_" + std::to_string(idx);
-            update.push_back(var(ptrName, ptrValType));
-            update.push_back(assign(ptrName, columnData(idx, ptrValType)));
-        }
-        argColumns.emplace(idx, std::move(ac));
-    }
-    update.push_back(var("selection_is_null", boolType));
-    update.push_back(assign("selection_is_null",
-        binary("==", cast(ident("selection"), i64Type), numI64(0))));
     update.push_back(var("state_slot", i64Type));
     update.push_back(assign("state_slot", numI64(-1)));
     update.push_back(var("is_new", i64Type));
@@ -1778,266 +2099,58 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     update.push_back(var("i", i64Type));
     update.push_back(assign("i", numI64(0)));
 
-    auto selected = binary("||", ident("selection_is_null"),
-        binary("!=", std::make_shared<TIndexExpr>(loc, ident("selection"), ident("i")),
-            number(0, u8Type)));
-    std::vector<TColumnValueAst> keyFields;
-    keyFields.reserve(key.Fields.size());
-    for (size_t fieldIndex = 0; fieldIndex < key.Fields.size(); ++fieldIndex) {
-        auto logicalType = key.Fields[fieldIndex].IsNullable
-            ? std::make_shared<TNullable>(key.Fields[fieldIndex].Type)
-            : key.Fields[fieldIndex].Type;
-        keyFields.push_back(BuildColumnValueAst(
-            "key_column_" + std::to_string(fieldIndex), "i",
-            "key_value_" + std::to_string(fieldIndex),
-            std::move(logicalType), stringViewType));
-    }
-
-    std::vector<TExprPtr> fields;
-    auto namedKey = TMaybeType<TNamedType>(key.LookupType);
-    auto keyStruct = namedKey
-        ? TMaybeType<TStructType>(namedKey.Cast()->UnderlyingType)
-        : TMaybeType<TStructType>(key.LookupType);
-    if (!keyStruct) {
-        throw std::invalid_argument(
-            "GenGenericAggregateDispatchAst: key must be a struct");
-    }
-    fields.reserve(keyStruct.Cast()->Fields.size());
-    for (const auto& [fieldName, fieldType] : keyStruct.Cast()->Fields) {
-        const bool validity = fieldName.starts_with("valid_");
-        const std::string_view prefix = validity ? "valid_" : "key_";
-        if (!fieldName.starts_with(prefix)) {
-            throw std::invalid_argument(
-                "GenGenericAggregateDispatchAst: unexpected key field '" +
-                fieldName + "'");
-        }
-        const size_t fieldIndex = std::stoull(fieldName.substr(prefix.size()));
-        if (fieldIndex >= key.Fields.size()) {
-            throw std::invalid_argument(
-                "GenGenericAggregateDispatchAst: invalid key field '" +
-                fieldName + "'");
-        }
-        fields.push_back(validity
-            ? keyFields[fieldIndex].IsValid
-            : keyFields[fieldIndex].Value);
-    }
-    TExprPtr keyValue = std::make_shared<TStructConstructExpr>(
-        loc, key.LookupType, std::move(fields));
-    std::vector<TExprPtr> keyValueSetup = {
-        var("key_value", key.LookupType),
-        assign("key_value", std::move(keyValue)),
-        var("hash_value", u64Type),
-    };
-    if (hasPrecomputedHash) {
-        // hash_ptr is only guaranteed non-null when the shuffle upstream
-        // produced a single-batch (view) output; the rarer multi-batch
-        // gather path leaves it null, so fall back to rh_hash per row.
-        keyValueSetup.push_back(std::make_shared<TIfExpr>(loc,
-            binary("!=", cast(ident("hash_ptr"), i64Type), numI64(0)),
-            block({assign("hash_value",
-                std::make_shared<TIndexExpr>(loc, ident("hash_ptr"), ident("i")))}),
-            block({assign("hash_value",
-                cast(call("rh_hash", {ident("key_value")}), u64Type))})));
-    } else {
-        keyValueSetup.push_back(assign("hash_value",
-            cast(call("rh_hash", {ident("key_value")}), u64Type)));
-    }
     // Scalar states live at the probe slot; string reducers retain their dense
     // ownership buffers. This policy must match aggregate finalization.
     const std::string upsertName = HasStringReducer(layout)
         ? "aht_upsert_dual"
         : "aht_upsert_aggregate";
-    auto upsertCall = call(upsertName, {
-        ident("ht"),
-        ident("key_value"),
-        ident("stored_witness"),
-        ident("is_new"),
-        ident("hash_value"),
-    });
-    auto ptrPtrI64Type = std::make_shared<TPointerType>(ptrI64Type);
-    auto slotIndex = [&](const std::string& buf) -> TExprPtr {
-        return std::make_shared<TIndexExpr>(loc, ident(buf), ident("state_slot"));
-    };
-
-    std::vector<TExprPtr> materialize;
-    for (auto& keyField : keyFields) {
-        materialize.insert(materialize.end(),
-            std::make_move_iterator(keyField.Setup.begin()),
-            std::make_move_iterator(keyField.Setup.end()));
+    std::vector<TExprPtr> process = row.Key("i");
+    for (auto& stmt : row.Arguments("i")) {
+        process.push_back(std::move(stmt));
     }
-    materialize.insert(materialize.end(),
-        std::make_move_iterator(keyValueSetup.begin()),
-        std::make_move_iterator(keyValueSetup.end()));
-    // Compute each arg column's value and validity once per row. Scalar
-    // integers/floats are carried as i64 bits, booleans as 0/1; BinInt stays typed.
-    for (auto& [idx, ac] : argColumns) {
-        if (ac.Mat) {
-            materialize.insert(materialize.end(),
-                std::make_move_iterator(ac.Mat->Setup.begin()),
-                std::make_move_iterator(ac.Mat->Setup.end()));
-        }
-        if (!ac.NeedValue) {
-            if (ac.Nullable) {
-                const std::string validName = "arg_valid_" + std::to_string(idx);
-                materialize.push_back(var(validName, boolType));
-                materialize.push_back(assign(validName, ac.Mat->IsValid));
-            }
-            continue;
-        }
-        const std::string vname = "arg_val_" + std::to_string(idx);
-        TExprPtr valExpr;
-        if (ac.Mat) {
-            if (ac.ValueKind == EAggValueKind::BinInt ||
-                ac.ValueKind == EAggValueKind::String) {
-                valExpr = ac.Mat->Value;
-            } else if (ac.ValueKind == EAggValueKind::Float64) {
-                valExpr = bitcast(ac.Mat->Value, i64Type);
-            } else if (ac.ValueKind == EAggValueKind::Bool) {
-                // Not a cast: an integer cast sign-extends TRUE to -1.
-                valExpr = std::make_shared<TIfExpr>(loc, ac.Mat->Value, numI64(1), numI64(0));
-            } else {
-                valExpr = cast(ac.Mat->Value, i64Type);
-            }
-        } else {
-            auto cell = std::make_shared<TIndexExpr>(loc,
-                ident("values_" + std::to_string(idx)), ident("i"));
-            if (ac.ValueKind == EAggValueKind::BinInt) {
-                valExpr = std::move(cell);
-            } else if (ac.ValueKind == EAggValueKind::Float64) {
-                valExpr = bitcast(std::move(cell), i64Type);
-            } else {
-                valExpr = cast(std::move(cell), i64Type);
-            }
-        }
-        auto argType = ac.ValueKind == EAggValueKind::BinInt
-            ? BinIntStorageType()
-            : (ac.ValueKind == EAggValueKind::String
-                ? AsNamed("StringView", stringViewType)
-                : i64Type);
-        materialize.push_back(var(vname, argType));
-        materialize.push_back(assign(vname, std::move(valExpr)));
-        if (ac.Nullable) {
-            const std::string validName = "arg_valid_" + std::to_string(idx);
-            materialize.push_back(var(validName, boolType));
-            materialize.push_back(assign(validName, ac.Mat->IsValid));
-        }
-    }
-
-    // Inlined per-reducer applications (each reads its own column's value).
-    std::vector<TExprPtr> reducerStmts;
-    reducerStmts.push_back(var("agg_buffers", ptrPtrI64Type));
-    reducerStmts.push_back(assign("agg_buffers", field("ht", "AggBuffers")));
-    for (size_t ri = 0; ri < layout.Reducers.size(); ++ri) {
-        const auto& info = layout.Reducers[ri];
-        const std::string bufName = "buf_" + std::to_string(ri);
-        const std::string reduceName = "reduce_" + std::to_string(ri);
-        reducerStmts.push_back(var(bufName, ptrI64Type));
-        reducerStmts.push_back(assign(bufName,
-            std::make_shared<TIndexExpr>(loc, ident("agg_buffers"),
-                numI64(static_cast<int64_t>(info.ValueBufIdx)))));
-        std::string hiBufName;
-        if (info.IsBinInt() || info.IsString()) {
-            hiBufName = "hibuf_" + std::to_string(ri);
-            reducerStmts.push_back(var(hiBufName, ptrI64Type));
-            reducerStmts.push_back(assign(hiBufName,
-                std::make_shared<TIndexExpr>(loc, ident("agg_buffers"),
-                    numI64(static_cast<int64_t>(info.ExtraBufIdx)))));
-        }
-        auto valueI = [&]() -> TExprPtr {
-            if (info.Func == "count") {
-                return numI64(0);
-            }
-            return info.HasArg ? ident("arg_val_" + std::to_string(info.ArgColumnIndex))
-                               : numI64(0);
-        };
-        auto validI = [&]() -> TExprPtr {
-            return info.NeedsValidity && argColumns.at(info.ArgColumnIndex).Nullable
-                ? ident("arg_valid_" + std::to_string(info.ArgColumnIndex))
-                : number(1, boolType);
-        };
-        if (info.IsString()) {
-            auto invoke = [&](TExprPtr seed) -> TExprPtr {
-                return call("agg_string_reduce", {
-                    ident(bufName), ident(hiBufName), ident("state_slot"),
-                    valueI(), number(info.Func == "min", boolType),
-                    std::move(seed)});
-            };
-            if (!info.NeedsValidity) {
-                reducerStmts.push_back(std::make_shared<TIfExpr>(loc,
-                    std::make_shared<TUnaryExpr>(loc, TOperator("!"),
-                        invoke(binary("!=", ident("is_new"), numI64(0)))),
-                    block({std::make_shared<TReturnExpr>(loc, numI64(-1))}), nullptr));
-                continue;
-            }
-            const std::string validBufName = "validbuf_" + std::to_string(ri);
-            reducerStmts.push_back(var(validBufName, ptrI64Type));
-            reducerStmts.push_back(assign(validBufName,
-                std::make_shared<TIndexExpr>(loc, ident("agg_buffers"),
-                    numI64(static_cast<int64_t>(info.ValidBufIdx)))));
-            reducerStmts.push_back(std::make_shared<TIfExpr>(loc, validI(), block({
-                std::make_shared<TIfExpr>(loc,
-                    std::make_shared<TUnaryExpr>(loc, TOperator("!"),
-                        invoke(binary("==", slotIndex(validBufName), numI64(0)))),
-                    block({std::make_shared<TReturnExpr>(loc, numI64(-1))}), nullptr),
-                std::make_shared<TArrayAssignExpr>(loc, validBufName,
-                    std::vector<TExprPtr>{ident("state_slot")},
-                    binary("+", slotIndex(validBufName), numI64(1))),
-            }), nullptr));
-            continue;
-        }
-        if (info.IsBinInt()) {
-            if (!info.NeedsValidity) {
-                reducerStmts.push_back(call(reduceName, {
-                    ident(bufName), ident(hiBufName), ident("state_slot"),
-                    valueI(), binary("!=", ident("is_new"), numI64(0))}));
-                continue;
-            }
-            const std::string validBufName = "validbuf_" + std::to_string(ri);
-            reducerStmts.push_back(var(validBufName, ptrI64Type));
-            reducerStmts.push_back(assign(validBufName,
-                std::make_shared<TIndexExpr>(loc, ident("agg_buffers"),
-                    numI64(static_cast<int64_t>(info.ValidBufIdx)))));
-            reducerStmts.push_back(call(reduceName, {
-                ident(bufName), ident(hiBufName), ident("state_slot"),
-                ident(validBufName), valueI(), validI()}));
-            continue;
-        }
-        if (!info.NeedsValidity) {
-            auto callR = call(reduceName, {slotIndex(bufName), valueI(),
-                binary("!=", ident("is_new"), numI64(0))});
-            reducerStmts.push_back(std::make_shared<TArrayAssignExpr>(loc, bufName,
-                std::vector<TExprPtr>{ident("state_slot")}, std::move(callR)));
-        } else if (info.Func == "count") {
-            reducerStmts.push_back(call(reduceName,
-                {ident(bufName), ident("state_slot"), validI()}));
-        } else {
-            const std::string validBufName = "validbuf_" + std::to_string(ri);
-            reducerStmts.push_back(var(validBufName, ptrI64Type));
-            reducerStmts.push_back(assign(validBufName,
-                std::make_shared<TIndexExpr>(loc, ident("agg_buffers"),
-                    numI64(static_cast<int64_t>(info.ValidBufIdx)))));
-            reducerStmts.push_back(call(reduceName, {ident(bufName),
-                ident(validBufName), ident("state_slot"), valueI(), validI()}));
-        }
-    }
-
     std::vector<TExprPtr> validBody = {
-        assign("state_slot", std::move(upsertCall)),
-        std::make_shared<TIfExpr>(loc,
-            binary("<", ident("state_slot"), numI64(0)),
-            block({std::make_shared<TReturnExpr>(loc, numI64(-1))}), nullptr),
+        assign("state_slot", call(upsertName, {
+            ident("ht"),
+            ident("key_value"),
+            ident("stored_witness"),
+            ident("is_new"),
+            ident("hash_value"),
+        })),
     };
-    validBody.insert(validBody.end(),
-        std::make_move_iterator(reducerStmts.begin()),
-        std::make_move_iterator(reducerStmts.end()));
-    materialize.push_back(block(std::move(validBody)));
-    auto process = block(std::move(materialize));
+    if (rows) {
+        // The table moves to the row layout instead of growing; the rest of
+        // the batch, this row included, goes there.
+        validBody.push_back(NOz::If(binary("==", ident("state_slot"), numI64(-2)), block({
+            NOz::If(NOz::Unary(TOperator("!"), call("agr_from_swiss", {
+                    ident("ht"),
+                    numI64(rows->KeyOffset),
+                    numI64(rows->StateOffset),
+                    numI64(rows->RowBytes),
+                    numI64(AggRowBlockRows),
+                    cast(numI64(0), ptrKeyType),
+                })),
+                block({returnValue(numI64(-1))})),
+            returnValue(call("agg_rows_update", {ident("ht"), ident("batch"), ident("i")})),
+        })));
+    }
+    validBody.push_back(NOz::If(
+        binary("<", ident("state_slot"), numI64(0)),
+        block({returnValue(numI64(-1))})));
+    auto ptrPtrI64Type = std::make_shared<TPointerType>(ptrI64Type);
+    validBody.push_back(var("agg_buffers", ptrPtrI64Type));
+    validBody.push_back(assign("agg_buffers", NOz::Field("ht", "AggBuffers")));
+    for (auto& stmt : row.Reducers([&](int index) {
+             return NOz::Index("agg_buffers", numI64(index));
+         }))
+    {
+        validBody.push_back(std::move(stmt));
+    }
+    process.push_back(block(std::move(validBody)));
     auto loop = block({
-        std::make_shared<TIfExpr>(loc, std::move(selected), std::move(process), nullptr),
+        NOz::If(row.Selected("i"), block(std::move(process))),
         assign("i", binary("+", ident("i"), numI64(1))),
     });
-    update.push_back(std::make_shared<TWhileStmtExpr>(
-        loc, binary("<", ident("i"), ident("n")), std::move(loop)));
+    update.push_back(NOz::While(binary("<", ident("i"), ident("n")), std::move(loop)));
     update.push_back(numI64(0));
 
     TExprPtr init = cast(call("aht_init", {
@@ -2066,9 +2179,8 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
         std::vector<TExprPtr> seed = {
             var("initialized", i64Type),
             assign("initialized", std::move(init)),
-            std::make_shared<TIfExpr>(loc,
-                binary("==", ident("initialized"), numI64(0)),
-                block({std::make_shared<TReturnExpr>(loc, numI64(0))}), nullptr),
+            NOz::If(binary("==", ident("initialized"), numI64(0)),
+                block({returnValue(numI64(0))})),
             var("seed_key", key.LookupType),
             var("stored_witness", key.StoredType),
             assign("stored_witness", ZeroValueExpr(key.StoredType)),
@@ -2089,35 +2201,172 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
                 ident("ht"), ident("seed_key"), ident("stored_witness"),
                 ident("is_new"), cast(call("rh_hash", {ident("seed_key")}), u64Type),
             })));
-            seed.push_back(std::make_shared<TIfExpr>(loc,
-                binary("<", ident("state_slot"), numI64(0)),
-                block({call("aht_destroy", {ident("ht")}),
-                    std::make_shared<TReturnExpr>(loc, numI64(0))}), nullptr));
+            seed.push_back(NOz::If(binary("<", ident("state_slot"), numI64(0)),
+                block({call("agr_destroy", {ident("ht")}), returnValue(numI64(0))})));
         }
         seed.push_back(numI64(1));
         init = block(std::move(seed));
     }
     auto destroyStmts = StringCleanupCalls(layout);
-    destroyStmts.push_back(call("aht_destroy", {ident("ht")}));
+    destroyStmts.push_back(call("agr_destroy", {ident("ht")}));
     destroyStmts.push_back(numI64(1));
-    auto destroy = block(std::move(destroyStmts));
-    auto dispatch = std::make_shared<TIfExpr>(loc,
-        binary("==", ident("op"), numI64(0)), std::move(init),
-        std::make_shared<TIfExpr>(loc,
-            binary("==", ident("op"), numI64(1)), block(std::move(update)),
-            std::move(destroy)));
-    auto body = std::make_shared<TBlockExpr>(loc,
-        std::vector<TExprPtr>{std::make_shared<TReturnExpr>(loc, dispatch)});
+
+    // The operations of EAggregateKernelOp (compiler.h).
+    auto opIs = [&](int64_t op) {
+        return binary("==", ident("op"), numI64(op));
+    };
+    TExprPtr dispatch = numI64(0);
+    if (rows) {
+        dispatch = NOz::If(opIs(4),
+            block({NOz::FieldAssign(ident("ht"), "RowSwitchGroups", ident("arg")), numI64(1)}),
+            std::move(dispatch));
+        dispatch = NOz::If(opIs(3),
+            cast(call("agr_init", {
+                ident("ht"), ident("arg"),
+                numI64(static_cast<int64_t>(layout.NumAggBuffers)),
+                numI64(static_cast<int64_t>(key.Size)),
+                numI64(rows->RowBytes),
+                numI64(AggRowBlockRows),
+            }), i64Type),
+            std::move(dispatch));
+    }
+    dispatch = NOz::If(opIs(2), block(std::move(destroyStmts)),
+        std::move(dispatch));
+    dispatch = NOz::If(opIs(1), block(std::move(update)),
+        std::move(dispatch));
+    dispatch = NOz::If(opIs(0), std::move(init), std::move(dispatch));
+    auto body = std::make_shared<TBlockExpr>(
+        loc, std::vector<TExprPtr>{returnValue(std::move(dispatch))});
     auto function = std::make_shared<TFunDecl>(
         loc, "agg_dispatch", std::vector<TGenericParam>{}, std::move(params), std::move(body), i64Type);
     return std::make_shared<TBlockExpr>(loc, std::vector<TExprPtr>{function});
+}
+
+NQumir::NAst::TExprPtr GenGenericAggregateRowsUpdateAst(
+    const NQumir::NAst::TStructType& inputType,
+    const TAggregateKeyDescriptor& key,
+    const TAggReducerLayout& layout,
+    const TAggRowLayout& rows,
+    NQumir::NAst::TTypePtr columnType,
+    NQumir::NAst::TTypePtr rowSetType,
+    NQumir::NAst::TTypePtr hashTableType,
+    bool hasPrecomputedHash)
+{
+    using namespace NQumir::NAst;
+    auto i64Type = std::make_shared<TIntegerType>();
+    auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
+    auto u8Type = std::make_shared<TIntegerType>(TIntegerType::U8);
+    auto ptrKeyType = std::make_shared<TPointerType>(key.LookupType);
+    auto numI64 = [&](int64_t value) { return NOz::TypedInt(value, i64Type); };
+    auto binary = [&](const char* op, TExprPtr left, TExprPtr right) {
+        return NOz::Bin(TOperator(op), std::move(left), std::move(right));
+    };
+    auto scratch = [&](const std::string& name) {
+        return NOz::Field(NOz::Field("ht", "RowScratch"), name);
+    };
+    auto failure = [&]() {
+        return NOz::Block({NOz::Return(numI64(-1))});
+    };
+
+    const TAggregateUpdateAst row(
+        inputType, key, layout, columnType, rowSetType, hasPrecomputedHash);
+    NOz::TFunBuilder builder("agg_rows_update");
+    builder.Param("ht", std::make_shared<TReferenceType>(AsNamed("HashTable", hashTableType)))
+        .Param("batch", std::make_shared<TReferenceType>(AsNamed("TRowSet", rowSetType)))
+        .Param("start", i64Type)
+        .Return(i64Type);
+    for (auto& stmt : row.Prologue()) {
+        builder.Stmt(std::move(stmt));
+    }
+    builder
+        .Stmt(NOz::If(NOz::Unary(TOperator("!"), NOz::Call("jr_scratch_reserve", {
+                NOz::Field("ht", "RowScratch"),
+                numI64(AggRowChunkRows),
+                numI64(static_cast<int64_t>(key.Size)),
+            })),
+            failure()))
+        .Var("hashes", std::make_shared<TPointerType>(u64Type))
+        .Assign("hashes", scratch("Hashes"))
+        .Var("rows", std::make_shared<TPointerType>(i64Type))
+        .Assign("rows", scratch("Rows"))
+        .Var("keys", ptrKeyType)
+        .Assign("keys", NOz::Cast(scratch("Keys"), ptrKeyType))
+        .Var("groups", std::make_shared<TPointerType>(u64Type))
+        .Assign("groups", scratch("Entries"))
+        .Var("i", i64Type)
+        .Assign("i", NOz::Ident("start"));
+
+    // Pass 1, the only one that reads the keys: the key and hash of every
+    // selected row of the chunk.
+    std::vector<TExprPtr> collect = row.Key("i");
+    collect.push_back(NOz::ArrayAssign("rows", NOz::Ident("cnt"), NOz::Ident("i")));
+    collect.push_back(NOz::ArrayAssign("hashes", NOz::Ident("cnt"), NOz::Ident("hash_value")));
+    collect.push_back(NOz::ArrayAssign("keys", NOz::Ident("cnt"), NOz::Ident("key_value")));
+    collect.push_back(NOz::Assign("cnt", NOz::Add(NOz::Ident("cnt"), numI64(1))));
+
+    // The last pass applies every row to its group: the row's states are the
+    // buffers, at slot 0.
+    std::vector<TExprPtr> apply = {
+        NOz::Var("r", i64Type),
+        NOz::Assign("r", NOz::Index("rows", NOz::Ident("j"))),
+        NOz::Var("group", u64Type),
+        NOz::Assign("group", NOz::Index("groups", NOz::Ident("j"))),
+        NOz::Var("is_new", i64Type),
+        NOz::Assign("is_new", NOz::Cast(
+            binary("&", NOz::Ident("group"), NOz::TypedInt(1, u64Type)), i64Type)),
+        NOz::Var("group_row", std::make_shared<TPointerType>(u8Type)),
+        NOz::Assign("group_row", NOz::Cast(NOz::Cast(
+            binary("&", NOz::Ident("group"), NOz::TypedInt(-2, u64Type)), i64Type),
+            std::make_shared<TPointerType>(u8Type))),
+        NOz::Var("state_slot", i64Type),
+        NOz::Assign("state_slot", numI64(0)),
+    };
+    for (auto& stmt : row.Arguments("r")) {
+        apply.push_back(std::move(stmt));
+    }
+    for (auto& stmt : row.Reducers([&](int word) {
+             return RowStateWord("group_row", rows, word);
+         }))
+    {
+        apply.push_back(std::move(stmt));
+    }
+    apply.push_back(NOz::Assign("j", NOz::Add(NOz::Ident("j"), numI64(1))));
+
+    auto chunk = NOz::Block({
+        NOz::Var("cnt", i64Type),
+        NOz::Assign("cnt", numI64(0)),
+        NOz::While(
+            binary("&&", binary("<", NOz::Ident("i"), NOz::Ident("n")),
+                binary("<", NOz::Ident("cnt"), numI64(AggRowChunkRows))),
+            NOz::Block({
+                NOz::If(row.Selected("i"), NOz::Block(std::move(collect))),
+                NOz::Assign("i", NOz::Add(NOz::Ident("i"), numI64(1))),
+            })),
+        // Passes 2 and 3: agr_find_or_insert in aggregation_rows.oz.
+        NOz::If(NOz::Unary(TOperator("!"), NOz::Call("agr_find_or_insert", {
+                NOz::Ident("ht"),
+                NOz::Ident("cnt"),
+                numI64(rows.KeyOffset),
+                numI64(rows.StateOffset),
+                NOz::Cast(numI64(0), ptrKeyType),
+            })),
+            failure()),
+        NOz::Var("j", i64Type),
+        NOz::Assign("j", numI64(0)),
+        NOz::While(binary("<", NOz::Ident("j"), NOz::Ident("cnt")), NOz::Block(std::move(apply))),
+    });
+    builder
+        .Stmt(NOz::While(binary("<", NOz::Ident("i"), NOz::Ident("n")), std::move(chunk)))
+        .Stmt(NOz::Return(numI64(0)));
+    return NOz::Block({std::move(builder).Build()});
 }
 
 NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
     const TAggregateKeyDescriptor& key,
     const TAggReducerLayout& layout,
     NQumir::NAst::TTypePtr hashTableType,
-    NQumir::NAst::TTypePtr columnType)
+    NQumir::NAst::TTypePtr columnType,
+    const std::optional<TAggRowLayout>& rows)
 {
     using namespace NQumir::NAst;
     NQumir::TLocation loc{};
@@ -2179,19 +2428,22 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
                 TMaybeType<TStringType>(UnwrapNamedType(field.Type)));
         });
     const char* keyIndex = slotOrder ? "phys" : "slot";
+    // The output columns, which both layouts fill.
     std::vector<TExprPtr> project;
-    project.push_back(std::make_shared<TVarStmt>(loc, "group_keys", ptrKeyType));
-    project.push_back(std::make_shared<TAssignExpr>(loc, "group_keys",
+    // The swiss table's keys and states.
+    std::vector<TExprPtr> swiss;
+    swiss.push_back(std::make_shared<TVarStmt>(loc, "group_keys", ptrKeyType));
+    swiss.push_back(std::make_shared<TAssignExpr>(loc, "group_keys",
         std::make_shared<TCastExpr>(loc,
             std::make_shared<TFieldAccessExpr>(
                 loc, ident("ht"), slotOrder ? "Keys" : "GroupKeys"),
             ptrKeyType)));
     if (slotOrder) {
-        project.push_back(std::make_shared<TVarStmt>(loc, "ctrl", ptrU8Type));
-        project.push_back(std::make_shared<TAssignExpr>(loc, "ctrl",
+        swiss.push_back(std::make_shared<TVarStmt>(loc, "ctrl", ptrU8Type));
+        swiss.push_back(std::make_shared<TAssignExpr>(loc, "ctrl",
             std::make_shared<TFieldAccessExpr>(loc, ident("ht"), "Ctrl")));
-        project.push_back(std::make_shared<TVarStmt>(loc, "phys", i64Type));
-        project.push_back(std::make_shared<TAssignExpr>(loc, "phys", numI64(0)));
+        swiss.push_back(std::make_shared<TVarStmt>(loc, "phys", i64Type));
+        swiss.push_back(std::make_shared<TAssignExpr>(loc, "phys", numI64(0)));
     }
     if (!ptrColumnType) {
         throw std::invalid_argument(
@@ -2264,8 +2516,8 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
                 ptrFieldType)));
     }
     if (!layout.Reducers.empty()) {
-        project.push_back(std::make_shared<TVarStmt>(loc, "agg_buffers", ptrPtrI64Type));
-        project.push_back(std::make_shared<TAssignExpr>(loc, "agg_buffers",
+        swiss.push_back(std::make_shared<TVarStmt>(loc, "agg_buffers", ptrPtrI64Type));
+        swiss.push_back(std::make_shared<TAssignExpr>(loc, "agg_buffers",
             std::make_shared<TFieldAccessExpr>(loc, ident("ht"), "AggBuffers")));
         for (size_t i = 0; i < layout.Reducers.size(); ++i) {
             const auto& r = layout.Reducers[i];
@@ -2280,8 +2532,8 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
                             index(ident("output_buffers"), numI64(i)), i64Type),
                         ident("result")}));
             } else {
-                project.push_back(std::make_shared<TVarStmt>(loc, srcName, ptrI64Type));
-                project.push_back(std::make_shared<TAssignExpr>(loc, srcName,
+                swiss.push_back(std::make_shared<TVarStmt>(loc, srcName, ptrI64Type));
+                swiss.push_back(std::make_shared<TAssignExpr>(loc, srcName,
                     index(ident("agg_buffers"),
                         numI64(static_cast<int64_t>(r.ValueBufIdx)))));
                 auto output = index(ident("output_buffers"), numI64(static_cast<int64_t>(i)));
@@ -2299,8 +2551,8 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
                 }
                 if (r.IsBinInt()) {
                     const std::string hiName = "agg_hi_" + std::to_string(i);
-                    project.push_back(std::make_shared<TVarStmt>(loc, hiName, ptrI64Type));
-                    project.push_back(std::make_shared<TAssignExpr>(loc, hiName,
+                    swiss.push_back(std::make_shared<TVarStmt>(loc, hiName, ptrI64Type));
+                    swiss.push_back(std::make_shared<TAssignExpr>(loc, hiName,
                         index(ident("agg_buffers"),
                             numI64(static_cast<int64_t>(r.ExtraBufIdx)))));
                 }
@@ -2311,8 +2563,8 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
             // Bind the internal valid-count buffer so the slot loop can derive a
             // nullable aggregate's output mask (zero valid args => NULL result).
             const std::string validName = "validbuf_" + std::to_string(i);
-            project.push_back(std::make_shared<TVarStmt>(loc, validName, ptrI64Type));
-            project.push_back(std::make_shared<TAssignExpr>(loc, validName,
+            swiss.push_back(std::make_shared<TVarStmt>(loc, validName, ptrI64Type));
+            swiss.push_back(std::make_shared<TAssignExpr>(loc, validName,
                 index(ident("agg_buffers"), numI64(static_cast<int64_t>(r.ValidBufIdx)))));
         }
     }
@@ -2320,11 +2572,10 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
     project.push_back(std::make_shared<TAssignExpr>(
         loc, "slot", std::make_shared<TNumberExpr>(loc, int64_t{0})));
 
-    std::vector<TExprPtr> loopStmts;
     // Dense output order is independent of the physical aggregate-state slot.
     if (!HasStringReducer(layout) && !slotOrder) {
-        project.push_back(std::make_shared<TVarStmt>(loc, "state_slots", ptrI64Type));
-        project.push_back(std::make_shared<TAssignExpr>(loc, "state_slots",
+        swiss.push_back(std::make_shared<TVarStmt>(loc, "state_slots", ptrI64Type));
+        swiss.push_back(std::make_shared<TAssignExpr>(loc, "state_slots",
             std::make_shared<TFieldAccessExpr>(loc, ident("ht"), "SlotId")));
     }
     auto stateSlot = [&]() -> TExprPtr {
@@ -2336,116 +2587,126 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
         }
         return index(ident("state_slots"), ident("slot"));
     };
-    for (size_t fieldIndex = 0; fieldIndex < key.Fields.size(); ++fieldIndex) {
-        auto keyValue = std::make_shared<TIndexExpr>(
-            loc, ident("group_keys"), ident(keyIndex));
-        TExprPtr value;
-        value = std::make_shared<TFieldAccessExpr>(
-            loc, keyValue, "key_" + std::to_string(fieldIndex));
-        if (key.Fields[fieldIndex].IsNullable) {
-            keyValue = std::make_shared<TIndexExpr>(
-                loc, ident("group_keys"), ident(keyIndex));
-            auto valid = std::make_shared<TFieldAccessExpr>(
-                loc, keyValue, "valid_" + std::to_string(fieldIndex));
-            loopStmts.push_back(std::make_shared<TCallExpr>(loc,
-                ident("qdb_bitmap_set_valid"),
-                std::vector<TExprPtr>{
-                    ident("output_mask_" + std::to_string(fieldIndex)),
-                    ident("slot"), std::move(valid)}));
-        }
-        const bool isString = TMaybeType<TStringType>(
-            UnwrapNamedType(key.Fields[fieldIndex].Type));
-        if (TMaybeType<TBoolType>(UnwrapNamedType(key.Fields[fieldIndex].Type))) {
-            loopStmts.push_back(std::make_shared<TCallExpr>(loc,
-                ident("qdb_bitmap_set_valid"),
-                std::vector<TExprPtr>{
-                    ident("output_key_" + std::to_string(fieldIndex)),
-                    ident("slot"), std::move(value)}));
-            continue;
-        }
-        if (!isString) {
-            loopStmts.push_back(std::make_shared<TArrayAssignExpr>(
-                loc, "output_key_" + std::to_string(fieldIndex),
-                std::vector<TExprPtr>{ident("slot")}, std::move(value)));
-            continue;
-        }
-        const std::string dataName =
-            "output_data_" + std::to_string(fieldIndex);
-        const std::string offsetsName =
-            "output_offsets_" + std::to_string(fieldIndex);
-        const std::string copyResultName =
-            "output_copy_result_" + std::to_string(fieldIndex);
-        auto offset = std::make_shared<TIndexExpr>(
-            loc, ident(offsetsName), ident("slot"));
-        auto destination = std::make_shared<TCastExpr>(loc,
-            std::make_shared<TBinaryExpr>(loc, TOperator("+"),
-                std::make_shared<TCastExpr>(loc, ident(dataName), i64Type),
-                offset), ptrU8Type);
-        auto source = std::make_shared<TFieldAccessExpr>(
-            loc, value, "Data");
-        auto byteSize = std::make_shared<TFieldAccessExpr>(
-            loc, value, "Size");
-        loopStmts.push_back(std::make_shared<TAssignExpr>(loc, copyResultName,
-            std::make_shared<TCallExpr>(loc,
-                ident("qdb_string_copy_bytes"),
-                std::vector<TExprPtr>{
-                    std::move(destination), std::move(source), byteSize})));
-        loopStmts.push_back(std::make_shared<TArrayAssignExpr>(loc,
-            offsetsName,
-            std::vector<TExprPtr>{std::make_shared<TBinaryExpr>(loc,
-                TOperator("+"), ident("slot"),
-                std::make_shared<TNumberExpr>(loc, int64_t{1}))},
-            std::make_shared<TBinaryExpr>(loc, TOperator("+"),
-                std::make_shared<TIndexExpr>(
-                    loc, ident(offsetsName), ident("slot")),
-                std::make_shared<TFieldAccessExpr>(loc, value, "Size"))));
-    }
-    for (size_t i = 0; i < layout.Reducers.size(); ++i) {
-        const auto& r = layout.Reducers[i];
-        const std::string srcName = "agg_src_" + std::to_string(i);
-        const std::string dstName = "output_agg_" + std::to_string(i);
-        if (!r.IsString()) {
-            if (r.IsBinInt()) {
-                const std::string hiName = "agg_hi_" + std::to_string(i);
-                auto outLoSlot = binary("*", ident("slot"), numI64(2));
-                auto outHiSlot = binary("+",
-                    binary("*", ident("slot"), numI64(2)), numI64(1));
-                loopStmts.push_back(std::make_shared<TArrayAssignExpr>(loc, dstName,
-                    std::vector<TExprPtr>{std::move(outLoSlot)},
-                    index(ident(srcName), stateSlot())));
-                loopStmts.push_back(std::make_shared<TArrayAssignExpr>(loc, dstName,
-                    std::vector<TExprPtr>{std::move(outHiSlot)},
-                    index(ident(hiName), stateSlot())));
-            } else if (r.IsBool()) {
+    // The statements that project one group into output row `slot`: keyAt()
+    // reads its key, stateAt(buffer, i) the state word of AggBuffers slot i,
+    // `buffer` naming the swiss array bound for it.
+    auto groupStatements = [&](const std::function<TExprPtr()>& keyAt,
+                               const std::function<TExprPtr(const std::string&, int)>& stateAt)
+    {
+        std::vector<TExprPtr> loopStmts;
+        for (size_t fieldIndex = 0; fieldIndex < key.Fields.size(); ++fieldIndex) {
+            TExprPtr value = std::make_shared<TFieldAccessExpr>(
+                loc, keyAt(), "key_" + std::to_string(fieldIndex));
+            if (key.Fields[fieldIndex].IsNullable) {
+                auto valid = std::make_shared<TFieldAccessExpr>(
+                    loc, keyAt(), "valid_" + std::to_string(fieldIndex));
                 loopStmts.push_back(std::make_shared<TCallExpr>(loc,
                     ident("qdb_bitmap_set_valid"),
                     std::vector<TExprPtr>{
-                        ident(dstName), ident("slot"),
-                        binary("!=", index(ident(srcName), stateSlot()), numI64(0))}));
-            } else {
-                loopStmts.push_back(std::make_shared<TArrayAssignExpr>(loc, dstName,
-                    std::vector<TExprPtr>{ident("slot")},
-                    index(ident(srcName), stateSlot())));
+                        ident("output_mask_" + std::to_string(fieldIndex)),
+                        ident("slot"), std::move(valid)}));
             }
+            const bool isString = TMaybeType<TStringType>(
+                UnwrapNamedType(key.Fields[fieldIndex].Type));
+            if (TMaybeType<TBoolType>(UnwrapNamedType(key.Fields[fieldIndex].Type))) {
+                loopStmts.push_back(std::make_shared<TCallExpr>(loc,
+                    ident("qdb_bitmap_set_valid"),
+                    std::vector<TExprPtr>{
+                        ident("output_key_" + std::to_string(fieldIndex)),
+                        ident("slot"), std::move(value)}));
+                continue;
+            }
+            if (!isString) {
+                loopStmts.push_back(std::make_shared<TArrayAssignExpr>(
+                    loc, "output_key_" + std::to_string(fieldIndex),
+                    std::vector<TExprPtr>{ident("slot")}, std::move(value)));
+                continue;
+            }
+            const std::string dataName =
+                "output_data_" + std::to_string(fieldIndex);
+            const std::string offsetsName =
+                "output_offsets_" + std::to_string(fieldIndex);
+            const std::string copyResultName =
+                "output_copy_result_" + std::to_string(fieldIndex);
+            auto offset = std::make_shared<TIndexExpr>(
+                loc, ident(offsetsName), ident("slot"));
+            auto destination = std::make_shared<TCastExpr>(loc,
+                std::make_shared<TBinaryExpr>(loc, TOperator("+"),
+                    std::make_shared<TCastExpr>(loc, ident(dataName), i64Type),
+                    offset), ptrU8Type);
+            auto source = std::make_shared<TFieldAccessExpr>(
+                loc, value, "Data");
+            auto byteSize = std::make_shared<TFieldAccessExpr>(
+                loc, value, "Size");
+            loopStmts.push_back(std::make_shared<TAssignExpr>(loc, copyResultName,
+                std::make_shared<TCallExpr>(loc,
+                    ident("qdb_string_copy_bytes"),
+                    std::vector<TExprPtr>{
+                        std::move(destination), std::move(source), byteSize})));
+            loopStmts.push_back(std::make_shared<TArrayAssignExpr>(loc,
+                offsetsName,
+                std::vector<TExprPtr>{std::make_shared<TBinaryExpr>(loc,
+                    TOperator("+"), ident("slot"),
+                    std::make_shared<TNumberExpr>(loc, int64_t{1}))},
+                std::make_shared<TBinaryExpr>(loc, TOperator("+"),
+                    std::make_shared<TIndexExpr>(
+                        loc, ident(offsetsName), ident("slot")),
+                    std::make_shared<TFieldAccessExpr>(loc, value, "Size"))));
         }
-        if (!r.IsNullableOutput) {
-            continue;
+        for (size_t i = 0; i < layout.Reducers.size(); ++i) {
+            const auto& r = layout.Reducers[i];
+            const std::string srcName = "agg_src_" + std::to_string(i);
+            const std::string dstName = "output_agg_" + std::to_string(i);
+            if (!r.IsString()) {
+                if (r.IsBinInt()) {
+                    const std::string hiName = "agg_hi_" + std::to_string(i);
+                    auto outLoSlot = binary("*", ident("slot"), numI64(2));
+                    auto outHiSlot = binary("+",
+                        binary("*", ident("slot"), numI64(2)), numI64(1));
+                    loopStmts.push_back(std::make_shared<TArrayAssignExpr>(loc, dstName,
+                        std::vector<TExprPtr>{std::move(outLoSlot)},
+                        stateAt(srcName, r.ValueBufIdx)));
+                    loopStmts.push_back(std::make_shared<TArrayAssignExpr>(loc, dstName,
+                        std::vector<TExprPtr>{std::move(outHiSlot)},
+                        stateAt(hiName, r.ExtraBufIdx)));
+                } else if (r.IsBool()) {
+                    loopStmts.push_back(std::make_shared<TCallExpr>(loc,
+                        ident("qdb_bitmap_set_valid"),
+                        std::vector<TExprPtr>{
+                            ident(dstName), ident("slot"),
+                            binary("!=", stateAt(srcName, r.ValueBufIdx), numI64(0))}));
+                } else {
+                    loopStmts.push_back(std::make_shared<TArrayAssignExpr>(loc, dstName,
+                        std::vector<TExprPtr>{ident("slot")},
+                        stateAt(srcName, r.ValueBufIdx)));
+                }
+            }
+            if (!r.IsNullableOutput) {
+                continue;
+            }
+            const std::string validName = "validbuf_" + std::to_string(i);
+            loopStmts.push_back(std::make_shared<TCallExpr>(loc,
+                ident("qdb_bitmap_set_valid"),
+                std::vector<TExprPtr>{
+                    std::make_shared<TIndexExpr>(loc, ident("output_agg_masks"),
+                        numI64(static_cast<int64_t>(i))),
+                    ident("slot"),
+                    std::make_shared<TBinaryExpr>(loc, TOperator(">"),
+                        stateAt(validName, r.ValidBufIdx), numI64(0))}));
         }
-        const std::string validName = "validbuf_" + std::to_string(i);
-        auto validCount = std::make_shared<TIndexExpr>(
-            loc, ident(validName), stateSlot());
-        loopStmts.push_back(std::make_shared<TCallExpr>(loc,
-            ident("qdb_bitmap_set_valid"),
-            std::vector<TExprPtr>{
-                std::make_shared<TIndexExpr>(loc, ident("output_agg_masks"),
-                    numI64(static_cast<int64_t>(i))),
-                ident("slot"),
-                std::make_shared<TBinaryExpr>(loc, TOperator(">"),
-                    std::move(validCount), numI64(0))}));
-    }
-    loopStmts.push_back(std::make_shared<TAssignExpr>(loc, "slot",
-        std::make_shared<TBinaryExpr>(loc, TOperator("+"), ident("slot"),
-            std::make_shared<TNumberExpr>(loc, int64_t{1}))));
+        loopStmts.push_back(std::make_shared<TAssignExpr>(loc, "slot",
+            std::make_shared<TBinaryExpr>(loc, TOperator("+"), ident("slot"),
+                std::make_shared<TNumberExpr>(loc, int64_t{1}))));
+        return loopStmts;
+    };
+
+    auto loopStmts = groupStatements(
+        [&] {
+            return std::make_shared<TIndexExpr>(loc, ident("group_keys"), ident(keyIndex));
+        },
+        [&](const std::string& buffer, int) {
+            return index(ident(buffer), stateSlot());
+        });
     if (slotOrder) {
         // Empty Ctrl bytes are 0x80; the scan stops at the last group.
         auto empty = std::make_shared<TNumberExpr>(loc, int64_t{128});
@@ -2459,10 +2720,58 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
                 binary("+", ident("phys"), numI64(1))),
         };
     }
-    project.push_back(std::make_shared<TWhileStmtExpr>(loc,
+    swiss.push_back(std::make_shared<TWhileStmtExpr>(loc,
         std::make_shared<TBinaryExpr>(loc, TOperator("<"),
             ident("slot"), ident("result")),
         std::make_shared<TBlockExpr>(loc, std::move(loopStmts))));
+
+    if (rows) {
+        // A table in the row layout: a scan of the arena, in insertion order.
+        auto arena = [&](const std::string& name) {
+            return NOz::Field(NOz::Field("ht", "RowArena"), name);
+        };
+        auto rowStmts = groupStatements(
+            [&] { return NOz::Index("row_key", numI64(0)); },
+            [&](const std::string&, int word) {
+                return NOz::Index("row_states", numI64(word));
+            });
+        rowStmts.insert(rowStmts.begin(), {
+            NOz::Var("row_key", ptrKeyType),
+            NOz::Assign("row_key", NOz::Cast(
+                NOz::Add(NOz::Ident("row"), numI64(rows->KeyOffset)), ptrKeyType)),
+            NOz::Var("row_states", ptrI64Type),
+            NOz::Assign("row_states", NOz::Cast(
+                NOz::Add(NOz::Ident("row"), numI64(rows->StateOffset)), ptrI64Type)),
+        });
+        rowStmts.push_back(NOz::Assign("row", NOz::Add(NOz::Ident("row"), numI64(rows->RowBytes))));
+        std::vector<TExprPtr> scan = {
+            NOz::Var("blocks", std::make_shared<TPointerType>(ptrU8Type)),
+            NOz::Assign("blocks", arena("Blocks")),
+            NOz::Var("block_count", i64Type),
+            NOz::Assign("block_count", arena("BlockCount")),
+            NOz::Var("b", i64Type),
+            NOz::Assign("b", numI64(0)),
+            NOz::While(binary("<", NOz::Ident("b"), NOz::Ident("block_count")), NOz::Block({
+                NOz::Var("rows_in_block", i64Type),
+                NOz::Assign("rows_in_block", arena("BlockRows")),
+                NOz::If(binary("==", NOz::Ident("b"), binary("-", NOz::Ident("block_count"), numI64(1))),
+                    NOz::Block({NOz::Assign("rows_in_block", arena("CurRows"))})),
+                NOz::Var("row", i64Type),
+                NOz::Assign("row", NOz::Cast(NOz::Index("blocks", NOz::Ident("b")), i64Type)),
+                NOz::Var("end", i64Type),
+                NOz::Assign("end", NOz::Add(NOz::Ident("row"),
+                    NOz::Mul(NOz::Ident("rows_in_block"), numI64(rows->RowBytes)))),
+                NOz::While(binary("<", NOz::Ident("row"), NOz::Ident("end")),
+                    NOz::Block(std::move(rowStmts))),
+                NOz::Assign("b", NOz::Add(NOz::Ident("b"), numI64(1))),
+            })),
+        };
+        project.push_back(NOz::If(NOz::Call("agr_active", {NOz::Ident("ht")}),
+            NOz::Block(std::move(scan)), NOz::Block(std::move(swiss))));
+    } else {
+        project.insert(project.end(),
+            std::make_move_iterator(swiss.begin()), std::make_move_iterator(swiss.end()));
+    }
 
     bodyStmts.push_back(std::make_shared<TIfExpr>(loc,
         std::make_shared<TBinaryExpr>(loc, TOperator(">="), ident("result"),
@@ -2629,7 +2938,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinishRowSetAst(
             Oz::Ident("ht"), Oz::Ident("key_bytes"), Oz::Ident("agg_bytes"),
             Oz::Ident("size")}));
     auto measureFailure = StringCleanupCalls(layout);
-    measureFailure.push_back(Oz::Call("aht_destroy", {Oz::Ident("ht")}));
+    measureFailure.push_back(Oz::Call("agr_destroy", {Oz::Ident("ht")}));
     measureFailure.push_back(Oz::Return(number(-1)));
     builder.Stmt(Oz::If(
         Oz::Bin(TOperator("!="), Oz::Ident("measured"), Oz::Ident("size")),
@@ -2752,7 +3061,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinishRowSetAst(
         builder.Stmt(std::move(cleanup));
     }
     builder
-        .Stmt(Oz::Call("aht_destroy", {Oz::Ident("ht")}))
+        .Stmt(Oz::Call("agr_destroy", {Oz::Ident("ht")}))
         .Stmt(Oz::If(
             Oz::Bin(TOperator("!="), Oz::Ident("finalized"), Oz::Ident("size")),
             Oz::Block({Oz::Return(number(-1))})))
