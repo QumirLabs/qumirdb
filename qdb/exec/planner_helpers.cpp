@@ -211,19 +211,13 @@ TAggregateTaskEstimate EstimateAggregateTask(
     const TAggregateOperator& aggregate,
     size_t partitionCount)
 {
-    const uint64_t partitions = std::max<uint64_t>(partitionCount, 1);
-    // A share rounds up, so that no task is planned below it.
-    auto share = [&](uint64_t total) {
-        return total / partitions + (total % partitions != 0);
-    };
     TAggregateTaskEstimate estimate{
         .InitialCapacity = EstimateAggregateInitialCapacity(aggregate, partitionCount),
     };
     if (const auto groups = EstimateAggregateGroupCount(aggregate)) {
-        estimate.Groups = share(*groups);
-    }
-    if (const auto& stats = aggregate.Input()->Stats_) {
-        estimate.InputRows = share(stats->RowCount);
+        // A share rounds up, so that no task is planned below it.
+        const uint64_t partitions = std::max<uint64_t>(partitionCount, 1);
+        estimate.Groups = *groups / partitions + (*groups % partitions != 0);
     }
     return estimate;
 }
@@ -243,25 +237,37 @@ int64_t AggregateRowLayoutMinGroups(int64_t rowBytes, size_t stateWords)
     return std::max<int64_t>(static_cast<int64_t>(bytes) / std::max<int64_t>(rowBytes, 1), 1);
 }
 
+bool AggregateMayUseRowLayout(NScheduler::EAggregateTableKind table, const TAggregateOperator& aggregate)
+{
+    using enum NScheduler::EAggregateTableKind;
+    // Every aggregate has a state word, so a grouping without aggregates has
+    // none. The row layout saves the state reads of the swiss table, and
+    // without states it saves nothing: a swiss hit reads a control group and
+    // the key, a row hit an entry and the row, and the entries take more bytes
+    // than the control bytes. The bound was measured from one state word up
+    // and grows without limit as the words go to zero, so auto keeps such a
+    // table swiss.
+    return table == Row || (table == Auto && !aggregate.Aggs().empty());
+}
+
 TAggregateTablePlan PlanAggregateTable(
     const TAggregateTaskEstimate& estimate,
     const TAggregateKernels& kernels,
     NScheduler::EAggregateTableKind table)
 {
+    using enum NScheduler::EAggregateTableKind;
     TAggregateTablePlan plan{.InitialCapacity = estimate.InitialCapacity};
-    if (kernels.RowBytes == 0 || table == NScheduler::EAggregateTableKind::Swiss) {
+    // Without state words auto keeps the table swiss (AggregateMayUseRowLayout).
+    if (kernels.RowBytes == 0 || table == Swiss || (table == Auto && kernels.StateWords == 0)) {
         return plan;
     }
     // Row entries for the estimated groups of the task. An estimate can be
     // far too high (#342), so they are capped as the swiss slots are, by the
-    // groups the slots of the byte budget hold, and by the task's input rows:
-    // a table that grows past them costs a few rewrites of its entries.
-    uint64_t groups = std::min<uint64_t>(estimate.Groups.value_or(0),
+    // groups the slots of the byte budget hold: a table that grows past them
+    // costs a few rewrites of its entries.
+    const uint64_t groups = std::min<uint64_t>(estimate.Groups.value_or(0),
         estimate.InitialCapacity - estimate.InitialCapacity / 8);
-    if (estimate.InputRows) {
-        groups = std::min(groups, *estimate.InputRows);
-    }
-    if (table == NScheduler::EAggregateTableKind::Row) {
+    if (table == Row) {
         plan.Layout = EAggregateTableLayout::Row;
         plan.InitialGroups = static_cast<int64_t>(groups);
         return plan;

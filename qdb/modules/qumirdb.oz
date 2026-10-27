@@ -64,7 +64,12 @@
     (RowSwitchGroups i64)
     ;; Groups the row entries are sized for at that move, when more than
     ;; twice the groups moved.
-    (RowExpectedGroups i64)>)
+    (RowExpectedGroups i64)
+    ;; For instrumentation: the builds of the row entries after the table's
+    ;; start, the move from the swiss table and each growth, and the swiss
+    ;; slots the table moved from (0 when it started in the row layout).
+    (RowRebuilds i64)
+    (RowMovedFromSlots i64)>)
 
   (type PairBuffer <struct
     (Count i64)

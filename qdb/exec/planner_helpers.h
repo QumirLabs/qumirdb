@@ -58,10 +58,9 @@ struct TAggregateTaskEstimate {
     // EstimateAggregateInitialCapacity: the swiss slots for the task's groups
     // within a byte budget.
     int64_t InitialCapacity = 8;
-    // The estimated groups and input rows of one task; nullopt without
-    // statistics.
+    // The estimated groups of one task, at most its input rows; nullopt
+    // without statistics.
     std::optional<uint64_t> Groups;
-    std::optional<uint64_t> InputRows;
 };
 
 TAggregateTaskEstimate EstimateAggregateTask(
@@ -70,14 +69,21 @@ TAggregateTaskEstimate EstimateAggregateTask(
 
 // The groups from which the table of a task is faster in the row layout
 // (kernel/aggregation/aggregation_rows.oz) than in the swiss table, for rows
-// of rowBytes bytes and stateWords state words.
+// of rowBytes bytes and stateWords state words, at least one.
 int64_t AggregateRowLayoutMinGroups(int64_t rowBytes, size_t stateWords);
 
+// Whether the kernels of `aggregate` are built with the row layout under
+// `table`: always under Row, never under Swiss, and under Auto when the
+// aggregate has state words, which a grouping without aggregates (DISTINCT,
+// the dedup of COUNT(DISTINCT x) or of an IN subquery) has not.
+bool AggregateMayUseRowLayout(NScheduler::EAggregateTableKind table, const TAggregateOperator& aggregate);
+
 // The table of one aggregate task. Under EAggregateTableKind::Auto every task
-// starts swiss, with at most the slots that hold AggregateRowLayoutMinGroups
-// groups, and moves to the row layout when it must grow past them. The move
-// sizes the row entries for the estimated groups, capped by the groups that
-// the byte budget of the swiss slots holds and by the task's input rows.
+// with state words starts swiss, with at most the slots that hold
+// AggregateRowLayoutMinGroups groups, and moves to the row layout when it must
+// grow past them; one without stays swiss. The move sizes the row entries for
+// the estimated groups, capped by the groups that the byte budget of the swiss
+// slots holds.
 TAggregateTablePlan PlanAggregateTable(
     const TAggregateTaskEstimate& estimate,
     const TAggregateKernels& kernels,

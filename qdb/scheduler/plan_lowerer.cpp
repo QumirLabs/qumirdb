@@ -1533,7 +1533,7 @@ private:
         auto spec = NKernel::BuildAggregateKernelSpec(
             *extInput, extKeys, aggregate.Aggs(), ExternalCatalog_.get(),
             aggregate.EmptyInputGroups());
-        spec.AggregateRowLayout = Settings_.Aggregate.Table != NScheduler::EAggregateTableKind::Swiss;
+        spec.AggregateRowLayout = AggregateMayUseRowLayout(Settings_.Aggregate.Table, aggregate);
         TKernelCompiler compiler(
             KernelOptions(std::move(stage), execStageId));
         auto kernels = std::make_shared<TAggregateKernels>(compiler.CompileAggregate(spec));
@@ -1597,7 +1597,7 @@ private:
             aggregate.EmptyInputGroups());
         spec.HasPrecomputedHash = hasPrecomputedHash;
         // Only a table that may take the row layout needs its kernels.
-        spec.AggregateRowLayout = Settings_.Aggregate.Table != NScheduler::EAggregateTableKind::Swiss;
+        spec.AggregateRowLayout = AggregateMayUseRowLayout(Settings_.Aggregate.Table, aggregate);
         TKernelCompiler compiler(
             KernelOptions(std::move(stage), execStageId));
         auto kernels = std::make_shared<TAggregateKernels>(

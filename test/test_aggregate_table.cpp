@@ -103,6 +103,8 @@ struct THashTable {
     TScratch RowScratch;
     int64_t RowSwitchGroups = 0;
     int64_t RowExpectedGroups = 0;
+    int64_t RowRebuilds = 0;
+    int64_t RowMovedFromSlots = 0;
 };
 static_assert(sizeof(TArena) == TKernelCompiler::RowArenaSize);
 static_assert(sizeof(TTable) == TKernelCompiler::RowTableSize);
@@ -1009,7 +1011,7 @@ TEST(AggregateTable, PlanFollowsTheSettingAndTheEstimate) {
     TAggregateKernels swissOnly{.StateWords = 4};
     const int64_t minGroups = AggregateRowLayoutMinGroups(56, 4);
     ASSERT_GT(minGroups, 1);
-    const TAggregateTaskEstimate small{.InitialCapacity = 64, .Groups = 40, .InputRows = 1000};
+    const TAggregateTaskEstimate small{.InitialCapacity = 64, .Groups = 40};
     const TAggregateTaskEstimate large{
         .InitialCapacity = 1 << 20, .Groups = static_cast<uint64_t>(4 * minGroups)};
     const TAggregateTaskEstimate unknown{};
@@ -1091,10 +1093,6 @@ TEST(AggregateTable, MoveIsSizedFromTheEstimate) {
     EXPECT_EQ(autoPlan({.InitialCapacity = 1 << 20}).RowExpectedGroups, 0);
     // The groups the slots of the byte budget hold.
     EXPECT_EQ(autoPlan({.InitialCapacity = 1 << 16, .Groups = 1u << 30}).RowExpectedGroups, 57344);
-    // A tenfold overestimate (#342) is capped by the input rows.
-    EXPECT_EQ(autoPlan({
-        .InitialCapacity = 1 << 22, .Groups = 3000000, .InputRows = 300000,
-    }).RowExpectedGroups, 300000);
 
     // 300,000 groups in batches of 16,384 rows; the swiss table of the plan
     // moves at the start of the eighth batch, with 114,688 groups.
@@ -1132,19 +1130,88 @@ TEST(AggregateTable, MoveIsSizedFromTheEstimate) {
         Release(&result);
         return moved;
     };
-    const auto exact = autoPlan({.InitialCapacity = 1 << 20, .Groups = Groups, .InputRows = Groups});
+    const auto exact = autoPlan({.InitialCapacity = 1 << 20, .Groups = Groups});
     ASSERT_EQ(exact.InitialCapacity - exact.InitialCapacity / 8, 114688);
     // Entries for 300,000 groups at most half full.
     EXPECT_EQ(movedCapacity(exact), 1u << 20);
-    EXPECT_EQ(movedCapacity(autoPlan({
-        .InitialCapacity = 1 << 22, .Groups = 10 * Groups, .InputRows = Groups,
-    })), 1u << 20);
+    // A tenfold overestimate (#342) with slots that the byte budget capped
+    // at 2^19: entries for the 458,752 groups those slots hold.
+    EXPECT_EQ(movedCapacity(autoPlan({.InitialCapacity = 1 << 19, .Groups = 10 * Groups})), 1u << 20);
     // Without an estimate, for twice the moved groups.
     EXPECT_EQ(movedCapacity(autoPlan({})), 1u << 19);
 }
 
+// A grouping without aggregates has no state words, so the row layout saves
+// no reads: auto keeps its table swiss, as sized on master, and row still
+// forces it into rows.
+TEST(AggregateTable, KeyOnlyAggregatesStaySwissUnderAuto) {
+    auto i64 = std::make_shared<TIntegerType>();
+    TStructType input({{"k", i64}});
+    const auto kernels = CompileWithRows(input, {"k"}, {});
+    ASSERT_EQ(kernels.StateWords, 0u);
+    ASSERT_EQ(kernels.RowBytes, 16);
+    using enum NScheduler::EAggregateTableKind;
+    const TAggregateTaskEstimate estimate{.InitialCapacity = 1 << 22, .Groups = 1u << 22};
+    const auto automatic = PlanAggregateTable(estimate, kernels, Auto);
+    EXPECT_EQ(automatic.Layout, EAggregateTableLayout::Swiss);
+    EXPECT_EQ(automatic.InitialCapacity, 1 << 22);
+    EXPECT_EQ(automatic.RowSwitchGroups, 0);
+    EXPECT_EQ(automatic.RowExpectedGroups, 0);
+    const auto rows = PlanAggregateTable({.InitialCapacity = 64, .Groups = 40}, kernels, Row);
+    EXPECT_EQ(rows.Layout, EAggregateTableLayout::Row);
+    EXPECT_EQ(rows.InitialGroups, 40);
 
+    std::vector<TBatch> batches;
+    auto& batch = batches.emplace_back(std::vector<EValue>{EValue::I64});
+    for (int64_t r = 0; r < 5000; ++r) {
+        batch.Add({(r * 7919) % 3001});
+    }
+    const auto swiss = Aggregate(kernels, PlanAggregateTable({}, kernels, Auto), batches, {EValue::I64});
+    EXPECT_FALSE(swiss.EndedInRows);
+    EXPECT_EQ(swiss.Rows.size(), 3001u);
+    const auto forced = Aggregate(kernels, rows, batches, {EValue::I64});
+    EXPECT_TRUE(forced.EndedInRows);
+    EXPECT_EQ(Sorted(forced.Rows), Sorted(swiss.Rows));
+}
 
+// The instrumentation counts the rehashes of the swiss table, the move once,
+// and each growth of the row entries after it, as the kernels made them.
+TEST(AggregateTable, InstrumentationCountsTheMoveOnce) {
+    auto i64 = std::make_shared<TIntegerType>();
+    TStructType input({{"k", i64}, {"v", i64}});
+    const auto kernels = CompileWithRows(input, {"k"}, {Agg("c", "count"), Agg("s", "sum", "v")});
+    TOperatorInstrumentation counters;
+    counters.Kernel = TKernelCompiler().CompileInstrumentation();
+    TAggregateProcessor processor(kernels, {.InitialCapacity = 8, .RowSwitchGroups = 100});
+    processor.SetInstrumentation(&counters);
+    TBatch first({EValue::I64, EValue::I64});
+    for (int64_t key = 0; key < 600; ++key) {
+        first.Add({key, key});
+    }
+    auto firstRows = first.RowSet();
+    processor.Add(firstRows);
+    // Four doublings from 8 to 128 slots, the move at 112 groups to entries
+    // for 224, and one growth of the entries when the rest of the batch can
+    // fill more than half of them.
+    ASSERT_TRUE(counters.RowLayout);
+    EXPECT_EQ(counters.HashCapacity, 2048u);
+    EXPECT_EQ(counters.HashGrowthEvents, 6u);
+    EXPECT_EQ(counters.Rehashes, 6u);
+    TBatch second({EValue::I64, EValue::I64});
+    for (int64_t key = 600; key < 3000; ++key) {
+        second.Add({key, key});
+    }
+    auto secondRows = second.RowSet();
+    processor.Add(secondRows);
+    // One more growth, from 2,048 to 8,192 entries.
+    EXPECT_EQ(counters.HashCapacity, 8192u);
+    EXPECT_EQ(counters.HashGrowthEvents, 7u);
+    EXPECT_EQ(counters.Rehashes, 7u);
+    TRowSet result{};
+    ASSERT_TRUE(processor.Finish(result));
+    EXPECT_EQ(result.RowCount, 3000);
+    Release(&result);
+}
 
 // ---- the measurement behind AggregateRowLayoutMinGroups ----
 
@@ -1289,7 +1356,6 @@ TEST(AggregateTable, DISABLED_LayoutMicrobenchmark) {
                 const auto automatic = run(PlanAggregateTable({
                     .InitialCapacity = presized,
                     .Groups = static_cast<uint64_t>(groups),
-                    .InputRows = static_cast<uint64_t>(rows),
                 }, kernels, NScheduler::EAggregateTableKind::Auto));
                 std::cout << std::format(
                     "{:>5} {:>2} {:>8} {:>8} {:>4} {:>8.2f} {:>8.2f} {:>5.2f} {:>8.2f} {:>8.2f} {:>5.2f}"

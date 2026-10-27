@@ -147,6 +147,7 @@
               (if (! (call agr_reindex (field ht RowTable) (field ht RowArena)
                            (+ (field ht Size) k)))
                 (block (return #f)))
+              (field_assign ht RowRebuilds (+ (field ht RowRebuilds) 1))
               (if first
                 (block (call rt_seek_all (field ht RowTable) (field ht RowScratch) k))
                 (block
@@ -211,6 +212,7 @@
     (block
       (var size = (field ht Size))
       (var num_aggs = (field ht NumAggs))
+      (var slots = (field ht Capacity))
       (var groups = (* size 2))
       (if (> (field ht RowExpectedGroups) groups)
         (block (= groups (field ht RowExpectedGroups))))
@@ -243,5 +245,7 @@
       (call aht_destroy ht)
       (field_assign ht Size size)
       (field_assign ht NumAggs num_aggs)
+      (field_assign ht RowRebuilds (+ (field ht RowRebuilds) 1))
+      (field_assign ht RowMovedFromSlots slots)
       (return #t)))
 )

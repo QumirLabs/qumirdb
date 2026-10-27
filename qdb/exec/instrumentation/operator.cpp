@@ -74,21 +74,32 @@ void TOperatorInstrumentation::ObserveHash(
     std::span<const int64_t> stringBuffers)
 {
     using TMeasure = void(*)(void*, int64_t, const int64_t*, int64_t, int64_t*);
-    int64_t values[4] = {};
+    int64_t values[6] = {};
     reinterpret_cast<TMeasure>(Kernel->Fns[1])(
         table, join, stringBuffers.data(), stringBuffers.size(), values);
     HasHash = true;
     HasBuildMemory = true;
     RowLayout = values[3] != 0;
     const uint64_t capacity = values[1];
+    const uint64_t rowRebuilds = values[4];
     if (Capacities_[side]) {
-        // Tables only grow by doubling, including multiple growths inside one
-        // batch. Initial reservation is not a rehash.
-        for (auto old = Capacities_[side]; old < capacity; old *= 2) {
+        // A swiss table only grows by doubling, so the doublings between two
+        // observations are its rehashes, several inside one batch included.
+        // A table that moved to the row layout since the last observation
+        // doubled up to the slots it moved from. The row layout counts its
+        // own rebuilds: the move, then each growth of its entries. Initial
+        // reservation is not a rehash.
+        const bool wasSwiss = RowRebuilds_[side] == 0;
+        const uint64_t swissEnd = !RowLayout ? capacity
+            : (wasSwiss ? static_cast<uint64_t>(values[5]) : 0);
+        for (auto old = Capacities_[side]; old < swissEnd; old *= 2) {
             ++HashGrowthEvents;
             ++Rehashes;
         }
+        HashGrowthEvents += rowRebuilds - RowRebuilds_[side];
+        Rehashes += rowRebuilds - RowRebuilds_[side];
     }
+    RowRebuilds_[side] = rowRebuilds;
     Capacities_[side] = capacity;
     Groups_[side] = values[0];
     Memory_[side] = values[2];

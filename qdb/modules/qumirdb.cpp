@@ -159,6 +159,8 @@ std::vector<TExternalType> BuildQumirDbExternalTypes() {
             {"RowScratch", std::make_shared<TNamedType>("RowScratch", rowScratchType)},
             {"RowSwitchGroups", i64Type},
             {"RowExpectedGroups", i64Type},
+            {"RowRebuilds", i64Type},
+            {"RowMovedFromSlots", i64Type},
         });
 
     return {

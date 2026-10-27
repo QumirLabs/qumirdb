@@ -173,7 +173,8 @@ constexpr const char* CacheSchemaVersion = "v1";
 // Semi and anti joins can build their left side and mark its rows.
 // The row table moves to kernel/row_table.oz under row names.
 // The aggregate table gains the row layout; HashTable embeds it.
-constexpr const char* KernelLibVersion = "55";
+// HashTable counts the rebuilds of the row layout for instrumentation.
+constexpr const char* KernelLibVersion = "56";
 } // namespace
 
 NQumir::NCodeGen::TLlvmRunner::TLinkedModule CompileKernelAstCached(
