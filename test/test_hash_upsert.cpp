@@ -9,6 +9,7 @@
 #include <qumir/runner/runner_llvm.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -31,6 +32,9 @@ struct THashTable {
     int64_t NumAggs = 0;
     int64_t NumKeys = 0;
     int64_t KeySize = 0;
+    std::array<uint8_t, NQdb::TKernelCompiler::JoinArenaSize + NQdb::TKernelCompiler::JoinTableSize
+        + NQdb::TKernelCompiler::JoinScratchSize> RowLayout = {};
+    int64_t RowSwitchGroups = 0;
 };
 static_assert(sizeof(THashTable) == NQdb::TKernelCompiler::HashTableSize);
 

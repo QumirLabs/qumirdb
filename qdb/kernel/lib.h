@@ -120,7 +120,8 @@ BuildGenericAggregateMeasureProgramAst(
 
 // One program with aggregate update/finalize entries sharing a single copy of
 // the type decls and libraries. Internal measure/finalize helpers stay in the
-// module; external callers use agg_dispatch and agg_finish_rowset.
+// module; external callers use agg_dispatch and agg_finish_rowset. With a row
+// layout (BuildAggRowLayout), the program serves both table layouts.
 std::expected<NQumir::NAst::TExprPtr, NQumir::TError>
 BuildGenericAggregateFusedProgramAst(
     const NQumir::NAst::TStructType& inputType,
@@ -130,7 +131,8 @@ BuildGenericAggregateFusedProgramAst(
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType,
     bool hasPrecomputedHash = false,
-    const std::vector<int64_t>& emptyInputGroups = {});
+    const std::vector<int64_t>& emptyInputGroups = {},
+    const std::optional<TAggRowLayout>& rows = std::nullopt);
 
 } // namespace NKernel
 } // namespace NQdb

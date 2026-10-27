@@ -164,8 +164,14 @@ grand-total row, as `SELECT count(*)` does.
 
 ## Hash table
 
-The current implementation uses Swiss-style grouped control-byte probing. The
-table separates probe storage from dense output storage:
+An aggregate task keeps its groups in one of two layouts. Both live in the same
+`HashTable` state and are served by the same compiled program, so a task can
+start in either and move from the first to the second while it runs.
+
+### Swiss table
+
+The swiss table uses Swiss-style grouped control-byte probing. It separates
+probe storage from dense output storage:
 
 ```text
 probe slot: key, control byte, stable dense slot id
@@ -182,6 +188,89 @@ Probe-table growth preserves stable dense group ids, so rebuilding lookup slots
 does not reassign reducer state. Before a new group exceeds the current 7/8
 load threshold, the table grows and rehashes keys. Group NDV estimates can
 pre-size it, but missing or inaccurate statistics still require normal growth.
+
+Every state word of a group, one per reducer and more for a nullable or
+decimal one, lives in its own array. An update therefore reads the control
+bytes, the stored key and one array per state word. While the table fits in the
+cache, that is cheap; beyond it, each array costs a cache miss of its own.
+
+### Row layout
+
+The row layout keeps a group in one row, as an array of structs, instead of a
+structure of arrays: Richter, Alvarez and Dittrich compare the two for linear
+probing and find that keeping a key with its values touches fewer cache lines
+once the table outgrows the cache ([PVLDB 9(3), 2015, Section 7](https://doi.org/10.14778/2850583.2850585)).
+QDB builds it on the row table of the row join: rows in an arena of fixed-size
+blocks, indexed by 8-byte entries that hold a 16-bit salt from the key's hash
+above a 48-bit row pointer, with linear probing at a load of at most one half.
+
+```text
+row:   hash | key | state words, in the order of the swiss table's arrays
+entry: salt (16 bits) | row pointer (48 bits)
+```
+
+An update reads one entry and one row, about two cache lines, whatever the
+number of states. A batch is processed in chunks of rows and passes over each
+chunk, so the cache misses of different rows overlap, as in the group
+prefetching of Chen, Ailamaki, Gibbons and Mowry
+([ICDE 2004](https://doi.org/10.1109/ICDE.2004.1319989)); here the processor
+overlaps them without prefetch instructions:
+
+1. Compute the key and hash of every selected row.
+2. Walk every row from its home entry to the first entry that is empty or
+   carries its salt.
+3. Read that entry again and compare keys there, or insert at an empty entry.
+   An earlier row of the chunk may have inserted there since the walk. Rows
+   with equal keys walk the same entries, so the first of them inserts the
+   group and the others find it. A row whose candidate holds another key moves
+   on and walks again in the next round.
+4. Apply every row to the states of its group; the row that inserted a group
+   starts from zero states, as the swiss table's new group does.
+
+Only a row that stands at an empty entry can insert, and only one group, so
+the entries grow before a round in which those rows could fill more than half
+of them. Growth rewrites only the entries, from the hashes kept in the rows;
+the rows do not move. Finalization scans the arena.
+
+The row layout serves fixed-width keys and states: integers, dates, decimals,
+`f64` and booleans, alone or together, with COUNT, SUM, MIN, MAX and the AVG
+built from them. A string key or reducer, and the groups that a global
+aggregate or an empty grouping set has over an empty input, keep the swiss
+table. The browser runtime uses the swiss table only.
+
+### Choosing the layout
+
+The layout is chosen per aggregate task, from the expected table size:
+
+- A task expects the estimated groups of the aggregate divided by the number
+  of its tasks. With S state words per group and rows of R bytes, it starts in
+  the row layout when those groups fill a row table of at least
+  8 MiB / S^1.5 bytes (groups · R ≥ 8 MiB / S^1.5), and in the swiss table
+  otherwise. A row table starts with entries for those groups, within the
+  byte budget of the swiss table's pre-sizing.
+- A swiss table that has to grow while it holds that many groups moves to the
+  row layout instead. The rehash would rewrite the table anyway, so the move
+  costs about as much: the groups move in their dense order, the entries are
+  sized for twice as many groups, as the doubling would be, and the rest of
+  the batch continues in rows. There is no move back.
+
+The bound comes from a microbenchmark of both layouts with one task per
+worker, as a parallel aggregate runs: the row layout became faster at about
+8 MiB of rows with one state word, 3 MiB with two and 1 to 1.5 MiB with four,
+and at every size with eight, for one- and two-column integer keys alike. The
+swiss table reads one more array for every state word, and its cost per row
+grows the fastest as the table leaves the cache. A table that the estimate
+underrates still moves to rows as it grows; one that the estimate overrates
+starts in rows and stays there, where a table that fits in the cache costs up
+to twice as much per row.
+
+Partial and final aggregates and the hash shuffle between them work as before;
+each task owns one table and chooses its layout by itself. `--aggregate-table`
+forces `swiss` or `row` for A/B runs and tests. The choice is visible in the
+label of each aggregate task, for example `aggregate final [row table]` or
+`aggregate [swiss table, rows from 349525 groups]`, and operator
+instrumentation counts the tasks that ended in the row layout in
+`hash_row_layout_tasks`.
 
 ## Finalization
 

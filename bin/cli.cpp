@@ -734,6 +734,8 @@ void PrintHelp() {
         "  --nocbo                      Disable cost-based join reordering\n"
         "  --no-runtime-filters         Disable join runtime filters (for A/B runs)\n"
         "  --join-table <kind>          Inner join hash table: row (default) or legacy\n"
+        "  --aggregate-table <kind>     Grouped aggregate hash table: auto (default),\n"
+        "                               swiss or row\n"
         "  --row-join-probe-hold-bytes <n>\n"
         "                               Probe bytes a row join task holds while its build\n"
         "                               runs; 0 disables the hold\n"
@@ -984,6 +986,18 @@ int main(int argc, char** argv) {
                 config.Scheduler.Join.Table = NQdb::NScheduler::EJoinTableKind::Legacy;
             } else {
                 std::cerr << "--join-table requires row or legacy\n";
+                return 1;
+            }
+        } else if (!std::strcmp(argv[i], "--aggregate-table")) {
+            const std::string_view kind = i + 1 < argc ? argv[++i] : "";
+            if (kind == "auto") {
+                config.Scheduler.Aggregate.Table = NQdb::NScheduler::EAggregateTableKind::Auto;
+            } else if (kind == "swiss") {
+                config.Scheduler.Aggregate.Table = NQdb::NScheduler::EAggregateTableKind::Swiss;
+            } else if (kind == "row") {
+                config.Scheduler.Aggregate.Table = NQdb::NScheduler::EAggregateTableKind::Row;
+            } else {
+                std::cerr << "--aggregate-table requires auto, swiss or row\n";
                 return 1;
             }
         } else if (!std::strcmp(argv[i], "--row-join-probe-hold-bytes")) {

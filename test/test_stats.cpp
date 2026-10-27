@@ -398,6 +398,12 @@ TEST(StatsTest, AggregateInitialCapacityUsesNdvAndPartitionCount) {
 
     NQdb::TAggregateOperator missingStats(input, {"unknown"}, {});
     EXPECT_EQ(NQdb::EstimateAggregateInitialCapacity(missingStats, 1), 8);
+
+    // A task's groups round up, so that no task is planned below its share.
+    const auto task = NQdb::EstimateAggregateTask(aggregate, 3);
+    EXPECT_EQ(task.InitialCapacity, NQdb::EstimateAggregateInitialCapacity(aggregate, 3));
+    EXPECT_EQ(task.Groups, 34u);
+    EXPECT_FALSE(NQdb::EstimateAggregateTask(missingStats, 3).Groups.has_value());
 }
 
 TEST(StatsTest, AggregateGroupCountUsesNdvProductAndRowCountCap) {

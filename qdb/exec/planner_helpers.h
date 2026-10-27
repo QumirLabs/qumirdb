@@ -1,5 +1,6 @@
 #pragma once
 
+#include <qdb/exec/aggregate_exec.h>
 #include <qdb/exec/join_exec.h>
 #include <qdb/exec/project_exec.h>
 #include <qdb/exec/sort_exec.h>
@@ -50,6 +51,32 @@ int64_t EstimateAggregateInitialCapacity(
 // NDVs. Returns nullopt when any key lacks usable statistics.
 std::optional<uint64_t> EstimateAggregateGroupCount(
     const TAggregateOperator& aggregate);
+
+// What one aggregate task's table is sized and laid out for when the groups
+// of `aggregate` are split among partitionCount tasks.
+struct TAggregateTaskEstimate {
+    // EstimateAggregateInitialCapacity.
+    int64_t InitialCapacity = 8;
+    // The estimated groups of one task; nullopt without statistics.
+    std::optional<uint64_t> Groups;
+};
+
+TAggregateTaskEstimate EstimateAggregateTask(
+    const TAggregateOperator& aggregate,
+    size_t partitionCount);
+
+// The groups from which a task's table is faster in the row layout
+// (kernel/aggregation/aggregation_rows.oz) than in the swiss table, for rows
+// of rowBytes bytes and stateWords state words.
+int64_t AggregateRowLayoutMinGroups(int64_t rowBytes, size_t stateWords);
+
+// The table of one aggregate task. Under EAggregateTableKind::Auto a task
+// whose estimated groups reach AggregateRowLayoutMinGroups starts in the row
+// layout; any other starts swiss and moves to rows when it grows past them.
+TAggregateTablePlan PlanAggregateTable(
+    const TAggregateTaskEstimate& estimate,
+    const TAggregateKernels& kernels,
+    NScheduler::EAggregateTableKind table);
 
 // Build the final-phase operator that merges rows emitted by a partial
 // aggregate. This is scheduler-neutral physical planning shared by local and

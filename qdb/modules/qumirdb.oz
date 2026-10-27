@@ -51,14 +51,24 @@
     (Size i64)
     (NumAggs i64)
     (NumKeys i64)
-    (KeySize i64)>)
+    (KeySize i64)
+    ;; The row layout of an aggregate (kernel/aggregation/aggregation_rows.oz):
+    ;; one arena row per group, holding its key and states, indexed by salted
+    ;; entries. The table is in this layout once RowIndex has entries; the
+    ;; swiss arrays above are then null. Joins do not use it.
+    (RowArena JoinArena)
+    (RowIndex JoinTable)
+    (RowScratch JoinScratch)
+    ;; Groups at which a swiss table that must grow moves to the row layout
+    ;; instead; 0 keeps it swiss.
+    (RowSwitchGroups i64)>)
 
   (type PairBuffer <struct
     (Count i64)
     (Capacity i64)
     (Data <ptr i64>)>)
 
-  ;; Row join table (kernel/join/join_rows.oz): build rows in fixed-size blocks.
+  ;; Row table (kernel/join/row_table.oz): rows in fixed-size blocks.
   (type JoinArena <struct
     (Blocks <ptr <ptr u8>>)
     (BlockCount i64)
@@ -77,7 +87,7 @@
     (Rows i64)
     (Keys i64)>)
 
-  ;; Per-probe-batch scratch of the row join, one slot per selected row.
+  ;; Per-batch lookup scratch of the row table, one slot per looked-up row.
   (type JoinScratch <struct
     (Hashes <ptr u64>)
     (Salts <ptr u64>)

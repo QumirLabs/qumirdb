@@ -99,23 +99,6 @@ std::vector<TExternalType> BuildQumirDbExternalTypes() {
     auto ptrPtrI64Type = std::make_shared<TPointerType>(ptrI64Type);
     auto ptrPtrU8Type = std::make_shared<TPointerType>(ptrU8Type);
 
-    auto hashTableType = std::make_shared<TStructType>(
-        std::vector<std::pair<std::string, TTypePtr>>{
-            {"Keys", ptrU8Type},
-            {"Ctrl", ptrU8Type},
-            {"SlotId", ptrI64Type},
-            {"GroupKeys", ptrU8Type},
-            {"AggBuffers", ptrPtrI64Type},
-            {"OwnedBlocks", ptrPtrU8Type},
-            {"OwnedBlockCount", i64Type},
-            {"OwnedBlockCapacity", i64Type},
-            {"Capacity", i64Type},
-            {"Size", i64Type},
-            {"NumAggs", i64Type},
-            {"NumKeys", i64Type},
-            {"KeySize", i64Type},
-        });
-
     auto pairBufferType = std::make_shared<TStructType>(
         std::vector<std::pair<std::string, TTypePtr>>{
             {"Count", i64Type},
@@ -123,8 +106,8 @@ std::vector<TExternalType> BuildQumirDbExternalTypes() {
             {"Data", ptrI64Type},
         });
 
-    // Row join table (kernel/join/join_rows.oz); mirrored by
-    // TRowJoinProcessor's state structs in exec/row_join_exec.h.
+    // Row table (kernel/join/row_table.oz); mirrored by TRowJoinProcessor's
+    // state structs in exec/row_join_exec.h.
     auto joinArenaType = std::make_shared<TStructType>(
         std::vector<std::pair<std::string, TTypePtr>>{
             {"Blocks", ptrPtrU8Type},
@@ -154,6 +137,27 @@ std::vector<TExternalType> BuildQumirDbExternalTypes() {
             {"Work", ptrI64Type},
             {"Keys", ptrU8Type},
             {"Capacity", i64Type},
+        });
+
+    auto hashTableType = std::make_shared<TStructType>(
+        std::vector<std::pair<std::string, TTypePtr>>{
+            {"Keys", ptrU8Type},
+            {"Ctrl", ptrU8Type},
+            {"SlotId", ptrI64Type},
+            {"GroupKeys", ptrU8Type},
+            {"AggBuffers", ptrPtrI64Type},
+            {"OwnedBlocks", ptrPtrU8Type},
+            {"OwnedBlockCount", i64Type},
+            {"OwnedBlockCapacity", i64Type},
+            {"Capacity", i64Type},
+            {"Size", i64Type},
+            {"NumAggs", i64Type},
+            {"NumKeys", i64Type},
+            {"KeySize", i64Type},
+            {"RowArena", std::make_shared<TNamedType>("JoinArena", joinArenaType)},
+            {"RowIndex", std::make_shared<TNamedType>("JoinTable", joinTableType)},
+            {"RowScratch", std::make_shared<TNamedType>("JoinScratch", joinScratchType)},
+            {"RowSwitchGroups", i64Type},
         });
 
     return {

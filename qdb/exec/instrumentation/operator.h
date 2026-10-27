@@ -40,6 +40,9 @@ struct TOperatorInstrumentation {
     uint64_t RetainedInputPeakBytes = 0;
     uint64_t BuildMemoryPeakBytes = 0;
     bool HasHash = false;
+    // The hash table is a row table (kernel/join/row_table.oz): a row join
+    // table, or an aggregate table in the row layout.
+    bool RowLayout = false;
     bool HasBuildMemory = false;
     bool MaterializesOutput = false;
 

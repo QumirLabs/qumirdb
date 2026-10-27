@@ -698,6 +698,17 @@ Group keys of string type are copied into a bump arena owned by the hash table
 instead of individually allocated, so building a table over many distinct string
 keys does not turn into a malloc storm. See [aggregation.md](aggregation.md).
 
+### 4.9 Row layout of the aggregate table
+
+A grouped aggregate task whose table is expected to outgrow the cache keeps a
+group's key and states in one arena row behind salted 8-byte entries, instead
+of the swiss table with one array per state word: an update then touches about
+two cache lines instead of two plus one per state word. Lowering chooses the
+layout per task from the estimated groups, and a swiss table that grows past
+the same bound moves its groups to rows at the rehash. Fixed-width keys and
+states only; `--aggregate-table auto|swiss|row`. See
+[aggregation.md](aggregation.md#hash-table).
+
 ## 5. Helpers that are not optimizations
 
 - `TConstFolder` is a helper, not a pipeline pass. UNION ALL pushdown uses it

@@ -161,7 +161,7 @@ TEST(OperatorInstrumentation, ObservesEveryGeometricGrowthInsideABatch) {
     auto kernels = TKernelCompiler().CompileAggregate(spec);
     TOperatorInstrumentation counters;
     counters.Kernel = MeasurementKernel();
-    TAggregateProcessor processor(kernels, 8);
+    TAggregateProcessor processor(kernels, {.InitialCapacity = 8});
     processor.SetInstrumentation(&counters);
     std::array<int64_t, 100> keys;
     std::iota(keys.begin(), keys.end(), 0);

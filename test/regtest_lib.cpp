@@ -1256,6 +1256,13 @@ TCaseResult CheckCase(const TQueryCase& test, bool canonize) {
             ? NScheduler::EJoinTableKind::Legacy
             : NScheduler::EJoinTableKind::Row;
     }
+    // QDB_AGGREGATE_TABLE=swiss|row runs the suites over one aggregate table layout.
+    if (const char* aggregateTable = std::getenv("QDB_AGGREGATE_TABLE")) {
+        const std::string_view kind = aggregateTable;
+        settings.Aggregate.Table = kind == "swiss"
+            ? NScheduler::EAggregateTableKind::Swiss
+            : (kind == "row" ? NScheduler::EAggregateTableKind::Row : NScheduler::EAggregateTableKind::Auto);
+    }
     TPlanRunTimings runTimings;
     TValue actual = nullptr;
     // Lowering, JIT compilation and the run itself.
