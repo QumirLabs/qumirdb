@@ -64,38 +64,60 @@ Common options:
 --format '<escape>csv'
 --format null
 
---scheduler single
---scheduler threaded
---scheduler-workers 8
---scan-tasks 8
---scheduler-counters
---no-partial-aggregates
---no-runtime-filters
---force-runtime-filters
 --verbose
+--config my.ini
+--scheduler:mode=single
+--scheduler:workers=8
+--scan:max_tasks=8
+--queue:debug_counters=true
+--aggregate:partial=false
+--join:runtime_filters=false
+--join:force_runtime_filters=true
 ```
 
+Engine settings are not command-line flags of their own. They live in an ini
+file and are validated against one table of known sections and keys; an unknown
+key or a bad value stops `qdb` with a message that lists what is accepted.
+`qdb --help` lists every section and key with its type and default, and the
+[Settings reference](https://github.com/QumirLabs/qumirdb/wiki/Settings-reference)
+describes them. The sources apply in this order, later ones overriding earlier
+ones: the built-in defaults, `$XDG_CONFIG_HOME/qdb/qdb.ini` (else
+`~/.config/qdb/qdb.ini`) if it exists, the file given by `--config`, and the
+`--section:key=value` arguments:
+
+```ini
+# my.ini
+[scheduler]
+mode = threaded
+workers = 8
+
+[scan]
+max_tasks = 8
+```
+
+`--verbose` prints the effective settings, so a log records what ran.
+
 Execution defaults to the threaded scheduler with one worker per logical CPU
-reported by the system (at least one if the count is unknown). Scheduler options
-can be omitted; `--scheduler single` and `--scheduler-workers N` override these
+reported by the system (at least one if the count is unknown). Scheduler settings
+can be omitted; `[scheduler] mode = single` and `workers = N` override these
 defaults.
 
-When `--scan-tasks` is omitted, the threaded scheduler chooses a limit for each
+When `[scan] max_tasks` is not set (it is 0), the threaded scheduler chooses a limit for each
 Parquet source using its surviving row groups, row count and uncompressed bytes
 of selected columns. Small scans stay serial. Large scans feeding a join are
 capped at the worker count; other scans may use up to twice that count. An
-explicit `--scan-tasks N` overrides this choice, including `N=1`. The single
+explicit `max_tasks = N` overrides this choice, including `N=1`. The single
 scheduler defaults to one scan task. `--verbose` reports each automatic choice.
 See [Scan parallelism](arch/scan_parallelism.md) for the sizing rule and its limits.
 
 The scheduler can add a local grouped aggregate before hash repartition. It
 does this when row-count and NDV statistics show a large drop in rows. Use
-`--no-partial-aggregates` to keep the raw-row plan for an A/B test. See
+`--aggregate:partial=false` to keep the raw-row plan for an A/B test. See
 [Aggregation](arch/aggregation.md#partial-aggregate-plan) for the rule and the two
 physical plans.
 
-Use `--no-runtime-filters` for an A/B run against automatic runtime-filter
-selection. `--force-runtime-filters` bypasses the filter benefit estimate;
+Use `--join:runtime_filters=false` for an A/B run against automatic runtime-filter
+selection. `--join:force_runtime_filters=true` bypasses the filter benefit estimate;
 it is useful for measuring joins that the estimate currently skips.
 
 Example:
@@ -104,7 +126,7 @@ Example:
 ./build/bin/qdb \
   --sql \
   --data ~/Projects/tpch/pq1 \
-  --scheduler single \
+  --scheduler:mode=single \
   --format '<escape>csv' \
   -i benchmark/tpch/queries/sql/q1.sql
 ```
@@ -217,7 +239,7 @@ Run SF1 SQL query 21 with the single-threaded scheduler:
 
 ```bash
 MODE=sql \
-QDB_ARGS="--scheduler single" \
+QDB_ARGS="--scheduler:mode=single" \
 benchmark/tpch/run_tpch.sh /path/to/tpch 1 21
 ```
 

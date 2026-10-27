@@ -12,7 +12,7 @@ containing `pq1/hits.parquet`:
 ./run_clickbench.sh /path/to/clickbench
 ./run_clickbench.sh /path/to/clickbench/pq1 0,7,42
 
-QDB_ARGS='--scheduler threaded --scheduler-workers 8' \
+QDB_ARGS='--scheduler:mode=threaded --scheduler:workers=8' \
     ./run_clickbench.sh /path/to/clickbench
 ```
 

@@ -138,24 +138,33 @@ With `hash_dir = false` the debug info of a cache hit names the worktree that
 compiled the object first.
 
 SQL table names resolve to `<table>.parquet` in the data directory. Enable the
-persistent JIT cache for normal execution runs with `--jit-cache-dir`. Run a SQL
+persistent JIT cache for normal execution runs with `--jit:cache_dir`. Run a SQL
 file with phase timings:
 
 ```sh
 ./build/bin/qdb --sql --data /path/to/parquet -i query.sql --timing \
-  --jit-cache-dir "$PWD/build/jit-cache"
+  --jit:cache_dir="$PWD/build/jit-cache"
 ```
 
 Omit `-i` for the interactive SQL prompt; terminate statements with `;`. Use
 `EXPLAIN` in SQL to inspect the optimized plan. For execution diagnostics use
-`--verbose` and, when needed, `--scheduler-counters`.
+`--verbose`, which prints the effective settings, and, when needed,
+`--queue:debug_counters=true`.
+
+Engine settings are never command-line flags of their own. They come from one
+validated ini config: the built-in defaults, then `$XDG_CONFIG_HOME/qdb/qdb.ini`
+(else `~/.config/qdb/qdb.ini`), then `--config <path>`, then `--section:key=value`
+arguments. An unknown section or key and a bad value fail at once and list the
+accepted ones. `qdb --help` lists every section and key. A new setting is one
+line next to its field in `qdb/scheduler/engine_settings.cpp`, and a new row in
+the wiki page "Settings-reference".
 
 Scheduler selection is explicit when comparing performance:
 
 ```sh
-./build/bin/qdb --sql --data /path/to/parquet -i query.sql --scheduler single
+./build/bin/qdb --sql --data /path/to/parquet -i query.sql --scheduler:mode=single
 ./build/bin/qdb --sql --data /path/to/parquet -i query.sql \
-  --scheduler threaded --scheduler-workers 4 --scan-tasks 4
+  --scheduler:mode=threaded --scheduler:workers=4 --scan:max_tasks=4
 ```
 
 Use `--format console`, `--format '<escape>csv'`, or `--format null` as appropriate,
@@ -163,10 +172,10 @@ and keep the same output mode in comparisons. Use the benchmark runners to rende
 TPC-H templates with their scale parameters:
 
 ```sh
-MODE=sql QDB_ARGS="--jit-cache-dir $PWD/build/jit-cache" \
+MODE=sql QDB_ARGS="--jit:cache_dir=$PWD/build/jit-cache" \
   OUT_DIR="$PWD/build/results/tpch" \
   bash benchmark/tpch/run_tpch.sh /path/to/tpch 100
-QDB_ARGS="--jit-cache-dir $PWD/build/jit-cache" OUT_DIR="$PWD/build/results/tpcds" \
+QDB_ARGS="--jit:cache_dir=$PWD/build/jit-cache" OUT_DIR="$PWD/build/results/tpcds" \
   bash benchmark/tpcds/run_tpcds.sh /path/to/tpcds 10
 ```
 
@@ -181,11 +190,14 @@ ctest --test-dir build -R '^test_reg_[0-9]$' -j 4 --output-on-failure
 ./build/test/test_reg test/regtest --gtest_filter='RegQuery.correlated_aggregate_*'
 ```
 
-`test_reg` enables its persistent JIT cache automatically; `--jit-cache-dir <path>`
-overrides its location. Run settings are flags, never environment variables:
-`--join-table row|legacy`, `--timing`, `--trace-fixtures`, `--dump-passes` and
-`--arrow-memory-pool`; an unknown value fails at once and lists the accepted ones.
-`ctest` passes the CMake variable `QDB_JIT_CACHE_DIR` as `--jit-cache-dir`, and
+`test_reg` enables its persistent JIT cache automatically; `--jit:cache_dir=<path>`
+overrides its location. Run settings are arguments, never environment variables:
+the runner's own `--timing` and `--trace-fixtures`, and the engine settings of the
+same config as `qdb`, as `--config <path>` and `--section:key=value` (for example
+`--join:table=legacy`, `--optimizer:dump_passes=true`, `--io:arrow_memory_pool=system`).
+`test_reg` does not read the default config file, so a run does not depend on the
+home directory. An unknown key or value fails at once and lists the accepted ones.
+`ctest` passes the CMake variable `QDB_JIT_CACHE_DIR` as `--jit:cache_dir=`, and
 `-DQDB_TEST_REG_VARIANTS=ON` adds `test_reg_legacy_join`, the full suite over the
 legacy join table. Use `--canonize` only for understood, intended expectation
 changes, then review the golden diff and check the affected cases again. Do not

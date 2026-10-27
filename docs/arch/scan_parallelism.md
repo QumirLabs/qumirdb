@@ -2,10 +2,10 @@
 
 The default execution mode is threaded, with one worker per logical CPU reported
 by `std::thread::hardware_concurrency()` (at least one if unknown). CLI execution
-and native plan-export requests share these defaults. No scheduler flags are
-needed; `--scheduler` and `--scheduler-workers` remain explicit overrides.
+and native plan-export requests share these defaults. No scheduler settings are
+needed; `[scheduler] mode` and `workers` remain explicit overrides.
 
-Omitting `--scan-tasks` enables per-source sizing in the threaded scheduler.
+Leaving `[scan] max_tasks` at 0 enables per-source sizing in the threaded scheduler.
 An explicit positive value is a cap for every source, including `1` to keep
 scans serial. The single scheduler defaults to one scan task. Sources without
 row-group metadata keep their original single source task.
@@ -46,7 +46,7 @@ when `N` stays constant.
 
 Automatic join partitioning remains
 `max(1, min(max(M_left, M_right), max(1, W / 2)))`.
-`--shuffle-partitions` overrides this count and may choose `N` larger than the
+`[shuffle] partitions` overrides this count and may choose `N` larger than the
 input lane counts. It also affects other shuffled operators. Scan sizing does
 not change this rule; size-based join partitioning would need a separate
 estimate of build/probe work and partition memory.
