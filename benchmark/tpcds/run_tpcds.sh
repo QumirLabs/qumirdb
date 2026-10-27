@@ -17,7 +17,7 @@ usage() {
     echo "  scale         — scale factor number: 1, 10, or 100 (default: all discovered)"
     echo "  query_filter  — optional comma-separated list of query ids to run (e.g. 6,19,42,14_1,q23_2)"
     echo "Env:"
-    echo "  QDB_ARGS      — extra arguments passed to qdb, e.g. '--scheduler threaded --scheduler-workers 4'"
+    echo "  QDB_ARGS      — extra arguments passed to qdb, e.g. '--scheduler:mode=threaded --scheduler:workers=4'"
     exit 1
 }
 

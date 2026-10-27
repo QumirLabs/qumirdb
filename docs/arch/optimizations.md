@@ -221,7 +221,7 @@ pipeline.
 
 ### 2.2 FlattenInnerJoins
 
-Only with the cost-based optimizer (default; `--nocbo` disables it). Collapses a
+Only with the cost-based optimizer (default; `[optimizer] cbo = false` disables it). Collapses a
 left-deep inner-join chain into one region so DPccp can reassociate it freely.
 
 ### 2.3 SimplifySelfEquality
@@ -592,7 +592,7 @@ See [predicate_pushdown.md](predicate_pushdown.md#parquet-row-group-pruning).
 
 ### 4.2 Scan splitting
 
-With the threaded scheduler a Parquet source is split into up to `--scan-tasks`
+With the threaded scheduler a Parquet source is split into up to `[scan] max_tasks`
 independent row-group ranges, which is what creates the parallel lanes every
 optimization below builds on. A single-row-group file yields one lane, and the
 parallel variants then do not apply.
@@ -602,7 +602,7 @@ pruning: one task per 1,048,576 rows or 64 MiB of uncompressed selected-column
 data, whichever yields more tasks. The limit is capped at the number of row
 groups and at the worker count for sources feeding a join, or twice the worker
 count otherwise. Single-threaded execution stays serial by default. Positive
-`--scan-tasks` values preserve the explicit limit. See
+`max_tasks` values preserve the explicit limit. See
 [Scan parallelism](scan_parallelism.md), including the comparison with DuckDB.
 
 ### 4.3 Hash-shuffled grouped aggregate
@@ -611,7 +611,7 @@ Always on for a grouped aggregate over parallel input: the input is shuffled by
 group key into partition-local tables, each of which computes complete groups.
 
 ```sql
-SELECT a, sum(c) FROM big GROUP BY a;    -- --scheduler threaded --scheduler-workers 4 --scan-tasks 4
+SELECT a, sum(c) FROM big GROUP BY a;    -- --scheduler:mode=threaded --scheduler:workers=4 --scan:max_tasks=4
 ```
 
 ```
@@ -621,19 +621,19 @@ conn blocking-input   src=1 dst=1    conn aggregate-shuffle-input one-to-one  sr
                                      conn final-gather           gather       src=2 dst=1
 ```
 
-### 4.4 Global aggregate cascade — `--cascade-aggregates`, off by default
+### 4.4 Global aggregate cascade — `[aggregate] cascade_global`, off by default
 
 An ungrouped aggregate over parallel input otherwise gathers every lane into a
-*single* aggregate task: the scan is parallel, the fold is not. The flag builds
+*single* aggregate task: the scan is parallel, the fold is not. The setting builds
 `partial[N] → gather → combine[1]` instead, where `combine` turns `count` into a
 `sum` of per-lane counts.
 
 ```sql
-SELECT sum(c) FROM big;   -- --scheduler threaded --scheduler-workers 4 --scan-tasks 4
+SELECT sum(c) FROM big;   -- --scheduler:mode=threaded --scheduler:workers=4 --scan:max_tasks=4
 ```
 
 ```
-default                                        --cascade-aggregates
+default                                        cascade_global = true
 nodes: 11, connections: 4                      nodes: 15, connections: 5
 conn blocking-input-gather gather src=4 dst=1  conn aggregate-cascade-input  one-to-one src=4 dst=4
                                                conn aggregate-cascade-gather gather     src=4 dst=1

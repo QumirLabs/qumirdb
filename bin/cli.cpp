@@ -21,6 +21,7 @@
 #include <qdb/plan/passes/qualify_columns.h>
 #include <qdb/plan/passes/top_sort.h>
 #include <qdb/plan/passes/typing.h>
+#include <qdb/scheduler/engine_settings.h>
 #include <qdb/sexp/parser.h>
 #include <qdb/sexp/printer.h>
 #include <qdb/sql/parser.h>
@@ -36,11 +37,10 @@
 
 #include <cctype>
 #include <chrono>
-#include <cmath>
 #include <cstdlib>
-#include <charconv>
 #include <cstring>
 #include <expected>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -120,16 +120,6 @@ TFormatSpec ParseFormat(const std::string& spec) {
     return result;
 }
 
-NQdb::NScheduler::EExecutionMode ParseSchedulerMode(const std::string& mode) {
-    if (mode == "single") {
-        return NQdb::NScheduler::EExecutionMode::SingleThreadedScheduler;
-    }
-    if (mode == "threaded") {
-        return NQdb::NScheduler::EExecutionMode::ThreadedScheduler;
-    }
-    throw std::invalid_argument("unknown scheduler mode: " + mode);
-}
-
 NQdb::TSchema SchemaFromType(
     const NQumir::NAst::TTypePtr& type,
     std::vector<std::string>& names,
@@ -161,19 +151,14 @@ std::optional<EExplainMode> ParseExplainMode(std::string_view value) {
     return std::nullopt;
 }
 
-struct TConfig {
+struct TCliOptions {
     ESyntax Syntax = ESyntax::Sexpr;
     std::string DataDir = ".";
     TFormatSpec Format;
     bool Verbose = false;
-    bool EnableCbo = true;
-    bool EnableRuntimeFilters = true;
-    bool ForceRuntimeFilters = false;
     bool Timing = false;
-    bool DumpPasses = false;
     EExplainMode ExplainMode = EExplainMode::Text;
-    NQdb::TLateMaterializationSettings LateMaterialization;
-    NQdb::NScheduler::TSettings Scheduler;
+    NQdb::TEngineSettings Engine;
 };
 
 std::string ResolveTablePath(const std::string& dataDir, std::string_view table) {
@@ -278,21 +263,16 @@ std::chrono::duration<double> ProcessCpuTime() {
 
 int ExecutePlan(
     NQdb::TOperatorPtr plan,
-    const TConfig& config,
+    const TCliOptions& config,
     const NQdb::NKernel::TAnnotationContext& annotation,
     bool explain,
     std::chrono::steady_clock::time_point planStart)
 {
     NQdb::TPlanPassDiagnostics planDiagnostics;
-    NQdb::ApplyPlanPasses(plan, {
-        .EnableCbo = config.EnableCbo,
-        .EnableRuntimeFilters = config.EnableRuntimeFilters,
-        .ForceRuntimeFilters = config.ForceRuntimeFilters,
-        .LateMaterialization = config.LateMaterialization,
-        .Diagnostics = &planDiagnostics,
-        .Annotation = annotation,
-        .DumpPasses = config.DumpPasses ? &std::cerr : nullptr,
-    });
+    auto passOptions = config.Engine.Optimizer;
+    passOptions.Diagnostics = &planDiagnostics;
+    passOptions.Annotation = annotation;
+    NQdb::ApplyPlanPasses(plan, std::move(passOptions));
     auto planElapsed = std::chrono::steady_clock::now() - planStart;
     const bool sexprAvailable = NQdb::CollectMaterializations(plan).empty();
 
@@ -336,17 +316,17 @@ int ExecutePlan(
 
     auto* diagnostics = config.Verbose ? &std::cerr : nullptr;
     if (diagnostics) {
-        NQdb::PrintRuntimePlan(*diagnostics, plan, config.Scheduler.Join.Table);
+        NQdb::PrintRuntimePlan(*diagnostics, plan, config.Engine.Scheduler.Join.Table);
     }
 
     auto buildStart = std::chrono::steady_clock::now();
     auto lowered = NQdb::NScheduler::LowerPlanToGraph(
-        plan, config.Scheduler, diagnostics, annotation.ExternalCatalog);
+        plan, config.Engine.Scheduler, diagnostics, annotation.ExternalCatalog);
     auto buildElapsed = std::chrono::steady_clock::now() - buildStart;
     auto llvmStart = std::chrono::steady_clock::now();
     NQdb::JitFinalizeKernels(
         lowered.Kernels, diagnostics, annotation.ExternalCatalog,
-        config.Scheduler.Jit.CacheDir);
+        config.Engine.Scheduler.Jit.CacheDir);
     auto llvmElapsed = std::chrono::steady_clock::now() - llvmStart;
 
     std::vector<std::string> outputNames;
@@ -368,7 +348,7 @@ int ExecutePlan(
     auto cpuStart = ProcessCpuTime();
     std::string error;
     if (!NQdb::NScheduler::RunPlanIntoSink(
-            std::move(lowered), counting, config.Scheduler, diagnostics, &error)) {
+            std::move(lowered), counting, config.Engine.Scheduler, diagnostics, &error)) {
         std::cerr << error << "\n";
         return 1;
     }
@@ -391,7 +371,7 @@ int ExecutePlan(
 
 int RunSqlStatement(
     const NQdb::NSql::TSqlNodePtr& statement,
-    const TConfig& config,
+    const TCliOptions& config,
     NQdb::TExternalModuleCatalog& catalog,
     bool explain)
 {
@@ -453,7 +433,7 @@ int RunSqlStatement(
 int RunQuery(
     ESyntax syntax,
     std::istream& in,
-    const TConfig& config,
+    const TCliOptions& config,
     NQdb::TExternalModuleCatalog& catalog)
 {
     std::string text{
@@ -561,7 +541,7 @@ std::string_view Trim(std::string_view s) {
 }
 
 // `\d <table>`: open the table and print its column names and types.
-void DescribeTable(std::string_view table, const TConfig& config) {
+void DescribeTable(std::string_view table, const TCliOptions& config) {
     if (table.empty()) {
         std::cerr << "usage: \\d <table>\n";
         return;
@@ -607,7 +587,7 @@ bool HasCompleteSqlStatement(const std::string& text) {
 
 // Reads SQL statements from readline and runs complete batches terminated by ';'.
 int RunInteractive(
-    TConfig config,
+    TCliOptions config,
     NQdb::TExternalModuleCatalog& catalog)
 {
     const std::string historyPath = HistoryPath();
@@ -679,30 +659,31 @@ int RunInteractive(
     return 0;
 }
 
-std::expected<NQdb::NScheduler::TInstrumentationSettings, std::string>
-ParseInstrumentation(std::string_view components) {
-    NQdb::NScheduler::TInstrumentationSettings settings;
-    while (true) {
-        const auto comma = components.find(',');
-        const auto component = components.substr(0, comma);
-        if (component == "operators") {
-            settings.Operators = true;
-        } else if (component == "group_predicate") {
-            settings.RowGroupPredicate = true;
-        } else {
-            return std::unexpected("Unknown instrumentation component '" + std::string(component) +
-                "' (expected operators or group_predicate)");
-        }
-        if (comma == std::string_view::npos) {
-            return settings;
-        }
-        components.remove_prefix(comma + 1);
+// $XDG_CONFIG_HOME/qdb/qdb.ini, else ~/.config/qdb/qdb.ini; empty when neither
+// variable is set.
+std::filesystem::path DefaultConfigPath() {
+    if (const char* xdg = std::getenv("XDG_CONFIG_HOME"); xdg && *xdg) {
+        return std::filesystem::path(xdg) / "qdb" / "qdb.ini";
     }
+    if (const char* home = std::getenv("HOME"); home && *home) {
+        return std::filesystem::path(home) / ".config" / "qdb" / "qdb.ini";
+    }
+    return {};
+}
+
+// An engine setting on the command line: --section:key=value.
+bool IsConfigOverride(std::string_view argument) {
+    if (!argument.starts_with("--")) {
+        return false;
+    }
+    const auto colon = argument.find(':');
+    const auto equals = argument.find('=');
+    return colon != std::string_view::npos && equals != std::string_view::npos && colon < equals;
 }
 
 void PrintHelp() {
     std::cout <<
-        "qdb [options]\n"
+        "qdb [options] [--section:key=value ...]\n"
         "Options:\n"
         "  -i <file>                    Input query file; without it, interactive mode\n"
         "  --sexpr                      Input file is an s-expression plan (default)\n"
@@ -714,41 +695,10 @@ void PrintHelp() {
         "    <escape>csv                CSV with quoting/escaping\n"
         "    <separator=X>csv           CSV with custom separator X\n"
         "    null                       Consume rows without output\n"
-        "  --scheduler <mode>           Execution mode: single, threaded (default: threaded)\n"
-        "  --scheduler-workers <n>      Worker count (default: logical CPU count, at least 1)\n"
-        "  --scan-tasks <n>             Maximum parquet scan tasks per source (default: auto)\n"
-        "  --instrumentation [list]     Enable instrumentation (default: operators)\n"
-        "                                Components: operators,group_predicate\n"
-        "  --scheduler-counters         Print scheduler and connection counters with --verbose\n"
-        "  --cascade-aggregates         Parallelize global aggregates (partial->gather->combine)\n"
-        "  --no-partial-aggregates      Disable statistics-selected local grouped aggregation\n"
-        "  --shuffle-partitions <n>     Hash shuffle partition count\n"
-        "  --queue-depth <n>            Rowset queue capacity per connection lane\n"
-        "  --late-materialization=auto|off\n"
-        "                                Enable/disable cost-based late materialization\n"
-        "  --late-materialization-max-rows <n>\n"
-        "                                Maximum statically known output rows (default: 100)\n"
-        "  --late-materialization-min-savings <factor>\n"
-        "                                Required byte saving factor (default: 2.0)\n"
-        "  --shuffle-queue <n>          Rowset queue capacity per shuffle lane\n"
-        "  --shuffle-target-rows <n>    Target rows per materialized shuffle batch\n"
-        "  --shuffle-max-rows <n>       Maximum rows per materialized shuffle batch\n"
-        "  --shuffle-target-bytes <n>   Byte target for shuffle output and retained inputs\n"
-        "  --nocbo                      Disable cost-based join reordering\n"
-        "  --no-runtime-filters         Disable join runtime filters (for A/B runs)\n"
-        "  --join-table <kind>          Inner join hash table: row (default) or legacy\n"
-        "  --jit-cache-dir <path>       Persistent JIT cache directory (default: none)\n"
-        "  --arrow-memory-pool <kind>   Parquet read allocator: auto (default), system,\n"
-        "                               default, jemalloc or mimalloc\n"
-        "  --dump-passes                Dump the plan to stderr after each optimizer pass\n"
-        "  --row-join-probe-hold-bytes <n>\n"
-        "                               Probe bytes a row join task holds while its build\n"
-        "                               runs; 0 disables the hold\n"
-        "  --force-runtime-filters      Emit a join runtime filter wherever a build\n"
-        "                               side exists, ignoring selectivity estimates\n"
         "  --explain-mode <mode>        explain output: text (default), sexpr, both\n"
-        "  --verbose                    Print the logical and runtime plans\n"
+        "  --verbose                    Print the logical and runtime plans and the effective settings\n"
         "  --timing                     Print per-phase timings (planning, kernel build, JIT LLVM, CPU)\n"
+        "  --config <path>              Ini file with engine settings\n"
         "  --help|-h                    Show this help message\n"
         "  --version|-v                 Show version information\n"
         "  --plan-export                Plan/runtime bundle export mode for the web UI\n"
@@ -756,7 +706,16 @@ void PrintHelp() {
         "\n"
         "Without -i, qdb starts an interactive SQL prompt (statements end with ';').\n"
         "  \\d [table]                   Describe a table\n"
-        "  \\explain <text|sexpr|both>   Set the explain output format\n";
+        "  \\explain <text|sexpr|both>   Set the explain output format\n"
+        "\n"
+        "Engine settings come from, in order, the built-in defaults, the file\n"
+        "$XDG_CONFIG_HOME/qdb/qdb.ini (else ~/.config/qdb/qdb.ini) if it exists,\n"
+        "--config <path>, and --section:key=value arguments. An ini file lists the keys\n"
+        "under [section] headers as 'key = value'; '#' and ';' start comments. An unknown\n"
+        "section or key and a bad value are errors.\n"
+        "\n"
+        "Settings (--section:key=<value>):\n"
+        << NQdb::EngineConfigSchema().Help();
 }
 
 } // namespace
@@ -770,9 +729,11 @@ int main(int argc, char** argv) {
 
     NQumir::NCodeGen::TLLVMInitializer llvmInit;
 
-    TConfig config;
+    TCliOptions config;
     NQdb::TExternalModuleCatalog catalog;
     std::string queryFile;
+    std::optional<std::string> configPath;
+    std::vector<std::string> overrides;
 
     for (int i = 1; i < argc; ++i) {
         if (!std::strcmp(argv[i], "-i")) {
@@ -813,223 +774,14 @@ int main(int argc, char** argv) {
                 std::cerr << "Invalid format spec: " << e.what() << "\n";
                 return 1;
             }
-        } else if (!std::strcmp(argv[i], "--scheduler")) {
+        } else if (!std::strcmp(argv[i], "--config")) {
             if (i + 1 >= argc) {
-                std::cerr << "--scheduler requires an argument\n";
+                std::cerr << "--config requires a path\n";
                 return 1;
             }
-            try {
-                config.Scheduler.Scheduler.Mode = ParseSchedulerMode(argv[++i]);
-            } catch (const std::invalid_argument& e) {
-                std::cerr << e.what() << "\n";
-                return 1;
-            }
-        } else if (!std::strcmp(argv[i], "--scheduler-workers")) {
-            if (i + 1 >= argc) {
-                std::cerr << "--scheduler-workers requires an argument\n";
-                return 1;
-            }
-            auto workers = std::atoi(argv[++i]);
-            if (workers <= 0) {
-                std::cerr << "--scheduler-workers requires a positive integer\n";
-                return 1;
-            }
-            config.Scheduler.Scheduler.WorkerCount = static_cast<size_t>(workers);
-        } else if (!std::strcmp(argv[i], "--scan-tasks")) {
-            if (i + 1 >= argc) {
-                std::cerr << "--scan-tasks requires an argument\n";
-                return 1;
-            }
-            auto tasks = std::atoi(argv[++i]);
-            if (tasks <= 0) {
-                std::cerr << "--scan-tasks requires a positive integer\n";
-                return 1;
-            }
-            config.Scheduler.ScanSplit.MaxScanTasks = static_cast<size_t>(tasks);
-        } else if (!std::strcmp(argv[i], "--instrumentation") ||
-            std::string_view(argv[i]).starts_with("--instrumentation="))
-        {
-            std::string_view components = "operators";
-            if (const auto argument = std::string_view(argv[i]); argument.starts_with("--instrumentation=")) {
-                components = argument.substr(std::string_view("--instrumentation=").size());
-            } else if (i + 1 < argc && !std::string_view(argv[i + 1]).starts_with('-')) {
-                components = argv[++i];
-            }
-            auto settings = ParseInstrumentation(components);
-            if (!settings) {
-                std::cerr << settings.error() << '\n';
-                return 1;
-            }
-            config.Scheduler.Instrumentation = *settings;
-            config.Scheduler.Instrumentation.Output = &std::cerr;
-        } else if (!std::strcmp(argv[i], "--scheduler-counters")) {
-            config.Scheduler.Queue.EnableDebugCounters = true;
-        } else if (!std::strcmp(argv[i], "--cascade-aggregates")) {
-            config.Scheduler.Aggregate.CascadeGlobal = true;
-        } else if (!std::strcmp(argv[i], "--no-partial-aggregates")) {
-            config.Scheduler.Aggregate.EnablePartial = false;
-        } else if (!std::strcmp(argv[i], "--shuffle-partitions")) {
-            if (i + 1 >= argc) {
-                std::cerr << "--shuffle-partitions requires an argument\n";
-                return 1;
-            }
-            auto partitions = std::atoi(argv[++i]);
-            if (partitions <= 0) {
-                std::cerr << "--shuffle-partitions requires a positive integer\n";
-                return 1;
-            }
-            config.Scheduler.HashShuffle.PartitionCount =
-                static_cast<size_t>(partitions);
-            config.Scheduler.HashShuffle.MaxPartitionCount =
-                static_cast<size_t>(partitions);
-        } else if (!std::strcmp(argv[i], "--shuffle-queue")) {
-            if (i + 1 >= argc) {
-                std::cerr << "--shuffle-queue requires an argument\n";
-                return 1;
-            }
-            auto capacity = std::atoi(argv[++i]);
-            if (capacity <= 0) {
-                std::cerr << "--shuffle-queue requires a positive integer\n";
-                return 1;
-            }
-            config.Scheduler.HashShuffle.MaxQueuedRowsetsPerLane =
-                static_cast<size_t>(capacity);
-        } else if (!std::strcmp(argv[i], "--queue-depth")) {
-            if (i + 1 >= argc) {
-                std::cerr << "--queue-depth requires an argument\n";
-                return 1;
-            }
-            auto capacity = std::atoi(argv[++i]);
-            if (capacity <= 0) {
-                std::cerr << "--queue-depth requires a positive integer\n";
-                return 1;
-            }
-            config.Scheduler.Queue.RowsetCapacityPerLane =
-                static_cast<size_t>(capacity);
-        } else if (!std::strncmp(
-                       argv[i], "--late-materialization=", 23)) {
-            const std::string_view mode(argv[i] + 23);
-            if (mode == "auto") {
-                config.LateMaterialization.Enabled = true;
-            } else if (mode == "off") {
-                config.LateMaterialization.Enabled = false;
-            } else {
-                std::cerr << "--late-materialization expects auto or off\n";
-                return 1;
-            }
-        } else if (!std::strcmp(argv[i], "--late-materialization-max-rows")) {
-            if (i + 1 >= argc) {
-                std::cerr << "--late-materialization-max-rows requires an argument\n";
-                return 1;
-            }
-            auto rows = std::atoll(argv[++i]);
-            if (rows <= 0) {
-                std::cerr << "--late-materialization-max-rows requires a positive integer\n";
-                return 1;
-            }
-            config.LateMaterialization.MaxOutputRows = static_cast<uint64_t>(rows);
-        } else if (!std::strcmp(argv[i], "--late-materialization-min-savings")) {
-            if (i + 1 >= argc) {
-                std::cerr << "--late-materialization-min-savings requires an argument\n";
-                return 1;
-            }
-            const double factor = std::atof(argv[++i]);
-            if (!std::isfinite(factor) || factor < 1.0) {
-                std::cerr << "--late-materialization-min-savings requires a number >= 1\n";
-                return 1;
-            }
-            config.LateMaterialization.MinSavingsFactor = factor;
-        } else if (!std::strcmp(argv[i], "--shuffle-target-rows")) {
-            if (i + 1 >= argc) {
-                std::cerr << "--shuffle-target-rows requires an argument\n";
-                return 1;
-            }
-            auto rows = std::atoi(argv[++i]);
-            if (rows <= 0) {
-                std::cerr << "--shuffle-target-rows requires a positive integer\n";
-                return 1;
-            }
-            config.Scheduler.HashShuffle.TargetOutputBatchRows =
-                static_cast<size_t>(rows);
-        } else if (!std::strcmp(argv[i], "--shuffle-max-rows")) {
-            if (i + 1 >= argc) {
-                std::cerr << "--shuffle-max-rows requires an argument\n";
-                return 1;
-            }
-            auto rows = std::atoi(argv[++i]);
-            if (rows <= 0) {
-                std::cerr << "--shuffle-max-rows requires a positive integer\n";
-                return 1;
-            }
-            config.Scheduler.HashShuffle.MaxOutputBatchRows =
-                static_cast<size_t>(rows);
-        } else if (!std::strcmp(argv[i], "--shuffle-target-bytes")) {
-            if (i + 1 >= argc) {
-                std::cerr << "--shuffle-target-bytes requires an argument\n";
-                return 1;
-            }
-            auto bytes = std::atoi(argv[++i]);
-            if (bytes <= 0) {
-                std::cerr << "--shuffle-target-bytes requires a positive integer\n";
-                return 1;
-            }
-            config.Scheduler.HashShuffle.TargetOutputBatchBytes =
-                static_cast<size_t>(bytes);
-        } else if (!std::strcmp(argv[i], "--nocbo")) {
-            config.EnableCbo = false;
-        } else if (!std::strcmp(argv[i], "--no-runtime-filters")) {
-            config.EnableRuntimeFilters = false;
-        } else if (!std::strcmp(argv[i], "--join-table")) {
-            if (i + 1 >= argc) {
-                std::cerr << "--join-table requires an argument: "
-                    << NQdb::NScheduler::JoinTableKindNames << "\n";
-                return 1;
-            }
-            const std::string_view kind = argv[++i];
-            const auto table = NQdb::NScheduler::ParseJoinTableKind(kind);
-            if (!table) {
-                std::cerr << "unknown --join-table value '" << kind << "'; accepted: "
-                    << NQdb::NScheduler::JoinTableKindNames << "\n";
-                return 1;
-            }
-            config.Scheduler.Join.Table = *table;
-        } else if (!std::strcmp(argv[i], "--jit-cache-dir")) {
-            if (i + 1 >= argc) {
-                std::cerr << "--jit-cache-dir requires a path\n";
-                return 1;
-            }
-            config.Scheduler.Jit.CacheDir = argv[++i];
-        } else if (!std::strcmp(argv[i], "--arrow-memory-pool")) {
-            if (i + 1 >= argc) {
-                std::cerr << "--arrow-memory-pool requires an argument: "
-                    << NQdb::ArrowMemoryPoolNames << "\n";
-                return 1;
-            }
-            const std::string_view kind = argv[++i];
-            const auto pool = NQdb::ParseArrowMemoryPool(kind);
-            if (!pool) {
-                std::cerr << "unknown --arrow-memory-pool value '" << kind << "'; accepted: "
-                    << NQdb::ArrowMemoryPoolNames << "\n";
-                return 1;
-            }
-            NQdb::SetArrowMemoryPool(*pool);
-        } else if (!std::strcmp(argv[i], "--dump-passes")) {
-            config.DumpPasses = true;
-        } else if (!std::strcmp(argv[i], "--row-join-probe-hold-bytes")) {
-            if (i + 1 >= argc) {
-                std::cerr << "--row-join-probe-hold-bytes requires a non-negative integer\n";
-                return 1;
-            }
-            const std::string_view value = argv[++i];
-            size_t bytes = 0;
-            const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), bytes);
-            if (error != std::errc() || end != value.data() + value.size()) {
-                std::cerr << "--row-join-probe-hold-bytes requires a non-negative integer\n";
-                return 1;
-            }
-            config.Scheduler.Join.RowJoinProbeHoldBytes = bytes;
-        } else if (!std::strcmp(argv[i], "--force-runtime-filters")) {
-            config.ForceRuntimeFilters = true;
+            configPath = argv[++i];
+        } else if (IsConfigOverride(argv[i])) {
+            overrides.emplace_back(argv[i] + 2);
         } else if (!std::strcmp(argv[i], "--verbose")) {
             config.Verbose = true;
         } else if (!std::strcmp(argv[i], "--timing")) {
@@ -1044,6 +796,18 @@ int main(int argc, char** argv) {
             std::cerr << "Unknown option: " << argv[i] << "\n";
             return 1;
         }
+    }
+
+    NQdb::NUtils::TConfig engineConfig(NQdb::EngineConfigSchema());
+    if (auto loaded = NQdb::LoadEngineConfig(engineConfig, DefaultConfigPath(), configPath, overrides); !loaded) {
+        std::cerr << loaded.error() << "\n";
+        return 1;
+    }
+    NQdb::ApplyEngineConfig(engineConfig, config.Engine);
+    NQdb::SetArrowMemoryPool(config.Engine.ArrowMemoryPool);
+    if (config.Verbose) {
+        std::cerr << "========== SETTINGS ==========\n" << engineConfig.Dump()
+            << "==============================\n";
     }
 
     try {

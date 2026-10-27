@@ -21,7 +21,7 @@ The queries are the same set mirrored in `test/regtest/cases/tpcds/` (q01–q99)
 ./run_tpcds.sh /path/to/tpcds 1 14_1     # one split query part
 
 # threaded execution
-QDB_ARGS='--scheduler threaded --scheduler-workers 4' ./run_tpcds.sh /path/to/tpcds 1
+QDB_ARGS='--scheduler:mode=threaded --scheduler:workers=4' ./run_tpcds.sh /path/to/tpcds 1
 ```
 
 Per-query timing and status print to stdout; full qdb output goes to

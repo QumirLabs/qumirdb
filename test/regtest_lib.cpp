@@ -594,8 +594,8 @@ std::string TestName(const fs::path& path) {
 
 fs::path InitializeJitCache(const char* executable, const TRegTestOptions& options) {
     fs::path path;
-    if (!options.JitCacheDir.empty()) {
-        path = options.JitCacheDir;
+    if (options.Engine.IsSet("jit", "cache_dir") && !options.Engine.GetString("jit", "cache_dir").empty()) {
+        path = options.Engine.GetString("jit", "cache_dir");
     } else {
         static int anchor;
         const auto binary = llvm::sys::fs::getMainExecutable(executable, &anchor);
@@ -606,59 +606,101 @@ fs::path InitializeJitCache(const char* executable, const TRegTestOptions& optio
     return path;
 }
 
-void TEngineOverrides::Apply(NScheduler::TSettings& settings) const {
-    if (JoinTable) settings.Join.Table = *JoinTable;
+namespace {
+
+// The run options: one table drives the checks and the error message. A kept
+// option stays in argv for main to handle.
+struct TRunOption {
+    std::string_view Name;
+    bool TakesValue;
+    bool Keep;
+};
+
+constexpr TRunOption RunOptions[] = {
+    { "--config", true, false },
+    { "--timing", false, false },
+    { "--trace-fixtures", false, false },
+    { "--canonize", false, true },
+    { "--print", false, true },
+    { "--help", false, true },
+};
+
+std::string KnownRunOptions() {
+    std::string names;
+    for (const auto& option : RunOptions) {
+        names += std::string(option.Name) + ", ";
+    }
+    return names + "--section:key=value and the --gtest_ flags";
 }
+
+} // namespace
 
 TRegTestOptions ParseRegTestOptions(int& argc, char** argv) {
     TRegTestOptions options;
+    std::vector<std::string> overrides;
+    std::string configPath;
+    bool hasConfig = false;
     int kept = 1;
     for (int i = 1; i < argc; ++i) {
         std::string_view arg = argv[i];
+        if (!arg.starts_with("--") || arg.starts_with("--gtest_")) {
+            argv[kept++] = argv[i];
+            continue;
+        }
         const auto equals = arg.find('=');
+        if (arg.find(':') < equals) {
+            overrides.emplace_back(arg.substr(2));
+            continue;
+        }
         const auto name = arg.substr(0, equals);
-        auto value = [&]() -> std::string_view {
-            if (equals != std::string_view::npos) return arg.substr(equals + 1);
-            if (i + 1 >= argc) throw std::invalid_argument(std::string(name) + " requires a value");
-            return argv[++i];
-        };
-        auto flag = [&]() {
+        const auto* option = std::find_if(std::begin(RunOptions), std::end(RunOptions),
+            [&](const TRunOption& candidate) { return candidate.Name == name; });
+        if (option == std::end(RunOptions)) {
+            throw std::invalid_argument("unknown option '" + std::string(arg) + "'; known options: "
+                + KnownRunOptions());
+        }
+        std::string_view value;
+        if (option->TakesValue) {
             if (equals != std::string_view::npos) {
-                throw std::invalid_argument(std::string(name) + " takes no value");
+                value = arg.substr(equals + 1);
+            } else if (i + 1 < argc && !std::string_view(argv[i + 1]).starts_with("--")) {
+                value = argv[++i];
+            } else {
+                throw std::invalid_argument(std::string(name) + " requires a value");
             }
-        };
-        if (name == "--join-table") {
-            const auto text = value();
-            options.Engine.JoinTable = NScheduler::ParseJoinTableKind(text);
-            if (!options.Engine.JoinTable) {
-                throw std::invalid_argument("unknown --join-table value '" + std::string(text)
-                    + "'; accepted: " + std::string(NScheduler::JoinTableKindNames));
+            if (value.empty()) {
+                throw std::invalid_argument(std::string(name) + " requires a non-empty value");
             }
-        } else if (name == "--jit-cache-dir") {
-            options.JitCacheDir = value();
-        } else if (name == "--arrow-memory-pool") {
-            const auto text = value();
-            const auto pool = ParseArrowMemoryPool(text);
-            if (!pool) {
-                throw std::invalid_argument("unknown --arrow-memory-pool value '" + std::string(text)
-                    + "'; accepted: " + std::string(ArrowMemoryPoolNames));
-            }
-            SetArrowMemoryPool(*pool);
+        } else if (equals != std::string_view::npos) {
+            throw std::invalid_argument(std::string(name) + " takes no value");
+        }
+        if (option->Keep) {
+            argv[kept++] = argv[i];
+        } else if (name == "--config") {
+            configPath = value;
+            hasConfig = true;
         } else if (name == "--timing") {
-            flag();
             options.Timing = true;
         } else if (name == "--trace-fixtures") {
-            flag();
             options.TraceFixtures = true;
-        } else if (name == "--dump-passes") {
-            flag();
-            options.DumpPasses = true;
-        } else {
-            argv[kept++] = argv[i];
         }
     }
     argc = kept;
     argv[argc] = nullptr;
+    // The default file of qdb is not read: a run must not depend on the user's home.
+    if (hasConfig) {
+        if (auto loaded = options.Engine.LoadFile(configPath); !loaded) {
+            throw std::invalid_argument(loaded.error());
+        }
+    }
+    for (const auto& spec : overrides) {
+        if (auto applied = options.Engine.Override(spec); !applied) {
+            throw std::invalid_argument(applied.error());
+        }
+    }
+    if (options.Engine.IsSet("io", "arrow_memory_pool")) {
+        SetArrowMemoryPool(*ParseArrowMemoryPool(options.Engine.GetString("io", "arrow_memory_pool")));
+    }
     return options;
 }
 
@@ -1225,6 +1267,16 @@ TCaseResult CheckCase(const TQueryCase& test, bool canonize, const TRegTestOptio
         point = now;
         return elapsed;
     };
+    // The variant sets the scheduler; the keys of the run override it.
+    TEngineSettings engine;
+    auto& variant = engine.Scheduler;
+    variant.Scheduler.Mode = test.Variant == "single"
+        ? NScheduler::EExecutionMode::SingleThreadedScheduler
+        : NScheduler::EExecutionMode::ThreadedScheduler;
+    variant.Scheduler.WorkerCount = test.Variant == "single" ? 1 : 4;
+    variant.ScanSplit.Strategy = NScheduler::EScanSplitStrategy::RowGroupRange;
+    variant.ScanSplit.MaxScanTasks = test.Variant == "single" ? 1 : 4;
+    ApplyEngineConfig(options.Engine, engine);
     std::vector<std::unique_ptr<TParquetSource>> sources;
     std::optional<TParsedQuery> parsed;
     TOperatorPtr plan;
@@ -1252,10 +1304,9 @@ TCaseResult CheckCase(const TQueryCase& test, bool canonize, const TRegTestOptio
         buildMs = mark();
         if (!built) throw built.error();
         plan = std::move(*built);
-        ApplyPlanPasses(plan, {
-            .Annotation = parsed->Annotation,
-            .DumpPasses = options.DumpPasses ? &std::cerr : nullptr,
-        });
+        auto passOptions = engine.Optimizer;
+        passOptions.Annotation = parsed->Annotation;
+        ApplyPlanPasses(plan, std::move(passOptions));
         optimizeMs = mark();
     });
     const std::string where = " (" + test.Sql.string() + ", " + test.Variant + ")";
@@ -1292,14 +1343,7 @@ TCaseResult CheckCase(const TQueryCase& test, bool canonize, const TRegTestOptio
         printTiming({}, 0);
         return {planComparison, std::nullopt, std::nullopt};
     }
-    NScheduler::TSettings settings;
-    settings.Scheduler.Mode = test.Variant == "single"
-        ? NScheduler::EExecutionMode::SingleThreadedScheduler
-        : NScheduler::EExecutionMode::ThreadedScheduler;
-    settings.Scheduler.WorkerCount = test.Variant == "single" ? 1 : 4;
-    settings.ScanSplit.Strategy = NScheduler::EScanSplitStrategy::RowGroupRange;
-    settings.ScanSplit.MaxScanTasks = test.Variant == "single" ? 1 : 4;
-    options.Engine.Apply(settings);
+    auto& settings = engine.Scheduler;
     settings.Jit.CacheDir = options.JitCacheDir;
     TPlanRunTimings runTimings;
     TValue actual = nullptr;

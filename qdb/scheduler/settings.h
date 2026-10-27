@@ -16,11 +16,29 @@ enum class EExecutionMode {
     ThreadedScheduler = 1,
 };
 
+// The names the command lines and the config accept, next to each enum.
+inline constexpr std::string_view ExecutionModeNames = "single, threaded";
+
+inline std::optional<EExecutionMode> ParseExecutionMode(std::string_view name) {
+    if (name == "single") return EExecutionMode::SingleThreadedScheduler;
+    if (name == "threaded") return EExecutionMode::ThreadedScheduler;
+    return std::nullopt;
+}
+
 enum class EScanSplitStrategy {
     Auto = 0,
     RowGroupRange = 1,
     SerialRead = 2,
 };
+
+inline constexpr std::string_view ScanSplitStrategyNames = "auto, row_group_range, serial_read";
+
+inline std::optional<EScanSplitStrategy> ParseScanSplitStrategy(std::string_view name) {
+    if (name == "auto") return EScanSplitStrategy::Auto;
+    if (name == "row_group_range") return EScanSplitStrategy::RowGroupRange;
+    if (name == "serial_read") return EScanSplitStrategy::SerialRead;
+    return std::nullopt;
+}
 
 struct TSchedulerSettings {
     EExecutionMode Mode = EExecutionMode::ThreadedScheduler;
@@ -33,7 +51,7 @@ struct TQueueSettings {
     // Rowset slots per connection lane. Depth 1 ping-pongs producer/consumer on
     // every batch; a small buffer (measured sweet spot ~4) lets a producer run
     // ahead, cutting handoff/scheduling overhead (~10-17% on TPC-H at 8-16
-    // workers) with negligible memory cost. Override with --queue-depth.
+    // workers) with negligible memory cost. Override with [queue] depth.
     size_t RowsetCapacityPerLane = 4;
     bool EnableDebugCounters = false;
 };
@@ -56,7 +74,7 @@ enum class EJoinTableKind {
     Legacy = 1,
 };
 
-// The names the command lines accept, shared by qdb and test_reg.
+// The names the config accepts.
 inline constexpr std::string_view JoinTableKindNames = "row, legacy";
 
 inline std::optional<EJoinTableKind> ParseJoinTableKind(std::string_view name) {

@@ -8,40 +8,30 @@
 #include <string>
 #include <vector>
 #include <qdb/plan/ops/stats.h>
-#include <qdb/scheduler/settings.h>
+#include <qdb/scheduler/engine_settings.h>
 
 namespace NRegTest {
 
 struct TSuite;
 
-// Engine settings a run overrides on top of what each case variant sets. Every
-// field is optional: an unset one keeps the engine default. A new engine option
-// adds a field here, its flag in ParseRegTestOptions and a line in Apply.
-struct TEngineOverrides {
-    std::optional<NQdb::NScheduler::EJoinTableKind> JoinTable;
-
-    void Apply(NQdb::NScheduler::TSettings& settings) const;
-};
-
 // Every setting of a regression run. Parsed once by ParseRegTestOptions and passed
 // down explicitly: nothing below main reads the environment.
 struct TRegTestOptions {
-    TEngineOverrides Engine;
+    // Engine settings a run overrides on top of what each case variant sets: only
+    // the keys given by --config or --section:key=value, never the defaults.
+    NQdb::NUtils::TConfig Engine = NQdb::NUtils::TConfig(NQdb::EngineConfigSchema());
     // Print the timing of each phase of each case to stderr.
     bool Timing = false;
     // Trace the loading of fixtures to stderr.
     bool TraceFixtures = false;
-    // Dump the plan after each optimizer pass to stderr.
-    bool DumpPasses = false;
-    // Persistent JIT cache directory; empty runs without a cache.
+    // The JIT cache directory in use; set by InitializeJitCache from [jit] cache_dir.
     std::string JitCacheDir;
 };
 
-// Parses and removes the run flags from argv (`--flag value` and `--flag=value`):
-// --join-table, --timing, --trace-fixtures, --dump-passes, --jit-cache-dir and
-// --arrow-memory-pool (applied at once, it is process-wide). Other arguments are left
-// for the caller and for gtest. Throws std::invalid_argument with the accepted values
-// on a bad flag value.
+// Parses and removes the run flags from argv: --timing, --trace-fixtures,
+// --config <path> (`--config=path` too) and the engine settings
+// --section:key=value. Other arguments are left for the caller and for gtest.
+// Throws std::invalid_argument with the accepted names or values on a bad setting.
 TRegTestOptions ParseRegTestOptions(int& argc, char** argv);
 
 struct TFloatTolerance {
@@ -91,8 +81,8 @@ struct TCaseResult {
 std::vector<TQueryCase> CollectCases(
     const std::filesystem::path& casesDir,
     const std::filesystem::path& goldensDir);
-// Creates the JIT cache directory: options.JitCacheDir, or a persistent cache next to
-// the executable when it is empty. Returns the directory; the caller stores it in
+// Creates the JIT cache directory: [jit] cache_dir of options.Engine, or a persistent
+// cache next to the executable when it is not set. Returns the directory; the caller stores it in
 // the options the cases run with.
 std::filesystem::path InitializeJitCache(const char* executable, const TRegTestOptions& options);
 // Prepare each selected suite/fixture once, sharing files across cases and variants.

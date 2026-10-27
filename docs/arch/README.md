@@ -60,6 +60,10 @@ SQL → logical plan → typed rewrite passes → physical task graph and kernel
    [scheduler_runtime.md](scheduler_runtime.md),
    [kernel-compilation-phases.md](kernel-compilation-phases.md).
 
+Engine settings come from one validated config: an ini file and
+`--section:key=value` overrides checked against a single table of known
+sections and keys. A mistyped key or value is an error, never a silent default.
+
 - [Optimizations](optimizations.md) - every rewrite in one place: build-time,
   pipeline passes, the CTE phase and the execution-time ones, each with a
   minimal query and the plan before and after.

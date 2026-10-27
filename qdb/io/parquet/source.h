@@ -31,7 +31,7 @@ enum class EArrowMemoryPool {
     Mimalloc,
 };
 
-// The names the command lines accept, shared by qdb and test_reg.
+// The names the config accepts.
 inline constexpr std::string_view ArrowMemoryPoolNames = "auto, system, default, jemalloc, mimalloc";
 
 std::optional<EArrowMemoryPool> ParseArrowMemoryPool(std::string_view name);

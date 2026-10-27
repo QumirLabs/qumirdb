@@ -210,7 +210,7 @@ class BenchmarkTest(unittest.TestCase):
         self.assertIn("--operator-instrumentation", result.stderr)
 
     def test_short_instrumentation_flag_cannot_enter_timed_runs(self):
-        result, _ = self.campaign(["--a-args=--instrumentation"])
+        result, _ = self.campaign(["--a-args=--instrumentation:operators=true"])
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("--instrumentation", result.stderr)
 

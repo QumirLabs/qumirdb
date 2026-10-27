@@ -24,8 +24,9 @@ from query_runner import TIMINGS, sha256
 
 RUNNER = Path(__file__).with_name("run_tpch.sh")
 REPO = RUNNER.parents[2]
-FORBIDDEN = {"--format", "--verbose", "--scheduler-counters", "--operator-diagnostics",
-             "--operator-instrumentation", "--instrumentation", "--sql", "--sexpr", "--data", "-i"}
+FORBIDDEN = {"--format", "--verbose", "--queue:debug_counters", "--operator-diagnostics",
+             "--operator-instrumentation", "--sql", "--sexpr", "--data", "-i"}
+FORBIDDEN_PREFIXES = ("--instrumentation:",)
 SUM_METRICS = [*TIMINGS, "process_wall_seconds", "process_user_seconds", "process_system_seconds"]
 
 
@@ -80,7 +81,8 @@ def binary_manifest(path, declared_commit, arguments):
     if commit is None:
         raise ValueError(f"Source commit is not available locally: {declared_commit}")
     for argument in arguments:
-        if argument.split("=", 1)[0] in FORBIDDEN:
+        name = argument.split("=", 1)[0]
+        if name in FORBIDDEN or name.startswith(FORBIDDEN_PREFIXES):
             raise ValueError(f"{argument}: SQL/data/output are shared; diagnostic counters require a separate run")
     version = subprocess.run([str(path), "--version"], text=True, capture_output=True, timeout=30)
     if version.returncode:
@@ -123,7 +125,7 @@ def run_sample(config, manifest, arm, kind, index, queries, env):
     engine_args = [] if arm == "control" else info["engine_args"]
     cache_dir = config.out / "jit-cache" / arm
     cache_dir.mkdir(parents=True, exist_ok=True)
-    arguments = ["--format", "<escape>csv", "--jit-cache-dir", str(cache_dir), *engine_args]
+    arguments = ["--format", "<escape>csv", f"--jit:cache_dir={cache_dir}", *engine_args]
     args_file = out / "arguments.nul"
     args_file.write_bytes(b"".join(argument.encode() + b"\0" for argument in arguments))
     run_env = {**env, "MODE": "sql", "QDB_BIN": info["path"], "QDB_ARGS_FILE": str(args_file),
@@ -256,8 +258,8 @@ def main():
         epilog=r"""Example (Q19 runtime filters; repeat with --scale 10 in a new output directory):
   python3 benchmark/tpch/compare_runs.py --data /data/tpch --scale 1 --queries 19 \
     --a build/bin/qdb --a-commit <build-source-sha> \
-    --a-args='--scheduler threaded --scheduler-workers 2' \
-    --b-args='--scheduler threaded --scheduler-workers 2 --no-runtime-filters' \
+    --a-args='--scheduler:mode=threaded --scheduler:workers=2' \
+    --b-args='--scheduler:mode=threaded --scheduler:workers=2 --join:runtime_filters=false' \
     --out build/results/q19-sf1
 
 The runner first saves all 22 SQL files using the existing templates/scale params.

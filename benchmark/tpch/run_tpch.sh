@@ -20,7 +20,7 @@ usage() {
     echo "  query_filter  — optional comma-separated list of query numbers to run (e.g. 1,3,7)"
     echo "Env:"
     echo "  MODE          — sexpr (default, runs queries/sexpr/*.sexp) or sql (runs queries/sql/*.sql via --sql)"
-    echo "  QDB_ARGS      — extra arguments passed to qdb, e.g. '--scheduler threaded --scheduler-workers 4'"
+    echo "  QDB_ARGS      — extra arguments passed to qdb, e.g. '--scheduler:mode=threaded --scheduler:workers=4'"
     echo "  QDB_ARGS_FILE — optional NUL-separated arguments (preserves spaces; overrides QDB_ARGS)"
     echo "  RENDER_ONLY=1 — save queries under OUT_DIR/queries without executing qdb"
     echo "  FROZEN_QUERY_DIR — execute previously rendered queries from this directory"

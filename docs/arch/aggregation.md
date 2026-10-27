@@ -246,10 +246,10 @@ The automatic rule is conservative. It needs all of these facts:
 - at least 8x fewer groups than input rows.
 
 If there are no statistics, the scheduler keeps the first plan. It also keeps
-the first plan when the estimate does not pass the rule. The option
-`--no-partial-aggregates` turns off the rule for tests and diagnostics. A global
+the first plan when the estimate does not pass the rule. The setting
+`[aggregate] partial = false` turns off the rule for tests and diagnostics. A global
 aggregate uses its `partial -> gather -> final` plan only with
-`--cascade-aggregates`. SQL grouping sets always use their special two-phase
+`[aggregate] cascade_global = true`. SQL grouping sets always use their special two-phase
 plan.
 
 Partial and final aggregates have distinct executable stage ids and explicit
