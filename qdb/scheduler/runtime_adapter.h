@@ -357,41 +357,5 @@ private:
     bool OutputFinished_ = false;
 };
 
-// Consumers push views of Batches that keep the spool alive until released.
-struct TCteSharedState : ITaskState {
-    enum class EStatus {
-        Building,
-        Ready,
-    };
-
-    std::atomic<EStatus> Status = EStatus::Building;
-    TOperatorInstrumentation* Instrumentation = nullptr;
-    std::vector<TRowSet> Batches;
-
-    void ConfigureInstrumentation(TOperatorInstrumentation* instrumentation) override {
-        Instrumentation = instrumentation;
-    }
-
-    ~TCteSharedState() override {
-        for (auto& batch : Batches) {
-            Release(&batch);
-        }
-    }
-};
-
-class TCteConsumerTask final : public ITaskNode {
-public:
-    TCteConsumerTask(std::shared_ptr<const TCteSharedState> state, TOutputPort output);
-
-    ETaskResult Execute() override;
-    void ConfigureInstrumentation(TTaskInstrumentationSetup& setup) override;
-
-private:
-    std::shared_ptr<const TCteSharedState> State_;
-    TOutputPort Output_;
-    size_t NextBatch_ = 0;
-    bool Finished_ = false;
-};
-
 } // namespace NScheduler
 } // namespace NQdb

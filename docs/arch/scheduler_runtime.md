@@ -81,9 +81,9 @@ expose each processor as a WASM node adapter with `push/finish/next/destroy`.
 | Connection | Cardinality | Fetch behavior | Used for | Cost model |
 |---|---:|---|---|---|
 | `TOneToOneConnection` | N -> N | destination `i` reads source `i` | normal streaming edges, single-lane blocking input, single-lane final output | Cheapest connection; preserves partitioning. |
-| `TGatherConnection` | N -> 1 | one destination round-robins over source lanes until all finish | global blocking operators, final output with multiple lanes, scalar side gather | Serializes lanes; useful only when semantics require one consumer. |
+| `TGatherConnection` | N -> 1 | one destination round-robins over source lanes until all finish | global blocking operators, final output with multiple lanes, scalar side gather, CTE producer completion | Serializes lanes; useful only when semantics require one consumer. |
 | `THashShuffleConnection` | N -> M | destination `j` reads from every source lane routed to partition `j` | grouped aggregate, window, and equi-join partitioning | Expensive boundary: hash kernel, routing, buffering/materialization. Carries the repartition key contract; `DstCount()` is the partition count. |
-| `TBroadcastConnection` | 1 -> N | every destination receives a shared copy | cross join scalar side, late lookup locators | Sends a shared copy to each destination lane. |
+| `TBroadcastConnection` | 1 -> N | every destination receives a shared copy | cross join scalar side, late lookup locators, CTE publication | Sends a shared copy to each destination lane. |
 
 Every connection is made of bounded rowset queues plus finish state. The graph
 stores edges with `(connection, srcLane, dstLane)` so diagnostics can print the
@@ -222,6 +222,55 @@ flowchart LR
 
 Merge is currently a C++ processor over sorted row-id runs. The radix sort
 kernel accelerates local sorting when all keys are supported.
+
+### Materialized CTE
+
+```mermaid
+flowchart LR
+    D0[Definition lane 0] --> W0[cte-producer 0]
+    D1[Definition lane 1] --> W1[cte-producer 1]
+    W0 --> S[(spool segments)]
+    W1 --> S
+    W0 -. finish .-> P[cte-publish]
+    W1 -. finish .-> P
+    P -. finish .-> A0[ref A lane 0]
+    P -. finish .-> A1[ref A lane 1]
+    P -. finish .-> B0[ref B lane 0]
+    P -. finish .-> B1[ref B lane 1]
+    S --> A0
+    S --> A1
+    S --> B0
+    S --> B1
+```
+
+A definition shared by several references is written once into a spool and read
+by every reference. Producer lane `i` appends the batches of definition lane `i`
+to segment `i`. A segment has one writer, so writes need no lock, and there is
+no gather. The spool has no capacity limit: a producer never waits for a
+consumer, so two references feeding the same join cannot deadlock.
+
+Completion connections carry finish signals only. Each producer lane finishes
+its lane of a gather when its input ends. The `cte-publish` task runs once all of
+them have finished: it seals the spool, numbering the batches segment by
+segment, and finishes a broadcast with one lane per consumer lane. The
+release/acquire order of these finish flags makes every segment visible to the
+consumers, and the spool is immutable from then on.
+
+Each reference has as many lanes as the definition, which is the parallelism an
+inlined copy would have. Its lanes share one cursor and claim the next batch
+from it, in the manner of morsel-driven scheduling ([Leis et al.,
+"Morsel-Driven Parallelism", SIGMOD 2014](https://doi.org/10.1145/2588555.2610507)):
+every batch reaches exactly one lane of the reference, and an idle lane takes
+the batches a busy one has not started. A lane emits views of the spooled
+batches. The spool is owned jointly by the producer lanes, the publish task, the
+read state of each reference and every emitted view; each drops its share when
+it is done, so the rows are released once the last consumer lane has finished
+and the last view downstream is released.
+
+The spool is still a pipeline breaker: no reference starts before the whole
+definition is written, while inlined copies run concurrently and can receive
+their own pushed filters. `ChooseCteReuse` weighs recomputation against spool
+traffic only.
 
 ## JavaScript/WASM Runtime Boundary
 

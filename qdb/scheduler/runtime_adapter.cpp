@@ -1249,56 +1249,6 @@ void THashShuffleTask::ClearPending() {
     ObserveInstrumentation();
 }
 
-namespace {
-
-// A consumer's view of a spooled batch keeps the spool alive, so a rowset
-// retained past the end of the plan (by a sink, for example) stays valid.
-struct TCteViewData {
-    std::shared_ptr<const TCteSharedState> State;
-};
-
-void DestroyCteView(TRowSet* rowSet) {
-    delete static_cast<TCteViewData*>(rowSet->Private);
-}
-
-} // namespace
-
-TCteConsumerTask::TCteConsumerTask(
-    std::shared_ptr<const TCteSharedState> state, TOutputPort output)
-    : State_(std::move(state))
-    , Output_(output)
-{}
-
-ETaskResult TCteConsumerTask::Execute() {
-    if (Finished_) {
-        return ETaskResult::FINISHED;
-    }
-    if (State_->Status.load(std::memory_order_acquire) !=
-        TCteSharedState::EStatus::Ready)
-    {
-        return ETaskResult::NEED_DATA;
-    }
-    if (NextBatch_ == State_->Batches.size()) {
-        Finished_ = true;
-        Output_.Finish();
-        return ETaskResult::FINISHED;
-    }
-    if (!Output_.CanPush()) {
-        return ETaskResult::BLOCKED_OUTPUT;
-    }
-
-    TRowSet view = State_->Batches[NextBatch_];
-    view.Destroy = DestroyCteView;
-    view.Private = new TCteViewData{State_};
-    view.RefCount = 1;
-    if (!Output_.Push(std::move(view))) {
-        Release(&view);
-        return ETaskResult::BLOCKED_OUTPUT;
-    }
-    ++NextBatch_;
-    return ETaskResult::OK;
-}
-
 void TSourceTask::ConfigureInstrumentation(TTaskInstrumentationSetup& setup) {
     setup.Output(Output_);
 }
@@ -1343,10 +1293,6 @@ void THashShuffleTask::ConfigureInstrumentation(TTaskInstrumentationSetup& setup
     OutputInstrumentation_ = &setup.Output(*Output_);
     ResourceInstrumentation_ = std::make_unique<TInstrumentationState>();
     ResourceInstrumentation_->Counters = &setup.Counters();
-}
-
-void TCteConsumerTask::ConfigureInstrumentation(TTaskInstrumentationSetup& setup) {
-    setup.Output(Output_);
 }
 
 } // namespace NScheduler
