@@ -55,11 +55,6 @@ using TArray = llvm::json::Array;
 
 namespace {
 
-bool TraceFixtures() {
-    const char* value = std::getenv("QDB_REGTEST_TRACE_FIXTURES");
-    return value && *value && std::string_view(value) != "0";
-}
-
 std::string ReadAll(const fs::path& path) {
     std::ifstream input(path, std::ios::binary);
     if (!input) {
@@ -597,11 +592,10 @@ std::string TestName(const fs::path& path) {
     return name;
 }
 
-fs::path InitializeJitCache(const char* executable) {
-    const char* configured = std::getenv("QDB_JIT_CACHE_DIR");
+fs::path InitializeJitCache(const char* executable, const TRegTestOptions& options) {
     fs::path path;
-    if (configured && *configured) {
-        path = configured;
+    if (!options.JitCacheDir.empty()) {
+        path = options.JitCacheDir;
     } else {
         static int anchor;
         const auto binary = llvm::sys::fs::getMainExecutable(executable, &anchor);
@@ -609,10 +603,63 @@ fs::path InitializeJitCache(const char* executable) {
         path = fs::path(binary).parent_path() / "test_reg_jit_cache";
     }
     fs::create_directories(path);
-    if (!(configured && *configured) && ::setenv("QDB_JIT_CACHE_DIR", path.c_str(), 1) != 0) {
-        throw std::runtime_error("cannot configure regression JIT cache");
-    }
     return path;
+}
+
+void TEngineOverrides::Apply(NScheduler::TSettings& settings) const {
+    if (JoinTable) settings.Join.Table = *JoinTable;
+}
+
+TRegTestOptions ParseRegTestOptions(int& argc, char** argv) {
+    TRegTestOptions options;
+    int kept = 1;
+    for (int i = 1; i < argc; ++i) {
+        std::string_view arg = argv[i];
+        const auto equals = arg.find('=');
+        const auto name = arg.substr(0, equals);
+        auto value = [&]() -> std::string_view {
+            if (equals != std::string_view::npos) return arg.substr(equals + 1);
+            if (i + 1 >= argc) throw std::invalid_argument(std::string(name) + " requires a value");
+            return argv[++i];
+        };
+        auto flag = [&]() {
+            if (equals != std::string_view::npos) {
+                throw std::invalid_argument(std::string(name) + " takes no value");
+            }
+        };
+        if (name == "--join-table") {
+            const auto text = value();
+            options.Engine.JoinTable = NScheduler::ParseJoinTableKind(text);
+            if (!options.Engine.JoinTable) {
+                throw std::invalid_argument("unknown --join-table value '" + std::string(text)
+                    + "'; accepted: " + std::string(NScheduler::JoinTableKindNames));
+            }
+        } else if (name == "--jit-cache-dir") {
+            options.JitCacheDir = value();
+        } else if (name == "--arrow-memory-pool") {
+            const auto text = value();
+            const auto pool = ParseArrowMemoryPool(text);
+            if (!pool) {
+                throw std::invalid_argument("unknown --arrow-memory-pool value '" + std::string(text)
+                    + "'; accepted: " + std::string(ArrowMemoryPoolNames));
+            }
+            SetArrowMemoryPool(*pool);
+        } else if (name == "--timing") {
+            flag();
+            options.Timing = true;
+        } else if (name == "--trace-fixtures") {
+            flag();
+            options.TraceFixtures = true;
+        } else if (name == "--dump-passes") {
+            flag();
+            options.DumpPasses = true;
+        } else {
+            argv[kept++] = argv[i];
+        }
+    }
+    argc = kept;
+    argv[argc] = nullptr;
+    return options;
 }
 
 TComparison CheckAst(const TQueryCase& test, bool canonize) {
@@ -646,14 +693,14 @@ struct TSuite {
     // Result goldens of the cases checked in canonize mode; a filter skips the rest.
     std::set<fs::path> Ran;
 
-    void Prepare(const std::string& name) {
+    void Prepare(const std::string& name, bool traceFixtures) {
         auto& fixture = Fixtures.at(name);
         if (fixture.File || !fixture.Error.empty()) return;
         try {
             if (!fixture.Parquet.empty()) {
                 fixture.File = std::make_shared<TParquetFile>(fixture.Parquet.string());
                 fixture.PreparedPath = fixture.Parquet;
-                if (TraceFixtures()) std::cerr << "[regtest-fixture] opened " << fixture.Parquet << '\n';
+                if (traceFixtures) std::cerr << "[regtest-fixture] opened " << fixture.Parquet << '\n';
                 return;
             }
             const auto identity = std::make_pair(fixture.Json, fixture.RowGroupRows);
@@ -662,7 +709,7 @@ struct TSuite {
                 auto& table = Parsed[fixture.Json];
                 if (!table) {
                     table = ReadTable(fixture.Json);
-                    if (TraceFixtures()) std::cerr << "[regtest-fixture] parsed " << fixture.Json << '\n';
+                    if (traceFixtures) std::cerr << "[regtest-fixture] parsed " << fixture.Json << '\n';
                 }
                 if (!Temp) Temp = std::make_unique<TTempDir>();
                 path = Temp->Path / (std::to_string(Files.size()) + ".parquet");
@@ -679,7 +726,7 @@ struct TSuite {
                 CheckArrow(writer->WriteTable(*table, fixture.RowGroupRows));
                 CheckArrow(writer->Close());
                 CheckArrow(output->Close());
-                if (TraceFixtures()) {
+                if (traceFixtures) {
                     std::cerr << "[regtest-fixture] generated " << fixture.Json << " -> " << path
                         << " rows=" << table->num_rows() << " row_group_rows=" << fixture.RowGroupRows << '\n';
                 }
@@ -812,24 +859,24 @@ std::vector<TQueryCase> CollectCases(const fs::path& root, const fs::path& golde
     return result;
 }
 
-void PrepareCases(std::span<const TQueryCase> tests) {
+void PrepareCases(std::span<const TQueryCase> tests, const TRegTestOptions& options) {
     const auto started = std::chrono::steady_clock::now();
     std::map<TSuite*, std::set<std::string>> selected;
     for (const auto& test : tests) {
         if (!test.Suite) continue;
         for (const auto& [table, fixture] : test.Tables) {
-            if (selected[test.Suite.get()].insert(fixture).second) test.Suite->Prepare(fixture);
+            if (selected[test.Suite.get()].insert(fixture).second) test.Suite->Prepare(fixture, options.TraceFixtures);
         }
     }
-    if (TraceFixtures()) {
+    if (options.TraceFixtures) {
         const auto elapsed = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - started).count();
         std::cerr << "[regtest-fixture] preparation cases=" << tests.size() << " elapsed_ms=" << elapsed << '\n';
     }
 }
 
-void PrepareCase(const TQueryCase& test) {
-    PrepareCases(std::span(&test, 1));
+void PrepareCase(const TQueryCase& test, const TRegTestOptions& options) {
+    PrepareCases(std::span(&test, 1), options);
 }
 
 TStatsPtr TableStats(const TQueryCase& test, const std::string& table) {
@@ -1151,7 +1198,7 @@ TComparison CompareResults(const std::string& actual, const std::string& expecte
     return {ResultsMatch(a, e, ordered, tol), RenderResult(a), RenderResult(e)};
 }
 
-TCaseResult CheckCase(const TQueryCase& test, bool canonize) {
+TCaseResult CheckCase(const TQueryCase& test, bool canonize, const TRegTestOptions& options) {
     if (!test.HasTables()) {
         std::istringstream input(ReadAll(test.Sql));
         const auto plan = BuildPlanText(input);
@@ -1169,8 +1216,7 @@ TCaseResult CheckCase(const TQueryCase& test, bool canonize) {
         return {ComparePlan(test, plan ? *plan : plan.error(), canonize), std::nullopt, std::nullopt};
     }
     if (canonize) test.Suite->Ran.insert(test.Golden);
-    const char* timingEnv = std::getenv("QDB_REGTEST_TIMING");
-    const bool timing = timingEnv && *timingEnv && std::string_view(timingEnv) != "0";
+    const bool timing = options.Timing;
     const auto started = std::chrono::steady_clock::now();
     auto point = started;
     auto mark = [&]() {
@@ -1206,7 +1252,10 @@ TCaseResult CheckCase(const TQueryCase& test, bool canonize) {
         buildMs = mark();
         if (!built) throw built.error();
         plan = std::move(*built);
-        ApplyPlanPasses(plan, {.Annotation = parsed->Annotation});
+        ApplyPlanPasses(plan, {
+            .Annotation = parsed->Annotation,
+            .DumpPasses = options.DumpPasses ? &std::cerr : nullptr,
+        });
         optimizeMs = mark();
     });
     const std::string where = " (" + test.Sql.string() + ", " + test.Variant + ")";
@@ -1250,12 +1299,8 @@ TCaseResult CheckCase(const TQueryCase& test, bool canonize) {
     settings.Scheduler.WorkerCount = test.Variant == "single" ? 1 : 4;
     settings.ScanSplit.Strategy = NScheduler::EScanSplitStrategy::RowGroupRange;
     settings.ScanSplit.MaxScanTasks = test.Variant == "single" ? 1 : 4;
-    // QDB_JOIN_TABLE=legacy runs the suites over the symmetric join table.
-    if (const char* joinTable = std::getenv("QDB_JOIN_TABLE")) {
-        settings.Join.Table = std::string_view(joinTable) == "legacy"
-            ? NScheduler::EJoinTableKind::Legacy
-            : NScheduler::EJoinTableKind::Row;
-    }
+    options.Engine.Apply(settings);
+    settings.Jit.CacheDir = options.JitCacheDir;
     TPlanRunTimings runTimings;
     TValue actual = nullptr;
     // Lowering, JIT compilation and the run itself.

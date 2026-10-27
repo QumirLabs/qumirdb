@@ -170,6 +170,7 @@ struct TConfig {
     bool EnableRuntimeFilters = true;
     bool ForceRuntimeFilters = false;
     bool Timing = false;
+    bool DumpPasses = false;
     EExplainMode ExplainMode = EExplainMode::Text;
     NQdb::TLateMaterializationSettings LateMaterialization;
     NQdb::NScheduler::TSettings Scheduler;
@@ -290,6 +291,7 @@ int ExecutePlan(
         .LateMaterialization = config.LateMaterialization,
         .Diagnostics = &planDiagnostics,
         .Annotation = annotation,
+        .DumpPasses = config.DumpPasses ? &std::cerr : nullptr,
     });
     auto planElapsed = std::chrono::steady_clock::now() - planStart;
     const bool sexprAvailable = NQdb::CollectMaterializations(plan).empty();
@@ -343,7 +345,8 @@ int ExecutePlan(
     auto buildElapsed = std::chrono::steady_clock::now() - buildStart;
     auto llvmStart = std::chrono::steady_clock::now();
     NQdb::JitFinalizeKernels(
-        lowered.Kernels, diagnostics, annotation.ExternalCatalog);
+        lowered.Kernels, diagnostics, annotation.ExternalCatalog,
+        config.Scheduler.Jit.CacheDir);
     auto llvmElapsed = std::chrono::steady_clock::now() - llvmStart;
 
     std::vector<std::string> outputNames;
@@ -734,6 +737,10 @@ void PrintHelp() {
         "  --nocbo                      Disable cost-based join reordering\n"
         "  --no-runtime-filters         Disable join runtime filters (for A/B runs)\n"
         "  --join-table <kind>          Inner join hash table: row (default) or legacy\n"
+        "  --jit-cache-dir <path>       Persistent JIT cache directory (default: none)\n"
+        "  --arrow-memory-pool <kind>   Parquet read allocator: auto (default), system,\n"
+        "                               default, jemalloc or mimalloc\n"
+        "  --dump-passes                Dump the plan to stderr after each optimizer pass\n"
         "  --row-join-probe-hold-bytes <n>\n"
         "                               Probe bytes a row join task holds while its build\n"
         "                               runs; 0 disables the hold\n"
@@ -974,18 +981,40 @@ int main(int argc, char** argv) {
             config.EnableRuntimeFilters = false;
         } else if (!std::strcmp(argv[i], "--join-table")) {
             if (i + 1 >= argc) {
-                std::cerr << "--join-table requires row or legacy\n";
+                std::cerr << "--join-table requires an argument: "
+                    << NQdb::NScheduler::JoinTableKindNames << "\n";
                 return 1;
             }
             const std::string_view kind = argv[++i];
-            if (kind == "row") {
-                config.Scheduler.Join.Table = NQdb::NScheduler::EJoinTableKind::Row;
-            } else if (kind == "legacy") {
-                config.Scheduler.Join.Table = NQdb::NScheduler::EJoinTableKind::Legacy;
-            } else {
-                std::cerr << "--join-table requires row or legacy\n";
+            const auto table = NQdb::NScheduler::ParseJoinTableKind(kind);
+            if (!table) {
+                std::cerr << "unknown --join-table value '" << kind << "'; accepted: "
+                    << NQdb::NScheduler::JoinTableKindNames << "\n";
                 return 1;
             }
+            config.Scheduler.Join.Table = *table;
+        } else if (!std::strcmp(argv[i], "--jit-cache-dir")) {
+            if (i + 1 >= argc) {
+                std::cerr << "--jit-cache-dir requires a path\n";
+                return 1;
+            }
+            config.Scheduler.Jit.CacheDir = argv[++i];
+        } else if (!std::strcmp(argv[i], "--arrow-memory-pool")) {
+            if (i + 1 >= argc) {
+                std::cerr << "--arrow-memory-pool requires an argument: "
+                    << NQdb::ArrowMemoryPoolNames << "\n";
+                return 1;
+            }
+            const std::string_view kind = argv[++i];
+            const auto pool = NQdb::ParseArrowMemoryPool(kind);
+            if (!pool) {
+                std::cerr << "unknown --arrow-memory-pool value '" << kind << "'; accepted: "
+                    << NQdb::ArrowMemoryPoolNames << "\n";
+                return 1;
+            }
+            NQdb::SetArrowMemoryPool(*pool);
+        } else if (!std::strcmp(argv[i], "--dump-passes")) {
+            config.DumpPasses = true;
         } else if (!std::strcmp(argv[i], "--row-join-probe-hold-bytes")) {
             if (i + 1 >= argc) {
                 std::cerr << "--row-join-probe-hold-bytes requires a non-negative integer\n";

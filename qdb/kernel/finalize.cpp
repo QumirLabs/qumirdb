@@ -4,7 +4,6 @@
 #include <qdb/kernel/compiler.h>
 #include <qdb/kernel/finalize_fused.h>
 
-#include <cstdlib>
 #include <memory>
 #include <optional>
 #include <ostream>
@@ -32,11 +31,9 @@ struct TFusedKernelStorage {
 void JitFinalizeKernels(
     std::span<TGeneratedKernel> kernels,
     std::ostream* diagnostics,
-    std::shared_ptr<const TExternalCatalogSnapshot> externalCatalog)
+    std::shared_ptr<const TExternalCatalogSnapshot> externalCatalog,
+    const std::string& cacheDir)
 {
-    const char* cacheDirEnv = std::getenv("QDB_JIT_CACHE_DIR");
-    const std::string cacheDir = (cacheDirEnv && *cacheDirEnv) ? cacheDirEnv : "";
-
     std::vector<TGeneratedKernel*> unique;
     std::vector<std::pair<TGeneratedKernel*, size_t>> bindings;
     std::unordered_map<std::string, size_t> uniqueByKey;

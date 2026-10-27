@@ -19,7 +19,6 @@
 #include <qdb/plan/passes/typing.h>
 #include <qdb/plan/plan_print.h>
 
-#include <cstdlib>
 #include <iostream>
 
 namespace NQdb {
@@ -27,15 +26,14 @@ namespace NQdb {
 namespace {
 
 void OptimizeOne(TOperatorPtr& plan, TPlanPassOptions& options, TConstFolder& folder) {
-    // QDB_DUMP_PASSES=1 dumps the plan after each pass to stderr (debugging).
-    const bool dump = std::getenv("QDB_DUMP_PASSES") != nullptr;
+    std::ostream* const dump = options.DumpPasses;
     auto stage = [&](const char* name) {
         if (dump) {
-            std::cerr << "\n===== after " << name << " =====\n";
-            PrintPlanTree(std::cerr, plan);
+            *dump << "\n===== after " << name << " =====\n";
+            PrintPlanTree(*dump, plan);
         }
     };
-    if (dump) { std::cerr << "\n===== initial =====\n"; PrintPlanTree(std::cerr, plan); }
+    if (dump) { *dump << "\n===== initial =====\n"; PrintPlanTree(*dump, plan); }
 
     BindLateMaterializationSources(plan);
     AssignSourceAliases(plan); stage("AssignSourceAliases");
@@ -177,9 +175,9 @@ void ApplyPlanPasses(TOperatorPtr& plan, TPlanPassOptions options) {
             AttachRuntimeFilters(current, nextFilterId, options.ForceRuntimeFilters);
         });
     }
-    if (std::getenv("QDB_DUMP_PASSES") != nullptr) {
-        std::cerr << "\n===== after ApplyCteReuse =====\n";
-        PrintPlanTreeWithCtes(std::cerr, plan);
+    if (options.DumpPasses) {
+        *options.DumpPasses << "\n===== after ApplyCteReuse =====\n";
+        PrintPlanTreeWithCtes(*options.DumpPasses, plan);
     }
 }
 

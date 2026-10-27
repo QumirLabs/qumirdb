@@ -5,6 +5,7 @@
 #include <qdb/plan/passes/late_materialization.h>
 #include <qdb/plan/passes/typing.h>
 
+#include <iosfwd>
 #include <memory>
 
 namespace NQdb {
@@ -24,6 +25,8 @@ struct TPlanPassOptions {
     TLateMaterializationSettings LateMaterialization;
     TPlanPassDiagnostics* Diagnostics = nullptr;
     NKernel::TAnnotationContext Annotation;
+    // When set, the plan is dumped here after each pass (debugging).
+    std::ostream* DumpPasses = nullptr;
 };
 
 void ApplyPlanPasses(TOperatorPtr& plan, TPlanPassOptions options = {});

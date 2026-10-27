@@ -3,6 +3,9 @@
 #include <algorithm>
 #include <cstddef>
 #include <iosfwd>
+#include <optional>
+#include <string>
+#include <string_view>
 #include <thread>
 
 namespace NQdb {
@@ -53,6 +56,15 @@ enum class EJoinTableKind {
     Legacy = 1,
 };
 
+// The names the command lines accept, shared by qdb and test_reg.
+inline constexpr std::string_view JoinTableKindNames = "row, legacy";
+
+inline std::optional<EJoinTableKind> ParseJoinTableKind(std::string_view name) {
+    if (name == "row") return EJoinTableKind::Row;
+    if (name == "legacy") return EJoinTableKind::Legacy;
+    return std::nullopt;
+}
+
 struct TJoinSettings {
     EJoinTableKind Table = EJoinTableKind::Row;
     // Probe bytes one row join task may hold while its table is being built.
@@ -95,6 +107,11 @@ struct TAggregateSettings {
     size_t PartialMinReductionFactor = 8;
 };
 
+struct TJitSettings {
+    // Persistent cache of compiled kernel dependencies; empty disables it.
+    std::string CacheDir;
+};
+
 struct TInstrumentationSettings {
     // Disabled by default. Applications may opt in and provide the destination
     // explicitly; the execution library never reads process environment state.
@@ -110,6 +127,7 @@ struct TSettings {
     THashShuffleSettings HashShuffle;
     TJoinSettings Join;
     TAggregateSettings Aggregate;
+    TJitSettings Jit;
     TInstrumentationSettings Instrumentation;
 };
 

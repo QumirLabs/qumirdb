@@ -5,7 +5,7 @@
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 
-#include <cstdlib>
+#include <atomic>
 #include <stdexcept>
 
 #include <arrow/api.h>
@@ -216,30 +216,25 @@ private:
     TParquetRowReader Reader_;
 };
 
+std::atomic<EArrowMemoryPool> ConfiguredMemoryPool{EArrowMemoryPool::Auto};
+
 arrow::MemoryPool* GetMemoryPool() {
     static arrow::MemoryPool* pool = []() -> arrow::MemoryPool* {
-        const char* env = std::getenv("QDB_ARROW_MEMORY_POOL");
-        std::string_view mode = env ? std::string_view(env) : std::string_view{};
-
-        if (mode == "system") {
+        switch (ConfiguredMemoryPool.load()) {
+        case EArrowMemoryPool::System:
             return arrow::system_memory_pool();
-        }
-        if (mode == "default") {
+        case EArrowMemoryPool::Default:
             return arrow::default_memory_pool();
-        }
-        if (mode == "jemalloc") {
-            arrow::MemoryPool* jemalloc = nullptr;
-            if (arrow::jemalloc_memory_pool(&jemalloc).ok() && jemalloc) {
-                return jemalloc;
-            }
-            return arrow::default_memory_pool();
-        }
-        if (mode == "mimalloc") {
+        case EArrowMemoryPool::Mimalloc: {
             arrow::MemoryPool* mimalloc = nullptr;
             if (arrow::mimalloc_memory_pool(&mimalloc).ok() && mimalloc) {
                 return mimalloc;
             }
             return arrow::default_memory_pool();
+        }
+        case EArrowMemoryPool::Jemalloc:
+        case EArrowMemoryPool::Auto:
+            break;
         }
         arrow::MemoryPool* jemalloc = nullptr;
         if (arrow::jemalloc_memory_pool(&jemalloc).ok() && jemalloc) {
@@ -251,6 +246,19 @@ arrow::MemoryPool* GetMemoryPool() {
 }
 
 } // namespace
+
+std::optional<EArrowMemoryPool> ParseArrowMemoryPool(std::string_view name) {
+    if (name == "auto") return EArrowMemoryPool::Auto;
+    if (name == "system") return EArrowMemoryPool::System;
+    if (name == "default") return EArrowMemoryPool::Default;
+    if (name == "jemalloc") return EArrowMemoryPool::Jemalloc;
+    if (name == "mimalloc") return EArrowMemoryPool::Mimalloc;
+    return std::nullopt;
+}
+
+void SetArrowMemoryPool(EArrowMemoryPool pool) {
+    ConfiguredMemoryPool.store(pool);
+}
 
 struct TParquetFileData {
     explicit TParquetFileData(const std::string& path)
