@@ -109,6 +109,47 @@ struct THashShuffleSettings {
     size_t TargetOutputBatchBytes = 1024 * 1024;
 };
 
+// Which layout the hash table of a grouped aggregate task has. Swiss is the
+// swiss table, with one array per state word. Row keeps the key and the
+// states of a group in one arena row behind salted entries
+// (kernel/aggregation/aggregation_rows.oz). Auto starts every task swiss and
+// moves its table to rows when it must grow past the size from which rows are
+// faster. Aggregates with string keys or states, and those with groups over
+// an empty input, have only the swiss table.
+enum class EAggregateTableKind {
+    Auto = 0,
+    Swiss = 1,
+    Row = 2,
+};
+
+// The names the config accepts.
+inline constexpr std::string_view AggregateTableKindNames = "auto, swiss, row";
+
+inline std::optional<EAggregateTableKind> ParseAggregateTableKind(std::string_view name) {
+    if (name == "auto") {
+        return EAggregateTableKind::Auto;
+    }
+    if (name == "swiss") {
+        return EAggregateTableKind::Swiss;
+    }
+    if (name == "row") {
+        return EAggregateTableKind::Row;
+    }
+    return std::nullopt;
+}
+
+inline std::string_view AggregateTableKindName(EAggregateTableKind kind) {
+    switch (kind) {
+        case EAggregateTableKind::Auto:
+            return "auto";
+        case EAggregateTableKind::Swiss:
+            return "swiss";
+        case EAggregateTableKind::Row:
+            return "row";
+    }
+    return "unknown";
+}
+
 struct TAggregateSettings {
     // Parallelize ungrouped/global aggregates with a partial->gather->combine
     // cascade instead of gathering every lane into one aggregate. Off by
@@ -123,6 +164,8 @@ struct TAggregateSettings {
     bool EnablePartial = true;
     size_t PartialMinInputRows = 1024 * 1024;
     size_t PartialMinReductionFactor = 8;
+
+    EAggregateTableKind Table = EAggregateTableKind::Auto;
 };
 
 struct TJitSettings {

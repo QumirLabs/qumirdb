@@ -40,6 +40,7 @@ TEST(EngineSettings, SchemaDefaultsAreTheDefaultsOfTheSettings) {
     EXPECT_TRUE(config.GetBool("join", "runtime_filters"));
     EXPECT_FALSE(config.GetBool("aggregate", "cascade_global"));
     EXPECT_TRUE(config.GetBool("aggregate", "partial"));
+    EXPECT_EQ(config.GetString("aggregate", "table"), "auto");
     EXPECT_TRUE(config.GetBool("optimizer", "cbo"));
     EXPECT_EQ(config.GetDouble("late_materialization", "min_savings"), 2.0);
     EXPECT_EQ(config.GetString("io", "arrow_memory_pool"), "auto");
@@ -60,6 +61,7 @@ TEST(EngineSettings, EveryDefaultSurvivesApplyingTheWholeDump) {
     EXPECT_EQ(settings.Scheduler.HashShuffle.TargetOutputBatchRows, defaults.Scheduler.HashShuffle.TargetOutputBatchRows);
     EXPECT_EQ(settings.Scheduler.Join.RowJoinProbeHoldBytes, defaults.Scheduler.Join.RowJoinProbeHoldBytes);
     EXPECT_EQ(settings.Scheduler.Aggregate.PartialMinInputRows, defaults.Scheduler.Aggregate.PartialMinInputRows);
+    EXPECT_EQ(settings.Scheduler.Aggregate.Table, defaults.Scheduler.Aggregate.Table);
     EXPECT_EQ(settings.Optimizer.LateMaterialization.MaxOutputRows, defaults.Optimizer.LateMaterialization.MaxOutputRows);
     EXPECT_EQ(settings.Optimizer.DumpPasses, nullptr);
     EXPECT_EQ(settings.Scheduler.Instrumentation.Output, nullptr);
@@ -81,6 +83,7 @@ TEST(EngineSettings, OverridesReachTheirFields) {
              "shuffle:max_partitions=7",
              "aggregate:cascade_global=true",
              "aggregate:partial=false",
+             "aggregate:table=row",
              "instrumentation:operators=true",
              "late_materialization:enabled=false",
              "late_materialization:max_rows=9",
@@ -109,6 +112,7 @@ TEST(EngineSettings, OverridesReachTheirFields) {
     EXPECT_EQ(settings.Scheduler.HashShuffle.MaxPartitionCount, 7u);
     EXPECT_TRUE(settings.Scheduler.Aggregate.CascadeGlobal);
     EXPECT_FALSE(settings.Scheduler.Aggregate.EnablePartial);
+    EXPECT_EQ(settings.Scheduler.Aggregate.Table, NScheduler::EAggregateTableKind::Row);
     EXPECT_TRUE(settings.Scheduler.Instrumentation.Operators);
     EXPECT_EQ(settings.Scheduler.Instrumentation.Output, &std::cerr);
     EXPECT_FALSE(settings.Optimizer.LateMaterialization.Enabled);
@@ -128,6 +132,7 @@ TEST(EngineSettings, BadSettingsAreErrorsThatListTheAccepted) {
         return result ? std::string() : result.error();
     };
     EXPECT_NE(message("join:table=hash").find("one of: row, legacy"), std::string::npos);
+    EXPECT_NE(message("aggregate:table=rows").find("one of: auto, swiss, row"), std::string::npos);
     EXPECT_NE(message("join:tabel=row").find("table"), std::string::npos);
     EXPECT_NE(message("joins:table=row").find("accepted sections: scheduler, queue, scan, join"), std::string::npos);
     EXPECT_NE(message("scheduler:workers=0").find("an integer >= 1"), std::string::npos);

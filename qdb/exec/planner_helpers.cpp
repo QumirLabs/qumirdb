@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cmath>
 #include <limits>
 #include <ostream>
 #include <stdexcept>
@@ -204,6 +205,77 @@ int64_t EstimateAggregateInitialCapacity(
 
     return static_cast<int64_t>(
         std::bit_ceil(std::max(required, DefaultCapacity)));
+}
+
+TAggregateTaskEstimate EstimateAggregateTask(
+    const TAggregateOperator& aggregate,
+    size_t partitionCount)
+{
+    const uint64_t partitions = std::max<uint64_t>(partitionCount, 1);
+    // A share rounds up, so that no task is planned below it.
+    auto share = [&](uint64_t total) {
+        return total / partitions + (total % partitions != 0);
+    };
+    TAggregateTaskEstimate estimate{
+        .InitialCapacity = EstimateAggregateInitialCapacity(aggregate, partitionCount),
+    };
+    if (const auto groups = EstimateAggregateGroupCount(aggregate)) {
+        estimate.Groups = share(*groups);
+    }
+    if (const auto& stats = aggregate.Input()->Stats_) {
+        estimate.InputRows = share(stats->RowCount);
+    }
+    return estimate;
+}
+
+int64_t AggregateRowLayoutMinGroups(int64_t rowBytes, size_t stateWords)
+{
+    // The swiss table reads one array per state word, so the more words a
+    // group has, the smaller the table from which the row layout is faster.
+    // AggregateTable.DISABLED_LayoutMicrobenchmark measured the crossover
+    // with one task per worker (18), as a parallel aggregate runs: the row
+    // table holds about 8 MiB there with one state word, 3 MiB with two,
+    // 1-1.5 MiB with four, and rows are faster at every size with eight, for
+    // i64 and (i64, i32) keys alike. 8 MiB / words^1.5 follows those points.
+    constexpr double OneWordBytes = 8 << 20;
+    const double words = static_cast<double>(std::max<size_t>(stateWords, 1));
+    const double bytes = OneWordBytes / (words * std::sqrt(words));
+    return std::max<int64_t>(static_cast<int64_t>(bytes) / std::max<int64_t>(rowBytes, 1), 1);
+}
+
+TAggregateTablePlan PlanAggregateTable(
+    const TAggregateTaskEstimate& estimate,
+    const TAggregateKernels& kernels,
+    NScheduler::EAggregateTableKind table)
+{
+    TAggregateTablePlan plan{.InitialCapacity = estimate.InitialCapacity};
+    if (kernels.RowBytes == 0 || table == NScheduler::EAggregateTableKind::Swiss) {
+        return plan;
+    }
+    // Row entries for the estimated groups of the task. An estimate can be
+    // far too high (#342), so they are capped as the swiss slots are, by the
+    // groups the slots of the byte budget hold, and by the task's input rows:
+    // a table that grows past them costs a few rewrites of its entries.
+    uint64_t groups = std::min<uint64_t>(estimate.Groups.value_or(0),
+        estimate.InitialCapacity - estimate.InitialCapacity / 8);
+    if (estimate.InputRows) {
+        groups = std::min(groups, *estimate.InputRows);
+    }
+    if (table == NScheduler::EAggregateTableKind::Row) {
+        plan.Layout = EAggregateTableLayout::Row;
+        plan.InitialGroups = static_cast<int64_t>(groups);
+        return plan;
+    }
+    // Auto: the swiss table must grow, and so move, once it holds the
+    // groups from which rows are faster.
+    plan.RowSwitchGroups = AggregateRowLayoutMinGroups(kernels.RowBytes, kernels.StateWords);
+    int64_t switchCapacity = 8;
+    while (switchCapacity - switchCapacity / 8 < plan.RowSwitchGroups) {
+        switchCapacity *= 2;
+    }
+    plan.InitialCapacity = std::min(plan.InitialCapacity, switchCapacity);
+    plan.RowExpectedGroups = static_cast<int64_t>(groups);
+    return plan;
 }
 
 NQumir::NAst::TTypePtr BuildSourceRuntimeType(TSourceOperator& src)

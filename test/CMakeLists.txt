@@ -83,11 +83,16 @@ foreach(shard RANGE 3)
 endforeach()
 # The whole suite over the symmetric join table. A full pass costs as much as
 # test_reg_0..3 together, so it is registered only on request.
-option(QDB_TEST_REG_VARIANTS "Register the regression suite variants (test_reg_legacy_join)" OFF)
+option(QDB_TEST_REG_VARIANTS
+    "Register the regression suite variants (test_reg_legacy_join, test_reg_row_aggregate)" OFF)
 if(QDB_TEST_REG_VARIANTS)
     add_test(NAME test_reg_legacy_join COMMAND test_reg ${QDB_REG_ARGS} --join:table=legacy
         --gtest_output=xml:${CMAKE_CURRENT_BINARY_DIR}/test_reg_legacy_join.xml)
     set_tests_properties(test_reg_legacy_join PROPERTIES COST 400 LABELS variant)
+    # Every aggregate that can have the row layout starts in it.
+    add_test(NAME test_reg_row_aggregate COMMAND test_reg ${QDB_REG_ARGS} --aggregate:table=row
+        --gtest_output=xml:${CMAKE_CURRENT_BINARY_DIR}/test_reg_row_aggregate.xml)
+    set_tests_properties(test_reg_row_aggregate PROPERTIES COST 400 LABELS variant)
 endif()
 ut(test_equijoin test_equijoin.cpp)
 ut(test_outer_join_to_anti test_outer_join_to_anti.cpp)

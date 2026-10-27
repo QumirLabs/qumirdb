@@ -9,11 +9,35 @@
 
 namespace NQdb {
 
+// The layouts of the aggregate hash table: the swiss table, with one array per
+// state word, or the row layout (kernel/aggregation/aggregation_rows.oz),
+// which keeps the key and the states of a group in one arena row.
+enum class EAggregateTableLayout {
+    Swiss,
+    Row,
+};
+
+// How the table of one aggregate task starts and when it changes layout;
+// PlanAggregateTable (planner_helpers.h) chooses it.
+struct TAggregateTablePlan {
+    EAggregateTableLayout Layout = EAggregateTableLayout::Swiss;
+    // Swiss slots, rounded up to a power of two of at least 8.
+    int64_t InitialCapacity = 8;
+    // The groups a table that starts in the row layout has entries for.
+    int64_t InitialGroups = 0;
+    // A swiss table that must grow while it holds this many groups or more
+    // moves to the row layout instead; 0 keeps it swiss.
+    int64_t RowSwitchGroups = 0;
+    // The groups that move sizes the row entries for, when that is more than
+    // twice the groups it moves; 0 sizes them for twice the groups.
+    int64_t RowExpectedGroups = 0;
+};
+
 class TAggregateProcessor {
 public:
     explicit TAggregateProcessor(
         TAggregateKernels kernels,
-        int64_t initialCapacity = 4);
+        TAggregateTablePlan plan = {});
     ~TAggregateProcessor();
 
     TAggregateProcessor(const TAggregateProcessor&) = delete;
@@ -30,7 +54,7 @@ private:
 private:
     TAggregateKernels Kernels_;
     TOperatorInstrumentation* Instrumentation_ = nullptr;
-    int64_t InitialCapacity_ = 4;
+    TAggregateTablePlan Plan_;
     std::array<uint8_t, TKernelCompiler::HashTableSize> HashTable_ = {};
     bool Initialized_ = false;
     bool Finished_ = false;
@@ -43,6 +67,7 @@ class TGroupingSetsAggregateProcessor {
 public:
     TGroupingSetsAggregateProcessor(
         TAggregateKernels kernels,
+        TAggregateTablePlan plan,
         std::vector<std::vector<size_t>> sets,
         size_t numKeys);
 

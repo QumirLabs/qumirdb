@@ -181,6 +181,9 @@ TEngineConfigBuilder BuildEngineConfig() {
         "Estimated input rows from which a partial aggregate is considered.");
     b.Size("partial_min_reduction_factor", [](auto& s) -> auto& { return s.Scheduler.Aggregate.PartialMinReductionFactor; },
         "Estimated row reduction a partial aggregate must reach.", 1);
+    b.Enum("table", NScheduler::AggregateTableKindNames, NScheduler::ParseAggregateTableKind,
+        [](auto& s) -> auto& { return s.Scheduler.Aggregate.Table; },
+        "Hash table of a grouped aggregate: swiss, row, or auto, which moves a swiss table to rows once it is large.");
 
     b.Section("instrumentation");
     b.Bool("operators", [](auto& s) -> auto& { return s.Scheduler.Instrumentation.Operators; },
