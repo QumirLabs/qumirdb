@@ -189,7 +189,7 @@ def summarize(out):
 
 
 def run_campaign(config):
-    diagnostic_env = {"QDB_DEBUG_ROW_GROUP_PREDICATE", "QDB_DUMP_PASSES", "QDB_JIT_CACHE_STATS"}
+    diagnostic_env = {"QDB_DEBUG_ROW_GROUP_PREDICATE", "QDB_JIT_CACHE_STATS"}
     if diagnostic_env.intersection(os.environ):
         raise ValueError("Diagnostic environment variables require a separate run: " +
                          ", ".join(sorted(diagnostic_env.intersection(os.environ))))
@@ -210,7 +210,7 @@ def run_campaign(config):
                 "host": {"platform": platform.platform(), "machine": platform.machine(), "logical_cpus": os.cpu_count(),
                          "cpu_affinity": sorted(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else None,
                          "python": sys.version, "environment": {key: env.get(key) for key in
-                         ("JITDUMPDIR", "QUMIR_RUNTIME", "QDB_ARROW_MEMORY_POOL", "LD_PRELOAD", "OMP_NUM_THREADS", "ARROW_NUM_THREADS", "LC_ALL", "TZ")}},
+                         ("JITDUMPDIR", "QUMIR_RUNTIME", "LD_PRELOAD", "OMP_NUM_THREADS", "ARROW_NUM_THREADS", "LC_ALL", "TZ")}},
                 "harness": {"commit": git("rev-parse", "HEAD"), "tracked_changes": git("status", "--porcelain", "--untracked-files=no")},
                 "cache_policy": "Dataset content hashing reads files before warmup; no page-cache eviction. Separate newly created JIT caches per arm, retained after warmup. Query-specific compilation may remain.",
                 "comparison": {"format": "quoted CSV", "relative_tolerance": config.rel_tol, "absolute_tolerance": config.abs_tol,

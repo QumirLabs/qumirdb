@@ -91,6 +91,48 @@ std::string FloatResult(std::string_view rows, std::string_view schema = "<struc
     return "{\"schema\":\"" + std::string(schema) + "\",\"rows\":" + std::string(rows) + '}';
 }
 
+namespace {
+
+NRegTest::TRegTestOptions ParseOptions(std::vector<std::string> arguments, int* remaining = nullptr) {
+    arguments.insert(arguments.begin(), "test_reg");
+    std::vector<char*> argv;
+    for (auto& argument : arguments) argv.push_back(argument.data());
+    argv.push_back(nullptr);
+    int argc = static_cast<int>(arguments.size());
+    auto options = NRegTest::ParseRegTestOptions(argc, argv.data());
+    if (remaining) *remaining = argc;
+    return options;
+}
+
+} // namespace
+
+TEST(RegTestOptions, ParsesFlagsAndKeepsOtherArguments) {
+    int remaining = 0;
+    const auto options = ParseOptions(
+        {"root", "--join-table=legacy", "--timing", "--jit-cache-dir", "dir", "--gtest_filter=*", "--print"},
+        &remaining);
+    EXPECT_EQ(options.Engine.JoinTable, NQdb::NScheduler::EJoinTableKind::Legacy);
+    EXPECT_TRUE(options.Timing);
+    EXPECT_EQ(options.JitCacheDir, "dir");
+    EXPECT_EQ(remaining, 4);
+}
+
+TEST(RegTestOptions, ValueFlagRejectsMissingValueOrFollowingFlag) {
+    EXPECT_THROW(ParseOptions({"--jit-cache-dir"}), std::invalid_argument);
+    EXPECT_THROW(ParseOptions({"--jit-cache-dir", "--gtest_list_tests"}), std::invalid_argument);
+    EXPECT_THROW(ParseOptions({"--join-table", "--timing"}), std::invalid_argument);
+}
+
+TEST(RegTestOptions, UnknownFlagFailsAndListsKnownOptions) {
+    try {
+        ParseOptions({"--join-tabel", "legacy"});
+        FAIL() << "a misspelled flag must fail";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_NE(std::string(error.what()).find("--join-table"), std::string::npos);
+    }
+    EXPECT_THROW(ParseOptions({"--bogus"}), std::invalid_argument);
+}
+
 TEST(RegResultComparison, DefaultToleranceAcceptsAggregateRoundingWithoutChangingGolden) {
     const auto actual = FloatResult("[[306804.95999999996]]");
     const auto expected = FloatResult("[[306804.96000000002]]");

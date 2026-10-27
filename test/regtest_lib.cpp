@@ -619,7 +619,9 @@ TRegTestOptions ParseRegTestOptions(int& argc, char** argv) {
         const auto name = arg.substr(0, equals);
         auto value = [&]() -> std::string_view {
             if (equals != std::string_view::npos) return arg.substr(equals + 1);
-            if (i + 1 >= argc) throw std::invalid_argument(std::string(name) + " requires a value");
+            if (i + 1 >= argc || std::string_view(argv[i + 1]).starts_with("--")) {
+                throw std::invalid_argument(std::string(name) + " requires a value");
+            }
             return argv[++i];
         };
         auto flag = [&]() {
@@ -653,6 +655,12 @@ TRegTestOptions ParseRegTestOptions(int& argc, char** argv) {
         } else if (name == "--dump-passes") {
             flag();
             options.DumpPasses = true;
+        } else if (arg.starts_with("--") && !arg.starts_with("--gtest_")
+            && name != "--canonize" && name != "--print" && name != "--help")
+        {
+            throw std::invalid_argument("unknown option '" + std::string(arg) + "'; known options: "
+                "--join-table, --timing, --trace-fixtures, --jit-cache-dir, --dump-passes, "
+                "--arrow-memory-pool, --canonize, --print, and the --gtest_ flags");
         } else {
             argv[kept++] = argv[i];
         }
