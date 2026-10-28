@@ -199,7 +199,8 @@ same config as `qdb`, as `--config <path>` and `--section:key=value` (for exampl
 home directory. An unknown key or value fails at once and lists the accepted ones.
 `ctest` passes the CMake variable `QDB_JIT_CACHE_DIR` as `--jit:cache_dir=`, and
 `-DQDB_TEST_REG_VARIANTS=ON` adds `test_reg_legacy_join`, the full suite over the
-legacy join table. Use `--canonize` only for understood, intended expectation
+legacy join table, and `test_reg_row_aggregate`, the full suite with
+`--aggregate:table=row`. Use `--canonize` only for understood, intended expectation
 changes, then review the golden diff and check the affected cases again. Do not
 canonize away an unexplained failure. Documentation-only edits need text/link
 checks, not an engine rebuild or benchmark.
