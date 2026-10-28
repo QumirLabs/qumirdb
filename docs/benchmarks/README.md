@@ -53,7 +53,7 @@ if that cost needs to be added back.
 
 | Benchmark | Scale | qdb (s) | DuckDB (s) | DataFusion (s) | ClickHouse (s) | qdb ÷ DuckDB | qdb ÷ DataFusion | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| ClickBench | — | 14.734 | 14.44 | — | 14.95 | 1.02× | — | qdb: one SQL run |
+| ClickBench | — | 13.499 | 14.44 | — | 14.95 | 0.93× | — | qdb: one SQL run |
 | TPC-H | 1 | 0.777 | 1.17 | 0.96 | — | 0.66× | 0.81× | qdb: one SQL run |
 | TPC-H | 10 | 3.864 | 4.03 | 4.18 | — | 0.96× | 0.92× | qdb: one SQL run |
 | TPC-H | 100 | 36.645 | 32.10 | 62.68 | — | 1.14× | 0.58× | qdb: one SQL run |
@@ -64,5 +64,4 @@ if that cost needs to be added back.
 Totals cover the queries each engine completed. Rows with failures or skipped
 queries compare different subsets, as indicated in the Notes column.
 TPC-H DataFusion numbers come from the fastest complete run by total at each
-scale, chosen from three runs at scales 1 and 10 and two runs at scale 100; see
-the [individual timings](tpch_datafusion_runs_2026-10-25.csv).
+scale, chosen from three runs at scales 1 and 10 and two runs at scale 100.

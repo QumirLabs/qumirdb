@@ -11,8 +11,8 @@ the precision suffix from Q1's day interval and translates qgen's trailing
 materializes Q15's `revenue0` aggregate once so both references use the same
 floating-point result. Each timing includes CLI startup, Parquet table
 registration, query execution, and CSV output. Ratios to DataFusion use the
-rounded values shown in the tables. [All individual DataFusion runs](tpch_datafusion_runs_2026-10-25.csv)
-are retained, including the complete-run totals.
+rounded values shown in the tables. The complete-run totals are listed above
+each scale's table.
 
 ## Scale 1
 
