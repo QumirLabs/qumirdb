@@ -113,7 +113,9 @@ aggregate keys=[l_returnflag] aggs=[sum_0=sum(arg_0)]
 ```
 
 Plain-column arguments (`sum(l_quantity)`) are passed through unchanged; the
-inner project is then omitted unless a global key is needed (below).
+inner project is then omitted unless a global key is needed (below). Equal
+computed arguments share one column, so `avg(strlen(url))`, which becomes a
+`sum` and a `count` of the same expression, evaluates `strlen` once per row.
 
 ### Functionally dependent group-key narrowing
 

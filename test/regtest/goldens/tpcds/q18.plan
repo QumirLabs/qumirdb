@@ -1,7 +1,7 @@
 top-sort [ca_country asc, ca_state asc, ca_county asc, i_item_id asc] limit 100
 └─ project (i_item_id, ca_country, ca_state, ca_county, agg1, agg2, agg3, agg4, agg5, agg6, agg7) (rows≈5 cost≈30.2K)
    └─ aggregate keys=[item.i_item_id, customer_address.ca_country, customer_address.ca_state, customer_address.ca_county] aggs=[sum_0=sum, count_0=count, sum_1=sum, count_1=count, sum_2=sum, count_2=count, sum_3=sum, count_3=count, sum_4=sum, count_4=count, sum_5=sum, count_5=count, sum_6=sum, count_6=count] (rows≈5 cost≈29.6K)
-      └─ project (item.i_item_id, customer_address.ca_country, customer_address.ca_state, customer_address.ca_county, arg_0, arg_1, arg_2, arg_3, arg_4, arg_5, arg_6, arg_7, arg_8, arg_9, arg_10, arg_11, arg_12, arg_13) (rows≈1 cost≈28.7K)
+      └─ project (item.i_item_id, customer_address.ca_country, customer_address.ca_state, customer_address.ca_county, arg_0, arg_1, arg_2, arg_3, arg_4, arg_5, arg_6) (rows≈1 cost≈28.7K)
          └─ join inner [catalog_sales.cs_bill_customer_sk = customer.c_customer_sk] (rows≈1 cost≈28.5K)
             ├─ join inner [item.i_item_sk = catalog_sales.cs_item_sk] emit-filter 1 from right (rows≈1 cost≈14.4K)
             │  ├─ source item AS item use-filter 1 keys=[item.i_item_sk] (rows≈10 cost≈200)

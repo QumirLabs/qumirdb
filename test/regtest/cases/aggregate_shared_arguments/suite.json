@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "fixtures": {
+    "t": {"json": "tables/t.json"}
+  },
+  "tables": {"t": "t"},
+  "variants": ["single", "threaded", "js"],
+  "cases": {
+    "avg_computed.sql": {"order": "unordered"},
+    "global_equal_arguments.sql": {"order": "ordered"}
+  }
+}

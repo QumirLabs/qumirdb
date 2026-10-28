@@ -2266,6 +2266,10 @@ std::expected<TRelation, TError> BuildAggregate(
                 argProjections.push_back({ .Name = key.Name, .Expression = key.Expression });
             }
         }
+        // Equal computed arguments are materialized once: avg(f(x)) lowers to
+        // sum(f(x)) and count(f(x)), and evaluating f per aggregate would double
+        // the cost of the project.
+        std::unordered_map<std::string, std::string> computedArgs; // PrintAst -> name
         for (auto& spec : specs) {
             if (!spec.Arg) {
                 continue;
@@ -2283,9 +2287,12 @@ std::expected<TRelation, TError> BuildAggregate(
             {
                 passthrough(ident.Cast()->Name);
             } else {
-                std::string name = names.Next("arg");
-                argProjections.push_back({ .Name = name, .Expression = spec.Arg });
-                spec.Arg = Ident(spec.Arg->Location, name);
+                auto [it, inserted] = computedArgs.try_emplace(NAst::NCore::PrintAst(spec.Arg));
+                if (inserted) {
+                    it->second = names.Next("arg");
+                    argProjections.push_back({ .Name = it->second, .Expression = spec.Arg });
+                }
+                spec.Arg = Ident(spec.Arg->Location, it->second);
             }
         }
         if (global) {
