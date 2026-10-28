@@ -1,0 +1,6 @@
+{
+  "schema": "<struct (groups i64) (row_count <named Nullable [i64]>) (sum_d <named Nullable [<named DECIMAL [20 2]>]>) (sum_k <named Nullable [i64]>) (sum_n <named Nullable [i64]>) (count_n i64) (count_a <named Nullable [i64]>) (sum_a <named Nullable [i64]>) (min_a <named Nullable [i64]>) (max_a <named Nullable [i64]>) (sum_v <named Nullable [i64]>) (min_f <named Nullable [f64]>) (max_f <named Nullable [f64]>) (sum_f <named Nullable [f64]>)>",
+  "rows": [
+    ["65536", "262144", "8355840.00", "8355840", "21487104", "56064", "196608", "-1914368", "-46", "240", "-1178352", 0.25, 64.5, 98304]
+  ]
+}

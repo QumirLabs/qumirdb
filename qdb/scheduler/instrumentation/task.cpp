@@ -137,6 +137,7 @@ struct TStageSnapshot {
     uint64_t RetainedInputPeak = 0;
     uint64_t BuildMemory = 0;
     uint64_t Materialized = 0;
+    uint64_t RowLayoutTasks = 0;
     bool HasHash = false;
     bool HasBuildMemory = false;
     bool Materializes = false;
@@ -161,6 +162,7 @@ struct TStageSnapshot {
         RetainedInputPeak += counters.RetainedInputPeakBytes;
         BuildMemory += counters.BuildMemoryPeakBytes;
         Materialized += counters.MaterializesOutput ? counters.Output.Bytes : 0;
+        RowLayoutTasks += counters.RowLayout;
         HasHash |= counters.HasHash;
         HasBuildMemory |= counters.HasBuildMemory;
         Materializes |= counters.MaterializesOutput;
@@ -179,10 +181,11 @@ void WriteSnapshot(std::ostream& out, const TStageSnapshot& value) {
     if (value.HasHash) {
         out << " groups=" << value.Groups << " hash_capacity=" << value.Capacity
             << " hash_growth_events=" << value.Growths << " rehashes=" << value.Rehashes
-            << " hash_memory_peak_bytes=" << value.HashMemory;
+            << " hash_memory_peak_bytes=" << value.HashMemory
+            << " hash_row_layout_tasks=" << value.RowLayoutTasks;
     } else {
         out << " groups=null hash_capacity=null hash_growth_events=null rehashes=null"
-            << " hash_memory_peak_bytes=null";
+            << " hash_memory_peak_bytes=null hash_row_layout_tasks=null";
     }
     if (value.HasBuildMemory) {
         out << " retained_input_bytes=" << value.RetainedInput

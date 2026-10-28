@@ -50,13 +50,16 @@
   ;; allocator metadata, source rowsets and output buffers are not included.
   ;; output[3] is 1 for an aggregate table in the row layout: its arena
   ;; blocks and their list, its entries, which the capacity counts, and its
-  ;; lookup scratch.
+  ;; lookup scratch. Such a table also reports its RowRebuilds in output[4]
+  ;; and its RowMovedFromSlots in output[5]; both are 0 otherwise.
   (fun qdb_instrumentation_hash
        ((var ht <ref HashTable>) (var join i64)
         (var string_buffers <ptr i64>) (var string_count i64)
         (var output <ptr i64>))
     (block
       (= output [3] 0)
+      (= output [4] 0)
+      (= output [5] 0)
       (var entries = (field (field ht RowTable) Capacity))
       (if (!= (cast (field (field ht RowTable) Entries) i64) 0)
         (block
@@ -68,6 +71,8 @@
             (* (field (field ht RowArena) BlockCapacity) 8)
             (* (field (field ht RowScratch) Capacity) (+ 48 (field ht KeySize)))))
           (= output [3] 1)
+          (= output [4] (field ht RowRebuilds))
+          (= output [5] (field ht RowMovedFromSlots))
           (return)))
       (var buffers = (field ht AggBuffers))
       (var blocks = (field ht OwnedBlocks))

@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "fixtures": {
+    "t": {"json": "tables/t.json", "parquet": {"row_group_rows": 32}}
+  },
+  "tables": {"t": "t"},
+  "variants": ["single", "threaded", "js"],
+  "cases": {
+    "checksum.sql": {"order": "ordered"},
+    "ordered_limit.sql": {"order": "ordered"},
+    "estimated_groups.sql": {"order": "ordered"}
+  }
+}

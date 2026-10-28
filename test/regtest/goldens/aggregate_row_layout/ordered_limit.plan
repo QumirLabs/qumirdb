@@ -1,0 +1,10 @@
+top-sort [sv desc, d desc, k asc] limit 10
+└─ project (d, k, n, c, ca, sa, na, xa, sv, nf, xf) (rows≈262144 cost≈92.6M)
+   └─ aggregate keys=[gb_0, y.id, x.n] aggs=[count_0=count, count_1=count, sum_0=sum, min_0=min, max_0=max, sum_1=sum, min_1=min, max_1=max] (rows≈262144 cost≈69.5M)
+      └─ project (gb_0, y.id, x.n, z.a, arg_0, arg_1, arg_2, arg_3, z.f, arg_4) (rows≈262144 cost≈46.4M)
+         └─ join inner (rows≈262144 cost≈25.5M)
+            ├─ join inner (rows≈65536 cost≈3.4M)
+            │  ├─ source t AS x (rows≈256 cost≈6.1K)
+            │  └─ source t AS y (rows≈256 cost≈6.1K)
+            └─ filter (< |z.id| 4) (rows≈4 cost≈16.4K)
+               └─ source t AS z row-groups (< |z.id| 4) (rows≈256 cost≈8.2K)

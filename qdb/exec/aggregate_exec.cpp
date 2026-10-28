@@ -33,25 +33,37 @@ struct THashTable {
         + TKernelCompiler::RowScratchSize> RowLayout = {};
     int64_t RowSwitchGroups = 0;
     int64_t RowExpectedGroups = 0;
+    int64_t RowRebuilds = 0;
+    int64_t RowMovedFromSlots = 0;
 };
 static_assert(sizeof(THashTable) == TKernelCompiler::HashTableSize);
 
 // SwissTable groups are 8 slots wide, so capacity starts at 8.
 constexpr int64_t InitialCapacity = 8;
-constexpr int64_t OpInit = 0;
-constexpr int64_t OpUpdate = 1;
-constexpr int64_t OpDestroy = 2;
+
+int64_t Dispatch(
+    const TAggregateKernels& kernels, void* table, TRowSet* batch, int64_t arg, EAggregateKernelOp op)
+{
+    return kernels.Dispatch(table, batch, arg, static_cast<int64_t>(op));
+}
 
 } // namespace
 
 TAggregateProcessor::TAggregateProcessor(
     TAggregateKernels kernels,
-    int64_t initialCapacity)
+    TAggregateTablePlan plan)
     : Kernels_(std::move(kernels))
-    // aht_init only accepts a power-of-two capacity of at least 8.
-    , InitialCapacity_(std::bit_ceil(static_cast<uint64_t>(
-          std::max(initialCapacity, InitialCapacity))))
+    , Plan_(plan)
 {
+    // aht_init only accepts a power-of-two capacity of at least 8.
+    Plan_.InitialCapacity = static_cast<int64_t>(std::bit_ceil(static_cast<uint64_t>(
+        std::max(Plan_.InitialCapacity, InitialCapacity))));
+    if (Kernels_.RowBytes == 0
+        && (Plan_.Layout == EAggregateTableLayout::Row || Plan_.RowSwitchGroups != 0
+            || Plan_.RowExpectedGroups != 0))
+    {
+        throw std::invalid_argument("aggregate has no row layout");
+    }
 }
 
 TAggregateProcessor::~TAggregateProcessor()
@@ -66,11 +78,21 @@ void TAggregateProcessor::EnsureInit()
         return;
     }
     Initialized_ = true;
-    if (Kernels_.Dispatch(
-            HashTable_.data(), nullptr, InitialCapacity_, OpInit) == 0)
-    {
+    void* table = HashTable_.data();
+    const bool initialized = Plan_.Layout == EAggregateTableLayout::Row
+        ? Dispatch(Kernels_, table, nullptr, Plan_.InitialGroups, EAggregateKernelOp::InitRows) != 0
+        : Dispatch(Kernels_, table, nullptr, Plan_.InitialCapacity, EAggregateKernelOp::Init) != 0;
+    if (!initialized) {
+        // A failing init frees what it allocated.
         Destroyed_ = true;
         throw std::runtime_error("aggregate initialization failed");
+    }
+    // Both only set a field; the constructor checked that the kernel serves them.
+    if (Plan_.RowSwitchGroups != 0) {
+        Dispatch(Kernels_, table, nullptr, Plan_.RowSwitchGroups, EAggregateKernelOp::SwitchToRowsAt);
+    }
+    if (Plan_.RowExpectedGroups != 0) {
+        Dispatch(Kernels_, table, nullptr, Plan_.RowExpectedGroups, EAggregateKernelOp::ExpectRowGroups);
     }
     if (Instrumentation_) {
         Instrumentation_->ObserveHash(HashTable_.data(), 0, false, Kernels_.StringMetadataBuffers);
@@ -91,7 +113,7 @@ void TAggregateProcessor::Add(TRowSet& rowSet)
         throw std::runtime_error("aggregate processor is already finished");
     }
     EnsureInit();
-    if (Kernels_.Dispatch(HashTable_.data(), &rowSet, 0, OpUpdate) < 0) {
+    if (Dispatch(Kernels_, HashTable_.data(), &rowSet, 0, EAggregateKernelOp::Update) < 0) {
         throw std::runtime_error("aggregate update failed");
     }
     if (Instrumentation_) {
@@ -121,16 +143,17 @@ bool TAggregateProcessor::Finish(TRowSet& rowSet)
 void TAggregateProcessor::Destroy()
 {
     if (Initialized_ && !Destroyed_) {
-        Kernels_.Dispatch(HashTable_.data(), nullptr, 0, OpDestroy);
+        Dispatch(Kernels_, HashTable_.data(), nullptr, 0, EAggregateKernelOp::Destroy);
         Destroyed_ = true;
     }
 }
 
 TGroupingSetsAggregateProcessor::TGroupingSetsAggregateProcessor(
     TAggregateKernels kernels,
+    TAggregateTablePlan plan,
     std::vector<std::vector<size_t>> sets,
     size_t numKeys)
-    : Inner_(std::move(kernels))
+    : Inner_(std::move(kernels), plan)
     , Sets_(std::move(sets))
     , NumKeys_(numKeys)
 {

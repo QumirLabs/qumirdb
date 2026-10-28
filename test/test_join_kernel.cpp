@@ -56,6 +56,8 @@ struct THashTable {
         + TKernelCompiler::RowScratchSize> RowLayout = {};
     int64_t RowSwitchGroups = 0;
     int64_t RowExpectedGroups = 0;
+    int64_t RowRebuilds = 0;
+    int64_t RowMovedFromSlots = 0;
 };
 static_assert(sizeof(THashTable) == TKernelCompiler::HashTableSize);
 

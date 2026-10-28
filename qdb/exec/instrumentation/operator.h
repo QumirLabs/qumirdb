@@ -65,6 +65,9 @@ private:
     std::array<uint64_t, 2> Capacities_ = {};
     std::array<uint64_t, 2> Groups_ = {};
     std::array<uint64_t, 2> Memory_ = {};
+    // The rebuilds of an aggregate table in the row layout at the last
+    // observation; 0 while it is swiss.
+    std::array<uint64_t, 2> RowRebuilds_ = {};
 };
 
 } // namespace NQdb

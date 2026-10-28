@@ -1,5 +1,6 @@
 #pragma once
 
+#include <qdb/exec/aggregate_exec.h>
 #include <qdb/exec/join_exec.h>
 #include <qdb/exec/project_exec.h>
 #include <qdb/exec/sort_exec.h>
@@ -50,6 +51,43 @@ int64_t EstimateAggregateInitialCapacity(
 // NDVs. Returns nullopt when any key lacks usable statistics.
 std::optional<uint64_t> EstimateAggregateGroupCount(
     const TAggregateOperator& aggregate);
+
+// What the table of one aggregate task is sized and laid out for when the
+// groups of `aggregate` are split among partitionCount tasks.
+struct TAggregateTaskEstimate {
+    // EstimateAggregateInitialCapacity: the swiss slots for the task's groups
+    // within a byte budget.
+    int64_t InitialCapacity = 8;
+    // The estimated groups of one task, at most its input rows; nullopt
+    // without statistics.
+    std::optional<uint64_t> Groups;
+};
+
+TAggregateTaskEstimate EstimateAggregateTask(
+    const TAggregateOperator& aggregate,
+    size_t partitionCount);
+
+// The groups from which the table of a task is faster in the row layout
+// (kernel/aggregation/aggregation_rows.oz) than in the swiss table, for rows
+// of rowBytes bytes and stateWords state words, at least one.
+int64_t AggregateRowLayoutMinGroups(int64_t rowBytes, size_t stateWords);
+
+// Whether the kernels of `aggregate` are built with the row layout under
+// `table`: always under Row, never under Swiss, and under Auto when the
+// aggregate has state words, which a grouping without aggregates (DISTINCT,
+// the dedup of COUNT(DISTINCT x) or of an IN subquery) has not.
+bool AggregateMayUseRowLayout(NScheduler::EAggregateTableKind table, const TAggregateOperator& aggregate);
+
+// The table of one aggregate task. Under EAggregateTableKind::Auto every task
+// with state words starts swiss, with at most the slots that hold
+// AggregateRowLayoutMinGroups groups, and moves to the row layout when it must
+// grow past them; one without stays swiss. The move sizes the row entries for
+// the estimated groups, capped by the groups that the byte budget of the swiss
+// slots holds.
+TAggregateTablePlan PlanAggregateTable(
+    const TAggregateTaskEstimate& estimate,
+    const TAggregateKernels& kernels,
+    NScheduler::EAggregateTableKind table);
 
 // Build the final-phase operator that merges rows emitted by a partial
 // aggregate. This is scheduler-neutral physical planning shared by local and

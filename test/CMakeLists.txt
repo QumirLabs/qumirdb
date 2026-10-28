@@ -81,13 +81,19 @@ foreach(shard RANGE 3)
     set_tests_properties(test_reg_${shard} PROPERTIES COST 100
         ENVIRONMENT "GTEST_TOTAL_SHARDS=4;GTEST_SHARD_INDEX=${shard}")
 endforeach()
-# The whole suite over the symmetric join table. A full pass costs as much as
-# test_reg_0..3 together, so it is registered only on request.
-option(QDB_TEST_REG_VARIANTS "Register the regression suite variants (test_reg_legacy_join)" OFF)
+# The whole suite over another table: the symmetric join table
+# (test_reg_legacy_join) and the row layout of the aggregate table from the
+# start (test_reg_row_aggregate). A full pass costs as much as test_reg_0..3
+# together, so they are registered only on request.
+option(QDB_TEST_REG_VARIANTS
+    "Register the regression suite variants (test_reg_legacy_join, test_reg_row_aggregate)" OFF)
 if(QDB_TEST_REG_VARIANTS)
     add_test(NAME test_reg_legacy_join COMMAND test_reg ${QDB_REG_ARGS} --join:table=legacy
         --gtest_output=xml:${CMAKE_CURRENT_BINARY_DIR}/test_reg_legacy_join.xml)
     set_tests_properties(test_reg_legacy_join PROPERTIES COST 400 LABELS variant)
+    add_test(NAME test_reg_row_aggregate COMMAND test_reg ${QDB_REG_ARGS} --aggregate:table=row
+        --gtest_output=xml:${CMAKE_CURRENT_BINARY_DIR}/test_reg_row_aggregate.xml)
+    set_tests_properties(test_reg_row_aggregate PROPERTIES COST 400 LABELS variant)
 endif()
 ut(test_equijoin test_equijoin.cpp)
 ut(test_outer_join_to_anti test_outer_join_to_anti.cpp)
