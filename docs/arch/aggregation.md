@@ -191,7 +191,8 @@ pre-size it, but missing or inaccurate statistics still require normal growth.
 
 Every state word of a group, one per reducer and more for a nullable or
 decimal one, lives in its own array. An update therefore reads the control
-bytes, the stored key and one array per state word. While the table fits in the
+bytes, the stored key, the slot's dense group id and one array per state word,
+each read depending on the one before. While the table fits in the
 cache, that is cheap; beyond it, each array costs a cache miss of its own.
 
 ### Row layout

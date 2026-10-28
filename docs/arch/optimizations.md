@@ -703,7 +703,7 @@ keys does not turn into a malloc storm. See [aggregation.md](aggregation.md).
 A grouped aggregate task starts as a swiss table, which keeps one array per state
 word. When its groups outgrow the cache, the table moves at its next rehash to
 rows: a group's key and states in one arena row behind salted 8-byte entries, so
-an update touches about two cache lines instead of two plus one per state word.
+an update touches about two cache lines instead of three plus one per state word.
 The estimated groups only size the entries of the move. Fixed-width keys and
 states only; a grouping without aggregates stays swiss. See
 [aggregation.md](aggregation.md#hash-table).
