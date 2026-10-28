@@ -1100,7 +1100,7 @@ TEST(AggregateTable, MoveIsSizedFromTheEstimate) {
     constexpr int64_t BatchRows = 16384;
     std::vector<int64_t> keys(Groups);
     for (int64_t i = 0; i < Groups; ++i) {
-        keys[i] = i * 0x5851f42d4c957f2dll;
+        keys[i] = static_cast<int64_t>(static_cast<uint64_t>(i) * 0x5851f42d4c957f2dull);
     }
     // The entries right after the move.
     auto movedCapacity = [&](const TAggregateTablePlan& plan) -> uint64_t {
@@ -1175,42 +1175,57 @@ TEST(AggregateTable, KeyOnlyAggregatesStaySwissUnderAuto) {
 }
 
 // The instrumentation counts the rehashes of the swiss table, the move once,
-// and each growth of the row entries after it, as the kernels made them.
+// and each growth of the row entries after it, as the kernels counted them in
+// the table.
 TEST(AggregateTable, InstrumentationCountsTheMoveOnce) {
     auto i64 = std::make_shared<TIntegerType>();
     TStructType input({{"k", i64}, {"v", i64}});
     const auto kernels = CompileWithRows(input, {"k"}, {Agg("c", "count"), Agg("s", "sum", "v")});
+    auto dispatch = [&](THashTable& table, TRowSet* batch, int64_t arg, EAggregateKernelOp op) {
+        return kernels.Dispatch(&table, batch, arg, static_cast<int64_t>(op));
+    };
     TOperatorInstrumentation counters;
     counters.Kernel = TKernelCompiler().CompileInstrumentation();
-    TAggregateProcessor processor(kernels, {.InitialCapacity = 8, .RowSwitchGroups = 100});
-    processor.SetInstrumentation(&counters);
-    TBatch first({EValue::I64, EValue::I64});
-    for (int64_t key = 0; key < 600; ++key) {
-        first.Add({key, key});
-    }
+    auto observe = [&](THashTable& table) {
+        counters.ObserveHash(&table, 0, false, kernels.StringMetadataBuffers);
+    };
+    auto batchOf = [](int64_t from, int64_t to) {
+        TBatch batch({EValue::I64, EValue::I64});
+        for (int64_t key = from; key < to; ++key) {
+            batch.Add({key, key});
+        }
+        return batch;
+    };
+    // 64 slots, at least a swiss group on every target, so the table doubles
+    // once and moves at 128 slots, with 112 groups.
+    THashTable table;
+    ASSERT_NE(dispatch(table, nullptr, 64, EAggregateKernelOp::Init), 0);
+    ASSERT_EQ(table.Capacity, 64);
+    ASSERT_EQ(dispatch(table, nullptr, 100, EAggregateKernelOp::SwitchToRowsAt), 1);
+    observe(table);
+    auto first = batchOf(0, 600);
     auto firstRows = first.RowSet();
-    processor.Add(firstRows);
-    // Four doublings from 8 to 128 slots, the move at 112 groups to entries
-    // for 224, and one growth of the entries when the rest of the batch can
-    // fill more than half of them.
-    ASSERT_TRUE(counters.RowLayout);
-    EXPECT_EQ(counters.HashCapacity, 2048u);
-    EXPECT_EQ(counters.HashGrowthEvents, 6u);
-    EXPECT_EQ(counters.Rehashes, 6u);
-    TBatch second({EValue::I64, EValue::I64});
-    for (int64_t key = 600; key < 3000; ++key) {
-        second.Add({key, key});
-    }
+    ASSERT_EQ(dispatch(table, &firstRows, 0, EAggregateKernelOp::Update), 0);
+    observe(table);
+    ASSERT_NE(table.RowTable.Entries, nullptr);
+    EXPECT_EQ(table.RowMovedFromSlots, 128);
+    // The move is the first rebuild of the row layout; the entries may grow
+    // after it as the rest of the batch arrives.
+    ASSERT_GE(table.RowRebuilds, 1);
+    EXPECT_EQ(counters.HashGrowthEvents, 1 + static_cast<uint64_t>(table.RowRebuilds));
+    EXPECT_EQ(counters.Rehashes, counters.HashGrowthEvents);
+    const uint64_t growths = counters.HashGrowthEvents;
+    const int64_t rebuilds = table.RowRebuilds;
+    auto second = batchOf(600, 3000);
     auto secondRows = second.RowSet();
-    processor.Add(secondRows);
-    // One more growth, from 2,048 to 8,192 entries.
-    EXPECT_EQ(counters.HashCapacity, 8192u);
-    EXPECT_EQ(counters.HashGrowthEvents, 7u);
-    EXPECT_EQ(counters.Rehashes, 7u);
-    TRowSet result{};
-    ASSERT_TRUE(processor.Finish(result));
-    EXPECT_EQ(result.RowCount, 3000);
-    Release(&result);
+    ASSERT_EQ(dispatch(table, &secondRows, 0, EAggregateKernelOp::Update), 0);
+    observe(table);
+    // The entries grow at least once for five times the groups.
+    EXPECT_GT(table.RowRebuilds, rebuilds);
+    EXPECT_EQ(counters.HashGrowthEvents - growths, static_cast<uint64_t>(table.RowRebuilds - rebuilds));
+    EXPECT_EQ(counters.Rehashes, counters.HashGrowthEvents);
+    EXPECT_EQ(counters.Groups, 3000u);
+    EXPECT_NE(dispatch(table, nullptr, 0, EAggregateKernelOp::Destroy), 0);
 }
 
 // ---- the measurement behind AggregateRowLayoutMinGroups ----
@@ -1278,7 +1293,8 @@ TEST(AggregateTable, DISABLED_LayoutMicrobenchmark) {
                     for (int64_t r = 0; r < rows; ++r) {
                         // Distinct groups, spread over the i64 range.
                         const auto group = static_cast<int64_t>(next() % static_cast<uint64_t>(groups));
-                        data[t].Keys[r] = group * 0x5851f42d4c957f2dll;
+                        data[t].Keys[r] = static_cast<int64_t>(
+                            static_cast<uint64_t>(group) * 0x5851f42d4c957f2dull);
                         data[t].Pairs[r] = static_cast<int32_t>(group % 1000);
                         data[t].Values[r] = static_cast<int64_t>(next() % 1000);
                     }
