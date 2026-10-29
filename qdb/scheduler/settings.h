@@ -165,12 +165,14 @@ struct TAggregateSettings {
     size_t PartialMinInputRows = 1024 * 1024;
     size_t PartialMinReductionFactor = 8;
 
-    // A partial aggregate planned without a group estimate judges its own
-    // reduction at run time: once it has hashed PartialSampleRows rows and
-    // holds more than one group per PartialMinReductionFactor rows, it stops
-    // hashing and hands its rows through as single-row partial states. Its
-    // table emits its groups and restarts empty at PartialMaxGroups groups, so
-    // one lane's table stays bounded whatever the input.
+    // Every partial aggregate judges its own reduction at run time, per lane,
+    // whatever statistics the planner had: once a lane has hashed
+    // PartialSampleRows rows and holds more than one group per
+    // PartialMinReductionFactor rows, it stops hashing and hands its rows
+    // through as single-row partial states. Statistics only decide whether the
+    // planner inserts the partial stage. Its table emits its groups and
+    // restarts empty at PartialMaxGroups groups, so one lane's table stays
+    // bounded whatever the input.
     size_t PartialSampleRows = 1 << 20;
     size_t PartialMaxGroups = 1 << 20;
 
