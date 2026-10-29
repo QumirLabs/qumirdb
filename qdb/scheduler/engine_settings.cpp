@@ -176,11 +176,15 @@ TEngineConfigBuilder BuildEngineConfig() {
     b.Bool("cascade_global", [](auto& s) -> auto& { return s.Scheduler.Aggregate.CascadeGlobal; },
         "Parallelize global aggregates as partial, gather, combine.");
     b.Bool("partial", [](auto& s) -> auto& { return s.Scheduler.Aggregate.EnablePartial; },
-        "Insert a partition-local partial aggregate before a repartition when statistics predict a reduction.");
+        "Insert a partition-local partial aggregate before a repartition unless statistics predict too little reduction.");
     b.Size("partial_min_input_rows", [](auto& s) -> auto& { return s.Scheduler.Aggregate.PartialMinInputRows; },
         "Estimated input rows from which a partial aggregate is considered.");
     b.Size("partial_min_reduction_factor", [](auto& s) -> auto& { return s.Scheduler.Aggregate.PartialMinReductionFactor; },
-        "Estimated row reduction a partial aggregate must reach.", 1);
+        "Row reduction a partial aggregate must reach: estimated by the planner, and observed by each lane at run time.", 1);
+    b.Size("partial_sample_rows", [](auto& s) -> auto& { return s.Scheduler.Aggregate.PartialSampleRows; },
+        "Rows each lane of a partial aggregate hashes before it judges its observed reduction and may switch to pass-through.", 1);
+    b.Size("partial_max_groups", [](auto& s) -> auto& { return s.Scheduler.Aggregate.PartialMaxGroups; },
+        "Groups at which a partial aggregate emits its table and restarts it empty.", 1);
     b.Enum("table", NScheduler::AggregateTableKindNames, NScheduler::ParseAggregateTableKind,
         [](auto& s) -> auto& { return s.Scheduler.Aggregate.Table; },
         "Hash table of a grouped aggregate: swiss, row, or auto, which moves a swiss table to rows once it is large.");

@@ -140,12 +140,110 @@ bool TAggregateProcessor::Finish(TRowSet& rowSet)
     return true;
 }
 
+int64_t TAggregateProcessor::Groups() const
+{
+    if (!Initialized_ || Destroyed_) {
+        return 0;
+    }
+    return reinterpret_cast<const THashTable*>(HashTable_.data())->Size;
+}
+
+bool TAggregateProcessor::Flush(TRowSet& rowSet)
+{
+    if (Groups() == 0) {
+        return false;
+    }
+    Finish(rowSet);
+    // Finish destroyed the table; the next Add initializes a new one.
+    Initialized_ = false;
+    Destroyed_ = false;
+    Finished_ = false;
+    return true;
+}
+
 void TAggregateProcessor::Destroy()
 {
     if (Initialized_ && !Destroyed_) {
         Dispatch(Kernels_, HashTable_.data(), nullptr, 0, EAggregateKernelOp::Destroy);
         Destroyed_ = true;
     }
+}
+
+TPartialAggregateProcessor::TPartialAggregateProcessor(
+    TAggregateKernels kernels,
+    TAggregateTablePlan plan,
+    TPartialAggregatePolicy policy,
+    TUnaryStreamProcess passThrough)
+    : Table_(std::move(kernels), plan)
+    , Policy_(policy)
+    , PassThrough_(std::move(passThrough))
+{
+}
+
+TPartialAggregateProcessor::~TPartialAggregateProcessor()
+{
+    if (HasPending_) {
+        Release(&Pending_);
+    }
+}
+
+void TPartialAggregateProcessor::SetInstrumentation(TOperatorInstrumentation* instrumentation)
+{
+    Table_.SetInstrumentation(instrumentation);
+}
+
+void TPartialAggregateProcessor::Add(TRowSet& rowSet)
+{
+    if (HasPending_) {
+        throw std::runtime_error("partial aggregate output was not taken");
+    }
+    if (PassingThrough_) {
+        // The projection takes the batch over and leaves the partial states.
+        PassThrough_(rowSet, PassThroughState_);
+        Pending_ = rowSet;
+        rowSet = {};
+        HasPending_ = true;
+        return;
+    }
+
+    HashedRows_ += static_cast<uint64_t>(rowSet.RowCount);
+    Table_.Add(rowSet);
+    Release(&rowSet);
+    rowSet = {};
+    const int64_t groups = Table_.Groups();
+    // The reduction counts every group the lane produced, emitted or held: a
+    // table that is emptied often has not reduced its rows.
+    const double groupsSoFar = static_cast<double>(EmittedGroups_ + static_cast<uint64_t>(groups));
+    if (PassThrough_ && HashedRows_ >= Policy_.SampleRows
+        && static_cast<double>(HashedRows_) < static_cast<double>(Policy_.MinReduction) * groupsSoFar)
+    {
+        PassingThrough_ = true;
+        HasPending_ = Table_.Flush(Pending_);
+        return;
+    }
+    if (groups >= Policy_.MaxGroups) {
+        EmittedGroups_ += static_cast<uint64_t>(groups);
+        HasPending_ = Table_.Flush(Pending_);
+    }
+}
+
+bool TPartialAggregateProcessor::Next(TRowSet& rowSet)
+{
+    if (!HasPending_) {
+        return false;
+    }
+    rowSet = Pending_;
+    Pending_ = {};
+    HasPending_ = false;
+    return true;
+}
+
+bool TPartialAggregateProcessor::Finish(TRowSet& rowSet)
+{
+    if (PassingThrough_) {
+        return false;
+    }
+    return Table_.Finish(rowSet);
 }
 
 TGroupingSetsAggregateProcessor::TGroupingSetsAggregateProcessor(

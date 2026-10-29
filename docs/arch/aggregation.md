@@ -338,19 +338,61 @@ phase reads rows from the partial phase. `BuildAggregateCombineOperator` builds
 the final aggregate. It changes `count` to `sum`. It keeps `sum`, `min`, and
 `max` as they are. Each function reads its own partial output column.
 
-The automatic rule is conservative. It needs all of these facts:
+The scheduler uses the second plan whenever statistics do not rule it out. It
+needs a parallel input, a normal `GROUP BY` and at least 1,048,576 estimated
+input rows. Statistics then only argue against the plan. The groups of a key
+are at least those of any part of it, so the estimate for the keys that have
+statistics (their NDVs multiplied under independence, at most the row count)
+keeps the first plan on its own when it promises fewer than 8x fewer groups
+than rows; a key without statistics, such as a computed expression, can only
+add groups. With statistics for every key this is the usual group estimate.
+When no key has statistics the partial phase decides at run time, as the next
+section describes. The setting
+`[aggregate] partial = false` turns the second plan off for tests and
+diagnostics. A global aggregate uses its `partial -> gather -> final` plan only
+with `[aggregate] cascade_global = true`. SQL grouping sets always use their
+special two-phase plan.
 
-- a parallel input and a normal `GROUP BY`;
-- estimates for the input row count and group NDV;
-- at least 1,048,576 estimated input rows;
-- at least 8x fewer groups than input rows.
+### Adaptive partial phase
 
-If there are no statistics, the scheduler keeps the first plan. It also keeps
-the first plan when the estimate does not pass the rule. The setting
-`[aggregate] partial = false` turns off the rule for tests and diagnostics. A global
-aggregate uses its `partial -> gather -> final` plan only with
-`[aggregate] cascade_global = true`. SQL grouping sets always use their special two-phase
-plan.
+A partial table reduces rows only as far as the lane's data allows: a key with
+few repetitions per lane sends almost every row on anyway, after paying for a
+hash insert and a table the size of the lane. The partial phase therefore
+follows the bounded-memory partial preaggregation of Larson
+([ICDE 2002](https://doi.org/10.1109/ICDE.2002.994787)): it is a table of
+bounded size that absorbs what it can and emits the rest, and the final phase
+completes the groups whatever the partial phase emitted.
+
+Each lane watches its own reduction. After `[aggregate] partial_sample_rows`
+input rows it compares the rows it hashed with the groups it produced, the
+emitted groups included. A group holds `rows / groups` rows on average; when
+that falls below `[aggregate] partial_min_reduction_factor`, the same 8x the
+plan asks of an estimate, hashing does not pay for itself: the exchange moves
+the group anyway and the final table hashes it again, and with string keys the
+partial insert and its emission copy every new key twice more, so a group has to
+absorb several rows to pay for them (ClickBench q17 loses a third of its time
+to a partial phase that reduces 4x per lane). The lane then emits its table and
+hands the remaining batches through as single-row partial states, which a
+generated projection produces: the keys as they are, `1` for `count(*)`, `1` or
+`0` by `qdb_is_null` for `count(x)`, and
+the argument of `sum`, `min` and `max` widened to the state type. The final
+phase cannot tell these rows from emitted groups. Switching strategy on the
+observed ratio of distinct keys to rows follows the hybrid aggregation of Müller
+et al. ([SIGMOD 2015](https://doi.org/10.1145/2723372.2747644)), who switch
+between hashing and partitioning on the same signal. The decision is one-way:
+a lane that passes rows through never hashes again.
+
+When the table reaches `[aggregate] partial_max_groups` groups it emits them and
+restarts empty, so a lane's memory is bounded however many groups its input
+holds. The emitted groups count towards the lane's reduction, so a lane that
+keeps emptying its table is judged by the rows it actually saved. A partial
+aggregate whose projection cannot be built keeps the bounded table and never
+passes rows through; the results are the same either way.
+
+Passing rows through is not free: the lane hashed its sample, and a state row is
+wider than the input row it stands for (a `count` adds eight bytes). That is why
+statistics that already show too little reduction keep the first plan instead of
+leaving the decision to the partial phase.
 
 Partial and final aggregates have distinct executable stage ids and explicit
 `EAggregatePhase::Partial` and `EAggregatePhase::Final` values. The

@@ -223,6 +223,297 @@ TEST(AggregateE2E, GlobalIdentitySurvivesParallelCascade) {
     }
 }
 
+namespace {
+
+// A mock whose statistics let the planner consider a partial aggregate: a row
+// count and no key NDV, so the partial phase judges its reduction itself.
+struct TStatsMockSource : TMockSource {
+    using TMockSource::TMockSource;
+    const TStatsPtr Stats() const override {
+        auto stats = std::make_shared<TStats>();
+        stats->RowCount = 0;
+        for (const auto& batch : Batches) {
+            stats->RowCount += static_cast<uint64_t>(batch.RowCount);
+        }
+        return stats;
+    }
+};
+
+struct TPartialGroup {
+    int64_t Count = 0;
+    int64_t CountV = 0;
+    int64_t Sum = 0;
+    int64_t Min = 0;
+    int64_t Max = 0;
+};
+
+} // namespace
+
+// The partial processor hands rows through once its sample shows too little
+// reduction, and empties a table that reaches its group bound.
+TEST(AggregateE2E, PartialAggregateProcessorJudgesItsReduction) {
+    TStructType input({
+        {"k", std::make_shared<TIntegerType>()},
+        {"v", std::make_shared<TIntegerType>()},
+    });
+    std::vector<TAggregateSpec> aggs = {{
+        .Name = "v", .Func = "sum",
+        .Arg = std::make_shared<TIdentExpr>(NQumir::TLocation{}, "v"),
+    }};
+    TKernelCompiler compiler;
+    const auto kernels = compiler.CompileAggregate(
+        NKernel::BuildAggregateKernelSpec(input, {"k"}, aggs));
+    // The partial state of one row, (k, sum v), is the row itself.
+    const TUnaryStreamProcess identity = [](TRowSet&, TUnaryStreamingKernelState&) {};
+
+    struct TBatch {
+        std::vector<int64_t> Keys;
+        std::vector<int64_t> Values;
+        std::array<TColumn, 2> Columns;
+        TRowSet RowSet() {
+            Columns = {
+                TColumn{.Data = reinterpret_cast<char*>(Keys.data())},
+                TColumn{.Data = reinterpret_cast<char*>(Values.data())},
+            };
+            return TRowSet{
+                .Columns = Columns.data(), .ColumnCount = 2,
+                .RowCount = static_cast<int64_t>(Keys.size()), .RefCount = 1};
+        }
+    };
+    auto sumOfSums = [](const TRowSet& rowSet) {
+        int64_t sum = 0;
+        for (int64_t row = 0; row < rowSet.RowCount; ++row) {
+            sum += reinterpret_cast<const int64_t*>(rowSet.Columns[1].Data)[row];
+        }
+        return sum;
+    };
+    const TPartialAggregatePolicy judgeAfterFour{
+        .SampleRows = 4, .MinReduction = 2, .MaxGroups = 1 << 20};
+
+    // Distinct keys: once the sample is in, the table is emitted and every later
+    // batch passes through untouched.
+    {
+        TPartialAggregateProcessor processor(kernels, {}, judgeAfterFour, identity);
+        TBatch sample{{1, 2, 3, 4}, {10, 20, 30, 40}};
+        auto rowSet = sample.RowSet();
+        processor.Add(rowSet);
+        EXPECT_TRUE(processor.PassesThrough());
+        TRowSet output{};
+        ASSERT_TRUE(processor.Next(output));
+        EXPECT_EQ(output.RowCount, 4);
+        EXPECT_EQ(sumOfSums(output), 100);
+        Release(&output);
+
+        TBatch next{{5, 6}, {50, 60}};
+        rowSet = next.RowSet();
+        processor.Add(rowSet);
+        ASSERT_TRUE(processor.Next(output));
+        EXPECT_EQ(output.Columns, next.Columns.data());
+        EXPECT_EQ(output.RowCount, 2);
+        Release(&output);
+        EXPECT_FALSE(processor.Finish(output));
+    }
+
+    // Repeated keys: the sample reduces, so the table keeps hashing to the end.
+    {
+        TPartialAggregateProcessor processor(kernels, {}, judgeAfterFour, identity);
+        TBatch sample{{1, 1, 1, 1}, {10, 20, 30, 40}};
+        auto rowSet = sample.RowSet();
+        processor.Add(rowSet);
+        EXPECT_FALSE(processor.PassesThrough());
+        TRowSet output{};
+        EXPECT_FALSE(processor.Next(output));
+        TBatch next{{1, 2}, {50, 60}};
+        rowSet = next.RowSet();
+        processor.Add(rowSet);
+        EXPECT_FALSE(processor.Next(output));
+        ASSERT_TRUE(processor.Finish(output));
+        EXPECT_EQ(output.RowCount, 2);
+        EXPECT_EQ(sumOfSums(output), 210);
+        Release(&output);
+    }
+
+    // A bounded table emits its groups and restarts; without a pass-through
+    // projection the processor never hands rows through.
+    {
+        TPartialAggregateProcessor processor(
+            kernels, {}, {.SampleRows = 1, .MinReduction = 1 << 30, .MaxGroups = 3}, nullptr);
+        TBatch first{{1, 2, 3}, {10, 20, 30}};
+        auto rowSet = first.RowSet();
+        processor.Add(rowSet);
+        EXPECT_FALSE(processor.PassesThrough());
+        TRowSet output{};
+        ASSERT_TRUE(processor.Next(output));
+        EXPECT_EQ(output.RowCount, 3);
+        EXPECT_EQ(sumOfSums(output), 60);
+        Release(&output);
+        TBatch second{{3, 4}, {1, 2}};
+        rowSet = second.RowSet();
+        processor.Add(rowSet);
+        EXPECT_FALSE(processor.Next(output));
+        ASSERT_TRUE(processor.Finish(output));
+        EXPECT_EQ(output.RowCount, 2);
+        EXPECT_EQ(sumOfSums(output), 3);
+        Release(&output);
+    }
+}
+
+// The partial phase of a grouped cascade reduces in a bounded table and hands
+// rows through once its reduction is low; every mode must merge to the same
+// groups as a plain partial.
+TEST(AggregateE2E, PartialAggregateModesAgree) {
+    constexpr int64_t RowsPerSource = 40;
+    constexpr int64_t RowsPerBatch = 20;
+    struct TSourceData {
+        std::vector<int64_t> Keys;
+        // One string buffer and offset array per batch.
+        std::vector<std::string> Strings;
+        std::vector<std::vector<int64_t>> Offsets;
+        std::vector<int32_t> Values;
+        std::vector<uint8_t> Mask;
+        std::vector<std::vector<TColumn>> Columns;
+    };
+    std::array<TSourceData, 2> data;
+    std::map<std::pair<int64_t, std::string>, TPartialGroup> reference;
+    auto build = [&](TSourceData& d, int64_t seed) {
+        d.Strings.resize(RowsPerSource / RowsPerBatch);
+        d.Offsets.assign(RowsPerSource / RowsPerBatch, {0});
+        d.Mask.assign((RowsPerSource + 7) / 8, 0);
+        for (int64_t i = 0; i < RowsPerSource; ++i) {
+            const int64_t row = seed * RowsPerSource + i;
+            const size_t batch = static_cast<size_t>(i / RowsPerBatch);
+            d.Keys.push_back(row % 13);
+            std::string s = "s" + std::to_string(row % 7);
+            d.Strings[batch] += s;
+            d.Offsets[batch].push_back(static_cast<int64_t>(d.Strings[batch].size()));
+            const int32_t v = static_cast<int32_t>(row * 3 - 50);
+            d.Values.push_back(v);
+            const bool valid = row % 5 != 0;
+            if (valid) {
+                d.Mask[i / 8] |= static_cast<uint8_t>(1u << (i % 8));
+            }
+            auto& group = reference[{d.Keys.back(), s}];
+            if (valid) {
+                if (group.CountV == 0) {
+                    group.Min = v;
+                    group.Max = v;
+                } else {
+                    group.Min = std::min<int64_t>(group.Min, v);
+                    group.Max = std::max<int64_t>(group.Max, v);
+                }
+                group.Sum += v;
+                group.CountV += 1;
+            }
+            group.Count += 1;
+        }
+    };
+    auto batches = [&](TSourceData& d) {
+        std::vector<TRowSet> result;
+        d.Columns.resize(RowsPerSource / RowsPerBatch);
+        for (int64_t b = 0; b < RowsPerSource / RowsPerBatch; ++b) {
+            const int64_t first = b * RowsPerBatch;
+            d.Columns[b] = {
+                TColumn{.Data = reinterpret_cast<char*>(d.Keys.data() + first)},
+                TColumn{
+                    .Data = d.Strings[b].data(), .Mask = nullptr,
+                    .Offsets = d.Offsets[b].data(), .OffsetWidth = 8},
+                TColumn{
+                    .Data = reinterpret_cast<char*>(d.Values.data() + first),
+                    .Mask = d.Mask.data(), .MaskBitOffset = static_cast<int32_t>(first)},
+            };
+            result.push_back(TRowSet{
+                .Columns = d.Columns[b].data(), .ColumnCount = 3,
+                .RowCount = RowsPerBatch, .RefCount = 1});
+        }
+        return result;
+    };
+    build(data[0], 0);
+    build(data[1], 1);
+
+    struct TMode {
+        const char* Name;
+        bool Partial;
+        size_t SampleRows;
+        size_t MinReductionFactor;
+        size_t MaxGroups;
+    };
+    const TMode modes[] = {
+        // The control: every row shuffled to the partition that owns its group.
+        {"shuffle", false, 1 << 20, 8, 1 << 20},
+        {"partial", true, 1 << 20, 8, 1 << 20},
+        // Judged after one batch, no reduction is good enough: rows pass through.
+        {"pass-through", true, 1, 1 << 30, 1 << 20},
+        // The table empties every few groups and never passes rows through.
+        {"bounded", true, 1 << 20, 1, 3},
+    };
+    for (const auto& mode : modes) {
+        SCOPED_TRACE(mode.Name);
+        std::vector<TTypePtr> types = {
+            std::make_shared<TIntegerType>(),
+            std::make_shared<TStringType>(),
+            std::make_shared<TNullable>(std::make_shared<TIntegerType>(TIntegerType::I32)),
+        };
+        TStatsMockSource left({"k", "s", "v"}, batches(data[0]), types);
+        TStatsMockSource right({"k", "s", "v"}, batches(data[1]), types);
+        auto root = BuildSqlPlan(
+            "SELECT k, s, COUNT(*), COUNT(v), SUM(v), MIN(v), MAX(v) "
+            "FROM (SELECT k, s, v FROM l UNION ALL SELECT k, s, v FROM r) u GROUP BY k, s",
+            [&](std::string_view table) -> std::expected<TOperatorPtr, NQumir::TError> {
+                ISource& source = table == "l" ? left : right;
+                return std::make_shared<TSourceOperator>(source, std::string(table));
+            });
+        ApplyPlanPasses(root);
+        NScheduler::TSettings settings;
+        settings.Scheduler.WorkerCount = 2;
+        settings.Aggregate.EnablePartial = mode.Partial;
+        settings.Aggregate.PartialMinInputRows = 0;
+        settings.Aggregate.PartialSampleRows = mode.SampleRows;
+        settings.Aggregate.PartialMinReductionFactor = mode.MinReductionFactor;
+        settings.Aggregate.PartialMaxGroups = mode.MaxGroups;
+        auto aggregate = FindAggregate(root);
+        ASSERT_TRUE(aggregate);
+        ASSERT_EQ(NScheduler::ShouldUsePartialAggregate(*aggregate, settings), mode.Partial);
+
+        auto runtime = RunPlan(root, settings);
+        std::map<std::pair<int64_t, std::string>, TPartialGroup> actual;
+        TRowSet result{};
+        while (runtime->Next(result)) {
+            ASSERT_EQ(result.ColumnCount, 7);
+            for (int64_t row = 0; row < result.RowCount; ++row) {
+                std::pair<int64_t, std::string> key{
+                    reinterpret_cast<int64_t*>(result.Columns[0].Data)[row],
+                    StringAt(result.Columns[1], row)};
+                ASSERT_FALSE(actual.contains(key)) << key.first << " " << key.second;
+                TPartialGroup group{
+                    .Count = reinterpret_cast<int64_t*>(result.Columns[2].Data)[row],
+                    .CountV = reinterpret_cast<int64_t*>(result.Columns[3].Data)[row],
+                };
+                EXPECT_EQ(IsValid(result.Columns[4], row), group.CountV != 0);
+                EXPECT_EQ(IsValid(result.Columns[5], row), group.CountV != 0);
+                EXPECT_EQ(IsValid(result.Columns[6], row), group.CountV != 0);
+                if (group.CountV != 0) {
+                    group.Sum = reinterpret_cast<int64_t*>(result.Columns[4].Data)[row];
+                    group.Min = reinterpret_cast<int64_t*>(result.Columns[5].Data)[row];
+                    group.Max = reinterpret_cast<int64_t*>(result.Columns[6].Data)[row];
+                }
+                actual[key] = group;
+            }
+            Release(&result);
+        }
+        ASSERT_EQ(actual.size(), reference.size());
+        for (const auto& [key, expected] : reference) {
+            SCOPED_TRACE(::testing::Message() << key.first << " " << key.second);
+            auto it = actual.find(key);
+            ASSERT_NE(it, actual.end());
+            EXPECT_EQ(it->second.Count, expected.Count);
+            EXPECT_EQ(it->second.CountV, expected.CountV);
+            EXPECT_EQ(it->second.Sum, expected.Sum);
+            EXPECT_EQ(it->second.Min, expected.Min);
+            EXPECT_EQ(it->second.Max, expected.Max);
+        }
+    }
+}
+
 TEST(AggregateE2E, EmptyExplicitGroupsHaveNoIdentityRow) {
     for (bool cascade : {false, true}) {
         for (const auto& sql : {
