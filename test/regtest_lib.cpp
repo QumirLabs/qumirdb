@@ -5,6 +5,7 @@
 #include <qdb/catalog/external_module.h>
 #include <qdb/io/parquet/source.h>
 #include <qdb/plan/build.h>
+#include <qdb/plan/build/build.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/pipeline.h>
 #include <qdb/plan/plan_print.h>
@@ -1288,7 +1289,7 @@ TCaseResult CheckCase(const TQueryCase& test, bool canonize, const TRegTestOptio
     const auto planError = CaptureError([&] {
         parsed.emplace(ParseQuery(test.Sql));
         parseMs = mark();
-        auto built = BuildPlan(parsed->Query, [&](std::string_view table)
+        auto factory = [&](std::string_view table)
             -> std::expected<TOperatorPtr, NQumir::TError>
         {
             const auto binding = test.Tables.find(std::string(table));
@@ -1300,7 +1301,10 @@ TCaseResult CheckCase(const TQueryCase& test, bool canonize, const TRegTestOptio
             if (!fixture.File) throw THarnessError("fixture was not prepared");
             auto& source = sources.emplace_back(fixture.File->MakeSource());
             return std::make_shared<TSourceOperator>(*source, std::string(table));
-        }, parsed->Annotation);
+        };
+        auto built = engine.Optimizer.Decorrelation == EDecorrelation::New
+            ? NBuild::BuildCanonicalPlan(parsed->Query, factory, parsed->Annotation)
+            : BuildPlan(parsed->Query, factory, parsed->Annotation);
         buildMs = mark();
         if (!built) throw built.error();
         plan = std::move(*built);

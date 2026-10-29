@@ -368,7 +368,7 @@ std::expected<TFromItem, TError> BuildJoin(const NSql::TSqlJoin& join, TBlock& b
     }
     // The right input resolved its reads of the left one against this block.
     auto attached = AttachDependent(left->Relation, block.Id, std::move(*separated), *kind, std::move(residual), "",
-        {}, context.Annotation);
+        *right->Correlation, context.Annotation);
     if (!attached) {
         return std::unexpected(attached.error());
     }
@@ -462,7 +462,7 @@ std::expected<void, TError> BuildFrom(const NSql::TSqlFrom& from, TBlock& block,
             continue;
         }
         auto attached = AttachDependent(block.Tree, block.Id, std::move(*right), EDependentJoinKind::Inner, nullptr, "",
-            {}, context.Annotation);
+            *item->Correlation, context.Annotation);
         if (!attached) {
             return attached;
         }
