@@ -96,12 +96,14 @@
             (block
               (= bytes (+ bytes (* (index caps i) 8)))
               (= i (+ i 1))))))
+      ;; Reducer buffers are indexed by dense group: only the first Size
+      ;; entries are initialized, a rehash copies no further.
       (= i 0)
       (while (< i string_count)
         (block
           (var metadata = (index buffers (index string_buffers i)))
           (var g = 0)
-          (while (< g capacity)
+          (while (< g size)
             (block
               (= bytes (+ bytes (cast
                 (>> (cast (index metadata g) u64) 32) i64)))

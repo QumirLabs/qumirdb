@@ -193,6 +193,50 @@ TEST(OperatorInstrumentation, ObservesEveryGeometricGrowthInsideABatch) {
     EXPECT_EQ(counters.Groups, 100u);
 }
 
+TEST(OperatorInstrumentation, StringStateMemoryCountsOnlyTheGroupsAfterRehash) {
+    // The string reducer buffers are indexed by dense group; a rehash leaves
+    // the entries past Size uninitialized, so measuring up to the capacity
+    // summed garbage. The same groups with strings 8 bytes longer must
+    // measure exactly 8 bytes more per group.
+    constexpr int64_t groups = 200000;
+    auto measure = [](int64_t length) {
+        TStructType inputType({{"k", std::make_shared<TStringType>()},
+            {"s", std::make_shared<TStringType>()}});
+        auto spec = NKernel::BuildAggregateKernelSpec(inputType, {"k"}, {{.Name = "m",
+            .Func = "min", .Arg = std::make_shared<TIdentExpr>(NQumir::TLocation{}, "s")}});
+        auto kernels = TKernelCompiler().CompileAggregate(spec);
+        TOperatorInstrumentation counters;
+        counters.Kernel = MeasurementKernel();
+        TAggregateProcessor processor(kernels, {.InitialCapacity = 8});
+        processor.SetInstrumentation(&counters);
+        std::string keys;
+        std::vector<int64_t> keyOffsets(groups + 1);
+        for (int64_t i = 0; i < groups; ++i) {
+            keyOffsets[i] = keys.size();
+            keys += "key-" + std::to_string(i);
+        }
+        keyOffsets[groups] = keys.size();
+        std::string data(static_cast<size_t>(groups * length), 'x');
+        std::vector<int64_t> offsets(groups + 1);
+        for (int64_t i = 0; i <= groups; ++i) {
+            offsets[i] = i * length;
+        }
+        TColumn columns[] = {{.Data = keys.data(), .Offsets = keyOffsets.data(), .OffsetWidth = 8},
+            {.Data = data.data(), .Offsets = offsets.data(), .OffsetWidth = 8}};
+        TRowSet batch{.Columns = columns, .ColumnCount = 2, .RowCount = groups, .RefCount = 1};
+        processor.Add(batch);
+        EXPECT_EQ(counters.Groups, static_cast<uint64_t>(groups));
+        EXPECT_GT(counters.Rehashes, 0u);
+        TRowSet output{};
+        EXPECT_TRUE(processor.Finish(output));
+        Release(&output);
+        return counters.HashMemoryPeakBytes;
+    };
+    const auto shortStrings = measure(8);
+    const auto longStrings = measure(16);
+    EXPECT_EQ(longStrings - shortStrings, static_cast<uint64_t>(groups * 8));
+}
+
 TEST(OperatorInstrumentation, MeasuresResidualSemiJoinMatchSetWithoutRowBuckets) {
     auto i64 = std::make_shared<TIntegerType>();
     TStructType leftType({{"lk", i64}});
