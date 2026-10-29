@@ -44,6 +44,10 @@ source lane. The two shuffle connections create `(M_left + M_right) * N`
 queues. Increasing scan lanes therefore increases graph and queue costs even
 when `N` stays constant.
 
+A join with a shared build table creates no probe-side queues: it emits in the
+probe input's `M_probe` lanes, and its build side goes through `M_build` queues
+into one build task.
+
 Automatic join partitioning remains
 `max(1, min(max(M_left, M_right), max(1, W / 2)))`.
 `[shuffle] partitions` overrides this count and may choose `N` larger than the

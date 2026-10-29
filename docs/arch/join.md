@@ -178,6 +178,67 @@ symmetric path otherwise or without estimates. A residual requires the left
 build side, and a runtime filter, which a semi join publishes from its right
 keys, requires the right one.
 
+## Shared build table
+
+By default a parallel equi-join is a partitioned hash join: both inputs are
+hash-partitioned into join partitions (see
+[scheduler runtime](scheduler_runtime.md#partitioned-equi-join)), and each
+partition builds and probes its own tables. In one process the partitioning of
+the probe side is pure overhead: every probe row is hashed, routed, copied and
+queued only so that it meets its build rows in the right partition. A hash join
+with a shared build table instead builds one table from the whole build side
+and lets every lane of the probe side probe it in place: a non-partitioned,
+broadcast-style hash join within one process, the shape of DuckDB's
+`PhysicalHashJoin` (thread-local sinks, one finalized table, probing in each
+thread's own pipeline). Only the execution strategy changes: the hash table,
+its layout and the join kernels are the ones the partitioned join uses.
+
+```text
+build lanes -> hash-shuffle tasks (1 destination) -> join-build ==publish==> join-probe i
+probe lane i ------------------------------------------------------------> join-probe i -> lane i
+```
+
+- The build side keeps its shuffle tasks with a single destination. They
+  compact sparse batches, so the table does not retain whole scan batches, and
+  they produce the join's runtime filter. One `join-build` task inserts every
+  row into one hash table and seals it.
+- The publication is a broadcast connection that carries no rowsets. The build
+  task finishes it after sealing the table, and a probe task touches the table
+  only after it has fetched that finish, so the finish is the release/acquire
+  point. Until then a probe task wants only the publication input, so its
+  probe lanes do not read ahead.
+- Each `join-probe` task streams its own lane through the sealed table with the
+  streaming kernels (`StreamLeft` / `StreamRight`). It owns its pair buffer and
+  output queue; the table and the build row store are read-only, so the probe
+  lanes share nothing mutable.
+- The join emits in the lanes of its probe input instead of in join partitions.
+
+Lowering uses a shared build table when the probe never writes the table and
+the build side is fixed before execution: inner joins whose planner choice is
+build-first (an asymmetry of at least `JoinAsymmetryRatio` or a runtime
+filter), and LEFT SEMI/ANTI without a residual, which build the key set of the
+right side. The build must also be estimated at most
+`TJoinSettings::SharedMaxBuildRows` rows, because one task builds the table.
+Outer joins, which mark build rows, FULL joins, residual SEMI/ANTI, adaptive
+joins and joins without estimates stay partitioned. `--join:mode=partitioned`
+partitions every join.
+
+Probe batches reach the kernel without a precomputed hash unless the join's own
+runtime filter hashed them (`TRowSet::Hash` carries no key identity), and the
+kernel then hashes the key itself.
+
+A runtime filter pays for its probe by sparing rejected rows the work after
+it. In front of a partitioned join that work is the repartitioning. In front
+of a shared table it is only the table probe itself: a rejected row costs about
+one cache miss either way, and a row that passes costs two. The join's own
+filter on its probe input is therefore redundant. Lowering drops such a
+consumer, and with it the filter build, when it is the filter's only use.
+Consumers placed further down, below other operators, still spare those
+operators the rejected rows and remain; so do the filters of partitioned joins.
+
+The browser runtime does not drive this graph shape yet; plan export lowers
+every join as a partitioned join.
+
 ## Execution by join type
 
 ### Inner
@@ -352,6 +413,8 @@ The implementation relies on these invariants:
 
 - each hash partition is one task, and a task runs on one worker at a time, so
   matched marks in its build table have one writer;
+- a shared build table has one writer, its build task, and is read-only once
+  the publication finishes; every probe lane owns its pair buffer and output;
 - outer unmatched pairs refer to the retained build rows until output is drained;
 - a `TRowId` with non-negative batch index always refers to a retained
   `TRowStore` batch;
@@ -370,6 +433,8 @@ The implementation relies on these invariants:
 
 ## Current limitations
 
+- A shared build table is built by one task; large builds stay partitioned.
+  Plan export for the browser runtime lowers only partitioned joins.
 - Runtime kernels do not directly execute `RightSemi` / `RightAnti`.
 - LEFT/RIGHT streaming requires a build side selected before execution; outer
   joins do not switch adaptively when an input happens to end first.

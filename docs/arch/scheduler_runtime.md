@@ -83,7 +83,7 @@ expose each processor as a WASM node adapter with `push/finish/next/destroy`.
 | `TOneToOneConnection` | N -> N | destination `i` reads source `i` | normal streaming edges, single-lane blocking input, single-lane final output | Cheapest connection; preserves partitioning. |
 | `TGatherConnection` | N -> 1 | one destination round-robins over source lanes until all finish | global blocking operators, final output with multiple lanes, scalar side gather, CTE producer completion | Serializes lanes; useful only when semantics require one consumer. |
 | `THashShuffleConnection` | N -> M | destination `j` reads from every source lane routed to partition `j` | grouped aggregate, window, and equi-join partitioning | Expensive boundary: hash kernel, routing, buffering/materialization. Carries the repartition key contract; `DstCount()` is the partition count. |
-| `TBroadcastConnection` | 1 -> N | every destination receives a shared copy | cross join scalar side, late lookup locators, CTE publication | Sends a shared copy to each destination lane. |
+| `TBroadcastConnection` | 1 -> N | every destination receives a shared copy | cross join scalar side, late lookup locators, CTE publication, shared build table publication (finish only) | Sends a shared copy to each destination lane. |
 
 Every connection is made of bounded rowset queues plus finish state. The graph
 stores edges with `(connection, srcLane, dstLane)` so diagnostics can print the
@@ -204,7 +204,54 @@ flowchart LR
 ```
 
 Each join partition owns its own `TInnerJoinProcessor`, two hash tables and row
-stores. The compiled join kernels are shared between partition states.
+stores. The compiled join kernels are shared between partition states. The join
+emits in its partitions, so the parent sees `N` lanes.
+
+### Equi-join with a shared build table
+
+```mermaid
+flowchart LR
+    B[Build lanes] --> BH[Build hash shuffle tasks]
+    BH --> G[hash-shuffle, 1 destination]
+    G --> JB[join-build: one task]
+    JB ==>|broadcast, finish only| P0
+    JB ==>|broadcast, finish only| P1
+    L0[Probe lane 0] --> P0[join-probe 0]
+    L1[Probe lane 1] --> P1[join-probe 1]
+    P0 --> O[parent lanes]
+    P1 --> O
+```
+
+When the build side is fixed and estimated small, lowering does not partition
+the join (see [join](join.md#shared-build-table)); `--join:mode=partitioned`
+turns this off. The build lanes keep their hash-shuffle tasks with one
+destination: they compact sparse batches and produce the join's runtime
+filter. One `join-build` task owns a `TJoinBuildTable` (the build row store and
+one hash table, the same table and kernels as a partition of the partitioned
+join), inserts every row and seals it. Each probe lane gets a `join-probe` task
+with its own `TJoinProbeProcessor` reading the shared table; it emits in the
+lane it reads, so the parent sees the probe side's lane count, and
+`OutputLanes` takes the shared or partitioned decision from the same function
+as lowering.
+
+The table is published, not sent. A `TBroadcastConnection` from the build task
+to every probe task carries no rowsets: the build task seals the table and
+finishes the connection, and a probe task reads the table only after it fetched
+that finish, which orders the table's writes before its reads. The edge is an
+ordinary rowset edge, so the schedulers need nothing new: a waiting probe task
+demands its build task through it, and the finish wakes every probe task. Until
+then a probe task reports that it wants only that input, so its probe lanes do
+not read ahead. The build task and the probe tasks belong to one exec stage;
+the publication edge carries the build input's index, so the exec plan sees an
+ordinary binary join.
+
+A probe task consumes its lane's batches as they arrive, often whole scan
+batches, and materializes their output before releasing them.
+
+When the only consumer of the join's own runtime filter sits on the probe
+input, lowering drops that consumer and the filter build: the probe right
+after it rejects the same rows exactly, so the filter would only add a lookup
+per row.
 
 ### Partitioned sort / top-sort
 
@@ -284,7 +331,10 @@ The task graph is the physical plan for worker placement. The browser exec plan
 hides route tasks, so it is not the worker placement plan. A distributed
 scheduler can use these steps:
 
-1. Put source, unary, and partial aggregate task groups on workers.
+1. Put source, unary, and partial aggregate task groups on workers. The build
+   task of a shared build table and its probe tasks share one table in
+   memory, so they stay in one process; across processes the join needs an
+   exchange (a broadcast of the build side, or a partitioned join).
 2. Read the keys from `TRepartitionSpec`.
 3. Read the partition count from the destination lane count.
 4. Assign destination lanes to workers.
@@ -299,8 +349,9 @@ control, error recovery, and a placement policy. It does not need to find the
 aggregate keys again or change a single aggregate after worker placement.
 
 Runtime join filters use a query-scoped id in the logical join. For a join with
-an emitted filter, `LowerPlanToGraph` uses hash-shuffle tasks to build and apply
-it, including when there is only one lane and no partition redistribution. It
+an emitted filter, `LowerPlanToGraph` builds it in the build side's hash-shuffle
+tasks, including when there is only one lane and no partition redistribution,
+including the one-destination build shuffle of a shared build table. It
 asks an `IRuntimeFilterBindingFactory` for separate producer and probe endpoints.
 The default local factory binds both to one `TRuntimeFilter`. A producer hands
 off a value-only `TRuntimeFilterPartial`

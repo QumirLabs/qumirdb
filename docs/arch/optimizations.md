@@ -676,7 +676,7 @@ A residual requires the left build side, whose marks only accepted pairs set.
 See [join.md](join.md).
 
 ```
-SELECT big.c, u.d FROM big, u WHERE big.a = u.a;   -- threaded, 4 scan tasks
+SELECT big.c, u.d FROM big, u WHERE big.a = u.a;   -- threaded, 4 scan tasks, --join:mode=partitioned
 
 conn join-left-input   one-to-one   src=4 dst=4     -- big: 4 lanes
 conn join-right-input  one-to-one   src=1 dst=1     -- u: 1 lane
@@ -684,7 +684,29 @@ conn join-left-shuffle hash-shuffle src=4 dst=2
 conn join-right-shuffle hash-shuffle src=1 dst=2
 ```
 
-### 4.7 Kernel fusion and the JIT object cache
+### 4.7 Shared build table
+
+On by default (`--join:mode=shared`; `--join:mode=partitioned` turns it off). An
+inner or LEFT SEMI/ANTI equi-join whose build side is fixed before execution
+(build-first above, or the build of a runtime filter) and estimated at most
+`TJoinSettings::SharedMaxBuildRows` rows is not partitioned. One task builds
+one hash table from the whole build side, and every lane of the probe side
+probes it in place, so the join emits in the probe lanes. The table and kernels
+are those of the partitioned join. The join's own runtime filter on its probe
+input is dropped, since the probe right after it rejects the same rows. Other
+joins stay partitioned. See [join.md](join.md#shared-build-table) and
+[scheduler_runtime.md](scheduler_runtime.md#equi-join-with-a-shared-build-table).
+
+```
+SELECT big.c, u.d FROM big, u WHERE big.a = u.a;   -- threaded, 4 scan tasks, u estimated small
+
+conn join-left-input   one-to-one   src=4 dst=4     -- big: 4 probe lanes, not repartitioned
+conn join-right-input  one-to-one   src=1 dst=1     -- u: 1 lane
+conn join-build-gather hash-shuffle src=1 dst=1     -- into the one build task
+conn join-publish      broadcast    src=1 dst=4     -- finish only: the table is sealed
+```
+
+### 4.8 Kernel fusion and the JIT object cache
 
 All kernels of one query are compiled as a single fused module, with shared
 helpers deduplicated. This shares compilation without removing operator/task
@@ -692,7 +714,7 @@ boundaries. The persistent JIT object cache reuses eligible objects, but
 planning, frontend work, query-specific emission, and linking still remain.
 See [kernel-compilation-phases.md](kernel-compilation-phases.md).
 
-### 4.8 Arena allocation for string aggregation keys
+### 4.9 Arena allocation for string aggregation keys
 
 Group keys of string type are copied into a bump arena owned by the hash table
 instead of individually allocated, so building a table over many distinct string
