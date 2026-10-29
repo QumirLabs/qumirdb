@@ -42,6 +42,8 @@ struct TCompiledColumn {
     std::shared_ptr<arrow::DataType> StorageType;
     bool ReinterpretStorage = false;
     bool CastStorage = false;
+    // The storage holds the unscaled integer of a DECIMAL column.
+    bool DecimalStorage = false;
 };
 
 arrow::MemoryPool* MemoryPoolOrDefault(arrow::MemoryPool* memoryPool) {
@@ -89,6 +91,10 @@ TCompiledColumn CompileColumn(
                 column.CastStorage =
                     type != arrow::Type::INT32 &&
                     !column.ReinterpretStorage;
+            } else if (type == arrow::Type::DECIMAL128) {
+                column.Read = EColumnRead::Primitive;
+                column.StorageType = arrow::int32();
+                column.DecimalStorage = true;
             }
             break;
         case parquet::Type::INT64:
@@ -101,6 +107,10 @@ TCompiledColumn CompileColumn(
                 column.ReinterpretStorage =
                     type == arrow::Type::UINT64 ||
                     type == arrow::Type::DATE64;
+            } else if (type == arrow::Type::DECIMAL128) {
+                column.Read = EColumnRead::Primitive;
+                column.StorageType = arrow::int64();
+                column.DecimalStorage = true;
             }
             break;
         case parquet::Type::FLOAT:
@@ -120,12 +130,92 @@ TCompiledColumn CompileColumn(
                 type == arrow::Type::LARGE_STRING)
             {
                 column.Read = EColumnRead::Binary;
+            } else if (type == arrow::Type::DECIMAL128) {
+                column.Read = EColumnRead::Binary;
+                column.DecimalStorage = true;
+            }
+            break;
+        case parquet::Type::FIXED_LEN_BYTE_ARRAY:
+            if (type == arrow::Type::DECIMAL128) {
+                column.Read = EColumnRead::Binary;
+                column.DecimalStorage = true;
             }
             break;
         default:
             break;
     }
     return column;
+}
+
+template <typename TArray>
+arrow::Status AppendBigEndian(
+    const TArray& unscaled,
+    arrow::Decimal128Builder& builder)
+{
+    for (int64_t i = 0; i < unscaled.length(); ++i) {
+        if (unscaled.IsNull(i)) {
+            builder.UnsafeAppendNull();
+            continue;
+        }
+        const auto bytes = unscaled.GetView(i);
+        ARROW_ASSIGN_OR_RAISE(
+            auto value,
+            arrow::Decimal128::FromBigEndian(
+                reinterpret_cast<const uint8_t*>(bytes.data()),
+                static_cast<int32_t>(bytes.size())));
+        builder.UnsafeAppend(value);
+    }
+    return arrow::Status::OK();
+}
+
+template <typename TArray>
+void AppendIntegers(
+    const TArray& unscaled,
+    arrow::Decimal128Builder& builder)
+{
+    for (int64_t i = 0; i < unscaled.length(); ++i) {
+        if (unscaled.IsNull(i)) {
+            builder.UnsafeAppendNull();
+        } else {
+            builder.UnsafeAppend(
+                arrow::Decimal128(static_cast<int64_t>(unscaled.Value(i))));
+        }
+    }
+}
+
+// Parquet stores a DECIMAL as its unscaled integer: INT32/INT64, or big-endian
+// two's complement bytes of a (FIXED_LEN_)BYTE_ARRAY. Widen it to Decimal128.
+arrow::Result<std::shared_ptr<arrow::Array>> DecimalFromUnscaled(
+    const std::shared_ptr<arrow::Array>& unscaled,
+    const std::shared_ptr<arrow::DataType>& type,
+    arrow::MemoryPool* memoryPool)
+{
+    arrow::Decimal128Builder builder(type, memoryPool);
+    ARROW_RETURN_NOT_OK(builder.Reserve(unscaled->length()));
+    switch (unscaled->type_id()) {
+        case arrow::Type::INT32:
+            AppendIntegers(
+                static_cast<const arrow::Int32Array&>(*unscaled), builder);
+            break;
+        case arrow::Type::INT64:
+            AppendIntegers(
+                static_cast<const arrow::Int64Array&>(*unscaled), builder);
+            break;
+        case arrow::Type::BINARY:
+            ARROW_RETURN_NOT_OK(AppendBigEndian(
+                static_cast<const arrow::BinaryArray&>(*unscaled), builder));
+            break;
+        case arrow::Type::FIXED_SIZE_BINARY:
+            ARROW_RETURN_NOT_OK(AppendBigEndian(
+                static_cast<const arrow::FixedSizeBinaryArray&>(*unscaled),
+                builder));
+            break;
+        default:
+            return arrow::Status::NotImplemented(
+                "parquet page lookup: decimal storage ",
+                unscaled->type()->ToString());
+    }
+    return builder.Finish();
 }
 
 struct TPageSelection {
@@ -260,6 +350,11 @@ arrow::Result<std::shared_ptr<arrow::Array>> ReadPageSelectedColumn(
                     arrow::Datum(retained), column.Field->type()));
             retained = casted.make_array();
         }
+    }
+    if (column.DecimalStorage) {
+        ARROW_ASSIGN_OR_RAISE(
+            retained,
+            DecimalFromUnscaled(retained, column.Field->type(), memoryPool));
     }
 
     if (retained->length() != selection.DenseRows) {
@@ -555,6 +650,10 @@ TParquetRowReader::TParquetRowReader(
 {}
 
 TParquetRowReader::~TParquetRowReader() = default;
+
+bool TParquetRowReader::SupportsPageLookup() const {
+    return Impl_->SupportsPageLookup;
+}
 
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> TParquetRowReader::ReadRows(std::span<const TPhysicalRowId> rowIds) const
 {

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "fixtures": {
+    "decimals": {"parquet_file": "tables/decimals.parquet"}
+  },
+  "tables": {"t": "decimals"},
+  "variants": ["single", "threaded"],
+  "cases": {
+    "order_limit.sql": {"order": "ordered"}
+  }
+}

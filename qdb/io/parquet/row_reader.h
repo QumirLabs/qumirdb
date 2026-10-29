@@ -34,6 +34,9 @@ public:
     arrow::Result<std::shared_ptr<arrow::RecordBatch>> ReadRows(
         std::span<const TPhysicalRowId> rowIds) const;
 
+    // False when a column type forces ReadRows to read whole row groups.
+    bool SupportsPageLookup() const;
+
 private:
     struct TImpl;
     std::unique_ptr<TImpl> Impl_;

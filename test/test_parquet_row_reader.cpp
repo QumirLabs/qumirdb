@@ -3,6 +3,7 @@
 #include <qdb/io/parquet/row_reader.h>
 
 #include <arrow/api.h>
+#include <arrow/compute/api.h>
 #include <arrow/io/api.h>
 #include <parquet/arrow/reader.h>
 #include <parquet/arrow/writer.h>
@@ -20,7 +21,8 @@ namespace {
 void WriteParquet(
     const std::string& path,
     const std::shared_ptr<arrow::RecordBatch>& batch,
-    int64_t rowGroupSize)
+    int64_t rowGroupSize,
+    bool storeDecimalAsInteger = false)
 {
     auto output = arrow::io::FileOutputStream::Open(path).ValueOrDie();
     auto table = arrow::Table::FromRecordBatches({batch}).ValueOrDie();
@@ -29,6 +31,9 @@ void WriteParquet(
         .max_rows_per_page(16)
         ->data_pagesize(256)
         ->disable_write_page_index();
+    if (storeDecimalAsInteger) {
+        properties.enable_store_decimal_as_integer();
+    }
     auto status = parquet::arrow::WriteTable(
         *table,
         arrow::default_memory_pool(),
@@ -160,6 +165,7 @@ TEST(ParquetRowReaderTest, ReadsSelectedPagesInLocatorOrder) {
 
     const std::vector<std::string> fallbackColumnNames{"i", "raw", "i"};
     TParquetRowReader fallbackReader(fileReader, fallbackColumnNames);
+    EXPECT_FALSE(fallbackReader.SupportsPageLookup());
     auto fallbackResult = fallbackReader.ReadRows(locators);
     ASSERT_TRUE(fallbackResult.ok()) << fallbackResult.status().ToString();
     const auto& fallbackOutput = *fallbackResult;
@@ -175,6 +181,110 @@ TEST(ParquetRowReaderTest, ReadsSelectedPagesInLocatorOrder) {
     EXPECT_THROW(
         TParquetRowReader(fileReader, std::vector<std::string>{"missing"}),
         std::invalid_argument);
+}
+
+// DECIMAL is stored as INT32/INT64 or as big-endian FIXED_LEN_BYTE_ARRAY; the
+// page lookup must decode every representation into the Decimal128 column.
+TEST(ParquetRowReaderTest, ReadsDecimalColumnsFromEveryStorage) {
+    constexpr int64_t rowGroupSize = 128;
+    constexpr int64_t rowCount = rowGroupSize * 2;
+
+    auto d9 = arrow::decimal128(9, 2);
+    auto d15 = arrow::decimal128(15, 2);
+    auto d18 = arrow::decimal128(18, 4);
+    auto d38 = arrow::decimal128(38, 6);
+    arrow::Decimal128Builder b9(d9);
+    arrow::Decimal128Builder b15(d15);
+    arrow::Decimal128Builder b18(d18);
+    arrow::Decimal128Builder b38(d38);
+    const arrow::Decimal128 wide =
+        arrow::Decimal128::FromString("123456789012345678901234567890").ValueOrDie();
+    for (int64_t row = 0; row < rowCount; ++row) {
+        if (row % 7 == 0) {
+            ASSERT_TRUE(b9.AppendNull().ok());
+            ASSERT_TRUE(b15.AppendNull().ok());
+            ASSERT_TRUE(b18.AppendNull().ok());
+            ASSERT_TRUE(b38.AppendNull().ok());
+            continue;
+        }
+        const int64_t sign = row % 3 == 0 ? -1 : 1;
+        ASSERT_TRUE(b9.Append(arrow::Decimal128(sign * (row * 101 + 1))).ok());
+        ASSERT_TRUE(b15.Append(arrow::Decimal128(sign * (row * 1000003 + 7))).ok());
+        ASSERT_TRUE(b18.Append(arrow::Decimal128(
+            sign * (row * 100000000000LL + 3))).ok());
+        ASSERT_TRUE(b38.Append(
+            (wide + arrow::Decimal128(row)) * arrow::Decimal128(sign)).ok());
+    }
+    auto schema = arrow::schema({
+        arrow::field("d9", d9, true),
+        arrow::field("d15", d15, true),
+        arrow::field("d18", d18, true),
+        arrow::field("d38", d38, true),
+    });
+    auto batch = arrow::RecordBatch::Make(schema, rowCount, {
+        b9.Finish().ValueOrDie(),
+        b15.Finish().ValueOrDie(),
+        b18.Finish().ValueOrDie(),
+        b38.Finish().ValueOrDie(),
+    });
+
+    const std::vector<TPhysicalRowId> locators{
+        MakeParquetRowId(1, 100),
+        MakeParquetRowId(0, 7),
+        MakeParquetRowId(0, 3),
+        MakeParquetRowId(1, 127),
+        MakeParquetRowId(0, 66),
+    };
+    arrow::Int64Builder rowsBuilder;
+    for (const auto locator : locators) {
+        ASSERT_TRUE(rowsBuilder.Append(
+            static_cast<int64_t>(ParquetRowGroup(locator)) * rowGroupSize +
+            ParquetRowOffset(locator)).ok());
+    }
+    auto rows = rowsBuilder.Finish().ValueOrDie();
+    auto expected = arrow::compute::Take(
+        arrow::Datum(batch), arrow::Datum(rows)).ValueOrDie().record_batch();
+
+    struct TStorage {
+        bool AsInteger;
+        std::vector<parquet::Type::type> PhysicalTypes;
+        std::vector<int> TypeLengths;
+    };
+    const std::vector<TStorage> storages{
+        {true,
+            {parquet::Type::INT32, parquet::Type::INT64, parquet::Type::INT64,
+                parquet::Type::FIXED_LEN_BYTE_ARRAY},
+            {0, 0, 0, 16}},
+        {false,
+            {parquet::Type::FIXED_LEN_BYTE_ARRAY,
+                parquet::Type::FIXED_LEN_BYTE_ARRAY,
+                parquet::Type::FIXED_LEN_BYTE_ARRAY,
+                parquet::Type::FIXED_LEN_BYTE_ARRAY},
+            {4, 7, 8, 16}},
+    };
+    for (const auto& storage : storages) {
+        const std::string path = storage.AsInteger
+            ? "/tmp/test_parquet_row_reader_decimal_int_qdb.parquet"
+            : "/tmp/test_parquet_row_reader_decimal_flba_qdb.parquet";
+        WriteParquet(path, batch, rowGroupSize, storage.AsInteger);
+        auto fileReader = OpenParquet(path);
+        const auto* fileSchema =
+            fileReader->parquet_reader()->metadata()->schema();
+        for (int i = 0; i < 4; ++i) {
+            EXPECT_EQ(fileSchema->Column(i)->physical_type(),
+                storage.PhysicalTypes[static_cast<size_t>(i)]);
+            EXPECT_EQ(fileSchema->Column(i)->type_length(),
+                storage.TypeLengths[static_cast<size_t>(i)]);
+        }
+
+        const std::vector<std::string> columnNames{"d9", "d15", "d18", "d38"};
+        TParquetRowReader reader(fileReader, columnNames);
+        EXPECT_TRUE(reader.SupportsPageLookup());
+        auto result = reader.ReadRows(locators);
+        ASSERT_TRUE(result.ok()) << result.status().ToString();
+        EXPECT_TRUE((*result)->Equals(*expected))
+            << (*result)->ToString() << "\nexpected\n" << expected->ToString();
+    }
 }
 
 TEST(ParquetRowReaderTest, RejectsNestedFileSchema) {
