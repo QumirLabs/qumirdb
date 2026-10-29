@@ -86,6 +86,50 @@
       (field_assign arena Rows 0)
       (field_assign arena CurRows 0)))
 
+  ;; ---- scan of the arena, in insertion order ----
+  ;; (var b = 0)
+  ;; (var end = 0)
+  ;; (var row = (call ra_first_row arena b end))
+  ;; (while (!= (cast row i64) 0)
+  ;;   (block ... (= row (call ra_next_row arena b end row))))
+  ;; The cursor is the index of the block that holds `row` and the address
+  ;; past its last row, so that a step inside a block is one compare.
+
+  ;; The address past the rows of block b: a block holds BlockRows rows, the
+  ;; last one CurRows.
+  (fun ra_block_end ((var arena <ref RowArena>) (var b i64)) -> i64
+    (attrs inline)
+    (block
+      (var rows = (field arena BlockRows))
+      (if (== b (- (field arena BlockCount) 1)) (block (= rows (field arena CurRows))))
+      (var blocks = (field arena Blocks))
+      (return (+ (cast (index blocks b) i64) (* rows (field arena RowBytes))))))
+
+  (fun ra_first_row ((var arena <ref RowArena>) (var block <ref i64>)
+                     (var end <ref i64>)) -> <ptr u8>
+    (attrs inline)
+    (block
+      (= block 0)
+      (= end 0)
+      (if (== (field arena BlockCount) 0) (block (return (cast 0 <ptr u8>))))
+      (= end (call ra_block_end arena 0))
+      (var blocks = (field arena Blocks))
+      (return (index blocks 0))))
+
+  ;; The row after `row`; null after the last.
+  (fun ra_next_row ((var arena <ref RowArena>) (var block <ref i64>)
+                    (var end <ref i64>) (var row <ptr u8>)) -> <ptr u8>
+    (attrs inline)
+    (block
+      (var next = (+ (cast row i64) (field arena RowBytes)))
+      (if (< next end) (block (return (cast next <ptr u8>))))
+      (var b = (+ block 1))
+      (= block b)
+      (if (== b (field arena BlockCount)) (block (return (cast 0 <ptr u8>))))
+      (= end (call ra_block_end arena b))
+      (var blocks = (field arena Blocks))
+      (return (index blocks b))))
+
   (fun rt_row_hash ((var row <ptr u8>)) -> u64
     (block
       (var words = (cast row <ptr u64>))

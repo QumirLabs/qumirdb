@@ -176,7 +176,10 @@
       (field_assign ht KeySize key_size)
       (return #t)))
 
-  (fun aht_destroy ((var ht <ref HashTable>))
+  ;; Frees the slot arrays of the swiss table and keeps the owned key arena:
+  ;; the stored keys of a table that moves to the row layout
+  ;; (aggregation/aggregation_rows.oz) point into it.
+  (fun aht_destroy_slots ((var ht <ref HashTable>))
     (block
       (var agg_buffers = (field ht AggBuffers))
       (var num_aggs = (field ht NumAggs))
@@ -195,16 +198,20 @@
       (if (!= (cast (field ht Ctrl) i64) (: 0 i64)) (block (call qdb_free (cast (field ht Ctrl) <ptr i8>))))
       (if (!= (cast (field ht SlotId) i64) (: 0 i64)) (block (call qdb_free (cast (field ht SlotId) <ptr i8>))))
       (if (!= (cast (field ht GroupKeys) i64) (: 0 i64)) (block (call qdb_free (cast (field ht GroupKeys) <ptr i8>))))
-      (call owned_arena_destroy
-        (field ht OwnedBlocks)
-        (field ht OwnedBlockCount)
-        (field ht OwnedBlockCapacity))
       (field_assign ht Keys (cast (: 0 i64) <ptr u8>))
       (field_assign ht Ctrl (cast (: 0 i64) <ptr u8>))
       (field_assign ht SlotId (cast (: 0 i64) <ptr i64>))
       (field_assign ht GroupKeys (cast (: 0 i64) <ptr u8>))
       (field_assign ht AggBuffers (cast (: 0 i64) <ptr <ptr i64>>))
-      (field_assign ht Capacity (: 0 i64))
+      (field_assign ht Capacity (: 0 i64))))
+
+  (fun aht_destroy ((var ht <ref HashTable>))
+    (block
+      (call aht_destroy_slots ht)
+      (call owned_arena_destroy
+        (field ht OwnedBlocks)
+        (field ht OwnedBlockCount)
+        (field ht OwnedBlockCapacity))
       (field_assign ht Size (: 0 i64))
       (field_assign ht NumAggs (: 0 i64))))
 

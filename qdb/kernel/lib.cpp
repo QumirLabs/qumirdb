@@ -549,7 +549,7 @@ BuildGenericAggregateFusedProgramAst(
         return std::unexpected(*err);
     }
     if (auto err = appendEntry(
-            GenGenericAggregateMeasureAst(key, layout, hashTableType),
+            GenGenericAggregateMeasureAst(key, layout, hashTableType, rows),
             "generic aggregate measure")) {
         return std::unexpected(*err);
     }

@@ -150,6 +150,23 @@ std::optional<uint64_t> EstimateAggregateGroupCount(
     return std::min(groups, inputStats->RowCount);
 }
 
+std::optional<uint64_t> EstimateAggregateGroupsForSizing(
+    const TAggregateOperator& aggregate)
+{
+    if (const auto groups = EstimateAggregateGroupCount(aggregate)) {
+        return groups;
+    }
+    // The optimizer's row estimate of the aggregate guesses the NDV of a key
+    // without statistics, such as an expression (EstimateStats). A plan
+    // decision must not rest on that guess, but a table may be sized by it:
+    // a guess too high costs a bounded allocation (the byte budget below), a
+    // guess too low a few doublings, where no estimate costs them all.
+    if (aggregate.Stats_ && !aggregate.GroupKeys().empty()) {
+        return aggregate.Stats_->RowCount;
+    }
+    return std::nullopt;
+}
+
 std::shared_ptr<TAggregateOperator> BuildAggregateCombineOperator(
     const TAggregateOperator& aggregate,
     std::vector<std::string> groupKeys)
@@ -175,7 +192,7 @@ int64_t EstimateAggregateInitialCapacity(
     size_t partitionCount)
 {
     constexpr uint64_t DefaultCapacity = 8;
-    const auto estimatedGroups = EstimateAggregateGroupCount(aggregate);
+    const auto estimatedGroups = EstimateAggregateGroupsForSizing(aggregate);
     if (!estimatedGroups || *estimatedGroups == 0) {
         return DefaultCapacity;
     }
@@ -214,7 +231,7 @@ TAggregateTaskEstimate EstimateAggregateTask(
     TAggregateTaskEstimate estimate{
         .InitialCapacity = EstimateAggregateInitialCapacity(aggregate, partitionCount),
     };
-    if (const auto groups = EstimateAggregateGroupCount(aggregate)) {
+    if (const auto groups = EstimateAggregateGroupsForSizing(aggregate)) {
         // A share rounds up, so that no task is planned below it.
         const uint64_t partitions = std::max<uint64_t>(partitionCount, 1);
         estimate.Groups = *groups / partitions + (*groups % partitions != 0);

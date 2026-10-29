@@ -52,6 +52,11 @@ int64_t EstimateAggregateInitialCapacity(
 std::optional<uint64_t> EstimateAggregateGroupCount(
     const TAggregateOperator& aggregate);
 
+// The groups the tables of an aggregate are sized for: the estimate above, or
+// the optimizer's row estimate of the aggregate when a key has no statistics.
+std::optional<uint64_t> EstimateAggregateGroupsForSizing(
+    const TAggregateOperator& aggregate);
+
 // What the table of one aggregate task is sized and laid out for when the
 // groups of `aggregate` are split among partitionCount tasks.
 struct TAggregateTaskEstimate {
