@@ -63,9 +63,8 @@ bool ShouldUsePartialAggregate(
     const TAggregateOperator& aggregate,
     const TSettings& settings);
 
-// Whether an ungrouped or global aggregate over `inputLanes` parallel lanes
-// should fold each lane in a partial aggregate and combine the partial states,
-// instead of gathering every lane into one aggregate task.
+// Whether an ungrouped or global aggregate over `inputLanes` lanes is lowered
+// as a partial->gather->combine cascade instead of one gathered aggregate.
 bool ShouldCascadeGlobalAggregate(
     const TAggregateOperator& aggregate,
     size_t inputLanes,

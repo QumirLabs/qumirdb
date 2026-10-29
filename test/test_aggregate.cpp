@@ -160,8 +160,7 @@ std::string StringAt(const TColumn& column, int64_t row) {
     return {column.Data + offsets[row], column.Data + offsets[row + 1]};
 }
 
-// A directory for the Parquet fixtures of the end-to-end tests, removed with
-// the test.
+// Parquet fixture directory, removed with the test.
 class TTempDir {
 public:
     TTempDir() {
@@ -188,8 +187,7 @@ private:
     std::filesystem::path Path_;
 };
 
-// Writes the values 0..rows-1 as the int64 column `v`, `rowGroupRows` per row
-// group, so the scan splits into several lanes and the file carries a row count.
+// Writes 0..rows-1 as the int64 column `v`, `rowGroupRows` per row group.
 void WriteValueParquet(const std::string& path, int64_t rows, int64_t rowGroupRows) {
     auto check = [](const arrow::Status& status) {
         if (!status.ok()) {
@@ -281,9 +279,8 @@ TEST(AggregateE2E, GlobalIdentitySurvivesParallelCascade) {
 }
 
 TEST(AggregateE2E, AutoCascadeFollowsTheParquetEstimate) {
-    // The whole auto path from the file to the result row: the estimate comes
-    // from the Parquet metadata, the lanes from scan splitting, and the bound
-    // decides between the cascade and the gather.
+    // Auto end to end: the estimate comes from the Parquet metadata, the lanes
+    // from scan splitting.
     constexpr int64_t rows = 1024;
     TTempDir dir;
     const auto path = (dir.Path() / "values.parquet").string();

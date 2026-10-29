@@ -150,10 +150,8 @@ inline std::string_view AggregateTableKindName(EAggregateTableKind kind) {
     return "unknown";
 }
 
-// How an ungrouped or global aggregate over a parallel input is lowered. On
-// builds the partial->gather->combine cascade, which folds every lane in
-// parallel; Off gathers every lane into one aggregate task, which folds
-// serially but compiles one program and runs one task. Auto decides per
+// Lowering of an ungrouped or global aggregate over a parallel input: the
+// partial->gather->combine cascade, one gathered aggregate, or a choice per
 // aggregate from the estimated input size (ShouldCascadeGlobalAggregate).
 enum class EGlobalCascadeMode {
     Auto = 0,
@@ -161,8 +159,7 @@ enum class EGlobalCascadeMode {
     Off = 2,
 };
 
-// The names the config accepts; `true` and `false` keep the spelling of the
-// former boolean key.
+// `true` and `false` keep the spelling of the former boolean key.
 inline constexpr std::string_view GlobalCascadeModeNames = "auto, true, false";
 
 inline std::optional<EGlobalCascadeMode> ParseGlobalCascadeMode(std::string_view name) {
@@ -191,11 +188,7 @@ inline std::string_view GlobalCascadeModeName(EGlobalCascadeMode mode) {
 }
 
 struct TAggregateSettings {
-    // Parallelize ungrouped/global aggregates with a partial->gather->combine
-    // cascade instead of gathering every lane into one aggregate. Auto uses
-    // the cascade when the estimated input is at least PartialMinInputRows:
-    // below that the serial fold is cheap and the second program and task of
-    // the cascade cost more than they save.
+    // Auto cascades when the estimated input is at least PartialMinInputRows.
     EGlobalCascadeMode CascadeGlobal = EGlobalCascadeMode::Auto;
 
     // Insert a partition-local partial aggregate before a repartition exchange

@@ -1994,10 +1994,8 @@ private:
             return LowerGroupingSetsCascade(aggregate, childLanes, outConn, outLaneOffset);
         }
 
-        // Ungrouped or global (`__group__`) aggregate over a parallel input.
-        // The cascade (partial -> gather -> combine) folds every lane in
-        // parallel; otherwise every lane is gathered into a single aggregate
-        // task, which folds serially but compiles one program and runs one task.
+        // Ungrouped or global (`__group__`) aggregate over a parallel input:
+        // cascade (partial -> gather -> combine) or gather into one aggregate.
         if (aggregate.GroupKeys().empty() || aggregate.IsGlobal()) {
             if (NScheduler::ShouldCascadeGlobalAggregate(aggregate, childLanes, Settings_)) {
                 return LowerAggregateCascade(aggregate, childLanes, outConn, outLaneOffset);
@@ -3234,17 +3232,10 @@ bool ShouldCascadeGlobalAggregate(
             break;
     }
 
-    // A global aggregate reduces its input to one row, so the cascade saves
-    // the serial fold of the whole input and costs a second compiled program
-    // (partial and combine), one task per lane and a gather of the partial
-    // states. That cost is paid once and does not grow with the input, so the
-    // cascade pays off from an input size on; the same bound as the grouped
-    // partial aggregate keeps one notion of "large input" in the settings.
-    // On a warm JIT cache the cascade wins from far smaller inputs (a sweep
-    // showed no loss at 64 Ki rows), so the bound guards the cold cache: below
-    // it the gain is a few ms and the second program costs ~0.1 s to compile
-    // (the sweep is on the wiki page Aggregation-implementation). Without an
-    // estimate the gather stays, as before the auto mode.
+    // The cascade saves the serial fold of the whole input but costs a second
+    // compiled program, so it pays off from an input size on. The grouped
+    // partial aggregate's bound is reused; it mainly guards the cold JIT cache
+    // (sweep: wiki, Aggregation-implementation). Without an estimate: gather.
     const auto inputStats = aggregate.Input()->Stats_;
     return inputStats &&
         inputStats->RowCount >= settings.Aggregate.PartialMinInputRows;

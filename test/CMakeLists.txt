@@ -83,10 +83,9 @@ foreach(shard RANGE 3)
 endforeach()
 # The whole suite over another table: the symmetric join table
 # (test_reg_legacy_join), the row layout of the aggregate table from the start
-# (test_reg_row_aggregate) and the global aggregate cascade over every parallel
-# input (test_reg_cascade_global; the fixtures are too small for auto to choose
-# it). A full pass costs as much as test_reg_0..3 together, so they are
-# registered only on request.
+# (test_reg_row_aggregate) and the global aggregate cascade (test_reg_cascade_global;
+# the fixtures are too small for auto to choose it). A full pass costs as much as
+# test_reg_0..3 together, so they are registered only on request.
 option(QDB_TEST_REG_VARIANTS
     "Register the regression suite variants (test_reg_legacy_join, test_reg_row_aggregate, test_reg_cascade_global)" OFF)
 if(QDB_TEST_REG_VARIANTS)
