@@ -226,9 +226,11 @@ struct TSchedulerRowJoinState : TProcessorTaskState<TSchedulerRowJoinState> {
     TRowJoinProcessor Processor;
 };
 
-// The single build task of a shared build table owns its writes.
+// The single build task of a shared build table owns its writes. TTable is
+// the symmetric TJoinBuildTable or the row join table TRowJoinTable.
+template <class TTable>
 struct TSharedJoinBuildState : NScheduler::ITaskState {
-    explicit TSharedJoinBuildState(std::shared_ptr<TJoinBuildTable> table)
+    explicit TSharedJoinBuildState(std::shared_ptr<TTable> table)
         : Table(std::move(table))
     {}
 
@@ -236,20 +238,20 @@ struct TSharedJoinBuildState : NScheduler::ITaskState {
         Table->SetInstrumentation(instrumentation);
     }
 
-    std::shared_ptr<TJoinBuildTable> Table;
+    std::shared_ptr<TTable> Table;
 };
 
 // One probe lane of a shared build table. It reads the table only after the
-// build task has sealed it and finished the publication connection.
+// build task has sealed it and finished the publication connection. TProbe is
+// TJoinProbeProcessor or TRowJoinProbe, the lane of the matching table.
+template <class TProbe>
 struct TSharedJoinProbeState : NScheduler::ITaskState {
-    TSharedJoinProbeState(
-        TJoinKernels kernels,
-        std::shared_ptr<const TJoinBuildTable> table,
-        bool useInputHash)
-        : Processor(std::move(kernels), std::move(table), useInputHash)
+    template <class... TArgs>
+    explicit TSharedJoinProbeState(TArgs&&... args)
+        : Processor(std::forward<TArgs>(args)...)
     {}
 
-    TJoinProbeProcessor Processor;
+    TProbe Processor;
     bool Published = false;
 };
 
@@ -3181,11 +3183,22 @@ private:
         // batches carry this join's hash only behind its own runtime filter.
         // Everything else reaches the kernel without a hash and is hashed there.
         kernelSpec.HasPrecomputedHash = true;
-        auto joinKernels = std::make_shared<TJoinKernels>(
-            [&]() {
-                TStageDiagnosticsScope diagnosticsScope(Diagnostics_, joinGroup);
-                return compiler.CompileJoin(kernelSpec);
-            }());
+        // An inner join without a residual probes a row join table, as its
+        // partitioned form would; the other joins probe the symmetric table.
+        const bool rowTable = UsesRowJoinTable(
+            join,
+            buildLeft ? EJoinBuildSide::Left : EJoinBuildSide::Right);
+        std::shared_ptr<TJoinKernels> joinKernels;
+        std::shared_ptr<TRowJoinKernels> rowJoinKernels;
+        {
+            TStageDiagnosticsScope diagnosticsScope(Diagnostics_, joinGroup);
+            if (rowTable) {
+                rowJoinKernels = std::make_shared<TRowJoinKernels>(
+                    compiler.CompileRowJoin(kernelSpec, buildLeft));
+            } else {
+                joinKernels = std::make_shared<TJoinKernels>(compiler.CompileJoin(kernelSpec));
+            }
+        }
 
         auto& buildOut = buildLeft ? leftOut : rightOut;
         auto& buildPipe = buildLeft ? leftPipeRef : rightPipeRef;
@@ -3254,13 +3267,36 @@ private:
             });
         }
 
-        auto table = std::make_shared<TJoinBuildTable>(
-            *joinKernels, join.JoinType(), buildSide);
+        // The build task and every probe lane share one table.
+        std::shared_ptr<const NScheduler::TBlockingCode> buildCode;
+        std::shared_ptr<NScheduler::ITaskState> buildState;
+        std::shared_ptr<const NScheduler::TBinaryBlockingCode> probeCode;
+        std::function<std::shared_ptr<NScheduler::ITaskState>()> makeProbeState;
+        if (rowTable) {
+            auto table = std::make_shared<TRowJoinTable>(*rowJoinKernels);
+            buildCode = MakeSharedJoinBuildCode<TRowJoinTable>();
+            buildState = std::make_shared<TSharedJoinBuildState<TRowJoinTable>>(table);
+            probeCode = MakeSharedJoinProbeCode<TRowJoinProbe>();
+            makeProbeState = [&, table]() {
+                return std::make_shared<TSharedJoinProbeState<TRowJoinProbe>>(
+                    table, useProbeHash);
+            };
+        } else {
+            auto table = std::make_shared<TJoinBuildTable>(
+                *joinKernels, join.JoinType(), buildSide);
+            buildCode = MakeSharedJoinBuildCode<TJoinBuildTable>();
+            buildState = std::make_shared<TSharedJoinBuildState<TJoinBuildTable>>(table);
+            probeCode = MakeSharedJoinProbeCode<TJoinProbeProcessor>();
+            makeProbeState = [&, table]() {
+                return std::make_shared<TSharedJoinProbeState<TJoinProbeProcessor>>(
+                    *joinKernels, table, useProbeHash);
+            };
+        }
         auto& publish = AddConn<NScheduler::TBroadcastConnection>(
             1, probeLanes, "join-publish");
         auto buildTask = std::make_unique<NScheduler::TBlockingTask>(
-            MakeSharedJoinBuildCode(),
-            std::make_shared<TSharedJoinBuildState>(table),
+            buildCode,
+            buildState,
             NScheduler::TInputPort{.Connection = buildShuf.Connection, .Lane = 0},
             NScheduler::TOutputPort{.Connection = &publish, .Lane = 0});
         auto& buildNode = Graph_.AddOwnedNode(std::move(buildTask));
@@ -3279,19 +3315,18 @@ private:
                 << " build_lanes=" << buildLanes
                 << " probe_lanes=" << probeLanes
                 << " probe_hash=" << (useProbeHash ? "filter" : "kernel")
+                << " table=" << (rowTable ? "row" : "legacy")
                 << (dropOwnFilter ? " own_filter=dropped" : "")
                 << ' ' << JoinDebugLabel(join) << '\n';
         }
 
-        auto probeCode = MakeSharedJoinProbeCode();
         TLoweredOutput result;
         result.OutputType = kernelSpec.OutputSchema;
         result.Producers.reserve(probeLanes);
         for (size_t m = 0; m < probeLanes; ++m) {
             auto task = std::make_unique<NScheduler::TBinaryBlockingTask>(
                 probeCode,
-                std::make_shared<TSharedJoinProbeState>(
-                    *joinKernels, table, useProbeHash),
+                makeProbeState(),
                 NScheduler::TInputPort{.Connection = &probePipe, .Lane = m},
                 NScheduler::TInputPort{.Connection = &publish, .Lane = m},
                 NScheduler::TOutputPort{
@@ -3306,13 +3341,14 @@ private:
         return result;
     }
 
+    template <class TTable>
     std::shared_ptr<const NScheduler::TBlockingCode> MakeSharedJoinBuildCode() {
         return std::make_shared<NScheduler::TBlockingCode>(
             [](NScheduler::ITaskState& state,
                NScheduler::TInputPort& input,
                TRowSet&)
             {
-                auto& s = static_cast<TSharedJoinBuildState&>(state);
+                auto& s = static_cast<TSharedJoinBuildState<TTable>&>(state);
                 for (;;) {
                     TRowSet batch{};
                     const auto fetch = input.Fetch(batch);
@@ -3330,6 +3366,7 @@ private:
             });
     }
 
+    template <class TProbe>
     std::shared_ptr<const NScheduler::TBinaryBlockingCode> MakeSharedJoinProbeCode() {
         auto code = std::make_shared<NScheduler::TBinaryBlockingCode>(
             [](NScheduler::ITaskState& state,
@@ -3337,7 +3374,7 @@ private:
                NScheduler::TInputPort& publish,
                TRowSet& output)
             {
-                auto& s = static_cast<TSharedJoinProbeState&>(state);
+                auto& s = static_cast<TSharedJoinProbeState<TProbe>&>(state);
                 if (!s.Published) {
                     TRowSet unexpected{};
                     switch (publish.Fetch(unexpected)) {
@@ -3370,7 +3407,7 @@ private:
         // Until the table is published only the build task can make progress;
         // the probe input is not woken, so its lanes do not read ahead.
         code->RequiredSide = [](NScheduler::ITaskState& state) {
-            return static_cast<TSharedJoinProbeState&>(state).Published
+            return static_cast<TSharedJoinProbeState<TProbe>&>(state).Published
                 ? NScheduler::ERequiredSide::Left
                 : NScheduler::ERequiredSide::Right;
         };

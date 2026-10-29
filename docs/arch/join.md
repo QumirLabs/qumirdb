@@ -207,10 +207,12 @@ probe lane i ------------------------------------------------------------> join-
   only after it has fetched that finish, so the finish is the release/acquire
   point. Until then a probe task wants only the publication input, so its
   probe lanes do not read ahead.
-- Each `join-probe` task streams its own lane through the sealed table with the
-  streaming kernels (`StreamLeft` / `StreamRight`). It owns its pair buffer and
-  output queue; the table and the build row store are read-only, so the probe
-  lanes share nothing mutable.
+- Each `join-probe` task streams its own lane through the sealed table. An
+  inner join without a residual builds and probes a row join table, as its
+  partitioned form would; the other joins use the streaming kernels of the
+  symmetric table (`StreamLeft` / `StreamRight`). A probe task owns its probe
+  scratch, pair buffer and output queue; the table and its build rows are
+  read-only, so the probe lanes share nothing mutable.
 - The join emits in the lanes of its probe input instead of in join partitions.
 
 Lowering uses a shared build table when the probe never writes the table and
@@ -414,7 +416,8 @@ The implementation relies on these invariants:
 - each hash partition is one task, and a task runs on one worker at a time, so
   matched marks in its build table have one writer;
 - a shared build table has one writer, its build task, and is read-only once
-  the publication finishes; every probe lane owns its pair buffer and output;
+  the publication finishes; every probe lane owns its probe scratch, pair
+  buffer and output;
 - outer unmatched pairs refer to the retained build rows until output is drained;
 - a `TRowId` with non-negative batch index always refers to a retained
   `TRowStore` batch;
