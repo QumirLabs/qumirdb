@@ -123,6 +123,13 @@ struct TJoinSettings {
     // One task builds a shared build table, so a larger estimated build keeps
     // the partitioned join with its partition-parallel build.
     size_t SharedMaxBuildRows = 4 * 1024 * 1024;
+    // A partial aggregate above a shared build table runs in the probe lanes:
+    // every lane may hold every group, and the lanes keep the rows as the
+    // scan split them. The shuffle of a partitioned join splits the groups
+    // that the join key determines among its partitions and balances the
+    // rows. Above this many estimated groups that is worth the shuffle
+    // (see SharedBuildSide); below it the per-lane tables stay small.
+    size_t SharedMaxAggregateGroups = 64 * 1024;
     // Testing aid: an inner or semi/anti join whose estimates leave the build
     // side adaptive builds a shared table from its right side, and missing
     // estimates do not block the shared path. Results are unchanged; only memory use may grow.

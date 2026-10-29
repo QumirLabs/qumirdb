@@ -248,6 +248,12 @@ All three conditions must hold:
 - **The build side is small.** Its estimate is at most
   `[join] shared_max_build_rows` (4,194,304 by default), because one task
   builds the table.
+- **No large partial aggregate above it depends on the key split.** When a
+  grouped aggregate with a lane-local partial phase reads the join's output
+  (through projections and filters), its estimated groups are more than
+  `[join] shared_max_aggregate_groups` (65,536 by default), and the join key
+  determines every group key, the join stays partitioned. See the trade-off
+  below.
 
 `--join:mode=partitioned` turns the shared table off.
 
@@ -260,11 +266,23 @@ Compared with the partitioned join:
   in the right partition.
 - **Cost: a serial build.** One task builds the whole table. This is why the
   build side has a size limit.
-- **Cost: the output is not split by key.** A partitioned join sends each key
-  to one lane. An aggregate above it that groups by the join key then holds
-  about `1/P` of the groups in each lane. Above a shared table every probe lane
-  can see every key, so the partial aggregate of each lane may hold almost all
-  groups. With many groups this costs time and memory.
+- **Cost: the output is not split by key, and the lanes keep the scan's row
+  distribution.** A partitioned join sends each key to one lane. A partial
+  aggregate above it whose group keys the join key determines (the join key
+  itself, or columns of a build side that is unique on its key) then holds
+  about `1/P` of the groups in each lane, `G` groups in all. Above a shared
+  table every probe lane can see every key, so each lane's partial may hold
+  all `G` groups: `L * G` groups in all, `L * G` rows into the combine, and a
+  table per lane that leaves the cache sooner. The probe lanes also keep the
+  rows as the scan split them; after a selective filter on data clustered by
+  that column (a date range over a fact table stored in date order) a few
+  lanes hold most of the rows, and the partial aggregate of those lanes is
+  the critical path, where a shuffle would have balanced them. Both effects
+  grow with `G` and are negligible for small `G`, whose tables stay in cache
+  and whose rows are cheap. Lowering therefore keeps the partitioned join
+  under a partial aggregate with more than `shared_max_aggregate_groups`
+  estimated groups that the join key splits. Grouped aggregates without a
+  partial phase shuffle their input first and are not affected.
 
 ### Runtime filter
 

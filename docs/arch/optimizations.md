@@ -692,7 +692,10 @@ execution (build-first above) and estimated small. One task builds one hash
 table from all build rows, and every probe lane probes that same table. The
 large probe side is not shuffled, and the join emits in the probe lanes. The
 join's own runtime filter on the probe input is dropped, because the probe
-right after it rejects the same rows. Other joins stay partitioned. See
+right after it rejects the same rows. A join under a lane-local partial
+aggregate with many estimated groups that the join key splits stays
+partitioned, because the shuffle gives the partials disjoint groups and
+balanced lanes. Other joins stay partitioned too. See
 [join.md](join.md#shared-build-table) and
 [scheduler_runtime.md](scheduler_runtime.md#equi-join-with-a-shared-build-table).
 

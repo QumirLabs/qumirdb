@@ -15,6 +15,7 @@
 #include <qdb/plan/ops/union.h>
 #include <qdb/plan/ops/stats.h>
 #include <qdb/plan/types/nullable.h>
+#include <qdb/plan/passes/column_pruning.h>
 #include <qdb/plan/passes/runtime_filters.h>
 #include <qdb/plan/passes/typing.h>
 
@@ -28,6 +29,7 @@
 #include <deque>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <tuple>
@@ -1096,6 +1098,63 @@ TEST_P(SemiAntiOrientation, SharedBuildJoinProbesTheRightKeySet) {
     auto r1 = KeyValBatch(rk1.data(), rv1.data(), 1, rc1);
     EXPECT_EQ((RunSharedJoin<TOut2>(GetParam(), EJoinSide::Right,
         {r0, r1}, {l0, l1}, leftType, rightType)), ExpectedSemiAnti(GetParam()));
+}
+
+namespace {
+
+// Lowers `plan` and returns the diagnostics line that names the strategy of
+// its join, which lowering prints when the shared table is on.
+std::string JoinStrategyOf(const TOperatorPtr& plan, size_t maxAggregateGroups) {
+    NScheduler::TSettings settings;
+    settings.Join.SharedMaxAggregateGroups = maxAggregateGroups;
+    std::ostringstream diagnostics;
+    NScheduler::LowerPlanToGraph(plan, settings, &diagnostics);
+    const auto text = diagnostics.str();
+    const auto at = text.find("join strategy: ");
+    if (at == std::string::npos) {
+        return {};
+    }
+    return text.substr(at, text.find('\n', at) - at);
+}
+
+} // namespace
+
+// A partial aggregate above the join whose groups the build key splits keeps
+// the partitioned join above the group threshold; a key of the probe side,
+// which the join key does not determine, leaves the shared table in place.
+TEST(SharedBuildJoin, PartialAggregateWithManyGroupsKeepsThePartitionedJoin) {
+    std::vector<int64_t> dk = {1, 2, 3, 4}, dv = {10, 20, 30, 40};
+    std::vector<int64_t> fk = {1, 1, 2, 4}, fv = {100, 200, 300, 400};
+    std::vector<TColumn> dc, fc;
+    TMockSource dim({"dk", "dv"}, {KeyValBatch(dk.data(), dv.data(), 4, dc)});
+    TMockSource fact({"fk", "fv"}, {KeyValBatch(fk.data(), fv.data(), 4, fc)});
+    auto plan = [&](const std::string& groupKey, const std::string& arg) {
+        auto join = std::make_shared<TJoinOperator>(
+            std::make_shared<TSourceOperator>(dim, "d"),
+            std::make_shared<TSourceOperator>(fact, "f"),
+            std::vector<TJoinKey>{{"dk", "fk"}}, EJoinType::Inner, nullptr);
+        // The dimension builds: four rows, unique on its key. The fact side is
+        // large enough for the aggregate's partial phase, with 8 groups.
+        join->Left()->Stats_ = RowsWithKeyNdv(4, "dk", 4);
+        join->Right()->Stats_ = RowsWithKeyNdv(2000000, "fk", 4);
+        auto project = std::make_shared<TProjectOperator>(join,
+            std::vector<TProjectionSpec>{
+                {.Name = "g", .Expression = std::make_shared<TIdentExpr>(NQumir::TLocation{}, groupKey)},
+                {.Name = "v", .Expression = std::make_shared<TIdentExpr>(NQumir::TLocation{}, arg)}});
+        project->Stats_ = RowsWithKeyNdv(2000000, "g", 8);
+        TOperatorPtr grouped = std::make_shared<TAggregateOperator>(project,
+            std::vector<std::string>{"g"}, std::vector<TAggregateSpec>{
+                {.Name = "s", .Func = "sum", .Arg = std::make_shared<TIdentExpr>(NQumir::TLocation{}, "v")}});
+        AnnotateTypes(grouped);
+        ApplyColumnPruning(grouped);
+        return grouped;
+    };
+    const auto byBuildColumn = JoinStrategyOf(plan("dv", "fv"), 4);
+    EXPECT_NE(byBuildColumn.find("partitioned"), std::string::npos) << byBuildColumn;
+    EXPECT_NE(byBuildColumn.find("partial aggregate above the join: estimated groups 8 > 4"),
+        std::string::npos) << byBuildColumn;
+    EXPECT_NE(JoinStrategyOf(plan("dv", "fv"), 8).find("shared build=left"), std::string::npos);
+    EXPECT_NE(JoinStrategyOf(plan("fv", "dv"), 4).find("shared build=left"), std::string::npos);
 }
 
 TEST(SharedBuildJoin, SemiAntiRejectLeftBuild) {

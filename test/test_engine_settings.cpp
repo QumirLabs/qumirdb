@@ -79,6 +79,7 @@ TEST(EngineSettings, OverridesReachTheirFields) {
              "join:table=legacy",
              "join:mode=partitioned",
              "join:shared_max_build_rows=1000000",
+             "join:shared_max_aggregate_groups=5000",
              "join:shared_force=true",
              "join:runtime_filters=false",
              "join:force_runtime_filters=true",
@@ -111,6 +112,7 @@ TEST(EngineSettings, OverridesReachTheirFields) {
     EXPECT_EQ(settings.Scheduler.Join.Table, NScheduler::EJoinTableKind::Legacy);
     EXPECT_EQ(settings.Scheduler.Join.Mode, NScheduler::EJoinMode::Partitioned);
     EXPECT_EQ(settings.Scheduler.Join.SharedMaxBuildRows, 1000000u);
+    EXPECT_EQ(settings.Scheduler.Join.SharedMaxAggregateGroups, 5000u);
     EXPECT_TRUE(settings.Scheduler.Join.SharedForce);
     EXPECT_FALSE(settings.Optimizer.EnableRuntimeFilters);
     EXPECT_TRUE(settings.Optimizer.ForceRuntimeFilters);

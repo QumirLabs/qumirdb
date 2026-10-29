@@ -389,6 +389,140 @@ std::unordered_set<const TSourceOperator*> SourcesFeedingJoins(
     return sources;
 }
 
+// A grouped aggregate whose lane-local partial phase consumes a join's output
+// through projections and filters: its group keys as the join's output names
+// them, and its estimated groups.
+struct TPartialAggregateConsumer {
+    std::vector<std::string> GroupKeys;
+    uint64_t Groups = 0;
+};
+
+// The joins whose output a lane-local partial aggregate consumes, for
+// SharedBuildSide. A grouped aggregate over a parallel input runs a partial
+// phase in its input lanes when it has grouping sets or when
+// ShouldUsePartialAggregate says so; every other grouped aggregate shuffles its
+// input first, which balances the lanes and splits the groups by itself. A key
+// is followed through a projection only when the projection passes a column
+// on; a computed key ends the walk without a record, as does a missing group
+// estimate.
+std::unordered_map<const TJoinOperator*, TPartialAggregateConsumer>
+PartialAggregateConsumers(
+    const TOperatorPtr& root,
+    const NScheduler::TSettings& settings)
+{
+    std::unordered_map<const TJoinOperator*, TPartialAggregateConsumer> consumers;
+    auto record = [&](const TAggregateOperator& aggregate) {
+        if (aggregate.IsGlobal() || aggregate.GroupKeys().empty()) {
+            return;
+        }
+        if (aggregate.GroupingSets().empty()
+            && !NScheduler::ShouldUsePartialAggregate(aggregate, settings))
+        {
+            return;
+        }
+        const auto groups = EstimateAggregateGroupCount(aggregate);
+        if (!groups) {
+            return;
+        }
+        auto keys = aggregate.GroupKeys();
+        auto op = aggregate.Input();
+        while (op) {
+            if (auto filter = TMaybeOp<TFilterOperator>(op)) {
+                op = filter.Cast()->Input();
+                continue;
+            }
+            if (auto project = TMaybeOp<TProjectOperator>(op)) {
+                for (auto& key : keys) {
+                    const auto& projections = project.Cast()->Projections();
+                    const auto spec = std::ranges::find(
+                        projections, key, &TProjectionSpec::Name);
+                    if (spec == projections.end()) {
+                        return;
+                    }
+                    auto ident = NQumir::NAst::TMaybeNode<NQumir::NAst::TIdentExpr>(
+                        spec->Expression);
+                    if (!ident) {
+                        return;
+                    }
+                    key = ident.Cast()->Name;
+                }
+                op = project.Cast()->Input();
+                continue;
+            }
+            if (auto join = TMaybeOp<TJoinOperator>(op)) {
+                consumers.emplace(join.Cast().get(),
+                    TPartialAggregateConsumer{std::move(keys), *groups});
+            }
+            return;
+        }
+    };
+    std::unordered_set<const IOperator*> visited;
+    std::function<void(const TOperatorPtr&)> visit = [&](const TOperatorPtr& op) {
+        if (!op || !visited.insert(op.get()).second) {
+            return;
+        }
+        if (auto aggregate = TMaybeOp<TAggregateOperator>(op)) {
+            record(*aggregate.Cast());
+        }
+        if (auto consumer = TMaybeOp<TCteConsumer>(op)) {
+            visit(consumer.Cast()->Materialization()->Plan);
+        }
+        for (const auto& input : op->Inputs()) {
+            visit(input);
+        }
+    };
+    visit(root);
+    return consumers;
+}
+
+// Whether the partitions of a partitioned join would hold disjoint groups of an
+// aggregate over its output that groups by `groupKeys`: every key is a join key
+// column, or a column of the build side whose join key is unique there, so the
+// key is a function of the join key. Uniqueness is read from the estimates as
+// EstimateStats reads it: the key's distinct values reach the build rows within
+// a tolerance of 10%.
+bool JoinKeySplitsGroups(
+    const TJoinOperator& join,
+    EJoinSide buildSide,
+    const std::vector<std::string>& groupKeys)
+{
+    const bool buildLeft = buildSide == EJoinSide::Left;
+    const auto& build = buildLeft ? join.Left() : join.Right();
+    bool buildKeyUnique = false;
+    if (const auto& stats = build->Stats_; stats && stats->RowCount > 0) {
+        const double rows = static_cast<double>(stats->RowCount);
+        double ndv = 1.0;
+        buildKeyUnique = true;
+        for (const auto& key : join.Keys()) {
+            const auto column = stats->ColumnStats.find(buildLeft ? key.Left : key.Right);
+            if (column == stats->ColumnStats.end() || !column->second
+                || !column->second->Ndv || *column->second->Ndv == 0)
+            {
+                buildKeyUnique = false;
+                break;
+            }
+            ndv = std::min(ndv * static_cast<double>(*column->second->Ndv), rows);
+        }
+        constexpr double NdvTolerance = 1.1;
+        buildKeyUnique = buildKeyUnique && ndv * NdvTolerance >= rows;
+    }
+    auto buildStruct = NQumir::NAst::TMaybeType<NQumir::NAst::TStructType>(
+        NQumir::NAst::UnwrapNamedType(build->OutputColumns()));
+    for (const auto& key : groupKeys) {
+        const bool joinKey = std::ranges::any_of(join.Keys(),
+            [&](const TJoinKey& k) { return k.Left == key || k.Right == key; });
+        if (joinKey) {
+            continue;
+        }
+        if (!buildKeyUnique || !buildStruct
+            || !FieldType(buildStruct.Cast().get(), key))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 size_t ChooseRuntimeBloomBytes(const TJoinOperator& join,
     EJoinFilterSide buildSide, size_t producerCount)
 {
@@ -467,6 +601,10 @@ public:
         , SourcesFeedingJoins_(Settings_.ScanSplit.MaxScanTasks == 0
             ? SourcesFeedingJoins(root)
             : std::unordered_set<const TSourceOperator*>{})
+        , PartialAggregateConsumers_(
+            Settings_.Join.Mode == NScheduler::EJoinMode::Shared
+            ? PartialAggregateConsumers(root, Settings_)
+            : std::unordered_map<const TJoinOperator*, TPartialAggregateConsumer>{})
         , Root_(root)
     {}
 
@@ -657,6 +795,21 @@ public:
     // task builds the table, so the build must also be estimated small. Only
     // joins whose probe never writes the table qualify: inner joins, and LEFT
     // SEMI/ANTI without a residual, which build the key set of the right side.
+    //
+    // The join then emits in its probe lanes, and a lane-local partial
+    // aggregate right above it (through projections and filters) inherits
+    // them: each lane's table may hold every group, L tables instead of P
+    // hold L*G groups in all and feed L*G rows to the combine, and the lanes
+    // keep the rows as the scan split them, which after a selective filter on
+    // clustered data leaves most of the rows to a few lanes. The partitioned
+    // join's shuffle balances the rows and, when the join key determines the
+    // group keys, gives each partition disjoint groups, G/P per table. Both
+    // effects grow with G and vanish for small G, whose tables stay in cache
+    // and whose rows cost little, so the join stays partitioned above a
+    // partial aggregate with more than SharedMaxAggregateGroups estimated
+    // groups that its key splits. Other consumers either shuffle the join's
+    // output themselves or stream it at a flat cost per row.
+    //
     // OutputLanes and lowering must agree, so this depends only on the plan
     // and the settings.
     std::optional<EJoinSide> SharedBuildSide(
@@ -697,6 +850,8 @@ public:
         }
         const auto& build = side == EJoinBuildSide::Left
             ? join.Left() : join.Right();
+        const auto buildSide = side == EJoinBuildSide::Left
+            ? EJoinSide::Left : EJoinSide::Right;
         if (!settings.SharedForce) {
             if (!build->Stats_) {
                 return decline("no build estimate");
@@ -708,8 +863,18 @@ public:
                     + std::to_string(build->Stats_->RowCount)
                     + " > " + std::to_string(settings.SharedMaxBuildRows));
             }
+            if (const auto consumer = PartialAggregateConsumers_.find(&join);
+                consumer != PartialAggregateConsumers_.end()
+                && consumer->second.Groups > settings.SharedMaxAggregateGroups
+                && JoinKeySplitsGroups(join, buildSide, consumer->second.GroupKeys))
+            {
+                return decline("partial aggregate above the join: estimated groups "
+                    + std::to_string(consumer->second.Groups)
+                    + " > " + std::to_string(settings.SharedMaxAggregateGroups)
+                    + ", split by the join key");
+            }
         }
-        return side == EJoinBuildSide::Left ? EJoinSide::Left : EJoinSide::Right;
+        return buildSide;
     }
 
     // outLaneOffset shifts this operator's producer lanes within outConn, so a
@@ -3613,6 +3778,9 @@ private:
     std::shared_ptr<IRuntimeFilterBindingFactory> RuntimeFilterBindings_;
     std::shared_ptr<TRuntimeContext> RuntimeContext_;
     std::unordered_set<const TSourceOperator*> SourcesFeedingJoins_;
+    // The joins under a lane-local partial aggregate, see SharedBuildSide.
+    std::unordered_map<const TJoinOperator*, TPartialAggregateConsumer>
+        PartialAggregateConsumers_;
     // Split planning includes Parquet predicate compilation and evaluation;
     // OutputLanes and LowerSource both query it. nullopt means "use the original
     // source", while an engaged empty vector is a proven empty scan.
