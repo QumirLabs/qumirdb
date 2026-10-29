@@ -538,12 +538,13 @@ TEST(StatsTest, PartialAggregateWithoutUsableEstimateDecidesAtRunTime) {
     EXPECT_TRUE(NQdb::NScheduler::ShouldUsePartialAggregate(
         unknownAggregate, settings));
 
-    // The product of two key NDVs reaches the row count: the trivial bound.
+    // The product of two key NDVs reaches the row count: an estimate, so the
+    // plan rule decides, and it promises no reduction.
     TStatsSource saturated({{"x", 11'000'000}, {"y", 11'000'000}}, 100'000'000);
     auto saturatedInput = std::make_shared<NQdb::TSourceOperator>(saturated, "t");
     saturatedInput->Stats_ = saturated.Stats_;
     NQdb::TAggregateOperator saturatedAggregate(saturatedInput, {"x", "y"}, {});
-    EXPECT_TRUE(NQdb::NScheduler::ShouldUsePartialAggregate(
+    EXPECT_FALSE(NQdb::NScheduler::ShouldUsePartialAggregate(
         saturatedAggregate, settings));
 
     // One key with as many values as rows is a unique key: nothing to reduce.
