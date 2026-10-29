@@ -381,9 +381,10 @@ plan asks of an estimate, hashing does not pay for itself: the exchange moves
 the group anyway and the final table hashes it again, and with string keys the
 partial insert and its emission copy every new key twice more, so a group has to
 absorb several rows to pay for them (ClickBench q17 loses a third of its time
-to a partial phase that reduces 4x per lane). The lane then emits its table and hands the remaining batches through as
-single-row partial states, which a generated projection produces: the keys as
-they are, `1` for `count(*)`, `1` or `0` by `qdb_is_null` for `count(x)`, and
+to a partial phase that reduces 4x per lane). The lane then emits its table and
+hands the remaining batches through as single-row partial states, which a
+generated projection produces: the keys as they are, `1` for `count(*)`, `1` or
+`0` by `qdb_is_null` for `count(x)`, and
 the argument of `sum`, `min` and `max` widened to the state type. The final
 phase cannot tell these rows from emitted groups. Switching strategy on the
 observed ratio of distinct keys to rows follows the hybrid aggregation of Müller
