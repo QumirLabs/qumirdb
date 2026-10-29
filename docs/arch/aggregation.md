@@ -348,12 +348,13 @@ the final aggregate. It changes `count` to `sum`. It keeps `sum`, `min`, and
 
 The scheduler uses the second plan whenever statistics do not rule it out. It
 needs a parallel input, a normal `GROUP BY` and at least 1,048,576 estimated
-input rows. Statistics then only argue against the plan. The groups of a
-composite key are at least as many as the values of any one key, so a key with
-more than one eighth as many values as rows settles it: there is too little to
-reduce. An estimate of the groups below that bound keeps the first plan too when
-it promises fewer than 8x fewer groups than rows. Without an estimate (a
-computed key has no NDV) the partial phase decides at run time, as the next
+input rows. Statistics then only argue against the plan. The groups of a key
+are at least those of any part of it, so the estimate for the keys that have
+statistics (their NDVs multiplied under independence, at most the row count)
+keeps the first plan on its own when it promises fewer than 8x fewer groups
+than rows; a key without statistics, such as a computed expression, can only
+add groups. With statistics for every key this is the usual group estimate.
+When no key has statistics the partial phase decides at run time, as the next
 section describes. The setting
 `[aggregate] partial = false` turns the second plan off for tests and
 diagnostics. A global aggregate reduces its input to one row, so only the input size matters
