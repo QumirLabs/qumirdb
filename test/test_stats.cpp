@@ -405,6 +405,16 @@ TEST(StatsTest, AggregateInitialCapacityUsesNdvAndPartitionCount) {
     EXPECT_EQ(task.Groups, 34u);
     EXPECT_FALSE(NQdb::EstimateAggregateTask(missingStats, 3).Groups.has_value());
 
+    // A key without statistics, such as an expression, leaves the group count
+    // unknown to the plan decisions, but the tables are sized by the
+    // optimizer's row estimate of the aggregate.
+    missingStats.Stats_ = std::make_shared<NQdb::TStats>();
+    missingStats.Stats_->RowCount = 600;
+    EXPECT_FALSE(NQdb::EstimateAggregateGroupCount(missingStats).has_value());
+    EXPECT_EQ(NQdb::EstimateAggregateGroupsForSizing(missingStats), 600u);
+    EXPECT_EQ(NQdb::EstimateAggregateTask(missingStats, 3).Groups, 200u);
+    EXPECT_EQ(NQdb::EstimateAggregateInitialCapacity(missingStats, 1), 1024);
+
     // A grouping without aggregates has no state words, so under auto its
     // kernels have no row layout; row still forces one.
     using enum NQdb::NScheduler::EAggregateTableKind;
