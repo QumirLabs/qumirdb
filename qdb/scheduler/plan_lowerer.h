@@ -58,7 +58,9 @@ size_t ChooseAggregatePartitionCount(
     const TSettings& settings);
 
 // Whether a grouped aggregate should be split into local partial and final
-// phases around a repartition exchange.
+// phases around a repartition exchange. Statistics that predict too little
+// reduction rule the partial out; without a usable estimate the partial phase
+// decides at run time.
 bool ShouldUsePartialAggregate(
     const TAggregateOperator& aggregate,
     const TSettings& settings);

@@ -527,6 +527,46 @@ TEST(StatsTest, PartialAggregateRequiresLargeEstimatedReduction) {
         usefulAggregate, settings));
 }
 
+TEST(StatsTest, PartialAggregateWithoutUsableEstimateDecidesAtRunTime) {
+    NQdb::NScheduler::TSettings settings;
+
+    // No statistics for the key: the partial aggregate judges its reduction.
+    TStatsSource unknown({{"x", 10'000'000}}, 100'000'000);
+    auto unknownInput = std::make_shared<NQdb::TSourceOperator>(unknown, "t");
+    unknownInput->Stats_ = unknown.Stats_;
+    NQdb::TAggregateOperator unknownAggregate(unknownInput, {"y"}, {});
+    EXPECT_TRUE(NQdb::NScheduler::ShouldUsePartialAggregate(
+        unknownAggregate, settings));
+
+    // The product of two key NDVs reaches the row count: the trivial bound.
+    TStatsSource saturated({{"x", 30'000'000}, {"y", 30'000'000}}, 100'000'000);
+    auto saturatedInput = std::make_shared<NQdb::TSourceOperator>(saturated, "t");
+    saturatedInput->Stats_ = saturated.Stats_;
+    NQdb::TAggregateOperator saturatedAggregate(saturatedInput, {"x", "y"}, {});
+    EXPECT_TRUE(NQdb::NScheduler::ShouldUsePartialAggregate(
+        saturatedAggregate, settings));
+
+    // One key with as many values as rows is a unique key: nothing to reduce.
+    TStatsSource unique({{"x", 100'000'000}}, 100'000'000);
+    auto uniqueInput = std::make_shared<NQdb::TSourceOperator>(unique, "t");
+    uniqueInput->Stats_ = unique.Stats_;
+    NQdb::TAggregateOperator uniqueAggregate(uniqueInput, {"x"}, {});
+    EXPECT_FALSE(NQdb::NScheduler::ShouldUsePartialAggregate(
+        uniqueAggregate, settings));
+
+    // A small input is not worth a second phase whatever its keys.
+    TStatsSource small({{"x", 10}}, 1000);
+    auto smallInput = std::make_shared<NQdb::TSourceOperator>(small, "t");
+    smallInput->Stats_ = small.Stats_;
+    NQdb::TAggregateOperator smallAggregate(smallInput, {"y"}, {});
+    EXPECT_FALSE(NQdb::NScheduler::ShouldUsePartialAggregate(
+        smallAggregate, settings));
+
+    settings.Aggregate.EnablePartial = false;
+    EXPECT_FALSE(NQdb::NScheduler::ShouldUsePartialAggregate(
+        unknownAggregate, settings));
+}
+
 TEST(StatsTest, AggregateCombineOperatorMergesPartialStates) {
     TStatsSource src({{"k", 10}, {"v", 100}}, 1000);
     auto input = std::make_shared<NQdb::TSourceOperator>(src, "t");

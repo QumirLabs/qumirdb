@@ -198,6 +198,16 @@ struct TAggregateSettings {
     size_t PartialMinInputRows = 1024 * 1024;
     size_t PartialMinReductionFactor = 8;
 
+    // A partial aggregate judges its own reduction at run time: once it has
+    // hashed PartialSampleRows rows and holds more than one group per
+    // PartialPassThroughReduction rows, it stops hashing and hands its rows
+    // through as single-row partial states. Its table emits its groups and
+    // restarts empty at PartialMaxGroups groups, so one lane's table stays
+    // bounded whatever the input.
+    size_t PartialSampleRows = 128 * 1024;
+    double PartialPassThroughReduction = 2.0;
+    size_t PartialMaxGroups = 1 << 20;
+
     EAggregateTableKind Table = EAggregateTableKind::Auto;
 };
 
