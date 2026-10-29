@@ -67,22 +67,34 @@ measurement per query.
 
 A/B of the branch against its base, origin/master `0725f69e`, both built
 RelWithDebInfo in separate worktrees with warm JIT caches, default settings
-(18 workers), `--format null --timing`. The five queries of issue #376 ran five
-times each, the two binaries interleaved; the table gives the median and the
-individual runs of "Returned in".
+(18 workers), `--format null --timing`. The five queries of issue #376 and the
+other grouped queries whose time moved ran five times each, the two binaries
+interleaved; the table gives the median and the individual runs of "Returned
+in".
 
 | Query | master (s) | branch (s) | change | master runs | branch runs | CPU master → branch (s) |
 |---|---:|---:|---:|---|---|---|
-| q17 | 0.518 | 0.532 | +2.7% | 0.652 0.551 0.517 0.515 0.518 | 0.637 0.532 0.545 0.515 0.512 | 7.6 → 7.6 |
-| q18 | 1.318 | 1.307 | −0.8% | 1.481 1.379 1.271 1.275 1.318 | 1.543 1.307 1.330 1.264 1.265 | 15.5 → 15.4 |
-| q28 | 1.122 | 0.940 | −16.2% | 1.300 1.131 1.111 1.122 1.114 | 1.078 0.940 0.939 0.941 0.933 | 17.5 → 14.8 |
-| q33 | 1.179 | 1.189 | +0.8% | 1.315 1.168 1.182 1.173 1.179 | 1.429 1.178 1.189 1.190 1.162 | 17.8 → 17.8 |
-| q34 | 1.173 | 1.178 | +0.4% | 1.246 1.201 1.170 1.173 1.170 | 1.483 1.176 1.178 1.161 1.180 | 17.9 → 17.8 |
+| q05 | 0.280 | 0.238 | −14.9% | 0.272 0.280 0.280 0.282 0.286 | 0.224 0.235 0.239 0.238 0.243 | 3.5 → 3.6 |
+| q12 | 0.301 | 0.253 | −16.1% | 0.295 0.301 0.301 0.306 0.308 | 0.247 0.257 0.253 0.253 0.262 | 3.8 → 3.9 |
+| q14 | 0.273 | 0.279 | +2.2% | 0.266 0.273 0.273 0.277 0.276 | 0.268 0.272 0.279 0.280 0.279 | 4.3 → 4.3 |
+| q17 | 0.512 | 0.509 | −0.5% | 0.525 0.512 0.516 0.511 0.511 | 0.501 0.504 0.512 0.509 0.515 | 7.6 → 7.6 |
+| q18 | 1.286 | 1.277 | −0.7% | 1.286 1.291 1.273 1.279 1.307 | 1.276 1.274 1.277 1.382 1.338 | 15.4 → 15.4 |
+| q28 | 1.138 | 0.959 | −15.7% | 1.086 1.143 1.145 1.136 1.138 | 0.915 0.944 0.960 0.961 0.959 | 17.7 → 15.1 |
+| q30 | 0.252 | 0.251 | −0.4% | 0.244 0.249 0.262 0.262 0.252 | 0.251 0.250 0.251 0.253 0.256 | 3.7 → 3.7 |
+| q33 | 1.183 | 1.175 | −0.6% | 1.161 1.192 1.200 1.173 1.183 | 1.157 1.175 1.177 1.173 1.186 | 17.9 → 17.9 |
+| q34 | 1.174 | 1.177 | +0.3% | 1.166 1.174 1.165 1.182 1.192 | 1.175 1.187 1.172 1.183 1.177 | 17.9 → 17.9 |
 
 q28 groups by a `regexp_replace` of `Referer`, a key without statistics; the
 branch plans the partial phase for it, and its 33 lanes reduce 81.0M rows to
-3.7M (21.8x) before the exchange instead of shuffling every `Referer`. The
-other four keep the shuffle plan: `UserID` (17.6M values) alone rules the
-partial out for q17 and q18, and `URL` (18.3M values) estimates a 5.5x
-reduction for q33 and q34, below the 8x the plan requires. Their differences
-are noise.
+3.7M (21.8x) before the exchange instead of shuffling every `Referer`. q05 and
+q12 group by `SearchPhrase`, whose 6.0M values estimate a 16x reduction, so
+both binaries plan the partial phase; per lane the reduction is only 1.8x, and
+the lanes that reach the sample now pass their rows through instead of hashing
+them. q17 and q18 keep the shuffle plan because `UserID` alone has 17.6M
+values, q33 and q34 because `URL` (18.3M values) estimates 5.5x, below the 8x
+the plan requires; q14 and q30 keep it because the product of their key NDVs
+reaches the row count. Their differences are noise.
+
+The full suite, three runs per binary interleaved, sum of per-query medians:
+master 13.942 s, branch 13.577 s (−2.6%); no other query moved by more than
+5%.
