@@ -647,6 +647,29 @@ the estimated input of the aggregate reaches `[aggregate] partial_min_input_rows
 [Aggregation](aggregation.md)) and gathers below it or without an estimate.
 `true` and `false` force one shape.
 
+The second program is the price of the cascade, and a cold JIT cache pays it
+in full: near the bound the parallel fold saves about 30 ms per 1 Mi rows
+(TPC-H SF10 Q6, 0.105 s to 0.077 s), while compiling the partial and combine
+programs adds about 0.13 s of LLVM time (q2 and Q6, 0.20 s to 0.33 s). A
+one-time query on a cold cache therefore loses near the bound and wins only
+well above it; with the persistent object cache of
+[§4.7](#47-kernel-fusion-and-the-jit-object-cache) the compilation is paid once
+and `auto` is a net win from the bound on. The project measures processing
+time with that cache ([benchmarks](../benchmarks/README.md)), which is the case
+`auto` is tuned for.
+
+The bound is therefore a guard for the cold cache, not a break-even of the fold
+itself. A sweep over a 16 Mi-row table with a filter that leaves 64 Ki to 4 Mi
+rows for the aggregate (18 workers, warm cache) showed the cascade never slower
+than the gather and 0–12 ms faster below 1 Mi rows, about the same for
+`count(*)`, numeric and string folds: what the cascade removes is the serial
+tail of one task consuming the gathered batches after the lanes finish, not
+the per-row fold. The gain grows with the input above 2 Mi rows (20–30 ms at
+4 Mi) and would need tens of Mi rows to repay a cold compilation, so the shared
+1 Mi bound keeps the warm-cache loss within the noise band of the benchmarks.
+The sweep and its reproduction are in the wiki
+([Aggregation implementation](https://github.com/resetius/qumirdb/wiki/Aggregation-implementation)).
+
 ### 4.5 Parallel grouping sets
 
 ROLLUP/GROUPING SETS over parallel input always use `partial → shuffle →

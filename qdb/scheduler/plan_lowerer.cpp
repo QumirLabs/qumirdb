@@ -3240,7 +3240,11 @@ bool ShouldCascadeGlobalAggregate(
     // states. That cost is paid once and does not grow with the input, so the
     // cascade pays off from an input size on; the same bound as the grouped
     // partial aggregate keeps one notion of "large input" in the settings.
-    // Without an estimate the gather stays, as before the auto mode.
+    // On a warm JIT cache the cascade wins from far smaller inputs (a sweep
+    // showed no loss at 64 Ki rows), so the bound guards the cold cache: below
+    // it the gain is a few ms and the second program costs ~0.1 s to compile
+    // (docs/arch/optimizations.md §4.4). Without an estimate the gather stays,
+    // as before the auto mode.
     const auto inputStats = aggregate.Input()->Stats_;
     return inputStats &&
         inputStats->RowCount >= settings.Aggregate.PartialMinInputRows;
