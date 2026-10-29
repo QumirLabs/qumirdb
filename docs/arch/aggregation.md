@@ -351,10 +351,7 @@ the first plan when the estimate does not pass the rule. The setting
 aggregate reduces its input to one row, so only the input size matters for its
 `partial -> gather -> final` plan: `[aggregate] cascade_global = auto` uses it when
 the estimated input rows reach the same bound, and gathers the lanes into one
-aggregate below it or without statistics; `true` and `false` force one plan. The
-cascade compiles a second program, so on a cold JIT cache it costs more than the
-parallel fold saves near the bound; `auto` assumes the persistent object cache
-(see [Optimizations §4.4](optimizations.md#44-global-aggregate-cascade--aggregate-cascade_global-auto-by-default)).
+aggregate below it or without statistics; `true` and `false` force one plan.
 SQL grouping sets always use their special two-phase plan.
 
 Partial and final aggregates have distinct executable stage ids and explicit
