@@ -1648,47 +1648,6 @@ constexpr int64_t AggRowChunkRows = 2048;
 // Rows per arena block of the row layout, as in the row join table.
 constexpr int64_t AggRowBlockRows = 16384;
 
-// A scan of the arena of a table in the row layout, in insertion order:
-// `rowStmts` run for every group with the address of its row in `row` (i64).
-NQumir::NAst::TExprPtr AggRowArenaScan(
-    const TAggRowLayout& rows, std::vector<NQumir::NAst::TExprPtr> rowStmts)
-{
-    using namespace NQumir::NAst;
-    auto i64Type = std::make_shared<TIntegerType>();
-    auto ptrU8Type = std::make_shared<TPointerType>(
-        std::make_shared<TIntegerType>(TIntegerType::U8));
-    auto numI64 = [&](int64_t value) { return NOz::TypedInt(value, i64Type); };
-    auto less = [&](TExprPtr left, TExprPtr right) {
-        return NOz::Bin(TOperator("<"), std::move(left), std::move(right));
-    };
-    auto arena = [&](const std::string& name) {
-        return NOz::Field(NOz::Field("ht", "RowArena"), name);
-    };
-    rowStmts.push_back(NOz::Assign("row", NOz::Add(NOz::Ident("row"), numI64(rows.RowBytes))));
-    return NOz::Block({
-        NOz::Var("blocks", std::make_shared<TPointerType>(ptrU8Type)),
-        NOz::Assign("blocks", arena("Blocks")),
-        NOz::Var("block_count", i64Type),
-        NOz::Assign("block_count", arena("BlockCount")),
-        NOz::Var("b", i64Type),
-        NOz::Assign("b", numI64(0)),
-        NOz::While(less(NOz::Ident("b"), NOz::Ident("block_count")), NOz::Block({
-            NOz::Var("rows_in_block", i64Type),
-            NOz::Assign("rows_in_block", arena("BlockRows")),
-            NOz::If(NOz::Bin(TOperator("=="), NOz::Ident("b"),
-                    NOz::Sub(NOz::Ident("block_count"), numI64(1))),
-                NOz::Block({NOz::Assign("rows_in_block", arena("CurRows"))})),
-            NOz::Var("row", i64Type),
-            NOz::Assign("row", NOz::Cast(NOz::Index("blocks", NOz::Ident("b")), i64Type)),
-            NOz::Var("end", i64Type),
-            NOz::Assign("end", NOz::Add(NOz::Ident("row"),
-                NOz::Mul(NOz::Ident("rows_in_block"), numI64(rows.RowBytes)))),
-            NOz::While(less(NOz::Ident("row"), NOz::Ident("end")), NOz::Block(std::move(rowStmts))),
-            NOz::Assign("b", NOz::Add(NOz::Ident("b"), numI64(1))),
-        })),
-    });
-}
-
 // The per-row parts of the aggregate update, shared by the swiss loop of
 // agg_dispatch and the passes of agg_rows_update. Each call builds new AST
 // nodes, so a part can be placed in both functions.
@@ -2799,14 +2758,23 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
             });
         rowStmts.insert(rowStmts.begin(), {
             NOz::Var("row_key", ptrKeyType),
-            NOz::Assign("row_key", NOz::Cast(
-                NOz::Add(NOz::Ident("row"), numI64(rows->KeyOffset)), ptrKeyType)),
+            NOz::Assign("row_key", NOz::Cast(NOz::Add(
+                NOz::Cast(NOz::Ident("row"), i64Type), numI64(rows->KeyOffset)), ptrKeyType)),
             NOz::Var("row_states", ptrI64Type),
-            NOz::Assign("row_states", NOz::Cast(
-                NOz::Add(NOz::Ident("row"), numI64(rows->StateOffset)), ptrI64Type)),
+            NOz::Assign("row_states", NOz::Cast(NOz::Add(
+                NOz::Cast(NOz::Ident("row"), i64Type), numI64(rows->StateOffset)), ptrI64Type)),
         });
-        project.push_back(NOz::If(NOz::Call("agr_active", {NOz::Ident("ht")}),
-            AggRowArenaScan(*rows, std::move(rowStmts)), NOz::Block(std::move(swissOnly))));
+        rowStmts.push_back(NOz::Assign("row", NOz::Call("ra_next_row",
+            {NOz::Field("ht", "RowArena"), NOz::Ident("b"), NOz::Ident("end"), NOz::Ident("row")})));
+        project.push_back(NOz::If(NOz::Call("agr_active", {NOz::Ident("ht")}), NOz::Block({
+            NOz::Var("b", i64Type),
+            NOz::Var("end", i64Type),
+            NOz::Var("row", ptrU8Type),
+            NOz::Assign("row", NOz::Call("ra_first_row",
+                {NOz::Field("ht", "RowArena"), NOz::Ident("b"), NOz::Ident("end")})),
+            NOz::While(binary("!=", NOz::Cast(NOz::Ident("row"), i64Type), numI64(0)),
+                NOz::Block(std::move(rowStmts))),
+        }), NOz::Block(std::move(swissOnly))));
     }
 
     bodyStmts.push_back(std::make_shared<TIfExpr>(loc,
@@ -3128,6 +3096,8 @@ NQumir::NAst::TExprPtr GenGenericAggregateMeasureAst(
     auto ptrI64Type = std::make_shared<TPointerType>(i64Type);
     auto ptrPtrI64Type = std::make_shared<TPointerType>(ptrI64Type);
     auto ptrKeyType = std::make_shared<TPointerType>(key.StoredType);
+    auto ptrU8Type = std::make_shared<TPointerType>(
+        std::make_shared<TIntegerType>(TIntegerType::U8));
     auto hashTableRefType = std::make_shared<TReferenceType>(
         AsNamed("HashTable", std::move(hashTableType)));
     auto ident = [&](const std::string& name) -> TExprPtr {
@@ -3254,11 +3224,20 @@ NQumir::NAst::TExprPtr GenGenericAggregateMeasureAst(
         auto rowStmts = addKeyBytes([&] { return NOz::Index("row_key", number(0)); });
         rowStmts.insert(rowStmts.begin(), {
             NOz::Var("row_key", ptrKeyType),
-            NOz::Assign("row_key", NOz::Cast(
-                NOz::Add(NOz::Ident("row"), number(rows->KeyOffset)), ptrKeyType)),
+            NOz::Assign("row_key", NOz::Cast(NOz::Add(
+                NOz::Cast(NOz::Ident("row"), i64Type), number(rows->KeyOffset)), ptrKeyType)),
         });
-        body.push_back(NOz::If(NOz::Call("agr_active", {NOz::Ident("ht")}),
-            AggRowArenaScan(*rows, std::move(rowStmts)), NOz::Block(std::move(swiss))));
+        rowStmts.push_back(NOz::Assign("row", NOz::Call("ra_next_row",
+            {NOz::Field("ht", "RowArena"), NOz::Ident("b"), NOz::Ident("end"), NOz::Ident("row")})));
+        body.push_back(NOz::If(NOz::Call("agr_active", {NOz::Ident("ht")}), NOz::Block({
+            NOz::Var("b", i64Type),
+            NOz::Var("end", i64Type),
+            NOz::Var("row", ptrU8Type),
+            NOz::Assign("row", NOz::Call("ra_first_row",
+                {NOz::Field("ht", "RowArena"), NOz::Ident("b"), NOz::Ident("end")})),
+            NOz::While(binary("!=", NOz::Cast(NOz::Ident("row"), i64Type), number(0)),
+                NOz::Block(std::move(rowStmts))),
+        }), NOz::Block(std::move(swiss))));
     } else {
         body.insert(body.end(), swiss.begin(), swiss.end());
     }

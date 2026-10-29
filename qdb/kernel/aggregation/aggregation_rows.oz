@@ -76,22 +76,13 @@
       (var old = (field table Entries))
       (if (! (call rt_init table groups)) (block (return #f)))
       (call qdb_free (cast old <ptr i8>))
-      (var blocks = (field arena Blocks))
-      (var count = (field arena BlockCount))
-      (var row_bytes = (field arena RowBytes))
       (var b = 0)
-      (while (< b count)
+      (var end = 0)
+      (var row = (call ra_first_row arena b end))
+      (while (!= (cast row i64) 0)
         (block
-          (var rows_in_block = (field arena BlockRows))
-          (if (== b (- count 1)) (block (= rows_in_block (field arena CurRows))))
-          (var row = (cast (index blocks b) i64))
-          (var end = (+ row (* rows_in_block row_bytes)))
-          (while (< row end)
-            (block
-              (var bytes = (cast row <ptr u8>))
-              (call agr_link table bytes (call rt_row_hash bytes))
-              (= row (+ row row_bytes))))
-          (= b (+ b 1))))
+          (call agr_link table row (call rt_row_hash row))
+          (= row (call ra_next_row arena b end row))))
       (return #t)))
 
   ;; Points the rows in Work[0, count) at their home entries again.
