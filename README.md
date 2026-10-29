@@ -1,25 +1,70 @@
 # QumirDB
 
-**The same compiled query runs natively and in your browser.**
+**A compiled SQL engine for Parquet, running natively and in the browser.**
 
-QumirDB is an analytical query engine for Parquet. It handles scans,
-filters, joins, aggregates, and sort. A planner uses predicate pushdown,
-join reorder, and row-group pruning to plan each query.
+QumirDB runs analytical SQL queries directly over Parquet files: filtering
+large datasets, joining tables, computing aggregates, and sorting results.
+Use it from a native application or command line, or explore datasets in
+the [browser workbench](https://db.qumir.dev).
 
-Every query compiles through LLVM into a generated kernel. It does not run
-through an interpreter. The same codegen path builds host machine code and
-also builds WebAssembly. The same fused kernel runs on the server, or in the
-browser against OPFS-backed datasets. There is no separate browser engine to
-keep in sync with the native one.
+QumirDB compiles the query's expressions and operator computations into
+machine code or WebAssembly before processing data. An expression
+interpreter evaluates a query through an expression tree or a sequence of
+opcodes, even when it processes column batches and uses optimized SIMD
+routines. QumirDB generates code specialized for the query's expressions
+and types, which LLVM can optimize together.
 
-Compiled queries have one more benefit. User code can join the same kernel.
-You register a Rust module with `CREATE MODULE`. Its bitcode joins the
-query's LLVM module before optimization runs. Then LLVM inlines the Rust
-code, propagates constants through it, and vectorizes it together with the
-SQL. See [UDFs that disappear into the
-query](#udfs-that-disappear-into-the-query) below.
+The compilation layer comes from [Qumir](https://github.com/QumirLabs/qumir).
+QumirDB generates kernels as Qumir ASTs; **oz-lang** is the S-expression
+textual representation of that AST. Qumir lowers the generated computation
+through its own SSA IR to LLVM. The same kernel generation path supports
+native execution and WebAssembly execution over browser datasets.
 
-Try it live at **[db.qumir.dev](https://db.qumir.dev)**.
+Custom computations can use the same optimization pipeline. Register a Rust
+module with `CREATE MODULE`, then call its functions from SQL. The module's
+LLVM bitcode is linked with the generated query code before optimization,
+allowing LLVM to inline functions, propagate constants, and vectorize across
+the SQL and user-code boundary. See
+[UDFs that disappear into the query](#udfs-that-disappear-into-the-query).
+
+## How a query runs
+
+```mermaid
+flowchart TD
+    SQL["SQL query"] --> Parser["SQL parser"]
+    Parser --> AST["SQL AST"]
+    AST --> Plan["Logical plan"]
+    Plan --> Passes["Optimizer passes"]
+    Passes --> Graph["Physical task graph"]
+    Graph --> Kernels["Generated kernels: Qumir AST / oz-lang"]
+    Kernels --> Compiler["Qumir compiler + LLVM"]
+    Compiler --> Code["Native machine code or WebAssembly"]
+    Code --> Execution["Scheduled execution"]
+    Graph -.->|tasks and data exchange| Execution
+    Parquet["Parquet data"] -->|column batches| Execution
+    Execution --> Result["Query results"]
+```
+
+The SQL parser builds a **SQL AST** that describes the query's syntax.
+Logical planning resolves tables and columns and turns the query into
+relational operators such as scans, joins, and aggregates. Optimizer passes
+rewrite that plan: they push down predicates, choose join order, remove
+unused columns, and attach Parquet row-group pruning conditions.
+
+Physical lowering builds a graph of executable tasks and the connections
+that carry data between them. It also generates the kernels those tasks
+will call. These kernels use the **Qumir AST**, a separate representation
+for executable computation, which Qumir and LLVM compile into one module
+for the query.
+
+At execution time, the scheduler runs the tasks, Parquet readers supply
+column batches, and compiled kernels perform the query's computations.
+Compiling the kernels together preserves the graph's operator boundaries,
+data dependencies, and task state.
+
+See [logical planning](docs/arch/logical_plan_build.md),
+[kernel compilation](docs/arch/kernel-compilation-phases.md), and
+[scheduled execution](docs/arch/scheduler_runtime.md) for the design.
 
 ## Project principles
 
@@ -218,7 +263,7 @@ Design notes live in [docs/arch/](docs/arch/README.md).
   scheduler, joins, aggregation, and kernel dispatch.
 
 QumirDB is built on [Qumir](https://qumir.dev)
-([GitHub](https://github.com/resetius/qumir)), the compiler and runtime
+([GitHub](https://github.com/QumirLabs/qumir)), the compiler and runtime
 layer for generated query kernels, and on
 [Coroio](https://coroio.dev) ([GitHub](https://github.com/resetius/coroio)),
 the coroutine-based web service runtime.
