@@ -3344,25 +3344,29 @@ bool ShouldUsePartialAggregate(
 
     // Statistics only rule the partial out; a partial phase that finds too
     // little reduction at run time still costs its sample and wider exchange
-    // rows. The groups of a composite key are at least the NDV of each key, so
-    // one key as distinct as a group's share of the rows settles it.
-    const uint64_t reduction = std::max<size_t>(
-        settings.Aggregate.PartialMinReductionFactor, 1);
-    const uint64_t maxGroups = inputStats->RowCount / reduction;
+    // rows. The groups of a key are at least those of any part of it, so the
+    // estimate for the keys that have statistics (their NDVs multiplied under
+    // independence, at most the rows) argues against the partial on its own;
+    // a key without statistics can only add groups. With statistics for every
+    // key this is the estimate of the groups; with none the partial aggregate
+    // judges its reduction at run time (TPartialAggregateProcessor).
+    const uint64_t rows = inputStats->RowCount;
+    uint64_t knownGroups = 1;
+    bool anyKnown = false;
     for (const auto& key : aggregate.GroupKeys()) {
         auto it = inputStats->ColumnStats.find(key);
-        if (it != inputStats->ColumnStats.end() && it->second && it->second->Ndv
-            && *it->second->Ndv > maxGroups)
+        if (it == inputStats->ColumnStats.end() || !it->second || !it->second->Ndv
+            || *it->second->Ndv == 0)
         {
-            return false;
+            continue;
         }
+        anyKnown = true;
+        const uint64_t ndv = *it->second->Ndv;
+        knownGroups = knownGroups > rows / ndv ? rows : std::min(knownGroups * ndv, rows);
     }
-
-    // Without a group estimate (a computed key has no NDV) the partial
-    // aggregate judges its reduction at run time and hands rows through when
-    // it is low (TPartialAggregateProcessor).
-    const auto estimatedGroups = EstimateAggregateGroupCount(aggregate);
-    return !estimatedGroups || *estimatedGroups <= maxGroups;
+    const uint64_t reduction = std::max<size_t>(
+        settings.Aggregate.PartialMinReductionFactor, 1);
+    return !anyKnown || knownGroups <= rows / reduction;
 }
 
 size_t ChooseAggregatePartitionCount(
