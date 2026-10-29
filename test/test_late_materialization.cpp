@@ -231,6 +231,9 @@ TEST(LateMaterialization, FetchesOnlyOutputWhenSortKeyIsHidden) {
     ASSERT_TRUE(offsetLimit);
     EXPECT_EQ(offsetLimit.Cast()->Limit(), 10);
     EXPECT_EQ(offsetLimit.Cast()->Offset(), 5);
+    auto offsetTop = TMaybeOp<TTopSortOperator>(offsetLimit.Cast()->Input());
+    ASSERT_TRUE(offsetTop);
+    EXPECT_EQ(offsetTop.Cast()->Limit(), 15);
 }
 
 TEST(LateMaterialization, RejectsLargeLimitAndComputedOutput) {

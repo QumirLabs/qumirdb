@@ -1,4 +1,4 @@
 limit
-└─ sort [i asc, id asc]
+└─ top-sort [i asc, id asc] limit 7
    └─ project (id, i) (rows≈8 cost≈256)
       └─ source t AS t (rows≈8 cost≈128)
