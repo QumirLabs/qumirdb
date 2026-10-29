@@ -5,8 +5,8 @@
 namespace NQdb {
 namespace NKernel {
 
-// SQL CASTs that Qumir does not convert itself (integer -> VARCHAR, BOOLEAN -> number,
-// VARCHAR -> DATE, number <-> DECIMAL, ...) are rows of one table in cast_rules.cpp. A
+// SQL CASTs that neither Qumir nor a `cast` operator of qumirdb.oz converts (integer ->
+// VARCHAR, VARCHAR -> DATE, number <-> DECIMAL, ...) are rows of one table in cast_rules.cpp. A
 // rule only converts a plain (non-nullable) value; the nullability of the operand is
 // handled around it by the pass that applies it.
 //

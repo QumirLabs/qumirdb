@@ -2199,7 +2199,7 @@ bool ContainsNull(const TExprPtr& e) {
 // comparisons, strcat/upper/lower -> their arena calls, qdb_string_view_sql_like -> a
 // constant-pattern fast path, a cast to a nullable target -> nullable_from_value (the raw
 // planner TNullable won't compile), a cast the cast table rewrites or rejects (integer ->
-// VARCHAR, boolean -> number), and a `%` or decimal `/` by what may be zero -> a NULLIF
+// VARCHAR, VARCHAR -> DATE), and a `%` or decimal `/` by what may be zero -> a NULLIF
 // guard. Float division keeps the fast path: it has no such rewrite.
 bool ContainsMustExpandCall(const TExprPtr& e, const TStructType& inputType) {
     if (!e) return false;

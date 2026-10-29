@@ -362,6 +362,23 @@
       (return (call qdb_string_from_magnitude arena value #f))))
 
   ;; CAST(<boolean> AS VARCHAR) spells the value like DuckDB and PostgreSQL output.
+  ;; CAST(<boolean> AS INTEGER / BIGINT / DOUBLE) is 1 or 0. Without these conversions
+  ;; Qumir lowers the cast as a sign extension of the i1, so TRUE would become -1.
+  (fun qdb_bool_to_i32 ((var value bool)) -> i32 (attrs (operator "cast"))
+    (block
+      (if value (block (return (: 1 i32))))
+      (return (: 0 i32))))
+
+  (fun qdb_bool_to_i64 ((var value bool)) -> i64 (attrs (operator "cast"))
+    (block
+      (if value (block (return 1)))
+      (return 0)))
+
+  (fun qdb_bool_to_f64 ((var value bool)) -> f64 (attrs (operator "cast"))
+    (block
+      (if value (block (return 1.0)))
+      (return 0.0)))
+
   (fun qdb_string_from_bool ((var value bool)) -> StringView
     (block
       (if value (block (return (cast "true" StringView))))

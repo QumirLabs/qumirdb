@@ -98,17 +98,6 @@ TExprPtr BoolToString(const TExprPtr& operand, const TTypePtr&, const TTypePtr&,
     return Call("qdb_string_from_bool", {operand}, loc);
 }
 
-// Qumir lowers a bool-to-number cast as a sign extension of the i1, so TRUE would become
-// -1 (and -1.0 for a float). Select 1 or 0 instead.
-TExprPtr BoolToNumber(const TExprPtr& operand, const TTypePtr&, const TTypePtr& to,
-    TLocation loc)
-{
-    auto literal = [&](int64_t value) -> TExprPtr {
-        return std::make_shared<TCastExpr>(loc, std::make_shared<TNumberExpr>(loc, value), to);
-    };
-    return std::make_shared<TIfExpr>(loc, operand, literal(1), literal(0));
-}
-
 // qdb_sql_date is the `cast` operator StringView -> DATE of qumirdb.oz; the rule keeps a
 // string column cast to DATE on it after the planner has erased DATE to i32, and erases
 // the nominal DATE it returns the same way.
@@ -178,15 +167,18 @@ struct TCastRule {
         TLocation loc);
 };
 
-// One row per conversion Qumir does not perform itself. A new cast is a new row and,
-// when it needs code, a function in qumirdb.oz (or an extern in qumirdb_runtime.cpp
-// with its counterpart in browser_runtime.js). The rows with a DECIMAL side are applied
-// by ExpandDecimal, the others by ExpandNullable (see cast_rules.h).
+// One row per conversion Qumir does not perform itself and a `cast` operator of
+// qumirdb.oz cannot: integer -> VARCHAR needs the kernel's arena, which a one-argument
+// operator cannot receive; a DECIMAL conversion needs the scale of the types; and the
+// Qumir resolver fails `cast` to StringView while the generic nullable_from_value[T]
+// is a candidate, so boolean -> VARCHAR is a row too. VARCHAR -> DATE is an operator
+// (qdb_sql_date), the row only survives the planner's erasure of DATE to i32. A cast
+// a plain operator can express (boolean -> number) belongs in qumirdb.oz instead.
+// The rows with a DECIMAL side are applied by ExpandDecimal, the others by
+// ExpandNullable (see cast_rules.h).
 const TCastRule CastRules[] = {
     {EKind::Integer, EKind::String, IntegerToString},
     {EKind::Bool, EKind::String, BoolToString},
-    {EKind::Bool, EKind::Integer, BoolToNumber},
-    {EKind::Bool, EKind::Float, BoolToNumber},
     {EKind::String, EKind::Date, StringToDate},
     {EKind::Integer, EKind::Decimal, IntegerToDecimal},
     {EKind::Float, EKind::Decimal, FloatToDecimal},
