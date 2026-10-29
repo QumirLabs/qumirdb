@@ -180,6 +180,10 @@ std::optional<TRewriteCandidate> MatchCandidate(const TOperatorPtr& root) {
         if (auto sort = TMaybeOp<TSortOperator>(orderingInput)) {
             result.Sort = sort.Cast();
             orderingInput = sort.Cast()->Input();
+        } else if (auto maybeTop = TMaybeOp<TTopSortOperator>(orderingInput)) {
+            // ApplyTopSort bounds the sort under a limit with an offset.
+            result.TopSort = maybeTop.Cast();
+            orderingInput = result.TopSort->Input();
         }
     } else {
         return std::nullopt;
@@ -353,6 +357,12 @@ TOperatorPtr ApplyLateMaterialization(
             std::move(narrow),
             candidate->TopSort->Keys(),
             candidate->TopSort->Limit());
+        if (candidate->Limit) {
+            bounded = std::make_shared<TLimitOperator>(
+                std::move(bounded),
+                candidate->Limit->Limit(),
+                candidate->Limit->Offset());
+        }
     } else if (candidate->Sort) {
         auto sorted = std::make_shared<TSortOperator>(
             std::move(narrow), candidate->Sort->Keys());
