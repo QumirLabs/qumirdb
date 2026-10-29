@@ -361,6 +361,59 @@
     (block
       (return (call qdb_string_from_magnitude arena value #f))))
 
+  ;; CAST(<date> AS VARCHAR): the ISO 8601 date yyyy-mm-dd of a day count since
+  ;; 1970-01-01 in the proleptic Gregorian calendar, in the arena like `||`. The year,
+  ;; month and day come from Howard Hinnant's civil_from_days ("chrono-Compatible
+  ;; Low-Level Date Algorithms"): the count is shifted to start at 0000-03-01, so a
+  ;; year begins in March and a leap day is its last day, and is split into eras of
+  ;; 400 years (146097 days) in which the leap-year pattern repeats. The year has at
+  ;; least four digits, more when it needs them, and a minus sign when negative.
+  (fun qdb_string_from_date ((var arena <ptr i8>) (var d DATE)) -> StringView
+    (block
+      (var z = (+ (cast (bitcast d i32) i64) 719468))
+      (var era = (// z 146097))
+      (if (< z 0) (block (= era (// (- z 146096) 146097))))
+      (var doe = (- z (* era 146097)))
+      (var yoe = (// (- (+ doe (// doe 36524)) (+ (// doe 1460) (// doe 146096))) 365))
+      (var year = (+ yoe (* era 400)))
+      (var doy = (- doe (- (+ (* 365 yoe) (// yoe 4)) (// yoe 100))))
+      (var mp = (// (+ (* 5 doy) 2) 153))
+      (var day = (+ (- doy (// (+ (* 153 mp) 2) 5)) 1))
+      (var month = (- mp 9))
+      (if (< mp 10) (block (= month (+ mp 3))))
+      (if (<= month 2) (block (= year (+ year 1))))
+      (var negative = (< year 0))
+      (var mag = year)
+      (if negative (block (= mag (- 0 year))))
+      (var digits = 4)
+      (var rest = (// mag 10000))
+      (while (!= rest 0)
+        (block
+          (= digits (+ digits 1))
+          (= rest (// rest 10))))
+      (var size = (+ digits 6))
+      (if negative (block (= size (+ size 1))))
+      (var out = (call qdb_string_arena_alloc arena size))
+      (var pos = 0)
+      (if negative
+        (block
+          (= out [0] (: 45 u8))
+          (= pos 1)))
+      (var i = (+ pos digits))
+      (while (> i pos)
+        (block
+          (= i (- i 1))
+          (= out [i] (cast (+ (% mag 10) 48) u8))
+          (= mag (// mag 10))))
+      (= pos (+ pos digits))
+      (= out [pos] (: 45 u8))
+      (= out [(+ pos 1)] (cast (+ (// month 10) 48) u8))
+      (= out [(+ pos 2)] (cast (+ (% month 10) 48) u8))
+      (= out [(+ pos 3)] (: 45 u8))
+      (= out [(+ pos 4)] (cast (+ (// day 10) 48) u8))
+      (= out [(+ pos 5)] (cast (+ (% day 10) 48) u8))
+      (return (cast (struct ((Data out) (Size size))) StringView))))
+
   ;; CAST(<boolean> AS VARCHAR) spells the value like DuckDB and PostgreSQL output.
   ;; CAST(<boolean> AS INTEGER / BIGINT / DOUBLE) is 1 or 0. Without these conversions
   ;; Qumir lowers the cast as a sign extension of the i1, so TRUE would become -1.

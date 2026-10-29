@@ -18,7 +18,10 @@ namespace NKernel {
 //
 // `from` is the operand's value type, `to` the cast target as the query wrote it, both
 // without nullability. The target keeps its spelling (`DATE`, `StringView`, a planner
-// type, a DECIMAL with its scale) because the planner erases DATE to i32 otherwise.
+// type, a DECIMAL with its scale) because the planner erases DATE to i32 otherwise; so
+// does the operand type when the operand is itself a cast to DATE (see
+// NominalCastType in annotate_type.cpp). A DATE column or literal is an i32 to the
+// planner (issue #226) and takes the integer rows.
 
 // The conversion of `operand` when a rule without a DECIMAL side covers the cast, else
 // nullptr: Qumir's own `cast` or a `cast` operator of qumirdb.oz applies then. Throws a

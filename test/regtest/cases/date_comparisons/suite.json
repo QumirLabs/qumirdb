@@ -5,9 +5,10 @@
     "dates_nullable": {"json": "tables/dates_nullable.json"},
     "spans": {"json": "tables/spans.json"},
     "spans_nullable": {"json": "tables/spans_nullable.json"},
-    "date_strings_nullable": {"json": "tables/date_strings_nullable.json"}
+    "date_strings_nullable": {"json": "tables/date_strings_nullable.json"},
+    "day_numbers_nullable": {"json": "tables/day_numbers_nullable.json"}
   },
-  "tables": {"dates": "dates", "dates_nullable": "dates_nullable", "spans": "spans", "spans_nullable": "spans_nullable", "date_strings_nullable": "date_strings_nullable"},
+  "tables": {"dates": "dates", "dates_nullable": "dates_nullable", "spans": "spans", "spans_nullable": "spans_nullable", "date_strings_nullable": "date_strings_nullable", "day_numbers_nullable": "day_numbers_nullable"},
   "variants": ["single", "threaded", "js"],
   "cases": {
     "column_first.sql": {"order": "unordered"},
@@ -17,6 +18,7 @@
     "cast_column.sql": {"order": "unordered"},
     "cast_column_nullable.sql": {"order": "unordered"},
     "cast_string_column_nullable.sql": {"order": "ordered"},
+    "cast_date_varchar_nullable.sql": {"order": "ordered"},
     "between_plus_interval.sql": {"order": "ordered"},
     "between_plus_interval_nullable.sql": {"order": "ordered"},
     "between_minus_interval.sql": {"order": "ordered"},

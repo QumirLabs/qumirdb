@@ -102,6 +102,16 @@ TExprPtr StringToDate(const TExprPtr& operand, const TTypePtr&, const TTypePtr&,
         std::make_shared<TIntegerType>(TIntegerType::I32));
 }
 
+// qdb_string_from_date formats the day count as an ISO date into the kernel's arena. The
+// operand is cast to DATE first: the rule is chosen by the nominal type the query wrote,
+// but the planner has erased the value it carries to i32, and the i32 -> DATE `cast`
+// operator of qumirdb.oz restores the type the function takes.
+TExprPtr DateToString(const TExprPtr& operand, const TTypePtr&, const TTypePtr&, TLocation loc) {
+    auto date = std::make_shared<TCastExpr>(loc, operand,
+        std::make_shared<TNamedType>("DATE", nullptr));
+    return Call("qdb_string_from_date", {Ident("__arena__", loc), std::move(date)}, loc);
+}
+
 // A DECIMAL is a BinInt of unscaled digits; the conversions below come from qumirdb.oz
 // and take the scale as a literal. qdb_decimal_from_* round the value to the target
 // scale, qdb_decimal_to_* round half away from zero and saturate.
@@ -164,16 +174,17 @@ struct TCastRule {
 };
 
 // One row per conversion Qumir does not perform itself and a `cast` operator of
-// qumirdb.oz cannot: integer -> VARCHAR needs the kernel's arena, which a one-argument
-// operator cannot receive, and a DECIMAL conversion needs the scale of the types.
-// VARCHAR -> DATE is an operator (qdb_sql_date), the row only survives the planner's
-// erasure of DATE to i32. A cast a plain operator can express (boolean -> number,
-// boolean -> VARCHAR) belongs in qumirdb.oz instead; ExpandNullable spells the target
-// of a cast to VARCHAR as StringView so that such an operator is a candidate.
+// qumirdb.oz cannot: integer -> VARCHAR and DATE -> VARCHAR need the kernel's arena,
+// which a one-argument operator cannot receive, and a DECIMAL conversion needs the scale
+// of the types. VARCHAR -> DATE is an operator (qdb_sql_date), the row only survives the
+// planner's erasure of DATE to i32. A cast a plain operator can express (boolean ->
+// number, boolean -> VARCHAR) belongs in qumirdb.oz instead; ExpandNullable spells the
+// target of a cast to VARCHAR as StringView so that such an operator is a candidate.
 // The rows with a DECIMAL side are applied by ExpandDecimal, the others by
 // ExpandNullable (see cast_rules.h).
 const TCastRule CastRules[] = {
     {EKind::Integer, EKind::String, IntegerToString},
+    {EKind::Date, EKind::String, DateToString},
     {EKind::String, EKind::Date, StringToDate},
     {EKind::Integer, EKind::Decimal, IntegerToDecimal},
     {EKind::Float, EKind::Decimal, FloatToDecimal},
@@ -196,11 +207,16 @@ const TCastRule* FindCastRule(EKind from, EKind to) {
 }
 
 // A cast to VARCHAR that neither a row nor a `cast` operator of qumirdb.oz converts
-// (DOUBLE, DECIMAL, DATE; issue #393) is rejected here with the SQL type names: Qumir
-// would report the unresolved cast only when the kernel is compiled.
+// (DOUBLE, DECIMAL; issue #393) is rejected here with the SQL type names: Qumir would
+// report the unresolved cast only when the kernel is compiled.
 bool IsUnsupportedToString(EKind from, EKind to) {
-    return to == EKind::String
-        && (from == EKind::Float || from == EKind::Decimal || from == EKind::Date);
+    return to == EKind::String && (from == EKind::Float || from == EKind::Decimal);
+}
+
+// The SQL spelling of a type in the rejection: Qumir's diagnostic name of a DECIMAL is
+// its SQL name already, that of DOUBLE is `f64`.
+std::string SqlTypeName(const TTypePtr& type) {
+    return TMaybeType<TFloatType>(UnwrapNamedType(type)) ? "DOUBLE" : TypeDiagnosticName(type);
 }
 
 } // namespace
@@ -220,7 +236,7 @@ TExprPtr ApplyCastRule(
     }
     if (IsUnsupportedToString(fromKind, toKind)) {
         throw NQumir::TError(loc,
-            "CAST from " + TypeDiagnosticName(from) + " to VARCHAR is not implemented");
+            "CAST from " + SqlTypeName(from) + " to VARCHAR is not implemented");
     }
     return nullptr;
 }

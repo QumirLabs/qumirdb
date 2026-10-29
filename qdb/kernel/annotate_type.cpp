@@ -1174,6 +1174,23 @@ TExprPtr ConvertValue(const TExprPtr& value, const TTypePtr& from, const TTypePt
     return std::make_shared<TCastExpr>(loc, value, CastTargetQ(valueType));
 }
 
+// The type of a cast operand as the query wrote it, when that says more than the planner
+// type: the target of an inner cast to DATE, which FromQumirType erases to i32 before an
+// outer cast could choose the DATE rule (`CAST(CAST(d AS DATE) AS VARCHAR)`). Taken before
+// the operand is expanded, since the expansion replaces the inner cast node. A DATE column
+// or literal is a plain i32 to the planner (issue #226) and has no such spelling.
+TTypePtr NominalCastType(const TExprPtr& operand) {
+    auto cast = TMaybeNode<TCastExpr>(operand);
+    if (!cast) {
+        return nullptr;
+    }
+    const TTypePtr target = UnwrapNullableType(cast.Cast()->Type);
+    if (auto named = TMaybeType<TNamedType>(target); named && named.Cast()->Name == "DATE") {
+        return target;
+    }
+    return nullptr;
+}
+
 // NULLIF(divisor, 0) as Nullable[value]: a zero divisor becomes one more NULL operand of
 // the division, so the null-strict guard skips computing it.
 TExprPtr NullIfZero(const TExprPtr& divisor, const TTypePtr& type, uint64_t& counter,
@@ -1518,6 +1535,7 @@ TTypePtr Expand(TExprPtr& e, const TStructType& inputType, uint64_t& counter) {
 
     if (auto cp = TMaybeNode<TCastExpr>(e)) {
         auto node = cp.Cast();
+        const TTypePtr nominal = NominalCastType(node->Operand);
         TTypePtr ot = Expand(node->Operand, inputType, counter);
         // `target` is the (non-nullable) value type; a nullable cast target contributes
         // nullability separately (BuildNullStrict / nullable_from_value wrap it once).
@@ -1525,6 +1543,8 @@ TTypePtr Expand(TExprPtr& e, const TStructType& inputType, uint64_t& counter) {
             ? UnwrapNullableType(node->Type)
             : FromQumirType(node->Type);
         const TTypePtr castTarget = UnwrapNullableType(node->Type);
+        // The operand type the cast table sees; `ot` keeps deciding the nullability.
+        const TTypePtr from = nominal ? nominal : ot;
         if (IsUntypedNull(node->Operand, ot)) {
             // CAST(NULL AS T) is the NULL of T.
             e = std::make_shared<TCastExpr>(node->Location, MakeNull(node->Location), NullableQ(target));
@@ -1542,7 +1562,7 @@ TTypePtr Expand(TExprPtr& e, const TStructType& inputType, uint64_t& counter) {
                 if (PlanTypeKey(UnwrapNullableType(ot)) != PlanTypeKey(base)) {
                     // Base conversion targets the planner base type so ExpandDecimal can
                     // still turn a float/int -> decimal cast into qdb_decimal_from_*.
-                    val = ConvertValue(val, ot, base, base, node->Location);
+                    val = ConvertValue(val, from, base, base, node->Location);
                 }
                 e = std::make_shared<TCastExpr>(node->Location, val, ToQumirType(node->Type));
                 return std::make_shared<TNullable>(base);
@@ -1552,7 +1572,7 @@ TTypePtr Expand(TExprPtr& e, const TStructType& inputType, uint64_t& counter) {
             // is spelled with the StringView target so that a `cast` operator of
             // qumirdb.oz (boolean -> VARCHAR) is a candidate.
             if (auto converted = ot
-                ? ApplyCastRule(ot, castTarget, node->Operand, node->Location)
+                ? ApplyCastRule(from, castTarget, node->Operand, node->Location)
                 : nullptr)
             {
                 e = converted;
@@ -1566,8 +1586,8 @@ TTypePtr Expand(TExprPtr& e, const TStructType& inputType, uint64_t& counter) {
         // BuildNullStrict already re-wraps the result in Nullable[target], so the inner
         // conversion targets the plain value type.
         e = BuildNullStrict({{operand, true}},
-            [ot, castTarget, target, node](std::vector<TExprPtr> a) -> TExprPtr {
-                return ConvertValue(a[0], ot, castTarget, target, node->Location);
+            [from, castTarget, target, node](std::vector<TExprPtr> a) -> TExprPtr {
+                return ConvertValue(a[0], from, castTarget, target, node->Location);
             }, target, counter, node->Location);
         return std::make_shared<TNullable>(target);
     }

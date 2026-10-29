@@ -1,2 +1,2 @@
-Error: CAST from f64 to VARCHAR is not implemented @ Line: 1, Byte: 12, Column: 12
+Error: CAST from DOUBLE to VARCHAR is not implemented @ Line: 1, Byte: 12, Column: 12
 

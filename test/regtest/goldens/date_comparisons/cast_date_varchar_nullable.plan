@@ -1,0 +1,3 @@
+sort [d asc]
+└─ project (d, iso, lit, c) (rows≈13 cost≈728)
+   └─ source day_numbers_nullable AS day_numbers_nullable (rows≈13 cost≈52)
