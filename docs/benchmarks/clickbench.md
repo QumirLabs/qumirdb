@@ -62,35 +62,3 @@ measurement per query.
 | q41 | 0.011 | 0.060 | 0.120 | 0.18× | 0.09× |
 | q42 | 0.008 | 0.060 | 0.100 | 0.14× | 0.08× |
 | **total** | **13.499** | **14.44** | **14.95** | **0.93×** | **0.90×** |
-
-## Global aggregate cascade
-
-A/B of 2026-10-29 on the queries without `GROUP BY` that end in a global
-aggregate (q5 needs a string aggregate qdb lacks). Four arms: master
-`b723dbf7`; the same build with `[aggregate] cascade_global` at its new default
-`auto`, forced `true` and forced `false` (`8d9a2ea3`). Each arm has its own
-persistent JIT cache. One warm-up run per query and arm, then five timed
-rounds with the arms alternated; the table shows the **median** processing
-time of the five. Every arm returned identical rows.
-
-| Query | master (s) | auto (s) | true (s) | false (s) |
-|---|---|---|---|---|
-| q0 | 0.108 | 0.014 | 0.014 | 0.107 |
-| q1 | 0.047 | 0.015 | 0.015 | 0.045 |
-| q2 | 0.252 | 0.045 | 0.045 | 0.252 |
-| q3 | 0.188 | 0.038 | 0.038 | 0.186 |
-| q4 | 0.187 | 0.167 | 0.168 | 0.185 |
-| q6 | 0.154 | 0.023 | 0.022 | 0.154 |
-| q20 | 0.369 | 0.369 | 0.368 | 0.372 |
-| q29 | 0.170 | 0.031 | 0.031 | 0.172 |
-| **sum** | **1.475** | **0.704** | **0.702** | **1.474** |
-
-`auto` chooses the cascade for every query here (the estimated input of each
-global aggregate is far above the 1,048,576-row bound) and matches forced
-`true`. q4 and q20 are bound by the `COUNT(DISTINCT)` dedup and the `LIKE`
-scan, so the serial fold was not their bottleneck.
-
-On a cold JIT cache the cascade compiles a partial and a combine program
-instead of one: LLVM time rose from about 0.20 s to 0.33 s on q2 and from
-0.40 s to 0.52 s on q29 (three runs each). Processing excludes compilation,
-and the persistent cache amortizes it across runs.
