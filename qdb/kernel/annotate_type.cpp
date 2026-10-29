@@ -1717,36 +1717,14 @@ TExprPtr DecimalScaleLiteral(TLocation loc, int32_t scale) {
     return Int64(loc, static_cast<int64_t>(scale));
 }
 
+// The expression as a DECIMAL of `targetScale`: the cast-table row from its value type.
+// Only the scale matters to the conversion, so the target carries the widest precision.
 TExprPtr DecimalValueAtScale(TExprPtr expr, const TTypePtr& type, int32_t targetScale,
     TLocation loc)
 {
-    TTypePtr valueType = ValueType(type);
-    if (auto decimal = DecimalSpecOfValueType(valueType)) {
-        if (decimal->Scale == targetScale) {
-            return expr;
-        }
-        if (decimal->Scale > targetScale) {
-            throw NQumir::TError(
-                "decimal scale down cast is not implemented: " +
-                std::to_string(decimal->Scale) + " -> " + std::to_string(targetScale));
-        }
-        return Call("qdb_decimal_scale_up", {
-            std::move(expr),
-            DecimalScaleLiteral(loc, targetScale - decimal->Scale),
-        }, loc);
-    }
-    valueType = UnwrapNamedType(valueType);
-    if (IsInt(valueType)) {
-        return Call("qdb_decimal_from_i64", {
-            CastToI64(std::move(expr), loc),
-            DecimalScaleLiteral(loc, targetScale),
-        }, loc);
-    }
-    if (IsFloat(valueType)) {
-        return Call("qdb_decimal_from_f64", {
-            std::move(expr),
-            DecimalScaleLiteral(loc, targetScale),
-        }, loc);
+    TTypePtr target = MakeDecimalType({.Precision = MaxDecimalPrecision, .Scale = targetScale});
+    if (auto converted = ApplyDecimalCastRule(ValueType(type), target, expr, loc)) {
+        return converted;
     }
     throw NQumir::TError(
         "cannot convert type '" + (type ? TypeDiagnosticName(type) : std::string("unknown")) +
@@ -1771,11 +1749,10 @@ int32_t DecimalCommonScale(const TTypePtr& left, const TTypePtr& right,
 // The expression as a DOUBLE: a decimal is converted like CAST(... AS DOUBLE), anything else
 // already is one or is converted by the caller's cast.
 TExprPtr DecimalValueAsDouble(TExprPtr expr, const TTypePtr& type, TLocation loc) {
-    if (auto decimal = DecimalSpecOfValueType(ValueType(type))) {
-        return Call("qdb_decimal_to_f64", {
-            std::move(expr),
-            DecimalScaleLiteral(loc, decimal->Scale),
-        }, loc);
+    if (auto converted = ApplyDecimalCastRule(ValueType(type), std::make_shared<TFloatType>(),
+            expr, loc))
+    {
+        return converted;
     }
     return expr;
 }
@@ -2020,30 +1997,12 @@ TTypePtr ExpandDecimalNode(TExprPtr& e, const TStructType& inputType, TTypeEnv& 
             e = DecimalValueAtScale(node->Operand, ot, decimal->Scale, node->Location);
             return MakeDecimalType(*decimal);
         }
-        if (ot && IsFloat(UnwrapNamedType(ValueType(target)))) {
-            if (auto decimal = DecimalSpecOfValueType(ValueType(ot))) {
-                e = Call("qdb_decimal_to_f64", {
-                    std::move(node->Operand),
-                    DecimalScaleLiteral(node->Location, decimal->Scale),
-                }, node->Location);
-            }
-        }
-        if (ot) {
-            auto integer = TMaybeType<TIntegerType>(UnwrapNamedType(ValueType(target)));
-            auto decimal = DecimalSpecOfValueType(ValueType(ot));
-            if (integer && decimal) {
-                // Only i32 and i64 are SQL integer types; qdb_decimal_to_i32/i64 round
-                // half away from zero and saturate.
-                const int bits = integer.Cast()->BitWidth();
-                if (bits != 32 && bits != 64) {
-                    throw NQumir::TError("decimal cast to a " + std::to_string(bits) +
-                        "-bit integer is not implemented; only INTEGER and BIGINT exist");
-                }
-                e = Call(bits == 32 ? "qdb_decimal_to_i32" : "qdb_decimal_to_i64", {
-                    std::move(node->Operand),
-                    DecimalScaleLiteral(node->Location, decimal->Scale),
-                }, node->Location);
-            }
+        // DECIMAL -> DOUBLE / INTEGER: the cast-table row from the operand's value type.
+        if (auto converted = ot
+            ? ApplyDecimalCastRule(ValueType(ot), ValueType(target), node->Operand, node->Location)
+            : nullptr)
+        {
+            e = converted;
         }
         return Propagate({ot}, target);
     }
