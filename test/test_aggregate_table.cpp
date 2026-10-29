@@ -71,6 +71,9 @@ struct TTable {
     int64_t Shift = 0;
     int64_t Rows = 0;
     int64_t Keys = 0;
+    uint8_t** Direct = nullptr;
+    int64_t DirectMin = 0;
+    uint64_t DirectSlots = 0;
 };
 
 struct TScratch {
