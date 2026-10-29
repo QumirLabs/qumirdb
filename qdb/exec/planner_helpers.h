@@ -96,6 +96,14 @@ std::shared_ptr<TAggregateOperator> BuildAggregateCombineOperator(
     const TAggregateOperator& aggregate,
     std::vector<std::string> groupKeys);
 
+// The projection that turns one input row of `aggregate` into the partial state
+// its combine operator merges: the group keys, 1 or 0 for a count, and the
+// argument of sum, min and max widened to the state type. It lets a partial
+// aggregate hand rows through once hashing them stops paying off. nullptr when
+// an aggregate function has no single-row state.
+std::shared_ptr<TProjectOperator> BuildAggregatePassThroughOperator(
+    const TAggregateOperator& aggregate);
+
 // Compilation-free projection layout: column plan, computed-expression types
 // and the output struct. Shared by the runtime process builder and the plan
 // exporter so output typing has one source.

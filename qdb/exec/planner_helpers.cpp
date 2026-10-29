@@ -170,6 +170,65 @@ std::shared_ptr<TAggregateOperator> BuildAggregateCombineOperator(
         aggregate.Input(), std::move(groupKeys), std::move(combineAggs));
 }
 
+std::shared_ptr<TProjectOperator> BuildAggregatePassThroughOperator(
+    const TAggregateOperator& aggregate)
+{
+    using namespace NQumir::NAst;
+    auto maybeInput = TMaybeType<TStructType>(
+        UnwrapNamedType(aggregate.Input()->OutputColumns()));
+    if (!maybeInput) {
+        return nullptr;
+    }
+    const auto* inputStruct = maybeInput.Cast().get();
+    const NQumir::TLocation loc{};
+    auto ident = [&](const std::string& name) {
+        return std::make_shared<TIdentExpr>(loc, name);
+    };
+    auto literal = [&](int64_t value) {
+        return std::make_shared<TNumberExpr>(loc, value);
+    };
+
+    std::vector<TProjectionSpec> projections;
+    projections.reserve(aggregate.GroupKeys().size() + aggregate.Aggs().size());
+    for (const auto& key : aggregate.GroupKeys()) {
+        projections.push_back({.Name = key, .Expression = ident(key)});
+    }
+    for (const auto& agg : aggregate.Aggs()) {
+        // Aggregate arguments at this boundary are column references.
+        auto argIdent = agg.Arg ? TMaybeNode<TIdentExpr>(agg.Arg) : TMaybeNode<TIdentExpr>(nullptr);
+        if (agg.Arg && !argIdent) {
+            return nullptr;
+        }
+        TExprPtr state;
+        if (agg.Func == "count") {
+            state = argIdent
+                ? std::make_shared<TIfExpr>(
+                    loc,
+                    std::make_shared<TCallExpr>(
+                        loc, ident("qdb_is_null"), std::vector<TExprPtr>{ident(argIdent.Cast()->Name)}),
+                    literal(0),
+                    literal(1))
+                : TExprPtr(literal(1));
+        } else if (argIdent && (agg.Func == "sum" || agg.Func == "min" || agg.Func == "max")) {
+            const auto& argName = argIdent.Cast()->Name;
+            auto argType = FieldType(inputStruct, argName);
+            auto stateType = AggregateResultType(agg.Func, argType);
+            if (!argType || !stateType) {
+                return nullptr;
+            }
+            state = ident(argName);
+            // The state of an integer aggregate is i64 whatever the argument width.
+            if (TypeKey(UnwrapNullableType(argType)) != TypeKey(UnwrapNullableType(stateType))) {
+                state = std::make_shared<TCastExpr>(loc, std::move(state), UnwrapNullableType(stateType));
+            }
+        } else {
+            return nullptr;
+        }
+        projections.push_back({.Name = agg.Name, .Expression = std::move(state)});
+    }
+    return std::make_shared<TProjectOperator>(aggregate.Input(), std::move(projections));
+}
+
 int64_t EstimateAggregateInitialCapacity(
     const TAggregateOperator& aggregate,
     size_t partitionCount)

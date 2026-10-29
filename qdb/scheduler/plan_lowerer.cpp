@@ -83,6 +83,19 @@ struct TAggregateBlockingState : TProcessorTaskState<TAggregateBlockingState> {
     bool Done = false;
 };
 
+struct TPartialAggregateBlockingState : TProcessorTaskState<TPartialAggregateBlockingState> {
+    TPartialAggregateBlockingState(
+        TAggregateKernels kernels,
+        TAggregateTablePlan plan,
+        TPartialAggregatePolicy policy,
+        TUnaryStreamProcess passThrough)
+        : Processor(std::move(kernels), plan, policy, std::move(passThrough))
+    {}
+
+    TPartialAggregateProcessor Processor;
+    bool Done = false;
+};
+
 struct TGroupingSetsBlockingState : TProcessorTaskState<TGroupingSetsBlockingState> {
     TGroupingSetsBlockingState(
         TAggregateKernels kernels, TAggregateTablePlan plan,
@@ -1575,6 +1588,133 @@ private:
         };
     }
 
+    // The compiled kernels of one aggregate stage and the table plan of its tasks.
+    struct TCompiledAggregate {
+        std::shared_ptr<TAggregateKernels> Kernels;
+        TAggregateTablePlan Plan;
+        NQumir::NAst::TTypePtr OutputType;
+    };
+
+    TCompiledAggregate CompileAggregateTable(
+        const NQumir::NAst::TStructType& inputType,
+        const TAggregateOperator& aggregate,
+        std::string stage,
+        TExecStageId execStageId,
+        const TAggregateTaskEstimate& estimate,
+        bool hasPrecomputedHash)
+    {
+        auto spec = NKernel::BuildAggregateKernelSpec(
+            inputType, aggregate.GroupKeys(), aggregate.Aggs(), ExternalCatalog_.get(),
+            aggregate.EmptyInputGroups());
+        spec.HasPrecomputedHash = hasPrecomputedHash;
+        // Only a table that may take the row layout needs its kernels.
+        spec.AggregateRowLayout = AggregateMayUseRowLayout(Settings_.Aggregate.Table, aggregate);
+        TKernelCompiler compiler(
+            KernelOptions(std::move(stage), execStageId));
+        auto kernels = std::make_shared<TAggregateKernels>(
+            compiler.CompileAggregate(spec));
+        const auto plan = PlanAggregateTable(estimate, *kernels, Settings_.Aggregate.Table);
+        return {
+            .Kernels = std::move(kernels),
+            .Plan = plan,
+            .OutputType = spec.OutputSchema,
+        };
+    }
+
+    // Whether two row schemas have the same column names and types.
+    static bool SameFields(
+        const NQumir::NAst::TTypePtr& left, const NQumir::NAst::TTypePtr& right)
+    {
+        auto* a = static_cast<NQumir::NAst::TStructType*>(left.get());
+        auto* b = static_cast<NQumir::NAst::TStructType*>(right.get());
+        if (!a || !b || a->Fields.size() != b->Fields.size()) {
+            return false;
+        }
+        for (size_t i = 0; i < a->Fields.size(); ++i) {
+            const auto& [aName, aType] = a->Fields[i];
+            const auto& [bName, bType] = b->Fields[i];
+            if (aName != bName || !aType || !bType || aType->ToString() != bType->ToString()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // The partial phase of a grouped cascade: the aggregate's table, bounded and
+    // watching its reduction, with the projection it hands rows through with
+    // once hashing stops paying off (TPartialAggregateProcessor).
+    TBlockingTail BuildPartialAggregateTail(
+        const NQumir::NAst::TTypePtr& childType,
+        TAggregateOperator& aggregate,
+        const std::string& stage,
+        TExecStageId execStageId,
+        const TAggregateTaskEstimate& estimate)
+    {
+        auto* inputType =
+            static_cast<NQumir::NAst::TStructType*>(childType.get());
+        if (!inputType) {
+            throw std::runtime_error("aggregate input must have TStructType");
+        }
+        auto compiled = CompileAggregateTable(
+            *inputType, aggregate, stage, execStageId, estimate,
+            /*hasPrecomputedHash=*/false);
+
+        TUnaryStreamProcess passThrough;
+        if (auto project = BuildAggregatePassThroughOperator(aggregate)) {
+            auto runtime = BuildProjectRuntimeProcess(
+                *project, childType, KernelOptions(stage, execStageId));
+            // The projection must produce exactly the rows the table emits; a
+            // partial aggregate without it still reduces, it only never hands
+            // rows through.
+            if (SameFields(runtime.OutputType, compiled.OutputType)) {
+                passThrough = std::move(runtime.Process);
+            } else if (Diagnostics_) {
+                *Diagnostics_ << "partial aggregate pass-through schema differs from the table's\n";
+            }
+        }
+        const TPartialAggregatePolicy policy{
+            .SampleRows = Settings_.Aggregate.PartialSampleRows,
+            .PassThroughReduction = Settings_.Aggregate.PartialPassThroughReduction,
+            .MaxGroups = static_cast<int64_t>(std::max<size_t>(Settings_.Aggregate.PartialMaxGroups, 1)),
+        };
+
+        auto code = std::make_shared<NScheduler::TBlockingCode>(
+            [](NScheduler::ITaskState& state, NScheduler::TInputPort& input, TRowSet& output) {
+                auto* s = &static_cast<TPartialAggregateBlockingState&>(state);
+                if (s->Done) {
+                    return NScheduler::ETaskResult::FINISHED;
+                }
+                TRowSet rowSet{};
+                while (true) {
+                    auto fetch = input.Fetch(rowSet);
+                    if (fetch == NScheduler::EFetchResult::NO_DATA) {
+                        return NScheduler::ETaskResult::NEED_DATA;
+                    }
+                    if (fetch == NScheduler::EFetchResult::FINISHED) {
+                        s->Done = true;
+                        return s->Processor.Finish(output)
+                            ? NScheduler::ETaskResult::OK
+                            : NScheduler::ETaskResult::FINISHED;
+                    }
+                    s->Processor.Add(rowSet);
+                    if (s->Processor.Next(output)) {
+                        return NScheduler::ETaskResult::OK;
+                    }
+                }
+            });
+        return TBlockingTail{
+            .Code = std::move(code),
+            .MakeState = [kernels = compiled.Kernels, plan = compiled.Plan, policy, passThrough]()
+                -> std::shared_ptr<NScheduler::ITaskState>
+            {
+                return std::make_shared<TPartialAggregateBlockingState>(
+                    *kernels, plan, policy, passThrough);
+            },
+            .OutputType = compiled.OutputType,
+            .LabelDetail = AggregateTableLabel(compiled.Plan),
+        };
+    }
+
     TBlockingTail BuildAggregateTail(
         const NQumir::NAst::TTypePtr& childType,
         TAggregateOperator& aggregate,
@@ -1592,17 +1732,8 @@ private:
             return BuildGroupingSetsAggregateTail(
                 childType, *inputType, aggregate, std::move(stage), execStageId);
         }
-        auto spec = NKernel::BuildAggregateKernelSpec(
-            *inputType, aggregate.GroupKeys(), aggregate.Aggs(), ExternalCatalog_.get(),
-            aggregate.EmptyInputGroups());
-        spec.HasPrecomputedHash = hasPrecomputedHash;
-        // Only a table that may take the row layout needs its kernels.
-        spec.AggregateRowLayout = AggregateMayUseRowLayout(Settings_.Aggregate.Table, aggregate);
-        TKernelCompiler compiler(
-            KernelOptions(std::move(stage), execStageId));
-        auto kernels = std::make_shared<TAggregateKernels>(
-            compiler.CompileAggregate(spec));
-        const auto plan = PlanAggregateTable(estimate, *kernels, Settings_.Aggregate.Table);
+        auto compiled = CompileAggregateTable(
+            *inputType, aggregate, std::move(stage), execStageId, estimate, hasPrecomputedHash);
         auto code = std::make_shared<NScheduler::TBlockingCode>(
             [](NScheduler::ITaskState& state, NScheduler::TInputPort& input, TRowSet& output) {
                 auto* s = &static_cast<TAggregateBlockingState&>(state);
@@ -1627,11 +1758,13 @@ private:
             });
         return TBlockingTail{
             .Code = std::move(code),
-            .MakeState = [kernels, plan]() -> std::shared_ptr<NScheduler::ITaskState> {
+            .MakeState = [kernels = compiled.Kernels, plan = compiled.Plan]()
+                -> std::shared_ptr<NScheduler::ITaskState>
+            {
                 return std::make_shared<TAggregateBlockingState>(*kernels, plan);
             },
-            .OutputType = spec.OutputSchema,
-            .LabelDetail = AggregateTableLabel(plan),
+            .OutputType = compiled.OutputType,
+            .LabelDetail = AggregateTableLabel(compiled.Plan),
         };
     }
 
@@ -1859,7 +1992,7 @@ private:
         TBlockingTail partialTail =
             [&]() {
                 TStageDiagnosticsScope diagnosticsScope(Diagnostics_, partialGroup);
-                return BuildAggregateTail(
+                return BuildPartialAggregateTail(
                     childOut.OutputType,
                     aggregate,
                     partialGroup,
@@ -3205,11 +3338,22 @@ bool ShouldUsePartialAggregate(
     }
 
     const auto inputStats = aggregate.Input()->Stats_;
-    const auto estimatedGroups = EstimateAggregateGroupCount(aggregate);
-    if (!inputStats || !estimatedGroups || *estimatedGroups == 0 ||
-        inputStats->RowCount < settings.Aggregate.PartialMinInputRows)
-    {
+    if (!inputStats || inputStats->RowCount < settings.Aggregate.PartialMinInputRows) {
         return false;
+    }
+
+    // Statistics only rule the partial out. Without a group estimate, or with
+    // one that says nothing, the partial aggregate judges its reduction at run
+    // time and hands rows through when it is low (TPartialAggregateProcessor).
+    const auto estimatedGroups = EstimateAggregateGroupCount(aggregate);
+    if (!estimatedGroups) {
+        return true;
+    }
+    // The estimate of a composite key is the product of the key NDVs under
+    // independence, an upper bound. Once it reaches the row count it is the
+    // trivial bound, true of every input, and says nothing about the groups.
+    if (aggregate.GroupKeys().size() > 1 && *estimatedGroups >= inputStats->RowCount) {
+        return true;
     }
 
     const uint64_t reduction = std::max<size_t>(
