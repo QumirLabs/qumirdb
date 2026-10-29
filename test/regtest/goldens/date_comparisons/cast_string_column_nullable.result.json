@@ -1,0 +1,10 @@
+{
+  "schema": "<struct (s <named Nullable [string]>) (d <named Nullable [i32]>) (late <named Nullable [bool]>)>",
+  "rows": [
+    ["1970-01-01", 0, false],
+    ["1998-08-03", 10441, false],
+    ["1998-08-04", 10442, true],
+    ["1998-08-05", 10443, true],
+    [null, null, null]
+  ]
+}

@@ -323,6 +323,41 @@
   (fun qdb_string_arena_alloc ((var arena <ptr i8>) (var size i64)) -> <ptr u8>
        (attrs extern) (block))
 
+  ;; CAST(<integer> AS VARCHAR): the decimal digits of value, in the arena like the
+  ;; result of `||`. The cast rule (qdb/kernel/cast_rules.cpp) widens every integer
+  ;; width to i64 and passes the arena.
+  (fun qdb_string_from_i64 ((var arena <ptr i8>) (var value i64)) -> StringView
+    (block
+      ;; The magnitude as u64: negating the most negative i64 fits there.
+      (var negative = (< value 0))
+      (var mag = (cast value u64))
+      (if negative (block (= mag (- (: 0 u64) mag))))
+      (var digits = 1)
+      (var rest = (// mag (: 10 u64)))
+      (while (!= rest (: 0 u64))
+        (block
+          (= digits (+ digits 1))
+          (= rest (// rest (: 10 u64)))))
+      (var size = digits)
+      (if negative (block (= size (+ size 1))))
+      (var out = (call qdb_string_arena_alloc arena size))
+      (var pos = size)
+      (var i = 0)
+      (while (< i digits)
+        (block
+          (= pos (- pos 1))
+          (= out [pos] (cast (+ (% mag (: 10 u64)) (: 48 u64)) u8))
+          (= mag (// mag (: 10 u64)))
+          (= i (+ i 1))))
+      (if negative (block (= out [0] (: 45 u8))))
+      (return (cast (struct ((Data out) (Size size))) StringView))))
+
+  ;; CAST(<boolean> AS VARCHAR) spells the value like DuckDB and PostgreSQL output.
+  (fun qdb_string_from_bool ((var value bool)) -> StringView
+    (block
+      (if value (block (return (cast "true" StringView))))
+      (return (cast "false" StringView))))
+
   ;; SQL UPPER/LOWER map each character by the simple (one code point to one
   ;; code point) Unicode case mapping, as DuckDB does, in Basic Latin, Latin-1
   ;; Supplement, Latin Extended-A, Latin Extended Additional, the Greek alphabet

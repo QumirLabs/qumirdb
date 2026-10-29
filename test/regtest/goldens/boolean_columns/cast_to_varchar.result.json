@@ -1,0 +1,16 @@
+{
+  "schema": "<struct (x i64) (xs string) (ms string) (bs string) (ns <named Nullable [string]>) (c string)>",
+  "rows": [
+    ["0", "0", "-5", "false", null, "x0"],
+    ["1", "1", "-4", "true", "true", "x1"],
+    ["2", "2", "-3", "false", "false", "x2"],
+    ["4", "4", "-1", "false", "false", "x4"],
+    ["5", "5", "0", "true", "true", "x5"],
+    ["6", "6", "1", "false", null, "x6"],
+    ["7", "7", "2", "true", "true", "x7"],
+    ["8", "8", "3", "false", "false", "x8"],
+    ["9", "9", "4", "true", null, "x9"],
+    ["10", "10", "5", "false", "false", "x10"],
+    ["11", "11", "6", "true", "true", "x11"]
+  ]
+}

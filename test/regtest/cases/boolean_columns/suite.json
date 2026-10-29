@@ -32,6 +32,9 @@
     "cast_to_number.sql": {
       "order": "ordered"
     },
+    "cast_to_varchar.sql": {
+      "order": "ordered"
+    },
     "group_boolean.sql": {
       "order": "ordered"
     },
