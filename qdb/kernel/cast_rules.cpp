@@ -94,10 +94,6 @@ TExprPtr IntegerToString(const TExprPtr& operand, const TTypePtr& from, const TT
         {Ident("__arena__", loc), std::move(wide)}, loc);
 }
 
-TExprPtr BoolToString(const TExprPtr& operand, const TTypePtr&, const TTypePtr&, TLocation loc) {
-    return Call("qdb_string_from_bool", {operand}, loc);
-}
-
 // qdb_sql_date is the `cast` operator StringView -> DATE of qumirdb.oz; the rule keeps a
 // string column cast to DATE on it after the planner has erased DATE to i32, and erases
 // the nominal DATE it returns the same way.
@@ -169,16 +165,15 @@ struct TCastRule {
 
 // One row per conversion Qumir does not perform itself and a `cast` operator of
 // qumirdb.oz cannot: integer -> VARCHAR needs the kernel's arena, which a one-argument
-// operator cannot receive; a DECIMAL conversion needs the scale of the types; and the
-// Qumir resolver fails `cast` to StringView while the generic nullable_from_value[T]
-// is a candidate, so boolean -> VARCHAR is a row too. VARCHAR -> DATE is an operator
-// (qdb_sql_date), the row only survives the planner's erasure of DATE to i32. A cast
-// a plain operator can express (boolean -> number) belongs in qumirdb.oz instead.
+// operator cannot receive, and a DECIMAL conversion needs the scale of the types.
+// VARCHAR -> DATE is an operator (qdb_sql_date), the row only survives the planner's
+// erasure of DATE to i32. A cast a plain operator can express (boolean -> number,
+// boolean -> VARCHAR) belongs in qumirdb.oz instead; ExpandNullable spells the target
+// of a cast to VARCHAR as StringView so that such an operator is a candidate.
 // The rows with a DECIMAL side are applied by ExpandDecimal, the others by
 // ExpandNullable (see cast_rules.h).
 const TCastRule CastRules[] = {
     {EKind::Integer, EKind::String, IntegerToString},
-    {EKind::Bool, EKind::String, BoolToString},
     {EKind::String, EKind::Date, StringToDate},
     {EKind::Integer, EKind::Decimal, IntegerToDecimal},
     {EKind::Float, EKind::Decimal, FloatToDecimal},
@@ -200,10 +195,12 @@ const TCastRule* FindCastRule(EKind from, EKind to) {
     return nullptr;
 }
 
-// A cast to VARCHAR without a rule has no conversion at all: Qumir's only `cast`
-// candidate to StringView is the generic nullable wrapper, whose error misleads.
+// A cast to VARCHAR that neither a row nor a `cast` operator of qumirdb.oz converts
+// (DOUBLE, DECIMAL, DATE; issue #393) is rejected here with the SQL type names: Qumir
+// would report the unresolved cast only when the kernel is compiled.
 bool IsUnsupportedToString(EKind from, EKind to) {
-    return to == EKind::String && from != EKind::String && from != EKind::Other;
+    return to == EKind::String
+        && (from == EKind::Float || from == EKind::Decimal || from == EKind::Date);
 }
 
 } // namespace

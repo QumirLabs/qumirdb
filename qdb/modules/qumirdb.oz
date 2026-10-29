@@ -379,7 +379,7 @@
       (if value (block (return 1.0)))
       (return 0.0)))
 
-  (fun qdb_string_from_bool ((var value bool)) -> StringView
+  (fun qdb_string_from_bool ((var value bool)) -> StringView (attrs (operator "cast"))
     (block
       (if value (block (return (cast "true" StringView))))
       (return (cast "false" StringView))))

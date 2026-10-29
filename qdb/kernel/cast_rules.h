@@ -21,9 +21,9 @@ namespace NKernel {
 // type, a DECIMAL with its scale) because the planner erases DATE to i32 otherwise.
 
 // The conversion of `operand` when a rule without a DECIMAL side covers the cast, else
-// nullptr: Qumir's own `cast` applies then. Throws a TError naming the types for a cast
-// to VARCHAR that no rule implements; Qumir's error there names a generic candidate and
-// misleads.
+// nullptr: Qumir's own `cast` or a `cast` operator of qumirdb.oz applies then. Throws a
+// TError naming the SQL types for a cast to VARCHAR that neither implements; Qumir would
+// report the unresolved cast only when the kernel is compiled.
 NQumir::NAst::TExprPtr ApplyCastRule(
     const NQumir::NAst::TTypePtr& from,
     const NQumir::NAst::TTypePtr& to,

@@ -1160,16 +1160,18 @@ TExprPtr Build3VL(bool isAnd, const TExprPtr& a, const TTypePtr& at,
 }
 
 // The conversion of a plain `value` of type `from` to a cast target: a row of the cast
-// table when one covers it, else Qumir's own `cast`. `castTarget` is the target as the
+// table when one covers it, else a Qumir `cast`. `castTarget` is the target as the
 // query wrote it (it still tells DATE from i32); `valueType` is the planner value type
-// the plain cast targets (kept planner-typed so ExpandDecimal can still lower it).
+// the plain cast targets. CastTargetQ keeps a DECIMAL planner-typed so ExpandDecimal can
+// still lower it and spells VARCHAR as StringView: the planner's `string` is not the
+// type the `cast` operators of qumirdb.oz produce, so none would be a candidate.
 TExprPtr ConvertValue(const TExprPtr& value, const TTypePtr& from, const TTypePtr& castTarget,
     const TTypePtr& valueType, TLocation loc)
 {
     if (auto converted = ApplyCastRule(ValueType(from), castTarget, value, loc)) {
         return converted;
     }
-    return std::make_shared<TCastExpr>(loc, value, valueType);
+    return std::make_shared<TCastExpr>(loc, value, CastTargetQ(valueType));
 }
 
 // NULLIF(divisor, 0) as Nullable[value]: a zero divisor becomes one more NULL operand of
@@ -1546,12 +1548,17 @@ TTypePtr Expand(TExprPtr& e, const TStructType& inputType, uint64_t& counter) {
                 return std::make_shared<TNullable>(base);
             }
             // Without a rule the plain cast stays as written: its target may be a type
-            // only qumirdb.oz knows, like `DATE` for a date literal.
+            // only qumirdb.oz knows, like `DATE` for a date literal. A cast to VARCHAR
+            // is spelled with the StringView target so that a `cast` operator of
+            // qumirdb.oz (boolean -> VARCHAR) is a candidate.
             if (auto converted = ot
                 ? ApplyCastRule(ot, castTarget, node->Operand, node->Location)
                 : nullptr)
             {
                 e = converted;
+            } else if (TMaybeType<TStringType>(castTarget)) {
+                e = std::make_shared<TCastExpr>(node->Location, node->Operand,
+                    CastTargetQ(castTarget));
             }
             return ot ? target : nullptr;
         }
@@ -2199,8 +2206,9 @@ bool ContainsNull(const TExprPtr& e) {
 // comparisons, strcat/upper/lower -> their arena calls, qdb_string_view_sql_like -> a
 // constant-pattern fast path, a cast to a nullable target -> nullable_from_value (the raw
 // planner TNullable won't compile), a cast the cast table rewrites or rejects (integer ->
-// VARCHAR, VARCHAR -> DATE), and a `%` or decimal `/` by what may be zero -> a NULLIF
-// guard. Float division keeps the fast path: it has no such rewrite.
+// VARCHAR, VARCHAR -> DATE), a cast to VARCHAR -> its StringView spelling, and a `%` or
+// decimal `/` by what may be zero -> a NULLIF guard. Float division keeps the fast path:
+// it has no such rewrite.
 bool ContainsMustExpandCall(const TExprPtr& e, const TStructType& inputType) {
     if (!e) return false;
     if (auto call = TMaybeNode<TCallExpr>(e)) {
@@ -2215,6 +2223,7 @@ bool ContainsMustExpandCall(const TExprPtr& e, const TStructType& inputType) {
     }
     if (auto cast = TMaybeNode<TCastExpr>(e)) {
         if (IsNullableType(cast.Cast()->Type)) return true;
+        if (TMaybeType<TStringType>(cast.Cast()->Type)) return true;
         if (HasCastRule(ValueType(InferType(cast.Cast()->Operand, inputType)),
                 UnwrapNullableType(cast.Cast()->Type)))
         {
