@@ -711,8 +711,9 @@ A grouped aggregate task starts as a swiss table, which keeps one array per stat
 word. When its groups outgrow the cache, the table moves at its next rehash to
 rows: a group's key and states in one arena row behind salted 8-byte entries, so
 an update touches about two cache lines instead of three plus one per state word.
-The estimated groups only size the entries of the move. Fixed-width keys and
-states only; a grouping without aggregates stays swiss. See
+The estimated groups only size the entries of the move. A string key is a handle
+in the row with its bytes in the table's arena; string reducers stay swiss, as
+does a grouping without aggregates. See
 [aggregation.md](aggregation.md#hash-table).
 
 ## 5. Helpers that are not optimizations

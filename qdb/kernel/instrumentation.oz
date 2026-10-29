@@ -49,9 +49,10 @@
   ;; join row-id buckets, and string reducer buffers. Temporary rehash copies,
   ;; allocator metadata, source rowsets and output buffers are not included.
   ;; output[3] is 1 for an aggregate table in the row layout: its arena
-  ;; blocks and their list, its entries, which the capacity counts, and its
-  ;; lookup scratch. Such a table also reports its RowRebuilds in output[4]
-  ;; and its RowMovedFromSlots in output[5]; both are 0 otherwise.
+  ;; blocks and their list, its entries, which the capacity counts, its
+  ;; lookup scratch and the owned key arena. Such a table also reports its
+  ;; RowRebuilds in output[4] and its RowMovedFromSlots in output[5]; both
+  ;; are 0 otherwise.
   (fun qdb_instrumentation_hash
        ((var ht <ref HashTable>) (var join i64)
         (var string_buffers <ptr i64>) (var string_count i64)
@@ -60,12 +61,21 @@
       (= output [3] 0)
       (= output [4] 0)
       (= output [5] 0)
+      ;; The owned key arena holds the bytes of string keys in either layout.
+      (var blocks = (field ht OwnedBlocks))
+      (var bytes = (* (field ht OwnedBlockCapacity) 8))
+      (var i = 0)
+      (while (< i (field ht OwnedBlockCount))
+        (block
+          (var header = (cast (index blocks i) <ptr i64>))
+          (= bytes (+ bytes 24 (index header 1)))
+          (= i (+ i 1))))
       (var entries = (field (field ht RowTable) Capacity))
       (if (!= (cast (field (field ht RowTable) Entries) i64) 0)
         (block
           (= output [0] (field ht Size))
           (= output [1] entries)
-          (= output [2] (+ (* entries 8)
+          (= output [2] (+ bytes (* entries 8)
             (* (field (field ht RowArena) BlockCount)
                (* (field (field ht RowArena) BlockRows) (field (field ht RowArena) RowBytes)))
             (* (field (field ht RowArena) BlockCapacity) 8)
@@ -75,19 +85,11 @@
           (= output [5] (field ht RowMovedFromSlots))
           (return)))
       (var buffers = (field ht AggBuffers))
-      (var blocks = (field ht OwnedBlocks))
       (var capacity = (field ht Capacity))
       (var size = (field ht Size))
       (var aggs = (field ht NumAggs))
-      (var bytes = (+ (* capacity
-        (+ (* (field ht KeySize) 2) 9 (* aggs 8))) (* aggs 8)
-        (* (field ht OwnedBlockCapacity) 8)))
-      (var i = 0)
-      (while (< i (field ht OwnedBlockCount))
-        (block
-          (var header = (cast (index blocks i) <ptr i64>))
-          (= bytes (+ bytes 24 (index header 1)))
-          (= i (+ i 1))))
+      (= bytes (+ bytes (* capacity
+        (+ (* (field ht KeySize) 2) 9 (* aggs 8))) (* aggs 8)))
       (if (&& (!= join 0) (>= aggs 3))
         (block
           (var caps = (index buffers 1))

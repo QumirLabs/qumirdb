@@ -10,8 +10,12 @@
   ;; An update reads one entry and one row, where the swiss table reads its
   ;; control bytes, its key and one state array per state word, so the row
   ;; layout wins once the table outgrows the cache, the sooner the more state
-  ;; words a group has. Keys and states are fixed-width; the offsets come
-  ;; from the generated code (gen.cpp).
+  ;; words a group has. The key struct and the states are fixed-width; the
+  ;; offsets come from the generated code (gen.cpp). A string key holds a
+  ;; handle (pointer, size) whose bytes live in the table's owned arena
+  ;; (owned_blocks.oz), as the swiss table stores them: an insert copies the
+  ;; bytes once, and a lookup reads them only to confirm a salt match.
+  ;; Growth never touches them, since the row keeps the hash.
   ;;
   ;; Find-or-insert works on a chunk of rows in the passes of the row table:
   ;; the generated code stores keys and hashes, rt_seek_all walks to the
@@ -34,6 +38,9 @@
     (block
       (call ra_init (field ht RowArena) row_bytes block_rows)
       (if (! (call rt_init (field ht RowTable) groups)) (block (return #f)))
+      (field_assign ht OwnedBlocks (cast 0 <ptr <ptr u8>>))
+      (field_assign ht OwnedBlockCount 0)
+      (field_assign ht OwnedBlockCapacity 0)
       (field_assign ht Size 0)
       (field_assign ht NumAggs num_aggs)
       (field_assign ht NumKeys 1)
@@ -102,20 +109,26 @@
           (= q (+ q 1))))))
 
   ;; Finds or inserts the group of every row j in [0, count) of the scratch,
-  ;; whose key (at Keys + j * key_stride) and Hashes[j] the caller stored. The
-  ;; stride keeps the key at the alignment its type needs, as key_offset does
-  ;; in the row. Afterwards Entries[j] is the
-  ;; group's row; bit 0 is set for the row that inserted the group, so that the
-  ;; caller applies it to zero states as a new group (rows are 8-byte aligned).
+  ;; whose lookup key (at Keys + j * key_stride) and Hashes[j] the caller
+  ;; stored. The stride keeps the key at the alignment its type needs, as
+  ;; key_offset does in the row. Afterwards Entries[j] is the group's row; bit
+  ;; 0 is set for the row that inserted the group, so that the caller applies
+  ;; it to zero states as a new group (rows are 8-byte aligned).
+  ;;
+  ;; The rows hold stored keys: the lookup key's string handles point into
+  ;; the batch, the stored key's into bytes that key_clone_owned copied to the
+  ;; owned arena (key_owned_bytes is 0 and the clone the key itself when the
+  ;; key has no strings). The two types are the same for fixed-width keys.
   ;;
   ;; A pass reads each candidate entry again rather than trusting the seek: an
   ;; earlier row of the chunk may have inserted there since, with the same key
   ;; or another one. Rows with equal keys walk the same entries, so the first of
   ;; them inserts the group and the others find it. A row whose candidate holds
   ;; another key moves past it and seeks again with the next pass.
-  (fun agr_find_or_insert [Key] ((var ht <ref HashTable>) (var count i64)
-                                 (var key_offset i64) (var key_stride i64)
-                                 (var state_offset i64) (var witness <ptr Key>)) -> bool
+  (fun agr_find_or_insert [LookupKey StoredKey]
+       ((var ht <ref HashTable>) (var count i64)
+        (var key_offset i64) (var key_stride i64) (var state_offset i64)
+        (var lookup_witness <ptr LookupKey>) (var stored_witness <ptr StoredKey>)) -> bool
     (block
       (var hashes = (field (field ht RowScratch) Hashes))
       (var salts = (field (field ht RowScratch) Salts))
@@ -162,16 +175,22 @@
               (var j = q)
               (if (! first) (block (= j (index work q))))
               (var off = (index offsets j))
-              (var key = (cast (+ keys (* j key_stride)) <ptr Key>))
+              (var key = (cast (+ keys (* j key_stride)) <ptr LookupKey>))
               (var e = (index entries (cast off i64)))
               (if (== e (: 0 u64))
                 (block
+                  (var owned_bytes = (call key_owned_bytes (index key 0)))
+                  (var owned_block = (cast 0 <ptr u8>))
+                  (if (> owned_bytes 0)
+                    (block
+                      (= owned_block (call aht_owned_arena_alloc ht owned_bytes))
+                      (if (== (cast owned_block i64) 0) (block (return #f)))))
                   (var row = (call ra_new_row (field ht RowArena)))
                   (if (== (cast row i64) 0) (block (return #f)))
                   (var words = (cast row <ptr u64>))
                   (= words [0] (index hashes j))
-                  (var row_key = (cast (+ (cast row i64) key_offset) <ptr Key>))
-                  (= row_key [0] (index key 0))
+                  (var row_key = (cast (+ (cast row i64) key_offset) <ptr StoredKey>))
+                  (= row_key [0] (call key_clone_owned (index key 0) owned_block))
                   (var states = (cast (+ (cast row i64) state_offset) <ptr i64>))
                   (var w = 0)
                   (while (< w num_aggs)
@@ -186,7 +205,7 @@
                   (var matched = #f)
                   (if (== (>> e (: 48 u64)) (index salts j))
                     (block
-                      (var row_key = (cast (+ (cast row i64) key_offset) <ptr Key>))
+                      (var row_key = (cast (+ (cast row i64) key_offset) <ptr StoredKey>))
                       (= matched (call rh_key_equal (index row_key 0) (index key 0)))))
                   (if matched
                     (block (= found [j] (cast (cast row i64) u64)))
@@ -202,13 +221,14 @@
       (return #t)))
 
   ;; Moves the groups of a swiss table to the row layout in their dense order
-  ;; and frees the swiss storage. A swiss state sits at the probe slot of its
+  ;; and frees the swiss slot arrays. The owned key arena stays: the stored
+  ;; keys keep pointing into it. A swiss state sits at the probe slot of its
   ;; group (SlotId maps the group to it). The entries are sized for twice the
   ;; groups, as the swiss table was about to double, or for RowExpectedGroups
   ;; when the caller expects more, so that the entries need not grow again.
-  (fun agr_from_swiss [Key] ((var ht <ref HashTable>) (var key_offset i64)
-                             (var state_offset i64) (var row_bytes i64)
-                             (var block_rows i64) (var witness <ptr Key>)) -> bool
+  (fun agr_from_swiss [StoredKey] ((var ht <ref HashTable>) (var key_offset i64)
+                                   (var state_offset i64) (var row_bytes i64)
+                                   (var block_rows i64) (var witness <ptr StoredKey>)) -> bool
     (block
       (var size = (field ht Size))
       (var num_aggs = (field ht NumAggs))
@@ -218,7 +238,7 @@
         (block (= groups (field ht RowExpectedGroups))))
       (call ra_init (field ht RowArena) row_bytes block_rows)
       (if (! (call rt_init (field ht RowTable) groups)) (block (return #f)))
-      (var group_keys = (cast (field ht GroupKeys) <ptr Key>))
+      (var group_keys = (cast (field ht GroupKeys) <ptr StoredKey>))
       (var slot_ids = (field ht SlotId))
       (var buffers = (field ht AggBuffers))
       (var g = 0)
@@ -230,7 +250,7 @@
           (var hash = (cast (call rh_hash key) u64))
           (var words = (cast row <ptr u64>))
           (= words [0] hash)
-          (var row_key = (cast (+ (cast row i64) key_offset) <ptr Key>))
+          (var row_key = (cast (+ (cast row i64) key_offset) <ptr StoredKey>))
           (= row_key [0] key)
           (var states = (cast (+ (cast row i64) state_offset) <ptr i64>))
           (var slot = (index slot_ids g))
@@ -242,9 +262,7 @@
               (= a (+ a 1))))
           (call agr_link (field ht RowTable) row hash)
           (= g (+ g 1))))
-      (call aht_destroy ht)
-      (field_assign ht Size size)
-      (field_assign ht NumAggs num_aggs)
+      (call aht_destroy_slots ht)
       (field_assign ht RowRebuilds (+ (field ht RowRebuilds) 1))
       (field_assign ht RowMovedFromSlots slots)
       (return #t)))

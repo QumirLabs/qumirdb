@@ -1620,10 +1620,9 @@ std::optional<TAggRowLayout> BuildAggRowLayout(
     const TAggReducerLayout& layout,
     bool hasEmptyInputGroups)
 {
-    const bool stringKey = std::ranges::any_of(key.Fields, [](const auto& field) {
-        return ContainsLogicalString(field.Type);
-    });
-    if (stringKey || HasStringReducer(layout) || hasEmptyInputGroups) {
+    // A string key is a fixed-width handle in the row, with its bytes in the
+    // owned arena; a string reducer's state is not.
+    if (HasStringReducer(layout) || hasEmptyInputGroups) {
         return std::nullopt;
     }
     const bool wideKey = std::ranges::any_of(key.Fields, [](const auto& field) {
@@ -1648,6 +1647,47 @@ namespace {
 constexpr int64_t AggRowChunkRows = 2048;
 // Rows per arena block of the row layout, as in the row join table.
 constexpr int64_t AggRowBlockRows = 16384;
+
+// A scan of the arena of a table in the row layout, in insertion order:
+// `rowStmts` run for every group with the address of its row in `row` (i64).
+NQumir::NAst::TExprPtr AggRowArenaScan(
+    const TAggRowLayout& rows, std::vector<NQumir::NAst::TExprPtr> rowStmts)
+{
+    using namespace NQumir::NAst;
+    auto i64Type = std::make_shared<TIntegerType>();
+    auto ptrU8Type = std::make_shared<TPointerType>(
+        std::make_shared<TIntegerType>(TIntegerType::U8));
+    auto numI64 = [&](int64_t value) { return NOz::TypedInt(value, i64Type); };
+    auto less = [&](TExprPtr left, TExprPtr right) {
+        return NOz::Bin(TOperator("<"), std::move(left), std::move(right));
+    };
+    auto arena = [&](const std::string& name) {
+        return NOz::Field(NOz::Field("ht", "RowArena"), name);
+    };
+    rowStmts.push_back(NOz::Assign("row", NOz::Add(NOz::Ident("row"), numI64(rows.RowBytes))));
+    return NOz::Block({
+        NOz::Var("blocks", std::make_shared<TPointerType>(ptrU8Type)),
+        NOz::Assign("blocks", arena("Blocks")),
+        NOz::Var("block_count", i64Type),
+        NOz::Assign("block_count", arena("BlockCount")),
+        NOz::Var("b", i64Type),
+        NOz::Assign("b", numI64(0)),
+        NOz::While(less(NOz::Ident("b"), NOz::Ident("block_count")), NOz::Block({
+            NOz::Var("rows_in_block", i64Type),
+            NOz::Assign("rows_in_block", arena("BlockRows")),
+            NOz::If(NOz::Bin(TOperator("=="), NOz::Ident("b"),
+                    NOz::Sub(NOz::Ident("block_count"), numI64(1))),
+                NOz::Block({NOz::Assign("rows_in_block", arena("CurRows"))})),
+            NOz::Var("row", i64Type),
+            NOz::Assign("row", NOz::Cast(NOz::Index("blocks", NOz::Ident("b")), i64Type)),
+            NOz::Var("end", i64Type),
+            NOz::Assign("end", NOz::Add(NOz::Ident("row"),
+                NOz::Mul(NOz::Ident("rows_in_block"), numI64(rows.RowBytes)))),
+            NOz::While(less(NOz::Ident("row"), NOz::Ident("end")), NOz::Block(std::move(rowStmts))),
+            NOz::Assign("b", NOz::Add(NOz::Ident("b"), numI64(1))),
+        })),
+    });
+}
 
 // The per-row parts of the aggregate update, shared by the swiss loop of
 // agg_dispatch and the passes of agg_rows_update. Each call builds new AST
@@ -2042,7 +2082,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     auto i64Type = std::make_shared<TIntegerType>();
     auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
     auto ptrI64Type = std::make_shared<TPointerType>(i64Type);
-    auto ptrKeyType = std::make_shared<TPointerType>(key.LookupType);
+    auto ptrStoredKeyType = std::make_shared<TPointerType>(key.StoredType);
 
     auto ident = [&](const std::string& name) -> TExprPtr {
         return std::make_shared<TIdentExpr>(loc, name);
@@ -2135,7 +2175,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
                     numI64(rows->StateOffset),
                     numI64(rows->RowBytes),
                     numI64(AggRowBlockRows),
-                    cast(numI64(0), ptrKeyType),
+                    cast(numI64(0), ptrStoredKeyType),
                 })),
                 block({NOz::Return(numI64(-1))})),
             NOz::Return(call("agg_rows_update", {ident("ht"), ident("batch"), ident("i")})),
@@ -2271,6 +2311,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateRowsUpdateAst(
     auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
     auto u8Type = std::make_shared<TIntegerType>(TIntegerType::U8);
     auto ptrKeyType = std::make_shared<TPointerType>(key.LookupType);
+    auto ptrStoredKeyType = std::make_shared<TPointerType>(key.StoredType);
     auto numI64 = [&](int64_t value) { return NOz::TypedInt(value, i64Type); };
     auto binary = [&](const char* op, TExprPtr left, TExprPtr right) {
         return NOz::Bin(TOperator(op), std::move(left), std::move(right));
@@ -2370,6 +2411,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateRowsUpdateAst(
                 numI64(rows.KeyStride),
                 numI64(rows.StateOffset),
                 NOz::Cast(numI64(0), ptrKeyType),
+                NOz::Cast(numI64(0), ptrStoredKeyType),
             })),
             failure()),
         NOz::Var("j", i64Type),
@@ -2750,9 +2792,6 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
 
     if (rows) {
         // A table in the row layout: a scan of the arena, in insertion order.
-        auto arena = [&](const std::string& name) {
-            return NOz::Field(NOz::Field("ht", "RowArena"), name);
-        };
         auto rowStmts = groupStatements(
             [&] { return NOz::Index("row_key", numI64(0)); },
             [&](const std::string&, int word) {
@@ -2766,31 +2805,8 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
             NOz::Assign("row_states", NOz::Cast(
                 NOz::Add(NOz::Ident("row"), numI64(rows->StateOffset)), ptrI64Type)),
         });
-        rowStmts.push_back(NOz::Assign("row", NOz::Add(NOz::Ident("row"), numI64(rows->RowBytes))));
-        std::vector<TExprPtr> scan = {
-            NOz::Var("blocks", std::make_shared<TPointerType>(ptrU8Type)),
-            NOz::Assign("blocks", arena("Blocks")),
-            NOz::Var("block_count", i64Type),
-            NOz::Assign("block_count", arena("BlockCount")),
-            NOz::Var("b", i64Type),
-            NOz::Assign("b", numI64(0)),
-            NOz::While(binary("<", NOz::Ident("b"), NOz::Ident("block_count")), NOz::Block({
-                NOz::Var("rows_in_block", i64Type),
-                NOz::Assign("rows_in_block", arena("BlockRows")),
-                NOz::If(binary("==", NOz::Ident("b"), binary("-", NOz::Ident("block_count"), numI64(1))),
-                    NOz::Block({NOz::Assign("rows_in_block", arena("CurRows"))})),
-                NOz::Var("row", i64Type),
-                NOz::Assign("row", NOz::Cast(NOz::Index("blocks", NOz::Ident("b")), i64Type)),
-                NOz::Var("end", i64Type),
-                NOz::Assign("end", NOz::Add(NOz::Ident("row"),
-                    NOz::Mul(NOz::Ident("rows_in_block"), numI64(rows->RowBytes)))),
-                NOz::While(binary("<", NOz::Ident("row"), NOz::Ident("end")),
-                    NOz::Block(std::move(rowStmts))),
-                NOz::Assign("b", NOz::Add(NOz::Ident("b"), numI64(1))),
-            })),
-        };
         project.push_back(NOz::If(NOz::Call("agr_active", {NOz::Ident("ht")}),
-            NOz::Block(std::move(scan)), NOz::Block(std::move(swissOnly))));
+            AggRowArenaScan(*rows, std::move(rowStmts)), NOz::Block(std::move(swissOnly))));
     }
 
     bodyStmts.push_back(std::make_shared<TIfExpr>(loc,
@@ -3103,7 +3119,8 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinishRowSetAst(
 NQumir::NAst::TExprPtr GenGenericAggregateMeasureAst(
     const TAggregateKeyDescriptor& key,
     const TAggReducerLayout& layout,
-    NQumir::NAst::TTypePtr hashTableType)
+    NQumir::NAst::TTypePtr hashTableType,
+    const std::optional<TAggRowLayout>& rows)
 {
     using namespace NQumir::NAst;
     NQumir::TLocation loc{};
@@ -3200,29 +3217,51 @@ NQumir::NAst::TExprPtr GenGenericAggregateMeasureAst(
             std::move(bytes)));
     }
 
-    body.push_back(std::make_shared<TVarStmt>(loc, "slot", i64Type));
-    body.push_back(std::make_shared<TAssignExpr>(loc, "slot", number(0)));
-    std::vector<TExprPtr> loop;
-    for (size_t fieldIndex = 0; fieldIndex < key.Fields.size(); ++fieldIndex) {
-        if (!TMaybeType<TStringType>(UnwrapNamedType(key.Fields[fieldIndex].Type))) {
-            continue;
+    // The bytes of the string keys, summed over the groups: the swiss table's
+    // dense keys, or the rows of a table in the row layout.
+    const bool stringKey = std::ranges::any_of(key.Fields, [](const auto& field) {
+        return static_cast<bool>(TMaybeType<TStringType>(UnwrapNamedType(field.Type)));
+    });
+    auto addKeyBytes = [&](const std::function<TExprPtr()>& keyAt) {
+        std::vector<TExprPtr> stmts;
+        for (size_t fieldIndex = 0; fieldIndex < key.Fields.size(); ++fieldIndex) {
+            if (!TMaybeType<TStringType>(UnwrapNamedType(key.Fields[fieldIndex].Type))) {
+                continue;
+            }
+            TExprPtr stored = std::make_shared<TFieldAccessExpr>(
+                loc, keyAt(), "key_" + std::to_string(fieldIndex));
+            auto size = std::make_shared<TFieldAccessExpr>(
+                loc, std::move(stored), "Size");
+            stmts.push_back(std::make_shared<TArrayAssignExpr>(loc,
+                "output_key_bytes",
+                std::vector<TExprPtr>{number(static_cast<int64_t>(fieldIndex))},
+                binary("+", outputAt(fieldIndex), std::move(size))));
         }
-        TExprPtr stored = std::make_shared<TIndexExpr>(
-            loc, ident("group_keys"), ident("slot"));
-        stored = std::make_shared<TFieldAccessExpr>(
-            loc, std::move(stored), "key_" + std::to_string(fieldIndex));
-        auto size = std::make_shared<TFieldAccessExpr>(
-            loc, std::move(stored), "Size");
-        loop.push_back(std::make_shared<TArrayAssignExpr>(loc,
-            "output_key_bytes",
-            std::vector<TExprPtr>{number(static_cast<int64_t>(fieldIndex))},
-            binary("+", outputAt(fieldIndex), std::move(size))));
-    }
+        return stmts;
+    };
+    std::vector<TExprPtr> swiss;
+    swiss.push_back(std::make_shared<TVarStmt>(loc, "slot", i64Type));
+    swiss.push_back(std::make_shared<TAssignExpr>(loc, "slot", number(0)));
+    auto loop = addKeyBytes([&] {
+        return std::make_shared<TIndexExpr>(loc, ident("group_keys"), ident("slot"));
+    });
     loop.push_back(std::make_shared<TAssignExpr>(loc, "slot",
         binary("+", ident("slot"), number(1))));
-    body.push_back(std::make_shared<TWhileStmtExpr>(loc,
+    swiss.push_back(std::make_shared<TWhileStmtExpr>(loc,
         binary("<", ident("slot"), ident("size")),
         std::make_shared<TBlockExpr>(loc, std::move(loop))));
+    if (rows && stringKey) {
+        auto rowStmts = addKeyBytes([&] { return NOz::Index("row_key", number(0)); });
+        rowStmts.insert(rowStmts.begin(), {
+            NOz::Var("row_key", ptrKeyType),
+            NOz::Assign("row_key", NOz::Cast(
+                NOz::Add(NOz::Ident("row"), number(rows->KeyOffset)), ptrKeyType)),
+        });
+        body.push_back(NOz::If(NOz::Call("agr_active", {NOz::Ident("ht")}),
+            AggRowArenaScan(*rows, std::move(rowStmts)), NOz::Block(std::move(swiss))));
+    } else {
+        body.insert(body.end(), swiss.begin(), swiss.end());
+    }
     body.push_back(std::make_shared<TReturnExpr>(loc, ident("size")));
 
     auto function = std::make_shared<TFunDecl>(loc, "agg_measure_outputs",

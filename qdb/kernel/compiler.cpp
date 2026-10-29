@@ -174,7 +174,7 @@ constexpr const char* CacheSchemaVersion = "v1";
 // The row table moves to kernel/row_table.oz under row names.
 // The aggregate table gains the row layout; HashTable embeds it.
 // HashTable counts the rebuilds of the row layout for instrumentation.
-constexpr const char* KernelLibVersion = "56";
+constexpr const char* KernelLibVersion = "57";
 } // namespace
 
 NQumir::NCodeGen::TLlvmRunner::TLinkedModule CompileKernelAstCached(

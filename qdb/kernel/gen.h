@@ -179,8 +179,9 @@ struct TAggRowLayout {
     int64_t RowBytes = 0;
 };
 
-// The row layout of an aggregate, or nullopt when it cannot have one: its key
-// or a reducer holds a string, or it has groups that exist over an empty input.
+// The row layout of an aggregate, or nullopt when it cannot have one: a
+// reducer holds a string, or it has groups that exist over an empty input. A
+// string key is a handle in the row, with its bytes in the owned arena.
 std::optional<TAggRowLayout> BuildAggRowLayout(
     const TAggregateKeyDescriptor& key,
     const TAggReducerLayout& layout,
@@ -252,12 +253,14 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinishRowSetAst(
     bool rowLayout = false);
 
 // Measures output Data bytes for key columns and aggregate values. Fixed-width
-// outputs report row_count * width; strings report their stored byte lengths.
-// Returns ht.Size or -1 on capacity failure.
+// outputs report row_count * width; strings report their stored byte lengths,
+// read from the swiss table's dense keys or from the rows of a table in the
+// row layout. Returns ht.Size or -1 on capacity failure.
 NQumir::NAst::TExprPtr GenGenericAggregateMeasureAst(
     const TAggregateKeyDescriptor& key,
     const TAggReducerLayout& layout,
-    NQumir::NAst::TTypePtr hashTableType);
+    NQumir::NAst::TTypePtr hashTableType,
+    const std::optional<TAggRowLayout>& rows = std::nullopt);
 
 // Generates N = funcs.size() FunDecls named reduce_0..reduce_{N-1}, each with
 // the predefined reducer contract from PLAN_AGGREGATION.md section 4:

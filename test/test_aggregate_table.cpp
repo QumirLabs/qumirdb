@@ -125,7 +125,7 @@ constexpr const char* RowEntries = R"(
   (fun test_rows_reserve ((var ht <ref HashTable>) (var n i64)) -> bool
     (block (return (call rt_scratch_reserve (field ht RowScratch) n 8))))
   (fun test_rows_find ((var ht <ref HashTable>) (var count i64)) -> bool
-    (block (return (call agr_find_or_insert ht count 8 8 16 (cast 0 <ptr i64>)))))
+    (block (return (call agr_find_or_insert ht count 8 8 16 (cast 0 <ptr i64>) (cast 0 <ptr i64>)))))
   (fun test_rows_from_swiss ((var ht <ref HashTable>)) -> bool
     (block (return (call agr_from_swiss ht 8 16 24 4 (cast 0 <ptr i64>)))))
   (fun test_swiss_init ((var ht <ref HashTable>) (var capacity i64)) -> bool
@@ -437,7 +437,20 @@ enum class EValue {
     F64,
     Wide,
     Bool,
+    Str,
 };
+
+// The string of a Str value: "" for 0, else the decimal index behind a run of
+// 'x' whose length varies with the index, so the strings have every length
+// the hash treats differently (up to 3, 8 and 16 bytes, and longer) and share
+// long prefixes. Distinct indices give distinct strings.
+std::string TestString(__int128 index) {
+    if (index == 0) {
+        return "";
+    }
+    const auto i = static_cast<int64_t>(index);
+    return std::string(static_cast<size_t>(i % 23), 'x') + std::to_string(i);
+}
 
 // A batch of columns built row by row; NULL is std::nullopt.
 class TBatch {
@@ -495,6 +508,20 @@ public:
                     }
                 }
                 break;
+            case EValue::Str: {
+                // A NULL takes no bytes; its payload must not reach the key.
+                std::vector<int64_t> offsets(rows + 1, 0);
+                for (size_t r = 0; r < rows; ++r) {
+                    const auto text = Valid_[c][r] ? TestString(Values_[c][r]) : std::string{};
+                    data.insert(data.end(), text.begin(), text.end());
+                    offsets[r + 1] = static_cast<int64_t>(data.size());
+                }
+                auto& bytes = Storage_.emplace_back(offsets.size() * 8);
+                std::memcpy(bytes.data(), offsets.data(), bytes.size());
+                Columns_[c].Offsets = bytes.data();
+                Columns_[c].OffsetWidth = 8;
+                break;
+            }
             }
             Columns_[c].Data = reinterpret_cast<char*>(data.data());
             if (std::ranges::any_of(Valid_[c], [](bool valid) { return !valid; })) {
@@ -554,6 +581,12 @@ std::string Render(const TColumn& column, EValue kind, int64_t row) {
     case EValue::Bool: {
         const auto* bits = reinterpret_cast<const uint8_t*>(column.Data);
         return ((bits[row / 8] >> (row % 8)) & 1) ? "true" : "false";
+    }
+    case EValue::Str: {
+        EXPECT_EQ(column.OffsetWidth, 8);
+        const auto* offsets = reinterpret_cast<const int64_t*>(column.Offsets);
+        return "'" + std::string(column.Data + offsets[row],
+            static_cast<size_t>(offsets[row + 1] - offsets[row])) + "'";
     }
     }
     return "?";
@@ -929,10 +962,82 @@ TEST(AggregateTable, RowLayoutNeedsTheSpecFlag) {
     EXPECT_NE(swiss.Dispatch(&table, nullptr, 0, static_cast<int64_t>(EAggregateKernelOp::Destroy)), 0);
 }
 
-TEST(AggregateTable, StringsAndEmptyInputGroupsKeepTheSwissTable) {
+// A string key is a 16-byte handle in the row (pointer and size), whose bytes
+// the owned arena holds in both layouts.
+TEST(AggregateTable, StringKeysAgreeAcrossLayouts) {
     auto i64 = std::make_shared<TIntegerType>();
-    TStructType strings({{"k", std::make_shared<TStringType>()}, {"v", i64}});
-    EXPECT_EQ(CompileWithRows(strings, {"k"}, {Agg("c", "count")}).RowBytes, 0);
+    TStructType input({{"s", std::make_shared<TStringType>()}, {"v", i64}});
+    std::vector<TAggregateSpec> aggs = {
+        Agg("c", "count"), Agg("sv", "sum", "v"), Agg("nv", "min", "v"), Agg("xv", "max", "v"),
+    };
+    EXPECT_EQ(CompileWithRows(input, {"s"}, {Agg("c", "count")}).RowBytes, 32);
+    // More groups than one find-or-insert chunk and than the smallest entry
+    // table, so the chunks and the growth see keys of every length; the
+    // empty string is a group of its own.
+    std::vector<TBatch> batches;
+    uint64_t seed = 777;
+    auto next = [&] {
+        seed = seed * 6364136223846793005ull + 1442695040888963407ull;
+        return seed >> 33;
+    };
+    std::set<int64_t> expected;
+    for (int b = 0; b < 12; ++b) {
+        auto& batch = batches.emplace_back(std::vector<EValue>{EValue::Str, EValue::I64});
+        for (int r = 0; r < 700; ++r) {
+            const auto key = static_cast<int64_t>(next() % 2500);
+            const bool selected = next() % 9 != 0;
+            batch.Add({key, static_cast<int64_t>(next() % 1000) - 500}, selected);
+            if (selected) {
+                expected.insert(key);
+            }
+        }
+    }
+    const auto swiss = CheckLayoutsAgree(input, {"s"}, aggs, batches, {
+        EValue::Str, EValue::I64, EValue::I64, EValue::I64, EValue::I64,
+    });
+    EXPECT_EQ(swiss.Rows.size(), expected.size());
+    EXPECT_TRUE(std::ranges::any_of(swiss.Rows, [](const auto& row) { return row.starts_with("''|"); }));
+}
+
+TEST(AggregateTable, CompositeAndNullStringKeysAgreeAcrossLayouts) {
+    auto i64 = std::make_shared<TIntegerType>();
+    auto string = std::make_shared<TStringType>();
+    TStructType input({
+        {"k", i64},
+        {"s", std::make_shared<TNullable>(string)},
+        {"t", string},
+        {"v", i64},
+    });
+    std::vector<TAggregateSpec> aggs = {Agg("c", "count"), Agg("sv", "sum", "v")};
+    const std::vector<EValue> kinds = {EValue::Str, EValue::Str, EValue::I64};
+    std::vector<TBatch> batches;
+    std::set<std::tuple<int, int, int>> expected;
+    for (int b = 0; b < 6; ++b) {
+        auto& batch = batches.emplace_back(
+            std::vector<EValue>{EValue::I64, EValue::Str, EValue::Str, EValue::I64});
+        for (int r = 0; r < 900; ++r) {
+            const int i = b * 900 + r;
+            // A NULL string carries a payload that must not split its group;
+            // "" (index 0) and a 20-byte string are groups next to it.
+            const bool sNull = i % 7 == 0;
+            batch.Add({
+                i % 5,
+                sNull ? std::nullopt : std::optional<__int128>(i % 3 == 0 ? 0 : 20 + i % 4),
+                i % 11,
+                i,
+            });
+            expected.emplace(i % 5, sNull ? -1 : (i % 3 == 0 ? 0 : 20 + i % 4), i % 11);
+        }
+    }
+    const auto swiss = CheckLayoutsAgree(input, {"k", "s", "t"}, aggs, batches, {
+        EValue::I64, EValue::Str, EValue::Str, EValue::I64, EValue::I64,
+    });
+    EXPECT_EQ(swiss.Rows.size(), expected.size());
+    EXPECT_TRUE(std::ranges::any_of(swiss.Rows, [](const auto& row) { return row.contains("|NULL|"); }));
+}
+
+TEST(AggregateTable, StringReducersAndEmptyInputGroupsKeepTheSwissTable) {
+    auto i64 = std::make_shared<TIntegerType>();
     TStructType numbers({{"k", i64}, {"s", std::make_shared<TStringType>()}});
     EXPECT_EQ(CompileWithRows(numbers, {"k"}, {Agg("m", "min", "s")}).RowBytes, 0);
     auto seeded = NKernel::BuildAggregateKernelSpec(

@@ -218,6 +218,13 @@ row:   hash | key | state words, in the order of the swiss table's arrays
 entry: salt (16 bits) | row pointer (48 bits)
 ```
 
+A string key is a fixed-size handle in the row, a pointer and a size, with
+its bytes in the arena that the table owns in both layouts. An insert copies
+the bytes once; a lookup reads them only to confirm a salt match, which is a
+hit or a 1 in 65,536 collision; and growth never reads them, since the row
+keeps the hash. The swiss table, by contrast, hashes every stored string
+again at each of its rehashes.
+
 An update reads one entry and one row, about two cache lines, whatever the
 number of states. A batch is processed in chunks of rows and passes over each
 chunk, so the cache misses of different rows overlap, as in the group
@@ -241,11 +248,11 @@ the entries grow before a round in which those rows could fill more than half
 of them. Growth rewrites only the entries, from the hashes kept in the rows;
 the rows do not move. Finalization scans the arena.
 
-The row layout serves fixed-width keys and states: integers, dates, decimals,
-`f64` and booleans, alone or together, with COUNT, SUM, MIN, MAX and the AVG
-built from them. A string key or reducer, and the groups that a global
-aggregate or an empty grouping set has over an empty input, keep the swiss
-table. The browser runtime uses the swiss table only.
+The row layout serves keys of integers, dates, decimals, `f64`, booleans and
+strings, alone or together, with the fixed-width states of COUNT, SUM, MIN,
+MAX and the AVG built from them. A string reducer, and the groups that a
+global aggregate or an empty grouping set has over an empty input, keep the
+swiss table. The browser runtime uses the swiss table only.
 
 ### Choosing the layout
 
