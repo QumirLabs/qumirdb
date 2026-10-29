@@ -33,17 +33,23 @@
   ;; last to the first, so a chain lists them in build order, like the
   ;; symmetric table's buckets.
   ;;
+  ;; A join on one integer key whose build keys turn out unique and within
+  ;; 2^20 of each other gets a direct index instead of the salted table (see
+  ;; jr_build_direct below).
+  ;;
   ;; C++ (qdb/exec/row_join_exec.cpp) owns the zeroed RowArena / RowTable /
   ;; RowScratch structs and the retained input batches.
 
   ;; ---- chains of rows with equal keys ----
 
   (fun jr_row_next ((var row <ptr u8>)) -> <ptr u8>
+    (attrs inline)
     (block
       (var words = (cast row <ptr u64>))
       (return (cast (cast (index words 0) i64) <ptr u8>))))
 
   (fun jr_row_set_next ((var row <ptr u8>) (var next <ptr u8>))
+    (attrs inline)
     (block
       (var words = (cast row <ptr u64>))
       (= words [0] (cast (cast next i64) u64))))
@@ -222,6 +228,147 @@
               (= row (+ row row_bytes))))
           (= b (+ b 1))))
       (return #t)))
+
+  (fun jr_block_rows ((var arena <ref RowArena>) (var b i64)) -> i64
+    (attrs inline)
+    (block
+      (if (== b (- (field arena BlockCount) 1)) (block (return (field arena CurRows))))
+      (return (field arena BlockRows))))
+
+  ;; ---- direct index: one unique integer key in a dense range ----
+  ;; A perfect hash: when the keys of the complete build side are unique and
+  ;; max - min <= 2^20, Direct holds the row of key k at k - DirectMin and
+  ;; null for an absent key. A probe needs no hash, salt or key comparison: a
+  ;; key outside the range costs one bounds check, a key inside it one load.
+  ;; A slot points to the arena row. Entries stays null; Capacity is the slot
+  ;; count, so the table reports its real size.
+
+  ;; The key of `row` as an i64; Value is the key's integer type.
+  (fun jr_row_int [Value] ((var row <ptr u8>) (var value_offset i64)
+                           (var witness <ptr Value>)) -> i64
+    (attrs inline)
+    (block
+      (var slot = (cast (+ (cast row i64) value_offset) <ptr Value>))
+      (return (cast (index slot 0) i64))))
+
+  ;; Builds the direct index over the arena when its keys allow one, reading
+  ;; each key at value_offset of the row. Returns #f and leaves the table
+  ;; untouched when the keys span more than 2^20, repeat, or the index cannot
+  ;; be allocated; the caller then builds the salted table.
+  (fun jr_build_direct [Value] ((var table <ref RowTable>) (var arena <ref RowArena>)
+                                (var value_offset i64) (var witness <ptr Value>)) -> bool
+    (block
+      (var max_span = (: 1048576 u64))
+      (var rows = (field arena Rows))
+      ;; More rows than possible slots must repeat a key.
+      (if (|| (== rows 0) (> (cast rows u64) (+ max_span (: 1 u64)))) (block (return #f)))
+      (var blocks = (field arena Blocks))
+      (var count = (field arena BlockCount))
+      (var row_bytes = (field arena RowBytes))
+      ;; Pass 1: the key range, given up after the first block that widens it
+      ;; past the limit. The span is unsigned, so it cannot overflow.
+      (var lo = (call jr_row_int (index blocks 0) value_offset witness))
+      (var hi = lo)
+      (var b = 0)
+      (while (< b count)
+        (block
+          (var row = (cast (index blocks b) i64))
+          (var end = (+ row (* (call jr_block_rows arena b) row_bytes)))
+          (while (< row end)
+            (block
+              (var v = (call jr_row_int (cast row <ptr u8>) value_offset witness))
+              (if (< v lo) (block (= lo v)))
+              (if (> v hi) (block (= hi v)))
+              (= row (+ row row_bytes))))
+          (if (> (- (cast hi u64) (cast lo u64)) max_span) (block (return #f)))
+          (= b (+ b 1))))
+      (var slots = (+ (cast (- (cast hi u64) (cast lo u64)) i64) 1))
+      (if (> rows slots) (block (return #f)))
+      ;; Pass 2: a bitmap of the range finds a repeated key before the index
+      ;; is allocated, so a failed attempt costs one bit per slot, not eight
+      ;; bytes.
+      (var words = (>> (+ slots 63) 6))
+      (var seen = (cast (call qdb_alloc (* words 8)) <ptr u64>))
+      (if (== (cast seen i64) 0) (block (return #f)))
+      (var w = 0)
+      (while (< w words)
+        (block
+          (= seen [w] (: 0 u64))
+          (= w (+ w 1))))
+      (= b 0)
+      (while (< b count)
+        (block
+          (var row = (cast (index blocks b) i64))
+          (var end = (+ row (* (call jr_block_rows arena b) row_bytes)))
+          (while (< row end)
+            (block
+              (var off = (- (cast (call jr_row_int (cast row <ptr u8>) value_offset witness) u64)
+                            (cast lo u64)))
+              (var word = (cast (>> off (: 6 u64)) i64))
+              (var bit = (<< (: 1 u64) (& off (: 63 u64))))
+              (if (!= (& (index seen word) bit) (: 0 u64))
+                (block
+                  (call qdb_free (cast seen <ptr i8>))
+                  (return #f)))
+              (= seen [word] (| (index seen word) bit))
+              (= row (+ row row_bytes))))
+          (= b (+ b 1))))
+      (call qdb_free (cast seen <ptr i8>))
+      ;; Pass 3: the row of every key into its slot.
+      (var direct = (cast (call qdb_alloc (* slots 8)) <ptr <ptr u8>>))
+      (if (== (cast direct i64) 0) (block (return #f)))
+      (var i = 0)
+      (while (< i slots)
+        (block
+          (= direct [i] (cast 0 <ptr u8>))
+          (= i (+ i 1))))
+      (= b 0)
+      (while (< b count)
+        (block
+          (var row = (cast (index blocks b) i64))
+          (var end = (+ row (* (call jr_block_rows arena b) row_bytes)))
+          (while (< row end)
+            (block
+              (var v = (call jr_row_int (cast row <ptr u8>) value_offset witness))
+              (= direct [(cast (- (cast v u64) (cast lo u64)) i64)] (cast row <ptr u8>))
+              (= row (+ row row_bytes))))
+          (= b (+ b 1))))
+      (field_assign table Direct direct)
+      (field_assign table DirectMin lo)
+      (field_assign table DirectSlots (cast slots u64))
+      (field_assign table Capacity slots)
+      (field_assign table Rows rows)
+      (field_assign table Keys rows)
+      (return #t)))
+
+  ;; Probes one row with key `key` (an i64 of the key's integer type). A
+  ;; present key emits its pair, in (left, right) order, or marks its build row
+  ;; when mark_offset is not negative; an absent key pads the row with a null
+  ;; build row when emit_unmatched is set.
+  (fun jr_direct_probe ((var table <ref RowTable>) (var pairs <ref PairBuffer>)
+                        (var key i64) (var probe_row i64) (var probe_is_left bool)
+                        (var emit_unmatched bool) (var mark_offset i64)) -> bool
+    (attrs inline)
+    (block
+      (var off = (- (cast key u64) (cast (field table DirectMin) u64)))
+      (var direct = (field table Direct))
+      (var row = 0)
+      (if (< off (field table DirectSlots))
+        (block (= row (cast (index direct (cast off i64)) i64))))
+      (if (== row 0)
+        (block
+          (if emit_unmatched
+            (block (return (call jr_push_pair pairs probe_row (cast 0 <ptr u8>) probe_is_left))))
+          (return #t)))
+      ;; A slot holds the only row of its key, and jr_build_direct links no
+      ;; chains (the first word keeps the hash), so the row is marked here
+      ;; rather than by jr_mark_chain.
+      (if (>= mark_offset 0)
+        (block
+          (var build = (cast row <ptr u8>))
+          (= build [mark_offset] (: 1 u8))
+          (return #t)))
+      (return (call jr_push_pair pairs probe_row (cast row <ptr u8>) probe_is_left))))
 
   ;; ---- payload: column -> row ----
 

@@ -10,7 +10,10 @@ fixed build side, a LEFT or RIGHT join that builds its null-supplying side, and
 a semi or anti join without a residual that builds its left side use the row
 join table, an arena of build rows behind a salted pointer table
 ([wiki](https://github.com/QumirLabs/qumirdb/wiki/Join-implementation#row-join-table));
-the other forms use the symmetric hash join described here. The runtime
+the other forms use the symmetric hash join described here. With one integer
+key whose build values turn out unique and within a range of 2^20, the row
+join table indexes its rows directly by `key − min` instead (see
+[optimizations](optimizations.md#410-direct-index-join-for-dense-integer-keys)). The runtime
 owns row storage, hash table headers, pair buffers, and output materialization.
 Reusable Oz code implements the generic hash-table probe/insert logic, while
 C++ generates query-specific key extraction, key hash/equality functions, and

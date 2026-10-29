@@ -708,6 +708,22 @@ The estimated groups only size the entries of the move. Fixed-width keys and
 states only; a grouping without aggregates stays swiss. See
 [aggregation.md](aggregation.md#hash-table).
 
+### 4.10 Direct-index join for dense integer keys
+
+A join on the row join table with one integer key decides its index when the
+build side is complete. If the non-NULL build keys are unique and
+`max − min ≤ 2^20`, it builds an array of row pointers indexed by `key − min`
+(a perfect hash) instead of the salted hash table. A probe then needs no hash,
+salt or key comparison: a key outside the range costs one unsigned bounds
+check, a key inside it one load. As in the salted table, the preserved row of
+an outer join whose key is absent is padded, and a semi or anti join that builds
+its left side marks the row it finds. A repeated key or a wider range keeps the
+salted table; a bitmap of the range finds a repeated key before the array is
+allocated, so a failed attempt stays cheap. Dimension primary keys such as
+`n_nationkey`, `r_regionkey` and `s_suppkey` qualify. The decision needs no
+statistics and is made per build partition, so each partition of a shuffled
+join chooses for itself. The array takes 8 bytes per slot, at most 8 MiB.
+
 ## 5. Helpers that are not optimizations
 
 - `TConstFolder` is a helper, not a pipeline pass. UNION ALL pushdown uses it
