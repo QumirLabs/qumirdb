@@ -53,13 +53,13 @@ if that cost needs to be added back.
 
 | Benchmark | Scale | qdb (s) | DuckDB (s) | DataFusion (s) | ClickHouse (s) | qdb ÷ DuckDB | qdb ÷ DataFusion | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| ClickBench | — | 13.499 | 14.44 | — | 14.95 | 0.93× | — | qdb: one SQL run |
+| ClickBench | — | 12.462 | 14.44 | — | 14.95 | 0.86× | — | qdb: one SQL run |
 | TPC-H | 1 | 0.777 | 1.17 | 0.96 | — | 0.66× | 0.81× | qdb: one SQL run |
 | TPC-H | 10 | 3.864 | 4.03 | 4.18 | — | 0.96× | 0.92× | qdb: one SQL run |
-| TPC-H | 100 | 36.645 | 32.10 | 62.68 | — | 1.14× | 0.58× | qdb: one SQL run |
+| TPC-H | 100 | 32.843 | 32.10 | 62.68 | — | 1.02× | 0.52× | qdb: one SQL run |
 | TPC-DS | 1 | 5.120 | 5.13 | — | — | 1.00× | — | qdb: one SQL run |
 | TPC-DS | 10 | 27.406 | 15.89 | — | — | 1.72× | — | qdb: one SQL run |
-| TPC-DS | 100 | 311.278 | 117.86 | — | — | 2.64× | — | qdb: one SQL run |
+| TPC-DS | 100 | 212.676 | 117.86 | — | — | 1.80× | — | qdb: one SQL run |
 
 Totals cover the queries each engine completed. Rows with failures or skipped
 queries compare different subsets, as indicated in the Notes column.
