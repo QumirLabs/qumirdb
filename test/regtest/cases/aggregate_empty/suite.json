@@ -15,6 +15,10 @@
     },
     "nonnullable_values": {
       "json": "tables/nonnullable_values.json"
+    },
+    "values_split": {
+      "json": "tables/values.json",
+      "parquet": {"row_group_rows": 2}
     }
   },
   "tables": {
@@ -63,6 +67,12 @@
       "order": "ordered",
       "tables": {
         "t": "values"
+      }
+    },
+    "split_mixed.sql": {
+      "order": "ordered",
+      "tables": {
+        "t": "values_split"
       }
     },
     "all_null_mixed.sql": {

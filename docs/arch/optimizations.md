@@ -621,10 +621,10 @@ conn blocking-input   src=1 dst=1    conn aggregate-shuffle-input one-to-one  sr
                                      conn final-gather           gather       src=2 dst=1
 ```
 
-### 4.4 Global aggregate cascade — `[aggregate] cascade_global`, off by default
+### 4.4 Global aggregate cascade — `[aggregate] cascade_global`, `auto` by default
 
-An ungrouped aggregate over parallel input otherwise gathers every lane into a
-*single* aggregate task: the scan is parallel, the fold is not. The setting builds
+An ungrouped aggregate over parallel input can gather every lane into a
+*single* aggregate task: the scan is parallel, the fold is not. The cascade builds
 `partial[N] → gather → combine[1]` instead, where `combine` turns `count` into a
 `sum` of per-lane counts.
 
@@ -633,11 +633,19 @@ SELECT sum(c) FROM big;   -- --scheduler:mode=threaded --scheduler:workers=4 --s
 ```
 
 ```
-default                                        cascade_global = true
+cascade_global = false                         cascade_global = true
 nodes: 11, connections: 4                      nodes: 15, connections: 5
 conn blocking-input-gather gather src=4 dst=1  conn aggregate-cascade-input  one-to-one src=4 dst=4
                                                conn aggregate-cascade-gather gather     src=4 dst=1
 ```
+
+The cascade saves the serial fold of the whole input and costs a second
+compiled program (partial and combine), one task per lane and a gather of the
+partial states. That cost does not grow with the input, so `auto` cascades when
+the estimated input of the aggregate reaches `[aggregate] partial_min_input_rows`
+(1,048,576 by default, the same bound as the grouped partial aggregate of
+[Aggregation](aggregation.md)) and gathers below it or without an estimate.
+`true` and `false` force one shape.
 
 ### 4.5 Parallel grouping sets
 

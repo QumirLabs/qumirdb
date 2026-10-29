@@ -552,9 +552,9 @@ TEST(ExecPlanBuilder, MultiKeepsRealPartialAndCombineStages) {
     constexpr std::string_view sql = "SELECT count(*) AS c FROM t";
 
     auto singleSettings = SingleSettings();
-    singleSettings.Aggregate.CascadeGlobal = true;
+    singleSettings.Aggregate.CascadeGlobal = NScheduler::EGlobalCascadeMode::On;
     auto multiSettings = MultiSettings();
-    multiSettings.Aggregate.CascadeGlobal = true;
+    multiSettings.Aggregate.CascadeGlobal = NScheduler::EGlobalCascadeMode::On;
 
     auto single = Lower(sql, sources, singleSettings);
     auto multi = Lower(sql, sources, multiSettings);
@@ -573,6 +573,48 @@ TEST(ExecPlanBuilder, MultiKeepsRealPartialAndCombineStages) {
     EXPECT_GT(multi.PhysicalTasks, single.PhysicalTasks);
     ExpectKernelBindings(single);
     ExpectKernelBindings(multi);
+}
+
+TEST(ExecPlanBuilder, AutoGlobalCascadeFollowsTheInputEstimate) {
+    constexpr std::string_view sql = "SELECT count(*) AS c FROM t";
+    auto phases = [](const TBuiltPlan& built) {
+        std::vector<EAggregatePhase> result;
+        for (const auto& node : built.Exec.Nodes) {
+            if (node.Kind == EExecPlanNodeKind::Aggregate) {
+                result.push_back(node.AggregatePhase);
+            }
+        }
+        return result;
+    };
+    const std::vector<EAggregatePhase> cascade{
+        EAggregatePhase::Partial, EAggregatePhase::Final};
+    const std::vector<EAggregatePhase> gather{EAggregatePhase::Single};
+
+    // Auto: a large estimated input cascades, a small one gathers.
+    TStatsSplitMockSource large(100'000'000, 1'000);
+    TStatsSplitMockSource small(1'000, 10);
+    auto settings = MultiSettings();
+    ASSERT_EQ(settings.Aggregate.CascadeGlobal, NScheduler::EGlobalCascadeMode::Auto);
+    EXPECT_EQ(phases(Lower(sql, {{"t", &large}}, settings)), cascade);
+    EXPECT_EQ(phases(Lower(sql, {{"t", &small}}, settings)), gather);
+
+    // The bound is the grouped partial aggregate's one.
+    settings.Aggregate.PartialMinInputRows = 1'000;
+    EXPECT_EQ(phases(Lower(sql, {{"t", &small}}, settings)), cascade);
+    settings.Aggregate.PartialMinInputRows = 1'001;
+    EXPECT_EQ(phases(Lower(sql, {{"t", &small}}, settings)), gather);
+
+    // Without an estimate auto gathers.
+    TSplitMockSource unknown({"k"});
+    settings = MultiSettings();
+    EXPECT_EQ(phases(Lower(sql, {{"t", &unknown}}, settings)), gather);
+
+    // true and false override the estimate; one lane never cascades.
+    settings.Aggregate.CascadeGlobal = NScheduler::EGlobalCascadeMode::On;
+    EXPECT_EQ(phases(Lower(sql, {{"t", &small}}, settings)), cascade);
+    EXPECT_EQ(phases(Lower(sql, {{"t", &large}}, SingleSettings())), gather);
+    settings.Aggregate.CascadeGlobal = NScheduler::EGlobalCascadeMode::Off;
+    EXPECT_EQ(phases(Lower(sql, {{"t", &large}}, settings)), gather);
 }
 
 TEST(ExecPlanBuilder, GroupedPartialAggregateHasDistributedPhaseBoundary) {

@@ -197,7 +197,9 @@ TEST(AggregateE2E, GlobalIdentitySurvivesParallelCascade) {
                 ApplyPlanPasses(root);
                 NScheduler::TSettings settings;
                 settings.Scheduler.WorkerCount = 2;
-                settings.Aggregate.CascadeGlobal = cascade;
+                settings.Aggregate.CascadeGlobal = cascade
+                    ? NScheduler::EGlobalCascadeMode::On
+                    : NScheduler::EGlobalCascadeMode::Off;
                 auto runtime = RunPlan(root, settings);
                 TRowSet result{};
                 ASSERT_TRUE(runtime->Next(result));
@@ -236,7 +238,9 @@ TEST(AggregateE2E, EmptyExplicitGroupsHaveNoIdentityRow) {
             ApplyPlanPasses(root);
             NScheduler::TSettings settings;
             settings.Scheduler.WorkerCount = 2;
-            settings.Aggregate.CascadeGlobal = cascade;
+            settings.Aggregate.CascadeGlobal = cascade
+                ? NScheduler::EGlobalCascadeMode::On
+                : NScheduler::EGlobalCascadeMode::Off;
             auto runtime = RunPlan(root, settings);
             TRowSet result{};
             while (runtime->Next(result)) {

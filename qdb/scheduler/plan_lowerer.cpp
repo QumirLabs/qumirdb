@@ -1995,11 +1995,11 @@ private:
         }
 
         // Ungrouped or global (`__group__`) aggregate over a parallel input.
-        // Opt-in cascade (partial -> gather -> combine) parallelizes the
-        // aggregate; otherwise gather every lane into a single aggregate, which
-        // is faster for cheap aggregates (the common case).
+        // The cascade (partial -> gather -> combine) folds every lane in
+        // parallel; otherwise every lane is gathered into a single aggregate
+        // task, which folds serially but compiles one program and runs one task.
         if (aggregate.GroupKeys().empty() || aggregate.IsGlobal()) {
-            if (Settings_.Aggregate.CascadeGlobal) {
+            if (NScheduler::ShouldCascadeGlobalAggregate(aggregate, childLanes, Settings_)) {
                 return LowerAggregateCascade(aggregate, childLanes, outConn, outLaneOffset);
             }
             auto execStageId = NewExecStage(
@@ -3217,6 +3217,35 @@ bool ShouldUsePartialAggregate(
     return *estimatedGroups <= inputStats->RowCount / reduction;
 }
 
+bool ShouldCascadeGlobalAggregate(
+    const TAggregateOperator& aggregate,
+    size_t inputLanes,
+    const TSettings& settings)
+{
+    if (inputLanes <= 1) {
+        return false;
+    }
+    switch (settings.Aggregate.CascadeGlobal) {
+        case EGlobalCascadeMode::On:
+            return true;
+        case EGlobalCascadeMode::Off:
+            return false;
+        case EGlobalCascadeMode::Auto:
+            break;
+    }
+
+    // A global aggregate reduces its input to one row, so the cascade saves
+    // the serial fold of the whole input and costs a second compiled program
+    // (partial and combine), one task per lane and a gather of the partial
+    // states. That cost is paid once and does not grow with the input, so the
+    // cascade pays off from an input size on; the same bound as the grouped
+    // partial aggregate keeps one notion of "large input" in the settings.
+    // Without an estimate the gather stays, as before the auto mode.
+    const auto inputStats = aggregate.Input()->Stats_;
+    return inputStats &&
+        inputStats->RowCount >= settings.Aggregate.PartialMinInputRows;
+}
+
 size_t ChooseAggregatePartitionCount(
     const TAggregateOperator& aggregate,
     size_t inputLanes,
@@ -3333,6 +3362,7 @@ void PrintGraphDiagnostics(
         << " partial_aggregate="
         << (settings.Aggregate.EnablePartial ? "auto" : "off")
         << " aggregate_table=" << AggregateTableKindName(settings.Aggregate.Table)
+        << " cascade_global=" << GlobalCascadeModeName(settings.Aggregate.CascadeGlobal)
         << "\n";
     graph.Print(out);
     out << "=====================================\n";
