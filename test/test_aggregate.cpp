@@ -288,7 +288,7 @@ TEST(AggregateE2E, PartialAggregateProcessorJudgesItsReduction) {
         return sum;
     };
     const TPartialAggregatePolicy judgeAfterFour{
-        .SampleRows = 4, .PassThroughReduction = 2.0, .MaxGroups = 1 << 20};
+        .SampleRows = 4, .MinReduction = 2, .MaxGroups = 1 << 20};
 
     // Distinct keys: once the sample is in, the table is emitted and every later
     // batch passes through untouched.
@@ -337,7 +337,7 @@ TEST(AggregateE2E, PartialAggregateProcessorJudgesItsReduction) {
     // projection the processor never hands rows through.
     {
         TPartialAggregateProcessor processor(
-            kernels, {}, {.SampleRows = 1, .PassThroughReduction = 1e9, .MaxGroups = 3}, nullptr);
+            kernels, {}, {.SampleRows = 1, .MinReduction = 1 << 30, .MaxGroups = 3}, nullptr);
         TBatch first{{1, 2, 3}, {10, 20, 30}};
         auto rowSet = first.RowSet();
         processor.Add(rowSet);
@@ -434,17 +434,17 @@ TEST(AggregateE2E, PartialAggregateModesAgree) {
         const char* Name;
         bool Partial;
         size_t SampleRows;
-        double PassThroughReduction;
+        size_t MinReductionFactor;
         size_t MaxGroups;
     };
     const TMode modes[] = {
         // The control: every row shuffled to the partition that owns its group.
-        {"shuffle", false, 1 << 20, 2.0, 1 << 20},
-        {"partial", true, 1 << 20, 2.0, 1 << 20},
+        {"shuffle", false, 1 << 20, 8, 1 << 20},
+        {"partial", true, 1 << 20, 8, 1 << 20},
         // Judged after one batch, no reduction is good enough: rows pass through.
-        {"pass-through", true, 1, 1e9, 1 << 20},
+        {"pass-through", true, 1, 1 << 30, 1 << 20},
         // The table empties every few groups and never passes rows through.
-        {"bounded", true, 1 << 20, 1.0, 3},
+        {"bounded", true, 1 << 20, 1, 3},
     };
     for (const auto& mode : modes) {
         SCOPED_TRACE(mode.Name);
@@ -468,7 +468,7 @@ TEST(AggregateE2E, PartialAggregateModesAgree) {
         settings.Aggregate.EnablePartial = mode.Partial;
         settings.Aggregate.PartialMinInputRows = 0;
         settings.Aggregate.PartialSampleRows = mode.SampleRows;
-        settings.Aggregate.PartialPassThroughReduction = mode.PassThroughReduction;
+        settings.Aggregate.PartialMinReductionFactor = mode.MinReductionFactor;
         settings.Aggregate.PartialMaxGroups = mode.MaxGroups;
         auto aggregate = FindAggregate(root);
         ASSERT_TRUE(aggregate);

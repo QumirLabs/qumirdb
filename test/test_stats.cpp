@@ -529,7 +529,7 @@ TEST(StatsTest, PartialAggregateWithoutUsableEstimateDecidesAtRunTime) {
         unknownAggregate, settings));
 
     // The product of two key NDVs reaches the row count: the trivial bound.
-    TStatsSource saturated({{"x", 30'000'000}, {"y", 30'000'000}}, 100'000'000);
+    TStatsSource saturated({{"x", 11'000'000}, {"y", 11'000'000}}, 100'000'000);
     auto saturatedInput = std::make_shared<NQdb::TSourceOperator>(saturated, "t");
     saturatedInput->Stats_ = saturated.Stats_;
     NQdb::TAggregateOperator saturatedAggregate(saturatedInput, {"x", "y"}, {});
@@ -543,6 +543,15 @@ TEST(StatsTest, PartialAggregateWithoutUsableEstimateDecidesAtRunTime) {
     NQdb::TAggregateOperator uniqueAggregate(uniqueInput, {"x"}, {});
     EXPECT_FALSE(NQdb::NScheduler::ShouldUsePartialAggregate(
         uniqueAggregate, settings));
+
+    // The groups are at least as many as the values of any one key, whatever
+    // the other keys, so one key beyond rows / 8 rules the partial out.
+    TStatsSource wideKey({{"x", 30'000'000}}, 100'000'000);
+    auto wideKeyInput = std::make_shared<NQdb::TSourceOperator>(wideKey, "t");
+    wideKeyInput->Stats_ = wideKey.Stats_;
+    NQdb::TAggregateOperator wideKeyAggregate(wideKeyInput, {"x", "y"}, {});
+    EXPECT_FALSE(NQdb::NScheduler::ShouldUsePartialAggregate(
+        wideKeyAggregate, settings));
 
     // A small input is not worth a second phase whatever its keys.
     TStatsSource small({{"x", 10}}, 1000);

@@ -215,7 +215,7 @@ void TPartialAggregateProcessor::Add(TRowSet& rowSet)
     // table that is emptied often has not reduced its rows.
     const double groupsSoFar = static_cast<double>(EmittedGroups_ + static_cast<uint64_t>(groups));
     if (PassThrough_ && HashedRows_ >= Policy_.SampleRows
-        && static_cast<double>(HashedRows_) < Policy_.PassThroughReduction * groupsSoFar)
+        && static_cast<double>(HashedRows_) < static_cast<double>(Policy_.MinReduction) * groupsSoFar)
     {
         PassingThrough_ = true;
         HasPending_ = Table_.Flush(Pending_);
