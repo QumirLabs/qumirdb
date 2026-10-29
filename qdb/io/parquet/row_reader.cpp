@@ -136,7 +136,10 @@ TCompiledColumn CompileColumn(
             }
             break;
         case parquet::Type::FIXED_LEN_BYTE_ARRAY:
-            if (type == arrow::Type::DECIMAL128) {
+            // Decimal128 holds at most 16 bytes; wider storage falls back.
+            if (type == arrow::Type::DECIMAL128 &&
+                descriptor->type_length() <= 16)
+            {
                 column.Read = EColumnRead::Binary;
                 column.DecimalStorage = true;
             }
@@ -282,13 +285,19 @@ arrow::Result<std::shared_ptr<arrow::Array>> ReadPageSelectedColumn(
             return selection.Skip(stats);
         });
 
+    // Arrow rejects a decimal type over BYTE_ARRAY; read the raw bytes instead.
+    const auto readerType =
+        column.DecimalStorage &&
+            column.Descriptor->physical_type() == parquet::Type::BYTE_ARRAY
+        ? arrow::binary()
+        : column.Field->type();
     auto recordReader = parquet::internal::RecordReader::Make(
         column.Descriptor,
         column.Levels,
         memoryPool,
         false,
         false,
-        column.Field->type());
+        readerType);
     recordReader->SetPageReader(std::move(pageReader));
     const int64_t recordsRead = recordReader->ReadRecords(rowGroupRows);
 
