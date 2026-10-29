@@ -68,21 +68,21 @@ measurement per query.
 A/B of the branch against its base, origin/master `0725f69e`, both built
 RelWithDebInfo in separate worktrees with warm JIT caches, default settings
 (18 workers), `--format null --timing`. The five queries of issue #376 and the
-other grouped queries whose time moved ran five times each, the two binaries
-interleaved; the table gives the median and the individual runs of "Returned
-in".
+other grouped queries whose plan or time the change could move ran five times
+each, the two binaries interleaved; the table gives the median and the
+individual runs of "Returned in".
 
 | Query | master (s) | branch (s) | change | master runs | branch runs | CPU master → branch (s) |
 |---|---:|---:|---:|---|---|---|
-| q05 | 0.280 | 0.238 | −14.9% | 0.272 0.280 0.280 0.282 0.286 | 0.224 0.235 0.239 0.238 0.243 | 3.5 → 3.6 |
-| q12 | 0.301 | 0.253 | −16.1% | 0.295 0.301 0.301 0.306 0.308 | 0.247 0.257 0.253 0.253 0.262 | 3.8 → 3.9 |
-| q14 | 0.273 | 0.279 | +2.2% | 0.266 0.273 0.273 0.277 0.276 | 0.268 0.272 0.279 0.280 0.279 | 4.3 → 4.3 |
-| q17 | 0.512 | 0.509 | −0.5% | 0.525 0.512 0.516 0.511 0.511 | 0.501 0.504 0.512 0.509 0.515 | 7.6 → 7.6 |
-| q18 | 1.286 | 1.277 | −0.7% | 1.286 1.291 1.273 1.279 1.307 | 1.276 1.274 1.277 1.382 1.338 | 15.4 → 15.4 |
-| q28 | 1.138 | 0.959 | −15.7% | 1.086 1.143 1.145 1.136 1.138 | 0.915 0.944 0.960 0.961 0.959 | 17.7 → 15.1 |
-| q30 | 0.252 | 0.251 | −0.4% | 0.244 0.249 0.262 0.262 0.252 | 0.251 0.250 0.251 0.253 0.256 | 3.7 → 3.7 |
-| q33 | 1.183 | 1.175 | −0.6% | 1.161 1.192 1.200 1.173 1.183 | 1.157 1.175 1.177 1.173 1.186 | 17.9 → 17.9 |
-| q34 | 1.174 | 1.177 | +0.3% | 1.166 1.174 1.165 1.182 1.192 | 1.175 1.187 1.172 1.183 1.177 | 17.9 → 17.9 |
+| q05 | 0.279 | 0.234 | −15.9% | 0.273 0.277 0.283 0.279 0.281 | 0.229 0.234 0.233 0.239 0.236 | 3.4 → 3.6 |
+| q12 | 0.307 | 0.255 | −17.0% | 0.299 0.307 0.311 0.309 0.306 | 0.255 0.251 0.255 0.254 0.257 | 3.8 → 3.8 |
+| q14 | 0.278 | 0.274 | −1.4% | 0.268 0.273 0.278 0.278 0.279 | 0.271 0.274 0.272 0.275 0.275 | 4.2 → 4.2 |
+| q17 | 0.526 | 0.523 | −0.6% | 0.506 0.544 0.557 0.515 0.526 | 0.523 0.520 0.562 0.526 0.518 | 7.6 → 7.6 |
+| q18 | 1.271 | 1.278 | +0.5% | 1.271 1.271 1.267 1.275 1.310 | 1.319 1.274 1.272 1.353 1.278 | 15.4 → 15.3 |
+| q28 | 1.124 | 0.943 | −16.1% | 1.100 1.117 1.132 1.124 1.133 | 0.928 0.942 0.954 0.962 0.943 | 17.6 → 14.9 |
+| q30 | 0.251 | 0.249 | −0.7% | 0.249 0.251 0.254 0.249 0.252 | 0.245 0.249 0.248 0.254 0.253 | 3.7 → 3.7 |
+| q33 | 1.168 | 1.177 | +0.8% | 1.151 1.185 1.168 1.169 1.160 | 1.166 1.227 1.181 1.173 1.177 | 17.9 → 18.0 |
+| q34 | 1.170 | 1.196 | +2.2% | 1.170 1.184 1.175 1.166 1.170 | 1.167 1.199 1.196 1.204 1.171 | 18.0 → 18.0 |
 
 q28 groups by a `regexp_replace` of `Referer`, a key without statistics; the
 branch plans the partial phase for it, and its 33 lanes reduce 81.0M rows to
@@ -90,11 +90,13 @@ branch plans the partial phase for it, and its 33 lanes reduce 81.0M rows to
 q12 group by `SearchPhrase`, whose 6.0M values estimate a 16x reduction, so
 both binaries plan the partial phase; per lane the reduction is only 1.8x, and
 the lanes that reach the sample now pass their rows through instead of hashing
-them. q17 and q18 keep the shuffle plan because `UserID` alone has 17.6M
-values, q33 and q34 because `URL` (18.3M values) estimates 5.5x, below the 8x
-the plan requires; q14 and q30 keep it because the product of their key NDVs
-reaches the row count. Their differences are noise.
+them. The other six keep the shuffle plan: `UserID` alone (17.6M values) rules
+the partial out for q17 and q18, `URL` (18.3M values) estimates 5.5x for q33
+and q34, and the key NDVs of q14 and q30 multiply beyond the row count. Their
+differences are noise.
 
 The full suite, three runs per binary interleaved, sum of per-query medians:
-master 13.942 s, branch 13.577 s (−2.6%); no other query moved by more than
-5%.
+master 13.970 s, branch 13.630 s (−2.4%); no other query moved by more than
+5%. TPC-H SF10 (SQL, three runs each): 3.846 s to 3.802 s (−1.1%), no query
+beyond 5%. TPC-DS SF10 (three runs each): 23.608 s to 23.585 s (−0.1%); q74
++7% with overlapping runs (0.298 0.332 0.302 vs 0.305 0.331 0.323).
