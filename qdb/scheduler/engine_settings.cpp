@@ -173,8 +173,10 @@ TEngineConfigBuilder BuildEngineConfig() {
         "Byte target for shuffle output and retained inputs.", 1);
 
     b.Section("aggregate");
-    b.Bool("cascade_global", [](auto& s) -> auto& { return s.Scheduler.Aggregate.CascadeGlobal; },
-        "Parallelize global aggregates as partial, gather, combine.");
+    b.Enum("cascade_global", NScheduler::GlobalCascadeModeNames, NScheduler::ParseGlobalCascadeMode,
+        [](auto& s) -> auto& { return s.Scheduler.Aggregate.CascadeGlobal; },
+        "Parallelize global aggregates as partial, gather, combine: true, false, or auto, "
+        "which cascades when the estimated input reaches partial_min_input_rows.");
     b.Bool("partial", [](auto& s) -> auto& { return s.Scheduler.Aggregate.EnablePartial; },
         "Insert a partition-local partial aggregate before a repartition when statistics predict a reduction.");
     b.Size("partial_min_input_rows", [](auto& s) -> auto& { return s.Scheduler.Aggregate.PartialMinInputRows; },

@@ -10,6 +10,7 @@
 #include "plan_runner.h"
 #include <qdb/exec/aggregate_exec.h>
 #include <qdb/io/io.h>
+#include <qdb/io/parquet/source.h>
 #include <qdb/kernel/compiler.h>
 #include <qdb/modules/qumirdb_runtime.h>
 #include <qdb/plan/build.h>
@@ -25,8 +26,14 @@
 #include <qdb/plan/types/nullable.h>
 #include <qdb/sql/parser.h>
 
+#include <arrow/api.h>
+#include <arrow/io/api.h>
+#include <parquet/arrow/writer.h>
+
 #include <algorithm>
 #include <array>
+#include <cstdlib>
+#include <filesystem>
 #include <memory>
 #include <map>
 #include <set>
@@ -153,6 +160,52 @@ std::string StringAt(const TColumn& column, int64_t row) {
     return {column.Data + offsets[row], column.Data + offsets[row + 1]};
 }
 
+// Parquet fixture directory, removed with the test.
+class TTempDir {
+public:
+    TTempDir() {
+        auto pattern = (std::filesystem::temp_directory_path() / "qdb-aggregate-XXXXXX").string();
+        std::vector<char> writable(pattern.begin(), pattern.end());
+        writable.push_back('\0');
+        const char* created = ::mkdtemp(writable.data());
+        if (!created) {
+            throw std::runtime_error("failed to create temporary directory");
+        }
+        Path_ = created;
+    }
+
+    ~TTempDir() {
+        std::error_code error;
+        std::filesystem::remove_all(Path_, error);
+    }
+
+    const std::filesystem::path& Path() const {
+        return Path_;
+    }
+
+private:
+    std::filesystem::path Path_;
+};
+
+// Writes 0..rows-1 as the int64 column `v`, `rowGroupRows` per row group.
+void WriteValueParquet(const std::string& path, int64_t rows, int64_t rowGroupRows) {
+    auto check = [](const arrow::Status& status) {
+        if (!status.ok()) {
+            throw std::runtime_error(status.ToString());
+        }
+    };
+    arrow::Int64Builder values;
+    for (int64_t row = 0; row < rows; ++row) {
+        check(values.Append(row));
+    }
+    auto schema = arrow::schema({arrow::field("v", arrow::int64(), false)});
+    auto batch = arrow::RecordBatch::Make(schema, rows, {values.Finish().ValueOrDie()});
+    auto table = arrow::Table::FromRecordBatches({batch}).ValueOrDie();
+    auto output = arrow::io::FileOutputStream::Open(path).ValueOrDie();
+    check(parquet::arrow::WriteTable(*table, arrow::default_memory_pool(), output, rowGroupRows));
+    check(output->Close());
+}
+
 } // namespace
 
 TEST(AggregateE2E, GlobalIdentitySurvivesParallelCascade) {
@@ -197,7 +250,9 @@ TEST(AggregateE2E, GlobalIdentitySurvivesParallelCascade) {
                 ApplyPlanPasses(root);
                 NScheduler::TSettings settings;
                 settings.Scheduler.WorkerCount = 2;
-                settings.Aggregate.CascadeGlobal = cascade;
+                settings.Aggregate.CascadeGlobal = cascade
+                    ? NScheduler::EGlobalCascadeMode::On
+                    : NScheduler::EGlobalCascadeMode::Off;
                 auto runtime = RunPlan(root, settings);
                 TRowSet result{};
                 ASSERT_TRUE(runtime->Next(result));
@@ -223,6 +278,58 @@ TEST(AggregateE2E, GlobalIdentitySurvivesParallelCascade) {
     }
 }
 
+TEST(AggregateE2E, AutoCascadeFollowsTheParquetEstimate) {
+    // Auto end to end: the estimate comes from the Parquet metadata, the lanes
+    // from scan splitting.
+    constexpr int64_t rows = 1024;
+    TTempDir dir;
+    const auto path = (dir.Path() / "values.parquet").string();
+    WriteValueParquet(path, rows, /*rowGroupRows*/ 256);
+    TParquetSource source(path);
+
+    const std::vector<EAggregatePhase> cascade{EAggregatePhase::Partial, EAggregatePhase::Final};
+    const std::vector<EAggregatePhase> gather{EAggregatePhase::Single};
+    for (const uint64_t bound : {rows, rows + 1}) {
+        SCOPED_TRACE(::testing::Message() << "partial_min_input_rows=" << bound);
+        auto root = BuildSqlPlan("SELECT COUNT(*), SUM(v), MIN(v), MAX(v) FROM t", source);
+        ApplyPlanPasses(root);
+        auto aggregate = FindAggregate(root);
+        ASSERT_NE(aggregate, nullptr);
+        ASSERT_TRUE(aggregate->Input()->Stats_);
+        ASSERT_EQ(aggregate->Input()->Stats_->RowCount, rows);
+
+        NScheduler::TSettings settings;
+        settings.Scheduler.WorkerCount = 4;
+        settings.ScanSplit.Strategy = NScheduler::EScanSplitStrategy::RowGroupRange;
+        settings.ScanSplit.MaxScanTasks = 4;
+        settings.Aggregate.PartialMinInputRows = bound;
+        ASSERT_EQ(settings.Aggregate.CascadeGlobal, NScheduler::EGlobalCascadeMode::Auto);
+
+        auto lowered = NScheduler::LowerPlanToGraph(root, settings, nullptr);
+        EXPECT_EQ(std::ranges::count_if(lowered.Graph->Nodes(),
+            [](const auto& node) { return node->DebugKind == "source"; }), 4);
+        std::vector<EAggregatePhase> phases;
+        for (const auto& stage : lowered.ExecStages) {
+            if (stage.Kind == EExecPlanNodeKind::Aggregate) {
+                phases.push_back(stage.AggregatePhase);
+            }
+        }
+        EXPECT_EQ(phases, bound <= static_cast<uint64_t>(rows) ? cascade : gather);
+
+        auto runtime = RunPlan(root, settings);
+        TRowSet result{};
+        ASSERT_TRUE(runtime->Next(result));
+        ASSERT_EQ(result.RowCount, 1);
+        ASSERT_EQ(result.ColumnCount, 4);
+        EXPECT_EQ(reinterpret_cast<int64_t*>(result.Columns[0].Data)[0], rows);
+        EXPECT_EQ(reinterpret_cast<int64_t*>(result.Columns[1].Data)[0], rows * (rows - 1) / 2);
+        EXPECT_EQ(reinterpret_cast<int64_t*>(result.Columns[2].Data)[0], 0);
+        EXPECT_EQ(reinterpret_cast<int64_t*>(result.Columns[3].Data)[0], rows - 1);
+        Release(&result);
+        EXPECT_FALSE(runtime->Next(result));
+    }
+}
+
 TEST(AggregateE2E, EmptyExplicitGroupsHaveNoIdentityRow) {
     for (bool cascade : {false, true}) {
         for (const auto& sql : {
@@ -236,7 +343,9 @@ TEST(AggregateE2E, EmptyExplicitGroupsHaveNoIdentityRow) {
             ApplyPlanPasses(root);
             NScheduler::TSettings settings;
             settings.Scheduler.WorkerCount = 2;
-            settings.Aggregate.CascadeGlobal = cascade;
+            settings.Aggregate.CascadeGlobal = cascade
+                ? NScheduler::EGlobalCascadeMode::On
+                : NScheduler::EGlobalCascadeMode::Off;
             auto runtime = RunPlan(root, settings);
             TRowSet result{};
             while (runtime->Next(result)) {

@@ -348,9 +348,11 @@ The automatic rule is conservative. It needs all of these facts:
 If there are no statistics, the scheduler keeps the first plan. It also keeps
 the first plan when the estimate does not pass the rule. The setting
 `[aggregate] partial = false` turns off the rule for tests and diagnostics. A global
-aggregate uses its `partial -> gather -> final` plan only with
-`[aggregate] cascade_global = true`. SQL grouping sets always use their special two-phase
-plan.
+aggregate reduces its input to one row, so only the input size matters for its
+`partial -> gather -> final` plan: `[aggregate] cascade_global = auto` uses it when
+the estimated input rows reach the same bound, and gathers the lanes into one
+aggregate below it or without statistics; `true` and `false` force one plan.
+SQL grouping sets always use their special two-phase plan.
 
 Partial and final aggregates have distinct executable stage ids and explicit
 `EAggregatePhase::Partial` and `EAggregatePhase::Final` values. The

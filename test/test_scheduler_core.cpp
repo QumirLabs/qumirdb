@@ -57,7 +57,7 @@ TEST(SchedulerCore, SettingsDefaultsEnableAutomaticParallelism) {
     EXPECT_TRUE(settings.Aggregate.EnablePartial);
     EXPECT_EQ(settings.Aggregate.PartialMinInputRows, 1024u * 1024u);
     EXPECT_EQ(settings.Aggregate.PartialMinReductionFactor, 8u);
-    EXPECT_FALSE(settings.Aggregate.CascadeGlobal);
+    EXPECT_EQ(settings.Aggregate.CascadeGlobal, EGlobalCascadeMode::Auto);
 }
 
 } // namespace

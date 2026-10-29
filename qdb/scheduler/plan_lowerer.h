@@ -63,6 +63,13 @@ bool ShouldUsePartialAggregate(
     const TAggregateOperator& aggregate,
     const TSettings& settings);
 
+// Whether an ungrouped or global aggregate over `inputLanes` lanes is lowered
+// as a partial->gather->combine cascade instead of one gathered aggregate.
+bool ShouldCascadeGlobalAggregate(
+    const TAggregateOperator& aggregate,
+    size_t inputLanes,
+    const TSettings& settings);
+
 // Lower a logical plan into a scheduler graph (no terminal sink yet).
 // Kernels are generated but not compiled.
 // A custom filter factory can bind query-scoped filter ids to remote endpoints.
