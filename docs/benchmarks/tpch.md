@@ -90,6 +90,26 @@ DataFusion complete-run totals: 4.220, 4.250, and 4.180 s.
 | q22 | 0.069 | 0.140 | 0.10 | 0.49× | 0.69× |
 | **total** | **3.864** | **4.03** | **4.180** | **0.96×** | **0.92×** |
 
+### Global aggregate cascade at scale 10
+
+A/B of 2026-10-29 on the queries that end in a global aggregate: master
+`b723dbf7` against the same build with `[aggregate] cascade_global` at its new
+default `auto`, forced `true` and forced `false` (`8d9a2ea3`); one warm-up
+run, five alternated rounds, medians. Q14 and Q19 return `f64` sums whose last
+bits vary from run to run on every arm, including master, because the lanes
+arrive in a different order each time.
+
+| Query | master (s) | auto (s) | true (s) | false (s) |
+|---|---|---|---|---|
+| q6 | 0.105 | 0.077 | 0.078 | 0.104 |
+| q14 | 0.096 | 0.095 | 0.095 | 0.095 |
+| q19 | 0.211 | 0.210 | 0.211 | 0.211 |
+
+`auto` cascades Q6 (about 1.1 M estimated rows after the `lineitem` filter)
+and gathers Q14 and Q19, whose aggregate inputs are estimated below the bound;
+forced `true` shows that the cascade would not have helped them. On a cold JIT
+cache the cascade raised Q6's LLVM time from about 0.20 s to 0.33 s.
+
 ## Scale 100
 
 qdb re-run 2026-10-25 in SQL mode at scale 100, one run per query on the
