@@ -178,15 +178,13 @@ TEngineConfigBuilder BuildEngineConfig() {
         "Parallelize global aggregates as partial, gather, combine: true, false, or auto, "
         "which cascades when the estimated input reaches partial_min_input_rows.");
     b.Bool("partial", [](auto& s) -> auto& { return s.Scheduler.Aggregate.EnablePartial; },
-        "Insert a partition-local partial aggregate before a repartition when statistics predict a reduction.");
+        "Insert a partition-local partial aggregate before a repartition unless statistics predict too little reduction.");
     b.Size("partial_min_input_rows", [](auto& s) -> auto& { return s.Scheduler.Aggregate.PartialMinInputRows; },
         "Estimated input rows from which a partial aggregate is considered.");
     b.Size("partial_min_reduction_factor", [](auto& s) -> auto& { return s.Scheduler.Aggregate.PartialMinReductionFactor; },
-        "Estimated row reduction a partial aggregate must reach.", 1);
+        "Row reduction a partial aggregate must reach, estimated when planned or observed at run time.", 1);
     b.Size("partial_sample_rows", [](auto& s) -> auto& { return s.Scheduler.Aggregate.PartialSampleRows; },
-        "Rows a partial aggregate hashes before it judges its observed reduction.", 1);
-    b.Double("partial_pass_through_reduction", [](auto& s) -> auto& { return s.Scheduler.Aggregate.PartialPassThroughReduction; },
-        "Observed rows per group below which a partial aggregate hands its rows through unaggregated.", 1.0);
+        "Rows a partial aggregate planned without an estimate hashes before it judges its observed reduction.", 1);
     b.Size("partial_max_groups", [](auto& s) -> auto& { return s.Scheduler.Aggregate.PartialMaxGroups; },
         "Groups at which a partial aggregate emits its table and restarts it empty.", 1);
     b.Enum("table", NScheduler::AggregateTableKindNames, NScheduler::ParseAggregateTableKind,

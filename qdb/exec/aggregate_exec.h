@@ -97,7 +97,7 @@ struct TPartialAggregatePolicy {
     uint64_t SampleRows = 128 * 1024;
     // Rows per group below which hashing does not pay for itself: the
     // remaining rows pass through as single-row partial states.
-    double PassThroughReduction = 2.0;
+    uint64_t MinReduction = 8;
     // Groups at which the table emits its groups and restarts empty.
     int64_t MaxGroups = 1 << 20;
 };
