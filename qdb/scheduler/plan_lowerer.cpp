@@ -3358,20 +3358,11 @@ bool ShouldUsePartialAggregate(
         }
     }
 
-    // Without a group estimate (a computed key has no NDV), or with one that
-    // says nothing, the partial aggregate judges its reduction at run time and
-    // hands rows through when it is low (TPartialAggregateProcessor).
+    // Without a group estimate (a computed key has no NDV) the partial
+    // aggregate judges its reduction at run time and hands rows through when
+    // it is low (TPartialAggregateProcessor).
     const auto estimatedGroups = EstimateAggregateGroupCount(aggregate);
-    if (!estimatedGroups) {
-        return true;
-    }
-    // The estimate of a composite key is the product of the key NDVs under
-    // independence, an upper bound. Once it reaches the row count it is the
-    // trivial bound, true of every input, and says nothing about the groups.
-    if (aggregate.GroupKeys().size() > 1 && *estimatedGroups >= inputStats->RowCount) {
-        return true;
-    }
-    return *estimatedGroups <= maxGroups;
+    return !estimatedGroups || *estimatedGroups <= maxGroups;
 }
 
 size_t ChooseAggregatePartitionCount(

@@ -713,9 +713,8 @@ states only; a grouping without aggregates stays swiss. See
 A grouped aggregate over parallel input gets a lane-local partial phase before
 the repartition unless statistics rule it out: one key with more than an eighth
 as many values as rows, or an estimate of fewer than 8x fewer groups than rows.
-Without a usable estimate, a computed key or the trivial bound of a composite
-key, the partial phase judges its own reduction after a sample of its input and
-hands rows through as single-row partial states when a group holds fewer than
+Without an estimate, as for a computed key, the partial phase judges its own
+reduction after a sample of its input and hands rows through as single-row partial states when a group holds fewer than
 eight rows on average; its table emits its groups and restarts at a group bound.
 The final
 phase merges emitted groups and passed-through rows alike, so results do not

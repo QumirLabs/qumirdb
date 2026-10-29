@@ -176,7 +176,7 @@ flowchart LR
 ```
 
 The scheduler selects this plan when the input has at least 1,048,576 rows and
-statistics do not show fewer than 8x fewer groups than rows; without a usable
+statistics do not show fewer than 8x fewer groups than rows; without an
 estimate the partial phase judges its reduction at run time
 ([aggregation.md](aggregation.md#adaptive-partial-phase)). Each partial
 lane builds local groups before it sends rows to the exchange. The final phase

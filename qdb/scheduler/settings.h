@@ -165,7 +165,7 @@ struct TAggregateSettings {
     size_t PartialMinInputRows = 1024 * 1024;
     size_t PartialMinReductionFactor = 8;
 
-    // A partial aggregate planned without a usable estimate judges its own
+    // A partial aggregate planned without a group estimate judges its own
     // reduction at run time: once it has hashed PartialSampleRows rows and
     // holds more than one group per PartialMinReductionFactor rows, it stops
     // hashing and hands its rows through as single-row partial states. Its

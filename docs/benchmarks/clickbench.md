@@ -62,3 +62,27 @@ measurement per query.
 | q41 | 0.011 | 0.060 | 0.120 | 0.18× | 0.09× |
 | q42 | 0.008 | 0.060 | 0.100 | 0.14× | 0.08× |
 | **total** | **13.499** | **14.44** | **14.95** | **0.93×** | **0.90×** |
+
+## Partial aggregate decided at run time (2026-10-29)
+
+A/B of the branch against its base, origin/master `0725f69e`, both built
+RelWithDebInfo in separate worktrees with warm JIT caches, default settings
+(18 workers), `--format null --timing`. The five queries of issue #376 ran five
+times each, the two binaries interleaved; the table gives the median and the
+individual runs of "Returned in".
+
+| Query | master (s) | branch (s) | change | master runs | branch runs | CPU master → branch (s) |
+|---|---:|---:|---:|---|---|---|
+| q17 | 0.518 | 0.532 | +2.7% | 0.652 0.551 0.517 0.515 0.518 | 0.637 0.532 0.545 0.515 0.512 | 7.6 → 7.6 |
+| q18 | 1.318 | 1.307 | −0.8% | 1.481 1.379 1.271 1.275 1.318 | 1.543 1.307 1.330 1.264 1.265 | 15.5 → 15.4 |
+| q28 | 1.122 | 0.940 | −16.2% | 1.300 1.131 1.111 1.122 1.114 | 1.078 0.940 0.939 0.941 0.933 | 17.5 → 14.8 |
+| q33 | 1.179 | 1.189 | +0.8% | 1.315 1.168 1.182 1.173 1.179 | 1.429 1.178 1.189 1.190 1.162 | 17.8 → 17.8 |
+| q34 | 1.173 | 1.178 | +0.4% | 1.246 1.201 1.170 1.173 1.170 | 1.483 1.176 1.178 1.161 1.180 | 17.9 → 17.8 |
+
+q28 groups by a `regexp_replace` of `Referer`, a key without statistics; the
+branch plans the partial phase for it, and its 33 lanes reduce 81.0M rows to
+3.7M (21.8x) before the exchange instead of shuffling every `Referer`. The
+other four keep the shuffle plan: `UserID` (17.6M values) alone rules the
+partial out for q17 and q18, and `URL` (18.3M values) estimates a 5.5x
+reduction for q33 and q34, below the 8x the plan requires. Their differences
+are noise.

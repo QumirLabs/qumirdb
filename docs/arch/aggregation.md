@@ -345,10 +345,8 @@ composite key are at least as many as the values of any one key, so a key with
 more than one eighth as many values as rows settles it: there is too little to
 reduce. An estimate of the groups below that bound keeps the first plan too when
 it promises fewer than 8x fewer groups than rows. Without an estimate (a
-computed key has no NDV), or with the trivial bound of a composite key (the
-product of the key NDVs under independence that already reaches the row count
-holds for every input and says nothing about the groups), the partial phase
-decides at run time, as the next section describes. The setting
+computed key has no NDV) the partial phase decides at run time, as the next
+section describes. The setting
 `[aggregate] partial = false` turns the second plan off for tests and
 diagnostics. A global aggregate uses its `partial -> gather -> final` plan only
 with `[aggregate] cascade_global = true`. SQL grouping sets always use their
