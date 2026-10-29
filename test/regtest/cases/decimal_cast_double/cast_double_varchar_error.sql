@@ -1,0 +1,1 @@
+SELECT id, CAST(x AS VARCHAR) AS s FROM t ORDER BY id;

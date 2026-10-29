@@ -1,0 +1,3 @@
+sort [s asc]
+└─ project (s, d, late) (rows≈5 cost≈185)
+   └─ source date_strings_nullable AS date_strings_nullable (rows≈5 cost≈80)

@@ -323,6 +323,120 @@
   (fun qdb_string_arena_alloc ((var arena <ptr i8>) (var size i64)) -> <ptr u8>
        (attrs extern) (block))
 
+  ;; CAST(<integer> AS VARCHAR): the decimal digits of a magnitude with an optional
+  ;; minus sign, in the arena like the result of `||`. The cast rule
+  ;; (qdb/kernel/cast_rules.cpp) widens a signed integer to i64 and an unsigned one to
+  ;; u64, so a UBIGINT above 2^63-1 keeps its value.
+  (fun qdb_string_from_magnitude ((var arena <ptr i8>) (var mag u64) (var negative bool)) -> StringView
+    (block
+      (var digits = 1)
+      (var rest = (// mag (: 10 u64)))
+      (while (!= rest (: 0 u64))
+        (block
+          (= digits (+ digits 1))
+          (= rest (// rest (: 10 u64)))))
+      (var size = digits)
+      (if negative (block (= size (+ size 1))))
+      (var out = (call qdb_string_arena_alloc arena size))
+      (var pos = size)
+      (var i = 0)
+      (while (< i digits)
+        (block
+          (= pos (- pos 1))
+          (= out [pos] (cast (+ (% mag (: 10 u64)) (: 48 u64)) u8))
+          (= mag (// mag (: 10 u64)))
+          (= i (+ i 1))))
+      (if negative (block (= out [0] (: 45 u8))))
+      (return (cast (struct ((Data out) (Size size))) StringView))))
+
+  (fun qdb_string_from_i64 ((var arena <ptr i8>) (var value i64)) -> StringView
+    (block
+      ;; The magnitude as u64: negating the most negative i64 fits there.
+      (var negative = (< value 0))
+      (var mag = (cast value u64))
+      (if negative (block (= mag (- (: 0 u64) mag))))
+      (return (call qdb_string_from_magnitude arena mag negative))))
+
+  (fun qdb_string_from_u64 ((var arena <ptr i8>) (var value u64)) -> StringView
+    (block
+      (return (call qdb_string_from_magnitude arena value #f))))
+
+  ;; CAST(<date> AS VARCHAR): the ISO 8601 date yyyy-mm-dd of a day count since
+  ;; 1970-01-01 in the proleptic Gregorian calendar, in the arena like `||`. The year,
+  ;; month and day come from Howard Hinnant's civil_from_days ("chrono-Compatible
+  ;; Low-Level Date Algorithms"): the count is shifted to start at 0000-03-01, so a
+  ;; year begins in March and a leap day is its last day, and is split into eras of
+  ;; 400 years (146097 days) in which the leap-year pattern repeats. The year has at
+  ;; least four digits, more when it needs them, and a minus sign when negative.
+  (fun qdb_string_from_date ((var arena <ptr i8>) (var d DATE)) -> StringView
+    (block
+      (var z = (+ (cast (bitcast d i32) i64) 719468))
+      (var era = (// z 146097))
+      (if (< z 0) (block (= era (// (- z 146096) 146097))))
+      (var doe = (- z (* era 146097)))
+      (var yoe = (// (- (+ doe (// doe 36524)) (+ (// doe 1460) (// doe 146096))) 365))
+      (var year = (+ yoe (* era 400)))
+      (var doy = (- doe (- (+ (* 365 yoe) (// yoe 4)) (// yoe 100))))
+      (var mp = (// (+ (* 5 doy) 2) 153))
+      (var day = (+ (- doy (// (+ (* 153 mp) 2) 5)) 1))
+      (var month = (- mp 9))
+      (if (< mp 10) (block (= month (+ mp 3))))
+      (if (<= month 2) (block (= year (+ year 1))))
+      (var negative = (< year 0))
+      (var mag = year)
+      (if negative (block (= mag (- 0 year))))
+      (var digits = 4)
+      (var rest = (// mag 10000))
+      (while (!= rest 0)
+        (block
+          (= digits (+ digits 1))
+          (= rest (// rest 10))))
+      (var size = (+ digits 6))
+      (if negative (block (= size (+ size 1))))
+      (var out = (call qdb_string_arena_alloc arena size))
+      (var pos = 0)
+      (if negative
+        (block
+          (= out [0] (: 45 u8))
+          (= pos 1)))
+      (var i = (+ pos digits))
+      (while (> i pos)
+        (block
+          (= i (- i 1))
+          (= out [i] (cast (+ (% mag 10) 48) u8))
+          (= mag (// mag 10))))
+      (= pos (+ pos digits))
+      (= out [pos] (: 45 u8))
+      (= out [(+ pos 1)] (cast (+ (// month 10) 48) u8))
+      (= out [(+ pos 2)] (cast (+ (% month 10) 48) u8))
+      (= out [(+ pos 3)] (: 45 u8))
+      (= out [(+ pos 4)] (cast (+ (// day 10) 48) u8))
+      (= out [(+ pos 5)] (cast (+ (% day 10) 48) u8))
+      (return (cast (struct ((Data out) (Size size))) StringView))))
+
+  ;; CAST(<boolean> AS VARCHAR) spells the value like DuckDB and PostgreSQL output.
+  ;; CAST(<boolean> AS INTEGER / BIGINT / DOUBLE) is 1 or 0. Without these conversions
+  ;; Qumir lowers the cast as a sign extension of the i1, so TRUE would become -1.
+  (fun qdb_bool_to_i32 ((var value bool)) -> i32 (attrs (operator "cast"))
+    (block
+      (if value (block (return (: 1 i32))))
+      (return (: 0 i32))))
+
+  (fun qdb_bool_to_i64 ((var value bool)) -> i64 (attrs (operator "cast"))
+    (block
+      (if value (block (return 1)))
+      (return 0)))
+
+  (fun qdb_bool_to_f64 ((var value bool)) -> f64 (attrs (operator "cast"))
+    (block
+      (if value (block (return 1.0)))
+      (return 0.0)))
+
+  (fun qdb_string_from_bool ((var value bool)) -> StringView (attrs (operator "cast"))
+    (block
+      (if value (block (return (cast "true" StringView))))
+      (return (cast "false" StringView))))
+
   ;; SQL UPPER/LOWER map each character by the simple (one code point to one
   ;; code point) Unicode case mapping, as DuckDB does, in Basic Latin, Latin-1
   ;; Supplement, Latin Extended-A, Latin Extended Additional, the Greek alphabet

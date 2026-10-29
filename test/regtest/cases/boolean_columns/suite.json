@@ -12,6 +12,12 @@
       "parquet": {
         "row_group_rows": 73
       }
+    },
+    "integers": {
+      "json": "tables/integers.json",
+      "parquet": {
+        "row_group_rows": 2
+      }
     }
   },
   "tables": {
@@ -30,6 +36,15 @@
       "order": "ordered"
     },
     "cast_to_number.sql": {
+      "order": "ordered"
+    },
+    "cast_to_varchar.sql": {
+      "order": "ordered"
+    },
+    "cast_integer_bounds.sql": {
+      "tables": {
+        "t": "integers"
+      },
       "order": "ordered"
     },
     "group_boolean.sql": {

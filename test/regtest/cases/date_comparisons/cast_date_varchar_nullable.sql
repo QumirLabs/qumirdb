@@ -1,0 +1,3 @@
+SELECT d, CAST(CAST(d AS DATE) AS VARCHAR) AS iso, CAST(CAST('2020-01-05' AS DATE) AS VARCHAR) AS lit,
+       'd=' || CAST(CAST(d AS DATE) AS VARCHAR) AS c
+FROM day_numbers_nullable ORDER BY d;

@@ -1,0 +1,4 @@
+sort [x asc]
+└─ project (x, xs, ms, bs, ns, c) (rows≈6 cost≈3.4K)
+   └─ filter (&& (!= (cast |t.x| string) (cast "3" <named StringView>)) (< |t.x| 12)) (rows≈6 cost≈2.9K)
+      └─ source t AS t row-groups (&& (!= (cast |t.x| string) (cast "3" <named StringView>)) (< |t.x| 12)) (rows≈144 cost≈1.4K)

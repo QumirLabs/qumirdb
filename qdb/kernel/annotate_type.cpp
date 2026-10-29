@@ -1,6 +1,7 @@
 #include <qdb/kernel/annotate_type.h>
 
 #include <qdb/catalog/external_module.h>
+#include <qdb/kernel/cast_rules.h>
 #include <qdb/kernel/vm_function.h>
 #include <qdb/plan/clone_expr.h>
 #include <qdb/plan/types/decimal.h>
@@ -1158,19 +1159,36 @@ TExprPtr Build3VL(bool isAnd, const TExprPtr& a, const TTypePtr& at,
     return std::make_shared<TBlockExpr>(loc, std::move(stmts));
 }
 
-// CAST(boolean AS number): qumir lowers a bool-to-integer cast as a sign extension of
-// the i1, so TRUE would become -1 (and a float cast -1.0). Select 1 or 0 instead.
-bool IsBoolToNumberCast(const TTypePtr& operandType, const TTypePtr& target) {
-    if (!operandType || !target) return false;
-    return TMaybeType<TBoolType>(UnwrapNullableType(operandType))
-        && (TMaybeType<TIntegerType>(target) || TMaybeType<TFloatType>(target));
+// The conversion of a plain `value` of type `from` to a cast target: a row of the cast
+// table when one covers it, else a Qumir `cast`. `castTarget` is the target as the
+// query wrote it (it still tells DATE from i32); `valueType` is the planner value type
+// the plain cast targets. CastTargetQ keeps a DECIMAL planner-typed so ExpandDecimal can
+// still lower it and spells VARCHAR as StringView: the planner's `string` is not the
+// type the `cast` operators of qumirdb.oz produce, so none would be a candidate.
+TExprPtr ConvertValue(const TExprPtr& value, const TTypePtr& from, const TTypePtr& castTarget,
+    const TTypePtr& valueType, TLocation loc)
+{
+    if (auto converted = ApplyCastRule(ValueType(from), castTarget, value, loc)) {
+        return converted;
+    }
+    return std::make_shared<TCastExpr>(loc, value, CastTargetQ(valueType));
 }
 
-TExprPtr BoolToNumber(const TExprPtr& value, const TTypePtr& target, TLocation loc) {
-    auto literal = [&](int64_t v) -> TExprPtr {
-        return std::make_shared<TCastExpr>(loc, std::make_shared<TNumberExpr>(loc, v), target);
-    };
-    return std::make_shared<TIfExpr>(loc, value, literal(1), literal(0));
+// The type of a cast operand as the query wrote it, when that says more than the planner
+// type: the target of an inner cast to DATE, which FromQumirType erases to i32 before an
+// outer cast could choose the DATE rule (`CAST(CAST(d AS DATE) AS VARCHAR)`). Taken before
+// the operand is expanded, since the expansion replaces the inner cast node. A DATE column
+// or literal is a plain i32 to the planner (issue #226) and has no such spelling.
+TTypePtr NominalCastType(const TExprPtr& operand) {
+    auto cast = TMaybeNode<TCastExpr>(operand);
+    if (!cast) {
+        return nullptr;
+    }
+    const TTypePtr target = UnwrapNullableType(cast.Cast()->Type);
+    if (auto named = TMaybeType<TNamedType>(target); named && named.Cast()->Name == "DATE") {
+        return target;
+    }
+    return nullptr;
 }
 
 // NULLIF(divisor, 0) as Nullable[value]: a zero divisor becomes one more NULL operand of
@@ -1517,12 +1535,16 @@ TTypePtr Expand(TExprPtr& e, const TStructType& inputType, uint64_t& counter) {
 
     if (auto cp = TMaybeNode<TCastExpr>(e)) {
         auto node = cp.Cast();
+        const TTypePtr nominal = NominalCastType(node->Operand);
         TTypePtr ot = Expand(node->Operand, inputType, counter);
         // `target` is the (non-nullable) value type; a nullable cast target contributes
         // nullability separately (BuildNullStrict / nullable_from_value wrap it once).
         TTypePtr target = IsNullableType(node->Type)
             ? UnwrapNullableType(node->Type)
             : FromQumirType(node->Type);
+        const TTypePtr castTarget = UnwrapNullableType(node->Type);
+        // The operand type the cast table sees; `ot` keeps deciding the nullability.
+        const TTypePtr from = nominal ? nominal : ot;
         if (IsUntypedNull(node->Operand, ot)) {
             // CAST(NULL AS T) is the NULL of T.
             e = std::make_shared<TCastExpr>(node->Location, MakeNull(node->Location), NullableQ(target));
@@ -1540,27 +1562,32 @@ TTypePtr Expand(TExprPtr& e, const TStructType& inputType, uint64_t& counter) {
                 if (PlanTypeKey(UnwrapNullableType(ot)) != PlanTypeKey(base)) {
                     // Base conversion targets the planner base type so ExpandDecimal can
                     // still turn a float/int -> decimal cast into qdb_decimal_from_*.
-                    val = std::make_shared<TCastExpr>(node->Location, val, base);
+                    val = ConvertValue(val, from, base, base, node->Location);
                 }
                 e = std::make_shared<TCastExpr>(node->Location, val, ToQumirType(node->Type));
                 return std::make_shared<TNullable>(base);
             }
-            if (IsBoolToNumberCast(ot, target)) {
-                e = BoolToNumber(node->Operand, target, node->Location);
+            // Without a rule the plain cast stays as written: its target may be a type
+            // only qumirdb.oz knows, like `DATE` for a date literal. A cast to VARCHAR
+            // is spelled with the StringView target so that a `cast` operator of
+            // qumirdb.oz (boolean -> VARCHAR) is a candidate.
+            if (auto converted = ot
+                ? ApplyCastRule(from, castTarget, node->Operand, node->Location)
+                : nullptr)
+            {
+                e = converted;
+            } else if (TMaybeType<TStringType>(castTarget)) {
+                e = std::make_shared<TCastExpr>(node->Location, node->Operand,
+                    CastTargetQ(castTarget));
             }
             return ot ? target : nullptr;
         }
         TExprPtr operand = node->Operand;
         // BuildNullStrict already re-wraps the result in Nullable[target], so the inner
-        // cast targets the planner base value type (kept planner-typed so ExpandDecimal
-        // can still lower a decimal conversion).
-        TTypePtr tt = target;
+        // conversion targets the plain value type.
         e = BuildNullStrict({{operand, true}},
-            [tt, node, boolToNumber = IsBoolToNumberCast(ot, target)](std::vector<TExprPtr> a) -> TExprPtr {
-                if (boolToNumber) {
-                    return BoolToNumber(a[0], tt, node->Location);
-                }
-                return std::make_shared<TCastExpr>(node->Location, a[0], tt);
+            [from, castTarget, target, node](std::vector<TExprPtr> a) -> TExprPtr {
+                return ConvertValue(a[0], from, castTarget, target, node->Location);
             }, target, counter, node->Location);
         return std::make_shared<TNullable>(target);
     }
@@ -1717,36 +1744,14 @@ TExprPtr DecimalScaleLiteral(TLocation loc, int32_t scale) {
     return Int64(loc, static_cast<int64_t>(scale));
 }
 
+// The expression as a DECIMAL of `targetScale`: the cast-table row from its value type.
+// Only the scale matters to the conversion, so the target carries the widest precision.
 TExprPtr DecimalValueAtScale(TExprPtr expr, const TTypePtr& type, int32_t targetScale,
     TLocation loc)
 {
-    TTypePtr valueType = ValueType(type);
-    if (auto decimal = DecimalSpecOfValueType(valueType)) {
-        if (decimal->Scale == targetScale) {
-            return expr;
-        }
-        if (decimal->Scale > targetScale) {
-            throw NQumir::TError(
-                "decimal scale down cast is not implemented: " +
-                std::to_string(decimal->Scale) + " -> " + std::to_string(targetScale));
-        }
-        return Call("qdb_decimal_scale_up", {
-            std::move(expr),
-            DecimalScaleLiteral(loc, targetScale - decimal->Scale),
-        }, loc);
-    }
-    valueType = UnwrapNamedType(valueType);
-    if (IsInt(valueType)) {
-        return Call("qdb_decimal_from_i64", {
-            CastToI64(std::move(expr), loc),
-            DecimalScaleLiteral(loc, targetScale),
-        }, loc);
-    }
-    if (IsFloat(valueType)) {
-        return Call("qdb_decimal_from_f64", {
-            std::move(expr),
-            DecimalScaleLiteral(loc, targetScale),
-        }, loc);
+    TTypePtr target = MakeDecimalType({.Precision = MaxDecimalPrecision, .Scale = targetScale});
+    if (auto converted = ApplyDecimalCastRule(ValueType(type), target, expr, loc)) {
+        return converted;
     }
     throw NQumir::TError(
         "cannot convert type '" + (type ? TypeDiagnosticName(type) : std::string("unknown")) +
@@ -1771,11 +1776,10 @@ int32_t DecimalCommonScale(const TTypePtr& left, const TTypePtr& right,
 // The expression as a DOUBLE: a decimal is converted like CAST(... AS DOUBLE), anything else
 // already is one or is converted by the caller's cast.
 TExprPtr DecimalValueAsDouble(TExprPtr expr, const TTypePtr& type, TLocation loc) {
-    if (auto decimal = DecimalSpecOfValueType(ValueType(type))) {
-        return Call("qdb_decimal_to_f64", {
-            std::move(expr),
-            DecimalScaleLiteral(loc, decimal->Scale),
-        }, loc);
+    if (auto converted = ApplyDecimalCastRule(ValueType(type), std::make_shared<TFloatType>(),
+            expr, loc))
+    {
+        return converted;
     }
     return expr;
 }
@@ -2020,30 +2024,12 @@ TTypePtr ExpandDecimalNode(TExprPtr& e, const TStructType& inputType, TTypeEnv& 
             e = DecimalValueAtScale(node->Operand, ot, decimal->Scale, node->Location);
             return MakeDecimalType(*decimal);
         }
-        if (ot && IsFloat(UnwrapNamedType(ValueType(target)))) {
-            if (auto decimal = DecimalSpecOfValueType(ValueType(ot))) {
-                e = Call("qdb_decimal_to_f64", {
-                    std::move(node->Operand),
-                    DecimalScaleLiteral(node->Location, decimal->Scale),
-                }, node->Location);
-            }
-        }
-        if (ot) {
-            auto integer = TMaybeType<TIntegerType>(UnwrapNamedType(ValueType(target)));
-            auto decimal = DecimalSpecOfValueType(ValueType(ot));
-            if (integer && decimal) {
-                // Only i32 and i64 are SQL integer types; qdb_decimal_to_i32/i64 round
-                // half away from zero and saturate.
-                const int bits = integer.Cast()->BitWidth();
-                if (bits != 32 && bits != 64) {
-                    throw NQumir::TError("decimal cast to a " + std::to_string(bits) +
-                        "-bit integer is not implemented; only INTEGER and BIGINT exist");
-                }
-                e = Call(bits == 32 ? "qdb_decimal_to_i32" : "qdb_decimal_to_i64", {
-                    std::move(node->Operand),
-                    DecimalScaleLiteral(node->Location, decimal->Scale),
-                }, node->Location);
-            }
+        // DECIMAL -> DOUBLE / INTEGER: the cast-table row from the operand's value type.
+        if (auto converted = ot
+            ? ApplyDecimalCastRule(ValueType(ot), ValueType(target), node->Operand, node->Location)
+            : nullptr)
+        {
+            e = converted;
         }
         return Propagate({ot}, target);
     }
@@ -2239,8 +2225,10 @@ bool ContainsNull(const TExprPtr& e) {
 // skip Expand when one is present: coalesce -> if-chain, qdb_in_list -> typed
 // comparisons, strcat/upper/lower -> their arena calls, qdb_string_view_sql_like -> a
 // constant-pattern fast path, a cast to a nullable target -> nullable_from_value (the raw
-// planner TNullable won't compile), and a `%` or decimal `/` by what may be zero -> a
-// NULLIF guard. Float division keeps the fast path: it has no such rewrite.
+// planner TNullable won't compile), a cast the cast table rewrites or rejects (integer ->
+// VARCHAR, VARCHAR -> DATE), a cast to VARCHAR -> its StringView spelling, and a `%` or
+// decimal `/` by what may be zero -> a NULLIF guard. Float division keeps the fast path:
+// it has no such rewrite.
 bool ContainsMustExpandCall(const TExprPtr& e, const TStructType& inputType) {
     if (!e) return false;
     if (auto call = TMaybeNode<TCallExpr>(e)) {
@@ -2255,6 +2243,12 @@ bool ContainsMustExpandCall(const TExprPtr& e, const TStructType& inputType) {
     }
     if (auto cast = TMaybeNode<TCastExpr>(e)) {
         if (IsNullableType(cast.Cast()->Type)) return true;
+        if (TMaybeType<TStringType>(cast.Cast()->Type)) return true;
+        if (HasCastRule(ValueType(InferType(cast.Cast()->Operand, inputType)),
+                UnwrapNullableType(cast.Cast()->Type)))
+        {
+            return true;
+        }
     }
     if (auto bin = TMaybeNode<TBinaryExpr>(e)) {
         const TOperator op = bin.Cast()->Operator;
