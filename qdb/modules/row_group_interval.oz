@@ -78,6 +78,41 @@
   (fun rg_const [T] ((var value T)) -> <named RgRange [T]>
     (block (return (call rg_range value value 5))))
 
+  ;; A DECIMAL range is its unscaled i128; the VM receives it as two i64 words.
+  (fun rg_i128_words ((var lo i64) (var hi i64)) -> i128
+    (block
+      (return (| (<< (cast hi i128) (: 64 i128))
+                 (cast (cast lo u64) i128)))))
+
+  (fun rg_i128_max () -> i128
+    (block
+      (return (- (: 0 i128) (+ (<< (: 1 i128) (: 127 i128)) (: 1 i128))))))
+
+  (fun rg_i128_from_i64 ((var a <named RgRange [i64]>)) -> <named RgRange [i128]>
+    (block
+      (return (call rg_range (cast (field a Lo) i128) (cast (field a Hi) i128)
+                             (field a Flags)))))
+
+  (fun rg_i128_from_u64 ((var a <named RgRange [u64]>)) -> <named RgRange [i128]>
+    (block
+      (return (call rg_range (cast (field a Lo) i128) (cast (field a Hi) i128)
+                             (field a Flags)))))
+
+  ;; Multiplies an unscaled DECIMAL range by a power of ten to meet a larger
+  ;; scale. Bounds that would leave i128 are dropped, which keeps the row group.
+  (fun rg_i128_scale
+       ((var a <named RgRange [i128]>) (var factor i128)) -> <named RgRange [i128]>
+    (block
+      (var flags = (& (field a Flags) 6))
+      (var limit = (/ (call rg_i128_max) factor))
+      (if (&& (call rg_has_bounds a)
+               (<= (field a Lo) limit) (>= (field a Lo) (- (: 0 i128) limit))
+               (<= (field a Hi) limit) (>= (field a Hi) (- (: 0 i128) limit)))
+        (block
+          (= flags (| flags 1))
+          (return (call rg_range (* (field a Lo) factor) (* (field a Hi) factor) flags))))
+      (return (call rg_range (: 0 i128) (: 0 i128) flags))))
+
   (fun rg_has_bounds [T] ((var a <named RgRange [T]>)) -> bool
     (block (return (!= (& (field a Flags) 1) 0))))
   (fun rg_may_null [T] ((var a <named RgRange [T]>)) -> bool

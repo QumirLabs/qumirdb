@@ -1,0 +1,1 @@
+SELECT id, d9, d15, d38 FROM t WHERE d15 >= 2500007.57 AND d38 > 0 ORDER BY id;

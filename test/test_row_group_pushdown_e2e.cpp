@@ -65,12 +65,14 @@ private:
     std::filesystem::path Path_;
 };
 
-void WriteFixture(const std::string& path) {
+void WriteFixture(const std::string& path, bool storeDecimalAsInteger = false) {
     arrow::Int64Builder id;
     arrow::Int32Builder signedValue;
     arrow::UInt32Builder unsignedValue;
     arrow::DoubleBuilder floatValue;
     arrow::Int64Builder nullableValue;
+    arrow::Decimal128Builder decimalValue(arrow::decimal128(15, 2));
+    arrow::Decimal128Builder wideValue(arrow::decimal128(38, 6));
 
     CheckArrow(id.AppendValues({0, 1, 2, 3, 4, 5}));
     CheckArrow(signedValue.AppendValues({0, 1, 100, 101, 0, 1}));
@@ -84,6 +86,14 @@ void WriteFixture(const std::string& path) {
     CheckArrow(nullableValue.AppendNull());
     CheckArrow(nullableValue.Append(1));
     CheckArrow(nullableValue.Append(2));
+    for (int64_t unscaled : {50, 150, 10050, 10150, -1000, -900}) {
+        CheckArrow(decimalValue.Append(arrow::Decimal128(unscaled)));
+    }
+    const arrow::Decimal128 unit =
+        arrow::Decimal128::FromString("1000000000000000000000000000000").ValueOrDie();
+    for (int64_t row = 0; row < 6; ++row) {
+        CheckArrow(wideValue.Append(unit * arrow::Decimal128(row - 2)));
+    }
 
     auto schema = arrow::schema({
         arrow::field("id", arrow::int64(), false),
@@ -91,6 +101,8 @@ void WriteFixture(const std::string& path) {
         arrow::field("unsigned_value", arrow::uint32(), false),
         arrow::field("float_value", arrow::float64(), false),
         arrow::field("nullable_value", arrow::int64(), true),
+        arrow::field("decimal_value", arrow::decimal128(15, 2), false),
+        arrow::field("wide_value", arrow::decimal128(38, 6), false),
     });
     auto batch = arrow::RecordBatch::Make(schema, 6, {
         id.Finish().ValueOrDie(),
@@ -98,11 +110,18 @@ void WriteFixture(const std::string& path) {
         unsignedValue.Finish().ValueOrDie(),
         floatValue.Finish().ValueOrDie(),
         nullableValue.Finish().ValueOrDie(),
+        decimalValue.Finish().ValueOrDie(),
+        wideValue.Finish().ValueOrDie(),
     });
     auto output = arrow::io::FileOutputStream::Open(path).ValueOrDie();
     auto table = arrow::Table::FromRecordBatches({batch}).ValueOrDie();
+    parquet::WriterProperties::Builder properties;
+    if (storeDecimalAsInteger) {
+        properties.enable_store_decimal_as_integer();
+    }
     CheckArrow(parquet::arrow::WriteTable(
-        *table, arrow::default_memory_pool(), output, /*chunk_size*/ 2));
+        *table, arrow::default_memory_pool(), output, /*chunk_size*/ 2,
+        properties.build()));
     CheckArrow(output->Close());
 }
 
@@ -260,6 +279,34 @@ TEST(RowGroupPushdownE2E, MatchesFullScanAcrossParquetPhysicalTypes) {
         path,
         "SELECT id FROM t WHERE nullable_value > 50",
         {2});
+}
+
+// DECIMAL statistics are read from every Parquet storage: INT64 and
+// FIXED_LEN_BYTE_ARRAY(16) with store_decimal_as_integer, FLBA(7) and FLBA(16)
+// without it.
+TEST(RowGroupPushdownE2E, PrunesDecimalColumnsOfEveryStorage) {
+    TTempDir tempDir;
+    for (const bool asInteger : {false, true}) {
+        const std::string path = (tempDir.Path() /
+            (asInteger ? "decimal-int.parquet" : "decimal-flba.parquet")).string();
+        WriteFixture(path, asInteger);
+        ExpectSameAsFullScan(
+            path,
+            "SELECT id FROM t WHERE decimal_value > 50.5",
+            {2, 3});
+        ExpectSameAsFullScan(
+            path,
+            "SELECT id FROM t WHERE decimal_value <= -9.5",
+            {4});
+        ExpectSameAsFullScan(
+            path,
+            "SELECT id FROM t WHERE decimal_value < 100",
+            {0, 1, 4, 5});
+        ExpectSameAsFullScan(
+            path,
+            "SELECT id FROM t WHERE wide_value < 0",
+            {0, 1});
+    }
 }
 
 TEST(RowGroupPushdownE2E, AllPrunedProducesAnEmptyScan) {
