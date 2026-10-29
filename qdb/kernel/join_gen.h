@@ -259,6 +259,12 @@ struct TRowJoinLayout {
     // Byte offset of the mark byte of a SEMI/ANTI build side, which a probe
     // sets on the rows it matches; -1 when the rows carry no mark.
     int64_t MarkOffset = -1;
+    // A key of one integer, which can use the direct index of join_rows.oz
+    // (jr_build_direct): the integer's offset in the row and its type. -1 for
+    // any other key, and for a nullable NULL-equal key, whose NULLs must
+    // match each other.
+    int64_t DirectKeyOffset = -1;
+    NQumir::NAst::TTypePtr DirectKeyType;
 };
 
 // `marked` gives the rows a mark byte.
