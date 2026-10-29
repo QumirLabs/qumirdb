@@ -82,11 +82,16 @@ int32_t ScaleOf(const TTypePtr& type) {
 }
 
 // The digits go to the kernel's scratch arena, like the bytes of `||`; `__arena__` is
-// the placeholder the codegen binds to it. One runtime function serves every width.
-TExprPtr IntegerToString(const TExprPtr& operand, const TTypePtr&, const TTypePtr&,
+// the placeholder the codegen binds to it. One runtime function serves every signed
+// width and one every unsigned width: a u64 above 2^63-1 has no i64 to widen to.
+TExprPtr IntegerToString(const TExprPtr& operand, const TTypePtr& from, const TTypePtr&,
     TLocation loc)
 {
-    return Call("qdb_string_from_i64", {Ident("__arena__", loc), CastToI64(operand, loc)}, loc);
+    const bool isSigned = TMaybeType<TIntegerType>(UnwrapNamedType(from)).Cast()->IsSigned();
+    auto wide = std::make_shared<TCastExpr>(loc, operand,
+        std::make_shared<TIntegerType>(isSigned ? TIntegerType::I64 : TIntegerType::U64));
+    return Call(isSigned ? "qdb_string_from_i64" : "qdb_string_from_u64",
+        {Ident("__arena__", loc), std::move(wide)}, loc);
 }
 
 TExprPtr BoolToString(const TExprPtr& operand, const TTypePtr&, const TTypePtr&, TLocation loc) {

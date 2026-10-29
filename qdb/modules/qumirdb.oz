@@ -323,15 +323,12 @@
   (fun qdb_string_arena_alloc ((var arena <ptr i8>) (var size i64)) -> <ptr u8>
        (attrs extern) (block))
 
-  ;; CAST(<integer> AS VARCHAR): the decimal digits of value, in the arena like the
-  ;; result of `||`. The cast rule (qdb/kernel/cast_rules.cpp) widens every integer
-  ;; width to i64 and passes the arena.
-  (fun qdb_string_from_i64 ((var arena <ptr i8>) (var value i64)) -> StringView
+  ;; CAST(<integer> AS VARCHAR): the decimal digits of a magnitude with an optional
+  ;; minus sign, in the arena like the result of `||`. The cast rule
+  ;; (qdb/kernel/cast_rules.cpp) widens a signed integer to i64 and an unsigned one to
+  ;; u64, so a UBIGINT above 2^63-1 keeps its value.
+  (fun qdb_string_from_magnitude ((var arena <ptr i8>) (var mag u64) (var negative bool)) -> StringView
     (block
-      ;; The magnitude as u64: negating the most negative i64 fits there.
-      (var negative = (< value 0))
-      (var mag = (cast value u64))
-      (if negative (block (= mag (- (: 0 u64) mag))))
       (var digits = 1)
       (var rest = (// mag (: 10 u64)))
       (while (!= rest (: 0 u64))
@@ -351,6 +348,18 @@
           (= i (+ i 1))))
       (if negative (block (= out [0] (: 45 u8))))
       (return (cast (struct ((Data out) (Size size))) StringView))))
+
+  (fun qdb_string_from_i64 ((var arena <ptr i8>) (var value i64)) -> StringView
+    (block
+      ;; The magnitude as u64: negating the most negative i64 fits there.
+      (var negative = (< value 0))
+      (var mag = (cast value u64))
+      (if negative (block (= mag (- (: 0 u64) mag))))
+      (return (call qdb_string_from_magnitude arena mag negative))))
+
+  (fun qdb_string_from_u64 ((var arena <ptr i8>) (var value u64)) -> StringView
+    (block
+      (return (call qdb_string_from_magnitude arena value #f))))
 
   ;; CAST(<boolean> AS VARCHAR) spells the value like DuckDB and PostgreSQL output.
   (fun qdb_string_from_bool ((var value bool)) -> StringView

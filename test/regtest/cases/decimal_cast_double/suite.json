@@ -9,6 +9,8 @@
     "cast_double.sql": {"order": "ordered"},
     "cast_double_scales.sql": {"order": "ordered"},
     "cast_double_expression.sql": {"order": "ordered"},
-    "cast_double_aggregate.sql": {"order": "ordered"}
+    "cast_double_aggregate.sql": {"order": "ordered"},
+    "cast_double_varchar_error.sql": {"expect_error": true},
+    "cast_decimal_varchar_error.sql": {"expect_error": true}
   }
 }
