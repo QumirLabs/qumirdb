@@ -1,9 +1,12 @@
 #pragma once
 
+#include <qdb/plan/types/decimal.h>
+
 #include <qumir/parser/ast.h>
 #include <qumir/parser/type.h>
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -55,6 +58,18 @@ NQumir::NAst::TTypePtr AnnotateExprTreeTypes(
     const NQumir::NAst::TExprPtr& expr,
     const NQumir::NAst::TStructType& inputType,
     const TAnnotationContext* context = nullptr);
+
+// A fractional literal beside a DECIMAL is a decimal of its own digits, as in DuckDB
+// (0.125 is DECIMAL(3,3)), instead of being rounded to the other operand's scale. The
+// lexeme is gone by now, so the digits are the shortest decimal form that round-trips
+// the double. Literals needing more than 18 digits stay doubles (nullopt). A unary
+// minus around the literal is part of it.
+struct TDecimalLiteral {
+    int64_t Unscaled;
+    TDecimalSpec Spec;
+};
+
+std::optional<TDecimalLiteral> DecimalLiteralOf(const NQumir::NAst::TExprPtr& e);
 
 // Effective common type used by a numeric binary operator/comparison after
 // AnnotateExprTreeTypes. Returns nullptr for a non-numeric or incompatible pair.

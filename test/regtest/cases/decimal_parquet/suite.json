@@ -6,6 +6,7 @@
   "tables": {"t": "decimals"},
   "variants": ["single", "threaded"],
   "cases": {
-    "order_limit.sql": {"order": "ordered"}
+    "order_limit.sql": {"order": "ordered"},
+    "filter_bounds.sql": {"order": "ordered"}
   }
 }

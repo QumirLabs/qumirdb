@@ -646,14 +646,7 @@ bool IsDecimalQuotientDouble(const TDecimalSpec& left, const TDecimalSpec& right
     return DecimalDivisionSpec(left, right).Scale < left.Scale;
 }
 
-// A fractional literal beside a DECIMAL is a decimal of its own digits, as in DuckDB
-// (0.125 is DECIMAL(3,3)), instead of being rounded to the other operand's scale. The
-// lexeme is gone by now, so the digits are the shortest decimal form that round-trips
-// the double. Literals needing more than 18 digits stay doubles.
-struct TDecimalLiteral {
-    int64_t Unscaled;
-    TDecimalSpec Spec;
-};
+} // namespace
 
 std::optional<TDecimalLiteral> DecimalLiteralOf(const TExprPtr& e) {
     bool negative = false;
@@ -691,6 +684,8 @@ std::optional<TDecimalLiteral> DecimalLiteralOf(const TExprPtr& e) {
     }
     return TDecimalLiteral{negative ? -unscaled : unscaled, {.Precision = precision, .Scale = scale}};
 }
+
+namespace {
 
 // An integer operand of a decimal remainder counts as DECIMAL(w, 0), w being the digits
 // of its SQL integer type (INTEGER is DECIMAL(10, 0)). An integer literal is INTEGER when

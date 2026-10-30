@@ -23,6 +23,7 @@
 #include <bit>
 #include <cmath>
 #include <numeric>
+#include <optional>
 #include <unordered_map>
 #include <utility>
 
@@ -359,6 +360,58 @@ void TParquetFileData::Open()
     }
 }
 
+// Parquet stores a DECIMAL as its unscaled integer: INT32, INT64, or big-endian
+// two's complement bytes of a (FIXED_LEN_)BYTE_ARRAY.
+std::optional<std::pair<__int128, __int128>> DecimalStatisticsBounds(
+    const parquet::ColumnDescriptor& descriptor,
+    const parquet::Statistics& stats)
+{
+    auto bigEndian = [](const uint8_t* data, int32_t length)
+        -> std::optional<__int128>
+    {
+        auto decoded = arrow::Decimal128::FromBigEndian(data, length);
+        if (!decoded.ok()) {
+            return std::nullopt;
+        }
+        const auto high = static_cast<unsigned __int128>(
+            static_cast<uint64_t>(decoded->high_bits()));
+        return static_cast<__int128>((high << 64) | decoded->low_bits());
+    };
+    switch (descriptor.physical_type()) {
+        case parquet::Type::INT32: {
+            const auto& typed = static_cast<const parquet::Int32Statistics&>(stats);
+            return std::pair<__int128, __int128>{typed.min(), typed.max()};
+        }
+        case parquet::Type::INT64: {
+            const auto& typed = static_cast<const parquet::Int64Statistics&>(stats);
+            return std::pair<__int128, __int128>{typed.min(), typed.max()};
+        }
+        case parquet::Type::FIXED_LEN_BYTE_ARRAY: {
+            const auto& typed = static_cast<const parquet::FLBAStatistics&>(stats);
+            const int32_t length = descriptor.type_length();
+            const auto lo = bigEndian(typed.min().ptr, length);
+            const auto hi = bigEndian(typed.max().ptr, length);
+            if (!lo || !hi) {
+                return std::nullopt;
+            }
+            return std::pair{*lo, *hi};
+        }
+        case parquet::Type::BYTE_ARRAY: {
+            const auto& typed = static_cast<const parquet::ByteArrayStatistics&>(stats);
+            const auto lo = bigEndian(
+                typed.min().ptr, static_cast<int32_t>(typed.min().len));
+            const auto hi = bigEndian(
+                typed.max().ptr, static_cast<int32_t>(typed.max().len));
+            if (!lo || !hi) {
+                return std::nullopt;
+            }
+            return std::pair{*lo, *hi};
+        }
+        default:
+            return std::nullopt;
+    }
+}
+
 void TParquetFileData::LoadRowGroupRanges()
 {
     auto metadata = FileReader->parquet_reader()->metadata();
@@ -496,6 +549,15 @@ void TParquetFileData::LoadRowGroupRanges()
                     if (!std::isnan(lo) && !std::isnan(hi) && lo <= hi) {
                         range.MinValue = std::bit_cast<uint64_t>(lo);
                         range.MaxValue = std::bit_cast<uint64_t>(hi);
+                        range.HasBounds = true;
+                    }
+                    break;
+                }
+                case arrow::Type::DECIMAL128: {
+                    auto bounds = DecimalStatisticsBounds(*descriptor, *stats);
+                    if (bounds && bounds->first <= bounds->second) {
+                        range.MinValue = static_cast<unsigned __int128>(bounds->first);
+                        range.MaxValue = static_cast<unsigned __int128>(bounds->second);
                         range.HasBounds = true;
                     }
                     break;
@@ -919,8 +981,8 @@ std::vector<NScheduler::TScanRowGroup> TParquetSource::PruneRowGroups(
                 const auto& range = File_->RowGroupRanges[rg][column];
                 *diagnostics << " col=" << File_->FileNames[column]
                              << " bounds=" << range.HasBounds
-                             << " min_bits=" << range.MinValue
-                             << " max_bits=" << range.MaxValue
+                             << " min_bits=" << static_cast<uint64_t>(range.MinValue)
+                             << " max_bits=" << static_cast<uint64_t>(range.MaxValue)
                              << " null=" << range.MayBeNull
                              << " value=" << range.MayBeValue;
             }

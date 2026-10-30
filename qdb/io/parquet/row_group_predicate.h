@@ -13,13 +13,14 @@
 
 namespace NQdb {
 
-// Raw scalar bounds for one source column in one Parquet row group. MinValue
-// and MaxValue contain the native i64/u64/f64 bit pattern selected by the
-// source schema. The remaining flags deliberately describe possibilities,
-// rather than facts, so missing metadata stays conservative.
+// Raw scalar bounds for one source column in one Parquet row group. The low 64
+// bits of MinValue and MaxValue contain the native i64/u64/f64 bit pattern
+// selected by the source schema; a DECIMAL column holds its unscaled i128. The
+// remaining flags deliberately describe possibilities, rather than facts, so
+// missing metadata stays conservative.
 struct TRowGroupColumnRange {
-    uint64_t MinValue = 0;
-    uint64_t MaxValue = 0;
+    unsigned __int128 MinValue = 0;
+    unsigned __int128 MaxValue = 0;
     bool HasBounds = false;
     bool MayBeNull = true;
     bool MayBeValue = true;

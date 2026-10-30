@@ -1,12 +1,15 @@
 #include <gtest/gtest.h>
 
 #include <qdb/io/parquet/row_group_predicate.h>
+#include <qdb/plan/types/decimal.h>
 
 #include <bit>
 #include <cstdint>
+#include <initializer_list>
 #include <memory>
 #include <limits>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace NQdb;
@@ -22,6 +25,15 @@ TExprPtr Id(const std::string& name) {
 
 TExprPtr Num(int64_t value) {
     return std::make_shared<TNumberExpr>(NQumir::TLocation{}, value);
+}
+
+TExprPtr Fraction(double value) {
+    return std::make_shared<TNumberExpr>(NQumir::TLocation{}, value);
+}
+
+TExprPtr Neg(TExprPtr operand) {
+    return std::make_shared<TUnaryExpr>(
+        NQumir::TLocation{}, TOperator("-"), std::move(operand));
 }
 
 TExprPtr Bin(std::string op, TExprPtr left, TExprPtr right, TTypePtr type) {
@@ -60,6 +72,19 @@ TRowGroupColumnRange U64Range(uint64_t lo, uint64_t hi) {
     };
 }
 
+using TRanges = std::vector<TRowGroupColumnRange>;
+
+// Bounds of a DECIMAL column as unscaled values.
+TRowGroupColumnRange DecimalRange(__int128 lo, __int128 hi) {
+    return {
+        .MinValue = static_cast<unsigned __int128>(lo),
+        .MaxValue = static_cast<unsigned __int128>(hi),
+        .HasBounds = true,
+        .MayBeNull = false,
+        .MayBeValue = true,
+    };
+}
+
 TRowGroupColumnRange F64Range(double lo, double hi) {
     return {
         .MinValue = std::bit_cast<uint64_t>(lo),
@@ -92,6 +117,17 @@ struct TTestSchema {
         Columns.push_back({Names.front(), std::move(type)});
         Schema = TSchema{Columns};
     }
+
+    // initializer_list, not vector: a two-string list would otherwise also
+    // match vector's iterator-pair constructor (GCC reports the ambiguity).
+    TTestSchema(std::initializer_list<std::pair<std::string, TTypePtr>> columns) {
+        Names.reserve(columns.size());
+        for (const auto& [name, type] : columns) {
+            Names.push_back(name);
+            Columns.push_back({Names.back(), type});
+        }
+        Schema = TSchema{Columns};
+    }
 };
 
 } // namespace
@@ -109,6 +145,73 @@ TEST(RowGroupPredicate, PrunesSimpleComparison) {
     EXPECT_FALSE(evaluator->MayBeTrue(below));
     EXPECT_TRUE(evaluator->MayBeTrue(above));
     EXPECT_TRUE(evaluator->MayBeTrue(crossing));
+}
+
+// A fractional literal meets a DECIMAL column at the larger of the two scales,
+// an integer literal at the column's scale; both compare exactly on i128.
+TEST(RowGroupPredicate, PrunesDecimalComparisons) {
+    TTestSchema schema("d", std::make_shared<TDecimal>(15, 2));
+    const std::vector<TRowGroupColumnRange> low{DecimalRange(-1000, 500)};
+    const std::vector<TRowGroupColumnRange> high{DecimalRange(501, 2400)};
+    const std::vector<TRowGroupColumnRange> crossing{DecimalRange(0, 700)};
+
+    auto fraction = Bin("<=", Id("d"), Fraction(5.0), BoolType());
+    auto evaluator = TRowGroupPredicateEvaluator::Compile(
+        fraction, schema.Schema, "");
+    ASSERT_TRUE(evaluator);
+    EXPECT_TRUE(evaluator->MayBeTrue(low));
+    EXPECT_FALSE(evaluator->MayBeTrue(high));
+    EXPECT_TRUE(evaluator->MayBeTrue(crossing));
+
+    // 5.005 has three fractional digits: the column is rescaled, not the literal.
+    auto finer = Bin(">", Id("d"), Fraction(5.005), BoolType());
+    evaluator = TRowGroupPredicateEvaluator::Compile(finer, schema.Schema, "");
+    ASSERT_TRUE(evaluator);
+    EXPECT_FALSE(evaluator->MayBeTrue(low));
+    EXPECT_TRUE(evaluator->MayBeTrue(high));
+    EXPECT_TRUE(evaluator->MayBeTrue(crossing));
+
+    auto integer = Bin("<", Id("d"), Num(24), BoolType());
+    evaluator = TRowGroupPredicateEvaluator::Compile(integer, schema.Schema, "");
+    ASSERT_TRUE(evaluator);
+    EXPECT_TRUE(evaluator->MayBeTrue(low));
+    EXPECT_TRUE(evaluator->MayBeTrue(crossing));
+    EXPECT_FALSE(evaluator->MayBeTrue(TRanges{DecimalRange(2400, 3000)}));
+
+    auto negative = Bin("<", Id("d"), Neg(Fraction(9.5)), BoolType());
+    evaluator = TRowGroupPredicateEvaluator::Compile(negative, schema.Schema, "");
+    ASSERT_TRUE(evaluator);
+    EXPECT_TRUE(evaluator->MayBeTrue(low));
+    EXPECT_FALSE(evaluator->MayBeTrue(TRanges{DecimalRange(-950, 0)}));
+    EXPECT_FALSE(evaluator->MayBeTrue(crossing));
+
+    const TRanges nullOnly{{
+        .HasBounds = false, .MayBeNull = true, .MayBeValue = false}};
+    EXPECT_FALSE(evaluator->MayBeTrue(nullOnly));
+}
+
+// Two DECIMAL columns meet at the larger scale; values beyond i64 compare
+// on the full 128 bits.
+TEST(RowGroupPredicate, ComparesWideDecimalColumns) {
+    TTestSchema schema({
+        {"a", std::make_shared<TDecimal>(38, 6)},
+        {"b", std::make_shared<TDecimal>(38, 2)},
+    });
+    const __int128 unit = static_cast<__int128>(1000000000000000000LL) * 1000000000000LL;
+    auto predicate = Bin("<", Id("a"), Id("b"), BoolType());
+    auto evaluator = TRowGroupPredicateEvaluator::Compile(
+        predicate, schema.Schema, "");
+    ASSERT_TRUE(evaluator);
+
+    // a in [1e24, 2e24], b in [0, 1e23] after rescaling b by 10^4.
+    EXPECT_FALSE(evaluator->MayBeTrue(TRanges{
+        DecimalRange(unit, 2 * unit), DecimalRange(0, unit / 10000 / 10)}));
+    EXPECT_TRUE(evaluator->MayBeTrue(TRanges{
+        DecimalRange(unit, 2 * unit), DecimalRange(0, unit / 10000 * 3)}));
+    // b with a bound that cannot be rescaled stays possibly true.
+    const __int128 huge = static_cast<__int128>(1) << 120;
+    EXPECT_TRUE(evaluator->MayBeTrue(TRanges{
+        DecimalRange(unit, 2 * unit), DecimalRange(huge, huge)}));
 }
 
 TEST(RowGroupPredicate, EvaluatesMultiColumnArithmeticIntervals) {

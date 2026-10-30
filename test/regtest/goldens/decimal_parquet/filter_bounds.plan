@@ -1,0 +1,4 @@
+sort [id asc]
+└─ project (id, d9, d15, d38) (rows≈64 cost≈16.1K)
+   └─ filter (&& (>= |t.d15| 2500007.5699999998) (> |t.d38| 0)) (rows≈64 cost≈14.3K)
+      └─ source t AS t row-groups (&& (>= |t.d15| 2500007.5699999998) (> |t.d38| 0)) (rows≈256 cost≈7.2K)
