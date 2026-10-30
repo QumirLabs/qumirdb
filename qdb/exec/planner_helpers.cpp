@@ -41,8 +41,8 @@ size_t ProjectColumnWidth(const NQumir::NAst::TTypePtr& type) {
     if (auto integer = TMaybeType<TIntegerType>(inner)) {
         return static_cast<size_t>(integer.Cast()->BitWidth() / 8);
     }
-    if (auto floating = TMaybeType<TFloatType>(inner)) {
-        return floating.Cast()->BitWidth() / 8;
+    if (TMaybeType<TFloatType>(inner)) {
+        return 8;
     }
     if (TMaybeType<TBoolType>(inner)) {
         return 1;
@@ -682,8 +682,8 @@ int32_t RadixKeyWidthBytes(const NQumir::NAst::TTypePtr& type) {
     if (auto integer = TMaybeType<TIntegerType>(inner)) {
         return static_cast<int32_t>(integer.Cast()->BitWidth() / 8);
     }
-    if (auto floating = TMaybeType<TFloatType>(inner)) {
-        return floating.Cast()->BitWidth() / 8;
+    if (TMaybeType<TFloatType>(inner)) {
+        return 8;
     }
     if (TMaybeType<TBoolType>(inner)) {
         return 1;

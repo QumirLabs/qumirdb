@@ -1,5 +1,4 @@
 sort [f asc]
-└─ project (f, c) (rows≈6 cost≈264)
-   └─ aggregate keys=[t.f] aggs=[count_0=count] (rows≈6 cost≈168)
-      └─ project (t.f) (rows≈6 cost≈72)
-         └─ source t AS t (rows≈6 cost≈24)
+└─ project (f, c) (rows≈6 cost≈240)
+   └─ aggregate keys=[t.f] aggs=[count_0=count] (rows≈6 cost≈144)
+      └─ source t AS t (rows≈6 cost≈48)

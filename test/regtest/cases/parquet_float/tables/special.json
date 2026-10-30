@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "schema": "<struct (id i32) (f <named Nullable [f32]>) (d <named Nullable [f64]>)>",
+  "rows": [
+    [1, null, null],
+    [2, 0, 0],
+    [3, {"$float": "-0"}, {"$float": "-0"}],
+    [4, {"$float": "-inf"}, {"$float": "-inf"}],
+    [5, {"$float": "+inf"}, {"$float": "+inf"}],
+    [6, {"$float": "nan"}, {"$float": "nan"}],
+    [7, 1.401298464324817e-45, 1.401298464324817e-45],
+    [8, 3.4028234663852886e+38, 3.4028234663852886e+38],
+    [9, -1.5, -1.5]
+  ]
+}

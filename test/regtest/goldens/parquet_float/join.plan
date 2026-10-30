@@ -1,7 +1,5 @@
 sort [id asc]
-└─ project (id, f, n) (rows≈1 cost≈4.5K)
-   └─ join inner [a.f = b.d] (rows≈1 cost≈4.5K)
-      ├─ project (a.id, a.f) (rows≈6 cost≈120)
-      │  └─ source t AS a (rows≈6 cost≈48)
-      └─ project (b.n, b.d) (rows≈6 cost≈168)
-         └─ source t AS b (rows≈6 cost≈72)
+└─ project (id, f, n) (rows≈5 cost≈4.6K)
+   └─ join inner [b.d = a.f] (rows≈5 cost≈4.5K)
+      ├─ source t AS b (rows≈6 cost≈96)
+      └─ source t AS a (rows≈6 cost≈72)

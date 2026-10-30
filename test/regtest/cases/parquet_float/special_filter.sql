@@ -1,0 +1,1 @@
+SELECT id, f FROM s WHERE f < 1 ORDER BY id;

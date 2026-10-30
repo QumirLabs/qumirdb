@@ -1074,11 +1074,7 @@ TValue Cell(const TColumn& column, int64_t row, const TTypePtr& type) {
             default: throw std::runtime_error("128-bit result integers are not supported yet");
         }
     }
-    if (auto floating = TMaybeType<TFloatType>(valueType)) {
-        return floating.Cast()->BitWidth() == 32
-            ? FloatJson(reinterpret_cast<const float*>(column.Data)[row])
-            : FloatJson(reinterpret_cast<const double*>(column.Data)[row]);
-    }
+    if (TMaybeType<TFloatType>(valueType)) return FloatJson(reinterpret_cast<const double*>(column.Data)[row]);
     if (TMaybeType<TBoolType>(valueType)) {
         const auto bit = column.DataBitOffset + row;
         return (reinterpret_cast<const uint8_t*>(column.Data)[bit / 8] & (uint8_t{1} << (bit % 8))) != 0;

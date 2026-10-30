@@ -120,8 +120,8 @@ size_t ShuffleColumnFixedWidth(const TTypePtr& type) {
     if (auto integer = TMaybeType<TIntegerType>(valueType)) {
         return static_cast<size_t>(integer.Cast()->BitWidth() / 8);
     }
-    if (auto floating = TMaybeType<TFloatType>(valueType)) {
-        return static_cast<size_t>(floating.Cast()->BitWidth() / 8);
+    if (TMaybeType<TFloatType>(valueType)) {
+        return 8;
     }
     if (TMaybeType<TBoolType>(valueType) || TMaybeType<TStringType>(valueType)) {
         return 0;

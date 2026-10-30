@@ -31,8 +31,8 @@ double EstimateTypeWidth(const TTypePtr& type) {
     if (auto integer = TMaybeType<TIntegerType>(inner)) {
         return std::max(1, integer.Cast()->BitWidth() / 8);
     }
-    if (auto floating = TMaybeType<TFloatType>(inner)) {
-        return floating.Cast()->BitWidth() / 8;
+    if (TMaybeType<TFloatType>(inner)) {
+        return 8.0;
     }
     if (TMaybeType<TBoolType>(inner)) {
         return 1.0;

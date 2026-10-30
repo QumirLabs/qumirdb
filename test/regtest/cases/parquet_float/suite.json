@@ -1,9 +1,10 @@
 {
   "version": 1,
   "fixtures": {
-    "values": {"json": "tables/t.json", "parquet": {"row_group_rows": 2}}
+    "values": {"json": "tables/t.json", "parquet": {"row_group_rows": 2}},
+    "special": {"json": "tables/special.json", "parquet": {"row_group_rows": 2}}
   },
-  "tables": {"t": "values"},
+  "tables": {"t": "values", "s": "special"},
   "variants": ["single", "threaded"],
   "cases": {
     "project.sql": {"order": "ordered"},
@@ -12,6 +13,9 @@
     "aggregate.sql": {"order": "ordered"},
     "group.sql": {"order": "ordered"},
     "cast.sql": {"order": "ordered"},
-    "join.sql": {"order": "ordered"}
+    "join.sql": {"order": "ordered"},
+    "literal_compare.sql": {"order": "ordered"},
+    "special.sql": {"order": "ordered"},
+    "special_filter.sql": {"order": "ordered"}
   }
 }
