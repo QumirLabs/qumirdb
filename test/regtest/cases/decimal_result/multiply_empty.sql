@@ -1,0 +1,1 @@
+SELECT sum(CAST(a AS DECIMAL(10,2)) * CAST(a AS DECIMAL(10,2))) AS s, count(*) AS n FROM t WHERE id > 100;

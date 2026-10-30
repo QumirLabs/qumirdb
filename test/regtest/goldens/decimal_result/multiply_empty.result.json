@@ -1,0 +1,6 @@
+{
+  "schema": "<struct (s <named Nullable [<named DECIMAL [20 4]>]>) (n i64)>",
+  "rows": [
+    [null, "0"]
+  ]
+}
