@@ -1,0 +1,9 @@
+{
+  "schema": "<struct (id i32) (d9 <named Nullable [<named DECIMAL [9 2]>]>) (d15 <named Nullable [<named DECIMAL [15 2]>]>) (d18 <named Nullable [<named DECIMAL [18 4]>]>) (d38 <named Nullable [<named DECIMAL [38 6]>]>) (s string)>",
+  "rows": [
+    [0, null, null, null, null, "item-0-aaaaaaaaaaaaaaaa"],
+    [1, "1.02", "10000.10", "10000000.0003", "123456789012345678901234.567891", "item-1-bbbbbbbbbbbbbbbb"],
+    [2, "2.03", "20000.13", "20000000.0003", "123456789012345678901234.567892", "item-2-cccccccccccccccc"],
+    [3, "-3.04", "-30000.16", "-30000000.0003", "-123456789012345678901234.567893", "item-3-dddddddddddddddd"]
+  ]
+}
