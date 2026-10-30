@@ -1,0 +1,10 @@
+sort [r asc, w asc]
+└─ project (w, r)
+   └─ window order=[w asc] fns=[w_0=rank]
+      └─ union-all (rows≈8 cost≈256)
+         ├─ project (w) (rows≈4 cost≈128)
+         │  └─ project (w) (rows≈4 cost≈64)
+         │     └─ source wide AS wide (rows≈4 cost≈32)
+         └─ project (b) (rows≈4 cost≈128)
+            └─ project (b) (rows≈4 cost≈64)
+               └─ source wide AS wide_1 (rows≈4 cost≈32)

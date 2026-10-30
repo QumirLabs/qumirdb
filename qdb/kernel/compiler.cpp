@@ -334,8 +334,7 @@ bool SortKeyIsBool(const NQumir::NAst::TTypePtr& type) {
 }
 
 bool SortValueIsBinInt(const NQumir::NAst::TTypePtr& type) {
-    auto valueType = UnwrapNullableType(type);
-    return IsDecimalType(valueType) || IsBinIntStorageType(valueType);
+    return HasBinIntLayout(type);
 }
 
 bool SortValueIsInteger(const NQumir::NAst::TTypePtr& type) {

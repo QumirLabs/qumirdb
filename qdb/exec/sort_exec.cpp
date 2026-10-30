@@ -131,7 +131,7 @@ int CompareValues(const TColumn& left, int32_t leftRow,
     const TColumn& right, int32_t rightRow,
     const TTypePtr& type)
 {
-    if (IsDecimalType(type) || IsBinIntStorageType(type)) {
+    if (HasBinIntLayout(type)) {
         const auto lhs = Load<qdb_bin_int>(left, leftRow);
         const auto rhs = Load<qdb_bin_int>(right, rightRow);
         if (qdb_decimal_lt(lhs, rhs)) {
@@ -240,7 +240,7 @@ bool SortRowsLess(const TRowStore& store, const std::vector<TSortKey>& keys,
 }
 
 size_t SortColumnFixedWidth(const TTypePtr& type) {
-    if (IsDecimalType(type) || IsBinIntStorageType(type)) {
+    if (HasBinIntLayout(type)) {
         return sizeof(qdb_bin_int);
     }
 
