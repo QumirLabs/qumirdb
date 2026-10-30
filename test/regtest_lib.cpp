@@ -1036,11 +1036,11 @@ namespace {
 // The exact text of a DECIMAL, as DuckDB prints it: the scaled integer with the
 // decimal point placed `scale` digits from the right. A result is compared as
 // this string, so no digit is lost to a binary float.
-std::string DecimalText(const char* storage, int32_t scale) {
-    __int128 value;
-    std::memcpy(&value, storage, sizeof(value));
-    const bool negative = value < 0;
-    auto magnitude = static_cast<unsigned __int128>(negative ? -value : value);
+std::string DecimalText(const char* storage, int32_t scale, bool isSigned = true) {
+    unsigned __int128 raw;
+    std::memcpy(&raw, storage, sizeof(raw));
+    const bool negative = isSigned && static_cast<__int128>(raw) < 0;
+    auto magnitude = negative ? ~raw + 1 : raw;
     std::string digits;
     do {
         digits.push_back(static_cast<char>('0' + static_cast<int>(magnitude % 10)));
@@ -1071,7 +1071,8 @@ TValue Cell(const TColumn& column, int64_t row, const TTypePtr& type) {
             case TIntegerType::U16: return reinterpret_cast<const uint16_t*>(column.Data)[row];
             case TIntegerType::U32: return reinterpret_cast<const uint32_t*>(column.Data)[row];
             case TIntegerType::U64: return std::to_string(reinterpret_cast<const uint64_t*>(column.Data)[row]);
-            default: throw std::runtime_error("128-bit result integers are not supported yet");
+            case TIntegerType::I128: return DecimalText(column.Data + row * 16, 0);
+            case TIntegerType::U128: return DecimalText(column.Data + row * 16, 0, false);
         }
     }
     if (TMaybeType<TFloatType>(valueType)) return FloatJson(reinterpret_cast<const double*>(column.Data)[row]);
