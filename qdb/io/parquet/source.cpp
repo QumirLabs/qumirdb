@@ -1,4 +1,5 @@
 #include <qdb/io/parquet/source.h>
+#include <qdb/io/parquet/decimal_storage.h>
 #include <qdb/io/parquet/row_reader.h>
 #include <qdb/io/parquet/row_id.h>
 #include <qdb/io/parquet/row_group_predicate.h>
@@ -76,6 +77,8 @@ TTypePtr ArrowFieldToQumir(const std::shared_ptr<arrow::Field>& field) {
 struct TBatchData {
     std::shared_ptr<arrow::RecordBatch> Batch;
     std::vector<TColumn> Columns;
+    // Decimal values copied to the width of their storage.
+    std::vector<std::shared_ptr<arrow::Buffer>> DecimalValues;
 };
 
 void DestroyBatch(TRowSet* rs) {
@@ -85,11 +88,6 @@ void DestroyBatch(TRowSet* rs) {
 char* NumericData(const std::shared_ptr<arrow::Array>& arr) {
     auto fwType = static_cast<const arrow::FixedWidthType*>(arr->type().get());
     int byteWidth = fwType->bit_width() / 8;
-    const uint8_t* raw = arr->data()->buffers[1]->data();
-    return const_cast<char*>(reinterpret_cast<const char*>(raw)) + arr->offset() * byteWidth;
-}
-
-char* FixedByteWidthData(const std::shared_ptr<arrow::Array>& arr, int32_t byteWidth) {
     const uint8_t* raw = arr->data()->buffers[1]->data();
     return const_cast<char*>(reinterpret_cast<const char*>(raw)) + arr->offset() * byteWidth;
 }
@@ -160,8 +158,12 @@ void RecordBatchToRowSet(
                 col.Data = NumericData(arr);
                 break;
             }
+            case arrow::Type::DECIMAL32:
+            case arrow::Type::DECIMAL64:
             case arrow::Type::DECIMAL128: {
-                col.Data = FixedByteWidthData(arr, 16);
+                auto values = DecimalStorageValues(*arr, GetMemoryPool());
+                col.Data = const_cast<char*>(reinterpret_cast<const char*>(values->data()));
+                data->DecimalValues.push_back(std::move(values));
                 break;
             }
             case arrow::Type::BOOL: {

@@ -1,14 +1,17 @@
 #include <gtest/gtest.h>
 
+#include <qdb/io/parquet/decimal_storage.h>
 #include <qdb/io/parquet/row_id.h>
 #include <qdb/io/parquet/source.h>
 #include <qdb/io/parquet/row_id.h>
 #include <qdb/io/text/sink.h>
 #include <qdb/plan/ops/source.h>
+#include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 
 #include <bit>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <optional>
 #include <sstream>
@@ -576,4 +579,56 @@ TEST(IOTest, FloatColumnIsReadAsDouble) {
     ASSERT_TRUE(source->CompileReader(columns)->ReadRows(rowIds, lookup, &error)) << error;
     expectWidened(DoubleCells(lookup.Columns[0], lookup.RowCount));
     Release(&lookup);
+}
+
+// A decimal array of any Arrow width comes out at the width of the qdb storage of its
+// precision, sign-extended or truncated, and a slice keeps its offset.
+TEST(IOTest, DecimalStorageValuesTakeTheStorageWidth) {
+    auto check = [](const std::shared_ptr<arrow::DataType>& type, const std::vector<__int128>& values) {
+        std::shared_ptr<arrow::Array> array;
+        const auto& decimal = static_cast<const arrow::DecimalType&>(*type);
+        auto builder = arrow::MakeBuilder(type).ValueOrDie();
+        for (const auto value : values) {
+            arrow::Status status;
+            switch (type->id()) {
+                case arrow::Type::DECIMAL32:
+                    status = static_cast<arrow::Decimal32Builder&>(*builder).Append(
+                        arrow::Decimal32(static_cast<int32_t>(value)));
+                    break;
+                case arrow::Type::DECIMAL64:
+                    status = static_cast<arrow::Decimal64Builder&>(*builder).Append(
+                        arrow::Decimal64(static_cast<int64_t>(value)));
+                    break;
+                default:
+                    status = static_cast<arrow::Decimal128Builder&>(*builder).Append(
+                        arrow::Decimal128(static_cast<int64_t>(value >> 64), static_cast<uint64_t>(value)));
+                    break;
+            }
+            ASSERT_TRUE(status.ok()) << status.ToString();
+        }
+        array = builder->Finish().ValueOrDie()->Slice(1);
+        const int32_t width = NQdb::DecimalStorageBytes({
+            .Precision = decimal.precision(),
+            .Scale = decimal.scale(),
+        });
+        auto storage = NQdb::DecimalStorageValues(*array, arrow::default_memory_pool());
+        ASSERT_EQ(storage->size(), array->length() * width) << type->ToString();
+        for (int64_t i = 0; i < array->length(); ++i) {
+            __int128 actual = 0;
+            if (width == 8) {
+                int64_t narrow;
+                std::memcpy(&narrow, storage->data() + i * width, sizeof(narrow));
+                actual = narrow;
+            } else {
+                std::memcpy(&actual, storage->data() + i * width, sizeof(actual));
+            }
+            EXPECT_TRUE(actual == values[static_cast<size_t>(i) + 1]) << type->ToString() << " row " << i;
+        }
+    };
+    const __int128 big = static_cast<__int128>(std::numeric_limits<int64_t>::max()) * 1000;
+    check(arrow::decimal32(9, 2), {7, 999999999, -999999999, 0, -1});
+    check(arrow::decimal64(15, 2), {7, 999999999999999, -999999999999999, 0, -1});
+    check(arrow::decimal64(18, 0), {7, 999999999999999999, -999999999999999999, -1});
+    check(arrow::decimal128(15, 2), {7, 999999999999999, -999999999999999, -1});
+    check(arrow::decimal128(38, 2), {7, big, -big, -1});
 }
