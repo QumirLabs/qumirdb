@@ -70,6 +70,7 @@ void WriteFixture(const std::string& path, bool storeDecimalAsInteger = false) {
     arrow::Int32Builder signedValue;
     arrow::UInt32Builder unsignedValue;
     arrow::DoubleBuilder floatValue;
+    arrow::FloatBuilder realValue;
     arrow::Int64Builder nullableValue;
     arrow::Decimal128Builder decimalValue(arrow::decimal128(15, 2));
     arrow::Decimal128Builder wideValue(arrow::decimal128(38, 6));
@@ -80,6 +81,8 @@ void WriteFixture(const std::string& path, bool storeDecimalAsInteger = false) {
         {1, 2, 100, 101, 4000000000U, 4000000001U}));
     CheckArrow(floatValue.AppendValues(
         {0.5, 1.5, 100.5, 101.5, -10.0, -9.0}));
+    CheckArrow(realValue.AppendValues(
+        {0.5f, 1.5f, 100.5f, 101.5f, -10.0f, -9.0f}));
     CheckArrow(nullableValue.AppendNull());
     CheckArrow(nullableValue.AppendNull());
     CheckArrow(nullableValue.Append(100));
@@ -100,6 +103,7 @@ void WriteFixture(const std::string& path, bool storeDecimalAsInteger = false) {
         arrow::field("signed_value", arrow::int32(), false),
         arrow::field("unsigned_value", arrow::uint32(), false),
         arrow::field("float_value", arrow::float64(), false),
+        arrow::field("real_value", arrow::float32(), false),
         arrow::field("nullable_value", arrow::int64(), true),
         arrow::field("decimal_value", arrow::decimal128(15, 2), false),
         arrow::field("wide_value", arrow::decimal128(38, 6), false),
@@ -109,6 +113,7 @@ void WriteFixture(const std::string& path, bool storeDecimalAsInteger = false) {
         signedValue.Finish().ValueOrDie(),
         unsignedValue.Finish().ValueOrDie(),
         floatValue.Finish().ValueOrDie(),
+        realValue.Finish().ValueOrDie(),
         nullableValue.Finish().ValueOrDie(),
         decimalValue.Finish().ValueOrDie(),
         wideValue.Finish().ValueOrDie(),
@@ -274,6 +279,10 @@ TEST(RowGroupPushdownE2E, MatchesFullScanAcrossParquetPhysicalTypes) {
     ExpectSameAsFullScan(
         path,
         "SELECT id FROM t WHERE float_value < 0.0",
+        {4, 5});
+    ExpectSameAsFullScan(
+        path,
+        "SELECT id FROM t WHERE real_value < 0.0",
         {4, 5});
     ExpectSameAsFullScan(
         path,

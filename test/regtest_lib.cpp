@@ -265,7 +265,9 @@ std::shared_ptr<arrow::DataType> ArrowType(const TTypePtr& type) {
             default: break;
         }
     }
-    if (TMaybeType<TFloatType>(type)) return arrow::float64();
+    if (auto floating = TMaybeType<TFloatType>(type)) {
+        return floating.Cast()->BitWidth() == 32 ? arrow::float32() : arrow::float64();
+    }
     if (TMaybeType<TBoolType>(type)) return arrow::boolean();
     if (TMaybeType<TStringType>(type)) return arrow::utf8();
     throw std::runtime_error("unsupported fixture type '" + NCore::PrintType(type) + "'");
@@ -341,6 +343,8 @@ void Append(arrow::ArrayBuilder& builder, const TValue& value) {
         case arrow::Type::UINT16: return AppendInteger<arrow::UInt16Builder, uint16_t>(builder, value);
         case arrow::Type::UINT32: return AppendInteger<arrow::UInt32Builder, uint32_t>(builder, value);
         case arrow::Type::UINT64: return AppendInteger<arrow::UInt64Builder, uint64_t>(builder, value);
+        case arrow::Type::FLOAT:
+            return CheckArrow(static_cast<arrow::FloatBuilder&>(builder).Append(static_cast<float>(Float(value))));
         case arrow::Type::DOUBLE:
             return CheckArrow(static_cast<arrow::DoubleBuilder&>(builder).Append(Float(value)));
         case arrow::Type::BOOL:
@@ -385,7 +389,11 @@ TObject ComputeNumericStats(const std::string& name, const arrow::Array& column)
     const auto buckets = std::min<size_t>(32, std::max<size_t>(1, values.size() - 1));
     for (size_t bucket = 0; bucket <= buckets; ++bucket) {
         const auto index = bucket * (values.size() - 1) / buckets;
-        histogram.push_back(TValue(static_cast<T>(values[index])));
+        if constexpr (std::is_floating_point_v<T>) {
+            histogram.push_back(TValue(static_cast<double>(values[index])));
+        } else {
+            histogram.push_back(TValue(static_cast<T>(values[index])));
+        }
     }
     stats["histogram"] = std::move(histogram);
     return stats;
@@ -405,6 +413,7 @@ TValue ComputeStats(const arrow::Schema& schema, const std::vector<std::shared_p
             case arrow::Type::UINT16: stats.push_back(ComputeNumericStats<arrow::UInt16Array>(name, column)); break;
             case arrow::Type::UINT32: stats.push_back(ComputeNumericStats<arrow::UInt32Array>(name, column)); break;
             case arrow::Type::UINT64: stats.push_back(ComputeNumericStats<arrow::UInt64Array>(name, column)); break;
+            case arrow::Type::FLOAT: stats.push_back(ComputeNumericStats<arrow::FloatArray>(name, column)); break;
             case arrow::Type::DOUBLE: stats.push_back(ComputeNumericStats<arrow::DoubleArray>(name, column)); break;
             case arrow::Type::BOOL: stats.push_back(ComputeNumericStats<arrow::BooleanArray>(name, column)); break;
             case arrow::Type::STRING: {
@@ -493,7 +502,8 @@ std::shared_ptr<arrow::Table> ReadTable(const fs::path& path) {
             if (const auto* exact = column.get("ndv_exact"); exact && !exact->getAsBoolean()) {
                 throw std::runtime_error("ndv_exact must be boolean");
             }
-            const auto floating = arrowSchema->field(index)->type()->id() == arrow::Type::DOUBLE;
+            const auto typeId = arrowSchema->field(index)->type()->id();
+            const auto floating = typeId == arrow::Type::DOUBLE || typeId == arrow::Type::FLOAT;
             auto numeric = [&](const TValue& boundary) {
                 if (floating) {
                     const auto number = boundary.getAsNumber();

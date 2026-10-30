@@ -1,0 +1,1 @@
+SELECT id, CAST(f AS BIGINT) AS i, CAST(f AS DOUBLE) AS dd FROM t WHERE id <= 4 ORDER BY id;

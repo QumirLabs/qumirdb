@@ -9,6 +9,7 @@
 #include <stdexcept>
 
 #include <arrow/api.h>
+#include <arrow/compute/api.h>
 #include <arrow/io/api.h>
 #include <arrow/memory_pool.h>
 #include <arrow/util/key_value_metadata.h>
@@ -46,6 +47,8 @@ TTypePtr ArrowTypeToQumir(const std::shared_ptr<arrow::DataType>& type) {
         case arrow::Type::UINT16: return std::make_shared<TIntegerType>(TIntegerType::U16);
         case arrow::Type::UINT32: return std::make_shared<TIntegerType>(TIntegerType::U32);
         case arrow::Type::UINT64: return std::make_shared<TIntegerType>(TIntegerType::U64);
+        // FLOAT is a storage width: RecordBatchToRowSet decodes it to f64.
+        case arrow::Type::FLOAT:
         case arrow::Type::DOUBLE: return std::make_shared<NQumir::NAst::TFloatType>();
         case arrow::Type::BOOL: return std::make_shared<NQumir::NAst::TBoolType>();
         case arrow::Type::STRING:
@@ -63,13 +66,6 @@ TTypePtr ArrowTypeToQumir(const std::shared_ptr<arrow::DataType>& type) {
 }
 
 TTypePtr ArrowFieldToQumir(const std::shared_ptr<arrow::Field>& field) {
-    // The kernels have no 32-bit float type yet; mapping FLOAT to f64 would hand
-    // them a 4-byte buffer. Reject the column instead of reading garbage.
-    if (field->type()->id() == arrow::Type::FLOAT) {
-        throw std::runtime_error(
-            "Parquet column '" + field->name() +
-            "' has type FLOAT (32-bit), which is not supported yet (#218)");
-    }
     auto type = ArrowTypeToQumir(field->type());
     if (type && field->nullable()) {
         return std::make_shared<TNullable>(std::move(type));
@@ -98,10 +94,36 @@ char* FixedByteWidthData(const std::shared_ptr<arrow::Array>& arr, int32_t byteW
     return const_cast<char*>(reinterpret_cast<const char*>(raw)) + arr->offset() * byteWidth;
 }
 
+arrow::MemoryPool* GetMemoryPool();
+
+// The engine has one float width, so FLOAT columns are widened here, on the
+// single path of both scans and late lookups. Widening is exact.
+std::shared_ptr<arrow::RecordBatch> WidenFloatColumns(std::shared_ptr<arrow::RecordBatch> batch) {
+    for (int i = 0; i < batch->num_columns(); ++i) {
+        if (batch->column(i)->type_id() != arrow::Type::FLOAT) {
+            continue;
+        }
+        arrow::compute::ExecContext context(GetMemoryPool());
+        auto widened = arrow::compute::Cast(
+            *batch->column(i), arrow::float64(), arrow::compute::CastOptions::Safe(), &context);
+        if (!widened.ok()) {
+            throw std::runtime_error(widened.status().ToString());
+        }
+        auto replaced = batch->SetColumn(
+            i, batch->schema()->field(i)->WithType(arrow::float64()), *widened);
+        if (!replaced.ok()) {
+            throw std::runtime_error(replaced.status().ToString());
+        }
+        batch = std::move(*replaced);
+    }
+    return batch;
+}
+
 void RecordBatchToRowSet(
     std::shared_ptr<arrow::RecordBatch> batch,
     TRowSet& rowSet)
 {
+    batch = WidenFloatColumns(std::move(batch));
     int32_t numCols = static_cast<int32_t>(batch->num_columns());
     int64_t len = batch->num_rows();
 
@@ -140,10 +162,6 @@ void RecordBatchToRowSet(
             }
             case arrow::Type::DECIMAL128: {
                 col.Data = FixedByteWidthData(arr, 16);
-                break;
-            }
-            case arrow::Type::FLOAT: {
-                col.Data = NumericData(arr);
                 break;
             }
             case arrow::Type::BOOL: {

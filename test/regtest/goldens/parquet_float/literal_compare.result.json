@@ -1,0 +1,11 @@
+{
+  "schema": "<struct (id i32) (eq bool) (le bool) (gt bool) (isin bool) (eq_int bool)>",
+  "rows": [
+    [1, false, false, true, false, false],
+    [2, false, true, false, false, false],
+    [3, false, false, true, false, false],
+    [4, false, false, true, false, false],
+    [5, false, false, true, false, false],
+    [6, false, true, false, false, false]
+  ]
+}
