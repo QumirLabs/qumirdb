@@ -14,6 +14,8 @@
     "multiply.sql": {"order": "ordered"},
     "multiply_sum.sql": {"order": "ordered"},
     "multiply_nested.sql": {"order": "ordered"},
-    "multiply_empty.sql": {"order": "ordered"}
+    "multiply_empty.sql": {"order": "ordered"},
+    "key_join_group.sql": {"order": "ordered"},
+    "key_before_int_group.sql": {"order": "ordered"}
   }
 }

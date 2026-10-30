@@ -1,0 +1,8 @@
+sort [k asc]
+└─ project (k, c, s) (rows≈5 cost≈4.7K)
+   └─ aggregate keys=[x.k] aggs=[count_0=count, sum_0=sum] (rows≈5 cost≈4.6K)
+      └─ join left [x.k = y.k] (rows≈5 cost≈4.5K)
+         ├─ project (x.k) (rows≈5 cost≈80)
+         │  └─ source t AS t (rows≈5 cost≈40)
+         └─ project (y.id, y.k) (rows≈5 cost≈120)
+            └─ source t AS t_1 (rows≈5 cost≈60)
