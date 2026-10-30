@@ -67,8 +67,8 @@ TNumberInfo NumberInfo(const TTypePtr& type) {
             .BitWidth = integer.Cast()->BitWidth(),
         };
     }
-    if (TMaybeType<TFloatType>(valueType)) {
-        return {.Kind = ENumberKind::Float, .BitWidth = 64};
+    if (auto floating = TMaybeType<TFloatType>(valueType)) {
+        return {.Kind = ENumberKind::Float, .BitWidth = floating.Cast()->BitWidth()};
     }
     return {};
 }

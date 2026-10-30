@@ -1,0 +1,1 @@
+SELECT id, f FROM t WHERE f > 0.2 AND n IS NOT NULL ORDER BY id;

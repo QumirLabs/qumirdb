@@ -25,8 +25,8 @@ std::vector<int64_t> InstrumentationColumnWidths(const NQumir::NAst::TTypePtr& t
             widths.push_back(integer.Cast()->BitWidth() / 8);
         } else if (TMaybeType<TBoolType>(value)) {
             widths.push_back(1);
-        } else if (TMaybeType<TFloatType>(value)) {
-            widths.push_back(8);
+        } else if (auto floating = TMaybeType<TFloatType>(value)) {
+            widths.push_back(floating.Cast()->BitWidth() / 8);
         } else {
             throw std::runtime_error("unsupported instrumentation column: " + field->ToString());
         }

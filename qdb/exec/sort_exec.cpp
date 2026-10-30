@@ -164,7 +164,10 @@ int CompareValues(const TColumn& left, int32_t leftRow,
                 return CompareScalar(Load<uint64_t>(left, leftRow), Load<uint64_t>(right, rightRow));
         }
     }
-    if (TMaybeType<TFloatType>(valueType)) {
+    if (auto floating = TMaybeType<TFloatType>(valueType)) {
+        if (floating.Cast()->BitWidth() == 32) {
+            return CompareScalar(Load<float>(left, leftRow), Load<float>(right, rightRow));
+        }
         return CompareScalar(Load<double>(left, leftRow), Load<double>(right, rightRow));
     }
     if (TMaybeType<TBoolType>(valueType)) {
@@ -248,8 +251,8 @@ size_t SortColumnFixedWidth(const TTypePtr& type) {
     if (auto integer = TMaybeType<TIntegerType>(valueType)) {
         return static_cast<size_t>(integer.Cast()->BitWidth() / 8);
     }
-    if (TMaybeType<TFloatType>(valueType)) {
-        return 8;
+    if (auto floating = TMaybeType<TFloatType>(valueType)) {
+        return static_cast<size_t>(floating.Cast()->BitWidth() / 8);
     }
     if (TMaybeType<TBoolType>(valueType)) {
         return 0;

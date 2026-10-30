@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "fixtures": {
+    "values": {"json": "tables/t.json", "parquet": {"row_group_rows": 2}}
+  },
+  "tables": {"t": "values"},
+  "variants": ["single", "threaded"],
+  "cases": {
+    "project.sql": {"order": "ordered"},
+    "filter.sql": {"order": "ordered"},
+    "arithmetic.sql": {"order": "ordered"},
+    "aggregate.sql": {"order": "ordered"},
+    "group.sql": {"order": "ordered"},
+    "cast.sql": {"order": "ordered"},
+    "join.sql": {"order": "ordered"}
+  }
+}

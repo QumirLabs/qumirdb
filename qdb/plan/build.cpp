@@ -1063,6 +1063,38 @@ std::vector<std::string> CommonColumns(const TRelation& left, const TRelation& r
     return common;
 }
 
+// f32 is a storage type only: the scan reads the 4-byte column and this
+// projection widens it to f64, so the rest of the engine sees one float width.
+std::optional<std::expected<TOperatorPtr, TError>> WidenStorageFloats(
+    const TOperatorPtr& sourcePlan,
+    const TBuildContext& context)
+{
+    auto output = sourcePlan->OutputColumns();
+    if (!output) {
+        return std::nullopt;
+    }
+    bool hasNarrowFloat = false;
+    std::vector<TProjectionSpec> projections;
+    for (const auto& [name, type] : output->Fields) {
+        auto expr = Ident({}, name);
+        auto floating = NAst::TMaybeType<NAst::TFloatType>(UnwrapNamedType(UnwrapNullableType(type)));
+        if (floating && floating.Cast()->Kind == NAst::TFloatType::F32) {
+            hasNarrowFloat = true;
+            expr = std::make_shared<NAst::TCastExpr>(
+                TLocation{}, std::move(expr), std::make_shared<NAst::TFloatType>());
+        }
+        projections.push_back({.Name = name, .Expression = std::move(expr)});
+    }
+    if (!hasNarrowFloat) {
+        return std::nullopt;
+    }
+    TOperatorPtr plan = std::make_shared<TProjectOperator>(sourcePlan, std::move(projections));
+    if (auto annotated = Annotate(plan, context); !annotated) {
+        return std::unexpected(annotated.error());
+    }
+    return plan;
+}
+
 std::expected<TRelation, TError> BuildTableRef(
     const NSql::TSqlPtr<NSql::TSqlTableRef>& ref,
     TBuildContext& context)
@@ -1079,6 +1111,12 @@ std::expected<TRelation, TError> BuildTableRef(
             source->Labels.clear();
             for (const auto& column : sourceOp.Cast()->GetSource().Schema().Columns) {
                 source->Labels.push_back(qualifier + "." + std::string(column.Name));
+            }
+            if (auto widened = WidenStorageFloats(source->Plan, context)) {
+                if (!*widened) {
+                    return std::unexpected(widened->error());
+                }
+                source->Plan = std::move(**widened);
             }
             return source;
         }

@@ -149,9 +149,10 @@ std::string FormatCell(const TColumn& col, int32_t row, const TTypePtr& type) {
         }
         return std::string(buf, r.ptr);
     }
-    if (TMaybeType<TFloatType>(valueType)) {
-        double v = reinterpret_cast<const double*>(col.Data)[row];
-        auto r = std::to_chars(buf, buf + sizeof(buf), v);
+    if (auto floating = TMaybeType<TFloatType>(valueType)) {
+        auto r = floating.Cast()->BitWidth() == 32
+            ? std::to_chars(buf, buf + sizeof(buf), reinterpret_cast<const float*>(col.Data)[row])
+            : std::to_chars(buf, buf + sizeof(buf), reinterpret_cast<const double*>(col.Data)[row]);
         return std::string(buf, r.ptr);
     }
     if (TMaybeType<TBoolType>(valueType)) {
@@ -230,9 +231,11 @@ void WriteValue(std::ostream& out, const TColumn& col, int32_t row, const TTypeP
                 }
                 return;
         }
-    } else if (TMaybeType<TFloatType>(valueType)) {
+    } else if (auto floating = TMaybeType<TFloatType>(valueType)) {
         char buffer[64];
-        auto view = ToCharsView(out, reinterpret_cast<const double*>(col.Data)[row], buffer, sizeof(buffer));
+        auto view = floating.Cast()->BitWidth() == 32
+            ? ToCharsView(out, reinterpret_cast<const float*>(col.Data)[row], buffer, sizeof(buffer))
+            : ToCharsView(out, reinterpret_cast<const double*>(col.Data)[row], buffer, sizeof(buffer));
         out.write(view.data(), static_cast<std::streamsize>(view.size()));
         return;
     } else if (TMaybeType<TBoolType>(valueType)) {

@@ -1,0 +1,5 @@
+sort [id asc]
+└─ project (id, f) (rows≈1 cost≈168)
+   └─ project (t.id, t.f) (rows≈1 cost≈156)
+      └─ filter (&& (> (cast |t.f| f64) 0.20000000000000001) (! (call qdb_is_null (cast |t.n| f64)))) (rows≈1 cost≈144)
+         └─ source t AS t row-groups (&& (> (cast |t.f| f64) 0.20000000000000001) (! (call qdb_is_null (cast |t.n| f64)))) (rows≈6 cost≈72)
