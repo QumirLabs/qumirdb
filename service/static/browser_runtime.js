@@ -76,7 +76,7 @@ export function coreTypeWidth(type) {
     case 'i32': case 'u32': return 4;
     case 'i64': case 'u64': case 'f64': return 8;
     case 'string': return 16; // StringView (ptr + size)
-    case 'binint': return 16; // qdb_bin_int (Lo + Hi)
+    case 'binint': case 'i128': case 'u128': return 16; // qdb_bin_int (Lo + Hi)
     default: return 0;
   }
 }
@@ -1211,7 +1211,8 @@ function readNumericValue(dv, address, type) {
     case 'i64': return dv.getBigInt64(address, true);
     case 'u64': return dv.getBigUint64(address, true);
     case 'f64': return dv.getFloat64(address, true);
-    case 'binint': return readBinIntValue(dv, address);
+    case 'binint': case 'i128': return readBinIntValue(dv, address);
+    case 'u128': return dv.getBigUint64(address, true) + (dv.getBigUint64(address + 8, true) << 64n);
     default: throw new Error(`unsupported numeric column type: ${type}`);
   }
 }

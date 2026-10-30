@@ -112,6 +112,15 @@ std::string FormatDecimal128(const char* data, int32_t scale) {
     return digits;
 }
 
+std::string FormatInt128(const char* data, bool isSigned) {
+    if (isSigned) {
+        return FormatDecimal128(data, 0);
+    }
+    unsigned __int128 raw = 0;
+    std::memcpy(&raw, data, sizeof(raw));
+    return UnsignedInt128ToString(raw);
+}
+
 std::string FormatCell(const TColumn& col, int32_t row, const TTypePtr& type) {
     if (IsMasked(col, row)) {
         return "NULL";
@@ -127,6 +136,9 @@ std::string FormatCell(const TColumn& col, int32_t row, const TTypePtr& type) {
     if (auto t = TMaybeType<TIntegerType>(valueType)) {
         auto intType = t.Cast();
         const char* ptr = col.Data + row * (intType->BitWidth() / 8);
+        if (intType->BitWidth() == 128) {
+            return FormatInt128(ptr, intType->IsSigned());
+        }
         std::to_chars_result r;
         if (intType->IsSigned()) {
             int64_t v = 0;
@@ -193,6 +205,11 @@ void WriteValue(std::ostream& out, const TColumn& col, int32_t row, const TTypeP
         const char* ptr = col.Data + row * (intType->BitWidth() / 8);
         char buffer[64];
         switch (intType->BitWidth()) {
+            case 128: {
+                const auto formatted = FormatInt128(ptr, intType->IsSigned());
+                out.write(formatted.data(), static_cast<std::streamsize>(formatted.size()));
+                return;
+            }
             case 8:
                 if (intType->IsSigned()) {
                     auto view = ToCharsView(out, static_cast<int64_t>(*reinterpret_cast<const int8_t*>(ptr)), buffer, sizeof(buffer));

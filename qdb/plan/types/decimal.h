@@ -120,6 +120,18 @@ inline bool IsBinIntStorageType(const NQumir::NAst::TTypePtr& type) {
     return named && named.Cast()->Name == "BinInt";
 }
 
+// A signed 128-bit integer has the same two-word layout as DECIMAL storage.
+// U128 is not listed: SQL cannot produce it yet.
+inline bool IsInt128Type(const NQumir::NAst::TTypePtr& type) {
+    auto integer = NQumir::NAst::TMaybeType<NQumir::NAst::TIntegerType>(
+        UnwrapNullableType(type));
+    return integer && integer.Cast()->Kind == NQumir::NAst::TIntegerType::I128;
+}
+
+inline bool HasBinIntLayout(const NQumir::NAst::TTypePtr& type) {
+    return IsDecimalType(type) || IsBinIntStorageType(type) || IsInt128Type(type);
+}
+
 inline NQumir::NAst::TTypePtr BinIntStorageType() {
     return std::make_shared<NQumir::NAst::TNamedType>("BinInt", nullptr);
 }

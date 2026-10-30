@@ -1,0 +1,4 @@
+WITH v AS (SELECT u AS w FROM wide UNION ALL SELECT b FROM wide)
+SELECT w, count(*) AS c
+FROM (SELECT w FROM v UNION ALL SELECT w + w FROM v)
+GROUP BY w;

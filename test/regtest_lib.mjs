@@ -13,7 +13,7 @@ const JS_VARIANT = 'js';
 const DEFAULT_ROW_GROUP_ROWS = 128;
 const DEFAULT_TOLERANCE = Object.freeze({ abs: 1e-12, rel: 1e-12 });
 const INTEGER_TYPES = new Set(['i8', 'i16', 'i32', 'u8', 'u16', 'u32']);
-const WIDE_INTEGER_TYPES = new Set(['i64', 'u64']);
+const WIDE_INTEGER_TYPES = new Set(['i64', 'u64', 'i128', 'u128']);
 const SCALAR_TYPES = new Set([...INTEGER_TYPES, ...WIDE_INTEGER_TYPES, 'f64', 'bool', 'string']);
 
 function readJson(file) {
