@@ -1625,11 +1625,8 @@ std::optional<TAggRowLayout> BuildAggRowLayout(
     if (HasStringReducer(layout) || hasEmptyInputGroups) {
         return std::nullopt;
     }
-    const bool wideKey = std::ranges::any_of(key.Fields, [](const auto& field) {
-        return IsBinIntStorageType(field.Type);
-    });
     TAggRowLayout rows;
-    rows.KeyAlignment = wideKey ? 16 : 8;
+    rows.KeyAlignment = std::max<int64_t>(8, static_cast<int64_t>(key.Alignment));
     const auto alignment = static_cast<size_t>(rows.KeyAlignment);
     rows.KeyOffset = static_cast<int64_t>(AlignUp(8, alignment));
     rows.KeyStride = static_cast<int64_t>(AlignUp(key.Size, alignment));

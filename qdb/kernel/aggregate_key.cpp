@@ -180,13 +180,12 @@ TRepresentedKeyType RepresentKeyType(const NQumir::NAst::TTypePtr& original) {
             maxAlignment = std::max(maxAlignment, represented.Layout.Alignment);
             hasString = hasString || represented.HasString;
         }
-        const size_t alignment = maxAlignment;
-        const size_t size = AlignUp(offset, alignment);
+        const size_t size = AlignUp(offset, maxAlignment);
         if (!hasString) {
             return {
                 .Lookup = inner,
                 .Stored = inner,
-                .Layout = {size, alignment},
+                .Layout = {size, maxAlignment},
                 .Nullable = nullable,
                 .Inner = inner,
             };
@@ -194,7 +193,7 @@ TRepresentedKeyType RepresentKeyType(const NQumir::NAst::TTypePtr& original) {
         return {
             .Lookup = std::make_shared<TStructType>(std::move(lookupFields)),
             .Stored = std::make_shared<TStructType>(std::move(storedFields)),
-            .Layout = {size, alignment},
+            .Layout = {size, maxAlignment},
             .HasString = hasString,
             .Nullable = nullable,
             .Inner = inner,
