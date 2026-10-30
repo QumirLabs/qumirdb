@@ -1033,10 +1033,10 @@ std::optional<std::string> CaptureError(TFunc&& stage) {
 
 namespace {
 
-// The exact text of a DECIMAL, as DuckDB prints it: the scaled integer with the
-// decimal point placed `scale` digits from the right. A result is compared as
-// this string, so no digit is lost to a binary float.
-std::string DecimalText(const char* storage, int32_t scale, bool isSigned = true) {
+// The exact text of a 128-bit DECIMAL or integer, as DuckDB prints it: the scaled
+// integer with the decimal point placed `scale` digits from the right. A result
+// is compared as this string, so no digit is lost to a binary float.
+std::string WideIntegerText(const char* storage, int32_t scale, bool isSigned = true) {
     unsigned __int128 raw;
     std::memcpy(&raw, storage, sizeof(raw));
     const bool negative = isSigned && static_cast<__int128>(raw) < 0;
@@ -1059,7 +1059,7 @@ TValue Cell(const TColumn& column, int64_t row, const TTypePtr& type) {
     }
     const auto valueType = UnwrapNullableType(type);
     if (const auto decimal = DecimalSpecOfValueType(valueType)) {
-        return DecimalText(column.Data + row * 16, decimal->Scale);
+        return WideIntegerText(column.Data + row * 16, decimal->Scale);
     }
     if (auto integer = TMaybeType<TIntegerType>(valueType)) {
         switch (integer.Cast()->Kind) {
@@ -1071,8 +1071,9 @@ TValue Cell(const TColumn& column, int64_t row, const TTypePtr& type) {
             case TIntegerType::U16: return reinterpret_cast<const uint16_t*>(column.Data)[row];
             case TIntegerType::U32: return reinterpret_cast<const uint32_t*>(column.Data)[row];
             case TIntegerType::U64: return std::to_string(reinterpret_cast<const uint64_t*>(column.Data)[row]);
-            case TIntegerType::I128: return DecimalText(column.Data + row * 16, 0);
-            case TIntegerType::U128: return DecimalText(column.Data + row * 16, 0, false);
+            case TIntegerType::I128: return WideIntegerText(column.Data + row * 16, 0);
+            // SQL cannot produce U128 yet; the branch keeps the switch exhaustive.
+            case TIntegerType::U128: return WideIntegerText(column.Data + row * 16, 0, false);
         }
     }
     if (TMaybeType<TFloatType>(valueType)) return FloatJson(reinterpret_cast<const double*>(column.Data)[row]);
