@@ -621,6 +621,25 @@ TDecimalSpec DecimalDivisionSpec(const TDecimalSpec& left, const TDecimalSpec& r
     };
 }
 
+// A p1-digit and a p2-digit number multiply to at most p1 + p2 digits, and the scales
+// add. Past 38 digits the precision is capped: i128 holds 38 digits, so such a product
+// can overflow. DuckDB narrows a product of two operands of up to 18 digits to
+// DECIMAL(18, s) to stay in int64 storage; qdb stores every decimal in i128 and
+// keeps the digit count. A scale above 38 has no DECIMAL type and is an error.
+TDecimalSpec DecimalProductSpec(TOperator op, const TDecimalSpec& left, const TDecimalSpec& right) {
+    const int32_t scale = left.Scale + right.Scale;
+    if (scale > MaxDecimalPrecision) {
+        throw NQumir::TError("decimal operator '" + op.ToString() + "' needs scale " +
+            std::to_string(scale) + ", above the DECIMAL maximum of " +
+            std::to_string(MaxDecimalPrecision) +
+            "; cast an operand to a smaller scale or to DOUBLE");
+    }
+    return {
+        .Precision = std::min(MaxDecimalPrecision, left.Precision + right.Precision),
+        .Scale = scale,
+    };
+}
+
 // DECIMAL(38, s) operands leave no room for fractional digits in the quotient, and
 // the reduced scale would truncate it below the dividend's own scale (150 / 8 at
 // DECIMAL(38,30) gave 18). Such a quotient is a DOUBLE, as in DuckDB. A reduced
@@ -782,7 +801,7 @@ TTypePtr DecimalBinaryValueType(TOperator op, const TExprPtr& le, const TExprPtr
         });
     }
     if (op == "*" && dl && dr) {
-        ThrowDecimalUnsupported(op, "decimal * decimal is intentionally absent in v1");
+        return MakeDecimalType(DecimalProductSpec(op, *dl, *dr));
     }
     if (op == "*") {
         auto decimal = dl ? *dl : *dr;
@@ -899,8 +918,8 @@ TTypePtr BinaryValueType(TOperator op, const TExprPtr& le, const TExprPtr& re,
 // BinaryValueType of an operation with a bare-NULL operand (null type). A null-strict
 // operator turns it into NULL whatever the NULL stands for, so the operand only has to give
 // the operation a result type. It takes the other operand's type, except next to a decimal
-// in `*`: decimal * decimal is not implemented, so such a NULL is an integer, as SQL
-// types a bare NULL.
+// in `*`: a decimal there would double the precision and scale, so such a NULL is an
+// integer, as SQL types a bare NULL.
 TTypePtr BinaryValueTypeWithNull(TOperator op, const TExprPtr& le, const TExprPtr& re,
     const TTypePtr& lt, const TTypePtr& rt)
 {
@@ -1939,6 +1958,11 @@ TTypePtr ExpandDecimalNode(TExprPtr& e, const TStructType& inputType, TTypeEnv& 
             return Propagate({lt, rt}, result);
         }
         if (node->Operator == "*") {
+            if (dl && dr) {
+                // TODO: decimal * decimal is typed but its kernel is not generated yet.
+                ThrowDecimalUnsupported(node->Operator,
+                    "the decimal * decimal kernel is not implemented yet");
+            }
             if (dl && !dr) {
                 node->Left = DecimalValueAtScale(node->Left, lt, dl->Scale, node->Location);
                 node->Right = CastToI64(node->Right, node->Location);
