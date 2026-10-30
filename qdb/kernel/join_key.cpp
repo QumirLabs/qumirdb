@@ -89,7 +89,7 @@ TJoinKeyDescriptor BuildJoinKeyDescriptor(
         maxAlignment = std::max(maxAlignment, layout.Alignment);
     }
 
-    result.Alignment = std::min<size_t>(maxAlignment, 8);
+    result.Alignment = maxAlignment;
     result.Size = AlignUp(offset, result.Alignment);
     std::vector<std::pair<TTypePtr, bool>> keyNameFields;
     keyNameFields.reserve(result.Fields.size());

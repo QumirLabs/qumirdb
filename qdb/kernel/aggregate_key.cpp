@@ -21,13 +21,15 @@ using TRepresentedType = TRepresentedKeyType;
 TLayout TypeLayout(const NQumir::NAst::TTypePtr& original) {
     using namespace NQumir::NAst;
 
+    // Key structs follow the C ABI, which qumir and LLVM share: an i128 and the
+    // BinInt struct around it are 16-aligned, so a struct holding one is too.
     if (IsDecimalType(original) || IsBinIntStorageType(original)) {
-        return {16, 8};
+        return {16, 16};
     }
     auto type = UnwrapNamedType(original);
     if (auto integer = TMaybeType<TIntegerType>(type)) {
         const size_t size = static_cast<size_t>(integer.Cast()->BitWidth() / 8);
-        return {size, std::min<size_t>(size, 8)};
+        return {size, size};
     }
     if (TMaybeType<TFloatType>(type)) {
         return {8, 8};
@@ -44,8 +46,7 @@ TLayout TypeLayout(const NQumir::NAst::TTypePtr& original) {
             offset += field.Size;
             maxAlignment = std::max(maxAlignment, field.Alignment);
         }
-        const size_t alignment = std::min<size_t>(maxAlignment, 8);
-        return {AlignUp(offset, alignment), alignment};
+        return {AlignUp(offset, maxAlignment), maxAlignment};
     }
     throw NQumir::TError(
         "aggregation key type is not fixed-width and trivially copyable: " +
@@ -179,7 +180,7 @@ TRepresentedKeyType RepresentKeyType(const NQumir::NAst::TTypePtr& original) {
             maxAlignment = std::max(maxAlignment, represented.Layout.Alignment);
             hasString = hasString || represented.HasString;
         }
-        const size_t alignment = std::min<size_t>(maxAlignment, 8);
+        const size_t alignment = maxAlignment;
         const size_t size = AlignUp(offset, alignment);
         if (!hasString) {
             return {
@@ -268,7 +269,7 @@ TAggregateKeyDescriptor BuildAggregateKeyDescriptor(
         maxAlignment = std::max(maxAlignment, layout.Alignment);
     }
 
-    result.Alignment = std::min<size_t>(maxAlignment, 8);
+    result.Alignment = maxAlignment;
     result.Size = AlignUp(offset, result.Alignment);
     std::vector<std::pair<TTypePtr, bool>> keyNameFields;
     keyNameFields.reserve(result.Fields.size());
