@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -308,6 +309,93 @@ TEST(ProjectE2E, DecimalProjectComputesWithBinIntStorage) {
     EXPECT_EQ(half[0].Lo, 500u);
     EXPECT_EQ(half[1].Lo, 625u);
     EXPECT_EQ(half[2].Lo, 1250u);
+    Release(&out);
+    EXPECT_FALSE(plan->Next(out));
+}
+
+// A DECIMAL with precision <= 18 is a plain i64 to kernels (#426); its conversion
+// kernels take the scale as an argument.
+TEST(ProjectE2E, Decimal64KernelsConvertI64Storage) {
+    std::array<int64_t, 5> values = {1050, -150, 9007199254740993, -9007199254740993, 0};
+    std::array<qdb_bin_int, 5> wide{};
+    for (size_t r = 0; r < values.size(); ++r) {
+        wide[r] = {
+            .Lo = static_cast<uint64_t>(values[r]),
+            .Hi = values[r] < 0 ? ~uint64_t{0} : 0,
+        };
+    }
+    std::array<TColumn, 2> cols = {
+        TColumn{.Data = reinterpret_cast<char*>(values.data())},
+        TColumn{.Data = reinterpret_cast<char*>(wide.data())},
+    };
+    TRowSet batch{.Columns = cols.data(), .ColumnCount = 2, .RowCount = 5, .RefCount = 1};
+    NQdb::TMockSource src(
+        {"v", "big"},
+        {std::make_shared<TIntegerType>(), std::make_shared<NQdb::TDecimal>(20, 2)},
+        {batch});
+
+    auto plan = Plan(
+        "(rel project (rel source \"L\") "
+        "(up (call qdb_decimal64_scale_up v (: 2 i64))) "
+        "(f (call qdb_decimal64_to_f64 v (: 2 i64))) "
+        "(i (call qdb_decimal64_to_i64 v (: 2 i64))) "
+        "(n (call qdb_decimal64_to_i32 v (: 2 i64))) "
+        "(w (call qdb_decimal64_narrow big)) "
+        "(d (call qdb_decimal64_div_i64 v (: 4 i64))))",
+        src);
+
+    TRowSet out{};
+    ASSERT_TRUE(plan->Next(out));
+    ASSERT_EQ(out.ColumnCount, 6);
+    ASSERT_EQ(out.RowCount, 5);
+    const auto* up = reinterpret_cast<const int64_t*>(out.Columns[0].Data);
+    const auto* f = reinterpret_cast<const double*>(out.Columns[1].Data);
+    const auto* i = reinterpret_cast<const int64_t*>(out.Columns[2].Data);
+    const auto* n = reinterpret_cast<const int32_t*>(out.Columns[3].Data);
+    const auto* w = reinterpret_cast<const int64_t*>(out.Columns[4].Data);
+    const auto* d = reinterpret_cast<const int64_t*>(out.Columns[5].Data);
+    const std::array<double, 5> expectedF = {
+        10.5, -1.5, std::strtod("90071992547409.93", nullptr),
+        std::strtod("-90071992547409.93", nullptr), 0.0,
+    };
+    const std::array<int64_t, 5> expectedI = {11, -2, 90071992547410, -90071992547410, 0};
+    const std::array<int32_t, 5> expectedN = {
+        11, -2, std::numeric_limits<int32_t>::max(), std::numeric_limits<int32_t>::min(), 0,
+    };
+    const std::array<int64_t, 5> expectedD = {262, -37, 2251799813685248, -2251799813685248, 0};
+    for (int r = 0; r < 5; ++r) {
+        EXPECT_EQ(up[r], values[r] * 100) << r;
+        EXPECT_EQ(f[r], expectedF[r]) << r;
+        EXPECT_EQ(i[r], expectedI[r]) << r;
+        EXPECT_EQ(n[r], expectedN[r]) << r;
+        EXPECT_EQ(w[r], values[r]) << r;
+        EXPECT_EQ(d[r], expectedD[r]) << r;
+    }
+    Release(&out);
+    EXPECT_FALSE(plan->Next(out));
+}
+
+TEST(ProjectE2E, Decimal64FromF64RoundsHalfAwayFromZero) {
+    std::array<double, 5> values = {1.25, -1.25, 0.04, -0.05, 2.5};
+    std::array<TColumn, 1> cols = {
+        TColumn{.Data = reinterpret_cast<char*>(values.data())},
+    };
+    TRowSet batch{.Columns = cols.data(), .ColumnCount = 1, .RowCount = 5, .RefCount = 1};
+    NQdb::TMockSource src({"x"}, {std::make_shared<TFloatType>()}, {batch});
+
+    auto plan = Plan(
+        "(rel project (rel source \"L\") "
+        "(d (call qdb_decimal64_from_f64 x (: 1 i64))))",
+        src);
+
+    TRowSet out{};
+    ASSERT_TRUE(plan->Next(out));
+    ASSERT_EQ(out.RowCount, 5);
+    const auto* d = reinterpret_cast<const int64_t*>(out.Columns[0].Data);
+    const std::array<int64_t, 5> expected = {13, -13, 0, -1, 25};
+    for (int r = 0; r < 5; ++r) {
+        EXPECT_EQ(d[r], expected[r]) << r;
+    }
     Release(&out);
     EXPECT_FALSE(plan->Next(out));
 }

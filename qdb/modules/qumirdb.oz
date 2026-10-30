@@ -1025,6 +1025,50 @@
       (= factor (call qdb_pow10_i128 delta))
       (return (cast (struct ((V (* (field value V) (field factor V))))) BinInt))))
 
+  ;; A DECIMAL with precision <= 18 keeps its unscaled value in a plain i64
+  ;; (issue #426). Arithmetic and comparisons at one scale are the i64 operators;
+  ;; the kernels below change the scale or the storage. Overflow wraps, as for i128.
+  (fun qdb_pow10_i64 ((var scale i64)) -> i64
+    (block
+      (if (< scale 0)
+        (block (return (: 0 i64))))
+      (var acc = (: 1 i64))
+      (var base = (: 10 i64))
+      (var n = scale)
+      (while (> n 0)
+        (block
+          (if (!= (& n 1) 0)
+            (block (= acc (* acc base))))
+          (= n (>> n 1))
+          (= base (* base base))))
+      (return acc)))
+  (fun qdb_decimal64_scale_up ((var value i64) (var delta i64)) -> i64
+    (block (return (* value (call qdb_pow10_i64 delta)))))
+  ;; Half away from zero, like qdb_decimal_from_f64.
+  (fun qdb_decimal64_from_f64 ((var value f64) (var scale i64)) -> i64
+    (block
+      (var scaled = (* value (cast (call qdb_pow10_i64 scale) f64)))
+      (if (< scaled 0.0)
+        (block (return (cast (- scaled 0.5) i64))))
+      (return (cast (+ scaled 0.5) i64))))
+  ;; Below 2^53 both operands are exact doubles (10^18 is one), so the division is
+  ;; correctly rounded; larger values take the exact i128 routine.
+  (fun qdb_decimal64_to_f64 ((var value i64) (var scale i64)) -> f64
+    (block
+      (if (&& (< value (: 9007199254740992 i64)) (> value (- (: 0 i64) (: 9007199254740992 i64))))
+        (block (return (/ (cast value f64) (cast (call qdb_pow10_i64 scale) f64)))))
+      (return (call qdb_decimal_to_f64 (call qdb_decimal_from_unscaled value) scale))))
+  (fun qdb_decimal64_to_i64 ((var value i64) (var scale i64)) -> i64
+    (block (return (call qdb_decimal_to_i64 (call qdb_decimal_from_unscaled value) scale))))
+  (fun qdb_decimal64_to_i32 ((var value i64) (var scale i64)) -> i32
+    (block (return (call qdb_decimal_to_i32 (call qdb_decimal_from_unscaled value) scale))))
+  ;; An i128 value whose type has precision <= 18 fits i64.
+  (fun qdb_decimal64_narrow ((var value BinInt)) -> i64
+    (block (return (cast (field value V) i64))))
+  ;; Integer division of the scaled value, truncated toward zero like SQL.
+  (fun qdb_decimal64_div_i64 ((var left i64) (var right i64)) -> i64
+    (block (return (// left right))))
+
   (fun qdb_decimal_add ((var left BinInt) (var right BinInt)) -> BinInt
     (attrs (operator "+"))
     (block (return (cast (struct ((V (+ (field left V) (field right V))))) BinInt))))
