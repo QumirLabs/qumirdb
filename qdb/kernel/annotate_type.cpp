@@ -1956,9 +1956,13 @@ TTypePtr ExpandDecimalNode(TExprPtr& e, const TStructType& inputType, TTypeEnv& 
         }
         if (node->Operator == "*") {
             if (dl && dr) {
-                // TODO: decimal * decimal is typed but its kernel is not generated yet.
-                ThrowDecimalUnsupported(node->Operator,
-                    "the decimal * decimal kernel is not implemented yet");
+                node->Left = DecimalValueAtScale(node->Left, lt, dl->Scale, node->Location);
+                node->Right = DecimalValueAtScale(node->Right, rt, dr->Scale, node->Location);
+                e = Call("qdb_decimal_mul", {
+                    std::move(node->Left),
+                    std::move(node->Right),
+                }, node->Location);
+                return Propagate({lt, rt}, result);
             }
             if (dl && !dr) {
                 node->Left = DecimalValueAtScale(node->Left, lt, dl->Scale, node->Location);

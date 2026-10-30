@@ -1,0 +1,7 @@
+{
+  "schema": "<struct (g i32) (s <named Nullable [<named DECIMAL [20 4]>]>) (disc <named Nullable [<named DECIMAL [21 4]>]>) (m <named Nullable [f64]>) (n i64)>",
+  "rows": [
+    [0, "50674.0000", "-50456.0000", -562.5, "2"],
+    [1, "22500.0000", "-22350.0000", 9.2592591759259255e+19, "3"]
+  ]
+}

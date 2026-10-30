@@ -1073,6 +1073,11 @@
   (fun qdb_decimal_i64_mul ((var left i64) (var right BinInt)) -> BinInt
     (attrs (operator "*"))
     (block (return (cast (struct ((V (* (cast left i128) (field right V))))) BinInt))))
+  ;; The unscaled product is at scale s1 + s2, the result's scale: no alignment.
+  ;; A product past 38 digits wraps, like the other operators here.
+  (fun qdb_decimal_mul ((var left BinInt) (var right BinInt)) -> BinInt
+    (attrs (operator "*"))
+    (block (return (cast (struct ((V (* (field left V) (field right V))))) BinInt))))
   (fun qdb_decimal_div_i64 ((var left BinInt) (var right i64)) -> BinInt
     (attrs (operator "/"))
     (block (return (cast (struct ((V (// (field left V) (cast right i128))))) BinInt))))

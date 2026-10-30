@@ -299,14 +299,20 @@ TEST(ProjectType, DecimalArithmeticAnnotates) {
     EXPECT_THROW(AnnotateExprType(Parse("(* frac frac)"), sc), NQumir::TError);
 }
 
-// The product is typed, but its kernel is not generated yet: expansion reports it.
-TEST(ProjectType, ExpandKernelExprRejectsDecimalProduct) {
+// The unscaled product is already at the result's scale: no scale alignment call.
+TEST(ProjectType, ExpandKernelExprLowersDecimalProduct) {
     TStructType sc({
         {"amount", std::make_shared<NQdb::TDecimal>(7, 2)},
         {"tax", std::make_shared<NQdb::TDecimal>(6, 3)},
     });
 
-    EXPECT_THROW(ExpandKernelExpr(Parse("(* amount tax)"), sc), NQumir::TError);
+    auto [expr, type] = ExpandKernelExpr(Parse("(* amount tax)"), sc);
+
+    EXPECT_TRUE(IsDecimal(type, 13, 5));
+    const std::string printed = NQumir::NAst::NCore::PrintAst(expr);
+    EXPECT_NE(printed.find("qdb_decimal_mul"), std::string::npos);
+    EXPECT_EQ(printed.find("qdb_decimal_scale_up"), std::string::npos);
+    EXPECT_EQ(printed.find("DECIMAL"), std::string::npos);
 }
 
 TEST(ProjectType, DecimalRemainderFollowsDuckDB) {
