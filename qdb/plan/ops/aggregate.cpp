@@ -1,6 +1,7 @@
 #include <qdb/plan/ops/aggregate.h>
 
 #include <qdb/plan/passes/unbound_vars.h>
+#include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 
 #include <qumir/parser/ast.h>
@@ -29,6 +30,12 @@ TTypePtr AggregateResultType(const std::string& func, const TTypePtr& argType) {
             // i64 state for every integer aggregate, incl. min/max over narrow ints.
             TTypePtr i64Type = std::make_shared<TIntegerType>();
             return nullable ? std::make_shared<TNullable>(std::move(i64Type)) : i64Type;
+        }
+        // A sum needs more digits than any of its terms: it keeps the scale and takes
+        // the widest precision, as in DuckDB.
+        if (auto decimal = DecimalSpecOfValueType(inner); decimal && func == "sum") {
+            auto sumType = MakeDecimalType({.Precision = MaxDecimalPrecision, .Scale = decimal->Scale});
+            return nullable ? std::make_shared<TNullable>(std::move(sumType)) : sumType;
         }
     }
     // Non-integer reducers are not connected yet; preserve the declared type.

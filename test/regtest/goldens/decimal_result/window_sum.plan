@@ -1,0 +1,6 @@
+sort [id asc]
+└─ project (id, running, part)
+   └─ window partition=[wk_1] fns=[w_1=sum]
+      └─ window order=[t.id asc] fns=[w_0=sum]
+         └─ project (t.id, wk_1, wk_0) (rows≈5 cost≈120)
+            └─ source t AS t (rows≈5 cost≈40)

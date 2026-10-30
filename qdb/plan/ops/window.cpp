@@ -1,5 +1,6 @@
 #include <qdb/plan/ops/window.h>
 
+#include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/passes/unbound_vars.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/plan/types/decimal.h>
@@ -33,7 +34,10 @@ TTypePtr WindowResultType(const std::string& func, const TTypePtr& argType) {
     if (func == "avg") {
         return ComputeWindowAvgResultType(argType);
     }
-    // sum / max: i64 state for every integer argument, else keep the arg type.
+    if (func == "sum") {
+        return AggregateResultType(func, argType);
+    }
+    // max: i64 state for every integer argument, else keep the arg type.
     auto inner = nullable ? UnwrapNullableType(argType) : argType;
     if (inner && inner->TypeName() == TIntegerType::TypeId) {
         return wrap(std::make_shared<TIntegerType>());
