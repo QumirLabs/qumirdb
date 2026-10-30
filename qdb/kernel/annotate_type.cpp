@@ -621,11 +621,8 @@ TDecimalSpec DecimalDivisionSpec(const TDecimalSpec& left, const TDecimalSpec& r
     };
 }
 
-// A p1-digit and a p2-digit number multiply to at most p1 + p2 digits, and the scales
-// add. Past 38 digits the precision is capped: i128 holds 38 digits, so such a product
-// can overflow. DuckDB narrows a product of two operands of up to 18 digits to
-// DECIMAL(18, s) to stay in int64 storage; qdb stores every decimal in i128 and
-// keeps the digit count. A scale above 38 has no DECIMAL type and is an error.
+// The digits of a product add, and so do the scales. The precision is capped at the
+// 38 digits of i128 (the product can then overflow); a scale above 38 has no type.
 TDecimalSpec DecimalProductSpec(TOperator op, const TDecimalSpec& left, const TDecimalSpec& right) {
     const int32_t scale = left.Scale + right.Scale;
     if (scale > MaxDecimalPrecision) {

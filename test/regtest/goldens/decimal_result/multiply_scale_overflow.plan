@@ -1,0 +1,2 @@
+Error: decimal operator '*' needs scale 40, above the DECIMAL maximum of 38; cast an operand to a smaller scale or to DOUBLE
+
