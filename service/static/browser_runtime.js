@@ -1192,7 +1192,9 @@ function writeNumericValue(dv, address, type, value) {
     case 'u16': dv.setUint16(address, Number(value) & 0xffff, true); break;
     case 'i32': dv.setInt32(address, Number(value) | 0, true); break;
     case 'u32': dv.setUint32(address, Number(value) >>> 0, true); break;
-    case 'i64': dv.setBigInt64(address, BigInt(value ?? 0), true); break;
+    case 'i64': dv.setBigInt64(address, isDecimalColumn(type)
+      ? decimalToScaledBigInt(value, decimalScale(type))
+      : BigInt(value ?? 0), true); break;
     case 'u64': dv.setBigUint64(address, BigInt(value ?? 0), true); break;
     case 'f64': dv.setFloat64(address, Number(value ?? 0), true); break;
     case 'binint': writeBinIntValue(dv, address, value, decimalScale(type)); break;

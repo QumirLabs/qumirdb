@@ -34,8 +34,8 @@ namespace {
 // TStringView struct (16 bytes) per row; the executor post-converts those.
 size_t ProjectColumnWidth(const NQumir::NAst::TTypePtr& type) {
     using namespace NQumir::NAst;
-    if (IsDecimalType(type)) {
-        return 16;
+    if (auto decimal = DecimalSpecOf(type)) {
+        return static_cast<size_t>(DecimalStorageBytes(*decimal));
     }
     auto inner = UnwrapNamedType(UnwrapNullableType(type));
     if (auto integer = TMaybeType<TIntegerType>(inner)) {

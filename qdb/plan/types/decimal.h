@@ -109,6 +109,26 @@ inline bool IsDecimalType(const NQumir::NAst::TTypePtr& type) {
     return DecimalSpecOf(type).has_value();
 }
 
+// The widest precision whose unscaled value fits a signed 64-bit integer.
+inline constexpr int32_t MaxDecimal64Precision = 18;
+
+// The signed integer that holds the unscaled value of a DECIMAL.
+enum class EDecimalStorage {
+    I64,
+    I128,
+};
+
+inline EDecimalStorage DecimalStorageOf(TDecimalSpec) {
+    // TODO: I64 up to MaxDecimal64Precision once kernels and readers take it (#426).
+    return EDecimalStorage::I128;
+}
+
+inline int32_t DecimalStorageBytes(TDecimalSpec spec) {
+    return DecimalStorageOf(spec) == EDecimalStorage::I64
+        ? 8
+        : 16;
+}
+
 inline NQumir::NAst::TTypePtr MakeDecimalType(TDecimalSpec spec) {
     ValidateDecimalSpec(spec);
     return std::make_shared<TDecimal>(spec.Precision, spec.Scale);
@@ -129,7 +149,9 @@ inline bool IsInt128Type(const NQumir::NAst::TTypePtr& type) {
 }
 
 inline bool HasBinIntLayout(const NQumir::NAst::TTypePtr& type) {
-    return IsDecimalType(type) || IsBinIntStorageType(type) || IsInt128Type(type);
+    auto decimal = DecimalSpecOf(type);
+    return (decimal && DecimalStorageOf(*decimal) == EDecimalStorage::I128) ||
+        IsBinIntStorageType(type) || IsInt128Type(type);
 }
 
 inline NQumir::NAst::TTypePtr BinIntStorageType() {
