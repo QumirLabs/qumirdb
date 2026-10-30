@@ -23,6 +23,7 @@
     "key_except.sql": {"order": "ordered"},
     "key_except_integer.sql": {"order": "ordered"},
     "key_overflow.sql": {"expect_error": true, "variants": ["single", "threaded"]},
-    "window_sum.sql": {"order": "ordered"}
+    "window_sum.sql": {"order": "ordered"},
+    "integer_operand.sql": {"order": "ordered"}
   }
 }
