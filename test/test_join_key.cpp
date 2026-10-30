@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <qdb/kernel/join_key.h>
+#include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 
 #include <qumir/error.h>
@@ -18,6 +19,7 @@ namespace {
 TTypePtr I(TIntegerType::EKind k) { return std::make_shared<TIntegerType>(k); }
 TTypePtr F64() { return std::make_shared<TFloatType>(); }
 TTypePtr Str() { return std::make_shared<TStringType>(); }
+TTypePtr Dec() { return std::make_shared<NQdb::TDecimal>(38, 6); }
 TTypePtr Nullable(TTypePtr type) { return std::make_shared<NQdb::TNullable>(std::move(type)); }
 
 TStructType Schema(std::vector<std::pair<std::string, TTypePtr>> fields) {
@@ -108,6 +110,40 @@ TEST(JoinKeyDescriptor, CompositeI32String) {
     EXPECT_EQ(d.Fields[1].LeftColumnIndex, 1);
     EXPECT_EQ(d.Fields[1].RightColumnIndex, 1);
     EXPECT_TRUE(d.HasDistinctLookupType()); // contains a string component
+}
+
+// A decimal key is an i128 inside the BinInt struct; the kernel places it at
+// 16 after a validity flag or a narrower key, and so must the host (#163).
+TEST(JoinKeyDescriptor, NullableDecimalKeyIsAlignedTo16) {
+    auto d = BuildJoinKeyDescriptor(
+        Schema({{"lk", Nullable(Dec())}}), Schema({{"rk", Nullable(Dec())}}), {{"lk", "rk"}});
+    ASSERT_EQ(d.Fields.size(), 1u);
+    EXPECT_TRUE(d.Fields[0].IsNullable);
+    EXPECT_EQ(d.Fields[0].Offset, 16u);
+    EXPECT_EQ(d.Fields[0].Size, 16u);
+    EXPECT_EQ(d.Fields[0].Alignment, 16u);
+    EXPECT_EQ(d.Alignment, 16u);
+    EXPECT_EQ(d.Size, 32u);
+}
+
+TEST(AggregateKeyDescriptor, DecimalAfterNarrowerKeysIsAlignedTo16) {
+    auto afterI32 = BuildAggregateKeyDescriptor(
+        Schema({{"k", I(TIntegerType::I32)}, {"d", Dec()}}), {"k", "d"});
+    ASSERT_EQ(afterI32.Fields.size(), 2u);
+    EXPECT_EQ(afterI32.Fields[1].Offset, 16u);
+    EXPECT_EQ(afterI32.Size, 32u);
+    EXPECT_EQ(afterI32.Alignment, 16u);
+
+    auto afterString = BuildAggregateKeyDescriptor(
+        Schema({{"s", Nullable(Str())}, {"d", Nullable(Dec())}}), {"s", "d"});
+    ASSERT_EQ(afterString.Fields.size(), 2u);
+    EXPECT_EQ(afterString.Fields[0].Offset, 8u);
+    EXPECT_EQ(afterString.Fields[1].Offset, 32u); // flag at 24, key at the next 16
+    EXPECT_EQ(afterString.Size, 48u);
+
+    auto first = BuildAggregateKeyDescriptor(Schema({{"d", Dec()}}), {"d"});
+    EXPECT_EQ(first.Fields[0].Offset, 0u);
+    EXPECT_EQ(first.Size, 16u);
 }
 
 TEST(JoinKeyDescriptor, RejectsIncompatibleTypes) {
