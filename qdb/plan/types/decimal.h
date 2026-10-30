@@ -121,6 +121,7 @@ inline bool IsBinIntStorageType(const NQumir::NAst::TTypePtr& type) {
 }
 
 // A signed 128-bit integer has the same two-word layout as DECIMAL storage.
+// U128 is not listed: SQL cannot produce it yet.
 inline bool IsInt128Type(const NQumir::NAst::TTypePtr& type) {
     auto integer = NQumir::NAst::TMaybeType<NQumir::NAst::TIntegerType>(
         UnwrapNullableType(type));
