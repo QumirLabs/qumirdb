@@ -270,6 +270,9 @@ TEST(ProjectType, DecimalArithmeticAnnotates) {
         {"prev", std::make_shared<NQdb::TDecimal>(17, 2)},
         {"wide", std::make_shared<NQdb::TDecimal>(38, 10)},
         {"wide2", std::make_shared<NQdb::TDecimal>(38, 10)},
+        {"price", std::make_shared<NQdb::TDecimal>(15, 2)},
+        {"disc", std::make_shared<NQdb::TDecimal>(15, 2)},
+        {"frac", std::make_shared<NQdb::TDecimal>(25, 20)},
         {"qty", std::make_shared<TIntegerType>()},
     });
 
@@ -281,7 +284,29 @@ TEST(ProjectType, DecimalArithmeticAnnotates) {
     EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(/ sales prev)"), sc), 37, 20));
     EXPECT_TRUE(TMaybeType<TFloatType>(AnnotateExprType(Parse("(/ wide wide2)"), sc)));
     EXPECT_TRUE(IsBool(AnnotateExprType(Parse("(< amount tax)"), sc)));
-    EXPECT_THROW(AnnotateExprType(Parse("(* amount tax)"), sc), NQumir::TError);
+
+    // A product adds precisions and scales; the precision is capped at 38, a scale
+    // past 38 has no type. (15,2) * (15,2) keeps its 30 digits (DuckDB: 18).
+    EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(* amount tax)"), sc), 13, 5));
+    EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(* amount amount)"), sc), 14, 4));
+    EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(* price disc)"), sc), 30, 4));
+    EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(* price (- 1 disc))"), sc), 31, 4));
+    EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(* (* price (- 1 disc)) (+ 1 disc))"), sc), 38, 6));
+    EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(* sales prev)"), sc), 34, 4));
+    EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(* wide tax)"), sc), 38, 13));
+    EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(* wide wide2)"), sc), 38, 20));
+    EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(* price 0.0001)"), sc), 19, 6));
+    EXPECT_THROW(AnnotateExprType(Parse("(* frac frac)"), sc), NQumir::TError);
+}
+
+// The product is typed, but its kernel is not generated yet: expansion reports it.
+TEST(ProjectType, ExpandKernelExprRejectsDecimalProduct) {
+    TStructType sc({
+        {"amount", std::make_shared<NQdb::TDecimal>(7, 2)},
+        {"tax", std::make_shared<NQdb::TDecimal>(6, 3)},
+    });
+
+    EXPECT_THROW(ExpandKernelExpr(Parse("(* amount tax)"), sc), NQumir::TError);
 }
 
 TEST(ProjectType, DecimalRemainderFollowsDuckDB) {
