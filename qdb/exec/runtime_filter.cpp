@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <bit>
 #include <cassert>
+#include <cmath>
 #include <stdexcept>
 #include <utility>
 
@@ -39,6 +40,7 @@ struct TPublishState {
     uint64_t* Bloom = nullptr;
     int64_t BloomWords = 0;
     int64_t BloomSeeded = 0;
+    double BloomMaxFill = 0.0;
     int64_t Kind = 0;
     int64_t ExactKeys = 0;
     int64_t TableSize = 0;
@@ -53,7 +55,7 @@ struct TFilterData {
 
 static_assert(sizeof(TRuntimeFilterBuildState) == 12 * sizeof(int64_t));
 static_assert(sizeof(TPartialView) == 4 * sizeof(int64_t));
-static_assert(sizeof(TPublishState) == 12 * sizeof(int64_t));
+static_assert(sizeof(TPublishState) == 13 * sizeof(int64_t));
 static_assert(sizeof(TFilterData) == 3 * sizeof(int64_t));
 
 using EMode = TRuntimeFilterBuildState::EMode;
@@ -182,6 +184,10 @@ TRuntimeFilterPartial TRuntimeFilterBuilder::TakePartial() && {
     };
 }
 
+double TRuntimeFilter::PublishedBloomFill() {
+    return -std::expm1(-8.0 / PublishedBloomBitsPerKey);
+}
+
 TRuntimeFilter::TRuntimeFilter(std::shared_ptr<TRuntimeContext> runtimeContext,
     size_t maxKeys, size_t bloomBytes)
     : RuntimeContext_(std::move(runtimeContext))
@@ -232,7 +238,10 @@ void TRuntimeFilter::BuildPublishedData() {
         return;
     }
 
-    TPublishState state{.MaxKeys = static_cast<int64_t>(MaxKeys_)};
+    TPublishState state{
+        .MaxKeys = static_cast<int64_t>(MaxKeys_),
+        .BloomMaxFill = PublishedBloomFill(),
+    };
     std::vector<uint64_t> bloom;
     std::vector<uint64_t> table;
     std::vector<uint64_t> keys;
@@ -288,6 +297,10 @@ void TRuntimeFilter::BuildPublishedData() {
         Data_.Stats.BloomDisabled = true;
         return;
     }
+    Data_.Stats.BloomFragmentBytes = bloom.size() * sizeof(uint64_t);
+    // The kernel folded the filter into its first BloomWords words.
+    bloom.resize(static_cast<size_t>(state.BloomWords));
+    bloom.shrink_to_fit();
     Data_.Stats.BloomBytes = bloom.size() * sizeof(uint64_t);
     Data_.Stats.BloomSetBits = static_cast<size_t>(state.BloomSetBits);
     // At this density the false-positive rate approaches 50%, making the

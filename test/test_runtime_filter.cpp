@@ -335,7 +335,7 @@ TEST_F(RuntimeFilter, WeakBloomPausesAndRechecks) {
     EXPECT_EQ(stats.SkippedProbeRows, matching.size() * 4);
     EXPECT_EQ(stats.PausedProbeRows, matching.size() * 4);
     EXPECT_EQ(stats.RejectedRows, 0u);
-    EXPECT_EQ(stats.BloomBytes, 512u);
+    EXPECT_EQ(stats.BloomFragmentBytes, 512u);
     EXPECT_GT(stats.BloomSetBits, 0u);
 
     auto random = Hashes(8192, 32);
@@ -570,20 +570,14 @@ TEST_F(RuntimeFilter, BloomFragmentsMergeFromSeveralProducers) {
         }
     }
     // One producer with every key builds the same filter.
-    auto builder = single.MakeBuilder();
-    builder.Add(allKeys);
-    auto whole = std::move(builder).TakePartial();
-    size_t setBits = 0;
-    for (uint64_t word : whole.BloomWords) {
-        setBits += std::popcount(word);
-    }
-    single.FinishProducer(std::move(whole));
+    PublishKeys(single, allKeys);
 
     ASSERT_TRUE(filter.UsesBloom());
-    EXPECT_EQ(filter.StatsSnapshot().BuildRows, Producers * 100);
-    EXPECT_EQ(filter.StatsSnapshot().BloomBytes, 4096u);
-    EXPECT_EQ(filter.StatsSnapshot().BloomSetBits, setBits);
-    EXPECT_EQ(single.StatsSnapshot().BloomSetBits, setBits);
+    const auto stats = filter.StatsSnapshot();
+    EXPECT_EQ(stats.BuildRows, Producers * 100);
+    EXPECT_EQ(stats.BloomFragmentBytes, 4096u);
+    EXPECT_EQ(stats.BloomBytes, single.StatsSnapshot().BloomBytes);
+    EXPECT_EQ(stats.BloomSetBits, single.StatsSnapshot().BloomSetBits);
     ExpectContainsAll(filter, allKeys);
     const auto probes = Hashes(20000, 99);
     const auto answers = ProbeRuntimeFilter(filter, probes);
@@ -601,7 +595,7 @@ TEST_F(RuntimeFilter, MergesExactEmptyAndBloomContributionsWithoutLosingZeroHash
     PublishKeys(filter, keys);
 
     ASSERT_TRUE(filter.UsesBloom());
-    EXPECT_EQ(filter.StatsSnapshot().BloomBytes, 512u);
+    EXPECT_EQ(filter.StatsSnapshot().BloomFragmentBytes, 512u);
     EXPECT_EQ(filter.StatsSnapshot().BuildRows, keys.size() + 2);
     EXPECT_TRUE(RuntimeFilterMayContain(filter, 0));
     EXPECT_TRUE(RuntimeFilterMayContain(filter, 1));
@@ -621,12 +615,106 @@ TEST_F(RuntimeFilter, IncompatibleBloomContributionPassesEverything) {
 }
 
 TEST_F(RuntimeFilter, SaturatedBloomPassesEverything) {
-    TRuntimeFilter filter(Context_, /*maxKeys=*/8, /*bloomBytes=*/64);
-    PublishKeys(filter, Hashes(10000, 88));
+    for (size_t bytes : {size_t{64}, size_t{4096}}) {
+        TRuntimeFilter filter(Context_, /*maxKeys=*/8, bytes);
+        PublishKeys(filter, Hashes(10000, 88));
 
-    EXPECT_TRUE(filter.StatsSnapshot().BloomDisabled);
+        const auto stats = filter.StatsSnapshot();
+        EXPECT_TRUE(stats.BloomDisabled) << bytes;
+        // Too full to fold.
+        EXPECT_EQ(stats.BloomBytes, bytes);
+        EXPECT_FALSE(filter.UsesBloom());
+        EXPECT_TRUE(RuntimeFilterMayContain(filter, 1234567));
+    }
+}
+
+// Publication folds the merged filter to the smallest power of two whose
+// share of set bits stays within the target. The folded filter is the one the
+// same keys build at that size, so both probes still find every key.
+TEST_F(RuntimeFilter, PublicationFoldsBloomToItsKeys) {
+    constexpr size_t Producers = 3;
+    constexpr size_t FragmentBytes = 1u << 20;
+    for (size_t count : {size_t{20}, size_t{3000}, size_t{30000}, size_t{200000}}) {
+        const auto keys = Hashes(count, count + 61);
+        TRuntimeFilter folded(Context_, /*maxKeys=*/8, FragmentBytes);
+        folded.SetProducerCount(Producers);
+        for (size_t producer = 0; producer < Producers; ++producer) {
+            const size_t begin = count * producer / Producers;
+            const size_t end = count * (producer + 1) / Producers;
+            PublishKeys(folded, std::span(keys).subspan(begin, end - begin));
+        }
+        ASSERT_TRUE(folded.UsesBloom()) << count;
+        const auto stats = folded.StatsSnapshot();
+        EXPECT_EQ(stats.BloomFragmentBytes, FragmentBytes);
+        ASSERT_TRUE(std::has_single_bit(stats.BloomBytes)) << count;
+        ASSERT_LT(stats.BloomBytes, FragmentBytes) << count;
+        const double bits = static_cast<double>(stats.BloomBytes * 8);
+        EXPECT_LE(stats.BloomSetBits, bits * TRuntimeFilter::PublishedBloomFill()) << count;
+
+        ExpectContainsAll(folded, keys);
+        for (size_t row = 0; row < keys.size(); row += 1000) {
+            const auto part = std::span(keys).subspan(row, std::min<size_t>(1000, count - row));
+            ExpectContainsAll(folded, part);
+        }
+
+        TRuntimeFilter direct(Context_, /*maxKeys=*/8, stats.BloomBytes);
+        PublishKeys(direct, keys);
+        EXPECT_EQ(direct.StatsSnapshot().BloomBytes, stats.BloomBytes) << count;
+        EXPECT_EQ(direct.StatsSnapshot().BloomSetBits, stats.BloomSetBits) << count;
+        const auto probes = Hashes(20000, count + 62);
+        EXPECT_EQ(Flags(ProbeRuntimeFilter(folded, probes)),
+            Flags(ProbeRuntimeFilter(direct, probes))) << count;
+
+        // A filter is never smaller than one block.
+        if (stats.BloomBytes > 64) {
+            TRuntimeFilter half(Context_, /*maxKeys=*/8, stats.BloomBytes / 2);
+            PublishKeys(half, keys);
+            EXPECT_GT(half.StatsSnapshot().BloomSetBits,
+                bits / 2 * TRuntimeFilter::PublishedBloomFill()) << count;
+        }
+    }
+}
+
+TEST_F(RuntimeFilter, ExactSetLimitAndOneKeyMore) {
+    constexpr size_t Cap = 4096;
+    constexpr size_t FragmentBytes = 1u << 20;
+    for (size_t distinct : {Cap, Cap + 1}) {
+        TRuntimeFilter filter(Context_, Cap, FragmentBytes);
+        filter.SetProducerCount(2);
+        const auto keys = Hashes(distinct, 63);
+        PublishKeys(filter, std::span(keys).first(distinct / 2));
+        PublishKeys(filter, std::span(keys).subspan(distinct / 2));
+
+        const auto stats = filter.StatsSnapshot();
+        ASSERT_EQ(filter.UsesBloom(), distinct > Cap) << distinct;
+        EXPECT_EQ(stats.ExactKeys, distinct > Cap ? 0 : Cap) << distinct;
+        if (distinct > Cap) {
+            EXPECT_EQ(stats.BloomFragmentBytes, FragmentBytes);
+            EXPECT_LT(stats.BloomBytes, FragmentBytes);
+            EXPECT_LE(static_cast<double>(stats.BloomSetBits),
+                static_cast<double>(stats.BloomBytes * 8) * TRuntimeFilter::PublishedBloomFill());
+        }
+        ExpectContainsAll(filter, keys);
+        EXPECT_LT(Kept(ProbeRuntimeFilter(filter, Hashes(100000, 64))), 1000u) << distinct;
+    }
+}
+
+TEST_F(RuntimeFilter, EmptyBuildRejectsEveryRow) {
+    TRuntimeFilter filter(Context_, /*maxKeys=*/8, /*bloomBytes=*/1u << 20);
+    filter.SetProducerCount(3);
+    for (int producer = 0; producer < 3; ++producer) {
+        filter.FinishProducer(filter.MakeBuilder().TakePartial());
+    }
+
+    ASSERT_TRUE(filter.Ready());
     EXPECT_FALSE(filter.UsesBloom());
-    EXPECT_TRUE(RuntimeFilterMayContain(filter, 1234567));
+    const auto stats = filter.StatsSnapshot();
+    EXPECT_FALSE(stats.BloomDisabled);
+    EXPECT_EQ(stats.ExactKeys, 0u);
+    EXPECT_EQ(stats.BloomBytes, 0u);
+    auto probes = Hashes(20000, 65);
+    probes.push_back(0);
+    EXPECT_EQ(Kept(ProbeRuntimeFilter(filter, probes)), 0u);
 }
 
 TEST_F(RuntimeFilter, RepeatedKeysDoNotConsumeTheCap) {
