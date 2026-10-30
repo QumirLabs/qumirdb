@@ -1,0 +1,7 @@
+{
+  "schema": "<struct (id i32) (abc <named Nullable [<named DECIMAL [38 4]>]>) (ab <named Nullable [<named DECIMAL [29 2]>]>)>",
+  "rows": [
+    [1, "27777777527777777752500.0000", "185185183518518518350.00"],
+    [2, "-253125.0000", "-1125.00"]
+  ]
+}

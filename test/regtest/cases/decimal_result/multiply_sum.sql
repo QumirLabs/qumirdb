@@ -1,0 +1,1 @@
+SELECT id % 2 AS g, sum(CAST(a AS DECIMAL(10,2)) * CAST(a AS DECIMAL(10,2))) AS s, sum(CAST(a AS DECIMAL(10,2)) * (1 - CAST(a AS DECIMAL(10,2)))) AS disc, avg(CAST(a AS DECIMAL(10,2)) * CAST(b AS DECIMAL(19,0))) AS m, count(*) AS n FROM t GROUP BY id % 2 ORDER BY g;

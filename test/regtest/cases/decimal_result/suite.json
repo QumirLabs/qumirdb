@@ -10,6 +10,10 @@
     "scale_zero.sql": {"order": "ordered"},
     "scale_large.sql": {"order": "ordered"},
     "wide.sql": {"order": "ordered"},
-    "multiply_scale_overflow.sql": {"expect_error": true, "variants": ["single", "threaded"]}
+    "multiply_scale_overflow.sql": {"expect_error": true, "variants": ["single", "threaded"]},
+    "multiply.sql": {"order": "ordered"},
+    "multiply_sum.sql": {"order": "ordered"},
+    "multiply_nested.sql": {"order": "ordered"},
+    "multiply_empty.sql": {"order": "ordered"}
   }
 }

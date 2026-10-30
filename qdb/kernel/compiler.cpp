@@ -174,7 +174,9 @@ constexpr const char* CacheSchemaVersion = "v1";
 // The row table moves to kernel/row_table.oz under row names.
 // The aggregate table gains the row layout; HashTable embeds it.
 // HashTable counts the rebuilds of the row layout for instrumentation.
-constexpr const char* KernelLibVersion = "57";
+// Decimal and i128 keys are aligned to 16 bytes in key layouts.
+// qumirdb.oz gains qdb_decimal_mul (decimal * decimal).
+constexpr const char* KernelLibVersion = "59";
 } // namespace
 
 NQumir::NCodeGen::TLlvmRunner::TLinkedModule CompileKernelAstCached(
