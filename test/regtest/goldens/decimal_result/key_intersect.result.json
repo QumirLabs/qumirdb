@@ -1,0 +1,7 @@
+{
+  "schema": "<struct (a <named DECIMAL [10 2]>) (k i32)>",
+  "rows": [
+    ["2.00", 2],
+    ["3.00", 3]
+  ]
+}

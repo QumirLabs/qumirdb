@@ -33,7 +33,7 @@ void CoerceSetOpBranches(
 // cannot share a key. Casts the narrower key of each join to the common integer or
 // decimal type (an integer against a decimal counts as DECIMAL(digits,0)) in a projection below
 // that side and re-points the key at the casted column. Run after AnnotateTypes, then
-// re-annotate.
-void CoerceJoinKeys(const TOperatorPtr& root);
+// re-annotate. A semi or anti join (INTERSECT, EXCEPT, IN) keeps its original output columns.
+void CoerceJoinKeys(TOperatorPtr& root);
 
 } // namespace NQdb

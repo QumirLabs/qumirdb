@@ -1,0 +1,2 @@
+Error: join key types DECIMAL(38,10) and DECIMAL(38,0) have no common DECIMAL type within 38 digits
+

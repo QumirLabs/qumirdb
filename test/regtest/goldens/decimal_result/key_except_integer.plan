@@ -1,0 +1,13 @@
+sort [id asc]
+└─ project (id) (rows≈2 cost≈4.4K)
+   └─ join left_anti [__join_key_0__ IS NOT DISTINCT FROM col0] (rows≈2 cost≈4.4K)
+      ├─ project (id, __join_key_0__) (rows≈5 cost≈140)
+      │  └─ project (id) (rows≈5 cost≈80)
+      │     └─ aggregate keys=[id] (rows≈5 cost≈60)
+      │        └─ project (id) (rows≈5 cost≈40)
+      │           └─ source t AS t (rows≈5 cost≈20)
+      └─ project (col0) (rows≈3 cost≈112)
+         └─ aggregate keys=[col0] (rows≈3 cost≈88)
+            └─ project (col0) (rows≈3 cost≈64)
+               └─ filter (> |t_1.id| 2) (rows≈3 cost≈40)
+                  └─ source t AS t_1 row-groups (> |t_1.id| 2) (rows≈5 cost≈20)

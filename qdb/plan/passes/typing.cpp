@@ -515,7 +515,8 @@ int32_t IntegerDecimalDigits(const TIntegerType& type) {
 // Type both join key sides are cast to so that equal values have equal bytes:
 // the common integer type, or for a decimal key (against a decimal or an integer)
 // the decimal with the larger scale and the larger integer part. nullptr when the
-// sides already share a type or no common key type exists.
+// sides already share a type or no common key type exists; throws when the common
+// decimal would need more than 38 digits, as a wrapping cast would equate unequal keys.
 TTypePtr CommonKeyType(const TTypePtr& left, const TTypePtr& right) {
     if (left->ToString() == right->ToString()) {
         return nullptr;
@@ -539,13 +540,17 @@ TTypePtr CommonKeyType(const TTypePtr& left, const TTypePtr& right) {
     const int32_t scale = std::max(leftSpec->Scale, rightSpec->Scale);
     const int32_t integerDigits = std::max(
         leftSpec->Precision - leftSpec->Scale, rightSpec->Precision - rightSpec->Scale);
-    return std::make_shared<TDecimal>(std::min(integerDigits + scale, MaxDecimalPrecision), scale);
+    if (integerDigits + scale > MaxDecimalPrecision) {
+        throw NQumir::TError("join key types " + left->ToString() + " and " + right->ToString() +
+            " have no common DECIMAL type within " + std::to_string(MaxDecimalPrecision) + " digits");
+    }
+    return std::make_shared<TDecimal>(integerDigits + scale, scale);
 }
 
 } // namespace
 
-void CoerceJoinKeys(const TOperatorPtr& root) {
-    for (const auto& input : root->Inputs()) {
+void CoerceJoinKeys(TOperatorPtr& root) {
+    for (auto& input : root->MutableInputs()) {
         CoerceJoinKeys(input);
     }
     auto join = TMaybeOp<TJoinOperator>(root);
@@ -553,6 +558,15 @@ void CoerceJoinKeys(const TOperatorPtr& root) {
         return;
     }
     size_t counter = 0;
+    // A semi or anti join outputs one input as is, so nothing above it drops a key
+    // alias added to that input (INTERSECT, EXCEPT); project the original columns back.
+    std::vector<TProjectionSpec> restored;
+    for (const auto& [name, _] : static_cast<TStructType*>(root->OutputColumns().get())->Fields) {
+        restored.push_back({
+            .Name = name,
+            .Expression = std::make_shared<TIdentExpr>(NQumir::TLocation{}, name),
+        });
+    }
     for (auto& key : join.Cast()->MutableKeys()) {
         const auto leftType = ColumnType(join.Cast()->Left(), key.Left);
         const auto rightType = ColumnType(join.Cast()->Right(), key.Right);
@@ -563,7 +577,7 @@ void CoerceJoinKeys(const TOperatorPtr& root) {
         if (!common) {
             continue;
         }
-        // A key wider than the common type is left alone; the narrower side widens.
+        // A side that already has the common type is left alone; the other side is cast.
         for (const bool isLeft : {true, false}) {
             const auto& sideType = isLeft ? leftType : rightType;
             if (UnwrapNullableType(sideType)->ToString() == common->ToString()) {
@@ -577,6 +591,19 @@ void CoerceJoinKeys(const TOperatorPtr& root) {
             side = AddCastedKey(side, column, target, alias);
             column = alias;
         }
+    }
+    if (counter == 0) {
+        return;
+    }
+    switch (join.Cast()->JoinType()) {
+        case EJoinType::LeftSemi:
+        case EJoinType::RightSemi:
+        case EJoinType::LeftAnti:
+        case EJoinType::RightAnti:
+            root = std::make_shared<TProjectOperator>(root, std::move(restored));
+            break;
+        default:
+            break;
     }
 }
 
