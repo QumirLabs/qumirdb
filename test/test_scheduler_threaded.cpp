@@ -6,7 +6,10 @@
 #include <qdb/scheduler/threaded_scheduler.h>
 
 #include <atomic>
+#include <map>
 #include <memory>
+#include <mutex>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -169,6 +172,33 @@ private:
     int Calls_ = 0;
 };
 
+// Records the context each worker thread passes to Execute.
+class TContextRecordingTask : public ITaskNode {
+public:
+    explicit TContextRecordingTask(int repeats)
+        : Remaining_(repeats)
+    {}
+
+    ETaskResult Execute(NQdb::TExecutionContext& context) override {
+        {
+            std::lock_guard lock(Mutex);
+            Seen[std::this_thread::get_id()].insert(&context);
+        }
+        std::this_thread::yield();
+        if (Remaining_ > 0) {
+            --Remaining_;
+            return ETaskResult::OK;
+        }
+        return ETaskResult::FINISHED;
+    }
+
+    std::mutex Mutex;
+    std::map<std::thread::id, std::set<const NQdb::TExecutionContext*>> Seen;
+
+private:
+    int Remaining_;
+};
+
 std::unique_ptr<TTaskGraph> MakeRepeatGraph(TRepeatTask*& task, int repeats) {
     auto graph = std::make_unique<TTaskGraph>();
     auto repeat = std::make_unique<TRepeatTask>(repeats);
@@ -233,6 +263,27 @@ TEST(SchedulerThreaded, StressProducerConsumerWakeups) {
     std::string error;
     ASSERT_TRUE(scheduler.Run(&error)) << error;
     EXPECT_EQ(sinkPtr->Consumed(), total);
+}
+
+// A task that migrates between workers gets the context of the worker that
+// runs it: one context per worker thread, never shared.
+TEST(SchedulerThreaded, EachWorkerPassesItsOwnContext) {
+    auto task = std::make_unique<TContextRecordingTask>(2000);
+    auto* taskPtr = task.get();
+
+    TTaskGraph graph;
+    graph.AddOwnedNode(std::move(task));
+    graph.Build();
+
+    TThreadedScheduler scheduler(graph, 4);
+    std::string error;
+    ASSERT_TRUE(scheduler.Run(&error)) << error;
+    std::set<const NQdb::TExecutionContext*> contexts;
+    for (const auto& [thread, seen] : taskPtr->Seen) {
+        EXPECT_EQ(seen.size(), 1u);
+        contexts.insert(seen.begin(), seen.end());
+    }
+    EXPECT_EQ(contexts.size(), taskPtr->Seen.size());
 }
 
 TEST(SchedulerThreaded, DoesNotExecuteSameTaskConcurrently) {
