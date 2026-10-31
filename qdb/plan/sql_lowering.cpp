@@ -120,9 +120,33 @@ bool IsStddevSupportedType(const NAst::TTypePtr& type) {
         NAst::TMaybeType<NAst::TFloatType>(value);
 }
 
-bool IsFloatType(const NAst::TTypePtr& type) {
-    return static_cast<bool>(
-        NAst::TMaybeType<NAst::TFloatType>(NAst::UnwrapNamedType(UnwrapNullableType(type))));
+bool IsFloatWidth(const NAst::TTypePtr& type, NAst::TFloatType::EKind kind) {
+    auto floating = NAst::TMaybeType<NAst::TFloatType>(
+        NAst::UnwrapNamedType(UnwrapNullableType(type)));
+    return floating && floating.Cast()->Kind == kind;
+}
+
+// sum, min and max of REAL are REAL, as in PostgreSQL: the reducers keep an f64 state,
+// which the expression above the aggregate or window narrows back.
+NAst::TExprPtr NarrowToReal(TLocation loc, NAst::TExprPtr expr) {
+    return std::make_shared<NAst::TCastExpr>(
+        std::move(loc), std::move(expr), std::make_shared<NAst::TFloatType>(NAst::TFloatType::F32));
+}
+
+bool IsRealArgument(const NAst::TExprPtr& arg, const NAst::TStructType* schema,
+    const NKernel::TAnnotationContext& context)
+{
+    NAst::TTypePtr type;
+    if (schema && !schema->Fields.empty()) {
+        try {
+            type = NKernel::AnnotateExprType(arg, *schema, &context);
+        } catch (const TError&) {
+            return false; // the aggregate reports its argument's typing error itself
+        }
+    } else if (auto cast = NAst::TMaybeNode<NAst::TCastExpr>(arg)) {
+        type = cast.Cast()->Type;
+    }
+    return IsFloatWidth(type, NAst::TFloatType::F32);
 }
 
 NSql::TSqlPtr<NSql::TSqlOrderItem> CloneSqlOrderItem(
@@ -720,7 +744,8 @@ std::expected<NAst::TExprPtr, TError> TAggCollector::EmitStddevSamp(const TAggCa
         return std::unexpected(type.error());
     }
 
-    const bool needsCast = *type && !IsFloatType(*type);
+    // A REAL argument is widened too, so its square does not round to REAL.
+    const bool needsCast = *type && !IsFloatWidth(*type, NAst::TFloatType::F64);
     auto valueArg = [&](TLocation argLoc) -> NAst::TExprPtr {
         auto arg = CloneExpr(agg.Arg);
         return needsCast ? CastF64(std::move(argLoc), std::move(arg)) : arg;
@@ -853,6 +878,11 @@ std::expected<NAst::TExprPtr, TError> TAggCollector::Emit(const TAggCall& agg, T
             loc, NAst::TOperator('/'), Ident(loc, sumName), std::move(count));
     }
 
+    if (arg && (agg.Func == "sum" || agg.Func == "min" || agg.Func == "max")
+        && IsRealArgument(arg, InputSchema_, Context_))
+    {
+        return NarrowToReal(loc, EmitPlain(agg.Func, std::move(arg), loc));
+    }
     return EmitPlain(agg.Func, std::move(arg), std::move(loc));
 }
 
@@ -1031,7 +1061,11 @@ std::expected<NAst::TExprPtr, TError> TWindowCollector::Emit(const NSql::TSqlPtr
     raw.Name = Names_.Next("w");
     raw.Signature = Signature(raw);
     auto loc = w->Location;
+    const bool realSum = func == "sum" && IsRealArgument(raw.Arg, InputSchema_, Context_);
     Raw_.push_back(std::move(raw));
+    if (realSum) {
+        return NarrowToReal(loc, Ident(loc, Raw_.back().Name));
+    }
     return Ident(loc, Raw_.back().Name);
 }
 

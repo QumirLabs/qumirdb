@@ -1,0 +1,4 @@
+sort [f asc, id asc]
+└─ project (id, f) (rows≈10 cost≈280)
+   └─ project (q.id, q.f) (rows≈10 cost≈200)
+      └─ source t AS t (rows≈10 cost≈120)

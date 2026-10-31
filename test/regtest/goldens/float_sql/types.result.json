@@ -1,0 +1,15 @@
+{
+  "schema": "<struct (id i32) (r <named Nullable [f32]>) (r4 <named Nullable [f32]>) (r24 <named Nullable [f32]>) (rc <named Nullable [f32]>) (f <named Nullable [f64]>) (f25 <named Nullable [f64]>) (f8 <named Nullable [f64]>) (dp <named Nullable [f64]>)>",
+  "rows": [
+    [1, 0.10000000000000001, 0.10000000000000001, 0.10000000000000001, 0.10000000000000001, 0.10000000000000001, 0.10000000000000001, 0.10000000000000001, 0.10000000000000001],
+    [2, 16777216, 16777216, 16777216, 16777216, 16777217, 16777217, 16777217, 16777217],
+    [3, {"$float":"-0"}, {"$float":"-0"}, {"$float":"-0"}, {"$float":"-0"}, {"$float":"-0"}, {"$float":"-0"}, {"$float":"-0"}, {"$float":"-0"}],
+    [4, 0, 0, 0, 0, 0, 0, 0, 0],
+    [5, {"$float":"nan"}, {"$float":"nan"}, {"$float":"nan"}, {"$float":"nan"}, {"$float":"nan"}, {"$float":"nan"}, {"$float":"nan"}, {"$float":"nan"}],
+    [6, {"$float":"+inf"}, {"$float":"+inf"}, {"$float":"+inf"}, {"$float":"+inf"}, {"$float":"+inf"}, {"$float":"+inf"}, {"$float":"+inf"}, {"$float":"+inf"}],
+    [7, {"$float":"-inf"}, {"$float":"-inf"}, {"$float":"-inf"}, {"$float":"-inf"}, {"$float":"-inf"}, {"$float":"-inf"}, {"$float":"-inf"}, {"$float":"-inf"}],
+    [8, null, null, null, null, null, null, null, null],
+    [9, 2.5, 2.5, 2.5, 2.5, 2.5, 2.5, 2.5, 2.5],
+    [10, -1.5, -1.5, -1.5, -1.5, -1.5, -1.5, -1.5, -1.5]
+  ]
+}

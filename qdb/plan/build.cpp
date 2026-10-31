@@ -2655,7 +2655,9 @@ std::expected<TRelation, TError> BuildSelect(
     // Shared by both the aggregated and non-aggregated paths. Their outputs are
     // helper columns.
     auto applyWindows = [&](const TRelation& n) -> std::expected<TRelation, TError> {
-        TWindowCollector windows(names);
+        auto windowInput = NAst::TMaybeType<NAst::TStructType>(n.Plan->OutputColumns());
+        TWindowCollector windows(
+            names, windowInput ? windowInput.Cast().get() : nullptr, context.Annotation);
         for (auto& projection : projections) {
             auto rewritten = windows.Rewrite(projection.Expression);
             if (!rewritten) {

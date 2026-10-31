@@ -1,0 +1,1 @@
+SELECT CAST(d AS FLOAT(54)) AS f FROM t;

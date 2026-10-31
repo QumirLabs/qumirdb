@@ -158,6 +158,17 @@ TEST(ConstFold, FoldsDoubleRemainderWithTheModule) {
     EXPECT_DOUBLE_EQ(folded.Cast()->FloatValue, 1.5);
 }
 
+// A REAL result stays a REAL literal with its exact value: the text form would
+// make it a DOUBLE rounded to 15 decimals.
+TEST(ConstFold, KeepsRealResultAsRealLiteral) {
+    auto folded = TMaybeNode<TNumberExpr>(Fold(Parse("(+ (cast 0.1 f32) (cast 0.2 f32))")));
+    ASSERT_TRUE(folded);
+    auto type = TMaybeType<TFloatType>(folded.Cast()->Type);
+    ASSERT_TRUE(type);
+    EXPECT_EQ(type.Cast()->Kind, TFloatType::F32);
+    EXPECT_EQ(folded.Cast()->FloatValue, static_cast<double>(0.1f + 0.2f));
+}
+
 // The estimates of a query read the same constants for every plan the join
 // order search considers; the query's folder folds each of them once.
 TEST(ConstFold, FoldsEachNumberOnce) {

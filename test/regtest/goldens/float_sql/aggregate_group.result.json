@@ -1,0 +1,7 @@
+{
+  "schema": "<struct (grp i32) (s <named Nullable [f32]>) (a <named Nullable [f64]>) (lo <named Nullable [f32]>) (hi <named Nullable [f32]>)>",
+  "rows": [
+    [0, 0.5, 0.125, -2, 2.5],
+    [1, 5, 1.25, 0.25, 2.5]
+  ]
+}

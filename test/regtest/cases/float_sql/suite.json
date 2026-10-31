@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "fixtures": {
+    "values": {"json": "tables/t.json", "parquet": {"row_group_rows": 3}}
+  },
+  "tables": {"t": "values"},
+  "variants": ["single", "threaded", "js"],
+  "cases": {
+    "types.sql": {"order": "ordered"},
+    "float_precision_error.sql": {"execute": false, "expect_error": true},
+    "arithmetic.sql": {"order": "ordered"},
+    "compare.sql": {"order": "ordered"},
+    "in_list.sql": {"order": "ordered"},
+    "branches.sql": {"order": "ordered"},
+    "group.sql": {"order": "ordered"},
+    "distinct.sql": {"order": "ordered"},
+    "join.sql": {"order": "ordered"},
+    "order_asc.sql": {"order": "ordered"},
+    "order_desc.sql": {"order": "ordered"},
+    "aggregate.sql": {"order": "ordered"},
+    "aggregate_group.sql": {"order": "ordered"},
+    "window.sql": {"order": "ordered"},
+    "union_int.sql": {"order": "ordered"},
+    "union_double.sql": {"order": "ordered"}
+  }
+}

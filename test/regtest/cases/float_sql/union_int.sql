@@ -1,0 +1,5 @@
+-- REAL with INTEGER is REAL: 16777217 becomes 16777216.
+SELECT id, f AS v FROM (SELECT id, CAST(d AS REAL) AS f FROM t) q WHERE id < 4
+UNION ALL
+SELECT id + 10, k FROM t WHERE id < 4
+ORDER BY id;

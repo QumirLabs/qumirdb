@@ -169,9 +169,19 @@ class TWindowCollector {
     };
 
 public:
-    explicit TWindowCollector(TFreshNames& names)
+    TWindowCollector(
+        TFreshNames& names,
+        const NQumir::NAst::TStructType* inputSchema,
+        const NKernel::TAnnotationContext& context)
         : Names_(names)
+        , InputSchema_(inputSchema)
+        , Context_(context)
     { }
+    // The collector keeps a reference to the context.
+    TWindowCollector(
+        TFreshNames& names,
+        const NQumir::NAst::TStructType* inputSchema,
+        const NKernel::TAnnotationContext&& context) = delete;
 
     std::expected<NQumir::NAst::TExprPtr, NQumir::TError> Rewrite(NQumir::NAst::TExprPtr expr);
 
@@ -186,6 +196,8 @@ private:
 
     std::vector<TRaw> Raw_;
     TFreshNames& Names_;
+    const NQumir::NAst::TStructType* InputSchema_ = nullptr;
+    const NKernel::TAnnotationContext& Context_;
 };
 
 // A plain column keeps its name; an expression is materialized into a synthetic

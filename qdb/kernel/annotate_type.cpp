@@ -546,6 +546,21 @@ TTypePtr Propagate(std::initializer_list<TTypePtr> operands, const TTypePtr& R) 
 
 bool IsInt(const TTypePtr& t) { return static_cast<bool>(TMaybeType<TIntegerType>(t)); }
 bool IsFloat(const TTypePtr& t) { return static_cast<bool>(TMaybeType<TFloatType>(t)); }
+bool IsReal(const TTypePtr& t) {
+    auto floating = TMaybeType<TFloatType>(t);
+    return floating && floating.Cast()->Kind == TFloatType::F32;
+}
+
+// One operand REAL and the other another number (value types). PostgreSQL has REAL
+// operators only for two REAL operands and widens REAL to DOUBLE PRECISION otherwise.
+bool MixesReal(const TTypePtr& a, const TTypePtr& b) {
+    auto isNumber = [](const TTypePtr& t) {
+        return t && (DecimalSpecOfValueType(t) || IsInt(UnwrapNamedType(t))
+            || IsFloat(UnwrapNamedType(t)));
+    };
+    return isNumber(a) && isNumber(b) && IsReal(UnwrapNamedType(a)) != IsReal(UnwrapNamedType(b));
+}
+
 // Whether `e` is an integer literal whose value `type` can represent (Qumir's
 // IntegerLiteralFits). Such a literal adopts the other operand's integer type; one that
 // does not fit keeps i64 and widens the operation.
@@ -586,11 +601,17 @@ TTypePtr NumericPreservingUnaryCall(
 }
 
 // Mirrors qumir NTypeAnnotation::CommonNumericType + WideningIntOK for the types qdb sees
-// (all ints signed). Float dominates; two ints widen to the wider. TODO(reuse): call
-// qumir's own BinaryNumericResultType once it is exposed (see NULL_PROPAGATION_PASS_PLAN.md).
+// (all ints signed): two floats give the wider, a float with an integer the float, two ints
+// the wider. TODO(reuse): call qumir's own BinaryNumericResultType once it is exposed (see
+// NULL_PROPAGATION_PASS_PLAN.md).
 TTypePtr CommonNumeric(const TTypePtr& a, const TTypePtr& b) {
-    if (IsFloat(a) || IsFloat(b)) {
-        return std::make_shared<TFloatType>();
+    auto af = TMaybeType<TFloatType>(a);
+    auto bf = TMaybeType<TFloatType>(b);
+    if (af && bf) {
+        return af.Cast()->BitWidth() >= bf.Cast()->BitWidth() ? a : b;
+    }
+    if (af || bf) {
+        return af ? a : b;
     }
     auto ai = TMaybeType<TIntegerType>(a);
     auto bi = TMaybeType<TIntegerType>(b);
@@ -656,7 +677,9 @@ std::optional<TDecimalLiteral> DecimalLiteralOf(const TExprPtr& e) {
         inner = un.Cast()->Operand;
     }
     auto num = TMaybeNode<TNumberExpr>(inner);
-    if (!num || !num.Cast()->IsFloat() || !std::isfinite(num.Cast()->FloatValue)) {
+    if (!num || !num.Cast()->IsFloat() || IsReal(num.Cast()->Type)
+        || !std::isfinite(num.Cast()->FloatValue))
+    {
         return std::nullopt;
     }
     char buf[400];
@@ -730,12 +753,13 @@ bool IsDecimalBesideFloat(const std::optional<TDecimalSpec>& dl, const std::opti
     return (dl && !dr && IsFloat(UnwrapNamedType(vr))) || (dr && !dl && IsFloat(UnwrapNamedType(vl)));
 }
 
+// A typed REAL literal (a folded constant) is a value, not a literal the query wrote.
 bool IsFloatLiteral(TExprPtr e) {
     if (auto un = TMaybeNode<TUnaryExpr>(e); un && un.Cast()->Operator == "-") {
         e = un.Cast()->Operand;
     }
     auto num = TMaybeNode<TNumberExpr>(e);
-    return num && num.Cast()->IsFloat();
+    return num && num.Cast()->IsFloat() && !IsReal(num.Cast()->Type);
 }
 
 // IsDecimalBesideFloat for a binary operation. A float literal is a constant, not an
@@ -838,11 +862,54 @@ TTypePtr DecimalBinaryValueType(TOperator op, const TExprPtr& le, const TExprPtr
     ThrowDecimalUnsupported(op, "operator is not implemented for decimal values");
 }
 
+TTypePtr InferType(const TExprPtr& e, const TStructType& schema);
+
+// Whether PostgreSQL converts the value to REAL in a common type (CASE, COALESCE, IN list):
+// a NULL, an integer, a decimal, a REAL, a fractional literal (qdb types it DOUBLE,
+// PostgreSQL NUMERIC), or a CASE of such values. Without the schema only literals are told.
+bool AbsorbedByReal(const TExprPtr& e, const TStructType* schema) {
+    if (!e || IsNullLiteral(e) || IsFloatLiteral(e)) {
+        return true;
+    }
+    if (!schema) {
+        return false;
+    }
+    if (auto ifp = TMaybeNode<TIfExpr>(e)) {
+        return AbsorbedByReal(ifp.Cast()->Then, schema) && AbsorbedByReal(ifp.Cast()->Else, schema);
+    }
+    const TTypePtr value = ValueType(InferType(e, *schema));
+    return !value || DecimalSpecOfValueType(value) || IsInt(UnwrapNamedType(value))
+        || IsReal(UnwrapNamedType(value));
+}
+
+// PostgreSQL's common type of REAL with values it converts to REAL is REAL.
+bool IsRealCommonType(const std::vector<TTypePtr>& types, const std::vector<TExprPtr>& exprs,
+    const TStructType* schema)
+{
+    bool real = false;
+    for (size_t i = 0; i < types.size(); ++i) {
+        const TTypePtr value = ValueType(types[i]);
+        if (!value) {
+            continue;
+        }
+        const bool isReal = IsReal(UnwrapNamedType(value));
+        real = real || isReal;
+        if (!isReal && !DecimalSpecOfValueType(value) && !IsInt(UnwrapNamedType(value))
+            && !AbsorbedByReal(exprs[i], schema))
+        {
+            return false;
+        }
+    }
+    return real;
+}
+
 // Common value type of two CASE/`if` branches (SQL branch unification): numeric promotion
 // (i32 then, i64 else -> i64), otherwise assume the branches already agree. The branch
-// expressions, when given, tell an integer literal beside a decimal (IntegerDecimalSpec).
+// expressions, when given, tell an integer literal beside a decimal (IntegerDecimalSpec)
+// and a value REAL absorbs (AbsorbedByReal, which sees CASE chains with the schema).
 TTypePtr UnifyBranchTypes(const TTypePtr& a, const TTypePtr& b,
-    const TExprPtr& ea = nullptr, const TExprPtr& eb = nullptr)
+    const TExprPtr& ea = nullptr, const TExprPtr& eb = nullptr,
+    const TStructType* schema = nullptr)
 {
     if (!a) return b ? UnwrapNullableType(b) : nullptr;
     if (!b) return UnwrapNullableType(a);
@@ -850,8 +917,9 @@ TTypePtr UnifyBranchTypes(const TTypePtr& a, const TTypePtr& b,
     auto da = DecimalSpecOfValueType(va);
     auto db = DecimalSpecOfValueType(vb);
     if (da || db) {
+        // The float keeps its width: REAL absorbs NUMERIC, as in PostgreSQL.
         if (IsDecimalBesideFloat(da, db, va, vb)) {
-            return std::make_shared<TFloatType>();
+            return UnwrapNamedType(da ? vb : va);
         }
         if (!da && IsInt(va)) {
             da = IntegerDecimalSpec(ea, va);
@@ -872,6 +940,12 @@ TTypePtr UnifyBranchTypes(const TTypePtr& a, const TTypePtr& b,
         return MakeDecimalType(da ? *da : *db);
     }
     if ((IsInt(va) || IsFloat(va)) && (IsInt(vb) || IsFloat(vb))) {
+        if (IsReal(va) && AbsorbedByReal(eb, schema)) {
+            return va;
+        }
+        if (IsReal(vb) && AbsorbedByReal(ea, schema)) {
+            return vb;
+        }
         return CommonNumeric(va, vb);
     }
     return va;
@@ -881,8 +955,15 @@ TTypePtr UnifyBranchTypes(const TTypePtr& a, const TTypePtr& b,
 // nullable (a bare NULL arg is ignored). Non-nullable arg => the whole COALESCE is
 // non-nullable (it is guaranteed to return that arg's value at worst).
 std::pair<TTypePtr, bool> CoalesceValueType(const std::vector<TTypePtr>& argTypes,
-    const std::vector<TExprPtr>& args)
+    const std::vector<TExprPtr>& args, const TStructType* schema = nullptr)
 {
+    if (IsRealCommonType(argTypes, args, schema)) {
+        bool allNullable = true;
+        for (const auto& t : argTypes) {
+            allNullable = allNullable && (!t || IsNullableType(t));
+        }
+        return {std::make_shared<TFloatType>(TFloatType::F32), allNullable};
+    }
     TTypePtr v = nullptr;
     TExprPtr first;
     bool allNullable = true;
@@ -902,9 +983,9 @@ std::pair<TTypePtr, bool> CoalesceValueType(const std::vector<TTypePtr>& argType
 }
 
 // The plain (non-null-propagated) result value type of a binary op, matching qumir's
-// AnnotateBinary: `/` -> float, `+ - * %`/bitwise -> CommonNumeric, comparisons/logical
-// -> bool. An integer-literal operand adopts the other operand's int type when its value
-// fits it (qumir's RetypeIntegerLiteralOperands).
+// AnnotateBinary: `/` -> a float (the common one, else DOUBLE), `+ - * %`/bitwise ->
+// CommonNumeric, comparisons/logical -> bool. An integer-literal operand adopts the other
+// operand's int type when its value fits it (qumir's RetypeIntegerLiteralOperands).
 TTypePtr BinaryValueType(TOperator op, const TExprPtr& le, const TExprPtr& re,
     const TTypePtr& lt, const TTypePtr& rt)
 {
@@ -923,8 +1004,13 @@ TTypePtr BinaryValueType(TOperator op, const TExprPtr& le, const TExprPtr& re,
         if (IntLiteralFits(re, vl)) vr = vl;
         else if (IntLiteralFits(le, vr)) vl = vr;
     }
+    // REAL beside another number computes in DOUBLE PRECISION (CoerceRealOperands).
+    if (MixesReal(vl, vr)) {
+        return std::make_shared<TFloatType>(TFloatType::F64);
+    }
     if (op == "/") {
-        return std::make_shared<TFloatType>();
+        auto common = CommonNumeric(vl, vr);
+        return IsFloat(common) ? common : std::make_shared<TFloatType>();
     }
     return CommonNumeric(vl, vr);
 }
@@ -1032,7 +1118,7 @@ TTypePtr InferType(const TExprPtr& e, const TStructType& schema) {
             return std::make_shared<TBoolType>(); // non-null bool regardless of args
         }
         if (name == "coalesce") {
-            auto [v, allNullable] = CoalesceValueType(at, node->Args);
+            auto [v, allNullable] = CoalesceValueType(at, node->Args, &schema);
             if (!v) return nullptr;
             return allNullable
                 ? std::static_pointer_cast<TType>(std::make_shared<TNullable>(v)) : v;
@@ -1076,7 +1162,7 @@ TTypePtr InferType(const TExprPtr& e, const TStructType& schema) {
         InferType(node->Cond, schema);
         TTypePtr tt = InferType(node->Then, schema);
         TTypePtr et = node->Else ? InferType(node->Else, schema) : nullptr;
-        TTypePtr base = UnifyBranchTypes(tt, et, node->Then, node->Else);
+        TTypePtr base = UnifyBranchTypes(tt, et, node->Then, node->Else, &schema);
         if (!base) {
             return nullptr;
         }
@@ -1824,15 +1910,19 @@ TDecimalSpec Wide(const TDecimalSpec& spec) {
     return {.Precision = MaxDecimalPrecision, .Scale = spec.Scale};
 }
 
-// The expression as a DOUBLE: a decimal is converted like CAST(... AS DOUBLE), anything else
-// already is one or is converted by the caller's cast.
-TExprPtr DecimalValueAsDouble(TExprPtr expr, const TTypePtr& type, TLocation loc) {
-    if (auto converted = ApplyDecimalCastRule(ValueType(type), std::make_shared<TFloatType>(),
-            expr, loc))
-    {
+// The expression as the float `target`: a decimal is converted like CAST(... AS target),
+// anything else already is one or is converted by the caller's cast.
+TExprPtr DecimalValueAsFloat(TExprPtr expr, const TTypePtr& type, const TTypePtr& target,
+    TLocation loc)
+{
+    if (auto converted = ApplyDecimalCastRule(ValueType(type), target, expr, loc)) {
         return converted;
     }
     return expr;
+}
+
+TExprPtr DecimalValueAsDouble(TExprPtr expr, const TTypePtr& type, TLocation loc) {
+    return DecimalValueAsFloat(std::move(expr), type, std::make_shared<TFloatType>(), loc);
 }
 
 TTypePtr ExpandDecimalNode(TExprPtr& e, const TStructType& inputType, TTypeEnv& env);
@@ -1917,9 +2007,9 @@ TTypePtr ExpandDecimalNode(TExprPtr& e, const TStructType& inputType, TTypeEnv& 
                 node->Else = DecimalValueAs(node->Else, elseT, *decimal, node->Location);
             }
         } else if (result && IsFloat(result)) {
-            node->Then = DecimalValueAsDouble(node->Then, thenT, node->Location);
+            node->Then = DecimalValueAsFloat(node->Then, thenT, result, node->Location);
             if (node->Else) {
-                node->Else = DecimalValueAsDouble(node->Else, elseT, node->Location);
+                node->Else = DecimalValueAsFloat(node->Else, elseT, result, node->Location);
             }
         }
         bool nullable = !thenT || !elseT || IsNullableType(thenT) || IsNullableType(elseT);
@@ -2358,6 +2448,145 @@ bool ContainsDecimalTypeRef(const TExprPtr& e) {
     return false;
 }
 
+// Whether the expression reads a REAL value: a REAL column, a cast to REAL, a REAL literal.
+bool InvolvesReal(const TExprPtr& e, const TStructType& inputType) {
+    if (!e) {
+        return false;
+    }
+    if (auto id = TMaybeNode<TIdentExpr>(e)) {
+        for (const auto& [name, type] : inputType.Fields) {
+            if (name == id.Cast()->Name) {
+                return IsReal(UnwrapNamedType(ValueType(type)));
+            }
+        }
+        return false;
+    }
+    if (TMaybeNode<TCastExpr>(e) || TMaybeNode<TNumberExpr>(e)) {
+        if (IsReal(UnwrapNamedType(ValueType(FromQumirType(e->Type))))) {
+            return true;
+        }
+    }
+    for (const auto& child : e->Children()) {
+        if (InvolvesReal(child, inputType)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ReadsColumn(const TExprPtr& e, const TStructType& inputType) {
+    if (auto id = TMaybeNode<TIdentExpr>(e)) {
+        for (const auto& [name, _] : inputType.Fields) {
+            if (name == id.Cast()->Name) {
+                return true;
+            }
+        }
+    }
+    for (const auto& child : e->Children()) {
+        if (child && ReadsColumn(child, inputType)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+TExprPtr CastTo(TExprPtr e, TFloatType::EKind kind) {
+    auto loc = e->Location;
+    return std::make_shared<TCastExpr>(loc, std::move(e), std::make_shared<TFloatType>(kind));
+}
+
+// Qumir computes a float beside an integer or a float literal at the float's width; the
+// planner types REAL as PostgreSQL does. Writes the casts that make the kernel compute the
+// planner's types: a REAL operand beside another number is widened (BinaryValueType), and a
+// CASE branch, a COALESCE argument or an IN-list constant that REAL absorbs is narrowed.
+void CoerceRealOperands(TExprPtr& e, const TStructType& inputType) {
+    for (auto* child : e->MutableChildren()) {
+        if (*child) {
+            CoerceRealOperands(*child, inputType);
+        }
+    }
+    auto typeOf = [&](const TExprPtr& operand) {
+        return operand ? ValueType(InferType(operand, inputType)) : nullptr;
+    };
+    auto narrow = [&](TExprPtr& operand) {
+        const auto type = typeOf(operand);
+        if (type && !IsReal(UnwrapNamedType(type))) {
+            operand = CastTo(operand, TFloatType::F32);
+        }
+    };
+    if (auto bin = TMaybeNode<TBinaryExpr>(e); bin && !IsLogical(bin.Cast()->Operator)) {
+        auto node = bin.Cast();
+        const auto lt = typeOf(node->Left);
+        if (MixesReal(lt, typeOf(node->Right))) {
+            auto& real = IsReal(UnwrapNamedType(lt)) ? node->Left : node->Right;
+            real = CastTo(real, TFloatType::F64);
+        }
+        return;
+    }
+    if (auto ifp = TMaybeNode<TIfExpr>(e)) {
+        auto node = ifp.Cast();
+        const auto value = UnifyBranchTypes(typeOf(node->Then), typeOf(node->Else),
+            node->Then, node->Else, &inputType);
+        if (IsReal(UnwrapNamedType(ValueType(value)))) {
+            narrow(node->Then);
+            if (node->Else) {
+                narrow(node->Else);
+            }
+        }
+        return;
+    }
+    auto call = TMaybeNode<TCallExpr>(e);
+    if (!call) {
+        return;
+    }
+    auto callee = TMaybeNode<TIdentExpr>(call.Cast()->Callee);
+    if (!callee) {
+        return;
+    }
+    auto& args = call.Cast()->Args;
+    if (callee.Cast()->Name == "coalesce") {
+        std::vector<TTypePtr> types;
+        for (const auto& arg : args) {
+            types.push_back(typeOf(arg));
+        }
+        if (IsRealCommonType(types, args, &inputType)) {
+            for (auto& arg : args) {
+                narrow(arg);
+            }
+        }
+        return;
+    }
+    if (callee.Cast()->Name != "qdb_in_list" || args.size() < 2) {
+        return;
+    }
+    // PostgreSQL compares a list of two or more constants in the common type of the list
+    // and its left operand; every other item is a separate `=`.
+    const auto lhs = typeOf(args[0]);
+    std::vector<TExprPtr*> constants;
+    std::vector<TTypePtr> types{lhs};
+    std::vector<TExprPtr> exprs{args[0]};
+    for (size_t i = 1; i < args.size(); ++i) {
+        if (!ReadsColumn(args[i], inputType)) {
+            constants.push_back(&args[i]);
+            types.push_back(typeOf(args[i]));
+            exprs.push_back(args[i]);
+        }
+    }
+    if (lhs && IsReal(UnwrapNamedType(lhs)) && constants.size() >= 2
+        && IsRealCommonType(types, exprs, &inputType))
+    {
+        for (auto* item : constants) {
+            narrow(*item);
+        }
+    }
+    // The item of a mixed `=` is cast to DOUBLE, which widens a REAL left operand too.
+    for (size_t i = 1; i < args.size(); ++i) {
+        if (MixesReal(lhs, typeOf(args[i]))) {
+            args[i] = CastTo(args[i], TFloatType::F64);
+        }
+    }
+}
+
 bool SchemaHasDecimal(const TStructType& inputType) {
     for (const auto& [_, type] : inputType.Fields) {
         if (IsDecimalType(type)) {
@@ -2403,7 +2632,12 @@ std::pair<TExprPtr, TTypePtr> ExpandKernelExpr(const TExprPtr& expr,
     const TExternalCatalogSnapshot* externalCatalog)
 {
     TExternalCatalogScope scope(externalCatalog);
-    auto nullable = ExpandNullable(expr, inputType, externalCatalog);
+    TExprPtr coerced = expr;
+    if (InvolvesReal(expr, inputType)) {
+        coerced = CloneExpr(expr);
+        CoerceRealOperands(coerced, inputType);
+    }
+    auto nullable = ExpandNullable(coerced, inputType, externalCatalog);
     if (!SchemaHasDecimal(inputType) && !ContainsDecimalTypeRef(nullable.first)) {
         return nullable;
     }

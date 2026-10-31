@@ -1,0 +1,4 @@
+sort [id asc]
+└─ project (id, real_real, real_div, neg, real_int, real_int_col, real_double, real_div_int, real_lit, real_decimal) (rows≈10 cost≈1.2K)
+   └─ project (q.id, q.f, q.g, q.d, q.k, q.x) (rows≈10 cost≈560)
+      └─ source t AS t (rows≈10 cost≈240)

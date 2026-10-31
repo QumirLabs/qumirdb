@@ -1,0 +1,1 @@
+SELECT id, f FROM (SELECT id, CAST(d AS REAL) AS f FROM t) q ORDER BY f, id;

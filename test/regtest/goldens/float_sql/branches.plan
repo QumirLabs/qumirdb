@@ -1,0 +1,4 @@
+sort [id asc]
+└─ project (id, lit_branch, chain, double_branch, decimal_branch, co_int, co_lit, co_lit_first, co_double, co_decimal) (rows≈10 cost≈1K)
+   └─ project (q.id, q.f, q.d, q.k, q.x) (rows≈10 cost≈520)
+      └─ source t AS t (rows≈10 cost≈240)

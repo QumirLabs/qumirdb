@@ -1,0 +1,6 @@
+{
+  "schema": "<struct (distinct_f i64) (c i64)>",
+  "rows": [
+    ["8", "9"]
+  ]
+}
