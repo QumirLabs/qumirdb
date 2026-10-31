@@ -8,9 +8,9 @@
 namespace {
 
 // Calls move(first, last, kept) for every maximal run of selected rows, where
-// `kept` is the number of rows kept before the run. Returns the total kept.
+// `kept` is the number of rows kept before the run.
 template <class F>
-int64_t ForEachRun(const uint8_t* sel, int64_t rows, F&& move) {
+void ForEachRun(const uint8_t* sel, int64_t rows, F&& move) {
     int64_t kept = 0;
     int64_t i = 0;
     while (i < rows) {
@@ -26,12 +26,11 @@ int64_t ForEachRun(const uint8_t* sel, int64_t rows, F&& move) {
         kept += j - i;
         i = j;
     }
-    return kept;
 }
 
 template <class TOffset>
-int64_t CompactStrings(TOffset* offsets, char* chars, const uint8_t* sel, int64_t rows) {
-    return ForEachRun(sel, rows, [&](int64_t first, int64_t last, int64_t kept) {
+void CompactStrings(TOffset* offsets, char* chars, const uint8_t* sel, int64_t rows) {
+    ForEachRun(sel, rows, [&](int64_t first, int64_t last, int64_t kept) {
         if (kept == first) {
             return;
         }
@@ -54,17 +53,17 @@ void SetBit(uint8_t* bits, int64_t i, bool value) {
     bits[i / 8] = value ? (bits[i / 8] | m) : (bits[i / 8] & ~m);
 }
 
-int64_t CompactFixed(void* data, int64_t width, const uint8_t* sel, int64_t rows) {
+void CompactFixed(void* data, int64_t width, const uint8_t* sel, int64_t rows) {
     auto* bytes = static_cast<char*>(data);
-    return ForEachRun(sel, rows, [&](int64_t first, int64_t last, int64_t kept) {
+    ForEachRun(sel, rows, [&](int64_t first, int64_t last, int64_t kept) {
         if (kept != first) {
             std::memmove(bytes + kept * width, bytes + first * width, static_cast<size_t>((last - first) * width));
         }
     });
 }
 
-int64_t CompactBits(uint8_t* bits, int64_t bitOffset, const uint8_t* sel, int64_t rows) {
-    return ForEachRun(sel, rows, [&](int64_t first, int64_t last, int64_t kept) {
+void CompactBits(uint8_t* bits, int64_t bitOffset, const uint8_t* sel, int64_t rows) {
+    ForEachRun(sel, rows, [&](int64_t first, int64_t last, int64_t kept) {
         if (kept == first) {
             return;
         }
@@ -74,30 +73,48 @@ int64_t CompactBits(uint8_t* bits, int64_t bitOffset, const uint8_t* sel, int64_
     });
 }
 
-int64_t CompactStringColumn(const NQdb::TColumn& col, const uint8_t* sel, int64_t rows) {
-    switch (col.OffsetWidth) {
-    case 4:
-        return CompactStrings(static_cast<int32_t*>(col.Offsets), col.Data, sel, rows);
-    case 8:
-        return CompactStrings(static_cast<int64_t*>(col.Offsets), col.Data, sel, rows);
-    default:
-        throw NQumir::TError("unsupported string offset width " + std::to_string(col.OffsetWidth));
+// OffsetWidth is 4 or 8 here: CompactRowSet validated it.
+void CompactStringColumn(const NQdb::TColumn& col, const uint8_t* sel, int64_t rows) {
+    if (col.OffsetWidth == 4) {
+        CompactStrings(static_cast<int32_t*>(col.Offsets), col.Data, sel, rows);
+    } else {
+        CompactStrings(static_cast<int64_t*>(col.Offsets), col.Data, sel, rows);
     }
+}
+
+bool IsFixedWidth(int32_t w) {
+    return w == 1 || w == 2 || w == 4 || w == 8 || w == 16;
 }
 
 } // namespace
 
 namespace NQdb {
 
-int64_t CompactRowSet(TRowSet& rowSet, std::span<const int32_t> valueWidths) {
+int64_t CompactRowSet(TRowSet& rowSet, std::span<const TValueLayout> layouts) {
     if (!rowSet.Selection) {
         return rowSet.RowCount;
     }
     if (rowSet.RefCount != 1) {
         throw NQumir::TError("cannot compact a shared row set in place");
     }
-    if (static_cast<int64_t>(valueWidths.size()) != rowSet.ColumnCount) {
-        throw NQumir::TError("compaction needs one value width per column");
+    if (static_cast<int64_t>(layouts.size()) != rowSet.ColumnCount) {
+        throw NQumir::TError("compaction needs one value layout per column");
+    }
+    // Validate everything first: compaction must not leave a half-moved row set.
+    for (int64_t c = 0; c < rowSet.ColumnCount; ++c) {
+        const TColumn& col = rowSet.Columns[c];
+        const TValueLayout& layout = layouts[c];
+        if (col.Offsets) {
+            if (col.OffsetWidth != 4 && col.OffsetWidth != 8) {
+                throw NQumir::TError("unsupported string offset width " + std::to_string(col.OffsetWidth));
+            }
+        } else if (layout.Bitmap) {
+            if (layout.Width != 0) {
+                throw NQumir::TError("bitmap column must have width 0");
+            }
+        } else if (!IsFixedWidth(layout.Width)) {
+            throw NQumir::TError("unsupported value width " + std::to_string(layout.Width));
+        }
     }
     const uint8_t* sel = rowSet.Selection;
     const int64_t rows = rowSet.RowCount;
@@ -109,10 +126,10 @@ int64_t CompactRowSet(TRowSet& rowSet, std::span<const int32_t> valueWidths) {
         TColumn& col = rowSet.Columns[c];
         if (col.Offsets) {
             CompactStringColumn(col, sel, rows);
-        } else if (valueWidths[c] == 0) {
+        } else if (layouts[c].Bitmap) {
             CompactBits(reinterpret_cast<uint8_t*>(col.Data), col.DataBitOffset, sel, rows);
         } else {
-            CompactFixed(col.Data, valueWidths[c], sel, rows);
+            CompactFixed(col.Data, layouts[c].Width, sel, rows);
         }
         if (col.Mask) {
             CompactBits(const_cast<uint8_t*>(col.Mask), col.MaskBitOffset, sel, rows);

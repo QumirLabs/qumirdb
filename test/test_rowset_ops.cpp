@@ -6,6 +6,7 @@
 
 #include <cstring>
 #include <random>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -68,7 +69,7 @@ public:
                 col.Offsets = nullptr;
             }
             Views_.push_back(col);
-            Widths_.push_back(c.Kind == EKind::Bool ? 0 : c.Width);
+            Layouts_.push_back(c.Kind == EKind::Bool ? TValueLayout{0, true} : TValueLayout{c.Width, false});
         }
         RowSet_ = TRowSet{};
         RowSet_.Columns = Views_.data();
@@ -136,7 +137,7 @@ public:
     }
 
     TRowSet& RowSet() { return RowSet_; }
-    const std::vector<int32_t>& Widths() const { return Widths_; }
+    const std::vector<TValueLayout>& Layouts() const { return Layouts_; }
     const std::vector<TTestColumn>& Columns() const { return Columns_; }
     const std::vector<uint64_t>& Hash() const { return Hash_; }
 
@@ -200,10 +201,24 @@ private:
     std::mt19937 Rng_;
     std::vector<TTestColumn> Columns_;
     std::vector<TColumn> Views_;
-    std::vector<int32_t> Widths_;
+    std::vector<TValueLayout> Layouts_;
     std::vector<uint64_t> Hash_;
     TRowSet RowSet_;
 };
+
+// Bits outside [offset, offset + rows) are not ours and must be unchanged; the
+// range itself is checked row by row (its tail past `kept` is unspecified).
+void ExpectBitPadding(const std::vector<uint8_t>& before, const std::vector<uint8_t>& after,
+                      int64_t offset, int64_t rows, const std::string& what)
+{
+    ASSERT_EQ(before.size(), after.size());
+    for (int64_t i = 0; i < static_cast<int64_t>(before.size()) * 8; ++i) {
+        if (i >= offset && i < offset + rows) {
+            continue;
+        }
+        ASSERT_EQ(Bit(after.data(), i), Bit(before.data(), i)) << what << " bit " << i;
+    }
+}
 
 void CheckCompaction(std::vector<EKind> kinds, int64_t rows, bool nullable, bool withHash, const std::string& pattern, uint32_t seed) {
     SCOPED_TRACE(pattern + " rows=" + std::to_string(rows) + " seed=" + std::to_string(seed));
@@ -211,9 +226,10 @@ void CheckCompaction(std::vector<EKind> kinds, int64_t rows, bool nullable, bool
     auto sel = fx.MakeSelection(pattern);
     const auto expected = fx.Expected(sel);
     const auto expectedHash = fx.ExpectedHash(sel);
+    const std::vector<TTestColumn> before = fx.Columns();
     fx.RowSet().Selection = sel.data();
 
-    const int64_t kept = CompactRowSet(fx.RowSet(), fx.Widths());
+    const int64_t kept = CompactRowSet(fx.RowSet(), fx.Layouts());
     int64_t expectedKept = 0;
     for (uint8_t s : sel) {
         expectedKept += s != 0;
@@ -226,6 +242,18 @@ void CheckCompaction(std::vector<EKind> kinds, int64_t rows, bool nullable, bool
             const TExpectedRow got = fx.Row(c, i);
             ASSERT_EQ(got.Valid, expected[c][i].Valid) << "col " << c << " row " << i;
             ASSERT_EQ(got.Value, expected[c][i].Value) << "col " << c << " row " << i;
+        }
+    }
+    for (size_t c = 0; c < before.size(); ++c) {
+        const TTestColumn& was = before[c];
+        const TTestColumn& now = fx.Columns()[c];
+        const std::string name = "col " + std::to_string(c);
+        if (was.Nullable) {
+            ExpectBitPadding(was.Mask, now.Mask, was.MaskBitOffset, rows, name + " mask");
+        }
+        if (was.Kind == EKind::Bool) {
+            ExpectBitPadding({was.Data.begin(), was.Data.end()}, {now.Data.begin(), now.Data.end()},
+                             was.DataBitOffset, rows, name + " data");
         }
     }
     if (withHash) {
@@ -278,7 +306,7 @@ TEST(RowSetCompact, MixedRowSet) {
 
 TEST(RowSetCompact, NoSelectionIsNoOp) {
     TRowSetFixture fx({EKind::Fixed}, 10, false, false, 7);
-    EXPECT_EQ(CompactRowSet(fx.RowSet(), fx.Widths()), 10);
+    EXPECT_EQ(CompactRowSet(fx.RowSet(), fx.Layouts()), 10);
     EXPECT_EQ(fx.RowSet().RowCount, 10);
 }
 
@@ -287,9 +315,51 @@ TEST(RowSetCompact, SharedRowSetIsRejected) {
     auto sel = fx.MakeSelection("alt");
     fx.RowSet().Selection = sel.data();
     fx.RowSet().RefCount = 2;
-    EXPECT_THROW(CompactRowSet(fx.RowSet(), fx.Widths()), NQumir::TError);
+    EXPECT_THROW(CompactRowSet(fx.RowSet(), fx.Layouts()), NQumir::TError);
     EXPECT_EQ(fx.RowSet().RowCount, 10);
     EXPECT_EQ(fx.RowSet().Selection, sel.data());
+}
+
+// A failed validation must leave the row set exactly as it was.
+void ExpectRejectedUntouched(TRowSetFixture& fx, std::span<const TValueLayout> layouts) {
+    auto sel = fx.MakeSelection("alt");
+    fx.RowSet().Selection = sel.data();
+    const std::vector<TTestColumn> before = fx.Columns();
+    EXPECT_THROW(CompactRowSet(fx.RowSet(), layouts), NQumir::TError);
+    EXPECT_EQ(fx.RowSet().RowCount, 10);
+    EXPECT_EQ(fx.RowSet().Selection, sel.data());
+    for (size_t c = 0; c < before.size(); ++c) {
+        EXPECT_EQ(fx.Columns()[c].Data, before[c].Data) << c;
+        EXPECT_EQ(fx.Columns()[c].Mask, before[c].Mask) << c;
+        EXPECT_EQ(fx.Columns()[c].Offsets, before[c].Offsets) << c;
+    }
+}
+
+TEST(RowSetCompact, InvalidLayoutIsRejectedBeforeMutation) {
+    for (int32_t bad : {-1, 0, 3, 5, 32}) {
+        // The first column is valid and would be compacted before the bad one is seen.
+        TRowSetFixture fx({EKind::Fixed, EKind::Fixed}, 10, true, true, 7);
+        const TValueLayout layouts[] = {fx.Layouts()[0], {bad, false}};
+        ExpectRejectedUntouched(fx, layouts);
+    }
+}
+
+TEST(RowSetCompact, InvalidBitmapLayoutIsRejectedBeforeMutation) {
+    TRowSetFixture fx({EKind::Fixed, EKind::Bool}, 10, false, false, 7);
+    const TValueLayout layouts[] = {fx.Layouts()[0], {1, true}};
+    ExpectRejectedUntouched(fx, layouts);
+}
+
+TEST(RowSetCompact, WrongLayoutCountIsRejectedBeforeMutation) {
+    TRowSetFixture fx({EKind::Fixed, EKind::Fixed}, 10, false, false, 7);
+    const TValueLayout layouts[] = {fx.Layouts()[0]};
+    ExpectRejectedUntouched(fx, layouts);
+}
+
+TEST(RowSetCompact, BadOffsetWidthIsRejectedBeforeMutation) {
+    TRowSetFixture fx({EKind::Fixed, EKind::String4}, 10, false, false, 7);
+    fx.RowSet().Columns[1].OffsetWidth = 2;
+    ExpectRejectedUntouched(fx, fx.Layouts());
 }
 
 TEST(RowSetCompact, BitPaddingIsUntouched) {
@@ -306,8 +376,8 @@ TEST(RowSetCompact, BitPaddingIsUntouched) {
     rowSet.RowCount = 8;
     rowSet.Selection = const_cast<uint8_t*>(sel);
     rowSet.RefCount = 1;
-    const int32_t widths[] = {0};
-    EXPECT_EQ(CompactRowSet(rowSet, widths), 4);
+    const TValueLayout layouts[] = {{0, true}};
+    EXPECT_EQ(CompactRowSet(rowSet, layouts), 4);
     for (int64_t i = 0; i < 32; ++i) {
         const int64_t from = i >= 3 && i < 7 ? 3 + 1 + 2 * (i - 3) : i;
         EXPECT_EQ(Bit(bits.data(), i), Bit(before.data(), from)) << i;
