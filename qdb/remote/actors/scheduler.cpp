@@ -98,6 +98,7 @@ struct TActorsCollector : public IBehaviorActor {
                 ctx->Send<TSpawnComputeActorResponse>(SendResponseTo, TSpawnComputeActorResponse {
                     .ActorIds = std::move(ComputeActors)
                 });
+                ctx->Send<TPoison>(ctx->Self(), TPoison{});
             }
         }
 
