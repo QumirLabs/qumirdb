@@ -1042,7 +1042,7 @@
           (= n (>> n 1))
           (= base (* base base))))
       (return acc)))
-;; Raises (C++ throws) when a value has more than `precision` digits, like DuckDB's
+  ;; Raises (C++ throws) when a value has more than `precision` digits, like DuckDB's
   ;; conversion error; the kernels test the range inline and call it only on failure.
   (fun qdb_decimal64_overflow ((var precision i64)) -> i64
     (attrs extern) (block))
@@ -1056,6 +1056,14 @@
       (if (|| (>= value limit) (<= value (- (: 0 i64) limit)))
         (block (return (call qdb_decimal64_overflow precision))))
       (return (* value (call qdb_pow10_i64 delta)))))
+  ;; A u64 above 2^63-1 has no i64 to narrow to, so it is bounded before the narrowing.
+  (fun qdb_decimal64_scale_up_checked_u64
+      ((var value u64) (var delta i64) (var precision i64)) -> i64
+    (block
+      (var limit = (call qdb_pow10_i64 (- precision delta)))
+      (if (>= value (cast limit u64))
+        (block (return (call qdb_decimal64_overflow precision))))
+      (return (* (cast value i64) (call qdb_pow10_i64 delta)))))
   ;; Half away from zero, like qdb_decimal_from_f64; NaN and out-of-range values raise.
   (fun qdb_decimal64_from_f64 ((var value f64) (var scale i64) (var precision i64)) -> i64
     (block

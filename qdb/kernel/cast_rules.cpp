@@ -145,6 +145,12 @@ TExprPtr IntegerToDecimal(const TExprPtr& operand, const TTypePtr& from, const T
     }
     // Digits that do not fit the precision raise, like DuckDB, instead of wrapping in i64.
     const bool fits = IntegerDigits(from) <= PrecisionOf(to) - ScaleOf(to);
+    if (!fits && !TMaybeType<TIntegerType>(UnwrapNamedType(from)).Cast()->IsSigned()) {
+        auto wide = std::make_shared<TCastExpr>(loc, operand,
+            std::make_shared<TIntegerType>(TIntegerType::U64));
+        return Call("qdb_decimal64_scale_up_checked_u64",
+            {std::move(wide), Int64(ScaleOf(to), loc), Int64(PrecisionOf(to), loc)}, loc);
+    }
     return fits
         ? Call("qdb_decimal64_scale_up", {CastToI64(operand, loc), Int64(ScaleOf(to), loc)}, loc)
         : Call("qdb_decimal64_scale_up_checked", {CastToI64(operand, loc),
