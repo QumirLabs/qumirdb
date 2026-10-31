@@ -1284,10 +1284,13 @@ private:
         const TParquetSource& parquet) const
     {
         std::unordered_map<std::string, double> bytes;
+        // A scan column is the file column qualified by the alias; the file name may hold dots.
+        const std::string prefix = source.GetAlias().empty()
+            ? std::string()
+            : source.GetAlias() + ".";
         for (const auto& [name, _] : source.OutputColumns()->Fields) {
-            const auto dot = name.rfind('.');
             const std::unordered_set<std::string> fileColumn{
-                dot == std::string::npos ? name : name.substr(dot + 1)};
+                name.starts_with(prefix) ? name.substr(prefix.size()) : name};
             int64_t rows = 0;
             int64_t size = 0;
             for (const auto& group : parquet.ScanRowGroups(fileColumn)) {

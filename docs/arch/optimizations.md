@@ -740,8 +740,9 @@ A filter kernel evaluates `&&` lazily, so a conjunct runs only on the rows the
 ones before it keep. Lowering orders the conjuncts of a filter over a Parquet
 scan by the cost of the columns each one adds, measured as uncompressed bytes
 per row in the file metadata; a conjunct over columns that are already read
-costs nothing and follows them. Costs within a factor of two are ordered by the
-estimated selectivity. The logical plan and EXPLAIN keep the SQL order.
+costs nothing and follows them, however costly it is to evaluate. Costs within
+a factor of two are ordered by the estimated selectivity. The logical plan and
+EXPLAIN keep the SQL order.
 
 ```sql
 SELECT ... FROM hits WHERE URL LIKE '%google%' AND SearchPhrase <> '';
