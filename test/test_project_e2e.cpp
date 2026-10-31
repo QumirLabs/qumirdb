@@ -477,7 +477,7 @@ TEST(ProjectE2E, DecimalRemainderAlignsScalesAndKeepsDividendSign) {
     ASSERT_EQ(outType->Fields.size(), 2u);
     auto byIntSpec = NQdb::DecimalSpecOf(outType->Fields[0].second);
     ASSERT_TRUE(byIntSpec.has_value());
-    EXPECT_EQ(byIntSpec->Precision, 12);
+    EXPECT_EQ(byIntSpec->Precision, 10);
     EXPECT_EQ(byIntSpec->Scale, 2);
     auto byDecimalSpec = NQdb::DecimalSpecOf(outType->Fields[1].second);
     ASSERT_TRUE(byDecimalSpec.has_value());

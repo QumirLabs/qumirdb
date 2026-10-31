@@ -277,8 +277,11 @@ TEST(ProjectType, DecimalArithmeticAnnotates) {
     });
 
     EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(+ amount tax)"), sc), 9, 3));
+    // An integer counts as DECIMAL(w, 0): BIGINT has 19 digits, a literal its own.
     EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(+ amount 1)"), sc), 8, 2));
-    EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(* amount qty)"), sc), 8, 2));
+    EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(+ amount qty)"), sc), 22, 2));
+    EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(* amount qty)"), sc), 26, 2));
+    EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(* amount 100)"), sc), 10, 2));
     EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(/ amount qty)"), sc), 7, 2));
     EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(/ amount tax)"), sc), 17, 9));
     EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(/ sales prev)"), sc), 37, 20));
@@ -315,7 +318,7 @@ TEST(ProjectType, ExpandKernelExprLowersDecimalProduct) {
     EXPECT_EQ(printed.find("DECIMAL"), std::string::npos);
 }
 
-TEST(ProjectType, DecimalRemainderFollowsDuckDB) {
+TEST(ProjectType, DecimalRemainderTakesTheWiderIntegerPart) {
     TStructType sc({
         {"amount", std::make_shared<NQdb::TDecimal>(10, 2)},
         {"tax", std::make_shared<NQdb::TDecimal>(5, 3)},
@@ -325,13 +328,13 @@ TEST(ProjectType, DecimalRemainderFollowsDuckDB) {
         {"p", std::make_shared<TFloatType>()},
     });
 
-    // Common scale; the integer part of the wider operand. INTEGER is DECIMAL(10, 0),
-    // BIGINT DECIMAL(19, 0), and an integer literal that fits is INTEGER.
+    // Common scale; the integer part of the wider operand (DuckDB's rule). INTEGER is
+    // DECIMAL(10, 0), BIGINT DECIMAL(19, 0), and an integer literal a decimal of its digits.
     EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(% amount k)"), sc), 12, 2));
-    EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(% amount 2)"), sc), 12, 2));
-    EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(% 7 amount)"), sc), 12, 2));
+    EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(% amount 2)"), sc), 10, 2));
+    EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(% 7 amount)"), sc), 10, 2));
     EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(% amount qty)"), sc), 21, 2));
-    EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(% amount 3000000000)"), sc), 21, 2));
+    EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(% amount 3000000000)"), sc), 12, 2));
     EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(% amount amount)"), sc), 10, 2));
     EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(% amount tax)"), sc), 11, 3));
     EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(% wide k)"), sc), 38, 2));

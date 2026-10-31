@@ -687,20 +687,27 @@ std::optional<TDecimalLiteral> DecimalLiteralOf(const TExprPtr& e) {
 
 namespace {
 
-// An integer operand of a decimal remainder counts as DECIMAL(w, 0), w being the digits
-// of its SQL integer type (INTEGER is DECIMAL(10, 0)). An integer literal is INTEGER when
-// its value fits, as SQL types integer literals.
-TDecimalSpec IntegerDecimalSpec(const TExprPtr& e, const TTypePtr& type) {
-    int bits = TMaybeType<TIntegerType>(type).Cast()->BitWidth();
+// An integer beside a decimal (an operand of + - * %, a CASE branch, a COALESCE argument)
+// counts as DECIMAL(w, 0), w being the digits of its SQL integer type (INTEGER is
+// DECIMAL(10, 0)). An integer literal is a decimal of its own digits, like a fractional
+// literal (TDecimalLiteral): 100 is DECIMAL(3, 0).
+TDecimalSpec IntegerDecimalSpec(TExprPtr e, const TTypePtr& type) {
+    if (auto un = TMaybeNode<TUnaryExpr>(e); un && un.Cast()->Operator == "-") {
+        e = un.Cast()->Operand;
+    }
     if (auto n = TMaybeNode<TNumberExpr>(e); n && !n.Cast()->IsFloat()) {
         const int64_t value = n.Cast()->IntValue;
-        const bool fitsInteger = value >= std::numeric_limits<int32_t>::min()
-            && value <= std::numeric_limits<int32_t>::max();
-        bits = fitsInteger
-            ? 32
-            : 64;
+        uint64_t magnitude = value < 0
+            ? uint64_t{0} - static_cast<uint64_t>(value)
+            : static_cast<uint64_t>(value);
+        int32_t digits = 1;
+        while (magnitude >= 10) {
+            magnitude /= 10;
+            ++digits;
+        }
+        return {.Precision = digits, .Scale = 0};
     }
-    switch (bits) {
+    switch (TMaybeType<TIntegerType>(type).Cast()->BitWidth()) {
         case 8:
             return {.Precision = 3, .Scale = 0};
         case 16:
@@ -792,43 +799,39 @@ TTypePtr DecimalBinaryValueType(TOperator op, const TExprPtr& le, const TExprPtr
             .Scale = scale,
         });
     }
-    if (op == "*" && dl && dr) {
-        return MakeDecimalType(DecimalProductSpec(op, *dl, *dr));
-    }
     if (op == "*") {
-        auto decimal = dl ? *dl : *dr;
-        const TTypePtr other = dl ? vr : vl;
-        if (!IsInt(other)) {
-            ThrowDecimalUnsupported(op, "only decimal * integer is implemented in v1");
+        if ((!dl && !IsInt(vl)) || (!dr && !IsInt(vr))) {
+            ThrowDecimalUnsupported(op, "only decimal * decimal and decimal * integer are implemented");
         }
-        return MakeDecimalType({
-            .Precision = std::min(MaxDecimalPrecision, decimal.Precision + 1),
-            .Scale = decimal.Scale,
-        });
+        const TDecimalSpec l = dl ? *dl : IntegerDecimalSpec(le, vl);
+        const TDecimalSpec r = dr ? *dr : IntegerDecimalSpec(re, vr);
+        return MakeDecimalType(DecimalProductSpec(op, l, r));
     }
     if (op == "+" || op == "-") {
-        if (!dl) {
-            if (!IsInt(vl) && !IsFloat(vl)) {
-                ThrowDecimalUnsupported(op, "left operand cannot be converted to decimal");
-            }
-            return MakeDecimalType({
-                .Precision = std::min(MaxDecimalPrecision, dr->Precision + 1),
-                .Scale = dr->Scale,
-            });
+        if (!dl && !IsInt(vl) && !IsFloat(vl)) {
+            ThrowDecimalUnsupported(op, "left operand cannot be converted to decimal");
         }
-        if (!dr) {
-            if (!IsInt(vr) && !IsFloat(vr)) {
-                ThrowDecimalUnsupported(op, "right operand cannot be converted to decimal");
-            }
-            return MakeDecimalType({
-                .Precision = std::min(MaxDecimalPrecision, dl->Precision + 1),
-                .Scale = dl->Scale,
-            });
+        if (!dr && !IsInt(vr) && !IsFloat(vr)) {
+            ThrowDecimalUnsupported(op, "right operand cannot be converted to decimal");
         }
-        const int32_t scale = std::max(dl->Scale, dr->Scale);
+        // A float literal that no decimal holds is converted at the decimal's scale and
+        // counts as the decimal's own type.
+        auto operandSpec = [](const std::optional<TDecimalSpec>& spec, const TExprPtr& e,
+            const TTypePtr& v, const TDecimalSpec& other) -> TDecimalSpec
+        {
+            if (spec) {
+                return *spec;
+            }
+            return IsInt(v)
+                ? IntegerDecimalSpec(e, v)
+                : other;
+        };
+        const TDecimalSpec l = operandSpec(dl, le, vl, dr ? *dr : *dl);
+        const TDecimalSpec r = operandSpec(dr, re, vr, dl ? *dl : *dr);
+        const int32_t scale = std::max(l.Scale, r.Scale);
         const int32_t intDigits = std::max(
-            dl->Precision - dl->Scale,
-            dr->Precision - dr->Scale);
+            l.Precision - l.Scale,
+            r.Precision - r.Scale);
         const int32_t precision = std::min(MaxDecimalPrecision, intDigits + scale + 1);
         return MakeDecimalType({.Precision = precision, .Scale = scale});
     }
@@ -836,14 +839,26 @@ TTypePtr DecimalBinaryValueType(TOperator op, const TExprPtr& le, const TExprPtr
 }
 
 // Common value type of two CASE/`if` branches (SQL branch unification): numeric promotion
-// (i32 then, i64 else -> i64), otherwise assume the branches already agree.
-TTypePtr UnifyBranchTypes(const TTypePtr& a, const TTypePtr& b) {
+// (i32 then, i64 else -> i64), otherwise assume the branches already agree. The branch
+// expressions, when given, tell an integer literal beside a decimal (IntegerDecimalSpec).
+TTypePtr UnifyBranchTypes(const TTypePtr& a, const TTypePtr& b,
+    const TExprPtr& ea = nullptr, const TExprPtr& eb = nullptr)
+{
     if (!a) return b ? UnwrapNullableType(b) : nullptr;
     if (!b) return UnwrapNullableType(a);
     TTypePtr va = UnwrapNullableType(a), vb = UnwrapNullableType(b);
     auto da = DecimalSpecOfValueType(va);
     auto db = DecimalSpecOfValueType(vb);
     if (da || db) {
+        if (IsDecimalBesideFloat(da, db, va, vb)) {
+            return std::make_shared<TFloatType>();
+        }
+        if (!da && IsInt(va)) {
+            da = IntegerDecimalSpec(ea, va);
+        }
+        if (!db && IsInt(vb)) {
+            db = IntegerDecimalSpec(eb, vb);
+        }
         if (da && db) {
             const int32_t scale = std::max(da->Scale, db->Scale);
             const int32_t intDigits = std::max(
@@ -853,9 +868,6 @@ TTypePtr UnifyBranchTypes(const TTypePtr& a, const TTypePtr& b) {
                 .Precision = std::min(MaxDecimalPrecision, intDigits + scale),
                 .Scale = scale,
             });
-        }
-        if (IsDecimalBesideFloat(da, db, va, vb)) {
-            return std::make_shared<TFloatType>();
         }
         return MakeDecimalType(da ? *da : *db);
     }
@@ -868,12 +880,22 @@ TTypePtr UnifyBranchTypes(const TTypePtr& a, const TTypePtr& b) {
 // COALESCE result: value type (unified over non-NULL args) and whether every arg is
 // nullable (a bare NULL arg is ignored). Non-nullable arg => the whole COALESCE is
 // non-nullable (it is guaranteed to return that arg's value at worst).
-std::pair<TTypePtr, bool> CoalesceValueType(const std::vector<TTypePtr>& argTypes) {
+std::pair<TTypePtr, bool> CoalesceValueType(const std::vector<TTypePtr>& argTypes,
+    const std::vector<TExprPtr>& args)
+{
     TTypePtr v = nullptr;
+    TExprPtr first;
     bool allNullable = true;
-    for (const auto& t : argTypes) {
+    for (size_t i = 0; i < argTypes.size(); ++i) {
+        const auto& t = argTypes[i];
         if (!t) continue; // bare NULL - never chosen
-        v = v ? UnifyBranchTypes(v, t) : UnwrapNullableType(t);
+        if (v) {
+            v = UnifyBranchTypes(v, t, first, args[i]);
+            first = nullptr;
+        } else {
+            v = UnwrapNullableType(t);
+            first = args[i];
+        }
         if (!IsNullableType(t)) allNullable = false;
     }
     return {v, allNullable};
@@ -917,7 +939,7 @@ TTypePtr BinaryValueTypeWithNull(TOperator op, const TExprPtr& le, const TExprPt
 {
     TTypePtr nullType = lt ? lt : rt;
     if (op == "*" && nullType && DecimalSpecOfValueType(ValueType(nullType))) {
-        nullType = std::make_shared<TIntegerType>();
+        nullType = std::make_shared<TIntegerType>(TIntegerType::I32);
     }
     return BinaryValueType(op, le, re, lt ? lt : nullType, rt ? rt : nullType);
 }
@@ -1010,7 +1032,7 @@ TTypePtr InferType(const TExprPtr& e, const TStructType& schema) {
             return std::make_shared<TBoolType>(); // non-null bool regardless of args
         }
         if (name == "coalesce") {
-            auto [v, allNullable] = CoalesceValueType(at);
+            auto [v, allNullable] = CoalesceValueType(at, node->Args);
             if (!v) return nullptr;
             return allNullable
                 ? std::static_pointer_cast<TType>(std::make_shared<TNullable>(v)) : v;
@@ -1054,7 +1076,7 @@ TTypePtr InferType(const TExprPtr& e, const TStructType& schema) {
         InferType(node->Cond, schema);
         TTypePtr tt = InferType(node->Then, schema);
         TTypePtr et = node->Else ? InferType(node->Else, schema) : nullptr;
-        TTypePtr base = UnifyBranchTypes(tt, et);
+        TTypePtr base = UnifyBranchTypes(tt, et, node->Then, node->Else);
         if (!base) {
             return nullptr;
         }
@@ -1343,12 +1365,13 @@ std::pair<TExprPtr, TTypePtr> ExpandCoalesce(const TCallExpr& node,
     const TLocation loc = node.Location;
     std::vector<std::pair<TExprPtr, TTypePtr>> args; // (expr, type); bare NULLs dropped
     std::vector<TTypePtr> types;
+    std::vector<TExprPtr> exprs;
     for (const auto& a : node.Args) {
         TExprPtr arg = a;
         TTypePtr t = Expand(arg, inputType, counter);
-        if (t) { args.emplace_back(arg, t); types.push_back(t); }
+        if (t) { args.emplace_back(arg, t); types.push_back(t); exprs.push_back(arg); }
     }
-    auto [T, allNullable] = CoalesceValueType(types);
+    auto [T, allNullable] = CoalesceValueType(types, exprs);
     if (args.empty() || !T) {
         return {MakeNull(loc), nullptr}; // degenerate (all NULL) - untyped
     }
@@ -1457,9 +1480,10 @@ TTypePtr Expand(TExprPtr& e, const TStructType& inputType, uint64_t& counter) {
         const bool thenNullable = thenNull || IsNullableType(thenT);
         const bool elseNullable = elseNull || IsNullableType(elseT);
         if (!thenNullable && !elseNullable) {
-            return UnifyBranchTypes(thenT, elseT); // no null - unify (i32/i64 -> i64)
+            // no null - unify (i32/i64 -> i64)
+            return UnifyBranchTypes(thenT, elseT, node->Then, node->Else);
         }
-        TTypePtr value = UnifyBranchTypes(thenT, elseT);
+        TTypePtr value = UnifyBranchTypes(thenT, elseT, node->Then, node->Else);
         if (!value) {
             return nullptr; // both branches NULL - untyped, leave for the parent
         }
@@ -1869,7 +1893,7 @@ TTypePtr ExpandDecimalNode(TExprPtr& e, const TStructType& inputType, TTypeEnv& 
         ExpandDecimalNode(node->Cond, inputType, env);
         TTypePtr thenT = ExpandDecimalNode(node->Then, inputType, env);
         TTypePtr elseT = node->Else ? ExpandDecimalNode(node->Else, inputType, env) : nullptr;
-        TTypePtr result = UnifyBranchTypes(thenT, elseT);
+        TTypePtr result = UnifyBranchTypes(thenT, elseT, node->Then, node->Else);
         if (auto decimal = DecimalSpecOfValueType(result)) {
             node->Then = DecimalValueAtScale(node->Then, thenT, decimal->Scale, node->Location);
             if (node->Else) {
@@ -2065,7 +2089,7 @@ TTypePtr ExpandDecimalNode(TExprPtr& e, const TStructType& inputType, TTypeEnv& 
                 return std::make_shared<TBoolType>();
             }
             if (cid.Cast()->Name == "coalesce") {
-                auto [value, allNullable] = CoalesceValueType(argTypes);
+                auto [value, allNullable] = CoalesceValueType(argTypes, node->Args);
                 return value && allNullable
                     ? std::static_pointer_cast<TType>(std::make_shared<TNullable>(value))
                     : value;
