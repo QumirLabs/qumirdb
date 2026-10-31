@@ -1,0 +1,1 @@
+SELECT id FROM r WHERE f = 1.5 ORDER BY id;

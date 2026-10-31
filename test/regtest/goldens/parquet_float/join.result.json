@@ -1,5 +1,5 @@
 {
-  "schema": "<struct (id i32) (f f64) (n <named Nullable [f64]>)>",
+  "schema": "<struct (id i32) (f f32) (n <named Nullable [f32]>)>",
   "rows": [
     [1, 7.5, 0.5],
     [2, -2.25, null],

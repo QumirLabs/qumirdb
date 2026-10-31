@@ -1,0 +1,5 @@
+sort [c asc]
+└─ project (c, n, s) (rows≈100 cost≈842K)
+   └─ aggregate keys=[t.c] aggs=[count_0=count, sum_0=sum] (rows≈100 cost≈840K)
+      └─ filter (&& (< |t.p| 1e+30) (> |t.p| (- 1e+30))) (rows≈10000 cost≈640K)
+         └─ source t AS t row-groups (&& (< |t.p| 1e+30) (> |t.p| (- 1e+30))) (rows≈40000 cost≈320K)

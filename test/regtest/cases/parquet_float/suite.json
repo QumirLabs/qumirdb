@@ -2,10 +2,11 @@
   "version": 1,
   "fixtures": {
     "values": {"json": "tables/t.json", "parquet": {"row_group_rows": 2}},
-    "special": {"json": "tables/special.json", "parquet": {"row_group_rows": 2}}
+    "special": {"json": "tables/special.json", "parquet": {"row_group_rows": 2}},
+    "required": {"json": "tables/required.json", "parquet": {"row_group_rows": 2}}
   },
-  "tables": {"t": "values", "s": "special"},
-  "variants": ["single", "threaded"],
+  "tables": {"t": "values", "s": "special", "r": "required"},
+  "variants": ["single", "threaded", "js"],
   "cases": {
     "project.sql": {"order": "ordered"},
     "filter.sql": {"order": "ordered"},
@@ -16,6 +17,18 @@
     "join.sql": {"order": "ordered"},
     "literal_compare.sql": {"order": "ordered"},
     "special.sql": {"order": "ordered"},
-    "special_filter.sql": {"order": "ordered"}
+    "special_filter.sql": {"order": "ordered"},
+    "required_project.sql": {"order": "ordered"},
+    "required_aggregate.sql": {"order": "ordered"},
+    "required_aggregate_sum.sql": {"order": "ordered"},
+    "required_group.sql": {"order": "ordered"},
+    "required_order.sql": {"order": "ordered"},
+    "required_order_desc.sql": {"order": "ordered"},
+    "required_filter.sql": {"order": "ordered"},
+    "required_filter_negative.sql": {"order": "ordered"},
+    "required_filter_equal.sql": {"order": "ordered"},
+    "required_join.sql": {"order": "ordered"},
+    "required_distinct.sql": {"order": "ordered"},
+    "required_arithmetic.sql": {"order": "ordered"}
   }
 }

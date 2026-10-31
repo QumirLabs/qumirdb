@@ -543,75 +543,104 @@ TEST(IOTest, EstimateLookupChargesPagesNotWholeChunks) {
 
 namespace {
 
-// Collects one f64 column; NULL cells come back as std::nullopt.
-std::vector<std::optional<double>> DoubleCells(const TColumn& column, int64_t rowCount) {
-    std::vector<std::optional<double>> cells;
-    const auto* values = reinterpret_cast<const double*>(column.Data);
+// Collects one f32 column as raw bits, so NaN payloads and -0 are compared exactly;
+// NULL cells come back as std::nullopt.
+std::vector<std::optional<uint32_t>> FloatCells(const TColumn& column, int64_t rowCount) {
+    std::vector<std::optional<uint32_t>> cells;
+    const auto* values = reinterpret_cast<const uint32_t*>(column.Data);
     for (int64_t row = 0; row < rowCount; ++row) {
         const auto bit = column.MaskBitOffset + row;
         const bool valid = !column.Mask || ((column.Mask[bit / 8] >> (bit % 8)) & 1);
-        cells.push_back(valid ? std::optional<double>(values[row]) : std::nullopt);
+        cells.push_back(valid ? std::optional<uint32_t>(values[row]) : std::nullopt);
     }
     return cells;
 }
 
 } // namespace
 
-// The engine has one float width: a Parquet FLOAT column is scanned and looked
-// up as f64, and every value, including NaN, -0 and denormals, widens exactly.
-TEST(IOTest, FloatColumnIsReadAsDouble) {
-    const std::string path = "/tmp/test_io_qdb_float.parquet";
-    const std::vector<float> values{
+// A Parquet FLOAT column is a 4-byte f32 column in a scan and in a late lookup:
+// NaN, -0, infinities and denormals keep their bits, in required and optional
+// columns, in dictionary and PLAIN pages, across row groups. The 40K-row case
+// reads past the first batch and would show a read beyond the decoded buffer as
+// values that change from run to run.
+TEST(IOTest, FloatColumnIsReadAsFloat) {
+    const std::vector<float> specials{
         0.1f, -0.0f, std::numeric_limits<float>::infinity(),
         -std::numeric_limits<float>::infinity(), std::numeric_limits<float>::quiet_NaN(),
         std::numeric_limits<float>::denorm_min(), std::numeric_limits<float>::max(), 16777216.0f};
-    arrow::FloatBuilder builder;
-    (void)builder.AppendValues(values);
-    (void)builder.AppendNull();
-    const auto rowCount = static_cast<int64_t>(values.size()) + 1;
-    auto batch = arrow::RecordBatch::Make(
-        arrow::schema({arrow::field("f", arrow::float32())}), rowCount, {builder.Finish().ValueOrDie()});
-    WriteParquet(path, batch, 4);
+    for (const bool nullable : {false, true}) {
+        for (const bool dictionary : {false, true}) {
+            for (const int64_t size : {int64_t{9}, int64_t{40000}}) {
+                SCOPED_TRACE("nullable=" + std::to_string(nullable) + " dictionary=" +
+                    std::to_string(dictionary) + " rows=" + std::to_string(size));
+                std::vector<std::optional<float>> values;
+                for (int64_t row = 0; row < size; ++row) {
+                    if (nullable && row % 5 == 4) {
+                        values.push_back(std::nullopt);
+                    } else if (row < static_cast<int64_t>(specials.size())) {
+                        values.push_back(specials[row]);
+                    } else {
+                        values.push_back(static_cast<float>(row % 1000) * 0.37f - 100.0f);
+                    }
+                }
+                arrow::FloatBuilder builder;
+                for (const auto& value : values) {
+                    ASSERT_TRUE((value ? builder.Append(*value) : builder.AppendNull()).ok());
+                }
+                auto batch = arrow::RecordBatch::Make(
+                    arrow::schema({arrow::field("f", arrow::float32(), nullable)}),
+                    size, {builder.Finish().ValueOrDie()});
+                const std::string path = "/tmp/test_io_qdb_float.parquet";
+                {
+                    parquet::WriterProperties::Builder properties;
+                    if (!dictionary) {
+                        properties.disable_dictionary();
+                    }
+                    auto outfile = arrow::io::FileOutputStream::Open(path).ValueOrDie();
+                    auto table = arrow::Table::FromRecordBatches({batch}).ValueOrDie();
+                    ASSERT_TRUE(parquet::arrow::WriteTable(
+                        *table, arrow::default_memory_pool(), outfile, 4, properties.build()).ok());
+                }
 
-    auto expectWidened = [&](const std::vector<std::optional<double>>& cells) {
-        ASSERT_EQ(cells.size(), values.size() + 1);
-        for (size_t row = 0; row < values.size(); ++row) {
-            ASSERT_TRUE(cells[row]) << "row " << row;
-            const double expected = values[row];
-            EXPECT_TRUE(std::isnan(expected)
-                ? std::isnan(*cells[row])
-                : std::bit_cast<uint64_t>(*cells[row]) == std::bit_cast<uint64_t>(expected))
-                << "row " << row << ": " << *cells[row];
+                auto expectRead = [&](const std::vector<std::optional<uint32_t>>& cells) {
+                    ASSERT_EQ(cells.size(), values.size());
+                    for (size_t row = 0; row < values.size(); ++row) {
+                        ASSERT_EQ(cells[row].has_value(), values[row].has_value()) << "row " << row;
+                        if (values[row]) {
+                            EXPECT_EQ(*cells[row], std::bit_cast<uint32_t>(*values[row])) << "row " << row;
+                        }
+                    }
+                };
+
+                NQdb::TParquetFile file(path);
+                auto source = file.MakeSource();
+                source->RestrictColumns({"f", std::string(InternalRowIdColumnName)});
+                auto type = NQumir::NAst::TMaybeType<NQumir::NAst::TFloatType>(
+                    UnwrapNullableType(source->Schema().Columns[0].Type));
+                ASSERT_TRUE(type);
+                EXPECT_EQ(type.Cast()->Kind, NQumir::NAst::TFloatType::F32);
+
+                std::vector<std::optional<uint32_t>> scanned;
+                std::vector<TPhysicalRowId> rowIds;
+                TRowSet rowSet = {};
+                while (source->Next(rowSet)) {
+                    auto cells = FloatCells(rowSet.Columns[0], rowSet.RowCount);
+                    scanned.insert(scanned.end(), cells.begin(), cells.end());
+                    const auto* ids = reinterpret_cast<const TPhysicalRowId*>(rowSet.Columns[1].Data);
+                    rowIds.insert(rowIds.end(), ids, ids + rowSet.RowCount);
+                    Release(&rowSet);
+                }
+                expectRead(scanned);
+
+                const std::vector<std::string> columns{"f"};
+                TRowSet lookup = {};
+                std::string error;
+                ASSERT_TRUE(source->CompileReader(columns)->ReadRows(rowIds, lookup, &error)) << error;
+                expectRead(FloatCells(lookup.Columns[0], lookup.RowCount));
+                Release(&lookup);
+            }
         }
-        EXPECT_FALSE(cells.back());
-    };
-
-    NQdb::TParquetFile file(path);
-    auto source = file.MakeSource();
-    source->RestrictColumns({"f", std::string(InternalRowIdColumnName)});
-    auto type = NQumir::NAst::TMaybeType<NQumir::NAst::TFloatType>(
-        UnwrapNullableType(source->Schema().Columns[0].Type));
-    ASSERT_TRUE(type);
-    EXPECT_EQ(type.Cast()->Kind, NQumir::NAst::TFloatType::F64);
-
-    std::vector<std::optional<double>> scanned;
-    std::vector<TPhysicalRowId> rowIds;
-    TRowSet rowSet = {};
-    while (source->Next(rowSet)) {
-        auto cells = DoubleCells(rowSet.Columns[0], rowSet.RowCount);
-        scanned.insert(scanned.end(), cells.begin(), cells.end());
-        const auto* ids = reinterpret_cast<const TPhysicalRowId*>(rowSet.Columns[1].Data);
-        rowIds.insert(rowIds.end(), ids, ids + rowSet.RowCount);
-        Release(&rowSet);
     }
-    expectWidened(scanned);
-
-    const std::vector<std::string> columns{"f"};
-    TRowSet lookup = {};
-    std::string error;
-    ASSERT_TRUE(source->CompileReader(columns)->ReadRows(rowIds, lookup, &error)) << error;
-    expectWidened(DoubleCells(lookup.Columns[0], lookup.RowCount));
-    Release(&lookup);
 }
 
 // A decimal array of any Arrow width comes out at the width of the qdb storage of its

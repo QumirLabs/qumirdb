@@ -1,0 +1,7 @@
+project (n) (rows≈1 cost≈483K)
+└─ aggregate keys=[__group__] aggs=[count_0=count] (rows≈1 cost≈483K)
+   └─ project (__group__) (rows≈100 cost≈481K)
+      └─ project (d.p) (rows≈100 cost≈480K)
+         └─ aggregate keys=[p] (rows≈100 cost≈480K)
+            └─ project (p) (rows≈40000 cost≈320K)
+               └─ source t AS t (rows≈40000 cost≈160K)

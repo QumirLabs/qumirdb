@@ -1,0 +1,6 @@
+{
+  "schema": "<struct (n i64) (lo <named Nullable [i64]>) (hi <named Nullable [i64]>) (m_lo <named Nullable [f32]>)>",
+  "rows": [
+    ["11999", "28001", "39999", 7000.25]
+  ]
+}

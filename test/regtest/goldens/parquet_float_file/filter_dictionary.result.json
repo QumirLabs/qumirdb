@@ -1,0 +1,6 @@
+{
+  "schema": "<struct (n i64) (p_lo <named Nullable [f32]>)>",
+  "rows": [
+    ["727", 0.9375]
+  ]
+}

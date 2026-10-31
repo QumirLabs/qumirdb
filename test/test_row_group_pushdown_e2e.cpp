@@ -130,6 +130,27 @@ void WriteFixture(const std::string& path, bool storeDecimalAsInteger = false) {
     CheckArrow(output->Close());
 }
 
+// Two rows per row group; the values sit around the f32 grid points above 2^24.
+void WriteLargeRealFixture(const std::string& path) {
+    arrow::Int64Builder id;
+    arrow::FloatBuilder real;
+    CheckArrow(id.AppendValues({0, 1, 2, 3, 4, 5, 6, 7}));
+    CheckArrow(real.AppendValues({
+        16777216.0f, 16777216.0f, 16777220.0f, 16777220.0f,
+        16777218.0f, 33554432.0f, 1.0f, 100.0f}));
+    auto schema = arrow::schema({
+        arrow::field("id", arrow::int64(), false),
+        arrow::field("real_value", arrow::float32(), false),
+    });
+    auto batch = arrow::RecordBatch::Make(schema, 8, {
+        id.Finish().ValueOrDie(), real.Finish().ValueOrDie()});
+    auto output = arrow::io::FileOutputStream::Open(path).ValueOrDie();
+    auto table = arrow::Table::FromRecordBatches({batch}).ValueOrDie();
+    CheckArrow(parquet::arrow::WriteTable(
+        *table, arrow::default_memory_pool(), output, /*chunk_size*/ 2));
+    CheckArrow(output->Close());
+}
+
 std::shared_ptr<TSourceOperator> FindSource(const TOperatorPtr& node) {
     if (auto source = TMaybeOp<TSourceOperator>(node)) {
         return source.Cast();
@@ -286,6 +307,22 @@ TEST(RowGroupPushdownE2E, MatchesFullScanAcrossParquetPhysicalTypes) {
         {4, 5});
     ExpectSameAsFullScan(
         path,
+        "SELECT id FROM t WHERE real_value > 50",
+        {2, 3});
+    ExpectSameAsFullScan(
+        path,
+        "SELECT id FROM t WHERE real_value = 101.5",
+        {3});
+    ExpectSameAsFullScan(
+        path,
+        "SELECT id FROM t WHERE real_value + real_value < 0",
+        {4, 5});
+    ExpectSameAsFullScan(
+        path,
+        "SELECT id FROM t WHERE real_value * real_value > 10000",
+        {2, 3});
+    ExpectSameAsFullScan(
+        path,
         "SELECT id FROM t WHERE nullable_value > 50",
         {2});
 }
@@ -316,6 +353,24 @@ TEST(RowGroupPushdownE2E, PrunesDecimalColumnsOfEveryStorage) {
             "SELECT id FROM t WHERE wide_value < 0",
             {0, 1});
     }
+}
+
+TEST(RowGroupPushdownE2E, F32ColumnVsIntegerLiteralAbove2Pow24) {
+    TTempDir tempDir;
+    const std::string path = (tempDir.Path() / "large-real.parquet").string();
+    WriteLargeRealFixture(path);
+
+    // The kernel compares in f64, so 16777217 and 16777219 are not f32 grid points.
+    ExpectSameAsFullScan(
+        path, "SELECT id FROM t WHERE real_value < 16777217", {0, 1, 6, 7});
+    ExpectSameAsFullScan(
+        path, "SELECT id FROM t WHERE real_value > 16777219", {2, 3, 5});
+    ExpectSameAsFullScan(
+        path, "SELECT id FROM t WHERE real_value > 16777217", {2, 3, 4, 5});
+    ExpectSameAsFullScan(
+        path, "SELECT id FROM t WHERE real_value <= 16777217.5", {0, 1, 6, 7});
+    ExpectSameAsFullScan(
+        path, "SELECT id FROM t WHERE real_value >= 16777219.5", {2, 3, 5});
 }
 
 TEST(RowGroupPushdownE2E, AllPrunedProducesAnEmptyScan) {

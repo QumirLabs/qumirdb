@@ -369,7 +369,7 @@ TEST(LateMaterialization, ExecutesParquetLookupAfterGlobalTopK) {
             "Payload" + std::to_string(column), arrow::int64(), false));
         arrays.push_back(payloads[column].Finish().ValueOrDie());
     }
-    // A Parquet FLOAT column is a direct f64 column for the rewrite.
+    // A Parquet FLOAT column is a direct f32 column for the rewrite.
     fields.push_back(arrow::field("Ratio", arrow::float32(), false));
     arrays.push_back(ratios.Finish().ValueOrDie());
     auto batch = arrow::RecordBatch::Make(
@@ -596,7 +596,8 @@ TEST(LateMaterialization, ExecutesParquetLookupAfterGlobalTopK) {
             {"Payload0", "Payload", integerType},
             {"Payload0", "PayloadCopy", integerType},
             {"EventTime", "EventTime", integerType},
-            {"Ratio", "Ratio", std::make_shared<NQumir::NAst::TFloatType>()},
+            {"Ratio", "Ratio", std::make_shared<NQumir::NAst::TFloatType>(
+                NQumir::NAst::TFloatType::F32)},
         });
     // Lowering expects a pruned plan: the physical locator column is only
     // emitted once column pruning has put it in the source's required set.
@@ -630,12 +631,12 @@ TEST(LateMaterialization, ExecutesParquetLookupAfterGlobalTopK) {
             output.Columns[1].Data);
         const auto* eventTime = reinterpret_cast<const int64_t*>(
             output.Columns[2].Data);
-        const auto* ratio = reinterpret_cast<const double*>(
+        const auto* ratio = reinterpret_cast<const float*>(
             output.Columns[3].Data);
         for (int64_t row = 0; row < output.RowCount; ++row) {
             EXPECT_EQ(payload[row], payloadCopy[row]);
             EXPECT_EQ(payload[row], eventTime[row] * 10);
-            EXPECT_EQ(ratio[row], static_cast<double>(eventTime[row]) + 0.25);
+            EXPECT_EQ(ratio[row], static_cast<float>(eventTime[row]) + 0.25f);
             ++materializedRows;
         }
         Release(&output);

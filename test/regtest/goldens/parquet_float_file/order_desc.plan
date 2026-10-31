@@ -1,0 +1,4 @@
+top-sort [p desc, id asc] limit 5
+└─ project (id, c, p) (rows≈20000 cost≈1.2M)
+   └─ filter (< |t.p| 1e+30) (rows≈20000 cost≈960K)
+      └─ source t AS t row-groups (< |t.p| 1e+30) (rows≈40000 cost≈480K)

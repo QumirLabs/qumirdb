@@ -1,0 +1,4 @@
+sort [f asc, id asc]
+└─ project (id, f) (rows≈10 cost≈288)
+   └─ filter (! (call qdb_in_list |r.id| 2 7 12)) (rows≈10 cost≈208)
+      └─ source r AS r row-groups (! (call qdb_in_list |r.id| 2 7 12)) (rows≈13 cost≈104)

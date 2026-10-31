@@ -1,0 +1,6 @@
+{
+  "schema": "<struct (c i64) (cf i64) (lo <named Nullable [f32]>) (hi <named Nullable [f32]>)>",
+  "rows": [
+    ["11", "11", {"$float":"-inf"}, {"$float":"+inf"}]
+  ]
+}

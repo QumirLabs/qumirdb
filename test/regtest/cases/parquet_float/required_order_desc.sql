@@ -1,0 +1,1 @@
+SELECT id, f FROM r WHERE id NOT IN (7, 12) ORDER BY f DESC, id LIMIT 6;

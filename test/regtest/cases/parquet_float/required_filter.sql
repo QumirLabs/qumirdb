@@ -1,0 +1,1 @@
+SELECT id FROM r WHERE f > 1 AND id NOT IN (7, 12) ORDER BY id;

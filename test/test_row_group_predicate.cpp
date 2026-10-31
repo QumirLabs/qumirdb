@@ -4,6 +4,7 @@
 #include <qdb/plan/types/decimal.h>
 
 #include <bit>
+#include <cmath>
 #include <cstdint>
 #include <initializer_list>
 #include <memory>
@@ -347,6 +348,94 @@ TEST(RowGroupPredicate, SupportsFloatArithmeticWithOutwardBounds) {
     const std::vector<TRowGroupColumnRange> negative{F64Range(-1.0, -0.5)};
     EXPECT_FALSE(evaluator->MayBeTrue(positive));
     EXPECT_TRUE(evaluator->MayBeTrue(negative));
+}
+
+TEST(RowGroupPredicate, F32ArithmeticRoundsToTheF32GridAndNeverPrunesAWitness) {
+    const auto f32 = std::make_shared<TFloatType>(TFloatType::F32);
+    std::vector<TColumnSchema> columns{{"x", f32}, {"y", f32}, {"z", f32}};
+    const TSchema schema{columns};
+    auto sum = Bin("+", Id("x"), Id("y"), f32);
+    auto product = Bin("*", Id("x"), Id("y"), f32);
+    // The sum 16777216 + 1 rounds to even, so x + y == z has witnesses a double
+    // sum would miss; the product adds another rounding.
+    for (const char* op : {"==", "<", ">"}) {
+        for (const bool multiply : {false, true}) {
+            auto evaluator = TRowGroupPredicateEvaluator::Compile(
+                Bin(op, multiply ? product : sum, Id("z"), BoolType()), schema, "");
+            ASSERT_TRUE(evaluator);
+            const std::vector<float> grid{
+                -3.0f, -0.0f, 0.0f, 1.0f, 1.5f, 3.0f, 16777215.0f, 16777216.0f,
+                16777218.0f, 33554432.0f, 3.4e38f, std::numeric_limits<float>::infinity()};
+            auto range = [](float lo, float hi) {
+                return F64Range(static_cast<double>(lo), static_cast<double>(hi));
+            };
+            for (const float xLo : grid) for (const float xHi : grid) {
+                if (xLo > xHi) continue;
+                for (const float yLo : grid) for (const float yHi : grid) {
+                    if (yLo > yHi) continue;
+                    for (const float zLo : grid) for (const float zHi : grid) {
+                        if (zLo > zHi) continue;
+                        bool witness = false;
+                        for (const float xv : {xLo, xHi}) for (const float yv : {yLo, yHi}) {
+                            for (const float zv : {zLo, zHi}) {
+                                const float result = multiply ? xv * yv : xv + yv;
+                                const std::string kind = op;
+                                witness |= kind == "==" ? result == zv
+                                    : kind == "<" ? result < zv : result > zv;
+                            }
+                        }
+                        if (witness) {
+                            const std::vector<TRowGroupColumnRange> ranges{
+                                range(xLo, xHi), range(yLo, yHi), range(zLo, zHi)};
+                            EXPECT_TRUE(evaluator->MayBeTrue(ranges))
+                                << op << " mul=" << multiply << " x " << xLo << ".." << xHi
+                                << " y " << yLo << ".." << yHi << " z " << zLo << ".." << zHi;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST(RowGroupPredicate, F32ColumnVsLiteralComparesInF64) {
+    const auto f32 = std::make_shared<TFloatType>(TFloatType::F32);
+    std::vector<TColumnSchema> columns{{"x", f32}};
+    const TSchema schema{columns};
+    // Literals on both sides of the f32 grid points above 2^24 (the grid step is 2 there).
+    const std::vector<double> literals{
+        16777215.0, 16777216.0, 16777216.5, 16777217.0, 16777217.5, 16777218.0,
+        16777219.0, 16777219.5, 16777220.0, 33554433.0};
+    const std::vector<float> grid{
+        1.0f, 16777216.0f, 16777218.0f, 16777220.0f, 33554432.0f};
+    for (const char* op : {"==", "<", "<=", ">", ">="}) {
+        for (const double literal : literals) {
+            auto number = Fraction(literal);
+            if (literal == std::floor(literal)) {
+                number = Num(static_cast<int64_t>(literal));
+            }
+            auto evaluator = TRowGroupPredicateEvaluator::Compile(
+                Bin(op, Id("x"), std::move(number), BoolType()), schema, "");
+            ASSERT_TRUE(evaluator);
+            for (const float lo : grid) for (const float hi : grid) {
+                if (lo > hi) continue;
+                const std::string kind = op;
+                bool witness = false;
+                for (const float v : {lo, hi}) {
+                    const double x = v;
+                    witness |= kind == "==" ? x == literal
+                        : kind == "<" ? x < literal
+                        : kind == "<=" ? x <= literal
+                        : kind == ">" ? x > literal : x >= literal;
+                }
+                if (witness) {
+                    const std::vector<TRowGroupColumnRange> ranges{F64Range(lo, hi)};
+                    EXPECT_TRUE(evaluator->MayBeTrue(ranges))
+                        << op << " " << literal << " range " << lo << ".." << hi;
+                }
+            }
+        }
+    }
 }
 
 TEST(RowGroupPredicate, SupportsNotAndNonStrictComparison) {

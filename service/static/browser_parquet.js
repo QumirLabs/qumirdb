@@ -83,7 +83,10 @@ function parquetType(field) {
   if (physical === 'INT64') {
     return Type.scalar('i64');
   }
-  if (physical === 'FLOAT' || physical === 'DOUBLE') {
+  if (physical === 'FLOAT') {
+    return Type.scalar('f32');
+  }
+  if (physical === 'DOUBLE') {
     return Type.scalar('f64');
   }
   if (physical === 'BYTE_ARRAY' || physical === 'FIXED_LEN_BYTE_ARRAY') {

@@ -1,0 +1,1 @@
+SELECT id FROM r WHERE f < 0 ORDER BY id;
