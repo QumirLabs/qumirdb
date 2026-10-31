@@ -17,6 +17,7 @@
     "multiply_nested.sql": {"order": "ordered"},
     "multiply_empty.sql": {"order": "ordered"},
     "key_join_group.sql": {"order": "ordered"},
-    "key_before_int_group.sql": {"order": "ordered"}
+    "key_before_int_group.sql": {"order": "ordered"},
+    "key_common_type.sql": {"order": "ordered"}
   }
 }

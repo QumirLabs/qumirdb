@@ -1,0 +1,12 @@
+{
+  "schema": "<struct (k string) (c i64)>",
+  "rows": [
+    ["except", "2"],
+    ["in", "3"],
+    ["integer_match", "5"],
+    ["integer_mismatch", "0"],
+    ["intersect", "5"],
+    ["scale", "5"],
+    ["wide", "5"]
+  ]
+}

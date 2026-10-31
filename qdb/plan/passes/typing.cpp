@@ -18,6 +18,8 @@
 #include <qumir/error.h>
 #include <qumir/parser/type.h>
 
+#include <algorithm>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -499,6 +501,47 @@ TTypePtr ColumnType(const TOperatorPtr& input, const std::string& column) {
     return nullptr;
 }
 
+// Decimal digits an integer type needs, so that it fits DECIMAL(digits, 0).
+int32_t IntegerDecimalDigits(const TIntegerType& type) {
+    switch (type.BitWidth()) {
+        case 8: return 3;
+        case 16: return 5;
+        case 32: return 10;
+        case 64: return type.IsSigned() ? 19 : 20;
+        default: return MaxDecimalPrecision;
+    }
+}
+
+// Type both join key sides are cast to so that equal values have equal bytes:
+// the common integer type, or for a decimal key (against a decimal or an integer)
+// the decimal with the larger scale and the larger integer part. nullptr when the
+// sides already share a type or no common key type exists.
+TTypePtr CommonKeyType(const TTypePtr& left, const TTypePtr& right) {
+    if (left->ToString() == right->ToString()) {
+        return nullptr;
+    }
+    auto leftInt = TMaybeType<TIntegerType>(left);
+    auto rightInt = TMaybeType<TIntegerType>(right);
+    if (leftInt && rightInt) {
+        return UnifyIntegers(*leftInt.Cast(), *rightInt.Cast());
+    }
+    const auto asDecimal = [](const TTypePtr& type) -> std::optional<TDecimalSpec> {
+        if (auto integer = TMaybeType<TIntegerType>(type)) {
+            return TDecimalSpec{.Precision = IntegerDecimalDigits(*integer.Cast()), .Scale = 0};
+        }
+        return DecimalSpecOfValueType(type);
+    };
+    const auto leftSpec = asDecimal(left);
+    const auto rightSpec = asDecimal(right);
+    if (!leftSpec || !rightSpec) {
+        return nullptr;
+    }
+    const int32_t scale = std::max(leftSpec->Scale, rightSpec->Scale);
+    const int32_t integerDigits = std::max(
+        leftSpec->Precision - leftSpec->Scale, rightSpec->Precision - rightSpec->Scale);
+    return std::make_shared<TDecimal>(std::min(integerDigits + scale, MaxDecimalPrecision), scale);
+}
+
 } // namespace
 
 void CoerceJoinKeys(const TOperatorPtr& root) {
@@ -516,12 +559,7 @@ void CoerceJoinKeys(const TOperatorPtr& root) {
         if (!leftType || !rightType) {
             continue;
         }
-        auto leftInt = TMaybeType<TIntegerType>(UnwrapNullableType(leftType));
-        auto rightInt = TMaybeType<TIntegerType>(UnwrapNullableType(rightType));
-        if (!leftInt || !rightInt || leftInt.Cast()->Kind == rightInt.Cast()->Kind) {
-            continue;
-        }
-        const auto common = UnifyIntegers(*leftInt.Cast(), *rightInt.Cast());
+        const auto common = CommonKeyType(UnwrapNullableType(leftType), UnwrapNullableType(rightType));
         if (!common) {
             continue;
         }
