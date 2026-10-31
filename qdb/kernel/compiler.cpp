@@ -884,16 +884,9 @@ NQumir::NAst::TExprPtr BuildTopSortUpdateAst(
     return std::move(builder).Build();
 }
 
+// Only integer and float columns take the fixed-column materialize path.
 int64_t MaterializeFixedWidth(const NQumir::NAst::TTypePtr& type) {
-    using namespace NQumir::NAst;
-    auto valueType = PhysicalValueType(type);
-    if (auto integer = TMaybeType<TIntegerType>(valueType)) {
-        return integer.Cast()->BitWidth() / 8;
-    }
-    if (TMaybeType<TFloatType>(valueType)) {
-        return 8;
-    }
-    return 0;
+    return SortCoreType(type) ? NKernel::FixedValueWidth(type) : 0;
 }
 
 // Emits an entry that gathers `inputType`'s columns from a sorted row-id slice.

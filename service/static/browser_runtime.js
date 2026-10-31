@@ -83,7 +83,7 @@ export function coreTypeWidth(type) {
   switch (storageTypeName(type)) {
     case 'i8': case 'u8': case 'bool': return 1;
     case 'i16': case 'u16': return 2;
-    case 'i32': case 'u32': return 4;
+    case 'i32': case 'u32': case 'f32': return 4;
     case 'i64': case 'u64': case 'f64': return 8;
     case 'string': return 16; // StringView (ptr + size)
     case 'binint': case 'i128': case 'u128': return 16; // qdb_bin_int (Lo + Hi)
@@ -106,6 +106,7 @@ function numericArrayConstructor(type) {
     case 'u32': return Uint32Array;
     case 'i64': return BigInt64Array;
     case 'u64': return BigUint64Array;
+    case 'f32': return Float32Array;
     case 'f64': return Float64Array;
     default: return null;
   }
@@ -1206,6 +1207,7 @@ function writeNumericValue(dv, address, type, value) {
       ? decimalToScaledBigInt(value, decimalScale(type))
       : BigInt(value ?? 0), true); break;
     case 'u64': dv.setBigUint64(address, BigInt(value ?? 0), true); break;
+    case 'f32': dv.setFloat32(address, Number(value ?? 0), true); break;
     case 'f64': dv.setFloat64(address, Number(value ?? 0), true); break;
     case 'binint': writeBinIntValue(dv, address, value, decimalScale(type)); break;
     default: throw new Error(`unsupported numeric column type: ${type}`);
@@ -1222,6 +1224,7 @@ function readNumericValue(dv, address, type) {
     case 'u32': return dv.getUint32(address, true);
     case 'i64': return dv.getBigInt64(address, true);
     case 'u64': return dv.getBigUint64(address, true);
+    case 'f32': return dv.getFloat32(address, true);
     case 'f64': return dv.getFloat64(address, true);
     case 'binint': case 'i128': return readBinIntValue(dv, address);
     case 'u128': return dv.getBigUint64(address, true) + (dv.getBigUint64(address + 8, true) << 64n);
@@ -2224,6 +2227,17 @@ function readValidityBits(memBytes, maskPtr, count, bitOffset = 0) {
   return valid;
 }
 
+// The shortest decimal that reads back as the same f32 (like std::to_chars(float)),
+// so 0.1f shows as 0.1 and not as the widened 0.10000000149011612.
+function shortestFloat32(value) {
+  if (!Number.isFinite(value) || value === 0) return value;
+  for (let digits = 1; digits <= 9; ++digits) {
+    const candidate = Number(value.toPrecision(digits));
+    if (Math.fround(candidate) === value) return candidate;
+  }
+  return value;
+}
+
 function materializeWasmRowSet(arena, layout, output, rowsetPtr) {
   const dv = arena.view();
   const memBytes = arena.bytes();
@@ -2269,7 +2283,7 @@ function materializeWasmRowSet(arena, layout, output, rowsetPtr) {
         const raw = readColumnValue(dv, dataPtr, r, spec, dataBitOffset);
         values[r] = isDecimalColumn(spec)
           ? formatDecimalValue(raw, decimalScale(spec))
-          : raw;
+          : (storageTypeName(spec) === 'f32' ? shortestFloat32(raw) : raw);
       }
     }
     columns.push({ name: spec.name, type: spec.type, values });

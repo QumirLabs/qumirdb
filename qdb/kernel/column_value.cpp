@@ -12,6 +12,24 @@
 
 namespace NQdb::NKernel {
 
+int64_t FixedValueWidth(const NQumir::NAst::TTypePtr& type) {
+    using namespace NQumir::NAst;
+    if (HasBinIntLayout(type)) {
+        return 16;
+    }
+    const auto valueType = PhysicalValueType(type);
+    if (auto integer = TMaybeType<TIntegerType>(valueType)) {
+        return integer.Cast()->BitWidth() / 8;
+    }
+    if (auto floating = TMaybeType<TFloatType>(valueType)) {
+        return floating.Cast()->BitWidth() / 8;
+    }
+    if (TMaybeType<TBoolType>(valueType)) {
+        return 1;
+    }
+    return 0;
+}
+
 TColumnValueAst BuildColumnValueAst(
     const std::string& columnName,
     const std::string& rowName,

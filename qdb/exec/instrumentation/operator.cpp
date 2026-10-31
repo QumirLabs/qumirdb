@@ -1,5 +1,6 @@
 #include <qdb/exec/instrumentation/operator.h>
 
+#include <qdb/kernel/column_value.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 
@@ -17,18 +18,10 @@ std::vector<int64_t> InstrumentationColumnWidths(const NQumir::NAst::TTypePtr& t
     std::vector<int64_t> widths;
     for (const auto& [name, field] : structure.Cast()->Fields) {
         const auto value = UnwrapNamedType(UnwrapNullableType(field));
-        if (auto decimal = DecimalSpecOf(field)) {
-            widths.push_back(DecimalStorageBytes(*decimal));
-        } else if (IsBinIntStorageType(field)) {
-            widths.push_back(16);
-        } else if (TMaybeType<TStringType>(value)) {
+        if (TMaybeType<TStringType>(value)) {
             widths.push_back(-1);
-        } else if (auto integer = TMaybeType<TIntegerType>(value)) {
-            widths.push_back(integer.Cast()->BitWidth() / 8);
-        } else if (TMaybeType<TBoolType>(value)) {
-            widths.push_back(1);
-        } else if (TMaybeType<TFloatType>(value)) {
-            widths.push_back(8);
+        } else if (const auto width = NKernel::FixedValueWidth(field)) {
+            widths.push_back(width);
         } else {
             throw std::runtime_error("unsupported instrumentation column: " + field->ToString());
         }

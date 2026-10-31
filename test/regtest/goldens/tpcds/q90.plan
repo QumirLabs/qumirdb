@@ -1,5 +1,5 @@
 top-sort [am_pm_ratio asc] limit 100
-└─ project (am_pm_ratio) (rows≈1 cost≈30.2K)
+└─ project (am_pm_ratio) (rows≈1 cost≈30.3K)
    └─ join inner (rows≈1 cost≈30.2K)
       ├─ project (at.amc) (rows≈1 cost≈13.1K)
       │  └─ aggregate keys=[__group__] aggs=[count_0=count] (rows≈1 cost≈13.1K)

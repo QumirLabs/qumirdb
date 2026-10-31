@@ -1,8 +1,8 @@
 sort [n asc]
-└─ project (n) (rows≈6 cost≈256)
-   └─ union-all (rows≈6 cost≈208)
-      ├─ project (n) (rows≈5 cost≈80)
+└─ project (n) (rows≈6 cost≈352)
+   └─ union-all (rows≈6 cost≈256)
+      ├─ project (n) (rows≈5 cost≈120)
       │  └─ source t AS t (rows≈5 cost≈40)
-      └─ project (col0) (rows≈1 cost≈128)
+      └─ project (col0) (rows≈1 cost≈136)
          └─ filter (== |t_1.id| 1) (rows≈1 cost≈120)
             └─ source t AS t_1 row-groups (== |t_1.id| 1) (rows≈5 cost≈60)
