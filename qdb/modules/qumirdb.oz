@@ -877,6 +877,10 @@
   ;; result takes the dividend's sign, and x % 0.0 is NaN.
   (fun qdb_fmod ((var left f64) (var right f64)) -> f64
     (attrs (extern fmod) (operator "%")) (block))
+  ;; REAL % REAL stays REAL; fmod of two floats is exact, so the narrowing loses nothing.
+  (fun qdb_fmod_f32 ((var left f32) (var right f32)) -> f32
+    (attrs (operator "%"))
+    (block (return (cast (call qdb_fmod (cast left f64) (cast right f64)) f32))))
 
   ;; Decimal kernel storage. qdb logical Decimal(p,s) is erased to this signed
   ;; 128-bit two's-complement value before qumir compilation; precision/scale
@@ -1075,6 +1079,83 @@
       (if (! (&& (< rounded limit) (> rounded (- 0.0 limit))))
         (block (return (call qdb_decimal64_overflow precision))))
       (return (cast rounded i64))))
+  ;; 10^n as a double: exact for |n| <= 22, within a few ulps beyond.
+  (fun qdb_f64_pow10 ((var n i64)) -> f64
+    (block
+      (var k = n)
+      (if (< n 0) (block (= k (- 0 n))))
+      (var acc = 1.0)
+      (var base = 10.0)
+      (while (> k 0)
+        (block
+          (if (!= (& k 1) 0) (block (= acc (* acc base))))
+          (= k (>> k 1))
+          (= base (* base base))))
+      (if (< n 0) (block (return (/ 1.0 acc))))
+      (return acc)))
+  ;; CAST(REAL AS DECIMAL) as PostgreSQL's float4_numeric: the REAL is first rounded to six
+  ;; significant digits (printf "%.6g", ties to even), then to the scale, half away from
+  ;; zero. The digits come from double arithmetic, which is exact except for a value
+  ;; below 1e-4 or above 1e15 within 1e-9 of a rounding tie. NaN, infinities and values
+  ;; over 38 digits raise.
+  (fun qdb_decimal_from_f32 ((var value f32) (var scale i64)) -> BinInt
+    (block
+      (var a = (cast value f64))
+      (var negative = (< a 0.0))
+      (if negative (block (= a (- 0.0 a))))
+      (var result = (: 0 i128))
+      (if (! (< a (call qdb_f64_pow10 (: 38 i64))))
+        (block (= result (cast (call qdb_decimal64_overflow (: 38 i64)) i128))))
+      (if (> a 0.0)
+        (block
+          (var e = 0)
+          (while (>= a (call qdb_f64_pow10 (+ e 1))) (block (= e (+ e 1))))
+          (while (< a (call qdb_f64_pow10 e)) (block (= e (- e 1))))
+          (var p = (- 5 e))
+          (var t = 0.0)
+          (if (>= p 0)
+            (block (= t (* a (call qdb_f64_pow10 p))))
+            (block (= t (/ a (call qdb_f64_pow10 (- 0 p))))))
+          (var n = (cast t i64))
+          (var frac = (- t (cast n f64)))
+          (if (|| (> frac 0.5) (&& (== frac 0.5) (!= (& n 1) 0)))
+            (block (= n (+ n 1))))
+          (var shift = (- scale p))
+          (var wide = (cast n i128))
+          (if (>= shift 0)
+            (block
+              (if (> shift 32)
+                (block (= result (cast (call qdb_decimal64_overflow (: 38 i64)) i128))))
+              (var factor BinInt)
+              (= factor (call qdb_pow10_i128 shift))
+              (= result (* wide (field factor V)))
+              (var limit BinInt)
+              (= limit (call qdb_pow10_i128 (: 38 i64)))
+              (if (>= result (field limit V))
+                (block (= result (cast (call qdb_decimal64_overflow (: 38 i64)) i128)))))
+            (block
+              (var drop = (- 0 shift))
+              (if (<= drop 7)
+                (block
+                  (var factor BinInt)
+                  (= factor (call qdb_pow10_i128 drop))
+                  (var q = (// wide (field factor V)))
+                  (var r = (- wide (* q (field factor V))))
+                  (if (>= (+ r r) (field factor V)) (block (= q (+ q (: 1 i128)))))
+                  (= result q)))))))
+      (if negative (block (= result (- (: 0 i128) result))))
+      (return (cast (struct ((V result))) BinInt))))
+  ;; CAST(float AS integer) rounds half to even, as PostgreSQL's rint and DuckDB do. Adding
+  ;; and removing 2^52 rounds to an integer in the default mode; a larger value (or NaN)
+  ;; is returned as is.
+  (fun qdb_rint ((var value f64)) -> f64
+    (block
+      (if (&& (> value (- 0.0 4503599627370496.0)) (< value 4503599627370496.0))
+        (block
+          (if (< value 0.0)
+            (block (return (+ (- value 4503599627370496.0) 4503599627370496.0))))
+          (return (- (+ value 4503599627370496.0) 4503599627370496.0))))
+      (return value)))
   ;; Below 2^53 both operands are exact doubles (10^18 is one), so the division is
   ;; correctly rounded; larger values take the exact i128 routine.
   (fun qdb_decimal64_to_f64 ((var value i64) (var scale i64)) -> f64
@@ -1147,6 +1228,8 @@
     (block (return (call qdb_abs_i64 value))))
   (fun abs ((var value f64)) -> f64
     (block (return (call qdb_fabs value))))
+  (fun abs ((var value f32)) -> f32
+    (block (return (cast (call qdb_fabs (cast value f64)) f32))))
   (fun abs ((var value BinInt)) -> BinInt
     (block
       (var raw i128)

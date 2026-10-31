@@ -1,0 +1,4 @@
+sort [id asc]
+└─ project (id, abs_f, abs_neg, abs_sum, abs_double) (rows≈10 cost≈560)
+   └─ project (q.id, q.f, q.g) (rows≈10 cost≈320)
+      └─ source t AS t (rows≈10 cost≈200)
