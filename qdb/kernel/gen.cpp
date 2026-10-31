@@ -222,7 +222,6 @@ NQumir::NAst::TExprPtr CanonicalFloatBits(
             number(quietNaN), bitcast(KeyValueExpr(root, path), bitsType)));
 }
 
-
 NQumir::NAst::TExprPtr HashKeyValue(
     const NQumir::NAst::TTypePtr& originalType,
     const std::string& root,

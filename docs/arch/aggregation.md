@@ -120,8 +120,8 @@ The generator recursively walks the AST type rather than the raw memory:
 
 Equality follows the same recursive type walk. Integer leaves use ordinary
 equality. `f32` and `f64` compare canonicalized bits, so all NaNs are equal
-for hash-key purposes and signed zeroes are equal. Struct equality is the conjunction of
-all field equalities.
+for hash-key purposes and signed zeroes are equal. Struct equality is the
+conjunction of all field equalities.
 
 The invariant is strict: if `rh_key_equal(a, b)` is true, both values must have
 the same `rh_hash` result.

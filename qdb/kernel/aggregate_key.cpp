@@ -89,8 +89,8 @@ std::string PhysicalKeyInnerComponentName(const NQumir::NAst::TTypePtr& original
     if (auto integer = TMaybeType<TIntegerType>(type)) {
         return integer.Cast()->ToString();
     }
-    if (TMaybeType<TFloatType>(type)) {
-        return FixedValueWidth(type) == 4 ? "f32" : "f64";
+    if (auto floating = TMaybeType<TFloatType>(type)) {
+        return floating.Cast()->ToString();
     }
     if (TMaybeType<TBoolType>(type)) {
         return "bool";
