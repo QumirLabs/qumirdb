@@ -1637,6 +1637,9 @@ function createQdbEnv(getMemory, holder) {
       return value < 0n ? -value : value;
     },
     qdb_fabs: Math.abs,
+    qdb_decimal64_overflow: (precision) => {
+      throw new Error(`value does not fit DECIMAL precision ${precision}`);
+    },
     // Cast a string-literal char* to a StringView {Data = lit, Size = strlen}
     // (sret out pointer). Matches qdb_lit_to_sv in qumirdb_runtime.cpp.
     qdb_lit_to_sv: (out, lit) => {

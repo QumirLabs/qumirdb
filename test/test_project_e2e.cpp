@@ -382,7 +382,7 @@ TEST(ProjectE2E, Decimal64FromF64RoundsHalfAwayFromZero) {
 
     auto plan = Plan(
         "(rel project (rel source \"L\") "
-        "(d (call qdb_decimal64_from_f64 x (: 1 i64))))",
+        "(d (call qdb_decimal64_from_f64 x (: 1 i64) (: 18 i64))))",
         src);
 
     TRowSet out{};

@@ -81,6 +81,23 @@ int32_t ScaleOf(const TTypePtr& type) {
     return DecimalSpecOfValueType(type)->Scale;
 }
 
+int32_t PrecisionOf(const TTypePtr& type) {
+    return DecimalSpecOfValueType(type)->Precision;
+}
+
+// The digits an integer type can hold; 64-bit takes 20 for u64.
+int32_t IntegerDigits(const TTypePtr& type) {
+    switch (TMaybeType<TIntegerType>(UnwrapNamedType(type)).Cast()->BitWidth()) {
+        case 8:
+            return 3;
+        case 16:
+            return 5;
+        case 32:
+            return 10;
+    }
+    return 20;
+}
+
 // The digits go to the kernel's scratch arena, like the bytes of `||`; `__arena__` is
 // the placeholder the codegen binds to it. One runtime function serves every signed
 // width and one every unsigned width: a u64 above 2^63-1 has no i64 to widen to.
@@ -120,18 +137,28 @@ bool IsDecimal64(const TTypePtr& type) {
 // conversions below come from qumirdb.oz and take the scale as a literal.
 // qdb_decimal*_from_* round the value to the target scale, qdb_decimal*_to_* round half
 // away from zero and saturate.
-TExprPtr IntegerToDecimal(const TExprPtr& operand, const TTypePtr&, const TTypePtr& to,
+TExprPtr IntegerToDecimal(const TExprPtr& operand, const TTypePtr& from, const TTypePtr& to,
     TLocation loc)
 {
-    return Call(IsDecimal64(to) ? "qdb_decimal64_scale_up" : "qdb_decimal_from_i64",
-        {CastToI64(operand, loc), Int64(ScaleOf(to), loc)}, loc);
+    if (!IsDecimal64(to)) {
+        return Call("qdb_decimal_from_i64", {CastToI64(operand, loc), Int64(ScaleOf(to), loc)}, loc);
+    }
+    // Digits that do not fit the precision raise, like DuckDB, instead of wrapping in i64.
+    const bool fits = IntegerDigits(from) <= PrecisionOf(to) - ScaleOf(to);
+    return fits
+        ? Call("qdb_decimal64_scale_up", {CastToI64(operand, loc), Int64(ScaleOf(to), loc)}, loc)
+        : Call("qdb_decimal64_scale_up_checked", {CastToI64(operand, loc),
+            Int64(ScaleOf(to), loc), Int64(PrecisionOf(to), loc)}, loc);
 }
 
 TExprPtr FloatToDecimal(const TExprPtr& operand, const TTypePtr&, const TTypePtr& to,
     TLocation loc)
 {
-    return Call(IsDecimal64(to) ? "qdb_decimal64_from_f64" : "qdb_decimal_from_f64",
-        {operand, Int64(ScaleOf(to), loc)}, loc);
+    if (!IsDecimal64(to)) {
+        return Call("qdb_decimal_from_f64", {operand, Int64(ScaleOf(to), loc)}, loc);
+    }
+    return Call("qdb_decimal64_from_f64",
+        {operand, Int64(ScaleOf(to), loc), Int64(PrecisionOf(to), loc)}, loc);
 }
 
 // Only the scale changes the digits: the same scale is the identity, a larger one
@@ -149,6 +176,11 @@ TExprPtr DecimalToDecimal(const TExprPtr& operand, const TTypePtr& from, const T
     }
     const int32_t delta = toScale - fromScale;
     if (IsDecimal64(from) && IsDecimal64(to)) {
+        // A target with fewer integer digits can overflow: it raises instead of wrapping.
+        if (PrecisionOf(to) - toScale < PrecisionOf(from) - fromScale) {
+            return Call("qdb_decimal64_scale_up_checked",
+                {operand, Int64(delta, loc), Int64(PrecisionOf(to), loc)}, loc);
+        }
         return delta == 0
             ? operand
             : Call("qdb_decimal64_scale_up", {operand, Int64(delta, loc)}, loc);
@@ -160,7 +192,7 @@ TExprPtr DecimalToDecimal(const TExprPtr& operand, const TTypePtr& from, const T
         wide = Call("qdb_decimal_scale_up", {std::move(wide), Int64(delta, loc)}, loc);
     }
     return IsDecimal64(to)
-        ? Call("qdb_decimal64_narrow", {std::move(wide)}, loc)
+        ? Call("qdb_decimal64_narrow_checked", {std::move(wide), Int64(PrecisionOf(to), loc)}, loc)
         : wide;
 }
 

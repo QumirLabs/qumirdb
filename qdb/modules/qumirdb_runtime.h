@@ -121,6 +121,10 @@ int32_t qdb_abs_i32(int32_t value);
 int64_t qdb_abs_i64(int64_t value);
 double qdb_fabs(double value);
 
+// Raises the error of a value that has more than `precision` digits; the i64 decimal
+// kernels call it after an inline range check.
+int64_t qdb_decimal64_overflow(int64_t precision);
+
 qdb_bin_int qdb_decimal_from_i64(int64_t value, int64_t scale);
 qdb_bin_int qdb_decimal_from_f64(double value, int64_t scale);
 qdb_bin_int qdb_decimal_scale_up(qdb_bin_int value, int64_t delta);
