@@ -22,6 +22,7 @@
 #include <arrow/io/api.h>
 #include <parquet/arrow/writer.h>
 #include <parquet/column_writer.h>
+#include <parquet/file_reader.h>
 #include <parquet/file_writer.h>
 
 using namespace NQdb;
@@ -720,7 +721,8 @@ TEST(IOTest, ScanDecimalColumnsInTheirStorage) {
 
 // Every physical type of a decimal, PLAIN and dictionary encoded, REQUIRED and with NULLs,
 // read through many pages, page-sized and chunk-sized reads, and row groups in one batch.
-// Fixed-length values are sign-extended to their length, BYTE_ARRAY values are minimal.
+// Fixed-length values are sign-extended to their length, BYTE_ARRAY values come in minimal,
+// sign-padded and empty (zero) forms. A dictionary chunk has several pages and falls back to PLAIN.
 TEST(IOTest, ScanDecimalPagesOfEveryPhysicalType) {
     struct TCase {
         parquet::Type::type Physical;
@@ -737,14 +739,18 @@ TEST(IOTest, ScanDecimalPagesOfEveryPhysicalType) {
         }
         return bytes;
     };
-    auto minimalLength = [](__int128 value) {
+    // A BYTE_ARRAY decimal may carry any number of redundant sign bytes, and zero may be empty.
+    auto byteArrayLength = [&](__int128 value, int64_t row) {
         int length = 1;
         while (length < 16 && (value >= (static_cast<__int128>(1) << (8 * length - 1)) ||
             value < -(static_cast<__int128>(1) << (8 * length - 1))))
         {
             ++length;
         }
-        return length;
+        if (value == 0 && row % 3 == 0) {
+            return 0;
+        }
+        return std::min(16, length + static_cast<int>(row % 4));
     };
     for (const bool dictionary : {true, false}) {
         for (const auto& testCase : std::vector<TCase>{
@@ -796,6 +802,9 @@ TEST(IOTest, ScanDecimalPagesOfEveryPhysicalType) {
                 parquet::WriterProperties::Builder properties;
                 if (dictionary) {
                     properties.enable_dictionary();
+                    properties.data_pagesize(1000);
+                    properties.dictionary_pagesize_limit(2000);
+                    properties.write_batch_size(128);
                 } else {
                     properties.disable_dictionary();
                     properties.data_pagesize(1000);
@@ -816,7 +825,7 @@ TEST(IOTest, ScanDecimalPagesOfEveryPhysicalType) {
                         ints.push_back(static_cast<int32_t>(*values[row]));
                         longs.push_back(static_cast<int64_t>(*values[row]));
                         bytes.push_back(bigEndian(*values[row],
-                            testCase.Length ? testCase.Length : minimalLength(*values[row])));
+                            testCase.Length ? testCase.Length : byteArrayLength(*values[row], row)));
                     }
                     auto* column = writer->AppendRowGroup()->NextColumn();
                     const auto count = static_cast<int64_t>(defLevels.size());
@@ -845,6 +854,22 @@ TEST(IOTest, ScanDecimalPagesOfEveryPhysicalType) {
                 }
                 writer->Close();
                 ASSERT_TRUE(output->Close().ok());
+            }
+
+            if (dictionary && testCase.Precision >= 9) {
+                // Thousands of distinct values overflow the dictionary page limit mid-chunk.
+                auto metadata = parquet::ParquetFileReader::OpenFile(path)->metadata();
+                for (int group = 0; group < metadata->num_row_groups(); ++group) {
+                    int64_t dictionaryPages = 0;
+                    int64_t plainPages = 0;
+                    for (const auto& stats : metadata->RowGroup(group)->ColumnChunk(0)->encoding_stats()) {
+                        if (stats.page_type == parquet::PageType::DATA_PAGE) {
+                            (stats.encoding == parquet::Encoding::PLAIN ? plainPages : dictionaryPages) += stats.count;
+                        }
+                    }
+                    EXPECT_GT(dictionaryPages, 0) << label << " group " << group;
+                    EXPECT_GT(plainPages, 0) << label << " group " << group;
+                }
             }
 
             const auto scanned = ScanDecimalStorage(path, {.Precision = testCase.Precision, .Scale = 2});

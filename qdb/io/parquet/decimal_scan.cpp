@@ -45,6 +45,8 @@ auto BigEndianUnscaled(const uint8_t* bytes) {
 }
 
 // Calls `func` with std::integral_constant<int, length> for a FIXED_LEN_BYTE_ARRAY length.
+// ReadRows is instantiated per length (32 instantiations) so the byte swap has a
+// compile-time size; accepted for the measured gain over a runtime-length loop.
 template <int Length = 1, typename TFunc>
 void WithLength(int length, TFunc&& func) {
     if constexpr (Length > 16) {
