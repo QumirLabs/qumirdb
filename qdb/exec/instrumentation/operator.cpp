@@ -35,7 +35,7 @@ void TRowSetInstrumentation::Add(const TRowSet& rowSet) {
     }
     using TMeasure = void(*)(const TRowSet*, const int64_t*, int64_t*);
     int64_t values[2] = {};
-    reinterpret_cast<TMeasure>(Kernel->Fns[0])(&rowSet, Widths.data(), values);
+    Kernel->Call<TMeasure>(0, &rowSet, Widths.data(), values);
     Rows += values[0];
     Bytes += values[1];
 }
@@ -70,7 +70,7 @@ void TOperatorInstrumentation::ObserveHash(
 {
     using TMeasure = void(*)(void*, int64_t, const int64_t*, int64_t, int64_t*);
     int64_t values[6] = {};
-    reinterpret_cast<TMeasure>(Kernel->Fns[1])(
+    Kernel->Call<TMeasure>(1,
         table, join, stringBuffers.data(), stringBuffers.size(), values);
     HasHash = true;
     HasBuildMemory = true;
