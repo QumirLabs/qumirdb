@@ -60,6 +60,10 @@
 namespace NQdb {
 namespace {
 
+// A later stage of a staged scan skips the decompression of pages and the copying of
+// values; a column no wider than a fixed-width value saves neither, so stage 0 reads it.
+constexpr double MaxNarrowColumnBytes = 16.0;
+
 struct TSchedulerSourceState {
     ISource* Source = nullptr;
     std::unique_ptr<ISource> OwnedSource;
@@ -1224,9 +1228,9 @@ private:
         return result;
     }
 
-    // A chain of filters over a Parquet scan runs inside the scan task (TStagedScan): the
-    // columns are read in the steps of OrderScanConjuncts, each one only for the rows the
-    // earlier steps keep. nullopt keeps the scan and the filter as separate tasks.
+    // A chain of filters over a Parquet scan runs inside the scan task (TStagedScan): stage 0
+    // reads the narrow columns, each later stage wide columns only for the rows the earlier
+    // stages keep, in OrderScanConjuncts order. nullopt keeps the scan and filter tasks.
     std::optional<TLoweredOutput> LowerStagedScan(
         const std::shared_ptr<TFilterOperator>& filter,
         NScheduler::IConnection& outConn,
@@ -1261,6 +1265,16 @@ private:
         if (!splits || splits->empty() || !std::ranges::all_of(*splits, readsRowGroups)) {
             return std::nullopt;
         }
+        // Fusing gives up the overlap of the scan and filter tasks, which is part of the
+        // query's parallelism while the scan has fewer lanes than workers.
+        const bool threaded =
+            Settings_.Scheduler.Mode == NScheduler::EExecutionMode::ThreadedScheduler;
+        const size_t workers = threaded
+            ? Settings_.Scheduler.WorkerCount
+            : 1;
+        if (splits->size() < workers) {
+            return std::nullopt;
+        }
 
         const auto sourceType = BuildSourceRuntimeType(*source);
         const auto& sourceStruct = static_cast<const NQumir::NAst::TStructType&>(*sourceType);
@@ -1272,28 +1286,53 @@ private:
                 fileColumns.emplace(sourceStruct.Fields[i].first, std::move(name));
             }
         }
-        auto steps = NScheduler::OrderScanConjuncts(
-            ScanConjuncts(predicates, input), ColumnBytes(*source, *parquet));
-        std::vector<std::vector<std::string>> groups;
+        // Stage 0 reads every narrow column, so a narrow column costs the order nothing.
+        auto columnBytes = ColumnBytes(*source, *parquet);
+        std::unordered_set<std::string> narrow;
+        for (auto& [name, bytes] : columnBytes) {
+            if (bytes <= MaxNarrowColumnBytes) {
+                narrow.insert(name);
+                bytes = 0.0;
+            }
+        }
+        // A step that adds only narrow columns runs in the stage before it.
+        std::vector<NScheduler::TScanFilterStep> stages;
         std::unordered_set<std::string> filterColumns;
-        for (const auto& step : steps) {
-            auto& group = groups.emplace_back();
-            for (const auto& column : step.NewColumns) {
-                filterColumns.insert(column);
+        auto steps = NScheduler::OrderScanConjuncts(ScanConjuncts(predicates, input), columnBytes);
+        for (auto& step : steps) {
+            filterColumns.insert(step.NewColumns.begin(), step.NewColumns.end());
+            std::erase_if(step.NewColumns, [&](const std::string& column) {
+                return !stages.empty() && narrow.contains(column);
+            });
+            if (!stages.empty() && step.NewColumns.empty()) {
+                auto& conjuncts = stages.back().Conjuncts;
+                conjuncts.insert(conjuncts.end(), step.Conjuncts.begin(), step.Conjuncts.end());
+                continue;
+            }
+            stages.push_back(std::move(step));
+        }
+        auto fileColumnsOf = [&](const std::vector<std::string>& columns) {
+            std::vector<std::string> files;
+            for (const auto& column : columns) {
                 if (auto file = fileColumns.find(column); file != fileColumns.end()) {
-                    group.push_back(file->second);
+                    files.push_back(file->second);
                 }
             }
+            return files;
+        };
+        std::vector<std::vector<std::string>> groups;
+        for (const auto& stage : stages) {
+            groups.push_back(fileColumnsOf(stage.NewColumns));
         }
         std::vector<std::string> payload;
         for (const auto& [name, _] : sourceStruct.Fields) {
-            auto file = fileColumns.find(name);
-            if (file != fileColumns.end() && !filterColumns.contains(name)) {
-                payload.push_back(file->second);
+            if (!filterColumns.contains(name) && !narrow.contains(name)) {
+                payload.push_back(name);
             }
         }
-        // One step and no payload leaves nothing to read later.
-        if (groups.empty() || groups[0].empty() || (steps.size() == 1 && payload.empty())) {
+        payload = fileColumnsOf(payload);
+        // Nothing wide to read after stage 0: sparse reading would not pay off.
+        if (groups.empty() || groups[0].empty() || (stages.size() == 1 && payload.empty())) {
             return std::nullopt;
         }
         auto columnPlan = BuildFilterColumnPlan(*filter, sourceType);
@@ -1314,9 +1353,9 @@ private:
         auto plan = std::make_shared<TStagedScanPlan>();
         {
             TStageDiagnosticsScope diagnosticsScope(Diagnostics_, stageLabel);
-            for (const auto& step : steps) {
+            for (const auto& stage : stages) {
                 auto spec = NKernel::BuildFilterKernelSpec(
-                    sourceStruct, ConjoinPredicates(step.Conjuncts), "<kernel>",
+                    sourceStruct, ConjoinPredicates(stage.Conjuncts), "<kernel>",
                     ExternalCatalog_.get(), RuntimeContext_.get());
                 TKernelCompiler compiler(KernelOptions(stageLabel, execStageId));
                 plan->Stages.push_back(compiler.CompileFilter(spec));

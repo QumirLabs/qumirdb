@@ -14,15 +14,20 @@ SELECT SearchPhrase, MIN(URL), MIN(Title), COUNT(*), COUNT(DISTINCT UserID)
 FROM hits
 WHERE Title LIKE '%Google%' AND URL NOT LIKE '%.google.%' AND SearchPhrase <> ''
 GROUP BY SearchPhrase;
--- stages: [SearchPhrase] [Title] [URL], payload: [UserID]
+-- stages: [SearchPhrase, UserID] [Title] [URL]
 ```
 
 ## Stages
 
-The stages come from the conjunct order of
-[optimizations.md 4.11](optimizations.md#411-conjunct-order-in-a-filter-over-a-scan):
-a stage is a run of conjuncts that add the same columns, cheapest columns
-first. A stage-0 conjunct reads only stage-0 columns, so stage 0 sees every row.
+Only a wide column is read in a later stage: one of more than 16 bytes per row
+uncompressed in the file metadata, wider than any fixed-width value. A narrow
+column, an integer, a date, a decimal or a short string, gains nothing from a
+sparse read: its pages are decompressed either way and its values cost as much
+to skip as to copy. Stage 0 reads every narrow column the scan needs, filter
+or payload. The stages come from the conjunct order of
+[optimizations.md 4.11](optimizations.md#411-conjunct-order-in-a-filter-over-a-scan)
+with the narrow columns counted as free: the conjuncts over narrow columns run
+in stage 0, then each wide column in the order of its cost.
 
 - Stage 0 is read densely with Arrow, as an ordinary scan, and sets the batch.
 - A later stage is read with the Parquet column reader. A page without a row
@@ -39,9 +44,13 @@ pass `SearchPhrase <> ''` and they still touch almost every URL page, so the
 saving there is the copy; in q22 the rows left after `Title LIKE` touch 27% of
 the URL pages.
 
-The staged scan applies to a chain of filters over one Parquet source that has
-at least two stages, or one stage and a payload; otherwise the filter stays a
-task after the scan. `[scan] staged_filter` turns it off. The exported browser
+The staged scan applies to a chain of filters over one Parquet source when a
+wide column is left after stage 0, to filter or to carry, and the scan has at
+least as many lanes as there are workers. Otherwise the filter stays a task
+after the scan. Fusing gives up the overlap of the scan and filter tasks of a
+lane: while lanes are fewer than workers, that overlap is part of the query's
+parallelism, and a staged scan of a small dimension table measured slower for
+the same CPU time. `[scan] staged_filter` turns it off. The exported browser
 plan keeps the separate filter, as its sources are read in JavaScript. Runtime
 filters of the source stay tasks after the scan and see its selection.
 
