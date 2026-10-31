@@ -1,6 +1,7 @@
 #pragma once
 #include <coroio/actors/actor.hpp>
 #include <qdb/io/io.h>
+#include <qdb/io/rowset_ops.h>
 
 namespace NQdb {
 namespace NRemote {
@@ -31,14 +32,6 @@ struct TSpawnComputeActorResponse {
 // compute-actor
 
 // used for serialization
-struct TColumnDescriptor {
-    uint8_t EntrySize; // 0 for bool
-    bool IsVariadic; // true for string
-};
-
-struct TDataDescriptor {
-    std::vector<TColumnDescriptor> Descriptors;
-};
 
 // Push(srcId, TRowSet&&)
 struct TDataChunk {
@@ -46,7 +39,7 @@ struct TDataChunk {
     uint32_t DstTaskId;
     uint32_t SrcLaneId;
     TRowSet RowSet;
-    TDataDescriptor* Descriptor; // serialization helper, is not passed to wire
+    const TValueLayout* Descriptor;
 };
 
 // Finish(srcId)
