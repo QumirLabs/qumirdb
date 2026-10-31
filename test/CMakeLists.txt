@@ -46,6 +46,7 @@ ut(test_join_key test_join_key.cpp)
 ut(test_finalize_fused test_finalize_fused.cpp)
 ut(test_project_type test_project_type.cpp)
 ut(test_project_kernel test_project_kernel.cpp)
+ut(test_kernel_vm test_kernel_vm.cpp)
 ut(test_kernel_spec test_kernel_spec.cpp)
 ut(test_project_e2e test_project_e2e.cpp)
 ut(test_external_module test_external_module.cpp)
@@ -81,6 +82,17 @@ foreach(shard RANGE 3)
     set_tests_properties(test_reg_${shard} PROPERTIES COST 100
         ENVIRONMENT "GTEST_TOTAL_SHARDS=4;GTEST_SHARD_INDEX=${shard}")
 endforeach()
+# Executing suites that the Qumir VM kernel backend runs completely, against the
+# LLVM goldens (#109; stage 4 replaces this list with per-case backends).
+set(QDB_REG_VM_SUITES aggregate_empty aggregate_subquery_arguments keyless_joins
+    outer_join_to_anti order_by null_order_default set_operations grouping_results
+    window_helper_names scalar_subquery_no_row decimal_wide_division parquet_float)
+list(TRANSFORM QDB_REG_VM_SUITES PREPEND "RegQuery.")
+list(TRANSFORM QDB_REG_VM_SUITES APPEND "_*")
+list(JOIN QDB_REG_VM_SUITES ":" QDB_REG_VM_FILTER)
+add_test(NAME test_reg_vm COMMAND test_reg ${QDB_REG_ARGS} --kernel:backend=vm
+    --gtest_filter=${QDB_REG_VM_FILTER}
+    --gtest_output=xml:${CMAKE_CURRENT_BINARY_DIR}/test_reg_vm.xml)
 # The whole suite over another table: the symmetric join table
 # (test_reg_legacy_join), the row layout of the aggregate table from the start
 # (test_reg_row_aggregate) and the global aggregate cascade (test_reg_cascade_global;

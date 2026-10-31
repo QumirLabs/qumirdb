@@ -142,7 +142,7 @@ TEST(RuntimeFilterKernel, BindsWhenTheQueryIsFinalized) {
     EXPECT_EQ(kernels.front().Entrypoints, (std::vector<std::string>(
         RuntimeFilterKernelEntrypoints.begin(), RuntimeFilterKernelEntrypoints.end())));
     EXPECT_FALSE(kernels.front().Slot->Runner);
-    JitFinalizeKernels(kernels);
+    FinalizeKernels(kernels, EKernelBackend::Llvm);
 
     TRuntimeFilter filter(runtime, /*maxKeys=*/8, /*bloomBytes=*/512);
     auto keys = Hashes(200, 23);

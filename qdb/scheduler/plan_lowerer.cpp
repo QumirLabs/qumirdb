@@ -3637,8 +3637,9 @@ bool RunPlanIntoSink(
     if (settings.Instrumentation.Operators) {
         EnableOperatorInstrumentation(lowered);
     }
-    JitFinalizeKernels(
-        lowered.Kernels, diagnostics, lowered.ExternalCatalog, settings.Jit.CacheDir);
+    FinalizeKernels(
+        lowered.Kernels, settings.Kernel.Backend, diagnostics, lowered.ExternalCatalog,
+        settings.Jit.CacheDir);
     if (!lowered.Graph->Validate(error)) {
         return false;
     }

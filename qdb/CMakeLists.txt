@@ -81,6 +81,8 @@ add_library(qumirdb
     kernel/lib.cpp
     kernel/compiler.cpp
     kernel/finalize.cpp
+    kernel/execution_context.cpp
+    kernel/vm_program.cpp
     kernel/finalize_fused.cpp
     exec/instrumentation/operator.cpp
     scheduler/instrumentation/task.cpp

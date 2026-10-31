@@ -13,7 +13,7 @@ logical plan
 TLoweredPlan  =  TTaskGraph + Kernels: every kernel as TGeneratedKernel
                  (program ASTs, named entries, and bindings; not compiled)
   │  machine finalization (the ONLY fork)
-  ├── JitFinalizeKernels  → deduplicate + fuse all ASTs, compile one native
+  ├── FinalizeKernels     → deduplicate + fuse all ASTs, compile one native
   │                          module, fill every kernel's TKernelSlot
   └── WasmFinalizeKernels → use the same deduplication/fusion, compile one
                              query-level wasm64 module, publish its entrypoint
@@ -50,7 +50,7 @@ operator pointer, debug label, or target is an identity in this phase.
 
 ## Finalization
 
-- JIT: `JitFinalizeKernels`  — deduplicate kernels by
+- JIT: `FinalizeKernels`  — deduplicate kernels by
   AST + entrypoints, build one `TFusedProgram`, compile it through one
   `TLLVMRunner`, then fill every `Slot->Fns` in original entrypoint order. All
   slots retain the runner (and cached-JIT lifetime when enabled). Idempotent.

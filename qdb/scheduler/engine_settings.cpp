@@ -216,6 +216,11 @@ TEngineConfigBuilder BuildEngineConfig() {
     b.String("cache_dir", [](auto& s) -> auto& { return s.Scheduler.Jit.CacheDir; },
         "Persistent cache of compiled kernel dependencies; empty disables it.");
 
+    b.Section("kernel");
+    b.Enum("backend", KernelBackendNames, ParseKernelBackend,
+        [](auto& s) -> auto& { return s.Scheduler.Kernel.Backend; },
+        "Where generated kernels run: llvm (native code) or vm (the Qumir interpreter).");
+
     b.Section("io");
     b.Enum("arrow_memory_pool", ArrowMemoryPoolNames, ParseArrowMemoryPool,
         [](auto& s) -> auto& { return s.ArrowMemoryPool; },

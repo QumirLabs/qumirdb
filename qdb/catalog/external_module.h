@@ -42,6 +42,9 @@ public:
     std::expected<std::monostate, NQumir::TError> RegisterDeclarations(
         NQumir::NFrontend::TSourceModuleLoader& loader) const;
 
+    // Whether `ast` calls a function of an external module; compiles nothing.
+    bool ReferencesModules(const NQumir::NAst::TExprPtr& ast) const;
+
     // Finds external calls in `ast`, lazily compiles only their modules and
     // composes their declarations + LLVM bitcode. nullopt means no external
     // module was referenced. An empty target selects rustc's native target;

@@ -3,6 +3,7 @@
 #include <qdb/catalog/external_module.h>
 #include <qdb/kernel/compiler.h>
 #include <qdb/kernel/finalize_fused.h>
+#include <qdb/kernel/vm_program.h>
 
 #include <memory>
 #include <optional>
@@ -28,8 +29,9 @@ struct TFusedKernelStorage {
 
 } // namespace
 
-void JitFinalizeKernels(
+void FinalizeKernels(
     std::span<TGeneratedKernel> kernels,
+    EKernelBackend backend,
     std::ostream* diagnostics,
     std::shared_ptr<const TExternalCatalogSnapshot> externalCatalog,
     const std::string& cacheDir)
@@ -40,9 +42,13 @@ void JitFinalizeKernels(
     for (auto& kernel : kernels) {
         if (!kernel.Slot) {
             throw std::logic_error(
-                "JitFinalizeKernels: kernel '" + kernel.Name + "' has no slot");
+                "FinalizeKernels: kernel '" + kernel.Name + "' has no slot");
         }
-        if (kernel.Slot->Runner) {
+        if (kernel.Slot->Runner || kernel.Slot->Vm) {
+            if ((kernel.Slot->Vm != nullptr) != (backend == EKernelBackend::Vm)) {
+                throw std::logic_error(
+                    "FinalizeKernels: kernel '" + kernel.Name + "' is bound for the other backend");
+            }
             continue; // already bound
         }
 
@@ -67,17 +73,10 @@ void JitFinalizeKernels(
                      << ", type decls: " << fused.TypeDeclCount
                      << ", function decls: " << fused.FunctionDeclCount
                      << ", entrypoints: " << fused.Entrypoints.size()
+                     << (backend == EKernelBackend::Vm ? ", backend: vm" : "")
                      << (cacheDir.empty() ? "" : ", cache: on")
                      << "\n";
     }
-
-    auto options = KernelRunnerOptions();
-    options.CoreInput = !(externalCatalog && externalCatalog->HasKumirModules());
-    options.NativeCode = true;
-    options.EnablePerfJitEventListener = true;
-    options.PrintIr = diagnostics != nullptr;
-    options.PrintLlvm = diagnostics != nullptr;
-    auto runner = std::make_shared<NQumir::TLLVMRunner>(std::move(options));
 
     auto storage = std::make_shared<TFusedKernelStorage>();
     storage->ExternalCatalog = externalCatalog;
@@ -89,6 +88,35 @@ void JitFinalizeKernels(
         }
     }
     storage->Program = std::move(fused.Program);
+
+    if (backend == EKernelBackend::Vm) {
+        // The VM runs oz code only, not the bitcode or native code of an external module.
+        if (externalCatalog && externalCatalog->ReferencesModules(storage->Program)) {
+            throw std::runtime_error(
+                "the vm kernel backend does not run external modules; use --kernel:backend=llvm");
+        }
+        auto program = PrepareVmProgram(storage->Program, fused.Entrypoints);
+        if (diagnostics) {
+            *diagnostics << "========== END RUNTIME FUSED FINALIZE ==========\n";
+        }
+        for (const auto& [kernel, uniqueIndex] : bindings) {
+            kernel->Slot->Vm = program;
+            kernel->Slot->VmFns.clear();
+            for (const auto& name : fused.UniqueEntrypoints[uniqueIndex]) {
+                kernel->Slot->VmFns.push_back(program->Entries.at(name));
+            }
+            kernel->Storage = storage;
+        }
+        return;
+    }
+
+    auto options = KernelRunnerOptions();
+    options.CoreInput = !(externalCatalog && externalCatalog->HasKumirModules());
+    options.NativeCode = true;
+    options.EnablePerfJitEventListener = true;
+    options.PrintIr = diagnostics != nullptr;
+    options.PrintLlvm = diagnostics != nullptr;
+    auto runner = std::make_shared<NQumir::TLLVMRunner>(std::move(options));
 
     std::string error;
     std::unordered_map<std::string, void*> fns;
