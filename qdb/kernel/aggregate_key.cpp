@@ -90,7 +90,7 @@ std::string PhysicalKeyInnerComponentName(const NQumir::NAst::TTypePtr& original
         return integer.Cast()->ToString();
     }
     if (TMaybeType<TFloatType>(type)) {
-        return "f64";
+        return FixedValueWidth(type) == 4 ? "f32" : "f64";
     }
     if (TMaybeType<TBoolType>(type)) {
         return "bool";

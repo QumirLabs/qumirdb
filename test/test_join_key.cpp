@@ -17,6 +17,7 @@ using namespace NQumir::NAst;
 namespace {
 
 TTypePtr I(TIntegerType::EKind k) { return std::make_shared<TIntegerType>(k); }
+TTypePtr F32() { return std::make_shared<TFloatType>(TFloatType::F32); }
 TTypePtr F64() { return std::make_shared<TFloatType>(); }
 TTypePtr Str() { return std::make_shared<TStringType>(); }
 TTypePtr Dec() { return std::make_shared<NQdb::TDecimal>(38, 6); }
@@ -91,6 +92,19 @@ TEST(JoinKeyDescriptor, ScalarF64) {
     auto d = BuildJoinKeyDescriptor(
         Schema({{"a", F64()}}), Schema({{"b", F64()}}), {{"a", "b"}});
     EXPECT_EQ(d.Fields[0].Size, 8u);
+    EXPECT_FALSE(d.HasDistinctLookupType());
+}
+
+TEST(JoinKeyDescriptor, F32InCompositeKeyIsPackedBySize) {
+    auto left = Schema({{"a", I(TIntegerType::I32)}, {"b", F32()}, {"c", I(TIntegerType::I64)}});
+    auto right = Schema({{"x", I(TIntegerType::I32)}, {"y", F32()}, {"z", I(TIntegerType::I64)}});
+    auto d = BuildJoinKeyDescriptor(left, right, {{"a", "x"}, {"b", "y"}, {"c", "z"}});
+    ASSERT_EQ(d.Fields.size(), 3u);
+    EXPECT_EQ(d.Fields[1].Offset, 4u);
+    EXPECT_EQ(d.Fields[1].Size, 4u);
+    EXPECT_EQ(d.Fields[2].Offset, 8u);
+    EXPECT_EQ(d.Size, 16u);
+    EXPECT_NE(d.TypeName.find("f32"), std::string::npos);
     EXPECT_FALSE(d.HasDistinctLookupType());
 }
 

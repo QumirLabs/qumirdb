@@ -112,14 +112,15 @@ The generator recursively walks the AST type rather than the raw memory:
 
 - integers are converted through the corresponding unsigned width, widened to
   `u64`, and mixed with the xorshift/multiply sequence used by the project;
-- `f64` uses `qdb_f64_bits`, canonicalizes `+0.0` and `-0.0` to the same bits,
-  canonicalizes every NaN payload to one quiet NaN, then uses the same mixer;
+- `f32` and `f64` use the bits of their own width (4 and 8 bytes),
+  canonicalize `+0.0` and `-0.0` to the same bits, canonicalize every NaN
+  payload to one quiet NaN, widen to `u64`, then use the same mixer;
 - structs hash every field recursively and combine field hashes in declaration
   order with a boost-style ordered combiner.
 
 Equality follows the same recursive type walk. Integer leaves use ordinary
-equality. `f64` compares canonicalized bits, so all NaNs are equal for hash-key
-purposes and signed zeroes are equal. Struct equality is the conjunction of
+equality. `f32` and `f64` compare canonicalized bits, so all NaNs are equal
+for hash-key purposes and signed zeroes are equal. Struct equality is the conjunction of
 all field equalities.
 
 The invariant is strict: if `rh_key_equal(a, b)` is true, both values must have

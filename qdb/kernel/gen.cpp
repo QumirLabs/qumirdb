@@ -181,16 +181,24 @@ NQumir::NAst::TExprPtr KeyValueExpr(
     return result;
 }
 
+// Float key bits with +0/-0 and all NaNs collapsed; u32 for f32, u64 for f64.
 NQumir::NAst::TExprPtr CanonicalFloatBits(
+    const NQumir::NAst::TTypePtr& floatType,
     const std::string& root,
     const std::vector<std::string>& path)
 {
     using namespace NQumir::NAst;
     NQumir::TLocation loc{};
-    auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
+    const bool single = FixedValueWidth(floatType) == 4;
+    auto bitsType = std::make_shared<TIntegerType>(
+        single ? TIntegerType::U32 : TIntegerType::U64);
+    const int64_t absMask = single ? 0x7fffffffLL : 0x7fffffffffffffffLL;
+    const int64_t expMask = single ? 0x7f800000LL : 0x7ff0000000000000LL;
+    const int64_t fracMask = single ? 0x007fffffLL : 0x000fffffffffffffLL;
+    const int64_t quietNaN = single ? 0x7fc00000LL : 0x7ff8000000000000LL;
     auto number = [&](int64_t value) -> TExprPtr {
         auto result = std::make_shared<TNumberExpr>(loc, value);
-        result->Type = u64Type;
+        result->Type = bitsType;
         return result;
     };
     auto binary = [&](const char* op, TExprPtr left, TExprPtr right) -> TExprPtr {
@@ -203,17 +211,17 @@ NQumir::NAst::TExprPtr CanonicalFloatBits(
             std::move(type));
     };
     auto masked = [&](int64_t mask) -> TExprPtr {
-        return binary("&", bitcast(KeyValueExpr(root, path), u64Type), number(mask));
+        return binary("&", bitcast(KeyValueExpr(root, path), bitsType), number(mask));
     };
-    auto isZero = binary("==", masked(0x7fffffffffffffffLL), number(0));
+    auto isZero = binary("==", masked(absMask), number(0));
     auto isNaN = binary("&&",
-        binary("==", masked(0x7ff0000000000000LL),
-            number(0x7ff0000000000000LL)),
-        binary("!=", masked(0x000fffffffffffffLL), number(0)));
+        binary("==", masked(expMask), number(expMask)),
+        binary("!=", masked(fracMask), number(0)));
     return std::make_shared<TIfExpr>(loc, std::move(isZero), number(0),
         std::make_shared<TIfExpr>(loc, std::move(isNaN),
-            number(0x7ff8000000000000LL), bitcast(KeyValueExpr(root, path), u64Type)));
+            number(quietNaN), bitcast(KeyValueExpr(root, path), bitsType)));
 }
+
 
 NQumir::NAst::TExprPtr HashKeyValue(
     const NQumir::NAst::TTypePtr& originalType,
@@ -316,7 +324,11 @@ NQumir::NAst::TExprPtr HashKeyValue(
     if (TMaybeType<TFloatType>(type)) {
         const std::string name = "key_hash_" + std::to_string(nextTemporary++);
         body.push_back(std::make_shared<TVarStmt>(loc, name, u64Type));
-        assign(name, CanonicalFloatBits(root, path));
+        TExprPtr bits = CanonicalFloatBits(type, root, path);
+        if (FixedValueWidth(type) == 4) {
+            bits = std::make_shared<TCastExpr>(loc, std::move(bits), u64Type);
+        }
+        assign(name, std::move(bits));
         mixU64(name);
         return ident(name);
     }
@@ -403,8 +415,13 @@ NQumir::NAst::TExprPtr EqualKeyValue(
         return binary("==", KeyValueExpr("left", path), KeyValueExpr("right", path));
     }
     if (TMaybeType<TFloatType>(left) && TMaybeType<TFloatType>(right)) {
+        if (FixedValueWidth(left) != FixedValueWidth(right)) {
+            throw std::invalid_argument(
+                "GenKeyOperationFunDecls: mismatched float key widths");
+        }
         return binary("==",
-            CanonicalFloatBits("left", path), CanonicalFloatBits("right", path));
+            CanonicalFloatBits(left, "left", path),
+            CanonicalFloatBits(right, "right", path));
     }
     if (auto leftStruct = TMaybeType<TStructType>(left)) {
         auto rightStruct = TMaybeType<TStructType>(right);

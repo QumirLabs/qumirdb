@@ -20,7 +20,9 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -489,6 +491,51 @@ TEST(CompileJoinHash, ProducesMatchingSideHashes) {
     EXPECT_EQ(leftHashes[1], rightHashes[2]);
     EXPECT_EQ(leftHashes[2], rightHashes[3]);
     EXPECT_EQ(leftHashes[0], leftHashes[2]);
+    EXPECT_NE(leftHashes[0], leftHashes[1]);
+}
+
+// An f32 key hashes its 4 canonical bytes: signed zeroes and NaN payloads
+// meet, next to i32 and i64 key parts of a composite key.
+TEST(CompileJoinHash, F32KeyCanonicalizesZeroAndNaN) {
+    using namespace NQumir::NAst;
+    auto f32 = [] { return std::make_shared<TFloatType>(TFloatType::F32); };
+    auto i32 = [] { return std::make_shared<TIntegerType>(TIntegerType::I32); };
+    auto i64 = [] { return std::make_shared<TIntegerType>(TIntegerType::I64); };
+    TStructType leftType({{"lf", f32()}, {"li", i32()}, {"ll", i64()}});
+    TStructType rightType({{"rf", f32()}, {"ri", i32()}, {"rl", i64()}});
+
+    TKernelCompiler compiler;
+    auto spec = NKernel::BuildJoinKernelSpec(
+        leftType, rightType, {{"lf", "rf"}, {"li", "ri"}, {"ll", "rl"}}, EJoinType::Inner);
+    auto kernels = compiler.CompileJoinHash(spec);
+
+    const float nan1 = std::numeric_limits<float>::quiet_NaN();
+    const float nan2 = std::bit_cast<float>(UINT32_C(0x7f800001));
+    std::vector<float> lf = {0.0f, 1.5f, nan1, 1.5f};
+    std::vector<float> rf = {-0.0f, 1.5f, nan2, -1.5f};
+    std::vector<int32_t> li = {7, 7, 7, 7};
+    std::vector<int64_t> ll = {9, 9, 9, 9};
+    std::vector<TColumn> lcols = {
+        TColumn{.Data = reinterpret_cast<char*>(lf.data())},
+        TColumn{.Data = reinterpret_cast<char*>(li.data())},
+        TColumn{.Data = reinterpret_cast<char*>(ll.data())},
+    };
+    std::vector<TColumn> rcols = {
+        TColumn{.Data = reinterpret_cast<char*>(rf.data())},
+        TColumn{.Data = reinterpret_cast<char*>(li.data())},
+        TColumn{.Data = reinterpret_cast<char*>(ll.data())},
+    };
+    TRowSet lbatch{.Columns = lcols.data(), .ColumnCount = 3, .RowCount = 4, .RefCount = 1};
+    TRowSet rbatch{.Columns = rcols.data(), .ColumnCount = 3, .RowCount = 4, .RefCount = 1};
+    std::vector<uint64_t> leftHashes(4, 0);
+    std::vector<uint64_t> rightHashes(4, 0);
+    ASSERT_TRUE(kernels.Left(&lbatch, leftHashes.data()));
+    ASSERT_TRUE(kernels.Right(&rbatch, rightHashes.data()));
+
+    EXPECT_EQ(leftHashes[0], rightHashes[0]); // +0.0 and -0.0
+    EXPECT_EQ(leftHashes[1], rightHashes[1]);
+    EXPECT_EQ(leftHashes[2], rightHashes[2]); // two NaN payloads
+    EXPECT_NE(leftHashes[3], rightHashes[3]); // 1.5 and -1.5
     EXPECT_NE(leftHashes[0], leftHashes[1]);
 }
 
