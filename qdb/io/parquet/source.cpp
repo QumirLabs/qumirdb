@@ -1,5 +1,5 @@
 #include <qdb/io/parquet/source.h>
-#include <qdb/io/parquet/decimal_scan.h>
+#include <qdb/io/parquet/column_scan.h>
 #include <qdb/io/parquet/decimal_storage.h>
 #include <qdb/io/parquet/row_reader.h>
 #include <qdb/io/parquet/row_id.h>
@@ -275,7 +275,7 @@ struct TParquetFileData {
     std::shared_ptr<arrow::Schema> FileSchema;
     std::vector<std::string> FileNames;
     std::vector<TColumnSchema> FileColumns;
-    // Per field: the leaf column TDecimalColumnScan reads, else -1 (read by Arrow).
+    // Per decimal field: the leaf column a TParquetColumnScan reads, else -1 (read by Arrow).
     std::vector<int> DecimalScanColumns;
     TSchema FullSchema;
     std::vector<NScheduler::TScanRowGroup> RowGroups;
@@ -348,7 +348,7 @@ void TParquetFileData::Open()
         }
         const auto* descriptor =
             FileReader->parquet_reader()->metadata()->schema()->Column(schemaField.column_index);
-        if (TDecimalColumnScan::Supports(*descriptor)) {
+        if (TParquetColumnScan::Supports(*descriptor, FileSchema->field(static_cast<int>(field))->type())) {
             DecimalScanColumns[field] = schemaField.column_index;
         }
     }
@@ -635,9 +635,9 @@ void TParquetSource::ResetReader()
             SelectedColumns_.push_back(i);
         }
     }
-    // Decimal columns bypass Arrow's per-value Decimal128 conversion (TDecimalColumnScan).
+    // Decimal columns bypass Arrow's per-value Decimal128 conversion (TParquetColumnScan).
     std::vector<int> arrowColumns;
-    DecimalScans_.clear();
+    ColumnScans_.clear();
     for (size_t position = 0; position < SelectedColumns_.size(); ++position) {
         const int field = SelectedColumns_[position];
         const int leaf = File_->DecimalScanColumns[static_cast<size_t>(field)];
@@ -645,10 +645,11 @@ void TParquetSource::ResetReader()
             arrowColumns.push_back(field);
             continue;
         }
-        DecimalScans_.push_back({
+        ColumnScans_.push_back({
             .Position = position,
-            .Scan = std::make_unique<TDecimalColumnScan>(
-                *File_->FileReader->parquet_reader(), leaf, rowGroups, GetMemoryPool()),
+            .Scan = std::make_unique<TParquetColumnScan>(
+                *File_->FileReader->parquet_reader(), leaf, File_->FileSchema->field(field)->type(),
+                rowGroups, GetMemoryPool()),
         });
     }
     auto batchReaderResult = File_->FileReader->GetRecordBatchReader(rowGroups, arrowColumns);
@@ -705,8 +706,8 @@ void TParquetSource::RefreshSchema()
             .Name = Names_.back(),
             .Type = ArrowFieldToQumir(field),
         });
-        if (nextScan < DecimalScans_.size() && DecimalScans_[nextScan].Position == position) {
-            field = field->WithType(DecimalScans_[nextScan++].Scan->Type());
+        if (nextScan < ColumnScans_.size() && ColumnScans_[nextScan].Position == position) {
+            field = field->WithType(ColumnScans_[nextScan++].Scan->Type());
         }
         fields.push_back(std::move(field));
     }
@@ -1182,15 +1183,15 @@ bool TParquetSource::Next(TRowSet& rowSet) {
     if (!Reader_->ReadNext(&batch).ok() || !batch) {
         return false;
     }
-    if (!DecimalScans_.empty()) {
+    if (!ColumnScans_.empty()) {
         // The decimal columns take their positions among the columns Arrow read.
         std::vector<std::shared_ptr<arrow::Array>> columns;
         columns.reserve(SelectedColumns_.size());
         int arrowColumn = 0;
         size_t nextScan = 0;
         for (size_t position = 0; position < SelectedColumns_.size(); ++position) {
-            if (nextScan < DecimalScans_.size() && DecimalScans_[nextScan].Position == position) {
-                columns.push_back(DecimalScans_[nextScan++].Scan->Read(batch->num_rows()));
+            if (nextScan < ColumnScans_.size() && ColumnScans_[nextScan].Position == position) {
+                columns.push_back(ColumnScans_[nextScan++].Scan->Read(batch->num_rows()));
             } else {
                 columns.push_back(batch->column(arrowColumn++));
             }
