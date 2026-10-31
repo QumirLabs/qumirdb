@@ -202,6 +202,37 @@ TEST(SqlPositions, StructItemsCountTheirFields) {
     EXPECT_TRUE(aliased) << aliased.error().ToString();
 }
 
+TEST(SqlBinding, FloatTypeNamesFollowPostgreSql) {
+    using NQumir::NAst::TFloatType;
+    TMockSource source(std::vector<std::string>{"x"});
+    for (const auto& [name, kind] : std::vector<std::pair<const char*, TFloatType::EKind>>{
+        {"REAL", TFloatType::F32}, {"real", TFloatType::F32}, {"FLOAT4", TFloatType::F32},
+        {"FLOAT(1)", TFloatType::F32}, {"FLOAT(24)", TFloatType::F32},
+        {"FLOAT", TFloatType::F64}, {"FLOAT(25)", TFloatType::F64}, {"FLOAT(53)", TFloatType::F64},
+        {"FLOAT8", TFloatType::F64}, {"DOUBLE", TFloatType::F64},
+        {"DOUBLE PRECISION", TFloatType::F64}, {"double precision", TFloatType::F64},
+    }) {
+        const std::string sql = std::string("SELECT CAST(x AS ") + name + ") AS a, x FROM t";
+        SCOPED_TRACE(sql);
+        auto plan = Build(sql, source);
+        ASSERT_TRUE(plan) << plan.error().ToString();
+        auto project = TMaybeOp<TProjectOperator>(*plan);
+        ASSERT_TRUE(project);
+        auto cast = NQumir::NAst::TMaybeNode<NQumir::NAst::TCastExpr>(project.Cast()->Projections()[0].Expression);
+        ASSERT_TRUE(cast);
+        auto type = NQumir::NAst::TMaybeType<TFloatType>(cast.Cast()->Type);
+        ASSERT_TRUE(type);
+        EXPECT_EQ(type.Cast()->Kind, kind);
+    }
+    for (const auto* sql : {
+        "SELECT CAST(x AS FLOAT(0)) FROM t", "SELECT CAST(x AS FLOAT(54)) FROM t",
+        "SELECT CAST(x AS FLOAT(p)) FROM t",
+    }) {
+        SCOPED_TRACE(sql);
+        EXPECT_FALSE(Build(sql, source));
+    }
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

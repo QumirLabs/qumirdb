@@ -285,8 +285,11 @@
     | "INT"
     | "INTEGER"
     | "BIGINT"
-    | "FLOAT"
-    | "DOUBLE"
+    | "REAL"
+    | "FLOAT4"
+    | "FLOAT" [ "(" <integer> ")" ]
+    | "FLOAT8"
+    | "DOUBLE" [ "PRECISION" ]
     | "TEXT"
     | "VARCHAR"
     | "DATE"
@@ -2110,7 +2113,8 @@ TAstExprTask expr_list_or_subquery(TParserContext& ctx) {
 }
 
 // <type_name> ::= "BOOL" | "BOOLEAN" | "INT" | "INTEGER" | "BIGINT"
-//   | "FLOAT" | "DOUBLE" | "TEXT" | "VARCHAR" | "DATE" | "TIMESTAMP"
+//   | "REAL" | "FLOAT4" | "FLOAT" [ "(" <integer> ")" ] | "FLOAT8" | "DOUBLE" [ "PRECISION" ]
+//   | "TEXT" | "VARCHAR" | "DATE" | "TIMESTAMP"
 //   | "DECIMAL" [ "(" <integer> [ "," <integer> ] ")" ]
 TAstTypeTask type_name(TParserContext& ctx) {
     using namespace NQumir::NAst;
@@ -2121,10 +2125,14 @@ TAstTypeTask type_name(TParserContext& ctx) {
     }
 
     // type names are case-insensitive; keywords already arrive upper-cased
-    std::string name;
-    for (char c : token.Name) {
-        name += std::toupper(static_cast<unsigned char>(c));
-    }
+    auto upper = [](const std::string& word) {
+        std::string result;
+        for (char c : word) {
+            result += std::toupper(static_cast<unsigned char>(c));
+        }
+        return result;
+    };
+    const std::string name = upper(token.Name);
 
     if (name == "BOOL" || name == "BOOLEAN") {
         co_return std::make_shared<TBoolType>();
@@ -2132,8 +2140,36 @@ TAstTypeTask type_name(TParserContext& ctx) {
         co_return std::make_shared<TIntegerType>(TIntegerType::I32);
     } else if (name == "BIGINT") {
         co_return std::make_shared<TIntegerType>(TIntegerType::I64);
-    } else if (name == "FLOAT" || name == "DOUBLE") {
-        co_return std::make_shared<TFloatType>();
+    } else if (name == "REAL" || name == "FLOAT4") {
+        co_return std::make_shared<TFloatType>(TFloatType::F32);
+    } else if (name == "DOUBLE" || name == "FLOAT8") {
+        auto next = ctx.Stream.Next();
+        if (name != "DOUBLE" || (next.Type != TToken::Identifier && next.Type != TToken::Keyword)
+            || upper(next.Name) != "PRECISION")
+        {
+            ctx.Stream.Unget(next);
+        }
+        co_return std::make_shared<TFloatType>(TFloatType::F64);
+    } else if (name == "FLOAT") {
+        // As in PostgreSQL, FLOAT is DOUBLE PRECISION and FLOAT(p) takes the binary
+        // precision p: up to 24 bits is REAL.
+        auto next = ctx.Stream.Next();
+        if (!IsOp(next, '(')) {
+            ctx.Stream.Unget(next);
+            co_return std::make_shared<TFloatType>(TFloatType::F64);
+        }
+        auto precision = ctx.Stream.Next();
+        if (precision.Type != TToken::Integer) {
+            co_return Error(precision, "integer expected in FLOAT");
+        }
+        if (precision.Value.i64 < 1 || precision.Value.i64 > 53) {
+            co_return Error(precision, "FLOAT precision must be between 1 and 53 bits");
+        }
+        if (auto close = ctx.Stream.Next(); !IsOp(close, ')')) {
+            co_return Error(close, "')' expected");
+        }
+        co_return std::make_shared<TFloatType>(
+            precision.Value.i64 <= 24 ? TFloatType::F32 : TFloatType::F64);
     } else if (name == "TEXT" || name == "VARCHAR") {
         co_return std::make_shared<TStringType>();
     } else if (name == "DATE" || name == "TIMESTAMP") {
