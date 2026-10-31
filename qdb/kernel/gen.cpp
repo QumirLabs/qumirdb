@@ -1859,13 +1859,21 @@ public:
                 }
                 continue;
             }
+            // One float state kind: an f32 argument is widened to f64 before the bitcast.
+            auto floatBits = [&](TExprPtr value) -> TExprPtr {
+                auto floating = TMaybeType<TFloatType>(UnwrapNamedType(UnwrapNullableType(ac.Type)));
+                if (floating && floating.Cast()->BitWidth() == 32) {
+                    value = NOz::Cast(std::move(value), std::make_shared<TFloatType>());
+                }
+                return std::make_shared<TBitcastExpr>(loc, std::move(value), I64());
+            };
             TExprPtr valExpr;
             if (mat) {
                 if (ac.ValueKind == EAggValueKind::BinInt ||
                     ac.ValueKind == EAggValueKind::String) {
                     valExpr = mat->Value;
                 } else if (ac.ValueKind == EAggValueKind::Float64) {
-                    valExpr = std::make_shared<TBitcastExpr>(loc, mat->Value, I64());
+                    valExpr = floatBits(mat->Value);
                 } else if (ac.ValueKind == EAggValueKind::Bool) {
                     // Not a cast: an integer cast sign-extends TRUE to -1.
                     valExpr = NOz::If(mat->Value, NOz::TypedInt(1, I64()), NOz::TypedInt(0, I64()));
@@ -1877,7 +1885,7 @@ public:
                 if (ac.ValueKind == EAggValueKind::BinInt) {
                     valExpr = std::move(cell);
                 } else if (ac.ValueKind == EAggValueKind::Float64) {
-                    valExpr = std::make_shared<TBitcastExpr>(loc, std::move(cell), I64());
+                    valExpr = floatBits(std::move(cell));
                 } else {
                     valExpr = NOz::Cast(std::move(cell), I64());
                 }

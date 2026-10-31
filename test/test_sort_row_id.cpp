@@ -12,6 +12,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <numeric>
 #include <random>
@@ -145,6 +146,69 @@ TEST(SortRowId, SortsSeveralBatchesByMixedNumericKeys) {
                                 NQdb::MakeRowId(0, 1),
                                 NQdb::MakeRowId(1, 1),
                             }));
+}
+
+// Special values in two batches; ties (+-0) are decided by the second key.
+template<typename TFloat>
+std::vector<int64_t> SortFloatKeyRows(bool desc, int64_t topLimit) {
+    using namespace NQumir::NAst;
+    const TFloat inf = std::numeric_limits<TFloat>::infinity();
+    const TFloat nan = std::numeric_limits<TFloat>::quiet_NaN();
+    auto type = std::make_shared<TFloatType>(
+        sizeof(TFloat) == 4 ? TFloatType::F32 : TFloatType::F64);
+    auto i32 = std::make_shared<TIntegerType>(TIntegerType::I32);
+    std::vector<NQdb::TSortRadixKeyInput> keys = {
+        {.ColumnIndex = 0, .Type = type, .Desc = desc},
+        {.ColumnIndex = 1, .Type = i32},
+    };
+
+    std::array<TFloat, 4> primary0 = {nan, TFloat(-0.0), TFloat(0.1), -inf};
+    std::array<int32_t, 4> secondary0 = {0, 3, 0, 0};
+    std::array<TFloat, 4> primary1 = {TFloat(0.0), inf, TFloat(-1.5), nan};
+    std::array<int32_t, 4> secondary1 = {1, 0, 0, 1};
+    std::array<NQdb::TColumn, 2> columns0 = {
+        NQdb::TColumn{.Data = reinterpret_cast<char*>(primary0.data())},
+        NQdb::TColumn{.Data = reinterpret_cast<char*>(secondary0.data())},
+    };
+    std::array<NQdb::TColumn, 2> columns1 = {
+        NQdb::TColumn{.Data = reinterpret_cast<char*>(primary1.data())},
+        NQdb::TColumn{.Data = reinterpret_cast<char*>(secondary1.data())},
+    };
+    std::array<NQdb::TRowSet, 2> store = {
+        NQdb::TRowSet{.Columns = columns0.data(), .ColumnCount = 2, .RowCount = 4},
+        NQdb::TRowSet{.Columns = columns1.data(), .ColumnCount = 2, .RowCount = 4},
+    };
+    auto rows = MakeRowIds(store);
+    if (topLimit == 0) {
+        auto compiled = CompileRowIdSort(keys);
+        EXPECT_NE(compiled.Sort, nullptr);
+        if (!compiled.Sort) {
+            return {};
+        }
+        compiled.Sort(rows.data(), static_cast<int64_t>(rows.size()), store.data());
+        return rows;
+    }
+    auto select = CompileHeapTopK(keys);
+    EXPECT_TRUE(select);
+    const int64_t kept = select(store.data(), rows.data(), static_cast<int64_t>(rows.size()), topLimit);
+    rows.resize(static_cast<size_t>(kept));
+    return rows;
+}
+
+TEST(SortRowId, F32KeyOrdersLikeF64) {
+    for (bool desc : {false, true}) {
+        auto f32Rows = SortFloatKeyRows<float>(desc, 0);
+        EXPECT_EQ(f32Rows.size(), 8u);
+        EXPECT_EQ(f32Rows, SortFloatKeyRows<double>(desc, 0));
+    }
+}
+
+TEST(HeapTopK, F32KeyOrdersLikeF64) {
+    for (bool desc : {false, true}) {
+        auto f32Rows = SortFloatKeyRows<float>(desc, 5);
+        EXPECT_EQ(f32Rows.size(), 5u);
+        EXPECT_EQ(f32Rows, SortFloatKeyRows<double>(desc, 5));
+    }
 }
 
 struct TStringColumn {
