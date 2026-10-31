@@ -30,12 +30,23 @@ struct TSpawnComputeActorResponse {
 
 // compute-actor
 
+// used for serialization
+struct TColumnDescriptor {
+    uint8_t EntrySize; // 0 for bool
+    bool IsVariadic; // true for string
+};
+
+struct TDataDescriptor {
+    std::vector<TColumnDescriptor> Descriptors;
+};
+
 // Push(srcId, TRowSet&&)
 struct TDataChunk {
     static constexpr NNet::NActors::TMessageId MessageId = 200;
     uint32_t DstTaskId;
     uint32_t SrcLaneId;
     TRowSet RowSet;
+    TDataDescriptor* Descriptor; // serialization helper, is not passed to wire
 };
 
 // Finish(srcId)
