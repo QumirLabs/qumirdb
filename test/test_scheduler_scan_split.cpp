@@ -1,7 +1,10 @@
 #include <gtest/gtest.h>
 
+#include <qdb/scheduler/conjunct_order.h>
 #include <qdb/scheduler/scan_split.h>
 
+#include <memory>
+#include <string>
 #include <vector>
 
 using namespace NQdb::NScheduler;
@@ -161,6 +164,66 @@ TEST(SchedulerScanSplit, AutoRespectsSerialExecutionAndExplicitOverrides) {
         EXPECT_EQ(ChooseScanTaskCount(RowGroups(), settings, false), cap);
         EXPECT_EQ(ChooseScanTaskCount(RowGroups(), settings, true), cap);
     }
+}
+
+TScanConjunct Conjunct(
+    std::vector<std::string> columns,
+    double selectivity,
+    bool mayFail = false)
+{
+    return {
+        .Predicate = std::make_shared<NQumir::NAst::TIdentExpr>(NQumir::TLocation{}, "p"),
+        .Columns = std::move(columns),
+        .Selectivity = selectivity,
+        .MayFail = mayFail,
+    };
+}
+
+// ClickBench q22: the short SearchPhrase goes first, then the more selective of the two
+// long columns, whose costs are close.
+TEST(SchedulerConjunctOrder, CheapColumnsFirstThenSelectivity) {
+    auto title = Conjunct({"Title"}, 0.05);
+    auto url = Conjunct({"URL"}, 0.95);
+    auto phrase = Conjunct({"SearchPhrase"}, 0.99);
+    auto steps = OrderScanConjuncts(
+        {title, url, phrase},
+        {{"SearchPhrase", 8.3}, {"Title", 81.5}, {"URL", 85.2}});
+
+    ASSERT_EQ(steps.size(), 3u);
+    EXPECT_EQ(steps[0].NewColumns, std::vector<std::string>{"SearchPhrase"});
+    EXPECT_EQ(steps[0].Conjuncts, std::vector<NQumir::NAst::TExprPtr>{phrase.Predicate});
+    EXPECT_EQ(steps[1].NewColumns, std::vector<std::string>{"Title"});
+    EXPECT_EQ(steps[1].Conjuncts, std::vector<NQumir::NAst::TExprPtr>{title.Predicate});
+    EXPECT_EQ(steps[2].NewColumns, std::vector<std::string>{"URL"});
+    EXPECT_EQ(steps[2].Conjuncts, std::vector<NQumir::NAst::TExprPtr>{url.Predicate});
+}
+
+// A conjunct over decoded columns joins the step that decoded them.
+TEST(SchedulerConjunctOrder, DecodedColumnsCostNothing) {
+    auto aLow = Conjunct({"a"}, 0.5);
+    auto b = Conjunct({"b"}, 0.1);
+    auto aHigh = Conjunct({"a"}, 0.5);
+    auto ab = Conjunct({"a", "b"}, 0.9);
+    auto steps = OrderScanConjuncts({aLow, b, aHigh, ab}, {{"a", 4.0}, {"b", 100.0}});
+
+    ASSERT_EQ(steps.size(), 2u);
+    EXPECT_EQ(steps[0].NewColumns, std::vector<std::string>{"a"});
+    EXPECT_EQ(steps[0].Conjuncts, (std::vector{aLow.Predicate, aHigh.Predicate}));
+    EXPECT_EQ(steps[1].NewColumns, std::vector<std::string>{"b"});
+    EXPECT_EQ(steps[1].Conjuncts, (std::vector{b.Predicate, ab.Predicate}));
+}
+
+// A conjunct that may fail is never evaluated before one that preceded it.
+TEST(SchedulerConjunctOrder, MayFailKeepsItsPlace) {
+    auto f = Conjunct({"b"}, 0.01, true);
+    auto g = Conjunct({"a"}, 0.01, true);
+    auto c = Conjunct({"c"}, 0.9);
+    auto steps = OrderScanConjuncts({f, g, c}, {{"a", 1.0}, {"b", 100.0}, {"c", 50.0}});
+
+    ASSERT_EQ(steps.size(), 3u);
+    EXPECT_EQ(steps[0].Conjuncts, std::vector<NQumir::NAst::TExprPtr>{c.Predicate});
+    EXPECT_EQ(steps[1].Conjuncts, std::vector<NQumir::NAst::TExprPtr>{f.Predicate});
+    EXPECT_EQ(steps[2].Conjuncts, std::vector<NQumir::NAst::TExprPtr>{g.Predicate});
 }
 
 } // namespace

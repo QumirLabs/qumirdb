@@ -23,10 +23,17 @@
 #include <qdb/plan/ops/union.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/window.h>
+#include <qdb/plan/passes/const_fold.h>
+#include <qdb/plan/passes/estimate_stats.h>
+#include <qdb/plan/passes/flatten_conjuncts.h>
+#include <qdb/plan/passes/predicate_requirements.h>
 #include <qdb/plan/passes/runtime_filters.h>
+#include <qdb/plan/passes/unbound_vars.h>
 #include <qdb/plan/ops/cte_consumer.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
+#include <qdb/catalog/external_module.h>
+#include <qdb/scheduler/conjunct_order.h>
 #include <qdb/scheduler/connection.h>
 #include <qdb/scheduler/cte_spool.h>
 #include <qdb/scheduler/executor.h>
@@ -268,11 +275,12 @@ private:
 
 TSchedulerUnaryStage BuildSchedulerFilterStage(
     TFilterOperator& filter,
+    const NQumir::NAst::TExprPtr& predicate,
     const NQumir::NAst::TTypePtr& inputType,
     TKernelCompilerOptions options)
 {
     auto runtime = BuildFilterRuntimeProcess(
-        filter, inputType, std::move(options));
+        filter, predicate, inputType, std::move(options));
     auto code = std::make_shared<NScheduler::TUnaryCode>(
         [process = std::move(runtime.Process)](void* state, TRowSet& rowSet) {
             auto* kernelState = static_cast<TUnaryStreamingKernelState*>(state);
@@ -666,6 +674,7 @@ public:
                 [&](const NQumir::NAst::TTypePtr& inType) {
                     return BuildSchedulerFilterStage(
                         *filter,
+                        ScanFilterPredicate(*filter),
                         inType,
                         KernelOptions(stageLabel, execStageId));
                 },
@@ -1195,6 +1204,101 @@ private:
             : TSourceSplits{std::move(splits)};
         ScanSplitCache_.emplace(&src, result);
         return result;
+    }
+
+    // A filter over a Parquet scan evaluates its conjuncts in OrderScanConjuncts order.
+    NQumir::NAst::TExprPtr ScanFilterPredicate(const TFilterOperator& filter) {
+        auto source = TMaybeOp<TSourceOperator>(filter.Input());
+        auto* parquet = source
+            ? dynamic_cast<TParquetSource*>(&source.Cast()->GetSource())
+            : nullptr;
+        if (!parquet) {
+            return filter.Predicate();
+        }
+        auto conjuncts = ScanConjuncts({filter.Predicate()}, filter.Input());
+        if (conjuncts.size() < 2) {
+            return filter.Predicate();
+        }
+        std::vector<NQumir::NAst::TExprPtr> ordered;
+        auto steps = NScheduler::OrderScanConjuncts(
+            std::move(conjuncts), ColumnBytes(*source.Cast(), *parquet));
+        for (auto& step : steps) {
+            for (auto& conjunct : step.Conjuncts) {
+                ordered.push_back(std::move(conjunct));
+            }
+        }
+        return ConjoinPredicates(ordered);
+    }
+
+    // The conjuncts of `predicates` over the columns of `input`.
+    std::vector<NScheduler::TScanConjunct> ScanConjuncts(
+        const std::vector<NQumir::NAst::TExprPtr>& predicates,
+        const TOperatorPtr& input)
+    {
+        std::vector<NScheduler::TScanConjunct> conjuncts;
+        for (const auto& predicate : predicates) {
+            std::vector<NQumir::NAst::TExprPtr> atoms;
+            FlattenConjuncts(predicate, atoms);
+            for (auto& atom : atoms) {
+                const auto names = FindUnboundVars(atom);
+                std::vector<std::string> columns;
+                for (const auto& [name, _] : input->OutputColumns()->Fields) {
+                    if (names.contains(name)) {
+                        columns.push_back(name);
+                    }
+                }
+                conjuncts.push_back({
+                    .Predicate = atom,
+                    .Columns = std::move(columns),
+                    .Selectivity = EstimatePredicateSelectivity(atom, input, ConstFolder_),
+                    .MayFail = CallsExternalFunction(atom),
+                });
+            }
+        }
+        return conjuncts;
+    }
+
+    // Built-in operators have no runtime error channel: a zero divisor gives NULL
+    // and a cast saturates. Only an external function may fail.
+    bool CallsExternalFunction(const NQumir::NAst::TExprPtr& expr) const {
+        if (!expr || !ExternalCatalog_) {
+            return false;
+        }
+        if (auto call = NQumir::NAst::TMaybeNode<NQumir::NAst::TCallExpr>(expr)) {
+            auto callee = NQumir::NAst::TMaybeNode<NQumir::NAst::TIdentExpr>(call.Cast()->Callee);
+            if (callee && ExternalCatalog_->HasFunction(callee.Cast()->Name)) {
+                return true;
+            }
+        }
+        for (const auto& child : expr->Children()) {
+            if (CallsExternalFunction(child)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Uncompressed bytes per row of each column of `source` in the Parquet metadata.
+    std::unordered_map<std::string, double> ColumnBytes(
+        const TSourceOperator& source,
+        const TParquetSource& parquet) const
+    {
+        std::unordered_map<std::string, double> bytes;
+        for (const auto& [name, _] : source.OutputColumns()->Fields) {
+            const auto dot = name.rfind('.');
+            const std::unordered_set<std::string> fileColumn{
+                dot == std::string::npos ? name : name.substr(dot + 1)};
+            int64_t rows = 0;
+            int64_t size = 0;
+            for (const auto& group : parquet.ScanRowGroups(fileColumn)) {
+                rows += group.RowCount;
+                size += group.ByteSize;
+            }
+            bytes[name] = rows > 0
+                ? static_cast<double>(size) / static_cast<double>(rows)
+                : 0.0;
+        }
+        return bytes;
     }
 
     // The row join table (kernel/join/join_rows.oz) serves a join that
@@ -2888,7 +2992,7 @@ private:
                 // The residual is a separate executable stage even though its
                 // semantic metadata points at the owning join operator.
                 return BuildSchedulerFilterStage(
-                    *filterOp, crossType,
+                    *filterOp, filterOp->Predicate(), crossType,
                     KernelOptions(residualGroup, residualStageId));
             }();
         TLoweredOutput result;
@@ -3305,6 +3409,8 @@ private:
     std::shared_ptr<const TExternalCatalogSnapshot> ExternalCatalog_;
     std::shared_ptr<IRuntimeFilterBindingFactory> RuntimeFilterBindings_;
     std::shared_ptr<TRuntimeContext> RuntimeContext_;
+    // Folds the constants of the selectivity estimates that order scan conjuncts.
+    TConstFolder ConstFolder_;
     std::unordered_set<const TSourceOperator*> SourcesFeedingJoins_;
     // Split planning includes Parquet predicate compilation and evaluation;
     // OutputLanes and LowerSource both query it. nullopt means "use the original
