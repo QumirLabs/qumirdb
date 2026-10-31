@@ -948,9 +948,9 @@ TEST(IOTest, ScanDecimalPagesOfEveryPhysicalType) {
     }
 }
 
-// A column scan reads only the rows a selection marks, through many pages and row groups:
-// every selected row has its value, an unselected string is empty, a read of a smaller
-// selection follows a dense one, and skipped rows leave the next read aligned.
+// A column scan reads only the rows a selection marks, through many pages and row groups,
+// in dictionary v1 pages and in PLAIN v2 pages, with a run of all-NULL pages: every
+// selected row has its value, an unselected string is empty, skipped rows stay aligned.
 TEST(IOTest, ColumnScanReadsSelectedRows) {
     constexpr int64_t rows = 20000;
     arrow::Int64Builder ids;
@@ -962,12 +962,15 @@ TEST(IOTest, ColumnScanReadsSelectedRows) {
     for (int64_t row = 0; row < rows; ++row) {
         ASSERT_TRUE(ids.Append(row).ok());
         ASSERT_TRUE(smalls.Append(static_cast<int16_t>(row % 1000 - 500)).ok());
-        ASSERT_TRUE((row % 7 == 3
+        const bool nullRun = row >= 7000 && row < 7300;
+        ASSERT_TRUE((row % 7 == 3 || nullRun
             ? strings.AppendNull()
             : strings.Append("v" + std::to_string(row % 50) + std::string(row % 3 == 0 ? row % 40 : 0, 'x'))).ok());
         ASSERT_TRUE((row % 11 == 0 ? flags.AppendNull() : flags.Append(row % 3 == 0)).ok());
         ASSERT_TRUE(doubles.Append(static_cast<double>(row) * 0.5).ok());
-        ASSERT_TRUE((row % 13 == 5 ? decimals.AppendNull() : decimals.Append(arrow::Decimal128(row * 7 - 1000))).ok());
+        ASSERT_TRUE((row % 13 == 5 || nullRun
+            ? decimals.AppendNull()
+            : decimals.Append(arrow::Decimal128(row * 7 - 1000))).ok());
     }
     auto batch = arrow::RecordBatch::Make(
         arrow::schema({
@@ -988,83 +991,92 @@ TEST(IOTest, ColumnScanReadsSelectedRows) {
             decimals.Finish().ValueOrDie(),
         });
     const std::string path = "/tmp/test_io_qdb_column_scan.parquet";
-    {
-        parquet::WriterProperties::Builder properties;
-        properties.data_pagesize(128);
-        properties.write_batch_size(64);
-        auto outfile = arrow::io::FileOutputStream::Open(path).ValueOrDie();
-        auto table = arrow::Table::FromRecordBatches({batch}).ValueOrDie();
-        ASSERT_TRUE(parquet::arrow::WriteTable(
-            *table, arrow::default_memory_pool(), outfile, 6000, properties.build()).ok());
-    }
+    for (const bool plainV2 : {false, true}) {
+        SCOPED_TRACE(plainV2 ? "plain v2" : "dictionary v1");
+        {
+            parquet::WriterProperties::Builder properties;
+            properties.data_pagesize(128);
+            properties.write_batch_size(64);
+            if (plainV2) {
+                properties.disable_dictionary();
+                properties.data_page_version(parquet::ParquetDataPageVersion::V2);
+            }
+            auto outfile = arrow::io::FileOutputStream::Open(path).ValueOrDie();
+            auto table = arrow::Table::FromRecordBatches({batch}).ValueOrDie();
+            ASSERT_TRUE(parquet::arrow::WriteTable(
+                *table, arrow::default_memory_pool(), outfile, 6000, properties.build()).ok());
+        }
 
-    // Selections of one read: every row, none, sparse, one run, and a dense middle.
-    auto select = [](int64_t pattern, int64_t count) {
-        std::vector<uint8_t> selection(static_cast<size_t>(count));
-        for (int64_t i = 0; i < count; ++i) {
-            switch (pattern % 5) {
-                case 0: selection[i] = 1; break;
-                case 1: selection[i] = 0; break;
-                case 2: selection[i] = i % 997 == 13; break;
-                case 3: selection[i] = i >= count / 3 && i < count / 2; break;
-                default: selection[i] = (i * 7 + pattern) % 10 < 3; break;
-            }
-        }
-        return selection;
-    };
-    auto reader = parquet::ParquetFileReader::OpenFile(path);
-    std::shared_ptr<arrow::Schema> schema;
-    ASSERT_TRUE(parquet::arrow::FromParquetSchema(reader->metadata()->schema(), &schema).ok());
-    for (int column = 0; column < batch->num_columns(); ++column) {
-        int64_t pages = 0;
-        for (const auto& stats : reader->metadata()->RowGroup(0)->ColumnChunk(column)->encoding_stats()) {
-            if (stats.page_type == parquet::PageType::DATA_PAGE) {
-                pages += stats.count;
-            }
-        }
-        ASSERT_GE(pages, 4) << column;
-    }
-    for (const std::vector<int>& rowGroups : {std::vector<int>{0, 1, 2, 3}, std::vector<int>{1, 3}}) {
-        std::vector<int64_t> fileRows;
-        for (int group : rowGroups) {
-            for (int64_t row = group * 6000; row < std::min<int64_t>(rows, (group + 1) * 6000); ++row) {
-                fileRows.push_back(row);
-            }
-        }
-        for (int column = 0; column < batch->num_columns(); ++column) {
-            SCOPED_TRACE(batch->schema()->field(column)->name() + " groups=" + std::to_string(rowGroups.size()));
-            const auto& type = schema->field(column)->type();
-            ASSERT_TRUE(TParquetColumnScan::Supports(*reader->metadata()->schema()->Column(column), type));
-            TParquetColumnScan scan(*reader, column, type, rowGroups, arrow::default_memory_pool());
-            const auto expected = batch->column(column);
-            int64_t position = 0;
-            for (int64_t read = 0; position < static_cast<int64_t>(fileRows.size()); ++read) {
-                const int64_t count = std::min<int64_t>(
-                    static_cast<int64_t>(fileRows.size()) - position, 1000 + (read * 1777) % 3000);
-                if (read % 6 == 5) {
-                    scan.Skip(count);
-                    position += count;
-                    continue;
+        // Selections of one read: every row, none, sparse, one run, and a dense middle.
+        auto select = [](int64_t pattern, int64_t count) {
+            std::vector<uint8_t> selection(static_cast<size_t>(count));
+            for (int64_t i = 0; i < count; ++i) {
+                switch (pattern % 5) {
+                    case 0: selection[i] = 1; break;
+                    case 1: selection[i] = 0; break;
+                    case 2: selection[i] = i % 997 == 13; break;
+                    case 3: selection[i] = i >= count / 3 && i < count / 2; break;
+                    default: selection[i] = (i * 7 + pattern) % 10 < 3; break;
                 }
-                const auto selection = select(read, count);
-                const bool dense = read % 5 == 0;
-                auto values = scan.Read(count, dense ? nullptr : selection.data());
-                ASSERT_EQ(values->length(), count);
-                for (int64_t i = 0; i < count; ++i) {
-                    const int64_t fileRow = fileRows[position + i];
-                    if (!dense && selection[i] == 0) {
-                        if (values->type_id() == arrow::Type::LARGE_STRING && values->IsValid(i)) {
-                            EXPECT_EQ(static_cast<const arrow::LargeStringArray&>(*values).value_length(i), 0);
-                        }
+            }
+            return selection;
+        };
+        auto reader = parquet::ParquetFileReader::OpenFile(path);
+        std::shared_ptr<arrow::Schema> schema;
+        ASSERT_TRUE(parquet::arrow::FromParquetSchema(reader->metadata()->schema(), &schema).ok());
+        for (int column = 0; column < batch->num_columns(); ++column) {
+            int64_t pages = 0;
+            for (const auto& stats : reader->metadata()->RowGroup(0)->ColumnChunk(column)->encoding_stats()) {
+                if (stats.page_type == parquet::PageType::DATA_PAGE ||
+                    stats.page_type == parquet::PageType::DATA_PAGE_V2)
+                {
+                    pages += stats.count;
+                }
+            }
+            ASSERT_GE(pages, 4) << column;
+        }
+        for (const std::vector<int>& rowGroups : {std::vector<int>{0, 1, 2, 3}, std::vector<int>{1, 3}}) {
+            std::vector<int64_t> fileRows;
+            for (int group : rowGroups) {
+                for (int64_t row = group * 6000; row < std::min<int64_t>(rows, (group + 1) * 6000); ++row) {
+                    fileRows.push_back(row);
+                }
+            }
+            for (int column = 0; column < batch->num_columns(); ++column) {
+                SCOPED_TRACE(batch->schema()->field(column)->name() + " groups=" + std::to_string(rowGroups.size()));
+                const auto& type = schema->field(column)->type();
+                ASSERT_TRUE(TParquetColumnScan::Supports(*reader->metadata()->schema()->Column(column), type));
+                TParquetColumnScan scan(*reader, column, type, rowGroups, arrow::default_memory_pool());
+                const auto expected = batch->column(column);
+                int64_t position = 0;
+                for (int64_t read = 0; position < static_cast<int64_t>(fileRows.size()); ++read) {
+                    const int64_t count = std::min<int64_t>(
+                        static_cast<int64_t>(fileRows.size()) - position, 1000 + (read * 1777) % 3000);
+                    if (read % 6 == 5) {
+                        scan.Skip(count);
+                        position += count;
                         continue;
                     }
-                    ASSERT_EQ(values->IsValid(i), expected->IsValid(fileRow)) << "row " << fileRow;
-                    if (expected->IsValid(fileRow)) {
-                        ASSERT_EQ(values->GetScalar(i).ValueOrDie()->ToString(),
-                            expected->GetScalar(fileRow).ValueOrDie()->ToString()) << "row " << fileRow;
+                    const auto selection = select(read, count);
+                    const bool dense = read % 5 == 0;
+                    auto values = scan.Read(count, dense ? nullptr : selection.data());
+                    ASSERT_EQ(values->length(), count);
+                    for (int64_t i = 0; i < count; ++i) {
+                        const int64_t fileRow = fileRows[position + i];
+                        if (!dense && selection[i] == 0) {
+                            if (values->type_id() == arrow::Type::LARGE_STRING && values->IsValid(i)) {
+                                EXPECT_EQ(static_cast<const arrow::LargeStringArray&>(*values).value_length(i), 0);
+                            }
+                            continue;
+                        }
+                        ASSERT_EQ(values->IsValid(i), expected->IsValid(fileRow)) << "row " << fileRow;
+                        if (expected->IsValid(fileRow)) {
+                            ASSERT_EQ(values->GetScalar(i).ValueOrDie()->ToString(),
+                                expected->GetScalar(fileRow).ValueOrDie()->ToString()) << "row " << fileRow;
+                        }
                     }
+                    position += count;
                 }
-                position += count;
             }
         }
     }

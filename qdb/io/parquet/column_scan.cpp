@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <bit>
 #include <cstring>
+#include <optional>
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
@@ -538,81 +539,121 @@ std::unique_ptr<IColumnValues> MakeDecimalValues(
     }
 }
 
-// The values of a flat column read as `type`, or null when the scan does not read it.
+// How the scan decodes a column it reads.
+enum class EValues {
+    Bool,
+    Int8,
+    Int16,
+    Int32,
+    UInt8,
+    UInt16,
+    UInt32,
+    Int64,
+    UInt64,
+    Float,
+    Double,
+    String,
+    Decimal,
+};
+
+// The decoding of a flat column read as `type`, or nullopt when the scan does not read it.
+std::optional<EValues> ValuesOf(const parquet::ColumnDescriptor& descriptor, const arrow::DataType& type) {
+    if (descriptor.max_repetition_level() != 0 || descriptor.max_definition_level() > 1) {
+        return std::nullopt;
+    }
+    const auto physical = descriptor.physical_type();
+    if (descriptor.converted_type() == parquet::ConvertedType::DECIMAL) {
+        const bool decodes = physical == parquet::Type::INT32 || physical == parquet::Type::INT64 ||
+            physical == parquet::Type::BYTE_ARRAY ||
+            (physical == parquet::Type::FIXED_LEN_BYTE_ARRAY && descriptor.type_length() <= 16);
+        if (descriptor.type_precision() <= 0 || descriptor.type_precision() > MaxDecimalPrecision || !decodes) {
+            return std::nullopt;
+        }
+        return EValues::Decimal;
+    }
+    const auto id = type.id();
+    if (physical == parquet::Type::INT32) {
+        switch (id) {
+            case arrow::Type::INT8:
+                return EValues::Int8;
+            case arrow::Type::INT16:
+                return EValues::Int16;
+            case arrow::Type::INT32:
+            case arrow::Type::DATE32:
+                return EValues::Int32;
+            case arrow::Type::UINT8:
+                return EValues::UInt8;
+            case arrow::Type::UINT16:
+                return EValues::UInt16;
+            case arrow::Type::UINT32:
+                return EValues::UInt32;
+            default:
+                return std::nullopt;
+        }
+    }
+    if (physical == parquet::Type::INT64 && (id == arrow::Type::INT64 || id == arrow::Type::UINT64)) {
+        return id == arrow::Type::INT64
+            ? EValues::Int64
+            : EValues::UInt64;
+    }
+    if (physical == parquet::Type::BOOLEAN && id == arrow::Type::BOOL) {
+        return EValues::Bool;
+    }
+    if (physical == parquet::Type::FLOAT && id == arrow::Type::FLOAT) {
+        return EValues::Float;
+    }
+    if (physical == parquet::Type::DOUBLE && id == arrow::Type::DOUBLE) {
+        return EValues::Double;
+    }
+    if (physical == parquet::Type::BYTE_ARRAY && (id == arrow::Type::STRING || id == arrow::Type::LARGE_STRING)) {
+        return EValues::String;
+    }
+    return std::nullopt;
+}
+
 std::unique_ptr<IColumnValues> MakeValues(
     const parquet::ColumnDescriptor& descriptor,
+    EValues values,
     const std::shared_ptr<arrow::DataType>& type,
     arrow::MemoryPool* memoryPool)
 {
-    if (descriptor.max_repetition_level() != 0 || descriptor.max_definition_level() > 1) {
-        return nullptr;
-    }
     const int16_t maxDef = descriptor.max_definition_level();
-    if (descriptor.converted_type() == parquet::ConvertedType::DECIMAL) {
-        const TDecimalSpec spec{.Precision = descriptor.type_precision(), .Scale = descriptor.type_scale()};
-        if (spec.Precision <= 0 || spec.Precision > MaxDecimalPrecision ||
-            (descriptor.physical_type() == parquet::Type::FIXED_LEN_BYTE_ARRAY && descriptor.type_length() > 16))
-        {
-            return nullptr;
+    switch (values) {
+        case EValues::Bool:
+            return std::make_unique<TBoolValues>(maxDef, memoryPool);
+        case EValues::Int8:
+            return MakeFixed<parquet::Int32Type, int8_t>(type, maxDef, memoryPool);
+        case EValues::Int16:
+            return MakeFixed<parquet::Int32Type, int16_t>(type, maxDef, memoryPool);
+        case EValues::Int32:
+            return MakeFixed<parquet::Int32Type, int32_t>(type, maxDef, memoryPool);
+        case EValues::UInt8:
+            return MakeFixed<parquet::Int32Type, uint8_t>(type, maxDef, memoryPool);
+        case EValues::UInt16:
+            return MakeFixed<parquet::Int32Type, uint16_t>(type, maxDef, memoryPool);
+        case EValues::UInt32:
+            return MakeFixed<parquet::Int32Type, uint32_t>(type, maxDef, memoryPool);
+        case EValues::Int64:
+            return MakeFixed<parquet::Int64Type, int64_t>(type, maxDef, memoryPool);
+        case EValues::UInt64:
+            return MakeFixed<parquet::Int64Type, uint64_t>(type, maxDef, memoryPool);
+        case EValues::Float:
+            return MakeFixed<parquet::FloatType, float>(type, maxDef, memoryPool);
+        case EValues::Double:
+            return MakeFixed<parquet::DoubleType, double>(type, maxDef, memoryPool);
+        case EValues::String:
+            return std::make_unique<TStringValues>(maxDef, memoryPool);
+        case EValues::Decimal: {
+            const TDecimalSpec spec{.Precision = descriptor.type_precision(), .Scale = descriptor.type_scale()};
+            if (DecimalStorageOf(spec) == EDecimalStorage::I64) {
+                return MakeDecimalValues<int64_t>(
+                    descriptor, arrow::decimal64(spec.Precision, spec.Scale), memoryPool);
+            }
+            return MakeDecimalValues<__int128>(
+                descriptor, arrow::decimal128(spec.Precision, spec.Scale), memoryPool);
         }
-        if (DecimalStorageOf(spec) == EDecimalStorage::I64) {
-            return MakeDecimalValues<int64_t>(
-                descriptor, arrow::decimal64(spec.Precision, spec.Scale), memoryPool);
-        }
-        return MakeDecimalValues<__int128>(
-            descriptor, arrow::decimal128(spec.Precision, spec.Scale), memoryPool);
     }
-    switch (descriptor.physical_type()) {
-        case parquet::Type::BOOLEAN:
-            if (type->id() == arrow::Type::BOOL) {
-                return std::make_unique<TBoolValues>(maxDef, memoryPool);
-            }
-            return nullptr;
-        case parquet::Type::INT32:
-            switch (type->id()) {
-                case arrow::Type::INT8:
-                    return MakeFixed<parquet::Int32Type, int8_t>(type, maxDef, memoryPool);
-                case arrow::Type::INT16:
-                    return MakeFixed<parquet::Int32Type, int16_t>(type, maxDef, memoryPool);
-                case arrow::Type::INT32:
-                case arrow::Type::DATE32:
-                    return MakeFixed<parquet::Int32Type, int32_t>(type, maxDef, memoryPool);
-                case arrow::Type::UINT8:
-                    return MakeFixed<parquet::Int32Type, uint8_t>(type, maxDef, memoryPool);
-                case arrow::Type::UINT16:
-                    return MakeFixed<parquet::Int32Type, uint16_t>(type, maxDef, memoryPool);
-                case arrow::Type::UINT32:
-                    return MakeFixed<parquet::Int32Type, uint32_t>(type, maxDef, memoryPool);
-                default:
-                    return nullptr;
-            }
-        case parquet::Type::INT64:
-            switch (type->id()) {
-                case arrow::Type::INT64:
-                    return MakeFixed<parquet::Int64Type, int64_t>(type, maxDef, memoryPool);
-                case arrow::Type::UINT64:
-                    return MakeFixed<parquet::Int64Type, uint64_t>(type, maxDef, memoryPool);
-                default:
-                    return nullptr;
-            }
-        case parquet::Type::FLOAT:
-            if (type->id() == arrow::Type::FLOAT) {
-                return MakeFixed<parquet::FloatType, float>(type, maxDef, memoryPool);
-            }
-            return nullptr;
-        case parquet::Type::DOUBLE:
-            if (type->id() == arrow::Type::DOUBLE) {
-                return MakeFixed<parquet::DoubleType, double>(type, maxDef, memoryPool);
-            }
-            return nullptr;
-        case parquet::Type::BYTE_ARRAY:
-            if (type->id() == arrow::Type::STRING || type->id() == arrow::Type::LARGE_STRING) {
-                return std::make_unique<TStringValues>(maxDef, memoryPool);
-            }
-            return nullptr;
-        default:
-            return nullptr;
-    }
+    return nullptr;
 }
 
 } // namespace
@@ -628,11 +669,12 @@ TParquetColumnScan::TParquetColumnScan(
     , RowGroups_(std::move(rowGroups))
     , MemoryPool_(memoryPool)
     , Descriptor_(File_.metadata()->schema()->Column(Column_))
-    , Values_(MakeValues(*Descriptor_, type, memoryPool))
 {
-    if (!Values_) {
+    const auto values = ValuesOf(*Descriptor_, *type);
+    if (!values) {
         throw std::runtime_error("parquet column scan: unsupported column " + Descriptor_->name());
     }
+    Values_ = MakeValues(*Descriptor_, *values, type, memoryPool);
 }
 
 TParquetColumnScan::~TParquetColumnScan() = default;
@@ -641,7 +683,7 @@ bool TParquetColumnScan::Supports(
     const parquet::ColumnDescriptor& descriptor,
     const std::shared_ptr<arrow::DataType>& type)
 {
-    return MakeValues(descriptor, type, arrow::default_memory_pool()) != nullptr;
+    return ValuesOf(descriptor, *type).has_value();
 }
 
 const std::shared_ptr<arrow::DataType>& TParquetColumnScan::Type() const {

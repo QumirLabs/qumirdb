@@ -107,13 +107,13 @@ private:
     std::optional<std::vector<int>> RowGroups_;
     std::optional<std::unordered_set<std::string>> RestrictedColumns_;
     std::shared_ptr<arrow::RecordBatchReader> Reader_;
-    // File fields in output order; the decimal ones are read by DecimalScans_.
+    // File fields in output order; the decimal ones are read by ColumnScans_.
     std::vector<int> SelectedColumns_;
-    struct TDecimalScan {
+    struct TColumnScan {
         size_t Position = 0;
         std::unique_ptr<TParquetColumnScan> Scan;
     };
-    std::vector<TDecimalScan> DecimalScans_;
+    std::vector<TColumnScan> ColumnScans_;
     std::shared_ptr<arrow::Schema> BatchSchema_;
     std::vector<int> ReaderRowGroups_;
     size_t ReaderRowGroupIndex_ = 0;

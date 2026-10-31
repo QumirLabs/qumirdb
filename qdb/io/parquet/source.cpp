@@ -637,7 +637,7 @@ void TParquetSource::ResetReader()
     }
     // Decimal columns bypass Arrow's per-value Decimal128 conversion (TParquetColumnScan).
     std::vector<int> arrowColumns;
-    DecimalScans_.clear();
+    ColumnScans_.clear();
     for (size_t position = 0; position < SelectedColumns_.size(); ++position) {
         const int field = SelectedColumns_[position];
         const int leaf = File_->DecimalScanColumns[static_cast<size_t>(field)];
@@ -645,7 +645,7 @@ void TParquetSource::ResetReader()
             arrowColumns.push_back(field);
             continue;
         }
-        DecimalScans_.push_back({
+        ColumnScans_.push_back({
             .Position = position,
             .Scan = std::make_unique<TParquetColumnScan>(
                 *File_->FileReader->parquet_reader(), leaf, File_->FileSchema->field(field)->type(),
@@ -706,8 +706,8 @@ void TParquetSource::RefreshSchema()
             .Name = Names_.back(),
             .Type = ArrowFieldToQumir(field),
         });
-        if (nextScan < DecimalScans_.size() && DecimalScans_[nextScan].Position == position) {
-            field = field->WithType(DecimalScans_[nextScan++].Scan->Type());
+        if (nextScan < ColumnScans_.size() && ColumnScans_[nextScan].Position == position) {
+            field = field->WithType(ColumnScans_[nextScan++].Scan->Type());
         }
         fields.push_back(std::move(field));
     }
@@ -1183,15 +1183,15 @@ bool TParquetSource::Next(TRowSet& rowSet) {
     if (!Reader_->ReadNext(&batch).ok() || !batch) {
         return false;
     }
-    if (!DecimalScans_.empty()) {
+    if (!ColumnScans_.empty()) {
         // The decimal columns take their positions among the columns Arrow read.
         std::vector<std::shared_ptr<arrow::Array>> columns;
         columns.reserve(SelectedColumns_.size());
         int arrowColumn = 0;
         size_t nextScan = 0;
         for (size_t position = 0; position < SelectedColumns_.size(); ++position) {
-            if (nextScan < DecimalScans_.size() && DecimalScans_[nextScan].Position == position) {
-                columns.push_back(DecimalScans_[nextScan++].Scan->Read(batch->num_rows()));
+            if (nextScan < ColumnScans_.size() && ColumnScans_[nextScan].Position == position) {
+                columns.push_back(ColumnScans_[nextScan++].Scan->Read(batch->num_rows()));
             } else {
                 columns.push_back(batch->column(arrowColumn++));
             }
