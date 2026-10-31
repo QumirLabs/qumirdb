@@ -1,7 +1,7 @@
 #pragma once
 
 #include <qdb/exec/stage.h>
-#include <qdb/kernel/thread_context.h>
+#include <qdb/kernel/execution_context.h>
 
 #include <qumir/parser/ast.h>
 
@@ -59,7 +59,7 @@ struct TKernelSlot {
     // function pointer type.
     template <typename TFn, typename... TArgs>
     auto Call(
-        [[maybe_unused]] TThreadExecutionContext& context, size_t index, TArgs... args) const
+        [[maybe_unused]] TExecutionContext& context, size_t index, TArgs... args) const
     {
         static_assert(IsKernelSignature<TFn>, "kernel signature violates the kernel ABI");
         return reinterpret_cast<TFn>(Fns[index])(args...);

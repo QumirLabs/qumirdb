@@ -275,7 +275,7 @@ TSchedulerUnaryStage BuildSchedulerFilterStage(
         filter, inputType, std::move(options));
     auto code = std::make_shared<NScheduler::TUnaryCode>(
         [process = std::move(runtime.Process)](
-            TThreadExecutionContext& context, void* state, TRowSet& rowSet)
+            TExecutionContext& context, void* state, TRowSet& rowSet)
         {
             auto* kernelState = static_cast<TUnaryStreamingKernelState*>(state);
             process(context, rowSet, *kernelState);
@@ -298,7 +298,7 @@ TSchedulerUnaryStage BuildSchedulerProjectStage(
         project, inputType, std::move(options));
     auto code = std::make_shared<NScheduler::TUnaryCode>(
         [process = std::move(runtime.Process)](
-            TThreadExecutionContext& context, void* state, TRowSet& rowSet)
+            TExecutionContext& context, void* state, TRowSet& rowSet)
         {
             auto* kernelState = static_cast<TUnaryStreamingKernelState*>(state);
             process(context, rowSet, *kernelState);
@@ -983,7 +983,7 @@ private:
     template <class TState>
     std::shared_ptr<const NScheduler::TBlockingCode> MakeDrainBlockingCode() {
         auto code = std::make_shared<NScheduler::TBlockingCode>(
-            [](TThreadExecutionContext& context,
+            [](TExecutionContext& context,
                NScheduler::ITaskState& state,
                NScheduler::TInputPort& input,
                TRowSet& output)
@@ -1048,7 +1048,7 @@ private:
     // Blocking code for a limit/offset task.
     std::shared_ptr<const NScheduler::TBlockingCode> MakeLimitBlockingCode() {
         return std::make_shared<NScheduler::TBlockingCode>(
-            [](TThreadExecutionContext& context,
+            [](TExecutionContext& context,
                NScheduler::ITaskState& state,
                NScheduler::TInputPort& input,
                TRowSet& output)
@@ -1080,7 +1080,7 @@ private:
     template <class TState>
     std::shared_ptr<const NScheduler::TBinaryBlockingCode> MakeBinaryJoinCode() {
         auto code = std::make_shared<NScheduler::TBinaryBlockingCode>(
-            [](TThreadExecutionContext& context,
+            [](TExecutionContext& context,
                NScheduler::ITaskState& state,
                NScheduler::TInputPort& left,
                NScheduler::TInputPort& right,
@@ -1568,7 +1568,7 @@ private:
         auto sets = aggregate.GroupingSets();
 
         auto code = std::make_shared<NScheduler::TBlockingCode>(
-            [](TThreadExecutionContext& context,
+            [](TExecutionContext& context,
                NScheduler::ITaskState& state,
                NScheduler::TInputPort& input,
                TRowSet& output)
@@ -1696,7 +1696,7 @@ private:
         };
 
         auto code = std::make_shared<NScheduler::TBlockingCode>(
-            [](TThreadExecutionContext& context,
+            [](TExecutionContext& context,
                NScheduler::ITaskState& state,
                NScheduler::TInputPort& input,
                TRowSet& output)
@@ -1756,7 +1756,7 @@ private:
         auto compiled = CompileAggregateTable(
             *inputType, aggregate, std::move(stage), execStageId, estimate, hasPrecomputedHash);
         auto code = std::make_shared<NScheduler::TBlockingCode>(
-            [](TThreadExecutionContext& context,
+            [](TExecutionContext& context,
                NScheduler::ITaskState& state,
                NScheduler::TInputPort& input,
                TRowSet& output)
@@ -2357,7 +2357,7 @@ private:
             // TBroadcastConnection requires one producer. This bridge turns
             // the already gathered locator stream into that producer.
             auto forwardCode = std::make_shared<NScheduler::TUnaryCode>(
-                [](TThreadExecutionContext&, void*, TRowSet&) {});
+                [](TExecutionContext&, void*, TRowSet&) {});
             auto forward = std::make_unique<NScheduler::TUnaryTask>(
                 forwardCode,
                 std::shared_ptr<void>{},
@@ -2435,7 +2435,7 @@ private:
         }
 
         auto mergeCode = std::make_shared<NScheduler::TMergeCode>(
-            [](TThreadExecutionContext& context,
+            [](TExecutionContext& context,
                NScheduler::ITaskState& state,
                std::vector<NScheduler::TInputPort>& inputs,
                TRowSet& output)
@@ -2639,7 +2639,7 @@ private:
         }
 
         auto mergeCode = std::make_shared<NScheduler::TMergeCode>(
-            [](TThreadExecutionContext& context,
+            [](TExecutionContext& context,
                NScheduler::ITaskState& state,
                std::vector<NScheduler::TInputPort>& inputs,
                TRowSet& output)
@@ -2801,7 +2801,7 @@ private:
                 1, lanes, "cross-scalar-broadcast");
 
             auto fwdCode = std::make_shared<NScheduler::TUnaryCode>(
-                [](TThreadExecutionContext&, void*, TRowSet&) {});
+                [](TExecutionContext&, void*, TRowSet&) {});
             auto fwd = std::make_unique<NScheduler::TUnaryTask>(
                 fwdCode,
                 std::make_shared<int>(0),

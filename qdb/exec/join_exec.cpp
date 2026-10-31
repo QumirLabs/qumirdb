@@ -59,7 +59,7 @@ void TInnerJoinProcessor::SetInstrumentation(TOperatorInstrumentation* instrumen
     RightRows_.SetInstrumentation(instrumentation, 1);
 }
 
-void TInnerJoinProcessor::ObserveInstrumentation(TThreadExecutionContext& context) {
+void TInnerJoinProcessor::ObserveInstrumentation(TExecutionContext& context) {
     if (Instrumentation_ && Initialized_) {
         Instrumentation_->ObserveHash(context, LeftTable_.data(), 0, true);
         Instrumentation_->ObserveHash(context, RightTable_.data(), 1, true);
@@ -82,7 +82,7 @@ TInnerJoinProcessor::~TInnerJoinProcessor() {
     }
     if (Initialized_) {
         // Runs outside any worker, on the thread that releases the plan.
-        TThreadExecutionContext context;
+        TExecutionContext context;
         Kernels_.Dispatch(
             context,
             LeftTable_.data(),
@@ -97,7 +97,7 @@ TInnerJoinProcessor::~TInnerJoinProcessor() {
     }
 }
 
-void TInnerJoinProcessor::EnsureInit(TThreadExecutionContext& context) {
+void TInnerJoinProcessor::EnsureInit(TExecutionContext& context) {
     if (Initialized_) {
         return;
     }
@@ -130,7 +130,7 @@ bool TInnerJoinProcessor::DrainReadyOutput(TRowSet& rowSet) {
 // Materializes at most one output batch of pending pairs through the kernel;
 // resets the buffer once the cursor catches up so later kernel ops (Finalize)
 // always see an empty buffer.
-bool TInnerJoinProcessor::DrainMaterialized(TThreadExecutionContext& context, TRowSet& rowSet) {
+bool TInnerJoinProcessor::DrainMaterialized(TExecutionContext& context, TRowSet& rowSet) {
     if (MaterializeCursor_ >= PairBuffer_.Count) {
         return false;
     }
@@ -155,7 +155,7 @@ bool TInnerJoinProcessor::DrainMaterialized(TThreadExecutionContext& context, TR
 }
 
 void TInnerJoinProcessor::DrainStreamingPairs(
-    TThreadExecutionContext& context,
+    TExecutionContext& context,
     const TRowSet& streamBatch,
     EJoinSide streamSide)
 {
@@ -204,7 +204,7 @@ EJoinSide TInnerJoinProcessor::ChooseSymmetricPullSide() const {
 }
 
 bool TInnerJoinProcessor::PullOneInputBatch(
-    TThreadExecutionContext& context,
+    TExecutionContext& context,
     const TFetch& left,
     const TFetch& right)
 {
@@ -403,7 +403,7 @@ bool TInnerJoinProcessor::FinalizesPreservedRows() const {
     return IsOuter() || StreamsSemiAntiRight();
 }
 
-void TInnerJoinProcessor::FinalizePreservedRows(TThreadExecutionContext& context) {
+void TInnerJoinProcessor::FinalizePreservedRows(TExecutionContext& context) {
     // A streamed join has no table of the other side to look keys up in; its
     // build rows carry matched marks instead.
     const auto op = BuildSide_ == EJoinBuildSide::Auto
@@ -435,7 +435,7 @@ bool TInnerJoinProcessor::StreamsSemiAntiRight() const {
 // The symmetric path stores the left rows and the distinct right keys; the left
 // rows must survive until the final membership scan.
 bool TInnerJoinProcessor::PullSemiAntiBatch(
-    TThreadExecutionContext& context,
+    TExecutionContext& context,
     const TFetch& left,
     const TFetch& right)
 {
@@ -499,7 +499,7 @@ bool TInnerJoinProcessor::PullSemiAntiBatch(
     return true;
 }
 
-void TInnerJoinProcessor::FinalizeSemiAntiJoin(TThreadExecutionContext& context) {
+void TInnerJoinProcessor::FinalizeSemiAntiJoin(TExecutionContext& context) {
     if (!Kernels_.Dispatch(
             context,
             LeftTable_.data(),
@@ -517,7 +517,7 @@ void TInnerJoinProcessor::FinalizeSemiAntiJoin(TThreadExecutionContext& context)
 }
 
 EJoinProcessorResult TInnerJoinProcessor::ProcessSemiAnti(
-    TThreadExecutionContext& context,
+    TExecutionContext& context,
     const TFetch& left,
     const TFetch& right,
     TRowSet& output)
@@ -541,7 +541,7 @@ EJoinProcessorResult TInnerJoinProcessor::ProcessSemiAnti(
 }
 
 EJoinProcessorResult TInnerJoinProcessor::Process(
-    TThreadExecutionContext& context,
+    TExecutionContext& context,
     const TFetch& left,
     const TFetch& right,
     TRowSet& output)
@@ -620,7 +620,7 @@ TCrossJoinProcessor::~TCrossJoinProcessor() {
     // a null function pointer - Data stays null and there is nothing to free.
     if (PairBuffer_.Data) {
         // Runs outside any worker, on the thread that releases the plan.
-        TThreadExecutionContext context;
+        TExecutionContext context;
         Kernels_.Dispatch(
             context,
             nullptr,
@@ -644,7 +644,7 @@ bool TCrossJoinProcessor::KeepsUnmatchedRight() const {
 }
 
 bool TCrossJoinProcessor::Dispatch(
-    TThreadExecutionContext& context, int32_t leftBatch, ECrossJoinKernelOp op)
+    TExecutionContext& context, int32_t leftBatch, ECrossJoinKernelOp op)
 {
     return Kernels_.Dispatch(
         context,
@@ -657,7 +657,7 @@ bool TCrossJoinProcessor::Dispatch(
         CrossJoinOp(op));
 }
 
-bool TCrossJoinProcessor::DrainMaterialized(TThreadExecutionContext& context, TRowSet& rowSet) {
+bool TCrossJoinProcessor::DrainMaterialized(TExecutionContext& context, TRowSet& rowSet) {
     if (MaterializeCursor_ >= PairBuffer_.Count) {
         return false;
     }
@@ -682,7 +682,7 @@ bool TCrossJoinProcessor::DrainMaterialized(TThreadExecutionContext& context, TR
 }
 
 EJoinProcessorResult TCrossJoinProcessor::Process(
-    TThreadExecutionContext& context,
+    TExecutionContext& context,
     const TFetch& left,
     const TFetch& right,
     TRowSet& output)

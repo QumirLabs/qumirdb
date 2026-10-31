@@ -69,7 +69,7 @@ using TProbe = int64_t (*)(const TFilterData*, const uint64_t*, const uint8_t*, 
 
 template <typename T, typename... TArgs>
 auto CallEntry(
-    TThreadExecutionContext& context, const TRuntimeContext& runtime, EEntry entry, TArgs... args)
+    TExecutionContext& context, const TRuntimeContext& runtime, EEntry entry, TArgs... args)
 {
     return runtime.RuntimeFilterKernels->Call<T>(context, entry, args...);
 }
@@ -122,7 +122,7 @@ TRuntimeFilterBuilder::TRuntimeFilterBuilder(
 }
 
 void TRuntimeFilterBuilder::Add(
-    TThreadExecutionContext& context,
+    TExecutionContext& context,
     std::span<const uint64_t> hashes,
     std::span<const uint8_t> selection)
 {
@@ -209,7 +209,7 @@ void TRuntimeFilter::StartExecutionClock() {
 }
 
 void TRuntimeFilter::FinishProducer(
-    TThreadExecutionContext& context, TRuntimeFilterPartial&& partial)
+    TExecutionContext& context, TRuntimeFilterPartial&& partial)
 {
     const size_t slot = NextPartial_.fetch_add(1, std::memory_order_relaxed);
     // Each producer writes its own slot. The acq_rel decrement chain makes all
@@ -221,7 +221,7 @@ void TRuntimeFilter::FinishProducer(
     }
 }
 
-void TRuntimeFilter::BuildPublishedData(TThreadExecutionContext& context) {
+void TRuntimeFilter::BuildPublishedData(TExecutionContext& context) {
     bool incomplete = false;
     size_t exactHashes = 0;
     for (const auto& partial : Partials_) {
@@ -306,7 +306,7 @@ void TRuntimeFilter::BuildPublishedData(TThreadExecutionContext& context) {
     Data_.Words = std::move(bloom);
 }
 
-void TRuntimeFilter::Publish(TThreadExecutionContext& context) {
+void TRuntimeFilter::Publish(TExecutionContext& context) {
     BuildPublishedData(context);
     std::vector<TRuntimeFilterPartial>().swap(Partials_);
     if (ExecutionStart_ != std::chrono::steady_clock::time_point{}) {
@@ -345,7 +345,7 @@ bool TRuntimeFilter::BeginBatch(TRuntimeFilterProbeState& state, size_t rows) co
 }
 
 size_t TRuntimeFilter::MayContainBatch(
-    TThreadExecutionContext& context,
+    TExecutionContext& context,
     std::span<const uint64_t> hashes,
     std::span<uint8_t> output,
     TRuntimeFilterProbeState& state,

@@ -29,7 +29,7 @@ using namespace NQumir::NAst;
 // immediately (OK once pushed, BLOCKED_OUTPUT if the queue is full), or nullopt
 // when nothing is pending so the caller proceeds to produce the next output.
 std::optional<ETaskResult> FlushPendingOutput(
-    TThreadExecutionContext& context,
+    TExecutionContext& context,
     bool& hasOutput,
     TOutputPort& output,
     TRowSet& current)
@@ -200,7 +200,7 @@ const TStructType& ShuffleInputStruct(const TTypePtr& type) {
 
 } // namespace
 
-EFetchResult TInputPort::Fetch(TThreadExecutionContext& context, TRowSet& rowSet) const {
+EFetchResult TInputPort::Fetch(TExecutionContext& context, TRowSet& rowSet) const {
     const auto result = Connection
         ? Connection->Fetch(Lane, rowSet)
         : EFetchResult::FINISHED;
@@ -214,7 +214,7 @@ bool TOutputPort::CanPush() const {
     return !Connection || Connection->CanPush(Lane);
 }
 
-bool TOutputPort::Push(TThreadExecutionContext& context, TRowSet&& rowSet) const {
+bool TOutputPort::Push(TExecutionContext& context, TRowSet&& rowSet) const {
     const auto rows = Instrumentation ? Instrumentation->Rows : 0;
     const auto bytes = Instrumentation ? Instrumentation->Bytes : 0;
     if (Instrumentation) {
@@ -317,7 +317,7 @@ TSourceTask::TSourceTask(
     , Output_(output)
 {}
 
-ETaskResult TSourceTask::Execute(TThreadExecutionContext& context) {
+ETaskResult TSourceTask::Execute(TExecutionContext& context) {
     if (Finished_) {
         return ETaskResult::FINISHED;
     }
@@ -394,7 +394,7 @@ bool TRuntimeFilterTask::TryNotifyDependency() noexcept {
         std::memory_order_acq_rel);
 }
 
-ETaskResult TRuntimeFilterTask::Execute(TThreadExecutionContext& context) {
+ETaskResult TRuntimeFilterTask::Execute(TExecutionContext& context) {
     if (OutputFinished_) {
         return ETaskResult::FINISHED;
     }
@@ -493,7 +493,7 @@ TUnaryTask::~TUnaryTask() {
     }
 }
 
-ETaskResult TUnaryTask::Execute(TThreadExecutionContext& context) {
+ETaskResult TUnaryTask::Execute(TExecutionContext& context) {
     if (OutputFinished_) {
         return ETaskResult::FINISHED;
     }
@@ -545,7 +545,7 @@ TSinkTask::TSinkTask(
     , Input_(input)
 {}
 
-ETaskResult TSinkTask::Execute(TThreadExecutionContext& context) {
+ETaskResult TSinkTask::Execute(TExecutionContext& context) {
     if (Finished_) {
         return ETaskResult::FINISHED;
     }
@@ -582,7 +582,7 @@ TBlockingTask::~TBlockingTask() {
     }
 }
 
-ETaskResult TBlockingTask::Execute(TThreadExecutionContext& context) {
+ETaskResult TBlockingTask::Execute(TExecutionContext& context) {
     if (OutputFinished_) {
         return ETaskResult::FINISHED;
     }
@@ -622,7 +622,7 @@ TBinaryBlockingTask::~TBinaryBlockingTask() {
     }
 }
 
-ETaskResult TBinaryBlockingTask::Execute(TThreadExecutionContext& context) {
+ETaskResult TBinaryBlockingTask::Execute(TExecutionContext& context) {
     if (OutputFinished_) {
         return ETaskResult::FINISHED;
     }
@@ -672,7 +672,7 @@ TMergeTask::~TMergeTask() {
     }
 }
 
-ETaskResult TMergeTask::Execute(TThreadExecutionContext& context) {
+ETaskResult TMergeTask::Execute(TExecutionContext& context) {
     if (OutputFinished_) {
         return ETaskResult::FINISHED;
     }
@@ -731,11 +731,11 @@ THashShuffleTask::THashShuffleTask(
 
 THashShuffleTask::~THashShuffleTask() {
     // Runs outside any worker, on the thread that releases the plan.
-    TThreadExecutionContext context;
+    TExecutionContext context;
     ClearPending(context);
 }
 
-ETaskResult THashShuffleTask::Execute(TThreadExecutionContext& context) {
+ETaskResult THashShuffleTask::Execute(TExecutionContext& context) {
     if (OutputFinished_) {
         return ETaskResult::FINISHED;
     }
@@ -779,7 +779,7 @@ ETaskResult THashShuffleTask::Execute(TThreadExecutionContext& context) {
     return PushPending(context);
 }
 
-void THashShuffleTask::ObserveInstrumentation(TThreadExecutionContext& context) {
+void THashShuffleTask::ObserveInstrumentation(TExecutionContext& context) {
     if (!ResourceInstrumentation_) {
         return;
     }
@@ -822,7 +822,7 @@ bool THashShuffleTask::BatchingEnabled() const {
 }
 
 std::shared_ptr<uint64_t> THashShuffleTask::ComputeHashes(
-    TThreadExecutionContext& context,
+    TExecutionContext& context,
     const std::shared_ptr<TRowSet>& input)
 {
     if (Code_->UseInputHash && input->Hash) {
@@ -837,7 +837,7 @@ std::shared_ptr<uint64_t> THashShuffleTask::ComputeHashes(
 }
 
 void THashShuffleTask::AccumulateFilter(
-    TThreadExecutionContext& context,
+    TExecutionContext& context,
     const TRowSet& rowSet, std::span<const uint64_t> hashes)
 {
     if (!Code_->ProducedFilter) {
@@ -862,7 +862,7 @@ void THashShuffleTask::EnsureBuffers(size_t partitions) {
     }
 }
 
-void THashShuffleTask::Scatter(TThreadExecutionContext& context, TRowSet& rowSet) {
+void THashShuffleTask::Scatter(TExecutionContext& context, TRowSet& rowSet) {
     if (Output_->DstCount() == 0 || rowSet.RowCount <= 0) {
         return;
     }
@@ -877,7 +877,7 @@ void THashShuffleTask::Scatter(TThreadExecutionContext& context, TRowSet& rowSet
 }
 
 void THashShuffleTask::ScatterBuffered(
-    TThreadExecutionContext& context, const std::shared_ptr<TRowSet>& input)
+    TExecutionContext& context, const std::shared_ptr<TRowSet>& input)
 {
     const size_t partitions = Output_->DstCount();
     EnsureBuffers(partitions);
@@ -928,7 +928,7 @@ void THashShuffleTask::ScatterBuffered(
 }
 
 void THashShuffleTask::ScatterViews(
-    TThreadExecutionContext& context, const std::shared_ptr<TRowSet>& input)
+    TExecutionContext& context, const std::shared_ptr<TRowSet>& input)
 {
     const size_t partitions = Output_->DstCount();
 
@@ -1000,7 +1000,7 @@ void THashShuffleTask::ScatterViews(
 }
 
 void THashShuffleTask::AddBufferedRows(
-    TThreadExecutionContext& context,
+    TExecutionContext& context,
     size_t dst,
     const std::shared_ptr<TRowSet>& input,
     std::vector<int32_t>&& rows,
@@ -1035,7 +1035,7 @@ void THashShuffleTask::AddBufferedRows(
 }
 
 void THashShuffleTask::FlushBuffer(
-    TThreadExecutionContext& context, size_t dst, bool releaseInputs)
+    TExecutionContext& context, size_t dst, bool releaseInputs)
 {
     auto& buffer = *Buffers_[dst];
     if (buffer.RowCount == 0) {
@@ -1214,13 +1214,13 @@ void THashShuffleTask::FlushBuffer(
     ObserveInstrumentation(context);
 }
 
-void THashShuffleTask::FlushAllBuffers(TThreadExecutionContext& context) {
+void THashShuffleTask::FlushAllBuffers(TExecutionContext& context) {
     for (size_t dst = 0; dst < Buffers_.size(); ++dst) {
         FlushBuffer(context, dst);
     }
 }
 
-ETaskResult THashShuffleTask::PushPending(TThreadExecutionContext& context) {
+ETaskResult THashShuffleTask::PushPending(TExecutionContext& context) {
     while (PendingIndex_ < Pending_.size()) {
         auto& pending = Pending_[PendingIndex_];
         if (!Output_->CanPushTo(SourceLane_, pending.DstLane)) {
@@ -1245,7 +1245,7 @@ ETaskResult THashShuffleTask::PushPending(TThreadExecutionContext& context) {
     return ETaskResult::OK;
 }
 
-void THashShuffleTask::ClearPending(TThreadExecutionContext& context) {
+void THashShuffleTask::ClearPending(TExecutionContext& context) {
     for (size_t i = PendingIndex_; i < Pending_.size(); ++i) {
         if (Pending_[i].RowSet.RefCount) {
             Release(&Pending_[i].RowSet);

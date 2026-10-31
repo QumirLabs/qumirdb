@@ -34,7 +34,7 @@ inline std::vector<uint8_t> ProbeRuntimeFilter(
     std::vector<uint8_t> output(hashes.size(), 0xff);
     auto state = filter.CreateProbeState();
     if (filter.BeginBatch(*state, hashes.size())) {
-        TThreadExecutionContext context;
+        TExecutionContext context;
         filter.MayContainBatch(context, hashes, output, *state);
     }
     return output;

@@ -39,7 +39,7 @@ TUnaryStreamProcess MakeProjectProcess(
         computedWidths = std::move(computedWidths),
         computedIsString = std::move(computedIsString),
         computedIsNullable = std::move(computedIsNullable)](
-        TThreadExecutionContext& context,
+        TExecutionContext& context,
         TRowSet& rowSet,
         TUnaryStreamingKernelState&)
     {

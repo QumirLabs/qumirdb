@@ -23,13 +23,13 @@ public:
         std::vector<TSortColumnRef> keyColumns,
         TSortRadixKernel kernel);
 
-    void Add(TThreadExecutionContext& context, TRowSet& rowSet);
+    void Add(TExecutionContext& context, TRowSet& rowSet);
     void SetInstrumentation(TOperatorInstrumentation* instrumentation) {
         Store_.SetInstrumentation(instrumentation, 0);
     }
 
     void Finish();
-    bool Next(TThreadExecutionContext& context, TRowSet& rowSet);
+    bool Next(TExecutionContext& context, TRowSet& rowSet);
 
 private:
     NQumir::NAst::TTypePtr OutputType_;

@@ -41,7 +41,7 @@ TExprPtr Parse(const std::string& src) {
 } // namespace
 
 TEST(CompileProject, ComputesF64AndI64Columns) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     // Input: p (f64), d (f64), k (i64).
     TStructType inputType({
         {"p", std::make_shared<TFloatType>()},
@@ -84,7 +84,7 @@ TEST(CompileProject, ComputesF64AndI64Columns) {
 }
 
 TEST(CompileProject, CompilesFromKernelSpec) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     TStructType inputType({
         {"value", std::make_shared<TIntegerType>(TIntegerType::I64)},
     });
@@ -109,7 +109,7 @@ TEST(CompileProject, CompilesFromKernelSpec) {
 }
 
 TEST(CompileProject, CastsIntegerIfBranchesBeforeLoweringPhi) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     TStructType inputType({
         {"d", std::make_shared<TIntegerType>(TIntegerType::I32)},
         {"qty", std::make_shared<TIntegerType>(TIntegerType::I32)},
@@ -140,7 +140,7 @@ TEST(CompileProject, CastsIntegerIfBranchesBeforeLoweringPhi) {
 }
 
 TEST(CompileProject, RegexpReplaceUsesCompiledQueryHandle) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     TStructType inputType({
         {"url", std::make_shared<TStringType>()},
     });

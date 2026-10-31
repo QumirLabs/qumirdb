@@ -96,7 +96,7 @@ TEST(OperatorInstrumentation, ResolvesLogicalAndPhysicalColumnWidths) {
 }
 
 TEST(OperatorInstrumentation, CountsSelectedNonNullPayloadAndBothOffsetWidths) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     auto kernel = MeasurementKernel();
     std::array<int32_t, 4> values = {10, 20, 30, 40};
     std::array<int32_t, 5> narrow = {0, 1, 4, 4, 9};
@@ -129,7 +129,7 @@ TEST(OperatorInstrumentation, CountsSelectedNonNullPayloadAndBothOffsetWidths) {
 }
 
 TEST(OperatorInstrumentation, BackpressureRetriesDoNotCountFailedPushOrEmptyFetch) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     auto kernel = MeasurementKernel();
     TOneToOneConnection connection(1);
     connection.Resize(1, 1);
@@ -158,7 +158,7 @@ TEST(OperatorInstrumentation, BackpressureRetriesDoNotCountFailedPushOrEmptyFetc
 }
 
 TEST(OperatorInstrumentation, ObservesEveryGeometricGrowthInsideABatch) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     auto i64 = std::make_shared<TIntegerType>();
     TStructType inputType({{"k", i64}});
     auto spec = NKernel::BuildAggregateKernelSpec(inputType, {"k"}, {{.Name = "n", .Func = "count"}});
@@ -211,7 +211,7 @@ TEST(OperatorInstrumentation, StringStateMemoryCountsOnlyTheGroupsAfterRehash) {
         auto kernels = TKernelCompiler().CompileAggregate(spec);
         TOperatorInstrumentation counters;
         counters.Kernel = MeasurementKernel();
-        NQdb::TThreadExecutionContext context;
+        NQdb::TExecutionContext context;
         TAggregateProcessor processor(kernels, {.InitialCapacity = 8});
         processor.SetInstrumentation(&counters);
         std::string keys;
@@ -243,7 +243,7 @@ TEST(OperatorInstrumentation, StringStateMemoryCountsOnlyTheGroupsAfterRehash) {
 }
 
 TEST(OperatorInstrumentation, MeasuresResidualSemiJoinMatchSetWithoutRowBuckets) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     auto i64 = std::make_shared<TIntegerType>();
     TStructType leftType({{"lk", i64}});
     TStructType rightType({{"rk", i64}});
@@ -430,7 +430,7 @@ TEST(OperatorInstrumentation, UnionShufflesKeepTheirOwnInputSchemas) {
 }
 
 TEST(OperatorInstrumentation, ShuffleAccountsSparseRetainedOwnersOnceAcrossPartitions) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     for (size_t retentionBudget : {1048576u, 1u}) {
         SCOPED_TRACE(retentionBudget);
         TTaskNode node;
@@ -495,7 +495,7 @@ TEST(OperatorInstrumentation, ShuffleAccountsSparseRetainedOwnersOnceAcrossParti
 TEST(OperatorInstrumentation, ThreadCpuExcludesSleepingAndSurvivesWorkerMigration) {
     class TSleepTask final : public ITaskNode {
     public:
-        ETaskResult Execute(NQdb::TThreadExecutionContext&) override {
+        ETaskResult Execute(NQdb::TExecutionContext&) override {
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
             return ETaskResult::OK;
         }
@@ -506,7 +506,7 @@ TEST(OperatorInstrumentation, ThreadCpuExcludesSleepingAndSurvivesWorkerMigratio
     const auto start = std::chrono::steady_clock::now();
     for (size_t worker = 0; worker < 2; ++worker) {
         std::thread([&] {
-            NQdb::TThreadExecutionContext context;
+            NQdb::TExecutionContext context;
             EXPECT_EQ(ExecuteTask(node, context), ETaskResult::OK);
         }).join();
     }

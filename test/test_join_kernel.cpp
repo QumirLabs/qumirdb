@@ -271,7 +271,7 @@ TEST(JoinKernel, PairBufferPushGrowsAndStoresPairs) {
 }
 
 TEST(CompileJoin, ProducesWorkingInnerJoinKernels) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     using namespace NQumir::NAst;
     auto i64 = [] {
         return std::make_shared<TIntegerType>(TIntegerType::I64);
@@ -387,7 +387,7 @@ TEST(CompileJoin, NormalizesNullableResidualIfBranch) {
 }
 
 TEST(CompileJoin, RejectsGeneralOuterFinalizationWithResidual) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     using namespace NQumir::NAst;
     auto i64 = [] {
         return std::make_shared<TIntegerType>(TIntegerType::I64);
@@ -456,7 +456,7 @@ TEST(CompileJoin, RejectsGeneralOuterFinalizationWithResidual) {
 }
 
 TEST(CompileJoinHash, ProducesMatchingSideHashes) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     using namespace NQumir::NAst;
     auto i64 = [] {
         return std::make_shared<TIntegerType>(TIntegerType::I64);
@@ -508,7 +508,7 @@ TEST(CompileJoinHash, ProducesMatchingSideHashes) {
 // An f32 key hashes its 4 canonical bytes: signed zeroes and NaN payloads
 // meet, next to i32 and i64 key parts of a composite key.
 TEST(CompileJoinHash, F32KeyCanonicalizesZeroAndNaN) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     using namespace NQumir::NAst;
     auto f32 = [] { return std::make_shared<TFloatType>(TFloatType::F32); };
     auto i32 = [] { return std::make_shared<TIntegerType>(TIntegerType::I32); };
@@ -554,7 +554,7 @@ TEST(CompileJoinHash, F32KeyCanonicalizesZeroAndNaN) {
 // Hash equality alone is not enough: the key compare must also treat signed
 // zeroes and NaN payloads as equal.
 TEST(CompileJoin, F32KeyMatchesSignedZeroAndNaN) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     using namespace NQumir::NAst;
     auto f32 = [] { return std::make_shared<TFloatType>(TFloatType::F32); };
     auto i64 = [] { return std::make_shared<TIntegerType>(TIntegerType::I64); };
@@ -654,7 +654,7 @@ protected:
             .Selection = side.Selection.empty() ? nullptr : side.Selection.data(),
             .RefCount = 1,
         };
-        NQdb::TThreadExecutionContext context;
+        NQdb::TExecutionContext context;
         ASSERT_TRUE(hash(context, &side.Batch, side.Hashes.data()));
         side.Batch.Hash = side.Hashes.data();
     }
@@ -694,7 +694,7 @@ TEST_F(JoinKeyHash, FullSelectionMatchesNoSelection) {
 // The join reads the hash of a selected row only, so the rows that the hash
 // kernel skipped do not show up in the result.
 TEST_F(JoinKeyHash, JoinWithPrecomputedHashesSkipsUnselectedRows) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     TSide left{.Keys = {1, 2, 1, 3}, .Selection = {1, 0, 0xff, 1}};
     TSide right{.Keys = {1, 2, 3, 1}, .Selection = {0, 1, 1, 0xff}};
     Prepare(left, Hash_.Left);
@@ -759,7 +759,7 @@ TEST_F(JoinKeyHash, JoinWithPrecomputedHashesSkipsUnselectedRows) {
 }
 
 TEST(CompileJoin, ProbeOnlyStreamsWithoutInserting) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     using namespace NQumir::NAst;
     auto i64 = [] {
         return std::make_shared<TIntegerType>(TIntegerType::I64);
@@ -1246,7 +1246,7 @@ bool MaskBit(const TColumn& col, int64_t row) {
 } // namespace
 
 TEST(JoinMaterialize, GathersFixedAndStringColumnsWithNullPadding) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     using namespace NQumir::NAst;
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     auto i32 = std::make_shared<TIntegerType>(TIntegerType::I32);
@@ -1340,7 +1340,7 @@ TEST(JoinMaterialize, GathersFixedAndStringColumnsWithNullPadding) {
 }
 
 TEST(JoinMaterialize, PropagatesSourceNullsAndReadsStreamBatches) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     using namespace NQumir::NAst;
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     TStructType leftType({{"lk", i64}, {"lv", std::make_shared<TNullable>(i64)}});
@@ -1396,7 +1396,7 @@ TEST(JoinMaterialize, PropagatesSourceNullsAndReadsStreamBatches) {
 }
 
 TEST(JoinMaterialize, FullOuterPadsBothSides) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     using namespace NQumir::NAst;
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     TStructType leftType({{"lk", i64}});
@@ -1455,7 +1455,7 @@ TEST(JoinMaterialize, FullOuterPadsBothSides) {
 }
 
 TEST(JoinMaterialize, SemiAntiOutputsLeftColumnsOnly) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     using namespace NQumir::NAst;
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     TStructType leftType({{"lk", i64}, {"lv", i64}});
@@ -1498,7 +1498,7 @@ TEST(JoinMaterialize, SemiAntiOutputsLeftColumnsOnly) {
 }
 
 TEST(JoinMaterialize, GathersBoolAndDecimalWorkers) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     using namespace NQumir::NAst;
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     TStructType leftType({{"lk", i64}, {"flag", std::make_shared<TBoolType>()}});
@@ -1554,7 +1554,7 @@ TEST(JoinMaterialize, GathersBoolAndDecimalWorkers) {
 }
 
 TEST(CompileCrossJoin, EmitsSelectedPairsAndMaterializesStringPayload) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     using namespace NQumir::NAst;
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     TStructType leftType({{"lk", i64}, {"lname", std::make_shared<TStringType>()}});
@@ -1689,7 +1689,7 @@ std::vector<int64_t> CrossJoinPairs(
     ECrossJoinKernelOp op,
     TPairBuffer& pairs)
 {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     EXPECT_TRUE(kernels.Dispatch(
         context,
         &input.Left,
@@ -1705,7 +1705,7 @@ std::vector<int64_t> CrossJoinPairs(
 } // namespace
 
 TEST(CompileCrossJoin, FullJoinPadsUnmatchedRowsOfBothSides) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     auto kernels = CompileResidualCrossJoin(EJoinType::Full);
     TCrossJoinResidualInput input;
     TPairBuffer pairs{};
@@ -1738,7 +1738,7 @@ TEST(CompileCrossJoin, FullJoinPadsUnmatchedRowsOfBothSides) {
 }
 
 TEST(CompileCrossJoin, SemiAndAntiEmitEachLeftRowOnceByMatch) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     for (
         const auto [type, row] :
         {std::pair{EJoinType::LeftSemi, 0}, std::pair{EJoinType::LeftAnti, 1}})
@@ -1792,7 +1792,7 @@ std::string ReadString(const TColumn& col, int64_t row) {
 } // namespace
 
 TEST(JoinStringKey, InnerJoinMatchesAndMaterializes) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     using namespace NQumir::NAst;
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     TStructType leftType({{"lk", std::make_shared<TStringType>()}, {"lv", i64}});
@@ -1878,7 +1878,7 @@ TEST(JoinStringKey, InnerJoinMatchesAndMaterializes) {
 }
 
 TEST(JoinStringKey, SemiAntiClonesRightKeysAndSurvivesRehash) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     using namespace NQumir::NAst;
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     TStructType leftType({{"lk", std::make_shared<TStringType>()}, {"lv", i64}});
@@ -2017,7 +2017,7 @@ TEST(JoinStringKey, SemiAntiClonesRightKeysAndSurvivesRehash) {
 }
 
 TEST(JoinStringKey, CompositeStringIntKey) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     using namespace NQumir::NAst;
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     TStructType leftType({{"lk", std::make_shared<TStringType>()}, {"ln", i64}, {"lv", i64}});
@@ -2262,7 +2262,7 @@ TMarkJoinRun RunMarkJoin(
     const TRowSet& right,
     EMarkJoinShape shape)
 {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     // Mixed splits the left batch through two complementary selections.
     std::vector<uint8_t> firstHalf(left.RowCount);
     std::vector<uint8_t> secondHalf(left.RowCount);
@@ -2630,7 +2630,7 @@ TEST(MarkJoinKernel, RehashSizedSidesMatchReference) {
 }
 
 TEST(MarkJoinKernel, ReadsPrecomputedLeftHashes) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     using namespace NQumir::NAst;
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     auto nullableI64 = std::make_shared<TNullable>(i64);
@@ -2675,7 +2675,7 @@ TEST(MarkJoinKernel, ReadsPrecomputedLeftHashes) {
 }
 
 TEST(MarkJoinKernel, RejectsUnsupportedSpecs) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     using namespace NQumir::NAst;
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     auto nullableI64 = std::make_shared<TNullable>(i64);
@@ -2773,7 +2773,7 @@ namespace {
 // against the column types of `type`.
 std::vector<int64_t>
 FilterRows(const NQumir::NAst::TTypePtr& type, TRowSet rowSet, const std::string& predicate) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     auto schema = NQumir::NAst::TMaybeType<NQumir::NAst::TStructType>(type);
     EXPECT_TRUE(schema);
     auto dispatch = TKernelCompiler().CompileFilter(
@@ -2795,7 +2795,7 @@ FilterRows(const NQumir::NAst::TTypePtr& type, TRowSet rowSet, const std::string
 // The materialized marker column must read back through the ordinary column
 // ABI (bit-packed Data, Mask bit 1 = valid) as the type the spec declares.
 TEST(MarkJoinKernel, MarkerColumnReadsBackAsDeclaredType) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     using namespace NQumir::NAst;
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     auto nullableI64 = std::make_shared<TNullable>(i64);
@@ -2959,7 +2959,7 @@ constexpr size_t TestProbeHoldBytes = 1 << 20;
 // behind one entry, NULL keys never match, and a string payload is gathered
 // from the retained batch through the row's StringView.
 TEST(RowJoinProcessor, ChainsNullKeysAndStringPayload) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     using namespace NQumir::NAst;
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     auto nullableI64 = std::make_shared<TNullable>(i64);
@@ -3069,7 +3069,7 @@ std::vector<TRowSet> RunRowJoin(
     std::vector<TRowSet> leftBatches,
     std::vector<TRowSet> rightBatches)
 {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     TKernelCompiler compiler;
     TRowJoinProcessor processor(
         compiler.CompileRowJoin(spec, buildSide == EJoinBuildSide::Left),
@@ -3167,7 +3167,7 @@ TEST(RowJoinProcessor, BuildLeftStringPayloadInBuildOrder) {
 // so the probe pipeline does not wait for the build. They are probed once the
 // table exists, also when the probe side ended first.
 TEST(RowJoinProcessor, HoldsProbeBatchesUntilTheTableIsBuilt) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     using namespace NQumir::NAst;
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     TStructType leftType({{"lk", i64}, {"lv", i64}});
@@ -3300,7 +3300,7 @@ THeldProbeRun RunHeldProbe(
     bool buildLeft = false,
     bool stringProbe = false)
 {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     using namespace NQumir::NAst;
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     TStructType leftType({{"lk", i64}, {stringProbe ? "lname" : "lv", stringProbe
@@ -3471,7 +3471,7 @@ TEST(RowJoinProcessor, ZeroBudgetHoldsNothing) {
 // an error elsewhere or a satisfied LIMIT. The probe batches the join holds for
 // the table must then be released with it.
 TEST(RowJoinProcessor, ReleasesHeldProbeBatchesWhenDestroyedBeforeTheBuild) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     using namespace NQumir::NAst;
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     TStructType leftType({{"lk", i64}});

@@ -162,7 +162,7 @@ NQumir::NAst::TExprPtr BuildWindowProgramAst(
 // zero-initialized buffer of TKernelCompiler::HashTableSize bytes (the
 // HashTable layout from modules/qumirdb.cpp).
 using TAggregateDispatch = std::function<int64_t(
-    TThreadExecutionContext& context, void* ht, TRowSet* batch, int64_t arg, int64_t op)>;
+    TExecutionContext& context, void* ht, TRowSet* batch, int64_t arg, int64_t op)>;
 
 // The agg_dispatch operations; arg is ignored unless an operation names it.
 // Init and InitRows return 0 on failure, Update a negative value. An
@@ -186,7 +186,7 @@ enum class EAggregateKernelOp : int64_t {
 
 // Finalizes ht into a complete TRowSet and destroys ht.
 using TAggregateFinishRowSet = std::function<int64_t(
-    TThreadExecutionContext& context, void* ht, TRowSet* output)>;
+    TExecutionContext& context, void* ht, TRowSet* output)>;
 
 enum class EAggregateOutputKeyKind {
     Fixed,
@@ -238,7 +238,7 @@ enum class EJoinKernelOp : int64_t {
 };
 
 using TJoinDispatch = std::function<bool(
-    TThreadExecutionContext& context,
+    TExecutionContext& context,
     void* left,
     void* right,
     TRowSet* batch,
@@ -258,7 +258,7 @@ using TJoinDispatch = std::function<bool(
 // pointer when no such pairs exist. Returns the number of rows written, 0 when
 // the buffer is exhausted (out is left untouched).
 using TJoinMaterialize = std::function<int64_t(
-    TThreadExecutionContext& context,
+    TExecutionContext& context,
     void* pairs,
     TRowSet* leftStore,
     TRowSet* rightStore,
@@ -296,7 +296,7 @@ enum class ECrossJoinKernelOp : int64_t {
 };
 
 using TCrossJoinDispatch = std::function<bool(
-    TThreadExecutionContext& context,
+    TExecutionContext& context,
     TRowSet* leftStore,
     int64_t batchIdx,
     TRowSet* rightStore,
@@ -351,7 +351,7 @@ enum class ERowJoinKernelOp : int64_t {
 // AppendNullKeys and the probe-side key columns for Probe; the other
 // operations ignore `batch`.
 using TRowJoinDispatch = std::function<bool(
-    TThreadExecutionContext& context,
+    TExecutionContext& context,
     void* arena,
     void* table,
     void* scratch,
@@ -363,7 +363,7 @@ using TRowJoinDispatch = std::function<bool(
 // but the build side of every pair is a row pointer into the arena and the
 // probe side a stream row id of `stream`.
 using TRowJoinMaterialize = std::function<int64_t(
-    TThreadExecutionContext& context,
+    TExecutionContext& context,
     void* pairs,
     TRowSet* stream,
     int64_t start,
@@ -392,7 +392,7 @@ struct TRowJoinKernels {
 
 struct TJoinHashKernels {
     using TDispatch = std::function<bool(
-        TThreadExecutionContext& context, TRowSet* batch, uint64_t* hashes)>;
+        TExecutionContext& context, TRowSet* batch, uint64_t* hashes)>;
 
     TDispatch Left;
     TDispatch Right;
@@ -430,7 +430,7 @@ public:
     // after this object is created and copied.
     struct TFilterDispatch {
         void operator()(
-            TThreadExecutionContext& context, TRowSet& rowSet, const uint8_t* inputSelection) const;
+            TExecutionContext& context, TRowSet& rowSet, const uint8_t* inputSelection) const;
 
         std::shared_ptr<TKernelSlot> Slot;
         // Payloads the kernel points into (literal strings).
@@ -443,22 +443,22 @@ public:
     // projection, each to a caller-owned buffer of RowCount * sizeof(computed
     // type). Only computed (non-ident) columns go through this kernel.
     using TProjectDispatch = std::function<void(
-        TThreadExecutionContext& context, TRowSet* in, void** outBuffers, void* arena)>;
+        TExecutionContext& context, TRowSet* in, void** outBuffers, void* arena)>;
 
     using TSortRadixCompositeDispatch = std::function<int64_t(
-        TThreadExecutionContext& context,
+        TExecutionContext& context,
         TRowSet* store, int64_t* rowIds, int64_t* work, uint32_t* counts,
         int64_t n, bool* descs, bool* nullsFirsts, bool doSort,
         int64_t start, int64_t limit, TRowSet* output)>;
 
     using TSortRadixCompositeNullableDispatch = std::function<int64_t(
-        TThreadExecutionContext& context,
+        TExecutionContext& context,
         TRowSet* store, int64_t* rowIds, int64_t* work, uint32_t* counts,
         int64_t n, bool* descs, bool* nullsFirsts, bool doSort,
         int64_t start, int64_t limit, TRowSet* output)>;
 
     using TTopSortDispatch = std::function<int64_t(
-        TThreadExecutionContext& context,
+        TExecutionContext& context,
         TRowSet* state,
         TRowSet* batch,
         int64_t* rowIds,
@@ -472,7 +472,7 @@ public:
         TRowSet* output)>;
 
     using THeapTopKDispatch = std::function<int64_t(
-        TThreadExecutionContext& context,
+        TExecutionContext& context,
         TRowSet* store,
         int64_t* rowIds,
         int64_t size,
@@ -572,7 +572,7 @@ public:
         const NKernel::TOperatorKernelSpec& spec);
 
     // Same rh_hash generator as CompileAggregate's own table, for shuffling.
-    std::function<bool(TThreadExecutionContext&, TRowSet*, uint64_t*)> CompileAggregateHash(
+    std::function<bool(TExecutionContext&, TRowSet*, uint64_t*)> CompileAggregateHash(
         const NQumir::NAst::TStructType& inputType,
         const std::vector<std::string>& groupKeys);
 

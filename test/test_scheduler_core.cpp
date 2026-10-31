@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 
-#include <qdb/kernel/thread_context.h>
+#include <qdb/kernel/execution_context.h>
 #include <qdb/scheduler/settings.h>
 #include <qdb/scheduler/state.h>
 
@@ -13,7 +13,7 @@ namespace {
 
 class TTestTask : public ITaskNode {
 public:
-    ETaskResult Execute(NQdb::TThreadExecutionContext&) override {
+    ETaskResult Execute(NQdb::TExecutionContext&) override {
         ++Calls_;
         return ETaskResult::OK;
     }
@@ -27,7 +27,7 @@ private:
 };
 
 TEST(SchedulerCore, TaskNodeInterfaceExecutes) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     TTestTask task;
     ITaskNode* node = &task;
 

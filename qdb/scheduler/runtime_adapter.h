@@ -29,7 +29,7 @@ struct TInputPort {
     size_t Lane = 0;
     TRowSetInstrumentation* Instrumentation = nullptr;
 
-    EFetchResult Fetch(TThreadExecutionContext& context, TRowSet& rowSet) const;
+    EFetchResult Fetch(TExecutionContext& context, TRowSet& rowSet) const;
 };
 
 struct TOutputPort {
@@ -38,7 +38,7 @@ struct TOutputPort {
     TRowSetInstrumentation* Instrumentation = nullptr;
 
     bool CanPush() const;
-    bool Push(TThreadExecutionContext& context, TRowSet&& rowSet) const;
+    bool Push(TExecutionContext& context, TRowSet&& rowSet) const;
     void Finish() const;
 };
 
@@ -67,7 +67,7 @@ struct TSourceCode {
 };
 
 struct TUnaryCode {
-    using TProcess = std::function<void(TThreadExecutionContext&, void*, TRowSet&)>;
+    using TProcess = std::function<void(TExecutionContext&, void*, TRowSet&)>;
 
     explicit TUnaryCode(TProcess process);
 
@@ -84,7 +84,7 @@ struct TSinkCode {
 
 struct TBlockingCode {
     using TProcess = std::function<ETaskResult(
-        TThreadExecutionContext&, ITaskState&, TInputPort&, TRowSet&)>;
+        TExecutionContext&, ITaskState&, TInputPort&, TRowSet&)>;
 
     explicit TBlockingCode(TProcess process);
 
@@ -93,7 +93,7 @@ struct TBlockingCode {
 
 struct TBinaryBlockingCode {
     using TProcess = std::function<ETaskResult(
-        TThreadExecutionContext&,
+        TExecutionContext&,
         ITaskState&,
         TInputPort&,
         TInputPort&,
@@ -109,7 +109,7 @@ struct TBinaryBlockingCode {
 };
 
 struct THashShuffleCode {
-    using THash = std::function<bool(TThreadExecutionContext&, TRowSet*, uint64_t*)>;
+    using THash = std::function<bool(TExecutionContext&, TRowSet*, uint64_t*)>;
 
     explicit THashShuffleCode(THash hash);
     THashShuffleCode(THash hash,
@@ -139,7 +139,7 @@ struct TRuntimeFilterCode {
 
 struct TMergeCode {
     using TProcess = std::function<ETaskResult(
-        TThreadExecutionContext&,
+        TExecutionContext&,
         ITaskState&,
         std::vector<TInputPort>&,
         TRowSet&)>;
@@ -156,7 +156,7 @@ public:
         std::shared_ptr<void> state,
         TOutputPort output);
 
-    ETaskResult Execute(TThreadExecutionContext& context) override;
+    ETaskResult Execute(TExecutionContext& context) override;
     void ConfigureInstrumentation(TTaskInstrumentationSetup& setup) override;
 
 private:
@@ -174,7 +174,7 @@ public:
         TOutputPort output);
     ~TRuntimeFilterTask() override;
 
-    ETaskResult Execute(TThreadExecutionContext& context) override;
+    ETaskResult Execute(TExecutionContext& context) override;
     void ConfigureInstrumentation(TTaskInstrumentationSetup& setup) override;
     bool WantsInput(const TTaskEdge& edge) const noexcept override;
     bool TryNotifyDependency() noexcept override;
@@ -201,7 +201,7 @@ public:
         TOutputPort output);
     ~TUnaryTask() override;
 
-    ETaskResult Execute(TThreadExecutionContext& context) override;
+    ETaskResult Execute(TExecutionContext& context) override;
     void ConfigureInstrumentation(TTaskInstrumentationSetup& setup) override;
 
     const std::shared_ptr<const TUnaryCode>& Code() const;
@@ -225,7 +225,7 @@ public:
         std::shared_ptr<void> state,
         TInputPort input);
 
-    ETaskResult Execute(TThreadExecutionContext& context) override;
+    ETaskResult Execute(TExecutionContext& context) override;
     void ConfigureInstrumentation(TTaskInstrumentationSetup& setup) override;
 
 private:
@@ -244,7 +244,7 @@ public:
         TOutputPort output);
     ~TBlockingTask() override;
 
-    ETaskResult Execute(TThreadExecutionContext& context) override;
+    ETaskResult Execute(TExecutionContext& context) override;
     void ConfigureInstrumentation(TTaskInstrumentationSetup& setup) override;
 
 private:
@@ -267,7 +267,7 @@ public:
         TOutputPort output);
     ~TBinaryBlockingTask() override;
 
-    ETaskResult Execute(TThreadExecutionContext& context) override;
+    ETaskResult Execute(TExecutionContext& context) override;
     void ConfigureInstrumentation(TTaskInstrumentationSetup& setup) override;
     bool WantsInput(const TTaskEdge& edge) const noexcept override;
 
@@ -292,7 +292,7 @@ public:
         TOutputPort output);
     ~TMergeTask() override;
 
-    ETaskResult Execute(TThreadExecutionContext& context) override;
+    ETaskResult Execute(TExecutionContext& context) override;
     void ConfigureInstrumentation(TTaskInstrumentationSetup& setup) override;
 
 private:
@@ -315,7 +315,7 @@ public:
         size_t sourceLane);
     ~THashShuffleTask() override;
 
-    ETaskResult Execute(TThreadExecutionContext& context) override;
+    ETaskResult Execute(TExecutionContext& context) override;
     void ConfigureInstrumentation(TTaskInstrumentationSetup& setup) override;
 
 private:
@@ -326,26 +326,26 @@ private:
 
     bool BatchingEnabled() const;
     std::shared_ptr<uint64_t> ComputeHashes(
-        TThreadExecutionContext& context, const std::shared_ptr<TRowSet>& input);
+        TExecutionContext& context, const std::shared_ptr<TRowSet>& input);
     void AccumulateFilter(
-        TThreadExecutionContext& context, const TRowSet& rowSet, std::span<const uint64_t> hashes);
+        TExecutionContext& context, const TRowSet& rowSet, std::span<const uint64_t> hashes);
     void EnsureBuffers(size_t partitions);
-    void Scatter(TThreadExecutionContext& context, TRowSet& rowSet);
-    void ScatterBuffered(TThreadExecutionContext& context, const std::shared_ptr<TRowSet>& input);
-    void ScatterViews(TThreadExecutionContext& context, const std::shared_ptr<TRowSet>& input);
+    void Scatter(TExecutionContext& context, TRowSet& rowSet);
+    void ScatterBuffered(TExecutionContext& context, const std::shared_ptr<TRowSet>& input);
+    void ScatterViews(TExecutionContext& context, const std::shared_ptr<TRowSet>& input);
     void AddBufferedRows(
-        TThreadExecutionContext& context,
+        TExecutionContext& context,
         size_t dst,
         const std::shared_ptr<TRowSet>& input,
         std::vector<int32_t>&& rows,
         size_t bytes,
         const std::shared_ptr<uint64_t>& hashes,
         size_t inputBytes);
-    void FlushBuffer(TThreadExecutionContext& context, size_t dst, bool releaseInputs = false);
-    void FlushAllBuffers(TThreadExecutionContext& context);
-    ETaskResult PushPending(TThreadExecutionContext& context);
-    void ClearPending(TThreadExecutionContext& context);
-    void ObserveInstrumentation(TThreadExecutionContext& context);
+    void FlushBuffer(TExecutionContext& context, size_t dst, bool releaseInputs = false);
+    void FlushAllBuffers(TExecutionContext& context);
+    ETaskResult PushPending(TExecutionContext& context);
+    void ClearPending(TExecutionContext& context);
+    void ObserveInstrumentation(TExecutionContext& context);
 
 private:
     std::shared_ptr<const THashShuffleCode> Code_;

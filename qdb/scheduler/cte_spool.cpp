@@ -23,7 +23,7 @@ void DestroyCteView(TRowSet* rowSet) {
 }
 
 // Completion connections carry finish signals only.
-EFetchResult FetchCompletion(TThreadExecutionContext& context, TInputPort& port) {
+EFetchResult FetchCompletion(TExecutionContext& context, TInputPort& port) {
     TRowSet rowSet{};
     const auto result = port.Fetch(context, rowSet);
     if (result == EFetchResult::OK) {
@@ -106,7 +106,7 @@ TCteProducerTask::TCteProducerTask(
     , Completion_(completion)
 {}
 
-ETaskResult TCteProducerTask::Execute(TThreadExecutionContext& context) {
+ETaskResult TCteProducerTask::Execute(TExecutionContext& context) {
     if (Finished_) {
         return ETaskResult::FINISHED;
     }
@@ -147,7 +147,7 @@ TCtePublishTask::TCtePublishTask(
     , Consumers_(consumers)
 {}
 
-ETaskResult TCtePublishTask::Execute(TThreadExecutionContext& context) {
+ETaskResult TCtePublishTask::Execute(TExecutionContext& context) {
     if (Finished_) {
         return ETaskResult::FINISHED;
     }
@@ -170,7 +170,7 @@ TCteConsumerTask::TCteConsumerTask(
     , Output_(output)
 {}
 
-ETaskResult TCteConsumerTask::Execute(TThreadExecutionContext& context) {
+ETaskResult TCteConsumerTask::Execute(TExecutionContext& context) {
     if (Finished_) {
         return ETaskResult::FINISHED;
     }

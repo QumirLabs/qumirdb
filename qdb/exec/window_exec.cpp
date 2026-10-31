@@ -26,7 +26,7 @@ TWindowProcessor::TWindowProcessor(
     , Kernel_(std::move(kernel))
 {}
 
-void TWindowProcessor::Add(TThreadExecutionContext& context, TRowSet& rowSet)
+void TWindowProcessor::Add(TExecutionContext& context, TRowSet& rowSet)
 {
     if (Emitted_) {
         throw std::runtime_error("window processor is already finished");
@@ -42,7 +42,7 @@ void TWindowProcessor::Add(TThreadExecutionContext& context, TRowSet& rowSet)
 
 void TWindowProcessor::Finish() {}
 
-bool TWindowProcessor::Next(TThreadExecutionContext& context, TRowSet& rowSet)
+bool TWindowProcessor::Next(TExecutionContext& context, TRowSet& rowSet)
 {
     if (Emitted_) {
         return false;

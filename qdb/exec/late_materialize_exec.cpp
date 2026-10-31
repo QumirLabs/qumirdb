@@ -33,7 +33,7 @@ TLateMaterializeProcessor::TLateMaterializeProcessor(
     }
 }
 
-void TLateMaterializeProcessor::Add(TThreadExecutionContext&, TRowSet& rowSet) {
+void TLateMaterializeProcessor::Add(TExecutionContext&, TRowSet& rowSet) {
     if (LocatorColumn_ < 0 || LocatorColumn_ >= rowSet.ColumnCount) {
         throw std::runtime_error("late materialize: locator column is out of range");
     }
@@ -48,7 +48,7 @@ void TLateMaterializeProcessor::Add(TThreadExecutionContext&, TRowSet& rowSet) {
     rowSet = {};
 }
 
-bool TLateMaterializeProcessor::Next(TThreadExecutionContext&, TRowSet& output) {
+bool TLateMaterializeProcessor::Next(TExecutionContext&, TRowSet& output) {
     if (Finished_) {
         return false;
     }

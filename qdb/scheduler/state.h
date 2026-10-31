@@ -4,7 +4,7 @@
 
 namespace NQdb {
 
-class TThreadExecutionContext;
+class TExecutionContext;
 
 namespace NScheduler {
 
@@ -31,7 +31,7 @@ public:
     virtual ~ITaskNode() = default;
 
     // The context belongs to the worker running this call; do not keep it.
-    virtual ETaskResult Execute(TThreadExecutionContext& context) = 0;
+    virtual ETaskResult Execute(TExecutionContext& context) = 0;
     virtual void ConfigureInstrumentation(TTaskInstrumentationSetup&) {}
 
     // Whether the demand path should schedule this inbound edge's producer.

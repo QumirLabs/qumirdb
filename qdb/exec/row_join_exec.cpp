@@ -39,7 +39,7 @@ TRowJoinProcessor::~TRowJoinProcessor() {
     }
     if (Initialized_) {
         // Runs outside any worker, on the thread that releases the plan.
-        TThreadExecutionContext context;
+        TExecutionContext context;
         TRowSet none{};
         Dispatch(context, ERowJoinKernelOp::Destroy, &none);
         if (Kernels_.KeepsNullKeyRows) {
@@ -59,7 +59,7 @@ bool TRowJoinProcessor::CanHoldProbe() const {
 }
 
 uint64_t TRowJoinProcessor::ProbeBatchBytes(
-    TThreadExecutionContext& context, const TRowSet& batch) const
+    TExecutionContext& context, const TRowSet& batch) const
 {
     // The same measure as the retained_input counters: all rows, no selection.
     auto measure = Kernels_.ProbeMeasure;
@@ -73,7 +73,7 @@ void TRowJoinProcessor::SetInstrumentation(TOperatorInstrumentation* instrumenta
     Instrumentation_ = instrumentation;
 }
 
-void TRowJoinProcessor::ObserveInstrumentation(TThreadExecutionContext&) {
+void TRowJoinProcessor::ObserveInstrumentation(TExecutionContext&) {
     if (Instrumentation_ && BuildDone_) {
         const auto side = BuildSide_ == EJoinBuildSide::Left ? 0 : 1;
         Instrumentation_->ObserveBuildTable(
@@ -86,7 +86,7 @@ void TRowJoinProcessor::ObserveInstrumentation(TThreadExecutionContext&) {
     }
 }
 
-void TRowJoinProcessor::EnsureInit(TThreadExecutionContext& context) {
+void TRowJoinProcessor::EnsureInit(TExecutionContext& context) {
     if (Initialized_) {
         return;
     }
@@ -101,13 +101,13 @@ void TRowJoinProcessor::EnsureInit(TThreadExecutionContext& context) {
 }
 
 bool TRowJoinProcessor::Dispatch(
-    TThreadExecutionContext& context, ERowJoinKernelOp op, TRowSet* batch)
+    TExecutionContext& context, ERowJoinKernelOp op, TRowSet* batch)
 {
     return Dispatch(context, op, batch, Arena_);
 }
 
 bool TRowJoinProcessor::Dispatch(
-    TThreadExecutionContext& context, ERowJoinKernelOp op, TRowSet* batch, TArenaState& arena)
+    TExecutionContext& context, ERowJoinKernelOp op, TRowSet* batch, TArenaState& arena)
 {
     return Kernels_.Dispatch(
         context, &arena, &Table_, &Scratch_, &PairBuffer_, batch, RowJoinOp(op));
@@ -122,7 +122,7 @@ bool TRowJoinProcessor::DrainReadyOutput(TRowSet& rowSet) {
     return true;
 }
 
-bool TRowJoinProcessor::PullBuildBatch(TThreadExecutionContext& context, const TFetch& build) {
+bool TRowJoinProcessor::PullBuildBatch(TExecutionContext& context, const TFetch& build) {
     TRowSet batch{};
     const auto fetch = build(batch);
     if (fetch == EJoinFetchResult::NO_DATA) {
@@ -156,7 +156,7 @@ bool TRowJoinProcessor::PullBuildBatch(TThreadExecutionContext& context, const T
     return true;
 }
 
-bool TRowJoinProcessor::PullProbeBatch(TThreadExecutionContext& context, const TFetch& probe) {
+bool TRowJoinProcessor::PullProbeBatch(TExecutionContext& context, const TFetch& probe) {
     TRowSet batch{};
     const auto fetch = probe(batch);
     if (fetch == EJoinFetchResult::NO_DATA) {
@@ -180,7 +180,7 @@ bool TRowJoinProcessor::PullProbeBatch(TThreadExecutionContext& context, const T
     return true;
 }
 
-void TRowJoinProcessor::ProbeBatch(TThreadExecutionContext& context, TRowSet& batch) {
+void TRowJoinProcessor::ProbeBatch(TExecutionContext& context, TRowSet& batch) {
     if (!Dispatch(context, ERowJoinKernelOp::Probe, &batch)) {
         Release(&batch);
         throw std::runtime_error("row join probe failed");
@@ -208,7 +208,7 @@ void TRowJoinProcessor::ProbeBatch(TThreadExecutionContext& context, TRowSet& ba
 // The output of a SEMI/ANTI join is known only once the probe side has ended.
 // It is materialized from the pair buffer one batch per call, as the build
 // rows stay in the arena until Destroy.
-EJoinProcessorResult TRowJoinProcessor::Finish(TThreadExecutionContext& context, TRowSet& output) {
+EJoinProcessorResult TRowJoinProcessor::Finish(TExecutionContext& context, TRowSet& output) {
     if (!Kernels_.EmitsByMark) {
         return EJoinProcessorResult::FINISHED;
     }
@@ -239,7 +239,7 @@ EJoinProcessorResult TRowJoinProcessor::Finish(TThreadExecutionContext& context,
 }
 
 EJoinProcessorResult TRowJoinProcessor::Process(
-    TThreadExecutionContext& context,
+    TExecutionContext& context,
     const TFetch& left,
     const TFetch& right,
     TRowSet& output)

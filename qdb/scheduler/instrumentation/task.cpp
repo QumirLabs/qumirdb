@@ -213,7 +213,7 @@ void WriteSnapshot(std::ostream& out, const TStageSnapshot& value) {
 
 } // namespace
 
-ETaskResult ExecuteTask(TTaskNode& node, TThreadExecutionContext& context) {
+ETaskResult ExecuteTask(TTaskNode& node, TExecutionContext& context) {
     if (!node.Instrumentation) {
         return node.Task->Execute(context);
     }

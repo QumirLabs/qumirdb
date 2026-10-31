@@ -78,7 +78,7 @@ std::vector<TOut2> RunSemiAnti(
     EJoinType type, EJoinBuildSide buildSide, bool nullableKeys = false,
     bool nullsEqual = false)
 {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     std::vector<int64_t> lk0 = {1, 2}, lv0 = {10, 20};
     std::vector<int64_t> lk1 = {1, 3}, lv1 = {30, 40};
     std::vector<int64_t> rk0 = {1, 1}, rv0 = {100, 200};
@@ -169,7 +169,7 @@ std::vector<TOut2> ExpectedSemiAnti(EJoinType type) {
 // Asserts the probe is never fetched while RequiredInputSide reports the build
 // side, then returns the collected inner-join rows.
 std::vector<TOut4> RunAsymmetric(EJoinBuildSide buildSide) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     std::vector<int64_t> lk = {1, 2, 1}, lv = {10, 20, 30};
     std::vector<int64_t> rk0 = {1, 1}, rv0 = {100, 200};
     std::vector<int64_t> rk1 = {3}, rv1 = {300};
@@ -949,7 +949,7 @@ TEST_P(SemiAntiOrientation, NullEqualKeysMatchInEitherOrientation) {
 // unmatched. The second right batch matches key 1 again, which a marked row
 // must survive without a second output row.
 TEST_P(SemiAntiOrientation, LeftBuildMarksOnlyPairsTheResidualAccepts) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     const auto type = GetParam();
     std::vector<int64_t> lk = {1, 1, 2, 3}, lv = {10, 20, 30, 40};
     std::vector<int64_t> rk0 = {1, 2}, rv0 = {10, 30};
@@ -1330,7 +1330,7 @@ protected:
         const TExprPtr& residual = nullptr)
     {
         TInnerJoinProcessor processor(Compile(type, residual), type, buildSide);
-        NQdb::TThreadExecutionContext context;
+        NQdb::TExecutionContext context;
         auto fetchLeft = [&](TRowSet& rowSet) { return left.Fetch(rowSet); };
         auto fetchRight = [&](TRowSet& rowSet) { return right.Fetch(rowSet); };
         std::vector<TOuterRow> rows;
@@ -1376,7 +1376,7 @@ protected:
         TSideInput left(leftRows);
         TSideInput right(rightRows);
         auto& probe = buildSide == EJoinBuildSide::Left ? right : left;
-        NQdb::TThreadExecutionContext context;
+        NQdb::TExecutionContext context;
         auto fetchLeft = [&](TRowSet& rowSet) { return left.Fetch(rowSet); };
         auto fetchRight = [&](TRowSet& rowSet) { return right.Fetch(rowSet); };
         std::vector<TOuterRow> rows;
@@ -1489,7 +1489,7 @@ TEST_F(OuterStreamJoin, InputStallsAndEofOrderDoNotChangeTheResult) {
 // output in between. The stream side is given back batch by batch, while the
 // build batches behind the pending rows stay alive.
 TEST_F(OuterStreamJoin, EmitsUnmatchedRowsInBatchesFromLiveBuildRows) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     const int64_t buildRows = 3 * JoinOutputBatchRows;
     TSideRows build(3);
     for (int64_t key = 0; key < buildRows; ++key) {

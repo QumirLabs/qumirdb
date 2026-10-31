@@ -151,7 +151,7 @@ TEST(SortRowId, SortsSeveralBatchesByMixedNumericKeys) {
 // Special values in two batches; ties (+-0) are decided by the second key.
 template<typename TFloat>
 std::vector<int64_t> SortFloatKeyRows(bool desc, int64_t topLimit) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     using namespace NQumir::NAst;
     const TFloat inf = std::numeric_limits<TFloat>::infinity();
     const TFloat nan = std::numeric_limits<TFloat>::quiet_NaN();
@@ -293,7 +293,7 @@ TEST(SortRowId, SortsNullableStringsWithSqlNullOrder) {
 }
 
 TEST(HeapTopK, SelectsSortedPrefixFromRandomRows) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     using namespace NQumir::NAst;
 
     auto i64 = std::make_shared<TIntegerType>();
@@ -374,7 +374,7 @@ TEST(HeapTopK, SelectsSortedPrefixFromRandomRows) {
 }
 
 TEST(HeapTopK, AppliesNullableStringOrder) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     using namespace NQumir::NAst;
 
     TStringColumn strings({"12345678beta", "unused", "12345678alpha",

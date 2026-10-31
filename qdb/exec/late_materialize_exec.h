@@ -1,7 +1,7 @@
 #pragma once
 
 #include <qdb/io/io.h>
-#include <qdb/kernel/thread_context.h>
+#include <qdb/kernel/execution_context.h>
 
 #include <cstdint>
 #include <vector>
@@ -15,8 +15,8 @@ public:
         int32_t locatorColumn);
 
     // The context is unused: lookups run no kernels.
-    void Add(TThreadExecutionContext& context, TRowSet& rowSet);
-    bool Next(TThreadExecutionContext& context, TRowSet& output);
+    void Add(TExecutionContext& context, TRowSet& rowSet);
+    bool Next(TExecutionContext& context, TRowSet& output);
 
 private:
     std::shared_ptr<const IPhysicalRowReader> Reader_;

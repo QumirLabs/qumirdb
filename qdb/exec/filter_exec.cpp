@@ -32,7 +32,7 @@ TUnaryStreamProcess MakeFilterViewProcess(
     return [dispatch = std::move(dispatch),
             keptIndices = std::move(keptIndices),
             keepAll](
-               TThreadExecutionContext& context, TRowSet& rowSet, TUnaryStreamingKernelState&) {
+               TExecutionContext& context, TRowSet& rowSet, TUnaryStreamingKernelState&) {
         auto data = std::make_unique<TFilterViewData>();
         data->Selection.resize(rowSet.RowCount);
 

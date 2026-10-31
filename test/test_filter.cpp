@@ -43,7 +43,7 @@ std::array<uint8_t, 4> RunStringLiteralFilter(
     bool literalFirst,
     bool castLiteral = false)
 {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     std::array<TColumn, 1> columns = {
         TColumn{.Data = const_cast<char*>(data.data()), .Mask = nullptr,
             .Offsets = const_cast<int32_t*>(offsets.data()), .OffsetWidth = 4},
@@ -81,7 +81,7 @@ std::array<uint8_t, 4> RunStringLiteralFilter(
 std::array<uint8_t, 6> RunNullableIntegerFilter(
     const std::string& predicateSource)
 {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     std::array<int64_t, 6> left = {0, 1, 91, 92, 1, 0};
     std::array<int64_t, 6> right = {81, 82, 0, 1, 1, 0};
     std::array<uint8_t, 1> leftMask = {0b00110011};
@@ -123,7 +123,7 @@ protected:
         std::vector<uint8_t> selection,
         std::vector<uint8_t> validity = {})
     {
-        NQdb::TThreadExecutionContext context;
+        NQdb::TExecutionContext context;
         TColumn column{
             .Data = reinterpret_cast<char*>(values.data()),
             .Mask = validity.empty() ? nullptr : validity.data(),
@@ -191,7 +191,7 @@ TEST_F(FilterSelection, DoesNotEvaluateRejectedRows) {
 // The kernel owns every byte of its output: a rejected row gets 0 whatever
 // the buffer held before.
 TEST(FilterKernel, ClearsOutputOfRejectedRows) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     const std::string data = std::string("a") + "same" + "z" + "same";
     const std::array<int32_t, 5> offsets = {0, 1, 5, 6, 10};
     TColumn column{.Data = const_cast<char*>(data.data()), .Mask = nullptr,
@@ -220,7 +220,7 @@ TEST(FilterKernel, ClearsOutputOfRejectedRows) {
 }
 
 TEST(FilterKernel, ComparesStringColumnsWithoutMutatingLogicalPredicate) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     const std::string leftData = "absamez";
     const std::string rightData = "basamey";
     std::array<int32_t, 5> offsets = {0, 1, 2, 6, 7};
@@ -290,7 +290,7 @@ TEST(FilterKernel, ComparesStringColumnAndLiteralInBothOrders) {
 // A StringView literal carries its codegen length instead of a per-row strlen,
 // so bytes after an embedded zero take part in the comparison.
 TEST(FilterKernel, StringViewLiteralKeepsItsLength) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     const std::string literal("a\0b", 3);
     const std::string data = "a" + literal + "z" + "a";
     const std::array<int32_t, 5> offsets = {0, 1, 4, 5, 6};
@@ -337,7 +337,7 @@ TEST(FilterKernel, AppliesSqlThreeValuedLogicToNullableColumns) {
 }
 
 TEST(FilterKernel, PreservesInputSelectionAndPrecomputedHashes) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     std::array<int64_t, 3> values = {1, 2, -1};
     std::array<uint8_t, 3> inputSelection = {2, 0, 0xff};
     std::array<uint64_t, 3> hashes = {11, 22, 33};
@@ -393,7 +393,7 @@ TEST(FilterKernel, InListPreservesBareNullItemSemantics) {
 }
 
 TEST(FilterKernel, CompilesFromKernelSpec) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     std::array<int64_t, 4> values = {0, 1, 2, 3};
     std::array<TColumn, 1> columns = {
         TColumn{.Data = reinterpret_cast<char*>(values.data())},

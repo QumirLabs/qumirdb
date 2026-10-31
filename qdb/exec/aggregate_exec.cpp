@@ -42,7 +42,7 @@ static_assert(sizeof(THashTable) == TKernelCompiler::HashTableSize);
 constexpr int64_t InitialCapacity = 8;
 
 int64_t Dispatch(
-    TThreadExecutionContext& context,
+    TExecutionContext& context,
     const TAggregateKernels& kernels,
     void* table,
     TRowSet* batch,
@@ -74,12 +74,12 @@ TAggregateProcessor::TAggregateProcessor(
 TAggregateProcessor::~TAggregateProcessor()
 {
     // Runs outside any worker, on the thread that releases the plan.
-    TThreadExecutionContext context;
+    TExecutionContext context;
     Destroy(context);
 }
 
 // Deferred so a processor can be constructed before its kernels are finalized.
-void TAggregateProcessor::EnsureInit(TThreadExecutionContext& context)
+void TAggregateProcessor::EnsureInit(TExecutionContext& context)
 {
     if (Initialized_) {
         return;
@@ -119,7 +119,7 @@ void TGroupingSetsAggregateProcessor::SetInstrumentation(TOperatorInstrumentatio
     Inner_.SetInstrumentation(instrumentation);
 }
 
-void TAggregateProcessor::Add(TThreadExecutionContext& context, TRowSet& rowSet)
+void TAggregateProcessor::Add(TExecutionContext& context, TRowSet& rowSet)
 {
     if (Finished_) {
         throw std::runtime_error("aggregate processor is already finished");
@@ -134,7 +134,7 @@ void TAggregateProcessor::Add(TThreadExecutionContext& context, TRowSet& rowSet)
     }
 }
 
-bool TAggregateProcessor::Finish(TThreadExecutionContext& context, TRowSet& rowSet)
+bool TAggregateProcessor::Finish(TExecutionContext& context, TRowSet& rowSet)
 {
     if (Finished_) {
         return false;
@@ -161,7 +161,7 @@ int64_t TAggregateProcessor::Groups() const
     return reinterpret_cast<const THashTable*>(HashTable_.data())->Size;
 }
 
-bool TAggregateProcessor::Flush(TThreadExecutionContext& context, TRowSet& rowSet)
+bool TAggregateProcessor::Flush(TExecutionContext& context, TRowSet& rowSet)
 {
     if (Groups() == 0) {
         return false;
@@ -174,7 +174,7 @@ bool TAggregateProcessor::Flush(TThreadExecutionContext& context, TRowSet& rowSe
     return true;
 }
 
-void TAggregateProcessor::Destroy(TThreadExecutionContext& context)
+void TAggregateProcessor::Destroy(TExecutionContext& context)
 {
     if (Initialized_ && !Destroyed_) {
         Dispatch(context, Kernels_, HashTable_.data(), nullptr, 0, EAggregateKernelOp::Destroy);
@@ -205,7 +205,7 @@ void TPartialAggregateProcessor::SetInstrumentation(TOperatorInstrumentation* in
     Table_.SetInstrumentation(instrumentation);
 }
 
-void TPartialAggregateProcessor::Add(TThreadExecutionContext& context, TRowSet& rowSet)
+void TPartialAggregateProcessor::Add(TExecutionContext& context, TRowSet& rowSet)
 {
     if (HasPending_) {
         throw std::runtime_error("partial aggregate output was not taken");
@@ -251,7 +251,7 @@ bool TPartialAggregateProcessor::Next(TRowSet& rowSet)
     return true;
 }
 
-bool TPartialAggregateProcessor::Finish(TThreadExecutionContext& context, TRowSet& rowSet)
+bool TPartialAggregateProcessor::Finish(TExecutionContext& context, TRowSet& rowSet)
 {
     if (PassingThrough_) {
         return false;
@@ -270,7 +270,7 @@ TGroupingSetsAggregateProcessor::TGroupingSetsAggregateProcessor(
 {
 }
 
-void TGroupingSetsAggregateProcessor::Add(TThreadExecutionContext& context, TRowSet& batch)
+void TGroupingSetsAggregateProcessor::Add(TExecutionContext& context, TRowSet& batch)
 {
     const int64_t rows = batch.RowCount;
     if (static_cast<int64_t>(SetIdBuf_.size()) < rows) {
@@ -310,7 +310,7 @@ void TGroupingSetsAggregateProcessor::Add(TThreadExecutionContext& context, TRow
     }
 }
 
-bool TGroupingSetsAggregateProcessor::Finish(TThreadExecutionContext& context, TRowSet& rowSet)
+bool TGroupingSetsAggregateProcessor::Finish(TExecutionContext& context, TRowSet& rowSet)
 {
     return Inner_.Finish(context, rowSet);
 }

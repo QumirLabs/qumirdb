@@ -29,7 +29,7 @@ std::vector<int64_t> InstrumentationColumnWidths(const NQumir::NAst::TTypePtr& t
     return widths;
 }
 
-void TRowSetInstrumentation::Add(TThreadExecutionContext& context, const TRowSet& rowSet) {
+void TRowSetInstrumentation::Add(TExecutionContext& context, const TRowSet& rowSet) {
     if (rowSet.ColumnCount != static_cast<int64_t>(Widths.size())) {
         throw std::runtime_error("instrumentation rowset/schema column count mismatch");
     }
@@ -41,7 +41,7 @@ void TRowSetInstrumentation::Add(TThreadExecutionContext& context, const TRowSet
 }
 
 uint64_t TOperatorInstrumentation::InputPayloadBytes(
-    TThreadExecutionContext& context, const TRowSet& rowSet, size_t input) const
+    TExecutionContext& context, const TRowSet& rowSet, size_t input) const
 {
     auto counter = Inputs.at(input);
     counter.Rows = 0;
@@ -60,14 +60,14 @@ void TOperatorInstrumentation::SetRetainedInputBytes(uint64_t bytes) {
 }
 
 void TOperatorInstrumentation::RetainInput(
-    TThreadExecutionContext& context, const TRowSet& rowSet, size_t input, bool append)
+    TExecutionContext& context, const TRowSet& rowSet, size_t input, bool append)
 {
     const auto bytes = InputPayloadBytes(context, rowSet, input);
     SetRetainedInputBytes(append ? RetainedInputBytes + bytes : bytes);
 }
 
 void TOperatorInstrumentation::ObserveHash(
-    TThreadExecutionContext& context,
+    TExecutionContext& context,
     void* table,
     size_t side,
     bool join,

@@ -615,7 +615,7 @@ TRun Aggregate(
     std::vector<TBatch>& batches,
     const std::vector<EValue>& outputs)
 {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     static const auto measure = TKernelCompiler().CompileInstrumentation();
     TOperatorInstrumentation counters;
     counters.Kernel = measure;
@@ -867,7 +867,7 @@ TEST(AggregateTable, RowLayoutAlignsKeysThatHoldADecimal) {
 }
 
 TEST(AggregateTable, RowLayoutReportsItsMemory) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     auto i64 = std::make_shared<TIntegerType>();
     TStructType input({{"k", i64}, {"v", i64}});
     const auto kernels = CompileWithRows(input, {"k"}, {Agg("c", "count"), Agg("s", "sum", "v")});
@@ -922,7 +922,7 @@ std::set<std::string> ProgramFunctions(
 }
 
 TEST(AggregateTable, RowLayoutNeedsTheSpecFlag) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     auto i64 = std::make_shared<TIntegerType>();
     TStructType input({{"k", i64}, {"v", i64}});
     const std::vector<TAggregateSpec> aggs = {Agg("c", "count"), Agg("s", "sum", "v")};
@@ -1069,7 +1069,7 @@ TEST(AggregateTable, StringReducersAndEmptyInputGroupsKeepTheSwissTable) {
 // The move sizes its entries for the groups the caller expects when that is
 // more than twice the groups it moves, so that they need not grow again.
 TEST(AggregateTable, ExpectRowGroupsSizesTheEntriesOfTheMove) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     auto i64 = std::make_shared<TIntegerType>();
     TStructType input({{"k", i64}, {"v", i64}});
     const auto kernels = CompileWithRows(input, {"k"}, {Agg("c", "count"), Agg("s", "sum", "v")});
@@ -1194,7 +1194,7 @@ TEST(AggregateTable, OverestimateStartsSwiss) {
 // The move sizes the row entries for the task's estimated groups, capped as
 // the swiss slots are and by the task's input rows.
 TEST(AggregateTable, MoveIsSizedFromTheEstimate) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     auto i64 = std::make_shared<TIntegerType>();
     TStructType input({{"k", i64}, {"v", i64}});
     const auto kernels = CompileWithRows(input, {"k"}, {Agg("c", "count"), Agg("s", "sum", "v")});
@@ -1291,7 +1291,7 @@ TEST(AggregateTable, KeyOnlyAggregatesStaySwissUnderAuto) {
 // and each growth of the row entries after it, as the kernels counted them in
 // the table.
 TEST(AggregateTable, InstrumentationCountsTheMoveOnce) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     auto i64 = std::make_shared<TIntegerType>();
     TStructType input({{"k", i64}, {"v", i64}});
     const auto kernels = CompileWithRows(input, {"k"}, {Agg("c", "count"), Agg("s", "sum", "v")});
@@ -1423,7 +1423,7 @@ TEST(AggregateTable, DISABLED_LayoutMicrobenchmark) {
                     static const auto measure = TKernelCompiler().CompileInstrumentation();
                     counters.Kernel = measure;
                     // Tasks run on their own threads, each with its own context.
-                    NQdb::TThreadExecutionContext context;
+                    NQdb::TExecutionContext context;
                     TAggregateProcessor processor(kernels, plan);
                     processor.SetInstrumentation(&counters);
                     std::array<TColumn, 4> columns{};

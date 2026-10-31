@@ -27,7 +27,7 @@ namespace {
 class SchedulerRuntimeFilter : public NTest::TRuntimeFilterTest {};
 
 TEST_F(SchedulerRuntimeFilter, AuxInputWaitsForAllProducers) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     auto filter = std::make_shared<TRuntimeFilter>(Context_, 16, 1024);
     filter->SetProducerCount(2);
     TTaskNode first;
@@ -52,7 +52,7 @@ TEST_F(SchedulerRuntimeFilter, AuxInputWaitsForAllProducers) {
 }
 
 TEST_F(SchedulerRuntimeFilter, FilterDependencyNotifiesOnlyOnPublication) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     auto filter = std::make_shared<TRuntimeFilter>(Context_, 16, 1024);
     TTaskNode producer;
     auto code = std::make_shared<TRuntimeFilterCode>();
@@ -74,7 +74,7 @@ TEST_F(SchedulerRuntimeFilter, FilterDependencyNotifiesOnlyOnPublication) {
 }
 
 TEST_F(SchedulerRuntimeFilter, MissingFilterPublicationFailsInExecute) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     auto filter = std::make_shared<TRuntimeFilter>(Context_, 16, 1024);
     TTaskNode producer;
     producer.State.store(ETaskState::Finished);
@@ -207,13 +207,13 @@ TPipeline MakePipeline() {
             return true;
         });
     out.FilterCode = std::make_shared<TUnaryCode>(
-        [](NQdb::TThreadExecutionContext&, void* state, TRowSet& rowSet) {
+        [](NQdb::TExecutionContext&, void* state, TRowSet& rowSet) {
             auto* unary = static_cast<TUnaryState*>(state);
             ++unary->Calls;
             rowSet.RowCount += unary->Add;
         });
     out.ProjectCode = std::make_shared<TUnaryCode>(
-        [](NQdb::TThreadExecutionContext&, void* state, TRowSet& rowSet) {
+        [](NQdb::TExecutionContext&, void* state, TRowSet& rowSet) {
             auto* unary = static_cast<TUnaryState*>(state);
             ++unary->Calls;
             rowSet.RowCount += unary->Add;
@@ -286,7 +286,7 @@ TEST(SchedulerRuntimeAdapter, RunsSourceFilterProjectSinkThreaded) {
 
 TEST(SchedulerRuntimeAdapter, PartitionTasksShareCodeButOwnState) {
     auto code = std::make_shared<TUnaryCode>(
-        [](NQdb::TThreadExecutionContext&, void* state, TRowSet& rowSet) {
+        [](NQdb::TExecutionContext&, void* state, TRowSet& rowSet) {
             auto* unary = static_cast<TUnaryState*>(state);
             ++unary->Calls;
             rowSet.RowCount += unary->Add;
@@ -315,7 +315,7 @@ TEST(SchedulerRuntimeAdapter, PartitionTasksShareCodeButOwnState) {
 }
 
 TEST(SchedulerRuntimeAdapter, RunsBinaryBlockingTask) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     auto graph = std::make_unique<TTaskGraph>();
     auto destroyCount = std::make_shared<std::atomic<int>>(0);
     auto leftState = std::make_shared<TSourceState>(TSourceState{
@@ -341,7 +341,7 @@ TEST(SchedulerRuntimeAdapter, RunsBinaryBlockingTask) {
             return true;
         });
     auto binaryCode = std::make_shared<TBinaryBlockingCode>(
-        [](NQdb::TThreadExecutionContext& context,
+        [](NQdb::TExecutionContext& context,
            ITaskState& state,
            TInputPort& left,
            TInputPort& right,
@@ -487,7 +487,7 @@ TGateResult RunAsymmetricGateGraph(bool gate) {
     auto binaryState = std::make_shared<TBinaryState>();
     binaryState->DestroyCount = destroy.get();
     auto binaryCode = std::make_shared<TBinaryBlockingCode>(
-        [](NQdb::TThreadExecutionContext& context,
+        [](NQdb::TExecutionContext& context,
            ITaskState& state,
            TInputPort& left,
            TInputPort& right,
@@ -590,7 +590,7 @@ TEST(SchedulerRuntimeAdapter, WithoutRequiredSideProbeIsPrefetched) {
 }
 
 TEST(SchedulerRuntimeAdapter, HashShuffleTaskScattersSelectedRows) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     std::atomic<int> destroyCount = 0;
     TOneToOneConnection input(1);
     THashShuffleConnection output(2);
@@ -605,7 +605,7 @@ TEST(SchedulerRuntimeAdapter, HashShuffleTaskScattersSelectedRows) {
     input.Finish(0);
 
     auto code = std::make_shared<THashShuffleCode>(
-        [](NQdb::TThreadExecutionContext&, TRowSet*, uint64_t*) {
+        [](NQdb::TExecutionContext&, TRowSet*, uint64_t*) {
             ADD_FAILURE() << "shuffle recomputed input hashes";
             return false;
         });
@@ -645,7 +645,7 @@ TEST(SchedulerRuntimeAdapter, HashShuffleTaskScattersSelectedRows) {
 }
 
 TEST(SchedulerRuntimeAdapter, HashShuffleTaskBatchesRowsUntilFinish) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     using namespace NQumir::NAst;
 
     std::atomic<int> destroyCount = 0;
@@ -662,7 +662,7 @@ TEST(SchedulerRuntimeAdapter, HashShuffleTaskBatchesRowsUntilFinish) {
             {"value", std::make_shared<TIntegerType>()},
         });
     auto code = std::make_shared<THashShuffleCode>(
-        [](NQdb::TThreadExecutionContext&, TRowSet* batch, uint64_t* hashes) {
+        [](NQdb::TExecutionContext&, TRowSet* batch, uint64_t* hashes) {
             auto* values = reinterpret_cast<int64_t*>(batch->Columns[0].Data);
             for (int64_t row = 0; row < batch->RowCount; ++row) {
                 hashes[row] = static_cast<uint64_t>(values[row]);
@@ -719,7 +719,7 @@ TEST(SchedulerRuntimeAdapter, HashShuffleTaskBatchesRowsUntilFinish) {
 }
 
 TEST_F(SchedulerRuntimeFilter, PublishesRuntimeFilterBeforeBufferedOutputDrains) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     using namespace NQumir::NAst;
     std::atomic<int> destroyCount = 0;
     TOneToOneConnection input(1);
@@ -734,7 +734,7 @@ TEST_F(SchedulerRuntimeFilter, PublishesRuntimeFilterBeforeBufferedOutputDrains)
             {"value", std::make_shared<TIntegerType>()},
         });
     auto code = std::make_shared<THashShuffleCode>(
-        [](NQdb::TThreadExecutionContext&, TRowSet* batch, uint64_t* hashes) {
+        [](NQdb::TExecutionContext&, TRowSet* batch, uint64_t* hashes) {
             auto* values = reinterpret_cast<int64_t*>(batch->Columns[0].Data);
             for (int64_t row = 0; row < batch->RowCount; ++row) {
                 hashes[row] = static_cast<uint64_t>(values[row]);
@@ -767,7 +767,7 @@ TEST_F(SchedulerRuntimeFilter, PublishesRuntimeFilterBeforeBufferedOutputDrains)
 
 // Stands in for the hash kernel over one i64 column: the hash is the value,
 // and an unselected row gets none.
-bool HashSelectedValues(NQdb::TThreadExecutionContext&, TRowSet* batch, uint64_t* hashes) {
+bool HashSelectedValues(NQdb::TExecutionContext&, TRowSet* batch, uint64_t* hashes) {
     auto* values = reinterpret_cast<int64_t*>(batch->Columns[0].Data);
     for (int64_t row = 0; row < batch->RowCount; ++row) {
         if (!batch->Selection || batch->Selection[row] != 0) {
@@ -804,7 +804,7 @@ TSelectedRows FetchSelectedRows(IConnection& connection, size_t lane) {
 }
 
 TEST(SchedulerRuntimeAdapter, HashShuffleBoundsSparseInputOwnersBeforeEof) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     using namespace NQumir::NAst;
     std::atomic<int> destroyed = 0;
     TOneToOneConnection input(1);
@@ -843,7 +843,7 @@ TEST(SchedulerRuntimeAdapter, HashShuffleBoundsSparseInputOwnersBeforeEof) {
 }
 
 TEST(SchedulerRuntimeAdapter, HashShuffleBudgetSharesOwnersAndHonorsBackpressure) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     using namespace NQumir::NAst;
     std::atomic<int> destroyed = 0;
     std::atomic<int> dummyDestroyed = 0;
@@ -926,7 +926,7 @@ TRowSet PayloadRowSet(std::unique_ptr<TShufflePayload> data, int64_t rows) {
 }
 
 TEST(SchedulerRuntimeAdapter, HashShuffleInputBudgetPreservesNullableBitmapOffsets) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     using namespace NQumir::NAst;
     std::atomic<int> destroyed = 0;
     TOneToOneConnection input(1);
@@ -936,7 +936,7 @@ TEST(SchedulerRuntimeAdapter, HashShuffleInputBudgetPreservesNullableBitmapOffse
     auto schema = std::make_shared<TStructType>(
         std::vector<std::pair<std::string, TTypePtr>>{{"flag", std::move(nullableBool)}});
     auto code = std::make_shared<THashShuffleCode>(
-        [](NQdb::TThreadExecutionContext&, TRowSet*, uint64_t*) {
+        [](NQdb::TExecutionContext&, TRowSet*, uint64_t*) {
             ADD_FAILURE() << "a one-partition shuffle does not need hashes";
             return false;
         }, schema, 16, 64, 70);
@@ -970,7 +970,7 @@ TEST(SchedulerRuntimeAdapter, HashShuffleInputBudgetPreservesNullableBitmapOffse
 }
 
 TEST(SchedulerRuntimeAdapter, HashShuffleInputBudgetCountsUnselectedStringPayload) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     using namespace NQumir::NAst;
     for (uint8_t width : {4, 8}) {
         for (bool dense : {false, true}) {
@@ -982,7 +982,7 @@ TEST(SchedulerRuntimeAdapter, HashShuffleInputBudgetCountsUnselectedStringPayloa
                 std::vector<std::pair<std::string, TTypePtr>>{
                     {"text", std::make_shared<TStringType>()}});
             auto code = std::make_shared<THashShuffleCode>(
-                [](NQdb::TThreadExecutionContext&, TRowSet*, uint64_t*) {
+                [](NQdb::TExecutionContext&, TRowSet*, uint64_t*) {
                     ADD_FAILURE() << "a one-partition shuffle does not need hashes";
                     return false;
                 }, schema, 16, 64, 128);
@@ -1031,7 +1031,7 @@ TEST(SchedulerRuntimeAdapter, HashShuffleInputBudgetCountsUnselectedStringPayloa
 // byte target each partition is compacted and the owner is released at once;
 // below it the partitions stay views of the owner until EOF.
 TEST(SchedulerRuntimeAdapter, HashShuffleBoundsDenseInputSplitAcrossPartitions) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     using namespace NQumir::NAst;
     for (bool overBudget : {true, false}) {
         SCOPED_TRACE(overBudget);
@@ -1098,7 +1098,7 @@ TEST(SchedulerRuntimeAdapter, HashShuffleBoundsDenseInputSplitAcrossPartitions) 
 // sparse inputs accumulate up to the row target, and at EOF a single sparse
 // input is forwarded as a view of its owner.
 TEST(SchedulerRuntimeAdapter, HashShuffleZeroByteTargetKeepsRowBatching) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     using namespace NQumir::NAst;
     std::atomic<int> destroyed = 0;
     TOneToOneConnection input(1);
@@ -1154,7 +1154,7 @@ TEST(SchedulerRuntimeAdapter, HashShuffleZeroByteTargetKeepsRowBatching) {
 }
 
 TEST(SchedulerRuntimeAdapter, HashShuffleCancellationReleasesInputOwners) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     using namespace NQumir::NAst;
     for (bool pending : {false, true}) {
         std::atomic<int> destroyed = 0;
@@ -1189,7 +1189,7 @@ TEST(SchedulerRuntimeAdapter, HashShuffleCancellationReleasesInputOwners) {
 // of an unselected row stays 0: a shuffle that read it would send the row to
 // partition 0 and add 0 to the filter.
 TEST_F(SchedulerRuntimeFilter, HashShuffleReadsHashesOfSelectedRowsOnly) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     using namespace NQumir::NAst;
     std::atomic<int> destroyCount = 0;
     TOneToOneConnection input(2);
@@ -1241,7 +1241,7 @@ TEST_F(SchedulerRuntimeFilter, HashShuffleReadsHashesOfSelectedRowsOnly) {
 }
 
 TEST_F(SchedulerRuntimeFilter, HashShuffleDropsBatchWithEmptySelection) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     std::atomic<int> destroyCount = 0;
     TOneToOneConnection input(1);
     THashShuffleConnection output(2);
@@ -1269,7 +1269,7 @@ TEST_F(SchedulerRuntimeFilter, HashShuffleDropsBatchWithEmptySelection) {
 }
 
 TEST(SchedulerRuntimeAdapter, HashShuffleTreatsFullSelectionAsNoSelection) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     for (bool withSelection : {false, true}) {
         std::atomic<int> destroyCount = 0;
         TOneToOneConnection input(1);
@@ -1303,7 +1303,7 @@ class RuntimeFilterTask : public NTest::TRuntimeFilterTest {
 protected:
     void SetUp() override {
         NTest::TRuntimeFilterTest::SetUp();
-        NQdb::TThreadExecutionContext context;
+        NQdb::TExecutionContext context;
         Filter_ = std::make_shared<TRuntimeFilter>(Context_);
         const std::vector<uint64_t> keys = {0, 11, 22};
         auto builder = Filter_->MakeBuilder();
@@ -1338,7 +1338,7 @@ protected:
 };
 
 TEST_F(RuntimeFilterTask, SparseSelectionProbesOnlySelectedRows) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     Push({11, 33, 0, 22, 11, 44}, {1, 1, 0, 0xff, 0, 2});
     EXPECT_EQ(Task_->Execute(context), ETaskResult::OK);
 
@@ -1351,7 +1351,7 @@ TEST_F(RuntimeFilterTask, SparseSelectionProbesOnlySelectedRows) {
 }
 
 TEST_F(RuntimeFilterTask, EmptySelectionKeepsNothing) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     Push({11, 0, 22}, {0, 0, 0});
     EXPECT_EQ(Task_->Execute(context), ETaskResult::OK);
 
@@ -1362,7 +1362,7 @@ TEST_F(RuntimeFilterTask, EmptySelectionKeepsNothing) {
 }
 
 TEST_F(RuntimeFilterTask, FullSelectionMatchesNoSelection) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     for (const auto& selection :
         {std::vector<uint8_t>{}, std::vector<uint8_t>{1, 0xff, 2, 1}}) {
         Push({11, 33, 0, 22}, selection);
@@ -1377,7 +1377,7 @@ TEST_F(RuntimeFilterTask, FullSelectionMatchesNoSelection) {
 }
 
 TEST_F(RuntimeFilterTask, BlockedOutputProbesTheBatchOnce) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     ASSERT_TRUE(Output_.Push(0, MakeInt64RowSet({7}, &DestroyCount_)));
     Push({11, 33, 0, 22}, {1, 1, 0, 1});
     EXPECT_EQ(Task_->Execute(context), ETaskResult::BLOCKED_OUTPUT);

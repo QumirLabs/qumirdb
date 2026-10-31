@@ -67,7 +67,7 @@ public:
         TInputPort input,
         TOutputPort completion);
 
-    ETaskResult Execute(TThreadExecutionContext& context) override;
+    ETaskResult Execute(TExecutionContext& context) override;
     void ConfigureInstrumentation(TTaskInstrumentationSetup& setup) override;
 
 private:
@@ -89,7 +89,7 @@ public:
         TInputPort producers,
         TOutputPort consumers);
 
-    ETaskResult Execute(TThreadExecutionContext& context) override;
+    ETaskResult Execute(TExecutionContext& context) override;
 
 private:
     std::shared_ptr<TCteSpool> Spool_;
@@ -107,7 +107,7 @@ public:
         TInputPort completion,
         TOutputPort output);
 
-    ETaskResult Execute(TThreadExecutionContext& context) override;
+    ETaskResult Execute(TExecutionContext& context) override;
     void ConfigureInstrumentation(TTaskInstrumentationSetup& setup) override;
 
 private:

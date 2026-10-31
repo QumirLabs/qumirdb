@@ -34,16 +34,16 @@ public:
         TSortRadixKernel radixKernel,
         int64_t batchRows = JoinOutputBatchRows);
 
-    void Add(TThreadExecutionContext& context, TRowSet& rowSet);
+    void Add(TExecutionContext& context, TRowSet& rowSet);
     void SetInstrumentation(TOperatorInstrumentation* instrumentation) {
         Store_.SetInstrumentation(instrumentation, 0);
     }
 
-    void Finish(TThreadExecutionContext& context);
-    bool Next(TThreadExecutionContext& context, TRowSet& rowSet);
+    void Finish(TExecutionContext& context);
+    bool Next(TExecutionContext& context, TRowSet& rowSet);
 
 private:
-    bool TryRadixSort(TThreadExecutionContext& context);
+    bool TryRadixSort(TExecutionContext& context);
 
     NQumir::NAst::TTypePtr OutputType_;
     std::vector<TSortKey> Keys_;
@@ -70,7 +70,7 @@ public:
         size_t runCount,
         int64_t batchRows = JoinOutputBatchRows);
 
-    void Add(TThreadExecutionContext& context, TRowSet& rowSet, size_t run);
+    void Add(TExecutionContext& context, TRowSet& rowSet, size_t run);
     void SetInstrumentation(TOperatorInstrumentation* instrumentation) {
         Store_.SetInstrumentation(instrumentation, 0);
     }
@@ -102,10 +102,10 @@ public:
         int64_t batchRows = JoinOutputBatchRows);
     ~TTopSortProcessor();
 
-    void Add(TThreadExecutionContext& context, TRowSet& rowSet);
+    void Add(TExecutionContext& context, TRowSet& rowSet);
     void SetInstrumentation(TOperatorInstrumentation* instrumentation);
     void Finish();
-    bool Next(TThreadExecutionContext& context, TRowSet& rowSet);
+    bool Next(TExecutionContext& context, TRowSet& rowSet);
 
 private:
     NQumir::NAst::TTypePtr OutputType_;

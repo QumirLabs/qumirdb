@@ -368,7 +368,7 @@ TSortProcessor::TSortProcessor(
     , BatchRows_(batchRows)
 {}
 
-bool TSortProcessor::TryRadixSort(TThreadExecutionContext& context)
+bool TSortProcessor::TryRadixSort(TExecutionContext& context)
 {
     if (Rows_.empty()) {
         return true;
@@ -402,7 +402,7 @@ bool TSortProcessor::TryRadixSort(TThreadExecutionContext& context)
     return true;
 }
 
-void TSortProcessor::Add(TThreadExecutionContext& context, TRowSet& rowSet)
+void TSortProcessor::Add(TExecutionContext& context, TRowSet& rowSet)
 {
     if (Materialized_) {
         throw std::runtime_error("sort processor is already finished");
@@ -417,7 +417,7 @@ void TSortProcessor::Add(TThreadExecutionContext& context, TRowSet& rowSet)
     rowSet = {};
 }
 
-void TSortProcessor::Finish(TThreadExecutionContext& context)
+void TSortProcessor::Finish(TExecutionContext& context)
 {
     if (Materialized_) {
         return;
@@ -429,7 +429,7 @@ void TSortProcessor::Finish(TThreadExecutionContext& context)
     Materialized_ = true;
 }
 
-bool TSortProcessor::Next(TThreadExecutionContext& context, TRowSet& rowSet)
+bool TSortProcessor::Next(TExecutionContext& context, TRowSet& rowSet)
 {
     Finish(context);
     if (Cursor_ >= Rows_.size()) {
@@ -482,7 +482,7 @@ TMergeProcessor::TMergeProcessor(
     , Runs_(runCount)
 {}
 
-void TMergeProcessor::Add(TThreadExecutionContext& context, TRowSet& rowSet, size_t run)
+void TMergeProcessor::Add(TExecutionContext& context, TRowSet& rowSet, size_t run)
 {
     if (Materialized_) {
         throw std::runtime_error("merge processor is already finished");
@@ -609,7 +609,7 @@ void TTopSortProcessor::SetInstrumentation(TOperatorInstrumentation* instrumenta
     Instrumentation_ = instrumentation;
 }
 
-void TTopSortProcessor::Add(TThreadExecutionContext& context, TRowSet& batch)
+void TTopSortProcessor::Add(TExecutionContext& context, TRowSet& batch)
 {
     if (Materialized_) {
         throw std::runtime_error("top-sort processor is already finished");
@@ -712,7 +712,7 @@ void TTopSortProcessor::Finish()
     Materialized_ = true;
 }
 
-bool TTopSortProcessor::Next(TThreadExecutionContext& context, TRowSet& rowSet)
+bool TTopSortProcessor::Next(TExecutionContext& context, TRowSet& rowSet)
 {
     Finish();
     if (!Scratch_ || Cursor_ >= static_cast<size_t>(Scratch_->State.RowCount)) {

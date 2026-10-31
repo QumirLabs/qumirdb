@@ -21,7 +21,7 @@ struct TRowSetInstrumentation {
     uint64_t Rows = 0;
     uint64_t Bytes = 0;
 
-    void Add(TThreadExecutionContext& context, const TRowSet& rowSet);
+    void Add(TExecutionContext& context, const TRowSet& rowSet);
 };
 
 // A task is executed by at most one worker at a time. Its counters migrate
@@ -47,13 +47,13 @@ struct TOperatorInstrumentation {
     bool MaterializesOutput = false;
 
     uint64_t InputPayloadBytes(
-        TThreadExecutionContext& context, const TRowSet& rowSet, size_t input) const;
+        TExecutionContext& context, const TRowSet& rowSet, size_t input) const;
     void SetRetainedInputBytes(uint64_t bytes);
     void RetainInput(
-        TThreadExecutionContext& context, const TRowSet& rowSet, size_t input, bool append = true);
+        TExecutionContext& context, const TRowSet& rowSet, size_t input, bool append = true);
 
     void ObserveHash(
-        TThreadExecutionContext& context,
+        TExecutionContext& context,
         void* table,
         size_t side,
         bool join,

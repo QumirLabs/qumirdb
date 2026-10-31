@@ -78,7 +78,7 @@ std::vector<uint64_t> Selected(
 }
 
 void PublishKeys(TRuntimeFilter& filter, std::span<const uint64_t> keys) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     auto builder = filter.MakeBuilder();
     builder.Add(context, keys);
     filter.FinishProducer(context, std::move(builder).TakePartial());
@@ -90,7 +90,7 @@ size_t ProbeBatch(IRuntimeFilterProbe& filter, TRuntimeFilterProbeState& state,
 {
     const size_t rows = selection.empty() ? hashes.size() : Kept(selection);
     if (filter.BeginBatch(state, rows)) {
-        TThreadExecutionContext context;
+        TExecutionContext context;
         return filter.MayContainBatch(context, hashes, output, state, selection);
     }
     for (size_t i = 0; i < output.size(); ++i) {
@@ -117,7 +117,7 @@ protected:
         std::span<const uint8_t> selection = {})
     {
         TRuntimeFilterBuilder builder(Context_, maxKeys, bloomBytes);
-        TThreadExecutionContext context;
+        TExecutionContext context;
         for (size_t row = 0; row < hashes.size(); row += batchRows) {
             const size_t rows = std::min(batchRows, hashes.size() - row);
             builder.Add(context, hashes.subspan(row, rows),
@@ -313,7 +313,7 @@ TEST_F(RuntimeFilter, BatchRespectsSelectionAndCountsOnlySelectedRows) {
 }
 
 TEST_F(RuntimeFilter, WeakBloomPausesAndRechecks) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     TRuntimeFilter filter(Context_, /*maxKeys=*/8, /*bloomBytes=*/512);
     auto keys = Hashes(200, 31);
     PublishKeys(filter, keys);
@@ -356,7 +356,7 @@ TEST_F(RuntimeFilter, RejectsKeysItWasNotGiven) {
 }
 
 TEST_F(RuntimeFilter, PassesEverythingWhenItCannotAnswer) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     TRuntimeFilter unpublished(Context_);
     EXPECT_FALSE(unpublished.Ready());
     EXPECT_TRUE(RuntimeFilterMayContain(unpublished, 12345));
@@ -378,7 +378,7 @@ TEST_F(RuntimeFilter, PassesEverythingWhenItCannotAnswer) {
 }
 
 TEST_F(RuntimeFilter, MergedOverflowUsesBloom) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     TRuntimeFilter filter(Context_, /*maxKeys=*/16, /*bloomBytes=*/512);
     filter.SetProducerCount(4);
     std::vector<uint64_t> allKeys;
@@ -396,7 +396,7 @@ TEST_F(RuntimeFilter, MergedOverflowUsesBloom) {
 }
 
 TEST_F(RuntimeFilter, RepeatsAtTheCapStayExact) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     constexpr size_t Cap = 4096;
     TRuntimeFilter filter(Context_, Cap);
     auto keys = Hashes(Cap, 11);
@@ -444,7 +444,7 @@ TEST_F(RuntimeFilter, CompactionSortsAndLaterKeysKeepTheirOrder) {
 }
 
 TEST_F(RuntimeFilter, PromotesAfterDuplicateHeavyExactBuildGetsNewKey) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     constexpr size_t Cap = 64;
     TRuntimeFilter filter(Context_, Cap, /*bloomBytes=*/512);
     auto keys = Hashes(Cap, 21);
@@ -524,7 +524,7 @@ TEST_F(RuntimeFilter, BloomLayoutIsStable) {
 }
 
 TEST_F(RuntimeFilter, CapIsEnforcedAtPublication) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     constexpr size_t Cap = 8;
     for (size_t distinct : {Cap, Cap + 1}) {
         TRuntimeFilter filter(Context_, Cap, /*bloomBytes=*/512);
@@ -541,7 +541,7 @@ TEST_F(RuntimeFilter, CapIsEnforcedAtPublication) {
 }
 
 TEST_F(RuntimeFilter, CapIsEnforcedAcrossBuildersAtPublication) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     constexpr size_t Cap = 8;
     TRuntimeFilter filter(Context_, Cap, /*bloomBytes=*/512);
     filter.SetProducerCount(3);
@@ -561,7 +561,7 @@ TEST_F(RuntimeFilter, CapIsEnforcedAcrossBuildersAtPublication) {
 }
 
 TEST_F(RuntimeFilter, BloomFragmentsMergeFromSeveralProducers) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     constexpr size_t Producers = 4;
     TRuntimeFilter filter(Context_, /*maxKeys=*/32, /*bloomBytes=*/4096);
     TRuntimeFilter single(Context_, /*maxKeys=*/32, /*bloomBytes=*/4096);
@@ -603,7 +603,7 @@ TEST_F(RuntimeFilter, BloomFragmentsMergeFromSeveralProducers) {
 }
 
 TEST_F(RuntimeFilter, MergesExactEmptyAndBloomContributionsWithoutLosingZeroHash) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     TRuntimeFilter filter(Context_, /*maxKeys=*/8, /*bloomBytes=*/1000);
     filter.SetProducerCount(3);
     PublishKeys(filter, std::vector<uint64_t>{0, 1});
@@ -621,7 +621,7 @@ TEST_F(RuntimeFilter, MergesExactEmptyAndBloomContributionsWithoutLosingZeroHash
 }
 
 TEST_F(RuntimeFilter, IncompatibleBloomContributionPassesEverything) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     TRuntimeFilter filter(Context_, /*maxKeys=*/8, /*bloomBytes=*/512);
     TRuntimeFilterBuilder builder(Context_, /*maxKeys=*/8, /*bloomBytes=*/64);
     builder.Add(context, Hashes(64, 72));
@@ -643,7 +643,7 @@ TEST_F(RuntimeFilter, SaturatedBloomPassesEverything) {
 }
 
 TEST_F(RuntimeFilter, RepeatedKeysDoNotConsumeTheCap) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     TRuntimeFilter filter(Context_, /*maxKeys=*/64);
     auto keys = Hashes(50, 7);
     auto builder = filter.MakeBuilder();
@@ -715,7 +715,7 @@ TEST_F(RuntimeFilter, PublishesOnceUnderContention) {
 }
 
 TEST_F(RuntimeFilter, PartialCanBeMergedAfterLeavingTheProducer) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     TRuntimeFilter filter(Context_, /*maxKeys=*/8);
     filter.SetProducerCount(2);
 
@@ -735,7 +735,7 @@ TEST_F(RuntimeFilter, PartialCanBeMergedAfterLeavingTheProducer) {
 }
 
 TEST_F(RuntimeFilter, LocalBindingKeepsProducerAndProbeInSync) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     TLocalRuntimeFilterBindingFactory factory;
     auto binding = factory.Create(/*id=*/7, /*producerCount=*/2,
         TRuntimeFilter::DefaultBloomBytes, Context_);

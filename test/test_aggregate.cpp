@@ -362,7 +362,7 @@ struct TPartialGroup {
 // The partial processor hands rows through once its sample shows too little
 // reduction, and empties a table that reaches its group bound.
 TEST(AggregateE2E, PartialAggregateProcessorJudgesItsReduction) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     TStructType input({
         {"k", std::make_shared<TIntegerType>()},
         {"v", std::make_shared<TIntegerType>()},
@@ -376,7 +376,7 @@ TEST(AggregateE2E, PartialAggregateProcessorJudgesItsReduction) {
         NKernel::BuildAggregateKernelSpec(input, {"k"}, aggs));
     // The partial state of one row, (k, sum v), is the row itself.
     const TUnaryStreamProcess identity =
-        [](TThreadExecutionContext&, TRowSet&, TUnaryStreamingKernelState&) {};
+        [](TExecutionContext&, TRowSet&, TUnaryStreamingKernelState&) {};
 
     struct TBatch {
         std::vector<int64_t> Keys;
@@ -1907,7 +1907,7 @@ TEST(AggregateE2E, CompilesNullableReducerArgumentWithUnwrappedAstType) {
 
 // CompileAggregateHash uses the same rh_hash generator as the aggregate's table.
 TEST(AggregateE2E, CompileAggregateHashMatchesEqualCompositeKeys) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     TStructType inputType({
         {"k1", std::make_shared<TIntegerType>()},
         {"k2", std::make_shared<TIntegerType>()},
@@ -1936,7 +1936,7 @@ TEST(AggregateE2E, CompileAggregateHashMatchesEqualCompositeKeys) {
 }
 
 TEST(AggregateE2E, CompileAggregateHashDistinguishesNullFromValue) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     TStructType inputType({
         {"k", std::make_shared<TIntegerType>()},
         {"v", std::make_shared<TNullable>(std::make_shared<TIntegerType>())},
@@ -2372,7 +2372,7 @@ TEST(AggregateE2E, NullableReducerArgumentWithNullStringKey) {
 namespace {
 
 void CheckAggregateStatesAcrossRepeatedGrowth(bool stringKeys) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     auto keyType = stringKeys
         ? TTypePtr(std::make_shared<TStringType>())
         : TTypePtr(std::make_shared<TIntegerType>());
@@ -2449,7 +2449,7 @@ TEST(AggregateE2E, StringKeyStatesPreserveOwnershipAcrossRepeatedGrowth) {
 }
 
 TEST(AggregateE2E, NullableFloatAndWideStatesSurviveRepeatedGrowth) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     TStructType input({
         {"k", std::make_shared<TIntegerType>()},
         {"f", std::make_shared<TNullable>(std::make_shared<TFloatType>())},
@@ -2572,7 +2572,7 @@ TEST(AggregateE2E, NullableFloatAndWideStatesSurviveRepeatedGrowth) {
 }
 
 TEST(AggregateE2E, MixedStringAndNumericReducersSurviveRepeatedGrowth) {
-    NQdb::TThreadExecutionContext context;
+    NQdb::TExecutionContext context;
     TStructType input({
         {"k", std::make_shared<TIntegerType>()},
         {"v", std::make_shared<TIntegerType>()},
