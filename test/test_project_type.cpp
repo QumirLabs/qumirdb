@@ -302,20 +302,27 @@ TEST(ProjectType, DecimalArithmeticAnnotates) {
     EXPECT_THROW(AnnotateExprType(Parse("(* frac frac)"), sc), NQumir::TError);
 }
 
-// The unscaled product is already at the result's scale: no scale alignment call.
+// The unscaled product is already at the result's scale: no scale alignment call. A
+// product of at most 18 digits is the i64 `*`; a wider one widens its operands to i128.
 TEST(ProjectType, ExpandKernelExprLowersDecimalProduct) {
     TStructType sc({
         {"amount", std::make_shared<NQdb::TDecimal>(7, 2)},
         {"tax", std::make_shared<NQdb::TDecimal>(6, 3)},
+        {"price", std::make_shared<NQdb::TDecimal>(15, 2)},
     });
 
-    auto [expr, type] = ExpandKernelExpr(Parse("(* amount tax)"), sc);
+    auto [narrow, narrowType] = ExpandKernelExpr(Parse("(* amount tax)"), sc);
+    EXPECT_TRUE(IsDecimal(narrowType, 13, 5));
+    const std::string narrowPrinted = NQumir::NAst::NCore::PrintAst(narrow);
+    EXPECT_EQ(narrowPrinted.find("qdb_decimal"), std::string::npos);
+    EXPECT_EQ(narrowPrinted.find("DECIMAL"), std::string::npos);
 
-    EXPECT_TRUE(IsDecimal(type, 13, 5));
-    const std::string printed = NQumir::NAst::NCore::PrintAst(expr);
-    EXPECT_NE(printed.find("qdb_decimal_mul"), std::string::npos);
-    EXPECT_EQ(printed.find("qdb_decimal_scale_up"), std::string::npos);
-    EXPECT_EQ(printed.find("DECIMAL"), std::string::npos);
+    auto [wide, wideType] = ExpandKernelExpr(Parse("(* price price)"), sc);
+    EXPECT_TRUE(IsDecimal(wideType, 30, 4));
+    const std::string widePrinted = NQumir::NAst::NCore::PrintAst(wide);
+    EXPECT_NE(widePrinted.find("qdb_decimal_mul"), std::string::npos);
+    EXPECT_NE(widePrinted.find("qdb_decimal_from_unscaled"), std::string::npos);
+    EXPECT_EQ(widePrinted.find("qdb_decimal_scale_up"), std::string::npos);
 }
 
 TEST(ProjectType, DecimalRemainderTakesTheWiderIntegerPart) {
@@ -350,7 +357,7 @@ TEST(ProjectType, ExpandKernelExprErasesDecimalCasts) {
 
     EXPECT_TRUE(IsDecimal(type, 8, 2));
     const std::string printed = NQumir::NAst::NCore::PrintAst(expr);
-    EXPECT_NE(printed.find("qdb_decimal_from_i64"), std::string::npos);
+    EXPECT_NE(printed.find("qdb_decimal64_scale_up"), std::string::npos);
     EXPECT_EQ(printed.find("DECIMAL"), std::string::npos);
 }
 
@@ -447,7 +454,7 @@ TEST(ProjectType, CoalesceDecimalBranchesOfDifferentScale) {
     auto [scaled, scaledType] = ExpandKernelExpr(Parse(
         "(call coalesce (cast a <named DECIMAL [10 2]>) (cast 1 <named DECIMAL [8 4]>))"), sc);
     EXPECT_TRUE(IsDecimal(scaledType, 12, 4));
-    EXPECT_NE(NQumir::NAst::NCore::PrintAst(scaled).find("qdb_decimal_scale_up"),
+    EXPECT_NE(NQumir::NAst::NCore::PrintAst(scaled).find("qdb_decimal64_scale_up"),
         std::string::npos);
 }
 

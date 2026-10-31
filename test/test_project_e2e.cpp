@@ -268,12 +268,9 @@ TEST(ProjectE2E, StringLiteralIsNotFlattenedAsStringViewStruct) {
     EXPECT_TRUE(TMaybeType<TStringType>(outType->Fields[0].second));
 }
 
-TEST(ProjectE2E, DecimalProjectComputesWithBinIntStorage) {
-    std::array<qdb_bin_int, 3> amount = {{
-        {.Lo = 1000, .Hi = 0}, // 10.00
-        {.Lo = 1250, .Hi = 0}, // 12.50
-        {.Lo = 2500, .Hi = 0}, // 25.00
-    }};
+// DECIMAL(7,2) and its results here have at most 18 digits: all are plain i64.
+TEST(ProjectE2E, DecimalProjectComputesWithI64Storage) {
+    std::array<int64_t, 3> amount = {1000, 1250, 2500}; // 10.00, 12.50, 25.00
     std::array<TColumn, 1> cols = {
         TColumn{.Data = reinterpret_cast<char*>(amount.data())},
     };
@@ -297,18 +294,18 @@ TEST(ProjectE2E, DecimalProjectComputesWithBinIntStorage) {
     ASSERT_TRUE(plan->Next(out));
     ASSERT_EQ(out.ColumnCount, 3);
     ASSERT_EQ(out.RowCount, 3);
-    const auto* plusOne = reinterpret_cast<const qdb_bin_int*>(out.Columns[0].Data);
-    const auto* twice = reinterpret_cast<const qdb_bin_int*>(out.Columns[1].Data);
-    const auto* half = reinterpret_cast<const qdb_bin_int*>(out.Columns[2].Data);
-    EXPECT_EQ(plusOne[0].Lo, 1100u);
-    EXPECT_EQ(plusOne[1].Lo, 1350u);
-    EXPECT_EQ(plusOne[2].Lo, 2600u);
-    EXPECT_EQ(twice[0].Lo, 2000u);
-    EXPECT_EQ(twice[1].Lo, 2500u);
-    EXPECT_EQ(twice[2].Lo, 5000u);
-    EXPECT_EQ(half[0].Lo, 500u);
-    EXPECT_EQ(half[1].Lo, 625u);
-    EXPECT_EQ(half[2].Lo, 1250u);
+    const auto* plusOne = reinterpret_cast<const int64_t*>(out.Columns[0].Data);
+    const auto* twice = reinterpret_cast<const int64_t*>(out.Columns[1].Data);
+    const auto* half = reinterpret_cast<const int64_t*>(out.Columns[2].Data);
+    EXPECT_EQ(plusOne[0], 1100);
+    EXPECT_EQ(plusOne[1], 1350);
+    EXPECT_EQ(plusOne[2], 2600);
+    EXPECT_EQ(twice[0], 2000);
+    EXPECT_EQ(twice[1], 2500);
+    EXPECT_EQ(twice[2], 5000);
+    EXPECT_EQ(half[0], 500);
+    EXPECT_EQ(half[1], 625);
+    EXPECT_EQ(half[2], 1250);
     Release(&out);
     EXPECT_FALSE(plan->Next(out));
 }
@@ -400,17 +397,10 @@ TEST(ProjectE2E, Decimal64FromF64RoundsHalfAwayFromZero) {
     EXPECT_FALSE(plan->Next(out));
 }
 
-TEST(ProjectE2E, DecimalDecimalDivisionComputesWithScaledBinIntStorage) {
-    std::array<qdb_bin_int, 3> amount = {{
-        {.Lo = 1000, .Hi = 0}, // 10.00
-        {.Lo = 1250, .Hi = 0}, // 12.50
-        {.Lo = 2500, .Hi = 0}, // 25.00
-    }};
-    std::array<qdb_bin_int, 3> divisor = {{
-        {.Lo = 200, .Hi = 0}, // 2.00
-        {.Lo = 250, .Hi = 0}, // 2.50
-        {.Lo = 500, .Hi = 0}, // 5.00
-    }};
+// The dividend is scaled up in i128; the DECIMAL(17,10) quotient is narrowed to i64.
+TEST(ProjectE2E, DecimalDecimalDivisionScalesUpInI128) {
+    std::array<int64_t, 3> amount = {1000, 1250, 2500}; // 10.00, 12.50, 25.00
+    std::array<int64_t, 3> divisor = {200, 250, 500}; // 2.00, 2.50, 5.00
     std::array<TColumn, 2> cols = {
         TColumn{.Data = reinterpret_cast<char*>(amount.data())},
         TColumn{.Data = reinterpret_cast<char*>(divisor.data())},
@@ -437,25 +427,18 @@ TEST(ProjectE2E, DecimalDecimalDivisionComputesWithScaledBinIntStorage) {
     ASSERT_TRUE(plan->Next(out));
     ASSERT_EQ(out.ColumnCount, 1);
     ASSERT_EQ(out.RowCount, 3);
-    const auto* ratio = reinterpret_cast<const qdb_bin_int*>(out.Columns[0].Data);
+    const auto* ratio = reinterpret_cast<const int64_t*>(out.Columns[0].Data);
     for (int i = 0; i < 3; ++i) {
-        EXPECT_EQ(ratio[i].Lo, 50000000000u);
-        EXPECT_EQ(ratio[i].Hi, 0u);
+        EXPECT_EQ(ratio[i], 50000000000);
     }
     Release(&out);
     EXPECT_FALSE(plan->Next(out));
 }
 
 TEST(ProjectE2E, DecimalRemainderAlignsScalesAndKeepsDividendSign) {
-    auto binInt = [](int64_t value) {
-        return qdb_bin_int{
-            .Lo = static_cast<uint64_t>(value),
-            .Hi = value < 0 ? ~uint64_t{0} : 0,
-        };
-    };
     // 7.50, -7.50, 7.25 at scale 2; 0.300, 2.000, -2.000 at scale 3.
-    std::array<qdb_bin_int, 3> amount = {{binInt(750), binInt(-750), binInt(725)}};
-    std::array<qdb_bin_int, 3> divisor = {{binInt(300), binInt(2000), binInt(-2000)}};
+    std::array<int64_t, 3> amount = {750, -750, 725};
+    std::array<int64_t, 3> divisor = {300, 2000, -2000};
     std::array<TColumn, 2> cols = {
         TColumn{.Data = reinterpret_cast<char*>(amount.data())},
         TColumn{.Data = reinterpret_cast<char*>(divisor.data())},
@@ -488,29 +471,24 @@ TEST(ProjectE2E, DecimalRemainderAlignsScalesAndKeepsDividendSign) {
     ASSERT_TRUE(plan->Next(out));
     ASSERT_EQ(out.ColumnCount, 2);
     ASSERT_EQ(out.RowCount, 3);
-    const auto* byInt = reinterpret_cast<const qdb_bin_int*>(out.Columns[0].Data);
-    const auto* byDecimal = reinterpret_cast<const qdb_bin_int*>(out.Columns[1].Data);
+    const auto* byInt = reinterpret_cast<const int64_t*>(out.Columns[0].Data);
+    const auto* byDecimal = reinterpret_cast<const int64_t*>(out.Columns[1].Data);
     // 1.50, -1.50, 1.25
     const std::array<int64_t, 3> expectedByInt = {150, -150, 125};
     // 7.500 % 0.300 = 0.000, -7.500 % 2.000 = -1.500, 7.250 % -2.000 = 1.250
     const std::array<int64_t, 3> expectedByDecimal = {0, -1500, 1250};
     for (int i = 0; i < 3; ++i) {
-        EXPECT_EQ(byInt[i].Lo, binInt(expectedByInt[i]).Lo) << i;
-        EXPECT_EQ(byInt[i].Hi, binInt(expectedByInt[i]).Hi) << i;
-        EXPECT_EQ(byDecimal[i].Lo, binInt(expectedByDecimal[i]).Lo) << i;
-        EXPECT_EQ(byDecimal[i].Hi, binInt(expectedByDecimal[i]).Hi) << i;
+        EXPECT_EQ(byInt[i], expectedByInt[i]) << i;
+        EXPECT_EQ(byDecimal[i], expectedByDecimal[i]) << i;
     }
     Release(&out);
     EXPECT_FALSE(plan->Next(out));
 }
 
+// The sum of DECIMAL(7,2) values is a DECIMAL(38,2) in i128, and so is the quotient.
 TEST(ProjectE2E, DecimalAverageShapeDividesSumByCount) {
     std::array<int64_t, 3> keys = {1, 1, 1};
-    std::array<qdb_bin_int, 3> amount = {{
-        {.Lo = 1000, .Hi = 0}, // 10.00
-        {.Lo = 2000, .Hi = 0}, // 20.00
-        {.Lo = 3000, .Hi = 0}, // 30.00
-    }};
+    std::array<int64_t, 3> amount = {1000, 2000, 3000}; // 10.00, 20.00, 30.00
     std::array<TColumn, 2> cols = {
         TColumn{.Data = reinterpret_cast<char*>(keys.data())},
         TColumn{.Data = reinterpret_cast<char*>(amount.data())},
@@ -545,11 +523,7 @@ TEST(ProjectE2E, DecimalAverageShapeDividesSumByCount) {
 }
 
 TEST(ProjectE2E, NullableDecimalProjectPropagatesValidity) {
-    std::array<qdb_bin_int, 3> amount = {{
-        {.Lo = 1000, .Hi = 0}, // 10.00
-        {.Lo = 1250, .Hi = 0}, // NULL by mask
-        {.Lo = 2500, .Hi = 0}, // 25.00
-    }};
+    std::array<int64_t, 3> amount = {1000, 1250, 2500}; // 10.00, NULL by mask, 25.00
     std::array<uint8_t, 1> mask = {0b00000101};
     std::array<TColumn, 1> cols = {
         TColumn{
@@ -577,27 +551,19 @@ TEST(ProjectE2E, NullableDecimalProjectPropagatesValidity) {
     ASSERT_EQ(out.ColumnCount, 1);
     ASSERT_EQ(out.RowCount, 3);
     ASSERT_NE(out.Columns[0].Mask, nullptr);
-    const auto* plusOne = reinterpret_cast<const qdb_bin_int*>(out.Columns[0].Data);
+    const auto* plusOne = reinterpret_cast<const int64_t*>(out.Columns[0].Data);
     EXPECT_TRUE(IsValid(out.Columns[0], 0));
     EXPECT_FALSE(IsValid(out.Columns[0], 1));
     EXPECT_TRUE(IsValid(out.Columns[0], 2));
-    EXPECT_EQ(plusOne[0].Lo, 1100u);
-    EXPECT_EQ(plusOne[2].Lo, 2600u);
+    EXPECT_EQ(plusOne[0], 1100);
+    EXPECT_EQ(plusOne[2], 2600);
     Release(&out);
     EXPECT_FALSE(plan->Next(out));
 }
 
 TEST(ProjectE2E, DecimalDivisionByZeroIsNull) {
-    std::array<qdb_bin_int, 3> amount = {{
-        {.Lo = 1000, .Hi = 0}, // 10.00
-        {.Lo = 1250, .Hi = 0}, // 12.50
-        {.Lo = 2500, .Hi = 0}, // 25.00
-    }};
-    std::array<qdb_bin_int, 3> divisor = {{
-        {.Lo = 0, .Hi = 0}, // 0.00
-        {.Lo = 250, .Hi = 0}, // 2.50
-        {.Lo = 500, .Hi = 0}, // 5.00
-    }};
+    std::array<int64_t, 3> amount = {1000, 1250, 2500}; // 10.00, 12.50, 25.00
+    std::array<int64_t, 3> divisor = {0, 250, 500}; // 0.00, 2.50, 5.00
     std::array<int64_t, 3> count = {2, 0, 5};
     std::array<TColumn, 3> cols = {
         TColumn{.Data = reinterpret_cast<char*>(amount.data())},
@@ -627,28 +593,24 @@ TEST(ProjectE2E, DecimalDivisionByZeroIsNull) {
     ASSERT_TRUE(plan->Next(out));
     ASSERT_EQ(out.ColumnCount, 2);
     ASSERT_EQ(out.RowCount, 3);
-    const auto* ratio = reinterpret_cast<const qdb_bin_int*>(out.Columns[0].Data);
-    const auto* share = reinterpret_cast<const qdb_bin_int*>(out.Columns[1].Data);
+    const auto* ratio = reinterpret_cast<const int64_t*>(out.Columns[0].Data);
+    const auto* share = reinterpret_cast<const int64_t*>(out.Columns[1].Data);
     EXPECT_FALSE(IsValid(out.Columns[0], 0));
     EXPECT_TRUE(IsValid(out.Columns[0], 1));
     EXPECT_TRUE(IsValid(out.Columns[0], 2));
-    EXPECT_EQ(ratio[1].Lo, 50000000000u); // 5.0000000000
-    EXPECT_EQ(ratio[2].Lo, 50000000000u);
+    EXPECT_EQ(ratio[1], 50000000000); // 5.0000000000
+    EXPECT_EQ(ratio[2], 50000000000);
     EXPECT_TRUE(IsValid(out.Columns[1], 0));
     EXPECT_FALSE(IsValid(out.Columns[1], 1));
     EXPECT_TRUE(IsValid(out.Columns[1], 2));
-    EXPECT_EQ(share[0].Lo, 500u); // 5.00
-    EXPECT_EQ(share[2].Lo, 500u);
+    EXPECT_EQ(share[0], 500); // 5.00
+    EXPECT_EQ(share[2], 500);
     Release(&out);
     EXPECT_FALSE(plan->Next(out));
 }
 
 TEST(FilterE2E, DecimalFilterAlignsIntegerLiteralScale) {
-    std::array<qdb_bin_int, 3> amount = {{
-        {.Lo = 1000, .Hi = 0}, // 10.00
-        {.Lo = 1250, .Hi = 0}, // 12.50
-        {.Lo = 2500, .Hi = 0}, // 25.00
-    }};
+    std::array<int64_t, 3> amount = {1000, 1250, 2500}; // 10.00, 12.50, 25.00
     std::array<TColumn, 1> cols = {
         TColumn{.Data = reinterpret_cast<char*>(amount.data())},
     };
@@ -695,12 +657,9 @@ TEST(FilterE2E, NullableDecimalDivisionComparesWithFloatLiteral) {
     EXPECT_FALSE(plan->Next(out));
 }
 
+// DECIMAL(15,2) is stored in i64 and DECIMAL(19,6) in i128: the difference widens.
 TEST(FilterE2E, DecimalAbsDivisionComparesWithFloatLiteral) {
-    std::array<qdb_bin_int, 3> sumSales = {{
-        {.Lo = 1000, .Hi = 0},     // 10.00
-        {.Lo = 1950, .Hi = 0},     // 19.50
-        {.Lo = 3000, .Hi = 0},     // 30.00
-    }};
+    std::array<int64_t, 3> sumSales = {1000, 1950, 3000}; // 10.00, 19.50, 30.00
     std::array<qdb_bin_int, 3> avgSales = {{
         {.Lo = 20000000, .Hi = 0}, // 20.000000
         {.Lo = 20000000, .Hi = 0}, // 20.000000

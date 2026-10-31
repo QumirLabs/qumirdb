@@ -46,9 +46,10 @@ async function schemaTypes({ qdb, ozType }) {
     nullable: true,
     precision: 18,
     scale: 2,
-    storageType: 'binint',
+    // DECIMAL with precision <= 18 is stored in i64.
+    storageType: 'i64',
     type: 'decimal',
-    width: 16,
+    width: 8,
   });
 
   const legacy = await runExporter(

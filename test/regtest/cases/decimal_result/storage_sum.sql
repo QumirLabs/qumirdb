@@ -1,0 +1,1 @@
+SELECT sum(CAST(999999999999999999 AS DECIMAL(18,0))) AS s, min(CAST(t1.a AS DECIMAL(18,2))) AS lo, max(CAST(t2.a AS DECIMAL(18,2))) AS hi, count(*) AS n FROM t AS t1, t AS t2;

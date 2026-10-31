@@ -529,15 +529,11 @@ TEST(AggregateE2E, SingleGroup) {
     EXPECT_FALSE(runtime->Next(second));
 }
 
+// DECIMAL(7,2) is stored in i64; its sum is a DECIMAL(38,2) in an i128 state.
 TEST(AggregateE2E, SumDecimalUsesBinIntState) {
     std::array<int64_t, 5> keys = {1, 1, 2, 2, 1};
-    std::array<qdb_bin_int, 5> values = {{
-        {.Lo = 1000, .Hi = 0}, // 10.00
-        {.Lo = 250, .Hi = 0},  //  2.50
-        {.Lo = 3000, .Hi = 0}, // 30.00
-        {.Lo = 125, .Hi = 0},  //  1.25
-        {.Lo = 75, .Hi = 0},   //  0.75
-    }};
+    // 10.00, 2.50, 30.00, 1.25, 0.75
+    std::array<int64_t, 5> values = {1000, 250, 3000, 125, 75};
     std::vector<TColumn> columns = {
         TColumn{.Data = reinterpret_cast<char*>(keys.data())},
         TColumn{.Data = reinterpret_cast<char*>(values.data())},

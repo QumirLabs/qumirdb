@@ -697,7 +697,7 @@ TEST(AggregateTable, EveryFixedWidthStateAgreesAcrossLayouts) {
     };
     const std::vector<EValue> kinds = {
         EValue::I64, EValue::I64, EValue::I32, EValue::F64, EValue::F64,
-        EValue::Wide, EValue::Wide, EValue::Bool,
+        EValue::Wide, EValue::I64, EValue::Bool,
     };
     std::vector<TBatch> batches;
     uint64_t seed = 12345;
@@ -727,6 +727,9 @@ TEST(AggregateTable, EveryFixedWidthStateAgreesAcrossLayouts) {
         outputs.insert(outputs.end(), 3, kind);
     }
     outputs[3 + 3] = EValue::I64;
+    // DECIMAL(18,0) is an i64; its sum is a DECIMAL(38,0) in i128.
+    outputs[3 + 5 * 3 + 1] = EValue::I64;
+    outputs[3 + 5 * 3 + 2] = EValue::I64;
     outputs.push_back(EValue::Bool);
     outputs.push_back(EValue::Bool);
     const auto swiss = CheckLayoutsAgree(input, {"k"}, aggs, batches, outputs);

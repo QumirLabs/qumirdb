@@ -112,43 +112,63 @@ TExprPtr DateToString(const TExprPtr& operand, const TTypePtr&, const TTypePtr&,
     return Call("qdb_string_from_date", {Ident("__arena__", loc), std::move(date)}, loc);
 }
 
-// A DECIMAL is a BinInt of unscaled digits; the conversions below come from qumirdb.oz
-// and take the scale as a literal. qdb_decimal_from_* round the value to the target
-// scale, qdb_decimal_to_* round half away from zero and saturate.
+bool IsDecimal64(const TTypePtr& type) {
+    return DecimalStorageOf(*DecimalSpecOfValueType(type)) == EDecimalStorage::I64;
+}
+
+// A DECIMAL is its unscaled digits in a plain i64 (precision <= 18) or in a BinInt; the
+// conversions below come from qumirdb.oz and take the scale as a literal.
+// qdb_decimal*_from_* round the value to the target scale, qdb_decimal*_to_* round half
+// away from zero and saturate.
 TExprPtr IntegerToDecimal(const TExprPtr& operand, const TTypePtr&, const TTypePtr& to,
     TLocation loc)
 {
-    return Call("qdb_decimal_from_i64", {CastToI64(operand, loc), Int64(ScaleOf(to), loc)}, loc);
+    return Call(IsDecimal64(to) ? "qdb_decimal64_scale_up" : "qdb_decimal_from_i64",
+        {CastToI64(operand, loc), Int64(ScaleOf(to), loc)}, loc);
 }
 
 TExprPtr FloatToDecimal(const TExprPtr& operand, const TTypePtr&, const TTypePtr& to,
     TLocation loc)
 {
-    return Call("qdb_decimal_from_f64", {operand, Int64(ScaleOf(to), loc)}, loc);
+    return Call(IsDecimal64(to) ? "qdb_decimal64_from_f64" : "qdb_decimal_from_f64",
+        {operand, Int64(ScaleOf(to), loc)}, loc);
 }
 
 // Only the scale changes the digits: the same scale is the identity, a larger one
-// multiplies by a power of ten. A scale down would have to round and is not implemented.
+// multiplies by a power of ten, in the wider of the two storages. A scale down would have
+// to round and is not implemented.
 TExprPtr DecimalToDecimal(const TExprPtr& operand, const TTypePtr& from, const TTypePtr& to,
     TLocation loc)
 {
     const int32_t fromScale = ScaleOf(from);
     const int32_t toScale = ScaleOf(to);
-    if (fromScale == toScale) {
-        return operand;
-    }
     if (fromScale > toScale) {
         throw NQumir::TError(
             "decimal scale down cast is not implemented: " +
             std::to_string(fromScale) + " -> " + std::to_string(toScale));
     }
-    return Call("qdb_decimal_scale_up", {operand, Int64(toScale - fromScale, loc)}, loc);
+    const int32_t delta = toScale - fromScale;
+    if (IsDecimal64(from) && IsDecimal64(to)) {
+        return delta == 0
+            ? operand
+            : Call("qdb_decimal64_scale_up", {operand, Int64(delta, loc)}, loc);
+    }
+    TExprPtr wide = IsDecimal64(from)
+        ? Call("qdb_decimal_from_unscaled", {operand}, loc)
+        : operand;
+    if (delta != 0) {
+        wide = Call("qdb_decimal_scale_up", {std::move(wide), Int64(delta, loc)}, loc);
+    }
+    return IsDecimal64(to)
+        ? Call("qdb_decimal64_narrow", {std::move(wide)}, loc)
+        : wide;
 }
 
 TExprPtr DecimalToFloat(const TExprPtr& operand, const TTypePtr& from, const TTypePtr&,
     TLocation loc)
 {
-    return Call("qdb_decimal_to_f64", {operand, Int64(ScaleOf(from), loc)}, loc);
+    return Call(IsDecimal64(from) ? "qdb_decimal64_to_f64" : "qdb_decimal_to_f64",
+        {operand, Int64(ScaleOf(from), loc)}, loc);
 }
 
 TExprPtr DecimalToInteger(const TExprPtr& operand, const TTypePtr& from, const TTypePtr& to,
@@ -160,7 +180,10 @@ TExprPtr DecimalToInteger(const TExprPtr& operand, const TTypePtr& from, const T
         throw NQumir::TError("decimal cast to a " + std::to_string(bits) +
             "-bit integer is not implemented; only INTEGER and BIGINT exist");
     }
-    return Call(bits == 32 ? "qdb_decimal_to_i32" : "qdb_decimal_to_i64",
+    const std::string prefix = IsDecimal64(from)
+        ? "qdb_decimal64_to_"
+        : "qdb_decimal_to_";
+    return Call(prefix + (bits == 32 ? "i32" : "i64"),
         {operand, Int64(ScaleOf(from), loc)}, loc);
 }
 

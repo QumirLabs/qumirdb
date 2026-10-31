@@ -1356,7 +1356,8 @@ TEST(JoinMaterialize, GathersBoolAndDecimalWorkers) {
     using namespace NQumir::NAst;
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     TStructType leftType({{"lk", i64}, {"flag", std::make_shared<TBoolType>()}});
-    TStructType rightType({{"rk", i64}, {"amount", std::make_shared<TDecimal>(7, 2)}});
+    // DECIMAL(20,2) is stored in i128 (BinInt); one of p <= 18 would be a plain i64.
+    TStructType rightType({{"rk", i64}, {"amount", std::make_shared<TDecimal>(20, 2)}});
 
     TKernelCompiler compiler;
     auto spec = NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}}, EJoinType::Left);

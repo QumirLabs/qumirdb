@@ -1,0 +1,6 @@
+project (s, lo, hi, n) (rows≈1 cost≈6.2K)
+└─ aggregate keys=[__group__] aggs=[sum_0=sum, min_0=min, max_0=max, count_0=count] (rows≈1 cost≈6.1K)
+   └─ project (arg_0, arg_1, arg_2, __group__) (rows≈25 cost≈5.1K)
+      └─ join inner (rows≈25 cost≈4.3K)
+         ├─ source t AS t1 (rows≈5 cost≈20)
+         └─ source t AS t2 (rows≈5 cost≈20)

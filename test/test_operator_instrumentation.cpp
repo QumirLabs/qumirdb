@@ -91,7 +91,8 @@ TEST(OperatorInstrumentation, ResolvesLogicalAndPhysicalColumnWidths) {
         {"text", std::make_shared<TNullable>(std::make_shared<TStringType>())},
         {"float", std::make_shared<TFloatType>()},
     });
-    EXPECT_EQ(InstrumentationColumnWidths(schema), (std::vector<int64_t>{16, 16, 4, 1, -1, 8}));
+    // DECIMAL(18,2) is stored in i64.
+    EXPECT_EQ(InstrumentationColumnWidths(schema), (std::vector<int64_t>{8, 16, 4, 1, -1, 8}));
 }
 
 TEST(OperatorInstrumentation, CountsSelectedNonNullPayloadAndBothOffsetWidths) {

@@ -44,6 +44,15 @@ function decimalScale(typeOrColumn) {
   return match ? Number(match[1]) : 0;
 }
 
+function decimalPrecision(typeOrColumn, type) {
+  if (typeof typeOrColumn === 'object' && typeOrColumn !== null &&
+      typeOrColumn.precision !== undefined) {
+    return Number(typeOrColumn.precision);
+  }
+  const match = type.match(/^decimal\s*\(\s*(\d+)/);
+  return match ? Number(match[1]) : 18;
+}
+
 function storageTypeName(typeOrColumn) {
   if (typeof typeOrColumn === 'object' && typeOrColumn !== null &&
       typeOrColumn.storageType) {
@@ -54,8 +63,9 @@ function storageTypeName(typeOrColumn) {
   if (nullable) {
     type = nullable[1].trim().toLowerCase();
   }
-  if (type === 'decimal' || type === 'binint' || type.startsWith('decimal(')) {
-    return 'binint';
+  if (type === 'decimal' || type.startsWith('decimal(')) {
+    // DecimalStorageOf: precision <= 18 is stored in i64, wider in BinInt.
+    return decimalPrecision(typeOrColumn, type) <= 18 ? 'i64' : 'binint';
   }
   return type;
 }

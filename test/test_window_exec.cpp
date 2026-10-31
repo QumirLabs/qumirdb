@@ -416,13 +416,13 @@ TEST(WindowExec, AvgI32BroadcastsF64PerPartition) {
 
 TEST(WindowExec, AvgDecimalBroadcastsPerPartition) {
     std::array<int64_t, 5> keys = {2, 1, 1, 2, 1};
-    std::array<qdb_bin_int, 5> values = {{
-        {.Lo = 1000, .Hi = 0},
-        {.Lo = 300, .Hi = 0},
-        {.Lo = 600, .Hi = 0},
-        {.Lo = 3000, .Hi = 0},
-        {.Lo = 1200, .Hi = 0},
-    }};
+    std::array<int64_t, 5> values = {
+        1000,
+        300,
+        600,
+        3000,
+        1200,
+    };
 
     std::vector<TColumn> columns = {
         TColumn{.Data = reinterpret_cast<char*>(keys.data())},
@@ -501,11 +501,11 @@ TEST(WindowExec, AvgDecimalKeepsFractionalPrecision) {
     // Non-exact average over one partition: 5.00 / 3. At the input scale (2) this
     // truncates to 1.66; widening the scale by 4 keeps 1.666666.
     std::array<int64_t, 3> keys = {1, 1, 1};
-    std::array<qdb_bin_int, 3> values = {{
-        {.Lo = 100, .Hi = 0},   // 1.00
-        {.Lo = 200, .Hi = 0},   // 2.00
-        {.Lo = 200, .Hi = 0},   // 2.00
-    }};
+    std::array<int64_t, 3> values = {
+        100, // 1.00
+        200, // 2.00
+        200, // 2.00
+    };
 
     std::vector<TColumn> columns = {
         TColumn{.Data = reinterpret_cast<char*>(keys.data())},
@@ -729,12 +729,12 @@ TEST(WindowExec, Q47LikeCteSelfJoinKeepsDecimalWindowAvg) {
     std::array<int64_t, 4> store = {1, 1, 1, 1};
     std::array<int64_t, 4> year = {2000, 1999, 2001, 2000};
     std::array<int64_t, 4> month = {2, 12, 1, 1};
-    std::array<qdb_bin_int, 4> sales = {{
-        {.Lo = 3000, .Hi = 0}, // 30.00
-        {.Lo = 500, .Hi = 0},  // 5.00
-        {.Lo = 5000, .Hi = 0}, // 50.00
-        {.Lo = 1000, .Hi = 0}, // 10.00
-    }};
+    std::array<int64_t, 4> sales = {
+        3000, // 30.00
+        500, // 5.00
+        5000, // 50.00
+        1000, // 10.00
+    };
 
     std::vector<TColumn> columns = {
         TColumn{.Data = reinterpret_cast<char*>(cat.data())},
@@ -822,21 +822,22 @@ TEST(WindowExec, Q47LikeCteSelfJoinKeepsDecimalWindowAvg) {
     ASSERT_EQ(result.ColumnCount, 6);
     ASSERT_EQ(result.RowCount, 2);
 
-    auto* outSales = reinterpret_cast<qdb_bin_int*>(result.Columns[2].Data);
+    // DECIMAL(15,2) columns are i64; the DECIMAL(19,6) average is a BinInt.
+    auto* outSales = reinterpret_cast<int64_t*>(result.Columns[2].Data);
     auto* outAvg = reinterpret_cast<qdb_bin_int*>(result.Columns[3].Data);
-    auto* outPrev = reinterpret_cast<qdb_bin_int*>(result.Columns[4].Data);
-    auto* outNext = reinterpret_cast<qdb_bin_int*>(result.Columns[5].Data);
+    auto* outPrev = reinterpret_cast<int64_t*>(result.Columns[4].Data);
+    auto* outNext = reinterpret_cast<int64_t*>(result.Columns[5].Data);
 
-    const std::array<uint64_t, 2> expectedSales = {1000, 3000};
+    const std::array<int64_t, 2> expectedSales = {1000, 3000};
     const std::array<uint64_t, 2> expectedAvg = {20000000, 20000000};
-    const std::array<uint64_t, 2> expectedPrev = {500, 1000};
-    const std::array<uint64_t, 2> expectedNext = {3000, 5000};
+    const std::array<int64_t, 2> expectedPrev = {500, 1000};
+    const std::array<int64_t, 2> expectedNext = {3000, 5000};
 
     for (int64_t row = 0; row < result.RowCount; ++row) {
-        EXPECT_EQ(outSales[row].Lo, expectedSales[row]) << "row " << row;
+        EXPECT_EQ(outSales[row], expectedSales[row]) << "row " << row;
         EXPECT_EQ(outAvg[row].Lo, expectedAvg[row]) << "row " << row;
-        EXPECT_EQ(outPrev[row].Lo, expectedPrev[row]) << "row " << row;
-        EXPECT_EQ(outNext[row].Lo, expectedNext[row]) << "row " << row;
+        EXPECT_EQ(outPrev[row], expectedPrev[row]) << "row " << row;
+        EXPECT_EQ(outNext[row], expectedNext[row]) << "row " << row;
     }
 
     Release(&result);
@@ -848,12 +849,12 @@ TEST(WindowExec, Q47LikeCteConsumerAppliesDecimalOutlierFilter) {
     std::array<int64_t, 4> store = {1, 1, 1, 1};
     std::array<int64_t, 4> year = {2000, 1999, 2001, 2000};
     std::array<int64_t, 4> month = {2, 12, 1, 1};
-    std::array<qdb_bin_int, 4> sales = {{
-        {.Lo = 3000, .Hi = 0}, // 30.00
-        {.Lo = 500, .Hi = 0},  // 5.00
-        {.Lo = 5000, .Hi = 0}, // 50.00
-        {.Lo = 1000, .Hi = 0}, // 10.00
-    }};
+    std::array<int64_t, 4> sales = {
+        3000, // 30.00
+        500, // 5.00
+        5000, // 50.00
+        1000, // 10.00
+    };
 
     std::vector<TColumn> columns = {
         TColumn{.Data = reinterpret_cast<char*>(cat.data())},
@@ -924,15 +925,15 @@ TEST(WindowExec, Q47LikeCteConsumerAppliesDecimalOutlierFilter) {
         (std::vector<uint8_t>{0, 0xff, 0xff, 0}));
 
     auto* outMonth = reinterpret_cast<int64_t*>(result.Columns[0].Data);
-    auto* outSales = reinterpret_cast<qdb_bin_int*>(result.Columns[1].Data);
+    auto* outSales = reinterpret_cast<int64_t*>(result.Columns[1].Data);
     auto* outAvg = reinterpret_cast<qdb_bin_int*>(result.Columns[2].Data);
     const std::array<int64_t, 4> expectedMonth = {12, 1, 2, 1};
-    const std::array<uint64_t, 4> expectedSales = {500, 1000, 3000, 5000};
+    const std::array<int64_t, 4> expectedSales = {500, 1000, 3000, 5000};
     const std::array<uint64_t, 4> expectedAvg = {5000000, 20000000, 20000000, 50000000};
     for (int64_t row = 0; row < result.RowCount; ++row) {
         EXPECT_EQ(outMonth[row], expectedMonth[row]) << "row " << row;
         EXPECT_TRUE(IsValid(result.Columns[2], row)) << "row " << row;
-        EXPECT_EQ(outSales[row].Lo, expectedSales[row]) << "row " << row;
+        EXPECT_EQ(outSales[row], expectedSales[row]) << "row " << row;
         EXPECT_EQ(outAvg[row].Lo, expectedAvg[row]) << "row " << row;
     }
 
@@ -945,12 +946,12 @@ TEST(WindowExec, Q47LikeCteSelfJoinAppliesDecimalOutlierFilter) {
     std::array<int64_t, 4> store = {1, 1, 1, 1};
     std::array<int64_t, 4> year = {2000, 1999, 2001, 2000};
     std::array<int64_t, 4> month = {2, 12, 1, 1};
-    std::array<qdb_bin_int, 4> sales = {{
-        {.Lo = 3000, .Hi = 0}, // 30.00
-        {.Lo = 500, .Hi = 0},  // 5.00
-        {.Lo = 5000, .Hi = 0}, // 50.00
-        {.Lo = 1000, .Hi = 0}, // 10.00
-    }};
+    std::array<int64_t, 4> sales = {
+        3000, // 30.00
+        500, // 5.00
+        5000, // 50.00
+        1000, // 10.00
+    };
 
     std::vector<TColumn> columns = {
         TColumn{.Data = reinterpret_cast<char*>(cat.data())},
@@ -1043,16 +1044,16 @@ TEST(WindowExec, Q47LikeCteSelfJoinAppliesDecimalOutlierFilter) {
     ASSERT_EQ(result.RowCount, 2);
 
     auto* outMonth = reinterpret_cast<int64_t*>(result.Columns[0].Data);
-    auto* outSales = reinterpret_cast<qdb_bin_int*>(result.Columns[1].Data);
+    auto* outSales = reinterpret_cast<int64_t*>(result.Columns[1].Data);
     auto* outAvg = reinterpret_cast<qdb_bin_int*>(result.Columns[2].Data);
 
     const std::array<int64_t, 2> expectedMonth = {1, 2};
-    const std::array<uint64_t, 2> expectedSales = {1000, 3000};
+    const std::array<int64_t, 2> expectedSales = {1000, 3000};
     const std::array<uint64_t, 2> expectedAvg = {20000000, 20000000};
 
     for (int64_t row = 0; row < result.RowCount; ++row) {
         EXPECT_EQ(outMonth[row], expectedMonth[row]) << "row " << row;
-        EXPECT_EQ(outSales[row].Lo, expectedSales[row]) << "row " << row;
+        EXPECT_EQ(outSales[row], expectedSales[row]) << "row " << row;
         EXPECT_EQ(outAvg[row].Lo, expectedAvg[row]) << "row " << row;
     }
 
@@ -1107,13 +1108,13 @@ TEST(WindowExec, RankI64WithoutPartition) {
 }
 
 TEST(WindowExec, RankDecimalWithoutPartition) {
-    std::array<qdb_bin_int, 5> order = {{
-        {.Lo = 3000, .Hi = 0},
-        {.Lo = 1000, .Hi = 0},
-        {.Lo = 2000, .Hi = 0},
-        {.Lo = 2000, .Hi = 0},
-        {.Lo = 1000, .Hi = 0},
-    }};
+    std::array<int64_t, 5> order = {
+        3000,
+        1000,
+        2000,
+        2000,
+        1000,
+    };
     std::array<int64_t, 5> payload = {3, 1, 2, 4, 5};
 
     std::vector<TColumn> columns = {
@@ -1145,15 +1146,14 @@ TEST(WindowExec, RankDecimalWithoutPartition) {
     ASSERT_EQ(result.ColumnCount, 3);
     ASSERT_EQ(result.RowCount, 5);
 
-    auto* outOrder = reinterpret_cast<qdb_bin_int*>(result.Columns[0].Data);
+    auto* outOrder = reinterpret_cast<int64_t*>(result.Columns[0].Data);
     auto* outRank = reinterpret_cast<int64_t*>(result.Columns[2].Data);
 
-    const std::array<uint64_t, 5> expectedOrder = {1000, 1000, 2000, 2000, 3000};
+    const std::array<int64_t, 5> expectedOrder = {1000, 1000, 2000, 2000, 3000};
     const std::array<int64_t, 5> expectedRank = {1, 1, 3, 3, 5};
 
     for (int64_t row = 0; row < result.RowCount; ++row) {
-        EXPECT_EQ(outOrder[row].Lo, expectedOrder[row]) << "row " << row;
-        EXPECT_EQ(outOrder[row].Hi, 0u) << "row " << row;
+        EXPECT_EQ(outOrder[row], expectedOrder[row]) << "row " << row;
         EXPECT_EQ(outRank[row], expectedRank[row]) << "row " << row;
     }
 
@@ -1165,13 +1165,13 @@ TEST(WindowExec, RankDecimalWithoutPartition) {
 
 TEST(WindowExec, SumDecimalBroadcastsNullForAllNullPartition) {
     std::array<int64_t, 5> keys = {2, 1, 2, 1, 2};
-    std::array<qdb_bin_int, 5> values = {{
-        {.Lo = 100, .Hi = 0},
-        {.Lo = 10, .Hi = 0},
-        {.Lo = 300, .Hi = 0},
-        {.Lo = 20, .Hi = 0},
-        {.Lo = 400, .Hi = 0},
-    }};
+    std::array<int64_t, 5> values = {
+        100,
+        10,
+        300,
+        20,
+        400,
+    };
     std::array<uint8_t, 1> valueMask = {0};
     valueMask[0] = static_cast<uint8_t>((1u << 0) | (1u << 2) | (1u << 4));
 
@@ -1236,13 +1236,13 @@ TEST(WindowExec, SumDecimalBroadcastsNullForAllNullPartition) {
 TEST(WindowExec, PrefixSumDecimalSkipsNullsAndKeepsNullUntilFirstValue) {
     std::array<int64_t, 5> keys = {1, 1, 2, 1, 2};
     std::array<int64_t, 5> order = {1, 2, 1, 3, 2};
-    std::array<qdb_bin_int, 5> values = {{
-        {.Lo = 10, .Hi = 0},
-        {.Lo = 500, .Hi = 0},
-        {.Lo = 70, .Hi = 0},
-        {.Lo = 30, .Hi = 0},
-        {.Lo = 700, .Hi = 0},
-    }};
+    std::array<int64_t, 5> values = {
+        10,
+        500,
+        70,
+        30,
+        700,
+    };
     std::array<uint8_t, 1> valueMask = {0};
     valueMask[0] = static_cast<uint8_t>((1u << 1) | (1u << 4));
 
@@ -1313,13 +1313,13 @@ TEST(WindowExec, PrefixSumDecimalSkipsNullsAndKeepsNullUntilFirstValue) {
 TEST(WindowExec, PrefixMaxDecimalSkipsNullsAndKeepsNullUntilFirstValue) {
     std::array<int64_t, 5> keys = {1, 1, 2, 1, 2};
     std::array<int64_t, 5> order = {1, 2, 1, 3, 2};
-    std::array<qdb_bin_int, 5> values = {{
-        {.Lo = 10, .Hi = 0},
-        {.Lo = 300, .Hi = 0},
-        {.Lo = 70, .Hi = 0},
-        {.Lo = 200, .Hi = 0},
-        {.Lo = 700, .Hi = 0},
-    }};
+    std::array<int64_t, 5> values = {
+        10,
+        300,
+        70,
+        200,
+        700,
+    };
     std::array<uint8_t, 1> valueMask = {0};
     valueMask[0] = static_cast<uint8_t>((1u << 1) | (1u << 3) | (1u << 4));
 
@@ -1364,20 +1364,19 @@ TEST(WindowExec, PrefixMaxDecimalSkipsNullsAndKeepsNullUntilFirstValue) {
 
     auto* outKeys = reinterpret_cast<int64_t*>(result.Columns[0].Data);
     auto* outOrder = reinterpret_cast<int64_t*>(result.Columns[1].Data);
-    auto* outMax = reinterpret_cast<qdb_bin_int*>(result.Columns[3].Data);
+    auto* outMax = reinterpret_cast<int64_t*>(result.Columns[3].Data);
 
     const std::array<int64_t, 5> expectedKeys = {1, 1, 1, 2, 2};
     const std::array<int64_t, 5> expectedOrder = {1, 2, 3, 1, 2};
     const std::array<bool, 5> expectedValid = {false, true, true, false, true};
-    const std::array<uint64_t, 5> expectedMax = {0, 300, 300, 0, 700};
+    const std::array<int64_t, 5> expectedMax = {0, 300, 300, 0, 700};
 
     for (int64_t row = 0; row < result.RowCount; ++row) {
         EXPECT_EQ(outKeys[row], expectedKeys[row]) << "row " << row;
         EXPECT_EQ(outOrder[row], expectedOrder[row]) << "row " << row;
         EXPECT_EQ(IsValid(result.Columns[3], row), expectedValid[row]) << "row " << row;
         if (expectedValid[row]) {
-            EXPECT_EQ(outMax[row].Lo, expectedMax[row]) << "row " << row;
-            EXPECT_EQ(outMax[row].Hi, 0u) << "row " << row;
+            EXPECT_EQ(outMax[row], expectedMax[row]) << "row " << row;
         }
     }
 
