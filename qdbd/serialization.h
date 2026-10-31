@@ -134,6 +134,7 @@ inline void DeserializeFromStream<TDataChunk>(TDataChunk& obj, std::istringstrea
     memcpy(&rowSet.ColumnCount, ptr, sizeof(rowSet.ColumnCount)); ptr += sizeof(rowSet.ColumnCount);
     memcpy(&rowSet.RowCount, ptr, sizeof(rowSet.RowCount)); ptr += sizeof(rowSet.RowCount);
     rowSet.Destroy = destroy;
+    rowSet.RefCount = 1;
     auto rowCount = rowSet.RowCount;
 
     // TODO: alignment
