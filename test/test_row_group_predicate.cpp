@@ -398,6 +398,46 @@ TEST(RowGroupPredicate, F32ArithmeticRoundsToTheF32GridAndNeverPrunesAWitness) {
     }
 }
 
+TEST(RowGroupPredicate, F32ColumnVsLiteralComparesInF64) {
+    const auto f32 = std::make_shared<TFloatType>(TFloatType::F32);
+    std::vector<TColumnSchema> columns{{"x", f32}};
+    const TSchema schema{columns};
+    // Literals on both sides of the f32 grid points above 2^24 (the grid step is 2 there).
+    const std::vector<double> literals{
+        16777215.0, 16777216.0, 16777216.5, 16777217.0, 16777217.5, 16777218.0,
+        16777219.0, 16777219.5, 16777220.0, 33554433.0};
+    const std::vector<float> grid{
+        1.0f, 16777216.0f, 16777218.0f, 16777220.0f, 33554432.0f};
+    for (const char* op : {"==", "<", "<=", ">", ">="}) {
+        for (const double literal : literals) {
+            auto number = Fraction(literal);
+            if (literal == std::floor(literal)) {
+                number = Num(static_cast<int64_t>(literal));
+            }
+            auto evaluator = TRowGroupPredicateEvaluator::Compile(
+                Bin(op, Id("x"), std::move(number), BoolType()), schema, "");
+            ASSERT_TRUE(evaluator);
+            for (const float lo : grid) for (const float hi : grid) {
+                if (lo > hi) continue;
+                const std::string kind = op;
+                bool witness = false;
+                for (const float v : {lo, hi}) {
+                    const double x = v;
+                    witness |= kind == "==" ? x == literal
+                        : kind == "<" ? x < literal
+                        : kind == "<=" ? x <= literal
+                        : kind == ">" ? x > literal : x >= literal;
+                }
+                if (witness) {
+                    const std::vector<TRowGroupColumnRange> ranges{F64Range(lo, hi)};
+                    EXPECT_TRUE(evaluator->MayBeTrue(ranges))
+                        << op << " " << literal << " range " << lo << ".." << hi;
+                }
+            }
+        }
+    }
+}
+
 TEST(RowGroupPredicate, SupportsNotAndNonStrictComparison) {
     TTestSchema schema({"x"});
     auto atMostTen = Bin("<=", Id("x"), Num(10), BoolType());

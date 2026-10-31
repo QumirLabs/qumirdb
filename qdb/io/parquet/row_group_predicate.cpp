@@ -424,14 +424,11 @@ private:
         TExprPtr literal;
         switch (target.Kind) {
             case ENumberKind::Float:
-                {
-                    const double value = number->IsFloat()
-                        ? number->FloatValue
-                        : static_cast<double>(number->IntValue);
-                    literal = F64(target.BitWidth == 32
-                        ? static_cast<double>(static_cast<float>(value))
-                        : value);
-                }
+                // Not rounded to f32: the kernel compares an f32 column with a
+                // literal in f64, so 16777217 stays 16777217.
+                literal = F64(number->IsFloat()
+                    ? number->FloatValue
+                    : static_cast<double>(number->IntValue));
                 break;
             case ENumberKind::Signed:
                 if (number->IsFloat()) {
