@@ -1,0 +1,14 @@
+{
+  "schema": "<struct (id i32) (ge <named Nullable [bool]>) (pos <named Nullable [bool]>) (above <named Nullable [bool]>) (gt10 <named Nullable [bool]>) (eq10 <named Nullable [bool]>) (bt10 <named Nullable [bool]>)>",
+  "rows": [
+    [1, true, true, false, false, false, true],
+    [2, false, false, false, false, false, true],
+    [3, true, true, true, true, false, false],
+    [4, false, false, false, false, false, false],
+    [6, true, true, false, true, false, false],
+    [7, true, true, false, false, false, false],
+    [8, false, false, false, false, false, true],
+    [9, false, false, false, true, true, true],
+    [10, true, true, false, null, null, null]
+  ]
+}

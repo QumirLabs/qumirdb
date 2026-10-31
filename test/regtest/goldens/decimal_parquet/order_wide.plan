@@ -1,0 +1,4 @@
+top-sort [d10 desc, id asc] limit 4
+└─ project (id, d2, d10) (rows≈8 cost≈1K)
+   └─ filter (! (call qdb_is_null |w.d10|)) (rows≈8 cost≈720)
+      └─ source w AS w row-groups (! (call qdb_is_null |w.d10|)) (rows≈10 cost≈360)

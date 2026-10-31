@@ -1,0 +1,4 @@
+project (n, c2, s2, a2, lo2, hi2, c10, s10, a10, lo10, hi10) (rows≈1 cost≈2.6K)
+└─ aggregate keys=[__group__] aggs=[count_0=count, count_1=count, sum_0=sum, sum_1=sum, count_2=count, min_0=min, max_0=max, count_3=count, sum_2=sum, sum_3=sum, count_4=count, min_1=min, max_1=max] (rows≈1 cost≈2.5K)
+   └─ project (w.d2, w.d10, __group__) (rows≈10 cost≈720)
+      └─ source w AS w (rows≈10 cost≈320)

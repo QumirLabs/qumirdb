@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "schema": "<struct (d2 <named Nullable [<named DECIMAL [38 2]>]>) (name string)>",
+  "stats": "footer",
+  "rows": [
+    ["1.50", "one-fifty"],
+    ["999999999999999999999999999999999999.99", "max"],
+    ["-999999999999999999999999999999999999.99", "min"],
+    ["99999999999999999999.99", "big"],
+    [null, "null"],
+    ["0.00", "zero"]
+  ]
+}
