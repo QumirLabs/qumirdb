@@ -1,7 +1,7 @@
 #pragma once
 
 #include <coroio/actors/actor.hpp>
-#include <qdb/remote/time_source.h>
+#include <qdbd/time_source.h>
 
 namespace NQdb {
 namespace NRemote {

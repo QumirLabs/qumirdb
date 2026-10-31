@@ -129,21 +129,6 @@ target_link_libraries(qumirdb PUBLIC
     ${CMAKE_DL_LIBS}
 )
 
-if(QDB_BUILD_DAEMON)
-    add_library(qumirdb_remote
-        remote/actors/compute.cpp
-        remote/actors/gateway.cpp
-        remote/actors/local_scheduler.cpp
-        remote/actors/pinger.cpp
-        remote/actors/query.cpp
-        remote/actors/scheduler.cpp
-    )
-    target_link_libraries(qumirdb_remote PUBLIC
-        coroio
-        qumirdb
-    )
-endif()
-
 # Modules and kernel libraries written in oz are read at kernel compile time,
 # so they ship next to the binaries that use them.
 install(FILES

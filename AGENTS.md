@@ -82,6 +82,9 @@ The main areas are:
 - `qdb/exec/`, `qdb/scheduler/`: operator state, tasks, connections, and execution.
 - `qdb/io/`: Parquet and other input/output infrastructure.
 - `bin/`: CLI and plan export; `service/`: web workbench.
+- `qdbd/`: distributed-execution library (actors, messages, transport); the `qdbd`
+  executable lives in `bin/`. It depends on
+  the single-node engine in `qdb/`, never the other way around.
 - `test/`: unit tests and SQL regression suites; `benchmark/`: benchmark runners.
 - `externals/qumir/`, `externals/coroio/`: Git submodules. Compiler/VM changes
   belong in Qumir; record their commits and update the QDB submodule pin.

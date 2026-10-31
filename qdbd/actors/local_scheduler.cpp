@@ -1,9 +1,9 @@
 #include <coroio/actors/actorsystem.hpp>
 #include <memory>
-#include <qdb/remote/actors.h>
-#include <qdb/remote/messages.h>
-#include <qdb/remote/serialization.h>
-#include <qdb/remote/time_source.h>
+#include <qdbd/actors.h>
+#include <qdbd/messages.h>
+#include <qdbd/serialization.h>
+#include <qdbd/time_source.h>
 
 #include "pinger.h"
 #include "compute.h"

@@ -1,8 +1,8 @@
 #include <algorithm>
 #include <coroio/actors/actorsystem.hpp>
-#include <qdb/remote/actors.h>
-#include <qdb/remote/messages.h>
-#include <qdb/remote/serialization.h>
+#include <qdbd/actors.h>
+#include <qdbd/messages.h>
+#include <qdbd/serialization.h>
 #include <unordered_map>
 #include <utility>
 #include <chrono>
