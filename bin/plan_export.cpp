@@ -1847,12 +1847,13 @@ llvm::json::Object CoreTypeJson(const NQumir::NAst::TTypePtr& type) {
     const bool nullable = NQdb::IsNullableType(type);
     auto valueType = NQdb::UnwrapNullableType(type);
     if (auto decimal = NQdb::DecimalSpecOfValueType(valueType)) {
+        const bool i64 = NQdb::DecimalStorageOf(*decimal) == NQdb::EDecimalStorage::I64;
         return llvm::json::Object{
             {"type", "decimal"},
-            {"storageType", "binint"},
+            {"storageType", i64 ? "i64" : "binint"},
             {"precision", decimal->Precision},
             {"scale", decimal->Scale},
-            {"width", 16},
+            {"width", NQdb::DecimalStorageBytes(*decimal)},
             {"nullable", nullable},
         };
     }

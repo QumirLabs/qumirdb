@@ -113,8 +113,8 @@ TTypePtr ShuffleValueType(const TTypePtr& type) {
 }
 
 size_t ShuffleColumnFixedWidth(const TTypePtr& type) {
-    if (IsDecimalType(type)) {
-        return 16;
+    if (auto decimal = DecimalSpecOf(type)) {
+        return static_cast<size_t>(DecimalStorageBytes(*decimal));
     }
     auto valueType = ShuffleValueType(type);
     if (auto integer = TMaybeType<TIntegerType>(valueType)) {

@@ -17,7 +17,9 @@ std::vector<int64_t> InstrumentationColumnWidths(const NQumir::NAst::TTypePtr& t
     std::vector<int64_t> widths;
     for (const auto& [name, field] : structure.Cast()->Fields) {
         const auto value = UnwrapNamedType(UnwrapNullableType(field));
-        if (IsDecimalType(field) || IsBinIntStorageType(field)) {
+        if (auto decimal = DecimalSpecOf(field)) {
+            widths.push_back(DecimalStorageBytes(*decimal));
+        } else if (IsBinIntStorageType(field)) {
             widths.push_back(16);
         } else if (TMaybeType<TStringType>(value)) {
             widths.push_back(-1);

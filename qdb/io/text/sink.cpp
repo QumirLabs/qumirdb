@@ -121,6 +121,18 @@ std::string FormatInt128(const char* data, bool isSigned) {
     return UnsignedInt128ToString(raw);
 }
 
+// A DECIMAL cell holds its unscaled value at the storage width of its type.
+std::string FormatDecimalCell(const TColumn& col, int32_t row, TDecimalSpec spec) {
+    const char* data = col.Data + static_cast<int64_t>(row) * DecimalStorageBytes(spec);
+    if (DecimalStorageOf(spec) == EDecimalStorage::I64) {
+        int64_t value = 0;
+        std::memcpy(&value, data, sizeof(value));
+        const __int128 wide = value;
+        return FormatDecimal128(reinterpret_cast<const char*>(&wide), spec.Scale);
+    }
+    return FormatDecimal128(data, spec.Scale);
+}
+
 std::string FormatCell(const TColumn& col, int32_t row, const TTypePtr& type) {
     if (IsMasked(col, row)) {
         return "NULL";
@@ -131,7 +143,7 @@ std::string FormatCell(const TColumn& col, int32_t row, const TTypePtr& type) {
     char buf[64];
     const auto valueType = UnwrapNullableType(type);
     if (auto decimal = DecimalSpecOfValueType(valueType)) {
-        return FormatDecimal128(col.Data + row * 16, decimal->Scale);
+        return FormatDecimalCell(col, row, *decimal);
     }
     if (auto t = TMaybeType<TIntegerType>(valueType)) {
         auto intType = t.Cast();
@@ -196,7 +208,7 @@ void WriteValue(std::ostream& out, const TColumn& col, int32_t row, const TTypeP
 
     const auto valueType = UnwrapNullableType(type);
     if (auto decimal = DecimalSpecOfValueType(valueType)) {
-        const auto formatted = FormatDecimal128(col.Data + row * 16, decimal->Scale);
+        const auto formatted = FormatDecimalCell(col, row, *decimal);
         out.write(formatted.data(), static_cast<std::streamsize>(formatted.size()));
         return;
     }

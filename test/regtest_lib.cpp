@@ -1059,6 +1059,10 @@ TValue Cell(const TColumn& column, int64_t row, const TTypePtr& type) {
     }
     const auto valueType = UnwrapNullableType(type);
     if (const auto decimal = DecimalSpecOfValueType(valueType)) {
+        if (DecimalStorageOf(*decimal) == EDecimalStorage::I64) {
+            const __int128 wide = reinterpret_cast<const int64_t*>(column.Data)[row];
+            return WideIntegerText(reinterpret_cast<const char*>(&wide), decimal->Scale);
+        }
         return WideIntegerText(column.Data + row * 16, decimal->Scale);
     }
     if (auto integer = TMaybeType<TIntegerType>(valueType)) {
