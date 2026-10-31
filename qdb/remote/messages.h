@@ -14,16 +14,17 @@ struct TPing {
     uint64_t TotalSlots = 0;
     uint64_t UsedSlots = 0;
     uint64_t CpuTime = 0;
+    bool Forwarded = false;
 };
 
 struct TSpawnComputeActor {
     static constexpr NNet::NActors::TMessageId MessageId = 101;
     uint32_t Count = 1;
+    bool Forwarded = false;
 };
 
 struct TSpawnComputeActorResponse {
     static constexpr NNet::NActors::TMessageId MessageId = 102;
-    uint32_t Count = 1;
     std::vector<NNet::NActors::TActorId> ActorIds;
 };
 

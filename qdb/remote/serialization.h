@@ -27,9 +27,10 @@ inline void DeserializeFromStream<TExecuteQueryResponse>(TExecuteQueryResponse& 
 template<>
 inline void SerializeToStream<TSpawnComputeActorResponse>(const TSpawnComputeActorResponse& obj, std::ostringstream& oss) {
     std::string buf;
-    buf.resize(sizeof(obj.Count) + obj.Count * obj.ActorIds.size());
+    uint32_t count = obj.ActorIds.size();
+    buf.resize(sizeof(count) + count * obj.ActorIds.size());
     char* ptr = (char*)buf.data();
-    memcpy(ptr, &obj.Count, sizeof(obj.Count)); ptr += obj.Count;
+    memcpy(ptr, &count, sizeof(count)); ptr += count;
     for (const auto& actorId : obj.ActorIds) {
         memcpy(ptr, &actorId, sizeof(actorId)); ptr += sizeof(actorId);
     }
@@ -41,9 +42,10 @@ inline void DeserializeFromStream<TSpawnComputeActorResponse>(TSpawnComputeActor
     const std::string& buf =  iss.str();
     const char* ptr = buf.data();
     // TODO: bound checks
-    memcpy(&obj.Count, ptr, sizeof(obj.Count)); ptr += sizeof(obj.Count);
-    obj.ActorIds.resize(obj.Count);
-    for (size_t i = 0; i < obj.Count; ++i) {
+    uint32_t count = 0;
+    memcpy(&count, ptr, sizeof(count)); ptr += sizeof(count);
+    obj.ActorIds.resize(count);
+    for (size_t i = 0; i < count; ++i) {
         memcpy(&obj.ActorIds[i], ptr, sizeof(obj.ActorIds[i])); ptr += sizeof(obj.ActorIds[i]);
     }
 }

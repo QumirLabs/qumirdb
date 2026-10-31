@@ -36,7 +36,6 @@ struct TLocalSchedulerActor : public IBehaviorActor {
                 actorIds.emplace_back(actorId);
             }
             ctx->Send<TSpawnComputeActorResponse>(ctx->Sender(), TSpawnComputeActorResponse {
-                .Count = request.Count,
                 .ActorIds = std::move(actorIds)
             });
         }
