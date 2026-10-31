@@ -3,13 +3,22 @@
   "fixtures": {
     "decimals": {"parquet_file": "tables/decimals.parquet"},
     "flba": {"json": "tables/layout.json", "parquet": {"row_group_rows": 2}},
-    "int64": {"json": "tables/layout.json", "parquet": {"row_group_rows": 2, "decimal_as_integer": true}}
+    "int64": {"json": "tables/layout.json", "parquet": {"row_group_rows": 2, "decimal_as_integer": true}},
+    "wide": {"json": "tables/wide.json", "parquet": {"row_group_rows": 3}},
+    "wide_dim": {"json": "tables/wide_dim.json"}
   },
-  "tables": {"t": "decimals", "a": "flba", "b": "int64"},
-  "variants": ["single", "threaded"],
+  "tables": {"w": "wide", "m": "wide_dim"},
+  "variants": ["single", "threaded", "js"],
   "cases": {
-    "order_limit.sql": {"order": "ordered"},
-    "filter_bounds.sql": {"order": "ordered"},
-    "layouts_agree.sql": {"order": "ordered"}
+    "order_limit.sql": {"order": "ordered", "tables": {"t": "decimals"}, "variants": ["single", "threaded"]},
+    "filter_bounds.sql": {"order": "ordered", "tables": {"t": "decimals"}, "variants": ["single", "threaded"]},
+    "layouts_agree.sql": {"order": "ordered", "tables": {"a": "flba", "b": "int64"}, "variants": ["single", "threaded"]},
+    "scan.sql": {"order": "ordered"},
+    "aggregates.sql": {"order": "ordered"},
+    "group_by.sql": {"order": "ordered"},
+    "join.sql": {"order": "ordered"},
+    "order_wide.sql": {"order": "ordered"},
+    "compare_literals.sql": {"order": "ordered"},
+    "casts.sql": {"order": "ordered"}
   }
 }

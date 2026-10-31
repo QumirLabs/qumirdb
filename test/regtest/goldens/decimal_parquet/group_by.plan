@@ -1,0 +1,4 @@
+sort [k asc, d2 asc]
+└─ project (k, d2, n, s10, lo10, hi10) (rows≈10 cost≈1.9K)
+   └─ aggregate keys=[w.k, w.d2] aggs=[count_0=count, sum_0=sum, min_0=min, max_0=max] (rows≈10 cost≈1.1K)
+      └─ source w AS w (rows≈10 cost≈360)

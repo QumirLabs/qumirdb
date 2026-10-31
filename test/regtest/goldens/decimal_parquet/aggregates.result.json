@@ -1,0 +1,6 @@
+{
+  "schema": "<struct (n i64) (c2 i64) (s2 <named Nullable [<named DECIMAL [38 2]>]>) (a2 <named Nullable [f64]>) (lo2 <named Nullable [<named DECIMAL [38 2]>]>) (hi2 <named Nullable [<named DECIMAL [38 2]>]>) (c10 i64) (s10 <named Nullable [<named DECIMAL [38 10]>]>) (a10 <named Nullable [f64]>) (lo10 <named Nullable [<named DECIMAL [38 10]>]>) (hi10 <named Nullable [<named DECIMAL [38 10]>]>)>",
+  "rows": [
+    ["10", "9", "100000000000000000001.49", 1.1111111111111111e+19, "-999999999999999999999999999999999999.99", "999999999999999999999999999999999999.99", "8", "0.5000000000", 0.0625, "-9999999999999999999999999999.9999999999", "9999999999999999999999999999.9999999999"]
+  ]
+}

@@ -1,0 +1,1 @@
+SELECT COUNT(*) AS n, COUNT(d2) AS c2, SUM(d2) AS s2, AVG(d2) AS a2, MIN(d2) AS lo2, MAX(d2) AS hi2, COUNT(d10) AS c10, SUM(d10) AS s10, AVG(d10) AS a10, MIN(d10) AS lo10, MAX(d10) AS hi10 FROM w;

@@ -1,0 +1,1 @@
+SELECT k, d2, COUNT(*) AS n, SUM(d10) AS s10, MIN(d10) AS lo10, MAX(d10) AS hi10 FROM w GROUP BY k, d2 ORDER BY k, d2;
