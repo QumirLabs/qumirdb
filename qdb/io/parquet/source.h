@@ -18,7 +18,7 @@ namespace arrow { class RecordBatchReader; class Schema; }
 
 namespace NQdb {
 
-class TDecimalColumnScan;
+class TParquetColumnScan;
 class TParquetSource;
 struct TParquetFileData;
 
@@ -111,7 +111,7 @@ private:
     std::vector<int> SelectedColumns_;
     struct TDecimalScan {
         size_t Position = 0;
-        std::unique_ptr<TDecimalColumnScan> Scan;
+        std::unique_ptr<TParquetColumnScan> Scan;
     };
     std::vector<TDecimalScan> DecimalScans_;
     std::shared_ptr<arrow::Schema> BatchSchema_;
