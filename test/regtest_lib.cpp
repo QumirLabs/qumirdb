@@ -1080,7 +1080,16 @@ TValue Cell(const TColumn& column, int64_t row, const TTypePtr& type) {
             case TIntegerType::U128: return WideIntegerText(column.Data + row * 16, 0, false);
         }
     }
-    if (TMaybeType<TFloatType>(valueType)) return FloatJson(reinterpret_cast<const double*>(column.Data)[row]);
+    if (auto floating = TMaybeType<TFloatType>(valueType)) {
+        if (floating.Cast()->BitWidth() == 32) {
+            // The shortest text of the f32 value keeps goldens as short as the printed result.
+            char text[64];
+            const auto printed = std::to_chars(text, text + sizeof(text),
+                reinterpret_cast<const float*>(column.Data)[row]);
+            return FloatJson(std::strtod(std::string(text, printed.ptr).c_str(), nullptr));
+        }
+        return FloatJson(reinterpret_cast<const double*>(column.Data)[row]);
+    }
     if (TMaybeType<TBoolType>(valueType)) {
         const auto bit = column.DataBitOffset + row;
         return (reinterpret_cast<const uint8_t*>(column.Data)[bit / 8] & (uint8_t{1} << (bit % 8))) != 0;
@@ -1241,6 +1250,10 @@ bool ResultsMatch(const TValue& actual, const TValue& expected, bool ordered, TF
 }
 
 } // namespace
+
+std::string CellJson(const NQdb::TColumn& column, int64_t row, const TTypePtr& type) {
+    return llvm::formatv("{0}", Cell(column, row, type)).str();
+}
 
 TComparison CompareResults(const std::string& actual, const std::string& expected,
     bool ordered, TFloatTolerance tol)

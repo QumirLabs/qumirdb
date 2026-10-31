@@ -253,6 +253,35 @@ TEST(RegResultComparison, NonFiniteTagsNullAndSignedZeroStayExact) {
         FloatResult(R"([[{"$float":"+inf"}]])")).Matches);
 }
 
+TEST(RegResultComparison, F32ColumnsFollowTheFloatRules) {
+    const auto nullable = "<struct (v <named Nullable [f32]>)>";
+    EXPECT_TRUE(NRegTest::CompareResults(FloatResult("[[0.1],[16777216]]", "<struct (v f32)>"),
+        FloatResult("[[0.1],[16777216]]", "<struct (v f32)>")).Matches);
+    const auto special = FloatResult(
+        R"([[{"$float":"nan"}],[{"$float":"+inf"}],[{"$float":"-0"}],[null]])", nullable);
+    EXPECT_TRUE(NRegTest::CompareResults(special, special).Matches);
+    EXPECT_FALSE(NRegTest::CompareResults(FloatResult("[[0]]", nullable),
+        FloatResult(R"([[{"$float":"-0"}]])", nullable)).Matches);
+    // The schema is part of the result: f32 does not match f64.
+    EXPECT_FALSE(NRegTest::CompareResults(FloatResult("[[1]]", "<struct (v f32)>"),
+        FloatResult("[[1]]")).Matches);
+}
+
+// An f32 cell is the double nearest to its shortest text, so it stores as the f64 cell
+// of that text; the widened float (0.10000000149...) would not.
+TEST(RegResultComparison, F32CellPrintsTheShortestFloatText) {
+    const float floats[] = {0.1f, 16777216.0f};
+    const double doubles[] = {0.1, 16777216.0};
+    NQdb::TColumn f32Column{.Data = reinterpret_cast<char*>(const_cast<float*>(floats))};
+    NQdb::TColumn f64Column{.Data = reinterpret_cast<char*>(const_cast<double*>(doubles))};
+    const auto f32 = std::make_shared<NQumir::NAst::TFloatType>(NQumir::NAst::TFloatType::F32);
+    const auto f64 = std::make_shared<NQumir::NAst::TFloatType>(NQumir::NAst::TFloatType::F64);
+    for (int64_t row = 0; row < 2; ++row) {
+        EXPECT_EQ(NRegTest::CellJson(f32Column, row, f32), NRegTest::CellJson(f64Column, row, f64));
+    }
+    EXPECT_EQ(NRegTest::CellJson(f32Column, 1, f32), "16777216");
+}
+
 TEST(RegResultComparison, OtherTypesAndSchemasStayExact) {
     const auto integer = R"({"schema":"<struct (v u64)>","rows":[["9007199254740993"]]})";
     const auto different = R"({"schema":"<struct (v u64)>","rows":[["9007199254740992"]]})";

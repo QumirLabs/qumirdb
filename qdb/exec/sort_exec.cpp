@@ -3,6 +3,7 @@
 #include <qdb/exec/kernel_rowset.h>
 #include <qdb/exec/sort_key_ops.h>
 #include <qdb/modules/qumirdb_runtime.h>
+#include <qdb/kernel/column_value.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 
@@ -165,6 +166,9 @@ int CompareValues(const TColumn& left, int32_t leftRow,
         }
     }
     if (TMaybeType<TFloatType>(valueType)) {
+        if (NKernel::FixedValueWidth(valueType) == sizeof(float)) {
+            return CompareScalar(Load<float>(left, leftRow), Load<float>(right, rightRow));
+        }
         return CompareScalar(Load<double>(left, leftRow), Load<double>(right, rightRow));
     }
     if (TMaybeType<TBoolType>(valueType)) {
@@ -239,23 +243,14 @@ bool SortRowsLess(const TRowStore& store, const std::vector<TSortKey>& keys,
     return false;
 }
 
+// Bool is bit-packed and strings use offsets, so neither has a fixed value width here.
 size_t SortColumnFixedWidth(const TTypePtr& type) {
-    if (HasBinIntLayout(type)) {
-        return sizeof(qdb_bin_int);
-    }
-
-    auto valueType = PhysicalValueType(type);
-    if (auto integer = TMaybeType<TIntegerType>(valueType)) {
-        return static_cast<size_t>(integer.Cast()->BitWidth() / 8);
-    }
-    if (TMaybeType<TFloatType>(valueType)) {
-        return 8;
-    }
-    if (TMaybeType<TBoolType>(valueType)) {
+    const auto valueType = PhysicalValueType(type);
+    if (TMaybeType<TBoolType>(valueType) || TMaybeType<TStringType>(valueType)) {
         return 0;
     }
-    if (TMaybeType<TStringType>(valueType)) {
-        return 0;
+    if (const auto width = NKernel::FixedValueWidth(type)) {
+        return static_cast<size_t>(width);
     }
     throw std::runtime_error(
         "sort: unsupported output column type " +

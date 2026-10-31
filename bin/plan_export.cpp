@@ -1870,7 +1870,7 @@ llvm::json::Object CoreTypeJson(const NQumir::NAst::TTypePtr& type) {
     if (auto integer = TMaybeType<TIntegerType>(inner)) {
         name = integer.Cast()->ToString();
     } else if (TMaybeType<TFloatType>(inner)) {
-        name = "f64";
+        name = inner->ToString();
     } else if (TMaybeType<TBoolType>(inner)) {
         name = "bool";
     } else if (TMaybeType<TStringType>(inner)) {
