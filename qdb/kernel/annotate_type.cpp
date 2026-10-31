@@ -864,15 +864,38 @@ TTypePtr DecimalBinaryValueType(TOperator op, const TExprPtr& le, const TExprPtr
 
 TTypePtr InferType(const TExprPtr& e, const TStructType& schema);
 
+// Arithmetic of fractional literals, integers and decimals: PostgreSQL types it NUMERIC, qdb
+// DOUBLE. A REAL or DOUBLE operand makes it a float in both, so it is not NUMERIC.
+bool IsNumericArithmetic(const TExprPtr& e, const TStructType& schema) {
+    if (IsFloatLiteral(e)) {
+        return true;
+    }
+    if (auto un = TMaybeNode<TUnaryExpr>(e)) {
+        return un.Cast()->Operator == "-" && IsNumericArithmetic(un.Cast()->Operand, schema);
+    }
+    if (auto bin = TMaybeNode<TBinaryExpr>(e)) {
+        const TOperator op = bin.Cast()->Operator;
+        return (op == "+" || op == "-" || op == "*" || op == "/" || op == "%")
+            && IsNumericArithmetic(bin.Cast()->Left, schema)
+            && IsNumericArithmetic(bin.Cast()->Right, schema);
+    }
+    const TTypePtr value = ValueType(InferType(e, schema));
+    return value && (DecimalSpecOfValueType(value) || IsInt(UnwrapNamedType(value)));
+}
+
 // Whether PostgreSQL converts the value to REAL in a common type (CASE, COALESCE, IN list):
-// a NULL, an integer, a decimal, a REAL, a fractional literal (qdb types it DOUBLE,
-// PostgreSQL NUMERIC), or a CASE of such values. Without the schema only literals are told.
+// a NULL, an integer, a decimal, a REAL, a fractional literal or arithmetic of
+// them (qdb types it DOUBLE, PostgreSQL NUMERIC), or a CASE of such values. Without the
+// schema only literals are told.
 bool AbsorbedByReal(const TExprPtr& e, const TStructType* schema) {
     if (!e || IsNullLiteral(e) || IsFloatLiteral(e)) {
         return true;
     }
     if (!schema) {
         return false;
+    }
+    if (IsNumericArithmetic(e, *schema)) {
+        return true;
     }
     if (auto ifp = TMaybeNode<TIfExpr>(e)) {
         return AbsorbedByReal(ifp.Cast()->Then, schema) && AbsorbedByReal(ifp.Cast()->Else, schema);

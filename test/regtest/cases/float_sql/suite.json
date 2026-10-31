@@ -19,6 +19,7 @@
     "order_desc.sql": {"order": "ordered"},
     "aggregate.sql": {"order": "ordered"},
     "aggregate_group.sql": {"order": "ordered"},
+    "aggregate_having.sql": {"order": "ordered"},
     "window.sql": {"order": "ordered"},
     "union_int.sql": {"order": "ordered"},
     "union_double.sql": {"order": "ordered"}
