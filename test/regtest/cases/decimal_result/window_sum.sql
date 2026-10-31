@@ -1,0 +1,1 @@
+SELECT id, sum(CAST(a AS DECIMAL(10,2))) OVER (ORDER BY id) AS running, sum(CAST(a AS DECIMAL(10,2))) OVER (PARTITION BY id % 2) AS part FROM t ORDER BY id;

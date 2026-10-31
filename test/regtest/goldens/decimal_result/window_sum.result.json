@@ -1,0 +1,10 @@
+{
+  "schema": "<struct (id i32) (running <named Nullable [<named DECIMAL [38 2]>]>) (part <named Nullable [<named DECIMAL [38 2]>]>)>",
+  "rows": [
+    [1, "150.00", "150.00"],
+    [2, "375.00", "218.00"],
+    [3, "375.00", "150.00"],
+    [4, "368.00", "218.00"],
+    [5, "368.00", "150.00"]
+  ]
+}

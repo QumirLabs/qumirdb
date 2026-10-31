@@ -889,11 +889,6 @@ TWindowRuntimeProcess BuildWindowRuntimeProcess(
         auto integer = TMaybeType<TIntegerType>(inner);
         const bool isInteger = static_cast<bool>(integer);
         const bool isFloat = static_cast<bool>(TMaybeType<TFloatType>(inner));
-        auto wrapNullable = [&](TTypePtr type) -> TTypePtr {
-            return IsNullableType(argType)
-                ? std::make_shared<TNullable>(std::move(type))
-                : type;
-        };
         if (fn.Func == "avg") {
             if (!window.OrderKeys().empty()) {
                 throw std::runtime_error(
@@ -919,9 +914,7 @@ TWindowRuntimeProcess BuildWindowRuntimeProcess(
             funcs.push_back({
                 .Func = ordered ? "sum_prefix" : "sum_partition",
                 .ArgColumn = idx,
-                .ResultType = isInteger
-                    ? wrapNullable(std::make_shared<TIntegerType>())
-                    : inputStruct->Fields[idx].second,
+                .ResultType = AggregateResultType("sum", argType),
                 .PeerInclusive = ordered && framePeerInclusive(),
             });
             continue;
