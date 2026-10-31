@@ -2,6 +2,7 @@
 
 #include <qdb/kernel/compiler.h>
 #include <qdb/exec/instrumentation/operator.h>
+#include <qdb/exec/unary_process.h>
 
 #include <array>
 #include <cstdint>
@@ -46,6 +47,12 @@ public:
     void Add(TRowSet& rowSet);
     void SetInstrumentation(TOperatorInstrumentation* instrumentation);
     bool Finish(TRowSet& rowSet);
+    // The groups the table holds.
+    int64_t Groups() const;
+    // Finalizes the groups so far into rowSet and starts an empty table, so the
+    // processor keeps accepting rows. False, with nothing emitted, when the table
+    // holds no groups.
+    bool Flush(TRowSet& rowSet);
 
 private:
     void EnsureInit();
@@ -82,6 +89,57 @@ private:
     std::vector<int32_t> SetIdBuf_;
     std::vector<uint8_t> NullMask_;
     std::vector<TColumn> Cols_;
+};
+
+// When a partial aggregate stops hashing and when it empties its table.
+struct TPartialAggregatePolicy {
+    // Input rows the table absorbs before its reduction is judged.
+    uint64_t SampleRows = 128 * 1024;
+    // Rows per group below which hashing does not pay for itself: the
+    // remaining rows pass through as single-row partial states.
+    uint64_t MinReduction = 8;
+    // Groups at which the table emits its groups and restarts empty.
+    int64_t MaxGroups = 1 << 20;
+};
+
+// The partial phase of a grouped aggregate cascade: a bounded table that
+// reduces one lane's rows before the exchange (Larson, ICDE 2002). It watches
+// its own reduction, and once hashing stops paying for itself it converts the
+// rows to partial states instead (passThrough), which the final phase merges
+// like any other partial output. Without a passThrough it only bounds the
+// table.
+class TPartialAggregateProcessor {
+public:
+    TPartialAggregateProcessor(
+        TAggregateKernels kernels,
+        TAggregateTablePlan plan,
+        TPartialAggregatePolicy policy,
+        TUnaryStreamProcess passThrough);
+    ~TPartialAggregateProcessor();
+
+    TPartialAggregateProcessor(const TPartialAggregateProcessor&) = delete;
+    TPartialAggregateProcessor& operator=(const TPartialAggregateProcessor&) = delete;
+
+    // Consumes rowSet; Next then yields what the batch made ready.
+    void Add(TRowSet& rowSet);
+    // The partial states ready to emit: the groups of a table that was emptied,
+    // or a batch that passed through.
+    bool Next(TRowSet& rowSet);
+    // The groups still in the table; false when it has none.
+    bool Finish(TRowSet& rowSet);
+    bool PassesThrough() const { return PassingThrough_; }
+    void SetInstrumentation(TOperatorInstrumentation* instrumentation);
+
+private:
+    TAggregateProcessor Table_;
+    TPartialAggregatePolicy Policy_;
+    TUnaryStreamProcess PassThrough_;
+    TUnaryStreamingKernelState PassThroughState_;
+    uint64_t HashedRows_ = 0;
+    uint64_t EmittedGroups_ = 0;
+    bool PassingThrough_ = false;
+    bool HasPending_ = false;
+    TRowSet Pending_{};
 };
 
 } // namespace NQdb

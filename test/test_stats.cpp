@@ -527,6 +527,69 @@ TEST(StatsTest, PartialAggregateRequiresLargeEstimatedReduction) {
         usefulAggregate, settings));
 }
 
+TEST(StatsTest, PartialAggregateWithoutUsableEstimateDecidesAtRunTime) {
+    NQdb::NScheduler::TSettings settings;
+
+    // No statistics for the key: the partial aggregate judges its reduction.
+    TStatsSource unknown({{"x", 10'000'000}}, 100'000'000);
+    auto unknownInput = std::make_shared<NQdb::TSourceOperator>(unknown, "t");
+    unknownInput->Stats_ = unknown.Stats_;
+    NQdb::TAggregateOperator unknownAggregate(unknownInput, {"y"}, {});
+    EXPECT_TRUE(NQdb::NScheduler::ShouldUsePartialAggregate(
+        unknownAggregate, settings));
+
+    // The product of two key NDVs reaches the row count: an estimate, so the
+    // plan rule decides, and it promises no reduction.
+    TStatsSource saturated({{"x", 11'000'000}, {"y", 11'000'000}}, 100'000'000);
+    auto saturatedInput = std::make_shared<NQdb::TSourceOperator>(saturated, "t");
+    saturatedInput->Stats_ = saturated.Stats_;
+    NQdb::TAggregateOperator saturatedAggregate(saturatedInput, {"x", "y"}, {});
+    EXPECT_FALSE(NQdb::NScheduler::ShouldUsePartialAggregate(
+        saturatedAggregate, settings));
+
+    // One key with as many values as rows is a unique key: nothing to reduce.
+    TStatsSource unique({{"x", 100'000'000}}, 100'000'000);
+    auto uniqueInput = std::make_shared<NQdb::TSourceOperator>(unique, "t");
+    uniqueInput->Stats_ = unique.Stats_;
+    NQdb::TAggregateOperator uniqueAggregate(uniqueInput, {"x"}, {});
+    EXPECT_FALSE(NQdb::NScheduler::ShouldUsePartialAggregate(
+        uniqueAggregate, settings));
+
+    // The groups are at least those of the keys with statistics, whatever the
+    // key without them adds, so their estimate rules the partial out on its own.
+    TStatsSource wideKey({{"x", 30'000'000}}, 100'000'000);
+    auto wideKeyInput = std::make_shared<NQdb::TSourceOperator>(wideKey, "t");
+    wideKeyInput->Stats_ = wideKey.Stats_;
+    NQdb::TAggregateOperator wideKeyAggregate(wideKeyInput, {"x", "y"}, {});
+    EXPECT_FALSE(NQdb::NScheduler::ShouldUsePartialAggregate(
+        wideKeyAggregate, settings));
+    TStatsSource widePair({{"x", 20'000}, {"y", 20'000}}, 100'000'000);
+    auto widePairInput = std::make_shared<NQdb::TSourceOperator>(widePair, "t");
+    widePairInput->Stats_ = widePair.Stats_;
+    NQdb::TAggregateOperator widePairAggregate(widePairInput, {"x", "y", "z"}, {});
+    EXPECT_FALSE(NQdb::NScheduler::ShouldUsePartialAggregate(
+        widePairAggregate, settings));
+    // A narrow known part leaves the decision to the partial phase.
+    TStatsSource narrowKey({{"x", 10}}, 100'000'000);
+    auto narrowKeyInput = std::make_shared<NQdb::TSourceOperator>(narrowKey, "t");
+    narrowKeyInput->Stats_ = narrowKey.Stats_;
+    NQdb::TAggregateOperator narrowKeyAggregate(narrowKeyInput, {"x", "y"}, {});
+    EXPECT_TRUE(NQdb::NScheduler::ShouldUsePartialAggregate(
+        narrowKeyAggregate, settings));
+
+    // A small input is not worth a second phase whatever its keys.
+    TStatsSource small({{"x", 10}}, 1000);
+    auto smallInput = std::make_shared<NQdb::TSourceOperator>(small, "t");
+    smallInput->Stats_ = small.Stats_;
+    NQdb::TAggregateOperator smallAggregate(smallInput, {"y"}, {});
+    EXPECT_FALSE(NQdb::NScheduler::ShouldUsePartialAggregate(
+        smallAggregate, settings));
+
+    settings.Aggregate.EnablePartial = false;
+    EXPECT_FALSE(NQdb::NScheduler::ShouldUsePartialAggregate(
+        unknownAggregate, settings));
+}
+
 TEST(StatsTest, AggregateCombineOperatorMergesPartialStates) {
     TStatsSource src({{"k", 10}, {"v", 100}}, 1000);
     auto input = std::make_shared<NQdb::TSourceOperator>(src, "t");

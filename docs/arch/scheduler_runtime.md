@@ -175,8 +175,10 @@ flowchart LR
     F1 --> Parent
 ```
 
-The scheduler selects this plan only when the input has at least 1,048,576
-rows. Statistics must also show at least 8x fewer groups than rows. Each partial
+The scheduler selects this plan when the input has at least 1,048,576 rows and
+the keys with statistics do not estimate fewer than 8x fewer groups than rows;
+when no key has statistics the partial phase judges its reduction at run time
+([aggregation.md](aggregation.md#adaptive-partial-phase)). Each partial
 lane builds local groups before it sends rows to the exchange. The final phase
 merges partial states. It changes `count` to `sum`. It keeps `sum`, `min`, and
 `max` as they are. All lanes in one phase use the same compiled code object.
