@@ -1,0 +1,5 @@
+project (col0) (rows≈1 cost≈3.5K)
+└─ aggregate keys=[__group__] aggs=[count_0=count] (rows≈1 cost≈3.5K)
+   └─ project (__group__) (rows≈13 cost≈3.3K)
+      └─ filter (&& (&& (!= |texts.flag| 0) (!= |texts.body| (cast "" <named StringView>))) (!= |texts.tag| (cast "" <named StringView>))) (rows≈13 cost≈3.2K)
+         └─ source texts AS texts row-groups (&& (&& (!= |texts.body| (cast "" <named StringView>)) (!= |texts.flag| 0)) (!= |texts.tag| (cast "" <named StringView>))) (rows≈40 cost≈1.6K)

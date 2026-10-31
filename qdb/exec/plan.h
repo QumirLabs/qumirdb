@@ -14,6 +14,8 @@ namespace NQdb {
 
 enum class EExecPlanNodeKind {
     Source,
+    // A filter chain fused into its Parquet source (staged scan); Operator is the top filter.
+    StagedScan,
     Filter,
     RuntimeFilter,
     Project,
@@ -49,6 +51,7 @@ inline std::string_view AggregatePhaseName(EAggregatePhase phase) {
 inline std::string_view ExecPlanNodeKindName(EExecPlanNodeKind kind) {
     switch (kind) {
         case EExecPlanNodeKind::Source: return "source";
+        case EExecPlanNodeKind::StagedScan: return "staged-scan";
         case EExecPlanNodeKind::Filter: return "filter";
         case EExecPlanNodeKind::RuntimeFilter: return "runtime-filter";
         case EExecPlanNodeKind::Project: return "project";

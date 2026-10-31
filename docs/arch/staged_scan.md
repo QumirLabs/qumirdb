@@ -38,11 +38,10 @@ in stage 0, then each wide column in the order of its cost.
 - A batch no row of which passes is not emitted; the later columns skip its
   rows.
 
-A page that reaches past the batch is read, as the next batch may need it. On
-ClickBench `hits` a URL page holds about 13,000 rows: in q21, 13% of the rows
-pass `SearchPhrase <> ''` and they still touch almost every URL page, so the
-saving there is the copy; in q22 the rows left after `Title LIKE` touch 27% of
-the URL pages.
+A page that reaches past the batch is read, as the next batch may need it.
+Skipping pages pays off when the rows that pass are few or clustered; rows
+scattered over every page still need every page decompressed, and the saving
+is then the copy of the values.
 
 The staged scan applies to a chain of filters over one Parquet source when a
 wide column is left after stage 0, to filter or to carry, and the scan has at

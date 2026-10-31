@@ -2,7 +2,8 @@
   "version": 1,
   "fixtures": {
     "values": {"json": "tables/t.json", "parquet": {"row_group_rows": 2}},
-    "pairs": {"json": "tables/s.json"}
+    "pairs": {"json": "tables/s.json"},
+    "texts": {"json": "tables/texts.json", "parquet": {"row_group_rows": 4}}
   },
   "tables": {"t": "values", "s": "pairs"},
   "variants": ["single", "threaded", "js"],
@@ -19,6 +20,12 @@
     "select_not_null.sql": {"order": "ordered"},
     "where_null_is_null.sql": {"order": "ordered"},
     "where_null_is_not_null.sql": {"order": "ordered"},
-    "select_null_is_null.sql": {"order": "ordered"}
+    "select_null_is_null.sql": {"order": "ordered"},
+    "staged_scan.sql": {"order": "ordered", "tables": {"texts": "texts"}},
+    "staged_scan_instrumented.sql": {
+      "tables": {"texts": "texts"},
+      "variants": ["single", "threaded"],
+      "settings": ["instrumentation:operators=true"]
+    }
   }
 }

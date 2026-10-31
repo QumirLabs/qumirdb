@@ -176,7 +176,9 @@ private:
 
     static size_t Arity(EExecPlanNodeKind kind) {
         switch (kind) {
-            case EExecPlanNodeKind::Source: return 0;
+            case EExecPlanNodeKind::Source:
+            case EExecPlanNodeKind::StagedScan:
+                return 0;
             case EExecPlanNodeKind::Join:
             case EExecPlanNodeKind::CrossJoin:
                 return 2;
@@ -306,6 +308,18 @@ private:
                     *const_cast<TSourceOperator*>(
                         static_cast<const TSourceOperator*>(stage.Operator)));
                 break;
+            case EExecPlanNodeKind::StagedScan: {
+                auto* filter = static_cast<const TFilterOperator*>(stage.Operator);
+                auto input = filter->Input();
+                while (auto nested = TMaybeOp<TFilterOperator>(input)) {
+                    input = nested.Cast()->Input();
+                }
+                auto columnPlan = BuildFilterColumnPlan(
+                    *filter, BuildSourceRuntimeType(*TMaybeOp<TSourceOperator>(input).Cast()));
+                outputType = std::move(columnPlan.OutputType);
+                keptColumns = std::move(columnPlan.KeptInputColumns);
+                break;
+            }
             case EExecPlanNodeKind::Filter: {
                 auto* filter = static_cast<const TFilterOperator*>(stage.Operator);
                 auto columnPlan = BuildFilterColumnPlan(

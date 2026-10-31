@@ -56,6 +56,8 @@ struct TQueryCase {
     // The case must fail: planning errors in the .plan golden, running errors in
     // the .error golden. A success is reported as a failure of the case.
     bool ExpectError = false;
+    // Engine settings of the case, `section:key=value`, after those of the run.
+    std::vector<std::string> Settings;
 
     bool HasTables() const { return !Tables.empty(); }
 };

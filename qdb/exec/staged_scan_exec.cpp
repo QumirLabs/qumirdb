@@ -12,7 +12,9 @@ namespace {
 // Owns the scanned batch and its selection while the batch is downstream.
 struct TStagedBatchData {
     ~TStagedBatchData() {
-        Release(&Input);
+        if (Input.Destroy) {
+            Release(&Input);
+        }
     }
 
     TRowSet Input = {};
@@ -51,8 +53,9 @@ TStagedScan::~TStagedScan() = default;
 bool TStagedScan::Next(TRowSet& rowSet) {
     const auto& stages = Plan_->Stages;
     const size_t groups = stages.size() + (Plan_->Payload ? 1 : 0);
+    // Reused while batches come out empty.
+    auto data = std::make_unique<TStagedBatchData>();
     for (;;) {
-        auto data = std::make_unique<TStagedBatchData>();
         if (!Scan_->Next(data->Input)) {
             return false;
         }
@@ -75,6 +78,8 @@ bool TStagedScan::Next(TRowSet& rowSet) {
             for (; group < groups; ++group) {
                 Scan_->Skip(group);
             }
+            Release(&data->Input);
+            data->Input = {};
             continue;
         }
         if (Plan_->Payload) {

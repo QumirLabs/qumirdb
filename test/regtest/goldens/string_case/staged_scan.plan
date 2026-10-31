@@ -1,4 +1,0 @@
-sort [k asc]
-└─ project (k, t) (rows≈6 cost≈1.3K)
-   └─ filter (&& (== (% |t.k| 3) 1) (!= |t.s| (cast "abc" <named StringView>))) (rows≈6 cost≈1.1K)
-      └─ source t AS t row-groups (&& (== (% |t.k| 3) 1) (!= |t.s| (cast "abc" <named StringView>))) (rows≈14 cost≈560)

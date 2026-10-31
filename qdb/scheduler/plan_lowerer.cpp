@@ -1347,8 +1347,7 @@ private:
             }
         }
 
-        // One stage: the scan task also runs the filter kernels.
-        const auto execStageId = NewExecStage(source.get(), EExecPlanNodeKind::Source);
+        const auto execStageId = NewExecStage(filter.get(), EExecPlanNodeKind::StagedScan);
         const auto stageLabel = StageLabel("staged-scan", execStageId);
         auto plan = std::make_shared<TStagedScanPlan>();
         {
@@ -1392,7 +1391,7 @@ private:
                         std::move(state),
                         NScheduler::TOutputPort{.Connection = &conn, .Lane = lane + laneOffset});
                     auto& node = Graph_.AddOwnedNode(std::move(task));
-                    MarkNode(node, "source", execStageId, label, execStageId);
+                    MarkNode(node, "staged-scan", execStageId, label, execStageId);
                     result.Producers.push_back(&node);
                 }
                 return result;
