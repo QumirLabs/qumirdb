@@ -1,0 +1,33 @@
+SELECT 'scale' AS k, count(*) AS c FROM (SELECT CAST(id AS DECIMAL(10,2)) AS a FROM t) x
+  JOIN (SELECT CAST(id AS DECIMAL(10,3)) AS b FROM t) y ON x.a = y.b
+UNION ALL
+SELECT 'integer_match', count(*) FROM (SELECT CAST(id AS DECIMAL(10,2)) AS a FROM t) x
+  JOIN (SELECT id AS b FROM t) y ON x.a = y.b
+UNION ALL
+SELECT 'integer_mismatch', count(*) FROM (SELECT CAST(id AS DECIMAL(10,2)) AS a FROM t) x
+  JOIN (SELECT id * 100 AS b FROM t) y ON x.a = y.b
+UNION ALL
+SELECT 'wide', count(*) FROM (SELECT CAST(id AS DECIMAL(10,2)) AS a FROM t) x
+  JOIN (SELECT CAST(id AS DECIMAL(30,2)) AS b FROM t) y ON x.a = y.b
+UNION ALL
+SELECT 'intersect', count(*) FROM
+  (SELECT CAST(id AS DECIMAL(10,2)) AS a FROM t INTERSECT SELECT id FROM t) z
+UNION ALL
+SELECT 'except', count(*) FROM
+  (SELECT CAST(id AS DECIMAL(10,2)) AS a FROM t EXCEPT SELECT id FROM t WHERE id > 2) z
+UNION ALL
+SELECT 'in', count(*) FROM t WHERE CAST(id AS DECIMAL(10,3)) IN (SELECT CAST(id AS DECIMAL(30,2)) FROM t WHERE id < 4)
+UNION ALL
+SELECT 'null_key', count(*) FROM (SELECT CAST(a AS DECIMAL(10,2)) AS k FROM t) x
+  JOIN (SELECT CAST(a AS DECIMAL(10,3)) AS k FROM t) y ON x.k = y.k
+UNION ALL
+SELECT 'composite', count(*) FROM (SELECT CAST(a AS DECIMAL(10,2)) AS k, id AS i FROM t) x
+  JOIN (SELECT CAST(a AS DECIMAL(10,3)) AS k, CAST(id AS BIGINT) AS i FROM t) y ON x.k = y.k AND x.i = y.i
+UNION ALL
+SELECT 'left_join', count(y.b) FROM (SELECT CAST(id AS DECIMAL(10,2)) AS a FROM t) x
+  LEFT JOIN (SELECT CAST(id AS DECIMAL(10,3)) AS b FROM t WHERE id < 3) y ON x.a = y.b
+UNION ALL
+SELECT 'not_in', count(*) FROM t WHERE CAST(id AS DECIMAL(10,2)) NOT IN (SELECT CAST(id AS DECIMAL(30,3)) FROM t WHERE id < 3)
+UNION ALL
+SELECT 'not_exists', count(*) FROM t x WHERE NOT EXISTS (SELECT 1 FROM t y WHERE y.id < 3 AND CAST(y.id AS DECIMAL(30,3)) = CAST(x.id AS DECIMAL(10,2)))
+ORDER BY k;
