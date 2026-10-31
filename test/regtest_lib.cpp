@@ -270,6 +270,7 @@ std::shared_ptr<arrow::DataType> ArrowType(const TTypePtr& type) {
     }
     if (TMaybeType<TBoolType>(type)) return arrow::boolean();
     if (TMaybeType<TStringType>(type)) return arrow::utf8();
+    if (const auto decimal = DecimalSpecOfValueType(type)) return arrow::decimal128(decimal->Precision, decimal->Scale);
     throw std::runtime_error("unsupported fixture type '" + NCore::PrintType(type) + "'");
 }
 
@@ -354,6 +355,16 @@ void Append(arrow::ArrayBuilder& builder, const TValue& value) {
             throw std::runtime_error("invalid bool value");
         case arrow::Type::STRING:
             return CheckArrow(static_cast<arrow::StringBuilder&>(builder).Append(String(value)));
+        case arrow::Type::DECIMAL128: {
+            // A decimal cell is a string: a double cannot hold 38 digits.
+            const auto& type = static_cast<const arrow::Decimal128Type&>(*builder.type());
+            arrow::Decimal128 decimal;
+            int32_t precision = 0, scale = 0;
+            CheckArrow(arrow::Decimal128::FromString(String(value), &decimal, &precision, &scale));
+            decimal = ArrowValue(decimal.Rescale(scale, type.scale()));
+            if (!decimal.FitsInPrecision(type.precision())) throw std::runtime_error("decimal out of range");
+            return CheckArrow(static_cast<arrow::Decimal128Builder&>(builder).Append(decimal));
+        }
         default: throw std::runtime_error("unsupported Arrow fixture type");
     }
 }
@@ -729,6 +740,7 @@ struct TSuite {
         fs::path Parquet;
         fs::path PreparedPath;
         int64_t RowGroupRows = 128;
+        bool DecimalAsInteger = false;
         std::shared_ptr<TParquetFile> File;
         std::string Error;
     };
@@ -738,7 +750,7 @@ struct TSuite {
     std::map<std::string, TFixture> Fixtures;
     std::map<fs::path, std::shared_ptr<arrow::Table>> Parsed;
     // Same input/layout, even under two fixture names, shares a generated file.
-    std::map<std::pair<fs::path, int64_t>, std::pair<fs::path, std::shared_ptr<TParquetFile>>> Files;
+    std::map<std::tuple<fs::path, int64_t, bool>, std::pair<fs::path, std::shared_ptr<TParquetFile>>> Files;
     std::map<fs::path, TValue> Canonized;
     std::map<fs::path, std::string> CanonizedPlans;
     std::map<fs::path, std::string> CanonizedErrors;
@@ -755,7 +767,7 @@ struct TSuite {
                 if (traceFixtures) std::cerr << "[regtest-fixture] opened " << fixture.Parquet << '\n';
                 return;
             }
-            const auto identity = std::make_pair(fixture.Json, fixture.RowGroupRows);
+            const auto identity = std::make_tuple(fixture.Json, fixture.RowGroupRows, fixture.DecimalAsInteger);
             auto& [path, file] = Files[identity];
             if (!file) {
                 auto& table = Parsed[fixture.Json];
@@ -770,6 +782,7 @@ struct TSuite {
                 properties.compression(parquet::Compression::UNCOMPRESSED);
                 properties.disable_dictionary();
                 properties.enable_statistics();
+                if (fixture.DecimalAsInteger) properties.enable_store_decimal_as_integer();
                 auto writer = ArrowValue(parquet::arrow::FileWriter::Open(*table->schema(),
                     arrow::default_memory_pool(), output, properties.build()));
                 if (const auto& metadata = table->schema()->metadata()) {
@@ -844,10 +857,11 @@ std::vector<TQueryCase> CollectCases(const fs::path& root, const fs::path& golde
                     definition.Parquet = File(dir, *parquetFile);
                 }
                 if (auto* options = fixture.getObject("parquet")) {
-                    Fields(*options, {"row_group_rows"});
+                    Fields(*options, {"row_group_rows", "decimal_as_integer"});
                     auto size = Required(*options, "row_group_rows").getAsInteger();
                     if (!size || *size <= 0) throw std::runtime_error("row_group_rows must be positive");
                     definition.RowGroupRows = *size;
+                    definition.DecimalAsInteger = BoolOption(*options, "decimal_as_integer", false);
                 } else if (fixture.get("parquet")) {
                     throw std::runtime_error("parquet options must be an object");
                 }

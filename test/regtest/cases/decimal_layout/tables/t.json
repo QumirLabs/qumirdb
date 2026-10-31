@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "schema": "<struct (id i32) (v <named Nullable [<named DECIMAL [18 2]>]>)>",
+  "stats": "footer",
+  "rows": [
+    [1, "0.01"],
+    [2, "-9999999999999999.99"],
+    [3, null],
+    [4, "9999999999999999.99"]
+  ]
+}
