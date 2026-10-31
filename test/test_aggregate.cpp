@@ -32,14 +32,17 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstdlib>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <map>
 #include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -1345,6 +1348,151 @@ TEST(AggregateE2E, MixedI32F64CompositeKeyPreservesLayoutAndTypedColumns) {
         EXPECT_EQ(outCounts[i], it->second.first);
         EXPECT_EQ(outSums[i], it->second.second);
     }
+    Release(&result);
+}
+
+TEST(AggregateE2E, ScalarF32KeyCanonicalizesSignedZeroAndNaN) {
+    const float nan1 = std::numeric_limits<float>::quiet_NaN();
+    const float nan2 = std::bit_cast<float>(UINT32_C(0x7f800001));
+    std::vector<float> keys = {
+        0.0f, -0.0f, 1.5f, -2.25f, 3.0f, 1.5f, -2.25f, nan1, nan2, 4.5f};
+    std::vector<int64_t> values = {5, 7, 11, 13, 17, 3, -2, 31, 37, 19};
+    std::vector<TColumn> columns = {
+        TColumn{.Data = reinterpret_cast<char*>(keys.data())},
+        TColumn{.Data = reinterpret_cast<char*>(values.data())},
+    };
+    std::vector<TRowSet> batches = {TRowSet{
+        .Columns = columns.data(),
+        .ColumnCount = 2,
+        .RowCount = static_cast<int64_t>(keys.size()),
+        .RefCount = 1,
+    }};
+    NQdb::TMockSource source(
+        {"k", "v"}, std::move(batches),
+        {std::make_shared<TFloatType>(TFloatType::F32),
+         std::make_shared<TIntegerType>(TIntegerType::I64)});
+    auto root = ParsePlan(
+        "(rel aggregate (rel source \"data.parquet\") (keys k) "
+        "(agg c count) (agg s sum v))",
+        source);
+    auto runtime = RunPlan(root);
+
+    auto canonicalBits = [](float value) {
+        const uint32_t bits = std::bit_cast<uint32_t>(value);
+        if ((bits & 0x7fffffffu) == 0) {
+            return uint32_t{0};
+        }
+        if ((bits & 0x7f800000u) == 0x7f800000u && (bits & 0x007fffffu) != 0) {
+            return uint32_t{0x7fc00000};
+        }
+        return bits;
+    };
+    std::map<uint32_t, std::pair<int64_t, int64_t>> reference;
+    for (size_t i = 0; i < keys.size(); ++i) {
+        auto& state = reference[canonicalBits(keys[i])];
+        state.first += 1;
+        state.second += values[i];
+    }
+
+    TRowSet result{};
+    ASSERT_TRUE(runtime->Next(result));
+    ASSERT_EQ(result.ColumnCount, 3);
+    ASSERT_EQ(result.RowCount, static_cast<int64_t>(reference.size()));
+    auto* outKeys = reinterpret_cast<float*>(result.Columns[0].Data);
+    auto* outCounts = reinterpret_cast<int64_t*>(result.Columns[1].Data);
+    auto* outSums = reinterpret_cast<int64_t*>(result.Columns[2].Data);
+    for (int64_t i = 0; i < result.RowCount; ++i) {
+        auto it = reference.find(canonicalBits(outKeys[i]));
+        ASSERT_NE(it, reference.end());
+        EXPECT_EQ(outCounts[i], it->second.first);
+        EXPECT_EQ(outSums[i], it->second.second);
+    }
+    Release(&result);
+}
+
+TEST(AggregateE2E, NullableF32KeyGroupsNullSeparately) {
+    std::vector<float> keys = {1.5f, 0.0f, -0.0f, 99.0f, 1.5f, 98.0f};
+    std::vector<uint8_t> mask = {0b00010111};
+    std::vector<int64_t> values = {1, 2, 4, 8, 16, 32};
+    std::vector<TColumn> columns = {
+        TColumn{.Data = reinterpret_cast<char*>(keys.data()), .Mask = mask.data()},
+        TColumn{.Data = reinterpret_cast<char*>(values.data())},
+    };
+    std::vector<TRowSet> batches = {TRowSet{
+        .Columns = columns.data(), .ColumnCount = 2, .RowCount = 6, .RefCount = 1}};
+    NQdb::TMockSource source(
+        {"k", "v"}, std::move(batches),
+        {std::make_shared<TNullable>(std::make_shared<TFloatType>(TFloatType::F32)),
+         std::make_shared<TIntegerType>(TIntegerType::I64)});
+    auto root = ParsePlan(
+        "(rel aggregate (rel source \"data.parquet\") (keys k) (agg s sum v))",
+        source);
+    auto runtime = RunPlan(root);
+
+    TRowSet result{};
+    ASSERT_TRUE(runtime->Next(result));
+    ASSERT_EQ(result.RowCount, 3);
+    auto* outKeys = reinterpret_cast<float*>(result.Columns[0].Data);
+    auto* outSums = reinterpret_cast<int64_t*>(result.Columns[1].Data);
+    std::map<int64_t, bool> sumToValid;
+    for (int64_t row = 0; row < result.RowCount; ++row) {
+        const bool valid = IsValid(result.Columns[0], row);
+        sumToValid[outSums[row]] = valid;
+        if (outSums[row] == 17) {
+            EXPECT_EQ(outKeys[row], 1.5f);
+        } else if (outSums[row] == 6) {
+            EXPECT_EQ(outKeys[row], 0.0f);
+        }
+    }
+    EXPECT_EQ(sumToValid, (std::map<int64_t, bool>{{17, true}, {6, true}, {40, false}}));
+    Release(&result);
+}
+
+TEST(AggregateE2E, MixedI32F32I64CompositeKeyPreservesLayoutAndTypedColumns) {
+    std::vector<int32_t> first = {1, 1, 2, 2, 3, 1, 5, 3};
+    std::vector<float> second = {
+        0.0f, -0.0f, 407986.25f, 417231.5f, -3.25f, 1.25f, 5.5f, -3.25f};
+    std::vector<int64_t> third = {
+        10, 10, 20, 20, 30, 10, 50, 30};
+    std::vector<int64_t> values = {5, 7, 11, 13, 17, 3, 23, -2};
+    std::vector<TColumn> columns = {
+        TColumn{.Data = reinterpret_cast<char*>(first.data())},
+        TColumn{.Data = reinterpret_cast<char*>(second.data())},
+        TColumn{.Data = reinterpret_cast<char*>(third.data())},
+        TColumn{.Data = reinterpret_cast<char*>(values.data())},
+    };
+    std::vector<TRowSet> batches = {TRowSet{
+        .Columns = columns.data(), .ColumnCount = 4, .RowCount = 8, .RefCount = 1}};
+    NQdb::TMockSource source(
+        {"k1", "k2", "k3", "v"}, std::move(batches),
+        {std::make_shared<TIntegerType>(TIntegerType::I32),
+         std::make_shared<TFloatType>(TFloatType::F32),
+         std::make_shared<TIntegerType>(TIntegerType::I64),
+         std::make_shared<TIntegerType>(TIntegerType::I64)});
+    auto root = ParsePlan(
+        "(rel aggregate (rel source \"data.parquet\") (keys k1 k2 k3) "
+        "(agg c count) (agg s sum v))",
+        source);
+    auto runtime = RunPlan(root);
+
+    TRowSet result{};
+    ASSERT_TRUE(runtime->Next(result));
+    ASSERT_EQ(result.ColumnCount, 5);
+    ASSERT_EQ(result.RowCount, 6);
+    auto* outFirst = reinterpret_cast<int32_t*>(result.Columns[0].Data);
+    auto* outSecond = reinterpret_cast<float*>(result.Columns[1].Data);
+    auto* outThird = reinterpret_cast<int64_t*>(result.Columns[2].Data);
+    auto* outCounts = reinterpret_cast<int64_t*>(result.Columns[3].Data);
+    auto* outSums = reinterpret_cast<int64_t*>(result.Columns[4].Data);
+    std::map<std::tuple<int32_t, float, int64_t>, std::pair<int64_t, int64_t>> actual;
+    for (int64_t i = 0; i < result.RowCount; ++i) {
+        actual[{outFirst[i], outSecond[i], outThird[i]}] = {outCounts[i], outSums[i]};
+    }
+    EXPECT_EQ(actual.size(), 6u);
+    EXPECT_EQ((actual.at({1, 0.0f, 10})), (std::pair<int64_t, int64_t>{2, 12}));
+    EXPECT_EQ((actual.at({2, 407986.25f, 20})), (std::pair<int64_t, int64_t>{1, 11}));
+    EXPECT_EQ((actual.at({3, -3.25f, 30})), (std::pair<int64_t, int64_t>{2, 15}));
+    EXPECT_EQ((actual.at({1, 1.25f, 10})), (std::pair<int64_t, int64_t>{1, 3}));
     Release(&result);
 }
 

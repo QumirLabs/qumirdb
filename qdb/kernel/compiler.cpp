@@ -178,7 +178,8 @@ constexpr const char* CacheSchemaVersion = "v1";
 // qumirdb.oz gains qdb_decimal_mul (decimal * decimal).
 // qumir aligns a struct field that holds an i128 to 16 (QumirLabs/qumir#169).
 // qumirdb.oz stores DECIMAL(p <= 18) in i64 and checks its range (qdb_decimal64_*).
-constexpr const char* KernelLibVersion = "61";
+// Hash and compare f32 keys by their canonical 32-bit bits.
+constexpr const char* KernelLibVersion = "62";
 } // namespace
 
 NQumir::NCodeGen::TLlvmRunner::TLinkedModule CompileKernelAstCached(
