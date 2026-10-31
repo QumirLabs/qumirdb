@@ -2,6 +2,10 @@
 #include <qdb/remote/messages.h>
 #include <qdb/remote/serialization.h>
 
+#include <qdb/io/text/sink.h>
+
+#include <sstream>
+
 #include "query.h"
 
 namespace NQdb {
@@ -13,6 +17,7 @@ namespace {
 
 struct TQueryState {
     TActorId RespondTo;
+    TSchema Schema;
 };
 
 struct TBaseBehavior {
@@ -52,10 +57,27 @@ struct TQueryActor : public IBehaviorActor {
         }
     };
 
-    struct TMonitorQuery : public TBaseBehavior, public TBehavior<TMonitorQuery> {
+    struct TMonitorQuery : public TBaseBehavior, public TBehavior<TMonitorQuery, TDataChunk, TFinish> {
         TMonitorQuery(TQueryState* state, IBehaviorActor* parent)
             : TBaseBehavior(state, parent)
+            , Sink(state->Schema, Out)
         { }
+
+        void Receive(TDataChunk&& req, TBlob, TActorContext::TPtr ctx) {
+            Sink.Write(req.RowSet);
+        }
+
+        void Receive(TFinish&& req, TBlob, TActorContext::TPtr ctx) {
+            Sink.Flush();
+
+            ctx->Send<TExecuteQueryResponse>(State->RespondTo, TExecuteQueryResponse {
+                .Response = Out.str()
+            });
+            ctx->Send<TPoison>(ctx->Self(), TPoison{});
+        }
+
+        std::ostringstream Out;
+        TConsoleSink Sink;
     };
 
     TQueryActor()

@@ -50,4 +50,12 @@ inline void DeserializeFromStream<TSpawnComputeActorResponse>(TSpawnComputeActor
     }
 }
 
+template<>
+inline void SerializeToStream<TDataChunk>(const TDataChunk& obj, std::ostringstream& oss) {
+}
+
+template<>
+inline void DeserializeFromStream<TDataChunk>(TDataChunk& obj, std::istringstream& iss) {
+}
+
 } // namespace NNet::NActors

@@ -29,12 +29,23 @@ struct TSpawnComputeActorResponse {
 };
 
 // compute-actor
+
+// Push(srcId, TRowSet&&)
 struct TDataChunk {
     static constexpr NNet::NActors::TMessageId MessageId = 200;
-    uint32_t TaskId;
-    uint32_t ChannelId;
+    uint32_t DstTaskId;
+    uint32_t SrcLaneId;
     TRowSet RowSet;
 };
+
+// Finish(srcId)
+struct TFinish {
+    static constexpr NNet::NActors::TMessageId MessageId = 201;
+    uint32_t DstTaskId;
+    uint32_t SrcLaneId;
+};
+
+// TODO: Fetch is local, do we need a message for it ?
 
 // client-side
 struct TExecuteQuery {
