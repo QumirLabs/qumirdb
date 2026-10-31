@@ -135,12 +135,15 @@
               (= j (+ j (: 1 i64)))))
           (= i peer_end)))))
 
-  (fun window_fill_prefix_sum_binint
+  ;; A decimal sum is DECIMAL(38, s): the argument, stored as i64 or BinInt (Value),
+  ;; accumulates in i128.
+  (fun window_fill_prefix_sum_binint [Value]
        ((var store <ptr TRowSet>)
         (var row_ids <ptr i64>)
         (var start i64)
         (var n i64)
         (var arg_col i64)
+        (var arg_witness <ptr Value>)
         (var out_col <ref TColumn>)
         (var out <ref TRowSet>)
         (var data_owner_idx i64)
@@ -179,8 +182,8 @@
               (var row_j = (index row_ids (+ start j)))
               (if (call sr_row_valid store row_j arg_col)
                 (block
-                  (= acc (+ acc
-                    (call sr_load_fixed_key store row_j arg_col witness)))
+                  (= acc (+ acc (call qdb_decimal_wide
+                    (call sr_load_fixed_key store row_j arg_col arg_witness))))
                   (= valid_count (+ valid_count (: 1 i64)))))
               (= j (+ j (: 1 i64)))))
           (var valid = (> valid_count (: 0 i64)))
@@ -402,26 +405,28 @@
 
   ;; avg(x) OVER (PARTITION BY ...) for decimal: the sum is scaled up by
   ;; 10^scale_delta before dividing by the count so the quotient keeps
-  ;; fractional precision instead of truncating to the argument's scale.
-  (fun window_fill_partition_avg_binint
+  ;; fractional precision instead of truncating to the argument's scale. It is
+  ;; computed in i128 and stored in the result's storage (Out).
+  (fun window_fill_partition_avg_binint [Value Out]
        ((var store <ptr TRowSet>)
         (var row_ids <ptr i64>)
         (var start i64)
         (var n i64)
         (var arg_col i64)
+        (var arg_witness <ptr Value>)
+        (var out_witness <ptr Out>)
+        (var out_bytes i64)
         (var out_col <ref TColumn>)
         (var out <ref TRowSet>)
         (var data_owner_idx i64)
         (var mask_owner_idx i64)
         (var scale_delta i64))
     (block
-      (var out_witness = (cast (: 0 i64) <ptr BinInt>))
       (var data =
         (call window_init_masked_fixed_output
-          n (: 16 i64) out_col out data_owner_idx mask_owner_idx out_witness))
+          n out_bytes out_col out data_owner_idx mask_owner_idx out_witness))
       (var mask = (field out_col Mask))
       (var zero = (cast (struct ((V (: 0 i128)))) BinInt))
-      (var arg_witness = (cast (: 0 i64) <ptr BinInt>))
       (var i = (: 0 i64))
       (while (< i n)
         (block
@@ -440,8 +445,8 @@
               (var row_id = (index row_ids (+ start j)))
               (if (call sr_row_valid store row_id arg_col)
                 (block
-                  (= acc (+ acc
-                    (call sr_load_fixed_key store row_id arg_col arg_witness)))
+                  (= acc (+ acc (call qdb_decimal_wide
+                    (call sr_load_fixed_key store row_id arg_col arg_witness))))
                   (= count (+ count (: 1 i64)))))
               (= j (+ j (: 1 i64)))))
 
@@ -453,7 +458,7 @@
           (while (< j run_end)
             (block
               (call qdb_bitmap_set_valid mask j (> count (: 0 i64)))
-              (= data [j] avg)
+              (= data [j] (call qdb_decimal_as avg out_witness))
               (= j (+ j (: 1 i64)))))
           (= i run_end)))))
 
@@ -509,12 +514,13 @@
               (= j (+ j (: 1 i64)))))
           (= i run_end)))))
 
-  (fun window_fill_partition_sum_binint
+  (fun window_fill_partition_sum_binint [Value]
        ((var store <ptr TRowSet>)
         (var row_ids <ptr i64>)
         (var start i64)
         (var n i64)
         (var arg_col i64)
+        (var arg_witness <ptr Value>)
         (var out_col <ref TColumn>)
         (var out <ref TRowSet>)
         (var data_owner_idx i64)
@@ -544,8 +550,8 @@
               (var row_id = (index row_ids (+ start j)))
               (if (call sr_row_valid store row_id arg_col)
                 (block
-                  (= acc (+ acc
-                    (call sr_load_fixed_key store row_id arg_col witness)))
+                  (= acc (+ acc (call qdb_decimal_wide
+                    (call sr_load_fixed_key store row_id arg_col arg_witness))))
                   (= count (+ count (: 1 i64)))))
               (= j (+ j (: 1 i64)))))
 

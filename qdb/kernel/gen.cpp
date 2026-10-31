@@ -53,15 +53,16 @@ NQumir::NAst::TTypePtr PointerPointeeOr(
     return fallback ? fallback : NamedType("TColumn");
 }
 
+// A BinInt or a decimal stored in i128; a decimal stored in i64 is a plain i64.
 bool IsBinIntValueType(const NQumir::NAst::TTypePtr& type) {
-    return IsBinIntStorageType(type) || IsDecimalType(type);
+    return IsBinIntStorageType(type) || IsDecimal128Type(type);
 }
 
 NQumir::NAst::TTypePtr AggregateStorageType(
     const NQumir::NAst::TTypePtr& type)
 {
-    if (IsBinIntValueType(type)) {
-        return BinIntStorageType();
+    if (auto decimal = DecimalSpecOf(type)) {
+        return DecimalStorageType(*decimal);
     }
     return type;
 }
@@ -1922,8 +1923,17 @@ public:
                 if (info.Func == "count") {
                     return numI64(0);
                 }
-                return info.HasArg ? NOz::Ident("arg_val_" + std::to_string(info.ArgColumnIndex))
-                                   : numI64(0);
+                if (!info.HasArg) {
+                    return numI64(0);
+                }
+                auto value = NOz::Ident("arg_val_" + std::to_string(info.ArgColumnIndex));
+                // A sum over a decimal stored in i64 accumulates in i128.
+                if (info.IsBinInt() &&
+                    ArgColumns_.at(info.ArgColumnIndex).ValueKind != EAggValueKind::BinInt)
+                {
+                    return NOz::Call("qdb_decimal_from_unscaled", {std::move(value)});
+                }
+                return value;
             };
             auto validI = [&]() -> TExprPtr {
                 return info.NeedsValidity && ArgColumns_.at(info.ArgColumnIndex).Nullable

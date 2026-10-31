@@ -1675,11 +1675,11 @@ std::vector<TJoinOutputColumn> BuildJoinOutputColumns(
     EJoinOutputColumns output)
 {
     auto classify = [](const TTypePtr& type, TJoinOutputColumn& col) {
-        if (DecimalSpecOfValueType(UnwrapNullableType(type))) {
+        if (IsDecimal128Type(type)) {
             col.Kind = TJoinOutputColumn::EKind::BinInt;
             return;
         }
-        auto inner = UnwrapNamedType(UnwrapNullableType(type));
+        auto inner = PhysicalValueType(type);
         if (auto integer = TMaybeType<TIntegerType>(inner)) {
             col.StorageType = inner;
             col.FixedWidth = integer.Cast()->BitWidth() / 8;
@@ -1869,13 +1869,13 @@ void ClassifyRowJoinColumn(
     int64_t& size,
     int64_t& alignment)
 {
-    if (DecimalSpecOfValueType(UnwrapNullableType(type))) {
+    if (IsDecimal128Type(type)) {
         col.Kind = TRowJoinColumn::EKind::BinInt;
         size = 16;
         alignment = 16;
         return;
     }
-    auto inner = UnwrapNamedType(UnwrapNullableType(type));
+    auto inner = PhysicalValueType(type);
     if (auto integer = TMaybeType<TIntegerType>(inner)) {
         col.Kind = TRowJoinColumn::EKind::Fixed;
         col.StorageType = inner;

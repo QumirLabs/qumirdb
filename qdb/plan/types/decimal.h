@@ -148,24 +148,41 @@ inline bool IsInt128Type(const NQumir::NAst::TTypePtr& type) {
     return integer && integer.Cast()->Kind == NQumir::NAst::TIntegerType::I128;
 }
 
-inline bool HasBinIntLayout(const NQumir::NAst::TTypePtr& type) {
+inline bool IsDecimal128Type(const NQumir::NAst::TTypePtr& type) {
     auto decimal = DecimalSpecOf(type);
-    return (decimal && DecimalStorageOf(*decimal) == EDecimalStorage::I128) ||
-        IsBinIntStorageType(type) || IsInt128Type(type);
+    return decimal && DecimalStorageOf(*decimal) == EDecimalStorage::I128;
+}
+
+inline bool HasBinIntLayout(const NQumir::NAst::TTypePtr& type) {
+    return IsDecimal128Type(type) || IsBinIntStorageType(type) || IsInt128Type(type);
 }
 
 inline NQumir::NAst::TTypePtr BinIntStorageType() {
     return std::make_shared<NQumir::NAst::TNamedType>("BinInt", nullptr);
 }
 
-inline NQumir::NAst::TTypePtr DecimalStorageType() {
+// The kernel type of the unscaled value: a plain i64, or an i128 inside the BinInt
+// struct that keeps decimal operators away from other integers.
+inline NQumir::NAst::TTypePtr DecimalStorageType(TDecimalSpec spec) {
+    if (DecimalStorageOf(spec) == EDecimalStorage::I64) {
+        return std::make_shared<NQumir::NAst::TIntegerType>(NQumir::NAst::TIntegerType::I64);
+    }
     return BinIntStorageType();
+}
+
+// The value type a physical path reads: a decimal's storage, else the type without
+// nullability and named wrappers.
+inline NQumir::NAst::TTypePtr PhysicalValueType(const NQumir::NAst::TTypePtr& type) {
+    if (auto decimal = DecimalSpecOf(type)) {
+        return DecimalStorageType(*decimal);
+    }
+    return NQumir::NAst::UnwrapNamedType(UnwrapNullableType(type));
 }
 
 inline NQumir::NAst::TTypePtr DecimalStorageTypeFor(
     const NQumir::NAst::TTypePtr& type)
 {
-    auto storage = DecimalStorageType();
+    auto storage = DecimalStorageType(*DecimalSpecOf(type));
     return IsNullableType(type)
         ? std::static_pointer_cast<NQumir::NAst::TType>(
               std::make_shared<TNullable>(std::move(storage)))

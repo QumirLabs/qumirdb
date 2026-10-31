@@ -23,7 +23,10 @@ TLayout TypeLayout(const NQumir::NAst::TTypePtr& original) {
 
     // Key structs follow the C ABI, which qumir and LLVM share: an i128 and the
     // BinInt struct around it are 16-aligned, so a struct holding one is too.
-    if (IsDecimalType(original) || IsBinIntStorageType(original)) {
+    if (auto decimal = DecimalSpecOf(original)) {
+        return TypeLayout(DecimalStorageType(*decimal));
+    }
+    if (IsBinIntStorageType(original)) {
         return {16, 16};
     }
     auto type = UnwrapNamedType(original);
@@ -75,6 +78,9 @@ std::string PhysicalKeyInnerComponentName(const NQumir::NAst::TTypePtr& original
     }
     if (IsBinIntStorageType(original)) {
         return "BinInt";
+    }
+    if (auto decimal = DecimalSpecOf(original)) {
+        return PhysicalKeyInnerComponentName(DecimalStorageType(*decimal));
     }
     auto type = UnwrapNamedType(original);
     if (auto integer = TMaybeType<TIntegerType>(type)) {
@@ -133,7 +139,11 @@ TRepresentedKeyType RepresentKeyType(const NQumir::NAst::TTypePtr& original) {
 
     const bool nullable = IsNullableType(original);
     auto inner = nullable ? UnwrapNullableType(original) : original;
-    if (IsDecimalType(inner) || IsBinIntStorageType(inner)) {
+    // A decimal key is its storage: a BinInt, or the plain i64 of p <= 18.
+    if (auto decimal = DecimalSpecOf(inner)) {
+        inner = DecimalStorageType(*decimal);
+    }
+    if (IsBinIntStorageType(inner)) {
         auto storage = BinIntStorageType();
         return {
             .Lookup = storage,

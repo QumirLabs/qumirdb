@@ -1068,6 +1068,16 @@
   ;; Integer division of the scaled value, truncated toward zero like SQL.
   (fun qdb_decimal64_div_i64 ((var left i64) (var right i64)) -> i64
     (block (return (// left right))))
+  ;; A decimal's unscaled value in i128 from either storage, and back into the
+  ;; storage the witness points to; the decimal's type guarantees the value fits.
+  (fun qdb_decimal_wide ((var value BinInt)) -> BinInt
+    (block (return value)))
+  (fun qdb_decimal_wide ((var value i64)) -> BinInt
+    (block (return (call qdb_decimal_from_unscaled value))))
+  (fun qdb_decimal_as ((var value BinInt) (var witness <ptr BinInt>)) -> BinInt
+    (block (return value)))
+  (fun qdb_decimal_as ((var value BinInt) (var witness <ptr i64>)) -> i64
+    (block (return (call qdb_decimal64_narrow value))))
 
   (fun qdb_decimal_add ((var left BinInt) (var right BinInt)) -> BinInt
     (attrs (operator "+"))

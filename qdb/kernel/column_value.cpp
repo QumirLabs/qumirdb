@@ -54,7 +54,11 @@ TColumnValueAst BuildColumnValueAst(
 
     const bool nullable = IsNullableType(logicalType);
     auto valueType = nullable ? UnwrapNullableType(logicalType) : logicalType;
-    const bool isBinIntValue = IsDecimalType(valueType) || IsBinIntStorageType(valueType);
+    // A decimal loads as its storage: a BinInt, or the plain i64 of p <= 18.
+    if (auto decimal = DecimalSpecOfValueType(valueType)) {
+        valueType = DecimalStorageType(*decimal);
+    }
+    const bool isBinIntValue = IsBinIntStorageType(valueType);
     auto type = isBinIntValue ? BinIntStorageType() : UnwrapNamedType(valueType);
     const std::string validName = temporaryPrefix + "_valid";
     const std::string valueName = temporaryPrefix + "_value";
@@ -83,7 +87,7 @@ TColumnValueAst BuildColumnValueAst(
     auto zeroBinInt = [&]() -> TExprPtr {
         auto zero = std::make_shared<TNumberExpr>(loc, int64_t{0});
         zero->Type = std::make_shared<TIntegerType>(TIntegerType::I128);
-        return std::make_shared<TStructConstructExpr>(loc, DecimalStorageType(),
+        return std::make_shared<TStructConstructExpr>(loc, BinIntStorageType(),
             std::vector<TExprPtr>{std::move(zero)},
             std::vector<std::string>{"V"});
     };
