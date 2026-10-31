@@ -4,9 +4,10 @@
     "values": {"json": "tables/t.json", "parquet": {"row_group_rows": 3}},
     "finite": {"json": "tables/c.json", "parquet": {"row_group_rows": 3}},
     "extreme": {"json": "tables/x.json", "parquet": {"row_group_rows": 3}},
-    "sweep": {"json": "tables/s.json", "parquet": {"row_group_rows": 7}}
+    "sweep": {"json": "tables/s.json", "parquet": {"row_group_rows": 7}},
+    "wide": {"json": "tables/w.json", "parquet": {"row_group_rows": 3}}
   },
-  "tables": {"t": "values", "c": "finite", "x": "extreme", "s": "sweep"},
+  "tables": {"t": "values", "c": "finite", "x": "extreme", "s": "sweep", "w": "wide"},
   "variants": ["single", "threaded", "js"],
   "cases": {
     "types.sql": {"order": "ordered"},
@@ -32,6 +33,7 @@
     "cast.sql": {"order": "ordered"},
     "cast_extreme.sql": {"order": "ordered"},
     "cast_integer.sql": {"order": "ordered"},
+    "cast_bigint_wide.sql": {"order": "ordered"},
     "cast_nan_error.sql": {"expect_error": true}
   }
 }
