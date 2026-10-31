@@ -632,3 +632,80 @@ TEST(IOTest, DecimalStorageValuesTakeTheStorageWidth) {
     check(arrow::decimal128(15, 2), {7, 999999999999999, -999999999999999, -1});
     check(arrow::decimal128(38, 2), {7, big, -big, -1});
 }
+
+// A scan reads decimal columns itself (TDecimalColumnScan): INT32, INT64 and
+// FIXED_LEN_BYTE_ARRAY decimals with NULLs come out at their storage width, also
+// when a batch spans several row groups.
+TEST(IOTest, ScanDecimalColumnsInTheirStorage) {
+    struct TCase {
+        std::shared_ptr<arrow::DataType> Type;
+        bool AsInteger;
+    };
+    const __int128 big = static_cast<__int128>(std::numeric_limits<int64_t>::max()) * 1000;
+    const std::vector<std::optional<__int128>> base = {
+        7, -1, std::nullopt, 999999999, -999999999, 0, 12345, std::nullopt, -42, 1, 2,
+    };
+    for (const auto& testCase : std::vector<TCase>{
+        {arrow::decimal128(9, 2), true},
+        {arrow::decimal128(18, 0), true},
+        {arrow::decimal128(15, 2), false},
+        {arrow::decimal128(30, 4), false},
+    }) {
+        const auto& decimal = static_cast<const arrow::DecimalType&>(*testCase.Type);
+        auto values = base;
+        if (decimal.precision() >= 18) {
+            values.push_back(decimal.precision() > 18 ? big : std::numeric_limits<int64_t>::max() / 10);
+            values.push_back(decimal.precision() > 18 ? -big : -(std::numeric_limits<int64_t>::max() / 10));
+        }
+        arrow::Decimal128Builder builder(testCase.Type);
+        for (const auto& value : values) {
+            ASSERT_TRUE((value
+                ? builder.Append(arrow::Decimal128(static_cast<int64_t>(*value >> 64), static_cast<uint64_t>(*value)))
+                : builder.AppendNull()).ok());
+        }
+        auto batch = arrow::RecordBatch::Make(
+            arrow::schema({arrow::field("d", testCase.Type)}),
+            static_cast<int64_t>(values.size()), {builder.Finish().ValueOrDie()});
+        const std::string path = "/tmp/test_io_qdb_decimal_scan.parquet";
+        {
+            auto output = arrow::io::FileOutputStream::Open(path).ValueOrDie();
+            parquet::WriterProperties::Builder properties;
+            if (testCase.AsInteger) {
+                properties.enable_store_decimal_as_integer();
+            }
+            auto table = arrow::Table::FromRecordBatches({batch}).ValueOrDie();
+            ASSERT_TRUE(parquet::arrow::WriteTable(
+                *table, arrow::default_memory_pool(), output, 3, properties.build()).ok());
+        }
+
+        NQdb::TParquetFile file(path);
+        auto source = file.MakeSource();
+        const NQdb::TDecimalSpec spec{.Precision = decimal.precision(), .Scale = decimal.scale()};
+        const int32_t width = NQdb::DecimalStorageBytes(spec);
+        std::vector<std::optional<__int128>> scanned;
+        TRowSet rowSet{};
+        while (source->Next(rowSet)) {
+            const auto& column = rowSet.Columns[0];
+            for (int64_t row = 0; row < rowSet.RowCount; ++row) {
+                if (column.Mask && !(column.Mask[(column.MaskBitOffset + row) / 8] >> ((column.MaskBitOffset + row) % 8) & 1)) {
+                    scanned.push_back(std::nullopt);
+                    continue;
+                }
+                __int128 value = 0;
+                if (width == 8) {
+                    int64_t narrow;
+                    std::memcpy(&narrow, column.Data + row * 8, sizeof(narrow));
+                    value = narrow;
+                } else {
+                    std::memcpy(&value, column.Data + row * 16, sizeof(value));
+                }
+                scanned.push_back(value);
+            }
+            NQdb::Release(&rowSet);
+        }
+        ASSERT_EQ(scanned.size(), values.size()) << testCase.Type->ToString();
+        for (size_t row = 0; row < values.size(); ++row) {
+            EXPECT_TRUE(scanned[row] == values[row]) << testCase.Type->ToString() << " row " << row;
+        }
+    }
+}

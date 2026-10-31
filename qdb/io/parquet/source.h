@@ -14,10 +14,11 @@
 #include <unordered_set>
 #include <vector>
 
-namespace arrow { class RecordBatchReader; }
+namespace arrow { class RecordBatchReader; class Schema; }
 
 namespace NQdb {
 
+class TDecimalColumnScan;
 class TParquetSource;
 struct TParquetFileData;
 
@@ -106,6 +107,14 @@ private:
     std::optional<std::vector<int>> RowGroups_;
     std::optional<std::unordered_set<std::string>> RestrictedColumns_;
     std::shared_ptr<arrow::RecordBatchReader> Reader_;
+    // File fields in output order; the decimal ones are read by DecimalScans_.
+    std::vector<int> SelectedColumns_;
+    struct TDecimalScan {
+        size_t Position = 0;
+        std::unique_ptr<TDecimalColumnScan> Scan;
+    };
+    std::vector<TDecimalScan> DecimalScans_;
+    std::shared_ptr<arrow::Schema> BatchSchema_;
     std::vector<int> ReaderRowGroups_;
     size_t ReaderRowGroupIndex_ = 0;
     int64_t ReaderRowOffset_ = 0;

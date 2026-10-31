@@ -1,4 +1,5 @@
 #include <qdb/io/parquet/source.h>
+#include <qdb/io/parquet/decimal_scan.h>
 #include <qdb/io/parquet/decimal_storage.h>
 #include <qdb/io/parquet/row_reader.h>
 #include <qdb/io/parquet/row_id.h>
@@ -15,6 +16,7 @@
 #include <arrow/memory_pool.h>
 #include <arrow/util/key_value_metadata.h>
 #include <parquet/arrow/reader.h>
+#include <parquet/arrow/schema.h>
 #include <parquet/metadata.h>
 #include <parquet/schema.h>
 #include <parquet/statistics.h>
@@ -298,6 +300,8 @@ struct TParquetFileData {
     std::shared_ptr<arrow::Schema> FileSchema;
     std::vector<std::string> FileNames;
     std::vector<TColumnSchema> FileColumns;
+    // Per field: the leaf column TDecimalColumnScan reads, else -1 (read by Arrow).
+    std::vector<int> DecimalScanColumns;
     TSchema FullSchema;
     std::vector<NScheduler::TScanRowGroup> RowGroups;
     std::vector<std::vector<TRowGroupColumnRange>> RowGroupRanges;
@@ -357,6 +361,22 @@ void TParquetFileData::Open()
         });
     }
     FullSchema = TSchema{FileColumns};
+
+    const auto& manifest = FileReader->manifest();
+    DecimalScanColumns.assign(static_cast<size_t>(FileSchema->num_fields()), -1);
+    for (size_t field = 0; field < manifest.schema_fields.size() &&
+        field < DecimalScanColumns.size(); ++field)
+    {
+        const auto& schemaField = manifest.schema_fields[field];
+        if (!schemaField.is_leaf() || !IsDecimalType(FileColumns[field].Type)) {
+            continue;
+        }
+        const auto* descriptor =
+            FileReader->parquet_reader()->metadata()->schema()->Column(schemaField.column_index);
+        if (TDecimalColumnScan::Supports(*descriptor)) {
+            DecimalScanColumns[field] = schemaField.column_index;
+        }
+    }
 
     LoadColumnStats();
     LoadRowGroupRanges();
@@ -632,11 +652,31 @@ std::vector<int> TParquetSource::EffectiveRowGroups() const
 void TParquetSource::ResetReader()
 {
     auto rowGroups = EffectiveRowGroups();
-    auto fileColumnIndexes = EffectiveFileColumnIndexes();
-    auto batchReaderResult = !RestrictedColumns_
-        ? File_->FileReader->GetRecordBatchReader(rowGroups)
-        : File_->FileReader->GetRecordBatchReader(
-            rowGroups, fileColumnIndexes);
+    SelectedColumns_.clear();
+    if (RestrictedColumns_) {
+        SelectedColumns_ = EffectiveFileColumnIndexes();
+    } else {
+        for (int i = 0; i < static_cast<int>(File_->FileNames.size()); ++i) {
+            SelectedColumns_.push_back(i);
+        }
+    }
+    // Decimal columns bypass Arrow's per-value Decimal128 conversion (TDecimalColumnScan).
+    std::vector<int> arrowColumns;
+    DecimalScans_.clear();
+    for (size_t position = 0; position < SelectedColumns_.size(); ++position) {
+        const int field = SelectedColumns_[position];
+        const int leaf = File_->DecimalScanColumns[static_cast<size_t>(field)];
+        if (leaf < 0) {
+            arrowColumns.push_back(field);
+            continue;
+        }
+        DecimalScans_.push_back({
+            .Position = position,
+            .Scan = std::make_unique<TDecimalColumnScan>(
+                *File_->FileReader->parquet_reader(), leaf, rowGroups, GetMemoryPool()),
+        });
+    }
+    auto batchReaderResult = File_->FileReader->GetRecordBatchReader(rowGroups, arrowColumns);
     if (!batchReaderResult.ok()) {
         throw std::runtime_error(batchReaderResult.status().ToString());
     }
@@ -676,18 +716,26 @@ std::vector<int> TParquetSource::EffectiveFileColumnIndexes(
 
 void TParquetSource::RefreshSchema()
 {
-    int numFields = Reader_->schema()->num_fields();
     Names_.clear();
     Columns_.clear();
-    Names_.reserve(numFields);
-    Columns_.reserve(numFields);
-    for (const auto& field : Reader_->schema()->fields()) {
+    Names_.reserve(SelectedColumns_.size());
+    Columns_.reserve(SelectedColumns_.size());
+    std::vector<std::shared_ptr<arrow::Field>> fields;
+    fields.reserve(SelectedColumns_.size());
+    size_t nextScan = 0;
+    for (size_t position = 0; position < SelectedColumns_.size(); ++position) {
+        auto field = File_->FileSchema->field(SelectedColumns_[position]);
         Names_.push_back(field->name());
         Columns_.push_back({
             .Name = Names_.back(),
             .Type = ArrowFieldToQumir(field),
         });
+        if (nextScan < DecimalScans_.size() && DecimalScans_[nextScan].Position == position) {
+            field = field->WithType(DecimalScans_[nextScan++].Scan->Type());
+        }
+        fields.push_back(std::move(field));
     }
+    BatchSchema_ = arrow::schema(std::move(fields));
     if (RowIdRequested()) {
         Names_.emplace_back(InternalRowIdColumnName);
         Columns_.push_back({
@@ -1158,6 +1206,21 @@ bool TParquetSource::Next(TRowSet& rowSet) {
     std::shared_ptr<arrow::RecordBatch> batch;
     if (!Reader_->ReadNext(&batch).ok() || !batch) {
         return false;
+    }
+    if (!DecimalScans_.empty()) {
+        // The decimal columns take their positions among the columns Arrow read.
+        std::vector<std::shared_ptr<arrow::Array>> columns;
+        columns.reserve(SelectedColumns_.size());
+        int arrowColumn = 0;
+        size_t nextScan = 0;
+        for (size_t position = 0; position < SelectedColumns_.size(); ++position) {
+            if (nextScan < DecimalScans_.size() && DecimalScans_[nextScan].Position == position) {
+                columns.push_back(DecimalScans_[nextScan++].Scan->Read(batch->num_rows()));
+            } else {
+                columns.push_back(batch->column(arrowColumn++));
+            }
+        }
+        batch = arrow::RecordBatch::Make(BatchSchema_, batch->num_rows(), std::move(columns));
     }
     if (RowIdRequested()) {
         arrow::UInt64Builder rowIds(GetMemoryPool());
