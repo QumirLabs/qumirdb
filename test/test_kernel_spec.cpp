@@ -2,7 +2,9 @@
 
 #include <qdb/kernel/annotate_type.h>
 #include <qdb/kernel/builder.h>
+#include <qdb/kernel/column_value.h>
 #include <qdb/kernel/spec.h>
+#include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 
 #include <qumir/parser/ast.h>
@@ -406,6 +408,25 @@ TEST(OzFunBuilder, BuildsFunctionDeclaration) {
     auto ident = TMaybeNode<TIdentExpr>(ret.Cast()->Value);
     ASSERT_TRUE(ident);
     EXPECT_EQ(ident.Cast()->Name, "value");
+}
+
+TEST(KernelSpec, FixedValueWidthIsTheByteWidthOfOneValue) {
+    using namespace NQumir::NAst;
+    auto width = [](const TTypePtr& type) { return NKernel::FixedValueWidth(type); };
+    EXPECT_EQ(width(std::make_shared<TIntegerType>(TIntegerType::I8)), 1);
+    EXPECT_EQ(width(std::make_shared<TIntegerType>(TIntegerType::U32)), 4);
+    EXPECT_EQ(width(std::make_shared<TIntegerType>(TIntegerType::I64)), 8);
+    EXPECT_EQ(width(std::make_shared<TIntegerType>(TIntegerType::I128)), 16);
+    EXPECT_EQ(width(std::make_shared<TFloatType>(TFloatType::F32)), 4);
+    EXPECT_EQ(width(std::make_shared<TFloatType>(TFloatType::F64)), 8);
+    EXPECT_EQ(width(std::make_shared<TBoolType>()), 1);
+    EXPECT_EQ(width(std::make_shared<TStringType>()), 0);
+    EXPECT_EQ(width(MakeDecimalType({.Precision = 18, .Scale = 2})), 8);
+    EXPECT_EQ(width(MakeDecimalType({.Precision = 38, .Scale = 2})), 16);
+    EXPECT_EQ(width(BinIntStorageType()), 16);
+    // Nullability does not change the width.
+    EXPECT_EQ(width(std::make_shared<TNullable>(std::make_shared<TFloatType>(TFloatType::F32))), 4);
+    EXPECT_EQ(width(std::make_shared<TNullable>(std::make_shared<TFloatType>())), 8);
 }
 
 int main(int argc, char** argv) {

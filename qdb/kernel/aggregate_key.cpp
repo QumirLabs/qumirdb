@@ -1,4 +1,5 @@
 #include <qdb/kernel/aggregate_key.h>
+#include <qdb/kernel/column_value.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 
@@ -35,7 +36,9 @@ TLayout TypeLayout(const NQumir::NAst::TTypePtr& original) {
         return {size, size};
     }
     if (TMaybeType<TFloatType>(type)) {
-        return {8, 8};
+        // Fixed-width scalars are aligned to their size.
+        const size_t size = static_cast<size_t>(FixedValueWidth(type));
+        return {size, size};
     }
     if (TMaybeType<TBoolType>(type)) {
         return {1, 1};

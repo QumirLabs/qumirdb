@@ -4,6 +4,7 @@
 #include "flatten_disjuncts.h"
 #include "unbound_vars.h"
 
+#include <qdb/kernel/column_value.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/cte_ref.h>
 #include <qdb/plan/ops/aggregate.h>
@@ -28,14 +29,8 @@ using namespace NQumir::NAst::NLiterals;
 
 double EstimateTypeWidth(const TTypePtr& type) {
     auto inner = UnwrapNamedType(UnwrapNullableType(type));
-    if (auto integer = TMaybeType<TIntegerType>(inner)) {
-        return std::max(1, integer.Cast()->BitWidth() / 8);
-    }
-    if (TMaybeType<TFloatType>(inner)) {
-        return 8.0;
-    }
-    if (TMaybeType<TBoolType>(inner)) {
-        return 1.0;
+    if (const auto width = NKernel::FixedValueWidth(type)) {
+        return static_cast<double>(width);
     }
     if (TMaybeType<TStringType>(inner)) {
         return 16.0;

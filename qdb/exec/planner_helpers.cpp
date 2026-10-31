@@ -7,6 +7,7 @@
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/limit.h>
 #include <qdb/plan/ops/late_materialize.h>
+#include <qdb/kernel/column_value.h>
 #include <qdb/kernel/compiler.h>
 #include <qdb/kernel/annotate_type.h>
 #include <qdb/kernel/spec.h>
@@ -34,21 +35,11 @@ namespace {
 // TStringView struct (16 bytes) per row; the executor post-converts those.
 size_t ProjectColumnWidth(const NQumir::NAst::TTypePtr& type) {
     using namespace NQumir::NAst;
-    if (auto decimal = DecimalSpecOf(type)) {
-        return static_cast<size_t>(DecimalStorageBytes(*decimal));
-    }
-    auto inner = UnwrapNamedType(UnwrapNullableType(type));
-    if (auto integer = TMaybeType<TIntegerType>(inner)) {
-        return static_cast<size_t>(integer.Cast()->BitWidth() / 8);
-    }
-    if (TMaybeType<TFloatType>(inner)) {
-        return 8;
-    }
-    if (TMaybeType<TBoolType>(inner)) {
-        return 1;
-    }
-    if (TMaybeType<TStringType>(inner)) {
+    if (TMaybeType<TStringType>(UnwrapNamedType(UnwrapNullableType(type)))) {
         return 16; // sizeof(TStringView): ptr(8) + size(8)
+    }
+    if (const auto width = NKernel::FixedValueWidth(type)) {
+        return static_cast<size_t>(width);
     }
     throw std::runtime_error(
         "project: unsupported computed column type " +
@@ -672,25 +663,6 @@ TUnaryRuntimeProcess BuildProjectRuntimeProcess(
     };
 }
 
-// Radix key byte width: integer width, or 8 for f64.
-int32_t RadixKeyWidthBytes(const NQumir::NAst::TTypePtr& type) {
-    using namespace NQumir::NAst;
-    if (auto decimal = DecimalSpecOf(type)) {
-        return DecimalStorageBytes(*decimal);
-    }
-    auto inner = UnwrapNamedType(UnwrapNullableType(type));
-    if (auto integer = TMaybeType<TIntegerType>(inner)) {
-        return static_cast<int32_t>(integer.Cast()->BitWidth() / 8);
-    }
-    if (TMaybeType<TFloatType>(inner)) {
-        return 8;
-    }
-    if (TMaybeType<TBoolType>(inner)) {
-        return 1;
-    }
-    return 0;
-}
-
 bool IsStringRadixKey(const NQumir::NAst::TTypePtr& type) {
     using namespace NQumir::NAst;
     return static_cast<bool>(TMaybeType<TStringType>(
@@ -754,7 +726,7 @@ TSortRuntimeProcess BuildSortRuntimeProcess(
             for (size_t k = 0; k < sortInputs.KeyColumns.size(); ++k) {
                 meta.push_back({
                     .Index = sortInputs.KeyColumns[k].Index,
-                    .WidthBytes = RadixKeyWidthBytes(sortInputs.KeyColumns[k].Type),
+                    .WidthBytes = static_cast<int32_t>(NKernel::FixedValueWidth(sortInputs.KeyColumns[k].Type)),
                     .IsString = IsStringRadixKey(sortInputs.KeyColumns[k].Type),
                     .Desc = keys[k].Direction == ESortDirection::Desc,
                 });
@@ -954,7 +926,7 @@ TWindowRuntimeProcess BuildWindowRuntimeProcess(
         for (size_t k = 0; k < keyColumns.size(); ++k) {
             meta.push_back({
                 .Index = keyColumns[k].Index,
-                .WidthBytes = RadixKeyWidthBytes(keyColumns[k].Type),
+                .WidthBytes = static_cast<int32_t>(NKernel::FixedValueWidth(keyColumns[k].Type)),
                 .IsString = IsStringRadixKey(keyColumns[k].Type),
                 .Desc = keys[k].Direction == ESortDirection::Desc,
             });

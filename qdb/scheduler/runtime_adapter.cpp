@@ -2,6 +2,7 @@
 
 #include <qdb/scheduler/graph.h>
 #include <qdb/scheduler/instrumentation/task.h>
+#include <qdb/kernel/column_value.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 
@@ -113,18 +114,12 @@ TTypePtr ShuffleValueType(const TTypePtr& type) {
 }
 
 size_t ShuffleColumnFixedWidth(const TTypePtr& type) {
-    if (auto decimal = DecimalSpecOf(type)) {
-        return static_cast<size_t>(DecimalStorageBytes(*decimal));
-    }
     auto valueType = ShuffleValueType(type);
-    if (auto integer = TMaybeType<TIntegerType>(valueType)) {
-        return static_cast<size_t>(integer.Cast()->BitWidth() / 8);
-    }
-    if (TMaybeType<TFloatType>(valueType)) {
-        return 8;
-    }
     if (TMaybeType<TBoolType>(valueType) || TMaybeType<TStringType>(valueType)) {
         return 0;
+    }
+    if (const auto width = NKernel::FixedValueWidth(type)) {
+        return static_cast<size_t>(width);
     }
     throw NQumir::TError(
         "hash shuffle cannot materialize column of type " +

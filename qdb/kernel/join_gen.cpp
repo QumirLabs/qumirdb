@@ -1680,12 +1680,9 @@ std::vector<TJoinOutputColumn> BuildJoinOutputColumns(
             return;
         }
         auto inner = PhysicalValueType(type);
-        if (auto integer = TMaybeType<TIntegerType>(inner)) {
+        if (TMaybeType<TIntegerType>(inner) || TMaybeType<TFloatType>(inner)) {
             col.StorageType = inner;
-            col.FixedWidth = integer.Cast()->BitWidth() / 8;
-        } else if (TMaybeType<TFloatType>(inner)) {
-            col.StorageType = inner;
-            col.FixedWidth = 8;
+            col.FixedWidth = FixedValueWidth(type);
         } else if (TMaybeType<TBoolType>(inner)) {
             col.Kind = TJoinOutputColumn::EKind::Bool;
         } else if (TMaybeType<TStringType>(inner)) {
@@ -1876,18 +1873,12 @@ void ClassifyRowJoinColumn(
         return;
     }
     auto inner = PhysicalValueType(type);
-    if (auto integer = TMaybeType<TIntegerType>(inner)) {
+    if (TMaybeType<TIntegerType>(inner) || TMaybeType<TFloatType>(inner)) {
         col.Kind = TRowJoinColumn::EKind::Fixed;
         col.StorageType = inner;
-        col.FixedWidth = integer.Cast()->BitWidth() / 8;
+        col.FixedWidth = FixedValueWidth(type);
         size = col.FixedWidth;
         alignment = col.FixedWidth;
-    } else if (TMaybeType<TFloatType>(inner)) {
-        col.Kind = TRowJoinColumn::EKind::Fixed;
-        col.StorageType = inner;
-        col.FixedWidth = 8;
-        size = 8;
-        alignment = 8;
     } else if (TMaybeType<TBoolType>(inner)) {
         col.Kind = TRowJoinColumn::EKind::Bool;
         size = 1;

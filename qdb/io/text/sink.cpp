@@ -75,6 +75,20 @@ std::string_view ToCharsView(std::ostream& out, T value, char* buffer, size_t si
     return std::string_view(buffer, static_cast<size_t>(tmp));
 }
 
+// Shortest text that reads back as the same value in the column's float width.
+std::to_chars_result FloatToChars(char* first, char* last, const TColumn& col, int32_t row,
+    const TFloatType& type)
+{
+    if (type.BitWidth() == 32) {
+        float value;
+        std::memcpy(&value, col.Data + static_cast<int64_t>(row) * sizeof(float), sizeof(float));
+        return std::to_chars(first, last, value);
+    }
+    double value;
+    std::memcpy(&value, col.Data + static_cast<int64_t>(row) * sizeof(double), sizeof(double));
+    return std::to_chars(first, last, value);
+}
+
 std::string UnsignedInt128ToString(unsigned __int128 value) {
     if (value == 0) {
         return "0";
@@ -173,9 +187,8 @@ std::string FormatCell(const TColumn& col, int32_t row, const TTypePtr& type) {
         }
         return std::string(buf, r.ptr);
     }
-    if (TMaybeType<TFloatType>(valueType)) {
-        double v = reinterpret_cast<const double*>(col.Data)[row];
-        auto r = std::to_chars(buf, buf + sizeof(buf), v);
+    if (auto floating = TMaybeType<TFloatType>(valueType)) {
+        auto r = FloatToChars(buf, buf + sizeof(buf), col, row, *floating.Cast());
         return std::string(buf, r.ptr);
     }
     if (TMaybeType<TBoolType>(valueType)) {
@@ -259,10 +272,10 @@ void WriteValue(std::ostream& out, const TColumn& col, int32_t row, const TTypeP
                 }
                 return;
         }
-    } else if (TMaybeType<TFloatType>(valueType)) {
+    } else if (auto floating = TMaybeType<TFloatType>(valueType)) {
         char buffer[64];
-        auto view = ToCharsView(out, reinterpret_cast<const double*>(col.Data)[row], buffer, sizeof(buffer));
-        out.write(view.data(), static_cast<std::streamsize>(view.size()));
+        const auto result = FloatToChars(buffer, buffer + sizeof(buffer), col, row, *floating.Cast());
+        out.write(buffer, result.ptr - buffer);
         return;
     } else if (TMaybeType<TBoolType>(valueType)) {
         out << (IsBitSet(col, row) ? "true" : "false");
