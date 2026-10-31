@@ -9,6 +9,7 @@
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 
+#include <algorithm>
 #include <bit>
 #include <cmath>
 #include <cstring>
@@ -20,6 +21,9 @@
 #include <arrow/api.h>
 #include <arrow/io/api.h>
 #include <parquet/arrow/writer.h>
+#include <parquet/column_writer.h>
+#include <parquet/file_reader.h>
+#include <parquet/file_writer.h>
 
 using namespace NQdb;
 
@@ -35,6 +39,35 @@ void WriteParquet(
     auto status = parquet::arrow::WriteTable(
         *table, arrow::default_memory_pool(), outfile, chunkSize);
     ASSERT_TRUE(status.ok()) << status.ToString();
+}
+
+// Scans the first column of a parquet file, a decimal, at the width of its storage.
+std::vector<std::optional<__int128>> ScanDecimalStorage(const std::string& path, NQdb::TDecimalSpec spec) {
+    NQdb::TParquetFile file(path);
+    auto source = file.MakeSource();
+    const int32_t width = NQdb::DecimalStorageBytes(spec);
+    std::vector<std::optional<__int128>> scanned;
+    TRowSet rowSet{};
+    while (source->Next(rowSet)) {
+        const auto& column = rowSet.Columns[0];
+        for (int64_t row = 0; row < rowSet.RowCount; ++row) {
+            if (column.Mask && !(column.Mask[(column.MaskBitOffset + row) / 8] >> ((column.MaskBitOffset + row) % 8) & 1)) {
+                scanned.push_back(std::nullopt);
+                continue;
+            }
+            __int128 value = 0;
+            if (width == 8) {
+                int64_t narrow;
+                std::memcpy(&narrow, column.Data + row * 8, sizeof(narrow));
+                value = narrow;
+            } else {
+                std::memcpy(&value, column.Data + row * 16, sizeof(value));
+            }
+            scanned.push_back(value);
+        }
+        NQdb::Release(&rowSet);
+    }
+    return scanned;
 }
 
 } // namespace
@@ -678,34 +711,176 @@ TEST(IOTest, ScanDecimalColumnsInTheirStorage) {
                 *table, arrow::default_memory_pool(), output, 3, properties.build()).ok());
         }
 
-        NQdb::TParquetFile file(path);
-        auto source = file.MakeSource();
-        const NQdb::TDecimalSpec spec{.Precision = decimal.precision(), .Scale = decimal.scale()};
-        const int32_t width = NQdb::DecimalStorageBytes(spec);
-        std::vector<std::optional<__int128>> scanned;
-        TRowSet rowSet{};
-        while (source->Next(rowSet)) {
-            const auto& column = rowSet.Columns[0];
-            for (int64_t row = 0; row < rowSet.RowCount; ++row) {
-                if (column.Mask && !(column.Mask[(column.MaskBitOffset + row) / 8] >> ((column.MaskBitOffset + row) % 8) & 1)) {
-                    scanned.push_back(std::nullopt);
-                    continue;
-                }
-                __int128 value = 0;
-                if (width == 8) {
-                    int64_t narrow;
-                    std::memcpy(&narrow, column.Data + row * 8, sizeof(narrow));
-                    value = narrow;
-                } else {
-                    std::memcpy(&value, column.Data + row * 16, sizeof(value));
-                }
-                scanned.push_back(value);
-            }
-            NQdb::Release(&rowSet);
-        }
+        const auto scanned = ScanDecimalStorage(path, {.Precision = decimal.precision(), .Scale = decimal.scale()});
         ASSERT_EQ(scanned.size(), values.size()) << testCase.Type->ToString();
         for (size_t row = 0; row < values.size(); ++row) {
             EXPECT_TRUE(scanned[row] == values[row]) << testCase.Type->ToString() << " row " << row;
+        }
+    }
+}
+
+// Every physical type of a decimal, PLAIN and dictionary encoded, REQUIRED and with NULLs,
+// read through many pages, page-sized and chunk-sized reads, and row groups in one batch.
+// Fixed-length values are sign-extended to their length, BYTE_ARRAY values come in minimal,
+// sign-padded and empty (zero) forms. A dictionary chunk has several pages and falls back to PLAIN.
+TEST(IOTest, ScanDecimalPagesOfEveryPhysicalType) {
+    struct TCase {
+        parquet::Type::type Physical;
+        int Length;
+        int Precision;
+        bool Nullable;
+    };
+    constexpr int64_t rows = 20011;
+    constexpr int64_t rowGroupRows = 9001;
+    auto bigEndian = [](__int128 value, int length) {
+        std::string bytes(static_cast<size_t>(length), '\0');
+        for (int i = 0; i < length; ++i) {
+            bytes[static_cast<size_t>(length - 1 - i)] = static_cast<char>(value >> (8 * i));
+        }
+        return bytes;
+    };
+    // A BYTE_ARRAY decimal may carry any number of redundant sign bytes, and zero may be empty.
+    auto byteArrayLength = [&](__int128 value, int64_t row) {
+        int length = 1;
+        while (length < 16 && (value >= (static_cast<__int128>(1) << (8 * length - 1)) ||
+            value < -(static_cast<__int128>(1) << (8 * length - 1))))
+        {
+            ++length;
+        }
+        if (value == 0 && row % 3 == 0) {
+            return 0;
+        }
+        return std::min(16, length + static_cast<int>(row % 4));
+    };
+    for (const bool dictionary : {true, false}) {
+        for (const auto& testCase : std::vector<TCase>{
+            {parquet::Type::INT32, 0, 9, true},
+            {parquet::Type::INT64, 0, 18, true},
+            {parquet::Type::INT64, 0, 15, false},
+            {parquet::Type::FIXED_LEN_BYTE_ARRAY, 1, 2, true},
+            {parquet::Type::FIXED_LEN_BYTE_ARRAY, 7, 15, false},
+            {parquet::Type::FIXED_LEN_BYTE_ARRAY, 8, 18, true},
+            {parquet::Type::FIXED_LEN_BYTE_ARRAY, 9, 18, true},
+            {parquet::Type::FIXED_LEN_BYTE_ARRAY, 16, 15, true},
+            {parquet::Type::FIXED_LEN_BYTE_ARRAY, 13, 30, true},
+            {parquet::Type::FIXED_LEN_BYTE_ARRAY, 16, 38, false},
+            {parquet::Type::BYTE_ARRAY, 0, 15, true},
+            {parquet::Type::BYTE_ARRAY, 0, 38, true},
+        }) {
+            const std::string label = std::string(parquet::TypeToString(testCase.Physical)) + "(" +
+                std::to_string(testCase.Length) + ") p=" + std::to_string(testCase.Precision) +
+                (dictionary ? " dictionary" : " plain");
+            __int128 limit = 1;
+            for (int digit = 0; digit < testCase.Precision; ++digit) {
+                limit *= 10;
+            }
+            limit -= 1;
+            std::vector<std::optional<__int128>> values;
+            for (int64_t row = 0; row < rows; ++row) {
+                if (testCase.Nullable && row % 13 == 5) {
+                    values.push_back(std::nullopt);
+                    continue;
+                }
+                const __int128 edges[] = {limit, -limit, 0, -1, 1};
+                values.push_back(row % 11 < 5
+                    ? edges[row % 11]
+                    : (limit / (row % 997 + 2) + row % 7) * (row % 2 ? -1 : 1));
+            }
+
+            const std::string path = "/tmp/test_io_qdb_decimal_pages.parquet";
+            {
+                using parquet::schema::GroupNode;
+                using parquet::schema::PrimitiveNode;
+                auto node = PrimitiveNode::Make(
+                    "d",
+                    testCase.Nullable ? parquet::Repetition::OPTIONAL : parquet::Repetition::REQUIRED,
+                    parquet::LogicalType::Decimal(testCase.Precision, 2),
+                    testCase.Physical,
+                    testCase.Physical == parquet::Type::FIXED_LEN_BYTE_ARRAY ? testCase.Length : -1);
+                auto schema = std::static_pointer_cast<GroupNode>(
+                    GroupNode::Make("schema", parquet::Repetition::REQUIRED, {node}));
+                parquet::WriterProperties::Builder properties;
+                if (dictionary) {
+                    properties.enable_dictionary();
+                    properties.data_pagesize(1000);
+                    properties.dictionary_pagesize_limit(2000);
+                    properties.write_batch_size(128);
+                } else {
+                    properties.disable_dictionary();
+                    properties.data_pagesize(1000);
+                }
+                auto output = arrow::io::FileOutputStream::Open(path).ValueOrDie();
+                auto writer = parquet::ParquetFileWriter::Open(output, schema, properties.build());
+                for (int64_t begin = 0; begin < rows; begin += rowGroupRows) {
+                    const int64_t end = std::min(rows, begin + rowGroupRows);
+                    std::vector<int16_t> defLevels;
+                    std::vector<int32_t> ints;
+                    std::vector<int64_t> longs;
+                    std::vector<std::string> bytes;
+                    for (int64_t row = begin; row < end; ++row) {
+                        defLevels.push_back(values[row] ? 1 : 0);
+                        if (!values[row]) {
+                            continue;
+                        }
+                        ints.push_back(static_cast<int32_t>(*values[row]));
+                        longs.push_back(static_cast<int64_t>(*values[row]));
+                        bytes.push_back(bigEndian(*values[row],
+                            testCase.Length ? testCase.Length : byteArrayLength(*values[row], row)));
+                    }
+                    auto* column = writer->AppendRowGroup()->NextColumn();
+                    const auto count = static_cast<int64_t>(defLevels.size());
+                    const int16_t* levels = testCase.Nullable ? defLevels.data() : nullptr;
+                    switch (testCase.Physical) {
+                        case parquet::Type::INT32:
+                            static_cast<parquet::Int32Writer*>(column)->WriteBatch(count, levels, nullptr, ints.data());
+                            break;
+                        case parquet::Type::INT64:
+                            static_cast<parquet::Int64Writer*>(column)->WriteBatch(count, levels, nullptr, longs.data());
+                            break;
+                        case parquet::Type::FIXED_LEN_BYTE_ARRAY: {
+                            std::vector<parquet::FixedLenByteArray> flba;
+                            for (const auto& value : bytes) {
+                                flba.emplace_back(reinterpret_cast<const uint8_t*>(value.data()));
+                            }
+                            static_cast<parquet::FixedLenByteArrayWriter*>(column)->WriteBatch(count, levels, nullptr, flba.data());
+                            break;
+                        }
+                        default: {
+                            std::vector<parquet::ByteArray> binary(bytes.begin(), bytes.end());
+                            static_cast<parquet::ByteArrayWriter*>(column)->WriteBatch(count, levels, nullptr, binary.data());
+                            break;
+                        }
+                    }
+                }
+                writer->Close();
+                ASSERT_TRUE(output->Close().ok());
+            }
+
+            if (dictionary && testCase.Precision >= 9) {
+                // Thousands of distinct values overflow the dictionary page limit mid-chunk.
+                auto metadata = parquet::ParquetFileReader::OpenFile(path)->metadata();
+                for (int group = 0; group < metadata->num_row_groups(); ++group) {
+                    int64_t dictionaryPages = 0;
+                    int64_t plainPages = 0;
+                    for (const auto& stats : metadata->RowGroup(group)->ColumnChunk(0)->encoding_stats()) {
+                        if (stats.page_type == parquet::PageType::DATA_PAGE) {
+                            (stats.encoding == parquet::Encoding::PLAIN ? plainPages : dictionaryPages) += stats.count;
+                        }
+                    }
+                    EXPECT_GT(dictionaryPages, 0) << label << " group " << group;
+                    EXPECT_GT(plainPages, 0) << label << " group " << group;
+                }
+            }
+
+            const auto scanned = ScanDecimalStorage(path, {.Precision = testCase.Precision, .Scale = 2});
+            ASSERT_EQ(scanned.size(), values.size()) << label;
+            int64_t mismatches = 0;
+            for (size_t row = 0; row < values.size(); ++row) {
+                if (scanned[row] != values[row] && mismatches++ < 5) {
+                    ADD_FAILURE() << label << " row " << row;
+                }
+            }
+            EXPECT_EQ(mismatches, 0) << label;
         }
     }
 }
