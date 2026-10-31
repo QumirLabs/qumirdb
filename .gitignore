@@ -44,6 +44,8 @@ __pycache__/
 build/
 Build/
 build-*/
+# A source directory, not a build one.
+!/qdb/plan/build/
 
 # CMake generated files
 CMakeFiles/

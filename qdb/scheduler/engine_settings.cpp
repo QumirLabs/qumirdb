@@ -207,6 +207,10 @@ TEngineConfigBuilder BuildEngineConfig() {
     b.Flag("dump_passes", false,
         [](TEngineSettings& s, bool on) { s.Optimizer.DumpPasses = on ? &std::cerr : nullptr; },
         "Dump the plan to stderr after each optimizer pass.");
+    b.Enum("decorrelation", DecorrelationNames, ParseDecorrelation,
+        [](auto& s) -> auto& { return s.Optimizer.Decorrelation; },
+        "How SQL subqueries are decorrelated: legacy rewrites them while building the plan; "
+        "new attaches them with dependent joins (such plans are explain-only for now).");
 
     b.Section("jit");
     b.String("cache_dir", [](auto& s) -> auto& { return s.Scheduler.Jit.CacheDir; },

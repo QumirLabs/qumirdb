@@ -1,6 +1,7 @@
 #include <qdb/sexp/printer.h>
 
 #include <qdb/plan/ops/aggregate.h>
+#include <qdb/plan/ops/dependent_join.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/late_materialize.h>
@@ -257,6 +258,34 @@ void PrintRelBody(NQumir::NAst::TExpr& expr, TPrinter& printer, TPrintFrame fram
         return;
     }
 
+    if (rel == TDependentJoinOperator::OpId) {
+        auto& join = static_cast<TDependentJoinOperator&>(op);
+        out << "(rel dependent-join";
+        printer.Separator(frame.Level + 1);
+        printer.PrintExpr(join.Left(), frame.AllowTypeWrap, frame.Level + 1);
+        printer.Separator(frame.Level + 1);
+        printer.PrintExpr(join.Right(), frame.AllowTypeWrap, frame.Level + 1);
+        printer.Separator(frame.Level + 1);
+        out << '(' << DependentJoinKindName(join.Kind()) << ')';
+        printer.Separator(frame.Level + 1);
+        out << "(scope " << join.Scope() << ')';
+        if (!join.Marker().empty()) {
+            printer.Separator(frame.Level + 1);
+            out << "(marker ";
+            printer.PrintIdentifier(join.Marker());
+            out << ')';
+        }
+        if (join.Predicate()) {
+            printer.Separator(frame.Level + 1);
+            out << "(on";
+            printer.Space();
+            printer.PrintExpr(join.Predicate(), frame.AllowTypeWrap, frame.Level + 1);
+            out << ')';
+        }
+        out << ')';
+        return;
+    }
+
     if (rel == TUnionAllOperator::OpId) {
         auto& un = static_cast<TUnionAllOperator&>(op);
         out << "(rel union-all";
@@ -358,7 +387,7 @@ void PrintRel(NQumir::NAst::TExpr& expr, TPrinter& printer, TPrintFrame frame) {
 } // namespace
 
 TPrintExprFactory MakeRelPrinters() {
-    return {{IOperator::NodeId, PrintRel}};
+    return {{IOperator::NodeId, PrintRel}, {TOuterRefExpr::NodeId, PrintOuterRef}};
 }
 
 void PrintRelPlan(std::ostream& out, const TOperatorPtr& plan) {

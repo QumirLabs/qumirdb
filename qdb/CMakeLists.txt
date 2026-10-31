@@ -24,6 +24,7 @@ add_library(qumirdb
     plan/ops/project.cpp
     plan/ops/aggregate.cpp
     plan/ops/join.cpp
+    plan/ops/dependent_join.cpp
     plan/ops/union.cpp
     plan/ops/sort.cpp
     plan/ops/limit.cpp
@@ -64,6 +65,11 @@ add_library(qumirdb
     plan/pipeline.cpp
     plan/plan_print.cpp
     plan/build.cpp
+    plan/build/aggregate.cpp
+    plan/build/binder.cpp
+    plan/build/build.cpp
+    plan/build/expr.cpp
+    plan/build/relation.cpp
     plan/sql_lowering.cpp
     kernel/vm_function.cpp
     kernel/column_value.cpp
