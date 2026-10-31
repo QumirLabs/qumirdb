@@ -143,7 +143,7 @@ int CompareValues(const TColumn& left, int32_t leftRow,
         return 0;
     }
 
-    auto valueType = UnwrapNamedType(UnwrapNullableType(type));
+    auto valueType = PhysicalValueType(type);
     if (auto integer = TMaybeType<TIntegerType>(valueType)) {
         switch (integer.Cast()->Kind) {
             case TIntegerType::I8:
@@ -244,7 +244,7 @@ size_t SortColumnFixedWidth(const TTypePtr& type) {
         return sizeof(qdb_bin_int);
     }
 
-    auto valueType = UnwrapNamedType(UnwrapNullableType(type));
+    auto valueType = PhysicalValueType(type);
     if (auto integer = TMaybeType<TIntegerType>(valueType)) {
         return static_cast<size_t>(integer.Cast()->BitWidth() / 8);
     }

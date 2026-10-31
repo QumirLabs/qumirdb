@@ -296,7 +296,7 @@ NQumir::NAst::TTypePtr QumirDbNamedType(const std::string& name) {
 
 NQumir::NAst::TTypePtr SortCoreType(const NQumir::NAst::TTypePtr& type) {
     using namespace NQumir::NAst;
-    auto valueType = UnwrapNamedType(UnwrapNullableType(type));
+    auto valueType = PhysicalValueType(type);
     if (auto integer = TMaybeType<TIntegerType>(valueType)) {
         return std::make_shared<TIntegerType>(integer.Cast()->Kind);
     }
@@ -308,7 +308,7 @@ NQumir::NAst::TTypePtr SortCoreType(const NQumir::NAst::TTypePtr& type) {
 
 int64_t SortRadixKeyBits(const NQumir::NAst::TTypePtr& type) {
     using namespace NQumir::NAst;
-    auto valueType = UnwrapNamedType(UnwrapNullableType(type));
+    auto valueType = PhysicalValueType(type);
     if (auto integer = TMaybeType<TIntegerType>(valueType)) {
         return integer.Cast()->BitWidth();
     }
@@ -337,10 +337,17 @@ bool SortValueIsBinInt(const NQumir::NAst::TTypePtr& type) {
     return HasBinIntLayout(type);
 }
 
+// The kernel type a decimal window argument is loaded as: BinInt, or the i64 of a
+// decimal stored in i64.
+NQumir::NAst::TTypePtr WindowDecimalArgType(const NQumir::NAst::TTypePtr& type) {
+    return HasBinIntLayout(type)
+        ? BinIntStorageType()
+        : PhysicalValueType(type);
+}
+
 bool SortValueIsInteger(const NQumir::NAst::TTypePtr& type) {
     using namespace NQumir::NAst;
-    return static_cast<bool>(TMaybeType<TIntegerType>(
-        UnwrapNamedType(UnwrapNullableType(type))));
+    return static_cast<bool>(TMaybeType<TIntegerType>(PhysicalValueType(type)));
 }
 
 NQumir::NAst::TExprPtr Int64Literal(int64_t value) {
@@ -878,7 +885,7 @@ NQumir::NAst::TExprPtr BuildTopSortUpdateAst(
 
 int64_t MaterializeFixedWidth(const NQumir::NAst::TTypePtr& type) {
     using namespace NQumir::NAst;
-    auto valueType = UnwrapNamedType(UnwrapNullableType(type));
+    auto valueType = PhysicalValueType(type);
     if (auto integer = TMaybeType<TIntegerType>(valueType)) {
         return integer.Cast()->BitWidth() / 8;
     }
@@ -1157,7 +1164,7 @@ NQumir::NAst::TExprPtr BuildWindowMaterializeWrapperAst(
                 const int64_t maskOwner = ownerIdx++;
                 const auto& argType =
                     inputType.Fields[static_cast<size_t>(funcs[f].ArgColumn)].second;
-                if (SortValueIsBinInt(argType)) {
+                if (SortValueIsBinInt(argType) || IsDecimalType(argType)) {
                     // Scale the sum up to the result decimal's scale before dividing
                     // by the count, so the quotient keeps fractional precision. The
                     // delta is exactly the scale the result type added over the arg.
@@ -1166,10 +1173,19 @@ NQumir::NAst::TExprPtr BuildWindowMaterializeWrapperAst(
                         UnwrapNullableType(funcs[f].ResultType));
                     const int64_t scaleDelta =
                         (argSpec && resSpec) ? (resSpec->Scale - argSpec->Scale) : 0;
+                    auto outType = resSpec
+                        ? DecimalStorageType(*resSpec)
+                        : BinIntStorageType();
+                    const int64_t outBytes = resSpec
+                        ? DecimalStorageBytes(*resSpec)
+                        : 16;
                     builder.Stmt(Oz::Call("window_fill_partition_avg_binint", {
                         Oz::Ident("store"), Oz::Ident("row_ids"), Oz::Ident("start"),
                         Oz::Ident("n"),
                         Int64Literal(static_cast<int64_t>(funcs[f].ArgColumn)),
+                        Cast(Int64Literal(0), Ptr(WindowDecimalArgType(argType))),
+                        Cast(Int64Literal(0), Ptr(std::move(outType))),
+                        Int64Literal(outBytes),
                         column(static_cast<size_t>(inputColumnCount) + f),
                         Oz::Ident("out_rowset"), Int64Literal(dataOwner),
                         Int64Literal(maskOwner),
@@ -1199,7 +1215,10 @@ NQumir::NAst::TExprPtr BuildWindowMaterializeWrapperAst(
                 const int64_t maskOwner = ownerIdx++;
                 const auto& argType =
                     inputType.Fields[static_cast<size_t>(funcs[f].ArgColumn)].second;
-                const bool binInt = SortValueIsBinInt(argType);
+                const bool isSum = funcs[f].Func != "max_prefix";
+                // A decimal sum accumulates in i128 whatever the argument's storage.
+                const bool binInt = SortValueIsBinInt(argType) ||
+                    (isSum && IsDecimalType(argType));
                 const bool isPrefix = funcs[f].Func != "sum_partition";
                 if (binInt) {
                     const char* filler = funcs[f].Func == "sum_prefix"
@@ -1211,10 +1230,15 @@ NQumir::NAst::TExprPtr BuildWindowMaterializeWrapperAst(
                         Oz::Ident("store"), Oz::Ident("row_ids"), Oz::Ident("start"),
                         Oz::Ident("n"),
                         Int64Literal(static_cast<int64_t>(funcs[f].ArgColumn)),
+                    };
+                    if (isSum) {
+                        args.push_back(Cast(Int64Literal(0), Ptr(WindowDecimalArgType(argType))));
+                    }
+                    args.insert(args.end(), {
                         column(static_cast<size_t>(inputColumnCount) + f),
                         Oz::Ident("out_rowset"), Int64Literal(dataOwner),
                         Int64Literal(maskOwner),
-                    };
+                    });
                     if (isPrefix) {
                         args.push_back(Oz::Bool(funcs[f].PeerInclusive));
                     }
@@ -2080,7 +2104,7 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
     const auto keyDescriptor = NKernel::BuildAggregateKeyDescriptor(inputType, groupKeys);
     for (const auto& field : keyDescriptor.Fields) {
         const auto valueType = UnwrapNullableType(field.Type);
-        const auto type = UnwrapNamedType(valueType);
+        const auto type = PhysicalValueType(valueType);
         if (!IsBinIntStorageType(valueType) &&
             !TMaybeType<TIntegerType>(type) && !TMaybeType<TFloatType>(type) &&
             !TMaybeType<TStringType>(type) && !TMaybeType<TBoolType>(type)) {
@@ -2121,9 +2145,10 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
             const std::string& name = ident.Cast()->Name;
             const auto type = requireField(name);
             const auto valueType = UnwrapNullableType(type);
-            const bool isBinInt =
-                IsBinIntStorageType(valueType) || IsDecimalType(valueType);
-            const auto unwrapped = isBinInt ? valueType : UnwrapNamedType(valueType);
+            // SUM over a decimal stored in i64 keeps an i128 state (DECIMAL(38, s)).
+            const bool isBinInt = IsBinIntStorageType(valueType) || IsDecimal128Type(valueType) ||
+                (IsDecimalType(valueType) && agg.Func == "sum");
+            const auto unwrapped = isBinInt ? valueType : PhysicalValueType(valueType);
             const bool isFloat = static_cast<bool>(TMaybeType<TFloatType>(unwrapped));
             const bool isInteger = static_cast<bool>(TMaybeType<TIntegerType>(unwrapped));
             const bool isString = static_cast<bool>(TMaybeType<TStringType>(unwrapped));

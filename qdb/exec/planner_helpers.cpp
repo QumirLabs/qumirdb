@@ -675,8 +675,8 @@ TUnaryRuntimeProcess BuildProjectRuntimeProcess(
 // Radix key byte width: integer width, or 8 for f64.
 int32_t RadixKeyWidthBytes(const NQumir::NAst::TTypePtr& type) {
     using namespace NQumir::NAst;
-    if (DecimalSpecOfValueType(UnwrapNullableType(type))) {
-        return 16; // qdb_bin_int (128-bit)
+    if (auto decimal = DecimalSpecOf(type)) {
+        return DecimalStorageBytes(*decimal);
     }
     auto inner = UnwrapNamedType(UnwrapNullableType(type));
     if (auto integer = TMaybeType<TIntegerType>(inner)) {
@@ -884,8 +884,8 @@ TWindowRuntimeProcess BuildWindowRuntimeProcess(
         const auto& argType = inputStruct->Fields[idx].second;
         auto valueType = UnwrapNullableType(argType);
         const bool isBinInt =
-            IsDecimalType(valueType) || IsBinIntStorageType(valueType);
-        auto inner = UnwrapNamedType(valueType);
+            IsDecimal128Type(valueType) || IsBinIntStorageType(valueType);
+        auto inner = PhysicalValueType(valueType);
         auto integer = TMaybeType<TIntegerType>(inner);
         const bool isInteger = static_cast<bool>(integer);
         const bool isFloat = static_cast<bool>(TMaybeType<TFloatType>(inner));

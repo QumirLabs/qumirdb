@@ -96,8 +96,8 @@ TTypePtr ToQumirType(const TTypePtr& type) {
             std::vector<TGenericArg>{
                 TGenericArg::TypeArg(ToQumirType(UnwrapNullableType(type)))});
     }
-    if (IsDecimalType(type)) {
-        return DecimalStorageType();
+    if (auto decimal = DecimalSpecOfValueType(type)) {
+        return DecimalStorageType(*decimal);
     }
     if (TMaybeType<TStringType>(type)) {
         return std::make_shared<TNamedType>("StringView", nullptr);
@@ -2112,7 +2112,7 @@ TTypePtr ExpandDecimalNode(TExprPtr& e, const TStructType& inputType, TTypeEnv& 
                 {
                     return std::make_shared<TBoolType>();
                 }
-                return DecimalStorageType();
+                return BinIntStorageType();
             }
         }
         TTypePtr ret = InferType(e, inputType);
