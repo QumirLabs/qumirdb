@@ -128,6 +128,8 @@ flowchart LR
 The scheduler dispatches tasks, but filter/project semantics live in
 `TUnaryCode`. A JS runtime would need to implement this task and connection
 protocol; the filter/project computation can stay in WASM kernels.
+Natively, a filter directly over a Parquet scan runs inside the source task
+instead, as a [staged scan](staged_scan.md).
 
 ### Grouped aggregate without local reduction
 

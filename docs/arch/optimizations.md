@@ -742,7 +742,9 @@ scan by the cost of the columns each one adds, measured as uncompressed bytes
 per row in the file metadata; a conjunct over columns that are already read
 costs nothing and follows them, however costly it is to evaluate. Costs within
 a factor of two are ordered by the estimated selectivity. The logical plan and
-EXPLAIN keep the SQL order.
+EXPLAIN keep the SQL order. The same order sets the stages of the
+[staged scan](staged_scan.md), which reads a later column only for the rows the
+earlier conjuncts keep.
 
 ```sql
 SELECT ... FROM hits WHERE URL LIKE '%google%' AND SearchPhrase <> '';

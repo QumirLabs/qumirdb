@@ -41,6 +41,9 @@
     },
     "nested.sql": {
       "order": "ordered"
+    },
+    "staged_scan.sql": {
+      "order": "ordered"
     }
   }
 }

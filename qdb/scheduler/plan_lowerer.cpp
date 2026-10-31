@@ -8,6 +8,7 @@
 #include <qdb/exec/runtime_filter.h>
 #include <qdb/exec/runtime_context.h>
 #include <qdb/exec/sort_exec.h>
+#include <qdb/exec/staged_scan_exec.h>
 #include <qdb/exec/window_exec.h>
 #include <qdb/io/parquet/source.h>
 #include <qdb/kernel/compiler.h>
@@ -602,13 +603,27 @@ public:
         NScheduler::IConnection& outConn,
         size_t outLaneOffset = 0)
     {
+        return LowerWithRuntimeFilters(op, outConn, outLaneOffset,
+            [&](NScheduler::IConnection& conn, size_t laneOffset) {
+                return LowerRaw(op, conn, laneOffset);
+            });
+    }
+
+    // Lowers `op` with `lowerRaw`, followed by the runtime filters it consumes.
+    template <typename TLowerRaw>
+    TLoweredOutput LowerWithRuntimeFilters(
+        const TOperatorPtr& op,
+        NScheduler::IConnection& outConn,
+        size_t outLaneOffset,
+        TLowerRaw&& lowerRaw)
+    {
         if (op->RuntimeFilterUses.empty()) {
-            return LowerRaw(op, outConn, outLaneOffset);
+            return lowerRaw(outConn, outLaneOffset);
         }
         const size_t lanes = OutputLanes(op);
         auto& firstInput = AddConn<NScheduler::TOneToOneConnection>(
             lanes, lanes, "runtime-filter-input");
-        auto lowered = LowerRaw(op, firstInput, 0);
+        auto lowered = lowerRaw(firstInput, 0);
         NScheduler::IConnection* input = &firstInput;
         for (size_t index = 0; index < op->RuntimeFilterUses.size(); ++index) {
             const auto& use = op->RuntimeFilterUses[index];
@@ -663,6 +678,9 @@ public:
         }
         if (auto n = TMaybeOp<TFilterOperator>(op)) {
             auto filter = n.Cast();
+            if (auto staged = LowerStagedScan(filter, outConn, outLaneOffset)) {
+                return std::move(*staged);
+            }
             auto execStageId = NewExecStage(
                 filter.get(), EExecPlanNodeKind::Filter);
             auto stageLabel = StageLabel("filter", execStageId);
@@ -1204,6 +1222,150 @@ private:
             : TSourceSplits{std::move(splits)};
         ScanSplitCache_.emplace(&src, result);
         return result;
+    }
+
+    // A chain of filters over a Parquet scan runs inside the scan task (TStagedScan): the
+    // columns are read in the steps of OrderScanConjuncts, each one only for the rows the
+    // earlier steps keep. nullopt keeps the scan and the filter as separate tasks.
+    std::optional<TLoweredOutput> LowerStagedScan(
+        const std::shared_ptr<TFilterOperator>& filter,
+        NScheduler::IConnection& outConn,
+        size_t outLaneOffset)
+    {
+        if (!Settings_.Scan.StagedFilter) {
+            return std::nullopt;
+        }
+        std::vector<NQumir::NAst::TExprPtr> predicates{filter->Predicate()};
+        TOperatorPtr input = filter->Input();
+        while (auto nested = TMaybeOp<TFilterOperator>(input)) {
+            if (!input->RuntimeFilterUses.empty()) {
+                return std::nullopt;
+            }
+            predicates.push_back(nested.Cast()->Predicate());
+            input = nested.Cast()->Input();
+        }
+        // The innermost filter comes first in SQL order.
+        std::reverse(predicates.begin(), predicates.end());
+        auto maybeSource = TMaybeOp<TSourceOperator>(input);
+        if (!maybeSource) {
+            return std::nullopt;
+        }
+        auto source = maybeSource.Cast();
+        auto* parquet = dynamic_cast<TParquetSource*>(&source->GetSource());
+        const auto splits = parquet
+            ? ScanSplits(*source)
+            : TSourceSplits{};
+        const auto readsRowGroups = [](const NScheduler::TScanSplit& split) {
+            return !split.RowGroups.empty();
+        };
+        if (!splits || splits->empty() || !std::ranges::all_of(*splits, readsRowGroups)) {
+            return std::nullopt;
+        }
+
+        const auto sourceType = BuildSourceRuntimeType(*source);
+        const auto& sourceStruct = static_cast<const NQumir::NAst::TStructType&>(*sourceType);
+        // The file column of each scan column; the row locator has none.
+        std::unordered_map<std::string, std::string> fileColumns;
+        for (size_t i = 0; i < sourceStruct.Fields.size(); ++i) {
+            std::string name(parquet->Schema().Columns[i].Name);
+            if (name != InternalRowIdColumnName) {
+                fileColumns.emplace(sourceStruct.Fields[i].first, std::move(name));
+            }
+        }
+        auto steps = NScheduler::OrderScanConjuncts(
+            ScanConjuncts(predicates, input), ColumnBytes(*source, *parquet));
+        std::vector<std::vector<std::string>> groups;
+        std::unordered_set<std::string> filterColumns;
+        for (const auto& step : steps) {
+            auto& group = groups.emplace_back();
+            for (const auto& column : step.NewColumns) {
+                filterColumns.insert(column);
+                if (auto file = fileColumns.find(column); file != fileColumns.end()) {
+                    group.push_back(file->second);
+                }
+            }
+        }
+        std::vector<std::string> payload;
+        for (const auto& [name, _] : sourceStruct.Fields) {
+            auto file = fileColumns.find(name);
+            if (file != fileColumns.end() && !filterColumns.contains(name)) {
+                payload.push_back(file->second);
+            }
+        }
+        // One step and no payload leaves nothing to read later.
+        if (groups.empty() || groups[0].empty() || (steps.size() == 1 && payload.empty())) {
+            return std::nullopt;
+        }
+        auto columnPlan = BuildFilterColumnPlan(*filter, sourceType);
+        // The runtime filters of the source follow the staged scan.
+        const auto* outputStruct = static_cast<const NQumir::NAst::TStructType*>(
+            columnPlan.OutputType.get());
+        for (const auto& use : source->RuntimeFilterUses) {
+            for (const auto& key : use.ProbeKeys) {
+                if (!FieldType(outputStruct, key)) {
+                    return std::nullopt;
+                }
+            }
+        }
+
+        // One stage: the scan task also runs the filter kernels.
+        const auto execStageId = NewExecStage(source.get(), EExecPlanNodeKind::Source);
+        const auto stageLabel = StageLabel("staged-scan", execStageId);
+        auto plan = std::make_shared<TStagedScanPlan>();
+        {
+            TStageDiagnosticsScope diagnosticsScope(Diagnostics_, stageLabel);
+            for (const auto& step : steps) {
+                auto spec = NKernel::BuildFilterKernelSpec(
+                    sourceStruct, ConjoinPredicates(step.Conjuncts), "<kernel>",
+                    ExternalCatalog_.get(), RuntimeContext_.get());
+                TKernelCompiler compiler(KernelOptions(stageLabel, execStageId));
+                plan->Stages.push_back(compiler.CompileFilter(spec));
+            }
+        }
+        plan->Payload = !payload.empty();
+        plan->KeptColumns = std::move(columnPlan.KeptInputColumns);
+        if (Diagnostics_) {
+            *Diagnostics_ << "staged scan: source="
+                << (source->GetAlias().empty() ? source->SourcePath() : source->GetAlias())
+                << " stages=";
+            for (const auto& group : groups) {
+                *Diagnostics_ << '[' << JoinNames(group) << ']';
+            }
+            *Diagnostics_ << " payload=[" << JoinNames(payload) << "]\n";
+        }
+        groups.erase(groups.begin());
+        if (!payload.empty()) {
+            groups.push_back(std::move(payload));
+        }
+        const std::string label = "staged-scan " + source->GetAlias();
+        return LowerWithRuntimeFilters(source, outConn, outLaneOffset,
+            [&](NScheduler::IConnection& conn, size_t laneOffset) {
+                auto code = std::make_shared<NScheduler::TSourceCode>(
+                    [](void* state, TRowSet& rowSet) {
+                        return static_cast<TStagedScan*>(state)->Next(rowSet);
+                    });
+                TLoweredOutput result{.OutputType = columnPlan.OutputType};
+                for (size_t lane = 0; lane < splits->size(); ++lane) {
+                    auto state = std::make_shared<TStagedScan>(
+                        parquet->MakeGroupedScan((*splits)[lane].RowGroups, groups), plan);
+                    auto task = std::make_unique<NScheduler::TSourceTask>(
+                        code,
+                        std::move(state),
+                        NScheduler::TOutputPort{.Connection = &conn, .Lane = lane + laneOffset});
+                    auto& node = Graph_.AddOwnedNode(std::move(task));
+                    MarkNode(node, "source", execStageId, label, execStageId);
+                    result.Producers.push_back(&node);
+                }
+                return result;
+            });
+    }
+
+    static std::string JoinNames(const std::vector<std::string>& names) {
+        std::string joined;
+        for (const auto& name : names) {
+            joined += (joined.empty() ? "" : ", ") + name;
+        }
+        return joined;
     }
 
     // A filter over a Parquet scan evaluates its conjuncts in OrderScanConjuncts order.

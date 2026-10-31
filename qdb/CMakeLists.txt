@@ -95,6 +95,7 @@ add_library(qumirdb
     exec/sort_key_ops.cpp
     exec/window_exec.cpp
     exec/planner_helpers.cpp
+    exec/staged_scan_exec.cpp
     exec/plan_builder.cpp
     scheduler/conjunct_order.cpp
     scheduler/connection.cpp

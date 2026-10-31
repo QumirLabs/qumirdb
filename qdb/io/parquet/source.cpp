@@ -28,6 +28,7 @@
 #include <numeric>
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 #include <qumir/parser/type.h>
@@ -94,6 +95,79 @@ char* NumericData(const std::shared_ptr<arrow::Array>& arr) {
 
 arrow::MemoryPool* GetMemoryPool();
 
+// Points `col` at the values of `arr`. Decimal values copied to the width of their storage
+// are kept in `decimalValues`.
+void ArrayToColumn(
+    const std::shared_ptr<arrow::Array>& arr,
+    TColumn& col,
+    std::vector<std::shared_ptr<arrow::Buffer>>& decimalValues)
+{
+    col.Offsets = nullptr;
+    col.OffsetWidth = 0;
+    col.DataBitOffset = 0;
+    col.Mask = nullptr;
+    col.MaskBitOffset = 0;
+
+    if (arr->null_count() > 0) {
+        col.Mask = arr->null_bitmap_data();
+        col.MaskBitOffset = static_cast<int32_t>(arr->offset());
+    }
+
+    switch (arr->type_id()) {
+        case arrow::Type::INT8:
+        case arrow::Type::INT16:
+        case arrow::Type::INT32:
+        case arrow::Type::INT64:
+        case arrow::Type::UINT8:
+        case arrow::Type::UINT16:
+        case arrow::Type::UINT32:
+        case arrow::Type::UINT64:
+        case arrow::Type::FLOAT:
+        case arrow::Type::DOUBLE:
+        case arrow::Type::DATE32:
+        case arrow::Type::DATE64: {
+            col.Data = NumericData(arr);
+            break;
+        }
+        case arrow::Type::DECIMAL32:
+        case arrow::Type::DECIMAL64:
+        case arrow::Type::DECIMAL128: {
+            auto values = DecimalStorageValues(*arr, GetMemoryPool());
+            col.Data = const_cast<char*>(reinterpret_cast<const char*>(values->data()));
+            decimalValues.push_back(std::move(values));
+            break;
+        }
+        case arrow::Type::BOOL: {
+            auto bitmap = arr->data()->buffers[1];
+            col.Data = const_cast<char*>(reinterpret_cast<const char*>(bitmap->data()));
+            col.DataBitOffset = static_cast<int32_t>(arr->offset());
+            break;
+        }
+        case arrow::Type::STRING: {
+            auto typed = std::static_pointer_cast<arrow::StringArray>(arr);
+            const int32_t* src = typed->raw_value_offsets() + arr->offset();
+            int32_t base = src[0];
+            col.Offsets = const_cast<int32_t*>(src);
+            col.OffsetWidth = 4;
+            col.Data = const_cast<char*>(reinterpret_cast<const char*>(typed->raw_data()) + base);
+            break;
+        }
+        case arrow::Type::LARGE_STRING: {
+            auto typed = std::static_pointer_cast<arrow::LargeStringArray>(arr);
+            const int64_t* src = typed->raw_value_offsets() + arr->offset();
+            int64_t base = src[0];
+            col.Offsets = const_cast<int64_t*>(src);
+            col.OffsetWidth = 8;
+            col.Data = const_cast<char*>(reinterpret_cast<const char*>(typed->raw_data()) + base);
+            break;
+        }
+        default: {
+            col.Data = nullptr;
+            break;
+        }
+    }
+}
+
 void RecordBatchToRowSet(
     std::shared_ptr<arrow::RecordBatch> batch,
     TRowSet& rowSet)
@@ -106,72 +180,7 @@ void RecordBatchToRowSet(
     data->Columns.resize(numCols);
 
     for (int32_t i = 0; i < numCols; ++i) {
-        auto arr = data->Batch->column(i);
-        TColumn& col = data->Columns[i];
-        col.Offsets = nullptr;
-        col.OffsetWidth = 0;
-        col.DataBitOffset = 0;
-        col.Mask = nullptr;
-        col.MaskBitOffset = 0;
-
-        if (arr->null_count() > 0) {
-            col.Mask = arr->null_bitmap_data();
-            col.MaskBitOffset = static_cast<int32_t>(arr->offset());
-        }
-
-        switch (arr->type_id()) {
-            case arrow::Type::INT8:
-            case arrow::Type::INT16:
-            case arrow::Type::INT32:
-            case arrow::Type::INT64:
-            case arrow::Type::UINT8:
-            case arrow::Type::UINT16:
-            case arrow::Type::UINT32:
-            case arrow::Type::UINT64:
-            case arrow::Type::FLOAT:
-            case arrow::Type::DOUBLE:
-            case arrow::Type::DATE32:
-            case arrow::Type::DATE64: {
-                col.Data = NumericData(arr);
-                break;
-            }
-            case arrow::Type::DECIMAL32:
-            case arrow::Type::DECIMAL64:
-            case arrow::Type::DECIMAL128: {
-                auto values = DecimalStorageValues(*arr, GetMemoryPool());
-                col.Data = const_cast<char*>(reinterpret_cast<const char*>(values->data()));
-                data->DecimalValues.push_back(std::move(values));
-                break;
-            }
-            case arrow::Type::BOOL: {
-                auto bitmap = arr->data()->buffers[1];
-                col.Data = const_cast<char*>(reinterpret_cast<const char*>(bitmap->data()));
-                col.DataBitOffset = static_cast<int32_t>(arr->offset());
-                break;
-            }
-            case arrow::Type::STRING: {
-                auto typed = std::static_pointer_cast<arrow::StringArray>(arr);
-                const int32_t* src = typed->raw_value_offsets() + arr->offset();
-                int32_t base = src[0];
-                col.Offsets = const_cast<int32_t*>(src);
-                col.OffsetWidth = 4;
-                col.Data = const_cast<char*>(reinterpret_cast<const char*>(typed->raw_data()) + base);
-                break;
-            }
-            case arrow::Type::LARGE_STRING: {
-                auto typed = std::static_pointer_cast<arrow::LargeStringArray>(arr);
-                const int64_t* src = typed->raw_value_offsets() + arr->offset();
-                int64_t base = src[0];
-                col.Offsets = const_cast<int64_t*>(src);
-                col.OffsetWidth = 8;
-                col.Data = const_cast<char*>(reinterpret_cast<const char*>(typed->raw_data()) + base);
-                break;
-            }
-            default: {
-                col.Data = nullptr;
-                break;
-            }
-        }
+        ArrayToColumn(data->Batch->column(i), data->Columns[i], data->DecimalValues);
     }
 
     rowSet = {
@@ -275,8 +284,8 @@ struct TParquetFileData {
     std::shared_ptr<arrow::Schema> FileSchema;
     std::vector<std::string> FileNames;
     std::vector<TColumnSchema> FileColumns;
-    // Per decimal field: the leaf column a TParquetColumnScan reads, else -1 (read by Arrow).
-    std::vector<int> DecimalScanColumns;
+    // Per field: the leaf column a TParquetColumnScan can read, else -1 (read by Arrow).
+    std::vector<int> ColumnScanLeaves;
     TSchema FullSchema;
     std::vector<NScheduler::TScanRowGroup> RowGroups;
     std::vector<std::vector<TRowGroupColumnRange>> RowGroupRanges;
@@ -338,18 +347,18 @@ void TParquetFileData::Open()
     FullSchema = TSchema{FileColumns};
 
     const auto& manifest = FileReader->manifest();
-    DecimalScanColumns.assign(static_cast<size_t>(FileSchema->num_fields()), -1);
+    ColumnScanLeaves.assign(static_cast<size_t>(FileSchema->num_fields()), -1);
     for (size_t field = 0; field < manifest.schema_fields.size() &&
-        field < DecimalScanColumns.size(); ++field)
+        field < ColumnScanLeaves.size(); ++field)
     {
         const auto& schemaField = manifest.schema_fields[field];
-        if (!schemaField.is_leaf() || !IsDecimalType(FileColumns[field].Type)) {
+        if (!schemaField.is_leaf()) {
             continue;
         }
         const auto* descriptor =
             FileReader->parquet_reader()->metadata()->schema()->Column(schemaField.column_index);
         if (TParquetColumnScan::Supports(*descriptor, FileSchema->field(static_cast<int>(field))->type())) {
-            DecimalScanColumns[field] = schemaField.column_index;
+            ColumnScanLeaves[field] = schemaField.column_index;
         }
     }
 
@@ -640,8 +649,8 @@ void TParquetSource::ResetReader()
     ColumnScans_.clear();
     for (size_t position = 0; position < SelectedColumns_.size(); ++position) {
         const int field = SelectedColumns_[position];
-        const int leaf = File_->DecimalScanColumns[static_cast<size_t>(field)];
-        if (leaf < 0) {
+        const int leaf = File_->ColumnScanLeaves[static_cast<size_t>(field)];
+        if (leaf < 0 || !IsDecimalType(File_->FileColumns[static_cast<size_t>(field)].Type)) {
             arrowColumns.push_back(field);
             continue;
         }
@@ -1050,6 +1059,99 @@ std::unique_ptr<TParquetSource> TParquetSource::MakeRowGroupsSource(
     return std::unique_ptr<TParquetSource>(new TParquetSource(
         File_, std::optional<std::vector<int>>(std::move(rowGroups)),
         RestrictedColumns_));
+}
+
+std::unique_ptr<TParquetGroupedScan> TParquetSource::MakeGroupedScan(
+    const std::vector<size_t>& selectedRowGroups,
+    const std::vector<std::vector<std::string>>& laterGroups) const
+{
+    const std::vector<int> rowGroups(selectedRowGroups.begin(), selectedRowGroups.end());
+    std::unordered_map<std::string_view, size_t> positions;
+    for (size_t position = 0; position < Names_.size(); ++position) {
+        positions.emplace(Names_[position], position);
+    }
+    auto scan = std::unique_ptr<TParquetGroupedScan>(new TParquetGroupedScan());
+    scan->ColumnCount_ = Names_.size();
+    std::unordered_set<std::string> first(Names_.begin(), Names_.end());
+    for (const auto& group : laterGroups) {
+        auto& columns = scan->Groups_.emplace_back();
+        for (const auto& name : group) {
+            const size_t position = positions.at(name);
+            // The row locator and a column the column scan cannot read stay in the first group.
+            const int field = position < SelectedColumns_.size()
+                ? SelectedColumns_[position]
+                : -1;
+            const int leaf = field < 0
+                ? -1
+                : File_->ColumnScanLeaves[static_cast<size_t>(field)];
+            if (leaf < 0) {
+                continue;
+            }
+            columns.push_back({
+                .Position = position,
+                .Scan = std::make_unique<TParquetColumnScan>(
+                    *File_->FileReader->parquet_reader(), leaf, File_->FileSchema->field(field)->type(),
+                    rowGroups, GetMemoryPool()),
+            });
+            first.erase(name);
+        }
+    }
+    scan->First_ = std::unique_ptr<TParquetSource>(new TParquetSource(
+        File_, std::optional<std::vector<int>>(rowGroups), std::move(first)));
+    for (const auto& name : scan->First_->Names_) {
+        scan->FirstPositions_.push_back(positions.at(name));
+    }
+    return scan;
+}
+
+struct TParquetGroupedScan::TBatch {
+    TRowSet First = {};
+    std::vector<TColumn> Columns;
+    std::vector<std::shared_ptr<arrow::Array>> Arrays;
+    std::vector<std::shared_ptr<arrow::Buffer>> DecimalValues;
+};
+
+TParquetGroupedScan::~TParquetGroupedScan() = default;
+
+bool TParquetGroupedScan::Next(TRowSet& rowSet) {
+    TRowSet first = {};
+    if (!First_->Next(first)) {
+        return false;
+    }
+    auto* batch = new TBatch{.First = first};
+    batch->Columns.resize(ColumnCount_);
+    for (size_t i = 0; i < FirstPositions_.size(); ++i) {
+        batch->Columns[FirstPositions_[i]] = first.Columns[i];
+    }
+    Batch_ = batch;
+    rowSet = {
+        .Columns = batch->Columns.data(),
+        .ColumnCount = static_cast<int64_t>(ColumnCount_),
+        .RowCount = first.RowCount,
+        .Selection = nullptr,
+        .Destroy = [](TRowSet* destroyed) {
+            auto* data = static_cast<TBatch*>(destroyed->Private);
+            Release(&data->First);
+            delete data;
+        },
+        .Private = batch,
+        .RefCount = 1,
+    };
+    return true;
+}
+
+void TParquetGroupedScan::Read(size_t group, const uint8_t* selection) {
+    for (auto& column : Groups_[group - 1]) {
+        auto values = column.Scan->Read(Batch_->First.RowCount, selection);
+        ArrayToColumn(values, Batch_->Columns[column.Position], Batch_->DecimalValues);
+        Batch_->Arrays.push_back(std::move(values));
+    }
+}
+
+void TParquetGroupedScan::Skip(size_t group) {
+    for (auto& column : Groups_[group - 1]) {
+        column.Scan->Skip(Batch_->First.RowCount);
+    }
 }
 
 std::shared_ptr<const IPhysicalRowReader> TParquetSource::CompileReader(
