@@ -577,6 +577,200 @@ EJoinBuildSide TInnerJoinProcessor::RequiredInputSide() const {
     return EJoinBuildSide::Auto;
 }
 
+TJoinBuildTable::TJoinBuildTable(
+    TJoinKernels kernels,
+    EJoinType joinType,
+    EJoinSide buildSide)
+    : Kernels_(std::move(kernels))
+    , JoinType_(joinType)
+    , BuildSide_(buildSide)
+{
+    const bool semiAnti =
+        joinType == EJoinType::LeftSemi || joinType == EJoinType::LeftAnti;
+    if (joinType != EJoinType::Inner && !semiAnti) {
+        throw std::runtime_error("a shared build table supports inner and left semi/anti joins only");
+    }
+    if (semiAnti && buildSide != EJoinSide::Right) {
+        throw std::runtime_error("a shared semi/anti build table must hold the right side");
+    }
+}
+
+TJoinBuildTable::~TJoinBuildTable() {
+    if (Initialized_) {
+        Kernels_.Dispatch(
+            LeftTable_.data(),
+            RightTable_.data(),
+            nullptr,
+            0,
+            &PairBuffer_,
+            nullptr,
+            nullptr,
+            0,
+            JoinOp(EJoinKernelOp::Destroy));
+    }
+}
+
+void TJoinBuildTable::SetInstrumentation(TOperatorInstrumentation* instrumentation) {
+    // These are the build task's counters, whose only input is the build
+    // side, whichever side of the join that is.
+    Instrumentation_ = instrumentation;
+    Rows_.SetInstrumentation(instrumentation, 0);
+}
+
+void TJoinBuildTable::EnsureInit() {
+    if (Initialized_) {
+        return;
+    }
+    Initialized_ = true;
+    if (!Kernels_.Dispatch(
+            LeftTable_.data(),
+            RightTable_.data(),
+            nullptr,
+            0,
+            &PairBuffer_,
+            nullptr,
+            nullptr,
+            JoinInitialCapacity,
+            JoinOp(EJoinKernelOp::Init))) {
+        throw std::runtime_error("join hash table initialization failed");
+    }
+}
+
+void TJoinBuildTable::Add(TRowSet batch) {
+    if (Sealed_) {
+        Release(&batch);
+        throw std::runtime_error("the shared build table is already sealed");
+    }
+    EnsureInit();
+    const bool buildLeft = BuildSide_ == EJoinSide::Left;
+    const auto op = buildLeft ? EJoinKernelOp::UpdateLeft : EJoinKernelOp::UpdateRight;
+    // SEMI/ANTI keep only the key set of the right side.
+    const bool keyOnly = JoinType_ != EJoinType::Inner;
+    int32_t batchIdx = -1;
+    TRowSet* input = &batch;
+    if (!keyOnly) {
+        batchIdx = Rows_.PushBatch(batch);
+        input = const_cast<TRowSet*>(&Rows_.Batch(batchIdx));
+    }
+    TRowSet* store = const_cast<TRowSet*>(Rows_.Data());
+    const bool ok = Kernels_.Dispatch(
+        LeftTable_.data(),
+        RightTable_.data(),
+        input,
+        batchIdx,
+        &PairBuffer_,
+        buildLeft ? store : nullptr,
+        buildLeft ? nullptr : store,
+        0,
+        JoinOp(op));
+    if (keyOnly) {
+        Release(&batch);
+    }
+    if (!ok) {
+        throw std::runtime_error("shared build table update failed");
+    }
+    // The other side's table is empty, so a build update emits no pairs.
+    PairBuffer_.Count = 0;
+    if (Instrumentation_) {
+        Instrumentation_->ObserveHash(Table(), 0, true);
+    }
+}
+
+void TJoinBuildTable::Seal() {
+    EnsureInit();
+    Sealed_ = true;
+}
+
+void* TJoinBuildTable::Table() const {
+    auto& table = BuildSide_ == EJoinSide::Left ? LeftTable_ : RightTable_;
+    return const_cast<uint8_t*>(table.data());
+}
+
+TRowSet* TJoinBuildTable::Store() const {
+    return const_cast<TRowSet*>(Rows_.Data());
+}
+
+TJoinProbeProcessor::TJoinProbeProcessor(
+    TJoinKernels kernels,
+    std::shared_ptr<const TJoinBuildTable> table,
+    bool useInputHash)
+    : Kernels_(std::move(kernels))
+    , Table_(std::move(table))
+    , UseInputHash_(useInputHash)
+{}
+
+TJoinProbeProcessor::~TJoinProbeProcessor() {
+    while (!ReadyOutput_.empty()) {
+        Release(&ReadyOutput_.front());
+        ReadyOutput_.pop_front();
+    }
+    // pb_push grows the buffer with qdb_alloc; the shared table's Destroy
+    // must not run here, so the buffer is freed directly.
+    if (PairBuffer_.Data) {
+        qdb_free(PairBuffer_.Data);
+    }
+}
+
+void TJoinProbeProcessor::Probe(TRowSet batch) {
+    if (!Table_->Sealed()) {
+        Release(&batch);
+        throw std::runtime_error("probe of the shared build table before it is sealed");
+    }
+    // The kernel reads a shallow view; the batch keeps its owner and refcount.
+    TRowSet view = batch;
+    if (!UseInputHash_) {
+        view.Hash = nullptr;
+    }
+    const bool buildRight = Table_->BuildSide() == EJoinSide::Right;
+    void* table = Table_->Table();
+    TRowSet* store = Table_->Store();
+    TRowSet* leftStore = buildRight ? nullptr : store;
+    TRowSet* rightStore = buildRight ? store : nullptr;
+    const auto op = buildRight ? EJoinKernelOp::StreamLeft : EJoinKernelOp::StreamRight;
+    if (!Kernels_.Dispatch(
+            buildRight ? NoTable_.data() : table,
+            buildRight ? table : NoTable_.data(),
+            &view,
+            -1,
+            &PairBuffer_,
+            leftStore,
+            rightStore,
+            0,
+            JoinOp(op))) {
+        Release(&batch);
+        throw std::runtime_error("probe of the shared build table failed");
+    }
+    // Pairs with batch index -1 read the probe batch, so they are materialized
+    // before it is released.
+    TRowSet* streamLeft = buildRight ? &view : leftStore;
+    TRowSet* streamRight = buildRight ? rightStore : &view;
+    int64_t cursor = 0;
+    while (cursor < PairBuffer_.Count) {
+        TRowSet out{};
+        const int64_t produced = Kernels_.Materialize(
+            &PairBuffer_, leftStore, rightStore, streamLeft, streamRight,
+            cursor, JoinOutputBatchRows, &out);
+        if (produced <= 0) {
+            Release(&batch);
+            throw std::runtime_error("join materialize failed");
+        }
+        out.Destroy = DestroyKernelOwnedRowSet;
+        ReadyOutput_.push_back(out);
+        cursor += produced;
+    }
+    PairBuffer_.Count = 0;
+    Release(&batch);
+}
+
+bool TJoinProbeProcessor::Next(TRowSet& output) {
+    if (ReadyOutput_.empty()) {
+        return false;
+    }
+    output = ReadyOutput_.front();
+    ReadyOutput_.pop_front();
+    return true;
+}
+
 void TCrossJoinProcessor::SetInstrumentation(TOperatorInstrumentation* instrumentation) {
     LeftRows_.SetInstrumentation(instrumentation, 0);
     RightRows_.SetInstrumentation(instrumentation, 1);

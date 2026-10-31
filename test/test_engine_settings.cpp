@@ -78,6 +78,10 @@ TEST(EngineSettings, OverridesReachTheirFields) {
              "scan:strategy=serial_read",
              "scan:max_tasks=5",
              "join:table=legacy",
+             "join:mode=partitioned",
+             "join:shared_max_build_rows=1000000",
+             "join:shared_max_aggregate_groups=5000",
+             "join:shared_force=true",
              "join:runtime_filters=false",
              "join:force_runtime_filters=true",
              "shuffle:partitions=6",
@@ -107,6 +111,10 @@ TEST(EngineSettings, OverridesReachTheirFields) {
     EXPECT_EQ(settings.Scheduler.ScanSplit.Strategy, NScheduler::EScanSplitStrategy::SerialRead);
     EXPECT_EQ(settings.Scheduler.ScanSplit.MaxScanTasks, 5u);
     EXPECT_EQ(settings.Scheduler.Join.Table, NScheduler::EJoinTableKind::Legacy);
+    EXPECT_EQ(settings.Scheduler.Join.Mode, NScheduler::EJoinMode::Partitioned);
+    EXPECT_EQ(settings.Scheduler.Join.SharedMaxBuildRows, 1000000u);
+    EXPECT_EQ(settings.Scheduler.Join.SharedMaxAggregateGroups, 5000u);
+    EXPECT_TRUE(settings.Scheduler.Join.SharedForce);
     EXPECT_FALSE(settings.Optimizer.EnableRuntimeFilters);
     EXPECT_TRUE(settings.Optimizer.ForceRuntimeFilters);
     EXPECT_EQ(settings.Scheduler.HashShuffle.PartitionCount, 6u);

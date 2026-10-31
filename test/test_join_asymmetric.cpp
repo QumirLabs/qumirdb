@@ -15,6 +15,7 @@
 #include <qdb/plan/ops/union.h>
 #include <qdb/plan/ops/stats.h>
 #include <qdb/plan/types/nullable.h>
+#include <qdb/plan/passes/column_pruning.h>
 #include <qdb/plan/passes/runtime_filters.h>
 #include <qdb/plan/passes/typing.h>
 
@@ -28,6 +29,7 @@
 #include <deque>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <tuple>
@@ -1002,6 +1004,318 @@ TEST_P(SemiAntiOrientation, LeftBuildMarksOnlyPairsTheResidualAccepts) {
     const std::vector<TOut2> expected = type == EJoinType::LeftSemi
         ? std::vector<TOut2>{{1, 10}, {1, 20}}
         : std::vector<TOut2>{{2, 30}, {3, 40}};
+    EXPECT_EQ(got, expected);
+}
+
+namespace {
+
+// The kernels of a join with a shared build table: precomputed hashes are enabled, and
+// batches without TRowSet::Hash are hashed by the kernel.
+TJoinKernels CompileSharedJoin(TKernelCompiler& compiler,
+    const TTypePtr& leftType, const TTypePtr& rightType, EJoinType type)
+{
+    auto spec = NKernel::BuildJoinKernelSpec(
+        static_cast<TStructType&>(*leftType),
+        static_cast<TStructType&>(*rightType),
+        {{"lk", "rk", false}}, type, nullptr);
+    spec.HasPrecomputedHash = true;
+    return compiler.CompileJoin(spec);
+}
+
+// One sealed build table probed by two independent lanes, each with its own
+// probe batch; the output must equal the single-processor join.
+template <class TOut>
+std::vector<TOut> RunSharedJoin(EJoinType type, EJoinSide buildSide,
+    std::vector<TRowSet> build, std::vector<TRowSet> probes,
+    const TTypePtr& leftType, const TTypePtr& rightType)
+{
+    TKernelCompiler compiler;
+    auto kernels = CompileSharedJoin(compiler, leftType, rightType, type);
+    auto table = std::make_shared<TJoinBuildTable>(kernels, type, buildSide);
+    for (auto& batch : build) {
+        table->Add(batch);
+    }
+    table->Seal();
+    std::vector<std::unique_ptr<TJoinProbeProcessor>> lanes;
+    for (size_t i = 0; i < probes.size(); ++i) {
+        lanes.push_back(std::make_unique<TJoinProbeProcessor>(
+            kernels, table, /*useInputHash=*/false));
+    }
+    std::vector<TOut> got;
+    for (size_t i = 0; i < probes.size(); ++i) {
+        // A stale hash of another key must not be read.
+        std::vector<uint64_t> garbage(probes[i].RowCount, 0x5eed);
+        probes[i].Hash = garbage.data();
+        lanes[i]->Probe(probes[i]);
+        TRowSet out{};
+        while (lanes[i]->Next(out)) {
+            for (int64_t r = 0; r < out.RowCount; ++r) {
+                TOut row{};
+                auto* fields = reinterpret_cast<int64_t*>(&row);
+                for (size_t c = 0; c < sizeof(TOut) / sizeof(int64_t); ++c) {
+                    fields[c] = reinterpret_cast<const int64_t*>(out.Columns[c].Data)[r];
+                }
+                got.push_back(row);
+            }
+            Release(&out);
+        }
+    }
+    std::sort(got.begin(), got.end());
+    return got;
+}
+
+} // namespace
+
+TEST(SharedBuildJoin, InnerProbesOneSharedTableFromEitherSide) {
+    std::vector<int64_t> lk0 = {1, 2}, lv0 = {10, 20};
+    std::vector<int64_t> lk1 = {1}, lv1 = {30};
+    std::vector<int64_t> rk0 = {1, 1}, rv0 = {100, 200};
+    std::vector<int64_t> rk1 = {3}, rv1 = {300};
+    std::vector<TColumn> lc0, lc1, rc0, rc1;
+    auto leftType = KeyValSchema("lk", "lv");
+    auto rightType = KeyValSchema("rk", "rv");
+    auto l0 = KeyValBatch(lk0.data(), lv0.data(), 2, lc0);
+    auto l1 = KeyValBatch(lk1.data(), lv1.data(), 1, lc1);
+    auto r0 = KeyValBatch(rk0.data(), rv0.data(), 2, rc0);
+    auto r1 = KeyValBatch(rk1.data(), rv1.data(), 1, rc1);
+    EXPECT_EQ((RunSharedJoin<TOut4>(EJoinType::Inner, EJoinSide::Right,
+        {r0, r1}, {l0, l1}, leftType, rightType)), ExpectedInner());
+    EXPECT_EQ((RunSharedJoin<TOut4>(EJoinType::Inner, EJoinSide::Left,
+        {l0, l1}, {r0, r1}, leftType, rightType)), ExpectedInner());
+}
+
+TEST_P(SemiAntiOrientation, SharedBuildJoinProbesTheRightKeySet) {
+    std::vector<int64_t> lk0 = {1, 2}, lv0 = {10, 20};
+    std::vector<int64_t> lk1 = {1, 3}, lv1 = {30, 40};
+    std::vector<int64_t> rk0 = {1, 1}, rv0 = {100, 200};
+    std::vector<int64_t> rk1 = {2}, rv1 = {300};
+    std::vector<TColumn> lc0, lc1, rc0, rc1;
+    auto leftType = KeyValSchema("lk", "lv");
+    auto rightType = KeyValSchema("rk", "rv");
+    auto l0 = KeyValBatch(lk0.data(), lv0.data(), 2, lc0);
+    auto l1 = KeyValBatch(lk1.data(), lv1.data(), 2, lc1);
+    auto r0 = KeyValBatch(rk0.data(), rv0.data(), 2, rc0);
+    auto r1 = KeyValBatch(rk1.data(), rv1.data(), 1, rc1);
+    EXPECT_EQ((RunSharedJoin<TOut2>(GetParam(), EJoinSide::Right,
+        {r0, r1}, {l0, l1}, leftType, rightType)), ExpectedSemiAnti(GetParam()));
+}
+
+namespace {
+
+// Lowers `plan` and returns the diagnostics line that names the strategy of
+// its join, which lowering prints when the shared table is on.
+std::string JoinStrategyOf(const TOperatorPtr& plan, size_t maxAggregateGroups) {
+    NScheduler::TSettings settings;
+    settings.Join.SharedMaxAggregateGroups = maxAggregateGroups;
+    std::ostringstream diagnostics;
+    NScheduler::LowerPlanToGraph(plan, settings, &diagnostics);
+    const auto text = diagnostics.str();
+    const auto at = text.find("join strategy: ");
+    if (at == std::string::npos) {
+        return {};
+    }
+    return text.substr(at, text.find('\n', at) - at);
+}
+
+} // namespace
+
+// A partial aggregate above the join whose groups the build key splits keeps
+// the partitioned join above the group threshold; a key of the probe side,
+// which the join key does not determine, leaves the shared table in place.
+TEST(SharedBuildJoin, PartialAggregateWithManyGroupsKeepsThePartitionedJoin) {
+    std::vector<int64_t> dk = {1, 2, 3, 4}, dv = {10, 20, 30, 40};
+    std::vector<int64_t> fk = {1, 1, 2, 4}, fv = {100, 200, 300, 400};
+    std::vector<TColumn> dc, fc;
+    TMockSource dim({"dk", "dv"}, {KeyValBatch(dk.data(), dv.data(), 4, dc)});
+    TMockSource fact({"fk", "fv"}, {KeyValBatch(fk.data(), fv.data(), 4, fc)});
+    auto plan = [&](const std::string& groupKey, const std::string& arg) {
+        auto join = std::make_shared<TJoinOperator>(
+            std::make_shared<TSourceOperator>(dim, "d"),
+            std::make_shared<TSourceOperator>(fact, "f"),
+            std::vector<TJoinKey>{{"dk", "fk"}}, EJoinType::Inner, nullptr);
+        // The dimension builds: four rows, unique on its key. The fact side is
+        // large enough for the aggregate's partial phase, with 8 groups.
+        join->Left()->Stats_ = RowsWithKeyNdv(4, "dk", 4);
+        join->Right()->Stats_ = RowsWithKeyNdv(2000000, "fk", 4);
+        auto project = std::make_shared<TProjectOperator>(join,
+            std::vector<TProjectionSpec>{
+                {.Name = "g", .Expression = std::make_shared<TIdentExpr>(NQumir::TLocation{}, groupKey)},
+                {.Name = "v", .Expression = std::make_shared<TIdentExpr>(NQumir::TLocation{}, arg)}});
+        project->Stats_ = RowsWithKeyNdv(2000000, "g", 8);
+        TOperatorPtr grouped = std::make_shared<TAggregateOperator>(project,
+            std::vector<std::string>{"g"}, std::vector<TAggregateSpec>{
+                {.Name = "s", .Func = "sum", .Arg = std::make_shared<TIdentExpr>(NQumir::TLocation{}, "v")}});
+        AnnotateTypes(grouped);
+        ApplyColumnPruning(grouped);
+        return grouped;
+    };
+    const auto byBuildColumn = JoinStrategyOf(plan("dv", "fv"), 4);
+    EXPECT_NE(byBuildColumn.find("partitioned"), std::string::npos) << byBuildColumn;
+    EXPECT_NE(byBuildColumn.find("partial aggregate above the join: estimated groups 8 > 4"),
+        std::string::npos) << byBuildColumn;
+    EXPECT_NE(JoinStrategyOf(plan("dv", "fv"), 8).find("shared build=left"), std::string::npos);
+    EXPECT_NE(JoinStrategyOf(plan("fv", "dv"), 4).find("shared build=left"), std::string::npos);
+}
+
+TEST(SharedBuildJoin, SemiAntiRejectLeftBuild) {
+    auto leftType = KeyValSchema("lk", "lv");
+    auto rightType = KeyValSchema("rk", "rv");
+    TKernelCompiler compiler;
+    auto kernels = CompileSharedJoin(compiler, leftType, rightType, EJoinType::LeftSemi);
+    EXPECT_THROW(
+        { TJoinBuildTable table(kernels, EJoinType::LeftSemi, EJoinSide::Left); },
+        std::runtime_error);
+}
+
+namespace {
+
+// The row join kernels of a shared build table, compiled as lowering does:
+// with precomputed hashes, so a probe batch's TRowSet::Hash would be read.
+TRowJoinKernels CompileSharedRowJoin(
+    const TTypePtr& leftType,
+    const TTypePtr& rightType,
+    EJoinSide buildSide)
+{
+    auto spec = NKernel::BuildJoinKernelSpec(
+        static_cast<TStructType&>(*leftType),
+        static_cast<TStructType&>(*rightType),
+        {{"lk", "rk", false}}, EJoinType::Inner, nullptr);
+    spec.HasPrecomputedHash = true;
+    TKernelCompiler compiler;
+    return compiler.CompileRowJoin(spec, buildSide == EJoinSide::Left);
+}
+
+// One sealed row join table probed by one lane per probe batch. Every lane
+// probes before any lane's output is drained, so the lanes' scratch, pair
+// buffers and output queues must be independent. Returns the output batches
+// of each lane, which the caller releases.
+std::vector<std::vector<TRowSet>> RunSharedRowJoin(
+    EJoinSide buildSide,
+    std::vector<TRowSet> build,
+    std::vector<TRowSet> probes,
+    const TTypePtr& leftType,
+    const TTypePtr& rightType)
+{
+    auto kernels = CompileSharedRowJoin(leftType, rightType, buildSide);
+    auto table = std::make_shared<TRowJoinTable>(kernels);
+    for (auto& batch : build) {
+        table->Add(batch);
+    }
+    table->Seal();
+    std::vector<std::unique_ptr<TRowJoinProbe>> lanes;
+    std::vector<std::vector<uint64_t>> garbage;
+    for (auto& probe : probes) {
+        lanes.push_back(std::make_unique<TRowJoinProbe>(table, /*useInputHash=*/false));
+        // A stale hash of another key must not be read.
+        garbage.emplace_back(probe.RowCount, 0x5eed);
+        probe.Hash = garbage.back().data();
+        lanes.back()->Probe(probe);
+    }
+    std::vector<std::vector<TRowSet>> outputs(lanes.size());
+    for (size_t i = 0; i < lanes.size(); ++i) {
+        TRowSet out{};
+        while (lanes[i]->Next(out)) {
+            outputs[i].push_back(out);
+        }
+    }
+    return outputs;
+}
+
+std::vector<TOut4> SharedRowJoinRows(std::vector<std::vector<TRowSet>> outputs) {
+    std::vector<TOut4> got;
+    for (auto& lane : outputs) {
+        for (auto& out : lane) {
+            for (int64_t r = 0; r < out.RowCount; ++r) {
+                const auto column = [&](int64_t c) {
+                    return reinterpret_cast<const int64_t*>(out.Columns[c].Data)[r];
+                };
+                got.push_back({column(0), column(1), column(2), column(3)});
+            }
+            Release(&out);
+        }
+    }
+    std::sort(got.begin(), got.end());
+    return got;
+}
+
+} // namespace
+
+TEST(SharedRowJoin, TwoLanesProbeOneSealedTableFromEitherSide) {
+    std::vector<int64_t> lk0 = {1, 2}, lv0 = {10, 20};
+    std::vector<int64_t> lk1 = {1}, lv1 = {30};
+    std::vector<int64_t> rk0 = {1, 1}, rv0 = {100, 200};
+    std::vector<int64_t> rk1 = {3}, rv1 = {300};
+    std::vector<TColumn> lc0, lc1, rc0, rc1;
+    auto leftType = KeyValSchema("lk", "lv");
+    auto rightType = KeyValSchema("rk", "rv");
+    auto l0 = KeyValBatch(lk0.data(), lv0.data(), 2, lc0);
+    auto l1 = KeyValBatch(lk1.data(), lv1.data(), 1, lc1);
+    auto r0 = KeyValBatch(rk0.data(), rv0.data(), 2, rc0);
+    auto r1 = KeyValBatch(rk1.data(), rv1.data(), 1, rc1);
+    EXPECT_EQ(
+        SharedRowJoinRows(RunSharedRowJoin(EJoinSide::Right, {r0, r1}, {l0, l1}, leftType, rightType)),
+        ExpectedInner());
+    EXPECT_EQ(
+        SharedRowJoinRows(RunSharedRowJoin(EJoinSide::Left, {l0, l1}, {r0, r1}, leftType, rightType)),
+        ExpectedInner());
+}
+
+// A string payload on the build side: the rows of two build batches point
+// into them, so the table retains both while the lanes gather the strings.
+TEST(SharedRowJoin, StringPayloadOfTheBuildSide) {
+    auto leftType = std::make_shared<TStructType>(std::vector<std::pair<std::string, TTypePtr>>{
+        {"lk", I64Type()},
+        {"lname", std::make_shared<TStringType>()},
+    });
+    auto rightType = KeyValSchema("rk", "rv");
+
+    std::vector<int64_t> lk0 = {5, 5};
+    std::string lname0 = "xyy"; // "x", "yy"
+    std::vector<int64_t> lnameOffsets0 = {0, 1, 3};
+    std::vector<int64_t> lk1 = {6, 5};
+    std::string lname1 = "wzzz"; // "w", "zzz"
+    std::vector<int64_t> lnameOffsets1 = {0, 1, 4};
+    std::vector<TColumn> lc0 = {
+        TColumn{.Data = reinterpret_cast<char*>(lk0.data())},
+        TColumn{.Data = lname0.data(), .Offsets = lnameOffsets0.data(), .OffsetWidth = 8},
+    };
+    std::vector<TColumn> lc1 = {
+        TColumn{.Data = reinterpret_cast<char*>(lk1.data())},
+        TColumn{.Data = lname1.data(), .Offsets = lnameOffsets1.data(), .OffsetWidth = 8},
+    };
+    TRowSet l0{.Columns = lc0.data(), .ColumnCount = 2, .RowCount = 2, .RefCount = 1};
+    TRowSet l1{.Columns = lc1.data(), .ColumnCount = 2, .RowCount = 2, .RefCount = 1};
+
+    std::vector<int64_t> rk0 = {5, 8}, rv0 = {50, 80};
+    std::vector<int64_t> rk1 = {6, 5}, rv1 = {60, 51};
+    std::vector<TColumn> rc0, rc1;
+    auto r0 = KeyValBatch(rk0.data(), rv0.data(), 2, rc0);
+    auto r1 = KeyValBatch(rk1.data(), rv1.data(), 2, rc1);
+
+    using TRow = std::tuple<int64_t, std::string, int64_t, int64_t>;
+    std::vector<std::vector<TRow>> got;
+    for (auto& lane : RunSharedRowJoin(EJoinSide::Left, {l0, l1}, {r0, r1}, leftType, rightType)) {
+        auto& rows = got.emplace_back();
+        for (auto& out : lane) {
+            ASSERT_EQ(out.ColumnCount, 4);
+            const auto& name = out.Columns[1];
+            ASSERT_EQ(name.OffsetWidth, 8);
+            const auto* offsets = reinterpret_cast<const int64_t*>(name.Offsets);
+            for (int64_t r = 0; r < out.RowCount; ++r) {
+                rows.emplace_back(
+                    reinterpret_cast<const int64_t*>(out.Columns[0].Data)[r],
+                    std::string(name.Data + (offsets[r] - offsets[0]), offsets[r + 1] - offsets[r]),
+                    reinterpret_cast<const int64_t*>(out.Columns[2].Data)[r],
+                    reinterpret_cast<const int64_t*>(out.Columns[3].Data)[r]);
+            }
+            Release(&out);
+        }
+        std::sort(rows.begin(), rows.end());
+    }
+    const std::vector<std::vector<TRow>> expected = {
+        {{5, "x", 5, 50}, {5, "yy", 5, 50}, {5, "zzz", 5, 50}},
+        {{5, "x", 5, 51}, {5, "yy", 5, 51}, {5, "zzz", 5, 51}, {6, "w", 6, 60}},
+    };
     EXPECT_EQ(got, expected);
 }
 

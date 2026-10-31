@@ -151,6 +151,17 @@ TEngineConfigBuilder BuildEngineConfig() {
     b.Enum("table", NScheduler::JoinTableKindNames, NScheduler::ParseJoinTableKind,
         [](auto& s) -> auto& { return s.Scheduler.Join.Table; },
         "Hash table of an inner equi-join with a fixed build side.");
+    b.Enum("mode", NScheduler::JoinModeNames, NScheduler::ParseJoinMode,
+        [](auto& s) -> auto& { return s.Scheduler.Join.Mode; },
+        "Hash join execution: shared (one build table probed in the probe lanes where the plan allows) "
+        "or partitioned (repartition both inputs of every join).");
+    b.Size("shared_max_build_rows", [](auto& s) -> auto& { return s.Scheduler.Join.SharedMaxBuildRows; },
+        "Largest estimated build side of a shared build table; a larger build keeps the partitioned join.", 1);
+    b.Size("shared_max_aggregate_groups", [](auto& s) -> auto& { return s.Scheduler.Join.SharedMaxAggregateGroups; },
+        "Largest estimated group count of a partial aggregate above a shared build table whose groups the join key splits; "
+        "more groups keep the partitioned join.");
+    b.Bool("shared_force", [](auto& s) -> auto& { return s.Scheduler.Join.SharedForce; },
+        "Testing aid: a shared build table also for joins whose estimates leave the build side open or missing.");
     b.Size("row_probe_hold_bytes", [](auto& s) -> auto& { return s.Scheduler.Join.RowJoinProbeHoldBytes; },
         "Probe bytes a row join task holds while its build runs; 0 disables the hold.");
     b.Bool("runtime_filters", [](auto& s) -> auto& { return s.Optimizer.EnableRuntimeFilters; },

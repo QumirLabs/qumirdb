@@ -19,27 +19,14 @@ constexpr int64_t RowJoinOp(ERowJoinKernelOp op) {
 
 } // namespace
 
-TRowJoinProcessor::TRowJoinProcessor(
-    TRowJoinKernels kernels,
-    EJoinBuildSide buildSide,
-    size_t probeHoldBytes)
+TRowJoinTable::TRowJoinTable(TRowJoinKernels kernels)
     : Kernels_(std::move(kernels))
-    , BuildSide_(buildSide)
-    , ProbeHoldBytes_(probeHoldBytes)
-{
-    if (BuildSide_ == EJoinBuildSide::Auto) {
-        throw std::runtime_error("row join requires a fixed build side");
-    }
-}
+{}
 
-TRowJoinProcessor::~TRowJoinProcessor() {
-    while (!ReadyOutput_.empty()) {
-        Release(&ReadyOutput_.front());
-        ReadyOutput_.pop_front();
-    }
+TRowJoinTable::~TRowJoinTable() {
     if (Initialized_) {
         TRowSet none{};
-        Dispatch(ERowJoinKernelOp::Destroy, &none);
+        Dispatch(ERowJoinKernelOp::Destroy, &none, Arena_);
         if (Kernels_.KeepsNullKeyRows) {
             Dispatch(ERowJoinKernelOp::Destroy, &none, NullKeyArena_);
         }
@@ -47,33 +34,17 @@ TRowJoinProcessor::~TRowJoinProcessor() {
     for (auto& batch : BuildBatches_) {
         Release(&batch);
     }
-    for (auto& held : PendingProbe_) {
-        Release(&held.Batch);
-    }
 }
 
-bool TRowJoinProcessor::CanHoldProbe() const {
-    return HeldProbeBytes_ < ProbeHoldBytes_;
-}
-
-uint64_t TRowJoinProcessor::ProbeBatchBytes(const TRowSet& batch) const {
-    // The same measure as the retained_input counters: all rows, no selection.
-    auto measure = Kernels_.ProbeMeasure;
-    auto allRows = batch;
-    allRows.Selection = nullptr;
-    measure.Add(allRows);
-    return measure.Bytes;
-}
-
-void TRowJoinProcessor::SetInstrumentation(TOperatorInstrumentation* instrumentation) {
+void TRowJoinTable::SetInstrumentation(TOperatorInstrumentation* instrumentation, size_t input) {
     Instrumentation_ = instrumentation;
+    InstrumentationInput_ = input;
 }
 
-void TRowJoinProcessor::ObserveInstrumentation() {
-    if (Instrumentation_ && BuildDone_) {
-        const auto side = BuildSide_ == EJoinBuildSide::Left ? 0 : 1;
+void TRowJoinTable::ObserveInstrumentation() const {
+    if (Instrumentation_ && Sealed_) {
         Instrumentation_->ObserveBuildTable(
-            side,
+            InstrumentationInput_,
             static_cast<uint64_t>(Table_.Keys),
             static_cast<uint64_t>(Table_.Capacity),
             static_cast<uint64_t>(Table_.Capacity) * sizeof(uint64_t)
@@ -82,13 +53,13 @@ void TRowJoinProcessor::ObserveInstrumentation() {
     }
 }
 
-void TRowJoinProcessor::EnsureInit() {
+void TRowJoinTable::EnsureInit() {
     if (Initialized_) {
         return;
     }
     Initialized_ = true;
     TRowSet none{};
-    if (!Dispatch(ERowJoinKernelOp::Init, &none)
+    if (!Dispatch(ERowJoinKernelOp::Init, &none, Arena_)
         || (Kernels_.KeepsNullKeyRows
             && !Dispatch(ERowJoinKernelOp::Init, &none, NullKeyArena_)))
     {
@@ -96,21 +67,206 @@ void TRowJoinProcessor::EnsureInit() {
     }
 }
 
-bool TRowJoinProcessor::Dispatch(ERowJoinKernelOp op, TRowSet* batch) {
-    return Dispatch(op, batch, Arena_);
+bool TRowJoinTable::Dispatch(ERowJoinKernelOp op, TRowSet* batch, TRowArenaState& arena) {
+    // Init, Append, Build and Destroy touch only the arena and the table here;
+    // the probe lanes own the scratch and pair buffers.
+    TRowScratchState noScratch{};
+    TJoinPairBuffer noPairs{};
+    return Kernels_.Dispatch(&arena, &Table_, &noScratch, &noPairs, batch, RowJoinOp(op));
 }
 
-bool TRowJoinProcessor::Dispatch(ERowJoinKernelOp op, TRowSet* batch, TArenaState& arena) {
-    return Kernels_.Dispatch(&arena, &Table_, &Scratch_, &PairBuffer_, batch, RowJoinOp(op));
+void TRowJoinTable::Add(TRowSet batch) {
+    if (Sealed_) {
+        Release(&batch);
+        throw std::runtime_error("the row join table is already sealed");
+    }
+    EnsureInit();
+    if (!Dispatch(ERowJoinKernelOp::Append, &batch, Arena_)
+        || (Kernels_.KeepsNullKeyRows
+            && !Dispatch(ERowJoinKernelOp::AppendNullKeys, &batch, NullKeyArena_)))
+    {
+        Release(&batch);
+        throw std::runtime_error("row join append failed");
+    }
+    if (Kernels_.RetainsBuildBatches) {
+        if (Instrumentation_) {
+            Instrumentation_->RetainInput(batch, InstrumentationInput_);
+        }
+        BuildBatches_.push_back(batch);
+    } else {
+        Release(&batch);
+    }
 }
 
-bool TRowJoinProcessor::DrainReadyOutput(TRowSet& rowSet) {
+void TRowJoinTable::Seal() {
+    EnsureInit();
+    TRowSet none{};
+    if (!Dispatch(ERowJoinKernelOp::Build, &none, Arena_)) {
+        throw std::runtime_error("row join table build failed");
+    }
+    Sealed_ = true;
+    ObserveInstrumentation();
+}
+
+void* TRowJoinTable::ArenaState() const {
+    return const_cast<TRowArenaState*>(&Arena_);
+}
+
+void* TRowJoinTable::NullKeyArenaState() const {
+    return const_cast<TRowArenaState*>(&NullKeyArena_);
+}
+
+void* TRowJoinTable::TableState() const {
+    return const_cast<TRowTableState*>(&Table_);
+}
+
+TRowJoinProbe::TRowJoinProbe(std::shared_ptr<const TRowJoinTable> table, bool useInputHash)
+    : Table_(std::move(table))
+    , UseInputHash_(useInputHash)
+{}
+
+TRowJoinProbe::~TRowJoinProbe() {
+    while (!ReadyOutput_.empty()) {
+        Release(&ReadyOutput_.front());
+        ReadyOutput_.pop_front();
+    }
+    if (Used_) {
+        // Zeroed in place of the shared table, so Destroy frees only this
+        // lane's scratch and pair buffer.
+        TRowArenaState noArena{};
+        TRowTableState noTable{};
+        TRowSet none{};
+        Table_->Kernels().Dispatch(
+            &noArena, &noTable, &Scratch_, &PairBuffer_, &none, RowJoinOp(ERowJoinKernelOp::Destroy));
+    }
+}
+
+bool TRowJoinProbe::Dispatch(ERowJoinKernelOp op, TRowSet* batch, void* arena) {
+    Used_ = true;
+    return Table_->Kernels().Dispatch(
+        arena, Table_->TableState(), &Scratch_, &PairBuffer_, batch, RowJoinOp(op));
+}
+
+TRowSet TRowJoinProbe::Materialize(TRowSet* stream, int64_t start) {
+    TRowSet out{};
+    const int64_t produced = Table_->Kernels().Materialize(
+        &PairBuffer_, stream, start, RowJoinOutputBatchRows, &out);
+    if (produced <= 0) {
+        throw std::runtime_error("row join materialize failed");
+    }
+    out.Destroy = DestroyKernelOwnedRowSet;
+    return out;
+}
+
+void TRowJoinProbe::Probe(TRowSet batch) {
+    if (!Table_->Sealed()) {
+        Release(&batch);
+        throw std::runtime_error("probe of the row join table before it is sealed");
+    }
+    // The kernel reads a shallow view; the batch keeps its owner and refcount.
+    TRowSet view = batch;
+    if (!UseInputHash_) {
+        view.Hash = nullptr;
+    }
+    if (!Dispatch(ERowJoinKernelOp::Probe, &view, Table_->ArenaState())) {
+        Release(&batch);
+        throw std::runtime_error("row join probe failed");
+    }
+    // The pairs refer to this batch, so its matches are materialized before
+    // it is released.
+    int64_t cursor = 0;
+    while (cursor < PairBuffer_.Count) {
+        TRowSet out{};
+        try {
+            out = Materialize(&view, cursor);
+        } catch (...) {
+            Release(&batch);
+            throw;
+        }
+        ReadyOutput_.push_back(out);
+        cursor += out.RowCount;
+    }
+    PairBuffer_.Count = 0;
+    Release(&batch);
+}
+
+bool TRowJoinProbe::Next(TRowSet& output) {
     if (ReadyOutput_.empty()) {
         return false;
     }
-    rowSet = ReadyOutput_.front();
+    output = ReadyOutput_.front();
     ReadyOutput_.pop_front();
     return true;
+}
+
+// The output of a SEMI/ANTI join is known only once the probe side has ended.
+// It is materialized from the pair buffer one batch per call, as the build
+// rows stay in the arena until Destroy.
+bool TRowJoinProbe::EmitMarked(TRowSet& output) {
+    TRowSet none{};
+    if (!MarksEmitted_) {
+        if (!Dispatch(ERowJoinKernelOp::EmitByMark, &none, Table_->ArenaState())
+            || (Table_->Kernels().KeepsNullKeyRows
+                && !Dispatch(ERowJoinKernelOp::EmitByMark, &none, Table_->NullKeyArenaState())))
+        {
+            throw std::runtime_error("row join emit by mark failed");
+        }
+        MarksEmitted_ = true;
+    }
+    if (EmitCursor_ >= PairBuffer_.Count) {
+        return false;
+    }
+    output = Materialize(&none, EmitCursor_);
+    EmitCursor_ += output.RowCount;
+    return true;
+}
+
+TRowJoinProcessor::TRowJoinProcessor(
+    TRowJoinKernels kernels,
+    EJoinBuildSide buildSide,
+    size_t probeHoldBytes)
+    : BuildSide_(buildSide)
+    , Table_(std::make_shared<TRowJoinTable>(std::move(kernels)))
+    // Both inputs of a partitioned join come from the hash shuffle on this
+    // join's keys, so a probe batch's hash is its key hash.
+    , Probe_(Table_, /*useInputHash=*/true)
+    , ProbeHoldBytes_(probeHoldBytes)
+{
+    if (BuildSide_ == EJoinBuildSide::Auto) {
+        throw std::runtime_error("row join requires a fixed build side");
+    }
+}
+
+TRowJoinProcessor::~TRowJoinProcessor() {
+    for (auto& held : PendingProbe_) {
+        Release(&held.Batch);
+    }
+}
+
+size_t TRowJoinProcessor::ProbeInput() const {
+    return BuildSide_ == EJoinBuildSide::Left ? 1 : 0;
+}
+
+bool TRowJoinProcessor::CanHoldProbe() const {
+    return HeldProbeBytes_ < ProbeHoldBytes_;
+}
+
+uint64_t TRowJoinProcessor::ProbeBatchBytes(const TRowSet& batch) const {
+    // The same measure as the retained_input counters: all rows, no selection.
+    auto measure = Table_->Kernels().ProbeMeasure;
+    auto allRows = batch;
+    allRows.Selection = nullptr;
+    measure.Add(allRows);
+    return measure.Bytes;
+}
+
+void TRowJoinProcessor::SetInstrumentation(TOperatorInstrumentation* instrumentation) {
+    Instrumentation_ = instrumentation;
+    Table_->SetInstrumentation(instrumentation, BuildSide_ == EJoinBuildSide::Left ? 0 : 1);
+}
+
+void TRowJoinProcessor::ObserveInstrumentation() {
+    Table_->ObserveInstrumentation();
 }
 
 bool TRowJoinProcessor::PullBuildBatch(const TFetch& build) {
@@ -120,29 +276,10 @@ bool TRowJoinProcessor::PullBuildBatch(const TFetch& build) {
         return false;
     }
     if (fetch == EJoinFetchResult::FINISHED) {
-        TRowSet none{};
-        if (!Dispatch(ERowJoinKernelOp::Build, &none)) {
-            throw std::runtime_error("row join table build failed");
-        }
-        BuildDone_ = true;
-        ObserveInstrumentation();
+        Table_->Seal();
         return true;
     }
-    if (!Dispatch(ERowJoinKernelOp::Append, &batch)
-        || (Kernels_.KeepsNullKeyRows
-            && !Dispatch(ERowJoinKernelOp::AppendNullKeys, &batch, NullKeyArena_)))
-    {
-        Release(&batch);
-        throw std::runtime_error("row join append failed");
-    }
-    if (Kernels_.RetainsBuildBatches) {
-        if (Instrumentation_) {
-            Instrumentation_->RetainInput(batch, BuildSide_ == EJoinBuildSide::Left ? 0 : 1);
-        }
-        BuildBatches_.push_back(batch);
-    } else {
-        Release(&batch);
-    }
+    Table_->Add(batch);
     return true;
 }
 
@@ -156,73 +293,26 @@ bool TRowJoinProcessor::PullProbeBatch(const TFetch& probe) {
         ProbeDone_ = true;
         return true;
     }
-    if (!BuildDone_) {
+    if (!Table_->Sealed()) {
         if (Instrumentation_) {
-            Instrumentation_->RetainInput(batch, BuildSide_ == EJoinBuildSide::Left ? 1 : 0);
+            Instrumentation_->RetainInput(batch, ProbeInput());
         }
         const auto bytes = ProbeBatchBytes(batch);
         HeldProbeBytes_ += bytes;
         PendingProbe_.push_back({batch, bytes});
         return true;
     }
-    ProbeBatch(batch);
+    Probe_.Probe(batch);
     return true;
 }
 
-void TRowJoinProcessor::ProbeBatch(TRowSet& batch) {
-    if (!Dispatch(ERowJoinKernelOp::Probe, &batch)) {
-        Release(&batch);
-        throw std::runtime_error("row join probe failed");
-    }
-    // The pairs refer to this batch, so its matches are materialized before
-    // it is released.
-    int64_t cursor = 0;
-    while (cursor < PairBuffer_.Count) {
-        TRowSet out{};
-        const int64_t produced = Kernels_.Materialize(
-            &PairBuffer_, &batch, cursor, RowJoinOutputBatchRows, &out);
-        if (produced <= 0) {
-            Release(&batch);
-            throw std::runtime_error("row join materialize failed");
-        }
-        out.Destroy = DestroyKernelOwnedRowSet;
-        ReadyOutput_.push_back(out);
-        cursor += produced;
-    }
-    PairBuffer_.Count = 0;
-    Release(&batch);
-}
-
-// The output of a SEMI/ANTI join is known only once the probe side has ended.
-// It is materialized from the pair buffer one batch per call, as the build
-// rows stay in the arena until Destroy.
 EJoinProcessorResult TRowJoinProcessor::Finish(TRowSet& output) {
-    if (!Kernels_.EmitsByMark) {
+    if (!Table_->Kernels().EmitsByMark) {
         return EJoinProcessorResult::FINISHED;
     }
-    TRowSet none{};
-    if (!MarksEmitted_) {
-        if (!Dispatch(ERowJoinKernelOp::EmitByMark, &none)
-            || (Kernels_.KeepsNullKeyRows
-                && !Dispatch(ERowJoinKernelOp::EmitByMark, &none, NullKeyArena_)))
-        {
-            throw std::runtime_error("row join emit by mark failed");
-        }
-        MarksEmitted_ = true;
-    }
-    if (EmitCursor_ >= PairBuffer_.Count) {
-        return EJoinProcessorResult::FINISHED;
-    }
-    TRowSet out{};
-    const int64_t produced = Kernels_.Materialize(
-        &PairBuffer_, &none, EmitCursor_, RowJoinOutputBatchRows, &out);
-    if (produced <= 0) {
-        throw std::runtime_error("row join materialize failed");
-    }
-    out.Destroy = DestroyKernelOwnedRowSet;
-    EmitCursor_ += produced;
-    output = out;
-    return EJoinProcessorResult::OK;
+    return Probe_.EmitMarked(output)
+        ? EJoinProcessorResult::OK
+        : EJoinProcessorResult::FINISHED;
 }
 
 EJoinProcessorResult TRowJoinProcessor::Process(
@@ -230,19 +320,18 @@ EJoinProcessorResult TRowJoinProcessor::Process(
     const TFetch& right,
     TRowSet& output)
 {
-    EnsureInit();
-    if (DrainReadyOutput(output)) {
+    if (Probe_.Next(output)) {
         return EJoinProcessorResult::OK;
     }
     const TFetch& build = BuildSide_ == EJoinBuildSide::Left ? left : right;
     const TFetch& probe = BuildSide_ == EJoinBuildSide::Left ? right : left;
-    if (!BuildDone_) {
+    if (!Table_->Sealed()) {
         // A probe batch is taken only when the build side has none ready, so
         // the probe side never delays the build, and only below the budget.
         if (!PullBuildBatch(build) && !ProbeDone_ && CanHoldProbe()) {
             PullProbeBatch(probe);
         }
-        if (!BuildDone_) {
+        if (!Table_->Sealed()) {
             return EJoinProcessorResult::NEED_DATA;
         }
     }
@@ -251,13 +340,12 @@ EJoinProcessorResult TRowJoinProcessor::Process(
         HeldProbeBytes_ -= PendingProbe_.front().Bytes;
         PendingProbe_.pop_front();
         if (Instrumentation_) {
-            const size_t input = BuildSide_ == EJoinBuildSide::Left ? 1 : 0;
             Instrumentation_->SetRetainedInputBytes(
                 Instrumentation_->RetainedInputBytes
-                - Instrumentation_->InputPayloadBytes(batch, input));
+                - Instrumentation_->InputPayloadBytes(batch, ProbeInput()));
         }
-        ProbeBatch(batch);
-        if (DrainReadyOutput(output)) {
+        Probe_.Probe(batch);
+        if (Probe_.Next(output)) {
             return EJoinProcessorResult::OK;
         }
     }
@@ -267,14 +355,14 @@ EJoinProcessorResult TRowJoinProcessor::Process(
     if (!PullProbeBatch(probe)) {
         return EJoinProcessorResult::NEED_DATA;
     }
-    if (DrainReadyOutput(output)) {
+    if (Probe_.Next(output)) {
         return EJoinProcessorResult::OK;
     }
     return ProbeDone_ ? Finish(output) : EJoinProcessorResult::NEED_DATA;
 }
 
 EJoinBuildSide TRowJoinProcessor::RequiredInputSide() const {
-    if (!BuildDone_) {
+    if (!Table_->Sealed()) {
         return ProbeDone_ || !CanHoldProbe() ? BuildSide_ : EJoinBuildSide::Auto;
     }
     return BuildSide_ == EJoinBuildSide::Left ? EJoinBuildSide::Right : EJoinBuildSide::Left;

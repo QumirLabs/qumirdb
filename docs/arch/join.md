@@ -178,6 +178,125 @@ symmetric path otherwise or without estimates. A residual requires the left
 build side, and a runtime filter, which a semi join publishes from its right
 keys, requires the right one.
 
+## Shared build table
+
+A parallel hash join can have one of three shapes. QDB uses the first and the
+third.
+
+**Partitioned.** Both inputs are hash-shuffled by the join key into `P`
+partitions (see [scheduler runtime](scheduler_runtime.md#partitioned-equi-join)).
+Each partition builds a table from its share of the keys and probes it. The
+output stays split by the join key: each key comes out in one of the `P` lanes.
+
+**Broadcast.** Every probe lane gets a copy of all build rows and builds its own
+table. The probe side is not shuffled, but the table is built `N` times and
+takes `N` times the memory. Between processes this is the usual shape, because
+each process needs its own copy. Inside one process the copies are waste.
+
+**Shared build table.** One task builds one table from all build rows and seals
+it. Every probe lane then probes this same table, and its rows stay in that
+lane. The table is built once and stored once, and the probe side is not
+shuffled. This is the broadcast shape without the copies: the broadcast edge
+carries only the news that the table is ready, not its rows. All threads
+probing one global hash table is the hash join of morsel-driven execution
+(Leis et al., [Morsel-Driven Parallelism](https://doi.org/10.1145/2588555.2610507),
+SIGMOD 2014), and DuckDB's `PhysicalHashJoin` works the same way. Both of them
+also build the table in parallel; QDB builds it in one task for now.
+
+```text
+build lanes -> hash-shuffle, 1 destination -> join-build: one table, sealed
+                                                  |
+                                                  | broadcast: finish only, no rows
+                                                  v
+probe lane i ------------------------------> join-probe i -> lane i
+```
+
+### How it runs
+
+- **Build.** The build lanes keep their hash-shuffle tasks, now with one
+  destination. They pack sparse batches, so the table does not keep whole scan
+  batches alive, and they build the join's runtime filter. One `join-build`
+  task inserts all rows into one table and seals it. The table and the kernels
+  are the same as in a partition of the partitioned join: the row join table
+  for an inner join without a residual, the symmetric table otherwise.
+- **Publication.** A broadcast connection goes from the build task to every
+  probe task. It carries no rows, only its finish. The build task finishes it
+  after it seals the table. A probe task reads the table only after it has seen
+  that finish, so every write to the table happens before any read
+  (release/acquire). Until then a probe task asks only for this input, so it
+  does not read ahead from its lane.
+- **Probe.** Each `join-probe` task reads its own lane and probes the sealed
+  table. It has its own probe scratch, pair buffer and output. Nobody writes
+  the table any more, so the probe lanes share nothing they write.
+- **Output.** The join emits in the lanes of its probe input, not in join
+  partitions.
+
+### When lowering chooses it
+
+All three conditions must hold:
+
+- **The probe does not write the table.** This is true for inner joins, and
+  for LEFT SEMI/ANTI without a residual that build the key set of the right
+  side. Outer joins mark matched build rows, so they stay partitioned. FULL
+  joins, SEMI/ANTI with a residual and SEMI/ANTI that build their left rows
+  stay partitioned too.
+- **The build side is known before execution.** The planner has chosen
+  build-first: an inner join on the row join table builds the smaller
+  estimated input, one on the legacy table needs an input estimated at least
+  `JoinAsymmetryRatio` times smaller, or a runtime filter needs its build
+  first. Adaptive joins and joins without estimates stay partitioned.
+- **The build side is small.** Its estimate is at most
+  `[join] shared_max_build_rows` (4,194,304 by default), because one task
+  builds the table.
+- **No large partial aggregate above it depends on the key split.** When a
+  grouped aggregate with a lane-local partial phase reads the join's output
+  (through projections and filters), its estimated groups are more than
+  `[join] shared_max_aggregate_groups` (65,536 by default), and the join key
+  determines every group key, the join stays partitioned. See the trade-off
+  below.
+
+`--join:mode=partitioned` turns the shared table off.
+
+### Trade-offs
+
+Compared with the partitioned join:
+
+- **Gain: no probe shuffle.** The probe side is usually the large one. Its rows
+  are no longer hashed, routed, copied and queued only to meet their build rows
+  in the right partition.
+- **Cost: a serial build.** One task builds the whole table. This is why the
+  build side has a size limit.
+- **Cost: the output is not split by key, and the lanes keep the scan's row
+  distribution.** A partitioned join sends each key to one lane. A partial
+  aggregate above it whose group keys the join key determines (the join key
+  itself, or columns of a build side that is unique on its key) then holds
+  about `1/P` of the groups in each lane, `G` groups in all. Above a shared
+  table every probe lane can see every key, so each lane's partial may hold
+  all `G` groups: `L * G` groups in all, `L * G` rows into the combine, and a
+  table per lane that leaves the cache sooner. The probe lanes also keep the
+  rows as the scan split them; after a selective filter on data clustered by
+  that column (a date range over a fact table stored in date order) a few
+  lanes hold most of the rows, and the partial aggregate of those lanes is
+  the critical path, where a shuffle would have balanced them. Both effects
+  grow with `G` and are negligible for small `G`, whose tables stay in cache
+  and whose rows are cheap. Lowering therefore keeps the partitioned join
+  under a partial aggregate with more than `shared_max_aggregate_groups`
+  estimated groups that the join key splits. Grouped aggregates without a
+  partial phase shuffle their input first and are not affected.
+
+### Runtime filter
+
+A runtime filter pays off when the rows it rejects skip costly work. In front
+of a partitioned join that work is the shuffle. In front of a shared table it
+is only the probe, which costs about the same as the filter check: about one
+cache miss per rejected row, and a row that passes would pay twice. So lowering
+drops the join's own filter on the probe input, and the filter build with it,
+when that is the filter's only use. Filters further down, below other
+operators, stay, because they save those operators work.
+
+Only the join's own runtime filter leaves a key hash on a probe batch that the
+probe kernel can reuse. Otherwise the kernel hashes the key itself.
+
 ## Execution by join type
 
 ### Inner
@@ -352,6 +471,9 @@ The implementation relies on these invariants:
 
 - each hash partition is one task, and a task runs on one worker at a time, so
   matched marks in its build table have one writer;
+- a shared build table has one writer, its build task, and is read-only once
+  the publication finishes; every probe lane owns its probe scratch, pair
+  buffer and output;
 - outer unmatched pairs refer to the retained build rows until output is drained;
 - a `TRowId` with non-negative batch index always refers to a retained
   `TRowStore` batch;
@@ -370,6 +492,8 @@ The implementation relies on these invariants:
 
 ## Current limitations
 
+- A shared build table is built by one task; large builds stay partitioned.
+  Plan export for the browser runtime lowers only partitioned joins.
 - Runtime kernels do not directly execute `RightSemi` / `RightAnti`.
 - LEFT/RIGHT streaming requires a build side selected before execution; outer
   joins do not switch adaptively when an input happens to end first.

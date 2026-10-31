@@ -102,7 +102,8 @@ void EnableOperatorInstrumentation(TLoweredPlan& lowered) {
         counters.Kernel = kernel;
         counters.Inputs.reserve(node->Inbound.size() + 2);
         counters.MaterializesOutput = node->DebugKind == "aggregate" ||
-            node->DebugKind == "join" || node->DebugKind == "cross-join" ||
+            node->DebugKind == "join" || node->DebugKind == "join-probe" ||
+            node->DebugKind == "cross-join" ||
             node->DebugKind == "sort" || node->DebugKind == "top-sort" ||
             node->DebugKind == "window" || node->DebugKind == "late-materialize" ||
             node->DebugKind == "hash-shuffle" || node->DebugKind == "cte-producer";

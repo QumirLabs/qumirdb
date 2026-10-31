@@ -41,6 +41,7 @@
 #include <limits>
 #include <optional>
 #include <ostream>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -225,6 +226,35 @@ struct TSchedulerRowJoinState : TProcessorTaskState<TSchedulerRowJoinState> {
     TRowJoinProcessor Processor;
 };
 
+// The single build task of a shared build table owns its writes. TTable is
+// the symmetric TJoinBuildTable or the row join table TRowJoinTable.
+template <class TTable>
+struct TSharedJoinBuildState : NScheduler::ITaskState {
+    explicit TSharedJoinBuildState(std::shared_ptr<TTable> table)
+        : Table(std::move(table))
+    {}
+
+    void ConfigureInstrumentation(TOperatorInstrumentation* instrumentation) override {
+        Table->SetInstrumentation(instrumentation);
+    }
+
+    std::shared_ptr<TTable> Table;
+};
+
+// One probe lane of a shared build table. It reads the table only after the
+// build task has sealed it and finished the publication connection. TProbe is
+// TJoinProbeProcessor or TRowJoinProbe, the lane of the matching table.
+template <class TProbe>
+struct TSharedJoinProbeState : NScheduler::ITaskState {
+    template <class... TArgs>
+    explicit TSharedJoinProbeState(TArgs&&... args)
+        : Processor(std::forward<TArgs>(args)...)
+    {}
+
+    TProbe Processor;
+    bool Published = false;
+};
+
 struct TSchedulerCrossJoinState : TProcessorTaskState<TSchedulerCrossJoinState> {
     TSchedulerCrossJoinState(TCrossJoinKernels kernels, EJoinType joinType)
         : Processor(std::move(kernels), joinType)
@@ -359,6 +389,140 @@ std::unordered_set<const TSourceOperator*> SourcesFeedingJoins(
     return sources;
 }
 
+// A grouped aggregate whose lane-local partial phase consumes a join's output
+// through projections and filters: its group keys as the join's output names
+// them, and its estimated groups.
+struct TPartialAggregateConsumer {
+    std::vector<std::string> GroupKeys;
+    uint64_t Groups = 0;
+};
+
+// The joins whose output a lane-local partial aggregate consumes, for
+// SharedBuildSide. A grouped aggregate over a parallel input runs a partial
+// phase in its input lanes when it has grouping sets or when
+// ShouldUsePartialAggregate says so; every other grouped aggregate shuffles its
+// input first, which balances the lanes and splits the groups by itself. A key
+// is followed through a projection only when the projection passes a column
+// on; a computed key ends the walk without a record, as does a missing group
+// estimate.
+std::unordered_map<const TJoinOperator*, TPartialAggregateConsumer>
+PartialAggregateConsumers(
+    const TOperatorPtr& root,
+    const NScheduler::TSettings& settings)
+{
+    std::unordered_map<const TJoinOperator*, TPartialAggregateConsumer> consumers;
+    auto record = [&](const TAggregateOperator& aggregate) {
+        if (aggregate.IsGlobal() || aggregate.GroupKeys().empty()) {
+            return;
+        }
+        if (aggregate.GroupingSets().empty()
+            && !NScheduler::ShouldUsePartialAggregate(aggregate, settings))
+        {
+            return;
+        }
+        const auto groups = EstimateAggregateGroupCount(aggregate);
+        if (!groups) {
+            return;
+        }
+        auto keys = aggregate.GroupKeys();
+        auto op = aggregate.Input();
+        while (op) {
+            if (auto filter = TMaybeOp<TFilterOperator>(op)) {
+                op = filter.Cast()->Input();
+                continue;
+            }
+            if (auto project = TMaybeOp<TProjectOperator>(op)) {
+                for (auto& key : keys) {
+                    const auto& projections = project.Cast()->Projections();
+                    const auto spec = std::ranges::find(
+                        projections, key, &TProjectionSpec::Name);
+                    if (spec == projections.end()) {
+                        return;
+                    }
+                    auto ident = NQumir::NAst::TMaybeNode<NQumir::NAst::TIdentExpr>(
+                        spec->Expression);
+                    if (!ident) {
+                        return;
+                    }
+                    key = ident.Cast()->Name;
+                }
+                op = project.Cast()->Input();
+                continue;
+            }
+            if (auto join = TMaybeOp<TJoinOperator>(op)) {
+                consumers.emplace(join.Cast().get(),
+                    TPartialAggregateConsumer{std::move(keys), *groups});
+            }
+            return;
+        }
+    };
+    std::unordered_set<const IOperator*> visited;
+    std::function<void(const TOperatorPtr&)> visit = [&](const TOperatorPtr& op) {
+        if (!op || !visited.insert(op.get()).second) {
+            return;
+        }
+        if (auto aggregate = TMaybeOp<TAggregateOperator>(op)) {
+            record(*aggregate.Cast());
+        }
+        if (auto consumer = TMaybeOp<TCteConsumer>(op)) {
+            visit(consumer.Cast()->Materialization()->Plan);
+        }
+        for (const auto& input : op->Inputs()) {
+            visit(input);
+        }
+    };
+    visit(root);
+    return consumers;
+}
+
+// Whether the partitions of a partitioned join would hold disjoint groups of an
+// aggregate over its output that groups by `groupKeys`: every key is a join key
+// column, or a column of the build side whose join key is unique there, so the
+// key is a function of the join key. Uniqueness is read from the estimates as
+// EstimateStats reads it: the key's distinct values reach the build rows within
+// a tolerance of 10%.
+bool JoinKeySplitsGroups(
+    const TJoinOperator& join,
+    EJoinSide buildSide,
+    const std::vector<std::string>& groupKeys)
+{
+    const bool buildLeft = buildSide == EJoinSide::Left;
+    const auto& build = buildLeft ? join.Left() : join.Right();
+    bool buildKeyUnique = false;
+    if (const auto& stats = build->Stats_; stats && stats->RowCount > 0) {
+        const double rows = static_cast<double>(stats->RowCount);
+        double ndv = 1.0;
+        buildKeyUnique = true;
+        for (const auto& key : join.Keys()) {
+            const auto column = stats->ColumnStats.find(buildLeft ? key.Left : key.Right);
+            if (column == stats->ColumnStats.end() || !column->second
+                || !column->second->Ndv || *column->second->Ndv == 0)
+            {
+                buildKeyUnique = false;
+                break;
+            }
+            ndv = std::min(ndv * static_cast<double>(*column->second->Ndv), rows);
+        }
+        constexpr double NdvTolerance = 1.1;
+        buildKeyUnique = buildKeyUnique && ndv * NdvTolerance >= rows;
+    }
+    auto buildStruct = NQumir::NAst::TMaybeType<NQumir::NAst::TStructType>(
+        NQumir::NAst::UnwrapNamedType(build->OutputColumns()));
+    for (const auto& key : groupKeys) {
+        const bool joinKey = std::ranges::any_of(join.Keys(),
+            [&](const TJoinKey& k) { return k.Left == key || k.Right == key; });
+        if (joinKey) {
+            continue;
+        }
+        if (!buildKeyUnique || !buildStruct
+            || !FieldType(buildStruct.Cast().get(), key))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 size_t ChooseRuntimeBloomBytes(const TJoinOperator& join,
     EJoinFilterSide buildSide, size_t producerCount)
 {
@@ -437,6 +601,11 @@ public:
         , SourcesFeedingJoins_(Settings_.ScanSplit.MaxScanTasks == 0
             ? SourcesFeedingJoins(root)
             : std::unordered_set<const TSourceOperator*>{})
+        , PartialAggregateConsumers_(
+            Settings_.Join.Mode == NScheduler::EJoinMode::Shared
+            ? PartialAggregateConsumers(root, Settings_)
+            : std::unordered_map<const TJoinOperator*, TPartialAggregateConsumer>{})
+        , Root_(root)
     {}
 
     // Kernel options for one stage: generation only (deferred finalization),
@@ -530,6 +699,10 @@ public:
             if (leftLanes == 0 || rightLanes == 0) {
                 return 0;
             }
+            // A join with a shared build table emits in its probe lanes.
+            if (auto build = SharedBuildSide(*join)) {
+                return *build == EJoinSide::Right ? leftLanes : rightLanes;
+            }
             return JoinPartitions(std::max(leftLanes, rightLanes));
         }
         if (auto n = TMaybeOp<TUnionAllOperator>(op)) {
@@ -574,6 +747,136 @@ public:
         return 0;
     }
 
+    // Number of runtime-filter uses of `id` in the plan below `op`, counting
+    // each operator once (a CTE plan may be referenced several times).
+    static size_t CountFilterUses(const TOperatorPtr& op, uint32_t id,
+        std::unordered_set<const IOperator*>& seen)
+    {
+        if (!op || !seen.insert(op.get()).second) {
+            return 0;
+        }
+        size_t count = std::count_if(op->RuntimeFilterUses.begin(),
+            op->RuntimeFilterUses.end(),
+            [id](const auto& use) { return use.Id == id; });
+        if (auto consumer = TMaybeOp<TCteConsumer>(op)) {
+            count += CountFilterUses(
+                consumer.Cast()->Materialization()->Plan, id, seen);
+        }
+        for (const auto& input : op->Inputs()) {
+            count += CountFilterUses(input, id, seen);
+        }
+        return count;
+    }
+
+    // Registers the use of the join's own filter on its probe input as dropped
+    // when that is the filter's only use; returns whether it did.
+    bool DropOwnProbeInputFilter(const TJoinOperator& join, const TOperatorPtr& probeChild) {
+        const auto& runtimeFilter = join.RuntimeFilter();
+        if (!runtimeFilter) {
+            return false;
+        }
+        const auto id = runtimeFilter->Id;
+        const bool atProbeInput = std::any_of(
+            probeChild->RuntimeFilterUses.begin(),
+            probeChild->RuntimeFilterUses.end(),
+            [id](const auto& use) { return use.Id == id; });
+        std::unordered_set<const IOperator*> seen;
+        if (!atProbeInput || CountFilterUses(Root_, id, seen) != 1) {
+            return false;
+        }
+        DroppedFilterUses_.insert({probeChild.get(), id});
+        return true;
+    }
+
+    // The side a join builds a shared table from, or nullopt when the join
+    // stays partitioned. The probe side streams through the table
+    // without being stored, so the build side must be known before execution:
+    // the planner fixes it for strong asymmetry or for a runtime filter. One
+    // task builds the table, so the build must also be estimated small. Only
+    // joins whose probe never writes the table qualify: inner joins, and LEFT
+    // SEMI/ANTI without a residual, which build the key set of the right side.
+    //
+    // The join then emits in its probe lanes, and a lane-local partial
+    // aggregate right above it (through projections and filters) inherits
+    // them: each lane's table may hold every group, L tables instead of P
+    // hold L*G groups in all and feed L*G rows to the combine, and the lanes
+    // keep the rows as the scan split them, which after a selective filter on
+    // clustered data leaves most of the rows to a few lanes. The partitioned
+    // join's shuffle balances the rows and, when the join key determines the
+    // group keys, gives each partition disjoint groups, G/P per table. Both
+    // effects grow with G and vanish for small G, whose tables stay in cache
+    // and whose rows cost little, so the join stays partitioned above a
+    // partial aggregate with more than SharedMaxAggregateGroups estimated
+    // groups that its key splits. Other consumers either shuffle the join's
+    // output themselves or stream it at a flat cost per row.
+    //
+    // OutputLanes and lowering must agree, so this depends only on the plan
+    // and the settings.
+    std::optional<EJoinSide> SharedBuildSide(
+        const TJoinOperator& join,
+        std::string* reason = nullptr) const
+    {
+        auto decline = [&](std::string why) -> std::optional<EJoinSide> {
+            if (reason) {
+                *reason = std::move(why);
+            }
+            return std::nullopt;
+        };
+        const auto& settings = Settings_.Join;
+        if (settings.Mode != NScheduler::EJoinMode::Shared) {
+            return decline("join mode is partitioned");
+        }
+        if (join.Keys().empty()) {
+            return decline("no equi-keys");
+        }
+        const auto type = join.JoinType();
+        const bool semiAnti =
+            type == EJoinType::LeftSemi || type == EJoinType::LeftAnti;
+        if (type != EJoinType::Inner && !semiAnti) {
+            return decline("join type " + std::string(JoinTypeName(type)));
+        }
+        if (semiAnti && join.Filter()) {
+            return decline("semi/anti residual builds the left side");
+        }
+        auto side = ChooseJoinBuildSide(join, settings.Table);
+        if (side == EJoinBuildSide::Auto) {
+            if (!settings.SharedForce) {
+                return decline("build side is adaptive");
+            }
+            side = EJoinBuildSide::Right;
+        }
+        if (semiAnti && side != EJoinBuildSide::Right) {
+            return decline("semi/anti builds the left side");
+        }
+        const auto& build = side == EJoinBuildSide::Left
+            ? join.Left() : join.Right();
+        const auto buildSide = side == EJoinBuildSide::Left
+            ? EJoinSide::Left : EJoinSide::Right;
+        if (!settings.SharedForce) {
+            if (!build->Stats_) {
+                return decline("no build estimate");
+            }
+            if (static_cast<size_t>(build->Stats_->RowCount)
+                > settings.SharedMaxBuildRows)
+            {
+                return decline("estimated build rows "
+                    + std::to_string(build->Stats_->RowCount)
+                    + " > " + std::to_string(settings.SharedMaxBuildRows));
+            }
+            if (const auto consumer = PartialAggregateConsumers_.find(&join);
+                consumer != PartialAggregateConsumers_.end()
+                && consumer->second.Groups > settings.SharedMaxAggregateGroups
+                && JoinKeySplitsGroups(join, buildSide, consumer->second.GroupKeys))
+            {
+                return decline("partial aggregate above the join: estimated groups "
+                    + std::to_string(consumer->second.Groups)
+                    + " > " + std::to_string(settings.SharedMaxAggregateGroups)
+                    + ", split by the join key");
+            }
+        }
+        return buildSide;
+    }
+
     // outLaneOffset shifts this operator's producer lanes within outConn, so a
     // UNION ALL can fan several branches into one gather without lane collisions.
     TLoweredOutput Lower(
@@ -581,7 +884,13 @@ public:
         NScheduler::IConnection& outConn,
         size_t outLaneOffset = 0)
     {
-        if (op->RuntimeFilterUses.empty()) {
+        std::vector<TRuntimeFilterUseSpec> uses;
+        for (const auto& use : op->RuntimeFilterUses) {
+            if (!DroppedFilterUses_.contains({op.get(), use.Id})) {
+                uses.push_back(use);
+            }
+        }
+        if (uses.empty()) {
             return LowerRaw(op, outConn, outLaneOffset);
         }
         const size_t lanes = OutputLanes(op);
@@ -589,10 +898,10 @@ public:
             lanes, lanes, "runtime-filter-input");
         auto lowered = LowerRaw(op, firstInput, 0);
         NScheduler::IConnection* input = &firstInput;
-        for (size_t index = 0; index < op->RuntimeFilterUses.size(); ++index) {
-            const auto& use = op->RuntimeFilterUses[index];
+        for (size_t index = 0; index < uses.size(); ++index) {
+            const auto& use = uses[index];
             NScheduler::IConnection* output = &outConn;
-            if (index + 1 != op->RuntimeFilterUses.size()) {
+            if (index + 1 != uses.size()) {
                 output = &AddConn<NScheduler::TOneToOneConnection>(
                     lanes, lanes, "runtime-filter-chain");
             }
@@ -1187,7 +1496,7 @@ private:
     // The row join table (kernel/join/join_rows.oz) serves a join that
     // RowJoinTableServes accepts once lowering has fixed its build side, by
     // estimates or by a runtime filter. A join without estimates keeps the
-    // symmetric Robin Hood join.
+    // symmetric swiss table join.
     bool UsesRowJoinTable(const TJoinOperator& join, EJoinBuildSide buildSide) const {
         return RowJoinTableServes(join, Settings_.Join.Table, buildSide);
     }
@@ -2785,9 +3094,18 @@ private:
         size_t outLaneOffset)
     {
         using namespace NQumir::NAst;
+        std::string partitionedReason;
+        if (auto build = SharedBuildSide(join, &partitionedReason)) {
+            return LowerSharedBuildJoin(join, *build, outConn, outLaneOffset);
+        }
         const size_t leftLanes = OutputLanes(join.Left());
         const size_t rightLanes = OutputLanes(join.Right());
         const size_t joinParts = JoinPartitions(std::max(leftLanes, rightLanes));
+        if (Diagnostics_ && Settings_.Join.Mode == NScheduler::EJoinMode::Shared) {
+            *Diagnostics_ << "join strategy: partitioned partitions=" << joinParts
+                << " reason=\"" << partitionedReason << "\" "
+                << JoinDebugLabel(join) << '\n';
+        }
         auto& leftPipeRef = AddConn<NScheduler::TOneToOneConnection>(
             leftLanes, leftLanes, "join-left-input");
         auto leftOut = Lower(join.Left(), leftPipeRef);
@@ -2972,6 +3290,291 @@ private:
             result.Producers.push_back(&node);
         }
         return result;
+    }
+
+    // Hash join with a shared build table (one process, shared memory):
+    //
+    //   build lanes -> hash-shuffle tasks -> join-build (one task) ==publish==>
+    //   probe lane i ---------------------------------> join-probe i -> out lane i
+    //
+    // The probe input is not repartitioned: each of its lanes probes the one
+    // shared table in place, so the join emits in the probe lanes. The build
+    // lanes keep their shuffle tasks, with a single destination: they compact
+    // sparse batches, so the table does not pin whole scan batches, and they
+    // produce the runtime filter. The publication is a broadcast connection
+    // that carries no rowsets: the build task seals the table and finishes it,
+    // and a probe task reads the table only after it fetched that finish.
+    TLoweredOutput LowerSharedBuildJoin(
+        TJoinOperator& join,
+        EJoinSide buildSide,
+        NScheduler::IConnection& outConn,
+        size_t outLaneOffset)
+    {
+        using namespace NQumir::NAst;
+        const bool buildLeft = buildSide == EJoinSide::Left;
+        const size_t leftLanes = OutputLanes(join.Left());
+        const size_t rightLanes = OutputLanes(join.Right());
+        // A consumer of the join's own filter right on the probe input checks
+        // the filter just before the probe rejects the same rows exactly. It
+        // costs about the cache miss the table probe costs anyway and saves
+        // nothing: no repartitioning follows. Without another consumer the
+        // filter is neither probed nor built. Consumers placed further down,
+        // where they spare other operators the rejected rows, remain.
+        const bool dropOwnFilter = DropOwnProbeInputFilter(
+            join, buildLeft ? join.Right() : join.Left());
+        auto& leftPipeRef = AddConn<NScheduler::TOneToOneConnection>(
+            leftLanes, leftLanes, "join-left-input");
+        auto leftOut = Lower(join.Left(), leftPipeRef);
+        auto& rightPipeRef = AddConn<NScheduler::TOneToOneConnection>(
+            rightLanes, rightLanes, "join-right-input");
+        auto rightOut = Lower(join.Right(), rightPipeRef);
+
+        auto leftType = leftOut.OutputType;
+        auto rightType = rightOut.OutputType;
+        auto* leftStruct = static_cast<TStructType*>(leftType.get());
+        auto* rightStruct = static_cast<TStructType*>(rightType.get());
+        if (!leftStruct || !rightStruct) {
+            throw std::runtime_error("scheduler join inputs must have TStructType");
+        }
+        auto kernelSpec = NKernel::BuildJoinKernelSpec(
+            *leftStruct, *rightStruct, join.Keys(), join.JoinType(), join.Filter());
+        const auto execStageId = NewExecStage(&join, EExecPlanNodeKind::Join);
+        const auto joinGroup = StageLabel("join", execStageId);
+        TKernelCompiler compiler(KernelOptions(joinGroup, execStageId));
+        auto hashKernels = compiler.CompileJoinHash(kernelSpec);
+        // Build batches carry the shuffle's hashes when it computed them; probe
+        // batches carry this join's hash only behind its own runtime filter.
+        // Everything else reaches the kernel without a hash and is hashed there.
+        kernelSpec.HasPrecomputedHash = true;
+        // An inner join without a residual probes a row join table, as its
+        // partitioned form would; the other joins probe the symmetric table.
+        const bool rowTable = UsesRowJoinTable(
+            join,
+            buildLeft ? EJoinBuildSide::Left : EJoinBuildSide::Right);
+        std::shared_ptr<TJoinKernels> joinKernels;
+        std::shared_ptr<TRowJoinKernels> rowJoinKernels;
+        {
+            TStageDiagnosticsScope diagnosticsScope(Diagnostics_, joinGroup);
+            if (rowTable) {
+                rowJoinKernels = std::make_shared<TRowJoinKernels>(
+                    compiler.CompileRowJoin(kernelSpec, buildLeft));
+            } else {
+                joinKernels = std::make_shared<TJoinKernels>(compiler.CompileJoin(kernelSpec));
+            }
+        }
+
+        auto& buildOut = buildLeft ? leftOut : rightOut;
+        auto& buildPipe = buildLeft ? leftPipeRef : rightPipeRef;
+        auto& probeOut = buildLeft ? rightOut : leftOut;
+        auto& probePipe = buildLeft ? rightPipeRef : leftPipeRef;
+        const size_t buildLanes = buildLeft ? leftLanes : rightLanes;
+        const size_t probeLanes = buildLeft ? rightLanes : leftLanes;
+        const size_t buildInput = buildLeft ? 0 : 1;
+        const size_t probeInput = buildLeft ? 1 : 0;
+
+        std::vector<std::string> buildKeys;
+        buildKeys.reserve(join.Keys().size());
+        for (const auto& key : join.Keys()) {
+            buildKeys.push_back(buildLeft ? key.Left : key.Right);
+        }
+        auto buildShuffleCode = MakeHashShuffleCode(
+            buildLeft ? hashKernels.Left : hashKernels.Right,
+            buildLeft ? leftType : rightType);
+        bool useProbeHash = false;
+        std::shared_ptr<IRuntimeFilterProbe> filterProbe;
+        const bool producesFilter = join.RuntimeFilter() && !dropOwnFilter;
+        if (const auto& runtimeFilter = join.RuntimeFilter(); producesFilter) {
+            if ((runtimeFilter->BuildSide == EJoinFilterSide::Left) != buildLeft) {
+                throw std::runtime_error(
+                    "a shared-table join builds a side other than its runtime filter");
+            }
+            if (!RuntimeContext_->RuntimeFilterKernels) {
+                RuntimeContext_->RuntimeFilterKernels = compiler.CompileRuntimeFilter();
+            }
+            if (!RuntimeFilterBindings_) {
+                RuntimeFilterBindings_ =
+                    std::make_shared<TLocalRuntimeFilterBindingFactory>();
+            }
+            auto binding = RuntimeFilterBindings_->Create(runtimeFilter->Id,
+                buildLanes, ChooseRuntimeBloomBytes(
+                    join, runtimeFilter->BuildSide, buildLanes),
+                RuntimeContext_);
+            if (!binding.Producer || !binding.Probe) {
+                throw std::runtime_error(
+                    "runtime filter binding factory returned an incomplete binding");
+            }
+            buildShuffleCode->ProducedFilter = std::move(binding.Producer);
+            filterProbe = std::move(binding.Probe);
+            // TRowSet::Hash has no key identity; see LowerJoin.
+            useProbeHash = CanReuseRuntimeFilterHash(
+                buildLeft ? join.Right() : join.Left(), runtimeFilter->Id);
+        }
+        auto buildShuf = BuildRepartitionExchange(
+            buildOut,
+            buildPipe,
+            buildLanes,
+            1,
+            std::move(buildShuffleCode),
+            "join-build-gather",
+            {.Keys = std::move(buildKeys)});
+        if (producesFilter) {
+            FilterProducers_.push_back(TFilterProducerTasks{
+                .Id = join.RuntimeFilter()->Id,
+                .KernelSpec = kernelSpec,
+                .HashKernels = hashKernels,
+                .Probe = std::move(filterProbe),
+                .Nodes = buildShuf.Nodes,
+                .BuildSide = join.RuntimeFilter()->BuildSide,
+                .ExecStageId = execStageId,
+                .Group = joinGroup,
+            });
+        }
+
+        // The build task and every probe lane share one table.
+        std::shared_ptr<const NScheduler::TBlockingCode> buildCode;
+        std::shared_ptr<NScheduler::ITaskState> buildState;
+        std::shared_ptr<const NScheduler::TBinaryBlockingCode> probeCode;
+        std::function<std::shared_ptr<NScheduler::ITaskState>()> makeProbeState;
+        if (rowTable) {
+            auto table = std::make_shared<TRowJoinTable>(*rowJoinKernels);
+            buildCode = MakeSharedJoinBuildCode<TRowJoinTable>();
+            buildState = std::make_shared<TSharedJoinBuildState<TRowJoinTable>>(table);
+            probeCode = MakeSharedJoinProbeCode<TRowJoinProbe>();
+            makeProbeState = [&, table]() {
+                return std::make_shared<TSharedJoinProbeState<TRowJoinProbe>>(
+                    table, useProbeHash);
+            };
+        } else {
+            auto table = std::make_shared<TJoinBuildTable>(
+                *joinKernels, join.JoinType(), buildSide);
+            buildCode = MakeSharedJoinBuildCode<TJoinBuildTable>();
+            buildState = std::make_shared<TSharedJoinBuildState<TJoinBuildTable>>(table);
+            probeCode = MakeSharedJoinProbeCode<TJoinProbeProcessor>();
+            makeProbeState = [&, table]() {
+                return std::make_shared<TSharedJoinProbeState<TJoinProbeProcessor>>(
+                    *joinKernels, table, useProbeHash);
+            };
+        }
+        auto& publish = AddConn<NScheduler::TBroadcastConnection>(
+            1, probeLanes, "join-publish");
+        auto buildTask = std::make_unique<NScheduler::TBlockingTask>(
+            buildCode,
+            buildState,
+            NScheduler::TInputPort{.Connection = buildShuf.Connection, .Lane = 0},
+            NScheduler::TOutputPort{.Connection = &publish, .Lane = 0});
+        auto& buildNode = Graph_.AddOwnedNode(std::move(buildTask));
+        MarkNode(buildNode, "join-build", execStageId,
+            "join-build " + JoinDebugLabel(join), execStageId);
+        for (size_t s = 0; s < buildLanes; ++s) {
+            Graph_.AddEdge(*buildShuf.Nodes[s], buildNode,
+                *buildShuf.Connection, s, 0, buildInput);
+        }
+
+        if (Diagnostics_) {
+            const auto& stats = (buildLeft ? join.Left() : join.Right())->Stats_;
+            *Diagnostics_ << "join strategy: shared build="
+                << (buildLeft ? "left" : "right")
+                << " est_build_rows=" << (stats ? std::to_string(stats->RowCount) : "?")
+                << " build_lanes=" << buildLanes
+                << " probe_lanes=" << probeLanes
+                << " probe_hash=" << (useProbeHash ? "filter" : "kernel")
+                << " table=" << (rowTable ? "row" : "legacy")
+                << (dropOwnFilter ? " own_filter=dropped" : "")
+                << ' ' << JoinDebugLabel(join) << '\n';
+        }
+
+        TLoweredOutput result;
+        result.OutputType = kernelSpec.OutputSchema;
+        result.Producers.reserve(probeLanes);
+        for (size_t m = 0; m < probeLanes; ++m) {
+            auto task = std::make_unique<NScheduler::TBinaryBlockingTask>(
+                probeCode,
+                makeProbeState(),
+                NScheduler::TInputPort{.Connection = &probePipe, .Lane = m},
+                NScheduler::TInputPort{.Connection = &publish, .Lane = m},
+                NScheduler::TOutputPort{
+                    .Connection = &outConn, .Lane = m + outLaneOffset});
+            auto& node = Graph_.AddOwnedNode(std::move(task));
+            MarkNode(node, "join-probe", execStageId, JoinDebugLabel(join),
+                execStageId);
+            Graph_.AddEdge(*probeOut.Producers[m], node, probePipe, m, m, probeInput);
+            Graph_.AddEdge(buildNode, node, publish, 0, m, buildInput);
+            result.Producers.push_back(&node);
+        }
+        return result;
+    }
+
+    template <class TTable>
+    std::shared_ptr<const NScheduler::TBlockingCode> MakeSharedJoinBuildCode() {
+        return std::make_shared<NScheduler::TBlockingCode>(
+            [](NScheduler::ITaskState& state,
+               NScheduler::TInputPort& input,
+               TRowSet&)
+            {
+                auto& s = static_cast<TSharedJoinBuildState<TTable>&>(state);
+                for (;;) {
+                    TRowSet batch{};
+                    const auto fetch = input.Fetch(batch);
+                    if (fetch == NScheduler::EFetchResult::NO_DATA) {
+                        return NScheduler::ETaskResult::NEED_DATA;
+                    }
+                    if (fetch == NScheduler::EFetchResult::FINISHED) {
+                        // FINISHED makes the task finish the publication
+                        // connection, which releases the sealed table.
+                        s.Table->Seal();
+                        return NScheduler::ETaskResult::FINISHED;
+                    }
+                    s.Table->Add(batch);
+                }
+            });
+    }
+
+    template <class TProbe>
+    std::shared_ptr<const NScheduler::TBinaryBlockingCode> MakeSharedJoinProbeCode() {
+        auto code = std::make_shared<NScheduler::TBinaryBlockingCode>(
+            [](NScheduler::ITaskState& state,
+               NScheduler::TInputPort& probe,
+               NScheduler::TInputPort& publish,
+               TRowSet& output)
+            {
+                auto& s = static_cast<TSharedJoinProbeState<TProbe>&>(state);
+                if (!s.Published) {
+                    TRowSet unexpected{};
+                    switch (publish.Fetch(unexpected)) {
+                        case NScheduler::EFetchResult::NO_DATA:
+                            return NScheduler::ETaskResult::NEED_DATA;
+                        case NScheduler::EFetchResult::OK:
+                            Release(&unexpected);
+                            throw std::runtime_error(
+                                "the shared build table publication carries no rowsets");
+                        case NScheduler::EFetchResult::FINISHED:
+                            s.Published = true;
+                            break;
+                    }
+                }
+                for (;;) {
+                    if (s.Processor.Next(output)) {
+                        return NScheduler::ETaskResult::OK;
+                    }
+                    TRowSet batch{};
+                    const auto fetch = probe.Fetch(batch);
+                    if (fetch == NScheduler::EFetchResult::NO_DATA) {
+                        return NScheduler::ETaskResult::NEED_DATA;
+                    }
+                    if (fetch == NScheduler::EFetchResult::FINISHED) {
+                        return NScheduler::ETaskResult::FINISHED;
+                    }
+                    s.Processor.Probe(batch);
+                }
+            });
+        // Until the table is published only the build task can make progress;
+        // the probe input is not woken, so its lanes do not read ahead.
+        code->RequiredSide = [](NScheduler::ITaskState& state) {
+            return static_cast<TSharedJoinProbeState<TProbe>&>(state).Published
+                ? NScheduler::ERequiredSide::Left
+                : NScheduler::ERequiredSide::Right;
+        };
+        return code;
     }
 
     TBlockingTail BuildWindowTail(
@@ -3173,6 +3776,9 @@ private:
     std::shared_ptr<IRuntimeFilterBindingFactory> RuntimeFilterBindings_;
     std::shared_ptr<TRuntimeContext> RuntimeContext_;
     std::unordered_set<const TSourceOperator*> SourcesFeedingJoins_;
+    // The joins under a lane-local partial aggregate, see SharedBuildSide.
+    std::unordered_map<const TJoinOperator*, TPartialAggregateConsumer>
+        PartialAggregateConsumers_;
     // Split planning includes Parquet predicate compilation and evaluation;
     // OutputLanes and LowerSource both query it. nullopt means "use the original
     // source", while an engaged empty vector is a proven empty scan.
@@ -3181,6 +3787,10 @@ private:
     std::unordered_map<uint32_t, std::vector<TFilterConsumerTasks>> FilterConsumers_;
     std::vector<TFilterProducerTasks> FilterProducers_;
     std::unordered_map<const TCteMaterialization*, TMaterializedProducer> Materialized_;
+    TOperatorPtr Root_;
+    // Runtime-filter uses (operator, filter id) that lowering skips: the own
+    // filter of a shared-table join on its probe input, see LowerSharedBuildJoin.
+    std::set<std::pair<const IOperator*, uint32_t>> DroppedFilterUses_;
     std::vector<TLoweredExecStage> ExecStages_;
     std::vector<NScheduler::TRuntimeFilterDiagnostic> RuntimeFilters_;
     NScheduler::TTaskGroupId LastTaskGroupId_ =

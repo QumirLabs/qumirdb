@@ -68,11 +68,30 @@ struct TScanSplitSettings {
 
 // Which hash table an inner equi-join with a fixed build side uses. Row is the
 // arena of build rows behind a salted pointer table (kernel/join/join_rows.oz);
-// Legacy is the symmetric Robin Hood table with per-key row-id buckets.
+// Legacy is the symmetric swiss table with per-key row-id buckets.
 enum class EJoinTableKind {
     Row = 0,
     Legacy = 1,
 };
+
+enum class EJoinMode {
+    // Every multi-lane equi-join repartitions both inputs by key into join
+    // partitions, each with its own symmetric hash join.
+    Partitioned = 0,
+    // A hash join whose build side is fixed at plan time and estimated small
+    // builds one shared read-only table; every lane of the probe side probes it
+    // in place, without repartitioning. Other joins stay partitioned.
+    Shared = 1,
+};
+
+// The names the config accepts.
+inline constexpr std::string_view JoinModeNames = "shared, partitioned";
+
+inline std::optional<EJoinMode> ParseJoinMode(std::string_view name) {
+    if (name == "shared") return EJoinMode::Shared;
+    if (name == "partitioned") return EJoinMode::Partitioned;
+    return std::nullopt;
+}
 
 // The names the config accepts.
 inline constexpr std::string_view JoinTableKindNames = "row, legacy";
@@ -98,6 +117,23 @@ struct TJoinSettings {
     // same time and peak RSS there, so the default is the one that keeps the
     // worst case small: 16 partitions hold about 256 MiB.
     size_t RowJoinProbeHoldBytes = 16 * 1024 * 1024;
+    // Plan export for the browser runtime lowers with Partitioned: the browser
+    // scheduler does not run the shared build table's graph shape yet.
+    EJoinMode Mode = EJoinMode::Shared;
+    // One task builds a shared build table, so a larger estimated build keeps
+    // the partitioned join with its partition-parallel build.
+    size_t SharedMaxBuildRows = 4 * 1024 * 1024;
+    // A partial aggregate above a shared build table runs in the probe lanes:
+    // every lane may hold every group, and the lanes keep the rows as the
+    // scan split them. The shuffle of a partitioned join splits the groups
+    // that the join key determines among its partitions and balances the
+    // rows. Above this many estimated groups that is worth the shuffle
+    // (see SharedBuildSide); below it the per-lane tables stay small.
+    size_t SharedMaxAggregateGroups = 64 * 1024;
+    // Testing aid: an inner or semi/anti join whose estimates leave the build
+    // side adaptive builds a shared table from its right side, and missing
+    // estimates do not block the shared path. Results are unchanged; only memory use may grow.
+    bool SharedForce = false;
 };
 
 struct THashShuffleSettings {
