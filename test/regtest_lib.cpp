@@ -1251,6 +1251,10 @@ bool ResultsMatch(const TValue& actual, const TValue& expected, bool ordered, TF
 
 } // namespace
 
+std::string CellJson(const NQdb::TColumn& column, int64_t row, const TTypePtr& type) {
+    return llvm::formatv("{0}", Cell(column, row, type)).str();
+}
+
 TComparison CompareResults(const std::string& actual, const std::string& expected,
     bool ordered, TFloatTolerance tol)
 {

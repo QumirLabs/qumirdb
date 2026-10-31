@@ -267,6 +267,21 @@ TEST(RegResultComparison, F32ColumnsFollowTheFloatRules) {
         FloatResult("[[1]]")).Matches);
 }
 
+// An f32 cell is the double nearest to its shortest text, so it stores as the f64 cell
+// of that text; the widened float (0.10000000149...) would not.
+TEST(RegResultComparison, F32CellPrintsTheShortestFloatText) {
+    const float floats[] = {0.1f, 16777216.0f};
+    const double doubles[] = {0.1, 16777216.0};
+    NQdb::TColumn f32Column{.Data = reinterpret_cast<char*>(const_cast<float*>(floats))};
+    NQdb::TColumn f64Column{.Data = reinterpret_cast<char*>(const_cast<double*>(doubles))};
+    const auto f32 = std::make_shared<NQumir::NAst::TFloatType>(NQumir::NAst::TFloatType::F32);
+    const auto f64 = std::make_shared<NQumir::NAst::TFloatType>(NQumir::NAst::TFloatType::F64);
+    for (int64_t row = 0; row < 2; ++row) {
+        EXPECT_EQ(NRegTest::CellJson(f32Column, row, f32), NRegTest::CellJson(f64Column, row, f64));
+    }
+    EXPECT_EQ(NRegTest::CellJson(f32Column, 1, f32), "16777216");
+}
+
 TEST(RegResultComparison, OtherTypesAndSchemasStayExact) {
     const auto integer = R"({"schema":"<struct (v u64)>","rows":[["9007199254740993"]]})";
     const auto different = R"({"schema":"<struct (v u64)>","rows":[["9007199254740992"]]})";

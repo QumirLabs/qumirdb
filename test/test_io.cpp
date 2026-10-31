@@ -583,38 +583,6 @@ TEST(IOTest, FloatColumnIsReadAsDouble) {
 
 // A decimal array of any Arrow width comes out at the width of the qdb storage of its
 // precision, sign-extended or truncated, and a slice keeps its offset.
-// An f32 column holds 4-byte values and prints as the shortest text that reads back as
-// the same float; the same bits read as f64 would print differently.
-TEST(IOTest, SinkPrintsF32AtFloatPrecision) {
-    const std::vector<float> values{
-        0.1f, 16777216.0f, -0.0f,
-        std::numeric_limits<float>::infinity(), std::numeric_limits<float>::quiet_NaN(),
-    };
-    TColumn column{.Data = reinterpret_cast<char*>(const_cast<float*>(values.data()))};
-    TRowSet rowSet{
-        .Columns = &column,
-        .ColumnCount = 1,
-        .RowCount = static_cast<int64_t>(values.size()),
-        .RefCount = 1,
-    };
-    const std::vector<TColumnSchema> columns{
-        {"f", std::make_shared<NQumir::NAst::TFloatType>(NQumir::NAst::TFloatType::F32)},
-    };
-    const TSchema schema{columns};
-
-    std::ostringstream csv;
-    TCsvSink csvSink(schema, csv);
-    csvSink.Write(rowSet);
-    EXPECT_EQ(csv.str(), "f\n0.1\n16777216\n-0\ninf\nnan\n");
-
-    std::ostringstream console;
-    TConsoleSink consoleSink(schema, console);
-    consoleSink.Write(rowSet);
-    consoleSink.Flush();
-    EXPECT_NE(console.str().find("0.1"), std::string::npos);
-    EXPECT_EQ(console.str().find("0.10000000149"), std::string::npos);
-}
-
 TEST(IOTest, DecimalStorageValuesTakeTheStorageWidth) {
     auto check = [](const std::shared_ptr<arrow::DataType>& type, const std::vector<__int128>& values) {
         std::shared_ptr<arrow::Array> array;
@@ -663,6 +631,38 @@ TEST(IOTest, DecimalStorageValuesTakeTheStorageWidth) {
     check(arrow::decimal64(18, 0), {7, 999999999999999999, -999999999999999999, -1});
     check(arrow::decimal128(15, 2), {7, 999999999999999, -999999999999999, -1});
     check(arrow::decimal128(38, 2), {7, big, -big, -1});
+}
+
+// An f32 column holds 4-byte values and prints as the shortest text that reads back as
+// the same float; the same bits read as f64 would print differently.
+TEST(IOTest, SinkPrintsF32AtFloatPrecision) {
+    const std::vector<float> values{
+        0.1f, 16777216.0f, -0.0f,
+        std::numeric_limits<float>::infinity(), std::numeric_limits<float>::quiet_NaN(),
+    };
+    TColumn column{.Data = reinterpret_cast<char*>(const_cast<float*>(values.data()))};
+    TRowSet rowSet{
+        .Columns = &column,
+        .ColumnCount = 1,
+        .RowCount = static_cast<int64_t>(values.size()),
+        .RefCount = 1,
+    };
+    const std::vector<TColumnSchema> columns{
+        {"f", std::make_shared<NQumir::NAst::TFloatType>(NQumir::NAst::TFloatType::F32)},
+    };
+    const TSchema schema{columns};
+
+    std::ostringstream csv;
+    TCsvSink csvSink(schema, csv);
+    csvSink.Write(rowSet);
+    EXPECT_EQ(csv.str(), "f\n0.1\n16777216\n-0\ninf\nnan\n");
+
+    std::ostringstream console;
+    TConsoleSink consoleSink(schema, console);
+    consoleSink.Write(rowSet);
+    consoleSink.Flush();
+    EXPECT_NE(console.str().find("0.1"), std::string::npos);
+    EXPECT_EQ(console.str().find("0.10000000149"), std::string::npos);
 }
 
 // A scan reads decimal columns itself (TDecimalColumnScan): INT32, INT64 and

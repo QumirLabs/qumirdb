@@ -7,6 +7,7 @@
 #include <span>
 #include <string>
 #include <vector>
+#include <qdb/io/io.h>
 #include <qdb/plan/ops/stats.h>
 #include <qdb/scheduler/engine_settings.h>
 
@@ -68,6 +69,9 @@ struct TComparison {
 // Typed result comparison, also used for agreement between canonized variants.
 TComparison CompareResults(const std::string& actual, const std::string& expected,
     bool ordered = true, TFloatTolerance tol = {});
+
+// The JSON text of one result cell as the runner stores it in a golden.
+std::string CellJson(const NQdb::TColumn& column, int64_t row, const NQumir::NAst::TTypePtr& type);
 
 std::string TestName(const std::filesystem::path& path);
 
