@@ -11,7 +11,8 @@
   ;;   - probes write a nonzero byte for a kept row and 0 otherwise, and
   ;;     return the number of kept rows;
   ;;   - a Bloom block is eight u64 words with one bit set in each word, and
-  ;;     block_mask is (blocks - 1) for a power-of-two block count.
+  ;;     block_mask is (blocks - 1) for a power-of-two block count, so a
+  ;;     filter folds in half without losing a key (rf_bloom_fold).
   ;; Needs sort/radix.oz and aggregation/swiss_group.oz in the same program.
 
   ;; One producer's contribution; mirrors TRuntimeFilterBuildState.
@@ -47,11 +48,13 @@
     (Bloom <ptr u64>)
     (BloomWords i64)>)
 
-  ;; Storage and result of a merge; mirrors TRuntimeFilterPublishState.
+  ;; Storage and result of a merge; mirrors TPublishState in C++.
   ;; Keys and SortKeys hold every partial key, SortOrder twice as many
   ;; entries plus 256. Table is zeroed and fits min(keys, MaxKeys) keys.
   ;; Bloom is zeroed, or with BloomSeeded already holds one fragment, which
-  ;; makes the result a Bloom filter. Kind: 0 cannot answer, 1 exact, 2 Bloom.
+  ;; makes the result a Bloom filter. A Bloom result then folds to the
+  ;; smallest size whose share of set bits stays within BloomMaxFill, and
+  ;; BloomWords returns that size. Kind: 0 cannot answer, 1 exact, 2 Bloom.
   (type RuntimeFilterPublish <struct
     (MaxKeys i64)
     (Keys <ptr u64>)
@@ -61,6 +64,7 @@
     (Bloom <ptr u64>)
     (BloomWords i64)
     (BloomSeeded i64)
+    (BloomMaxFill f64)
     (Kind i64)
     (ExactKeys i64)
     (TableSize i64)
@@ -167,6 +171,41 @@
           (= bits (+ bits (call builtin::ctpop (index words i))))
           (= i (+ i 1))))
       (return bits)))
+
+  ;; Set bits of the filter folded once, without folding it.
+  (fun rf_bloom_folded_popcount ((var words <ptr u64>) (var half i64)) -> i64
+    (block
+      (var bits = 0)
+      (var i = 0)
+      (while (< i half)
+        (block
+          (= bits (+ bits (call builtin::ctpop
+                            (| (index words i) (index words (+ i half))))))
+          (= i (+ i 1))))
+      (return bits)))
+
+  ;; Folding ORs the upper half of the blocks onto the lower half. A key's
+  ;; block is the low bits of its mixed hash and its bits within the block do
+  ;; not depend on the size, so the result is exactly the filter that the
+  ;; same keys build at half the size, and it keeps every key. A fold never
+  ;; lowers the share of set bits, so the first fold that would exceed
+  ;; BloomMaxFill ends the search at the smallest filter within it.
+  (fun rf_bloom_fold ((var state <ref RuntimeFilterPublish>))
+    (block
+      (var words = (field state Bloom))
+      (var max_fill = (field state BloomMaxFill))
+      (var count = (field state BloomWords))
+      (while (> count 8)
+        (block
+          (var half = (// count 2))
+          (var bits = (call rf_bloom_folded_popcount words half))
+          (if (> (cast bits f64) (* max_fill (cast (* half 64) f64)))
+            (block (return)))
+          (call rf_bloom_or words
+            (cast (+ (cast words i64) (* half 8)) <ptr u64>) half)
+          (= count half)
+          (field_assign state BloomWords count)
+          (field_assign state BloomSetBits bits)))))
 
   (fun rf_bloom_probe_scalar
        ((var words <ptr u64>) (var block_mask u64) (var hashes <ptr u64>)
@@ -497,7 +536,7 @@
             hashes selection count)))
       (return count)))
 
-  ;; Merges the contributions of every producer.
+  ;; Merges the contributions of every producer, then folds a Bloom result.
   (fun rf_publish
        ((var state <ref RuntimeFilterPublish>)
         (var partials <ptr RuntimeFilterPartial>) (var partial_count i64))
@@ -562,7 +601,8 @@
       (if (== (field state Kind) 2)
         (block
           (field_assign state BloomSetBits
-            (call rf_bloom_popcount bloom bloom_words))))))
+            (call rf_bloom_popcount bloom bloom_words))
+          (call rf_bloom_fold state)))))
 
   ;; Tests the selected hashes. A Bloom filter is probed four hashes at a
   ;; time when vectorized is nonzero; selected_hashes and selected_output

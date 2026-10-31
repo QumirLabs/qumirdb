@@ -324,6 +324,24 @@ fragment supplies the result's storage, and the other fragments are OR-ed into
 it. Bloom sizes are powers of two so both scalar and vector probes use a block
 mask instead of division.
 
+A producer must fix its fragment size before it sees a key, and a Bloom
+fragment cannot grow. Lowering therefore sizes fragments for the estimated
+build rows, and the merger sizes the published filter from the keys. A
+power-of-two Bloom filter halves by OR-ing its upper half onto its lower half,
+as Broder and Mitzenmacher note in [Network Applications of Bloom Filters: A
+Survey (Internet Mathematics, 2004)](https://doi.org/10.1080/15427951.2004.10129096),
+section 2.4. A key's block is the low bits of its mixed hash and its bits
+within the block do not depend on the size, so the folded filter is exactly
+the filter the same keys build at half the size: folding never rejects a key.
+Since n keys set about 1 - exp(-8n/m) of m bits, the share of set bits
+measures the density. The merger folds while the filter keeps at least 10 bits
+per distinct key, which bounds false positives at about 1%: a denser filter
+lets through more rows than its smaller size saves, and a sparser one misses
+the cache more often without rejecting many more. Folding never lowers the
+share of set bits, so the first fold past the target ends the search. A low
+estimate cannot be folded away; it publishes a denser filter, which is
+disabled when saturated.
+
 Each probe task owns its counters, selection scratch buffers, and weak-Bloom
 pause policy. Worker migration does not move this state between tasks. Aggregate
 instrumentation snapshots are read only after execution stops. Before allocating
