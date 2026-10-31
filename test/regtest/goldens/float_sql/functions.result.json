@@ -1,0 +1,15 @@
+{
+  "schema": "<struct (id i32) (abs_f <named Nullable [f32]>) (abs_neg <named Nullable [f32]>) (abs_sum <named Nullable [f32]>) (abs_double <named Nullable [f64]>)>",
+  "rows": [
+    [1, 0.10000000000000001, 0.10000000000000001, 0.20000000000000001, 0.10000000149011612],
+    [2, 16777216, 16777216, 16777218, 16777216],
+    [3, 0, 0, 0.75, 0],
+    [4, 0, 0, 0.5, 0],
+    [5, {"$float":"nan"}, {"$float":"nan"}, {"$float":"nan"}, {"$float":"nan"}],
+    [6, {"$float":"+inf"}, {"$float":"+inf"}, {"$float":"+inf"}, {"$float":"+inf"}],
+    [7, {"$float":"+inf"}, {"$float":"+inf"}, {"$float":"+inf"}, {"$float":"+inf"}],
+    [8, null, null, null, null],
+    [9, 2.5, 2.5, 5, 2.5],
+    [10, 1.5, 1.5, 2, 1.5]
+  ]
+}

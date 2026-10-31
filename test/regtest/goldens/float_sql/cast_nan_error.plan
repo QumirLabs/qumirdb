@@ -1,0 +1,3 @@
+project (x) (rows≈1 cost≈248)
+└─ filter (== |t.id| 5) (rows≈1 cost≈240)
+   └─ source t AS t row-groups (== |t.id| 5) (rows≈10 cost≈120)

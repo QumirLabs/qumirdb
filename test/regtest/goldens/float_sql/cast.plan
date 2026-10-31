@@ -1,0 +1,4 @@
+sort [id asc]
+└─ project (id, dec18, dec38, dec10_2, dec9_0) (rows≈24 cost≈1.5K)
+   └─ project (q.id, q.f) (rows≈24 cost≈480)
+      └─ source c AS c (rows≈24 cost≈288)

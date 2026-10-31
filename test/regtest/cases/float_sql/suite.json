@@ -1,9 +1,12 @@
 {
   "version": 1,
   "fixtures": {
-    "values": {"json": "tables/t.json", "parquet": {"row_group_rows": 3}}
+    "values": {"json": "tables/t.json", "parquet": {"row_group_rows": 3}},
+    "finite": {"json": "tables/c.json", "parquet": {"row_group_rows": 3}},
+    "extreme": {"json": "tables/x.json", "parquet": {"row_group_rows": 3}},
+    "sweep": {"json": "tables/s.json", "parquet": {"row_group_rows": 7}}
   },
-  "tables": {"t": "values"},
+  "tables": {"t": "values", "c": "finite", "x": "extreme", "s": "sweep"},
   "variants": ["single", "threaded", "js"],
   "cases": {
     "types.sql": {"order": "ordered"},
@@ -22,6 +25,13 @@
     "aggregate_having.sql": {"order": "ordered"},
     "window.sql": {"order": "ordered"},
     "union_int.sql": {"order": "ordered"},
-    "union_double.sql": {"order": "ordered"}
+    "union_double.sql": {"order": "ordered"},
+    "functions.sql": {"order": "ordered"},
+    "functions_widened.sql": {"order": "ordered"},
+    "round_sweep.sql": {"order": "ordered"},
+    "cast.sql": {"order": "ordered"},
+    "cast_extreme.sql": {"order": "ordered"},
+    "cast_integer.sql": {"order": "ordered"},
+    "cast_nan_error.sql": {"expect_error": true}
   }
 }

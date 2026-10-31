@@ -157,9 +157,17 @@ TExprPtr IntegerToDecimal(const TExprPtr& operand, const TTypePtr& from, const T
             Int64(ScaleOf(to), loc), Int64(PrecisionOf(to), loc)}, loc);
 }
 
-TExprPtr FloatToDecimal(const TExprPtr& operand, const TTypePtr&, const TTypePtr& to,
+TExprPtr FloatToDecimal(const TExprPtr& operand, const TTypePtr& from, const TTypePtr& to,
     TLocation loc)
 {
+    auto floating = TMaybeType<TFloatType>(UnwrapNamedType(from));
+    if (floating && floating.Cast()->Kind == TFloatType::F32) {
+        // REAL has its own rounding (six digits first), so it does not go through f64.
+        auto wide = Call("qdb_decimal_from_f32", {operand, Int64(ScaleOf(to), loc)}, loc);
+        return IsDecimal64(to)
+            ? Call("qdb_decimal64_narrow_checked", {std::move(wide), Int64(PrecisionOf(to), loc)}, loc)
+            : wide;
+    }
     if (!IsDecimal64(to)) {
         return Call("qdb_decimal_from_f64", {operand, Int64(ScaleOf(to), loc)}, loc);
     }
@@ -216,6 +224,16 @@ TExprPtr DecimalToFloat(const TExprPtr& operand, const TTypePtr& from, const TTy
     return value;
 }
 
+// Qumir's float -> integer cast truncates; SQL rounds half to even (issue #412). The
+// operand is widened to f64: the runtime has no rounding for f32.
+TExprPtr FloatToInteger(const TExprPtr& operand, const TTypePtr&, const TTypePtr& to,
+    TLocation loc)
+{
+    auto wide = std::make_shared<TCastExpr>(loc, operand,
+        std::make_shared<TFloatType>(TFloatType::F64));
+    return std::make_shared<TCastExpr>(loc, Call("qdb_rint", {std::move(wide)}, loc), to);
+}
+
 TExprPtr DecimalToInteger(const TExprPtr& operand, const TTypePtr& from, const TTypePtr& to,
     TLocation loc)
 {
@@ -259,6 +277,7 @@ const TCastRule CastRules[] = {
     {EKind::Decimal, EKind::Decimal, DecimalToDecimal},
     {EKind::Decimal, EKind::Float, DecimalToFloat},
     {EKind::Decimal, EKind::Integer, DecimalToInteger},
+    {EKind::Float, EKind::Integer, FloatToInteger},
 };
 
 bool HasDecimalSide(EKind from, EKind to) {
@@ -282,9 +301,12 @@ bool IsUnsupportedToString(EKind from, EKind to) {
 }
 
 // The SQL spelling of a type in the rejection: Qumir's diagnostic name of a DECIMAL is
-// its SQL name already, that of DOUBLE is `f64`.
+// its SQL name already, those of DOUBLE and REAL are `f64` and `f32`.
 std::string SqlTypeName(const TTypePtr& type) {
-    return TMaybeType<TFloatType>(UnwrapNamedType(type)) ? "DOUBLE" : TypeDiagnosticName(type);
+    if (auto floating = TMaybeType<TFloatType>(UnwrapNamedType(type))) {
+        return floating.Cast()->Kind == TFloatType::F32 ? "REAL" : "DOUBLE";
+    }
+    return TypeDiagnosticName(type);
 }
 
 } // namespace
