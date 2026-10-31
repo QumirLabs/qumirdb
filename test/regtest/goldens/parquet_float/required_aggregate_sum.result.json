@@ -1,0 +1,6 @@
+{
+  "schema": "<struct (s <named Nullable [f32]>) (a <named Nullable [f64]>)>",
+  "rows": [
+    [16777218, 2396745.3714285716]
+  ]
+}

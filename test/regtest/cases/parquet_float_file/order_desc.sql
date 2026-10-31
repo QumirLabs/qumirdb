@@ -1,0 +1,1 @@
+SELECT id, c, p FROM t WHERE p < 1e30 ORDER BY p DESC, id LIMIT 5;

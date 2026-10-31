@@ -1,0 +1,6 @@
+{
+  "schema": "<struct (n i64) (nc i64) (c_lo <named Nullable [f32]>) (c_hi <named Nullable [f32]>) (c_sum <named Nullable [f32]>) (np i64) (p_lo <named Nullable [f32]>) (p_hi <named Nullable [f32]>) (p_sum <named Nullable [f32]>)>",
+  "rows": [
+    ["39997", "36360", 0, 12.25, 222713.75, "39997", 0, 6250.0625, 124983032]
+  ]
+}

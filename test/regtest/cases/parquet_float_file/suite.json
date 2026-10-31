@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "fixtures": {
+    "big": {"parquet_file": "tables/big.parquet"}
+  },
+  "tables": {"t": "big"},
+  "variants": ["single", "threaded"],
+  "cases": {
+    "aggregate.sql": {"order": "ordered"},
+    "group.sql": {"order": "ordered"},
+    "order_asc.sql": {"order": "ordered"},
+    "order_desc.sql": {"order": "ordered"},
+    "filter_pruned.sql": {"order": "ordered"},
+    "filter_arithmetic.sql": {"order": "ordered"},
+    "filter_dictionary.sql": {"order": "ordered"},
+    "distinct.sql": {"order": "ordered"},
+    "special.sql": {"order": "ordered"}
+  }
+}

@@ -67,8 +67,8 @@ TNumberInfo NumberInfo(const TTypePtr& type) {
             .BitWidth = integer.Cast()->BitWidth(),
         };
     }
-    if (TMaybeType<TFloatType>(valueType)) {
-        return {.Kind = ENumberKind::Float, .BitWidth = 64};
+    if (auto floating = TMaybeType<TFloatType>(valueType)) {
+        return {.Kind = ENumberKind::Float, .BitWidth = floating.Cast()->BitWidth()};
     }
     return {};
 }
@@ -329,6 +329,13 @@ private:
             return Rescale(std::move(value), target);
         }
         if (value.Info.Kind == target.Kind) {
+            // A range is held as f64; f32 values widen exactly, but f64 values
+            // would need a rounding the kernel never applies here.
+            if (value.Info.Kind == ENumberKind::Float &&
+                value.Info.BitWidth > target.BitWidth)
+            {
+                return {};
+            }
             value.Info = target;
             return value;
         }
@@ -351,18 +358,26 @@ private:
         if (target.Kind == ENumberKind::Float) {
             if (value.Info.Kind == ENumberKind::Signed) {
                 return {
-                    .Expr = Call("rg_f64_from_i64", {std::move(value.Expr)}),
+                    .Expr = RoundToWidth(
+                        Call("rg_f64_from_i64", {std::move(value.Expr)}), target),
                     .Info = target,
                 };
             }
             if (value.Info.Kind == ENumberKind::Unsigned) {
                 return {
-                    .Expr = Call("rg_f64_from_u64", {std::move(value.Expr)}),
+                    .Expr = RoundToWidth(
+                        Call("rg_f64_from_u64", {std::move(value.Expr)}), target),
                     .Info = target,
                 };
             }
         }
         return {};
+    }
+
+    // f32 ranges are kept as f64 holding f32 values; an f32 result is the f64
+    // range widened outward to the f32 grid.
+    static TExprPtr RoundToWidth(TExprPtr range, const TNumberInfo& target) {
+        return target.BitWidth == 32 ? Call("rg_f32_round", {std::move(range)}) : range;
     }
 
     // A literal beside a DECIMAL as the kernel types it: a fractional literal
@@ -409,9 +424,14 @@ private:
         TExprPtr literal;
         switch (target.Kind) {
             case ENumberKind::Float:
-                literal = F64(number->IsFloat()
-                    ? number->FloatValue
-                    : static_cast<double>(number->IntValue));
+                {
+                    const double value = number->IsFloat()
+                        ? number->FloatValue
+                        : static_cast<double>(number->IntValue);
+                    literal = F64(target.BitWidth == 32
+                        ? static_cast<double>(static_cast<float>(value))
+                        : value);
+                }
                 break;
             case ENumberKind::Signed:
                 if (number->IsFloat()) {
@@ -527,7 +547,8 @@ private:
             const std::string fn = op == "+" ? "rg_f64_add"
                 : op == "-" ? "rg_f64_sub"
                 : "rg_f64_mul";
-            result = Call(fn, {std::move(left.Expr), std::move(right.Expr)});
+            result = RoundToWidth(
+                Call(fn, {std::move(left.Expr), std::move(right.Expr)}), native);
         } else {
             return {};
         }

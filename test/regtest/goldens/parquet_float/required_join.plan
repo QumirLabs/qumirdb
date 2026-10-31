@@ -1,0 +1,5 @@
+sort [a asc, b asc]
+└─ project (a, b) (rows≈1 cost≈4.4K)
+   └─ join inner [a.f = b.f] (rows≈1 cost≈4.4K)
+      ├─ source r AS a (rows≈13 cost≈104)
+      └─ source r AS b (rows≈13 cost≈104)

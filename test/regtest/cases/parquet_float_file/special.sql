@@ -1,0 +1,1 @@
+SELECT id, c, p, m FROM t WHERE id BETWEEN 4 AND 9 ORDER BY id;

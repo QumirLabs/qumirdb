@@ -380,6 +380,40 @@
         (block (return (bitcast (+ bits (: 1 u64)) f64))))
       (return (bitcast (- bits (: 1 u64)) f64))))
 
+  ;; The f32 grid neighbours of an f64 value: the largest f32 not above it and the
+  ;; smallest f32 not below it.
+  (fun rg_f32_down ((var value f64)) -> f64
+    (block
+      (if (!= value value) (block (return value)))
+      (var near = (cast value f32))
+      (if (<= (cast near f64) value) (block (return (cast near f64))))
+      (var bits = (bitcast near u32))
+      (if (== near (: 0.0 f32))
+        (block (return (cast (bitcast (| (<< (: 1 u32) (: 31 u32)) (: 1 u32)) f32) f64))))
+      (if (> near (: 0.0 f32))
+        (block (return (cast (bitcast (- bits (: 1 u32)) f32) f64))))
+      (return (cast (bitcast (+ bits (: 1 u32)) f32) f64))))
+
+  (fun rg_f32_up ((var value f64)) -> f64
+    (block
+      (if (!= value value) (block (return value)))
+      (var near = (cast value f32))
+      (if (>= (cast near f64) value) (block (return (cast near f64))))
+      (var bits = (bitcast near u32))
+      (if (== near (: 0.0 f32))
+        (block (return (cast (bitcast (: 1 u32) f32) f64))))
+      (if (> near (: 0.0 f32))
+        (block (return (cast (bitcast (+ bits (: 1 u32)) f32) f64))))
+      (return (cast (bitcast (- bits (: 1 u32)) f32) f64))))
+
+  (fun rg_f32_round ((var a <named RgRange [f64]>)) -> <named RgRange [f64]>
+    (block
+      (if (call rg_has_bounds a)
+        (block
+          (return (call rg_range (call rg_f32_down (field a Lo))
+                                 (call rg_f32_up (field a Hi)) (field a Flags)))))
+      (return a)))
+
   (fun rg_f64_binary_flags
        ((var a <named RgRange [f64]>) (var b <named RgRange [f64]>)) -> i64
     (block

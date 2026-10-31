@@ -1,4 +1,4 @@
 sort [id asc]
-└─ project (id, f) (rows≈4 cost≈264)
-   └─ filter (< |s.f| 1) (rows≈4 cost≈216)
-      └─ source s AS s row-groups (< |s.f| 1) (rows≈9 cost≈108)
+└─ project (id, f) (rows≈4 cost≈176)
+   └─ filter (< |s.f| 1) (rows≈4 cost≈144)
+      └─ source s AS s row-groups (< |s.f| 1) (rows≈9 cost≈72)

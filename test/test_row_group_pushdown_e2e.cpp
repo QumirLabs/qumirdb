@@ -286,6 +286,22 @@ TEST(RowGroupPushdownE2E, MatchesFullScanAcrossParquetPhysicalTypes) {
         {4, 5});
     ExpectSameAsFullScan(
         path,
+        "SELECT id FROM t WHERE real_value > 50",
+        {2, 3});
+    ExpectSameAsFullScan(
+        path,
+        "SELECT id FROM t WHERE real_value = 101.5",
+        {3});
+    ExpectSameAsFullScan(
+        path,
+        "SELECT id FROM t WHERE real_value + real_value < 0",
+        {4, 5});
+    ExpectSameAsFullScan(
+        path,
+        "SELECT id FROM t WHERE real_value * real_value > 10000",
+        {2, 3});
+    ExpectSameAsFullScan(
+        path,
         "SELECT id FROM t WHERE nullable_value > 50",
         {2});
 }

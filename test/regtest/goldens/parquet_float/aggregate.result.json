@@ -1,6 +1,6 @@
 {
-  "schema": "<struct (c i64) (s <named Nullable [f64]>) (lo <named Nullable [f64]>) (hi <named Nullable [f64]>) (a <named Nullable [f64]>) (cn i64)>",
+  "schema": "<struct (c i64) (s <named Nullable [f32]>) (lo <named Nullable [f32]>) (hi <named Nullable [f32]>) (a <named Nullable [f64]>) (cn i64)>",
   "rows": [
-    ["6", 1.0000000150474662e+30, -2.25, 1.0000000150474662e+30, -2.5000000376186655e+29, "4"]
+    ["6", 1e+30, -2.25, 1e+30, -2.5000000376186655e+29, "4"]
   ]
 }

@@ -1,0 +1,5 @@
+sort [f asc]
+└─ project (f) (rows≈13 cost≈208)
+   └─ aggregate keys=[f] (rows≈13 cost≈156)
+      └─ project (f) (rows≈13 cost≈104)
+         └─ source r AS r (rows≈13 cost≈52)

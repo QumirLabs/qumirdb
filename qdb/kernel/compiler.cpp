@@ -180,7 +180,8 @@ constexpr const char* CacheSchemaVersion = "v1";
 // qumirdb.oz stores DECIMAL(p <= 18) in i64 and checks its range (qdb_decimal64_*).
 // Hash and compare f32 keys by their canonical 32-bit bits.
 // radix.oz gains qumir_radix_key(f32).
-constexpr const char* KernelLibVersion = "64";
+// row_group_interval.oz gains f32 operand intervals.
+constexpr const char* KernelLibVersion = "65";
 } // namespace
 
 NQumir::NCodeGen::TLlvmRunner::TLinkedModule CompileKernelAstCached(

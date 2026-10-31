@@ -1,0 +1,4 @@
+top-sort [f desc, id asc] limit 6
+└─ project (id, f) (rows≈11 cost≈296)
+   └─ filter (! (call qdb_in_list |r.id| 7 12)) (rows≈11 cost≈208)
+      └─ source r AS r row-groups (! (call qdb_in_list |r.id| 7 12)) (rows≈13 cost≈104)

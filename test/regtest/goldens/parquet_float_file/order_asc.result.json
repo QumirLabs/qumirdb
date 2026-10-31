@@ -1,0 +1,10 @@
+{
+  "schema": "<struct (id <named Nullable [i32]>) (c <named Nullable [f32]>) (p <named Nullable [f32]>)>",
+  "rows": [
+    [0, null, 0],
+    [7, 1.75, {"$float":"-0"}],
+    [36584, 8.5, 0.3125],
+    [31217, 4.25, 0.4375],
+    [25850, null, 0.5625]
+  ]
+}
