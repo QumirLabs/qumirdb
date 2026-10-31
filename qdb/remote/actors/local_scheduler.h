@@ -1,11 +1,12 @@
 #pragma once
 
 #include <coroio/actors/actor.hpp>
+#include <qdb/remote/time_source.h>
 
 namespace NQdb {
 namespace NRemote {
 
-NNet::NActors::IActor* CreateLocalScheduler(NNet::NActors::TNodeId leader, uint64_t pingPeriodMs);
+NNet::NActors::IActor* CreateLocalScheduler(ITimeSource* timeSource, NNet::NActors::TNodeId leader, uint64_t pingPeriodMs);
 
 } // NRemote
 } // NQdb

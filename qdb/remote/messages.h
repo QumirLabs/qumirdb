@@ -18,11 +18,13 @@ struct TPing {
 
 struct TSpawnComputeActor {
     static constexpr NNet::NActors::TMessageId MessageId = 101;
+    uint32_t Count = 1;
 };
 
 struct TSpawnComputeActorResponse {
     static constexpr NNet::NActors::TMessageId MessageId = 102;
-    NNet::NActors::TActorId ActorId;
+    uint32_t Count = 1;
+    std::vector<NNet::NActors::TActorId> ActorIds;
 };
 
 // compute-actor

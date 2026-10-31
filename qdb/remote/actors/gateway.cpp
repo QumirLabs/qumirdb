@@ -1,33 +1,7 @@
 #include <coroio/actors/actorsystem.hpp>
 #include <qdb/remote/messages.h>
+#include <qdb/remote/serialization.h>
 #include "gateway.h"
-
-
-namespace NNet::NActors {
-
-using namespace NQdb::NRemote;
-
-template<>
-void SerializeToStream<TExecuteQuery>(const TExecuteQuery& obj, std::ostringstream& oss) {
-    oss << obj.Query;
-}
-
-template<>
-void DeserializeFromStream<TExecuteQuery>(TExecuteQuery& obj, std::istringstream& iss) {
-    obj.Query = iss.str();
-}
-
-template<>
-void SerializeToStream<TExecuteQueryResponse>(const TExecuteQueryResponse& obj, std::ostringstream& oss) {
-    oss << obj.Response;
-}
-
-template<>
-void DeserializeFromStream<TExecuteQueryResponse>(TExecuteQueryResponse& obj, std::istringstream& iss) {
-    obj.Response = iss.str();
-}
-
-} // namespace NNet::NActors
 
 
 namespace NQdb {
