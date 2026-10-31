@@ -42,6 +42,15 @@
           (= mask (bitcast (: -1 i64) u64))))
       (return (^ bits mask))))
 
+  (fun qumir_radix_key ((var value f32)) -> u64
+    (block
+      (var bits = (bitcast value u32))
+      (var mask = (<< (: 1 u32) (: 31 u32)))
+      (if (!= (>> bits (: 31 u32)) (: 0 u32))
+        (block
+          (= mask (bitcast (: -1 i32) u32))))
+      (return (cast (^ bits mask) u64))))
+
   (fun qumir_radix_digit ((var key u64) (var digit i64)) -> u32
     (block
       (return (cast (& (>> key (cast digit u64)) (: 255 u64)) u32))))

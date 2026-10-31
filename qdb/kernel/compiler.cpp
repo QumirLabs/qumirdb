@@ -179,7 +179,8 @@ constexpr const char* CacheSchemaVersion = "v1";
 // qumir aligns a struct field that holds an i128 to 16 (QumirLabs/qumir#169).
 // qumirdb.oz stores DECIMAL(p <= 18) in i64 and checks its range (qdb_decimal64_*).
 // Hash and compare f32 keys by their canonical 32-bit bits.
-constexpr const char* KernelLibVersion = "62";
+// radix.oz gains qumir_radix_key(f32).
+constexpr const char* KernelLibVersion = "63";
 } // namespace
 
 NQumir::NCodeGen::TLlvmRunner::TLinkedModule CompileKernelAstCached(
@@ -302,8 +303,8 @@ NQumir::NAst::TTypePtr SortCoreType(const NQumir::NAst::TTypePtr& type) {
     if (auto integer = TMaybeType<TIntegerType>(valueType)) {
         return std::make_shared<TIntegerType>(integer.Cast()->Kind);
     }
-    if (TMaybeType<TFloatType>(valueType)) {
-        return std::make_shared<TFloatType>();
+    if (auto floating = TMaybeType<TFloatType>(valueType)) {
+        return std::make_shared<TFloatType>(floating.Cast()->Kind);
     }
     return nullptr;
 }
@@ -314,8 +315,8 @@ int64_t SortRadixKeyBits(const NQumir::NAst::TTypePtr& type) {
     if (auto integer = TMaybeType<TIntegerType>(valueType)) {
         return integer.Cast()->BitWidth();
     }
-    if (TMaybeType<TFloatType>(valueType)) {
-        return 64;
+    if (auto floating = TMaybeType<TFloatType>(valueType)) {
+        return floating.Cast()->BitWidth();
     }
     if (TMaybeType<TBoolType>(valueType)) {
         return 8;
@@ -1261,10 +1262,12 @@ NQumir::NAst::TExprPtr BuildWindowMaterializeWrapperAst(
                     Cast(Int64Literal(0), Ptr(std::move(argCoreType))),
                 };
                 if (funcs[f].Func == "sum_prefix" || funcs[f].Func == "sum_partition") {
-                    auto outCoreType = integerSum
-                        ? std::make_shared<TIntegerType>()
-                        : SortCoreType(argType);
-                    const int64_t outWidth = integerSum ? 8 : width;
+                    // Integer sums widen to i64 and float sums to f64, as AggregateResultType.
+                    const bool floatSum = !integerSum && TMaybeType<TFloatType>(PhysicalValueType(argType));
+                    TTypePtr outCoreType = integerSum
+                        ? TTypePtr(std::make_shared<TIntegerType>())
+                        : (floatSum ? TTypePtr(std::make_shared<TFloatType>()) : SortCoreType(argType));
+                    const int64_t outWidth = (integerSum || floatSum) ? 8 : width;
                     if (!outCoreType || outWidth == 0) {
                         throw NQumir::TError(
                             "BuildWindowMaterializeWrapperAst: unsupported window sum result type " +

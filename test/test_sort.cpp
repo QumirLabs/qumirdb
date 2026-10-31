@@ -44,6 +44,13 @@ auto RadixKey(T x) {
     return u;
 }
 
+uint32_t RadixKey(float x) {
+    uint32_t u = std::bit_cast<uint32_t>(x);
+    uint32_t sign = u >> 31;
+    uint32_t mask = (-sign) | 0x80000000U;
+    return u ^ mask;
+}
+
 uint64_t RadixKey(double x) {
     uint64_t u = std::bit_cast<uint64_t>(x);
     uint64_t sign = u >> 63;
@@ -322,6 +329,10 @@ const char* TestRadixWrapperSource = R"(
       (return (call qumir_radix_key value))))
 
   (fun test_radix_key_f64 ((var value f64)) -> u64
+    (block
+      (return (call qumir_radix_key value))))
+
+  (fun test_radix_key_f32 ((var value f32)) -> u64
     (block
       (return (call qumir_radix_key value)))))
 )";
@@ -728,6 +739,25 @@ TEST(SortRadixOz, NumericKeysMatchPrototype) {
     auto f64Key = reinterpret_cast<uint64_t(*)(double)>(f64Entry);
     for (double value : {-2345.6, -0.0, 0.0, 1.2, 555.99}) {
         EXPECT_EQ(f64Key(value), RadixKey(value));
+    }
+}
+
+TEST(SortRadixOz, F32KeyMatchesPrototypeAndKeepsFloatOrder) {
+    void* entry = nullptr;
+    auto runner = CompileRadixOperation("test_radix_key_f32", entry);
+    ASSERT_NE(entry, nullptr);
+    auto f32Key = reinterpret_cast<uint64_t(*)(float)>(entry);
+    // Same bit-pattern order as the f64 key: -0.0 sorts before 0.0, NaN after +inf.
+    const float inf = std::numeric_limits<float>::infinity();
+    const std::vector<float> ascending = {
+        -inf, -3.4e38f, -2345.6f, -1.0f, -1e-45f, -0.0f, 0.0f, 1e-45f, 1.2f, 555.99f,
+        3.4e38f, inf, std::numeric_limits<float>::quiet_NaN()};
+    for (size_t i = 0; i < ascending.size(); ++i) {
+        EXPECT_EQ(f32Key(ascending[i]), RadixKey(ascending[i])) << i;
+        EXPECT_LE(f32Key(ascending[i]), 0xffffffffULL) << i;
+        if (i > 0) {
+            EXPECT_LT(f32Key(ascending[i - 1]), f32Key(ascending[i])) << i;
+        }
     }
 }
 

@@ -18,6 +18,8 @@
 #include <qumir/parser/core/parser.h>
 
 #include <array>
+#include <cmath>
+#include <limits>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
@@ -1501,4 +1503,127 @@ int main(int argc, char** argv) {
     NQumir::NCodeGen::TLLVMInitializer initializer;
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
+}
+
+namespace {
+
+// Owns the f32 input and the runtime of a window over (k, o, nullable f32 v).
+struct TF32WindowRun {
+    std::vector<TColumn> Columns;
+    std::unique_ptr<TMockSource> Source;
+    std::unique_ptr<TTestRuntime> Runtime;
+
+    TF32WindowRun(
+        const std::string& tail,
+        std::array<int64_t, 6>& keys,
+        std::array<int64_t, 6>& order,
+        std::array<float, 6>& values,
+        std::array<uint8_t, 1>& valueMask)
+    {
+        Columns = {
+            TColumn{.Data = reinterpret_cast<char*>(keys.data())},
+            TColumn{.Data = reinterpret_cast<char*>(order.data())},
+            TColumn{.Data = reinterpret_cast<char*>(values.data()), .Mask = valueMask.data()},
+        };
+        std::vector<TRowSet> batches = {TRowSet{
+            .Columns = Columns.data(),
+            .ColumnCount = 3,
+            .RowCount = static_cast<int64_t>(keys.size()),
+            .Selection = nullptr,
+            .RefCount = 1,
+        }};
+        Source = std::make_unique<TMockSource>(
+            std::vector<std::string>{"k", "o", "v"},
+            std::move(batches),
+            std::vector<NQumir::NAst::TTypePtr>{
+                std::make_shared<NQumir::NAst::TIntegerType>(),
+                std::make_shared<NQumir::NAst::TIntegerType>(),
+                std::make_shared<TNullable>(std::make_shared<NQumir::NAst::TFloatType>(
+                    NQumir::NAst::TFloatType::F32)),
+            });
+        Runtime = RunPlan(ParsePlan(
+            "(rel window (rel source \"data.parquet\") (partition k) " + tail, *Source));
+    }
+};
+
+} // namespace
+
+TEST(WindowExec, PrefixSumAndMaxOfF32WidenSumAndKeepMax) {
+    const float inf = std::numeric_limits<float>::infinity();
+    std::array<int64_t, 6> keys = {1, 1, 1, 1, 2, 2};
+    std::array<int64_t, 6> order = {1, 2, 3, 4, 1, 2};
+    std::array<float, 6> values = {0.1f, 5.0f, 0.2f, inf, 3.0f, -0.0f};
+    std::array<uint8_t, 1> valueMask = {0b00111101}; // row 1 is NULL
+
+    TF32WindowRun run(
+        "(order (o asc nulls-default)) "
+        "(frame rows (start unbounded-preceding) (end current-row)) "
+        "(fn running_sum sum v) (fn running_max max v))",
+        keys, order, values, valueMask);
+    auto& runtime = run.Runtime;
+
+    TRowSet result{};
+    ASSERT_TRUE(runtime->Next(result));
+    ASSERT_EQ(result.ColumnCount, 5);
+    ASSERT_EQ(result.RowCount, 6);
+
+    auto sumType = NQumir::NAst::TMaybeType<NQumir::NAst::TFloatType>(
+        UnwrapNullableType(static_cast<NQumir::NAst::TStructType*>(
+            runtime->OutputType().get())->Fields[3].second));
+    auto maxType = NQumir::NAst::TMaybeType<NQumir::NAst::TFloatType>(
+        UnwrapNullableType(static_cast<NQumir::NAst::TStructType*>(
+            runtime->OutputType().get())->Fields[4].second));
+    ASSERT_TRUE(sumType);
+    ASSERT_TRUE(maxType);
+    EXPECT_EQ(sumType.Cast()->BitWidth(), 64);
+    EXPECT_EQ(maxType.Cast()->BitWidth(), 32);
+
+    auto* sums = reinterpret_cast<double*>(result.Columns[3].Data);
+    auto* maxes = reinterpret_cast<float*>(result.Columns[4].Data);
+    const std::array<bool, 6> expectedValid = {true, true, true, true, true, true};
+    const std::array<double, 6> expectedSums = {
+        static_cast<double>(0.1f), static_cast<double>(0.1f),
+        static_cast<double>(0.1f) + static_cast<double>(0.2f),
+        std::numeric_limits<double>::infinity(), 3.0, 3.0};
+    const std::array<float, 6> expectedMax = {0.1f, 0.1f, 0.2f, inf, 3.0f, 3.0f};
+    for (int64_t row = 0; row < result.RowCount; ++row) {
+        EXPECT_EQ(IsValid(result.Columns[3], row), expectedValid[row]) << "row " << row;
+        EXPECT_EQ(sums[row], expectedSums[row]) << "row " << row;
+        EXPECT_EQ(maxes[row], expectedMax[row]) << "row " << row;
+    }
+    Release(&result);
+}
+
+TEST(WindowExec, PartitionSumAndAvgOfF32AccumulateInF64) {
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    std::array<int64_t, 6> keys = {1, 1, 2, 2, 3, 3};
+    std::array<int64_t, 6> order = {1, 2, 1, 2, 1, 2};
+    std::array<float, 6> values = {0.1f, 0.2f, nan, 1.0f, 4.0f, 5.0f};
+    std::array<uint8_t, 1> valueMask = {0b00001111}; // partition 3 is all NULL
+
+    TF32WindowRun run(
+        "(fn total sum v) (fn mean avg v))", keys, order, values, valueMask);
+    auto& runtime = run.Runtime;
+
+    TRowSet result{};
+    ASSERT_TRUE(runtime->Next(result));
+    ASSERT_EQ(result.ColumnCount, 5);
+    ASSERT_EQ(result.RowCount, 6);
+    auto* sums = reinterpret_cast<double*>(result.Columns[3].Data);
+    auto* avgs = reinterpret_cast<double*>(result.Columns[4].Data);
+
+    const double sum1 = static_cast<double>(0.1f) + static_cast<double>(0.2f);
+    for (int64_t row : {0, 1}) {
+        EXPECT_EQ(sums[row], sum1) << "row " << row;
+        EXPECT_EQ(avgs[row], sum1 / 2.0) << "row " << row;
+    }
+    for (int64_t row : {2, 3}) {
+        EXPECT_TRUE(std::isnan(sums[row])) << "row " << row;
+        EXPECT_TRUE(std::isnan(avgs[row])) << "row " << row;
+    }
+    for (int64_t row : {4, 5}) {
+        EXPECT_FALSE(IsValid(result.Columns[3], row)) << "row " << row;
+        EXPECT_FALSE(IsValid(result.Columns[4], row)) << "row " << row;
+    }
+    Release(&result);
 }

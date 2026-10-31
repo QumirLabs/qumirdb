@@ -14,6 +14,8 @@
 #include <qdb/sexp/parser.h>
 
 #include <array>
+#include <cmath>
+#include <limits>
 #include <map>
 #include <memory>
 #include <sstream>
@@ -197,4 +199,60 @@ int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     NQumir::NCodeGen::TLLVMInitializer initializer;
     return RUN_ALL_TESTS();
+}
+
+TEST(AggregateF64, Float32ArgumentFeedsF64States) {
+    // v is a nullable f32 column; sum/min/max results are f64 of the widened values.
+    const float inf = std::numeric_limits<float>::infinity();
+    std::array<int64_t, 8> k = {1, 1, 2, 2, 3, 3, 4, 4};
+    std::array<float, 8> v = {0.1f, 0.2f, -inf, 5.0f, -0.0f, 7.0f, std::nanf(""), 1.0f};
+    std::array<uint8_t, 1> mask = {0b11011111}; // row 5 is NULL
+    std::array<TColumn, 2> cols = {
+        TColumn{.Data = reinterpret_cast<char*>(k.data())},
+        TColumn{.Data = reinterpret_cast<char*>(v.data()), .Mask = mask.data()},
+    };
+    TRowSet batch{.Columns = cols.data(), .ColumnCount = 2, .RowCount = 8, .RefCount = 1};
+    NQdb::TMockSource src({"k", "v"},
+        {std::make_shared<TIntegerType>(TIntegerType::I64),
+         std::make_shared<TNullable>(std::make_shared<TFloatType>(TFloatType::F32))},
+        {batch});
+
+    auto plan = Plan(
+        "(rel aggregate (rel source \"L\") (keys k) "
+        "(agg s sum v) (agg mn min v) (agg mx max v))", src);
+
+    auto* outType = static_cast<TStructType*>(plan->OutputType().get());
+    ASSERT_EQ(outType->Fields.size(), 4u);
+    for (size_t i = 1; i < 4; ++i) {
+        auto inner = UnwrapNullableType(outType->Fields[i].second);
+        auto floating = TMaybeType<TFloatType>(inner);
+        ASSERT_TRUE(floating);
+        EXPECT_EQ(floating.Cast()->BitWidth(), 64);
+    }
+
+    struct TStats { double s, mn, mx; };
+    std::map<int64_t, TStats> got;
+    TRowSet out{};
+    while (plan->Next(out)) {
+        const auto* kc = reinterpret_cast<const int64_t*>(out.Columns[0].Data);
+        const auto* s = reinterpret_cast<const double*>(out.Columns[1].Data);
+        const auto* mn = reinterpret_cast<const double*>(out.Columns[2].Data);
+        const auto* mx = reinterpret_cast<const double*>(out.Columns[3].Data);
+        for (int64_t i = 0; i < out.RowCount; ++i) {
+            got[kc[i]] = {s[i], mn[i], mx[i]};
+        }
+        Release(&out);
+    }
+
+    ASSERT_EQ(got.size(), 4u);
+    EXPECT_EQ(got[1].s, static_cast<double>(0.1f) + static_cast<double>(0.2f));
+    EXPECT_EQ(got[1].mn, static_cast<double>(0.1f));
+    EXPECT_EQ(got[1].mx, static_cast<double>(0.2f));
+    EXPECT_EQ(got[2].s, -std::numeric_limits<double>::infinity());
+    EXPECT_EQ(got[2].mn, -std::numeric_limits<double>::infinity());
+    EXPECT_EQ(got[2].mx, 5.0);
+    EXPECT_EQ(got[3].s, -0.0 + 0.0);  // the NULL row is skipped
+    EXPECT_EQ(got[3].mn, 0.0);
+    EXPECT_EQ(got[3].mx, 0.0);
+    EXPECT_TRUE(std::isnan(got[4].s));
 }

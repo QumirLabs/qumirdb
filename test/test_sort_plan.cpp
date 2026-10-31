@@ -31,6 +31,7 @@
 
 #include <algorithm>
 #include <expected>
+#include <limits>
 #include <memory>
 #include <numeric>
 #include <sstream>
@@ -592,6 +593,83 @@ TEST(SortExec, SortsCompositeNumericKeysWithFusedRadixKernel) {
     EXPECT_EQ(std::vector<int64_t>(outB, outB + out.RowCount),
         (std::vector<int64_t>{7, 5, 30, 20, 10}));
     Release(&out);
+}
+
+// Sorts a nullable float key holding NaN, +-0, +-inf and NULL across two batches
+// and returns the payload column in output order.
+template<typename TFloat>
+std::vector<int64_t> SortFloatKeyPayload(const char* sql, bool topSort) {
+    using namespace NQumir::NAst;
+    const TFloat inf = std::numeric_limits<TFloat>::infinity();
+    const TFloat nan = std::numeric_limits<TFloat>::quiet_NaN();
+    TFloat keys1[] = {TFloat(0.1), nan, TFloat(-0.0), -inf, TFloat(7)};
+    int64_t payload1[] = {1, 2, 3, 4, 5};
+    uint8_t mask1[] = {0b00011111};
+    TFloat keys2[] = {TFloat(0.0), inf, TFloat(-1.5), TFloat(3)};
+    int64_t payload2[] = {6, 7, 8, 9};
+    uint8_t mask2[] = {0b00001011}; // row 2 is NULL
+    std::vector<TColumn> columns1 = {
+        TColumn{.Data = reinterpret_cast<char*>(keys1), .Mask = mask1},
+        TColumn{.Data = reinterpret_cast<char*>(payload1)},
+    };
+    std::vector<TColumn> columns2 = {
+        TColumn{.Data = reinterpret_cast<char*>(keys2), .Mask = mask2},
+        TColumn{.Data = reinterpret_cast<char*>(payload2)},
+    };
+    TRowSet batch1{.Columns = columns1.data(), .ColumnCount = 2, .RowCount = 5, .RefCount = 1};
+    TRowSet batch2{.Columns = columns2.data(), .ColumnCount = 2, .RowCount = 4, .RefCount = 1};
+
+    auto floatType = std::make_shared<TFloatType>(
+        sizeof(TFloat) == 4 ? TFloatType::F32 : TFloatType::F64);
+    NQdb::TMockSource source(
+        TMockColumns{},
+        {{"k", std::make_shared<TNullable>(floatType)},
+         {"payload", std::make_shared<TIntegerType>()}},
+        {batch1, batch2});
+    auto plan = BuildSqlPlan(sql, source);
+    EXPECT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
+    if (!plan) {
+        return {};
+    }
+    auto root = topSort ? ApplyTopSort(*plan) : *plan;
+    auto runtime = RunPlan(root);
+
+    std::vector<int64_t> result;
+    TRowSet out{};
+    while (runtime->Next(out)) {
+        auto* payload = reinterpret_cast<int64_t*>(out.Columns[1].Data);
+        result.insert(result.end(), payload, payload + out.RowCount);
+        Release(&out);
+    }
+    return result;
+}
+
+TEST(SortExec, F32KeyOrdersLikeF64) {
+    for (const char* sql : {
+             "SELECT k, payload FROM t ORDER BY k, payload",
+             "SELECT k, payload FROM t ORDER BY k DESC, payload",
+             "SELECT k, payload FROM t ORDER BY k NULLS FIRST, payload"})
+    {
+        auto f32Rows = SortFloatKeyPayload<float>(sql, false);
+        EXPECT_EQ(f32Rows.size(), 9u) << sql;
+        EXPECT_EQ(f32Rows, SortFloatKeyPayload<double>(sql, false)) << sql;
+    }
+    // -inf, the zeros, the finite values, +inf, then NaN; the NULL row (payload 8) is last.
+    auto ascending = SortFloatKeyPayload<float>(
+        "SELECT k, payload FROM t ORDER BY k, payload", false);
+    ASSERT_EQ(ascending.size(), 9u);
+    EXPECT_EQ(ascending, (std::vector<int64_t>{4, 3, 6, 1, 9, 5, 7, 2, 8}));
+}
+
+TEST(SortExec, F32TopSortOrdersLikeF64) {
+    for (const char* sql : {
+             "SELECT k, payload FROM t ORDER BY k, payload LIMIT 4",
+             "SELECT k, payload FROM t ORDER BY k DESC, payload LIMIT 4"})
+    {
+        auto f32Rows = SortFloatKeyPayload<float>(sql, true);
+        EXPECT_EQ(f32Rows.size(), 4u) << sql;
+        EXPECT_EQ(f32Rows, SortFloatKeyPayload<double>(sql, true)) << sql;
+    }
 }
 
 TEST(SortExec, SchedulerRuntimeRunsSortTail) {

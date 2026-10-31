@@ -38,7 +38,16 @@ TTypePtr AggregateResultType(const std::string& func, const TTypePtr& argType) {
             return nullable ? std::make_shared<TNullable>(std::move(sumType)) : sumType;
         }
     }
-    // Non-integer reducers are not connected yet; preserve the declared type.
+    // A float argument feeds the f64 reducer state whatever its width.
+    if (argType) {
+        const bool nullable = IsNullableType(argType);
+        auto inner = nullable ? UnwrapNullableType(argType) : argType;
+        if (inner && TMaybeType<TFloatType>(inner)) {
+            TTypePtr f64Type = std::make_shared<TFloatType>();
+            return nullable ? std::make_shared<TNullable>(std::move(f64Type)) : f64Type;
+        }
+    }
+    // Other reducers are not connected yet; preserve the declared type.
     return argType;
 }
 
