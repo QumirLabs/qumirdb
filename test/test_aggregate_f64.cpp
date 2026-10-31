@@ -195,12 +195,6 @@ TEST(AggregateF64, SchedulerUnaryPrefixFeedsAggregate) {
     EXPECT_DOUBLE_EQ(got[2], 4.0);
 }
 
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    NQumir::NCodeGen::TLLVMInitializer initializer;
-    return RUN_ALL_TESTS();
-}
-
 TEST(AggregateF64, Float32ArgumentFeedsF64States) {
     // v is a nullable f32 column; sum/min/max results are f64 of the widened values.
     const float inf = std::numeric_limits<float>::infinity();
@@ -255,4 +249,10 @@ TEST(AggregateF64, Float32ArgumentFeedsF64States) {
     EXPECT_EQ(got[3].mn, 0.0);
     EXPECT_EQ(got[3].mx, 0.0);
     EXPECT_TRUE(std::isnan(got[4].s));
+}
+
+int main(int argc, char** argv) {
+    ::testing::InitGoogleTest(&argc, argv);
+    NQumir::NCodeGen::TLLVMInitializer initializer;
+    return RUN_ALL_TESTS();
 }

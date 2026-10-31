@@ -759,6 +759,10 @@ TEST(SortRadixOz, F32KeyMatchesPrototypeAndKeepsFloatOrder) {
             EXPECT_LT(f32Key(ascending[i - 1]), f32Key(ascending[i])) << i;
         }
     }
+    // A NaN with the sign bit set sorts before -inf, like f64.
+    const float negNan = std::bit_cast<float>(0xffc00000U);
+    EXPECT_EQ(f32Key(negNan), RadixKey(negNan));
+    EXPECT_LT(f32Key(negNan), f32Key(-inf));
 }
 
 TEST(SortRadixOz, SortsU32IndicesAscending) {

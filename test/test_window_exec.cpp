@@ -1499,12 +1499,6 @@ TEST(WindowExec, RangeSumSharesValueAcrossOrderPeers) {
     Release(&result);
 }
 
-int main(int argc, char** argv) {
-    NQumir::NCodeGen::TLLVMInitializer initializer;
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}
-
 namespace {
 
 // Owns the f32 input and the runtime of a window over (k, o, nullable f32 v).
@@ -1626,4 +1620,10 @@ TEST(WindowExec, PartitionSumAndAvgOfF32AccumulateInF64) {
         EXPECT_FALSE(IsValid(result.Columns[4], row)) << "row " << row;
     }
     Release(&result);
+}
+
+int main(int argc, char** argv) {
+    NQumir::NCodeGen::TLLVMInitializer initializer;
+    ::testing::InitGoogleTest(&argc, argv);
+    return RUN_ALL_TESTS();
 }
