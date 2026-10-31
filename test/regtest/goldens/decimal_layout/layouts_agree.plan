@@ -1,0 +1,5 @@
+sort [id asc]
+└─ project (id, flba, int64) (rows≈1 cost≈4.3K)
+   └─ join inner [a.id = b.id] (rows≈1 cost≈4.2K)
+      ├─ source a AS a (rows≈4 cost≈48)
+      └─ source b AS b (rows≈4 cost≈48)
