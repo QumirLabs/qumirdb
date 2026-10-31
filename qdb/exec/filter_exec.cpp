@@ -31,14 +31,15 @@ TUnaryStreamProcess MakeFilterViewProcess(
 {
     return [dispatch = std::move(dispatch),
             keptIndices = std::move(keptIndices),
-            keepAll](TRowSet& rowSet, TUnaryStreamingKernelState&) {
+            keepAll](
+               TThreadExecutionContext& context, TRowSet& rowSet, TUnaryStreamingKernelState&) {
         auto data = std::make_unique<TFilterViewData>();
         data->Selection.resize(rowSet.RowCount);
 
         // Predicate on a copy; leave the input intact until it succeeds.
         TRowSet filtered = rowSet;
         filtered.Selection = data->Selection.data();
-        dispatch(filtered, rowSet.Selection);
+        dispatch(context, filtered, rowSet.Selection);
 
         TColumn* columns = rowSet.Columns;
         int64_t columnCount = rowSet.ColumnCount;

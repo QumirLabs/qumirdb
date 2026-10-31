@@ -27,6 +27,7 @@ namespace {
 class SchedulerRuntimeFilter : public NTest::TRuntimeFilterTest {};
 
 TEST_F(SchedulerRuntimeFilter, AuxInputWaitsForAllProducers) {
+    NQdb::TThreadExecutionContext context;
     auto filter = std::make_shared<TRuntimeFilter>(Context_, 16, 1024);
     filter->SetProducerCount(2);
     TTaskNode first;
@@ -42,15 +43,16 @@ TEST_F(SchedulerRuntimeFilter, AuxInputWaitsForAllProducers) {
     second.State.store(ETaskState::Queued);
     EXPECT_EQ(input.Poll(), EAuxInputStatus::Waiting);
 
-    filter->FinishProducer(std::move(filter->MakeBuilder()).TakePartial());
+    filter->FinishProducer(context, std::move(filter->MakeBuilder()).TakePartial());
     first.State.store(ETaskState::Finished);
     EXPECT_EQ(input.Poll(), EAuxInputStatus::Waiting);
-    filter->FinishProducer(std::move(filter->MakeBuilder()).TakePartial());
+    filter->FinishProducer(context, std::move(filter->MakeBuilder()).TakePartial());
     second.State.store(ETaskState::Finished);
     EXPECT_EQ(input.Poll(), EAuxInputStatus::Ready);
 }
 
 TEST_F(SchedulerRuntimeFilter, FilterDependencyNotifiesOnlyOnPublication) {
+    NQdb::TThreadExecutionContext context;
     auto filter = std::make_shared<TRuntimeFilter>(Context_, 16, 1024);
     TTaskNode producer;
     auto code = std::make_shared<TRuntimeFilterCode>();
@@ -65,13 +67,14 @@ TEST_F(SchedulerRuntimeFilter, FilterDependencyNotifiesOnlyOnPublication) {
     EXPECT_TRUE(consumer.WantsInput(dependency));
     producer.State.store(ETaskState::Queued);
     EXPECT_FALSE(consumer.WantsInput(dependency));
-    filter->FinishProducer(std::move(filter->MakeBuilder()).TakePartial());
+    filter->FinishProducer(context, std::move(filter->MakeBuilder()).TakePartial());
     producer.State.store(ETaskState::Finished);
     EXPECT_TRUE(consumer.TryNotifyDependency());
     EXPECT_FALSE(consumer.TryNotifyDependency());
 }
 
 TEST_F(SchedulerRuntimeFilter, MissingFilterPublicationFailsInExecute) {
+    NQdb::TThreadExecutionContext context;
     auto filter = std::make_shared<TRuntimeFilter>(Context_, 16, 1024);
     TTaskNode producer;
     producer.State.store(ETaskState::Finished);
@@ -86,7 +89,7 @@ TEST_F(SchedulerRuntimeFilter, MissingFilterPublicationFailsInExecute) {
     EXPECT_EQ(code->AuxInput->Poll(), EAuxInputStatus::Failed);
     EXPECT_FALSE(consumer.WantsInput(dependency));
     EXPECT_TRUE(consumer.TryNotifyDependency());
-    EXPECT_THROW(consumer.Execute(), std::runtime_error);
+    EXPECT_THROW(consumer.Execute(context), std::runtime_error);
 }
 
 struct TSourceState {
@@ -204,13 +207,13 @@ TPipeline MakePipeline() {
             return true;
         });
     out.FilterCode = std::make_shared<TUnaryCode>(
-        [](void* state, TRowSet& rowSet) {
+        [](NQdb::TThreadExecutionContext&, void* state, TRowSet& rowSet) {
             auto* unary = static_cast<TUnaryState*>(state);
             ++unary->Calls;
             rowSet.RowCount += unary->Add;
         });
     out.ProjectCode = std::make_shared<TUnaryCode>(
-        [](void* state, TRowSet& rowSet) {
+        [](NQdb::TThreadExecutionContext&, void* state, TRowSet& rowSet) {
             auto* unary = static_cast<TUnaryState*>(state);
             ++unary->Calls;
             rowSet.RowCount += unary->Add;
@@ -283,7 +286,7 @@ TEST(SchedulerRuntimeAdapter, RunsSourceFilterProjectSinkThreaded) {
 
 TEST(SchedulerRuntimeAdapter, PartitionTasksShareCodeButOwnState) {
     auto code = std::make_shared<TUnaryCode>(
-        [](void* state, TRowSet& rowSet) {
+        [](NQdb::TThreadExecutionContext&, void* state, TRowSet& rowSet) {
             auto* unary = static_cast<TUnaryState*>(state);
             ++unary->Calls;
             rowSet.RowCount += unary->Add;
@@ -312,6 +315,7 @@ TEST(SchedulerRuntimeAdapter, PartitionTasksShareCodeButOwnState) {
 }
 
 TEST(SchedulerRuntimeAdapter, RunsBinaryBlockingTask) {
+    NQdb::TThreadExecutionContext context;
     auto graph = std::make_unique<TTaskGraph>();
     auto destroyCount = std::make_shared<std::atomic<int>>(0);
     auto leftState = std::make_shared<TSourceState>(TSourceState{
@@ -337,11 +341,15 @@ TEST(SchedulerRuntimeAdapter, RunsBinaryBlockingTask) {
             return true;
         });
     auto binaryCode = std::make_shared<TBinaryBlockingCode>(
-        [](ITaskState& state, TInputPort& left, TInputPort& right, TRowSet& output) {
+        [](NQdb::TThreadExecutionContext& context,
+           ITaskState& state,
+           TInputPort& left,
+           TInputPort& right,
+           TRowSet& output) {
             auto* binary = &static_cast<TBinaryState&>(state);
             TRowSet rowSet{};
             while (!binary->LeftDone) {
-                auto fetch = left.Fetch(rowSet);
+                auto fetch = left.Fetch(context, rowSet);
                 if (fetch == EFetchResult::NO_DATA) {
                     break;
                 }
@@ -354,7 +362,7 @@ TEST(SchedulerRuntimeAdapter, RunsBinaryBlockingTask) {
                 rowSet = {};
             }
             while (!binary->RightDone) {
-                auto fetch = right.Fetch(rowSet);
+                auto fetch = right.Fetch(context, rowSet);
                 if (fetch == EFetchResult::NO_DATA) {
                     break;
                 }
@@ -479,11 +487,15 @@ TGateResult RunAsymmetricGateGraph(bool gate) {
     auto binaryState = std::make_shared<TBinaryState>();
     binaryState->DestroyCount = destroy.get();
     auto binaryCode = std::make_shared<TBinaryBlockingCode>(
-        [](ITaskState& state, TInputPort& left, TInputPort& right, TRowSet& output) {
+        [](NQdb::TThreadExecutionContext& context,
+           ITaskState& state,
+           TInputPort& left,
+           TInputPort& right,
+           TRowSet& output) {
             auto* b = &static_cast<TBinaryState&>(state);
             TRowSet rowSet{};
             while (!b->RightDone) { // build side first
-                auto fetch = right.Fetch(rowSet);
+                auto fetch = right.Fetch(context, rowSet);
                 if (fetch == EFetchResult::NO_DATA) return ETaskResult::NEED_DATA;
                 if (fetch == EFetchResult::FINISHED) { b->RightDone = true; break; }
                 ++b->RightRows;
@@ -491,7 +503,7 @@ TGateResult RunAsymmetricGateGraph(bool gate) {
                 rowSet = {};
             }
             while (!b->LeftDone) { // probe side after build EOF
-                auto fetch = left.Fetch(rowSet);
+                auto fetch = left.Fetch(context, rowSet);
                 if (fetch == EFetchResult::NO_DATA) return ETaskResult::NEED_DATA;
                 if (fetch == EFetchResult::FINISHED) { b->LeftDone = true; break; }
                 ++b->LeftRows;
@@ -578,6 +590,7 @@ TEST(SchedulerRuntimeAdapter, WithoutRequiredSideProbeIsPrefetched) {
 }
 
 TEST(SchedulerRuntimeAdapter, HashShuffleTaskScattersSelectedRows) {
+    NQdb::TThreadExecutionContext context;
     std::atomic<int> destroyCount = 0;
     TOneToOneConnection input(1);
     THashShuffleConnection output(2);
@@ -592,7 +605,7 @@ TEST(SchedulerRuntimeAdapter, HashShuffleTaskScattersSelectedRows) {
     input.Finish(0);
 
     auto code = std::make_shared<THashShuffleCode>(
-        [](TRowSet*, uint64_t*) {
+        [](NQdb::TThreadExecutionContext&, TRowSet*, uint64_t*) {
             ADD_FAILURE() << "shuffle recomputed input hashes";
             return false;
         });
@@ -605,7 +618,7 @@ TEST(SchedulerRuntimeAdapter, HashShuffleTaskScattersSelectedRows) {
         output,
         0);
 
-    EXPECT_EQ(task.Execute(), ETaskResult::OK);
+    EXPECT_EQ(task.Execute(context), ETaskResult::OK);
 
     TRowSet left{};
     ASSERT_EQ(output.Fetch(0, left), EFetchResult::OK);
@@ -625,13 +638,14 @@ TEST(SchedulerRuntimeAdapter, HashShuffleTaskScattersSelectedRows) {
         (std::vector<uint8_t>{0, 0, 0xff, 0}));
     Release(&right);
 
-    EXPECT_EQ(task.Execute(), ETaskResult::FINISHED);
+    EXPECT_EQ(task.Execute(context), ETaskResult::FINISHED);
     EXPECT_EQ(output.Fetch(0, left), EFetchResult::FINISHED);
     EXPECT_EQ(output.Fetch(1, right), EFetchResult::FINISHED);
     EXPECT_EQ(destroyCount.load(std::memory_order_relaxed), 1);
 }
 
 TEST(SchedulerRuntimeAdapter, HashShuffleTaskBatchesRowsUntilFinish) {
+    NQdb::TThreadExecutionContext context;
     using namespace NQumir::NAst;
 
     std::atomic<int> destroyCount = 0;
@@ -648,7 +662,7 @@ TEST(SchedulerRuntimeAdapter, HashShuffleTaskBatchesRowsUntilFinish) {
             {"value", std::make_shared<TIntegerType>()},
         });
     auto code = std::make_shared<THashShuffleCode>(
-        [](TRowSet* batch, uint64_t* hashes) {
+        [](NQdb::TThreadExecutionContext&, TRowSet* batch, uint64_t* hashes) {
             auto* values = reinterpret_cast<int64_t*>(batch->Columns[0].Data);
             for (int64_t row = 0; row < batch->RowCount; ++row) {
                 hashes[row] = static_cast<uint64_t>(values[row]);
@@ -667,14 +681,14 @@ TEST(SchedulerRuntimeAdapter, HashShuffleTaskBatchesRowsUntilFinish) {
         output,
         0);
 
-    EXPECT_EQ(task.Execute(), ETaskResult::OK);
+    EXPECT_EQ(task.Execute(context), ETaskResult::OK);
     TRowSet left{};
     EXPECT_EQ(output.Fetch(0, left), EFetchResult::NO_DATA);
 
-    EXPECT_EQ(task.Execute(), ETaskResult::OK);
+    EXPECT_EQ(task.Execute(context), ETaskResult::OK);
     EXPECT_EQ(output.Fetch(0, left), EFetchResult::NO_DATA);
 
-    EXPECT_EQ(task.Execute(), ETaskResult::FINISHED);
+    EXPECT_EQ(task.Execute(context), ETaskResult::FINISHED);
 
     ASSERT_EQ(output.Fetch(0, left), EFetchResult::OK);
     ASSERT_EQ(left.RowCount, 2);
@@ -705,6 +719,7 @@ TEST(SchedulerRuntimeAdapter, HashShuffleTaskBatchesRowsUntilFinish) {
 }
 
 TEST_F(SchedulerRuntimeFilter, PublishesRuntimeFilterBeforeBufferedOutputDrains) {
+    NQdb::TThreadExecutionContext context;
     using namespace NQumir::NAst;
     std::atomic<int> destroyCount = 0;
     TOneToOneConnection input(1);
@@ -719,7 +734,7 @@ TEST_F(SchedulerRuntimeFilter, PublishesRuntimeFilterBeforeBufferedOutputDrains)
             {"value", std::make_shared<TIntegerType>()},
         });
     auto code = std::make_shared<THashShuffleCode>(
-        [](TRowSet* batch, uint64_t* hashes) {
+        [](NQdb::TThreadExecutionContext&, TRowSet* batch, uint64_t* hashes) {
             auto* values = reinterpret_cast<int64_t*>(batch->Columns[0].Data);
             for (int64_t row = 0; row < batch->RowCount; ++row) {
                 hashes[row] = static_cast<uint64_t>(values[row]);
@@ -730,9 +745,9 @@ TEST_F(SchedulerRuntimeFilter, PublishesRuntimeFilterBeforeBufferedOutputDrains)
     code->ProducedFilter = filter;
     THashShuffleTask task(code, nullptr, TInputPort{.Connection = &input}, output, 0);
 
-    EXPECT_EQ(task.Execute(), ETaskResult::OK);
+    EXPECT_EQ(task.Execute(context), ETaskResult::OK);
     EXPECT_FALSE(filter->Ready());
-    EXPECT_EQ(task.Execute(), ETaskResult::BLOCKED_OUTPUT);
+    EXPECT_EQ(task.Execute(context), ETaskResult::BLOCKED_OUTPUT);
     ASSERT_TRUE(filter->Ready());
     EXPECT_TRUE(NTest::RuntimeFilterMayContain(*filter, 11));
     EXPECT_TRUE(NTest::RuntimeFilterMayContain(*filter, 22));
@@ -741,8 +756,8 @@ TEST_F(SchedulerRuntimeFilter, PublishesRuntimeFilterBeforeBufferedOutputDrains)
     TRowSet out{};
     ASSERT_EQ(output.Fetch(0, out), EFetchResult::OK);
     Release(&out);
-    EXPECT_EQ(task.Execute(), ETaskResult::OK);
-    EXPECT_EQ(task.Execute(), ETaskResult::FINISHED);
+    EXPECT_EQ(task.Execute(context), ETaskResult::OK);
+    EXPECT_EQ(task.Execute(context), ETaskResult::FINISHED);
     EXPECT_EQ(filter->StatsSnapshot().BuildRows, 2u);
     ASSERT_EQ(output.Fetch(0, out), EFetchResult::OK);
     Release(&out);
@@ -752,7 +767,7 @@ TEST_F(SchedulerRuntimeFilter, PublishesRuntimeFilterBeforeBufferedOutputDrains)
 
 // Stands in for the hash kernel over one i64 column: the hash is the value,
 // and an unselected row gets none.
-bool HashSelectedValues(TRowSet* batch, uint64_t* hashes) {
+bool HashSelectedValues(NQdb::TThreadExecutionContext&, TRowSet* batch, uint64_t* hashes) {
     auto* values = reinterpret_cast<int64_t*>(batch->Columns[0].Data);
     for (int64_t row = 0; row < batch->RowCount; ++row) {
         if (!batch->Selection || batch->Selection[row] != 0) {
@@ -789,6 +804,7 @@ TSelectedRows FetchSelectedRows(IConnection& connection, size_t lane) {
 }
 
 TEST(SchedulerRuntimeAdapter, HashShuffleBoundsSparseInputOwnersBeforeEof) {
+    NQdb::TThreadExecutionContext context;
     using namespace NQumir::NAst;
     std::atomic<int> destroyed = 0;
     TOneToOneConnection input(1);
@@ -808,7 +824,7 @@ TEST(SchedulerRuntimeAdapter, HashShuffleBoundsSparseInputOwnersBeforeEof) {
             auto rowSet = MakeInt64RowSet(std::move(values), &destroyed);
             rowSet.Selection = selection.data();
             ASSERT_TRUE(input.Push(0, std::move(rowSet)));
-            EXPECT_EQ(task.Execute(), ETaskResult::OK);
+            EXPECT_EQ(task.Execute(context), ETaskResult::OK);
             if (batch == 0) {
                 EXPECT_EQ(destroyed.load(), cycle * 2);
                 TRowSet absent{};
@@ -823,10 +839,11 @@ TEST(SchedulerRuntimeAdapter, HashShuffleBoundsSparseInputOwnersBeforeEof) {
         EXPECT_EQ(rows.Values, (std::vector<int64_t>{cycle * 2, cycle * 2 + 1}));
     }
     input.Finish(0);
-    EXPECT_EQ(task.Execute(), ETaskResult::FINISHED);
+    EXPECT_EQ(task.Execute(context), ETaskResult::FINISHED);
 }
 
 TEST(SchedulerRuntimeAdapter, HashShuffleBudgetSharesOwnersAndHonorsBackpressure) {
+    NQdb::TThreadExecutionContext context;
     using namespace NQumir::NAst;
     std::atomic<int> destroyed = 0;
     std::atomic<int> dummyDestroyed = 0;
@@ -855,24 +872,24 @@ TEST(SchedulerRuntimeAdapter, HashShuffleBudgetSharesOwnersAndHonorsBackpressure
         ASSERT_TRUE(input.Push(0, std::move(rowSet)));
     };
     push(2, both);
-    EXPECT_EQ(task.Execute(), ETaskResult::OK);
+    EXPECT_EQ(task.Execute(context), ETaskResult::OK);
     ASSERT_TRUE(output.PushTo(0, 0, MakeRowSet(1, &dummyDestroyed)));
     push(6, evenOnly);
-    EXPECT_EQ(task.Execute(), ETaskResult::BLOCKED_OUTPUT);
+    EXPECT_EQ(task.Execute(context), ETaskResult::BLOCKED_OUTPUT);
     EXPECT_EQ(destroyed.load(), 1) << "the first owner still belongs to partition1";
     push(8, oddOnly);
-    EXPECT_EQ(task.Execute(), ETaskResult::BLOCKED_OUTPUT);
+    EXPECT_EQ(task.Execute(context), ETaskResult::BLOCKED_OUTPUT);
     EXPECT_FALSE(input.CanPush(0)) << "blocked output must not consume the next input";
     TRowSet dummy{};
     ASSERT_EQ(output.Fetch(0, dummy), EFetchResult::OK);
     Release(&dummy);
-    EXPECT_EQ(task.Execute(), ETaskResult::OK);
+    EXPECT_EQ(task.Execute(context), ETaskResult::OK);
     evenOnly[2] = 0;
     const auto even = FetchSelectedRows(output, 0);
     EXPECT_EQ(even.Values, (std::vector<int64_t>{2, 6}));
     EXPECT_EQ(even.Hashes, (std::vector<uint64_t>{2, 6}));
     EXPECT_EQ(destroyed.load(), 1);
-    EXPECT_EQ(task.Execute(), ETaskResult::OK);
+    EXPECT_EQ(task.Execute(context), ETaskResult::OK);
     EXPECT_EQ(destroyed.load(), 3);
     both.assign(64, 0);
     oddOnly.assign(64, 0);
@@ -880,7 +897,7 @@ TEST(SchedulerRuntimeAdapter, HashShuffleBudgetSharesOwnersAndHonorsBackpressure
     EXPECT_EQ(odd.Values, (std::vector<int64_t>{3, 9}));
     EXPECT_EQ(odd.Hashes, (std::vector<uint64_t>{3, 9}));
     input.Finish(0);
-    EXPECT_EQ(task.Execute(), ETaskResult::FINISHED);
+    EXPECT_EQ(task.Execute(context), ETaskResult::FINISHED);
 }
 
 struct TShufflePayload {
@@ -909,6 +926,7 @@ TRowSet PayloadRowSet(std::unique_ptr<TShufflePayload> data, int64_t rows) {
 }
 
 TEST(SchedulerRuntimeAdapter, HashShuffleInputBudgetPreservesNullableBitmapOffsets) {
+    NQdb::TThreadExecutionContext context;
     using namespace NQumir::NAst;
     std::atomic<int> destroyed = 0;
     TOneToOneConnection input(1);
@@ -918,7 +936,7 @@ TEST(SchedulerRuntimeAdapter, HashShuffleInputBudgetPreservesNullableBitmapOffse
     auto schema = std::make_shared<TStructType>(
         std::vector<std::pair<std::string, TTypePtr>>{{"flag", std::move(nullableBool)}});
     auto code = std::make_shared<THashShuffleCode>(
-        [](TRowSet*, uint64_t*) {
+        [](NQdb::TThreadExecutionContext&, TRowSet*, uint64_t*) {
             ADD_FAILURE() << "a one-partition shuffle does not need hashes";
             return false;
         }, schema, 16, 64, 70);
@@ -937,7 +955,7 @@ TEST(SchedulerRuntimeAdapter, HashShuffleInputBudgetPreservesNullableBitmapOffse
         auto rowSet = PayloadRowSet(std::move(data), 32);
         rowSet.Selection = selection.data();
         ASSERT_TRUE(input.Push(0, std::move(rowSet)));
-        EXPECT_EQ(task.Execute(), ETaskResult::OK);
+        EXPECT_EQ(task.Execute(context), ETaskResult::OK);
     }
     EXPECT_EQ(destroyed.load(), 2);
     TRowSet result{};
@@ -948,10 +966,11 @@ TEST(SchedulerRuntimeAdapter, HashShuffleInputBudgetPreservesNullableBitmapOffse
     EXPECT_EQ(static_cast<uint8_t>(result.Columns[0].Data[0]) & 3, 2);
     Release(&result);
     input.Finish(0);
-    EXPECT_EQ(task.Execute(), ETaskResult::FINISHED);
+    EXPECT_EQ(task.Execute(context), ETaskResult::FINISHED);
 }
 
 TEST(SchedulerRuntimeAdapter, HashShuffleInputBudgetCountsUnselectedStringPayload) {
+    NQdb::TThreadExecutionContext context;
     using namespace NQumir::NAst;
     for (uint8_t width : {4, 8}) {
         for (bool dense : {false, true}) {
@@ -963,7 +982,7 @@ TEST(SchedulerRuntimeAdapter, HashShuffleInputBudgetCountsUnselectedStringPayloa
                 std::vector<std::pair<std::string, TTypePtr>>{
                     {"text", std::make_shared<TStringType>()}});
             auto code = std::make_shared<THashShuffleCode>(
-                [](TRowSet*, uint64_t*) {
+                [](NQdb::TThreadExecutionContext&, TRowSet*, uint64_t*) {
                     ADD_FAILURE() << "a one-partition shuffle does not need hashes";
                     return false;
                 }, schema, 16, 64, 128);
@@ -987,7 +1006,7 @@ TEST(SchedulerRuntimeAdapter, HashShuffleInputBudgetCountsUnselectedStringPayloa
             std::vector<uint8_t> selection = {0, 1, 0};
             rowSet.Selection = dense ? nullptr : selection.data();
             ASSERT_TRUE(input.Push(0, std::move(rowSet)));
-            EXPECT_EQ(task.Execute(), ETaskResult::OK);
+            EXPECT_EQ(task.Execute(context), ETaskResult::OK);
             TRowSet result{};
             ASSERT_EQ(output.Fetch(0, result), EFetchResult::OK);
             if (dense) {
@@ -1003,7 +1022,7 @@ TEST(SchedulerRuntimeAdapter, HashShuffleInputBudgetCountsUnselectedStringPayloa
             Release(&result);
             EXPECT_EQ(destroyed.load(), 1);
             input.Finish(0);
-            EXPECT_EQ(task.Execute(), ETaskResult::FINISHED);
+            EXPECT_EQ(task.Execute(context), ETaskResult::FINISHED);
         }
     }
 }
@@ -1012,6 +1031,7 @@ TEST(SchedulerRuntimeAdapter, HashShuffleInputBudgetCountsUnselectedStringPayloa
 // byte target each partition is compacted and the owner is released at once;
 // below it the partitions stay views of the owner until EOF.
 TEST(SchedulerRuntimeAdapter, HashShuffleBoundsDenseInputSplitAcrossPartitions) {
+    NQdb::TThreadExecutionContext context;
     using namespace NQumir::NAst;
     for (bool overBudget : {true, false}) {
         SCOPED_TRACE(overBudget);
@@ -1032,13 +1052,13 @@ TEST(SchedulerRuntimeAdapter, HashShuffleBoundsDenseInputSplitAcrossPartitions) 
         auto rowSet = MakeInt64RowSet(std::move(values), &destroyed);
         const char* sourceData = rowSet.Columns[0].Data;
         ASSERT_TRUE(input.Push(0, std::move(rowSet)));
-        EXPECT_EQ(task.Execute(), ETaskResult::OK);
+        EXPECT_EQ(task.Execute(context), ETaskResult::OK);
         EXPECT_EQ(destroyed.load(), overBudget ? 1 : 0);
         if (!overBudget) {
             TRowSet absent{};
             EXPECT_EQ(output.Fetch(0, absent), EFetchResult::NO_DATA);
             input.Finish(0);
-            EXPECT_EQ(task.Execute(), ETaskResult::FINISHED);
+            EXPECT_EQ(task.Execute(context), ETaskResult::FINISHED);
         }
 
         std::vector<TRowSet> results(4);
@@ -1069,7 +1089,7 @@ TEST(SchedulerRuntimeAdapter, HashShuffleBoundsDenseInputSplitAcrossPartitions) 
         EXPECT_EQ(destroyed.load(), 1);
         if (overBudget) {
             input.Finish(0);
-            EXPECT_EQ(task.Execute(), ETaskResult::FINISHED);
+            EXPECT_EQ(task.Execute(context), ETaskResult::FINISHED);
         }
     }
 }
@@ -1078,6 +1098,7 @@ TEST(SchedulerRuntimeAdapter, HashShuffleBoundsDenseInputSplitAcrossPartitions) 
 // sparse inputs accumulate up to the row target, and at EOF a single sparse
 // input is forwarded as a view of its owner.
 TEST(SchedulerRuntimeAdapter, HashShuffleZeroByteTargetKeepsRowBatching) {
+    NQdb::TThreadExecutionContext context;
     using namespace NQumir::NAst;
     std::atomic<int> destroyed = 0;
     TOneToOneConnection input(1);
@@ -1098,7 +1119,7 @@ TEST(SchedulerRuntimeAdapter, HashShuffleZeroByteTargetKeepsRowBatching) {
         rowSet.Selection = selection.data();
         lastData = rowSet.Columns[0].Data;
         ASSERT_TRUE(input.Push(0, std::move(rowSet)));
-        EXPECT_EQ(task.Execute(), ETaskResult::OK);
+        EXPECT_EQ(task.Execute(context), ETaskResult::OK);
     };
     for (int64_t value = 0; value < 3; ++value) {
         push(value);
@@ -1120,7 +1141,7 @@ TEST(SchedulerRuntimeAdapter, HashShuffleZeroByteTargetKeepsRowBatching) {
 
     push(4);
     input.Finish(0);
-    EXPECT_EQ(task.Execute(), ETaskResult::FINISHED);
+    EXPECT_EQ(task.Execute(context), ETaskResult::FINISHED);
     result = {};
     ASSERT_EQ(output.Fetch(0, result), EFetchResult::OK);
     EXPECT_EQ(result.Columns[0].Data, lastData);
@@ -1133,6 +1154,7 @@ TEST(SchedulerRuntimeAdapter, HashShuffleZeroByteTargetKeepsRowBatching) {
 }
 
 TEST(SchedulerRuntimeAdapter, HashShuffleCancellationReleasesInputOwners) {
+    NQdb::TThreadExecutionContext context;
     using namespace NQumir::NAst;
     for (bool pending : {false, true}) {
         std::atomic<int> destroyed = 0;
@@ -1151,7 +1173,7 @@ TEST(SchedulerRuntimeAdapter, HashShuffleCancellationReleasesInputOwners) {
         ASSERT_TRUE(input.Push(0, MakeInt64RowSet(std::vector<int64_t>(8, 1), &destroyed)));
         {
             THashShuffleTask task(code, nullptr, TInputPort{.Connection = &input}, output, 0);
-            EXPECT_EQ(task.Execute(), pending ? ETaskResult::BLOCKED_OUTPUT : ETaskResult::OK);
+            EXPECT_EQ(task.Execute(context), pending ? ETaskResult::BLOCKED_OUTPUT : ETaskResult::OK);
             EXPECT_EQ(destroyed.load(), 0);
         }
         EXPECT_EQ(destroyed.load(), 1);
@@ -1167,6 +1189,7 @@ TEST(SchedulerRuntimeAdapter, HashShuffleCancellationReleasesInputOwners) {
 // of an unselected row stays 0: a shuffle that read it would send the row to
 // partition 0 and add 0 to the filter.
 TEST_F(SchedulerRuntimeFilter, HashShuffleReadsHashesOfSelectedRowsOnly) {
+    NQdb::TThreadExecutionContext context;
     using namespace NQumir::NAst;
     std::atomic<int> destroyCount = 0;
     TOneToOneConnection input(2);
@@ -1193,9 +1216,9 @@ TEST_F(SchedulerRuntimeFilter, HashShuffleReadsHashesOfSelectedRowsOnly) {
     code->ProducedFilter = filter;
     THashShuffleTask task(code, nullptr, TInputPort{.Connection = &input}, output, 0);
 
-    EXPECT_EQ(task.Execute(), ETaskResult::OK);
-    EXPECT_EQ(task.Execute(), ETaskResult::OK);
-    EXPECT_EQ(task.Execute(), ETaskResult::FINISHED);
+    EXPECT_EQ(task.Execute(context), ETaskResult::OK);
+    EXPECT_EQ(task.Execute(context), ETaskResult::OK);
+    EXPECT_EQ(task.Execute(context), ETaskResult::FINISHED);
 
     const auto even = FetchSelectedRows(output, 0);
     EXPECT_EQ(even.Values, (std::vector<int64_t>{12, 2, 4}));
@@ -1218,6 +1241,7 @@ TEST_F(SchedulerRuntimeFilter, HashShuffleReadsHashesOfSelectedRowsOnly) {
 }
 
 TEST_F(SchedulerRuntimeFilter, HashShuffleDropsBatchWithEmptySelection) {
+    NQdb::TThreadExecutionContext context;
     std::atomic<int> destroyCount = 0;
     TOneToOneConnection input(1);
     THashShuffleConnection output(2);
@@ -1234,8 +1258,8 @@ TEST_F(SchedulerRuntimeFilter, HashShuffleDropsBatchWithEmptySelection) {
     code->ProducedFilter = filter;
     THashShuffleTask task(code, nullptr, TInputPort{.Connection = &input}, output, 0);
 
-    EXPECT_EQ(task.Execute(), ETaskResult::OK);
-    EXPECT_EQ(task.Execute(), ETaskResult::FINISHED);
+    EXPECT_EQ(task.Execute(context), ETaskResult::OK);
+    EXPECT_EQ(task.Execute(context), ETaskResult::FINISHED);
 
     EXPECT_TRUE(FetchSelectedRows(output, 0).Values.empty());
     EXPECT_TRUE(FetchSelectedRows(output, 1).Values.empty());
@@ -1245,6 +1269,7 @@ TEST_F(SchedulerRuntimeFilter, HashShuffleDropsBatchWithEmptySelection) {
 }
 
 TEST(SchedulerRuntimeAdapter, HashShuffleTreatsFullSelectionAsNoSelection) {
+    NQdb::TThreadExecutionContext context;
     for (bool withSelection : {false, true}) {
         std::atomic<int> destroyCount = 0;
         TOneToOneConnection input(1);
@@ -1260,7 +1285,7 @@ TEST(SchedulerRuntimeAdapter, HashShuffleTreatsFullSelectionAsNoSelection) {
         auto code = std::make_shared<THashShuffleCode>(HashSelectedValues);
         THashShuffleTask task(
             code, nullptr, TInputPort{.Connection = &input}, output, 0);
-        EXPECT_EQ(task.Execute(), ETaskResult::OK);
+        EXPECT_EQ(task.Execute(context), ETaskResult::OK);
 
         const auto even = FetchSelectedRows(output, 0);
         EXPECT_EQ(even.Values, (std::vector<int64_t>{2, 4})) << withSelection;
@@ -1278,11 +1303,12 @@ class RuntimeFilterTask : public NTest::TRuntimeFilterTest {
 protected:
     void SetUp() override {
         NTest::TRuntimeFilterTest::SetUp();
+        NQdb::TThreadExecutionContext context;
         Filter_ = std::make_shared<TRuntimeFilter>(Context_);
         const std::vector<uint64_t> keys = {0, 11, 22};
         auto builder = Filter_->MakeBuilder();
-        builder.Add(keys);
-        Filter_->FinishProducer(std::move(builder).TakePartial());
+        builder.Add(context, keys);
+        Filter_->FinishProducer(context, std::move(builder).TakePartial());
 
         auto code = std::make_shared<TRuntimeFilterCode>();
         code->Hash = HashSelectedValues;
@@ -1312,8 +1338,9 @@ protected:
 };
 
 TEST_F(RuntimeFilterTask, SparseSelectionProbesOnlySelectedRows) {
+    NQdb::TThreadExecutionContext context;
     Push({11, 33, 0, 22, 11, 44}, {1, 1, 0, 0xff, 0, 2});
-    EXPECT_EQ(Task_->Execute(), ETaskResult::OK);
+    EXPECT_EQ(Task_->Execute(context), ETaskResult::OK);
 
     const auto kept = FetchSelectedRows(Output_, 0);
     EXPECT_EQ(kept.Values, (std::vector<int64_t>{11, 22}));
@@ -1324,8 +1351,9 @@ TEST_F(RuntimeFilterTask, SparseSelectionProbesOnlySelectedRows) {
 }
 
 TEST_F(RuntimeFilterTask, EmptySelectionKeepsNothing) {
+    NQdb::TThreadExecutionContext context;
     Push({11, 0, 22}, {0, 0, 0});
-    EXPECT_EQ(Task_->Execute(), ETaskResult::OK);
+    EXPECT_EQ(Task_->Execute(context), ETaskResult::OK);
 
     EXPECT_TRUE(FetchSelectedRows(Output_, 0).Values.empty());
     const auto stats = Filter_->StatsSnapshot();
@@ -1334,10 +1362,11 @@ TEST_F(RuntimeFilterTask, EmptySelectionKeepsNothing) {
 }
 
 TEST_F(RuntimeFilterTask, FullSelectionMatchesNoSelection) {
+    NQdb::TThreadExecutionContext context;
     for (const auto& selection :
         {std::vector<uint8_t>{}, std::vector<uint8_t>{1, 0xff, 2, 1}}) {
         Push({11, 33, 0, 22}, selection);
-        EXPECT_EQ(Task_->Execute(), ETaskResult::OK);
+        EXPECT_EQ(Task_->Execute(context), ETaskResult::OK);
         const auto kept = FetchSelectedRows(Output_, 0);
         EXPECT_EQ(kept.Values, (std::vector<int64_t>{11, 0, 22}));
         EXPECT_EQ(kept.Hashes, (std::vector<uint64_t>{11, 0, 22}));
@@ -1348,15 +1377,16 @@ TEST_F(RuntimeFilterTask, FullSelectionMatchesNoSelection) {
 }
 
 TEST_F(RuntimeFilterTask, BlockedOutputProbesTheBatchOnce) {
+    NQdb::TThreadExecutionContext context;
     ASSERT_TRUE(Output_.Push(0, MakeInt64RowSet({7}, &DestroyCount_)));
     Push({11, 33, 0, 22}, {1, 1, 0, 1});
-    EXPECT_EQ(Task_->Execute(), ETaskResult::BLOCKED_OUTPUT);
-    EXPECT_EQ(Task_->Execute(), ETaskResult::BLOCKED_OUTPUT);
+    EXPECT_EQ(Task_->Execute(context), ETaskResult::BLOCKED_OUTPUT);
+    EXPECT_EQ(Task_->Execute(context), ETaskResult::BLOCKED_OUTPUT);
 
     TRowSet blocker{};
     ASSERT_EQ(Output_.Fetch(0, blocker), EFetchResult::OK);
     Release(&blocker);
-    EXPECT_EQ(Task_->Execute(), ETaskResult::OK);
+    EXPECT_EQ(Task_->Execute(context), ETaskResult::OK);
 
     const auto kept = FetchSelectedRows(Output_, 0);
     EXPECT_EQ(kept.Values, (std::vector<int64_t>{11, 22}));

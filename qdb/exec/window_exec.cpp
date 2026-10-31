@@ -26,12 +26,12 @@ TWindowProcessor::TWindowProcessor(
     , Kernel_(std::move(kernel))
 {}
 
-void TWindowProcessor::Add(TRowSet& rowSet)
+void TWindowProcessor::Add(TThreadExecutionContext& context, TRowSet& rowSet)
 {
     if (Emitted_) {
         throw std::runtime_error("window processor is already finished");
     }
-    const int32_t batchIdx = Store_.PushBatch(rowSet);
+    const int32_t batchIdx = Store_.PushBatch(context, rowSet);
     for (int32_t row = 0; row < rowSet.RowCount; ++row) {
         if (RowSelected(rowSet, row)) {
             Rows_.push_back(MakeRowId(batchIdx, row));
@@ -42,7 +42,7 @@ void TWindowProcessor::Add(TRowSet& rowSet)
 
 void TWindowProcessor::Finish() {}
 
-bool TWindowProcessor::Next(TRowSet& rowSet)
+bool TWindowProcessor::Next(TThreadExecutionContext& context, TRowSet& rowSet)
 {
     if (Emitted_) {
         return false;
@@ -75,6 +75,7 @@ bool TWindowProcessor::Next(TRowSet& rowSet)
     // One call: sort the row-ids in place, then materialize the whole partition
     // (input columns + window columns) into a kernel-owned rowset.
     const int64_t out = Kernel_.Dispatch(
+        context,
         const_cast<TRowSet*>(Store_.Data()),
         Rows_.data(),
         work.data(),

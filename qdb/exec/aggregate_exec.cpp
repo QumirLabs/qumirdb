@@ -42,9 +42,14 @@ static_assert(sizeof(THashTable) == TKernelCompiler::HashTableSize);
 constexpr int64_t InitialCapacity = 8;
 
 int64_t Dispatch(
-    const TAggregateKernels& kernels, void* table, TRowSet* batch, int64_t arg, EAggregateKernelOp op)
+    TThreadExecutionContext& context,
+    const TAggregateKernels& kernels,
+    void* table,
+    TRowSet* batch,
+    int64_t arg,
+    EAggregateKernelOp op)
 {
-    return kernels.Dispatch(table, batch, arg, static_cast<int64_t>(op));
+    return kernels.Dispatch(context, table, batch, arg, static_cast<int64_t>(op));
 }
 
 } // namespace
@@ -68,11 +73,13 @@ TAggregateProcessor::TAggregateProcessor(
 
 TAggregateProcessor::~TAggregateProcessor()
 {
-    Destroy();
+    // Runs outside any worker, on the thread that releases the plan.
+    TThreadExecutionContext context;
+    Destroy(context);
 }
 
 // Deferred so a processor can be constructed before its kernels are finalized.
-void TAggregateProcessor::EnsureInit()
+void TAggregateProcessor::EnsureInit(TThreadExecutionContext& context)
 {
     if (Initialized_) {
         return;
@@ -80,8 +87,10 @@ void TAggregateProcessor::EnsureInit()
     Initialized_ = true;
     void* table = HashTable_.data();
     const bool initialized = Plan_.Layout == EAggregateTableLayout::Row
-        ? Dispatch(Kernels_, table, nullptr, Plan_.InitialGroups, EAggregateKernelOp::InitRows) != 0
-        : Dispatch(Kernels_, table, nullptr, Plan_.InitialCapacity, EAggregateKernelOp::Init) != 0;
+        ? Dispatch(context, Kernels_, table, nullptr, Plan_.InitialGroups,
+            EAggregateKernelOp::InitRows) != 0
+        : Dispatch(context, Kernels_, table, nullptr, Plan_.InitialCapacity,
+            EAggregateKernelOp::Init) != 0;
     if (!initialized) {
         // A failing init frees what it allocated.
         Destroyed_ = true;
@@ -89,13 +98,16 @@ void TAggregateProcessor::EnsureInit()
     }
     // Both only set a field; the constructor checked that the kernel serves them.
     if (Plan_.RowSwitchGroups != 0) {
-        Dispatch(Kernels_, table, nullptr, Plan_.RowSwitchGroups, EAggregateKernelOp::SwitchToRowsAt);
+        Dispatch(context, Kernels_, table, nullptr, Plan_.RowSwitchGroups,
+            EAggregateKernelOp::SwitchToRowsAt);
     }
     if (Plan_.RowExpectedGroups != 0) {
-        Dispatch(Kernels_, table, nullptr, Plan_.RowExpectedGroups, EAggregateKernelOp::ExpectRowGroups);
+        Dispatch(context, Kernels_, table, nullptr, Plan_.RowExpectedGroups,
+            EAggregateKernelOp::ExpectRowGroups);
     }
     if (Instrumentation_) {
-        Instrumentation_->ObserveHash(HashTable_.data(), 0, false, Kernels_.StringMetadataBuffers);
+        Instrumentation_->ObserveHash(
+            context, HashTable_.data(), 0, false, Kernels_.StringMetadataBuffers);
     }
 }
 
@@ -107,30 +119,31 @@ void TGroupingSetsAggregateProcessor::SetInstrumentation(TOperatorInstrumentatio
     Inner_.SetInstrumentation(instrumentation);
 }
 
-void TAggregateProcessor::Add(TRowSet& rowSet)
+void TAggregateProcessor::Add(TThreadExecutionContext& context, TRowSet& rowSet)
 {
     if (Finished_) {
         throw std::runtime_error("aggregate processor is already finished");
     }
-    EnsureInit();
-    if (Dispatch(Kernels_, HashTable_.data(), &rowSet, 0, EAggregateKernelOp::Update) < 0) {
+    EnsureInit(context);
+    if (Dispatch(context, Kernels_, HashTable_.data(), &rowSet, 0, EAggregateKernelOp::Update) < 0) {
         throw std::runtime_error("aggregate update failed");
     }
     if (Instrumentation_) {
-        Instrumentation_->ObserveHash(HashTable_.data(), 0, false, Kernels_.StringMetadataBuffers);
+        Instrumentation_->ObserveHash(
+            context, HashTable_.data(), 0, false, Kernels_.StringMetadataBuffers);
     }
 }
 
-bool TAggregateProcessor::Finish(TRowSet& rowSet)
+bool TAggregateProcessor::Finish(TThreadExecutionContext& context, TRowSet& rowSet)
 {
     if (Finished_) {
         return false;
     }
     Finished_ = true;
-    EnsureInit();
+    EnsureInit(context);
 
     const int64_t size = reinterpret_cast<THashTable*>(HashTable_.data())->Size;
-    const int64_t finalized = Kernels_.FinishRowSet(HashTable_.data(), &rowSet);
+    const int64_t finalized = Kernels_.FinishRowSet(context, HashTable_.data(), &rowSet);
     Destroyed_ = true;
     if (finalized != size) {
         throw std::runtime_error("aggregate finalize returned an unexpected row count");
@@ -148,12 +161,12 @@ int64_t TAggregateProcessor::Groups() const
     return reinterpret_cast<const THashTable*>(HashTable_.data())->Size;
 }
 
-bool TAggregateProcessor::Flush(TRowSet& rowSet)
+bool TAggregateProcessor::Flush(TThreadExecutionContext& context, TRowSet& rowSet)
 {
     if (Groups() == 0) {
         return false;
     }
-    Finish(rowSet);
+    Finish(context, rowSet);
     // Finish destroyed the table; the next Add initializes a new one.
     Initialized_ = false;
     Destroyed_ = false;
@@ -161,10 +174,10 @@ bool TAggregateProcessor::Flush(TRowSet& rowSet)
     return true;
 }
 
-void TAggregateProcessor::Destroy()
+void TAggregateProcessor::Destroy(TThreadExecutionContext& context)
 {
     if (Initialized_ && !Destroyed_) {
-        Dispatch(Kernels_, HashTable_.data(), nullptr, 0, EAggregateKernelOp::Destroy);
+        Dispatch(context, Kernels_, HashTable_.data(), nullptr, 0, EAggregateKernelOp::Destroy);
         Destroyed_ = true;
     }
 }
@@ -192,14 +205,14 @@ void TPartialAggregateProcessor::SetInstrumentation(TOperatorInstrumentation* in
     Table_.SetInstrumentation(instrumentation);
 }
 
-void TPartialAggregateProcessor::Add(TRowSet& rowSet)
+void TPartialAggregateProcessor::Add(TThreadExecutionContext& context, TRowSet& rowSet)
 {
     if (HasPending_) {
         throw std::runtime_error("partial aggregate output was not taken");
     }
     if (PassingThrough_) {
         // The projection takes the batch over and leaves the partial states.
-        PassThrough_(rowSet, PassThroughState_);
+        PassThrough_(context, rowSet, PassThroughState_);
         Pending_ = rowSet;
         rowSet = {};
         HasPending_ = true;
@@ -207,7 +220,7 @@ void TPartialAggregateProcessor::Add(TRowSet& rowSet)
     }
 
     HashedRows_ += static_cast<uint64_t>(rowSet.RowCount);
-    Table_.Add(rowSet);
+    Table_.Add(context, rowSet);
     Release(&rowSet);
     rowSet = {};
     const int64_t groups = Table_.Groups();
@@ -218,12 +231,12 @@ void TPartialAggregateProcessor::Add(TRowSet& rowSet)
         && static_cast<double>(HashedRows_) < static_cast<double>(Policy_.MinReduction) * groupsSoFar)
     {
         PassingThrough_ = true;
-        HasPending_ = Table_.Flush(Pending_);
+        HasPending_ = Table_.Flush(context, Pending_);
         return;
     }
     if (groups >= Policy_.MaxGroups) {
         EmittedGroups_ += static_cast<uint64_t>(groups);
-        HasPending_ = Table_.Flush(Pending_);
+        HasPending_ = Table_.Flush(context, Pending_);
     }
 }
 
@@ -238,12 +251,12 @@ bool TPartialAggregateProcessor::Next(TRowSet& rowSet)
     return true;
 }
 
-bool TPartialAggregateProcessor::Finish(TRowSet& rowSet)
+bool TPartialAggregateProcessor::Finish(TThreadExecutionContext& context, TRowSet& rowSet)
 {
     if (PassingThrough_) {
         return false;
     }
-    return Table_.Finish(rowSet);
+    return Table_.Finish(context, rowSet);
 }
 
 TGroupingSetsAggregateProcessor::TGroupingSetsAggregateProcessor(
@@ -257,7 +270,7 @@ TGroupingSetsAggregateProcessor::TGroupingSetsAggregateProcessor(
 {
 }
 
-void TGroupingSetsAggregateProcessor::Add(TRowSet& batch)
+void TGroupingSetsAggregateProcessor::Add(TThreadExecutionContext& context, TRowSet& batch)
 {
     const int64_t rows = batch.RowCount;
     if (static_cast<int64_t>(SetIdBuf_.size()) < rows) {
@@ -293,13 +306,13 @@ void TGroupingSetsAggregateProcessor::Add(TRowSet& batch)
         masked.Destroy = nullptr;
         masked.Private = nullptr;
         masked.RefCount = 1;
-        Inner_.Add(masked);
+        Inner_.Add(context, masked);
     }
 }
 
-bool TGroupingSetsAggregateProcessor::Finish(TRowSet& rowSet)
+bool TGroupingSetsAggregateProcessor::Finish(TThreadExecutionContext& context, TRowSet& rowSet)
 {
-    return Inner_.Finish(rowSet);
+    return Inner_.Finish(context, rowSet);
 }
 
 } // namespace NQdb

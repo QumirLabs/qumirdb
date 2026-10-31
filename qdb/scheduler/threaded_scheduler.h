@@ -28,7 +28,7 @@ private:
     TTaskNode* PopReady();
     void ScheduleInput(TTaskNode* node);
     void ScheduleOutput(TTaskNode* node);
-    void Work();
+    void Work(TThreadExecutionContext& context);
     bool FinishRun(TTaskNode* node);
     void FinishNode(TTaskNode* node);
     void ResetStats();

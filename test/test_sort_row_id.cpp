@@ -151,6 +151,7 @@ TEST(SortRowId, SortsSeveralBatchesByMixedNumericKeys) {
 // Special values in two batches; ties (+-0) are decided by the second key.
 template<typename TFloat>
 std::vector<int64_t> SortFloatKeyRows(bool desc, int64_t topLimit) {
+    NQdb::TThreadExecutionContext context;
     using namespace NQumir::NAst;
     const TFloat inf = std::numeric_limits<TFloat>::infinity();
     const TFloat nan = std::numeric_limits<TFloat>::quiet_NaN();
@@ -190,7 +191,7 @@ std::vector<int64_t> SortFloatKeyRows(bool desc, int64_t topLimit) {
     }
     auto select = CompileHeapTopK(keys);
     EXPECT_TRUE(select);
-    const int64_t kept = select(store.data(), rows.data(), static_cast<int64_t>(rows.size()), topLimit);
+    const int64_t kept = select(context, store.data(), rows.data(), static_cast<int64_t>(rows.size()), topLimit);
     rows.resize(static_cast<size_t>(kept));
     return rows;
 }
@@ -292,6 +293,7 @@ TEST(SortRowId, SortsNullableStringsWithSqlNullOrder) {
 }
 
 TEST(HeapTopK, SelectsSortedPrefixFromRandomRows) {
+    NQdb::TThreadExecutionContext context;
     using namespace NQumir::NAst;
 
     auto i64 = std::make_shared<TIntegerType>();
@@ -360,6 +362,7 @@ TEST(HeapTopK, SelectsSortedPrefixFromRandomRows) {
     for (int64_t limit : limits) {
         auto rows = input;
         const int64_t kept = select(
+            context,
             store.data(), rows.data(), static_cast<int64_t>(rows.size()), limit);
         const int64_t expectedCount = std::min<int64_t>(rowCount, limit);
         EXPECT_EQ(kept, expectedCount);
@@ -367,10 +370,11 @@ TEST(HeapTopK, SelectsSortedPrefixFromRandomRows) {
             rows.begin(), rows.begin() + kept, expected.begin()));
     }
 
-    EXPECT_EQ(select(nullptr, nullptr, 0, 10), 0);
+    EXPECT_EQ(select(context, nullptr, nullptr, 0, 10), 0);
 }
 
 TEST(HeapTopK, AppliesNullableStringOrder) {
+    NQdb::TThreadExecutionContext context;
     using namespace NQumir::NAst;
 
     TStringColumn strings({"12345678beta", "unused", "12345678alpha",
@@ -393,6 +397,7 @@ TEST(HeapTopK, AppliesNullableStringOrder) {
     auto rows = MakeSingleBatchRowIds(batch);
     std::reverse(rows.begin(), rows.end());
     ASSERT_EQ(select(
+        context,
         &batch, rows.data(), static_cast<int64_t>(rows.size()), 4), 4);
     const std::vector<int64_t> expected = {
         NQdb::MakeRowId(0, 1),

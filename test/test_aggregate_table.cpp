@@ -615,6 +615,7 @@ TRun Aggregate(
     std::vector<TBatch>& batches,
     const std::vector<EValue>& outputs)
 {
+    NQdb::TThreadExecutionContext context;
     static const auto measure = TKernelCompiler().CompileInstrumentation();
     TOperatorInstrumentation counters;
     counters.Kernel = measure;
@@ -622,11 +623,11 @@ TRun Aggregate(
     processor.SetInstrumentation(&counters);
     for (auto& batch : batches) {
         auto rowSet = batch.RowSet();
-        processor.Add(rowSet);
+        processor.Add(context, rowSet);
     }
     TRun run{.EndedInRows = counters.RowLayout};
     TRowSet result{};
-    EXPECT_TRUE(processor.Finish(result));
+    EXPECT_TRUE(processor.Finish(context, result));
     EXPECT_EQ(result.ColumnCount, static_cast<int64_t>(outputs.size()));
     for (int64_t row = 0; row < result.RowCount; ++row) {
         std::string text;
@@ -866,6 +867,7 @@ TEST(AggregateTable, RowLayoutAlignsKeysThatHoldADecimal) {
 }
 
 TEST(AggregateTable, RowLayoutReportsItsMemory) {
+    NQdb::TThreadExecutionContext context;
     auto i64 = std::make_shared<TIntegerType>();
     TStructType input({{"k", i64}, {"v", i64}});
     const auto kernels = CompileWithRows(input, {"k"}, {Agg("c", "count"), Agg("s", "sum", "v")});
@@ -881,7 +883,7 @@ TEST(AggregateTable, RowLayoutReportsItsMemory) {
         batch.Add({key, key});
     }
     auto rowSet = batch.RowSet();
-    processor.Add(rowSet);
+    processor.Add(context, rowSet);
     EXPECT_TRUE(counters.RowLayout);
     EXPECT_EQ(counters.Groups, 3000u);
     // Entries for 3000 groups at most half full.
@@ -889,7 +891,7 @@ TEST(AggregateTable, RowLayoutReportsItsMemory) {
     // The entries and one arena block of 16,384 rows.
     EXPECT_GE(counters.HashMemoryPeakBytes, 8192u * 8 + 16384u * 32);
     TRowSet result{};
-    ASSERT_TRUE(processor.Finish(result));
+    ASSERT_TRUE(processor.Finish(context, result));
     EXPECT_EQ(result.RowCount, 3000);
     Release(&result);
 }
@@ -920,6 +922,7 @@ std::set<std::string> ProgramFunctions(
 }
 
 TEST(AggregateTable, RowLayoutNeedsTheSpecFlag) {
+    NQdb::TThreadExecutionContext context;
     auto i64 = std::make_shared<TIntegerType>();
     TStructType input({{"k", i64}, {"v", i64}});
     const std::vector<TAggregateSpec> aggs = {Agg("c", "count"), Agg("s", "sum", "v")};
@@ -946,10 +949,10 @@ TEST(AggregateTable, RowLayoutNeedsTheSpecFlag) {
 
     // Its kernel serves none of the row layout's operations and stays swiss.
     THashTable table;
-    ASSERT_NE(swiss.Dispatch(&table, nullptr, 8, static_cast<int64_t>(EAggregateKernelOp::Init)), 0);
+    ASSERT_NE(swiss.Dispatch(context, &table, nullptr, 8, static_cast<int64_t>(EAggregateKernelOp::Init)), 0);
     for (const auto op : {EAggregateKernelOp::InitRows, EAggregateKernelOp::SwitchToRowsAt,
                           EAggregateKernelOp::ExpectRowGroups}) {
-        EXPECT_EQ(swiss.Dispatch(&table, nullptr, 2, static_cast<int64_t>(op)), 0);
+        EXPECT_EQ(swiss.Dispatch(context, &table, nullptr, 2, static_cast<int64_t>(op)), 0);
     }
     EXPECT_EQ(table.RowSwitchGroups, 0);
     EXPECT_EQ(table.RowExpectedGroups, 0);
@@ -958,11 +961,11 @@ TEST(AggregateTable, RowLayoutNeedsTheSpecFlag) {
         batch.Add({key, key});
     }
     auto rowSet = batch.RowSet();
-    EXPECT_EQ(swiss.Dispatch(&table, &rowSet, 0, static_cast<int64_t>(EAggregateKernelOp::Update)), 0);
+    EXPECT_EQ(swiss.Dispatch(context, &table, &rowSet, 0, static_cast<int64_t>(EAggregateKernelOp::Update)), 0);
     EXPECT_EQ(table.Size, 100);
     EXPECT_NE(table.Keys, nullptr);
     EXPECT_EQ(table.RowTable.Entries, nullptr);
-    EXPECT_NE(swiss.Dispatch(&table, nullptr, 0, static_cast<int64_t>(EAggregateKernelOp::Destroy)), 0);
+    EXPECT_NE(swiss.Dispatch(context, &table, nullptr, 0, static_cast<int64_t>(EAggregateKernelOp::Destroy)), 0);
 }
 
 // A string key is a 16-byte handle in the row (pointer and size), whose bytes
@@ -1066,6 +1069,7 @@ TEST(AggregateTable, StringReducersAndEmptyInputGroupsKeepTheSwissTable) {
 // The move sizes its entries for the groups the caller expects when that is
 // more than twice the groups it moves, so that they need not grow again.
 TEST(AggregateTable, ExpectRowGroupsSizesTheEntriesOfTheMove) {
+    NQdb::TThreadExecutionContext context;
     auto i64 = std::make_shared<TIntegerType>();
     TStructType input({{"k", i64}, {"v", i64}});
     const auto kernels = CompileWithRows(input, {"k"}, {Agg("c", "count"), Agg("s", "sum", "v")});
@@ -1097,16 +1101,16 @@ TEST(AggregateTable, ExpectRowGroupsSizesTheEntriesOfTheMove) {
         processor.SetInstrumentation(&counters);
         auto first = batchOf(0, 600);
         auto firstRows = first.RowSet();
-        processor.Add(firstRows);
+        processor.Add(context, firstRows);
         ASSERT_TRUE(counters.RowLayout) << expected;
         EXPECT_EQ(counters.HashCapacity, static_cast<uint64_t>(moved)) << expected;
         auto second = batchOf(600, 3000);
         auto secondRows = second.RowSet();
-        processor.Add(secondRows);
+        processor.Add(context, secondRows);
         EXPECT_EQ(counters.Groups, 3000u);
         EXPECT_EQ(counters.HashCapacity, static_cast<uint64_t>(final)) << expected;
         TRowSet result{};
-        ASSERT_TRUE(processor.Finish(result));
+        ASSERT_TRUE(processor.Finish(context, result));
         EXPECT_EQ(result.RowCount, 3000);
         Release(&result);
     }
@@ -1190,6 +1194,7 @@ TEST(AggregateTable, OverestimateStartsSwiss) {
 // The move sizes the row entries for the task's estimated groups, capped as
 // the swiss slots are and by the task's input rows.
 TEST(AggregateTable, MoveIsSizedFromTheEstimate) {
+    NQdb::TThreadExecutionContext context;
     auto i64 = std::make_shared<TIntegerType>();
     TStructType input({{"k", i64}, {"v", i64}});
     const auto kernels = CompileWithRows(input, {"k"}, {Agg("c", "count"), Agg("s", "sum", "v")});
@@ -1227,13 +1232,13 @@ TEST(AggregateTable, MoveIsSizedFromTheEstimate) {
                 .RowCount = std::min(BatchRows, Groups - begin),
                 .RefCount = 1,
             };
-            processor.Add(batch);
+            processor.Add(context, batch);
             if (counters.RowLayout && moved == 0) {
                 moved = counters.HashCapacity;
             }
         }
         TRowSet result{};
-        EXPECT_TRUE(processor.Finish(result));
+        EXPECT_TRUE(processor.Finish(context, result));
         EXPECT_EQ(result.RowCount, Groups);
         Release(&result);
         return moved;
@@ -1286,16 +1291,17 @@ TEST(AggregateTable, KeyOnlyAggregatesStaySwissUnderAuto) {
 // and each growth of the row entries after it, as the kernels counted them in
 // the table.
 TEST(AggregateTable, InstrumentationCountsTheMoveOnce) {
+    NQdb::TThreadExecutionContext context;
     auto i64 = std::make_shared<TIntegerType>();
     TStructType input({{"k", i64}, {"v", i64}});
     const auto kernels = CompileWithRows(input, {"k"}, {Agg("c", "count"), Agg("s", "sum", "v")});
     auto dispatch = [&](THashTable& table, TRowSet* batch, int64_t arg, EAggregateKernelOp op) {
-        return kernels.Dispatch(&table, batch, arg, static_cast<int64_t>(op));
+        return kernels.Dispatch(context, &table, batch, arg, static_cast<int64_t>(op));
     };
     TOperatorInstrumentation counters;
     counters.Kernel = TKernelCompiler().CompileInstrumentation();
     auto observe = [&](THashTable& table) {
-        counters.ObserveHash(&table, 0, false, kernels.StringMetadataBuffers);
+        counters.ObserveHash(context, &table, 0, false, kernels.StringMetadataBuffers);
     };
     auto batchOf = [](int64_t from, int64_t to) {
         TBatch batch({EValue::I64, EValue::I64});
@@ -1416,6 +1422,8 @@ TEST(AggregateTable, DISABLED_LayoutMicrobenchmark) {
                     TOperatorInstrumentation counters;
                     static const auto measure = TKernelCompiler().CompileInstrumentation();
                     counters.Kernel = measure;
+                    // Tasks run on their own threads, each with its own context.
+                    NQdb::TThreadExecutionContext context;
                     TAggregateProcessor processor(kernels, plan);
                     processor.SetInstrumentation(&counters);
                     std::array<TColumn, 4> columns{};
@@ -1434,11 +1442,11 @@ TEST(AggregateTable, DISABLED_LayoutMicrobenchmark) {
                             .RowCount = std::min(BatchRows, rows - begin),
                             .RefCount = 1,
                         };
-                        processor.Add(batch);
+                        processor.Add(context, batch);
                     }
                     const auto updated = std::chrono::steady_clock::now();
                     TRowSet output{};
-                    processor.Finish(output);
+                    processor.Finish(context, output);
                     const auto finished = std::chrono::steady_clock::now();
                     const auto groupsOut = output.RowCount;
                     Release(&output);

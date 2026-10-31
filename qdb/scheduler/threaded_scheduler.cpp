@@ -1,3 +1,4 @@
+#include <qdb/kernel/thread_context.h>
 #include <qdb/scheduler/instrumentation/task.h>
 #include <qdb/scheduler/threaded_scheduler.h>
 
@@ -52,7 +53,9 @@ bool TThreadedScheduler::Run(std::string* error) {
     workers.reserve(WorkerCount_);
     for (size_t i = 0; i < WorkerCount_; ++i) {
         workers.emplace_back([this]() {
-            Work();
+            // Owned by the worker for its lifetime and passed to every task it runs.
+            TThreadExecutionContext context;
+            Work(context);
         });
     }
     for (auto& worker : workers) {
@@ -145,7 +148,7 @@ void TThreadedScheduler::ScheduleOutput(TTaskNode* node) {
     }
 }
 
-void TThreadedScheduler::Work() {
+void TThreadedScheduler::Work(TThreadExecutionContext& context) {
     // Terminate once the root (sink) is Finished: all output the query needs has
     // been produced. Nodes still unfinished at that point are upstream branches
     // abandoned by early termination (a satisfied LIMIT stops pulling, leaving
@@ -211,7 +214,7 @@ void TThreadedScheduler::Work() {
 
         ETaskResult result;
         try {
-            result = ExecuteTask(*node);
+            result = ExecuteTask(*node, context);
         } catch (const std::exception& e) {
             bool expected = false;
             if (Failed_.compare_exchange_strong(

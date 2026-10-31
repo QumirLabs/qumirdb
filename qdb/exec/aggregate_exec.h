@@ -44,19 +44,19 @@ public:
     TAggregateProcessor(const TAggregateProcessor&) = delete;
     TAggregateProcessor& operator=(const TAggregateProcessor&) = delete;
 
-    void Add(TRowSet& rowSet);
+    void Add(TThreadExecutionContext& context, TRowSet& rowSet);
     void SetInstrumentation(TOperatorInstrumentation* instrumentation);
-    bool Finish(TRowSet& rowSet);
+    bool Finish(TThreadExecutionContext& context, TRowSet& rowSet);
     // The groups the table holds.
     int64_t Groups() const;
     // Finalizes the groups so far into rowSet and starts an empty table, so the
     // processor keeps accepting rows. False, with nothing emitted, when the table
     // holds no groups.
-    bool Flush(TRowSet& rowSet);
+    bool Flush(TThreadExecutionContext& context, TRowSet& rowSet);
 
 private:
-    void EnsureInit();
-    void Destroy();
+    void EnsureInit(TThreadExecutionContext& context);
+    void Destroy(TThreadExecutionContext& context);
 
 private:
     TAggregateKernels Kernels_;
@@ -78,9 +78,9 @@ public:
         std::vector<std::vector<size_t>> sets,
         size_t numKeys);
 
-    void Add(TRowSet& rowSet);
+    void Add(TThreadExecutionContext& context, TRowSet& rowSet);
     void SetInstrumentation(TOperatorInstrumentation* instrumentation);
-    bool Finish(TRowSet& rowSet);
+    bool Finish(TThreadExecutionContext& context, TRowSet& rowSet);
 
 private:
     TAggregateProcessor Inner_;
@@ -121,12 +121,12 @@ public:
     TPartialAggregateProcessor& operator=(const TPartialAggregateProcessor&) = delete;
 
     // Consumes rowSet; Next then yields what the batch made ready.
-    void Add(TRowSet& rowSet);
+    void Add(TThreadExecutionContext& context, TRowSet& rowSet);
     // The partial states ready to emit: the groups of a table that was emptied,
     // or a batch that passed through.
     bool Next(TRowSet& rowSet);
     // The groups still in the table; false when it has none.
-    bool Finish(TRowSet& rowSet);
+    bool Finish(TThreadExecutionContext& context, TRowSet& rowSet);
     bool PassesThrough() const { return PassingThrough_; }
     void SetInstrumentation(TOperatorInstrumentation* instrumentation);
 

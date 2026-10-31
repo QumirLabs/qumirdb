@@ -368,7 +368,7 @@ TSortProcessor::TSortProcessor(
     , BatchRows_(batchRows)
 {}
 
-bool TSortProcessor::TryRadixSort()
+bool TSortProcessor::TryRadixSort(TThreadExecutionContext& context)
 {
     if (Rows_.empty()) {
         return true;
@@ -396,19 +396,19 @@ bool TSortProcessor::TryRadixSort()
 
     auto* store = const_cast<TRowSet*>(Store_.Data());
     TRowSet unused{};
-    dispatch(store, Rows_.data(), work.data(), counts.data(),
+    dispatch(context, store, Rows_.data(), work.data(), counts.data(),
         static_cast<int64_t>(Rows_.size()), descs.get(), nullsFirsts.get(),
         true, 0, 0, &unused);
     return true;
 }
 
-void TSortProcessor::Add(TRowSet& rowSet)
+void TSortProcessor::Add(TThreadExecutionContext& context, TRowSet& rowSet)
 {
     if (Materialized_) {
         throw std::runtime_error("sort processor is already finished");
     }
 
-    const int32_t batchIdx = Store_.PushBatch(rowSet);
+    const int32_t batchIdx = Store_.PushBatch(context, rowSet);
     for (int32_t row = 0; row < rowSet.RowCount; ++row) {
         if (RowSelected(rowSet, row)) {
             Rows_.push_back(MakeRowId(batchIdx, row));
@@ -417,21 +417,21 @@ void TSortProcessor::Add(TRowSet& rowSet)
     rowSet = {};
 }
 
-void TSortProcessor::Finish()
+void TSortProcessor::Finish(TThreadExecutionContext& context)
 {
     if (Materialized_) {
         return;
     }
-    if (!TryRadixSort()) {
+    if (!TryRadixSort(context)) {
         throw std::runtime_error("sort kernel is unavailable");
     }
 
     Materialized_ = true;
 }
 
-bool TSortProcessor::Next(TRowSet& rowSet)
+bool TSortProcessor::Next(TThreadExecutionContext& context, TRowSet& rowSet)
 {
-    Finish();
+    Finish(context);
     if (Cursor_ >= Rows_.size()) {
         return false;
     }
@@ -445,6 +445,7 @@ bool TSortProcessor::Next(TRowSet& rowSet)
             : RadixKernel_.Dispatch;
         if (RadixKernel_.Enabled && dispatch) {
             const int64_t out = dispatch(
+                context,
                 const_cast<TRowSet*>(Store_.Data()),
                 Rows_.data(),
                 nullptr,
@@ -481,12 +482,12 @@ TMergeProcessor::TMergeProcessor(
     , Runs_(runCount)
 {}
 
-void TMergeProcessor::Add(TRowSet& rowSet, size_t run)
+void TMergeProcessor::Add(TThreadExecutionContext& context, TRowSet& rowSet, size_t run)
 {
     if (Materialized_) {
         throw std::runtime_error("merge processor is already finished");
     }
-    const int32_t batchIdx = Store_.PushBatch(rowSet);
+    const int32_t batchIdx = Store_.PushBatch(context, rowSet);
     const TRowSet& batch = Store_.Batch(batchIdx);
     for (int32_t row = 0; row < batch.RowCount; ++row) {
         if (RowSelected(batch, row)) {
@@ -608,7 +609,7 @@ void TTopSortProcessor::SetInstrumentation(TOperatorInstrumentation* instrumenta
     Instrumentation_ = instrumentation;
 }
 
-void TTopSortProcessor::Add(TRowSet& batch)
+void TTopSortProcessor::Add(TThreadExecutionContext& context, TRowSet& batch)
 {
     if (Materialized_) {
         throw std::runtime_error("top-sort processor is already finished");
@@ -646,6 +647,7 @@ void TTopSortProcessor::Add(TRowSet& batch)
     if (RadixKernel_.HeapTopKDispatch &&
         ShouldUseHeapTopK(selectedRows, static_cast<size_t>(Limit_))) {
         const int64_t kept = RadixKernel_.HeapTopKDispatch(
+            context,
             &batch,
             scratch.TempRowIds.data(),
             static_cast<int64_t>(selectedRows),
@@ -676,6 +678,7 @@ void TTopSortProcessor::Add(TRowSet& batch)
 
     TRowSet next{};
     const int64_t produced = RadixKernel_.TopSortDispatch(
+        context,
         &scratch.State,
         &batch,
         scratch.TempRowIds.data(),
@@ -697,7 +700,7 @@ void TTopSortProcessor::Add(TRowSet& batch)
         ReleaseKernelState(scratch.State);
         scratch.State = next;
         if (Instrumentation_) {
-            Instrumentation_->RetainInput(scratch.State, 0, false);
+            Instrumentation_->RetainInput(context, scratch.State, 0, false);
         }
     }
     Release(&batch);
@@ -709,7 +712,7 @@ void TTopSortProcessor::Finish()
     Materialized_ = true;
 }
 
-bool TTopSortProcessor::Next(TRowSet& rowSet)
+bool TTopSortProcessor::Next(TThreadExecutionContext& context, TRowSet& rowSet)
 {
     Finish();
     if (!Scratch_ || Cursor_ >= static_cast<size_t>(Scratch_->State.RowCount)) {
@@ -731,6 +734,7 @@ bool TTopSortProcessor::Next(TRowSet& rowSet)
         throw std::runtime_error("top-sort materialize kernel is unavailable");
     }
     const int64_t produced = dispatch(
+        context,
         &Scratch_->State,
         Scratch_->TempRowIds.data(),
         nullptr,

@@ -22,7 +22,7 @@ public:
         : Remaining_(repeats)
     {}
 
-    ETaskResult Execute() override {
+    ETaskResult Execute(NQdb::TThreadExecutionContext&) override {
         ++Calls_;
         if (Remaining_ > 0) {
             --Remaining_;
@@ -46,7 +46,7 @@ public:
         : Total_(total)
     {}
 
-    ETaskResult Execute() override {
+    ETaskResult Execute(NQdb::TThreadExecutionContext&) override {
         auto produced = Produced.load(std::memory_order_relaxed);
         if (produced < Total_) {
             Produced.store(produced + 1, std::memory_order_release);
@@ -70,7 +70,7 @@ public:
         , Total_(total)
     {}
 
-    ETaskResult Execute() override {
+    ETaskResult Execute(NQdb::TThreadExecutionContext&) override {
         auto produced = Source_.Produced.load(std::memory_order_acquire);
         if (Consumed_ < produced) {
             ++Consumed_;
@@ -101,7 +101,7 @@ public:
         : Remaining_(repeats)
     {}
 
-    ETaskResult Execute() override {
+    ETaskResult Execute(NQdb::TThreadExecutionContext&) override {
         if (Running_.exchange(true, std::memory_order_acq_rel)) {
             Violations.fetch_add(1, std::memory_order_relaxed);
         }
@@ -125,21 +125,21 @@ private:
 
 class TFinishTask : public ITaskNode {
 public:
-    ETaskResult Execute() override {
+    ETaskResult Execute(NQdb::TThreadExecutionContext&) override {
         return ETaskResult::FINISHED;
     }
 };
 
 class TThrowTask : public ITaskNode {
 public:
-    ETaskResult Execute() override {
+    ETaskResult Execute(NQdb::TThreadExecutionContext&) override {
         throw std::runtime_error("expected task failure");
     }
 };
 
 class TManyInputSinkTask : public ITaskNode {
 public:
-    ETaskResult Execute() override {
+    ETaskResult Execute(NQdb::TThreadExecutionContext&) override {
         if (!Requested_) {
             Requested_ = true;
             return ETaskResult::NEED_DATA;
@@ -153,7 +153,7 @@ private:
 
 class TNeedFinishedReplayTask : public ITaskNode {
 public:
-    ETaskResult Execute() override {
+    ETaskResult Execute(NQdb::TThreadExecutionContext&) override {
         ++Calls_;
         if (Calls_ < 3) {
             return ETaskResult::NEED_DATA;

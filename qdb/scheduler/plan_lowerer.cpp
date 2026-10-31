@@ -274,9 +274,11 @@ TSchedulerUnaryStage BuildSchedulerFilterStage(
     auto runtime = BuildFilterRuntimeProcess(
         filter, inputType, std::move(options));
     auto code = std::make_shared<NScheduler::TUnaryCode>(
-        [process = std::move(runtime.Process)](void* state, TRowSet& rowSet) {
+        [process = std::move(runtime.Process)](
+            TThreadExecutionContext& context, void* state, TRowSet& rowSet)
+        {
             auto* kernelState = static_cast<TUnaryStreamingKernelState*>(state);
-            process(rowSet, *kernelState);
+            process(context, rowSet, *kernelState);
         });
     return {
         .Code = std::move(code),
@@ -295,9 +297,11 @@ TSchedulerUnaryStage BuildSchedulerProjectStage(
     auto runtime = BuildProjectRuntimeProcess(
         project, inputType, std::move(options));
     auto code = std::make_shared<NScheduler::TUnaryCode>(
-        [process = std::move(runtime.Process)](void* state, TRowSet& rowSet) {
+        [process = std::move(runtime.Process)](
+            TThreadExecutionContext& context, void* state, TRowSet& rowSet)
+        {
             auto* kernelState = static_cast<TUnaryStreamingKernelState*>(state);
-            process(rowSet, *kernelState);
+            process(context, rowSet, *kernelState);
         });
 
     return {
@@ -979,11 +983,15 @@ private:
     template <class TState>
     std::shared_ptr<const NScheduler::TBlockingCode> MakeDrainBlockingCode() {
         auto code = std::make_shared<NScheduler::TBlockingCode>(
-            [](NScheduler::ITaskState& state, NScheduler::TInputPort& input, TRowSet& output) {
+            [](TThreadExecutionContext& context,
+               NScheduler::ITaskState& state,
+               NScheduler::TInputPort& input,
+               TRowSet& output)
+            {
                 auto* s = &static_cast<TState&>(state);
                 TRowSet rowSet{};
                 while (!s->InputFinished) {
-                    auto fetch = input.Fetch(rowSet);
+                    auto fetch = input.Fetch(context, rowSet);
                     if (fetch == NScheduler::EFetchResult::NO_DATA) {
                         return NScheduler::ETaskResult::NEED_DATA;
                     }
@@ -991,10 +999,10 @@ private:
                         s->InputFinished = true;
                         break;
                     }
-                    s->Processor.Add(rowSet);
+                    s->Processor.Add(context, rowSet);
                     rowSet = {};
                 }
-                if (s->Processor.Next(output)) {
+                if (s->Processor.Next(context, output)) {
                     return NScheduler::ETaskResult::OK;
                 }
                 return NScheduler::ETaskResult::FINISHED;
@@ -1040,14 +1048,18 @@ private:
     // Blocking code for a limit/offset task.
     std::shared_ptr<const NScheduler::TBlockingCode> MakeLimitBlockingCode() {
         return std::make_shared<NScheduler::TBlockingCode>(
-            [](NScheduler::ITaskState& state, NScheduler::TInputPort& input, TRowSet& output) {
+            [](TThreadExecutionContext& context,
+               NScheduler::ITaskState& state,
+               NScheduler::TInputPort& input,
+               TRowSet& output)
+            {
                 auto* s = &static_cast<TLimitBlockingState&>(state);
                 if (s->Processor.Finished()) {
                     return NScheduler::ETaskResult::FINISHED;
                 }
                 TRowSet rowSet{};
                 while (!s->Processor.Finished()) {
-                    auto fetch = input.Fetch(rowSet);
+                    auto fetch = input.Fetch(context, rowSet);
                     if (fetch == NScheduler::EFetchResult::NO_DATA) {
                         return NScheduler::ETaskResult::NEED_DATA;
                     }
@@ -1068,21 +1080,22 @@ private:
     template <class TState>
     std::shared_ptr<const NScheduler::TBinaryBlockingCode> MakeBinaryJoinCode() {
         auto code = std::make_shared<NScheduler::TBinaryBlockingCode>(
-            [](NScheduler::ITaskState& state,
+            [](TThreadExecutionContext& context,
+               NScheduler::ITaskState& state,
                NScheduler::TInputPort& left,
                NScheduler::TInputPort& right,
                TRowSet& output)
             {
                 auto* s = &static_cast<TState&>(state);
                 auto fetchLeft = [&](TRowSet& rowSet) {
-                    return MapJoinFetch(left.Fetch(rowSet));
+                    return MapJoinFetch(left.Fetch(context, rowSet));
                 };
                 auto fetchRight = [&](TRowSet& rowSet) {
-                    return MapJoinFetch(right.Fetch(rowSet));
+                    return MapJoinFetch(right.Fetch(context, rowSet));
                 };
-                const auto result = s->Processor.Process(fetchLeft, fetchRight, output);
-                if constexpr (requires { s->Processor.ObserveInstrumentation(); }) {
-                    s->Processor.ObserveInstrumentation();
+                const auto result = s->Processor.Process(context, fetchLeft, fetchRight, output);
+                if constexpr (requires { s->Processor.ObserveInstrumentation(context); }) {
+                    s->Processor.ObserveInstrumentation(context);
                 }
                 return MapJoinProcessResult(result);
             });
@@ -1555,23 +1568,27 @@ private:
         auto sets = aggregate.GroupingSets();
 
         auto code = std::make_shared<NScheduler::TBlockingCode>(
-            [](NScheduler::ITaskState& state, NScheduler::TInputPort& input, TRowSet& output) {
+            [](TThreadExecutionContext& context,
+               NScheduler::ITaskState& state,
+               NScheduler::TInputPort& input,
+               TRowSet& output)
+            {
                 auto* s = &static_cast<TGroupingSetsBlockingState&>(state);
                 if (s->Done) {
                     return NScheduler::ETaskResult::FINISHED;
                 }
                 TRowSet rowSet{};
                 while (true) {
-                    auto fetch = input.Fetch(rowSet);
+                    auto fetch = input.Fetch(context, rowSet);
                     if (fetch == NScheduler::EFetchResult::NO_DATA) {
                         return NScheduler::ETaskResult::NEED_DATA;
                     }
                     if (fetch == NScheduler::EFetchResult::FINISHED) {
                         s->Done = true;
-                        s->Processor.Finish(output);
+                        s->Processor.Finish(context, output);
                         return NScheduler::ETaskResult::OK;
                     }
-                    s->Processor.Add(rowSet);
+                    s->Processor.Add(context, rowSet);
                     Release(&rowSet);
                     rowSet = {};
                 }
@@ -1679,24 +1696,28 @@ private:
         };
 
         auto code = std::make_shared<NScheduler::TBlockingCode>(
-            [](NScheduler::ITaskState& state, NScheduler::TInputPort& input, TRowSet& output) {
+            [](TThreadExecutionContext& context,
+               NScheduler::ITaskState& state,
+               NScheduler::TInputPort& input,
+               TRowSet& output)
+            {
                 auto* s = &static_cast<TPartialAggregateBlockingState&>(state);
                 if (s->Done) {
                     return NScheduler::ETaskResult::FINISHED;
                 }
                 TRowSet rowSet{};
                 while (true) {
-                    auto fetch = input.Fetch(rowSet);
+                    auto fetch = input.Fetch(context, rowSet);
                     if (fetch == NScheduler::EFetchResult::NO_DATA) {
                         return NScheduler::ETaskResult::NEED_DATA;
                     }
                     if (fetch == NScheduler::EFetchResult::FINISHED) {
                         s->Done = true;
-                        return s->Processor.Finish(output)
+                        return s->Processor.Finish(context, output)
                             ? NScheduler::ETaskResult::OK
                             : NScheduler::ETaskResult::FINISHED;
                     }
-                    s->Processor.Add(rowSet);
+                    s->Processor.Add(context, rowSet);
                     if (s->Processor.Next(output)) {
                         return NScheduler::ETaskResult::OK;
                     }
@@ -1735,23 +1756,27 @@ private:
         auto compiled = CompileAggregateTable(
             *inputType, aggregate, std::move(stage), execStageId, estimate, hasPrecomputedHash);
         auto code = std::make_shared<NScheduler::TBlockingCode>(
-            [](NScheduler::ITaskState& state, NScheduler::TInputPort& input, TRowSet& output) {
+            [](TThreadExecutionContext& context,
+               NScheduler::ITaskState& state,
+               NScheduler::TInputPort& input,
+               TRowSet& output)
+            {
                 auto* s = &static_cast<TAggregateBlockingState&>(state);
                 if (s->Done) {
                     return NScheduler::ETaskResult::FINISHED;
                 }
                 TRowSet rowSet{};
                 while (true) {
-                    auto fetch = input.Fetch(rowSet);
+                    auto fetch = input.Fetch(context, rowSet);
                     if (fetch == NScheduler::EFetchResult::NO_DATA) {
                         return NScheduler::ETaskResult::NEED_DATA;
                     }
                     if (fetch == NScheduler::EFetchResult::FINISHED) {
                         s->Done = true;
-                        s->Processor.Finish(output);
+                        s->Processor.Finish(context, output);
                         return NScheduler::ETaskResult::OK;
                     }
-                    s->Processor.Add(rowSet);
+                    s->Processor.Add(context, rowSet);
                     Release(&rowSet);
                     rowSet = {};
                 }
@@ -2332,7 +2357,7 @@ private:
             // TBroadcastConnection requires one producer. This bridge turns
             // the already gathered locator stream into that producer.
             auto forwardCode = std::make_shared<NScheduler::TUnaryCode>(
-                [](void*, TRowSet&) {});
+                [](TThreadExecutionContext&, void*, TRowSet&) {});
             auto forward = std::make_unique<NScheduler::TUnaryTask>(
                 forwardCode,
                 std::shared_ptr<void>{},
@@ -2410,7 +2435,8 @@ private:
         }
 
         auto mergeCode = std::make_shared<NScheduler::TMergeCode>(
-            [](NScheduler::ITaskState& state,
+            [](TThreadExecutionContext& context,
+               NScheduler::ITaskState& state,
                std::vector<NScheduler::TInputPort>& inputs,
                TRowSet& output)
             {
@@ -2424,7 +2450,7 @@ private:
                         continue;
                     }
                     TRowSet partition{};
-                    switch (inputs[i].Fetch(partition)) {
+                    switch (inputs[i].Fetch(context, partition)) {
                         case NScheduler::EFetchResult::OK:
                             merge->Partitions[i] = partition;
                             merge->Received[i] = true;
@@ -2613,7 +2639,8 @@ private:
         }
 
         auto mergeCode = std::make_shared<NScheduler::TMergeCode>(
-            [](NScheduler::ITaskState& state,
+            [](TThreadExecutionContext& context,
+               NScheduler::ITaskState& state,
                std::vector<NScheduler::TInputPort>& inputs,
                TRowSet& output)
             {
@@ -2626,7 +2653,7 @@ private:
                         }
                         for (;;) {
                             TRowSet batch{};
-                            auto fetch = inputs[i].Fetch(batch);
+                            auto fetch = inputs[i].Fetch(context, batch);
                             if (fetch == NScheduler::EFetchResult::NO_DATA) {
                                 allDone = false;
                                 break;
@@ -2635,7 +2662,7 @@ private:
                                 s->RunFinished[i] = true;
                                 break;
                             }
-                            s->Processor.Add(batch, i);
+                            s->Processor.Add(context, batch, i);
                         }
                     }
                     if (!allDone) {
@@ -2774,7 +2801,7 @@ private:
                 1, lanes, "cross-scalar-broadcast");
 
             auto fwdCode = std::make_shared<NScheduler::TUnaryCode>(
-                [](void*, TRowSet&) {});
+                [](TThreadExecutionContext&, void*, TRowSet&) {});
             auto fwd = std::make_unique<NScheduler::TUnaryTask>(
                 fwdCode,
                 std::make_shared<int>(0),

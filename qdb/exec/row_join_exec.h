@@ -46,6 +46,7 @@ public:
     ~TRowJoinProcessor();
 
     EJoinProcessorResult Process(
+        TThreadExecutionContext& context,
         const TFetch& left,
         const TFetch& right,
         TRowSet& output);
@@ -54,7 +55,7 @@ public:
     // side only, while the held probe batches are at the budget.
     EJoinBuildSide RequiredInputSide() const;
     void SetInstrumentation(TOperatorInstrumentation* instrumentation);
-    void ObserveInstrumentation();
+    void ObserveInstrumentation(TThreadExecutionContext& context);
 
 private:
     // Mirror the RowArena / RowTable / RowScratch / PairBuffer external
@@ -99,26 +100,27 @@ private:
     };
     static_assert(sizeof(TPairBufferState) == TKernelCompiler::PairBufferSize);
 
-    void EnsureInit();
+    void EnsureInit(TThreadExecutionContext& context);
     // Runs `op` on Arena_, or on `arena`.
-    bool Dispatch(ERowJoinKernelOp op, TRowSet* batch);
-    bool Dispatch(ERowJoinKernelOp op, TRowSet* batch, TArenaState& arena);
+    bool Dispatch(TThreadExecutionContext& context, ERowJoinKernelOp op, TRowSet* batch);
+    bool Dispatch(
+        TThreadExecutionContext& context, ERowJoinKernelOp op, TRowSet* batch, TArenaState& arena);
     bool DrainReadyOutput(TRowSet& rowSet);
     // Pulls one build batch; true when the build side made progress or ended.
-    bool PullBuildBatch(const TFetch& build);
+    bool PullBuildBatch(TThreadExecutionContext& context, const TFetch& build);
     // Pulls one probe batch: kept in PendingProbe_ while the table is not
     // built, probed otherwise. True when the probe side made progress or ended.
-    bool PullProbeBatch(const TFetch& probe);
+    bool PullProbeBatch(TThreadExecutionContext& context, const TFetch& probe);
     // Looks the batch up, materializes its matches into ReadyOutput_ and
     // releases it.
-    void ProbeBatch(TRowSet& batch);
+    void ProbeBatch(TThreadExecutionContext& context, TRowSet& batch);
     // The probe side may be read ahead of the build: the budget is not reached.
     bool CanHoldProbe() const;
     // Payload bytes of the batch, by the instrumentation measure kernel.
-    uint64_t ProbeBatchBytes(const TRowSet& batch) const;
+    uint64_t ProbeBatchBytes(TThreadExecutionContext& context, const TRowSet& batch) const;
     // After the probe side ended: emits the build rows a SEMI/ANTI join
     // selects by their marks, one output batch per call.
-    EJoinProcessorResult Finish(TRowSet& output);
+    EJoinProcessorResult Finish(TThreadExecutionContext& context, TRowSet& output);
 
 private:
     TRowJoinKernels Kernels_;

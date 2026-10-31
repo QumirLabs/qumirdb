@@ -1,6 +1,7 @@
 #pragma once
 
 #include <qdb/io/io.h>
+#include <qdb/kernel/thread_context.h>
 
 #include <cstdint>
 #include <functional>
@@ -16,7 +17,7 @@ struct TUnaryStreamingKernelState {
 
 // A streaming transform applied to one batch in place (filter/project). The
 // scheduler wraps this in a unary streaming task.
-using TUnaryStreamProcess =
-    std::function<void(TRowSet&, TUnaryStreamingKernelState&)>;
+using TUnaryStreamProcess = std::function<void(
+    TThreadExecutionContext&, TRowSet&, TUnaryStreamingKernelState&)>;
 
 } // namespace NQdb

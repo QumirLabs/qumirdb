@@ -1,6 +1,7 @@
 #pragma once
 
 #include <qdb/exec/stage.h>
+#include <qdb/kernel/thread_context.h>
 
 #include <qumir/parser/ast.h>
 
@@ -54,9 +55,12 @@ struct TKernelSlot {
     // Cache path only: keeps the query's LLJIT alive (the runner does not).
     std::shared_ptr<void> JitLifetime;
 
-    // Calls entrypoint `index`; TFn is its native function pointer type.
+    // Calls entrypoint `index` on the calling thread; TFn is its native
+    // function pointer type.
     template <typename TFn, typename... TArgs>
-    auto Call(size_t index, TArgs... args) const {
+    auto Call(
+        [[maybe_unused]] TThreadExecutionContext& context, size_t index, TArgs... args) const
+    {
         static_assert(IsKernelSignature<TFn>, "kernel signature violates the kernel ABI");
         return reinterpret_cast<TFn>(Fns[index])(args...);
     }

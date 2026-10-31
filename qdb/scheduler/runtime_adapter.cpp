@@ -29,6 +29,7 @@ using namespace NQumir::NAst;
 // immediately (OK once pushed, BLOCKED_OUTPUT if the queue is full), or nullopt
 // when nothing is pending so the caller proceeds to produce the next output.
 std::optional<ETaskResult> FlushPendingOutput(
+    TThreadExecutionContext& context,
     bool& hasOutput,
     TOutputPort& output,
     TRowSet& current)
@@ -39,7 +40,7 @@ std::optional<ETaskResult> FlushPendingOutput(
     if (!output.CanPush()) {
         return ETaskResult::BLOCKED_OUTPUT;
     }
-    if (!output.Push(std::move(current))) {
+    if (!output.Push(context, std::move(current))) {
         return ETaskResult::BLOCKED_OUTPUT;
     }
     current = {};
@@ -199,12 +200,12 @@ const TStructType& ShuffleInputStruct(const TTypePtr& type) {
 
 } // namespace
 
-EFetchResult TInputPort::Fetch(TRowSet& rowSet) const {
+EFetchResult TInputPort::Fetch(TThreadExecutionContext& context, TRowSet& rowSet) const {
     const auto result = Connection
         ? Connection->Fetch(Lane, rowSet)
         : EFetchResult::FINISHED;
     if (result == EFetchResult::OK && Instrumentation) {
-        Instrumentation->Add(rowSet);
+        Instrumentation->Add(context, rowSet);
     }
     return result;
 }
@@ -213,11 +214,11 @@ bool TOutputPort::CanPush() const {
     return !Connection || Connection->CanPush(Lane);
 }
 
-bool TOutputPort::Push(TRowSet&& rowSet) const {
+bool TOutputPort::Push(TThreadExecutionContext& context, TRowSet&& rowSet) const {
     const auto rows = Instrumentation ? Instrumentation->Rows : 0;
     const auto bytes = Instrumentation ? Instrumentation->Bytes : 0;
     if (Instrumentation) {
-        Instrumentation->Add(rowSet);
+        Instrumentation->Add(context, rowSet);
     }
     const bool pushed = !Connection || Connection->Push(Lane, std::move(rowSet));
     if (!pushed && Instrumentation) {
@@ -316,7 +317,7 @@ TSourceTask::TSourceTask(
     , Output_(output)
 {}
 
-ETaskResult TSourceTask::Execute() {
+ETaskResult TSourceTask::Execute(TThreadExecutionContext& context) {
     if (Finished_) {
         return ETaskResult::FINISHED;
     }
@@ -331,7 +332,7 @@ ETaskResult TSourceTask::Execute() {
         return ETaskResult::FINISHED;
     }
 
-    if (!Output_.Push(std::move(rowSet))) {
+    if (!Output_.Push(context, std::move(rowSet))) {
         Release(&rowSet);
         return ETaskResult::BLOCKED_OUTPUT;
     }
@@ -393,7 +394,7 @@ bool TRuntimeFilterTask::TryNotifyDependency() noexcept {
         std::memory_order_acq_rel);
 }
 
-ETaskResult TRuntimeFilterTask::Execute() {
+ETaskResult TRuntimeFilterTask::Execute(TThreadExecutionContext& context) {
     if (OutputFinished_) {
         return ETaskResult::FINISHED;
     }
@@ -407,7 +408,7 @@ ETaskResult TRuntimeFilterTask::Execute() {
     }
 
     if (!HasInput_ && !InputFinished_) {
-        auto fetch = Input_.Fetch(CurrentInput_);
+        auto fetch = Input_.Fetch(context, CurrentInput_);
         if (fetch == EFetchResult::OK) {
             HasInput_ = true;
         } else if (fetch == EFetchResult::FINISHED) {
@@ -442,12 +443,12 @@ ETaskResult TRuntimeFilterTask::Execute() {
         if (Code_->Probe->BeginBatch(*ProbeState_, selected)) {
             auto data = std::make_unique<TRuntimeFilterRowSetData>();
             data->Hashes.resize(rows);
-            if (!Code_->Hash(&CurrentInput_, data->Hashes.data())) {
+            if (!Code_->Hash(context, &CurrentInput_, data->Hashes.data())) {
                 throw std::runtime_error("runtime filter hash kernel failed");
             }
             data->Selection.resize(rows);
             const size_t kept = Code_->Probe->MayContainBatch(
-                data->Hashes, data->Selection, *ProbeState_, selection);
+                context, data->Hashes, data->Selection, *ProbeState_, selection);
             if (!kept) {
                 Release(&CurrentInput_);
                 CurrentInput_ = {};
@@ -466,7 +467,7 @@ ETaskResult TRuntimeFilterTask::Execute() {
         }
         Prepared_ = true;
     }
-    if (!Output_.Push(std::move(CurrentInput_))) {
+    if (!Output_.Push(context, std::move(CurrentInput_))) {
         return ETaskResult::BLOCKED_OUTPUT;
     }
     CurrentInput_ = {};
@@ -492,13 +493,13 @@ TUnaryTask::~TUnaryTask() {
     }
 }
 
-ETaskResult TUnaryTask::Execute() {
+ETaskResult TUnaryTask::Execute(TThreadExecutionContext& context) {
     if (OutputFinished_) {
         return ETaskResult::FINISHED;
     }
 
     if (!HasInput_ && !InputFinished_) {
-        auto fetch = Input_.Fetch(CurrentInput_);
+        auto fetch = Input_.Fetch(context, CurrentInput_);
         if (fetch == EFetchResult::OK) {
             HasInput_ = true;
         } else if (fetch == EFetchResult::FINISHED) {
@@ -518,8 +519,8 @@ ETaskResult TUnaryTask::Execute() {
         return ETaskResult::BLOCKED_OUTPUT;
     }
 
-    Code_->Process(State_.get(), CurrentInput_);
-    if (!Output_.Push(std::move(CurrentInput_))) {
+    Code_->Process(context, State_.get(), CurrentInput_);
+    if (!Output_.Push(context, std::move(CurrentInput_))) {
         return ETaskResult::BLOCKED_OUTPUT;
     }
     CurrentInput_ = {};
@@ -544,13 +545,13 @@ TSinkTask::TSinkTask(
     , Input_(input)
 {}
 
-ETaskResult TSinkTask::Execute() {
+ETaskResult TSinkTask::Execute(TThreadExecutionContext& context) {
     if (Finished_) {
         return ETaskResult::FINISHED;
     }
 
     TRowSet rowSet{};
-    auto fetch = Input_.Fetch(rowSet);
+    auto fetch = Input_.Fetch(context, rowSet);
     if (fetch == EFetchResult::NO_DATA) {
         return ETaskResult::NEED_DATA;
     }
@@ -581,16 +582,16 @@ TBlockingTask::~TBlockingTask() {
     }
 }
 
-ETaskResult TBlockingTask::Execute() {
+ETaskResult TBlockingTask::Execute(TThreadExecutionContext& context) {
     if (OutputFinished_) {
         return ETaskResult::FINISHED;
     }
 
-    if (auto result = FlushPendingOutput(HasOutput_, Output_, CurrentOutput_)) {
+    if (auto result = FlushPendingOutput(context, HasOutput_, Output_, CurrentOutput_)) {
         return *result;
     }
 
-    auto result = Code_->Process(*State_, Input_, CurrentOutput_);
+    auto result = Code_->Process(context, *State_, Input_, CurrentOutput_);
     if (result == ETaskResult::OK) {
         HasOutput_ = true;
         return ETaskResult::OK;
@@ -621,16 +622,16 @@ TBinaryBlockingTask::~TBinaryBlockingTask() {
     }
 }
 
-ETaskResult TBinaryBlockingTask::Execute() {
+ETaskResult TBinaryBlockingTask::Execute(TThreadExecutionContext& context) {
     if (OutputFinished_) {
         return ETaskResult::FINISHED;
     }
 
-    if (auto result = FlushPendingOutput(HasOutput_, Output_, CurrentOutput_)) {
+    if (auto result = FlushPendingOutput(context, HasOutput_, Output_, CurrentOutput_)) {
         return *result;
     }
 
-    auto result = Code_->Process(*State_, Left_, Right_, CurrentOutput_);
+    auto result = Code_->Process(context, *State_, Left_, Right_, CurrentOutput_);
     if (result == ETaskResult::OK) {
         HasOutput_ = true;
         return ETaskResult::OK;
@@ -671,16 +672,16 @@ TMergeTask::~TMergeTask() {
     }
 }
 
-ETaskResult TMergeTask::Execute() {
+ETaskResult TMergeTask::Execute(TThreadExecutionContext& context) {
     if (OutputFinished_) {
         return ETaskResult::FINISHED;
     }
 
-    if (auto result = FlushPendingOutput(HasOutput_, Output_, CurrentOutput_)) {
+    if (auto result = FlushPendingOutput(context, HasOutput_, Output_, CurrentOutput_)) {
         return *result;
     }
 
-    auto result = Code_->Process(*State_, Inputs_, CurrentOutput_);
+    auto result = Code_->Process(context, *State_, Inputs_, CurrentOutput_);
     if (result == ETaskResult::OK) {
         HasOutput_ = true;
         return ETaskResult::OK;
@@ -729,20 +730,22 @@ THashShuffleTask::THashShuffleTask(
 {}
 
 THashShuffleTask::~THashShuffleTask() {
-    ClearPending();
+    // Runs outside any worker, on the thread that releases the plan.
+    TThreadExecutionContext context;
+    ClearPending(context);
 }
 
-ETaskResult THashShuffleTask::Execute() {
+ETaskResult THashShuffleTask::Execute(TThreadExecutionContext& context) {
     if (OutputFinished_) {
         return ETaskResult::FINISHED;
     }
 
     if (PendingIndex_ < Pending_.size()) {
-        return PushPending();
+        return PushPending(context);
     }
 
     TRowSet rowSet{};
-    auto fetch = InputFinished_ ? EFetchResult::FINISHED : Input_.Fetch(rowSet);
+    auto fetch = InputFinished_ ? EFetchResult::FINISHED : Input_.Fetch(context, rowSet);
     if (fetch == EFetchResult::NO_DATA) {
         return ETaskResult::NEED_DATA;
     }
@@ -755,12 +758,12 @@ ETaskResult THashShuffleTask::Execute() {
                 auto builder = FilterBuilder_
                     ? std::move(*FilterBuilder_)
                     : Code_->ProducedFilter->MakeBuilder();
-                Code_->ProducedFilter->FinishProducer(std::move(builder).TakePartial());
+                Code_->ProducedFilter->FinishProducer(context, std::move(builder).TakePartial());
                 FilterBuilder_.reset();
             }
-            FlushAllBuffers();
+            FlushAllBuffers(context);
         }
-        auto result = PushPending();
+        auto result = PushPending(context);
         if (result != ETaskResult::OK) {
             return result;
         }
@@ -769,14 +772,14 @@ ETaskResult THashShuffleTask::Execute() {
         return ETaskResult::FINISHED;
     }
 
-    Scatter(rowSet);
+    Scatter(context, rowSet);
     if (rowSet.RefCount) {
         Release(&rowSet);
     }
-    return PushPending();
+    return PushPending(context);
 }
 
-void THashShuffleTask::ObserveInstrumentation() {
+void THashShuffleTask::ObserveInstrumentation(TThreadExecutionContext& context) {
     if (!ResourceInstrumentation_) {
         return;
     }
@@ -790,7 +793,7 @@ void THashShuffleTask::ObserveInstrumentation() {
         auto found = state.PayloadBytes.find(owner);
         if (found == state.PayloadBytes.end()) {
             found = state.PayloadBytes.emplace(owner,
-                state.Counters->InputPayloadBytes(rowSet, 0)).first;
+                state.Counters->InputPayloadBytes(context, rowSet, 0)).first;
         }
         bytes += found->second;
     };
@@ -819,6 +822,7 @@ bool THashShuffleTask::BatchingEnabled() const {
 }
 
 std::shared_ptr<uint64_t> THashShuffleTask::ComputeHashes(
+    TThreadExecutionContext& context,
     const std::shared_ptr<TRowSet>& input)
 {
     if (Code_->UseInputHash && input->Hash) {
@@ -826,13 +830,14 @@ std::shared_ptr<uint64_t> THashShuffleTask::ComputeHashes(
         return std::shared_ptr<uint64_t>(input, input->Hash);
     }
     auto hashes = std::make_shared<std::vector<uint64_t>>(input->RowCount);
-    if (!Code_->Hash(input.get(), hashes->data())) {
+    if (!Code_->Hash(context, input.get(), hashes->data())) {
         throw std::runtime_error("hash shuffle hash kernel failed");
     }
     return std::shared_ptr<uint64_t>(hashes, hashes->data());
 }
 
 void THashShuffleTask::AccumulateFilter(
+    TThreadExecutionContext& context,
     const TRowSet& rowSet, std::span<const uint64_t> hashes)
 {
     if (!Code_->ProducedFilter) {
@@ -841,7 +846,7 @@ void THashShuffleTask::AccumulateFilter(
     if (!FilterBuilder_) {
         FilterBuilder_.emplace(Code_->ProducedFilter->MakeBuilder());
     }
-    FilterBuilder_->Add(hashes, rowSet.Selection
+    FilterBuilder_->Add(context, hashes, rowSet.Selection
         ? std::span<const uint8_t>(rowSet.Selection, hashes.size())
         : std::span<const uint8_t>{});
 }
@@ -857,21 +862,23 @@ void THashShuffleTask::EnsureBuffers(size_t partitions) {
     }
 }
 
-void THashShuffleTask::Scatter(TRowSet& rowSet) {
+void THashShuffleTask::Scatter(TThreadExecutionContext& context, TRowSet& rowSet) {
     if (Output_->DstCount() == 0 || rowSet.RowCount <= 0) {
         return;
     }
     auto input = std::shared_ptr<TRowSet>(new TRowSet(rowSet), DestroySharedRowSet);
     rowSet = {};
     if (BatchingEnabled()) {
-        ScatterBuffered(input);
+        ScatterBuffered(context, input);
     } else {
-        ScatterViews(input);
+        ScatterViews(context, input);
     }
-    ObserveInstrumentation();
+    ObserveInstrumentation(context);
 }
 
-void THashShuffleTask::ScatterBuffered(const std::shared_ptr<TRowSet>& input) {
+void THashShuffleTask::ScatterBuffered(
+    TThreadExecutionContext& context, const std::shared_ptr<TRowSet>& input)
+{
     const size_t partitions = Output_->DstCount();
     EnsureBuffers(partitions);
 
@@ -897,13 +904,13 @@ void THashShuffleTask::ScatterBuffered(const std::shared_ptr<TRowSet>& input) {
         const auto hashes = Code_->UseInputHash && input->Hash
             ? std::shared_ptr<uint64_t>(input, input->Hash) : nullptr;
         const size_t inputBytes = ReferencedInputBytes(*input, inputType, hashes);
-        AddBufferedRows(0, input, std::move(rows[0]), bytes[0], hashes, inputBytes);
+        AddBufferedRows(context, 0, input, std::move(rows[0]), bytes[0], hashes, inputBytes);
         return;
     }
 
-    auto hashes = ComputeHashes(input);
+    auto hashes = ComputeHashes(context, input);
     const std::span<const uint64_t> hashValues(hashes.get(), input->RowCount);
-    AccumulateFilter(*input, hashValues);
+    AccumulateFilter(context, *input, hashValues);
 
     for (int64_t row = 0; row < input->RowCount; ++row) {
         if (!RowSelected(*input, row)) {
@@ -916,17 +923,19 @@ void THashShuffleTask::ScatterBuffered(const std::shared_ptr<TRowSet>& input) {
     const size_t inputBytes = ReferencedInputBytes(*input, inputType, hashes);
     for (size_t dst = 0; dst < partitions; ++dst) {
         bytes[dst] = rows[dst].size() * estimatedRowBytes;
-        AddBufferedRows(dst, input, std::move(rows[dst]), bytes[dst], hashes, inputBytes);
+        AddBufferedRows(context, dst, input, std::move(rows[dst]), bytes[dst], hashes, inputBytes);
     }
 }
 
-void THashShuffleTask::ScatterViews(const std::shared_ptr<TRowSet>& input) {
+void THashShuffleTask::ScatterViews(
+    TThreadExecutionContext& context, const std::shared_ptr<TRowSet>& input)
+{
     const size_t partitions = Output_->DstCount();
 
     // Many-to-one shuffle: every row routes to lane 0, so skip hashing and
     // forward the whole rowset (keeping its existing selection) unchanged.
     if (partitions == 1 && !Code_->ProducedFilter) {
-        ClearPending();
+        ClearPending(context);
         auto* data = new THashShuffleRowSetData;
         data->Input = input;
         Pending_.push_back(TPendingOutput{
@@ -945,9 +954,9 @@ void THashShuffleTask::ScatterViews(const std::shared_ptr<TRowSet>& input) {
         return;
     }
 
-    auto hashes = ComputeHashes(input);
+    auto hashes = ComputeHashes(context, input);
     const std::span<const uint64_t> hashValues(hashes.get(), input->RowCount);
-    AccumulateFilter(*input, hashValues);
+    AccumulateFilter(context, *input, hashValues);
 
     std::vector<std::vector<uint8_t>> selections(partitions);
     std::vector<size_t> counts(partitions, 0);
@@ -963,7 +972,7 @@ void THashShuffleTask::ScatterViews(const std::shared_ptr<TRowSet>& input) {
         ++counts[dst];
     }
 
-    ClearPending();
+    ClearPending(context);
 
     Pending_.reserve(partitions);
     for (size_t dst = 0; dst < partitions; ++dst) {
@@ -991,6 +1000,7 @@ void THashShuffleTask::ScatterViews(const std::shared_ptr<TRowSet>& input) {
 }
 
 void THashShuffleTask::AddBufferedRows(
+    TThreadExecutionContext& context,
     size_t dst,
     const std::shared_ptr<TRowSet>& input,
     std::vector<int32_t>&& rows,
@@ -1010,7 +1020,7 @@ void THashShuffleTask::AddBufferedRows(
         .Rows = std::move(rows),
         .Hashes = hashes,
     });
-    ObserveInstrumentation();
+    ObserveInstrumentation(context);
 
     const size_t targetRows = Code_->TargetOutputBatchRows;
     const size_t maxRows = Code_->MaxOutputBatchRows;
@@ -1020,11 +1030,13 @@ void THashShuffleTask::AddBufferedRows(
     if ((targetRows > 0 && buffer.RowCount >= targetRows) ||
         (maxRows > 0 && buffer.RowCount >= maxRows) ||
         (targetBytes > 0 && buffer.ByteCount >= targetBytes) || releaseInputs) {
-        FlushBuffer(dst, releaseInputs);
+        FlushBuffer(context, dst, releaseInputs);
     }
 }
 
-void THashShuffleTask::FlushBuffer(size_t dst, bool releaseInputs) {
+void THashShuffleTask::FlushBuffer(
+    TThreadExecutionContext& context, size_t dst, bool releaseInputs)
+{
     auto& buffer = *Buffers_[dst];
     if (buffer.RowCount == 0) {
         return;
@@ -1060,7 +1072,7 @@ void THashShuffleTask::FlushBuffer(size_t dst, bool releaseInputs) {
         buffer.RowCount = 0;
         buffer.ByteCount = 0;
         buffer.ReferencedInputBytes = 0;
-        ObserveInstrumentation();
+        ObserveInstrumentation(context);
         return;
     }
 
@@ -1199,16 +1211,16 @@ void THashShuffleTask::FlushBuffer(size_t dst, bool releaseInputs) {
     buffer.RowCount = 0;
     buffer.ByteCount = 0;
     buffer.ReferencedInputBytes = 0;
-    ObserveInstrumentation();
+    ObserveInstrumentation(context);
 }
 
-void THashShuffleTask::FlushAllBuffers() {
+void THashShuffleTask::FlushAllBuffers(TThreadExecutionContext& context) {
     for (size_t dst = 0; dst < Buffers_.size(); ++dst) {
-        FlushBuffer(dst);
+        FlushBuffer(context, dst);
     }
 }
 
-ETaskResult THashShuffleTask::PushPending() {
+ETaskResult THashShuffleTask::PushPending(TThreadExecutionContext& context) {
     while (PendingIndex_ < Pending_.size()) {
         auto& pending = Pending_[PendingIndex_];
         if (!Output_->CanPushTo(SourceLane_, pending.DstLane)) {
@@ -1217,7 +1229,7 @@ ETaskResult THashShuffleTask::PushPending() {
         const auto rows = OutputInstrumentation_ ? OutputInstrumentation_->Rows : 0;
         const auto bytes = OutputInstrumentation_ ? OutputInstrumentation_->Bytes : 0;
         if (OutputInstrumentation_) {
-            OutputInstrumentation_->Add(pending.RowSet);
+            OutputInstrumentation_->Add(context, pending.RowSet);
         }
         if (!Output_->PushTo(SourceLane_, pending.DstLane, std::move(pending.RowSet))) {
             if (OutputInstrumentation_) {
@@ -1227,13 +1239,13 @@ ETaskResult THashShuffleTask::PushPending() {
             return ETaskResult::BLOCKED_OUTPUT;
         }
         ++PendingIndex_;
-        ObserveInstrumentation();
+        ObserveInstrumentation(context);
     }
-    ClearPending();
+    ClearPending(context);
     return ETaskResult::OK;
 }
 
-void THashShuffleTask::ClearPending() {
+void THashShuffleTask::ClearPending(TThreadExecutionContext& context) {
     for (size_t i = PendingIndex_; i < Pending_.size(); ++i) {
         if (Pending_[i].RowSet.RefCount) {
             Release(&Pending_[i].RowSet);
@@ -1241,7 +1253,7 @@ void THashShuffleTask::ClearPending() {
     }
     Pending_.clear();
     PendingIndex_ = 0;
-    ObserveInstrumentation();
+    ObserveInstrumentation(context);
 }
 
 void TSourceTask::ConfigureInstrumentation(TTaskInstrumentationSetup& setup) {

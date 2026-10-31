@@ -60,9 +60,9 @@ public:
         Input_ = input;
     }
 
-    int32_t PushBatch(TRowSet batch) {
+    int32_t PushBatch(TThreadExecutionContext& context, TRowSet batch) {
         if (Instrumentation_) {
-            Instrumentation_->RetainInput(batch, Input_);
+            Instrumentation_->RetainInput(context, batch, Input_);
         }
         Batches_.push_back(batch);
         return static_cast<int32_t>(Batches_.size() - 1);
@@ -136,6 +136,7 @@ public:
     ~TInnerJoinProcessor();
 
     EJoinProcessorResult Process(
+        TThreadExecutionContext& context,
         const TFetch& left,
         const TFetch& right,
         TRowSet& output);
@@ -145,7 +146,7 @@ public:
     // skip waking the side not read yet.
     EJoinBuildSide RequiredInputSide() const;
     void SetInstrumentation(TOperatorInstrumentation* instrumentation);
-    void ObserveInstrumentation();
+    void ObserveInstrumentation(TThreadExecutionContext& context);
 
 private:
     // Mirrors the PairBuffer external type (modules/qumirdb.cpp).
@@ -158,21 +159,25 @@ private:
 
     bool IsOuter() const;
     bool IsSemiAnti() const;
-    void EnsureInit();
+    void EnsureInit(TThreadExecutionContext& context);
     bool DrainReadyOutput(TRowSet& rowSet);
-    bool DrainMaterialized(TRowSet& rowSet);
-    void DrainStreamingPairs(const TRowSet& streamBatch, EJoinSide streamSide);
-    bool PullOneInputBatch(const TFetch& left, const TFetch& right);
-    bool PullSemiAntiBatch(const TFetch& left, const TFetch& right);
+    bool DrainMaterialized(TThreadExecutionContext& context, TRowSet& rowSet);
+    void DrainStreamingPairs(
+        TThreadExecutionContext& context, const TRowSet& streamBatch, EJoinSide streamSide);
+    bool PullOneInputBatch(
+        TThreadExecutionContext& context, const TFetch& left, const TFetch& right);
+    bool PullSemiAntiBatch(
+        TThreadExecutionContext& context, const TFetch& left, const TFetch& right);
     // A SEMI/ANTI join that builds its right keys streams the left input; one
     // that builds its left rows streams the right input and marks the left rows
     // it matches. Auto runs the symmetric path, which stores both.
     bool StreamsSemiAntiLeft() const;
     bool StreamsSemiAntiRight() const;
     bool FinalizesPreservedRows() const;
-    void FinalizePreservedRows();
-    void FinalizeSemiAntiJoin();
+    void FinalizePreservedRows(TThreadExecutionContext& context);
+    void FinalizeSemiAntiJoin(TThreadExecutionContext& context);
     EJoinProcessorResult ProcessSemiAnti(
+        TThreadExecutionContext& context,
         const TFetch& left, const TFetch& right, TRowSet& output);
     EJoinSide ChooseSymmetricPullSide() const;
 
@@ -224,6 +229,7 @@ public:
     ~TCrossJoinProcessor();
 
     EJoinProcessorResult Process(
+        TThreadExecutionContext& context,
         const TFetch& left,
         const TFetch& right,
         TRowSet& output);
@@ -236,10 +242,10 @@ private:
     };
     static_assert(sizeof(TPairBufferState) == TKernelCompiler::PairBufferSize);
 
-    bool DrainMaterialized(TRowSet& rowSet);
+    bool DrainMaterialized(TThreadExecutionContext& context, TRowSet& rowSet);
     bool KeepsUnmatchedLeft() const;
     bool KeepsUnmatchedRight() const;
-    bool Dispatch(int32_t leftBatch, ECrossJoinKernelOp op);
+    bool Dispatch(TThreadExecutionContext& context, int32_t leftBatch, ECrossJoinKernelOp op);
 
 private:
     TCrossJoinKernels Kernels_;

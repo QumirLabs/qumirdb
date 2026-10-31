@@ -23,9 +23,9 @@ void DestroyCteView(TRowSet* rowSet) {
 }
 
 // Completion connections carry finish signals only.
-EFetchResult FetchCompletion(TInputPort& port) {
+EFetchResult FetchCompletion(TThreadExecutionContext& context, TInputPort& port) {
     TRowSet rowSet{};
-    const auto result = port.Fetch(rowSet);
+    const auto result = port.Fetch(context, rowSet);
     if (result == EFetchResult::OK) {
         Release(&rowSet);
         throw std::runtime_error("cte spool: a completion connection carried a rowset");
@@ -106,17 +106,17 @@ TCteProducerTask::TCteProducerTask(
     , Completion_(completion)
 {}
 
-ETaskResult TCteProducerTask::Execute() {
+ETaskResult TCteProducerTask::Execute(TThreadExecutionContext& context) {
     if (Finished_) {
         return ETaskResult::FINISHED;
     }
     for (;;) {
         TRowSet rowSet{};
-        switch (Input_.Fetch(rowSet)) {
+        switch (Input_.Fetch(context, rowSet)) {
             case EFetchResult::OK:
                 if (Instrumentation_) {
-                    Instrumentation_->RetainInput(rowSet, 0);
-                    Instrumentation_->Output.Add(rowSet);
+                    Instrumentation_->RetainInput(context, rowSet, 0);
+                    Instrumentation_->Output.Add(context, rowSet);
                 }
                 Spool_->Append(Segment_, rowSet);
                 break;
@@ -147,11 +147,11 @@ TCtePublishTask::TCtePublishTask(
     , Consumers_(consumers)
 {}
 
-ETaskResult TCtePublishTask::Execute() {
+ETaskResult TCtePublishTask::Execute(TThreadExecutionContext& context) {
     if (Finished_) {
         return ETaskResult::FINISHED;
     }
-    if (FetchCompletion(Producers_) == EFetchResult::NO_DATA) {
+    if (FetchCompletion(context, Producers_) == EFetchResult::NO_DATA) {
         return ETaskResult::NEED_DATA;
     }
     Spool_->Seal();
@@ -170,12 +170,12 @@ TCteConsumerTask::TCteConsumerTask(
     , Output_(output)
 {}
 
-ETaskResult TCteConsumerTask::Execute() {
+ETaskResult TCteConsumerTask::Execute(TThreadExecutionContext& context) {
     if (Finished_) {
         return ETaskResult::FINISHED;
     }
     if (!Published_) {
-        if (FetchCompletion(Completion_) == EFetchResult::NO_DATA) {
+        if (FetchCompletion(context, Completion_) == EFetchResult::NO_DATA) {
             return ETaskResult::NEED_DATA;
         }
         Published_ = true;
@@ -200,7 +200,7 @@ ETaskResult TCteConsumerTask::Execute() {
     view.Destroy = DestroyCteView;
     view.Private = new TCteViewData{spool};
     view.RefCount = 1;
-    if (!Output_.Push(std::move(view))) {
+    if (!Output_.Push(context, std::move(view))) {
         Release(&view);
         return ETaskResult::BLOCKED_OUTPUT;
     }

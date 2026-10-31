@@ -15,7 +15,7 @@ namespace {
 
 class TNoopTask : public ITaskNode {
 public:
-    ETaskResult Execute() override {
+    ETaskResult Execute(NQdb::TThreadExecutionContext&) override {
         ++Calls_;
         return ETaskResult::FINISHED;
     }
@@ -30,7 +30,7 @@ private:
 
 class TSourceTask : public ITaskNode {
 public:
-    ETaskResult Execute() override {
+    ETaskResult Execute(NQdb::TThreadExecutionContext&) override {
         if (!Produced) {
             Produced = true;
             return ETaskResult::OK;
@@ -49,7 +49,7 @@ public:
         : Source_(source)
     {}
 
-    ETaskResult Execute() override {
+    ETaskResult Execute(NQdb::TThreadExecutionContext&) override {
         if (!Source_.Produced) {
             return ETaskResult::NEED_DATA;
         }
@@ -80,7 +80,7 @@ public:
     TTaskNode* Prerequisite = nullptr;
     bool RanAfterPrerequisite = false;
 
-    ETaskResult Execute() override {
+    ETaskResult Execute(NQdb::TThreadExecutionContext&) override {
         if (Prerequisite->State.load() != ETaskState::Finished) {
             return ETaskResult::NEED_DATA;
         }
@@ -94,7 +94,7 @@ public:
     TTaskNode* Left = nullptr;
     TTaskNode* Right = nullptr;
 
-    ETaskResult Execute() override {
+    ETaskResult Execute(NQdb::TThreadExecutionContext&) override {
         return Left->State.load() == ETaskState::Finished
                 && Right->State.load() == ETaskState::Finished
             ? ETaskResult::FINISHED : ETaskResult::NEED_DATA;

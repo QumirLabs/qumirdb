@@ -59,10 +59,10 @@ void TInnerJoinProcessor::SetInstrumentation(TOperatorInstrumentation* instrumen
     RightRows_.SetInstrumentation(instrumentation, 1);
 }
 
-void TInnerJoinProcessor::ObserveInstrumentation() {
+void TInnerJoinProcessor::ObserveInstrumentation(TThreadExecutionContext& context) {
     if (Instrumentation_ && Initialized_) {
-        Instrumentation_->ObserveHash(LeftTable_.data(), 0, true);
-        Instrumentation_->ObserveHash(RightTable_.data(), 1, true);
+        Instrumentation_->ObserveHash(context, LeftTable_.data(), 0, true);
+        Instrumentation_->ObserveHash(context, RightTable_.data(), 1, true);
     }
 }
 
@@ -81,7 +81,10 @@ TInnerJoinProcessor::~TInnerJoinProcessor() {
         ReadyOutput_.pop_front();
     }
     if (Initialized_) {
+        // Runs outside any worker, on the thread that releases the plan.
+        TThreadExecutionContext context;
         Kernels_.Dispatch(
+            context,
             LeftTable_.data(),
             RightTable_.data(),
             nullptr,
@@ -94,12 +97,13 @@ TInnerJoinProcessor::~TInnerJoinProcessor() {
     }
 }
 
-void TInnerJoinProcessor::EnsureInit() {
+void TInnerJoinProcessor::EnsureInit(TThreadExecutionContext& context) {
     if (Initialized_) {
         return;
     }
     Initialized_ = true;
     if (!Kernels_.Dispatch(
+            context,
             LeftTable_.data(),
             RightTable_.data(),
             nullptr,
@@ -111,7 +115,7 @@ void TInnerJoinProcessor::EnsureInit() {
             JoinOp(EJoinKernelOp::Init))) {
         throw std::runtime_error("join hash table initialization failed");
     }
-    ObserveInstrumentation();
+    ObserveInstrumentation(context);
 }
 
 bool TInnerJoinProcessor::DrainReadyOutput(TRowSet& rowSet) {
@@ -126,7 +130,7 @@ bool TInnerJoinProcessor::DrainReadyOutput(TRowSet& rowSet) {
 // Materializes at most one output batch of pending pairs through the kernel;
 // resets the buffer once the cursor catches up so later kernel ops (Finalize)
 // always see an empty buffer.
-bool TInnerJoinProcessor::DrainMaterialized(TRowSet& rowSet) {
+bool TInnerJoinProcessor::DrainMaterialized(TThreadExecutionContext& context, TRowSet& rowSet) {
     if (MaterializeCursor_ >= PairBuffer_.Count) {
         return false;
     }
@@ -134,6 +138,7 @@ bool TInnerJoinProcessor::DrainMaterialized(TRowSet& rowSet) {
     auto* rightStore = const_cast<TRowSet*>(RightRows_.Data());
     TRowSet out{};
     const int64_t produced = Kernels_.Materialize(
+        context,
         &PairBuffer_, leftStore, rightStore, leftStore, rightStore,
         MaterializeCursor_, JoinOutputBatchRows, &out);
     if (produced <= 0) {
@@ -150,6 +155,7 @@ bool TInnerJoinProcessor::DrainMaterialized(TRowSet& rowSet) {
 }
 
 void TInnerJoinProcessor::DrainStreamingPairs(
+    TThreadExecutionContext& context,
     const TRowSet& streamBatch,
     EJoinSide streamSide)
 {
@@ -165,6 +171,7 @@ void TInnerJoinProcessor::DrainStreamingPairs(
     while (MaterializeCursor_ < PairBuffer_.Count) {
         TRowSet out{};
         const int64_t produced = Kernels_.Materialize(
+            context,
             &PairBuffer_, leftStore, rightStore, streamLeft, streamRight,
             MaterializeCursor_, JoinOutputBatchRows, &out);
         if (produced <= 0) {
@@ -197,6 +204,7 @@ EJoinSide TInnerJoinProcessor::ChooseSymmetricPullSide() const {
 }
 
 bool TInnerJoinProcessor::PullOneInputBatch(
+    TThreadExecutionContext& context,
     const TFetch& left,
     const TFetch& right)
 {
@@ -213,8 +221,9 @@ bool TInnerJoinProcessor::PullOneInputBatch(
 
         StoredLeftRows_ += batch.RowCount;
         LastLeftBatchRows_ = batch.RowCount;
-        const int32_t batchIdx = LeftRows_.PushBatch(batch);
+        const int32_t batchIdx = LeftRows_.PushBatch(context, batch);
         if (!Kernels_.Dispatch(
+                context,
                 LeftTable_.data(),
                 RightTable_.data(),
                 const_cast<TRowSet*>(&LeftRows_.Batch(batchIdx)),
@@ -246,10 +255,11 @@ bool TInnerJoinProcessor::PullOneInputBatch(
         if (!keyOnly) {
             StoredRightRows_ += batch.RowCount;
             LastRightBatchRows_ = batch.RowCount;
-            batchIdx = RightRows_.PushBatch(batch);
+            batchIdx = RightRows_.PushBatch(context, batch);
             input = const_cast<TRowSet*>(&RightRows_.Batch(batchIdx));
         }
         if (!Kernels_.Dispatch(
+                context,
                 LeftTable_.data(),
                 RightTable_.data(),
                 input,
@@ -283,6 +293,7 @@ bool TInnerJoinProcessor::PullOneInputBatch(
         }
 
         if (!Kernels_.Dispatch(
+                context,
                 LeftTable_.data(),
                 RightTable_.data(),
                 &batch,
@@ -295,7 +306,7 @@ bool TInnerJoinProcessor::PullOneInputBatch(
             Release(&batch);
             throw std::runtime_error("join kernel update failed");
         }
-        DrainStreamingPairs(batch, EJoinSide::Left);
+        DrainStreamingPairs(context, batch, EJoinSide::Left);
         Release(&batch);
         return true;
     };
@@ -313,6 +324,7 @@ bool TInnerJoinProcessor::PullOneInputBatch(
         }
 
         if (!Kernels_.Dispatch(
+                context,
                 LeftTable_.data(),
                 RightTable_.data(),
                 &batch,
@@ -325,7 +337,7 @@ bool TInnerJoinProcessor::PullOneInputBatch(
             Release(&batch);
             throw std::runtime_error("join kernel update failed");
         }
-        DrainStreamingPairs(batch, EJoinSide::Right);
+        DrainStreamingPairs(context, batch, EJoinSide::Right);
         Release(&batch);
         return true;
     };
@@ -391,12 +403,13 @@ bool TInnerJoinProcessor::FinalizesPreservedRows() const {
     return IsOuter() || StreamsSemiAntiRight();
 }
 
-void TInnerJoinProcessor::FinalizePreservedRows() {
+void TInnerJoinProcessor::FinalizePreservedRows(TThreadExecutionContext& context) {
     // A streamed join has no table of the other side to look keys up in; its
     // build rows carry matched marks instead.
     const auto op = BuildSide_ == EJoinBuildSide::Auto
         ? EJoinKernelOp::Finalize : EJoinKernelOp::FinalizeStream;
     if (!Kernels_.Dispatch(
+            context,
             LeftTable_.data(),
             RightTable_.data(),
             nullptr,
@@ -422,6 +435,7 @@ bool TInnerJoinProcessor::StreamsSemiAntiRight() const {
 // The symmetric path stores the left rows and the distinct right keys; the left
 // rows must survive until the final membership scan.
 bool TInnerJoinProcessor::PullSemiAntiBatch(
+    TThreadExecutionContext& context,
     const TFetch& left,
     const TFetch& right)
 {
@@ -435,8 +449,9 @@ bool TInnerJoinProcessor::PullSemiAntiBatch(
             LeftDone_ = true;
             return true;
         }
-        const int32_t batchIdx = LeftRows_.PushBatch(batch);
+        const int32_t batchIdx = LeftRows_.PushBatch(context, batch);
         if (!Kernels_.Dispatch(
+                context,
                 LeftTable_.data(),
                 RightTable_.data(),
                 const_cast<TRowSet*>(&LeftRows_.Batch(batchIdx)),
@@ -463,6 +478,7 @@ bool TInnerJoinProcessor::PullSemiAntiBatch(
             return true;
         }
         if (!Kernels_.Dispatch(
+                context,
                 LeftTable_.data(),
                 RightTable_.data(),
                 &batch,
@@ -483,8 +499,9 @@ bool TInnerJoinProcessor::PullSemiAntiBatch(
     return true;
 }
 
-void TInnerJoinProcessor::FinalizeSemiAntiJoin() {
+void TInnerJoinProcessor::FinalizeSemiAntiJoin(TThreadExecutionContext& context) {
     if (!Kernels_.Dispatch(
+            context,
             LeftTable_.data(),
             RightTable_.data(),
             nullptr,
@@ -500,61 +517,63 @@ void TInnerJoinProcessor::FinalizeSemiAntiJoin() {
 }
 
 EJoinProcessorResult TInnerJoinProcessor::ProcessSemiAnti(
+    TThreadExecutionContext& context,
     const TFetch& left,
     const TFetch& right,
     TRowSet& output)
 {
-    if (DrainMaterialized(output)) {
+    if (DrainMaterialized(context, output)) {
         return EJoinProcessorResult::OK;
     }
     if (SemiAntiFinalized_) {
         return EJoinProcessorResult::FINISHED;
     }
     while (!BothDone_) {
-        if (!PullSemiAntiBatch(left, right)) {
+        if (!PullSemiAntiBatch(context, left, right)) {
             return EJoinProcessorResult::NEED_DATA;
         }
     }
-    FinalizeSemiAntiJoin();
-    if (DrainMaterialized(output)) {
+    FinalizeSemiAntiJoin(context);
+    if (DrainMaterialized(context, output)) {
         return EJoinProcessorResult::OK;
     }
     return EJoinProcessorResult::FINISHED;
 }
 
 EJoinProcessorResult TInnerJoinProcessor::Process(
+    TThreadExecutionContext& context,
     const TFetch& left,
     const TFetch& right,
     TRowSet& output)
 {
-    EnsureInit();
+    EnsureInit(context);
 
     if (IsSemiAnti() && BuildSide_ == EJoinBuildSide::Auto) {
-        return ProcessSemiAnti(left, right, output);
+        return ProcessSemiAnti(context, left, right, output);
     }
 
     // Once both inputs are drained, outer joins emit their unmatched rows and
     // SEMI/ANTI joins that built their left side the rows its marks select.
     auto finishedResult = [&]() -> EJoinProcessorResult {
         if (FinalizesPreservedRows() && !PreservedFinalized_) {
-            FinalizePreservedRows();
-            if (DrainReadyOutput(output) || DrainMaterialized(output)) {
+            FinalizePreservedRows(context);
+            if (DrainReadyOutput(output) || DrainMaterialized(context, output)) {
                 return EJoinProcessorResult::OK;
             }
         }
         return EJoinProcessorResult::FINISHED;
     };
 
-    if (DrainReadyOutput(output) || DrainMaterialized(output)) {
+    if (DrainReadyOutput(output) || DrainMaterialized(context, output)) {
         return EJoinProcessorResult::OK;
     }
     if (BothDone_) {
         return finishedResult();
     }
-    if (!PullOneInputBatch(left, right)) {
+    if (!PullOneInputBatch(context, left, right)) {
         return EJoinProcessorResult::NEED_DATA;
     }
-    if (DrainReadyOutput(output) || DrainMaterialized(output)) {
+    if (DrainReadyOutput(output) || DrainMaterialized(context, output)) {
         return EJoinProcessorResult::OK;
     }
     return BothDone_ ? finishedResult() : EJoinProcessorResult::NEED_DATA;
@@ -600,7 +619,10 @@ TCrossJoinProcessor::~TCrossJoinProcessor() {
     // kernels to WASM but never JIT-finalizes them, so Kernels_.Dispatch wraps
     // a null function pointer - Data stays null and there is nothing to free.
     if (PairBuffer_.Data) {
+        // Runs outside any worker, on the thread that releases the plan.
+        TThreadExecutionContext context;
         Kernels_.Dispatch(
+            context,
             nullptr,
             0,
             nullptr,
@@ -621,8 +643,11 @@ bool TCrossJoinProcessor::KeepsUnmatchedRight() const {
     return JoinType_ == EJoinType::Right || JoinType_ == EJoinType::Full;
 }
 
-bool TCrossJoinProcessor::Dispatch(int32_t leftBatch, ECrossJoinKernelOp op) {
+bool TCrossJoinProcessor::Dispatch(
+    TThreadExecutionContext& context, int32_t leftBatch, ECrossJoinKernelOp op)
+{
     return Kernels_.Dispatch(
+        context,
         const_cast<TRowSet*>(LeftRows_.Data()),
         leftBatch,
         const_cast<TRowSet*>(RightRows_.Data()),
@@ -632,7 +657,7 @@ bool TCrossJoinProcessor::Dispatch(int32_t leftBatch, ECrossJoinKernelOp op) {
         CrossJoinOp(op));
 }
 
-bool TCrossJoinProcessor::DrainMaterialized(TRowSet& rowSet) {
+bool TCrossJoinProcessor::DrainMaterialized(TThreadExecutionContext& context, TRowSet& rowSet) {
     if (MaterializeCursor_ >= PairBuffer_.Count) {
         return false;
     }
@@ -640,6 +665,7 @@ bool TCrossJoinProcessor::DrainMaterialized(TRowSet& rowSet) {
     auto* rightStore = const_cast<TRowSet*>(RightRows_.Data());
     TRowSet out{};
     const int64_t produced = Kernels_.Materialize(
+        context,
         &PairBuffer_, leftStore, rightStore, leftStore, rightStore,
         MaterializeCursor_, JoinOutputBatchRows, &out);
     if (produced <= 0) {
@@ -656,11 +682,12 @@ bool TCrossJoinProcessor::DrainMaterialized(TRowSet& rowSet) {
 }
 
 EJoinProcessorResult TCrossJoinProcessor::Process(
+    TThreadExecutionContext& context,
     const TFetch& left,
     const TFetch& right,
     TRowSet& output)
 {
-    if (DrainMaterialized(output)) {
+    if (DrainMaterialized(context, output)) {
         return EJoinProcessorResult::OK;
     }
 
@@ -680,14 +707,14 @@ EJoinProcessorResult TCrossJoinProcessor::Process(
                 break;
             }
             RightTotalRows_ += batch.RowCount;
-            RightRows_.PushBatch(batch);
+            RightRows_.PushBatch(context, batch);
         }
     }
 
     // Phase 2: stream left, comparing each selected left row with every
     // selected right row.
     for (;;) {
-        if (DrainMaterialized(output)) {
+        if (DrainMaterialized(context, output)) {
             return EJoinProcessorResult::OK;
         }
         if (LeftDone_) {
@@ -701,7 +728,7 @@ EJoinProcessorResult TCrossJoinProcessor::Process(
         if (fetch == EJoinFetchResult::FINISHED) {
             LeftDone_ = true;
             if (KeepsUnmatchedRight() &&
-                !Dispatch(0, ECrossJoinKernelOp::EmitUnmatchedRight)) {
+                !Dispatch(context, 0, ECrossJoinKernelOp::EmitUnmatchedRight)) {
                 throw std::runtime_error("cross join unmatched-right emission failed");
             }
             continue;
@@ -710,11 +737,11 @@ EJoinProcessorResult TCrossJoinProcessor::Process(
             Release(&batch);
             continue;
         }
-        const int32_t li = LeftRows_.PushBatch(batch);
-        if (!Dispatch(li, ECrossJoinKernelOp::Emit)) {
+        const int32_t li = LeftRows_.PushBatch(context, batch);
+        if (!Dispatch(context, li, ECrossJoinKernelOp::Emit)) {
             throw std::runtime_error("cross join kernel update failed");
         }
-        if (DrainMaterialized(output)) {
+        if (DrainMaterialized(context, output)) {
             return EJoinProcessorResult::OK;
         }
     }

@@ -362,6 +362,7 @@ struct TPartialGroup {
 // The partial processor hands rows through once its sample shows too little
 // reduction, and empties a table that reaches its group bound.
 TEST(AggregateE2E, PartialAggregateProcessorJudgesItsReduction) {
+    NQdb::TThreadExecutionContext context;
     TStructType input({
         {"k", std::make_shared<TIntegerType>()},
         {"v", std::make_shared<TIntegerType>()},
@@ -374,7 +375,8 @@ TEST(AggregateE2E, PartialAggregateProcessorJudgesItsReduction) {
     const auto kernels = compiler.CompileAggregate(
         NKernel::BuildAggregateKernelSpec(input, {"k"}, aggs));
     // The partial state of one row, (k, sum v), is the row itself.
-    const TUnaryStreamProcess identity = [](TRowSet&, TUnaryStreamingKernelState&) {};
+    const TUnaryStreamProcess identity =
+        [](TThreadExecutionContext&, TRowSet&, TUnaryStreamingKernelState&) {};
 
     struct TBatch {
         std::vector<int64_t> Keys;
@@ -406,7 +408,7 @@ TEST(AggregateE2E, PartialAggregateProcessorJudgesItsReduction) {
         TPartialAggregateProcessor processor(kernels, {}, judgeAfterFour, identity);
         TBatch sample{{1, 2, 3, 4}, {10, 20, 30, 40}};
         auto rowSet = sample.RowSet();
-        processor.Add(rowSet);
+        processor.Add(context, rowSet);
         EXPECT_TRUE(processor.PassesThrough());
         TRowSet output{};
         ASSERT_TRUE(processor.Next(output));
@@ -416,12 +418,12 @@ TEST(AggregateE2E, PartialAggregateProcessorJudgesItsReduction) {
 
         TBatch next{{5, 6}, {50, 60}};
         rowSet = next.RowSet();
-        processor.Add(rowSet);
+        processor.Add(context, rowSet);
         ASSERT_TRUE(processor.Next(output));
         EXPECT_EQ(output.Columns, next.Columns.data());
         EXPECT_EQ(output.RowCount, 2);
         Release(&output);
-        EXPECT_FALSE(processor.Finish(output));
+        EXPECT_FALSE(processor.Finish(context, output));
     }
 
     // Repeated keys: the sample reduces, so the table keeps hashing to the end.
@@ -429,15 +431,15 @@ TEST(AggregateE2E, PartialAggregateProcessorJudgesItsReduction) {
         TPartialAggregateProcessor processor(kernels, {}, judgeAfterFour, identity);
         TBatch sample{{1, 1, 1, 1}, {10, 20, 30, 40}};
         auto rowSet = sample.RowSet();
-        processor.Add(rowSet);
+        processor.Add(context, rowSet);
         EXPECT_FALSE(processor.PassesThrough());
         TRowSet output{};
         EXPECT_FALSE(processor.Next(output));
         TBatch next{{1, 2}, {50, 60}};
         rowSet = next.RowSet();
-        processor.Add(rowSet);
+        processor.Add(context, rowSet);
         EXPECT_FALSE(processor.Next(output));
-        ASSERT_TRUE(processor.Finish(output));
+        ASSERT_TRUE(processor.Finish(context, output));
         EXPECT_EQ(output.RowCount, 2);
         EXPECT_EQ(sumOfSums(output), 210);
         Release(&output);
@@ -450,7 +452,7 @@ TEST(AggregateE2E, PartialAggregateProcessorJudgesItsReduction) {
             kernels, {}, {.SampleRows = 1, .MinReduction = 1 << 30, .MaxGroups = 3}, nullptr);
         TBatch first{{1, 2, 3}, {10, 20, 30}};
         auto rowSet = first.RowSet();
-        processor.Add(rowSet);
+        processor.Add(context, rowSet);
         EXPECT_FALSE(processor.PassesThrough());
         TRowSet output{};
         ASSERT_TRUE(processor.Next(output));
@@ -459,9 +461,9 @@ TEST(AggregateE2E, PartialAggregateProcessorJudgesItsReduction) {
         Release(&output);
         TBatch second{{3, 4}, {1, 2}};
         rowSet = second.RowSet();
-        processor.Add(rowSet);
+        processor.Add(context, rowSet);
         EXPECT_FALSE(processor.Next(output));
-        ASSERT_TRUE(processor.Finish(output));
+        ASSERT_TRUE(processor.Finish(context, output));
         EXPECT_EQ(output.RowCount, 2);
         EXPECT_EQ(sumOfSums(output), 3);
         Release(&output);
@@ -1905,6 +1907,7 @@ TEST(AggregateE2E, CompilesNullableReducerArgumentWithUnwrappedAstType) {
 
 // CompileAggregateHash uses the same rh_hash generator as the aggregate's table.
 TEST(AggregateE2E, CompileAggregateHashMatchesEqualCompositeKeys) {
+    NQdb::TThreadExecutionContext context;
     TStructType inputType({
         {"k1", std::make_shared<TIntegerType>()},
         {"k2", std::make_shared<TIntegerType>()},
@@ -1925,7 +1928,7 @@ TEST(AggregateE2E, CompileAggregateHashMatchesEqualCompositeKeys) {
     };
 
     std::vector<uint64_t> hashes(k1.size(), 0);
-    ASSERT_TRUE(hash(&batch, hashes.data()));
+    ASSERT_TRUE(hash(context, &batch, hashes.data()));
 
     EXPECT_EQ(hashes[0], hashes[2]) << "identical (k1, k2) must hash equal";
     EXPECT_NE(hashes[0], hashes[1]) << "different k1 must (almost certainly) hash differently";
@@ -1933,6 +1936,7 @@ TEST(AggregateE2E, CompileAggregateHashMatchesEqualCompositeKeys) {
 }
 
 TEST(AggregateE2E, CompileAggregateHashDistinguishesNullFromValue) {
+    NQdb::TThreadExecutionContext context;
     TStructType inputType({
         {"k", std::make_shared<TIntegerType>()},
         {"v", std::make_shared<TNullable>(std::make_shared<TIntegerType>())},
@@ -1955,7 +1959,7 @@ TEST(AggregateE2E, CompileAggregateHashDistinguishesNullFromValue) {
     };
 
     std::vector<uint64_t> hashes(k.size(), 0);
-    ASSERT_TRUE(hash(&batch, hashes.data()));
+    ASSERT_TRUE(hash(context, &batch, hashes.data()));
 
     EXPECT_NE(hashes[0], hashes[1]) << "null vs. same-bits-but-valid must hash differently";
 }
@@ -2368,6 +2372,7 @@ TEST(AggregateE2E, NullableReducerArgumentWithNullStringKey) {
 namespace {
 
 void CheckAggregateStatesAcrossRepeatedGrowth(bool stringKeys) {
+    NQdb::TThreadExecutionContext context;
     auto keyType = stringKeys
         ? TTypePtr(std::make_shared<TStringType>())
         : TTypePtr(std::make_shared<TIntegerType>());
@@ -2405,10 +2410,10 @@ void CheckAggregateStatesAcrossRepeatedGrowth(bool stringKeys) {
         };
         TRowSet rows{.Columns = columns.data(), .ColumnCount = 2,
             .RowCount = 197, .RefCount = 1};
-        processor.Add(rows);
+        processor.Add(context, rows);
     }
     TRowSet result{};
-    processor.Finish(result);
+    processor.Finish(context, result);
     ASSERT_EQ(result.RowCount, static_cast<int64_t>(expected.size()));
     auto* sums = reinterpret_cast<const int64_t*>(result.Columns[1].Data);
     auto* offsets = static_cast<const int64_t*>(result.Columns[0].Offsets);
@@ -2444,6 +2449,7 @@ TEST(AggregateE2E, StringKeyStatesPreserveOwnershipAcrossRepeatedGrowth) {
 }
 
 TEST(AggregateE2E, NullableFloatAndWideStatesSurviveRepeatedGrowth) {
+    NQdb::TThreadExecutionContext context;
     TStructType input({
         {"k", std::make_shared<TIntegerType>()},
         {"f", std::make_shared<TNullable>(std::make_shared<TFloatType>())},
@@ -2535,10 +2541,10 @@ TEST(AggregateE2E, NullableFloatAndWideStatesSurviveRepeatedGrowth) {
             .Selection = selection.data(),
             .RefCount = 1,
         };
-        processor.Add(rows);
+        processor.Add(context, rows);
     }
     TRowSet result{};
-    ASSERT_TRUE(processor.Finish(result));
+    ASSERT_TRUE(processor.Finish(context, result));
     ASSERT_EQ(result.ColumnCount, 9);
     ASSERT_EQ(result.RowCount, static_cast<int64_t>(expected.size()));
     std::set<int64_t> seen;
@@ -2566,6 +2572,7 @@ TEST(AggregateE2E, NullableFloatAndWideStatesSurviveRepeatedGrowth) {
 }
 
 TEST(AggregateE2E, MixedStringAndNumericReducersSurviveRepeatedGrowth) {
+    NQdb::TThreadExecutionContext context;
     TStructType input({
         {"k", std::make_shared<TIntegerType>()},
         {"v", std::make_shared<TIntegerType>()},
@@ -2620,10 +2627,10 @@ TEST(AggregateE2E, MixedStringAndNumericReducersSurviveRepeatedGrowth) {
             .RowCount = rowsPerBatch,
             .RefCount = 1,
         };
-        processor.Add(rows);
+        processor.Add(context, rows);
     }
     TRowSet result{};
-    ASSERT_TRUE(processor.Finish(result));
+    ASSERT_TRUE(processor.Finish(context, result));
     ASSERT_EQ(result.ColumnCount, 4);
     ASSERT_EQ(result.RowCount, static_cast<int64_t>(expected.size()));
     for (int64_t row = 0; row < result.RowCount; ++row) {

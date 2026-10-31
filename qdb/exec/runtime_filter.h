@@ -13,6 +13,7 @@
 namespace NQdb {
 
 struct TRuntimeContext;
+class TThreadExecutionContext;
 
 // The runtime-filter kernel (qdb/kernel/join/runtime_filter.oz) implements
 // every operation on filter contents; these are its entry points, in
@@ -55,7 +56,10 @@ public:
     TRuntimeFilterBuilder(std::shared_ptr<TRuntimeContext> runtimeContext,
         size_t maxKeys, size_t bloomBytes);
     // An empty selection selects every row.
-    void Add(std::span<const uint64_t> hashes, std::span<const uint8_t> selection = {});
+    void Add(
+        TThreadExecutionContext& context,
+        std::span<const uint64_t> hashes,
+        std::span<const uint8_t> selection = {});
     bool Overflowed() const { return State_.Mode == TRuntimeFilterBuildState::EMode::Bloom; }
     TRuntimeFilterPartial TakePartial() &&;
 
@@ -97,7 +101,8 @@ public:
     virtual ~IRuntimeFilterProducer() = default;
     virtual TRuntimeFilterBuilder MakeBuilder() const = 0;
     // Once per lane at input EOF, before waiting for its output to drain.
-    virtual void FinishProducer(TRuntimeFilterPartial&& partial) = 0;
+    virtual void FinishProducer(
+        TThreadExecutionContext& context, TRuntimeFilterPartial&& partial) = 0;
 };
 
 class IRuntimeFilterProbe {
@@ -112,6 +117,7 @@ public:
     virtual bool BeginBatch(TRuntimeFilterProbeState& state, size_t rows) const;
     // Requires a successful BeginBatch. Returns the number of accepted rows.
     virtual size_t MayContainBatch(
+        TThreadExecutionContext& context,
         std::span<const uint64_t> hashes,
         std::span<uint8_t> output,
         TRuntimeFilterProbeState& state,
@@ -162,10 +168,12 @@ public:
 
     // Configure before execution. A standalone filter defaults to one producer.
     void SetProducerCount(size_t producers);
-    void FinishProducer(TRuntimeFilterPartial&& partial) override;
+    void FinishProducer(
+        TThreadExecutionContext& context, TRuntimeFilterPartial&& partial) override;
     std::shared_ptr<TRuntimeFilterProbeState> CreateProbeState() override;
     bool BeginBatch(TRuntimeFilterProbeState& state, size_t rows) const override;
     size_t MayContainBatch(
+        TThreadExecutionContext& context,
         std::span<const uint64_t> hashes,
         std::span<uint8_t> output,
         TRuntimeFilterProbeState& state,
@@ -188,8 +196,8 @@ private:
         TRuntimeFilterStats Stats;
     };
 
-    void Publish();
-    void BuildPublishedData();
+    void Publish(TThreadExecutionContext& context);
+    void BuildPublishedData(TThreadExecutionContext& context);
 
     std::shared_ptr<TRuntimeContext> RuntimeContext_;
     size_t MaxKeys_;

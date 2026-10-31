@@ -41,6 +41,7 @@ TExprPtr Parse(const std::string& src) {
 } // namespace
 
 TEST(CompileProject, ComputesF64AndI64Columns) {
+    NQdb::TThreadExecutionContext context;
     // Input: p (f64), d (f64), k (i64).
     TStructType inputType({
         {"p", std::make_shared<TFloatType>()},
@@ -74,7 +75,7 @@ TEST(CompileProject, ComputesF64AndI64Columns) {
     std::array<double, 3> outDisc{};
     std::array<int64_t, 3> outBumped{};
     std::array<void*, 2> outBuffers = {outDisc.data(), outBumped.data()};
-    dispatch(&batch, outBuffers.data(), nullptr);
+    dispatch(context, &batch, outBuffers.data(), nullptr);
 
     for (int i = 0; i < 3; ++i) {
         EXPECT_DOUBLE_EQ(outDisc[i], p[i] * (1.0 - d[i]));
@@ -83,6 +84,7 @@ TEST(CompileProject, ComputesF64AndI64Columns) {
 }
 
 TEST(CompileProject, CompilesFromKernelSpec) {
+    NQdb::TThreadExecutionContext context;
     TStructType inputType({
         {"value", std::make_shared<TIntegerType>(TIntegerType::I64)},
     });
@@ -101,12 +103,13 @@ TEST(CompileProject, CompilesFromKernelSpec) {
     std::array<int64_t, 3> output{};
     std::array<void*, 1> outBuffers = {output.data()};
 
-    dispatch(&batch, outBuffers.data(), nullptr);
+    dispatch(context, &batch, outBuffers.data(), nullptr);
 
     EXPECT_EQ(output, (std::array<int64_t, 3>{11, 12, 13}));
 }
 
 TEST(CompileProject, CastsIntegerIfBranchesBeforeLoweringPhi) {
+    NQdb::TThreadExecutionContext context;
     TStructType inputType({
         {"d", std::make_shared<TIntegerType>(TIntegerType::I32)},
         {"qty", std::make_shared<TIntegerType>(TIntegerType::I32)},
@@ -131,12 +134,13 @@ TEST(CompileProject, CastsIntegerIfBranchesBeforeLoweringPhi) {
     std::array<int64_t, 3> output{};
     std::array<void*, 1> outBuffers = {output.data()};
 
-    dispatch(&batch, outBuffers.data(), nullptr);
+    dispatch(context, &batch, outBuffers.data(), nullptr);
 
     EXPECT_EQ(output, (std::array<int64_t, 3>{11, 0, 33}));
 }
 
 TEST(CompileProject, RegexpReplaceUsesCompiledQueryHandle) {
+    NQdb::TThreadExecutionContext context;
     TStructType inputType({
         {"url", std::make_shared<TStringType>()},
     });
@@ -184,7 +188,7 @@ TEST(CompileProject, RegexpReplaceUsesCompiledQueryHandle) {
     std::array<TStringView, 3> output{};
     std::array<void*, 1> outBuffers = {output.data()};
     TStringArena arena;
-    dispatch(&batch, outBuffers.data(), &arena);
+    dispatch(context, &batch, outBuffers.data(), &arena);
 
     auto text = [&](size_t i) {
         return std::string_view(

@@ -78,6 +78,7 @@ std::vector<TOut2> RunSemiAnti(
     EJoinType type, EJoinBuildSide buildSide, bool nullableKeys = false,
     bool nullsEqual = false)
 {
+    NQdb::TThreadExecutionContext context;
     std::vector<int64_t> lk0 = {1, 2}, lv0 = {10, 20};
     std::vector<int64_t> lk1 = {1, 3}, lv1 = {30, 40};
     std::vector<int64_t> rk0 = {1, 1}, rv0 = {100, 200};
@@ -136,7 +137,7 @@ std::vector<TOut2> RunSemiAnti(
             processor.RequiredInputSide() == EJoinBuildSide::Left) {
             EXPECT_EQ(rightFetches, 0) << "right streamed before the left was built";
         }
-        auto result = processor.Process(left, right, out);
+        auto result = processor.Process(context, left, right, out);
         if (result == EJoinProcessorResult::NEED_DATA) continue;
         if (result == EJoinProcessorResult::FINISHED) break;
         EXPECT_EQ(out.ColumnCount, 2) << "semi/anti emits left columns only";
@@ -168,6 +169,7 @@ std::vector<TOut2> ExpectedSemiAnti(EJoinType type) {
 // Asserts the probe is never fetched while RequiredInputSide reports the build
 // side, then returns the collected inner-join rows.
 std::vector<TOut4> RunAsymmetric(EJoinBuildSide buildSide) {
+    NQdb::TThreadExecutionContext context;
     std::vector<int64_t> lk = {1, 2, 1}, lv = {10, 20, 30};
     std::vector<int64_t> rk0 = {1, 1}, rv0 = {100, 200};
     std::vector<int64_t> rk1 = {3}, rv1 = {300};
@@ -217,7 +219,7 @@ std::vector<TOut4> RunAsymmetric(EJoinBuildSide buildSide) {
             case EJoinBuildSide::Auto:
                 break;
         }
-        auto result = processor.Process(left, right, out);
+        auto result = processor.Process(context, left, right, out);
         if (result == EJoinProcessorResult::NEED_DATA) continue;
         if (result == EJoinProcessorResult::FINISHED) break;
         const auto* c0 = reinterpret_cast<const int64_t*>(out.Columns[0].Data);
@@ -947,6 +949,7 @@ TEST_P(SemiAntiOrientation, NullEqualKeysMatchInEitherOrientation) {
 // unmatched. The second right batch matches key 1 again, which a marked row
 // must survive without a second output row.
 TEST_P(SemiAntiOrientation, LeftBuildMarksOnlyPairsTheResidualAccepts) {
+    NQdb::TThreadExecutionContext context;
     const auto type = GetParam();
     std::vector<int64_t> lk = {1, 1, 2, 3}, lv = {10, 20, 30, 40};
     std::vector<int64_t> rk0 = {1, 2}, rv0 = {10, 30};
@@ -986,7 +989,7 @@ TEST_P(SemiAntiOrientation, LeftBuildMarksOnlyPairsTheResidualAccepts) {
     std::vector<TOut2> got;
     TRowSet out{};
     for (;;) {
-        auto result = processor.Process(left, right, out);
+        auto result = processor.Process(context, left, right, out);
         if (result == EJoinProcessorResult::NEED_DATA) continue;
         if (result == EJoinProcessorResult::FINISHED) break;
         const auto* c0 = reinterpret_cast<const int64_t*>(out.Columns[0].Data);
@@ -1327,12 +1330,13 @@ protected:
         const TExprPtr& residual = nullptr)
     {
         TInnerJoinProcessor processor(Compile(type, residual), type, buildSide);
+        NQdb::TThreadExecutionContext context;
         auto fetchLeft = [&](TRowSet& rowSet) { return left.Fetch(rowSet); };
         auto fetchRight = [&](TRowSet& rowSet) { return right.Fetch(rowSet); };
         std::vector<TOuterRow> rows;
         TRowSet out{};
         for (;;) {
-            auto result = processor.Process(fetchLeft, fetchRight, out);
+            auto result = processor.Process(context, fetchLeft, fetchRight, out);
             if (result == EJoinProcessorResult::FINISHED) {
                 break;
             }
@@ -1372,12 +1376,13 @@ protected:
         TSideInput left(leftRows);
         TSideInput right(rightRows);
         auto& probe = buildSide == EJoinBuildSide::Left ? right : left;
+        NQdb::TThreadExecutionContext context;
         auto fetchLeft = [&](TRowSet& rowSet) { return left.Fetch(rowSet); };
         auto fetchRight = [&](TRowSet& rowSet) { return right.Fetch(rowSet); };
         std::vector<TOuterRow> rows;
         TRowSet out{};
         for (;;) {
-            auto result = processor.Process(fetchLeft, fetchRight, out);
+            auto result = processor.Process(context, fetchLeft, fetchRight, out);
             EXPECT_EQ(probe.Released(), probe.Fetched())
                 << "a preserved batch outlived its probe call";
             if (result == EJoinProcessorResult::FINISHED) {
@@ -1484,6 +1489,7 @@ TEST_F(OuterStreamJoin, InputStallsAndEofOrderDoNotChangeTheResult) {
 // output in between. The stream side is given back batch by batch, while the
 // build batches behind the pending rows stay alive.
 TEST_F(OuterStreamJoin, EmitsUnmatchedRowsInBatchesFromLiveBuildRows) {
+    NQdb::TThreadExecutionContext context;
     const int64_t buildRows = 3 * JoinOutputBatchRows;
     TSideRows build(3);
     for (int64_t key = 0; key < buildRows; ++key) {
@@ -1505,7 +1511,7 @@ TEST_F(OuterStreamJoin, EmitsUnmatchedRowsInBatchesFromLiveBuildRows) {
             if (processor.RequiredInputSide() == EJoinBuildSide::Left) {
                 EXPECT_EQ(right.Fetched(), 0u) << "probe read during the build";
             }
-            auto result = processor.Process(fetchLeft, fetchRight, out);
+            auto result = processor.Process(context, fetchLeft, fetchRight, out);
             EXPECT_EQ(right.Released(), right.Fetched())
                 << "a probe batch outlived its stream call";
             EXPECT_EQ(left.Released(), 0u);

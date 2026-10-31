@@ -96,6 +96,7 @@ TEST(OperatorInstrumentation, ResolvesLogicalAndPhysicalColumnWidths) {
 }
 
 TEST(OperatorInstrumentation, CountsSelectedNonNullPayloadAndBothOffsetWidths) {
+    NQdb::TThreadExecutionContext context;
     auto kernel = MeasurementKernel();
     std::array<int32_t, 4> values = {10, 20, 30, 40};
     std::array<int32_t, 5> narrow = {0, 1, 4, 4, 9};
@@ -114,20 +115,21 @@ TEST(OperatorInstrumentation, CountsSelectedNonNullPayloadAndBothOffsetWidths) {
         TRowSet batch{.Columns = columns, .ColumnCount = 2, .RowCount = 4,
             .Selection = selection.data(), .RefCount = 1};
         TRowSetInstrumentation counters{.Kernel = kernel, .Widths = {4, -1}};
-        counters.Add(batch);
+        counters.Add(context, batch);
         EXPECT_EQ(counters.Rows, 3u);
         EXPECT_EQ(counters.Bytes, 11u);
         batch.Selection = nullptr;
-        counters.Add(batch);
+        counters.Add(context, batch);
         EXPECT_EQ(counters.Rows, 7u);
         EXPECT_EQ(counters.Bytes, 27u);
         batch.RowCount = 0;
-        counters.Add(batch);
+        counters.Add(context, batch);
         EXPECT_EQ(counters.Rows, 7u);
     }
 }
 
 TEST(OperatorInstrumentation, BackpressureRetriesDoNotCountFailedPushOrEmptyFetch) {
+    NQdb::TThreadExecutionContext context;
     auto kernel = MeasurementKernel();
     TOneToOneConnection connection(1);
     connection.Resize(1, 1);
@@ -139,23 +141,24 @@ TEST(OperatorInstrumentation, BackpressureRetriesDoNotCountFailedPushOrEmptyFetc
     TOutputPort output{.Connection = &connection, .Instrumentation = &sent};
     TInputPort input{.Connection = &connection, .Instrumentation = &received};
     auto first = batch;
-    EXPECT_TRUE(output.Push(std::move(first)));
+    EXPECT_TRUE(output.Push(context, std::move(first)));
     auto second = batch;
-    EXPECT_FALSE(output.Push(std::move(second)));
+    EXPECT_FALSE(output.Push(context, std::move(second)));
     EXPECT_EQ(sent.Rows, 1u);
     TRowSet fetched{};
-    EXPECT_EQ(input.Fetch(fetched), EFetchResult::OK);
+    EXPECT_EQ(input.Fetch(context, fetched), EFetchResult::OK);
     Release(&fetched);
-    EXPECT_EQ(input.Fetch(fetched), EFetchResult::NO_DATA);
+    EXPECT_EQ(input.Fetch(context, fetched), EFetchResult::NO_DATA);
     EXPECT_EQ(received.Rows, 1u);
     EXPECT_EQ(received.Bytes, 8u);
-    EXPECT_TRUE(output.Push(std::move(second)));
+    EXPECT_TRUE(output.Push(context, std::move(second)));
     EXPECT_EQ(sent.Rows, 2u);
-    EXPECT_EQ(input.Fetch(fetched), EFetchResult::OK);
+    EXPECT_EQ(input.Fetch(context, fetched), EFetchResult::OK);
     Release(&fetched);
 }
 
 TEST(OperatorInstrumentation, ObservesEveryGeometricGrowthInsideABatch) {
+    NQdb::TThreadExecutionContext context;
     auto i64 = std::make_shared<TIntegerType>();
     TStructType inputType({{"k", i64}});
     auto spec = NKernel::BuildAggregateKernelSpec(inputType, {"k"}, {{.Name = "n", .Func = "count"}});
@@ -169,12 +172,12 @@ TEST(OperatorInstrumentation, ObservesEveryGeometricGrowthInsideABatch) {
     TColumn column{.Data = reinterpret_cast<char*>(keys.data())};
     TRowSet batch{.Columns = &column, .ColumnCount = 1, .RowCount = 100, .RefCount = 1};
     batch.RowCount = 0;
-    processor.Add(batch);
+    processor.Add(context, batch);
     const auto initialCapacity = counters.HashCapacity;
     EXPECT_TRUE(initialCapacity == 8 || initialCapacity == 16);
     EXPECT_EQ(counters.Rehashes, 0u);
     batch.RowCount = 100;
-    processor.Add(batch);
+    processor.Add(context, batch);
     EXPECT_TRUE(counters.HasHash);
     EXPECT_EQ(counters.Groups, 100u);
     EXPECT_EQ(counters.HashCapacity, 128u);
@@ -184,11 +187,11 @@ TEST(OperatorInstrumentation, ObservesEveryGeometricGrowthInsideABatch) {
     const auto memory = counters.HashMemoryPeakBytes;
     EXPECT_GT(memory, 128u * 8u);
     EXPECT_EQ(counters.BuildMemoryPeakBytes, memory);
-    processor.Add(batch);
+    processor.Add(context, batch);
     EXPECT_EQ(counters.Groups, 100u);
     EXPECT_EQ(counters.HashMemoryPeakBytes, memory);
     TRowSet output{};
-    ASSERT_TRUE(processor.Finish(output));
+    ASSERT_TRUE(processor.Finish(context, output));
     EXPECT_EQ(output.RowCount, 100);
     Release(&output);
     EXPECT_EQ(counters.Groups, 100u);
@@ -208,6 +211,7 @@ TEST(OperatorInstrumentation, StringStateMemoryCountsOnlyTheGroupsAfterRehash) {
         auto kernels = TKernelCompiler().CompileAggregate(spec);
         TOperatorInstrumentation counters;
         counters.Kernel = MeasurementKernel();
+        NQdb::TThreadExecutionContext context;
         TAggregateProcessor processor(kernels, {.InitialCapacity = 8});
         processor.SetInstrumentation(&counters);
         std::string keys;
@@ -225,11 +229,11 @@ TEST(OperatorInstrumentation, StringStateMemoryCountsOnlyTheGroupsAfterRehash) {
         TColumn columns[] = {{.Data = keys.data(), .Offsets = keyOffsets.data(), .OffsetWidth = 8},
             {.Data = data.data(), .Offsets = offsets.data(), .OffsetWidth = 8}};
         TRowSet batch{.Columns = columns, .ColumnCount = 2, .RowCount = groups, .RefCount = 1};
-        processor.Add(batch);
+        processor.Add(context, batch);
         EXPECT_EQ(counters.Groups, static_cast<uint64_t>(groups));
         EXPECT_GT(counters.Rehashes, 0u);
         TRowSet output{};
-        EXPECT_TRUE(processor.Finish(output));
+        EXPECT_TRUE(processor.Finish(context, output));
         Release(&output);
         return counters.HashMemoryPeakBytes;
     };
@@ -239,6 +243,7 @@ TEST(OperatorInstrumentation, StringStateMemoryCountsOnlyTheGroupsAfterRehash) {
 }
 
 TEST(OperatorInstrumentation, MeasuresResidualSemiJoinMatchSetWithoutRowBuckets) {
+    NQdb::TThreadExecutionContext context;
     auto i64 = std::make_shared<TIntegerType>();
     TStructType leftType({{"lk", i64}});
     TStructType rightType({{"rk", i64}});
@@ -248,16 +253,16 @@ TEST(OperatorInstrumentation, MeasuresResidualSemiJoinMatchSetWithoutRowBuckets)
     alignas(8) std::array<uint8_t, TKernelCompiler::HashTableSize> left{};
     alignas(8) std::array<uint8_t, TKernelCompiler::HashTableSize> right{};
     alignas(8) std::array<uint8_t, TKernelCompiler::PairBufferSize> pairs{};
-    ASSERT_TRUE(kernels.Dispatch(left.data(), right.data(), nullptr, 0, pairs.data(),
+    ASSERT_TRUE(kernels.Dispatch(context, left.data(), right.data(), nullptr, 0, pairs.data(),
         nullptr, nullptr, 8, static_cast<int64_t>(EJoinKernelOp::Init)));
     TOperatorInstrumentation counters;
     counters.Kernel = MeasurementKernel();
-    counters.ObserveHash(left.data(), 0, true);
-    counters.ObserveHash(right.data(), 1, true);
+    counters.ObserveHash(context, left.data(), 0, true);
+    counters.ObserveHash(context, right.data(), 1, true);
     EXPECT_EQ(counters.Groups, 0u);
     EXPECT_GT(counters.HashMemoryPeakBytes, 0u);
     EXPECT_EQ(counters.Rehashes, 0u);
-    EXPECT_TRUE(kernels.Dispatch(left.data(), right.data(), nullptr, 0, pairs.data(),
+    EXPECT_TRUE(kernels.Dispatch(context, left.data(), right.data(), nullptr, 0, pairs.data(),
         nullptr, nullptr, 0, static_cast<int64_t>(EJoinKernelOp::Destroy)));
 }
 
@@ -425,6 +430,7 @@ TEST(OperatorInstrumentation, UnionShufflesKeepTheirOwnInputSchemas) {
 }
 
 TEST(OperatorInstrumentation, ShuffleAccountsSparseRetainedOwnersOnceAcrossPartitions) {
+    NQdb::TThreadExecutionContext context;
     for (size_t retentionBudget : {1048576u, 1u}) {
         SCOPED_TRACE(retentionBudget);
         TTaskNode node;
@@ -448,7 +454,7 @@ TEST(OperatorInstrumentation, ShuffleAccountsSparseRetainedOwnersOnceAcrossParti
             {"k", i64}, {"v", i64}});
         auto hash = TKernelCompiler().CompileAggregateHash(*schema, {"k"});
         std::vector<uint64_t> hashes(10000);
-        ASSERT_TRUE(hash(&batch, hashes.data()));
+        ASSERT_TRUE(hash(context, &batch, hashes.data()));
         ASSERT_NE(hashes[9998] % 4, hashes[9999] % 4);
         auto code = std::make_shared<THashShuffleCode>(hash, schema, 16384, 65536, retentionBudget);
         TOneToOneConnection input(1);
@@ -462,7 +468,7 @@ TEST(OperatorInstrumentation, ShuffleAccountsSparseRetainedOwnersOnceAcrossParti
         task.ConfigureInstrumentation(setup);
         ASSERT_TRUE(input.Push(0, std::move(batch)));
         input.Finish(0);
-        EXPECT_EQ(task.Execute(), ETaskResult::OK);
+        EXPECT_EQ(task.Execute(context), ETaskResult::OK);
         EXPECT_EQ(node.Instrumentation->Inputs[0].Rows, 2u);
         const bool flushedBeforeEof = retentionBudget < 160000;
         // A pending copied row can overlap the original shared input owner.
@@ -470,7 +476,7 @@ TEST(OperatorInstrumentation, ShuffleAccountsSparseRetainedOwnersOnceAcrossParti
         EXPECT_EQ(node.Instrumentation->Output.Rows, flushedBeforeEof ? 2u : 0u);
         EXPECT_EQ(node.Instrumentation->RetainedInputBytes, flushedBeforeEof ? 0u : 160000u);
         EXPECT_EQ(node.Instrumentation->RetainedInputPeakBytes, expectedPeak);
-        EXPECT_EQ(task.Execute(), ETaskResult::FINISHED);
+        EXPECT_EQ(task.Execute(context), ETaskResult::FINISHED);
         EXPECT_EQ(node.Instrumentation->Output.Rows, 2u);
         EXPECT_EQ(node.Instrumentation->RetainedInputBytes, 0u);
         EXPECT_EQ(node.Instrumentation->RetainedInputPeakBytes, expectedPeak);
@@ -489,7 +495,7 @@ TEST(OperatorInstrumentation, ShuffleAccountsSparseRetainedOwnersOnceAcrossParti
 TEST(OperatorInstrumentation, ThreadCpuExcludesSleepingAndSurvivesWorkerMigration) {
     class TSleepTask final : public ITaskNode {
     public:
-        ETaskResult Execute() override {
+        ETaskResult Execute(NQdb::TThreadExecutionContext&) override {
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
             return ETaskResult::OK;
         }
@@ -499,7 +505,10 @@ TEST(OperatorInstrumentation, ThreadCpuExcludesSleepingAndSurvivesWorkerMigratio
     node.Instrumentation = std::make_unique<TOperatorInstrumentation>();
     const auto start = std::chrono::steady_clock::now();
     for (size_t worker = 0; worker < 2; ++worker) {
-        std::thread([&] { EXPECT_EQ(ExecuteTask(node), ETaskResult::OK); }).join();
+        std::thread([&] {
+            NQdb::TThreadExecutionContext context;
+            EXPECT_EQ(ExecuteTask(node, context), ETaskResult::OK);
+        }).join();
     }
     const auto wall = std::chrono::steady_clock::now() - start;
     EXPECT_GE(wall, std::chrono::milliseconds(100));

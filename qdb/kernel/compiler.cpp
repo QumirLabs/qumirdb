@@ -1805,11 +1805,11 @@ TKernelCompiler::TFilterDispatch TKernelCompiler::CompileFilter(
 }
 
 void TKernelCompiler::TFilterDispatch::operator()(
-    TRowSet& rowSet, const uint8_t* inputSelection) const
+    TThreadExecutionContext& context, TRowSet& rowSet, const uint8_t* inputSelection) const
 {
     using TFilterFn = void(*)(void*, void*, void**, const uint8_t*);
     TStringArena arena;
-    Slot->Call<TFilterFn>(0,
+    Slot->Call<TFilterFn>(context, 0,
         &rowSet, &arena, Runtime ? Runtime->Regexes.Handles() : nullptr,
         inputSelection);
 }
@@ -1870,8 +1870,8 @@ TKernelCompiler::TProjectDispatch TKernelCompiler::CompileProject(
     using TProjectFn = void(*)(void*, void**, void*, void**);
     return [slot = kernel.Slot, storage = kernel.Storage,
             runtime = RuntimeContext_](
-               TRowSet* in, void** outBuffers, void* arena) {
-        slot->Call<TProjectFn>(0,
+               TThreadExecutionContext& context, TRowSet* in, void** outBuffers, void* arena) {
+        slot->Call<TProjectFn>(context, 0,
             in, outBuffers, arena,
             runtime ? runtime->Regexes.Handles() : nullptr);
     };
@@ -1902,10 +1902,10 @@ TKernelCompiler::TSortRadixCompositeDispatch TKernelCompiler::CompileRadixSortCo
     using TSortFn = int64_t(*)(
         TRowSet*, int64_t*, int64_t*, uint32_t*, int64_t, bool*, bool*,
         bool, int64_t, int64_t, TRowSet*);
-    return [slot = kernel.Slot](TRowSet* store, int64_t* rowIds, int64_t* work,
-        uint32_t* counts, int64_t n, bool* descs, bool* nullsFirsts,
-        bool doSort, int64_t start, int64_t limit, TRowSet* output) {
-        return slot->Call<TSortFn>(0,
+    return [slot = kernel.Slot](TThreadExecutionContext& context, TRowSet* store,
+        int64_t* rowIds, int64_t* work, uint32_t* counts, int64_t n, bool* descs,
+        bool* nullsFirsts, bool doSort, int64_t start, int64_t limit, TRowSet* output) {
+        return slot->Call<TSortFn>(context, 0,
             store, rowIds, work, counts, n, descs, nullsFirsts,
             doSort, start, limit, output);
     };
@@ -1937,10 +1937,10 @@ TKernelCompiler::CompileWindow(
     using TWindowFn = int64_t(*)(
         TRowSet*, int64_t*, int64_t*, uint32_t*, int64_t, bool*, bool*,
         bool, int64_t, int64_t, TRowSet*);
-    return [slot = kernel.Slot](TRowSet* store, int64_t* rowIds, int64_t* work,
-        uint32_t* counts, int64_t n, bool* descs, bool* nullsFirsts,
-        bool doSort, int64_t start, int64_t limit, TRowSet* output) {
-        return slot->Call<TWindowFn>(0,
+    return [slot = kernel.Slot](TThreadExecutionContext& context, TRowSet* store,
+        int64_t* rowIds, int64_t* work, uint32_t* counts, int64_t n, bool* descs,
+        bool* nullsFirsts, bool doSort, int64_t start, int64_t limit, TRowSet* output) {
+        return slot->Call<TWindowFn>(context, 0,
             store, rowIds, work, counts, n, descs, nullsFirsts,
             doSort, start, limit, output);
     };
@@ -1968,10 +1968,10 @@ TKernelCompiler::CompileRadixSortCompositeNullable(
     using TSortFn = int64_t(*)(
         TRowSet*, int64_t*, int64_t*, uint32_t*, int64_t, bool*, bool*,
         bool, int64_t, int64_t, TRowSet*);
-    return [slot = kernel.Slot](TRowSet* store, int64_t* rowIds,
-        int64_t* work, uint32_t* counts, int64_t n, bool* descs, bool* nullsFirsts,
-        bool doSort, int64_t start, int64_t limit, TRowSet* output) {
-        return slot->Call<TSortFn>(0,
+    return [slot = kernel.Slot](TThreadExecutionContext& context, TRowSet* store,
+        int64_t* rowIds, int64_t* work, uint32_t* counts, int64_t n, bool* descs,
+        bool* nullsFirsts, bool doSort, int64_t start, int64_t limit, TRowSet* output) {
+        return slot->Call<TSortFn>(context, 0,
             store, rowIds, work, counts, n, descs, nullsFirsts,
             doSort, start, limit, output);
     };
@@ -1999,6 +1999,7 @@ TKernelCompiler::TTopSortDispatch TKernelCompiler::CompileTopSort(
         TRowSet*, TRowSet*, int64_t*, int64_t*, uint32_t*,
         int64_t, bool, uint8_t*, uint32_t*, int64_t, TRowSet*);
     return [slot = kernel.Slot](
+        TThreadExecutionContext& context,
         TRowSet* state,
         TRowSet* batch,
         int64_t* rowIds,
@@ -2010,7 +2011,7 @@ TKernelCompiler::TTopSortDispatch TKernelCompiler::CompileTopSort(
         uint32_t* pickIdx,
         int64_t limit,
         TRowSet* output) {
-        return slot->Call<TTopSortFn>(0,
+        return slot->Call<TTopSortFn>(context, 0,
             state, batch, rowIds, work, counts, n, sortInput,
             pickSrc, pickIdx, limit, output);
     };
@@ -2031,11 +2032,12 @@ TKernelCompiler::THeapTopKDispatch TKernelCompiler::CompileHeapTopK(
     using THeapTopKFn = int64_t(*)(
         TRowSet*, int64_t*, int64_t, int64_t);
     return [slot = kernel.Slot](
+        TThreadExecutionContext& context,
         TRowSet* store,
         int64_t* rowIds,
         int64_t size,
         int64_t limit) {
-        return slot->Call<THeapTopKFn>(0,
+        return slot->Call<THeapTopKFn>(context, 0,
             store, rowIds, size, limit);
     };
 }
@@ -2252,11 +2254,12 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
     using TFinishRowSetFn = int64_t(*)(void*, TRowSet*);
 
     auto slot = kernel.Slot;
-    kernels.Dispatch = [slot](void* ht, TRowSet* batch, int64_t arg, int64_t op) {
-        return slot->Call<TDispatchFn>(0, ht, batch, arg, op);
+    kernels.Dispatch = [slot](
+        TThreadExecutionContext& context, void* ht, TRowSet* batch, int64_t arg, int64_t op) {
+        return slot->Call<TDispatchFn>(context, 0, ht, batch, arg, op);
     };
-    kernels.FinishRowSet = [slot](void* ht, TRowSet* output) {
-        return slot->Call<TFinishRowSetFn>(1, ht, output);
+    kernels.FinishRowSet = [slot](TThreadExecutionContext& context, void* ht, TRowSet* output) {
+        return slot->Call<TFinishRowSetFn>(context, 1, ht, output);
     };
     return kernels;
 }
@@ -2389,6 +2392,7 @@ TCrossJoinKernels TKernelCompiler::CompileCrossJoin(
 
     TCrossJoinKernels kernels;
     kernels.Dispatch = [slot](
+        TThreadExecutionContext& context,
         TRowSet* leftStore,
         int64_t batchIdx,
         TRowSet* rightStore,
@@ -2398,11 +2402,12 @@ TCrossJoinKernels TKernelCompiler::CompileCrossJoin(
         int64_t op) {
         // Scratch of the residual's strings, which do not outlive the call.
         TStringArena arena;
-        return slot->Call<TDispatchFn>(0,
+        return slot->Call<TDispatchFn>(context, 0,
             leftStore, batchIdx, rightStore, rightBatchCount, rightMatched, pairs,
             &arena, op);
     };
     kernels.Materialize = [slot](
+        TThreadExecutionContext& context,
         void* pairs,
         TRowSet* leftStore,
         TRowSet* rightStore,
@@ -2411,7 +2416,7 @@ TCrossJoinKernels TKernelCompiler::CompileCrossJoin(
         int64_t start,
         int64_t limit,
         TRowSet* out) {
-        return slot->Call<TMaterializeFn>(1,
+        return slot->Call<TMaterializeFn>(context, 1,
             pairs, leftStore, rightStore, streamLeft, streamRight, start, limit, out);
     };
     return kernels;
@@ -2497,19 +2502,20 @@ TJoinHashKernels TKernelCompiler::CompileJoinHash(
     using THashFn = bool(*)(TRowSet*, uint64_t*, const int64_t*);
     return {
         .Left = [slot = kernel.Slot, keyColumns = std::move(leftKeyColumns)](
-                    TRowSet* batch, uint64_t* hashes) {
-            return slot->Call<THashFn>(0,
+                    TThreadExecutionContext& context, TRowSet* batch, uint64_t* hashes) {
+            return slot->Call<THashFn>(context, 0,
                 batch, hashes, keyColumns->data());
         },
         .Right = [slot = kernel.Slot, keyColumns = std::move(rightKeyColumns)](
-                     TRowSet* batch, uint64_t* hashes) {
-            return slot->Call<THashFn>(1,
+                     TThreadExecutionContext& context, TRowSet* batch, uint64_t* hashes) {
+            return slot->Call<THashFn>(context, 1,
                 batch, hashes, keyColumns->data());
         },
     };
 }
 
-std::function<bool(TRowSet*, uint64_t*)> TKernelCompiler::CompileAggregateHash(
+std::function<bool(TThreadExecutionContext&, TRowSet*, uint64_t*)>
+TKernelCompiler::CompileAggregateHash(
     const NQumir::NAst::TStructType& inputType,
     const std::vector<std::string>& groupKeys)
 {
@@ -2559,8 +2565,8 @@ std::function<bool(TRowSet*, uint64_t*)> TKernelCompiler::CompileAggregateHash(
 
     using THashFn = bool(*)(TRowSet*, uint64_t*, const int64_t*);
     return [slot = kernel.Slot, keyColumns = std::move(keyColumns)](
-               TRowSet* batch, uint64_t* hashes) {
-        return slot->Call<THashFn>(0,
+               TThreadExecutionContext& context, TRowSet* batch, uint64_t* hashes) {
+        return slot->Call<THashFn>(context, 0,
             batch, hashes, keyColumns->data());
     };
 }
@@ -2675,6 +2681,7 @@ TRowJoinKernels TKernelCompiler::CompileRowJoin(
     kernels.EmitsByMark = marksBuild;
     kernels.KeepsNullKeyRows = keepsNullKeyRows;
     kernels.Dispatch = [slot, buildKeyColumns, probeKeyColumns](
+        TThreadExecutionContext& context,
         void* arena,
         void* table,
         void* scratch,
@@ -2685,16 +2692,17 @@ TRowJoinKernels TKernelCompiler::CompileRowJoin(
             || op == static_cast<int64_t>(ERowJoinKernelOp::AppendNullKeys);
         const auto* keyColumns = appends
             ? buildKeyColumns->data() : probeKeyColumns->data();
-        return slot->Call<TDispatchFn>(0,
+        return slot->Call<TDispatchFn>(context, 0,
             arena, table, scratch, pairs, batch, keyColumns, op);
     };
     kernels.Materialize = [slot](
+        TThreadExecutionContext& context,
         void* pairs,
         TRowSet* stream,
         int64_t start,
         int64_t limit,
         TRowSet* out) {
-        return slot->Call<TMaterializeFn>(1,
+        return slot->Call<TMaterializeFn>(context, 1,
             pairs, stream, start, limit, out);
     };
     return kernels;
@@ -2889,6 +2897,7 @@ TJoinKernels TKernelCompiler::CompileJoin(
     kernels.Dispatch = [slot,
                         leftKeyColumns = std::move(leftKeyColumns),
                         rightKeyColumns = std::move(rightKeyColumns)](
+        TThreadExecutionContext& context,
         void* left,
         void* right,
         TRowSet* batch,
@@ -2900,11 +2909,12 @@ TJoinKernels TKernelCompiler::CompileJoin(
         int64_t op) {
         // Scratch of the residual's strings, which do not outlive the call.
         TStringArena arena;
-        return slot->Call<TDispatchFn>(0,
+        return slot->Call<TDispatchFn>(context, 0,
             left, right, batch, batchIdx, pairs, leftStore, rightStore, &arena,
             leftKeyColumns->data(), rightKeyColumns->data(), arg, op);
     };
     kernels.Materialize = [slot](
+        TThreadExecutionContext& context,
         void* pairs,
         TRowSet* leftStore,
         TRowSet* rightStore,
@@ -2913,7 +2923,7 @@ TJoinKernels TKernelCompiler::CompileJoin(
         int64_t start,
         int64_t limit,
         TRowSet* out) {
-        return slot->Call<TMaterializeFn>(1,
+        return slot->Call<TMaterializeFn>(context, 1,
             pairs, leftStore, rightStore, streamLeft, streamRight, start, limit, out);
     };
     return kernels;

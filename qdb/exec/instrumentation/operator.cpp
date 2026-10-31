@@ -29,24 +29,26 @@ std::vector<int64_t> InstrumentationColumnWidths(const NQumir::NAst::TTypePtr& t
     return widths;
 }
 
-void TRowSetInstrumentation::Add(const TRowSet& rowSet) {
+void TRowSetInstrumentation::Add(TThreadExecutionContext& context, const TRowSet& rowSet) {
     if (rowSet.ColumnCount != static_cast<int64_t>(Widths.size())) {
         throw std::runtime_error("instrumentation rowset/schema column count mismatch");
     }
     using TMeasure = void(*)(const TRowSet*, const int64_t*, int64_t*);
     int64_t values[2] = {};
-    Kernel->Call<TMeasure>(0, &rowSet, Widths.data(), values);
+    Kernel->Call<TMeasure>(context, 0, &rowSet, Widths.data(), values);
     Rows += values[0];
     Bytes += values[1];
 }
 
-uint64_t TOperatorInstrumentation::InputPayloadBytes(const TRowSet& rowSet, size_t input) const {
+uint64_t TOperatorInstrumentation::InputPayloadBytes(
+    TThreadExecutionContext& context, const TRowSet& rowSet, size_t input) const
+{
     auto counter = Inputs.at(input);
     counter.Rows = 0;
     counter.Bytes = 0;
     auto allRows = rowSet;
     allRows.Selection = nullptr;
-    counter.Add(allRows);
+    counter.Add(context, allRows);
     return counter.Bytes;
 }
 
@@ -57,12 +59,15 @@ void TOperatorInstrumentation::SetRetainedInputBytes(uint64_t bytes) {
     BuildMemoryPeakBytes = std::max(BuildMemoryPeakBytes, bytes + Memory_[0] + Memory_[1]);
 }
 
-void TOperatorInstrumentation::RetainInput(const TRowSet& rowSet, size_t input, bool append) {
-    const auto bytes = InputPayloadBytes(rowSet, input);
+void TOperatorInstrumentation::RetainInput(
+    TThreadExecutionContext& context, const TRowSet& rowSet, size_t input, bool append)
+{
+    const auto bytes = InputPayloadBytes(context, rowSet, input);
     SetRetainedInputBytes(append ? RetainedInputBytes + bytes : bytes);
 }
 
 void TOperatorInstrumentation::ObserveHash(
+    TThreadExecutionContext& context,
     void* table,
     size_t side,
     bool join,
@@ -70,7 +75,7 @@ void TOperatorInstrumentation::ObserveHash(
 {
     using TMeasure = void(*)(void*, int64_t, const int64_t*, int64_t, int64_t*);
     int64_t values[6] = {};
-    Kernel->Call<TMeasure>(1,
+    Kernel->Call<TMeasure>(context, 1,
         table, join, stringBuffers.data(), stringBuffers.size(), values);
     HasHash = true;
     HasBuildMemory = true;

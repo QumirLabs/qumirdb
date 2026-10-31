@@ -68,8 +68,10 @@ using TProbe = int64_t (*)(const TFilterData*, const uint64_t*, const uint8_t*, 
     int64_t, int64_t, uint64_t*, uint8_t*);
 
 template <typename T, typename... TArgs>
-auto CallEntry(const TRuntimeContext& context, EEntry entry, TArgs... args) {
-    return context.RuntimeFilterKernels->Call<T>(entry, args...);
+auto CallEntry(
+    TThreadExecutionContext& context, const TRuntimeContext& runtime, EEntry entry, TArgs... args)
+{
+    return runtime.RuntimeFilterKernels->Call<T>(context, entry, args...);
 }
 
 void CheckKernels(const std::shared_ptr<TRuntimeContext>& context) {
@@ -120,7 +122,9 @@ TRuntimeFilterBuilder::TRuntimeFilterBuilder(
 }
 
 void TRuntimeFilterBuilder::Add(
-    std::span<const uint64_t> hashes, std::span<const uint8_t> selection)
+    TThreadExecutionContext& context,
+    std::span<const uint64_t> hashes,
+    std::span<const uint8_t> selection)
 {
     CheckBatchSizes(hashes.size(), hashes.size(), selection.size());
     BuildRows_ += SelectedRows(hashes.size(), selection);
@@ -128,7 +132,7 @@ void TRuntimeFilterBuilder::Add(
     // The kernel stops only to ask for storage, and continues from that row.
     do {
         ProvideStorage(hashes.size() - row);
-        row += static_cast<size_t>(CallEntry<TBuild>(*RuntimeContext_, EEntry::Build,
+        row += static_cast<size_t>(CallEntry<TBuild>(context, *RuntimeContext_, EEntry::Build,
             &State_, hashes.data() + row,
             selection.empty() ? nullptr : selection.data() + row,
             static_cast<int64_t>(hashes.size() - row)));
@@ -204,18 +208,20 @@ void TRuntimeFilter::StartExecutionClock() {
     ExecutionStart_ = std::chrono::steady_clock::now();
 }
 
-void TRuntimeFilter::FinishProducer(TRuntimeFilterPartial&& partial) {
+void TRuntimeFilter::FinishProducer(
+    TThreadExecutionContext& context, TRuntimeFilterPartial&& partial)
+{
     const size_t slot = NextPartial_.fetch_add(1, std::memory_order_relaxed);
     // Each producer writes its own slot. The acq_rel decrement chain makes all
     // contributions visible to the last producer, which alone builds Data_.
     assert(slot < Partials_.size());
     Partials_[slot] = std::move(partial);
     if (PendingProducers_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-        Publish();
+        Publish(context);
     }
 }
 
-void TRuntimeFilter::BuildPublishedData() {
+void TRuntimeFilter::BuildPublishedData(TThreadExecutionContext& context) {
     bool incomplete = false;
     size_t exactHashes = 0;
     for (const auto& partial : Partials_) {
@@ -273,7 +279,7 @@ void TRuntimeFilter::BuildPublishedData() {
     state.Table = table.data();
     state.Bloom = bloom.data();
     state.BloomWords = static_cast<int64_t>(bloom.size());
-    CallEntry<TPublish>(*RuntimeContext_, EEntry::Publish,
+    CallEntry<TPublish>(context, *RuntimeContext_, EEntry::Publish,
         &state, partials.data(), static_cast<int64_t>(partials.size()));
 
     if (state.Kind == static_cast<int64_t>(EKind::Exact)) {
@@ -300,8 +306,8 @@ void TRuntimeFilter::BuildPublishedData() {
     Data_.Words = std::move(bloom);
 }
 
-void TRuntimeFilter::Publish() {
-    BuildPublishedData();
+void TRuntimeFilter::Publish(TThreadExecutionContext& context) {
+    BuildPublishedData(context);
     std::vector<TRuntimeFilterPartial>().swap(Partials_);
     if (ExecutionStart_ != std::chrono::steady_clock::time_point{}) {
         Data_.Stats.ReadyLatencyMs = std::chrono::duration<double, std::milli>(
@@ -339,6 +345,7 @@ bool TRuntimeFilter::BeginBatch(TRuntimeFilterProbeState& state, size_t rows) co
 }
 
 size_t TRuntimeFilter::MayContainBatch(
+    TThreadExecutionContext& context,
     std::span<const uint64_t> hashes,
     std::span<uint8_t> output,
     TRuntimeFilterProbeState& state,
@@ -359,7 +366,8 @@ size_t TRuntimeFilter::MayContainBatch(
         .Words = Data_.Words.data(),
         .WordCount = static_cast<int64_t>(Data_.Words.size()),
     };
-    const auto accepted = static_cast<size_t>(CallEntry<TProbe>(*RuntimeContext_, EEntry::Probe,
+    const auto accepted = static_cast<size_t>(CallEntry<TProbe>(
+        context, *RuntimeContext_, EEntry::Probe,
         &data, hashes.data(), selection.empty() ? nullptr : selection.data(),
         output.data(), static_cast<int64_t>(hashes.size()), vectorized,
         state.SelectedHashes.data(), state.SelectedOutput.data()));

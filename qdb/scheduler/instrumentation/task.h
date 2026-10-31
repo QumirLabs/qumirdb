@@ -31,7 +31,7 @@ private:
 // Oz measurement kernel is emitted only when instrumentation is requested.
 void EnableOperatorInstrumentation(TLoweredPlan& lowered);
 void PrintOperatorInstrumentation(std::ostream& out, const TTaskGraph& graph);
-ETaskResult ExecuteTask(TTaskNode& node);
+ETaskResult ExecuteTask(TTaskNode& node, TThreadExecutionContext& context);
 
 } // namespace NScheduler
 } // namespace NQdb

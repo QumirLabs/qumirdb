@@ -1,3 +1,4 @@
+#include <qdb/kernel/thread_context.h>
 #include <qdb/scheduler/instrumentation/task.h>
 #include <qdb/scheduler/single_threaded_scheduler.h>
 
@@ -36,6 +37,7 @@ bool TSingleThreadedScheduler::Run(std::string* error) {
     Stats_ = {};
     Schedule(Graph_.Root());
 
+    TThreadExecutionContext context;
     while (!Ready_.empty()) {
         auto* node = Ready_.front();
         Ready_.pop_front();
@@ -44,7 +46,7 @@ bool TSingleThreadedScheduler::Run(std::string* error) {
 
         ETaskResult state;
         try {
-            state = ExecuteTask(*node);
+            state = ExecuteTask(*node, context);
         } catch (const std::exception& e) {
             SetError(error, e.what());
             return false;

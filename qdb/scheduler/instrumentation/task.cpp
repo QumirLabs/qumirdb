@@ -213,12 +213,12 @@ void WriteSnapshot(std::ostream& out, const TStageSnapshot& value) {
 
 } // namespace
 
-ETaskResult ExecuteTask(TTaskNode& node) {
+ETaskResult ExecuteTask(TTaskNode& node, TThreadExecutionContext& context) {
     if (!node.Instrumentation) {
-        return node.Task->Execute();
+        return node.Task->Execute(context);
     }
     const auto start = ThreadCpuNanoseconds();
-    const auto result = node.Task->Execute();
+    const auto result = node.Task->Execute(context);
     node.Instrumentation->ExecutionCpuNanoseconds += ThreadCpuNanoseconds() - start;
     return result;
 }

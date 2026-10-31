@@ -39,6 +39,7 @@ TUnaryStreamProcess MakeProjectProcess(
         computedWidths = std::move(computedWidths),
         computedIsString = std::move(computedIsString),
         computedIsNullable = std::move(computedIsNullable)](
+        TThreadExecutionContext& context,
         TRowSet& rowSet,
         TUnaryStreamingKernelState&)
     {
@@ -68,7 +69,7 @@ TUnaryStreamProcess MakeProjectProcess(
             // outlive the kernel *and* the string post-processing below, which copies the
             // bytes into owned StringData - a local here does exactly that.
             TStringArena arena;
-            computeDispatch(&rowSet, outBuffers.data(), &arena);
+            computeDispatch(context, &rowSet, outBuffers.data(), &arena);
 
             // Post-process string computed columns: convert TStringView array
             // (ptr + size per row) into a proper offset-based string TColumn.
