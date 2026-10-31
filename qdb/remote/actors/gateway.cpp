@@ -2,6 +2,7 @@
 #include <qdb/remote/messages.h>
 #include <qdb/remote/serialization.h>
 #include "gateway.h"
+#include "query.h"
 
 
 namespace NQdb {
@@ -13,9 +14,10 @@ namespace {
 
 struct TGatewayActor : public IBehaviorActor {
     struct TDefaultBehavior : public TBehavior<TDefaultBehavior, TExecuteQuery> {
-        void Receive(TExecuteQuery&&, TBlob, TActorContext::TPtr ctx) {
-            // TODO: implement
-            ctx->Send<TExecuteQueryResponse>(ctx->Sender(), TExecuteQueryResponse{});
+        void Receive(TExecuteQuery&& req, TBlob, TActorContext::TPtr ctx) {
+            auto* queryActor = CreateQueryActor();
+            auto queryActorId = ctx->Register(std::unique_ptr<IActor>(queryActor));
+            ctx->Forward<TExecuteQuery>(queryActorId, std::move(req));
         }
 
         void HandleUnknownMessage(TMessageId messageId, TBlob blob, TActorContext::TPtr ctx) { }
