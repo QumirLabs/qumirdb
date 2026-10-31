@@ -7,8 +7,7 @@
 
 namespace {
 
-// Calls move(first, last, kept) for every maximal run of selected rows, where
-// `kept` is the number of rows kept before the run.
+// Calls move(first, last, kept) per run of selected rows; kept = rows kept before it.
 template <class F>
 void ForEachRun(const uint8_t* sel, int64_t rows, F&& move) {
     int64_t kept = 0;
@@ -34,7 +33,7 @@ void CompactStrings(TOffset* offsets, char* chars, const uint8_t* sel, int64_t r
         if (kept == first) {
             return;
         }
-        // Writes land at indices <= the ones still to be read, so one pass is safe.
+        // Writes never pass the unread data, so one pass is safe.
         const TOffset srcBegin = offsets[first];
         const TOffset dstBegin = offsets[kept];
         std::memmove(chars + dstBegin, chars + srcBegin, static_cast<size_t>(offsets[last] - srcBegin));
@@ -73,7 +72,6 @@ void CompactBits(uint8_t* bits, int64_t bitOffset, const uint8_t* sel, int64_t r
     });
 }
 
-// OffsetWidth is 4 or 8 here: CompactRowSet validated it.
 void CompactStringColumn(const NQdb::TColumn& col, const uint8_t* sel, int64_t rows) {
     if (col.OffsetWidth == 4) {
         CompactStrings(static_cast<int32_t*>(col.Offsets), col.Data, sel, rows);
@@ -100,7 +98,7 @@ int64_t CompactRowSet(TRowSet& rowSet, std::span<const TValueLayout> layouts) {
     if (static_cast<int64_t>(layouts.size()) != rowSet.ColumnCount) {
         throw NQumir::TError("compaction needs one value layout per column");
     }
-    // Validate everything first: compaction must not leave a half-moved row set.
+    // Validate first so a failure leaves the row set untouched.
     for (int64_t c = 0; c < rowSet.ColumnCount; ++c) {
         const TColumn& col = rowSet.Columns[c];
         const TValueLayout& layout = layouts[c];

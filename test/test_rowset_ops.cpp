@@ -16,8 +16,7 @@ namespace {
 
 enum class EKind { Fixed, Bool, String4, String8 };
 
-// Owns the buffers of one column; the padding rows/bits around the data are
-// random so that an out-of-range write is visible.
+// Owns one column; random padding around the data exposes out-of-range writes.
 struct TTestColumn {
     EKind Kind;
     int32_t Width = 0;
@@ -94,7 +93,7 @@ public:
         return sel;
     }
 
-    // Row-by-row copy of the selected rows, the reference for the compaction.
+    // Reference: row-by-row copy of the selected rows.
     std::vector<std::vector<TExpectedRow>> Expected(const std::vector<uint8_t>& sel) const {
         std::vector<std::vector<TExpectedRow>> out(Columns_.size());
         for (size_t c = 0; c < Columns_.size(); ++c) {
@@ -171,7 +170,7 @@ private:
             }
             break;
         default: {
-            // Non-zero first offset like a sliced Arrow array; some strings are empty or long.
+            // Non-zero first offset (like a sliced array); some strings empty or long.
             std::string chars(5, 'x');
             std::vector<int64_t> offs{static_cast<int64_t>(chars.size())};
             for (int64_t i = 0; i < rows; ++i) {
@@ -206,8 +205,7 @@ private:
     TRowSet RowSet_;
 };
 
-// Bits outside [offset, offset + rows) are not ours and must be unchanged; the
-// range itself is checked row by row (its tail past `kept` is unspecified).
+// Bits outside [offset, offset + rows) must stay unchanged; the tail past `kept` is unspecified.
 void ExpectBitPadding(const std::vector<uint8_t>& before, const std::vector<uint8_t>& after,
                       int64_t offset, int64_t rows, const std::string& what)
 {
@@ -337,7 +335,7 @@ void ExpectRejectedUntouched(TRowSetFixture& fx, std::span<const TValueLayout> l
 
 TEST(RowSetCompact, InvalidLayoutIsRejectedBeforeMutation) {
     for (int32_t bad : {-1, 0, 3, 5, 32}) {
-        // The first column is valid and would be compacted before the bad one is seen.
+        // The valid first column must not be touched before the bad one is seen.
         TRowSetFixture fx({EKind::Fixed, EKind::Fixed}, 10, true, true, 7);
         const TValueLayout layouts[] = {fx.Layouts()[0], {bad, false}};
         ExpectRejectedUntouched(fx, layouts);
@@ -363,7 +361,6 @@ TEST(RowSetCompact, BadOffsetWidthIsRejectedBeforeMutation) {
 }
 
 TEST(RowSetCompact, BitPaddingIsUntouched) {
-    // Bits outside [offset, offset + kept) belong to someone else and must survive.
     std::vector<uint8_t> bits = {0xA5, 0x5A, 0xC3, 0x3C};
     const std::vector<uint8_t> before = bits;
     const uint8_t sel[8] = {0, 1, 0, 1, 0, 1, 0, 1};

@@ -7,30 +7,19 @@
 
 namespace NQdb {
 
-// Per-column layout of the value buffer. Bitmap marks a bit-packed bool column
-// (Width must be 0); this is not NKernel::FixedValueWidth, which gives 1 for bool.
-// Other fixed-width columns need Width in {1, 2, 4, 8, 16}. String columns are
-// recognized by Offsets and their Width is ignored.
+// Bitmap: bit-packed bool column (Width must be 0). Otherwise Width is 1, 2, 4, 8
+// or 16 (unlike NKernel::FixedValueWidth, bool is not 1). Strings are found by Offsets.
 struct TValueLayout {
     int32_t Width = 0;
     bool Bitmap = false;
 };
 
-// Keeps the rows with Selection[i] != 0 and moves them down inside the same
-// buffers: fixed-width values, bool and validity bitmaps (honoring their bit
-// offsets), string offsets and characters, and Hash. Sets RowCount to the kept
-// count, clears Selection and returns the count. Does nothing without Selection.
-// Clearing only drops the pointer: producers keep the mask in Private (a vector)
-// and free it from Destroy, never through Selection, so nothing leaks.
-//
-// layouts has one entry per column. Throws before changing anything if the
-// count, a layout or a string OffsetWidth (4 or 8) is invalid.
-//
-// Precondition: the caller owns every column buffer (Data, Offsets, Mask, Hash),
-// including the validity masks, which are written despite being const in TColumn.
-// View row sets over another row set's buffers (broadcast and shuffle views)
-// must not be compacted: gather them instead. RefCount != 1 is only a cheap
-// guard and does not detect shared buffers.
+// Moves the rows with Selection[i] != 0 down in place (values, validity, strings,
+// Hash), sets RowCount to the kept count and resets Selection, which is not owned.
+// layouts has one entry per column; throws before any change if it is invalid.
+// The caller must own all column buffers, including Mask (written despite const).
+// Views over another row set's buffers must not be compacted. RefCount != 1 is
+// only a cheap guard.
 int64_t CompactRowSet(TRowSet& rowSet, std::span<const TValueLayout> layouts);
 
 } // namespace NQdb
