@@ -1,16 +1,21 @@
 #include <qdb/io/parquet/decimal_scan.h>
 
 #include <parquet/column_reader.h>
-#include <parquet/level_conversion.h>
 #include <parquet/schema.h>
 
+#include <algorithm>
+#include <bit>
 #include <cstring>
 #include <stdexcept>
-#include <string>
+#include <type_traits>
+#include <utility>
 
 namespace NQdb {
 
 namespace {
+
+// Values per ReadBatch: the levels and raw values of a chunk stay in cache until stored.
+constexpr int64_t ChunkRows = 4096;
 
 // Big-endian two's complement bytes, sign-extended.
 template <typename TInt, typename TUInt>
@@ -24,12 +29,30 @@ TInt BigEndianUnscaled(const uint8_t* bytes, int32_t length) {
     return static_cast<TInt>(value);
 }
 
-void StoreUnscaled(uint8_t* data, int64_t row, int32_t width, __int128 value) {
-    if (width == 8) {
-        const int64_t narrow = static_cast<int64_t>(value);
-        std::memcpy(data + row * 8, &narrow, sizeof(narrow));
+// The same for a length known at compile time: whole loads and a byte swap.
+template <int Length>
+auto BigEndianUnscaled(const uint8_t* bytes) {
+    if constexpr (Length <= 8) {
+        uint64_t raw = 0;
+        std::memcpy(&raw, bytes, Length);
+        return static_cast<int64_t>(std::byteswap(raw)) >> (64 - 8 * Length);
     } else {
-        std::memcpy(data + row * 16, &value, sizeof(value));
+        uint64_t low;
+        std::memcpy(&low, bytes + Length - 8, sizeof(low));
+        const auto high = static_cast<unsigned __int128>(BigEndianUnscaled<Length - 8>(bytes));
+        return static_cast<__int128>(high << 64 | std::byteswap(low));
+    }
+}
+
+// Calls `func` with std::integral_constant<int, length> for a FIXED_LEN_BYTE_ARRAY length.
+template <int Length = 1, typename TFunc>
+void WithLength(int length, TFunc&& func) {
+    if constexpr (Length > 16) {
+        throw std::runtime_error("parquet decimal scan: unsupported FIXED_LEN_BYTE_ARRAY length");
+    } else if (length == Length) {
+        func(std::integral_constant<int, Length>{});
+    } else {
+        WithLength<Length + 1>(length, std::forward<TFunc>(func));
     }
 }
 
@@ -41,14 +64,74 @@ std::shared_ptr<arrow::Buffer> Allocate(int64_t bytes, arrow::MemoryPool* memory
     return std::move(*allocated);
 }
 
-std::shared_ptr<arrow::DataType> ReaderType(const parquet::ColumnDescriptor& descriptor) {
-    switch (descriptor.physical_type()) {
-        case parquet::Type::FIXED_LEN_BYTE_ARRAY:
-            return arrow::fixed_size_binary(descriptor.type_length());
-        case parquet::Type::BYTE_ARRAY:
-            return arrow::binary();
-        default:
-            return nullptr;
+// The validity bitmap of one Read, allocated at its first NULL.
+struct TNulls {
+    void Mark(int64_t row, const int16_t* defLevels, int16_t maxDef, int64_t levels) {
+        if (!Bitmap) {
+            Bitmap = Allocate(arrow::bit_util::BytesForBits(Rows), MemoryPool);
+            std::memset(Bitmap->mutable_data(), 0xff, Bitmap->size());
+        }
+        for (int64_t i = 0; i < levels; ++i) {
+            if (defLevels[i] != maxDef) {
+                arrow::bit_util::ClearBit(Bitmap->mutable_data(), row + i);
+                ++Count;
+            }
+        }
+    }
+
+    const int64_t Rows;
+    arrow::MemoryPool* const MemoryPool;
+    std::shared_ptr<arrow::Buffer> Bitmap;
+    int64_t Count = 0;
+};
+
+// Reads `rows` values into `out`, decoding each raw value with `decode`; a NULL row stores zero.
+// `reader` returns the column reader of the current row group with values left.
+template <typename TDType, typename TStorage, typename TReader, typename TDecode>
+void ReadRows(
+    int64_t rows,
+    int16_t maxDef,
+    TReader&& reader,
+    TDecode decode,
+    TStorage* out,
+    TNulls& nulls)
+{
+    using TValue = typename TDType::c_type;
+    // INT64 at i64 storage: the page decoder writes straight into the output.
+    constexpr bool direct = std::is_same_v<TValue, TStorage>;
+    std::vector<TValue> chunk(direct ? 0 : ChunkRows);
+    std::vector<int16_t> defLevels(maxDef > 0 ? ChunkRows : 0);
+    for (int64_t row = 0; row < rows;) {
+        auto& typed = static_cast<parquet::TypedColumnReader<TDType>&>(reader());
+        TValue* values = chunk.data();
+        if constexpr (direct) {
+            values = out + row;
+        }
+        int64_t valuesRead = 0;
+        const int64_t levels = typed.ReadBatch(
+            std::min(rows - row, ChunkRows),
+            maxDef > 0 ? defLevels.data() : nullptr,
+            nullptr,
+            values,
+            &valuesRead);
+        TStorage* target = out + row;
+        if (valuesRead == levels) {
+            if constexpr (!direct) {
+                for (int64_t i = 0; i < levels; ++i) {
+                    target[i] = static_cast<TStorage>(decode(values[i]));
+                }
+            }
+        } else {
+            nulls.Mark(row, defLevels.data(), maxDef, levels);
+            // Dense values move to their rows; from the back, so a direct read is spread in place.
+            int64_t next = valuesRead;
+            for (int64_t i = levels; i-- > 0;) {
+                target[i] = defLevels[i] == maxDef
+                    ? static_cast<TStorage>(decode(values[--next]))
+                    : TStorage{0};
+            }
+        }
+        row += levels;
     }
 }
 
@@ -63,19 +146,12 @@ TDecimalColumnScan::TDecimalColumnScan(
     , Column_(column)
     , RowGroups_(std::move(rowGroups))
     , MemoryPool_(memoryPool)
+    , Descriptor_(File_.metadata()->schema()->Column(Column_))
 {
-    const auto* descriptor = File_.metadata()->schema()->Column(Column_);
-    Spec_ = {.Precision = descriptor->type_precision(), .Scale = descriptor->type_scale()};
+    Spec_ = {.Precision = Descriptor_->type_precision(), .Scale = Descriptor_->type_scale()};
     Type_ = DecimalStorageOf(Spec_) == EDecimalStorage::I64
         ? arrow::decimal64(Spec_.Precision, Spec_.Scale)
         : arrow::decimal128(Spec_.Precision, Spec_.Scale);
-    Reader_ = parquet::internal::RecordReader::Make(
-        descriptor,
-        parquet::internal::LevelInfo::ComputeLevelInfo(descriptor),
-        MemoryPool_,
-        false,
-        false,
-        ReaderType(*descriptor));
 }
 
 TDecimalColumnScan::~TDecimalColumnScan() = default;
@@ -105,88 +181,57 @@ const std::shared_ptr<arrow::DataType>& TDecimalColumnScan::Type() const {
 }
 
 std::shared_ptr<arrow::Array> TDecimalColumnScan::Read(int64_t rows) {
-    Reader_->Reset();
-    Reader_->Reserve(rows);
-    int64_t read = 0;
-    bool started = NextRowGroup_ > 0;
-    while (read < rows) {
-        // A row group is done when the reader runs out of data or reads no record.
-        const int64_t records = started && Reader_->HasMoreData()
-            ? Reader_->ReadRecords(rows - read)
-            : 0;
-        if (records > 0) {
-            read += records;
-            continue;
-        }
-        if (NextRowGroup_ == RowGroups_.size()) {
-            throw std::runtime_error("parquet decimal scan ran past its row groups");
-        }
-        auto rowGroup = File_.RowGroup(RowGroups_[NextRowGroup_++]);
-        Reader_->SetPageReader(rowGroup->GetColumnPageReader(Column_));
-        started = true;
-    }
-
-    const int32_t width = DecimalStorageBytes(Spec_);
-    const auto physical = Reader_->descr()->physical_type();
-    std::shared_ptr<arrow::Buffer> validity;
-    std::shared_ptr<arrow::Buffer> values;
-    int64_t nullCount = 0;
-    if (physical == parquet::Type::INT32 || physical == parquet::Type::INT64) {
-        nullCount = Reader_->null_count();
-        auto decoded = Reader_->ReleaseValues();
-        auto isValid = Reader_->ReleaseIsValid();
-        if (nullCount > 0) {
-            validity = std::move(isValid);
-        }
-        if (physical == parquet::Type::INT64 && width == 8) {
-            values = std::move(decoded);
-        } else {
-            values = Allocate(rows * width, MemoryPool_);
-            for (int64_t row = 0; row < rows; ++row) {
-                const __int128 value = physical == parquet::Type::INT64
-                    ? static_cast<__int128>(reinterpret_cast<const int64_t*>(decoded->data())[row])
-                    : static_cast<__int128>(reinterpret_cast<const int32_t*>(decoded->data())[row]);
-                StoreUnscaled(values->mutable_data(), row, width, value);
+    auto reader = [this]() -> parquet::ColumnReader& {
+        while (!Reader_ || !Reader_->HasNext()) {
+            if (NextRowGroup_ == RowGroups_.size()) {
+                throw std::runtime_error("parquet decimal scan ran past its row groups");
             }
+            auto rowGroup = File_.RowGroup(RowGroups_[NextRowGroup_++]);
+            Reader_ = parquet::ColumnReader::Make(
+                Descriptor_, rowGroup->GetColumnPageReader(Column_), MemoryPool_);
         }
+        return *Reader_;
+    };
+    const int16_t maxDef = Descriptor_->max_definition_level();
+    auto values = Allocate(rows * DecimalStorageBytes(Spec_), MemoryPool_);
+    TNulls nulls{.Rows = rows, .MemoryPool = MemoryPool_};
+    auto read = [&]<typename TStorage>(TStorage* out) {
+        auto rowsOf = [&]<typename TDType>(TDType, auto decode) {
+            ReadRows<TDType>(rows, maxDef, reader, decode, out, nulls);
+        };
+        switch (Descriptor_->physical_type()) {
+            case parquet::Type::INT32:
+                rowsOf(parquet::Int32Type{}, [](int32_t value) { return value; });
+                break;
+            case parquet::Type::INT64:
+                rowsOf(parquet::Int64Type{}, [](int64_t value) { return value; });
+                break;
+            case parquet::Type::FIXED_LEN_BYTE_ARRAY:
+                WithLength(Descriptor_->type_length(), [&](auto length) {
+                    rowsOf(parquet::FLBAType{}, [](parquet::FixedLenByteArray value) {
+                        return BigEndianUnscaled<decltype(length)::value>(value.ptr);
+                    });
+                });
+                break;
+            case parquet::Type::BYTE_ARRAY:
+                rowsOf(parquet::ByteArrayType{}, [](parquet::ByteArray value) {
+                    const auto length = static_cast<int32_t>(value.len);
+                    return length <= 8
+                        ? static_cast<__int128>(BigEndianUnscaled<int64_t, uint64_t>(value.ptr, length))
+                        : BigEndianUnscaled<__int128, unsigned __int128>(value.ptr, length);
+                });
+                break;
+            default:
+                throw std::runtime_error("parquet decimal scan: unsupported physical type");
+        }
+    };
+    if (DecimalStorageOf(Spec_) == EDecimalStorage::I64) {
+        read(reinterpret_cast<int64_t*>(values->mutable_data()));
     } else {
-        auto* binary = dynamic_cast<parquet::internal::BinaryRecordReader*>(Reader_.get());
-        if (!binary) {
-            throw std::runtime_error("parquet decimal scan: binary record reader is unavailable");
-        }
-        values = Allocate(rows * width, MemoryPool_);
-        std::shared_ptr<arrow::Buffer> bitmap;
-        int64_t row = 0;
-        for (const auto& chunk : binary->GetBuilderChunks()) {
-            for (int64_t i = 0; i < chunk->length(); ++i, ++row) {
-                if (chunk->IsNull(i)) {
-                    if (!bitmap) {
-                        bitmap = Allocate(arrow::bit_util::BytesForBits(rows), MemoryPool_);
-                        std::memset(bitmap->mutable_data(), 0xff, bitmap->size());
-                    }
-                    arrow::bit_util::ClearBit(bitmap->mutable_data(), row);
-                    StoreUnscaled(values->mutable_data(), row, width, 0);
-                    ++nullCount;
-                    continue;
-                }
-                std::string_view bytes = physical == parquet::Type::FIXED_LEN_BYTE_ARRAY
-                    ? static_cast<const arrow::FixedSizeBinaryArray&>(*chunk).GetView(i)
-                    : static_cast<const arrow::BinaryArray&>(*chunk).GetView(i);
-                const auto* data = reinterpret_cast<const uint8_t*>(bytes.data());
-                const auto length = static_cast<int32_t>(bytes.size());
-                const __int128 value = length <= 8
-                    ? static_cast<__int128>(BigEndianUnscaled<int64_t, uint64_t>(data, length))
-                    : BigEndianUnscaled<__int128, unsigned __int128>(data, length);
-                StoreUnscaled(values->mutable_data(), row, width, value);
-            }
-        }
-        if (row != rows) {
-            throw std::runtime_error("parquet decimal scan: decoded value count mismatch");
-        }
-        validity = std::move(bitmap);
+        read(reinterpret_cast<__int128*>(values->mutable_data()));
     }
     return arrow::MakeArray(arrow::ArrayData::Make(
-        Type_, rows, {std::move(validity), std::move(values)}, nullCount));
+        Type_, rows, {std::move(nulls.Bitmap), std::move(values)}, nulls.Count));
 }
 
 } // namespace NQdb
