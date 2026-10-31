@@ -58,8 +58,9 @@ TTypePtr UnifyIntegers(const TIntegerType& a, const TIntegerType& b) {
 
 // Common numeric type for a UNION column across branches: any decimal -> decimal
 // (scale = max branch scale, precision widened to 38 to avoid overflow when a float/int
-// branch is cast in); else any float -> float; else the wider integer. Returns nullptr if the base
-// types are not a compatible numeric mix (caller reports the mismatch).
+// branch is cast in); else two floats -> the wider (REAL with DOUBLE is DOUBLE), a float with
+// an integer -> the float, as in PostgreSQL; else the wider integer. Returns nullptr if the
+// base types are not a compatible numeric mix (caller reports the mismatch).
 TTypePtr UnifyUnionBase(const TTypePtr& a, const TTypePtr& b) {
     if (!a || !b) return nullptr;
     if (a->ToString() == b->ToString()) return a;
@@ -72,7 +73,11 @@ TTypePtr UnifyUnionBase(const TTypePtr& a, const TTypePtr& b) {
         int32_t scale = std::max(da ? da->Scale : 0, db ? db->Scale : 0);
         return std::make_shared<TDecimal>(MaxDecimalPrecision, scale);
     }
-    if (IsFloatType(a) || IsFloatType(b)) return std::make_shared<TFloatType>();
+    if (IsFloatType(a) && IsFloatType(b)) {
+        const int aBits = TMaybeType<TFloatType>(a).Cast()->BitWidth();
+        return aBits >= TMaybeType<TFloatType>(b).Cast()->BitWidth() ? a : b;
+    }
+    if (IsFloatType(a) || IsFloatType(b)) return IsFloatType(a) ? a : b;
     return UnifyIntegers(*TMaybeType<TIntegerType>(a).Cast(), *TMaybeType<TIntegerType>(b).Cast());
 }
 
@@ -513,13 +518,20 @@ int32_t IntegerDecimalDigits(const TIntegerType& type) {
 }
 
 // Type both join key sides are cast to so that equal values have equal bytes:
-// the common integer type, or for a decimal key (against a decimal or an integer)
-// the decimal with the larger scale and the larger integer part. nullptr when the
+// DOUBLE for a float key against any other number, as PostgreSQL's `=` compares REAL only
+// with REAL; the common integer type; or for a decimal key (against a decimal or an
+// integer) the decimal with the larger scale and the larger integer part. nullptr when the
 // sides already share a type or no common key type exists; throws when the common
 // decimal would need more than 38 digits, as a wrapping cast would equate unequal keys.
 TTypePtr CommonKeyType(const TTypePtr& left, const TTypePtr& right) {
     if (left->ToString() == right->ToString()) {
         return nullptr;
+    }
+    const auto isNumber = [](const TTypePtr& type) {
+        return IsIntType(type) || IsFloatType(type) || DecimalSpecOfValueType(type);
+    };
+    if ((IsFloatType(left) || IsFloatType(right)) && isNumber(left) && isNumber(right)) {
+        return std::make_shared<TFloatType>(TFloatType::F64);
     }
     auto leftInt = TMaybeType<TIntegerType>(left);
     auto rightInt = TMaybeType<TIntegerType>(right);

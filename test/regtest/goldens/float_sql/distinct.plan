@@ -1,0 +1,6 @@
+project (distinct_f, c) (rows≈1 cost≈696)
+└─ aggregate keys=[__group__] aggs=[count_0=count, count_1=sum] (rows≈1 cost≈680)
+   └─ project (q.f, partial_0, __group__) (rows≈10 cost≈440)
+      └─ aggregate keys=[q.f] aggs=[partial_0=count] (rows≈10 cost≈240)
+         └─ project (q.f) (rows≈10 cost≈120)
+            └─ source t AS t (rows≈10 cost≈80)

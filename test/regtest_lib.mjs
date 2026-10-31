@@ -14,7 +14,11 @@ const DEFAULT_ROW_GROUP_ROWS = 128;
 const DEFAULT_TOLERANCE = Object.freeze({ abs: 1e-12, rel: 1e-12 });
 const INTEGER_TYPES = new Set(['i8', 'i16', 'i32', 'u8', 'u16', 'u32']);
 const WIDE_INTEGER_TYPES = new Set(['i64', 'u64', 'i128', 'u128']);
-const SCALAR_TYPES = new Set([...INTEGER_TYPES, ...WIDE_INTEGER_TYPES, 'f64', 'bool', 'string']);
+// An f32 cell is the shortest decimal of the value, as in the native goldens.
+const FLOAT_TYPES = new Set(['f32', 'f64']);
+const SCALAR_TYPES = new Set([
+  ...INTEGER_TYPES, ...WIDE_INTEGER_TYPES, ...FLOAT_TYPES, 'bool', 'string',
+]);
 
 function readJson(file) {
   try {
@@ -129,7 +133,7 @@ function floatValue(value) {
     case '+inf': return Infinity;
     case '-inf': return -Infinity;
     case '-0': return -0;
-    default: throw new Error(`invalid f64 value ${JSON.stringify(value)}`);
+    default: throw new Error(`invalid float value ${JSON.stringify(value)}`);
   }
 }
 
@@ -142,7 +146,7 @@ function sourceValue(column, value) {
   }
   if (WIDE_INTEGER_TYPES.has(column.type)) return BigInt(value);
   if (INTEGER_TYPES.has(column.type)) return Number(value);
-  if (column.type === 'f64') return floatValue(value);
+  if (FLOAT_TYPES.has(column.type)) return floatValue(value);
   if (column.type === 'bool') {
     if (typeof value !== 'boolean') throw new Error(`invalid bool value in ${column.name}`);
     return value;
@@ -155,7 +159,7 @@ function sourceValue(column, value) {
 function computedColumnStats(columns, values) {
   return columns.map(column => {
     const present = values[column.name].filter(value => value !== null);
-    if (column.type === 'f64' && present.some(Number.isNaN)) {
+    if (FLOAT_TYPES.has(column.type) && present.some(Number.isNaN)) {
       return { name: column.name };
     }
     const distinct = new Set(present.map(value =>
@@ -396,7 +400,7 @@ function resultCell(column, value) {
   if (value === null || value === undefined) return null;
   if (WIDE_INTEGER_TYPES.has(column.type)) return String(value);
   if (INTEGER_TYPES.has(column.type)) return Number(value);
-  if (column.type === 'f64') return floatJson(Number(value));
+  if (FLOAT_TYPES.has(column.type)) return floatJson(Number(value));
   if (column.type === 'bool') {
     if (value === true || value === 1) return true;
     if (value === false || value === 0) return false;
@@ -443,7 +447,7 @@ function normalize(result, ordered) {
       throw new Error(`result row ${index}: wrong width`);
     }
     return row.map((cell, i) =>
-      cell !== null && columns[i].type === 'f64' ? floatJson(floatValue(cell)) : cell);
+      cell !== null && FLOAT_TYPES.has(columns[i].type) ? floatJson(floatValue(cell)) : cell);
   });
   if (!ordered) {
     rows.sort((left, right) => (rowKey(left) < rowKey(right) ? -1 : rowKey(left) > rowKey(right) ? 1 : 0));
@@ -466,7 +470,7 @@ function resultsMatch(actual, expected, ordered, tol) {
   if (actual.schema !== expected.schema || actual.rows.length !== expected.rows.length) {
     return false;
   }
-  const floats = actual.columns.map(column => column.type === 'f64');
+  const floats = actual.columns.map(column => FLOAT_TYPES.has(column.type));
   const rowMatches = (left, right) => left.every((cell, i) => {
     if (cellKey(cell) === cellKey(right[i])) return true;
     // NULL and $float tags (NaN, infinities, signed zero) stay exact.

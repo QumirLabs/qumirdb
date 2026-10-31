@@ -1,0 +1,5 @@
+sort [f desc, id desc]
+└─ project (id, f) (rows≈9 cost≈384)
+   └─ project (q.id, q.f) (rows≈9 cost≈312)
+      └─ filter (!= |t.id| 5) (rows≈9 cost≈240)
+         └─ source t AS t row-groups (!= |t.id| 5) (rows≈10 cost≈120)

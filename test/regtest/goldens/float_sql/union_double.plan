@@ -1,0 +1,10 @@
+sort [id asc]
+└─ union-all (rows≈6 cost≈600)
+   ├─ project (id, v) (rows≈3 cost≈324)
+   │  └─ project (id, v) (rows≈3 cost≈288)
+   │     └─ project (q.id, q.f) (rows≈3 cost≈264)
+   │        └─ filter (< |t.id| 4) (rows≈3 cost≈240)
+   │           └─ source t AS t row-groups (< |t.id| 4) (rows≈10 cost≈120)
+   └─ project (col0, d) (rows≈3 cost≈276)
+      └─ filter (< |t_1.id| 4) (rows≈3 cost≈240)
+         └─ source t AS t_1 row-groups (< |t_1.id| 4) (rows≈10 cost≈120)

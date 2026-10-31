@@ -10,6 +10,7 @@
 #include <qumir/parser/ast.h>
 #include <qumir/parser/core/printer.h>
 
+#include <bit>
 #include <charconv>
 #include <memory>
 #include <optional>
@@ -44,31 +45,6 @@ void DetachNamedTypes(const TExprPtr& expr) {
     }
 }
 
-// A compilation rewrites its expression, so each one gets its own copy.
-std::optional<std::string> EvalClosed(
-    TVmFrontendContext& context,
-    std::vector<std::string> imports,
-    const TExprPtr& expr,
-    const TTypePtr& retType)
-{
-    auto copy = CloneExpr(expr);
-    DetachNamedTypes(copy);
-    NQumir::TLocation loc{};
-    auto body = std::make_shared<TBlockExpr>(
-        loc, std::vector<TExprPtr>{std::move(copy)});
-    auto compiled = TVmFunction::Compile(context, {
-        .NamePrefix = EvalFn,
-        .Params = {},
-        .Body = std::move(body),
-        .ReturnType = DetachedType(retType),
-        .Imports = std::move(imports),
-    });
-    if (!compiled) {
-        return std::nullopt;
-    }
-    return (*compiled)->Eval({});
-}
-
 TExprPtr LiteralFromResult(const std::string& s) {
     NQumir::TLocation loc{};
     if (s == "true") {
@@ -90,6 +66,49 @@ TExprPtr LiteralFromResult(const std::string& s) {
     return nullptr;
 }
 
+bool IsReal(const TTypePtr& type) {
+    auto floating = TMaybeType<TFloatType>(type);
+    return floating && floating.Cast()->Kind == TFloatType::F32;
+}
+
+// A compilation rewrites its expression, so each one gets its own copy. The result is a
+// literal of the expression's type. A REAL stays a typed REAL literal, read from the raw
+// register: its text form would round it to 15 decimals and make it a DOUBLE.
+TExprPtr EvalClosed(
+    TVmFrontendContext& context,
+    std::vector<std::string> imports,
+    const TExprPtr& expr,
+    const TTypePtr& retType)
+{
+    auto copy = CloneExpr(expr);
+    DetachNamedTypes(copy);
+    NQumir::TLocation loc{};
+    auto body = std::make_shared<TBlockExpr>(
+        loc, std::vector<TExprPtr>{std::move(copy)});
+    auto compiled = TVmFunction::Compile(context, {
+        .NamePrefix = EvalFn,
+        .Params = {},
+        .Body = std::move(body),
+        .ReturnType = DetachedType(retType),
+        .Imports = std::move(imports),
+    });
+    if (!compiled) {
+        return nullptr;
+    }
+    if (IsReal(retType)) {
+        auto raw = (*compiled)->EvalRaw({});
+        if (!raw) {
+            return nullptr;
+        }
+        auto literal = std::make_shared<TNumberExpr>(loc,
+            static_cast<double>(std::bit_cast<float>(static_cast<uint32_t>(*raw))));
+        literal->Type = std::make_shared<TFloatType>(TFloatType::F32);
+        return literal;
+    }
+    auto result = (*compiled)->Eval({});
+    return result ? LiteralFromResult(*result) : nullptr;
+}
+
 } // namespace
 
 TConstFolder::TConstFolder() = default;
@@ -102,7 +121,7 @@ TConstFolder::~TConstFolder() = default;
 // the module and is compiled with it. The module defines operators only for
 // its own types and `%` on doubles, which Qumir does not accept, so an
 // expression that compiles without the module means the same as with it.
-std::optional<std::string> TConstFolder::Eval(const TExprPtr& expr, const TTypePtr& type) {
+TExprPtr TConstFolder::Eval(const TExprPtr& expr, const TTypePtr& type) {
     if (!Builtin_) {
         Builtin_ = std::make_unique<TVmFrontendContext>();
     }
@@ -137,11 +156,7 @@ TExprPtr TConstFolder::Fold(TExprPtr expr) {
     if (!rewrittenType) {
         return expr;
     }
-    auto result = Eval(rewritten, rewrittenType);
-    if (!result) {
-        return expr;
-    }
-    auto literal = LiteralFromResult(*result);
+    auto literal = Eval(rewritten, rewrittenType);
     return literal ? literal : expr;
 }
 

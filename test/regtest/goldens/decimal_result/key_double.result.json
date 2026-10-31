@@ -1,0 +1,9 @@
+{
+  "schema": "<struct (k string) (c i64)>",
+  "rows": [
+    ["decimal", "5"],
+    ["in", "2"],
+    ["join", "5"],
+    ["where", "2"]
+  ]
+}

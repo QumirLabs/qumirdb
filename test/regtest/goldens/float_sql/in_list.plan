@@ -1,0 +1,5 @@
+sort [id asc]
+└─ project (id, one_lit, two_lits, two_ints, with_double, with_column, int_lhs) (rows≈9 cost≈714)
+   └─ project (q.id, q.f, q.g, q.k) (rows≈9 cost≈624)
+      └─ filter (!= |t.id| 5) (rows≈9 cost≈480)
+         └─ source t AS t row-groups (!= |t.id| 5) (rows≈10 cost≈240)

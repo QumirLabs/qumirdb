@@ -202,11 +202,18 @@ TExprPtr DecimalToDecimal(const TExprPtr& operand, const TTypePtr& from, const T
         : wide;
 }
 
-TExprPtr DecimalToFloat(const TExprPtr& operand, const TTypePtr& from, const TTypePtr&,
+// REAL goes through DOUBLE: the runtime converts only to f64.
+TExprPtr DecimalToFloat(const TExprPtr& operand, const TTypePtr& from, const TTypePtr& to,
     TLocation loc)
 {
-    return Call(IsDecimal64(from) ? "qdb_decimal64_to_f64" : "qdb_decimal_to_f64",
+    auto value = Call(IsDecimal64(from) ? "qdb_decimal64_to_f64" : "qdb_decimal_to_f64",
         {operand, Int64(ScaleOf(from), loc)}, loc);
+    auto floating = TMaybeType<TFloatType>(UnwrapNamedType(to));
+    if (floating && floating.Cast()->Kind == TFloatType::F32) {
+        return std::make_shared<TCastExpr>(loc, std::move(value),
+            std::make_shared<TFloatType>(TFloatType::F32));
+    }
+    return value;
 }
 
 TExprPtr DecimalToInteger(const TExprPtr& operand, const TTypePtr& from, const TTypePtr& to,

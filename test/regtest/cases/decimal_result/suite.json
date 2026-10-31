@@ -20,6 +20,7 @@
     "key_join_group.sql": {"order": "ordered"},
     "key_before_int_group.sql": {"order": "ordered"},
     "key_common_type.sql": {"order": "ordered"},
+    "key_double.sql": {"order": "ordered"},
     "key_intersect.sql": {"order": "ordered"},
     "key_except.sql": {"order": "ordered"},
     "key_except_integer.sql": {"order": "ordered"},

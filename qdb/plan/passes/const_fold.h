@@ -34,7 +34,7 @@ public:
         const NQumir::NAst::TExprPtr& expr);
 
 private:
-    std::optional<std::string> Eval(
+    NQumir::NAst::TExprPtr Eval(
         const NQumir::NAst::TExprPtr& expr,
         const NQumir::NAst::TTypePtr& type);
 

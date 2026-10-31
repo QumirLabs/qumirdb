@@ -1,0 +1,8 @@
+sort [id asc]
+└─ project (id, run_sum, run_max, part_avg, part_sum)
+   └─ window partition=[wk_0] fns=[w_2=avg, w_3=sum]
+      └─ window order=[q.id asc] fns=[w_0=sum, w_1=max]
+         └─ project (q.id, q.g, wk_0) (rows≈10 cost≈440)
+            └─ project (q.id, q.g) (rows≈10 cost≈320)
+               └─ filter (> |t.id| 1) (rows≈10 cost≈240)
+                  └─ source t AS t row-groups (> |t.id| 1) (rows≈10 cost≈120)

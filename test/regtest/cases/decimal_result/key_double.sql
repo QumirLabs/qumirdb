@@ -1,0 +1,14 @@
+-- A DOUBLE PRECISION key meets an INTEGER or a DECIMAL key as DOUBLE PRECISION (issue #422).
+SELECT 'join' AS k, count(*) AS c
+  FROM (SELECT CAST(id AS DOUBLE PRECISION) AS d FROM t) x JOIN t AS y ON x.d = y.id
+UNION ALL
+SELECT 'where', count(*)
+  FROM (SELECT CAST(a AS DOUBLE PRECISION) / 75 AS d FROM t) x, t AS y WHERE x.d = y.id
+UNION ALL
+SELECT 'in', count(*)
+  FROM (SELECT CAST(a AS DOUBLE PRECISION) / 75 AS d FROM t) x WHERE x.d IN (SELECT id FROM t)
+UNION ALL
+SELECT 'decimal', count(*)
+  FROM (SELECT CAST(id AS DOUBLE PRECISION) / 4 AS d FROM t) x
+  JOIN (SELECT CAST(id AS DECIMAL(10,2)) / 4 AS v FROM t) y ON x.d = y.v
+ORDER BY k;
