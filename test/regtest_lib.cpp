@@ -597,6 +597,15 @@ std::set<std::string> NativeVariants(const TValue& value) {
     return variants;
 }
 
+bool ListsVariant(const TValue& value, std::string_view variant) {
+    for (const auto& item : Array(value)) {
+        if (String(item) == variant) {
+            return true;
+        }
+    }
+    return false;
+}
+
 fs::path File(const fs::path& dir, const TValue& value) {
     const auto path = (dir / String(value)).lexically_normal();
     if (!fs::is_regular_file(path)) throw std::runtime_error("missing file " + path.string());
@@ -880,12 +889,22 @@ std::vector<TQueryCase> CollectCases(const fs::path& root, const fs::path& golde
             std::set<fs::path> queries;
             for (const auto& [name, value] : Object(Required(object, "cases"))) {
                 const auto& definition = Object(value);
-                Fields(definition, {"tables", "order", "execute", "tol", "variants", "expect_error"});
+                Fields(definition, {"tables", "order", "execute", "tol", "variants", "expect_error", "settings"});
                 const bool execute = BoolOption(definition, "execute", suiteExecute);
                 const auto tol = ToleranceOption(definition, suiteTol);
                 const bool expectError = BoolOption(definition, "expect_error", suiteExpectError);
                 const auto* caseVariants = definition.get("variants");
                 const auto executed = caseVariants ? NativeVariants(*caseVariants) : variants;
+                std::vector<std::string> settings;
+                if (auto* specs = definition.get("settings")) {
+                    for (const auto& spec : Array(*specs)) {
+                        settings.push_back(String(spec));
+                    }
+                    // The browser runner has no engine settings to apply.
+                    if (!caseVariants || ListsVariant(*caseVariants, "js")) {
+                        throw std::runtime_error("a case with settings lists its own variants without js");
+                    }
+                }
                 const auto sql = File(dir, TValue(name.str()));
                 if (sql.extension() != ".sql" || sql.parent_path() != dir) {
                     throw std::runtime_error("suite SQL cases must be .sql files in the manifest directory");
@@ -907,7 +926,7 @@ std::vector<TQueryCase> CollectCases(const fs::path& root, const fs::path& golde
                     ? std::set<std::string>{"plan"} : executed;
                 for (const auto& variant : runs) {
                     result.push_back({base, sql, planGolden, golden, errorGolden,
-                        suite, bindings, variant, order == "ordered", execute, tol, expectError});
+                        suite, bindings, variant, order == "ordered", execute, tol, expectError, settings});
                 }
             }
             for (const auto& entry : fs::directory_iterator(dir)) {
@@ -1320,6 +1339,15 @@ TCaseResult CheckCase(const TQueryCase& test, bool canonize, const TRegTestOptio
     variant.ScanSplit.Strategy = NScheduler::EScanSplitStrategy::RowGroupRange;
     variant.ScanSplit.MaxScanTasks = test.Variant == "single" ? 1 : 4;
     ApplyEngineConfig(options.Engine, engine);
+    if (!test.Settings.empty()) {
+        NUtils::TConfig caseConfig(EngineConfigSchema());
+        for (const auto& spec : test.Settings) {
+            if (auto applied = caseConfig.Override(spec); !applied) {
+                throw THarnessError(applied.error());
+            }
+        }
+        ApplyEngineConfig(caseConfig, engine);
+    }
     std::vector<std::unique_ptr<TParquetSource>> sources;
     std::optional<TParsedQuery> parsed;
     TOperatorPtr plan;

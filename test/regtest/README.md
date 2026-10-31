@@ -42,6 +42,20 @@ List `js` only where the case passes in the browser; the browser runner fails a
 `js` case whose plan the exporter cannot run in the browser, and reports every
 executed case without `js` as skipped together with the list that excludes it.
 
+## Engine settings
+
+A case may set engine settings of its own with `"settings"`, in the
+`section:key=value` form of the command line; they apply after those of the
+run. The browser runner has no engine settings, so such a case lists its own
+variants without `js`:
+
+```json
+"count_instrumented.sql": {
+  "variants": ["single", "threaded"],
+  "settings": ["instrumentation:operators=true"]
+}
+```
+
 ## Expected errors
 
 An invalid query is a regular result. A case that must fail sets

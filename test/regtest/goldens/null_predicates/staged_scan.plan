@@ -1,0 +1,4 @@
+sort [id asc]
+└─ project (id, body) (rows≈1 cost≈2.6K)
+   └─ filter (&& (== |texts.flag| 1) (call qdb_string_view_sql_like |texts.body| (cast "%needle%" <named StringView>))) (rows≈1 cost≈2.6K)
+      └─ source texts AS texts row-groups (&& (call qdb_string_view_sql_like |texts.body| (cast "%needle%" <named StringView>)) (== |texts.flag| 1)) (rows≈40 cost≈1.3K)

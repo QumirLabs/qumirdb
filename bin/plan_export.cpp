@@ -976,6 +976,8 @@ NQdb::NScheduler::TSettings ParseSchedulerSettings(const llvm::json::Object& roo
     settings.Join.Table = NQdb::NScheduler::EJoinTableKind::Legacy;
     // It also keeps every aggregate in the swiss table.
     settings.Aggregate.Table = NQdb::NScheduler::EAggregateTableKind::Swiss;
+    // Its sources are read in the browser, which has no staged scan.
+    settings.Scan.StagedFilter = false;
 
     const auto* optionsValue = root.get("options");
     const auto* options = optionsValue ? optionsValue->getAsObject() : nullptr;
@@ -2414,6 +2416,11 @@ struct TExecPlanCodec {
             case NQdb::EExecPlanNodeKind::RuntimeFilter: {
                 Unsupported = UnsupportedExec(
                     "runtime-filter is only supported by the native runtime");
+                return;
+            }
+            case NQdb::EExecPlanNodeKind::StagedScan: {
+                Unsupported = UnsupportedExec(
+                    "staged-scan is only supported by the native runtime");
                 return;
             }
             case NQdb::EExecPlanNodeKind::Project: {

@@ -146,6 +146,8 @@ TEngineConfigBuilder BuildEngineConfig() {
         "Bytes a scan task aims to read.", 1);
     b.Size("tiny_input_rows", [](auto& s) -> auto& { return s.Scheduler.ScanSplit.TinyInputRowsThreshold; },
         "Scans of at most this many rows are not split; 0 splits every scan.");
+    b.Bool("staged_filter", [](auto& s) -> auto& { return s.Scheduler.Scan.StagedFilter; },
+        "Read the columns of a filter over a Parquet scan in stages, each only for the rows the earlier ones keep.");
 
     b.Section("join");
     b.Enum("table", NScheduler::JoinTableKindNames, NScheduler::ParseJoinTableKind,

@@ -96,6 +96,8 @@ Physical execution:
   boundary.
 - [Late materialization](late_materialization.md) - narrow Parquet scans, row
   locators, lookup tasks, and safety rules.
+- [Staged scan](staged_scan.md) - a filter fused into its Parquet scan: the
+  filter's columns are read in stages, each only for the rows that still pass.
 - [Dispatch](dispatch.md) - runtime shell dispatch model, node kinds, and
   kernel/dispatcher ownership split.
 - [String values](string_values.md) - borrowed/owned string representations for

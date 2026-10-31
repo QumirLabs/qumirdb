@@ -19,6 +19,7 @@ namespace arrow { class RecordBatchReader; class Schema; }
 namespace NQdb {
 
 class TParquetColumnScan;
+class TParquetGroupedScan;
 class TParquetSource;
 struct TParquetFileData;
 
@@ -77,6 +78,11 @@ public:
         const std::unordered_set<std::string>* columnNames = nullptr) const;
     std::unique_ptr<TParquetSource> MakeRowGroupsSource(
         const std::vector<size_t>& rowGroups) const;
+    // A staged scan of `rowGroups` with the restricted columns. `laterGroups` lists file
+    // columns read after the first group, which takes the others and the row locator.
+    std::unique_ptr<TParquetGroupedScan> MakeGroupedScan(
+        const std::vector<size_t>& rowGroups,
+        const std::vector<std::vector<std::string>>& laterGroups) const;
     std::shared_ptr<const IPhysicalRowReader> CompileReader(
         std::span<const std::string> columnNames) const override;
 
@@ -121,6 +127,38 @@ private:
     std::vector<std::string> Names_;
     std::vector<TColumnSchema> Columns_;
     TSchema Schema_;
+};
+
+// One lane of a staged scan. Next reads the first column group of a batch; Read reads a later
+// group of that batch while it is alive, only for the rows a selection marks. A column not
+// read yet has no data; a row a sparse read skips holds zero or an empty string.
+class TParquetGroupedScan {
+public:
+    ~TParquetGroupedScan();
+
+    bool Next(TRowSet& rowSet);
+    // Reads group `group` (the first later group is 1) for the rows `selection` marks;
+    // null reads every row.
+    void Read(size_t group, const uint8_t* selection);
+    // Moves the columns of `group` past the batch.
+    void Skip(size_t group);
+
+private:
+    friend class TParquetSource;
+    struct TBatch;
+    struct TColumnScan {
+        size_t Position = 0;
+        std::unique_ptr<TParquetColumnScan> Scan;
+    };
+
+    TParquetGroupedScan() = default;
+
+    std::unique_ptr<TParquetSource> First_;
+    // The position of each column of First_ in a batch.
+    std::vector<size_t> FirstPositions_;
+    std::vector<std::vector<TColumnScan>> Groups_;
+    size_t ColumnCount_ = 0;
+    TBatch* Batch_ = nullptr;
 };
 
 } // namespace NQdb
