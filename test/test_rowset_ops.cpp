@@ -82,13 +82,21 @@ public:
         const int64_t rows = RowSet_.RowCount;
         std::vector<uint8_t> sel(rows);
         for (int64_t i = 0; i < rows; ++i) {
-            if (pattern == "none") sel[i] = 0;
-            else if (pattern == "all") sel[i] = 1;
-            else if (pattern == "alt") sel[i] = i % 2;
-            else if (pattern == "first") sel[i] = i == 0;
-            else if (pattern == "last") sel[i] = i == rows - 1;
-            else if (pattern == "runs") sel[i] = (i / 5) % 3 != 1;
-            else sel[i] = Rng_() % 3 != 0;
+            if (pattern == "none") {
+                sel[i] = 0;
+            } else if (pattern == "all") {
+                sel[i] = 1;
+            } else if (pattern == "alt") {
+                sel[i] = i % 2;
+            } else if (pattern == "first") {
+                sel[i] = i == 0;
+            } else if (pattern == "last") {
+                sel[i] = i == rows - 1;
+            } else if (pattern == "runs") {
+                sel[i] = (i / 5) % 3 != 1;
+            } else {
+                sel[i] = Rng_() % 3 != 0;
+            }
         }
         return sel;
     }
@@ -135,10 +143,18 @@ public:
         return r;
     }
 
-    TRowSet& RowSet() { return RowSet_; }
-    const std::vector<TValueLayout>& Layouts() const { return Layouts_; }
-    const std::vector<TTestColumn>& Columns() const { return Columns_; }
-    const std::vector<uint64_t>& Hash() const { return Hash_; }
+    TRowSet& RowSet() {
+        return RowSet_;
+    }
+    const std::vector<TValueLayout>& Layouts() const {
+        return Layouts_;
+    }
+    const std::vector<TTestColumn>& Columns() const {
+        return Columns_;
+    }
+    const std::vector<uint64_t>& Hash() const {
+        return Hash_;
+    }
 
 private:
     TTestColumn MakeColumn(EKind kind, int64_t rows, bool nullable) {
