@@ -19,6 +19,7 @@ add_library(qumirdb
     io/parquet/source.cpp
     io/parquet/row_reader.cpp
     io/parquet/row_group_predicate.cpp
+    io/rowset_ops.cpp
     io/text/sink.cpp
     plan/ops/source.cpp
     plan/ops/filter.cpp
