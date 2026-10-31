@@ -67,9 +67,9 @@ using TPublish = void (*)(TPublishState*, const TPartialView*, int64_t);
 using TProbe = int64_t (*)(const TFilterData*, const uint64_t*, const uint8_t*, uint8_t*,
     int64_t, int64_t, uint64_t*, uint8_t*);
 
-template <typename T>
-T Entry(const TRuntimeContext& context, EEntry entry) {
-    return reinterpret_cast<T>(context.RuntimeFilterKernels->Fns[entry]);
+template <typename T, typename... TArgs>
+auto CallEntry(const TRuntimeContext& context, EEntry entry, TArgs... args) {
+    return context.RuntimeFilterKernels->Call<T>(entry, args...);
 }
 
 void CheckKernels(const std::shared_ptr<TRuntimeContext>& context) {
@@ -124,12 +124,12 @@ void TRuntimeFilterBuilder::Add(
 {
     CheckBatchSizes(hashes.size(), hashes.size(), selection.size());
     BuildRows_ += SelectedRows(hashes.size(), selection);
-    const auto build = Entry<TBuild>(*RuntimeContext_, EEntry::Build);
     size_t row = 0;
     // The kernel stops only to ask for storage, and continues from that row.
     do {
         ProvideStorage(hashes.size() - row);
-        row += static_cast<size_t>(build(&State_, hashes.data() + row,
+        row += static_cast<size_t>(CallEntry<TBuild>(*RuntimeContext_, EEntry::Build,
+            &State_, hashes.data() + row,
             selection.empty() ? nullptr : selection.data() + row,
             static_cast<int64_t>(hashes.size() - row)));
     } while (State_.Want != EWant::Nothing);
@@ -273,7 +273,7 @@ void TRuntimeFilter::BuildPublishedData() {
     state.Table = table.data();
     state.Bloom = bloom.data();
     state.BloomWords = static_cast<int64_t>(bloom.size());
-    Entry<TPublish>(*RuntimeContext_, EEntry::Publish)(
+    CallEntry<TPublish>(*RuntimeContext_, EEntry::Publish,
         &state, partials.data(), static_cast<int64_t>(partials.size()));
 
     if (state.Kind == static_cast<int64_t>(EKind::Exact)) {
@@ -359,7 +359,7 @@ size_t TRuntimeFilter::MayContainBatch(
         .Words = Data_.Words.data(),
         .WordCount = static_cast<int64_t>(Data_.Words.size()),
     };
-    const auto accepted = static_cast<size_t>(Entry<TProbe>(*RuntimeContext_, EEntry::Probe)(
+    const auto accepted = static_cast<size_t>(CallEntry<TProbe>(*RuntimeContext_, EEntry::Probe,
         &data, hashes.data(), selection.empty() ? nullptr : selection.data(),
         output.data(), static_cast<int64_t>(hashes.size()), vectorized,
         state.SelectedHashes.data(), state.SelectedOutput.data()));

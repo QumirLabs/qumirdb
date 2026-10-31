@@ -7,6 +7,8 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace NQumir {
@@ -17,6 +19,31 @@ namespace NQdb {
 
 class TRuntimeContext;
 
+// Kernel ABI: arguments are pointers, integers up to 64 bits or bool; the
+// result is void, an integer or bool.
+template <typename T>
+constexpr bool IsKernelArg() {
+    if constexpr (std::is_pointer_v<T>) {
+        return true;
+    } else if constexpr (std::is_integral_v<T>) {
+        return sizeof(T) <= sizeof(int64_t);
+    } else {
+        return false;
+    }
+}
+
+template <typename T>
+constexpr bool IsKernelResult() {
+    return std::is_void_v<T> || IsKernelArg<T>();
+}
+
+template <typename>
+inline constexpr bool IsKernelSignature = false;
+
+template <typename R, typename... TArgs>
+inline constexpr bool IsKernelSignature<R (*)(TArgs...)> =
+    IsKernelResult<R>() && (IsKernelArg<TArgs>() && ...);
+
 // Machine binding for one generated kernel program. Created empty at
 // generation time; filled exactly once by the JIT finalizer.
 struct TKernelSlot {
@@ -26,6 +53,13 @@ struct TKernelSlot {
     std::shared_ptr<NQumir::TLLVMRunner> Runner;
     // Cache path only: keeps the query's LLJIT alive (the runner does not).
     std::shared_ptr<void> JitLifetime;
+
+    // Calls entrypoint `index`; TFn is its native function pointer type.
+    template <typename TFn, typename... TArgs>
+    auto Call(size_t index, TArgs... args) const {
+        static_assert(IsKernelSignature<TFn>, "kernel signature violates the kernel ABI");
+        return reinterpret_cast<TFn>(Fns[index])(args...);
+    }
 };
 
 // One kernel program attached to the physical plan as an AST. A finalizer
