@@ -1,0 +1,1 @@
+SELECT id, CAST(u AS DECIMAL(18,0)) AS x FROM u ORDER BY id;

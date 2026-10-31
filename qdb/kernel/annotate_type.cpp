@@ -1779,13 +1779,10 @@ TExprPtr DecimalScaleLiteral(TLocation loc, int32_t scale) {
     return Int64(loc, static_cast<int64_t>(scale));
 }
 
-// The expression as a DECIMAL of `targetScale`: the cast-table row from its value type.
-// Only the scale matters to the conversion, so the target carries the widest precision.
-TExprPtr DecimalValueAtScale(TExprPtr expr, const TTypePtr& type, int32_t targetScale,
-    TLocation loc)
-{
-    TTypePtr target = MakeDecimalType({.Precision = MaxDecimalPrecision, .Scale = targetScale});
-    if (auto converted = ApplyDecimalCastRule(ValueType(type), target, expr, loc)) {
+// The expression as a DECIMAL of `target`: the cast-table row from its value type. The
+// target's precision picks the storage the value is converted to.
+TExprPtr DecimalValueAs(TExprPtr expr, const TTypePtr& type, TDecimalSpec target, TLocation loc) {
+    if (auto converted = ApplyDecimalCastRule(ValueType(type), MakeDecimalType(target), expr, loc)) {
         return converted;
     }
     throw NQumir::TError(
@@ -1793,19 +1790,38 @@ TExprPtr DecimalValueAtScale(TExprPtr expr, const TTypePtr& type, int32_t target
         "' to decimal");
 }
 
-int32_t DecimalCommonScale(const TTypePtr& left, const TTypePtr& right,
-    const TDecimalSpec& result)
+// The digits an operand of a decimal operation brings: its own spec, DECIMAL(w, 0) for an
+// integer, and the widest precision for a float literal no decimal holds.
+TDecimalSpec DecimalOperandSpec(const TExprPtr& e, const TTypePtr& type) {
+    const TTypePtr value = ValueType(type);
+    if (auto decimal = DecimalSpecOfValueType(value)) {
+        return *decimal;
+    }
+    if (IsInt(value)) {
+        return IntegerDecimalSpec(e, value);
+    }
+    return {.Precision = MaxDecimalPrecision, .Scale = 0};
+}
+
+// The spec both operands of a comparison take: the common scale and the wider integer
+// part, so the storage holds either side.
+TDecimalSpec DecimalComparisonSpec(const TExprPtr& le, const TTypePtr& lt,
+    const TExprPtr& re, const TTypePtr& rt)
 {
-    auto dl = DecimalSpecOfValueType(ValueType(left));
-    auto dr = DecimalSpecOfValueType(ValueType(right));
-    int32_t scale = result.Scale;
-    if (dl) {
-        scale = std::max(scale, dl->Scale);
-    }
-    if (dr) {
-        scale = std::max(scale, dr->Scale);
-    }
-    return scale;
+    const TDecimalSpec l = DecimalOperandSpec(le, lt);
+    const TDecimalSpec r = DecimalOperandSpec(re, rt);
+    const int32_t scale = std::max(l.Scale, r.Scale);
+    const int32_t intDigits = std::max(l.Precision - l.Scale, r.Precision - r.Scale);
+    return {.Precision = std::min(MaxDecimalPrecision, intDigits + scale), .Scale = scale};
+}
+
+bool IsDecimal64(const TDecimalSpec& spec) {
+    return DecimalStorageOf(spec) == EDecimalStorage::I64;
+}
+
+// A decimal operand widened to i128 at its own scale.
+TDecimalSpec Wide(const TDecimalSpec& spec) {
+    return {.Precision = MaxDecimalPrecision, .Scale = spec.Scale};
 }
 
 // The expression as a DOUBLE: a decimal is converted like CAST(... AS DOUBLE), anything else
@@ -1849,8 +1865,9 @@ TTypePtr ExpandDecimalBlock(TBlockExpr& node, const TStructType& inputType, TTyp
     return last;
 }
 
+// A literal has at most 18 digits (DecimalLiteralOf), so its storage is a plain i64.
 TExprPtr DecimalConstant(const TDecimalLiteral& lit, TLocation loc) {
-    return Call("qdb_decimal_from_unscaled", {Int64(loc, lit.Unscaled)}, loc);
+    return Int64(loc, lit.Unscaled);
 }
 
 TTypePtr ExpandDecimalNode(TExprPtr& e, const TStructType& inputType, TTypeEnv& env) {
@@ -1895,9 +1912,9 @@ TTypePtr ExpandDecimalNode(TExprPtr& e, const TStructType& inputType, TTypeEnv& 
         TTypePtr elseT = node->Else ? ExpandDecimalNode(node->Else, inputType, env) : nullptr;
         TTypePtr result = UnifyBranchTypes(thenT, elseT, node->Then, node->Else);
         if (auto decimal = DecimalSpecOfValueType(result)) {
-            node->Then = DecimalValueAtScale(node->Then, thenT, decimal->Scale, node->Location);
+            node->Then = DecimalValueAs(node->Then, thenT, *decimal, node->Location);
             if (node->Else) {
-                node->Else = DecimalValueAtScale(node->Else, elseT, decimal->Scale, node->Location);
+                node->Else = DecimalValueAs(node->Else, elseT, *decimal, node->Location);
             }
         } else if (result && IsFloat(result)) {
             node->Then = DecimalValueAsDouble(node->Then, thenT, node->Location);
@@ -1957,55 +1974,58 @@ TTypePtr ExpandDecimalNode(TExprPtr& e, const TStructType& inputType, TTypeEnv& 
         }
         TTypePtr result = BinaryValueType(node->Operator, node->Left, node->Right, lt, rt);
         if (IsComparison(node->Operator)) {
-            TDecimalSpec spec = dl ? *dl : *dr;
-            const int32_t scale = DecimalCommonScale(lt, rt, spec);
-            node->Left = DecimalValueAtScale(node->Left, lt, scale, node->Location);
-            node->Right = DecimalValueAtScale(node->Right, rt, scale, node->Location);
+            const TDecimalSpec spec = DecimalComparisonSpec(node->Left, lt, node->Right, rt);
+            node->Left = DecimalValueAs(node->Left, lt, spec, node->Location);
+            node->Right = DecimalValueAs(node->Right, rt, spec, node->Location);
             return Propagate({lt, rt}, result);
         }
         auto resultDecimal = DecimalSpecOfValueType(result);
         if (!resultDecimal) {
             return Propagate({lt, rt}, result);
         }
+        // Operands of + - % take the result's spec: it holds either of them, and an i64
+        // result computes with the i64 operators.
         if (node->Operator == "+"_op || node->Operator == "-"_op || node->Operator == "%"_op) {
-            const int32_t scale = DecimalCommonScale(lt, rt, *resultDecimal);
-            node->Left = DecimalValueAtScale(node->Left, lt, scale, node->Location);
-            node->Right = DecimalValueAtScale(node->Right, rt, scale, node->Location);
+            node->Left = DecimalValueAs(node->Left, lt, *resultDecimal, node->Location);
+            node->Right = DecimalValueAs(node->Right, rt, *resultDecimal, node->Location);
             return Propagate({lt, rt}, result);
         }
+        // The unscaled product is at scale s1 + s2, the result's scale. An i64 result has at
+        // most 18 digits, so its i64 operands multiply without overflow; a wider one is
+        // computed in i128.
         if (node->Operator == "*") {
+            const bool narrow = IsDecimal64(*resultDecimal);
             if (dl && dr) {
-                node->Left = DecimalValueAtScale(node->Left, lt, dl->Scale, node->Location);
-                node->Right = DecimalValueAtScale(node->Right, rt, dr->Scale, node->Location);
-                e = Call("qdb_decimal_mul", {
-                    std::move(node->Left),
-                    std::move(node->Right),
-                }, node->Location);
+                node->Left = DecimalValueAs(node->Left, lt, narrow ? *dl : Wide(*dl), node->Location);
+                node->Right = DecimalValueAs(node->Right, rt, narrow ? *dr : Wide(*dr), node->Location);
+                if (!narrow) {
+                    e = Call("qdb_decimal_mul", {
+                        std::move(node->Left),
+                        std::move(node->Right),
+                    }, node->Location);
+                }
                 return Propagate({lt, rt}, result);
             }
-            if (dl && !dr) {
-                node->Left = DecimalValueAtScale(node->Left, lt, dl->Scale, node->Location);
-                node->Right = CastToI64(node->Right, node->Location);
+            auto& decimalOperand = dl ? node->Left : node->Right;
+            auto& integerOperand = dl ? node->Right : node->Left;
+            const TDecimalSpec decimal = dl ? *dl : *dr;
+            decimalOperand = DecimalValueAs(decimalOperand, dl ? lt : rt,
+                narrow ? decimal : Wide(decimal), node->Location);
+            integerOperand = CastToI64(integerOperand, node->Location);
+            if (!narrow) {
                 e = Call("qdb_decimal_mul_i64", {
-                    std::move(node->Left),
-                    std::move(node->Right),
+                    std::move(decimalOperand),
+                    std::move(integerOperand),
                 }, node->Location);
-                return Propagate({lt, rt}, result);
             }
-            if (!dl && dr) {
-                node->Right = DecimalValueAtScale(node->Right, rt, dr->Scale, node->Location);
-                node->Left = CastToI64(node->Left, node->Location);
-                e = Call("qdb_decimal_mul_i64", {
-                    std::move(node->Right),
-                    std::move(node->Left),
-                }, node->Location);
-                return Propagate({lt, rt}, result);
-            }
+            return Propagate({lt, rt}, result);
         }
         if (node->Operator == "/") {
             if (dl && dr) {
-                node->Left = DecimalValueAtScale(node->Left, lt, dl->Scale, node->Location);
-                node->Right = DecimalValueAtScale(node->Right, rt, dr->Scale, node->Location);
+                // The dividend is scaled up past both scales, which needs i128 whatever
+                // the operands are; an i64 result is narrowed back.
+                node->Left = DecimalValueAs(node->Left, lt, Wide(*dl), node->Location);
+                node->Right = DecimalValueAs(node->Right, rt, Wide(*dr), node->Location);
                 const int32_t dividendScaleDelta =
                     resultDecimal->Scale + dr->Scale - dl->Scale;
                 if (dividendScaleDelta < 0) {
@@ -2022,12 +2042,15 @@ TTypePtr ExpandDecimalNode(TExprPtr& e, const TStructType& inputType, TTypeEnv& 
                     std::move(node->Left),
                     std::move(node->Right),
                 }, node->Location);
+                if (IsDecimal64(*resultDecimal)) {
+                    e = Call("qdb_decimal64_narrow", {std::move(e)}, node->Location);
+                }
                 return Propagate({lt, rt}, result);
             }
             if (dl && !dr) {
-                node->Left = DecimalValueAtScale(node->Left, lt, dl->Scale, node->Location);
+                node->Left = DecimalValueAs(node->Left, lt, *dl, node->Location);
                 node->Right = CastToI64(node->Right, node->Location);
-                e = Call("qdb_decimal_div_i64", {
+                e = Call(IsDecimal64(*dl) ? "qdb_decimal64_div_i64" : "qdb_decimal_div_i64", {
                     std::move(node->Left),
                     std::move(node->Right),
                 }, node->Location);
@@ -2041,9 +2064,10 @@ TTypePtr ExpandDecimalNode(TExprPtr& e, const TStructType& inputType, TTypeEnv& 
         TTypePtr ot = ExpandDecimalNode(node->Operand, inputType, env);
         if (auto decimal = DecimalSpecOfValueType(ValueType(ot))) {
             if (node->Operator == "-") {
-                node->Operand = DecimalValueAtScale(
-                    node->Operand, ot, decimal->Scale, node->Location);
-                e = Call("qdb_decimal_neg", {std::move(node->Operand)}, node->Location);
+                node->Operand = DecimalValueAs(node->Operand, ot, *decimal, node->Location);
+                if (!IsDecimal64(*decimal)) {
+                    e = Call("qdb_decimal_neg", {std::move(node->Operand)}, node->Location);
+                }
                 return Propagate({ot}, MakeDecimalType(*decimal));
             }
             ThrowDecimalUnsupported(node->Operator, "unary operator is not implemented");
@@ -2057,15 +2081,14 @@ TTypePtr ExpandDecimalNode(TExprPtr& e, const TStructType& inputType, TTypeEnv& 
         if (auto nullable = TMaybeType<TNullable>(target)) {
             if (auto decimal = DecimalSpecOfValueType(nullable.Cast()->UnderlyingType)) {
                 if (ot && !IsBinIntStorageType(ot)) {
-                    node->Operand = DecimalValueAtScale(
-                        node->Operand, ot, decimal->Scale, node->Location);
+                    node->Operand = DecimalValueAs(node->Operand, ot, *decimal, node->Location);
                 }
                 node->Type = ToQumirType(target);
                 return target;
             }
         }
         if (auto decimal = DecimalSpecOfValueType(target)) {
-            e = DecimalValueAtScale(node->Operand, ot, decimal->Scale, node->Location);
+            e = DecimalValueAs(node->Operand, ot, *decimal, node->Location);
             return MakeDecimalType(*decimal);
         }
         // DECIMAL -> DOUBLE / INTEGER: the cast-table row from the operand's value type.
@@ -2096,8 +2119,8 @@ TTypePtr ExpandDecimalNode(TExprPtr& e, const TStructType& inputType, TTypeEnv& 
             }
             if (auto value = NumericPreservingUnaryCall(cid.Cast()->Name, argTypes)) {
                 if (auto decimal = DecimalSpecOfValueType(value)) {
-                    node->Args[0] = DecimalValueAtScale(
-                        std::move(node->Args[0]), argTypes[0], decimal->Scale, node->Location);
+                    node->Args[0] = DecimalValueAs(
+                        std::move(node->Args[0]), argTypes[0], *decimal, node->Location);
                     e = Call(cid.Cast()->Name, {std::move(node->Args[0])}, node->Location);
                 }
                 return Propagate({argTypes[0]}, value);
@@ -2113,6 +2136,15 @@ TTypePtr ExpandDecimalNode(TExprPtr& e, const TStructType& inputType, TTypeEnv& 
                     return std::make_shared<TBoolType>();
                 }
                 return BinIntStorageType();
+            }
+            // To kernels a decimal stored in i64 is a plain i64: a call this pass does not
+            // lower would take the unscaled digits for the number.
+            for (const auto& argType : argTypes) {
+                auto decimal = DecimalSpecOfValueType(ValueType(argType));
+                if (decimal && IsDecimal64(*decimal)) {
+                    throw NQumir::TError(node->Location,
+                        "function '" + cid.Cast()->Name + "' does not take DECIMAL arguments");
+                }
             }
         }
         TTypePtr ret = InferType(e, inputType);

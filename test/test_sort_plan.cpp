@@ -1025,8 +1025,9 @@ TEST(SortExec, MaterializesNullableDecimalPayload) {
     };
 
     auto i64 = std::make_shared<TIntegerType>();
+    // DECIMAL(20,2) is stored in i128 (BinInt); one of p <= 18 would be a plain i64.
     auto decimal = std::make_shared<NQdb::TNullable>(
-        std::make_shared<NQdb::TDecimal>(7, 2));
+        std::make_shared<NQdb::TDecimal>(20, 2));
     NQdb::TMockSource source(
         TMockColumns{},
         {{"k", i64}, {"amount", decimal}},

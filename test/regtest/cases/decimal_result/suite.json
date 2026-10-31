@@ -1,9 +1,10 @@
 {
   "version": 1,
   "fixtures": {
-    "values": {"json": "tables/t.json", "parquet": {"row_group_rows": 2}}
+    "values": {"json": "tables/t.json", "parquet": {"row_group_rows": 2}},
+    "unsigned": {"json": "tables/u.json", "parquet": {"row_group_rows": 2}}
   },
-  "tables": {"t": "values"},
+  "tables": {"t": "values", "u": "unsigned"},
   "variants": ["single", "threaded", "js"],
   "cases": {
     "scale_two.sql": {"order": "ordered"},
@@ -24,6 +25,10 @@
     "key_except_integer.sql": {"order": "ordered"},
     "key_overflow.sql": {"expect_error": true, "variants": ["single", "threaded"]},
     "window_sum.sql": {"order": "ordered"},
-    "integer_operand.sql": {"order": "ordered"}
+    "integer_operand.sql": {"order": "ordered"},
+    "storage_boundary.sql": {"order": "ordered"},
+    "storage_sum.sql": {"order": "ordered"},
+    "storage_overflow.sql": {"expect_error": true},
+    "storage_unsigned.sql": {"expect_error": true}
   }
 }

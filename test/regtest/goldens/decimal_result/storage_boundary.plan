@@ -1,0 +1,3 @@
+sort [id asc]
+└─ project (id, p18, p19, lt_bigint, mixed) (rows≈5 cost≈225)
+   └─ source t AS t (rows≈5 cost≈80)

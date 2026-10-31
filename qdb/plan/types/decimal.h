@@ -118,9 +118,10 @@ enum class EDecimalStorage {
     I128,
 };
 
-inline EDecimalStorage DecimalStorageOf(TDecimalSpec) {
-    // TODO: I64 up to MaxDecimal64Precision once kernels and readers take it (#426).
-    return EDecimalStorage::I128;
+inline EDecimalStorage DecimalStorageOf(TDecimalSpec spec) {
+    return spec.Precision <= MaxDecimal64Precision
+        ? EDecimalStorage::I64
+        : EDecimalStorage::I128;
 }
 
 inline int32_t DecimalStorageBytes(TDecimalSpec spec) {

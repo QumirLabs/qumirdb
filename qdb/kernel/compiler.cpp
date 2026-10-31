@@ -177,7 +177,8 @@ constexpr const char* CacheSchemaVersion = "v1";
 // Decimal and i128 keys are aligned to 16 bytes in key layouts.
 // qumirdb.oz gains qdb_decimal_mul (decimal * decimal).
 // qumir aligns a struct field that holds an i128 to 16 (QumirLabs/qumir#169).
-constexpr const char* KernelLibVersion = "60";
+// qumirdb.oz stores DECIMAL(p <= 18) in i64 and checks its range (qdb_decimal64_*).
+constexpr const char* KernelLibVersion = "61";
 } // namespace
 
 NQumir::NCodeGen::TLlvmRunner::TLinkedModule CompileKernelAstCached(

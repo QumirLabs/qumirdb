@@ -1,0 +1,10 @@
+{
+  "schema": "<struct (id i32) (p18 <named Nullable [<named DECIMAL [18 4]>]>) (p19 <named DECIMAL [19 0]>) (lt_bigint <named Nullable [bool]>) (mixed <named Nullable [<named DECIMAL [21 2]>]>)>",
+  "rows": [
+    [1, "22500.0000", "9999999989000000001", true, "1234567890123456789.00"],
+    [2, "50625.0000", "9999999989000000001", false, "-5.00"],
+    [3, null, "9999999989000000001", null, null],
+    [4, "49.0000", "9999999989000000001", true, "-7.00"],
+    [5, "0.0000", "9999999989000000001", false, "0.00"]
+  ]
+}

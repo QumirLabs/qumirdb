@@ -1042,15 +1042,39 @@
           (= n (>> n 1))
           (= base (* base base))))
       (return acc)))
+  ;; Raises (C++ throws) when a value has more than `precision` digits, like DuckDB's
+  ;; conversion error; the kernels test the range inline and call it only on failure.
+  (fun qdb_decimal64_overflow ((var precision i64)) -> i64
+    (attrs extern) (block))
   (fun qdb_decimal64_scale_up ((var value i64) (var delta i64)) -> i64
     (block (return (* value (call qdb_pow10_i64 delta)))))
-  ;; Half away from zero, like qdb_decimal_from_f64.
-  (fun qdb_decimal64_from_f64 ((var value f64) (var scale i64)) -> i64
+  ;; value * 10^delta must have at most `precision` digits, which is |value| < 10^(precision - delta).
+  (fun qdb_decimal64_scale_up_checked
+      ((var value i64) (var delta i64) (var precision i64)) -> i64
+    (block
+      (var limit = (call qdb_pow10_i64 (- precision delta)))
+      (if (|| (>= value limit) (<= value (- (: 0 i64) limit)))
+        (block (return (call qdb_decimal64_overflow precision))))
+      (return (* value (call qdb_pow10_i64 delta)))))
+  ;; A u64 above 2^63-1 has no i64 to narrow to, so it is bounded before the narrowing.
+  (fun qdb_decimal64_scale_up_checked_u64
+      ((var value u64) (var delta i64) (var precision i64)) -> i64
+    (block
+      (var limit = (call qdb_pow10_i64 (- precision delta)))
+      (if (>= value (cast limit u64))
+        (block (return (call qdb_decimal64_overflow precision))))
+      (return (* (cast value i64) (call qdb_pow10_i64 delta)))))
+  ;; Half away from zero, like qdb_decimal_from_f64; NaN and out-of-range values raise.
+  (fun qdb_decimal64_from_f64 ((var value f64) (var scale i64) (var precision i64)) -> i64
     (block
       (var scaled = (* value (cast (call qdb_pow10_i64 scale) f64)))
+      (var rounded = (+ scaled 0.5))
       (if (< scaled 0.0)
-        (block (return (cast (- scaled 0.5) i64))))
-      (return (cast (+ scaled 0.5) i64))))
+        (block (= rounded (- scaled 0.5))))
+      (var limit = (cast (call qdb_pow10_i64 precision) f64))
+      (if (! (&& (< rounded limit) (> rounded (- 0.0 limit))))
+        (block (return (call qdb_decimal64_overflow precision))))
+      (return (cast rounded i64))))
   ;; Below 2^53 both operands are exact doubles (10^18 is one), so the division is
   ;; correctly rounded; larger values take the exact i128 routine.
   (fun qdb_decimal64_to_f64 ((var value i64) (var scale i64)) -> f64
@@ -1065,6 +1089,15 @@
   ;; An i128 value whose type has precision <= 18 fits i64.
   (fun qdb_decimal64_narrow ((var value BinInt)) -> i64
     (block (return (cast (field value V) i64))))
+  (fun qdb_decimal64_narrow_checked ((var value BinInt) (var precision i64)) -> i64
+    (block
+      (var wide i128)
+      (= wide (field value V))
+      (var limit i128)
+      (= limit (cast (call qdb_pow10_i64 precision) i128))
+      (if (|| (>= wide limit) (<= wide (- (: 0 i128) limit)))
+        (block (return (call qdb_decimal64_overflow precision))))
+      (return (cast wide i64))))
   ;; Integer division of the scaled value, truncated toward zero like SQL.
   (fun qdb_decimal64_div_i64 ((var left i64) (var right i64)) -> i64
     (block (return (// left right))))

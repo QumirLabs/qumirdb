@@ -556,6 +556,10 @@ double qdb_fabs(double value) {
     return std::fabs(value);
 }
 
+int64_t qdb_decimal64_overflow(int64_t precision) {
+    throw std::overflow_error("value does not fit DECIMAL precision " + std::to_string(precision));
+}
+
 qdb_bin_int qdb_decimal_from_i64(int64_t value, int64_t scale) {
     return FromI128(static_cast<__int128>(value) * Pow10I128(scale));
 }
