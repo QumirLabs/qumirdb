@@ -1,12 +1,15 @@
 {
   "version": 1,
   "fixtures": {
-    "decimals": {"parquet_file": "tables/decimals.parquet"}
+    "decimals": {"parquet_file": "tables/decimals.parquet"},
+    "flba": {"json": "tables/layout.json", "parquet": {"row_group_rows": 2}},
+    "int64": {"json": "tables/layout.json", "parquet": {"row_group_rows": 2, "decimal_as_integer": true}}
   },
-  "tables": {"t": "decimals"},
+  "tables": {"t": "decimals", "a": "flba", "b": "int64"},
   "variants": ["single", "threaded"],
   "cases": {
     "order_limit.sql": {"order": "ordered"},
-    "filter_bounds.sql": {"order": "ordered"}
+    "filter_bounds.sql": {"order": "ordered"},
+    "layouts_agree.sql": {"order": "ordered"}
   }
 }
