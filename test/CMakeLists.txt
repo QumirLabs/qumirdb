@@ -47,6 +47,7 @@ ut(test_join_key test_join_key.cpp)
 ut(test_finalize_fused test_finalize_fused.cpp)
 ut(test_project_type test_project_type.cpp)
 ut(test_project_kernel test_project_kernel.cpp)
+ut(test_kernel_vm test_kernel_vm.cpp)
 ut(test_kernel_spec test_kernel_spec.cpp)
 ut(test_project_e2e test_project_e2e.cpp)
 ut(test_external_module test_external_module.cpp)
@@ -82,6 +83,18 @@ foreach(shard RANGE 3)
     set_tests_properties(test_reg_${shard} PROPERTIES COST 100
         ENVIRONMENT "GTEST_TOTAL_SHARDS=4;GTEST_SHARD_INDEX=${shard}")
 endforeach()
+# The whole suite on the Qumir VM kernel backend against the LLVM goldens (#109),
+# except external modules (LLVM only) and runtime error texts (QumirLabs/qumir#192).
+# Disabled: VM coverage will be enabled per suite.
+# set(QDB_REG_VM_EXCLUDED external_modules decimal_result_storage_overflow
+#     decimal_result_storage_unsigned float_sql_cast_nan_error runtime_errors_abs_overflow)
+# list(TRANSFORM QDB_REG_VM_EXCLUDED PREPEND "RegQuery.")
+# list(TRANSFORM QDB_REG_VM_EXCLUDED APPEND "_*")
+# list(JOIN QDB_REG_VM_EXCLUDED ":" QDB_REG_VM_EXCLUDED_FILTER)
+# add_test(NAME test_reg_vm COMMAND test_reg ${QDB_REG_ARGS} --kernel:backend=vm
+#     "--gtest_filter=RegQuery.*-${QDB_REG_VM_EXCLUDED_FILTER}"
+#     --gtest_output=xml:${CMAKE_CURRENT_BINARY_DIR}/test_reg_vm.xml)
+# set_tests_properties(test_reg_vm PROPERTIES COST 100)
 # The whole suite over another table: the symmetric join table
 # (test_reg_legacy_join), the row layout of the aggregate table from the start
 # (test_reg_row_aggregate) and the global aggregate cascade (test_reg_cascade_global;

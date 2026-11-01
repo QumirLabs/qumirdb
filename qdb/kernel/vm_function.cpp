@@ -11,9 +11,11 @@
 #include <qumir/ir/vmcompiler.h>
 #include <qumir/modules/builtins/builtins.h>
 #include <qumir/modules/system/system.h>
+#include <qumir/runtime/string.h>
 #include <qumir/semantics/name_resolution/name_resolver.h>
 #include <qumir/semantics/transform/transform.h>
 
+#include <bit>
 #include <exception>
 #include <mutex>
 #include <sstream>
@@ -100,7 +102,8 @@ std::expected<TExprPtr, std::string> TransformWithResolver(
     NQumir::NFrontend::TSourceModuleLoader& loader,
     const std::vector<TPragma>& pragmas,
     NQumir::NSemantics::TNameResolver& resolver,
-    TExprPtr module)
+    TExprPtr module,
+    bool runDefiniteAssignment = true)
 {
     auto composed = NQumir::NFrontend::LoadAndCompose(
         loader, module, pragmas, /*cloneSourceModules*/ true);
@@ -113,7 +116,7 @@ std::expected<TExprPtr, std::string> TransformWithResolver(
         return std::unexpected(error->ToString());
     }
     if (auto transformed = NQumir::NTransform::Pipeline(
-            composed->Ast, resolver, {});
+            composed->Ast, resolver, {.RunDefiniteAssignment = runDefiniteAssignment});
         !transformed)
     {
         return std::unexpected(transformed.error().ToString());
@@ -147,7 +150,8 @@ std::expected<TExprPtr, std::string> TVmFrontendContext::Transform(
 
 std::expected<void, std::string> TVmFrontendContext::Lower(
     TExprPtr module,
-    NQumir::NIR::TModule& output)
+    NQumir::NIR::TModule& output,
+    bool runDefiniteAssignment)
 {
     std::lock_guard lock(Impl_->Mutex);
     if (Impl_->LoadError) {
@@ -162,7 +166,7 @@ std::expected<void, std::string> TVmFrontendContext::Lower(
     resolver.RegisterModule(Impl_->Builtins.get());
     (void)resolver.ImportModule(Impl_->Builtins->Name());
     auto transformed = TransformWithResolver(
-        Impl_->Loader, Impl_->Pragmas, resolver, std::move(module));
+        Impl_->Loader, Impl_->Pragmas, resolver, std::move(module), runDefiniteAssignment);
     if (!transformed) {
         return std::unexpected(transformed.error());
     }
@@ -194,7 +198,11 @@ TVmFunction::TVmFunction(std::unique_ptr<TImpl> impl)
     : Impl_(std::move(impl))
 {}
 
-TVmFunction::~TVmFunction() = default;
+TVmFunction::~TVmFunction() {
+    if (Impl_ && Impl_->Interpreter) {
+        (void)Impl_->Interpreter->Finalize();
+    }
+}
 
 std::expected<std::unique_ptr<TVmFunction>, std::string> TVmFunction::Compile(
     TVmFrontendContext& context,
@@ -237,11 +245,17 @@ std::expected<std::unique_ptr<TVmFunction>, std::string> TVmFunction::Compile(
             return std::unexpected(
                 "compiled module has no function " + functionName);
         }
+        if (auto prepared = impl->Compiler.Prepare({impl->Entry}); !prepared) {
+            return std::unexpected(prepared.error().ToString());
+        }
         impl->Interpreter = std::make_unique<NQumir::NIR::TInterpreter>(
             impl->Module,
             impl->Compiler,
             impl->Out,
             impl->In);
+        if (auto initialized = impl->Interpreter->Initialize(); !initialized) {
+            return std::unexpected(initialized.error().ToString());
+        }
         return std::unique_ptr<TVmFunction>(
             new TVmFunction(std::move(impl)));
     } catch (const std::exception& error) {
@@ -254,12 +268,24 @@ std::expected<std::unique_ptr<TVmFunction>, std::string> TVmFunction::Compile(
 std::optional<std::string> TVmFunction::Eval(
     std::vector<int64_t> args) noexcept
 {
-    if (!Impl_ || !Impl_->Entry || !Impl_->Interpreter) {
+    auto raw = EvalRaw(std::move(args));
+    if (!raw) {
         return std::nullopt;
     }
+    // Formats the result the way TInterpreter::Eval does.
     try {
-        return Impl_->Interpreter->Eval(
-            *Impl_->Entry, std::move(args), {});
+        const auto& entry = *Impl_->Entry;
+        std::ostringstream out;
+        if (entry.ReturnTypeIsString) {
+            auto* text = reinterpret_cast<char*>(*raw);
+            out << text;
+            NQumir::NRuntime::str_release(text);
+        } else if (entry.ReturnTypeId >= 0) {
+            Impl_->Module.Types.Format(out, std::bit_cast<uint64_t>(*raw), entry.ReturnTypeId);
+        } else {
+            out << *raw;
+        }
+        return out.str();
     } catch (...) {
         return std::nullopt;
     }
@@ -272,8 +298,11 @@ std::optional<int64_t> TVmFunction::EvalRaw(
         return std::nullopt;
     }
     try {
-        return Impl_->Interpreter->EvalRaw(
-            *Impl_->Entry, std::move(args), {});
+        auto result = Impl_->Interpreter->Invoke(*Impl_->Entry, std::move(args));
+        if (!result) {
+            return std::nullopt;
+        }
+        return *result;
     } catch (...) {
         return std::nullopt;
     }

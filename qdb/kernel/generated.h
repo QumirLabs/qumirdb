@@ -1,6 +1,7 @@
 #pragma once
 
 #include <qdb/exec/stage.h>
+#include <qdb/kernel/execution_context.h>
 
 #include <qumir/parser/ast.h>
 
@@ -13,11 +14,15 @@
 
 namespace NQumir {
 class TLLVMRunner;
+namespace NIR {
+struct TFunction;
+} // namespace NIR
 } // namespace NQumir
 
 namespace NQdb {
 
 class TRuntimeContext;
+struct TVmProgram;
 
 // Kernel ABI: arguments are pointers, integers up to 64 bits or bool; the
 // result is void, an integer or bool.
@@ -44,21 +49,75 @@ template <typename R, typename... TArgs>
 inline constexpr bool IsKernelSignature<R (*)(TArgs...)> =
     IsKernelResult<R>() && (IsKernelArg<TArgs>() && ...);
 
+// The VM passes every argument and result as one 64-bit word.
+template <typename T>
+int64_t ToKernelWord(T value) {
+    if constexpr (std::is_pointer_v<T>) {
+        return reinterpret_cast<intptr_t>(value);
+    } else {
+        return static_cast<int64_t>(value);
+    }
+}
+
+template <typename R, typename... TParams, typename... TArgs>
+std::vector<int64_t> ToKernelWords(R (*)(TParams...), TArgs... args) {
+    return {ToKernelWord<TParams>(args)...};
+}
+
+template <typename T>
+T FromKernelWord(int64_t word) {
+    if constexpr (std::is_same_v<T, bool>) {
+        // Only the low byte of a bool register is defined.
+        return (word & 0xff) != 0;
+    } else if constexpr (std::is_pointer_v<T>) {
+        return reinterpret_cast<T>(word);
+    } else {
+        return static_cast<T>(word);
+    }
+}
+
 // Machine binding for one generated kernel program. Created empty at
-// generation time; filled exactly once by the JIT finalizer.
+// generation time; filled exactly once by FinalizeKernels for one backend.
 struct TKernelSlot {
-    // Parallel to TGeneratedKernel::Entrypoints; nullptr until bound.
+    // LLVM: parallel to TGeneratedKernel::Entrypoints; nullptr until bound.
     std::vector<void*> Fns;
     // Owns the JIT'd code: the pointers are valid while this lives.
     std::shared_ptr<NQumir::TLLVMRunner> Runner;
     // Cache path only: keeps the query's LLJIT alive (the runner does not).
     std::shared_ptr<void> JitLifetime;
+    // VM: the query's prepared program and the function of each entrypoint.
+    std::shared_ptr<TVmProgram> Vm;
+    std::vector<NQumir::NIR::TFunction*> VmFns;
 
-    // Calls entrypoint `index`; TFn is its native function pointer type.
+    // Calls entrypoint `index` on the calling thread; TFn is its native
+    // function pointer type. The VM runs it on the context's instance.
     template <typename TFn, typename... TArgs>
     auto Call(size_t index, TArgs... args) const {
         static_assert(IsKernelSignature<TFn>, "kernel signature violates the kernel ABI");
-        return reinterpret_cast<TFn>(Fns[index])(args...);
+        using TResult = std::invoke_result_t<TFn, TArgs...>;
+        if (!Vm) {
+            return reinterpret_cast<TFn>(Fns[index])(args...);
+        }
+        if constexpr (std::is_void_v<TResult>) {
+            CallVm<TFn>(index, args...);
+        } else {
+            return FromKernelWord<TResult>(CallVm<TFn>(index, args...));
+        }
+    }
+
+private:
+    // Out of line so the native call sites stay small.
+    template <typename TFn, typename... TArgs>
+    [[gnu::noinline, gnu::cold]] int64_t CallVm(
+        size_t index, TArgs... args) const
+    {
+        if (auto* context = TryExecutionContext()) {
+            return context->Invoke(Vm, *VmFns[index], ToKernelWords(TFn{}, args...));
+        }
+        // Raw callers own their allocations, as on the LLVM path. Processor
+        // methods and scheduler tasks already establish a heap/context scope.
+        TExecutionContext context;
+        return context.Invoke(Vm, *VmFns[index], ToKernelWords(TFn{}, args...));
     }
 };
 

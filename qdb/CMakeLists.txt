@@ -69,6 +69,7 @@ add_library(qumirdb
     plan/build.cpp
     plan/sql_lowering.cpp
     kernel/vm_function.cpp
+    kernel/vm_program.cpp
     kernel/column_value.cpp
     kernel/gen.cpp
     kernel/aggregate_key.cpp

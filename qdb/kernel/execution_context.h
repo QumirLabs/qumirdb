@@ -2,9 +2,20 @@
 
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
+#include <vector>
+
+namespace NQumir {
+namespace NIR {
+struct TFunction;
+} // namespace NIR
+} // namespace NQumir
 
 namespace NQdb {
+
+struct TVmProgram;
+class TVmExecutionState;
 
 // One serialized task owns the allocation list; other tasks return blocks
 // through Returned_. The heap must outlive those returns.
@@ -52,6 +63,14 @@ private:
 struct TExecutionContext {
     TExecutionState* State = nullptr;
     TKernelHeap* Heap = nullptr;
+    // Lazy interpreter state belongs to the worker, independently of the
+    // task's heap. Migrating tasks reuse prepared code on their next worker.
+    std::shared_ptr<TVmExecutionState> Vm;
+
+    int64_t Invoke(
+        const std::shared_ptr<TVmProgram>& program,
+        NQumir::NIR::TFunction& function,
+        std::vector<int64_t> args);
 };
 
 TExecutionContext* TryExecutionContext() noexcept;

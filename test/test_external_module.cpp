@@ -437,6 +437,54 @@ TEST(ExternalModuleCatalog, OzlangFunctionsAreExportedAndRunWithoutCreateFunctio
     EXPECT_FALSE(runtime->Next(output));
 }
 
+// The VM runs no external module code; it refuses the query before the
+// module's bitcode is built, so even invalid Rust source is never compiled.
+TEST(ExternalModuleCatalog, VmBackendRejectsExternalModules) {
+    TExternalModuleCatalog catalog;
+    auto statements = ParseAll(
+        "CREATE MODULE broken LANGUAGE rust AS $$not valid rust$$;"
+        "CREATE FUNCTION broken_fn(DOUBLE) RETURNS DOUBLE "
+        "SET MODULE TO broken SET SYMBOL TO broken_fn;"
+        "SELECT broken_fn(x) AS value FROM points;");
+    ApplyDefinitions(catalog, {statements[0], statements[1]});
+
+    std::array<double, 1> values{2.0};
+    std::array<TColumn, 1> columns{
+        TColumn{.Data = reinterpret_cast<char*>(values.data())},
+    };
+    TRowSet batch{
+        .Columns = columns.data(),
+        .ColumnCount = 1,
+        .RowCount = 1,
+        .RefCount = 1,
+    };
+    TMockSource source(
+        {"x"}, {std::make_shared<TFloatType>()}, {batch});
+    auto snapshot = catalog.Snapshot();
+    NKernel::TAnnotationContext annotation{.ExternalCatalog = snapshot};
+    auto plan = BuildPlan(statements[2], [&](std::string_view table)
+        -> std::expected<TOperatorPtr, NQumir::TError>
+    {
+        return std::make_shared<TSourceOperator>(source, std::string(table));
+    }, annotation);
+    ASSERT_TRUE(plan) << plan.error().ToString();
+    AnnotateTypes(*plan, annotation);
+    ApplyPlanPasses(*plan, {
+        .EnableCbo = false,
+        .Annotation = annotation,
+    });
+
+    NScheduler::TSettings settings;
+    settings.Kernel.Backend = EKernelBackend::Vm;
+    try {
+        RunPlan(*plan, settings, snapshot);
+        FAIL() << "the vm backend ran an external module";
+    } catch (const std::runtime_error& error) {
+        EXPECT_NE(std::string(error.what()).find("does not run external modules"),
+            std::string::npos) << error.what();
+    }
+}
+
 TEST(ExternalModuleCatalog, StddevArgumentTypesExternalFunctions) {
     NQumir::NCodeGen::TLLVMInitializer llvmInit;
     TExternalModuleCatalog catalog;
