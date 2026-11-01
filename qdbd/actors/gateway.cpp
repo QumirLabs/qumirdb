@@ -20,7 +20,7 @@ struct TGatewayActor : public IBehaviorActor {
         { }
 
         void Receive(TExecuteQuery&& req, TBlob, TActorContext::TPtr ctx) {
-            auto* queryActor = CreateQueryActor();
+            auto* queryActor = CreateQueryActor(Logger);
             auto queryActorId = ctx->Register(std::unique_ptr<IActor>(queryActor));
             Logger("Gateway: got request");
             ctx->Forward<TExecuteQuery>(queryActorId, std::move(req));

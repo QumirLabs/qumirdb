@@ -121,10 +121,11 @@ struct TActorsCollector : public IBehaviorActor {
 
 struct TSchedulerActor : public IBehaviorActor {
     struct TDefaultBehavior : public TBehavior<TDefaultBehavior, TPing, TWakeUp, TSpawnComputeActor> {
-        TDefaultBehavior(ITimeSource* timeSource, TSchedulerState* state, TNodeId leaderId)
+        TDefaultBehavior(ITimeSource* timeSource, TSchedulerState* state, TNodeId leaderId, std::function<void(const std::string&)> logger)
             : TimeSource(timeSource)
             , State(state)
             , LeaderId(leaderId)
+            , Logger(logger)
         { }
 
         void SchedulePeriodicJob(TActorContext::TPtr& ctx) {
@@ -174,7 +175,10 @@ struct TSchedulerActor : public IBehaviorActor {
             return false;
         }
 
-        void HandleUnknownMessage(TMessageId messageId, TBlob blob, TActorContext::TPtr ctx) { }
+        void HandleUnknownMessage(TMessageId messageId, TBlob blob, TActorContext::TPtr ctx) {
+            std::ostringstream str; str << "Scheduler: unknown message " <<  messageId;
+            Logger(str.str());
+        }
 
         static constexpr uint64_t PeriodicJobMs = 1000;
         static constexpr uint64_t EvictionTimeout = 10000;
@@ -182,10 +186,11 @@ struct TSchedulerActor : public IBehaviorActor {
         ITimeSource* TimeSource;
         TSchedulerState* State;
         TNodeId LeaderId;
+        std::function<void(const std::string&)> Logger;
     };
 
-    TSchedulerActor(ITimeSource* timeSource, TNodeId leaderId)
-        : Behavior(timeSource, &State, leaderId)
+    TSchedulerActor(ITimeSource* timeSource, TNodeId leaderId, std::function<void(const std::string&)> logger)
+        : Behavior(timeSource, &State, leaderId, logger)
     {
         Become(&Behavior);
     }
@@ -200,9 +205,9 @@ struct TSchedulerActor : public IBehaviorActor {
 
 } // namespace
 
-NNet::NActors::IActor* CreateSchedulerActor(ITimeSource* timeSource, NNet::NActors::TNodeId leaderId)
+NNet::NActors::IActor* CreateSchedulerActor(ITimeSource* timeSource, NNet::NActors::TNodeId leaderId, std::function<void(const std::string&)> logger)
 {
-    return new TSchedulerActor(timeSource, leaderId);
+    return new TSchedulerActor(timeSource, leaderId, logger);
 }
 
 } // namespace NRemote

@@ -21,14 +21,16 @@ struct TQueryState {
 };
 
 struct TBaseBehavior {
-    TBaseBehavior(TQueryState* state, IBehaviorActor* parent)
+    TBaseBehavior(TQueryState* state, IBehaviorActor* parent, std::function<void(const std::string&)> logger)
         : State(state)
         , Parent(parent)
+        , Logger(logger)
     { }
 
     void HandleUnknownMessage(TMessageId messageId, TBlob blob, TActorContext::TPtr ctx) { }
 
     void Compile(TExecuteQuery& req, TActorId clientId) {
+        Logger("Query: compiling");
         State->RespondTo = clientId;
         // TODO:
     }
@@ -39,12 +41,13 @@ struct TBaseBehavior {
 
     TQueryState* State;
     IBehaviorActor* Parent;
+    std::function<void(const std::string&)> Logger;
 };
 
 struct TQueryActor : public IBehaviorActor {
     struct TStartQuery : public TBaseBehavior, public TBehavior<TStartQuery, TExecuteQuery, TSpawnComputeActorResponse> {
-        TStartQuery(TQueryState* state, IBehaviorActor* parent)
-            : TBaseBehavior(state, parent)
+        TStartQuery(TQueryState* state, IBehaviorActor* parent, std::function<void(const std::string&)> logger)
+            : TBaseBehavior(state, parent, logger)
         { }
 
         void Receive(TExecuteQuery&& req, TBlob, TActorContext::TPtr ctx) {
@@ -58,8 +61,8 @@ struct TQueryActor : public IBehaviorActor {
     };
 
     struct TMonitorQuery : public TBaseBehavior, public TBehavior<TMonitorQuery, TDataChunk, TFinish> {
-        TMonitorQuery(TQueryState* state, IBehaviorActor* parent)
-            : TBaseBehavior(state, parent)
+        TMonitorQuery(TQueryState* state, IBehaviorActor* parent, std::function<void(const std::string&)> logger)
+            : TBaseBehavior(state, parent, logger)
             , Sink(state->Schema, Out)
         { }
 
@@ -80,9 +83,9 @@ struct TQueryActor : public IBehaviorActor {
         TConsoleSink Sink;
     };
 
-    TQueryActor()
-        : StartQuery(&State, this)
-        , MonitorQuery(&State, this)
+    TQueryActor(std::function<void(const std::string&)> logger)
+        : StartQuery(&State, this, logger)
+        , MonitorQuery(&State, this, logger)
     {
         Become(&StartQuery);
     }
@@ -94,9 +97,9 @@ struct TQueryActor : public IBehaviorActor {
 
 } // namespace
 
-NNet::NActors::IActor* CreateQueryActor()
+NNet::NActors::IActor* CreateQueryActor(std::function<void(const std::string&)> logger)
 {
-    return new TQueryActor();
+    return new TQueryActor(logger);
 }
 
 } // namespace NRemote

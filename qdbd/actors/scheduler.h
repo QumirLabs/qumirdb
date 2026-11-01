@@ -7,7 +7,7 @@ namespace NQdb {
 namespace NRemote {
 
 // Cluster "singleton", knows about all nodes and resources
-NNet::NActors::IActor* CreateSchedulerActor(ITimeSource* timeSource, NNet::NActors::TNodeId leaderId);
+NNet::NActors::IActor* CreateSchedulerActor(ITimeSource* timeSource, NNet::NActors::TNodeId leaderId, std::function<void(const std::string&)> logger);
 
 } // NRemote
 } // NQdb

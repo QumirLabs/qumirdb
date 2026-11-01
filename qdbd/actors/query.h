@@ -6,7 +6,7 @@ namespace NQdb {
 namespace NRemote {
 
 // Query orchestrator
-NNet::NActors::IActor* CreateQueryActor();
+NNet::NActors::IActor* CreateQueryActor(std::function<void(const std::string&)> logger);
 
 } // NRemote
 } // NQdb

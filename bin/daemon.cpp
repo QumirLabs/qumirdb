@@ -126,7 +126,7 @@ int main(int argc, char** argv) {
     sys.Serve(std::move(actorSysListenSocket));
 
     TTimeSource timeSource;
-    sys.RegisterWellKnown(TLocalActorId(EWellKnownActors::Scheduler), IActor::TPtr(CreateSchedulerActor(&timeSource, leaderId)));
+    sys.RegisterWellKnown(TLocalActorId(EWellKnownActors::Scheduler), IActor::TPtr(CreateSchedulerActor(&timeSource, leaderId, logger)));
 
     uint64_t pingPeriodMs = 1000;
     sys.RegisterWellKnown(TLocalActorId(EWellKnownActors::LocalScheduler), IActor::TPtr(CreateLocalScheduler(&timeSource, leaderId, pingPeriodMs)));
