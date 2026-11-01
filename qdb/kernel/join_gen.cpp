@@ -1320,11 +1320,6 @@ NQumir::NAst::TExprPtr GenJoinDispatchAst(
             TOperator("&&"),
             Oz::Call("jt_init", {Oz::Ident("left"), Oz::Ident("arg"), number(keySize)}),
             Oz::Call("jt_init", {Oz::Ident("right"), Oz::Ident("arg"), number(keySize)})));
-    std::vector<TExprPtr> destroyBody;
-    destroyBody.push_back(Oz::Call("jt_destroy", {Oz::Ident("left")}));
-    destroyBody.push_back(Oz::Call("jt_destroy", {Oz::Ident("right")}));
-    destroyBody.push_back(Oz::Call("pb_destroy", {Oz::Ident("pairs")}));
-    destroyBody.push_back(boolReturn(true));
     builder.Param("left", hashTableRefType)
         .Param("right", hashTableRefType)
         .Param("batch", rowSetRefType)
@@ -1344,7 +1339,6 @@ NQumir::NAst::TExprPtr GenJoinDispatchAst(
         .Stmt(Oz::If(opIs(3), Oz::Block({Oz::Return(streamLeft())})))
         .Stmt(Oz::If(opIs(4), Oz::Block({Oz::Return(streamRight())})))
         .Stmt(Oz::If(opIs(5), finalize()))
-        .Stmt(Oz::If(opIs(6), Oz::Block(std::move(destroyBody))))
         .Stmt(Oz::If(opIs(7), finalizeStream()))
         .Stmt(boolReturn(false));
 
@@ -1421,13 +1415,6 @@ NQumir::NAst::TExprPtr GenCrossJoinDispatchAst(
                                 Oz::Bool(keepsUnmatchedLeft),
                                 Oz::Bool(keepsUnmatchedRight),
                             })),
-                })))
-        .Stmt(
-            Oz::If(
-                opIs(1),
-                Oz::Block({
-                    Oz::Call("pb_destroy", {Oz::Ident("pairs")}),
-                    Oz::Return(Oz::Bool(true)),
                 })))
         .Stmt(Oz::If(opIs(2), Oz::Block({Oz::Return(std::move(emitUnmatchedRight))})))
         .Stmt(Oz::Return(Oz::Bool(false)));
@@ -2315,16 +2302,6 @@ NQumir::NAst::TExprPtr GenRowJoinDispatchAst(
                                 Oz::Ident("key_columns"),
                                 Oz::Ident("pairs"),
                             })),
-                })))
-        .Stmt(
-            Oz::If(
-                opIs(4),
-                Oz::Block({
-                    Oz::Call("ra_destroy", {Oz::Ident("arena")}),
-                    Oz::Call("rt_destroy", {Oz::Ident("table")}),
-                    Oz::Call("rt_scratch_destroy", {Oz::Ident("scratch")}),
-                    Oz::Call("pb_destroy", {Oz::Ident("pairs")}),
-                    Oz::Return(Oz::Bool(true)),
                 })));
     if (layout.MarkOffset >= 0) {
         if (type == EJoinType::LeftAnti) {

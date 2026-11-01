@@ -37,13 +37,6 @@ TRowJoinProcessor::~TRowJoinProcessor() {
         Release(&ReadyOutput_.front());
         ReadyOutput_.pop_front();
     }
-    if (Initialized_) {
-        // TRowSet none{};
-        // Dispatch(ERowJoinKernelOp::Destroy, &none);
-        if (Kernels_.KeepsNullKeyRows) {
-            // Dispatch(ERowJoinKernelOp::Destroy, &none, NullKeyArena_);
-        }
-    }
     for (auto& batch : BuildBatches_) {
         Release(&batch);
     }
@@ -195,7 +188,7 @@ void TRowJoinProcessor::ProbeBatch(TRowSet& batch) {
 
 // The output of a SEMI/ANTI join is known only once the probe side has ended.
 // It is materialized from the pair buffer one batch per call, as the build
-// rows stay in the arena until Destroy.
+// rows stay in the arena until its allocation domain is released.
 EJoinProcessorResult TRowJoinProcessor::Finish(TRowSet& output) {
     if (!Kernels_.EmitsByMark) {
         return EJoinProcessorResult::FINISHED;

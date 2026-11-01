@@ -1,3 +1,5 @@
+#include "kernel_heap_fixture.h"
+
 // The layouts of the aggregate hash table: the row layout's kernels
 // (kernel/aggregation/aggregation_rows.oz) on their own, the aggregate
 // operator in each layout and across the move from the swiss table, and the
@@ -132,12 +134,12 @@ constexpr const char* RowEntries = R"(
     (block (return (call aht_init ht capacity 1 8))))
   (fun test_swiss_upsert ((var ht <ref HashTable>) (var key i64)
                           (var is_new <ref i64>) (var hash u64)) -> i64
-    (block (return (call aht_upsert_aggregate ht key 0 is_new hash))))
-  (fun test_destroy ((var ht <ref HashTable>))
-    (block (call agr_destroy ht))))
+    (block (return (call aht_upsert_aggregate ht key 0 is_new hash)))))
 )";
 
-class RowLayoutKernels : public testing::Test {
+using AggregateTable = NQdb::NTest::TKernelHeapTest;
+
+class RowLayoutKernels : public NQdb::NTest::TKernelHeapTest {
 protected:
     void SetUp() override {
         std::vector<TExprPtr> functions;
@@ -166,9 +168,9 @@ protected:
         std::string error;
         auto kernels = Runner_->CompileKernelAst(program, {
             "test_rows_init", "test_rows_reserve", "test_rows_find", "test_rows_from_swiss",
-            "test_swiss_init", "test_swiss_upsert", "test_destroy", "rh_hash",
+            "test_swiss_init", "test_swiss_upsert", "rh_hash",
             "swiss_group_width"}, &error);
-        ASSERT_EQ(kernels.size(), 9u) << error;
+        ASSERT_EQ(kernels.size(), 8u) << error;
         RowsInit_ = reinterpret_cast<bool(*)(THashTable*, int64_t)>(kernels.at("test_rows_init"));
         Reserve_ = reinterpret_cast<bool(*)(THashTable*, int64_t)>(kernels.at("test_rows_reserve"));
         Find_ = reinterpret_cast<bool(*)(THashTable*, int64_t)>(kernels.at("test_rows_find"));
@@ -176,15 +178,8 @@ protected:
         SwissInit_ = reinterpret_cast<bool(*)(THashTable*, int64_t)>(kernels.at("test_swiss_init"));
         SwissUpsert_ = reinterpret_cast<int64_t(*)(THashTable*, int64_t, int64_t*, uint64_t)>(
             kernels.at("test_swiss_upsert"));
-        Destroy_ = reinterpret_cast<void(*)(THashTable*)>(kernels.at("test_destroy"));
         Hash_ = reinterpret_cast<uint64_t(*)(int64_t)>(kernels.at("rh_hash"));
         SwissWidth_ = reinterpret_cast<int64_t(*)()>(kernels.at("swiss_group_width"))();
-    }
-
-    void TearDown() override {
-        if (Destroy_) {
-            Destroy_(&Table_);
-        }
     }
 
     // Finds or inserts the groups of `keys` with the given hashes; returns the
@@ -249,7 +244,6 @@ protected:
     bool (*FromSwiss_)(THashTable*) = nullptr;
     bool (*SwissInit_)(THashTable*, int64_t) = nullptr;
     int64_t (*SwissUpsert_)(THashTable*, int64_t, int64_t*, uint64_t) = nullptr;
-    void (*Destroy_)(THashTable*) = nullptr;
     uint64_t (*Hash_)(int64_t) = nullptr;
     int64_t SwissWidth_ = 0;
 };
@@ -672,7 +666,7 @@ TRun CheckLayoutsAgree(
     return swiss;
 }
 
-TEST(AggregateTable, EveryFixedWidthStateAgreesAcrossLayouts) {
+TEST_F(AggregateTable, EveryFixedWidthStateAgreesAcrossLayouts) {
     auto i64 = std::make_shared<TIntegerType>();
     auto i32 = std::make_shared<TIntegerType>(TIntegerType::I32);
     TStructType input({
@@ -736,7 +730,7 @@ TEST(AggregateTable, EveryFixedWidthStateAgreesAcrossLayouts) {
     EXPECT_GT(swiss.Rows.size(), 2000u);
 }
 
-TEST(AggregateTable, CompositeAndNullKeysAgreeAcrossLayouts) {
+TEST_F(AggregateTable, CompositeAndNullKeysAgreeAcrossLayouts) {
     auto i64 = std::make_shared<TIntegerType>();
     auto i32 = std::make_shared<TIntegerType>(TIntegerType::I32);
     // The decimal key comes first: after a nullable flag or a narrower key it
@@ -782,7 +776,7 @@ TEST(AggregateTable, CompositeAndNullKeysAgreeAcrossLayouts) {
     EXPECT_EQ(swiss.Rows.size(), expected.size());
 }
 
-TEST(AggregateTable, MovesToRowsInsideABatch) {
+TEST_F(AggregateTable, MovesToRowsInsideABatch) {
     auto i64 = std::make_shared<TIntegerType>();
     TStructType input({{"k", i64}, {"v", i64}});
     std::vector<TAggregateSpec> aggs = {
@@ -830,7 +824,7 @@ TEST(AggregateTable, MovesToRowsInsideABatch) {
     }
 }
 
-TEST(AggregateTable, RowLayoutAlignsKeysThatHoldADecimal) {
+TEST_F(AggregateTable, RowLayoutAlignsKeysThatHoldADecimal) {
     auto i64 = std::make_shared<TIntegerType>();
     auto i32 = std::make_shared<TIntegerType>(TIntegerType::I32);
     TStructType input({
@@ -865,7 +859,7 @@ TEST(AggregateTable, RowLayoutAlignsKeysThatHoldADecimal) {
     EXPECT_EQ(narrow->RowBytes, 40);
 }
 
-TEST(AggregateTable, RowLayoutReportsItsMemory) {
+TEST_F(AggregateTable, RowLayoutReportsItsMemory) {
     auto i64 = std::make_shared<TIntegerType>();
     TStructType input({{"k", i64}, {"v", i64}});
     const auto kernels = CompileWithRows(input, {"k"}, {Agg("c", "count"), Agg("s", "sum", "v")});
@@ -919,7 +913,7 @@ std::set<std::string> ProgramFunctions(
     return names;
 }
 
-TEST(AggregateTable, RowLayoutNeedsTheSpecFlag) {
+TEST_F(AggregateTable, RowLayoutNeedsTheSpecFlag) {
     auto i64 = std::make_shared<TIntegerType>();
     TStructType input({{"k", i64}, {"v", i64}});
     const std::vector<TAggregateSpec> aggs = {Agg("c", "count"), Agg("s", "sum", "v")};
@@ -962,12 +956,11 @@ TEST(AggregateTable, RowLayoutNeedsTheSpecFlag) {
     EXPECT_EQ(table.Size, 100);
     EXPECT_NE(table.Keys, nullptr);
     EXPECT_EQ(table.RowTable.Entries, nullptr);
-    EXPECT_NE(swiss.Dispatch(&table, nullptr, 0, static_cast<int64_t>(EAggregateKernelOp::Destroy)), 0);
 }
 
 // A string key is a 16-byte handle in the row (pointer and size), whose bytes
 // the owned arena holds in both layouts.
-TEST(AggregateTable, StringKeysAgreeAcrossLayouts) {
+TEST_F(AggregateTable, StringKeysAgreeAcrossLayouts) {
     auto i64 = std::make_shared<TIntegerType>();
     TStructType input({{"s", std::make_shared<TStringType>()}, {"v", i64}});
     std::vector<TAggregateSpec> aggs = {
@@ -1002,7 +995,7 @@ TEST(AggregateTable, StringKeysAgreeAcrossLayouts) {
     EXPECT_TRUE(std::ranges::any_of(swiss.Rows, [](const auto& row) { return row.starts_with("''|"); }));
 }
 
-TEST(AggregateTable, CompositeAndNullStringKeysAgreeAcrossLayouts) {
+TEST_F(AggregateTable, CompositeAndNullStringKeysAgreeAcrossLayouts) {
     auto i64 = std::make_shared<TIntegerType>();
     auto string = std::make_shared<TStringType>();
     TStructType input({
@@ -1039,7 +1032,7 @@ TEST(AggregateTable, CompositeAndNullStringKeysAgreeAcrossLayouts) {
     EXPECT_TRUE(std::ranges::any_of(swiss.Rows, [](const auto& row) { return row.contains("|NULL|"); }));
 }
 
-TEST(AggregateTable, StringReducersAndEmptyInputGroupsKeepTheSwissTable) {
+TEST_F(AggregateTable, StringReducersAndEmptyInputGroupsKeepTheSwissTable) {
     auto i64 = std::make_shared<TIntegerType>();
     TStructType numbers({{"k", i64}, {"s", std::make_shared<TStringType>()}});
     EXPECT_EQ(CompileWithRows(numbers, {"k"}, {Agg("m", "min", "s")}).RowBytes, 0);
@@ -1065,7 +1058,7 @@ TEST(AggregateTable, StringReducersAndEmptyInputGroupsKeepTheSwissTable) {
 
 // The move sizes its entries for the groups the caller expects when that is
 // more than twice the groups it moves, so that they need not grow again.
-TEST(AggregateTable, ExpectRowGroupsSizesTheEntriesOfTheMove) {
+TEST_F(AggregateTable, ExpectRowGroupsSizesTheEntriesOfTheMove) {
     auto i64 = std::make_shared<TIntegerType>();
     TStructType input({{"k", i64}, {"v", i64}});
     const auto kernels = CompileWithRows(input, {"k"}, {Agg("c", "count"), Agg("s", "sum", "v")});
@@ -1114,7 +1107,7 @@ TEST(AggregateTable, ExpectRowGroupsSizesTheEntriesOfTheMove) {
 
 // ---- the choice of the layout ----
 
-TEST(AggregateTable, PlanFollowsTheSettingAndTheEstimate) {
+TEST_F(AggregateTable, PlanFollowsTheSettingAndTheEstimate) {
     TAggregateKernels rows{.StateWords = 4, .RowBytes = 56};
     TAggregateKernels swissOnly{.StateWords = 4};
     const int64_t minGroups = AggregateRowLayoutMinGroups(56, 4);
@@ -1154,7 +1147,7 @@ TEST(AggregateTable, PlanFollowsTheSettingAndTheEstimate) {
     EXPECT_EQ(PlanAggregateTable(capped, rows, Row).InitialGroups, 896);
 }
 
-TEST(AggregateTable, MoreStateWordsMoveToRowsEarlier) {
+TEST_F(AggregateTable, MoreStateWordsMoveToRowsEarlier) {
     for (const int64_t rowBytes : {24, 56, 120}) {
         for (size_t states = 1; states < 8; ++states) {
             EXPECT_GE(AggregateRowLayoutMinGroups(rowBytes, states),
@@ -1166,7 +1159,7 @@ TEST(AggregateTable, MoreStateWordsMoveToRowsEarlier) {
 // An estimate cannot start a task in rows: the swiss slots stop where the
 // table must grow, and so move, at the bound. An overestimate then costs
 // nothing until the table really holds that many groups.
-TEST(AggregateTable, OverestimateStartsSwiss) {
+TEST_F(AggregateTable, OverestimateStartsSwiss) {
     const TAggregateKernels rows{.StateWords = 4, .RowBytes = 56};
     const int64_t minGroups = AggregateRowLayoutMinGroups(56, 4);
     using enum NScheduler::EAggregateTableKind;
@@ -1189,7 +1182,7 @@ TEST(AggregateTable, OverestimateStartsSwiss) {
 
 // The move sizes the row entries for the task's estimated groups, capped as
 // the swiss slots are and by the task's input rows.
-TEST(AggregateTable, MoveIsSizedFromTheEstimate) {
+TEST_F(AggregateTable, MoveIsSizedFromTheEstimate) {
     auto i64 = std::make_shared<TIntegerType>();
     TStructType input({{"k", i64}, {"v", i64}});
     const auto kernels = CompileWithRows(input, {"k"}, {Agg("c", "count"), Agg("s", "sum", "v")});
@@ -1252,7 +1245,7 @@ TEST(AggregateTable, MoveIsSizedFromTheEstimate) {
 // A grouping without aggregates has no state words, so the row layout saves
 // no reads: auto keeps its table swiss, as sized on master, and row still
 // forces it into rows.
-TEST(AggregateTable, KeyOnlyAggregatesStaySwissUnderAuto) {
+TEST_F(AggregateTable, KeyOnlyAggregatesStaySwissUnderAuto) {
     auto i64 = std::make_shared<TIntegerType>();
     TStructType input({{"k", i64}});
     const auto kernels = CompileWithRows(input, {"k"}, {});
@@ -1285,7 +1278,7 @@ TEST(AggregateTable, KeyOnlyAggregatesStaySwissUnderAuto) {
 // The instrumentation counts the rehashes of the swiss table, the move once,
 // and each growth of the row entries after it, as the kernels counted them in
 // the table.
-TEST(AggregateTable, InstrumentationCountsTheMoveOnce) {
+TEST_F(AggregateTable, InstrumentationCountsTheMoveOnce) {
     auto i64 = std::make_shared<TIntegerType>();
     TStructType input({{"k", i64}, {"v", i64}});
     const auto kernels = CompileWithRows(input, {"k"}, {Agg("c", "count"), Agg("s", "sum", "v")});
@@ -1333,7 +1326,6 @@ TEST(AggregateTable, InstrumentationCountsTheMoveOnce) {
     EXPECT_EQ(counters.HashGrowthEvents - growths, static_cast<uint64_t>(table.RowRebuilds - rebuilds));
     EXPECT_EQ(counters.Rehashes, counters.HashGrowthEvents);
     EXPECT_EQ(counters.Groups, 3000u);
-    EXPECT_NE(dispatch(table, nullptr, 0, EAggregateKernelOp::Destroy), 0);
 }
 
 // ---- the measurement behind AggregateRowLayoutMinGroups ----
@@ -1351,7 +1343,7 @@ TEST(AggregateTable, InstrumentationCountsTheMoveOnce) {
 //   which starts swiss and moves to rows at AggregateRowLayoutMinGroups;
 // - x: the ratio of the swiss time to the other;
 // - fin: finalization per group, B: table bytes per group.
-TEST(AggregateTable, DISABLED_LayoutMicrobenchmark) {
+TEST_F(AggregateTable, DISABLED_LayoutMicrobenchmark) {
 #ifndef NDEBUG
     GTEST_SKIP() << "the microbenchmark measures a Release build";
 #endif

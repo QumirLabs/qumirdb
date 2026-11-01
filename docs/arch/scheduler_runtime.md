@@ -77,12 +77,20 @@ underlying rowset through the existing reference-counting protocol.
 
 Normal kernel frees still reclaim memory during processing, and aggregate
 finalization still releases its table. The heap reclaims allocations left by
-cancellation or incomplete processing at teardown. Processor destructor calls
-to destroy kernels are currently commented out; their C++ resource cleanup
-remains active. Raw native kernel callers may continue to manage allocations
-explicitly. Standalone processors establish a scope over their own heap when
+cancellation or incomplete processing at teardown. Processor destructors release
+C++ resources and retained batches; generated kernels have no teardown operation.
+Raw native kernel callers establish a heap scope or manage allocations explicitly.
+Standalone processors establish a scope over their own heap when
 there is no scheduler context. The tracker covers `qdb_alloc` allocations;
 ordinary C++ resources retain their own RAII ownership.
+
+The browser allocator similarly owns unfinished query allocations. Join dispatch
+allocations are scoped to the operator state, so finishing a join can release
+its buffers while downstream stages continue. Materialized output batches are
+allocated outside that scope and retain their own owners lists. Query teardown
+reclaims any allocations left after task and connection cleanup. Working kernel
+frees, including aggregate finalization and scratch resizing, remain part of
+normal processing on both targets.
 
 Every task exposes one scheduler method:
 

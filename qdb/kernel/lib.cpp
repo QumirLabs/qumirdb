@@ -93,8 +93,8 @@ std::optional<NQumir::TError> AddStringReducerLibrary(
         library, ReadAggregationKernel("aggregation_string_reducer.oz"));
 }
 
-// Shared prefix of both join libraries: generic Robin Hood + HashTable
-// lifecycle and the join table / pair buffer helpers.
+// Shared join helpers. Teardown belongs to the allocation domain; only
+// working allocation/growth helpers are needed in these programs.
 std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError>
 BuildJoinLibraryBase() {
     std::vector<NQumir::NAst::TExprPtr> library;
@@ -110,12 +110,8 @@ BuildJoinLibraryBase() {
         return std::unexpected(*e);
     }
     if (auto e = AddParsedKernel(library,
-            ReadAggregationKernel("owned_arena_lifecycle.oz"))) {
-        return std::unexpected(*e);
-    }
-    if (auto e = AddParsedKernel(library,
             ReadAggregationKernel("aggregation_hashtable_generic.oz"),
-            {"aht_update"})) {
+            {"aht_update", "aht_destroy", "aht_destroy_slots"})) {
         return std::unexpected(*e);
     }
     if (auto e = AddParsedKernel(library, ReadJoinKernel("join_table.oz"))) {
@@ -178,7 +174,7 @@ BuildRowJoinKernelLibrary() {
     if (!library) {
         return library;
     }
-    if (auto e = AddParsedKernel(*library, ReadRowTableKernel())) {
+    if (auto e = AddParsedKernel(*library, ReadRowTableKernel(), {"ra_destroy", "rt_destroy"})) {
         return std::unexpected(*e);
     }
     if (auto e = AddParsedKernel(*library, ReadJoinKernel("join_rows.oz"))) {

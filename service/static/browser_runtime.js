@@ -674,14 +674,47 @@ class Arena {
   constructor(memory, base) {
     this.memory = memory;
     this.allocator = new BucketAllocator(memory, Number(base));
+    this.allocationOwner = null;
+    this.allocationOwners = new Map();
   }
 
   alloc(bytes, _align = 8) {
-    return this.allocator.malloc(bytes);
+    const ptr = this.allocator.malloc(bytes);
+    if (this.allocationOwner) {
+      this.allocationOwner.add(ptr);
+      this.allocationOwners.set(ptr, this.allocationOwner);
+    }
+    return ptr;
   }
 
   free(ptr) {
+    const owner = this.allocationOwners.get(Number(ptr));
+    if (owner) {
+      owner.delete(Number(ptr));
+      this.allocationOwners.delete(Number(ptr));
+    }
     this.allocator.free(ptr);
+  }
+
+  // Dispatch allocations belong to operator state. Materialized outputs are
+  // allocated outside this scope and retain their independent rowset owners.
+  withAllocationOwner(owner, fn) {
+    const previous = this.allocationOwner;
+    this.allocationOwner = owner;
+    try {
+      return fn();
+    } finally {
+      this.allocationOwner = previous;
+    }
+  }
+
+  freeOwned(owner) {
+    for (const ptr of owner) this.free(ptr);
+  }
+
+  freeAll() {
+    this.allocator.freeAll();
+    this.allocationOwners.clear();
   }
 
   view() {
@@ -2568,7 +2601,6 @@ const JoinOp = Object.freeze({
   STREAM_LEFT: 3n,
   STREAM_RIGHT: 4n,
   FINALIZE: 5n,
-  DESTROY: 6n,
   FINALIZE_STREAM: 7n,
 });
 
@@ -2582,7 +2614,6 @@ const BROWSER_JOIN_OUTPUT_BATCH_ROWS = 4096;
 
 const CrossJoinOp = Object.freeze({
   EMIT: 0n,
-  DESTROY: 1n,
   EMIT_UNMATCHED_RIGHT: 2n,
 });
 
@@ -2591,7 +2622,7 @@ function dispatchJoin(state, batch, batchIdx, leftStore, rightStore, arg, op) {
   // argument is unused here, as for filters).
   const releaseStringScratch = beginKernelStringScratch(state.kernel);
   try {
-    return state.dispatch(
+    return state.arena.withAllocationOwner(state.allocations, () => state.dispatch(
       toWasmPtr(state.leftTable),
       toWasmPtr(state.rightTable),
       toWasmPtr(batch),
@@ -2603,7 +2634,7 @@ function dispatchJoin(state, batch, batchIdx, leftStore, rightStore, arg, op) {
       toWasmPtr(state.leftKeyColumns),
       toWasmPtr(state.rightKeyColumns),
       BigInt(arg),
-      BigInt(op));
+      BigInt(op)));
   } finally {
     releaseStringScratch();
   }
@@ -2642,6 +2673,7 @@ function createJoinState(kernel, layout, stage, instrumentation = null) {
     layout,
     stage,
     dispatch,
+    allocations: new Set(),
     materialize,
     arena,
     leftTable,
@@ -2831,7 +2863,10 @@ function finishJoinState(state) {
     return;
   }
   state.finalized = true;
-  dispatchJoin(state, 0, 0, 0, 0, 0, JoinOp.DESTROY);
+  state.arena.freeOwned(state.allocations);
+  state.arena.free(state.leftTable);
+  state.arena.free(state.rightTable);
+  state.arena.free(state.pairBuffer);
   // Reclaim the build-side row store so it doesn't linger for the rest of the
   // query (upstream joins finish before the final one peaks).
   state.leftStore.freeMarshalled();
@@ -2854,6 +2889,7 @@ function createCrossJoinState(kernel, layout, stage, instrumentation = null) {
     layout,
     stage,
     dispatch,
+    allocations: new Set(),
     materialize,
     arena,
     pairBuffer,
@@ -2876,7 +2912,7 @@ function dispatchCrossJoin(state, batchIdx, op) {
   // it builds live in the call's string scratch.
   const releaseStringScratch = beginKernelStringScratch(state.kernel);
   try {
-    return state.dispatch(
+    return state.arena.withAllocationOwner(state.allocations, () => state.dispatch(
       toWasmPtr(state.leftStore.dataPtr()),
       BigInt(batchIdx),
       toWasmPtr(state.rightStore.dataPtr()),
@@ -2884,7 +2920,7 @@ function dispatchCrossJoin(state, batchIdx, op) {
       toWasmPtr(state.rightMatched),
       toWasmPtr(state.pairBuffer),
       toWasmPtr(0),
-      op);
+      op));
   } finally {
     releaseStringScratch();
   }
@@ -2987,7 +3023,8 @@ function finishCrossJoinState(state) {
     return;
   }
   state.finalized = true;
-  dispatchCrossJoin(state, 0, CrossJoinOp.DESTROY);
+  state.arena.freeOwned(state.allocations);
+  state.arena.free(state.pairBuffer);
   state.leftStore.freeMarshalled();
   state.rightStore.freeMarshalled();
   if (state.rightMatched) {
@@ -4985,8 +5022,12 @@ export async function executeBrowserPipelineScheduled(exec, readSourceBatches, o
       };
     }
   } finally {
-    cleanupScheduledGraph(nodes);
-    for (const node of nodes) node.instrumentation?.destroy();
+    try {
+      cleanupScheduledGraph(nodes);
+      for (const node of nodes) node.instrumentation?.destroy();
+    } finally {
+      shared.arena.freeAll();
+    }
   }
   result.timings = nodes.map(node => ({
     stage: node.label,

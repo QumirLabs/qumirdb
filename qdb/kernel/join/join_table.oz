@@ -1,7 +1,7 @@
 (block
   ;; The symmetric hash join reuses the aggregation Robin Hood HashTable
   ;; (modules/qumirdb.cpp) as its hash map, so the probe table and lifecycle
-  ;; (aht_init / aht_rehash / aht_destroy) are NOT duplicated here. The dense
+  ;; (aht_init / aht_rehash) are NOT duplicated here. The dense
   ;; per-slot RowId bucket is stored in the generic AggBuffers as three int64
   ;; "columns" (NumAggs = 3):
   ;;   AggBuffers[0][slot] = bucket length
@@ -15,24 +15,6 @@
   (fun jt_init ((var ht <ref HashTable>) (var capacity i64) (var key_size i64)) -> bool
     (block
       (return (call aht_init ht capacity (: 3 i64) key_size))))
-
-  ;; jt_destroy: free the per-slot bucket data blocks (which aht_destroy does
-  ;; not know about), then the generic destroy frees everything else.
-  (fun jt_destroy ((var ht <ref HashTable>))
-    (block
-      (var aggs = (field ht AggBuffers))
-      (if (!= (cast aggs i64) (: 0 i64))
-        (block
-          (var datas = (index aggs (: 2 i64)))
-          (var size = (field ht Size))
-          (var i i64)
-          (= i (: 0 i64))
-          (while (< i size)
-            (block
-              (var blk = (index datas i))
-              (if (!= blk (: 0 i64)) (block (call qdb_free (cast blk <ptr i8>))))
-              (= i (+ i (: 1 i64)))))))
-      (call aht_destroy ht)))
 
   ;; Appends row_id to the dense RowId bucket at dense slot `slot`
   ;; (amortized O(1), 1.5x growth from capacity 4). The slot's three columns must
@@ -89,12 +71,4 @@
       (= data [(* count (: 2 i64))] left_id)
       (= data [(+ (* count (: 2 i64)) (: 1 i64))] right_id)
       (field_assign buf Count (+ count (: 1 i64)))
-      (return #t)))
-
-  (fun pb_destroy ((var buf <ref PairBuffer>))
-    (block
-      (var data = (field buf Data))
-      (if (!= (cast data i64) (: 0 i64)) (block (call qdb_free (cast data <ptr i8>))))
-      (field_assign buf Count (: 0 i64))
-      (field_assign buf Capacity (: 0 i64))
-      (field_assign buf Data (cast (: 0 i64) <ptr i64>)))))
+      (return #t))))

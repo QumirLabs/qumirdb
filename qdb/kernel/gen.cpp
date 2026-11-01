@@ -2249,11 +2249,6 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
         seed.push_back(numI64(1));
         init = block(std::move(seed));
     }
-    auto destroyStmts = StringCleanupCalls(layout);
-    // agr_destroy frees a table in either layout.
-    destroyStmts.push_back(call(rows ? "agr_destroy" : "aht_destroy", {ident("ht")}));
-    destroyStmts.push_back(numI64(1));
-
     // The operations of EAggregateKernelOp (compiler.h); any other returns 0.
     auto opIs = [&](int64_t op) {
         return binary("==", ident("op"), numI64(op));
@@ -2276,7 +2271,6 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
             }), i64Type),
             std::move(dispatch));
     }
-    dispatch = NOz::If(opIs(2), block(std::move(destroyStmts)), std::move(dispatch));
     dispatch = NOz::If(opIs(1), block(std::move(update)), std::move(dispatch));
     dispatch = NOz::If(opIs(0), std::move(init), std::move(dispatch));
     auto body = std::make_shared<TBlockExpr>(loc,

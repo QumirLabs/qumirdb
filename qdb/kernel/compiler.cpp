@@ -181,7 +181,7 @@ constexpr const char* CacheSchemaVersion = "v1";
 // Hash and compare f32 keys by their canonical 32-bit bits.
 // radix.oz gains qumir_radix_key(f32).
 // row_group_interval.oz gains f32 operand intervals.
-constexpr const char* KernelLibVersion = "65";
+constexpr const char* KernelLibVersion = "66";
 } // namespace
 
 NQumir::NCodeGen::TLlvmRunner::TLinkedModule CompileKernelAstCached(

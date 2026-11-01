@@ -171,7 +171,6 @@ enum class EAggregateKernelOp : int64_t {
     // A swiss table of `arg` slots, a power of two of at least 8.
     Init = 0,
     Update = 1,
-    Destroy = 2,
     // A table in the row layout (kernel/aggregation/aggregation_rows.oz) with
     // entries for `arg` groups. Only for kernels with RowBytes > 0.
     InitRows = 3,
@@ -203,7 +202,7 @@ struct TAggregateOutputAgg {
 };
 
 // The compiled kernels for one Aggregation query: Dispatch handles
-// init/update/destroy of the HashTable (via agg_dispatch's op-codes),
+// initialization and updates of the HashTable (via agg_dispatch's op-codes),
 // Finalize copies the dense group keys/aggregate buffers to output arrays.
 struct TAggregateKernels {
     TAggregateDispatch Dispatch;
@@ -228,7 +227,6 @@ enum class EJoinKernelOp : int64_t {
     StreamLeft = 3,
     StreamRight = 4,
     Finalize = 5,
-    Destroy = 6,
     // A join that streamed against its marked build side (the preserved side of
     // a LEFT/RIGHT join, the left side of a SEMI/ANTI join): emit the build
     // rows the stream probes left unmarked, or the marked ones of a SEMI join.
@@ -287,7 +285,6 @@ struct TJoinKernels {
 
 enum class ECrossJoinKernelOp : int64_t {
     Emit = 0,
-    Destroy = 1,
     EmitUnmatchedRight = 2,
 };
 
@@ -308,7 +305,7 @@ struct TCrossJoinKernels {
     // the buffered right store, as the compiled join type emits them. RIGHT and
     // FULL joins also flag the matched right rows in rightMatched, one byte per
     // right row in store order, which EmitUnmatchedRight reads after the last
-    // left batch. Destroy frees PairBuffer storage.
+    // left batch. The allocation domain owns PairBuffer storage.
     TCrossJoinDispatch Dispatch;
 
     // Same generated materializer as equi-join: cross emits row-id pairs and
@@ -329,9 +326,6 @@ enum class ERowJoinKernelOp : int64_t {
     // an outer join is null. A SEMI/ANTI join marks the build rows it matches
     // instead and emits nothing.
     Probe = 3,
-    // Free `arena` and the table, scratch and pair buffers. A buffer already
-    // freed is skipped, so a join with two arenas destroys each.
-    Destroy = 4,
     // ANTI only: append the selected rows of `batch` whose key is NULL to
     // `arena`, which no table indexes.
     AppendNullKeys = 5,
@@ -370,7 +364,7 @@ struct TRowJoinKernels {
     TRowJoinDispatch Dispatch;
     TRowJoinMaterialize Materialize;
     // String payload rows point into the build batches, which the caller then
-    // keeps alive until Destroy.
+    // keeps alive until the processor is released.
     bool RetainsBuildBatches = false;
     // The instrumentation measure kernel over the probe schema: sizes a held
     // probe batch the way retained_input_bytes does, with instrumentation off.

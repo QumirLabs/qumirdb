@@ -40,7 +40,6 @@ public:
     explicit TAggregateProcessor(
         TAggregateKernels kernels,
         TAggregateTablePlan plan = {});
-    ~TAggregateProcessor();
 
     TAggregateProcessor(const TAggregateProcessor&) = delete;
     TAggregateProcessor& operator=(const TAggregateProcessor&) = delete;
@@ -57,7 +56,6 @@ public:
 
 private:
     void EnsureInit();
-    void Destroy();
 
 private:
     TKernelHeap StandaloneHeap_;
@@ -67,7 +65,6 @@ private:
     std::array<uint8_t, TKernelCompiler::HashTableSize> HashTable_ = {};
     bool Initialized_ = false;
     bool Finished_ = false;
-    bool Destroyed_ = false;
 };
 
 // Replays each batch once per set as a masked view (set id -> constant column, keys

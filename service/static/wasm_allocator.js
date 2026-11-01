@@ -105,6 +105,12 @@ export class BucketAllocator {
     return ptr;
   }
 
+  // The memory instance belongs to one query. Reclaim abandoned state after
+  // task/connection cleanup, including allocations left by failed kernels.
+  freeAll() {
+    for (const ptr of this.blockClass.keys()) this.free(ptr);
+  }
+
   free(ptr) {
     const p = Number(ptr);
     if (!p) return;
