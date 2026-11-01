@@ -1,0 +1,6 @@
+sort [k asc]
+└─ project (k, tag, note) (rows≈4 cost≈32.9K)
+   └─ join inner [d.k = f.k] emit-filter 1 from left (rows≈4 cost≈32.8K)
+      ├─ source d AS d (rows≈5 cost≈120)
+      └─ filter (&& (!= |f.g| 5) (!= |f.note| (cast "" <named StringView>))) (rows≈338 cost≈25.6K)
+         └─ source f AS f row-groups (&& (!= |f.g| 5) (!= |f.note| (cast "" <named StringView>))) use-filter 1 keys=[f.k] (rows≈400 cost≈12.8K)

@@ -65,12 +65,13 @@ struct TFilterDecision {
     EJoinFilterSide BuildSide;
     TConsumerPlacement Targets;
     double Benefit = 0.0;
+    double PassFraction = 1.0;
 };
 
 std::vector<TConsumerPlacement> PlacementCandidates(
     TOperatorPtr target, std::vector<std::string> probeKeys,
     std::optional<TKeyEstimate> buildKey = std::nullopt);
-void AttachPlacement(const TConsumerPlacement& placement, uint32_t id);
+void AttachPlacement(const TConsumerPlacement& placement, uint32_t id, double passFraction = 1.0);
 void RemoveFilterUse(const TOperatorPtr& root, uint32_t id);
 void ReuseRuntimeFilters(const TOperatorPtr& root);
 
@@ -332,7 +333,8 @@ std::optional<TFilterDecision> ChooseRuntimeFilter(
             decision = TFilterDecision{
                 .BuildSide = side,
                 .Targets = std::move(placement->Targets),
-                .Benefit = placement->Benefit};
+                .Benefit = placement->Benefit,
+                .PassFraction = *passFraction};
         }
     };
     if (!leftOuter && leftNdv && rightNdv) {
@@ -378,7 +380,7 @@ void Attach(const TOperatorPtr& node, uint32_t& nextId, bool force) {
             const uint32_t id = nextId++;
             join.Cast()->MutableRuntimeFilter() = TRuntimeFilterSpec{
                 .Id = id, .BuildSide = decision->BuildSide};
-            AttachPlacement(decision->Targets, id);
+            AttachPlacement(decision->Targets, id, decision->PassFraction);
         } else {
             join.Cast()->MutableRuntimeFilter() = std::nullopt;
         }
@@ -657,14 +659,14 @@ std::vector<TConsumerPlacement> PlacementCandidates(
     return candidates;
 }
 
-void AttachPlacement(const TConsumerPlacement& placement, uint32_t id) {
+void AttachPlacement(const TConsumerPlacement& placement, uint32_t id, double passFraction) {
     for (const auto& target : placement) {
         if (!std::any_of(target.Operator->RuntimeFilterUses.begin(),
                 target.Operator->RuntimeFilterUses.end(),
                 [id](const auto& existing) { return existing.Id == id; })) {
             target.Operator->RuntimeFilterUses.push_back(
                 TRuntimeFilterUseSpec{
-                    .Id = id, .ProbeKeys = target.ProbeKeys});
+                    .Id = id, .ProbeKeys = target.ProbeKeys, .PassFraction = passFraction});
         }
     }
 }
@@ -680,6 +682,7 @@ void RemoveFilterUse(const TOperatorPtr& root, uint32_t id) {
 struct TReusablePlacement {
     uint32_t Id;
     TScoredPlacement Placement;
+    double PassFraction = 1.0;
 };
 
 void FindReusableFilter(const TOperatorPtr& node,
@@ -767,7 +770,8 @@ void FindReusableFilter(const TOperatorPtr& node,
                             || placement->Benefit > best->Placement.Benefit)) {
                         best = TReusablePlacement{
                             .Id = producer->Id,
-                            .Placement = std::move(*placement)};
+                            .Placement = std::move(*placement),
+                            .PassFraction = *pass};
                     }
                 }
             }
@@ -797,7 +801,7 @@ void ReuseRuntimeFilters(const TOperatorPtr& root) {
             RemoveFilterUse(root, own->Id);
             join.Cast()->MutableRuntimeFilter() = std::nullopt;
         }
-        AttachPlacement(best->Placement.Targets, best->Id);
+        AttachPlacement(best->Placement.Targets, best->Id, best->PassFraction);
     }
 }
 

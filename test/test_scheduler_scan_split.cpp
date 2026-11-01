@@ -226,6 +226,22 @@ TEST(SchedulerConjunctOrder, MayFailKeepsItsPlace) {
     EXPECT_EQ(steps[2].Conjuncts, std::vector<NQumir::NAst::TExprPtr>{g.Predicate});
 }
 
+// A selective runtime filter goes before a LIKE on a long string, an unselective one after
+// it, and one of unknown pass fraction after every stage.
+TEST(SchedulerConjunctOrder, RuntimeFiltersGoByRank) {
+    const std::vector<TRankedStep> stages = {
+        {.Selectivity = 0.05, .Cost = 81.5},
+        {.Selectivity = 0.95, .Cost = 85.2},
+    };
+    const auto positions = PlaceRuntimeFilters(stages, {
+        {.Selectivity = 0.2, .Cost = 8.0},
+        {.Selectivity = 0.99, .Cost = 8.0},
+        {.Selectivity = 1.0, .Cost = 8.0},
+    });
+    EXPECT_EQ(positions, (std::vector<size_t>{0, 1, 2}));
+    EXPECT_EQ(PlaceRuntimeFilters({}, {{.Selectivity = 0.5, .Cost = 8.0}}), std::vector<size_t>{0});
+}
+
 } // namespace
 
 int main(int argc, char** argv) {

@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <qdb/exec/staged_scan_exec.h>
 #include <qdb/io/parquet/column_scan.h>
 #include <qdb/io/parquet/decimal_storage.h>
 #include <qdb/io/parquet/row_id.h>
@@ -1080,4 +1081,113 @@ TEST(IOTest, ColumnScanReadsSelectedRows) {
             }
         }
     }
+}
+
+namespace {
+
+// Keeps the rows whose hash is 7 modulo 100, once published.
+class TFakeRuntimeFilter final : public IRuntimeFilterProbe {
+public:
+    bool Ready() const override {
+        return Published;
+    }
+
+    size_t MayContainBatch(
+        std::span<const uint64_t> hashes,
+        std::span<uint8_t> output,
+        TRuntimeFilterProbeState&,
+        std::span<const uint8_t> selection) const override
+    {
+        size_t kept = 0;
+        for (size_t i = 0; i < hashes.size(); ++i) {
+            output[i] = (selection.empty() || selection[i]) && hashes[i] % 100 == 7;
+            kept += output[i];
+        }
+        return kept;
+    }
+
+    bool Published = false;
+};
+
+} // namespace
+
+// A staged scan waits for an unpublished runtime filter; once it is published, the filter step
+// keeps the rows it may contain, the output carries their key hashes, and the payload is read
+// for those rows only.
+TEST(StagedScan, RuntimeFilterStepBeforeThePayload) {
+    constexpr int64_t rows = 10000;
+    arrow::Int64Builder keys;
+    arrow::StringBuilder notes;
+    arrow::Int32Builder smalls;
+    for (int64_t row = 0; row < rows; ++row) {
+        ASSERT_TRUE(keys.Append(row).ok());
+        ASSERT_TRUE(notes.Append("a long note of row " + std::to_string(row)).ok());
+        ASSERT_TRUE(smalls.Append(static_cast<int32_t>(row % 1000)).ok());
+    }
+    auto batch = arrow::RecordBatch::Make(
+        arrow::schema({
+            arrow::field("k", arrow::int64(), false),
+            arrow::field("note", arrow::utf8(), false),
+            arrow::field("small", arrow::int32(), false),
+        }),
+        rows,
+        {keys.Finish().ValueOrDie(), notes.Finish().ValueOrDie(), smalls.Finish().ValueOrDie()});
+    const std::string path = "/tmp/test_io_qdb_staged_runtime_filter.parquet";
+    {
+        parquet::WriterProperties::Builder properties;
+        properties.data_pagesize(1024);
+        auto outfile = arrow::io::FileOutputStream::Open(path).ValueOrDie();
+        auto table = arrow::Table::FromRecordBatches({batch}).ValueOrDie();
+        ASSERT_TRUE(parquet::arrow::WriteTable(
+            *table, arrow::default_memory_pool(), outfile, 2500, properties.build()).ok());
+    }
+    NQdb::TParquetFile file(path);
+    auto source = file.MakeSource();
+    auto probe = std::make_shared<TFakeRuntimeFilter>();
+    auto consumer = std::make_shared<TRuntimeFilterConsumer>(TRuntimeFilterConsumer{
+        .Hash = [](TRowSet* rowSet, uint64_t* hashes) {
+            const auto* values = reinterpret_cast<const int64_t*>(rowSet->Columns[0].Data);
+            for (int64_t row = 0; row < rowSet->RowCount; ++row) {
+                hashes[row] = static_cast<uint64_t>(values[row]);
+            }
+            return true;
+        },
+        .Probe = probe,
+    });
+    auto plan = std::make_shared<TStagedScanPlan>(TStagedScanPlan{
+        .Steps = {{.RuntimeFilter = consumer}},
+        .MaxSparseShares = {0.5, 1.0 / 16},
+        .HashStep = 0,
+    });
+    TStagedScan scan(source->MakeGroupedScan({0, 1, 2, 3}, {{"note"}, {"small"}}), plan);
+    TRowSet rowSet = {};
+    EXPECT_EQ(scan.Next(rowSet), EStagedScanResult::Pending);
+    probe->Published = true;
+    int64_t first = 0;
+    int64_t kept = 0;
+    while (scan.Next(rowSet) == EStagedScanResult::Batch) {
+        ASSERT_EQ(rowSet.ColumnCount, 3);
+        ASSERT_TRUE(rowSet.Selection);
+        ASSERT_TRUE(rowSet.Hash);
+        const auto* smallValues = reinterpret_cast<const int32_t*>(rowSet.Columns[2].Data);
+        const auto* offsets = static_cast<const int64_t*>(rowSet.Columns[1].Offsets);
+        ASSERT_EQ(rowSet.Columns[1].OffsetWidth, 8);
+        for (int64_t i = 0; i < rowSet.RowCount; ++i) {
+            const int64_t row = first + i;
+            EXPECT_EQ(rowSet.Selection[i] != 0, row % 100 == 7) << row;
+            if (!rowSet.Selection[i]) {
+                continue;
+            }
+            ++kept;
+            EXPECT_EQ(rowSet.Hash[i], static_cast<uint64_t>(row)) << row;
+            EXPECT_EQ(std::string(rowSet.Columns[1].Data + offsets[i] - offsets[0], offsets[i + 1] - offsets[i]),
+                "a long note of row " + std::to_string(row));
+            EXPECT_EQ(smallValues[i], row % 1000) << row;
+        }
+        first += rowSet.RowCount;
+        Release(&rowSet);
+    }
+    EXPECT_EQ(scan.Next(rowSet), EStagedScanResult::Finished);
+    EXPECT_EQ(first, rows);
+    EXPECT_EQ(kept, rows / 100);
 }

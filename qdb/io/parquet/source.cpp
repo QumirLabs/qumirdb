@@ -1123,7 +1123,6 @@ bool TParquetGroupedScan::Next(TRowSet& rowSet) {
     for (size_t i = 0; i < FirstPositions_.size(); ++i) {
         batch->Columns[FirstPositions_[i]] = first.Columns[i];
     }
-    Batch_ = batch;
     rowSet = {
         .Columns = batch->Columns.data(),
         .ColumnCount = static_cast<int64_t>(ColumnCount_),
@@ -1140,17 +1139,18 @@ bool TParquetGroupedScan::Next(TRowSet& rowSet) {
     return true;
 }
 
-void TParquetGroupedScan::Read(size_t group, const uint8_t* selection) {
+void TParquetGroupedScan::Read(TRowSet& batch, size_t group, const uint8_t* selection) {
+    auto& data = *static_cast<TBatch*>(batch.Private);
     for (auto& column : Groups_[group - 1]) {
-        auto values = column.Scan->Read(Batch_->First.RowCount, selection);
-        ArrayToColumn(values, Batch_->Columns[column.Position], Batch_->DecimalValues);
-        Batch_->Arrays.push_back(std::move(values));
+        auto values = column.Scan->Read(batch.RowCount, selection);
+        ArrayToColumn(values, data.Columns[column.Position], data.DecimalValues);
+        data.Arrays.push_back(std::move(values));
     }
 }
 
-void TParquetGroupedScan::Skip(size_t group) {
+void TParquetGroupedScan::Skip(const TRowSet& batch, size_t group) {
     for (auto& column : Groups_[group - 1]) {
-        column.Scan->Skip(Batch_->First.RowCount);
+        column.Scan->Skip(batch.RowCount);
     }
 }
 

@@ -310,10 +310,12 @@ THashShuffleCode::THashShuffleCode(THash hash,
 TSourceTask::TSourceTask(
     std::shared_ptr<const TSourceCode> code,
     std::shared_ptr<void> state,
-    TOutputPort output)
+    TOutputPort output,
+    std::shared_ptr<TAuxInput> auxInput)
     : Code_(std::move(code))
     , State_(std::move(state))
     , Output_(output)
+    , AuxInput_(std::move(auxInput))
 {}
 
 ETaskResult TSourceTask::Execute() {
@@ -325,10 +327,19 @@ ETaskResult TSourceTask::Execute() {
     }
 
     TRowSet rowSet{};
-    if (!Code_->Next(State_.get(), rowSet)) {
-        Finished_ = true;
-        Output_.Finish();
-        return ETaskResult::FINISHED;
+    switch (Code_->Next(State_.get(), rowSet)) {
+        case ESourceResult::Batch:
+            break;
+        case ESourceResult::Pending:
+            if (AuxInput_ && AuxInput_->Poll() == EAuxInputStatus::Failed) {
+                throw std::runtime_error(
+                    "auxiliary producers finished without publishing input");
+            }
+            return ETaskResult::NEED_DATA;
+        case ESourceResult::Finished:
+            Finished_ = true;
+            Output_.Finish();
+            return ETaskResult::FINISHED;
     }
 
     if (!Output_.Push(std::move(rowSet))) {
@@ -367,6 +378,24 @@ TRuntimeFilterTask::~TRuntimeFilterTask() {
     if (HasInput_) {
         Release(&CurrentInput_);
     }
+}
+
+bool TSourceTask::WantsInput(const TTaskEdge& edge) const noexcept {
+    return AuxInput_ && edge.Kind == ETaskEdgeKind::Dependency
+        && AuxInput_->Poll() == EAuxInputStatus::NeedProducer;
+}
+
+bool TSourceTask::TryNotifyDependency() noexcept {
+    if (!AuxInput_) {
+        return true;
+    }
+    const auto status = AuxInput_->Poll();
+    if (status != EAuxInputStatus::Ready && status != EAuxInputStatus::Failed) {
+        return false;
+    }
+    bool expected = false;
+    return DependencyNotified_.compare_exchange_strong(expected, true,
+        std::memory_order_acq_rel);
 }
 
 bool TRuntimeFilterTask::WantsInput(const TTaskEdge& edge) const noexcept {
@@ -432,23 +461,11 @@ ETaskResult TRuntimeFilterTask::Execute() {
         if (!ProbeState_) {
             ProbeState_ = Code_->Probe->CreateProbeState();
         }
-        const size_t rows = static_cast<size_t>(CurrentInput_.RowCount);
-        const std::span<const uint8_t> selection = CurrentInput_.Selection
-            ? std::span<const uint8_t>(CurrentInput_.Selection, rows)
-            : std::span<const uint8_t>{};
-        const size_t selected = selection.empty() ? rows : static_cast<size_t>(
-            std::count_if(selection.begin(), selection.end(),
-                [](uint8_t value) { return value != 0; }));
-        if (Code_->Probe->BeginBatch(*ProbeState_, selected)) {
-            auto data = std::make_unique<TRuntimeFilterRowSetData>();
-            data->Hashes.resize(rows);
-            if (!Code_->Hash(&CurrentInput_, data->Hashes.data())) {
-                throw std::runtime_error("runtime filter hash kernel failed");
-            }
-            data->Selection.resize(rows);
-            const size_t kept = Code_->Probe->MayContainBatch(
-                data->Hashes, data->Selection, *ProbeState_, selection);
-            if (!kept) {
+        auto data = std::make_unique<TRuntimeFilterRowSetData>();
+        const auto kept = ProbeRuntimeFilter(
+            *Code_, *ProbeState_, CurrentInput_, data->Hashes, data->Selection);
+        if (kept) {
+            if (!*kept) {
                 Release(&CurrentInput_);
                 CurrentInput_ = {};
                 HasInput_ = false;

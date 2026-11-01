@@ -1,0 +1,10 @@
+{
+  "schema": "<struct (k i64) (tag string) (note <named Nullable [string]>)>",
+  "rows": [
+    ["3", "x", "note 3 delta bravo foxtrot"],
+    ["40", "y", "note 40 alpha alpha alpha"],
+    ["117", "z", "note 117 foxtrot hotel delta"],
+    ["250", "w", "note 250 charlie golf golf"],
+    ["399", "v", "note 399 hotel foxtrot bravo"]
+  ]
+}

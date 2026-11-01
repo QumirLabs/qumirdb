@@ -58,8 +58,16 @@ private:
     std::vector<TTaskNode*> Producers_;
 };
 
+// What a call of a source produced.
+enum class ESourceResult {
+    Batch,
+    // Nothing for now: the source waits for its auxiliary input.
+    Pending,
+    Finished,
+};
+
 struct TSourceCode {
-    using TNext = std::function<bool(void*, TRowSet&)>;
+    using TNext = std::function<ESourceResult(void*, TRowSet&)>;
 
     explicit TSourceCode(TNext next);
 
@@ -129,9 +137,7 @@ struct THashShuffleCode {
     bool UseInputHash = false;
 };
 
-struct TRuntimeFilterCode {
-    THashShuffleCode::THash Hash;
-    std::shared_ptr<IRuntimeFilterProbe> Probe;
+struct TRuntimeFilterCode : TRuntimeFilterConsumer {
     std::shared_ptr<TAuxInput> AuxInput;
 };
 
@@ -148,18 +154,24 @@ struct TMergeCode {
 
 class TSourceTask final : public ITaskNode {
 public:
+    // `auxInput` wakes a source that waits for its runtime filters to be published.
     TSourceTask(
         std::shared_ptr<const TSourceCode> code,
         std::shared_ptr<void> state,
-        TOutputPort output);
+        TOutputPort output,
+        std::shared_ptr<TAuxInput> auxInput = nullptr);
 
     ETaskResult Execute() override;
+    bool WantsInput(const TTaskEdge& edge) const noexcept override;
+    bool TryNotifyDependency() noexcept override;
     void ConfigureInstrumentation(TTaskInstrumentationSetup& setup) override;
 
 private:
     std::shared_ptr<const TSourceCode> Code_;
     std::shared_ptr<void> State_;
     TOutputPort Output_;
+    std::shared_ptr<TAuxInput> AuxInput_;
+    std::atomic<bool> DependencyNotified_ = false;
     bool Finished_ = false;
 };
 

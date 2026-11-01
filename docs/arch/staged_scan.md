@@ -44,14 +44,47 @@ scattered over every page still need every page decompressed, and the saving
 is then the copy of the values.
 
 The staged scan applies to a chain of filters over one Parquet source when a
-wide column is left after stage 0, to filter or to carry, and the scan has at
-least as many lanes as there are workers. Otherwise the filter stays a task
-after the scan. Fusing gives up the overlap of the scan and filter tasks of a
-lane: while lanes are fewer than workers, that overlap is part of the query's
-parallelism, and a staged scan of a small dimension table measured slower for
-the same CPU time. `[scan] staged_filter` turns it off. The exported browser
-plan keeps the separate filter, as its sources are read in JavaScript. Runtime
-filters of the source stay tasks after the scan and see its selection.
+wide column is left after stage 0, to filter or to carry, or the source has
+runtime filters on narrow keys, and the scan has at least half as many lanes
+as there are workers. Otherwise the filter stays a task after the scan. Fusing
+gives up the overlap of the scan and filter tasks of a lane: while lanes are
+few, that overlap is part of the query's parallelism, and a staged scan of a
+small dimension table measured slower for the same CPU time. A scan feeding a
+join has at most a lane per worker, and often a few less. `[scan] staged_filter` turns it off. The exported browser
+plan keeps the separate filter, as its sources are read in JavaScript.
+
+## Runtime filters
+
+A join's runtime filter tests a probe key against a Bloom filter or key set
+published by the build side; a row it rejects has no match, and the filter
+never rejects a row with one. It cannot fail, so it may run before any
+conjunct. When a staged scan's source has runtime filters whose keys are all
+narrow, they become steps of the scan instead of tasks after it.
+
+A filter step goes after stage 0 and before the first later stage of lower
+rank `(1 - s) / c`, the order of expensive predicates by Hellerstein and
+Stonebraker in [Predicate Migration (SIGMOD
+1993)](https://doi.org/10.1145/170035.170078). For a filter, `s` is the pass
+fraction the planner estimated from the key NDVs when it chose the filter, and
+`c` the probe, about the cost of decoding eight bytes per row; for a stage,
+`s` is the estimate of its conjuncts and `c` the bytes per row of its wide
+columns. A selective filter so runs before a `LIKE` on a long string, and an
+unselective one after it.
+
+With runtime filters in the scan, the narrow payload is read after them, whole:
+a narrow value costs about as much to skip as to copy, but a batch the filters
+empty skips its payload. The source of such a filter is staged even without a
+wide column.
+
+Until its runtime filters are published, the scan reads up to four batches
+ahead through the steps before them and then waits, as the queue before a
+runtime filter task did: rows let through before publication would cost the
+operators above more than the wait. A paused or pass-all filter passes the
+batch.
+The output carries the key hashes of the source's last runtime filter when
+that filter tested the batch, so the join's shuffle reuses them as it does
+after the filter tasks. If a key is wide, every runtime filter of the source
+stays a task after the scan.
 
 ## Kernels and the batch contract
 

@@ -29,6 +29,8 @@ struct TColumnReference {
 struct TRuntimeFilterUseSpec {
     uint32_t Id = 0;
     std::vector<std::string> ProbeKeys;
+    // The estimated fraction of probe rows the filter keeps; 1 when unknown.
+    double PassFraction = 1.0;
 };
 
 struct IOperator : NQumir::NAst::TExpr {

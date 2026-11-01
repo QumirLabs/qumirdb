@@ -64,6 +64,15 @@ namespace {
 // values; a column no wider than a fixed-width value saves neither, so stage 0 reads it.
 constexpr double MaxNarrowColumnBytes = 16.0;
 
+// A staged scan reads a column group sparsely while at most this share of a batch is
+// selected: about half for a wide column. A narrow payload column after runtime filters is
+// read whole, its values cost as much to skip as to copy; a batch they empty skips it.
+constexpr double MaxSparseShareWide = 0.5;
+constexpr double MaxSparseShareNarrow = 0.0;
+
+// Hashing and probing a key costs about as much as decoding this many bytes of a column.
+constexpr double RuntimeFilterProbeBytes = 8.0;
+
 struct TSchedulerSourceState {
     ISource* Source = nullptr;
     std::unique_ptr<ISource> OwnedSource;
@@ -607,21 +616,25 @@ public:
         NScheduler::IConnection& outConn,
         size_t outLaneOffset = 0)
     {
-        return LowerWithRuntimeFilters(op, outConn, outLaneOffset,
+        if (auto staged = LowerStagedScan(op, outConn, outLaneOffset)) {
+            return std::move(*staged);
+        }
+        return LowerWithRuntimeFilters(op, op->RuntimeFilterUses, outConn, outLaneOffset,
             [&](NScheduler::IConnection& conn, size_t laneOffset) {
                 return LowerRaw(op, conn, laneOffset);
             });
     }
 
-    // Lowers `op` with `lowerRaw`, followed by the runtime filters it consumes.
+    // Lowers `op` with `lowerRaw`, followed by tasks for the runtime filter `uses` of `op`.
     template <typename TLowerRaw>
     TLoweredOutput LowerWithRuntimeFilters(
         const TOperatorPtr& op,
+        const std::vector<TRuntimeFilterUseSpec>& uses,
         NScheduler::IConnection& outConn,
         size_t outLaneOffset,
         TLowerRaw&& lowerRaw)
     {
-        if (op->RuntimeFilterUses.empty()) {
+        if (uses.empty()) {
             return lowerRaw(outConn, outLaneOffset);
         }
         const size_t lanes = OutputLanes(op);
@@ -629,10 +642,10 @@ public:
             lanes, lanes, "runtime-filter-input");
         auto lowered = lowerRaw(firstInput, 0);
         NScheduler::IConnection* input = &firstInput;
-        for (size_t index = 0; index < op->RuntimeFilterUses.size(); ++index) {
-            const auto& use = op->RuntimeFilterUses[index];
+        for (size_t index = 0; index < uses.size(); ++index) {
+            const auto& use = uses[index];
             NScheduler::IConnection* output = &outConn;
-            if (index + 1 != op->RuntimeFilterUses.size()) {
+            if (index + 1 != uses.size()) {
                 output = &AddConn<NScheduler::TOneToOneConnection>(
                     lanes, lanes, "runtime-filter-chain");
             }
@@ -682,9 +695,6 @@ public:
         }
         if (auto n = TMaybeOp<TFilterOperator>(op)) {
             auto filter = n.Cast();
-            if (auto staged = LowerStagedScan(filter, outConn, outLaneOffset)) {
-                return std::move(*staged);
-            }
             auto execStageId = NewExecStage(
                 filter.get(), EExecPlanNodeKind::Filter);
             auto stageLabel = StageLabel("filter", execStageId);
@@ -1228,21 +1238,25 @@ private:
         return result;
     }
 
-    // A chain of filters over a Parquet scan runs inside the scan task (TStagedScan): stage 0
-    // reads the narrow columns, each later stage wide columns only for the rows the earlier
-    // stages keep, in OrderScanConjuncts order. nullopt keeps the scan and filter tasks.
+    // A Parquet scan runs the filters above it and its runtime filters inside the scan task
+    // (TStagedScan) when sparse reading can pay off: stage 0 reads the narrow columns, a later
+    // step wide columns only for the rows the earlier steps keep. nullopt keeps the tasks.
     std::optional<TLoweredOutput> LowerStagedScan(
-        const std::shared_ptr<TFilterOperator>& filter,
+        const TOperatorPtr& op,
         NScheduler::IConnection& outConn,
         size_t outLaneOffset)
     {
         if (!Settings_.Scan.StagedFilter) {
             return std::nullopt;
         }
-        std::vector<NQumir::NAst::TExprPtr> predicates{filter->Predicate()};
-        TOperatorPtr input = filter->Input();
+        std::shared_ptr<TFilterOperator> filter;
+        if (auto top = TMaybeOp<TFilterOperator>(op)) {
+            filter = top.Cast();
+        }
+        std::vector<NQumir::NAst::TExprPtr> predicates;
+        TOperatorPtr input = op;
         while (auto nested = TMaybeOp<TFilterOperator>(input)) {
-            if (!input->RuntimeFilterUses.empty()) {
+            if (input != op && !input->RuntimeFilterUses.empty()) {
                 return std::nullopt;
             }
             predicates.push_back(nested.Cast()->Predicate());
@@ -1251,7 +1265,7 @@ private:
         // The innermost filter comes first in SQL order.
         std::reverse(predicates.begin(), predicates.end());
         auto maybeSource = TMaybeOp<TSourceOperator>(input);
-        if (!maybeSource) {
+        if (!maybeSource || (predicates.empty() && maybeSource.Cast()->RuntimeFilterUses.empty())) {
             return std::nullopt;
         }
         auto source = maybeSource.Cast();
@@ -1266,13 +1280,14 @@ private:
             return std::nullopt;
         }
         // Fusing gives up the overlap of the scan and filter tasks, which is part of the
-        // query's parallelism while the scan has fewer lanes than workers.
+        // query's parallelism while a scan has few lanes. A scan feeding a join has at most a
+        // lane per worker and often a few less, as its row groups split unevenly.
         const bool threaded =
             Settings_.Scheduler.Mode == NScheduler::EExecutionMode::ThreadedScheduler;
         const size_t workers = threaded
             ? Settings_.Scheduler.WorkerCount
             : 1;
-        if (splits->size() < workers) {
+        if (2 * splits->size() < workers) {
             return std::nullopt;
         }
 
@@ -1286,19 +1301,35 @@ private:
                 fileColumns.emplace(sourceStruct.Fields[i].first, std::move(name));
             }
         }
-        // Stage 0 reads every narrow column, so a narrow column costs the order nothing.
-        auto columnBytes = ColumnBytes(*source, *parquet);
+        // Stage 0 reads every narrow column it needs, so a narrow column costs the order nothing.
+        const auto columnBytes = ColumnBytes(*source, *parquet);
+        auto orderBytes = columnBytes;
         std::unordered_set<std::string> narrow;
-        for (auto& [name, bytes] : columnBytes) {
+        for (auto& [name, bytes] : orderBytes) {
             if (bytes <= MaxNarrowColumnBytes) {
                 narrow.insert(name);
                 bytes = 0.0;
             }
         }
+        // The runtime filters become steps when all of them probe keys stage 0 reads; then the
+        // output carries the hashes of the last one, as the chain of runtime filter tasks does.
+        const auto& uses = source->RuntimeFilterUses;
+        const bool probesInScan = !uses.empty() && std::ranges::all_of(uses, [&](const auto& use) {
+            return std::ranges::all_of(use.ProbeKeys, [&](const std::string& key) {
+                return narrow.contains(key) && fileColumns.contains(key);
+            });
+        });
+        std::unordered_set<std::string> probeKeys;
+        if (probesInScan) {
+            for (const auto& use : uses) {
+                probeKeys.insert(use.ProbeKeys.begin(), use.ProbeKeys.end());
+            }
+        }
+
         // A step that adds only narrow columns runs in the stage before it.
         std::vector<NScheduler::TScanFilterStep> stages;
         std::unordered_set<std::string> filterColumns;
-        auto steps = NScheduler::OrderScanConjuncts(ScanConjuncts(predicates, input), columnBytes);
+        auto steps = NScheduler::OrderScanConjuncts(ScanConjuncts(predicates, input), orderBytes);
         for (auto& step : steps) {
             filterColumns.insert(step.NewColumns.begin(), step.NewColumns.end());
             std::erase_if(step.NewColumns, [&](const std::string& column) {
@@ -1324,22 +1355,33 @@ private:
         for (const auto& stage : stages) {
             groups.push_back(fileColumnsOf(stage.NewColumns));
         }
-        std::vector<std::string> payload;
+        // After runtime filters even narrow columns are worth reading sparsely, but only when
+        // few rows are left: their values cost about as much to skip as to copy.
+        std::vector<std::string> widePayload;
+        std::vector<std::string> narrowPayload;
         for (const auto& [name, _] : sourceStruct.Fields) {
-            if (!filterColumns.contains(name) && !narrow.contains(name)) {
-                payload.push_back(name);
+            if (filterColumns.contains(name) || probeKeys.contains(name)) {
+                continue;
+            }
+            if (!narrow.contains(name)) {
+                widePayload.push_back(name);
+            } else if (probesInScan) {
+                narrowPayload.push_back(name);
             }
         }
-        payload = fileColumnsOf(payload);
-        // Nothing wide to read after stage 0: sparse reading would not pay off.
-        if (groups.empty() || groups[0].empty() || (stages.size() == 1 && payload.empty())) {
+        widePayload = fileColumnsOf(widePayload);
+        narrowPayload = fileColumnsOf(narrowPayload);
+        const bool wideLater = stages.size() > 1 || !widePayload.empty();
+        if ((!stages.empty() && groups[0].empty()) || !(wideLater || probesInScan)) {
             return std::nullopt;
         }
-        auto columnPlan = BuildFilterColumnPlan(*filter, sourceType);
-        // The runtime filters of the source follow the staged scan.
+        auto columnPlan = filter
+            ? BuildFilterColumnPlan(*filter, sourceType)
+            : TFilterColumnPlan{.OutputType = sourceType};
+        // Runtime filters left as tasks follow the staged scan.
         const auto* outputStruct = static_cast<const NQumir::NAst::TStructType*>(
             columnPlan.OutputType.get());
-        for (const auto& use : source->RuntimeFilterUses) {
+        for (const auto& use : probesInScan ? std::vector<TRuntimeFilterUseSpec>{} : uses) {
             for (const auto& key : use.ProbeKeys) {
                 if (!FieldType(outputStruct, key)) {
                     return std::nullopt;
@@ -1347,9 +1389,10 @@ private:
             }
         }
 
-        const auto execStageId = NewExecStage(filter.get(), EExecPlanNodeKind::StagedScan);
+        const auto execStageId = NewExecStage(op.get(), EExecPlanNodeKind::StagedScan);
         const auto stageLabel = StageLabel("staged-scan", execStageId);
         auto plan = std::make_shared<TStagedScanPlan>();
+        std::vector<TStagedScanPlan::TStep> stageSteps;
         {
             TStageDiagnosticsScope diagnosticsScope(Diagnostics_, stageLabel);
             for (const auto& stage : stages) {
@@ -1357,44 +1400,127 @@ private:
                     sourceStruct, ConjoinPredicates(stage.Conjuncts), "<kernel>",
                     ExternalCatalog_.get(), RuntimeContext_.get());
                 TKernelCompiler compiler(KernelOptions(stageLabel, execStageId));
-                plan->Stages.push_back(compiler.CompileFilter(spec));
+                stageSteps.push_back({
+                    .ReadsGroup = !stageSteps.empty(),
+                    .Filter = compiler.CompileFilter(spec),
+                });
             }
         }
-        plan->Payload = !payload.empty();
+        // Runtime filters go between the later stages by rank; bound once their producers are
+        // lowered. Before they are published the scan reads a few batches ahead and waits.
+        std::vector<std::shared_ptr<NScheduler::TRuntimeFilterCode>> filterCodes;
+        std::vector<size_t> filterPositions;
+        std::shared_ptr<NScheduler::TAuxInput> auxInput;
+        if (probesInScan) {
+            auxInput = std::make_shared<NScheduler::TAuxInput>();
+            std::vector<NScheduler::TRankedStep> later;
+            for (size_t stage = 1; stage < stages.size(); ++stage) {
+                double cost = 0.0;
+                for (const auto& column : stages[stage].NewColumns) {
+                    cost += columnBytes.at(column);
+                }
+                later.push_back({
+                    .Selectivity = EstimatePredicateSelectivity(
+                        ConjoinPredicates(stages[stage].Conjuncts), input, ConstFolder_),
+                    .Cost = cost,
+                });
+            }
+            std::vector<NScheduler::TRankedStep> ranked;
+            for (const auto& use : uses) {
+                ranked.push_back({.Selectivity = use.PassFraction, .Cost = RuntimeFilterProbeBytes});
+                auto code = std::make_shared<NScheduler::TRuntimeFilterCode>();
+                code->AuxInput = auxInput;
+                filterCodes.push_back(std::move(code));
+            }
+            filterPositions = NScheduler::PlaceRuntimeFilters(later, ranked);
+        }
+        // Filters of one position keep the order of the uses; the last one hashes for the next consumer.
+        for (size_t stage = 0; stage <= stages.size(); ++stage) {
+            if (stage > 0 && stage <= stageSteps.size()) {
+                plan->Steps.push_back(stageSteps[stage - 1]);
+            }
+            for (size_t use = 0; use < filterCodes.size(); ++use) {
+                if (filterPositions[use] + std::min<size_t>(stages.size(), 1) == stage) {
+                    if (use + 1 == uses.size()) {
+                        plan->HashStep = plan->Steps.size();
+                    }
+                    plan->Steps.push_back({.RuntimeFilter = filterCodes[use]});
+                }
+            }
+        }
+        for (size_t group = 1; group < groups.size(); ++group) {
+            plan->MaxSparseShares.push_back(MaxSparseShareWide);
+        }
+        if (!widePayload.empty()) {
+            groups.push_back(widePayload);
+            plan->MaxSparseShares.push_back(MaxSparseShareWide);
+        }
+        if (!narrowPayload.empty()) {
+            groups.push_back(narrowPayload);
+            plan->MaxSparseShares.push_back(MaxSparseShareNarrow);
+        }
         plan->KeptColumns = std::move(columnPlan.KeptInputColumns);
         if (Diagnostics_) {
             *Diagnostics_ << "staged scan: source="
                 << (source->GetAlias().empty() ? source->SourcePath() : source->GetAlias())
                 << " stages=";
-            for (const auto& group : groups) {
-                *Diagnostics_ << '[' << JoinNames(group) << ']';
+            for (size_t stage = 0; stage < stages.size(); ++stage) {
+                *Diagnostics_ << '[' << JoinNames(groups[stage]) << ']';
             }
-            *Diagnostics_ << " payload=[" << JoinNames(payload) << "]\n";
+            *Diagnostics_ << " runtime_filters=" << filterCodes.size()
+                << " payload=[" << JoinNames(widePayload) << "][" << JoinNames(narrowPayload) << "]\n";
         }
-        groups.erase(groups.begin());
-        if (!payload.empty()) {
-            groups.push_back(std::move(payload));
+        if (!groups.empty() && !stages.empty()) {
+            groups.erase(groups.begin());
         }
         const std::string label = "staged-scan " + source->GetAlias();
-        return LowerWithRuntimeFilters(source, outConn, outLaneOffset,
+        auto lowerLanes = [&](NScheduler::IConnection& conn, size_t laneOffset) {
+            auto code = std::make_shared<NScheduler::TSourceCode>(
+                [](void* state, TRowSet& rowSet) {
+                    switch (static_cast<TStagedScan*>(state)->Next(rowSet)) {
+                        case EStagedScanResult::Batch:
+                            return NScheduler::ESourceResult::Batch;
+                        case EStagedScanResult::Pending:
+                            return NScheduler::ESourceResult::Pending;
+                        case EStagedScanResult::Finished:
+                            return NScheduler::ESourceResult::Finished;
+                    }
+                    return NScheduler::ESourceResult::Finished;
+                });
+            TLoweredOutput result{.OutputType = columnPlan.OutputType};
+            for (size_t lane = 0; lane < splits->size(); ++lane) {
+                auto state = std::make_shared<TStagedScan>(
+                    parquet->MakeGroupedScan((*splits)[lane].RowGroups, groups), plan);
+                auto task = std::make_unique<NScheduler::TSourceTask>(
+                    code,
+                    std::move(state),
+                    NScheduler::TOutputPort{.Connection = &conn, .Lane = lane + laneOffset},
+                    auxInput);
+                auto& node = Graph_.AddOwnedNode(std::move(task));
+                MarkNode(node, "staged-scan", execStageId, label, execStageId);
+                result.Producers.push_back(&node);
+            }
+            for (size_t use = 0; use < filterCodes.size(); ++use) {
+                FilterConsumers_[uses[use].Id].push_back({
+                    .Code = filterCodes[use],
+                    .Nodes = result.Producers,
+                    .ProbeKeys = uses[use].ProbeKeys,
+                    .OutputType = sourceType,
+                    .AtSource = true,
+                });
+            }
+            return result;
+        };
+        const std::vector<TRuntimeFilterUseSpec> noUses;
+        const auto& sourceUses = probesInScan
+            ? noUses
+            : uses;
+        if (!filter) {
+            return LowerWithRuntimeFilters(op, sourceUses, outConn, outLaneOffset, lowerLanes);
+        }
+        return LowerWithRuntimeFilters(op, op->RuntimeFilterUses, outConn, outLaneOffset,
             [&](NScheduler::IConnection& conn, size_t laneOffset) {
-                auto code = std::make_shared<NScheduler::TSourceCode>(
-                    [](void* state, TRowSet& rowSet) {
-                        return static_cast<TStagedScan*>(state)->Next(rowSet);
-                    });
-                TLoweredOutput result{.OutputType = columnPlan.OutputType};
-                for (size_t lane = 0; lane < splits->size(); ++lane) {
-                    auto state = std::make_shared<TStagedScan>(
-                        parquet->MakeGroupedScan((*splits)[lane].RowGroups, groups), plan);
-                    auto task = std::make_unique<NScheduler::TSourceTask>(
-                        code,
-                        std::move(state),
-                        NScheduler::TOutputPort{.Connection = &conn, .Lane = lane + laneOffset});
-                    auto& node = Graph_.AddOwnedNode(std::move(task));
-                    MarkNode(node, "staged-scan", execStageId, label, execStageId);
-                    result.Producers.push_back(&node);
-                }
-                return result;
+                return LowerWithRuntimeFilters(source, sourceUses, conn, laneOffset, lowerLanes);
             });
     }
 
@@ -1587,7 +1713,9 @@ private:
         auto code = std::make_shared<NScheduler::TSourceCode>(
             [](void* state, TRowSet& rowSet) {
                 auto* sourceState = static_cast<TSchedulerSourceState*>(state);
-                return sourceState->Source->Next(rowSet);
+                return sourceState->Source->Next(rowSet)
+                    ? NScheduler::ESourceResult::Batch
+                    : NScheduler::ESourceResult::Finished;
             });
 
         const size_t lanes = std::max<size_t>(

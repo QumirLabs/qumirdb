@@ -410,4 +410,31 @@ TRuntimeFilterBinding TLocalRuntimeFilterBindingFactory::Create(
     return TRuntimeFilterBinding{.Producer = filter, .Probe = std::move(filter)};
 }
 
+std::optional<size_t> ProbeRuntimeFilter(
+    const TRuntimeFilterConsumer& consumer,
+    TRuntimeFilterProbeState& state,
+    TRowSet& rowSet,
+    std::vector<uint64_t>& hashes,
+    std::vector<uint8_t>& output)
+{
+    const size_t rows = static_cast<size_t>(rowSet.RowCount);
+    const std::span<const uint8_t> selection = rowSet.Selection
+        ? std::span<const uint8_t>(rowSet.Selection, rows)
+        : std::span<const uint8_t>{};
+    const size_t selected = selection.empty()
+        ? rows
+        : static_cast<size_t>(std::count_if(selection.begin(), selection.end(), [](uint8_t value) {
+            return value != 0;
+        }));
+    if (!consumer.Probe->BeginBatch(state, selected)) {
+        return std::nullopt;
+    }
+    hashes.resize(rows);
+    if (!consumer.Hash(&rowSet, hashes.data())) {
+        throw std::runtime_error("runtime filter hash kernel failed");
+    }
+    output.resize(rows);
+    return consumer.Probe->MayContainBatch(hashes, output, state, selection);
+}
+
 } // namespace NQdb

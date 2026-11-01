@@ -309,7 +309,14 @@ private:
                         static_cast<const TSourceOperator*>(stage.Operator)));
                 break;
             case EExecPlanNodeKind::StagedScan: {
-                auto* filter = static_cast<const TFilterOperator*>(stage.Operator);
+                // The source itself, or the chain of filters fused into it.
+                auto* filter = dynamic_cast<const TFilterOperator*>(stage.Operator);
+                if (!filter) {
+                    outputType = BuildSourceRuntimeType(
+                        *const_cast<TSourceOperator*>(
+                            static_cast<const TSourceOperator*>(stage.Operator)));
+                    break;
+                }
                 auto input = filter->Input();
                 while (auto nested = TMaybeOp<TFilterOperator>(input)) {
                     input = nested.Cast()->Input();
