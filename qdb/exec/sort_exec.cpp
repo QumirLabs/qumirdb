@@ -459,7 +459,7 @@ bool TSortProcessor::Next(TRowSet& rowSet)
             if (out <= 0) {
                 return false;
             }
-            rowSet.Destroy = DestroyKernelOwnedRowSet;
+            AdoptKernelOwnedRowSet(rowSet);
             Cursor_ += static_cast<size_t>(out);
             return true;
         }
@@ -693,7 +693,7 @@ void TTopSortProcessor::Add(TRowSet& batch)
         throw std::runtime_error("top-sort kernel update failed");
     }
     if (produced > 0) {
-        next.Destroy = DestroyKernelOwnedRowSet;
+        AdoptKernelOwnedRowSet(next);
         ReleaseKernelState(scratch.State);
         scratch.State = next;
         if (Instrumentation_) {
@@ -745,7 +745,7 @@ bool TTopSortProcessor::Next(TRowSet& rowSet)
     if (produced <= 0) {
         return false;
     }
-    rowSet.Destroy = DestroyKernelOwnedRowSet;
+    AdoptKernelOwnedRowSet(rowSet);
     Cursor_ += static_cast<size_t>(produced);
     return true;
 }

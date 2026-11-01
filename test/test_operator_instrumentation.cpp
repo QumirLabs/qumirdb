@@ -499,7 +499,11 @@ TEST(OperatorInstrumentation, ThreadCpuExcludesSleepingAndSurvivesWorkerMigratio
     node.Instrumentation = std::make_unique<TOperatorInstrumentation>();
     const auto start = std::chrono::steady_clock::now();
     for (size_t worker = 0; worker < 2; ++worker) {
-        std::thread([&] { EXPECT_EQ(ExecuteTask(node), ETaskResult::OK); }).join();
+        std::thread([&] {
+            TExecutionState state(1);
+            TExecutionContext context{.State = &state};
+            EXPECT_EQ(ExecuteTask(node, context), ETaskResult::OK);
+        }).join();
     }
     const auto wall = std::chrono::steady_clock::now() - start;
     EXPECT_GE(wall, std::chrono::milliseconds(100));

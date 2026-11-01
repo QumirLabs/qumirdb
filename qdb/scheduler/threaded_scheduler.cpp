@@ -49,6 +49,7 @@ bool TThreadedScheduler::Run(std::string* error) {
     Schedule(Graph_.Root());
 
     std::vector<std::thread> workers;
+    Graph_.PrepareExecution();
     workers.reserve(WorkerCount_);
     for (size_t i = 0; i < WorkerCount_; ++i) {
         workers.emplace_back([this]() {
@@ -146,6 +147,7 @@ void TThreadedScheduler::ScheduleOutput(TTaskNode* node) {
 }
 
 void TThreadedScheduler::Work() {
+    TExecutionContext context{.State = &Graph_.PrepareExecution()};
     // Terminate once the root (sink) is Finished: all output the query needs has
     // been produced. Nodes still unfinished at that point are upstream branches
     // abandoned by early termination (a satisfied LIMIT stops pulling, leaving
@@ -211,7 +213,7 @@ void TThreadedScheduler::Work() {
 
         ETaskResult result;
         try {
-            result = ExecuteTask(*node);
+            result = ExecuteTask(*node, context);
         } catch (const std::exception& e) {
             bool expected = false;
             if (Failed_.compare_exchange_strong(

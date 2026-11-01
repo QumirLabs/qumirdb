@@ -3,6 +3,7 @@
 #include <qdb/io/io.h>
 #include <qdb/exec/instrumentation/operator.h>
 #include <qdb/kernel/compiler.h>
+#include <qdb/kernel/execution_context.h>
 
 #include <qumir/parser/type.h>
 
@@ -177,6 +178,7 @@ private:
     EJoinSide ChooseSymmetricPullSide() const;
 
 private:
+    TKernelHeap StandaloneHeap_;
     TJoinKernels Kernels_;
     TOperatorInstrumentation* Instrumentation_ = nullptr;
     EJoinType JoinType_ = EJoinType::Inner;
@@ -242,6 +244,7 @@ private:
     bool Dispatch(int32_t leftBatch, ECrossJoinKernelOp op);
 
 private:
+    TKernelHeap StandaloneHeap_;
     TCrossJoinKernels Kernels_;
     EJoinType JoinType_ = EJoinType::Inner;
     TRowStore LeftRows_;

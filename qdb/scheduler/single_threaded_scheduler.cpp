@@ -34,6 +34,7 @@ bool TSingleThreadedScheduler::Run(std::string* error) {
     Ready_.clear();
     Scheduled_.clear();
     Stats_ = {};
+    TExecutionContext context{.State = &Graph_.PrepareExecution()};
     Schedule(Graph_.Root());
 
     while (!Ready_.empty()) {
@@ -44,7 +45,7 @@ bool TSingleThreadedScheduler::Run(std::string* error) {
 
         ETaskResult state;
         try {
-            state = ExecuteTask(*node);
+            state = ExecuteTask(*node, context);
         } catch (const std::exception& e) {
             SetError(error, e.what());
             return false;

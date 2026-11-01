@@ -38,10 +38,10 @@ TRowJoinProcessor::~TRowJoinProcessor() {
         ReadyOutput_.pop_front();
     }
     if (Initialized_) {
-        TRowSet none{};
-        Dispatch(ERowJoinKernelOp::Destroy, &none);
+        // TRowSet none{};
+        // Dispatch(ERowJoinKernelOp::Destroy, &none);
         if (Kernels_.KeepsNullKeyRows) {
-            Dispatch(ERowJoinKernelOp::Destroy, &none, NullKeyArena_);
+            // Dispatch(ERowJoinKernelOp::Destroy, &none, NullKeyArena_);
         }
     }
     for (auto& batch : BuildBatches_) {
@@ -185,7 +185,7 @@ void TRowJoinProcessor::ProbeBatch(TRowSet& batch) {
             Release(&batch);
             throw std::runtime_error("row join materialize failed");
         }
-        out.Destroy = DestroyKernelOwnedRowSet;
+        AdoptKernelOwnedRowSet(out);
         ReadyOutput_.push_back(out);
         cursor += produced;
     }
@@ -219,7 +219,7 @@ EJoinProcessorResult TRowJoinProcessor::Finish(TRowSet& output) {
     if (produced <= 0) {
         throw std::runtime_error("row join materialize failed");
     }
-    out.Destroy = DestroyKernelOwnedRowSet;
+    AdoptKernelOwnedRowSet(out);
     EmitCursor_ += produced;
     output = out;
     return EJoinProcessorResult::OK;
@@ -230,6 +230,7 @@ EJoinProcessorResult TRowJoinProcessor::Process(
     const TFetch& right,
     TRowSet& output)
 {
+    TKernelHeapScope scope(StandaloneHeap_);
     EnsureInit();
     if (DrainReadyOutput(output)) {
         return EJoinProcessorResult::OK;

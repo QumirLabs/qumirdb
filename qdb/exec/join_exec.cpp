@@ -81,16 +81,16 @@ TInnerJoinProcessor::~TInnerJoinProcessor() {
         ReadyOutput_.pop_front();
     }
     if (Initialized_) {
-        Kernels_.Dispatch(
-            LeftTable_.data(),
-            RightTable_.data(),
-            nullptr,
-            0,
-            &PairBuffer_,
-            nullptr,
-            nullptr,
-            0,
-            JoinOp(EJoinKernelOp::Destroy));
+        // Kernels_.Dispatch(
+        //     LeftTable_.data(),
+        //     RightTable_.data(),
+        //     nullptr,
+        //     0,
+        //     &PairBuffer_,
+        //     nullptr,
+        //     nullptr,
+        //     0,
+        //     JoinOp(EJoinKernelOp::Destroy));
     }
 }
 
@@ -139,7 +139,7 @@ bool TInnerJoinProcessor::DrainMaterialized(TRowSet& rowSet) {
     if (produced <= 0) {
         throw std::runtime_error("join materialize failed");
     }
-    out.Destroy = DestroyKernelOwnedRowSet;
+    AdoptKernelOwnedRowSet(out);
     MaterializeCursor_ += produced;
     if (MaterializeCursor_ >= PairBuffer_.Count) {
         PairBuffer_.Count = 0;
@@ -170,7 +170,7 @@ void TInnerJoinProcessor::DrainStreamingPairs(
         if (produced <= 0) {
             throw std::runtime_error("join materialize failed");
         }
-        out.Destroy = DestroyKernelOwnedRowSet;
+        AdoptKernelOwnedRowSet(out);
         ReadyOutput_.push_back(out);
         MaterializeCursor_ += produced;
     }
@@ -527,6 +527,7 @@ EJoinProcessorResult TInnerJoinProcessor::Process(
     const TFetch& right,
     TRowSet& output)
 {
+    TKernelHeapScope scope(StandaloneHeap_);
     EnsureInit();
 
     if (IsSemiAnti() && BuildSide_ == EJoinBuildSide::Auto) {
@@ -600,14 +601,14 @@ TCrossJoinProcessor::~TCrossJoinProcessor() {
     // kernels to WASM but never JIT-finalizes them, so Kernels_.Dispatch wraps
     // a null function pointer - Data stays null and there is nothing to free.
     if (PairBuffer_.Data) {
-        Kernels_.Dispatch(
-            nullptr,
-            0,
-            nullptr,
-            0,
-            nullptr,
-            &PairBuffer_,
-            CrossJoinOp(ECrossJoinKernelOp::Destroy));
+        // Kernels_.Dispatch(
+        //     nullptr,
+        //     0,
+        //     nullptr,
+        //     0,
+        //     nullptr,
+        //     &PairBuffer_,
+        //     CrossJoinOp(ECrossJoinKernelOp::Destroy));
     }
 }
 
@@ -645,7 +646,7 @@ bool TCrossJoinProcessor::DrainMaterialized(TRowSet& rowSet) {
     if (produced <= 0) {
         throw std::runtime_error("cross join materialize failed");
     }
-    out.Destroy = DestroyKernelOwnedRowSet;
+    AdoptKernelOwnedRowSet(out);
     MaterializeCursor_ += produced;
     if (MaterializeCursor_ >= PairBuffer_.Count) {
         PairBuffer_.Count = 0;
@@ -660,6 +661,7 @@ EJoinProcessorResult TCrossJoinProcessor::Process(
     const TFetch& right,
     TRowSet& output)
 {
+    TKernelHeapScope scope(StandaloneHeap_);
     if (DrainMaterialized(output)) {
         return EJoinProcessorResult::OK;
     }
