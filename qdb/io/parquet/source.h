@@ -129,19 +129,19 @@ private:
     TSchema Schema_;
 };
 
-// One lane of a staged scan. Next reads the first column group of a batch; Read reads a later
-// group of that batch while it is alive, only for the rows a selection marks. A column not
-// read yet has no data; a row a sparse read skips holds zero or an empty string.
+// One lane of a staged scan. Next reads the first column group of a batch, Read a later group
+// of a batch in batch order, only for the rows a selection marks. An unread column has no
+// data; a row a sparse read skips holds zero or an empty string.
 class TParquetGroupedScan {
 public:
     ~TParquetGroupedScan();
 
     bool Next(TRowSet& rowSet);
-    // Reads group `group` (the first later group is 1) for the rows `selection` marks;
-    // null reads every row.
-    void Read(size_t group, const uint8_t* selection);
-    // Moves the columns of `group` past the batch.
-    void Skip(size_t group);
+    // Reads group `group` (the first later group is 1) of `batch` for the rows `selection`
+    // marks; null reads every row.
+    void Read(TRowSet& batch, size_t group, const uint8_t* selection);
+    // Moves the columns of `group` past `batch`.
+    void Skip(const TRowSet& batch, size_t group);
 
 private:
     friend class TParquetSource;
@@ -158,7 +158,6 @@ private:
     std::vector<size_t> FirstPositions_;
     std::vector<std::vector<TColumnScan>> Groups_;
     size_t ColumnCount_ = 0;
-    TBatch* Batch_ = nullptr;
 };
 
 } // namespace NQdb

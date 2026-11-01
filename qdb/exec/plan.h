@@ -14,7 +14,8 @@ namespace NQdb {
 
 enum class EExecPlanNodeKind {
     Source,
-    // A filter chain fused into its Parquet source (staged scan); Operator is the top filter.
+    // A Parquet source with the filters above it fused (staged scan); Operator is the top
+    // filter, or the source when only its runtime filters are fused.
     StagedScan,
     Filter,
     RuntimeFilter,

@@ -197,11 +197,11 @@ TPipeline MakePipeline() {
         [destroyCount = out.DestroyCount](void* state, TRowSet& rowSet) {
             auto* source = static_cast<TSourceState*>(state);
             if (source->Next > source->End) {
-                return false;
+                return ESourceResult::Finished;
             }
             rowSet = MakeRowSet(source->Next, destroyCount.get());
             ++source->Next;
-            return true;
+            return ESourceResult::Batch;
         });
     out.FilterCode = std::make_shared<TUnaryCode>(
         [](void* state, TRowSet& rowSet) {
@@ -330,11 +330,11 @@ TEST(SchedulerRuntimeAdapter, RunsBinaryBlockingTask) {
         [destroyCount](void* state, TRowSet& rowSet) {
             auto* source = static_cast<TSourceState*>(state);
             if (source->Next > source->End) {
-                return false;
+                return ESourceResult::Finished;
             }
             rowSet = MakeRowSet(source->Next, destroyCount.get());
             ++source->Next;
-            return true;
+            return ESourceResult::Batch;
         });
     auto binaryCode = std::make_shared<TBinaryBlockingCode>(
         [](ITaskState& state, TInputPort& left, TInputPort& right, TRowSet& output) {
@@ -454,11 +454,11 @@ TGateResult RunAsymmetricGateGraph(bool gate) {
             auto* s = static_cast<TSourceState*>(state);
             if (s->Next > s->End) {
                 buildDone->store(true, std::memory_order_relaxed);
-                return false;
+                return ESourceResult::Finished;
             }
             rowSet = MakeRowSet(1, destroy.get());
             ++s->Next;
-            return true;
+            return ESourceResult::Batch;
         });
 
     auto probeState = std::make_shared<TSourceState>(TSourceState{.Next = 1, .End = 2});
@@ -469,11 +469,11 @@ TGateResult RunAsymmetricGateGraph(bool gate) {
             }
             auto* s = static_cast<TSourceState*>(state);
             if (s->Next > s->End) {
-                return false;
+                return ESourceResult::Finished;
             }
             rowSet = MakeRowSet(1, destroy.get());
             ++s->Next;
-            return true;
+            return ESourceResult::Batch;
         });
 
     auto binaryState = std::make_shared<TBinaryState>();

@@ -257,9 +257,10 @@ TRunResult RunQuery(
             }
         }
         auto lowered = NScheduler::LowerPlanToGraph(plan, settings, &diagnostics);
+        // A filter over the scan may run inside it, as a staged scan.
         const auto lanes = std::ranges::count_if(
             lowered.Graph->Nodes(), [](const auto& node) {
-                return node->DebugKind == "source";
+                return node->DebugKind == "source" || node->DebugKind == "staged-scan";
             });
         EXPECT_EQ(lanes, enablePruning ? 1 : 3);
         EXPECT_NE(diagnostics.str().find(" bytes=" + std::to_string(projectedBytes)),

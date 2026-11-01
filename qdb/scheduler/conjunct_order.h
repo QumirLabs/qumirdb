@@ -33,5 +33,19 @@ std::vector<TScanFilterStep> OrderScanConjuncts(
     std::vector<TScanConjunct> conjuncts,
     const std::unordered_map<std::string, double>& columnBytes);
 
+// A step of a staged scan after stage 0, by its estimated selectivity and its cost in
+// bytes per row.
+struct TRankedStep {
+    double Selectivity = 1.0;
+    double Cost = 0.0;
+};
+
+// Where runtime filters go among the later stages of a staged scan: each before the first
+// stage of lower rank (1 - s) / c, the order of expensive predicates by Hellerstein and
+// Stonebraker. Returns for each filter the number of stages before it.
+std::vector<size_t> PlaceRuntimeFilters(
+    const std::vector<TRankedStep>& stages,
+    const std::vector<TRankedStep>& filters);
+
 } // namespace NScheduler
 } // namespace NQdb

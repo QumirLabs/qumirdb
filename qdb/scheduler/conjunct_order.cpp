@@ -14,6 +14,9 @@ namespace {
 // Bytes per row are a coarse proxy of the decoding cost, so close costs defer to selectivity.
 constexpr double CloseCostRatio = 2.0;
 
+// A free step ranks above every costed one.
+constexpr double MinRankCost = 1e-9;
+
 class TStepBuilder {
 public:
     explicit TStepBuilder(const std::unordered_map<std::string, double>& columnBytes)
@@ -88,6 +91,24 @@ std::vector<TScanFilterStep> OrderScanConjuncts(
         builder.Add(std::move(conjunct));
     }
     return builder.Finish();
+}
+
+std::vector<size_t> PlaceRuntimeFilters(
+    const std::vector<TRankedStep>& stages,
+    const std::vector<TRankedStep>& filters)
+{
+    auto rank = [](const TRankedStep& step) {
+        return (1.0 - step.Selectivity) / std::max(step.Cost, MinRankCost);
+    };
+    std::vector<size_t> positions;
+    for (const auto& filter : filters) {
+        size_t position = 0;
+        while (position < stages.size() && rank(stages[position]) >= rank(filter)) {
+            ++position;
+        }
+        positions.push_back(position);
+    }
+    return positions;
 }
 
 } // namespace NScheduler

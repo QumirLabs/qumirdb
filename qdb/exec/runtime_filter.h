@@ -1,12 +1,16 @@
 #pragma once
 
+#include <qdb/io/io.h>
+
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -117,6 +121,22 @@ public:
         TRuntimeFilterProbeState& state,
         std::span<const uint8_t> selection = {}) const = 0;
 };
+
+// A consumer of a runtime filter: the hash of its probe keys and the filter it probes, bound
+// once lowering has met the producer.
+struct TRuntimeFilterConsumer {
+    std::function<bool(TRowSet*, uint64_t*)> Hash;
+    std::shared_ptr<IRuntimeFilterProbe> Probe;
+};
+
+// Probes the rows `rowSet` selects: `output` marks those the filter may contain and `hashes`
+// holds the key hash of each probed row. nullopt: the filter passes the batch (paused, pass-all).
+std::optional<size_t> ProbeRuntimeFilter(
+    const TRuntimeFilterConsumer& consumer,
+    TRuntimeFilterProbeState& state,
+    TRowSet& rowSet,
+    std::vector<uint64_t>& hashes,
+    std::vector<uint8_t>& output);
 
 struct TRuntimeFilterBinding {
     std::shared_ptr<IRuntimeFilterProducer> Producer;
