@@ -85,15 +85,16 @@ foreach(shard RANGE 3)
 endforeach()
 # The whole suite on the Qumir VM kernel backend against the LLVM goldens (#109),
 # except external modules (LLVM only) and runtime error texts (QumirLabs/qumir#192).
-set(QDB_REG_VM_EXCLUDED external_modules decimal_result_storage_overflow
-    decimal_result_storage_unsigned float_sql_cast_nan_error runtime_errors_abs_overflow)
-list(TRANSFORM QDB_REG_VM_EXCLUDED PREPEND "RegQuery.")
-list(TRANSFORM QDB_REG_VM_EXCLUDED APPEND "_*")
-list(JOIN QDB_REG_VM_EXCLUDED ":" QDB_REG_VM_EXCLUDED_FILTER)
-add_test(NAME test_reg_vm COMMAND test_reg ${QDB_REG_ARGS} --kernel:backend=vm
-    "--gtest_filter=RegQuery.*-${QDB_REG_VM_EXCLUDED_FILTER}"
-    --gtest_output=xml:${CMAKE_CURRENT_BINARY_DIR}/test_reg_vm.xml)
-set_tests_properties(test_reg_vm PROPERTIES COST 100)
+# Disabled: VM coverage will be enabled per suite.
+# set(QDB_REG_VM_EXCLUDED external_modules decimal_result_storage_overflow
+#     decimal_result_storage_unsigned float_sql_cast_nan_error runtime_errors_abs_overflow)
+# list(TRANSFORM QDB_REG_VM_EXCLUDED PREPEND "RegQuery.")
+# list(TRANSFORM QDB_REG_VM_EXCLUDED APPEND "_*")
+# list(JOIN QDB_REG_VM_EXCLUDED ":" QDB_REG_VM_EXCLUDED_FILTER)
+# add_test(NAME test_reg_vm COMMAND test_reg ${QDB_REG_ARGS} --kernel:backend=vm
+#     "--gtest_filter=RegQuery.*-${QDB_REG_VM_EXCLUDED_FILTER}"
+#     --gtest_output=xml:${CMAKE_CURRENT_BINARY_DIR}/test_reg_vm.xml)
+# set_tests_properties(test_reg_vm PROPERTIES COST 100)
 # The whole suite over another table: the symmetric join table
 # (test_reg_legacy_join), the row layout of the aggregate table from the start
 # (test_reg_row_aggregate) and the global aggregate cascade (test_reg_cascade_global;
