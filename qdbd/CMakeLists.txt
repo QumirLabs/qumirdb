@@ -9,6 +9,6 @@ add_library(qumirdb_remote
 )
 target_compile_features(qumirdb_remote PUBLIC cxx_std_23)
 target_link_libraries(qumirdb_remote PUBLIC
-    coroio
+    coroio_actors
     qumirdb
 )
