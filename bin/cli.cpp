@@ -7,10 +7,12 @@
 #include <qdb/kernel/finalize.h>
 #include <qdb/scheduler/plan_lowerer.h>
 #include <qdb/plan/build.h>
+#include <qdb/plan/build/build.h>
 #include <qdb/plan/pipeline.h>
 #include <qdb/plan/plan_print.h>
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/cte_consumer.h>
+#include <qdb/plan/ops/dependent_join.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/project.h>
@@ -261,6 +263,19 @@ std::chrono::duration<double> ProcessCpuTime() {
     return std::chrono::duration<double>(seconds(usage.ru_utime) + seconds(usage.ru_stime));
 }
 
+void PrintExplain(const NQdb::TOperatorPtr& plan, EExplainMode mode) {
+    const bool sexprAvailable = NQdb::CollectMaterializations(plan).empty();
+    const bool wantSexpr = mode != EExplainMode::Text && sexprAvailable;
+    const bool wantText = mode != EExplainMode::Sexpr || !sexprAvailable;
+    if (wantSexpr) {
+        NQdb::NSexp::PrintRelPlan(std::cout, plan);
+        std::cout << (wantText ? "\n\n" : "\n");
+    }
+    if (wantText) {
+        PrintPlanTreeWithCtes(std::cout, plan);
+    }
+}
+
 int ExecutePlan(
     NQdb::TOperatorPtr plan,
     const TCliOptions& config,
@@ -268,6 +283,17 @@ int ExecutePlan(
     bool explain,
     std::chrono::steady_clock::time_point planStart)
 {
+    // The optimizer passes and execution need an unnested plan: a dependent
+    // join left by the new builder stops the pipeline here.
+    if (auto unnested = NQdb::RequireNoDependentJoins(plan); !unnested) {
+        if (explain) {
+            std::cerr << "note: the plan has dependent joins; it is shown before the optimizer passes\n";
+            PrintExplain(plan, config.ExplainMode);
+            return 0;
+        }
+        std::cerr << unnested.error().ToString() << "\n";
+        return 1;
+    }
     NQdb::TPlanPassDiagnostics planDiagnostics;
     auto passOptions = config.Engine.Optimizer;
     passOptions.Diagnostics = &planDiagnostics;
@@ -300,17 +326,7 @@ int ExecutePlan(
     }
 
     if (explain) {
-        const bool wantSexpr =
-            config.ExplainMode != EExplainMode::Text && sexprAvailable;
-        const bool wantText =
-            config.ExplainMode != EExplainMode::Sexpr || !sexprAvailable;
-        if (wantSexpr) {
-            NQdb::NSexp::PrintRelPlan(std::cout, plan);
-            std::cout << (wantText ? "\n\n" : "\n");
-        }
-        if (wantText) {
-            PrintPlanTreeWithCtes(std::cout, plan);
-        }
+        PrintExplain(plan, config.ExplainMode);
         return 0;
     }
 
@@ -421,7 +437,9 @@ int RunSqlStatement(
     };
     // Plan construction and the optimizer passes type against the same catalog snapshot.
     NQdb::NKernel::TAnnotationContext annotation{.ExternalCatalog = catalog.Snapshot()};
-    auto plan = NQdb::BuildPlan(statement, factory, annotation);
+    auto plan = config.Engine.Optimizer.Decorrelation == NQdb::EDecorrelation::New
+        ? NQdb::NBuild::BuildCanonicalPlan(statement, factory, annotation)
+        : NQdb::BuildPlan(statement, factory, annotation);
 
     if (!plan) {
         std::cerr << plan.error().ToString() << "\n";

@@ -65,6 +65,7 @@ TEST(EngineSettings, EveryDefaultSurvivesApplyingTheWholeDump) {
     EXPECT_EQ(settings.Scheduler.Aggregate.Table, defaults.Scheduler.Aggregate.Table);
     EXPECT_EQ(settings.Optimizer.LateMaterialization.MaxOutputRows, defaults.Optimizer.LateMaterialization.MaxOutputRows);
     EXPECT_EQ(settings.Optimizer.DumpPasses, nullptr);
+    EXPECT_EQ(settings.Optimizer.Decorrelation, EDecorrelation::Legacy);
     EXPECT_EQ(settings.Scheduler.Instrumentation.Output, nullptr);
 }
 
@@ -91,6 +92,7 @@ TEST(EngineSettings, OverridesReachTheirFields) {
              "late_materialization:min_savings=3.5",
              "optimizer:cbo=false",
              "optimizer:dump_passes=true",
+             "optimizer:decorrelation=new",
              "jit:cache_dir=/tmp/jit",
              "io:arrow_memory_pool=system",
          })
@@ -121,6 +123,7 @@ TEST(EngineSettings, OverridesReachTheirFields) {
     EXPECT_EQ(settings.Optimizer.LateMaterialization.MinSavingsFactor, 3.5);
     EXPECT_FALSE(settings.Optimizer.EnableCbo);
     EXPECT_EQ(settings.Optimizer.DumpPasses, &std::cerr);
+    EXPECT_EQ(settings.Optimizer.Decorrelation, EDecorrelation::New);
     EXPECT_EQ(settings.Scheduler.Jit.CacheDir, "/tmp/jit");
     EXPECT_EQ(settings.ArrowMemoryPool, EArrowMemoryPool::System);
 }

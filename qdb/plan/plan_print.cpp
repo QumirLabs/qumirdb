@@ -2,6 +2,7 @@
 
 #include <qdb/plan/ops/cte_consumer.h>
 #include <qdb/plan/ops/cte_ref.h>
+#include <qdb/plan/ops/dependent_join.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/late_materialize.h>
 #include <qdb/plan/ops/project.h>
@@ -23,7 +24,10 @@ std::string ExprLine(const NQumir::NAst::TExprPtr& expr) {
     }
     return NQumir::NAst::NCore::PrintAst(
         expr,
-        NQumir::NAst::NCore::TPrintOptions{.Pretty = false});
+        NQumir::NAst::NCore::TPrintOptions{
+            .Pretty = false,
+            .NodePrinters = {{TOuterRefExpr::NodeId, PrintOuterRef}},
+        });
 }
 
 std::string JoinPlanLabel(const TJoinOperator& join) {
@@ -181,6 +185,18 @@ std::string PlanLabel(const TOperatorPtr& op) {
     }
     if (auto join = TMaybeOp<TJoinOperator>(op)) {
         return JoinPlanLabel(*join.Cast());
+    }
+    if (auto maybeJoin = TMaybeOp<TDependentJoinOperator>(op)) {
+        auto join = maybeJoin.Cast();
+        std::string label = "dependent-join " + std::string(DependentJoinKindName(join->Kind()))
+            + " scope=" + std::to_string(join->Scope());
+        if (!join->Marker().empty()) {
+            label += " marker=" + join->Marker();
+        }
+        if (join->Predicate()) {
+            label += " on " + ExprLine(join->Predicate());
+        }
+        return label;
     }
     if (auto sort = TMaybeOp<TSortOperator>(op)) {
         return SortPlanLabel("sort", sort.Cast()->Keys());
