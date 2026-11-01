@@ -66,8 +66,7 @@ struct TKeyValueBatch {
     }
 };
 
-// The selected rows; the selected byte is 255 on LLVM and 1 on the VM (QumirLabs/qumir#179).
-std::vector<bool> RunFilter(EKernelBackend backend) {
+std::vector<uint8_t> RunFilter(EKernelBackend backend) {
     TKernelCompiler compiler({.Backend = backend});
     auto dispatch = compiler.CompileFilter(NKernel::BuildFilterKernelSpec(
         KeyValueType(), Parse("(&& (> v 2) (!= k 4))")));
@@ -76,7 +75,7 @@ std::vector<bool> RunFilter(EKernelBackend backend) {
     auto rowSet = batch.RowSet(selection.data());
     TExecutionContext context;
     dispatch(context, rowSet, nullptr);
-    return {selection.begin(), selection.end()};
+    return selection;
 }
 
 std::vector<int64_t> RunProject(EKernelBackend backend) {
@@ -132,7 +131,7 @@ std::map<int64_t, int64_t> RunAggregate(EKernelBackend backend) {
 TEST(KernelVm, FilterMatchesLlvm) {
     const auto vm = RunFilter(EKernelBackend::Vm);
     EXPECT_EQ(vm, RunFilter(EKernelBackend::Llvm));
-    EXPECT_EQ(vm, (std::vector<bool>{true, false, true, false, false}));
+    EXPECT_EQ(vm, (std::vector<uint8_t>{0xff, 0, 0xff, 0, 0}));
 }
 
 TEST(KernelVm, ProjectMatchesLlvm) {
