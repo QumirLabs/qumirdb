@@ -5,6 +5,8 @@
 #include <qdbd/actors/scheduler.h>
 #include <qdbd/actors/local_scheduler.h>
 #include <qdbd/actors.h>
+#include <qdbd/messages.h>
+#include <qdbd/serialization.h>
 #include <qdbd/time_source.h>
 
 using namespace NNet;
@@ -68,6 +70,7 @@ int main(int argc, char** argv) {
     TResolver resolver(loop.Poller());
 
     TMessagesFactory factory;
+    RegisterMessages(factory);
 
     for (auto& [host, port, nodeId] : allHosts) {
         nodes.emplace_back(nodeId, std::make_unique<TNode<TPoller>>(
@@ -110,12 +113,12 @@ int main(int argc, char** argv) {
     const auto httpListenAddress = httpListenSocket.LocalAddr()->ToString();
     const auto actorSysListenAddress = actorSysListenSocket.LocalAddr()->ToString();
 
-    auto gatewayActorId = sys.RegisterWellKnown(TLocalActorId(EWellKnownActors::Gateway), IActor::TPtr(CreateGatewayActor()));
-    auto router = NHttp::CreateRouter(&sys, gatewayActorId);
-
     auto logger = [](const std::string& msg) {
         std::cerr << "[QumirDB] " << msg << "\n";
     };
+
+    auto gatewayActorId = sys.RegisterWellKnown(TLocalActorId(EWellKnownActors::Gateway), IActor::TPtr(CreateGatewayActor(logger)));
+    auto router = NHttp::CreateRouter(&sys, gatewayActorId);
 
     TWebServer<TSocket> server(std::move(httpListenSocket), *router, logger);
     server.Start();

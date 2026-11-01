@@ -6,7 +6,7 @@ namespace NQdb {
 namespace NRemote {
 
 // Client entry-point
-NNet::NActors::IActor* CreateGatewayActor();
+NNet::NActors::IActor* CreateGatewayActor(std::function<void(const std::string&)> logger);
 
 } // NRemote
 } // NQdb

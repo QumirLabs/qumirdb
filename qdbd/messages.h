@@ -62,5 +62,18 @@ struct TExecuteQueryResponse {
     std::string Response;
 };
 
+template<typename TMessagesFactory>
+inline void RegisterMessages(TMessagesFactory& factory) {
+    factory.template RegisterSerializer<TWakeUp>();
+    factory.template RegisterSerializer<TPing>();
+    factory.template RegisterSerializer<TSpawnComputeActor>();
+    factory.template RegisterSerializer<TSpawnComputeActorResponse>();
+    factory.template RegisterSerializer<TDataChunk>();
+    factory.template RegisterSerializer<TFinish>();
+    factory.template RegisterSerializer<TExecuteQuery>();
+    factory.template RegisterSerializer<TExecuteQueryResponse>();
+}
+
+
 } // namespace NRemote
 } // namespace NQdb
