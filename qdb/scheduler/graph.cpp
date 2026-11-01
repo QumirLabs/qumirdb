@@ -5,6 +5,7 @@
 #include <format>
 #include <ostream>
 #include <ranges>
+#include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -41,14 +42,28 @@ const char* ConnectionKindName(EConnectionKind kind) {
 } // namespace
 
 TTaskNode& TTaskGraph::AddNode(ITaskNode& task) {
+    if (Execution_) {
+        throw std::logic_error("cannot add a task after preparing execution slots");
+    }
     auto node = std::make_unique<TTaskNode>();
     node->Task = &task;
+    node->ExecutionSlot = Nodes_.size();
     auto* ptr = node.get();
     Nodes_.push_back(std::move(node));
     return *ptr;
 }
 
+TExecutionState& TTaskGraph::PrepareExecution() {
+    if (!Execution_) {
+        Execution_ = std::make_unique<TExecutionState>(Nodes_.size());
+    }
+    return *Execution_;
+}
+
 TTaskNode& TTaskGraph::AddOwnedNode(std::unique_ptr<ITaskNode> task) {
+    if (Execution_) {
+        throw std::logic_error("cannot add a task after preparing execution slots");
+    }
     auto* ptr = task.get();
     OwnedTasks_.push_back(std::move(task));
     return AddNode(*ptr);

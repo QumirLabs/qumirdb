@@ -41,6 +41,49 @@ and reschedules their neighbors when a task returns `OK`, `NEED_DATA`,
 
 ## Task State Machines
 
+### Execution context and allocation ownership
+
+Before scheduling starts, the graph allocates a fixed table with one kernel
+heap per task. The table is destroyed after all workers have joined and task
+states and connections have been released. Each worker owns its own
+execution context referring to this table. A task that resumes on another
+worker selects the same allocation slot; the slot belongs to the task rather
+than to the thread.
+
+The scheduler passes the context at the task execution boundary. A scoped pin
+sets a thread-local borrowed pointer for the duration of that invocation and
+restores its previous value on return or exception. Nested execution restores
+the outer context and heap. Processors and kernel dispatch closures do not
+retain a worker context. This scoped bridge lets native kernel externs find
+the active allocation domain without passing a worker parameter through every
+processor, port, and callback.
+
+The scheduler never executes the same task concurrently, so its heap's list of
+live allocations has one writer. Allocation headers contain their owner and
+intrusive list links; tracking uses neither a pointer map nor an extra
+allocation for each record. Tracking adds no lock to local allocation and free;
+the backing allocator is still `malloc`/`free`. A free
+from another task reads the allocation's original owner and sends the block
+to that owner's MPSC return queue with an atomic push. The owner drains this
+queue when pinned, when allocating, and before unpinning. Remote returns can
+therefore retain memory until the next collection or graph teardown.
+
+Materialized rowsets use a faster ownership transfer. Before publishing a
+rowset, the producer detaches every buffer in its owners list from the task
+heap. The rowset becomes the sole owner of those buffers. Its final release
+can free them on any thread, including after query teardown, without consulting
+the original task or its return queue. Shuffle and spool views retain the
+underlying rowset through the existing reference-counting protocol.
+
+Normal kernel frees still reclaim memory during processing, and aggregate
+finalization still releases its table. The heap reclaims allocations left by
+cancellation or incomplete processing at teardown. Processor destructor calls
+to destroy kernels are currently commented out; their C++ resource cleanup
+remains active. Raw native kernel callers may continue to manage allocations
+explicitly. Standalone processors establish a scope over their own heap when
+there is no scheduler context. The tracker covers `qdb_alloc` allocations;
+ordinary C++ resources retain their own RAII ownership.
+
 Every task exposes one scheduler method:
 
 ```text

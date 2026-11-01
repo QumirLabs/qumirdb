@@ -46,10 +46,9 @@ private:
 
 extern "C" {
 
-// Backing allocator for qdb-generated kernels (e.g. the Robin Hood hash
-// table used by the Aggregation operator). Thin wrappers around malloc
-// family so they can be registered as external functions in the QumirDb
-// module and resolved by the LLVM JIT via the process symbol table.
+// Native allocation externs for generated kernels. Allocations use the pinned
+// task heap when present; free follows the owner stored in the block header.
+// The LLVM JIT resolves these symbols through the process symbol table.
 void* qdb_alloc(int64_t size);
 void qdb_free(void* ptr);
 

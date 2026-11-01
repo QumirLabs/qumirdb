@@ -1,4 +1,5 @@
 #include <qdb/modules/qumirdb_runtime.h>
+#include <qdb/kernel/execution_context.h>
 #include <qdb/utils/regex.h>
 
 #define XXH_INLINE_ALL
@@ -211,7 +212,10 @@ void* qdb_alloc(int64_t size) {
     if (size < 0) {
         return nullptr;
     }
-    return std::malloc(static_cast<size_t>(size));
+    auto* context = NQdb::TryExecutionContext();
+    return context && context->Heap
+        ? context->Heap->Allocate(static_cast<size_t>(size))
+        : NQdb::TKernelHeap::AllocateUnowned(static_cast<size_t>(size));
 }
 
 // Note: qdb_realloc is intentionally NOT provided here. It is implemented in Oz
@@ -219,7 +223,7 @@ void* qdb_alloc(int64_t size) {
 // only the live bytes.
 
 void qdb_free(void* ptr) {
-    std::free(ptr);
+    NQdb::TKernelHeap::Free(ptr);
 }
 
 int64_t qdb_filter_string_compare(

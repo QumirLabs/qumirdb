@@ -24,6 +24,7 @@ if(QDB_PYTHON_EXECUTABLE)
 endif()
 
 ut(test_io test_io.cpp)
+ut(test_execution_context test_execution_context.cpp)
 ut(test_parquet_row_reader test_parquet_row_reader.cpp)
 ut(test_stats test_stats.cpp)
 ut(test_row_group_predicate test_row_group_predicate.cpp)

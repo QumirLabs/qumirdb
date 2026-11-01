@@ -730,6 +730,7 @@ THashShuffleTask::THashShuffleTask(
 
 THashShuffleTask::~THashShuffleTask() {
     ClearPending();
+    // ObserveInstrumentation();
 }
 
 ETaskResult THashShuffleTask::Execute() {
@@ -927,6 +928,7 @@ void THashShuffleTask::ScatterViews(const std::shared_ptr<TRowSet>& input) {
     // forward the whole rowset (keeping its existing selection) unchanged.
     if (partitions == 1 && !Code_->ProducedFilter) {
         ClearPending();
+        ObserveInstrumentation();
         auto* data = new THashShuffleRowSetData;
         data->Input = input;
         Pending_.push_back(TPendingOutput{
@@ -964,6 +966,7 @@ void THashShuffleTask::ScatterViews(const std::shared_ptr<TRowSet>& input) {
     }
 
     ClearPending();
+    ObserveInstrumentation();
 
     Pending_.reserve(partitions);
     for (size_t dst = 0; dst < partitions; ++dst) {
@@ -1230,6 +1233,7 @@ ETaskResult THashShuffleTask::PushPending() {
         ObserveInstrumentation();
     }
     ClearPending();
+    ObserveInstrumentation();
     return ETaskResult::OK;
 }
 
@@ -1241,7 +1245,6 @@ void THashShuffleTask::ClearPending() {
     }
     Pending_.clear();
     PendingIndex_ = 0;
-    ObserveInstrumentation();
 }
 
 void TSourceTask::ConfigureInstrumentation(TTaskInstrumentationSetup& setup) {

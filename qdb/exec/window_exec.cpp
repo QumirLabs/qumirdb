@@ -89,7 +89,7 @@ bool TWindowProcessor::Next(TRowSet& rowSet)
     if (out <= 0) {
         return false;
     }
-    rowSet.Destroy = DestroyKernelOwnedRowSet;
+    AdoptKernelOwnedRowSet(rowSet);
     return true;
 }
 

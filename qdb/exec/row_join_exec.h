@@ -121,6 +121,7 @@ private:
     EJoinProcessorResult Finish(TRowSet& output);
 
 private:
+    TKernelHeap StandaloneHeap_;
     TRowJoinKernels Kernels_;
     EJoinBuildSide BuildSide_;
     TOperatorInstrumentation* Instrumentation_ = nullptr;

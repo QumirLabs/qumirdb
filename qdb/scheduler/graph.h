@@ -1,6 +1,7 @@
 #pragma once
 
 #include <qdb/exec/stage.h>
+#include <qdb/kernel/execution_context.h>
 #include <qdb/exec/instrumentation/operator.h>
 #include <qdb/scheduler/connection.h>
 #include <qdb/scheduler/state.h>
@@ -23,6 +24,7 @@ struct TTaskEdge;
 enum class ETaskEdgeKind { Rowset, Dependency };
 
 struct TTaskNode {
+    size_t ExecutionSlot = 0;
     ITaskNode* Task = nullptr;
     std::unique_ptr<TOperatorInstrumentation> Instrumentation;
     TExecStageId ExecStageId = InvalidExecStageId;
@@ -84,8 +86,11 @@ public:
     const std::vector<std::unique_ptr<TTaskEdge>>& Edges() const;
     const std::vector<TTaskNode*>& Leaves() const;
     TTaskNode* Root() const;
+    TExecutionState& PrepareExecution();
 
 private:
+    // Outlives task destructors and connections returning tracked allocations.
+    std::unique_ptr<TExecutionState> Execution_;
     // Task-local observers and ports remain valid through task destruction.
     std::vector<std::unique_ptr<TTaskNode>> Nodes_;
     std::vector<std::unique_ptr<IConnection>> OwnedConnections_;

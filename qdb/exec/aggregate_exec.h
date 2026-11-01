@@ -1,6 +1,7 @@
 #pragma once
 
 #include <qdb/kernel/compiler.h>
+#include <qdb/kernel/execution_context.h>
 #include <qdb/exec/instrumentation/operator.h>
 #include <qdb/exec/unary_process.h>
 
@@ -59,6 +60,7 @@ private:
     void Destroy();
 
 private:
+    TKernelHeap StandaloneHeap_;
     TAggregateKernels Kernels_;
     TOperatorInstrumentation* Instrumentation_ = nullptr;
     TAggregateTablePlan Plan_;

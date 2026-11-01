@@ -68,7 +68,7 @@ TAggregateProcessor::TAggregateProcessor(
 
 TAggregateProcessor::~TAggregateProcessor()
 {
-    Destroy();
+    // Destroy();
 }
 
 // Deferred so a processor can be constructed before its kernels are finalized.
@@ -109,6 +109,7 @@ void TGroupingSetsAggregateProcessor::SetInstrumentation(TOperatorInstrumentatio
 
 void TAggregateProcessor::Add(TRowSet& rowSet)
 {
+    TKernelHeapScope scope(StandaloneHeap_);
     if (Finished_) {
         throw std::runtime_error("aggregate processor is already finished");
     }
@@ -123,6 +124,7 @@ void TAggregateProcessor::Add(TRowSet& rowSet)
 
 bool TAggregateProcessor::Finish(TRowSet& rowSet)
 {
+    TKernelHeapScope scope(StandaloneHeap_);
     if (Finished_) {
         return false;
     }
@@ -136,7 +138,7 @@ bool TAggregateProcessor::Finish(TRowSet& rowSet)
         throw std::runtime_error("aggregate finalize returned an unexpected row count");
     }
 
-    rowSet.Destroy = DestroyKernelOwnedRowSet;
+    AdoptKernelOwnedRowSet(rowSet);
     return true;
 }
 

@@ -14,6 +14,7 @@ add_library(qumirdb
     catalog/external_module.cpp
     modules/qumirdb.cpp
     modules/qumirdb_runtime.cpp
+    kernel/execution_context.cpp
     io/parquet/decimal_scan.cpp
     io/parquet/decimal_storage.cpp
     io/parquet/source.cpp
