@@ -239,6 +239,8 @@ TEST(OperatorInstrumentation, StringStateMemoryCountsOnlyTheGroupsAfterRehash) {
 }
 
 TEST(OperatorInstrumentation, MeasuresResidualSemiJoinMatchSetWithoutRowBuckets) {
+    TKernelHeap heap;
+    TKernelHeapScope scope(heap);
     auto i64 = std::make_shared<TIntegerType>();
     TStructType leftType({{"lk", i64}});
     TStructType rightType({{"rk", i64}});
@@ -257,8 +259,6 @@ TEST(OperatorInstrumentation, MeasuresResidualSemiJoinMatchSetWithoutRowBuckets)
     EXPECT_EQ(counters.Groups, 0u);
     EXPECT_GT(counters.HashMemoryPeakBytes, 0u);
     EXPECT_EQ(counters.Rehashes, 0u);
-    EXPECT_TRUE(kernels.Dispatch(left.data(), right.data(), nullptr, 0, pairs.data(),
-        nullptr, nullptr, 0, static_cast<int64_t>(EJoinKernelOp::Destroy)));
 }
 
 TEST(OperatorInstrumentation, DisabledPlanHasNoMeasurementProgramOrCounters) {

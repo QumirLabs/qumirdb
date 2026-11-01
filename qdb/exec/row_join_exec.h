@@ -34,8 +34,9 @@ namespace NQdb {
 // the build side only, as it would without the hold.
 //
 // Ownership: the kernel qdb_alloc's every buffer behind the zeroed state
-// structs and frees them on Destroy. Build batches are retained only when a
-// build row carries a StringView into them (TRowJoinKernels::RetainsBuildBatches).
+// structs; its allocation domain reclaims their buffers. Build batches are
+// retained only when a build row carries a StringView into them
+// (TRowJoinKernels::RetainsBuildBatches).
 class TRowJoinProcessor {
 public:
     using TFetch = std::function<EJoinFetchResult(TRowSet&)>;

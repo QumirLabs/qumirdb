@@ -66,27 +66,21 @@ TAggregateProcessor::TAggregateProcessor(
     }
 }
 
-TAggregateProcessor::~TAggregateProcessor()
-{
-    // Destroy();
-}
-
 // Deferred so a processor can be constructed before its kernels are finalized.
 void TAggregateProcessor::EnsureInit()
 {
     if (Initialized_) {
         return;
     }
-    Initialized_ = true;
     void* table = HashTable_.data();
     const bool initialized = Plan_.Layout == EAggregateTableLayout::Row
         ? Dispatch(Kernels_, table, nullptr, Plan_.InitialGroups, EAggregateKernelOp::InitRows) != 0
         : Dispatch(Kernels_, table, nullptr, Plan_.InitialCapacity, EAggregateKernelOp::Init) != 0;
     if (!initialized) {
         // A failing init frees what it allocated.
-        Destroyed_ = true;
         throw std::runtime_error("aggregate initialization failed");
     }
+    Initialized_ = true;
     // Both only set a field; the constructor checked that the kernel serves them.
     if (Plan_.RowSwitchGroups != 0) {
         Dispatch(Kernels_, table, nullptr, Plan_.RowSwitchGroups, EAggregateKernelOp::SwitchToRowsAt);
@@ -133,7 +127,6 @@ bool TAggregateProcessor::Finish(TRowSet& rowSet)
 
     const int64_t size = reinterpret_cast<THashTable*>(HashTable_.data())->Size;
     const int64_t finalized = Kernels_.FinishRowSet(HashTable_.data(), &rowSet);
-    Destroyed_ = true;
     if (finalized != size) {
         throw std::runtime_error("aggregate finalize returned an unexpected row count");
     }
@@ -144,7 +137,7 @@ bool TAggregateProcessor::Finish(TRowSet& rowSet)
 
 int64_t TAggregateProcessor::Groups() const
 {
-    if (!Initialized_ || Destroyed_) {
+    if (!Initialized_ || Finished_) {
         return 0;
     }
     return reinterpret_cast<const THashTable*>(HashTable_.data())->Size;
@@ -158,17 +151,8 @@ bool TAggregateProcessor::Flush(TRowSet& rowSet)
     Finish(rowSet);
     // Finish destroyed the table; the next Add initializes a new one.
     Initialized_ = false;
-    Destroyed_ = false;
     Finished_ = false;
     return true;
-}
-
-void TAggregateProcessor::Destroy()
-{
-    if (Initialized_ && !Destroyed_) {
-        Dispatch(Kernels_, HashTable_.data(), nullptr, 0, EAggregateKernelOp::Destroy);
-        Destroyed_ = true;
-    }
 }
 
 TPartialAggregateProcessor::TPartialAggregateProcessor(

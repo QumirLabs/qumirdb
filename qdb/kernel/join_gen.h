@@ -215,7 +215,7 @@ NQumir::NAst::TExprPtr GenJoinMaterializeAst(
 // Generates the single external join entrypoint:
 //   jt_dispatch(left, right, batch, batch_idx, pairs, left_store, right_store,
 //               arena, left_key_columns, right_key_columns, arg, op) -> bool
-// It dispatches init/update/stream/finalize/destroy to the internal generated
+// It dispatches init/update/stream/finalize to the internal generated
 // and library helpers. Join type and key layout are compile-time constants.
 //
 // LeftMark: UpdateLeft stores left rows, UpdateRight builds the key-only right

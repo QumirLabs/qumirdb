@@ -187,11 +187,10 @@ std::optional<TAggRowLayout> BuildAggRowLayout(
     const TAggReducerLayout& layout,
     bool hasEmptyInputGroups);
 
-// Builds the generic aggregation dispatch entry over aht_init/aht_upsert_dual/
-// aht_destroy. Key extraction uses the common TColumn materializer and the
-// descriptor's borrowed LookupType/stored StoredType representations. Aggregate
-// aht_destroy. Each reducer reads its own argument column (layout's
-// ArgColumnIndex), so different aggregates may aggregate different columns; the
+// Builds the generic aggregation initialization/update dispatch entry. Key
+// extraction uses the common TColumn materializer and the descriptor's borrowed
+// LookupType/stored StoredType representations. Each reducer reads its own
+// argument column (layout's ArgColumnIndex), so aggregates may use different columns; the
 // reducer applications are inlined per row with per-reducer values.
 // hasPrecomputedHash: read batch.Hash[i] instead of calling rh_hash(key) -
 // set when the caller knows this batch comes straight from a hash shuffle

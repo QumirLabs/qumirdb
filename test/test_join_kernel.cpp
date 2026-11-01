@@ -1,3 +1,5 @@
+#include "kernel_heap_fixture.h"
+
 #include <gtest/gtest.h>
 
 #include <qdb/io/io.h>
@@ -33,6 +35,16 @@
 #include <vector>
 
 using namespace NQdb;
+
+using CompileCrossJoin = NQdb::NTest::TKernelHeapTest;
+using CompileJoin = NQdb::NTest::TKernelHeapTest;
+using CompileJoinHash = NQdb::NTest::TKernelHeapTest;
+using JoinKernel = NQdb::NTest::TKernelHeapTest;
+using JoinKernelGeneric = NQdb::NTest::TKernelHeapTest;
+using JoinMaterialize = NQdb::NTest::TKernelHeapTest;
+using JoinStringKey = NQdb::NTest::TKernelHeapTest;
+using MarkJoinKernel = NQdb::NTest::TKernelHeapTest;
+using RowJoinProcessor = NQdb::NTest::TKernelHeapTest;
 
 namespace {
 
@@ -135,7 +147,7 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileJoinEntry(const std::string& entryNa
 
 } // namespace
 
-TEST(JoinKernel, PairBufferLayout) {
+TEST_F(JoinKernel, PairBufferLayout) {
     std::shared_ptr<NQumir::NAst::TStructType> pairBuffer;
     std::shared_ptr<NQumir::NAst::TStructType> joinTable;
     for (const auto& type : NQumir::NRegistry::QumirDbExternalTypes()) {
@@ -155,7 +167,7 @@ TEST(JoinKernel, PairBufferLayout) {
     EXPECT_EQ(joinTable->Fields[0].first, "Entries");
 }
 
-TEST(JoinKernel, MaterializeLibraryMarksPhysicalWorkersCacheable) {
+TEST_F(JoinKernel, MaterializeLibraryMarksPhysicalWorkersCacheable) {
     auto library = NKernel::BuildJoinKernelLibrary();
     ASSERT_TRUE(library) << library.error().ToString();
 
@@ -184,15 +196,40 @@ TEST(JoinKernel, MaterializeLibraryMarksPhysicalWorkersCacheable) {
     EXPECT_FALSE(functions.at("jt_materialize_fixed_column")->GenericParams.empty());
 }
 
-TEST(JoinKernel, InitReusesHashTableAndDestroyClears) {
+TEST_F(JoinKernel, LibrariesKeepGrowthWithoutTeardown) {
+    for (const auto build : {
+            NKernel::BuildJoinKernelLibrary,
+            NKernel::BuildCrossJoinKernelLibrary,
+            NKernel::BuildRowJoinKernelLibrary}) {
+        auto library = build();
+        ASSERT_TRUE(library) << library.error().ToString();
+        std::unordered_set<std::string> functions;
+        for (const auto& stmt : *library) {
+            auto fun = NQumir::NAst::TMaybeNode<NQumir::NAst::TFunDecl>(stmt);
+            if (fun) {
+                functions.insert(fun.Cast()->Name);
+            }
+        }
+        for (const auto* name : {
+                "jt_destroy", "pb_destroy", "aht_destroy", "aht_destroy_slots",
+                "owned_arena_destroy", "ra_destroy", "rt_destroy"}) {
+            EXPECT_FALSE(functions.contains(name)) << name;
+        }
+        EXPECT_TRUE(functions.contains("aht_rehash"));
+        EXPECT_TRUE(functions.contains("jb_append"));
+        EXPECT_TRUE(functions.contains("pb_push"));
+        if (build == NKernel::BuildRowJoinKernelLibrary) {
+            // Scratch growth still releases its previous allocation in-kernel.
+            EXPECT_TRUE(functions.contains("rt_scratch_destroy"));
+        }
+    }
+}
+
+TEST_F(JoinKernel, InitReusesHashTable) {
     void* initEntry = nullptr;
     auto initRunner = CompileJoinEntry("jt_init", initEntry);
     ASSERT_NE(initEntry, nullptr);
-    void* destroyEntry = nullptr;
-    auto destroyRunner = CompileJoinEntry("jt_destroy", destroyEntry);
-    ASSERT_NE(destroyEntry, nullptr);
     auto jtInit = reinterpret_cast<bool (*)(void*, int64_t, int64_t)>(initEntry);
-    auto jtDestroy = reinterpret_cast<void (*)(void*)>(destroyEntry);
 
     void* widthEntry = nullptr;
     auto widthRunner = CompileJoinEntry("swiss_group_width", widthEntry);
@@ -212,22 +249,17 @@ TEST(JoinKernel, InitReusesHashTableAndDestroyClears) {
         EXPECT_EQ(ht.AggBuffers[2][i], 0); // data pointer (null)
     }
 
-    jtDestroy(&ht);
-    EXPECT_EQ(ht.Keys, nullptr);
-    EXPECT_EQ(ht.AggBuffers, nullptr);
-    EXPECT_EQ(ht.Capacity, 0);
+    Heap_.Reset();
+    EXPECT_EQ(Heap_.Bytes(), 0u);
 }
 
-TEST(JoinKernel, BucketAppendGrowsAndStoresRowIds) {
+TEST_F(JoinKernel, BucketAppendGrowsAndStoresRowIds) {
     void* initEntry = nullptr;
     auto initRunner = CompileJoinEntry("jt_init", initEntry);
-    void* destroyEntry = nullptr;
-    auto destroyRunner = CompileJoinEntry("jt_destroy", destroyEntry);
     void* appendEntry = nullptr;
     auto appendRunner = CompileJoinEntry("jb_append", appendEntry);
     ASSERT_NE(appendEntry, nullptr);
     auto jtInit = reinterpret_cast<bool (*)(void*, int64_t, int64_t)>(initEntry);
-    auto jtDestroy = reinterpret_cast<void (*)(void*)>(destroyEntry);
     auto jbAppend = reinterpret_cast<bool (*)(void*, int64_t, int64_t)>(appendEntry);
 
     THashTable ht{};
@@ -244,16 +276,12 @@ TEST(JoinKernel, BucketAppendGrowsAndStoresRowIds) {
         EXPECT_EQ(bucket[i], 1000 + i);
     }
     EXPECT_EQ(ht.AggBuffers[0][0], 0); // untouched slot
-    jtDestroy(&ht);
 }
 
-TEST(JoinKernel, PairBufferPushGrowsAndStoresPairs) {
+TEST_F(JoinKernel, PairBufferPushGrowsAndStoresPairs) {
     void* pushEntry = nullptr;
     auto pushRunner = CompileJoinEntry("pb_push", pushEntry);
-    void* destroyEntry = nullptr;
-    auto destroyRunner = CompileJoinEntry("pb_destroy", destroyEntry);
     auto pbPush = reinterpret_cast<bool (*)(void*, int64_t, int64_t)>(pushEntry);
-    auto pbDestroy = reinterpret_cast<void (*)(void*)>(destroyEntry);
 
     TPairBuffer buf{};
     for (int64_t i = 0; i < 10; ++i) {
@@ -265,12 +293,12 @@ TEST(JoinKernel, PairBufferPushGrowsAndStoresPairs) {
         EXPECT_EQ(buf.Data[2 * i], 100 + i);
         EXPECT_EQ(buf.Data[2 * i + 1], 200 + i);
     }
-    pbDestroy(&buf);
-    EXPECT_EQ(buf.Count, 0);
-    EXPECT_EQ(buf.Data, nullptr);
+
+    Heap_.Reset();
+    EXPECT_EQ(Heap_.Bytes(), 0u);
 }
 
-TEST(CompileJoin, ProducesWorkingInnerJoinKernels) {
+TEST_F(CompileJoin, ProducesWorkingInnerJoinKernels) {
     using namespace NQumir::NAst;
     auto i64 = [] {
         return std::make_shared<TIntegerType>(TIntegerType::I64);
@@ -345,20 +373,9 @@ TEST(CompileJoin, ProducesWorkingInnerJoinKernels) {
     std::vector<std::tuple<int64_t, int64_t>> expected = {{0, 0}, {0, 1}, {2, 0}, {2, 1}};
     std::sort(got.begin(), got.end());
     EXPECT_EQ(got, expected);
-
-    kernels.Dispatch(
-        &left,
-        &right,
-        nullptr,
-        0,
-        &pairs,
-        nullptr,
-        nullptr,
-        0,
-        JoinOpCode(EJoinKernelOp::Destroy));
 }
 
-TEST(CompileJoin, NormalizesNullableResidualIfBranch) {
+TEST_F(CompileJoin, NormalizesNullableResidualIfBranch) {
     using namespace NQumir::NAst;
     auto i64 = [] {
         return std::make_shared<TIntegerType>(TIntegerType::I64);
@@ -381,7 +398,7 @@ TEST(CompileJoin, NormalizesNullableResidualIfBranch) {
     EXPECT_TRUE(static_cast<bool>(kernels.Dispatch));
 }
 
-TEST(CompileJoin, RejectsGeneralOuterFinalizationWithResidual) {
+TEST_F(CompileJoin, RejectsGeneralOuterFinalizationWithResidual) {
     using namespace NQumir::NAst;
     auto i64 = [] {
         return std::make_shared<TIntegerType>(TIntegerType::I64);
@@ -432,20 +449,10 @@ TEST(CompileJoin, RejectsGeneralOuterFinalizationWithResidual) {
             0,
             JoinOpCode(EJoinKernelOp::FinalizeStream)));
         EXPECT_EQ(pairs.Count, 0);
-        EXPECT_TRUE(kernels.Dispatch(
-            &left,
-            &right,
-            nullptr,
-            0,
-            &pairs,
-            nullptr,
-            nullptr,
-            0,
-            JoinOpCode(EJoinKernelOp::Destroy)));
     }
 }
 
-TEST(CompileJoinHash, ProducesMatchingSideHashes) {
+TEST_F(CompileJoinHash, ProducesMatchingSideHashes) {
     using namespace NQumir::NAst;
     auto i64 = [] {
         return std::make_shared<TIntegerType>(TIntegerType::I64);
@@ -496,7 +503,7 @@ TEST(CompileJoinHash, ProducesMatchingSideHashes) {
 
 // An f32 key hashes its 4 canonical bytes: signed zeroes and NaN payloads
 // meet, next to i32 and i64 key parts of a composite key.
-TEST(CompileJoinHash, F32KeyCanonicalizesZeroAndNaN) {
+TEST_F(CompileJoinHash, F32KeyCanonicalizesZeroAndNaN) {
     using namespace NQumir::NAst;
     auto f32 = [] { return std::make_shared<TFloatType>(TFloatType::F32); };
     auto i32 = [] { return std::make_shared<TIntegerType>(TIntegerType::I32); };
@@ -541,7 +548,7 @@ TEST(CompileJoinHash, F32KeyCanonicalizesZeroAndNaN) {
 
 // Hash equality alone is not enough: the key compare must also treat signed
 // zeroes and NaN payloads as equal.
-TEST(CompileJoin, F32KeyMatchesSignedZeroAndNaN) {
+TEST_F(CompileJoin, F32KeyMatchesSignedZeroAndNaN) {
     using namespace NQumir::NAst;
     auto f32 = [] { return std::make_shared<TFloatType>(TFloatType::F32); };
     auto i64 = [] { return std::make_shared<TIntegerType>(TIntegerType::I64); };
@@ -595,10 +602,6 @@ TEST(CompileJoin, F32KeyMatchesSignedZeroAndNaN) {
     // +0.0 = -0.0, 1.5 = 1.5, nan1 = nan2.
     std::vector<std::tuple<int64_t, int64_t>> expected = {{0, 0}, {1, 2}, {2, 1}};
     EXPECT_EQ(got, expected);
-
-    kernels.Dispatch(
-        &left, &right, nullptr, 0, &pairs, nullptr, nullptr, 0,
-        JoinOpCode(EJoinKernelOp::Destroy));
 }
 
 namespace {
@@ -722,20 +725,9 @@ TEST_F(JoinKeyHash, JoinWithPrecomputedHashesSkipsUnselectedRows) {
     }
     std::sort(got.begin(), got.end());
     EXPECT_EQ(got, (std::vector<std::tuple<int64_t, int64_t>>{{0, 3}, {2, 3}, {3, 2}}));
-
-    kernels.Dispatch(
-        &leftTable,
-        &rightTable,
-        nullptr,
-        0,
-        &pairs,
-        nullptr,
-        nullptr,
-        0,
-        JoinOpCode(EJoinKernelOp::Destroy));
 }
 
-TEST(CompileJoin, ProbeOnlyStreamsWithoutInserting) {
+TEST_F(CompileJoin, ProbeOnlyStreamsWithoutInserting) {
     using namespace NQumir::NAst;
     auto i64 = [] {
         return std::make_shared<TIntegerType>(TIntegerType::I64);
@@ -809,16 +801,6 @@ TEST(CompileJoin, ProbeOnlyStreamsWithoutInserting) {
     EXPECT_EQ(got, expected);
 
     pairs.Count = 0;
-    kernels.Dispatch(
-        &left,
-        &right,
-        nullptr,
-        0,
-        &pairs,
-        nullptr,
-        nullptr,
-        0,
-        JoinOpCode(EJoinKernelOp::Destroy));
     THashTable left2{}, right2{};
     ASSERT_TRUE(kernels.Dispatch(
         &left2,
@@ -859,20 +841,9 @@ TEST(CompileJoin, ProbeOnlyStreamsWithoutInserting) {
     }
     std::sort(got.begin(), got.end());
     EXPECT_EQ(got, expected);
-
-    kernels.Dispatch(
-        &left2,
-        &right2,
-        nullptr,
-        0,
-        &pairs,
-        nullptr,
-        nullptr,
-        0,
-        JoinOpCode(EJoinKernelOp::Destroy));
 }
 
-TEST(CompileJoin, AcceptsStringKeyAndRejectsUnsupportedSpecs) {
+TEST_F(CompileJoin, AcceptsStringKeyAndRejectsUnsupportedSpecs) {
     using namespace NQumir::NAst;
     auto i64 = [] {
         return std::make_shared<TIntegerType>(TIntegerType::I64);
@@ -1023,7 +994,7 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileGenericJoin(
 
 } // namespace
 
-TEST(JoinKernelGeneric, Int32KeyMatchesNestedLoop) {
+TEST_F(JoinKernelGeneric, Int32KeyMatchesNestedLoop) {
     using namespace NQumir::NAst;
     auto i32 = std::make_shared<TIntegerType>(TIntegerType::I32);
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
@@ -1033,10 +1004,6 @@ TEST(JoinKernelGeneric, Int32KeyMatchesNestedLoop) {
 
     void* initFn = nullptr;
     auto r1 = CompileGenericJoin(keyDesc, "jt_init", initFn);
-    void* destroyFn = nullptr;
-    auto r2 = CompileGenericJoin(keyDesc, "jt_destroy", destroyFn);
-    void* pbDestroyFn = nullptr;
-    auto r3 = CompileGenericJoin(keyDesc, "pb_destroy", pbDestroyFn);
     void* leftFn = nullptr;
     auto r4 = CompileGenericJoin(keyDesc, "jt_process_left", leftFn);
     void* rightFn = nullptr;
@@ -1045,8 +1012,6 @@ TEST(JoinKernelGeneric, Int32KeyMatchesNestedLoop) {
     ASSERT_NE(rightFn, nullptr);
 
     auto jtInit = reinterpret_cast<bool (*)(void*, int64_t, int64_t)>(initFn);
-    auto jtDestroy = reinterpret_cast<void (*)(void*)>(destroyFn);
-    auto pbDestroy = reinterpret_cast<void (*)(void*)>(pbDestroyFn);
     auto procLeft = reinterpret_cast<
         bool (*)(void*, void*, TRowSet*, const int64_t*, int64_t, void*, TRowSet*, TRowSet*)>(
         leftFn);
@@ -1089,13 +1054,9 @@ TEST(JoinKernelGeneric, Int32KeyMatchesNestedLoop) {
     std::vector<std::tuple<int64_t, int64_t>> expected = {{0, 0}, {0, 1}, {2, 0}, {2, 1}};
     std::sort(got.begin(), got.end());
     EXPECT_EQ(got, expected);
-
-    pbDestroy(&pairs);
-    jtDestroy(&left);
-    jtDestroy(&right);
 }
 
-TEST(JoinKernelGeneric, Int32KeyTriggersRehash) {
+TEST_F(JoinKernelGeneric, Int32KeyTriggersRehash) {
     using namespace NQumir::NAst;
     auto i32 = std::make_shared<TIntegerType>(TIntegerType::I32);
     TStructType leftType({{"lk", i32}});
@@ -1104,10 +1065,6 @@ TEST(JoinKernelGeneric, Int32KeyTriggersRehash) {
 
     void* initFn = nullptr;
     auto r1 = CompileGenericJoin(keyDesc, "jt_init", initFn);
-    void* destroyFn = nullptr;
-    auto r2 = CompileGenericJoin(keyDesc, "jt_destroy", destroyFn);
-    void* pbDestroyFn = nullptr;
-    auto r3 = CompileGenericJoin(keyDesc, "pb_destroy", pbDestroyFn);
     void* leftFn = nullptr;
     auto r4 = CompileGenericJoin(keyDesc, "jt_process_left", leftFn);
     void* rightFn = nullptr;
@@ -1116,8 +1073,6 @@ TEST(JoinKernelGeneric, Int32KeyTriggersRehash) {
     ASSERT_NE(rightFn, nullptr);
 
     auto jtInit = reinterpret_cast<bool (*)(void*, int64_t, int64_t)>(initFn);
-    auto jtDestroy = reinterpret_cast<void (*)(void*)>(destroyFn);
-    auto pbDestroy = reinterpret_cast<void (*)(void*)>(pbDestroyFn);
     auto procLeft = reinterpret_cast<
         bool (*)(void*, void*, TRowSet*, const int64_t*, int64_t, void*, TRowSet*, TRowSet*)>(
         leftFn);
@@ -1182,10 +1137,6 @@ TEST(JoinKernelGeneric, Int32KeyTriggersRehash) {
     }
     EXPECT_EQ(matched, expected);
     EXPECT_GT(left.Capacity, initialCapacity); // bucket pointers survived rehash
-
-    pbDestroy(&pairs);
-    jtDestroy(&left);
-    jtDestroy(&right);
 }
 
 namespace {
@@ -1213,7 +1164,7 @@ bool MaskBit(const TColumn& col, int64_t row) {
 
 } // namespace
 
-TEST(JoinMaterialize, GathersFixedAndStringColumnsWithNullPadding) {
+TEST_F(JoinMaterialize, GathersFixedAndStringColumnsWithNullPadding) {
     using namespace NQumir::NAst;
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     auto i32 = std::make_shared<TIntegerType>(TIntegerType::I32);
@@ -1306,7 +1257,7 @@ TEST(JoinMaterialize, GathersFixedAndStringColumnsWithNullPadding) {
     EXPECT_EQ(kernels.Materialize(&noPairs, &lbatch, &rbatch, &lbatch, &rbatch, 0, 100, &empty), 0);
 }
 
-TEST(JoinMaterialize, PropagatesSourceNullsAndReadsStreamBatches) {
+TEST_F(JoinMaterialize, PropagatesSourceNullsAndReadsStreamBatches) {
     using namespace NQumir::NAst;
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     TStructType leftType({{"lk", i64}, {"lv", std::make_shared<TNullable>(i64)}});
@@ -1361,7 +1312,7 @@ TEST(JoinMaterialize, PropagatesSourceNullsAndReadsStreamBatches) {
     FreeMaterializedRowSet(out);
 }
 
-TEST(JoinMaterialize, FullOuterPadsBothSides) {
+TEST_F(JoinMaterialize, FullOuterPadsBothSides) {
     using namespace NQumir::NAst;
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     TStructType leftType({{"lk", i64}});
@@ -1419,7 +1370,7 @@ TEST(JoinMaterialize, FullOuterPadsBothSides) {
     FreeMaterializedRowSet(out);
 }
 
-TEST(JoinMaterialize, SemiAntiOutputsLeftColumnsOnly) {
+TEST_F(JoinMaterialize, SemiAntiOutputsLeftColumnsOnly) {
     using namespace NQumir::NAst;
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     TStructType leftType({{"lk", i64}, {"lv", i64}});
@@ -1461,7 +1412,7 @@ TEST(JoinMaterialize, SemiAntiOutputsLeftColumnsOnly) {
     FreeMaterializedRowSet(out);
 }
 
-TEST(JoinMaterialize, GathersBoolAndDecimalWorkers) {
+TEST_F(JoinMaterialize, GathersBoolAndDecimalWorkers) {
     using namespace NQumir::NAst;
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     TStructType leftType({{"lk", i64}, {"flag", std::make_shared<TBoolType>()}});
@@ -1516,7 +1467,7 @@ TEST(JoinMaterialize, GathersBoolAndDecimalWorkers) {
     FreeMaterializedRowSet(out);
 }
 
-TEST(CompileCrossJoin, EmitsSelectedPairsAndMaterializesStringPayload) {
+TEST_F(CompileCrossJoin, EmitsSelectedPairsAndMaterializesStringPayload) {
     using namespace NQumir::NAst;
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     TStructType leftType({{"lk", i64}, {"lname", std::make_shared<TStringType>()}});
@@ -1587,14 +1538,6 @@ TEST(CompileCrossJoin, EmitsSelectedPairsAndMaterializesStringPayload) {
     EXPECT_EQ(outRv[1], 20);
 
     FreeMaterializedRowSet(out);
-    kernels.Dispatch(
-        nullptr,
-        0,
-        nullptr,
-        0,
-        nullptr,
-        &pairs,
-        static_cast<int64_t>(ECrossJoinKernelOp::Destroy));
 }
 
 namespace {
@@ -1662,7 +1605,7 @@ std::vector<int64_t> CrossJoinPairs(
 
 } // namespace
 
-TEST(CompileCrossJoin, FullJoinPadsUnmatchedRowsOfBothSides) {
+TEST_F(CompileCrossJoin, FullJoinPadsUnmatchedRowsOfBothSides) {
     auto kernels = CompileResidualCrossJoin(EJoinType::Full);
     TCrossJoinResidualInput input;
     TPairBuffer pairs{};
@@ -1682,18 +1625,9 @@ TEST(CompileCrossJoin, FullJoinPadsUnmatchedRowsOfBothSides) {
     EXPECT_EQ(
         CrossJoinPairs(kernels, input, ECrossJoinKernelOp::EmitUnmatchedRight, pairs),
         (std::vector<int64_t>{-1, PackRowId(1, 0)}));
-
-    kernels.Dispatch(
-        nullptr,
-        0,
-        nullptr,
-        0,
-        nullptr,
-        &pairs,
-        static_cast<int64_t>(ECrossJoinKernelOp::Destroy));
 }
 
-TEST(CompileCrossJoin, SemiAndAntiEmitEachLeftRowOnceByMatch) {
+TEST_F(CompileCrossJoin, SemiAndAntiEmitEachLeftRowOnceByMatch) {
     for (
         const auto [type, row] :
         {std::pair{EJoinType::LeftSemi, 0}, std::pair{EJoinType::LeftAnti, 1}})
@@ -1706,15 +1640,6 @@ TEST(CompileCrossJoin, SemiAndAntiEmitEachLeftRowOnceByMatch) {
             CrossJoinPairs(kernels, input, ECrossJoinKernelOp::Emit, pairs),
             (std::vector<int64_t>{PackRowId(0, row), -1}))
             << JoinTypeName(type);
-
-        kernels.Dispatch(
-            nullptr,
-            0,
-            nullptr,
-            0,
-            nullptr,
-            &pairs,
-            static_cast<int64_t>(ECrossJoinKernelOp::Destroy));
     }
 }
 
@@ -1745,7 +1670,7 @@ std::string ReadString(const TColumn& col, int64_t row) {
 
 } // namespace
 
-TEST(JoinStringKey, InnerJoinMatchesAndMaterializes) {
+TEST_F(JoinStringKey, InnerJoinMatchesAndMaterializes) {
     using namespace NQumir::NAst;
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     TStructType leftType({{"lk", std::make_shared<TStringType>()}, {"lv", i64}});
@@ -1813,20 +1738,9 @@ TEST(JoinStringKey, InnerJoinMatchesAndMaterializes) {
     std::sort(got.begin(), got.end());
     EXPECT_EQ(got, expected);
     FreeMaterializedRowSet(out);
-
-    kernels.Dispatch(
-        &left,
-        &right,
-        nullptr,
-        0,
-        &pairs,
-        nullptr,
-        nullptr,
-        0,
-        JoinOpCode(EJoinKernelOp::Destroy));
 }
 
-TEST(JoinStringKey, SemiAntiClonesRightKeysAndSurvivesRehash) {
+TEST_F(JoinStringKey, SemiAntiClonesRightKeysAndSurvivesRehash) {
     using namespace NQumir::NAst;
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     TStructType leftType({{"lk", std::make_shared<TStringType>()}, {"lv", i64}});
@@ -1946,20 +1860,9 @@ TEST(JoinStringKey, SemiAntiClonesRightKeysAndSurvivesRehash) {
     std::sort(got.begin(), got.end());
     std::sort(expected.begin(), expected.end());
     EXPECT_EQ(got, expected);
-
-    kernels.Dispatch(
-        &left,
-        &right,
-        nullptr,
-        0,
-        &pairs,
-        nullptr,
-        nullptr,
-        0,
-        JoinOpCode(EJoinKernelOp::Destroy));
 }
 
-TEST(JoinStringKey, CompositeStringIntKey) {
+TEST_F(JoinStringKey, CompositeStringIntKey) {
     using namespace NQumir::NAst;
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     TStructType leftType({{"lk", std::make_shared<TStringType>()}, {"ln", i64}, {"lv", i64}});
@@ -2043,17 +1946,6 @@ TEST(JoinStringKey, CompositeStringIntKey) {
     std::sort(got.begin(), got.end());
     EXPECT_EQ(got, expected);
     FreeMaterializedRowSet(out);
-
-    kernels.Dispatch(
-        &left,
-        &right,
-        nullptr,
-        0,
-        &pairs,
-        nullptr,
-        nullptr,
-        0,
-        JoinOpCode(EJoinKernelOp::Destroy));
 }
 
 namespace {
@@ -2258,7 +2150,6 @@ TMarkJoinRun RunMarkJoin(
         }
         FreeMaterializedRowSet(out);
     }
-    dispatch(nullptr, 0, 0, EJoinKernelOp::Destroy);
     std::sort(run.Rows.begin(), run.Rows.end());
     return run;
 }
@@ -2285,7 +2176,7 @@ RandomNullableKeys(uint32_t& seed, size_t count, uint32_t domain, uint32_t nullE
 
 } // namespace
 
-TEST(MarkJoinKernel, NullableKeyFollowsThreeValuedIn) {
+TEST_F(MarkJoinKernel, NullableKeyFollowsThreeValuedIn) {
     using namespace NQumir::NAst;
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     auto nullableI64 = std::make_shared<TNullable>(i64);
@@ -2380,7 +2271,7 @@ TEST(MarkJoinKernel, NullableKeyFollowsThreeValuedIn) {
     }
 }
 
-TEST(MarkJoinKernel, NonNullableCompositeKeyIsTwoValued) {
+TEST_F(MarkJoinKernel, NonNullableCompositeKeyIsTwoValued) {
     using namespace NQumir::NAst;
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     auto i32 = std::make_shared<TIntegerType>(TIntegerType::I32);
@@ -2443,7 +2334,7 @@ TEST(MarkJoinKernel, NonNullableCompositeKeyIsTwoValued) {
     }
 }
 
-TEST(MarkJoinKernel, NullableStringKeys) {
+TEST_F(MarkJoinKernel, NullableStringKeys) {
     using namespace NQumir::NAst;
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     auto nullableString = std::make_shared<TNullable>(std::make_shared<TStringType>());
@@ -2512,7 +2403,7 @@ TEST(MarkJoinKernel, NullableStringKeys) {
     }
 }
 
-TEST(MarkJoinKernel, RehashSizedSidesMatchReference) {
+TEST_F(MarkJoinKernel, RehashSizedSidesMatchReference) {
     using namespace NQumir::NAst;
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     auto nullableI64 = std::make_shared<TNullable>(i64);
@@ -2565,7 +2456,7 @@ TEST(MarkJoinKernel, RehashSizedSidesMatchReference) {
     }
 }
 
-TEST(MarkJoinKernel, ReadsPrecomputedLeftHashes) {
+TEST_F(MarkJoinKernel, ReadsPrecomputedLeftHashes) {
     using namespace NQumir::NAst;
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     auto nullableI64 = std::make_shared<TNullable>(i64);
@@ -2609,7 +2500,7 @@ TEST(MarkJoinKernel, ReadsPrecomputedLeftHashes) {
     }
 }
 
-TEST(MarkJoinKernel, RejectsUnsupportedSpecs) {
+TEST_F(MarkJoinKernel, RejectsUnsupportedSpecs) {
     using namespace NQumir::NAst;
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     auto nullableI64 = std::make_shared<TNullable>(i64);
@@ -2686,16 +2577,6 @@ TEST(MarkJoinKernel, RejectsUnsupportedSpecs) {
         0,
         JoinOpCode(EJoinKernelOp::StreamRight)));
     EXPECT_EQ(pairs.Count, 0);
-    kernels.Dispatch(
-        &left,
-        &right,
-        nullptr,
-        0,
-        &pairs,
-        nullptr,
-        nullptr,
-        0,
-        JoinOpCode(EJoinKernelOp::Destroy));
 }
 
 namespace {
@@ -2724,7 +2605,7 @@ FilterRows(const NQumir::NAst::TTypePtr& type, TRowSet rowSet, const std::string
 
 // The materialized marker column must read back through the ordinary column
 // ABI (bit-packed Data, Mask bit 1 = valid) as the type the spec declares.
-TEST(MarkJoinKernel, MarkerColumnReadsBackAsDeclaredType) {
+TEST_F(MarkJoinKernel, MarkerColumnReadsBackAsDeclaredType) {
     using namespace NQumir::NAst;
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     auto nullableI64 = std::make_shared<TNullable>(i64);
@@ -2775,16 +2656,6 @@ TEST(MarkJoinKernel, MarkerColumnReadsBackAsDeclaredType) {
             kernels
                 .Materialize(&pairs, nullptr, nullptr, &leftBatch, nullptr, 0, pairs.Count, &out),
             left.RowCount);
-        kernels.Dispatch(
-            &leftTable,
-            &rightTable,
-            nullptr,
-            0,
-            &pairs,
-            nullptr,
-            nullptr,
-            0,
-            JoinOpCode(EJoinKernelOp::Destroy));
     };
 
     // Nullable keys, S with NULL: TRUE, NULL (missing key), NULL (NULL key),
@@ -2883,7 +2754,7 @@ constexpr size_t TestProbeHoldBytes = 1 << 20;
 // The row join table (kernel/join/join_rows.oz): rows with an equal key chain
 // behind one entry, NULL keys never match, and a string payload is gathered
 // from the retained batch through the row's StringView.
-TEST(RowJoinProcessor, ChainsNullKeysAndStringPayload) {
+TEST_F(RowJoinProcessor, ChainsNullKeysAndStringPayload) {
     using namespace NQumir::NAst;
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     auto nullableI64 = std::make_shared<TNullable>(i64);
@@ -3040,7 +2911,7 @@ std::string StringAt(const TColumn& column, int64_t row) {
 // Build on the left with a string payload: the build side's strings are
 // gathered from the retained build batch, and the rows of one key come out in
 // build order.
-TEST(RowJoinProcessor, BuildLeftStringPayloadInBuildOrder) {
+TEST_F(RowJoinProcessor, BuildLeftStringPayloadInBuildOrder) {
     using namespace NQumir::NAst;
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     TStructType leftType({{"lk", i64}, {"lname", std::make_shared<TStringType>()}});
@@ -3089,7 +2960,7 @@ TEST(RowJoinProcessor, BuildLeftStringPayloadInBuildOrder) {
 // While the build side has no batch ready, probe batches are pulled and held,
 // so the probe pipeline does not wait for the build. They are probed once the
 // table exists, also when the probe side ended first.
-TEST(RowJoinProcessor, HoldsProbeBatchesUntilTheTableIsBuilt) {
+TEST_F(RowJoinProcessor, HoldsProbeBatchesUntilTheTableIsBuilt) {
     using namespace NQumir::NAst;
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     TStructType leftType({{"lk", i64}, {"lv", i64}});
@@ -3333,7 +3204,7 @@ THeldProbeRun RunHeldProbe(
 
 // The hold is bounded: at the budget the processor asks for the build side
 // only and does not read the probe side, then reads it again after the build.
-TEST(RowJoinProcessor, StopsHoldingProbeBatchesAtTheBudget) {
+TEST_F(RowJoinProcessor, StopsHoldingProbeBatchesAtTheBudget) {
     // Four 32-byte probe batches against a 64-byte budget: two are held.
     const auto run = RunHeldProbe(/*probeHoldBytes=*/64, /*probeBatches=*/4, /*idleSteps=*/6);
     EXPECT_TRUE(run.Finished);
@@ -3373,7 +3244,7 @@ TEST(RowJoinProcessor, StopsHoldingProbeBatchesAtTheBudget) {
 
 // A batch larger than the budget is still taken when nothing is held, so the
 // processor cannot wait on probe input it refuses to read.
-TEST(RowJoinProcessor, TakesOneProbeBatchLargerThanTheBudget) {
+TEST_F(RowJoinProcessor, TakesOneProbeBatchLargerThanTheBudget) {
     const auto run = RunHeldProbe(/*probeHoldBytes=*/8, /*probeBatches=*/3, /*idleSteps=*/4);
     EXPECT_TRUE(run.Finished);
     EXPECT_EQ(run.ProbesBeforeBuild, 1u);
@@ -3381,7 +3252,7 @@ TEST(RowJoinProcessor, TakesOneProbeBatchLargerThanTheBudget) {
 }
 
 // A zero budget disables the hold: the build is awaited before any probe read.
-TEST(RowJoinProcessor, ZeroBudgetHoldsNothing) {
+TEST_F(RowJoinProcessor, ZeroBudgetHoldsNothing) {
     const auto run = RunHeldProbe(/*probeHoldBytes=*/0, /*probeBatches=*/3, /*idleSteps=*/4);
     EXPECT_TRUE(run.Finished);
     EXPECT_EQ(run.ProbesBeforeBuild, 0u);
@@ -3391,7 +3262,7 @@ TEST(RowJoinProcessor, ZeroBudgetHoldsNothing) {
 // A query can be torn down while the build is still running, for example after
 // an error elsewhere or a satisfied LIMIT. The probe batches the join holds for
 // the table must then be released with it.
-TEST(RowJoinProcessor, ReleasesHeldProbeBatchesWhenDestroyedBeforeTheBuild) {
+TEST_F(RowJoinProcessor, ReleasesHeldProbeBatchesWhenDestroyedBeforeTheBuild) {
     using namespace NQumir::NAst;
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     TStructType leftType({{"lk", i64}});
@@ -3443,7 +3314,7 @@ TEST(RowJoinProcessor, ReleasesHeldProbeBatchesWhenDestroyedBeforeTheBuild) {
 // its 2^20-entry table to 0.48. Two million probe keys, three quarters of them
 // absent, meet about thirty entries whose salt matches a different key; the
 // key comparison must reject those and keep probing.
-TEST(RowJoinProcessor, ManyArenaBlocksAndSaltCollisions) {
+TEST_F(RowJoinProcessor, ManyArenaBlocksAndSaltCollisions) {
     using namespace NQumir::NAst;
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     TStructType leftType({{"lk", i64}});
@@ -3528,7 +3399,7 @@ std::optional<std::string> StringOrNullAt(const TColumn& column, int64_t row) {
 // columns. NULL keys on both sides match nothing, a build key with two rows
 // yields two pairs, and the build side's string and nullable payloads read as
 // NULL on a padded row. The unselected probe row is not part of the input.
-TEST(RowJoinProcessor, LeftOuterPadsUnmatchedProbeRows) {
+TEST_F(RowJoinProcessor, LeftOuterPadsUnmatchedProbeRows) {
     using namespace NQumir::NAst;
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     auto nullableI64 = std::make_shared<TNullable>(i64);
@@ -3624,7 +3495,7 @@ TEST(RowJoinProcessor, LeftOuterPadsUnmatchedProbeRows) {
 // A RIGHT join builds its null-supplying left side. With a two-column key a
 // row matches only on both components: a probe row that agrees on one of them
 // is padded, and so is one whose nullable component is NULL.
-TEST(RowJoinProcessor, RightOuterMultiColumnKeyBuildsLeft) {
+TEST_F(RowJoinProcessor, RightOuterMultiColumnKeyBuildsLeft) {
     using namespace NQumir::NAst;
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     auto nullableI64 = std::make_shared<TNullable>(i64);
@@ -3687,7 +3558,7 @@ TEST(RowJoinProcessor, RightOuterMultiColumnKeyBuildsLeft) {
 
 // An empty build side pads every preserved row; an empty preserved side
 // produces nothing.
-TEST(RowJoinProcessor, LeftOuterEmptySides) {
+TEST_F(RowJoinProcessor, LeftOuterEmptySides) {
     using namespace NQumir::NAst;
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     TStructType leftType({{"lk", i64}});
@@ -3750,7 +3621,7 @@ std::vector<TSemiAntiRow> SemiAntiRows(std::vector<TRowSet> outputs) {
 // each build row comes out once. A NULL key matches nothing, on either side:
 // ANTI emits its build rows, NOT EXISTS style, with their string and nullable
 // payloads. Unselected rows of both sides take no part.
-TEST(RowJoinProcessor, SemiAntiBuildLeftEmitsEachLeftRowOnce) {
+TEST_F(RowJoinProcessor, SemiAntiBuildLeftEmitsEachLeftRowOnce) {
     using namespace NQumir::NAst;
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     auto nullableI64 = std::make_shared<TNullable>(i64);
@@ -3812,7 +3683,7 @@ TEST(RowJoinProcessor, SemiAntiBuildLeftEmitsEachLeftRowOnce) {
 
 // Without probe rows SEMI emits nothing and ANTI every selected build row,
 // NULL keys included; without build rows neither emits anything.
-TEST(RowJoinProcessor, SemiAntiBuildLeftEmptySides) {
+TEST_F(RowJoinProcessor, SemiAntiBuildLeftEmptySides) {
     using namespace NQumir::NAst;
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     auto nullableI64 = std::make_shared<TNullable>(i64);
@@ -3848,7 +3719,7 @@ TEST(RowJoinProcessor, SemiAntiBuildLeftEmptySides) {
 // read the full ones and the partly filled last one. Every third key is probed
 // three times, in batches that each match it once, so a SEMI row is emitted
 // once however often its key is matched.
-TEST(RowJoinProcessor, SemiAntiBuildLeftManyBlocksUniqueKeys) {
+TEST_F(RowJoinProcessor, SemiAntiBuildLeftManyBlocksUniqueKeys) {
     using namespace NQumir::NAst;
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     TStructType leftType({{"lk", i64}, {"lv", i64}});
@@ -3901,7 +3772,7 @@ TEST(RowJoinProcessor, SemiAntiBuildLeftManyBlocksUniqueKeys) {
 // The row join table marks only the left rows of a SEMI/ANTI join and runs no
 // residual, so it cannot build the preserved side of an outer join, the right
 // side of a SEMI/ANTI join, or decide a residual's matches.
-TEST(RowJoinProcessor, RejectsJoinsItCannotStream) {
+TEST_F(RowJoinProcessor, RejectsJoinsItCannotStream) {
     using namespace NQumir::NAst;
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     TStructType leftType({{"lk", i64}, {"lv", i64}});

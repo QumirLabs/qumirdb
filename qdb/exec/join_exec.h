@@ -223,7 +223,6 @@ public:
     void SetInstrumentation(TOperatorInstrumentation* instrumentation);
     TCrossJoinProcessor(const TCrossJoinProcessor&) = delete;
     TCrossJoinProcessor& operator=(const TCrossJoinProcessor&) = delete;
-    ~TCrossJoinProcessor();
 
     EJoinProcessorResult Process(
         const TFetch& left,

@@ -730,7 +730,6 @@ THashShuffleTask::THashShuffleTask(
 
 THashShuffleTask::~THashShuffleTask() {
     ClearPending();
-    // ObserveInstrumentation();
 }
 
 ETaskResult THashShuffleTask::Execute() {

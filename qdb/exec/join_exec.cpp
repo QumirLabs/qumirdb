@@ -80,18 +80,6 @@ TInnerJoinProcessor::~TInnerJoinProcessor() {
         Release(&ReadyOutput_.front());
         ReadyOutput_.pop_front();
     }
-    if (Initialized_) {
-        // Kernels_.Dispatch(
-        //     LeftTable_.data(),
-        //     RightTable_.data(),
-        //     nullptr,
-        //     0,
-        //     &PairBuffer_,
-        //     nullptr,
-        //     nullptr,
-        //     0,
-        //     JoinOp(EJoinKernelOp::Destroy));
-    }
 }
 
 void TInnerJoinProcessor::EnsureInit() {
@@ -592,23 +580,6 @@ TCrossJoinProcessor::TCrossJoinProcessor(
     // The nested-loop kernel has no marker emission.
     if (JoinType_ == EJoinType::LeftMark) {
         throw std::runtime_error("left_mark join is not supported by the nested-loop join processor");
-    }
-}
-
-TCrossJoinProcessor::~TCrossJoinProcessor() {
-    // The pair buffer is only allocated once the kernel actually runs (pb_push
-    // during Process). When nothing ran - e.g. plan export, which compiles the
-    // kernels to WASM but never JIT-finalizes them, so Kernels_.Dispatch wraps
-    // a null function pointer - Data stays null and there is nothing to free.
-    if (PairBuffer_.Data) {
-        // Kernels_.Dispatch(
-        //     nullptr,
-        //     0,
-        //     nullptr,
-        //     0,
-        //     nullptr,
-        //     &PairBuffer_,
-        //     CrossJoinOp(ECrossJoinKernelOp::Destroy));
     }
 }
 
