@@ -641,17 +641,17 @@ TExternalCatalogSnapshot::RegisterDeclarations(
     return std::monostate{};
 }
 
-std::expected<std::optional<NQumir::NFrontend::TComposeResult>, TError>
-TExternalCatalogSnapshot::ComposeReferenced(
-    const TExprPtr& ast,
-    const std::string& target,
-    const std::string& cacheDir) const
+namespace {
+
+// The modules that define a function `ast` calls.
+std::vector<std::shared_ptr<const TExternalCatalogSnapshot::TState::TModule>> ReferencedModules(
+    const TExternalCatalogSnapshot::TState& state, const TExprPtr& ast)
 {
     std::unordered_set<std::string> callNames;
     CollectCallNames(ast, callNames);
 
-    std::vector<std::shared_ptr<const TState::TModule>> modules;
-    for (const auto& [_, module] : State_->Modules) {
+    std::vector<std::shared_ptr<const TExternalCatalogSnapshot::TState::TModule>> modules;
+    for (const auto& [_, module] : state.Modules) {
         bool referenced = std::ranges::any_of(
             module->Functions,
             [&](const auto& item) { return callNames.contains(item.second->Name); });
@@ -659,6 +659,22 @@ TExternalCatalogSnapshot::ComposeReferenced(
             modules.push_back(module);
         }
     }
+    return modules;
+}
+
+} // namespace
+
+bool TExternalCatalogSnapshot::ReferencesModules(const TExprPtr& ast) const {
+    return !ReferencedModules(*State_, ast).empty();
+}
+
+std::expected<std::optional<NQumir::NFrontend::TComposeResult>, TError>
+TExternalCatalogSnapshot::ComposeReferenced(
+    const TExprPtr& ast,
+    const std::string& target,
+    const std::string& cacheDir) const
+{
+    auto modules = ReferencedModules(*State_, ast);
     if (modules.empty()) {
         return std::optional<NQumir::NFrontend::TComposeResult>{};
     }

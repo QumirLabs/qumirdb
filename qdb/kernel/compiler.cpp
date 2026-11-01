@@ -122,6 +122,8 @@ void InjectJoinResidualFilter(
     }
 }
 
+} // namespace
+
 void EnsureQumirDbUse(const NQumir::NAst::TExprPtr& ast) {
     using namespace NQumir::NAst;
     auto block = TMaybeNode<TBlockExpr>(ast);
@@ -138,8 +140,6 @@ void EnsureQumirDbUse(const NQumir::NAst::TExprPtr& ast) {
         block.Cast()->Stmts.begin(),
         std::make_shared<TUseExpr>(NQumir::TLocation{}, "qumirdb"));
 }
-
-} // namespace
 
 std::unordered_map<std::string, void*> CompileKernelAst(
     NQumir::TLLVMRunner& runner,
@@ -235,8 +235,8 @@ TGeneratedKernel TKernelCompiler::EmitKernel(
         Sink_->push_back(kernel);
     }
     if (BindNow_) {
-        JitFinalizeKernels(
-            std::span(&kernel, 1), Diagnostics_, ExternalCatalog_, JitCacheDir_);
+        FinalizeKernels(
+            std::span(&kernel, 1), Backend_, Diagnostics_, ExternalCatalog_, JitCacheDir_);
     }
     return kernel;
 }

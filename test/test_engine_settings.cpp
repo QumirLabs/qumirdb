@@ -45,6 +45,7 @@ TEST(EngineSettings, SchemaDefaultsAreTheDefaultsOfTheSettings) {
     EXPECT_EQ(config.GetDouble("late_materialization", "min_savings"), 2.0);
     EXPECT_EQ(config.GetString("io", "arrow_memory_pool"), "auto");
     EXPECT_EQ(config.GetString("jit", "cache_dir"), "");
+    EXPECT_EQ(config.GetString("kernel", "backend"), "llvm");
 }
 
 TEST(EngineSettings, EveryDefaultSurvivesApplyingTheWholeDump) {
@@ -63,6 +64,7 @@ TEST(EngineSettings, EveryDefaultSurvivesApplyingTheWholeDump) {
     EXPECT_EQ(settings.Scheduler.Aggregate.PartialMinInputRows, defaults.Scheduler.Aggregate.PartialMinInputRows);
     EXPECT_EQ(settings.Scheduler.Aggregate.CascadeGlobal, defaults.Scheduler.Aggregate.CascadeGlobal);
     EXPECT_EQ(settings.Scheduler.Aggregate.Table, defaults.Scheduler.Aggregate.Table);
+    EXPECT_EQ(settings.Scheduler.Kernel.Backend, defaults.Scheduler.Kernel.Backend);
     EXPECT_EQ(settings.Optimizer.LateMaterialization.MaxOutputRows, defaults.Optimizer.LateMaterialization.MaxOutputRows);
     EXPECT_EQ(settings.Optimizer.DumpPasses, nullptr);
     EXPECT_EQ(settings.Scheduler.Instrumentation.Output, nullptr);
@@ -92,6 +94,7 @@ TEST(EngineSettings, OverridesReachTheirFields) {
              "optimizer:cbo=false",
              "optimizer:dump_passes=true",
              "jit:cache_dir=/tmp/jit",
+             "kernel:backend=vm",
              "io:arrow_memory_pool=system",
          })
     {
@@ -122,6 +125,7 @@ TEST(EngineSettings, OverridesReachTheirFields) {
     EXPECT_FALSE(settings.Optimizer.EnableCbo);
     EXPECT_EQ(settings.Optimizer.DumpPasses, &std::cerr);
     EXPECT_EQ(settings.Scheduler.Jit.CacheDir, "/tmp/jit");
+    EXPECT_EQ(settings.Scheduler.Kernel.Backend, EKernelBackend::Vm);
     EXPECT_EQ(settings.ArrowMemoryPool, EArrowMemoryPool::System);
 }
 
@@ -134,6 +138,7 @@ TEST(EngineSettings, BadSettingsAreErrorsThatListTheAccepted) {
     };
     EXPECT_NE(message("join:table=hash").find("one of: row, legacy"), std::string::npos);
     EXPECT_NE(message("aggregate:table=rows").find("one of: auto, swiss, row"), std::string::npos);
+    EXPECT_NE(message("kernel:backend=jit").find("one of: llvm, vm"), std::string::npos);
     EXPECT_NE(message("aggregate:cascade_global=yes").find("one of: auto, true, false"), std::string::npos);
     EXPECT_NE(message("join:tabel=row").find("table"), std::string::npos);
     EXPECT_NE(message("joins:table=row").find("accepted sections: scheduler, queue, scan, join"), std::string::npos);

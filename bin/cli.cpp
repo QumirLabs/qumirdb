@@ -323,9 +323,10 @@ int ExecutePlan(
     auto lowered = NQdb::NScheduler::LowerPlanToGraph(
         plan, config.Engine.Scheduler, diagnostics, annotation.ExternalCatalog);
     auto buildElapsed = std::chrono::steady_clock::now() - buildStart;
+    const auto backend = config.Engine.Scheduler.Kernel.Backend;
     auto llvmStart = std::chrono::steady_clock::now();
-    NQdb::JitFinalizeKernels(
-        lowered.Kernels, diagnostics, annotation.ExternalCatalog,
+    NQdb::FinalizeKernels(
+        lowered.Kernels, backend, diagnostics, annotation.ExternalCatalog,
         config.Engine.Scheduler.Jit.CacheDir);
     auto llvmElapsed = std::chrono::steady_clock::now() - llvmStart;
 
@@ -360,7 +361,7 @@ int ExecutePlan(
                   << std::chrono::duration<double>(planElapsed).count() << " seconds\n"
                   << "KernelBuild: "
                   << std::chrono::duration<double>(buildElapsed).count() << " seconds\n"
-                  << "JitLLVM: "
+                  << (backend == NQdb::EKernelBackend::Vm ? "VmPrepare: " : "JitLLVM: ")
                   << std::chrono::duration<double>(llvmElapsed).count() << " seconds\n"
                   << "Cpu: " << cpuElapsed.count() << " seconds\n";
     }
@@ -697,7 +698,7 @@ void PrintHelp() {
         "    null                       Consume rows without output\n"
         "  --explain-mode <mode>        explain output: text (default), sexpr, both\n"
         "  --verbose                    Print the logical and runtime plans and the effective settings\n"
-        "  --timing                     Print per-phase timings (planning, kernel build, JIT LLVM, CPU)\n"
+        "  --timing                     Print per-phase timings (planning, kernel build, JIT LLVM or VM, CPU)\n"
         "  --config <path>              Ini file with engine settings\n"
         "  --help|-h                    Show this help message\n"
         "  --version|-v                 Show version information\n"

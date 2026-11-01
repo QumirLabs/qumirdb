@@ -2,6 +2,7 @@
 
 #include <qdb/exec/instrumentation/operator.h>
 #include <qdb/io/io.h>
+#include <qdb/kernel/backend.h>
 #include <qdb/kernel/generated.h>
 #include <qdb/kernel/spec.h>
 #include <qdb/plan/ops/aggregate.h>
@@ -26,8 +27,8 @@ namespace NQdb {
 class TExternalCatalogSnapshot;
 
 // Kernel generation appends TGeneratedKernels to Sink (when set); BindNow
-// additionally JIT-finalizes them immediately so the returned dispatches are
-// live (the default; deferred callers finalize via JitFinalizeKernels).
+// additionally finalizes them for Backend immediately so the returned
+// dispatches are live (the default; deferred callers use FinalizeKernels).
 struct TKernelCompilerOptions {
     std::ostream* Diagnostics = nullptr;
     std::string Stage;
@@ -38,10 +39,14 @@ struct TKernelCompilerOptions {
     std::shared_ptr<TRuntimeContext> RuntimeContext;
     // Persistent JIT cache used when BindNow finalizes; empty disables it.
     std::string JitCacheDir;
+    EKernelBackend Backend = EKernelBackend::Llvm;
 };
 
 // Shared kernel-pipeline options; caller overrides NativeCode/TargetTriple.
 NQumir::TLLVMRunnerOptions KernelRunnerOptions();
+
+// Kernel ASTs refer to the qumirdb module; prepends `use qumirdb` when absent.
+void EnsureQumirDbUse(const NQumir::NAst::TExprPtr& ast);
 
 // Native-JIT kernel compilation (prepends `use qumirdb`, links runtime
 // symbols); one function pointer per entry. The pointers live as long as
@@ -398,6 +403,7 @@ public:
         , Sink_(options.Sink)
         , BindNow_(options.BindNow)
         , JitCacheDir_(std::move(options.JitCacheDir))
+        , Backend_(options.Backend)
         , ExternalCatalog_(std::move(options.ExternalCatalog))
         , RuntimeContext_(std::move(options.RuntimeContext))
     {
@@ -578,7 +584,7 @@ private:
         bool hasPrecomputedHash = false);
 
     // Wrap a freshly built kernel program: create its slot, append to Sink_,
-    // and (if BindNow_) JIT-finalize immediately. Returns the emitted kernel
+    // and (if BindNow_) finalize it immediately. Returns the emitted kernel
     // (its Slot backs the caller's dispatch closures).
     TGeneratedKernel EmitKernel(
         std::string name,
@@ -592,6 +598,7 @@ private:
     std::vector<TGeneratedKernel>* Sink_ = nullptr;
     bool BindNow_ = true;
     std::string JitCacheDir_;
+    EKernelBackend Backend_ = EKernelBackend::Llvm;
     std::shared_ptr<const TExternalCatalogSnapshot> ExternalCatalog_;
     std::shared_ptr<TRuntimeContext> RuntimeContext_;
     NQumir::TLLVMRunnerOptions Opts_;

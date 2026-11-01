@@ -1,5 +1,7 @@
 #pragma once
 
+#include <qdb/kernel/backend.h>
+
 #include <algorithm>
 #include <cstddef>
 #include <iosfwd>
@@ -217,6 +219,10 @@ struct TJitSettings {
     std::string CacheDir;
 };
 
+struct TKernelSettings {
+    EKernelBackend Backend = EKernelBackend::Llvm;
+};
+
 struct TInstrumentationSettings {
     // Disabled by default. Applications may opt in and provide the destination
     // explicitly; the execution library never reads process environment state.
@@ -233,6 +239,7 @@ struct TSettings {
     TJoinSettings Join;
     TAggregateSettings Aggregate;
     TJitSettings Jit;
+    TKernelSettings Kernel;
     TInstrumentationSettings Instrumentation;
 };
 

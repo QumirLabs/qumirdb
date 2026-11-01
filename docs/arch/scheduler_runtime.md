@@ -50,6 +50,12 @@ execution context referring to this table. A task that resumes on another
 worker selects the same allocation slot; the slot belongs to the task rather
 than to the thread.
 
+With the VM kernel backend, the worker context also owns lazy interpreter
+instances over shared prepared bytecode. Interpreter registers and stack stay
+with the worker; operator progress and allocated buffers stay with the task.
+Moving a task therefore requires neither moving a VM instance nor recompiling
+its kernels.
+
 The scheduler passes the context at the task execution boundary. A scoped pin
 sets a thread-local borrowed pointer for the duration of that invocation and
 restores its previous value on return or exception. Nested execution restores

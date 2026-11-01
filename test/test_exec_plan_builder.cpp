@@ -464,7 +464,7 @@ TEST(ExecPlanBuilder, RuntimeFiltersShareTheQueryJit) {
     EXPECT_NE(filter->RuntimeContext, secondFilter->RuntimeContext);
     EXPECT_FALSE(filter->Slot->Runner);
 
-    JitFinalizeKernels(first.Kernels);
+    FinalizeKernels(first.Kernels, EKernelBackend::Llvm);
     ASSERT_TRUE(filter->Slot->Runner);
     for (const auto& kernel : first.Kernels) {
         EXPECT_EQ(kernel.Slot->Runner, filter->Slot->Runner);

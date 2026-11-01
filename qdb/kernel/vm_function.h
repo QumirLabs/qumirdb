@@ -51,9 +51,11 @@ public:
         NQumir::NAst::TExprPtr module);
     std::expected<NQumir::NAst::TExprPtr, std::string> Transform(
         NQumir::NAst::TExprPtr module);
+    // Kernels skip definite-assignment analysis, as KernelRunnerOptions does.
     std::expected<void, std::string> Lower(
         NQumir::NAst::TExprPtr module,
-        NQumir::NIR::TModule& output);
+        NQumir::NIR::TModule& output,
+        bool runDefiniteAssignment = true);
 
 private:
     struct TImpl;
@@ -68,6 +70,8 @@ TVmFrontendContext& QumirdbVmContext();
 // Reusable AST -> compose -> resolve -> IR -> interpreter pipeline for small
 // planning-time functions. The compiled module and interpreter stay alive so
 // the same function can be evaluated repeatedly with different arguments.
+// The bytecode is prepared at compilation and calls touch no global state, so
+// separate functions may run on separate threads.
 class TVmFunction {
 public:
     static std::expected<std::unique_ptr<TVmFunction>, std::string> Compile(
