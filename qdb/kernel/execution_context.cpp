@@ -5,6 +5,7 @@
 #include <qumir/ir/eval.h>
 
 #include <algorithm>
+#include <iostream>
 #include <sstream>
 #include <stdexcept>
 #include <utility>
@@ -26,6 +27,10 @@ struct TExecutionContext::TInstance {
 
 TExecutionContext::TExecutionContext() = default;
 
+TExecutionContext::TExecutionContext(TReleaseTag)
+    : ReleaseMode_(true)
+{}
+
 TExecutionContext::~TExecutionContext() {
     for (auto& instance : Instances_) {
         // Kernel programs have no module destructor, so there is nothing to report.
@@ -34,6 +39,22 @@ TExecutionContext::~TExecutionContext() {
 }
 
 int64_t TExecutionContext::Invoke(
+    const std::shared_ptr<TVmProgram>& program,
+    NQumir::NIR::TFunction& function,
+    std::vector<int64_t> args)
+{
+    if (!ReleaseMode_) {
+        return InvokeThrowing(program, function, std::move(args));
+    }
+    try {
+        return InvokeThrowing(program, function, std::move(args));
+    } catch (const std::exception& e) {
+        std::cerr << "qdb: kernel release failed: " << e.what() << std::endl;
+        return 0;
+    }
+}
+
+int64_t TExecutionContext::InvokeThrowing(
     const std::shared_ptr<TVmProgram>& program,
     NQumir::NIR::TFunction& function,
     std::vector<int64_t> args)

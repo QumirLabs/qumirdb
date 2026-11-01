@@ -731,7 +731,7 @@ THashShuffleTask::THashShuffleTask(
 
 THashShuffleTask::~THashShuffleTask() {
     // Runs outside any worker, on the thread that releases the plan.
-    TExecutionContext context;
+    TExecutionContext context{TExecutionContext::TReleaseTag{}};
     ClearPending(context);
 }
 

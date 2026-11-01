@@ -39,7 +39,7 @@ TRowJoinProcessor::~TRowJoinProcessor() {
     }
     if (Initialized_) {
         // Runs outside any worker, on the thread that releases the plan.
-        TExecutionContext context;
+        TExecutionContext context{TExecutionContext::TReleaseTag{}};
         TRowSet none{};
         Dispatch(context, ERowJoinKernelOp::Destroy, &none);
         if (Kernels_.KeepsNullKeyRows) {

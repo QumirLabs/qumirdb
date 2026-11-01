@@ -74,7 +74,7 @@ TAggregateProcessor::TAggregateProcessor(
 TAggregateProcessor::~TAggregateProcessor()
 {
     // Runs outside any worker, on the thread that releases the plan.
-    TExecutionContext context;
+    TExecutionContext context{TExecutionContext::TReleaseTag{}};
     Destroy(context);
 }
 

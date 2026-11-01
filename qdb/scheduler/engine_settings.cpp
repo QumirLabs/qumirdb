@@ -219,7 +219,8 @@ TEngineConfigBuilder BuildEngineConfig() {
     b.Section("kernel");
     b.Enum("backend", KernelBackendNames, ParseKernelBackend,
         [](auto& s) -> auto& { return s.Scheduler.Kernel.Backend; },
-        "Where generated kernels run: llvm (native code) or vm (the Qumir interpreter).");
+        "Where generated kernels run: llvm (native code) or vm (the Qumir interpreter, "
+        "experimental: may crash the process on queries hitting known Qumir VM gaps).");
 
     b.Section("io");
     b.Enum("arrow_memory_pool", ArrowMemoryPoolNames, ParseArrowMemoryPool,

@@ -98,12 +98,20 @@ struct TKernelSlot {
         if (!Vm) {
             return reinterpret_cast<TFn>(Fns[index])(args...);
         }
-        auto words = ToKernelWords(TFn{}, args...);
         if constexpr (std::is_void_v<TResult>) {
-            context.Invoke(Vm, *VmFns[index], std::move(words));
+            CallVm<TFn>(context, index, args...);
         } else {
-            return FromKernelWord<TResult>(context.Invoke(Vm, *VmFns[index], std::move(words)));
+            return FromKernelWord<TResult>(CallVm<TFn>(context, index, args...));
         }
+    }
+
+private:
+    // Out of line so the native call sites stay small.
+    template <typename TFn, typename... TArgs>
+    [[gnu::noinline, gnu::cold]] int64_t CallVm(
+        TExecutionContext& context, size_t index, TArgs... args) const
+    {
+        return context.Invoke(Vm, *VmFns[index], ToKernelWords(TFn{}, args...));
     }
 };
 

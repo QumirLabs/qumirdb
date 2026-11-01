@@ -20,6 +20,10 @@ struct TVmProgram;
 class TExecutionContext {
 public:
     TExecutionContext();
+    // Context for destructors that release kernel state: Invoke reports a VM
+    // error to stderr and returns 0 instead of throwing out of a noexcept dtor.
+    struct TReleaseTag {};
+    explicit TExecutionContext(TReleaseTag);
     ~TExecutionContext();
 
     TExecutionContext(const TExecutionContext&) = delete;
@@ -33,8 +37,14 @@ public:
         std::vector<int64_t> args);
 
 private:
+    int64_t InvokeThrowing(
+        const std::shared_ptr<TVmProgram>& program,
+        NQumir::NIR::TFunction& function,
+        std::vector<int64_t> args);
+
     struct TInstance;
     std::vector<std::unique_ptr<TInstance>> Instances_;
+    bool ReleaseMode_ = false;
 };
 
 } // namespace NQdb

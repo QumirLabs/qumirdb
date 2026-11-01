@@ -82,7 +82,7 @@ TInnerJoinProcessor::~TInnerJoinProcessor() {
     }
     if (Initialized_) {
         // Runs outside any worker, on the thread that releases the plan.
-        TExecutionContext context;
+        TExecutionContext context{TExecutionContext::TReleaseTag{}};
         Kernels_.Dispatch(
             context,
             LeftTable_.data(),
@@ -620,7 +620,7 @@ TCrossJoinProcessor::~TCrossJoinProcessor() {
     // a null function pointer - Data stays null and there is nothing to free.
     if (PairBuffer_.Data) {
         // Runs outside any worker, on the thread that releases the plan.
-        TExecutionContext context;
+        TExecutionContext context{TExecutionContext::TReleaseTag{}};
         Kernels_.Dispatch(
             context,
             nullptr,
