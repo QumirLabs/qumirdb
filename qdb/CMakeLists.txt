@@ -6,6 +6,7 @@ find_package(LLVM REQUIRED CONFIG)
 
 add_library(qumirdb
     stub.cpp
+    compiler/query.cpp
     utils/sha1.cpp
     utils/regex.cpp
     utils/config.cpp
