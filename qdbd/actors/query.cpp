@@ -60,7 +60,7 @@ struct TBaseBehavior {
 
         std::ostringstream explainOutput;
         for (auto& statement : parseResult.value().Statements) {
-            auto prepareResult = State->Compiler.Prepare(statement, true);
+            auto prepareResult = State->Compiler.Prepare(statement, parseResult->Explain);
             if (!prepareResult) {
                 Complete(std::unexpected(prepareResult.error()), ctx);
                 return;
