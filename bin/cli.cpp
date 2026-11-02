@@ -1,34 +1,17 @@
 #include "plan_export.h"
 
-#include <qdb/catalog/external_module.h>
+#include <qdb/compiler/query.h>
 #include <qdb/exec/planner_helpers.h>
 #include <qdb/io/parquet/source.h>
 #include <qdb/io/text/sink.h>
 #include <qdb/kernel/finalize.h>
 #include <qdb/scheduler/plan_lowerer.h>
-#include <qdb/plan/build.h>
-#include <qdb/plan/pipeline.h>
-#include <qdb/plan/plan_print.h>
-#include <qdb/plan/ops/aggregate.h>
-#include <qdb/plan/ops/cte_consumer.h>
-#include <qdb/plan/ops/filter.h>
-#include <qdb/plan/ops/join.h>
-#include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/source.h>
-#include <qdb/plan/passes/column_pruning.h>
-#include <qdb/plan/passes/equijoin.h>
-#include <qdb/plan/passes/join_order.h>
-#include <qdb/plan/passes/qualify_columns.h>
-#include <qdb/plan/passes/top_sort.h>
-#include <qdb/plan/passes/typing.h>
 #include <qdb/scheduler/engine_settings.h>
-#include <qdb/sexp/parser.h>
-#include <qdb/sexp/printer.h>
 #include <qdb/sql/parser.h>
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
-#include <qumir/parser/core/lexer.h>
-#include <qumir/parser/core/parser.h>
+#include <qumir/parser/core/printer.h>
 
 #include <readline/history.h>
 #include <readline/readline.h>
@@ -52,10 +35,8 @@
 
 namespace {
 
-enum class ESyntax {
-    Sexpr,
-    Sql,
-};
+using NQdb::NCompiler::ESyntax;
+using NQdb::NCompiler::EExplainMode;
 
 struct TFormatSpec {
     std::string Name = "console";
@@ -142,8 +123,6 @@ NQdb::TSchema SchemaFromType(
     return NQdb::TSchema{std::span<const NQdb::TColumnSchema>(columns)};
 }
 
-enum class EExplainMode { Text, Sexpr, Both };
-
 std::optional<EExplainMode> ParseExplainMode(std::string_view value) {
     if (value == "text") return EExplainMode::Text;
     if (value == "sexpr" || value == "s-expr") return EExplainMode::Sexpr;
@@ -166,64 +145,6 @@ std::string ResolveTablePath(const std::string& dataDir, std::string_view table)
         return std::string(table);
     }
     return dataDir + "/" + std::string(table) + ".parquet";
-}
-
-std::expected<NQdb::TOperatorPtr, NQumir::TError> ParseSexpr(
-    std::istream& in,
-    const std::function<NQdb::TOperatorPtr(const std::string&)>& makeSource)
-{
-    NQdb::NSexp::TRelParserOptions opts;
-    opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) {
-        return makeSource(std::string(path));
-    };
-
-    NQumir::NAst::NCore::TParser parser;
-    for (auto& [key, value] : NQdb::NSexp::MakeRelParsers(std::move(opts))) {
-        parser.NodeParsers[key] = std::move(value);
-    }
-
-    NQumir::NAst::NCore::TTokenStream tokens(in);
-    auto parsed = parser.Parse(tokens);
-    if (!parsed) {
-        return std::unexpected(parsed.error());
-    }
-    auto plan = std::dynamic_pointer_cast<NQdb::IOperator>(*parsed);
-    if (!plan) {
-        return std::unexpected(NQumir::TError("input must be a relational plan (rel ...)"));
-    }
-    return plan;
-}
-
-std::expected<std::vector<NQdb::NSql::TSqlNodePtr>, NQumir::TError>
-ParseSqlStatements(std::istream& in)
-{
-    NQdb::NSql::TTokenStream tokens(in);
-    NQdb::NSql::TParser parser;
-    return parser.ParseAll(tokens);
-}
-
-// If `text` begins with the word "explain" (case-insensitive), strip it and
-// return true.
-bool StripExplain(std::string& text) {
-    size_t start = text.find_first_not_of(" \t\r\n");
-    if (start == std::string::npos) {
-        return false;
-    }
-    static const std::string keyword = "explain";
-    if (text.size() - start < keyword.size()) {
-        return false;
-    }
-    for (size_t i = 0; i < keyword.size(); ++i) {
-        if (std::tolower(text[start + i]) != keyword[i]) {
-            return false;
-        }
-    }
-    size_t after = start + keyword.size();
-    if (after < text.size() && !std::isspace(text[after])) {
-        return false; // e.g. "explained"
-    }
-    text = text.substr(after);
-    return true;
 }
 
 // Wraps the output sink to count the total number of result rows.
@@ -262,19 +183,15 @@ std::chrono::duration<double> ProcessCpuTime() {
 }
 
 int ExecutePlan(
-    NQdb::TOperatorPtr plan,
+    const NQdb::NCompiler::TPreparedQuery& prepared,
     const TCliOptions& config,
-    const NQdb::NKernel::TAnnotationContext& annotation,
     bool explain,
     std::chrono::steady_clock::time_point planStart)
 {
-    NQdb::TPlanPassDiagnostics planDiagnostics;
-    auto passOptions = config.Engine.Optimizer;
-    passOptions.Diagnostics = &planDiagnostics;
-    passOptions.Annotation = annotation;
-    NQdb::ApplyPlanPasses(plan, std::move(passOptions));
+    const auto& plan = prepared.Plan;
+    const auto& annotation = prepared.Annotation;
+    const auto& planDiagnostics = prepared.Diagnostics;
     auto planElapsed = std::chrono::steady_clock::now() - planStart;
-    const bool sexprAvailable = NQdb::CollectMaterializations(plan).empty();
 
     if (config.Verbose) {
         const auto& late = planDiagnostics.LateMaterialization;
@@ -291,26 +208,12 @@ int ExecutePlan(
             std::cerr << '\n';
         }
         std::cerr << "========== LOGICAL PLAN ==========\n";
-        if (sexprAvailable) {
-            NQdb::NSexp::PrintRelPlan(std::cerr, plan);
-        } else {
-            NQdb::PrintPlanTreeWithCtes(std::cerr, plan);
-        }
+        NQdb::NCompiler::Explain(std::cerr, plan, EExplainMode::Sexpr);
         std::cerr << "\n==================================\n";
     }
 
     if (explain) {
-        const bool wantSexpr =
-            config.ExplainMode != EExplainMode::Text && sexprAvailable;
-        const bool wantText =
-            config.ExplainMode != EExplainMode::Sexpr || !sexprAvailable;
-        if (wantSexpr) {
-            NQdb::NSexp::PrintRelPlan(std::cout, plan);
-            std::cout << (wantText ? "\n\n" : "\n");
-        }
-        if (wantText) {
-            PrintPlanTreeWithCtes(std::cout, plan);
-        }
+        NQdb::NCompiler::Explain(std::cout, plan, config.ExplainMode);
         return 0;
     }
 
@@ -370,109 +273,55 @@ int ExecutePlan(
     return 0;
 }
 
-int RunSqlStatement(
-    const NQdb::NSql::TSqlNodePtr& statement,
-    const TCliOptions& config,
-    NQdb::TExternalModuleCatalog& catalog,
-    bool explain)
-{
-    if (auto module = NQdb::NSql::TMaybeNode<NQdb::NSql::TSqlExternalModule>(statement)) {
-        if (explain) {
-            std::cerr << "EXPLAIN requires a SELECT statement\n";
-            return 1;
-        }
-        auto applied = catalog.Apply(*module.Cast());
-        if (!applied) {
-            std::cerr << applied.error().ToString() << "\n";
-            return 1;
-        }
-        return 0;
-    }
-    if (auto function = NQdb::NSql::TMaybeNode<NQdb::NSql::TSqlExternalFunction>(statement)) {
-        if (explain) {
-            std::cerr << "EXPLAIN requires a SELECT statement\n";
-            return 1;
-        }
-        auto applied = catalog.Apply(*function.Cast());
-        if (!applied) {
-            std::cerr << applied.error().ToString() << "\n";
-            return 1;
-        }
-        return 0;
-    }
-
-    std::vector<std::unique_ptr<NQdb::TParquetSource>> sources;
-    auto makeSource = [&](const std::string& path) -> NQdb::TOperatorPtr {
-        auto source = std::make_unique<NQdb::TParquetSource>(path);
-        auto op = std::make_shared<NQdb::TSourceOperator>(*source, path);
-        sources.push_back(std::move(source));
-        return op;
-    };
-
-    auto planStart = std::chrono::steady_clock::now();
-    auto factory = [&](std::string_view table)
-        -> std::expected<NQdb::TOperatorPtr, NQumir::TError>
-    {
-        try {
-            return makeSource(ResolveTablePath(config.DataDir, table));
-        } catch (const std::exception& e) {
-            return std::unexpected(NQumir::TError(
-                "cannot open table '" + std::string(table) + "': " + e.what()));
-        }
-    };
-    // Plan construction and the optimizer passes type against the same catalog snapshot.
-    NQdb::NKernel::TAnnotationContext annotation{.ExternalCatalog = catalog.Snapshot()};
-    auto plan = NQdb::BuildPlan(statement, factory, annotation);
-
-    if (!plan) {
-        std::cerr << plan.error().ToString() << "\n";
-        return 1;
-    }
-    return ExecutePlan(std::move(*plan), config, annotation, explain, planStart);
-}
-
 int RunQuery(
     ESyntax syntax,
     std::istream& in,
     const TCliOptions& config,
     NQdb::TExternalModuleCatalog& catalog)
 {
-    std::string text{
-        std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
-    bool explain = StripExplain(text);
-    std::istringstream stream(text);
-    if (syntax == ESyntax::Sql) {
-        auto statements = ParseSqlStatements(stream);
-        if (!statements) {
-            std::cerr << statements.error().ToString() << "\n";
+    std::vector<std::unique_ptr<NQdb::TParquetSource>> sources;
+    auto factory = [&](std::string_view table)
+        -> std::expected<NQdb::TOperatorPtr, NQumir::TError>
+    {
+        const auto path = syntax == ESyntax::Sql
+            ? ResolveTablePath(config.DataDir, table)
+            : std::string(table);
+        try {
+            auto source = std::make_unique<NQdb::TParquetSource>(path);
+            auto op = std::make_shared<NQdb::TSourceOperator>(*source, path);
+            sources.push_back(std::move(source));
+            return op;
+        } catch (const std::exception& e) {
+            return std::unexpected(NQumir::TError(
+                "cannot open table '" + std::string(table) + "': " + e.what()));
+        }
+    };
+    NQdb::NCompiler::TQueryCompiler compiler(catalog, factory, config.Engine.Optimizer);
+    const auto parseStart = std::chrono::steady_clock::now();
+    auto query = compiler.Parse(in, syntax);
+    if (!query) {
+        std::cerr << query.error().ToString() << "\n";
+        return 1;
+    }
+    for (const auto& statement : query->Statements) {
+        if (syntax == ESyntax::Sql) {
+            sources.clear();
+        }
+        auto planStart = syntax == ESyntax::Sql
+            ? std::chrono::steady_clock::now()
+            : parseStart;
+        auto prepared = compiler.Prepare(statement, query->Explain);
+        if (!prepared) {
+            std::cerr << prepared.error().ToString() << "\n";
             return 1;
         }
-        if (explain && statements->size() != 1) {
-            std::cerr << "EXPLAIN requires exactly one SELECT statement\n";
-            return 1;
-        }
-        for (const auto& statement : *statements) {
-            if (int status = RunSqlStatement(statement, config, catalog, explain)) {
+        if (*prepared) {
+            if (int status = ExecutePlan(**prepared, config, query->Explain, planStart)) {
                 return status;
             }
         }
-        return 0;
     }
-
-    std::vector<std::unique_ptr<NQdb::TParquetSource>> sources;
-    auto makeSource = [&](const std::string& path) -> NQdb::TOperatorPtr {
-        auto source = std::make_unique<NQdb::TParquetSource>(path);
-        auto op = std::make_shared<NQdb::TSourceOperator>(*source, path);
-        sources.push_back(std::move(source));
-        return op;
-    };
-    auto planStart = std::chrono::steady_clock::now();
-    auto plan = ParseSexpr(stream, makeSource);
-    if (!plan) {
-        std::cerr << plan.error().ToString() << "\n";
-        return 1;
-    }
-    return ExecutePlan(std::move(*plan), config, {}, explain, planStart);
+    return 0;
 }
 
 std::string HistoryPath() {
