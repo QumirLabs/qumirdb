@@ -3,6 +3,8 @@
 #include <qdb/io/io.h>
 #include <qdb/io/rowset_ops.h>
 
+#include <qumir/error.h>
+
 namespace NQdb {
 namespace NRemote {
 
@@ -54,12 +56,14 @@ struct TFinish {
 // client-side
 struct TExecuteQuery {
     static constexpr NNet::NActors::TMessageId MessageId = 1000;
+    using LocalMessage = void;
     std::string Query;
 };
 
 struct TExecuteQueryResponse {
     static constexpr NNet::NActors::TMessageId MessageId = 1001;
-    std::string Response;
+    using LocalMessage = void;
+    std::expected<std::string, NQumir::TError> Response;
 };
 
 template<typename TMessagesFactory>

@@ -9,11 +9,31 @@
 #include <qdbd/serialization.h>
 #include <qdbd/time_source.h>
 
+#include <qdb/utils/config.h>
+#include <qdb/compiler/query.h>
+#include <qdb/plan/ops/source.h>
+#include <qdb/catalog/external_module.h>
+#include <qdb/scheduler/engine_settings.h>
+
+#include <qumir/error.h>
+
 using namespace NNet;
 using namespace NNet::NActors;
 
 using namespace NQdb;
 using namespace NQdb::NRemote;
+
+namespace {
+
+std::string ResolveTablePath(const std::string& dataDir, std::string_view table) {
+    if (table.ends_with(".parquet")) {
+        return std::string(table);
+    }
+    return dataDir + "/" + std::string(table) + ".parquet";
+}
+
+
+} // namespace
 
 int main(int argc, char** argv) {
     NNet::TInitializer init;
@@ -22,6 +42,9 @@ int main(int argc, char** argv) {
     int port = 31337;
     int httpPort = 8080;
     std::vector<std::tuple<std::string,int,int>> allHosts;
+    std::optional<std::string> configPath;
+    std::string dataDir;
+    std::vector<std::string> overrides;
 
     for (int i = 1; i < argc; ++i) {
         if (!std::strcmp(argv[i], "--http-port") && i + 1 < argc) {
@@ -47,6 +70,20 @@ int main(int argc, char** argv) {
                 std::cerr << "Invalid node format. Use host:port:nodeId\n";
                 return -1;
             }
+        } else if (!std::strcmp(argv[i], "--data")) {
+            if (i + 1 >= argc) {
+                std::cerr << "--config requires a path\n";
+                return 1;
+            }
+            dataDir = argv[++i];
+        } else if (NQdb::NUtils::IsConfigOverride(argv[i])) {
+            overrides.emplace_back(argv[i] + 2);
+        } else if (!std::strcmp(argv[i], "--config")) {
+            if (i + 1 >= argc) {
+                std::cerr << "--data requires a path\n";
+                return 1;
+            }
+            configPath = argv[++i];
         } else if (!std::strcmp(argv[i], "--help")) {
             std::cout
                 << "Usage: " << argv[0]
@@ -59,6 +96,34 @@ int main(int argc, char** argv) {
             return 0;
         }
     }
+
+    std::unordered_map<std::string, std::unique_ptr<TParquetSource>> sources;
+    TExternalModuleCatalog catalog;
+    auto tableFactory = [&](std::string_view table)
+        -> std::expected<NQdb::TOperatorPtr, NQumir::TError>
+    {
+        const auto path = ResolveTablePath(dataDir, table);
+        try {
+            auto& source = sources[path];
+            if (!source) {
+                source = std::make_unique<TParquetSource>(path);
+            }
+            auto op = std::make_shared<TSourceOperator>(*source, path);
+            return op;
+        } catch (const std::exception& e) {
+            return std::unexpected(NQumir::TError(
+                "cannot open table '" + std::string(table) + "': " + e.what()));
+        }
+    };
+
+    NUtils::TConfig engineConfig(EngineConfigSchema());
+    if (auto loaded = LoadEngineConfig(engineConfig, NQdb::NUtils::DefaultConfigPath(), configPath, overrides); !loaded) {
+        std::cerr << loaded.error() << "\n";
+        return 1;
+    }
+    TEngineSettings EngineSettings;
+    ApplyEngineConfig(engineConfig, EngineSettings);
+    NCompiler::TQueryCompiler compiler(catalog, tableFactory, EngineSettings.Optimizer);
 
     TAddress httpAddress{"::", httpPort};
     TAddress actorSysAddress{"::", port};
@@ -117,7 +182,7 @@ int main(int argc, char** argv) {
         std::cerr << "[QumirDB] " << msg << "\n";
     };
 
-    auto gatewayActorId = sys.RegisterWellKnown(TLocalActorId(EWellKnownActors::Gateway), IActor::TPtr(CreateGatewayActor(logger)));
+    auto gatewayActorId = sys.RegisterWellKnown(TLocalActorId(EWellKnownActors::Gateway), IActor::TPtr(CreateGatewayActor(compiler, logger)));
     auto router = NHttp::CreateRouter(&sys, gatewayActorId);
 
     TWebServer<TSocket> server(std::move(httpListenSocket), *router, logger);

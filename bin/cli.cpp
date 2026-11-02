@@ -18,15 +18,12 @@
 
 #include <sys/resource.h>
 
-#include <cctype>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <expected>
-#include <filesystem>
 #include <fstream>
 #include <iostream>
-#include <iterator>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -508,28 +505,6 @@ int RunInteractive(
     return 0;
 }
 
-// $XDG_CONFIG_HOME/qdb/qdb.ini, else ~/.config/qdb/qdb.ini; empty when neither
-// variable is set.
-std::filesystem::path DefaultConfigPath() {
-    if (const char* xdg = std::getenv("XDG_CONFIG_HOME"); xdg && *xdg) {
-        return std::filesystem::path(xdg) / "qdb" / "qdb.ini";
-    }
-    if (const char* home = std::getenv("HOME"); home && *home) {
-        return std::filesystem::path(home) / ".config" / "qdb" / "qdb.ini";
-    }
-    return {};
-}
-
-// An engine setting on the command line: --section:key=value.
-bool IsConfigOverride(std::string_view argument) {
-    if (!argument.starts_with("--")) {
-        return false;
-    }
-    const auto colon = argument.find(':');
-    const auto equals = argument.find('=');
-    return colon != std::string_view::npos && equals != std::string_view::npos && colon < equals;
-}
-
 void PrintHelp() {
     std::cout <<
         "qdb [options] [--section:key=value ...]\n"
@@ -629,7 +604,7 @@ int main(int argc, char** argv) {
                 return 1;
             }
             configPath = argv[++i];
-        } else if (IsConfigOverride(argv[i])) {
+        } else if (NQdb::NUtils::IsConfigOverride(argv[i])) {
             overrides.emplace_back(argv[i] + 2);
         } else if (!std::strcmp(argv[i], "--verbose")) {
             config.Verbose = true;
@@ -648,7 +623,7 @@ int main(int argc, char** argv) {
     }
 
     NQdb::NUtils::TConfig engineConfig(NQdb::EngineConfigSchema());
-    if (auto loaded = NQdb::LoadEngineConfig(engineConfig, DefaultConfigPath(), configPath, overrides); !loaded) {
+    if (auto loaded = NQdb::LoadEngineConfig(engineConfig,  NQdb::NUtils::DefaultConfigPath(), configPath, overrides); !loaded) {
         std::cerr << loaded.error() << "\n";
         return 1;
     }

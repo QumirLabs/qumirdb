@@ -1,4 +1,5 @@
 #include <coroio/actors/actorsystem.hpp>
+#include <expected>
 #include <qdbd/messages.h>
 #include <qdbd/serialization.h>
 
@@ -7,6 +8,8 @@
 #include <sstream>
 
 #include "query.h"
+#include "qdb/compiler/query.h"
+#include "qumir/error.h"
 
 namespace NQdb {
 namespace NRemote {
@@ -18,6 +21,8 @@ namespace {
 struct TQueryState {
     TActorId RespondTo;
     TSchema Schema;
+
+    NCompiler::TQueryCompiler& Compiler;
 };
 
 struct TBaseBehavior {
@@ -27,12 +32,44 @@ struct TBaseBehavior {
         , Logger(logger)
     { }
 
-    void HandleUnknownMessage(TMessageId messageId, TBlob blob, TActorContext::TPtr ctx) { }
+    void HandleUnknownMessage(TMessageId messageId, TBlob blob, TActorContext::TPtr ctx) {
+        std::ostringstream str; str << "Query: unknown message " <<  messageId;
+        Logger(str.str());
+    }
 
-    void Compile(TExecuteQuery& req, TActorId clientId) {
+    void Complete(const std::expected<std::string, NQumir::TError>& res, TActorContext::TPtr& ctx) {
+        ctx->Send<TExecuteQueryResponse>(State->RespondTo, TExecuteQueryResponse {
+            .Response = res
+        });
+        ctx->Send<TPoison>(ctx->Self(), TPoison{});
+    }
+
+    void Execute(TExecuteQuery& req, TActorContext::TPtr& ctx) {
         Logger("Query: compiling");
-        State->RespondTo = clientId;
-        // TODO:
+        State->RespondTo = ctx->Sender();
+        std::istringstream input(req.Query);
+        auto parseResult = State->Compiler.Parse(input);
+        if (!parseResult) {
+            Complete(std::unexpected(parseResult.error()), ctx);
+            return;
+        }
+        if (!parseResult->Explain) {
+            Complete(std::unexpected(NQumir::TError(NQumir::TLocation{}, "Execution unsupported yet")), ctx);
+            return;
+        }
+
+        std::ostringstream explainOutput;
+        for (auto& statement : parseResult.value().Statements) {
+            auto prepareResult = State->Compiler.Prepare(statement, true);
+            if (!prepareResult) {
+                Complete(std::unexpected(prepareResult.error()), ctx);
+                return;
+            }
+
+            NCompiler::Explain(explainOutput, prepareResult->value().Plan, NCompiler::EExplainMode::Text);
+        };
+
+        Complete(explainOutput.str(), ctx);
     }
 
     void StartGraph(const std::vector<TActorId>& actorIds, TActorContext::TPtr& ctx) {
@@ -51,7 +88,7 @@ struct TQueryActor : public IBehaviorActor {
         { }
 
         void Receive(TExecuteQuery&& req, TBlob, TActorContext::TPtr ctx) {
-            Compile(req, ctx->Sender());
+            Execute(req, ctx);
         }
 
         void Receive(TSpawnComputeActorResponse&& req, TBlob, TActorContext::TPtr ctx) {
@@ -83,8 +120,9 @@ struct TQueryActor : public IBehaviorActor {
         TConsoleSink Sink;
     };
 
-    TQueryActor(std::function<void(const std::string&)> logger)
-        : StartQuery(&State, this, logger)
+    TQueryActor(NCompiler::TQueryCompiler& compiler, std::function<void(const std::string&)> logger)
+        : State{.Compiler = compiler}
+        , StartQuery(&State, this, logger)
         , MonitorQuery(&State, this, logger)
     {
         Become(&StartQuery);
@@ -97,9 +135,9 @@ struct TQueryActor : public IBehaviorActor {
 
 } // namespace
 
-NNet::NActors::IActor* CreateQueryActor(std::function<void(const std::string&)> logger)
+NNet::NActors::IActor* CreateQueryActor(NCompiler::TQueryCompiler& compiler, std::function<void(const std::string&)> logger)
 {
-    return new TQueryActor(logger);
+    return new TQueryActor(compiler, logger);
 }
 
 } // namespace NRemote

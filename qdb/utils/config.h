@@ -11,6 +11,7 @@
 #include <string_view>
 #include <variant>
 #include <vector>
+#include <filesystem>
 
 namespace NQdb::NUtils {
 
@@ -130,5 +131,27 @@ private:
     // The keys a file or an override has set, for callers that apply only those.
     std::set<std::string> Set_;
 };
+
+// $XDG_CONFIG_HOME/qdb/qdb.ini, else ~/.config/qdb/qdb.ini; empty when neither
+// variable is set.
+inline std::filesystem::path DefaultConfigPath() {
+    if (const char* xdg = std::getenv("XDG_CONFIG_HOME"); xdg && *xdg) {
+        return std::filesystem::path(xdg) / "qdb" / "qdb.ini";
+    }
+    if (const char* home = std::getenv("HOME"); home && *home) {
+        return std::filesystem::path(home) / ".config" / "qdb" / "qdb.ini";
+    }
+    return {};
+}
+
+// An engine setting on the command line: --section:key=value.
+inline bool IsConfigOverride(std::string_view argument) {
+    if (!argument.starts_with("--")) {
+        return false;
+    }
+    const auto colon = argument.find(':');
+    const auto equals = argument.find('=');
+    return colon != std::string_view::npos && equals != std::string_view::npos && colon < equals;
+}
 
 } // namespace NQdb::NUtils

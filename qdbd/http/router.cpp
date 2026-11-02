@@ -39,7 +39,7 @@ struct TRouter final : public IRouter {
             co_return co_await Post(request, response);
         }
 
-        co_await SendText(response, "Not Found", "text/plain; charset=utf-8");
+        co_await SendText(response, "Not Found", "text/plain; charset=utf-8", 404);
     }
 
     TFuture<void> Post(TRequest& request, TResponse& response) {
@@ -51,17 +51,23 @@ struct TRouter final : public IRouter {
                 .Query = std::move(body)
             });
 
-            co_return co_await SendText(response, res.Response, "text/plain; charset=utf-8");
+            if (res.Response) {
+                co_return co_await SendText(response, res.Response.value(), "text/plain; charset=utf-8");
+            } else {
+                co_return co_await SendText(response, res.Response.error().ToString(), "text/plain; charset=utf-8", 503);
+            }
         }
 
-        co_await SendText(response, "Not Found", "text/plain; charset=utf-8");
+        co_await SendText(response, "Not Found", "text/plain; charset=utf-8", 404);
     }
 
     TFuture<void> SendText(
         TResponse& response,
         const std::string& body,
-        const std::string& contentType)
+        const std::string& contentType,
+        int status = 200)
     {
+        response.SetStatus(200);
         response.SetHeader("Content-Type", contentType);
         response.SetHeader("Content-Length", std::to_string(body.size()));
         co_await response.SendHeaders();

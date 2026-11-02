@@ -15,12 +15,13 @@ namespace {
 
 struct TGatewayActor : public IBehaviorActor {
     struct TDefaultBehavior : public TBehavior<TDefaultBehavior, TExecuteQuery> {
-        TDefaultBehavior(std::function<void(const std::string&)> logger)
-            : Logger(logger)
+        TDefaultBehavior(NCompiler::TQueryCompiler& compiler, std::function<void(const std::string&)> logger)
+            : Compiler(compiler)
+            , Logger(logger)
         { }
 
         void Receive(TExecuteQuery&& req, TBlob, TActorContext::TPtr ctx) {
-            auto* queryActor = CreateQueryActor(Logger);
+            auto* queryActor = CreateQueryActor(Compiler, Logger);
             auto queryActorId = ctx->Register(std::unique_ptr<IActor>(queryActor));
             Logger("Gateway: got request");
             ctx->Forward<TExecuteQuery>(queryActorId, std::move(req));
@@ -31,11 +32,12 @@ struct TGatewayActor : public IBehaviorActor {
             Logger(str.str());
         }
 
+        NCompiler::TQueryCompiler& Compiler;
         std::function<void(const std::string&)> Logger;
     };
 
-    TGatewayActor(std::function<void(const std::string&)> logger)
-        : Behavior(logger)
+    TGatewayActor(NCompiler::TQueryCompiler& compiler, std::function<void(const std::string&)> logger)
+        : Behavior(compiler, logger)
     {
         Become(&Behavior);
     }
@@ -45,9 +47,9 @@ struct TGatewayActor : public IBehaviorActor {
 
 } // namespace
 
-NNet::NActors::IActor* CreateGatewayActor(std::function<void(const std::string&)> logger)
+NNet::NActors::IActor* CreateGatewayActor(NCompiler::TQueryCompiler& compiler, std::function<void(const std::string&)> logger)
 {
-    return new TGatewayActor(logger);
+    return new TGatewayActor(compiler, logger);
 }
 
 } // namespace NRemote
