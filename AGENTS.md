@@ -38,10 +38,12 @@ dependencies, and ownership explicit. Kernel fusion must preserve these logical
 execution boundaries.
 
 Keep task progress in task/operator state. Pass per-thread execution resources
-through an explicit context; do not locate mutable execution state or a VM
-instance through thread-local or implicit global state. Keep prepared code and
-mutable execution state separate, with clear lifetimes. A task may resume on a
-different worker.
+through an explicit context. `thread_local` has one allowed use: the task
+boundary in `ExecuteTask` pins the worker's context while kernels run
+([execution context](docs/arch/scheduler_runtime.md#execution-context-and-allocation-ownership));
+no other code locates mutable state or a VM instance through thread-local or
+implicit global state. Keep prepared code and mutable execution state separate,
+with clear lifetimes. A task may resume on a different worker.
 
 ### 4. Complex analytical queries are central
 
