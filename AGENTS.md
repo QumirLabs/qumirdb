@@ -37,11 +37,12 @@ be distributed across processes and nodes. Make data exchange, readiness,
 dependencies, and ownership explicit. Kernel fusion must preserve these logical
 execution boundaries.
 
-Keep task progress in task/operator state. Pass per-thread execution resources
-through an explicit context; do not locate mutable execution state or a VM
-instance through thread-local or implicit global state. Keep prepared code and
-mutable execution state separate, with clear lifetimes. A task may resume on a
-different worker.
+Pass all other per-thread state through an explicit context. The only `thread_local`
+is the scoped execution-context pin, set by `TTaskExecutionGuard` in `ExecuteTask`
+and by `TKernelHeapScope` for standalone processors ([execution context](docs/arch/scheduler_runtime.md#execution-context-and-allocation-ownership)).
+
+Keep task progress in task/operator state. Keep prepared code and mutable
+execution state separate, with clear lifetimes. A task may resume on a different worker.
 
 ### 4. Complex analytical queries are central
 
