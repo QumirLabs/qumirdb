@@ -56,6 +56,13 @@ struct TQueryCase {
     // The case must fail: planning errors in the .plan golden, running errors in
     // the .error golden. A success is reported as a failure of the case.
     bool ExpectError = false;
+    // The kernel backend the case runs with: "llvm" or "vm".
+    std::string Backend = "llvm";
+
+    // The variant, with the backend unless it is the default one.
+    std::string Label() const {
+        return Backend == "llvm" ? Variant : Variant + "_" + Backend;
+    }
 
     bool HasTables() const { return !Tables.empty(); }
 };
