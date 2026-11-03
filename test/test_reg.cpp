@@ -66,26 +66,26 @@ private:
     void TestBody() override {
         const auto result = NRegTest::CheckCase(Case, updateGoldens, Options);
         if (printOutput) {
-            std::cout << "=== " << Case.Sql << " (.plan, " << Case.Variant << ") ===\n"
+            std::cout << "=== " << Case.Sql << " (.plan, " << Case.Label() << ") ===\n"
                 << result.Plan.Actual;
             if (result.Result) {
-                std::cout << "=== " << Case.Sql << " (.result.json, " << Case.Variant << ") ===\n"
+                std::cout << "=== " << Case.Sql << " (.result.json, " << Case.Label() << ") ===\n"
                     << result.Result->Actual;
             }
             if (result.Error) {
-                std::cout << "=== " << Case.Sql << " (.error, " << Case.Variant << ") ===\n"
+                std::cout << "=== " << Case.Sql << " (.error, " << Case.Label() << ") ===\n"
                     << result.Error->Actual;
             }
         }
         EXPECT_TRUE(result.Plan.Matches) << "SQL: " << Case.Sql << "\nGolden: " << Case.PlanGolden
-            << "\nVariant: " << Case.Variant << '\n' << ComparisonDiff(result.Plan);
+            << "\nVariant: " << Case.Label() << '\n' << ComparisonDiff(result.Plan);
         if (result.Error) {
             EXPECT_TRUE(result.Error->Matches) << "SQL: " << Case.Sql << "\nGolden: " << Case.ErrorGolden
-                << "\nVariant: " << Case.Variant << '\n' << ComparisonDiff(*result.Error);
+                << "\nVariant: " << Case.Label() << '\n' << ComparisonDiff(*result.Error);
         }
         if (result.Result) {
             EXPECT_TRUE(result.Result->Matches) << "SQL: " << Case.Sql << "\nGolden: " << Case.Golden
-                << "\nVariant: " << Case.Variant << "\nTolerance: abs=" << Case.Tol.Absolute
+                << "\nVariant: " << Case.Label() << "\nTolerance: abs=" << Case.Tol.Absolute
                 << " rel=" << Case.Tol.Relative << '\n' << ComparisonDiff(*result.Result);
         }
     }
@@ -132,7 +132,7 @@ int main(int argc, char** argv) {
             if ((!test.Suite || fs::is_regular_file(astGolden)) && astQueries.insert(test.Sql).second) {
                 AstCases.push_back(test);
             }
-            const auto name = NRegTest::TestName(test.Base) + "_" + test.Variant;
+            const auto name = NRegTest::TestName(test.Base) + "_" + test.Label();
             if (!names.insert(name).second) throw std::runtime_error("duplicate query test name: " + name);
             const auto* info = ::testing::RegisterTest("RegQuery", name.c_str(),
                 nullptr, nullptr, __FILE__, __LINE__, [test]() { return new RegQuery(test); });

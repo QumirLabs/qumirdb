@@ -555,6 +555,41 @@ bool BoolOption(const TObject& object, llvm::StringRef name, bool fallback) {
     return *enabled;
 }
 
+// "execute": false, true (the llvm backend) or a nonempty list of kernel backends.
+struct TExecute {
+    bool Run = true;
+    std::vector<std::string> Backends{"llvm"};
+};
+
+TExecute ExecuteOption(const TObject& object, const TExecute& fallback, const std::string& where) {
+    const auto* value = object.get("execute");
+    if (!value) {
+        return fallback;
+    }
+    if (const auto enabled = value->getAsBoolean()) {
+        return {*enabled, {"llvm"}};
+    }
+    if (!value->getAsArray()) {
+        throw std::runtime_error(where + ": execute must be a boolean or a list of backends");
+    }
+    TExecute result;
+    result.Backends.clear();
+    for (const auto& item : Array(*value)) {
+        const auto name = String(item);
+        if (!ParseKernelBackend(name)) {
+            throw std::runtime_error(where + ": unknown kernel backend '" + name + "' in execute");
+        }
+        if (std::find(result.Backends.begin(), result.Backends.end(), name) != result.Backends.end()) {
+            throw std::runtime_error(where + ": duplicate kernel backend '" + name + "' in execute");
+        }
+        result.Backends.push_back(name);
+    }
+    if (result.Backends.empty()) {
+        throw std::runtime_error(where + ": execute needs at least one kernel backend");
+    }
+    return result;
+}
+
 void ValidateTolerance(TFloatTolerance tol) {
     if (!std::isfinite(tol.Absolute) || tol.Absolute < 0
         || !std::isfinite(tol.Relative) || tol.Relative < 0)
@@ -837,7 +872,7 @@ std::vector<TQueryCase> CollectCases(const fs::path& root, const fs::path& golde
             Fields(object, {"version", "fixtures", "tables", "variants", "cases", "execute", "tol", "expect_error"});
             const bool suiteExpectError = BoolOption(object, "expect_error", false);
             Version(object);
-            const bool suiteExecute = BoolOption(object, "execute", true);
+            const auto suiteExecute = ExecuteOption(object, {}, "suite");
             const auto suiteTol = ToleranceOption(object, {});
             auto suite = std::make_shared<TSuite>();
             suite->Manifest = manifest;
@@ -881,7 +916,7 @@ std::vector<TQueryCase> CollectCases(const fs::path& root, const fs::path& golde
             for (const auto& [name, value] : Object(Required(object, "cases"))) {
                 const auto& definition = Object(value);
                 Fields(definition, {"tables", "order", "execute", "tol", "variants", "expect_error"});
-                const bool execute = BoolOption(definition, "execute", suiteExecute);
+                const auto execute = ExecuteOption(definition, suiteExecute, "case '" + name.str() + "'");
                 const auto tol = ToleranceOption(definition, suiteTol);
                 const bool expectError = BoolOption(definition, "expect_error", suiteExpectError);
                 const auto* caseVariants = definition.get("variants");
@@ -903,11 +938,16 @@ std::vector<TQueryCase> CollectCases(const fs::path& root, const fs::path& golde
                 const auto golden = fs::path(goldenRoot / relativeSql).replace_extension(".result.json");
                 const auto planGolden = fs::path(goldenRoot / relativeSql).replace_extension(".plan");
                 const auto errorGolden = fs::path(goldenRoot / relativeSql).replace_extension(".error");
-                const auto runs = bindings.empty() || !execute
-                    ? std::set<std::string>{"plan"} : executed;
-                for (const auto& variant : runs) {
+                if (bindings.empty() || !execute.Run) {
                     result.push_back({base, sql, planGolden, golden, errorGolden,
-                        suite, bindings, variant, order == "ordered", execute, tol, expectError});
+                        suite, bindings, "plan", order == "ordered", execute.Run, tol, expectError});
+                    continue;
+                }
+                for (const auto& variant : executed) {
+                    for (const auto& backend : execute.Backends) {
+                        result.push_back({base, sql, planGolden, golden, errorGolden,
+                            suite, bindings, variant, order == "ordered", true, tol, expectError, backend});
+                    }
                 }
             }
             for (const auto& entry : fs::directory_iterator(dir)) {
@@ -920,7 +960,7 @@ std::vector<TQueryCase> CollectCases(const fs::path& root, const fs::path& golde
         }
     }
     std::sort(result.begin(), result.end(), [](const auto& a, const auto& b) {
-        return std::tie(a.Base, a.Variant) < std::tie(b.Base, b.Variant);
+        return std::tie(a.Base, a.Variant, a.Backend) < std::tie(b.Base, b.Variant, b.Backend);
     });
     return result;
 }
@@ -1289,7 +1329,7 @@ TCaseResult CheckCase(const TQueryCase& test, bool canonize, const TRegTestOptio
         const auto plan = BuildPlanText(input);
         // Cases without a manifest cannot declare `expect_error` and record either outcome.
         if (test.Suite) {
-            const std::string where = " (" + test.Sql.string() + ", " + test.Variant + ")";
+            const std::string where = " (" + test.Sql.string() + ", " + test.Label() + ")";
             if (!plan && !test.ExpectError) {
                 throw std::runtime_error("unexpected planning error" + where
                     + "; declare \"expect_error\" if it is intended:\n" + plan.error());
@@ -1319,6 +1359,7 @@ TCaseResult CheckCase(const TQueryCase& test, bool canonize, const TRegTestOptio
     variant.Scheduler.WorkerCount = test.Variant == "single" ? 1 : 4;
     variant.ScanSplit.Strategy = NScheduler::EScanSplitStrategy::RowGroupRange;
     variant.ScanSplit.MaxScanTasks = test.Variant == "single" ? 1 : 4;
+    variant.Kernel.Backend = *ParseKernelBackend(test.Backend);
     ApplyEngineConfig(options.Engine, engine);
     std::vector<std::unique_ptr<TParquetSource>> sources;
     std::optional<TParsedQuery> parsed;
@@ -1352,7 +1393,7 @@ TCaseResult CheckCase(const TQueryCase& test, bool canonize, const TRegTestOptio
         ApplyPlanPasses(plan, std::move(passOptions));
         optimizeMs = mark();
     });
-    const std::string where = " (" + test.Sql.string() + ", " + test.Variant + ")";
+    const std::string where = " (" + test.Sql.string() + ", " + test.Label() + ")";
     if (planError && !test.ExpectError) {
         // Canonizing must not turn a case into an error golden.
         throw std::runtime_error("unexpected planning error" + where
@@ -1375,7 +1416,7 @@ TCaseResult CheckCase(const TQueryCase& test, bool canonize, const TRegTestOptio
     auto printTiming = [&](const TPlanRunTimings& runTimings, double resultGoldenMs) {
         if (!timing) return;
         const auto totalMs = std::chrono::duration<double, std::milli>(point - started).count();
-        std::cerr << "[regtest-timing] query=" << test.Base.string() << " variant=" << test.Variant
+        std::cerr << "[regtest-timing] query=" << test.Base.string() << " variant=" << test.Label()
             << " read_parse_ms=" << parseMs << " build_plan_ms=" << buildMs
             << " optimize_ms=" << optimizeMs << " plan_golden_ms=" << planGoldenMs
             << " lower_ms=" << runTimings.LowerMs << " jit_ms=" << runTimings.JitMs

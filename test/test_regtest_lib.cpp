@@ -667,6 +667,48 @@ TEST(RegSuiteInfrastructure, CaseExecutionOverridesSuiteDefault) {
     EXPECT_EQ(overridden[0].Variant, "plan");
 }
 
+TEST(RegSuiteInfrastructure, ExecuteListsKernelBackends) {
+    TCaseDirectory dir;
+    dir.Write("suite.json", R"({
+        "version":1,"execute":["llvm","vm"],
+        "fixtures":{"data":{"json":"table.json"}},
+        "tables":{"t":"data"},"variants":["single"],
+        "cases":{"query.sql":{}}
+    })");
+    auto tests = dir.Collect();
+    ASSERT_EQ(tests.size(), 2);
+    EXPECT_EQ(tests[0].Backend, "llvm");
+    EXPECT_EQ(tests[0].Label(), "single");
+    EXPECT_EQ(tests[1].Backend, "vm");
+    EXPECT_EQ(tests[1].Label(), "single_vm");
+    dir.Write("suite.json", R"({
+        "version":1,"execute":["vm"],
+        "fixtures":{"data":{"json":"table.json"}},
+        "tables":{"t":"data"},"variants":["single"],
+        "cases":{"query.sql":{"execute":true}}
+    })");
+    tests = dir.Collect();
+    ASSERT_EQ(tests.size(), 1);
+    EXPECT_EQ(tests[0].Backend, "llvm");
+    for (const std::string value : {"[]", "[\"jit\"]", "[\"vm\",\"vm\"]", "[true]"}) {
+        auto manifest = std::string(TCaseDirectory::Manifest);
+        manifest.insert(1, "\"execute\":" + value + ',');
+        dir.Write("suite.json", manifest);
+        EXPECT_THROW(dir.Collect(), std::runtime_error) << value;
+    }
+    for (const std::string value : {"\"vm\"", "[\"vm\",\"vm\"]", "[\"jit\"]"}) {
+        auto manifest = std::string(TCaseDirectory::Manifest);
+        manifest.insert(1, "\"execute\":" + value + ',');
+        dir.Write("suite.json", manifest);
+        try {
+            dir.Collect();
+            ADD_FAILURE() << value;
+        } catch (const std::runtime_error& error) {
+            EXPECT_NE(std::string(error.what()).find("suite.json: suite: "), std::string::npos) << error.what();
+        }
+    }
+}
+
 TEST(RegSuiteInfrastructure, RejectsInvalidExecutionOptions) {
     TCaseDirectory dir;
     for (const std::string value : {"0", "\"false\"", "null"}) {

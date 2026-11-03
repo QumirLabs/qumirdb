@@ -42,6 +42,16 @@ List `js` only where the case passes in the browser; the browser runner fails a
 `js` case whose plan the exporter cannot run in the browser, and reports every
 executed case without `js` as skipped together with the list that excludes it.
 
+## Kernel backends
+
+`"execute"` is `true` (the `llvm` kernel backend), `false` (plan only) or a list
+of kernel backends, for example `["llvm", "vm"]`; set per suite or per case, the
+case wins. Each listed backend runs every variant against the same goldens, and
+the test name of a non-default backend gets a suffix (`_single_vm`). The browser
+runner has no backends and runs a listed case once, as with `true`.
+`--kernel:backend=...` on the command line overrides the manifest: every case
+then runs on the forced backend, whatever it lists.
+
 ## Expected errors
 
 An invalid query is a regular result. A case that must fail sets
