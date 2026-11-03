@@ -226,6 +226,19 @@ function booleanOption(where, object, name, fallback) {
   return value;
 }
 
+// "execute" as the native runner reads it: a boolean or a nonempty list of
+// distinct backends. The browser has no backends, so a list means "run once".
+function executeOption(where, value) {
+  if (typeof value === 'boolean') return value;
+  if (!Array.isArray(value)) throw new Error(`${where}: execute must be a boolean or a list of backends`);
+  if (value.length === 0) throw new Error(`${where}: execute needs at least one kernel backend`);
+  value.forEach((name, i) => {
+    if (!['llvm', 'vm'].includes(name)) throw new Error(`${where}: unknown kernel backend '${name}' in execute`);
+    if (value.indexOf(name) !== i) throw new Error(`${where}: duplicate kernel backend '${name}' in execute`);
+  });
+  return true;
+}
+
 // Cases whose suite (or case) variants list "js" and that execute against
 // tables. Executed cases without js are returned as skipped so that the runner
 // reports them; plan-only cases have no result golden to check.
@@ -246,7 +259,8 @@ export function collectCases(root) {
       const relative = path.relative(casesDir, sql);
       const base = relative.replace(/\.sql$/, '');
       const tables = { ...json.tables, ...(options.tables ?? {}) };
-      const execute = options.execute ?? json.execute ?? true;
+      const execute = executeOption(`${manifestPath}: case '${sqlFile}'`,
+        options.execute !== undefined ? options.execute : json.execute !== undefined ? json.execute : true);
       if (!execute || Object.keys(tables).length === 0) {
         continue;
       }

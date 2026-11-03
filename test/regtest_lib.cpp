@@ -561,23 +561,33 @@ struct TExecute {
     std::vector<std::string> Backends{"llvm"};
 };
 
-TExecute ExecuteOption(const TObject& object, const TExecute& fallback) {
+TExecute ExecuteOption(const TObject& object, const TExecute& fallback, const std::string& where) {
     const auto* value = object.get("execute");
-    if (!value) return fallback;
-    if (value->getAsArray()) {
-        TExecute result;
-        result.Backends.clear();
-        for (const auto& item : Array(*value)) {
-            const auto name = String(item);
-            if (!ParseKernelBackend(name) || std::find(result.Backends.begin(), result.Backends.end(), name) != result.Backends.end()) {
-                throw std::runtime_error("unknown or duplicate kernel backend '" + name + "' in execute");
-            }
-            result.Backends.push_back(name);
-        }
-        if (result.Backends.empty()) throw std::runtime_error("execute needs at least one kernel backend");
-        return result;
+    if (!value) {
+        return fallback;
     }
-    return {BoolOption(object, "execute", fallback.Run), {"llvm"}};
+    if (const auto enabled = value->getAsBoolean()) {
+        return {*enabled, {"llvm"}};
+    }
+    if (!value->getAsArray()) {
+        throw std::runtime_error(where + ": execute must be a boolean or a list of backends");
+    }
+    TExecute result;
+    result.Backends.clear();
+    for (const auto& item : Array(*value)) {
+        const auto name = String(item);
+        if (!ParseKernelBackend(name)) {
+            throw std::runtime_error(where + ": unknown kernel backend '" + name + "' in execute");
+        }
+        if (std::find(result.Backends.begin(), result.Backends.end(), name) != result.Backends.end()) {
+            throw std::runtime_error(where + ": duplicate kernel backend '" + name + "' in execute");
+        }
+        result.Backends.push_back(name);
+    }
+    if (result.Backends.empty()) {
+        throw std::runtime_error(where + ": execute needs at least one kernel backend");
+    }
+    return result;
 }
 
 void ValidateTolerance(TFloatTolerance tol) {
@@ -862,7 +872,7 @@ std::vector<TQueryCase> CollectCases(const fs::path& root, const fs::path& golde
             Fields(object, {"version", "fixtures", "tables", "variants", "cases", "execute", "tol", "expect_error"});
             const bool suiteExpectError = BoolOption(object, "expect_error", false);
             Version(object);
-            const auto suiteExecute = ExecuteOption(object, {});
+            const auto suiteExecute = ExecuteOption(object, {}, "suite");
             const auto suiteTol = ToleranceOption(object, {});
             auto suite = std::make_shared<TSuite>();
             suite->Manifest = manifest;
@@ -906,7 +916,7 @@ std::vector<TQueryCase> CollectCases(const fs::path& root, const fs::path& golde
             for (const auto& [name, value] : Object(Required(object, "cases"))) {
                 const auto& definition = Object(value);
                 Fields(definition, {"tables", "order", "execute", "tol", "variants", "expect_error"});
-                const auto execute = ExecuteOption(definition, suiteExecute);
+                const auto execute = ExecuteOption(definition, suiteExecute, "case '" + name.str() + "'");
                 const auto tol = ToleranceOption(definition, suiteTol);
                 const bool expectError = BoolOption(definition, "expect_error", suiteExpectError);
                 const auto* caseVariants = definition.get("variants");

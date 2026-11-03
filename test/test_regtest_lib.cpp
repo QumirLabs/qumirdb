@@ -696,6 +696,17 @@ TEST(RegSuiteInfrastructure, ExecuteListsKernelBackends) {
         dir.Write("suite.json", manifest);
         EXPECT_THROW(dir.Collect(), std::runtime_error) << value;
     }
+    for (const std::string value : {"\"vm\"", "[\"vm\",\"vm\"]", "[\"jit\"]"}) {
+        auto manifest = std::string(TCaseDirectory::Manifest);
+        manifest.insert(1, "\"execute\":" + value + ',');
+        dir.Write("suite.json", manifest);
+        try {
+            dir.Collect();
+            ADD_FAILURE() << value;
+        } catch (const std::runtime_error& error) {
+            EXPECT_NE(std::string(error.what()).find("suite.json: suite: "), std::string::npos) << error.what();
+        }
+    }
 }
 
 TEST(RegSuiteInfrastructure, RejectsInvalidExecutionOptions) {

@@ -73,6 +73,16 @@ function tests() {
       },
     },
     {
+      name: 'execute is a boolean or a list of backends, run once in the browser',
+      run: async () => {
+        assert.equal(collect({ execute: ['llvm', 'vm'] }).cases.length, 1);
+        for (const value of [[], ['jit'], ['vm', 'vm'], [true], 'vm', null]) {
+          assert.throws(() => collect({ cases: { 'q.sql': { execute: value } } }),
+            /case 'q\.sql': (execute|unknown|duplicate)/, JSON.stringify(value));
+        }
+      },
+    },
+    {
       name: 'a planning error is compared with the plan golden',
       run: async () => {
         const test = errorCase({ plan: 'Error: bad column @ Line: 1, Byte: 8, Column: 8\n' });
