@@ -7,6 +7,7 @@
 #include <qdb/utils/module_path.h>
 
 #include <qumir/ir/eval.h>
+#include <qumir/ir/passes/transforms/pipeline.h>
 
 #include <algorithm>
 #include <sstream>
@@ -111,6 +112,8 @@ std::shared_ptr<TVmProgram> PrepareVmProgram(
     if (!lowered) {
         throw std::runtime_error("VM kernel frontend failed: " + lowered.error());
     }
+    // Same Qumir IR passes as the LLVM and IR runners: promote locals to SSA, fold constants.
+    NQumir::NIR::NPasses::Pipeline(program->Module);
     std::vector<NQumir::NIR::TFunction*> roots;
     for (const auto& name : entryNames) {
         auto* function = program->Module.GetFunctionByName(name);
