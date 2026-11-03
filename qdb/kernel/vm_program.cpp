@@ -112,7 +112,7 @@ std::shared_ptr<TVmProgram> PrepareVmProgram(
     if (!lowered) {
         throw std::runtime_error("VM kernel frontend failed: " + lowered.error());
     }
-    // LLVM promotes locals itself; the VM interprets the IR as lowered.
+    // Same Qumir IR passes as the LLVM and IR runners: promote locals to SSA, fold constants.
     NQumir::NIR::NPasses::Pipeline(program->Module);
     std::vector<NQumir::NIR::TFunction*> roots;
     for (const auto& name : entryNames) {
