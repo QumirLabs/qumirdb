@@ -53,7 +53,7 @@ if that cost needs to be added back.
 
 | Benchmark | Scale | qdb (s) | DuckDB (s) | DataFusion (s) | ClickHouse (s) | qdb ÷ DuckDB | qdb ÷ DataFusion | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| ClickBench | — | 12.462 | 14.44 | — | 14.95 | 0.86× | — | qdb: one SQL run |
+| ClickBench | — | 11.577 | 14.44 | — | 14.95 | 0.80× | — | qdb: one SQL run |
 | TPC-H | 1 | 0.777 | 1.17 | 0.96 | — | 0.66× | 0.81× | qdb: one SQL run |
 | TPC-H | 10 | 3.864 | 4.03 | 4.18 | — | 0.96× | 0.92× | qdb: one SQL run |
 | TPC-H | 100 | 32.843 | 32.10 | 62.68 | — | 1.02× | 0.52× | qdb: one SQL run |
