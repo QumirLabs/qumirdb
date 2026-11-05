@@ -161,8 +161,10 @@ bool RowJoinTableServes(
     EJoinBuildSide buildSide);
 std::string_view JoinBuildSideName(EJoinBuildSide side);
 
+// `predicate` is the filter's predicate, its conjuncts possibly in another order.
 TUnaryRuntimeProcess BuildFilterRuntimeProcess(
     TFilterOperator& filter,
+    const NQumir::NAst::TExprPtr& predicate,
     const NQumir::NAst::TTypePtr& inputType,
     TKernelCompilerOptions options);
 

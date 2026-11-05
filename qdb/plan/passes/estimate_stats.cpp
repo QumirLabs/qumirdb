@@ -971,10 +971,8 @@ TStatsPtr ComputeFilterStats(const std::shared_ptr<TFilterOperator>& filter, TCo
     if (!inputStats) {
         return nullptr;
     }
-    double selectivity = EstimateSelectivity(filter->Predicate(), inputStats,
-        TMaybeType<TStructType>(filter->Input()->OutputColumns()).Cast(),
-        TMaybeOp<TSourceOperator>(filter->Input()), folder);
-    selectivity = std::clamp(selectivity, 0.0, 1.0);
+    const double selectivity = EstimatePredicateSelectivity(
+        filter->Predicate(), filter->Input(), folder);
     auto outputStats = std::make_shared<TStats>();
     outputStats->ColumnStats = inputStats->ColumnStats;
     outputStats->RowCount = std::max<uint64_t>(1, inputStats->RowCount * selectivity);
@@ -1849,6 +1847,20 @@ uint64_t EstimateInnerJoinRows(
     TConstFolder& folder)
 {
     return JoinRows(left, right, keys, EJoinType::Inner, residual, {}, folder);
+}
+
+double EstimatePredicateSelectivity(
+    const TExprPtr& predicate,
+    const TOperatorPtr& input,
+    TConstFolder& folder)
+{
+    if (!input->Stats_) {
+        return 0.5;
+    }
+    const double selectivity = EstimateSelectivity(predicate, input->Stats_,
+        TMaybeType<TStructType>(input->OutputColumns()).Cast(),
+        TMaybeOp<TSourceOperator>(input), folder);
+    return std::clamp(selectivity, 0.0, 1.0);
 }
 
 TStatsPtr EstimateStats(TOperatorPtr op, TConstFolder& folder) {

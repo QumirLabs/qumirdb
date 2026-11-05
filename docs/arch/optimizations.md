@@ -734,6 +734,29 @@ SELECT regexp_replace(url, '^https?://([^/]+)/.*$', '\\1') AS host, count(*)
 FROM hits GROUP BY host;   -- the key has no NDV: partial[N] -> repartition -> final[P]
 ```
 
+### 4.11 Conjunct order in a filter over a scan
+
+A filter kernel evaluates `&&` lazily, so a conjunct runs only on the rows the
+ones before it keep. Lowering orders the conjuncts of a filter over a Parquet
+scan by the cost of the columns each one adds, measured as uncompressed bytes
+per row in the file metadata; a conjunct over columns that are already read
+costs nothing and follows them, however costly it is to evaluate. Costs within
+a factor of two are ordered by the estimated selectivity. The logical plan and
+EXPLAIN keep the SQL order.
+
+```sql
+SELECT ... FROM hits WHERE URL LIKE '%google%' AND SearchPhrase <> '';
+-- SearchPhrase (8 B/row) first: LIKE runs on the 13% of rows it keeps
+```
+
+Hellerstein and Stonebraker rank expensive predicates by `(1 - s) / c` in
+[Predicate Migration (SIGMOD 1993)](https://doi.org/10.1145/170035.170078).
+That rank is only as good as the selectivity `s`, and the default estimates are
+coarse (0.05 for `LIKE`, `1 - 1/NDV` for `<> ''`), so the decoding cost leads
+here. A conjunct that calls an external function may fail on a row an earlier
+conjunct rejects, so it is evaluated after all the others; built-in operators
+cannot fail, as a zero divisor yields NULL and a cast saturates.
+
 ## 5. Helpers that are not optimizations
 
 - `TConstFolder` is a helper, not a pipeline pass. UNION ALL pushdown uses it

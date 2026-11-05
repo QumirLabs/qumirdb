@@ -493,6 +493,7 @@ std::string_view JoinBuildSideName(EJoinBuildSide side) {
 
 TUnaryRuntimeProcess BuildFilterRuntimeProcess(
     TFilterOperator& filter,
+    const NQumir::NAst::TExprPtr& predicate,
     const NQumir::NAst::TTypePtr& inputType,
     TKernelCompilerOptions options)
 {
@@ -505,7 +506,7 @@ TUnaryRuntimeProcess BuildFilterRuntimeProcess(
     }
 
     auto spec = NKernel::BuildFilterKernelSpec(
-        *inputStruct, filter.Predicate(), "<kernel>", options.ExternalCatalog.get(),
+        *inputStruct, predicate, "<kernel>", options.ExternalCatalog.get(),
         options.RuntimeContext.get());
     TKernelCompiler compiler(std::move(options));
     auto dispatch = compiler.CompileFilter(spec);

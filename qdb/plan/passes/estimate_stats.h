@@ -43,6 +43,13 @@ uint64_t EstimateInnerJoinRows(
     const NQumir::NAst::TExprPtr& residual,
     TConstFolder& folder);
 
+// Fraction of the rows of `input` that `predicate` keeps, from the statistics
+// estimated for `input`.
+double EstimatePredicateSelectivity(
+    const NQumir::NAst::TExprPtr& predicate,
+    const TOperatorPtr& input,
+    TConstFolder& folder);
+
 // Width estimate used by the CBO cost model. Strings are costed as the
 // materialized StringView (ptr + size), not as their payload bytes.
 double EstimateTypeWidth(const NQumir::NAst::TTypePtr& type);
