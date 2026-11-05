@@ -139,7 +139,9 @@ struct TRuntimeFilterStats {
     uint64_t RejectedRows = 0;
     uint64_t SkippedProbeRows = 0;
     uint64_t PausedProbeRows = 0;
+    // The published filter; producers built fragments of BloomFragmentBytes.
     size_t BloomBytes = 0;
+    size_t BloomFragmentBytes = 0;
     size_t BloomSetBits = 0;
     size_t ExactKeys = 0;
     double ReadyLatencyMs = 0.0;
@@ -147,10 +149,23 @@ struct TRuntimeFilterStats {
     bool BloomDisabled = false;
 };
 
+// bloomBytes sizes each producer's Bloom fragment. Publication folds the
+// merged filter to the smallest power of two that keeps at least
+// PublishedBloomBitsPerKey bits per distinct key.
 class TRuntimeFilter final : public IRuntimeFilterProducer, public IRuntimeFilterProbe {
 public:
     static constexpr size_t DefaultMaxKeys = 1u << 14;
     static constexpr size_t DefaultBloomBytes = 2u << 20;
+    // At most about 1% false positives. Of the densities measured on TPC-H
+    // SF10, from 6 to 16 bits per key, this one cost the least CPU: denser
+    // filters pass more rows than their smaller size saves, and sparser ones
+    // miss the cache more without rejecting many more rows.
+    static constexpr double PublishedBloomBitsPerKey = 10;
+
+    // The share of set bits at PublishedBloomBitsPerKey. Each key sets one bit
+    // in each of its block's eight words, so b bits per key leave
+    // 1 - exp(-8 / b) of the bits set.
+    static double PublishedBloomFill();
 
     explicit TRuntimeFilter(std::shared_ptr<TRuntimeContext> runtimeContext,
         size_t maxKeys = DefaultMaxKeys,

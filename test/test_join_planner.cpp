@@ -19,8 +19,10 @@
 #include <qdb/sexp/parser.h>
 
 #include <algorithm>
+#include <bit>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <tuple>
@@ -53,9 +55,9 @@ public:
         uint32_t id, size_t producerCount, size_t bloomBytes,
         std::shared_ptr<TRuntimeContext> runtimeContext) override {
         (void)id;
-        (void)bloomBytes;
         ++Created;
         ProducerCount = producerCount;
+        RequestedBloomBytes = bloomBytes;
         Filter = std::make_shared<TRuntimeFilter>(
             std::move(runtimeContext), MaxKeys_, BloomBytes_);
         Filter->SetProducerCount(producerCount);
@@ -64,6 +66,7 @@ public:
 
     size_t Created = 0;
     size_t ProducerCount = 0;
+    size_t RequestedBloomBytes = 0;
     std::shared_ptr<TRuntimeFilter> Filter;
 
 private:
@@ -736,6 +739,46 @@ TEST(JoinPlanner, RuntimeFilterCrossesOnlyDirectProjectKeyLineage) {
         ASSERT_TRUE(bindings->Filter);
         EXPECT_EQ(bindings->Filter->StatsSnapshot().ProbeRows, 3u);
         EXPECT_EQ(bindings->Filter->StatsSnapshot().RejectedRows, 2u);
+    }
+}
+
+// Producers size their Bloom fragments from the build estimate, since
+// publication folds the merged filter down to the keys it holds. A fragment
+// exists only once a producer has more than MaxKeys keys.
+TEST(JoinPlanner, RuntimeFilterFragmentFollowsTheBuildEstimate) {
+    std::vector<int64_t> lk = {1, 2}, lv = {10, 20};
+    std::vector<int64_t> rk = {1}, rv = {100};
+    const double bitsPerKey = TRuntimeFilter::PublishedBloomBitsPerKey;
+    for (std::optional<uint64_t> rows : {std::optional<uint64_t>{},
+             std::optional<uint64_t>{1000}, std::optional<uint64_t>{1'000'000}}) {
+        std::vector<TColumn> lcols, rcols;
+        TMockSource left({"lk", "lv"}, {KeyValBatch(lk.data(), lv.data(), 2, lcols)});
+        TMockSource right({"rk", "rv"}, {KeyValBatch(rk.data(), rv.data(), 1, rcols)});
+        auto bindings = std::make_shared<TCountingFilterBindingFactory>();
+        auto plan = PlanJoinWithSources(
+            "(rel join (rel source \"L\") (rel source \"R\") "
+            "((lk rk)) (inner) (emit-filter 7 right))",
+            [&](std::string_view path) -> ISource* {
+                return path == "L" ? &left : &right;
+            }, {}, bindings, [&](const TOperatorPtr& root) {
+                auto join = TMaybeOp<TJoinOperator>(root);
+                ASSERT_TRUE(join);
+                if (rows) {
+                    join.Cast()->Right()->Stats_ = std::make_shared<TStats>(
+                        TStats{.RowCount = *rows});
+                }
+            });
+        ASSERT_EQ(bindings->Created, 1u);
+        const size_t bytes = bindings->RequestedBloomBytes;
+        if (!rows) {
+            EXPECT_EQ(bytes, TRuntimeFilter::DefaultBloomBytes);
+            continue;
+        }
+        const double keys = std::max<double>(
+            static_cast<double>(*rows), TRuntimeFilter::DefaultMaxKeys + 1);
+        EXPECT_TRUE(std::has_single_bit(bytes)) << *rows;
+        EXPECT_GE(static_cast<double>(bytes) * 8, keys * bitsPerKey) << *rows;
+        EXPECT_LT(static_cast<double>(bytes) * 8, keys * bitsPerKey * 2) << *rows;
     }
 }
 
