@@ -9,6 +9,11 @@ target_include_directories(qdb PRIVATE ${LLVM_INCLUDE_DIRS})
 target_compile_definitions(qdb PRIVATE ${LLVM_DEFINITIONS}
     QDB_VERSION_STRING="${QDB_VERSION_STRING}")
 
+if(QDB_BUILD_DAEMON)
+    add_executable(qdbd daemon.cpp)
+    target_link_libraries(qdbd PUBLIC qumirdb_remote)
+endif()
+
 install(TARGETS qdb
     RUNTIME DESTINATION ${QDB_PRIVATE_BINDIR}
     COMPONENT engine)
