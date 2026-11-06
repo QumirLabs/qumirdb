@@ -47,22 +47,13 @@ class TestQdbdCli(unittest.TestCase):
                 p.kill()
                 p.wait()
 
-    def test_explicit_port_wins_over_node_port(self):
-        node_port, port, http_port = free_port(), free_port(), free_port()
-        p = subprocess.Popen([QDBD, "--node", f"127.0.0.1:{node_port}:1", "--port", str(port),
-                              "--http-port", str(http_port)], stderr=subprocess.DEVNULL)
-        try:
-            self.assertTrue(listens(port))
-        finally:
-            p.kill()
-            p.wait()
-
     def test_bad_command_lines_fail_with_a_message(self):
         for args, text in (
             (["--bogus"], "Unknown argument: --bogus"),
             (["stray"], "Unknown argument: stray"),
             (["--http-port", "x"], "Invalid value 'x' for --http-port"),
-            (["--port", "70000"], "Invalid value '70000' for --port"),
+            (["--port", "31337"], "Unknown argument: --port"),
+            (["--http-port", "70000"], "Invalid value '70000' for --http-port"),
             (["--node", "127.0.0.1:1"], "Invalid node format"),
             (["--data"], "--data requires a value"),
             (["--config"], "--config requires a value"),
@@ -84,7 +75,7 @@ class TestQdbdCli(unittest.TestCase):
     def test_help_lists_every_option(self):
         r = run("--help")
         self.assertEqual(r.returncode, 0)
-        for flag in ("--http-port", "--port", "--node-id", "--leader-id", "--node", "--data", "--config"):
+        for flag in ("--http-port", "--node-id", "--leader-id", "--node", "--data", "--config"):
             self.assertIn(flag, r.stdout)
 
 

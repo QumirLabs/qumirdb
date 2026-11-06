@@ -57,7 +57,6 @@ void PrintUsage(std::ostream& out, const char* program)
 {
     out << "Usage: " << program << " [options]\n"
         << "  --http-port n         HTTP port (default 8080)\n"
-        << "  --port n              actor system port; defaults to the port of --node with --node-id, else 31337\n"
         << "  --node-id n           id of this node (default 1)\n"
         << "  --leader-id n         id of the leader node (default 1)\n"
         << "  --node host:port:id   cluster node, repeat for every node\n"
@@ -74,7 +73,6 @@ int main(int argc, char** argv)
     NNet::TInitializer init;
     TNodeId myNodeId = 1;
     TNodeId leaderId = 1;
-    std::optional<int> explicitPort;
     int httpPort = 8080;
     std::vector<std::tuple<std::string,int,int>> allHosts;
     std::optional<std::string> configPath;
@@ -91,7 +89,7 @@ int main(int argc, char** argv)
             overrides.emplace_back(argv[i] + 2);
             continue;
         }
-        const bool known = arg == "--http-port" || arg == "--port" || arg == "--node-id"
+        const bool known = arg == "--http-port" || arg == "--node-id"
             || arg == "--leader-id" || arg == "--node" || arg == "--data" || arg == "--config";
         if (!known) {
             std::cerr << "Unknown argument: " << arg << "\n";
@@ -109,12 +107,6 @@ int main(int argc, char** argv)
                 return 1;
             }
             httpPort = *parsed;
-        } else if (arg == "--port") {
-            const auto parsed = ParseNumber(arg, value, 0, 65535);
-            if (!parsed) {
-                return 1;
-            }
-            explicitPort = *parsed;
         } else if (arg == "--node-id" || arg == "--leader-id") {
             const auto parsed = ParseNumber(arg, value, 0, std::numeric_limits<int>::max());
             if (!parsed) {
@@ -194,15 +186,15 @@ int main(int argc, char** argv)
         ));
     }
 
-    // --port wins; otherwise this node listens on its own --node port.
-    int port = explicitPort.value_or(31337);
+    // This node listens on the port of its own --node entry.
+    int port = 0;
     std::vector<TNodeId> nodeIds;
     TActorSystem sys(&loop.Poller(), myNodeId);
     for (auto&& [nodeId, node] : nodes) {
         if (nodeId != myNodeId) {
             std::cerr << "Adding node with id: " << nodeId << "\n";
             sys.AddNode(nodeId, std::move(node));
-        } else if (!explicitPort) {
+        } else {
             port = node->GetHostPort().GetPort();
         }
         nodeIds.push_back(nodeId);
