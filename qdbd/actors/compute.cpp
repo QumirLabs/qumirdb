@@ -13,7 +13,9 @@ namespace {
 
 struct TComputeActor : public IBehaviorActor {
     struct TDefaultBehavior : public TBehavior<TDefaultBehavior> {
-        void HandleUnknownMessage(TMessageId messageId, TBlob blob, TActorContext::TPtr ctx) { }
+        void HandleUnknownMessage(TMessageId messageId, TBlob blob, TActorContext::TPtr ctx)
+        {
+        }
     };
 
     explicit TComputeActor(std::shared_ptr<TRuntimeResources> resources)

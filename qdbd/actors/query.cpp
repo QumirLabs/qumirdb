@@ -36,13 +36,15 @@ struct TBaseBehavior {
     { }
 
     void HandleUnknownMessage(TMessageId messageId, TBlob blob, TActorContext::TPtr ctx) {
-        std::ostringstream str; str << "Query: unknown message " <<  messageId;
+        std::ostringstream str;
+        str << "Query: unknown message " << messageId;
         Logger(str.str());
     }
 
-    void Complete(const std::expected<std::string, NQumir::TError>& res, TActorContext::TPtr& ctx) {
+    void Complete(const std::expected<std::string, NQumir::TError>& res, TActorContext::TPtr& ctx, bool unavailable = false) {
         ctx->Send<TExecuteQueryResponse>(State->RespondTo, TExecuteQueryResponse {
-            .Response = res
+            .Response = res,
+            .Unavailable = unavailable
         });
         ctx->Send<TPoison>(ctx->Self(), TPoison{});
     }
@@ -70,7 +72,7 @@ struct TBaseBehavior {
             }
 
             NCompiler::Explain(explainOutput, prepareResult->value().Plan, NCompiler::EExplainMode::Text);
-        };
+        }
 
         Complete(explainOutput.str(), ctx);
     }
@@ -96,7 +98,7 @@ struct TQueryActor : public IBehaviorActor {
 
         void Receive(TSpawnComputeActorResponse&& req, TBlob, TActorContext::TPtr ctx) {
             if (!req.Error.empty()) {
-                Complete(std::unexpected(NQumir::TError(req.Error)), ctx);
+                Complete(std::unexpected(NQumir::TError(req.Error)), ctx, true);
                 return;
             }
             State->Collector = ctx->Register(std::unique_ptr<IActor>(CreateActorsCollector(
@@ -117,7 +119,7 @@ struct TQueryActor : public IBehaviorActor {
                 return;
             }
             if (!response.Error.empty()) {
-                Complete(std::unexpected(NQumir::TError(response.Error)), ctx);
+                Complete(std::unexpected(NQumir::TError(response.Error)), ctx, true);
                 return;
             }
             StartGraph(response.ActorIds, ctx);

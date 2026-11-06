@@ -109,7 +109,7 @@ struct TMixedBatch {
         Message.Descriptor = Layouts.data();
         Message.RowSet = TRowSet{
             .Columns = Columns.data(),
-            .ColumnCount = Columns.size(),
+            .ColumnCount = static_cast<int64_t>(Columns.size()),
             .RowCount = 3,
             .Hash = Hash.data(),
         };
@@ -404,6 +404,10 @@ TEST(DistributedSerialization, RejectsUncompactedAndInvalidSourceBatches) {
     batch.Columns[0].Data = nullptr;
     EXPECT_THROW(Encode(batch.Message), std::runtime_error);
     batch.Columns[0].Data = batch.Fixed.data();
+    // A fixed-width layout over a column that carries string offsets.
+    batch.Columns[0].Offsets = batch.Offsets32.data();
+    EXPECT_THROW(Encode(batch.Message), std::runtime_error);
+    batch.Columns[0].Offsets = nullptr;
     batch.Offsets32[2] = -1;
     EXPECT_THROW(Encode(batch.Message), std::runtime_error);
 }
@@ -492,24 +496,27 @@ private:
     std::vector<TSpawnComputeActorResponse>& Responses_;
 };
 
+enum class EReply { Result, QueryError, Unavailable };
+
 class TQueryReplyProbe : public IActor {
 public:
-    explicit TQueryReplyProbe(bool fail)
-        : Fail_(fail)
+    explicit TQueryReplyProbe(EReply mode)
+        : Mode_(mode)
     {}
 
     void Receive(TMessageId messageId, TBlob, TActorContext::TPtr ctx) override {
         ASSERT_EQ(messageId, TExecuteQuery::MessageId);
         TExecuteQueryResponse response{
-            .Response = Fail_
+            .Response = Mode_ != EReply::Result
                 ? std::expected<std::string, NQumir::TError>(std::unexpected(NQumir::TError("query failed")))
                 : std::expected<std::string, NQumir::TError>("query result"),
+            .Unavailable = Mode_ == EReply::Unavailable,
         };
         ctx->Send<TExecuteQueryResponse>(ctx->Sender(), std::move(response));
     }
 
 private:
-    bool Fail_;
+    EReply Mode_;
 };
 
 struct TWorkerState {
@@ -694,6 +701,19 @@ TEST(DistributedScheduler, ForwardsToLeaderAndPreservesRequester) {
     }
 }
 
+TEST(DistributedScheduler, RepliesWithErrorWhenRequestReachesNonLeaderTwice) {
+    TTestCluster cluster;
+    cluster.Follower.Send<TSpawnComputeActor>(cluster.Client, cluster.FollowerScheduler,
+        TSpawnComputeActor{.Count = 1, .Forwarded = true});
+    const auto deadline = NNet::TClock::now() + std::chrono::seconds(2);
+    while (cluster.Responses.empty() && NNet::TClock::now() < deadline) {
+        cluster.Loop.Step();
+    }
+    ASSERT_EQ(cluster.Responses.size(), 1);
+    EXPECT_FALSE(cluster.Responses.back().Error.empty());
+    EXPECT_TRUE(cluster.Responses.back().ActorIds.empty());
+}
+
 TEST(DistributedScheduler, KeepsDistinctSendersAndRepeatedPingsAtTimeZero) {
     TTestCluster cluster;
     const auto first = cluster.AddWorker(true, 10);
@@ -788,10 +808,10 @@ TEST(DistributedScheduler, HeartbeatsAdvertiseLocalSchedulersAndAllowAllocation)
         cluster.Loop.Poller().SetMaxDuration(std::chrono::milliseconds(1));
         const auto first = cluster.Leader.RegisterWellKnown(
             static_cast<TLocalActorId>(EWellKnownActors::LocalScheduler),
-            std::unique_ptr<IActor>(CreateLocalScheduler(&cluster.Clock, leaderId, 1)));
+            std::unique_ptr<IActor>(CreateLocalScheduler(leaderId, 1)));
         const auto second = cluster.Follower.RegisterWellKnown(
             static_cast<TLocalActorId>(EWellKnownActors::LocalScheduler),
-            std::unique_ptr<IActor>(CreateLocalScheduler(&cluster.Clock, leaderId, 1)));
+            std::unique_ptr<IActor>(CreateLocalScheduler(leaderId, 1)));
         const auto leaderActors = cluster.Leader.ActorsSize();
         const auto followerActors = cluster.Follower.ActorsSize();
         const auto deadline = NNet::TClock::now() + std::chrono::seconds(2);
@@ -833,7 +853,7 @@ TEST(DistributedScheduler, LocalSchedulerCreatesIndependentActors) {
     TTestCluster cluster;
     const auto local = cluster.Follower.RegisterWellKnown(
         static_cast<TLocalActorId>(EWellKnownActors::LocalScheduler),
-        std::unique_ptr<IActor>(CreateLocalScheduler(&cluster.Clock,
+        std::unique_ptr<IActor>(CreateLocalScheduler(
             cluster.LeaderScheduler.NodeId(), 1000)));
     const auto before = cluster.Follower.ActorsSize();
     for (uint32_t count : {0, 1, 3}) {
@@ -1039,7 +1059,7 @@ TEST(DistributedAllocation, LocalSchedulerAllowsOversubscription) {
     TTestCluster cluster;
     const auto local = cluster.Follower.RegisterWellKnown(
         static_cast<TLocalActorId>(EWellKnownActors::LocalScheduler),
-        std::unique_ptr<IActor>(CreateLocalScheduler(&cluster.Clock,
+        std::unique_ptr<IActor>(CreateLocalScheduler(
             cluster.LeaderScheduler.NodeId(), 1000)));
     const auto before = cluster.Follower.ActorsSize();
     cluster.Spawn(32, local);
@@ -1094,10 +1114,10 @@ TEST(DistributedHttp, UnknownRoutesReturnNotFound) {
 }
 
 TEST(DistributedHttp, QueryResultAndErrorKeepTheirStatusCodes) {
-    for (bool fail : {false, true}) {
-        SCOPED_TRACE(fail);
+    for (const auto mode : {EReply::Result, EReply::QueryError, EReply::Unavailable}) {
+        SCOPED_TRACE(static_cast<int>(mode));
         TTestCluster cluster;
-        const auto gateway = cluster.Follower.Register(std::make_unique<TQueryReplyProbe>(fail));
+        const auto gateway = cluster.Follower.Register(std::make_unique<TQueryReplyProbe>(mode));
         auto router = NHttp::CreateRouter(&cluster.Follower, gateway);
         NNet::TRequest request("POST /api/run HTTP/1.1\r\nContent-Length: 0\r\n\r\n",
             [](char*, size_t) -> NNet::TFuture<ssize_t> { co_return 0; });
@@ -1113,10 +1133,14 @@ TEST(DistributedHttp, QueryResultAndErrorKeepTheirStatusCodes) {
         }
         ASSERT_TRUE(result.done());
         ASSERT_NO_THROW(result.await_resume());
-        EXPECT_EQ(response.StatusCode(), fail ? 503 : 200);
-        EXPECT_TRUE(output.starts_with(fail
-            ? "HTTP/1.1 503 Service Unavailable\r\n" : "HTTP/1.1 200 OK\r\n"));
-        EXPECT_NE(output.find(fail ? "query failed" : "query result"), std::string::npos);
+        const std::array<int, 3> statuses{200, 400, 503};
+        const std::array<const char*, 3> lines{"HTTP/1.1 200 OK\r\n", "HTTP/1.1 400 Bad Request\r\n",
+            "HTTP/1.1 503 Service Unavailable\r\n"};
+        const auto index = static_cast<size_t>(mode);
+        EXPECT_EQ(response.StatusCode(), statuses[index]);
+        EXPECT_TRUE(output.starts_with(lines[index]));
+        EXPECT_NE(output.find(mode == EReply::Result ? "query result" : "query failed"), std::string::npos);
+        EXPECT_NE(output.find("Access-Control-Allow-Origin: *\r\n"), std::string::npos);
     }
 }
 

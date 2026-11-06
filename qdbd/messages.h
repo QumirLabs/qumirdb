@@ -34,10 +34,6 @@ struct TSpawnComputeActorResponse {
     std::string Error;
 };
 
-// compute-actor
-
-// used for serialization
-
 // Push(srcId, TRowSet&&)
 struct TDataChunk {
     static constexpr NNet::NActors::TMessageId MessageId = 200;
@@ -53,8 +49,8 @@ struct TDataChunk {
 // Finish(srcId)
 struct TFinish {
     static constexpr NNet::NActors::TMessageId MessageId = 201;
-    uint32_t DstTaskId;
-    uint32_t SrcLaneId;
+    uint32_t DstTaskId = 0;
+    uint32_t SrcLaneId = 0;
 };
 
 // TODO: Fetch is local, do we need a message for it ?
@@ -70,6 +66,8 @@ struct TExecuteQueryResponse {
     static constexpr NNet::NActors::TMessageId MessageId = 1001;
     using LocalMessage = void;
     std::expected<std::string, NQumir::TError> Response;
+    // The error is a lack of compute nodes, not a bad query: the client may retry.
+    bool Unavailable = false;
 };
 
 template<typename TMessagesFactory>

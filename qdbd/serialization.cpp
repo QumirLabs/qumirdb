@@ -48,6 +48,11 @@ void ValidateLayout(const TValueLayout& layout) {
     }
 }
 
+// The wire carries only layouts, so a layout with Width 0 and no Bitmap is the one string rule.
+bool IsStringLayout(const TValueLayout& layout) {
+    return layout.Width == 0 && !layout.Bitmap;
+}
+
 class TWriter {
 public:
     explicit TWriter(std::ostringstream& output)
@@ -330,6 +335,9 @@ void SerializeToStream(const TDataChunk& message, std::ostringstream& output) {
     for (uint64_t i = 0; i < columns; ++i) {
         const auto& layout = message.Descriptor[i];
         ValidateLayout(layout);
+        if (rowSet.Columns && rowSet.Columns[i].Offsets && !IsStringLayout(layout)) {
+            Invalid("string offsets do not match the value layout");
+        }
         writer.Value<uint8_t>(layout.Width);
         writer.Value<uint8_t>(layout.Bitmap);
     }
@@ -338,7 +346,7 @@ void SerializeToStream(const TDataChunk& message, std::ostringstream& output) {
         const auto& layout = message.Descriptor[i];
         if (layout.Bitmap) {
             writer.Bitmap(column.Data, column.DataBitOffset, rows);
-        } else if (layout.Width == 0) {
+        } else if (IsStringLayout(layout)) {
             WriteStrings(writer, column, rows);
         } else {
             writer.Bytes(column.Data, ByteSize(rows, layout.Width));
@@ -380,7 +388,7 @@ void DeserializeFromStream(TDataChunk& message, std::istringstream& input) {
         const auto& layout = storage->Layouts[i];
         if (layout.Bitmap) {
             column.Data = storage->Copy(reader.Bytes(BitmapSize(rows)));
-        } else if (layout.Width == 0) {
+        } else if (IsStringLayout(layout)) {
             ReadStrings(reader, *storage, column, rows);
         } else {
             column.Data = storage->Copy(reader.Bytes(ByteSize(rows, layout.Width)));

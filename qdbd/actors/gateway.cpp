@@ -28,7 +28,8 @@ struct TGatewayActor : public IBehaviorActor {
         }
 
         void HandleUnknownMessage(TMessageId messageId, TBlob blob, TActorContext::TPtr ctx) {
-            std::ostringstream str; str << "Gateway: unknown message " <<  messageId;
+            std::ostringstream str;
+            str << "Gateway: unknown message " << messageId;
             Logger(str.str());
         }
 

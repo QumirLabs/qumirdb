@@ -17,14 +17,6 @@ using namespace std::chrono;
 
 namespace {
 
-struct TActorIdHash {
-    size_t operator()(const TActorId& actor) const {
-        return std::hash<TNodeId>()(actor.NodeId())
-            ^ std::hash<TLocalActorId>()(actor.ActorId())
-            ^ std::hash<TCookie>()(actor.Cookie());
-    }
-};
-
 struct TPlacement {
     TActorId Scheduler;
     uint32_t Count = 0;
@@ -132,7 +124,7 @@ struct TActorsCollector : public IBehaviorActor,
             Complete(MissingNodes ? "no live compute nodes" : "", ctx);
             return;
         }
-        std::unordered_set<TActorId, TActorIdHash> schedulers;
+        std::unordered_set<TActorId> schedulers;
         for (const auto& placement : Placements) {
             if (!placement.Scheduler || !schedulers.insert(placement.Scheduler).second) {
                 Placements.clear();
@@ -162,7 +154,7 @@ struct TActorsCollector : public IBehaviorActor,
     bool MissingNodes = false;
     bool Completed = false;
     std::vector<TActorId> Actors;
-    std::unordered_set<TActorId, TActorIdHash> UniqueActors;
+    std::unordered_set<TActorId> UniqueActors;
 };
 
 } // namespace
