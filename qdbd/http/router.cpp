@@ -54,7 +54,9 @@ struct TRouter final : public IRouter {
             if (res.Response) {
                 co_return co_await SendText(response, res.Response.value(), "text/plain; charset=utf-8");
             } else {
-                co_return co_await SendText(response, res.Response.error().ToString(), "text/plain; charset=utf-8", 503);
+                // A failed query is the client's error; only a lack of compute nodes asks to retry.
+                co_return co_await SendText(response, res.Response.error().ToString(), "text/plain; charset=utf-8",
+                    res.Unavailable ? 503 : 400);
             }
         }
 
@@ -68,6 +70,7 @@ struct TRouter final : public IRouter {
         int status = 200)
     {
         response.SetStatus(status);
+        response.SetHeader("Access-Control-Allow-Origin", "*");
         response.SetHeader("Content-Type", contentType);
         response.SetHeader("Content-Length", std::to_string(body.size()));
         co_await response.SendHeaders();

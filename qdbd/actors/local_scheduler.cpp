@@ -3,7 +3,6 @@
 #include <qdbd/actors.h>
 #include <qdbd/messages.h>
 #include <qdbd/serialization.h>
-#include <qdbd/time_source.h>
 
 #include "pinger.h"
 #include "compute.h"
@@ -19,9 +18,8 @@ namespace {
 
 struct TLocalSchedulerActor : public IBehaviorActor {
     struct TDefaultBehavior : public TBehavior<TDefaultBehavior, TSpawnComputeActor> {
-        TDefaultBehavior(ITimeSource* timeSource, TNodeId leader, uint64_t pingPeriodMs)
-            : TimeSource(timeSource)
-            , Leader(leader)
+        TDefaultBehavior(TNodeId leader, uint64_t pingPeriodMs)
+            : Leader(leader)
             , PingPeriodMs(pingPeriodMs)
             , Resources(std::make_shared<TRuntimeResources>())
         { }
@@ -45,7 +43,9 @@ struct TLocalSchedulerActor : public IBehaviorActor {
             ctx->Send<TSpawnComputeActorResponse>(ctx->Sender(), std::move(response));
         }
 
-        void HandleUnknownMessage(TMessageId messageId, TBlob blob, TActorContext::TPtr ctx) { }
+        void HandleUnknownMessage(TMessageId messageId, TBlob blob, TActorContext::TPtr ctx)
+        {
+        }
 
         void StartPinger(TActorContext::TPtr& ctx) {
             auto pinger = CreatePinger(Resources, ctx->Self(), WellKnownActorId(EWellKnownActors::Scheduler, Leader), PingPeriodMs);
@@ -56,7 +56,6 @@ struct TLocalSchedulerActor : public IBehaviorActor {
             ctx->Send<TPoison>(PingerActorId, TPoison{});
         }
 
-        ITimeSource* TimeSource;
         TNodeId Leader;
         uint64_t PingPeriodMs;
         std::shared_ptr<TRuntimeResources> Resources;
@@ -64,8 +63,8 @@ struct TLocalSchedulerActor : public IBehaviorActor {
         TActorId PingerActorId;
     };
 
-    TLocalSchedulerActor(ITimeSource* timeSource, TNodeId leader, uint64_t pingPeriodMs)
-        : Behavior(timeSource, leader, pingPeriodMs)
+    TLocalSchedulerActor(TNodeId leader, uint64_t pingPeriodMs)
+        : Behavior(leader, pingPeriodMs)
     {
         Become(&Behavior);
     }
@@ -83,9 +82,9 @@ struct TLocalSchedulerActor : public IBehaviorActor {
 
 } // namespace
 
-NNet::NActors::IActor* CreateLocalScheduler(ITimeSource* timeSource, TNodeId leader, uint64_t pingPeriodMs)
+NNet::NActors::IActor* CreateLocalScheduler(TNodeId leader, uint64_t pingPeriodMs)
 {
-    return new TLocalSchedulerActor(timeSource, leader, pingPeriodMs);
+    return new TLocalSchedulerActor(leader, pingPeriodMs);
 }
 
 } // namespace NRemote

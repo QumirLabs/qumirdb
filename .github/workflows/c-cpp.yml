@@ -75,6 +75,7 @@ jobs:
           -DCMAKE_CXX_SCAN_FOR_MODULES=OFF \
           -DQDB_LLVM_LINK_SHARED=ON \
           -DQDB_BUILD_TESTS=ON \
+          -DQDB_BUILD_DAEMON=ON \
           -DQDB_JIT_CACHE_DIR="$GITHUB_WORKSPACE/build/jit-cache"
     - name: Build
       run: cmake --build build

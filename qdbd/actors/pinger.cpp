@@ -29,7 +29,9 @@ struct TPingerActor : public IBehaviorActor {
             Schedule(ctx);
         }
 
-        void HandleUnknownMessage(TMessageId messageId, TBlob blob, TActorContext::TPtr ctx) { }
+        void HandleUnknownMessage(TMessageId messageId, TBlob blob, TActorContext::TPtr ctx)
+        {
+        }
 
         void Schedule(TActorContext::TPtr& ctx) {
             ctx->Schedule<TWakeUp>(steady_clock::now() + milliseconds(PeriodMs), ctx->Self(), ctx->Self());

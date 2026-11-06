@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <chrono>
 #include <list>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -99,6 +100,11 @@ struct TSchedulerActor : public IBehaviorActor,
             ctx->Forward<T>(WellKnownActorId(EWellKnownActors::Scheduler, LeaderId), std::move(message));
         } else {
             Logger("Scheduler: message reached a non-leader twice");
+            if constexpr (std::is_same_v<T, TSpawnComputeActor>) {
+                TSpawnComputeActorResponse response;
+                response.Error = "scheduler leader mismatch: request reached a non-leader node twice";
+                ctx->Send<TSpawnComputeActorResponse>(ctx->Sender(), std::move(response));
+            }
         }
         return true;
     }
