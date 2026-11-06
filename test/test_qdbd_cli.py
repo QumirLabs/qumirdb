@@ -76,7 +76,16 @@ class TestQdbdCli(unittest.TestCase):
         r = run("--help")
         self.assertEqual(r.returncode, 0)
         for flag in ("--http-port", "--node-id", "--leader-id", "--node", "--data", "--config"):
-            self.assertIn(flag, r.stdout)
+            with self.subTest(flag=flag):
+                self.assertRegex(r.stdout, rf"(?m)^\s*{flag}(\s|$)")
+        self.assertIn("required", r.stdout)
+
+    def test_unregistered_node_id_exits_with_one(self):
+        for args in ([], ["--node", f"127.0.0.1:{free_port()}:2"]):
+            with self.subTest(args=args):
+                r = run(*args)
+                self.assertEqual(r.returncode, 1, r.stderr)
+                self.assertIn("is not registered", r.stderr)
 
 
 if __name__ == "__main__":

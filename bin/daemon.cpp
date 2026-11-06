@@ -59,7 +59,7 @@ void PrintUsage(std::ostream& out, const char* program)
         << "  --http-port n         HTTP port (default 8080)\n"
         << "  --node-id n           id of this node (default 1)\n"
         << "  --leader-id n         id of the leader node (default 1)\n"
-        << "  --node host:port:id   cluster node, repeat for every node\n"
+        << "  --node host:port:id   cluster node, repeat for every node; required, one entry must have this node's id\n"
         << "  --data dir            directory with <table>.parquet files\n"
         << "  --config path         engine config file\n"
         << "  --section:key=value   engine config override\n"
@@ -202,8 +202,8 @@ int main(int argc, char** argv)
     std::sort(nodeIds.begin(), nodeIds.end());
     auto it = std::find(nodeIds.begin(), nodeIds.end(), myNodeId);
     if (it == nodeIds.end()) {
-        std::cerr << "Node with id: " << myNodeId << " is not registered.\n";
-        return -1;
+        std::cerr << "Node with id: " << myNodeId << " is not registered. Pass --node host:port:id for it.\n";
+        return 1;
     }
 
     TAddress actorSysAddress{"::", port};
