@@ -96,6 +96,8 @@ Physical execution:
   boundary.
 - [Late materialization](late_materialization.md) - narrow Parquet scans, row
   locators, lookup tasks, and safety rules.
+- [Distributed placement](distributed_placement.md) - node selection, actor creation,
+  and ownership of allocation failures.
 - [Dispatch](dispatch.md) - runtime shell dispatch model, node kinds, and
   kernel/dispatcher ownership split.
 - [String values](string_values.md) - borrowed/owned string representations for
