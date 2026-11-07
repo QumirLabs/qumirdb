@@ -52,6 +52,14 @@ connection as transport capacity permits. When it needs more input or finishes
 the transfer, it publishes that state before waking the task. The next task
 step can then request upstream work or report completion.
 
+Task notifications use a bounded multiple-producer, single-consumer queue:
+workers reserve slots with a producer-side compare-and-swap, while the actor
+alone advances the read cursor. A slot becomes readable only after its value
+has been published; an unfinished reservation is not skipped. Producers notify
+after publication, so a delayed producer can wake the actor again. A full queue
+rejects a push without moving its value. Element moves must not throw because
+later producers may already have reserved slots beyond a failed publication.
+
 This model requires a generic external-wakeup contract in the scheduler. A
 `WAITING` result suspends a task until an external event; a thread-safe `Wake`
 reschedules it without losing notifications that arrive during execution.

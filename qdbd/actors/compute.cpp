@@ -1,5 +1,6 @@
 #include <coroio/actors/actorsystem.hpp>
 #include <qdbd/messages.h>
+#include <qdbd/scheduler/actor_task_node.h>
 
 #include "compute.h"
 #include "pinger.h"
@@ -7,6 +8,7 @@
 namespace NQdb {
 namespace NRemote {
 
+using namespace NNet;
 using namespace NNet::NActors;
 
 namespace {
@@ -36,6 +38,25 @@ struct TComputeActor : public IBehaviorActor {
     }
 
     void AfterRegister(TActorContext::TPtr ctx) override {
+        Channel = std::make_unique<NScheduler::TActorNotificationChannel>(ctx->CreateNotifier());
+
+        NotificationTask = [&]() -> TVoidSuspendedTask {
+            co_await Channel->Wait();
+            ProcessNotifications();
+        }();
+    }
+
+    void ProcessNotifications() {
+        // TODO: need to implement it throght a separate actor
+        // e.g. ComputeActorNotifier -> consumer notification queue -> send to ComputeActor
+        // need to do it if we move Actors to multithreaded model
+
+        auto& queue = Channel->Queue();
+        NQdb::NScheduler::TActorTaskNode* task = nullptr;
+        while (queue.TryPop(task)) {
+            // process
+            task->Mark();
+        }
     }
 
     void ReleaseSlot() {
@@ -43,10 +64,17 @@ struct TComputeActor : public IBehaviorActor {
             Resources->UsedSlots.fetch_sub(1, std::memory_order_relaxed);
             Resources.reset();
         }
+
+        if (NotificationTask) {
+            NotificationTask.destroy();
+            NotificationTask = {};
+        }
     }
 
     TDefaultBehavior Behavior;
     std::shared_ptr<TRuntimeResources> Resources;
+    std::unique_ptr<NScheduler::TActorNotificationChannel> Channel;
+    TVoidSuspendedTask NotificationTask;
 };
 
 } // namespace
