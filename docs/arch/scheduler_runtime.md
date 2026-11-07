@@ -43,10 +43,7 @@ and reschedules their neighbors when a task returns `OK`, `NEED_DATA`,
 
 ### Execution context and allocation ownership
 
-Before scheduling starts, the graph allocates a fixed table with one kernel
-heap per task. The table is destroyed after all workers have joined and task
-states and connections have been released. Each worker owns its own
-execution context referring to this table. A task that resumes on another
+Each worker owns its own execution context. A task that resumes on another
 worker selects the same allocation slot; the slot belongs to the task rather
 than to the thread.
 
@@ -71,8 +68,7 @@ allocation for each record. Tracking adds no lock to local allocation and free;
 the backing allocator is still `malloc`/`free`. A free
 from another task reads the allocation's original owner and sends the block
 to that owner's MPSC return queue with an atomic push. The owner drains this
-queue when pinned, when allocating, and before unpinning. Remote returns can
-therefore retain memory until the next collection or graph teardown.
+queue when pinned, when allocating, and before unpinning.
 
 Materialized rowsets use a faster ownership transfer. Before publishing a
 rowset, the producer detaches every buffer in its owners list from the task
