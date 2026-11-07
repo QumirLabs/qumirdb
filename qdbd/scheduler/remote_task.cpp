@@ -13,12 +13,14 @@ using namespace NRemote;
 
 TRemoteSink::TRemoteSink(
     NScheduler::TInputPort input,
+    uint64_t id,
     NNet::NActors::TActorId actorId,
     size_t dstLaneId,
     size_t dstTaskId,
     const TValueLayout* descriptor,
     TActorNotificationChannel& actorChannel)
     : Input(std::move(input))
+    , Id_(id)
     , ActorId(actorId)
     , DstLaneId(dstLaneId)
     , DstTaskId(dstTaskId)

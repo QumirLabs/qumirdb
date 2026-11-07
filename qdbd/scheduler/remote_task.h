@@ -59,6 +59,7 @@ class TRemoteSink : public ITask {
 public:
     TRemoteSink(
         NScheduler::TInputPort input, // sink consumes input
+        uint64_t id, // the id this node is marked external under in the graph
         NNet::NActors::TActorId actorId,
         size_t dstLaneId,
         size_t dstTaskId,
@@ -69,16 +70,13 @@ public:
 
     void SendQueue(NNet::NActors::TActorContext::TPtr& ctx);
 
-    void SetNode(NScheduler::TTaskNode* node) {
-        Node = node;
-    }
-
-    NScheduler::TTaskNode* Meta() const {
-        return Node;
+    uint64_t Id() const {
+        return Id_;
     }
 
 private:
     NScheduler::TInputPort Input;
+    uint64_t Id_;
     NNet::NActors::TActorId ActorId;
     size_t DstLaneId;
     size_t DstTaskId;
@@ -86,7 +84,6 @@ private:
     TActorNotificationChannel& ActorChannel;
     std::atomic<bool> Queued = false;
     std::atomic<bool> Finished = false;
-    NScheduler::TTaskNode* Node = nullptr;
 };
 
 } // namespace NScheduler

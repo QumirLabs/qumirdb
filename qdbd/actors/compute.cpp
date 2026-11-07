@@ -62,7 +62,7 @@ struct TComputeActor : public IBehaviorActor {
         while (queue.TryPop(task)) {
             // process
             task->SendQueue(ctx);
-            SchedulerSchannel->Notify(task->Meta());
+            SchedulerSchannel->Notify(Graph.ExternalNode(task->Id()));
         }
     }
 
@@ -79,8 +79,9 @@ struct TComputeActor : public IBehaviorActor {
     }
 
     void StartGraph(TTaskGraphMessage&& message, TActorContext::TPtr ctx) {
+        Graph = message.Graph;
         Scheduler = std::make_unique<NScheduler::TThreadedScheduler>(
-            message.Graph, /* worker_count = */ 18
+            Graph, /* worker_count = */ 18
         );
         SchedulerSchannel = std::make_unique<NScheduler::TSchedulerChannel>(
             *Scheduler
@@ -96,6 +97,7 @@ struct TComputeActor : public IBehaviorActor {
 
     TDefaultBehavior Behavior;
     std::shared_ptr<TRuntimeResources> Resources;
+    NScheduler::TSealedTaskGraph Graph;
     std::unique_ptr<NScheduler::TActorNotificationChannel> ActorChannel;
     std::unique_ptr<NScheduler::TSchedulerChannel> SchedulerSchannel;
     std::unique_ptr<NScheduler::TThreadedScheduler> Scheduler;
