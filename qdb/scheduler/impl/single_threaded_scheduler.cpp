@@ -16,26 +16,27 @@ void SetError(std::string* error, std::string message) {
 
 } // namespace
 
-TSingleThreadedScheduler::TSingleThreadedScheduler(TTaskGraph& graph)
+TSingleThreadedScheduler::TSingleThreadedScheduler(TSealedTaskGraph graph)
     : Graph_(graph)
+    , Execution_(graph.TaskCount())
 {}
 
 bool TSingleThreadedScheduler::Run(std::string* error) {
+    if (!Graph_) {
+        SetError(error, "task graph is not sealed");
+        return false;
+    }
     if (HasRun_) {
         SetError(error, "single-threaded scheduler cannot run twice");
         return false;
     }
     HasRun_ = true;
 
-    if (!Graph_.Validate(error)) {
-        return false;
-    }
-
     Ready_.clear();
     Scheduled_.clear();
     Stats_ = {};
-    TExecutionContext context{.State = &Graph_.PrepareExecution()};
-    Schedule(Graph_.Root());
+    TExecutionContext context{.State = &Execution_};
+    Schedule(&Graph_.Root());
 
     while (!Ready_.empty()) {
         auto* node = Ready_.front();

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <qdb/kernel/execution_context.h>
 #include <qdb/scheduler/graph.h>
 
 #include <list>
@@ -11,7 +12,7 @@ namespace NScheduler {
 
 class TSingleThreadedScheduler {
 public:
-    explicit TSingleThreadedScheduler(TTaskGraph& graph);
+    explicit TSingleThreadedScheduler(TSealedTaskGraph graph);
 
     bool Run(std::string* error = nullptr);
     TSchedulerRunStats Stats() const;
@@ -21,7 +22,8 @@ private:
     void ScheduleInput(TTaskNode* node);
     void ScheduleOutput(TTaskNode* node);
 
-    TTaskGraph& Graph_;
+    TSealedTaskGraph Graph_;
+    TExecutionState Execution_;
     std::list<TTaskNode*> Ready_;
     std::unordered_set<TTaskNode*> Scheduled_;
     TSchedulerRunStats Stats_;

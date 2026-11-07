@@ -1,5 +1,6 @@
 #pragma once
 
+#include <qdb/kernel/execution_context.h>
 #include <qdb/scheduler/graph.h>
 #include <qdb/scheduler/port.h>
 

@@ -21,35 +21,34 @@ void SetError(std::string* error, std::string message) {
 } // namespace
 
 TThreadedScheduler::TThreadedScheduler(
-    TTaskGraph& graph,
+    TSealedTaskGraph graph,
     size_t workerCount,
     size_t readyQueueCapacity)
     : Graph_(graph)
+    , Execution_(graph.TaskCount())
     , Ready_(std::max({
         readyQueueCapacity,
-        graph.Nodes().size(),
+        graph.TaskCount(),
         size_t{1}}))
     , WorkerCount_(std::max<size_t>(workerCount, 1))
 {}
 
 bool TThreadedScheduler::Run(std::string* error) {
+    if (!Graph_) {
+        SetError(error, "task graph is not sealed");
+        return false;
+    }
     if (HasRun_) {
         SetError(error, "threaded scheduler cannot run twice");
         return false;
     }
     HasRun_ = true;
 
-    Graph_.Build();
-    if (!Graph_.Validate(error)) {
-        return false;
-    }
-
     FinishedCount_.store(0, std::memory_order_release);
     ResetStats();
-    Schedule(Graph_.Root());
+    Schedule(&Graph_.Root());
 
     std::vector<std::thread> workers;
-    Graph_.PrepareExecution();
     workers.reserve(WorkerCount_);
     for (size_t i = 0; i < WorkerCount_; ++i) {
         workers.emplace_back([this]() {
@@ -147,20 +146,16 @@ void TThreadedScheduler::ScheduleOutput(TTaskNode* node) {
 }
 
 void TThreadedScheduler::Work() {
-    TExecutionContext context{.State = &Graph_.PrepareExecution()};
+    TExecutionContext context{.State = &Execution_};
     // Terminate once the root (sink) is Finished: all output the query needs has
     // been produced. Nodes still unfinished at that point are upstream branches
     // abandoned by early termination (a satisfied LIMIT stops pulling, leaving
     // its producers blocked on a Finished consumer) - waiting for them to finish
     // would deadlock. The single-threaded scheduler equivalently stops when no
     // work remains queued.
-    // Run() only reaches Work() after a successful Validate(), which guarantees
-    // exactly one root.
-    auto* root = Graph_.Root();
-    assert(root);
     auto done = [&] {
         return Failed_.load(std::memory_order_acquire) ||
-            root->State.load(std::memory_order_acquire) == ETaskState::Finished;
+            Graph_.Root().State.load(std::memory_order_acquire) == ETaskState::Finished;
     };
     // Brief spin on the work permit before blocking, so bursts of scheduling
     // are picked up without an OS wakeup; then park on the semaphore.
@@ -275,7 +270,7 @@ void TThreadedScheduler::FinishNode(TTaskNode* node) {
     auto previous = node->State.exchange(ETaskState::Finished, std::memory_order_acq_rel);
     assert(previous == ETaskState::Running || previous == ETaskState::Reschedule);
     FinishedCount_.fetch_add(1, std::memory_order_acq_rel);
-    if (node == Graph_.Root()) {
+    if (node == &Graph_.Root()) {
         // The sink is done: the query's output is complete. Wake every worker so
         // they observe termination and exit instead of parking on the permit
         // while upstream branches sit unfinished (abandoned by early termination).

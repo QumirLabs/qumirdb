@@ -611,14 +611,17 @@ TEST(LateMaterialization, ExecutesParquetLookupAfterGlobalTopK) {
     multiLaneSettings.ScanSplit.MaxScanTasks = 4;
     auto lowered = NScheduler::LowerPlanToGraph(
         multiLanePlan, multiLaneSettings, nullptr);
-    lowered.Graph->Build();
     auto broadcast = std::ranges::find_if(
         lowered.Graph->Nodes(),
         [](const auto& node) {
             return node->DebugKind == "late-lookup-broadcast";
         });
     ASSERT_NE(broadcast, lowered.Graph->Nodes().end());
-    EXPECT_EQ((*broadcast)->Inbound.size(), 4u);
+    EXPECT_EQ(std::ranges::count_if(
+        lowered.Graph->Edges(),
+        [&](const auto& edge) {
+            return edge->Dst == broadcast->get();
+        }), 4);
 
     auto runtime = RunPlan(multiLanePlan, multiLaneSettings);
     int64_t materializedRows = 0;

@@ -252,13 +252,13 @@ TPipeline MakePipeline() {
     out.Graph->AddOwnedEdge(source, filter, std::move(sourceToFilter));
     out.Graph->AddOwnedEdge(filter, project, std::move(filterToProject));
     out.Graph->AddOwnedEdge(project, sink, std::move(projectToSink));
-    out.Graph->Build();
+    EXPECT_TRUE(out.Graph->Seal());
     return out;
 }
 
 TEST(SchedulerRuntimeAdapter, RunsSourceFilterProjectSinkSingleThreaded) {
     auto pipeline = MakePipeline();
-    TSingleThreadedScheduler scheduler(*pipeline.Graph);
+    TSingleThreadedScheduler scheduler(pipeline.Graph->Seal());
 
     std::string error;
     ASSERT_TRUE(scheduler.Run(&error)) << error;
@@ -271,7 +271,7 @@ TEST(SchedulerRuntimeAdapter, RunsSourceFilterProjectSinkSingleThreaded) {
 
 TEST(SchedulerRuntimeAdapter, RunsSourceFilterProjectSinkThreaded) {
     auto pipeline = MakePipeline();
-    TThreadedScheduler scheduler(*pipeline.Graph, 4);
+    TThreadedScheduler scheduler(pipeline.Graph->Seal(), 4);
 
     std::string error;
     ASSERT_TRUE(scheduler.Run(&error)) << error;
@@ -415,11 +415,10 @@ TEST(SchedulerRuntimeAdapter, RunsBinaryBlockingTask) {
     graph->AddOwnedEdge(left, binary, std::move(leftToBinary));
     graph->AddOwnedEdge(right, binary, std::move(rightToBinary));
     graph->AddOwnedEdge(binary, sink, std::move(binaryToSink));
-    graph->Build();
-
     std::string error;
-    ASSERT_TRUE(graph->Validate(&error)) << error;
-    TThreadedScheduler scheduler(*graph, 3);
+    const auto sealed = graph->Seal(&error);
+    ASSERT_TRUE(sealed) << error;
+    TThreadedScheduler scheduler(sealed, 3);
     ASSERT_TRUE(scheduler.Run(&error)) << error;
     EXPECT_EQ(binaryState->LeftRows, 3);
     EXPECT_EQ(binaryState->RightRows, 21);
@@ -543,11 +542,10 @@ TGateResult RunAsymmetricGateGraph(bool gate) {
     graph->AddOwnedEdge(probe, binary, std::move(leftToBinary));
     graph->AddOwnedEdge(build, binary, std::move(rightToBinary));
     graph->AddOwnedEdge(binary, sink, std::move(binaryToSink));
-    graph->Build();
-
     std::string error;
-    EXPECT_TRUE(graph->Validate(&error)) << error;
-    TSingleThreadedScheduler scheduler(*graph);
+    const auto sealed = graph->Seal(&error);
+    EXPECT_TRUE(sealed) << error;
+    TSingleThreadedScheduler scheduler(sealed);
     EXPECT_TRUE(scheduler.Run(&error)) << error;
 
     return {

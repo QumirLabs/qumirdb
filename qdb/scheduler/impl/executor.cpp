@@ -18,9 +18,7 @@ void SetError(std::string* error, std::string message) {
 
 } // namespace
 
-TSchedulerExecutor::TSchedulerExecutor(
-    TTaskGraph& graph,
-    TSettings settings)
+TSchedulerExecutor::TSchedulerExecutor(TSealedTaskGraph graph, TSettings settings)
     : Graph_(graph)
     , Settings_(settings)
 {}

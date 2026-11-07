@@ -3586,13 +3586,7 @@ TLoweredPlan LowerPlanToGraph(
     };
 }
 
-bool RunPlanIntoSink(
-    TLoweredPlan lowered,
-    ISink& sink,
-    TSettings settings,
-    std::ostream* diagnostics,
-    std::string* error)
-{
+void AttachSink(TLoweredPlan& lowered, ISink& sink) {
     // Aliasing shared_ptr: the sink task's state points at the caller-owned
     // sink without taking ownership of it.
     std::shared_ptr<void> sinkState(std::shared_ptr<void>{}, &sink);
@@ -3606,17 +3600,26 @@ bool RunPlanIntoSink(
         lowered.Graph->AddEdge(
             *lowered.Producers[p], sinkNode, *lowered.FinalGather, p, 0);
     }
+}
 
-    lowered.Graph->Build();
+bool RunPlanIntoSink(
+    TLoweredPlan lowered,
+    ISink& sink,
+    TSettings settings,
+    std::ostream* diagnostics,
+    std::string* error)
+{
+    AttachSink(lowered, sink);
+    const auto sealed = lowered.Graph->Seal(error);
+    if (!sealed) {
+        return false;
+    }
     if (settings.Instrumentation.Operators) {
         EnableOperatorInstrumentation(lowered);
     }
     FinalizeKernels(
         lowered.Kernels, settings.Kernel.Backend, diagnostics, lowered.ExternalCatalog,
         settings.Jit.CacheDir);
-    if (!lowered.Graph->Validate(error)) {
-        return false;
-    }
     lowered.Graph->SetConnectionStatsEnabled(settings.Queue.EnableDebugCounters);
     if (diagnostics) {
         PrintGraphDiagnostics(*diagnostics, *lowered.Graph, settings);
@@ -3631,7 +3634,7 @@ bool RunPlanIntoSink(
         }
     }
 
-    TSchedulerExecutor executor(*lowered.Graph, settings);
+    TSchedulerExecutor executor(sealed, settings);
     if (!executor.Run(error)) {
         return false;
     }

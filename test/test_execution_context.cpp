@@ -1,12 +1,16 @@
 #include <qdb/exec/kernel_rowset.h>
 #include <qdb/kernel/execution_context.h>
 #include <qdb/modules/qumirdb_runtime.h>
+#include <qdb/scheduler/connections/local.h>
 #include <qdb/scheduler/graph.h>
+#include <qdb/scheduler/impl/single_threaded_scheduler.h>
 #include <qdb/scheduler/impl/threaded_scheduler.h>
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <cstdint>
+#include <memory>
 #include <stdexcept>
 #include <thread>
 #include <vector>
@@ -200,29 +204,160 @@ public:
     ETaskResult Execute() override {
         EXPECT_NE(TryExecutionContext(), nullptr);
         EXPECT_NE(ExecutionContext().Heap, nullptr);
+        EXPECT_EQ(ExecutionContext().Heap, &ExecutionContext().State->Heap(Slot));
         qdb_alloc(96);
+        Bytes = ExecutionContext().Heap->Bytes();
         return ETaskResult::FINISHED;
     }
+
+    size_t Slot = 0;
+    size_t Bytes = 0;
+};
+
+class TMaterializingTask final : public ITask {
+public:
+    explicit TMaterializingTask(TRowSet& output)
+        : Output_(output)
+    {}
+
+    ETaskResult Execute() override {
+        auto* value = static_cast<int64_t*>(qdb_alloc(sizeof(int64_t)));
+        *value = 456;
+        auto* columns = static_cast<TColumn*>(qdb_alloc(sizeof(TColumn)));
+        *columns = {.Data = reinterpret_cast<char*>(value)};
+        auto* owners = static_cast<int64_t*>(qdb_alloc(3 * sizeof(int64_t)));
+        owners[0] = 2;
+        owners[1] = reinterpret_cast<int64_t>(value);
+        owners[2] = reinterpret_cast<int64_t>(columns);
+        Output_.RefCount = 1;
+        Output_.RowCount = 1;
+        Output_.Columns = columns;
+        Output_.Private = owners;
+        AdoptKernelOwnedRowSet(Output_);
+        return ETaskResult::FINISHED;
+    }
+
+private:
+    TRowSet& Output_;
+};
+
+class TAbandonedHeapTask final : public ITask {
+public:
+    ETaskResult Execute() override {
+        if (!Block) {
+            Block = qdb_alloc(64);
+            Allocated.store(true, std::memory_order_release);
+        }
+        return ETaskResult::BLOCKED_OUTPUT;
+    }
+
+    // The block belongs to the task heap, which reclaims it at teardown.
+    void* Block = nullptr;
+    std::atomic<bool> Allocated = false;
+};
+
+class TEarlyFinishTask final : public ITask {
+public:
+    explicit TEarlyFinishTask(TAbandonedHeapTask& producer)
+        : Producer_(producer)
+    {}
+
+    ETaskResult Execute() override {
+        if (!Producer_.Allocated.load(std::memory_order_acquire)) {
+            return ETaskResult::NEED_DATA;
+        }
+        HeapBytes = ExecutionContext().State->Heap(0).Bytes();
+        return ETaskResult::FINISHED;
+    }
+
+    size_t HeapBytes = 0;
+
+private:
+    TAbandonedHeapTask& Producer_;
 };
 
 } // namespace
 
 TEST(ExecutionContext, SchedulerPinsAllocationDomain) {
     TTaskGraph graph;
-    auto& node = graph.AddOwnedNode(std::make_unique<TAllocatingTask>());
-    TThreadedScheduler scheduler(graph, 2);
+    TAllocatingTask task;
+    graph.AddNode(task);
+    const auto sealed = graph.Seal();
+    ASSERT_TRUE(sealed);
+    TThreadedScheduler scheduler(sealed, 2);
     std::string error;
     ASSERT_TRUE(scheduler.Run(&error)) << error;
-    EXPECT_EQ(graph.PrepareExecution().Heap(node.ExecutionSlot).Bytes(), 96);
+    EXPECT_EQ(task.Bytes, 96u);
     EXPECT_EQ(TryExecutionContext(), nullptr);
 }
 
-TEST(ExecutionContext, TaskTableIsFrozenBeforeWorkersStart) {
-    TAllocatingTask task;
-    TTaskGraph graph;
-    graph.AddNode(task);
-    graph.PrepareExecution();
-    EXPECT_THROW(graph.AddNode(task), std::logic_error);
+TEST(ExecutionContext, SchedulersCreateExecutionStateFromTaskCount) {
+    for (bool threaded : {false, true}) {
+        SCOPED_TRACE(threaded);
+        TAllocatingTask source;
+        TAllocatingTask task;
+        task.Slot = 1;
+        TTaskGraph graph;
+        auto& sourceNode = graph.AddNode(source);
+        auto& root = graph.AddNode(task);
+        graph.AddOwnedEdge(sourceNode, root, std::make_unique<TOneToOneConnection>());
+        const auto sealed = graph.Seal();
+        ASSERT_EQ(sealed.TaskCount(), 2u);
+
+        std::string error;
+        const bool ok = threaded
+            ? TThreadedScheduler(sealed, 2).Run(&error)
+            : TSingleThreadedScheduler(sealed).Run(&error);
+        ASSERT_TRUE(ok) << error;
+        EXPECT_EQ(root.State.load(), ETaskState::Finished);
+        EXPECT_EQ(task.Bytes, 96u);
+        EXPECT_EQ(TryExecutionContext(), nullptr);
+    }
+}
+
+TEST(ExecutionContext, PublishedBatchOutlivesSchedulerAndGraph) {
+    for (bool threaded : {false, true}) {
+        SCOPED_TRACE(threaded);
+        TRowSet batch{};
+        {
+            TTaskGraph graph;
+            graph.AddOwnedNode(std::make_unique<TMaterializingTask>(batch));
+            const auto sealed = graph.Seal();
+            ASSERT_TRUE(sealed);
+            std::string error;
+            const bool ok = threaded
+                ? TThreadedScheduler(sealed, 2).Run(&error)
+                : TSingleThreadedScheduler(sealed).Run(&error);
+            ASSERT_TRUE(ok) << error;
+        }
+        EXPECT_EQ(*reinterpret_cast<int64_t*>(batch.Columns[0].Data), 456);
+        Release(&batch);
+    }
+}
+
+TEST(ExecutionContext, AbandonedTaskHeapIsReclaimedBeforeGraphTeardown) {
+    for (bool threaded : {false, true}) {
+        SCOPED_TRACE(threaded);
+        TTaskGraph graph;
+        auto producerTask = std::make_unique<TAbandonedHeapTask>();
+        auto* producer = producerTask.get();
+        auto consumerTask = std::make_unique<TEarlyFinishTask>(*producer);
+        auto* consumer = consumerTask.get();
+        auto& source = graph.AddOwnedNode(std::move(producerTask));
+        auto& sink = graph.AddOwnedNode(std::move(consumerTask));
+        graph.AddOwnedEdge(source, sink, std::make_unique<TOneToOneConnection>());
+        const auto sealed = graph.Seal();
+        ASSERT_TRUE(sealed);
+
+        std::string error;
+        const bool ok = threaded
+            ? TThreadedScheduler(sealed, 2).Run(&error)
+            : TSingleThreadedScheduler(sealed).Run(&error);
+        ASSERT_TRUE(ok) << error;
+        EXPECT_EQ(source.State.load(), ETaskState::Idle);
+        EXPECT_EQ(consumer->HeapBytes, 64u);
+        EXPECT_NE(producer->Block, nullptr);
+    }
 }
 
 int main(int argc, char** argv) {

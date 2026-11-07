@@ -42,9 +42,7 @@ const char* ConnectionKindName(EConnectionKind kind) {
 } // namespace
 
 TTaskNode& TTaskGraph::AddNode(ITask& task) {
-    if (Execution_) {
-        throw std::logic_error("cannot add a task after preparing execution slots");
-    }
+    CheckMutable();
     auto node = std::make_unique<TTaskNode>();
     node->Task = &task;
     node->ExecutionSlot = Nodes_.size();
@@ -53,23 +51,15 @@ TTaskNode& TTaskGraph::AddNode(ITask& task) {
     return *ptr;
 }
 
-TExecutionState& TTaskGraph::PrepareExecution() {
-    if (!Execution_) {
-        Execution_ = std::make_unique<TExecutionState>(Nodes_.size());
-    }
-    return *Execution_;
-}
-
 TTaskNode& TTaskGraph::AddOwnedNode(std::unique_ptr<ITask> task) {
-    if (Execution_) {
-        throw std::logic_error("cannot add a task after preparing execution slots");
-    }
+    CheckMutable();
     auto* ptr = task.get();
     OwnedTasks_.push_back(std::move(task));
     return AddNode(*ptr);
 }
 
 IConnection& TTaskGraph::AddConnection(std::unique_ptr<IConnection> connection) {
+    CheckMutable();
     auto* ptr = connection.get();
     OwnedConnections_.push_back(std::move(connection));
     return *ptr;
@@ -83,6 +73,7 @@ TTaskEdge& TTaskGraph::AddEdge(
     size_t dstLane,
     size_t execInput)
 {
+    CheckMutable();
     auto edge = std::make_unique<TTaskEdge>();
     edge->Src = &src;
     edge->Dst = &dst;
@@ -103,6 +94,7 @@ TTaskEdge& TTaskGraph::AddOwnedEdge(
     size_t dstLane,
     size_t execInput)
 {
+    CheckMutable();
     if (!connection) {
         auto edge = std::make_unique<TTaskEdge>();
         edge->Src = &src;
@@ -122,6 +114,7 @@ TTaskEdge& TTaskGraph::AddOwnedEdge(
 TTaskEdge& TTaskGraph::AddDependencyEdge(
     TTaskNode& producer, TTaskNode& consumer)
 {
+    CheckMutable();
     auto edge = std::make_unique<TTaskEdge>();
     edge->Src = &producer;
     edge->Dst = &consumer;
@@ -153,6 +146,23 @@ void TTaskGraph::Build() {
         if (std::ranges::none_of(node->Outbound, IsRowsetEdge)) {
             Root_ = node.get();
         }
+    }
+}
+
+TSealedTaskGraph TTaskGraph::Seal(std::string* error) {
+    if (!Sealed_) {
+        Build();
+        if (!Validate(error)) {
+            return {};
+        }
+        Sealed_ = true;
+    }
+    return TSealedTaskGraph(*Root_, Nodes_.size());
+}
+
+void TTaskGraph::CheckMutable() const {
+    if (Sealed_) {
+        throw std::logic_error("cannot modify a sealed task graph");
     }
 }
 

@@ -175,7 +175,7 @@ std::unique_ptr<TTaskGraph> MakeRepeatGraph(TRepeatTask*& task, int repeats) {
     auto repeat = std::make_unique<TRepeatTask>(repeats);
     task = repeat.get();
     graph->AddOwnedNode(std::move(repeat));
-    graph->Build();
+    EXPECT_TRUE(graph->Seal());
     return graph;
 }
 
@@ -191,9 +191,10 @@ TEST(SchedulerThreaded, RunsSmallGraph) {
     auto& source = graph.AddOwnedNode(std::move(sourceTask));
     auto& sink = graph.AddOwnedNode(std::move(sinkTask));
     graph.AddOwnedEdge(source, sink, std::make_unique<TOneToOneConnection>());
-    graph.Build();
+    const auto sealed = graph.Seal();
+    ASSERT_TRUE(sealed);
 
-    TThreadedScheduler scheduler(graph, 4);
+    TThreadedScheduler scheduler(sealed, 4);
     std::string error;
     ASSERT_TRUE(scheduler.Run(&error)) << error;
     EXPECT_EQ(sourcePtr->Produced.load(std::memory_order_acquire), total);
@@ -204,13 +205,13 @@ TEST(SchedulerThreaded, RunsSmallGraph) {
 TEST(SchedulerThreaded, OneWorkerMatchesSingleThreadedScheduler) {
     TRepeatTask* singleTask = nullptr;
     auto singleGraph = MakeRepeatGraph(singleTask, 10);
-    TSingleThreadedScheduler singleScheduler(*singleGraph);
+    TSingleThreadedScheduler singleScheduler(singleGraph->Seal());
     std::string error;
     ASSERT_TRUE(singleScheduler.Run(&error)) << error;
 
     TRepeatTask* threadedTask = nullptr;
     auto threadedGraph = MakeRepeatGraph(threadedTask, 10);
-    TThreadedScheduler threadedScheduler(*threadedGraph, 1);
+    TThreadedScheduler threadedScheduler(threadedGraph->Seal(), 1);
     ASSERT_TRUE(threadedScheduler.Run(&error)) << error;
 
     EXPECT_EQ(threadedTask->Calls(), singleTask->Calls());
@@ -228,9 +229,10 @@ TEST(SchedulerThreaded, StressProducerConsumerWakeups) {
     auto& source = graph.AddOwnedNode(std::move(sourceTask));
     auto& sink = graph.AddOwnedNode(std::move(sinkTask));
     graph.AddOwnedEdge(source, sink, std::make_unique<TOneToOneConnection>());
-    graph.Build();
+    const auto sealed = graph.Seal();
+    ASSERT_TRUE(sealed);
 
-    TThreadedScheduler scheduler(graph, 4);
+    TThreadedScheduler scheduler(sealed, 4);
     std::string error;
     ASSERT_TRUE(scheduler.Run(&error)) << error;
     EXPECT_EQ(sinkPtr->Consumed(), total);
@@ -242,9 +244,10 @@ TEST(SchedulerThreaded, DoesNotExecuteSameTaskConcurrently) {
 
     TTaskGraph graph;
     graph.AddOwnedNode(std::move(task));
-    graph.Build();
+    const auto sealed = graph.Seal();
+    ASSERT_TRUE(sealed);
 
-    TThreadedScheduler scheduler(graph, 8);
+    TThreadedScheduler scheduler(sealed, 8);
     std::string error;
     ASSERT_TRUE(scheduler.Run(&error)) << error;
     EXPECT_EQ(taskPtr->Violations.load(std::memory_order_relaxed), 0);
@@ -266,10 +269,11 @@ TEST(SchedulerThreaded, ReadyQueueCapacityIsAtLeastNodeCount) {
             sink,
             std::make_unique<TOneToOneConnection>());
     }
-    graph.Build();
+    const auto sealed = graph.Seal();
+    ASSERT_TRUE(sealed);
 
     TThreadedScheduler scheduler(
-        graph,
+        sealed,
         4,
         /*readyQueueCapacity=*/1);
     std::string error;
@@ -288,9 +292,10 @@ TEST(SchedulerThreaded, RechecksConsumerWhenInputsAlreadyFinished) {
         source,
         sink,
         std::make_unique<TOneToOneConnection>());
-    graph.Build();
+    const auto sealed = graph.Seal();
+    ASSERT_TRUE(sealed);
 
-    TThreadedScheduler scheduler(graph, 1);
+    TThreadedScheduler scheduler(sealed, 1);
     std::string error;
     ASSERT_TRUE(scheduler.Run(&error)) << error;
     EXPECT_EQ(sinkPtr->Calls(), 3);
@@ -299,7 +304,7 @@ TEST(SchedulerThreaded, RechecksConsumerWhenInputsAlreadyFinished) {
 TEST(SchedulerThreaded, CannotRunTwice) {
     TRepeatTask* task = nullptr;
     auto graph = MakeRepeatGraph(task, 1);
-    TThreadedScheduler scheduler(*graph, 2);
+    TThreadedScheduler scheduler(graph->Seal(), 2);
 
     std::string error;
     ASSERT_TRUE(scheduler.Run(&error)) << error;
@@ -311,11 +316,12 @@ TEST(SchedulerThreaded, ReportsTaskExceptions) {
     auto run = [](bool threaded) {
         TTaskGraph graph;
         graph.AddOwnedNode(std::make_unique<TThrowTask>());
-        graph.Build();
+        const auto sealed = graph.Seal();
+        ASSERT_TRUE(sealed);
         std::string error;
         const bool ok = threaded
-            ? TThreadedScheduler(graph, 2).Run(&error)
-            : TSingleThreadedScheduler(graph).Run(&error);
+            ? TThreadedScheduler(sealed, 2).Run(&error)
+            : TSingleThreadedScheduler(sealed).Run(&error);
         EXPECT_FALSE(ok);
         EXPECT_EQ(error, "expected task failure");
     };

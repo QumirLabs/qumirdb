@@ -1,7 +1,6 @@
 #pragma once
 
 #include <qdb/exec/stage.h>
-#include <qdb/kernel/execution_context.h>
 #include <qdb/exec/instrumentation/operator.h>
 #include <qdb/scheduler/connection.h>
 #include <qdb/scheduler/task.h>
@@ -51,6 +50,35 @@ struct TTaskEdge {
     size_t ExecInput = 0;
 };
 
+// A validated, frozen graph; only TTaskGraph::Seal() makes a non-empty one.
+class TSealedTaskGraph {
+public:
+    TSealedTaskGraph() = default;
+
+    explicit operator bool() const {
+        return Root_ != nullptr;
+    }
+
+    TTaskNode& Root() const {
+        return *Root_;
+    }
+
+    size_t TaskCount() const {
+        return TaskCount_;
+    }
+
+private:
+    friend class TTaskGraph;
+
+    TSealedTaskGraph(TTaskNode& root, size_t taskCount)
+        : Root_(&root)
+        , TaskCount_(taskCount)
+    {}
+
+    TTaskNode* Root_ = nullptr;
+    size_t TaskCount_ = 0;
+};
+
 class TTaskGraph {
 public:
     TTaskNode& AddNode(ITask& task);
@@ -76,8 +104,8 @@ public:
     // Carries wakeups and demand, but no rowsets or exec-stage input.
     TTaskEdge& AddDependencyEdge(TTaskNode& producer, TTaskNode& consumer);
 
-    void Build();
-    bool Validate(std::string* error = nullptr) const;
+    // Builds adjacency, validates and freezes the graph; empty on error.
+    TSealedTaskGraph Seal(std::string* error = nullptr);
     void SetConnectionStatsEnabled(bool enabled);
     void Print(std::ostream& out) const;
     void PrintConnectionStats(std::ostream& out) const;
@@ -86,11 +114,12 @@ public:
     const std::vector<std::unique_ptr<TTaskEdge>>& Edges() const;
     const std::vector<TTaskNode*>& Leaves() const;
     TTaskNode* Root() const;
-    TExecutionState& PrepareExecution();
 
 private:
-    // Outlives task destructors and connections returning tracked allocations.
-    std::unique_ptr<TExecutionState> Execution_;
+    void CheckMutable() const;
+    void Build();
+    bool Validate(std::string* error) const;
+
     // Task-local observers and ports remain valid through task destruction.
     std::vector<std::unique_ptr<TTaskNode>> Nodes_;
     std::vector<std::unique_ptr<IConnection>> OwnedConnections_;
@@ -98,6 +127,7 @@ private:
     std::vector<std::unique_ptr<TTaskEdge>> Edges_;
     std::vector<TTaskNode*> Leaves_;
     TTaskNode* Root_ = nullptr;
+    bool Sealed_ = false;
 };
 
 } // namespace NScheduler

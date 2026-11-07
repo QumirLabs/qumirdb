@@ -127,8 +127,6 @@ void TKernelHeap::Collect() noexcept {
 }
 
 void TKernelHeap::Reset() noexcept {
-    // Teardown follows worker join and batch release; no producer may still
-    // return a block while the allocation domain is being destroyed.
     Collect();
     while (Head_) {
         auto* block = Head_;
