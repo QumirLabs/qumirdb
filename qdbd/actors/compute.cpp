@@ -58,11 +58,11 @@ struct TComputeActor : public IBehaviorActor {
         // need to do it if we move Actors to multithreaded model
 
         auto& queue = ActorChannel->Queue();
-        NQdb::NScheduler::TRemoteSink* task = nullptr;
-        while (queue.TryPop(task)) {
+        NQdb::NScheduler::TRemoteSinkState* state = nullptr;
+        while (queue.TryPop(state)) {
             // process
-            task->SendQueue(ctx);
-            SchedulerSchannel->Notify(Graph.ExternalNode(task->Id()));
+            state->SendQueue(ctx);
+            SchedulerSchannel->Notify(Graph.ExternalNode(state->Id));
         }
     }
 

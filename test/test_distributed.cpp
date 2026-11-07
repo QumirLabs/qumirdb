@@ -9,6 +9,7 @@
 #include <qdbd/scheduler/remote_task.h>
 #include <qdb/scheduler/impl/threaded_scheduler.h>
 #include <qdb/scheduler/channel.h>
+#include <qdb/scheduler/connections/local.h>
 
 #include <coroio/all.hpp>
 #include <coroio/actors/actorsystem.hpp>
@@ -1145,6 +1146,146 @@ TEST(DistributedHttp, QueryResultAndErrorKeepTheirStatusCodes) {
         EXPECT_TRUE(output.starts_with(lines[index]));
         EXPECT_NE(output.find(mode == EReply::Result ? "query result" : "query failed"), std::string::npos);
         EXPECT_NE(output.find("Access-Control-Allow-Origin: *\r\n"), std::string::npos);
+    }
+}
+
+namespace {
+
+class TFakeNotifier : public NNet::INotifier {
+public:
+    void Notify() override {}
+
+    NNet::TFuture<void> Wait() override {
+        throw std::logic_error("unused");
+    }
+};
+
+void CountDestroy(TRowSet* rowSet) {
+    static_cast<std::atomic<int>*>(rowSet->Private)->fetch_add(1, std::memory_order_relaxed);
+}
+
+TRowSet CountedRows(int64_t rows, std::atomic<int>* destroyed) {
+    return TRowSet{
+        .RowCount = rows,
+        .Destroy = CountDestroy,
+        .Private = destroyed,
+        .RefCount = 1,
+    };
+}
+
+struct TProducerState {
+    int64_t Next = 1;
+    int64_t Total = 0;
+};
+
+struct TCollectorState {
+    std::vector<int64_t> Rows;
+};
+
+} // namespace
+
+// producer -> remote sink | fake ComputeActor | remote source -> collector
+TEST(DistributedScheduler, RemoteTasksMoveRowSetsInOrder) {
+    using namespace NQdb::NScheduler;
+    constexpr int64_t total = 300;
+
+    for (int iteration = 0; iteration < 20; ++iteration) {
+        SCOPED_TRACE(iteration);
+        std::atomic<int> destroyed = 0;
+        TActorNotificationChannel actorChannel(std::make_unique<TFakeNotifier>());
+
+        auto [sinkCode, sinkState] = MakeRemoteSink(1, TActorId{}, 0, 2, nullptr, actorChannel, 2);
+        auto producerCode = std::make_shared<TSourceCode>([&](void* state, TRowSet& rowSet) {
+            auto* producer = static_cast<TProducerState*>(state);
+            if (producer->Next > producer->Total) {
+                return ETaskResult::FINISHED;
+            }
+            rowSet = CountedRows(producer->Next++, &destroyed);
+            return ETaskResult::OK;
+        });
+        auto producerState = std::make_shared<TProducerState>(TProducerState{.Total = total});
+
+        auto producerToSink = std::make_unique<TOneToOneConnection>();
+        auto* producerToSinkPtr = producerToSink.get();
+        TTaskGraph graphA;
+        auto& producer = graphA.AddOwnedNode(std::make_unique<TSourceTask>(
+            producerCode, producerState, TOutputPort{.Connection = producerToSinkPtr}));
+        auto& sink = graphA.AddOwnedNode(std::make_unique<TSinkTask>(
+            sinkCode, sinkState, TInputPort{.Connection = producerToSinkPtr}));
+        graphA.AddOwnedEdge(producer, sink, std::move(producerToSink));
+        graphA.MarkExternal(sink, sinkState->Id);
+        const auto sealedA = graphA.Seal();
+        ASSERT_TRUE(sealedA);
+
+        auto [sourceCode, sourceState] = MakeRemoteSource(2, 2);
+        auto collectorCode = std::make_shared<TSinkCode>([](void* state, const TRowSet& rowSet) {
+            static_cast<TCollectorState*>(state)->Rows.push_back(rowSet.RowCount);
+            return ETaskResult::OK;
+        });
+        auto collectorState = std::make_shared<TCollectorState>();
+
+        auto sourceToCollector = std::make_unique<TOneToOneConnection>();
+        auto* sourceToCollectorPtr = sourceToCollector.get();
+        TTaskGraph graphB;
+        auto& source = graphB.AddOwnedNode(std::make_unique<TSourceTask>(
+            sourceCode, sourceState, TOutputPort{.Connection = sourceToCollectorPtr}));
+        auto& collector = graphB.AddOwnedNode(std::make_unique<TSinkTask>(
+            collectorCode, collectorState, TInputPort{.Connection = sourceToCollectorPtr}));
+        graphB.AddOwnedEdge(source, collector, std::move(sourceToCollector));
+        graphB.MarkExternal(source, sourceState->Id);
+        const auto sealedB = graphB.Seal();
+        ASSERT_TRUE(sealedB);
+
+        TThreadedScheduler schedulerA(sealedA, 2);
+        TThreadedScheduler schedulerB(sealedB, 2);
+        TSchedulerChannel channelA(schedulerA);
+        TSchedulerChannel channelB(schedulerB);
+
+        std::atomic<bool> stop = false;
+        std::thread actor([&] {
+            int64_t delivered = 0;
+            bool finished = false;
+            while (!stop.load(std::memory_order_acquire)) {
+                TRemoteSinkState* state = nullptr;
+                if (!actorChannel.Queue().TryPop(state)) {
+                    std::this_thread::yield();
+                    continue;
+                }
+                state->Drain([&](TRowSet&& rowSet) {
+                    while (!sourceState->Push(std::move(rowSet))) {
+                        channelB.Notify(sealedB.ExternalNode(sourceState->Id));
+                        std::this_thread::yield();
+                    }
+                    channelB.Notify(sealedB.ExternalNode(sourceState->Id));
+                    ++delivered;
+                });
+                channelA.Notify(sealedA.ExternalNode(state->Id));
+                if (delivered == total && !finished) {
+                    finished = true;
+                    sourceState->Finish();
+                    channelB.Notify(sealedB.ExternalNode(sourceState->Id));
+                }
+            }
+        });
+
+        std::string errorA;
+        std::string errorB;
+        bool okA = false;
+        bool okB = false;
+        std::thread runA([&] { okA = schedulerA.Run(&errorA); });
+        std::thread runB([&] { okB = schedulerB.Run(&errorB); });
+        runA.join();
+        runB.join();
+        stop.store(true, std::memory_order_release);
+        actor.join();
+
+        EXPECT_TRUE(okA) << errorA;
+        EXPECT_TRUE(okB) << errorB;
+        ASSERT_EQ(collectorState->Rows.size(), static_cast<size_t>(total));
+        for (int64_t i = 0; i < total; ++i) {
+            ASSERT_EQ(collectorState->Rows[i], i + 1);
+        }
+        EXPECT_EQ(destroyed.load(), total);
     }
 }
 
