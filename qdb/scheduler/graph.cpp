@@ -41,7 +41,7 @@ const char* ConnectionKindName(EConnectionKind kind) {
 
 } // namespace
 
-TTaskNode& TTaskGraph::AddNode(ITaskNode& task) {
+TTaskNode& TTaskGraph::AddNode(ITask& task) {
     if (Execution_) {
         throw std::logic_error("cannot add a task after preparing execution slots");
     }
@@ -60,7 +60,7 @@ TExecutionState& TTaskGraph::PrepareExecution() {
     return *Execution_;
 }
 
-TTaskNode& TTaskGraph::AddOwnedNode(std::unique_ptr<ITaskNode> task) {
+TTaskNode& TTaskGraph::AddOwnedNode(std::unique_ptr<ITask> task) {
     if (Execution_) {
         throw std::logic_error("cannot add a task after preparing execution slots");
     }

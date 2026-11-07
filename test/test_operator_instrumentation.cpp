@@ -489,7 +489,7 @@ TEST(OperatorInstrumentation, ShuffleAccountsSparseRetainedOwnersOnceAcrossParti
 }
 
 TEST(OperatorInstrumentation, ThreadCpuExcludesSleepingAndSurvivesWorkerMigration) {
-    class TSleepTask final : public ITaskNode {
+    class TSleepTask final : public ITask {
     public:
         ETaskResult Execute() override {
             std::this_thread::sleep_for(std::chrono::milliseconds(50));

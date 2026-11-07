@@ -23,9 +23,9 @@ enum class ETaskState {
     Finished = 4,
 };
 
-class ITaskNode {
+class ITask {
 public:
-    virtual ~ITaskNode() = default;
+    virtual ~ITask() = default;
 
     virtual ETaskResult Execute() = 0;
     virtual void ConfigureInstrumentation(TTaskInstrumentationSetup&) {}

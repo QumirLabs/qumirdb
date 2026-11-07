@@ -129,7 +129,7 @@ struct TMergeCode {
     TProcess Process;
 };
 
-class TSourceTask final : public ITaskNode {
+class TSourceTask final : public ITask {
 public:
     TSourceTask(
         std::shared_ptr<const TSourceCode> code,
@@ -146,7 +146,7 @@ private:
     bool Finished_ = false;
 };
 
-class TRuntimeFilterTask final : public ITaskNode {
+class TRuntimeFilterTask final : public ITask {
 public:
     TRuntimeFilterTask(
         std::shared_ptr<const TRuntimeFilterCode> code,
@@ -172,7 +172,7 @@ private:
     std::atomic<bool> DependencyNotified_ = false;
 };
 
-class TUnaryTask final : public ITaskNode {
+class TUnaryTask final : public ITask {
 public:
     TUnaryTask(
         std::shared_ptr<const TUnaryCode> code,
@@ -198,7 +198,7 @@ private:
     bool OutputFinished_ = false;
 };
 
-class TSinkTask final : public ITaskNode {
+class TSinkTask final : public ITask {
 public:
     TSinkTask(
         std::shared_ptr<const TSinkCode> code,
@@ -215,7 +215,7 @@ private:
     bool Finished_ = false;
 };
 
-class TBlockingTask final : public ITaskNode {
+class TBlockingTask final : public ITask {
 public:
     TBlockingTask(
         std::shared_ptr<const TBlockingCode> code,
@@ -237,7 +237,7 @@ private:
     bool OutputFinished_ = false;
 };
 
-class TBinaryBlockingTask final : public ITaskNode {
+class TBinaryBlockingTask final : public ITask {
 public:
     TBinaryBlockingTask(
         std::shared_ptr<const TBinaryBlockingCode> code,
@@ -263,7 +263,7 @@ private:
 };
 
 // N-input blocking task: reads several sorted runs and emits one stream.
-class TMergeTask final : public ITaskNode {
+class TMergeTask final : public ITask {
 public:
     TMergeTask(
         std::shared_ptr<const TMergeCode> code,
@@ -285,7 +285,7 @@ private:
     bool OutputFinished_ = false;
 };
 
-class THashShuffleTask final : public ITaskNode {
+class THashShuffleTask final : public ITask {
 public:
     THashShuffleTask(
         std::shared_ptr<const THashShuffleCode> code,
