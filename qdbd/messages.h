@@ -35,10 +35,9 @@ struct TSpawnComputeActorResponse {
     std::string Error;
 };
 
-// Push(srcId, TRowSet&&)
+// The receiving RemoteSource is selected by DstTaskId and pushes into its own output lane.
 struct TDataChunk {
     static constexpr NNet::NActors::TMessageId MessageId = 200;
-    uint64_t DstLaneId = 0;
     uint64_t DstTaskId = 0;
     TRowSet RowSet{};
     const TValueLayout* Descriptor = nullptr;
@@ -47,11 +46,10 @@ struct TDataChunk {
     ~TDataChunk() {}
 };
 
-// Finish(srcId)
+// The receiving RemoteSource is selected by DstTaskId and finishes its own output lane.
 struct TFinish {
     static constexpr NNet::NActors::TMessageId MessageId = 201;
-    uint32_t DstTaskId = 0;
-    uint32_t SrcLaneId = 0;
+    uint64_t DstTaskId = 0;
 };
 
 struct TTaskGraphMessage {

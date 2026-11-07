@@ -110,7 +110,6 @@ struct TMixedBatch {
             .OffsetWidth = 8,
         };
         Message.DstTaskId = 123;
-        Message.DstLaneId = 7;
         Message.Descriptor = Layouts.data();
         Message.RowSet = TRowSet{
             .Columns = Columns.data(),
@@ -123,7 +122,6 @@ struct TMixedBatch {
 
 void CheckMixed(const TDataChunk& message) {
     EXPECT_EQ(message.DstTaskId, 123);
-    EXPECT_EQ(message.DstLaneId, 7);
     const auto& rows = message.RowSet;
     ASSERT_EQ(rows.ColumnCount, 4);
     ASSERT_EQ(rows.RowCount, 3);
@@ -348,18 +346,18 @@ TEST(DistributedSerialization, RejectsEveryTruncatedPrefixWithoutChangingOutput)
 TEST(DistributedSerialization, RejectsInvalidDimensionsAndLayouts) {
     TMixedBatch original;
     const auto bytes = Encode(original.Message);
-    for (size_t offset : {16, 24}) {
+    for (size_t offset : {8, 16}) {
         auto invalid = bytes;
         Replace(invalid, offset, std::numeric_limits<uint64_t>::max());
         EXPECT_THROW(TDecodedChunk{invalid}, std::runtime_error);
     }
-    for (const auto [offset, value] : std::array<std::pair<size_t, uint8_t>, 3>{{{32, 3}, {33, 2}, {33, 1}}}) {
+    for (const auto [offset, value] : std::array<std::pair<size_t, uint8_t>, 3>{{{24, 3}, {25, 2}, {25, 1}}}) {
         auto invalid = bytes;
         Replace(invalid, offset, value);
         EXPECT_THROW(TDecodedChunk{invalid}, std::runtime_error);
     }
     auto huge = bytes;
-    Replace(huge, 24, static_cast<uint64_t>(std::numeric_limits<int64_t>::max()));
+    Replace(huge, 16, static_cast<uint64_t>(std::numeric_limits<int64_t>::max()));
     EXPECT_THROW(TDecodedChunk{huge}, std::runtime_error);
     TDataChunk empty;
     auto flag = Encode(empty);
@@ -377,16 +375,16 @@ TEST(DistributedSerialization, RejectsInvalidStringOffsets) {
     message.RowSet = {.Columns = &column, .ColumnCount = 1, .RowCount = 3};
     const auto bytes = Encode(message);
     auto invalid = bytes;
-    Replace(invalid, 34, uint8_t{3});
+    Replace(invalid, 26, uint8_t{3});
     EXPECT_THROW(TDecodedChunk{invalid}, std::runtime_error);
     for (uint32_t first : {1u, std::numeric_limits<uint32_t>::max()}) {
         invalid = bytes;
-        Replace(invalid, 35, first);
+        Replace(invalid, 27, first);
         EXPECT_THROW(TDecodedChunk{invalid}, std::runtime_error);
     }
     for (uint32_t last : {2u, 1000u}) {
         invalid = bytes;
-        Replace(invalid, 47, last);
+        Replace(invalid, 39, last);
         EXPECT_THROW(TDecodedChunk{invalid}, std::runtime_error);
     }
 }
@@ -1194,7 +1192,7 @@ TEST(DistributedScheduler, RemoteTasksMoveRowSetsInOrder) {
         std::atomic<int> destroyed = 0;
         TActorNotificationChannel actorChannel(std::make_unique<TFakeNotifier>());
 
-        auto [sinkCode, sinkState] = MakeRemoteSink(1, TActorId{}, 0, 2, nullptr, actorChannel, 2);
+        auto [sinkCode, sinkState] = MakeRemoteSink(1, TActorId{}, 2, nullptr, actorChannel, 2);
         auto producerCode = std::make_shared<TSourceCode>([&](void* state, TRowSet& rowSet) {
             auto* producer = static_cast<TProducerState*>(state);
             if (producer->Next > producer->Total) {

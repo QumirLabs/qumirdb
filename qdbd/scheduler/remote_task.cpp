@@ -14,14 +14,12 @@ using namespace NRemote;
 TRemoteSinkState::TRemoteSinkState(
     uint64_t id,
     NNet::NActors::TActorId actorId,
-    uint64_t dstLaneId,
     uint64_t dstTaskId,
     const TValueLayout* descriptor,
     TActorNotificationChannel& actorChannel,
     size_t outboxCapacity)
     : Id(id)
     , ActorId(actorId)
-    , DstLaneId(dstLaneId)
     , DstTaskId(dstTaskId)
     , Descriptor(descriptor)
     , ActorChannel(actorChannel)
@@ -56,7 +54,6 @@ ETaskResult TRemoteSinkState::Write(const TRowSet& rowSet) {
 void TRemoteSinkState::SendQueue(NNet::NActors::TActorContext::TPtr& ctx) {
     Drain([&](TRowSet&& rowSet) {
         ctx->Send<TDataChunk>(ActorId, TDataChunk {
-            .DstLaneId = DstLaneId,
             .DstTaskId = DstTaskId,
             .RowSet = rowSet,
             .Descriptor = Descriptor,
@@ -94,7 +91,6 @@ ETaskResult TRemoteSourceState::Next(TRowSet& rowSet) {
 std::pair<std::shared_ptr<const TSinkCode>, std::shared_ptr<TRemoteSinkState>> MakeRemoteSink(
     uint64_t id,
     NNet::NActors::TActorId actorId,
-    uint64_t dstLaneId,
     uint64_t dstTaskId,
     const TValueLayout* descriptor,
     TActorNotificationChannel& actorChannel,
@@ -104,7 +100,7 @@ std::pair<std::shared_ptr<const TSinkCode>, std::shared_ptr<TRemoteSinkState>> M
         return static_cast<TRemoteSinkState*>(state)->Write(rowSet);
     });
     auto state = std::make_shared<TRemoteSinkState>(
-        id, actorId, dstLaneId, dstTaskId, descriptor, actorChannel, outboxCapacity);
+        id, actorId, dstTaskId, descriptor, actorChannel, outboxCapacity);
     return {std::move(code), std::move(state)};
 }
 

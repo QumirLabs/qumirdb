@@ -53,7 +53,6 @@ struct TRemoteSinkState {
     TRemoteSinkState(
         uint64_t id,
         NNet::NActors::TActorId actorId,
-        uint64_t dstLaneId,
         uint64_t dstTaskId,
         const TValueLayout* descriptor,
         TActorNotificationChannel& actorChannel,
@@ -86,7 +85,6 @@ struct TRemoteSinkState {
 
     const uint64_t Id;
     NNet::NActors::TActorId ActorId;
-    uint64_t DstLaneId;
     uint64_t DstTaskId;
     const TValueLayout* Descriptor;
     TActorNotificationChannel& ActorChannel;
@@ -116,7 +114,6 @@ struct TRemoteSourceState {
 std::pair<std::shared_ptr<const TSinkCode>, std::shared_ptr<TRemoteSinkState>> MakeRemoteSink(
     uint64_t id,
     NNet::NActors::TActorId actorId,
-    uint64_t dstLaneId,
     uint64_t dstTaskId,
     const TValueLayout* descriptor,
     TActorNotificationChannel& actorChannel,

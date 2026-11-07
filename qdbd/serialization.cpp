@@ -329,7 +329,6 @@ void SerializeToStream(const TDataChunk& message, std::ostringstream& output) {
     ByteSize(columns, 2);
     TWriter writer(output);
     writer.Value<uint64_t>(message.DstTaskId);
-    writer.Value<uint64_t>(message.DstLaneId);
     writer.Value<uint64_t>(columns);
     writer.Value<uint64_t>(rows);
     for (uint64_t i = 0; i < columns; ++i) {
@@ -366,7 +365,6 @@ template<>
 void DeserializeFromStream(TDataChunk& message, std::istringstream& input) {
     TReader reader(input);
     const auto task = reader.Value<uint64_t>();
-    const auto lane = reader.Value<uint64_t>();
     const auto columns = reader.Value<uint64_t>();
     const auto rows = reader.Value<uint64_t>();
     if (rows > std::numeric_limits<int64_t>::max() || columns > reader.Remaining() / 2) {
@@ -404,7 +402,6 @@ void DeserializeFromStream(TDataChunk& message, std::istringstream& input) {
     }
     reader.Finish();
     message.DstTaskId = task;
-    message.DstLaneId = lane;
     message.Descriptor = storage->Layouts.data();
     message.RowSet = TRowSet{
         .Columns = storage->Columns.data(),
