@@ -1,4 +1,5 @@
 #pragma once
+#include "qdb/scheduler/graph.h"
 #include <coroio/actors/actor.hpp>
 #include <qdb/io/io.h>
 #include <qdb/io/rowset_ops.h>
@@ -51,6 +52,12 @@ struct TFinish {
     static constexpr NNet::NActors::TMessageId MessageId = 201;
     uint32_t DstTaskId = 0;
     uint32_t SrcLaneId = 0;
+};
+
+struct TTaskGraphMessage {
+    static constexpr NNet::NActors::TMessageId MessageId = 202;
+    using LocalMessage = void; // TODO: must be serializable
+    NScheduler::TTaskNode* Node = nullptr;
 };
 
 // TODO: Fetch is local, do we need a message for it ?

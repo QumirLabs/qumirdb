@@ -1,6 +1,7 @@
 #pragma once
 
 #include <qdb/scheduler/task.h>
+#include <qdb/scheduler/graph.h>
 #include <qdb/scheduler/utils/mpsc.h>
 
 #include <coroio/notifier.hpp>
@@ -46,9 +47,18 @@ public:
         Queued.store(false);
     }
 
+    void SetNode(NScheduler::TTaskNode* node) {
+        Node = node;
+    }
+
+    NScheduler::TTaskNode* Meta() const {
+        return Node;
+    }
+
 private:
     TActorNotificationChannel& ActorChannel;
     std::atomic<bool> Queued = false;
+    NScheduler::TTaskNode* Node = nullptr;
 };
 
 } // namespace NScheduler

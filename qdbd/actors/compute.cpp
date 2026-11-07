@@ -1,6 +1,7 @@
 #include <coroio/actors/actorsystem.hpp>
 #include <qdbd/messages.h>
 #include <qdbd/scheduler/actor_task_node.h>
+#include <qdb/scheduler/channel.h>
 
 #include "compute.h"
 #include "pinger.h"
@@ -14,7 +15,10 @@ using namespace NNet::NActors;
 namespace {
 
 struct TComputeActor : public IBehaviorActor {
-    struct TDefaultBehavior : public TBehavior<TDefaultBehavior> {
+    struct TDefaultBehavior : public TBehavior<TDefaultBehavior, TTaskGraphMessage> {
+        void Receive(TTaskGraphMessage&&, TBlob, TActorContext::TPtr ctx) {
+        }
+
         void HandleUnknownMessage(TMessageId messageId, TBlob blob, TActorContext::TPtr ctx)
         {
         }
@@ -38,10 +42,10 @@ struct TComputeActor : public IBehaviorActor {
     }
 
     void AfterRegister(TActorContext::TPtr ctx) override {
-        Channel = std::make_unique<NScheduler::TActorNotificationChannel>(ctx->CreateNotifier());
+        ActorChannel = std::make_unique<NScheduler::TActorNotificationChannel>(ctx->CreateNotifier());
 
         NotificationTask = [&]() -> TVoidSuspendedTask {
-            co_await Channel->Wait();
+            co_await ActorChannel->Wait();
             ProcessNotifications();
         }();
     }
@@ -51,11 +55,12 @@ struct TComputeActor : public IBehaviorActor {
         // e.g. ComputeActorNotifier -> consumer notification queue -> send to ComputeActor
         // need to do it if we move Actors to multithreaded model
 
-        auto& queue = Channel->Queue();
+        auto& queue = ActorChannel->Queue();
         NQdb::NScheduler::TActorTaskNode* task = nullptr;
         while (queue.TryPop(task)) {
             // process
             task->Mark();
+            SchedulerSchannel->Notify(task->Meta());
         }
     }
 
@@ -73,7 +78,8 @@ struct TComputeActor : public IBehaviorActor {
 
     TDefaultBehavior Behavior;
     std::shared_ptr<TRuntimeResources> Resources;
-    std::unique_ptr<NScheduler::TActorNotificationChannel> Channel;
+    std::unique_ptr<NScheduler::TActorNotificationChannel> ActorChannel;
+    std::unique_ptr<NScheduler::TSchedulerChannel> SchedulerSchannel;
     TVoidSuspendedTask NotificationTask;
 };
 
