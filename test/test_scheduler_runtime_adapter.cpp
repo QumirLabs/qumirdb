@@ -3,6 +3,7 @@
 #include "runtime_filter_test_util.h"
 
 #include <qdb/plan/types/nullable.h>
+#include <qdb/scheduler/channel.h>
 #include <qdb/scheduler/connection.h>
 #include <qdb/scheduler/connections/local.h>
 #include <qdb/scheduler/graph.h>
@@ -301,7 +302,8 @@ void RunWaitingGraph(
     std::shared_ptr<TSinkCode> sinkCode,
     std::shared_ptr<TWaitingState> state,
     bool wakeSink,
-    TSchedulerRunStats* stats)
+    TSchedulerRunStats* stats,
+    bool wakeByExternalId = false)
 {
     TTaskGraph graph;
     auto connection = std::make_unique<TOneToOneConnection>();
@@ -311,17 +313,24 @@ void RunWaitingGraph(
     auto& sink = graph.AddOwnedNode(std::make_unique<TSinkTask>(
         sinkCode, state, TInputPort{.Connection = connectionPtr}));
     graph.AddOwnedEdge(source, sink, std::move(connection));
+    constexpr uint64_t externalId = 42;
+    if (wakeByExternalId) {
+        graph.MarkExternal(wakeSink ? sink : source, externalId);
+    }
     std::string error;
     const auto sealed = graph.Seal(&error);
     ASSERT_TRUE(sealed) << error;
 
     TThreadedScheduler scheduler(sealed, 2);
-    TTaskNode* wake = wakeSink ? &sink : &source;
+    TSchedulerChannel channel(scheduler);
+    TTaskNode* wake = wakeByExternalId ? sealed.ExternalNode(externalId)
+        : wakeSink ? &sink : &source;
+    ASSERT_NE(wake, nullptr);
     std::thread waker([&] {
         while (!state->Waited.load(std::memory_order_acquire)) {
             std::this_thread::yield();
         }
-        scheduler.Schedule(wake);
+        channel.Notify(wake);
     });
     const bool ok = scheduler.Run(&error);
     waker.join();
@@ -363,6 +372,38 @@ TEST(SchedulerRuntimeAdapter, SourceWaitsForExternalSchedule) {
     EXPECT_EQ(state->Rows, 5);
     EXPECT_EQ(stats.Waiting, 1u);
     EXPECT_EQ(destroyCount->load(std::memory_order_relaxed), 1);
+}
+
+TEST(SchedulerRuntimeAdapter, SourceWokenByExternalIdThroughChannel) {
+    auto destroyCount = std::make_shared<std::atomic<int>>(0);
+    auto state = std::make_shared<TWaitingState>();
+    auto sourceCode = std::make_shared<TSourceCode>(
+        [destroyCount](void* raw, TRowSet& rowSet) {
+            auto* s = static_cast<TWaitingState*>(raw);
+            switch (s->Calls++) {
+                case 0:
+                    s->Waited.store(true, std::memory_order_release);
+                    return ETaskResult::WAITING;
+                case 1:
+                    rowSet = MakeRowSet(5, destroyCount.get());
+                    return ETaskResult::OK;
+                default:
+                    return ETaskResult::FINISHED;
+            }
+        });
+    auto sinkCode = std::make_shared<TSinkCode>(
+        [](void* raw, const TRowSet& rowSet) {
+            auto* s = static_cast<TWaitingState*>(raw);
+            s->Rows += static_cast<int>(rowSet.RowCount);
+            ++s->Batches;
+            return ETaskResult::OK;
+        });
+
+    TSchedulerRunStats stats;
+    RunWaitingGraph(sourceCode, sinkCode, state, false, &stats, true);
+    EXPECT_EQ(state->Calls, 3);
+    EXPECT_EQ(state->Rows, 5);
+    EXPECT_EQ(stats.Waiting, 1u);
 }
 
 TEST(SchedulerRuntimeAdapter, SinkRetriesPendingRowSetAfterWaiting) {

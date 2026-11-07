@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <iosfwd>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -50,6 +51,12 @@ struct TTaskEdge {
     size_t ExecInput = 0;
 };
 
+// A node woken from outside the graph (e.g. by a remote channel) under `Id`.
+struct TExternalNode {
+    uint64_t Id = 0;
+    TTaskNode* Node = nullptr;
+};
+
 // A validated, frozen graph; only TTaskGraph::Seal() makes a non-empty one.
 class TSealedTaskGraph {
 public:
@@ -67,16 +74,22 @@ public:
         return TaskCount_;
     }
 
+    // The node marked external under `id`, or nullptr.
+    TTaskNode* ExternalNode(uint64_t id) const;
+
 private:
     friend class TTaskGraph;
 
-    TSealedTaskGraph(TTaskNode& root, size_t taskCount)
+    TSealedTaskGraph(TTaskNode& root, size_t taskCount, std::span<const TExternalNode> externals)
         : Root_(&root)
         , TaskCount_(taskCount)
+        , Externals_(externals)
     {}
 
     TTaskNode* Root_ = nullptr;
     size_t TaskCount_ = 0;
+    // Sorted by Id.
+    std::span<const TExternalNode> Externals_;
 };
 
 class TTaskGraph {
@@ -104,6 +117,9 @@ public:
     // Carries wakeups and demand, but no rowsets or exec-stage input.
     TTaskEdge& AddDependencyEdge(TTaskNode& producer, TTaskNode& consumer);
 
+    // Names a node that is woken from outside the graph; ids must be unique.
+    void MarkExternal(TTaskNode& node, uint64_t id);
+
     // Builds adjacency, validates and freezes the graph; empty on error.
     TSealedTaskGraph Seal(std::string* error = nullptr);
     void SetConnectionStatsEnabled(bool enabled);
@@ -126,6 +142,7 @@ private:
     std::vector<std::unique_ptr<ITask>> OwnedTasks_;
     std::vector<std::unique_ptr<TTaskEdge>> Edges_;
     std::vector<TTaskNode*> Leaves_;
+    std::vector<TExternalNode> Externals_;
     TTaskNode* Root_ = nullptr;
     bool Sealed_ = false;
 };

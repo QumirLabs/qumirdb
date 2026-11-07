@@ -1,6 +1,7 @@
 #include <qdb/scheduler/graph.h>
 
 #include <algorithm>
+#include <cassert>
 #include <deque>
 #include <format>
 #include <ostream>
@@ -56,6 +57,19 @@ TTaskNode& TTaskGraph::AddOwnedNode(std::unique_ptr<ITask> task) {
     auto* ptr = task.get();
     OwnedTasks_.push_back(std::move(task));
     return AddNode(*ptr);
+}
+
+void TTaskGraph::MarkExternal(TTaskNode& node, uint64_t id) {
+    CheckMutable();
+    if (std::ranges::none_of(Nodes_, [&](const auto& owned) { return owned.get() == &node; })) {
+        throw std::logic_error("cannot mark a node from another task graph as external");
+    }
+    Externals_.push_back({id, &node});
+}
+
+TTaskNode* TSealedTaskGraph::ExternalNode(uint64_t id) const {
+    auto it = std::ranges::lower_bound(Externals_, id, {}, &TExternalNode::Id);
+    return it != Externals_.end() && it->Id == id ? it->Node : nullptr;
 }
 
 IConnection& TTaskGraph::AddConnection(std::unique_ptr<IConnection> connection) {
@@ -134,6 +148,9 @@ void TTaskGraph::Build() {
         node->State.store(ETaskState::Idle, std::memory_order_release);
     }
 
+    // Validate() and ExternalNode() rely on Externals_ being sorted by id.
+    std::ranges::stable_sort(Externals_, {}, &TExternalNode::Id);
+
     for (auto& edge : Edges_) {
         edge->Src->Outbound.push_back(edge.get());
         edge->Dst->Inbound.push_back(edge.get());
@@ -157,7 +174,7 @@ TSealedTaskGraph TTaskGraph::Seal(std::string* error) {
         }
         Sealed_ = true;
     }
-    return TSealedTaskGraph(*Root_, Nodes_.size());
+    return TSealedTaskGraph(*Root_, Nodes_.size(), Externals_);
 }
 
 void TTaskGraph::CheckMutable() const {
@@ -187,6 +204,15 @@ bool TTaskGraph::Validate(std::string* error) const {
         }
         if (std::ranges::none_of(node->Outbound, IsRowsetEdge)) {
             ++rootCount;
+        }
+    }
+
+    assert(std::ranges::is_sorted(Externals_, {}, &TExternalNode::Id));
+    for (size_t i = 1; i < Externals_.size(); ++i) {
+        if (Externals_[i].Id == Externals_[i - 1].Id) {
+            SetError(error, std::format(
+                "task graph has duplicate external node id {}", Externals_[i].Id));
+            return false;
         }
     }
 

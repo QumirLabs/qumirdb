@@ -169,8 +169,64 @@ TEST(SchedulerGraph, SealFreezesStructure) {
     EXPECT_THROW(graph.AddEdge(source, sink, connection), std::logic_error);
     EXPECT_THROW(graph.AddOwnedEdge(source, sink, {}), std::logic_error);
     EXPECT_THROW(graph.AddDependencyEdge(source, sink), std::logic_error);
+    EXPECT_THROW(graph.MarkExternal(source, 1), std::logic_error);
     EXPECT_EQ(graph.Nodes().size(), 2u);
     EXPECT_EQ(graph.Edges().size(), 1u);
+}
+
+TEST(SchedulerGraph, ExternalNodeLookup) {
+    TNoopTask task;
+    TTaskGraph graph;
+    auto& source = graph.AddNode(task);
+    auto& sink = graph.AddNode(task);
+    graph.AddOwnedEdge(source, sink, std::make_unique<TOneToOneConnection>());
+    graph.MarkExternal(sink, 9);
+    graph.MarkExternal(source, 3);
+    std::string error;
+    const auto sealed = graph.Seal(&error);
+    ASSERT_TRUE(sealed) << error;
+
+    EXPECT_EQ(sealed.ExternalNode(3), &source);
+    EXPECT_EQ(sealed.ExternalNode(9), &sink);
+    EXPECT_EQ(sealed.ExternalNode(4), nullptr);
+}
+
+TEST(SchedulerGraph, RejectsDuplicateExternalIds) {
+    TNoopTask task;
+    TTaskGraph graph;
+    auto& source = graph.AddNode(task);
+    auto& sink = graph.AddNode(task);
+    graph.AddOwnedEdge(source, sink, std::make_unique<TOneToOneConnection>());
+    graph.MarkExternal(source, 5);
+    graph.MarkExternal(sink, 5);
+    std::string error;
+    EXPECT_FALSE(graph.Seal(&error));
+    EXPECT_EQ(error, "task graph has duplicate external node id 5");
+}
+
+TEST(SchedulerGraph, MarkExternalRejectsForeignNode) {
+    TNoopTask task;
+    TTaskGraph graph;
+    TTaskGraph other;
+    graph.AddNode(task);
+    auto& foreign = other.AddNode(task);
+    EXPECT_THROW(graph.MarkExternal(foreign, 1), std::logic_error);
+}
+
+TEST(SchedulerGraph, RepeatedSealKeepsExternalNodes) {
+    TNoopTask task;
+    TTaskGraph graph;
+    auto& source = graph.AddNode(task);
+    auto& sink = graph.AddNode(task);
+    graph.AddOwnedEdge(source, sink, std::make_unique<TOneToOneConnection>());
+    graph.MarkExternal(sink, 9);
+    graph.MarkExternal(source, 3);
+    ASSERT_TRUE(graph.Seal());
+
+    const auto sealed = graph.Seal();
+    ASSERT_TRUE(sealed);
+    EXPECT_EQ(sealed.ExternalNode(3), &source);
+    EXPECT_EQ(sealed.ExternalNode(9), &sink);
 }
 
 TEST(SchedulerGraph, RepeatedSealPreservesTaskState) {
