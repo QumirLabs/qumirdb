@@ -103,7 +103,7 @@ or in the wiki; architectural chapters should explain the algorithms themselves.
 | Join ordering, DPccp, and estimates | `qdb/plan/passes/join_order.cpp`, `qdb/plan/passes/cbo/dpccp.cpp`, `qdb/plan/passes/estimate_stats.cpp` |
 | Predicate placement and join keys | `qdb/plan/passes/equijoin.cpp` |
 | Physical task lowering and parallel aggregation | `qdb/scheduler/lowering/plan_lowerer.cpp`, `qdb/exec/planner_helpers.cpp` |
-| Task protocol, graphs, connections, scheduling | `qdb/scheduler/task.h`, `qdb/scheduler/graph.h`, `qdb/scheduler/connection.h`, `qdb/scheduler/impl/threaded_scheduler.cpp` |
+| Task protocol, graphs, connections, scheduling | `qdb/scheduler/task.h`, `qdb/scheduler/channel.h`, `qdb/scheduler/graph.h`, `qdb/scheduler/connection.h`, `qdb/scheduler/impl/threaded_scheduler.cpp` |
 | Kernel specifications, generation, finalization | `qdb/kernel/spec.h`, `qdb/kernel/compiler.cpp`, `qdb/kernel/finalize.cpp` |
 | Aggregate key types and generated reducers | `qdb/kernel/aggregate_key.cpp`, `qdb/kernel/gen.cpp`, `qdb/kernel/lib.cpp` |
 | Join keys and generated matching/materialization | `qdb/kernel/join_key.cpp`, `qdb/kernel/join_gen.cpp` |

@@ -6,6 +6,9 @@
 #include <qdbd/actors/local_scheduler.h>
 #include <qdbd/actors/scheduler.h>
 #include <qdbd/http/router.h>
+#include <qdbd/scheduler/actor_task_node.h>
+#include <qdb/scheduler/impl/threaded_scheduler.h>
+#include <qdb/scheduler/channel.h>
 
 #include <coroio/all.hpp>
 #include <coroio/actors/actorsystem.hpp>
@@ -25,6 +28,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <thread>
 #include <unordered_set>
 
 namespace {
@@ -885,6 +889,73 @@ TEST(DistributedSerialization, AllocationErrorRoundTrip) {
     Replace(invalid, 4, std::numeric_limits<uint32_t>::max());
     std::istringstream badLength(invalid);
     EXPECT_THROW(DeserializeFromStream(decoded, badLength), std::runtime_error);
+}
+
+namespace {
+
+using namespace NQdb::NScheduler;
+
+class TCompletingActorTask : public TActorTaskNode {
+public:
+    using TActorTaskNode::TActorTaskNode;
+
+    ETaskResult Execute() override {
+        return Completed.load(std::memory_order_acquire)
+            ? ETaskResult::FINISHED : TActorTaskNode::Execute();
+    }
+
+    std::atomic<bool> Completed = false;
+};
+
+NNet::TFuture<TActorTaskNode*> CompleteActorTask(
+    TActorNotificationChannel& channel, NScheduler::TSchedulerChannel& scheduler,
+    NScheduler::TTaskNode& node, std::atomic<bool>& completed)
+{
+    co_await channel.Wait();
+    TActorTaskNode* task = nullptr;
+    if (channel.Queue().TryPop(task)) {
+        task->Mark();
+        completed.store(true, std::memory_order_release);
+        scheduler.Notify(&node);
+    }
+    co_return task;
+}
+
+} // namespace
+
+TEST(DistributedScheduler, ActorChannelReturnsTaskThroughSchedulerChannel) {
+    using namespace NQdb::NScheduler;
+    for (size_t workers : {1, 4}) {
+        SCOPED_TRACE(workers);
+        NNet::TLoop<NNet::TDefaultPoller> loop;
+        loop.Poller().SetMaxDuration(std::chrono::milliseconds(1));
+        TActorNotificationChannel actorChannel(loop.Poller().CreateNotifier());
+        TCompletingActorTask task(actorChannel);
+        TTaskGraph graph;
+        auto& node = graph.AddNode(task);
+        const auto sealed = graph.Seal();
+        ASSERT_TRUE(sealed);
+        TThreadedScheduler scheduler(sealed, workers);
+        TSchedulerChannel schedulerChannel(scheduler);
+        auto listener = CompleteActorTask(actorChannel, schedulerChannel, node, task.Completed);
+        std::string error;
+        bool success = false;
+        std::thread runner([&] { success = scheduler.Run(&error); });
+        const auto deadline = NNet::TClock::now() + std::chrono::seconds(5);
+        while (!listener.done() && NNet::TClock::now() < deadline) {
+            loop.Step();
+        }
+        if (!listener.done()) {
+            task.Completed.store(true, std::memory_order_release);
+            schedulerChannel.Notify(&node);
+        }
+        runner.join();
+        ASSERT_TRUE(listener.done());
+        EXPECT_EQ(listener.await_resume(), &task);
+        EXPECT_TRUE(success) << error;
+        EXPECT_EQ(scheduler.Stats().Executed, 2);
+        EXPECT_EQ(scheduler.Stats().Waiting, 1);
+    }
 }
 
 TEST(DistributedAllocation, NoNodesIsAnExplicitErrorAndZeroCountSucceeds) {

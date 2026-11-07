@@ -37,7 +37,7 @@ private:
     TMPSCQueue<TActorTaskNode*> ReadyQueue;
 };
 
-class TActorTaskNode : public ITaskNode {
+class TActorTaskNode : public ITask {
 public:
     TActorTaskNode(TActorNotificationChannel& actorChannel);
 

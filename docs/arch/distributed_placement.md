@@ -60,10 +60,21 @@ after publication, so a delayed producer can wake the actor again. A full queue
 rejects a push without moving its value. Element moves must not throw because
 later producers may already have reserved slots beyond a failed publication.
 
-This model requires a generic external-wakeup contract in the scheduler. A
-`WAITING` result suspends a task until an external event; a thread-safe `Wake`
-reschedules it without losing notifications that arrive during execution.
-An empty ready queue is not completion while external work remains pending,
-and wakeup handles must respect the graph's lifetime. The actor-specific
-bridge belongs in `qdbd`; the scheduler only needs waiting and wakeup semantics.
-This exchange is a design proposal, not an implemented execution path.
+The threaded scheduler supports external wakeups through a scheduler channel.
+The channel holds a reference to `IThreadedScheduler` and directly calls its
+thread-safe `Schedule` method. Producers publish progress before notifying the
+corresponding graph node. A `WAITING` result suspends the task without requesting
+upstream or downstream work. A notification received during execution records
+a reschedule request; one received after suspension puts the task back into
+the ready queue. Duplicate notifications do not cause concurrent execution.
+
+The channel does not own the scheduler or graph: its caller must stop external
+producers before destroying either. No binding or callback registration is
+needed. The scheduler continues waiting when its ready queue is empty and the
+root is unfinished. Root completion ends the run even if abandoned upstream
+branches still await external events. The simple single-threaded scheduler
+rejects external waits; the threaded implementation supports them even with
+one worker.
+
+The actor-specific bridge belongs in `qdbd`. Network data transfer and the
+Query-to-compute-actor lifecycle protocol remain outside this preparatory work.

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <qdb/kernel/execution_context.h>
+#include <qdb/scheduler/threaded_scheduler.h>
 #include <qdb/scheduler/graph.h>
 #include <qdb/scheduler/utils/mpmc.h>
 
@@ -13,13 +14,6 @@
 
 namespace NQdb {
 namespace NScheduler {
-
-class IThreadedScheduler {
-public:
-    virtual ~IThreadedScheduler() = default;
-
-    virtual void Schedule(TTaskNode* task) = 0;
-};
 
 class TThreadedScheduler : public IThreadedScheduler {
 public:

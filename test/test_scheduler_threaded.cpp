@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <qdb/scheduler/channel.h>
 #include <qdb/scheduler/connection.h>
 #include <qdb/scheduler/connections/local.h>
 #include <qdb/scheduler/graph.h>
@@ -7,6 +8,8 @@
 #include <qdb/scheduler/impl/threaded_scheduler.h>
 
 #include <atomic>
+#include <chrono>
+#include <latch>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -177,6 +180,218 @@ std::unique_ptr<TTaskGraph> MakeRepeatGraph(TRepeatTask*& task, int repeats) {
     graph->AddOwnedNode(std::move(repeat));
     EXPECT_TRUE(graph->Seal());
     return graph;
+}
+
+class TSelfWakeTask : public ITask {
+public:
+    ETaskResult Execute() override {
+        if (++Calls == 1) {
+            for (int i = 0; i < 100; ++i) {
+                Channel->Notify(Node);
+            }
+            return ETaskResult::WAITING;
+        }
+        return ETaskResult::FINISHED;
+    }
+
+    TSchedulerChannel* Channel = nullptr;
+    TTaskNode* Node = nullptr;
+    int Calls = 0;
+};
+
+class TExternalTask : public ITask {
+public:
+    ETaskResult Execute() override {
+        ++Calls;
+        return Ready.load(std::memory_order_acquire) ? ETaskResult::FINISHED : ETaskResult::WAITING;
+    }
+
+    std::atomic<bool> Ready = false;
+    int Calls = 0;
+};
+
+class THeldExternalTask : public ITask {
+public:
+    ETaskResult Execute() override {
+        if (Running_.exchange(true, std::memory_order_acq_rel)) {
+            Violations.fetch_add(1, std::memory_order_relaxed);
+        }
+        const bool first = ++Calls == 1;
+        if (first) {
+            Entered.count_down();
+            Return.wait();
+        }
+        Running_.store(false, std::memory_order_release);
+        return first ? ETaskResult::WAITING : ETaskResult::FINISHED;
+    }
+
+    std::latch Entered{1};
+    std::latch Return{1};
+    int Calls = 0;
+    std::atomic<int> Violations = 0;
+
+private:
+    std::atomic<bool> Running_ = false;
+};
+
+TEST(SchedulerExternal, WakeDuringExecuteIsRetained) {
+    for (size_t workers : {1, 4}) {
+        SCOPED_TRACE(workers);
+        TSelfWakeTask task;
+        TTaskGraph graph;
+        auto& node = graph.AddNode(task);
+        const auto sealed = graph.Seal();
+        ASSERT_TRUE(sealed);
+        TThreadedScheduler scheduler(sealed, workers);
+        TSchedulerChannel channel(scheduler);
+        task.Channel = &channel;
+        task.Node = &node;
+        std::string error;
+        EXPECT_TRUE(scheduler.Run(&error)) << error;
+        EXPECT_EQ(task.Calls, 2);
+        EXPECT_EQ(scheduler.Stats().Executed, 2);
+        EXPECT_EQ(scheduler.Stats().Waiting, 1);
+    }
+}
+
+void CheckWakeAfterWaiting(TThreadedScheduler& scheduler, TTaskNode& node, TExternalTask& task) {
+    std::string error;
+    bool success = false;
+    std::atomic<bool> returned = false;
+    TSchedulerChannel channel(scheduler);
+    std::thread runner([&] {
+        success = scheduler.Run(&error);
+        returned.store(true, std::memory_order_release);
+    });
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (node.State.load(std::memory_order_acquire) != ETaskState::Waiting
+        && !returned.load(std::memory_order_acquire)
+        && std::chrono::steady_clock::now() < deadline)
+    {
+        std::this_thread::yield();
+    }
+    EXPECT_EQ(node.State.load(std::memory_order_acquire), ETaskState::Waiting);
+    EXPECT_FALSE(returned.load(std::memory_order_acquire));
+    task.Ready.store(true, std::memory_order_release);
+    channel.Notify(&node);
+    runner.join();
+    EXPECT_TRUE(success) << error;
+    EXPECT_EQ(task.Calls, 2);
+    EXPECT_EQ(scheduler.Stats().Waiting, 1);
+}
+
+TEST(SchedulerExternal, EmptyReadyQueueWaitsForExternalCompletion) {
+    for (size_t workers : {1, 4}) {
+        SCOPED_TRACE(workers);
+        TTaskGraph graph;
+        TExternalTask task;
+        auto& node = graph.AddNode(task);
+        const auto sealed = graph.Seal();
+        ASSERT_TRUE(sealed);
+        TThreadedScheduler scheduler(sealed, workers);
+        CheckWakeAfterWaiting(scheduler, node, task);
+    }
+}
+
+void CheckConcurrentWakes(TThreadedScheduler& scheduler, TTaskNode& node, THeldExternalTask& task) {
+    std::string error;
+    bool success = false;
+    TSchedulerChannel channel(scheduler);
+    std::thread runner([&] { success = scheduler.Run(&error); });
+    task.Entered.wait();
+    std::vector<std::thread> producers;
+    for (int i = 0; i < 4; ++i) {
+        producers.emplace_back([&] {
+            for (int j = 0; j < 1000; ++j) {
+                channel.Notify(&node);
+            }
+        });
+    }
+    for (auto& producer : producers) {
+        producer.join();
+    }
+    task.Return.count_down();
+    runner.join();
+    EXPECT_TRUE(success) << error;
+    EXPECT_EQ(task.Calls, 2);
+    EXPECT_EQ(task.Violations.load(std::memory_order_relaxed), 0);
+    EXPECT_EQ(scheduler.Stats().Waiting, 1);
+}
+
+TEST(SchedulerExternal, ConcurrentDuplicateWakesDoNotExecuteTaskConcurrently) {
+    for (size_t workers : {1, 4}) {
+        SCOPED_TRACE(workers);
+        TTaskGraph graph;
+        THeldExternalTask task;
+        auto& node = graph.AddNode(task);
+        const auto sealed = graph.Seal();
+        ASSERT_TRUE(sealed);
+        TThreadedScheduler scheduler(sealed, workers);
+        CheckConcurrentWakes(scheduler, node, task);
+    }
+}
+
+TEST(SchedulerExternal, FinishedTaskIgnoresExternalWakes) {
+    TFinishTask task;
+    TTaskGraph graph;
+    auto& node = graph.AddNode(task);
+    const auto sealed = graph.Seal();
+    ASSERT_TRUE(sealed);
+    TThreadedScheduler scheduler(sealed, 2);
+    TSchedulerChannel channel(scheduler);
+    std::string error;
+    ASSERT_TRUE(scheduler.Run(&error)) << error;
+    const auto scheduled = scheduler.Stats().Scheduled;
+    channel.Notify(&node);
+    channel.Notify(nullptr);
+    EXPECT_EQ(scheduler.Stats().Scheduled, scheduled);
+}
+
+void CheckEarlyCompletion(TThreadedScheduler& scheduler, TTaskNode& source, TTaskNode& root) {
+    std::string error;
+    bool success = false;
+    std::thread runner([&] { success = scheduler.Run(&error); });
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (source.State.load(std::memory_order_acquire) != ETaskState::Waiting
+        && std::chrono::steady_clock::now() < deadline)
+    {
+        std::this_thread::yield();
+    }
+    EXPECT_EQ(source.State.load(std::memory_order_acquire), ETaskState::Waiting);
+    TSchedulerChannel channel(scheduler);
+    channel.Notify(&root);
+    runner.join();
+    EXPECT_TRUE(success) << error;
+    EXPECT_EQ(root.State.load(std::memory_order_acquire), ETaskState::Finished);
+    EXPECT_EQ(source.State.load(std::memory_order_acquire), ETaskState::Waiting);
+}
+
+TEST(SchedulerExternal, RootCompletionAbandonsExternalWaits) {
+    for (size_t workers : {1, 4}) {
+        SCOPED_TRACE(workers);
+        TTaskGraph graph;
+        TExternalTask sourceTask;
+        TManyInputSinkTask sinkTask;
+        auto& source = graph.AddNode(sourceTask);
+        auto& root = graph.AddNode(sinkTask);
+        graph.AddOwnedEdge(source, root, std::make_unique<TOneToOneConnection>());
+        const auto sealed = graph.Seal();
+        ASSERT_TRUE(sealed);
+        TThreadedScheduler scheduler(sealed, workers);
+        CheckEarlyCompletion(scheduler, source, root);
+    }
+}
+
+TEST(SchedulerExternal, SingleThreadedRejectsExternalWaits) {
+    TTaskGraph graph;
+    TExternalTask task;
+    graph.AddNode(task);
+    const auto sealed = graph.Seal();
+    ASSERT_TRUE(sealed);
+    TSingleThreadedScheduler scheduler(sealed);
+    std::string error;
+    EXPECT_FALSE(scheduler.Run(&error));
+    EXPECT_EQ(error, "single-threaded scheduler does not support external waits");
 }
 
 TEST(SchedulerThreaded, RunsSmallGraph) {
