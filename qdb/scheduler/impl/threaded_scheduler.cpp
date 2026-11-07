@@ -73,7 +73,7 @@ void TThreadedScheduler::Schedule(TTaskNode* node) {
 
     auto state = node->State.load(std::memory_order_acquire);
     for (;;) {
-        if (state == ETaskState::Idle) {
+        if (state == ETaskState::Idle || state == ETaskState::Waiting) {
             if (node->State.compare_exchange_weak(
                     state,
                     ETaskState::Queued,
@@ -151,8 +151,7 @@ void TThreadedScheduler::Work() {
     // been produced. Nodes still unfinished at that point are upstream branches
     // abandoned by early termination (a satisfied LIMIT stops pulling, leaving
     // its producers blocked on a Finished consumer) - waiting for them to finish
-    // would deadlock. The single-threaded scheduler equivalently stops when no
-    // work remains queued.
+    // would deadlock. External waits on abandoned branches do not delay completion.
     auto done = [&] {
         return Failed_.load(std::memory_order_acquire) ||
             Graph_.Root().State.load(std::memory_order_acquire) == ETaskState::Finished;
@@ -247,6 +246,12 @@ void TThreadedScheduler::Work() {
                 Rescheduled_.fetch_add(1, std::memory_order_relaxed);
                 Schedule(node);
             }
+        } else if (result == ETaskResult::WAITING) {
+            Waiting_.fetch_add(1, std::memory_order_relaxed);
+            if (FinishRun(node, ETaskState::Waiting)) {
+                Rescheduled_.fetch_add(1, std::memory_order_relaxed);
+                Schedule(node);
+            }
         } else if (result == ETaskResult::FINISHED) {
             Finished_.fetch_add(1, std::memory_order_relaxed);
             FinishNode(node);
@@ -260,8 +265,8 @@ void TThreadedScheduler::Work() {
     }
 }
 
-bool TThreadedScheduler::FinishRun(TTaskNode* node) {
-    auto previous = node->State.exchange(ETaskState::Idle, std::memory_order_acq_rel);
+bool TThreadedScheduler::FinishRun(TTaskNode* node, ETaskState nextState) {
+    auto previous = node->State.exchange(nextState, std::memory_order_acq_rel);
     assert(previous == ETaskState::Running || previous == ETaskState::Reschedule);
     return previous == ETaskState::Reschedule;
 }
@@ -286,6 +291,7 @@ void TThreadedScheduler::ResetStats() {
     BlockedOutput_.store(0, std::memory_order_relaxed);
     Ok_.store(0, std::memory_order_relaxed);
     Finished_.store(0, std::memory_order_relaxed);
+    Waiting_.store(0, std::memory_order_relaxed);
     Rescheduled_.store(0, std::memory_order_relaxed);
     ReadyPushRetries_.store(0, std::memory_order_relaxed);
     EmptyReadyPolls_.store(0, std::memory_order_relaxed);
@@ -300,6 +306,7 @@ TSchedulerRunStats TThreadedScheduler::Stats() const {
         .BlockedOutput = BlockedOutput_.load(std::memory_order_relaxed),
         .Ok = Ok_.load(std::memory_order_relaxed),
         .Finished = Finished_.load(std::memory_order_relaxed),
+        .Waiting = Waiting_.load(std::memory_order_relaxed),
         .Rescheduled = Rescheduled_.load(std::memory_order_relaxed),
         .ReadyPushRetries = ReadyPushRetries_.load(std::memory_order_relaxed),
         .EmptyReadyPolls = EmptyReadyPolls_.load(std::memory_order_relaxed),

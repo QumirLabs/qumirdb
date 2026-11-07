@@ -1281,7 +1281,9 @@ private:
         auto code = std::make_shared<NScheduler::TSourceCode>(
             [](void* state, TRowSet& rowSet) {
                 auto* sourceState = static_cast<TSchedulerSourceState*>(state);
-                return sourceState->Source->Next(rowSet);
+                return sourceState->Source->Next(rowSet)
+                    ? NScheduler::ETaskResult::OK
+                    : NScheduler::ETaskResult::FINISHED;
             });
 
         const size_t lanes = std::max<size_t>(
@@ -3481,6 +3483,7 @@ std::shared_ptr<TSinkCode> MakeSinkWriterCode() {
     return std::make_shared<TSinkCode>(
         [](void* state, const TRowSet& rowSet) {
             static_cast<ISink*>(state)->Write(rowSet);
+            return ETaskResult::OK;
         });
 }
 
@@ -3526,6 +3529,7 @@ void PrintCounterDiagnostics(
         << " ok=" << stats.Ok
         << " need_data=" << stats.NeedData
         << " blocked_output=" << stats.BlockedOutput
+        << " waiting=" << stats.Waiting
         << " finished=" << stats.Finished
         << " rescheduled=" << stats.Rescheduled
         << " ready_push_retries=" << stats.ReadyPushRetries
