@@ -13,6 +13,9 @@ namespace NScheduler {
 // destructors run after it, so they must not free task-heap blocks.
 class TSchedulerExecutor {
 public:
+    // Gets only the static graph part, the sealed root. The other static part, the
+    // kernels, is TLoweredPlan::Kernels: FinalizeKernels compiles it into the kernel
+    // slots the tasks share before Run().
     TSchedulerExecutor(TSealedTaskGraph graph, TSettings settings);
 
     bool Run(std::string* error = nullptr);
