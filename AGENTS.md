@@ -102,8 +102,8 @@ or in the wiki; architectural chapters should explain the algorithms themselves.
 | Optimizer order and CTE decisions | `qdb/plan/pipeline.cpp`, `qdb/plan/passes/cte_reuse.cpp` |
 | Join ordering, DPccp, and estimates | `qdb/plan/passes/join_order.cpp`, `qdb/plan/passes/cbo/dpccp.cpp`, `qdb/plan/passes/estimate_stats.cpp` |
 | Predicate placement and join keys | `qdb/plan/passes/equijoin.cpp` |
-| Physical task lowering and parallel aggregation | `qdb/scheduler/plan_lowerer.cpp`, `qdb/exec/planner_helpers.cpp` |
-| Task protocol, graphs, connections, scheduling | `qdb/scheduler/state.h`, `qdb/scheduler/graph.h`, `qdb/scheduler/connection.h`, `qdb/scheduler/threaded_scheduler.cpp` |
+| Physical task lowering and parallel aggregation | `qdb/scheduler/lowering/plan_lowerer.cpp`, `qdb/exec/planner_helpers.cpp` |
+| Task protocol, graphs, connections, scheduling | `qdb/scheduler/task.h`, `qdb/scheduler/graph.h`, `qdb/scheduler/connection.h`, `qdb/scheduler/impl/threaded_scheduler.cpp` |
 | Kernel specifications, generation, finalization | `qdb/kernel/spec.h`, `qdb/kernel/compiler.cpp`, `qdb/kernel/finalize.cpp` |
 | Aggregate key types and generated reducers | `qdb/kernel/aggregate_key.cpp`, `qdb/kernel/gen.cpp`, `qdb/kernel/lib.cpp` |
 | Join keys and generated matching/materialization | `qdb/kernel/join_key.cpp`, `qdb/kernel/join_gen.cpp` |
@@ -160,7 +160,7 @@ validated ini config: the built-in defaults, then `$XDG_CONFIG_HOME/qdb/qdb.ini`
 (else `~/.config/qdb/qdb.ini`), then `--config <path>`, then `--section:key=value`
 arguments. An unknown section or key and a bad value fail at once and list the
 accepted ones. `qdb --help` lists every section and key. A new setting is one
-line next to its field in `qdb/scheduler/engine_settings.cpp`, and a new row in
+line next to its field in `qdb/scheduler/settings/engine_settings.cpp`, and a new row in
 the wiki page "Settings-reference".
 
 Scheduler selection is explicit when comparing performance:

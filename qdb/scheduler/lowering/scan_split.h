@@ -1,6 +1,6 @@
 #pragma once
 
-#include <qdb/scheduler/settings.h>
+#include <qdb/scheduler/settings/settings.h>
 
 #include <cstddef>
 #include <cstdint>

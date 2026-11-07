@@ -1,8 +1,8 @@
 #pragma once
 
 #include <qdb/io/io.h>
-#include <qdb/scheduler/runtime_adapter.h>
-#include <qdb/scheduler/state.h>
+#include <qdb/scheduler/port.h>
+#include <qdb/scheduler/task.h>
 
 #include <atomic>
 #include <cstddef>
@@ -11,6 +11,9 @@
 #include <vector>
 
 namespace NQdb {
+
+struct TOperatorInstrumentation;
+
 namespace NScheduler {
 
 // The rows of a materialized CTE. Each producer lane owns one segment and

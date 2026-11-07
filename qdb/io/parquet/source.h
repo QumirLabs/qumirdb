@@ -2,7 +2,7 @@
 
 #include <qdb/io/io.h>
 #include <qdb/plan/ops/stats.h>
-#include <qdb/scheduler/scan_split.h>
+#include <qdb/scheduler/lowering/scan_split.h>
 
 #include <qumir/parser/ast.h>
 

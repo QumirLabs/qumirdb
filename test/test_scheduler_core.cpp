@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 
-#include <qdb/scheduler/settings.h>
-#include <qdb/scheduler/state.h>
+#include <qdb/scheduler/settings/settings.h>
+#include <qdb/scheduler/task.h>
 
 #include <algorithm>
 #include <thread>

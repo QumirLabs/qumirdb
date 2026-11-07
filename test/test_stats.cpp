@@ -16,7 +16,7 @@
 #include <qdb/plan/passes/row_group_predicate.h>
 #include <qdb/plan/passes/typing.h>
 #include <qdb/plan/types/nullable.h>
-#include <qdb/scheduler/plan_lowerer.h>
+#include <qdb/scheduler/lowering/plan_lowerer.h>
 
 #include <qumir/parser/core/printer.h>
 #include <qumir/parser/type.h>

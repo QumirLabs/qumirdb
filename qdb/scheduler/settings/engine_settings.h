@@ -2,7 +2,7 @@
 
 #include <qdb/io/parquet/source.h>
 #include <qdb/plan/pipeline.h>
-#include <qdb/scheduler/settings.h>
+#include <qdb/scheduler/settings/settings.h>
 #include <qdb/utils/config.h>
 
 #include <filesystem>

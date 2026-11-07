@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 
-#include <qdb/scheduler/mpmc.h>
-#include <qdb/scheduler/spsc.h>
+#include <qdb/scheduler/utils/mpmc.h>
+#include <qdb/scheduler/utils/spsc.h>
 
 #include <atomic>
 #include <memory>

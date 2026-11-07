@@ -7,8 +7,8 @@
 
 #include <qdb/io/io.h>
 #include <qdb/kernel/finalize.h>
-#include <qdb/scheduler/plan_lowerer.h>
-#include <qdb/scheduler/settings.h>
+#include <qdb/scheduler/lowering/plan_lowerer.h>
+#include <qdb/scheduler/settings/settings.h>
 
 #include <chrono>
 #include <memory>

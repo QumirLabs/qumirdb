@@ -2,7 +2,7 @@
 
 #include <qdb/exec/plan_builder.h>
 #include <qdb/kernel/compiler.h>
-#include <qdb/scheduler/plan_lowerer.h>
+#include <qdb/scheduler/lowering/plan_lowerer.h>
 
 #include <algorithm>
 #include <ctime>

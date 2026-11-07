@@ -6,7 +6,7 @@
 #include <qdb/plan/ops/operator.h>
 #include <qdb/scheduler/connection.h>
 #include <qdb/scheduler/graph.h>
-#include <qdb/scheduler/settings.h>
+#include <qdb/scheduler/settings/settings.h>
 
 #include <cstdint>
 #include <iosfwd>

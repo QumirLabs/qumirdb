@@ -1,4 +1,4 @@
-#include <qdb/scheduler/plan_lowerer.h>
+#include <qdb/scheduler/lowering/plan_lowerer.h>
 #include <qdb/scheduler/instrumentation/task.h>
 #include <qdb/exec/aggregate_exec.h>
 #include <qdb/exec/join_exec.h>
@@ -28,11 +28,12 @@
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/scheduler/connection.h>
-#include <qdb/scheduler/cte_spool.h>
-#include <qdb/scheduler/executor.h>
+#include <qdb/scheduler/connections/local.h>
+#include <qdb/scheduler/tasks/cte_spool.h>
+#include <qdb/scheduler/impl/executor.h>
 #include <qdb/scheduler/graph.h>
-#include <qdb/scheduler/runtime_adapter.h>
-#include <qdb/scheduler/scan_split.h>
+#include <qdb/scheduler/tasks/runtime_adapter.h>
+#include <qdb/scheduler/lowering/scan_split.h>
 
 #include <algorithm>
 #include <bit>

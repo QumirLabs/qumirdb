@@ -2,7 +2,7 @@
 #include <qdb/kernel/execution_context.h>
 #include <qdb/modules/qumirdb_runtime.h>
 #include <qdb/scheduler/graph.h>
-#include <qdb/scheduler/threaded_scheduler.h>
+#include <qdb/scheduler/impl/threaded_scheduler.h>
 
 #include <gtest/gtest.h>
 

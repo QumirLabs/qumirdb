@@ -13,7 +13,7 @@
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/sort.h>
 #include <qdb/plan/ops/window.h>
-#include <qdb/scheduler/settings.h>
+#include <qdb/scheduler/settings/settings.h>
 
 #include <cstdint>
 #include <iosfwd>

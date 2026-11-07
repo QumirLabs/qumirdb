@@ -3,9 +3,9 @@
 #include <qdb/exec/runtime_filter.h>
 #include <qdb/exec/instrumentation/operator.h>
 #include <qdb/io/io.h>
-#include <qdb/scheduler/connection.h>
-#include <qdb/scheduler/state.h>
-#include <qdb/scheduler/task_state.h>
+#include <qdb/scheduler/port.h>
+#include <qdb/scheduler/task.h>
+#include <qdb/scheduler/tasks/task_state.h>
 
 #include <qumir/parser/type.h>
 
@@ -21,26 +21,9 @@ namespace NQdb {
 namespace NScheduler {
 
 struct TTaskNode;
+class THashShuffleConnection;
 
 enum class ERequiredSide { Both = 0, Left = 1, Right = 2 };
-
-struct TInputPort {
-    IConnection* Connection = nullptr;
-    size_t Lane = 0;
-    TRowSetInstrumentation* Instrumentation = nullptr;
-
-    EFetchResult Fetch(TRowSet& rowSet) const;
-};
-
-struct TOutputPort {
-    IConnection* Connection = nullptr;
-    size_t Lane = 0;
-    TRowSetInstrumentation* Instrumentation = nullptr;
-
-    bool CanPush() const;
-    bool Push(TRowSet&& rowSet) const;
-    void Finish() const;
-};
 
 enum class EAuxInputStatus { Ready, NeedProducer, Waiting, Failed };
 

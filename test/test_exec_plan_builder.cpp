@@ -1,3 +1,4 @@
+#include <qdb/scheduler/connections/local.h>
 #include <gtest/gtest.h>
 
 #include "mock_source.h"
@@ -12,9 +13,9 @@
 #include <qdb/plan/pipeline.h>
 #include <qdb/plan/plan_print.h>
 #include <qdb/plan/passes/runtime_filters.h>
-#include <qdb/scheduler/plan_lowerer.h>
-#include <qdb/scheduler/runtime_adapter.h>
-#include <qdb/scheduler/scan_split.h>
+#include <qdb/scheduler/lowering/plan_lowerer.h>
+#include <qdb/scheduler/tasks/runtime_adapter.h>
+#include <qdb/scheduler/lowering/scan_split.h>
 #include <qdb/sql/parser.h>
 
 #include <qumir/codegen/llvm/llvm_initializer.h>

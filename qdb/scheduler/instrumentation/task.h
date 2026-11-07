@@ -1,7 +1,9 @@
 #pragma once
 
 #include <qdb/scheduler/graph.h>
-#include <qdb/scheduler/runtime_adapter.h>
+#include <qdb/scheduler/port.h>
+
+#include <qumir/parser/type.h>
 
 #include <iosfwd>
 #include <unordered_map>

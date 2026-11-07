@@ -1,7 +1,7 @@
 #pragma once
 
 #include <qdb/scheduler/graph.h>
-#include <qdb/scheduler/mpmc.h>
+#include <qdb/scheduler/utils/mpmc.h>
 
 #include <atomic>
 #include <cstddef>

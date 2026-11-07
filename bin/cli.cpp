@@ -5,9 +5,9 @@
 #include <qdb/io/parquet/source.h>
 #include <qdb/io/text/sink.h>
 #include <qdb/kernel/finalize.h>
-#include <qdb/scheduler/plan_lowerer.h>
+#include <qdb/scheduler/lowering/plan_lowerer.h>
 #include <qdb/plan/ops/source.h>
-#include <qdb/scheduler/engine_settings.h>
+#include <qdb/scheduler/settings/engine_settings.h>
 #include <qdb/sql/parser.h>
 
 #include <qumir/codegen/llvm/llvm_initializer.h>

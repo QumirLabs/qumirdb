@@ -1,7 +1,7 @@
-#include <qdb/scheduler/executor.h>
+#include <qdb/scheduler/impl/executor.h>
 
-#include <qdb/scheduler/single_threaded_scheduler.h>
-#include <qdb/scheduler/threaded_scheduler.h>
+#include <qdb/scheduler/impl/single_threaded_scheduler.h>
+#include <qdb/scheduler/impl/threaded_scheduler.h>
 
 #include <algorithm>
 #include <utility>
