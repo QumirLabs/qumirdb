@@ -2,6 +2,7 @@
 #include <qdb/kernel/execution_context.h>
 #include <qdb/modules/qumirdb_runtime.h>
 #include <qdb/scheduler/graph.h>
+#include <qdb/scheduler/impl/single_threaded_scheduler.h>
 #include <qdb/scheduler/impl/threaded_scheduler.h>
 
 #include <gtest/gtest.h>
@@ -200,29 +201,94 @@ public:
     ETaskResult Execute() override {
         EXPECT_NE(TryExecutionContext(), nullptr);
         EXPECT_NE(ExecutionContext().Heap, nullptr);
+        EXPECT_EQ(ExecutionContext().Heap, &ExecutionContext().State->Heap(Slot));
         qdb_alloc(96);
+        Bytes = ExecutionContext().Heap->Bytes();
         return ETaskResult::FINISHED;
     }
+
+    size_t Slot = 0;
+    size_t Bytes = 0;
+};
+
+class TMaterializingTask final : public ITask {
+public:
+    explicit TMaterializingTask(TRowSet& output)
+        : Output_(output)
+    {}
+
+    ETaskResult Execute() override {
+        auto* value = static_cast<int64_t*>(qdb_alloc(sizeof(int64_t)));
+        *value = 456;
+        auto* columns = static_cast<TColumn*>(qdb_alloc(sizeof(TColumn)));
+        *columns = {.Data = reinterpret_cast<char*>(value)};
+        auto* owners = static_cast<int64_t*>(qdb_alloc(3 * sizeof(int64_t)));
+        owners[0] = 2;
+        owners[1] = reinterpret_cast<int64_t>(value);
+        owners[2] = reinterpret_cast<int64_t>(columns);
+        Output_.RefCount = 1;
+        Output_.RowCount = 1;
+        Output_.Columns = columns;
+        Output_.Private = owners;
+        AdoptKernelOwnedRowSet(Output_);
+        return ETaskResult::FINISHED;
+    }
+
+private:
+    TRowSet& Output_;
 };
 
 } // namespace
 
 TEST(ExecutionContext, SchedulerPinsAllocationDomain) {
     TTaskGraph graph;
-    auto& node = graph.AddOwnedNode(std::make_unique<TAllocatingTask>());
-    TThreadedScheduler scheduler(graph, 2);
+    TAllocatingTask task;
+    graph.AddNode(task);
+    const auto taskCount = graph.Seal();
+    ASSERT_EQ(taskCount, 1u);
+    TThreadedScheduler scheduler(*graph.Root(), taskCount, 2);
     std::string error;
     ASSERT_TRUE(scheduler.Run(&error)) << error;
-    EXPECT_EQ(graph.PrepareExecution().Heap(node.ExecutionSlot).Bytes(), 96);
+    EXPECT_EQ(task.Bytes, 96u);
     EXPECT_EQ(TryExecutionContext(), nullptr);
 }
 
-TEST(ExecutionContext, TaskTableIsFrozenBeforeWorkersStart) {
-    TAllocatingTask task;
-    TTaskGraph graph;
-    graph.AddNode(task);
-    graph.PrepareExecution();
-    EXPECT_THROW(graph.AddNode(task), std::logic_error);
+TEST(ExecutionContext, SchedulersCreateExecutionStateFromTaskCount) {
+    for (bool threaded : {false, true}) {
+        SCOPED_TRACE(threaded);
+        TAllocatingTask task;
+        task.Slot = 2;
+        TTaskNode root{.ExecutionSlot = 2, .Task = &task};
+
+        std::string error;
+        const bool ok = threaded
+            ? TThreadedScheduler(root, 3, 2).Run(&error)
+            : TSingleThreadedScheduler(root, 3).Run(&error);
+        ASSERT_TRUE(ok) << error;
+        EXPECT_EQ(root.State.load(), ETaskState::Finished);
+        EXPECT_EQ(task.Bytes, 96u);
+        EXPECT_EQ(TryExecutionContext(), nullptr);
+    }
+}
+
+TEST(ExecutionContext, PublishedBatchOutlivesSchedulerAndGraph) {
+    for (bool threaded : {false, true}) {
+        SCOPED_TRACE(threaded);
+        TRowSet batch{};
+        {
+            TTaskGraph graph;
+            graph.AddOwnedNode(std::make_unique<TMaterializingTask>(batch));
+            const auto taskCount = graph.Seal();
+            ASSERT_EQ(taskCount, 1u);
+            std::string error;
+            const bool ok = threaded
+                ? TThreadedScheduler(*graph.Root(), taskCount, 2).Run(&error)
+                : TSingleThreadedScheduler(*graph.Root(), taskCount).Run(&error);
+            ASSERT_TRUE(ok) << error;
+        }
+        EXPECT_EQ(*reinterpret_cast<int64_t*>(batch.Columns[0].Data), 456);
+        Release(&batch);
+    }
 }
 
 int main(int argc, char** argv) {

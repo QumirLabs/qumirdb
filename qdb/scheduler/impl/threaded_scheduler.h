@@ -1,5 +1,6 @@
 #pragma once
 
+#include <qdb/kernel/execution_context.h>
 #include <qdb/scheduler/graph.h>
 #include <qdb/scheduler/utils/mpmc.h>
 
@@ -16,7 +17,8 @@ namespace NScheduler {
 class TThreadedScheduler {
 public:
     TThreadedScheduler(
-        TTaskGraph& graph,
+        TTaskNode& root,
+        size_t taskCount,
         size_t workerCount,
         size_t readyQueueCapacity = 0);
 
@@ -33,7 +35,8 @@ private:
     void FinishNode(TTaskNode* node);
     void ResetStats();
 
-    TTaskGraph& Graph_;
+    TTaskNode& Root_;
+    TExecutionState Execution_;
     TMPMCQueue<TTaskNode*> Ready_;
     // One permit is released per task pushed to Ready_; idle workers block on
     // it (after a short spin) instead of busy-yielding until work arrives.

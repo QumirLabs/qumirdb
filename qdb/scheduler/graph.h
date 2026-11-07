@@ -1,7 +1,6 @@
 #pragma once
 
 #include <qdb/exec/stage.h>
-#include <qdb/kernel/execution_context.h>
 #include <qdb/exec/instrumentation/operator.h>
 #include <qdb/scheduler/connection.h>
 #include <qdb/scheduler/task.h>
@@ -77,7 +76,7 @@ public:
     TTaskEdge& AddDependencyEdge(TTaskNode& producer, TTaskNode& consumer);
 
     void Build();
-    bool Validate(std::string* error = nullptr) const;
+    size_t Seal(std::string* error = nullptr);
     void SetConnectionStatsEnabled(bool enabled);
     void Print(std::ostream& out) const;
     void PrintConnectionStats(std::ostream& out) const;
@@ -86,11 +85,11 @@ public:
     const std::vector<std::unique_ptr<TTaskEdge>>& Edges() const;
     const std::vector<TTaskNode*>& Leaves() const;
     TTaskNode* Root() const;
-    TExecutionState& PrepareExecution();
 
 private:
-    // Outlives task destructors and connections returning tracked allocations.
-    std::unique_ptr<TExecutionState> Execution_;
+    void CheckMutable() const;
+    bool Validate(std::string* error) const;
+
     // Task-local observers and ports remain valid through task destruction.
     std::vector<std::unique_ptr<TTaskNode>> Nodes_;
     std::vector<std::unique_ptr<IConnection>> OwnedConnections_;
@@ -98,6 +97,7 @@ private:
     std::vector<std::unique_ptr<TTaskEdge>> Edges_;
     std::vector<TTaskNode*> Leaves_;
     TTaskNode* Root_ = nullptr;
+    bool Sealed_ = false;
 };
 
 } // namespace NScheduler

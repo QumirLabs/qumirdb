@@ -11,14 +11,16 @@ namespace NScheduler {
 class TSchedulerExecutor {
 public:
     TSchedulerExecutor(
-        TTaskGraph& graph,
+        TTaskNode& root,
+        size_t taskCount,
         TSettings settings);
 
     bool Run(std::string* error = nullptr);
     TSchedulerRunStats Stats() const;
 
 private:
-    TTaskGraph& Graph_;
+    TTaskNode& Root_;
+    size_t TaskCount_;
     TSettings Settings_;
     TSchedulerRunStats Stats_;
 };

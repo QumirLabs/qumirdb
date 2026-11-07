@@ -252,13 +252,15 @@ TPipeline MakePipeline() {
     out.Graph->AddOwnedEdge(source, filter, std::move(sourceToFilter));
     out.Graph->AddOwnedEdge(filter, project, std::move(filterToProject));
     out.Graph->AddOwnedEdge(project, sink, std::move(projectToSink));
-    out.Graph->Build();
+    EXPECT_GT(out.Graph->Seal(), 0u);
     return out;
 }
 
 TEST(SchedulerRuntimeAdapter, RunsSourceFilterProjectSinkSingleThreaded) {
     auto pipeline = MakePipeline();
-    TSingleThreadedScheduler scheduler(*pipeline.Graph);
+    TSingleThreadedScheduler scheduler(
+        *pipeline.Graph->Root(),
+        pipeline.Graph->Seal());
 
     std::string error;
     ASSERT_TRUE(scheduler.Run(&error)) << error;
@@ -271,7 +273,10 @@ TEST(SchedulerRuntimeAdapter, RunsSourceFilterProjectSinkSingleThreaded) {
 
 TEST(SchedulerRuntimeAdapter, RunsSourceFilterProjectSinkThreaded) {
     auto pipeline = MakePipeline();
-    TThreadedScheduler scheduler(*pipeline.Graph, 4);
+    TThreadedScheduler scheduler(
+        *pipeline.Graph->Root(),
+        pipeline.Graph->Seal(),
+        4);
 
     std::string error;
     ASSERT_TRUE(scheduler.Run(&error)) << error;
@@ -415,11 +420,10 @@ TEST(SchedulerRuntimeAdapter, RunsBinaryBlockingTask) {
     graph->AddOwnedEdge(left, binary, std::move(leftToBinary));
     graph->AddOwnedEdge(right, binary, std::move(rightToBinary));
     graph->AddOwnedEdge(binary, sink, std::move(binaryToSink));
-    graph->Build();
-
     std::string error;
-    ASSERT_TRUE(graph->Validate(&error)) << error;
-    TThreadedScheduler scheduler(*graph, 3);
+    const auto taskCount = graph->Seal(&error);
+    ASSERT_GT(taskCount, 0u) << error;
+    TThreadedScheduler scheduler(*graph->Root(), taskCount, 3);
     ASSERT_TRUE(scheduler.Run(&error)) << error;
     EXPECT_EQ(binaryState->LeftRows, 3);
     EXPECT_EQ(binaryState->RightRows, 21);
@@ -543,11 +547,10 @@ TGateResult RunAsymmetricGateGraph(bool gate) {
     graph->AddOwnedEdge(probe, binary, std::move(leftToBinary));
     graph->AddOwnedEdge(build, binary, std::move(rightToBinary));
     graph->AddOwnedEdge(binary, sink, std::move(binaryToSink));
-    graph->Build();
-
     std::string error;
-    EXPECT_TRUE(graph->Validate(&error)) << error;
-    TSingleThreadedScheduler scheduler(*graph);
+    const auto taskCount = graph->Seal(&error);
+    EXPECT_GT(taskCount, 0u) << error;
+    TSingleThreadedScheduler scheduler(*graph->Root(), taskCount);
     EXPECT_TRUE(scheduler.Run(&error)) << error;
 
     return {

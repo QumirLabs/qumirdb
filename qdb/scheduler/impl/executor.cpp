@@ -19,15 +19,17 @@ void SetError(std::string* error, std::string message) {
 } // namespace
 
 TSchedulerExecutor::TSchedulerExecutor(
-    TTaskGraph& graph,
+    TTaskNode& root,
+    size_t taskCount,
     TSettings settings)
-    : Graph_(graph)
+    : Root_(root)
+    , TaskCount_(taskCount)
     , Settings_(settings)
 {}
 
 bool TSchedulerExecutor::Run(std::string* error) {
     if (Settings_.Scheduler.Mode == EExecutionMode::SingleThreadedScheduler) {
-        TSingleThreadedScheduler scheduler(Graph_);
+        TSingleThreadedScheduler scheduler(Root_, TaskCount_);
         const bool ok = scheduler.Run(error);
         Stats_ = scheduler.Stats();
         return ok;
@@ -35,7 +37,8 @@ bool TSchedulerExecutor::Run(std::string* error) {
 
     if (Settings_.Scheduler.Mode == EExecutionMode::ThreadedScheduler) {
         TThreadedScheduler scheduler(
-            Graph_,
+            Root_,
+            TaskCount_,
             std::max<size_t>(Settings_.Scheduler.WorkerCount, 1),
             Settings_.Scheduler.ReadyQueueCapacity);
         const bool ok = scheduler.Run(error);

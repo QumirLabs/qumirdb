@@ -3607,16 +3607,16 @@ bool RunPlanIntoSink(
             *lowered.Producers[p], sinkNode, *lowered.FinalGather, p, 0);
     }
 
-    lowered.Graph->Build();
+    const auto taskCount = lowered.Graph->Seal(error);
+    if (taskCount == 0) {
+        return false;
+    }
     if (settings.Instrumentation.Operators) {
         EnableOperatorInstrumentation(lowered);
     }
     FinalizeKernels(
         lowered.Kernels, settings.Kernel.Backend, diagnostics, lowered.ExternalCatalog,
         settings.Jit.CacheDir);
-    if (!lowered.Graph->Validate(error)) {
-        return false;
-    }
     lowered.Graph->SetConnectionStatsEnabled(settings.Queue.EnableDebugCounters);
     if (diagnostics) {
         PrintGraphDiagnostics(*diagnostics, *lowered.Graph, settings);
@@ -3631,7 +3631,7 @@ bool RunPlanIntoSink(
         }
     }
 
-    TSchedulerExecutor executor(*lowered.Graph, settings);
+    TSchedulerExecutor executor(*lowered.Graph->Root(), taskCount, settings);
     if (!executor.Run(error)) {
         return false;
     }

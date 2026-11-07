@@ -16,8 +16,11 @@ void SetError(std::string* error, std::string message) {
 
 } // namespace
 
-TSingleThreadedScheduler::TSingleThreadedScheduler(TTaskGraph& graph)
-    : Graph_(graph)
+TSingleThreadedScheduler::TSingleThreadedScheduler(
+    TTaskNode& root,
+    size_t taskCount)
+    : Root_(root)
+    , Execution_(taskCount)
 {}
 
 bool TSingleThreadedScheduler::Run(std::string* error) {
@@ -27,15 +30,11 @@ bool TSingleThreadedScheduler::Run(std::string* error) {
     }
     HasRun_ = true;
 
-    if (!Graph_.Validate(error)) {
-        return false;
-    }
-
     Ready_.clear();
     Scheduled_.clear();
     Stats_ = {};
-    TExecutionContext context{.State = &Graph_.PrepareExecution()};
-    Schedule(Graph_.Root());
+    TExecutionContext context{.State = &Execution_};
+    Schedule(&Root_);
 
     while (!Ready_.empty()) {
         auto* node = Ready_.front();
