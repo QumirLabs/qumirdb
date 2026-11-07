@@ -88,6 +88,26 @@ ETaskResult TRemoteSourceState::Next(TRowSet& rowSet) {
     return Inbox.TryPop(rowSet) ? ETaskResult::OK : ETaskResult::FINISHED;
 }
 
+std::string ValidateEndpoints(
+    const TSealedTaskGraph& graph,
+    std::span<const TRemoteEndpoint> endpoints)
+{
+    for (const auto& endpoint : endpoints) {
+        const auto* node = graph.ExternalNode(endpoint.Id);
+        if (!node) {
+            return "no external node with id " + std::to_string(endpoint.Id);
+        }
+        const bool source = dynamic_cast<const TSourceTask*>(node->Task) != nullptr;
+        const bool sink = dynamic_cast<const TSinkTask*>(node->Task) != nullptr;
+        const bool isSource = endpoint.Kind == ERemoteEndpointKind::Source;
+        if (isSource ? !source : !sink) {
+            return "external node " + std::to_string(endpoint.Id)
+                + (isSource ? " is not a source task" : " is not a sink task");
+        }
+    }
+    return {};
+}
+
 std::pair<std::shared_ptr<const TSinkCode>, std::shared_ptr<TRemoteSinkState>> MakeRemoteSink(
     uint64_t id,
     NNet::NActors::TActorId actorId,

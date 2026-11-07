@@ -1,4 +1,5 @@
 #include <coroio/actors/actorsystem.hpp>
+#include <iostream>
 #include <memory>
 #include <qdbd/messages.h>
 #include <qdbd/scheduler/remote_task.h>
@@ -80,6 +81,10 @@ struct TComputeActor : public IBehaviorActor {
     }
 
     void StartGraph(TTaskGraphMessage&& message, TActorContext::TPtr ctx) {
+        if (auto error = NScheduler::ValidateEndpoints(message.Graph, message.Endpoints); !error.empty()) {
+            std::cerr << "compute actor: cannot start graph: " << error << "\n";
+            return;
+        }
         Graph = message.Graph;
         Scheduler = std::make_unique<NScheduler::TThreadedScheduler>(
             Graph, SchedulerSettings.WorkerCount, SchedulerSettings.ReadyQueueCapacity

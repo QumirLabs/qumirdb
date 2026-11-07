@@ -9,6 +9,9 @@
 
 #include <qdbd/messages.h>
 
+#include <span>
+#include <string>
+
 #include <coroio/notifier.hpp>
 #include <coroio/actors/actor.hpp>
 
@@ -109,6 +112,12 @@ struct TRemoteSourceState {
     TMPSCQueue<TRowSet> Inbox;
     std::atomic<bool> Finished = false;
 };
+
+// Empty if every endpoint names a node of the matching task type (TSourceTask
+// for Source, TSinkTask for Sink); otherwise the first problem.
+std::string ValidateEndpoints(
+    const TSealedTaskGraph& graph,
+    std::span<const NRemote::TRemoteEndpoint> endpoints);
 
 // Code and state for TSinkTask / TSourceTask.
 std::pair<std::shared_ptr<const TSinkCode>, std::shared_ptr<TRemoteSinkState>> MakeRemoteSink(

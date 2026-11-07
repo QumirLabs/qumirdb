@@ -1287,6 +1287,37 @@ TEST(DistributedScheduler, RemoteTasksMoveRowSetsInOrder) {
     }
 }
 
+TEST(DistributedScheduler, ValidatesRemoteEndpoints) {
+    using namespace NQdb::NScheduler;
+    TActorNotificationChannel channel(std::make_unique<TFakeNotifier>());
+    auto [sinkCode, sinkState] = MakeRemoteSink(1, TActorId{}, 2, nullptr, channel);
+    auto [sourceCode, sourceState] = MakeRemoteSource(2);
+    auto connection = std::make_unique<TOneToOneConnection>();
+    auto* connectionPtr = connection.get();
+    TTaskGraph graph;
+    auto& source = graph.AddOwnedNode(std::make_unique<TSourceTask>(
+        sourceCode, sourceState, TOutputPort{.Connection = connectionPtr}));
+    auto& sink = graph.AddOwnedNode(std::make_unique<TSinkTask>(
+        sinkCode, sinkState, TInputPort{.Connection = connectionPtr}));
+    graph.AddOwnedEdge(source, sink, std::move(connection));
+    graph.MarkExternal(sink, 1);
+    graph.MarkExternal(source, 2);
+    const auto sealed = graph.Seal();
+    ASSERT_TRUE(sealed);
+
+    auto endpoint = [](uint64_t id, ERemoteEndpointKind kind) {
+        return TRemoteEndpoint{.Id = id, .Kind = kind};
+    };
+    const std::vector<TRemoteEndpoint> good{
+        endpoint(1, ERemoteEndpointKind::Sink), endpoint(2, ERemoteEndpointKind::Source)};
+    EXPECT_EQ(ValidateEndpoints(sealed, good), "");
+    const std::vector<TRemoteEndpoint> missing{endpoint(3, ERemoteEndpointKind::Sink)};
+    EXPECT_NE(ValidateEndpoints(sealed, missing), "");
+    const std::vector<TRemoteEndpoint> swapped{
+        endpoint(1, ERemoteEndpointKind::Source), endpoint(2, ERemoteEndpointKind::Sink)};
+    EXPECT_NE(ValidateEndpoints(sealed, swapped), "");
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

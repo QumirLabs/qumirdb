@@ -52,10 +52,25 @@ struct TFinish {
     uint64_t DstTaskId = 0;
 };
 
+enum class ERemoteEndpointKind {
+    Source,
+    Sink,
+};
+
+// Id is the node's external id in the graph; routing lives here, not in the graph.
+struct TRemoteEndpoint {
+    uint64_t Id = 0;
+    ERemoteEndpointKind Kind = ERemoteEndpointKind::Source;
+    // Sink only: where the rows go.
+    NNet::NActors::TActorId PeerActor;
+    uint64_t PeerTaskId = 0;
+};
+
 struct TTaskGraphMessage {
     static constexpr NNet::NActors::TMessageId MessageId = 202;
     using LocalMessage = void; // TODO: must be serializable
     NScheduler::TSealedTaskGraph Graph;
+    std::vector<TRemoteEndpoint> Endpoints;
     std::vector<TGeneratedKernel> Kernels;
 };
 
