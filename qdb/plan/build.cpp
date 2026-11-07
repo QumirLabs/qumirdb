@@ -1743,6 +1743,102 @@ bool HasUnmappedOuter(
     return false;
 }
 
+// The grouped rewrite must recover COUNT's identity before evaluating the
+// scalar expression or HAVING; a missing group is not a NULL COUNT value.
+NAst::TExprPtr RestoreCorrelatedCountDefaults(
+    NAst::TExprPtr expr,
+    const std::unordered_map<std::string, NAst::TExprPtr>& replacements)
+{
+    if (!expr) {
+        return expr;
+    }
+    if (auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(expr)) {
+        if (auto it = replacements.find(ident.Cast()->Name); it != replacements.end()) {
+            return CloneExpr(it->second);
+        }
+    }
+    for (auto* child : expr->MutableChildren()) {
+        *child = RestoreCorrelatedCountDefaults(*child, replacements);
+    }
+    return expr;
+}
+
+// A correlated ungrouped aggregate subquery whose COUNT identity is recovered
+// above the join: the grouped plan is cut below its projection and HAVING, they
+// are evaluated on the aggregate states after the LEFT join.
+struct TCorrelatedCount {
+    TOperatorPtr States;                 // correlation keys, then one state per aggregate
+    std::vector<std::string> Aggregates; // aggregate output names
+    std::vector<bool> EmptyIsZero;
+    NAst::TExprPtr Value;                // over the aggregate output names
+    NAst::TExprPtr Having;               // over the aggregate output names, may be null
+};
+
+std::optional<TCorrelatedCount> SplitCorrelatedCount(
+    const TOperatorPtr& plan,
+    size_t correlationCount)
+{
+    auto project = TMaybeOp<TProjectOperator>(plan);
+    if (!project) {
+        return std::nullopt;
+    }
+    auto input = project.Cast()->Input();
+    auto having = TMaybeOp<TFilterOperator>(input);
+    auto aggregate = TMaybeOp<TAggregateOperator>(having ? having.Cast()->Input() : input);
+    if (!aggregate || !std::ranges::any_of(aggregate.Cast()->Aggs(), [](const auto& agg) {
+        return agg.Func == "count" || agg.EmptyIsZero;
+    })) {
+        return std::nullopt;
+    }
+
+    TCorrelatedCount split;
+    std::vector<TProjectionSpec> states(
+        project.Cast()->Projections().begin(),
+        project.Cast()->Projections().begin() + correlationCount);
+    for (const auto& agg : aggregate.Cast()->Aggs()) {
+        states.push_back({.Name = agg.Name, .Expression = Ident({}, agg.Name)});
+        split.Aggregates.push_back(agg.Name);
+        split.EmptyIsZero.push_back(agg.Func == "count" || agg.EmptyIsZero);
+    }
+    split.Value = CloneExpr(project.Cast()->Projections().back().Expression);
+    if (having) {
+        split.Having = CloneExpr(having.Cast()->Predicate());
+    }
+    split.States = std::make_shared<TProjectOperator>(aggregate.Cast(), std::move(states));
+    return split;
+}
+
+// The scalar value over the joined state columns `states`, in the order of
+// `split.Aggregates`.
+NAst::TExprPtr RestoreCorrelatedCount(
+    const TCorrelatedCount& split,
+    const std::vector<std::string>& states)
+{
+    std::unordered_map<std::string, NAst::TExprPtr> replacements;
+    for (size_t i = 0; i < states.size(); ++i) {
+        NAst::TExprPtr value = Ident({}, states[i]);
+        if (split.EmptyIsZero[i]) {
+            value = Call({}, "coalesce", {
+                std::move(value),
+                std::make_shared<NAst::TNumberExpr>(TLocation{}, static_cast<int64_t>(0)),
+            });
+        }
+        replacements.emplace(split.Aggregates[i], std::move(value));
+    }
+    auto value = RestoreCorrelatedCountDefaults(CloneExpr(split.Value), replacements);
+    if (split.Having) {
+        // Evaluate HAVING on the recovered aggregate values. A rejected group
+        // means an empty scalar subquery, whose result is NULL, even for COUNT.
+        auto condition = RestoreCorrelatedCountDefaults(CloneExpr(split.Having), replacements);
+        const auto location = value->Location;
+        value = std::make_shared<NAst::TIfExpr>(
+            location,
+            Call({}, "qdb_is_true", {std::move(condition)}),
+            std::move(value), Call({}, "qdb_sql_null", {}));
+    }
+    return value;
+}
+
 // The scalar and IN subqueries extracted from the expressions of one SELECT, whose
 // columns are numbered apart. The parser shares the operand of BETWEEN or of a
 // simple CASE between its comparisons, so each subquery is extracted once and
@@ -1863,6 +1959,7 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
 
             if (!correlation.empty()) {
                 int id = extracted.Counter++;
+                const bool ungrouped = !sel->GroupBy;
                 if (!sel->GroupBy) {
                     sel->GroupBy = std::make_shared<NSql::TSqlGroupBy>();
                 }
@@ -1909,7 +2006,25 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
                     return std::unexpected(
                         TError("correlated scalar subquery must return one value"));
                 }
-                outputs.push_back("__scalar_" + std::to_string(id) + "__");
+                std::optional<TCorrelatedCount> counts;
+                if (ungrouped) {
+                    counts = SplitCorrelatedCount(plan->Plan, correlation.size());
+                }
+                if (counts) {
+                    // The states replace the scalar column; the COUNT identity,
+                    // the projection and HAVING are evaluated above the join.
+                    auto states = Relation(std::move(counts->States));
+                    if (auto annotated = Annotate(states.Plan, context); !annotated) {
+                        return std::unexpected(annotated.error());
+                    }
+                    for (size_t i = 0; i < counts->Aggregates.size(); ++i) {
+                        outputs.push_back("__scalar_" + std::to_string(id) +
+                            "_state_" + std::to_string(i) + "__");
+                    }
+                    plan = std::move(states);
+                } else {
+                    outputs.push_back("__scalar_" + std::to_string(id) + "__");
+                }
                 auto right = SubqueryOutputs(node, std::move(*plan), std::move(outputs), context);
                 if (!right) {
                     return std::unexpected(right.error());
@@ -1923,6 +2038,10 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
                 // the surrounding comparison filters the row out (SQL semantics).
                 node = JoinRelations(
                     std::move(node), std::move(*right), std::move(joinKeys), EJoinType::Left, nullptr);
+                if (counts) {
+                    return extract(RestoreCorrelatedCount(*counts,
+                        {columns.begin() + correlation.size(), columns.end()}));
+                }
                 return extract(Ident(expr->Location, columns.back()));
             }
 

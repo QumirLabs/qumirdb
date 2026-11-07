@@ -144,10 +144,20 @@ filter (< l_quantity __scalar_0__)
 ```
 
 `LEFT` keeps the outer rows wherever the subquery appears: a part with no
-matching lineitems yields `NULL`. Here `l_quantity < NULL` is unknown and the
-row is filtered out, matching SQL scalar semantics, so outer-join
-simplification later makes the join inner (see below). The comparison spans
-both sides and stays above the join or in its residual.
+matching lineitems yields `NULL` for SUM, MIN, and AVG. Here `l_quantity < NULL`
+is unknown and the row is filtered out, matching SQL scalar semantics, so
+outer-join simplification later makes the join inner (see below). The comparison
+spans both sides and stays above the join or in its residual.
+
+An ungrouped COUNT has a different identity: no matches mean zero. Its aggregate
+states pass through the LEFT join, COUNT states recover zero, and the scalar
+expression is evaluated afterward. This order also makes `COUNT(*) + 1` yield
+one for an empty input without changing a NULL produced by the scalar expression
+on an existing group.
+
+HAVING is evaluated after these identities are restored. If it rejects the
+aggregate row, the scalar subquery yields NULL. Explicit GROUP BY retains its
+ordinary missing-group behavior; it does not acquire an empty identity group.
 
 Multiple correlation columns are supported (one group key + one join key each).
 The correlated subquery may itself sit inside an `IN` subquery — it is handled
@@ -178,4 +188,4 @@ statistics are estimated, so it is not costed as a selective predicate
   whole predicate requires;
 - the correlated subquery must reduce to a single value (one non-correlation
   output column);
-- `WITH RECURSIVE` and scalar subqueries in the SELECT list are not handled.
+- `WITH RECURSIVE` in scalar subqueries is not handled.
