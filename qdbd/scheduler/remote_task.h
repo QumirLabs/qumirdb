@@ -2,14 +2,19 @@
 
 #include <qdb/scheduler/task.h>
 #include <qdb/scheduler/graph.h>
+#include <qdb/scheduler/port.h>
 #include <qdb/scheduler/utils/mpsc.h>
+#include <qdb/io/rowset_ops.h>
+
+#include <qdbd/messages.h>
 
 #include <coroio/notifier.hpp>
+#include <coroio/actors/actor.hpp>
 
 namespace NQdb {
 namespace NScheduler {
 
-class TActorTaskNode;
+class TRemoteSink;
 class TActorNotificationChannel {
 public:
     TActorNotificationChannel(std::unique_ptr<NNet::INotifier> notifier)
@@ -17,11 +22,11 @@ public:
         , ReadyQueue(1024) // TODO: right capacity?
     { }
 
-    TMPSCQueue<TActorTaskNode*>& Queue() {
+    TMPSCQueue<TRemoteSink*>& Queue() {
         return ReadyQueue;
     }
 
-    bool Notify(TActorTaskNode* task) {
+    bool Notify(TRemoteSink* task) {
         if (ReadyQueue.TryPush(std::move(task))) {
             Notifier->Notify();
             return true;
@@ -35,17 +40,34 @@ public:
 
 private:
     std::unique_ptr<NNet::INotifier> Notifier;
-    TMPSCQueue<TActorTaskNode*> ReadyQueue;
+    TMPSCQueue<TRemoteSink*> ReadyQueue;
 };
 
-class TActorTaskNode : public ITask {
+class TRemoteSource : public ITask {
 public:
-    TActorTaskNode(TActorNotificationChannel& actorChannel);
+    TRemoteSource(NScheduler::TOutputPort output, size_t srcLaneId);
+
+    void Receive(NQdb::NRemote::TDataChunk&& data, NNet::NActors::TActorContext::TPtr& ctx);
 
     ETaskResult Execute() override;
-    void Mark() {
-        Queued.store(false);
-    }
+
+private:
+    NScheduler::TOutputPort Output;
+};
+
+class TRemoteSink : public ITask {
+public:
+    TRemoteSink(
+        NScheduler::TInputPort input, // sink consumes input
+        NNet::NActors::TActorId actorId,
+        size_t dstLaneId,
+        size_t dstTaskId,
+        const TValueLayout* descriptor,
+        TActorNotificationChannel& actorChannel);
+
+    ETaskResult Execute() override;
+
+    void SendQueue(NNet::NActors::TActorContext::TPtr& ctx);
 
     void SetNode(NScheduler::TTaskNode* node) {
         Node = node;
@@ -56,8 +78,14 @@ public:
     }
 
 private:
+    NScheduler::TInputPort Input;
+    NNet::NActors::TActorId ActorId;
+    size_t DstLaneId;
+    size_t DstTaskId;
+    const TValueLayout* Descriptor;
     TActorNotificationChannel& ActorChannel;
     std::atomic<bool> Queued = false;
+    std::atomic<bool> Finished = false;
     NScheduler::TTaskNode* Node = nullptr;
 };
 

@@ -1,6 +1,7 @@
 #include <coroio/actors/actorsystem.hpp>
+#include <memory>
 #include <qdbd/messages.h>
-#include <qdbd/scheduler/actor_task_node.h>
+#include <qdbd/scheduler/remote_task.h>
 #include <qdb/scheduler/channel.h>
 
 #include "compute.h"
@@ -16,16 +17,24 @@ namespace {
 
 struct TComputeActor : public IBehaviorActor {
     struct TDefaultBehavior : public TBehavior<TDefaultBehavior, TTaskGraphMessage> {
-        void Receive(TTaskGraphMessage&&, TBlob, TActorContext::TPtr ctx) {
+        TDefaultBehavior(TComputeActor* parent)
+            : Parent(parent)
+        { }
+
+        void Receive(TTaskGraphMessage&& message, TBlob, TActorContext::TPtr ctx) {
+            Parent->StartGraph(std::move(message), std::move(ctx));
         }
 
         void HandleUnknownMessage(TMessageId messageId, TBlob blob, TActorContext::TPtr ctx)
         {
         }
+
+        TComputeActor* Parent;
     };
 
     explicit TComputeActor(std::shared_ptr<TRuntimeResources> resources)
-        : Resources(std::move(resources))
+        : Behavior(this)
+        , Resources(std::move(resources))
     {
         if (Resources) {
             Resources->UsedSlots.fetch_add(1, std::memory_order_relaxed);
@@ -41,25 +50,18 @@ struct TComputeActor : public IBehaviorActor {
         ReleaseSlot();
     }
 
-    void AfterRegister(TActorContext::TPtr ctx) override {
-        ActorChannel = std::make_unique<NScheduler::TActorNotificationChannel>(ctx->CreateNotifier());
+    void AfterRegister(TActorContext::TPtr ctx) override { }
 
-        NotificationTask = [&]() -> TVoidSuspendedTask {
-            co_await ActorChannel->Wait();
-            ProcessNotifications();
-        }();
-    }
-
-    void ProcessNotifications() {
+    void ProcessNotifications(TActorContext::TPtr& ctx) {
         // TODO: need to implement it throght a separate actor
         // e.g. ComputeActorNotifier -> consumer notification queue -> send to ComputeActor
         // need to do it if we move Actors to multithreaded model
 
         auto& queue = ActorChannel->Queue();
-        NQdb::NScheduler::TActorTaskNode* task = nullptr;
+        NQdb::NScheduler::TRemoteSink* task = nullptr;
         while (queue.TryPop(task)) {
             // process
-            task->Mark();
+            task->SendQueue(ctx);
             SchedulerSchannel->Notify(task->Meta());
         }
     }
@@ -76,10 +78,27 @@ struct TComputeActor : public IBehaviorActor {
         }
     }
 
+    void StartGraph(TTaskGraphMessage&& message, TActorContext::TPtr ctx) {
+        Scheduler = std::make_unique<NScheduler::TThreadedScheduler>(
+            message.Graph, /* worker_count = */ 18
+        );
+        SchedulerSchannel = std::make_unique<NScheduler::TSchedulerChannel>(
+            *Scheduler
+        );
+        ActorChannel = std::make_unique<NScheduler::TActorNotificationChannel>(ctx->CreateNotifier());
+        NotificationTask = [&](TActorContext::TPtr ctx) -> TVoidSuspendedTask {
+            while (true) {
+                co_await ActorChannel->Wait();
+                ProcessNotifications(ctx);
+            }
+        }(std::move(ctx));
+    }
+
     TDefaultBehavior Behavior;
     std::shared_ptr<TRuntimeResources> Resources;
     std::unique_ptr<NScheduler::TActorNotificationChannel> ActorChannel;
     std::unique_ptr<NScheduler::TSchedulerChannel> SchedulerSchannel;
+    std::unique_ptr<NScheduler::TThreadedScheduler> Scheduler;
     TVoidSuspendedTask NotificationTask;
 };
 

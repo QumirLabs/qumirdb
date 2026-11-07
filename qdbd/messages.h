@@ -38,8 +38,8 @@ struct TSpawnComputeActorResponse {
 // Push(srcId, TRowSet&&)
 struct TDataChunk {
     static constexpr NNet::NActors::TMessageId MessageId = 200;
-    uint32_t DstTaskId = 0;
-    uint32_t SrcLaneId = 0;
+    uint64_t DstLaneId = 0;
+    uint64_t DstTaskId = 0;
     TRowSet RowSet{};
     const TValueLayout* Descriptor = nullptr;
 
@@ -57,7 +57,8 @@ struct TFinish {
 struct TTaskGraphMessage {
     static constexpr NNet::NActors::TMessageId MessageId = 202;
     using LocalMessage = void; // TODO: must be serializable
-    NScheduler::TTaskNode* Node = nullptr;
+    NScheduler::TSealedTaskGraph Graph;
+    std::vector<TGeneratedKernel> Kernels;
 };
 
 // TODO: Fetch is local, do we need a message for it ?
