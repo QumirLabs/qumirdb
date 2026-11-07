@@ -1,9 +1,10 @@
 #include <gtest/gtest.h>
 
 #include <qdb/scheduler/connection.h>
+#include <qdb/scheduler/connections/local.h>
 #include <qdb/scheduler/graph.h>
-#include <qdb/scheduler/single_threaded_scheduler.h>
-#include <qdb/scheduler/threaded_scheduler.h>
+#include <qdb/scheduler/impl/single_threaded_scheduler.h>
+#include <qdb/scheduler/impl/threaded_scheduler.h>
 
 #include <atomic>
 #include <memory>

@@ -1,4 +1,4 @@
-#include <qdb/scheduler/scan_split.h>
+#include <qdb/scheduler/lowering/scan_split.h>
 
 #include <algorithm>
 

@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 
-#include <qdb/scheduler/engine_settings.h>
+#include <qdb/scheduler/settings/engine_settings.h>
 
 #include <filesystem>
 #include <fstream>

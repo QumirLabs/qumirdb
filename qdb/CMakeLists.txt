@@ -100,15 +100,17 @@ add_library(qumirdb
     exec/planner_helpers.cpp
     exec/plan_builder.cpp
     scheduler/connection.cpp
-    scheduler/cte_spool.cpp
-    scheduler/engine_settings.cpp
-    scheduler/executor.cpp
+    scheduler/connections/local.cpp
+    scheduler/port.cpp
+    scheduler/tasks/cte_spool.cpp
+    scheduler/settings/engine_settings.cpp
+    scheduler/impl/executor.cpp
     scheduler/graph.cpp
-    scheduler/plan_lowerer.cpp
-    scheduler/runtime_adapter.cpp
-    scheduler/scan_split.cpp
-    scheduler/single_threaded_scheduler.cpp
-    scheduler/threaded_scheduler.cpp
+    scheduler/lowering/plan_lowerer.cpp
+    scheduler/tasks/runtime_adapter.cpp
+    scheduler/lowering/scan_split.cpp
+    scheduler/impl/single_threaded_scheduler.cpp
+    scheduler/impl/threaded_scheduler.cpp
 )
 target_include_directories(qumirdb PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
 target_include_directories(qumirdb PRIVATE ${LLVM_INCLUDE_DIRS})

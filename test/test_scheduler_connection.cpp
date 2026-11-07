@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <qdb/scheduler/connection.h>
+#include <qdb/scheduler/connections/local.h>
 
 #include <atomic>
 #include <algorithm>

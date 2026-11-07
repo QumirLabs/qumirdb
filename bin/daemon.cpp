@@ -17,7 +17,7 @@
 #include <qdb/compiler/query.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/catalog/external_module.h>
-#include <qdb/scheduler/engine_settings.h>
+#include <qdb/scheduler/settings/engine_settings.h>
 
 #include <qumir/error.h>
 

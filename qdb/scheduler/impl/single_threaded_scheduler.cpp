@@ -1,5 +1,5 @@
 #include <qdb/scheduler/instrumentation/task.h>
-#include <qdb/scheduler/single_threaded_scheduler.h>
+#include <qdb/scheduler/impl/single_threaded_scheduler.h>
 
 #include <exception>
 #include <utility>

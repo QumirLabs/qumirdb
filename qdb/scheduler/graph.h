@@ -4,7 +4,7 @@
 #include <qdb/kernel/execution_context.h>
 #include <qdb/exec/instrumentation/operator.h>
 #include <qdb/scheduler/connection.h>
-#include <qdb/scheduler/state.h>
+#include <qdb/scheduler/task.h>
 
 #include <atomic>
 #include <cstddef>

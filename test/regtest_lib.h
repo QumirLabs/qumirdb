@@ -9,7 +9,7 @@
 #include <vector>
 #include <qdb/io/io.h>
 #include <qdb/plan/ops/stats.h>
-#include <qdb/scheduler/engine_settings.h>
+#include <qdb/scheduler/settings/engine_settings.h>
 
 namespace NRegTest {
 

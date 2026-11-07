@@ -10,8 +10,8 @@
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/pipeline.h>
 #include <qdb/scheduler/graph.h>
-#include <qdb/scheduler/plan_lowerer.h>
-#include <qdb/scheduler/scan_split.h>
+#include <qdb/scheduler/lowering/plan_lowerer.h>
+#include <qdb/scheduler/lowering/scan_split.h>
 #include <qdb/sql/parser.h>
 
 #include <algorithm>

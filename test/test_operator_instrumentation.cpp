@@ -1,3 +1,5 @@
+#include <qdb/scheduler/connections/local.h>
+#include <qdb/scheduler/tasks/runtime_adapter.h>
 #include "mock_source.h"
 #include "plan_runner.h"
 

@@ -1,4 +1,4 @@
-#include <qdb/scheduler/cte_spool.h>
+#include <qdb/scheduler/tasks/cte_spool.h>
 
 #include <qdb/exec/instrumentation/operator.h>
 #include <qdb/scheduler/instrumentation/task.h>

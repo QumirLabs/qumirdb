@@ -5,7 +5,6 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <memory>
 #include <string>
 #include <vector>
 
@@ -24,10 +23,6 @@ enum class EFetchResult {
     NO_DATA = 1,
     FINISHED = 2,
 };
-
-// A single-producer/single-consumer lane: a bounded rowset queue plus a finished
-// flag. Shared by every connection type; defined in connection.cpp.
-struct TConnectionLane;
 
 struct TConnectionStats {
     uint64_t Pushed = 0;
@@ -73,12 +68,6 @@ protected:
     void CountEmptyFetch(uint64_t count = 1) const;
     void CountFinishedFetch(uint64_t count = 1) const;
 
-    // Push/can-push against a single lane, updating counters. Shared by the
-    // single-lane connections (one-to-one, gather). On a failed push the rowset
-    // is left untouched for a retry.
-    bool LaneCanPush(TConnectionLane& lane) const;
-    bool LanePush(TConnectionLane& lane, TRowSet& rowSet) const;
-
 private:
     std::string DebugName_;
     bool StatsEnabled_ = false;
@@ -88,115 +77,6 @@ private:
     mutable std::atomic<uint64_t> BlockedPush_ = 0;
     mutable std::atomic<uint64_t> EmptyFetch_ = 0;
     mutable std::atomic<uint64_t> FinishedFetch_ = 0;
-};
-
-class TOneToOneConnection : public IConnection {
-public:
-    explicit TOneToOneConnection(size_t capacity = 1);
-    ~TOneToOneConnection() override;
-
-    EConnectionKind Kind() const override;
-    void Resize(size_t srcCount, size_t dstCount) override;
-    size_t SrcCount() const override;
-    size_t DstCount() const override;
-
-    bool CanPush(size_t srcId) const override;
-    bool Push(size_t srcId, TRowSet&& rowSet) override;
-    void Finish(size_t srcId) override;
-
-    EFetchResult Fetch(size_t dstId, TRowSet& rowSet) override;
-
-private:
-    size_t Capacity_;
-    size_t Size_ = 0;
-    std::vector<std::unique_ptr<TConnectionLane>> Lanes_;
-};
-
-class TGatherConnection : public IConnection {
-public:
-    explicit TGatherConnection(size_t capacity = 1);
-    ~TGatherConnection() override;
-
-    EConnectionKind Kind() const override;
-    void Resize(size_t srcCount, size_t dstCount) override;
-    size_t SrcCount() const override;
-    size_t DstCount() const override;
-
-    bool CanPush(size_t srcId) const override;
-    bool Push(size_t srcId, TRowSet&& rowSet) override;
-    void Finish(size_t srcId) override;
-
-    EFetchResult Fetch(size_t dstId, TRowSet& rowSet) override;
-
-private:
-    size_t Capacity_;
-    size_t Size_ = 0;
-    size_t FetchId_ = 0;
-    std::atomic<size_t> FinishedCount_ = 0;
-    std::vector<std::unique_ptr<TConnectionLane>> Lanes_;
-};
-
-class THashShuffleConnection : public IConnection {
-public:
-    explicit THashShuffleConnection(
-        size_t capacity = 1,
-        TRepartitionSpec repartition = {});
-    ~THashShuffleConnection() override;
-
-    EConnectionKind Kind() const override;
-    void Resize(size_t srcCount, size_t dstCount) override;
-    size_t SrcCount() const override;
-    size_t DstCount() const override;
-
-    bool CanPush(size_t srcId) const override;
-    bool Push(size_t srcId, TRowSet&& rowSet) override;
-    void Finish(size_t srcId) override;
-
-    bool CanPushTo(size_t srcId, size_t dstId) const;
-    bool PushTo(size_t srcId, size_t dstId, TRowSet&& rowSet);
-
-    EFetchResult Fetch(size_t dstId, TRowSet& rowSet) override;
-
-    const TRepartitionSpec& Repartition() const;
-
-private:
-    size_t LaneIndex(size_t srcId, size_t dstId) const;
-
-private:
-    size_t Capacity_;
-    size_t SrcCount_ = 0;
-    size_t DstCount_ = 0;
-    std::vector<std::unique_ptr<TConnectionLane>> Lanes_;
-    std::vector<std::unique_ptr<std::atomic<bool>>> Finished_;
-    std::atomic<size_t> FinishedCount_ = 0;
-    std::vector<size_t> FetchIds_;
-    TRepartitionSpec Repartition_;
-};
-
-// One producer, N consumers: every pushed rowset is replicated (shared) to all
-// destination lanes. Used to broadcast a small side (e.g. a scalar) to every
-// partition of the vector side in a cross join.
-class TBroadcastConnection : public IConnection {
-public:
-    explicit TBroadcastConnection(size_t capacity = 1);
-    ~TBroadcastConnection() override;
-
-    EConnectionKind Kind() const override;
-    void Resize(size_t srcCount, size_t dstCount) override;
-    size_t SrcCount() const override;
-    size_t DstCount() const override;
-
-    bool CanPush(size_t srcId) const override;
-    bool Push(size_t srcId, TRowSet&& rowSet) override;
-    void Finish(size_t srcId) override;
-
-    EFetchResult Fetch(size_t dstId, TRowSet& rowSet) override;
-
-private:
-    size_t Capacity_;
-    size_t DstCount_ = 0;
-    std::atomic<bool> Finished_ = false;
-    std::vector<std::unique_ptr<TConnectionLane>> Lanes_;
 };
 
 } // namespace NScheduler

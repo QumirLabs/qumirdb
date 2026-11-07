@@ -1,5 +1,6 @@
-#include <qdb/scheduler/runtime_adapter.h>
+#include <qdb/scheduler/tasks/runtime_adapter.h>
 
+#include <qdb/scheduler/connections/local.h>
 #include <qdb/scheduler/graph.h>
 #include <qdb/scheduler/instrumentation/task.h>
 #include <qdb/kernel/column_value.h>
@@ -198,40 +199,6 @@ const TStructType& ShuffleInputStruct(const TTypePtr& type) {
 }
 
 } // namespace
-
-EFetchResult TInputPort::Fetch(TRowSet& rowSet) const {
-    const auto result = Connection
-        ? Connection->Fetch(Lane, rowSet)
-        : EFetchResult::FINISHED;
-    if (result == EFetchResult::OK && Instrumentation) {
-        Instrumentation->Add(rowSet);
-    }
-    return result;
-}
-
-bool TOutputPort::CanPush() const {
-    return !Connection || Connection->CanPush(Lane);
-}
-
-bool TOutputPort::Push(TRowSet&& rowSet) const {
-    const auto rows = Instrumentation ? Instrumentation->Rows : 0;
-    const auto bytes = Instrumentation ? Instrumentation->Bytes : 0;
-    if (Instrumentation) {
-        Instrumentation->Add(rowSet);
-    }
-    const bool pushed = !Connection || Connection->Push(Lane, std::move(rowSet));
-    if (!pushed && Instrumentation) {
-        Instrumentation->Rows = rows;
-        Instrumentation->Bytes = bytes;
-    }
-    return pushed;
-}
-
-void TOutputPort::Finish() const {
-    if (Connection) {
-        Connection->Finish(Lane);
-    }
-}
 
 void TAuxInput::AddFilter(std::shared_ptr<IRuntimeFilterProbe> filter) {
     Filters_.push_back(std::move(filter));
