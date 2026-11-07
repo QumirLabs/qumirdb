@@ -19,3 +19,43 @@ completion.
 The Query-to-compute-actor lifecycle protocol, distributed query execution, and
 graph partitioning are outside this preparatory change. Compute actor cleanup
 when a Query disappears belongs to that future lifecycle protocol.
+
+## Proposed task-to-actor exchange
+
+An actor-backed task can connect the scheduler's worker pool to a ComputeActor
+on the event loop. The producer writes into a bounded local connection; the
+ComputeActor is its only consumer and performs `Fetch` and network `Send`.
+The same connection provides buffering and backpressure across the thread
+boundary.
+
+```mermaid
+flowchart LR
+    subgraph workers[Scheduler workers]
+        P[Producer task]
+        T[TActorTaskNode.Execute]
+    end
+    Q[Bounded local IConnection]
+    subgraph loop[Event loop]
+        A[ComputeActor]
+    end
+    R[Remote node]
+    P --> Q
+    Q -->|Fetch| A
+    T -. Notify .-> A
+    A -->|Send| R
+    A -. Wake .-> T
+```
+
+The task checks the shared transfer state and wakes the actor through a
+coalescing Notifier. It does not fetch rowsets itself. The actor drains the
+connection as transport capacity permits. When it needs more input or finishes
+the transfer, it publishes that state before waking the task. The next task
+step can then request upstream work or report completion.
+
+This model requires a generic external-wakeup contract in the scheduler. A
+`WAITING` result suspends a task until an external event; a thread-safe `Wake`
+reschedules it without losing notifications that arrive during execution.
+An empty ready queue is not completion while external work remains pending,
+and wakeup handles must respect the graph's lifetime. The actor-specific
+bridge belongs in `qdbd`; the scheduler only needs waiting and wakeup semantics.
+This exchange is a design proposal, not an implemented execution path.
