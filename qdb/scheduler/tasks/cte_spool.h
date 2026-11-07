@@ -62,7 +62,7 @@ private:
 // One lane of a CTE producer: appends its input to its own spool segment and
 // finishes its completion lane at the end of the input. The spool has no
 // capacity limit, so no consumer can block the producer.
-class TCteProducerTask final : public ITaskNode {
+class TCteProducerTask final : public ITask {
 public:
     TCteProducerTask(
         std::shared_ptr<TCteSpool> spool,
@@ -85,7 +85,7 @@ private:
 // The publication barrier of a spool. When every producer lane has finished
 // its completion lane, it seals the spool and finishes the completion lane of
 // every consumer lane. Both connections carry finish signals only.
-class TCtePublishTask final : public ITaskNode {
+class TCtePublishTask final : public ITask {
 public:
     TCtePublishTask(
         std::shared_ptr<TCteSpool> spool,
@@ -103,7 +103,7 @@ private:
 
 // One lane of a CTE reference. After publication it emits a view of each batch
 // it claims; a view keeps the spool alive while downstream operators hold it.
-class TCteConsumerTask final : public ITaskNode {
+class TCteConsumerTask final : public ITask {
 public:
     TCteConsumerTask(
         std::shared_ptr<TCteConsumerState> state,

@@ -25,7 +25,7 @@ enum class ETaskEdgeKind { Rowset, Dependency };
 
 struct TTaskNode {
     size_t ExecutionSlot = 0;
-    ITaskNode* Task = nullptr;
+    ITask* Task = nullptr;
     std::unique_ptr<TOperatorInstrumentation> Instrumentation;
     TExecStageId ExecStageId = InvalidExecStageId;
     // Stable physical grouping assigned monotonically during one lowering.
@@ -53,8 +53,8 @@ struct TTaskEdge {
 
 class TTaskGraph {
 public:
-    TTaskNode& AddNode(ITaskNode& task);
-    TTaskNode& AddOwnedNode(std::unique_ptr<ITaskNode> task);
+    TTaskNode& AddNode(ITask& task);
+    TTaskNode& AddOwnedNode(std::unique_ptr<ITask> task);
     IConnection& AddConnection(std::unique_ptr<IConnection> connection);
 
     TTaskEdge& AddEdge(
@@ -94,7 +94,7 @@ private:
     // Task-local observers and ports remain valid through task destruction.
     std::vector<std::unique_ptr<TTaskNode>> Nodes_;
     std::vector<std::unique_ptr<IConnection>> OwnedConnections_;
-    std::vector<std::unique_ptr<ITaskNode>> OwnedTasks_;
+    std::vector<std::unique_ptr<ITask>> OwnedTasks_;
     std::vector<std::unique_ptr<TTaskEdge>> Edges_;
     std::vector<TTaskNode*> Leaves_;
     TTaskNode* Root_ = nullptr;

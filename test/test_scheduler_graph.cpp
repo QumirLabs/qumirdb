@@ -14,7 +14,7 @@ using namespace NQdb::NScheduler;
 
 namespace {
 
-class TNoopTask : public ITaskNode {
+class TNoopTask : public ITask {
 public:
     ETaskResult Execute() override {
         ++Calls_;
@@ -29,7 +29,7 @@ private:
     int Calls_ = 0;
 };
 
-class TSourceTask : public ITaskNode {
+class TSourceTask : public ITask {
 public:
     ETaskResult Execute() override {
         if (!Produced) {
@@ -44,7 +44,7 @@ public:
     bool Finished = false;
 };
 
-class TSinkTask : public ITaskNode {
+class TSinkTask : public ITask {
 public:
     explicit TSinkTask(TSourceTask& source)
         : Source_(source)
@@ -76,7 +76,7 @@ private:
     bool Consumed_ = false;
 };
 
-class TOrderedProbeTask : public ITaskNode {
+class TOrderedProbeTask : public ITask {
 public:
     TTaskNode* Prerequisite = nullptr;
     bool RanAfterPrerequisite = false;
@@ -90,7 +90,7 @@ public:
     }
 };
 
-class TWaitForBothTask : public ITaskNode {
+class TWaitForBothTask : public ITask {
 public:
     TTaskNode* Left = nullptr;
     TTaskNode* Right = nullptr;

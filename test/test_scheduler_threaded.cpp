@@ -17,7 +17,7 @@ using namespace NQdb::NScheduler;
 
 namespace {
 
-class TRepeatTask : public ITaskNode {
+class TRepeatTask : public ITask {
 public:
     explicit TRepeatTask(int repeats)
         : Remaining_(repeats)
@@ -41,7 +41,7 @@ private:
     int Calls_ = 0;
 };
 
-class TStressSourceTask : public ITaskNode {
+class TStressSourceTask : public ITask {
 public:
     explicit TStressSourceTask(int total)
         : Total_(total)
@@ -64,7 +64,7 @@ private:
     int Total_;
 };
 
-class TStressSinkTask : public ITaskNode {
+class TStressSinkTask : public ITask {
 public:
     TStressSinkTask(TStressSourceTask& source, int total)
         : Source_(source)
@@ -96,7 +96,7 @@ private:
     int Consumed_ = 0;
 };
 
-class TGuardedTask : public ITaskNode {
+class TGuardedTask : public ITask {
 public:
     explicit TGuardedTask(int repeats)
         : Remaining_(repeats)
@@ -124,21 +124,21 @@ private:
     std::atomic<bool> Running_ = false;
 };
 
-class TFinishTask : public ITaskNode {
+class TFinishTask : public ITask {
 public:
     ETaskResult Execute() override {
         return ETaskResult::FINISHED;
     }
 };
 
-class TThrowTask : public ITaskNode {
+class TThrowTask : public ITask {
 public:
     ETaskResult Execute() override {
         throw std::runtime_error("expected task failure");
     }
 };
 
-class TManyInputSinkTask : public ITaskNode {
+class TManyInputSinkTask : public ITask {
 public:
     ETaskResult Execute() override {
         if (!Requested_) {
@@ -152,7 +152,7 @@ private:
     bool Requested_ = false;
 };
 
-class TNeedFinishedReplayTask : public ITaskNode {
+class TNeedFinishedReplayTask : public ITask {
 public:
     ETaskResult Execute() override {
         ++Calls_;

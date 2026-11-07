@@ -10,7 +10,7 @@ using namespace NQdb::NScheduler;
 
 namespace {
 
-class TTestTask : public ITaskNode {
+class TTestTask : public ITask {
 public:
     ETaskResult Execute() override {
         ++Calls_;
@@ -25,11 +25,11 @@ private:
     int Calls_ = 0;
 };
 
-TEST(SchedulerCore, TaskNodeInterfaceExecutes) {
+TEST(SchedulerCore, TaskInterfaceExecutes) {
     TTestTask task;
-    ITaskNode* node = &task;
+    ITask* executable = &task;
 
-    EXPECT_EQ(node->Execute(), ETaskResult::OK);
+    EXPECT_EQ(executable->Execute(), ETaskResult::OK);
     EXPECT_EQ(task.Calls(), 1);
 }
 

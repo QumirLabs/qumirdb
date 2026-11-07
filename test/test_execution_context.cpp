@@ -195,7 +195,7 @@ TEST(ExecutionContext, AllocationAlignmentAndFailure) {
 
 namespace {
 
-class TAllocatingTask final : public ITaskNode {
+class TAllocatingTask final : public ITask {
 public:
     ETaskResult Execute() override {
         EXPECT_NE(TryExecutionContext(), nullptr);
