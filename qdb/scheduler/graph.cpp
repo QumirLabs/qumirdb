@@ -125,7 +125,6 @@ TTaskEdge& TTaskGraph::AddDependencyEdge(
 }
 
 void TTaskGraph::Build() {
-    CheckMutable();
     Leaves_.clear();
     Root_ = nullptr;
 
@@ -150,15 +149,15 @@ void TTaskGraph::Build() {
     }
 }
 
-size_t TTaskGraph::Seal(std::string* error) {
+TSealedTaskGraph TTaskGraph::Seal(std::string* error) {
     if (!Sealed_) {
         Build();
         if (!Validate(error)) {
-            return 0;
+            return {};
         }
         Sealed_ = true;
     }
-    return Nodes_.size();
+    return TSealedTaskGraph(*Root_, Nodes_.size());
 }
 
 void TTaskGraph::CheckMutable() const {

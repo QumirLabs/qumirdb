@@ -364,6 +364,14 @@ private:
     llvm::json::Object Items_;
 };
 
+// Completes the native task graph shape; the browser runs the exec plan instead.
+class TUnusedSink final : public NQdb::ISink {
+public:
+    void Write(const NQdb::TRowSet&) override {
+        throw std::logic_error("the exported task graph is never run");
+    }
+};
+
 class TOutputSilencer {
 public:
     TOutputSilencer() {
@@ -1418,10 +1426,15 @@ llvm::json::Object GraphJson(
     std::vector<TGroup> groups;
     std::unordered_map<std::string, size_t> groupIndexes;
     std::unordered_map<const NQdb::NScheduler::TTaskNode*, std::string> nodeGroups;
+    // The sink is encoded as "result" below; the browser has its own.
+    const auto* sink = lowered.Graph->Root();
     const auto& graphNodes = lowered.Graph->Nodes();
     nodeGroups.reserve(graphNodes.size());
     for (size_t i = 0; i < graphNodes.size(); ++i) {
         const auto& node = *graphNodes[i];
+        if (&node == sink) {
+            continue;
+        }
         const auto rawId = "n" + std::to_string(i);
         const auto kind = node.DebugKind.empty() ? "task" : node.DebugKind;
         const auto label = node.DebugLabel.empty() ? kind : node.DebugLabel;
@@ -1480,7 +1493,9 @@ llvm::json::Object GraphJson(
     std::vector<TEdge> groupedEdges;
     std::unordered_map<std::string, size_t> edgeIndexes;
     for (const auto& edge : lowered.Graph->Edges()) {
-        if (edge->Kind == NQdb::NScheduler::ETaskEdgeKind::Dependency) {
+        if (edge->Kind == NQdb::NScheduler::ETaskEdgeKind::Dependency ||
+            edge->Dst == sink)
+        {
             continue;
         }
         const auto& from = nodeGroups.at(edge->Src);
@@ -2889,6 +2904,7 @@ llvm::json::Object BuildBundle(
     };
     try {
         std::ostringstream lowerDiagnostics;
+        TUnusedSink unusedSink;
         // One lowering; kernels arrive as ASTs on lowered.Kernels.
         auto lowered = NQdb::NScheduler::LowerPlanToGraph(
             logicalPlan,
@@ -2916,7 +2932,13 @@ llvm::json::Object BuildBundle(
             });
             compiler.CompileInstrumentation();
         }
-        lowered.Graph->Build();
+        // Validate and freeze the same graph that native execution runs.
+        NQdb::NScheduler::AttachSink(lowered, unusedSink);
+        std::string sealError;
+        if (!lowered.Graph->Seal(&sealError)) {
+            typedExecPlan.reset();
+            throw std::runtime_error(sealError);
+        }
 
         // Wasm finalization: ast artifacts always, wasm in embed mode.
         wasmFinalized = WasmFinalizeKernels(

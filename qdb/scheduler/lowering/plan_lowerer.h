@@ -82,6 +82,10 @@ TLoweredPlan LowerPlanToGraph(
     std::shared_ptr<const TExternalCatalogSnapshot> externalCatalog = nullptr,
     std::shared_ptr<IRuntimeFilterBindingFactory> filterBindings = nullptr);
 
+// Attach the terminal sink task that writes every output rowset to `sink`; the
+// sink must outlive the graph.
+void AttachSink(TLoweredPlan& lowered, ISink& sink);
+
 // Attach a terminal sink that writes every output rowset to `sink`, then run the
 // graph on the configured scheduler. Returns false and sets `error` on failure.
 bool RunPlanIntoSink(

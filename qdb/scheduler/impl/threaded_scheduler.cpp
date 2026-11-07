@@ -21,20 +21,23 @@ void SetError(std::string* error, std::string message) {
 } // namespace
 
 TThreadedScheduler::TThreadedScheduler(
-    TTaskNode& root,
-    size_t taskCount,
+    TSealedTaskGraph graph,
     size_t workerCount,
     size_t readyQueueCapacity)
-    : Root_(root)
-    , Execution_(taskCount)
+    : Graph_(graph)
+    , Execution_(graph.TaskCount())
     , Ready_(std::max({
         readyQueueCapacity,
-        taskCount,
+        graph.TaskCount(),
         size_t{1}}))
     , WorkerCount_(std::max<size_t>(workerCount, 1))
 {}
 
 bool TThreadedScheduler::Run(std::string* error) {
+    if (!Graph_) {
+        SetError(error, "task graph is not sealed");
+        return false;
+    }
     if (HasRun_) {
         SetError(error, "threaded scheduler cannot run twice");
         return false;
@@ -43,7 +46,7 @@ bool TThreadedScheduler::Run(std::string* error) {
 
     FinishedCount_.store(0, std::memory_order_release);
     ResetStats();
-    Schedule(&Root_);
+    Schedule(&Graph_.Root());
 
     std::vector<std::thread> workers;
     workers.reserve(WorkerCount_);
@@ -152,7 +155,7 @@ void TThreadedScheduler::Work() {
     // work remains queued.
     auto done = [&] {
         return Failed_.load(std::memory_order_acquire) ||
-            Root_.State.load(std::memory_order_acquire) == ETaskState::Finished;
+            Graph_.Root().State.load(std::memory_order_acquire) == ETaskState::Finished;
     };
     // Brief spin on the work permit before blocking, so bursts of scheduling
     // are picked up without an OS wakeup; then park on the semaphore.
@@ -267,7 +270,7 @@ void TThreadedScheduler::FinishNode(TTaskNode* node) {
     auto previous = node->State.exchange(ETaskState::Finished, std::memory_order_acq_rel);
     assert(previous == ETaskState::Running || previous == ETaskState::Reschedule);
     FinishedCount_.fetch_add(1, std::memory_order_acq_rel);
-    if (node == &Root_) {
+    if (node == &Graph_.Root()) {
         // The sink is done: the query's output is complete. Wake every worker so
         // they observe termination and exit instead of parking on the permit
         // while upstream branches sit unfinished (abandoned by early termination).

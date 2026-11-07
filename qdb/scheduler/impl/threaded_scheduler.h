@@ -17,8 +17,7 @@ namespace NScheduler {
 class TThreadedScheduler {
 public:
     TThreadedScheduler(
-        TTaskNode& root,
-        size_t taskCount,
+        TSealedTaskGraph graph,
         size_t workerCount,
         size_t readyQueueCapacity = 0);
 
@@ -35,7 +34,7 @@ private:
     void FinishNode(TTaskNode* node);
     void ResetStats();
 
-    TTaskNode& Root_;
+    TSealedTaskGraph Graph_;
     TExecutionState Execution_;
     TMPMCQueue<TTaskNode*> Ready_;
     // One permit is released per task pushed to Ready_; idle workers block on

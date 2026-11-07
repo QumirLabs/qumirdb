@@ -282,9 +282,9 @@ TEST(ExecutionContext, SchedulerPinsAllocationDomain) {
     TTaskGraph graph;
     TAllocatingTask task;
     graph.AddNode(task);
-    const auto taskCount = graph.Seal();
-    ASSERT_EQ(taskCount, 1u);
-    TThreadedScheduler scheduler(*graph.Root(), taskCount, 2);
+    const auto sealed = graph.Seal();
+    ASSERT_TRUE(sealed);
+    TThreadedScheduler scheduler(sealed, 2);
     std::string error;
     ASSERT_TRUE(scheduler.Run(&error)) << error;
     EXPECT_EQ(task.Bytes, 96u);
@@ -294,14 +294,20 @@ TEST(ExecutionContext, SchedulerPinsAllocationDomain) {
 TEST(ExecutionContext, SchedulersCreateExecutionStateFromTaskCount) {
     for (bool threaded : {false, true}) {
         SCOPED_TRACE(threaded);
+        TAllocatingTask source;
         TAllocatingTask task;
-        task.Slot = 2;
-        TTaskNode root{.ExecutionSlot = 2, .Task = &task};
+        task.Slot = 1;
+        TTaskGraph graph;
+        auto& sourceNode = graph.AddNode(source);
+        auto& root = graph.AddNode(task);
+        graph.AddOwnedEdge(sourceNode, root, std::make_unique<TOneToOneConnection>());
+        const auto sealed = graph.Seal();
+        ASSERT_EQ(sealed.TaskCount(), 2u);
 
         std::string error;
         const bool ok = threaded
-            ? TThreadedScheduler(root, 3, 2).Run(&error)
-            : TSingleThreadedScheduler(root, 3).Run(&error);
+            ? TThreadedScheduler(sealed, 2).Run(&error)
+            : TSingleThreadedScheduler(sealed).Run(&error);
         ASSERT_TRUE(ok) << error;
         EXPECT_EQ(root.State.load(), ETaskState::Finished);
         EXPECT_EQ(task.Bytes, 96u);
@@ -316,12 +322,12 @@ TEST(ExecutionContext, PublishedBatchOutlivesSchedulerAndGraph) {
         {
             TTaskGraph graph;
             graph.AddOwnedNode(std::make_unique<TMaterializingTask>(batch));
-            const auto taskCount = graph.Seal();
-            ASSERT_EQ(taskCount, 1u);
+            const auto sealed = graph.Seal();
+            ASSERT_TRUE(sealed);
             std::string error;
             const bool ok = threaded
-                ? TThreadedScheduler(*graph.Root(), taskCount, 2).Run(&error)
-                : TSingleThreadedScheduler(*graph.Root(), taskCount).Run(&error);
+                ? TThreadedScheduler(sealed, 2).Run(&error)
+                : TSingleThreadedScheduler(sealed).Run(&error);
             ASSERT_TRUE(ok) << error;
         }
         EXPECT_EQ(*reinterpret_cast<int64_t*>(batch.Columns[0].Data), 456);
@@ -340,13 +346,13 @@ TEST(ExecutionContext, AbandonedTaskHeapIsReclaimedBeforeGraphTeardown) {
         auto& source = graph.AddOwnedNode(std::move(producerTask));
         auto& sink = graph.AddOwnedNode(std::move(consumerTask));
         graph.AddOwnedEdge(source, sink, std::make_unique<TOneToOneConnection>());
-        const auto taskCount = graph.Seal();
-        ASSERT_EQ(taskCount, 2u);
+        const auto sealed = graph.Seal();
+        ASSERT_TRUE(sealed);
 
         std::string error;
         const bool ok = threaded
-            ? TThreadedScheduler(*graph.Root(), taskCount, 2).Run(&error)
-            : TSingleThreadedScheduler(*graph.Root(), taskCount).Run(&error);
+            ? TThreadedScheduler(sealed, 2).Run(&error)
+            : TSingleThreadedScheduler(sealed).Run(&error);
         ASSERT_TRUE(ok) << error;
         EXPECT_EQ(source.State.load(), ETaskState::Idle);
         EXPECT_EQ(consumer->HeapBytes, 64u);

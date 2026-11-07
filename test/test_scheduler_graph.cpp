@@ -118,15 +118,15 @@ void CheckControlDependency(bool threaded) {
     graph.AddOwnedEdge(build, root, std::make_unique<TOneToOneConnection>());
     graph.AddOwnedEdge(probe, root, std::make_unique<TOneToOneConnection>());
     graph.AddDependencyEdge(build, probe);
-    const auto taskCount = graph.Seal();
-    ASSERT_GT(taskCount, 0u);
+    const auto sealed = graph.Seal();
+    ASSERT_TRUE(sealed);
 
     std::string error;
     if (threaded) {
-        TThreadedScheduler scheduler(*graph.Root(), taskCount, 2);
+        TThreadedScheduler scheduler(sealed, 2);
         ASSERT_TRUE(scheduler.Run(&error)) << error;
     } else {
-        TSingleThreadedScheduler scheduler(*graph.Root(), taskCount);
+        TSingleThreadedScheduler scheduler(sealed);
         ASSERT_TRUE(scheduler.Run(&error)) << error;
     }
     EXPECT_TRUE(probePtr->RanAfterPrerequisite);
@@ -139,7 +139,7 @@ TEST(SchedulerGraph, BuildsAdjacencyAndValidates) {
     auto& sink = graph.AddOwnedNode(std::make_unique<TNoopTask>());
     graph.AddOwnedEdge(source, sink, std::make_unique<TOneToOneConnection>());
     std::string error;
-    EXPECT_EQ(graph.Seal(&error), 2u) << error;
+    EXPECT_EQ(graph.Seal(&error).TaskCount(), 2u) << error;
     ASSERT_EQ(graph.Leaves().size(), 1u);
     EXPECT_EQ(graph.Leaves()[0], &source);
     EXPECT_EQ(graph.Root(), &sink);
@@ -150,7 +150,7 @@ TEST(SchedulerGraph, BuildsAdjacencyAndValidates) {
 TEST(SchedulerGraph, RejectsEmptyGraph) {
     TTaskGraph graph;
     std::string error;
-    EXPECT_EQ(graph.Seal(&error), 0u);
+    EXPECT_FALSE(graph.Seal(&error));
     EXPECT_EQ(error, "task graph is empty");
 }
 
@@ -161,7 +161,7 @@ TEST(SchedulerGraph, SealFreezesStructure) {
     auto& sink = graph.AddNode(task);
     auto& connection = graph.AddConnection(std::make_unique<TOneToOneConnection>());
     graph.AddEdge(source, sink, connection);
-    ASSERT_EQ(graph.Seal(), 2u);
+    ASSERT_EQ(graph.Seal().TaskCount(), 2u);
 
     EXPECT_THROW(graph.AddNode(task), std::logic_error);
     EXPECT_THROW(graph.AddOwnedNode(std::make_unique<TNoopTask>()), std::logic_error);
@@ -169,7 +169,6 @@ TEST(SchedulerGraph, SealFreezesStructure) {
     EXPECT_THROW(graph.AddEdge(source, sink, connection), std::logic_error);
     EXPECT_THROW(graph.AddOwnedEdge(source, sink, {}), std::logic_error);
     EXPECT_THROW(graph.AddDependencyEdge(source, sink), std::logic_error);
-    EXPECT_THROW(graph.Build(), std::logic_error);
     EXPECT_EQ(graph.Nodes().size(), 2u);
     EXPECT_EQ(graph.Edges().size(), 1u);
 }
@@ -178,11 +177,13 @@ TEST(SchedulerGraph, RepeatedSealPreservesTaskState) {
     TNoopTask task;
     TTaskGraph graph;
     auto& root = graph.AddNode(task);
-    ASSERT_EQ(graph.Seal(), 1u);
+    ASSERT_TRUE(graph.Seal());
     root.State.store(ETaskState::Finished);
 
-    EXPECT_EQ(graph.Seal(), 1u);
-    EXPECT_EQ(graph.Root(), &root);
+    const auto sealed = graph.Seal();
+    ASSERT_TRUE(sealed);
+    EXPECT_EQ(&sealed.Root(), &root);
+    EXPECT_EQ(sealed.TaskCount(), 1u);
     EXPECT_EQ(root.State.load(), ETaskState::Finished);
 }
 
@@ -191,11 +192,25 @@ TEST(SchedulerGraph, FailedSealDoesNotFreezeStructure) {
     TTaskGraph graph;
     auto& source = graph.AddNode(task);
     auto& sink = graph.AddNode(task);
-    EXPECT_EQ(graph.Seal(), 0u);
+    EXPECT_FALSE(graph.Seal());
 
     graph.AddOwnedEdge(source, sink, std::make_unique<TOneToOneConnection>());
-    EXPECT_EQ(graph.Seal(), 2u);
-    EXPECT_EQ(graph.Root(), &sink);
+    const auto sealed = graph.Seal();
+    ASSERT_TRUE(sealed);
+    EXPECT_EQ(&sealed.Root(), &sink);
+    EXPECT_EQ(sealed.TaskCount(), 2u);
+}
+
+TEST(SchedulerGraph, SchedulersRejectFailedSeal) {
+    TTaskGraph graph;
+    const auto sealed = graph.Seal();
+    ASSERT_FALSE(sealed);
+    std::string error;
+    EXPECT_FALSE(TSingleThreadedScheduler(sealed).Run(&error));
+    EXPECT_EQ(error, "task graph is not sealed");
+    error.clear();
+    EXPECT_FALSE(TThreadedScheduler(sealed, 2).Run(&error));
+    EXPECT_EQ(error, "task graph is not sealed");
 }
 
 TEST(SchedulerGraph, RejectsMissingConnection) {
@@ -204,7 +219,7 @@ TEST(SchedulerGraph, RejectsMissingConnection) {
     auto& sink = graph.AddOwnedNode(std::make_unique<TNoopTask>());
     graph.AddOwnedEdge(source, sink, {});
     std::string error;
-    EXPECT_EQ(graph.Seal(&error), 0u);
+    EXPECT_FALSE(graph.Seal(&error));
     EXPECT_NE(error.find("without a connection"), std::string::npos);
 }
 
@@ -213,7 +228,7 @@ TEST(SchedulerGraph, RejectsMultipleRoots) {
     graph.AddOwnedNode(std::make_unique<TNoopTask>());
     graph.AddOwnedNode(std::make_unique<TNoopTask>());
     std::string error;
-    EXPECT_EQ(graph.Seal(&error), 0u);
+    EXPECT_FALSE(graph.Seal(&error));
     EXPECT_NE(error.find("exactly one root"), std::string::npos);
 }
 
@@ -223,7 +238,7 @@ TEST(SchedulerGraph, RejectsInvalidLaneIds) {
     auto& sink = graph.AddOwnedNode(std::make_unique<TNoopTask>());
     graph.AddOwnedEdge(source, sink, std::make_unique<TOneToOneConnection>(), 1, 0);
     std::string error;
-    EXPECT_EQ(graph.Seal(&error), 0u);
+    EXPECT_FALSE(graph.Seal(&error));
     EXPECT_NE(error.find("source lane"), std::string::npos);
 }
 
@@ -238,8 +253,7 @@ TEST(SchedulerGraph, PrintsConnectionsAndLaneMapping) {
     auto& conn = graph.AddConnection(std::move(connection));
     graph.AddEdge(left, sink, conn, 0, 0);
     graph.AddEdge(right, sink, conn, 1, 0);
-    const auto taskCount = graph.Seal();
-    ASSERT_GT(taskCount, 0u);
+    ASSERT_TRUE(graph.Seal());
 
     std::stringstream out;
     graph.Print(out);
@@ -256,7 +270,7 @@ TEST(SchedulerGraph, RejectsDependencyCycle) {
     graph.AddOwnedEdge(source, sink, std::make_unique<TOneToOneConnection>());
     graph.AddDependencyEdge(sink, source);
     std::string error;
-    EXPECT_EQ(graph.Seal(&error), 0u);
+    EXPECT_FALSE(graph.Seal(&error));
     EXPECT_NE(error.find("scheduling cycle"), std::string::npos);
 }
 
@@ -268,8 +282,7 @@ TEST(SchedulerGraph, DependencyEdgesDoNotCarryRowsets) {
     graph.AddOwnedEdge(build, sink, std::make_unique<TOneToOneConnection>());
     graph.AddOwnedEdge(probe, sink, std::make_unique<TOneToOneConnection>());
     graph.AddDependencyEdge(build, probe);
-    const auto taskCount = graph.Seal();
-    ASSERT_GT(taskCount, 0u);
+    ASSERT_TRUE(graph.Seal());
 
     ASSERT_EQ(probe.Inbound.size(), 1u);
     EXPECT_EQ(probe.Inbound.front()->Kind, ETaskEdgeKind::Dependency);
@@ -298,10 +311,10 @@ TEST(SchedulerGraph, SingleThreadedSchedulerRunsSmallGraph) {
     auto& source = graph.AddOwnedNode(std::move(sourceTask));
     auto& sink = graph.AddOwnedNode(std::move(sinkTask));
     graph.AddOwnedEdge(source, sink, std::make_unique<TOneToOneConnection>());
-    const auto taskCount = graph.Seal();
-    ASSERT_GT(taskCount, 0u);
+    const auto sealed = graph.Seal();
+    ASSERT_TRUE(sealed);
 
-    TSingleThreadedScheduler scheduler(*graph.Root(), taskCount);
+    TSingleThreadedScheduler scheduler(sealed);
     std::string error;
     ASSERT_TRUE(scheduler.Run(&error)) << error;
     EXPECT_TRUE(sourcePtr->Finished);
@@ -312,10 +325,10 @@ TEST(SchedulerGraph, SingleThreadedSchedulerRunsSmallGraph) {
 TEST(SchedulerGraph, SingleThreadedSchedulerCannotRunTwice) {
     TTaskGraph graph;
     graph.AddOwnedNode(std::make_unique<TNoopTask>());
-    const auto taskCount = graph.Seal();
-    ASSERT_GT(taskCount, 0u);
+    const auto sealed = graph.Seal();
+    ASSERT_TRUE(sealed);
 
-    TSingleThreadedScheduler scheduler(*graph.Root(), taskCount);
+    TSingleThreadedScheduler scheduler(sealed);
     std::string error;
     ASSERT_TRUE(scheduler.Run(&error)) << error;
     EXPECT_FALSE(scheduler.Run(&error));

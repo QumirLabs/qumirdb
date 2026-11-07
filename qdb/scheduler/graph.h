@@ -50,6 +50,35 @@ struct TTaskEdge {
     size_t ExecInput = 0;
 };
 
+// A validated, frozen graph; only TTaskGraph::Seal() makes a non-empty one.
+class TSealedTaskGraph {
+public:
+    TSealedTaskGraph() = default;
+
+    explicit operator bool() const {
+        return Root_ != nullptr;
+    }
+
+    TTaskNode& Root() const {
+        return *Root_;
+    }
+
+    size_t TaskCount() const {
+        return TaskCount_;
+    }
+
+private:
+    friend class TTaskGraph;
+
+    TSealedTaskGraph(TTaskNode& root, size_t taskCount)
+        : Root_(&root)
+        , TaskCount_(taskCount)
+    {}
+
+    TTaskNode* Root_ = nullptr;
+    size_t TaskCount_ = 0;
+};
+
 class TTaskGraph {
 public:
     TTaskNode& AddNode(ITask& task);
@@ -75,8 +104,8 @@ public:
     // Carries wakeups and demand, but no rowsets or exec-stage input.
     TTaskEdge& AddDependencyEdge(TTaskNode& producer, TTaskNode& consumer);
 
-    void Build();
-    size_t Seal(std::string* error = nullptr);
+    // Builds adjacency, validates and freezes the graph; empty on error.
+    TSealedTaskGraph Seal(std::string* error = nullptr);
     void SetConnectionStatsEnabled(bool enabled);
     void Print(std::ostream& out) const;
     void PrintConnectionStats(std::ostream& out) const;
@@ -88,6 +117,7 @@ public:
 
 private:
     void CheckMutable() const;
+    void Build();
     bool Validate(std::string* error) const;
 
     // Task-local observers and ports remain valid through task destruction.

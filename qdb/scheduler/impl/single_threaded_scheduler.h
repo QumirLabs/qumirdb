@@ -12,7 +12,7 @@ namespace NScheduler {
 
 class TSingleThreadedScheduler {
 public:
-    TSingleThreadedScheduler(TTaskNode& root, size_t taskCount);
+    explicit TSingleThreadedScheduler(TSealedTaskGraph graph);
 
     bool Run(std::string* error = nullptr);
     TSchedulerRunStats Stats() const;
@@ -22,7 +22,7 @@ private:
     void ScheduleInput(TTaskNode* node);
     void ScheduleOutput(TTaskNode* node);
 
-    TTaskNode& Root_;
+    TSealedTaskGraph Graph_;
     TExecutionState Execution_;
     std::list<TTaskNode*> Ready_;
     std::unordered_set<TTaskNode*> Scheduled_;
