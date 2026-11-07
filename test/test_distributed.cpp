@@ -347,18 +347,18 @@ TEST(DistributedSerialization, RejectsEveryTruncatedPrefixWithoutChangingOutput)
 TEST(DistributedSerialization, RejectsInvalidDimensionsAndLayouts) {
     TMixedBatch original;
     const auto bytes = Encode(original.Message);
-    for (size_t offset : {8, 16}) {
+    for (size_t offset : {16, 24}) {
         auto invalid = bytes;
         Replace(invalid, offset, std::numeric_limits<uint64_t>::max());
         EXPECT_THROW(TDecodedChunk{invalid}, std::runtime_error);
     }
-    for (const auto [offset, value] : std::array<std::pair<size_t, uint8_t>, 3>{{{24, 3}, {25, 2}, {25, 1}}}) {
+    for (const auto [offset, value] : std::array<std::pair<size_t, uint8_t>, 3>{{{32, 3}, {33, 2}, {33, 1}}}) {
         auto invalid = bytes;
         Replace(invalid, offset, value);
         EXPECT_THROW(TDecodedChunk{invalid}, std::runtime_error);
     }
     auto huge = bytes;
-    Replace(huge, 16, static_cast<uint64_t>(std::numeric_limits<int64_t>::max()));
+    Replace(huge, 24, static_cast<uint64_t>(std::numeric_limits<int64_t>::max()));
     EXPECT_THROW(TDecodedChunk{huge}, std::runtime_error);
     TDataChunk empty;
     auto flag = Encode(empty);
@@ -376,16 +376,16 @@ TEST(DistributedSerialization, RejectsInvalidStringOffsets) {
     message.RowSet = {.Columns = &column, .ColumnCount = 1, .RowCount = 3};
     const auto bytes = Encode(message);
     auto invalid = bytes;
-    Replace(invalid, 26, uint8_t{3});
+    Replace(invalid, 34, uint8_t{3});
     EXPECT_THROW(TDecodedChunk{invalid}, std::runtime_error);
     for (uint32_t first : {1u, std::numeric_limits<uint32_t>::max()}) {
         invalid = bytes;
-        Replace(invalid, 27, first);
+        Replace(invalid, 35, first);
         EXPECT_THROW(TDecodedChunk{invalid}, std::runtime_error);
     }
     for (uint32_t last : {2u, 1000u}) {
         invalid = bytes;
-        Replace(invalid, 39, last);
+        Replace(invalid, 47, last);
         EXPECT_THROW(TDecodedChunk{invalid}, std::runtime_error);
     }
 }

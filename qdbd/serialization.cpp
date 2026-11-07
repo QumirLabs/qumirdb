@@ -365,8 +365,8 @@ void SerializeToStream(const TDataChunk& message, std::ostringstream& output) {
 template<>
 void DeserializeFromStream(TDataChunk& message, std::istringstream& input) {
     TReader reader(input);
-    const auto task = reader.Value<uint32_t>();
-    const auto lane = reader.Value<uint32_t>();
+    const auto task = reader.Value<uint64_t>();
+    const auto lane = reader.Value<uint64_t>();
     const auto columns = reader.Value<uint64_t>();
     const auto rows = reader.Value<uint64_t>();
     if (rows > std::numeric_limits<int64_t>::max() || columns > reader.Remaining() / 2) {
