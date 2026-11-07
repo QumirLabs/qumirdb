@@ -13,6 +13,7 @@ enum class ETaskResult {
     NEED_DATA = 1,
     BLOCKED_OUTPUT = 2,
     FINISHED = 3,
+    WAITING = 4,
 };
 
 enum class ETaskState {
@@ -21,6 +22,7 @@ enum class ETaskState {
     Running = 2,
     Reschedule = 3,
     Finished = 4,
+    Waiting = 5,
 };
 
 class ITask {
@@ -46,6 +48,7 @@ struct TSchedulerRunStats {
     uint64_t BlockedOutput = 0;
     uint64_t Ok = 0;
     uint64_t Finished = 0;
+    uint64_t Waiting = 0;
     uint64_t Rescheduled = 0;
     uint64_t ReadyPushRetries = 0;
     uint64_t EmptyReadyPolls = 0;

@@ -42,7 +42,9 @@ private:
 };
 
 struct TSourceCode {
-    using TNext = std::function<bool(void*, TRowSet&)>;
+    // OK: rowSet is produced. WAITING: no data yet, an external wake follows.
+    // FINISHED: no more data.
+    using TNext = std::function<ETaskResult(void*, TRowSet&)>;
 
     explicit TSourceCode(TNext next);
 
@@ -58,7 +60,9 @@ struct TUnaryCode {
 };
 
 struct TSinkCode {
-    using TWrite = std::function<void(void*, const TRowSet&)>;
+    // OK: written. WAITING: not written, the same rowSet is passed again after
+    // an external wake.
+    using TWrite = std::function<ETaskResult(void*, const TRowSet&)>;
 
     explicit TSinkCode(TWrite write);
 
@@ -204,6 +208,7 @@ public:
         std::shared_ptr<const TSinkCode> code,
         std::shared_ptr<void> state,
         TInputPort input);
+    ~TSinkTask() override;
 
     ETaskResult Execute() override;
     void ConfigureInstrumentation(TTaskInstrumentationSetup& setup) override;
@@ -212,6 +217,8 @@ private:
     std::shared_ptr<const TSinkCode> Code_;
     std::shared_ptr<void> State_;
     TInputPort Input_;
+    TRowSet Pending_{};
+    bool HasPending_ = false;
     bool Finished_ = false;
 };
 

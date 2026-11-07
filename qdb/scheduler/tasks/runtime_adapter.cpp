@@ -292,7 +292,11 @@ ETaskResult TSourceTask::Execute() {
     }
 
     TRowSet rowSet{};
-    if (!Code_->Next(State_.get(), rowSet)) {
+    auto next = Code_->Next(State_.get(), rowSet);
+    if (next == ETaskResult::WAITING) {
+        return ETaskResult::WAITING;
+    }
+    if (next == ETaskResult::FINISHED) {
         Finished_ = true;
         Output_.Finish();
         return ETaskResult::FINISHED;
@@ -511,9 +515,24 @@ TSinkTask::TSinkTask(
     , Input_(input)
 {}
 
+TSinkTask::~TSinkTask() {
+    if (HasPending_) {
+        Release(&Pending_);
+    }
+}
+
 ETaskResult TSinkTask::Execute() {
     if (Finished_) {
         return ETaskResult::FINISHED;
+    }
+
+    if (HasPending_) {
+        if (Code_->Write(State_.get(), Pending_) == ETaskResult::WAITING) {
+            return ETaskResult::WAITING;
+        }
+        HasPending_ = false;
+        Release(&Pending_);
+        return ETaskResult::OK;
     }
 
     TRowSet rowSet{};
@@ -526,7 +545,11 @@ ETaskResult TSinkTask::Execute() {
         return ETaskResult::FINISHED;
     }
 
-    Code_->Write(State_.get(), rowSet);
+    if (Code_->Write(State_.get(), rowSet) == ETaskResult::WAITING) {
+        Pending_ = rowSet;
+        HasPending_ = true;
+        return ETaskResult::WAITING;
+    }
     Release(&rowSet);
     return ETaskResult::OK;
 }

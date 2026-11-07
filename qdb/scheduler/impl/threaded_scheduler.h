@@ -14,7 +14,14 @@
 namespace NQdb {
 namespace NScheduler {
 
-class TThreadedScheduler {
+class IThreadedScheduler {
+public:
+    virtual ~IThreadedScheduler() = default;
+
+    virtual void Schedule(TTaskNode* task) = 0;
+};
+
+class TThreadedScheduler : public IThreadedScheduler {
 public:
     TThreadedScheduler(
         TSealedTaskGraph graph,
@@ -23,14 +30,14 @@ public:
 
     bool Run(std::string* error = nullptr);
     TSchedulerRunStats Stats() const;
+    void Schedule(TTaskNode* node) override;
 
 private:
-    void Schedule(TTaskNode* node);
     TTaskNode* PopReady();
     void ScheduleInput(TTaskNode* node);
     void ScheduleOutput(TTaskNode* node);
     void Work();
-    bool FinishRun(TTaskNode* node);
+    bool FinishRun(TTaskNode* node, ETaskState nextState = ETaskState::Idle);
     void FinishNode(TTaskNode* node);
     void ResetStats();
 
@@ -51,6 +58,7 @@ private:
     std::atomic<uint64_t> BlockedOutput_ = 0;
     std::atomic<uint64_t> Ok_ = 0;
     std::atomic<uint64_t> Finished_ = 0;
+    std::atomic<uint64_t> Waiting_ = 0;
     std::atomic<uint64_t> Rescheduled_ = 0;
     std::atomic<uint64_t> ReadyPushRetries_ = 0;
     std::atomic<uint64_t> EmptyReadyPolls_ = 0;

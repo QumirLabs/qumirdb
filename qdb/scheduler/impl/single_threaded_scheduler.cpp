@@ -70,6 +70,9 @@ bool TSingleThreadedScheduler::Run(std::string* error) {
                     ETaskState::Finished, std::memory_order_release);
             }
             ScheduleOutput(node);
+        } else if (state == ETaskResult::WAITING) {
+            SetError(error, "single-threaded scheduler does not support external waits");
+            return false;
         } else if (state == ETaskResult::OK) {
             ++Stats_.Ok;
             Schedule(node);

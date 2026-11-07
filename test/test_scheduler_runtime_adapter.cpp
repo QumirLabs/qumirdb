@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -198,11 +199,11 @@ TPipeline MakePipeline() {
         [destroyCount = out.DestroyCount](void* state, TRowSet& rowSet) {
             auto* source = static_cast<TSourceState*>(state);
             if (source->Next > source->End) {
-                return false;
+                return ETaskResult::FINISHED;
             }
             rowSet = MakeRowSet(source->Next, destroyCount.get());
             ++source->Next;
-            return true;
+            return ETaskResult::OK;
         });
     out.FilterCode = std::make_shared<TUnaryCode>(
         [](void* state, TRowSet& rowSet) {
@@ -221,6 +222,7 @@ TPipeline MakePipeline() {
             auto* sink = static_cast<TSinkState*>(state);
             sink->Rows += static_cast<int>(rowSet.RowCount);
             ++sink->Batches;
+            return ETaskResult::OK;
         });
 
     auto sourceToFilter = std::make_unique<TOneToOneConnection>();
@@ -282,6 +284,126 @@ TEST(SchedulerRuntimeAdapter, RunsSourceFilterProjectSinkThreaded) {
     EXPECT_EQ(pipeline.DestroyCount->load(std::memory_order_relaxed), 4);
 }
 
+namespace {
+
+struct TWaitingState {
+    int Calls = 0;
+    int Rows = 0;
+    int Batches = 0;
+    std::atomic<bool> Waited = false;
+};
+
+// Runs source -> sink under the threaded scheduler; `wakeNode` selects which
+// task a helper thread schedules once the code reports WAITING.
+void RunWaitingGraph(
+    std::shared_ptr<TSourceCode> sourceCode,
+    std::shared_ptr<TSinkCode> sinkCode,
+    std::shared_ptr<TWaitingState> state,
+    bool wakeSink,
+    TSchedulerRunStats* stats)
+{
+    TTaskGraph graph;
+    auto connection = std::make_unique<TOneToOneConnection>();
+    auto* connectionPtr = connection.get();
+    auto& source = graph.AddOwnedNode(std::make_unique<TSourceTask>(
+        sourceCode, state, TOutputPort{.Connection = connectionPtr}));
+    auto& sink = graph.AddOwnedNode(std::make_unique<TSinkTask>(
+        sinkCode, state, TInputPort{.Connection = connectionPtr}));
+    graph.AddOwnedEdge(source, sink, std::move(connection));
+    std::string error;
+    const auto sealed = graph.Seal(&error);
+    ASSERT_TRUE(sealed) << error;
+
+    TThreadedScheduler scheduler(sealed, 2);
+    TTaskNode* wake = wakeSink ? &sink : &source;
+    std::thread waker([&] {
+        while (!state->Waited.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        scheduler.Schedule(wake);
+    });
+    const bool ok = scheduler.Run(&error);
+    waker.join();
+    ASSERT_TRUE(ok) << error;
+    *stats = scheduler.Stats();
+}
+
+} // namespace
+
+TEST(SchedulerRuntimeAdapter, SourceWaitsForExternalSchedule) {
+    auto destroyCount = std::make_shared<std::atomic<int>>(0);
+    auto state = std::make_shared<TWaitingState>();
+    auto sourceCode = std::make_shared<TSourceCode>(
+        [destroyCount](void* raw, TRowSet& rowSet) {
+            auto* s = static_cast<TWaitingState*>(raw);
+            switch (s->Calls++) {
+                case 0:
+                    s->Waited.store(true, std::memory_order_release);
+                    return ETaskResult::WAITING;
+                case 1:
+                    rowSet = MakeRowSet(5, destroyCount.get());
+                    return ETaskResult::OK;
+                default:
+                    return ETaskResult::FINISHED;
+            }
+        });
+    auto sinkCode = std::make_shared<TSinkCode>(
+        [](void* raw, const TRowSet& rowSet) {
+            auto* s = static_cast<TWaitingState*>(raw);
+            s->Rows += static_cast<int>(rowSet.RowCount);
+            ++s->Batches;
+            return ETaskResult::OK;
+        });
+
+    TSchedulerRunStats stats;
+    RunWaitingGraph(sourceCode, sinkCode, state, false, &stats);
+    EXPECT_EQ(state->Calls, 3);
+    EXPECT_EQ(state->Batches, 1);
+    EXPECT_EQ(state->Rows, 5);
+    EXPECT_EQ(stats.Waiting, 1u);
+    EXPECT_EQ(destroyCount->load(std::memory_order_relaxed), 1);
+}
+
+TEST(SchedulerRuntimeAdapter, SinkRetriesPendingRowSetAfterWaiting) {
+    auto destroyCount = std::make_shared<std::atomic<int>>(0);
+    auto state = std::make_shared<TWaitingState>();
+    auto sourceCode = std::make_shared<TSourceCode>(
+        [destroyCount](void* raw, TRowSet& rowSet) {
+            auto* s = static_cast<TWaitingState*>(raw);
+            if (s->Calls >= 2) {
+                return ETaskResult::FINISHED;
+            }
+            rowSet = MakeRowSet(++s->Calls, destroyCount.get());
+            return ETaskResult::OK;
+        });
+    // Rejects the first row set once; destroyCount stays 0 until it is written.
+    auto attempts = std::make_shared<int>(0);
+    auto sinkCode = std::make_shared<TSinkCode>(
+        [attempts, destroyCount](void* raw, const TRowSet& rowSet) {
+            auto* s = static_cast<TWaitingState*>(raw);
+            if ((*attempts)++ == 0) {
+                EXPECT_EQ(rowSet.RowCount, 1);
+                s->Waited.store(true, std::memory_order_release);
+                return ETaskResult::WAITING;
+            }
+            if (*attempts == 2) {
+                EXPECT_EQ(rowSet.RowCount, 1);
+                EXPECT_EQ(destroyCount->load(std::memory_order_relaxed), 0);
+            }
+            s->Rows += static_cast<int>(rowSet.RowCount);
+            ++s->Batches;
+            return ETaskResult::OK;
+        });
+
+    TSchedulerRunStats stats;
+    RunWaitingGraph(sourceCode, sinkCode, state, true, &stats);
+    EXPECT_EQ(*attempts, 3);
+    EXPECT_EQ(state->Batches, 2);
+    EXPECT_EQ(state->Rows, 3);
+    EXPECT_EQ(stats.Waiting, 1u);
+    EXPECT_EQ(destroyCount->load(std::memory_order_relaxed), 2);
+}
+
 TEST(SchedulerRuntimeAdapter, PartitionTasksShareCodeButOwnState) {
     auto code = std::make_shared<TUnaryCode>(
         [](void* state, TRowSet& rowSet) {
@@ -331,11 +453,11 @@ TEST(SchedulerRuntimeAdapter, RunsBinaryBlockingTask) {
         [destroyCount](void* state, TRowSet& rowSet) {
             auto* source = static_cast<TSourceState*>(state);
             if (source->Next > source->End) {
-                return false;
+                return ETaskResult::FINISHED;
             }
             rowSet = MakeRowSet(source->Next, destroyCount.get());
             ++source->Next;
-            return true;
+            return ETaskResult::OK;
         });
     auto binaryCode = std::make_shared<TBinaryBlockingCode>(
         [](ITaskState& state, TInputPort& left, TInputPort& right, TRowSet& output) {
@@ -384,6 +506,7 @@ TEST(SchedulerRuntimeAdapter, RunsBinaryBlockingTask) {
             auto* sink = static_cast<TSinkState*>(state);
             sink->Rows += static_cast<int>(rowSet.RowCount);
             ++sink->Batches;
+            return ETaskResult::OK;
         });
 
     auto leftToBinary = std::make_unique<TOneToOneConnection>();
@@ -454,11 +577,11 @@ TGateResult RunAsymmetricGateGraph(bool gate) {
             auto* s = static_cast<TSourceState*>(state);
             if (s->Next > s->End) {
                 buildDone->store(true, std::memory_order_relaxed);
-                return false;
+                return ETaskResult::FINISHED;
             }
             rowSet = MakeRowSet(1, destroy.get());
             ++s->Next;
-            return true;
+            return ETaskResult::OK;
         });
 
     auto probeState = std::make_shared<TSourceState>(TSourceState{.Next = 1, .End = 2});
@@ -469,11 +592,11 @@ TGateResult RunAsymmetricGateGraph(bool gate) {
             }
             auto* s = static_cast<TSourceState*>(state);
             if (s->Next > s->End) {
-                return false;
+                return ETaskResult::FINISHED;
             }
             rowSet = MakeRowSet(1, destroy.get());
             ++s->Next;
-            return true;
+            return ETaskResult::OK;
         });
 
     auto binaryState = std::make_shared<TBinaryState>();
@@ -518,6 +641,7 @@ TGateResult RunAsymmetricGateGraph(bool gate) {
             auto* sink = static_cast<TSinkState*>(state);
             sink->Rows += static_cast<int>(rowSet.RowCount);
             ++sink->Batches;
+            return ETaskResult::OK;
         });
 
     auto leftToBinary = std::make_unique<TOneToOneConnection>();
