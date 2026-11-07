@@ -241,7 +241,7 @@ int main(int argc, char** argv)
     sys.RegisterWellKnown(TLocalActorId(EWellKnownActors::Scheduler), IActor::TPtr(CreateSchedulerActor(&timeSource, leaderId, logger)));
 
     uint64_t pingPeriodMs = 1000;
-    sys.RegisterWellKnown(TLocalActorId(EWellKnownActors::LocalScheduler), IActor::TPtr(CreateLocalScheduler(leaderId, pingPeriodMs)));
+    sys.RegisterWellKnown(TLocalActorId(EWellKnownActors::LocalScheduler), IActor::TPtr(CreateLocalScheduler(leaderId, pingPeriodMs, EngineSettings.Scheduler.Scheduler)));
 
     std::cerr << "QumirDB listening on " << httpListenAddress << ", " << actorSysListenAddress << "\n";
     loop.Loop();

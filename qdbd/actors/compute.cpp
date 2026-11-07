@@ -37,6 +37,7 @@ struct TComputeActor : public IBehaviorActor {
         , Resources(std::move(resources))
     {
         if (Resources) {
+            SchedulerSettings = Resources->Scheduler;
             Resources->UsedSlots.fetch_add(1, std::memory_order_relaxed);
         }
         Become(&Behavior);
@@ -81,7 +82,7 @@ struct TComputeActor : public IBehaviorActor {
     void StartGraph(TTaskGraphMessage&& message, TActorContext::TPtr ctx) {
         Graph = message.Graph;
         Scheduler = std::make_unique<NScheduler::TThreadedScheduler>(
-            Graph, /* worker_count = */ 18
+            Graph, SchedulerSettings.WorkerCount, SchedulerSettings.ReadyQueueCapacity
         );
         SchedulerSchannel = std::make_unique<NScheduler::TSchedulerChannel>(
             *Scheduler
@@ -97,6 +98,7 @@ struct TComputeActor : public IBehaviorActor {
 
     TDefaultBehavior Behavior;
     std::shared_ptr<TRuntimeResources> Resources;
+    NScheduler::TSchedulerSettings SchedulerSettings;
     NScheduler::TSealedTaskGraph Graph;
     std::unique_ptr<NScheduler::TActorNotificationChannel> ActorChannel;
     std::unique_ptr<NScheduler::TSchedulerChannel> SchedulerSchannel;
