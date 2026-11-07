@@ -204,6 +204,31 @@ TEST(SchedulerGraph, RejectsDuplicateExternalIds) {
     EXPECT_EQ(error, "task graph has duplicate external node id 5");
 }
 
+TEST(SchedulerGraph, MarkExternalRejectsForeignNode) {
+    TNoopTask task;
+    TTaskGraph graph;
+    TTaskGraph other;
+    graph.AddNode(task);
+    auto& foreign = other.AddNode(task);
+    EXPECT_THROW(graph.MarkExternal(foreign, 1), std::logic_error);
+}
+
+TEST(SchedulerGraph, RepeatedSealKeepsExternalNodes) {
+    TNoopTask task;
+    TTaskGraph graph;
+    auto& source = graph.AddNode(task);
+    auto& sink = graph.AddNode(task);
+    graph.AddOwnedEdge(source, sink, std::make_unique<TOneToOneConnection>());
+    graph.MarkExternal(sink, 9);
+    graph.MarkExternal(source, 3);
+    ASSERT_TRUE(graph.Seal());
+
+    const auto sealed = graph.Seal();
+    ASSERT_TRUE(sealed);
+    EXPECT_EQ(sealed.ExternalNode(3), &source);
+    EXPECT_EQ(sealed.ExternalNode(9), &sink);
+}
+
 TEST(SchedulerGraph, RepeatedSealPreservesTaskState) {
     TNoopTask task;
     TTaskGraph graph;

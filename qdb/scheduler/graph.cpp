@@ -1,6 +1,7 @@
 #include <qdb/scheduler/graph.h>
 
 #include <algorithm>
+#include <cassert>
 #include <deque>
 #include <format>
 #include <ostream>
@@ -60,6 +61,9 @@ TTaskNode& TTaskGraph::AddOwnedNode(std::unique_ptr<ITask> task) {
 
 void TTaskGraph::MarkExternal(TTaskNode& node, uint64_t id) {
     CheckMutable();
+    if (std::ranges::none_of(Nodes_, [&](const auto& owned) { return owned.get() == &node; })) {
+        throw std::logic_error("cannot mark a node from another task graph as external");
+    }
     Externals_.push_back({id, &node});
 }
 
@@ -144,6 +148,7 @@ void TTaskGraph::Build() {
         node->State.store(ETaskState::Idle, std::memory_order_release);
     }
 
+    // Validate() and ExternalNode() rely on Externals_ being sorted by id.
     std::ranges::stable_sort(Externals_, {}, &TExternalNode::Id);
 
     for (auto& edge : Edges_) {
@@ -202,6 +207,7 @@ bool TTaskGraph::Validate(std::string* error) const {
         }
     }
 
+    assert(std::ranges::is_sorted(Externals_, {}, &TExternalNode::Id));
     for (size_t i = 1; i < Externals_.size(); ++i) {
         if (Externals_[i].Id == Externals_[i - 1].Id) {
             SetError(error, std::format(
