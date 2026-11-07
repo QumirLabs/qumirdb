@@ -1,13 +1,16 @@
 #include <qdb/exec/kernel_rowset.h>
 #include <qdb/kernel/execution_context.h>
 #include <qdb/modules/qumirdb_runtime.h>
+#include <qdb/scheduler/connections/local.h>
 #include <qdb/scheduler/graph.h>
 #include <qdb/scheduler/impl/single_threaded_scheduler.h>
 #include <qdb/scheduler/impl/threaded_scheduler.h>
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <cstdint>
+#include <memory>
 #include <stdexcept>
 #include <thread>
 #include <vector>
@@ -238,6 +241,41 @@ private:
     TRowSet& Output_;
 };
 
+class TAbandonedHeapTask final : public ITask {
+public:
+    ETaskResult Execute() override {
+        if (!Block) {
+            Block = qdb_alloc(64);
+            Allocated.store(true, std::memory_order_release);
+        }
+        return ETaskResult::BLOCKED_OUTPUT;
+    }
+
+    // The block belongs to the task heap, which reclaims it at teardown.
+    void* Block = nullptr;
+    std::atomic<bool> Allocated = false;
+};
+
+class TEarlyFinishTask final : public ITask {
+public:
+    explicit TEarlyFinishTask(TAbandonedHeapTask& producer)
+        : Producer_(producer)
+    {}
+
+    ETaskResult Execute() override {
+        if (!Producer_.Allocated.load(std::memory_order_acquire)) {
+            return ETaskResult::NEED_DATA;
+        }
+        HeapBytes = ExecutionContext().State->Heap(0).Bytes();
+        return ETaskResult::FINISHED;
+    }
+
+    size_t HeapBytes = 0;
+
+private:
+    TAbandonedHeapTask& Producer_;
+};
+
 } // namespace
 
 TEST(ExecutionContext, SchedulerPinsAllocationDomain) {
@@ -288,6 +326,31 @@ TEST(ExecutionContext, PublishedBatchOutlivesSchedulerAndGraph) {
         }
         EXPECT_EQ(*reinterpret_cast<int64_t*>(batch.Columns[0].Data), 456);
         Release(&batch);
+    }
+}
+
+TEST(ExecutionContext, AbandonedTaskHeapIsReclaimedBeforeGraphTeardown) {
+    for (bool threaded : {false, true}) {
+        SCOPED_TRACE(threaded);
+        TTaskGraph graph;
+        auto producerTask = std::make_unique<TAbandonedHeapTask>();
+        auto* producer = producerTask.get();
+        auto consumerTask = std::make_unique<TEarlyFinishTask>(*producer);
+        auto* consumer = consumerTask.get();
+        auto& source = graph.AddOwnedNode(std::move(producerTask));
+        auto& sink = graph.AddOwnedNode(std::move(consumerTask));
+        graph.AddOwnedEdge(source, sink, std::make_unique<TOneToOneConnection>());
+        const auto taskCount = graph.Seal();
+        ASSERT_EQ(taskCount, 2u);
+
+        std::string error;
+        const bool ok = threaded
+            ? TThreadedScheduler(*graph.Root(), taskCount, 2).Run(&error)
+            : TSingleThreadedScheduler(*graph.Root(), taskCount).Run(&error);
+        ASSERT_TRUE(ok) << error;
+        EXPECT_EQ(source.State.load(), ETaskState::Idle);
+        EXPECT_EQ(consumer->HeapBytes, 64u);
+        EXPECT_NE(producer->Block, nullptr);
     }
 }
 
