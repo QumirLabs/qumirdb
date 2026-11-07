@@ -14,6 +14,7 @@
 #include <qumir/parser/type.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -402,6 +403,134 @@ TEST(SchedulerRuntimeAdapter, SinkRetriesPendingRowSetAfterWaiting) {
     EXPECT_EQ(state->Rows, 3);
     EXPECT_EQ(stats.Waiting, 1u);
     EXPECT_EQ(destroyCount->load(std::memory_order_relaxed), 2);
+}
+
+TEST(SchedulerRuntimeAdapter, SingleThreadedSchedulerRejectsExternalWait) {
+    auto state = std::make_shared<TWaitingState>();
+    auto sourceCode = std::make_shared<TSourceCode>(
+        [](void*, TRowSet&) {
+            return ETaskResult::WAITING;
+        });
+    auto sinkCode = std::make_shared<TSinkCode>(
+        [](void*, const TRowSet&) {
+            return ETaskResult::OK;
+        });
+    TTaskGraph graph;
+    auto connection = std::make_unique<TOneToOneConnection>();
+    auto* connectionPtr = connection.get();
+    auto& source = graph.AddOwnedNode(std::make_unique<TSourceTask>(
+        sourceCode, state, TOutputPort{.Connection = connectionPtr}));
+    auto& sink = graph.AddOwnedNode(std::make_unique<TSinkTask>(
+        sinkCode, state, TInputPort{.Connection = connectionPtr}));
+    graph.AddOwnedEdge(source, sink, std::move(connection));
+    std::string error;
+    const auto sealed = graph.Seal(&error);
+    ASSERT_TRUE(sealed) << error;
+
+    TSingleThreadedScheduler scheduler(sealed);
+    EXPECT_FALSE(scheduler.Run(&error));
+    EXPECT_EQ(error, "single-threaded scheduler does not support external waits");
+}
+
+TEST(SchedulerRuntimeAdapter, ThreadedRunCompletesWithAbandonedWaitingBranch) {
+    auto destroyCount = std::make_shared<std::atomic<int>>(0);
+    auto waitState = std::make_shared<TWaitingState>();
+    auto leftState = std::make_shared<TSourceState>(TSourceState{.Next = 1, .End = 1});
+    auto binaryState = std::make_shared<TBinaryState>();
+    binaryState->DestroyCount = destroyCount.get();
+    auto sinkState = std::make_shared<TSinkState>();
+
+    // The left source holds its batch until the right one has reported WAITING,
+    // so the abandoned branch is really waiting when the root finishes.
+    auto leftCode = std::make_shared<TSourceCode>(
+        [waitState, destroyCount](void* raw, TRowSet& rowSet) {
+            auto* source = static_cast<TSourceState*>(raw);
+            if (source->Next > source->End) {
+                return ETaskResult::FINISHED;
+            }
+            while (!waitState->Waited.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            rowSet = MakeRowSet(source->Next++, destroyCount.get());
+            return ETaskResult::OK;
+        });
+    auto rightCode = std::make_shared<TSourceCode>(
+        [](void* raw, TRowSet&) {
+            static_cast<TWaitingState*>(raw)->Waited.store(true, std::memory_order_release);
+            return ETaskResult::WAITING;
+        });
+    // Emits one row set after the left input and finishes without reading the right.
+    auto binaryCode = std::make_shared<TBinaryBlockingCode>(
+        [](ITaskState& state, TInputPort& left, TInputPort&, TRowSet& output) {
+            auto& binary = static_cast<TBinaryState&>(state);
+            if (binary.LeftDone) {
+                return ETaskResult::FINISHED;
+            }
+            TRowSet rowSet{};
+            const auto fetch = left.Fetch(rowSet);
+            if (fetch == EFetchResult::NO_DATA) {
+                return ETaskResult::NEED_DATA;
+            }
+            binary.LeftDone = true;
+            if (fetch == EFetchResult::FINISHED) {
+                return ETaskResult::FINISHED;
+            }
+            output = rowSet;
+            return ETaskResult::OK;
+        });
+    auto sinkCode = std::make_shared<TSinkCode>(
+        [](void* raw, const TRowSet& rowSet) {
+            auto* sink = static_cast<TSinkState*>(raw);
+            sink->Rows += static_cast<int>(rowSet.RowCount);
+            ++sink->Batches;
+            return ETaskResult::OK;
+        });
+
+    TTaskGraph graph;
+    auto leftToBinary = std::make_unique<TOneToOneConnection>();
+    auto* leftToBinaryPtr = leftToBinary.get();
+    auto rightToBinary = std::make_unique<TOneToOneConnection>();
+    auto* rightToBinaryPtr = rightToBinary.get();
+    auto binaryToSink = std::make_unique<TOneToOneConnection>();
+    auto* binaryToSinkPtr = binaryToSink.get();
+    auto& left = graph.AddOwnedNode(std::make_unique<TSourceTask>(
+        leftCode, leftState, TOutputPort{.Connection = leftToBinaryPtr}));
+    auto& right = graph.AddOwnedNode(std::make_unique<TSourceTask>(
+        rightCode, waitState, TOutputPort{.Connection = rightToBinaryPtr}));
+    auto& binary = graph.AddOwnedNode(std::make_unique<TBinaryBlockingTask>(
+        binaryCode,
+        binaryState,
+        TInputPort{.Connection = leftToBinaryPtr},
+        TInputPort{.Connection = rightToBinaryPtr},
+        TOutputPort{.Connection = binaryToSinkPtr}));
+    auto& sink = graph.AddOwnedNode(std::make_unique<TSinkTask>(
+        sinkCode, sinkState, TInputPort{.Connection = binaryToSinkPtr}));
+    graph.AddOwnedEdge(left, binary, std::move(leftToBinary));
+    graph.AddOwnedEdge(right, binary, std::move(rightToBinary));
+    graph.AddOwnedEdge(binary, sink, std::move(binaryToSink));
+    std::string error;
+    const auto sealed = graph.Seal(&error);
+    ASSERT_TRUE(sealed) << error;
+
+    // A regression would hang Run(); the watchdog turns the hang into a failure.
+    std::atomic<bool> finished = false;
+    std::thread watchdog([&] {
+        for (int i = 0; i < 300 && !finished.load(); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        if (!finished.load()) {
+            ADD_FAILURE() << "Run() hung with an abandoned waiting branch";
+            std::abort();
+        }
+    });
+    TThreadedScheduler scheduler(sealed, 2);
+    const bool ok = scheduler.Run(&error);
+    finished.store(true);
+    watchdog.join();
+    ASSERT_TRUE(ok) << error;
+    EXPECT_TRUE(waitState->Waited.load());
+    EXPECT_EQ(sinkState->Batches, 1);
+    EXPECT_EQ(scheduler.Stats().Waiting, 1u);
 }
 
 TEST(SchedulerRuntimeAdapter, PartitionTasksShareCodeButOwnState) {

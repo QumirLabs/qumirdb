@@ -42,7 +42,8 @@ private:
 };
 
 struct TSourceCode {
-    // OK: rowSet is produced. WAITING: no data yet, an external wake follows.
+    // OK: rowSet is produced. WAITING: no data yet; may be returned again at
+    // any time, so Next must tolerate a call before the external wake.
     // FINISHED: no more data.
     using TNext = std::function<ETaskResult(void*, TRowSet&)>;
 
@@ -60,8 +61,8 @@ struct TUnaryCode {
 };
 
 struct TSinkCode {
-    // OK: written. WAITING: not written, the same rowSet is passed again after
-    // an external wake.
+    // OK: written. WAITING: not written, the same rowSet is passed again, maybe
+    // before the external wake; Write must be idempotent for a rejected rowSet.
     using TWrite = std::function<ETaskResult(void*, const TRowSet&)>;
 
     explicit TSinkCode(TWrite write);

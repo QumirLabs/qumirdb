@@ -3529,6 +3529,7 @@ void PrintCounterDiagnostics(
         << " ok=" << stats.Ok
         << " need_data=" << stats.NeedData
         << " blocked_output=" << stats.BlockedOutput
+        << " waiting=" << stats.Waiting
         << " finished=" << stats.Finished
         << " rescheduled=" << stats.Rescheduled
         << " ready_push_retries=" << stats.ReadyPushRetries
