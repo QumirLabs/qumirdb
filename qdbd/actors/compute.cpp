@@ -35,6 +35,9 @@ struct TComputeActor : public IBehaviorActor {
         ReleaseSlot();
     }
 
+    void AfterRegister(TActorContext::TPtr ctx) override {
+    }
+
     void ReleaseSlot() {
         if (Resources) {
             Resources->UsedSlots.fetch_sub(1, std::memory_order_relaxed);
