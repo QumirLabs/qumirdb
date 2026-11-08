@@ -88,8 +88,11 @@ private:
 
     size_t Capacity_;
     std::vector<TCell> Buffer_;
-    std::atomic<size_t> PushPos_ = 0;
-    std::atomic<size_t> PopPos_ = 0;
+    // Each counter gets its own cache line, away from the read-only fields. Fixed 128:
+    // Apple M-series lines are 128 bytes; std::hardware_destructive_interference_size
+    // varies with the compiler and -mcpu (64-256 on aarch64).
+    alignas(128) std::atomic<size_t> PushPos_ = 0;
+    alignas(128) std::atomic<size_t> PopPos_ = 0;
 };
 
 } // namespace NScheduler
