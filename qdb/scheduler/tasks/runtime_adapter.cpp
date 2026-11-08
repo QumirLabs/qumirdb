@@ -10,6 +10,7 @@
 #include <qumir/error.h>
 
 #include <algorithm>
+#include <cassert>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -283,6 +284,16 @@ TSourceTask::TSourceTask(
     , Output_(output)
 {}
 
+void TSourceTask::BindCode(std::shared_ptr<const TSourceCode> code, std::shared_ptr<void> state) {
+    assert(!Code_);
+    Code_ = std::move(code);
+    State_ = std::move(state);
+}
+
+const std::shared_ptr<const TSourceCode>& TSourceTask::Code() const {
+    return Code_;
+}
+
 ETaskResult TSourceTask::Execute() {
     if (Finished_) {
         return ETaskResult::FINISHED;
@@ -519,6 +530,16 @@ TSinkTask::~TSinkTask() {
     if (HasPending_) {
         Release(&Pending_);
     }
+}
+
+void TSinkTask::BindCode(std::shared_ptr<const TSinkCode> code, std::shared_ptr<void> state) {
+    assert(!Code_);
+    Code_ = std::move(code);
+    State_ = std::move(state);
+}
+
+const std::shared_ptr<const TSinkCode>& TSinkTask::Code() const {
+    return Code_;
 }
 
 ETaskResult TSinkTask::Execute() {

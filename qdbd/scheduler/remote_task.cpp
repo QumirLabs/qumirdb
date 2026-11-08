@@ -6,6 +6,8 @@
 
 #include <coroio/actors/actorsystem.hpp>
 
+#include <unordered_set>
+
 namespace NQdb {
 namespace NScheduler {
 
@@ -92,17 +94,24 @@ std::string ValidateEndpoints(
     const TSealedTaskGraph& graph,
     std::span<const TRemoteEndpoint> endpoints)
 {
+    std::unordered_set<uint64_t> seen;
     for (const auto& endpoint : endpoints) {
         const auto* node = graph.ExternalNode(endpoint.Id);
         if (!node) {
             return "no external node with id " + std::to_string(endpoint.Id);
         }
-        const bool source = dynamic_cast<const TSourceTask*>(node->Task) != nullptr;
-        const bool sink = dynamic_cast<const TSinkTask*>(node->Task) != nullptr;
+        if (!seen.insert(endpoint.Id).second) {
+            return "external node " + std::to_string(endpoint.Id) + " has two endpoints";
+        }
+        const auto* source = dynamic_cast<const TSourceTask*>(node->Task);
+        const auto* sink = dynamic_cast<const TSinkTask*>(node->Task);
         const bool isSource = endpoint.Kind == ERemoteEndpointKind::Source;
         if (isSource ? !source : !sink) {
             return "external node " + std::to_string(endpoint.Id)
                 + (isSource ? " is not a source task" : " is not a sink task");
+        }
+        if (isSource ? source->Code() != nullptr : sink->Code() != nullptr) {
+            return "external node " + std::to_string(endpoint.Id) + " already has code";
         }
     }
     return {};

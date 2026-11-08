@@ -94,15 +94,17 @@ struct TComputeActor : public IBehaviorActor {
             return;
         }
         Graph = message.Graph;
-        for (const auto& endpoint : message.Endpoints) {
+        Endpoints = std::move(message.Endpoints);
+        ActorChannel = std::make_unique<NScheduler::TActorNotificationChannel>(ctx->CreateNotifier());
+        for (const auto& endpoint : Endpoints) {
             const bool isSource = endpoint.Kind == ERemoteEndpointKind::Source;
-            const auto* node = Graph.ExternalNode(endpoint.Id);
+            auto* node = Graph.ExternalNode(endpoint.Id);
             if (isSource) {
-                const auto* source = dynamic_cast<const NScheduler::TSourceTask*>(node->Task);
-                InitSource(source);
+                auto* source = dynamic_cast<NScheduler::TSourceTask*>(node->Task);
+                InitSource(endpoint, *source, node);
             } else {
-                const auto* sink = dynamic_cast<const NScheduler::TSinkTask*>(node->Task);
-                InitSink(sink);
+                auto* sink = dynamic_cast<NScheduler::TSinkTask*>(node->Task);
+                InitSink(endpoint, *sink);
             }
         }
         Scheduler = std::make_unique<NScheduler::TThreadedScheduler>(
@@ -111,7 +113,6 @@ struct TComputeActor : public IBehaviorActor {
         SchedulerSchannel = std::make_unique<NScheduler::TSchedulerChannel>(
             *Scheduler
         );
-        ActorChannel = std::make_unique<NScheduler::TActorNotificationChannel>(ctx->CreateNotifier());
         NotificationTask = [&](TActorContext::TPtr ctx) -> TVoidSuspendedTask {
             while (true) {
                 co_await ActorChannel->Wait();
@@ -127,26 +128,38 @@ struct TComputeActor : public IBehaviorActor {
             return;
         }
         auto& [state, node] = it->second;
-        state.Push(std::move(chunk.RowSet));
+        state->Push(std::move(chunk.RowSet));
         Scheduler->Schedule(node);
     }
 
-    void InitSource(const NScheduler::TSourceTask* sourceTask) {
-        // TODO: init state
+    void InitSource(
+        const TRemoteEndpoint& endpoint,
+        NScheduler::TSourceTask& sourceTask,
+        NScheduler::TTaskNode* node)
+    {
+        auto [code, state] = NScheduler::MakeRemoteSource(endpoint.Id);
+        sourceTask.BindCode(std::move(code), state);
+        SourceStates.emplace(endpoint.Id, std::tuple{std::move(state), node});
     }
 
-    void InitSink(const NScheduler::TSinkTask* sinkTask) {
-        // TODO: init state
+    void InitSink(const TRemoteEndpoint& endpoint, NScheduler::TSinkTask& sinkTask) {
+        auto [code, state] = NScheduler::MakeRemoteSink(
+            endpoint.Id, endpoint.PeerActor, endpoint.PeerTaskId, endpoint.Layouts.data(), *ActorChannel);
+        sinkTask.BindCode(std::move(code), state);
+        SinkStates.emplace(endpoint.Id, std::move(state));
     }
 
     TDefaultBehavior Behavior;
     std::shared_ptr<TRuntimeResources> Resources;
     NScheduler::TSchedulerSettings SchedulerSettings;
     NScheduler::TSealedTaskGraph Graph;
+    // Owns the sink Layouts that the sink states use as descriptors.
+    std::vector<TRemoteEndpoint> Endpoints;
     std::unique_ptr<NScheduler::TActorNotificationChannel> ActorChannel;
     std::unique_ptr<NScheduler::TSchedulerChannel> SchedulerSchannel;
     std::unique_ptr<NScheduler::TThreadedScheduler> Scheduler;
-    std::unordered_map<uint64_t, std::tuple<NScheduler::TRemoteSourceState, NScheduler::TTaskNode*>> SourceStates;
+    std::unordered_map<uint64_t, std::tuple<std::shared_ptr<NScheduler::TRemoteSourceState>, NScheduler::TTaskNode*>> SourceStates;
+    std::unordered_map<uint64_t, std::shared_ptr<NScheduler::TRemoteSinkState>> SinkStates;
     TVoidSuspendedTask NotificationTask;
 };
 

@@ -1203,17 +1203,19 @@ TEST(DistributedScheduler, RemoteTasksMoveRowSetsInOrder) {
         });
         auto producerState = std::make_shared<TProducerState>(TProducerState{.Total = total});
 
+        // Remote endpoints arrive with empty code; the compute actor binds its own.
         auto producerToSink = std::make_unique<TOneToOneConnection>();
         auto* producerToSinkPtr = producerToSink.get();
         TTaskGraph graphA;
         auto& producer = graphA.AddOwnedNode(std::make_unique<TSourceTask>(
             producerCode, producerState, TOutputPort{.Connection = producerToSinkPtr}));
         auto& sink = graphA.AddOwnedNode(std::make_unique<TSinkTask>(
-            sinkCode, sinkState, TInputPort{.Connection = producerToSinkPtr}));
+            nullptr, nullptr, TInputPort{.Connection = producerToSinkPtr}));
         graphA.AddOwnedEdge(producer, sink, std::move(producerToSink));
         graphA.MarkExternal(sink, sinkState->Id);
         const auto sealedA = graphA.Seal();
         ASSERT_TRUE(sealedA);
+        static_cast<TSinkTask*>(sink.Task)->BindCode(sinkCode, sinkState);
 
         auto [sourceCode, sourceState] = MakeRemoteSource(2, 2);
         auto collectorCode = std::make_shared<TSinkCode>([](void* state, const TRowSet& rowSet) {
@@ -1226,13 +1228,14 @@ TEST(DistributedScheduler, RemoteTasksMoveRowSetsInOrder) {
         auto* sourceToCollectorPtr = sourceToCollector.get();
         TTaskGraph graphB;
         auto& source = graphB.AddOwnedNode(std::make_unique<TSourceTask>(
-            sourceCode, sourceState, TOutputPort{.Connection = sourceToCollectorPtr}));
+            nullptr, nullptr, TOutputPort{.Connection = sourceToCollectorPtr}));
         auto& collector = graphB.AddOwnedNode(std::make_unique<TSinkTask>(
             collectorCode, collectorState, TInputPort{.Connection = sourceToCollectorPtr}));
         graphB.AddOwnedEdge(source, collector, std::move(sourceToCollector));
         graphB.MarkExternal(source, sourceState->Id);
         const auto sealedB = graphB.Seal();
         ASSERT_TRUE(sealedB);
+        static_cast<TSourceTask*>(source.Task)->BindCode(sourceCode, sourceState);
 
         TThreadedScheduler schedulerA(sealedA, 2);
         TThreadedScheduler schedulerB(sealedB, 2);
@@ -1296,9 +1299,9 @@ TEST(DistributedScheduler, ValidatesRemoteEndpoints) {
     auto* connectionPtr = connection.get();
     TTaskGraph graph;
     auto& source = graph.AddOwnedNode(std::make_unique<TSourceTask>(
-        sourceCode, sourceState, TOutputPort{.Connection = connectionPtr}));
+        nullptr, nullptr, TOutputPort{.Connection = connectionPtr}));
     auto& sink = graph.AddOwnedNode(std::make_unique<TSinkTask>(
-        sinkCode, sinkState, TInputPort{.Connection = connectionPtr}));
+        nullptr, nullptr, TInputPort{.Connection = connectionPtr}));
     graph.AddOwnedEdge(source, sink, std::move(connection));
     graph.MarkExternal(sink, 1);
     graph.MarkExternal(source, 2);
@@ -1316,6 +1319,17 @@ TEST(DistributedScheduler, ValidatesRemoteEndpoints) {
     const std::vector<TRemoteEndpoint> swapped{
         endpoint(1, ERemoteEndpointKind::Source), endpoint(2, ERemoteEndpointKind::Sink)};
     EXPECT_NE(ValidateEndpoints(sealed, swapped), "");
+    const std::vector<TRemoteEndpoint> twice{
+        endpoint(1, ERemoteEndpointKind::Sink), endpoint(1, ERemoteEndpointKind::Sink)};
+    EXPECT_NE(ValidateEndpoints(sealed, twice), "");
+
+    // A node that already has code is not a remote endpoint.
+    static_cast<TSinkTask*>(sink.Task)->BindCode(sinkCode, sinkState);
+    EXPECT_NE(ValidateEndpoints(sealed, good), "");
+    const std::vector<TRemoteEndpoint> sourceOnly{endpoint(2, ERemoteEndpointKind::Source)};
+    EXPECT_EQ(ValidateEndpoints(sealed, sourceOnly), "");
+    static_cast<TSourceTask*>(source.Task)->BindCode(sourceCode, sourceState);
+    EXPECT_NE(ValidateEndpoints(sealed, sourceOnly), "");
 }
 
 int main(int argc, char** argv) {

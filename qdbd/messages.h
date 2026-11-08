@@ -64,6 +64,8 @@ struct TRemoteEndpoint {
     // Sink only: where the rows go.
     NNet::NActors::TActorId PeerActor;
     uint64_t PeerTaskId = 0;
+    // Sink only: value layouts of the sent row sets.
+    std::vector<TValueLayout> Layouts;
 };
 
 struct TTaskGraphMessage {

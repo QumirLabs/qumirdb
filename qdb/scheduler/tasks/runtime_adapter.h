@@ -144,6 +144,10 @@ public:
     ETaskResult Execute() override;
     void ConfigureInstrumentation(TTaskInstrumentationSetup& setup) override;
 
+    // Only for a task built with empty code (a remote source), before it is scheduled.
+    void BindCode(std::shared_ptr<const TSourceCode> code, std::shared_ptr<void> state);
+    const std::shared_ptr<const TSourceCode>& Code() const;
+
 private:
     std::shared_ptr<const TSourceCode> Code_;
     std::shared_ptr<void> State_;
@@ -213,6 +217,10 @@ public:
 
     ETaskResult Execute() override;
     void ConfigureInstrumentation(TTaskInstrumentationSetup& setup) override;
+
+    // Only for a task built with empty code (a remote sink), before it is scheduled.
+    void BindCode(std::shared_ptr<const TSinkCode> code, std::shared_ptr<void> state);
+    const std::shared_ptr<const TSinkCode>& Code() const;
 
 private:
     std::shared_ptr<const TSinkCode> Code_;
