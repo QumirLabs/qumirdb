@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 
 #include <qdb/exec/aggregate_exec.h>
+#include <qdb/exec/join_exec.h>
+#include <qdb/exec/row_join_exec.h>
 #include <qdb/io/io.h>
 #include <qdb/kernel/annotate_type.h>
 #include <qdb/kernel/compiler.h>
@@ -16,6 +18,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdio>
@@ -178,6 +181,97 @@ std::map<int64_t, int64_t> LoadAndRunAggregate(const std::string& bytes)
     return RunAggregate(std::move(aggregate));
 }
 
+TStructType LeftJoinType()
+{
+    return TStructType({
+        {"lk", std::make_shared<TIntegerType>(TIntegerType::I64)},
+        {"lv", std::make_shared<TIntegerType>(TIntegerType::I64)},
+    });
+}
+
+TStructType RightJoinType()
+{
+    return TStructType({
+        {"rk", std::make_shared<TIntegerType>(TIntegerType::I64)},
+        {"rv", std::make_shared<TIntegerType>(TIntegerType::I64)},
+    });
+}
+
+NKernel::TOperatorKernelSpec JoinSpec()
+{
+    return NKernel::BuildJoinKernelSpec(
+        LeftJoinType(), RightJoinType(), {{"lk", "rk"}}, EJoinType::Inner);
+}
+
+// Runs the processor over fixed batches and returns the sorted (lv, rv) pairs.
+template <class TProcessor>
+std::vector<std::pair<int64_t, int64_t>> RunJoin(TProcessor& processor)
+{
+    TKeyValueBatch left{.Keys = {1, 2, 1}, .Values = {10, 20, 30}};
+    TKeyValueBatch right{.Keys = {1, 1, 3}, .Values = {100, 200, 300}};
+    const auto leftRows = left.RowSet();
+    const auto rightRows = right.RowSet();
+    bool leftDone = false;
+    bool rightDone = false;
+    auto fetch = [](const TRowSet& rows, bool& done) {
+        return [&rows, &done](TRowSet& batch) {
+            if (done) {
+                return EJoinFetchResult::FINISHED;
+            }
+            batch = rows;
+            done = true;
+            return EJoinFetchResult::OK;
+        };
+    };
+
+    std::vector<std::pair<int64_t, int64_t>> pairs;
+    TRowSet out{};
+    for (;;) {
+        const auto status = processor.Process(fetch(leftRows, leftDone), fetch(rightRows, rightDone), out);
+        if (status == EJoinProcessorResult::NEED_DATA) {
+            continue;
+        }
+        if (status == EJoinProcessorResult::FINISHED) {
+            break;
+        }
+        const auto* lv = reinterpret_cast<const int64_t*>(out.Columns[1].Data);
+        const auto* rv = reinterpret_cast<const int64_t*>(out.Columns[3].Data);
+        for (int64_t row = 0; row < out.RowCount; ++row) {
+            pairs.emplace_back(lv[row], rv[row]);
+        }
+        Release(&out);
+    }
+    std::ranges::sort(pairs);
+    return pairs;
+}
+
+const std::vector<std::pair<int64_t, int64_t>> ExpectedJoinPairs =
+    {{10, 100}, {10, 200}, {30, 100}, {30, 200}};
+
+std::vector<std::shared_ptr<TKernelSlot>> LoadImageSlots(std::vector<TGeneratedKernel>& kernels)
+{
+    const auto bytes = SerializeKernelImage(CompileKernelImage(kernels));
+    std::vector<std::shared_ptr<TKernelSlot>> slots;
+    for (const auto& kernel : kernels) {
+        slots.push_back(kernel.Slot);
+    }
+    LoadKernelImage(DeserializeKernelImage(bytes), slots);
+    return slots;
+}
+
+std::pair<std::vector<uint64_t>, std::vector<uint64_t>> RunJoinHash(const TJoinHashKernels& hash)
+{
+    TKeyValueBatch left{.Keys = {1, 2, 1, 4}, .Values = {0, 0, 0, 0}};
+    TKeyValueBatch right{.Keys = {1, 3, 2, 1}, .Values = {0, 0, 0, 0}};
+    auto leftRows = left.RowSet();
+    auto rightRows = right.RowSet();
+    std::vector<uint64_t> leftHashes(4);
+    std::vector<uint64_t> rightHashes(4);
+    EXPECT_TRUE(hash.Left(&leftRows, leftHashes.data()));
+    EXPECT_TRUE(hash.Right(&rightRows, rightHashes.data()));
+    return {leftHashes, rightHashes};
+}
+
 } // namespace
 
 TEST(KernelImage, FilterRoundTrip)
@@ -281,6 +375,95 @@ TEST(KernelImage, AggregateBindsFromImageSlot)
     EXPECT_EQ(bound.StateWords, aggregate.StateWords);
     EXPECT_EQ(RunAggregate(std::move(bound)), expected);
     EXPECT_EQ(expected, ExpectedSums);
+}
+
+TEST(KernelImage, JoinBindsFromImageSlot)
+{
+    TKernelCompiler jit({});
+    TInnerJoinProcessor expectedProcessor(jit.CompileJoin(JoinSpec()));
+    const auto expected = RunJoin(expectedProcessor);
+
+    std::vector<TGeneratedKernel> kernels;
+    TKernelCompiler compiler({.Sink = &kernels, .BindNow = false});
+    compiler.CompileFilter(FilterSpec());
+    auto join = compiler.CompileJoin(JoinSpec());
+    ASSERT_EQ(kernels.size(), 2u);
+    EXPECT_EQ(join.Kernel, 1u);
+    EXPECT_EQ(kernels[join.Kernel].Slot, join.Slot);
+
+    auto slots = LoadImageSlots(kernels);
+    TInnerJoinProcessor processor(BindJoinKernels(slots[join.Kernel], join));
+    EXPECT_EQ(RunJoin(processor), expected);
+    EXPECT_EQ(expected, ExpectedJoinPairs);
+}
+
+TEST(KernelImage, RowJoinBindsFromImageSlots)
+{
+    constexpr size_t probeHoldBytes = 1 << 20;
+    TKernelCompiler jit({});
+    TRowJoinProcessor expectedProcessor(
+        jit.CompileRowJoin(JoinSpec(), /*buildIsLeft=*/false), EJoinBuildSide::Right, probeHoldBytes);
+    const auto expected = RunJoin(expectedProcessor);
+
+    std::vector<TGeneratedKernel> kernels;
+    TKernelCompiler compiler({.Sink = &kernels, .BindNow = false});
+    compiler.CompileFilter(FilterSpec());
+    auto join = compiler.CompileRowJoin(JoinSpec(), /*buildIsLeft=*/false);
+    ASSERT_EQ(kernels.size(), 3u);
+    EXPECT_EQ(join.Kernel, 1u);
+    EXPECT_EQ(join.ProbeMeasureKernel, 2u);
+    EXPECT_EQ(kernels[join.Kernel].Slot, join.Slot);
+    EXPECT_EQ(kernels[join.ProbeMeasureKernel].Slot, join.ProbeMeasure.Kernel);
+
+    auto slots = LoadImageSlots(kernels);
+    auto bound = BindRowJoinKernels(slots[join.Kernel], slots[join.ProbeMeasureKernel], join);
+    EXPECT_EQ(bound.ProbeMeasure.Kernel, slots[join.ProbeMeasureKernel]);
+    EXPECT_EQ(bound.ProbeMeasure.Widths, join.ProbeMeasure.Widths);
+    TRowJoinProcessor processor(std::move(bound), EJoinBuildSide::Right, probeHoldBytes);
+    EXPECT_EQ(RunJoin(processor), expected);
+    EXPECT_EQ(expected, ExpectedJoinPairs);
+}
+
+TEST(KernelImage, CrossJoinBindsFromImageSlot)
+{
+    const auto spec = NKernel::BuildCrossJoinKernelSpec(LeftJoinType(), RightJoinType());
+    TKernelCompiler jit({});
+    TCrossJoinProcessor expectedProcessor(jit.CompileCrossJoin(spec));
+    const auto expected = RunJoin(expectedProcessor);
+
+    std::vector<TGeneratedKernel> kernels;
+    TKernelCompiler compiler({.Sink = &kernels, .BindNow = false});
+    compiler.CompileFilter(FilterSpec());
+    auto join = compiler.CompileCrossJoin(spec);
+    ASSERT_EQ(kernels.size(), 2u);
+    EXPECT_EQ(join.Kernel, 1u);
+    EXPECT_EQ(kernels[join.Kernel].Slot, join.Slot);
+
+    auto slots = LoadImageSlots(kernels);
+    TCrossJoinProcessor processor(BindCrossJoinKernels(slots[join.Kernel], join));
+    EXPECT_EQ(RunJoin(processor), expected);
+    EXPECT_EQ(expected.size(), 9u);
+}
+
+TEST(KernelImage, JoinHashBindsFromImageSlot)
+{
+    TKernelCompiler jit({});
+    const auto expected = RunJoinHash(jit.CompileJoinHash(JoinSpec()));
+
+    std::vector<TGeneratedKernel> kernels;
+    TKernelCompiler compiler({.Sink = &kernels, .BindNow = false});
+    compiler.CompileFilter(FilterSpec());
+    auto hash = compiler.CompileJoinHash(JoinSpec());
+    ASSERT_EQ(kernels.size(), 2u);
+    EXPECT_EQ(hash.Kernel, 1u);
+    EXPECT_EQ(kernels[hash.Kernel].Slot, hash.Slot);
+
+    auto slots = LoadImageSlots(kernels);
+    const auto bound = RunJoinHash(BindJoinHashKernels(slots[hash.Kernel], hash));
+    EXPECT_EQ(bound, expected);
+    // Equal keys hash alike on both sides: left 1 = right 1.
+    EXPECT_EQ(bound.first[0], bound.second[0]);
+    EXPECT_EQ(bound.first[1], bound.second[2]);
 }
 
 TEST(KernelImage, AggregateInAnotherProcess)

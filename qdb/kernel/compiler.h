@@ -295,7 +295,19 @@ struct TJoinKernels {
     // payloads, outer-join null padding) is baked into the generated
     // jt_materialize, so host code only cursors over the pair buffer.
     TJoinMaterialize Materialize;
+
+    std::vector<int64_t> LeftKeyColumns;
+    std::vector<int64_t> RightKeyColumns;
+    std::shared_ptr<TKernelSlot> Slot;
+    // Index of the join kernel in the sink (0 without a sink).
+    uint32_t Kernel = 0;
 };
+
+// Binds Dispatch and Materialize to the slot; the other fields of `meta`
+// (plain data) are kept. CompileJoin ends with this call.
+TJoinKernels BindJoinKernels(
+    std::shared_ptr<TKernelSlot> slot,
+    TJoinKernels meta);
 
 enum class ECrossJoinKernelOp : int64_t {
     Emit = 0,
@@ -325,7 +337,16 @@ struct TCrossJoinKernels {
     // Same generated materializer as equi-join: cross emits row-id pairs and
     // host code only cursors over PairBuffer.
     TJoinMaterialize Materialize;
+
+    std::shared_ptr<TKernelSlot> Slot;
+    // Index of the cross join kernel in the sink (0 without a sink).
+    uint32_t Kernel = 0;
 };
+
+// Binds Dispatch and Materialize to the slot. CompileCrossJoin ends with this call.
+TCrossJoinKernels BindCrossJoinKernels(
+    std::shared_ptr<TKernelSlot> slot,
+    TCrossJoinKernels meta);
 
 enum class ERowJoinKernelOp : int64_t {
     // Initialize `arena`.
@@ -389,14 +410,42 @@ struct TRowJoinKernels {
     // An ANTI join keeps its NULL-key build rows in a second arena
     // (AppendNullKeys), whose rows EmitByMark emits as well.
     bool KeepsNullKeyRows = false;
+
+    std::vector<int64_t> BuildKeyColumns;
+    std::vector<int64_t> ProbeKeyColumns;
+    std::shared_ptr<TKernelSlot> Slot;
+    // Index of the row join kernel in the sink (0 without a sink).
+    uint32_t Kernel = 0;
+    // Index of the probe measure kernel (ProbeMeasure.Kernel) in the sink.
+    uint32_t ProbeMeasureKernel = 0;
 };
+
+// Binds Dispatch and Materialize to `slot` and ProbeMeasure.Kernel to
+// `measureSlot`; the other fields of `meta` (plain data) are kept.
+// CompileRowJoin ends with this call.
+TRowJoinKernels BindRowJoinKernels(
+    std::shared_ptr<TKernelSlot> slot,
+    std::shared_ptr<TKernelSlot> measureSlot,
+    TRowJoinKernels meta);
 
 struct TJoinHashKernels {
     using TDispatch = std::function<bool(TRowSet* batch, uint64_t* hashes)>;
 
+    // Left runs entry 0 of the kernel, Right entry 1.
     TDispatch Left;
     TDispatch Right;
+
+    std::vector<int64_t> LeftKeyColumns;
+    std::vector<int64_t> RightKeyColumns;
+    std::shared_ptr<TKernelSlot> Slot;
+    // Index of the join hash kernel in the sink (0 without a sink).
+    uint32_t Kernel = 0;
 };
+
+// Binds Left and Right to the slot. CompileJoinHash ends with this call.
+TJoinHashKernels BindJoinHashKernels(
+    std::shared_ptr<TKernelSlot> slot,
+    TJoinHashKernels meta);
 
 // Compiles qumir core-lang kernel sources to LLVM JIT function pointers.
 class TKernelCompiler {
@@ -610,6 +659,9 @@ private:
         const NQumir::NAst::TStructType* innerType = nullptr,
         size_t leftFieldCount = 0,
         bool hasPrecomputedHash = false);
+
+    // Emits the instrumentation kernel; CompileInstrumentation returns its slot.
+    TGeneratedKernel EmitInstrumentation();
 
     // Wrap a freshly built kernel program: create its slot, append to Sink_,
     // and (if BindNow_) finalize it immediately. Returns the emitted kernel
