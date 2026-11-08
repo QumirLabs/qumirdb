@@ -30,9 +30,8 @@ struct TUnaryRuntimeProcess {
     NQumir::NAst::TTypePtr OutputType;
 };
 
-// A runtime process with the plan data to rebuild it from a kernel slot.
+// The filter plan data and output type; the process is built from a kernel slot.
 struct TFilterRuntimeProcess {
-    TUnaryStreamProcess Process;
     NQumir::NAst::TTypePtr OutputType;
     TFilterPlanData Plan;
 };

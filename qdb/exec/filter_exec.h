@@ -9,9 +9,6 @@
 
 namespace NQdb {
 
-TUnaryStreamProcess MakeFilterProcess(
-    TKernelCompiler::TFilterDispatch dispatch);
-
 // Binds the process from its plan data and a dispatch over the kernel's slot.
 TUnaryStreamProcess MakeFilterProcess(
     const TFilterPlanData& plan,

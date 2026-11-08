@@ -516,7 +516,6 @@ TFilterRuntimeProcess BuildFilterRuntimeProcess(
         .KeptInputColumns = std::move(columnPlan.KeptInputColumns),
     };
     return {
-        .Process = MakeFilterProcess(data, std::move(dispatch)),
         .OutputType = std::move(columnPlan.OutputType),
         .Plan = std::move(data),
     };
