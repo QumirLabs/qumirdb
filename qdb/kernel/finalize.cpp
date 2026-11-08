@@ -18,10 +18,9 @@ namespace NQdb {
 
 namespace {
 
-// Kept alive as long as any bound slot lives; owns the fused AST + payloads.
+// Kept alive as long as any bound slot lives; owns the fused AST.
 struct TFusedKernelStorage {
     NQumir::NAst::TExprPtr Program;
-    std::vector<std::shared_ptr<void>> KernelStorage;
     // Native external runtimes must remain loaded while any generated entry
     // point can still be called.
     std::shared_ptr<const TExternalCatalogSnapshot> ExternalCatalog;
@@ -67,13 +66,6 @@ void FinalizeKernels(
 
     auto storage = std::make_shared<TFusedKernelStorage>();
     storage->ExternalCatalog = externalCatalog;
-    storage->KernelStorage.reserve(bindings.size());
-    for (const auto& [kernel, uniqueIndex] : bindings) {
-        (void)uniqueIndex;
-        if (kernel->Storage) {
-            storage->KernelStorage.push_back(kernel->Storage);
-        }
-    }
     storage->Program = std::move(fused.Program);
 
     if (backend == EKernelBackend::Vm) {
