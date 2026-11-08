@@ -34,6 +34,7 @@
 #include <qdb/scheduler/graph.h>
 #include <qdb/scheduler/tasks/runtime_adapter.h>
 #include <qdb/scheduler/lowering/scan_split.h>
+#include <qdb/scheduler/lowering/task_factory.h>
 
 #include <algorithm>
 #include <bit>
@@ -53,6 +54,8 @@
 namespace NQdb {
 namespace {
 
+using namespace NScheduler::NLowering;
+
 struct TSchedulerSourceState {
     ISource* Source = nullptr;
     std::unique_ptr<ISource> OwnedSource;
@@ -62,189 +65,6 @@ struct TSchedulerUnaryStage {
     std::shared_ptr<const NScheduler::TUnaryCode> Code;
     std::function<std::shared_ptr<void>(size_t)> MakeState;
     NQumir::NAst::TTypePtr OutputType;
-};
-
-template <class TState>
-struct TProcessorTaskState : NScheduler::ITaskState {
-    void ConfigureInstrumentation(TOperatorInstrumentation* instrumentation) override {
-        if constexpr (requires(TState& state) { state.Processor.SetInstrumentation(instrumentation); }) {
-            static_cast<TState&>(*this).Processor.SetInstrumentation(instrumentation);
-        }
-    }
-};
-
-struct TAggregateBlockingState : TProcessorTaskState<TAggregateBlockingState> {
-    explicit TAggregateBlockingState(
-        TAggregateKernels kernels,
-        TAggregateTablePlan plan)
-        : Processor(std::move(kernels), plan)
-    {}
-
-    TAggregateProcessor Processor;
-    bool Done = false;
-};
-
-struct TPartialAggregateBlockingState : TProcessorTaskState<TPartialAggregateBlockingState> {
-    TPartialAggregateBlockingState(
-        TAggregateKernels kernels,
-        TAggregateTablePlan plan,
-        TPartialAggregatePolicy policy,
-        TUnaryStreamProcess passThrough)
-        : Processor(std::move(kernels), plan, policy, std::move(passThrough))
-    {}
-
-    TPartialAggregateProcessor Processor;
-    bool Done = false;
-};
-
-struct TGroupingSetsBlockingState : TProcessorTaskState<TGroupingSetsBlockingState> {
-    TGroupingSetsBlockingState(
-        TAggregateKernels kernels, TAggregateTablePlan plan,
-        std::vector<std::vector<size_t>> sets, size_t numKeys)
-        : Processor(std::move(kernels), plan, std::move(sets), numKeys)
-    {}
-
-    TGroupingSetsAggregateProcessor Processor;
-    bool Done = false;
-};
-
-struct TLimitBlockingState : TProcessorTaskState<TLimitBlockingState> {
-    TLimitBlockingState(int64_t limit, int64_t offset)
-        : Processor(limit, offset)
-    {}
-
-    TLimitProcessor Processor;
-};
-
-struct TSortBlockingState : TProcessorTaskState<TSortBlockingState> {
-    TSortBlockingState(
-        NQumir::NAst::TTypePtr outputType,
-        std::vector<TSortKey> keys,
-        std::vector<TSortColumnRef> keyColumns,
-        TSortRadixKernel radixKernel)
-        : Processor(
-            std::move(outputType),
-            std::move(keys),
-            std::move(keyColumns),
-            std::move(radixKernel))
-    {}
-
-    TSortProcessor Processor;
-    bool InputFinished = false;
-};
-
-struct TWindowBlockingState : TProcessorTaskState<TWindowBlockingState> {
-    TWindowBlockingState(
-        NQumir::NAst::TTypePtr outputType,
-        std::vector<TSortKey> keys,
-        std::vector<TSortColumnRef> keyColumns,
-        TSortRadixKernel radixKernel)
-        : Processor(
-            std::move(outputType),
-            std::move(keys),
-            std::move(keyColumns),
-            std::move(radixKernel))
-    {}
-
-    TWindowProcessor Processor;
-    bool InputFinished = false;
-};
-
-struct TMergeState : TProcessorTaskState<TMergeState> {
-    TMergeState(
-        NQumir::NAst::TTypePtr outputType,
-        std::vector<TSortKey> keys,
-        std::vector<TSortColumnRef> keyColumns,
-        size_t runCount)
-        : Processor(
-            std::move(outputType),
-            std::move(keys),
-            std::move(keyColumns),
-            runCount)
-        , RunFinished(runCount, false)
-    {}
-
-    TMergeProcessor Processor;
-    std::vector<bool> RunFinished;
-    bool InputsDone = false;
-};
-
-struct TTopSortBlockingState : TProcessorTaskState<TTopSortBlockingState> {
-    TTopSortBlockingState(
-        NQumir::NAst::TTypePtr outputType,
-        std::vector<TSortKey> keys,
-        std::vector<TSortColumnRef> keyColumns,
-        TSortRadixKernel radixKernel,
-        int64_t limit)
-        : Processor(
-            std::move(outputType),
-            std::move(keys),
-            std::move(keyColumns),
-            std::move(radixKernel),
-            limit)
-    {}
-
-    TTopSortProcessor Processor;
-    bool InputFinished = false;
-};
-
-struct TLateMaterializeBlockingState : TProcessorTaskState<TLateMaterializeBlockingState> {
-    TLateMaterializeBlockingState(
-        std::shared_ptr<const IPhysicalRowReader> reader,
-        int32_t locatorColumn)
-        : Processor(std::move(reader), locatorColumn)
-    {}
-
-    TLateMaterializeProcessor Processor;
-    bool InputFinished = false;
-};
-
-struct TLateMaterializeMergeState : NScheduler::ITaskState {
-    explicit TLateMaterializeMergeState(size_t partitionCount)
-        : Partitions(partitionCount)
-        , Received(partitionCount, false)
-        , Finished(partitionCount, false)
-    {}
-
-    ~TLateMaterializeMergeState() {
-        for (size_t i = 0; i < Partitions.size(); ++i) {
-            if (Received[i]) {
-                Release(&Partitions[i]);
-            }
-        }
-    }
-
-    std::vector<TRowSet> Partitions;
-    std::vector<bool> Received;
-    std::vector<bool> Finished;
-    bool Emitted = false;
-};
-
-struct TSchedulerInnerJoinState : TProcessorTaskState<TSchedulerInnerJoinState> {
-    TSchedulerInnerJoinState(
-        TJoinKernels kernels,
-        EJoinType joinType,
-        EJoinBuildSide buildSide = EJoinBuildSide::Auto)
-        : Processor(std::move(kernels), joinType, buildSide)
-    {}
-
-    TInnerJoinProcessor Processor;
-};
-
-struct TSchedulerRowJoinState : TProcessorTaskState<TSchedulerRowJoinState> {
-    TSchedulerRowJoinState(TRowJoinKernels kernels, EJoinBuildSide buildSide, size_t probeHoldBytes)
-        : Processor(std::move(kernels), buildSide, probeHoldBytes)
-    {}
-
-    TRowJoinProcessor Processor;
-};
-
-struct TSchedulerCrossJoinState : TProcessorTaskState<TSchedulerCrossJoinState> {
-    TSchedulerCrossJoinState(TCrossJoinKernels kernels, EJoinType joinType)
-        : Processor(std::move(kernels), joinType)
-    {}
-
-    TCrossJoinProcessor Processor;
 };
 
 class TStageDiagnosticsScope {
@@ -308,32 +128,6 @@ TSchedulerUnaryStage BuildSchedulerProjectStage(
         },
         .OutputType = std::move(runtime.OutputType),
     };
-}
-
-EJoinFetchResult MapJoinFetch(NScheduler::EFetchResult result)
-{
-    switch (result) {
-        case NScheduler::EFetchResult::OK:
-            return EJoinFetchResult::OK;
-        case NScheduler::EFetchResult::NO_DATA:
-            return EJoinFetchResult::NO_DATA;
-        case NScheduler::EFetchResult::FINISHED:
-            return EJoinFetchResult::FINISHED;
-    }
-    return EJoinFetchResult::FINISHED;
-}
-
-NScheduler::ETaskResult MapJoinProcessResult(EJoinProcessorResult result)
-{
-    switch (result) {
-        case EJoinProcessorResult::OK:
-            return NScheduler::ETaskResult::OK;
-        case EJoinProcessorResult::NEED_DATA:
-            return NScheduler::ETaskResult::NEED_DATA;
-        case EJoinProcessorResult::FINISHED:
-            return NScheduler::ETaskResult::FINISHED;
-    }
-    return NScheduler::ETaskResult::FINISHED;
 }
 
 struct TLoweredOutput {
@@ -946,14 +740,6 @@ private:
         return label;
     }
 
-    struct TBlockingTail {
-        std::shared_ptr<const NScheduler::TBlockingCode> Code;
-        std::function<std::shared_ptr<NScheduler::ITaskState>()> MakeState;
-        NQumir::NAst::TTypePtr OutputType;
-        // Appended to the label of the tasks, e.g. an aggregate's table.
-        std::string LabelDetail;
-    };
-
     // The table an aggregate task starts with, its move to rows and the
     // groups that move sizes the row entries for.
     static std::string AggregateTableLabel(const TAggregateTablePlan& plan) {
@@ -974,134 +760,6 @@ private:
         NScheduler::THashShuffleConnection* Connection = nullptr;
         std::vector<NScheduler::TTaskNode*> Nodes;
     };
-
-    // Blocking code for a processor with Add/Next/InputFinished methods. It
-    // drains the input first, then emits processor output.
-    template <class TState>
-    std::shared_ptr<const NScheduler::TBlockingCode> MakeDrainBlockingCode() {
-        auto code = std::make_shared<NScheduler::TBlockingCode>(
-            [](NScheduler::ITaskState& state, NScheduler::TInputPort& input, TRowSet& output) {
-                auto* s = &static_cast<TState&>(state);
-                TRowSet rowSet{};
-                while (!s->InputFinished) {
-                    auto fetch = input.Fetch(rowSet);
-                    if (fetch == NScheduler::EFetchResult::NO_DATA) {
-                        return NScheduler::ETaskResult::NEED_DATA;
-                    }
-                    if (fetch == NScheduler::EFetchResult::FINISHED) {
-                        s->InputFinished = true;
-                        break;
-                    }
-                    s->Processor.Add(rowSet);
-                    rowSet = {};
-                }
-                if (s->Processor.Next(output)) {
-                    return NScheduler::ETaskResult::OK;
-                }
-                return NScheduler::ETaskResult::FINISHED;
-            });
-        return code;
-    }
-
-    // Blocking tail for a local sort (top-K when topLimit is set, otherwise a
-    // full sort). Shared by the single-lane path and the per-lane locals of the
-    // partitioned merge.
-    TBlockingTail MakeSortTail(
-        const NQumir::NAst::TTypePtr& childType,
-        const std::vector<TSortKey>& keys,
-        std::vector<TSortColumnRef> keyColumns,
-        TSortRadixKernel radixKernel,
-        std::optional<int64_t> topLimit)
-    {
-        if (topLimit) {
-            const int64_t limit = *topLimit;
-            return TBlockingTail{
-                .Code = MakeDrainBlockingCode<TTopSortBlockingState>(),
-                .MakeState = [childType, keys, keyColumns, radixKernel, limit]()
-                    -> std::shared_ptr<NScheduler::ITaskState>
-                {
-                    return std::make_shared<TTopSortBlockingState>(
-                        childType, keys, keyColumns, radixKernel, limit);
-                },
-                .OutputType = childType,
-            };
-        }
-        return TBlockingTail{
-            .Code = MakeDrainBlockingCode<TSortBlockingState>(),
-            .MakeState = [childType, keys, keyColumns, radixKernel]()
-                -> std::shared_ptr<NScheduler::ITaskState>
-            {
-                return std::make_shared<TSortBlockingState>(
-                    childType, keys, keyColumns, radixKernel);
-            },
-            .OutputType = childType,
-        };
-    }
-
-    // Blocking code for a limit/offset task.
-    std::shared_ptr<const NScheduler::TBlockingCode> MakeLimitBlockingCode() {
-        return std::make_shared<NScheduler::TBlockingCode>(
-            [](NScheduler::ITaskState& state, NScheduler::TInputPort& input, TRowSet& output) {
-                auto* s = &static_cast<TLimitBlockingState&>(state);
-                if (s->Processor.Finished()) {
-                    return NScheduler::ETaskResult::FINISHED;
-                }
-                TRowSet rowSet{};
-                while (!s->Processor.Finished()) {
-                    auto fetch = input.Fetch(rowSet);
-                    if (fetch == NScheduler::EFetchResult::NO_DATA) {
-                        return NScheduler::ETaskResult::NEED_DATA;
-                    }
-                    if (fetch == NScheduler::EFetchResult::FINISHED) {
-                        return NScheduler::ETaskResult::FINISHED;
-                    }
-                    if (s->Processor.Process(rowSet, output)) {
-                        return NScheduler::ETaskResult::OK;
-                    }
-                    rowSet = {};
-                }
-                return NScheduler::ETaskResult::FINISHED;
-            });
-    }
-
-    // Binary blocking code adapting scheduler input ports to a join/cross
-    // processor's fetch-callback interface. TState wraps the processor.
-    template <class TState>
-    std::shared_ptr<const NScheduler::TBinaryBlockingCode> MakeBinaryJoinCode() {
-        auto code = std::make_shared<NScheduler::TBinaryBlockingCode>(
-            [](NScheduler::ITaskState& state,
-               NScheduler::TInputPort& left,
-               NScheduler::TInputPort& right,
-               TRowSet& output)
-            {
-                auto* s = &static_cast<TState&>(state);
-                auto fetchLeft = [&](TRowSet& rowSet) {
-                    return MapJoinFetch(left.Fetch(rowSet));
-                };
-                auto fetchRight = [&](TRowSet& rowSet) {
-                    return MapJoinFetch(right.Fetch(rowSet));
-                };
-                const auto result = s->Processor.Process(fetchLeft, fetchRight, output);
-                if constexpr (requires { s->Processor.ObserveInstrumentation(); }) {
-                    s->Processor.ObserveInstrumentation();
-                }
-                return MapJoinProcessResult(result);
-            });
-        if constexpr (requires(TState& s) { s.Processor.RequiredInputSide(); }) {
-            code->RequiredSide = [](NScheduler::ITaskState& state) {
-                switch (static_cast<TState&>(state).Processor.RequiredInputSide()) {
-                    case EJoinBuildSide::Left:
-                        return NScheduler::ERequiredSide::Left;
-                    case EJoinBuildSide::Right:
-                        return NScheduler::ERequiredSide::Right;
-                    case EJoinBuildSide::Auto:
-                        return NScheduler::ERequiredSide::Both;
-                }
-                return NScheduler::ERequiredSide::Both;
-            };
-        }
-        return code;
-    }
 
     bool SupportedChild(const TOperatorPtr& op) const {
         if (auto n = TMaybeOp<TAggregateOperator>(op)) {
