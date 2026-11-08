@@ -109,6 +109,7 @@ add_library(qumirdb
     scheduler/settings/engine_settings.cpp
     scheduler/impl/executor.cpp
     scheduler/graph.cpp
+    scheduler/spec/graph_spec.cpp
     scheduler/lowering/plan_lowerer.cpp
     scheduler/tasks/runtime_adapter.cpp
     scheduler/lowering/scan_split.cpp
