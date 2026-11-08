@@ -21,7 +21,7 @@ using namespace NNet::NActors;
 namespace {
 
 struct TComputeActor : public IBehaviorActor {
-    struct TDefaultBehavior : public TBehavior<TDefaultBehavior, TTaskGraphMessage, TDataChunk, TDataConfirm> {
+    struct TDefaultBehavior : public TBehavior<TDefaultBehavior, TTaskGraphMessage, TDataChunk, TDataConfirm, TFinish> {
         TDefaultBehavior(TComputeActor* parent)
             : Parent(parent)
         { }
@@ -36,6 +36,10 @@ struct TComputeActor : public IBehaviorActor {
 
         void Receive(TDataConfirm&& message, TBlob, TActorContext::TPtr ctx) {
             Parent->OnDataConfirm(message, ctx);
+        }
+
+        void Receive(TFinish&& message, TBlob, TActorContext::TPtr) {
+            Parent->OnFinish(message);
         }
 
         void HandleUnknownMessage(TMessageId messageId, TBlob blob, TActorContext::TPtr ctx)
@@ -143,6 +147,18 @@ struct TComputeActor : public IBehaviorActor {
             Release(&chunk.RowSet);
             return;
         }
+        Scheduler->Schedule(node);
+    }
+
+    void OnFinish(const TFinish& finish) {
+        auto it = SourceStates.find(finish.DstTaskId);
+        if (it == SourceStates.end()) {
+            // TODO: protocol errors
+            std::cerr << "compute actor: dropped finish for task " << finish.DstTaskId << "\n";
+            return;
+        }
+        auto& [state, node] = it->second;
+        state->Finish();
         Scheduler->Schedule(node);
     }
 

@@ -446,6 +446,41 @@ TEST(SchedulerRuntimeAdapter, SinkRetriesPendingRowSetAfterWaiting) {
     EXPECT_EQ(destroyCount->load(std::memory_order_relaxed), 2);
 }
 
+TEST(SchedulerRuntimeAdapter, SinkRetriesFinishAfterWaiting) {
+    auto destroyCount = std::make_shared<std::atomic<int>>(0);
+    auto state = std::make_shared<TWaitingState>();
+    auto sourceCode = std::make_shared<TSourceCode>(
+        [destroyCount](void* raw, TRowSet& rowSet) {
+            auto* s = static_cast<TWaitingState*>(raw);
+            if (s->Calls >= 2) {
+                return ETaskResult::FINISHED;
+            }
+            rowSet = MakeRowSet(++s->Calls, destroyCount.get());
+            return ETaskResult::OK;
+        });
+    auto finishes = std::make_shared<int>(0);
+    auto sinkCode = std::make_shared<TSinkCode>(
+        [](void* raw, const TRowSet& rowSet) {
+            static_cast<TWaitingState*>(raw)->Rows += static_cast<int>(rowSet.RowCount);
+            return ETaskResult::OK;
+        },
+        [finishes](void* raw) {
+            auto* s = static_cast<TWaitingState*>(raw);
+            EXPECT_EQ(s->Rows, 3);
+            if ((*finishes)++ == 0) {
+                s->Waited.store(true, std::memory_order_release);
+                return ETaskResult::WAITING;
+            }
+            return ETaskResult::OK;
+        });
+
+    TSchedulerRunStats stats;
+    RunWaitingGraph(sourceCode, sinkCode, state, true, &stats);
+    EXPECT_EQ(*finishes, 2);
+    EXPECT_EQ(stats.Waiting, 1u);
+    EXPECT_EQ(destroyCount->load(std::memory_order_relaxed), 2);
+}
+
 TEST(SchedulerRuntimeAdapter, SingleThreadedSchedulerRejectsExternalWait) {
     auto state = std::make_shared<TWaitingState>();
     auto sourceCode = std::make_shared<TSourceCode>(

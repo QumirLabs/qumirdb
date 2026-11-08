@@ -1192,7 +1192,8 @@ struct TRemotePipeline {
 };
 
 // producer -> remote sink | fake compute actors | remote source -> collector.
-// Both fake actors share one thread; FIFO queues stand for the transport.
+// Both fake actors share one thread; FIFO queues stand for the transport, and
+// a chunk without a Seq stands for TFinish.
 void RunRemotePipeline(const TRemotePipeline& options) {
     using namespace NQdb::NScheduler;
     std::atomic<int> destroyed = 0;
@@ -1258,13 +1259,16 @@ void RunRemotePipeline(const TRemotePipeline& options) {
             EXPECT_LE(sinkState->Sent - sinkState->Confirmed, options.Window);
             chunks.emplace_back(seq, rowSet);
         };
+        auto finish = [&] {
+            chunks.emplace_back(0, TRowSet{});
+        };
         int64_t delivered = 0;
         while (!stop.load(std::memory_order_acquire)) {
             bool idle = true;
             TRemoteSinkState* sinkReady = nullptr;
             while (channelA.SinkQueue().TryPop(sinkReady)) {
                 idle = false;
-                sinkReady->Drain(send);
+                sinkReady->Drain(send, finish);
                 wakeA.Notify(sealedA.ExternalNode(sinkReady->Id));
             }
             TRemoteSourceState* sourceReady = nullptr;
@@ -1278,18 +1282,20 @@ void RunRemotePipeline(const TRemotePipeline& options) {
                 idle = false;
                 auto [seq, rowSet] = chunks.front();
                 chunks.pop_front();
-                if (!sourceState->Push(seq, std::move(rowSet))) {
+                if (seq == 0) {
+                    EXPECT_EQ(delivered, options.Total);
+                    sourceState->Finish();
+                } else if (sourceState->Push(seq, std::move(rowSet))) {
+                    ++delivered;
+                } else {
                     ADD_FAILURE() << "chunk " << seq << " does not fit";
                     Release(&rowSet);
-                }
-                if (++delivered == options.Total) {
-                    sourceState->Finish();
                 }
                 wakeB.Notify(sealedB.ExternalNode(sourceState->Id));
             }
             if (!confirms.empty()) {
                 idle = false;
-                EXPECT_TRUE(sinkState->Confirm(confirms.front(), send));
+                EXPECT_TRUE(sinkState->Confirm(confirms.front(), send, finish));
                 confirms.pop_front();
                 wakeA.Notify(sealedA.ExternalNode(sinkState->Id));
             }
@@ -1317,6 +1323,8 @@ void RunRemotePipeline(const TRemotePipeline& options) {
         ASSERT_EQ(collectorState->Rows[i], i + 1);
     }
     EXPECT_EQ(sinkState->Sent, static_cast<uint64_t>(options.Total));
+    EXPECT_TRUE(sinkState->FinishSent);
+    EXPECT_EQ(source.State.load(), ETaskState::Finished);
     EXPECT_EQ(destroyed.load(), options.Total);
 }
 
@@ -1357,6 +1365,9 @@ TEST(DistributedScheduler, RemoteSinkKeepsAtMostWindowChunksUnconfirmed) {
         sent.push_back(seq);
         Release(&rowSet);
     };
+    auto finish = [] {
+        ADD_FAILURE() << "the sink has not finished";
+    };
     auto write = [&](int64_t rows) {
         auto rowSet = CountedRows(rows, &destroyed);
         EXPECT_EQ(code->Write(state.get(), rowSet), ETaskResult::OK);
@@ -1369,27 +1380,70 @@ TEST(DistributedScheduler, RemoteSinkKeepsAtMostWindowChunksUnconfirmed) {
     TRemoteSinkState* queued = nullptr;
     ASSERT_TRUE(channel.SinkQueue().TryPop(queued));
     EXPECT_FALSE(channel.SinkQueue().TryPop(queued));
-    queued->Drain(send);
+    queued->Drain(send, finish);
     EXPECT_EQ(sent, (std::vector<uint64_t>{1, 2}));
     // A parked state stays with the actor: a new row does not queue it again.
     write(6);
     EXPECT_FALSE(channel.SinkQueue().TryPop(queued));
 
-    EXPECT_TRUE(state->Confirm(1, send));
+    EXPECT_TRUE(state->Confirm(1, send, finish));
     EXPECT_EQ(sent, (std::vector<uint64_t>{1, 2, 3}));
-    EXPECT_TRUE(state->Confirm(3, send));
+    EXPECT_TRUE(state->Confirm(3, send, finish));
     EXPECT_EQ(sent, (std::vector<uint64_t>{1, 2, 3, 4, 5}));
-    EXPECT_FALSE(state->Confirm(6, send));
-    EXPECT_TRUE(state->Confirm(5, send));
+    EXPECT_FALSE(state->Confirm(6, send, finish));
+    EXPECT_TRUE(state->Confirm(5, send, finish));
     EXPECT_EQ(sent, (std::vector<uint64_t>{1, 2, 3, 4, 5, 6}));
     EXPECT_FALSE(channel.SinkQueue().TryPop(queued));
 
     // The outbox ran empty inside the window, so the next row queues the state.
     write(7);
     ASSERT_TRUE(channel.SinkQueue().TryPop(queued));
-    queued->Drain(send);
+    queued->Drain(send, finish);
     EXPECT_EQ(sent.back(), 7);
     EXPECT_EQ(destroyed.load(), 7);
+}
+
+TEST(DistributedScheduler, RemoteSinkFinishesAfterItsLastChunk) {
+    using namespace NQdb::NScheduler;
+    std::atomic<int> destroyed = 0;
+    TActorNotificationChannel channel(std::make_unique<TFakeNotifier>());
+    auto [code, state] = MakeRemoteSink(1, TActorId{}, 2, nullptr, channel, 4, 1);
+    std::vector<uint64_t> events; // 0 is the finish
+    auto send = [&](uint64_t seq, TRowSet&& rowSet) {
+        events.push_back(seq);
+        Release(&rowSet);
+    };
+    auto finish = [&] {
+        events.push_back(0);
+    };
+    for (int64_t rows = 1; rows <= 3; ++rows) {
+        auto rowSet = CountedRows(rows, &destroyed);
+        EXPECT_EQ(code->Write(state.get(), rowSet), ETaskResult::OK);
+        Release(&rowSet);
+    }
+
+    // Finish comes while the window holds back two rows.
+    EXPECT_EQ(code->Finish(state.get()), ETaskResult::OK);
+    TRemoteSinkState* queued = nullptr;
+    ASSERT_TRUE(channel.SinkQueue().TryPop(queued));
+    queued->Drain(send, finish);
+    EXPECT_EQ(events, (std::vector<uint64_t>{1}));
+    EXPECT_TRUE(state->Confirm(1, send, finish));
+    EXPECT_EQ(events, (std::vector<uint64_t>{1, 2}));
+    EXPECT_TRUE(state->Confirm(2, send, finish));
+    EXPECT_EQ(events, (std::vector<uint64_t>{1, 2, 3, 0}));
+    EXPECT_TRUE(state->Confirm(3, send, finish));
+    EXPECT_EQ(events, (std::vector<uint64_t>{1, 2, 3, 0}));
+    EXPECT_FALSE(channel.SinkQueue().TryPop(queued));
+    EXPECT_EQ(destroyed.load(), 3);
+
+    // An empty stream finishes at once.
+    auto [emptyCode, emptyState] = MakeRemoteSink(3, TActorId{}, 4, nullptr, channel, 4, 1);
+    events.clear();
+    EXPECT_EQ(emptyCode->Finish(emptyState.get()), ETaskResult::OK);
+    ASSERT_TRUE(channel.SinkQueue().TryPop(queued));
+    queued->Drain(send, finish);
+    EXPECT_EQ(events, (std::vector<uint64_t>{0}));
 }
 
 TEST(DistributedScheduler, RemoteSourceConfirmsConsumedChunks) {

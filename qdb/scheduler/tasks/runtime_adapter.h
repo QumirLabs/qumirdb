@@ -64,10 +64,14 @@ struct TSinkCode {
     // OK: written. WAITING: not written, the same rowSet is passed again, maybe
     // before the external wake; Write must be idempotent for a rejected rowSet.
     using TWrite = std::function<ETaskResult(void*, const TRowSet&)>;
+    // Optional; called after the last Write. OK: the task finishes. WAITING:
+    // called again, maybe before the external wake, so it must be idempotent.
+    using TFinish = std::function<ETaskResult(void*)>;
 
-    explicit TSinkCode(TWrite write);
+    explicit TSinkCode(TWrite write, TFinish finish = {});
 
     TWrite Write;
+    TFinish Finish;
 };
 
 struct TBlockingCode {
@@ -228,6 +232,7 @@ private:
     TInputPort Input_;
     TRowSet Pending_{};
     bool HasPending_ = false;
+    bool InputFinished_ = false;
     bool Finished_ = false;
 };
 

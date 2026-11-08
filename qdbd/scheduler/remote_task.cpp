@@ -43,6 +43,7 @@ ETaskResult TRemoteSinkState::Write(const TRowSet& rowSet) {
             --task.RefCount;
             return ETaskResult::WAITING;
         }
+        ++Written;
     }
     if (!Queued.exchange(true)) {
         if (!ActorChannel.Notify(this)) {
@@ -56,16 +57,34 @@ ETaskResult TRemoteSinkState::Write(const TRowSet& rowSet) {
     return ETaskResult::OK;
 }
 
+ETaskResult TRemoteSinkState::Finish() {
+    InputFinished.store(true);
+    if (!Queued.exchange(true) && !ActorChannel.Notify(this)) {
+        Queued.store(false);
+        return ETaskResult::WAITING;
+    }
+    return ETaskResult::OK;
+}
+
 void TRemoteSinkState::SendQueue(NNet::NActors::TActorContext::TPtr& ctx) {
-    Drain([&](uint64_t seq, TRowSet&& rowSet) {
-        SendChunk(ctx, seq, std::move(rowSet));
-    });
+    Drain(
+        [&](uint64_t seq, TRowSet&& rowSet) {
+            SendChunk(ctx, seq, std::move(rowSet));
+        },
+        [&] {
+            SendFinish(ctx);
+        });
 }
 
 bool TRemoteSinkState::OnConfirm(uint64_t lastApplied, NNet::NActors::TActorContext::TPtr& ctx) {
-    return Confirm(lastApplied, [&](uint64_t seq, TRowSet&& rowSet) {
-        SendChunk(ctx, seq, std::move(rowSet));
-    });
+    return Confirm(
+        lastApplied,
+        [&](uint64_t seq, TRowSet&& rowSet) {
+            SendChunk(ctx, seq, std::move(rowSet));
+        },
+        [&] {
+            SendFinish(ctx);
+        });
 }
 
 void TRemoteSinkState::SendChunk(NNet::NActors::TActorContext::TPtr& ctx, uint64_t seq, TRowSet&& rowSet) {
@@ -78,6 +97,12 @@ void TRemoteSinkState::SendChunk(NNet::NActors::TActorContext::TPtr& ctx, uint64
     // Send has serialized the payload, so the reference can go here. Row
     // sets own detached buffers, which any thread may free.
     Release(&rowSet);
+}
+
+void TRemoteSinkState::SendFinish(NNet::NActors::TActorContext::TPtr& ctx) {
+    ctx->Send<TFinish>(ActorId, TFinish {
+        .DstTaskId = DstTaskId,
+    });
 }
 
 TRemoteSourceState::TRemoteSourceState(
@@ -187,9 +212,13 @@ std::pair<std::shared_ptr<const TSinkCode>, std::shared_ptr<TRemoteSinkState>> M
     size_t outboxCapacity,
     size_t window)
 {
-    auto code = std::make_shared<const TSinkCode>([](void* state, const TRowSet& rowSet) {
-        return static_cast<TRemoteSinkState*>(state)->Write(rowSet);
-    });
+    auto code = std::make_shared<const TSinkCode>(
+        [](void* state, const TRowSet& rowSet) {
+            return static_cast<TRemoteSinkState*>(state)->Write(rowSet);
+        },
+        [](void* state) {
+            return static_cast<TRemoteSinkState*>(state)->Finish();
+        });
     auto state = std::make_shared<TRemoteSinkState>(
         id, actorId, dstTaskId, descriptor, actorChannel, outboxCapacity, window);
     return {std::move(code), std::move(state)};

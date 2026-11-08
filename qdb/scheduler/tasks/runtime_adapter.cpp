@@ -243,8 +243,9 @@ TUnaryCode::TUnaryCode(TProcess process)
     : Process(std::move(process))
 {}
 
-TSinkCode::TSinkCode(TWrite write)
+TSinkCode::TSinkCode(TWrite write, TFinish finish)
     : Write(std::move(write))
+    , Finish(std::move(finish))
 {}
 
 TBlockingCode::TBlockingCode(TProcess process)
@@ -557,11 +558,15 @@ ETaskResult TSinkTask::Execute() {
     }
 
     TRowSet rowSet{};
-    auto fetch = Input_.Fetch(rowSet);
+    auto fetch = InputFinished_ ? EFetchResult::FINISHED : Input_.Fetch(rowSet);
     if (fetch == EFetchResult::NO_DATA) {
         return ETaskResult::NEED_DATA;
     }
     if (fetch == EFetchResult::FINISHED) {
+        InputFinished_ = true;
+        if (Code_->Finish && Code_->Finish(State_.get()) == ETaskResult::WAITING) {
+            return ETaskResult::WAITING;
+        }
         Finished_ = true;
         return ETaskResult::FINISHED;
     }

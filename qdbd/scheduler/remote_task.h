@@ -83,27 +83,40 @@ struct TRemoteSinkState {
 
     // TSinkCode::TWrite: OK or WAITING (outbox or notification channel is full).
     ETaskResult Write(const TRowSet& rowSet);
+    // TSinkCode::TFinish: OK or WAITING (notification channel is full).
+    ETaskResult Finish();
 
     // ComputeActor side. Passes queued row sets and their Seq to `send`, which
-    // takes ownership, while fewer than Window are unconfirmed. Queued stays set
-    // while the actor owns the state: from the queue pop until the outbox is
-    // empty, or parked on a closed window until Confirm resumes the drain.
-    template <class TSend>
-    void Drain(TSend&& send) {
+    // takes ownership, while fewer than Window are unconfirmed; calls `finish`
+    // once after the last row of a finished sink. Queued stays set while the
+    // actor owns the state: from the queue pop until the outbox is empty, or
+    // parked on a closed window until Confirm resumes the drain.
+    template <class TSend, class TSendFinish>
+    void Drain(TSend&& send, TSendFinish&& finish) {
         TRowSet rowSet;
         for (;;) {
             while (Sent - Confirmed < Window && Outbox.TryPop(rowSet)) {
                 send(++Sent, std::move(rowSet));
+            }
+            // Finish follows the last Write, so Written is final once InputFinished is set.
+            if (InputFinished.load() && Sent == Written) {
+                if (!FinishSent) {
+                    FinishSent = true;
+                    finish();
+                }
+                return;
             }
             if (Sent - Confirmed >= Window) {
                 Parked = true;
                 return;
             }
             Queued.store(false);
-            if (!Outbox.TryPop(rowSet)) {
+            // A Write or Finish that saw Queued set did not notify: look again.
+            if (Outbox.TryPop(rowSet)) {
+                send(++Sent, std::move(rowSet));
+            } else if (!InputFinished.load()) {
                 return;
             }
-            send(++Sent, std::move(rowSet));
             if (Queued.exchange(true)) {
                 return; // a worker queued this state again
             }
@@ -111,15 +124,15 @@ struct TRemoteSinkState {
     }
 
     // ComputeActor side, on TDataConfirm. False if lastApplied was never sent.
-    template <class TSend>
-    bool Confirm(uint64_t lastApplied, TSend&& send) {
+    template <class TSend, class TSendFinish>
+    bool Confirm(uint64_t lastApplied, TSend&& send, TSendFinish&& finish) {
         if (lastApplied > Sent) {
             return false;
         }
         Confirmed = std::max(Confirmed, lastApplied);
         if (Parked && Sent - Confirmed < Window) {
             Parked = false;
-            Drain(send);
+            Drain(send, finish);
         }
         return true;
     }
@@ -135,14 +148,18 @@ struct TRemoteSinkState {
     TMPSCQueue<TRowSet> Outbox;
     const size_t Window;
     std::atomic<bool> Queued = false;
+    std::atomic<bool> InputFinished = false;
     bool NotifyPending = false; // worker only: the row is in the outbox, the notification failed
+    uint64_t Written = 0; // worker only until InputFinished: rows pushed into the outbox
     // Actor only: the last sent and the last confirmed Seq.
     uint64_t Sent = 0;
     uint64_t Confirmed = 0;
     bool Parked = false;
+    bool FinishSent = false;
 
 private:
     void SendChunk(NNet::NActors::TActorContext::TPtr& ctx, uint64_t seq, TRowSet&& rowSet);
+    void SendFinish(NNet::NActors::TActorContext::TPtr& ctx);
 };
 
 // ComputeActor -> worker. The actor pushes received row sets into a bounded
