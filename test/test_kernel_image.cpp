@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "mock_source.h"
 
 #include <qdb/exec/aggregate_exec.h>
 #include <qdb/exec/join_exec.h>
@@ -13,6 +14,8 @@
 #include <qdb/kernel/compiler.h>
 #include <qdb/kernel/image.h>
 #include <qdb/kernel/spec.h>
+#include <qdb/plan/ops/source.h>
+#include <qdb/plan/ops/window.h>
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/parser/core/lexer.h>
@@ -298,7 +301,7 @@ std::pair<std::vector<int64_t>, std::vector<int64_t>> RunSort(const TSortRuntime
     std::pair<std::vector<int64_t>, std::vector<int64_t>> result;
     TRowSet out{};
     {
-        TSortProcessor sort(outputType, keys, process.KeyColumns, process.RadixKernel);
+        TSortProcessor sort(outputType, keys, process.Plan.KeyColumns, process.RadixKernel);
         auto rows = batch.RowSet();
         sort.Add(rows);
         sort.Finish();
@@ -307,7 +310,8 @@ std::pair<std::vector<int64_t>, std::vector<int64_t>> RunSort(const TSortRuntime
         Release(&out);
     }
     {
-        TTopSortProcessor topSort(outputType, keys, process.KeyColumns, process.RadixKernel, 3);
+        TTopSortProcessor topSort(
+            outputType, keys, process.Plan.KeyColumns, process.RadixKernel, process.Plan.Top->Limit);
         auto rows = batch.RowSet();
         topSort.Add(rows);
         topSort.Finish();
@@ -319,15 +323,8 @@ std::pair<std::vector<int64_t>, std::vector<int64_t>> RunSort(const TSortRuntime
 }
 
 // Window kernel: running sum of v per k, ordered by v. Returns the sum column.
-std::vector<int64_t> RunWindow(const TKernelCompiler::TSortRadixCompositeDispatch& dispatch)
+std::vector<int64_t> RunWindow(TWindowProcessor& window)
 {
-    const std::vector<TSortKey> keys = {{.Column = "k"}, {.Column = "v"}};
-    const std::vector<TSortColumnRef> keyColumns = {
-        {.Index = 0, .Type = I64Type()}, {.Index = 1, .Type = I64Type()}};
-    const auto outputType = std::make_shared<TStructType>(TStructType({
-        {"k", I64Type()}, {"v", I64Type()}, {"s", I64Type()}}));
-    TWindowProcessor window(
-        outputType, keys, keyColumns, TSortRadixKernel{.Enabled = true, .Dispatch = dispatch});
     TKeyValueBatch batch{.Keys = {1, 2, 1, 2}, .Values = {5, 3, 2, 4}};
     auto rows = batch.RowSet();
     window.Add(rows);
@@ -337,6 +334,28 @@ std::vector<int64_t> RunWindow(const TKernelCompiler::TSortRadixCompositeDispatc
     auto sums = ReadSortedColumn(out, 2);
     Release(&out);
     return sums;
+}
+
+std::vector<int64_t> RunWindow(const TKernelCompiler::TSortRadixCompositeDispatch& dispatch)
+{
+    const std::vector<TSortKey> keys = {{.Column = "k"}, {.Column = "v"}};
+    const std::vector<TSortColumnRef> keyColumns = {
+        {.Index = 0, .Type = I64Type()}, {.Index = 1, .Type = I64Type()}};
+    const auto outputType = std::make_shared<TStructType>(TStructType({
+        {"k", I64Type()}, {"v", I64Type()}, {"s", I64Type()}}));
+    TWindowProcessor window(outputType, keys, keyColumns, MakeWindowKernel(dispatch));
+    return RunWindow(window);
+}
+
+// Window operator over the key/value schema: running sum of v per k, ordered by v.
+std::shared_ptr<TWindowOperator> MakeWindowOperator(TMockSource& source)
+{
+    return std::make_shared<TWindowOperator>(
+        std::make_shared<TSourceOperator>(source, "data"),
+        std::vector<std::string>{"k"},
+        std::vector<TSortKey>{{.Column = "v"}},
+        std::nullopt,
+        std::vector<TWindowFunc>{{.Name = "s", .Func = "sum", .Arg = Parse("v")}});
 }
 
 std::vector<TSortRadixKeyInput> WindowKeys()
@@ -547,28 +566,37 @@ TEST(KernelImage, JoinHashBindsFromImageSlot)
     EXPECT_EQ(bound.first[1], bound.second[2]);
 }
 
-TEST(KernelImage, SortKernelsBindFromImageSlots)
+TEST(KernelImage, SortKernelsBindFromPlanDataAndImageSlots)
 {
-    const auto expected = RunSort(BuildSortRuntimeProcess(KeyValueType(), {{.Column = "v"}}, "top-sort", {}));
+    const auto inputType = std::make_shared<TStructType>(KeyValueType());
+    const std::vector<TSortKey> keys = {{.Column = "v"}};
+    const auto expected = RunSort(BuildSortRuntimeProcess(inputType, keys, "top-sort", 3, {}));
 
     std::vector<TGeneratedKernel> kernels;
     // A leading filter shifts the kernel indexes.
     TKernelCompiler(TKernelCompilerOptions{.Sink = &kernels, .BindNow = false}).CompileFilter(FilterSpec());
     auto process = BuildSortRuntimeProcess(
-        KeyValueType(), {{.Column = "v"}}, "top-sort", {.Sink = &kernels, .BindNow = false});
-    auto& radix = process.RadixKernel;
+        inputType, keys, "top-sort", 3, {.Sink = &kernels, .BindNow = false});
+    const auto& plan = process.Plan;
     ASSERT_EQ(kernels.size(), 4u);
-    EXPECT_EQ(radix.Dispatch.Kernel, 1u);
-    EXPECT_EQ(radix.TopSortDispatch.Kernel, 2u);
-    EXPECT_EQ(radix.HeapTopKDispatch.Kernel, 3u);
-    EXPECT_EQ(kernels[radix.Dispatch.Kernel].Slot, radix.Dispatch.Slot);
-    EXPECT_EQ(kernels[radix.TopSortDispatch.Kernel].Slot, radix.TopSortDispatch.Slot);
-    EXPECT_EQ(kernels[radix.HeapTopKDispatch.Kernel].Slot, radix.HeapTopKDispatch.Slot);
+    ASSERT_TRUE(plan.Top);
+    EXPECT_EQ(plan.RadixKernel, 1u);
+    EXPECT_FALSE(plan.RadixNullable);
+    EXPECT_EQ(plan.Top->TopSortKernel, 2u);
+    EXPECT_EQ(plan.Top->HeapKernel, 3u);
+    EXPECT_EQ(plan.Top->Limit, 3);
+    EXPECT_EQ(plan.Keys.size(), 1u);
+    EXPECT_EQ(plan.KeyColumns.size(), 1u);
+    EXPECT_EQ(kernels[plan.RadixKernel].Slot, process.RadixKernel.Dispatch.Slot);
+    EXPECT_EQ(kernels[plan.Top->TopSortKernel].Slot, process.RadixKernel.TopSortDispatch.Slot);
+    EXPECT_EQ(kernels[plan.Top->HeapKernel].Slot, process.RadixKernel.HeapTopKDispatch.Slot);
 
     auto slots = LoadImageSlots(kernels);
-    radix.Dispatch = BindSortRadixComposite(slots[radix.Dispatch.Kernel]);
-    radix.TopSortDispatch = BindTopSort(slots[radix.TopSortDispatch.Kernel]);
-    radix.HeapTopKDispatch = BindHeapTopK(slots[radix.HeapTopKDispatch.Kernel]);
+    process.RadixKernel = MakeSortRadixKernel(
+        plan,
+        BindSortRadixComposite(slots[plan.RadixKernel]),
+        BindTopSort(slots[plan.Top->TopSortKernel]),
+        BindHeapTopK(slots[plan.Top->HeapKernel]));
     EXPECT_EQ(RunSort(process), expected);
     EXPECT_EQ(expected.first, (std::vector<int64_t>{1, 2, 3, 5, 9}));
     EXPECT_EQ(expected.second, (std::vector<int64_t>{1, 2, 3}));
@@ -590,6 +618,35 @@ TEST(KernelImage, WindowBindsFromImageSlot)
     auto slots = LoadImageSlots(kernels);
     EXPECT_EQ(RunWindow(BindSortRadixComposite(slots[window.Kernel])), expected);
     // Sorted by (k, v): (1,2) (1,5) (2,3) (2,4).
+    EXPECT_EQ(expected, (std::vector<int64_t>{2, 7, 3, 7}));
+}
+
+TEST(KernelImage, WindowBindsFromPlanDataAndImageSlot)
+{
+    TMockSource source({"k", "v"});
+    auto window = MakeWindowOperator(source);
+    const auto inputType = StructTypeFromSchema(source.Schema());
+    auto direct = BuildWindowRuntimeProcess(*window, inputType, {});
+    TWindowProcessor original(
+        direct.Plan.OutputType, direct.Plan.Keys, direct.Plan.KeyColumns, direct.Kernel);
+    const auto expected = RunWindow(original);
+
+    std::vector<TGeneratedKernel> kernels;
+    // A leading filter shifts the kernel indexes.
+    TKernelCompiler(TKernelCompilerOptions{.Sink = &kernels, .BindNow = false}).CompileFilter(FilterSpec());
+    auto process = BuildWindowRuntimeProcess(*window, inputType, {.Sink = &kernels, .BindNow = false});
+    const auto& plan = process.Plan;
+    ASSERT_EQ(kernels.size(), 2u);
+    EXPECT_EQ(plan.Kernel, 1u);
+    EXPECT_EQ(plan.Keys.size(), 2u);
+    EXPECT_EQ(plan.KeyColumns.size(), 2u);
+    EXPECT_EQ(kernels[plan.Kernel].Slot, process.Kernel.Dispatch.Slot);
+
+    auto slots = LoadImageSlots(kernels);
+    TWindowProcessor rebuilt(
+        plan.OutputType, plan.Keys, plan.KeyColumns,
+        MakeWindowKernel(BindSortRadixComposite(slots[plan.Kernel])));
+    EXPECT_EQ(RunWindow(rebuilt), expected);
     EXPECT_EQ(expected, (std::vector<int64_t>{2, 7, 3, 7}));
 }
 

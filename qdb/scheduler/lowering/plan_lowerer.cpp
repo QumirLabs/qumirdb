@@ -2216,18 +2216,12 @@ private:
             group,
             execStageId,
             [&, group](const NQumir::NAst::TTypePtr& childType) {
-                auto* inputType =
-                    static_cast<NQumir::NAst::TStructType*>(childType.get());
-                if (!inputType) {
-                    throw std::runtime_error(
-                        "sort input must have TStructType");
-                }
                 auto runtime = BuildSortRuntimeProcess(
-                    *inputType, sortKeys, kernelName,
+                    childType, sortKeys, kernelName, topLimit,
                     KernelOptions(group, execStageId));
                 return MakeSortTail(
                     childType, sortKeys,
-                    std::move(runtime.KeyColumns),
+                    std::move(runtime.Plan.KeyColumns),
                     std::move(runtime.RadixKernel), topLimit);
             },
             outConn,
@@ -2262,21 +2256,16 @@ private:
         auto childOut = Lower(input, childConnRef);
 
         auto childType = childOut.OutputType;
-        auto* inputType =
-            static_cast<NQumir::NAst::TStructType*>(childType.get());
-        if (!inputType) {
-            throw std::runtime_error("sort input must have TStructType");
-        }
         auto localSortGroup = StageLabel(kernelName, execStageId);
         TSortRuntimeProcess runtime =
             [&]() {
                 TStageDiagnosticsScope diagnosticsScope(Diagnostics_, localSortGroup);
                 return BuildSortRuntimeProcess(
-                    *inputType, sortKeys, kernelName,
+                    childType, sortKeys, kernelName, topLimit,
                     KernelOptions(localSortGroup, execStageId));
             }();
         auto keys = sortKeys;
-        auto keyColumns = runtime.KeyColumns;
+        auto keyColumns = runtime.Plan.KeyColumns;
 
         // Per-lane local (top-)sort producing sorted runs for the merge.
         auto localTail = MakeSortTail(
@@ -2818,12 +2807,12 @@ private:
             .Code = MakeDrainBlockingCode<TWindowBlockingState>(),
             .MakeState = [runtime]() -> std::shared_ptr<NScheduler::ITaskState> {
                 return std::make_shared<TWindowBlockingState>(
-                    runtime.OutputType,
-                    runtime.Keys,
-                    runtime.KeyColumns,
+                    runtime.Plan.OutputType,
+                    runtime.Plan.Keys,
+                    runtime.Plan.KeyColumns,
                     runtime.Kernel);
             },
-            .OutputType = runtime.OutputType,
+            .OutputType = runtime.Plan.OutputType,
         };
     }
 

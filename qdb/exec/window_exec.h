@@ -10,6 +10,18 @@
 
 namespace NQdb {
 
+// What a window process needs besides its kernel, so it can be rebuilt later.
+struct TWindowPlanData {
+    NQumir::NAst::TTypePtr OutputType;
+    std::vector<TSortKey> Keys;              // partition (asc) ++ order
+    std::vector<TSortColumnRef> KeyColumns;
+    // Index of the window kernel in the sink (0 without a sink).
+    uint32_t Kernel = 0;
+};
+
+// Binds the window kernel from a dispatch over the kernel's slot.
+TSortRadixKernel MakeWindowKernel(TKernelCompiler::TSortRadixCompositeDispatch dispatch);
+
 // Blocking window processor. Buffers all input, then in a single Next() sorts
 // the row-id permutation by (partition ++ order) and materializes the input
 // columns followed by one computed column per window function - all inside the
