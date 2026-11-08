@@ -2,6 +2,7 @@
 
 #include <qdb/scheduler/connections/local.h>
 #include <qdb/scheduler/impl/single_threaded_scheduler.h>
+#include <qdb/scheduler/lowering/plan_lowerer.h>
 #include <qdb/scheduler/spec/graph_spec.h>
 #include <qdb/scheduler/tasks/runtime_adapter.h>
 
@@ -181,6 +182,30 @@ TEST(GraphSpec, ExtractReturnsTheSameSpec)
     ASSERT_TRUE(graph->Seal());
     EXPECT_EQ(SerializeGraphSpec(ExtractGraphSpec(*graph, spec.Nodes)), SerializeGraphSpec(spec));
     EXPECT_THROW(ExtractGraphSpec(*graph, {}), std::runtime_error);
+}
+
+TEST(GraphSpec, LoweredPlanWithAllRecordsExtractsAndMaterializes)
+{
+    TCountingSink sink;
+    const auto spec = FanOutSpec();
+    TLoweredPlan lowered;
+    lowered.Graph = MaterializeGraph(spec, &sink);
+    ASSERT_TRUE(lowered.Graph->Seal());
+    EXPECT_FALSE(ExtractLoweredGraphSpec(lowered));
+
+    for (const auto& node : spec.Nodes) {
+        lowered.NodeSpecs.push_back(node);
+    }
+    const auto extracted = ExtractLoweredGraphSpec(lowered);
+    ASSERT_TRUE(extracted);
+    auto again = MaterializeGraph(*extracted, &sink);
+    ASSERT_TRUE(again->Seal());
+    EXPECT_EQ(PrintGraph(*again), PrintGraph(*lowered.Graph));
+
+    lowered.NodeSpecs[1].reset();
+    std::vector<uint32_t> missing;
+    EXPECT_FALSE(ExtractLoweredGraphSpec(lowered, &missing));
+    EXPECT_EQ(missing, std::vector<uint32_t>{1});
 }
 
 struct TForeignConnection : IConnection {

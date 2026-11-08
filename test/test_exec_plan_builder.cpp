@@ -179,6 +179,11 @@ NScheduler::TSettings MultiSettings() {
     return settings;
 }
 
+struct TCollectSink : ISink {
+    void Write(const TRowSet&) override
+    {}
+};
+
 struct TBuiltPlan {
     TOperatorPtr Logical;
     TExecPlan Exec;
@@ -545,6 +550,45 @@ TEST(ExecPlanBuilder, CrossJoinResidualPreservesBothInputSchemas) {
         EXPECT_TRUE(FieldType(output.Cast().get(), "l.lv"));
         EXPECT_TRUE(FieldType(output.Cast().get(), "r.rv"));
     }
+}
+
+TEST(ExecPlanBuilder, LoweringRecordsSpecsForForwardAndSinkNodes) {
+    TSplitMockSource left({"lv"});
+    TSplitMockSource right({"rv"});
+    const std::unordered_map<std::string, ISource*> sources{
+        {"l", &left}, {"r", &right},
+    };
+    auto plan = BuildSqlPlan(
+        "SELECT r.rv, count(*) AS n FROM l, r WHERE r.rv > l.lv GROUP BY r.rv", sources);
+    auto lowered = NScheduler::LowerPlanToGraph(plan, MultiSettings(), nullptr);
+    TCollectSink sink;
+    NScheduler::AttachSink(lowered, sink);
+
+    const auto& nodes = lowered.Graph->Nodes();
+    ASSERT_EQ(lowered.NodeSpecs.size(), nodes.size());
+    size_t forwards = 0;
+    std::vector<uint32_t> expectedMissing;
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        const auto& record = lowered.NodeSpecs[i];
+        const bool isForward = nodes[i]->DebugKind == "broadcast";
+        const bool isSink = nodes[i]->DebugKind == "sink";
+        ASSERT_EQ(record.has_value(), isForward || isSink) << nodes[i]->DebugKind;
+        if (!record) {
+            expectedMissing.push_back(static_cast<uint32_t>(i));
+            continue;
+        }
+        EXPECT_EQ(record->DebugKind, nodes[i]->DebugKind);
+        EXPECT_EQ(record->TaskGroupId, nodes[i]->TaskGroupId);
+        EXPECT_EQ(
+            isForward,
+            std::holds_alternative<NScheduler::TForwardNode>(record->Body));
+        forwards += isForward;
+    }
+    EXPECT_GT(forwards, 0u);
+
+    std::vector<uint32_t> missing;
+    EXPECT_FALSE(NScheduler::ExtractLoweredGraphSpec(lowered, &missing));
+    EXPECT_EQ(missing, expectedMissing);
 }
 
 TEST(ExecPlanBuilder, MultiKeepsRealPartialAndCombineStages) {

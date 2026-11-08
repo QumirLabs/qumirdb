@@ -70,39 +70,6 @@ TOutputPort OutputPort(const std::vector<IConnection*>& connections, const TPort
     return TOutputPort{.Connection = &ConnectionAt(connections, port.Connection), .Lane = port.Lane};
 }
 
-std::unique_ptr<ITask> MakeTask(
-    const TNodeBody& body, const std::vector<IConnection*>& connections, ISink* sink)
-{
-    return std::visit([&](const auto& node) -> std::unique_ptr<ITask> {
-        using TNode = std::decay_t<decltype(node)>;
-        if constexpr (std::is_same_v<TNode, TForwardNode>) {
-            auto code = std::make_shared<TUnaryCode>([](void*, TRowSet&) {});
-            return std::make_unique<TUnaryTask>(
-                std::move(code), std::shared_ptr<void>{},
-                InputPort(connections, node.In), OutputPort(connections, node.Out));
-        } else if constexpr (std::is_same_v<TNode, TRemoteSourceNode>) {
-            return std::make_unique<TSourceTask>(
-                nullptr, nullptr, OutputPort(connections, node.Out));
-        } else if constexpr (std::is_same_v<TNode, TRemoteSinkNode>) {
-            return std::make_unique<TSinkTask>(
-                nullptr, nullptr, InputPort(connections, node.In));
-        } else {
-            static_assert(std::is_same_v<TNode, TSinkWriterNode>);
-            if (!sink) {
-                Invalid("a sink writer node needs a sink");
-            }
-            auto code = std::make_shared<TSinkCode>([](void* state, const TRowSet& rowSet) {
-                static_cast<ISink*>(state)->Write(rowSet);
-                return ETaskResult::OK;
-            });
-            // Aliasing shared_ptr: the task's state points at the caller's sink.
-            std::shared_ptr<void> state(std::shared_ptr<void>{}, sink);
-            return std::make_unique<TSinkTask>(
-                std::move(code), std::move(state), InputPort(connections, node.In));
-        }
-    }, body);
-}
-
 TTaskNode& NodeAt(const std::vector<TTaskNode*>& nodes, uint32_t index)
 {
     if (index >= nodes.size()) {
@@ -147,6 +114,39 @@ TConnectionSpec ExtractConnection(const IConnection& connection)
 
 } // namespace
 
+std::unique_ptr<ITask> MakeNodeTask(
+    const TNodeBody& body, const std::vector<IConnection*>& connections, ISink* sink)
+{
+    return std::visit([&](const auto& node) -> std::unique_ptr<ITask> {
+        using TNode = std::decay_t<decltype(node)>;
+        if constexpr (std::is_same_v<TNode, TForwardNode>) {
+            auto code = std::make_shared<TUnaryCode>([](void*, TRowSet&) {});
+            return std::make_unique<TUnaryTask>(
+                std::move(code), std::shared_ptr<void>{},
+                InputPort(connections, node.In), OutputPort(connections, node.Out));
+        } else if constexpr (std::is_same_v<TNode, TRemoteSourceNode>) {
+            return std::make_unique<TSourceTask>(
+                nullptr, nullptr, OutputPort(connections, node.Out));
+        } else if constexpr (std::is_same_v<TNode, TRemoteSinkNode>) {
+            return std::make_unique<TSinkTask>(
+                nullptr, nullptr, InputPort(connections, node.In));
+        } else {
+            static_assert(std::is_same_v<TNode, TSinkWriterNode>);
+            if (!sink) {
+                Invalid("a sink writer node needs a sink");
+            }
+            auto code = std::make_shared<TSinkCode>([](void* state, const TRowSet& rowSet) {
+                static_cast<ISink*>(state)->Write(rowSet);
+                return ETaskResult::OK;
+            });
+            // Aliasing shared_ptr: the task's state points at the caller's sink.
+            std::shared_ptr<void> state(std::shared_ptr<void>{}, sink);
+            return std::make_unique<TSinkTask>(
+                std::move(code), std::move(state), InputPort(connections, node.In));
+        }
+    }, body);
+}
+
 std::string SerializeGraphSpec(const TGraphSpec& spec)
 {
     TBinaryWriter writer;
@@ -178,7 +178,7 @@ std::unique_ptr<TTaskGraph> MaterializeGraph(const TGraphSpec& spec, ISink* sink
     std::vector<TTaskNode*> nodes;
     nodes.reserve(spec.Nodes.size());
     for (const auto& nodeSpec : spec.Nodes) {
-        auto& node = graph->AddOwnedNode(MakeTask(nodeSpec.Body, connections, sink));
+        auto& node = graph->AddOwnedNode(MakeNodeTask(nodeSpec.Body, connections, sink));
         node.ExecStageId = nodeSpec.ExecStageId;
         node.TaskGroupId = nodeSpec.TaskGroupId;
         node.DebugKind = nodeSpec.DebugKind;
