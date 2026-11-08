@@ -82,8 +82,6 @@ public:
         std::string_view sourceAlias,
         std::ostream* diagnostics = nullptr,
         const std::unordered_set<std::string>* columnNames = nullptr) const;
-    std::unique_ptr<TParquetSource> MakeRowGroupsSource(
-        const std::vector<size_t>& rowGroups) const;
     std::shared_ptr<const IPhysicalRowReader> CompileReader(
         std::span<const std::string> columnNames) const override;
 

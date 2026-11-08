@@ -412,7 +412,7 @@ TEST(RowGroupPushdownE2E, AutoJoinRunsWithUnequalSourceWidths) {
     WriteFixture(path);
     TParquetFile file(path);
     auto left = file.MakeSource();
-    auto right = left->MakeRowGroupsSource({1});
+    auto right = file.MakeSource(std::vector<int>{1});
     auto plan = BuildSqlPlan(
         "SELECT l.id FROM l JOIN r ON l.signed_value = r.signed_value",
         {{"l", left.get()}, {"r", right.get()}});

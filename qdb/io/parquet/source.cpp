@@ -1064,19 +1064,6 @@ std::vector<NScheduler::TScanRowGroup> TParquetSource::PruneRowGroups(
     return kept;
 }
 
-std::unique_ptr<TParquetSource> TParquetSource::MakeRowGroupsSource(
-    const std::vector<size_t>& selectedRowGroups) const
-{
-    std::vector<int> rowGroups;
-    rowGroups.reserve(selectedRowGroups.size());
-    for (size_t rowGroup : selectedRowGroups) {
-        rowGroups.push_back(static_cast<int>(rowGroup));
-    }
-    return std::unique_ptr<TParquetSource>(new TParquetSource(
-        File_, std::optional<std::vector<int>>(std::move(rowGroups)),
-        RestrictedColumns_));
-}
-
 std::shared_ptr<const IPhysicalRowReader> TParquetSource::CompileReader(
     std::span<const std::string> columnNames) const
 {

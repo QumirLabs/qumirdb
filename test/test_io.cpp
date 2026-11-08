@@ -247,7 +247,7 @@ TEST(IOTest, ParquetRowGroupRangeSource) {
         (std::vector<int64_t>{50, 20, 30}));
     Release(&lookupRows);
 
-    auto split = source->MakeRowGroupsSource({1});
+    auto split = source->File().MakeSource(std::vector<int>{1}, source->RestrictedColumns());
     EXPECT_EQ(split->Stats().get(), source->Stats().get());
     const auto splitGroups = split->ScanRowGroups();
     ASSERT_EQ(splitGroups.size(), 1u);
@@ -391,7 +391,7 @@ TEST(IOTest, RowIdColumnKeepsFileWideLocatorsInSplitScans) {
 
     // A split source scans one row group but must still report file-wide
     // locators, otherwise a later lookup would read the wrong rows.
-    auto split = source->MakeRowGroupsSource({1});
+    auto split = source->File().MakeSource(std::vector<int>{1}, source->RestrictedColumns());
     std::vector<int64_t> ids;
     const auto rowIds = DrainRowIds(*split, 1, &ids);
     EXPECT_EQ(rowIds, (std::vector<TPhysicalRowId>{
@@ -401,11 +401,11 @@ TEST(IOTest, RowIdColumnKeepsFileWideLocatorsInSplitScans) {
     }));
     EXPECT_EQ(ids, (std::vector<int64_t>{4, 5, 6}));
 
-    auto tail = source->MakeRowGroupsSource({2});
+    auto tail = source->File().MakeSource(std::vector<int>{2}, source->RestrictedColumns());
     EXPECT_EQ(DrainRowIds(*tail, 1),
         (std::vector<TPhysicalRowId>{MakeParquetRowId(2, 0)}));
 
-    auto empty = source->MakeRowGroupsSource({});
+    auto empty = source->File().MakeSource(std::vector<int>{}, source->RestrictedColumns());
     EXPECT_TRUE(DrainRowIds(*empty, 1).empty());
 }
 
@@ -414,7 +414,7 @@ TEST(IOTest, SplitSourceRebuildsFromItsFileAndScanParameters) {
     NQdb::TParquetFile file(path);
     auto source = file.MakeSource();
     source->RestrictColumns({"id", std::string(InternalRowIdColumnName)});
-    auto split = source->MakeRowGroupsSource({1});
+    auto split = source->File().MakeSource(std::vector<int>{1}, source->RestrictedColumns());
     EXPECT_EQ(split->Path(), path);
     EXPECT_FALSE(source->RowGroups());
     EXPECT_EQ(split->RowGroups(), std::optional(std::vector<int>{1}));
