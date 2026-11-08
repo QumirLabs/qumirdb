@@ -105,6 +105,7 @@ struct TComputeActor : public IBehaviorActor {
             std::cerr << "compute actor: cannot start graph: " << error << "\n";
             return;
         }
+        QueryActorId = ctx->Sender();
         Graph = message.Graph;
         Endpoints = std::move(message.Endpoints);
         ActorChannel = std::make_unique<NScheduler::TActorNotificationChannel>(ctx->CreateNotifier());
@@ -208,6 +209,7 @@ struct TComputeActor : public IBehaviorActor {
     std::unordered_map<uint64_t, std::tuple<std::shared_ptr<NScheduler::TRemoteSourceState>, NScheduler::TTaskNode*>> SourceStates;
     std::unordered_map<uint64_t, std::tuple<std::shared_ptr<NScheduler::TRemoteSinkState>, NScheduler::TTaskNode*>> SinkStates;
     TVoidSuspendedTask NotificationTask;
+    TActorId QueryActorId;
 };
 
 } // namespace
