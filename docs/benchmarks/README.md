@@ -44,7 +44,7 @@ if that cost needs to be added back.
 - **ClickBench** — 43 queries over `hits.parquet`. Run by qdb, DuckDB and
   `clickhouse-local`.
 - **TPC-H** — 22 queries at scale factors 1, 10 and 100, run by qdb, DuckDB
-  and DataFusion.
+  and DataFusion; `clickhouse-local` results at scales 1 and 10.
 - **TPC-DS** — all 99 queries completed at scale factors 1, 10 and 100.
   qdb runs 14, 23, 24 and 39 as two parts each; the parts are summed within a run
   here so the query set matches DuckDB.
@@ -54,8 +54,8 @@ if that cost needs to be added back.
 | Benchmark | Scale | qdb (s) | DuckDB (s) | DataFusion (s) | ClickHouse (s) | qdb ÷ DuckDB | qdb ÷ DataFusion | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | ClickBench | — | 11.577 | 14.44 | — | 14.95 | 0.80× | — | qdb: one SQL run |
-| TPC-H | 1 | 0.777 | 1.17 | 0.96 | — | 0.66× | 0.81× | qdb: one SQL run |
-| TPC-H | 10 | 3.864 | 4.03 | 4.18 | — | 0.96× | 0.92× | qdb: one SQL run |
+| TPC-H | 1 | 0.777 | 1.17 | 0.96 | 2.610 | 0.66× | 0.81× | qdb: one SQL run |
+| TPC-H | 10 | 3.864 | 4.03 | 4.18 | 8.510 | 0.96× | 0.92× | qdb: one SQL run |
 | TPC-H | 100 | 32.843 | 32.10 | 62.68 | — | 1.02× | 0.52× | qdb: one SQL run |
 | TPC-DS | 1 | 5.120 | 5.13 | — | — | 1.00× | — | qdb: one SQL run |
 | TPC-DS | 10 | 27.406 | 15.89 | — | — | 1.72× | — | qdb: one SQL run |
