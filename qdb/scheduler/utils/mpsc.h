@@ -35,6 +35,8 @@ public:
             auto pos = PushPos_.load(std::memory_order_relaxed);
             if (pos - popPos >= Capacity_) {
                 // If the consumer moved since, popPos was stale: the queue may not be full.
+                // The fence keeps this re-load from being satisfied before the relaxed PushPos_ load.
+                std::atomic_thread_fence(std::memory_order_acquire);
                 if (PopPos_.load(std::memory_order_acquire) == popPos) {
                     return false;
                 }
