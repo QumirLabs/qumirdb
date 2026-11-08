@@ -31,6 +31,13 @@ TRemoteSinkState::TRemoteSinkState(
     , Window(window)
 { }
 
+TRemoteSinkState::~TRemoteSinkState() {
+    TRowSet rowSet;
+    while (Outbox.TryPop(rowSet)) {
+        Release(&rowSet);
+    }
+}
+
 ETaskResult TRemoteSinkState::Write(const TRowSet& rowSet) {
     if (!NotifyPending) {
         // TSinkTask releases its reference after Write. The outbox copy owns the
@@ -126,6 +133,13 @@ TRemoteSourceState::TRemoteSourceState(
     , ActorChannel(actorChannel)
     , Inbox(inboxCapacity)
 { }
+
+TRemoteSourceState::~TRemoteSourceState() {
+    TRowSet rowSet;
+    while (Inbox.TryPop(rowSet)) {
+        Release(&rowSet);
+    }
+}
 
 bool TRemoteSourceState::Push(uint64_t seq, TRowSet&& rowSet) {
     if (seq != Received + 1 || !Inbox.TryPush(std::move(rowSet))) {

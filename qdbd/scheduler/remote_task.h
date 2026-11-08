@@ -80,6 +80,7 @@ struct TRemoteSinkState {
         TActorNotificationChannel& actorChannel,
         size_t outboxCapacity = 16,
         size_t window = 2);
+    ~TRemoteSinkState();
 
     // TSinkCode::TWrite: OK or WAITING (outbox or notification channel is full).
     ETaskResult Write(const TRowSet& rowSet);
@@ -173,6 +174,7 @@ struct TRemoteSourceState {
         uint64_t peerTaskId,
         TActorNotificationChannel& actorChannel,
         size_t inboxCapacity = 16);
+    ~TRemoteSourceState();
 
     // ComputeActor side. False if seq is not the next one or the inbox is full;
     // rowSet is then left untouched. The peer keeps at most its window of chunks

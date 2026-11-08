@@ -1914,6 +1914,57 @@ TEST(DistributedScheduler, ComputeActorReportsAFailedSendAndReleasesTheRowSet) {
     }
 }
 
+// The peer never confirms, so the window stays closed and the outbox fills up.
+TEST(DistributedScheduler, RemoteSinkReleasesItsOutboxOnTeardown) {
+    using namespace NQdb::NScheduler;
+    std::atomic<int> destroyed = 0;
+    std::atomic<int> produced = 0;
+    TProducerState producerState{.Total = 1000};
+    auto producerCode = std::make_shared<TSourceCode>([&](void* state, TRowSet& rowSet) {
+        auto* producer = static_cast<TProducerState*>(state);
+        if (producer->Next > producer->Total) {
+            return ETaskResult::FINISHED;
+        }
+        rowSet = CountedRows(producer->Next++, &destroyed);
+        ++produced;
+        return ETaskResult::OK;
+    });
+    {
+        auto connection = std::make_unique<TOneToOneConnection>();
+        auto* connectionPtr = connection.get();
+        TTaskGraph graph;
+        auto& producer = graph.AddOwnedNode(std::make_unique<TSourceTask>(
+            producerCode, std::shared_ptr<void>(&producerState, [](void*) {}),
+            TOutputPort{.Connection = connectionPtr}));
+        auto& remoteSink = graph.AddOwnedNode(std::make_unique<TSinkTask>(
+            nullptr, nullptr, TInputPort{.Connection = connectionPtr}));
+        graph.AddOwnedEdge(producer, remoteSink, std::move(connection));
+        graph.MarkExternal(remoteSink, 1);
+        const auto sealed = graph.Seal();
+        ASSERT_TRUE(sealed);
+
+        auto resources = std::make_shared<TRuntimeResources>();
+        resources->Scheduler.WorkerCount = 2;
+        TTestCluster cluster;
+        std::map<std::string, int> statuses;
+        std::vector<std::string> errors;
+        const auto query = cluster.Follower.Register(std::make_unique<TReportProbe>(statuses, errors));
+        const auto peer = cluster.Follower.Register(std::make_unique<TBlackHole>());
+        const auto actor = cluster.Follower.Register(std::unique_ptr<IActor>(CreateComputeActor(resources)));
+        cluster.Follower.Send<TTaskGraphMessage>(query, actor, TTaskGraphMessage{
+            .Graph = sealed,
+            .Endpoints = {{.Id = 1, .Kind = ERemoteEndpointKind::Sink, .PeerActor = peer, .PeerTaskId = 2}}});
+        const auto until = NNet::TClock::now() + std::chrono::milliseconds(200);
+        while (NNet::TClock::now() < until) {
+            cluster.Pump();
+        }
+        cluster.Follower.Send<TPoison>(query, actor, TPoison{});
+        cluster.Pump();
+    }
+    EXPECT_GT(produced.load(), 2);
+    EXPECT_EQ(destroyed.load(), produced.load());
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
