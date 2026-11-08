@@ -447,6 +447,13 @@ TJoinHashKernels BindJoinHashKernels(
     std::shared_ptr<TKernelSlot> slot,
     TJoinHashKernels meta);
 
+// The runtime-filter kernel of a query: its slot and its index in the sink
+// (0 without a sink).
+struct TRuntimeFilterKernel {
+    std::shared_ptr<TKernelSlot> Slot;
+    uint32_t Kernel = 0;
+};
+
 // Compiles qumir core-lang kernel sources to LLVM JIT function pointers.
 class TKernelCompiler {
 public:
@@ -513,34 +520,55 @@ public:
         uint32_t Kernel = 0;
     };
 
-    using TSortRadixCompositeDispatch = std::function<int64_t(
-        TRowSet* store, int64_t* rowIds, int64_t* work, uint32_t* counts,
-        int64_t n, bool* descs, bool* nullsFirsts, bool doSort,
-        int64_t start, int64_t limit, TRowSet* output)>;
+    // Radix sort kernel (entry 0 of its program). The window kernel reuses
+    // this ABI, and so does the nullable variant.
+    struct TSortRadixCompositeDispatch {
+        int64_t operator()(
+            TRowSet* store, int64_t* rowIds, int64_t* work, uint32_t* counts,
+            int64_t n, bool* descs, bool* nullsFirsts, bool doSort,
+            int64_t start, int64_t limit, TRowSet* output) const;
 
-    using TSortRadixCompositeNullableDispatch = std::function<int64_t(
-        TRowSet* store, int64_t* rowIds, int64_t* work, uint32_t* counts,
-        int64_t n, bool* descs, bool* nullsFirsts, bool doSort,
-        int64_t start, int64_t limit, TRowSet* output)>;
+        // Empty when the kernel was not generated.
+        explicit operator bool() const
+        {
+            return Slot != nullptr;
+        }
 
-    using TTopSortDispatch = std::function<int64_t(
-        TRowSet* state,
-        TRowSet* batch,
-        int64_t* rowIds,
-        int64_t* work,
-        uint32_t* counts,
-        int64_t n,
-        bool sortInput,
-        uint8_t* pickSrc,
-        uint32_t* pickIdx,
-        int64_t limit,
-        TRowSet* output)>;
+        std::shared_ptr<TKernelSlot> Slot;
+        // Index of the kernel in the sink (0 without a sink).
+        uint32_t Kernel = 0;
+    };
 
-    using THeapTopKDispatch = std::function<int64_t(
-        TRowSet* store,
-        int64_t* rowIds,
-        int64_t size,
-        int64_t limit)>;
+    using TSortRadixCompositeNullableDispatch = TSortRadixCompositeDispatch;
+
+    struct TTopSortDispatch {
+        int64_t operator()(
+            TRowSet* state, TRowSet* batch, int64_t* rowIds, int64_t* work,
+            uint32_t* counts, int64_t n, bool sortInput, uint8_t* pickSrc,
+            uint32_t* pickIdx, int64_t limit, TRowSet* output) const;
+
+        explicit operator bool() const
+        {
+            return Slot != nullptr;
+        }
+
+        std::shared_ptr<TKernelSlot> Slot;
+        uint32_t Kernel = 0;
+    };
+
+    struct THeapTopKDispatch {
+        int64_t operator()(
+            TRowSet* store, int64_t* rowIds, int64_t size, int64_t limit) const;
+
+        explicit operator bool() const
+        {
+            return Slot != nullptr;
+        }
+
+        std::shared_ptr<TKernelSlot> Slot;
+        uint32_t Kernel = 0;
+    };
+
 
     // sizeof(HashTable) per modules/qumirdb.cpp's layout - callers of
     // CompileAggregate must allocate a zero-initialized buffer this large
@@ -573,7 +601,7 @@ public:
     TFilterDispatch CompileFilter(const NKernel::TOperatorKernelSpec& spec);
 
     // Entry points follow RuntimeFilterKernelEntrypoints.
-    std::shared_ptr<TKernelSlot> CompileRuntimeFilter();
+    TRuntimeFilterKernel CompileRuntimeFilter();
 
     // Compiles a project kernel for the computed (non-ident) projections.
     // computedExprs and computedTypes are parallel; computedTypes[k] is the
@@ -693,5 +721,17 @@ TKernelCompiler::TProjectDispatch BindProject(
 TKernelCompiler::TAggregateHashDispatch BindAggregateHash(
     std::shared_ptr<TKernelSlot> slot,
     std::vector<int64_t> keyColumns);
+
+// Bind a sort, top-sort or heap top-k kernel from its slot; the Compile*
+// functions end with these calls. BindSortRadixComposite also binds the
+// nullable sort and the window kernel.
+TKernelCompiler::TSortRadixCompositeDispatch BindSortRadixComposite(
+    std::shared_ptr<TKernelSlot> slot);
+
+TKernelCompiler::TTopSortDispatch BindTopSort(
+    std::shared_ptr<TKernelSlot> slot);
+
+TKernelCompiler::THeapTopKDispatch BindHeapTopK(
+    std::shared_ptr<TKernelSlot> slot);
 
 } // namespace NQdb

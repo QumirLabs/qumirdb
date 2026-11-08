@@ -2710,7 +2710,9 @@ private:
         std::shared_ptr<IRuntimeFilterProbe> filterProbe;
         if (const auto& runtimeFilter = join.RuntimeFilter()) {
             if (!RuntimeContext_->RuntimeFilterKernels) {
-                RuntimeContext_->RuntimeFilterKernels = compiler.CompileRuntimeFilter();
+                const auto kernel = compiler.CompileRuntimeFilter();
+                RuntimeContext_->RuntimeFilterKernels = kernel.Slot;
+                RuntimeContext_->RuntimeFilterKernel = kernel.Kernel;
             }
             if (!RuntimeFilterBindings_) {
                 RuntimeFilterBindings_ =
