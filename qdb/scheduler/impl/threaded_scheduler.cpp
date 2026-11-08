@@ -66,6 +66,15 @@ bool TThreadedScheduler::Run(std::string* error) {
     return true;
 }
 
+void TThreadedScheduler::Cancel() {
+    bool expected = false;
+    if (Failed_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+        std::lock_guard lock(ErrorMutex_);
+        Error_ = "scheduler cancelled";
+    }
+    WorkAvailable_.release(static_cast<ptrdiff_t>(WorkerCount_));
+}
+
 void TThreadedScheduler::Schedule(TTaskNode* node) {
     if (!node) {
         return;

@@ -2,6 +2,7 @@
 #include <chrono>
 #include <memory>
 #include <optional>
+#include <thread>
 
 #include <coroio/actors/actorsystem.hpp>
 #include <qdbd/messages.h>
@@ -117,7 +118,15 @@ struct TComputeActor : public IBehaviorActor {
             ctx->Self(), ctx->Self());
     }
 
+    void StopScheduler() {
+        if (SchedulerThread.joinable()) {
+            Scheduler->Cancel();
+            SchedulerThread.join();
+        }
+    }
+
     void ReleaseSlot() {
+        StopScheduler();
         if (Resources) {
             Resources->UsedSlots.fetch_sub(1, std::memory_order_relaxed);
             Resources.reset();
@@ -155,6 +164,10 @@ struct TComputeActor : public IBehaviorActor {
         SchedulerSchannel = std::make_unique<NScheduler::TSchedulerChannel>(
             *Scheduler
         );
+        // Run() blocks until the graph's root finishes or the scheduler is cancelled.
+        SchedulerThread = std::thread([this] {
+            Scheduler->Run();
+        });
         ScheduleStatus(ctx);
         NotificationTask = [&](TActorContext::TPtr ctx) -> TVoidSuspendedTask {
             while (true) {
@@ -237,6 +250,7 @@ struct TComputeActor : public IBehaviorActor {
     std::unique_ptr<NScheduler::TThreadedScheduler> Scheduler;
     std::unordered_map<uint64_t, std::tuple<std::shared_ptr<NScheduler::TRemoteSourceState>, NScheduler::TTaskNode*>> SourceStates;
     std::unordered_map<uint64_t, std::tuple<std::shared_ptr<NScheduler::TRemoteSinkState>, NScheduler::TTaskNode*>> SinkStates;
+    std::thread SchedulerThread;
     TVoidSuspendedTask NotificationTask;
     TActorId QueryActorId;
     std::optional<NNet::NActors::TEvent> StatusEvent;
