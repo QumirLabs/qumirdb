@@ -16,6 +16,7 @@ namespace {
 using NQdb::TColumn;
 using NQdb::TRowSet;
 using NQdb::TValueLayout;
+using NQdb::NRemote::TComputeError;
 using NQdb::NRemote::TDataChunk;
 using NQdb::NRemote::TSpawnComputeActorResponse;
 
@@ -311,6 +312,22 @@ void DeserializeFromStream(TSpawnComputeActorResponse& message, std::istringstre
         result.ActorIds.emplace_back(node, actor, cookie);
     }
     result.Error = reader.Bytes(reader.Value<uint32_t>());
+    reader.Finish();
+    message = std::move(result);
+}
+
+template<>
+void SerializeToStream(const TComputeError& message, std::ostringstream& output) {
+    TWriter writer(output);
+    writer.Value<uint32_t>(ByteSize(message.Message.size(), 1));
+    writer.Bytes(message.Message.data(), message.Message.size());
+}
+
+template<>
+void DeserializeFromStream(TComputeError& message, std::istringstream& input) {
+    TReader reader(input);
+    TComputeError result;
+    result.Message = reader.Bytes(reader.Value<uint32_t>());
     reader.Finish();
     message = std::move(result);
 }

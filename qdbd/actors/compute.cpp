@@ -40,8 +40,8 @@ struct TComputeActor : public IBehaviorActor {
             Parent->OnDataConfirm(message, ctx);
         }
 
-        void Receive(TFinish&& message, TBlob, TActorContext::TPtr) {
-            Parent->OnFinish(message);
+        void Receive(TFinish&& message, TBlob, TActorContext::TPtr ctx) {
+            Parent->OnFinish(message, ctx);
         }
 
         void Receive(TWakeUp&&, TBlob, TActorContext::TPtr ctx) {
@@ -98,6 +98,14 @@ struct TComputeActor : public IBehaviorActor {
         }
     }
 
+    void SendError(TActorContext::TPtr& ctx, std::string message) {
+        if (!QueryActorId) {
+            std::cerr << "compute actor: " << message << "\n";
+            return;
+        }
+        ctx->Send<TComputeError>(QueryActorId, TComputeError{.Message = std::move(message)});
+    }
+
     void SendStatus(TActorContext::TPtr& ctx) {
         ctx->Send<TComputeStatus>(QueryActorId, TComputeStatus{});
         ScheduleStatus(ctx);
@@ -122,11 +130,11 @@ struct TComputeActor : public IBehaviorActor {
     }
 
     void StartGraph(TTaskGraphMessage&& message, TActorContext::TPtr ctx) {
+        QueryActorId = ctx->Sender();
         if (auto error = NScheduler::ValidateEndpoints(message.Graph, message.Endpoints); !error.empty()) {
-            std::cerr << "compute actor: cannot start graph: " << error << "\n";
+            SendError(ctx, "cannot start graph: " + error);
             return;
         }
-        QueryActorId = ctx->Sender();
         Graph = message.Graph;
         Endpoints = std::move(message.Endpoints);
         ActorChannel = std::make_unique<NScheduler::TActorNotificationChannel>(ctx->CreateNotifier());
@@ -159,25 +167,25 @@ struct TComputeActor : public IBehaviorActor {
     void OnDataChunk(TDataChunk&& chunk, TActorContext::TPtr& ctx) {
         auto it = SourceStates.find(chunk.DstTaskId);
         if (it == SourceStates.end()) {
-            // TODO: protocol errors
+            SendError(ctx, "dropped chunk " + std::to_string(chunk.Seq) + " for unknown task "
+                + std::to_string(chunk.DstTaskId));
+            Release(&chunk.RowSet);
             return;
         }
         auto& [state, node] = it->second;
         if (!state->Push(chunk.Seq, std::move(chunk.RowSet))) {
-            // TODO: protocol errors
-            std::cerr << "compute actor: dropped chunk " << chunk.Seq << " for task " << chunk.DstTaskId
-                << ": out of order or beyond the window\n";
+            SendError(ctx, "dropped chunk " + std::to_string(chunk.Seq) + " for task "
+                + std::to_string(chunk.DstTaskId) + ": out of order or beyond the window");
             Release(&chunk.RowSet);
             return;
         }
         Scheduler->Schedule(node);
     }
 
-    void OnFinish(const TFinish& finish) {
+    void OnFinish(const TFinish& finish, TActorContext::TPtr& ctx) {
         auto it = SourceStates.find(finish.DstTaskId);
         if (it == SourceStates.end()) {
-            // TODO: protocol errors
-            std::cerr << "compute actor: dropped finish for task " << finish.DstTaskId << "\n";
+            SendError(ctx, "dropped finish for unknown task " + std::to_string(finish.DstTaskId));
             return;
         }
         auto& [state, node] = it->second;
@@ -188,9 +196,8 @@ struct TComputeActor : public IBehaviorActor {
     void OnDataConfirm(const TDataConfirm& confirm, TActorContext::TPtr& ctx) {
         auto it = SinkStates.find(confirm.SinkId);
         if (it == SinkStates.end() || !std::get<0>(it->second)->OnConfirm(confirm.LastApplied, ctx)) {
-            // TODO: protocol errors
-            std::cerr << "compute actor: dropped confirm " << confirm.LastApplied
-                << " for task " << confirm.SinkId << "\n";
+            SendError(ctx, "dropped confirm " + std::to_string(confirm.LastApplied)
+                + " for task " + std::to_string(confirm.SinkId));
             return;
         }
         // The drain may have freed outbox space for a waiting sink task.

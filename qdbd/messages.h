@@ -67,6 +67,12 @@ struct TComputeStatus {
     static constexpr NNet::NActors::TMessageId MessageId = 204;
 };
 
+// Compute actor -> query actor: a protocol or startup error; the query actor decides what to do.
+struct TComputeError {
+    static constexpr NNet::NActors::TMessageId MessageId = 205;
+    std::string Message;
+};
+
 enum class ERemoteEndpointKind {
     Source,
     Sink,
@@ -118,6 +124,7 @@ inline void RegisterMessages(TMessagesFactory& factory) {
     factory.template RegisterSerializer<TFinish>();
     factory.template RegisterSerializer<TDataConfirm>();
     factory.template RegisterSerializer<TComputeStatus>();
+    factory.template RegisterSerializer<TComputeError>();
     factory.template RegisterSerializer<TExecuteQuery>();
     factory.template RegisterSerializer<TExecuteQueryResponse>();
 }

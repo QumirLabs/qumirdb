@@ -893,6 +893,22 @@ TEST(DistributedSerialization, AllocationErrorRoundTrip) {
     EXPECT_THROW(DeserializeFromStream(decoded, badLength), std::runtime_error);
 }
 
+TEST(DistributedSerialization, ComputeErrorRoundTrip) {
+    TComputeError original{.Message = std::string("bad\0graph", 9)};
+    const auto bytes = Encode(original);
+    std::istringstream input(bytes);
+    TComputeError decoded;
+    DeserializeFromStream(decoded, input);
+    EXPECT_EQ(decoded.Message, original.Message);
+    for (size_t size = 0; size < bytes.size(); ++size) {
+        SCOPED_TRACE(size);
+        std::istringstream truncated(bytes.substr(0, size));
+        EXPECT_THROW(DeserializeFromStream(decoded, truncated), std::runtime_error);
+    }
+    std::istringstream trailing(bytes + 'x');
+    EXPECT_THROW(DeserializeFromStream(decoded, trailing), std::runtime_error);
+}
+
 TEST(DistributedAllocation, NoNodesIsAnExplicitErrorAndZeroCountSucceeds) {
     TTestCluster cluster;
     cluster.Spawn(1);
@@ -1082,6 +1098,19 @@ TEST(DistributedAllocation, LocalSchedulerAllowsOversubscription) {
 
 namespace {
 
+void CountDestroy(TRowSet* rowSet) {
+    static_cast<std::atomic<int>*>(rowSet->Private)->fetch_add(1, std::memory_order_relaxed);
+}
+
+TRowSet CountedRows(int64_t rows, std::atomic<int>* destroyed) {
+    return TRowSet{
+        .RowCount = rows,
+        .Destroy = CountDestroy,
+        .Private = destroyed,
+        .RefCount = 1,
+    };
+}
+
 // source -> sink, both external: ids 2 and 1, like the pipeline tests above.
 struct TTwoEndpointGraph {
     // The sealed graph points into the task graph.
@@ -1110,17 +1139,23 @@ struct TTwoEndpointGraph {
 // Plays the query actor: counts what the compute actor reports.
 class TOrchestratorProbe : public IActor {
 public:
-    explicit TOrchestratorProbe(int& statuses)
+    TOrchestratorProbe(int& statuses, std::vector<std::string>& errors)
         : Statuses_(statuses)
+        , Errors_(errors)
     {}
 
-    void Receive(TMessageId messageId, TBlob, TActorContext::TPtr) override {
-        ASSERT_EQ(messageId, TComputeStatus::MessageId);
-        ++Statuses_;
+    void Receive(TMessageId messageId, TBlob blob, TActorContext::TPtr) override {
+        if (messageId == TComputeStatus::MessageId) {
+            ++Statuses_;
+        } else {
+            ASSERT_EQ(messageId, TComputeError::MessageId);
+            Errors_.push_back(ReadMessage<TComputeError>(blob).Message);
+        }
     }
 
 private:
     int& Statuses_;
+    std::vector<std::string>& Errors_;
 };
 
 } // namespace
@@ -1132,7 +1167,8 @@ TEST(DistributedAllocation, ComputeActorSendsPeriodicStatus) {
     TTwoEndpointGraph graph;
     TTestCluster cluster;
     int statuses = 0;
-    const auto probe = cluster.Follower.Register(std::make_unique<TOrchestratorProbe>(statuses));
+    std::vector<std::string> errors;
+    const auto probe = cluster.Follower.Register(std::make_unique<TOrchestratorProbe>(statuses, errors));
     const auto actor = cluster.Follower.Register(std::unique_ptr<IActor>(CreateComputeActor(resources)));
     for (int i = 0; i < 8; ++i) {
         cluster.Pump();
@@ -1156,6 +1192,48 @@ TEST(DistributedAllocation, ComputeActorSendsPeriodicStatus) {
         cluster.Pump();
     }
     EXPECT_EQ(statuses, stopped);
+    EXPECT_TRUE(errors.empty());
+}
+
+TEST(DistributedAllocation, ComputeActorReportsErrorsToTheQueryActor) {
+    auto resources = std::make_shared<TRuntimeResources>();
+    // Declared first: the compute actor's graph copy points into it until the cluster is gone.
+    TTwoEndpointGraph graph;
+    TTestCluster cluster;
+    int statuses = 0;
+    std::vector<std::string> errors;
+    const auto probe = cluster.Follower.Register(std::make_unique<TOrchestratorProbe>(statuses, errors));
+    const auto actor = cluster.Follower.Register(std::unique_ptr<IActor>(CreateComputeActor(resources)));
+
+    auto bad = graph.Endpoints;
+    bad.push_back({.Id = 7, .Kind = ERemoteEndpointKind::Sink});
+    cluster.Follower.Send<TTaskGraphMessage>(probe, actor, TTaskGraphMessage{
+        .Graph = graph.Graph, .Endpoints = bad});
+    cluster.Pump();
+    ASSERT_EQ(errors.size(), 1);
+    EXPECT_NE(errors[0].find("no external node with id 7"), std::string::npos);
+
+    cluster.Follower.Send<TTaskGraphMessage>(probe, actor, TTaskGraphMessage{
+        .Graph = graph.Graph, .Endpoints = graph.Endpoints});
+    cluster.Pump();
+    EXPECT_EQ(errors.size(), 1);
+
+    // Unknown tasks: a chunk (its row set must be released), a finish and a confirm.
+    std::atomic<int> destroyed = 0;
+    cluster.Follower.Send<TDataChunk>(probe, actor, TDataChunk{
+        .DstTaskId = 99, .Seq = 1, .RowSet = CountedRows(3, &destroyed)});
+    cluster.Follower.Send<TFinish>(probe, actor, TFinish{.DstTaskId = 99});
+    cluster.Follower.Send<TDataConfirm>(probe, actor, TDataConfirm{.SinkId = 99, .LastApplied = 1});
+    cluster.Pump();
+    ASSERT_EQ(errors.size(), 4);
+    EXPECT_NE(errors[1].find("unknown task 99"), std::string::npos);
+    EXPECT_NE(errors[2].find("finish"), std::string::npos);
+    EXPECT_NE(errors[3].find("confirm"), std::string::npos);
+    EXPECT_EQ(destroyed.load(), 1);
+
+    // A started graph keeps a context in the actor: stop it before the system goes.
+    cluster.Follower.Send<TPoison>(probe, actor, TPoison{});
+    cluster.Pump();
 }
 
 TEST(DistributedAllocation, ComputeActorReleasesItsCounterExactlyOnce) {
@@ -1238,19 +1316,6 @@ public:
         throw std::logic_error("unused");
     }
 };
-
-void CountDestroy(TRowSet* rowSet) {
-    static_cast<std::atomic<int>*>(rowSet->Private)->fetch_add(1, std::memory_order_relaxed);
-}
-
-TRowSet CountedRows(int64_t rows, std::atomic<int>* destroyed) {
-    return TRowSet{
-        .RowCount = rows,
-        .Destroy = CountDestroy,
-        .Private = destroyed,
-        .RefCount = 1,
-    };
-}
 
 struct TProducerState {
     int64_t Next = 1;
