@@ -5,15 +5,28 @@
 #include <qumir/parser/ast.h>
 
 #include <cstddef>
+#include <functional>
 #include <span>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace NQdb {
 
 // Dedup key for a whole kernel: identical AST + entrypoints compile once.
 std::string MakeKernelDedupKey(const TGeneratedKernel& kernel);
+
+struct TKernelDedup {
+    std::vector<TGeneratedKernel*> Unique;
+    // Every kept kernel with the index of its unique kernel.
+    std::vector<std::pair<TGeneratedKernel*, size_t>> Bindings;
+};
+
+// Groups kernels by MakeKernelDedupKey; kernels for which `skip` is true are left out.
+TKernelDedup DeduplicateKernels(
+    std::span<TGeneratedKernel> kernels,
+    const std::function<bool(const TGeneratedKernel&)>& skip);
 
 struct TFusedProgram {
     NQumir::NAst::TExprPtr Program;
