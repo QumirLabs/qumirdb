@@ -39,38 +39,29 @@ TRemoteSinkState::~TRemoteSinkState() {
 }
 
 ETaskResult TRemoteSinkState::Write(const TRowSet& rowSet) {
-    if (!NotifyPending) {
-        // TSinkTask releases its reference after Write. The outbox copy owns the
-        // one taken here and is released by whoever drains it.
-        auto& task = const_cast<TRowSet&>(rowSet);
-        Retain(&task);
-        TRowSet copy = task;
-        copy.RefCount = 1;
-        if (!Outbox.TryPush(std::move(copy))) {
-            --task.RefCount;
-            return ETaskResult::WAITING;
-        }
-        ++Written;
+    // TSinkTask releases its reference after Write. The outbox copy owns the
+    // one taken here and is released by whoever drains it.
+    auto& task = const_cast<TRowSet&>(rowSet);
+    Retain(&task);
+    TRowSet copy = task;
+    copy.RefCount = 1;
+    if (!Outbox.TryPush(std::move(copy))) {
+        --task.RefCount;
+        return ETaskResult::WAITING;
     }
+    ++Written;
     // Pairs with the fence in Drain: the push must be visible before Queued is read.
     std::atomic_thread_fence(std::memory_order_seq_cst);
     if (!Queued.exchange(true)) {
-        if (!ActorChannel.Notify(this)) {
-            // The same row set comes back; do not push it twice.
-            Queued.store(false);
-            NotifyPending = true;
-            return ETaskResult::WAITING;
-        }
+        ActorChannel.Notify(this);
     }
-    NotifyPending = false;
     return ETaskResult::OK;
 }
 
 ETaskResult TRemoteSinkState::Finish() {
     InputFinished.store(true);
-    if (!Queued.exchange(true) && !ActorChannel.Notify(this)) {
-        Queued.store(false);
-        return ETaskResult::WAITING;
+    if (!Queued.exchange(true)) {
+        ActorChannel.Notify(this);
     }
     return ETaskResult::OK;
 }
@@ -192,11 +183,8 @@ bool TRemoteSourceState::Pop(TRowSet& rowSet) {
     }
     // Seqs arrive without gaps, so the pop count is the Seq of this chunk.
     Applied.fetch_add(1);
-    // A state is queued at most once, so this fails only with more source
-    // states than the queue holds; waiting would stall the peer for good.
-    if (!Queued.exchange(true) && !ActorChannel.Notify(this)) {
-        Release(&rowSet);
-        throw std::runtime_error("remote source: the actor notification queue is full");
+    if (!Queued.exchange(true)) {
+        ActorChannel.Notify(this);
     }
     return true;
 }

@@ -1363,8 +1363,8 @@ struct TRemotePipeline {
 void RunRemotePipeline(const TRemotePipeline& options) {
     using namespace NQdb::NScheduler;
     std::atomic<int> destroyed = 0;
-    TActorNotificationChannel channelA(std::make_unique<TFakeNotifier>());
-    TActorNotificationChannel channelB(std::make_unique<TFakeNotifier>());
+    TActorNotificationChannel channelA(std::make_unique<TFakeNotifier>(), 1, 1);
+    TActorNotificationChannel channelB(std::make_unique<TFakeNotifier>(), 1, 1);
 
     auto [sinkCode, sinkState] = MakeRemoteSink(
         1, TActorId{}, 2, {}, channelA, options.OutboxCapacity, options.Window);
@@ -1524,7 +1524,7 @@ TEST(DistributedScheduler, RemoteTasksDeliverEverythingWithSmallWindows) {
 TEST(DistributedScheduler, RemoteSinkKeepsAtMostWindowChunksUnconfirmed) {
     using namespace NQdb::NScheduler;
     std::atomic<int> destroyed = 0;
-    TActorNotificationChannel channel(std::make_unique<TFakeNotifier>());
+    TActorNotificationChannel channel(std::make_unique<TFakeNotifier>(), 2, 2);
     auto [code, state] = MakeRemoteSink(1, TActorId{}, 2, {}, channel, 8, 2);
     std::vector<uint64_t> sent;
     auto send = [&](uint64_t seq, TRowSet&& rowSet) {
@@ -1572,7 +1572,7 @@ TEST(DistributedScheduler, RemoteSinkKeepsAtMostWindowChunksUnconfirmed) {
 TEST(DistributedScheduler, RemoteSinkFinishesAfterItsLastChunk) {
     using namespace NQdb::NScheduler;
     std::atomic<int> destroyed = 0;
-    TActorNotificationChannel channel(std::make_unique<TFakeNotifier>());
+    TActorNotificationChannel channel(std::make_unique<TFakeNotifier>(), 2, 2);
     auto [code, state] = MakeRemoteSink(1, TActorId{}, 2, {}, channel, 4, 1);
     std::vector<uint64_t> events; // 0 is the finish
     auto send = [&](uint64_t seq, TRowSet&& rowSet) {
@@ -1617,7 +1617,7 @@ TEST(DistributedScheduler, RemoteSinkNeverStrandsARowAgainstConcurrentDrain) {
     using namespace NQdb::NScheduler;
     constexpr uint64_t total = 20000;
     std::atomic<int> destroyed = 0;
-    TActorNotificationChannel channel(std::make_unique<TFakeNotifier>());
+    TActorNotificationChannel channel(std::make_unique<TFakeNotifier>(), 2, 2);
     auto [code, state] = MakeRemoteSink(1, TActorId{}, 2, {}, channel, 4, 1 << 20);
     std::thread worker([&] {
         for (uint64_t i = 0; i < total; ++i) {
@@ -1652,10 +1652,40 @@ TEST(DistributedScheduler, RemoteSinkNeverStrandsARowAgainstConcurrentDrain) {
     EXPECT_EQ(sent, total);
 }
 
+// The queues are sized by the number of states, so a Write or Finish never fails to wake the actor.
+TEST(DistributedScheduler, NotificationChannelHoldsEveryState) {
+    using namespace NQdb::NScheduler;
+    std::atomic<int> destroyed = 0;
+    TActorNotificationChannel channel(std::make_unique<TFakeNotifier>(), 3, 3);
+    std::vector<std::shared_ptr<TRemoteSinkState>> sinks;
+    std::vector<std::shared_ptr<TRemoteSourceState>> sources;
+    for (uint64_t id = 1; id <= 3; ++id) {
+        auto [sinkCode, sinkState] = MakeRemoteSink(id, TActorId{}, 0, {}, channel);
+        auto rowSet = CountedRows(1, &destroyed);
+        EXPECT_EQ(sinkCode->Write(sinkState.get(), rowSet), ETaskResult::OK);
+        Release(&rowSet);
+        sinks.push_back(sinkState);
+        auto [sourceCode, sourceState] = MakeRemoteSource(id, TActorId{}, 0, channel);
+        sourceState->Push(1, CountedRows(1, &destroyed));
+        TRowSet out;
+        EXPECT_EQ(sourceCode->Next(sourceState.get(), out), ETaskResult::OK);
+        Release(&out);
+        sources.push_back(sourceState);
+    }
+    TRemoteSinkState* sink = nullptr;
+    TRemoteSourceState* source = nullptr;
+    for (int i = 0; i < 3; ++i) {
+        EXPECT_TRUE(channel.SinkQueue().TryPop(sink));
+        EXPECT_TRUE(channel.SourceQueue().TryPop(source));
+    }
+    EXPECT_FALSE(channel.SinkQueue().TryPop(sink));
+    EXPECT_FALSE(channel.SourceQueue().TryPop(source));
+}
+
 TEST(DistributedScheduler, RemoteSourceConfirmsConsumedChunks) {
     using namespace NQdb::NScheduler;
     std::atomic<int> destroyed = 0;
-    TActorNotificationChannel channel(std::make_unique<TFakeNotifier>());
+    TActorNotificationChannel channel(std::make_unique<TFakeNotifier>(), 2, 2);
     auto [code, state] = MakeRemoteSource(2, TActorId{}, 1, channel, 2);
     auto push = [&](uint64_t seq) {
         auto rowSet = CountedRows(seq, &destroyed);
@@ -1703,7 +1733,7 @@ TEST(DistributedScheduler, RemoteSourceConfirmsConsumedChunks) {
 
 TEST(DistributedScheduler, ValidatesRemoteEndpoints) {
     using namespace NQdb::NScheduler;
-    TActorNotificationChannel channel(std::make_unique<TFakeNotifier>());
+    TActorNotificationChannel channel(std::make_unique<TFakeNotifier>(), 2, 2);
     auto [sinkCode, sinkState] = MakeRemoteSink(1, TActorId{}, 2, {}, channel);
     auto [sourceCode, sourceState] = MakeRemoteSource(2, TActorId{}, 1, channel);
     auto connection = std::make_unique<TOneToOneConnection>();

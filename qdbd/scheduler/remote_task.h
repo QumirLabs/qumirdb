@@ -10,6 +10,7 @@
 #include <qdbd/messages.h>
 
 #include <algorithm>
+#include <cassert>
 #include <span>
 #include <string>
 
@@ -23,13 +24,14 @@ struct TRemoteSinkState;
 struct TRemoteSourceState;
 
 // Wakes the ComputeActor; carries the sink states that have rows in their outbox
-// and the source states that have consumed chunks to confirm.
+// and the source states that have consumed chunks to confirm. A state is queued
+// at most once, so queues sized by the number of states never fill up.
 class TActorNotificationChannel {
 public:
-    TActorNotificationChannel(std::unique_ptr<NNet::INotifier> notifier)
+    TActorNotificationChannel(std::unique_ptr<NNet::INotifier> notifier, size_t sinks, size_t sources)
         : Notifier(std::move(notifier))
-        , SinkReady(1024) // TODO: right capacity?
-        , SourceReady(1024)
+        , SinkReady(std::max<size_t>(sinks, 2)) // 2 is the queue minimum
+        , SourceReady(std::max<size_t>(sources, 2))
     { }
 
     TMPSCQueue<TRemoteSinkState*>& SinkQueue() {
@@ -40,12 +42,12 @@ public:
         return SourceReady;
     }
 
-    bool Notify(TRemoteSinkState* state) {
-        return Push(SinkReady, state);
+    void Notify(TRemoteSinkState* state) {
+        Push(SinkReady, state);
     }
 
-    bool Notify(TRemoteSourceState* state) {
-        return Push(SourceReady, state);
+    void Notify(TRemoteSourceState* state) {
+        Push(SourceReady, state);
     }
 
     NNet::TFuture<void> Wait() {
@@ -54,12 +56,10 @@ public:
 
 private:
     template <class TState>
-    bool Push(TMPSCQueue<TState*>& queue, TState* state) {
-        if (queue.TryPush(std::move(state))) {
-            Notifier->Notify();
-            return true;
-        }
-        return false;
+    void Push(TMPSCQueue<TState*>& queue, TState* state) {
+        [[maybe_unused]] const bool pushed = queue.TryPush(std::move(state));
+        assert(pushed);
+        Notifier->Notify();
     }
 
     std::unique_ptr<NNet::INotifier> Notifier;
@@ -82,9 +82,9 @@ struct TRemoteSinkState {
         size_t window = 2);
     ~TRemoteSinkState();
 
-    // TSinkCode::TWrite: OK or WAITING (outbox or notification channel is full).
+    // TSinkCode::TWrite: OK or WAITING (the outbox is full).
     ETaskResult Write(const TRowSet& rowSet);
-    // TSinkCode::TFinish: OK or WAITING (notification channel is full).
+    // TSinkCode::TFinish
     ETaskResult Finish();
 
     // ComputeActor side. Passes queued row sets and their Seq to `send`, which
@@ -152,7 +152,6 @@ struct TRemoteSinkState {
     const size_t Window;
     std::atomic<bool> Queued = false;
     std::atomic<bool> InputFinished = false;
-    bool NotifyPending = false; // worker only: the row is in the outbox, the notification failed
     uint64_t Written = 0; // worker only until InputFinished: rows pushed into the outbox
     // Actor only: the last sent and the last confirmed Seq.
     uint64_t Sent = 0;

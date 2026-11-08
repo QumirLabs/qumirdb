@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <iostream>
 #include <chrono>
 #include <memory>
@@ -168,7 +169,11 @@ struct TComputeActor : public IBehaviorActor {
         }
         Graph = message.Graph;
         Endpoints = std::move(message.Endpoints);
-        ActorChannel = std::make_unique<NScheduler::TActorNotificationChannel>(ctx->CreateNotifier());
+        const auto sources = static_cast<size_t>(std::ranges::count_if(Endpoints, [](const auto& endpoint) {
+            return endpoint.Kind == ERemoteEndpointKind::Source;
+        }));
+        ActorChannel = std::make_unique<NScheduler::TActorNotificationChannel>(
+            ctx->CreateNotifier(), Endpoints.size() - sources, sources);
         for (const auto& endpoint : Endpoints) {
             const bool isSource = endpoint.Kind == ERemoteEndpointKind::Source;
             auto* node = Graph.ExternalNode(endpoint.Id);
