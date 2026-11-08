@@ -169,12 +169,13 @@ struct TComputeActor : public IBehaviorActor {
             Scheduler->Run();
         });
         ScheduleStatus(ctx);
-        NotificationTask = [&](TActorContext::TPtr ctx) -> TVoidSuspendedTask {
+        // The closure of a coroutine lambda dies after this statement: no captures.
+        NotificationTask = [](TComputeActor* self, TActorContext::TPtr ctx) -> TVoidSuspendedTask {
             while (true) {
-                co_await ActorChannel->Wait();
-                ProcessNotifications(ctx);
+                co_await self->ActorChannel->Wait();
+                self->ProcessNotifications(ctx);
             }
-        }(std::move(ctx));
+        }(this, std::move(ctx));
     }
 
     void OnDataChunk(TDataChunk&& chunk, TActorContext::TPtr& ctx) {
