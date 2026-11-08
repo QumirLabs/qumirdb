@@ -1,6 +1,7 @@
 #pragma once
 
 #include <qdb/exec/aggregate_exec.h>
+#include <qdb/exec/filter_exec.h>
 #include <qdb/exec/join_exec.h>
 #include <qdb/exec/project_exec.h>
 #include <qdb/exec/sort_exec.h>
@@ -27,6 +28,19 @@ namespace NQdb {
 struct TUnaryRuntimeProcess {
     TUnaryStreamProcess Process;
     NQumir::NAst::TTypePtr OutputType;
+};
+
+// A runtime process with the plan data to rebuild it from a kernel slot.
+struct TFilterRuntimeProcess {
+    TUnaryStreamProcess Process;
+    NQumir::NAst::TTypePtr OutputType;
+    TFilterPlanData Plan;
+};
+
+struct TProjectRuntimeProcess {
+    TUnaryStreamProcess Process;
+    NQumir::NAst::TTypePtr OutputType;
+    TProjectPlanData Plan;
 };
 
 struct TFilterColumnPlan {
@@ -161,12 +175,12 @@ bool RowJoinTableServes(
     EJoinBuildSide buildSide);
 std::string_view JoinBuildSideName(EJoinBuildSide side);
 
-TUnaryRuntimeProcess BuildFilterRuntimeProcess(
+TFilterRuntimeProcess BuildFilterRuntimeProcess(
     TFilterOperator& filter,
     const NQumir::NAst::TTypePtr& inputType,
     TKernelCompilerOptions options);
 
-TUnaryRuntimeProcess BuildProjectRuntimeProcess(
+TProjectRuntimeProcess BuildProjectRuntimeProcess(
     TProjectOperator& project,
     const NQumir::NAst::TTypePtr& inputType,
     TKernelCompilerOptions options);
