@@ -2012,6 +2012,91 @@ TEST(DistributedScheduler, TwoComputeActorsMoveRowsThroughRemoteTasks) {
     EXPECT_GE(destroyed.load(), total);
 }
 
+// The senders drop their graphs right after sending: only GraphOwner keeps them alive.
+TEST(DistributedScheduler, ComputeActorsKeepGraphsAliveThroughGraphOwner) {
+    using namespace NQdb::NScheduler;
+    constexpr int64_t total = 200;
+    std::atomic<int> destroyed = 0;
+    TProducerState producerState{.Total = total};
+    TSmokeCollector collector;
+    auto producerCode = std::make_shared<TSourceCode>([&](void* state, TRowSet& rowSet) {
+        auto* producer = static_cast<TProducerState*>(state);
+        if (producer->Next > producer->Total) {
+            return ETaskResult::FINISHED;
+        }
+        rowSet = CountedRows(producer->Next++, &destroyed);
+        return ETaskResult::OK;
+    });
+    auto collectorCode = std::make_shared<TSinkCode>(
+        [&](void*, const TRowSet& rowSet) {
+            std::lock_guard lock(collector.Mutex);
+            collector.Rows.push_back(rowSet.RowCount);
+            return ETaskResult::OK;
+        },
+        [&](void*) {
+            collector.Finished.store(true);
+            return ETaskResult::OK;
+        });
+
+    auto resources = std::make_shared<TRuntimeResources>();
+    resources->Scheduler.WorkerCount = 2;
+    TTestCluster cluster;
+    std::map<std::string, int> statuses;
+    std::vector<std::string> errors;
+    const auto query = cluster.Follower.Register(std::make_unique<TReportProbe>(statuses, errors));
+    const auto ca1 = cluster.Follower.Register(std::unique_ptr<IActor>(CreateComputeActor(resources)));
+    const auto ca2 = cluster.Follower.Register(std::unique_ptr<IActor>(CreateComputeActor(resources)));
+
+    {
+        auto graph1 = std::make_shared<TTaskGraph>();
+        auto toRemoteSink = std::make_unique<TOneToOneConnection>();
+        auto* toRemoteSinkPtr = toRemoteSink.get();
+        toRemoteSinkPtr->SetRowLayouts({TValueLayout{.Width = 8}});
+        auto& producer = graph1->AddOwnedNode(std::make_unique<TSourceTask>(
+            producerCode, std::shared_ptr<void>(&producerState, [](void*) {}),
+            TOutputPort{.Connection = toRemoteSinkPtr}));
+        auto& remoteSink = graph1->AddOwnedNode(std::make_unique<TSinkTask>(
+            nullptr, nullptr, TInputPort{.Connection = toRemoteSinkPtr}));
+        graph1->AddOwnedEdge(producer, remoteSink, std::move(toRemoteSink));
+        graph1->MarkExternal(remoteSink, 1);
+        cluster.Follower.Send<TTaskGraphMessage>(query, ca1, TTaskGraphMessage{
+            .Graph = graph1->Seal(),
+            .GraphOwner = graph1,
+            .Endpoints = {{.Id = 1, .Kind = ERemoteEndpointKind::Sink, .PeerActor = ca2, .PeerTaskId = 2}}});
+
+        auto graph2 = std::make_shared<TTaskGraph>();
+        auto fromRemoteSource = std::make_unique<TOneToOneConnection>();
+        auto* fromRemoteSourcePtr = fromRemoteSource.get();
+        auto& remoteSource = graph2->AddOwnedNode(std::make_unique<TSourceTask>(
+            nullptr, nullptr, TOutputPort{.Connection = fromRemoteSourcePtr}));
+        auto& localSink = graph2->AddOwnedNode(std::make_unique<TSinkTask>(
+            collectorCode, nullptr, TInputPort{.Connection = fromRemoteSourcePtr}));
+        graph2->AddOwnedEdge(remoteSource, localSink, std::move(fromRemoteSource));
+        graph2->MarkExternal(remoteSource, 2);
+        cluster.Follower.Send<TTaskGraphMessage>(query, ca2, TTaskGraphMessage{
+            .Graph = graph2->Seal(),
+            .GraphOwner = graph2,
+            .Endpoints = {{.Id = 2, .Kind = ERemoteEndpointKind::Source, .PeerActor = ca1, .PeerTaskId = 1}}});
+    }
+
+    const auto deadline = NNet::TClock::now() + std::chrono::seconds(60);
+    while (!collector.Finished.load() && errors.empty() && NNet::TClock::now() < deadline) {
+        cluster.Pump();
+    }
+    EXPECT_TRUE(collector.Finished.load());
+    EXPECT_TRUE(errors.empty());
+
+    cluster.Follower.Send<TPoison>(query, ca1, TPoison{});
+    cluster.Follower.Send<TPoison>(query, ca2, TPoison{});
+    cluster.Pump();
+
+    std::lock_guard lock(collector.Mutex);
+    ASSERT_EQ(collector.Rows.size(), static_cast<size_t>(total));
+    for (int64_t i = 0; i < total; ++i) {
+        ASSERT_EQ(collector.Rows[i], i + 1);
+    }
+}
+
 namespace {
 
 class TBlackHole : public IActor {
