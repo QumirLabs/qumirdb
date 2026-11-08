@@ -16,10 +16,6 @@ namespace NQdb {
 // overhead are excluded. Width -1 denotes variable-length string data.
 std::vector<int64_t> InstrumentationColumnWidths(const NQumir::NAst::TTypePtr& type);
 
-// Row descriptor of a struct row type: strings {0, false}, bool {0, true}
-// (bit-packed), other types {FixedValueWidth}.
-std::vector<TValueLayout> RowLayouts(const NQumir::NAst::TTypePtr& type);
-
 struct TRowSetInstrumentation {
     std::shared_ptr<TKernelSlot> Kernel;
     std::vector<int64_t> Widths;

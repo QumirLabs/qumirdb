@@ -5,6 +5,7 @@
 
 #include <qdb/exec/aggregate_exec.h>
 #include <qdb/exec/instrumentation/operator.h>
+#include <qdb/io/row_layouts.h>
 #include <qdb/kernel/compiler.h>
 #include <qdb/kernel/builder.h>
 #include <qdb/kernel/spec.h>
