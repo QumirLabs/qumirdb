@@ -52,6 +52,8 @@ ETaskResult TRemoteSinkState::Write(const TRowSet& rowSet) {
         }
         ++Written;
     }
+    // Pairs with the fence in Drain: the push must be visible before Queued is read.
+    std::atomic_thread_fence(std::memory_order_seq_cst);
     if (!Queued.exchange(true)) {
         if (!ActorChannel.Notify(this)) {
             // The same row set comes back; do not push it twice.

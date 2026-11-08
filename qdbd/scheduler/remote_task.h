@@ -112,6 +112,8 @@ struct TRemoteSinkState {
                 return;
             }
             Queued.store(false);
+            // Store-buffering with the worker's push: the pop must not run before the store.
+            std::atomic_thread_fence(std::memory_order_seq_cst);
             // A Write or Finish that saw Queued set did not notify: look again.
             if (Outbox.TryPop(rowSet)) {
                 send(++Sent, std::move(rowSet));

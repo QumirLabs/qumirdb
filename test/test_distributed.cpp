@@ -1612,6 +1612,46 @@ TEST(DistributedScheduler, RemoteSinkFinishesAfterItsLastChunk) {
     EXPECT_EQ(events, (std::vector<uint64_t>{0}));
 }
 
+// A row pushed while the actor leaves Drain must still be picked up or announced.
+TEST(DistributedScheduler, RemoteSinkNeverStrandsARowAgainstConcurrentDrain) {
+    using namespace NQdb::NScheduler;
+    constexpr uint64_t total = 20000;
+    std::atomic<int> destroyed = 0;
+    TActorNotificationChannel channel(std::make_unique<TFakeNotifier>());
+    auto [code, state] = MakeRemoteSink(1, TActorId{}, 2, {}, channel, 4, 1 << 20);
+    std::thread worker([&] {
+        for (uint64_t i = 0; i < total; ++i) {
+            auto rowSet = CountedRows(1, &destroyed);
+            while (code->Write(state.get(), rowSet) != ETaskResult::OK) {
+                std::this_thread::yield();
+            }
+            Release(&rowSet);
+        }
+        while (code->Finish(state.get()) != ETaskResult::OK) {
+            std::this_thread::yield();
+        }
+    });
+    uint64_t sent = 0;
+    bool finished = false;
+    auto send = [&](uint64_t, TRowSet&& rowSet) {
+        ++sent;
+        Release(&rowSet);
+    };
+    auto finish = [&] {
+        finished = true;
+    };
+    const auto deadline = NNet::TClock::now() + std::chrono::seconds(30);
+    TRemoteSinkState* queued = nullptr;
+    while (!finished && NNet::TClock::now() < deadline) {
+        if (channel.SinkQueue().TryPop(queued)) {
+            queued->Drain(send, finish);
+        }
+    }
+    worker.join();
+    EXPECT_TRUE(finished);
+    EXPECT_EQ(sent, total);
+}
+
 TEST(DistributedScheduler, RemoteSourceConfirmsConsumedChunks) {
     using namespace NQdb::NScheduler;
     std::atomic<int> destroyed = 0;
