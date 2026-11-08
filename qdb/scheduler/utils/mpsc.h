@@ -30,12 +30,15 @@ public:
 
     bool TryPush(T&& value) {
         for (;;) {
-            // PopPos_ first: its acquire makes the PushPos_ read at least as new, so
-            // pos - popPos cannot wrap around and report a free queue as full.
+            // PopPos_ first, so pos - popPos cannot wrap around.
             const auto popPos = PopPos_.load(std::memory_order_acquire);
             auto pos = PushPos_.load(std::memory_order_relaxed);
             if (pos - popPos >= Capacity_) {
-                return false;
+                // If the consumer moved since, popPos was stale: the queue may not be full.
+                if (PopPos_.load(std::memory_order_acquire) == popPos) {
+                    return false;
+                }
+                continue;
             }
             if (PushPos_.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed)) {
                 auto& cell = Buffer_[pos % Capacity_];

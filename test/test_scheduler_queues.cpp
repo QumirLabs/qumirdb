@@ -219,6 +219,50 @@ TEST(MPSC, RejectsPushOnlyWhenFull) {
     EXPECT_EQ(rejected.load(), 0);
 }
 
+TEST(MPSC, NeverRejectsPushWhenQueueCannotBeFull) {
+    constexpr int producerCount = 8;
+    // Each producer has at most one item queued, so the queue never fills up
+    // and every rejected push is spurious.
+    TMPSCQueue<int> queue(producerCount + 1);
+    struct alignas(64) TFlag {
+        std::atomic<bool> InFlight = false;
+    };
+    std::vector<TFlag> flags(producerCount);
+    std::atomic<bool> stop = false;
+    std::atomic<int> rejected = 0;
+    std::vector<std::thread> producers;
+    for (int producer = 0; producer < producerCount; ++producer) {
+        producers.emplace_back([&, producer] {
+            while (!stop.load(std::memory_order_relaxed)) {
+                if (flags[producer].InFlight.load(std::memory_order_acquire)) {
+                    continue;
+                }
+                flags[producer].InFlight.store(true, std::memory_order_relaxed);
+                int item = producer;
+                if (!queue.TryPush(std::move(item))) {
+                    rejected.fetch_add(1, std::memory_order_relaxed);
+                    flags[producer].InFlight.store(false, std::memory_order_relaxed);
+                }
+            }
+        });
+    }
+    std::thread consumer([&] {
+        int value = 0;
+        while (!stop.load(std::memory_order_relaxed)) {
+            if (queue.TryPop(value)) {
+                flags[value].InFlight.store(false, std::memory_order_release);
+            }
+        }
+    });
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+    stop.store(true);
+    for (auto& producer : producers) {
+        producer.join();
+    }
+    consumer.join();
+    EXPECT_EQ(rejected.load(), 0);
+}
+
 TEST(MPSC, TransfersAllItemsWithMultipleProducersInProducerOrder) {
     struct TItem {
         int Producer;
