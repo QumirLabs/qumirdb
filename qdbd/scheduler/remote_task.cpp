@@ -212,8 +212,8 @@ std::string ValidateEndpoints(
         if (isSource ? source->Code() != nullptr : sink->Code() != nullptr) {
             return "external node " + std::to_string(endpoint.Id) + " already has code";
         }
-        if (!isSource && endpoint.Layouts.empty()) {
-            return "sink endpoint " + std::to_string(endpoint.Id) + " has no layouts";
+        if (!isSource && (!sink->InputConnection() || sink->InputConnection()->RowLayouts().empty())) {
+            return "sink " + std::to_string(endpoint.Id) + " has no input row layouts";
         }
         covered.insert(node);
     }

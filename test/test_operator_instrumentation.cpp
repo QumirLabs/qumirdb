@@ -95,6 +95,14 @@ TEST(OperatorInstrumentation, ResolvesLogicalAndPhysicalColumnWidths) {
     });
     // DECIMAL(18,2) is stored in i64.
     EXPECT_EQ(InstrumentationColumnWidths(schema), (std::vector<int64_t>{8, 16, 4, 1, -1, 8}));
+    // Bool is bit-packed in row sets and strings carry no width.
+    const auto layouts = RowLayouts(schema);
+    ASSERT_EQ(layouts.size(), 6u);
+    const std::vector<std::pair<int32_t, bool>> expected{{8, false}, {16, false}, {4, false}, {0, true}, {0, false}, {8, false}};
+    for (size_t i = 0; i < layouts.size(); ++i) {
+        EXPECT_EQ(layouts[i].Width, expected[i].first) << i;
+        EXPECT_EQ(layouts[i].Bitmap, expected[i].second) << i;
+    }
 }
 
 TEST(OperatorInstrumentation, CountsSelectedNonNullPayloadAndBothOffsetWidths) {

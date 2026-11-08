@@ -1,10 +1,12 @@
 #pragma once
 
 #include <qdb/io/io.h>
+#include <qdb/io/rowset_ops.h>
 
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -60,6 +62,10 @@ public:
     void SetStatsEnabled(bool enabled);
     TConnectionStats Stats() const;
 
+    // Row descriptor, one entry per column; empty until the graph builder sets it.
+    void SetRowLayouts(std::vector<TValueLayout> layouts);
+    std::span<const TValueLayout> RowLayouts() const;
+
 protected:
     void CountPushed(uint64_t count = 1) const;
     void CountPopped(uint64_t count = 1) const;
@@ -70,6 +76,7 @@ protected:
 
 private:
     std::string DebugName_;
+    std::vector<TValueLayout> RowLayouts_;
     bool StatsEnabled_ = false;
     mutable std::atomic<uint64_t> Pushed_ = 0;
     mutable std::atomic<uint64_t> Popped_ = 0;
