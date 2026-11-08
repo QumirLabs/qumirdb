@@ -232,6 +232,7 @@ TGeneratedKernel TKernelCompiler::EmitKernel(
     };
     kernel.Slot->Fns.resize(kernel.Entrypoints.size(), nullptr);
     if (Sink_) {
+        kernel.Index = static_cast<uint32_t>(Sink_->size());
         Sink_->push_back(kernel);
     }
     if (BindNow_) {
@@ -1801,6 +1802,7 @@ TKernelCompiler::TFilterDispatch TKernelCompiler::CompileFilter(
         .Slot = kernel.Slot,
         .Storage = kernel.Storage,
         .Runtime = RuntimeContext_,
+        .Kernel = kernel.Index,
     };
 }
 

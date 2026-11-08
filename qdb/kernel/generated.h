@@ -134,6 +134,8 @@ struct TGeneratedKernel {
     std::shared_ptr<TRuntimeContext> RuntimeContext;
     std::shared_ptr<TKernelSlot> Slot;
     bool ExportArtifacts = true;
+    // Position in the compiler's sink (0 without a sink); equals the kernel's image index.
+    uint32_t Index = 0;
 
     // Sort kernels only: resolved key metadata retained with the lowered plan.
     struct TSortKeyMeta {
