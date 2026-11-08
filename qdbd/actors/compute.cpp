@@ -167,6 +167,7 @@ struct TComputeActor : public IBehaviorActor {
             SendError(ctx, "cannot start graph: " + error);
             return;
         }
+        GraphOwner = std::move(message.GraphOwner);
         Graph = message.Graph;
         const auto sources = static_cast<size_t>(std::ranges::count_if(message.Endpoints, [](const auto& endpoint) {
             return endpoint.Kind == ERemoteEndpointKind::Source;
@@ -273,6 +274,8 @@ struct TComputeActor : public IBehaviorActor {
     TDefaultBehavior Behavior;
     std::shared_ptr<TRuntimeResources> Resources;
     NScheduler::TSchedulerSettings SchedulerSettings;
+    // Declared before Graph and Scheduler: they point into it and die first.
+    std::shared_ptr<void> GraphOwner;
     NScheduler::TSealedTaskGraph Graph;
     std::unique_ptr<NScheduler::TActorNotificationChannel> ActorChannel;
     std::unique_ptr<NScheduler::TSchedulerChannel> SchedulerChannel;
