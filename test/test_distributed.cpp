@@ -1201,7 +1201,7 @@ void CountDestroy(TRowSet* rowSet) {
     static_cast<std::atomic<int>*>(rowSet->Private)->fetch_add(1, std::memory_order_relaxed);
 }
 
-// One column, like the Layouts of the sink endpoints in these tests.
+// One column, like the row layouts of the sink input connections in these tests.
 TRowSet CountedRows(int64_t rows, std::atomic<int>* destroyed) {
     static TColumn column{};
     return TRowSet{
@@ -1220,7 +1220,7 @@ struct TTwoEndpointGraph {
     NQdb::NScheduler::TTaskGraph Owner;
     NQdb::NScheduler::TSealedTaskGraph Graph;
     std::vector<TRemoteEndpoint> Endpoints{
-        {.Id = 1, .Kind = ERemoteEndpointKind::Sink, .Layouts = {TValueLayout{.Width = 8}}},
+        {.Id = 1, .Kind = ERemoteEndpointKind::Sink},
         {.Id = 2, .Kind = ERemoteEndpointKind::Source},
     };
 
@@ -1228,6 +1228,7 @@ struct TTwoEndpointGraph {
         using namespace NQdb::NScheduler;
         auto connection = std::make_unique<TOneToOneConnection>();
         auto* connectionPtr = connection.get();
+        connectionPtr->SetRowLayouts({TValueLayout{.Width = 8}});
         auto& source = Owner.AddOwnedNode(std::make_unique<TSourceTask>(
             nullptr, nullptr, TOutputPort{.Connection = connectionPtr}));
         auto& sink = Owner.AddOwnedNode(std::make_unique<TSinkTask>(
@@ -1309,7 +1310,7 @@ TEST(DistributedAllocation, ComputeActorReportsErrorsToTheQueryActor) {
     const auto actor = cluster.Follower.Register(std::unique_ptr<IActor>(CreateComputeActor(resources)));
 
     auto bad = graph.Endpoints;
-    bad.push_back({.Id = 7, .Kind = ERemoteEndpointKind::Sink, .Layouts = {TValueLayout{.Width = 8}}});
+    bad.push_back({.Id = 7, .Kind = ERemoteEndpointKind::Sink});
     cluster.Follower.Send<TTaskGraphMessage>(probe, actor, TTaskGraphMessage{
         .Graph = graph.Graph, .Endpoints = bad});
     cluster.Pump();
@@ -1840,6 +1841,7 @@ TEST(DistributedScheduler, ValidatesRemoteEndpoints) {
     auto [sourceCode, sourceState] = MakeRemoteSource(2, TActorId{}, 1, channel);
     auto connection = std::make_unique<TOneToOneConnection>();
     auto* connectionPtr = connection.get();
+    connectionPtr->SetRowLayouts({TValueLayout{.Width = 8}});
     TTaskGraph graph;
     auto& source = graph.AddOwnedNode(std::make_unique<TSourceTask>(
         nullptr, nullptr, TOutputPort{.Connection = connectionPtr}));
@@ -1852,11 +1854,7 @@ TEST(DistributedScheduler, ValidatesRemoteEndpoints) {
     ASSERT_TRUE(sealed);
 
     auto endpoint = [](uint64_t id, ERemoteEndpointKind kind) {
-        TRemoteEndpoint result{.Id = id, .Kind = kind};
-        if (kind == ERemoteEndpointKind::Sink) {
-            result.Layouts = {TValueLayout{.Width = 8}};
-        }
-        return result;
+        return TRemoteEndpoint{.Id = id, .Kind = kind};
     };
     const std::vector<TRemoteEndpoint> good{
         endpoint(1, ERemoteEndpointKind::Sink), endpoint(2, ERemoteEndpointKind::Source)};
@@ -1865,9 +1863,9 @@ TEST(DistributedScheduler, ValidatesRemoteEndpoints) {
     const std::vector<TRemoteEndpoint> sinkOnly{endpoint(1, ERemoteEndpointKind::Sink)};
     EXPECT_NE(ValidateEndpoints(sealed, sinkOnly), "");
     EXPECT_NE(ValidateEndpoints(sealed, {}), "");
-    auto noLayouts = endpoint(1, ERemoteEndpointKind::Sink);
-    noLayouts.Layouts.clear();
-    EXPECT_NE(ValidateEndpoints(sealed, std::vector{noLayouts, endpoint(2, ERemoteEndpointKind::Source)}), "");
+    connectionPtr->SetRowLayouts({});
+    EXPECT_NE(ValidateEndpoints(sealed, good), "");
+    connectionPtr->SetRowLayouts({TValueLayout{.Width = 8}});
     const std::vector<TRemoteEndpoint> missing{endpoint(3, ERemoteEndpointKind::Sink)};
     EXPECT_NE(ValidateEndpoints(sealed, missing), "");
     const std::vector<TRemoteEndpoint> swapped{
@@ -1949,6 +1947,7 @@ TEST(DistributedScheduler, TwoComputeActorsMoveRowsThroughRemoteTasks) {
 
     auto toRemoteSink = std::make_unique<TOneToOneConnection>();
     auto* toRemoteSinkPtr = toRemoteSink.get();
+    toRemoteSinkPtr->SetRowLayouts({TValueLayout{.Width = 8}});
     TTaskGraph graph1;
     auto& producer = graph1.AddOwnedNode(std::make_unique<TSourceTask>(
         producerCode, std::shared_ptr<void>(&producerState, [](void*) {}),
@@ -1985,8 +1984,7 @@ TEST(DistributedScheduler, TwoComputeActorsMoveRowsThroughRemoteTasks) {
 
     cluster.Follower.Send<TTaskGraphMessage>(query, ca1, TTaskGraphMessage{
         .Graph = sealed1,
-        .Endpoints = {{.Id = 1, .Kind = ERemoteEndpointKind::Sink, .PeerActor = ca2, .PeerTaskId = 2,
-            .Layouts = {TValueLayout{.Width = 8}}}}});
+        .Endpoints = {{.Id = 1, .Kind = ERemoteEndpointKind::Sink, .PeerActor = ca2, .PeerTaskId = 2}}});
     cluster.Follower.Send<TTaskGraphMessage>(query, ca2, TTaskGraphMessage{
         .Graph = sealed2,
         .Endpoints = {{.Id = 2, .Kind = ERemoteEndpointKind::Source, .PeerActor = ca1, .PeerTaskId = 1}}});
@@ -2058,6 +2056,7 @@ TEST(DistributedScheduler, ComputeActorReportsAFailedSendAndReleasesTheRowSet) {
         });
         auto connection = std::make_unique<TOneToOneConnection>();
         auto* connectionPtr = connection.get();
+        connectionPtr->SetRowLayouts(std::vector(c.Layouts, TValueLayout{.Width = 8}));
         TTaskGraph graph;
         auto& producer = graph.AddOwnedNode(std::make_unique<TSourceTask>(
             producerCode, std::shared_ptr<void>(&producerState, [](void*) {}),
@@ -2079,7 +2078,6 @@ TEST(DistributedScheduler, ComputeActorReportsAFailedSendAndReleasesTheRowSet) {
         const auto peer = cluster.Leader.Register(std::make_unique<TBlackHole>());
         const auto actor = cluster.Follower.Register(std::unique_ptr<IActor>(CreateComputeActor(resources)));
         TRemoteEndpoint sink{.Id = 1, .Kind = ERemoteEndpointKind::Sink, .PeerActor = peer, .PeerTaskId = 2};
-        sink.Layouts.assign(c.Layouts, TValueLayout{.Width = 8});
         cluster.Follower.Send<TTaskGraphMessage>(query, actor, TTaskGraphMessage{
             .Graph = sealed, .Endpoints = {sink}});
         const auto deadline = NNet::TClock::now() + std::chrono::seconds(10);
@@ -2112,6 +2110,7 @@ TEST(DistributedScheduler, RemoteSinkReleasesItsOutboxOnTeardown) {
     {
         auto connection = std::make_unique<TOneToOneConnection>();
         auto* connectionPtr = connection.get();
+        connectionPtr->SetRowLayouts({TValueLayout{.Width = 8}});
         TTaskGraph graph;
         auto& producer = graph.AddOwnedNode(std::make_unique<TSourceTask>(
             producerCode, std::shared_ptr<void>(&producerState, [](void*) {}),
@@ -2133,8 +2132,7 @@ TEST(DistributedScheduler, RemoteSinkReleasesItsOutboxOnTeardown) {
         const auto actor = cluster.Follower.Register(std::unique_ptr<IActor>(CreateComputeActor(resources)));
         cluster.Follower.Send<TTaskGraphMessage>(query, actor, TTaskGraphMessage{
             .Graph = sealed,
-            .Endpoints = {{.Id = 1, .Kind = ERemoteEndpointKind::Sink, .PeerActor = peer, .PeerTaskId = 2,
-            .Layouts = {TValueLayout{.Width = 8}}}}});
+            .Endpoints = {{.Id = 1, .Kind = ERemoteEndpointKind::Sink, .PeerActor = peer, .PeerTaskId = 2}}});
         const auto until = NNet::TClock::now() + std::chrono::milliseconds(200);
         while (NNet::TClock::now() < until) {
             cluster.Pump();
@@ -2213,6 +2211,7 @@ TEST(DistributedScheduler, SelectedRowsCrossNodesCompacted) {
 
     auto toRemoteSink = std::make_unique<TOneToOneConnection>();
     auto* toRemoteSinkPtr = toRemoteSink.get();
+    toRemoteSinkPtr->SetRowLayouts({TValueLayout{.Width = 8}});
     TTaskGraph graph1;
     auto& producer = graph1.AddOwnedNode(std::make_unique<TSourceTask>(
         producerCode, std::shared_ptr<void>(&producerState, [](void*) {}),
@@ -2247,8 +2246,7 @@ TEST(DistributedScheduler, SelectedRowsCrossNodesCompacted) {
     const auto ca2 = cluster.Leader.Register(std::unique_ptr<IActor>(CreateComputeActor(resources)));
     cluster.Follower.Send<TTaskGraphMessage>(queryF, ca1, TTaskGraphMessage{
         .Graph = sealed1,
-        .Endpoints = {{.Id = 1, .Kind = ERemoteEndpointKind::Sink, .PeerActor = ca2, .PeerTaskId = 2,
-            .Layouts = {TValueLayout{.Width = 8}}}}});
+        .Endpoints = {{.Id = 1, .Kind = ERemoteEndpointKind::Sink, .PeerActor = ca2, .PeerTaskId = 2}}});
     cluster.Leader.Send<TTaskGraphMessage>(queryL, ca2, TTaskGraphMessage{
         .Graph = sealed2,
         .Endpoints = {{.Id = 2, .Kind = ERemoteEndpointKind::Source, .PeerActor = ca1, .PeerTaskId = 1}}});

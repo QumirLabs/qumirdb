@@ -1,6 +1,7 @@
 #pragma once
 
 #include <qdb/io/io.h>
+#include <qdb/io/rowset_ops.h>
 #include <qdb/kernel/generated.h>
 
 #include <array>

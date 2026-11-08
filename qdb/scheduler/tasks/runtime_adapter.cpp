@@ -543,6 +543,10 @@ const std::shared_ptr<const TSinkCode>& TSinkTask::Code() const {
     return Code_;
 }
 
+const IConnection* TSinkTask::InputConnection() const {
+    return Input_.Connection;
+}
+
 ETaskResult TSinkTask::Execute() {
     if (Finished_) {
         return ETaskResult::FINISHED;

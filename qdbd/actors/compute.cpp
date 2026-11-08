@@ -168,13 +168,12 @@ struct TComputeActor : public IBehaviorActor {
             return;
         }
         Graph = message.Graph;
-        Endpoints = std::move(message.Endpoints);
-        const auto sources = static_cast<size_t>(std::ranges::count_if(Endpoints, [](const auto& endpoint) {
+        const auto sources = static_cast<size_t>(std::ranges::count_if(message.Endpoints, [](const auto& endpoint) {
             return endpoint.Kind == ERemoteEndpointKind::Source;
         }));
         ActorChannel = std::make_unique<NScheduler::TActorNotificationChannel>(
-            ctx->CreateNotifier(), Endpoints.size() - sources, sources);
-        for (const auto& endpoint : Endpoints) {
+            ctx->CreateNotifier(), message.Endpoints.size() - sources, sources);
+        for (const auto& endpoint : message.Endpoints) {
             const bool isSource = endpoint.Kind == ERemoteEndpointKind::Source;
             auto* node = Graph.ExternalNode(endpoint.Id);
             if (isSource) {
@@ -266,7 +265,7 @@ struct TComputeActor : public IBehaviorActor {
         NScheduler::TTaskNode* node)
     {
         auto [code, state] = NScheduler::MakeRemoteSink(
-            endpoint.Id, endpoint.PeerActor, endpoint.PeerTaskId, endpoint.Layouts, *ActorChannel);
+            endpoint.Id, endpoint.PeerActor, endpoint.PeerTaskId, sinkTask.InputConnection()->RowLayouts(), *ActorChannel);
         sinkTask.BindCode(std::move(code), state);
         SinkStates.emplace(endpoint.Id, std::tuple{std::move(state), node});
     }
@@ -275,8 +274,6 @@ struct TComputeActor : public IBehaviorActor {
     std::shared_ptr<TRuntimeResources> Resources;
     NScheduler::TSchedulerSettings SchedulerSettings;
     NScheduler::TSealedTaskGraph Graph;
-    // Owns the sink Layouts that the sink states use as descriptors.
-    std::vector<TRemoteEndpoint> Endpoints;
     std::unique_ptr<NScheduler::TActorNotificationChannel> ActorChannel;
     std::unique_ptr<NScheduler::TSchedulerChannel> SchedulerChannel;
     std::unique_ptr<NScheduler::TThreadedScheduler> Scheduler;

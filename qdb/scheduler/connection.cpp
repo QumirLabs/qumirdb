@@ -17,6 +17,14 @@ void IConnection::SetStatsEnabled(bool enabled) {
     StatsEnabled_ = enabled;
 }
 
+void IConnection::SetRowLayouts(std::vector<TValueLayout> layouts) {
+    RowLayouts_ = std::move(layouts);
+}
+
+std::span<const TValueLayout> IConnection::RowLayouts() const {
+    return RowLayouts_;
+}
+
 TConnectionStats IConnection::Stats() const {
     return TConnectionStats{
         .Pushed = Pushed_.load(std::memory_order_relaxed),
