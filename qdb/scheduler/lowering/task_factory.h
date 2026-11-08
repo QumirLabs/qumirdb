@@ -217,7 +217,8 @@ NScheduler::ETaskResult MapJoinProcessResult(EJoinProcessorResult result);
 // Blocking code for a processor with Add/Next/InputFinished methods. It
 // drains the input first, then emits processor output.
 template <class TState>
-std::shared_ptr<const NScheduler::TBlockingCode> MakeDrainBlockingCode() {
+std::shared_ptr<const NScheduler::TBlockingCode> MakeDrainBlockingCode()
+{
     auto code = std::make_shared<NScheduler::TBlockingCode>(
         [](NScheduler::ITaskState& state, NScheduler::TInputPort& input, TRowSet& output) {
             auto* s = &static_cast<TState&>(state);
@@ -257,7 +258,8 @@ std::shared_ptr<const NScheduler::TBlockingCode> MakeLimitBlockingCode();
 // Binary blocking code adapting scheduler input ports to a join/cross
 // processor's fetch-callback interface. TState wraps the processor.
 template <class TState>
-std::shared_ptr<const NScheduler::TBinaryBlockingCode> MakeBinaryJoinCode() {
+std::shared_ptr<const NScheduler::TBinaryBlockingCode> MakeBinaryJoinCode()
+{
     auto code = std::make_shared<NScheduler::TBinaryBlockingCode>(
         [](NScheduler::ITaskState& state,
            NScheduler::TInputPort& left,

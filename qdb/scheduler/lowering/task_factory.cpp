@@ -60,7 +60,9 @@ TBlockingTail MakeSortTail(
     };
 }
 
-std::shared_ptr<const NScheduler::TBlockingCode> MakeLimitBlockingCode() {
+// Blocking code for a limit/offset task.
+std::shared_ptr<const NScheduler::TBlockingCode> MakeLimitBlockingCode()
+{
     return std::make_shared<NScheduler::TBlockingCode>(
         [](NScheduler::ITaskState& state, NScheduler::TInputPort& input, TRowSet& output) {
             auto* s = &static_cast<TLimitBlockingState&>(state);
