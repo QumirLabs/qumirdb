@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <optional>
@@ -69,7 +70,7 @@ public:
             U32(value);
         } else if constexpr (std::is_same_v<T, int32_t>) {
             I32(value);
-        } else if constexpr (std::is_same_v<T, uint64_t>) {
+        } else if constexpr (std::is_same_v<T, uint64_t> || std::is_same_v<T, size_t>) {
             U64(value);
         } else if constexpr (std::is_same_v<T, int64_t>) {
             I64(value);
@@ -95,6 +96,15 @@ private:
         U32(static_cast<uint32_t>(values.size()));
         for (const auto& value : values) {
             (*this)(value);
+        }
+    }
+
+    // vector<bool> has no bool references to visit.
+    void WriteComposite(const std::vector<bool>& values)
+    {
+        U32(static_cast<uint32_t>(values.size()));
+        for (const bool value : values) {
+            U8(value ? 1 : 0);
         }
     }
 
@@ -183,7 +193,7 @@ public:
             value = U32();
         } else if constexpr (std::is_same_v<T, int32_t>) {
             value = I32();
-        } else if constexpr (std::is_same_v<T, uint64_t>) {
+        } else if constexpr (std::is_same_v<T, uint64_t> || std::is_same_v<T, size_t>) {
             value = U64();
         } else if constexpr (std::is_same_v<T, int64_t>) {
             value = I64();
@@ -222,6 +232,17 @@ private:
         values.resize(count);
         for (auto& value : values) {
             (*this)(value);
+        }
+    }
+
+    void ReadComposite(std::vector<bool>& values)
+    {
+        const uint32_t count = U32();
+        Need(count);
+        values.clear();
+        values.reserve(count);
+        for (uint32_t i = 0; i < count; ++i) {
+            values.push_back(U8() != 0);
         }
     }
 

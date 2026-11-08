@@ -5,6 +5,8 @@
 
 #include <qdb/exec/plan_builder.h>
 #include <qdb/exec/runtime_filter.h>
+#include <qdb/io/parquet/source.h>
+#include <qdb/io/text/sink.h>
 #include <qdb/kernel/finalize.h>
 #include <qdb/plan/build.h>
 #include <qdb/plan/ops/join.h>
@@ -13,6 +15,7 @@
 #include <qdb/plan/pipeline.h>
 #include <qdb/plan/plan_print.h>
 #include <qdb/plan/passes/runtime_filters.h>
+#include <qdb/scheduler/impl/executor.h>
 #include <qdb/scheduler/lowering/plan_lowerer.h>
 #include <qdb/scheduler/tasks/runtime_adapter.h>
 #include <qdb/scheduler/lowering/scan_split.h>
@@ -552,7 +555,7 @@ TEST(ExecPlanBuilder, CrossJoinResidualPreservesBothInputSchemas) {
     }
 }
 
-TEST(ExecPlanBuilder, LoweringRecordsSpecsForForwardAndSinkNodes) {
+TEST(ExecPlanBuilder, LoweringRecordsSpecsForSupportedNodeKinds) {
     TSplitMockSource left({"lv"});
     TSplitMockSource right({"rv"});
     const std::unordered_map<std::string, ISource*> sources{
@@ -570,9 +573,11 @@ TEST(ExecPlanBuilder, LoweringRecordsSpecsForForwardAndSinkNodes) {
     std::vector<uint32_t> expectedMissing;
     for (size_t i = 0; i < nodes.size(); ++i) {
         const auto& record = lowered.NodeSpecs[i];
-        const bool isForward = nodes[i]->DebugKind == "broadcast";
-        const bool isSink = nodes[i]->DebugKind == "sink";
-        ASSERT_EQ(record.has_value(), isForward || isSink) << nodes[i]->DebugKind;
+        const auto& kind = nodes[i]->DebugKind;
+        const bool isForward = kind == "broadcast";
+        // Mock sources are not parquet scans, so they keep no record.
+        const bool recorded = isForward || kind == "sink" || kind == "filter" || kind == "project";
+        ASSERT_EQ(record.has_value(), recorded) << kind;
         if (!record) {
             expectedMissing.push_back(static_cast<uint32_t>(i));
             continue;
@@ -589,6 +594,71 @@ TEST(ExecPlanBuilder, LoweringRecordsSpecsForForwardAndSinkNodes) {
     std::vector<uint32_t> missing;
     EXPECT_FALSE(NScheduler::ExtractLoweredGraphSpec(lowered, &missing));
     EXPECT_EQ(missing, expectedMissing);
+}
+
+// Runs a graph into a CSV sink and returns the rows sorted.
+std::vector<std::string> RunSortedCsv(
+    NScheduler::TTaskGraph& graph, const std::ostringstream& out, const NScheduler::TSettings& settings)
+{
+    std::string error;
+    auto sealed = graph.Seal(&error);
+    if (!sealed) {
+        throw std::runtime_error(error);
+    }
+    NScheduler::TSchedulerExecutor executor(sealed, settings);
+    if (!executor.Run(&error)) {
+        throw std::runtime_error(error);
+    }
+    std::vector<std::string> rows;
+    std::istringstream lines(out.str());
+    for (std::string line; std::getline(lines, line);) {
+        rows.push_back(std::move(line));
+    }
+    std::ranges::sort(rows);
+    return rows;
+}
+
+TEST(ExecPlanBuilder, ScanFilterProjectGraphRunsFromItsSerializedSpec) {
+    TParquetSource source(QDB_TEST_DATA_DIR "/regtest/cases/decimal_parquet/tables/decimals.parquet");
+    const std::unordered_map<std::string, ISource*> sources{{"t", &source}};
+    auto plan = BuildSqlPlan(
+        "SELECT id, d15 + d15 AS twice, REGEXP_REPLACE(s, '-[a-z]+$', '') AS item "
+        "FROM t WHERE d9 > 100 AND id % 3 <> 0", sources);
+    const auto settings = MultiSettings();
+    auto lowered = NScheduler::LowerPlanToGraph(plan, settings, nullptr);
+
+    const auto& fields = static_cast<NQumir::NAst::TStructType&>(*lowered.OutputType).Fields;
+    std::vector<TColumnSchema> columns;
+    for (const auto& [name, type] : fields) {
+        columns.push_back({.Name = name, .Type = type});
+    }
+    const TSchema schema{columns};
+    std::ostringstream originalOut;
+    std::ostringstream rebuiltOut;
+    TCsvSink original(schema, originalOut);
+    TCsvSink rebuilt(schema, rebuiltOut);
+    NScheduler::AttachSink(lowered, original);
+
+    const auto spec = NScheduler::ExtractLoweredGraphSpec(lowered);
+    ASSERT_TRUE(spec);
+    EXPECT_EQ(std::ranges::count_if(spec->Nodes, [](const auto& node) {
+        return std::holds_alternative<NScheduler::TParquetScanNode>(node.Body);
+    }), 4);
+    ASSERT_EQ(spec->Regexes.size(), 1u);
+    const auto bytes = NScheduler::SerializeGraphSpec(*spec);
+    const auto decoded = NScheduler::DeserializeGraphSpec(bytes);
+    EXPECT_EQ(NScheduler::SerializeGraphSpec(decoded), bytes);
+
+    FinalizeKernels(lowered.Kernels, settings.Kernel.Backend);
+    std::vector<std::shared_ptr<TKernelSlot>> slots;
+    for (const auto& kernel : lowered.Kernels) {
+        slots.push_back(kernel.Slot);
+    }
+    auto graph = NScheduler::MaterializeGraph(decoded, &rebuilt, std::move(slots));
+
+    const auto expected = RunSortedCsv(*lowered.Graph, originalOut, settings);
+    EXPECT_GT(expected.size(), 50u);
+    EXPECT_EQ(RunSortedCsv(*graph, rebuiltOut, settings), expected);
 }
 
 TEST(ExecPlanBuilder, MultiKeepsRealPartialAndCombineStages) {

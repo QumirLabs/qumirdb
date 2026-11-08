@@ -15,6 +15,12 @@ struct TFilterPlanData {
     uint32_t Kernel = 0;
     // Input columns kept in output order; nullopt keeps all of them.
     std::optional<std::vector<int32_t>> KeptInputColumns;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.Kernel);
+        v(self.KeptInputColumns);
+    }
 };
 
 TUnaryStreamProcess MakeFilterProcess(

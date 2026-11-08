@@ -1,6 +1,10 @@
 #pragma once
 
+#include <qdb/exec/filter_exec.h>
+#include <qdb/exec/project_exec.h>
 #include <qdb/io/io.h>
+#include <qdb/io/parquet/source.h>
+#include <qdb/kernel/regex.h>
 #include <qdb/scheduler/connection.h>
 #include <qdb/scheduler/graph.h>
 
@@ -9,10 +13,15 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <variant>
 #include <vector>
 
 namespace NQdb {
+
+struct TKernelSlot;
+struct TRuntimeContext;
+
 namespace NScheduler {
 
 // Plain-data description of a task graph. Connections, nodes and edges are
@@ -103,7 +112,53 @@ struct TSinkWriterNode {
     }
 };
 
-using TNodeBody = std::variant<TForwardNode, TRemoteSourceNode, TRemoteSinkNode, TSinkWriterNode>;
+// Path names the same file wherever the graph runs.
+struct TParquetScanNode {
+    TPortSpec Out;
+    std::string Path;
+    // File columns to read, sorted; nullopt reads all of them.
+    std::optional<std::vector<std::string>> Columns;
+    // nullopt reads the whole file; an empty list is a proven-empty scan.
+    std::optional<std::vector<int32_t>> RowGroups;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.Out);
+        v(self.Path);
+        v(self.Columns);
+        v(self.RowGroups);
+    }
+};
+
+struct TFilterNode {
+    TPortSpec In;
+    TPortSpec Out;
+    TFilterPlanData Plan;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.In);
+        v(self.Out);
+        v(self.Plan);
+    }
+};
+
+struct TProjectNode {
+    TPortSpec In;
+    TPortSpec Out;
+    TProjectPlanData Plan;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.In);
+        v(self.Out);
+        v(self.Plan);
+    }
+};
+
+using TNodeBody = std::variant<
+    TForwardNode, TRemoteSourceNode, TRemoteSinkNode, TSinkWriterNode,
+    TParquetScanNode, TFilterNode, TProjectNode>;
 
 struct TNodeSpec {
     uint64_t ExecStageId = InvalidExecStageId;
@@ -161,6 +216,8 @@ struct TGraphSpec {
     // In the order the edges were added.
     std::vector<TEdgeSpec> Edges;
     std::vector<TExternalSpec> Externals;
+    // The query's regexes in registration order, so each keeps its id.
+    std::vector<NKernel::TRegexSpec> Regexes;
 
     void Fields(this auto& self, auto& v)
     {
@@ -168,6 +225,7 @@ struct TGraphSpec {
         v(self.Nodes);
         v(self.Edges);
         v(self.Externals);
+        v(self.Regexes);
     }
 };
 
@@ -176,20 +234,36 @@ std::string SerializeGraphSpec(const TGraphSpec& spec);
 // Throws std::runtime_error on truncated or malformed input.
 TGraphSpec DeserializeGraphSpec(std::string_view bytes);
 
+// Query objects the node tasks of one graph bind.
+struct TNodeTaskContext {
+    // Kernel slots by kernel index.
+    std::vector<std::shared_ptr<TKernelSlot>> Slots;
+    std::shared_ptr<TRuntimeContext> Runtime;
+    // Opened on first use; the scans of one path share the file.
+    std::unordered_map<std::string, TParquetFile> ParquetFiles;
+    // Required for SinkWriter nodes.
+    ISink* Sink = nullptr;
+};
+
 // Builds the task of one node; port connections index `connections`. The
-// lowerer builds its Forward and SinkWriter tasks through this too. `sink` is
-// required for SinkWriter nodes. Throws std::runtime_error on an invalid body.
+// lowerer builds the tasks of these kinds through this too. Throws
+// std::runtime_error on an invalid body.
 std::unique_ptr<ITask> MakeNodeTask(
-    const TNodeBody& body, const std::vector<IConnection*>& connections, ISink* sink);
+    const TNodeBody& body, const std::vector<IConnection*>& connections, TNodeTaskContext& context);
 
 // Builds an unsealed graph: node i has ExecutionSlot i. Remote source and sink
 // tasks have empty code, which the compute actor binds. `sink` is required for
-// SinkWriter nodes. Throws std::runtime_error on an invalid spec.
-std::unique_ptr<TTaskGraph> MaterializeGraph(const TGraphSpec& spec, ISink* sink = nullptr);
+// SinkWriter nodes; `slots` are the query's kernel slots by kernel index. The
+// runtime context is rebuilt from the spec's regexes. Throws
+// std::runtime_error on an invalid spec.
+std::unique_ptr<TTaskGraph> MaterializeGraph(
+    const TGraphSpec& spec, ISink* sink = nullptr,
+    std::vector<std::shared_ptr<TKernelSlot>> slots = {});
 
 // Reads connections, edges and externals from a graph built by MaterializeGraph
 // or by hand. The caller supplies the node records, one per graph node in
-// order. Externals keep the graph's current order (sorted by id after Seal).
+// order. Externals keep the graph's current order (sorted by id after Seal);
+// regexes are left to the caller.
 // Throws std::runtime_error for a connection that is not a local one and for a
 // rowset edge without a connection.
 TGraphSpec ExtractGraphSpec(const TTaskGraph& graph, std::vector<TNodeSpec> nodes);

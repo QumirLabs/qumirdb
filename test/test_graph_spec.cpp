@@ -159,6 +159,69 @@ TEST(GraphSpec, RejectsTruncatedInput)
     EXPECT_THROW(DeserializeGraphSpec(bytes + "x"), std::runtime_error);
 }
 
+TEST(GraphSpec, ScanFilterProjectRecordsRoundTrip)
+{
+    using TRowGroups = std::optional<std::vector<int32_t>>;
+    TGraphSpec spec;
+    for (const auto& rowGroups : {TRowGroups{}, TRowGroups{std::vector<int32_t>{}}, TRowGroups{{1, 3}}}) {
+        spec.Nodes.push_back(Node("source", "t", TParquetScanNode{
+            .Out = {0, 2}, .Path = "/data/t.parquet",
+            .Columns = std::vector<std::string>{"a", "b"}, .RowGroups = rowGroups}));
+    }
+    spec.Nodes.push_back(Node("source", "u", TParquetScanNode{.Path = "/data/u.parquet"}));
+    spec.Nodes.push_back(Node("filter", "", TFilterNode{.In = {0, 2}, .Out = {1, 2}, .Plan = {.Kernel = 2}}));
+    spec.Nodes.push_back(Node("filter", "", TFilterNode{
+        .Plan = {.Kernel = 3, .KeptInputColumns = std::vector<int32_t>{2, 0}}}));
+    spec.Nodes.push_back(Node("project", "", TProjectNode{.In = {1, 2}, .Out = {2, 2}, .Plan = {
+        .Kernel = 4,
+        .Columns = {{.Index = 1}, {.Computed = true, .Index = 0}, {.Computed = true, .Index = 1}},
+        .ComputedWidths = {16, 8},
+        .ComputedIsString = {true, false},
+        .ComputedIsNullable = {false, true},
+    }}));
+    spec.Nodes.push_back(Node("project", "", TProjectNode{.Plan = {.Columns = {{.Index = 0}}}}));
+    spec.Regexes = {{.Pattern = "a+", .Replacement = "b"}, {.Pattern = "^x", .Replacement = ""}};
+
+    const auto bytes = SerializeGraphSpec(spec);
+    const auto back = DeserializeGraphSpec(bytes);
+    EXPECT_EQ(SerializeGraphSpec(back), bytes);
+    for (size_t size = 0; size < bytes.size(); ++size) {
+        EXPECT_THROW(DeserializeGraphSpec(std::string_view(bytes).substr(0, size)),
+            std::runtime_error) << size;
+    }
+
+    ASSERT_EQ(back.Nodes.size(), 8u);
+    EXPECT_FALSE(std::get<TParquetScanNode>(back.Nodes[0].Body).RowGroups);
+    EXPECT_EQ(std::get<TParquetScanNode>(back.Nodes[1].Body).RowGroups, TRowGroups{std::vector<int32_t>{}});
+    const auto& scan = std::get<TParquetScanNode>(back.Nodes[2].Body);
+    EXPECT_EQ(scan.RowGroups, (TRowGroups{{1, 3}}));
+    EXPECT_EQ(scan.Path, "/data/t.parquet");
+    EXPECT_EQ(scan.Columns, (std::vector<std::string>{"a", "b"}));
+    EXPECT_EQ(scan.Out.Lane, 2u);
+    EXPECT_FALSE(std::get<TParquetScanNode>(back.Nodes[3].Body).Columns);
+
+    EXPECT_EQ(std::get<TFilterNode>(back.Nodes[4].Body).Plan.Kernel, 2u);
+    EXPECT_FALSE(std::get<TFilterNode>(back.Nodes[4].Body).Plan.KeptInputColumns);
+    EXPECT_EQ(std::get<TFilterNode>(back.Nodes[5].Body).Plan.KeptInputColumns,
+        (std::vector<int32_t>{2, 0}));
+
+    const auto& project = std::get<TProjectNode>(back.Nodes[6].Body).Plan;
+    EXPECT_EQ(project.Kernel, 4u);
+    ASSERT_EQ(project.Columns.size(), 3u);
+    EXPECT_FALSE(project.Columns[0].Computed);
+    EXPECT_EQ(project.Columns[0].Index, 1);
+    EXPECT_TRUE(project.Columns[2].Computed);
+    EXPECT_EQ(project.Columns[2].Index, 1);
+    EXPECT_EQ(project.ComputedWidths, (std::vector<size_t>{16, 8}));
+    EXPECT_EQ(project.ComputedIsString, (std::vector<bool>{true, false}));
+    EXPECT_EQ(project.ComputedIsNullable, (std::vector<bool>{false, true}));
+    EXPECT_FALSE(std::get<TProjectNode>(back.Nodes[7].Body).Plan.Kernel);
+
+    ASSERT_EQ(back.Regexes.size(), 2u);
+    EXPECT_EQ(back.Regexes[1].Pattern, "^x");
+    EXPECT_EQ(back.Regexes[0].Replacement, "b");
+}
+
 TEST(GraphSpec, MaterializedGraphMatchesHandBuiltGraph)
 {
     TCountingSink sink;
@@ -277,6 +340,11 @@ TEST(GraphSpec, RejectsInvalidSpecs)
 
     spec = FanOutSpec();
     std::get<TForwardNode>(spec.Nodes[1].Body).In.Connection = 9;
+    EXPECT_THROW(MaterializeGraph(spec, &sink), std::runtime_error);
+
+    // Kernel 0 has no slot.
+    spec = FanOutSpec();
+    spec.Nodes[1].Body = TFilterNode{.In = {0, 0}, .Out = {1, 0}};
     EXPECT_THROW(MaterializeGraph(spec, &sink), std::runtime_error);
 }
 

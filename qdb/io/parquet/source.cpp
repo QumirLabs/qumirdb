@@ -588,12 +588,18 @@ TParquetFile::TParquetFile(const std::string& path)
     : Data_(std::make_shared<TParquetFileData>(path))
 {}
 
+TParquetFile::TParquetFile(std::shared_ptr<TParquetFileData> data)
+    : Data_(std::move(data))
+{}
+
 TParquetFile::~TParquetFile() = default;
 
-std::unique_ptr<TParquetSource> TParquetFile::MakeSource() const
+std::unique_ptr<TParquetSource> TParquetFile::MakeSource(
+    std::optional<std::vector<int>> rowGroups,
+    std::optional<std::unordered_set<std::string>> restrictedColumns) const
 {
     return std::unique_ptr<TParquetSource>(
-        new TParquetSource(Data_, std::nullopt, std::nullopt));
+        new TParquetSource(Data_, std::move(rowGroups), std::move(restrictedColumns)));
 }
 
 TParquetSource::TParquetSource(const std::string& path)
@@ -950,6 +956,26 @@ TParquetSource::~TParquetSource() = default;
 const TStatsPtr TParquetSource::Stats() const
 {
     return File_->Stats;
+}
+
+TParquetFile TParquetSource::File() const
+{
+    return TParquetFile(File_);
+}
+
+const std::string& TParquetSource::Path() const
+{
+    return File_->Path;
+}
+
+const std::optional<std::vector<int>>& TParquetSource::RowGroups() const
+{
+    return RowGroups_;
+}
+
+const std::optional<std::unordered_set<std::string>>& TParquetSource::RestrictedColumns() const
+{
+    return RestrictedColumns_;
 }
 
 void TParquetSource::RestrictColumns(const std::unordered_set<std::string>& names) {

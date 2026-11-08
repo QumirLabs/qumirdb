@@ -16,6 +16,12 @@ struct TProjectColumn {
     // Ident: index into the input batch's columns.
     // Computed: index into the flat computed-buffer list.
     int32_t Index = 0;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.Computed);
+        v(self.Index);
+    }
 };
 
 // What a project process needs besides its kernel, so it can be rebuilt later.
@@ -26,6 +32,15 @@ struct TProjectPlanData {
     std::vector<size_t> ComputedWidths;
     std::vector<bool> ComputedIsString;
     std::vector<bool> ComputedIsNullable;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.Kernel);
+        v(self.Columns);
+        v(self.ComputedWidths);
+        v(self.ComputedIsString);
+        v(self.ComputedIsNullable);
+    }
 };
 
 // Binds the process from its plan data and a dispatch over the kernel's slot

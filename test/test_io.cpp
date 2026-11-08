@@ -409,6 +409,28 @@ TEST(IOTest, RowIdColumnKeepsFileWideLocatorsInSplitScans) {
     EXPECT_TRUE(DrainRowIds(*empty, 1).empty());
 }
 
+TEST(IOTest, SplitSourceRebuildsFromItsFileAndScanParameters) {
+    const auto path = WriteRowIdFixture();
+    NQdb::TParquetFile file(path);
+    auto source = file.MakeSource();
+    source->RestrictColumns({"id", std::string(InternalRowIdColumnName)});
+    auto split = source->MakeRowGroupsSource({1});
+    EXPECT_EQ(split->Path(), path);
+    EXPECT_FALSE(source->RowGroups());
+    EXPECT_EQ(split->RowGroups(), std::optional(std::vector<int>{1}));
+    EXPECT_EQ(split->RestrictedColumns(), source->RestrictedColumns());
+
+    // A scan task recreates the split from these on the shared file.
+    auto rebuilt = split->File().MakeSource(split->RowGroups(), split->RestrictedColumns());
+    std::vector<int64_t> ids;
+    EXPECT_EQ(DrainRowIds(*rebuilt, 1, &ids), (std::vector<TPhysicalRowId>{
+        MakeParquetRowId(1, 0),
+        MakeParquetRowId(1, 1),
+        MakeParquetRowId(1, 2),
+    }));
+    EXPECT_EQ(ids, (std::vector<int64_t>{4, 5, 6}));
+}
+
 TEST(IOTest, RowIdColumnRestartsAfterRestrictColumns) {
     NQdb::TParquetFile file(WriteRowIdFixture());
     auto source = file.MakeSource();

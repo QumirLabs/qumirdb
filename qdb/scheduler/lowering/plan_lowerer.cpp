@@ -78,19 +78,19 @@ NScheduler::TPortSpec PortSpec(
 }
 
 // Builds the task through the graph spec factory, adds the node and keeps the
-// record at the node's index. `sink` is for SinkWriter records.
+// record at the node's index.
 NScheduler::TTaskNode& AddTask(
     NScheduler::TTaskGraph& graph,
     TNodeSpecs& records,
     NScheduler::TNodeSpec record,
-    ISink* sink = nullptr)
+    NScheduler::TNodeTaskContext& context)
 {
     std::vector<NScheduler::IConnection*> connections;
     for (const auto& connection : graph.Connections()) {
         connections.push_back(connection.get());
     }
     auto& node = graph.AddOwnedNode(
-        NScheduler::MakeNodeTask(record.Body, connections, sink));
+        NScheduler::MakeNodeTask(record.Body, connections, context));
     node.ExecStageId = record.ExecStageId;
     node.TaskGroupId = record.TaskGroupId;
     node.DebugKind = record.DebugKind;
@@ -100,14 +100,10 @@ NScheduler::TTaskNode& AddTask(
     return node;
 }
 
-struct TSchedulerSourceState {
-    ISource* Source = nullptr;
-    std::unique_ptr<ISource> OwnedSource;
-};
-
-struct TSchedulerUnaryStage {
-    std::shared_ptr<const NScheduler::TUnaryCode> Code;
-    std::function<std::shared_ptr<void>(size_t)> MakeState;
+// The record of a unary stage's nodes; LowerUnary sets In and Out per lane.
+template <class TNode>
+struct TUnaryNodeStage {
+    TNode Node;
     NQumir::NAst::TTypePtr OutputType;
 };
 
@@ -131,45 +127,29 @@ private:
     std::ostream* Out_;
 };
 
-TSchedulerUnaryStage BuildSchedulerFilterStage(
+// The tasks bind the kernel from the record, not the compiled process.
+TUnaryNodeStage<NScheduler::TFilterNode> BuildSchedulerFilterStage(
     TFilterOperator& filter,
     const NQumir::NAst::TTypePtr& inputType,
     TKernelCompilerOptions options)
 {
     auto runtime = BuildFilterRuntimeProcess(
         filter, inputType, std::move(options));
-    auto code = std::make_shared<NScheduler::TUnaryCode>(
-        [process = std::move(runtime.Process)](void* state, TRowSet& rowSet) {
-            auto* kernelState = static_cast<TUnaryStreamingKernelState*>(state);
-            process(rowSet, *kernelState);
-        });
     return {
-        .Code = std::move(code),
-        .MakeState = [](size_t) {
-            return std::make_shared<TUnaryStreamingKernelState>();
-        },
+        .Node = {.Plan = std::move(runtime.Plan)},
         .OutputType = std::move(runtime.OutputType),
     };
 }
 
-TSchedulerUnaryStage BuildSchedulerProjectStage(
+TUnaryNodeStage<NScheduler::TProjectNode> BuildSchedulerProjectStage(
     TProjectOperator& project,
     const NQumir::NAst::TTypePtr& inputType,
     TKernelCompilerOptions options)
 {
     auto runtime = BuildProjectRuntimeProcess(
         project, inputType, std::move(options));
-    auto code = std::make_shared<NScheduler::TUnaryCode>(
-        [process = std::move(runtime.Process)](void* state, TRowSet& rowSet) {
-            auto* kernelState = static_cast<TUnaryStreamingKernelState*>(state);
-            process(rowSet, *kernelState);
-        });
-
     return {
-        .Code = std::move(code),
-        .MakeState = [](size_t) {
-            return std::make_shared<TUnaryStreamingKernelState>();
-        },
+        .Node = {.Plan = std::move(runtime.Plan)},
         .OutputType = std::move(runtime.OutputType),
     };
 }
@@ -286,6 +266,7 @@ public:
         , ExternalCatalog_(std::move(externalCatalog))
         , RuntimeFilterBindings_(std::move(filterBindings))
         , RuntimeContext_(std::make_shared<TRuntimeContext>())
+        , TaskContext_{.Runtime = RuntimeContext_}
         , SourcesFeedingJoins_(Settings_.ScanSplit.MaxScanTasks == 0
             ? SourcesFeedingJoins(root)
             : std::unordered_set<const TSourceOperator*>{})
@@ -980,13 +961,19 @@ private:
         auto splitPlan = ScanSplits(src);
         auto* sourcePtr = &src.GetSource();
         auto* parquetSource = dynamic_cast<TParquetSource*>(sourcePtr);
-        auto code = std::make_shared<NScheduler::TSourceCode>(
-            [](void* state, TRowSet& rowSet) {
-                auto* sourceState = static_cast<TSchedulerSourceState*>(state);
-                return sourceState->Source->Next(rowSet)
-                    ? NScheduler::ETaskResult::OK
-                    : NScheduler::ETaskResult::FINISHED;
-            });
+        const auto label = src.GetAlias().empty() ? "source" : "source " + src.GetAlias();
+        // Parquet scans are built from records; other sources keep their task.
+        std::optional<std::vector<std::string>> columns;
+        std::shared_ptr<const NScheduler::TSourceCode> code;
+        if (parquetSource) {
+            TaskContext_.ParquetFiles.try_emplace(parquetSource->Path(), parquetSource->File());
+            if (const auto& restricted = parquetSource->RestrictedColumns()) {
+                columns.emplace(restricted->begin(), restricted->end());
+                std::ranges::sort(*columns);
+            }
+        } else {
+            code = MakeSourceCode();
+        }
 
         const size_t lanes = std::max<size_t>(
             splitPlan ? splitPlan->size() : 0, 1);
@@ -997,37 +984,34 @@ private:
             const auto* split = splitPlan && !splitPlan->empty()
                 ? &(*splitPlan)[p]
                 : nullptr;
-            std::shared_ptr<void> state;
-            if (parquetSource && split && !split->RowGroups.empty()) {
-                auto owned = parquetSource->MakeRowGroupsSource(split->RowGroups);
-                auto* ptr = owned.get();
-                state = std::make_shared<TSchedulerSourceState>(
-                    TSchedulerSourceState{
-                        .Source = ptr,
-                        .OwnedSource = std::move(owned),
-                    });
-            } else if (parquetSource && splitPlan && splitPlan->empty()) {
-                auto owned = parquetSource->MakeRowGroupsSource({});
-                auto* ptr = owned.get();
-                state = std::make_shared<TSchedulerSourceState>(
-                    TSchedulerSourceState{
-                        .Source = ptr,
-                        .OwnedSource = std::move(owned),
-                    });
-            } else {
-                state = std::make_shared<TSchedulerSourceState>(
-                    TSchedulerSourceState{.Source = sourcePtr});
+            if (parquetSource) {
+                auto rowGroups = parquetSource->RowGroups();
+                if (split && !split->RowGroups.empty()) {
+                    rowGroups.emplace(split->RowGroups.begin(), split->RowGroups.end());
+                } else if (splitPlan && splitPlan->empty()) {
+                    rowGroups.emplace();
+                }
+                auto& node = AddNode({
+                    .ExecStageId = execStageId,
+                    .TaskGroupId = execStageId,
+                    .DebugKind = "source",
+                    .DebugLabel = label,
+                    .Body = NScheduler::TParquetScanNode{
+                        .Out = PortSpec(Graph_, &outConn, p + outLaneOffset),
+                        .Path = parquetSource->Path(),
+                        .Columns = columns,
+                        .RowGroups = std::move(rowGroups),
+                    },
+                });
+                result.Producers.push_back(&node);
+                continue;
             }
             auto task = std::make_unique<NScheduler::TSourceTask>(
                 code,
-                std::move(state),
+                std::make_shared<TSchedulerSourceState>(TSchedulerSourceState{.Source = sourcePtr}),
                 NScheduler::TOutputPort{.Connection = &outConn, .Lane = p + outLaneOffset});
             auto& node = Graph_.AddOwnedNode(std::move(task));
-            MarkNode(node,
-                "source",
-                execStageId,
-                src.GetAlias().empty() ? "source" : "source " + src.GetAlias(),
-                execStageId);
+            MarkNode(node, "source", execStageId, label, execStageId);
             result.Producers.push_back(&node);
         }
         return result;
@@ -1163,13 +1147,16 @@ private:
         result.OutputType = std::move(stage.OutputType);
         result.Producers.reserve(lanes);
         for (size_t p = 0; p < lanes; ++p) {
-            auto task = std::make_unique<NScheduler::TUnaryTask>(
-                stage.Code,
-                stage.MakeState(p),
-                NScheduler::TInputPort{.Connection = &childConnRef, .Lane = p},
-                NScheduler::TOutputPort{.Connection = &outConn, .Lane = p + outLaneOffset});
-            auto& node = Graph_.AddOwnedNode(std::move(task));
-            MarkNode(node, stageKind, execStageId, stageKind, execStageId);
+            auto body = stage.Node;
+            body.In = PortSpec(Graph_, &childConnRef, p);
+            body.Out = PortSpec(Graph_, &outConn, p + outLaneOffset);
+            auto& node = AddNode({
+                .ExecStageId = execStageId,
+                .TaskGroupId = execStageId,
+                .DebugKind = stageKind,
+                .DebugLabel = stageKind,
+                .Body = std::move(body),
+            });
             Graph_.AddEdge(*childOut.Producers[p], node, childConnRef, p, p);
             result.Producers.push_back(&node);
         }
@@ -2036,7 +2023,7 @@ private:
                 1, lookupTaskCount, "late-lookup-requests");
             // TBroadcastConnection requires one producer. This bridge turns
             // the already gathered locator stream into that producer.
-            auto& forwardNode = AddTask(Graph_, NodeSpecs_, {
+            auto& forwardNode = AddNode({
                 .TaskGroupId = NewTaskGroup(),
                 .DebugKind = "late-lookup-broadcast",
                 .DebugLabel = "late-lookup-broadcast",
@@ -2472,7 +2459,7 @@ private:
             auto& broadcastRef = AddConn<NScheduler::TBroadcastConnection>(
                 1, lanes, "cross-scalar-broadcast");
 
-            auto& fwdNode = AddTask(Graph_, NodeSpecs_, {
+            auto& fwdNode = AddNode({
                 .TaskGroupId = NewTaskGroup(),
                 .DebugKind = "broadcast",
                 .DebugLabel = "broadcast",
@@ -2578,7 +2565,7 @@ private:
             &join, EExecPlanNodeKind::CrossResidualFilter);
         const auto residualGroup = StageLabel(
             "cross-residual-filter", residualStageId);
-        TSchedulerUnaryStage stage =
+        auto stage =
             [&]() {
                 TStageDiagnosticsScope diagnosticsScope(Diagnostics_, residualGroup);
                 // The residual is a separate executable stage even though its
@@ -2591,17 +2578,16 @@ private:
         result.OutputType = std::move(stage.OutputType);
         result.Producers.reserve(lanes);
         for (size_t m = 0; m < lanes; ++m) {
-            auto task = std::make_unique<NScheduler::TUnaryTask>(
-                stage.Code,
-                stage.MakeState(m),
-                NScheduler::TInputPort{.Connection = residualConn, .Lane = m},
-                NScheduler::TOutputPort{.Connection = &outConn, .Lane = m + outLaneOffset});
-            auto& node = Graph_.AddOwnedNode(std::move(task));
-            MarkNode(node,
-                "filter",
-                residualStageId,
-                "filter",
-                residualStageId);
+            auto body = stage.Node;
+            body.In = PortSpec(Graph_, residualConn, m);
+            body.Out = PortSpec(Graph_, &outConn, m + outLaneOffset);
+            auto& node = AddNode({
+                .ExecStageId = residualStageId,
+                .TaskGroupId = residualStageId,
+                .DebugKind = "filter",
+                .DebugLabel = "filter",
+                .Body = std::move(body),
+            });
             Graph_.AddEdge(*crossNodes[m], node, *residualConn, m, m);
             result.Producers.push_back(&node);
         }
@@ -2961,6 +2947,10 @@ public:
     TNodeSpecs& NodeSpecs() {
         return NodeSpecs_;
     }
+    const std::shared_ptr<TRuntimeContext>& RuntimeContext() const
+    {
+        return RuntimeContext_;
+    }
     std::vector<TLoweredExecStage>& ExecStages() {
         return ExecStages_;
     }
@@ -2969,6 +2959,16 @@ public:
     }
 
 private:
+    // Builds the task through the node factory; the slots of the kernels
+    // generated so far are appended first.
+    NScheduler::TTaskNode& AddNode(NScheduler::TNodeSpec record)
+    {
+        for (size_t i = TaskContext_.Slots.size(); i < KernelSink_->size(); ++i) {
+            TaskContext_.Slots.push_back((*KernelSink_)[i].Slot);
+        }
+        return AddTask(Graph_, NodeSpecs_, std::move(record), TaskContext_);
+    }
+
     TExecStageId NewExecStage(
         const IOperator* op,
         EExecPlanNodeKind kind,
@@ -3006,6 +3006,8 @@ private:
     std::shared_ptr<const TExternalCatalogSnapshot> ExternalCatalog_;
     std::shared_ptr<IRuntimeFilterBindingFactory> RuntimeFilterBindings_;
     std::shared_ptr<TRuntimeContext> RuntimeContext_;
+    // Slots follow KernelSink_; ParquetFiles reuses the plan's opened files.
+    NScheduler::TNodeTaskContext TaskContext_;
     std::unordered_set<const TSourceOperator*> SourcesFeedingJoins_;
     // Split planning includes Parquet predicate compilation and evaluation;
     // OutputLanes and LowerSource both query it. nullopt means "use the original
@@ -3281,14 +3283,16 @@ TLoweredPlan LowerPlanToGraph(
         .ExecStages = std::move(lowerer.ExecStages()),
         .RuntimeFilters = std::move(lowerer.RuntimeFilters()),
         .NodeSpecs = std::move(nodeSpecs),
+        .RuntimeContext = lowerer.RuntimeContext(),
     };
 }
 
 void AttachSink(TLoweredPlan& lowered, ISink& sink) {
+    TNodeTaskContext context{.Sink = &sink};
     auto& sinkNode = AddTask(*lowered.Graph, lowered.NodeSpecs, {
         .DebugKind = "sink",
         .Body = TSinkWriterNode{.In = PortSpec(*lowered.Graph, lowered.FinalGather, 0)},
-    }, &sink);
+    }, context);
     for (size_t p = 0; p < lowered.Lanes; ++p) {
         lowered.Graph->AddEdge(
             *lowered.Producers[p], sinkNode, *lowered.FinalGather, p, 0);
@@ -3313,7 +3317,11 @@ std::optional<TGraphSpec> ExtractLoweredGraphSpec(
         }
         return std::nullopt;
     }
-    return ExtractGraphSpec(*lowered.Graph, std::move(nodes));
+    auto spec = ExtractGraphSpec(*lowered.Graph, std::move(nodes));
+    if (lowered.RuntimeContext) {
+        spec.Regexes = lowered.RuntimeContext->Regexes.Specs();
+    }
+    return spec;
 }
 
 bool RunPlanIntoSink(

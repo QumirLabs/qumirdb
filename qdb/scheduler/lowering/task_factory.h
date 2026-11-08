@@ -29,6 +29,15 @@ struct TProcessorTaskState : NScheduler::ITaskState {
     }
 };
 
+// The source a source task reads; OwnedSource is set when the task owns it.
+struct TSchedulerSourceState {
+    ISource* Source = nullptr;
+    std::unique_ptr<ISource> OwnedSource;
+};
+
+// Source code that reads TSchedulerSourceState::Source until it ends.
+std::shared_ptr<const NScheduler::TSourceCode> MakeSourceCode();
+
 struct TAggregateBlockingState : TProcessorTaskState<TAggregateBlockingState> {
     explicit TAggregateBlockingState(
         TAggregateKernels kernels,
