@@ -183,6 +183,60 @@ TEST(GraphSpec, ExtractReturnsTheSameSpec)
     EXPECT_THROW(ExtractGraphSpec(*graph, {}), std::runtime_error);
 }
 
+struct TForeignConnection : IConnection {
+    EConnectionKind Kind() const override
+    {
+        return EConnectionKind::OneToOne;
+    }
+
+    void Resize(size_t, size_t) override
+    {}
+
+    size_t SrcCount() const override
+    {
+        return 1;
+    }
+
+    size_t DstCount() const override
+    {
+        return 1;
+    }
+
+    bool CanPush(size_t) const override
+    {
+        return true;
+    }
+
+    bool Push(size_t, TRowSet&&) override
+    {
+        return true;
+    }
+
+    void Finish(size_t) override
+    {}
+
+    EFetchResult Fetch(size_t, TRowSet&) override
+    {
+        return EFetchResult::NO_DATA;
+    }
+};
+
+TEST(GraphSpec, ExtractRejectsNonLocalConnectionAndMissingRowsetConnection)
+{
+    TCountingSink sink;
+    const auto spec = FanOutSpec();
+
+    auto foreign = MaterializeGraph(spec, &sink);
+    foreign->AddConnection(std::make_unique<TForeignConnection>());
+    EXPECT_THROW(ExtractGraphSpec(*foreign, spec.Nodes), std::runtime_error);
+
+    auto bare = MaterializeGraph(spec, &sink);
+    auto& src = *bare->Nodes()[0];
+    auto& dst = *bare->Nodes()[3];
+    bare->AddOwnedEdge(src, dst, nullptr);
+    EXPECT_THROW(ExtractGraphSpec(*bare, spec.Nodes), std::runtime_error);
+}
+
 TEST(GraphSpec, RejectsInvalidSpecs)
 {
     auto spec = FanOutSpec();

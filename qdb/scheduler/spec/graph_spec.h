@@ -183,7 +183,9 @@ std::unique_ptr<TTaskGraph> MaterializeGraph(const TGraphSpec& spec, ISink* sink
 
 // Reads connections, edges and externals from a graph built by MaterializeGraph
 // or by hand. The caller supplies the node records, one per graph node in
-// order. Throws std::runtime_error for a connection that is not a local one.
+// order. Externals keep the graph's current order (sorted by id after Seal).
+// Throws std::runtime_error for a connection that is not a local one and for a
+// rowset edge without a connection.
 TGraphSpec ExtractGraphSpec(const TTaskGraph& graph, std::vector<TNodeSpec> nodes);
 
 } // namespace NScheduler

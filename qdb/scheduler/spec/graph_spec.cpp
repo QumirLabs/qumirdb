@@ -113,6 +113,9 @@ TTaskNode& NodeAt(const std::vector<TTaskNode*>& nodes, uint32_t index)
 
 TConnectionSpec ExtractConnection(const IConnection& connection)
 {
+    if (!dynamic_cast<const TLocalConnection*>(&connection)) {
+        throw std::runtime_error("ExtractGraphSpec supports local connections only");
+    }
     TConnectionSpec spec{
         .Kind = connection.Kind(),
         .SrcCount = static_cast<uint32_t>(connection.SrcCount()),
@@ -234,6 +237,8 @@ TGraphSpec ExtractGraphSpec(const TTaskGraph& graph, std::vector<TNodeSpec> node
         };
         if (edge->Connection) {
             edgeSpec.Connection = connectionIds.at(edge->Connection);
+        } else if (edge->Kind != ETaskEdgeKind::Dependency) {
+            throw std::runtime_error("a rowset edge needs a connection");
         }
         spec.Edges.push_back(edgeSpec);
     }
