@@ -280,6 +280,17 @@ TEST(SchedulerThreaded, ReadyQueueCapacityIsAtLeastNodeCount) {
     ASSERT_TRUE(scheduler.Run(&error)) << error;
 }
 
+TEST(SchedulerThreaded, SingleTaskWithReadyQueueCapacityOne) {
+    TTaskGraph graph;
+    graph.AddOwnedNode(std::make_unique<TFinishTask>());
+    const auto sealed = graph.Seal();
+    ASSERT_TRUE(sealed);
+
+    TThreadedScheduler scheduler(sealed, 2, /*readyQueueCapacity=*/1);
+    std::string error;
+    ASSERT_TRUE(scheduler.Run(&error)) << error;
+}
+
 TEST(SchedulerThreaded, RechecksConsumerWhenInputsAlreadyFinished) {
     auto sourceTask = std::make_unique<TFinishTask>();
     auto sinkTask = std::make_unique<TNeedFinishedReplayTask>();

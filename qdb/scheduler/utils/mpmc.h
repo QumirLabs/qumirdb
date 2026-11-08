@@ -18,7 +18,9 @@ public:
         : Capacity_(capacity)
         , Buffer_(Capacity_)
     {
-        assert(Capacity_ > 0);
+        // Pop sets Sequence to pos + Capacity_, which equals the "full" value
+        // pos + 1 for one slot (issue 497).
+        assert(Capacity_ >= 2);
         for (size_t i = 0; i < Capacity_; ++i) {
             Buffer_[i].Sequence.store(i, std::memory_order_relaxed);
         }

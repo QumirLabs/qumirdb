@@ -29,7 +29,7 @@ TThreadedScheduler::TThreadedScheduler(
     , Ready_(std::max({
         readyQueueCapacity,
         graph.TaskCount(),
-        size_t{1}}))
+        size_t{2}}))
     , WorkerCount_(std::max<size_t>(workerCount, 1))
 {}
 
