@@ -55,7 +55,7 @@ async function schemaTypes({ qdb, ozType }) {
   const legacy = await runExporter(
     qdb, singleColumnRequest('SELECT amount FROM t', 'Nullable<DECIMAL(18,2)>'));
   assert.equal(legacy.ok, false, 'legacy schema type syntax is still accepted');
-  assert.match(legacy.error?.message || '', /unexpected trailing input/);
+  assert.match(legacy.error?.message || '', /Nullable expects one type argument/);
 }
 
 async function typeErrorDiagnostics({ qdb }) {

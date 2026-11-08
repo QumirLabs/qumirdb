@@ -29,6 +29,7 @@
 #include <qdb/plan/passes/unbound_vars.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
+#include <qdb/plan/types/type_text.h>
 #include <qdb/kernel/compiler.h>
 #include <qdb/kernel/finalize_fused.h>
 #include <qdb/kernel/join_key.h>
@@ -712,92 +713,6 @@ std::expected<TCompiledWasm64Module, std::string> CompileKernelAstToWasm(
     };
 }
 
-NQumir::NAst::TTypePtr TranslateSchemaNamedTypes(
-    NQumir::NAst::TTypePtr type)
-{
-    using namespace NQumir::NAst;
-
-    if (auto named = TMaybeType<TNamedType>(type)) {
-        auto value = named.Cast();
-        if (value->Name == "Nullable") {
-            if (value->UnderlyingType || value->TypeArgs.size() != 1 ||
-                value->TypeArgs[0].Kind != TGenericArg::EKind::Type ||
-                !value->TypeArgs[0].Type)
-            {
-                throw std::runtime_error(
-                    "schema type Nullable expects one type argument");
-            }
-            return std::make_shared<TNullable>(
-                TranslateSchemaNamedTypes(value->TypeArgs[0].Type));
-        }
-        if (value->Name == "Decimal") {
-            if (value->UnderlyingType || value->TypeArgs.size() != 2 ||
-                value->TypeArgs[0].Kind != TGenericArg::EKind::Value ||
-                value->TypeArgs[1].Kind != TGenericArg::EKind::Value)
-            {
-                throw std::runtime_error(
-                    "schema type Decimal expects precision and scale value arguments");
-            }
-            auto precision = ParseDecimalArg(value->TypeArgs[0].Value);
-            auto scale = ParseDecimalArg(value->TypeArgs[1].Value);
-            if (!precision || !scale) {
-                throw std::runtime_error(
-                    "schema type Decimal precision and scale must be integers");
-            }
-            return std::make_shared<TDecimal>(*precision, *scale);
-        }
-        for (auto& arg : value->TypeArgs) {
-            if (arg.Kind == TGenericArg::EKind::Type) {
-                arg.Type = TranslateSchemaNamedTypes(std::move(arg.Type));
-            }
-        }
-        value->UnderlyingType =
-            TranslateSchemaNamedTypes(std::move(value->UnderlyingType));
-        return type;
-    }
-    if (auto function = TMaybeType<TFunctionType>(type)) {
-        auto value = function.Cast();
-        for (auto& param : value->ParamTypes) {
-            param = TranslateSchemaNamedTypes(std::move(param));
-        }
-        value->ReturnType = TranslateSchemaNamedTypes(std::move(value->ReturnType));
-    } else if (auto future = TMaybeType<TFutureType>(type)) {
-        auto value = future.Cast();
-        value->ResultType = TranslateSchemaNamedTypes(std::move(value->ResultType));
-    } else if (auto array = TMaybeType<TArrayType>(type)) {
-        auto value = array.Cast();
-        value->ElementType = TranslateSchemaNamedTypes(std::move(value->ElementType));
-    } else if (auto pointer = TMaybeType<TPointerType>(type)) {
-        auto value = pointer.Cast();
-        value->PointeeType = TranslateSchemaNamedTypes(std::move(value->PointeeType));
-    } else if (auto reference = TMaybeType<TReferenceType>(type)) {
-        auto value = reference.Cast();
-        value->ReferencedType = TranslateSchemaNamedTypes(std::move(value->ReferencedType));
-    } else if (auto structure = TMaybeType<TStructType>(type)) {
-        for (auto& [name, fieldType] : structure.Cast()->Fields) {
-            fieldType = TranslateSchemaNamedTypes(std::move(fieldType));
-        }
-    }
-    return type;
-}
-
-NQumir::NAst::TTypePtr ParseSchemaType(std::string_view typeName) {
-    std::istringstream input{std::string(typeName)};
-    NQumir::NAst::NCore::TTokenStream tokens(input);
-    auto parsed = NQumir::NAst::NCore::ParseType(tokens);
-    if (!parsed) {
-        throw std::runtime_error(
-            "invalid schema type '" + std::string(typeName) + "': " +
-            parsed.error().ToString());
-    }
-    if (!tokens.Next().IsEof()) {
-        throw std::runtime_error(
-            "invalid schema type '" + std::string(typeName) +
-            "': unexpected trailing input");
-    }
-    return TranslateSchemaNamedTypes(std::move(*parsed));
-}
-
 std::optional<uint64_t> ParseUnsignedStatsInteger(
     const llvm::json::Object& object,
     const char* key)
@@ -879,7 +794,7 @@ std::vector<std::pair<std::string, NQumir::NAst::TTypePtr>> ParseTableColumns(
         if (!name || !type) {
             throw std::runtime_error("dataset column must have name and type");
         }
-        out.emplace_back(std::string(*name), ParseSchemaType(*type));
+        out.emplace_back(std::string(*name), NQdb::ParseTypeText(*type));
     }
     return out;
 }
