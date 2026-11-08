@@ -20,6 +20,7 @@
 #include <bit>
 #include <chrono>
 #include <cstring>
+#include <deque>
 #include <limits>
 #include <optional>
 #include <map>
@@ -110,6 +111,7 @@ struct TMixedBatch {
             .OffsetWidth = 8,
         };
         Message.DstTaskId = 123;
+        Message.Seq = 7;
         Message.Descriptor = Layouts.data();
         Message.RowSet = TRowSet{
             .Columns = Columns.data(),
@@ -122,6 +124,7 @@ struct TMixedBatch {
 
 void CheckMixed(const TDataChunk& message) {
     EXPECT_EQ(message.DstTaskId, 123);
+    EXPECT_EQ(message.Seq, 7);
     const auto& rows = message.RowSet;
     ASSERT_EQ(rows.ColumnCount, 4);
     ASSERT_EQ(rows.RowCount, 3);
@@ -346,18 +349,18 @@ TEST(DistributedSerialization, RejectsEveryTruncatedPrefixWithoutChangingOutput)
 TEST(DistributedSerialization, RejectsInvalidDimensionsAndLayouts) {
     TMixedBatch original;
     const auto bytes = Encode(original.Message);
-    for (size_t offset : {8, 16}) {
+    for (size_t offset : {16, 24}) {
         auto invalid = bytes;
         Replace(invalid, offset, std::numeric_limits<uint64_t>::max());
         EXPECT_THROW(TDecodedChunk{invalid}, std::runtime_error);
     }
-    for (const auto [offset, value] : std::array<std::pair<size_t, uint8_t>, 3>{{{24, 3}, {25, 2}, {25, 1}}}) {
+    for (const auto [offset, value] : std::array<std::pair<size_t, uint8_t>, 3>{{{32, 3}, {33, 2}, {33, 1}}}) {
         auto invalid = bytes;
         Replace(invalid, offset, value);
         EXPECT_THROW(TDecodedChunk{invalid}, std::runtime_error);
     }
     auto huge = bytes;
-    Replace(huge, 16, static_cast<uint64_t>(std::numeric_limits<int64_t>::max()));
+    Replace(huge, 24, static_cast<uint64_t>(std::numeric_limits<int64_t>::max()));
     EXPECT_THROW(TDecodedChunk{huge}, std::runtime_error);
     TDataChunk empty;
     auto flag = Encode(empty);
@@ -375,16 +378,16 @@ TEST(DistributedSerialization, RejectsInvalidStringOffsets) {
     message.RowSet = {.Columns = &column, .ColumnCount = 1, .RowCount = 3};
     const auto bytes = Encode(message);
     auto invalid = bytes;
-    Replace(invalid, 26, uint8_t{3});
+    Replace(invalid, 34, uint8_t{3});
     EXPECT_THROW(TDecodedChunk{invalid}, std::runtime_error);
     for (uint32_t first : {1u, std::numeric_limits<uint32_t>::max()}) {
         invalid = bytes;
-        Replace(invalid, 27, first);
+        Replace(invalid, 35, first);
         EXPECT_THROW(TDecodedChunk{invalid}, std::runtime_error);
     }
     for (uint32_t last : {2u, 1000u}) {
         invalid = bytes;
-        Replace(invalid, 39, last);
+        Replace(invalid, 47, last);
         EXPECT_THROW(TDecodedChunk{invalid}, std::runtime_error);
     }
 }
@@ -1180,121 +1183,269 @@ struct TCollectorState {
     std::vector<int64_t> Rows;
 };
 
+struct TRemotePipeline {
+    int64_t Total = 300;
+    size_t Workers = 2;
+    size_t OutboxCapacity = 2;
+    size_t InboxCapacity = 2;
+    size_t Window = 2;
+};
+
+// producer -> remote sink | fake compute actors | remote source -> collector.
+// Both fake actors share one thread; FIFO queues stand for the transport.
+void RunRemotePipeline(const TRemotePipeline& options) {
+    using namespace NQdb::NScheduler;
+    std::atomic<int> destroyed = 0;
+    TActorNotificationChannel channelA(std::make_unique<TFakeNotifier>());
+    TActorNotificationChannel channelB(std::make_unique<TFakeNotifier>());
+
+    auto [sinkCode, sinkState] = MakeRemoteSink(
+        1, TActorId{}, 2, nullptr, channelA, options.OutboxCapacity, options.Window);
+    auto producerCode = std::make_shared<TSourceCode>([&](void* state, TRowSet& rowSet) {
+        auto* producer = static_cast<TProducerState*>(state);
+        if (producer->Next > producer->Total) {
+            return ETaskResult::FINISHED;
+        }
+        rowSet = CountedRows(producer->Next++, &destroyed);
+        return ETaskResult::OK;
+    });
+    auto producerState = std::make_shared<TProducerState>(TProducerState{.Total = options.Total});
+
+    // Remote endpoints arrive with empty code; the compute actor binds its own.
+    auto producerToSink = std::make_unique<TOneToOneConnection>();
+    auto* producerToSinkPtr = producerToSink.get();
+    TTaskGraph graphA;
+    auto& producer = graphA.AddOwnedNode(std::make_unique<TSourceTask>(
+        producerCode, producerState, TOutputPort{.Connection = producerToSinkPtr}));
+    auto& sink = graphA.AddOwnedNode(std::make_unique<TSinkTask>(
+        nullptr, nullptr, TInputPort{.Connection = producerToSinkPtr}));
+    graphA.AddOwnedEdge(producer, sink, std::move(producerToSink));
+    graphA.MarkExternal(sink, sinkState->Id);
+    const auto sealedA = graphA.Seal();
+    ASSERT_TRUE(sealedA);
+    static_cast<TSinkTask*>(sink.Task)->BindCode(sinkCode, sinkState);
+
+    auto [sourceCode, sourceState] = MakeRemoteSource(2, TActorId{}, 1, channelB, options.InboxCapacity);
+    auto collectorCode = std::make_shared<TSinkCode>([](void* state, const TRowSet& rowSet) {
+        static_cast<TCollectorState*>(state)->Rows.push_back(rowSet.RowCount);
+        return ETaskResult::OK;
+    });
+    auto collectorState = std::make_shared<TCollectorState>();
+
+    auto sourceToCollector = std::make_unique<TOneToOneConnection>();
+    auto* sourceToCollectorPtr = sourceToCollector.get();
+    TTaskGraph graphB;
+    auto& source = graphB.AddOwnedNode(std::make_unique<TSourceTask>(
+        nullptr, nullptr, TOutputPort{.Connection = sourceToCollectorPtr}));
+    auto& collector = graphB.AddOwnedNode(std::make_unique<TSinkTask>(
+        collectorCode, collectorState, TInputPort{.Connection = sourceToCollectorPtr}));
+    graphB.AddOwnedEdge(source, collector, std::move(sourceToCollector));
+    graphB.MarkExternal(source, sourceState->Id);
+    const auto sealedB = graphB.Seal();
+    ASSERT_TRUE(sealedB);
+    static_cast<TSourceTask*>(source.Task)->BindCode(sourceCode, sourceState);
+
+    TThreadedScheduler schedulerA(sealedA, options.Workers);
+    TThreadedScheduler schedulerB(sealedB, options.Workers);
+    TSchedulerChannel wakeA(schedulerA);
+    TSchedulerChannel wakeB(schedulerB);
+
+    std::atomic<bool> stop = false;
+    std::thread actors([&] {
+        std::deque<std::pair<uint64_t, TRowSet>> chunks;
+        std::deque<uint64_t> confirms;
+        auto send = [&](uint64_t seq, TRowSet&& rowSet) {
+            EXPECT_LE(sinkState->Sent - sinkState->Confirmed, options.Window);
+            chunks.emplace_back(seq, rowSet);
+        };
+        int64_t delivered = 0;
+        while (!stop.load(std::memory_order_acquire)) {
+            bool idle = true;
+            TRemoteSinkState* sinkReady = nullptr;
+            while (channelA.SinkQueue().TryPop(sinkReady)) {
+                idle = false;
+                sinkReady->Drain(send);
+                wakeA.Notify(sealedA.ExternalNode(sinkReady->Id));
+            }
+            TRemoteSourceState* sourceReady = nullptr;
+            while (channelB.SourceQueue().TryPop(sourceReady)) {
+                idle = false;
+                if (const auto applied = sourceReady->TakeApplied()) {
+                    confirms.push_back(applied);
+                }
+            }
+            if (!chunks.empty()) {
+                idle = false;
+                auto [seq, rowSet] = chunks.front();
+                chunks.pop_front();
+                if (!sourceState->Push(seq, std::move(rowSet))) {
+                    ADD_FAILURE() << "chunk " << seq << " does not fit";
+                    Release(&rowSet);
+                }
+                if (++delivered == options.Total) {
+                    sourceState->Finish();
+                }
+                wakeB.Notify(sealedB.ExternalNode(sourceState->Id));
+            }
+            if (!confirms.empty()) {
+                idle = false;
+                EXPECT_TRUE(sinkState->Confirm(confirms.front(), send));
+                confirms.pop_front();
+                wakeA.Notify(sealedA.ExternalNode(sinkState->Id));
+            }
+            if (idle) {
+                std::this_thread::yield();
+            }
+        }
+    });
+
+    std::string errorA;
+    std::string errorB;
+    bool okA = false;
+    bool okB = false;
+    std::thread runA([&] { okA = schedulerA.Run(&errorA); });
+    std::thread runB([&] { okB = schedulerB.Run(&errorB); });
+    runA.join();
+    runB.join();
+    stop.store(true, std::memory_order_release);
+    actors.join();
+
+    EXPECT_TRUE(okA) << errorA;
+    EXPECT_TRUE(okB) << errorB;
+    ASSERT_EQ(collectorState->Rows.size(), static_cast<size_t>(options.Total));
+    for (int64_t i = 0; i < options.Total; ++i) {
+        ASSERT_EQ(collectorState->Rows[i], i + 1);
+    }
+    EXPECT_EQ(sinkState->Sent, static_cast<uint64_t>(options.Total));
+    EXPECT_EQ(destroyed.load(), options.Total);
+}
+
 } // namespace
 
-// producer -> remote sink | fake ComputeActor | remote source -> collector
 TEST(DistributedScheduler, RemoteTasksMoveRowSetsInOrder) {
-    using namespace NQdb::NScheduler;
-    constexpr int64_t total = 300;
-
     for (int iteration = 0; iteration < 20; ++iteration) {
         SCOPED_TRACE(iteration);
-        std::atomic<int> destroyed = 0;
-        TActorNotificationChannel actorChannel(std::make_unique<TFakeNotifier>());
-
-        auto [sinkCode, sinkState] = MakeRemoteSink(1, TActorId{}, 2, nullptr, actorChannel, 2);
-        auto producerCode = std::make_shared<TSourceCode>([&](void* state, TRowSet& rowSet) {
-            auto* producer = static_cast<TProducerState*>(state);
-            if (producer->Next > producer->Total) {
-                return ETaskResult::FINISHED;
-            }
-            rowSet = CountedRows(producer->Next++, &destroyed);
-            return ETaskResult::OK;
-        });
-        auto producerState = std::make_shared<TProducerState>(TProducerState{.Total = total});
-
-        // Remote endpoints arrive with empty code; the compute actor binds its own.
-        auto producerToSink = std::make_unique<TOneToOneConnection>();
-        auto* producerToSinkPtr = producerToSink.get();
-        TTaskGraph graphA;
-        auto& producer = graphA.AddOwnedNode(std::make_unique<TSourceTask>(
-            producerCode, producerState, TOutputPort{.Connection = producerToSinkPtr}));
-        auto& sink = graphA.AddOwnedNode(std::make_unique<TSinkTask>(
-            nullptr, nullptr, TInputPort{.Connection = producerToSinkPtr}));
-        graphA.AddOwnedEdge(producer, sink, std::move(producerToSink));
-        graphA.MarkExternal(sink, sinkState->Id);
-        const auto sealedA = graphA.Seal();
-        ASSERT_TRUE(sealedA);
-        static_cast<TSinkTask*>(sink.Task)->BindCode(sinkCode, sinkState);
-
-        auto [sourceCode, sourceState] = MakeRemoteSource(2, 2);
-        auto collectorCode = std::make_shared<TSinkCode>([](void* state, const TRowSet& rowSet) {
-            static_cast<TCollectorState*>(state)->Rows.push_back(rowSet.RowCount);
-            return ETaskResult::OK;
-        });
-        auto collectorState = std::make_shared<TCollectorState>();
-
-        auto sourceToCollector = std::make_unique<TOneToOneConnection>();
-        auto* sourceToCollectorPtr = sourceToCollector.get();
-        TTaskGraph graphB;
-        auto& source = graphB.AddOwnedNode(std::make_unique<TSourceTask>(
-            nullptr, nullptr, TOutputPort{.Connection = sourceToCollectorPtr}));
-        auto& collector = graphB.AddOwnedNode(std::make_unique<TSinkTask>(
-            collectorCode, collectorState, TInputPort{.Connection = sourceToCollectorPtr}));
-        graphB.AddOwnedEdge(source, collector, std::move(sourceToCollector));
-        graphB.MarkExternal(source, sourceState->Id);
-        const auto sealedB = graphB.Seal();
-        ASSERT_TRUE(sealedB);
-        static_cast<TSourceTask*>(source.Task)->BindCode(sourceCode, sourceState);
-
-        TThreadedScheduler schedulerA(sealedA, 2);
-        TThreadedScheduler schedulerB(sealedB, 2);
-        TSchedulerChannel channelA(schedulerA);
-        TSchedulerChannel channelB(schedulerB);
-
-        std::atomic<bool> stop = false;
-        std::thread actor([&] {
-            int64_t delivered = 0;
-            bool finished = false;
-            while (!stop.load(std::memory_order_acquire)) {
-                TRemoteSinkState* state = nullptr;
-                if (!actorChannel.Queue().TryPop(state)) {
-                    std::this_thread::yield();
-                    continue;
-                }
-                state->Drain([&](TRowSet&& rowSet) {
-                    while (!sourceState->Push(std::move(rowSet))) {
-                        channelB.Notify(sealedB.ExternalNode(sourceState->Id));
-                        std::this_thread::yield();
-                    }
-                    channelB.Notify(sealedB.ExternalNode(sourceState->Id));
-                    ++delivered;
-                });
-                channelA.Notify(sealedA.ExternalNode(state->Id));
-                if (delivered == total && !finished) {
-                    finished = true;
-                    sourceState->Finish();
-                    channelB.Notify(sealedB.ExternalNode(sourceState->Id));
-                }
-            }
-        });
-
-        std::string errorA;
-        std::string errorB;
-        bool okA = false;
-        bool okB = false;
-        std::thread runA([&] { okA = schedulerA.Run(&errorA); });
-        std::thread runB([&] { okB = schedulerB.Run(&errorB); });
-        runA.join();
-        runB.join();
-        stop.store(true, std::memory_order_release);
-        actor.join();
-
-        EXPECT_TRUE(okA) << errorA;
-        EXPECT_TRUE(okB) << errorB;
-        ASSERT_EQ(collectorState->Rows.size(), static_cast<size_t>(total));
-        for (int64_t i = 0; i < total; ++i) {
-            ASSERT_EQ(collectorState->Rows[i], i + 1);
-        }
-        EXPECT_EQ(destroyed.load(), total);
+        RunRemotePipeline({});
     }
+}
+
+TEST(DistributedScheduler, RemoteTasksDeliverEverythingWithSmallWindows) {
+    for (size_t window : {1, 2, 3}) {
+        for (size_t outbox : {1, 4}) {
+            for (int iteration = 0; iteration < 3; ++iteration) {
+                SCOPED_TRACE(std::to_string(window) + "/" + std::to_string(outbox) + "/" + std::to_string(iteration));
+                // An inbox of exactly the window must never overflow.
+                RunRemotePipeline({
+                    .Total = 1000,
+                    .Workers = 4,
+                    .OutboxCapacity = outbox,
+                    .InboxCapacity = window,
+                    .Window = window,
+                });
+            }
+        }
+    }
+}
+
+TEST(DistributedScheduler, RemoteSinkKeepsAtMostWindowChunksUnconfirmed) {
+    using namespace NQdb::NScheduler;
+    std::atomic<int> destroyed = 0;
+    TActorNotificationChannel channel(std::make_unique<TFakeNotifier>());
+    auto [code, state] = MakeRemoteSink(1, TActorId{}, 2, nullptr, channel, 8, 2);
+    std::vector<uint64_t> sent;
+    auto send = [&](uint64_t seq, TRowSet&& rowSet) {
+        sent.push_back(seq);
+        Release(&rowSet);
+    };
+    auto write = [&](int64_t rows) {
+        auto rowSet = CountedRows(rows, &destroyed);
+        EXPECT_EQ(code->Write(state.get(), rowSet), ETaskResult::OK);
+        Release(&rowSet);
+    };
+
+    for (int64_t i = 1; i <= 5; ++i) {
+        write(i);
+    }
+    TRemoteSinkState* queued = nullptr;
+    ASSERT_TRUE(channel.SinkQueue().TryPop(queued));
+    EXPECT_FALSE(channel.SinkQueue().TryPop(queued));
+    queued->Drain(send);
+    EXPECT_EQ(sent, (std::vector<uint64_t>{1, 2}));
+    // A parked state stays with the actor: a new row does not queue it again.
+    write(6);
+    EXPECT_FALSE(channel.SinkQueue().TryPop(queued));
+
+    EXPECT_TRUE(state->Confirm(1, send));
+    EXPECT_EQ(sent, (std::vector<uint64_t>{1, 2, 3}));
+    EXPECT_TRUE(state->Confirm(3, send));
+    EXPECT_EQ(sent, (std::vector<uint64_t>{1, 2, 3, 4, 5}));
+    EXPECT_FALSE(state->Confirm(6, send));
+    EXPECT_TRUE(state->Confirm(5, send));
+    EXPECT_EQ(sent, (std::vector<uint64_t>{1, 2, 3, 4, 5, 6}));
+    EXPECT_FALSE(channel.SinkQueue().TryPop(queued));
+
+    // The outbox ran empty inside the window, so the next row queues the state.
+    write(7);
+    ASSERT_TRUE(channel.SinkQueue().TryPop(queued));
+    queued->Drain(send);
+    EXPECT_EQ(sent.back(), 7);
+    EXPECT_EQ(destroyed.load(), 7);
+}
+
+TEST(DistributedScheduler, RemoteSourceConfirmsConsumedChunks) {
+    using namespace NQdb::NScheduler;
+    std::atomic<int> destroyed = 0;
+    TActorNotificationChannel channel(std::make_unique<TFakeNotifier>());
+    auto [code, state] = MakeRemoteSource(2, TActorId{}, 1, channel, 2);
+    auto push = [&](uint64_t seq) {
+        auto rowSet = CountedRows(seq, &destroyed);
+        if (state->Push(seq, std::move(rowSet))) {
+            return true;
+        }
+        Release(&rowSet);
+        return false;
+    };
+    TRowSet rowSet{};
+    auto next = [&] {
+        const auto result = code->Next(state.get(), rowSet);
+        if (result == ETaskResult::OK) {
+            Release(&rowSet);
+        }
+        return result;
+    };
+
+    EXPECT_TRUE(push(1));
+    EXPECT_FALSE(push(3));
+    EXPECT_TRUE(push(2));
+    EXPECT_FALSE(push(3));
+    // Received chunks are not confirmed before the source task takes them.
+    TRemoteSourceState* queued = nullptr;
+    EXPECT_FALSE(channel.SourceQueue().TryPop(queued));
+    EXPECT_EQ(state->TakeApplied(), 0);
+
+    ASSERT_EQ(next(), ETaskResult::OK);
+    EXPECT_EQ(rowSet.RowCount, 1);
+    ASSERT_TRUE(channel.SourceQueue().TryPop(queued));
+    EXPECT_EQ(queued->TakeApplied(), 1);
+    EXPECT_EQ(queued->TakeApplied(), 0);
+
+    // Pops between two wakes are confirmed once, with the last Seq.
+    EXPECT_TRUE(push(3));
+    ASSERT_EQ(next(), ETaskResult::OK);
+    ASSERT_EQ(next(), ETaskResult::OK);
+    EXPECT_EQ(rowSet.RowCount, 3);
+    EXPECT_EQ(next(), ETaskResult::WAITING);
+    ASSERT_TRUE(channel.SourceQueue().TryPop(queued));
+    EXPECT_FALSE(channel.SourceQueue().TryPop(queued));
+    EXPECT_EQ(queued->TakeApplied(), 3);
+    EXPECT_EQ(destroyed.load(), 5);
 }
 
 TEST(DistributedScheduler, ValidatesRemoteEndpoints) {
     using namespace NQdb::NScheduler;
     TActorNotificationChannel channel(std::make_unique<TFakeNotifier>());
     auto [sinkCode, sinkState] = MakeRemoteSink(1, TActorId{}, 2, nullptr, channel);
-    auto [sourceCode, sourceState] = MakeRemoteSource(2);
+    auto [sourceCode, sourceState] = MakeRemoteSource(2, TActorId{}, 1, channel);
     auto connection = std::make_unique<TOneToOneConnection>();
     auto* connectionPtr = connection.get();
     TTaskGraph graph;

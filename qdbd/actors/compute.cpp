@@ -21,7 +21,7 @@ using namespace NNet::NActors;
 namespace {
 
 struct TComputeActor : public IBehaviorActor {
-    struct TDefaultBehavior : public TBehavior<TDefaultBehavior, TTaskGraphMessage, TDataChunk> {
+    struct TDefaultBehavior : public TBehavior<TDefaultBehavior, TTaskGraphMessage, TDataChunk, TDataConfirm> {
         TDefaultBehavior(TComputeActor* parent)
             : Parent(parent)
         { }
@@ -32,6 +32,10 @@ struct TComputeActor : public IBehaviorActor {
 
         void Receive(TDataChunk&& message, TBlob, TActorContext::TPtr ctx) {
             Parent->OnDataChunk(std::move(message), ctx);
+        }
+
+        void Receive(TDataConfirm&& message, TBlob, TActorContext::TPtr ctx) {
+            Parent->OnDataConfirm(message, ctx);
         }
 
         void HandleUnknownMessage(TMessageId messageId, TBlob blob, TActorContext::TPtr ctx)
@@ -67,12 +71,16 @@ struct TComputeActor : public IBehaviorActor {
         // e.g. ComputeActorNotifier -> consumer notification queue -> send to ComputeActor
         // need to do it if we move Actors to multithreaded model
 
-        auto& queue = ActorChannel->Queue();
+        auto& queue = ActorChannel->SinkQueue();
         NQdb::NScheduler::TRemoteSinkState* state = nullptr;
         while (queue.TryPop(state)) {
             // process
             state->SendQueue(ctx);
             SchedulerSchannel->Notify(Graph.ExternalNode(state->Id));
+        }
+        NQdb::NScheduler::TRemoteSourceState* source = nullptr;
+        while (ActorChannel->SourceQueue().TryPop(source)) {
+            source->SendConfirm(ctx);
         }
     }
 
@@ -128,8 +136,26 @@ struct TComputeActor : public IBehaviorActor {
             return;
         }
         auto& [state, node] = it->second;
-        state->Push(std::move(chunk.RowSet));
+        if (!state->Push(chunk.Seq, std::move(chunk.RowSet))) {
+            // TODO: protocol errors
+            std::cerr << "compute actor: dropped chunk " << chunk.Seq << " for task " << chunk.DstTaskId
+                << ": out of order or beyond the window\n";
+            Release(&chunk.RowSet);
+            return;
+        }
         Scheduler->Schedule(node);
+    }
+
+    void OnDataConfirm(const TDataConfirm& confirm, TActorContext::TPtr& ctx) {
+        auto it = SinkStates.find(confirm.SinkId);
+        if (it == SinkStates.end() || !it->second->OnConfirm(confirm.LastApplied, ctx)) {
+            // TODO: protocol errors
+            std::cerr << "compute actor: dropped confirm " << confirm.LastApplied
+                << " for task " << confirm.SinkId << "\n";
+            return;
+        }
+        // The drain may have freed outbox space for a waiting sink task.
+        SchedulerSchannel->Notify(Graph.ExternalNode(confirm.SinkId));
     }
 
     void InitSource(
@@ -137,7 +163,8 @@ struct TComputeActor : public IBehaviorActor {
         NScheduler::TSourceTask& sourceTask,
         NScheduler::TTaskNode* node)
     {
-        auto [code, state] = NScheduler::MakeRemoteSource(endpoint.Id);
+        auto [code, state] = NScheduler::MakeRemoteSource(
+            endpoint.Id, endpoint.PeerActor, endpoint.PeerTaskId, *ActorChannel);
         sourceTask.BindCode(std::move(code), state);
         SourceStates.emplace(endpoint.Id, std::tuple{std::move(state), node});
     }

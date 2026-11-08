@@ -39,6 +39,8 @@ struct TSpawnComputeActorResponse {
 struct TDataChunk {
     static constexpr NNet::NActors::TMessageId MessageId = 200;
     uint64_t DstTaskId = 0;
+    // Numbers the chunks of one DstTaskId from 1; TDataConfirm acknowledges them.
+    uint64_t Seq = 0;
     TRowSet RowSet{};
     const TValueLayout* Descriptor = nullptr;
 
@@ -52,6 +54,14 @@ struct TFinish {
     uint64_t DstTaskId = 0;
 };
 
+// The consumer's source task has taken every chunk up to LastApplied; SinkId
+// selects the producer's sink, which may then send more.
+struct TDataConfirm {
+    static constexpr NNet::NActors::TMessageId MessageId = 203;
+    uint64_t SinkId = 0;
+    uint64_t LastApplied = 0;
+};
+
 enum class ERemoteEndpointKind {
     Source,
     Sink,
@@ -61,7 +71,7 @@ enum class ERemoteEndpointKind {
 struct TRemoteEndpoint {
     uint64_t Id = 0;
     ERemoteEndpointKind Kind = ERemoteEndpointKind::Source;
-    // Sink only: where the rows go.
+    // Sink: where the rows go. Source: where the confirms go (the peer sink).
     NNet::NActors::TActorId PeerActor;
     uint64_t PeerTaskId = 0;
     // Sink only: value layouts of the sent row sets.
@@ -101,6 +111,7 @@ inline void RegisterMessages(TMessagesFactory& factory) {
     factory.template RegisterSerializer<TSpawnComputeActorResponse>();
     factory.template RegisterSerializer<TDataChunk>();
     factory.template RegisterSerializer<TFinish>();
+    factory.template RegisterSerializer<TDataConfirm>();
     factory.template RegisterSerializer<TExecuteQuery>();
     factory.template RegisterSerializer<TExecuteQueryResponse>();
 }

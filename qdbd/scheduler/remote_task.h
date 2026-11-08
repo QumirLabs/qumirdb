@@ -9,6 +9,7 @@
 
 #include <qdbd/messages.h>
 
+#include <algorithm>
 #include <span>
 #include <string>
 
@@ -19,25 +20,32 @@ namespace NQdb {
 namespace NScheduler {
 
 struct TRemoteSinkState;
+struct TRemoteSourceState;
 
-// Wakes the ComputeActor; carries the sink states that have rows in their outbox.
+// Wakes the ComputeActor; carries the sink states that have rows in their outbox
+// and the source states that have consumed chunks to confirm.
 class TActorNotificationChannel {
 public:
     TActorNotificationChannel(std::unique_ptr<NNet::INotifier> notifier)
         : Notifier(std::move(notifier))
-        , ReadyQueue(1024) // TODO: right capacity?
+        , SinkReady(1024) // TODO: right capacity?
+        , SourceReady(1024)
     { }
 
-    TMPSCQueue<TRemoteSinkState*>& Queue() {
-        return ReadyQueue;
+    TMPSCQueue<TRemoteSinkState*>& SinkQueue() {
+        return SinkReady;
+    }
+
+    TMPSCQueue<TRemoteSourceState*>& SourceQueue() {
+        return SourceReady;
     }
 
     bool Notify(TRemoteSinkState* state) {
-        if (ReadyQueue.TryPush(std::move(state))) {
-            Notifier->Notify();
-            return true;
-        }
-        return false;
+        return Push(SinkReady, state);
+    }
+
+    bool Notify(TRemoteSourceState* state) {
+        return Push(SourceReady, state);
     }
 
     NNet::TFuture<void> Wait() {
@@ -45,13 +53,24 @@ public:
     }
 
 private:
+    template <class TState>
+    bool Push(TMPSCQueue<TState*>& queue, TState* state) {
+        if (queue.TryPush(std::move(state))) {
+            Notifier->Notify();
+            return true;
+        }
+        return false;
+    }
+
     std::unique_ptr<NNet::INotifier> Notifier;
-    TMPSCQueue<TRemoteSinkState*> ReadyQueue;
+    TMPSCQueue<TRemoteSinkState*> SinkReady;
+    TMPSCQueue<TRemoteSourceState*> SourceReady;
 };
 
 // Worker -> ComputeActor. The sink task writes into a bounded outbox; the actor
 // is its only consumer. The external id of the sink node is kept here so the
-// actor can wake the node with Graph.ExternalNode(Id).
+// actor can wake the node with Graph.ExternalNode(Id). The actor numbers the
+// chunks it sends from 1 and keeps at most Window of them unconfirmed.
 struct TRemoteSinkState {
     TRemoteSinkState(
         uint64_t id,
@@ -59,32 +78,54 @@ struct TRemoteSinkState {
         uint64_t dstTaskId,
         const TValueLayout* descriptor,
         TActorNotificationChannel& actorChannel,
-        size_t outboxCapacity = 16);
+        size_t outboxCapacity = 16,
+        size_t window = 2);
 
     // TSinkCode::TWrite: OK or WAITING (outbox or notification channel is full).
     ETaskResult Write(const TRowSet& rowSet);
 
-    // ComputeActor side. Passes every queued row set to `send`, which takes
-    // ownership, then lets workers queue this state again.
+    // ComputeActor side. Passes queued row sets and their Seq to `send`, which
+    // takes ownership, while fewer than Window are unconfirmed. Queued stays set
+    // while the actor owns the state: from the queue pop until the outbox is
+    // empty, or parked on a closed window until Confirm resumes the drain.
     template <class TSend>
     void Drain(TSend&& send) {
         TRowSet rowSet;
         for (;;) {
-            while (Outbox.TryPop(rowSet)) {
-                send(std::move(rowSet));
+            while (Sent - Confirmed < Window && Outbox.TryPop(rowSet)) {
+                send(++Sent, std::move(rowSet));
+            }
+            if (Sent - Confirmed >= Window) {
+                Parked = true;
+                return;
             }
             Queued.store(false);
             if (!Outbox.TryPop(rowSet)) {
                 return;
             }
-            send(std::move(rowSet));
+            send(++Sent, std::move(rowSet));
             if (Queued.exchange(true)) {
                 return; // a worker queued this state again
             }
         }
     }
 
+    // ComputeActor side, on TDataConfirm. False if lastApplied was never sent.
+    template <class TSend>
+    bool Confirm(uint64_t lastApplied, TSend&& send) {
+        if (lastApplied > Sent) {
+            return false;
+        }
+        Confirmed = std::max(Confirmed, lastApplied);
+        if (Parked && Sent - Confirmed < Window) {
+            Parked = false;
+            Drain(send);
+        }
+        return true;
+    }
+
     void SendQueue(NNet::NActors::TActorContext::TPtr& ctx);
+    bool OnConfirm(uint64_t lastApplied, NNet::NActors::TActorContext::TPtr& ctx);
 
     const uint64_t Id;
     NNet::NActors::TActorId ActorId;
@@ -92,25 +133,58 @@ struct TRemoteSinkState {
     const TValueLayout* Descriptor;
     TActorNotificationChannel& ActorChannel;
     TMPSCQueue<TRowSet> Outbox;
+    const size_t Window;
     std::atomic<bool> Queued = false;
     bool NotifyPending = false; // worker only: the row is in the outbox, the notification failed
+    // Actor only: the last sent and the last confirmed Seq.
+    uint64_t Sent = 0;
+    uint64_t Confirmed = 0;
+    bool Parked = false;
+
+private:
+    void SendChunk(NNet::NActors::TActorContext::TPtr& ctx, uint64_t seq, TRowSet&& rowSet);
 };
 
 // ComputeActor -> worker. The actor pushes received row sets into a bounded
-// inbox and then wakes the source node with Graph.ExternalNode(Id).
+// inbox and then wakes the source node with Graph.ExternalNode(Id). A chunk is
+// applied once Next pops it; the worker then wakes the actor, which confirms
+// the last applied Seq to the peer sink (PeerActor, PeerTaskId).
 struct TRemoteSourceState {
-    explicit TRemoteSourceState(uint64_t id, size_t inboxCapacity = 16);
+    TRemoteSourceState(
+        uint64_t id,
+        NNet::NActors::TActorId peerActor,
+        uint64_t peerTaskId,
+        TActorNotificationChannel& actorChannel,
+        size_t inboxCapacity = 16);
 
-    // ComputeActor side. False if the inbox is full; rowSet is then left untouched.
-    bool Push(TRowSet&& rowSet);
+    // ComputeActor side. False if seq is not the next one or the inbox is full;
+    // rowSet is then left untouched. The peer keeps at most its window of chunks
+    // unconfirmed, so an inbox that holds the window never fills up.
+    bool Push(uint64_t seq, TRowSet&& rowSet);
     void Finish();
+
+    // ComputeActor side, on a wake: the last applied Seq if it moved since the
+    // previous call, else 0.
+    uint64_t TakeApplied();
+    void SendConfirm(NNet::NActors::TActorContext::TPtr& ctx);
 
     // TSourceCode::TNext
     ETaskResult Next(TRowSet& rowSet);
 
     const uint64_t Id;
+    NNet::NActors::TActorId PeerActor;
+    uint64_t PeerTaskId;
+    TActorNotificationChannel& ActorChannel;
     TMPSCQueue<TRowSet> Inbox;
     std::atomic<bool> Finished = false;
+    std::atomic<uint64_t> Applied = 0; // worker: the Seq of the last popped chunk
+    std::atomic<bool> Queued = false;
+    // Actor only: the last received and the last confirmed Seq.
+    uint64_t Received = 0;
+    uint64_t Confirmed = 0;
+
+private:
+    bool Pop(TRowSet& rowSet);
 };
 
 // Empty if every endpoint names its own node of the matching task type
@@ -127,10 +201,14 @@ std::pair<std::shared_ptr<const TSinkCode>, std::shared_ptr<TRemoteSinkState>> M
     uint64_t dstTaskId,
     const TValueLayout* descriptor,
     TActorNotificationChannel& actorChannel,
-    size_t outboxCapacity = 16);
+    size_t outboxCapacity = 16,
+    size_t window = 2);
 
 std::pair<std::shared_ptr<const TSourceCode>, std::shared_ptr<TRemoteSourceState>> MakeRemoteSource(
     uint64_t id,
+    NNet::NActors::TActorId peerActor,
+    uint64_t peerTaskId,
+    TActorNotificationChannel& actorChannel,
     size_t inboxCapacity = 16);
 
 } // namespace NScheduler
