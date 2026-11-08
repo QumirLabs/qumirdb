@@ -11,15 +11,15 @@
 namespace NQdb {
 
 // Compiled LLVM code of kernels that another process loads without compiling.
-// Objects are relocatable PIC objects; runtime helpers stay undefined symbols
+// Object is one relocatable PIC object; runtime helpers stay undefined symbols
 // that the loader binds by name.
 struct TKernelImage {
-    std::vector<std::string> Objects;
+    std::string Object;
     // Per kernel: the linked entry names, parallel to TGeneratedKernel::Entrypoints.
     std::vector<std::vector<std::string>> Entrypoints;
 };
 
-// Deduplicates and fuses `kernels` as FinalizeKernels does and compiles them once;
+// Deduplicates and fuses `kernels` as FinalizeKernels does and compiles them once, without the persistent cache, into one object;
 // binds no slot. Fusion rewrites the ASTs, so the kernels cannot be finalized afterwards.
 TKernelImage CompileKernelImage(std::span<TGeneratedKernel> kernels);
 

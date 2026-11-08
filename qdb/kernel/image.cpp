@@ -87,7 +87,7 @@ TKernelImage CompileKernelImage(std::span<TGeneratedKernel> kernels)
     }
 
     TKernelImage image;
-    image.Objects.push_back(std::move(*object));
+    image.Object = std::move(*object);
     for (const auto& [kernel, uniqueIndex] : dedup.Bindings) {
         (void)kernel;
         image.Entrypoints.push_back(fused.UniqueEntrypoints[uniqueIndex]);
@@ -107,7 +107,7 @@ void LoadKernelImage(const TKernelImage& image, std::span<const std::shared_ptr<
     }
     NQumir::NCodeGen::TLlvmRunner linker({.EnablePerfJitEventListener = true});
     std::string error;
-    auto linked = linker.LinkAndLookup({}, image.Objects, nullptr, true, names, &error);
+    auto linked = linker.LinkAndLookup({}, {image.Object}, nullptr, true, names, &error);
     if (linked.Entries.empty() && !names.empty()) {
         throw std::runtime_error("kernel image link failed: " + error);
     }
@@ -125,10 +125,7 @@ void LoadKernelImage(const TKernelImage& image, std::span<const std::shared_ptr<
 std::string SerializeKernelImage(const TKernelImage& image)
 {
     std::string out;
-    WriteU64(out, image.Objects.size());
-    for (const auto& object : image.Objects) {
-        WriteString(out, object);
-    }
+    WriteString(out, image.Object);
     WriteU64(out, image.Entrypoints.size());
     for (const auto& names : image.Entrypoints) {
         WriteU64(out, names.size());
@@ -143,9 +140,7 @@ TKernelImage DeserializeKernelImage(std::string_view bytes)
 {
     TReader reader(bytes);
     TKernelImage image;
-    for (uint64_t n = reader.ReadU64(); n > 0; --n) {
-        image.Objects.push_back(reader.ReadString());
-    }
+    image.Object = reader.ReadString();
     for (uint64_t kernels = reader.ReadU64(); kernels > 0; --kernels) {
         auto& names = image.Entrypoints.emplace_back();
         for (uint64_t n = reader.ReadU64(); n > 0; --n) {
