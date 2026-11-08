@@ -64,10 +64,14 @@ struct TSinkCode {
     // OK: written. WAITING: not written, the same rowSet is passed again, maybe
     // before the external wake; Write must be idempotent for a rejected rowSet.
     using TWrite = std::function<ETaskResult(void*, const TRowSet&)>;
+    // Optional; called after the last Write. OK: the task finishes. WAITING:
+    // called again, maybe before the external wake, so it must be idempotent.
+    using TFinish = std::function<ETaskResult(void*)>;
 
-    explicit TSinkCode(TWrite write);
+    explicit TSinkCode(TWrite write, TFinish finish = {});
 
     TWrite Write;
+    TFinish Finish;
 };
 
 struct TBlockingCode {
@@ -144,6 +148,10 @@ public:
     ETaskResult Execute() override;
     void ConfigureInstrumentation(TTaskInstrumentationSetup& setup) override;
 
+    // Only for a task built with empty code (a remote source), before it is scheduled.
+    void BindCode(std::shared_ptr<const TSourceCode> code, std::shared_ptr<void> state);
+    const std::shared_ptr<const TSourceCode>& Code() const;
+
 private:
     std::shared_ptr<const TSourceCode> Code_;
     std::shared_ptr<void> State_;
@@ -214,12 +222,17 @@ public:
     ETaskResult Execute() override;
     void ConfigureInstrumentation(TTaskInstrumentationSetup& setup) override;
 
+    // Only for a task built with empty code (a remote sink), before it is scheduled.
+    void BindCode(std::shared_ptr<const TSinkCode> code, std::shared_ptr<void> state);
+    const std::shared_ptr<const TSinkCode>& Code() const;
+
 private:
     std::shared_ptr<const TSinkCode> Code_;
     std::shared_ptr<void> State_;
     TInputPort Input_;
     TRowSet Pending_{};
     bool HasPending_ = false;
+    bool InputFinished_ = false;
     bool Finished_ = false;
 };
 

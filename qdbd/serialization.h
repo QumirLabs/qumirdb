@@ -16,6 +16,12 @@ void DeserializeFromStream(
     std::istringstream& input);
 
 template<>
+void SerializeToStream(const NQdb::NRemote::TComputeError& message, std::ostringstream& output);
+
+template<>
+void DeserializeFromStream(NQdb::NRemote::TComputeError& message, std::istringstream& input);
+
+template<>
 void SerializeToStream(const NQdb::NRemote::TDataChunk& message, std::ostringstream& output);
 
 // The decoded row set owns its buffers and descriptor; release it with NQdb::Release.

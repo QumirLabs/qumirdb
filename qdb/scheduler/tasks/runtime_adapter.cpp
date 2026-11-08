@@ -10,6 +10,7 @@
 #include <qumir/error.h>
 
 #include <algorithm>
+#include <cassert>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -242,8 +243,9 @@ TUnaryCode::TUnaryCode(TProcess process)
     : Process(std::move(process))
 {}
 
-TSinkCode::TSinkCode(TWrite write)
+TSinkCode::TSinkCode(TWrite write, TFinish finish)
     : Write(std::move(write))
+    , Finish(std::move(finish))
 {}
 
 TBlockingCode::TBlockingCode(TProcess process)
@@ -282,6 +284,16 @@ TSourceTask::TSourceTask(
     , State_(std::move(state))
     , Output_(output)
 {}
+
+void TSourceTask::BindCode(std::shared_ptr<const TSourceCode> code, std::shared_ptr<void> state) {
+    assert(!Code_);
+    Code_ = std::move(code);
+    State_ = std::move(state);
+}
+
+const std::shared_ptr<const TSourceCode>& TSourceTask::Code() const {
+    return Code_;
+}
 
 ETaskResult TSourceTask::Execute() {
     if (Finished_) {
@@ -521,6 +533,16 @@ TSinkTask::~TSinkTask() {
     }
 }
 
+void TSinkTask::BindCode(std::shared_ptr<const TSinkCode> code, std::shared_ptr<void> state) {
+    assert(!Code_);
+    Code_ = std::move(code);
+    State_ = std::move(state);
+}
+
+const std::shared_ptr<const TSinkCode>& TSinkTask::Code() const {
+    return Code_;
+}
+
 ETaskResult TSinkTask::Execute() {
     if (Finished_) {
         return ETaskResult::FINISHED;
@@ -536,11 +558,15 @@ ETaskResult TSinkTask::Execute() {
     }
 
     TRowSet rowSet{};
-    auto fetch = Input_.Fetch(rowSet);
+    auto fetch = InputFinished_ ? EFetchResult::FINISHED : Input_.Fetch(rowSet);
     if (fetch == EFetchResult::NO_DATA) {
         return ETaskResult::NEED_DATA;
     }
     if (fetch == EFetchResult::FINISHED) {
+        InputFinished_ = true;
+        if (Code_->Finish && Code_->Finish(State_.get()) == ETaskResult::WAITING) {
+            return ETaskResult::WAITING;
+        }
         Finished_ = true;
         return ETaskResult::FINISHED;
     }

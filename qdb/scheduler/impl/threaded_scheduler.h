@@ -29,6 +29,8 @@ public:
         size_t readyQueueCapacity = 0);
 
     bool Run(std::string* error = nullptr);
+    // Makes a running Run() return false; safe from any thread.
+    void Cancel();
     TSchedulerRunStats Stats() const;
     void Schedule(TTaskNode* node) override;
 

@@ -127,6 +127,8 @@ TEngineConfigBuilder BuildEngineConfig() {
         "Worker threads; the default is the logical CPU count.", 1);
     b.Size("ready_queue_capacity", [](auto& s) -> auto& { return s.Scheduler.Scheduler.ReadyQueueCapacity; },
         "Capacity of the queue of ready tasks.", 1);
+    b.Size("status_period_ms", [](auto& s) -> auto& { return s.Scheduler.Scheduler.StatusPeriodMs; },
+        "Period in milliseconds of a compute actor's status message to its query actor.", 1);
 
     b.Section("queue");
     b.Size("depth", [](auto& s) -> auto& { return s.Scheduler.Queue.RowsetCapacityPerLane; },

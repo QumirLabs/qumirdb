@@ -1,4 +1,5 @@
 #pragma once
+#include "qdb/scheduler/graph.h"
 #include <coroio/actors/actor.hpp>
 #include <qdb/io/io.h>
 #include <qdb/io/rowset_ops.h>
@@ -34,11 +35,12 @@ struct TSpawnComputeActorResponse {
     std::string Error;
 };
 
-// Push(srcId, TRowSet&&)
+// The receiving RemoteSource is selected by DstTaskId and pushes into its own output lane.
 struct TDataChunk {
     static constexpr NNet::NActors::TMessageId MessageId = 200;
-    uint32_t DstTaskId = 0;
-    uint32_t SrcLaneId = 0;
+    uint64_t DstTaskId = 0;
+    // Numbers the chunks of one DstTaskId from 1; TDataConfirm acknowledges them.
+    uint64_t Seq = 0;
     TRowSet RowSet{};
     const TValueLayout* Descriptor = nullptr;
 
@@ -46,11 +48,53 @@ struct TDataChunk {
     ~TDataChunk() {}
 };
 
-// Finish(srcId)
+// The receiving RemoteSource is selected by DstTaskId and finishes its own output lane.
 struct TFinish {
     static constexpr NNet::NActors::TMessageId MessageId = 201;
-    uint32_t DstTaskId = 0;
-    uint32_t SrcLaneId = 0;
+    uint64_t DstTaskId = 0;
+};
+
+// The consumer's source task has taken every chunk up to LastApplied; SinkId
+// selects the producer's sink, which may then send more.
+struct TDataConfirm {
+    static constexpr NNet::NActors::TMessageId MessageId = 203;
+    uint64_t SinkId = 0;
+    uint64_t LastApplied = 0;
+};
+
+// Compute actor -> query actor, periodically while the graph runs: the actor is alive.
+struct TComputeStatus {
+    static constexpr NNet::NActors::TMessageId MessageId = 204;
+};
+
+// Compute actor -> query actor: a protocol or startup error; the query actor decides what to do.
+struct TComputeError {
+    static constexpr NNet::NActors::TMessageId MessageId = 205;
+    std::string Message;
+};
+
+enum class ERemoteEndpointKind {
+    Source,
+    Sink,
+};
+
+// Id is the node's external id in the graph; routing lives here, not in the graph.
+struct TRemoteEndpoint {
+    uint64_t Id = 0;
+    ERemoteEndpointKind Kind = ERemoteEndpointKind::Source;
+    // Sink: where the rows go. Source: where the confirms go (the peer sink).
+    NNet::NActors::TActorId PeerActor;
+    uint64_t PeerTaskId = 0;
+    // Sink only: value layouts of the sent row sets.
+    std::vector<TValueLayout> Layouts;
+};
+
+struct TTaskGraphMessage {
+    static constexpr NNet::NActors::TMessageId MessageId = 202;
+    using LocalMessage = void; // TODO: must be serializable
+    NScheduler::TSealedTaskGraph Graph;
+    std::vector<TRemoteEndpoint> Endpoints;
+    std::vector<TGeneratedKernel> Kernels;
 };
 
 // TODO: Fetch is local, do we need a message for it ?
@@ -78,6 +122,9 @@ inline void RegisterMessages(TMessagesFactory& factory) {
     factory.template RegisterSerializer<TSpawnComputeActorResponse>();
     factory.template RegisterSerializer<TDataChunk>();
     factory.template RegisterSerializer<TFinish>();
+    factory.template RegisterSerializer<TDataConfirm>();
+    factory.template RegisterSerializer<TComputeStatus>();
+    factory.template RegisterSerializer<TComputeError>();
     factory.template RegisterSerializer<TExecuteQuery>();
     factory.template RegisterSerializer<TExecuteQueryResponse>();
 }
