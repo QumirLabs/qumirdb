@@ -1685,6 +1685,10 @@ TEST(DistributedScheduler, ValidatesRemoteEndpoints) {
     const std::vector<TRemoteEndpoint> good{
         endpoint(1, ERemoteEndpointKind::Sink), endpoint(2, ERemoteEndpointKind::Source)};
     EXPECT_EQ(ValidateEndpoints(sealed, good), "");
+    // Every source or sink without code needs an endpoint: a null Code would crash the scheduler.
+    const std::vector<TRemoteEndpoint> sinkOnly{endpoint(1, ERemoteEndpointKind::Sink)};
+    EXPECT_NE(ValidateEndpoints(sealed, sinkOnly), "");
+    EXPECT_NE(ValidateEndpoints(sealed, {}), "");
     const std::vector<TRemoteEndpoint> missing{endpoint(3, ERemoteEndpointKind::Sink)};
     EXPECT_NE(ValidateEndpoints(sealed, missing), "");
     const std::vector<TRemoteEndpoint> swapped{

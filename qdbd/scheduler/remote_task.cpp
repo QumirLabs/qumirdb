@@ -190,6 +190,7 @@ std::string ValidateEndpoints(
     std::span<const TRemoteEndpoint> endpoints)
 {
     std::unordered_set<uint64_t> seen;
+    std::unordered_set<const TTaskNode*> covered;
     for (const auto& endpoint : endpoints) {
         const auto* node = graph.ExternalNode(endpoint.Id);
         if (!node) {
@@ -207,6 +208,28 @@ std::string ValidateEndpoints(
         }
         if (isSource ? source->Code() != nullptr : sink->Code() != nullptr) {
             return "external node " + std::to_string(endpoint.Id) + " already has code";
+        }
+        covered.insert(node);
+    }
+    // A source or sink left without code would dereference a null Code_.
+    std::vector<const TTaskNode*> stack{&graph.Root()};
+    std::unordered_set<const TTaskNode*> visited{&graph.Root()};
+    while (!stack.empty()) {
+        const auto* node = stack.back();
+        stack.pop_back();
+        const auto* source = dynamic_cast<const TSourceTask*>(node->Task);
+        const auto* sink = dynamic_cast<const TSinkTask*>(node->Task);
+        if ((source ? source->Code() == nullptr : sink && sink->Code() == nullptr) && !covered.contains(node)) {
+            return std::string("a ") + (source ? "source" : "sink") + " task without code has no endpoint";
+        }
+        for (const auto* edges : {&node->Inbound, &node->Outbound}) {
+            for (const auto* edge : *edges) {
+                for (const auto* next : {edge->Src, edge->Dst}) {
+                    if (visited.insert(next).second) {
+                        stack.push_back(next);
+                    }
+                }
+            }
         }
     }
     return {};
