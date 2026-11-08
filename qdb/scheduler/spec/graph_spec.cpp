@@ -1,5 +1,7 @@
 #include <qdb/scheduler/spec/graph_spec.h>
 
+#include <qdb/exec/filter_exec.h>
+#include <qdb/exec/project_exec.h>
 #include <qdb/exec/runtime_context.h>
 #include <qdb/kernel/compiler.h>
 #include <qdb/scheduler/connections/local.h>

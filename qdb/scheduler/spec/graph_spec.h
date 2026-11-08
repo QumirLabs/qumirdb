@@ -1,7 +1,6 @@
 #pragma once
 
-#include <qdb/exec/filter_exec.h>
-#include <qdb/exec/project_exec.h>
+#include <qdb/exec/plan_data.h>
 #include <qdb/io/io.h>
 #include <qdb/io/parquet/source.h>
 #include <qdb/kernel/regex.h>

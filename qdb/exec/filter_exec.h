@@ -1,27 +1,13 @@
 #pragma once
 
+#include <qdb/exec/plan_data.h>
 #include <qdb/exec/unary_process.h>
 #include <qdb/kernel/compiler.h>
 
 #include <cstdint>
-#include <optional>
 #include <vector>
 
 namespace NQdb {
-
-// What a filter process needs besides its kernel, so it can be rebuilt later.
-struct TFilterPlanData {
-    // Index of the filter kernel in the sink (0 without a sink).
-    uint32_t Kernel = 0;
-    // Input columns kept in output order; nullopt keeps all of them.
-    std::optional<std::vector<int32_t>> KeptInputColumns;
-
-    void Fields(this auto& self, auto& v)
-    {
-        v(self.Kernel);
-        v(self.KeptInputColumns);
-    }
-};
 
 TUnaryStreamProcess MakeFilterProcess(
     TKernelCompiler::TFilterDispatch dispatch);
