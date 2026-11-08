@@ -618,47 +618,77 @@ std::vector<std::string> RunSortedCsv(
     return rows;
 }
 
-TEST(ExecPlanBuilder, ScanFilterProjectGraphRunsFromItsSerializedSpec) {
-    TParquetSource source(QDB_TEST_DATA_DIR "/regtest/cases/decimal_parquet/tables/decimals.parquet");
-    const std::unordered_map<std::string, ISource*> sources{{"t", &source}};
+// Lowers `where`, serializes the graph spec, runs the original graph, then
+// destroys the plan, the source and the lowered graph. Only the bytes and the
+// kernel slots survive, and the rebuilt graph must give the same rows on both
+// schedulers.
+std::vector<std::string> ExpectScanFilterProjectFromSpec(std::string_view where)
+{
+    auto source = std::make_unique<TParquetSource>(
+        QDB_TEST_DATA_DIR "/regtest/cases/decimal_parquet/tables/decimals.parquet");
+    const std::unordered_map<std::string, ISource*> sources{{"t", source.get()}};
     auto plan = BuildSqlPlan(
         "SELECT id, d15 + d15 AS twice, REGEXP_REPLACE(s, '-[a-z]+$', '') AS item "
-        "FROM t WHERE d9 > 100 AND id % 3 <> 0", sources);
+        "FROM t WHERE " + std::string(where), sources);
     const auto settings = MultiSettings();
-    auto lowered = NScheduler::LowerPlanToGraph(plan, settings, nullptr);
+    auto lowered = std::make_unique<NScheduler::TLoweredPlan>(
+        NScheduler::LowerPlanToGraph(plan, settings, nullptr));
 
-    const auto& fields = static_cast<NQumir::NAst::TStructType&>(*lowered.OutputType).Fields;
+    // The schema's column names point into the output type.
+    const auto outputType = lowered->OutputType;
+    const auto& fields = static_cast<NQumir::NAst::TStructType&>(*outputType).Fields;
     std::vector<TColumnSchema> columns;
     for (const auto& [name, type] : fields) {
         columns.push_back({.Name = name, .Type = type});
     }
     const TSchema schema{columns};
     std::ostringstream originalOut;
-    std::ostringstream rebuiltOut;
     TCsvSink original(schema, originalOut);
-    TCsvSink rebuilt(schema, rebuiltOut);
-    NScheduler::AttachSink(lowered, original);
+    NScheduler::AttachSink(*lowered, original);
 
-    const auto spec = NScheduler::ExtractLoweredGraphSpec(lowered);
-    ASSERT_TRUE(spec);
-    EXPECT_EQ(std::ranges::count_if(spec->Nodes, [](const auto& node) {
+    const auto spec = NScheduler::ExtractLoweredGraphSpec(*lowered);
+    EXPECT_TRUE(spec);
+    if (!spec) {
+        return {};
+    }
+    EXPECT_GT(std::ranges::count_if(spec->Nodes, [](const auto& node) {
         return std::holds_alternative<NScheduler::TParquetScanNode>(node.Body);
-    }), 4);
-    ASSERT_EQ(spec->Regexes.size(), 1u);
+    }), 0);
+    EXPECT_EQ(spec->Regexes.size(), 1u);
     const auto bytes = NScheduler::SerializeGraphSpec(*spec);
     const auto decoded = NScheduler::DeserializeGraphSpec(bytes);
     EXPECT_EQ(NScheduler::SerializeGraphSpec(decoded), bytes);
 
-    FinalizeKernels(lowered.Kernels, settings.Kernel.Backend);
+    FinalizeKernels(lowered->Kernels, settings.Kernel.Backend);
     std::vector<std::shared_ptr<TKernelSlot>> slots;
-    for (const auto& kernel : lowered.Kernels) {
+    for (const auto& kernel : lowered->Kernels) {
         slots.push_back(kernel.Slot);
     }
-    auto graph = NScheduler::MaterializeGraph(decoded, &rebuilt, std::move(slots));
+    const auto expected = RunSortedCsv(*lowered->Graph, originalOut, settings);
 
-    const auto expected = RunSortedCsv(*lowered.Graph, originalOut, settings);
-    EXPECT_GT(expected.size(), 50u);
-    EXPECT_EQ(RunSortedCsv(*graph, rebuiltOut, settings), expected);
+    lowered.reset();
+    plan.reset();
+    source.reset();
+
+    for (const auto& runSettings : {settings, SingleSettings()}) {
+        std::ostringstream rebuiltOut;
+        TCsvSink rebuilt(schema, rebuiltOut);
+        auto graph = NScheduler::MaterializeGraph(decoded, &rebuilt, slots);
+        const auto got = RunSortedCsv(*graph, rebuiltOut, runSettings);
+        EXPECT_EQ(got, expected);
+    }
+    return expected;
+}
+
+TEST(ExecPlanBuilder, ScanFilterProjectGraphRunsFromItsSerializedSpec) {
+    const auto rows = ExpectScanFilterProjectFromSpec("d9 > 100 AND id % 3 <> 0");
+    EXPECT_GT(rows.size(), 50u);
+}
+
+TEST(ExecPlanBuilder, ProvenEmptyScanGraphRunsFromItsSerializedSpec) {
+    // Every row group is pruned, so the scans carry an empty row group list.
+    const auto rows = ExpectScanFilterProjectFromSpec("id > 1000");
+    EXPECT_LE(rows.size(), 1u);
 }
 
 TEST(ExecPlanBuilder, MultiKeepsRealPartialAndCombineStages) {
