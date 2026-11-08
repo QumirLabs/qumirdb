@@ -80,7 +80,7 @@ struct TComputeActor : public IBehaviorActor {
         while (queue.TryPop(state)) {
             // process
             state->SendQueue(ctx);
-            SchedulerSchannel->Notify(Graph.ExternalNode(state->Id));
+            SchedulerSchannel->Notify(std::get<1>(SinkStates.at(state->Id)));
         }
         NQdb::NScheduler::TRemoteSourceState* source = nullptr;
         while (ActorChannel->SourceQueue().TryPop(source)) {
@@ -116,7 +116,7 @@ struct TComputeActor : public IBehaviorActor {
                 InitSource(endpoint, *source, node);
             } else {
                 auto* sink = dynamic_cast<NScheduler::TSinkTask*>(node->Task);
-                InitSink(endpoint, *sink);
+                InitSink(endpoint, *sink, node);
             }
         }
         Scheduler = std::make_unique<NScheduler::TThreadedScheduler>(
@@ -164,14 +164,14 @@ struct TComputeActor : public IBehaviorActor {
 
     void OnDataConfirm(const TDataConfirm& confirm, TActorContext::TPtr& ctx) {
         auto it = SinkStates.find(confirm.SinkId);
-        if (it == SinkStates.end() || !it->second->OnConfirm(confirm.LastApplied, ctx)) {
+        if (it == SinkStates.end() || !std::get<0>(it->second)->OnConfirm(confirm.LastApplied, ctx)) {
             // TODO: protocol errors
             std::cerr << "compute actor: dropped confirm " << confirm.LastApplied
                 << " for task " << confirm.SinkId << "\n";
             return;
         }
         // The drain may have freed outbox space for a waiting sink task.
-        SchedulerSchannel->Notify(Graph.ExternalNode(confirm.SinkId));
+        SchedulerSchannel->Notify(std::get<1>(it->second));
     }
 
     void InitSource(
@@ -185,11 +185,15 @@ struct TComputeActor : public IBehaviorActor {
         SourceStates.emplace(endpoint.Id, std::tuple{std::move(state), node});
     }
 
-    void InitSink(const TRemoteEndpoint& endpoint, NScheduler::TSinkTask& sinkTask) {
+    void InitSink(
+        const TRemoteEndpoint& endpoint,
+        NScheduler::TSinkTask& sinkTask,
+        NScheduler::TTaskNode* node)
+    {
         auto [code, state] = NScheduler::MakeRemoteSink(
             endpoint.Id, endpoint.PeerActor, endpoint.PeerTaskId, endpoint.Layouts.data(), *ActorChannel);
         sinkTask.BindCode(std::move(code), state);
-        SinkStates.emplace(endpoint.Id, std::move(state));
+        SinkStates.emplace(endpoint.Id, std::tuple{std::move(state), node});
     }
 
     TDefaultBehavior Behavior;
@@ -202,7 +206,7 @@ struct TComputeActor : public IBehaviorActor {
     std::unique_ptr<NScheduler::TSchedulerChannel> SchedulerSchannel;
     std::unique_ptr<NScheduler::TThreadedScheduler> Scheduler;
     std::unordered_map<uint64_t, std::tuple<std::shared_ptr<NScheduler::TRemoteSourceState>, NScheduler::TTaskNode*>> SourceStates;
-    std::unordered_map<uint64_t, std::shared_ptr<NScheduler::TRemoteSinkState>> SinkStates;
+    std::unordered_map<uint64_t, std::tuple<std::shared_ptr<NScheduler::TRemoteSinkState>, NScheduler::TTaskNode*>> SinkStates;
     TVoidSuspendedTask NotificationTask;
 };
 
