@@ -35,6 +35,7 @@
 #include <qdb/scheduler/tasks/runtime_adapter.h>
 #include <qdb/scheduler/lowering/scan_split.h>
 #include <qdb/scheduler/lowering/task_factory.h>
+#include <qdb/scheduler/spec/graph_spec.h>
 
 #include <algorithm>
 #include <bit>
@@ -55,6 +56,49 @@ namespace NQdb {
 namespace {
 
 using namespace NScheduler::NLowering;
+
+using TNodeSpecs = std::vector<std::optional<NScheduler::TNodeSpec>>;
+
+NScheduler::TPortSpec PortSpec(
+    const NScheduler::TTaskGraph& graph,
+    const NScheduler::IConnection* connection,
+    size_t lane)
+{
+    const auto connections = graph.Connections();
+    const auto it = std::ranges::find_if(connections, [&](const auto& owned) {
+        return owned.get() == connection;
+    });
+    if (it == connections.end()) {
+        throw std::logic_error("a task port uses a connection outside the graph");
+    }
+    return {
+        .Connection = static_cast<uint32_t>(it - connections.begin()),
+        .Lane = static_cast<uint32_t>(lane),
+    };
+}
+
+// Builds the task through the graph spec factory, adds the node and keeps the
+// record at the node's index. `sink` is for SinkWriter records.
+NScheduler::TTaskNode& AddTask(
+    NScheduler::TTaskGraph& graph,
+    TNodeSpecs& records,
+    NScheduler::TNodeSpec record,
+    ISink* sink = nullptr)
+{
+    std::vector<NScheduler::IConnection*> connections;
+    for (const auto& connection : graph.Connections()) {
+        connections.push_back(connection.get());
+    }
+    auto& node = graph.AddOwnedNode(
+        NScheduler::MakeNodeTask(record.Body, connections, sink));
+    node.ExecStageId = record.ExecStageId;
+    node.TaskGroupId = record.TaskGroupId;
+    node.DebugKind = record.DebugKind;
+    node.DebugLabel = record.DebugLabel;
+    records.resize(graph.Nodes().size());
+    records.back() = std::move(record);
+    return node;
+}
 
 struct TSchedulerSourceState {
     ISource* Source = nullptr;
@@ -1992,21 +2036,15 @@ private:
                 1, lookupTaskCount, "late-lookup-requests");
             // TBroadcastConnection requires one producer. This bridge turns
             // the already gathered locator stream into that producer.
-            auto forwardCode = std::make_shared<NScheduler::TUnaryCode>(
-                [](void*, TRowSet&) {});
-            auto forward = std::make_unique<NScheduler::TUnaryTask>(
-                forwardCode,
-                std::shared_ptr<void>{},
-                NScheduler::TInputPort{
-                    .Connection = childConnection, .Lane = 0},
-                NScheduler::TOutputPort{
-                    .Connection = &broadcast, .Lane = 0});
-            auto& forwardNode = Graph_.AddOwnedNode(std::move(forward));
-            MarkNode(
-                forwardNode,
-                "late-lookup-broadcast",
-                NewTaskGroup(),
-                "late-lookup-broadcast");
+            auto& forwardNode = AddTask(Graph_, NodeSpecs_, {
+                .TaskGroupId = NewTaskGroup(),
+                .DebugKind = "late-lookup-broadcast",
+                .DebugLabel = "late-lookup-broadcast",
+                .Body = NScheduler::TForwardNode{
+                    .In = PortSpec(Graph_, childConnection, 0),
+                    .Out = PortSpec(Graph_, &broadcast, 0),
+                },
+            });
             for (size_t lane = 0; lane < childLanes; ++lane) {
                 Graph_.AddEdge(
                     *childOut.Producers[lane],
@@ -2434,18 +2472,15 @@ private:
             auto& broadcastRef = AddConn<NScheduler::TBroadcastConnection>(
                 1, lanes, "cross-scalar-broadcast");
 
-            auto fwdCode = std::make_shared<NScheduler::TUnaryCode>(
-                [](void*, TRowSet&) {});
-            auto fwd = std::make_unique<NScheduler::TUnaryTask>(
-                fwdCode,
-                std::make_shared<int>(0),
-                NScheduler::TInputPort{.Connection = &scalarGatherRef, .Lane = 0},
-                NScheduler::TOutputPort{.Connection = &broadcastRef, .Lane = 0});
-            auto& fwdNode = Graph_.AddOwnedNode(std::move(fwd));
-            MarkNode(fwdNode,
-                "broadcast",
-                NewTaskGroup(),
-                "broadcast");
+            auto& fwdNode = AddTask(Graph_, NodeSpecs_, {
+                .TaskGroupId = NewTaskGroup(),
+                .DebugKind = "broadcast",
+                .DebugLabel = "broadcast",
+                .Body = NScheduler::TForwardNode{
+                    .In = PortSpec(Graph_, &scalarGatherRef, 0),
+                    .Out = PortSpec(Graph_, &broadcastRef, 0),
+                },
+            });
             for (size_t m = 0; m < scalarLanes; ++m) {
                 Graph_.AddEdge(
                     *scalarOut.Producers[m], fwdNode, scalarGatherRef, m, 0);
@@ -2921,6 +2956,9 @@ private:
     }
 
 public:
+    TNodeSpecs& NodeSpecs() {
+        return NodeSpecs_;
+    }
     std::vector<TLoweredExecStage>& ExecStages() {
         return ExecStages_;
     }
@@ -2975,6 +3013,7 @@ private:
     std::unordered_map<uint32_t, std::vector<TFilterConsumerTasks>> FilterConsumers_;
     std::vector<TFilterProducerTasks> FilterProducers_;
     std::unordered_map<const TCteMaterialization*, TMaterializedProducer> Materialized_;
+    TNodeSpecs NodeSpecs_;
     std::vector<TLoweredExecStage> ExecStages_;
     std::vector<NScheduler::TRuntimeFilterDiagnostic> RuntimeFilters_;
     NScheduler::TTaskGroupId LastTaskGroupId_ =
@@ -3137,14 +3176,6 @@ size_t ChooseAggregatePartitionCount(
 
 namespace {
 
-std::shared_ptr<TSinkCode> MakeSinkWriterCode() {
-    return std::make_shared<TSinkCode>(
-        [](void* state, const TRowSet& rowSet) {
-            static_cast<ISink*>(state)->Write(rowSet);
-            return ETaskResult::OK;
-        });
-}
-
 void PrintGraphDiagnostics(
     std::ostream& out, const TTaskGraph& graph, const TSettings& settings)
 {
@@ -3235,6 +3266,8 @@ TLoweredPlan LowerPlanToGraph(
     lowerer.WireRuntimeFilters();
     lowerer.CheckExecStagesConsistent();
 
+    auto nodeSpecs = std::move(lowerer.NodeSpecs());
+    nodeSpecs.resize(graph->Nodes().size());
     return TLoweredPlan{
         .Graph = std::move(graph),
         .OutputType = std::move(out.OutputType),
@@ -3245,23 +3278,40 @@ TLoweredPlan LowerPlanToGraph(
         .ExternalCatalog = std::move(externalCatalog),
         .ExecStages = std::move(lowerer.ExecStages()),
         .RuntimeFilters = std::move(lowerer.RuntimeFilters()),
+        .NodeSpecs = std::move(nodeSpecs),
     };
 }
 
 void AttachSink(TLoweredPlan& lowered, ISink& sink) {
-    // Aliasing shared_ptr: the sink task's state points at the caller-owned
-    // sink without taking ownership of it.
-    std::shared_ptr<void> sinkState(std::shared_ptr<void>{}, &sink);
-    auto sinkTask = std::make_unique<TSinkTask>(
-        MakeSinkWriterCode(),
-        std::move(sinkState),
-        TInputPort{.Connection = lowered.FinalGather, .Lane = 0});
-    auto& sinkNode = lowered.Graph->AddOwnedNode(std::move(sinkTask));
-    sinkNode.DebugKind = "sink";
+    auto& sinkNode = AddTask(*lowered.Graph, lowered.NodeSpecs, {
+        .DebugKind = "sink",
+        .Body = TSinkWriterNode{.In = PortSpec(*lowered.Graph, lowered.FinalGather, 0)},
+    }, &sink);
     for (size_t p = 0; p < lowered.Lanes; ++p) {
         lowered.Graph->AddEdge(
             *lowered.Producers[p], sinkNode, *lowered.FinalGather, p, 0);
     }
+}
+
+std::optional<TGraphSpec> ExtractLoweredGraphSpec(
+    const TLoweredPlan& lowered, std::vector<uint32_t>* missing)
+{
+    std::vector<TNodeSpec> nodes;
+    std::vector<uint32_t> absent;
+    for (size_t i = 0; i < lowered.Graph->Nodes().size(); ++i) {
+        if (i < lowered.NodeSpecs.size() && lowered.NodeSpecs[i]) {
+            nodes.push_back(*lowered.NodeSpecs[i]);
+        } else {
+            absent.push_back(static_cast<uint32_t>(i));
+        }
+    }
+    if (!absent.empty()) {
+        if (missing) {
+            *missing = std::move(absent);
+        }
+        return std::nullopt;
+    }
+    return ExtractGraphSpec(*lowered.Graph, std::move(nodes));
 }
 
 bool RunPlanIntoSink(

@@ -176,6 +176,12 @@ std::string SerializeGraphSpec(const TGraphSpec& spec);
 // Throws std::runtime_error on truncated or malformed input.
 TGraphSpec DeserializeGraphSpec(std::string_view bytes);
 
+// Builds the task of one node; port connections index `connections`. The
+// lowerer builds its Forward and SinkWriter tasks through this too. `sink` is
+// required for SinkWriter nodes. Throws std::runtime_error on an invalid body.
+std::unique_ptr<ITask> MakeNodeTask(
+    const TNodeBody& body, const std::vector<IConnection*>& connections, ISink* sink);
+
 // Builds an unsealed graph: node i has ExecutionSlot i. Remote source and sink
 // tasks have empty code, which the compute actor binds. `sink` is required for
 // SinkWriter nodes. Throws std::runtime_error on an invalid spec.

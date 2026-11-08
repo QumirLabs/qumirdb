@@ -7,10 +7,12 @@
 #include <qdb/scheduler/connection.h>
 #include <qdb/scheduler/graph.h>
 #include <qdb/scheduler/settings/settings.h>
+#include <qdb/scheduler/spec/graph_spec.h>
 
 #include <cstdint>
 #include <iosfwd>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -47,6 +49,9 @@ struct TLoweredPlan {
     // that creates Graph. Debug labels are deliberately not identities.
     std::vector<TLoweredExecStage> ExecStages;
     std::vector<TRuntimeFilterDiagnostic> RuntimeFilters;
+    // Spec records indexed by node index; empty for node kinds the graph spec
+    // does not describe yet.
+    std::vector<std::optional<TNodeSpec>> NodeSpecs;
 };
 
 // Choose hash-shuffle fanout for a plain grouped aggregate. Explicit shuffle
@@ -85,6 +90,11 @@ TLoweredPlan LowerPlanToGraph(
 // Attach the terminal sink task that writes every output rowset to `sink`; the
 // sink must outlive the graph.
 void AttachSink(TLoweredPlan& lowered, ISink& sink);
+
+// The graph spec of a lowered plan with its sink attached. Returns nullopt
+// when some nodes have no record; `missing` then lists their indices.
+std::optional<TGraphSpec> ExtractLoweredGraphSpec(
+    const TLoweredPlan& lowered, std::vector<uint32_t>* missing = nullptr);
 
 // Attach a terminal sink that writes every output rowset to `sink`, then run the
 // graph on the configured scheduler. Returns false and sets `error` on failure.
