@@ -164,4 +164,108 @@ struct TWindowPlanData {
     }
 };
 
+enum class EAggregateOutputKeyKind {
+    Fixed,
+    String,
+};
+
+struct TAggregateOutputKey {
+    EAggregateOutputKeyKind Kind = EAggregateOutputKeyKind::Fixed;
+    bool IsNullable = false;
+    size_t Size = 0;
+    size_t Alignment = 0;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.Kind);
+        v(self.IsNullable);
+        v(self.Size);
+        v(self.Alignment);
+    }
+};
+
+struct TAggregateOutputAgg {
+    bool IsNullable = false;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.IsNullable);
+    }
+};
+
+// The plain data of compiled aggregate kernels (TAggregateKernels without its
+// callables), so BindAggregateKernels can rebind them from their slot.
+struct TAggregateKernelMeta {
+    size_t NumAggs = 0;
+    // The i64 state words of a group, one swiss state array each.
+    size_t StateWords = 0;
+    // Bytes of a group in the row layout, or 0 when the kernel has none: the
+    // spec does not ask for it (TOperatorKernelSpec::AggregateRowLayout), its
+    // key or a reducer holds a string, or it has groups that exist over an
+    // empty input.
+    int64_t RowBytes = 0;
+    std::vector<int64_t> StringMetadataBuffers;
+    std::vector<TAggregateOutputKey> OutputKeys;
+    std::vector<TAggregateOutputAgg> OutputAggs;
+    // Index of the aggregate kernel in the sink (0 without a sink).
+    uint32_t Kernel = 0;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.NumAggs);
+        v(self.StateWords);
+        v(self.RowBytes);
+        v(self.StringMetadataBuffers);
+        v(self.OutputKeys);
+        v(self.OutputAggs);
+        v(self.Kernel);
+    }
+};
+
+// The layouts of the aggregate hash table: the swiss table, with one array per
+// state word, or the row layout (kernel/aggregation/aggregation_rows.oz),
+// which keeps the key and the states of a group in one arena row.
+enum class EAggregateTableLayout {
+    Swiss,
+    Row,
+};
+
+// How the table of one aggregate task starts and when it changes layout;
+// PlanAggregateTable (planner_helpers.h) chooses it.
+struct TAggregateTablePlan {
+    EAggregateTableLayout Layout = EAggregateTableLayout::Swiss;
+    // Swiss slots, rounded up to a power of two of at least 8.
+    int64_t InitialCapacity = 8;
+    // The groups a table that starts in the row layout has entries for.
+    int64_t InitialGroups = 0;
+    // A swiss table that must grow while it holds this many groups or more
+    // moves to the row layout instead; 0 keeps it swiss.
+    int64_t RowSwitchGroups = 0;
+    // The groups that move sizes the row entries for, when that is more than
+    // twice the groups it moves; 0 sizes them for twice the groups.
+    int64_t RowExpectedGroups = 0;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.Layout);
+        v(self.InitialCapacity);
+        v(self.InitialGroups);
+        v(self.RowSwitchGroups);
+        v(self.RowExpectedGroups);
+    }
+};
+
+// What an aggregate-hash dispatch needs besides its kernel slot.
+struct TAggregateHashPlanData {
+    // Index of the hash kernel in the sink (0 without a sink).
+    uint32_t Kernel = 0;
+    std::vector<int64_t> KeyColumns;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.Kernel);
+        v(self.KeyColumns);
+    }
+};
+
 } // namespace NQdb

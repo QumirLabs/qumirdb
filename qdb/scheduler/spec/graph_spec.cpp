@@ -139,6 +139,33 @@ std::unique_ptr<ITask> MakeSortTask(
         std::move(code), std::move(state), input, output);
 }
 
+std::unique_ptr<ITask> MakeAggregateTask(
+    const TAggregateNode& node, const std::vector<IConnection*>& connections, const TNodeTaskContext& context)
+{
+    auto state = std::make_shared<NLowering::TAggregateBlockingState>(
+        BindAggregateKernels(SlotAt(context, node.Meta.Kernel), node.Meta), node.Table);
+    return std::make_unique<TBlockingTask>(
+        NLowering::MakeAggregateBlockingCode(), std::move(state),
+        InputPort(connections, node.In), OutputPort(connections, node.Out));
+}
+
+std::unique_ptr<ITask> MakeHashShuffleTask(
+    const THashShuffleNode& node, const std::vector<IConnection*>& connections, const TNodeTaskContext& context)
+{
+    auto* output = dynamic_cast<THashShuffleConnection*>(&ConnectionAt(connections, node.Out));
+    if (!output) {
+        Invalid("a hash shuffle node needs a hash shuffle output");
+    }
+    auto hash = BindAggregateHash(SlotAt(context, node.Hash.Kernel), node.Hash.KeyColumns);
+    hash.Kernel = node.Hash.Kernel;
+    auto code = std::make_shared<THashShuffleCode>(
+        std::move(hash), node.InputType,
+        node.TargetOutputBatchRows, node.MaxOutputBatchRows, node.TargetOutputBatchBytes);
+    code->UseInputHash = node.UseInputHash;
+    return std::make_unique<THashShuffleTask>(
+        std::move(code), nullptr, InputPort(connections, node.In), *output, node.SourceLane);
+}
+
 TTaskNode& NodeAt(const std::vector<TTaskNode*>& nodes, uint32_t index)
 {
     if (index >= nodes.size()) {
@@ -233,6 +260,10 @@ std::unique_ptr<ITask> MakeNodeTask(
                 std::make_shared<NLowering::TWindowBlockingState>(
                     plan.OutputType, plan.Keys, plan.KeyColumns, std::move(kernel)),
                 InputPort(connections, node.In), OutputPort(connections, node.Out));
+        } else if constexpr (std::is_same_v<TNode, TAggregateNode>) {
+            return MakeAggregateTask(node, connections, context);
+        } else if constexpr (std::is_same_v<TNode, THashShuffleNode>) {
+            return MakeHashShuffleTask(node, connections, context);
         } else if constexpr (std::is_same_v<TNode, TForwardNode>) {
             auto code = std::make_shared<TUnaryCode>([](void*, TRowSet&) {});
             return std::make_unique<TUnaryTask>(

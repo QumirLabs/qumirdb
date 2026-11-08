@@ -105,7 +105,7 @@ bool AggregateMayUseRowLayout(NScheduler::EAggregateTableKind table, const TAggr
 // slots holds.
 TAggregateTablePlan PlanAggregateTable(
     const TAggregateTaskEstimate& estimate,
-    const TAggregateKernels& kernels,
+    const TAggregateKernelMeta& kernels,
     NScheduler::EAggregateTableKind table);
 
 // Build the final-phase operator that merges rows emitted by a partial

@@ -13,6 +13,32 @@ std::shared_ptr<const NScheduler::TSourceCode> MakeSourceCode()
         });
 }
 
+std::shared_ptr<const NScheduler::TBlockingCode> MakeAggregateBlockingCode()
+{
+    return std::make_shared<NScheduler::TBlockingCode>(
+        [](NScheduler::ITaskState& state, NScheduler::TInputPort& input, TRowSet& output) {
+            auto* s = &static_cast<TAggregateBlockingState&>(state);
+            if (s->Done) {
+                return NScheduler::ETaskResult::FINISHED;
+            }
+            TRowSet rowSet{};
+            while (true) {
+                auto fetch = input.Fetch(rowSet);
+                if (fetch == NScheduler::EFetchResult::NO_DATA) {
+                    return NScheduler::ETaskResult::NEED_DATA;
+                }
+                if (fetch == NScheduler::EFetchResult::FINISHED) {
+                    s->Done = true;
+                    s->Processor.Finish(output);
+                    return NScheduler::ETaskResult::OK;
+                }
+                s->Processor.Add(rowSet);
+                Release(&rowSet);
+                rowSet = {};
+            }
+        });
+}
+
 EJoinFetchResult MapJoinFetch(NScheduler::EFetchResult result)
 {
     switch (result) {

@@ -319,7 +319,7 @@ bool AggregateMayUseRowLayout(NScheduler::EAggregateTableKind table, const TAggr
 
 TAggregateTablePlan PlanAggregateTable(
     const TAggregateTaskEstimate& estimate,
-    const TAggregateKernels& kernels,
+    const TAggregateKernelMeta& kernels,
     NScheduler::EAggregateTableKind table)
 {
     using enum NScheduler::EAggregateTableKind;

@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 
+#include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
+#include <qdb/plan/types/type_text.h>
 #include <qdb/scheduler/connections/local.h>
 #include <qdb/scheduler/impl/single_threaded_scheduler.h>
 #include <qdb/scheduler/lowering/plan_lowerer.h>
@@ -10,6 +12,8 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <utility>
+#include <vector>
 
 using namespace NQdb;
 using namespace NQdb::NScheduler;
@@ -291,6 +295,97 @@ TEST(GraphSpec, SortMergeWindowRecordsRoundTrip)
     EXPECT_EQ(window.Plan.Keys[1].Column, "v");
 }
 
+TEST(GraphSpec, AggregateAndHashShuffleRecordsRoundTrip)
+{
+    using namespace NQumir::NAst;
+    const TTypePtr inputType = std::make_shared<TStructType>(std::vector<std::pair<std::string, TTypePtr>>{
+        {"k", std::make_shared<TIntegerType>(TIntegerType::I64)},
+        {"d", std::make_shared<TNullable>(std::make_shared<TDecimal>(18, 2))},
+        {"s", std::make_shared<TStringType>()},
+    });
+    TGraphSpec spec;
+    spec.Nodes.push_back(Node("hash-shuffle", "aggregate-repartition", THashShuffleNode{
+        .In = {0, 1},
+        .Out = 1,
+        .SourceLane = 1,
+        .Hash = {.Kernel = 3, .KeyColumns = {0, 2}},
+        .InputType = inputType,
+        .TargetOutputBatchRows = 4096,
+        .MaxOutputBatchRows = 65536,
+        .TargetOutputBatchBytes = 1 << 20,
+        .UseInputHash = true,
+    }));
+    spec.Nodes.push_back(Node("aggregate", "aggregate", TAggregateNode{
+        .In = {1, 1},
+        .Out = {2, 1},
+        .Meta = {
+            .NumAggs = 2,
+            .StateWords = 3,
+            .RowBytes = 40,
+            .StringMetadataBuffers = {2},
+            .OutputKeys = {
+                {.Kind = EAggregateOutputKeyKind::String, .IsNullable = true, .Size = 16, .Alignment = 8},
+                {.Size = 4, .Alignment = 4},
+            },
+            .OutputAggs = {{.IsNullable = true}, {}},
+            .Kernel = 4,
+        },
+        .Table = {
+            .Layout = EAggregateTableLayout::Row,
+            .InitialCapacity = 64,
+            .InitialGroups = 40,
+            .RowSwitchGroups = 7,
+            .RowExpectedGroups = 9,
+        },
+    }));
+
+    const auto bytes = SerializeGraphSpec(spec);
+    const auto back = DeserializeGraphSpec(bytes);
+    EXPECT_EQ(SerializeGraphSpec(back), bytes);
+    for (size_t size = 0; size < bytes.size(); ++size) {
+        EXPECT_THROW(DeserializeGraphSpec(std::string_view(bytes).substr(0, size)),
+            std::runtime_error) << size;
+    }
+
+    ASSERT_EQ(back.Nodes.size(), 2u);
+    const auto& shuffle = std::get<THashShuffleNode>(back.Nodes[0].Body);
+    EXPECT_EQ(shuffle.In.Lane, 1u);
+    EXPECT_EQ(shuffle.Out, 1u);
+    EXPECT_EQ(shuffle.SourceLane, 1u);
+    EXPECT_EQ(shuffle.Hash.Kernel, 3u);
+    EXPECT_EQ(shuffle.Hash.KeyColumns, (std::vector<int64_t>{0, 2}));
+    ASSERT_TRUE(shuffle.InputType);
+    EXPECT_NE(shuffle.InputType, inputType);
+    EXPECT_EQ(PrintTypeText(shuffle.InputType), PrintTypeText(inputType));
+    EXPECT_EQ(shuffle.TargetOutputBatchRows, 4096u);
+    EXPECT_EQ(shuffle.MaxOutputBatchRows, 65536u);
+    EXPECT_EQ(shuffle.TargetOutputBatchBytes, 1u << 20);
+    EXPECT_TRUE(shuffle.UseInputHash);
+
+    const auto& aggregate = std::get<TAggregateNode>(back.Nodes[1].Body);
+    EXPECT_EQ(aggregate.Out.Connection, 2u);
+    const auto& meta = aggregate.Meta;
+    EXPECT_EQ(meta.NumAggs, 2u);
+    EXPECT_EQ(meta.StateWords, 3u);
+    EXPECT_EQ(meta.RowBytes, 40);
+    EXPECT_EQ(meta.StringMetadataBuffers, (std::vector<int64_t>{2}));
+    ASSERT_EQ(meta.OutputKeys.size(), 2u);
+    EXPECT_EQ(meta.OutputKeys[0].Kind, EAggregateOutputKeyKind::String);
+    EXPECT_TRUE(meta.OutputKeys[0].IsNullable);
+    EXPECT_EQ(meta.OutputKeys[0].Size, 16u);
+    EXPECT_EQ(meta.OutputKeys[1].Kind, EAggregateOutputKeyKind::Fixed);
+    EXPECT_EQ(meta.OutputKeys[1].Alignment, 4u);
+    ASSERT_EQ(meta.OutputAggs.size(), 2u);
+    EXPECT_TRUE(meta.OutputAggs[0].IsNullable);
+    EXPECT_FALSE(meta.OutputAggs[1].IsNullable);
+    EXPECT_EQ(meta.Kernel, 4u);
+    EXPECT_EQ(aggregate.Table.Layout, EAggregateTableLayout::Row);
+    EXPECT_EQ(aggregate.Table.InitialCapacity, 64);
+    EXPECT_EQ(aggregate.Table.InitialGroups, 40);
+    EXPECT_EQ(aggregate.Table.RowSwitchGroups, 7);
+    EXPECT_EQ(aggregate.Table.RowExpectedGroups, 9);
+}
+
 TEST(GraphSpec, MaterializedGraphMatchesHandBuiltGraph)
 {
     TCountingSink sink;
@@ -414,6 +509,11 @@ TEST(GraphSpec, RejectsInvalidSpecs)
     // Kernel 0 has no slot.
     spec = FanOutSpec();
     spec.Nodes[1].Body = TFilterNode{.In = {0, 0}, .Out = {1, 0}};
+    EXPECT_THROW(MaterializeGraph(spec, &sink), std::runtime_error);
+
+    // Connection 1 is a gather, not a hash shuffle.
+    spec = FanOutSpec();
+    spec.Nodes[1].Body = THashShuffleNode{.In = {0, 0}, .Out = 1};
     EXPECT_THROW(MaterializeGraph(spec, &sink), std::runtime_error);
 }
 

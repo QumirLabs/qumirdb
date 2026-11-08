@@ -3,6 +3,7 @@
 #include <qdb/kernel/compiler.h>
 #include <qdb/kernel/execution_context.h>
 #include <qdb/exec/instrumentation/operator.h>
+#include <qdb/exec/plan_data.h>
 #include <qdb/exec/unary_process.h>
 
 #include <array>
@@ -10,30 +11,6 @@
 #include <vector>
 
 namespace NQdb {
-
-// The layouts of the aggregate hash table: the swiss table, with one array per
-// state word, or the row layout (kernel/aggregation/aggregation_rows.oz),
-// which keeps the key and the states of a group in one arena row.
-enum class EAggregateTableLayout {
-    Swiss,
-    Row,
-};
-
-// How the table of one aggregate task starts and when it changes layout;
-// PlanAggregateTable (planner_helpers.h) chooses it.
-struct TAggregateTablePlan {
-    EAggregateTableLayout Layout = EAggregateTableLayout::Swiss;
-    // Swiss slots, rounded up to a power of two of at least 8.
-    int64_t InitialCapacity = 8;
-    // The groups a table that starts in the row layout has entries for.
-    int64_t InitialGroups = 0;
-    // A swiss table that must grow while it holds this many groups or more
-    // moves to the row layout instead; 0 keeps it swiss.
-    int64_t RowSwitchGroups = 0;
-    // The groups that move sizes the row entries for, when that is more than
-    // twice the groups it moves; 0 sizes them for twice the groups.
-    int64_t RowExpectedGroups = 0;
-};
 
 class TAggregateProcessor {
 public:

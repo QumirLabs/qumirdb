@@ -196,10 +196,53 @@ struct TWindowNode {
     }
 };
 
+// A blocking aggregate over all its input rows.
+struct TAggregateNode {
+    TPortSpec In;
+    TPortSpec Out;
+    TAggregateKernelMeta Meta;
+    TAggregateTablePlan Table;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.In);
+        v(self.Out);
+        v(self.Meta);
+        v(self.Table);
+    }
+};
+
+// Partitions its input by the aggregate hash of the keys.
+struct THashShuffleNode {
+    TPortSpec In;
+    // The hash shuffle connection; the task writes every partition of it.
+    uint32_t Out = 0;
+    uint32_t SourceLane = 0;
+    TAggregateHashPlanData Hash;
+    NQumir::NAst::TTypePtr InputType;
+    uint64_t TargetOutputBatchRows = 0;
+    uint64_t MaxOutputBatchRows = 0;
+    uint64_t TargetOutputBatchBytes = 0;
+    bool UseInputHash = false;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.In);
+        v(self.Out);
+        v(self.SourceLane);
+        v(self.Hash);
+        TypeField(v, self.InputType);
+        v(self.TargetOutputBatchRows);
+        v(self.MaxOutputBatchRows);
+        v(self.TargetOutputBatchBytes);
+        v(self.UseInputHash);
+    }
+};
+
 using TNodeBody = std::variant<
     TForwardNode, TRemoteSourceNode, TRemoteSinkNode, TSinkWriterNode,
     TParquetScanNode, TFilterNode, TProjectNode, TSortNode, TSortMergeNode,
-    TWindowNode>;
+    TWindowNode, TAggregateNode, THashShuffleNode>;
 
 struct TNodeSpec {
     uint64_t ExecStageId = InvalidExecStageId;

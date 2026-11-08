@@ -1,6 +1,7 @@
 #pragma once
 
 #include <qdb/exec/instrumentation/operator.h>
+#include <qdb/exec/plan_data.h>
 #include <qdb/io/io.h>
 #include <qdb/kernel/backend.h>
 #include <qdb/kernel/generated.h>
@@ -190,49 +191,20 @@ enum class EAggregateKernelOp : int64_t {
 // Finalizes ht into a complete TRowSet and destroys ht.
 using TAggregateFinishRowSet = std::function<int64_t(void* ht, TRowSet* output)>;
 
-enum class EAggregateOutputKeyKind {
-    Fixed,
-    String,
-};
-
-struct TAggregateOutputKey {
-    EAggregateOutputKeyKind Kind = EAggregateOutputKeyKind::Fixed;
-    bool IsNullable = false;
-    size_t Size = 0;
-    size_t Alignment = 0;
-};
-
-struct TAggregateOutputAgg {
-    bool IsNullable = false;
-};
-
 // The compiled kernels for one Aggregation query: Dispatch handles
 // initialization and updates of the HashTable (via agg_dispatch's op-codes),
 // Finalize copies the dense group keys/aggregate buffers to output arrays.
-struct TAggregateKernels {
+struct TAggregateKernels : TAggregateKernelMeta {
     TAggregateDispatch Dispatch;
     TAggregateFinishRowSet FinishRowSet;
-    size_t NumAggs = 0;
-    // The i64 state words of a group, one swiss state array each.
-    size_t StateWords = 0;
-    // Bytes of a group in the row layout, or 0 when the kernel has none: the
-    // spec does not ask for it (TOperatorKernelSpec::AggregateRowLayout), its
-    // key or a reducer holds a string, or it has groups that exist over an
-    // empty input.
-    int64_t RowBytes = 0;
-    std::vector<int64_t> StringMetadataBuffers;
-    std::vector<TAggregateOutputKey> OutputKeys;
-    std::vector<TAggregateOutputAgg> OutputAggs;
     std::shared_ptr<TKernelSlot> Slot;
-    // Index of the aggregate kernel in the sink (0 without a sink).
-    uint32_t Kernel = 0;
 };
 
-// Binds Dispatch and FinishRowSet to the slot; the other fields of `meta`
-// (plain data) are kept. CompileAggregate ends with this call.
+// Binds Dispatch and FinishRowSet to the slot and keeps `meta`.
+// CompileAggregate ends with this call.
 TAggregateKernels BindAggregateKernels(
     std::shared_ptr<TKernelSlot> slot,
-    TAggregateKernels meta);
+    TAggregateKernelMeta meta);
 
 enum class EJoinKernelOp : int64_t {
     Init = 0,
