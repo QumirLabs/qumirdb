@@ -68,6 +68,7 @@ add_library(qumirdb
     plan/passes/cte_reuse.cpp
     plan/pipeline.cpp
     plan/plan_print.cpp
+    plan/types/type_text.cpp
     plan/build.cpp
     plan/sql_lowering.cpp
     kernel/vm_function.cpp
