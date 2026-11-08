@@ -30,6 +30,11 @@ public:
         Raw(value);
     }
 
+    void I32(int32_t value)
+    {
+        Raw(value);
+    }
+
     void U64(uint64_t value)
     {
         Raw(value);
@@ -62,6 +67,8 @@ public:
             U8(value);
         } else if constexpr (std::is_same_v<T, uint32_t>) {
             U32(value);
+        } else if constexpr (std::is_same_v<T, int32_t>) {
+            I32(value);
         } else if constexpr (std::is_same_v<T, uint64_t>) {
             U64(value);
         } else if constexpr (std::is_same_v<T, int64_t>) {
@@ -134,6 +141,11 @@ public:
         return Raw<uint32_t>();
     }
 
+    int32_t I32()
+    {
+        return Raw<int32_t>();
+    }
+
     uint64_t U64()
     {
         return Raw<uint64_t>();
@@ -169,6 +181,8 @@ public:
             value = U8();
         } else if constexpr (std::is_same_v<T, uint32_t>) {
             value = U32();
+        } else if constexpr (std::is_same_v<T, int32_t>) {
+            value = I32();
         } else if constexpr (std::is_same_v<T, uint64_t>) {
             value = U64();
         } else if constexpr (std::is_same_v<T, int64_t>) {

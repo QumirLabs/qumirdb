@@ -132,6 +132,22 @@ TEST(GraphSpec, SerializesAndDeserializes)
     EXPECT_EQ(decoded.Externals[0].Id, 5u);
 }
 
+TEST(GraphSpec, RowLayoutWidthKeepsInt32)
+{
+    auto spec = FanOutSpec();
+    spec.Connections[0].RowLayouts[0].Width = 0x7fffffff;
+    spec.Connections[0].RowLayouts[1].Width = -5;
+    const auto bytes = SerializeGraphSpec(spec);
+    const auto back = DeserializeGraphSpec(bytes);
+    EXPECT_EQ(back.Connections[0].RowLayouts[0].Width, 0x7fffffff);
+    EXPECT_EQ(back.Connections[0].RowLayouts[1].Width, -5);
+    EXPECT_EQ(SerializeGraphSpec(back), bytes);
+    // Each layout is a 4-byte width plus a 1-byte bitmap flag.
+    auto bare = spec;
+    bare.Connections[0].RowLayouts.clear();
+    EXPECT_EQ(bytes.size() - SerializeGraphSpec(bare).size(), 2 * (4 + 1));
+}
+
 TEST(GraphSpec, RejectsTruncatedInput)
 {
     const auto bytes = SerializeGraphSpec(FanOutSpec());

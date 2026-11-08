@@ -45,7 +45,7 @@ std::unique_ptr<IConnection> MakeConnection(const TConnectionSpec& spec)
     layouts.reserve(spec.RowLayouts.size());
     for (const auto& layout : spec.RowLayouts) {
         layouts.push_back(TValueLayout{
-            .Width = static_cast<int32_t>(layout.Width), .Bitmap = layout.Bitmap});
+            .Width = layout.Width, .Bitmap = layout.Bitmap});
     }
     connection->SetRowLayouts(std::move(layouts));
     return connection;

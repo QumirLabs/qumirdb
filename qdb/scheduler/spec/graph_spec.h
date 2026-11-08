@@ -20,7 +20,7 @@ namespace NScheduler {
 // TODO: no versioning or compatibility checks yet.
 
 struct TRowLayoutSpec {
-    int64_t Width = 0;
+    int32_t Width = 0;
     bool Bitmap = false;
 
     void Fields(this auto& self, auto& v)
