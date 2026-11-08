@@ -730,14 +730,21 @@ bool IsStringRadixKey(const NQumir::NAst::TTypePtr& type) {
 }
 
 TSortRuntimeProcess BuildSortRuntimeProcess(
-    const NQumir::NAst::TStructType& inputType,
+    const NQumir::NAst::TTypePtr& inputTypePtr,
     const std::vector<TSortKey>& keys,
     std::string_view kernelName,
+    std::optional<int64_t> topLimit,
     TKernelCompilerOptions options)
 {
+    auto* inputStruct = static_cast<NQumir::NAst::TStructType*>(inputTypePtr.get());
+    if (!inputStruct) {
+        throw std::runtime_error("sort input must have TStructType");
+    }
+    const auto& inputType = *inputStruct;
     auto spec = NKernel::BuildSortKernelSpec(inputType, keys, std::string(kernelName));
     PrintKernelSpec(options.Diagnostics, spec);
     auto sortInputs = BuildSortKernelInputs(spec);
+    TSortPlanData plan{.OutputType = inputTypePtr, .Keys = keys};
     TSortRadixKernel radixKernel;
     if (!sortInputs.AllKeysRadixSortable || sortInputs.RadixKeys.empty()) {
         throw std::runtime_error("sort kernel is unavailable for requested keys");
@@ -753,31 +760,34 @@ TSortRuntimeProcess BuildSortRuntimeProcess(
             anyNullableKey = anyNullableKey || IsNullableType(key.Type);
         }
         auto radixOptions = options;
-        if (kernelName == "top-sort") {
+        if (topLimit) {
             radixOptions.Diagnostics = nullptr;
         }
         TKernelCompiler compiler(std::move(radixOptions));
-        radixKernel = {
-            .Enabled = true,
-            .Dispatch = anyNullableKey
-                ? TKernelCompiler::TSortRadixCompositeDispatch{}
-                : compiler.CompileRadixSortComposite(sortInputs.RadixKeys, &inputType),
-            .NullableDispatch = anyNullableKey
-                ? compiler.CompileRadixSortCompositeNullable(sortInputs.RadixKeys, &inputType)
-                : TKernelCompiler::TSortRadixCompositeNullableDispatch{},
-        };
-        if (kernelName == "top-sort") {
+        auto radix = anyNullableKey
+            ? compiler.CompileRadixSortCompositeNullable(sortInputs.RadixKeys, &inputType)
+            : compiler.CompileRadixSortComposite(sortInputs.RadixKeys, &inputType);
+        plan.RadixKernel = radix.Kernel;
+        plan.RadixNullable = anyNullableKey;
+        TKernelCompiler::TTopSortDispatch topSort;
+        TKernelCompiler::THeapTopKDispatch heapTopK;
+        if (topLimit) {
             if (sink) {
                 for (size_t i = sinkBefore; i < sink->size(); ++i) {
                     (*sink)[i].ExportArtifacts = false;
                 }
             }
             TKernelCompiler topSortCompiler(std::move(options));
-            radixKernel.TopSortDispatch =
-                topSortCompiler.CompileTopSort(sortInputs.RadixKeys, &inputType);
-            radixKernel.HeapTopKDispatch =
-                topSortCompiler.CompileHeapTopK(sortInputs.RadixKeys);
+            topSort = topSortCompiler.CompileTopSort(sortInputs.RadixKeys, &inputType);
+            heapTopK = topSortCompiler.CompileHeapTopK(sortInputs.RadixKeys);
+            plan.Top = TSortPlanData::TTop{
+                .TopSortKernel = topSort.Kernel,
+                .HeapKernel = heapTopK.Kernel,
+                .Limit = *topLimit,
+            };
         }
+        radixKernel = MakeSortRadixKernel(
+            plan, std::move(radix), std::move(topSort), std::move(heapTopK));
         if (sink) {
             // Resolved key metadata for the exec exporter, on all emitted sort
             // kernels.
@@ -796,9 +806,10 @@ TSortRuntimeProcess BuildSortRuntimeProcess(
             }
         }
     }
+    plan.KeyColumns = std::move(sortInputs.KeyColumns);
     return {
-        .KeyColumns = std::move(sortInputs.KeyColumns),
         .RadixKernel = std::move(radixKernel),
+        .Plan = std::move(plan),
     };
 }
 
@@ -976,10 +987,9 @@ TWindowRuntimeProcess BuildWindowRuntimeProcess(
     auto* sink = options.Sink;
     const size_t sinkBefore = sink ? sink->size() : 0;
     TKernelCompiler compiler(std::move(options));
-    TSortRadixKernel kernel;
-    kernel.Enabled = true;
-    kernel.Dispatch = compiler.CompileWindow(
+    auto dispatch = compiler.CompileWindow(
         radixKeys, *inputStruct, partitionRadixKeys, orderRadixKeys, funcs);
+    const uint32_t kernelIndex = dispatch.Kernel;
     if (sink) {
         std::vector<TGeneratedKernel::TSortKeyMeta> meta;
         meta.reserve(keyColumns.size());
@@ -996,11 +1006,15 @@ TWindowRuntimeProcess BuildWindowRuntimeProcess(
         }
     }
 
-    return {
+    TWindowPlanData plan{
         .OutputType = ComputeWindowOutputType(inputType, window.Functions()),
         .Keys = std::move(keys),
         .KeyColumns = std::move(keyColumns),
-        .Kernel = std::move(kernel),
+        .Kernel = kernelIndex,
+    };
+    return {
+        .Kernel = MakeWindowKernel(std::move(dispatch)),
+        .Plan = std::move(plan),
     };
 }
 

@@ -20,6 +20,25 @@
 
 namespace NQdb {
 
+TSortRadixKernel MakeSortRadixKernel(
+    const TSortPlanData& plan,
+    TKernelCompiler::TSortRadixCompositeDispatch radix,
+    TKernelCompiler::TTopSortDispatch topSort,
+    TKernelCompiler::THeapTopKDispatch heapTopK)
+{
+    TSortRadixKernel kernel{.Enabled = true};
+    if (plan.RadixNullable) {
+        kernel.NullableDispatch = std::move(radix);
+    } else {
+        kernel.Dispatch = std::move(radix);
+    }
+    if (plan.Top) {
+        kernel.TopSortDispatch = std::move(topSort);
+        kernel.HeapTopKDispatch = std::move(heapTopK);
+    }
+    return kernel;
+}
+
 using namespace NQumir::NAst;
 
 struct TGatheredColumn {

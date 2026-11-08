@@ -6,6 +6,7 @@
 #include <qdb/exec/project_exec.h>
 #include <qdb/exec/sort_exec.h>
 #include <qdb/exec/unary_process.h>
+#include <qdb/exec/window_exec.h>
 #include <qdb/kernel/compiler.h>
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/filter.h>
@@ -142,9 +143,10 @@ TProjectColumnPlan BuildProjectColumnPlan(
     TProjectOperator& project,
     const NQumir::NAst::TStructType& inputStruct);
 
+// A sort or top-sort with the plan data to rebuild it from kernel slots.
 struct TSortRuntimeProcess {
-    std::vector<TSortColumnRef> KeyColumns;
     TSortRadixKernel RadixKernel;
+    TSortPlanData Plan;
 };
 
 // Print a human-readable runtime-plan tree for diagnostics (--verbose).
@@ -185,17 +187,17 @@ TProjectRuntimeProcess BuildProjectRuntimeProcess(
     const NQumir::NAst::TTypePtr& inputType,
     TKernelCompilerOptions options);
 
+// topLimit makes it a top-sort that keeps that many rows.
 TSortRuntimeProcess BuildSortRuntimeProcess(
-    const NQumir::NAst::TStructType& inputType,
+    const NQumir::NAst::TTypePtr& inputType,
     const std::vector<TSortKey>& keys,
     std::string_view kernelName,
+    std::optional<int64_t> topLimit,
     TKernelCompilerOptions options);
 
 struct TWindowRuntimeProcess {
-    NQumir::NAst::TTypePtr OutputType;
-    std::vector<TSortKey> Keys;              // partition (asc) ++ order
-    std::vector<TSortColumnRef> KeyColumns;
     TSortRadixKernel Kernel;                 // Kernel.Dispatch = window kernel
+    TWindowPlanData Plan;
 };
 
 TWindowRuntimeProcess BuildWindowRuntimeProcess(

@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace NQdb {
@@ -24,6 +25,32 @@ struct TSortRadixKernel {
     TKernelCompiler::TTopSortDispatch TopSortDispatch;
     TKernelCompiler::THeapTopKDispatch HeapTopKDispatch;
 };
+
+// What a sort or top-sort needs besides its kernels, so it can be rebuilt later.
+struct TSortPlanData {
+    // Kernel fields are indexes in the sink (0 without a sink).
+    struct TTop {
+        uint32_t TopSortKernel = 0;
+        uint32_t HeapKernel = 0;
+        int64_t Limit = 0;
+    };
+
+    NQumir::NAst::TTypePtr OutputType;
+    std::vector<TSortKey> Keys;
+    std::vector<TSortColumnRef> KeyColumns;
+    uint32_t RadixKernel = 0;
+    // The radix kernel is the nullable variant.
+    bool RadixNullable = false;
+    std::optional<TTop> Top;
+};
+
+// Binds the sort kernels from the plan data and dispatches over the kernels'
+// slots; the top-sort and heap dispatches are used only when the plan has Top.
+TSortRadixKernel MakeSortRadixKernel(
+    const TSortPlanData& plan,
+    TKernelCompiler::TSortRadixCompositeDispatch radix,
+    TKernelCompiler::TTopSortDispatch topSort,
+    TKernelCompiler::THeapTopKDispatch heapTopK);
 
 class TSortProcessor {
 public:

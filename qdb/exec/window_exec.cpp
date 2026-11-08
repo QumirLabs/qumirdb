@@ -15,6 +15,11 @@ namespace NQdb {
 
 using namespace NQumir::NAst;
 
+TSortRadixKernel MakeWindowKernel(TKernelCompiler::TSortRadixCompositeDispatch dispatch)
+{
+    return {.Enabled = true, .Dispatch = std::move(dispatch)};
+}
+
 TWindowProcessor::TWindowProcessor(
     TTypePtr outputType,
     std::vector<TSortKey> keys,
