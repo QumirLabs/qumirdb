@@ -223,7 +223,16 @@ struct TAggregateKernels {
     std::vector<int64_t> StringMetadataBuffers;
     std::vector<TAggregateOutputKey> OutputKeys;
     std::vector<TAggregateOutputAgg> OutputAggs;
+    std::shared_ptr<TKernelSlot> Slot;
+    // Index of the aggregate kernel in the sink (0 without a sink).
+    uint32_t Kernel = 0;
 };
+
+// Binds Dispatch and FinishRowSet to the slot; the other fields of `meta`
+// (plain data) are kept. CompileAggregate ends with this call.
+TAggregateKernels BindAggregateKernels(
+    std::shared_ptr<TKernelSlot> slot,
+    TAggregateKernels meta);
 
 enum class EJoinKernelOp : int64_t {
     Init = 0,

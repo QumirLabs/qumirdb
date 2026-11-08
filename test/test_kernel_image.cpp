@@ -255,6 +255,34 @@ TEST(KernelImage, AggregateRoundTrip)
     EXPECT_EQ(LoadAndRunAggregate(CompileAggregateImage()), expected);
 }
 
+TEST(KernelImage, AggregateBindsFromImageSlot)
+{
+    TKernelCompiler jit({});
+    const auto expected = RunAggregate(jit.CompileAggregate(AggregateSpec()));
+
+    std::vector<TGeneratedKernel> kernels;
+    TKernelCompiler compiler({.Sink = &kernels, .BindNow = false});
+    // A leading filter shifts the aggregate kernel index.
+    compiler.CompileFilter(FilterSpec());
+    auto aggregate = compiler.CompileAggregate(AggregateSpec());
+    ASSERT_EQ(kernels.size(), 2u);
+    EXPECT_EQ(aggregate.Kernel, 1u);
+    EXPECT_EQ(kernels[aggregate.Kernel].Slot, aggregate.Slot);
+
+    const auto bytes = SerializeKernelImage(CompileKernelImage(kernels));
+    std::vector<std::shared_ptr<TKernelSlot>> slots;
+    for (const auto& kernel : kernels) {
+        slots.push_back(kernel.Slot);
+    }
+    LoadKernelImage(DeserializeKernelImage(bytes), slots);
+
+    auto bound = BindAggregateKernels(slots[aggregate.Kernel], aggregate);
+    EXPECT_EQ(bound.Slot, slots[aggregate.Kernel]);
+    EXPECT_EQ(bound.StateWords, aggregate.StateWords);
+    EXPECT_EQ(RunAggregate(std::move(bound)), expected);
+    EXPECT_EQ(expected, ExpectedSums);
+}
+
 TEST(KernelImage, AggregateInAnotherProcess)
 {
     static int counter = 0;

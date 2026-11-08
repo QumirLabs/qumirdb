@@ -2266,17 +2266,25 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
         }
     }
 
+    kernels.Kernel = kernel.Index;
+    return BindAggregateKernels(kernel.Slot, std::move(kernels));
+}
+
+TAggregateKernels BindAggregateKernels(
+    std::shared_ptr<TKernelSlot> slot,
+    TAggregateKernels meta)
+{
     using TDispatchFn = int64_t(*)(void*, TRowSet*, int64_t, int64_t);
     using TFinishRowSetFn = int64_t(*)(void*, TRowSet*);
 
-    auto slot = kernel.Slot;
-    kernels.Dispatch = [slot](void* ht, TRowSet* batch, int64_t arg, int64_t op) {
+    meta.Dispatch = [slot](void* ht, TRowSet* batch, int64_t arg, int64_t op) {
         return slot->Call<TDispatchFn>(0, ht, batch, arg, op);
     };
-    kernels.FinishRowSet = [slot](void* ht, TRowSet* output) {
+    meta.FinishRowSet = [slot](void* ht, TRowSet* output) {
         return slot->Call<TFinishRowSetFn>(1, ht, output);
     };
-    return kernels;
+    meta.Slot = std::move(slot);
+    return meta;
 }
 
 TJoinKernels TKernelCompiler::CompileJoin(
