@@ -491,7 +491,7 @@ std::string_view JoinBuildSideName(EJoinBuildSide side) {
     return "auto";
 }
 
-TUnaryRuntimeProcess BuildFilterRuntimeProcess(
+TFilterRuntimeProcess BuildFilterRuntimeProcess(
     TFilterOperator& filter,
     const NQumir::NAst::TTypePtr& inputType,
     TKernelCompilerOptions options)
@@ -511,16 +511,14 @@ TUnaryRuntimeProcess BuildFilterRuntimeProcess(
     auto dispatch = compiler.CompileFilter(spec);
 
     auto columnPlan = BuildFilterColumnPlan(filter, inputType);
-    if (columnPlan.KeptInputColumns) {
-        return {
-            .Process = MakeFilterSelectProcess(
-                std::move(dispatch), std::move(*columnPlan.KeptInputColumns)),
-            .OutputType = std::move(columnPlan.OutputType),
-        };
-    }
+    TFilterPlanData data{
+        .Kernel = dispatch.Kernel,
+        .KeptInputColumns = std::move(columnPlan.KeptInputColumns),
+    };
     return {
-        .Process = MakeFilterProcess(std::move(dispatch)),
+        .Process = MakeFilterProcess(data, std::move(dispatch)),
         .OutputType = std::move(columnPlan.OutputType),
+        .Plan = std::move(data),
     };
 }
 
@@ -681,7 +679,7 @@ TProjectColumnPlan BuildProjectColumnPlan(
     return plan;
 }
 
-TUnaryRuntimeProcess BuildProjectRuntimeProcess(
+TProjectRuntimeProcess BuildProjectRuntimeProcess(
     TProjectOperator& project,
     const NQumir::NAst::TTypePtr& inputType,
     TKernelCompilerOptions options)
@@ -709,16 +707,19 @@ TUnaryRuntimeProcess BuildProjectRuntimeProcess(
         dispatch = compiler.CompileProject(spec);
     }
 
-    auto process = MakeProjectProcess(
-        std::move(plan.Columns),
-        std::move(dispatch),
-        std::move(plan.ComputedWidths),
-        std::move(plan.ComputedIsString),
-        std::move(plan.ComputedIsNullable));
+    TProjectPlanData data{
+        .Kernel = plan.ComputedExprs.empty() ? std::nullopt : std::optional(dispatch.Kernel),
+        .Columns = std::move(plan.Columns),
+        .ComputedWidths = std::move(plan.ComputedWidths),
+        .ComputedIsString = std::move(plan.ComputedIsString),
+        .ComputedIsNullable = std::move(plan.ComputedIsNullable),
+    };
+    auto process = MakeProjectProcess(data, std::move(dispatch));
 
     return {
         .Process = std::move(process),
         .OutputType = std::move(plan.OutputType),
+        .Plan = std::move(data),
     };
 }
 

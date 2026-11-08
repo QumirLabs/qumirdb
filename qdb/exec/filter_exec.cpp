@@ -75,6 +75,16 @@ TUnaryStreamProcess MakeFilterProcess(
     return MakeFilterViewProcess(std::move(dispatch), {}, /*keepAll=*/true);
 }
 
+TUnaryStreamProcess MakeFilterProcess(
+    const TFilterPlanData& plan,
+    TKernelCompiler::TFilterDispatch dispatch)
+{
+    if (plan.KeptInputColumns) {
+        return MakeFilterSelectProcess(std::move(dispatch), *plan.KeptInputColumns);
+    }
+    return MakeFilterProcess(std::move(dispatch));
+}
+
 TUnaryStreamProcess MakeFilterSelectProcess(
     TKernelCompiler::TFilterDispatch dispatch,
     std::vector<int32_t> keptIndices)

@@ -27,18 +27,15 @@ void DestroyProjectedRowSet(TRowSet* rowSet) {
 } // namespace
 
 TUnaryStreamProcess MakeProjectProcess(
-    std::vector<TProjectColumn> columns,
-    TKernelCompiler::TProjectDispatch computeDispatch,
-    std::vector<size_t> computedWidths,
-    std::vector<bool> computedIsString,
-    std::vector<bool> computedIsNullable)
+    TProjectPlanData plan,
+    TKernelCompiler::TProjectDispatch computeDispatch)
 {
     return [
-        columns = std::move(columns),
+        columns = std::move(plan.Columns),
         computeDispatch = std::move(computeDispatch),
-        computedWidths = std::move(computedWidths),
-        computedIsString = std::move(computedIsString),
-        computedIsNullable = std::move(computedIsNullable)](
+        computedWidths = std::move(plan.ComputedWidths),
+        computedIsString = std::move(plan.ComputedIsString),
+        computedIsNullable = std::move(plan.ComputedIsNullable)](
         TRowSet& rowSet,
         TUnaryStreamingKernelState&)
     {

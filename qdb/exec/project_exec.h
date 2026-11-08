@@ -4,6 +4,7 @@
 #include <qdb/kernel/compiler.h>
 
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 namespace NQdb {
@@ -17,11 +18,20 @@ struct TProjectColumn {
     int32_t Index = 0;
 };
 
+// What a project process needs besides its kernel, so it can be rebuilt later.
+struct TProjectPlanData {
+    // Index of the project kernel in the sink; none without computed columns.
+    std::optional<uint32_t> Kernel;
+    std::vector<TProjectColumn> Columns;
+    std::vector<size_t> ComputedWidths;
+    std::vector<bool> ComputedIsString;
+    std::vector<bool> ComputedIsNullable;
+};
+
+// Binds the process from its plan data and a dispatch over the kernel's slot
+// (empty without computed columns).
 TUnaryStreamProcess MakeProjectProcess(
-    std::vector<TProjectColumn> columns,
-    TKernelCompiler::TProjectDispatch computeDispatch,
-    std::vector<size_t> computedWidths,
-    std::vector<bool> computedIsString = {},
-    std::vector<bool> computedIsNullable = {});
+    TProjectPlanData plan,
+    TKernelCompiler::TProjectDispatch computeDispatch);
 
 } // namespace NQdb
