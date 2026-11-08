@@ -722,7 +722,7 @@ TKernelDedup DeduplicateKernels(
   std::unordered_map<std::string, size_t> uniqueByKey;
   for (auto &kernel : kernels) {
     if (!kernel.Slot) {
-      throw std::logic_error("kernel '" + kernel.Name + "' has no slot");
+      throw std::logic_error("FinalizeKernels: kernel '" + kernel.Name + "' has no slot");
     }
     if (skip(kernel)) {
       continue;
