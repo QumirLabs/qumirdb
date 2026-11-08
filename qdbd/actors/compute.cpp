@@ -86,17 +86,34 @@ struct TComputeActor : public IBehaviorActor {
         // e.g. ComputeActorNotifier -> consumer notification queue -> send to ComputeActor
         // need to do it if we move Actors to multithreaded model
 
-        auto& queue = ActorChannel->SinkQueue();
-        NQdb::NScheduler::TRemoteSinkState* state = nullptr;
-        while (queue.TryPop(state)) {
-            // process
-            state->SendQueue(ctx);
-            SchedulerSchannel->Notify(std::get<1>(SinkStates.at(state->Id)));
+        if (Failed) {
+            return;
         }
-        NQdb::NScheduler::TRemoteSourceState* source = nullptr;
-        while (ActorChannel->SourceQueue().TryPop(source)) {
-            source->SendConfirm(ctx);
+        // An exception must not leave the coroutine: it would stop silently.
+        try {
+            auto& queue = ActorChannel->SinkQueue();
+            NQdb::NScheduler::TRemoteSinkState* state = nullptr;
+            while (queue.TryPop(state)) {
+                // process
+                state->SendQueue(ctx);
+                SchedulerSchannel->Notify(std::get<1>(SinkStates.at(state->Id)));
+            }
+            NQdb::NScheduler::TRemoteSourceState* source = nullptr;
+            while (ActorChannel->SourceQueue().TryPop(source)) {
+                source->SendConfirm(ctx);
+            }
+        } catch (const std::exception& e) {
+            Fail(ctx, e.what());
+        } catch (...) {
+            Fail(ctx, "unknown error");
         }
+    }
+
+    // Stops moving data for the graph and tells the query actor.
+    void Fail(TActorContext::TPtr& ctx, std::string message) {
+        Failed = true;
+        Scheduler->Cancel();
+        SendError(ctx, "compute actor failed: " + std::move(message));
     }
 
     void SendError(TActorContext::TPtr& ctx, std::string message) {
@@ -179,6 +196,10 @@ struct TComputeActor : public IBehaviorActor {
     }
 
     void OnDataChunk(TDataChunk&& chunk, TActorContext::TPtr& ctx) {
+        if (Failed) {
+            Release(&chunk.RowSet);
+            return;
+        }
         auto it = SourceStates.find(chunk.DstTaskId);
         if (it == SourceStates.end()) {
             SendError(ctx, "dropped chunk " + std::to_string(chunk.Seq) + " for unknown task "
@@ -235,7 +256,7 @@ struct TComputeActor : public IBehaviorActor {
         NScheduler::TTaskNode* node)
     {
         auto [code, state] = NScheduler::MakeRemoteSink(
-            endpoint.Id, endpoint.PeerActor, endpoint.PeerTaskId, endpoint.Layouts.data(), *ActorChannel);
+            endpoint.Id, endpoint.PeerActor, endpoint.PeerTaskId, endpoint.Layouts, *ActorChannel);
         sinkTask.BindCode(std::move(code), state);
         SinkStates.emplace(endpoint.Id, std::tuple{std::move(state), node});
     }
@@ -254,6 +275,7 @@ struct TComputeActor : public IBehaviorActor {
     std::thread SchedulerThread;
     TVoidSuspendedTask NotificationTask;
     TActorId QueryActorId;
+    bool Failed = false;
     std::optional<NNet::NActors::TEvent> StatusEvent;
 };
 

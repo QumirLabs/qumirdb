@@ -18,7 +18,7 @@ TRemoteSinkState::TRemoteSinkState(
     uint64_t id,
     NNet::NActors::TActorId actorId,
     uint64_t dstTaskId,
-    const TValueLayout* descriptor,
+    std::span<const TValueLayout> descriptor,
     TActorNotificationChannel& actorChannel,
     size_t outboxCapacity,
     size_t window)
@@ -88,12 +88,21 @@ bool TRemoteSinkState::OnConfirm(uint64_t lastApplied, NNet::NActors::TActorCont
 }
 
 void TRemoteSinkState::SendChunk(NNet::NActors::TActorContext::TPtr& ctx, uint64_t seq, TRowSet&& rowSet) {
-    ctx->Send<TDataChunk>(ActorId, TDataChunk {
-        .DstTaskId = DstTaskId,
-        .Seq = seq,
-        .RowSet = rowSet,
-        .Descriptor = Descriptor,
-    });
+    // TODO: a Selection rowset is refused by serialization; compact or reject is still open.
+    try {
+        if (static_cast<size_t>(rowSet.ColumnCount) > Descriptor.size()) {
+            throw std::runtime_error("remote sink " + std::to_string(Id) + ": fewer layouts than columns");
+        }
+        ctx->Send<TDataChunk>(ActorId, TDataChunk {
+            .DstTaskId = DstTaskId,
+            .Seq = seq,
+            .RowSet = rowSet,
+            .Descriptor = Descriptor.data(),
+        });
+    } catch (...) {
+        Release(&rowSet);
+        throw;
+    }
     // Send has serialized the payload, so the reference can go here. Row
     // sets own detached buffers, which any thread may free.
     Release(&rowSet);
@@ -207,7 +216,7 @@ std::pair<std::shared_ptr<const TSinkCode>, std::shared_ptr<TRemoteSinkState>> M
     uint64_t id,
     NNet::NActors::TActorId actorId,
     uint64_t dstTaskId,
-    const TValueLayout* descriptor,
+    std::span<const TValueLayout> descriptor,
     TActorNotificationChannel& actorChannel,
     size_t outboxCapacity,
     size_t window)

@@ -76,7 +76,7 @@ struct TRemoteSinkState {
         uint64_t id,
         NNet::NActors::TActorId actorId,
         uint64_t dstTaskId,
-        const TValueLayout* descriptor,
+        std::span<const TValueLayout> descriptor,
         TActorNotificationChannel& actorChannel,
         size_t outboxCapacity = 16,
         size_t window = 2);
@@ -143,7 +143,7 @@ struct TRemoteSinkState {
     const uint64_t Id;
     NNet::NActors::TActorId ActorId;
     uint64_t DstTaskId;
-    const TValueLayout* Descriptor;
+    std::span<const TValueLayout> Descriptor;
     TActorNotificationChannel& ActorChannel;
     TMPSCQueue<TRowSet> Outbox;
     const size_t Window;
@@ -216,7 +216,7 @@ std::pair<std::shared_ptr<const TSinkCode>, std::shared_ptr<TRemoteSinkState>> M
     uint64_t id,
     NNet::NActors::TActorId actorId,
     uint64_t dstTaskId,
-    const TValueLayout* descriptor,
+    std::span<const TValueLayout> descriptor,
     TActorNotificationChannel& actorChannel,
     size_t outboxCapacity = 16,
     size_t window = 2);

@@ -1345,7 +1345,7 @@ void RunRemotePipeline(const TRemotePipeline& options) {
     TActorNotificationChannel channelB(std::make_unique<TFakeNotifier>());
 
     auto [sinkCode, sinkState] = MakeRemoteSink(
-        1, TActorId{}, 2, nullptr, channelA, options.OutboxCapacity, options.Window);
+        1, TActorId{}, 2, {}, channelA, options.OutboxCapacity, options.Window);
     auto producerCode = std::make_shared<TSourceCode>([&](void* state, TRowSet& rowSet) {
         auto* producer = static_cast<TProducerState*>(state);
         if (producer->Next > producer->Total) {
@@ -1503,7 +1503,7 @@ TEST(DistributedScheduler, RemoteSinkKeepsAtMostWindowChunksUnconfirmed) {
     using namespace NQdb::NScheduler;
     std::atomic<int> destroyed = 0;
     TActorNotificationChannel channel(std::make_unique<TFakeNotifier>());
-    auto [code, state] = MakeRemoteSink(1, TActorId{}, 2, nullptr, channel, 8, 2);
+    auto [code, state] = MakeRemoteSink(1, TActorId{}, 2, {}, channel, 8, 2);
     std::vector<uint64_t> sent;
     auto send = [&](uint64_t seq, TRowSet&& rowSet) {
         sent.push_back(seq);
@@ -1551,7 +1551,7 @@ TEST(DistributedScheduler, RemoteSinkFinishesAfterItsLastChunk) {
     using namespace NQdb::NScheduler;
     std::atomic<int> destroyed = 0;
     TActorNotificationChannel channel(std::make_unique<TFakeNotifier>());
-    auto [code, state] = MakeRemoteSink(1, TActorId{}, 2, nullptr, channel, 4, 1);
+    auto [code, state] = MakeRemoteSink(1, TActorId{}, 2, {}, channel, 4, 1);
     std::vector<uint64_t> events; // 0 is the finish
     auto send = [&](uint64_t seq, TRowSet&& rowSet) {
         events.push_back(seq);
@@ -1582,7 +1582,7 @@ TEST(DistributedScheduler, RemoteSinkFinishesAfterItsLastChunk) {
     EXPECT_EQ(destroyed.load(), 3);
 
     // An empty stream finishes at once.
-    auto [emptyCode, emptyState] = MakeRemoteSink(3, TActorId{}, 4, nullptr, channel, 4, 1);
+    auto [emptyCode, emptyState] = MakeRemoteSink(3, TActorId{}, 4, {}, channel, 4, 1);
     events.clear();
     EXPECT_EQ(emptyCode->Finish(emptyState.get()), ETaskResult::OK);
     ASSERT_TRUE(channel.SinkQueue().TryPop(queued));
@@ -1642,7 +1642,7 @@ TEST(DistributedScheduler, RemoteSourceConfirmsConsumedChunks) {
 TEST(DistributedScheduler, ValidatesRemoteEndpoints) {
     using namespace NQdb::NScheduler;
     TActorNotificationChannel channel(std::make_unique<TFakeNotifier>());
-    auto [sinkCode, sinkState] = MakeRemoteSink(1, TActorId{}, 2, nullptr, channel);
+    auto [sinkCode, sinkState] = MakeRemoteSink(1, TActorId{}, 2, {}, channel);
     auto [sourceCode, sourceState] = MakeRemoteSource(2, TActorId{}, 1, channel);
     auto connection = std::make_unique<TOneToOneConnection>();
     auto* connectionPtr = connection.get();
@@ -1808,6 +1808,84 @@ TEST(DistributedScheduler, TwoComputeActorsMoveRowsThroughRemoteTasks) {
     }
     // In one system the chunk is a shallow copy, so both sides release the same row set.
     EXPECT_GE(destroyed.load(), total);
+}
+
+namespace {
+
+class TBlackHole : public IActor {
+public:
+    void Receive(TMessageId, TBlob, TActorContext::TPtr) override { }
+};
+
+// Rows with `columns` columns that the sink cannot send: too few layouts or a Selection.
+TRowSet UnsendableRows(int64_t columns, bool selection, std::atomic<int>* destroyed) {
+    static TColumn storage[2] = {};
+    static uint8_t selected[1] = {1};
+    auto rows = CountedRows(1, destroyed);
+    rows.Columns = storage;
+    rows.ColumnCount = columns;
+    rows.Selection = selection ? selected : nullptr;
+    return rows;
+}
+
+} // namespace
+
+// The sink is on another node, so a failing Send must reach the query actor as TComputeError.
+TEST(DistributedScheduler, ComputeActorReportsAFailedSendAndReleasesTheRowSet) {
+    using namespace NQdb::NScheduler;
+    struct TCase {
+        int64_t Columns;
+        bool Selection;
+        size_t Layouts;
+    };
+    for (const auto& c : {TCase{1, false, 0}, TCase{2, false, 1}, TCase{1, true, 1}}) {
+        std::atomic<int> destroyed = 0;
+        TProducerState producerState{.Total = 1000};
+        auto producerCode = std::make_shared<TSourceCode>([&](void* state, TRowSet& rowSet) {
+            auto* producer = static_cast<TProducerState*>(state);
+            if (producer->Next > producer->Total) {
+                return ETaskResult::FINISHED;
+            }
+            ++producer->Next;
+            rowSet = UnsendableRows(c.Columns, c.Selection, &destroyed);
+            return ETaskResult::OK;
+        });
+        auto connection = std::make_unique<TOneToOneConnection>();
+        auto* connectionPtr = connection.get();
+        TTaskGraph graph;
+        auto& producer = graph.AddOwnedNode(std::make_unique<TSourceTask>(
+            producerCode, std::shared_ptr<void>(&producerState, [](void*) {}),
+            TOutputPort{.Connection = connectionPtr}));
+        auto& remoteSink = graph.AddOwnedNode(std::make_unique<TSinkTask>(
+            nullptr, nullptr, TInputPort{.Connection = connectionPtr}));
+        graph.AddOwnedEdge(producer, remoteSink, std::move(connection));
+        graph.MarkExternal(remoteSink, 1);
+        const auto sealed = graph.Seal();
+        ASSERT_TRUE(sealed);
+
+        auto resources = std::make_shared<TRuntimeResources>();
+        resources->Scheduler.WorkerCount = 2;
+        TTestCluster cluster;
+        std::map<std::string, int> statuses;
+        std::vector<std::string> errors;
+        const auto query = cluster.Follower.Register(std::make_unique<TReportProbe>(statuses, errors));
+        // The peer is on the other node, so the chunk goes through serialization.
+        const auto peer = cluster.Leader.Register(std::make_unique<TBlackHole>());
+        const auto actor = cluster.Follower.Register(std::unique_ptr<IActor>(CreateComputeActor(resources)));
+        TRemoteEndpoint sink{.Id = 1, .Kind = ERemoteEndpointKind::Sink, .PeerActor = peer, .PeerTaskId = 2};
+        sink.Layouts.assign(c.Layouts, TValueLayout{.Width = 8});
+        cluster.Follower.Send<TTaskGraphMessage>(query, actor, TTaskGraphMessage{
+            .Graph = sealed, .Endpoints = {sink}});
+        const auto deadline = NNet::TClock::now() + std::chrono::seconds(10);
+        while (errors.empty() && NNet::TClock::now() < deadline) {
+            cluster.Pump();
+        }
+        ASSERT_EQ(errors.size(), 1u);
+        EXPECT_NE(errors[0].find("compute actor failed"), std::string::npos);
+        EXPECT_GE(destroyed.load(), 1);
+        cluster.Follower.Send<TPoison>(query, actor, TPoison{});
+        cluster.Pump();
+    }
 }
 
 int main(int argc, char** argv) {
