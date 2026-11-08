@@ -113,6 +113,7 @@ add_library(qumirdb
     scheduler/lowering/plan_lowerer.cpp
     scheduler/tasks/runtime_adapter.cpp
     scheduler/lowering/scan_split.cpp
+    scheduler/lowering/task_factory.cpp
     scheduler/impl/single_threaded_scheduler.cpp
     scheduler/impl/threaded_scheduler.cpp
 )
