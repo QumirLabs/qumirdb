@@ -1216,8 +1216,8 @@ TRowSet CountedRows(int64_t rows, std::atomic<int>* destroyed) {
 
 // source -> sink, both external: ids 2 and 1, like the pipeline tests above.
 struct TTwoEndpointGraph {
-    // The sealed graph points into the task graph.
-    NQdb::NScheduler::TTaskGraph Owner;
+    // The sealed graph points into the task graph; the message keeps it alive.
+    std::shared_ptr<NQdb::NScheduler::TTaskGraph> Owner = std::make_shared<NQdb::NScheduler::TTaskGraph>();
     NQdb::NScheduler::TSealedTaskGraph Graph;
     std::vector<TRemoteEndpoint> Endpoints{
         {.Id = 1, .Kind = ERemoteEndpointKind::Sink},
@@ -1229,14 +1229,14 @@ struct TTwoEndpointGraph {
         auto connection = std::make_unique<TOneToOneConnection>();
         auto* connectionPtr = connection.get();
         connectionPtr->SetRowLayouts({TValueLayout{.Width = 8}});
-        auto& source = Owner.AddOwnedNode(std::make_unique<TSourceTask>(
+        auto& source = Owner->AddOwnedNode(std::make_unique<TSourceTask>(
             nullptr, nullptr, TOutputPort{.Connection = connectionPtr}));
-        auto& sink = Owner.AddOwnedNode(std::make_unique<TSinkTask>(
+        auto& sink = Owner->AddOwnedNode(std::make_unique<TSinkTask>(
             nullptr, nullptr, TInputPort{.Connection = connectionPtr}));
-        Owner.AddOwnedEdge(source, sink, std::move(connection));
-        Owner.MarkExternal(sink, 1);
-        Owner.MarkExternal(source, 2);
-        Graph = Owner.Seal();
+        Owner->AddOwnedEdge(source, sink, std::move(connection));
+        Owner->MarkExternal(sink, 1);
+        Owner->MarkExternal(source, 2);
+        Graph = Owner->Seal();
     }
 };
 
@@ -1267,7 +1267,6 @@ private:
 TEST(DistributedAllocation, ComputeActorSendsPeriodicStatus) {
     auto resources = std::make_shared<TRuntimeResources>();
     resources->Scheduler.StatusPeriodMs = 5;
-    // Declared first: the compute actor's graph copy points into it until the cluster is gone.
     TTwoEndpointGraph graph;
     TTestCluster cluster;
     int statuses = 0;
@@ -1281,7 +1280,7 @@ TEST(DistributedAllocation, ComputeActorSendsPeriodicStatus) {
     EXPECT_EQ(statuses, 0);
 
     cluster.Follower.Send<TTaskGraphMessage>(probe, actor, TTaskGraphMessage{
-        .Graph = graph.Graph, .Endpoints = graph.Endpoints});
+        .Graph = graph.Graph, .GraphOwner = graph.Owner, .Endpoints = graph.Endpoints});
     const auto deadline = NNet::TClock::now() + std::chrono::seconds(5);
     while (statuses < 3 && NNet::TClock::now() < deadline) {
         cluster.Pump();
@@ -1301,7 +1300,6 @@ TEST(DistributedAllocation, ComputeActorSendsPeriodicStatus) {
 
 TEST(DistributedAllocation, ComputeActorReportsErrorsToTheQueryActor) {
     auto resources = std::make_shared<TRuntimeResources>();
-    // Declared first: the compute actor's graph copy points into it until the cluster is gone.
     TTwoEndpointGraph graph;
     TTestCluster cluster;
     int statuses = 0;
@@ -1312,13 +1310,13 @@ TEST(DistributedAllocation, ComputeActorReportsErrorsToTheQueryActor) {
     auto bad = graph.Endpoints;
     bad.push_back({.Id = 7, .Kind = ERemoteEndpointKind::Sink});
     cluster.Follower.Send<TTaskGraphMessage>(probe, actor, TTaskGraphMessage{
-        .Graph = graph.Graph, .Endpoints = bad});
+        .Graph = graph.Graph, .GraphOwner = graph.Owner, .Endpoints = bad});
     cluster.Pump();
     ASSERT_EQ(errors.size(), 1);
     EXPECT_NE(errors[0].find("no external node with id 7"), std::string::npos);
 
     cluster.Follower.Send<TTaskGraphMessage>(probe, actor, TTaskGraphMessage{
-        .Graph = graph.Graph, .Endpoints = graph.Endpoints});
+        .Graph = graph.Graph, .GraphOwner = graph.Owner, .Endpoints = graph.Endpoints});
     cluster.Pump();
     EXPECT_EQ(errors.size(), 1);
 
@@ -1350,10 +1348,10 @@ TEST(DistributedAllocation, ComputeActorRejectsASecondGraph) {
     const auto probe = cluster.Follower.Register(std::make_unique<TOrchestratorProbe>(statuses, errors));
     const auto actor = cluster.Follower.Register(std::unique_ptr<IActor>(CreateComputeActor(resources)));
     cluster.Follower.Send<TTaskGraphMessage>(probe, actor, TTaskGraphMessage{
-        .Graph = first.Graph, .Endpoints = first.Endpoints});
+        .Graph = first.Graph, .GraphOwner = first.Owner, .Endpoints = first.Endpoints});
     cluster.Pump();
     cluster.Follower.Send<TTaskGraphMessage>(probe, actor, TTaskGraphMessage{
-        .Graph = second.Graph, .Endpoints = second.Endpoints});
+        .Graph = second.Graph, .GraphOwner = second.Owner, .Endpoints = second.Endpoints});
     cluster.Pump();
     ASSERT_EQ(errors.size(), 1u);
     EXPECT_NE(errors[0].find("already started"), std::string::npos);

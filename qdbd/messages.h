@@ -91,6 +91,8 @@ struct TTaskGraphMessage {
     static constexpr NNet::NActors::TMessageId MessageId = 202;
     using LocalMessage = void; // TODO: must be serializable
     NScheduler::TSealedTaskGraph Graph;
+    // Keeps the nodes and connections behind Graph alive.
+    std::shared_ptr<void> GraphOwner;
     std::vector<TRemoteEndpoint> Endpoints;
     std::vector<TGeneratedKernel> Kernels;
 };
