@@ -433,7 +433,7 @@ public:
         void operator()(TRowSet& rowSet, const uint8_t* inputSelection) const;
 
         std::shared_ptr<TKernelSlot> Slot;
-        // Payloads the kernel points into (literal strings).
+        // Keeps the finalized program alive.
         std::shared_ptr<void> Storage;
         std::shared_ptr<TRuntimeContext> Runtime;
         // Index of the filter kernel in the sink (0 without a sink).
@@ -617,8 +617,7 @@ private:
     TGeneratedKernel EmitKernel(
         std::string name,
         std::vector<std::string> entrypoints,
-        NQumir::NAst::TExprPtr ast,
-        std::shared_ptr<void> storage = nullptr);
+        NQumir::NAst::TExprPtr ast);
 
     std::ostream* Diagnostics_ = nullptr;
     std::string Stage_;

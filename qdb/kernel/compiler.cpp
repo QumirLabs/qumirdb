@@ -217,8 +217,7 @@ std::shared_ptr<TKernelSlot> TKernelCompiler::CompileInstrumentation() {
 TGeneratedKernel TKernelCompiler::EmitKernel(
     std::string name,
     std::vector<std::string> entrypoints,
-    NQumir::NAst::TExprPtr ast,
-    std::shared_ptr<void> storage)
+    NQumir::NAst::TExprPtr ast)
 {
     TGeneratedKernel kernel{
         .Name = std::move(name),
@@ -226,7 +225,6 @@ TGeneratedKernel TKernelCompiler::EmitKernel(
         .ExecStageId = ExecStageId_,
         .Entrypoints = std::move(entrypoints),
         .Ast = std::move(ast),
-        .Storage = std::move(storage),
         .RuntimeContext = RuntimeContext_,
         .Slot = std::make_shared<TKernelSlot>(),
     };
@@ -1779,11 +1777,9 @@ TKernelCompiler::TFilterDispatch TKernelCompiler::CompileFilter(
     auto rowSetType = QumirDbNamedType("TRowSet");
     auto stringViewType = QumirDbNamedType("StringView");
 
-    auto literalStorage =
-        std::make_shared<std::vector<std::shared_ptr<std::string>>>();
     auto kernelAst = NKernel::BuildFilterProgramAst(
         ClonePredicate(predicate), *inputType.Cast(), fieldIndices, columnType,
-        rowSetType, stringViewType, *literalStorage);
+        rowSetType, stringViewType);
     if (!kernelAst) {
         throw NQumir::TError(
             "CompileFilter: " + kernelAst.error().ToString());
@@ -1795,7 +1791,7 @@ TKernelCompiler::TFilterDispatch TKernelCompiler::CompileFilter(
     PrintKernelAst(Diagnostics_, "filter", *kernelAst);
 
     auto kernel = EmitKernel(
-        "filter", {"<kernel>"}, std::move(*kernelAst), literalStorage);
+        "filter", {"<kernel>"}, std::move(*kernelAst));
     FinishKernelDiagnostics(Diagnostics_);
 
     return {
@@ -1848,8 +1844,6 @@ TKernelCompiler::TProjectDispatch TKernelCompiler::CompileProject(
     auto rowSetType = QumirDbNamedType("TRowSet");
     auto stringViewType = QumirDbNamedType("StringView");
 
-    auto literalStorage =
-        std::make_shared<std::vector<std::shared_ptr<std::string>>>();
     std::vector<NQumir::NAst::TExprPtr> cloned;
     cloned.reserve(spec.Expressions.size());
     for (const auto& expr : spec.Expressions) {
@@ -1858,7 +1852,7 @@ TKernelCompiler::TProjectDispatch TKernelCompiler::CompileProject(
 
     auto kernelAst = NKernel::GenProjectKernelAst(
         std::move(cloned), computedTypes, *inputType.Cast(), fieldIndices,
-        columnType, rowSetType, stringViewType, *literalStorage);
+        columnType, rowSetType, stringViewType);
 
     if (Diagnostics_) {
         NKernel::PrintKernelSpec(*Diagnostics_, spec);
@@ -1866,7 +1860,7 @@ TKernelCompiler::TProjectDispatch TKernelCompiler::CompileProject(
     PrintKernelAst(Diagnostics_, "project", kernelAst);
 
     auto kernel = EmitKernel(
-        "project", {"<project>"}, std::move(kernelAst), literalStorage);
+        "project", {"<project>"}, std::move(kernelAst));
     FinishKernelDiagnostics(Diagnostics_);
 
     auto dispatch = BindProject(kernel.Slot, kernel.Storage, RuntimeContext_);

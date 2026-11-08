@@ -123,8 +123,7 @@ NQumir::NAst::TExprPtr GenFilterKernelAst(
     const std::unordered_map<std::string, int32_t>& fieldIndices,
     NQumir::NAst::TTypePtr columnType,
     NQumir::NAst::TTypePtr rowSetType,
-    NQumir::NAst::TTypePtr stringViewType,
-    std::vector<std::shared_ptr<std::string>>& literalStorage);
+    NQumir::NAst::TTypePtr stringViewType);
 
 // Builds `jt_residual_filter` evaluating `predicate` on one (left,right) row
 // pair, replacing the always-true default (join/join_residual_default.oz) in the
@@ -160,8 +159,7 @@ NQumir::NAst::TExprPtr GenProjectKernelAst(
     const std::unordered_map<std::string, int32_t>& fieldIndices,
     NQumir::NAst::TTypePtr columnType,
     NQumir::NAst::TTypePtr rowSetType,
-    NQumir::NAst::TTypePtr stringViewType,
-    std::vector<std::shared_ptr<std::string>>& literalStorage);
+    NQumir::NAst::TTypePtr stringViewType);
 
 // Byte layout of a group in the row layout of the aggregate table
 // (kernel/aggregation/aggregation_rows.oz): the hash word, the key at

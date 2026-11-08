@@ -129,7 +129,7 @@ struct TGeneratedKernel {
     TExecStageId ExecStageId = InvalidExecStageId;
     std::vector<std::string> Entrypoints;
     NQumir::NAst::TExprPtr Ast;
-    // Payloads the AST points into (e.g. filter literal strings).
+    // Set by FinalizeKernels: keeps the finalized program alive.
     std::shared_ptr<void> Storage;
     std::shared_ptr<TRuntimeContext> RuntimeContext;
     std::shared_ptr<TKernelSlot> Slot;

@@ -93,8 +93,7 @@ BuildFilterProgramAst(
     const std::unordered_map<std::string, int32_t>& fieldIndices,
     NQumir::NAst::TTypePtr columnType,
     NQumir::NAst::TTypePtr rowSetType,
-    NQumir::NAst::TTypePtr stringViewType,
-    std::vector<std::shared_ptr<std::string>>& literalStorage);
+    NQumir::NAst::TTypePtr stringViewType);
 
 // Composes one generic aggregation update program in dependency order:
 // key operations, reducers, generic rehash/table libraries, then the named
