@@ -77,6 +77,10 @@ EConnectionKind TOneToOneConnection::Kind() const {
     return EConnectionKind::OneToOne;
 }
 
+size_t TOneToOneConnection::Capacity() const {
+    return Capacity_;
+}
+
 void TOneToOneConnection::Resize(size_t srcCount, size_t dstCount) {
     assert(srcCount == dstCount);
     Size_ = srcCount;
@@ -141,6 +145,10 @@ TGatherConnection::~TGatherConnection() = default;
 
 EConnectionKind TGatherConnection::Kind() const {
     return EConnectionKind::Gather;
+}
+
+size_t TGatherConnection::Capacity() const {
+    return Capacity_;
 }
 
 void TGatherConnection::Resize(size_t srcCount, size_t dstCount) {
@@ -228,6 +236,10 @@ THashShuffleConnection::~THashShuffleConnection() = default;
 
 EConnectionKind THashShuffleConnection::Kind() const {
     return EConnectionKind::HashShuffle;
+}
+
+size_t THashShuffleConnection::Capacity() const {
+    return Capacity_;
 }
 
 void THashShuffleConnection::Resize(size_t srcCount, size_t dstCount) {
@@ -348,6 +360,10 @@ TBroadcastConnection::~TBroadcastConnection() = default;
 
 EConnectionKind TBroadcastConnection::Kind() const {
     return EConnectionKind::Broadcast;
+}
+
+size_t TBroadcastConnection::Capacity() const {
+    return Capacity_;
 }
 
 void TBroadcastConnection::Resize(size_t srcCount, size_t dstCount) {

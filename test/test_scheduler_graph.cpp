@@ -147,6 +147,31 @@ TEST(SchedulerGraph, BuildsAdjacencyAndValidates) {
     EXPECT_EQ(sink.Inbound.size(), 1u);
 }
 
+TEST(SchedulerGraph, ExposesConnectionsAndExternals) {
+    TNoopTask task;
+    TTaskGraph graph;
+    auto& source = graph.AddNode(task);
+    auto& sink = graph.AddNode(task);
+    auto& edge = graph.AddOwnedEdge(source, sink, std::make_unique<TGatherConnection>(3));
+    auto& extra = graph.AddConnection(std::make_unique<TBroadcastConnection>(5));
+    graph.MarkExternal(sink, 9);
+    graph.MarkExternal(source, 3);
+
+    ASSERT_EQ(graph.Connections().size(), 2u);
+    EXPECT_EQ(graph.Connections()[0].get(), edge.Connection);
+    EXPECT_EQ(graph.Connections()[1].get(), &extra);
+    EXPECT_EQ(static_cast<TGatherConnection&>(*edge.Connection).Capacity(), 3u);
+    EXPECT_EQ(static_cast<TBroadcastConnection&>(extra).Capacity(), 5u);
+    EXPECT_EQ(TOneToOneConnection(2).Capacity(), 2u);
+    EXPECT_EQ(THashShuffleConnection(4).Capacity(), 4u);
+
+    ASSERT_EQ(graph.Externals().size(), 2u);
+    EXPECT_EQ(graph.Externals()[0].Id, 9u);
+    EXPECT_EQ(graph.Externals()[0].Node, &sink);
+    EXPECT_EQ(graph.Externals()[1].Id, 3u);
+    EXPECT_EQ(graph.Externals()[1].Node, &source);
+}
+
 TEST(SchedulerGraph, RejectsEmptyGraph) {
     TTaskGraph graph;
     std::string error;

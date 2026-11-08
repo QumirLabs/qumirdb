@@ -37,6 +37,8 @@ public:
 
     EFetchResult Fetch(size_t dstId, TRowSet& rowSet) override;
 
+    size_t Capacity() const;
+
 private:
     size_t Capacity_;
     size_t Size_ = 0;
@@ -58,6 +60,8 @@ public:
     void Finish(size_t srcId) override;
 
     EFetchResult Fetch(size_t dstId, TRowSet& rowSet) override;
+
+    size_t Capacity() const;
 
 private:
     size_t Capacity_;
@@ -89,6 +93,7 @@ public:
     EFetchResult Fetch(size_t dstId, TRowSet& rowSet) override;
 
     const TRepartitionSpec& Repartition() const;
+    size_t Capacity() const;
 
 private:
     size_t LaneIndex(size_t srcId, size_t dstId) const;
@@ -122,6 +127,8 @@ public:
     void Finish(size_t srcId) override;
 
     EFetchResult Fetch(size_t dstId, TRowSet& rowSet) override;
+
+    size_t Capacity() const;
 
 private:
     size_t Capacity_;

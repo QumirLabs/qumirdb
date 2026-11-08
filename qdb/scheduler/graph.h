@@ -130,6 +130,10 @@ public:
     const std::vector<std::unique_ptr<TTaskEdge>>& Edges() const;
     const std::vector<TTaskNode*>& Leaves() const;
     TTaskNode* Root() const;
+    // Owned connections in creation order.
+    std::span<const std::unique_ptr<IConnection>> Connections() const;
+    // Marked nodes; sorted by id once the graph is sealed.
+    std::span<const TExternalNode> Externals() const;
 
 private:
     void CheckMutable() const;
