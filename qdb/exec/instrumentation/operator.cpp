@@ -37,7 +37,14 @@ std::vector<TValueLayout> RowLayouts(const NQumir::NAst::TTypePtr& type) {
     }
     std::vector<TValueLayout> layouts;
     for (const auto& [name, field] : structure.Cast()->Fields) {
-        const auto value = UnwrapNamedType(UnwrapNullableType(field));
+        auto value = field;
+        while (true) {
+            const auto inner = UnwrapNamedType(UnwrapNullableType(value));
+            if (inner == value) {
+                break;
+            }
+            value = inner;
+        }
         if (TMaybeType<TStringType>(value)) {
             layouts.push_back({});
         } else if (TMaybeType<TBoolType>(value)) {

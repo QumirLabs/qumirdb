@@ -105,6 +105,22 @@ TEST(OperatorInstrumentation, ResolvesLogicalAndPhysicalColumnWidths) {
     }
 }
 
+TEST(OperatorInstrumentation, RowLayoutsUnwrapNamedNullableChains) {
+    auto named = [](TTypePtr type) {
+        return std::make_shared<TNamedType>("ALIAS", std::move(type));
+    };
+    auto schema = std::make_shared<TStructType>(std::vector<std::pair<std::string, TTypePtr>>{
+        {"flag", named(std::make_shared<TNullable>(std::make_shared<TBoolType>()))},
+        {"text", named(std::make_shared<TNullable>(std::make_shared<TStringType>()))},
+    });
+    const auto layouts = RowLayouts(schema);
+    ASSERT_EQ(layouts.size(), 2u);
+    EXPECT_TRUE(layouts[0].Bitmap);
+    EXPECT_EQ(layouts[0].Width, 0);
+    EXPECT_FALSE(layouts[1].Bitmap);
+    EXPECT_EQ(layouts[1].Width, 0);
+}
+
 TEST(OperatorInstrumentation, CountsSelectedNonNullPayloadAndBothOffsetWidths) {
     auto kernel = MeasurementKernel();
     std::array<int32_t, 4> values = {10, 20, 30, 40};
