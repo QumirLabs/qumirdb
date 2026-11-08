@@ -232,6 +232,44 @@ TEST(ProjectE2E, ProjectRebuildsFromPlanDataAndSlot) {
     EXPECT_EQ(RunProcess(rebuilt, data.Batch()), expected);
 }
 
+TEST(ProjectE2E, FilterKeepAllRebuildsFromPlanDataAndSlot) {
+    TTwoColumns data;
+    NQdb::TMockSource src({"x", "y"});
+    auto root = ParseRel("(rel filter (rel source \"L\") (> x (: 2 i64)))", src);
+    auto filter = TMaybeOp<TFilterOperator>(root);
+    ASSERT_TRUE(filter);
+
+    std::vector<TGeneratedKernel> kernels;
+    auto built = BuildFilterRuntimeProcess(*filter.Cast(),
+        filter.Cast()->Input()->OutputColumns(), {.Sink = &kernels});
+    ASSERT_EQ(kernels.size(), 1u);
+    EXPECT_FALSE(built.Plan.KeptInputColumns);
+
+    const auto& kernel = kernels[built.Plan.Kernel];
+    auto rebuilt = MakeFilterProcess(built.Plan, {
+        .Slot = kernel.Slot, .Storage = kernel.Storage, .Runtime = kernel.RuntimeContext});
+    const auto expected = RunProcess(built.Process, data.Batch());
+    EXPECT_FALSE(expected.empty());
+    EXPECT_EQ(RunProcess(rebuilt, data.Batch()), expected);
+}
+
+TEST(ProjectE2E, ProjectWithoutComputedColumnsRebuildsFromPlanData) {
+    TTwoColumns data;
+    NQdb::TMockSource src({"x", "y"});
+    auto root = ParseRel("(rel project (rel source \"L\") (y y) (x x))", src);
+    auto project = TMaybeOp<TProjectOperator>(root);
+    ASSERT_TRUE(project);
+
+    auto built = BuildProjectRuntimeProcess(*project.Cast(),
+        project.Cast()->Input()->OutputColumns(), {});
+    EXPECT_FALSE(built.Plan.Kernel);
+
+    auto rebuilt = MakeProjectProcess(built.Plan, TKernelCompiler::TProjectDispatch{});
+    const auto expected = RunProcess(built.Process, data.Batch());
+    EXPECT_FALSE(expected.empty());
+    EXPECT_EQ(RunProcess(rebuilt, data.Batch()), expected);
+}
+
 TEST(ProjectE2E, IdentZeroCopyPlusComputed) {
     std::array<double, 3> x = {10.0, 20.0, 4.0};
     std::array<double, 3> z = {0.5, 0.25, 0.75};
