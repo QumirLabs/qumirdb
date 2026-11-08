@@ -209,7 +209,8 @@ private:
 
 // Empty if every endpoint names its own node of the matching task type
 // (TSourceTask for Source, TSinkTask for Sink) built with empty code, and every
-// source or sink task with empty code has an endpoint; otherwise the first problem.
+// source or sink task with empty code has an endpoint, and every sink endpoint
+// has Layouts; otherwise the first problem.
 std::string ValidateEndpoints(
     const TSealedTaskGraph& graph,
     std::span<const NRemote::TRemoteEndpoint> endpoints);

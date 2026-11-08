@@ -97,8 +97,8 @@ bool TRemoteSinkState::OnConfirm(uint64_t lastApplied, NNet::NActors::TActorCont
 
 void TRemoteSinkState::SendChunk(NNet::NActors::TActorContext::TPtr& ctx, uint64_t seq, TRowSet&& rowSet) {
     try {
-        if (static_cast<size_t>(rowSet.ColumnCount) > Descriptor.size()) {
-            throw std::runtime_error("remote sink " + std::to_string(Id) + ": fewer layouts than columns");
+        if (static_cast<size_t>(rowSet.ColumnCount) != Descriptor.size()) {
+            throw std::runtime_error("remote sink " + std::to_string(Id) + ": row set columns do not match layouts");
         }
         ctx->Send<TDataChunk>(ActorId, TDataChunk {
             .DstTaskId = DstTaskId,
@@ -219,6 +219,9 @@ std::string ValidateEndpoints(
         }
         if (isSource ? source->Code() != nullptr : sink->Code() != nullptr) {
             return "external node " + std::to_string(endpoint.Id) + " already has code";
+        }
+        if (!isSource && endpoint.Layouts.empty()) {
+            return "sink endpoint " + std::to_string(endpoint.Id) + " has no layouts";
         }
         covered.insert(node);
     }

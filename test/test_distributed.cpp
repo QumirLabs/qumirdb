@@ -1103,8 +1103,12 @@ void CountDestroy(TRowSet* rowSet) {
     static_cast<std::atomic<int>*>(rowSet->Private)->fetch_add(1, std::memory_order_relaxed);
 }
 
+// One column, like the Layouts of the sink endpoints in these tests.
 TRowSet CountedRows(int64_t rows, std::atomic<int>* destroyed) {
+    static TColumn column{};
     return TRowSet{
+        .Columns = &column,
+        .ColumnCount = 1,
         .RowCount = rows,
         .Destroy = CountDestroy,
         .Private = destroyed,
@@ -1118,7 +1122,7 @@ struct TTwoEndpointGraph {
     NQdb::NScheduler::TTaskGraph Owner;
     NQdb::NScheduler::TSealedTaskGraph Graph;
     std::vector<TRemoteEndpoint> Endpoints{
-        {.Id = 1, .Kind = ERemoteEndpointKind::Sink},
+        {.Id = 1, .Kind = ERemoteEndpointKind::Sink, .Layouts = {TValueLayout{.Width = 8}}},
         {.Id = 2, .Kind = ERemoteEndpointKind::Source},
     };
 
@@ -1207,7 +1211,7 @@ TEST(DistributedAllocation, ComputeActorReportsErrorsToTheQueryActor) {
     const auto actor = cluster.Follower.Register(std::unique_ptr<IActor>(CreateComputeActor(resources)));
 
     auto bad = graph.Endpoints;
-    bad.push_back({.Id = 7, .Kind = ERemoteEndpointKind::Sink});
+    bad.push_back({.Id = 7, .Kind = ERemoteEndpointKind::Sink, .Layouts = {TValueLayout{.Width = 8}}});
     cluster.Follower.Send<TTaskGraphMessage>(probe, actor, TTaskGraphMessage{
         .Graph = graph.Graph, .Endpoints = bad});
     cluster.Pump();
@@ -1750,7 +1754,11 @@ TEST(DistributedScheduler, ValidatesRemoteEndpoints) {
     ASSERT_TRUE(sealed);
 
     auto endpoint = [](uint64_t id, ERemoteEndpointKind kind) {
-        return TRemoteEndpoint{.Id = id, .Kind = kind};
+        TRemoteEndpoint result{.Id = id, .Kind = kind};
+        if (kind == ERemoteEndpointKind::Sink) {
+            result.Layouts = {TValueLayout{.Width = 8}};
+        }
+        return result;
     };
     const std::vector<TRemoteEndpoint> good{
         endpoint(1, ERemoteEndpointKind::Sink), endpoint(2, ERemoteEndpointKind::Source)};
@@ -1759,6 +1767,9 @@ TEST(DistributedScheduler, ValidatesRemoteEndpoints) {
     const std::vector<TRemoteEndpoint> sinkOnly{endpoint(1, ERemoteEndpointKind::Sink)};
     EXPECT_NE(ValidateEndpoints(sealed, sinkOnly), "");
     EXPECT_NE(ValidateEndpoints(sealed, {}), "");
+    auto noLayouts = endpoint(1, ERemoteEndpointKind::Sink);
+    noLayouts.Layouts.clear();
+    EXPECT_NE(ValidateEndpoints(sealed, std::vector{noLayouts, endpoint(2, ERemoteEndpointKind::Source)}), "");
     const std::vector<TRemoteEndpoint> missing{endpoint(3, ERemoteEndpointKind::Sink)};
     EXPECT_NE(ValidateEndpoints(sealed, missing), "");
     const std::vector<TRemoteEndpoint> swapped{
@@ -1876,7 +1887,8 @@ TEST(DistributedScheduler, TwoComputeActorsMoveRowsThroughRemoteTasks) {
 
     cluster.Follower.Send<TTaskGraphMessage>(query, ca1, TTaskGraphMessage{
         .Graph = sealed1,
-        .Endpoints = {{.Id = 1, .Kind = ERemoteEndpointKind::Sink, .PeerActor = ca2, .PeerTaskId = 2}}});
+        .Endpoints = {{.Id = 1, .Kind = ERemoteEndpointKind::Sink, .PeerActor = ca2, .PeerTaskId = 2,
+            .Layouts = {TValueLayout{.Width = 8}}}}});
     cluster.Follower.Send<TTaskGraphMessage>(query, ca2, TTaskGraphMessage{
         .Graph = sealed2,
         .Endpoints = {{.Id = 2, .Kind = ERemoteEndpointKind::Source, .PeerActor = ca1, .PeerTaskId = 1}}});
@@ -1913,7 +1925,7 @@ public:
     void Receive(TMessageId, TBlob, TActorContext::TPtr) override { }
 };
 
-// Rows with `columns` columns that the sink cannot send: too few layouts or a Selection.
+// Rows with `columns` columns for a sink whose layout count differs.
 TRowSet UnsendableRows(int64_t columns, bool selection, std::atomic<int>* destroyed) {
     static TColumn storage[2] = {};
     static uint8_t selected[1] = {1};
@@ -1934,7 +1946,7 @@ TEST(DistributedScheduler, ComputeActorReportsAFailedSendAndReleasesTheRowSet) {
         bool Selection;
         size_t Layouts;
     };
-    for (const auto& c : {TCase{1, false, 0}, TCase{2, false, 1}}) {
+    for (const auto& c : {TCase{2, false, 1}, TCase{1, false, 2}}) {
         std::atomic<int> destroyed = 0;
         TProducerState producerState{.Total = 1000};
         auto producerCode = std::make_shared<TSourceCode>([&](void* state, TRowSet& rowSet) {
@@ -2023,7 +2035,8 @@ TEST(DistributedScheduler, RemoteSinkReleasesItsOutboxOnTeardown) {
         const auto actor = cluster.Follower.Register(std::unique_ptr<IActor>(CreateComputeActor(resources)));
         cluster.Follower.Send<TTaskGraphMessage>(query, actor, TTaskGraphMessage{
             .Graph = sealed,
-            .Endpoints = {{.Id = 1, .Kind = ERemoteEndpointKind::Sink, .PeerActor = peer, .PeerTaskId = 2}}});
+            .Endpoints = {{.Id = 1, .Kind = ERemoteEndpointKind::Sink, .PeerActor = peer, .PeerTaskId = 2,
+            .Layouts = {TValueLayout{.Width = 8}}}}});
         const auto until = NNet::TClock::now() + std::chrono::milliseconds(200);
         while (NNet::TClock::now() < until) {
             cluster.Pump();
