@@ -1,6 +1,7 @@
 #pragma once
 
 #include <qdb/exec/join_exec.h>
+#include <qdb/exec/plan_data.h>
 #include <qdb/kernel/compiler.h>
 #include <qdb/plan/ops/sort.h>
 
@@ -13,35 +14,12 @@ namespace NQdb {
 
 struct TTopSortScratch;
 
-struct TSortColumnRef {
-    int32_t Index = 0;
-    NQumir::NAst::TTypePtr Type;
-};
-
 struct TSortRadixKernel {
     bool Enabled = false;
     TKernelCompiler::TSortRadixCompositeDispatch Dispatch;
     TKernelCompiler::TSortRadixCompositeNullableDispatch NullableDispatch;
     TKernelCompiler::TTopSortDispatch TopSortDispatch;
     TKernelCompiler::THeapTopKDispatch HeapTopKDispatch;
-};
-
-// What a sort or top-sort needs besides its kernels, so it can be rebuilt later.
-struct TSortPlanData {
-    // Kernel fields are indexes in the sink (0 without a sink).
-    struct TTop {
-        uint32_t TopSortKernel = 0;
-        uint32_t HeapKernel = 0;
-        int64_t Limit = 0;
-    };
-
-    NQumir::NAst::TTypePtr OutputType;
-    std::vector<TSortKey> Keys;
-    std::vector<TSortColumnRef> KeyColumns;
-    uint32_t RadixKernel = 0;
-    // The radix kernel is the nullable variant.
-    bool RadixNullable = false;
-    std::optional<TTop> Top;
 };
 
 // Binds the sort kernels from the plan data and dispatches over the kernels'

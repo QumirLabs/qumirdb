@@ -155,9 +155,51 @@ struct TProjectNode {
     }
 };
 
+// A sort, or a top-sort when the plan has Top.
+struct TSortNode {
+    TPortSpec In;
+    TPortSpec Out;
+    TSortPlanData Plan;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.In);
+        v(self.Out);
+        v(self.Plan);
+    }
+};
+
+// Merges the sorted runs of its inputs, one run per input.
+struct TSortMergeNode {
+    std::vector<TPortSpec> In;
+    TPortSpec Out;
+    TSortMergePlanData Plan;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.In);
+        v(self.Out);
+        v(self.Plan);
+    }
+};
+
+struct TWindowNode {
+    TPortSpec In;
+    TPortSpec Out;
+    TWindowPlanData Plan;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.In);
+        v(self.Out);
+        v(self.Plan);
+    }
+};
+
 using TNodeBody = std::variant<
     TForwardNode, TRemoteSourceNode, TRemoteSinkNode, TSinkWriterNode,
-    TParquetScanNode, TFilterNode, TProjectNode>;
+    TParquetScanNode, TFilterNode, TProjectNode, TSortNode, TSortMergeNode,
+    TWindowNode>;
 
 struct TNodeSpec {
     uint64_t ExecStageId = InvalidExecStageId;

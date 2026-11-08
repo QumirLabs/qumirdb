@@ -3,6 +3,8 @@
 #include <qdb/exec/filter_exec.h>
 #include <qdb/exec/project_exec.h>
 #include <qdb/exec/runtime_context.h>
+#include <qdb/exec/sort_exec.h>
+#include <qdb/exec/window_exec.h>
 #include <qdb/kernel/compiler.h>
 #include <qdb/scheduler/connections/local.h>
 #include <qdb/scheduler/lowering/task_factory.h>
@@ -109,6 +111,34 @@ std::unique_ptr<ITask> MakeParquetScanTask(
     return std::make_unique<TSourceTask>(NLowering::MakeSourceCode(), std::move(state), output);
 }
 
+std::unique_ptr<ITask> MakeSortTask(
+    const TSortNode& node, TInputPort input, TOutputPort output, const TNodeTaskContext& context)
+{
+    const auto& plan = node.Plan;
+    TKernelCompiler::TTopSortDispatch topSort;
+    TKernelCompiler::THeapTopKDispatch heapTopK;
+    if (plan.Top) {
+        topSort = BindTopSort(SlotAt(context, plan.Top->TopSortKernel));
+        heapTopK = BindHeapTopK(SlotAt(context, plan.Top->HeapKernel));
+    }
+    auto radix = MakeSortRadixKernel(
+        plan, BindSortRadixComposite(SlotAt(context, plan.RadixKernel)),
+        std::move(topSort), std::move(heapTopK));
+    std::shared_ptr<const TBlockingCode> code;
+    std::shared_ptr<ITaskState> state;
+    if (plan.Top) {
+        code = NLowering::MakeDrainBlockingCode<NLowering::TTopSortBlockingState>();
+        state = std::make_shared<NLowering::TTopSortBlockingState>(
+            plan.OutputType, plan.Keys, plan.KeyColumns, std::move(radix), plan.Top->Limit);
+    } else {
+        code = NLowering::MakeDrainBlockingCode<NLowering::TSortBlockingState>();
+        state = std::make_shared<NLowering::TSortBlockingState>(
+            plan.OutputType, plan.Keys, plan.KeyColumns, std::move(radix));
+    }
+    return std::make_unique<TBlockingTask>(
+        std::move(code), std::move(state), input, output);
+}
+
 TTaskNode& NodeAt(const std::vector<TTaskNode*>& nodes, uint32_t index)
 {
     if (index >= nodes.size()) {
@@ -180,6 +210,28 @@ std::unique_ptr<ITask> MakeNodeTask(
             }
             return MakeProcessTask(
                 MakeProjectProcess(node.Plan, std::move(dispatch)),
+                InputPort(connections, node.In), OutputPort(connections, node.Out));
+        } else if constexpr (std::is_same_v<TNode, TSortNode>) {
+            return MakeSortTask(
+                node, InputPort(connections, node.In), OutputPort(connections, node.Out), context);
+        } else if constexpr (std::is_same_v<TNode, TSortMergeNode>) {
+            std::vector<TInputPort> inputs;
+            for (const auto& port : node.In) {
+                inputs.push_back(InputPort(connections, port));
+            }
+            const auto& plan = node.Plan;
+            return std::make_unique<TMergeTask>(
+                NLowering::MakeMergeCode(),
+                std::make_shared<NLowering::TMergeState>(
+                    plan.OutputType, plan.Keys, plan.KeyColumns, inputs.size()),
+                std::move(inputs), OutputPort(connections, node.Out));
+        } else if constexpr (std::is_same_v<TNode, TWindowNode>) {
+            const auto& plan = node.Plan;
+            auto kernel = MakeWindowKernel(BindSortRadixComposite(SlotAt(context, plan.Kernel)));
+            return std::make_unique<TBlockingTask>(
+                NLowering::MakeDrainBlockingCode<NLowering::TWindowBlockingState>(),
+                std::make_shared<NLowering::TWindowBlockingState>(
+                    plan.OutputType, plan.Keys, plan.KeyColumns, std::move(kernel)),
                 InputPort(connections, node.In), OutputPort(connections, node.Out));
         } else if constexpr (std::is_same_v<TNode, TForwardNode>) {
             auto code = std::make_shared<TUnaryCode>([](void*, TRowSet&) {});

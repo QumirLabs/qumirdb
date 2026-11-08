@@ -1163,6 +1163,48 @@ private:
         return result;
     }
 
+    // LowerBlocking for a stage built as a node record.
+    template <typename TStageBuilder>
+    TLoweredOutput LowerBlockingNode(
+        const TOperatorPtr& child,
+        std::string stageKind,
+        std::string stageGroup,
+        TExecStageId execStageId,
+        TStageBuilder buildStage,
+        NScheduler::IConnection& outConn,
+        size_t outLaneOffset)
+    {
+        const size_t lanes = OutputLanes(child);
+        NScheduler::IConnection* inputConn = nullptr;
+        if (lanes == 1) {
+            inputConn = &AddConn<NScheduler::TOneToOneConnection>(
+                1, 1, "blocking-input");
+        } else {
+            inputConn = &AddConn<NScheduler::TGatherConnection>(
+                lanes, 1, "blocking-input-gather");
+        }
+        auto childOut = Lower(child, *inputConn);
+
+        TStageDiagnosticsScope diagnosticsScope(Diagnostics_, stageGroup);
+        auto stage = buildStage(childOut.OutputType);
+        stage.Node.In = PortSpec(Graph_, inputConn, 0);
+        stage.Node.Out = PortSpec(Graph_, &outConn, outLaneOffset);
+        auto& node = AddNode({
+            .ExecStageId = execStageId,
+            .TaskGroupId = execStageId,
+            .DebugKind = stageKind,
+            .DebugLabel = stageKind,
+            .Body = std::move(stage.Node),
+        });
+        for (size_t p = 0; p < lanes; ++p) {
+            Graph_.AddEdge(*childOut.Producers[p], node, *inputConn, p, 0);
+        }
+        return TLoweredOutput{
+            .Producers = {&node},
+            .OutputType = std::move(stage.OutputType),
+        };
+    }
+
     template <typename TTailBuilder>
     TLoweredOutput LowerBlocking(
         const TOperatorPtr& child,
@@ -2197,19 +2239,18 @@ private:
                 ? EExecPlanNodeKind::TopSort
                 : EExecPlanNodeKind::Sort);
         auto group = StageLabel(kernelName, execStageId);
-        return LowerBlocking(
+        return LowerBlockingNode(
             input,
             std::string(kernelName),
             group,
             execStageId,
             [&, group](const NQumir::NAst::TTypePtr& childType) {
-                auto runtime = BuildSortRuntimeProcess(
-                    childType, sortKeys, kernelName, topLimit,
-                    KernelOptions(group, execStageId));
-                return MakeSortTail(
-                    childType, sortKeys,
-                    std::move(runtime.Plan.KeyColumns),
-                    std::move(runtime.RadixKernel), topLimit);
+                return TUnaryNodeStage<NScheduler::TSortNode>{
+                    .Node = {.Plan = BuildSortPlanData(
+                        childType, sortKeys, kernelName, topLimit,
+                        KernelOptions(group, execStageId))},
+                    .OutputType = childType,
+                };
             },
             outConn,
             outLaneOffset);
@@ -2244,97 +2285,52 @@ private:
 
         auto childType = childOut.OutputType;
         auto localSortGroup = StageLabel(kernelName, execStageId);
-        TSortRuntimeProcess runtime =
-            [&]() {
-                TStageDiagnosticsScope diagnosticsScope(Diagnostics_, localSortGroup);
-                return BuildSortRuntimeProcess(
-                    childType, sortKeys, kernelName, topLimit,
-                    KernelOptions(localSortGroup, execStageId));
-            }();
-        auto keys = sortKeys;
-        auto keyColumns = runtime.Plan.KeyColumns;
-
-        // Per-lane local (top-)sort producing sorted runs for the merge.
-        auto localTail = MakeSortTail(
-            childType, keys, keyColumns,
-            std::move(runtime.RadixKernel), topLimit);
+        auto plan = [&]() {
+            TStageDiagnosticsScope diagnosticsScope(Diagnostics_, localSortGroup);
+            return BuildSortPlanData(
+                childType, sortKeys, kernelName, topLimit,
+                KernelOptions(localSortGroup, execStageId));
+        }();
 
         // One local (top-)sort per input lane, each writing a sorted run.
+        NScheduler::TSortMergeNode mergeBody{
+            .Plan = {
+                .OutputType = childType,
+                .Keys = sortKeys,
+                .KeyColumns = plan.KeyColumns,
+            },
+        };
         std::vector<NScheduler::IConnection*> runConns;
-        std::vector<NScheduler::TInputPort> mergeInputs;
         std::vector<NScheduler::TTaskNode*> localSorts;
         runConns.reserve(lanes);
-        mergeInputs.reserve(lanes);
         localSorts.reserve(lanes);
         for (size_t i = 0; i < lanes; ++i) {
             auto& runRef = AddConn<NScheduler::TOneToOneConnection>(
                 1, 1, "sort-run-" + std::to_string(i));
-            auto task = std::make_unique<NScheduler::TBlockingTask>(
-                localTail.Code,
-                localTail.MakeState(),
-                NScheduler::TInputPort{.Connection = &childConnRef, .Lane = i},
-                NScheduler::TOutputPort{.Connection = &runRef, .Lane = 0});
-            auto& node = Graph_.AddOwnedNode(std::move(task));
-            MarkNode(node,
-                std::string(kernelName),
-                execStageId,
-                std::string(kernelName),
-                execStageId);
+            auto& node = AddNode({
+                .ExecStageId = execStageId,
+                .TaskGroupId = execStageId,
+                .DebugKind = std::string(kernelName),
+                .DebugLabel = std::string(kernelName),
+                .Body = NScheduler::TSortNode{
+                    .In = PortSpec(Graph_, &childConnRef, i),
+                    .Out = PortSpec(Graph_, &runRef, 0),
+                    .Plan = plan,
+                },
+            });
             Graph_.AddEdge(*childOut.Producers[i], node, childConnRef, i, i);
             runConns.push_back(&runRef);
-            mergeInputs.push_back(
-                NScheduler::TInputPort{.Connection = &runRef, .Lane = 0});
+            mergeBody.In.push_back(PortSpec(Graph_, &runRef, 0));
             localSorts.push_back(&node);
         }
 
-        auto mergeCode = std::make_shared<NScheduler::TMergeCode>(
-            [](NScheduler::ITaskState& state,
-               std::vector<NScheduler::TInputPort>& inputs,
-               TRowSet& output)
-            {
-                auto* s = &static_cast<TMergeState&>(state);
-                if (!s->InputsDone) {
-                    bool allDone = true;
-                    for (size_t i = 0; i < inputs.size(); ++i) {
-                        if (s->RunFinished[i]) {
-                            continue;
-                        }
-                        for (;;) {
-                            TRowSet batch{};
-                            auto fetch = inputs[i].Fetch(batch);
-                            if (fetch == NScheduler::EFetchResult::NO_DATA) {
-                                allDone = false;
-                                break;
-                            }
-                            if (fetch == NScheduler::EFetchResult::FINISHED) {
-                                s->RunFinished[i] = true;
-                                break;
-                            }
-                            s->Processor.Add(batch, i);
-                        }
-                    }
-                    if (!allDone) {
-                        return NScheduler::ETaskResult::NEED_DATA;
-                    }
-                    s->Processor.Finish();
-                    s->InputsDone = true;
-                }
-                if (s->Processor.Next(output)) {
-                    return NScheduler::ETaskResult::OK;
-                }
-                return NScheduler::ETaskResult::FINISHED;
-            });
-
-        auto merge = std::make_unique<NScheduler::TMergeTask>(
-            mergeCode,
-            std::make_shared<TMergeState>(childType, keys, keyColumns, lanes),
-            std::move(mergeInputs),
-            NScheduler::TOutputPort{.Connection = &mergeOut, .Lane = 0 + mergeOutLaneOffset});
-        auto& mergeNode = Graph_.AddOwnedNode(std::move(merge));
-        MarkNode(mergeNode,
-            "merge",
-            NewTaskGroup(),
-            "merge");
+        mergeBody.Out = PortSpec(Graph_, &mergeOut, mergeOutLaneOffset);
+        auto& mergeNode = AddNode({
+            .TaskGroupId = NewTaskGroup(),
+            .DebugKind = "merge",
+            .DebugLabel = "merge",
+            .Body = std::move(mergeBody),
+        });
         for (size_t i = 0; i < lanes; ++i) {
             Graph_.AddEdge(*localSorts[i], mergeNode, *runConns[i], 0, 0);
         }
@@ -2780,25 +2776,18 @@ private:
         return result;
     }
 
-    TBlockingTail BuildWindowTail(
+    TUnaryNodeStage<NScheduler::TWindowNode> BuildWindowStage(
         const NQumir::NAst::TTypePtr& childType,
         TWindowOperator& window,
         std::string stage,
         TExecStageId execStageId)
     {
-        TKernelCompilerOptions options =
-            KernelOptions(std::move(stage), execStageId);
-        auto runtime = BuildWindowRuntimeProcess(window, childType, std::move(options));
-        return TBlockingTail{
-            .Code = MakeDrainBlockingCode<TWindowBlockingState>(),
-            .MakeState = [runtime]() -> std::shared_ptr<NScheduler::ITaskState> {
-                return std::make_shared<TWindowBlockingState>(
-                    runtime.Plan.OutputType,
-                    runtime.Plan.Keys,
-                    runtime.Plan.KeyColumns,
-                    runtime.Kernel);
-            },
-            .OutputType = runtime.Plan.OutputType,
+        auto plan = BuildWindowPlanData(
+            window, childType, KernelOptions(std::move(stage), execStageId));
+        auto outputType = plan.OutputType;
+        return {
+            .Node = {.Plan = std::move(plan)},
+            .OutputType = std::move(outputType),
         };
     }
 
@@ -2813,13 +2802,13 @@ private:
         const auto windowGroup = StageLabel("window", execStageId);
 
         if (childLanes <= 1 || window.PartitionKeys().empty()) {
-            return LowerBlocking(
+            return LowerBlockingNode(
                 window.Input(),
                 "window",
                 windowGroup,
                 execStageId,
                 [&, windowGroup](const NQumir::NAst::TTypePtr& childType) {
-                    return BuildWindowTail(
+                    return BuildWindowStage(
                         childType, window, windowGroup, execStageId);
                 },
                 outConn,
@@ -2851,28 +2840,25 @@ private:
             "window-repartition",
             {.Keys = window.PartitionKeys()});
 
-        TBlockingTail tail =
-            [&]() {
-                TStageDiagnosticsScope diagnosticsScope(Diagnostics_, windowGroup);
-                return BuildWindowTail(
-                    childType, window, windowGroup, execStageId);
-            }();
+        auto stage = [&]() {
+            TStageDiagnosticsScope diagnosticsScope(Diagnostics_, windowGroup);
+            return BuildWindowStage(childType, window, windowGroup, execStageId);
+        }();
 
         TLoweredOutput result;
-        result.OutputType = tail.OutputType;
+        result.OutputType = stage.OutputType;
         result.Producers.reserve(parts);
         for (size_t m = 0; m < parts; ++m) {
-            auto task = std::make_unique<NScheduler::TBlockingTask>(
-                tail.Code,
-                tail.MakeState(),
-                NScheduler::TInputPort{.Connection = shuf.Connection, .Lane = m},
-                NScheduler::TOutputPort{.Connection = &outConn, .Lane = m + outLaneOffset});
-            auto& node = Graph_.AddOwnedNode(std::move(task));
-            MarkNode(node,
-                "window",
-                execStageId,
-                "window",
-                execStageId);
+            auto body = stage.Node;
+            body.In = PortSpec(Graph_, shuf.Connection, m);
+            body.Out = PortSpec(Graph_, &outConn, m + outLaneOffset);
+            auto& node = AddNode({
+                .ExecStageId = execStageId,
+                .TaskGroupId = execStageId,
+                .DebugKind = "window",
+                .DebugLabel = "window",
+                .Body = std::move(body),
+            });
             for (size_t s = 0; s < childLanes; ++s) {
                 Graph_.AddEdge(*shuf.Nodes[s], node, *shuf.Connection, s, m);
             }

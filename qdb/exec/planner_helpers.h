@@ -142,12 +142,6 @@ TProjectColumnPlan BuildProjectColumnPlan(
     TProjectOperator& project,
     const NQumir::NAst::TStructType& inputStruct);
 
-// A sort or top-sort with the plan data to rebuild it from kernel slots.
-struct TSortRuntimeProcess {
-    TSortRadixKernel RadixKernel;
-    TSortPlanData Plan;
-};
-
 // Print a human-readable runtime-plan tree for diagnostics (--verbose).
 void PrintRuntimePlan(
     std::ostream& out,
@@ -186,20 +180,17 @@ TProjectRuntimeProcess BuildProjectRuntimeProcess(
     const NQumir::NAst::TTypePtr& inputType,
     TKernelCompilerOptions options);
 
+// Compiles the sort kernels and returns the plan data the task binds them from.
 // topLimit makes it a top-sort that keeps that many rows.
-TSortRuntimeProcess BuildSortRuntimeProcess(
+TSortPlanData BuildSortPlanData(
     const NQumir::NAst::TTypePtr& inputType,
     const std::vector<TSortKey>& keys,
     std::string_view kernelName,
     std::optional<int64_t> topLimit,
     TKernelCompilerOptions options);
 
-struct TWindowRuntimeProcess {
-    TSortRadixKernel Kernel;                 // Kernel.Dispatch = window kernel
-    TWindowPlanData Plan;
-};
-
-TWindowRuntimeProcess BuildWindowRuntimeProcess(
+// Compiles the window kernel and returns the plan data the task binds it from.
+TWindowPlanData BuildWindowPlanData(
     TWindowOperator& window,
     const NQumir::NAst::TTypePtr& inputType,
     TKernelCompilerOptions options);

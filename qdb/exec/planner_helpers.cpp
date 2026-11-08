@@ -728,7 +728,7 @@ bool IsStringRadixKey(const NQumir::NAst::TTypePtr& type) {
         UnwrapNamedType(UnwrapNullableType(type))));
 }
 
-TSortRuntimeProcess BuildSortRuntimeProcess(
+TSortPlanData BuildSortPlanData(
     const NQumir::NAst::TTypePtr& inputTypePtr,
     const std::vector<TSortKey>& keys,
     std::string_view kernelName,
@@ -744,7 +744,6 @@ TSortRuntimeProcess BuildSortRuntimeProcess(
     PrintKernelSpec(options.Diagnostics, spec);
     auto sortInputs = BuildSortKernelInputs(spec);
     TSortPlanData plan{.OutputType = inputTypePtr, .Keys = keys};
-    TSortRadixKernel radixKernel;
     if (!sortInputs.AllKeysRadixSortable || sortInputs.RadixKeys.empty()) {
         throw std::runtime_error("sort kernel is unavailable for requested keys");
     }
@@ -785,8 +784,6 @@ TSortRuntimeProcess BuildSortRuntimeProcess(
                 .Limit = *topLimit,
             };
         }
-        radixKernel = MakeSortRadixKernel(
-            plan, std::move(radix), std::move(topSort), std::move(heapTopK));
         if (sink) {
             // Resolved key metadata for the exec exporter, on all emitted sort
             // kernels.
@@ -806,13 +803,10 @@ TSortRuntimeProcess BuildSortRuntimeProcess(
         }
     }
     plan.KeyColumns = std::move(sortInputs.KeyColumns);
-    return {
-        .RadixKernel = std::move(radixKernel),
-        .Plan = std::move(plan),
-    };
+    return plan;
 }
 
-TWindowRuntimeProcess BuildWindowRuntimeProcess(
+TWindowPlanData BuildWindowPlanData(
     TWindowOperator& window,
     const NQumir::NAst::TTypePtr& inputType,
     TKernelCompilerOptions options)
@@ -1005,15 +999,11 @@ TWindowRuntimeProcess BuildWindowRuntimeProcess(
         }
     }
 
-    TWindowPlanData plan{
+    return TWindowPlanData{
         .OutputType = ComputeWindowOutputType(inputType, window.Functions()),
         .Keys = std::move(keys),
         .KeyColumns = std::move(keyColumns),
         .Kernel = kernelIndex,
-    };
-    return {
-        .Kernel = MakeWindowKernel(std::move(dispatch)),
-        .Plan = std::move(plan),
     };
 }
 

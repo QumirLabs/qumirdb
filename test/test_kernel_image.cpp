@@ -296,18 +296,42 @@ std::vector<int64_t> ReadSortedColumn(const TRowSet& rows, size_t column)
     return std::vector<int64_t>(data, data + rows.RowCount);
 }
 
-// Sorts (and top-sorts, when the plan has Top) the same batch by the keys;
+TSortRadixKernel BindSortKernel(
+    const TSortPlanData& plan, const std::vector<std::shared_ptr<TKernelSlot>>& slots)
+{
+    TKernelCompiler::TTopSortDispatch topSort;
+    TKernelCompiler::THeapTopKDispatch heapTopK;
+    if (plan.Top) {
+        topSort = BindTopSort(slots[plan.Top->TopSortKernel]);
+        heapTopK = BindHeapTopK(slots[plan.Top->HeapKernel]);
+    }
+    return MakeSortRadixKernel(
+        plan, BindSortRadixComposite(slots[plan.RadixKernel]), std::move(topSort), std::move(heapTopK));
+}
+
+std::vector<std::shared_ptr<TKernelSlot>> SlotsOf(const std::vector<TGeneratedKernel>& kernels)
+{
+    std::vector<std::shared_ptr<TKernelSlot>> slots;
+    for (const auto& kernel : kernels) {
+        slots.push_back(kernel.Slot);
+    }
+    return slots;
+}
+
+// Sorts (and top-sort the same batch by the keys;
 // returns the v columns.
 std::pair<std::vector<int64_t>, std::vector<int64_t>> RunSort(
-    const TSortRuntimeProcess& process,
+    const TSortPlanData& plan,
+    const std::vector<std::shared_ptr<TKernelSlot>>& slots,
     const std::vector<TSortKey>& keys,
     const TTypePtr& outputType,
     TKeyValueBatch batch)
 {
+    const auto radixKernel = BindSortKernel(plan, slots);
     std::pair<std::vector<int64_t>, std::vector<int64_t>> result;
     TRowSet out{};
     {
-        TSortProcessor sort(outputType, keys, process.Plan.KeyColumns, process.RadixKernel);
+        TSortProcessor sort(outputType, keys, plan.KeyColumns, radixKernel);
         auto rows = batch.RowSet();
         sort.Add(rows);
         sort.Finish();
@@ -315,9 +339,9 @@ std::pair<std::vector<int64_t>, std::vector<int64_t>> RunSort(
         result.first = ReadSortedColumn(out, 1);
         Release(&out);
     }
-    if (process.Plan.Top) {
+    if (plan.Top) {
         TTopSortProcessor topSort(
-            outputType, keys, process.Plan.KeyColumns, process.RadixKernel, process.Plan.Top->Limit);
+            outputType, keys, plan.KeyColumns, radixKernel, plan.Top->Limit);
         auto rows = batch.RowSet();
         topSort.Add(rows);
         topSort.Finish();
@@ -328,13 +352,32 @@ std::pair<std::vector<int64_t>, std::vector<int64_t>> RunSort(
     return result;
 }
 
-std::pair<std::vector<int64_t>, std::vector<int64_t>> RunSort(const TSortRuntimeProcess& process)
+std::pair<std::vector<int64_t>, std::vector<int64_t>> RunSort(
+    const TSortPlanData& plan, const std::vector<std::shared_ptr<TKernelSlot>>& slots)
 {
     return RunSort(
-        process,
+        plan, slots,
         {{.Column = "v"}},
         std::make_shared<TStructType>(KeyValueType()),
         TKeyValueBatch{.Keys = {1, 2, 3, 4, 5}, .Values = {5, 1, 3, 9, 2}});
+}
+
+// Runs the sort with the kernels bound in process, without an image.
+template <class... TBatch>
+std::pair<std::vector<int64_t>, std::vector<int64_t>> RunSortDirect(
+    const TTypePtr& inputType,
+    const std::vector<TSortKey>& keys,
+    std::string_view kernelName,
+    std::optional<int64_t> topLimit,
+    const TBatch&... batch)
+{
+    std::vector<TGeneratedKernel> kernels;
+    const auto plan = BuildSortPlanData(inputType, keys, kernelName, topLimit, {.Sink = &kernels});
+    if constexpr (sizeof...(batch) == 0) {
+        return RunSort(plan, SlotsOf(kernels));
+    } else {
+        return RunSort(plan, SlotsOf(kernels), keys, inputType, batch...);
+    }
 }
 
 // Window kernel: running sum of v per k, ordered by v. Returns the sum column.
@@ -585,14 +628,13 @@ TEST(KernelImage, SortKernelsBindFromPlanDataAndImageSlots)
 {
     const auto inputType = std::make_shared<TStructType>(KeyValueType());
     const std::vector<TSortKey> keys = {{.Column = "v"}};
-    const auto expected = RunSort(BuildSortRuntimeProcess(inputType, keys, "top-sort", 3, {}));
+    const auto expected = RunSortDirect(inputType, keys, "top-sort", 3);
 
     std::vector<TGeneratedKernel> kernels;
     // A leading filter shifts the kernel indexes.
     TKernelCompiler(TKernelCompilerOptions{.Sink = &kernels, .BindNow = false}).CompileFilter(FilterSpec());
-    auto process = BuildSortRuntimeProcess(
+    const auto plan = BuildSortPlanData(
         inputType, keys, "top-sort", 3, {.Sink = &kernels, .BindNow = false});
-    const auto& plan = process.Plan;
     ASSERT_EQ(kernels.size(), 4u);
     ASSERT_TRUE(plan.Top);
     EXPECT_EQ(plan.RadixKernel, 1u);
@@ -602,17 +644,9 @@ TEST(KernelImage, SortKernelsBindFromPlanDataAndImageSlots)
     EXPECT_EQ(plan.Top->Limit, 3);
     EXPECT_EQ(plan.Keys.size(), 1u);
     EXPECT_EQ(plan.KeyColumns.size(), 1u);
-    EXPECT_EQ(kernels[plan.RadixKernel].Slot, process.RadixKernel.Dispatch.Slot);
-    EXPECT_EQ(kernels[plan.Top->TopSortKernel].Slot, process.RadixKernel.TopSortDispatch.Slot);
-    EXPECT_EQ(kernels[plan.Top->HeapKernel].Slot, process.RadixKernel.HeapTopKDispatch.Slot);
 
     auto slots = LoadImageSlots(kernels);
-    process.RadixKernel = MakeSortRadixKernel(
-        plan,
-        BindSortRadixComposite(slots[plan.RadixKernel]),
-        BindTopSort(slots[plan.Top->TopSortKernel]),
-        BindHeapTopK(slots[plan.Top->HeapKernel]));
-    EXPECT_EQ(RunSort(process), expected);
+    EXPECT_EQ(RunSort(plan, slots), expected);
     EXPECT_EQ(expected.first, (std::vector<int64_t>{1, 2, 3, 5, 9}));
     EXPECT_EQ(expected.second, (std::vector<int64_t>{1, 2, 3}));
 }
@@ -627,12 +661,11 @@ TEST(KernelImage, NullableSortBindsFromPlanDataAndImageSlots)
         return TKeyValueBatch{
             .Keys = {30, 1000, 10, -999, 20}, .Values = {1, 2, 3, 4, 5}, .KeyMask = {0b00010101}};
     };
-    const auto expected = RunSort(BuildSortRuntimeProcess(inputType, keys, "nullable-sort", 3, {}), keys, inputType, batch());
+    const auto expected = RunSortDirect(inputType, keys, "nullable-sort", 3, batch());
 
     std::vector<TGeneratedKernel> kernels;
-    auto process = BuildSortRuntimeProcess(
+    const auto plan = BuildSortPlanData(
         inputType, keys, "nullable-sort", 3, {.Sink = &kernels, .BindNow = false});
-    const auto& plan = process.Plan;
     ASSERT_TRUE(plan.RadixNullable);
     ASSERT_TRUE(plan.Top);
     ASSERT_EQ(kernels.size(), 3u);
@@ -641,14 +674,10 @@ TEST(KernelImage, NullableSortBindsFromPlanDataAndImageSlots)
         TStructType({{"k", nullableType}, {"v", I64Type()}}).ToString());
 
     auto slots = LoadImageSlots(kernels);
-    process.RadixKernel = MakeSortRadixKernel(
-        plan,
-        BindSortRadixComposite(slots[plan.RadixKernel]),
-        BindTopSort(slots[plan.Top->TopSortKernel]),
-        BindHeapTopK(slots[plan.Top->HeapKernel]));
-    EXPECT_TRUE(process.RadixKernel.NullableDispatch.Slot);
-    EXPECT_FALSE(process.RadixKernel.Dispatch.Slot);
-    EXPECT_EQ(RunSort(process, keys, inputType, batch()), expected);
+    const auto radixKernel = BindSortKernel(plan, slots);
+    EXPECT_TRUE(radixKernel.NullableDispatch.Slot);
+    EXPECT_FALSE(radixKernel.Dispatch.Slot);
+    EXPECT_EQ(RunSort(plan, slots, keys, inputType, batch()), expected);
     // Ascending, nulls last: 10, 20, 30, then the null rows.
     EXPECT_EQ(expected.second, (std::vector<int64_t>{3, 5, 1}));
     EXPECT_EQ(std::vector<int64_t>(expected.first.begin(), expected.first.begin() + 3), expected.second);
@@ -658,20 +687,18 @@ TEST(KernelImage, PlainSortWithoutTopBindsFromPlanDataAndImageSlots)
 {
     const auto inputType = std::make_shared<TStructType>(KeyValueType());
     const std::vector<TSortKey> keys = {{.Column = "v"}};
-    const auto expected = RunSort(BuildSortRuntimeProcess(inputType, keys, "plain-sort", std::nullopt, {}));
+    const auto expected = RunSortDirect(inputType, keys, "plain-sort", std::nullopt);
 
     std::vector<TGeneratedKernel> kernels;
-    auto process = BuildSortRuntimeProcess(
+    const auto plan = BuildSortPlanData(
         inputType, keys, "plain-sort", std::nullopt, {.Sink = &kernels, .BindNow = false});
-    const auto& plan = process.Plan;
     ASSERT_EQ(kernels.size(), 1u);
     EXPECT_FALSE(plan.Top);
     EXPECT_FALSE(plan.RadixNullable);
 
     auto slots = LoadImageSlots(kernels);
-    process.RadixKernel = MakeSortRadixKernel(plan, BindSortRadixComposite(slots[plan.RadixKernel]), {}, {});
-    EXPECT_FALSE(process.RadixKernel.TopSortDispatch.Slot);
-    EXPECT_EQ(RunSort(process), expected);
+    EXPECT_FALSE(BindSortKernel(plan, slots).TopSortDispatch.Slot);
+    EXPECT_EQ(RunSort(plan, slots), expected);
     EXPECT_EQ(expected.first, (std::vector<int64_t>{1, 2, 3, 5, 9}));
     EXPECT_TRUE(expected.second.empty());
 }
@@ -700,21 +727,21 @@ TEST(KernelImage, WindowBindsFromPlanDataAndImageSlot)
     TMockSource source({"k", "v"});
     auto window = MakeWindowOperator(source);
     const auto inputType = StructTypeFromSchema(source.Schema());
-    auto direct = BuildWindowRuntimeProcess(*window, inputType, {});
+    std::vector<TGeneratedKernel> directKernels;
+    const auto direct = BuildWindowPlanData(*window, inputType, {.Sink = &directKernels});
     TWindowProcessor original(
-        direct.Plan.OutputType, direct.Plan.Keys, direct.Plan.KeyColumns, direct.Kernel);
+        direct.OutputType, direct.Keys, direct.KeyColumns,
+        MakeWindowKernel(BindSortRadixComposite(directKernels[direct.Kernel].Slot)));
     const auto expected = RunWindow(original);
 
     std::vector<TGeneratedKernel> kernels;
     // A leading filter shifts the kernel indexes.
     TKernelCompiler(TKernelCompilerOptions{.Sink = &kernels, .BindNow = false}).CompileFilter(FilterSpec());
-    auto process = BuildWindowRuntimeProcess(*window, inputType, {.Sink = &kernels, .BindNow = false});
-    const auto& plan = process.Plan;
+    const auto plan = BuildWindowPlanData(*window, inputType, {.Sink = &kernels, .BindNow = false});
     ASSERT_EQ(kernels.size(), 2u);
     EXPECT_EQ(plan.Kernel, 1u);
     EXPECT_EQ(plan.Keys.size(), 2u);
     EXPECT_EQ(plan.KeyColumns.size(), 2u);
-    EXPECT_EQ(kernels[plan.Kernel].Slot, process.Kernel.Dispatch.Slot);
 
     auto slots = LoadImageSlots(kernels);
     TWindowProcessor rebuilt(

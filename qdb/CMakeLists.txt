@@ -90,6 +90,7 @@ add_library(qumirdb
     kernel/image.cpp
     exec/instrumentation/operator.cpp
     scheduler/instrumentation/task.cpp
+    exec/plan_data.cpp
     exec/filter_exec.cpp
     exec/project_exec.cpp
     exec/aggregate_exec.cpp

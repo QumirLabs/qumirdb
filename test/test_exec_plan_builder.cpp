@@ -25,6 +25,7 @@
 
 #include <algorithm>
 #include <expected>
+#include <functional>
 #include <ranges>
 #include <sstream>
 #include <stdexcept>
@@ -596,9 +597,10 @@ TEST(ExecPlanBuilder, LoweringRecordsSpecsForSupportedNodeKinds) {
     EXPECT_EQ(missing, expectedMissing);
 }
 
-// Runs a graph into a CSV sink and returns the rows sorted.
-std::vector<std::string> RunSortedCsv(
-    NScheduler::TTaskGraph& graph, const std::ostringstream& out, const NScheduler::TSettings& settings)
+// Runs a graph into a CSV sink and returns the rows, sorted unless `ordered`.
+std::vector<std::string> RunCsv(
+    NScheduler::TTaskGraph& graph, const std::ostringstream& out, const NScheduler::TSettings& settings,
+    bool ordered)
 {
     std::string error;
     auto sealed = graph.Seal(&error);
@@ -614,23 +616,24 @@ std::vector<std::string> RunSortedCsv(
     for (std::string line; std::getline(lines, line);) {
         rows.push_back(std::move(line));
     }
-    std::ranges::sort(rows);
+    if (!ordered) {
+        std::ranges::sort(rows);
+    }
     return rows;
 }
 
-// Lowers `where`, serializes the graph spec, runs the original graph, then
-// destroys the plan, the source and the lowered graph. Only the bytes and the
-// kernel slots survive, and the rebuilt graph must give the same rows on both
-// schedulers.
-std::vector<std::string> ExpectScanFilterProjectFromSpec(std::string_view where)
+// Lowers `sql` over decimals.parquet, serializes the graph spec, runs the
+// original graph, then destroys the plan, the source and the lowered graph.
+// Only the bytes and the kernel slots survive, and the rebuilt graph must give
+// the same rows on both schedulers (in the same order when `ordered`).
+std::vector<std::string> ExpectQueryFromSpec(
+    const std::string& sql, const NScheduler::TSettings& settings, bool ordered,
+    const std::function<void(const NScheduler::TGraphSpec&)>& checkSpec)
 {
     auto source = std::make_unique<TParquetSource>(
         QDB_TEST_DATA_DIR "/regtest/cases/decimal_parquet/tables/decimals.parquet");
     const std::unordered_map<std::string, ISource*> sources{{"t", source.get()}};
-    auto plan = BuildSqlPlan(
-        "SELECT id, d15 + d15 AS twice, REGEXP_REPLACE(s, '-[a-z]+$', '') AS item "
-        "FROM t WHERE " + std::string(where), sources);
-    const auto settings = MultiSettings();
+    auto plan = BuildSqlPlan(sql, sources);
     auto lowered = std::make_unique<NScheduler::TLoweredPlan>(
         NScheduler::LowerPlanToGraph(plan, settings, nullptr));
 
@@ -646,15 +649,13 @@ std::vector<std::string> ExpectScanFilterProjectFromSpec(std::string_view where)
     TCsvSink original(schema, originalOut);
     NScheduler::AttachSink(*lowered, original);
 
-    const auto spec = NScheduler::ExtractLoweredGraphSpec(*lowered);
-    EXPECT_TRUE(spec);
+    std::vector<uint32_t> missing;
+    const auto spec = NScheduler::ExtractLoweredGraphSpec(*lowered, &missing);
+    EXPECT_TRUE(spec) << missing.size() << " nodes have no record";
     if (!spec) {
         return {};
     }
-    EXPECT_GT(std::ranges::count_if(spec->Nodes, [](const auto& node) {
-        return std::holds_alternative<NScheduler::TParquetScanNode>(node.Body);
-    }), 0);
-    EXPECT_EQ(spec->Regexes.size(), 1u);
+    checkSpec(*spec);
     const auto bytes = NScheduler::SerializeGraphSpec(*spec);
     const auto decoded = NScheduler::DeserializeGraphSpec(bytes);
     EXPECT_EQ(NScheduler::SerializeGraphSpec(decoded), bytes);
@@ -664,20 +665,39 @@ std::vector<std::string> ExpectScanFilterProjectFromSpec(std::string_view where)
     for (const auto& kernel : lowered->Kernels) {
         slots.push_back(kernel.Slot);
     }
-    const auto expected = RunSortedCsv(*lowered->Graph, originalOut, settings);
+    const auto expected = RunCsv(*lowered->Graph, originalOut, settings, ordered);
 
     lowered.reset();
     plan.reset();
     source.reset();
 
-    for (const auto& runSettings : {settings, SingleSettings()}) {
+    for (const auto& runSettings : {MultiSettings(), SingleSettings()}) {
         std::ostringstream rebuiltOut;
         TCsvSink rebuilt(schema, rebuiltOut);
         auto graph = NScheduler::MaterializeGraph(decoded, &rebuilt, slots);
-        const auto got = RunSortedCsv(*graph, rebuiltOut, runSettings);
+        const auto got = RunCsv(*graph, rebuiltOut, runSettings, ordered);
         EXPECT_EQ(got, expected);
     }
     return expected;
+}
+
+template <class TNode>
+size_t CountNodes(const NScheduler::TGraphSpec& spec)
+{
+    return std::ranges::count_if(spec.Nodes, [](const auto& node) {
+        return std::holds_alternative<TNode>(node.Body);
+    });
+}
+
+std::vector<std::string> ExpectScanFilterProjectFromSpec(std::string_view where)
+{
+    return ExpectQueryFromSpec(
+        "SELECT id, d15 + d15 AS twice, REGEXP_REPLACE(s, '-[a-z]+$', '') AS item "
+        "FROM t WHERE " + std::string(where),
+        MultiSettings(), false, [](const NScheduler::TGraphSpec& spec) {
+            EXPECT_GT(CountNodes<NScheduler::TParquetScanNode>(spec), 0u);
+            EXPECT_EQ(spec.Regexes.size(), 1u);
+        });
 }
 
 TEST(ExecPlanBuilder, ScanFilterProjectGraphRunsFromItsSerializedSpec) {
@@ -689,6 +709,55 @@ TEST(ExecPlanBuilder, ProvenEmptyScanGraphRunsFromItsSerializedSpec) {
     // Every row group is pruned, so the scans carry an empty row group list.
     const auto rows = ExpectScanFilterProjectFromSpec("id > 1000");
     EXPECT_LE(rows.size(), 1u);
+}
+
+TEST(ExecPlanBuilder, SortGraphRunsFromItsSerializedSpec) {
+    const auto rows = ExpectQueryFromSpec(
+        "SELECT id, d9 FROM t ORDER BY id DESC", SingleSettings(), true,
+        [](const NScheduler::TGraphSpec& spec) {
+            EXPECT_EQ(CountNodes<NScheduler::TSortNode>(spec), 1u);
+            EXPECT_EQ(CountNodes<NScheduler::TSortMergeNode>(spec), 0u);
+        });
+    EXPECT_GT(rows.size(), 100u);
+}
+
+TEST(ExecPlanBuilder, TopSortGraphRunsFromItsSerializedSpec) {
+    const auto rows = ExpectQueryFromSpec(
+        "SELECT id, d9 FROM t ORDER BY id LIMIT 7", SingleSettings(), true,
+        [](const NScheduler::TGraphSpec& spec) {
+            ASSERT_EQ(CountNodes<NScheduler::TSortNode>(spec), 1u);
+            for (const auto& node : spec.Nodes) {
+                if (const auto* sort = std::get_if<NScheduler::TSortNode>(&node.Body)) {
+                    ASSERT_TRUE(sort->Plan.Top);
+                    EXPECT_EQ(sort->Plan.Top->Limit, 7);
+                }
+            }
+        });
+    EXPECT_EQ(rows.size(), 8u);
+}
+
+TEST(ExecPlanBuilder, ParallelSortMergeGraphRunsFromItsSerializedSpec) {
+    const auto rows = ExpectQueryFromSpec(
+        "SELECT id, d9 FROM t ORDER BY d9, id", MultiSettings(), true,
+        [](const NScheduler::TGraphSpec& spec) {
+            EXPECT_GT(CountNodes<NScheduler::TSortNode>(spec), 1u);
+            ASSERT_EQ(CountNodes<NScheduler::TSortMergeNode>(spec), 1u);
+            for (const auto& node : spec.Nodes) {
+                if (const auto* merge = std::get_if<NScheduler::TSortMergeNode>(&node.Body)) {
+                    EXPECT_EQ(merge->In.size(), CountNodes<NScheduler::TSortNode>(spec));
+                }
+            }
+        });
+    EXPECT_GT(rows.size(), 100u);
+}
+
+TEST(ExecPlanBuilder, WindowGraphRunsFromItsSerializedSpec) {
+    const auto rows = ExpectQueryFromSpec(
+        "SELECT id, rank() OVER (ORDER BY id DESC) AS rn FROM t", MultiSettings(), false,
+        [](const NScheduler::TGraphSpec& spec) {
+            EXPECT_EQ(CountNodes<NScheduler::TWindowNode>(spec), 1u);
+        });
+    EXPECT_GT(rows.size(), 100u);
 }
 
 TEST(ExecPlanBuilder, MultiKeepsRealPartialAndCombineStages) {

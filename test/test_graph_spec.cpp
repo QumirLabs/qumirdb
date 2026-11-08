@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <qdb/plan/types/nullable.h>
 #include <qdb/scheduler/connections/local.h>
 #include <qdb/scheduler/impl/single_threaded_scheduler.h>
 #include <qdb/scheduler/lowering/plan_lowerer.h>
@@ -220,6 +221,74 @@ TEST(GraphSpec, ScanFilterProjectRecordsRoundTrip)
     ASSERT_EQ(back.Regexes.size(), 2u);
     EXPECT_EQ(back.Regexes[1].Pattern, "^x");
     EXPECT_EQ(back.Regexes[0].Replacement, "b");
+}
+
+TEST(GraphSpec, SortMergeWindowRecordsRoundTrip)
+{
+    using namespace NQumir::NAst;
+    const auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
+    const auto nullableI64 = std::make_shared<TNullable>(i64);
+    const auto type = std::make_shared<TStructType>(TStructType({{"k", nullableI64}, {"v", i64}}));
+    const std::vector<TSortKey> keys = {
+        {.Column = "k", .Direction = ESortDirection::Desc, .Nulls = ESortNulls::Last},
+        {.Column = "v"},
+    };
+    const std::vector<TSortColumnRef> keyColumns = {{.Index = 0, .Type = nullableI64}, {.Index = 1, .Type = i64}};
+
+    TGraphSpec spec;
+    spec.Nodes.push_back(Node("sort", "sort", TSortNode{.In = {0, 1}, .Out = {2, 3}, .Plan = {
+        .OutputType = type, .Keys = keys, .KeyColumns = keyColumns, .RadixKernel = 4, .RadixNullable = true}}));
+    spec.Nodes.push_back(Node("top-sort", "top-sort", TSortNode{.Plan = {
+        .OutputType = type, .Keys = keys, .KeyColumns = keyColumns, .RadixKernel = 5, .RadixNullable = true,
+        .Top = TSortPlanData::TTop{.TopSortKernel = 6, .HeapKernel = 7, .Limit = 100}}}));
+    spec.Nodes.push_back(Node("merge", "merge", TSortMergeNode{
+        .In = {{0, 0}, {1, 0}, {2, 0}}, .Out = {3, 1},
+        .Plan = {.OutputType = type, .Keys = keys, .KeyColumns = keyColumns}}));
+    spec.Nodes.push_back(Node("window", "window", TWindowNode{.In = {4, 0}, .Out = {5, 0}, .Plan = {
+        .OutputType = type, .Keys = keys, .KeyColumns = keyColumns, .Kernel = 9}}));
+
+    const auto bytes = SerializeGraphSpec(spec);
+    const auto back = DeserializeGraphSpec(bytes);
+    EXPECT_EQ(SerializeGraphSpec(back), bytes);
+    for (size_t size = 0; size < bytes.size(); ++size) {
+        EXPECT_THROW(DeserializeGraphSpec(std::string_view(bytes).substr(0, size)),
+            std::runtime_error) << size;
+    }
+
+    ASSERT_EQ(back.Nodes.size(), 4u);
+    const auto& sort = std::get<TSortNode>(back.Nodes[0].Body);
+    EXPECT_EQ(sort.In.Lane, 1u);
+    EXPECT_EQ(sort.Out.Connection, 2u);
+    EXPECT_EQ(sort.Plan.RadixKernel, 4u);
+    EXPECT_TRUE(sort.Plan.RadixNullable);
+    EXPECT_FALSE(sort.Plan.Top);
+    EXPECT_EQ(sort.Plan.OutputType->ToString(), type->ToString());
+    ASSERT_EQ(sort.Plan.Keys.size(), 2u);
+    EXPECT_EQ(sort.Plan.Keys[0].Column, "k");
+    EXPECT_EQ(sort.Plan.Keys[0].Direction, ESortDirection::Desc);
+    EXPECT_EQ(sort.Plan.Keys[0].Nulls, ESortNulls::Last);
+    ASSERT_EQ(sort.Plan.KeyColumns.size(), 2u);
+    EXPECT_TRUE(TMaybeType<TNullable>(sort.Plan.KeyColumns[0].Type));
+    EXPECT_FALSE(TMaybeType<TNullable>(sort.Plan.KeyColumns[1].Type));
+    EXPECT_EQ(sort.Plan.KeyColumns[0].Type->ToString(), nullableI64->ToString());
+
+    const auto& top = std::get<TSortNode>(back.Nodes[1].Body).Plan.Top;
+    ASSERT_TRUE(top);
+    EXPECT_EQ(top->TopSortKernel, 6u);
+    EXPECT_EQ(top->HeapKernel, 7u);
+    EXPECT_EQ(top->Limit, 100);
+
+    const auto& merge = std::get<TSortMergeNode>(back.Nodes[2].Body);
+    ASSERT_EQ(merge.In.size(), 3u);
+    EXPECT_EQ(merge.In[2].Connection, 2u);
+    EXPECT_EQ(merge.Out.Lane, 1u);
+    EXPECT_EQ(merge.Plan.KeyColumns[0].Index, 0);
+    EXPECT_TRUE(TMaybeType<TNullable>(merge.Plan.KeyColumns[0].Type));
+
+    const auto& window = std::get<TWindowNode>(back.Nodes[3].Body);
+    EXPECT_EQ(window.Plan.Kernel, 9u);
+    EXPECT_EQ(window.Plan.OutputType->ToString(), type->ToString());
+    EXPECT_EQ(window.Plan.Keys[1].Column, "v");
 }
 
 TEST(GraphSpec, MaterializedGraphMatchesHandBuiltGraph)
