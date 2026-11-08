@@ -179,8 +179,17 @@ TEST(KernelImage, AggregateRoundTrip)
 
 TEST(KernelImage, AggregateInAnotherProcess)
 {
+    static int counter = 0;
     const auto path = std::filesystem::temp_directory_path() /
-        ("qdb_kernel_image_" + std::to_string(::getpid()) + ".bin");
+        ("qdb_kernel_image_" + std::to_string(::getpid()) + "_" + std::to_string(counter++) + ".bin");
+    struct TRemove {
+        std::filesystem::path Path;
+        ~TRemove()
+        {
+            std::error_code ec;
+            std::filesystem::remove(Path, ec);
+        }
+    } removeFile{path};
     {
         std::ofstream out(path, std::ios::binary);
         const auto bytes = CompileAggregateImage();
@@ -197,7 +206,6 @@ TEST(KernelImage, AggregateInAnotherProcess)
     int status = 0;
     ASSERT_EQ(waitpid(pid, &status, 0), pid);
     const int code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-    std::filesystem::remove(path);
     EXPECT_EQ(code, 0);
 }
 
