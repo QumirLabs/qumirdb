@@ -435,8 +435,25 @@ public:
     // writes outBuffers[k][i] = <expr_k>. outBuffers has one pointer per computed
     // projection, each to a caller-owned buffer of RowCount * sizeof(computed
     // type). Only computed (non-ident) columns go through this kernel.
-    using TProjectDispatch =
-        std::function<void(TRowSet* in, void** outBuffers, void* arena)>;
+    struct TProjectDispatch {
+        void operator()(TRowSet* in, void** outBuffers, void* arena) const;
+
+        std::shared_ptr<TKernelSlot> Slot;
+        std::shared_ptr<void> Storage;
+        std::shared_ptr<TRuntimeContext> Runtime;
+        // Index of the project kernel in the sink (0 without a sink).
+        uint32_t Kernel = 0;
+    };
+
+    // Hashes the group keys of a batch, one uint64 per row.
+    struct TAggregateHashDispatch {
+        bool operator()(TRowSet* batch, uint64_t* hashes) const;
+
+        std::shared_ptr<TKernelSlot> Slot;
+        std::vector<int64_t> KeyColumns;
+        // Index of the hash kernel in the sink (0 without a sink).
+        uint32_t Kernel = 0;
+    };
 
     using TSortRadixCompositeDispatch = std::function<int64_t(
         TRowSet* store, int64_t* rowIds, int64_t* work, uint32_t* counts,
@@ -561,7 +578,7 @@ public:
         const NKernel::TOperatorKernelSpec& spec);
 
     // Same rh_hash generator as CompileAggregate's own table, for shuffling.
-    std::function<bool(TRowSet*, uint64_t*)> CompileAggregateHash(
+    TAggregateHashDispatch CompileAggregateHash(
         const NQumir::NAst::TStructType& inputType,
         const std::vector<std::string>& groupKeys);
 
@@ -605,5 +622,16 @@ private:
     std::shared_ptr<TRuntimeContext> RuntimeContext_;
     NQumir::TLLVMRunnerOptions Opts_;
 };
+
+// Bind a project or aggregate-hash kernel from its slot and plain-data
+// parameters; CompileProject and CompileAggregateHash end with these calls.
+TKernelCompiler::TProjectDispatch BindProject(
+    std::shared_ptr<TKernelSlot> slot,
+    std::shared_ptr<void> storage,
+    std::shared_ptr<TRuntimeContext> runtime);
+
+TKernelCompiler::TAggregateHashDispatch BindAggregateHash(
+    std::shared_ptr<TKernelSlot> slot,
+    std::vector<int64_t> keyColumns);
 
 } // namespace NQdb

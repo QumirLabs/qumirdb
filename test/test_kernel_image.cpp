@@ -2,6 +2,7 @@
 
 #include <qdb/exec/aggregate_exec.h>
 #include <qdb/io/io.h>
+#include <qdb/kernel/annotate_type.h>
 #include <qdb/kernel/compiler.h>
 #include <qdb/kernel/image.h>
 #include <qdb/kernel/spec.h>
@@ -92,6 +93,33 @@ std::vector<uint8_t> RunFilter(TKernelCompiler::TFilterDispatch& dispatch)
     auto rowSet = batch.RowSet(selection.data());
     dispatch(rowSet, nullptr);
     return selection;
+}
+
+NKernel::TOperatorKernelSpec ProjectSpec()
+{
+    const auto inputType = KeyValueType();
+    std::vector<TExprPtr> exprs = {Parse("(+ (* k 10) v)")};
+    std::vector<TTypePtr> types = {NKernel::AnnotateExprType(exprs[0], inputType)};
+    return NKernel::BuildProjectKernelSpec(inputType, exprs, types);
+}
+
+std::vector<int64_t> RunProject(const TKernelCompiler::TProjectDispatch& dispatch)
+{
+    TKeyValueBatch batch{.Keys = {1, 2, 3}, .Values = {7, 8, 9}};
+    auto rowSet = batch.RowSet();
+    std::vector<int64_t> output(batch.Keys.size());
+    std::array<void*, 2> outBuffers = {output.data(), nullptr};
+    dispatch(&rowSet, outBuffers.data(), nullptr);
+    return output;
+}
+
+std::vector<uint64_t> RunAggregateHash(const TKernelCompiler::TAggregateHashDispatch& dispatch)
+{
+    TKeyValueBatch batch{.Keys = {1, 2, 1}, .Values = {7, 8, 9}};
+    auto rowSet = batch.RowSet();
+    std::vector<uint64_t> hashes(batch.Keys.size());
+    EXPECT_TRUE(dispatch(&rowSet, hashes.data()));
+    return hashes;
 }
 
 NKernel::TOperatorKernelSpec AggregateSpec()
@@ -188,6 +216,35 @@ TEST(KernelImage, FilterDispatchRecordsKernelIndex)
 
     TKernelCompiler unsunk({});
     EXPECT_EQ(unsunk.CompileFilter(FilterSpec()).Kernel, 0u);
+}
+
+TEST(KernelImage, ProjectAndAggregateHashBindFromImageSlots)
+{
+    TKernelCompiler jit({});
+    const auto expectedProject = RunProject(jit.CompileProject(ProjectSpec()));
+    const auto expectedHash = RunAggregateHash(jit.CompileAggregateHash(KeyValueType(), {"k"}));
+
+    std::vector<TGeneratedKernel> kernels;
+    TKernelCompiler compiler({.Sink = &kernels, .BindNow = false});
+    auto project = compiler.CompileProject(ProjectSpec());
+    auto hash = compiler.CompileAggregateHash(KeyValueType(), {"k"});
+    ASSERT_EQ(kernels.size(), 2u);
+    EXPECT_EQ(project.Kernel, 0u);
+    EXPECT_EQ(hash.Kernel, 1u);
+    EXPECT_EQ(kernels[project.Kernel].Slot, project.Slot);
+    EXPECT_EQ(kernels[hash.Kernel].Slot, hash.Slot);
+
+    const auto bytes = SerializeKernelImage(CompileKernelImage(kernels));
+    std::vector<std::shared_ptr<TKernelSlot>> slots;
+    for (const auto& kernel : kernels) {
+        slots.push_back(kernel.Slot);
+    }
+    LoadKernelImage(DeserializeKernelImage(bytes), slots);
+
+    auto boundProject = BindProject(slots[project.Kernel], project.Storage, project.Runtime);
+    auto boundHash = BindAggregateHash(slots[hash.Kernel], hash.KeyColumns);
+    EXPECT_EQ(RunProject(boundProject), expectedProject);
+    EXPECT_EQ(RunAggregateHash(boundHash), expectedHash);
 }
 
 TEST(KernelImage, AggregateRoundTrip)

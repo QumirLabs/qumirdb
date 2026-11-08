@@ -1869,14 +1869,30 @@ TKernelCompiler::TProjectDispatch TKernelCompiler::CompileProject(
         "project", {"<project>"}, std::move(kernelAst), literalStorage);
     FinishKernelDiagnostics(Diagnostics_);
 
-    using TProjectFn = void(*)(void*, void**, void*, void**);
-    return [slot = kernel.Slot, storage = kernel.Storage,
-            runtime = RuntimeContext_](
-               TRowSet* in, void** outBuffers, void* arena) {
-        slot->Call<TProjectFn>(0,
-            in, outBuffers, arena,
-            runtime ? runtime->Regexes.Handles() : nullptr);
+    auto dispatch = BindProject(kernel.Slot, kernel.Storage, RuntimeContext_);
+    dispatch.Kernel = kernel.Index;
+    return dispatch;
+}
+
+TKernelCompiler::TProjectDispatch BindProject(
+    std::shared_ptr<TKernelSlot> slot,
+    std::shared_ptr<void> storage,
+    std::shared_ptr<TRuntimeContext> runtime)
+{
+    return {
+        .Slot = std::move(slot),
+        .Storage = std::move(storage),
+        .Runtime = std::move(runtime),
     };
+}
+
+void TKernelCompiler::TProjectDispatch::operator()(
+    TRowSet* in, void** outBuffers, void* arena) const
+{
+    using TProjectFn = void(*)(void*, void**, void*, void**);
+    Slot->Call<TProjectFn>(0,
+        in, outBuffers, arena,
+        Runtime ? Runtime->Regexes.Handles() : nullptr);
 }
 
 TKernelCompiler::TSortRadixCompositeDispatch TKernelCompiler::CompileRadixSortComposite(
@@ -2511,7 +2527,7 @@ TJoinHashKernels TKernelCompiler::CompileJoinHash(
     };
 }
 
-std::function<bool(TRowSet*, uint64_t*)> TKernelCompiler::CompileAggregateHash(
+TKernelCompiler::TAggregateHashDispatch TKernelCompiler::CompileAggregateHash(
     const NQumir::NAst::TStructType& inputType,
     const std::vector<std::string>& groupKeys)
 {
@@ -2553,18 +2569,32 @@ std::function<bool(TRowSet*, uint64_t*)> TKernelCompiler::CompileAggregateHash(
     auto kernel = EmitKernel("aggregate_hash", {"agg_hash"}, std::move(program));
     FinishKernelDiagnostics(Diagnostics_);
 
-    auto keyColumns = std::make_shared<std::vector<int64_t>>();
-    keyColumns->reserve(keyDesc.Fields.size());
+    std::vector<int64_t> keyColumns;
+    keyColumns.reserve(keyDesc.Fields.size());
     for (const auto& field : keyDesc.Fields) {
-        keyColumns->push_back(field.ColumnIndex);
+        keyColumns.push_back(field.ColumnIndex);
     }
 
-    using THashFn = bool(*)(TRowSet*, uint64_t*, const int64_t*);
-    return [slot = kernel.Slot, keyColumns = std::move(keyColumns)](
-               TRowSet* batch, uint64_t* hashes) {
-        return slot->Call<THashFn>(0,
-            batch, hashes, keyColumns->data());
+    auto dispatch = BindAggregateHash(kernel.Slot, std::move(keyColumns));
+    dispatch.Kernel = kernel.Index;
+    return dispatch;
+}
+
+TKernelCompiler::TAggregateHashDispatch BindAggregateHash(
+    std::shared_ptr<TKernelSlot> slot,
+    std::vector<int64_t> keyColumns)
+{
+    return {
+        .Slot = std::move(slot),
+        .KeyColumns = std::move(keyColumns),
     };
+}
+
+bool TKernelCompiler::TAggregateHashDispatch::operator()(
+    TRowSet* batch, uint64_t* hashes) const
+{
+    using THashFn = bool(*)(TRowSet*, uint64_t*, const int64_t*);
+    return Slot->Call<THashFn>(0, batch, hashes, KeyColumns.data());
 }
 
 TRowJoinKernels TKernelCompiler::CompileRowJoin(
