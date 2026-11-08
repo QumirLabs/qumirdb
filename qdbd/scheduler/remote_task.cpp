@@ -45,6 +45,14 @@ ETaskResult TRemoteSinkState::Write(const TRowSet& rowSet) {
     Retain(&task);
     TRowSet copy = task;
     copy.RefCount = 1;
+    if (copy.Selection) {
+        // Serialization takes compacted row sets only. On a layout mismatch the row set
+        // stays as it is and the actor reports the error when it sends it.
+        try {
+            CompactRowSet(copy, Descriptor);
+        } catch (const std::exception&) {
+        }
+    }
     if (!Outbox.TryPush(std::move(copy))) {
         --task.RefCount;
         return ETaskResult::WAITING;
@@ -88,7 +96,6 @@ bool TRemoteSinkState::OnConfirm(uint64_t lastApplied, NNet::NActors::TActorCont
 }
 
 void TRemoteSinkState::SendChunk(NNet::NActors::TActorContext::TPtr& ctx, uint64_t seq, TRowSet&& rowSet) {
-    // TODO: a Selection rowset is refused by serialization; compact or reject is still open.
     try {
         if (static_cast<size_t>(rowSet.ColumnCount) > Descriptor.size()) {
             throw std::runtime_error("remote sink " + std::to_string(Id) + ": fewer layouts than columns");

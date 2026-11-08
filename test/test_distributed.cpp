@@ -1934,7 +1934,7 @@ TEST(DistributedScheduler, ComputeActorReportsAFailedSendAndReleasesTheRowSet) {
         bool Selection;
         size_t Layouts;
     };
-    for (const auto& c : {TCase{1, false, 0}, TCase{2, false, 1}, TCase{1, true, 1}}) {
+    for (const auto& c : {TCase{1, false, 0}, TCase{2, false, 1}}) {
         std::atomic<int> destroyed = 0;
         TProducerState producerState{.Total = 1000};
         auto producerCode = std::make_shared<TSourceCode>([&](void* state, TRowSet& rowSet) {
@@ -2033,6 +2033,116 @@ TEST(DistributedScheduler, RemoteSinkReleasesItsOutboxOnTeardown) {
     }
     EXPECT_GT(produced.load(), 2);
     EXPECT_EQ(destroyed.load(), produced.load());
+}
+
+namespace {
+
+// One int64 column with `values`; only the rows with selection[i] != 0 are real.
+struct TSelectedInts {
+    std::vector<int64_t> Values;
+    std::vector<uint8_t> Selection;
+    TColumn Column{};
+};
+
+TRowSet SelectedInts(std::vector<int64_t> values, std::vector<uint8_t> selection) {
+    auto* data = new TSelectedInts{.Values = std::move(values), .Selection = std::move(selection)};
+    data->Column.Data = reinterpret_cast<char*>(data->Values.data());
+    return TRowSet{
+        .Columns = &data->Column,
+        .ColumnCount = 1,
+        .RowCount = static_cast<int64_t>(data->Values.size()),
+        .Selection = data->Selection.data(),
+        .Destroy = [](TRowSet* rowSet) {
+            delete static_cast<TSelectedInts*>(rowSet->Private);
+        },
+        .Private = data,
+        .RefCount = 1,
+    };
+}
+
+} // namespace
+
+// CA1 (follower): producer -> remote sink; CA2 (leader): remote source -> collector.
+TEST(DistributedScheduler, SelectedRowsCrossNodesCompacted) {
+    using namespace NQdb::NScheduler;
+    TProducerState producerState{.Total = 1};
+    auto producerCode = std::make_shared<TSourceCode>([&](void* state, TRowSet& rowSet) {
+        auto* producer = static_cast<TProducerState*>(state);
+        if (producer->Next > producer->Total) {
+            return ETaskResult::FINISHED;
+        }
+        ++producer->Next;
+        rowSet = SelectedInts({10, 20, 30, 40}, {1, 0, 1, 0});
+        return ETaskResult::OK;
+    });
+    std::mutex mutex;
+    std::vector<int64_t> received;
+    std::atomic<bool> finished = false;
+    auto collectorCode = std::make_shared<TSinkCode>(
+        [&](void*, const TRowSet& rowSet) {
+            std::lock_guard lock(mutex);
+            EXPECT_EQ(rowSet.Selection, nullptr);
+            const auto* data = reinterpret_cast<const int64_t*>(rowSet.Columns[0].Data);
+            received.assign(data, data + rowSet.RowCount);
+            return ETaskResult::OK;
+        },
+        [&](void*) {
+            finished.store(true);
+            return ETaskResult::OK;
+        });
+
+    auto toRemoteSink = std::make_unique<TOneToOneConnection>();
+    auto* toRemoteSinkPtr = toRemoteSink.get();
+    TTaskGraph graph1;
+    auto& producer = graph1.AddOwnedNode(std::make_unique<TSourceTask>(
+        producerCode, std::shared_ptr<void>(&producerState, [](void*) {}),
+        TOutputPort{.Connection = toRemoteSinkPtr}));
+    auto& remoteSink = graph1.AddOwnedNode(std::make_unique<TSinkTask>(
+        nullptr, nullptr, TInputPort{.Connection = toRemoteSinkPtr}));
+    graph1.AddOwnedEdge(producer, remoteSink, std::move(toRemoteSink));
+    graph1.MarkExternal(remoteSink, 1);
+    const auto sealed1 = graph1.Seal();
+    ASSERT_TRUE(sealed1);
+
+    auto fromRemoteSource = std::make_unique<TOneToOneConnection>();
+    auto* fromRemoteSourcePtr = fromRemoteSource.get();
+    TTaskGraph graph2;
+    auto& remoteSource = graph2.AddOwnedNode(std::make_unique<TSourceTask>(
+        nullptr, nullptr, TOutputPort{.Connection = fromRemoteSourcePtr}));
+    auto& localSink = graph2.AddOwnedNode(std::make_unique<TSinkTask>(
+        collectorCode, nullptr, TInputPort{.Connection = fromRemoteSourcePtr}));
+    graph2.AddOwnedEdge(remoteSource, localSink, std::move(fromRemoteSource));
+    graph2.MarkExternal(remoteSource, 2);
+    const auto sealed2 = graph2.Seal();
+    ASSERT_TRUE(sealed2);
+
+    auto resources = std::make_shared<TRuntimeResources>();
+    resources->Scheduler.WorkerCount = 2;
+    TTestCluster cluster;
+    std::map<std::string, int> statuses;
+    std::vector<std::string> errors;
+    const auto queryF = cluster.Follower.Register(std::make_unique<TReportProbe>(statuses, errors));
+    const auto queryL = cluster.Leader.Register(std::make_unique<TReportProbe>(statuses, errors));
+    const auto ca1 = cluster.Follower.Register(std::unique_ptr<IActor>(CreateComputeActor(resources)));
+    const auto ca2 = cluster.Leader.Register(std::unique_ptr<IActor>(CreateComputeActor(resources)));
+    cluster.Follower.Send<TTaskGraphMessage>(queryF, ca1, TTaskGraphMessage{
+        .Graph = sealed1,
+        .Endpoints = {{.Id = 1, .Kind = ERemoteEndpointKind::Sink, .PeerActor = ca2, .PeerTaskId = 2,
+            .Layouts = {TValueLayout{.Width = 8}}}}});
+    cluster.Leader.Send<TTaskGraphMessage>(queryL, ca2, TTaskGraphMessage{
+        .Graph = sealed2,
+        .Endpoints = {{.Id = 2, .Kind = ERemoteEndpointKind::Source, .PeerActor = ca1, .PeerTaskId = 1}}});
+    const auto deadline = NNet::TClock::now() + std::chrono::seconds(10);
+    while (!finished.load() && errors.empty() && NNet::TClock::now() < deadline) {
+        cluster.Pump();
+    }
+    EXPECT_TRUE(finished.load());
+    EXPECT_TRUE(errors.empty());
+    cluster.Follower.Send<TPoison>(queryF, ca1, TPoison{});
+    cluster.Leader.Send<TPoison>(queryL, ca2, TPoison{});
+    cluster.Pump();
+    std::lock_guard lock(mutex);
+    EXPECT_EQ(received, (std::vector<int64_t>{10, 30}));
 }
 
 int main(int argc, char** argv) {
