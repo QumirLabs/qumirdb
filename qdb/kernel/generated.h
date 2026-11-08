@@ -83,7 +83,7 @@ struct TKernelSlot {
     std::vector<void*> Fns;
     // Owns the JIT'd code: the pointers are valid while this lives.
     std::shared_ptr<NQumir::TLLVMRunner> Runner;
-    // Cache path only: keeps the query's LLJIT alive (the runner does not).
+    // Cache path and LoadKernelImage (Runner empty): keeps the LLJIT alive.
     std::shared_ptr<void> JitLifetime;
     // VM: the query's prepared program and the function of each entrypoint.
     std::shared_ptr<TVmProgram> Vm;

@@ -98,7 +98,8 @@ TKernelImage CompileKernelImage(std::span<TGeneratedKernel> kernels)
 void LoadKernelImage(const TKernelImage& image, std::span<const std::shared_ptr<TKernelSlot>> slots)
 {
     // TODO: check that the image was compiled by the same binary and CPU.
-    // TODO: check that the slot count matches and the slots are not bound yet.
+    // TODO: check that the slot count matches and the slots are not bound yet;
+    // FinalizeKernels treats a slot as bound by Runner || Vm, so an image slot would be recompiled.
     NQumir::NRegistry::EnsureQumirDbRuntimeSymbolsLinked();
 
     std::vector<std::string> names;
