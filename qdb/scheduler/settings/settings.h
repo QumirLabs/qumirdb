@@ -47,6 +47,8 @@ struct TSchedulerSettings {
     // hardware_concurrency may be unknown (zero); always keep one worker.
     size_t WorkerCount = std::max(1u, std::thread::hardware_concurrency());
     size_t ReadyQueueCapacity = 1024;
+    // Period of the compute actor's TComputeStatus to the query actor.
+    size_t StatusPeriodMs = 1000;
 };
 
 struct TQueueSettings {

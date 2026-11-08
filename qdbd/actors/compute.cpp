@@ -1,5 +1,7 @@
 #include <iostream>
+#include <chrono>
 #include <memory>
+#include <optional>
 
 #include <coroio/actors/actorsystem.hpp>
 #include <qdbd/messages.h>
@@ -21,7 +23,7 @@ using namespace NNet::NActors;
 namespace {
 
 struct TComputeActor : public IBehaviorActor {
-    struct TDefaultBehavior : public TBehavior<TDefaultBehavior, TTaskGraphMessage, TDataChunk, TDataConfirm, TFinish> {
+    struct TDefaultBehavior : public TBehavior<TDefaultBehavior, TTaskGraphMessage, TDataChunk, TDataConfirm, TFinish, TWakeUp> {
         TDefaultBehavior(TComputeActor* parent)
             : Parent(parent)
         { }
@@ -40,6 +42,10 @@ struct TComputeActor : public IBehaviorActor {
 
         void Receive(TFinish&& message, TBlob, TActorContext::TPtr) {
             Parent->OnFinish(message);
+        }
+
+        void Receive(TWakeUp&&, TBlob, TActorContext::TPtr ctx) {
+            Parent->SendStatus(ctx);
         }
 
         void HandleUnknownMessage(TMessageId messageId, TBlob blob, TActorContext::TPtr ctx)
@@ -64,7 +70,11 @@ struct TComputeActor : public IBehaviorActor {
         ReleaseSlot();
     }
 
-    void BeforeUnregister(TActorContext::TPtr) override {
+    void BeforeUnregister(TActorContext::TPtr ctx) override {
+        if (StatusEvent) {
+            ctx->Cancel(*StatusEvent);
+            StatusEvent.reset();
+        }
         ReleaseSlot();
     }
 
@@ -86,6 +96,17 @@ struct TComputeActor : public IBehaviorActor {
         while (ActorChannel->SourceQueue().TryPop(source)) {
             source->SendConfirm(ctx);
         }
+    }
+
+    void SendStatus(TActorContext::TPtr& ctx) {
+        ctx->Send<TComputeStatus>(QueryActorId, TComputeStatus{});
+        ScheduleStatus(ctx);
+    }
+
+    void ScheduleStatus(TActorContext::TPtr& ctx) {
+        StatusEvent = ctx->Schedule<TWakeUp>(
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(SchedulerSettings.StatusPeriodMs),
+            ctx->Self(), ctx->Self());
     }
 
     void ReleaseSlot() {
@@ -126,6 +147,7 @@ struct TComputeActor : public IBehaviorActor {
         SchedulerSchannel = std::make_unique<NScheduler::TSchedulerChannel>(
             *Scheduler
         );
+        ScheduleStatus(ctx);
         NotificationTask = [&](TActorContext::TPtr ctx) -> TVoidSuspendedTask {
             while (true) {
                 co_await ActorChannel->Wait();
@@ -210,6 +232,7 @@ struct TComputeActor : public IBehaviorActor {
     std::unordered_map<uint64_t, std::tuple<std::shared_ptr<NScheduler::TRemoteSinkState>, NScheduler::TTaskNode*>> SinkStates;
     TVoidSuspendedTask NotificationTask;
     TActorId QueryActorId;
+    std::optional<NNet::NActors::TEvent> StatusEvent;
 };
 
 } // namespace

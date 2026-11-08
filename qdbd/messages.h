@@ -62,6 +62,11 @@ struct TDataConfirm {
     uint64_t LastApplied = 0;
 };
 
+// Compute actor -> query actor, periodically while the graph runs: the actor is alive.
+struct TComputeStatus {
+    static constexpr NNet::NActors::TMessageId MessageId = 204;
+};
+
 enum class ERemoteEndpointKind {
     Source,
     Sink,
@@ -112,6 +117,7 @@ inline void RegisterMessages(TMessagesFactory& factory) {
     factory.template RegisterSerializer<TDataChunk>();
     factory.template RegisterSerializer<TFinish>();
     factory.template RegisterSerializer<TDataConfirm>();
+    factory.template RegisterSerializer<TComputeStatus>();
     factory.template RegisterSerializer<TExecuteQuery>();
     factory.template RegisterSerializer<TExecuteQueryResponse>();
 }

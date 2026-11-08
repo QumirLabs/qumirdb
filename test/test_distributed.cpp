@@ -1080,6 +1080,84 @@ TEST(DistributedAllocation, LocalSchedulerAllowsOversubscription) {
     EXPECT_EQ(cluster.Follower.ActorsSize(), before);
 }
 
+namespace {
+
+// source -> sink, both external: ids 2 and 1, like the pipeline tests above.
+struct TTwoEndpointGraph {
+    // The sealed graph points into the task graph.
+    NQdb::NScheduler::TTaskGraph Owner;
+    NQdb::NScheduler::TSealedTaskGraph Graph;
+    std::vector<TRemoteEndpoint> Endpoints{
+        {.Id = 1, .Kind = ERemoteEndpointKind::Sink},
+        {.Id = 2, .Kind = ERemoteEndpointKind::Source},
+    };
+
+    TTwoEndpointGraph() {
+        using namespace NQdb::NScheduler;
+        auto connection = std::make_unique<TOneToOneConnection>();
+        auto* connectionPtr = connection.get();
+        auto& source = Owner.AddOwnedNode(std::make_unique<TSourceTask>(
+            nullptr, nullptr, TOutputPort{.Connection = connectionPtr}));
+        auto& sink = Owner.AddOwnedNode(std::make_unique<TSinkTask>(
+            nullptr, nullptr, TInputPort{.Connection = connectionPtr}));
+        Owner.AddOwnedEdge(source, sink, std::move(connection));
+        Owner.MarkExternal(sink, 1);
+        Owner.MarkExternal(source, 2);
+        Graph = Owner.Seal();
+    }
+};
+
+// Plays the query actor: counts what the compute actor reports.
+class TOrchestratorProbe : public IActor {
+public:
+    explicit TOrchestratorProbe(int& statuses)
+        : Statuses_(statuses)
+    {}
+
+    void Receive(TMessageId messageId, TBlob, TActorContext::TPtr) override {
+        ASSERT_EQ(messageId, TComputeStatus::MessageId);
+        ++Statuses_;
+    }
+
+private:
+    int& Statuses_;
+};
+
+} // namespace
+
+TEST(DistributedAllocation, ComputeActorSendsPeriodicStatus) {
+    auto resources = std::make_shared<TRuntimeResources>();
+    resources->Scheduler.StatusPeriodMs = 5;
+    // Declared first: the compute actor's graph copy points into it until the cluster is gone.
+    TTwoEndpointGraph graph;
+    TTestCluster cluster;
+    int statuses = 0;
+    const auto probe = cluster.Follower.Register(std::make_unique<TOrchestratorProbe>(statuses));
+    const auto actor = cluster.Follower.Register(std::unique_ptr<IActor>(CreateComputeActor(resources)));
+    for (int i = 0; i < 8; ++i) {
+        cluster.Pump();
+    }
+    // No graph, no heartbeat.
+    EXPECT_EQ(statuses, 0);
+
+    cluster.Follower.Send<TTaskGraphMessage>(probe, actor, TTaskGraphMessage{
+        .Graph = graph.Graph, .Endpoints = graph.Endpoints});
+    const auto deadline = NNet::TClock::now() + std::chrono::seconds(5);
+    while (statuses < 3 && NNet::TClock::now() < deadline) {
+        cluster.Pump();
+    }
+    EXPECT_GE(statuses, 3);
+
+    cluster.Follower.Send<TPoison>(probe, actor, TPoison{});
+    cluster.Pump();
+    const int stopped = statuses;
+    const auto quiet = NNet::TClock::now() + std::chrono::milliseconds(50);
+    while (NNet::TClock::now() < quiet) {
+        cluster.Pump();
+    }
+    EXPECT_EQ(statuses, stopped);
+}
+
 TEST(DistributedAllocation, ComputeActorReleasesItsCounterExactlyOnce) {
     auto resources = std::make_shared<TRuntimeResources>();
     {
