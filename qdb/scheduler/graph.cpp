@@ -392,6 +392,14 @@ void TTaskGraph::PrintConnectionStats(std::ostream& out) const {
     }
 }
 
+std::span<const std::unique_ptr<IConnection>> TTaskGraph::Connections() const {
+    return OwnedConnections_;
+}
+
+std::span<const TExternalNode> TTaskGraph::Externals() const {
+    return Externals_;
+}
+
 const std::vector<std::unique_ptr<TTaskNode>>& TTaskGraph::Nodes() const {
     return Nodes_;
 }
