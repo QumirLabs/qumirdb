@@ -63,6 +63,7 @@ public:
     TConnectionStats Stats() const;
 
     // Row descriptor, one entry per column; empty until the graph builder sets it.
+    // Set while building the graph, before Seal; sinks keep spans into it, so it must not change later.
     void SetRowLayouts(std::vector<TValueLayout> layouts);
     std::span<const TValueLayout> RowLayouts() const;
 
