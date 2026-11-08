@@ -16,6 +16,7 @@
 #include <qdb/kernel/spec.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/window.h>
+#include <qdb/plan/types/nullable.h>
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/parser/core/lexer.h>
@@ -74,12 +75,16 @@ TStructType KeyValueType()
 struct TKeyValueBatch {
     std::vector<int64_t> Keys;
     std::vector<int64_t> Values;
+    // Validity bits of the key column; empty means no null mask.
+    std::vector<uint8_t> KeyMask;
     std::array<TColumn, 2> Columns{};
 
     TRowSet RowSet(uint8_t* selection = nullptr)
     {
         Columns = {
-            TColumn{.Data = reinterpret_cast<char*>(Keys.data())},
+            TColumn{
+                .Data = reinterpret_cast<char*>(Keys.data()),
+                .Mask = KeyMask.empty() ? nullptr : KeyMask.data()},
             TColumn{.Data = reinterpret_cast<char*>(Values.data())},
         };
         return TRowSet{
@@ -291,13 +296,14 @@ std::vector<int64_t> ReadSortedColumn(const TRowSet& rows, size_t column)
     return std::vector<int64_t>(data, data + rows.RowCount);
 }
 
-// Sorts and top-sorts the same batch by v; returns both v columns.
-std::pair<std::vector<int64_t>, std::vector<int64_t>> RunSort(const TSortRuntimeProcess& process)
+// Sorts (and top-sorts, when the plan has Top) the same batch by the keys;
+// returns the v columns.
+std::pair<std::vector<int64_t>, std::vector<int64_t>> RunSort(
+    const TSortRuntimeProcess& process,
+    const std::vector<TSortKey>& keys,
+    const TTypePtr& outputType,
+    TKeyValueBatch batch)
 {
-    const std::vector<TSortKey> keys = {{.Column = "v"}};
-    const auto outputType = std::make_shared<TStructType>(KeyValueType());
-    TKeyValueBatch batch{.Keys = {1, 2, 3, 4, 5}, .Values = {5, 1, 3, 9, 2}};
-
     std::pair<std::vector<int64_t>, std::vector<int64_t>> result;
     TRowSet out{};
     {
@@ -309,7 +315,7 @@ std::pair<std::vector<int64_t>, std::vector<int64_t>> RunSort(const TSortRuntime
         result.first = ReadSortedColumn(out, 1);
         Release(&out);
     }
-    {
+    if (process.Plan.Top) {
         TTopSortProcessor topSort(
             outputType, keys, process.Plan.KeyColumns, process.RadixKernel, process.Plan.Top->Limit);
         auto rows = batch.RowSet();
@@ -320,6 +326,15 @@ std::pair<std::vector<int64_t>, std::vector<int64_t>> RunSort(const TSortRuntime
         Release(&out);
     }
     return result;
+}
+
+std::pair<std::vector<int64_t>, std::vector<int64_t>> RunSort(const TSortRuntimeProcess& process)
+{
+    return RunSort(
+        process,
+        {{.Column = "v"}},
+        std::make_shared<TStructType>(KeyValueType()),
+        TKeyValueBatch{.Keys = {1, 2, 3, 4, 5}, .Values = {5, 1, 3, 9, 2}});
 }
 
 // Window kernel: running sum of v per k, ordered by v. Returns the sum column.
@@ -600,6 +615,65 @@ TEST(KernelImage, SortKernelsBindFromPlanDataAndImageSlots)
     EXPECT_EQ(RunSort(process), expected);
     EXPECT_EQ(expected.first, (std::vector<int64_t>{1, 2, 3, 5, 9}));
     EXPECT_EQ(expected.second, (std::vector<int64_t>{1, 2, 3}));
+}
+
+TEST(KernelImage, NullableSortBindsFromPlanDataAndImageSlots)
+{
+    const auto nullableType = std::make_shared<TNullable>(I64Type());
+    const auto inputType = std::make_shared<TStructType>(TStructType({{"k", nullableType}, {"v", I64Type()}}));
+    const std::vector<TSortKey> keys = {{.Column = "k"}};
+    // Rows 1 and 3 have a null key.
+    const auto batch = [] {
+        return TKeyValueBatch{
+            .Keys = {30, 1000, 10, -999, 20}, .Values = {1, 2, 3, 4, 5}, .KeyMask = {0b00010101}};
+    };
+    const auto expected = RunSort(BuildSortRuntimeProcess(inputType, keys, "nullable-sort", 3, {}), keys, inputType, batch());
+
+    std::vector<TGeneratedKernel> kernels;
+    auto process = BuildSortRuntimeProcess(
+        inputType, keys, "nullable-sort", 3, {.Sink = &kernels, .BindNow = false});
+    const auto& plan = process.Plan;
+    ASSERT_TRUE(plan.RadixNullable);
+    ASSERT_TRUE(plan.Top);
+    ASSERT_EQ(kernels.size(), 3u);
+    EXPECT_EQ(
+        plan.OutputType->ToString(),
+        TStructType({{"k", nullableType}, {"v", I64Type()}}).ToString());
+
+    auto slots = LoadImageSlots(kernels);
+    process.RadixKernel = MakeSortRadixKernel(
+        plan,
+        BindSortRadixComposite(slots[plan.RadixKernel]),
+        BindTopSort(slots[plan.Top->TopSortKernel]),
+        BindHeapTopK(slots[plan.Top->HeapKernel]));
+    EXPECT_TRUE(process.RadixKernel.NullableDispatch.Slot);
+    EXPECT_FALSE(process.RadixKernel.Dispatch.Slot);
+    EXPECT_EQ(RunSort(process, keys, inputType, batch()), expected);
+    // Ascending, nulls last: 10, 20, 30, then the null rows.
+    EXPECT_EQ(expected.second, (std::vector<int64_t>{3, 5, 1}));
+    EXPECT_EQ(std::vector<int64_t>(expected.first.begin(), expected.first.begin() + 3), expected.second);
+}
+
+TEST(KernelImage, PlainSortWithoutTopBindsFromPlanDataAndImageSlots)
+{
+    const auto inputType = std::make_shared<TStructType>(KeyValueType());
+    const std::vector<TSortKey> keys = {{.Column = "v"}};
+    const auto expected = RunSort(BuildSortRuntimeProcess(inputType, keys, "plain-sort", std::nullopt, {}));
+
+    std::vector<TGeneratedKernel> kernels;
+    auto process = BuildSortRuntimeProcess(
+        inputType, keys, "plain-sort", std::nullopt, {.Sink = &kernels, .BindNow = false});
+    const auto& plan = process.Plan;
+    ASSERT_EQ(kernels.size(), 1u);
+    EXPECT_FALSE(plan.Top);
+    EXPECT_FALSE(plan.RadixNullable);
+
+    auto slots = LoadImageSlots(kernels);
+    process.RadixKernel = MakeSortRadixKernel(plan, BindSortRadixComposite(slots[plan.RadixKernel]), {}, {});
+    EXPECT_FALSE(process.RadixKernel.TopSortDispatch.Slot);
+    EXPECT_EQ(RunSort(process), expected);
+    EXPECT_EQ(expected.first, (std::vector<int64_t>{1, 2, 3, 5, 9}));
+    EXPECT_TRUE(expected.second.empty());
 }
 
 TEST(KernelImage, WindowBindsFromImageSlot)
