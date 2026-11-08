@@ -134,7 +134,7 @@ TEST(RuntimeFilterKernel, BindsWhenTheQueryIsFinalized) {
         .BindNow = false,
         .RuntimeContext = context,
     });
-    context->RuntimeFilterKernels = compiler.CompileRuntimeFilter();
+    context->RuntimeFilterKernels = compiler.CompileRuntimeFilter().Slot;
     ASSERT_EQ(kernels.size(), 1u);
     EXPECT_EQ(kernels.front().Entrypoints, (std::vector<std::string>(
         RuntimeFilterKernelEntrypoints.begin(), RuntimeFilterKernelEntrypoints.end())));

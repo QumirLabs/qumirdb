@@ -20,7 +20,7 @@ class TRuntimeFilterTest : public testing::Test {
 protected:
     void SetUp() override {
         Context_ = std::make_shared<TRuntimeContext>();
-        Context_->RuntimeFilterKernels = TKernelCompiler().CompileRuntimeFilter();
+        Context_->RuntimeFilterKernels = TKernelCompiler().CompileRuntimeFilter().Slot;
     }
 
     std::shared_ptr<TRuntimeContext> Context_;

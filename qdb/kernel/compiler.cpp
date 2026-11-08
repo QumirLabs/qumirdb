@@ -1725,7 +1725,7 @@ NQumir::NAst::TExprPtr BuildTopSortMergeProgramAst(
     return std::make_shared<TBlockExpr>(NQumir::TLocation{}, std::move(programStmts));
 }
 
-std::shared_ptr<TKernelSlot> TKernelCompiler::CompileRuntimeFilter() {
+TRuntimeFilterKernel TKernelCompiler::CompileRuntimeFilter() {
     using namespace NQumir::NAst;
     // Type declarations go first, as in a source file.
     std::vector<TExprPtr> programStmts;
@@ -1754,7 +1754,7 @@ std::shared_ptr<TKernelSlot> TKernelCompiler::CompileRuntimeFilter() {
         std::move(ast));
     FinishKernelDiagnostics(Diagnostics_);
 
-    return kernel.Slot;
+    return {.Slot = kernel.Slot, .Kernel = kernel.Index};
 }
 
 TKernelCompiler::TFilterDispatch TKernelCompiler::CompileFilter(
@@ -1915,16 +1915,9 @@ TKernelCompiler::TSortRadixCompositeDispatch TKernelCompiler::CompileRadixSortCo
         std::move(program));
     FinishKernelDiagnostics(Diagnostics_);
 
-    using TSortFn = int64_t(*)(
-        TRowSet*, int64_t*, int64_t*, uint32_t*, int64_t, bool*, bool*,
-        bool, int64_t, int64_t, TRowSet*);
-    return [slot = kernel.Slot](TRowSet* store, int64_t* rowIds, int64_t* work,
-        uint32_t* counts, int64_t n, bool* descs, bool* nullsFirsts,
-        bool doSort, int64_t start, int64_t limit, TRowSet* output) {
-        return slot->Call<TSortFn>(0,
-            store, rowIds, work, counts, n, descs, nullsFirsts,
-            doSort, start, limit, output);
-    };
+    auto dispatch = BindSortRadixComposite(kernel.Slot);
+    dispatch.Kernel = kernel.Index;
+    return dispatch;
 }
 
 TKernelCompiler::TSortRadixCompositeDispatch
@@ -1950,16 +1943,9 @@ TKernelCompiler::CompileWindow(
         std::move(program));
     FinishKernelDiagnostics(Diagnostics_);
 
-    using TWindowFn = int64_t(*)(
-        TRowSet*, int64_t*, int64_t*, uint32_t*, int64_t, bool*, bool*,
-        bool, int64_t, int64_t, TRowSet*);
-    return [slot = kernel.Slot](TRowSet* store, int64_t* rowIds, int64_t* work,
-        uint32_t* counts, int64_t n, bool* descs, bool* nullsFirsts,
-        bool doSort, int64_t start, int64_t limit, TRowSet* output) {
-        return slot->Call<TWindowFn>(0,
-            store, rowIds, work, counts, n, descs, nullsFirsts,
-            doSort, start, limit, output);
-    };
+    auto dispatch = BindSortRadixComposite(kernel.Slot);
+    dispatch.Kernel = kernel.Index;
+    return dispatch;
 }
 
 TKernelCompiler::TSortRadixCompositeNullableDispatch
@@ -1981,16 +1967,9 @@ TKernelCompiler::CompileRadixSortCompositeNullable(
         std::move(program));
     FinishKernelDiagnostics(Diagnostics_);
 
-    using TSortFn = int64_t(*)(
-        TRowSet*, int64_t*, int64_t*, uint32_t*, int64_t, bool*, bool*,
-        bool, int64_t, int64_t, TRowSet*);
-    return [slot = kernel.Slot](TRowSet* store, int64_t* rowIds,
-        int64_t* work, uint32_t* counts, int64_t n, bool* descs, bool* nullsFirsts,
-        bool doSort, int64_t start, int64_t limit, TRowSet* output) {
-        return slot->Call<TSortFn>(0,
-            store, rowIds, work, counts, n, descs, nullsFirsts,
-            doSort, start, limit, output);
-    };
+    auto dispatch = BindSortRadixComposite(kernel.Slot);
+    dispatch.Kernel = kernel.Index;
+    return dispatch;
 }
 
 TKernelCompiler::TTopSortDispatch TKernelCompiler::CompileTopSort(
@@ -2011,25 +1990,9 @@ TKernelCompiler::TTopSortDispatch TKernelCompiler::CompileTopSort(
         std::move(program));
     FinishKernelDiagnostics(Diagnostics_);
 
-    using TTopSortFn = int64_t(*)(
-        TRowSet*, TRowSet*, int64_t*, int64_t*, uint32_t*,
-        int64_t, bool, uint8_t*, uint32_t*, int64_t, TRowSet*);
-    return [slot = kernel.Slot](
-        TRowSet* state,
-        TRowSet* batch,
-        int64_t* rowIds,
-        int64_t* work,
-        uint32_t* counts,
-        int64_t n,
-        bool sortInput,
-        uint8_t* pickSrc,
-        uint32_t* pickIdx,
-        int64_t limit,
-        TRowSet* output) {
-        return slot->Call<TTopSortFn>(0,
-            state, batch, rowIds, work, counts, n, sortInput,
-            pickSrc, pickIdx, limit, output);
-    };
+    auto dispatch = BindTopSort(kernel.Slot);
+    dispatch.Kernel = kernel.Index;
+    return dispatch;
 }
 
 TKernelCompiler::THeapTopKDispatch TKernelCompiler::CompileHeapTopK(
@@ -2044,16 +2007,58 @@ TKernelCompiler::THeapTopKDispatch TKernelCompiler::CompileHeapTopK(
         std::move(program));
     FinishKernelDiagnostics(Diagnostics_);
 
-    using THeapTopKFn = int64_t(*)(
-        TRowSet*, int64_t*, int64_t, int64_t);
-    return [slot = kernel.Slot](
-        TRowSet* store,
-        int64_t* rowIds,
-        int64_t size,
-        int64_t limit) {
-        return slot->Call<THeapTopKFn>(0,
-            store, rowIds, size, limit);
-    };
+    auto dispatch = BindHeapTopK(kernel.Slot);
+    dispatch.Kernel = kernel.Index;
+    return dispatch;
+}
+
+TKernelCompiler::TSortRadixCompositeDispatch BindSortRadixComposite(
+    std::shared_ptr<TKernelSlot> slot)
+{
+    return {.Slot = std::move(slot)};
+}
+
+TKernelCompiler::TTopSortDispatch BindTopSort(std::shared_ptr<TKernelSlot> slot)
+{
+    return {.Slot = std::move(slot)};
+}
+
+TKernelCompiler::THeapTopKDispatch BindHeapTopK(std::shared_ptr<TKernelSlot> slot)
+{
+    return {.Slot = std::move(slot)};
+}
+
+int64_t TKernelCompiler::TSortRadixCompositeDispatch::operator()(
+    TRowSet* store, int64_t* rowIds, int64_t* work, uint32_t* counts,
+    int64_t n, bool* descs, bool* nullsFirsts, bool doSort,
+    int64_t start, int64_t limit, TRowSet* output) const
+{
+    using TSortFn = int64_t(*)(
+        TRowSet*, int64_t*, int64_t*, uint32_t*, int64_t, bool*, bool*,
+        bool, int64_t, int64_t, TRowSet*);
+    return Slot->Call<TSortFn>(0,
+        store, rowIds, work, counts, n, descs, nullsFirsts,
+        doSort, start, limit, output);
+}
+
+int64_t TKernelCompiler::TTopSortDispatch::operator()(
+    TRowSet* state, TRowSet* batch, int64_t* rowIds, int64_t* work,
+    uint32_t* counts, int64_t n, bool sortInput, uint8_t* pickSrc,
+    uint32_t* pickIdx, int64_t limit, TRowSet* output) const
+{
+    using TTopSortFn = int64_t(*)(
+        TRowSet*, TRowSet*, int64_t*, int64_t*, uint32_t*,
+        int64_t, bool, uint8_t*, uint32_t*, int64_t, TRowSet*);
+    return Slot->Call<TTopSortFn>(0,
+        state, batch, rowIds, work, counts, n, sortInput,
+        pickSrc, pickIdx, limit, output);
+}
+
+int64_t TKernelCompiler::THeapTopKDispatch::operator()(
+    TRowSet* store, int64_t* rowIds, int64_t size, int64_t limit) const
+{
+    using THeapTopKFn = int64_t(*)(TRowSet*, int64_t*, int64_t, int64_t);
+    return Slot->Call<THeapTopKFn>(0, store, rowIds, size, limit);
 }
 
 TAggregateKernels TKernelCompiler::CompileAggregate(

@@ -2,7 +2,12 @@
 
 #include <qdb/exec/aggregate_exec.h>
 #include <qdb/exec/join_exec.h>
+#include <qdb/exec/planner_helpers.h>
 #include <qdb/exec/row_join_exec.h>
+#include <qdb/exec/runtime_context.h>
+#include <qdb/exec/runtime_filter.h>
+#include <qdb/exec/sort_exec.h>
+#include <qdb/exec/window_exec.h>
 #include <qdb/io/io.h>
 #include <qdb/kernel/annotate_type.h>
 #include <qdb/kernel/compiler.h>
@@ -272,6 +277,82 @@ std::pair<std::vector<uint64_t>, std::vector<uint64_t>> RunJoinHash(const TJoinH
     return {leftHashes, rightHashes};
 }
 
+TTypePtr I64Type()
+{
+    return std::make_shared<TIntegerType>(TIntegerType::I64);
+}
+
+std::vector<int64_t> ReadSortedColumn(const TRowSet& rows, size_t column)
+{
+    const auto* data = reinterpret_cast<const int64_t*>(rows.Columns[column].Data);
+    return std::vector<int64_t>(data, data + rows.RowCount);
+}
+
+// Sorts and top-sorts the same batch by v; returns both v columns.
+std::pair<std::vector<int64_t>, std::vector<int64_t>> RunSort(const TSortRuntimeProcess& process)
+{
+    const std::vector<TSortKey> keys = {{.Column = "v"}};
+    const auto outputType = std::make_shared<TStructType>(KeyValueType());
+    TKeyValueBatch batch{.Keys = {1, 2, 3, 4, 5}, .Values = {5, 1, 3, 9, 2}};
+
+    std::pair<std::vector<int64_t>, std::vector<int64_t>> result;
+    TRowSet out{};
+    {
+        TSortProcessor sort(outputType, keys, process.KeyColumns, process.RadixKernel);
+        auto rows = batch.RowSet();
+        sort.Add(rows);
+        sort.Finish();
+        EXPECT_TRUE(sort.Next(out));
+        result.first = ReadSortedColumn(out, 1);
+        Release(&out);
+    }
+    {
+        TTopSortProcessor topSort(outputType, keys, process.KeyColumns, process.RadixKernel, 3);
+        auto rows = batch.RowSet();
+        topSort.Add(rows);
+        topSort.Finish();
+        EXPECT_TRUE(topSort.Next(out));
+        result.second = ReadSortedColumn(out, 1);
+        Release(&out);
+    }
+    return result;
+}
+
+// Window kernel: running sum of v per k, ordered by v. Returns the sum column.
+std::vector<int64_t> RunWindow(const TKernelCompiler::TSortRadixCompositeDispatch& dispatch)
+{
+    const std::vector<TSortKey> keys = {{.Column = "k"}, {.Column = "v"}};
+    const std::vector<TSortColumnRef> keyColumns = {
+        {.Index = 0, .Type = I64Type()}, {.Index = 1, .Type = I64Type()}};
+    const auto outputType = std::make_shared<TStructType>(TStructType({
+        {"k", I64Type()}, {"v", I64Type()}, {"s", I64Type()}}));
+    TWindowProcessor window(
+        outputType, keys, keyColumns, TSortRadixKernel{.Enabled = true, .Dispatch = dispatch});
+    TKeyValueBatch batch{.Keys = {1, 2, 1, 2}, .Values = {5, 3, 2, 4}};
+    auto rows = batch.RowSet();
+    window.Add(rows);
+    window.Finish();
+    TRowSet out{};
+    EXPECT_TRUE(window.Next(out));
+    auto sums = ReadSortedColumn(out, 2);
+    Release(&out);
+    return sums;
+}
+
+std::vector<TSortRadixKeyInput> WindowKeys()
+{
+    return {{.ColumnIndex = 0, .Type = I64Type()}, {.ColumnIndex = 1, .Type = I64Type()}};
+}
+
+TKernelCompiler::TSortRadixCompositeDispatch CompileWindowKernel(TKernelCompiler& compiler)
+{
+    const auto inputType = KeyValueType();
+    const auto keys = WindowKeys();
+    return compiler.CompileWindow(
+        keys, inputType, {keys[0]}, {keys[1]},
+        {{.Func = "sum_prefix", .ArgColumn = 1, .ResultType = I64Type()}});
+}
+
 } // namespace
 
 TEST(KernelImage, FilterRoundTrip)
@@ -464,6 +545,84 @@ TEST(KernelImage, JoinHashBindsFromImageSlot)
     // Equal keys hash alike on both sides: left 1 = right 1.
     EXPECT_EQ(bound.first[0], bound.second[0]);
     EXPECT_EQ(bound.first[1], bound.second[2]);
+}
+
+TEST(KernelImage, SortKernelsBindFromImageSlots)
+{
+    const auto expected = RunSort(BuildSortRuntimeProcess(KeyValueType(), {{.Column = "v"}}, "top-sort", {}));
+
+    std::vector<TGeneratedKernel> kernels;
+    // A leading filter shifts the kernel indexes.
+    TKernelCompiler(TKernelCompilerOptions{.Sink = &kernels, .BindNow = false}).CompileFilter(FilterSpec());
+    auto process = BuildSortRuntimeProcess(
+        KeyValueType(), {{.Column = "v"}}, "top-sort", {.Sink = &kernels, .BindNow = false});
+    auto& radix = process.RadixKernel;
+    ASSERT_EQ(kernels.size(), 4u);
+    EXPECT_EQ(radix.Dispatch.Kernel, 1u);
+    EXPECT_EQ(radix.TopSortDispatch.Kernel, 2u);
+    EXPECT_EQ(radix.HeapTopKDispatch.Kernel, 3u);
+    EXPECT_EQ(kernels[radix.Dispatch.Kernel].Slot, radix.Dispatch.Slot);
+    EXPECT_EQ(kernels[radix.TopSortDispatch.Kernel].Slot, radix.TopSortDispatch.Slot);
+    EXPECT_EQ(kernels[radix.HeapTopKDispatch.Kernel].Slot, radix.HeapTopKDispatch.Slot);
+
+    auto slots = LoadImageSlots(kernels);
+    radix.Dispatch = BindSortRadixComposite(slots[radix.Dispatch.Kernel]);
+    radix.TopSortDispatch = BindTopSort(slots[radix.TopSortDispatch.Kernel]);
+    radix.HeapTopKDispatch = BindHeapTopK(slots[radix.HeapTopKDispatch.Kernel]);
+    EXPECT_EQ(RunSort(process), expected);
+    EXPECT_EQ(expected.first, (std::vector<int64_t>{1, 2, 3, 5, 9}));
+    EXPECT_EQ(expected.second, (std::vector<int64_t>{1, 2, 3}));
+}
+
+TEST(KernelImage, WindowBindsFromImageSlot)
+{
+    TKernelCompiler jit({});
+    const auto expected = RunWindow(CompileWindowKernel(jit));
+
+    std::vector<TGeneratedKernel> kernels;
+    TKernelCompiler compiler({.Sink = &kernels, .BindNow = false});
+    compiler.CompileFilter(FilterSpec());
+    auto window = CompileWindowKernel(compiler);
+    ASSERT_EQ(kernels.size(), 2u);
+    EXPECT_EQ(window.Kernel, 1u);
+    EXPECT_EQ(kernels[window.Kernel].Slot, window.Slot);
+
+    auto slots = LoadImageSlots(kernels);
+    EXPECT_EQ(RunWindow(BindSortRadixComposite(slots[window.Kernel])), expected);
+    // Sorted by (k, v): (1,2) (1,5) (2,3) (2,4).
+    EXPECT_EQ(expected, (std::vector<int64_t>{2, 7, 3, 7}));
+}
+
+TEST(KernelImage, RuntimeFilterKernelBindsFromImageSlot)
+{
+    std::vector<TGeneratedKernel> kernels;
+    TKernelCompiler compiler({.Sink = &kernels, .BindNow = false});
+    compiler.CompileFilter(FilterSpec());
+    auto filter = compiler.CompileRuntimeFilter();
+    ASSERT_EQ(kernels.size(), 2u);
+    EXPECT_EQ(filter.Kernel, 1u);
+    EXPECT_EQ(kernels[filter.Kernel].Slot, filter.Slot);
+
+    auto slots = LoadImageSlots(kernels);
+    auto context = MakeRuntimeContext({}, slots[filter.Kernel]);
+    EXPECT_EQ(context->RuntimeFilterKernels, slots[filter.Kernel]);
+    EXPECT_EQ(context->RuntimeFilterKernels->Fns.size(), RuntimeFilterKernelEntrypoints.size());
+}
+
+TEST(KernelImage, RuntimeContextRebuildsRegexesFromSpecs)
+{
+    TRuntimeContext original;
+    const auto first = original.Regexes.Register("a+", "x");
+    const auto second = original.Regexes.Register("b", "y");
+    EXPECT_NE(first, second);
+
+    auto rebuilt = MakeRuntimeContext(original.Regexes.Specs(), nullptr);
+    ASSERT_EQ(rebuilt->Regexes.Specs().size(), 2u);
+    // Registering a known spec returns its id, so the ids were kept.
+    EXPECT_EQ(rebuilt->Regexes.Register("a+", "x"), first);
+    EXPECT_EQ(rebuilt->Regexes.Register("b", "y"), second);
+    EXPECT_NE(rebuilt->Regexes.Handles(), nullptr);
+    EXPECT_EQ(rebuilt->RuntimeFilterKernels, nullptr);
 }
 
 TEST(KernelImage, AggregateInAnotherProcess)
