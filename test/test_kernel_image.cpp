@@ -416,7 +416,7 @@ TEST(KernelImage, ProjectAndAggregateHashBindFromImageSlots)
     }
     LoadKernelImage(DeserializeKernelImage(bytes), slots);
 
-    auto boundProject = BindProject(slots[project.Kernel], project.Storage, project.Runtime);
+    auto boundProject = BindProject(slots[project.Kernel], project.Runtime);
     auto boundHash = BindAggregateHash(slots[hash.Kernel], hash.KeyColumns);
     EXPECT_EQ(RunProject(boundProject), expectedProject);
     EXPECT_EQ(RunAggregateHash(boundHash), expectedHash);

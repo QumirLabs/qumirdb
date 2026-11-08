@@ -203,7 +203,7 @@ TEST(ProjectE2E, FilterRebuildsFromPlanDataAndSlot) {
 
     const auto& kernel = kernels[built.Plan.Kernel];
     auto rebuilt = MakeFilterProcess(built.Plan, {
-        .Slot = kernel.Slot, .Storage = kernel.Storage, .Runtime = kernel.RuntimeContext});
+        .Slot = kernel.Slot, .Runtime = kernel.RuntimeContext});
     const auto expected = RunProcess(built.Process, data.Batch());
     EXPECT_FALSE(expected.empty());
     EXPECT_EQ(RunProcess(rebuilt, data.Batch()), expected);
@@ -225,7 +225,7 @@ TEST(ProjectE2E, ProjectRebuildsFromPlanDataAndSlot) {
 
     const auto& kernel = kernels[*built.Plan.Kernel];
     auto rebuilt = MakeProjectProcess(
-        built.Plan, BindProject(kernel.Slot, kernel.Storage, kernel.RuntimeContext));
+        built.Plan, BindProject(kernel.Slot, kernel.RuntimeContext));
     const auto expected = RunProcess(built.Process, data.Batch());
     EXPECT_EQ(expected, (std::vector<std::vector<int64_t>>{
         {10, 11}, {20, 23}, {30, 35}, {40, 42}}));
@@ -247,7 +247,7 @@ TEST(ProjectE2E, FilterKeepAllRebuildsFromPlanDataAndSlot) {
 
     const auto& kernel = kernels[built.Plan.Kernel];
     auto rebuilt = MakeFilterProcess(built.Plan, {
-        .Slot = kernel.Slot, .Storage = kernel.Storage, .Runtime = kernel.RuntimeContext});
+        .Slot = kernel.Slot, .Runtime = kernel.RuntimeContext});
     const auto expected = RunProcess(built.Process, data.Batch());
     EXPECT_FALSE(expected.empty());
     EXPECT_EQ(RunProcess(rebuilt, data.Batch()), expected);

@@ -489,8 +489,6 @@ public:
         void operator()(TRowSet& rowSet, const uint8_t* inputSelection) const;
 
         std::shared_ptr<TKernelSlot> Slot;
-        // Keeps the finalized program alive.
-        std::shared_ptr<void> Storage;
         std::shared_ptr<TRuntimeContext> Runtime;
         // Index of the filter kernel in the sink (0 without a sink).
         uint32_t Kernel = 0;
@@ -504,7 +502,6 @@ public:
         void operator()(TRowSet* in, void** outBuffers, void* arena) const;
 
         std::shared_ptr<TKernelSlot> Slot;
-        std::shared_ptr<void> Storage;
         std::shared_ptr<TRuntimeContext> Runtime;
         // Index of the project kernel in the sink (0 without a sink).
         uint32_t Kernel = 0;
@@ -715,7 +712,6 @@ private:
 // parameters; CompileProject and CompileAggregateHash end with these calls.
 TKernelCompiler::TProjectDispatch BindProject(
     std::shared_ptr<TKernelSlot> slot,
-    std::shared_ptr<void> storage,
     std::shared_ptr<TRuntimeContext> runtime);
 
 TKernelCompiler::TAggregateHashDispatch BindAggregateHash(

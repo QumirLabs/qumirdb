@@ -1800,7 +1800,6 @@ TKernelCompiler::TFilterDispatch TKernelCompiler::CompileFilter(
 
     return {
         .Slot = kernel.Slot,
-        .Storage = kernel.Storage,
         .Runtime = RuntimeContext_,
         .Kernel = kernel.Index,
     };
@@ -1867,19 +1866,17 @@ TKernelCompiler::TProjectDispatch TKernelCompiler::CompileProject(
         "project", {"<project>"}, std::move(kernelAst));
     FinishKernelDiagnostics(Diagnostics_);
 
-    auto dispatch = BindProject(kernel.Slot, kernel.Storage, RuntimeContext_);
+    auto dispatch = BindProject(kernel.Slot, RuntimeContext_);
     dispatch.Kernel = kernel.Index;
     return dispatch;
 }
 
 TKernelCompiler::TProjectDispatch BindProject(
     std::shared_ptr<TKernelSlot> slot,
-    std::shared_ptr<void> storage,
     std::shared_ptr<TRuntimeContext> runtime)
 {
     return {
         .Slot = std::move(slot),
-        .Storage = std::move(storage),
         .Runtime = std::move(runtime),
     };
 }
