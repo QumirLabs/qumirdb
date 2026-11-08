@@ -83,7 +83,7 @@ struct TComputeActor : public IBehaviorActor {
     void AfterRegister(TActorContext::TPtr ctx) override { }
 
     void ProcessNotifications(TActorContext::TPtr& ctx) {
-        // TODO: need to implement it throght a separate actor
+        // TODO: need to implement it through a separate actor
         // e.g. ComputeActorNotifier -> consumer notification queue -> send to ComputeActor
         // need to do it if we move Actors to multithreaded model
 
@@ -97,7 +97,7 @@ struct TComputeActor : public IBehaviorActor {
             while (queue.TryPop(state)) {
                 // process
                 state->SendQueue(ctx);
-                SchedulerSchannel->Notify(std::get<1>(SinkStates.at(state->Id)));
+                SchedulerChannel->Notify(std::get<1>(SinkStates.at(state->Id)));
             }
             NQdb::NScheduler::TRemoteSourceState* source = nullptr;
             while (ActorChannel->SourceQueue().TryPop(source)) {
@@ -188,7 +188,7 @@ struct TComputeActor : public IBehaviorActor {
         Scheduler = std::make_unique<NScheduler::TThreadedScheduler>(
             Graph, SchedulerSettings.WorkerCount, SchedulerSettings.ReadyQueueCapacity
         );
-        SchedulerSchannel = std::make_unique<NScheduler::TSchedulerChannel>(
+        SchedulerChannel = std::make_unique<NScheduler::TSchedulerChannel>(
             *Scheduler
         );
         // Run() blocks until the graph's root finishes or the scheduler is cancelled.
@@ -246,7 +246,7 @@ struct TComputeActor : public IBehaviorActor {
             return;
         }
         // The drain may have freed outbox space for a waiting sink task.
-        SchedulerSchannel->Notify(std::get<1>(it->second));
+        SchedulerChannel->Notify(std::get<1>(it->second));
     }
 
     void InitSource(
@@ -278,7 +278,7 @@ struct TComputeActor : public IBehaviorActor {
     // Owns the sink Layouts that the sink states use as descriptors.
     std::vector<TRemoteEndpoint> Endpoints;
     std::unique_ptr<NScheduler::TActorNotificationChannel> ActorChannel;
-    std::unique_ptr<NScheduler::TSchedulerChannel> SchedulerSchannel;
+    std::unique_ptr<NScheduler::TSchedulerChannel> SchedulerChannel;
     std::unique_ptr<NScheduler::TThreadedScheduler> Scheduler;
     std::unordered_map<uint64_t, std::tuple<std::shared_ptr<NScheduler::TRemoteSourceState>, NScheduler::TTaskNode*>> SourceStates;
     std::unordered_map<uint64_t, std::tuple<std::shared_ptr<NScheduler::TRemoteSinkState>, NScheduler::TTaskNode*>> SinkStates;
