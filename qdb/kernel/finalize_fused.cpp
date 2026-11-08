@@ -715,6 +715,28 @@ std::string MakeKernelDedupKey(const TGeneratedKernel &kernel) {
   return key;
 }
 
+TKernelDedup DeduplicateKernels(
+    std::span<TGeneratedKernel> kernels,
+    const std::function<bool(const TGeneratedKernel &)> &skip) {
+  TKernelDedup out;
+  std::unordered_map<std::string, size_t> uniqueByKey;
+  for (auto &kernel : kernels) {
+    if (!kernel.Slot) {
+      throw std::logic_error("FinalizeKernels: kernel '" + kernel.Name + "' has no slot");
+    }
+    if (skip(kernel)) {
+      continue;
+    }
+    auto [it, inserted] =
+        uniqueByKey.emplace(MakeKernelDedupKey(kernel), out.Unique.size());
+    if (inserted) {
+      out.Unique.push_back(&kernel);
+    }
+    out.Bindings.emplace_back(&kernel, it->second);
+  }
+  return out;
+}
+
 TFusedProgram
 BuildFusedProgram(std::span<TGeneratedKernel *const> uniqueKernels) {
   TFusedProgramBuilder builder;

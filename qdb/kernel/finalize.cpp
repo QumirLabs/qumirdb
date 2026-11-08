@@ -36,29 +36,16 @@ void FinalizeKernels(
     std::shared_ptr<const TExternalCatalogSnapshot> externalCatalog,
     const std::string& cacheDir)
 {
-    std::vector<TGeneratedKernel*> unique;
-    std::vector<std::pair<TGeneratedKernel*, size_t>> bindings;
-    std::unordered_map<std::string, size_t> uniqueByKey;
-    for (auto& kernel : kernels) {
-        if (!kernel.Slot) {
-            throw std::logic_error(
-                "FinalizeKernels: kernel '" + kernel.Name + "' has no slot");
-        }
+    auto [unique, bindings] = DeduplicateKernels(kernels, [&](const TGeneratedKernel& kernel) {
         if (kernel.Slot->Runner || kernel.Slot->Vm) {
             if ((kernel.Slot->Vm != nullptr) != (backend == EKernelBackend::Vm)) {
                 throw std::logic_error(
                     "FinalizeKernels: kernel '" + kernel.Name + "' is bound for the other backend");
             }
-            continue; // already bound
+            return true; // already bound
         }
-
-        std::string key = MakeKernelDedupKey(kernel);
-        auto [it, inserted] = uniqueByKey.emplace(std::move(key), unique.size());
-        if (inserted) {
-            unique.push_back(&kernel);
-        }
-        bindings.emplace_back(&kernel, it->second);
-    }
+        return false;
+    });
 
     if (unique.empty()) {
         return;
