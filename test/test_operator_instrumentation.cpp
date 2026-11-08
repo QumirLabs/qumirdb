@@ -103,6 +103,11 @@ TEST(OperatorInstrumentation, ResolvesLogicalAndPhysicalColumnWidths) {
         EXPECT_EQ(layouts[i].Width, expected[i].first) << i;
         EXPECT_EQ(layouts[i].Bitmap, expected[i].second) << i;
     }
+    EXPECT_THROW(RowLayouts(std::make_shared<TIntegerType>(TIntegerType::I32)), std::runtime_error);
+    auto unsupported = std::make_shared<TStructType>(std::vector<std::pair<std::string, TTypePtr>>{
+        {"bad", std::make_shared<TStructType>(std::vector<std::pair<std::string, TTypePtr>>{})},
+    });
+    EXPECT_THROW(RowLayouts(unsupported), std::runtime_error);
 }
 
 TEST(OperatorInstrumentation, RowLayoutsUnwrapNamedNullableChains) {
