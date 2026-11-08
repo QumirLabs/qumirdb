@@ -204,9 +204,8 @@ TEST(ProjectE2E, FilterRebuildsFromPlanDataAndSlot) {
     const auto& kernel = kernels[built.Plan.Kernel];
     auto rebuilt = MakeFilterProcess(built.Plan, {
         .Slot = kernel.Slot, .Runtime = kernel.RuntimeContext});
-    const auto expected = RunProcess(built.Process, data.Batch());
-    EXPECT_FALSE(expected.empty());
-    EXPECT_EQ(RunProcess(rebuilt, data.Batch()), expected);
+    EXPECT_EQ(RunProcess(rebuilt, data.Batch()),
+        (std::vector<std::vector<int64_t>>{{20}, {30}}));
 }
 
 TEST(ProjectE2E, ProjectRebuildsFromPlanDataAndSlot) {
@@ -248,9 +247,8 @@ TEST(ProjectE2E, FilterKeepAllRebuildsFromPlanDataAndSlot) {
     const auto& kernel = kernels[built.Plan.Kernel];
     auto rebuilt = MakeFilterProcess(built.Plan, {
         .Slot = kernel.Slot, .Runtime = kernel.RuntimeContext});
-    const auto expected = RunProcess(built.Process, data.Batch());
-    EXPECT_FALSE(expected.empty());
-    EXPECT_EQ(RunProcess(rebuilt, data.Batch()), expected);
+    EXPECT_EQ(RunProcess(rebuilt, data.Batch()),
+        (std::vector<std::vector<int64_t>>{{3, 20}, {5, 30}}));
 }
 
 TEST(ProjectE2E, ProjectWithoutComputedColumnsRebuildsFromPlanData) {

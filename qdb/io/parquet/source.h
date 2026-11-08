@@ -48,9 +48,16 @@ public:
     explicit TParquetFile(const std::string& path);
     ~TParquetFile();
 
-    std::unique_ptr<TParquetSource> MakeSource() const;
+    // nullopt row groups read the whole file and an empty list nothing;
+    // nullopt columns read every file column.
+    std::unique_ptr<TParquetSource> MakeSource(
+        std::optional<std::vector<int>> rowGroups = std::nullopt,
+        std::optional<std::unordered_set<std::string>> restrictedColumns = std::nullopt) const;
 
 private:
+    friend class TParquetSource;
+    explicit TParquetFile(std::shared_ptr<TParquetFileData> data);
+
     std::shared_ptr<TParquetFileData> Data_;
 };
 
@@ -75,8 +82,6 @@ public:
         std::string_view sourceAlias,
         std::ostream* diagnostics = nullptr,
         const std::unordered_set<std::string>* columnNames = nullptr) const;
-    std::unique_ptr<TParquetSource> MakeRowGroupsSource(
-        const std::vector<size_t>& rowGroups) const;
     std::shared_ptr<const IPhysicalRowReader> CompileReader(
         std::span<const std::string> columnNames) const override;
 
@@ -85,6 +90,12 @@ public:
         std::span<const std::string> fetchColumns,
         uint64_t maxRows) const override;
     const TStatsPtr Stats() const override;
+
+    // What a scan task needs to recreate this source from its file.
+    TParquetFile File() const;
+    const std::string& Path() const;
+    const std::optional<std::vector<int>>& RowGroups() const;
+    const std::optional<std::unordered_set<std::string>>& RestrictedColumns() const;
 
 private:
     friend class TParquetFile;

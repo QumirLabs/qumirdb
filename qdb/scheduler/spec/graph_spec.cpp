@@ -1,12 +1,18 @@
 #include <qdb/scheduler/spec/graph_spec.h>
 
+#include <qdb/exec/filter_exec.h>
+#include <qdb/exec/project_exec.h>
+#include <qdb/exec/runtime_context.h>
+#include <qdb/kernel/compiler.h>
 #include <qdb/scheduler/connections/local.h>
+#include <qdb/scheduler/lowering/task_factory.h>
 #include <qdb/scheduler/tasks/runtime_adapter.h>
 #include <qdb/utils/binary_io.h>
 
 #include <stdexcept>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace NQdb {
@@ -70,6 +76,39 @@ TOutputPort OutputPort(const std::vector<IConnection*>& connections, const TPort
     return TOutputPort{.Connection = &ConnectionAt(connections, port.Connection), .Lane = port.Lane};
 }
 
+const std::shared_ptr<TKernelSlot>& SlotAt(const TNodeTaskContext& context, uint32_t kernel)
+{
+    if (kernel >= context.Slots.size()) {
+        Invalid("kernel index is out of range");
+    }
+    return context.Slots[kernel];
+}
+
+std::unique_ptr<ITask> MakeProcessTask(
+    TUnaryStreamProcess process, TInputPort input, TOutputPort output)
+{
+    auto code = std::make_shared<TUnaryCode>(
+        [process = std::move(process)](void* state, TRowSet& rowSet) {
+            process(rowSet, *static_cast<TUnaryStreamingKernelState*>(state));
+        });
+    return std::make_unique<TUnaryTask>(
+        std::move(code), std::make_shared<TUnaryStreamingKernelState>(), input, output);
+}
+
+std::unique_ptr<ITask> MakeParquetScanTask(
+    const TParquetScanNode& node, TOutputPort output, TNodeTaskContext& context)
+{
+    const auto& file = context.ParquetFiles.try_emplace(node.Path, node.Path).first->second;
+    std::optional<std::unordered_set<std::string>> columns;
+    if (node.Columns) {
+        columns.emplace(node.Columns->begin(), node.Columns->end());
+    }
+    auto state = std::make_shared<NLowering::TSchedulerSourceState>();
+    state->OwnedSource = file.MakeSource(node.RowGroups, std::move(columns));
+    state->Source = state->OwnedSource.get();
+    return std::make_unique<TSourceTask>(NLowering::MakeSourceCode(), std::move(state), output);
+}
+
 TTaskNode& NodeAt(const std::vector<TTaskNode*>& nodes, uint32_t index)
 {
     if (index >= nodes.size()) {
@@ -115,11 +154,34 @@ TConnectionSpec ExtractConnection(const IConnection& connection)
 } // namespace
 
 std::unique_ptr<ITask> MakeNodeTask(
-    const TNodeBody& body, const std::vector<IConnection*>& connections, ISink* sink)
+    const TNodeBody& body, const std::vector<IConnection*>& connections, TNodeTaskContext& context)
 {
     return std::visit([&](const auto& node) -> std::unique_ptr<ITask> {
         using TNode = std::decay_t<decltype(node)>;
-        if constexpr (std::is_same_v<TNode, TForwardNode>) {
+        if constexpr (std::is_same_v<TNode, TParquetScanNode>) {
+            return MakeParquetScanTask(node, OutputPort(connections, node.Out), context);
+        } else if constexpr (std::is_same_v<TNode, TFilterNode>) {
+            TKernelCompiler::TFilterDispatch dispatch{
+                .Slot = SlotAt(context, node.Plan.Kernel),
+                .Runtime = context.Runtime,
+                .Kernel = node.Plan.Kernel,
+            };
+            return MakeProcessTask(
+                MakeFilterProcess(node.Plan, std::move(dispatch)),
+                InputPort(connections, node.In), OutputPort(connections, node.Out));
+        } else if constexpr (std::is_same_v<TNode, TProjectNode>) {
+            TKernelCompiler::TProjectDispatch dispatch;
+            if (!node.Plan.Kernel && !node.Plan.ComputedWidths.empty()) {
+                Invalid("a project with computed columns needs a kernel");
+            }
+            if (node.Plan.Kernel) {
+                dispatch = BindProject(SlotAt(context, *node.Plan.Kernel), context.Runtime);
+                dispatch.Kernel = *node.Plan.Kernel;
+            }
+            return MakeProcessTask(
+                MakeProjectProcess(node.Plan, std::move(dispatch)),
+                InputPort(connections, node.In), OutputPort(connections, node.Out));
+        } else if constexpr (std::is_same_v<TNode, TForwardNode>) {
             auto code = std::make_shared<TUnaryCode>([](void*, TRowSet&) {});
             return std::make_unique<TUnaryTask>(
                 std::move(code), std::shared_ptr<void>{},
@@ -132,6 +194,7 @@ std::unique_ptr<ITask> MakeNodeTask(
                 nullptr, nullptr, InputPort(connections, node.In));
         } else {
             static_assert(std::is_same_v<TNode, TSinkWriterNode>);
+            auto* sink = context.Sink;
             if (!sink) {
                 Invalid("a sink writer node needs a sink");
             }
@@ -165,9 +228,16 @@ TGraphSpec DeserializeGraphSpec(std::string_view bytes)
     return spec;
 }
 
-std::unique_ptr<TTaskGraph> MaterializeGraph(const TGraphSpec& spec, ISink* sink)
+std::unique_ptr<TTaskGraph> MaterializeGraph(
+    const TGraphSpec& spec, ISink* sink, std::vector<std::shared_ptr<TKernelSlot>> slots)
 {
     auto graph = std::make_unique<TTaskGraph>();
+    TNodeTaskContext context{
+        .Slots = std::move(slots),
+        // No record binds a runtime filter yet, so no runtime-filter kernel.
+        .Runtime = MakeRuntimeContext(spec.Regexes, nullptr),
+        .Sink = sink,
+    };
 
     std::vector<IConnection*> connections;
     connections.reserve(spec.Connections.size());
@@ -178,7 +248,7 @@ std::unique_ptr<TTaskGraph> MaterializeGraph(const TGraphSpec& spec, ISink* sink
     std::vector<TTaskNode*> nodes;
     nodes.reserve(spec.Nodes.size());
     for (const auto& nodeSpec : spec.Nodes) {
-        auto& node = graph->AddOwnedNode(MakeNodeTask(nodeSpec.Body, connections, sink));
+        auto& node = graph->AddOwnedNode(MakeNodeTask(nodeSpec.Body, connections, context));
         node.ExecStageId = nodeSpec.ExecStageId;
         node.TaskGroupId = nodeSpec.TaskGroupId;
         node.DebugKind = nodeSpec.DebugKind;

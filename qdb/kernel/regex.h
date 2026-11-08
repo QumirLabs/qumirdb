@@ -12,6 +12,12 @@ namespace NQdb::NKernel {
 struct TRegexSpec {
     std::string Pattern;
     std::string Replacement;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.Pattern);
+        v(self.Replacement);
+    }
 };
 
 // Query-local immutable-at-execution registry. Register is called serially

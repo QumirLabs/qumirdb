@@ -130,7 +130,7 @@ protected:
             valueType = std::make_shared<TNullable>(valueType);
         }
         TStructType inputType({{"value", valueType}});
-        auto process = MakeFilterProcess(TKernelCompiler().CompileFilter(
+        auto process = MakeFilterProcess({}, TKernelCompiler().CompileFilter(
             NKernel::BuildFilterKernelSpec(inputType, ParsePredicate(predicate))));
         TRowSet rowSet{
             .Columns = &column,
@@ -340,7 +340,7 @@ TEST(FilterKernel, PreservesInputSelectionAndPrecomputedHashes) {
     });
     auto dispatch = TKernelCompiler().CompileFilter(
         NKernel::BuildFilterKernelSpec(inputType, ParsePredicate("(> value 0)")));
-    auto process = MakeFilterProcess(std::move(dispatch));
+    auto process = MakeFilterProcess({}, std::move(dispatch));
     TRowSet rowSet{
         .Columns = &column,
         .ColumnCount = 1,

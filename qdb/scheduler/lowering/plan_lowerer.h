@@ -18,6 +18,7 @@
 
 namespace NQdb {
 class TExternalCatalogSnapshot;
+struct TRuntimeContext;
 class TAggregateOperator;
 class IRuntimeFilterBindingFactory;
 class IRuntimeFilterProbe;
@@ -52,6 +53,8 @@ struct TLoweredPlan {
     // Spec records indexed by node index; empty for node kinds the graph spec
     // does not describe yet.
     std::vector<std::optional<TNodeSpec>> NodeSpecs;
+    // Shared by Kernels; the graph spec carries its regexes.
+    std::shared_ptr<TRuntimeContext> RuntimeContext;
 };
 
 // Choose hash-shuffle fanout for a plain grouped aggregate. Explicit shuffle

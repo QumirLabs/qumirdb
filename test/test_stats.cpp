@@ -247,7 +247,7 @@ TEST(StatsTest, ParquetRowGroupPredicateUsesPerGroupBounds) {
         NQdb::TMaybeOp<NQdb::TFilterOperator>(*impossible).Cast();
     EXPECT_TRUE(source.PruneRowGroups(impossibleFilter->Predicate(), "").empty());
 
-    auto emptySource = source.MakeRowGroupsSource({});
+    auto emptySource = source.File().MakeSource(std::vector<int>{}, source.RestrictedColumns());
     NQdb::TRowSet rowSet{};
     EXPECT_FALSE(emptySource->Next(rowSet));
 }

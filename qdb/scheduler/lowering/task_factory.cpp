@@ -2,6 +2,17 @@
 
 namespace NQdb::NScheduler::NLowering {
 
+std::shared_ptr<const NScheduler::TSourceCode> MakeSourceCode()
+{
+    return std::make_shared<NScheduler::TSourceCode>(
+        [](void* state, TRowSet& rowSet) {
+            auto* sourceState = static_cast<TSchedulerSourceState*>(state);
+            return sourceState->Source->Next(rowSet)
+                ? NScheduler::ETaskResult::OK
+                : NScheduler::ETaskResult::FINISHED;
+        });
+}
+
 EJoinFetchResult MapJoinFetch(NScheduler::EFetchResult result)
 {
     switch (result) {
