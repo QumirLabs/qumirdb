@@ -315,6 +315,108 @@ TEST(DistributedSerialization, BitmapSlicesAcrossByteBoundaries) {
     }
 }
 
+TEST(DistributedSerialization, SelectedRowsAreWrittenWithoutChangingTheSource) {
+    // Rows 0, 2, 3, 6 of 7 are selected; every column kind, with and without a mask.
+    std::array<uint8_t, 7> selection{1, 0, 1, 1, 0, 0, 1};
+    const std::array<int, 4> kept{0, 2, 3, 6};
+    for (bool nullable : {false, true}) {
+        for (bool hashed : {false, true}) {
+            SCOPED_TRACE(std::to_string(nullable) + "/" + std::to_string(hashed));
+            std::array<int32_t, 7> fixed{10, 11, 12, 13, 14, 15, 16};
+            std::array<uint8_t, 3> bits{0xb5, 0x6a, 0x93};
+            std::array<uint8_t, 3> mask{0x5c, 0xe1, 0x27};
+            std::string chars = "aaabbbbcdddeeef";
+            // Row lengths 1, 0, 3, 2, 4, 0, 1 -> 7 strings, offsets start from 2.
+            std::array<int32_t, 8> offsets32{2, 3, 3, 6, 8, 12, 12, 13};
+            std::array<int64_t, 8> offsets64{2, 3, 3, 6, 8, 12, 12, 13};
+            std::array<uint64_t, 7> hash{100, 101, 102, 103, 104, 105, 106};
+            std::array<TValueLayout, 4> layouts{{{.Width = 4}, {.Bitmap = true}, {}, {}}};
+            std::array<TColumn, 4> columns{};
+            columns[0] = TColumn{.Data = reinterpret_cast<char*>(fixed.data()),
+                .Mask = nullable ? mask.data() : nullptr, .MaskBitOffset = 3};
+            columns[1] = TColumn{.Data = reinterpret_cast<char*>(bits.data()), .DataBitOffset = 5,
+                .Mask = nullable ? mask.data() : nullptr, .MaskBitOffset = 9};
+            columns[2] = TColumn{.Data = chars.data(), .Mask = nullable ? mask.data() : nullptr,
+                .MaskBitOffset = 1, .Offsets = offsets32.data(), .OffsetWidth = 4};
+            columns[3] = TColumn{.Data = chars.data(), .Offsets = offsets64.data(), .OffsetWidth = 8};
+            TDataChunk original;
+            original.Descriptor = layouts.data();
+            original.RowSet = {.Columns = columns.data(), .ColumnCount = 4, .RowCount = 7,
+                .Selection = selection.data(), .Hash = hashed ? hash.data() : nullptr};
+
+            const auto fixedBefore = fixed;
+            const auto bitsBefore = bits;
+            const auto maskBefore = mask;
+            const auto offsets32Before = offsets32;
+            const auto offsets64Before = offsets64;
+            const auto hashBefore = hash;
+            const auto charsBefore = chars;
+            const auto columnsBefore = columns;
+            TDecodedChunk decoded(Encode(original));
+            EXPECT_EQ(fixed, fixedBefore);
+            EXPECT_EQ(bits, bitsBefore);
+            EXPECT_EQ(mask, maskBefore);
+            EXPECT_EQ(offsets32, offsets32Before);
+            EXPECT_EQ(offsets64, offsets64Before);
+            EXPECT_EQ(hash, hashBefore);
+            EXPECT_EQ(chars, charsBefore);
+            EXPECT_EQ(std::memcmp(columns.data(), columnsBefore.data(), sizeof(columns)), 0);
+            EXPECT_EQ(original.RowSet.RowCount, 7);
+            EXPECT_EQ(original.RowSet.Selection, selection.data());
+
+            const auto& result = decoded.Message.RowSet;
+            ASSERT_EQ(result.RowCount, 4);
+            EXPECT_EQ(result.Selection, nullptr);
+            const auto bit = [](const void* data, int offset, int row) {
+                const int index = row + offset;
+                return (static_cast<const uint8_t*>(data)[index / 8] >> (index % 8)) & 1;
+            };
+            for (int i = 0; i < 4; ++i) {
+                const int row = kept[i];
+                int32_t value;
+                std::memcpy(&value, result.Columns[0].Data + i * 4, 4);
+                EXPECT_EQ(value, fixed[row]);
+                EXPECT_EQ(bit(result.Columns[1].Data, 0, i), bit(bits.data(), 5, row));
+                for (int c : {2, 3}) {
+                    const auto& column = result.Columns[c];
+                    const int64_t from = c == 2 ? offsets32[row] : offsets64[row];
+                    const int64_t to = c == 2 ? offsets32[row + 1] : offsets64[row + 1];
+                    int64_t begin = 0;
+                    int64_t end = 0;
+                    if (c == 2) {
+                        ASSERT_EQ(column.OffsetWidth, 4);
+                        int32_t b, e;
+                        std::memcpy(&b, static_cast<const char*>(column.Offsets) + i * 4, 4);
+                        std::memcpy(&e, static_cast<const char*>(column.Offsets) + (i + 1) * 4, 4);
+                        begin = b;
+                        end = e;
+                    } else {
+                        ASSERT_EQ(column.OffsetWidth, 8);
+                        std::memcpy(&begin, static_cast<const char*>(column.Offsets) + i * 8, 8);
+                        std::memcpy(&end, static_cast<const char*>(column.Offsets) + (i + 1) * 8, 8);
+                    }
+                    EXPECT_EQ(std::string(column.Data + begin, end - begin), chars.substr(from, to - from));
+                }
+                if (nullable) {
+                    EXPECT_EQ(bit(result.Columns[0].Mask, 0, i), bit(mask.data(), 3, row));
+                    EXPECT_EQ(bit(result.Columns[1].Mask, 0, i), bit(mask.data(), 9, row));
+                    EXPECT_EQ(bit(result.Columns[2].Mask, 0, i), bit(mask.data(), 1, row));
+                }
+                if (hashed) {
+                    EXPECT_EQ(result.Hash[i], hash[row]);
+                }
+            }
+            if (!nullable) {
+                for (const auto& column : std::span(result.Columns, 4)) {
+                    EXPECT_EQ(column.Mask, nullptr);
+                }
+            }
+            EXPECT_EQ(result.Columns[3].Mask, nullptr);
+            EXPECT_EQ(result.Hash == nullptr, !hashed);
+        }
+    }
+}
+
 TEST(DistributedSerialization, EmptyBatches) {
     TDataChunk original;
     TDecodedChunk zeroColumns(Encode(original));
@@ -393,7 +495,7 @@ TEST(DistributedSerialization, RejectsInvalidStringOffsets) {
     }
 }
 
-TEST(DistributedSerialization, RejectsUncompactedAndInvalidSourceBatches) {
+TEST(DistributedSerialization, RejectsInvalidSourceBatches) {
     TMixedBatch batch;
     batch.Message.RowSet.RowCount = -1;
     EXPECT_THROW(Encode(batch.Message), std::runtime_error);
@@ -401,10 +503,6 @@ TEST(DistributedSerialization, RejectsUncompactedAndInvalidSourceBatches) {
     batch.Message.RowSet.ColumnCount = -1;
     EXPECT_THROW(Encode(batch.Message), std::runtime_error);
     batch.Message.RowSet.ColumnCount = 4;
-    uint8_t selected = 1;
-    batch.Message.RowSet.Selection = &selected;
-    EXPECT_THROW(Encode(batch.Message), std::runtime_error);
-    batch.Message.RowSet.Selection = nullptr;
     batch.Message.Descriptor = nullptr;
     EXPECT_THROW(Encode(batch.Message), std::runtime_error);
     batch.Message.Descriptor = batch.Layouts.data();
@@ -2054,11 +2152,16 @@ namespace {
 struct TSelectedInts {
     std::vector<int64_t> Values;
     std::vector<uint8_t> Selection;
+    std::vector<int64_t> OriginalValues;
+    std::vector<uint8_t> OriginalSelection;
+    std::atomic<bool>* Intact = nullptr;
     TColumn Column{};
 };
 
-TRowSet SelectedInts(std::vector<int64_t> values, std::vector<uint8_t> selection) {
-    auto* data = new TSelectedInts{.Values = std::move(values), .Selection = std::move(selection)};
+// `intact` is set on destruction: true if the sender's buffers were not modified.
+TRowSet SelectedInts(std::vector<int64_t> values, std::vector<uint8_t> selection, std::atomic<bool>* intact) {
+    auto* data = new TSelectedInts{.Values = values, .Selection = selection,
+        .OriginalValues = values, .OriginalSelection = selection, .Intact = intact};
     data->Column.Data = reinterpret_cast<char*>(data->Values.data());
     return TRowSet{
         .Columns = &data->Column,
@@ -2066,7 +2169,10 @@ TRowSet SelectedInts(std::vector<int64_t> values, std::vector<uint8_t> selection
         .RowCount = static_cast<int64_t>(data->Values.size()),
         .Selection = data->Selection.data(),
         .Destroy = [](TRowSet* rowSet) {
-            delete static_cast<TSelectedInts*>(rowSet->Private);
+            auto* data = static_cast<TSelectedInts*>(rowSet->Private);
+            data->Intact->store(data->Values == data->OriginalValues &&
+                data->Selection == data->OriginalSelection && rowSet->RowCount == 4);
+            delete data;
         },
         .Private = data,
         .RefCount = 1,
@@ -2079,13 +2185,14 @@ TRowSet SelectedInts(std::vector<int64_t> values, std::vector<uint8_t> selection
 TEST(DistributedScheduler, SelectedRowsCrossNodesCompacted) {
     using namespace NQdb::NScheduler;
     TProducerState producerState{.Total = 1};
+    std::atomic<bool> senderIntact = false;
     auto producerCode = std::make_shared<TSourceCode>([&](void* state, TRowSet& rowSet) {
         auto* producer = static_cast<TProducerState*>(state);
         if (producer->Next > producer->Total) {
             return ETaskResult::FINISHED;
         }
         ++producer->Next;
-        rowSet = SelectedInts({10, 20, 30, 40}, {1, 0, 1, 0});
+        rowSet = SelectedInts({10, 20, 30, 40}, {1, 0, 1, 0}, &senderIntact);
         return ETaskResult::OK;
     });
     std::mutex mutex;
@@ -2156,6 +2263,7 @@ TEST(DistributedScheduler, SelectedRowsCrossNodesCompacted) {
     cluster.Pump();
     std::lock_guard lock(mutex);
     EXPECT_EQ(received, (std::vector<int64_t>{10, 30}));
+    EXPECT_TRUE(senderIntact.load());
 }
 
 int main(int argc, char** argv) {

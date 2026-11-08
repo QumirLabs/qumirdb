@@ -278,6 +278,106 @@ void ReadStrings(TReader& reader, TRowSetStorage& storage, TColumn& column, uint
     column.Data = storage.Copy(reader.Bytes(ByteSize(last, 1)));
 }
 
+// Copies the selected rows of a column into `storage`; the source is never written.
+// The result is a column with zero bit offsets, starting string offsets and a compact Data.
+struct TSelectedColumn {
+    std::vector<char> Data;
+    std::vector<uint8_t> Mask;
+    std::vector<char> Offsets;
+    TColumn Column;
+};
+
+void GatherBits(std::vector<uint8_t>& out, const void* source, int32_t bitOffset,
+    const uint8_t* selection, uint64_t rows, uint64_t kept)
+{
+    if (bitOffset < 0) {
+        Invalid("negative bitmap offset");
+    }
+    out.assign(BitmapSize(kept), 0);
+    if (kept != 0 && !source) {
+        Invalid("missing bitmap");
+    }
+    const auto* bits = static_cast<const uint8_t*>(source);
+    uint64_t next = 0;
+    for (uint64_t row = 0; row < rows; ++row) {
+        if (selection[row]) {
+            const uint64_t bit = row + static_cast<uint32_t>(bitOffset);
+            out[next / 8] |= ((bits[bit / 8] >> (bit % 8)) & 1) << (next % 8);
+            ++next;
+        }
+    }
+}
+
+void GatherColumn(TSelectedColumn& result, const TColumn& column, const TValueLayout& layout,
+    const uint8_t* selection, uint64_t rows, uint64_t kept)
+{
+    result.Column = column;
+    result.Column.DataBitOffset = 0;
+    result.Column.MaskBitOffset = 0;
+    if (layout.Bitmap) {
+        std::vector<uint8_t> bits;
+        GatherBits(bits, column.Data, column.DataBitOffset, selection, rows, kept);
+        result.Data.assign(bits.begin(), bits.end());
+        result.Column.Data = result.Data.data();
+    } else if (IsStringLayout(layout)) {
+        const auto width = column.OffsetWidth;
+        if (width != 4 && width != 8) {
+            Invalid("unsupported string offset width");
+        }
+        if (!column.Offsets && rows != 0) {
+            Invalid("missing string offsets");
+        }
+        result.Offsets.resize(ByteSize(kept + 1, width));
+        uint64_t next = 0;
+        uint64_t total = 0;
+        auto put = [&](uint64_t value) {
+            if (width == 4) {
+                const int32_t v = static_cast<int32_t>(value);
+                std::memcpy(result.Offsets.data() + next * 4, &v, 4);
+            } else {
+                std::memcpy(result.Offsets.data() + next * 8, &value, 8);
+            }
+            ++next;
+        };
+        put(0);
+        for (uint64_t row = 0; row < rows; ++row) {
+            if (selection[row]) {
+                const uint64_t begin = OffsetAt(column, row);
+                const uint64_t end = OffsetAt(column, row + 1);
+                if (end < begin) {
+                    Invalid("decreasing string offsets");
+                }
+                if (end != begin && !column.Data) {
+                    Invalid("missing string data");
+                }
+                result.Data.insert(result.Data.end(), column.Data + begin, column.Data + end);
+                total += end - begin;
+                put(total);
+            }
+        }
+        result.Column.Data = result.Data.data();
+        result.Column.Offsets = result.Offsets.data();
+    } else {
+        const size_t width = layout.Width;
+        result.Data.resize(ByteSize(kept, width));
+        if (kept != 0 && !column.Data) {
+            Invalid("missing buffer");
+        }
+        size_t next = 0;
+        for (uint64_t row = 0; row < rows; ++row) {
+            if (selection[row]) {
+                std::memcpy(result.Data.data() + next * width, column.Data + row * width, width);
+                ++next;
+            }
+        }
+        result.Column.Data = result.Data.data();
+    }
+    if (column.Mask) {
+        GatherBits(result.Mask, column.Mask, column.MaskBitOffset, selection, rows, kept);
+        result.Column.Mask = result.Mask.data();
+    }
+}
+
 } // namespace
 
 template<>
@@ -335,10 +435,17 @@ void DeserializeFromStream(TComputeError& message, std::istringstream& input) {
 template<>
 void SerializeToStream(const TDataChunk& message, std::ostringstream& output) {
     const auto& rowSet = message.RowSet;
-    if (rowSet.RowCount < 0 || rowSet.ColumnCount < 0 || rowSet.Selection) {
-        Invalid("row set must have nonnegative dimensions and be compacted");
+    if (rowSet.RowCount < 0 || rowSet.ColumnCount < 0) {
+        Invalid("row set must have nonnegative dimensions");
     }
-    const uint64_t rows = rowSet.RowCount;
+    const uint64_t sourceRows = rowSet.RowCount;
+    uint64_t rows = sourceRows;
+    if (rowSet.Selection) {
+        rows = 0;
+        for (uint64_t row = 0; row < sourceRows; ++row) {
+            rows += rowSet.Selection[row] != 0;
+        }
+    }
     const uint64_t columns = rowSet.ColumnCount;
     if (columns != 0 && (!rowSet.Columns || !message.Descriptor)) {
         Invalid("missing columns or value layouts");
@@ -359,8 +466,13 @@ void SerializeToStream(const TDataChunk& message, std::ostringstream& output) {
         writer.Value<uint8_t>(layout.Bitmap);
     }
     for (uint64_t i = 0; i < columns; ++i) {
-        const auto& column = rowSet.Columns[i];
         const auto& layout = message.Descriptor[i];
+        // A selected row set is gathered into a copy; the sender's buffers stay untouched.
+        TSelectedColumn selected;
+        if (rowSet.Selection) {
+            GatherColumn(selected, rowSet.Columns[i], layout, rowSet.Selection, sourceRows, rows);
+        }
+        const auto& column = rowSet.Selection ? selected.Column : rowSet.Columns[i];
         if (layout.Bitmap) {
             writer.Bitmap(column.Data, column.DataBitOffset, rows);
         } else if (IsStringLayout(layout)) {
@@ -375,7 +487,17 @@ void SerializeToStream(const TDataChunk& message, std::ostringstream& output) {
     }
     writer.Value<uint8_t>(rowSet.Hash != nullptr);
     if (rowSet.Hash) {
-        writer.Bytes(rowSet.Hash, ByteSize(rows, sizeof(uint64_t)));
+        std::vector<uint64_t> hashes;
+        const uint64_t* hash = rowSet.Hash;
+        if (rowSet.Selection) {
+            for (uint64_t row = 0; row < sourceRows; ++row) {
+                if (rowSet.Selection[row]) {
+                    hashes.push_back(rowSet.Hash[row]);
+                }
+            }
+            hash = hashes.data();
+        }
+        writer.Bytes(hash, ByteSize(rows, sizeof(uint64_t)));
     }
 }
 

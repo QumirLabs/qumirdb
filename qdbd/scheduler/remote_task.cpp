@@ -45,14 +45,6 @@ ETaskResult TRemoteSinkState::Write(const TRowSet& rowSet) {
     Retain(&task);
     TRowSet copy = task;
     copy.RefCount = 1;
-    if (copy.Selection) {
-        // Serialization takes compacted row sets only. On a layout mismatch the row set
-        // stays as it is and the actor reports the error when it sends it.
-        try {
-            CompactRowSet(copy, Descriptor);
-        } catch (const std::exception&) {
-        }
-    }
     if (!Outbox.TryPush(std::move(copy))) {
         --task.RefCount;
         return ETaskResult::WAITING;
