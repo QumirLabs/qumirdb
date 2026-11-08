@@ -161,12 +161,33 @@ TEST(KernelImage, FilterRoundTrip)
     TKernelCompiler compiler({.Sink = &kernels, .BindNow = false});
     auto dispatch = compiler.CompileFilter(FilterSpec());
     const auto bytes = SerializeKernelImage(CompileKernelImage(kernels));
-    std::vector<std::shared_ptr<TKernelSlot>> slots = {dispatch.Slot};
+    ASSERT_EQ(kernels.size(), 1u);
+    EXPECT_EQ(kernels[dispatch.Kernel].Slot, dispatch.Slot);
+    // Load through the recorded kernel index, as a deserialized graph would.
+    std::vector<std::shared_ptr<TKernelSlot>> slots(kernels.size());
+    slots[dispatch.Kernel] = dispatch.Slot;
     LoadKernelImage(DeserializeKernelImage(bytes), slots);
 
     EXPECT_EQ(dispatch.Slot->Runner, nullptr);
     EXPECT_EQ(RunFilter(dispatch), RunFilter(expected));
     EXPECT_EQ(RunFilter(dispatch), (std::vector<uint8_t>{0xff, 0, 0xff, 0, 0}));
+}
+
+TEST(KernelImage, FilterDispatchRecordsKernelIndex)
+{
+    std::vector<TGeneratedKernel> kernels;
+    TKernelCompiler compiler({.Sink = &kernels, .BindNow = false});
+    auto first = compiler.CompileFilter(FilterSpec());
+    auto second = compiler.CompileFilter(FilterSpec());
+
+    EXPECT_EQ(first.Kernel, 0u);
+    EXPECT_EQ(second.Kernel, 1u);
+    ASSERT_EQ(kernels.size(), 2u);
+    EXPECT_EQ(kernels[first.Kernel].Slot, first.Slot);
+    EXPECT_EQ(kernels[second.Kernel].Slot, second.Slot);
+
+    TKernelCompiler unsunk({});
+    EXPECT_EQ(unsunk.CompileFilter(FilterSpec()).Kernel, 0u);
 }
 
 TEST(KernelImage, AggregateRoundTrip)

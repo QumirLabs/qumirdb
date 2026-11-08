@@ -427,6 +427,8 @@ public:
         // Payloads the kernel points into (literal strings).
         std::shared_ptr<void> Storage;
         std::shared_ptr<TRuntimeContext> Runtime;
+        // Index of the filter kernel in the sink (0 without a sink).
+        uint32_t Kernel = 0;
     };
 
     // Project dispatch: called per batch; for each computed column k and row i,
