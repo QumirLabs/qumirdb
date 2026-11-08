@@ -24,6 +24,7 @@
 #include <limits>
 #include <optional>
 #include <map>
+#include <mutex>
 #include <set>
 #include <span>
 #include <sstream>
@@ -1678,6 +1679,135 @@ TEST(DistributedScheduler, ValidatesRemoteEndpoints) {
     EXPECT_EQ(ValidateEndpoints(sealed, sourceOnly), "");
     static_cast<TSourceTask*>(source.Task)->BindCode(sourceCode, sourceState);
     EXPECT_NE(ValidateEndpoints(sealed, sourceOnly), "");
+}
+
+namespace {
+
+// Counts what each compute actor reports to the query actor.
+class TReportProbe : public IActor {
+public:
+    TReportProbe(std::map<std::string, int>& statuses, std::vector<std::string>& errors)
+        : Statuses_(statuses)
+        , Errors_(errors)
+    {}
+
+    void Receive(TMessageId messageId, TBlob blob, TActorContext::TPtr ctx) override {
+        if (messageId == TComputeStatus::MessageId) {
+            ++Statuses_[ctx->Sender().ToString()];
+        } else {
+            ASSERT_EQ(messageId, TComputeError::MessageId);
+            Errors_.push_back(ReadMessage<TComputeError>(blob).Message);
+        }
+    }
+
+private:
+    std::map<std::string, int>& Statuses_;
+    std::vector<std::string>& Errors_;
+};
+
+struct TSmokeCollector {
+    std::mutex Mutex;
+    std::vector<int64_t> Rows;
+    std::atomic<bool> Finished = false;
+};
+
+} // namespace
+
+// CA1: [local source -> remote sink] -> CA2: [remote source -> local sink], one actor system.
+TEST(DistributedScheduler, TwoComputeActorsMoveRowsThroughRemoteTasks) {
+    using namespace NQdb::NScheduler;
+    constexpr int64_t total = 500;
+    std::atomic<int> destroyed = 0;
+    TProducerState producerState{.Total = total};
+    TSmokeCollector collector;
+
+    // The graphs outlive the actors: their graph copies point into these.
+    auto producerCode = std::make_shared<TSourceCode>([&](void* state, TRowSet& rowSet) {
+        auto* producer = static_cast<TProducerState*>(state);
+        if (producer->Next > producer->Total) {
+            return ETaskResult::FINISHED;
+        }
+        rowSet = CountedRows(producer->Next++, &destroyed);
+        return ETaskResult::OK;
+    });
+    auto collectorCode = std::make_shared<TSinkCode>(
+        [](void* state, const TRowSet& rowSet) {
+            auto* result = static_cast<TSmokeCollector*>(state);
+            std::lock_guard lock(result->Mutex);
+            result->Rows.push_back(rowSet.RowCount);
+            return ETaskResult::OK;
+        },
+        [](void* state) {
+            static_cast<TSmokeCollector*>(state)->Finished.store(true);
+            return ETaskResult::OK;
+        });
+
+    auto toRemoteSink = std::make_unique<TOneToOneConnection>();
+    auto* toRemoteSinkPtr = toRemoteSink.get();
+    TTaskGraph graph1;
+    auto& producer = graph1.AddOwnedNode(std::make_unique<TSourceTask>(
+        producerCode, std::shared_ptr<void>(&producerState, [](void*) {}),
+        TOutputPort{.Connection = toRemoteSinkPtr}));
+    auto& remoteSink = graph1.AddOwnedNode(std::make_unique<TSinkTask>(
+        nullptr, nullptr, TInputPort{.Connection = toRemoteSinkPtr}));
+    graph1.AddOwnedEdge(producer, remoteSink, std::move(toRemoteSink));
+    graph1.MarkExternal(remoteSink, 1);
+    const auto sealed1 = graph1.Seal();
+    ASSERT_TRUE(sealed1);
+
+    auto fromRemoteSource = std::make_unique<TOneToOneConnection>();
+    auto* fromRemoteSourcePtr = fromRemoteSource.get();
+    TTaskGraph graph2;
+    auto& remoteSource = graph2.AddOwnedNode(std::make_unique<TSourceTask>(
+        nullptr, nullptr, TOutputPort{.Connection = fromRemoteSourcePtr}));
+    auto& localSink = graph2.AddOwnedNode(std::make_unique<TSinkTask>(
+        collectorCode, std::shared_ptr<void>(&collector, [](void*) {}),
+        TInputPort{.Connection = fromRemoteSourcePtr}));
+    graph2.AddOwnedEdge(remoteSource, localSink, std::move(fromRemoteSource));
+    graph2.MarkExternal(remoteSource, 2);
+    const auto sealed2 = graph2.Seal();
+    ASSERT_TRUE(sealed2);
+
+    auto resources = std::make_shared<TRuntimeResources>();
+    resources->Scheduler.WorkerCount = 2;
+    resources->Scheduler.StatusPeriodMs = 5;
+    TTestCluster cluster;
+    std::map<std::string, int> statuses;
+    std::vector<std::string> errors;
+    const auto query = cluster.Follower.Register(std::make_unique<TReportProbe>(statuses, errors));
+    const auto ca1 = cluster.Follower.Register(std::unique_ptr<IActor>(CreateComputeActor(resources)));
+    const auto ca2 = cluster.Follower.Register(std::unique_ptr<IActor>(CreateComputeActor(resources)));
+
+    cluster.Follower.Send<TTaskGraphMessage>(query, ca1, TTaskGraphMessage{
+        .Graph = sealed1,
+        .Endpoints = {{.Id = 1, .Kind = ERemoteEndpointKind::Sink, .PeerActor = ca2, .PeerTaskId = 2}}});
+    cluster.Follower.Send<TTaskGraphMessage>(query, ca2, TTaskGraphMessage{
+        .Graph = sealed2,
+        .Endpoints = {{.Id = 2, .Kind = ERemoteEndpointKind::Source, .PeerActor = ca1, .PeerTaskId = 1}}});
+
+    // The deadline only guards against a hang.
+    const auto deadline = NNet::TClock::now() + std::chrono::seconds(60);
+    auto reported = [&] {
+        return statuses.contains(ca1.ToString()) && statuses.contains(ca2.ToString());
+    };
+    while ((!collector.Finished.load() || !reported()) && NNet::TClock::now() < deadline) {
+        cluster.Pump();
+    }
+    EXPECT_TRUE(collector.Finished.load());
+    EXPECT_TRUE(reported());
+    EXPECT_TRUE(errors.empty());
+
+    cluster.Follower.Send<TPoison>(query, ca1, TPoison{});
+    cluster.Follower.Send<TPoison>(query, ca2, TPoison{});
+    cluster.Pump();
+
+    std::lock_guard lock(collector.Mutex);
+    ASSERT_EQ(collector.Rows.size(), static_cast<size_t>(total));
+    for (int64_t i = 0; i < total; ++i) {
+        ASSERT_EQ(collector.Rows[i], i + 1);
+    }
+    // In one system the chunk is a shallow copy, so both sides release the same row set.
+    EXPECT_GE(destroyed.load(), total);
 }
 
 int main(int argc, char** argv) {
