@@ -156,6 +156,11 @@ struct TComputeActor : public IBehaviorActor {
     }
 
     void StartGraph(TTaskGraphMessage&& message, TActorContext::TPtr ctx) {
+        // A compute actor runs one graph.
+        if (Scheduler) {
+            ctx->Send<TComputeError>(ctx->Sender(), TComputeError{.Message = "graph is already started"});
+            return;
+        }
         QueryActorId = ctx->Sender();
         if (auto error = NScheduler::ValidateEndpoints(message.Graph, message.Endpoints); !error.empty()) {
             SendError(ctx, "cannot start graph: " + error);

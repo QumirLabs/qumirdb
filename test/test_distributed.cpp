@@ -1237,6 +1237,28 @@ TEST(DistributedAllocation, ComputeActorReportsErrorsToTheQueryActor) {
     cluster.Pump();
 }
 
+TEST(DistributedAllocation, ComputeActorRejectsASecondGraph) {
+    auto resources = std::make_shared<TRuntimeResources>();
+    TTwoEndpointGraph first;
+    TTwoEndpointGraph second;
+    TTestCluster cluster;
+    int statuses = 0;
+    std::vector<std::string> errors;
+    const auto probe = cluster.Follower.Register(std::make_unique<TOrchestratorProbe>(statuses, errors));
+    const auto actor = cluster.Follower.Register(std::unique_ptr<IActor>(CreateComputeActor(resources)));
+    cluster.Follower.Send<TTaskGraphMessage>(probe, actor, TTaskGraphMessage{
+        .Graph = first.Graph, .Endpoints = first.Endpoints});
+    cluster.Pump();
+    cluster.Follower.Send<TTaskGraphMessage>(probe, actor, TTaskGraphMessage{
+        .Graph = second.Graph, .Endpoints = second.Endpoints});
+    cluster.Pump();
+    ASSERT_EQ(errors.size(), 1u);
+    EXPECT_NE(errors[0].find("already started"), std::string::npos);
+
+    cluster.Follower.Send<TPoison>(probe, actor, TPoison{});
+    cluster.Pump();
+}
+
 TEST(DistributedAllocation, ComputeActorReleasesItsCounterExactlyOnce) {
     auto resources = std::make_shared<TRuntimeResources>();
     {
