@@ -511,10 +511,12 @@ TEST(GraphSpec, RejectsInvalidSpecs)
     spec.Nodes[1].Body = TFilterNode{.In = {0, 0}, .Out = {1, 0}};
     EXPECT_THROW(MaterializeGraph(spec, &sink), std::runtime_error);
 
-    // Connection 1 is a gather, not a hash shuffle.
+    // Connection 1 is a gather, not a hash shuffle; kernel 0 has a slot, so the
+    // connection kind is what throws.
     spec = FanOutSpec();
     spec.Nodes[1].Body = THashShuffleNode{.In = {0, 0}, .Out = 1};
-    EXPECT_THROW(MaterializeGraph(spec, &sink), std::runtime_error);
+    const std::vector<std::shared_ptr<TKernelSlot>> slots{std::make_shared<TKernelSlot>()};
+    EXPECT_THROW(MaterializeGraph(spec, &sink, slots), std::runtime_error);
 }
 
 TEST(GraphSpec, ForwardChainRunsRows)
