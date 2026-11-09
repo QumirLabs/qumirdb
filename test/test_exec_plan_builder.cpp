@@ -810,6 +810,24 @@ TEST(ExecPlanBuilder, LimitOffsetGraphRunsFromItsSerializedSpec) {
     EXPECT_EQ(rows.size(), 6u);
 }
 
+TEST(ExecPlanBuilder, LimitZeroGraphRunsFromItsSerializedSpec) {
+    const auto rows = ExpectQueryFromSpec(
+        "SELECT id FROM t LIMIT 0", SingleSettings(), true,
+        [](const NScheduler::TGraphSpec& spec) {
+            EXPECT_EQ(CountNodes<NScheduler::TLimitNode>(spec), 1u);
+        });
+    EXPECT_LE(rows.size(), 1u);
+}
+
+TEST(ExecPlanBuilder, OffsetPastEndGraphRunsFromItsSerializedSpec) {
+    const auto rows = ExpectQueryFromSpec(
+        "SELECT id FROM t LIMIT 5 OFFSET 1000000", SingleSettings(), true,
+        [](const NScheduler::TGraphSpec& spec) {
+            EXPECT_EQ(CountNodes<NScheduler::TLimitNode>(spec), 1u);
+        });
+    EXPECT_LE(rows.size(), 1u);
+}
+
 TEST(ExecPlanBuilder, PartitionedWindowGraphRunsFromItsSerializedSpec) {
     const auto rows = ExpectQueryFromSpec(
         "SELECT id, rank() OVER (PARTITION BY id % 4 ORDER BY id DESC) AS rn FROM t",
