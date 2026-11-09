@@ -879,7 +879,7 @@ std::vector<std::string> ExpectPartialAggregateFromSpec(NScheduler::TSettings se
 {
     // The 256-row table qualifies, and the computed key has no statistics.
     settings.Aggregate.PartialMinInputRows = 0;
-    return ExpectQueryFromSpec(
+    const auto rows = ExpectQueryFromSpec(
         std::string(GroupedAggregateSql), settings, false,
         [&settings](const NScheduler::TGraphSpec& spec) {
             EXPECT_EQ(CountNodes<NScheduler::TPartialAggregateNode>(spec), 4u);
@@ -893,6 +893,12 @@ std::vector<std::string> ExpectPartialAggregateFromSpec(NScheduler::TSettings se
                 }
             }
         });
+    // The same query without the partial phase gives the same rows.
+    auto plain = settings;
+    plain.Aggregate.EnablePartial = false;
+    EXPECT_EQ(rows, ExpectQueryFromSpec(
+        std::string(GroupedAggregateSql), plain, false, [](const NScheduler::TGraphSpec&) {}));
+    return rows;
 }
 
 TEST(ExecPlanBuilder, PartialAggregateGraphRunsFromItsSerializedSpec) {
