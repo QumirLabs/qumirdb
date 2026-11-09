@@ -33,6 +33,7 @@
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 using namespace NQdb;
 
@@ -577,7 +578,8 @@ TEST(ExecPlanBuilder, LoweringRecordsSpecsForSupportedNodeKinds) {
         const auto& kind = nodes[i]->DebugKind;
         const bool isForward = kind == "broadcast";
         // Mock sources are not parquet scans, so they keep no record.
-        const bool recorded = isForward || kind == "sink" || kind == "filter" || kind == "project";
+        const bool recorded = isForward || kind == "sink" || kind == "filter" || kind == "project"
+            || kind == "aggregate" || kind == "hash-shuffle";
         ASSERT_EQ(record.has_value(), recorded) << kind;
         if (!record) {
             expectedMissing.push_back(static_cast<uint32_t>(i));
@@ -758,6 +760,37 @@ TEST(ExecPlanBuilder, WindowGraphRunsFromItsSerializedSpec) {
             EXPECT_EQ(CountNodes<NScheduler::TWindowNode>(spec), 1u);
         });
     EXPECT_GT(rows.size(), 100u);
+}
+
+TEST(ExecPlanBuilder, GroupedAggregateGraphRunsFromItsSerializedSpec) {
+    auto settings = MultiSettings();
+    // The partial aggregate cascade has no record yet.
+    settings.Aggregate.EnablePartial = false;
+    const auto rows = ExpectQueryFromSpec(
+        "SELECT id % 7 AS k, COUNT(*) AS n, SUM(d15) AS total, MIN(s) AS lo "
+        "FROM t GROUP BY id % 7", settings, false,
+        [](const NScheduler::TGraphSpec& spec) {
+            // Four scan lanes shuffle into two partition aggregates.
+            EXPECT_EQ(CountNodes<NScheduler::THashShuffleNode>(spec), 4u);
+            EXPECT_EQ(CountNodes<NScheduler::TAggregateNode>(spec), 2u);
+        });
+    // The header and one row per group.
+    EXPECT_EQ(rows.size(), 1u + 7u);
+}
+
+TEST(ExecPlanBuilder, UngroupedAggregateGraphRunsFromItsSerializedSpec) {
+    for (const auto cascade : {NScheduler::EGlobalCascadeMode::Off, NScheduler::EGlobalCascadeMode::On}) {
+        auto settings = MultiSettings();
+        settings.Aggregate.CascadeGlobal = cascade;
+        const bool cascaded = cascade == NScheduler::EGlobalCascadeMode::On;
+        const auto rows = ExpectQueryFromSpec(
+            "SELECT COUNT(*) AS n, SUM(d15) AS total, MIN(s) AS lo FROM t WHERE id % 3 <> 0",
+            settings, false, [cascaded](const NScheduler::TGraphSpec& spec) {
+                // The cascade adds one partial aggregate per scan lane.
+                EXPECT_EQ(CountNodes<NScheduler::TAggregateNode>(spec), cascaded ? 5u : 1u);
+            });
+        EXPECT_EQ(rows.size(), 1u + 1u);
+    }
 }
 
 TEST(ExecPlanBuilder, MultiKeepsRealPartialAndCombineStages) {

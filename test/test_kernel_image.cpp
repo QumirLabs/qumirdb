@@ -318,8 +318,8 @@ std::vector<std::shared_ptr<TKernelSlot>> SlotsOf(const std::vector<TGeneratedKe
     return slots;
 }
 
-// Sorts (and top-sort the same batch by the keys;
-// returns the v columns.
+// Sorts the batch by the keys and, when the plan has a top, top-sorts the
+// same batch too; returns the v columns of both.
 std::pair<std::vector<int64_t>, std::vector<int64_t>> RunSort(
     const TSortPlanData& plan,
     const std::vector<std::shared_ptr<TKernelSlot>>& slots,

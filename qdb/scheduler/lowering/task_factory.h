@@ -49,6 +49,10 @@ struct TAggregateBlockingState : TProcessorTaskState<TAggregateBlockingState> {
     bool Done = false;
 };
 
+// Blocking code that feeds every input row to TAggregateBlockingState, then
+// emits the groups.
+std::shared_ptr<const NScheduler::TBlockingCode> MakeAggregateBlockingCode();
+
 struct TPartialAggregateBlockingState : TProcessorTaskState<TPartialAggregateBlockingState> {
     TPartialAggregateBlockingState(
         TAggregateKernels kernels,

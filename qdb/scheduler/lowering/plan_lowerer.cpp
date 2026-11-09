@@ -50,6 +50,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace NQdb {
@@ -100,11 +101,13 @@ NScheduler::TTaskNode& AddTask(
     return node;
 }
 
-// The record of a unary stage's nodes; LowerUnary sets In and Out per lane.
+// The record of a stage's nodes; the lowerer sets In and Out per lane.
 template <class TNode>
 struct TUnaryNodeStage {
     TNode Node;
     NQumir::NAst::TTypePtr OutputType;
+    // Appended to the label of the tasks, e.g. an aggregate's table.
+    std::string LabelDetail;
 };
 
 class TStageDiagnosticsScope {
@@ -1187,15 +1190,8 @@ private:
 
         TStageDiagnosticsScope diagnosticsScope(Diagnostics_, stageGroup);
         auto stage = buildStage(childOut.OutputType);
-        stage.Node.In = PortSpec(Graph_, inputConn, 0);
-        stage.Node.Out = PortSpec(Graph_, &outConn, outLaneOffset);
-        auto& node = AddNode({
-            .ExecStageId = execStageId,
-            .TaskGroupId = execStageId,
-            .DebugKind = stageKind,
-            .DebugLabel = stageKind,
-            .Body = std::move(stage.Node),
-        });
+        auto& node = AddStageNode(
+            stage, stageKind, stageKind, execStageId, *inputConn, 0, outConn, outLaneOffset);
         for (size_t p = 0; p < lanes; ++p) {
             Graph_.AddEdge(*childOut.Producers[p], node, *inputConn, p, 0);
         }
@@ -1244,17 +1240,41 @@ private:
         };
     }
 
+    // Adds one task of `stage` from its record, reading `input` and writing `output`.
+    template <class TNode>
+    NScheduler::TTaskNode& AddStageNode(
+        const TUnaryNodeStage<TNode>& stage,
+        std::string kind,
+        const std::string& label,
+        TExecStageId execStageId,
+        NScheduler::IConnection& input,
+        size_t inputLane,
+        NScheduler::IConnection& output,
+        size_t outputLane)
+    {
+        auto body = stage.Node;
+        body.In = PortSpec(Graph_, &input, inputLane);
+        body.Out = PortSpec(Graph_, &output, outputLane);
+        return AddNode({
+            .ExecStageId = execStageId,
+            .TaskGroupId = execStageId,
+            .DebugKind = std::move(kind),
+            .DebugLabel = label + stage.LabelDetail,
+            .Body = std::move(body),
+        });
+    }
+
     // Builds the aggregate code + partition-local state factory + output type
     // for a given (already-lowered) input type. Kernels are compiled once and
     // shared across all partition states.
     TBlockingTail BuildGroupingSetsAggregateTail(
         const NQumir::NAst::TTypePtr& childType,
-        const NQumir::NAst::TStructType& inputType,
         TAggregateOperator& aggregate,
         std::string stage,
         TExecStageId execStageId)
     {
         using namespace NQumir::NAst;
+        const auto& inputType = AggregateInputType(childType);
         const size_t numKeys = aggregate.GroupKeys().size();
 
         // Kernel input = leading i32 __grouping_id__ ++ nullable keys ++ args; the
@@ -1329,6 +1349,15 @@ private:
         NQumir::NAst::TTypePtr OutputType;
     };
 
+    static const NQumir::NAst::TStructType& AggregateInputType(const NQumir::NAst::TTypePtr& type)
+    {
+        auto* inputType = static_cast<NQumir::NAst::TStructType*>(type.get());
+        if (!inputType) {
+            throw std::runtime_error("aggregate input must have TStructType");
+        }
+        return *inputType;
+    }
+
     TCompiledAggregate CompileAggregateTable(
         const NQumir::NAst::TStructType& inputType,
         const TAggregateOperator& aggregate,
@@ -1384,13 +1413,8 @@ private:
         TExecStageId execStageId,
         const TAggregateTaskEstimate& estimate)
     {
-        auto* inputType =
-            static_cast<NQumir::NAst::TStructType*>(childType.get());
-        if (!inputType) {
-            throw std::runtime_error("aggregate input must have TStructType");
-        }
         auto compiled = CompileAggregateTable(
-            *inputType, aggregate, stage, execStageId, estimate,
+            AggregateInputType(childType), aggregate, stage, execStageId, estimate,
             /*hasPrecomputedHash=*/false);
 
         TUnaryStreamProcess passThrough;
@@ -1449,7 +1473,8 @@ private:
         };
     }
 
-    TBlockingTail BuildAggregateTail(
+    // A plain aggregate stage; grouping sets take BuildGroupingSetsAggregateTail.
+    TUnaryNodeStage<NScheduler::TAggregateNode> BuildAggregateStage(
         const NQumir::NAst::TTypePtr& childType,
         TAggregateOperator& aggregate,
         std::string stage,
@@ -1457,45 +1482,13 @@ private:
         const TAggregateTaskEstimate& estimate = {},
         bool hasPrecomputedHash = false)
     {
-        auto* inputType =
-            static_cast<NQumir::NAst::TStructType*>(childType.get());
-        if (!inputType) {
-            throw std::runtime_error("aggregate input must have TStructType");
-        }
-        if (!aggregate.GroupingSets().empty()) {
-            return BuildGroupingSetsAggregateTail(
-                childType, *inputType, aggregate, std::move(stage), execStageId);
-        }
         auto compiled = CompileAggregateTable(
-            *inputType, aggregate, std::move(stage), execStageId, estimate, hasPrecomputedHash);
-        auto code = std::make_shared<NScheduler::TBlockingCode>(
-            [](NScheduler::ITaskState& state, NScheduler::TInputPort& input, TRowSet& output) {
-                auto* s = &static_cast<TAggregateBlockingState&>(state);
-                if (s->Done) {
-                    return NScheduler::ETaskResult::FINISHED;
-                }
-                TRowSet rowSet{};
-                while (true) {
-                    auto fetch = input.Fetch(rowSet);
-                    if (fetch == NScheduler::EFetchResult::NO_DATA) {
-                        return NScheduler::ETaskResult::NEED_DATA;
-                    }
-                    if (fetch == NScheduler::EFetchResult::FINISHED) {
-                        s->Done = true;
-                        s->Processor.Finish(output);
-                        return NScheduler::ETaskResult::OK;
-                    }
-                    s->Processor.Add(rowSet);
-                    Release(&rowSet);
-                    rowSet = {};
-                }
-            });
-        return TBlockingTail{
-            .Code = std::move(code),
-            .MakeState = [kernels = compiled.Kernels, plan = compiled.Plan]()
-                -> std::shared_ptr<NScheduler::ITaskState>
-            {
-                return std::make_shared<TAggregateBlockingState>(*kernels, plan);
+            AggregateInputType(childType), aggregate, std::move(stage), execStageId, estimate,
+            hasPrecomputedHash);
+        return {
+            .Node = {
+                .Meta = static_cast<const TAggregateKernelMeta&>(*compiled.Kernels),
+                .Table = compiled.Plan,
             },
             .OutputType = compiled.OutputType,
             .LabelDetail = AggregateTableLabel(compiled.Plan),
@@ -1532,13 +1525,13 @@ private:
             &aggregate, EAggregatePhase::Partial);
         const auto partialGroup = StageLabel(
             "aggregate-partial", partialStageId);
-        TBlockingTail partialTail =
+        auto partialStage =
             [&]() {
                 TStageDiagnosticsScope diagnosticsScope(Diagnostics_, partialGroup);
-                return BuildAggregateTail(
+                return BuildAggregateStage(
                     childOut.OutputType, aggregate, partialGroup, partialStageId);
             }();
-        auto partialType = partialTail.OutputType;
+        auto partialType = partialStage.OutputType;
 
         auto& gatherRef = AddConn<NScheduler::TGatherConnection>(
             lanes, 1, "aggregate-cascade-gather");
@@ -1546,17 +1539,9 @@ private:
         std::vector<NScheduler::TTaskNode*> partialNodes;
         partialNodes.reserve(lanes);
         for (size_t m = 0; m < lanes; ++m) {
-            auto task = std::make_unique<NScheduler::TBlockingTask>(
-                partialTail.Code,
-                partialTail.MakeState(),
-                NScheduler::TInputPort{.Connection = &childRef, .Lane = m},
-                NScheduler::TOutputPort{.Connection = &gatherRef, .Lane = m});
-            auto& node = Graph_.AddOwnedNode(std::move(task));
-            MarkNode(node,
-                "aggregate",
-                partialStageId,
-                "aggregate partial" + partialTail.LabelDetail,
-                partialStageId);
+            auto& node = AddStageNode(
+                partialStage, "aggregate", "aggregate partial", partialStageId,
+                childRef, m, gatherRef, m);
             Graph_.AddEdge(*childOut.Producers[m], node, childRef, m, m);
             partialNodes.push_back(&node);
         }
@@ -1567,30 +1552,22 @@ private:
             combineAgg.get(), EAggregatePhase::Final, combineAgg);
         const auto combineGroup = StageLabel(
             "aggregate-combine", combineStageId);
-        TBlockingTail combineTail =
+        auto combineStage =
             [&]() {
                 TStageDiagnosticsScope diagnosticsScope(Diagnostics_, combineGroup);
-                return BuildAggregateTail(
+                return BuildAggregateStage(
                     partialType, *combineAgg, combineGroup, combineStageId);
             }();
-        auto finalTask = std::make_unique<NScheduler::TBlockingTask>(
-            std::move(combineTail.Code),
-            combineTail.MakeState(),
-            NScheduler::TInputPort{.Connection = &gatherRef, .Lane = 0},
-            NScheduler::TOutputPort{.Connection = &outConn, .Lane = 0 + outLaneOffset});
-        auto& finalNode = Graph_.AddOwnedNode(std::move(finalTask));
-        MarkNode(finalNode,
-            "aggregate",
-            combineStageId,
-            "aggregate combine" + combineTail.LabelDetail,
-            combineStageId);
+        auto& finalNode = AddStageNode(
+            combineStage, "aggregate", "aggregate combine", combineStageId,
+            gatherRef, 0, outConn, outLaneOffset);
         for (size_t m = 0; m < lanes; ++m) {
             Graph_.AddEdge(*partialNodes[m], finalNode, gatherRef, m, 0);
         }
 
         return TLoweredOutput{
             .Producers = {&finalNode},
-            .OutputType = std::move(combineTail.OutputType),
+            .OutputType = std::move(combineStage.OutputType),
         };
     }
 
@@ -1622,7 +1599,7 @@ private:
         TBlockingTail partialTail =
             [&]() {
                 TStageDiagnosticsScope diagnosticsScope(Diagnostics_, partialGroup);
-                return BuildAggregateTail(
+                return BuildGroupingSetsAggregateTail(
                     childOut.OutputType, aggregate, partialGroup, partialStageId);
             }();
         auto partialType = partialTail.OutputType;
@@ -1654,7 +1631,6 @@ private:
         TKernelCompiler hashCompiler(KernelOptions(partialGroup, partialStageId));
         auto groupHash = hashCompiler.CompileAggregateHash(
             *partialStruct, combineAgg->GroupKeys());
-        auto hashCode = MakeHashShuffleCode(std::move(groupHash), partialType);
         TLoweredOutput partialOut{
             .Producers = partialNodes,
             .OutputType = partialType,
@@ -1664,7 +1640,7 @@ private:
             partialRef,
             childLanes,
             parts,
-            std::move(hashCode),
+            std::move(groupHash),
             "grouping-sets-repartition",
             {.Keys = combineAgg->GroupKeys()});
 
@@ -1672,28 +1648,21 @@ private:
             combineAgg.get(), EAggregatePhase::Final, combineAgg);
         const auto combineGroup = StageLabel(
             "aggregate-combine", combineStageId);
-        TBlockingTail combineTail =
+        auto combineStage =
             [&]() {
                 TStageDiagnosticsScope diagnosticsScope(Diagnostics_, combineGroup);
-                return BuildAggregateTail(
+                return BuildAggregateStage(
                     partialType, *combineAgg, combineGroup, combineStageId,
                     /*estimate=*/{}, /*hasPrecomputedHash=*/true);
             }();
 
         TLoweredOutput result;
-        result.OutputType = combineTail.OutputType;
+        result.OutputType = combineStage.OutputType;
         result.Producers.reserve(parts);
         for (size_t m = 0; m < parts; ++m) {
-            auto task = std::make_unique<NScheduler::TBlockingTask>(
-                combineTail.Code,
-                combineTail.MakeState(),
-                NScheduler::TInputPort{
-                    .Connection = exchange.Connection, .Lane = m},
-                NScheduler::TOutputPort{.Connection = &outConn, .Lane = m + outLaneOffset});
-            auto& node = Graph_.AddOwnedNode(std::move(task));
-            MarkNode(
-                node, "aggregate", combineStageId,
-                "aggregate combine" + combineTail.LabelDetail, combineStageId);
+            auto& node = AddStageNode(
+                combineStage, "aggregate", "aggregate combine", combineStageId,
+                *exchange.Connection, m, outConn, m + outLaneOffset);
             for (size_t s = 0; s < childLanes; ++s) {
                 Graph_.AddEdge(
                     *exchange.Nodes[s], node, *exchange.Connection, s, m);
@@ -1782,14 +1751,14 @@ private:
             partialRef,
             childLanes,
             parts,
-            MakeHashShuffleCode(std::move(groupHash), partialType),
+            std::move(groupHash),
             "aggregate-repartition",
             {.Keys = combineAgg->GroupKeys()});
 
-        TBlockingTail finalTail =
+        auto finalStage =
             [&]() {
                 TStageDiagnosticsScope diagnosticsScope(Diagnostics_, finalGroup);
-                return BuildAggregateTail(
+                return BuildAggregateStage(
                     partialType,
                     *combineAgg,
                     finalGroup,
@@ -1799,24 +1768,12 @@ private:
             }();
 
         TLoweredOutput result;
-        result.OutputType = finalTail.OutputType;
+        result.OutputType = finalStage.OutputType;
         result.Producers.reserve(parts);
         for (size_t partition = 0; partition < parts; ++partition) {
-            auto task = std::make_unique<NScheduler::TBlockingTask>(
-                finalTail.Code,
-                finalTail.MakeState(),
-                NScheduler::TInputPort{
-                    .Connection = exchange.Connection, .Lane = partition},
-                NScheduler::TOutputPort{
-                    .Connection = &outConn,
-                    .Lane = partition + outLaneOffset});
-            auto& node = Graph_.AddOwnedNode(std::move(task));
-            MarkNode(
-                node,
-                "aggregate",
-                finalStageId,
-                "aggregate final" + finalTail.LabelDetail,
-                finalStageId);
+            auto& node = AddStageNode(
+                finalStage, "aggregate", "aggregate final", finalStageId,
+                *exchange.Connection, partition, outConn, partition + outLaneOffset);
             for (size_t lane = 0; lane < childLanes; ++lane) {
                 Graph_.AddEdge(
                     *exchange.Nodes[lane],
@@ -1841,13 +1798,26 @@ private:
             auto execStageId = NewExecStage(
                 &aggregate, EExecPlanNodeKind::Aggregate);
             auto group = StageLabel("aggregate", execStageId);
-            return LowerBlocking(
+            if (!aggregate.GroupingSets().empty()) {
+                return LowerBlocking(
+                    aggregate.Input(),
+                    "aggregate",
+                    group,
+                    execStageId,
+                    [&, group](const NQumir::NAst::TTypePtr& childType) {
+                        return BuildGroupingSetsAggregateTail(
+                            childType, aggregate, group, execStageId);
+                    },
+                    outConn,
+                    outLaneOffset);
+            }
+            return LowerBlockingNode(
                 aggregate.Input(),
                 "aggregate",
                 group,
                 execStageId,
                 [&, group](const NQumir::NAst::TTypePtr& childType) {
-                    return BuildAggregateTail(
+                    return BuildAggregateStage(
                         childType, aggregate, group, execStageId,
                         EstimateAggregateTask(aggregate, 1));
                 },
@@ -1870,13 +1840,13 @@ private:
             auto execStageId = NewExecStage(
                 &aggregate, EExecPlanNodeKind::Aggregate);
             auto group = StageLabel("aggregate", execStageId);
-            return LowerBlocking(
+            return LowerBlockingNode(
                 aggregate.Input(),
                 "aggregate",
                 group,
                 execStageId,
                 [&, group](const NQumir::NAst::TTypePtr& childType) {
-                    return BuildAggregateTail(
+                    return BuildAggregateStage(
                         childType, aggregate, group, execStageId);
                 },
                 outConn,
@@ -1908,41 +1878,31 @@ private:
         TKernelCompiler hashCompiler(KernelOptions(aggregateGroup, execStageId));
         auto groupHash = hashCompiler.CompileAggregateHash(
             *childStruct, aggregate.GroupKeys());
-        TBlockingTail tail =
+        auto stage =
             [&]() {
                 TStageDiagnosticsScope diagnosticsScope(Diagnostics_, aggregateGroup);
-                return BuildAggregateTail(
+                return BuildAggregateStage(
                     childType, aggregate, aggregateGroup, execStageId,
                     EstimateAggregateTask(aggregate, parts),
                     /*hasPrecomputedHash=*/true);
             }();
 
-        auto hashCode = MakeHashShuffleCode(std::move(groupHash), childType);
         auto exchange = BuildRepartitionExchange(
             childOut,
             childConnRef,
             childLanes,
             parts,
-            std::move(hashCode),
+            std::move(groupHash),
             "aggregate-repartition",
             {.Keys = aggregate.GroupKeys()});
 
         TLoweredOutput result;
-        result.OutputType = tail.OutputType;
+        result.OutputType = stage.OutputType;
         result.Producers.reserve(parts);
         for (size_t m = 0; m < parts; ++m) {
-            auto task = std::make_unique<NScheduler::TBlockingTask>(
-                tail.Code,
-                tail.MakeState(),
-                NScheduler::TInputPort{
-                    .Connection = exchange.Connection, .Lane = m},
-                NScheduler::TOutputPort{.Connection = &outConn, .Lane = m + outLaneOffset});
-            auto& node = Graph_.AddOwnedNode(std::move(task));
-            MarkNode(node,
-                "aggregate",
-                execStageId,
-                "aggregate" + tail.LabelDetail,
-                execStageId);
+            auto& node = AddStageNode(
+                stage, "aggregate", "aggregate", execStageId,
+                *exchange.Connection, m, outConn, m + outLaneOffset);
             for (size_t s = 0; s < childLanes; ++s) {
                 Graph_.AddEdge(
                     *exchange.Nodes[s], node, *exchange.Connection, s, m);
@@ -2830,13 +2790,12 @@ private:
         TKernelCompiler hashCompiler(KernelOptions(windowGroup, execStageId));
         auto partitionHash = hashCompiler.CompileAggregateHash(
             *childStruct, window.PartitionKeys());
-        auto hashCode = MakeHashShuffleCode(std::move(partitionHash), childType);
         auto shuf = BuildRepartitionExchange(
             childOut,
             childConnRef,
             childLanes,
             parts,
-            std::move(hashCode),
+            std::move(partitionHash),
             "window-repartition",
             {.Keys = window.PartitionKeys()});
 
@@ -2867,12 +2826,17 @@ private:
         return result;
     }
 
+    // The aggregate hash builds the shuffle tasks from records; join hashes
+    // keep their prebuilt code.
+    using TShuffleHash = std::variant<
+        TKernelCompiler::TAggregateHashDispatch, std::shared_ptr<NScheduler::THashShuffleCode>>;
+
     TRepartitionExchange BuildRepartitionExchange(
         const TLoweredOutput& input,
         NScheduler::IConnection& inputConn,
         size_t inputLanes,
         size_t partitions,
-        std::shared_ptr<NScheduler::THashShuffleCode> hashCode,
+        TShuffleHash hash,
         std::string debugName,
         NScheduler::TRepartitionSpec repartition)
     {
@@ -2889,19 +2853,38 @@ private:
         side.Nodes.reserve(inputLanes);
         const auto shuffleTaskGroupId = NewTaskGroup();
         for (size_t p = 0; p < inputLanes; ++p) {
-            auto task = std::make_unique<NScheduler::THashShuffleTask>(
-                hashCode,
-                std::make_shared<int>(0),
-                NScheduler::TInputPort{.Connection = &inputConn, .Lane = p},
-                *shufPtr,
-                p);
-            auto& node = Graph_.AddOwnedNode(std::move(task));
-            MarkNode(node,
-                "hash-shuffle",
-                shuffleTaskGroupId,
-                label);
-            Graph_.AddEdge(*input.Producers[p], node, inputConn, p, p);
-            side.Nodes.push_back(&node);
+            NScheduler::TTaskNode* node = nullptr;
+            if (const auto* aggregateHash = std::get_if<TKernelCompiler::TAggregateHashDispatch>(&hash)) {
+                node = &AddNode({
+                    .TaskGroupId = shuffleTaskGroupId,
+                    .DebugKind = "hash-shuffle",
+                    .DebugLabel = label,
+                    .Body = NScheduler::THashShuffleNode{
+                        .In = PortSpec(Graph_, &inputConn, p),
+                        .Out = PortSpec(Graph_, shufPtr, 0).Connection,
+                        .SourceLane = static_cast<uint32_t>(p),
+                        .Hash = {.Kernel = aggregateHash->Kernel, .KeyColumns = aggregateHash->KeyColumns},
+                        .InputType = input.OutputType,
+                        .TargetOutputBatchRows = Settings_.HashShuffle.TargetOutputBatchRows,
+                        .MaxOutputBatchRows = Settings_.HashShuffle.MaxOutputBatchRows,
+                        .TargetOutputBatchBytes = Settings_.HashShuffle.TargetOutputBatchBytes,
+                    },
+                });
+            } else {
+                auto task = std::make_unique<NScheduler::THashShuffleTask>(
+                    std::get<std::shared_ptr<NScheduler::THashShuffleCode>>(hash),
+                    std::make_shared<int>(0),
+                    NScheduler::TInputPort{.Connection = &inputConn, .Lane = p},
+                    *shufPtr,
+                    p);
+                node = &Graph_.AddOwnedNode(std::move(task));
+                MarkNode(*node,
+                    "hash-shuffle",
+                    shuffleTaskGroupId,
+                    label);
+            }
+            Graph_.AddEdge(*input.Producers[p], *node, inputConn, p, p);
+            side.Nodes.push_back(node);
         }
         return side;
     }

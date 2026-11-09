@@ -1108,8 +1108,8 @@ TEST_F(AggregateTable, ExpectRowGroupsSizesTheEntriesOfTheMove) {
 // ---- the choice of the layout ----
 
 TEST_F(AggregateTable, PlanFollowsTheSettingAndTheEstimate) {
-    TAggregateKernels rows{.StateWords = 4, .RowBytes = 56};
-    TAggregateKernels swissOnly{.StateWords = 4};
+    TAggregateKernelMeta rows{.StateWords = 4, .RowBytes = 56};
+    TAggregateKernelMeta swissOnly{.StateWords = 4};
     const int64_t minGroups = AggregateRowLayoutMinGroups(56, 4);
     ASSERT_GT(minGroups, 1);
     const TAggregateTaskEstimate small{.InitialCapacity = 64, .Groups = 40};
@@ -1160,7 +1160,7 @@ TEST_F(AggregateTable, MoreStateWordsMoveToRowsEarlier) {
 // table must grow, and so move, at the bound. An overestimate then costs
 // nothing until the table really holds that many groups.
 TEST_F(AggregateTable, OverestimateStartsSwiss) {
-    const TAggregateKernels rows{.StateWords = 4, .RowBytes = 56};
+    const TAggregateKernelMeta rows{.StateWords = 4, .RowBytes = 56};
     const int64_t minGroups = AggregateRowLayoutMinGroups(56, 4);
     using enum NScheduler::EAggregateTableKind;
     const auto plan = PlanAggregateTable({

@@ -2210,7 +2210,7 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
             "CompileAggregate: " + program.error().ToString());
     }
 
-    TAggregateKernels kernels;
+    TAggregateKernelMeta kernels;
     kernels.NumAggs = funcs.size();
     kernels.StateWords = layout.NumAggBuffers;
     kernels.RowBytes = rows ? rows->RowBytes : 0;
@@ -2272,19 +2272,20 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
 
 TAggregateKernels BindAggregateKernels(
     std::shared_ptr<TKernelSlot> slot,
-    TAggregateKernels meta)
+    TAggregateKernelMeta meta)
 {
     using TDispatchFn = int64_t(*)(void*, TRowSet*, int64_t, int64_t);
     using TFinishRowSetFn = int64_t(*)(void*, TRowSet*);
 
-    meta.Dispatch = [slot](void* ht, TRowSet* batch, int64_t arg, int64_t op) {
+    TAggregateKernels kernels{std::move(meta)};
+    kernels.Dispatch = [slot](void* ht, TRowSet* batch, int64_t arg, int64_t op) {
         return slot->Call<TDispatchFn>(0, ht, batch, arg, op);
     };
-    meta.FinishRowSet = [slot](void* ht, TRowSet* output) {
+    kernels.FinishRowSet = [slot](void* ht, TRowSet* output) {
         return slot->Call<TFinishRowSetFn>(1, ht, output);
     };
-    meta.Slot = std::move(slot);
-    return meta;
+    kernels.Slot = std::move(slot);
+    return kernels;
 }
 
 TJoinKernels TKernelCompiler::CompileJoin(
