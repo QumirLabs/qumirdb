@@ -7,10 +7,20 @@
 #include <qdbd/actors/scheduler.h>
 #include <qdbd/http/router.h>
 #include <qdbd/scheduler/remote_task.h>
+#include <qdb/io/parquet/source.h>
+#include <qdb/io/row_layouts.h>
+#include <qdb/kernel/image.h>
+#include <qdb/plan/build.h>
+#include <qdb/plan/ops/source.h>
+#include <qdb/plan/pipeline.h>
 #include <qdb/scheduler/impl/threaded_scheduler.h>
 #include <qdb/scheduler/channel.h>
 #include <qdb/scheduler/connections/local.h>
+#include <qdb/scheduler/lowering/plan_lowerer.h>
 #include <qdb/scheduler/spec/graph_spec.h>
+#include <qdb/sql/parser.h>
+
+#include <qumir/codegen/llvm/llvm_initializer.h>
 
 #include <coroio/all.hpp>
 #include <coroio/actors/actorsystem.hpp>
@@ -23,11 +33,11 @@
 #include <chrono>
 #include <cstring>
 #include <deque>
+#include <expected>
 #include <functional>
 #include <limits>
 #include <optional>
 #include <map>
-#include <numeric>
 #include <set>
 #include <span>
 #include <sstream>
@@ -1015,6 +1025,7 @@ TEST(DistributedSerialization, TaskGraphMessageRoundTrip) {
     EXPECT_FALSE(is_local_message_v<TTaskGraphMessage>);
     TTaskGraphMessage original{
         .Spec = std::string("spec\0bytes", 10),
+        .KernelImage = std::string("kernel\0image", 12),
         .Endpoints = {
             {.Id = 1, .Kind = ERemoteEndpointKind::Sink, .PeerActor = TActorId(2, 123, 4), .PeerTaskId = 7},
             {.Id = std::numeric_limits<uint64_t>::max(), .Kind = ERemoteEndpointKind::Source,
@@ -1026,6 +1037,7 @@ TEST(DistributedSerialization, TaskGraphMessageRoundTrip) {
     TTaskGraphMessage decoded;
     DeserializeFromStream(decoded, input);
     EXPECT_EQ(decoded.Spec, original.Spec);
+    EXPECT_EQ(decoded.KernelImage, original.KernelImage);
     ASSERT_EQ(decoded.Endpoints.size(), original.Endpoints.size());
     for (size_t i = 0; i < original.Endpoints.size(); ++i) {
         EXPECT_EQ(decoded.Endpoints[i].Id, original.Endpoints[i].Id);
@@ -1040,9 +1052,9 @@ TEST(DistributedSerialization, TaskGraphMessageRoundTrip) {
     }
     std::istringstream trailing(bytes + 'x');
     EXPECT_THROW(DeserializeFromStream(decoded, trailing), std::runtime_error);
-    // The kind of the first endpoint follows the spec, the endpoint count and its id.
+    // The kind of the first endpoint follows the spec, the image, the endpoint count and its id.
     auto invalid = bytes;
-    invalid[4 + original.Spec.size() + 4 + 8] = 2;
+    invalid[4 + original.Spec.size() + 4 + original.KernelImage.size() + 4 + 8] = 2;
     std::istringstream badKind(invalid);
     EXPECT_THROW(DeserializeFromStream(decoded, badKind), std::runtime_error);
 }
@@ -1277,9 +1289,68 @@ std::vector<TRemoteEndpoint> RelayEndpoints(TActorId sinkPeer = {}, TActorId sou
     };
 }
 
-TTaskGraphMessage GraphMessage(const NQdb::NScheduler::TGraphSpec& spec, std::vector<TRemoteEndpoint> endpoints)
+TTaskGraphMessage GraphMessage(
+    const NQdb::NScheduler::TGraphSpec& spec,
+    std::vector<TRemoteEndpoint> endpoints,
+    std::string kernelImage = SerializeKernelImage({}))
 {
-    return TTaskGraphMessage{.Spec = NQdb::NScheduler::SerializeGraphSpec(spec), .Endpoints = std::move(endpoints)};
+    return TTaskGraphMessage{
+        .Spec = NQdb::NScheduler::SerializeGraphSpec(spec),
+        .KernelImage = std::move(kernelImage),
+        .Endpoints = std::move(endpoints),
+    };
+}
+
+constexpr const char* DecimalsPath = QDB_TEST_DATA_DIR "/regtest/cases/decimal_parquet/tables/decimals.parquet";
+
+struct TLoweredFragment {
+    NQdb::NScheduler::TGraphSpec Spec;
+    std::string KernelImage;
+};
+
+// Lowers `sql` over decimals.parquet as table t and turns the query's sink
+// writer into remote sink 1. The kernels are compiled only into the image.
+TLoweredFragment LowerFragment(const std::string& sql)
+{
+    using namespace NQdb::NScheduler;
+    TParquetSource source(DecimalsPath);
+    std::istringstream input(sql);
+    NSql::TTokenStream tokens(input);
+    NSql::TParser parser;
+    auto parsed = parser.Parse(tokens);
+    if (!parsed) {
+        throw std::runtime_error(parsed.error().ToString());
+    }
+    auto plan = BuildPlan(*parsed, [&](std::string_view) -> std::expected<TOperatorPtr, NQumir::TError> {
+        return std::make_shared<TSourceOperator>(source, "t");
+    });
+    if (!plan) {
+        throw std::runtime_error(plan.error().ToString());
+    }
+    auto root = *plan;
+    ApplyPlanPasses(root, {.EnableCbo = false});
+    // One scan task keeps the file order.
+    TSettings settings;
+    settings.ScanSplit.Strategy = EScanSplitStrategy::SerialRead;
+    settings.ScanSplit.MaxScanTasks = 1;
+    struct TNoSink : ISink {
+        void Write(const TRowSet&) override
+        {}
+    } sink;
+    auto lowered = LowerPlanToGraph(root, settings, nullptr);
+    AttachSink(lowered, sink);
+    auto spec = ExtractLoweredGraphSpec(lowered);
+    if (!spec) {
+        throw std::runtime_error("the lowered graph has nodes without records");
+    }
+    auto& writer = spec->Nodes.back();
+    const auto in = std::get<TSinkWriterNode>(writer.Body).In;
+    writer.Body = TRemoteSinkNode{.In = in};
+    for (const auto& layout : RowLayouts(lowered.OutputType)) {
+        spec->Connections[in.Connection].RowLayouts.push_back({.Width = layout.Width, .Bitmap = layout.Bitmap});
+    }
+    spec->Externals.push_back({.Id = 1, .Node = static_cast<uint32_t>(spec->Nodes.size() - 1)});
+    return {std::move(*spec), SerializeKernelImage(CompileKernelImage(lowered.Kernels))};
 }
 
 // Plays the query actor: counts what the compute actor reports.
@@ -2005,18 +2076,12 @@ private:
 
 } // namespace
 
-// CA1 (follower): [parquet scan -> remote sink] -> CA2 (leader): [remote source
-// -> remote sink] -> the result probe (follower). Both graphs arrive as bytes,
-// CA2's across nodes.
+// CA1 (follower): [parquet scan -> filter -> remote sink], lowered from SQL ->
+// CA2 (leader): [remote source -> remote sink] -> the result probe (follower).
+// Both graphs arrive as bytes with the query's kernel image, CA2's across nodes.
 TEST(DistributedScheduler, TwoComputeActorsMoveRowsThroughRemoteTasks) {
     using namespace NQdb::NScheduler;
-    auto scan = RelaySpec({{.Width = 4}});
-    scan.Nodes[0].Body = TParquetScanNode{
-        .Out = {0, 0},
-        .Path = QDB_TEST_DATA_DIR "/regtest/cases/decimal_parquet/tables/decimals.parquet",
-        .Columns = std::vector<std::string>{"id"},
-    };
-    scan.Externals = {{.Id = 1, .Node = 1}};
+    const auto fragment = LowerFragment("SELECT id FROM t WHERE id % 3 <> 0");
 
     auto resources = std::make_shared<TRuntimeResources>();
     resources->Scheduler.WorkerCount = 2;
@@ -2034,9 +2099,11 @@ TEST(DistributedScheduler, TwoComputeActorsMoveRowsThroughRemoteTasks) {
     const auto ca1 = cluster.Follower.Register(std::unique_ptr<IActor>(CreateComputeActor(resources)));
     const auto ca2 = cluster.Leader.Register(std::unique_ptr<IActor>(CreateComputeActor(resources)));
 
-    cluster.Follower.Send<TTaskGraphMessage>(query, ca1, GraphMessage(scan, {RelayEndpoints(ca2)[0]}));
+    cluster.Follower.Send<TTaskGraphMessage>(query, ca1, GraphMessage(
+        fragment.Spec, {RelayEndpoints(ca2)[0]}, fragment.KernelImage));
+    // One kernel image per query: CA2 loads it although its relay runs no kernel.
     cluster.Follower.Send<TTaskGraphMessage>(query, ca2, GraphMessage(
-        RelaySpec({{.Width = 4}}), RelayEndpoints(result, ca1)));
+        RelaySpec({{.Width = 4}}), RelayEndpoints(result, ca1), fragment.KernelImage));
 
     // The deadline only guards against a hang.
     const auto deadline = NNet::TClock::now() + std::chrono::seconds(60);
@@ -2054,9 +2121,43 @@ TEST(DistributedScheduler, TwoComputeActorsMoveRowsThroughRemoteTasks) {
     cluster.Leader.Send<TPoison>(query, ca2, TPoison{});
     cluster.Pump();
 
-    std::vector<int32_t> expected(256);
-    std::iota(expected.begin(), expected.end(), 0);
+    std::vector<int32_t> expected;
+    for (int32_t id = 0; id < 256; ++id) {
+        if (id % 3 != 0) {
+            expected.push_back(id);
+        }
+    }
     EXPECT_EQ(ids, expected);
+}
+
+TEST(DistributedScheduler, ComputeActorReportsKernelImagesItCannotLoad) {
+    const auto fragment = LowerFragment("SELECT id FROM t WHERE id % 3 <> 0");
+    auto truncated = fragment.KernelImage;
+    truncated.pop_back();
+    auto unknownEntry = DeserializeKernelImage(fragment.KernelImage);
+    unknownEntry.Entrypoints.at(0).at(0) = "qdb_no_such_kernel";
+
+    auto resources = std::make_shared<TRuntimeResources>();
+    TTestCluster cluster;
+    std::map<std::string, int> statuses;
+    std::vector<std::string> errors;
+    const auto query = cluster.Follower.Register(std::make_unique<TReportProbe>(statuses, errors));
+    const auto actor = cluster.Follower.Register(std::unique_ptr<IActor>(CreateComputeActor(resources)));
+    // The last image has no kernels for the filter.
+    for (const auto& image : {truncated, SerializeKernelImage(unknownEntry), SerializeKernelImage({})}) {
+        cluster.Follower.Send<TTaskGraphMessage>(query, actor, GraphMessage(
+            fragment.Spec, {RelayEndpoints()[0]}, image));
+        cluster.Pump();
+    }
+    ASSERT_EQ(errors.size(), 3u);
+    EXPECT_NE(errors[0].find("truncated"), std::string::npos);
+    EXPECT_NE(errors[1].find("link failed"), std::string::npos);
+    EXPECT_NE(errors[2].find("kernel index"), std::string::npos);
+    for (const auto& error : errors) {
+        EXPECT_NE(error.find("cannot start graph"), std::string::npos) << error;
+    }
+    cluster.Follower.Send<TPoison>(query, actor, TPoison{});
+    cluster.Pump();
 }
 
 namespace {
@@ -2217,5 +2318,6 @@ TEST(DistributedScheduler, SelectedRowsCrossNodesCompacted) {
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
+    NQumir::NCodeGen::TLLVMInitializer initializer;
     return RUN_ALL_TESTS();
 }

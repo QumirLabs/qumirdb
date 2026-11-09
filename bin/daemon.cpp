@@ -19,6 +19,7 @@
 #include <qdb/catalog/external_module.h>
 #include <qdb/scheduler/settings/engine_settings.h>
 
+#include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/error.h>
 
 using namespace NNet;
@@ -71,6 +72,8 @@ void PrintUsage(std::ostream& out, const char* program)
 int main(int argc, char** argv)
 {
     NNet::TInitializer init;
+    // Compute actors link kernel images.
+    NQumir::NCodeGen::TLLVMInitializer llvmInit;
     TNodeId myNodeId = 1;
     TNodeId leaderId = 1;
     int httpPort = 8080;

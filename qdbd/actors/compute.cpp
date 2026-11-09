@@ -5,11 +5,13 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <coroio/actors/actorsystem.hpp>
 #include <qdbd/messages.h>
 #include <qdbd/serialization.h>
 #include <qdbd/scheduler/remote_task.h>
+#include <qdb/kernel/image.h>
 #include <qdb/scheduler/channel.h>
 #include <qdb/scheduler/graph.h>
 #include <qdb/scheduler/spec/graph_spec.h>
@@ -169,8 +171,18 @@ struct TComputeActor : public IBehaviorActor {
         NScheduler::TSealedTaskGraph sealed;
         std::string error;
         try {
+            const auto spec = NScheduler::DeserializeGraphSpec(message.Spec);
+            const auto image = DeserializeKernelImage(message.KernelImage);
+            std::vector<std::shared_ptr<TKernelSlot>> slots;
+            for (size_t i = 0; i < image.Entrypoints.size(); ++i) {
+                slots.push_back(std::make_shared<TKernelSlot>());
+            }
+            // An image without kernels has nothing to link.
+            if (!slots.empty()) {
+                LoadKernelImage(image, slots);
+            }
             // No sink: a compute actor's results leave through its remote sinks.
-            graph = NScheduler::MaterializeGraph(NScheduler::DeserializeGraphSpec(message.Spec));
+            graph = NScheduler::MaterializeGraph(spec, nullptr, std::move(slots));
             sealed = graph->Seal(&error);
         } catch (const std::exception& e) {
             error = e.what();

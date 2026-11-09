@@ -442,6 +442,8 @@ void SerializeToStream(const TTaskGraphMessage& message, std::ostringstream& out
     TWriter writer(output);
     writer.Value<uint32_t>(ByteSize(message.Spec.size(), 1));
     writer.Bytes(message.Spec.data(), message.Spec.size());
+    writer.Value<uint32_t>(ByteSize(message.KernelImage.size(), 1));
+    writer.Bytes(message.KernelImage.data(), message.KernelImage.size());
     if (message.Endpoints.size() > MaxPayloadSize / EndpointSize) {
         Invalid("too many endpoints");
     }
@@ -461,6 +463,7 @@ void DeserializeFromStream(TTaskGraphMessage& message, std::istringstream& input
     TReader reader(input);
     TTaskGraphMessage result;
     result.Spec = reader.Bytes(reader.Value<uint32_t>());
+    result.KernelImage = reader.Bytes(reader.Value<uint32_t>());
     const auto count = reader.Value<uint32_t>();
     if (count > reader.Remaining() / EndpointSize) {
         Invalid("truncated endpoint list");
