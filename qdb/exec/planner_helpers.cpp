@@ -1,7 +1,6 @@
 #include <qdb/exec/planner_helpers.h>
 #include <qdb/exec/runtime_context.h>
 #include <qdb/exec/filter_exec.h>
-#include <qdb/exec/project_exec.h>
 #include <qdb/exec/sort_key_ops.h>
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/join.h>
@@ -491,7 +490,7 @@ std::string_view JoinBuildSideName(EJoinBuildSide side) {
     return "auto";
 }
 
-TFilterRuntimeProcess BuildFilterRuntimeProcess(
+TFilterPlan BuildFilterPlan(
     TFilterOperator& filter,
     const NQumir::NAst::TTypePtr& inputType,
     TKernelCompilerOptions options)
@@ -678,7 +677,7 @@ TProjectColumnPlan BuildProjectColumnPlan(
     return plan;
 }
 
-TProjectRuntimeProcess BuildProjectRuntimeProcess(
+TProjectPlan BuildProjectPlan(
     TProjectOperator& project,
     const NQumir::NAst::TTypePtr& inputType,
     TKernelCompilerOptions options)
@@ -693,7 +692,7 @@ TProjectRuntimeProcess BuildProjectRuntimeProcess(
 
     auto plan = BuildProjectColumnPlan(project, *inputStruct);
 
-    TKernelCompiler::TProjectDispatch dispatch;
+    std::optional<uint32_t> kernel;
     if (!plan.ComputedExprs.empty()) {
         auto spec = NKernel::BuildProjectKernelSpec(
             *inputStruct,
@@ -703,22 +702,18 @@ TProjectRuntimeProcess BuildProjectRuntimeProcess(
             options.ExternalCatalog.get(),
             options.RuntimeContext.get());
         TKernelCompiler compiler(std::move(options));
-        dispatch = compiler.CompileProject(spec);
+        kernel = compiler.CompileProject(spec).Kernel;
     }
 
-    TProjectPlanData data{
-        .Kernel = plan.ComputedExprs.empty() ? std::nullopt : std::optional(dispatch.Kernel),
-        .Columns = std::move(plan.Columns),
-        .ComputedWidths = std::move(plan.ComputedWidths),
-        .ComputedIsString = std::move(plan.ComputedIsString),
-        .ComputedIsNullable = std::move(plan.ComputedIsNullable),
-    };
-    auto process = MakeProjectProcess(data, std::move(dispatch));
-
     return {
-        .Process = std::move(process),
         .OutputType = std::move(plan.OutputType),
-        .Plan = std::move(data),
+        .Plan = {
+            .Kernel = kernel,
+            .Columns = std::move(plan.Columns),
+            .ComputedWidths = std::move(plan.ComputedWidths),
+            .ComputedIsString = std::move(plan.ComputedIsString),
+            .ComputedIsNullable = std::move(plan.ComputedIsNullable),
+        },
     };
 }
 

@@ -855,13 +855,15 @@ TEST(ExecPlanBuilder, LateMaterializeGraphRunsFromItsSerializedSpec) {
     EXPECT_EQ(rows.size(), 4u);
 }
 
+constexpr std::string_view GroupedAggregateSql =
+    "SELECT id % 7 AS k, COUNT(*) AS n, SUM(d15) AS total, MIN(s) AS lo FROM t GROUP BY id % 7";
+
 TEST(ExecPlanBuilder, GroupedAggregateGraphRunsFromItsSerializedSpec) {
     auto settings = MultiSettings();
-    // The partial aggregate cascade has no record yet.
+    // The plain shuffle, without the partial cascade.
     settings.Aggregate.EnablePartial = false;
     const auto rows = ExpectQueryFromSpec(
-        "SELECT id % 7 AS k, COUNT(*) AS n, SUM(d15) AS total, MIN(s) AS lo "
-        "FROM t GROUP BY id % 7", settings, false,
+        std::string(GroupedAggregateSql), settings, false,
         [](const NScheduler::TGraphSpec& spec) {
             // Four scan lanes shuffle into two partition aggregates.
             EXPECT_EQ(CountNodes<NScheduler::THashShuffleNode>(spec), 4u);
@@ -869,6 +871,77 @@ TEST(ExecPlanBuilder, GroupedAggregateGraphRunsFromItsSerializedSpec) {
         });
     // The header and one row per group.
     EXPECT_EQ(rows.size(), 1u + 7u);
+}
+
+// The grouped cascade: a partial aggregate per scan lane, the shuffle, then
+// two final aggregates.
+std::vector<std::string> ExpectPartialAggregateFromSpec(NScheduler::TSettings settings)
+{
+    // The 256-row table qualifies, and the computed key has no statistics.
+    settings.Aggregate.PartialMinInputRows = 0;
+    const auto rows = ExpectQueryFromSpec(
+        std::string(GroupedAggregateSql), settings, false,
+        [&settings](const NScheduler::TGraphSpec& spec) {
+            EXPECT_EQ(CountNodes<NScheduler::TPartialAggregateNode>(spec), 4u);
+            EXPECT_EQ(CountNodes<NScheduler::THashShuffleNode>(spec), 4u);
+            EXPECT_EQ(CountNodes<NScheduler::TAggregateNode>(spec), 2u);
+            for (const auto& node : spec.Nodes) {
+                if (const auto* partial = std::get_if<NScheduler::TPartialAggregateNode>(&node.Body)) {
+                    EXPECT_TRUE(partial->PassThrough);
+                    EXPECT_EQ(partial->Policy.SampleRows, settings.Aggregate.PartialSampleRows);
+                    EXPECT_EQ(partial->Policy.MinReduction, settings.Aggregate.PartialMinReductionFactor);
+                }
+            }
+        });
+    // The same query without the partial phase gives the same rows.
+    auto plain = settings;
+    plain.Aggregate.EnablePartial = false;
+    EXPECT_EQ(rows, ExpectQueryFromSpec(
+        std::string(GroupedAggregateSql), plain, false, [](const NScheduler::TGraphSpec&) {}));
+    return rows;
+}
+
+TEST(ExecPlanBuilder, PartialAggregateGraphRunsFromItsSerializedSpec) {
+    const auto rows = ExpectPartialAggregateFromSpec(MultiSettings());
+    EXPECT_EQ(rows.size(), 1u + 7u);
+}
+
+TEST(ExecPlanBuilder, PassThroughPartialAggregateGraphRunsFromItsSerializedSpec) {
+    // Judged after its first batch, each partial hands the rest of its rows
+    // through as single-row partial states.
+    auto settings = MultiSettings();
+    settings.Aggregate.PartialSampleRows = 1;
+    settings.Aggregate.PartialMinReductionFactor = 1000;
+    const auto rows = ExpectPartialAggregateFromSpec(settings);
+    EXPECT_EQ(rows.size(), 1u + 7u);
+}
+
+// Over four lanes the sets take the partial, shuffle and combine cascade; over
+// one lane a single grouping-sets aggregate. Both give the same rows.
+void ExpectGroupingSetsFromSpec(const std::string& groupBy, size_t groups)
+{
+    const auto sql = "SELECT id % 3 AS a, id % 5 AS b, COUNT(*) AS n, SUM(d15) AS total FROM t GROUP BY "
+        + groupBy;
+    const auto cascade = ExpectQueryFromSpec(
+        sql, MultiSettings(), false, [](const NScheduler::TGraphSpec& spec) {
+            EXPECT_EQ(CountNodes<NScheduler::TGroupingSetsAggregateNode>(spec), 4u);
+            EXPECT_EQ(CountNodes<NScheduler::THashShuffleNode>(spec), 4u);
+            // The combines, by __grouping_id__ and the keys.
+            EXPECT_EQ(CountNodes<NScheduler::TAggregateNode>(spec), 2u);
+        });
+    EXPECT_EQ(cascade.size(), 1u + groups) << groupBy;
+    const auto single = ExpectQueryFromSpec(
+        sql, SingleSettings(), false, [](const NScheduler::TGraphSpec& spec) {
+            EXPECT_EQ(CountNodes<NScheduler::TGroupingSetsAggregateNode>(spec), 1u);
+            EXPECT_EQ(CountNodes<NScheduler::TAggregateNode>(spec), 0u);
+        });
+    EXPECT_EQ(single, cascade) << groupBy;
+}
+
+TEST(ExecPlanBuilder, GroupingSetsGraphsRunFromTheirSerializedSpecs) {
+    ExpectGroupingSetsFromSpec("GROUPING SETS ((1), (2))", 3 + 5);
+    ExpectGroupingSetsFromSpec("ROLLUP(1, 2)", 15 + 3 + 1);
+    ExpectGroupingSetsFromSpec("CUBE(1, 2)", 15 + 3 + 5 + 1);
 }
 
 TEST(ExecPlanBuilder, UngroupedAggregateGraphRunsFromItsSerializedSpec) {

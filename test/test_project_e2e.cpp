@@ -7,7 +7,9 @@
 #include <qumir/parser/type.h>
 
 #include "plan_runner.h"
+#include <qdb/exec/filter_exec.h>
 #include <qdb/exec/planner_helpers.h>
+#include <qdb/exec/project_exec.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/io/io.h>
 #include <qdb/modules/qumirdb_runtime.h>
@@ -195,7 +197,7 @@ TEST(ProjectE2E, FilterRebuildsFromPlanDataAndSlot) {
     ASSERT_TRUE(filter);
 
     std::vector<TGeneratedKernel> kernels;
-    auto built = BuildFilterRuntimeProcess(*filter.Cast(),
+    auto built = BuildFilterPlan(*filter.Cast(),
         filter.Cast()->Input()->OutputColumns(), {.Sink = &kernels});
     ASSERT_EQ(kernels.size(), 1u);
     EXPECT_EQ(built.Plan.Kernel, 0u);
@@ -216,7 +218,7 @@ TEST(ProjectE2E, ProjectRebuildsFromPlanDataAndSlot) {
     ASSERT_TRUE(project);
 
     std::vector<TGeneratedKernel> kernels;
-    auto built = BuildProjectRuntimeProcess(*project.Cast(),
+    auto built = BuildProjectPlan(*project.Cast(),
         project.Cast()->Input()->OutputColumns(), {.Sink = &kernels});
     ASSERT_EQ(kernels.size(), 1u);
     ASSERT_TRUE(built.Plan.Kernel);
@@ -225,10 +227,8 @@ TEST(ProjectE2E, ProjectRebuildsFromPlanDataAndSlot) {
     const auto& kernel = kernels[*built.Plan.Kernel];
     auto rebuilt = MakeProjectProcess(
         built.Plan, BindProject(kernel.Slot, kernel.RuntimeContext));
-    const auto expected = RunProcess(built.Process, data.Batch());
-    EXPECT_EQ(expected, (std::vector<std::vector<int64_t>>{
+    EXPECT_EQ(RunProcess(rebuilt, data.Batch()), (std::vector<std::vector<int64_t>>{
         {10, 11}, {20, 23}, {30, 35}, {40, 42}}));
-    EXPECT_EQ(RunProcess(rebuilt, data.Batch()), expected);
 }
 
 TEST(ProjectE2E, FilterKeepAllRebuildsFromPlanDataAndSlot) {
@@ -239,7 +239,7 @@ TEST(ProjectE2E, FilterKeepAllRebuildsFromPlanDataAndSlot) {
     ASSERT_TRUE(filter);
 
     std::vector<TGeneratedKernel> kernels;
-    auto built = BuildFilterRuntimeProcess(*filter.Cast(),
+    auto built = BuildFilterPlan(*filter.Cast(),
         filter.Cast()->Input()->OutputColumns(), {.Sink = &kernels});
     ASSERT_EQ(kernels.size(), 1u);
     EXPECT_FALSE(built.Plan.KeptInputColumns);
@@ -258,14 +258,13 @@ TEST(ProjectE2E, ProjectWithoutComputedColumnsRebuildsFromPlanData) {
     auto project = TMaybeOp<TProjectOperator>(root);
     ASSERT_TRUE(project);
 
-    auto built = BuildProjectRuntimeProcess(*project.Cast(),
+    auto built = BuildProjectPlan(*project.Cast(),
         project.Cast()->Input()->OutputColumns(), {});
     EXPECT_FALSE(built.Plan.Kernel);
 
     auto rebuilt = MakeProjectProcess(built.Plan, TKernelCompiler::TProjectDispatch{});
-    const auto expected = RunProcess(built.Process, data.Batch());
-    EXPECT_FALSE(expected.empty());
-    EXPECT_EQ(RunProcess(rebuilt, data.Batch()), expected);
+    EXPECT_EQ(RunProcess(rebuilt, data.Batch()),
+        (std::vector<std::vector<int64_t>>{{10, 1}, {20, 3}, {30, 5}, {40, 2}}));
 }
 
 TEST(ProjectE2E, IdentZeroCopyPlusComputed) {

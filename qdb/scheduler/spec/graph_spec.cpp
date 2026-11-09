@@ -148,13 +148,54 @@ std::unique_ptr<ITask> MakeSortTask(
         std::move(code), std::move(state), input, output);
 }
 
+TUnaryStreamProcess BindProjectProcess(const TProjectPlanData& plan, const TNodeTaskContext& context)
+{
+    TKernelCompiler::TProjectDispatch dispatch;
+    if (!plan.Kernel && !plan.ComputedWidths.empty()) {
+        Invalid("a project with computed columns needs a kernel");
+    }
+    if (plan.Kernel) {
+        dispatch = BindProject(SlotAt(context, *plan.Kernel), context.Runtime);
+        dispatch.Kernel = *plan.Kernel;
+    }
+    return MakeProjectProcess(plan, std::move(dispatch));
+}
+
 std::unique_ptr<ITask> MakeAggregateTask(
     const TAggregateNode& node, const std::vector<IConnection*>& connections, const TNodeTaskContext& context)
 {
     auto state = std::make_shared<NLowering::TAggregateBlockingState>(
         BindAggregateKernels(SlotAt(context, node.Meta.Kernel), node.Meta), node.Table);
     return std::make_unique<TBlockingTask>(
-        NLowering::MakeAggregateBlockingCode(), std::move(state),
+        NLowering::MakeAggregateBlockingCode<NLowering::TAggregateBlockingState>(), std::move(state),
+        InputPort(connections, node.In), OutputPort(connections, node.Out));
+}
+
+std::unique_ptr<ITask> MakePartialAggregateTask(
+    const TPartialAggregateNode& node, const std::vector<IConnection*>& connections,
+    const TNodeTaskContext& context)
+{
+    TUnaryStreamProcess passThrough;
+    if (node.PassThrough) {
+        passThrough = BindProjectProcess(*node.PassThrough, context);
+    }
+    auto state = std::make_shared<NLowering::TPartialAggregateBlockingState>(
+        BindAggregateKernels(SlotAt(context, node.Meta.Kernel), node.Meta), node.Table, node.Policy,
+        std::move(passThrough));
+    return std::make_unique<TBlockingTask>(
+        NLowering::MakePartialAggregateBlockingCode(), std::move(state),
+        InputPort(connections, node.In), OutputPort(connections, node.Out));
+}
+
+std::unique_ptr<ITask> MakeGroupingSetsAggregateTask(
+    const TGroupingSetsAggregateNode& node, const std::vector<IConnection*>& connections,
+    const TNodeTaskContext& context)
+{
+    auto state = std::make_shared<NLowering::TGroupingSetsBlockingState>(
+        BindAggregateKernels(SlotAt(context, node.Meta.Kernel), node.Meta), node.Table, node.Sets,
+        node.NumKeys);
+    return std::make_unique<TBlockingTask>(
+        NLowering::MakeAggregateBlockingCode<NLowering::TGroupingSetsBlockingState>(), std::move(state),
         InputPort(connections, node.In), OutputPort(connections, node.Out));
 }
 
@@ -245,16 +286,8 @@ std::unique_ptr<ITask> MakeNodeTask(
                 MakeFilterProcess(node.Plan, std::move(dispatch)),
                 InputPort(connections, node.In), OutputPort(connections, node.Out));
         } else if constexpr (std::is_same_v<TNode, TProjectNode>) {
-            TKernelCompiler::TProjectDispatch dispatch;
-            if (!node.Plan.Kernel && !node.Plan.ComputedWidths.empty()) {
-                Invalid("a project with computed columns needs a kernel");
-            }
-            if (node.Plan.Kernel) {
-                dispatch = BindProject(SlotAt(context, *node.Plan.Kernel), context.Runtime);
-                dispatch.Kernel = *node.Plan.Kernel;
-            }
             return MakeProcessTask(
-                MakeProjectProcess(node.Plan, std::move(dispatch)),
+                BindProjectProcess(node.Plan, context),
                 InputPort(connections, node.In), OutputPort(connections, node.Out));
         } else if constexpr (std::is_same_v<TNode, TSortNode>) {
             return MakeSortTask(
@@ -280,6 +313,10 @@ std::unique_ptr<ITask> MakeNodeTask(
                 InputPort(connections, node.In), OutputPort(connections, node.Out));
         } else if constexpr (std::is_same_v<TNode, TAggregateNode>) {
             return MakeAggregateTask(node, connections, context);
+        } else if constexpr (std::is_same_v<TNode, TPartialAggregateNode>) {
+            return MakePartialAggregateTask(node, connections, context);
+        } else if constexpr (std::is_same_v<TNode, TGroupingSetsAggregateNode>) {
+            return MakeGroupingSetsAggregateTask(node, connections, context);
         } else if constexpr (std::is_same_v<TNode, THashShuffleNode>) {
             return MakeHashShuffleTask(node, connections, context, nullptr);
         } else if constexpr (std::is_same_v<TNode, THashJoinNode>) {

@@ -217,6 +217,52 @@ struct TAggregateNode {
     }
 };
 
+// The partial phase of a grouped cascade: a bounded aggregate that hands its
+// rows through PassThrough once hashing stops paying off.
+struct TPartialAggregateNode {
+    TPortSpec In;
+    TPortSpec Out;
+    TAggregateKernelMeta Meta;
+    TAggregateTablePlan Table;
+    TPartialAggregatePolicy Policy;
+    // Turns input rows into single-row partial states; without it the table
+    // is only bounded.
+    std::optional<TProjectPlanData> PassThrough;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.In);
+        v(self.Out);
+        v(self.Meta);
+        v(self.Table);
+        v(self.Policy);
+        v(self.PassThrough);
+    }
+};
+
+// One aggregate table over all grouping sets: each batch is replayed once per
+// set, with the keys outside the set masked NULL.
+struct TGroupingSetsAggregateNode {
+    TPortSpec In;
+    TPortSpec Out;
+    TAggregateKernelMeta Meta;
+    TAggregateTablePlan Table;
+    // The key indexes of each set.
+    std::vector<std::vector<size_t>> Sets;
+    // The leading input columns that are group keys.
+    size_t NumKeys = 0;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.In);
+        v(self.Out);
+        v(self.Meta);
+        v(self.Table);
+        v(self.Sets);
+        v(self.NumKeys);
+    }
+};
+
 // Partitions its input by the hash of the keys: an aggregate hash or one side
 // of a join hash.
 struct THashShuffleNode {
@@ -427,7 +473,8 @@ using TNodeBody = std::variant<
     TParquetScanNode, TFilterNode, TProjectNode, TSortNode, TSortMergeNode,
     TWindowNode, TAggregateNode, THashShuffleNode, THashJoinNode, TRowJoinNode,
     TCrossJoinNode, TLimitNode, TLateLookupNode, TLateMergeNode,
-    TCteProducerNode, TCtePublishNode, TCteConsumerNode>;
+    TCteProducerNode, TCtePublishNode, TCteConsumerNode, TPartialAggregateNode,
+    TGroupingSetsAggregateNode>;
 
 struct TNodeSpec {
     uint64_t ExecStageId = InvalidExecStageId;
