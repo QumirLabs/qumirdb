@@ -16,11 +16,16 @@ namespace {
 using NQdb::TColumn;
 using NQdb::TRowSet;
 using NQdb::TValueLayout;
+using NQdb::NRemote::ERemoteEndpointKind;
 using NQdb::NRemote::TComputeError;
 using NQdb::NRemote::TDataChunk;
+using NQdb::NRemote::TRemoteEndpoint;
 using NQdb::NRemote::TSpawnComputeActorResponse;
+using NQdb::NRemote::TTaskGraphMessage;
 
 constexpr size_t MaxPayloadSize = std::numeric_limits<uint32_t>::max();
+// Id, kind, peer actor (node, actor, cookie) and peer task.
+constexpr size_t EndpointSize = 8 + 1 + 2 + 4 + 2 + 8;
 
 [[noreturn]] void Invalid(std::string_view reason) {
     throw std::runtime_error("invalid distributed message: " + std::string(reason));
@@ -428,6 +433,53 @@ void DeserializeFromStream(TComputeError& message, std::istringstream& input) {
     TReader reader(input);
     TComputeError result;
     result.Message = reader.Bytes(reader.Value<uint32_t>());
+    reader.Finish();
+    message = std::move(result);
+}
+
+template<>
+void SerializeToStream(const TTaskGraphMessage& message, std::ostringstream& output) {
+    TWriter writer(output);
+    writer.Value<uint32_t>(ByteSize(message.Spec.size(), 1));
+    writer.Bytes(message.Spec.data(), message.Spec.size());
+    if (message.Endpoints.size() > MaxPayloadSize / EndpointSize) {
+        Invalid("too many endpoints");
+    }
+    writer.Value<uint32_t>(message.Endpoints.size());
+    for (const auto& endpoint : message.Endpoints) {
+        writer.Value<uint64_t>(endpoint.Id);
+        writer.Value<uint8_t>(static_cast<uint8_t>(endpoint.Kind));
+        writer.Value<uint16_t>(endpoint.PeerActor.NodeId());
+        writer.Value<uint32_t>(endpoint.PeerActor.ActorId());
+        writer.Value<uint16_t>(endpoint.PeerActor.Cookie());
+        writer.Value<uint64_t>(endpoint.PeerTaskId);
+    }
+}
+
+template<>
+void DeserializeFromStream(TTaskGraphMessage& message, std::istringstream& input) {
+    TReader reader(input);
+    TTaskGraphMessage result;
+    result.Spec = reader.Bytes(reader.Value<uint32_t>());
+    const auto count = reader.Value<uint32_t>();
+    if (count > reader.Remaining() / EndpointSize) {
+        Invalid("truncated endpoint list");
+    }
+    result.Endpoints.reserve(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        TRemoteEndpoint endpoint{.Id = reader.Value<uint64_t>()};
+        const auto kind = reader.Value<uint8_t>();
+        if (kind > static_cast<uint8_t>(ERemoteEndpointKind::Sink)) {
+            Invalid("invalid endpoint kind");
+        }
+        endpoint.Kind = static_cast<ERemoteEndpointKind>(kind);
+        const auto node = reader.Value<uint16_t>();
+        const auto actor = reader.Value<uint32_t>();
+        const auto cookie = reader.Value<uint16_t>();
+        endpoint.PeerActor = TActorId(node, actor, cookie);
+        endpoint.PeerTaskId = reader.Value<uint64_t>();
+        result.Endpoints.push_back(endpoint);
+    }
     reader.Finish();
     message = std::move(result);
 }
