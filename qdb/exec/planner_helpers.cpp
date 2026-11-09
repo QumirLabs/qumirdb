@@ -490,7 +490,7 @@ std::string_view JoinBuildSideName(EJoinBuildSide side) {
     return "auto";
 }
 
-TFilterRuntimeProcess BuildFilterRuntimeProcess(
+TFilterPlan BuildFilterPlan(
     TFilterOperator& filter,
     const NQumir::NAst::TTypePtr& inputType,
     TKernelCompilerOptions options)
@@ -677,7 +677,7 @@ TProjectColumnPlan BuildProjectColumnPlan(
     return plan;
 }
 
-TProjectRuntimeProcess BuildProjectRuntimeProcess(
+TProjectPlan BuildProjectPlan(
     TProjectOperator& project,
     const NQumir::NAst::TTypePtr& inputType,
     TKernelCompilerOptions options)

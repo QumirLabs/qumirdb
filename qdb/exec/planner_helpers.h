@@ -24,13 +24,13 @@
 namespace NQdb {
 
 // The filter plan data and output type; the process is built from a kernel slot.
-struct TFilterRuntimeProcess {
+struct TFilterPlan {
     NQumir::NAst::TTypePtr OutputType;
     TFilterPlanData Plan;
 };
 
 // The project plan data and output type; the process is built from a kernel slot.
-struct TProjectRuntimeProcess {
+struct TProjectPlan {
     NQumir::NAst::TTypePtr OutputType;
     TProjectPlanData Plan;
 };
@@ -162,12 +162,12 @@ bool RowJoinTableServes(
     EJoinBuildSide buildSide);
 std::string_view JoinBuildSideName(EJoinBuildSide side);
 
-TFilterRuntimeProcess BuildFilterRuntimeProcess(
+TFilterPlan BuildFilterPlan(
     TFilterOperator& filter,
     const NQumir::NAst::TTypePtr& inputType,
     TKernelCompilerOptions options);
 
-TProjectRuntimeProcess BuildProjectRuntimeProcess(
+TProjectPlan BuildProjectPlan(
     TProjectOperator& project,
     const NQumir::NAst::TTypePtr& inputType,
     TKernelCompilerOptions options);

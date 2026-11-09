@@ -197,7 +197,7 @@ TEST(ProjectE2E, FilterRebuildsFromPlanDataAndSlot) {
     ASSERT_TRUE(filter);
 
     std::vector<TGeneratedKernel> kernels;
-    auto built = BuildFilterRuntimeProcess(*filter.Cast(),
+    auto built = BuildFilterPlan(*filter.Cast(),
         filter.Cast()->Input()->OutputColumns(), {.Sink = &kernels});
     ASSERT_EQ(kernels.size(), 1u);
     EXPECT_EQ(built.Plan.Kernel, 0u);
@@ -218,7 +218,7 @@ TEST(ProjectE2E, ProjectRebuildsFromPlanDataAndSlot) {
     ASSERT_TRUE(project);
 
     std::vector<TGeneratedKernel> kernels;
-    auto built = BuildProjectRuntimeProcess(*project.Cast(),
+    auto built = BuildProjectPlan(*project.Cast(),
         project.Cast()->Input()->OutputColumns(), {.Sink = &kernels});
     ASSERT_EQ(kernels.size(), 1u);
     ASSERT_TRUE(built.Plan.Kernel);
@@ -239,7 +239,7 @@ TEST(ProjectE2E, FilterKeepAllRebuildsFromPlanDataAndSlot) {
     ASSERT_TRUE(filter);
 
     std::vector<TGeneratedKernel> kernels;
-    auto built = BuildFilterRuntimeProcess(*filter.Cast(),
+    auto built = BuildFilterPlan(*filter.Cast(),
         filter.Cast()->Input()->OutputColumns(), {.Sink = &kernels});
     ASSERT_EQ(kernels.size(), 1u);
     EXPECT_FALSE(built.Plan.KeptInputColumns);
@@ -258,7 +258,7 @@ TEST(ProjectE2E, ProjectWithoutComputedColumnsRebuildsFromPlanData) {
     auto project = TMaybeOp<TProjectOperator>(root);
     ASSERT_TRUE(project);
 
-    auto built = BuildProjectRuntimeProcess(*project.Cast(),
+    auto built = BuildProjectPlan(*project.Cast(),
         project.Cast()->Input()->OutputColumns(), {});
     EXPECT_FALSE(built.Plan.Kernel);
 

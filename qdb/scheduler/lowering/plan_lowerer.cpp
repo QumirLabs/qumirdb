@@ -147,7 +147,7 @@ TUnaryNodeStage<NScheduler::TFilterNode> BuildSchedulerFilterStage(
     const NQumir::NAst::TTypePtr& inputType,
     TKernelCompilerOptions options)
 {
-    auto runtime = BuildFilterRuntimeProcess(
+    auto runtime = BuildFilterPlan(
         filter, inputType, std::move(options));
     return {
         .Node = {.Plan = std::move(runtime.Plan)},
@@ -160,7 +160,7 @@ TUnaryNodeStage<NScheduler::TProjectNode> BuildSchedulerProjectStage(
     const NQumir::NAst::TTypePtr& inputType,
     TKernelCompilerOptions options)
 {
-    auto runtime = BuildProjectRuntimeProcess(
+    auto runtime = BuildProjectPlan(
         project, inputType, std::move(options));
     return {
         .Node = {.Plan = std::move(runtime.Plan)},
@@ -1188,7 +1188,7 @@ private:
 
     // Gathers the lanes of `child` into one task of the stage.
     template <typename TStageBuilder>
-    TLoweredOutput LowerBlockingNode(
+    TLoweredOutput LowerBlocking(
         const TOperatorPtr& child,
         std::string stageKind,
         std::string stageGroup,
@@ -1375,7 +1375,7 @@ private:
 
         std::optional<TProjectPlanData> passThrough;
         if (auto project = BuildAggregatePassThroughOperator(aggregate)) {
-            auto runtime = BuildProjectRuntimeProcess(
+            auto runtime = BuildProjectPlan(
                 *project, childType, KernelOptions(stage, execStageId));
             // The projection must produce exactly the rows the table emits; a
             // partial aggregate without it still reduces, it only never hands
@@ -1711,7 +1711,7 @@ private:
                 &aggregate, EExecPlanNodeKind::Aggregate);
             auto group = StageLabel("aggregate", execStageId);
             if (!aggregate.GroupingSets().empty()) {
-                return LowerBlockingNode(
+                return LowerBlocking(
                     aggregate.Input(),
                     "aggregate",
                     group,
@@ -1723,7 +1723,7 @@ private:
                     outConn,
                     outLaneOffset);
             }
-            return LowerBlockingNode(
+            return LowerBlocking(
                 aggregate.Input(),
                 "aggregate",
                 group,
@@ -1752,7 +1752,7 @@ private:
             auto execStageId = NewExecStage(
                 &aggregate, EExecPlanNodeKind::Aggregate);
             auto group = StageLabel("aggregate", execStageId);
-            return LowerBlockingNode(
+            return LowerBlocking(
                 aggregate.Input(),
                 "aggregate",
                 group,
@@ -1831,7 +1831,7 @@ private:
     {
         const auto execStageId = NewExecStage(
             &limit, EExecPlanNodeKind::Limit);
-        return LowerBlockingNode(
+        return LowerBlocking(
             limit.Input(),
             "limit",
             StageLabel("limit", execStageId),
@@ -2041,7 +2041,7 @@ private:
                 ? EExecPlanNodeKind::TopSort
                 : EExecPlanNodeKind::Sort);
         auto group = StageLabel(kernelName, execStageId);
-        return LowerBlockingNode(
+        return LowerBlocking(
             input,
             std::string(kernelName),
             group,
@@ -2571,7 +2571,7 @@ private:
         const auto windowGroup = StageLabel("window", execStageId);
 
         if (childLanes <= 1 || window.PartitionKeys().empty()) {
-            return LowerBlockingNode(
+            return LowerBlocking(
                 window.Input(),
                 "window",
                 windowGroup,
