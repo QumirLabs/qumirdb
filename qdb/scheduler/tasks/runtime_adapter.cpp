@@ -352,6 +352,12 @@ TRuntimeFilterTask::~TRuntimeFilterTask() {
     }
 }
 
+void TRuntimeFilterTask::BindCode(std::shared_ptr<const TRuntimeFilterCode> code)
+{
+    assert(!Code_);
+    Code_ = std::move(code);
+}
+
 bool TRuntimeFilterTask::WantsInput(const TTaskEdge& edge) const noexcept {
     switch (Code_->AuxInput->Poll()) {
         case EAuxInputStatus::Ready:

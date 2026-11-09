@@ -1,6 +1,7 @@
 #pragma once
 
 #include <qdb/exec/plan_data.h>
+#include <qdb/exec/runtime_filter.h>
 #include <qdb/io/io.h>
 #include <qdb/io/parquet/source.h>
 #include <qdb/kernel/regex.h>
@@ -19,7 +20,6 @@
 
 namespace NQdb {
 
-class IRuntimeFilterProducer;
 struct TKernelSlot;
 struct TRuntimeContext;
 
@@ -277,7 +277,10 @@ struct THashShuffleNode {
     uint64_t TargetOutputBatchRows = 0;
     uint64_t MaxOutputBatchRows = 0;
     uint64_t TargetOutputBatchBytes = 0;
+    // Reuses the hashes a runtime filter task left on the input for this key.
     bool UseInputHash = false;
+    // The runtime filter this build lane publishes a partial into.
+    std::optional<uint32_t> ProducedFilter;
 
     void Fields(this auto& self, auto& v)
     {
@@ -290,6 +293,7 @@ struct THashShuffleNode {
         v(self.MaxOutputBatchRows);
         v(self.TargetOutputBatchBytes);
         v(self.UseInputHash);
+        v(self.ProducedFilter);
     }
 };
 
@@ -468,13 +472,51 @@ struct TCteConsumerNode {
     }
 };
 
+// A runtime filter of a join: every build lane publishes one partial into it,
+// the filter tasks probe it. Created through the binding factory.
+struct TRuntimeFilterBindingSpec {
+    // Query-scoped; a factory may bind it to a remote filter.
+    uint32_t Id = 0;
+    uint32_t ProducerCount = 0;
+    uint64_t BloomBytes = 0;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.Id);
+        v(self.ProducerCount);
+        v(self.BloomBytes);
+    }
+};
+
+// Passes the rows of In whose key hash Filter may contain, once the filter is
+// published. AuxProducers are the build lanes it waits for; they may follow it
+// in the graph, so BindRuntimeFilterTask binds the task after every node exists.
+struct TRuntimeFilterNode {
+    TPortSpec In;
+    TPortSpec Out;
+    // The probe side of a join hash over In's key columns.
+    TJoinHashPlanData Hash;
+    uint32_t Filter = 0;
+    // Node indices.
+    std::vector<uint32_t> AuxProducers;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.In);
+        v(self.Out);
+        v(self.Hash);
+        v(self.Filter);
+        v(self.AuxProducers);
+    }
+};
+
 using TNodeBody = std::variant<
     TForwardNode, TRemoteSourceNode, TRemoteSinkNode, TSinkWriterNode,
     TParquetScanNode, TFilterNode, TProjectNode, TSortNode, TSortMergeNode,
     TWindowNode, TAggregateNode, THashShuffleNode, THashJoinNode, TRowJoinNode,
     TCrossJoinNode, TLimitNode, TLateLookupNode, TLateMergeNode,
     TCteProducerNode, TCtePublishNode, TCteConsumerNode, TPartialAggregateNode,
-    TGroupingSetsAggregateNode>;
+    TGroupingSetsAggregateNode, TRuntimeFilterNode>;
 
 struct TNodeSpec {
     uint64_t ExecStageId = InvalidExecStageId;
@@ -537,6 +579,10 @@ struct TGraphSpec {
     // Shared by the CTE records, which index them.
     std::vector<TCteSpoolSpec> CteSpools;
     std::vector<TCteConsumerStateSpec> CteConsumerStates;
+    // The runtime-filter kernel; required when there are runtime filters.
+    std::optional<uint32_t> RuntimeFilterKernel;
+    // Shared by the runtime filter and build shuffle records, which index them.
+    std::vector<TRuntimeFilterBindingSpec> RuntimeFilterBindings;
 
     void Fields(this auto& self, auto& v)
     {
@@ -547,6 +593,8 @@ struct TGraphSpec {
         v(self.Regexes);
         v(self.CteSpools);
         v(self.CteConsumerStates);
+        v(self.RuntimeFilterKernel);
+        v(self.RuntimeFilterBindings);
     }
 };
 
@@ -568,6 +616,8 @@ struct TNodeTaskContext {
     // a context lives only while its graph is built.
     std::vector<std::shared_ptr<TCteSpool>> CteSpools;
     std::vector<std::shared_ptr<TCteConsumerState>> CteConsumerStates;
+    // Created from the runtime filter table, by index.
+    std::vector<TRuntimeFilterBinding> RuntimeFilterBindings;
 };
 
 // Builds the CTE spools and consumer states of the tables past those the
@@ -577,31 +627,43 @@ void AppendCteObjects(
     const std::vector<TCteSpoolSpec>& spools, const std::vector<TCteConsumerStateSpec>& states,
     TNodeTaskContext& context);
 
+// Creates the runtime filters of the table past those the context already
+// holds through `factory`, over the context's runtime. Throws
+// std::runtime_error on an incomplete binding.
+void AppendRuntimeFilterBindings(
+    const std::vector<TRuntimeFilterBindingSpec>& filters, IRuntimeFilterBindingFactory& factory,
+    TNodeTaskContext& context);
+
 // Builds the task of one node; port connections index `connections`. The
-// lowerer builds the tasks of these kinds through this too. Throws
-// std::runtime_error on an invalid body.
+// lowerer builds the tasks of these kinds through this too. A runtime filter
+// task stays unbound until BindRuntimeFilterTask. Throws std::runtime_error on
+// an invalid body.
 std::unique_ptr<ITask> MakeNodeTask(
     const TNodeBody& body, const std::vector<IConnection*>& connections, TNodeTaskContext& context);
 
-// The task of a hash shuffle node that also publishes `producedFilter`. The
-// lowerer keeps no record for it while runtime filters have none.
-std::unique_ptr<ITask> MakeHashShuffleTask(
-    const THashShuffleNode& node, const std::vector<IConnection*>& connections,
-    const TNodeTaskContext& context, std::shared_ptr<IRuntimeFilterProducer> producedFilter);
+// Binds the task MakeNodeTask built for `node` to its filter, its hash and its
+// producers, which index the nodes of `graph`. Throws std::runtime_error on an
+// invalid record.
+void BindRuntimeFilterTask(
+    const TRuntimeFilterNode& node, TTaskNode& task, const TTaskGraph& graph,
+    const TNodeTaskContext& context);
 
 // Builds an unsealed graph: node i has ExecutionSlot i. Remote source and sink
 // tasks have empty code, which the compute actor binds. `sink` is required for
 // SinkWriter nodes; `slots` are the query's kernel slots by kernel index. The
-// runtime context is rebuilt from the spec's regexes and the CTE objects from
-// its CTE tables. Throws std::runtime_error on an invalid spec.
+// runtime context is rebuilt from the spec's regexes and runtime-filter kernel,
+// the CTE objects from its CTE tables, and the runtime filters through
+// `filterBindings` (local filters by default). Throws std::runtime_error on an
+// invalid spec.
 std::unique_ptr<TTaskGraph> MaterializeGraph(
     const TGraphSpec& spec, ISink* sink = nullptr,
-    std::vector<std::shared_ptr<TKernelSlot>> slots = {});
+    std::vector<std::shared_ptr<TKernelSlot>> slots = {},
+    std::shared_ptr<IRuntimeFilterBindingFactory> filterBindings = nullptr);
 
 // Reads connections, edges and externals from a graph built by MaterializeGraph
 // or by hand. The caller supplies the node records, one per graph node in
 // order. Externals keep the graph's current order (sorted by id after Seal);
-// regexes and CTE tables are left to the caller.
+// regexes, CTE and runtime filter tables are left to the caller.
 // Throws std::runtime_error for a connection that is not a local one and for a
 // rowset edge without a connection.
 TGraphSpec ExtractGraphSpec(const TTaskGraph& graph, std::vector<TNodeSpec> nodes);

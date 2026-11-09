@@ -58,6 +58,9 @@ struct TLoweredPlan {
     // The graph spec's CTE tables, which the CTE records index.
     std::vector<TCteSpoolSpec> CteSpools;
     std::vector<TCteConsumerStateSpec> CteConsumerStates;
+    // The graph spec's runtime filter table, which the filter and build
+    // shuffle records index.
+    std::vector<TRuntimeFilterBindingSpec> RuntimeFilterBindings;
 };
 
 // Choose hash-shuffle fanout for a plain grouped aggregate. Explicit shuffle

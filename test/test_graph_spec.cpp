@@ -676,6 +676,66 @@ TEST(GraphSpec, CteRecordsAndTablesRoundTrip)
     EXPECT_EQ(consumer.State, 2u);
 }
 
+TEST(GraphSpec, RuntimeFilterRecordsAndTableRoundTrip)
+{
+    using namespace NQumir::NAst;
+    TGraphSpec spec;
+    spec.RuntimeFilterKernel = 11;
+    spec.RuntimeFilterBindings = {
+        {.Id = 3, .ProducerCount = 4, .BloomBytes = 1u << 21},
+        {.Id = 9, .ProducerCount = 1, .BloomBytes = 64},
+    };
+    spec.Nodes.push_back(Node("runtime-filter", "runtime-filter 9", TRuntimeFilterNode{
+        .In = {0, 2},
+        .Out = {1, 3},
+        .Hash = {.Kernel = 5, .Entry = 1, .KeyColumns = {2, 0}},
+        .Filter = 1,
+        .AuxProducers = {7, 8, 9},
+    }));
+    spec.Nodes.push_back(Node("hash-shuffle", "join-right-repartition", THashShuffleNode{
+        .In = {2, 1},
+        .Out = 3,
+        .Hash = TJoinHashPlanData{.Kernel = 5, .Entry = 1, .KeyColumns = {0}},
+        .InputType = std::make_shared<TStructType>(std::vector<std::pair<std::string, TTypePtr>>{
+            {"k", std::make_shared<TIntegerType>(TIntegerType::I64)},
+        }),
+        .ProducedFilter = 0,
+    }));
+
+    const auto bytes = SerializeGraphSpec(spec);
+    const auto back = DeserializeGraphSpec(bytes);
+    EXPECT_EQ(SerializeGraphSpec(back), bytes);
+    for (size_t size = 0; size < bytes.size(); ++size) {
+        EXPECT_THROW(DeserializeGraphSpec(std::string_view(bytes).substr(0, size)),
+            std::runtime_error) << size;
+    }
+
+    ASSERT_TRUE(back.RuntimeFilterKernel);
+    EXPECT_EQ(*back.RuntimeFilterKernel, 11u);
+    ASSERT_EQ(back.RuntimeFilterBindings.size(), 2u);
+    EXPECT_EQ(back.RuntimeFilterBindings[0].Id, 3u);
+    EXPECT_EQ(back.RuntimeFilterBindings[0].ProducerCount, 4u);
+    EXPECT_EQ(back.RuntimeFilterBindings[0].BloomBytes, 1u << 21);
+    EXPECT_EQ(back.RuntimeFilterBindings[1].Id, 9u);
+    EXPECT_EQ(back.RuntimeFilterBindings[1].BloomBytes, 64u);
+
+    ASSERT_EQ(back.Nodes.size(), 2u);
+    const auto& filter = std::get<TRuntimeFilterNode>(back.Nodes[0].Body);
+    EXPECT_EQ(filter.In.Lane, 2u);
+    EXPECT_EQ(filter.Out.Connection, 1u);
+    EXPECT_EQ(filter.Out.Lane, 3u);
+    EXPECT_EQ(filter.Hash.Kernel, 5u);
+    EXPECT_EQ(filter.Hash.Entry, 1u);
+    EXPECT_EQ(filter.Hash.KeyColumns, (std::vector<int64_t>{2, 0}));
+    EXPECT_EQ(filter.Filter, 1u);
+    EXPECT_EQ(filter.AuxProducers, (std::vector<uint32_t>{7, 8, 9}));
+
+    const auto& shuffle = std::get<THashShuffleNode>(back.Nodes[1].Body);
+    ASSERT_TRUE(shuffle.ProducedFilter);
+    EXPECT_EQ(*shuffle.ProducedFilter, 0u);
+    EXPECT_FALSE(shuffle.UseInputHash);
+}
+
 TEST(GraphSpec, MaterializedGraphMatchesHandBuiltGraph)
 {
     TCountingSink sink;
@@ -833,6 +893,22 @@ TEST(GraphSpec, RejectsInvalidSpecs)
     spec.Nodes[1].Body = TPartialAggregateNode{
         .In = {0, 0}, .Out = {1, 0}, .PassThrough = TProjectPlanData{.ComputedWidths = {8}}};
     EXPECT_THROW(MaterializeGraph(spec, &sink, slots), std::runtime_error);
+
+    // Runtime filters need the runtime-filter kernel; records index the filter
+    // table and the nodes.
+    spec = FanOutSpec();
+    spec.RuntimeFilterBindings = {{.Id = 3, .ProducerCount = 1}};
+    EXPECT_THROW(MaterializeGraph(spec, &sink, slots), std::runtime_error);
+    spec.RuntimeFilterKernel = 0;
+    EXPECT_NO_THROW(MaterializeGraph(spec, &sink, slots));
+    spec.Nodes[1].Body = THashShuffleNode{.In = {0, 0}, .Out = 0, .ProducedFilter = 1};
+    EXPECT_THROW(MaterializeGraph(spec, &sink, slots), std::runtime_error);
+    spec.Nodes[1].Body = TRuntimeFilterNode{.In = {0, 0}, .Out = {1, 0}, .Filter = 1};
+    EXPECT_THROW(MaterializeGraph(spec, &sink, slots), std::runtime_error);
+    spec.Nodes[1].Body = TRuntimeFilterNode{.In = {0, 0}, .Out = {1, 0}, .AuxProducers = {4}};
+    EXPECT_THROW(MaterializeGraph(spec, &sink, slots), std::runtime_error);
+    spec.Nodes[1].Body = TRuntimeFilterNode{.In = {0, 0}, .Out = {1, 0}, .AuxProducers = {3}};
+    EXPECT_NO_THROW(MaterializeGraph(spec, &sink, slots));
 }
 
 TEST(GraphSpec, ForwardChainRunsRows)

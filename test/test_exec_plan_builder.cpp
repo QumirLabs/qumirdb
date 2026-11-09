@@ -95,10 +95,14 @@ public:
         uint32_t id, size_t producerCount, size_t bloomBytes,
         std::shared_ptr<TRuntimeContext> runtimeContext) override {
         Created.emplace_back(id, producerCount);
-        return Local_.Create(id, producerCount, bloomBytes, std::move(runtimeContext));
+        auto binding = Local_.Create(id, producerCount, bloomBytes, std::move(runtimeContext));
+        Filters.push_back(std::static_pointer_cast<TRuntimeFilter>(binding.Probe));
+        return binding;
     }
 
     std::vector<std::pair<uint32_t, size_t>> Created;
+    // Kept for their counters.
+    std::vector<std::shared_ptr<TRuntimeFilter>> Filters;
 
 private:
     TLocalRuntimeFilterBindingFactory Local_;
@@ -132,7 +136,8 @@ bool HasRuntimeFilterUse(const TOperatorPtr& node) {
 
 TOperatorPtr BuildSqlPlan(
     std::string_view sql,
-    const std::unordered_map<std::string, ISource*>& sources)
+    const std::unordered_map<std::string, ISource*>& sources,
+    TPlanPassOptions passes = {.EnableCbo = false})
 {
     std::istringstream input{std::string(sql)};
     NSql::TTokenStream tokens(input);
@@ -156,7 +161,7 @@ TOperatorPtr BuildSqlPlan(
         throw std::runtime_error(plan.error().ToString());
     }
     auto root = *plan;
-    ApplyPlanPasses(root, {.EnableCbo = false});
+    ApplyPlanPasses(root, std::move(passes));
     return root;
 }
 
@@ -375,17 +380,24 @@ TEST(ExecPlanBuilder, LowererUsesInjectedRuntimeFilterBindings) {
         }
     }
     EXPECT_EQ(dependencies, 16u);
-    // Runtime filters have no records yet, so the build shuffles that publish
-    // one have none either; the join tasks do.
+    // The build shuffles publish into the table entry the filter tasks probe;
+    // only the mock sources keep no record.
+    ASSERT_EQ(lowered.RuntimeFilterBindings.size(), 1u);
+    EXPECT_EQ(lowered.RuntimeFilterBindings[0].Id, 17u);
+    EXPECT_EQ(lowered.RuntimeFilterBindings[0].ProducerCount, 4u);
     const auto& nodes = lowered.Graph->Nodes();
+    ASSERT_EQ(lowered.NodeSpecs.size(), nodes.size());
     size_t buildShuffles = 0;
     for (size_t i = 0; i < nodes.size(); ++i) {
-        const bool recorded = i < lowered.NodeSpecs.size() && lowered.NodeSpecs[i];
+        const auto& record = lowered.NodeSpecs[i];
+        ASSERT_EQ(record.has_value(), nodes[i]->DebugKind != "source") << nodes[i]->DebugKind;
         if (nodes[i]->DebugLabel == "join-right-repartition") {
             ++buildShuffles;
-            EXPECT_FALSE(recorded);
-        } else if (nodes[i]->DebugKind == "join") {
-            EXPECT_TRUE(recorded);
+            const auto& filter = std::get<NScheduler::THashShuffleNode>(record->Body).ProducedFilter;
+            ASSERT_TRUE(filter);
+            EXPECT_EQ(*filter, 0u);
+        } else if (nodes[i]->DebugKind == "runtime-filter") {
+            EXPECT_EQ(std::get<NScheduler::TRuntimeFilterNode>(record->Body).Filter, 0u);
         }
     }
     EXPECT_EQ(buildShuffles, 4u);
@@ -642,15 +654,18 @@ std::vector<std::string> RunCsv(
 // Lowers `sql` over decimals.parquet, serializes the graph spec, runs the
 // original graph, then destroys the plan, the source and the lowered graph.
 // Only the bytes and the kernel slots survive, and the rebuilt graph must give
-// the same rows on both schedulers (in the same order when `ordered`).
+// the same rows on both schedulers (in the same order when `ordered`). The
+// rebuilt graphs create their runtime filters through `filterBindings`.
 std::vector<std::string> ExpectQueryFromSpec(
     const std::string& sql, const NScheduler::TSettings& settings, bool ordered,
-    const std::function<void(const NScheduler::TGraphSpec&)>& checkSpec)
+    const std::function<void(const NScheduler::TGraphSpec&)>& checkSpec,
+    TPlanPassOptions passes = {.EnableCbo = false},
+    std::shared_ptr<IRuntimeFilterBindingFactory> filterBindings = nullptr)
 {
     auto source = std::make_unique<TParquetSource>(
         QDB_TEST_DATA_DIR "/regtest/cases/decimal_parquet/tables/decimals.parquet");
     const std::unordered_map<std::string, ISource*> sources{{"t", source.get()}};
-    auto plan = BuildSqlPlan(sql, sources);
+    auto plan = BuildSqlPlan(sql, sources, std::move(passes));
     auto lowered = std::make_unique<NScheduler::TLoweredPlan>(
         NScheduler::LowerPlanToGraph(plan, settings, nullptr));
 
@@ -691,7 +706,7 @@ std::vector<std::string> ExpectQueryFromSpec(
     for (const auto& runSettings : {MultiSettings(), SingleSettings()}) {
         std::ostringstream rebuiltOut;
         TCsvSink rebuilt(schema, rebuiltOut);
-        auto graph = NScheduler::MaterializeGraph(decoded, &rebuilt, slots);
+        auto graph = NScheduler::MaterializeGraph(decoded, &rebuilt, slots, filterBindings);
         const auto got = RunCsv(*graph, rebuiltOut, runSettings, ordered);
         EXPECT_EQ(got, expected);
     }
@@ -972,8 +987,7 @@ std::vector<uint32_t> JoinHashEntries(const NScheduler::TGraphSpec& spec)
     return entries;
 }
 
-// These join queries place no runtime filter on a 256-row table, so every
-// node has a record.
+// The cost model places no runtime filter on these joins of the 256-row table.
 TEST(ExecPlanBuilder, HashJoinGraphRunsFromItsSerializedSpec) {
     auto settings = MultiSettings();
     // The symmetric table; the row table would take this inner join.
@@ -1014,6 +1028,82 @@ TEST(ExecPlanBuilder, CrossJoinGraphRunsFromItsSerializedSpec) {
             EXPECT_GT(CountNodes<NScheduler::TCrossJoinNode>(spec), 0u);
         });
     EXPECT_EQ(rows.size(), 1u + 15u);
+}
+
+// A forced runtime filter: the build shuffles of b publish it, and the filter
+// tasks on the scan lanes of a wait for them, then pass the matching rows.
+void ExpectRuntimeFilterJoinFromSpec(NScheduler::EJoinTableKind table)
+{
+    auto settings = MultiSettings();
+    settings.Join.Table = table;
+    auto bindings = std::make_shared<TRecordingFilterBindingFactory>();
+    const auto rows = ExpectQueryFromSpec(
+        "SELECT a.id, a.d9, b.s FROM t a JOIN (SELECT id, s FROM t WHERE id % 4 = 0) b ON a.id = b.id",
+        settings, false, [table](const NScheduler::TGraphSpec& spec) {
+            const bool legacy = table == NScheduler::EJoinTableKind::Legacy;
+            EXPECT_EQ(CountNodes<NScheduler::THashJoinNode>(spec), legacy ? 2u : 0u);
+            EXPECT_EQ(CountNodes<NScheduler::TRowJoinNode>(spec), legacy ? 0u : 2u);
+            ASSERT_EQ(spec.RuntimeFilterBindings.size(), 1u);
+            EXPECT_EQ(spec.RuntimeFilterBindings[0].ProducerCount, 4u);
+            EXPECT_TRUE(spec.RuntimeFilterKernel);
+            std::vector<uint32_t> producers;
+            std::vector<uint32_t> filters;
+            size_t hashReuses = 0;
+            for (uint32_t i = 0; i < spec.Nodes.size(); ++i) {
+                const auto& body = spec.Nodes[i].Body;
+                if (const auto* shuffle = std::get_if<NScheduler::THashShuffleNode>(&body)) {
+                    if (shuffle->ProducedFilter) {
+                        EXPECT_EQ(*shuffle->ProducedFilter, 0u);
+                        producers.push_back(i);
+                    }
+                    hashReuses += shuffle->UseInputHash;
+                } else if (std::holds_alternative<NScheduler::TRuntimeFilterNode>(body)) {
+                    filters.push_back(i);
+                }
+            }
+            EXPECT_EQ(producers.size(), 4u);
+            // The probe shuffles reuse the hashes of the filter tasks.
+            EXPECT_EQ(hashReuses, 4u);
+            ASSERT_EQ(filters.size(), 4u);
+            std::vector<std::pair<uint32_t, uint32_t>> expectedDependencies;
+            for (const auto producer : producers) {
+                for (const auto filter : filters) {
+                    expectedDependencies.emplace_back(producer, filter);
+                }
+            }
+            for (const auto i : filters) {
+                const auto& filter = std::get<NScheduler::TRuntimeFilterNode>(spec.Nodes[i].Body);
+                EXPECT_EQ(filter.Filter, 0u);
+                // The probe is the left input.
+                EXPECT_EQ(filter.Hash.Entry, 0u);
+                EXPECT_EQ(filter.AuxProducers, producers);
+            }
+            std::vector<std::pair<uint32_t, uint32_t>> dependencies;
+            for (const auto& edge : spec.Edges) {
+                if (edge.Kind == NScheduler::ETaskEdgeKind::Dependency) {
+                    EXPECT_FALSE(edge.Connection);
+                    dependencies.emplace_back(edge.Src, edge.Dst);
+                }
+            }
+            EXPECT_EQ(dependencies, expectedDependencies);
+        },
+        {.EnableCbo = false, .ForceRuntimeFilters = true}, bindings);
+    EXPECT_EQ(rows.size(), 1u + 64u);
+    // One filter per rebuilt graph; each rejects every probe row without a match.
+    ASSERT_EQ(bindings->Filters.size(), 2u);
+    for (const auto& filter : bindings->Filters) {
+        const auto stats = filter->StatsSnapshot();
+        EXPECT_EQ(stats.ProbeRows, 256u);
+        EXPECT_EQ(stats.RejectedRows, 256u - 64u);
+    }
+}
+
+TEST(ExecPlanBuilder, RuntimeFilterHashJoinGraphRunsFromItsSerializedSpec) {
+    ExpectRuntimeFilterJoinFromSpec(NScheduler::EJoinTableKind::Legacy);
+}
+
+TEST(ExecPlanBuilder, RuntimeFilterRowJoinGraphRunsFromItsSerializedSpec) {
+    ExpectRuntimeFilterJoinFromSpec(NScheduler::EJoinTableKind::Row);
 }
 
 // One spool of `segments` segments that `references` references read; each

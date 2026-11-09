@@ -199,18 +199,50 @@ std::unique_ptr<ITask> MakeGroupingSetsAggregateTask(
         InputPort(connections, node.In), OutputPort(connections, node.Out));
 }
 
+THashShuffleCode::THash BindJoinHashPlan(const TJoinHashPlanData& hash, const TNodeTaskContext& context)
+{
+    if (hash.Entry > 1) {
+        Invalid("a join hash entry is 0 (left) or 1 (right)");
+    }
+    return BindJoinHash(SlotAt(context, hash.Kernel), hash.Entry, hash.KeyColumns);
+}
+
 THashShuffleCode::THash BindShuffleHash(const THashShuffleNode::THash& hash, const TNodeTaskContext& context)
 {
     if (const auto* join = std::get_if<TJoinHashPlanData>(&hash)) {
-        if (join->Entry > 1) {
-            Invalid("a join hash entry is 0 (left) or 1 (right)");
-        }
-        return BindJoinHash(SlotAt(context, join->Kernel), join->Entry, join->KeyColumns);
+        return BindJoinHashPlan(*join, context);
     }
     const auto& aggregate = std::get<TAggregateHashPlanData>(hash);
     auto dispatch = BindAggregateHash(SlotAt(context, aggregate.Kernel), aggregate.KeyColumns);
     dispatch.Kernel = aggregate.Kernel;
     return dispatch;
+}
+
+const TRuntimeFilterBinding& RuntimeFilterAt(const TNodeTaskContext& context, uint32_t filter)
+{
+    if (filter >= context.RuntimeFilterBindings.size()) {
+        Invalid("runtime filter index is out of range");
+    }
+    return context.RuntimeFilterBindings[filter];
+}
+
+std::unique_ptr<ITask> MakeHashShuffleTask(
+    const THashShuffleNode& node, const std::vector<IConnection*>& connections,
+    const TNodeTaskContext& context)
+{
+    auto* output = dynamic_cast<THashShuffleConnection*>(&ConnectionAt(connections, node.Out));
+    if (!output) {
+        Invalid("a hash shuffle node needs a hash shuffle output");
+    }
+    auto code = std::make_shared<THashShuffleCode>(
+        BindShuffleHash(node.Hash, context), node.InputType,
+        node.TargetOutputBatchRows, node.MaxOutputBatchRows, node.TargetOutputBatchBytes);
+    if (node.ProducedFilter) {
+        code->ProducedFilter = RuntimeFilterAt(context, *node.ProducedFilter).Producer;
+    }
+    code->UseInputHash = node.UseInputHash;
+    return std::make_unique<THashShuffleTask>(
+        std::move(code), InputPort(connections, node.In), *output, node.SourceLane);
 }
 
 // Binary join code and its state over the node's ports.
@@ -318,7 +350,7 @@ std::unique_ptr<ITask> MakeNodeTask(
         } else if constexpr (std::is_same_v<TNode, TGroupingSetsAggregateNode>) {
             return MakeGroupingSetsAggregateTask(node, connections, context);
         } else if constexpr (std::is_same_v<TNode, THashShuffleNode>) {
-            return MakeHashShuffleTask(node, connections, context, nullptr);
+            return MakeHashShuffleTask(node, connections, context);
         } else if constexpr (std::is_same_v<TNode, THashJoinNode>) {
             return MakeJoinTask<NLowering::TSchedulerInnerJoinState>(
                 node, connections, BindJoinKernels(SlotAt(context, node.Kernels.Kernel), node.Kernels),
@@ -377,6 +409,9 @@ std::unique_ptr<ITask> MakeNodeTask(
             return std::make_unique<TCteConsumerTask>(
                 context.CteConsumerStates[node.State], InputPort(connections, node.In),
                 OutputPort(connections, node.Out));
+        } else if constexpr (std::is_same_v<TNode, TRuntimeFilterNode>) {
+            return std::make_unique<TRuntimeFilterTask>(
+                nullptr, InputPort(connections, node.In), OutputPort(connections, node.Out));
         } else if constexpr (std::is_same_v<TNode, TForwardNode>) {
             auto code = std::make_shared<TUnaryCode>([](void*, TRowSet&) {});
             return std::make_unique<TUnaryTask>(
@@ -419,21 +454,39 @@ void AppendCteObjects(
     }
 }
 
-std::unique_ptr<ITask> MakeHashShuffleTask(
-    const THashShuffleNode& node, const std::vector<IConnection*>& connections,
-    const TNodeTaskContext& context, std::shared_ptr<IRuntimeFilterProducer> producedFilter)
+void AppendRuntimeFilterBindings(
+    const std::vector<TRuntimeFilterBindingSpec>& filters, IRuntimeFilterBindingFactory& factory,
+    TNodeTaskContext& context)
 {
-    auto* output = dynamic_cast<THashShuffleConnection*>(&ConnectionAt(connections, node.Out));
-    if (!output) {
-        Invalid("a hash shuffle node needs a hash shuffle output");
+    for (size_t i = context.RuntimeFilterBindings.size(); i < filters.size(); ++i) {
+        const auto& filter = filters[i];
+        auto binding = factory.Create(filter.Id, filter.ProducerCount, filter.BloomBytes, context.Runtime);
+        if (!binding.Producer || !binding.Probe) {
+            throw std::runtime_error("runtime filter binding factory returned an incomplete binding");
+        }
+        context.RuntimeFilterBindings.push_back(std::move(binding));
     }
-    auto code = std::make_shared<THashShuffleCode>(
-        BindShuffleHash(node.Hash, context), node.InputType,
-        node.TargetOutputBatchRows, node.MaxOutputBatchRows, node.TargetOutputBatchBytes);
-    code->ProducedFilter = std::move(producedFilter);
-    code->UseInputHash = node.UseInputHash;
-    return std::make_unique<THashShuffleTask>(
-        std::move(code), InputPort(connections, node.In), *output, node.SourceLane);
+}
+
+void BindRuntimeFilterTask(
+    const TRuntimeFilterNode& node, TTaskNode& task, const TTaskGraph& graph,
+    const TNodeTaskContext& context)
+{
+    const auto& probe = RuntimeFilterAt(context, node.Filter).Probe;
+    auto auxInput = std::make_shared<TAuxInput>();
+    auxInput->AddFilter(probe);
+    for (const auto producer : node.AuxProducers) {
+        if (producer >= graph.Nodes().size()) {
+            Invalid("runtime filter producer index is out of range");
+        }
+        auxInput->AddProducer(*graph.Nodes()[producer]);
+    }
+    auto code = std::make_shared<TRuntimeFilterCode>(TRuntimeFilterCode{
+        .Hash = BindJoinHashPlan(node.Hash, context),
+        .Probe = probe,
+        .AuxInput = std::move(auxInput),
+    });
+    static_cast<TRuntimeFilterTask*>(task.Task)->BindCode(std::move(code));
 }
 
 std::string SerializeGraphSpec(const TGraphSpec& spec)
@@ -455,16 +508,23 @@ TGraphSpec DeserializeGraphSpec(std::string_view bytes)
 }
 
 std::unique_ptr<TTaskGraph> MaterializeGraph(
-    const TGraphSpec& spec, ISink* sink, std::vector<std::shared_ptr<TKernelSlot>> slots)
+    const TGraphSpec& spec, ISink* sink, std::vector<std::shared_ptr<TKernelSlot>> slots,
+    std::shared_ptr<IRuntimeFilterBindingFactory> filterBindings)
 {
     auto graph = std::make_unique<TTaskGraph>();
-    TNodeTaskContext context{
-        .Slots = std::move(slots),
-        // No record binds a runtime filter yet, so no runtime-filter kernel.
-        .Runtime = MakeRuntimeContext(spec.Regexes, nullptr),
-        .Sink = sink,
-    };
+    TNodeTaskContext context{.Slots = std::move(slots), .Sink = sink};
+    std::shared_ptr<TKernelSlot> filterKernel;
+    if (spec.RuntimeFilterKernel) {
+        filterKernel = SlotAt(context, *spec.RuntimeFilterKernel);
+    } else if (!spec.RuntimeFilterBindings.empty()) {
+        Invalid("runtime filters need the runtime-filter kernel");
+    }
+    context.Runtime = MakeRuntimeContext(spec.Regexes, std::move(filterKernel));
     AppendCteObjects(spec.CteSpools, spec.CteConsumerStates, context);
+    if (!filterBindings) {
+        filterBindings = std::make_shared<TLocalRuntimeFilterBindingFactory>();
+    }
+    AppendRuntimeFilterBindings(spec.RuntimeFilterBindings, *filterBindings, context);
 
     std::vector<IConnection*> connections;
     connections.reserve(spec.Connections.size());
@@ -481,6 +541,12 @@ std::unique_ptr<TTaskGraph> MaterializeGraph(
         node.DebugKind = nodeSpec.DebugKind;
         node.DebugLabel = nodeSpec.DebugLabel;
         nodes.push_back(&node);
+    }
+    // The filter tasks wait for producers that may follow them.
+    for (size_t i = 0; i < spec.Nodes.size(); ++i) {
+        if (const auto* filter = std::get_if<TRuntimeFilterNode>(&spec.Nodes[i].Body)) {
+            BindRuntimeFilterTask(*filter, *nodes[i], *graph, context);
+        }
     }
 
     for (const auto& edge : spec.Edges) {
