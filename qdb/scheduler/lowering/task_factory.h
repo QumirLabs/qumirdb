@@ -252,17 +252,10 @@ std::shared_ptr<const NScheduler::TBlockingCode> MakeDrainBlockingCode()
     return code;
 }
 
-// Blocking tail for a local sort (top-K when topLimit is set, otherwise a
-// full sort). Shared by the single-lane path and the per-lane locals of the
-// partitioned merge.
-TBlockingTail MakeSortTail(
-    const NQumir::NAst::TTypePtr& childType,
-    const std::vector<TSortKey>& keys,
-    std::vector<TSortColumnRef> keyColumns,
-    TSortRadixKernel radixKernel,
-    std::optional<int64_t> topLimit);
-
 std::shared_ptr<const NScheduler::TBlockingCode> MakeLimitBlockingCode();
+
+// Merge code for TMergeState: reads every sorted run, then emits the merge.
+std::shared_ptr<const NScheduler::TMergeCode> MakeMergeCode();
 
 // Binary blocking code adapting scheduler input ports to a join/cross
 // processor's fetch-callback interface. TState wraps the processor.

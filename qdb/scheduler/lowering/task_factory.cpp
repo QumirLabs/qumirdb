@@ -39,38 +39,6 @@ NScheduler::ETaskResult MapJoinProcessResult(EJoinProcessorResult result)
     return NScheduler::ETaskResult::FINISHED;
 }
 
-TBlockingTail MakeSortTail(
-    const NQumir::NAst::TTypePtr& childType,
-    const std::vector<TSortKey>& keys,
-    std::vector<TSortColumnRef> keyColumns,
-    TSortRadixKernel radixKernel,
-    std::optional<int64_t> topLimit)
-{
-    if (topLimit) {
-        const int64_t limit = *topLimit;
-        return TBlockingTail{
-            .Code = MakeDrainBlockingCode<TTopSortBlockingState>(),
-            .MakeState = [childType, keys, keyColumns, radixKernel, limit]()
-                -> std::shared_ptr<NScheduler::ITaskState>
-            {
-                return std::make_shared<TTopSortBlockingState>(
-                    childType, keys, keyColumns, radixKernel, limit);
-            },
-            .OutputType = childType,
-        };
-    }
-    return TBlockingTail{
-        .Code = MakeDrainBlockingCode<TSortBlockingState>(),
-        .MakeState = [childType, keys, keyColumns, radixKernel]()
-            -> std::shared_ptr<NScheduler::ITaskState>
-        {
-            return std::make_shared<TSortBlockingState>(
-                childType, keys, keyColumns, radixKernel);
-        },
-        .OutputType = childType,
-    };
-}
-
 // Blocking code for a limit/offset task.
 std::shared_ptr<const NScheduler::TBlockingCode> MakeLimitBlockingCode()
 {
@@ -93,6 +61,47 @@ std::shared_ptr<const NScheduler::TBlockingCode> MakeLimitBlockingCode()
                     return NScheduler::ETaskResult::OK;
                 }
                 rowSet = {};
+            }
+            return NScheduler::ETaskResult::FINISHED;
+        });
+}
+
+std::shared_ptr<const NScheduler::TMergeCode> MakeMergeCode()
+{
+    return std::make_shared<NScheduler::TMergeCode>(
+        [](NScheduler::ITaskState& state,
+           std::vector<NScheduler::TInputPort>& inputs,
+           TRowSet& output)
+        {
+            auto* s = &static_cast<TMergeState&>(state);
+            if (!s->InputsDone) {
+                bool allDone = true;
+                for (size_t i = 0; i < inputs.size(); ++i) {
+                    if (s->RunFinished[i]) {
+                        continue;
+                    }
+                    for (;;) {
+                        TRowSet batch{};
+                        auto fetch = inputs[i].Fetch(batch);
+                        if (fetch == NScheduler::EFetchResult::NO_DATA) {
+                            allDone = false;
+                            break;
+                        }
+                        if (fetch == NScheduler::EFetchResult::FINISHED) {
+                            s->RunFinished[i] = true;
+                            break;
+                        }
+                        s->Processor.Add(batch, i);
+                    }
+                }
+                if (!allDone) {
+                    return NScheduler::ETaskResult::NEED_DATA;
+                }
+                s->Processor.Finish();
+                s->InputsDone = true;
+            }
+            if (s->Processor.Next(output)) {
+                return NScheduler::ETaskResult::OK;
             }
             return NScheduler::ETaskResult::FINISHED;
         });
