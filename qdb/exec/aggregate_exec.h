@@ -67,17 +67,6 @@ private:
     std::vector<TColumn> Cols_;
 };
 
-// When a partial aggregate stops hashing and when it empties its table.
-struct TPartialAggregatePolicy {
-    // Input rows the table absorbs before its reduction is judged.
-    uint64_t SampleRows = 128 * 1024;
-    // Rows per group below which hashing does not pay for itself: the
-    // remaining rows pass through as single-row partial states.
-    uint64_t MinReduction = 8;
-    // Groups at which the table emits its groups and restarts empty.
-    int64_t MaxGroups = 1 << 20;
-};
-
 // The partial phase of a grouped aggregate cascade: a bounded table that
 // reduces one lane's rows before the exchange (Larson, ICDE 2002). It watches
 // its own reduction, and once hashing stops paying for itself it converts the

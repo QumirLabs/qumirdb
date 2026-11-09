@@ -387,6 +387,84 @@ TEST(GraphSpec, AggregateAndHashShuffleRecordsRoundTrip)
     EXPECT_EQ(aggregate.Table.RowExpectedGroups, 9);
 }
 
+TEST(GraphSpec, PartialAndGroupingSetsAggregateRecordsRoundTrip)
+{
+    const TAggregateKernelMeta meta{
+        .NumAggs = 1,
+        .StateWords = 2,
+        .OutputKeys = {{.IsNullable = true, .Size = 8, .Alignment = 8}},
+        .OutputAggs = {{}},
+        .Kernel = 5,
+    };
+    TGraphSpec spec;
+    spec.Nodes.push_back(Node("aggregate", "aggregate partial", TPartialAggregateNode{
+        .In = {0, 3},
+        .Out = {1, 3},
+        .Meta = meta,
+        .Table = {.InitialCapacity = 256, .RowSwitchGroups = 11},
+        .Policy = {.SampleRows = 1000, .MinReduction = 16, .MaxGroups = 4096},
+        .PassThrough = TProjectPlanData{
+            .Kernel = 6,
+            .Columns = {{.Index = 0}, {.Computed = true, .Index = 0}},
+            .ComputedWidths = {8},
+            .ComputedIsString = {false},
+            .ComputedIsNullable = {true},
+        },
+    }));
+    spec.Nodes.push_back(Node("aggregate", "aggregate partial", TPartialAggregateNode{
+        .In = {0, 1},
+        .Out = {1, 1},
+        .Meta = meta,
+    }));
+    spec.Nodes.push_back(Node("aggregate", "aggregate", TGroupingSetsAggregateNode{
+        .In = {1, 0},
+        .Out = {2, 0},
+        .Meta = meta,
+        .Table = {.Layout = EAggregateTableLayout::Row, .InitialGroups = 12},
+        .Sets = {{0, 1}, {0}, {}},
+        .NumKeys = 2,
+    }));
+
+    const auto bytes = SerializeGraphSpec(spec);
+    const auto back = DeserializeGraphSpec(bytes);
+    EXPECT_EQ(SerializeGraphSpec(back), bytes);
+    for (size_t size = 0; size < bytes.size(); ++size) {
+        EXPECT_THROW(DeserializeGraphSpec(std::string_view(bytes).substr(0, size)),
+            std::runtime_error) << size;
+    }
+
+    ASSERT_EQ(back.Nodes.size(), 3u);
+    const auto& partial = std::get<TPartialAggregateNode>(back.Nodes[0].Body);
+    EXPECT_EQ(partial.In.Lane, 3u);
+    EXPECT_EQ(partial.Out.Connection, 1u);
+    EXPECT_EQ(partial.Meta.StateWords, 2u);
+    ASSERT_EQ(partial.Meta.OutputKeys.size(), 1u);
+    EXPECT_TRUE(partial.Meta.OutputKeys[0].IsNullable);
+    EXPECT_EQ(partial.Meta.Kernel, 5u);
+    EXPECT_EQ(partial.Table.InitialCapacity, 256);
+    EXPECT_EQ(partial.Table.RowSwitchGroups, 11);
+    EXPECT_EQ(partial.Policy.SampleRows, 1000u);
+    EXPECT_EQ(partial.Policy.MinReduction, 16u);
+    EXPECT_EQ(partial.Policy.MaxGroups, 4096);
+    ASSERT_TRUE(partial.PassThrough);
+    EXPECT_EQ(partial.PassThrough->Kernel, 6u);
+    ASSERT_EQ(partial.PassThrough->Columns.size(), 2u);
+    EXPECT_FALSE(partial.PassThrough->Columns[0].Computed);
+    EXPECT_TRUE(partial.PassThrough->Columns[1].Computed);
+    EXPECT_EQ(partial.PassThrough->ComputedWidths, (std::vector<size_t>{8}));
+    EXPECT_EQ(partial.PassThrough->ComputedIsNullable, (std::vector<bool>{true}));
+
+    EXPECT_FALSE(std::get<TPartialAggregateNode>(back.Nodes[1].Body).PassThrough);
+
+    const auto& sets = std::get<TGroupingSetsAggregateNode>(back.Nodes[2].Body);
+    EXPECT_EQ(sets.Out.Connection, 2u);
+    EXPECT_EQ(sets.Meta.NumAggs, 1u);
+    EXPECT_EQ(sets.Table.Layout, EAggregateTableLayout::Row);
+    EXPECT_EQ(sets.Table.InitialGroups, 12);
+    EXPECT_EQ(sets.Sets, (std::vector<std::vector<size_t>>{{0, 1}, {0}, {}}));
+    EXPECT_EQ(sets.NumKeys, 2u);
+}
+
 TEST(GraphSpec, JoinAndJoinHashShuffleRecordsRoundTrip)
 {
     using namespace NQumir::NAst;
@@ -749,6 +827,12 @@ TEST(GraphSpec, RejectsInvalidSpecs)
     EXPECT_NO_THROW(MaterializeGraph(spec, &sink));
     spec.CteConsumerStates = {{.Spool = 1}};
     EXPECT_THROW(MaterializeGraph(spec, &sink), std::runtime_error);
+
+    // A pass-through that computes a column needs its kernel.
+    spec = FanOutSpec();
+    spec.Nodes[1].Body = TPartialAggregateNode{
+        .In = {0, 0}, .Out = {1, 0}, .PassThrough = TProjectPlanData{.ComputedWidths = {8}}};
+    EXPECT_THROW(MaterializeGraph(spec, &sink, slots), std::runtime_error);
 }
 
 TEST(GraphSpec, ForwardChainRunsRows)

@@ -26,19 +26,14 @@
 
 namespace NQdb {
 
-struct TUnaryRuntimeProcess {
-    TUnaryStreamProcess Process;
-    NQumir::NAst::TTypePtr OutputType;
-};
-
 // The filter plan data and output type; the process is built from a kernel slot.
 struct TFilterRuntimeProcess {
     NQumir::NAst::TTypePtr OutputType;
     TFilterPlanData Plan;
 };
 
+// The project plan data and output type; the process is built from a kernel slot.
 struct TProjectRuntimeProcess {
-    TUnaryStreamProcess Process;
     NQumir::NAst::TTypePtr OutputType;
     TProjectPlanData Plan;
 };

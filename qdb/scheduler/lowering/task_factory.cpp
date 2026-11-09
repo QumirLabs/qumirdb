@@ -16,11 +16,11 @@ std::shared_ptr<const NScheduler::TSourceCode> MakeSourceCode()
         });
 }
 
-std::shared_ptr<const NScheduler::TBlockingCode> MakeAggregateBlockingCode()
+std::shared_ptr<const NScheduler::TBlockingCode> MakePartialAggregateBlockingCode()
 {
     return std::make_shared<NScheduler::TBlockingCode>(
         [](NScheduler::ITaskState& state, NScheduler::TInputPort& input, TRowSet& output) {
-            auto* s = &static_cast<TAggregateBlockingState&>(state);
+            auto* s = &static_cast<TPartialAggregateBlockingState&>(state);
             if (s->Done) {
                 return NScheduler::ETaskResult::FINISHED;
             }
@@ -32,12 +32,14 @@ std::shared_ptr<const NScheduler::TBlockingCode> MakeAggregateBlockingCode()
                 }
                 if (fetch == NScheduler::EFetchResult::FINISHED) {
                     s->Done = true;
-                    s->Processor.Finish(output);
-                    return NScheduler::ETaskResult::OK;
+                    return s->Processor.Finish(output)
+                        ? NScheduler::ETaskResult::OK
+                        : NScheduler::ETaskResult::FINISHED;
                 }
                 s->Processor.Add(rowSet);
-                Release(&rowSet);
-                rowSet = {};
+                if (s->Processor.Next(output)) {
+                    return NScheduler::ETaskResult::OK;
+                }
             }
         });
 }

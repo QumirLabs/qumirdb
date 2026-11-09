@@ -225,10 +225,8 @@ TEST(ProjectE2E, ProjectRebuildsFromPlanDataAndSlot) {
     const auto& kernel = kernels[*built.Plan.Kernel];
     auto rebuilt = MakeProjectProcess(
         built.Plan, BindProject(kernel.Slot, kernel.RuntimeContext));
-    const auto expected = RunProcess(built.Process, data.Batch());
-    EXPECT_EQ(expected, (std::vector<std::vector<int64_t>>{
+    EXPECT_EQ(RunProcess(rebuilt, data.Batch()), (std::vector<std::vector<int64_t>>{
         {10, 11}, {20, 23}, {30, 35}, {40, 42}}));
-    EXPECT_EQ(RunProcess(rebuilt, data.Batch()), expected);
 }
 
 TEST(ProjectE2E, FilterKeepAllRebuildsFromPlanDataAndSlot) {
@@ -263,9 +261,8 @@ TEST(ProjectE2E, ProjectWithoutComputedColumnsRebuildsFromPlanData) {
     EXPECT_FALSE(built.Plan.Kernel);
 
     auto rebuilt = MakeProjectProcess(built.Plan, TKernelCompiler::TProjectDispatch{});
-    const auto expected = RunProcess(built.Process, data.Batch());
-    EXPECT_FALSE(expected.empty());
-    EXPECT_EQ(RunProcess(rebuilt, data.Batch()), expected);
+    EXPECT_EQ(RunProcess(rebuilt, data.Batch()),
+        (std::vector<std::vector<int64_t>>{{10, 1}, {20, 3}, {30, 5}, {40, 2}}));
 }
 
 TEST(ProjectE2E, IdentZeroCopyPlusComputed) {

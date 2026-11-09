@@ -10,10 +10,8 @@
 #include <qdb/scheduler/tasks/runtime_adapter.h>
 
 #include <cstdint>
-#include <functional>
 #include <memory>
 #include <optional>
-#include <string>
 #include <vector>
 
 namespace NQdb::NScheduler::NLowering {
@@ -49,10 +47,6 @@ struct TAggregateBlockingState : TProcessorTaskState<TAggregateBlockingState> {
     bool Done = false;
 };
 
-// Blocking code that feeds every input row to TAggregateBlockingState, then
-// emits the groups.
-std::shared_ptr<const NScheduler::TBlockingCode> MakeAggregateBlockingCode();
-
 struct TPartialAggregateBlockingState : TProcessorTaskState<TPartialAggregateBlockingState> {
     TPartialAggregateBlockingState(
         TAggregateKernels kernels,
@@ -76,6 +70,39 @@ struct TGroupingSetsBlockingState : TProcessorTaskState<TGroupingSetsBlockingSta
     TGroupingSetsAggregateProcessor Processor;
     bool Done = false;
 };
+
+// Blocking code that feeds every input row to the processor of TState (an
+// aggregate or grouping-sets state), then emits the groups.
+template <class TState>
+std::shared_ptr<const NScheduler::TBlockingCode> MakeAggregateBlockingCode()
+{
+    return std::make_shared<NScheduler::TBlockingCode>(
+        [](NScheduler::ITaskState& state, NScheduler::TInputPort& input, TRowSet& output) {
+            auto* s = &static_cast<TState&>(state);
+            if (s->Done) {
+                return NScheduler::ETaskResult::FINISHED;
+            }
+            TRowSet rowSet{};
+            while (true) {
+                auto fetch = input.Fetch(rowSet);
+                if (fetch == NScheduler::EFetchResult::NO_DATA) {
+                    return NScheduler::ETaskResult::NEED_DATA;
+                }
+                if (fetch == NScheduler::EFetchResult::FINISHED) {
+                    s->Done = true;
+                    s->Processor.Finish(output);
+                    return NScheduler::ETaskResult::OK;
+                }
+                s->Processor.Add(rowSet);
+                Release(&rowSet);
+                rowSet = {};
+            }
+        });
+}
+
+// Blocking code for TPartialAggregateBlockingState: emits each batch of
+// partial states as soon as the processor has one.
+std::shared_ptr<const NScheduler::TBlockingCode> MakePartialAggregateBlockingCode();
 
 struct TLimitBlockingState : TProcessorTaskState<TLimitBlockingState> {
     TLimitBlockingState(int64_t limit, int64_t offset)
@@ -214,14 +241,6 @@ struct TSchedulerCrossJoinState : TProcessorTaskState<TSchedulerCrossJoinState> 
     {}
 
     TCrossJoinProcessor Processor;
-};
-
-struct TBlockingTail {
-    std::shared_ptr<const NScheduler::TBlockingCode> Code;
-    std::function<std::shared_ptr<NScheduler::ITaskState>()> MakeState;
-    NQumir::NAst::TTypePtr OutputType;
-    // Appended to the label of the tasks, e.g. an aggregate's table.
-    std::string LabelDetail;
 };
 
 EJoinFetchResult MapJoinFetch(NScheduler::EFetchResult result);

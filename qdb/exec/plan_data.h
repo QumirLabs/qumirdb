@@ -255,6 +255,24 @@ struct TAggregateTablePlan {
     }
 };
 
+// When a partial aggregate stops hashing and when it empties its table.
+struct TPartialAggregatePolicy {
+    // Input rows the table absorbs before its reduction is judged.
+    uint64_t SampleRows = 128 * 1024;
+    // Rows per group below which hashing does not pay for itself: the
+    // remaining rows pass through as single-row partial states.
+    uint64_t MinReduction = 8;
+    // Groups at which the table emits its groups and restarts empty.
+    int64_t MaxGroups = 1 << 20;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.SampleRows);
+        v(self.MinReduction);
+        v(self.MaxGroups);
+    }
+};
+
 // What an aggregate-hash dispatch needs besides its kernel slot.
 struct TAggregateHashPlanData {
     // Index of the hash kernel in the sink (0 without a sink).
