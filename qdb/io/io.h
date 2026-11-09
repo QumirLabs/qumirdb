@@ -86,9 +86,6 @@ public:
         std::span<const std::string> earlyColumns,
         std::span<const std::string> fetchColumns,
         uint64_t maxRows) const = 0;
-
-    virtual std::shared_ptr<const IPhysicalRowReader> CompileReader(
-        std::span<const std::string> columnNames) const = 0;
 };
 
 struct ISink {

@@ -1,5 +1,8 @@
 #include <qdb/scheduler/lowering/task_factory.h>
 
+#include <algorithm>
+#include <stdexcept>
+
 namespace NQdb::NScheduler::NLowering {
 
 std::shared_ptr<const NScheduler::TSourceCode> MakeSourceCode()
@@ -89,6 +92,63 @@ std::shared_ptr<const NScheduler::TBlockingCode> MakeLimitBlockingCode()
                 rowSet = {};
             }
             return NScheduler::ETaskResult::FINISHED;
+        });
+}
+
+std::shared_ptr<const NScheduler::TMergeCode> MakeLateMergeCode()
+{
+    return std::make_shared<NScheduler::TMergeCode>(
+        [](NScheduler::ITaskState& state,
+           std::vector<NScheduler::TInputPort>& inputs,
+           TRowSet& output)
+        {
+            auto* merge = &static_cast<TLateMaterializeMergeState&>(state);
+            if (merge->Emitted) {
+                return NScheduler::ETaskResult::FINISHED;
+            }
+
+            for (size_t i = 0; i < inputs.size(); ++i) {
+                if (merge->Received[i] || merge->Finished[i]) {
+                    continue;
+                }
+                TRowSet partition{};
+                switch (inputs[i].Fetch(partition)) {
+                    case NScheduler::EFetchResult::OK:
+                        merge->Partitions[i] = partition;
+                        merge->Received[i] = true;
+                        break;
+                    case NScheduler::EFetchResult::NO_DATA:
+                        break;
+                    case NScheduler::EFetchResult::FINISHED:
+                        merge->Finished[i] = true;
+                        break;
+                }
+            }
+
+            const bool allReceived = std::ranges::all_of(
+                merge->Received, [](bool value) { return value; });
+            if (allReceived) {
+                MergeLateMaterializedColumns(merge->Partitions, output);
+                std::ranges::fill(merge->Received, false);
+                merge->Emitted = true;
+                return NScheduler::ETaskResult::OK;
+            }
+
+            const bool allFinished = std::ranges::all_of(
+                merge->Finished, [](bool value) { return value; });
+            const bool anyReceived = std::ranges::any_of(
+                merge->Received, [](bool value) { return value; });
+            const bool anyFinished = std::ranges::any_of(
+                merge->Finished, [](bool value) { return value; });
+            if (allFinished && !anyReceived) {
+                return NScheduler::ETaskResult::FINISHED;
+            }
+            if (anyReceived && anyFinished) {
+                throw std::runtime_error(
+                    "late materialize: lookup partitions returned "
+                    "different result counts");
+            }
+            return NScheduler::ETaskResult::NEED_DATA;
         });
 }
 

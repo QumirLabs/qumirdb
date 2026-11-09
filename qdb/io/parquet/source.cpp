@@ -1064,11 +1064,11 @@ std::vector<NScheduler::TScanRowGroup> TParquetSource::PruneRowGroups(
     return kept;
 }
 
-std::shared_ptr<const IPhysicalRowReader> TParquetSource::CompileReader(
+std::shared_ptr<const IPhysicalRowReader> TParquetFile::CompileReader(
     std::span<const std::string> columnNames) const
 {
     return std::make_shared<TParquetPhysicalRowReader>(
-        File_->FileReader, columnNames, GetMemoryPool());
+        Data_->FileReader, columnNames, GetMemoryPool());
 }
 
 // Parquet page sizes are not in the metadata. Writers cap a data page at 1 MiB

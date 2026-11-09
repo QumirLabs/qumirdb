@@ -776,6 +776,84 @@ TEST(ExecPlanBuilder, WindowGraphRunsFromItsSerializedSpec) {
     EXPECT_GT(rows.size(), 100u);
 }
 
+TEST(ExecPlanBuilder, ParallelTopSortLimitGraphRunsFromItsSerializedSpec) {
+    // Local top-sorts, a sort merge, then the final limit.
+    const auto rows = ExpectQueryFromSpec(
+        "SELECT id, d9 FROM t ORDER BY d9, id LIMIT 7", MultiSettings(), true,
+        [](const NScheduler::TGraphSpec& spec) {
+            EXPECT_GT(CountNodes<NScheduler::TSortNode>(spec), 1u);
+            EXPECT_EQ(CountNodes<NScheduler::TSortMergeNode>(spec), 1u);
+            ASSERT_EQ(CountNodes<NScheduler::TLimitNode>(spec), 1u);
+            for (const auto& node : spec.Nodes) {
+                if (const auto* limit = std::get_if<NScheduler::TLimitNode>(&node.Body)) {
+                    EXPECT_EQ(limit->Limit, 7);
+                    EXPECT_EQ(limit->Offset, 0);
+                }
+            }
+        });
+    EXPECT_EQ(rows.size(), 8u);
+}
+
+TEST(ExecPlanBuilder, LimitOffsetGraphRunsFromItsSerializedSpec) {
+    // One scan lane, so the rows the limit keeps are the same on every run.
+    const auto rows = ExpectQueryFromSpec(
+        "SELECT id FROM t LIMIT 5 OFFSET 3", SingleSettings(), true,
+        [](const NScheduler::TGraphSpec& spec) {
+            ASSERT_EQ(CountNodes<NScheduler::TLimitNode>(spec), 1u);
+            for (const auto& node : spec.Nodes) {
+                if (const auto* limit = std::get_if<NScheduler::TLimitNode>(&node.Body)) {
+                    EXPECT_EQ(limit->Limit, 5);
+                    EXPECT_EQ(limit->Offset, 3);
+                }
+            }
+        });
+    EXPECT_EQ(rows.size(), 6u);
+}
+
+TEST(ExecPlanBuilder, LimitZeroGraphRunsFromItsSerializedSpec) {
+    const auto rows = ExpectQueryFromSpec(
+        "SELECT id FROM t LIMIT 0", SingleSettings(), true,
+        [](const NScheduler::TGraphSpec& spec) {
+            EXPECT_EQ(CountNodes<NScheduler::TLimitNode>(spec), 1u);
+        });
+    EXPECT_LE(rows.size(), 1u);
+}
+
+TEST(ExecPlanBuilder, OffsetPastEndGraphRunsFromItsSerializedSpec) {
+    const auto rows = ExpectQueryFromSpec(
+        "SELECT id FROM t LIMIT 5 OFFSET 1000000", SingleSettings(), true,
+        [](const NScheduler::TGraphSpec& spec) {
+            EXPECT_EQ(CountNodes<NScheduler::TLimitNode>(spec), 1u);
+        });
+    EXPECT_LE(rows.size(), 1u);
+}
+
+TEST(ExecPlanBuilder, PartitionedWindowGraphRunsFromItsSerializedSpec) {
+    const auto rows = ExpectQueryFromSpec(
+        "SELECT id, rank() OVER (PARTITION BY id % 4 ORDER BY id DESC) AS rn FROM t",
+        MultiSettings(), false, [](const NScheduler::TGraphSpec& spec) {
+            EXPECT_GT(CountNodes<NScheduler::THashShuffleNode>(spec), 0u);
+            EXPECT_GT(CountNodes<NScheduler::TWindowNode>(spec), 1u);
+        });
+    EXPECT_GT(rows.size(), 100u);
+}
+
+TEST(ExecPlanBuilder, LateMaterializeGraphRunsFromItsSerializedSpec) {
+    // The wide top-3 fetches its columns by locator after the sort.
+    const auto rows = ExpectQueryFromSpec(
+        "SELECT id, d9, d15, d18, d38, s FROM t ORDER BY d9, id LIMIT 3", MultiSettings(), true,
+        [](const NScheduler::TGraphSpec& spec) {
+            ASSERT_EQ(CountNodes<NScheduler::TLateMergeNode>(spec), 1u);
+            EXPECT_GT(CountNodes<NScheduler::TLateLookupNode>(spec), 1u);
+            for (const auto& node : spec.Nodes) {
+                if (const auto* merge = std::get_if<NScheduler::TLateMergeNode>(&node.Body)) {
+                    EXPECT_EQ(merge->In.size(), CountNodes<NScheduler::TLateLookupNode>(spec));
+                }
+            }
+        });
+    EXPECT_EQ(rows.size(), 4u);
+}
+
 TEST(ExecPlanBuilder, GroupedAggregateGraphRunsFromItsSerializedSpec) {
     auto settings = MultiSettings();
     // The partial aggregate cascade has no record yet.

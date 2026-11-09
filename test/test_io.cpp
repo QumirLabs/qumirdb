@@ -222,7 +222,7 @@ TEST(IOTest, ParquetRowGroupRangeSource) {
         "id",
         "payload",
     };
-    auto reader = source->CompileReader(columnNames);
+    auto reader = source->File().CompileReader(columnNames);
     const std::vector<TPhysicalRowId> rowIds{
         MakeParquetRowId(2, 0),
         MakeParquetRowId(0, 1),
@@ -461,7 +461,7 @@ TEST(IOTest, ScannedRowIdsResolveBackToTheirRows) {
     // Feed the locators the scan produced back into a lookup and check that
     // every row comes back with the payload of the row the scan saw.
     const std::vector<std::string> columns{"payload", "id"};
-    auto reader = source->CompileReader(columns);
+    auto reader = source->File().CompileReader(columns);
     TRowSet lookup = {};
     std::string error;
     ASSERT_TRUE(reader->ReadRows(rowIds, lookup, &error)) << error;
@@ -657,7 +657,7 @@ TEST(IOTest, FloatColumnIsReadAsFloat) {
                 const std::vector<std::string> columns{"f"};
                 TRowSet lookup = {};
                 std::string error;
-                ASSERT_TRUE(source->CompileReader(columns)->ReadRows(rowIds, lookup, &error)) << error;
+                ASSERT_TRUE(source->File().CompileReader(columns)->ReadRows(rowIds, lookup, &error)) << error;
                 expectRead(FloatCells(lookup.Columns[0], lookup.RowCount));
                 Release(&lookup);
             }
