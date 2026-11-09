@@ -1413,13 +1413,8 @@ private:
         TExecStageId execStageId,
         const TAggregateTaskEstimate& estimate)
     {
-        auto* inputType =
-            static_cast<NQumir::NAst::TStructType*>(childType.get());
-        if (!inputType) {
-            throw std::runtime_error("aggregate input must have TStructType");
-        }
         auto compiled = CompileAggregateTable(
-            *inputType, aggregate, stage, execStageId, estimate,
+            AggregateInputType(childType), aggregate, stage, execStageId, estimate,
             /*hasPrecomputedHash=*/false);
 
         TUnaryStreamProcess passThrough;
