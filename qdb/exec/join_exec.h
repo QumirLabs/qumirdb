@@ -2,6 +2,7 @@
 
 #include <qdb/io/io.h>
 #include <qdb/exec/instrumentation/operator.h>
+#include <qdb/exec/plan_data.h>
 #include <qdb/kernel/compiler.h>
 #include <qdb/kernel/execution_context.h>
 
@@ -104,7 +105,6 @@ enum class EJoinSide { Left, Right };
 // adaptive symmetric build-up. An inner join on the row join table builds its
 // smaller side at any ratio (ChooseJoinBuildSide).
 inline constexpr double JoinAsymmetryRatio = 10.0;
-enum class EJoinBuildSide { Auto, Left, Right };
 
 enum class EJoinStreamMode {
     Symmetric,

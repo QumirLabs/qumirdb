@@ -253,7 +253,7 @@ using TJoinMaterialize = std::function<int64_t(
 // pair buffer is a zero-initialized buffer of PairBufferSize. Key-column
 // indices are supplied by the bound dispatch closure; join-kind dispatch stays
 // baked into the generated jt_dispatch function.
-struct TJoinKernels {
+struct TJoinKernels : TJoinKernelMeta {
     // jt_dispatch(left, right, batch, batchIdx, pairs, leftStore, rightStore,
     //             arena, leftKeyColumns, rightKeyColumns, arg, op) -> bool.
     // The closure binds the key columns and a string arena for the call.
@@ -268,18 +268,14 @@ struct TJoinKernels {
     // jt_materialize, so host code only cursors over the pair buffer.
     TJoinMaterialize Materialize;
 
-    std::vector<int64_t> LeftKeyColumns;
-    std::vector<int64_t> RightKeyColumns;
     std::shared_ptr<TKernelSlot> Slot;
-    // Index of the join kernel in the sink (0 without a sink).
-    uint32_t Kernel = 0;
 };
 
-// Binds Dispatch and Materialize to the slot; the other fields of `meta`
-// (plain data) are kept. CompileJoin ends with this call.
+// Binds Dispatch and Materialize to the slot and keeps `meta`. CompileJoin
+// ends with this call.
 TJoinKernels BindJoinKernels(
     std::shared_ptr<TKernelSlot> slot,
-    TJoinKernels meta);
+    TJoinKernelMeta meta);
 
 enum class ECrossJoinKernelOp : int64_t {
     Emit = 0,
@@ -367,38 +363,21 @@ using TRowJoinMaterialize = std::function<int64_t(
 // The compiled kernels of an inner, outer, semi or anti equi-join over the row
 // join table (kernel/join/join_rows.oz). The caller owns zero-initialized
 // RowArena, RowTable, RowScratch and PairBuffer buffers of the sizes below.
-struct TRowJoinKernels {
+struct TRowJoinKernels : TRowJoinKernelMeta {
     TRowJoinDispatch Dispatch;
     TRowJoinMaterialize Materialize;
-    // String payload rows point into the build batches, which the caller then
-    // keeps alive until the processor is released.
-    bool RetainsBuildBatches = false;
-    // The instrumentation measure kernel over the probe schema: sizes a held
-    // probe batch the way retained_input_bytes does, with instrumentation off.
-    TRowSetInstrumentation ProbeMeasure;
-    // The build side is the left side of a SEMI/ANTI join: the probe marks its
-    // rows, and EmitByMark emits the output once the probe side has ended.
-    bool EmitsByMark = false;
-    // An ANTI join keeps its NULL-key build rows in a second arena
-    // (AppendNullKeys), whose rows EmitByMark emits as well.
-    bool KeepsNullKeyRows = false;
-
-    std::vector<int64_t> BuildKeyColumns;
-    std::vector<int64_t> ProbeKeyColumns;
+    // Sizes a held probe batch the way retained_input_bytes does, with
+    // instrumentation off; the widths are ProbeMeasureWidths.
+    std::shared_ptr<TKernelSlot> ProbeMeasureSlot;
     std::shared_ptr<TKernelSlot> Slot;
-    // Index of the row join kernel in the sink (0 without a sink).
-    uint32_t Kernel = 0;
-    // Index of the probe measure kernel (ProbeMeasure.Kernel) in the sink.
-    uint32_t ProbeMeasureKernel = 0;
 };
 
-// Binds Dispatch and Materialize to `slot` and ProbeMeasure.Kernel to
-// `measureSlot`; the other fields of `meta` (plain data) are kept.
-// CompileRowJoin ends with this call.
+// Binds Dispatch and Materialize to `slot` and ProbeMeasureSlot to `measureSlot`,
+// and keeps `meta`. CompileRowJoin ends with this call.
 TRowJoinKernels BindRowJoinKernels(
     std::shared_ptr<TKernelSlot> slot,
     std::shared_ptr<TKernelSlot> measureSlot,
-    TRowJoinKernels meta);
+    TRowJoinKernelMeta meta);
 
 struct TJoinHashKernels {
     using TDispatch = std::function<bool(TRowSet* batch, uint64_t* hashes)>;
@@ -418,6 +397,13 @@ struct TJoinHashKernels {
 TJoinHashKernels BindJoinHashKernels(
     std::shared_ptr<TKernelSlot> slot,
     TJoinHashKernels meta);
+
+// Binds one entry of a join hash kernel (0 hashes the left keys, 1 the right
+// ones) to the key columns of its side.
+TJoinHashKernels::TDispatch BindJoinHash(
+    std::shared_ptr<TKernelSlot> slot,
+    uint32_t entry,
+    std::vector<int64_t> keyColumns);
 
 // The runtime-filter kernel of a query: its slot and its index in the sink
 // (0 without a sink).

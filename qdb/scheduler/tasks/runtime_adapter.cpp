@@ -737,12 +737,10 @@ struct THashShuffleTask::TDestinationBuffer {
 
 THashShuffleTask::THashShuffleTask(
     std::shared_ptr<const THashShuffleCode> code,
-    std::shared_ptr<void> state,
     TInputPort input,
     THashShuffleConnection& output,
     size_t sourceLane)
     : Code_(std::move(code))
-    , State_(std::move(state))
     , Input_(input)
     , Output_(&output)
     , SourceLane_(sourceLane)

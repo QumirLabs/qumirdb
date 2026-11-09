@@ -2535,19 +2535,23 @@ TJoinHashKernels BindJoinHashKernels(
     std::shared_ptr<TKernelSlot> slot,
     TJoinHashKernels meta)
 {
-    using THashFn = bool(*)(TRowSet*, uint64_t*, const int64_t*);
-    meta.Left = [slot, keyColumns = std::make_shared<const std::vector<int64_t>>(
-                           meta.LeftKeyColumns)](TRowSet* batch, uint64_t* hashes) {
-        return slot->Call<THashFn>(0,
-            batch, hashes, keyColumns->data());
-    };
-    meta.Right = [slot, keyColumns = std::make_shared<const std::vector<int64_t>>(
-                            meta.RightKeyColumns)](TRowSet* batch, uint64_t* hashes) {
-        return slot->Call<THashFn>(1,
-            batch, hashes, keyColumns->data());
-    };
+    meta.Left = BindJoinHash(slot, 0, meta.LeftKeyColumns);
+    meta.Right = BindJoinHash(slot, 1, meta.RightKeyColumns);
     meta.Slot = std::move(slot);
     return meta;
+}
+
+TJoinHashKernels::TDispatch BindJoinHash(
+    std::shared_ptr<TKernelSlot> slot,
+    uint32_t entry,
+    std::vector<int64_t> keyColumns)
+{
+    using THashFn = bool(*)(TRowSet*, uint64_t*, const int64_t*);
+    return [slot = std::move(slot), entry,
+            keyColumns = std::make_shared<const std::vector<int64_t>>(std::move(keyColumns))](
+        TRowSet* batch, uint64_t* hashes) {
+        return slot->Call<THashFn>(entry, batch, hashes, keyColumns->data());
+    };
 }
 
 TKernelCompiler::TAggregateHashDispatch TKernelCompiler::CompileAggregateHash(
@@ -2649,7 +2653,7 @@ TRowJoinKernels TKernelCompiler::CompileRowJoin(
     const auto layout = NKernel::BuildRowJoinLayout(buildType, keyDesc, marksBuild);
     const bool keepsNullKeyRows = marksBuild && spec.JoinType == EJoinType::LeftAnti;
 
-    TRowJoinKernels kernels;
+    TRowJoinKernelMeta kernels;
     for (const auto& field : keyDesc.Fields) {
         kernels.BuildKeyColumns.push_back(
             buildIsLeft ? field.LeftColumnIndex : field.RightColumnIndex);
@@ -2721,7 +2725,7 @@ TRowJoinKernels TKernelCompiler::CompileRowJoin(
 
     kernels.RetainsBuildBatches = layout.HasString;
     const auto measure = EmitInstrumentation();
-    kernels.ProbeMeasure.Widths = InstrumentationColumnWidths(buildIsLeft ? rightType : leftType);
+    kernels.ProbeMeasureWidths = InstrumentationColumnWidths(buildIsLeft ? rightType : leftType);
     kernels.EmitsByMark = marksBuild;
     kernels.KeepsNullKeyRows = keepsNullKeyRows;
     kernels.Kernel = kernel.Index;
@@ -2732,18 +2736,19 @@ TRowJoinKernels TKernelCompiler::CompileRowJoin(
 TRowJoinKernels BindRowJoinKernels(
     std::shared_ptr<TKernelSlot> slot,
     std::shared_ptr<TKernelSlot> measureSlot,
-    TRowJoinKernels meta)
+    TRowJoinKernelMeta meta)
 {
     using TDispatchFn = bool(*)(
         void*, void*, void*, void*, TRowSet*, const int64_t*, int64_t);
     using TMaterializeFn = int64_t(*)(void*, TRowSet*, int64_t, int64_t, TRowSet*);
 
-    meta.ProbeMeasure.Kernel = std::move(measureSlot);
-    meta.Dispatch = [slot,
-                     buildKeyColumns = std::make_shared<const std::vector<int64_t>>(
-                         meta.BuildKeyColumns),
-                     probeKeyColumns = std::make_shared<const std::vector<int64_t>>(
-                         meta.ProbeKeyColumns)](
+    TRowJoinKernels kernels{std::move(meta)};
+    kernels.ProbeMeasureSlot = std::move(measureSlot);
+    kernels.Dispatch = [slot,
+                        buildKeyColumns = std::make_shared<const std::vector<int64_t>>(
+                            kernels.BuildKeyColumns),
+                        probeKeyColumns = std::make_shared<const std::vector<int64_t>>(
+                            kernels.ProbeKeyColumns)](
         void* arena,
         void* table,
         void* scratch,
@@ -2757,7 +2762,7 @@ TRowJoinKernels BindRowJoinKernels(
         return slot->Call<TDispatchFn>(0,
             arena, table, scratch, pairs, batch, keyColumns, op);
     };
-    meta.Materialize = [slot](
+    kernels.Materialize = [slot](
         void* pairs,
         TRowSet* stream,
         int64_t start,
@@ -2766,8 +2771,8 @@ TRowJoinKernels BindRowJoinKernels(
         return slot->Call<TMaterializeFn>(1,
             pairs, stream, start, limit, out);
     };
-    meta.Slot = std::move(slot);
-    return meta;
+    kernels.Slot = std::move(slot);
+    return kernels;
 }
 
 TJoinKernels TKernelCompiler::CompileJoin(
@@ -2808,7 +2813,7 @@ TJoinKernels TKernelCompiler::CompileJoin(
                 "CompileJoin: left_mark join does not support a nullable multi-column key");
         }
     }
-    TJoinKernels kernels;
+    TJoinKernelMeta kernels;
     kernels.LeftKeyColumns.reserve(keyDesc.Fields.size());
     kernels.RightKeyColumns.reserve(keyDesc.Fields.size());
     for (const auto& field : keyDesc.Fields) {
@@ -2953,7 +2958,7 @@ TJoinKernels TKernelCompiler::CompileJoin(
 
 TJoinKernels BindJoinKernels(
     std::shared_ptr<TKernelSlot> slot,
-    TJoinKernels meta)
+    TJoinKernelMeta meta)
 {
     using TDispatchFn = bool(*)(
         void*, void*, TRowSet*, int64_t, void*, TRowSet*, TRowSet*, void*,
@@ -2961,11 +2966,12 @@ TJoinKernels BindJoinKernels(
     using TMaterializeFn = int64_t(*)(
         void*, TRowSet*, TRowSet*, TRowSet*, TRowSet*, int64_t, int64_t, TRowSet*);
 
-    meta.Dispatch = [slot,
-                     leftKeyColumns = std::make_shared<const std::vector<int64_t>>(
-                         meta.LeftKeyColumns),
-                     rightKeyColumns = std::make_shared<const std::vector<int64_t>>(
-                         meta.RightKeyColumns)](
+    TJoinKernels kernels{std::move(meta)};
+    kernels.Dispatch = [slot,
+                        leftKeyColumns = std::make_shared<const std::vector<int64_t>>(
+                            kernels.LeftKeyColumns),
+                        rightKeyColumns = std::make_shared<const std::vector<int64_t>>(
+                            kernels.RightKeyColumns)](
         void* left,
         void* right,
         TRowSet* batch,
@@ -2981,7 +2987,7 @@ TJoinKernels BindJoinKernels(
             left, right, batch, batchIdx, pairs, leftStore, rightStore, &arena,
             leftKeyColumns->data(), rightKeyColumns->data(), arg, op);
     };
-    meta.Materialize = [slot](
+    kernels.Materialize = [slot](
         void* pairs,
         TRowSet* leftStore,
         TRowSet* rightStore,
@@ -2993,8 +2999,8 @@ TJoinKernels BindJoinKernels(
         return slot->Call<TMaterializeFn>(1,
             pairs, leftStore, rightStore, streamLeft, streamRight, start, limit, out);
     };
-    meta.Slot = std::move(slot);
-    return meta;
+    kernels.Slot = std::move(slot);
+    return kernels;
 }
 
 } // namespace NQdb

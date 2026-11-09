@@ -78,6 +78,15 @@ NScheduler::TPortSpec PortSpec(
     };
 }
 
+std::vector<NScheduler::IConnection*> GraphConnections(const NScheduler::TTaskGraph& graph)
+{
+    std::vector<NScheduler::IConnection*> connections;
+    for (const auto& connection : graph.Connections()) {
+        connections.push_back(connection.get());
+    }
+    return connections;
+}
+
 // Builds the task through the graph spec factory, adds the node and keeps the
 // record at the node's index.
 NScheduler::TTaskNode& AddTask(
@@ -86,12 +95,8 @@ NScheduler::TTaskNode& AddTask(
     NScheduler::TNodeSpec record,
     NScheduler::TNodeTaskContext& context)
 {
-    std::vector<NScheduler::IConnection*> connections;
-    for (const auto& connection : graph.Connections()) {
-        connections.push_back(connection.get());
-    }
     auto& node = graph.AddOwnedNode(
-        NScheduler::MakeNodeTask(record.Body, connections, context));
+        NScheduler::MakeNodeTask(record.Body, GraphConnections(graph), context));
     node.ExecStageId = record.ExecStageId;
     node.TaskGroupId = record.TaskGroupId;
     node.DebugKind = record.DebugKind;
@@ -108,6 +113,13 @@ struct TUnaryNodeStage {
     NQumir::NAst::TTypePtr OutputType;
     // Appended to the label of the tasks, e.g. an aggregate's table.
     std::string LabelDetail;
+};
+
+// A shuffle's part in a runtime filter: it publishes Produced, or it reuses the
+// hashes of the filter task before it.
+struct TShuffleRuntimeFilter {
+    std::shared_ptr<IRuntimeFilterProducer> Produced;
+    bool UseInputHash = false;
 };
 
 class TStageDiagnosticsScope {
@@ -1640,7 +1652,7 @@ private:
             partialRef,
             childLanes,
             parts,
-            std::move(groupHash),
+            AggregateHashPlan(groupHash),
             "grouping-sets-repartition",
             {.Keys = combineAgg->GroupKeys()});
 
@@ -1751,7 +1763,7 @@ private:
             partialRef,
             childLanes,
             parts,
-            std::move(groupHash),
+            AggregateHashPlan(groupHash),
             "aggregate-repartition",
             {.Keys = combineAgg->GroupKeys()});
 
@@ -1892,7 +1904,7 @@ private:
             childConnRef,
             childLanes,
             parts,
-            std::move(groupHash),
+            AggregateHashPlan(groupHash),
             "aggregate-repartition",
             {.Keys = aggregate.GroupKeys()});
 
@@ -2444,12 +2456,13 @@ private:
         const auto crossGroup = StageLabel("cross-join", crossStageId);
         TKernelCompiler compiler(
             KernelOptions(crossGroup, crossStageId));
-        auto crossKernels = std::make_shared<TCrossJoinKernels>(
-            [&]() {
+        const NScheduler::TCrossJoinNode crossNode{
+            .Kernel = [&]() {
                 TStageDiagnosticsScope diagnosticsScope(Diagnostics_, crossGroup);
-                return compiler.CompileCrossJoin(kernelSpec);
-            }());
-        auto crossCode = MakeBinaryJoinCode<TSchedulerCrossJoinState>();
+                return compiler.CompileCrossJoin(kernelSpec).Kernel;
+            }(),
+            .JoinType = join.JoinType(),
+        };
 
         NScheduler::IConnection* crossOut = &outConn;
         NScheduler::IConnection* residualConn = nullptr;
@@ -2462,19 +2475,8 @@ private:
         std::vector<NScheduler::TTaskNode*> crossNodes;
         crossNodes.reserve(lanes);
         for (size_t m = 0; m < lanes; ++m) {
-            auto task = std::make_unique<NScheduler::TBinaryBlockingTask>(
-                crossCode,
-                std::make_shared<TSchedulerCrossJoinState>(
-                    *crossKernels, join.JoinType()),
-                NScheduler::TInputPort{.Connection = vectorRef, .Lane = m},
-                NScheduler::TInputPort{.Connection = scalarInput, .Lane = m},
-                NScheduler::TOutputPort{.Connection = crossOut, .Lane = m});
-            auto& node = Graph_.AddOwnedNode(std::move(task));
-            MarkNode(node,
-                "join",
-                crossStageId,
-                JoinDebugLabel(join),
-                crossStageId);
+            auto& node = AddJoinNode(
+                crossNode, *vectorRef, *scalarInput, m, *crossOut, m, crossStageId, JoinDebugLabel(join));
             if (gatherVector) {
                 for (size_t s = 0; s < leftLanes; ++s) {
                     Graph_.AddEdge(*vectorOut.Producers[s], node, *vectorRef, s, m);
@@ -2573,48 +2575,40 @@ private:
             KernelOptions(joinGroup, execStageId));
         const auto buildSide = ChooseJoinBuildSide(join, Settings_.Join.Table);
         const bool rowTable = UsesRowJoinTable(join, buildSide);
-        auto joinCode = rowTable
-            ? MakeBinaryJoinCode<TSchedulerRowJoinState>()
-            : MakeBinaryJoinCode<TSchedulerInnerJoinState>();
-        std::shared_ptr<TJoinKernels> joinKernels;
-        std::shared_ptr<TRowJoinKernels> rowJoinKernels;
-        auto compileJoinKernels = [&]() {
+        // The record of the join's tasks; addJoinNode sets the ports per lane.
+        using TJoinNode = std::variant<NScheduler::THashJoinNode, NScheduler::TRowJoinNode>;
+        auto compileJoin = [&]() -> TJoinNode {
             TStageDiagnosticsScope diagnosticsScope(Diagnostics_, joinGroup);
             if (rowTable) {
-                rowJoinKernels = std::make_shared<TRowJoinKernels>(
-                    compiler.CompileRowJoin(kernelSpec, buildSide == EJoinBuildSide::Left));
-            } else {
-                joinKernels = std::make_shared<TJoinKernels>(compiler.CompileJoin(kernelSpec));
+                return NScheduler::TRowJoinNode{
+                    .Kernels = compiler.CompileRowJoin(kernelSpec, buildSide == EJoinBuildSide::Left),
+                    .BuildSide = buildSide,
+                    .ProbeHoldBytes = Settings_.Join.RowJoinProbeHoldBytes,
+                };
             }
+            return NScheduler::THashJoinNode{
+                .Kernels = compiler.CompileJoin(kernelSpec),
+                .JoinType = join.JoinType(),
+                .BuildSide = buildSide,
+            };
         };
-        auto makeJoinState = [&]() -> std::shared_ptr<NScheduler::ITaskState> {
-            if (rowTable) {
-                return std::make_shared<TSchedulerRowJoinState>(
-                    *rowJoinKernels, buildSide, Settings_.Join.RowJoinProbeHoldBytes);
-            }
-            return std::make_shared<TSchedulerInnerJoinState>(
-                *joinKernels, join.JoinType(), buildSide);
+        auto addJoinNode = [&](
+            const TJoinNode& record,
+            NScheduler::IConnection& left,
+            NScheduler::IConnection& right,
+            size_t lane) -> NScheduler::TTaskNode&
+        {
+            return std::visit([&](const auto& body) -> NScheduler::TTaskNode& {
+                return AddJoinNode(
+                    body, left, right, lane, outConn, lane + outLaneOffset, execStageId, JoinDebugLabel(join));
+            }, record);
         };
 
         // A filtered join still needs the hash-shuffle tasks to publish and
         // apply the filter, even when both inputs have only one lane.
         if (leftLanes == 1 && rightLanes == 1 && joinParts == 1
             && !join.RuntimeFilter()) {
-            compileJoinKernels();
-            auto task = std::make_unique<NScheduler::TBinaryBlockingTask>(
-                joinCode,
-                makeJoinState(),
-                NScheduler::TInputPort{
-                    .Connection = &leftPipeRef, .Lane = 0},
-                NScheduler::TInputPort{
-                    .Connection = &rightPipeRef, .Lane = 0},
-                NScheduler::TOutputPort{.Connection = &outConn, .Lane = 0 + outLaneOffset});
-            auto& node = Graph_.AddOwnedNode(std::move(task));
-            MarkNode(node,
-                "join",
-                execStageId,
-                JoinDebugLabel(join),
-                execStageId);
+            auto& node = addJoinNode(compileJoin(), leftPipeRef, rightPipeRef, 0);
             Graph_.AddEdge(*leftOut.Producers[0], node, leftPipeRef, 0, 0);
             Graph_.AddEdge(
                 *rightOut.Producers[0], node, rightPipeRef, 0, 0, 1);
@@ -2626,7 +2620,7 @@ private:
 
         auto hashKernels = compiler.CompileJoinHash(kernelSpec);
         kernelSpec.HasPrecomputedHash = true;
-        compileJoinKernels();
+        const auto joinNode = compileJoin();
         std::vector<std::string> leftPartitionKeys;
         std::vector<std::string> rightPartitionKeys;
         leftPartitionKeys.reserve(join.Keys().size());
@@ -2635,8 +2629,8 @@ private:
             leftPartitionKeys.push_back(key.Left);
             rightPartitionKeys.push_back(key.Right);
         }
-        auto leftShuffleCode = MakeHashShuffleCode(hashKernels.Left, leftType);
-        auto rightShuffleCode = MakeHashShuffleCode(hashKernels.Right, rightType);
+        TShuffleRuntimeFilter leftFilter;
+        TShuffleRuntimeFilter rightFilter;
         bool filterBuildIsLeft = false;
         std::shared_ptr<IRuntimeFilterProbe> filterProbe;
         if (const auto& runtimeFilter = join.RuntimeFilter()) {
@@ -2663,33 +2657,33 @@ private:
                 throw std::runtime_error(
                     "runtime filter binding factory returned an incomplete binding");
             }
-            (buildIsLeft ? leftShuffleCode : rightShuffleCode)->ProducedFilter =
-                std::move(binding.Producer);
+            (buildIsLeft ? leftFilter : rightFilter).Produced = std::move(binding.Producer);
             filterProbe = std::move(binding.Probe);
             // TRowSet::Hash has no key identity. Another consumer on this
             // path may leave a hash for a different join key, and a nested
             // join may produce its own hash-bearing rowsets. Recompute in
             // those cases before partitioning this join.
-            (buildIsLeft ? rightShuffleCode : leftShuffleCode)
-                ->UseInputHash = CanReuseRuntimeFilterHash(
-                    buildIsLeft ? join.Right() : join.Left(), runtimeFilter->Id);
+            (buildIsLeft ? rightFilter : leftFilter).UseInputHash = CanReuseRuntimeFilterHash(
+                buildIsLeft ? join.Right() : join.Left(), runtimeFilter->Id);
         }
         auto leftShuf = BuildRepartitionExchange(
             leftOut,
             leftPipeRef,
             leftLanes,
             joinParts,
-            std::move(leftShuffleCode),
+            TJoinHashPlanData{.Kernel = hashKernels.Kernel, .Entry = 0, .KeyColumns = hashKernels.LeftKeyColumns},
             "join-left-repartition",
-            {.Keys = std::move(leftPartitionKeys)});
+            {.Keys = std::move(leftPartitionKeys)},
+            std::move(leftFilter));
         auto rightShuf = BuildRepartitionExchange(
             rightOut,
             rightPipeRef,
             rightLanes,
             joinParts,
-            std::move(rightShuffleCode),
+            TJoinHashPlanData{.Kernel = hashKernels.Kernel, .Entry = 1, .KeyColumns = hashKernels.RightKeyColumns},
             "join-right-repartition",
-            {.Keys = std::move(rightPartitionKeys)});
+            {.Keys = std::move(rightPartitionKeys)},
+            std::move(rightFilter));
 
         if (join.RuntimeFilter()) {
             const auto& buildNodes = filterBuildIsLeft
@@ -2710,20 +2704,7 @@ private:
         result.OutputType = kernelSpec.OutputSchema;
         result.Producers.reserve(joinParts);
         for (size_t j = 0; j < joinParts; ++j) {
-            auto task = std::make_unique<NScheduler::TBinaryBlockingTask>(
-                joinCode,
-                makeJoinState(),
-                NScheduler::TInputPort{
-                    .Connection = leftShuf.Connection, .Lane = j},
-                NScheduler::TInputPort{
-                    .Connection = rightShuf.Connection, .Lane = j},
-                NScheduler::TOutputPort{.Connection = &outConn, .Lane = j + outLaneOffset});
-            auto& node = Graph_.AddOwnedNode(std::move(task));
-            MarkNode(node,
-                "join",
-                execStageId,
-                JoinDebugLabel(join),
-                execStageId);
+            auto& node = addJoinNode(joinNode, *leftShuf.Connection, *rightShuf.Connection, j);
             for (size_t s = 0; s < leftLanes; ++s) {
                 Graph_.AddEdge(*leftShuf.Nodes[s], node, *leftShuf.Connection, s, j);
             }
@@ -2795,7 +2776,7 @@ private:
             childConnRef,
             childLanes,
             parts,
-            std::move(partitionHash),
+            AggregateHashPlan(partitionHash),
             "window-repartition",
             {.Keys = window.PartitionKeys()});
 
@@ -2826,19 +2807,15 @@ private:
         return result;
     }
 
-    // The aggregate hash builds the shuffle tasks from records; join hashes
-    // keep their prebuilt code.
-    using TShuffleHash = std::variant<
-        TKernelCompiler::TAggregateHashDispatch, std::shared_ptr<NScheduler::THashShuffleCode>>;
-
     TRepartitionExchange BuildRepartitionExchange(
         const TLoweredOutput& input,
         NScheduler::IConnection& inputConn,
         size_t inputLanes,
         size_t partitions,
-        TShuffleHash hash,
+        NScheduler::THashShuffleNode::THash hash,
         std::string debugName,
-        NScheduler::TRepartitionSpec repartition)
+        NScheduler::TRepartitionSpec repartition,
+        TShuffleRuntimeFilter runtimeFilter = {})
     {
         const std::string label = debugName;
         auto* shufPtr = &AddConn<NScheduler::THashShuffleConnection>(
@@ -2853,52 +2830,60 @@ private:
         side.Nodes.reserve(inputLanes);
         const auto shuffleTaskGroupId = NewTaskGroup();
         for (size_t p = 0; p < inputLanes; ++p) {
-            NScheduler::TTaskNode* node = nullptr;
-            if (const auto* aggregateHash = std::get_if<TKernelCompiler::TAggregateHashDispatch>(&hash)) {
-                node = &AddNode({
-                    .TaskGroupId = shuffleTaskGroupId,
-                    .DebugKind = "hash-shuffle",
-                    .DebugLabel = label,
-                    .Body = NScheduler::THashShuffleNode{
-                        .In = PortSpec(Graph_, &inputConn, p),
-                        .Out = PortSpec(Graph_, shufPtr, 0).Connection,
-                        .SourceLane = static_cast<uint32_t>(p),
-                        .Hash = {.Kernel = aggregateHash->Kernel, .KeyColumns = aggregateHash->KeyColumns},
-                        .InputType = input.OutputType,
-                        .TargetOutputBatchRows = Settings_.HashShuffle.TargetOutputBatchRows,
-                        .MaxOutputBatchRows = Settings_.HashShuffle.MaxOutputBatchRows,
-                        .TargetOutputBatchBytes = Settings_.HashShuffle.TargetOutputBatchBytes,
-                    },
-                });
-            } else {
-                auto task = std::make_unique<NScheduler::THashShuffleTask>(
-                    std::get<std::shared_ptr<NScheduler::THashShuffleCode>>(hash),
-                    std::make_shared<int>(0),
-                    NScheduler::TInputPort{.Connection = &inputConn, .Lane = p},
-                    *shufPtr,
-                    p);
-                node = &Graph_.AddOwnedNode(std::move(task));
-                MarkNode(*node,
-                    "hash-shuffle",
-                    shuffleTaskGroupId,
-                    label);
-            }
-            Graph_.AddEdge(*input.Producers[p], *node, inputConn, p, p);
-            side.Nodes.push_back(node);
+            NScheduler::TNodeSpec record{
+                .TaskGroupId = shuffleTaskGroupId,
+                .DebugKind = "hash-shuffle",
+                .DebugLabel = label,
+                .Body = NScheduler::THashShuffleNode{
+                    .In = PortSpec(Graph_, &inputConn, p),
+                    .Out = PortSpec(Graph_, shufPtr, 0).Connection,
+                    .SourceLane = static_cast<uint32_t>(p),
+                    .Hash = hash,
+                    .InputType = input.OutputType,
+                    .TargetOutputBatchRows = Settings_.HashShuffle.TargetOutputBatchRows,
+                    .MaxOutputBatchRows = Settings_.HashShuffle.MaxOutputBatchRows,
+                    .TargetOutputBatchBytes = Settings_.HashShuffle.TargetOutputBatchBytes,
+                    .UseInputHash = runtimeFilter.UseInputHash,
+                },
+            };
+            auto& node = runtimeFilter.Produced || runtimeFilter.UseInputHash
+                ? AddRuntimeFilterShuffleNode(record, runtimeFilter.Produced)
+                : AddNode(std::move(record));
+            Graph_.AddEdge(*input.Producers[p], node, inputConn, p, p);
+            side.Nodes.push_back(&node);
         }
         return side;
     }
 
-    std::shared_ptr<NScheduler::THashShuffleCode> MakeHashShuffleCode(
-        NScheduler::THashShuffleCode::THash hash,
-        NQumir::NAst::TTypePtr inputType) const
+    // The aggregate hash of a shuffle record.
+    static TAggregateHashPlanData AggregateHashPlan(const TKernelCompiler::TAggregateHashDispatch& hash)
     {
-        return std::make_shared<NScheduler::THashShuffleCode>(
-            std::move(hash),
-            std::move(inputType),
-            Settings_.HashShuffle.TargetOutputBatchRows,
-            Settings_.HashShuffle.MaxOutputBatchRows,
-            Settings_.HashShuffle.TargetOutputBatchBytes);
+        return {.Kernel = hash.Kernel, .KeyColumns = hash.KeyColumns};
+    }
+
+    // Adds one task of a join stage from its record: lane `lane` of both
+    // inputs, lane `outputLane` of `output`.
+    template <class TJoinNode>
+    NScheduler::TTaskNode& AddJoinNode(
+        TJoinNode body,
+        NScheduler::IConnection& left,
+        NScheduler::IConnection& right,
+        size_t lane,
+        NScheduler::IConnection& output,
+        size_t outputLane,
+        TExecStageId execStageId,
+        std::string label)
+    {
+        body.Left = PortSpec(Graph_, &left, lane);
+        body.Right = PortSpec(Graph_, &right, lane);
+        body.Out = PortSpec(Graph_, &output, outputLane);
+        return AddNode({
+            .ExecStageId = execStageId,
+            .TaskGroupId = execStageId,
+            .DebugKind = "join",
+            .DebugLabel = std::move(label),
+            .Body = std::move(body),
+        });
     }
 
 public:
@@ -2917,14 +2902,32 @@ public:
     }
 
 private:
-    // Builds the task through the node factory; the slots of the kernels
-    // generated so far are appended first.
+    // Builds the task through the node factory.
     NScheduler::TTaskNode& AddNode(NScheduler::TNodeSpec record)
+    {
+        AppendKernelSlots();
+        return AddTask(Graph_, NodeSpecs_, std::move(record), TaskContext_);
+    }
+
+    // Runtime filters have no records yet, so neither has a shuffle that
+    // publishes one or reuses its hashes; the factory still builds its task.
+    NScheduler::TTaskNode& AddRuntimeFilterShuffleNode(
+        const NScheduler::TNodeSpec& record, std::shared_ptr<IRuntimeFilterProducer> producedFilter)
+    {
+        AppendKernelSlots();
+        auto& node = Graph_.AddOwnedNode(NScheduler::MakeHashShuffleTask(
+            std::get<NScheduler::THashShuffleNode>(record.Body), GraphConnections(Graph_), TaskContext_,
+            std::move(producedFilter)));
+        MarkNode(node, record.DebugKind, record.TaskGroupId, record.DebugLabel);
+        return node;
+    }
+
+    // The slots of the kernels generated so far, which the new task may bind.
+    void AppendKernelSlots()
     {
         for (size_t i = TaskContext_.Slots.size(); i < KernelSink_->size(); ++i) {
             TaskContext_.Slots.push_back((*KernelSink_)[i].Slot);
         }
-        return AddTask(Graph_, NodeSpecs_, std::move(record), TaskContext_);
     }
 
     TExecStageId NewExecStage(

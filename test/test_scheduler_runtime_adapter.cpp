@@ -925,10 +925,8 @@ TEST(SchedulerRuntimeAdapter, HashShuffleTaskScattersSelectedRows) {
             return false;
         });
     code->UseInputHash = true;
-    auto state = std::make_shared<int>(0);
     THashShuffleTask task(
         code,
-        state,
         TInputPort{.Connection = &input},
         output,
         0);
@@ -987,10 +985,8 @@ TEST(SchedulerRuntimeAdapter, HashShuffleTaskBatchesRowsUntilFinish) {
         16,
         64,
         1024 * 1024);
-    auto state = std::make_shared<int>(0);
     THashShuffleTask task(
         code,
-        state,
         TInputPort{.Connection = &input},
         output,
         0);
@@ -1056,7 +1052,7 @@ TEST_F(SchedulerRuntimeFilter, PublishesRuntimeFilterBeforeBufferedOutputDrains)
         }, schema, 16, 64, 1024 * 1024);
     auto filter = std::make_shared<TRuntimeFilter>(Context_);
     code->ProducedFilter = filter;
-    THashShuffleTask task(code, nullptr, TInputPort{.Connection = &input}, output, 0);
+    THashShuffleTask task(code, TInputPort{.Connection = &input}, output, 0);
 
     EXPECT_EQ(task.Execute(), ETaskResult::OK);
     EXPECT_FALSE(filter->Ready());
@@ -1125,7 +1121,7 @@ TEST(SchedulerRuntimeAdapter, HashShuffleBoundsSparseInputOwnersBeforeEof) {
     auto schema = std::make_shared<TStructType>(
         std::vector<std::pair<std::string, TTypePtr>>{{"value", std::make_shared<TIntegerType>()}});
     auto code = std::make_shared<THashShuffleCode>(HashSelectedValues, schema, 16, 64, 800);
-    THashShuffleTask task(code, nullptr, TInputPort{.Connection = &input}, output, 0);
+    THashShuffleTask task(code, TInputPort{.Connection = &input}, output, 0);
     std::vector<uint8_t> selection(64, 0);
 
     for (int cycle = 0; cycle < 4; ++cycle) {
@@ -1166,7 +1162,7 @@ TEST(SchedulerRuntimeAdapter, HashShuffleBudgetSharesOwnersAndHonorsBackpressure
             {"value", std::make_shared<TIntegerType>()}});
     auto code = std::make_shared<THashShuffleCode>(
         HashSelectedValues, schema, 16, 64, 1800);
-    THashShuffleTask task(code, nullptr, TInputPort{.Connection = &input}, output, 0);
+    THashShuffleTask task(code, TInputPort{.Connection = &input}, output, 0);
     std::vector<uint8_t> both(64, 0);
     std::vector<uint8_t> evenOnly(64, 0);
     std::vector<uint8_t> oddOnly(64, 0);
@@ -1250,7 +1246,7 @@ TEST(SchedulerRuntimeAdapter, HashShuffleInputBudgetPreservesNullableBitmapOffse
             ADD_FAILURE() << "a one-partition shuffle does not need hashes";
             return false;
         }, schema, 16, 64, 70);
-    THashShuffleTask task(code, nullptr, TInputPort{.Connection = &input}, output, 0);
+    THashShuffleTask task(code, TInputPort{.Connection = &input}, output, 0);
     std::vector<uint8_t> selection(32, 0);
     selection[16] = 1;
     for (bool valid : {false, true}) {
@@ -1295,7 +1291,7 @@ TEST(SchedulerRuntimeAdapter, HashShuffleInputBudgetCountsUnselectedStringPayloa
                     ADD_FAILURE() << "a one-partition shuffle does not need hashes";
                     return false;
                 }, schema, 16, 64, 128);
-            THashShuffleTask task(code, nullptr, TInputPort{.Connection = &input}, output, 0);
+            THashShuffleTask task(code, TInputPort{.Connection = &input}, output, 0);
             auto data = std::make_unique<TShufflePayload>();
             data->Destroyed = &destroyed;
             data->Data = std::string(2048, 'x') + "keep";
@@ -1352,7 +1348,7 @@ TEST(SchedulerRuntimeAdapter, HashShuffleBoundsDenseInputSplitAcrossPartitions) 
                 {"value", std::make_shared<TIntegerType>()}});
         auto code = std::make_shared<THashShuffleCode>(
             HashSelectedValues, schema, 64, 64, overBudget ? 200 : 1 << 20);
-        THashShuffleTask task(code, nullptr, TInputPort{.Connection = &input}, output, 0);
+        THashShuffleTask task(code, TInputPort{.Connection = &input}, output, 0);
         std::vector<int64_t> values(64);
         for (int64_t i = 0; i < 64; ++i) {
             values[i] = i;
@@ -1415,7 +1411,7 @@ TEST(SchedulerRuntimeAdapter, HashShuffleZeroByteTargetKeepsRowBatching) {
         std::vector<std::pair<std::string, TTypePtr>>{
             {"value", std::make_shared<TIntegerType>()}});
     auto code = std::make_shared<THashShuffleCode>(HashSelectedValues, schema, 4, 64, 0);
-    THashShuffleTask task(code, nullptr, TInputPort{.Connection = &input}, output, 0);
+    THashShuffleTask task(code, TInputPort{.Connection = &input}, output, 0);
     std::vector<uint8_t> selection(64, 0);
     selection[7] = 1;
     const char* lastData = nullptr;
@@ -1478,7 +1474,7 @@ TEST(SchedulerRuntimeAdapter, HashShuffleCancellationReleasesInputOwners) {
         }
         ASSERT_TRUE(input.Push(0, MakeInt64RowSet(std::vector<int64_t>(8, 1), &destroyed)));
         {
-            THashShuffleTask task(code, nullptr, TInputPort{.Connection = &input}, output, 0);
+            THashShuffleTask task(code, TInputPort{.Connection = &input}, output, 0);
             EXPECT_EQ(task.Execute(), pending ? ETaskResult::BLOCKED_OUTPUT : ETaskResult::OK);
             EXPECT_EQ(destroyed.load(), 0);
         }
@@ -1519,7 +1515,7 @@ TEST_F(SchedulerRuntimeFilter, HashShuffleReadsHashesOfSelectedRowsOnly) {
         HashSelectedValues, schema, 16, 64, 1024 * 1024);
     auto filter = std::make_shared<TRuntimeFilter>(Context_);
     code->ProducedFilter = filter;
-    THashShuffleTask task(code, nullptr, TInputPort{.Connection = &input}, output, 0);
+    THashShuffleTask task(code, TInputPort{.Connection = &input}, output, 0);
 
     EXPECT_EQ(task.Execute(), ETaskResult::OK);
     EXPECT_EQ(task.Execute(), ETaskResult::OK);
@@ -1560,7 +1556,7 @@ TEST_F(SchedulerRuntimeFilter, HashShuffleDropsBatchWithEmptySelection) {
     auto code = std::make_shared<THashShuffleCode>(HashSelectedValues);
     auto filter = std::make_shared<TRuntimeFilter>(Context_);
     code->ProducedFilter = filter;
-    THashShuffleTask task(code, nullptr, TInputPort{.Connection = &input}, output, 0);
+    THashShuffleTask task(code, TInputPort{.Connection = &input}, output, 0);
 
     EXPECT_EQ(task.Execute(), ETaskResult::OK);
     EXPECT_EQ(task.Execute(), ETaskResult::FINISHED);
@@ -1587,7 +1583,7 @@ TEST(SchedulerRuntimeAdapter, HashShuffleTreatsFullSelectionAsNoSelection) {
 
         auto code = std::make_shared<THashShuffleCode>(HashSelectedValues);
         THashShuffleTask task(
-            code, nullptr, TInputPort{.Connection = &input}, output, 0);
+            code, TInputPort{.Connection = &input}, output, 0);
         EXPECT_EQ(task.Execute(), ETaskResult::OK);
 
         const auto even = FetchSelectedRows(output, 0);

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <qdb/plan/ops/join_type.h>
 #include <qdb/plan/ops/operator.h>
 
 #include <qumir/error.h>
@@ -14,21 +15,6 @@
 #include <vector>
 
 namespace NQdb {
-
-enum class EJoinType {
-    Inner,
-    Left,       // LEFT OUTER
-    Right,      // RIGHT OUTER
-    Full,       // FULL OUTER
-    LeftSemi,
-    RightSemi,
-    LeftAnti,
-    RightAnti,
-    // Every left row once, followed by a marker with the SQL value of
-    // `left keys IN right keys` (TRUE / FALSE / NULL). Only the join kernel
-    // supports it so far; plans do not produce it.
-    LeftMark,
-};
 
 // Equi-join key: a pair of column names, one from each side
 // (left.Left == right.Right is the equality predicate).

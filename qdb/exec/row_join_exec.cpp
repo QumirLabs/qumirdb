@@ -51,7 +51,8 @@ bool TRowJoinProcessor::CanHoldProbe() const {
 
 uint64_t TRowJoinProcessor::ProbeBatchBytes(const TRowSet& batch) const {
     // The same measure as the retained_input counters: all rows, no selection.
-    auto measure = Kernels_.ProbeMeasure;
+    TRowSetInstrumentation measure{
+        .Kernel = Kernels_.ProbeMeasureSlot, .Widths = Kernels_.ProbeMeasureWidths};
     auto allRows = batch;
     allRows.Selection = nullptr;
     measure.Add(allRows);

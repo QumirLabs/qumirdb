@@ -4,6 +4,7 @@
 #include <qdb/io/io.h>
 #include <qdb/io/parquet/source.h>
 #include <qdb/kernel/regex.h>
+#include <qdb/plan/ops/join_type.h>
 #include <qdb/scheduler/connection.h>
 #include <qdb/scheduler/graph.h>
 
@@ -18,6 +19,7 @@
 
 namespace NQdb {
 
+class IRuntimeFilterProducer;
 struct TKernelSlot;
 struct TRuntimeContext;
 
@@ -212,13 +214,16 @@ struct TAggregateNode {
     }
 };
 
-// Partitions its input by the aggregate hash of the keys.
+// Partitions its input by the hash of the keys: an aggregate hash or one side
+// of a join hash.
 struct THashShuffleNode {
+    using THash = std::variant<TAggregateHashPlanData, TJoinHashPlanData>;
+
     TPortSpec In;
     // The hash shuffle connection; the task writes every partition of it.
     uint32_t Out = 0;
     uint32_t SourceLane = 0;
-    TAggregateHashPlanData Hash;
+    THash Hash;
     NQumir::NAst::TTypePtr InputType;
     uint64_t TargetOutputBatchRows = 0;
     uint64_t MaxOutputBatchRows = 0;
@@ -239,10 +244,71 @@ struct THashShuffleNode {
     }
 };
 
+// A join over the symmetric Robin Hood join table.
+struct THashJoinNode {
+    TPortSpec Left;
+    TPortSpec Right;
+    TPortSpec Out;
+    TJoinKernelMeta Kernels;
+    EJoinType JoinType = EJoinType::Inner;
+    EJoinBuildSide BuildSide = EJoinBuildSide::Auto;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.Left);
+        v(self.Right);
+        v(self.Out);
+        v(self.Kernels);
+        v(self.JoinType);
+        v(self.BuildSide);
+    }
+};
+
+// An equi-join over the row join table: builds BuildSide, probes the other.
+struct TRowJoinNode {
+    TPortSpec Left;
+    TPortSpec Right;
+    TPortSpec Out;
+    TRowJoinKernelMeta Kernels;
+    EJoinBuildSide BuildSide = EJoinBuildSide::Auto;
+    // Probe bytes the task may hold while its table is being built.
+    uint64_t ProbeHoldBytes = 0;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.Left);
+        v(self.Right);
+        v(self.Out);
+        v(self.Kernels);
+        v(self.BuildSide);
+        v(self.ProbeHoldBytes);
+    }
+};
+
+// A keyless join of each Left batch against the buffered Right input.
+struct TCrossJoinNode {
+    TPortSpec Left;
+    TPortSpec Right;
+    TPortSpec Out;
+    // Index of the cross join kernel in the sink (0 without a sink).
+    uint32_t Kernel = 0;
+    EJoinType JoinType = EJoinType::Inner;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.Left);
+        v(self.Right);
+        v(self.Out);
+        v(self.Kernel);
+        v(self.JoinType);
+    }
+};
+
 using TNodeBody = std::variant<
     TForwardNode, TRemoteSourceNode, TRemoteSinkNode, TSinkWriterNode,
     TParquetScanNode, TFilterNode, TProjectNode, TSortNode, TSortMergeNode,
-    TWindowNode, TAggregateNode, THashShuffleNode>;
+    TWindowNode, TAggregateNode, THashShuffleNode, THashJoinNode, TRowJoinNode,
+    TCrossJoinNode>;
 
 struct TNodeSpec {
     uint64_t ExecStageId = InvalidExecStageId;
@@ -334,6 +400,12 @@ struct TNodeTaskContext {
 // std::runtime_error on an invalid body.
 std::unique_ptr<ITask> MakeNodeTask(
     const TNodeBody& body, const std::vector<IConnection*>& connections, TNodeTaskContext& context);
+
+// The task of a hash shuffle node that also publishes `producedFilter`. The
+// lowerer keeps no record for it while runtime filters have none.
+std::unique_ptr<ITask> MakeHashShuffleTask(
+    const THashShuffleNode& node, const std::vector<IConnection*>& connections,
+    const TNodeTaskContext& context, std::shared_ptr<IRuntimeFilterProducer> producedFilter);
 
 // Builds an unsealed graph: node i has ExecutionSlot i. Remote source and sink
 // tasks have empty code, which the compute actor binds. `sink` is required for
