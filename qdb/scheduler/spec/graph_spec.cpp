@@ -8,6 +8,7 @@
 #include <qdb/kernel/compiler.h>
 #include <qdb/scheduler/connections/local.h>
 #include <qdb/scheduler/lowering/task_factory.h>
+#include <qdb/scheduler/tasks/cte_spool.h>
 #include <qdb/scheduler/tasks/runtime_adapter.h>
 #include <qdb/utils/binary_io.h>
 
@@ -84,6 +85,14 @@ const std::shared_ptr<TKernelSlot>& SlotAt(const TNodeTaskContext& context, uint
         Invalid("kernel index is out of range");
     }
     return context.Slots[kernel];
+}
+
+const std::shared_ptr<TCteSpool>& CteSpoolAt(const TNodeTaskContext& context, uint32_t spool)
+{
+    if (spool >= context.CteSpools.size()) {
+        Invalid("cte spool index is out of range");
+    }
+    return context.CteSpools[spool];
 }
 
 std::unique_ptr<ITask> MakeProcessTask(
@@ -313,6 +322,24 @@ std::unique_ptr<ITask> MakeNodeTask(
                 NLowering::MakeLateMergeCode(),
                 std::make_shared<NLowering::TLateMaterializeMergeState>(inputs.size()),
                 std::move(inputs), OutputPort(connections, node.Out));
+        } else if constexpr (std::is_same_v<TNode, TCteProducerNode>) {
+            const auto& spool = CteSpoolAt(context, node.Spool);
+            if (node.Segment >= spool->SegmentCount()) {
+                Invalid("cte spool segment is out of range");
+            }
+            return std::make_unique<TCteProducerTask>(
+                spool, node.Segment, InputPort(connections, node.In), OutputPort(connections, node.Out));
+        } else if constexpr (std::is_same_v<TNode, TCtePublishNode>) {
+            return std::make_unique<TCtePublishTask>(
+                CteSpoolAt(context, node.Spool), InputPort(connections, node.In),
+                OutputPort(connections, node.Out));
+        } else if constexpr (std::is_same_v<TNode, TCteConsumerNode>) {
+            if (node.State >= context.CteConsumerStates.size()) {
+                Invalid("cte consumer state index is out of range");
+            }
+            return std::make_unique<TCteConsumerTask>(
+                context.CteConsumerStates[node.State], InputPort(connections, node.In),
+                OutputPort(connections, node.Out));
         } else if constexpr (std::is_same_v<TNode, TForwardNode>) {
             auto code = std::make_shared<TUnaryCode>([](void*, TRowSet&) {});
             return std::make_unique<TUnaryTask>(
@@ -340,6 +367,19 @@ std::unique_ptr<ITask> MakeNodeTask(
                 std::move(code), std::move(state), InputPort(connections, node.In));
         }
     }, body);
+}
+
+void AppendCteObjects(
+    const std::vector<TCteSpoolSpec>& spools, const std::vector<TCteConsumerStateSpec>& states,
+    TNodeTaskContext& context)
+{
+    for (size_t i = context.CteSpools.size(); i < spools.size(); ++i) {
+        context.CteSpools.push_back(std::make_shared<TCteSpool>(spools[i].Segments));
+    }
+    for (size_t i = context.CteConsumerStates.size(); i < states.size(); ++i) {
+        context.CteConsumerStates.push_back(
+            std::make_shared<TCteConsumerState>(CteSpoolAt(context, states[i].Spool)));
+    }
 }
 
 std::unique_ptr<ITask> MakeHashShuffleTask(
@@ -387,6 +427,7 @@ std::unique_ptr<TTaskGraph> MaterializeGraph(
         .Runtime = MakeRuntimeContext(spec.Regexes, nullptr),
         .Sink = sink,
     };
+    AppendCteObjects(spec.CteSpools, spec.CteConsumerStates, context);
 
     std::vector<IConnection*> connections;
     connections.reserve(spec.Connections.size());

@@ -55,6 +55,9 @@ struct TLoweredPlan {
     std::vector<std::optional<TNodeSpec>> NodeSpecs;
     // Shared by Kernels; the graph spec carries its regexes.
     std::shared_ptr<TRuntimeContext> RuntimeContext;
+    // The graph spec's CTE tables, which the CTE records index.
+    std::vector<TCteSpoolSpec> CteSpools;
+    std::vector<TCteConsumerStateSpec> CteConsumerStates;
 };
 
 // Choose hash-shuffle fanout for a plain grouped aggregate. Explicit shuffle

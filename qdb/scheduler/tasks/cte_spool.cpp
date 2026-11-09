@@ -62,6 +62,11 @@ void TCteSpool::Seal() {
     }
 }
 
+size_t TCteSpool::SegmentCount() const
+{
+    return Segments_.size();
+}
+
 size_t TCteSpool::BatchCount() const {
     assert(SegmentEnds_.size() == Segments_.size());
     return SegmentEnds_.empty() ? 0 : SegmentEnds_.back();

@@ -32,6 +32,7 @@ public:
     // Producer side, before Seal. The spool takes over the rowset reference.
     void Append(size_t segment, TRowSet rowSet);
     void Seal();
+    size_t SegmentCount() const;
 
     // Consumer side, after Seal. Batches are numbered segment by segment.
     size_t BatchCount() const;

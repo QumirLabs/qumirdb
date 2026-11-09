@@ -25,6 +25,9 @@ struct TRuntimeContext;
 
 namespace NScheduler {
 
+class TCteConsumerState;
+class TCteSpool;
+
 // Plain-data description of a task graph. Connections, nodes and edges are
 // referenced by their position, which is also the order they are built in.
 // TODO: no versioning or compatibility checks yet.
@@ -352,11 +355,79 @@ struct TLateMergeNode {
     }
 };
 
+// The spool of a materialized CTE, one segment per producer lane.
+struct TCteSpoolSpec {
+    uint32_t Segments = 0;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.Segments);
+    }
+};
+
+// The read progress of one CTE reference, shared by its lanes.
+struct TCteConsumerStateSpec {
+    uint32_t Spool = 0;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.Spool);
+    }
+};
+
+// One lane of a CTE producer: appends In to its segment of the spool and then
+// finishes its lane of Out, the publish task's input.
+struct TCteProducerNode {
+    TPortSpec In;
+    TPortSpec Out;
+    uint32_t Spool = 0;
+    uint32_t Segment = 0;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.In);
+        v(self.Out);
+        v(self.Spool);
+        v(self.Segment);
+    }
+};
+
+// Seals the spool once every producer lane of In has finished, then finishes
+// every consumer lane of Out.
+struct TCtePublishNode {
+    TPortSpec In;
+    TPortSpec Out;
+    uint32_t Spool = 0;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.In);
+        v(self.Out);
+        v(self.Spool);
+    }
+};
+
+// One lane of a CTE reference. In is its lane of the publish task's output:
+// reference * lanes + lane.
+struct TCteConsumerNode {
+    TPortSpec In;
+    TPortSpec Out;
+    uint32_t State = 0;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.In);
+        v(self.Out);
+        v(self.State);
+    }
+};
+
 using TNodeBody = std::variant<
     TForwardNode, TRemoteSourceNode, TRemoteSinkNode, TSinkWriterNode,
     TParquetScanNode, TFilterNode, TProjectNode, TSortNode, TSortMergeNode,
     TWindowNode, TAggregateNode, THashShuffleNode, THashJoinNode, TRowJoinNode,
-    TCrossJoinNode, TLimitNode, TLateLookupNode, TLateMergeNode>;
+    TCrossJoinNode, TLimitNode, TLateLookupNode, TLateMergeNode,
+    TCteProducerNode, TCtePublishNode, TCteConsumerNode>;
 
 struct TNodeSpec {
     uint64_t ExecStageId = InvalidExecStageId;
@@ -416,6 +487,9 @@ struct TGraphSpec {
     std::vector<TExternalSpec> Externals;
     // The query's regexes in registration order, so each keeps its id.
     std::vector<NKernel::TRegexSpec> Regexes;
+    // Shared by the CTE records, which index them.
+    std::vector<TCteSpoolSpec> CteSpools;
+    std::vector<TCteConsumerStateSpec> CteConsumerStates;
 
     void Fields(this auto& self, auto& v)
     {
@@ -424,6 +498,8 @@ struct TGraphSpec {
         v(self.Edges);
         v(self.Externals);
         v(self.Regexes);
+        v(self.CteSpools);
+        v(self.CteConsumerStates);
     }
 };
 
@@ -441,7 +517,18 @@ struct TNodeTaskContext {
     std::unordered_map<std::string, TParquetFile> ParquetFiles;
     // Required for SinkWriter nodes.
     ISink* Sink = nullptr;
+    // Built from the CTE tables, by index. They keep the spooled rows alive, so
+    // a context lives only while its graph is built.
+    std::vector<std::shared_ptr<TCteSpool>> CteSpools;
+    std::vector<std::shared_ptr<TCteConsumerState>> CteConsumerStates;
 };
+
+// Builds the CTE spools and consumer states of the tables past those the
+// context already holds, so indices match the tables. Throws
+// std::runtime_error on a consumer state of an unknown spool.
+void AppendCteObjects(
+    const std::vector<TCteSpoolSpec>& spools, const std::vector<TCteConsumerStateSpec>& states,
+    TNodeTaskContext& context);
 
 // Builds the task of one node; port connections index `connections`. The
 // lowerer builds the tasks of these kinds through this too. Throws
@@ -458,8 +545,8 @@ std::unique_ptr<ITask> MakeHashShuffleTask(
 // Builds an unsealed graph: node i has ExecutionSlot i. Remote source and sink
 // tasks have empty code, which the compute actor binds. `sink` is required for
 // SinkWriter nodes; `slots` are the query's kernel slots by kernel index. The
-// runtime context is rebuilt from the spec's regexes. Throws
-// std::runtime_error on an invalid spec.
+// runtime context is rebuilt from the spec's regexes and the CTE objects from
+// its CTE tables. Throws std::runtime_error on an invalid spec.
 std::unique_ptr<TTaskGraph> MaterializeGraph(
     const TGraphSpec& spec, ISink* sink = nullptr,
     std::vector<std::shared_ptr<TKernelSlot>> slots = {});
@@ -467,7 +554,7 @@ std::unique_ptr<TTaskGraph> MaterializeGraph(
 // Reads connections, edges and externals from a graph built by MaterializeGraph
 // or by hand. The caller supplies the node records, one per graph node in
 // order. Externals keep the graph's current order (sorted by id after Seal);
-// regexes are left to the caller.
+// regexes and CTE tables are left to the caller.
 // Throws std::runtime_error for a connection that is not a local one and for a
 // rowset edge without a connection.
 TGraphSpec ExtractGraphSpec(const TTaskGraph& graph, std::vector<TNodeSpec> nodes);
