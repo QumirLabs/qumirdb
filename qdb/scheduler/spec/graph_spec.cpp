@@ -149,21 +149,30 @@ std::unique_ptr<ITask> MakeAggregateTask(
         InputPort(connections, node.In), OutputPort(connections, node.Out));
 }
 
-std::unique_ptr<ITask> MakeHashShuffleTask(
-    const THashShuffleNode& node, const std::vector<IConnection*>& connections, const TNodeTaskContext& context)
+THashShuffleCode::THash BindShuffleHash(const THashShuffleNode::THash& hash, const TNodeTaskContext& context)
 {
-    auto* output = dynamic_cast<THashShuffleConnection*>(&ConnectionAt(connections, node.Out));
-    if (!output) {
-        Invalid("a hash shuffle node needs a hash shuffle output");
+    if (const auto* join = std::get_if<TJoinHashPlanData>(&hash)) {
+        if (join->Entry > 1) {
+            Invalid("a join hash entry is 0 (left) or 1 (right)");
+        }
+        return BindJoinHash(SlotAt(context, join->Kernel), join->Entry, join->KeyColumns);
     }
-    auto hash = BindAggregateHash(SlotAt(context, node.Hash.Kernel), node.Hash.KeyColumns);
-    hash.Kernel = node.Hash.Kernel;
-    auto code = std::make_shared<THashShuffleCode>(
-        std::move(hash), node.InputType,
-        node.TargetOutputBatchRows, node.MaxOutputBatchRows, node.TargetOutputBatchBytes);
-    code->UseInputHash = node.UseInputHash;
-    return std::make_unique<THashShuffleTask>(
-        std::move(code), nullptr, InputPort(connections, node.In), *output, node.SourceLane);
+    const auto& aggregate = std::get<TAggregateHashPlanData>(hash);
+    auto dispatch = BindAggregateHash(SlotAt(context, aggregate.Kernel), aggregate.KeyColumns);
+    dispatch.Kernel = aggregate.Kernel;
+    return dispatch;
+}
+
+// Binary join code and its state over the node's ports.
+template <class TState, class TNode, class... TArgs>
+std::unique_ptr<ITask> MakeJoinTask(
+    const TNode& node, const std::vector<IConnection*>& connections, TArgs&&... args)
+{
+    return std::make_unique<TBinaryBlockingTask>(
+        NLowering::MakeBinaryJoinCode<TState>(),
+        std::make_shared<TState>(std::forward<TArgs>(args)...),
+        InputPort(connections, node.Left), InputPort(connections, node.Right),
+        OutputPort(connections, node.Out));
 }
 
 TTaskNode& NodeAt(const std::vector<TTaskNode*>& nodes, uint32_t index)
@@ -263,7 +272,22 @@ std::unique_ptr<ITask> MakeNodeTask(
         } else if constexpr (std::is_same_v<TNode, TAggregateNode>) {
             return MakeAggregateTask(node, connections, context);
         } else if constexpr (std::is_same_v<TNode, THashShuffleNode>) {
-            return MakeHashShuffleTask(node, connections, context);
+            return MakeHashShuffleTask(node, connections, context, nullptr);
+        } else if constexpr (std::is_same_v<TNode, THashJoinNode>) {
+            return MakeJoinTask<NLowering::TSchedulerInnerJoinState>(
+                node, connections, BindJoinKernels(SlotAt(context, node.Kernels.Kernel), node.Kernels),
+                node.JoinType, node.BuildSide);
+        } else if constexpr (std::is_same_v<TNode, TRowJoinNode>) {
+            const auto& kernels = node.Kernels;
+            return MakeJoinTask<NLowering::TSchedulerRowJoinState>(
+                node, connections,
+                BindRowJoinKernels(
+                    SlotAt(context, kernels.Kernel), SlotAt(context, kernels.ProbeMeasureKernel), kernels),
+                node.BuildSide, node.ProbeHoldBytes);
+        } else if constexpr (std::is_same_v<TNode, TCrossJoinNode>) {
+            return MakeJoinTask<NLowering::TSchedulerCrossJoinState>(
+                node, connections,
+                BindCrossJoinKernels(SlotAt(context, node.Kernel), {.Kernel = node.Kernel}), node.JoinType);
         } else if constexpr (std::is_same_v<TNode, TForwardNode>) {
             auto code = std::make_shared<TUnaryCode>([](void*, TRowSet&) {});
             return std::make_unique<TUnaryTask>(
@@ -291,6 +315,23 @@ std::unique_ptr<ITask> MakeNodeTask(
                 std::move(code), std::move(state), InputPort(connections, node.In));
         }
     }, body);
+}
+
+std::unique_ptr<ITask> MakeHashShuffleTask(
+    const THashShuffleNode& node, const std::vector<IConnection*>& connections,
+    const TNodeTaskContext& context, std::shared_ptr<IRuntimeFilterProducer> producedFilter)
+{
+    auto* output = dynamic_cast<THashShuffleConnection*>(&ConnectionAt(connections, node.Out));
+    if (!output) {
+        Invalid("a hash shuffle node needs a hash shuffle output");
+    }
+    auto code = std::make_shared<THashShuffleCode>(
+        BindShuffleHash(node.Hash, context), node.InputType,
+        node.TargetOutputBatchRows, node.MaxOutputBatchRows, node.TargetOutputBatchBytes);
+    code->ProducedFilter = std::move(producedFilter);
+    code->UseInputHash = node.UseInputHash;
+    return std::make_unique<THashShuffleTask>(
+        std::move(code), InputPort(connections, node.In), *output, node.SourceLane);
 }
 
 std::string SerializeGraphSpec(const TGraphSpec& spec)

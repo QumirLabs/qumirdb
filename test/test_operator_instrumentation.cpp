@@ -487,7 +487,7 @@ TEST(OperatorInstrumentation, ShuffleAccountsSparseRetainedOwnersOnceAcrossParti
         input.Resize(1, 1);
         THashShuffleConnection output(1);
         output.Resize(1, 4);
-        THashShuffleTask task(code, nullptr, TInputPort{.Connection = &input}, output, 0);
+        THashShuffleTask task(code, TInputPort{.Connection = &input}, output, 0);
         node.Task = &task;
         std::unordered_map<const IConnection*, TTypePtr> types{{&input, schema}, {&output, schema}};
         TTaskInstrumentationSetup setup(node, types);

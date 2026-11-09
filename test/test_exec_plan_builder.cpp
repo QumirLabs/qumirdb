@@ -374,6 +374,20 @@ TEST(ExecPlanBuilder, LowererUsesInjectedRuntimeFilterBindings) {
         }
     }
     EXPECT_EQ(dependencies, 16u);
+    // Runtime filters have no records yet, so the build shuffles that publish
+    // one have none either; the join tasks do.
+    const auto& nodes = lowered.Graph->Nodes();
+    size_t buildShuffles = 0;
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        const bool recorded = i < lowered.NodeSpecs.size() && lowered.NodeSpecs[i];
+        if (nodes[i]->DebugLabel == "join-right-repartition") {
+            ++buildShuffles;
+            EXPECT_FALSE(recorded);
+        } else if (nodes[i]->DebugKind == "join") {
+            EXPECT_TRUE(recorded);
+        }
+    }
+    EXPECT_EQ(buildShuffles, 4u);
     auto exec = BuildExecPlan(lowered);
     ASSERT_TRUE(exec.has_value()) << exec.error();
     ASSERT_EQ(CountKind(*exec, EExecPlanNodeKind::RuntimeFilter), 1u);
@@ -579,7 +593,7 @@ TEST(ExecPlanBuilder, LoweringRecordsSpecsForSupportedNodeKinds) {
         const bool isForward = kind == "broadcast";
         // Mock sources are not parquet scans, so they keep no record.
         const bool recorded = isForward || kind == "sink" || kind == "filter" || kind == "project"
-            || kind == "aggregate" || kind == "hash-shuffle";
+            || kind == "aggregate" || kind == "hash-shuffle" || kind == "join";
         ASSERT_EQ(record.has_value(), recorded) << kind;
         if (!record) {
             expectedMissing.push_back(static_cast<uint32_t>(i));
@@ -791,6 +805,63 @@ TEST(ExecPlanBuilder, UngroupedAggregateGraphRunsFromItsSerializedSpec) {
             });
         EXPECT_EQ(rows.size(), 1u + 1u);
     }
+}
+
+// The join hashes of the shuffles in `spec`: entry 0 (left) or 1 (right).
+std::vector<uint32_t> JoinHashEntries(const NScheduler::TGraphSpec& spec)
+{
+    std::vector<uint32_t> entries;
+    for (const auto& node : spec.Nodes) {
+        if (const auto* shuffle = std::get_if<NScheduler::THashShuffleNode>(&node.Body)) {
+            entries.push_back(std::get<TJoinHashPlanData>(shuffle->Hash).Entry);
+        }
+    }
+    std::ranges::sort(entries);
+    return entries;
+}
+
+// These join queries place no runtime filter on a 256-row table, so every
+// node has a record.
+TEST(ExecPlanBuilder, HashJoinGraphRunsFromItsSerializedSpec) {
+    auto settings = MultiSettings();
+    // The symmetric table; the row table would take this inner join.
+    settings.Join.Table = NScheduler::EJoinTableKind::Legacy;
+    const auto rows = ExpectQueryFromSpec(
+        "SELECT a.id, b.d9, a.s FROM t a JOIN t b ON a.id = b.id WHERE a.id % 3 <> 0",
+        settings, false, [](const NScheduler::TGraphSpec& spec) {
+            // Four scan lanes per side shuffle into two partition joins.
+            EXPECT_EQ(CountNodes<NScheduler::THashJoinNode>(spec), 2u);
+            EXPECT_EQ(JoinHashEntries(spec), (std::vector<uint32_t>{0, 0, 0, 0, 1, 1, 1, 1}));
+        });
+    EXPECT_EQ(rows.size(), 1u + 170u);
+}
+
+TEST(ExecPlanBuilder, RowJoinGraphRunsFromItsSerializedSpec) {
+    // The smaller right input is the build side, so the row table serves the
+    // LEFT join.
+    const auto rows = ExpectQueryFromSpec(
+        "SELECT a.id, a.d9, b.s FROM t a LEFT JOIN (SELECT id, s FROM t WHERE id % 4 = 0) b "
+        "ON a.id = b.id",
+        MultiSettings(), false, [](const NScheduler::TGraphSpec& spec) {
+            ASSERT_EQ(CountNodes<NScheduler::TRowJoinNode>(spec), 2u);
+            for (const auto& node : spec.Nodes) {
+                if (const auto* join = std::get_if<NScheduler::TRowJoinNode>(&node.Body)) {
+                    EXPECT_EQ(join->BuildSide, EJoinBuildSide::Right);
+                }
+            }
+            EXPECT_EQ(JoinHashEntries(spec), (std::vector<uint32_t>{0, 0, 0, 0, 1, 1, 1, 1}));
+        });
+    EXPECT_EQ(rows.size(), 1u + 256u);
+}
+
+TEST(ExecPlanBuilder, CrossJoinGraphRunsFromItsSerializedSpec) {
+    const auto rows = ExpectQueryFromSpec(
+        "SELECT a.id, b.id AS bid FROM t a, (SELECT id FROM t WHERE id < 3) b "
+        "WHERE a.id % 50 = 0 AND a.id > b.id",
+        MultiSettings(), false, [](const NScheduler::TGraphSpec& spec) {
+            EXPECT_GT(CountNodes<NScheduler::TCrossJoinNode>(spec), 0u);
+        });
+    EXPECT_EQ(rows.size(), 1u + 15u);
 }
 
 TEST(ExecPlanBuilder, MultiKeepsRealPartialAndCombineStages) {

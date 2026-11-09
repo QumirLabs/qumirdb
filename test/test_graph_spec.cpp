@@ -308,7 +308,7 @@ TEST(GraphSpec, AggregateAndHashShuffleRecordsRoundTrip)
         .In = {0, 1},
         .Out = 1,
         .SourceLane = 1,
-        .Hash = {.Kernel = 3, .KeyColumns = {0, 2}},
+        .Hash = TAggregateHashPlanData{.Kernel = 3, .KeyColumns = {0, 2}},
         .InputType = inputType,
         .TargetOutputBatchRows = 4096,
         .MaxOutputBatchRows = 65536,
@@ -352,8 +352,9 @@ TEST(GraphSpec, AggregateAndHashShuffleRecordsRoundTrip)
     EXPECT_EQ(shuffle.In.Lane, 1u);
     EXPECT_EQ(shuffle.Out, 1u);
     EXPECT_EQ(shuffle.SourceLane, 1u);
-    EXPECT_EQ(shuffle.Hash.Kernel, 3u);
-    EXPECT_EQ(shuffle.Hash.KeyColumns, (std::vector<int64_t>{0, 2}));
+    const auto& hash = std::get<TAggregateHashPlanData>(shuffle.Hash);
+    EXPECT_EQ(hash.Kernel, 3u);
+    EXPECT_EQ(hash.KeyColumns, (std::vector<int64_t>{0, 2}));
     ASSERT_TRUE(shuffle.InputType);
     EXPECT_NE(shuffle.InputType, inputType);
     EXPECT_EQ(PrintTypeText(shuffle.InputType), PrintTypeText(inputType));
@@ -384,6 +385,104 @@ TEST(GraphSpec, AggregateAndHashShuffleRecordsRoundTrip)
     EXPECT_EQ(aggregate.Table.InitialGroups, 40);
     EXPECT_EQ(aggregate.Table.RowSwitchGroups, 7);
     EXPECT_EQ(aggregate.Table.RowExpectedGroups, 9);
+}
+
+TEST(GraphSpec, JoinAndJoinHashShuffleRecordsRoundTrip)
+{
+    using namespace NQumir::NAst;
+    const TTypePtr inputType = std::make_shared<TStructType>(std::vector<std::pair<std::string, TTypePtr>>{
+        {"k", std::make_shared<TIntegerType>(TIntegerType::I32)},
+    });
+    TGraphSpec spec;
+    spec.Nodes.push_back(Node("hash-shuffle", "join-right-repartition", THashShuffleNode{
+        .In = {0, 2},
+        .Out = 1,
+        .SourceLane = 2,
+        .Hash = TJoinHashPlanData{.Kernel = 5, .Entry = 1, .KeyColumns = {1, 0}},
+        .InputType = inputType,
+    }));
+    spec.Nodes.push_back(Node("join", "join inner", THashJoinNode{
+        .Left = {1, 0},
+        .Right = {2, 0},
+        .Out = {3, 1},
+        .Kernels = {.LeftKeyColumns = {0, 2}, .RightKeyColumns = {1, 3}, .Kernel = 6},
+        .JoinType = EJoinType::LeftAnti,
+        .BuildSide = EJoinBuildSide::Right,
+    }));
+    spec.Nodes.push_back(Node("join", "join left", TRowJoinNode{
+        .Left = {1, 1},
+        .Right = {2, 1},
+        .Out = {3, 0},
+        .Kernels = {
+            .RetainsBuildBatches = true,
+            .EmitsByMark = true,
+            .KeepsNullKeyRows = true,
+            .BuildKeyColumns = {4},
+            .ProbeKeyColumns = {5},
+            .Kernel = 7,
+            .ProbeMeasureKernel = 8,
+            .ProbeMeasureWidths = {8, -1},
+        },
+        .BuildSide = EJoinBuildSide::Left,
+        .ProbeHoldBytes = 1 << 24,
+    }));
+    spec.Nodes.push_back(Node("join", "cross-join full", TCrossJoinNode{
+        .Left = {4, 2},
+        .Right = {5, 2},
+        .Out = {6, 2},
+        .Kernel = 9,
+        .JoinType = EJoinType::Full,
+    }));
+
+    const auto bytes = SerializeGraphSpec(spec);
+    const auto back = DeserializeGraphSpec(bytes);
+    EXPECT_EQ(SerializeGraphSpec(back), bytes);
+    for (size_t size = 0; size < bytes.size(); ++size) {
+        EXPECT_THROW(DeserializeGraphSpec(std::string_view(bytes).substr(0, size)),
+            std::runtime_error) << size;
+    }
+
+    ASSERT_EQ(back.Nodes.size(), 4u);
+    const auto& shuffle = std::get<THashShuffleNode>(back.Nodes[0].Body);
+    const auto& hash = std::get<TJoinHashPlanData>(shuffle.Hash);
+    EXPECT_EQ(hash.Kernel, 5u);
+    EXPECT_EQ(hash.Entry, 1u);
+    EXPECT_EQ(hash.KeyColumns, (std::vector<int64_t>{1, 0}));
+    EXPECT_EQ(PrintTypeText(shuffle.InputType), PrintTypeText(inputType));
+
+    const auto& hashJoin = std::get<THashJoinNode>(back.Nodes[1].Body);
+    EXPECT_EQ(hashJoin.Left.Connection, 1u);
+    EXPECT_EQ(hashJoin.Right.Connection, 2u);
+    EXPECT_EQ(hashJoin.Out.Lane, 1u);
+    EXPECT_EQ(hashJoin.Kernels.LeftKeyColumns, (std::vector<int64_t>{0, 2}));
+    EXPECT_EQ(hashJoin.Kernels.RightKeyColumns, (std::vector<int64_t>{1, 3}));
+    EXPECT_EQ(hashJoin.Kernels.Kernel, 6u);
+    EXPECT_EQ(hashJoin.JoinType, EJoinType::LeftAnti);
+    EXPECT_EQ(hashJoin.BuildSide, EJoinBuildSide::Right);
+
+    const auto& rowJoin = std::get<TRowJoinNode>(back.Nodes[2].Body);
+    EXPECT_EQ(rowJoin.Left.Lane, 1u);
+    EXPECT_EQ(rowJoin.Right.Lane, 1u);
+    EXPECT_EQ(rowJoin.Out.Connection, 3u);
+    const auto& kernels = rowJoin.Kernels;
+    EXPECT_TRUE(kernels.RetainsBuildBatches);
+    EXPECT_TRUE(kernels.EmitsByMark);
+    EXPECT_TRUE(kernels.KeepsNullKeyRows);
+    EXPECT_EQ(kernels.BuildKeyColumns, (std::vector<int64_t>{4}));
+    EXPECT_EQ(kernels.ProbeKeyColumns, (std::vector<int64_t>{5}));
+    EXPECT_EQ(kernels.Kernel, 7u);
+    EXPECT_EQ(kernels.ProbeMeasureKernel, 8u);
+    EXPECT_EQ(kernels.ProbeMeasureWidths, (std::vector<int64_t>{8, -1}));
+    EXPECT_EQ(rowJoin.BuildSide, EJoinBuildSide::Left);
+    EXPECT_EQ(rowJoin.ProbeHoldBytes, 1u << 24);
+
+    const auto& cross = std::get<TCrossJoinNode>(back.Nodes[3].Body);
+    EXPECT_EQ(cross.Left.Connection, 4u);
+    EXPECT_EQ(cross.Right.Connection, 5u);
+    EXPECT_EQ(cross.Out.Connection, 6u);
+    EXPECT_EQ(cross.Out.Lane, 2u);
+    EXPECT_EQ(cross.Kernel, 9u);
+    EXPECT_EQ(cross.JoinType, EJoinType::Full);
 }
 
 TEST(GraphSpec, MaterializedGraphMatchesHandBuiltGraph)
@@ -516,6 +615,11 @@ TEST(GraphSpec, RejectsInvalidSpecs)
     spec = FanOutSpec();
     spec.Nodes[1].Body = THashShuffleNode{.In = {0, 0}, .Out = 1};
     const std::vector<std::shared_ptr<TKernelSlot>> slots{std::make_shared<TKernelSlot>()};
+    EXPECT_THROW(MaterializeGraph(spec, &sink, slots), std::runtime_error);
+
+    // A join hash has entries 0 and 1 only.
+    spec = FanOutSpec();
+    spec.Nodes[1].Body = THashShuffleNode{.In = {0, 0}, .Out = 0, .Hash = TJoinHashPlanData{.Entry = 2}};
     EXPECT_THROW(MaterializeGraph(spec, &sink, slots), std::runtime_error);
 }
 

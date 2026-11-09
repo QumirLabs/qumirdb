@@ -268,4 +268,73 @@ struct TAggregateHashPlanData {
     }
 };
 
+// One side of a join hash kernel: entry 0 hashes the left keys, entry 1 the
+// right ones.
+struct TJoinHashPlanData {
+    // Index of the join hash kernel in the sink (0 without a sink).
+    uint32_t Kernel = 0;
+    uint32_t Entry = 0;
+    std::vector<int64_t> KeyColumns;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.Kernel);
+        v(self.Entry);
+        v(self.KeyColumns);
+    }
+};
+
+// The input a join builds its table on; Auto builds both adaptively.
+enum class EJoinBuildSide { Auto, Left, Right };
+
+// The plain data of compiled hash join kernels (TJoinKernels without its
+// callables), so BindJoinKernels can rebind them from their slot.
+struct TJoinKernelMeta {
+    std::vector<int64_t> LeftKeyColumns;
+    std::vector<int64_t> RightKeyColumns;
+    // Index of the join kernel in the sink (0 without a sink).
+    uint32_t Kernel = 0;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.LeftKeyColumns);
+        v(self.RightKeyColumns);
+        v(self.Kernel);
+    }
+};
+
+// The plain data of compiled row join kernels (TRowJoinKernels without its
+// callables), so BindRowJoinKernels can rebind them from their slots.
+struct TRowJoinKernelMeta {
+    // String payload rows point into the build batches, which the caller then
+    // keeps alive until the processor is released.
+    bool RetainsBuildBatches = false;
+    // The build side is the left side of a SEMI/ANTI join: the probe marks its
+    // rows, and EmitByMark emits the output once the probe side has ended.
+    bool EmitsByMark = false;
+    // An ANTI join keeps its NULL-key build rows in a second arena
+    // (AppendNullKeys), whose rows EmitByMark emits as well.
+    bool KeepsNullKeyRows = false;
+    std::vector<int64_t> BuildKeyColumns;
+    std::vector<int64_t> ProbeKeyColumns;
+    // Index of the row join kernel in the sink (0 without a sink).
+    uint32_t Kernel = 0;
+    // The instrumentation measure kernel over the probe schema and the column
+    // widths it sizes (TRowJoinKernels::ProbeMeasure).
+    uint32_t ProbeMeasureKernel = 0;
+    std::vector<int64_t> ProbeMeasureWidths;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.RetainsBuildBatches);
+        v(self.EmitsByMark);
+        v(self.KeepsNullKeyRows);
+        v(self.BuildKeyColumns);
+        v(self.ProbeKeyColumns);
+        v(self.Kernel);
+        v(self.ProbeMeasureKernel);
+        v(self.ProbeMeasureWidths);
+    }
+};
+
 } // namespace NQdb

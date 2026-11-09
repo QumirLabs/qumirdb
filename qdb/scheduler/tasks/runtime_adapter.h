@@ -311,7 +311,6 @@ class THashShuffleTask final : public ITask {
 public:
     THashShuffleTask(
         std::shared_ptr<const THashShuffleCode> code,
-        std::shared_ptr<void> state,
         TInputPort input,
         THashShuffleConnection& output,
         size_t sourceLane);
@@ -348,7 +347,6 @@ private:
 
 private:
     std::shared_ptr<const THashShuffleCode> Code_;
-    std::shared_ptr<void> State_;
     TInputPort Input_;
     THashShuffleConnection* Output_ = nullptr;
     size_t SourceLane_ = 0;
