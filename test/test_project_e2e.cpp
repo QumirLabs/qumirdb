@@ -7,7 +7,9 @@
 #include <qumir/parser/type.h>
 
 #include "plan_runner.h"
+#include <qdb/exec/filter_exec.h>
 #include <qdb/exec/planner_helpers.h>
+#include <qdb/exec/project_exec.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/io/io.h>
 #include <qdb/modules/qumirdb_runtime.h>

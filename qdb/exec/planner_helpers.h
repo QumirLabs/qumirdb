@@ -1,11 +1,8 @@
 #pragma once
 
 #include <qdb/exec/aggregate_exec.h>
-#include <qdb/exec/filter_exec.h>
 #include <qdb/exec/join_exec.h>
-#include <qdb/exec/project_exec.h>
 #include <qdb/exec/sort_exec.h>
-#include <qdb/exec/unary_process.h>
 #include <qdb/exec/window_exec.h>
 #include <qdb/kernel/compiler.h>
 #include <qdb/plan/ops/aggregate.h>
