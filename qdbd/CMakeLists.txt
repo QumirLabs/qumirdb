@@ -7,6 +7,7 @@ add_library(qumirdb_remote
     actors/pinger.cpp
     actors/query.cpp
     actors/scheduler.cpp
+    partitioner/partitioner.cpp
     scheduler/remote_task.cpp
     http/router.cpp
 )
