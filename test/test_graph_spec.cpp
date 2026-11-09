@@ -538,6 +538,66 @@ TEST(GraphSpec, LimitAndLateMaterializeRecordsRoundTrip)
     EXPECT_EQ(merge.Out.Lane, 5u);
 }
 
+TEST(GraphSpec, CteRecordsAndTablesRoundTrip)
+{
+    TGraphSpec spec;
+    spec.CteSpools = {{.Segments = 4}, {.Segments = 1}};
+    spec.CteConsumerStates = {{.Spool = 1}, {.Spool = 0}, {.Spool = 0}};
+    spec.Nodes.push_back(Node("cte-producer", "cte-producer 2", TCteProducerNode{
+        .In = {0, 3},
+        .Out = {1, 3},
+        .Spool = 0,
+        .Segment = 3,
+    }));
+    spec.Nodes.push_back(Node("cte-publish", "cte-publish 2", TCtePublishNode{
+        .In = {1, 0},
+        .Out = {2, 0},
+        .Spool = 1,
+    }));
+    // Lane 2 of reference 1 over a four-segment spool.
+    spec.Nodes.push_back(Node("cte-consumer", "cte-consumer 2", TCteConsumerNode{
+        .In = {2, 6},
+        .Out = {3, 2},
+        .State = 2,
+    }));
+
+    const auto bytes = SerializeGraphSpec(spec);
+    const auto back = DeserializeGraphSpec(bytes);
+    EXPECT_EQ(SerializeGraphSpec(back), bytes);
+    for (size_t size = 0; size < bytes.size(); ++size) {
+        EXPECT_THROW(DeserializeGraphSpec(std::string_view(bytes).substr(0, size)),
+            std::runtime_error) << size;
+    }
+
+    ASSERT_EQ(back.CteSpools.size(), 2u);
+    EXPECT_EQ(back.CteSpools[0].Segments, 4u);
+    EXPECT_EQ(back.CteSpools[1].Segments, 1u);
+    ASSERT_EQ(back.CteConsumerStates.size(), 3u);
+    EXPECT_EQ(back.CteConsumerStates[0].Spool, 1u);
+    EXPECT_EQ(back.CteConsumerStates[1].Spool, 0u);
+    EXPECT_EQ(back.CteConsumerStates[2].Spool, 0u);
+
+    ASSERT_EQ(back.Nodes.size(), 3u);
+    const auto& producer = std::get<TCteProducerNode>(back.Nodes[0].Body);
+    EXPECT_EQ(producer.In.Lane, 3u);
+    EXPECT_EQ(producer.Out.Connection, 1u);
+    EXPECT_EQ(producer.Out.Lane, 3u);
+    EXPECT_EQ(producer.Spool, 0u);
+    EXPECT_EQ(producer.Segment, 3u);
+
+    const auto& publish = std::get<TCtePublishNode>(back.Nodes[1].Body);
+    EXPECT_EQ(publish.In.Connection, 1u);
+    EXPECT_EQ(publish.Out.Connection, 2u);
+    EXPECT_EQ(publish.Spool, 1u);
+
+    const auto& consumer = std::get<TCteConsumerNode>(back.Nodes[2].Body);
+    EXPECT_EQ(consumer.In.Connection, 2u);
+    EXPECT_EQ(consumer.In.Lane, 6u);
+    EXPECT_EQ(consumer.Out.Connection, 3u);
+    EXPECT_EQ(consumer.Out.Lane, 2u);
+    EXPECT_EQ(consumer.State, 2u);
+}
+
 TEST(GraphSpec, MaterializedGraphMatchesHandBuiltGraph)
 {
     TCountingSink sink;
@@ -674,6 +734,21 @@ TEST(GraphSpec, RejectsInvalidSpecs)
     spec = FanOutSpec();
     spec.Nodes[1].Body = THashShuffleNode{.In = {0, 0}, .Out = 0, .Hash = TJoinHashPlanData{.Entry = 2}};
     EXPECT_THROW(MaterializeGraph(spec, &sink, slots), std::runtime_error);
+
+    // CTE records index the spool and consumer state tables.
+    spec = FanOutSpec();
+    spec.Nodes[1].Body = TCtePublishNode{.In = {0, 0}, .Out = {1, 0}};
+    EXPECT_THROW(MaterializeGraph(spec, &sink), std::runtime_error);
+    spec.CteSpools = {{.Segments = 2}};
+    EXPECT_NO_THROW(MaterializeGraph(spec, &sink));
+    spec.Nodes[1].Body = TCteProducerNode{.In = {0, 0}, .Out = {1, 0}, .Segment = 2};
+    EXPECT_THROW(MaterializeGraph(spec, &sink), std::runtime_error);
+    spec.Nodes[1].Body = TCteConsumerNode{.In = {0, 0}, .Out = {1, 0}};
+    EXPECT_THROW(MaterializeGraph(spec, &sink), std::runtime_error);
+    spec.CteConsumerStates = {{.Spool = 0}};
+    EXPECT_NO_THROW(MaterializeGraph(spec, &sink));
+    spec.CteConsumerStates = {{.Spool = 1}};
+    EXPECT_THROW(MaterializeGraph(spec, &sink), std::runtime_error);
 }
 
 TEST(GraphSpec, ForwardChainRunsRows)

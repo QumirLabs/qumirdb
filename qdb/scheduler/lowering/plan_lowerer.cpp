@@ -29,7 +29,6 @@
 #include <qdb/plan/types/nullable.h>
 #include <qdb/scheduler/connection.h>
 #include <qdb/scheduler/connections/local.h>
-#include <qdb/scheduler/tasks/cte_spool.h>
 #include <qdb/scheduler/impl/executor.h>
 #include <qdb/scheduler/graph.h>
 #include <qdb/scheduler/tasks/runtime_adapter.h>
@@ -1036,7 +1035,7 @@ private:
     // publish task wakes the lanes of every reference once the spool is
     // complete. The completion connection has one lane per consumer lane.
     struct TMaterializedProducer {
-        std::shared_ptr<NScheduler::TCteSpool> Spool;
+        uint32_t Spool = 0;
         NScheduler::TTaskNode* Publish = nullptr;
         NScheduler::IConnection* Completion = nullptr;
         size_t Lanes = 0;
@@ -1062,26 +1061,26 @@ private:
             throw std::runtime_error(
                 "cte materialization: more consumers lowered than RefCount");
         }
-        auto state = std::make_shared<NScheduler::TCteConsumerState>(
-            producer.Spool);
+        const auto state = static_cast<uint32_t>(CteConsumerStates_.size());
+        CteConsumerStates_.push_back({.Spool = producer.Spool});
         const auto execStageId = NewExecStage(
             &consumer, EExecPlanNodeKind::CteConsumer);
+        const auto label = "cte-consumer " + std::to_string(consumer.Def()->Id);
         TLoweredOutput result{.OutputType = producer.OutputType};
         result.Producers.reserve(producer.Lanes);
         for (size_t lane = 0; lane < producer.Lanes; ++lane) {
             const size_t completionLane = reference * producer.Lanes + lane;
-            auto task = std::make_unique<NScheduler::TCteConsumerTask>(
-                state,
-                NScheduler::TInputPort{
-                    .Connection = producer.Completion, .Lane = completionLane},
-                NScheduler::TOutputPort{
-                    .Connection = &outConn, .Lane = lane + outLaneOffset});
-            auto& node = Graph_.AddOwnedNode(std::move(task));
-            MarkNode(node,
-                "cte-consumer",
-                execStageId,
-                "cte-consumer " + std::to_string(consumer.Def()->Id),
-                execStageId);
+            auto& node = AddNode({
+                .ExecStageId = execStageId,
+                .TaskGroupId = execStageId,
+                .DebugKind = "cte-consumer",
+                .DebugLabel = label,
+                .Body = NScheduler::TCteConsumerNode{
+                    .In = PortSpec(Graph_, producer.Completion, completionLane),
+                    .Out = PortSpec(Graph_, &outConn, lane + outLaneOffset),
+                    .State = state,
+                },
+            });
             Graph_.AddEdge(*producer.Publish, node, *producer.Completion,
                 0, completionLane);
             result.Producers.push_back(&node);
@@ -1103,7 +1102,8 @@ private:
             lanes, lanes, "cte-producer-input");
         auto planOut = Lower(materialization->Plan, input);
 
-        auto spool = std::make_shared<NScheduler::TCteSpool>(lanes);
+        const auto spool = static_cast<uint32_t>(CteSpools_.size());
+        CteSpools_.push_back({.Segments = static_cast<uint32_t>(lanes)});
         auto& written = AddConn<NScheduler::TGatherConnection>(
             lanes, 1, "cte-written");
         auto& completion = AddConn<NScheduler::TBroadcastConnection>(
@@ -1112,27 +1112,35 @@ private:
             &consumer, EExecPlanNodeKind::CteProducer);
         const auto id = std::to_string(consumer.Def()->Id);
 
-        auto publishTask = std::make_unique<NScheduler::TCtePublishTask>(
-            spool,
-            NScheduler::TInputPort{.Connection = &written, .Lane = 0},
-            NScheduler::TOutputPort{.Connection = &completion, .Lane = 0});
-        auto& publish = Graph_.AddOwnedNode(std::move(publishTask));
-        MarkNode(publish, "cte-publish", NewTaskGroup(), "cte-publish " + id,
-            execStageId);
+        auto& publish = AddNode({
+            .ExecStageId = execStageId,
+            .TaskGroupId = NewTaskGroup(),
+            .DebugKind = "cte-publish",
+            .DebugLabel = "cte-publish " + id,
+            .Body = NScheduler::TCtePublishNode{
+                .In = PortSpec(Graph_, &written, 0),
+                .Out = PortSpec(Graph_, &completion, 0),
+                .Spool = spool,
+            },
+        });
         for (size_t lane = 0; lane < lanes; ++lane) {
-            auto task = std::make_unique<NScheduler::TCteProducerTask>(
-                spool,
-                lane,
-                NScheduler::TInputPort{.Connection = &input, .Lane = lane},
-                NScheduler::TOutputPort{.Connection = &written, .Lane = lane});
-            auto& node = Graph_.AddOwnedNode(std::move(task));
-            MarkNode(node, "cte-producer", execStageId, "cte-producer " + id,
-                execStageId);
+            auto& node = AddNode({
+                .ExecStageId = execStageId,
+                .TaskGroupId = execStageId,
+                .DebugKind = "cte-producer",
+                .DebugLabel = "cte-producer " + id,
+                .Body = NScheduler::TCteProducerNode{
+                    .In = PortSpec(Graph_, &input, lane),
+                    .Out = PortSpec(Graph_, &written, lane),
+                    .Spool = spool,
+                    .Segment = static_cast<uint32_t>(lane),
+                },
+            });
             Graph_.AddEdge(*planOut.Producers[lane], node, input, lane, lane);
             Graph_.AddEdge(node, publish, written, lane, 0);
         }
         return TMaterializedProducer{
-            .Spool = std::move(spool),
+            .Spool = spool,
             .Publish = &publish,
             .Completion = &completion,
             .Lanes = lanes,
@@ -2818,6 +2826,14 @@ public:
     TNodeSpecs& NodeSpecs() {
         return NodeSpecs_;
     }
+    std::vector<NScheduler::TCteSpoolSpec>& CteSpools()
+    {
+        return CteSpools_;
+    }
+    std::vector<NScheduler::TCteConsumerStateSpec>& CteConsumerStates()
+    {
+        return CteConsumerStates_;
+    }
     const std::shared_ptr<TRuntimeContext>& RuntimeContext() const
     {
         return RuntimeContext_;
@@ -2834,6 +2850,7 @@ private:
     NScheduler::TTaskNode& AddNode(NScheduler::TNodeSpec record)
     {
         AppendKernelSlots();
+        NScheduler::AppendCteObjects(CteSpools_, CteConsumerStates_, TaskContext_);
         return AddTask(Graph_, NodeSpecs_, std::move(record), TaskContext_);
     }
 
@@ -2907,6 +2924,8 @@ private:
     std::vector<TFilterProducerTasks> FilterProducers_;
     std::unordered_map<const TCteMaterialization*, TMaterializedProducer> Materialized_;
     TNodeSpecs NodeSpecs_;
+    std::vector<NScheduler::TCteSpoolSpec> CteSpools_;
+    std::vector<NScheduler::TCteConsumerStateSpec> CteConsumerStates_;
     std::vector<TLoweredExecStage> ExecStages_;
     std::vector<NScheduler::TRuntimeFilterDiagnostic> RuntimeFilters_;
     NScheduler::TTaskGroupId LastTaskGroupId_ =
@@ -3173,6 +3192,8 @@ TLoweredPlan LowerPlanToGraph(
         .RuntimeFilters = std::move(lowerer.RuntimeFilters()),
         .NodeSpecs = std::move(nodeSpecs),
         .RuntimeContext = lowerer.RuntimeContext(),
+        .CteSpools = std::move(lowerer.CteSpools()),
+        .CteConsumerStates = std::move(lowerer.CteConsumerStates()),
     };
 }
 
@@ -3210,6 +3231,8 @@ std::optional<TGraphSpec> ExtractLoweredGraphSpec(
     if (lowered.RuntimeContext) {
         spec.Regexes = lowered.RuntimeContext->Regexes.Specs();
     }
+    spec.CteSpools = lowered.CteSpools;
+    spec.CteConsumerStates = lowered.CteConsumerStates;
     return spec;
 }
 

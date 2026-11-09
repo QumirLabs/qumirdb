@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <expected>
 #include <functional>
+#include <numeric>
 #include <ranges>
 #include <sstream>
 #include <stdexcept>
@@ -940,6 +941,71 @@ TEST(ExecPlanBuilder, CrossJoinGraphRunsFromItsSerializedSpec) {
             EXPECT_GT(CountNodes<NScheduler::TCrossJoinNode>(spec), 0u);
         });
     EXPECT_EQ(rows.size(), 1u + 15u);
+}
+
+// One spool of `segments` segments that `references` references read; each
+// consumer lane reads its own completion lane, reference * segments + lane.
+void ExpectOneCteSpool(const NScheduler::TGraphSpec& spec, uint32_t segments, uint32_t references)
+{
+    ASSERT_EQ(spec.CteSpools.size(), 1u);
+    EXPECT_EQ(spec.CteSpools[0].Segments, segments);
+    ASSERT_EQ(spec.CteConsumerStates.size(), references);
+    for (const auto& state : spec.CteConsumerStates) {
+        EXPECT_EQ(state.Spool, 0u);
+    }
+    EXPECT_EQ(CountNodes<NScheduler::TCteProducerNode>(spec), segments);
+    EXPECT_EQ(CountNodes<NScheduler::TCtePublishNode>(spec), 1u);
+    std::vector<uint32_t> completionLanes;
+    for (const auto& node : spec.Nodes) {
+        if (const auto* consumer = std::get_if<NScheduler::TCteConsumerNode>(&node.Body)) {
+            completionLanes.push_back(consumer->In.Lane);
+        }
+    }
+    std::ranges::sort(completionLanes);
+    std::vector<uint32_t> expected(segments * references);
+    std::iota(expected.begin(), expected.end(), 0u);
+    EXPECT_EQ(completionLanes, expected);
+}
+
+constexpr std::string_view CteReadTwiceSql =
+    "WITH c AS (SELECT id, d9 FROM t WHERE id % 5 = 0) "
+    "SELECT id, d9 FROM c UNION ALL SELECT id, d9 FROM c WHERE id > 100";
+
+// A CTE read once is always inlined, so it has no records to check.
+TEST(ExecPlanBuilder, CteReadTwiceGraphRunsFromItsSerializedSpec) {
+    // One scan lane fills a one-segment spool.
+    const auto rows = ExpectQueryFromSpec(
+        std::string(CteReadTwiceSql), SingleSettings(), false, [](const NScheduler::TGraphSpec& spec) {
+            ExpectOneCteSpool(spec, 1, 2);
+        });
+    EXPECT_EQ(rows.size(), 1u + 83u);
+}
+
+TEST(ExecPlanBuilder, ParallelCteSpoolGraphRunsFromItsSerializedSpec) {
+    // Four scan lanes fill four segments.
+    const auto rows = ExpectQueryFromSpec(
+        std::string(CteReadTwiceSql), MultiSettings(), false, [](const NScheduler::TGraphSpec& spec) {
+            ExpectOneCteSpool(spec, 4, 2);
+        });
+    EXPECT_EQ(rows.size(), 1u + 83u);
+}
+
+TEST(ExecPlanBuilder, NestedCteSpoolsGraphRunsFromItsSerializedSpec) {
+    // b reads a, so the consumer states of the two references to each CTE
+    // point at two different spools.
+    const auto rows = ExpectQueryFromSpec(
+        "WITH a AS (SELECT id, d9 FROM t WHERE id % 5 = 0), b AS (SELECT id, d9 FROM a WHERE id > 100) "
+        "SELECT id, d9 FROM a UNION ALL SELECT id, d9 FROM b UNION ALL SELECT id, d9 FROM b WHERE d9 > 0",
+        MultiSettings(), false, [](const NScheduler::TGraphSpec& spec) {
+            EXPECT_EQ(spec.CteSpools.size(), 2u);
+            std::vector<uint32_t> spools;
+            for (const auto& state : spec.CteConsumerStates) {
+                spools.push_back(state.Spool);
+            }
+            std::ranges::sort(spools);
+            EXPECT_EQ(spools, (std::vector<uint32_t>{0, 0, 1, 1}));
+        });
+    EXPECT_EQ(rows.size(), 1u + 100u);
 }
 
 TEST(ExecPlanBuilder, MultiKeepsRealPartialAndCombineStages) {
