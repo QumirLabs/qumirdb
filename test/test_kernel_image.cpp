@@ -571,12 +571,11 @@ TEST(KernelImage, RowJoinBindsFromImageSlots)
     EXPECT_EQ(join.Kernel, 1u);
     EXPECT_EQ(join.ProbeMeasureKernel, 2u);
     EXPECT_EQ(kernels[join.Kernel].Slot, join.Slot);
-    EXPECT_EQ(kernels[join.ProbeMeasureKernel].Slot, join.ProbeMeasure.Kernel);
+    EXPECT_EQ(kernels[join.ProbeMeasureKernel].Slot, join.ProbeMeasureSlot);
 
     auto slots = LoadImageSlots(kernels);
     auto bound = BindRowJoinKernels(slots[join.Kernel], slots[join.ProbeMeasureKernel], join);
-    EXPECT_EQ(bound.ProbeMeasure.Kernel, slots[join.ProbeMeasureKernel]);
-    EXPECT_EQ(bound.ProbeMeasure.Widths, join.ProbeMeasure.Widths);
+    EXPECT_EQ(bound.ProbeMeasureSlot, slots[join.ProbeMeasureKernel]);
     TRowJoinProcessor processor(std::move(bound), EJoinBuildSide::Right, probeHoldBytes);
     EXPECT_EQ(RunJoin(processor), expected);
     EXPECT_EQ(expected, ExpectedJoinPairs);

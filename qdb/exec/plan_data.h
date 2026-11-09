@@ -320,7 +320,7 @@ struct TRowJoinKernelMeta {
     // Index of the row join kernel in the sink (0 without a sink).
     uint32_t Kernel = 0;
     // The instrumentation measure kernel over the probe schema and the column
-    // widths it sizes (TRowJoinKernels::ProbeMeasure).
+    // widths it sizes (TRowJoinKernels::ProbeMeasureSlot).
     uint32_t ProbeMeasureKernel = 0;
     std::vector<int64_t> ProbeMeasureWidths;
 

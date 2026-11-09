@@ -367,12 +367,12 @@ struct TRowJoinKernels : TRowJoinKernelMeta {
     TRowJoinDispatch Dispatch;
     TRowJoinMaterialize Materialize;
     // Sizes a held probe batch the way retained_input_bytes does, with
-    // instrumentation off.
-    TRowSetInstrumentation ProbeMeasure;
+    // instrumentation off; the widths are ProbeMeasureWidths.
+    std::shared_ptr<TKernelSlot> ProbeMeasureSlot;
     std::shared_ptr<TKernelSlot> Slot;
 };
 
-// Binds Dispatch and Materialize to `slot` and ProbeMeasure to `measureSlot`,
+// Binds Dispatch and Materialize to `slot` and ProbeMeasureSlot to `measureSlot`,
 // and keeps `meta`. CompileRowJoin ends with this call.
 TRowJoinKernels BindRowJoinKernels(
     std::shared_ptr<TKernelSlot> slot,

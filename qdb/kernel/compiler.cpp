@@ -2743,7 +2743,7 @@ TRowJoinKernels BindRowJoinKernels(
     using TMaterializeFn = int64_t(*)(void*, TRowSet*, int64_t, int64_t, TRowSet*);
 
     TRowJoinKernels kernels{std::move(meta)};
-    kernels.ProbeMeasure = {.Kernel = std::move(measureSlot), .Widths = kernels.ProbeMeasureWidths};
+    kernels.ProbeMeasureSlot = std::move(measureSlot);
     kernels.Dispatch = [slot,
                         buildKeyColumns = std::make_shared<const std::vector<int64_t>>(
                             kernels.BuildKeyColumns),
