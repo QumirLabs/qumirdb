@@ -87,9 +87,6 @@ public:
         std::string_view sourceAlias,
         std::ostream* diagnostics = nullptr,
         const std::unordered_set<std::string>* columnNames = nullptr) const;
-    std::shared_ptr<const IPhysicalRowReader> CompileReader(
-        std::span<const std::string> columnNames) const override;
-
     std::optional<TLateMaterializationCost> EstimateLookup(
         std::span<const std::string> earlyColumns,
         std::span<const std::string> fetchColumns,

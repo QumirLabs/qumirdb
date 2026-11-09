@@ -57,12 +57,6 @@ public:
             .LookupBytes = 500,
         };
     }
-
-    std::shared_ptr<const IPhysicalRowReader> CompileReader(
-        std::span<const std::string>) const override
-    {
-        return {};
-    }
 };
 
 std::expected<TOperatorPtr, NQumir::TError> BuildSqlPlan(

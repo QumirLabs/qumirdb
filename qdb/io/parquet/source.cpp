@@ -1071,12 +1071,6 @@ std::shared_ptr<const IPhysicalRowReader> TParquetFile::CompileReader(
         Data_->FileReader, columnNames, GetMemoryPool());
 }
 
-std::shared_ptr<const IPhysicalRowReader> TParquetSource::CompileReader(
-    std::span<const std::string> columnNames) const
-{
-    return TParquetFile(File_).CompileReader(columnNames);
-}
-
 // Parquet page sizes are not in the metadata. Writers cap a data page at 1 MiB
 // uncompressed by default, so this yields a lower bound on the page count: a
 // writer using smaller pages only makes the real lookup cheaper.
