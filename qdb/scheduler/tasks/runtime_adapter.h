@@ -172,6 +172,10 @@ public:
     bool WantsInput(const TTaskEdge& edge) const noexcept override;
     bool TryNotifyDependency() noexcept override;
 
+    // Only for a task built with empty code, before it is scheduled: its aux
+    // producers may join the graph after it.
+    void BindCode(std::shared_ptr<const TRuntimeFilterCode> code);
+
 private:
     std::shared_ptr<const TRuntimeFilterCode> Code_;
     std::shared_ptr<TRuntimeFilterProbeState> ProbeState_;
