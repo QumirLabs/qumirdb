@@ -94,6 +94,8 @@ struct TTaskGraphMessage {
     static constexpr NNet::NActors::TMessageId MessageId = 202;
     // SerializeGraphSpec bytes.
     std::string Spec;
+    // SerializeKernelImage bytes of the query's kernels, which the spec's records index.
+    std::string KernelImage;
     std::vector<TRemoteEndpoint> Endpoints;
 };
 
