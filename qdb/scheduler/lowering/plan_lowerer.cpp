@@ -1931,22 +1931,14 @@ private:
     {
         const auto execStageId = NewExecStage(
             &limit, EExecPlanNodeKind::Limit);
-        return LowerBlocking(
+        return LowerBlockingNode(
             limit.Input(),
             "limit",
             StageLabel("limit", execStageId),
             execStageId,
             [&](const NQumir::NAst::TTypePtr& childType) {
-                const int64_t limitValue = limit.Limit();
-                const int64_t offsetValue = limit.Offset();
-                return TBlockingTail{
-                    .Code = MakeLimitBlockingCode(),
-                    .MakeState = [limitValue, offsetValue]()
-                        -> std::shared_ptr<NScheduler::ITaskState>
-                    {
-                        return std::make_shared<TLimitBlockingState>(
-                            limitValue, offsetValue);
-                    },
+                return TUnaryNodeStage<NScheduler::TLimitNode>{
+                    .Node = {.Limit = limit.Limit(), .Offset = limit.Offset()},
                     .OutputType = childType,
                 };
             },
@@ -1967,7 +1959,12 @@ private:
             throw std::runtime_error(
                 "late materialize source has not been bound to emit locators");
         }
-        auto* lookup = &source.Lookup;
+        auto* parquetSource = dynamic_cast<TParquetSource*>(&source.Lookup);
+        if (!parquetSource) {
+            throw std::runtime_error(
+                "late materialize lowering needs a parquet source");
+        }
+        TaskContext_.ParquetFiles.try_emplace(parquetSource->Path(), parquetSource->File());
         const auto locator = late.LocatorColumn();
         const auto outputType = late.OutputColumns();
         const size_t childLanes = OutputLanes(late.Input());
@@ -2060,7 +2057,6 @@ private:
 
         auto& results = AddConn<NScheduler::TOneToOneConnection>(
             lookupTaskCount, lookupTaskCount, "late-lookup-results");
-        auto lookupCode = MakeDrainBlockingCode<TLateMaterializeBlockingState>();
         std::vector<NScheduler::TTaskNode*> lookupNodes;
         lookupNodes.reserve(lookupTaskCount);
         for (size_t taskIndex = 0; taskIndex < lookupTaskCount; ++taskIndex) {
@@ -2071,28 +2067,21 @@ private:
                 physicalColumns.size() * taskIndex / lookupTaskCount;
             const size_t end =
                 physicalColumns.size() * (taskIndex + 1) / lookupTaskCount;
-            const std::span<const std::string> taskColumns(
-                physicalColumns.data() + begin, end - begin);
-            auto reader = lookup->CompileReader(taskColumns);
-            if (!reader) {
-                throw std::runtime_error(
-                    "late materialize source failed to compile row reader");
-            }
-            auto task = std::make_unique<NScheduler::TBlockingTask>(
-                lookupCode,
-                std::make_shared<TLateMaterializeBlockingState>(
-                    std::move(reader), locatorColumn),
-                NScheduler::TInputPort{
-                    .Connection = requests, .Lane = taskIndex},
-                NScheduler::TOutputPort{
-                    .Connection = &results, .Lane = taskIndex});
-            auto& node = Graph_.AddOwnedNode(std::move(task));
-            MarkNode(
-                node,
-                "late-lookup",
-                execStageId,
-                "late-lookup",
-                execStageId);
+            auto& node = AddNode({
+                .ExecStageId = execStageId,
+                .TaskGroupId = execStageId,
+                .DebugKind = "late-lookup",
+                .DebugLabel = "late-lookup",
+                .Body = NScheduler::TLateLookupNode{
+                    .In = PortSpec(Graph_, requests, taskIndex),
+                    .Out = PortSpec(Graph_, &results, taskIndex),
+                    .Path = parquetSource->Path(),
+                    .Columns = {
+                        physicalColumns.begin() + begin,
+                        physicalColumns.begin() + end},
+                    .LocatorColumn = locatorColumn,
+                },
+            });
             if (broadcastNode) {
                 Graph_.AddEdge(
                     *broadcastNode, node, *requests, 0, taskIndex);
@@ -2109,78 +2098,19 @@ private:
             lookupNodes.push_back(&node);
         }
 
-        auto mergeCode = std::make_shared<NScheduler::TMergeCode>(
-            [](NScheduler::ITaskState& state,
-               std::vector<NScheduler::TInputPort>& inputs,
-               TRowSet& output)
-            {
-                auto* merge = &static_cast<TLateMaterializeMergeState&>(state);
-                if (merge->Emitted) {
-                    return NScheduler::ETaskResult::FINISHED;
-                }
-
-                for (size_t i = 0; i < inputs.size(); ++i) {
-                    if (merge->Received[i] || merge->Finished[i]) {
-                        continue;
-                    }
-                    TRowSet partition{};
-                    switch (inputs[i].Fetch(partition)) {
-                        case NScheduler::EFetchResult::OK:
-                            merge->Partitions[i] = partition;
-                            merge->Received[i] = true;
-                            break;
-                        case NScheduler::EFetchResult::NO_DATA:
-                            break;
-                        case NScheduler::EFetchResult::FINISHED:
-                            merge->Finished[i] = true;
-                            break;
-                    }
-                }
-
-                const bool allReceived = std::ranges::all_of(
-                    merge->Received, [](bool value) { return value; });
-                if (allReceived) {
-                    MergeLateMaterializedColumns(merge->Partitions, output);
-                    std::ranges::fill(merge->Received, false);
-                    merge->Emitted = true;
-                    return NScheduler::ETaskResult::OK;
-                }
-
-                const bool allFinished = std::ranges::all_of(
-                    merge->Finished, [](bool value) { return value; });
-                const bool anyReceived = std::ranges::any_of(
-                    merge->Received, [](bool value) { return value; });
-                const bool anyFinished = std::ranges::any_of(
-                    merge->Finished, [](bool value) { return value; });
-                if (allFinished && !anyReceived) {
-                    return NScheduler::ETaskResult::FINISHED;
-                }
-                if (anyReceived && anyFinished) {
-                    throw std::runtime_error(
-                        "late materialize: lookup partitions returned "
-                        "different result counts");
-                }
-                return NScheduler::ETaskResult::NEED_DATA;
-            });
-        std::vector<NScheduler::TInputPort> mergeInputs;
-        mergeInputs.reserve(lookupTaskCount);
+        NScheduler::TLateMergeNode mergeBody{
+            .Out = PortSpec(Graph_, &outConn, outLaneOffset),
+        };
         for (size_t taskIndex = 0; taskIndex < lookupTaskCount; ++taskIndex) {
-            mergeInputs.push_back(NScheduler::TInputPort{
-                .Connection = &results, .Lane = taskIndex});
+            mergeBody.In.push_back(PortSpec(Graph_, &results, taskIndex));
         }
-        auto mergeTask = std::make_unique<NScheduler::TMergeTask>(
-            mergeCode,
-            std::make_shared<TLateMaterializeMergeState>(lookupTaskCount),
-            std::move(mergeInputs),
-            NScheduler::TOutputPort{
-                .Connection = &outConn, .Lane = outLaneOffset});
-        auto& mergeNode = Graph_.AddOwnedNode(std::move(mergeTask));
-        MarkNode(
-            mergeNode,
-            "late-materialize",
-            execStageId,
-            "late-materialize",
-            execStageId);
+        auto& mergeNode = AddNode({
+            .ExecStageId = execStageId,
+            .TaskGroupId = execStageId,
+            .DebugKind = "late-materialize",
+            .DebugLabel = "late-materialize",
+            .Body = std::move(mergeBody),
+        });
         for (size_t taskIndex = 0; taskIndex < lookupTaskCount; ++taskIndex) {
             Graph_.AddEdge(
                 *lookupNodes[taskIndex],
@@ -2347,18 +2277,16 @@ private:
         auto merged = BuildSortMerge(
             sort.Input(), sort.Keys(), "top-sort", sort.Limit(), &sort, mergeConnRef, 0);
 
-        auto limitCode = MakeLimitBlockingCode();
-        const int64_t limit = sort.Limit();
-        auto limitTask = std::make_unique<NScheduler::TBlockingTask>(
-            limitCode,
-            std::make_shared<TLimitBlockingState>(limit, 0),
-            NScheduler::TInputPort{.Connection = &mergeConnRef, .Lane = 0},
-            NScheduler::TOutputPort{.Connection = &outConn, .Lane = 0 + outLaneOffset});
-        auto& limitNode = Graph_.AddOwnedNode(std::move(limitTask));
-        MarkNode(limitNode,
-            "limit",
-            NewTaskGroup(),
-            "limit");
+        auto& limitNode = AddNode({
+            .TaskGroupId = NewTaskGroup(),
+            .DebugKind = "limit",
+            .DebugLabel = "limit",
+            .Body = NScheduler::TLimitNode{
+                .In = PortSpec(Graph_, &mergeConnRef, 0),
+                .Out = PortSpec(Graph_, &outConn, outLaneOffset),
+                .Limit = sort.Limit(),
+            },
+        });
         Graph_.AddEdge(*merged.Merge, limitNode, mergeConnRef, 0, 0);
 
         return TLoweredOutput{

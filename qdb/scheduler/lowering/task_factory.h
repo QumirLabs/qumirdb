@@ -258,6 +258,10 @@ std::shared_ptr<const NScheduler::TBlockingCode> MakeDrainBlockingCode()
 
 std::shared_ptr<const NScheduler::TBlockingCode> MakeLimitBlockingCode();
 
+// Merge code for TLateMaterializeMergeState: joins the column slices of the
+// lookups once each has produced one.
+std::shared_ptr<const NScheduler::TMergeCode> MakeLateMergeCode();
+
 // Merge code for TMergeState: reads every sorted run, then emits the merge.
 std::shared_ptr<const NScheduler::TMergeCode> MakeMergeCode();
 

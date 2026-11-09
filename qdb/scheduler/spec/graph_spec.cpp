@@ -288,6 +288,31 @@ std::unique_ptr<ITask> MakeNodeTask(
             return MakeJoinTask<NLowering::TSchedulerCrossJoinState>(
                 node, connections,
                 BindCrossJoinKernels(SlotAt(context, node.Kernel), {.Kernel = node.Kernel}), node.JoinType);
+        } else if constexpr (std::is_same_v<TNode, TLimitNode>) {
+            return std::make_unique<TBlockingTask>(
+                NLowering::MakeLimitBlockingCode(),
+                std::make_shared<NLowering::TLimitBlockingState>(node.Limit, node.Offset),
+                InputPort(connections, node.In), OutputPort(connections, node.Out));
+        } else if constexpr (std::is_same_v<TNode, TLateLookupNode>) {
+            const auto& file = context.ParquetFiles.try_emplace(node.Path, node.Path).first->second;
+            auto reader = file.CompileReader(node.Columns);
+            if (!reader) {
+                Invalid("a late lookup could not compile its row reader");
+            }
+            return std::make_unique<TBlockingTask>(
+                NLowering::MakeDrainBlockingCode<NLowering::TLateMaterializeBlockingState>(),
+                std::make_shared<NLowering::TLateMaterializeBlockingState>(
+                    std::move(reader), node.LocatorColumn),
+                InputPort(connections, node.In), OutputPort(connections, node.Out));
+        } else if constexpr (std::is_same_v<TNode, TLateMergeNode>) {
+            std::vector<TInputPort> inputs;
+            for (const auto& port : node.In) {
+                inputs.push_back(InputPort(connections, port));
+            }
+            return std::make_unique<TMergeTask>(
+                NLowering::MakeLateMergeCode(),
+                std::make_shared<NLowering::TLateMaterializeMergeState>(inputs.size()),
+                std::move(inputs), OutputPort(connections, node.Out));
         } else if constexpr (std::is_same_v<TNode, TForwardNode>) {
             auto code = std::make_shared<TUnaryCode>([](void*, TRowSet&) {});
             return std::make_unique<TUnaryTask>(

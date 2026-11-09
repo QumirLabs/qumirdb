@@ -485,6 +485,59 @@ TEST(GraphSpec, JoinAndJoinHashShuffleRecordsRoundTrip)
     EXPECT_EQ(cross.JoinType, EJoinType::Full);
 }
 
+TEST(GraphSpec, LimitAndLateMaterializeRecordsRoundTrip)
+{
+    TGraphSpec spec;
+    spec.Nodes.push_back(Node("limit", "limit", TLimitNode{
+        .In = {0, 1},
+        .Out = {1, 2},
+        .Limit = 1'000'000'000'000,
+        .Offset = 7,
+    }));
+    spec.Nodes.push_back(Node("late-lookup", "late-lookup", TLateLookupNode{
+        .In = {1, 3},
+        .Out = {2, 4},
+        .Path = "/data/hits.parquet",
+        .Columns = {"URL", "Title"},
+        .LocatorColumn = 2,
+    }));
+    spec.Nodes.push_back(Node("late-materialize", "late-materialize", TLateMergeNode{
+        .In = {{2, 0}, {2, 1}, {2, 2}},
+        .Out = {3, 5},
+    }));
+
+    const auto bytes = SerializeGraphSpec(spec);
+    const auto back = DeserializeGraphSpec(bytes);
+    EXPECT_EQ(SerializeGraphSpec(back), bytes);
+    for (size_t size = 0; size < bytes.size(); ++size) {
+        EXPECT_THROW(DeserializeGraphSpec(std::string_view(bytes).substr(0, size)),
+            std::runtime_error) << size;
+    }
+
+    ASSERT_EQ(back.Nodes.size(), 3u);
+    const auto& limit = std::get<TLimitNode>(back.Nodes[0].Body);
+    EXPECT_EQ(limit.In.Lane, 1u);
+    EXPECT_EQ(limit.Out.Connection, 1u);
+    EXPECT_EQ(limit.Out.Lane, 2u);
+    EXPECT_EQ(limit.Limit, 1'000'000'000'000);
+    EXPECT_EQ(limit.Offset, 7);
+
+    const auto& lookup = std::get<TLateLookupNode>(back.Nodes[1].Body);
+    EXPECT_EQ(lookup.In.Connection, 1u);
+    EXPECT_EQ(lookup.In.Lane, 3u);
+    EXPECT_EQ(lookup.Out.Lane, 4u);
+    EXPECT_EQ(lookup.Path, "/data/hits.parquet");
+    EXPECT_EQ(lookup.Columns, (std::vector<std::string>{"URL", "Title"}));
+    EXPECT_EQ(lookup.LocatorColumn, 2);
+
+    const auto& merge = std::get<TLateMergeNode>(back.Nodes[2].Body);
+    ASSERT_EQ(merge.In.size(), 3u);
+    EXPECT_EQ(merge.In[2].Connection, 2u);
+    EXPECT_EQ(merge.In[2].Lane, 2u);
+    EXPECT_EQ(merge.Out.Connection, 3u);
+    EXPECT_EQ(merge.Out.Lane, 5u);
+}
+
 TEST(GraphSpec, MaterializedGraphMatchesHandBuiltGraph)
 {
     TCountingSink sink;

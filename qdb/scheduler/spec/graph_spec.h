@@ -304,11 +304,59 @@ struct TCrossJoinNode {
     }
 };
 
+// Skips Offset rows, then passes Limit rows.
+struct TLimitNode {
+    TPortSpec In;
+    TPortSpec Out;
+    int64_t Limit = 0;
+    int64_t Offset = 0;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.In);
+        v(self.Out);
+        v(self.Limit);
+        v(self.Offset);
+    }
+};
+
+// Reads Columns of a parquet file at the row locators of its input.
+struct TLateLookupNode {
+    TPortSpec In;
+    TPortSpec Out;
+    std::string Path;
+    // File column names the lookup fetches.
+    std::vector<std::string> Columns;
+    // Index of the locator column in the input.
+    int32_t LocatorColumn = 0;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.In);
+        v(self.Out);
+        v(self.Path);
+        v(self.Columns);
+        v(self.LocatorColumn);
+    }
+};
+
+// Joins the column slices of the lookups, one input per lookup, in order.
+struct TLateMergeNode {
+    std::vector<TPortSpec> In;
+    TPortSpec Out;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.In);
+        v(self.Out);
+    }
+};
+
 using TNodeBody = std::variant<
     TForwardNode, TRemoteSourceNode, TRemoteSinkNode, TSinkWriterNode,
     TParquetScanNode, TFilterNode, TProjectNode, TSortNode, TSortMergeNode,
     TWindowNode, TAggregateNode, THashShuffleNode, THashJoinNode, TRowJoinNode,
-    TCrossJoinNode>;
+    TCrossJoinNode, TLimitNode, TLateLookupNode, TLateMergeNode>;
 
 struct TNodeSpec {
     uint64_t ExecStageId = InvalidExecStageId;

@@ -9,6 +9,7 @@
 #include <memory>
 #include <iosfwd>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <unordered_set>
@@ -53,6 +54,10 @@ public:
     std::unique_ptr<TParquetSource> MakeSource(
         std::optional<std::vector<int>> rowGroups = std::nullopt,
         std::optional<std::unordered_set<std::string>> restrictedColumns = std::nullopt) const;
+
+    // Random-access reader of the given file columns, for late materialization.
+    std::shared_ptr<const IPhysicalRowReader> CompileReader(
+        std::span<const std::string> columnNames) const;
 
 private:
     friend class TParquetSource;
