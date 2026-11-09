@@ -1,10 +1,12 @@
 #pragma once
-#include "qdb/scheduler/graph.h"
 #include <coroio/actors/actor.hpp>
 #include <qdb/io/io.h>
 #include <qdb/io/rowset_ops.h>
 
 #include <qumir/error.h>
+
+#include <string>
+#include <vector>
 
 namespace NQdb {
 namespace NRemote {
@@ -87,14 +89,12 @@ struct TRemoteEndpoint {
     uint64_t PeerTaskId = 0;
 };
 
+// Query actor -> compute actor: the graph to run, which the compute actor builds and owns.
 struct TTaskGraphMessage {
     static constexpr NNet::NActors::TMessageId MessageId = 202;
-    using LocalMessage = void; // TODO: must be serializable
-    NScheduler::TSealedTaskGraph Graph;
-    // Keeps the nodes and connections behind Graph alive.
-    std::shared_ptr<void> GraphOwner;
+    // SerializeGraphSpec bytes.
+    std::string Spec;
     std::vector<TRemoteEndpoint> Endpoints;
-    std::vector<TGeneratedKernel> Kernels;
 };
 
 // TODO: Fetch is local, do we need a message for it ?
@@ -125,6 +125,7 @@ inline void RegisterMessages(TMessagesFactory& factory) {
     factory.template RegisterSerializer<TDataConfirm>();
     factory.template RegisterSerializer<TComputeStatus>();
     factory.template RegisterSerializer<TComputeError>();
+    factory.template RegisterSerializer<TTaskGraphMessage>();
     factory.template RegisterSerializer<TExecuteQuery>();
     factory.template RegisterSerializer<TExecuteQueryResponse>();
 }

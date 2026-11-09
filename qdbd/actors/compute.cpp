@@ -3,6 +3,7 @@
 #include <chrono>
 #include <memory>
 #include <optional>
+#include <string>
 #include <thread>
 
 #include <coroio/actors/actorsystem.hpp>
@@ -11,6 +12,7 @@
 #include <qdbd/scheduler/remote_task.h>
 #include <qdb/scheduler/channel.h>
 #include <qdb/scheduler/graph.h>
+#include <qdb/scheduler/spec/graph_spec.h>
 
 #include "compute.h"
 #include "pinger.h"
@@ -163,12 +165,25 @@ struct TComputeActor : public IBehaviorActor {
             return;
         }
         QueryActorId = ctx->Sender();
-        if (auto error = NScheduler::ValidateEndpoints(message.Graph, message.Endpoints); !error.empty()) {
+        std::unique_ptr<NScheduler::TTaskGraph> graph;
+        NScheduler::TSealedTaskGraph sealed;
+        std::string error;
+        try {
+            // No sink: a compute actor's results leave through its remote sinks.
+            graph = NScheduler::MaterializeGraph(NScheduler::DeserializeGraphSpec(message.Spec));
+            sealed = graph->Seal(&error);
+        } catch (const std::exception& e) {
+            error = e.what();
+        }
+        if (error.empty()) {
+            error = NScheduler::ValidateEndpoints(sealed, message.Endpoints);
+        }
+        if (!error.empty()) {
             SendError(ctx, "cannot start graph: " + error);
             return;
         }
-        GraphOwner = std::move(message.GraphOwner);
-        Graph = message.Graph;
+        OwnedGraph = std::move(graph);
+        Graph = sealed;
         const auto sources = static_cast<size_t>(std::ranges::count_if(message.Endpoints, [](const auto& endpoint) {
             return endpoint.Kind == ERemoteEndpointKind::Source;
         }));
@@ -275,7 +290,7 @@ struct TComputeActor : public IBehaviorActor {
     std::shared_ptr<TRuntimeResources> Resources;
     NScheduler::TSchedulerSettings SchedulerSettings;
     // Declared before Graph and Scheduler: they point into it and die first.
-    std::shared_ptr<void> GraphOwner;
+    std::unique_ptr<NScheduler::TTaskGraph> OwnedGraph;
     NScheduler::TSealedTaskGraph Graph;
     std::unique_ptr<NScheduler::TActorNotificationChannel> ActorChannel;
     std::unique_ptr<NScheduler::TSchedulerChannel> SchedulerChannel;

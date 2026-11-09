@@ -27,6 +27,7 @@ ut(test_io test_io.cpp)
 if(QDB_BUILD_DAEMON)
     ut(test_distributed test_distributed.cpp)
     target_link_libraries(test_distributed qumirdb_remote)
+    target_compile_definitions(test_distributed PRIVATE QDB_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
     if(QDB_PYTHON_EXECUTABLE)
         add_test(NAME test_qdbd_cli
             COMMAND ${QDB_PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_qdbd_cli.py $<TARGET_FILE:qdbd> -v)
