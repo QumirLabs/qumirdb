@@ -124,10 +124,10 @@ while root not finished:
 ```
 
 In that subset, no JS runtime support is needed for `TGatherConnection`,
-`THashShuffleConnection`, `TBroadcastConnection`, worker queues, atomics, or
-partition lane fan-out. The remaining work is exactly the operator processor
-machines above: either implement them in JS over exported `TRowSet` memory, or
-expose each processor as a WASM node adapter with `push/finish/next/destroy`.
+`TBroadcastConnection`, worker queues, atomics, or partition lane fan-out.
+The remaining work is exactly the operator processor machines above: either
+implement them in JS over exported `TRowSet` memory, or expose each processor
+as a WASM node adapter with `push/finish/next/destroy`.
 
 ## Connections
 
@@ -135,16 +135,11 @@ expose each processor as a WASM node adapter with `push/finish/next/destroy`.
 |---|---:|---|---|---|
 | `TOneToOneConnection` | N -> N | destination `i` reads source `i` | normal streaming edges, single-lane blocking input, single-lane final output | Cheapest connection; preserves partitioning. |
 | `TGatherConnection` | N -> 1 | one destination round-robins over source lanes until all finish | global blocking operators, final output with multiple lanes, scalar side gather, CTE producer completion | Serializes lanes; useful only when semantics require one consumer. |
-| `THashShuffleConnection` | N -> M | destination `j` reads from every source lane routed to partition `j` | grouped aggregate, window, and equi-join partitioning | Expensive boundary: hash kernel, routing, buffering/materialization. Carries the repartition key contract; `DstCount()` is the partition count. |
 | `TBroadcastConnection` | 1 -> N | every destination receives a shared copy | cross join scalar side, late lookup locators, CTE publication | Sends a shared copy to each destination lane. |
 
 Every connection is made of bounded rowset queues plus finish state. The graph
 stores edges with `(connection, srcLane, dstLane)` so diagnostics can print the
 same logical connection between multiple task pairs.
-
-`THashShuffleConnection::Repartition()` returns the physical
-`TRepartitionSpec`. The spec has the column names for the hash kernel. A task
-routes each row. The connection states which partition rule the task uses.
 
 ## Compiled Kernels
 
@@ -236,9 +231,7 @@ lane builds local groups before it sends rows to the exchange. The final phase
 merges partial states. It changes `count` to `sum`. It keeps `sum`, `min`, and
 `max` as they are. All lanes in one phase use the same compiled code object.
 
-The executable plan marks the stages as `partial` and `final`. The hash-shuffle
-connection between them stores the group keys in `TRepartitionSpec`. The plan
-does not hide this fact in task names.
+The executable plan marks the stages as `partial` and `final`.
 
 ### Partitioned equi-join
 
@@ -340,12 +333,11 @@ hides route tasks, so it is not the worker placement plan. A distributed
 scheduler can use these steps:
 
 1. Put source, unary, and partial aggregate task groups on workers.
-2. Read the keys from `TRepartitionSpec`.
-3. Read the partition count from the destination lane count.
-4. Assign destination lanes to workers.
-5. Send `TRowSet` batches over a network connection with the same
+2. Read the partition count from the destination lane count.
+3. Assign destination lanes to workers.
+4. Send `TRowSet` batches over a network connection with the same
    push/fetch/finish rules.
-6. Run final aggregate task groups. Each partition has its own state.
+5. Run final aggregate task groups. Each partition has its own state.
 
 `BuildAggregateCombineOperator` creates the final aggregate. This rule does not
 belong to a scheduler. The exec plan also has `Single`, `Partial`, and `Final`

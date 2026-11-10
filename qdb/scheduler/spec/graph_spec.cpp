@@ -38,10 +38,6 @@ std::unique_ptr<IConnection> MakeConnection(const TConnectionSpec& spec)
         case EConnectionKind::Gather:
             connection = std::make_unique<TGatherConnection>(spec.Capacity);
             break;
-        case EConnectionKind::HashShuffle:
-            connection = std::make_unique<THashShuffleConnection>(
-                spec.Capacity, TRepartitionSpec{.Keys = spec.RepartitionKeys});
-            break;
         case EConnectionKind::Broadcast:
             connection = std::make_unique<TBroadcastConnection>(spec.Capacity);
             break;
@@ -230,9 +226,13 @@ std::unique_ptr<ITask> MakeHashShuffleTask(
     const THashShuffleNode& node, const std::vector<IConnection*>& connections,
     const TNodeTaskContext& context)
 {
-    auto* output = dynamic_cast<THashShuffleConnection*>(&ConnectionAt(connections, node.Out));
-    if (!output) {
-        Invalid("a hash shuffle node needs a hash shuffle output");
+    if (node.Out.empty()) {
+        Invalid("a hash shuffle node needs an output per partition");
+    }
+    std::vector<TOutputPort> outputs;
+    outputs.reserve(node.Out.size());
+    for (const auto& port : node.Out) {
+        outputs.push_back(OutputPort(connections, port));
     }
     auto code = std::make_shared<THashShuffleCode>(
         BindShuffleHash(node.Hash, context), node.InputType,
@@ -242,7 +242,7 @@ std::unique_ptr<ITask> MakeHashShuffleTask(
     }
     code->UseInputHash = node.UseInputHash;
     return std::make_unique<THashShuffleTask>(
-        std::move(code), InputPort(connections, node.In), *output, node.SourceLane);
+        std::move(code), InputPort(connections, node.In), std::move(outputs));
 }
 
 // Binary join code and its state over the node's ports.
@@ -286,12 +286,6 @@ TConnectionSpec ExtractConnection(const IConnection& connection)
         case EConnectionKind::Gather:
             spec.Capacity = static_cast<const TGatherConnection&>(connection).Capacity();
             break;
-        case EConnectionKind::HashShuffle: {
-            const auto& shuffle = static_cast<const THashShuffleConnection&>(connection);
-            spec.Capacity = shuffle.Capacity();
-            spec.RepartitionKeys = shuffle.Repartition().Keys;
-            break;
-        }
         case EConnectionKind::Broadcast:
             spec.Capacity = static_cast<const TBroadcastConnection&>(connection).Capacity();
             break;

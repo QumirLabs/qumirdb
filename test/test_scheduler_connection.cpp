@@ -117,57 +117,6 @@ TEST(SchedulerConnection, GatherPollsProducerLanesAndFinishes) {
     EXPECT_EQ(conn.Fetch(0, out), EFetchResult::FINISHED);
 }
 
-TEST(SchedulerConnection, HashShuffleRoutesRowsToDestinationLanes) {
-    THashShuffleConnection conn(1);
-    conn.Resize(2, 3);
-
-    auto left = MakeRowSet(10);
-    auto right = MakeRowSet(20);
-    ASSERT_TRUE(conn.PushTo(0, 2, std::move(left)));
-    ASSERT_TRUE(conn.PushTo(1, 0, std::move(right)));
-
-    TRowSet out{};
-    EXPECT_EQ(conn.Fetch(1, out), EFetchResult::NO_DATA);
-    ASSERT_EQ(conn.Fetch(2, out), EFetchResult::OK);
-    EXPECT_EQ(out.RowCount, 10);
-    ASSERT_EQ(conn.Fetch(0, out), EFetchResult::OK);
-    EXPECT_EQ(out.RowCount, 20);
-
-    conn.Finish(0);
-    EXPECT_EQ(conn.Fetch(0, out), EFetchResult::NO_DATA);
-    conn.Finish(1);
-    EXPECT_EQ(conn.Fetch(0, out), EFetchResult::FINISHED);
-    EXPECT_EQ(conn.Fetch(2, out), EFetchResult::FINISHED);
-}
-
-TEST(SchedulerConnection, HashShuffleCarriesRepartitionContract) {
-    THashShuffleConnection conn(
-        1, {.Keys = {"customer_id", "order_date"}});
-    conn.Resize(3, 7);
-
-    EXPECT_EQ(conn.Kind(), EConnectionKind::HashShuffle);
-    EXPECT_EQ(conn.SrcCount(), 3u);
-    EXPECT_EQ(conn.DstCount(), 7u);
-    EXPECT_EQ(conn.Repartition().Keys,
-        (std::vector<std::string>{"customer_id", "order_date"}));
-}
-
-TEST(SchedulerConnection, HashShufflePreservesInputWhenDestinationLaneIsFull) {
-    THashShuffleConnection conn(1);
-    conn.Resize(2, 2);
-
-    auto first = MakeRowSet(1);
-    auto second = MakeRowSet(2);
-    ASSERT_TRUE(conn.PushTo(0, 1, std::move(first)));
-    EXPECT_FALSE(conn.CanPushTo(0, 1));
-    EXPECT_FALSE(conn.PushTo(0, 1, std::move(second)));
-    EXPECT_EQ(second.RowCount, 2);
-
-    TRowSet out{};
-    ASSERT_EQ(conn.Fetch(1, out), EFetchResult::OK);
-    EXPECT_EQ(out.RowCount, 1);
-}
-
 TEST(SchedulerConnection, QueuedRowSetsAreReleasedOnConnectionDestroy) {
     std::atomic<int> destroyCount = 0;
     {

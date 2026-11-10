@@ -163,7 +163,6 @@ TEST(SchedulerGraph, ExposesConnectionsAndExternals) {
     EXPECT_EQ(static_cast<TGatherConnection&>(*edge.Connection).Capacity(), 3u);
     EXPECT_EQ(static_cast<TBroadcastConnection&>(extra).Capacity(), 5u);
     EXPECT_EQ(TOneToOneConnection(2).Capacity(), 2u);
-    EXPECT_EQ(THashShuffleConnection(4).Capacity(), 4u);
 
     ASSERT_EQ(graph.Externals().size(), 2u);
     EXPECT_EQ(graph.Externals()[0].Id, 9u);

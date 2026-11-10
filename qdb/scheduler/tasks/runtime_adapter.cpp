@@ -1,6 +1,5 @@
 #include <qdb/scheduler/tasks/runtime_adapter.h>
 
-#include <qdb/scheduler/connections/local.h>
 #include <qdb/scheduler/graph.h>
 #include <qdb/scheduler/instrumentation/task.h>
 #include <qdb/kernel/column_value.h>
@@ -719,7 +718,7 @@ ETaskResult TMergeTask::Execute() {
 }
 
 struct THashShuffleTask::TPendingOutput {
-    size_t DstLane = 0;
+    size_t Destination = 0;
     TRowSet RowSet = {};
 };
 
@@ -744,12 +743,10 @@ struct THashShuffleTask::TDestinationBuffer {
 THashShuffleTask::THashShuffleTask(
     std::shared_ptr<const THashShuffleCode> code,
     TInputPort input,
-    THashShuffleConnection& output,
-    size_t sourceLane)
+    std::vector<TOutputPort> outputs)
     : Code_(std::move(code))
     , Input_(input)
-    , Output_(&output)
-    , SourceLane_(sourceLane)
+    , Outputs_(std::move(outputs))
 {}
 
 THashShuffleTask::~THashShuffleTask() {
@@ -789,7 +786,9 @@ ETaskResult THashShuffleTask::Execute() {
             return result;
         }
         OutputFinished_ = true;
-        Output_->Finish(SourceLane_);
+        for (const auto& output : Outputs_) {
+            output.Finish();
+        }
         return ETaskResult::FINISHED;
     }
 
@@ -882,7 +881,7 @@ void THashShuffleTask::EnsureBuffers(size_t partitions) {
 }
 
 void THashShuffleTask::Scatter(TRowSet& rowSet) {
-    if (Output_->DstCount() == 0 || rowSet.RowCount <= 0) {
+    if (Outputs_.empty() || rowSet.RowCount <= 0) {
         return;
     }
     auto input = std::shared_ptr<TRowSet>(new TRowSet(rowSet), DestroySharedRowSet);
@@ -896,7 +895,7 @@ void THashShuffleTask::Scatter(TRowSet& rowSet) {
 }
 
 void THashShuffleTask::ScatterBuffered(const std::shared_ptr<TRowSet>& input) {
-    const size_t partitions = Output_->DstCount();
+    const size_t partitions = Outputs_.size();
     EnsureBuffers(partitions);
 
     const auto& inputType = ShuffleInputStruct(Code_->InputType);
@@ -945,9 +944,9 @@ void THashShuffleTask::ScatterBuffered(const std::shared_ptr<TRowSet>& input) {
 }
 
 void THashShuffleTask::ScatterViews(const std::shared_ptr<TRowSet>& input) {
-    const size_t partitions = Output_->DstCount();
+    const size_t partitions = Outputs_.size();
 
-    // Many-to-one shuffle: every row routes to lane 0, so skip hashing and
+    // Many-to-one shuffle: every row routes to output 0, so skip hashing and
     // forward the whole rowset (keeping its existing selection) unchanged.
     if (partitions == 1 && !Code_->ProducedFilter) {
         ClearPending();
@@ -955,7 +954,7 @@ void THashShuffleTask::ScatterViews(const std::shared_ptr<TRowSet>& input) {
         auto* data = new THashShuffleRowSetData;
         data->Input = input;
         Pending_.push_back(TPendingOutput{
-            .DstLane = 0,
+            .Destination = 0,
             .RowSet = TRowSet{
                 .Columns = input->Columns,
                 .ColumnCount = input->ColumnCount,
@@ -1001,7 +1000,7 @@ void THashShuffleTask::ScatterViews(const std::shared_ptr<TRowSet>& input) {
         data->Selection = std::move(selections[dst]);
         data->Hashes = hashes;
         Pending_.push_back(TPendingOutput{
-            .DstLane = dst,
+            .Destination = dst,
             .RowSet = TRowSet{
                 .Columns = input->Columns,
                 .ColumnCount = input->ColumnCount,
@@ -1070,7 +1069,7 @@ void THashShuffleTask::FlushBuffer(size_t dst, bool releaseInputs) {
         }
         data->Hashes = batch.Hashes;
         Pending_.push_back(TPendingOutput{
-            .DstLane = dst,
+            .Destination = dst,
             .RowSet = TRowSet{
                 .Columns = batch.Input->Columns,
                 .ColumnCount = batch.Input->ColumnCount,
@@ -1208,7 +1207,7 @@ void THashShuffleTask::FlushBuffer(size_t dst, bool releaseInputs) {
     }
 
     Pending_.push_back(TPendingOutput{
-        .DstLane = dst,
+        .Destination = dst,
         .RowSet = TRowSet{
             .Columns = data->Columns.data(),
             .ColumnCount = static_cast<int64_t>(data->Columns.size()),
@@ -1237,19 +1236,8 @@ void THashShuffleTask::FlushAllBuffers() {
 ETaskResult THashShuffleTask::PushPending() {
     while (PendingIndex_ < Pending_.size()) {
         auto& pending = Pending_[PendingIndex_];
-        if (!Output_->CanPushTo(SourceLane_, pending.DstLane)) {
-            return ETaskResult::BLOCKED_OUTPUT;
-        }
-        const auto rows = OutputInstrumentation_ ? OutputInstrumentation_->Rows : 0;
-        const auto bytes = OutputInstrumentation_ ? OutputInstrumentation_->Bytes : 0;
-        if (OutputInstrumentation_) {
-            OutputInstrumentation_->Add(pending.RowSet);
-        }
-        if (!Output_->PushTo(SourceLane_, pending.DstLane, std::move(pending.RowSet))) {
-            if (OutputInstrumentation_) {
-                OutputInstrumentation_->Rows = rows;
-                OutputInstrumentation_->Bytes = bytes;
-            }
+        const auto& output = Outputs_[pending.Destination];
+        if (!output.CanPush() || !output.Push(std::move(pending.RowSet))) {
             return ETaskResult::BLOCKED_OUTPUT;
         }
         ++PendingIndex_;
@@ -1311,7 +1299,9 @@ void TMergeTask::ConfigureInstrumentation(TTaskInstrumentationSetup& setup) {
 
 void THashShuffleTask::ConfigureInstrumentation(TTaskInstrumentationSetup& setup) {
     setup.Input(Input_);
-    OutputInstrumentation_ = &setup.Output(*Output_);
+    for (auto& output : Outputs_) {
+        setup.Output(output);
+    }
     ResourceInstrumentation_ = std::make_unique<TInstrumentationState>();
     ResourceInstrumentation_->Counters = &setup.Counters();
 }

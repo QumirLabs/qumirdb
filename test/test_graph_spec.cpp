@@ -38,14 +38,13 @@ TNodeSpec Node(std::string kind, std::string label, TNodeBody body)
     };
 }
 
-// source -> hash shuffle -> two forwards -> gather -> sink writer.
+// source -> broadcast -> two forwards -> gather -> sink writer.
 TGraphSpec FanOutSpec()
 {
     TGraphSpec spec;
     spec.Connections = {
-        {.Kind = EConnectionKind::HashShuffle, .Capacity = 2, .SrcCount = 1, .DstCount = 2,
-            .DebugName = "shuffle", .RepartitionKeys = {"k"},
-            .RowLayouts = {{.Width = 8}, {.Width = 1, .Bitmap = true}}},
+        {.Kind = EConnectionKind::Broadcast, .Capacity = 2, .SrcCount = 1, .DstCount = 2,
+            .DebugName = "broadcast", .RowLayouts = {{.Width = 8}, {.Width = 1, .Bitmap = true}}},
         {.Kind = EConnectionKind::Gather, .Capacity = 3, .SrcCount = 2, .DstCount = 1,
             .DebugName = "gather"},
     };
@@ -79,11 +78,11 @@ struct TCountingSink : ISink {
 std::unique_ptr<TTaskGraph> BuildFanOutByHand(ISink& sink)
 {
     auto graph = std::make_unique<TTaskGraph>();
-    auto shuffle = std::make_unique<THashShuffleConnection>(2, TRepartitionSpec{.Keys = {"k"}});
-    shuffle->Resize(1, 2);
-    shuffle->SetDebugName("shuffle");
-    shuffle->SetRowLayouts({TValueLayout{.Width = 8}, TValueLayout{.Width = 1, .Bitmap = true}});
-    auto& shuffleRef = graph->AddConnection(std::move(shuffle));
+    auto broadcast = std::make_unique<TBroadcastConnection>(2);
+    broadcast->Resize(1, 2);
+    broadcast->SetDebugName("broadcast");
+    broadcast->SetRowLayouts({TValueLayout{.Width = 8}, TValueLayout{.Width = 1, .Bitmap = true}});
+    auto& broadcastRef = graph->AddConnection(std::move(broadcast));
     auto gather = std::make_unique<TGatherConnection>(3);
     gather->Resize(2, 1);
     gather->SetDebugName("gather");
@@ -92,7 +91,7 @@ std::unique_ptr<TTaskGraph> BuildFanOutByHand(ISink& sink)
     auto forwardCode = std::make_shared<TUnaryCode>([](void*, TRowSet&) {});
     auto forward = [&](size_t lane) {
         return std::make_unique<TUnaryTask>(forwardCode, std::shared_ptr<void>{},
-            TInputPort{.Connection = &shuffleRef, .Lane = lane},
+            TInputPort{.Connection = &broadcastRef, .Lane = lane},
             TOutputPort{.Connection = &gatherRef, .Lane = lane});
     };
     auto sinkCode = std::make_shared<TSinkCode>([](void* state, const TRowSet& rowSet) {
@@ -100,7 +99,7 @@ std::unique_ptr<TTaskGraph> BuildFanOutByHand(ISink& sink)
         return ETaskResult::OK;
     });
     auto& source = graph->AddOwnedNode(std::make_unique<TSourceTask>(
-        nullptr, nullptr, TOutputPort{.Connection = &shuffleRef}));
+        nullptr, nullptr, TOutputPort{.Connection = &broadcastRef}));
     auto& left = graph->AddOwnedNode(forward(0));
     auto& right = graph->AddOwnedNode(forward(1));
     auto& out = graph->AddOwnedNode(std::make_unique<TSinkTask>(
@@ -110,8 +109,8 @@ std::unique_ptr<TTaskGraph> BuildFanOutByHand(ISink& sink)
              {&right, "forward"}, {&out, "sink"}}) {
         node->DebugKind = kind;
     }
-    graph->AddEdge(source, left, shuffleRef, 0, 0);
-    graph->AddEdge(source, right, shuffleRef, 0, 1);
+    graph->AddEdge(source, left, broadcastRef, 0, 0);
+    graph->AddEdge(source, right, broadcastRef, 0, 1);
     graph->AddEdge(left, out, gatherRef, 0, 0);
     graph->AddEdge(right, out, gatherRef, 1, 0, 1);
     graph->AddDependencyEdge(source, out);
@@ -129,7 +128,7 @@ TEST(GraphSpec, SerializesAndDeserializes)
 
     const auto decoded = DeserializeGraphSpec(bytes);
     ASSERT_EQ(decoded.Connections.size(), 2u);
-    EXPECT_EQ(decoded.Connections[0].RepartitionKeys, std::vector<std::string>{"k"});
+    EXPECT_EQ(decoded.Connections[0].Kind, EConnectionKind::Broadcast);
     EXPECT_TRUE(decoded.Connections[0].RowLayouts[1].Bitmap);
     EXPECT_EQ(decoded.Nodes[3].DebugLabel, "out");
     EXPECT_TRUE(std::holds_alternative<TSinkWriterNode>(decoded.Nodes[3].Body));
@@ -306,8 +305,7 @@ TEST(GraphSpec, AggregateAndHashShuffleRecordsRoundTrip)
     TGraphSpec spec;
     spec.Nodes.push_back(Node("hash-shuffle", "aggregate-repartition", THashShuffleNode{
         .In = {0, 1},
-        .Out = 1,
-        .SourceLane = 1,
+        .Out = {{1, 1}, {2, 1}},
         .Hash = TAggregateHashPlanData{.Kernel = 3, .KeyColumns = {0, 2}},
         .InputType = inputType,
         .TargetOutputBatchRows = 4096,
@@ -350,8 +348,9 @@ TEST(GraphSpec, AggregateAndHashShuffleRecordsRoundTrip)
     ASSERT_EQ(back.Nodes.size(), 2u);
     const auto& shuffle = std::get<THashShuffleNode>(back.Nodes[0].Body);
     EXPECT_EQ(shuffle.In.Lane, 1u);
-    EXPECT_EQ(shuffle.Out, 1u);
-    EXPECT_EQ(shuffle.SourceLane, 1u);
+    ASSERT_EQ(shuffle.Out.size(), 2u);
+    EXPECT_EQ(shuffle.Out[1].Connection, 2u);
+    EXPECT_EQ(shuffle.Out[1].Lane, 1u);
     const auto& hash = std::get<TAggregateHashPlanData>(shuffle.Hash);
     EXPECT_EQ(hash.Kernel, 3u);
     EXPECT_EQ(hash.KeyColumns, (std::vector<int64_t>{0, 2}));
@@ -474,8 +473,7 @@ TEST(GraphSpec, JoinAndJoinHashShuffleRecordsRoundTrip)
     TGraphSpec spec;
     spec.Nodes.push_back(Node("hash-shuffle", "join-right-repartition", THashShuffleNode{
         .In = {0, 2},
-        .Out = 1,
-        .SourceLane = 2,
+        .Out = {{1, 2}},
         .Hash = TJoinHashPlanData{.Kernel = 5, .Entry = 1, .KeyColumns = {1, 0}},
         .InputType = inputType,
     }));
@@ -694,7 +692,7 @@ TEST(GraphSpec, RuntimeFilterRecordsAndTableRoundTrip)
     }));
     spec.Nodes.push_back(Node("hash-shuffle", "join-right-repartition", THashShuffleNode{
         .In = {2, 1},
-        .Out = 3,
+        .Out = {{3, 0}},
         .Hash = TJoinHashPlanData{.Kernel = 5, .Entry = 1, .KeyColumns = {0}},
         .InputType = std::make_shared<TStructType>(std::vector<std::pair<std::string, TTypePtr>>{
             {"k", std::make_shared<TIntegerType>(TIntegerType::I64)},
@@ -861,16 +859,18 @@ TEST(GraphSpec, RejectsInvalidSpecs)
     spec.Nodes[1].Body = TFilterNode{.In = {0, 0}, .Out = {1, 0}};
     EXPECT_THROW(MaterializeGraph(spec, &sink), std::runtime_error);
 
-    // Connection 1 is a gather, not a hash shuffle; kernel 0 has a slot, so the
-    // connection kind is what throws.
+    // A shuffle needs an output per partition, each inside the graph; kernel 0
+    // has a slot, so the outputs are what throws.
     spec = FanOutSpec();
-    spec.Nodes[1].Body = THashShuffleNode{.In = {0, 0}, .Out = 1};
+    spec.Nodes[1].Body = THashShuffleNode{.In = {0, 0}};
     const std::vector<std::shared_ptr<TKernelSlot>> slots{std::make_shared<TKernelSlot>()};
+    EXPECT_THROW(MaterializeGraph(spec, &sink, slots), std::runtime_error);
+    spec.Nodes[1].Body = THashShuffleNode{.In = {0, 0}, .Out = {{1, 0}, {9, 0}}};
     EXPECT_THROW(MaterializeGraph(spec, &sink, slots), std::runtime_error);
 
     // A join hash has entries 0 and 1 only.
     spec = FanOutSpec();
-    spec.Nodes[1].Body = THashShuffleNode{.In = {0, 0}, .Out = 0, .Hash = TJoinHashPlanData{.Entry = 2}};
+    spec.Nodes[1].Body = THashShuffleNode{.In = {0, 0}, .Out = {{1, 0}}, .Hash = TJoinHashPlanData{.Entry = 2}};
     EXPECT_THROW(MaterializeGraph(spec, &sink, slots), std::runtime_error);
 
     // CTE records index the spool and consumer state tables.
@@ -901,7 +901,7 @@ TEST(GraphSpec, RejectsInvalidSpecs)
     EXPECT_THROW(MaterializeGraph(spec, &sink, slots), std::runtime_error);
     spec.RuntimeFilterKernel = 0;
     EXPECT_NO_THROW(MaterializeGraph(spec, &sink, slots));
-    spec.Nodes[1].Body = THashShuffleNode{.In = {0, 0}, .Out = 0, .ProducedFilter = 1};
+    spec.Nodes[1].Body = THashShuffleNode{.In = {0, 0}, .Out = {{1, 0}}, .ProducedFilter = 1};
     EXPECT_THROW(MaterializeGraph(spec, &sink, slots), std::runtime_error);
     spec.Nodes[1].Body = TRuntimeFilterNode{.In = {0, 0}, .Out = {1, 0}, .Filter = 1};
     EXPECT_THROW(MaterializeGraph(spec, &sink, slots), std::runtime_error);
