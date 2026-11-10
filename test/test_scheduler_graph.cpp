@@ -327,6 +327,62 @@ TEST(SchedulerGraph, NodeWithOnlyADependencyOutputIsARoot) {
     EXPECT_EQ(Graphs(sealed), (TGraphs{{&build, &sink}}));
 }
 
+// P feeds C1 and gates C2 through a dependency; Q only gates C2, so Q is a root.
+TEST(SchedulerGraph, RetireAbandonsADependencyProducerWithItsLastConsumer) {
+    TTaskGraph graph;
+    auto& p = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& q = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& c1 = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& c2 = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& r1 = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& r2 = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    graph.AddOwnedEdge(p, c1, std::make_unique<TOneToOneConnection>());
+    graph.AddOwnedEdge(c1, r1, std::make_unique<TOneToOneConnection>());
+    graph.AddOwnedEdge(c2, r2, std::make_unique<TOneToOneConnection>());
+    graph.AddDependencyEdge(p, c2);
+    graph.AddDependencyEdge(q, c2);
+    std::string error;
+    ASSERT_TRUE(graph.Seal(&error)) << error;
+
+    Retire(r1);
+    EXPECT_TRUE(c1.Retired.load());
+    // C2 still waits for P's publication.
+    EXPECT_FALSE(p.Retired.load());
+    Retire(r2);
+    EXPECT_TRUE(c2.Retired.load());
+    EXPECT_TRUE(p.Retired.load());
+    EXPECT_FALSE(q.Retired.load());
+}
+
+// P has two edges to C and one to D: it lives until both consumers retire.
+TEST(SchedulerGraph, RetireCountsEveryEdgeToOneConsumer) {
+    TTaskGraph graph;
+    auto& p = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& c = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& d = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& r1 = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& r2 = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    graph.AddOwnedEdge(p, c, std::make_unique<TOneToOneConnection>());
+    graph.AddOwnedEdge(p, c, std::make_unique<TOneToOneConnection>());
+    graph.AddOwnedEdge(p, d, std::make_unique<TOneToOneConnection>());
+    graph.AddOwnedEdge(c, r1, std::make_unique<TOneToOneConnection>());
+    graph.AddOwnedEdge(d, r2, std::make_unique<TOneToOneConnection>());
+    std::string error;
+    ASSERT_TRUE(graph.Seal(&error)) << error;
+    EXPECT_EQ(p.LiveConsumers.load(), 3u);
+
+    Retire(r1);
+    EXPECT_TRUE(c.Retired.load());
+    EXPECT_FALSE(p.Retired.load());
+    EXPECT_EQ(p.LiveConsumers.load(), 1u);
+    Retire(r2);
+    EXPECT_TRUE(d.Retired.load());
+    EXPECT_TRUE(p.Retired.load());
+    // A node retired twice, e.g. one that finishes after it was abandoned, releases once.
+    Retire(c);
+    EXPECT_EQ(p.LiveConsumers.load(), 0u);
+}
+
 TEST(SchedulerGraph, RejectsCycleBesideAValidSubgraph) {
     TTaskGraph graph;
     auto& source = graph.AddOwnedNode(std::make_unique<TNoopTask>());
