@@ -21,7 +21,6 @@ namespace NQdb {
 namespace NScheduler {
 
 struct TTaskNode;
-class THashShuffleConnection;
 
 enum class ERequiredSide { Both = 0, Left = 1, Right = 2 };
 
@@ -311,13 +310,13 @@ private:
     bool OutputFinished_ = false;
 };
 
+// Routes each row by its key hash to one output per destination partition.
 class THashShuffleTask final : public ITask {
 public:
     THashShuffleTask(
         std::shared_ptr<const THashShuffleCode> code,
         TInputPort input,
-        THashShuffleConnection& output,
-        size_t sourceLane);
+        std::vector<TOutputPort> outputs);
     ~THashShuffleTask() override;
 
     ETaskResult Execute() override;
@@ -352,9 +351,7 @@ private:
 private:
     std::shared_ptr<const THashShuffleCode> Code_;
     TInputPort Input_;
-    THashShuffleConnection* Output_ = nullptr;
-    size_t SourceLane_ = 0;
-    TRowSetInstrumentation* OutputInstrumentation_ = nullptr;
+    std::vector<TOutputPort> Outputs_;
     std::unique_ptr<TInstrumentationState> ResourceInstrumentation_;
     std::optional<TRuntimeFilterBuilder> FilterBuilder_;
     std::vector<std::unique_ptr<TDestinationBuffer>> Buffers_;

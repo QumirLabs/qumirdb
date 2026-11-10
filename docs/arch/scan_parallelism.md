@@ -40,7 +40,7 @@ row-group sizes can still cause uneven work.
 
 A hash-shuffled join can take `M_left` and `M_right` input lanes and produce `N`
 join partitions. Each key maps to one output partition independently of its
-source lane. The two shuffle connections create `(M_left + M_right) * N`
+source lane. The two shuffles create `(M_left + M_right) * N`
 queues. Increasing scan lanes therefore increases graph and queue costs even
 when `N` stays constant.
 

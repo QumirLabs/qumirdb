@@ -33,7 +33,6 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 
 using namespace NQdb;
@@ -227,22 +226,29 @@ TBuiltPlan Lower(
             ++sourceLanes[node->DebugLabel];
         }
     }
-    std::unordered_set<const NScheduler::IConnection*> seenConnections;
-    for (const auto& edge : lowered.Graph->Edges()) {
-        const auto* connection = edge->Connection;
-        if (!connection ||
-            connection->Kind() != NScheduler::EConnectionKind::HashShuffle ||
-            !seenConnections.insert(connection).second)
-        {
+    // The shuffle tasks of one exchange share a task group; the hash key
+    // columns of their input name the keys.
+    std::unordered_map<NScheduler::TTaskGroupId, size_t> exchanges;
+    for (const auto& record : lowered.NodeSpecs) {
+        const auto* shuffle = record
+            ? std::get_if<NScheduler::THashShuffleNode>(&record->Body)
+            : nullptr;
+        if (!shuffle) {
             continue;
         }
-        const auto* exchange = static_cast<
-            const NScheduler::THashShuffleConnection*>(connection);
-        repartitions.push_back({
-            .Keys = exchange->Repartition().Keys,
-            .Sources = exchange->SrcCount(),
-            .Destinations = exchange->DstCount(),
-        });
+        const auto [exchange, added] = exchanges.emplace(record->TaskGroupId, repartitions.size());
+        if (added) {
+            const auto& fields = static_cast<const NQumir::NAst::TStructType&>(*shuffle->InputType).Fields;
+            const auto& columns = std::visit([](const auto& hash) -> const std::vector<int64_t>& {
+                return hash.KeyColumns;
+            }, shuffle->Hash);
+            TBuiltPlan::TRepartition repartition{.Destinations = shuffle->Out.size()};
+            for (const auto column : columns) {
+                repartition.Keys.push_back(fields[column].first);
+            }
+            repartitions.push_back(std::move(repartition));
+        }
+        ++repartitions[exchange->second].Sources;
     }
     return {
         .Logical = std::move(logical),

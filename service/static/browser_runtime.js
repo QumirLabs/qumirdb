@@ -3256,7 +3256,6 @@ const FetchResult = {
 const ConnectionKind = {
   OneToOne: 'one-to-one',
   Gather: 'gather',
-  HashShuffle: 'hash-shuffle',
   Broadcast: 'broadcast',
 };
 
@@ -3348,12 +3347,6 @@ class GatherConnection extends UnsupportedConnection {
   }
 }
 
-class HashShuffleConnection extends UnsupportedConnection {
-  constructor() {
-    super(ConnectionKind.HashShuffle);
-  }
-}
-
 class BroadcastConnection extends UnsupportedConnection {
   constructor() {
     super(ConnectionKind.Broadcast);
@@ -3366,8 +3359,6 @@ function createConnection(kind = ConnectionKind.OneToOne, options = {}) {
       return new OneToOneConnection(options.capacity || 1);
     case ConnectionKind.Gather:
       return new GatherConnection();
-    case ConnectionKind.HashShuffle:
-      return new HashShuffleConnection();
     case ConnectionKind.Broadcast:
       return new BroadcastConnection();
     default:

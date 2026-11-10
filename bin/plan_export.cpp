@@ -1188,8 +1188,6 @@ std::string ConnectionKindName(NQdb::NScheduler::EConnectionKind kind) {
             return "one-to-one";
         case EConnectionKind::Gather:
             return "gather";
-        case EConnectionKind::HashShuffle:
-            return "hash-shuffle";
         case EConnectionKind::Broadcast:
             return "broadcast";
     }

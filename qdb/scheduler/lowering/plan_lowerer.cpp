@@ -805,8 +805,10 @@ private:
         return label + "]";
     }
 
+    // Destination partition m reads lane 0 of Partitions[m], a gather over
+    // the shuffle tasks in Nodes.
     struct TRepartitionExchange {
-        NScheduler::THashShuffleConnection* Connection = nullptr;
+        std::vector<NScheduler::IConnection*> Partitions;
         std::vector<NScheduler::TTaskNode*> Nodes;
     };
 
@@ -1574,8 +1576,7 @@ private:
             childLanes,
             parts,
             AggregateHashPlan(groupHash),
-            "grouping-sets-repartition",
-            {.Keys = combineAgg->GroupKeys()});
+            "grouping-sets-repartition");
 
         const auto combineStageId = NewAggregateStage(
             combineAgg.get(), EAggregatePhase::Final, combineAgg);
@@ -1595,10 +1596,10 @@ private:
         for (size_t m = 0; m < parts; ++m) {
             auto& node = AddStageNode(
                 combineStage, "aggregate", "aggregate combine", combineStageId,
-                *exchange.Connection, m, outConn, m + outLaneOffset);
+                *exchange.Partitions[m], 0, outConn, m + outLaneOffset);
             for (size_t s = 0; s < childLanes; ++s) {
                 Graph_.AddEdge(
-                    *exchange.Nodes[s], node, *exchange.Connection, s, m);
+                    *exchange.Nodes[s], node, *exchange.Partitions[m], s, 0);
             }
             result.Producers.push_back(&node);
         }
@@ -1607,8 +1608,8 @@ private:
 
     // child[N] -> local partial aggregate[N] -> hash repartition exchange
     // (N->parts) -> final combine aggregate[parts]. The two aggregate phases
-    // have independent executable-stage identities; the exchange connection
-    // carries its partitioning contract so a distributed scheduler can replace
+    // have independent executable-stage identities; the shuffle records
+    // carry the partitioning hash so a distributed scheduler can replace
     // only the transport between them.
     TLoweredOutput LowerGroupedAggregateCascade(
         TAggregateOperator& aggregate,
@@ -1674,8 +1675,7 @@ private:
             childLanes,
             parts,
             AggregateHashPlan(groupHash),
-            "aggregate-repartition",
-            {.Keys = combineAgg->GroupKeys()});
+            "aggregate-repartition");
 
         auto finalStage =
             [&]() {
@@ -1695,14 +1695,14 @@ private:
         for (size_t partition = 0; partition < parts; ++partition) {
             auto& node = AddStageNode(
                 finalStage, "aggregate", "aggregate final", finalStageId,
-                *exchange.Connection, partition, outConn, partition + outLaneOffset);
+                *exchange.Partitions[partition], 0, outConn, partition + outLaneOffset);
             for (size_t lane = 0; lane < childLanes; ++lane) {
                 Graph_.AddEdge(
                     *exchange.Nodes[lane],
                     node,
-                    *exchange.Connection,
+                    *exchange.Partitions[partition],
                     lane,
-                    partition);
+                    0);
             }
             result.Producers.push_back(&node);
         }
@@ -1815,8 +1815,7 @@ private:
             childLanes,
             parts,
             AggregateHashPlan(groupHash),
-            "aggregate-repartition",
-            {.Keys = aggregate.GroupKeys()});
+            "aggregate-repartition");
 
         TLoweredOutput result;
         result.OutputType = stage.OutputType;
@@ -1824,10 +1823,10 @@ private:
         for (size_t m = 0; m < parts; ++m) {
             auto& node = AddStageNode(
                 stage, "aggregate", "aggregate", execStageId,
-                *exchange.Connection, m, outConn, m + outLaneOffset);
+                *exchange.Partitions[m], 0, outConn, m + outLaneOffset);
             for (size_t s = 0; s < childLanes; ++s) {
                 Graph_.AddEdge(
-                    *exchange.Nodes[s], node, *exchange.Connection, s, m);
+                    *exchange.Nodes[s], node, *exchange.Partitions[m], s, 0);
             }
             result.Producers.push_back(&node);
         }
@@ -2430,6 +2429,7 @@ private:
                 .BuildSide = buildSide,
             };
         };
+        // Partition `lane` reads lane 0 of its own `left` and `right` inputs.
         auto addJoinNode = [&](
             const TJoinNode& record,
             NScheduler::IConnection& left,
@@ -2438,7 +2438,7 @@ private:
         {
             return std::visit([&](const auto& body) -> NScheduler::TTaskNode& {
                 return AddJoinNode(
-                    body, left, right, lane, outConn, lane + outLaneOffset, execStageId, JoinDebugLabel(join));
+                    body, left, right, 0, outConn, lane + outLaneOffset, execStageId, JoinDebugLabel(join));
             }, record);
         };
 
@@ -2459,14 +2459,6 @@ private:
         auto hashKernels = compiler.CompileJoinHash(kernelSpec);
         kernelSpec.HasPrecomputedHash = true;
         const auto joinNode = compileJoin();
-        std::vector<std::string> leftPartitionKeys;
-        std::vector<std::string> rightPartitionKeys;
-        leftPartitionKeys.reserve(join.Keys().size());
-        rightPartitionKeys.reserve(join.Keys().size());
-        for (const auto& key : join.Keys()) {
-            leftPartitionKeys.push_back(key.Left);
-            rightPartitionKeys.push_back(key.Right);
-        }
         TShuffleRuntimeFilter leftFilter;
         TShuffleRuntimeFilter rightFilter;
         bool filterBuildIsLeft = false;
@@ -2508,7 +2500,6 @@ private:
             joinParts,
             TJoinHashPlanData{.Kernel = hashKernels.Kernel, .Entry = 0, .KeyColumns = hashKernels.LeftKeyColumns},
             "join-left-repartition",
-            {.Keys = std::move(leftPartitionKeys)},
             std::move(leftFilter));
         auto rightShuf = BuildRepartitionExchange(
             rightOut,
@@ -2517,7 +2508,6 @@ private:
             joinParts,
             TJoinHashPlanData{.Kernel = hashKernels.Kernel, .Entry = 1, .KeyColumns = hashKernels.RightKeyColumns},
             "join-right-repartition",
-            {.Keys = std::move(rightPartitionKeys)},
             std::move(rightFilter));
 
         if (join.RuntimeFilter()) {
@@ -2539,13 +2529,13 @@ private:
         result.OutputType = kernelSpec.OutputSchema;
         result.Producers.reserve(joinParts);
         for (size_t j = 0; j < joinParts; ++j) {
-            auto& node = addJoinNode(joinNode, *leftShuf.Connection, *rightShuf.Connection, j);
+            auto& node = addJoinNode(joinNode, *leftShuf.Partitions[j], *rightShuf.Partitions[j], j);
             for (size_t s = 0; s < leftLanes; ++s) {
-                Graph_.AddEdge(*leftShuf.Nodes[s], node, *leftShuf.Connection, s, j);
+                Graph_.AddEdge(*leftShuf.Nodes[s], node, *leftShuf.Partitions[j], s, 0);
             }
             for (size_t s = 0; s < rightLanes; ++s) {
                 Graph_.AddEdge(
-                    *rightShuf.Nodes[s], node, *rightShuf.Connection, s, j, 1);
+                    *rightShuf.Nodes[s], node, *rightShuf.Partitions[j], s, 0, 1);
             }
             result.Producers.push_back(&node);
         }
@@ -2612,8 +2602,7 @@ private:
             childLanes,
             parts,
             AggregateHashPlan(partitionHash),
-            "window-repartition",
-            {.Keys = window.PartitionKeys()});
+            "window-repartition");
 
         auto stage = [&]() {
             TStageDiagnosticsScope diagnosticsScope(Diagnostics_, windowGroup);
@@ -2625,7 +2614,7 @@ private:
         result.Producers.reserve(parts);
         for (size_t m = 0; m < parts; ++m) {
             auto body = stage.Node;
-            body.In = PortSpec(Graph_, shuf.Connection, m);
+            body.In = PortSpec(Graph_, shuf.Partitions[m], 0);
             body.Out = PortSpec(Graph_, &outConn, m + outLaneOffset);
             auto& node = AddNode({
                 .ExecStageId = execStageId,
@@ -2635,7 +2624,7 @@ private:
                 .Body = std::move(body),
             });
             for (size_t s = 0; s < childLanes; ++s) {
-                Graph_.AddEdge(*shuf.Nodes[s], node, *shuf.Connection, s, m);
+                Graph_.AddEdge(*shuf.Nodes[s], node, *shuf.Partitions[m], s, 0);
             }
             result.Producers.push_back(&node);
         }
@@ -2648,31 +2637,30 @@ private:
         size_t inputLanes,
         size_t partitions,
         NScheduler::THashShuffleNode::THash hash,
-        std::string debugName,
-        NScheduler::TRepartitionSpec repartition,
+        const std::string& label,
         TShuffleRuntimeFilter runtimeFilter = {})
     {
-        const std::string label = debugName;
-        auto* shufPtr = &AddConn<NScheduler::THashShuffleConnection>(
-            inputLanes,
-            partitions,
-            std::move(debugName),
-            ShuffleQueueCapacity(),
-            std::move(repartition));
-
         TRepartitionExchange side;
-        side.Connection = shufPtr;
+        side.Partitions.reserve(partitions);
+        for (size_t m = 0; m < partitions; ++m) {
+            side.Partitions.push_back(&AddConn<NScheduler::TGatherConnection>(
+                inputLanes, 1, label, ShuffleQueueCapacity()));
+        }
         side.Nodes.reserve(inputLanes);
         const auto shuffleTaskGroupId = NewTaskGroup();
         for (size_t p = 0; p < inputLanes; ++p) {
+            std::vector<NScheduler::TPortSpec> outputs;
+            outputs.reserve(partitions);
+            for (auto* partition : side.Partitions) {
+                outputs.push_back(PortSpec(Graph_, partition, p));
+            }
             NScheduler::TNodeSpec record{
                 .TaskGroupId = shuffleTaskGroupId,
                 .DebugKind = "hash-shuffle",
                 .DebugLabel = label,
                 .Body = NScheduler::THashShuffleNode{
                     .In = PortSpec(Graph_, &inputConn, p),
-                    .Out = PortSpec(Graph_, shufPtr, 0).Connection,
-                    .SourceLane = static_cast<uint32_t>(p),
+                    .Out = std::move(outputs),
                     .Hash = hash,
                     .InputType = input.OutputType,
                     .TargetOutputBatchRows = Settings_.HashShuffle.TargetOutputBatchRows,

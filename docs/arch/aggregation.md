@@ -405,13 +405,11 @@ statistics that already show too little reduction keep the first plan instead of
 leaving the decision to the partial phase.
 
 Partial and final aggregates have distinct executable stage ids and explicit
-`EAggregatePhase::Partial` and `EAggregatePhase::Final` values. The
-`THashShuffleConnection` between them has a `TRepartitionSpec`. This spec has
-the group keys. The connection also has source and destination lane counts.
+`EAggregatePhase::Partial` and `EAggregatePhase::Final` values.
 
-This connection is the border for a distributed scheduler. Such a scheduler
-can put the two phases on different workers. It can replace the local
-many-to-many connection with a network connection. It does not need to change
+The exchange between them is the border for a distributed scheduler. Such a
+scheduler can put the two phases on different workers. It can replace the
+local exchange with a network connection. It does not need to change
 the aggregate rules or read keys from debug names. The common planner helper
 owns the combine rule, so both local and distributed schedulers can use it.
 

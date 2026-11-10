@@ -49,8 +49,6 @@ struct TConnectionSpec {
     uint32_t SrcCount = 1;
     uint32_t DstCount = 1;
     std::string DebugName;
-    // Hash shuffle only.
-    std::vector<std::string> RepartitionKeys;
     std::vector<TRowLayoutSpec> RowLayouts;
 
     void Fields(this auto& self, auto& v)
@@ -60,7 +58,6 @@ struct TConnectionSpec {
         v(self.SrcCount);
         v(self.DstCount);
         v(self.DebugName);
-        v(self.RepartitionKeys);
         v(self.RowLayouts);
     }
 };
@@ -269,9 +266,8 @@ struct THashShuffleNode {
     using THash = std::variant<TAggregateHashPlanData, TJoinHashPlanData>;
 
     TPortSpec In;
-    // The hash shuffle connection; the task writes every partition of it.
-    uint32_t Out = 0;
-    uint32_t SourceLane = 0;
+    // Out[d] receives the rows whose hash picks partition d.
+    std::vector<TPortSpec> Out;
     THash Hash;
     NQumir::NAst::TTypePtr InputType;
     uint64_t TargetOutputBatchRows = 0;
@@ -286,7 +282,6 @@ struct THashShuffleNode {
     {
         v(self.In);
         v(self.Out);
-        v(self.SourceLane);
         v(self.Hash);
         TypeField(v, self.InputType);
         v(self.TargetOutputBatchRows);

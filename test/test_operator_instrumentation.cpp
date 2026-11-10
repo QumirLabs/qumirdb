@@ -485,11 +485,16 @@ TEST(OperatorInstrumentation, ShuffleAccountsSparseRetainedOwnersOnceAcrossParti
         auto code = std::make_shared<THashShuffleCode>(hash, schema, 16384, 65536, retentionBudget);
         TOneToOneConnection input(1);
         input.Resize(1, 1);
-        THashShuffleConnection output(1);
-        output.Resize(1, 4);
-        THashShuffleTask task(code, TInputPort{.Connection = &input}, output, 0);
+        std::vector<std::unique_ptr<TGatherConnection>> output;
+        std::vector<TOutputPort> ports;
+        std::unordered_map<const IConnection*, TTypePtr> types{{&input, schema}};
+        for (size_t partition = 0; partition < 4; ++partition) {
+            output.push_back(std::make_unique<TGatherConnection>(1));
+            ports.push_back(TOutputPort{.Connection = output.back().get()});
+            types.emplace(output.back().get(), schema);
+        }
+        THashShuffleTask task(code, TInputPort{.Connection = &input}, std::move(ports));
         node.Task = &task;
-        std::unordered_map<const IConnection*, TTypePtr> types{{&input, schema}, {&output, schema}};
         TTaskInstrumentationSetup setup(node, types);
         task.ConfigureInstrumentation(setup);
         ASSERT_TRUE(input.Push(0, std::move(batch)));
@@ -509,7 +514,7 @@ TEST(OperatorInstrumentation, ShuffleAccountsSparseRetainedOwnersOnceAcrossParti
         EXPECT_EQ(node.Instrumentation->BuildMemoryPeakBytes, expectedPeak);
         for (size_t partition = 0; partition < 4; ++partition) {
             TRowSet rowSet{};
-            while (output.Fetch(partition, rowSet) == EFetchResult::OK) {
+            while (output[partition]->Fetch(0, rowSet) == EFetchResult::OK) {
                 EXPECT_EQ(rowSet.RowCount, flushedBeforeEof ? 1 : 10000);
                 EXPECT_EQ(rowSet.Selection == nullptr, flushedBeforeEof);
                 Release(&rowSet);

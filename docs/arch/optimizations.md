@@ -617,7 +617,6 @@ SELECT a, sum(c) FROM big GROUP BY a;    -- --scheduler:mode=threaded --schedule
 ```
 single scheduler                     threaded
 conn blocking-input   src=1 dst=1    conn aggregate-shuffle-input one-to-one  src=4 dst=4
-                                     conn aggregate-shuffle      hash-shuffle src=4 dst=2
                                      conn final-gather           gather       src=2 dst=1
 ```
 
@@ -687,8 +686,6 @@ SELECT big.c, u.d FROM big, u WHERE big.a = u.a;   -- threaded, 4 scan tasks
 
 conn join-left-input   one-to-one   src=4 dst=4     -- big: 4 lanes
 conn join-right-input  one-to-one   src=1 dst=1     -- u: 1 lane
-conn join-left-shuffle hash-shuffle src=4 dst=2
-conn join-right-shuffle hash-shuffle src=1 dst=2
 ```
 
 ### 4.7 Kernel fusion and the JIT object cache

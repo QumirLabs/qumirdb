@@ -16,8 +16,7 @@ namespace NScheduler {
 enum class EConnectionKind {
     OneToOne = 0,
     Gather = 1,
-    HashShuffle = 2,
-    Broadcast = 3,
+    Broadcast = 2,
 };
 
 enum class EFetchResult {
@@ -33,13 +32,6 @@ struct TConnectionStats {
     uint64_t BlockedPush = 0;
     uint64_t EmptyFetch = 0;
     uint64_t FinishedFetch = 0;
-};
-
-// Physical contract of a hash repartition exchange. The local scheduler uses
-// an in-process many-to-many connection; a distributed scheduler can replace
-// that transport while preserving the key and destination-partition contract.
-struct TRepartitionSpec {
-    std::vector<std::string> Keys;
 };
 
 class IConnection {
