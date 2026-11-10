@@ -148,10 +148,9 @@ public:
 
     // Builds adjacency, validates and freezes the graph; empty on error.
     TSealedTaskGraph Seal(std::string* error = nullptr);
-    // Cuts the plan's edges of a sealed graph and regroups it into one
-    // subgraph per color; earlier sealed views become invalid. Colors must be
-    // 0..K-1; a graph is split once. Throws std::logic_error on a plan it
-    // cannot apply; after that the graph may only be destroyed.
+    // Cuts the plan's edges of a sealed graph, once, into one subgraph per
+    // color (colors 0..K-1). Throws std::logic_error on a plan it cannot
+    // apply; after that the graph may only be destroyed.
     TSealedTaskGraph Apply(TSplitPlan&& plan);
     void SetConnectionStatsEnabled(bool enabled);
     void Print(std::ostream& out) const;
