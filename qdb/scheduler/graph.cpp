@@ -161,7 +161,7 @@ std::vector<std::vector<TTaskNode*>> GroupByColor(
     std::map<int, std::vector<TTaskNode*>> roots;
     for (const auto& node : nodes) {
         const int color = colorOf(*node);
-        if (std::ranges::none_of(node->Outbound, IsRowsetEdge)) {
+        if (IsRoot(*node)) {
             roots[color].push_back(node.get());
         }
     }
@@ -173,6 +173,10 @@ std::vector<std::vector<TTaskNode*>> GroupByColor(
 }
 
 } // namespace
+
+bool IsRoot(const TTaskNode& node) {
+    return std::ranges::none_of(node.Outbound, IsRowsetEdge);
+}
 
 TTaskNode& TTaskGraph::AddNode(ITask& task) {
     CheckMutable();
@@ -303,7 +307,7 @@ TSealedTaskGraph TTaskGraph::Seal(std::string* error) {
         // One subgraph of all roots; only Apply() splits it.
         Graphs_.assign(1, {});
         for (const auto& node : Nodes_) {
-            if (std::ranges::none_of(node->Outbound, IsRowsetEdge)) {
+            if (IsRoot(*node)) {
                 Graphs_.front().push_back(node.get());
             }
         }

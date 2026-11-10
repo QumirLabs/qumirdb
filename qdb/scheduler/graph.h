@@ -51,6 +51,9 @@ struct TTaskEdge {
     size_t ExecInput = 0;
 };
 
+// A root has no rowset output; Graphs() lists the roots of each subgraph.
+bool IsRoot(const TTaskNode& node);
+
 // A node woken from outside the graph (e.g. by a remote channel) under `Id`.
 struct TExternalNode {
     uint64_t Id = 0;

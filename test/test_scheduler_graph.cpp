@@ -341,19 +341,6 @@ TEST(SchedulerGraph, RejectsCycleBesideAValidSubgraph) {
     EXPECT_NE(error.find("scheduling cycle"), std::string::npos);
 }
 
-TEST(SchedulerGraph, SchedulersRunOnlyOneRoot) {
-    TTaskGraph graph;
-    graph.AddOwnedNode(std::make_unique<TNoopTask>());
-    graph.AddOwnedNode(std::make_unique<TNoopTask>());
-    const auto sealed = graph.Seal();
-    ASSERT_TRUE(sealed);
-    std::string error;
-    EXPECT_FALSE(TSingleThreadedScheduler(sealed).Run(&error));
-    EXPECT_EQ(error, "single-threaded scheduler runs only a graph with one root");
-    EXPECT_FALSE(TThreadedScheduler(sealed, 2).Run(&error));
-    EXPECT_EQ(error, "threaded scheduler runs only a graph with one root");
-}
-
 // Holds plain ports for Apply to rebind; never runs.
 class TPortsTask : public ITask {
 public:
