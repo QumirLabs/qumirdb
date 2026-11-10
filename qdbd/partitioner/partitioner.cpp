@@ -1,15 +1,16 @@
 #include "partitioner.h"
-#include "qdb/scheduler/tasks/runtime_adapter.h"
 
-#include <memory>
 #include <qdb/scheduler/connections/local.h>
+#include <qdb/scheduler/port.h>
+#include <qdb/scheduler/tasks/runtime_adapter.h>
 
 #include <algorithm>
-#include <limits>
-#include <queue>
-#include <stack>
-#include <set>
 #include <cassert>
+#include <limits>
+#include <memory>
+#include <stack>
+#include <stdexcept>
+#include <utility>
 
 namespace NQdb {
 namespace NScheduler {
@@ -23,6 +24,7 @@ void TPartitioner::Do()
 {
     Colors_.clear();
     SplitEdges_.clear();
+    ConnectionSplits_.clear();
 
     Color();
 
@@ -39,55 +41,68 @@ void TPartitioner::Do()
 
 void TPartitioner::Partition()
 {
-    std::unordered_map<NScheduler::TOneToOneConnection*, std::vector<TTaskEdge*>> oneToOneConnections;
     for (auto* edge : SplitEdges_) {
         if (edge->Kind == ETaskEdgeKind::Dependency) {
-            // src -> [removeSinkProducer] :: [remoteSourceConsumer] -> dst
-            auto* dst = edge->Dst;
-            edge->Dst = nullptr; // TODO: should be removeSinkProducer
-
-            auto newEdge = std::make_unique<TTaskEdge>();
-            newEdge->Src = nullptr; // TODO: should be removeSinkConsumer
-            newEdge->Dst = dst;
-            // TODO: add newEdge to graph
-        } else if (auto oneToOne = dynamic_cast<NScheduler::TOneToOneConnection*>(edge->Connection)) {
-            // simple split
+            // TODO: dependency transport is separate from rowset streams.
+            continue;
+        }
+        if (auto* oneToOne = dynamic_cast<TOneToOneConnection*>(edge->Connection)) {
             assert(edge->SrcLane == edge->DstLane);
-            oneToOneConnections[oneToOne].push_back(edge);
+            PlanSplit(*edge, EReboundPort::DestinationInput, oneToOne->Capacity());
+        } else if (auto* gather = dynamic_cast<TGatherConnection*>(edge->Connection)) {
+            assert(edge->DstLane == 0);
+            PlanSplit(*edge, EReboundPort::SourceOutput, gather->Capacity());
+        } else if (auto* broadcast = dynamic_cast<TBroadcastConnection*>(edge->Connection)) {
+            assert(edge->SrcLane == 0);
+            PlanSplit(*edge, EReboundPort::DestinationInput, broadcast->Capacity());
+        } else {
+            throw std::logic_error("unsupported connection for partitioning");
         }
     }
+}
 
-    for (auto& [oneToOne, edges] : oneToOneConnections) {
-        // create new capacity=1 connection per split
-        for (auto* edge : edges) {
-            auto newConnection = std::make_unique<TOneToOneConnection>(1);
-            // 0 -> 0
-            // dst -> edge -> [remoteSink] :: [remoteSource] -> edge -> src
-            auto newEdge = std::make_unique<TTaskEdge>();
-            newEdge->SrcLane = 0;
-            newEdge->DstLane = 0;
-            newEdge->Dst = edge->Dst;
-            auto src = std::make_unique<TSourceTask>(nullptr, nullptr, TOutputPort {
-                .Connection = newConnection.get(),
-                .Lane = 0,
-                .Instrumentation = nullptr,
-            });
-            TTaskNode srcTask = TTaskNode {
-                .Task = src.get()
-            };
-            newEdge->Src = &srcTask;
+void TPartitioner::PlanSplit(TTaskEdge& edge, EReboundPort reboundPort, size_t capacity) {
+    auto split = std::make_unique<TConnectionSplitPlan>();
+    split->OriginalEdge = &edge;
+    split->ReboundPort = reboundPort;
+    split->SinkPartition = Colors_.at(edge.Src);
+    split->SourcePartition = Colors_.at(edge.Dst);
+    split->NewConnection = std::make_unique<TOneToOneConnection>(capacity);
+    const auto layouts = edge.Connection->RowLayouts();
+    split->NewConnection->SetRowLayouts(
+        std::vector<TValueLayout>(layouts.begin(), layouts.end()));
 
-            auto dst = std::make_unique<TSinkTask>(nullptr, nullptr, TInputPort {
-                .Connection = oneToOne,
-                .Lane = edge->SrcLane,
-                .Instrumentation = nullptr
-            });
-            TTaskNode dstTask = TTaskNode {
-                .Task = dst.get()
-            };
-            edge->Dst = &dstTask;
-        }
+    TInputPort sinkInput{.Connection = edge.Connection, .Lane = edge.DstLane};
+    TOutputPort sourceOutput{.Connection = split->NewConnection.get(), .Lane = 0};
+    if (reboundPort == EReboundPort::SourceOutput) {
+        sinkInput = {.Connection = split->NewConnection.get(), .Lane = 0};
+        sourceOutput = {.Connection = edge.Connection, .Lane = edge.SrcLane};
     }
+
+    split->SinkTask = std::make_unique<TSinkTask>(nullptr, nullptr, sinkInput);
+    split->SourceTask = std::make_unique<TSourceTask>(nullptr, nullptr, sourceOutput);
+    split->SinkNode.Task = split->SinkTask.get();
+    split->SinkNode.DebugKind = "remote-sink";
+    split->SourceNode.Task = split->SourceTask.get();
+    split->SourceNode.DebugKind = "remote-source";
+    split->SinkEdge = {
+        .Src = edge.Src,
+        .Dst = &split->SinkNode,
+        .Connection = sinkInput.Connection,
+        .SrcLane = reboundPort == EReboundPort::SourceOutput ? 0 : edge.SrcLane,
+        .DstLane = sinkInput.Lane,
+    };
+    split->SourceEdge = {
+        .Src = &split->SourceNode,
+        .Dst = edge.Dst,
+        .Connection = sourceOutput.Connection,
+        .SrcLane = sourceOutput.Lane,
+        .DstLane = reboundPort == EReboundPort::DestinationInput ? 0 : edge.DstLane,
+        .ExecInput = edge.ExecInput,
+    };
+
+    // Applying the plan must also rebind the selected original task port.
+    ConnectionSplits_.push_back(std::move(split));
 }
 
 void TPartitioner::Color()
