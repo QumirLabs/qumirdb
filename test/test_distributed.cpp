@@ -2048,8 +2048,8 @@ TEST(DistributedScheduler, ValidatesRemoteEndpoints) {
     EXPECT_NE(ValidateEndpoints(sealed, sourceOnly), "");
 }
 
-// Two relays in one fragment: the endpoints of each subgraph are checked.
-TEST(DistributedScheduler, ValidatesRemoteEndpointsOfEverySubgraph) {
+// Two relays in one fragment: the endpoints of every root are checked.
+TEST(DistributedScheduler, ValidatesRemoteEndpointsOfEveryRoot) {
     using namespace NQdb::NScheduler;
     TTaskGraph graph;
     std::vector<TRemoteEndpoint> endpoints;
@@ -2069,7 +2069,8 @@ TEST(DistributedScheduler, ValidatesRemoteEndpointsOfEverySubgraph) {
     }
     const auto sealed = graph.Seal();
     ASSERT_TRUE(sealed);
-    ASSERT_EQ(sealed.Graphs().size(), 2u);
+    ASSERT_EQ(sealed.Graphs().size(), 1u);
+    ASSERT_EQ(sealed.Graphs().front().size(), 2u);
     EXPECT_EQ(ValidateEndpoints(sealed, endpoints), "");
     endpoints.pop_back();
     EXPECT_EQ(ValidateEndpoints(sealed, endpoints), "a source task without code has no endpoint");

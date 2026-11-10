@@ -57,7 +57,29 @@ struct TExternalNode {
     TTaskNode* Node = nullptr;
 };
 
-// A validated, frozen graph; only TTaskGraph::Seal() makes a non-empty one.
+// The side of a cut edge whose port moves to the new 1->1 connection: Dst's
+// input for a one-to-one or broadcast cut, Src's output for a gather cut, so
+// the gather keeps all its producer lanes.
+enum class EReboundPort { SourceOutput, DestinationInput };
+
+// Cuts one rowset edge into Src -> SinkTask and SourceTask -> Dst, the remote
+// sink in Src's color and the remote source in Dst's color. The placeholder
+// tasks come with unbound ports; Apply binds them to the new edges.
+struct TEdgeSplit {
+    TTaskEdge* Edge = nullptr;
+    EReboundPort ReboundPort = EReboundPort::DestinationInput;
+    int SinkColor = 0;
+    int SourceColor = 0;
+    std::unique_ptr<IConnection> NewConnection;
+    std::unique_ptr<ITask> SinkTask;
+    std::unique_ptr<ITask> SourceTask;
+};
+
+struct TSplitPlan {
+    std::vector<TEdgeSplit> Splits;
+};
+
+// A validated, frozen graph; only TTaskGraph::Seal() and Apply() make a non-empty one.
 class TSealedTaskGraph {
 public:
     TSealedTaskGraph() = default;
@@ -126,6 +148,10 @@ public:
 
     // Builds adjacency, validates and freezes the graph; empty on error.
     TSealedTaskGraph Seal(std::string* error = nullptr);
+    // Cuts the plan's edges of a sealed graph and regroups it into one
+    // subgraph per color; earlier sealed views become invalid. Throws
+    // std::logic_error on a plan it cannot apply.
+    TSealedTaskGraph Apply(TSplitPlan&& plan);
     void SetConnectionStatsEnabled(bool enabled);
     void Print(std::ostream& out) const;
     void PrintConnectionStats(std::ostream& out) const;
@@ -133,8 +159,9 @@ public:
     const std::vector<std::unique_ptr<TTaskNode>>& Nodes() const;
     const std::vector<std::unique_ptr<TTaskEdge>>& Edges() const;
     const std::vector<TTaskNode*>& Leaves() const;
-    // The weakly connected subgraphs, each given by its roots (nodes without a
-    // rowset output). Both levels follow ExecutionSlot order; set by Seal().
+    // The subgraphs, each given by its roots (nodes without a rowset output) in
+    // ExecutionSlot order. Seal() makes one of all roots; Apply() makes one per
+    // color, in color order.
     const std::vector<std::vector<TTaskNode*>>& Graphs() const;
     // Owned connections in creation order.
     std::span<const std::unique_ptr<IConnection>> Connections() const;
@@ -145,7 +172,6 @@ private:
     void CheckMutable() const;
     void Build();
     bool Validate(std::string* error) const;
-    void GroupRoots();
 
     // Task-local observers and ports remain valid through task destruction.
     std::vector<std::unique_ptr<TTaskNode>> Nodes_;

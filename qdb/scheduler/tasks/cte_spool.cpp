@@ -143,6 +143,10 @@ void TCteProducerTask::ConfigureInstrumentation(TTaskInstrumentationSetup& setup
     Instrumentation_ = &setup.Counters();
 }
 
+bool TCteProducerTask::RebindPort(const TPortRebind& rebind) {
+    return rebind.Apply(Input_) || rebind.Apply(Completion_);
+}
+
 TCtePublishTask::TCtePublishTask(
     std::shared_ptr<TCteSpool> spool,
     TInputPort producers,
@@ -164,6 +168,10 @@ ETaskResult TCtePublishTask::Execute() {
     Finished_ = true;
     Consumers_.Finish();
     return ETaskResult::FINISHED;
+}
+
+bool TCtePublishTask::RebindPort(const TPortRebind& rebind) {
+    return rebind.Apply(Producers_) || rebind.Apply(Consumers_);
 }
 
 TCteConsumerTask::TCteConsumerTask(
@@ -215,6 +223,10 @@ ETaskResult TCteConsumerTask::Execute() {
 
 void TCteConsumerTask::ConfigureInstrumentation(TTaskInstrumentationSetup& setup) {
     setup.Output(Output_);
+}
+
+bool TCteConsumerTask::RebindPort(const TPortRebind& rebind) {
+    return rebind.Apply(Completion_) || rebind.Apply(Output_);
 }
 
 } // namespace NScheduler

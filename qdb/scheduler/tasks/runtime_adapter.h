@@ -146,6 +146,7 @@ public:
 
     ETaskResult Execute() override;
     void ConfigureInstrumentation(TTaskInstrumentationSetup& setup) override;
+    bool RebindPort(const TPortRebind& rebind) override;
 
     // Only for a task built with empty code (a remote source), before it is scheduled.
     void BindCode(std::shared_ptr<const TSourceCode> code, std::shared_ptr<void> state);
@@ -168,6 +169,7 @@ public:
 
     ETaskResult Execute() override;
     void ConfigureInstrumentation(TTaskInstrumentationSetup& setup) override;
+    bool RebindPort(const TPortRebind& rebind) override;
     bool WantsInput(const TTaskEdge& edge) const noexcept override;
     bool TryNotifyDependency() noexcept override;
 
@@ -199,6 +201,7 @@ public:
 
     ETaskResult Execute() override;
     void ConfigureInstrumentation(TTaskInstrumentationSetup& setup) override;
+    bool RebindPort(const TPortRebind& rebind) override;
 
     const std::shared_ptr<const TUnaryCode>& Code() const;
     const std::shared_ptr<void>& State() const;
@@ -224,6 +227,7 @@ public:
 
     ETaskResult Execute() override;
     void ConfigureInstrumentation(TTaskInstrumentationSetup& setup) override;
+    bool RebindPort(const TPortRebind& rebind) override;
 
     // Only for a task built with empty code (a remote sink), before it is scheduled.
     void BindCode(std::shared_ptr<const TSinkCode> code, std::shared_ptr<void> state);
@@ -251,6 +255,7 @@ public:
 
     ETaskResult Execute() override;
     void ConfigureInstrumentation(TTaskInstrumentationSetup& setup) override;
+    bool RebindPort(const TPortRebind& rebind) override;
 
 private:
     std::shared_ptr<const TBlockingCode> Code_;
@@ -274,6 +279,7 @@ public:
 
     ETaskResult Execute() override;
     void ConfigureInstrumentation(TTaskInstrumentationSetup& setup) override;
+    bool RebindPort(const TPortRebind& rebind) override;
     bool WantsInput(const TTaskEdge& edge) const noexcept override;
 
 private:
@@ -299,6 +305,7 @@ public:
 
     ETaskResult Execute() override;
     void ConfigureInstrumentation(TTaskInstrumentationSetup& setup) override;
+    bool RebindPort(const TPortRebind& rebind) override;
 
 private:
     std::shared_ptr<const TMergeCode> Code_;
@@ -321,6 +328,7 @@ public:
 
     ETaskResult Execute() override;
     void ConfigureInstrumentation(TTaskInstrumentationSetup& setup) override;
+    bool RebindPort(const TPortRebind& rebind) override;
 
 private:
     struct TBufferedBatch;

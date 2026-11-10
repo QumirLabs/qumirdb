@@ -7,6 +7,7 @@ namespace NScheduler {
 
 class TTaskInstrumentationSetup;
 struct TTaskEdge; // graph.h
+struct TPortRebind; // port.h
 
 enum class ETaskResult {
     OK = 0,
@@ -38,6 +39,11 @@ public:
     virtual bool WantsInput(const TTaskEdge&) const noexcept { return true; }
     // Dependency edges signal publication, not every rowset produced upstream.
     virtual bool TryNotifyDependency() noexcept { return true; }
+    // Moves the one port `rebind` matches, before the task runs; false if none
+    // matches. TTaskGraph::Apply uses it to cut an edge.
+    virtual bool RebindPort(const TPortRebind&) {
+        return false;
+    }
 };
 
 struct TSchedulerRunStats {

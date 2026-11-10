@@ -1306,5 +1306,39 @@ void THashShuffleTask::ConfigureInstrumentation(TTaskInstrumentationSetup& setup
     ResourceInstrumentation_->Counters = &setup.Counters();
 }
 
+bool TSourceTask::RebindPort(const TPortRebind& rebind) {
+    return rebind.Apply(Output_);
+}
+
+bool TRuntimeFilterTask::RebindPort(const TPortRebind& rebind) {
+    return rebind.Apply(Input_) || rebind.Apply(Output_);
+}
+
+bool TUnaryTask::RebindPort(const TPortRebind& rebind) {
+    return rebind.Apply(Input_) || rebind.Apply(Output_);
+}
+
+bool TSinkTask::RebindPort(const TPortRebind& rebind) {
+    return rebind.Apply(Input_);
+}
+
+bool TBlockingTask::RebindPort(const TPortRebind& rebind) {
+    return rebind.Apply(Input_) || rebind.Apply(Output_);
+}
+
+bool TBinaryBlockingTask::RebindPort(const TPortRebind& rebind) {
+    return rebind.Apply(Left_) || rebind.Apply(Right_) || rebind.Apply(Output_);
+}
+
+bool TMergeTask::RebindPort(const TPortRebind& rebind) {
+    return std::ranges::any_of(Inputs_, [&](auto& input) { return rebind.Apply(input); })
+        || rebind.Apply(Output_);
+}
+
+bool THashShuffleTask::RebindPort(const TPortRebind& rebind) {
+    return rebind.Apply(Input_)
+        || std::ranges::any_of(Outputs_, [&](auto& output) { return rebind.Apply(output); });
+}
+
 } // namespace NScheduler
 } // namespace NQdb
