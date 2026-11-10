@@ -50,6 +50,10 @@ bool TSingleThreadedScheduler::Run(std::string* error) {
         Ready_.pop_front();
         Scheduled_.erase(node);
         ++Stats_.Popped;
+        // Abandoned while queued: no consumer needs its output.
+        if (node->Retired.load(std::memory_order_acquire)) {
+            continue;
+        }
 
         ETaskResult state;
         try {
@@ -75,6 +79,7 @@ bool TSingleThreadedScheduler::Run(std::string* error) {
                 ++Stats_.Finished;
                 node->State.store(
                     ETaskState::Finished, std::memory_order_release);
+                Retire(*node);
                 if (IsRoot(*node)) {
                     --unfinishedRoots;
                 }
@@ -94,8 +99,9 @@ bool TSingleThreadedScheduler::Run(std::string* error) {
 }
 
 void TSingleThreadedScheduler::Schedule(TTaskNode* node) {
+    // A retired node is finished or abandoned.
     if (!node || Scheduled_.contains(node)
-        || node->State.load(std::memory_order_acquire) == ETaskState::Finished) {
+        || node->Retired.load(std::memory_order_acquire)) {
         return;
     }
     Ready_.push_back(node);

@@ -172,10 +172,29 @@ std::vector<std::vector<TTaskNode*>> GroupByColor(
     return graphs;
 }
 
+// `node` reads no more input: abandons each producer it was the last live consumer of.
+void ReleaseProducers(const TTaskNode& node) {
+    for (auto* edge : node.Inbound) {
+        auto& producer = *edge->Src;
+        if (producer.LiveConsumers.fetch_sub(1, std::memory_order_acq_rel) == 1
+            && !IsRoot(producer)
+            && !producer.Retired.exchange(true, std::memory_order_acq_rel))
+        {
+            ReleaseProducers(producer);
+        }
+    }
+}
+
 } // namespace
 
 bool IsRoot(const TTaskNode& node) {
     return std::ranges::none_of(node.Outbound, IsRowsetEdge);
+}
+
+void Retire(TTaskNode& node) {
+    if (!node.Retired.exchange(true, std::memory_order_acq_rel)) {
+        ReleaseProducers(node);
+    }
 }
 
 TTaskNode& TTaskGraph::AddNode(ITask& task) {
@@ -281,6 +300,7 @@ void TTaskGraph::Build() {
         node->Inbound.clear();
         node->Outbound.clear();
         node->State.store(ETaskState::Idle, std::memory_order_release);
+        node->Retired.store(false, std::memory_order_release);
     }
 
     // Validate() and ExternalNode() rely on Externals_ being sorted by id.
@@ -292,6 +312,7 @@ void TTaskGraph::Build() {
     }
 
     for (auto& node : Nodes_) {
+        node->LiveConsumers.store(node->Outbound.size(), std::memory_order_release);
         if (std::ranges::none_of(node->Inbound, IsRowsetEdge)) {
             Leaves_.push_back(node.get());
         }

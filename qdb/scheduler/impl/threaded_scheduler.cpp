@@ -83,7 +83,8 @@ void TThreadedScheduler::Cancel() {
 }
 
 void TThreadedScheduler::Schedule(TTaskNode* node) {
-    if (!node) {
+    // A retired node is finished or abandoned; external wakes for it are dropped too.
+    if (!node || node->Retired.load(std::memory_order_acquire)) {
         return;
     }
 
@@ -205,12 +206,15 @@ void TThreadedScheduler::Work() {
             node = PopReady();
         }
 
-        // The last root may have finished while this node sat queued; abandon it
-        // rather than start (possibly heavy) upstream work no consumer needs, so
-        // cancellation after a satisfied LIMIT is prompt. Leaving it unrun is
-        // safe - the graph is being torn down.
+        // The last root may have finished while this node sat queued. Leaving it
+        // unrun is safe - the graph is being torn down.
         if (done()) {
             return;
+        }
+        // Abandoned while queued: no consumer needs its output, so it never runs,
+        // and a satisfied LIMIT stops its upstream promptly.
+        if (node->Retired.load(std::memory_order_acquire)) {
+            continue;
         }
 
         auto expected = ETaskState::Queued;
@@ -291,6 +295,7 @@ bool TThreadedScheduler::FinishRun(TTaskNode* node, ETaskState nextState) {
 void TThreadedScheduler::FinishNode(TTaskNode* node) {
     auto previous = node->State.exchange(ETaskState::Finished, std::memory_order_acq_rel);
     assert(previous == ETaskState::Running || previous == ETaskState::Reschedule);
+    Retire(*node);
     if (IsRoot(*node) && UnfinishedRoots_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
         // The last root is done: the graph's output is complete. Wake every worker
         // so they observe termination and exit instead of parking on the permit

@@ -771,6 +771,96 @@ TEST(SchedulerMultiRoot, LimitRootsFinishWhileAnotherRootKeepsReading) {
     }
 }
 
+// Root A is LIMIT 1 over a gather of a one-batch source and a task that reads an
+// endless source to the end, like an aggregation. Once the LIMIT finished, that
+// branch feeds nothing, so it must stop while root B still runs.
+TEST(SchedulerMultiRoot, BranchFeedingOnlyAFinishedRootStops) {
+    constexpr int batchesAfterA = 2000;
+    for (size_t workers : SchedulerWorkers) {
+        SCOPED_TRACE(workers);
+        TMultiRootGraph graph;
+        auto rootAFinished = std::make_shared<std::atomic<bool>>(false);
+        auto abandonedBatches = std::make_shared<std::atomic<int>>(0);
+        auto& gather = graph.Connect(std::make_unique<TGatherConnection>());
+        gather.Resize(2, 1);
+        auto& endless = graph.Connect(std::make_unique<TOneToOneConnection>());
+        auto& limited = graph.Connect(std::make_unique<TOneToOneConnection>());
+        auto& chain = graph.Connect(std::make_unique<TOneToOneConnection>());
+
+        // Counts the batches it makes after root A finished.
+        auto endlessCode = std::make_shared<TSourceCode>(
+            [destroyCount = graph.DestroyCount, rootAFinished, abandonedBatches](void*, TRowSet& rowSet) {
+                if (rootAFinished->load()) {
+                    abandonedBatches->fetch_add(1);
+                }
+                rowSet = MakeRowSet(1, destroyCount.get());
+                return ETaskResult::OK;
+            });
+        auto drainCode = std::make_shared<TBlockingCode>(
+            [](ITaskState&, TInputPort& input, TRowSet&) {
+                TRowSet rowSet{};
+                for (;;) {
+                    const auto fetch = input.Fetch(rowSet);
+                    if (fetch == EFetchResult::NO_DATA) {
+                        return ETaskResult::NEED_DATA;
+                    }
+                    if (fetch == EFetchResult::FINISHED) {
+                        return ETaskResult::FINISHED;
+                    }
+                    Release(&rowSet);
+                }
+            });
+        auto& endlessSource = graph.Graph->AddOwnedNode(std::make_unique<TSourceTask>(
+            endlessCode, nullptr, TOutputPort{.Connection = &endless}));
+        auto& drain = graph.Graph->AddOwnedNode(std::make_unique<TBlockingTask>(
+            drainCode,
+            std::make_shared<ITaskState>(),
+            TInputPort{.Connection = &endless},
+            TOutputPort{.Connection = &gather, .Lane = 1}));
+        graph.Graph->AddEdge(endlessSource, drain, endless);
+        auto& limit = graph.AddLimit(graph.AddSource(gather, 1), gather, 0, limited, 1);
+        graph.Graph->AddEdge(drain, limit, gather, 1, 0);
+
+        auto rootA = std::make_shared<TSinkState>();
+        auto rootACode = std::make_shared<TSinkCode>(
+            [](void* raw, const TRowSet& rowSet) {
+                auto* sink = static_cast<TSinkState*>(raw);
+                sink->Rows += static_cast<int>(rowSet.RowCount);
+                ++sink->Batches;
+                return ETaskResult::OK;
+            },
+            [rootAFinished](void*) {
+                rootAFinished->store(true);
+                return ETaskResult::OK;
+            });
+        auto& rootANode = graph.Graph->AddOwnedNode(std::make_unique<TSinkTask>(
+            rootACode, rootA, TInputPort{.Connection = &limited}));
+        graph.Graph->AddEdge(limit, rootANode, limited);
+
+        // Root B runs on for `batchesAfterA` batches after root A finished.
+        auto chainCode = std::make_shared<TSourceCode>(
+            [destroyCount = graph.DestroyCount, rootAFinished](void* raw, TRowSet& rowSet) {
+                auto* source = static_cast<TSourceState*>(raw);
+                if (rootAFinished->load() && ++source->Next > batchesAfterA) {
+                    return ETaskResult::FINISHED;
+                }
+                rowSet = MakeRowSet(1, destroyCount.get());
+                return ETaskResult::OK;
+            });
+        auto& chainSource = graph.Graph->AddOwnedNode(std::make_unique<TSourceTask>(
+            chainCode, std::make_shared<TSourceState>(), TOutputPort{.Connection = &chain}));
+        const auto rootB = graph.AddSink(chainSource, chain);
+
+        std::string error;
+        ASSERT_TRUE(graph.Run(workers, error)) << error;
+        EXPECT_EQ(rootA->Batches, 1);
+        EXPECT_EQ(rootA->Rows, 1);
+        EXPECT_GE(rootB->Batches, batchesAfterA);
+        // At most one batch that was already in flight when its branch was abandoned.
+        EXPECT_LE(abandonedBatches->load(), 1);
+    }
+}
+
 TEST(SchedulerMultiRoot, ErrorInOneBranchFailsTheRun) {
     for (size_t workers : SchedulerWorkers) {
         SCOPED_TRACE(workers);
