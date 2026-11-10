@@ -141,6 +141,11 @@ Every connection is made of bounded rowset queues plus finish state. The graph
 stores edges with `(connection, srcLane, dstLane)` so diagnostics can print the
 same logical connection between multiple task pairs.
 
+Finish goes downstream; closing goes upstream. When a task finishes, the
+scheduler closes the lanes it read. A broadcast then feeds only its open lanes,
+so a consumer that stopped early, such as a satisfied LIMIT, does not block the
+others. A lane with one consumer stays as it is, and its producer parks.
+
 ## Compiled Kernels
 
 A hash kernel writes `hashes[i]` only for rows in `TRowSet::Selection`. The slot

@@ -89,6 +89,7 @@ public:
     void Finish(size_t srcId) override;
 
     EFetchResult Fetch(size_t dstId, TRowSet& rowSet) override;
+    void Close(size_t dstId) override;
 
     size_t Capacity() const;
 

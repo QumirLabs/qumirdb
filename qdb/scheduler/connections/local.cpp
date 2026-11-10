@@ -44,6 +44,7 @@ struct TConnectionLane {
 
     TSPSC<TRowSet> Queue;
     std::atomic<bool> Finished = false;
+    std::atomic<bool> Closed = false;
 };
 
 bool TLocalConnection::LaneCanPush(TConnectionLane& lane) const {
@@ -260,24 +261,31 @@ size_t TBroadcastConnection::DstCount() const {
 
 bool TBroadcastConnection::CanPush(size_t srcId) const {
     assert(srcId == 0);
+    // With every lane closed, block like a full lane: the producer parks instead
+    // of producing rows nobody reads.
+    bool open = false;
     for (const auto& lane : Lanes_) {
+        if (lane->Closed.load(std::memory_order_acquire)) {
+            continue;
+        }
+        open = true;
         if (!lane->Queue.CanPush()) {
             CountBlockedPush();
             return false;
         }
     }
-    return true;
+    if (!open) {
+        CountBlockedPush();
+    }
+    return open;
 }
 
 bool TBroadcastConnection::Push(size_t srcId, TRowSet&& rowSet) {
     assert(srcId == 0);
-    // All destination lanes must accept, so the rowset is replicated to each in
-    // lockstep; otherwise leave the rowset untouched for a retry.
-    for (const auto& lane : Lanes_) {
-        if (!lane->Queue.CanPush()) {
-            CountBlockedPush();
-            return false;
-        }
+    // All open destination lanes must accept, so the rowset is replicated to each
+    // in lockstep; otherwise leave the rowset untouched for a retry.
+    if (!CanPush(srcId)) {
+        return false;
     }
 
     auto moved = TakeRowSet(rowSet);
@@ -288,6 +296,10 @@ bool TBroadcastConnection::Push(size_t srcId, TRowSet&& rowSet) {
             delete p;
         });
     for (auto& lane : Lanes_) {
+        // Closed lanes get no copy; with none left, `input` releases the rowset.
+        if (lane->Closed.load(std::memory_order_acquire)) {
+            continue;
+        }
         auto* data = new TBroadcastRowSetData{input};
         TRowSet copy{
             .Columns = input->Columns,
@@ -329,6 +341,11 @@ EFetchResult TBroadcastConnection::Fetch(size_t dstId, TRowSet& rowSet) {
     }
     CountFinishedFetch();
     return EFetchResult::FINISHED;
+}
+
+void TBroadcastConnection::Close(size_t dstId) {
+    assert(dstId < Lanes_.size());
+    Lanes_[dstId]->Closed.store(true, std::memory_order_release);
 }
 
 } // namespace NScheduler

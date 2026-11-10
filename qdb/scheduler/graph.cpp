@@ -197,6 +197,14 @@ void Retire(TTaskNode& node) {
     }
 }
 
+void CloseInputs(const TTaskNode& node) {
+    for (const auto* edge : node.Inbound) {
+        if (IsRowsetEdge(edge)) {
+            edge->Connection->Close(edge->DstLane);
+        }
+    }
+}
+
 TTaskNode& TTaskGraph::AddNode(ITask& task) {
     CheckMutable();
     auto node = std::make_unique<TTaskNode>();

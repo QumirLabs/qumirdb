@@ -62,6 +62,10 @@ bool IsRoot(const TTaskNode& node);
 // all retired is abandoned, and so on upstream: nobody needs its output.
 void Retire(TTaskNode& node);
 
+// Closes the rowset lanes a finished node read, so their producers stop
+// feeding it (IConnection::Close).
+void CloseInputs(const TTaskNode& node);
+
 // A node woken from outside the graph (e.g. by a remote channel) under `Id`.
 struct TExternalNode {
     uint64_t Id = 0;
