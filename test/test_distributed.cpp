@@ -1498,6 +1498,34 @@ TEST(DistributedAllocation, ComputeActorReportsGraphsItCannotBuild) {
     cluster.Pump();
 }
 
+// Two relays in one fragment: the scheduler runs one root, so the start fails.
+TEST(DistributedAllocation, ComputeActorRejectsAGraphWithTwoRoots) {
+    using namespace NQdb::NScheduler;
+    auto spec = RelaySpec();
+    spec.Connections.push_back(spec.Connections[0]);
+    spec.Nodes.push_back({.DebugKind = "source", .Body = TRemoteSourceNode{.Out = {1, 0}}});
+    spec.Nodes.push_back({.DebugKind = "sink", .Body = TRemoteSinkNode{.In = {1, 0}}});
+    spec.Edges.push_back({.Src = 2, .Dst = 3, .Connection = 1});
+    spec.Externals.push_back({.Id = 3, .Node = 3});
+    spec.Externals.push_back({.Id = 4, .Node = 2});
+    auto endpoints = RelayEndpoints();
+    endpoints.push_back({.Id = 3, .Kind = ERemoteEndpointKind::Sink, .PeerTaskId = 4});
+    endpoints.push_back({.Id = 4, .Kind = ERemoteEndpointKind::Source, .PeerTaskId = 3});
+
+    auto resources = std::make_shared<TRuntimeResources>();
+    TTestCluster cluster;
+    int statuses = 0;
+    std::vector<std::string> errors;
+    const auto probe = cluster.Follower.Register(std::make_unique<TOrchestratorProbe>(statuses, errors));
+    const auto actor = cluster.Follower.Register(std::unique_ptr<IActor>(CreateComputeActor(resources)));
+    cluster.Follower.Send<TTaskGraphMessage>(probe, actor, GraphMessage(spec, endpoints));
+    cluster.Pump();
+    EXPECT_EQ(errors, std::vector<std::string>{"cannot start graph: compute actor runs only a graph with one root"});
+    EXPECT_EQ(statuses, 0);
+    cluster.Follower.Send<TPoison>(probe, actor, TPoison{});
+    cluster.Pump();
+}
+
 TEST(DistributedAllocation, ComputeActorReleasesItsCounterExactlyOnce) {
     auto resources = std::make_shared<TRuntimeResources>();
     {

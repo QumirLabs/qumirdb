@@ -339,6 +339,19 @@ TEST(SchedulerGraph, DependencyEdgeJoinsSubgraphs) {
     EXPECT_EQ(Graphs(sealed), (TGraphs{{&buildSink, &probeSink}}));
 }
 
+TEST(SchedulerGraph, NodeWithOnlyADependencyOutputIsARoot) {
+    TTaskGraph graph;
+    auto& build = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& probe = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& sink = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    graph.AddOwnedEdge(probe, sink, std::make_unique<TOneToOneConnection>());
+    graph.AddDependencyEdge(build, probe);
+    std::string error;
+    const auto sealed = graph.Seal(&error);
+    ASSERT_TRUE(sealed) << error;
+    EXPECT_EQ(Graphs(sealed), (TGraphs{{&build, &sink}}));
+}
+
 TEST(SchedulerGraph, RejectsCycleBesideAValidSubgraph) {
     TTaskGraph graph;
     auto& source = graph.AddOwnedNode(std::make_unique<TNoopTask>());
