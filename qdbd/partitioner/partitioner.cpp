@@ -1,11 +1,15 @@
 #include "partitioner.h"
-#include "qdb/scheduler/graph.h"
+#include "qdb/scheduler/tasks/runtime_adapter.h"
+
+#include <memory>
+#include <qdb/scheduler/connections/local.h>
 
 #include <algorithm>
 #include <limits>
 #include <queue>
 #include <stack>
 #include <set>
+#include <cassert>
 
 namespace NQdb {
 namespace NScheduler {
@@ -29,8 +33,62 @@ void TPartitioner::Do()
             }
         }
     }
+
+    Partition();
 }
 
+void TPartitioner::Partition()
+{
+    std::unordered_map<NScheduler::TOneToOneConnection*, std::vector<TTaskEdge*>> oneToOneConnections;
+    for (auto* edge : SplitEdges_) {
+        if (edge->Kind == ETaskEdgeKind::Dependency) {
+            // src -> [removeSinkProducer] :: [remoteSourceConsumer] -> dst
+            auto* dst = edge->Dst;
+            edge->Dst = nullptr; // TODO: should be removeSinkProducer
+
+            auto newEdge = std::make_unique<TTaskEdge>();
+            newEdge->Src = nullptr; // TODO: should be removeSinkConsumer
+            newEdge->Dst = dst;
+            // TODO: add newEdge to graph
+        } else if (auto oneToOne = dynamic_cast<NScheduler::TOneToOneConnection*>(edge->Connection)) {
+            // simple split
+            assert(edge->SrcLane == edge->DstLane);
+            oneToOneConnections[oneToOne].push_back(edge);
+        }
+    }
+
+    for (auto& [oneToOne, edges] : oneToOneConnections) {
+        // create new capacity=1 connection per split
+        for (auto* edge : edges) {
+            auto newConnection = std::make_unique<TOneToOneConnection>(1);
+            // 0 -> 0
+            // dst -> edge -> [remoteSink] :: [remoteSource] -> edge -> src
+            auto newEdge = std::make_unique<TTaskEdge>();
+            newEdge->SrcLane = 0;
+            newEdge->DstLane = 0;
+            newEdge->Dst = edge->Dst;
+            auto src = std::make_unique<TSourceTask>(nullptr, nullptr, TOutputPort {
+                .Connection = newConnection.get(),
+                .Lane = 0,
+                .Instrumentation = nullptr,
+            });
+            TTaskNode srcTask = TTaskNode {
+                .Task = src.get()
+            };
+            newEdge->Src = &srcTask;
+
+            auto dst = std::make_unique<TSinkTask>(nullptr, nullptr, TInputPort {
+                .Connection = oneToOne,
+                .Lane = edge->SrcLane,
+                .Instrumentation = nullptr
+            });
+            TTaskNode dstTask = TTaskNode {
+                .Task = dst.get()
+            };
+            edge->Dst = &dstTask;
+        }
+    }
+}
 
 void TPartitioner::Color()
 {
