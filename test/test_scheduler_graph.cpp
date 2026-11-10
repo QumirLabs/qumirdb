@@ -691,6 +691,114 @@ TEST(SchedulerGraph, ApplyRejectsInvalidPlans) {
     EXPECT_EQ(sink.Task.Inputs[0].Connection, &connection);
 }
 
+TEST(SchedulerGraph, ApplyRejectsTwoColorsInOnePiece) {
+    TTaskGraph graph;
+    auto& first = graph.AddConnection(std::make_unique<TOneToOneConnection>());
+    auto& second = graph.AddConnection(std::make_unique<TOneToOneConnection>());
+    auto source = AddPortsNode(graph, {}, {{.Connection = &first}, {.Connection = &second}});
+    auto root = AddPortsNode(graph, {{.Connection = &first}, {.Connection = &second}}, {});
+    auto& cut = graph.AddEdge(source.Node, root.Node, first);
+    graph.AddEdge(source.Node, root.Node, second);
+    std::string error;
+    ASSERT_TRUE(graph.Seal(&error)) << error;
+    // The uncut second path keeps the sink and the source in one piece.
+    EXPECT_EQ(
+        ApplyError(graph, Plan(Split(cut, EReboundPort::DestinationInput, 0, 1))),
+        "split plan gives one subgraph colors 0 and 1");
+}
+
+TEST(SchedulerGraph, ApplyRejectsAPieceWithoutColor) {
+    TTaskGraph graph;
+    auto& first = graph.AddConnection(std::make_unique<TOneToOneConnection>());
+    auto& second = graph.AddConnection(std::make_unique<TOneToOneConnection>());
+    auto source = AddPortsNode(graph, {}, {{.Connection = &first}});
+    auto root = AddPortsNode(graph, {{.Connection = &first}}, {});
+    auto other = AddPortsNode(graph, {}, {{.Connection = &second}});
+    auto otherRoot = AddPortsNode(graph, {{.Connection = &second}}, {});
+    auto& cut = graph.AddEdge(source.Node, root.Node, first);
+    graph.AddEdge(other.Node, otherRoot.Node, second);
+    std::string error;
+    ASSERT_TRUE(graph.Seal(&error)) << error;
+    EXPECT_EQ(
+        ApplyError(graph, Plan(Split(cut, EReboundPort::DestinationInput, 0, 1))),
+        "split plan leaves task n2 without a color");
+}
+
+TEST(SchedulerGraph, ApplyRejectsAPlanThatBreaksTheGraph) {
+    TTaskGraph graph;
+    auto& connection = graph.AddConnection(std::make_unique<TOneToOneConnection>());
+    auto source = AddPortsNode(graph, {}, {{.Connection = &connection}});
+    auto root = AddPortsNode(graph, {{.Connection = &connection}}, {});
+    auto& cut = graph.AddEdge(source.Node, root.Node, connection);
+    std::string error;
+    ASSERT_TRUE(graph.Seal(&error)) << error;
+    auto split = Split(cut, EReboundPort::DestinationInput, 0, 1);
+    split.NewConnection->Resize(0, 0);
+    EXPECT_EQ(
+        ApplyError(graph, Plan(std::move(split))),
+        "split plan breaks the task graph: task graph contains an invalid source lane id");
+}
+
+TEST(SchedulerGraph, ApplyRejectsAnIncompleteSplit) {
+    TTaskGraph graph;
+    auto& connection = graph.AddConnection(std::make_unique<TOneToOneConnection>());
+    auto source = AddPortsNode(graph, {}, {{.Connection = &connection}});
+    auto root = AddPortsNode(graph, {{.Connection = &connection}}, {});
+    auto& cut = graph.AddEdge(source.Node, root.Node, connection);
+    std::string error;
+    ASSERT_TRUE(graph.Seal(&error)) << error;
+    auto split = Split(cut, EReboundPort::DestinationInput, 0, 1);
+    split.SourceTask.reset();
+    EXPECT_EQ(ApplyError(graph, Plan(std::move(split))), "split plan has an incomplete split");
+}
+
+TEST(SchedulerGraph, ApplyRejectsColorsWithGaps) {
+    TTaskGraph graph;
+    auto& connection = graph.AddConnection(std::make_unique<TOneToOneConnection>());
+    auto source = AddPortsNode(graph, {}, {{.Connection = &connection}});
+    auto root = AddPortsNode(graph, {{.Connection = &connection}}, {});
+    auto& cut = graph.AddEdge(source.Node, root.Node, connection);
+    std::string error;
+    ASSERT_TRUE(graph.Seal(&error)) << error;
+    const auto gaps = "split plan colors must be 0..K-1 without gaps";
+    EXPECT_EQ(ApplyError(graph, Plan(Split(cut, EReboundPort::DestinationInput, 0, 2))), gaps);
+    EXPECT_EQ(ApplyError(graph, Plan(Split(cut, EReboundPort::DestinationInput, 1, 2))), gaps);
+    EXPECT_EQ(ApplyError(graph, Plan(Split(cut, EReboundPort::DestinationInput, -1, 0))), gaps);
+}
+
+TEST(SchedulerGraph, ApplyRejectsASecondSplit) {
+    TTaskGraph graph;
+    auto& connection = graph.AddConnection(std::make_unique<TOneToOneConnection>());
+    auto source = AddPortsNode(graph, {}, {{.Connection = &connection}});
+    auto root = AddPortsNode(graph, {{.Connection = &connection}}, {});
+    auto& cut = graph.AddEdge(source.Node, root.Node, connection);
+    std::string error;
+    ASSERT_TRUE(graph.Seal(&error)) << error;
+    graph.Apply(Plan(Split(cut, EReboundPort::DestinationInput, 0, 1)));
+    auto& again = *graph.Edges().front();
+    EXPECT_EQ(
+        ApplyError(graph, Plan(Split(again, EReboundPort::DestinationInput, 0, 1))),
+        "task graph is already split");
+    EXPECT_TRUE(graph.Apply({}));
+}
+
+TEST(SchedulerGraph, FailedApplyLeavesTheGraphDestroyable) {
+    TTaskGraph graph;
+    auto& first = graph.AddConnection(std::make_unique<TOneToOneConnection>());
+    auto& second = graph.AddConnection(std::make_unique<TOneToOneConnection>());
+    auto source = AddPortsNode(graph, {}, {{.Connection = &first}});
+    auto middle = AddPortsNode(graph, {{.Connection = &first}}, {{.Connection = &second}});
+    auto& sink = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    graph.AddEdge(source.Node, middle.Node, first);
+    auto& cut = graph.AddEdge(middle.Node, sink, second);
+    std::string error;
+    ASSERT_TRUE(graph.Seal(&error)) << error;
+    // The sink has no input port, so Apply throws after it has moved the kept edge.
+    EXPECT_EQ(
+        ApplyError(graph, Plan(Split(cut, EReboundPort::DestinationInput, 0, 1))),
+        "split plan: task n2 has no input port to rebind");
+}
+
 TEST(SchedulerGraph, SchedulersRejectFailedSeal) {
     TTaskGraph graph;
     const auto sealed = graph.Seal();

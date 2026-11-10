@@ -2856,7 +2856,7 @@ llvm::json::Object BuildBundle(
         }
         // The browser runs one result: the attached sink must be the only root.
         const auto graphs = sealed.Graphs();
-        if (graphs.size() != 1 || graphs.front().size() != 1) {
+        if (graphs.front().size() != 1) {
             typedExecPlan.reset();
             throw std::runtime_error("exported task graph must have one root, the sink");
         }

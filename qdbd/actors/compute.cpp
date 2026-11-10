@@ -191,7 +191,7 @@ struct TComputeActor : public IBehaviorActor {
             error = NScheduler::ValidateEndpoints(sealed, message.Endpoints);
         }
         // The scheduler runs one root, and its Run() error would not reach the query actor.
-        if (error.empty() && (sealed.Graphs().size() != 1 || sealed.Graphs().front().size() != 1)) {
+        if (error.empty() && sealed.Graphs().front().size() != 1) {
             error = "compute actor runs only a graph with one root";
         }
         if (!error.empty()) {

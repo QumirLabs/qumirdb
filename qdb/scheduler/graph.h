@@ -149,8 +149,9 @@ public:
     // Builds adjacency, validates and freezes the graph; empty on error.
     TSealedTaskGraph Seal(std::string* error = nullptr);
     // Cuts the plan's edges of a sealed graph and regroups it into one
-    // subgraph per color; earlier sealed views become invalid. Throws
-    // std::logic_error on a plan it cannot apply.
+    // subgraph per color; earlier sealed views become invalid. Colors must be
+    // 0..K-1; a graph is split once. Throws std::logic_error on a plan it
+    // cannot apply; after that the graph may only be destroyed.
     TSealedTaskGraph Apply(TSplitPlan&& plan);
     void SetConnectionStatsEnabled(bool enabled);
     void Print(std::ostream& out) const;
@@ -161,7 +162,7 @@ public:
     const std::vector<TTaskNode*>& Leaves() const;
     // The subgraphs, each given by its roots (nodes without a rowset output) in
     // ExecutionSlot order. Seal() makes one of all roots; Apply() makes one per
-    // color, in color order.
+    // color, so Graphs()[c] is the fragment of color c.
     const std::vector<std::vector<TTaskNode*>>& Graphs() const;
     // Owned connections in creation order.
     std::span<const std::unique_ptr<IConnection>> Connections() const;
@@ -182,6 +183,7 @@ private:
     std::vector<TExternalNode> Externals_;
     std::vector<std::vector<TTaskNode*>> Graphs_;
     bool Sealed_ = false;
+    bool Split_ = false;
 };
 
 } // namespace NScheduler

@@ -11,6 +11,7 @@
 #include <optional>
 #include <ostream>
 #include <ranges>
+#include <set>
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
@@ -318,6 +319,9 @@ TSealedTaskGraph TTaskGraph::Apply(TSplitPlan&& plan) {
     if (plan.Splits.empty()) {
         return TSealedTaskGraph(Graphs_, Nodes_.size(), Externals_);
     }
+    if (Split_) {
+        throw std::logic_error("task graph is already split");
+    }
     std::unordered_map<const TTaskEdge*, TEdgeSplit*> splits;
     for (auto& split : plan.Splits) {
         if (!split.Edge || !split.NewConnection || !split.SinkTask || !split.SourceTask) {
@@ -329,6 +333,14 @@ TSealedTaskGraph TTaskGraph::Apply(TSplitPlan&& plan) {
         if (!splits.emplace(split.Edge, &split).second) {
             throw std::logic_error("split plan cuts one edge twice");
         }
+    }
+    std::set<int> planColors;
+    for (const auto& split : plan.Splits) {
+        planColors.insert(split.SinkColor);
+        planColors.insert(split.SourceColor);
+    }
+    if (*planColors.begin() != 0 || *planColors.rbegin() != static_cast<int>(planColors.size()) - 1) {
+        throw std::logic_error("split plan colors must be 0..K-1 without gaps");
     }
     const auto known = std::ranges::count_if(Edges_, [&](const auto& edge) {
         return splits.contains(edge.get());
@@ -355,6 +367,7 @@ TSealedTaskGraph TTaskGraph::Apply(TSplitPlan&& plan) {
         throw std::logic_error("split plan breaks the task graph: " + error);
     }
     Graphs_ = GroupByColor(Nodes_, Edges_, colors);
+    Split_ = true;
     Sealed_ = true;
     return TSealedTaskGraph(Graphs_, Nodes_.size(), Externals_);
 }
@@ -429,10 +442,9 @@ bool TTaskGraph::Validate(std::string* error) const {
         }
     }
 
-    // A dependency edge must not turn a data-flow DAG into a scheduling
-    // cycle. In particular, a probe cannot gate its own build-side producer.
-    // An acyclic graph has a root downstream of every node, so a run that
-    // starts from the roots pulls every task.
+    // A dependency edge must not turn a data-flow DAG into a scheduling cycle
+    // (a probe cannot gate its own build-side producer). An acyclic graph has
+    // a root downstream of every node, so a run from the roots pulls every task.
     std::unordered_map<const TTaskNode*, size_t> pending;
     for (const auto& node : Nodes_) {
         pending.emplace(node.get(), node->Inbound.size());
