@@ -73,6 +73,7 @@ public:
 
     ETaskResult Execute() override;
     void ConfigureInstrumentation(TTaskInstrumentationSetup& setup) override;
+    bool RebindPort(const TPortRebind& rebind) override;
 
 private:
     std::shared_ptr<TCteSpool> Spool_;
@@ -94,6 +95,7 @@ public:
         TOutputPort consumers);
 
     ETaskResult Execute() override;
+    bool RebindPort(const TPortRebind& rebind) override;
 
 private:
     std::shared_ptr<TCteSpool> Spool_;
@@ -113,6 +115,7 @@ public:
 
     ETaskResult Execute() override;
     void ConfigureInstrumentation(TTaskInstrumentationSetup& setup) override;
+    bool RebindPort(const TPortRebind& rebind) override;
 
 private:
     std::shared_ptr<TCteConsumerState> State_;

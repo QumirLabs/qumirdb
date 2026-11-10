@@ -57,17 +57,40 @@ struct TExternalNode {
     TTaskNode* Node = nullptr;
 };
 
-// A validated, frozen graph; only TTaskGraph::Seal() makes a non-empty one.
+// The side of a cut edge whose port moves to the new 1->1 connection: Dst's
+// input for a one-to-one or broadcast cut, Src's output for a gather cut, so
+// the gather keeps all its producer lanes.
+enum class EReboundPort { SourceOutput, DestinationInput };
+
+// Cuts one rowset edge into Src -> SinkTask and SourceTask -> Dst, the remote
+// sink in Src's color and the remote source in Dst's color. The placeholder
+// tasks come with unbound ports; Apply binds them to the new edges.
+struct TEdgeSplit {
+    TTaskEdge* Edge = nullptr;
+    EReboundPort ReboundPort = EReboundPort::DestinationInput;
+    int SinkColor = 0;
+    int SourceColor = 0;
+    std::unique_ptr<IConnection> NewConnection;
+    std::unique_ptr<ITask> SinkTask;
+    std::unique_ptr<ITask> SourceTask;
+};
+
+struct TSplitPlan {
+    std::vector<TEdgeSplit> Splits;
+};
+
+// A validated, frozen graph; only TTaskGraph::Seal() and Apply() make a non-empty one.
 class TSealedTaskGraph {
 public:
     TSealedTaskGraph() = default;
 
     explicit operator bool() const {
-        return Root_ != nullptr;
+        return !Graphs_.empty();
     }
 
-    TTaskNode& Root() const {
-        return *Root_;
+    // See TTaskGraph::Graphs().
+    std::span<const std::vector<TTaskNode*>> Graphs() const {
+        return Graphs_;
     }
 
     size_t TaskCount() const {
@@ -80,13 +103,16 @@ public:
 private:
     friend class TTaskGraph;
 
-    TSealedTaskGraph(TTaskNode& root, size_t taskCount, std::span<const TExternalNode> externals)
-        : Root_(&root)
+    TSealedTaskGraph(
+        std::span<const std::vector<TTaskNode*>> graphs,
+        size_t taskCount,
+        std::span<const TExternalNode> externals)
+        : Graphs_(graphs)
         , TaskCount_(taskCount)
         , Externals_(externals)
     {}
 
-    TTaskNode* Root_ = nullptr;
+    std::span<const std::vector<TTaskNode*>> Graphs_;
     size_t TaskCount_ = 0;
     // Sorted by Id.
     std::span<const TExternalNode> Externals_;
@@ -122,6 +148,10 @@ public:
 
     // Builds adjacency, validates and freezes the graph; empty on error.
     TSealedTaskGraph Seal(std::string* error = nullptr);
+    // Cuts the plan's edges of a sealed graph, once, into one subgraph per
+    // color (colors 0..K-1). Throws std::logic_error on a plan it cannot
+    // apply; after that the graph may only be destroyed.
+    TSealedTaskGraph Apply(TSplitPlan&& plan);
     void SetConnectionStatsEnabled(bool enabled);
     void Print(std::ostream& out) const;
     void PrintConnectionStats(std::ostream& out) const;
@@ -129,7 +159,10 @@ public:
     const std::vector<std::unique_ptr<TTaskNode>>& Nodes() const;
     const std::vector<std::unique_ptr<TTaskEdge>>& Edges() const;
     const std::vector<TTaskNode*>& Leaves() const;
-    TTaskNode* Root() const;
+    // The subgraphs, each given by its roots (nodes without a rowset output) in
+    // ExecutionSlot order. Seal() makes one of all roots; Apply() makes one per
+    // color, so Graphs()[c] is the fragment of color c.
+    const std::vector<std::vector<TTaskNode*>>& Graphs() const;
     // Owned connections in creation order.
     std::span<const std::unique_ptr<IConnection>> Connections() const;
     // Marked nodes; sorted by id once the graph is sealed.
@@ -147,8 +180,9 @@ private:
     std::vector<std::unique_ptr<TTaskEdge>> Edges_;
     std::vector<TTaskNode*> Leaves_;
     std::vector<TExternalNode> Externals_;
-    TTaskNode* Root_ = nullptr;
+    std::vector<std::vector<TTaskNode*>> Graphs_;
     bool Sealed_ = false;
+    bool Split_ = false;
 };
 
 } // namespace NScheduler

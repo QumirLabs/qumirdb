@@ -41,5 +41,23 @@ void TOutputPort::Finish() const {
     }
 }
 
+bool TPortRebind::Apply(TInputPort& port) const {
+    if (Kind != EPortKind::Input || port.Connection != From || port.Lane != FromLane) {
+        return false;
+    }
+    port.Connection = To;
+    port.Lane = ToLane;
+    return true;
+}
+
+bool TPortRebind::Apply(TOutputPort& port) const {
+    if (Kind != EPortKind::Output || port.Connection != From || port.Lane != FromLane) {
+        return false;
+    }
+    port.Connection = To;
+    port.Lane = ToLane;
+    return true;
+}
+
 } // namespace NScheduler
 } // namespace NQdb

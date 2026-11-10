@@ -30,13 +30,18 @@ bool TSingleThreadedScheduler::Run(std::string* error) {
         SetError(error, "single-threaded scheduler cannot run twice");
         return false;
     }
+    const auto graphs = Graph_.Graphs();
+    if (graphs.size() != 1 || graphs.front().size() != 1) {
+        SetError(error, "single-threaded scheduler runs only a graph with one root");
+        return false;
+    }
     HasRun_ = true;
 
     Ready_.clear();
     Scheduled_.clear();
     Stats_ = {};
     TExecutionContext context{.State = &Execution_};
-    Schedule(&Graph_.Root());
+    Schedule(graphs.front().front());
 
     while (!Ready_.empty()) {
         auto* node = Ready_.front();

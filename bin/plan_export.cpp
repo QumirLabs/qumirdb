@@ -1339,8 +1339,9 @@ llvm::json::Object GraphJson(
     std::vector<TGroup> groups;
     std::unordered_map<std::string, size_t> groupIndexes;
     std::unordered_map<const NQdb::NScheduler::TTaskNode*, std::string> nodeGroups;
-    // The sink is encoded as "result" below; the browser has its own.
-    const auto* sink = lowered.Graph->Root();
+    // The sink, the only root (checked after Seal), is encoded as "result"
+    // below; the browser has its own.
+    const auto* sink = lowered.Graph->Graphs().front().front();
     const auto& graphNodes = lowered.Graph->Nodes();
     nodeGroups.reserve(graphNodes.size());
     for (size_t i = 0; i < graphNodes.size(); ++i) {
@@ -2848,9 +2849,16 @@ llvm::json::Object BuildBundle(
         // Validate and freeze the same graph that native execution runs.
         NQdb::NScheduler::AttachSink(lowered, unusedSink);
         std::string sealError;
-        if (!lowered.Graph->Seal(&sealError)) {
+        const auto sealed = lowered.Graph->Seal(&sealError);
+        if (!sealed) {
             typedExecPlan.reset();
             throw std::runtime_error(sealError);
+        }
+        // The browser runs one result: the attached sink must be the only root.
+        const auto graphs = sealed.Graphs();
+        if (graphs.front().size() != 1) {
+            typedExecPlan.reset();
+            throw std::runtime_error("exported task graph must have one root, the sink");
         }
 
         // Wasm finalization: ast artifacts always, wasm in embed mode.

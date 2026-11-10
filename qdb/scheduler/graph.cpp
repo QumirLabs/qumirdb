@@ -1,11 +1,17 @@
 #include <qdb/scheduler/graph.h>
 
+#include <qdb/scheduler/port.h>
+
 #include <algorithm>
 #include <cassert>
 #include <deque>
 #include <format>
+#include <map>
+#include <numeric>
+#include <optional>
 #include <ostream>
 #include <ranges>
+#include <set>
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
@@ -36,6 +42,134 @@ const char* ConnectionKindName(EConnectionKind kind) {
             return "broadcast";
     }
     return "unknown";
+}
+
+void Rebind(TTaskNode& node, const TPortRebind& rebind) {
+    if (!node.Task->RebindPort(rebind)) {
+        throw std::logic_error(std::format(
+            "split plan: task n{} has no {} port to rebind",
+            node.ExecutionSlot,
+            rebind.Kind == EPortKind::Input ? "input" : "output"));
+    }
+}
+
+// Replaces split.Edge by Src -> remote sink and remote source -> Dst. Both
+// start as copies of it; the rebound side then uses lane 0 of the new connection.
+void Cut(
+    TTaskGraph& graph,
+    TEdgeSplit& split,
+    std::vector<std::unique_ptr<TTaskEdge>>& edges,
+    std::vector<std::optional<int>>& colors)
+{
+    const auto& edge = *split.Edge;
+    auto& connection = graph.AddConnection(std::move(split.NewConnection));
+    auto& sink = graph.AddOwnedNode(std::move(split.SinkTask));
+    sink.DebugKind = "remote-sink";
+    auto& source = graph.AddOwnedNode(std::move(split.SourceTask));
+    source.DebugKind = "remote-source";
+    colors.resize(graph.Nodes().size());
+    colors[sink.ExecutionSlot] = split.SinkColor;
+    colors[source.ExecutionSlot] = split.SourceColor;
+
+    auto sinkEdge = std::make_unique<TTaskEdge>(edge);
+    sinkEdge->Dst = &sink;
+    sinkEdge->ExecInput = 0;
+    auto sourceEdge = std::make_unique<TTaskEdge>(edge);
+    sourceEdge->Src = &source;
+    if (split.ReboundPort == EReboundPort::SourceOutput) {
+        Rebind(*edge.Src, {
+            .Kind = EPortKind::Output,
+            .From = edge.Connection,
+            .FromLane = edge.SrcLane,
+            .To = &connection,
+        });
+        sinkEdge->Connection = &connection;
+        sinkEdge->SrcLane = 0;
+        sinkEdge->DstLane = 0;
+    } else {
+        Rebind(*edge.Dst, {
+            .Kind = EPortKind::Input,
+            .From = edge.Connection,
+            .FromLane = edge.DstLane,
+            .To = &connection,
+        });
+        sourceEdge->Connection = &connection;
+        sourceEdge->SrcLane = 0;
+        sourceEdge->DstLane = 0;
+    }
+    Rebind(sink, {.Kind = EPortKind::Input, .To = sinkEdge->Connection, .ToLane = sinkEdge->DstLane});
+    Rebind(source, {.Kind = EPortKind::Output, .To = sourceEdge->Connection, .ToLane = sourceEdge->SrcLane});
+    edges.push_back(std::move(sinkEdge));
+    edges.push_back(std::move(sourceEdge));
+}
+
+// Union-find over rowset edges: each piece takes the color of its remote
+// sinks and sources. A dependency edge is a scheduling gate with no transport
+// between fragments yet, so it must stay within one color.
+std::vector<std::vector<TTaskNode*>> GroupByColor(
+    const std::vector<std::unique_ptr<TTaskNode>>& nodes,
+    const std::vector<std::unique_ptr<TTaskEdge>>& edges,
+    const std::vector<std::optional<int>>& colors)
+{
+    std::vector<size_t> parent(nodes.size());
+    std::iota(parent.begin(), parent.end(), size_t{0});
+    auto find = [&](size_t slot) {
+        while (parent[slot] != slot) {
+            parent[slot] = parent[parent[slot]];
+            slot = parent[slot];
+        }
+        return slot;
+    };
+    for (const auto& edge : edges) {
+        if (IsRowsetEdge(edge.get())) {
+            parent[find(edge->Src->ExecutionSlot)] = find(edge->Dst->ExecutionSlot);
+        }
+    }
+
+    std::vector<std::optional<int>> pieceColors(nodes.size());
+    for (size_t slot = 0; slot < colors.size(); ++slot) {
+        if (!colors[slot]) {
+            continue;
+        }
+        auto& pieceColor = pieceColors[find(slot)];
+        if (pieceColor && *pieceColor != *colors[slot]) {
+            throw std::logic_error(std::format(
+                "split plan gives one subgraph colors {} and {}", *pieceColor, *colors[slot]));
+        }
+        pieceColor = colors[slot];
+    }
+    auto colorOf = [&](const TTaskNode& node) {
+        const auto& color = pieceColors[find(node.ExecutionSlot)];
+        if (!color) {
+            throw std::logic_error(std::format(
+                "split plan leaves task n{} without a color", node.ExecutionSlot));
+        }
+        return *color;
+    };
+
+    for (const auto& edge : edges) {
+        if (!IsRowsetEdge(edge.get()) && colorOf(*edge->Src) != colorOf(*edge->Dst)) {
+            throw std::logic_error(std::format(
+                "split plan: dependency edge n{} -> n{} crosses colors {} and {}",
+                edge->Src->ExecutionSlot,
+                edge->Dst->ExecutionSlot,
+                colorOf(*edge->Src),
+                colorOf(*edge->Dst)));
+        }
+    }
+
+    std::map<int, std::vector<TTaskNode*>> roots;
+    for (const auto& node : nodes) {
+        const int color = colorOf(*node);
+        if (std::ranges::none_of(node->Outbound, IsRowsetEdge)) {
+            roots[color].push_back(node.get());
+        }
+    }
+    std::vector<std::vector<TTaskNode*>> graphs;
+    for (auto& [color, colorRoots] : roots) {
+        graphs.push_back(std::move(colorRoots));
+    }
+    return graphs;
 }
 
 } // namespace
@@ -138,7 +272,6 @@ TTaskEdge& TTaskGraph::AddDependencyEdge(
 
 void TTaskGraph::Build() {
     Leaves_.clear();
-    Root_ = nullptr;
 
     for (auto& node : Nodes_) {
         node->Inbound.clear();
@@ -158,9 +291,6 @@ void TTaskGraph::Build() {
         if (std::ranges::none_of(node->Inbound, IsRowsetEdge)) {
             Leaves_.push_back(node.get());
         }
-        if (std::ranges::none_of(node->Outbound, IsRowsetEdge)) {
-            Root_ = node.get();
-        }
     }
 }
 
@@ -170,9 +300,76 @@ TSealedTaskGraph TTaskGraph::Seal(std::string* error) {
         if (!Validate(error)) {
             return {};
         }
+        // One subgraph of all roots; only Apply() splits it.
+        Graphs_.assign(1, {});
+        for (const auto& node : Nodes_) {
+            if (std::ranges::none_of(node->Outbound, IsRowsetEdge)) {
+                Graphs_.front().push_back(node.get());
+            }
+        }
         Sealed_ = true;
     }
-    return TSealedTaskGraph(*Root_, Nodes_.size(), Externals_);
+    return TSealedTaskGraph(Graphs_, Nodes_.size(), Externals_);
+}
+
+TSealedTaskGraph TTaskGraph::Apply(TSplitPlan&& plan) {
+    if (!Sealed_) {
+        throw std::logic_error("split plan applies only to a sealed task graph");
+    }
+    if (plan.Splits.empty()) {
+        return TSealedTaskGraph(Graphs_, Nodes_.size(), Externals_);
+    }
+    if (Split_) {
+        throw std::logic_error("task graph is already split");
+    }
+    std::unordered_map<const TTaskEdge*, TEdgeSplit*> splits;
+    for (auto& split : plan.Splits) {
+        if (!split.Edge || !split.NewConnection || !split.SinkTask || !split.SourceTask) {
+            throw std::logic_error("split plan has an incomplete split");
+        }
+        if (!IsRowsetEdge(split.Edge)) {
+            throw std::logic_error("split plan cuts a dependency edge");
+        }
+        if (!splits.emplace(split.Edge, &split).second) {
+            throw std::logic_error("split plan cuts one edge twice");
+        }
+    }
+    std::set<int> planColors;
+    for (const auto& split : plan.Splits) {
+        planColors.insert(split.SinkColor);
+        planColors.insert(split.SourceColor);
+    }
+    if (*planColors.begin() != 0 || *planColors.rbegin() != static_cast<int>(planColors.size()) - 1) {
+        throw std::logic_error("split plan colors must be 0..K-1 without gaps");
+    }
+    const auto known = std::ranges::count_if(Edges_, [&](const auto& edge) {
+        return splits.contains(edge.get());
+    });
+    if (static_cast<size_t>(known) != splits.size()) {
+        throw std::logic_error("split plan cuts an edge of another task graph");
+    }
+
+    Sealed_ = false;
+    std::vector<std::optional<int>> colors(Nodes_.size());
+    std::vector<std::unique_ptr<TTaskEdge>> edges;
+    edges.reserve(Edges_.size() + splits.size());
+    for (auto& edge : Edges_) {
+        if (auto it = splits.find(edge.get()); it != splits.end()) {
+            Cut(*this, *it->second, edges, colors);
+        } else {
+            edges.push_back(std::move(edge));
+        }
+    }
+    Edges_ = std::move(edges);
+    Build();
+    std::string error;
+    if (!Validate(&error)) {
+        throw std::logic_error("split plan breaks the task graph: " + error);
+    }
+    Graphs_ = GroupByColor(Nodes_, Edges_, colors);
+    Split_ = true;
+    Sealed_ = true;
+    return TSealedTaskGraph(Graphs_, Nodes_.size(), Externals_);
 }
 
 void TTaskGraph::CheckMutable() const {
@@ -189,7 +386,6 @@ bool TTaskGraph::Validate(std::string* error) const {
 
     std::unordered_set<const TTaskNode*> nodes;
     nodes.reserve(Nodes_.size());
-    size_t rootCount = 0;
     size_t leafCount = 0;
     for (auto& node : Nodes_) {
         if (!node->Task) {
@@ -199,9 +395,6 @@ bool TTaskGraph::Validate(std::string* error) const {
         nodes.insert(node.get());
         if (std::ranges::none_of(node->Inbound, IsRowsetEdge)) {
             ++leafCount;
-        }
-        if (std::ranges::none_of(node->Outbound, IsRowsetEdge)) {
-            ++rootCount;
         }
     }
 
@@ -216,11 +409,6 @@ bool TTaskGraph::Validate(std::string* error) const {
 
     if (leafCount == 0) {
         SetError(error, "task graph has no source leaf");
-        return false;
-    }
-    if (rootCount != 1) {
-        SetError(error, std::format(
-            "task graph must have exactly one root, got {}", rootCount));
         return false;
     }
 
@@ -254,8 +442,9 @@ bool TTaskGraph::Validate(std::string* error) const {
         }
     }
 
-    // A dependency edge must not turn a data-flow DAG into a scheduling
-    // cycle. In particular, a probe cannot gate its own build-side producer.
+    // A dependency edge must not turn a data-flow DAG into a scheduling cycle
+    // (a probe cannot gate its own build-side producer). An acyclic graph has
+    // a root downstream of every node, so a run from the roots pulls every task.
     std::unordered_map<const TTaskNode*, size_t> pending;
     for (const auto& node : Nodes_) {
         pending.emplace(node.get(), node->Inbound.size());
@@ -279,27 +468,6 @@ bool TTaskGraph::Validate(std::string* error) const {
     }
     if (visited != Nodes_.size()) {
         SetError(error, "task graph contains a scheduling cycle");
-        return false;
-    }
-
-    // The threaded scheduler stops once the single root (sink) is Finished, so
-    // every node must be an ancestor of the root; an orphan branch would be
-    // silently abandoned. (Guaranteed for an acyclic single-root graph, but a
-    // cycle disconnected from the root would slip past the root-count check.)
-    std::unordered_set<const TTaskNode*> reaches;
-    std::vector<const TTaskNode*> stack{Root_};
-    reaches.insert(Root_);
-    while (!stack.empty()) {
-        const auto* node = stack.back();
-        stack.pop_back();
-        for (const auto* edge : node->Inbound) {
-            if (reaches.insert(edge->Src).second) {
-                stack.push_back(edge->Src);
-            }
-        }
-    }
-    if (reaches.size() != Nodes_.size()) {
-        SetError(error, "task graph has nodes that cannot reach the root");
         return false;
     }
 
@@ -333,8 +501,12 @@ void TTaskGraph::Print(std::ostream& out) const {
         out << " n" << nodeIds[leaf];
     }
     out << "\n";
-    if (Root_) {
-        out << "root: n" << nodeIds[Root_] << "\n";
+    for (size_t i = 0; i < Graphs_.size(); ++i) {
+        out << "graph g" << i << " roots:";
+        for (auto* root : Graphs_[i]) {
+            out << " n" << nodeIds[root];
+        }
+        out << "\n";
     }
 
     for (size_t i = 0; i < OwnedConnections_.size(); ++i) {
@@ -410,8 +582,8 @@ const std::vector<TTaskNode*>& TTaskGraph::Leaves() const {
     return Leaves_;
 }
 
-TTaskNode* TTaskGraph::Root() const {
-    return Root_;
+const std::vector<std::vector<TTaskNode*>>& TTaskGraph::Graphs() const {
+    return Graphs_;
 }
 
 } // namespace NScheduler

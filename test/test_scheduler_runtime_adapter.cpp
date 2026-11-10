@@ -7,6 +7,8 @@
 #include <qdb/scheduler/connection.h>
 #include <qdb/scheduler/connections/local.h>
 #include <qdb/scheduler/graph.h>
+#include <qdb/scheduler/port.h>
+#include <qdb/scheduler/tasks/cte_spool.h>
 #include <qdb/scheduler/tasks/runtime_adapter.h>
 #include <qdb/scheduler/impl/single_threaded_scheduler.h>
 #include <qdb/scheduler/impl/threaded_scheduler.h>
@@ -1659,6 +1661,56 @@ TEST(SchedulerRuntimeAdapter, HashShuffleTreatsFullSelectionAsNoSelection) {
         EXPECT_EQ(odd.Values, (std::vector<int64_t>{3, 5})) << withSelection;
         EXPECT_EQ(odd.Hashes, (std::vector<uint64_t>{3, 5})) << withSelection;
     }
+}
+
+// The port of `kind` on {from, lane} moves away once and then moves back.
+void ExpectRebinds(ITask& task, EPortKind kind, IConnection& from, size_t lane) {
+    TOneToOneConnection other;
+    const TPortRebind away{.Kind = kind, .From = &from, .FromLane = lane, .To = &other};
+    EXPECT_TRUE(task.RebindPort(away));
+    EXPECT_FALSE(task.RebindPort(away));
+    EXPECT_TRUE(task.RebindPort({.Kind = kind, .From = &other, .To = &from, .ToLane = lane}));
+}
+
+TEST(SchedulerRuntimeAdapter, TasksRebindOnlyTheMatchingPort) {
+    TOneToOneConnection in;
+    in.Resize(2, 2);
+    TOneToOneConnection out;
+    out.Resize(2, 2);
+    const TInputPort in0{.Connection = &in, .Lane = 0};
+    const TInputPort in1{.Connection = &in, .Lane = 1};
+    const TOutputPort out0{.Connection = &out, .Lane = 0};
+    const TOutputPort out1{.Connection = &out, .Lane = 1};
+
+    TSourceTask source(nullptr, nullptr, out0);
+    ExpectRebinds(source, EPortKind::Output, out, 0);
+    EXPECT_FALSE(source.RebindPort({.Kind = EPortKind::Input, .From = &out, .To = &in}));
+    TSinkTask sink(nullptr, nullptr, in0);
+    ExpectRebinds(sink, EPortKind::Input, in, 0);
+    EXPECT_FALSE(sink.RebindPort({.Kind = EPortKind::Input, .From = &in, .FromLane = 1, .To = &out}));
+
+    TUnaryTask unary(nullptr, nullptr, in0, out0);
+    TRuntimeFilterTask filter(nullptr, in0, out0);
+    TBlockingTask blocking(nullptr, nullptr, in0, out0);
+    TCteProducerTask producer(nullptr, 0, in0, out0);
+    TCtePublishTask publish(nullptr, in0, out0);
+    TCteConsumerTask consumer(nullptr, in0, out0);
+    const std::vector<ITask*> singlePortTasks = {&unary, &filter, &blocking, &producer, &publish, &consumer};
+    for (auto* task : singlePortTasks) {
+        ExpectRebinds(*task, EPortKind::Input, in, 0);
+        ExpectRebinds(*task, EPortKind::Output, out, 0);
+    }
+
+    TBinaryBlockingTask binary(nullptr, nullptr, in0, in1, out0);
+    ExpectRebinds(binary, EPortKind::Input, in, 0);
+    ExpectRebinds(binary, EPortKind::Input, in, 1);
+    ExpectRebinds(binary, EPortKind::Output, out, 0);
+    TMergeTask merge(nullptr, nullptr, {in0, in1}, out0);
+    ExpectRebinds(merge, EPortKind::Input, in, 1);
+    ExpectRebinds(merge, EPortKind::Output, out, 0);
+    THashShuffleTask shuffle(nullptr, in0, {out0, out1});
+    ExpectRebinds(shuffle, EPortKind::Input, in, 0);
+    ExpectRebinds(shuffle, EPortKind::Output, out, 1);
 }
 
 // One runtime filter task between two connections. The filter holds 0, the

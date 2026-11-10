@@ -5,11 +5,17 @@
 #include <qdb/scheduler/graph.h>
 #include <qdb/scheduler/impl/single_threaded_scheduler.h>
 #include <qdb/scheduler/impl/threaded_scheduler.h>
+#include <qdb/scheduler/port.h>
+#include <qdb/scheduler/tasks/runtime_adapter.h>
 
+#include <algorithm>
+#include <deque>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <tuple>
+#include <vector>
 
 using namespace NQdb::NScheduler;
 
@@ -103,6 +109,12 @@ public:
     }
 };
 
+using TGraphs = std::vector<std::vector<TTaskNode*>>;
+
+TGraphs Graphs(const TSealedTaskGraph& sealed) {
+    return {sealed.Graphs().begin(), sealed.Graphs().end()};
+}
+
 void CheckControlDependency(bool threaded) {
     TTaskGraph graph;
     auto& build = graph.AddOwnedNode(std::make_unique<TNoopTask>());
@@ -142,7 +154,7 @@ TEST(SchedulerGraph, BuildsAdjacencyAndValidates) {
     EXPECT_EQ(graph.Seal(&error).TaskCount(), 2u) << error;
     ASSERT_EQ(graph.Leaves().size(), 1u);
     EXPECT_EQ(graph.Leaves()[0], &source);
-    EXPECT_EQ(graph.Root(), &sink);
+    EXPECT_EQ(graph.Graphs(), TGraphs{{&sink}});
     EXPECT_EQ(source.Outbound.size(), 1u);
     EXPECT_EQ(sink.Inbound.size(), 1u);
 }
@@ -262,7 +274,7 @@ TEST(SchedulerGraph, RepeatedSealPreservesTaskState) {
 
     const auto sealed = graph.Seal();
     ASSERT_TRUE(sealed);
-    EXPECT_EQ(&sealed.Root(), &root);
+    EXPECT_EQ(Graphs(sealed), TGraphs{{&root}});
     EXPECT_EQ(sealed.TaskCount(), 1u);
     EXPECT_EQ(root.State.load(), ETaskState::Finished);
 }
@@ -270,15 +282,521 @@ TEST(SchedulerGraph, RepeatedSealPreservesTaskState) {
 TEST(SchedulerGraph, FailedSealDoesNotFreezeStructure) {
     TNoopTask task;
     TTaskGraph graph;
-    auto& source = graph.AddNode(task);
-    auto& sink = graph.AddNode(task);
     EXPECT_FALSE(graph.Seal());
 
+    auto& source = graph.AddNode(task);
+    auto& sink = graph.AddNode(task);
     graph.AddOwnedEdge(source, sink, std::make_unique<TOneToOneConnection>());
     const auto sealed = graph.Seal();
     ASSERT_TRUE(sealed);
-    EXPECT_EQ(&sealed.Root(), &sink);
+    EXPECT_EQ(Graphs(sealed), TGraphs{{&sink}});
     EXPECT_EQ(sealed.TaskCount(), 2u);
+}
+
+TEST(SchedulerGraph, SealPutsEveryRootIntoOneGraph) {
+    TTaskGraph graph;
+    auto& firstSource = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& secondSource = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& secondSink = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& firstSink = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& lonely = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    graph.AddOwnedEdge(firstSource, firstSink, std::make_unique<TOneToOneConnection>());
+    graph.AddOwnedEdge(secondSource, secondSink, std::make_unique<TOneToOneConnection>());
+    std::string error;
+    const auto sealed = graph.Seal(&error);
+    ASSERT_TRUE(sealed) << error;
+    EXPECT_EQ(Graphs(sealed), (TGraphs{{&secondSink, &firstSink, &lonely}}));
+    // A view of the graph's own lists.
+    EXPECT_EQ(sealed.Graphs().data(), graph.Graphs().data());
+
+    std::stringstream out;
+    graph.Print(out);
+    EXPECT_NE(out.str().find("graph g0 roots: n2 n3 n4\n"), std::string::npos);
+}
+
+TEST(SchedulerGraph, NodeWithOnlyADependencyOutputIsARoot) {
+    TTaskGraph graph;
+    auto& build = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& probe = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& sink = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    graph.AddOwnedEdge(probe, sink, std::make_unique<TOneToOneConnection>());
+    graph.AddDependencyEdge(build, probe);
+    std::string error;
+    const auto sealed = graph.Seal(&error);
+    ASSERT_TRUE(sealed) << error;
+    EXPECT_EQ(Graphs(sealed), (TGraphs{{&build, &sink}}));
+}
+
+TEST(SchedulerGraph, RejectsCycleBesideAValidSubgraph) {
+    TTaskGraph graph;
+    auto& source = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& sink = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& left = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& right = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    graph.AddOwnedEdge(source, sink, std::make_unique<TOneToOneConnection>());
+    graph.AddOwnedEdge(left, right, std::make_unique<TOneToOneConnection>());
+    graph.AddOwnedEdge(right, left, std::make_unique<TOneToOneConnection>());
+    std::string error;
+    EXPECT_FALSE(graph.Seal(&error));
+    EXPECT_NE(error.find("scheduling cycle"), std::string::npos);
+}
+
+TEST(SchedulerGraph, SchedulersRunOnlyOneRoot) {
+    TTaskGraph graph;
+    graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    const auto sealed = graph.Seal();
+    ASSERT_TRUE(sealed);
+    std::string error;
+    EXPECT_FALSE(TSingleThreadedScheduler(sealed).Run(&error));
+    EXPECT_EQ(error, "single-threaded scheduler runs only a graph with one root");
+    EXPECT_FALSE(TThreadedScheduler(sealed, 2).Run(&error));
+    EXPECT_EQ(error, "threaded scheduler runs only a graph with one root");
+}
+
+// Holds plain ports for Apply to rebind; never runs.
+class TPortsTask : public ITask {
+public:
+    ETaskResult Execute() override {
+        ADD_FAILURE() << "split tests do not run this task";
+        return ETaskResult::FINISHED;
+    }
+
+    bool RebindPort(const TPortRebind& rebind) override {
+        return std::ranges::any_of(Inputs, [&](auto& port) { return rebind.Apply(port); })
+            || std::ranges::any_of(Outputs, [&](auto& port) { return rebind.Apply(port); });
+    }
+
+    std::vector<TInputPort> Inputs;
+    std::vector<TOutputPort> Outputs;
+};
+
+struct TPortsNode {
+    TTaskNode& Node;
+    TPortsTask& Task;
+};
+
+TPortsNode AddPortsNode(
+    TTaskGraph& graph,
+    std::vector<TInputPort> inputs,
+    std::vector<TOutputPort> outputs)
+{
+    auto task = std::make_unique<TPortsTask>();
+    auto& ref = *task;
+    ref.Inputs = std::move(inputs);
+    ref.Outputs = std::move(outputs);
+    return {graph.AddOwnedNode(std::move(task)), ref};
+}
+
+using TRemoteSinkTask = NQdb::NScheduler::TSinkTask;
+using TRemoteSourceTask = NQdb::NScheduler::TSourceTask;
+
+TEdgeSplit Split(TTaskEdge& edge, EReboundPort port, int sinkColor, int sourceColor) {
+    return {
+        .Edge = &edge,
+        .ReboundPort = port,
+        .SinkColor = sinkColor,
+        .SourceColor = sourceColor,
+        .NewConnection = std::make_unique<TOneToOneConnection>(),
+        .SinkTask = std::make_unique<TRemoteSinkTask>(nullptr, nullptr, TInputPort{}),
+        .SourceTask = std::make_unique<TRemoteSourceTask>(nullptr, nullptr, TOutputPort{}),
+    };
+}
+
+template <class... TSplits>
+TSplitPlan Plan(TSplits... splits) {
+    TSplitPlan plan;
+    (plan.Splits.push_back(std::move(splits)), ...);
+    return plan;
+}
+
+std::string ApplyError(TTaskGraph& graph, TSplitPlan plan) {
+    try {
+        graph.Apply(std::move(plan));
+    } catch (const std::logic_error& e) {
+        return e.what();
+    }
+    return {};
+}
+
+using TEdgeShape = std::tuple<const TTaskNode*, const TTaskNode*, const IConnection*, size_t, size_t, size_t>;
+
+// {Src, Dst, Connection, SrcLane, DstLane, ExecInput}
+TEdgeShape Shape(const TTaskEdge& edge) {
+    return {edge.Src, edge.Dst, edge.Connection, edge.SrcLane, edge.DstLane, edge.ExecInput};
+}
+
+NQdb::TRowSet EmptyBatch(int64_t rows) {
+    return {.RowCount = rows, .RefCount = 1};
+}
+
+// Carries the row counts of empty batches from a remote sink to its remote source.
+void BindTransport(TTaskNode& sink, TTaskNode& source) {
+    struct TTransport {
+        std::deque<int64_t> RowCounts;
+        bool Finished = false;
+    };
+    auto transport = std::make_shared<TTransport>();
+    auto* sinkTask = dynamic_cast<TRemoteSinkTask*>(sink.Task);
+    auto* sourceTask = dynamic_cast<TRemoteSourceTask*>(source.Task);
+    ASSERT_NE(sinkTask, nullptr);
+    ASSERT_NE(sourceTask, nullptr);
+    sinkTask->BindCode(std::make_shared<TSinkCode>(
+        [](void* state, const NQdb::TRowSet& rows) {
+            static_cast<TTransport*>(state)->RowCounts.push_back(rows.RowCount);
+            return ETaskResult::OK;
+        },
+        [](void* state) {
+            static_cast<TTransport*>(state)->Finished = true;
+            return ETaskResult::OK;
+        }), transport);
+    sourceTask->BindCode(std::make_shared<TSourceCode>(
+        [](void* state, NQdb::TRowSet& rows) {
+            auto& transport = *static_cast<TTransport*>(state);
+            if (transport.RowCounts.empty()) {
+                return transport.Finished
+                    ? ETaskResult::FINISHED
+                    : ETaskResult::WAITING;
+            }
+            rows = EmptyBatch(transport.RowCounts.front());
+            transport.RowCounts.pop_front();
+            return ETaskResult::OK;
+        }), transport);
+}
+
+// The row count of the next batch on `port`; fails unless one is there.
+int64_t FetchRows(const TInputPort& port) {
+    NQdb::TRowSet rows{};
+    EXPECT_EQ(port.Fetch(rows), EFetchResult::OK);
+    const auto count = rows.RowCount;
+    if (rows.RefCount) {
+        NQdb::Release(&rows);
+    }
+    return count;
+}
+
+EFetchResult FetchState(const TInputPort& port) {
+    NQdb::TRowSet rows{};
+    const auto result = port.Fetch(rows);
+    EXPECT_NE(result, EFetchResult::OK);
+    return result;
+}
+
+TEST(SchedulerGraph, ApplyMovesTheDestinationOfAOneToOneCut) {
+    TTaskGraph graph;
+    auto connection = std::make_unique<TOneToOneConnection>();
+    connection->Resize(6, 6);
+    auto& original = graph.AddConnection(std::move(connection));
+    auto left = AddPortsNode(graph, {}, {{.Connection = &original, .Lane = 3}});
+    auto right = AddPortsNode(graph, {}, {{.Connection = &original, .Lane = 5}});
+    auto root = AddPortsNode(
+        graph,
+        {{.Connection = &original, .Lane = 3}, {.Connection = &original, .Lane = 5}},
+        {});
+    graph.AddEdge(left.Node, root.Node, original, 3, 3, 1);
+    auto& cut = graph.AddEdge(right.Node, root.Node, original, 5, 5, 2);
+    std::string error;
+    ASSERT_TRUE(graph.Seal(&error)) << error;
+
+    const auto sealed = graph.Apply(Plan(Split(cut, EReboundPort::DestinationInput, 1, 0)));
+    ASSERT_EQ(graph.Nodes().size(), 5u);
+    auto& sink = *graph.Nodes()[3];
+    auto& source = *graph.Nodes()[4];
+    EXPECT_EQ(sink.DebugKind, "remote-sink");
+    EXPECT_EQ(source.DebugKind, "remote-source");
+    EXPECT_EQ(Graphs(sealed), (TGraphs{{&root.Node}, {&sink}}));
+    const auto* added = graph.Connections().back().get();
+    ASSERT_EQ(graph.Edges().size(), 3u);
+    EXPECT_EQ(Shape(*graph.Edges()[0]), (TEdgeShape{&left.Node, &root.Node, &original, 3, 3, 1}));
+    EXPECT_EQ(Shape(*graph.Edges()[1]), (TEdgeShape{&right.Node, &sink, &original, 5, 5, 0}));
+    EXPECT_EQ(Shape(*graph.Edges()[2]), (TEdgeShape{&source, &root.Node, added, 0, 0, 2}));
+    EXPECT_EQ(root.Task.Inputs[0].Connection, &original);
+    EXPECT_EQ(root.Task.Inputs[1].Connection, added);
+    EXPECT_EQ(root.Task.Inputs[1].Lane, 0u);
+
+    // Rows the right side writes to lane 5 reach the root through the new connection.
+    ASSERT_NO_FATAL_FAILURE(BindTransport(sink, source));
+    ASSERT_TRUE(right.Task.Outputs[0].Push(EmptyBatch(42)));
+    right.Task.Outputs[0].Finish();
+    EXPECT_EQ(sink.Task->Execute(), ETaskResult::OK);
+    EXPECT_EQ(source.Task->Execute(), ETaskResult::OK);
+    EXPECT_EQ(FetchRows(root.Task.Inputs[1]), 42);
+    EXPECT_EQ(sink.Task->Execute(), ETaskResult::FINISHED);
+    EXPECT_EQ(source.Task->Execute(), ETaskResult::FINISHED);
+    EXPECT_EQ(FetchState(root.Task.Inputs[1]), EFetchResult::FINISHED);
+}
+
+TEST(SchedulerGraph, ApplyMovesTheSourceOfAGatherCut) {
+    TTaskGraph graph;
+    auto connection = std::make_unique<TGatherConnection>();
+    connection->Resize(2, 1);
+    auto& original = graph.AddConnection(std::move(connection));
+    auto left = AddPortsNode(graph, {}, {{.Connection = &original, .Lane = 0}});
+    auto right = AddPortsNode(graph, {}, {{.Connection = &original, .Lane = 1}});
+    auto root = AddPortsNode(graph, {{.Connection = &original}}, {});
+    graph.AddEdge(left.Node, root.Node, original, 0, 0, 1);
+    auto& cut = graph.AddEdge(right.Node, root.Node, original, 1, 0, 1);
+    std::string error;
+    ASSERT_TRUE(graph.Seal(&error)) << error;
+
+    const auto sealed = graph.Apply(Plan(Split(cut, EReboundPort::SourceOutput, 1, 0)));
+    ASSERT_EQ(graph.Nodes().size(), 5u);
+    auto& sink = *graph.Nodes()[3];
+    auto& source = *graph.Nodes()[4];
+    EXPECT_EQ(Graphs(sealed), (TGraphs{{&root.Node}, {&sink}}));
+    const auto* added = graph.Connections().back().get();
+    ASSERT_EQ(graph.Edges().size(), 3u);
+    EXPECT_EQ(Shape(*graph.Edges()[1]), (TEdgeShape{&right.Node, &sink, added, 0, 0, 0}));
+    EXPECT_EQ(Shape(*graph.Edges()[2]), (TEdgeShape{&source, &root.Node, &original, 1, 0, 1}));
+    EXPECT_EQ(right.Task.Outputs[0].Connection, added);
+    EXPECT_EQ(right.Task.Outputs[0].Lane, 0u);
+    EXPECT_EQ(root.Task.Inputs[0].Connection, &original);
+
+    // The gather still waits for its remote lane 1 after the local lane ends.
+    ASSERT_NO_FATAL_FAILURE(BindTransport(sink, source));
+    ASSERT_TRUE(left.Task.Outputs[0].Push(EmptyBatch(11)));
+    left.Task.Outputs[0].Finish();
+    EXPECT_EQ(FetchRows(root.Task.Inputs[0]), 11);
+    EXPECT_EQ(FetchState(root.Task.Inputs[0]), EFetchResult::NO_DATA);
+    ASSERT_TRUE(right.Task.Outputs[0].Push(EmptyBatch(22)));
+    right.Task.Outputs[0].Finish();
+    EXPECT_EQ(sink.Task->Execute(), ETaskResult::OK);
+    EXPECT_EQ(source.Task->Execute(), ETaskResult::OK);
+    EXPECT_EQ(FetchRows(root.Task.Inputs[0]), 22);
+    EXPECT_EQ(FetchState(root.Task.Inputs[0]), EFetchResult::NO_DATA);
+    EXPECT_EQ(sink.Task->Execute(), ETaskResult::FINISHED);
+    EXPECT_EQ(source.Task->Execute(), ETaskResult::FINISHED);
+    EXPECT_EQ(FetchState(root.Task.Inputs[0]), EFetchResult::FINISHED);
+}
+
+TEST(SchedulerGraph, ApplyMovesTheDestinationOfABroadcastCut) {
+    TTaskGraph graph;
+    auto connection = std::make_unique<TBroadcastConnection>();
+    connection->Resize(1, 2);
+    auto& original = graph.AddConnection(std::move(connection));
+    auto producer = AddPortsNode(graph, {}, {{.Connection = &original}});
+    auto left = AddPortsNode(graph, {{.Connection = &original, .Lane = 0}}, {});
+    auto right = AddPortsNode(graph, {{.Connection = &original, .Lane = 1}}, {});
+    graph.AddEdge(producer.Node, left.Node, original, 0, 0, 1);
+    auto& cut = graph.AddEdge(producer.Node, right.Node, original, 0, 1, 1);
+    std::string error;
+    ASSERT_TRUE(graph.Seal(&error)) << error;
+
+    const auto sealed = graph.Apply(Plan(Split(cut, EReboundPort::DestinationInput, 0, 1)));
+    ASSERT_EQ(graph.Nodes().size(), 5u);
+    auto& sink = *graph.Nodes()[3];
+    auto& source = *graph.Nodes()[4];
+    EXPECT_EQ(Graphs(sealed), (TGraphs{{&left.Node, &sink}, {&right.Node}}));
+    const auto* added = graph.Connections().back().get();
+    ASSERT_EQ(graph.Edges().size(), 3u);
+    EXPECT_EQ(Shape(*graph.Edges()[1]), (TEdgeShape{&producer.Node, &sink, &original, 0, 1, 0}));
+    EXPECT_EQ(Shape(*graph.Edges()[2]), (TEdgeShape{&source, &right.Node, added, 0, 0, 1}));
+    EXPECT_EQ(right.Task.Inputs[0].Connection, added);
+    EXPECT_EQ(left.Task.Inputs[0].Connection, &original);
+
+    // Both the local lane 0 and the remote lane 1 get the copy.
+    ASSERT_NO_FATAL_FAILURE(BindTransport(sink, source));
+    ASSERT_TRUE(producer.Task.Outputs[0].Push(EmptyBatch(7)));
+    producer.Task.Outputs[0].Finish();
+    EXPECT_EQ(FetchRows(left.Task.Inputs[0]), 7);
+    EXPECT_EQ(FetchState(left.Task.Inputs[0]), EFetchResult::FINISHED);
+    EXPECT_EQ(sink.Task->Execute(), ETaskResult::OK);
+    EXPECT_EQ(source.Task->Execute(), ETaskResult::OK);
+    EXPECT_EQ(FetchRows(right.Task.Inputs[0]), 7);
+    EXPECT_EQ(sink.Task->Execute(), ETaskResult::FINISHED);
+    EXPECT_EQ(source.Task->Execute(), ETaskResult::FINISHED);
+    EXPECT_EQ(FetchState(right.Task.Inputs[0]), EFetchResult::FINISHED);
+}
+
+TEST(SchedulerGraph, ApplyGroupsPiecesOfOneColorIntoOneGraph) {
+    TTaskGraph graph;
+    auto& first = graph.AddConnection(std::make_unique<TOneToOneConnection>());
+    auto& second = graph.AddConnection(std::make_unique<TOneToOneConnection>());
+    auto source = AddPortsNode(graph, {}, {{.Connection = &first}});
+    auto middle = AddPortsNode(graph, {{.Connection = &first}}, {{.Connection = &second}});
+    auto root = AddPortsNode(graph, {{.Connection = &second}}, {});
+    auto& in = graph.AddEdge(source.Node, middle.Node, first);
+    auto& out = graph.AddEdge(middle.Node, root.Node, second);
+    auto& gate = graph.AddDependencyEdge(source.Node, root.Node);
+    std::string error;
+    ASSERT_TRUE(graph.Seal(&error)) << error;
+    EXPECT_EQ(Graphs(graph.Apply({})), (TGraphs{{&root.Node}}));
+
+    // Only the middle moves to color 1; color 0 keeps two pieces joined by the gate.
+    const auto sealed = graph.Apply(Plan(
+        Split(in, EReboundPort::DestinationInput, 0, 1),
+        Split(out, EReboundPort::DestinationInput, 1, 0)));
+    ASSERT_EQ(graph.Nodes().size(), 7u);
+    EXPECT_EQ(Graphs(sealed), (TGraphs{{&root.Node, graph.Nodes()[3].get()}, {graph.Nodes()[5].get()}}));
+    ASSERT_EQ(graph.Edges().size(), 5u);
+    EXPECT_EQ(graph.Edges().back().get(), &gate);
+    EXPECT_EQ(middle.Task.Inputs[0].Connection, graph.Connections()[2].get());
+    EXPECT_EQ(root.Task.Inputs[0].Connection, graph.Connections()[3].get());
+}
+
+TEST(SchedulerGraph, ApplyRejectsADependencyAcrossColors) {
+    TTaskGraph graph;
+    auto& first = graph.AddConnection(std::make_unique<TOneToOneConnection>());
+    auto& second = graph.AddConnection(std::make_unique<TOneToOneConnection>());
+    auto build = AddPortsNode(graph, {}, {{.Connection = &first}});
+    auto probe = AddPortsNode(graph, {}, {{.Connection = &second}});
+    auto root = AddPortsNode(graph, {{.Connection = &first}, {.Connection = &second}}, {});
+    auto& cut = graph.AddEdge(build.Node, root.Node, first);
+    graph.AddEdge(probe.Node, root.Node, second);
+    graph.AddDependencyEdge(build.Node, probe.Node);
+    std::string error;
+    ASSERT_TRUE(graph.Seal(&error)) << error;
+    EXPECT_EQ(
+        ApplyError(graph, Plan(Split(cut, EReboundPort::DestinationInput, 1, 0))),
+        "split plan: dependency edge n0 -> n1 crosses colors 1 and 0");
+}
+
+TEST(SchedulerGraph, ApplyRejectsATaskWithoutTheCutPort) {
+    TTaskGraph graph;
+    auto& connection = graph.AddConnection(std::make_unique<TOneToOneConnection>());
+    auto source = AddPortsNode(graph, {}, {{.Connection = &connection}});
+    auto& sink = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& cut = graph.AddEdge(source.Node, sink, connection);
+    std::string error;
+    ASSERT_TRUE(graph.Seal(&error)) << error;
+    EXPECT_EQ(
+        ApplyError(graph, Plan(Split(cut, EReboundPort::DestinationInput, 0, 1))),
+        "split plan: task n1 has no input port to rebind");
+}
+
+TEST(SchedulerGraph, ApplyRejectsInvalidPlans) {
+    TTaskGraph graph;
+    auto& connection = graph.AddConnection(std::make_unique<TOneToOneConnection>());
+    auto source = AddPortsNode(graph, {}, {{.Connection = &connection}});
+    auto sink = AddPortsNode(graph, {{.Connection = &connection}}, {});
+    auto& edge = graph.AddEdge(source.Node, sink.Node, connection);
+    auto& gate = graph.AddDependencyEdge(source.Node, sink.Node);
+    EXPECT_EQ(
+        ApplyError(graph, Plan(Split(edge, EReboundPort::DestinationInput, 0, 1))),
+        "split plan applies only to a sealed task graph");
+    std::string error;
+    ASSERT_TRUE(graph.Seal(&error)) << error;
+    EXPECT_EQ(
+        ApplyError(graph, Plan(Split(gate, EReboundPort::DestinationInput, 0, 1))),
+        "split plan cuts a dependency edge");
+    EXPECT_EQ(
+        ApplyError(graph, Plan(
+            Split(edge, EReboundPort::DestinationInput, 0, 1),
+            Split(edge, EReboundPort::DestinationInput, 0, 1))),
+        "split plan cuts one edge twice");
+    TTaskEdge foreign = edge;
+    EXPECT_EQ(
+        ApplyError(graph, Plan(Split(foreign, EReboundPort::DestinationInput, 0, 1))),
+        "split plan cuts an edge of another task graph");
+    EXPECT_EQ(sink.Task.Inputs[0].Connection, &connection);
+}
+
+TEST(SchedulerGraph, ApplyRejectsTwoColorsInOnePiece) {
+    TTaskGraph graph;
+    auto& first = graph.AddConnection(std::make_unique<TOneToOneConnection>());
+    auto& second = graph.AddConnection(std::make_unique<TOneToOneConnection>());
+    auto source = AddPortsNode(graph, {}, {{.Connection = &first}, {.Connection = &second}});
+    auto root = AddPortsNode(graph, {{.Connection = &first}, {.Connection = &second}}, {});
+    auto& cut = graph.AddEdge(source.Node, root.Node, first);
+    graph.AddEdge(source.Node, root.Node, second);
+    std::string error;
+    ASSERT_TRUE(graph.Seal(&error)) << error;
+    // The uncut second path keeps the sink and the source in one piece.
+    EXPECT_EQ(
+        ApplyError(graph, Plan(Split(cut, EReboundPort::DestinationInput, 0, 1))),
+        "split plan gives one subgraph colors 0 and 1");
+}
+
+TEST(SchedulerGraph, ApplyRejectsAPieceWithoutColor) {
+    TTaskGraph graph;
+    auto& first = graph.AddConnection(std::make_unique<TOneToOneConnection>());
+    auto& second = graph.AddConnection(std::make_unique<TOneToOneConnection>());
+    auto source = AddPortsNode(graph, {}, {{.Connection = &first}});
+    auto root = AddPortsNode(graph, {{.Connection = &first}}, {});
+    auto other = AddPortsNode(graph, {}, {{.Connection = &second}});
+    auto otherRoot = AddPortsNode(graph, {{.Connection = &second}}, {});
+    auto& cut = graph.AddEdge(source.Node, root.Node, first);
+    graph.AddEdge(other.Node, otherRoot.Node, second);
+    std::string error;
+    ASSERT_TRUE(graph.Seal(&error)) << error;
+    EXPECT_EQ(
+        ApplyError(graph, Plan(Split(cut, EReboundPort::DestinationInput, 0, 1))),
+        "split plan leaves task n2 without a color");
+}
+
+TEST(SchedulerGraph, ApplyRejectsAPlanThatBreaksTheGraph) {
+    TTaskGraph graph;
+    auto& connection = graph.AddConnection(std::make_unique<TOneToOneConnection>());
+    auto source = AddPortsNode(graph, {}, {{.Connection = &connection}});
+    auto root = AddPortsNode(graph, {{.Connection = &connection}}, {});
+    auto& cut = graph.AddEdge(source.Node, root.Node, connection);
+    std::string error;
+    ASSERT_TRUE(graph.Seal(&error)) << error;
+    auto split = Split(cut, EReboundPort::DestinationInput, 0, 1);
+    split.NewConnection->Resize(0, 0);
+    EXPECT_EQ(
+        ApplyError(graph, Plan(std::move(split))),
+        "split plan breaks the task graph: task graph contains an invalid source lane id");
+}
+
+TEST(SchedulerGraph, ApplyRejectsAnIncompleteSplit) {
+    TTaskGraph graph;
+    auto& connection = graph.AddConnection(std::make_unique<TOneToOneConnection>());
+    auto source = AddPortsNode(graph, {}, {{.Connection = &connection}});
+    auto root = AddPortsNode(graph, {{.Connection = &connection}}, {});
+    auto& cut = graph.AddEdge(source.Node, root.Node, connection);
+    std::string error;
+    ASSERT_TRUE(graph.Seal(&error)) << error;
+    auto split = Split(cut, EReboundPort::DestinationInput, 0, 1);
+    split.SourceTask.reset();
+    EXPECT_EQ(ApplyError(graph, Plan(std::move(split))), "split plan has an incomplete split");
+}
+
+TEST(SchedulerGraph, ApplyRejectsColorsWithGaps) {
+    TTaskGraph graph;
+    auto& connection = graph.AddConnection(std::make_unique<TOneToOneConnection>());
+    auto source = AddPortsNode(graph, {}, {{.Connection = &connection}});
+    auto root = AddPortsNode(graph, {{.Connection = &connection}}, {});
+    auto& cut = graph.AddEdge(source.Node, root.Node, connection);
+    std::string error;
+    ASSERT_TRUE(graph.Seal(&error)) << error;
+    const auto gaps = "split plan colors must be 0..K-1 without gaps";
+    EXPECT_EQ(ApplyError(graph, Plan(Split(cut, EReboundPort::DestinationInput, 0, 2))), gaps);
+    EXPECT_EQ(ApplyError(graph, Plan(Split(cut, EReboundPort::DestinationInput, 1, 2))), gaps);
+    EXPECT_EQ(ApplyError(graph, Plan(Split(cut, EReboundPort::DestinationInput, -1, 0))), gaps);
+}
+
+TEST(SchedulerGraph, ApplyRejectsASecondSplit) {
+    TTaskGraph graph;
+    auto& connection = graph.AddConnection(std::make_unique<TOneToOneConnection>());
+    auto source = AddPortsNode(graph, {}, {{.Connection = &connection}});
+    auto root = AddPortsNode(graph, {{.Connection = &connection}}, {});
+    auto& cut = graph.AddEdge(source.Node, root.Node, connection);
+    std::string error;
+    ASSERT_TRUE(graph.Seal(&error)) << error;
+    graph.Apply(Plan(Split(cut, EReboundPort::DestinationInput, 0, 1)));
+    auto& again = *graph.Edges().front();
+    EXPECT_EQ(
+        ApplyError(graph, Plan(Split(again, EReboundPort::DestinationInput, 0, 1))),
+        "task graph is already split");
+    EXPECT_TRUE(graph.Apply({}));
+}
+
+TEST(SchedulerGraph, FailedApplyLeavesTheGraphDestroyable) {
+    TTaskGraph graph;
+    auto& first = graph.AddConnection(std::make_unique<TOneToOneConnection>());
+    auto& second = graph.AddConnection(std::make_unique<TOneToOneConnection>());
+    auto source = AddPortsNode(graph, {}, {{.Connection = &first}});
+    auto middle = AddPortsNode(graph, {{.Connection = &first}}, {{.Connection = &second}});
+    auto& sink = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    graph.AddEdge(source.Node, middle.Node, first);
+    auto& cut = graph.AddEdge(middle.Node, sink, second);
+    std::string error;
+    ASSERT_TRUE(graph.Seal(&error)) << error;
+    // The sink has no input port, so Apply throws after it has moved the kept edge.
+    EXPECT_EQ(
+        ApplyError(graph, Plan(Split(cut, EReboundPort::DestinationInput, 0, 1))),
+        "split plan: task n2 has no input port to rebind");
 }
 
 TEST(SchedulerGraph, SchedulersRejectFailedSeal) {
@@ -301,15 +819,6 @@ TEST(SchedulerGraph, RejectsMissingConnection) {
     std::string error;
     EXPECT_FALSE(graph.Seal(&error));
     EXPECT_NE(error.find("without a connection"), std::string::npos);
-}
-
-TEST(SchedulerGraph, RejectsMultipleRoots) {
-    TTaskGraph graph;
-    graph.AddOwnedNode(std::make_unique<TNoopTask>());
-    graph.AddOwnedNode(std::make_unique<TNoopTask>());
-    std::string error;
-    EXPECT_FALSE(graph.Seal(&error));
-    EXPECT_NE(error.find("exactly one root"), std::string::npos);
 }
 
 TEST(SchedulerGraph, RejectsInvalidLaneIds) {

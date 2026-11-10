@@ -28,5 +28,21 @@ struct TOutputPort {
     void Finish() const;
 };
 
+enum class EPortKind { Input, Output };
+
+// Moves the task port of Kind bound to {From, FromLane} to {To, ToLane}; an
+// unbound port has a null From. The port keeps its instrumentation.
+struct TPortRebind {
+    EPortKind Kind = EPortKind::Input;
+    const IConnection* From = nullptr;
+    size_t FromLane = 0;
+    IConnection* To = nullptr;
+    size_t ToLane = 0;
+
+    // Whether `port` matched and moved.
+    bool Apply(TInputPort& port) const;
+    bool Apply(TOutputPort& port) const;
+};
+
 } // namespace NScheduler
 } // namespace NQdb
