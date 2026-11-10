@@ -341,11 +341,10 @@ TEST(SchedulerGraph, RejectsCycleBesideAValidSubgraph) {
     EXPECT_NE(error.find("scheduling cycle"), std::string::npos);
 }
 
-// Holds plain ports for Apply to rebind; never runs.
+// Holds plain ports for Apply to rebind; finishes at once when run.
 class TPortsTask : public ITask {
 public:
     ETaskResult Execute() override {
-        ADD_FAILURE() << "split tests do not run this task";
         return ETaskResult::FINISHED;
     }
 
@@ -784,6 +783,38 @@ TEST(SchedulerGraph, FailedApplyLeavesTheGraphDestroyable) {
     EXPECT_EQ(
         ApplyError(graph, Plan(Split(cut, EReboundPort::DestinationInput, 0, 1))),
         "split plan: task n2 has no input port to rebind");
+}
+
+// Apply makes one subgraph per color; a run starts from the roots of all of them.
+TEST(SchedulerGraph, SchedulersRunTheRootsOfEverySubgraph) {
+    for (bool threaded : {false, true}) {
+        SCOPED_TRACE(threaded);
+        TTaskGraph graph;
+        auto& connection = graph.AddConnection(std::make_unique<TOneToOneConnection>());
+        auto source = AddPortsNode(graph, {}, {{.Connection = &connection}});
+        auto sink = AddPortsNode(graph, {{.Connection = &connection}}, {});
+        auto& cut = graph.AddEdge(source.Node, sink.Node, connection);
+        ASSERT_TRUE(graph.Seal());
+        auto split = Split(cut, EReboundPort::DestinationInput, 0, 1);
+        auto remoteSink = std::make_unique<TPortsTask>();
+        remoteSink->Inputs.emplace_back();
+        auto remoteSource = std::make_unique<TPortsTask>();
+        remoteSource->Outputs.emplace_back();
+        split.SinkTask = std::move(remoteSink);
+        split.SourceTask = std::move(remoteSource);
+        const auto sealed = graph.Apply(Plan(std::move(split)));
+        auto& remoteSinkNode = *graph.Nodes()[2];
+        ASSERT_EQ(Graphs(sealed), (TGraphs{{&remoteSinkNode}, {&sink.Node}}));
+
+        std::string error;
+        if (threaded) {
+            ASSERT_TRUE(TThreadedScheduler(sealed, 2).Run(&error)) << error;
+        } else {
+            ASSERT_TRUE(TSingleThreadedScheduler(sealed).Run(&error)) << error;
+        }
+        EXPECT_EQ(remoteSinkNode.State.load(), ETaskState::Finished);
+        EXPECT_EQ(sink.Node.State.load(), ETaskState::Finished);
+    }
 }
 
 TEST(SchedulerGraph, SchedulersRejectFailedSeal) {
