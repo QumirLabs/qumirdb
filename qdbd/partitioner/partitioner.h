@@ -2,30 +2,12 @@
 
 #include <qdb/scheduler/graph.h>
 
-#include <memory>
 #include <unordered_map>
 #include <unordered_set>
-#include <vector>
+#include <utility>
 
 namespace NQdb {
 namespace NScheduler {
-
-enum class EReboundPort { SourceOutput, DestinationInput };
-
-struct TConnectionSplitPlan {
-    TTaskEdge* OriginalEdge = nullptr;
-    EReboundPort ReboundPort = EReboundPort::DestinationInput;
-    int SinkPartition = 0;
-    int SourcePartition = 0;
-
-    std::unique_ptr<IConnection> NewConnection;
-    TTaskNode SinkNode;
-    TTaskNode SourceNode;
-    std::unique_ptr<ITask> SinkTask;
-    std::unique_ptr<ITask> SourceTask;
-    TTaskEdge SinkEdge;
-    TTaskEdge SourceEdge;
-};
 
 class TPartitioner {
 public:
@@ -40,8 +22,9 @@ public:
         return SplitEdges_;
     }
 
-    const std::vector<std::unique_ptr<TConnectionSplitPlan>>& ConnectionSplits() const {
-        return ConnectionSplits_;
+    // The rowset cuts of SplitEdges() for TTaskGraph::Apply.
+    TSplitPlan TakePlan() {
+        return std::exchange(Plan_, {});
     }
 
 private:
@@ -54,7 +37,7 @@ private:
 
     std::unordered_map<TTaskNode*, int> Colors_;
     std::unordered_set<TTaskEdge*> SplitEdges_;
-    std::vector<std::unique_ptr<TConnectionSplitPlan>> ConnectionSplits_;
+    TSplitPlan Plan_;
 };
 
 } // namespace NScheduler

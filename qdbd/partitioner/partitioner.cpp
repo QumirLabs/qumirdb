@@ -24,7 +24,7 @@ void TPartitioner::Do()
 {
     Colors_.clear();
     SplitEdges_.clear();
-    ConnectionSplits_.clear();
+    Plan_ = {};
 
     Color();
 
@@ -62,47 +62,20 @@ void TPartitioner::Partition()
 }
 
 void TPartitioner::PlanSplit(TTaskEdge& edge, EReboundPort reboundPort, size_t capacity) {
-    auto split = std::make_unique<TConnectionSplitPlan>();
-    split->OriginalEdge = &edge;
-    split->ReboundPort = reboundPort;
-    split->SinkPartition = Colors_.at(edge.Src);
-    split->SourcePartition = Colors_.at(edge.Dst);
-    split->NewConnection = std::make_unique<TOneToOneConnection>(capacity);
+    auto connection = std::make_unique<TOneToOneConnection>(capacity);
     const auto layouts = edge.Connection->RowLayouts();
-    split->NewConnection->SetRowLayouts(
+    connection->SetRowLayouts(
         std::vector<TValueLayout>(layouts.begin(), layouts.end()));
-
-    TInputPort sinkInput{.Connection = edge.Connection, .Lane = edge.DstLane};
-    TOutputPort sourceOutput{.Connection = split->NewConnection.get(), .Lane = 0};
-    if (reboundPort == EReboundPort::SourceOutput) {
-        sinkInput = {.Connection = split->NewConnection.get(), .Lane = 0};
-        sourceOutput = {.Connection = edge.Connection, .Lane = edge.SrcLane};
-    }
-
-    split->SinkTask = std::make_unique<TSinkTask>(nullptr, nullptr, sinkInput);
-    split->SourceTask = std::make_unique<TSourceTask>(nullptr, nullptr, sourceOutput);
-    split->SinkNode.Task = split->SinkTask.get();
-    split->SinkNode.DebugKind = "remote-sink";
-    split->SourceNode.Task = split->SourceTask.get();
-    split->SourceNode.DebugKind = "remote-source";
-    split->SinkEdge = {
-        .Src = edge.Src,
-        .Dst = &split->SinkNode,
-        .Connection = sinkInput.Connection,
-        .SrcLane = reboundPort == EReboundPort::SourceOutput ? 0 : edge.SrcLane,
-        .DstLane = sinkInput.Lane,
-    };
-    split->SourceEdge = {
-        .Src = &split->SourceNode,
-        .Dst = edge.Dst,
-        .Connection = sourceOutput.Connection,
-        .SrcLane = sourceOutput.Lane,
-        .DstLane = reboundPort == EReboundPort::DestinationInput ? 0 : edge.DstLane,
-        .ExecInput = edge.ExecInput,
-    };
-
-    // Applying the plan must also rebind the selected original task port.
-    ConnectionSplits_.push_back(std::move(split));
+    // The placeholder tasks stay unbound: Apply binds them to the new edges.
+    Plan_.Splits.push_back({
+        .Edge = &edge,
+        .ReboundPort = reboundPort,
+        .SinkColor = Colors_.at(edge.Src),
+        .SourceColor = Colors_.at(edge.Dst),
+        .NewConnection = std::move(connection),
+        .SinkTask = std::make_unique<TSinkTask>(nullptr, nullptr, TInputPort{}),
+        .SourceTask = std::make_unique<TSourceTask>(nullptr, nullptr, TOutputPort{}),
+    });
 }
 
 void TPartitioner::Color()
