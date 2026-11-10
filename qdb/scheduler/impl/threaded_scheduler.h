@@ -44,6 +44,7 @@ private:
     void ResetStats();
 
     TSealedTaskGraph Graph_;
+    TTaskNode* Root_ = nullptr;
     TExecutionState Execution_;
     TMPMCQueue<TTaskNode*> Ready_;
     // One permit is released per task pushed to Ready_; idle workers block on

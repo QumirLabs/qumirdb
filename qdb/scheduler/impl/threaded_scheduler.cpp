@@ -42,11 +42,17 @@ bool TThreadedScheduler::Run(std::string* error) {
         SetError(error, "threaded scheduler cannot run twice");
         return false;
     }
+    const auto graphs = Graph_.Graphs();
+    if (graphs.size() != 1 || graphs.front().size() != 1) {
+        SetError(error, "threaded scheduler runs only a graph with one root");
+        return false;
+    }
     HasRun_ = true;
+    Root_ = graphs.front().front();
 
     FinishedCount_.store(0, std::memory_order_release);
     ResetStats();
-    Schedule(&Graph_.Root());
+    Schedule(Root_);
 
     std::vector<std::thread> workers;
     workers.reserve(WorkerCount_);
@@ -163,7 +169,7 @@ void TThreadedScheduler::Work() {
     // would deadlock. External waits on abandoned branches do not delay completion.
     auto done = [&] {
         return Failed_.load(std::memory_order_acquire) ||
-            Graph_.Root().State.load(std::memory_order_acquire) == ETaskState::Finished;
+            Root_->State.load(std::memory_order_acquire) == ETaskState::Finished;
     };
     // Brief spin on the work permit before blocking, so bursts of scheduling
     // are picked up without an OS wakeup; then park on the semaphore.
@@ -284,7 +290,7 @@ void TThreadedScheduler::FinishNode(TTaskNode* node) {
     auto previous = node->State.exchange(ETaskState::Finished, std::memory_order_acq_rel);
     assert(previous == ETaskState::Running || previous == ETaskState::Reschedule);
     FinishedCount_.fetch_add(1, std::memory_order_acq_rel);
-    if (node == &Graph_.Root()) {
+    if (node == Root_) {
         // The sink is done: the query's output is complete. Wake every worker so
         // they observe termination and exit instead of parking on the permit
         // while upstream branches sit unfinished (abandoned by early termination).

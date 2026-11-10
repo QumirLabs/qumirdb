@@ -63,11 +63,12 @@ public:
     TSealedTaskGraph() = default;
 
     explicit operator bool() const {
-        return Root_ != nullptr;
+        return !Graphs_.empty();
     }
 
-    TTaskNode& Root() const {
-        return *Root_;
+    // See TTaskGraph::Graphs().
+    std::span<const std::vector<TTaskNode*>> Graphs() const {
+        return Graphs_;
     }
 
     size_t TaskCount() const {
@@ -80,13 +81,16 @@ public:
 private:
     friend class TTaskGraph;
 
-    TSealedTaskGraph(TTaskNode& root, size_t taskCount, std::span<const TExternalNode> externals)
-        : Root_(&root)
+    TSealedTaskGraph(
+        std::span<const std::vector<TTaskNode*>> graphs,
+        size_t taskCount,
+        std::span<const TExternalNode> externals)
+        : Graphs_(graphs)
         , TaskCount_(taskCount)
         , Externals_(externals)
     {}
 
-    TTaskNode* Root_ = nullptr;
+    std::span<const std::vector<TTaskNode*>> Graphs_;
     size_t TaskCount_ = 0;
     // Sorted by Id.
     std::span<const TExternalNode> Externals_;
@@ -129,7 +133,9 @@ public:
     const std::vector<std::unique_ptr<TTaskNode>>& Nodes() const;
     const std::vector<std::unique_ptr<TTaskEdge>>& Edges() const;
     const std::vector<TTaskNode*>& Leaves() const;
-    TTaskNode* Root() const;
+    // The weakly connected subgraphs, each given by its roots (nodes without a
+    // rowset output). Both levels follow ExecutionSlot order; set by Seal().
+    const std::vector<std::vector<TTaskNode*>>& Graphs() const;
     // Owned connections in creation order.
     std::span<const std::unique_ptr<IConnection>> Connections() const;
     // Marked nodes; sorted by id once the graph is sealed.
@@ -139,6 +145,7 @@ private:
     void CheckMutable() const;
     void Build();
     bool Validate(std::string* error) const;
+    void GroupRoots();
 
     // Task-local observers and ports remain valid through task destruction.
     std::vector<std::unique_ptr<TTaskNode>> Nodes_;
@@ -147,7 +154,7 @@ private:
     std::vector<std::unique_ptr<TTaskEdge>> Edges_;
     std::vector<TTaskNode*> Leaves_;
     std::vector<TExternalNode> Externals_;
-    TTaskNode* Root_ = nullptr;
+    std::vector<std::vector<TTaskNode*>> Graphs_;
     bool Sealed_ = false;
 };
 

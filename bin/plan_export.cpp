@@ -1339,8 +1339,9 @@ llvm::json::Object GraphJson(
     std::vector<TGroup> groups;
     std::unordered_map<std::string, size_t> groupIndexes;
     std::unordered_map<const NQdb::NScheduler::TTaskNode*, std::string> nodeGroups;
-    // The sink is encoded as "result" below; the browser has its own.
-    const auto* sink = lowered.Graph->Root();
+    // The sink, the local plan's only root, is encoded as "result" below; the
+    // browser has its own.
+    const auto* sink = lowered.Graph->Graphs().front().front();
     const auto& graphNodes = lowered.Graph->Nodes();
     nodeGroups.reserve(graphNodes.size());
     for (size_t i = 0; i < graphNodes.size(); ++i) {

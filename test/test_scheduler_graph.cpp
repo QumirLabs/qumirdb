@@ -10,6 +10,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 using namespace NQdb::NScheduler;
 
@@ -103,6 +104,12 @@ public:
     }
 };
 
+using TGraphs = std::vector<std::vector<TTaskNode*>>;
+
+TGraphs Graphs(const TSealedTaskGraph& sealed) {
+    return {sealed.Graphs().begin(), sealed.Graphs().end()};
+}
+
 void CheckControlDependency(bool threaded) {
     TTaskGraph graph;
     auto& build = graph.AddOwnedNode(std::make_unique<TNoopTask>());
@@ -142,7 +149,7 @@ TEST(SchedulerGraph, BuildsAdjacencyAndValidates) {
     EXPECT_EQ(graph.Seal(&error).TaskCount(), 2u) << error;
     ASSERT_EQ(graph.Leaves().size(), 1u);
     EXPECT_EQ(graph.Leaves()[0], &source);
-    EXPECT_EQ(graph.Root(), &sink);
+    EXPECT_EQ(graph.Graphs(), TGraphs{{&sink}});
     EXPECT_EQ(source.Outbound.size(), 1u);
     EXPECT_EQ(sink.Inbound.size(), 1u);
 }
@@ -262,7 +269,7 @@ TEST(SchedulerGraph, RepeatedSealPreservesTaskState) {
 
     const auto sealed = graph.Seal();
     ASSERT_TRUE(sealed);
-    EXPECT_EQ(&sealed.Root(), &root);
+    EXPECT_EQ(Graphs(sealed), TGraphs{{&root}});
     EXPECT_EQ(sealed.TaskCount(), 1u);
     EXPECT_EQ(root.State.load(), ETaskState::Finished);
 }
@@ -270,15 +277,93 @@ TEST(SchedulerGraph, RepeatedSealPreservesTaskState) {
 TEST(SchedulerGraph, FailedSealDoesNotFreezeStructure) {
     TNoopTask task;
     TTaskGraph graph;
-    auto& source = graph.AddNode(task);
-    auto& sink = graph.AddNode(task);
     EXPECT_FALSE(graph.Seal());
 
+    auto& source = graph.AddNode(task);
+    auto& sink = graph.AddNode(task);
     graph.AddOwnedEdge(source, sink, std::make_unique<TOneToOneConnection>());
     const auto sealed = graph.Seal();
     ASSERT_TRUE(sealed);
-    EXPECT_EQ(&sealed.Root(), &sink);
+    EXPECT_EQ(Graphs(sealed), TGraphs{{&sink}});
     EXPECT_EQ(sealed.TaskCount(), 2u);
+}
+
+TEST(SchedulerGraph, RootsSharingAnUpstreamFormOneGraph) {
+    TTaskGraph graph;
+    auto& source = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& left = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& right = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& broadcast = graph.AddConnection(std::make_unique<TBroadcastConnection>());
+    broadcast.Resize(1, 2);
+    graph.AddEdge(source, left, broadcast, 0, 0);
+    graph.AddEdge(source, right, broadcast, 0, 1);
+    std::string error;
+    const auto sealed = graph.Seal(&error);
+    ASSERT_TRUE(sealed) << error;
+    EXPECT_EQ(Graphs(sealed), (TGraphs{{&left, &right}}));
+}
+
+TEST(SchedulerGraph, GroupsRootsBySubgraphInSlotOrder) {
+    TTaskGraph graph;
+    auto& firstSource = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& secondSource = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& secondSink = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& firstSink = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& lonely = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    graph.AddOwnedEdge(firstSource, firstSink, std::make_unique<TOneToOneConnection>());
+    graph.AddOwnedEdge(secondSource, secondSink, std::make_unique<TOneToOneConnection>());
+    std::string error;
+    const auto sealed = graph.Seal(&error);
+    ASSERT_TRUE(sealed) << error;
+    EXPECT_EQ(Graphs(sealed), (TGraphs{{&secondSink}, {&firstSink}, {&lonely}}));
+    // A view of the graph's own lists.
+    EXPECT_EQ(sealed.Graphs().data(), graph.Graphs().data());
+
+    std::stringstream out;
+    graph.Print(out);
+    EXPECT_NE(out.str().find("graph g1 roots: n3\n"), std::string::npos);
+}
+
+TEST(SchedulerGraph, DependencyEdgeJoinsSubgraphs) {
+    TTaskGraph graph;
+    auto& build = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& buildSink = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& probe = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& probeSink = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    graph.AddOwnedEdge(build, buildSink, std::make_unique<TOneToOneConnection>());
+    graph.AddOwnedEdge(probe, probeSink, std::make_unique<TOneToOneConnection>());
+    graph.AddDependencyEdge(build, probe);
+    std::string error;
+    const auto sealed = graph.Seal(&error);
+    ASSERT_TRUE(sealed) << error;
+    EXPECT_EQ(Graphs(sealed), (TGraphs{{&buildSink, &probeSink}}));
+}
+
+TEST(SchedulerGraph, RejectsCycleBesideAValidSubgraph) {
+    TTaskGraph graph;
+    auto& source = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& sink = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& left = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& right = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    graph.AddOwnedEdge(source, sink, std::make_unique<TOneToOneConnection>());
+    graph.AddOwnedEdge(left, right, std::make_unique<TOneToOneConnection>());
+    graph.AddOwnedEdge(right, left, std::make_unique<TOneToOneConnection>());
+    std::string error;
+    EXPECT_FALSE(graph.Seal(&error));
+    EXPECT_NE(error.find("scheduling cycle"), std::string::npos);
+}
+
+TEST(SchedulerGraph, SchedulersRunOnlyOneRoot) {
+    TTaskGraph graph;
+    graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    const auto sealed = graph.Seal();
+    ASSERT_TRUE(sealed);
+    std::string error;
+    EXPECT_FALSE(TSingleThreadedScheduler(sealed).Run(&error));
+    EXPECT_EQ(error, "single-threaded scheduler runs only a graph with one root");
+    EXPECT_FALSE(TThreadedScheduler(sealed, 2).Run(&error));
+    EXPECT_EQ(error, "threaded scheduler runs only a graph with one root");
 }
 
 TEST(SchedulerGraph, SchedulersRejectFailedSeal) {
@@ -301,15 +386,6 @@ TEST(SchedulerGraph, RejectsMissingConnection) {
     std::string error;
     EXPECT_FALSE(graph.Seal(&error));
     EXPECT_NE(error.find("without a connection"), std::string::npos);
-}
-
-TEST(SchedulerGraph, RejectsMultipleRoots) {
-    TTaskGraph graph;
-    graph.AddOwnedNode(std::make_unique<TNoopTask>());
-    graph.AddOwnedNode(std::make_unique<TNoopTask>());
-    std::string error;
-    EXPECT_FALSE(graph.Seal(&error));
-    EXPECT_NE(error.find("exactly one root"), std::string::npos);
 }
 
 TEST(SchedulerGraph, RejectsInvalidLaneIds) {

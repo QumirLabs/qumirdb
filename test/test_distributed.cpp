@@ -2020,6 +2020,33 @@ TEST(DistributedScheduler, ValidatesRemoteEndpoints) {
     EXPECT_NE(ValidateEndpoints(sealed, sourceOnly), "");
 }
 
+// Two relays in one fragment: the endpoints of each subgraph are checked.
+TEST(DistributedScheduler, ValidatesRemoteEndpointsOfEverySubgraph) {
+    using namespace NQdb::NScheduler;
+    TTaskGraph graph;
+    std::vector<TRemoteEndpoint> endpoints;
+    for (uint64_t sinkId : {1, 3}) {
+        auto connection = std::make_unique<TOneToOneConnection>();
+        auto* connectionPtr = connection.get();
+        connectionPtr->SetRowLayouts({TValueLayout{.Width = 8}});
+        auto& source = graph.AddOwnedNode(std::make_unique<TSourceTask>(
+            nullptr, nullptr, TOutputPort{.Connection = connectionPtr}));
+        auto& sink = graph.AddOwnedNode(std::make_unique<TSinkTask>(
+            nullptr, nullptr, TInputPort{.Connection = connectionPtr}));
+        graph.AddOwnedEdge(source, sink, std::move(connection));
+        graph.MarkExternal(sink, sinkId);
+        graph.MarkExternal(source, sinkId + 1);
+        endpoints.push_back({.Id = sinkId, .Kind = ERemoteEndpointKind::Sink});
+        endpoints.push_back({.Id = sinkId + 1, .Kind = ERemoteEndpointKind::Source});
+    }
+    const auto sealed = graph.Seal();
+    ASSERT_TRUE(sealed);
+    ASSERT_EQ(sealed.Graphs().size(), 2u);
+    EXPECT_EQ(ValidateEndpoints(sealed, endpoints), "");
+    endpoints.pop_back();
+    EXPECT_EQ(ValidateEndpoints(sealed, endpoints), "a source task without code has no endpoint");
+}
+
 namespace {
 
 // Counts what each compute actor reports to the query actor.

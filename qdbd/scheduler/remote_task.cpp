@@ -218,8 +218,11 @@ std::string ValidateEndpoints(
         covered.insert(node);
     }
     // A source or sink left without code would dereference a null Code_.
-    std::vector<const TTaskNode*> stack{&graph.Root()};
-    std::unordered_set<const TTaskNode*> visited{&graph.Root()};
+    std::vector<const TTaskNode*> stack;
+    for (const auto& roots : graph.Graphs()) {
+        stack.insert(stack.end(), roots.begin(), roots.end());
+    }
+    std::unordered_set<const TTaskNode*> visited(stack.begin(), stack.end());
     while (!stack.empty()) {
         const auto* node = stack.back();
         stack.pop_back();

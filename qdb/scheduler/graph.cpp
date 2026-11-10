@@ -4,6 +4,7 @@
 #include <cassert>
 #include <deque>
 #include <format>
+#include <numeric>
 #include <ostream>
 #include <ranges>
 #include <stdexcept>
@@ -138,7 +139,6 @@ TTaskEdge& TTaskGraph::AddDependencyEdge(
 
 void TTaskGraph::Build() {
     Leaves_.clear();
-    Root_ = nullptr;
 
     for (auto& node : Nodes_) {
         node->Inbound.clear();
@@ -158,9 +158,36 @@ void TTaskGraph::Build() {
         if (std::ranges::none_of(node->Inbound, IsRowsetEdge)) {
             Leaves_.push_back(node.get());
         }
-        if (std::ranges::none_of(node->Outbound, IsRowsetEdge)) {
-            Root_ = node.get();
+    }
+}
+
+void TTaskGraph::GroupRoots() {
+    // Union-find over ExecutionSlot; a dependency edge also joins two subgraphs.
+    std::vector<size_t> parent(Nodes_.size());
+    std::iota(parent.begin(), parent.end(), size_t{0});
+    auto find = [&](size_t slot) {
+        while (parent[slot] != slot) {
+            parent[slot] = parent[parent[slot]];
+            slot = parent[slot];
         }
+        return slot;
+    };
+    for (const auto& edge : Edges_) {
+        parent[find(edge->Src->ExecutionSlot)] = find(edge->Dst->ExecutionSlot);
+    }
+
+    const size_t none = Nodes_.size();
+    std::vector<size_t> graphOf(Nodes_.size(), none);
+    for (const auto& node : Nodes_) {
+        if (std::ranges::any_of(node->Outbound, IsRowsetEdge)) {
+            continue;
+        }
+        auto& index = graphOf[find(node->ExecutionSlot)];
+        if (index == none) {
+            index = Graphs_.size();
+            Graphs_.emplace_back();
+        }
+        Graphs_[index].push_back(node.get());
     }
 }
 
@@ -170,9 +197,10 @@ TSealedTaskGraph TTaskGraph::Seal(std::string* error) {
         if (!Validate(error)) {
             return {};
         }
+        GroupRoots();
         Sealed_ = true;
     }
-    return TSealedTaskGraph(*Root_, Nodes_.size(), Externals_);
+    return TSealedTaskGraph(Graphs_, Nodes_.size(), Externals_);
 }
 
 void TTaskGraph::CheckMutable() const {
@@ -189,7 +217,6 @@ bool TTaskGraph::Validate(std::string* error) const {
 
     std::unordered_set<const TTaskNode*> nodes;
     nodes.reserve(Nodes_.size());
-    size_t rootCount = 0;
     size_t leafCount = 0;
     for (auto& node : Nodes_) {
         if (!node->Task) {
@@ -199,9 +226,6 @@ bool TTaskGraph::Validate(std::string* error) const {
         nodes.insert(node.get());
         if (std::ranges::none_of(node->Inbound, IsRowsetEdge)) {
             ++leafCount;
-        }
-        if (std::ranges::none_of(node->Outbound, IsRowsetEdge)) {
-            ++rootCount;
         }
     }
 
@@ -216,11 +240,6 @@ bool TTaskGraph::Validate(std::string* error) const {
 
     if (leafCount == 0) {
         SetError(error, "task graph has no source leaf");
-        return false;
-    }
-    if (rootCount != 1) {
-        SetError(error, std::format(
-            "task graph must have exactly one root, got {}", rootCount));
         return false;
     }
 
@@ -256,6 +275,8 @@ bool TTaskGraph::Validate(std::string* error) const {
 
     // A dependency edge must not turn a data-flow DAG into a scheduling
     // cycle. In particular, a probe cannot gate its own build-side producer.
+    // An acyclic graph has a root downstream of every node, so a run that
+    // starts from the roots pulls every task.
     std::unordered_map<const TTaskNode*, size_t> pending;
     for (const auto& node : Nodes_) {
         pending.emplace(node.get(), node->Inbound.size());
@@ -279,27 +300,6 @@ bool TTaskGraph::Validate(std::string* error) const {
     }
     if (visited != Nodes_.size()) {
         SetError(error, "task graph contains a scheduling cycle");
-        return false;
-    }
-
-    // The threaded scheduler stops once the single root (sink) is Finished, so
-    // every node must be an ancestor of the root; an orphan branch would be
-    // silently abandoned. (Guaranteed for an acyclic single-root graph, but a
-    // cycle disconnected from the root would slip past the root-count check.)
-    std::unordered_set<const TTaskNode*> reaches;
-    std::vector<const TTaskNode*> stack{Root_};
-    reaches.insert(Root_);
-    while (!stack.empty()) {
-        const auto* node = stack.back();
-        stack.pop_back();
-        for (const auto* edge : node->Inbound) {
-            if (reaches.insert(edge->Src).second) {
-                stack.push_back(edge->Src);
-            }
-        }
-    }
-    if (reaches.size() != Nodes_.size()) {
-        SetError(error, "task graph has nodes that cannot reach the root");
         return false;
     }
 
@@ -333,8 +333,12 @@ void TTaskGraph::Print(std::ostream& out) const {
         out << " n" << nodeIds[leaf];
     }
     out << "\n";
-    if (Root_) {
-        out << "root: n" << nodeIds[Root_] << "\n";
+    for (size_t i = 0; i < Graphs_.size(); ++i) {
+        out << "graph g" << i << " roots:";
+        for (auto* root : Graphs_[i]) {
+            out << " n" << nodeIds[root];
+        }
+        out << "\n";
     }
 
     for (size_t i = 0; i < OwnedConnections_.size(); ++i) {
@@ -410,8 +414,8 @@ const std::vector<TTaskNode*>& TTaskGraph::Leaves() const {
     return Leaves_;
 }
 
-TTaskNode* TTaskGraph::Root() const {
-    return Root_;
+const std::vector<std::vector<TTaskNode*>>& TTaskGraph::Graphs() const {
+    return Graphs_;
 }
 
 } // namespace NScheduler
