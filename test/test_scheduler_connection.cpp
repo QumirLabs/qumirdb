@@ -117,6 +117,34 @@ TEST(SchedulerConnection, GatherPollsProducerLanesAndFinishes) {
     EXPECT_EQ(conn.Fetch(0, out), EFetchResult::FINISHED);
 }
 
+TEST(SchedulerConnection, BroadcastFeedsOpenLanesAndBlocksWhenAllAreClosed) {
+    std::atomic<int> destroyCount = 0;
+    {
+        TBroadcastConnection conn(1);
+        conn.Resize(1, 2);
+        ASSERT_TRUE(conn.Push(0, MakeRowSet(1, &destroyCount)));
+        conn.Close(0);
+        TRowSet out{};
+        ASSERT_EQ(conn.Fetch(1, out), EFetchResult::OK);
+        Release(&out);
+        // Lane 0 is still full, but closed.
+        ASSERT_TRUE(conn.Push(0, MakeRowSet(2, &destroyCount)));
+        ASSERT_EQ(conn.Fetch(1, out), EFetchResult::OK);
+        EXPECT_EQ(out.RowCount, 2);
+        Release(&out);
+
+        conn.Close(1);
+        auto blocked = MakeRowSet(3, &destroyCount);
+        EXPECT_FALSE(conn.CanPush(0));
+        EXPECT_FALSE(conn.Push(0, std::move(blocked)));
+        EXPECT_EQ(blocked.RowCount, 3);
+        Release(&blocked);
+        EXPECT_EQ(destroyCount.load(), 2);
+    }
+    // The first rowset's copy in the closed lane goes with the connection.
+    EXPECT_EQ(destroyCount.load(), 3);
+}
+
 TEST(SchedulerConnection, QueuedRowSetsAreReleasedOnConnectionDestroy) {
     std::atomic<int> destroyCount = 0;
     {

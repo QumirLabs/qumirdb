@@ -9,6 +9,9 @@ void IConnection::SetDebugName(std::string name) {
     DebugName_ = std::move(name);
 }
 
+void IConnection::Close(size_t) {
+}
+
 const std::string& IConnection::DebugName() const {
     return DebugName_;
 }
