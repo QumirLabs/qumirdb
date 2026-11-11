@@ -15,10 +15,16 @@
 namespace NQdb {
 namespace NScheduler {
 
-TPartitioner::TPartitioner(TTaskNode* root, int partitions)
-    : Root_(root)
-    , Partitions_(partitions)
-{ }
+TPartitioner::TPartitioner(const TSealedTaskGraph& graph, int partitions)
+    : Partitions_(partitions)
+{
+    if (!graph) {
+        throw std::invalid_argument("partitioner needs a sealed graph");
+    }
+    // Copied: Apply replaces the graph's subgraphs.
+    const auto roots = graph.Graphs().front();
+    Roots_.assign(roots.begin(), roots.end());
+}
 
 void TPartitioner::Do() {
     Colors_.clear();
@@ -80,8 +86,10 @@ void TPartitioner::Color() {
     std::unordered_map<TTaskNode*, int> inDegree;
     std::unordered_set<TTaskNode*> visited;
     std::stack<TTaskNode*> st;
-    st.push(Root_);
-    visited.insert(Root_);
+    for (auto* root : Roots_) {
+        st.push(root);
+        visited.insert(root);
+    }
 
     std::vector<TTaskNode*> currentLevel;
     while (!st.empty()) {

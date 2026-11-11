@@ -5,13 +5,14 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 namespace NQdb {
 namespace NScheduler {
 
 class TPartitioner {
 public:
-    TPartitioner(TTaskNode* root, int partitions);
+    TPartitioner(const TSealedTaskGraph& graph, int partitions);
     void Do();
 
     const std::unordered_map<TTaskNode*, int>& Colors() const {
@@ -32,7 +33,7 @@ private:
     void Partition();
     void PlanSplit(TTaskEdge& edge, EReboundPort reboundPort, size_t capacity);
 
-    TTaskNode* Root_;
+    std::vector<TTaskNode*> Roots_;
     int Partitions_;
 
     std::unordered_map<TTaskNode*, int> Colors_;

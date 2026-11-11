@@ -240,11 +240,12 @@ protected:
 TEST_F(TPartitionerTest, SingleNodeHasNoCuts) {
     auto& root = AddNode();
     std::string error;
-    ASSERT_TRUE(Graph_.Seal(&error)) << error;
+    const auto sealed = Graph_.Seal(&error);
+    ASSERT_TRUE(sealed) << error;
 
     for (int partitions : {1, 2, 4}) {
         SCOPED_TRACE(partitions);
-        TPartitioner partitioner(&root, partitions);
+        TPartitioner partitioner(sealed, partitions);
         partitioner.Do();
         ASSERT_NO_FATAL_FAILURE(CheckResult(partitioner, partitions));
         EXPECT_TRUE(partitioner.SplitEdges().empty());
@@ -259,11 +260,12 @@ TEST_F(TPartitionerTest, ChainKeepsOneColor) {
     Connect(source, middle);
     Connect(middle, root);
     std::string error;
-    ASSERT_TRUE(Graph_.Seal(&error)) << error;
+    const auto sealed = Graph_.Seal(&error);
+    ASSERT_TRUE(sealed) << error;
 
     for (int partitions : {1, 2, 4}) {
         SCOPED_TRACE(partitions);
-        TPartitioner partitioner(&root, partitions);
+        TPartitioner partitioner(sealed, partitions);
         partitioner.Do();
         ASSERT_NO_FATAL_FAILURE(CheckResult(partitioner, partitions));
         EXPECT_EQ(partitioner.Colors().at(&source), partitioner.Colors().at(&root));
@@ -294,9 +296,10 @@ TEST_P(TPartitionerGatherTest, GatherBalancesItsProducers) {
         AddEdge(*sources[lane], root, gather, lane, 0);
     }
     std::string error;
-    ASSERT_TRUE(Graph_.Seal(&error)) << error;
+    const auto sealed = Graph_.Seal(&error);
+    ASSERT_TRUE(sealed) << error;
 
-    TPartitioner partitioner(&root, partitions);
+    TPartitioner partitioner(sealed, partitions);
     partitioner.Do();
     ASSERT_NO_FATAL_FAILURE(CheckResult(partitioner, partitions));
     std::vector<size_t> counts(partitions);
@@ -323,9 +326,10 @@ TEST_F(TPartitionerTest, DiamondHasOnlyFinalColorCuts) {
     Connect(left, root);
     Connect(right, root);
     std::string error;
-    ASSERT_TRUE(Graph_.Seal(&error)) << error;
+    const auto sealed = Graph_.Seal(&error);
+    ASSERT_TRUE(sealed) << error;
 
-    TPartitioner partitioner(&root, 2);
+    TPartitioner partitioner(sealed, 2);
     partitioner.Do();
     ASSERT_NO_FATAL_FAILURE(CheckResult(partitioner, 2));
     EXPECT_NE(partitioner.Colors().at(&left), partitioner.Colors().at(&right));
@@ -341,9 +345,10 @@ TEST_F(TPartitionerTest, ShortcutPreservesTopologicalLevels) {
     Connect(source, middle);
     Connect(middle, root);
     std::string error;
-    ASSERT_TRUE(Graph_.Seal(&error)) << error;
+    const auto sealed = Graph_.Seal(&error);
+    ASSERT_TRUE(sealed) << error;
 
-    TPartitioner partitioner(&root, 2);
+    TPartitioner partitioner(sealed, 2);
     partitioner.Do();
     ASSERT_NO_FATAL_FAILURE(CheckResult(partitioner, 2));
     EXPECT_EQ(partitioner.Colors().at(&source), partitioner.Colors().at(&root));
@@ -372,9 +377,10 @@ TEST_F(TPartitionerTest, ShuffleFindsCutsForEachLane) {
         AddEdge(*consumers[lane], root, gather, lane, 0);
     }
     std::string error;
-    ASSERT_TRUE(Graph_.Seal(&error)) << error;
+    const auto sealed = Graph_.Seal(&error);
+    ASSERT_TRUE(sealed) << error;
 
-    TPartitioner partitioner(&root, 2);
+    TPartitioner partitioner(sealed, 2);
     partitioner.Do();
     ASSERT_NO_FATAL_FAILURE(CheckResult(partitioner, 2));
     EXPECT_NE(partitioner.Colors().at(sources[0]), partitioner.Colors().at(sources[1]));
@@ -393,6 +399,74 @@ TEST_F(TPartitionerTest, ShuffleFindsCutsForEachLane) {
     ASSERT_NO_FATAL_FAILURE(ApplyPlan(partitioner));
 }
 
+TEST_F(TPartitionerTest, SharedSourceWithTwoRootsColorsEveryNode) {
+    auto& source = AddNode();
+    auto& first = AddNode();
+    auto& second = AddNode();
+    Connect(source, first);
+    Connect(source, second);
+    std::string error;
+    const auto sealed = Graph_.Seal(&error);
+    ASSERT_TRUE(sealed) << error;
+    ASSERT_EQ(sealed.Graphs().front().size(), 2u);
+
+    TPartitioner partitioner(sealed, 2);
+    partitioner.Do();
+    ASSERT_NO_FATAL_FAILURE(CheckResult(partitioner, 2));
+    ASSERT_NO_FATAL_FAILURE(ApplyPlan(partitioner));
+}
+
+TEST_F(TPartitionerTest, DisjointRootsAreAllColored) {
+    auto& a = AddNode();
+    auto& b = AddNode();
+    auto& c = AddNode();
+    auto& first = AddNode();
+    auto& second = AddNode();
+    Connect(a, first);
+    Connect(b, first);
+    Connect(c, second);
+    std::string error;
+    const auto sealed = Graph_.Seal(&error);
+    ASSERT_TRUE(sealed) << error;
+
+    TPartitioner partitioner(sealed, 2);
+    partitioner.Do();
+    ASSERT_NO_FATAL_FAILURE(CheckResult(partitioner, 2));
+    // The components share no edge, so Apply sees no cut and keeps one fragment.
+    EXPECT_TRUE(Graph_.Apply(partitioner.TakePlan()));
+}
+
+TEST_F(TPartitionerTest, RootBehindDependencyEdgeIsColored) {
+    auto& source = AddNode();
+    auto& root = AddNode();
+    auto& gated = AddNode();
+    Connect(source, root);
+    Graph_.AddDependencyEdge(source, gated);
+    std::string error;
+    const auto sealed = Graph_.Seal(&error);
+    ASSERT_TRUE(sealed) << error;
+
+    TPartitioner partitioner(sealed, 2);
+    partitioner.Do();
+    ASSERT_NO_FATAL_FAILURE(CheckResult(partitioner, 2));
+}
+
+TEST_F(TPartitionerTest, RootBehindDependencyEdgeInOneColorApplies) {
+    auto& source = AddNode();
+    auto& root = AddNode();
+    auto& gated = AddNode();
+    Connect(source, root);
+    Graph_.AddDependencyEdge(source, gated);
+    std::string error;
+    const auto sealed = Graph_.Seal(&error);
+    ASSERT_TRUE(sealed) << error;
+
+    TPartitioner partitioner(sealed, 1);
+    partitioner.Do();
+    ASSERT_NO_FATAL_FAILURE(CheckResult(partitioner, 1));
+    ASSERT_NO_FATAL_FAILURE(ApplyPlan(partitioner));
+}
+
 TEST_F(TPartitionerTest, IncludesCrossPartitionDependency) {
     auto& left = AddNode();
     auto& right = AddNode();
@@ -401,9 +475,10 @@ TEST_F(TPartitionerTest, IncludesCrossPartitionDependency) {
     Connect(right, root);
     auto& dependency = Graph_.AddDependencyEdge(left, right);
     std::string error;
-    ASSERT_TRUE(Graph_.Seal(&error)) << error;
+    const auto sealed = Graph_.Seal(&error);
+    ASSERT_TRUE(sealed) << error;
 
-    TPartitioner partitioner(&root, 2);
+    TPartitioner partitioner(sealed, 2);
     partitioner.Do();
     ASSERT_NO_FATAL_FAILURE(CheckResult(partitioner, 2));
     EXPECT_NE(partitioner.Colors().at(&left), partitioner.Colors().at(&right));
@@ -424,9 +499,10 @@ TEST_F(TPartitionerTest, OneToOneSplitRebindsDestinationLane) {
     AddEdge(left, root, original, 3, 3, 1);
     AddEdge(right, root, original, 5, 5, 2);
     std::string error;
-    ASSERT_TRUE(Graph_.Seal(&error)) << error;
+    const auto sealed = Graph_.Seal(&error);
+    ASSERT_TRUE(sealed) << error;
 
-    TPartitioner partitioner(&root, 2);
+    TPartitioner partitioner(sealed, 2);
     partitioner.Do();
     ASSERT_NO_FATAL_FAILURE(CheckResult(partitioner, 2));
     ASSERT_NO_FATAL_FAILURE(ApplyPlan(partitioner));
@@ -474,9 +550,10 @@ TEST_F(TPartitionerTest, GatherSplitRebindsSourceAndWaitsForRemoteEof) {
     AddEdge(left, root, original, 0, 0, 1);
     AddEdge(right, root, original, 1, 0, 1);
     std::string error;
-    ASSERT_TRUE(Graph_.Seal(&error)) << error;
+    const auto sealed = Graph_.Seal(&error);
+    ASSERT_TRUE(sealed) << error;
 
-    TPartitioner partitioner(&root, 2);
+    TPartitioner partitioner(sealed, 2);
     partitioner.Do();
     ASSERT_NO_FATAL_FAILURE(CheckResult(partitioner, 2));
     ASSERT_NO_FATAL_FAILURE(ApplyPlan(partitioner));
@@ -531,9 +608,10 @@ TEST_F(TPartitionerTest, BroadcastSplitPreservesLocalAndRemoteCopies) {
     Connect(left, root);
     Connect(right, root);
     std::string error;
-    ASSERT_TRUE(Graph_.Seal(&error)) << error;
+    const auto sealed = Graph_.Seal(&error);
+    ASSERT_TRUE(sealed) << error;
 
-    TPartitioner partitioner(&root, 2);
+    TPartitioner partitioner(sealed, 2);
     partitioner.Do();
     ASSERT_NO_FATAL_FAILURE(CheckResult(partitioner, 2));
     ASSERT_NO_FATAL_FAILURE(ApplyPlan(partitioner));
