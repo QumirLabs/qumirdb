@@ -2954,11 +2954,10 @@ struct TDecimalsCompiler {
 };
 
 // The CSV rows of `sql` run in this process.
-std::string RunLocally(const std::string& sql, const NQdb::NScheduler::TSettings& settings,
-    TPlanPassOptions options = WithoutRuntimeFilters)
+std::string RunLocally(const std::string& sql, const NQdb::NScheduler::TSettings& settings)
 {
     using namespace NQdb::NScheduler;
-    TDecimalsCompiler compiler(options);
+    TDecimalsCompiler compiler;
     std::istringstream input(sql);
     auto parsed = compiler.Compiler.Parse(input);
     if (!parsed) {
@@ -3211,8 +3210,8 @@ TEST(DistributedScheduler, QueryActorRunsAQueryOnEveryNode) {
 }
 
 // Joins whose build lanes and probes the split puts on both nodes: each node's
-// filter merges every build lane, so the rows are those of a local run with
-// the same filters. One build side is empty.
+// filter merges every build lane, so the rows are those of a local run without
+// filters. One build side is empty.
 TEST(DistributedScheduler, QueryActorRunsRuntimeFiltersAcrossNodes) {
     TQueryCluster cluster;
     ASSERT_NO_FATAL_FAILURE(cluster.Start());
@@ -3227,7 +3226,7 @@ TEST(DistributedScheduler, QueryActorRunsRuntimeFiltersAcrossNodes) {
             ASSERT_TRUE(answer);
             ASSERT_TRUE(answer->Response) << answer->Response.error().ToString();
             EXPECT_TRUE(std::ranges::contains(log, std::string("Query: started 2 fragments")));
-            EXPECT_EQ(*answer->Response, RunLocally(sql, cluster.Settings, WithRuntimeFilters));
+            EXPECT_EQ(*answer->Response, RunLocally(sql, cluster.Settings));
         }
     }
 }
