@@ -327,6 +327,62 @@ TEST(SchedulerGraph, NodeWithOnlyADependencyOutputIsARoot) {
     EXPECT_EQ(Graphs(sealed), (TGraphs{{&build, &sink}}));
 }
 
+// P feeds C1 and gates C2 through a dependency; Q only gates C2, so Q is a root.
+TEST(SchedulerGraph, RetireAbandonsADependencyProducerWithItsLastConsumer) {
+    TTaskGraph graph;
+    auto& p = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& q = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& c1 = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& c2 = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& r1 = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& r2 = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    graph.AddOwnedEdge(p, c1, std::make_unique<TOneToOneConnection>());
+    graph.AddOwnedEdge(c1, r1, std::make_unique<TOneToOneConnection>());
+    graph.AddOwnedEdge(c2, r2, std::make_unique<TOneToOneConnection>());
+    graph.AddDependencyEdge(p, c2);
+    graph.AddDependencyEdge(q, c2);
+    std::string error;
+    ASSERT_TRUE(graph.Seal(&error)) << error;
+
+    Retire(r1);
+    EXPECT_TRUE(c1.Retired.load());
+    // C2 still waits for P's publication.
+    EXPECT_FALSE(p.Retired.load());
+    Retire(r2);
+    EXPECT_TRUE(c2.Retired.load());
+    EXPECT_TRUE(p.Retired.load());
+    EXPECT_FALSE(q.Retired.load());
+}
+
+// P has two edges to C and one to D: it lives until both consumers retire.
+TEST(SchedulerGraph, RetireCountsEveryEdgeToOneConsumer) {
+    TTaskGraph graph;
+    auto& p = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& c = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& d = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& r1 = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& r2 = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    graph.AddOwnedEdge(p, c, std::make_unique<TOneToOneConnection>());
+    graph.AddOwnedEdge(p, c, std::make_unique<TOneToOneConnection>());
+    graph.AddOwnedEdge(p, d, std::make_unique<TOneToOneConnection>());
+    graph.AddOwnedEdge(c, r1, std::make_unique<TOneToOneConnection>());
+    graph.AddOwnedEdge(d, r2, std::make_unique<TOneToOneConnection>());
+    std::string error;
+    ASSERT_TRUE(graph.Seal(&error)) << error;
+    EXPECT_EQ(p.LiveConsumers.load(), 3u);
+
+    Retire(r1);
+    EXPECT_TRUE(c.Retired.load());
+    EXPECT_FALSE(p.Retired.load());
+    EXPECT_EQ(p.LiveConsumers.load(), 1u);
+    Retire(r2);
+    EXPECT_TRUE(d.Retired.load());
+    EXPECT_TRUE(p.Retired.load());
+    // A node retired twice, e.g. one that finishes after it was abandoned, releases once.
+    Retire(c);
+    EXPECT_EQ(p.LiveConsumers.load(), 0u);
+}
+
 TEST(SchedulerGraph, RejectsCycleBesideAValidSubgraph) {
     TTaskGraph graph;
     auto& source = graph.AddOwnedNode(std::make_unique<TNoopTask>());
@@ -341,24 +397,10 @@ TEST(SchedulerGraph, RejectsCycleBesideAValidSubgraph) {
     EXPECT_NE(error.find("scheduling cycle"), std::string::npos);
 }
 
-TEST(SchedulerGraph, SchedulersRunOnlyOneRoot) {
-    TTaskGraph graph;
-    graph.AddOwnedNode(std::make_unique<TNoopTask>());
-    graph.AddOwnedNode(std::make_unique<TNoopTask>());
-    const auto sealed = graph.Seal();
-    ASSERT_TRUE(sealed);
-    std::string error;
-    EXPECT_FALSE(TSingleThreadedScheduler(sealed).Run(&error));
-    EXPECT_EQ(error, "single-threaded scheduler runs only a graph with one root");
-    EXPECT_FALSE(TThreadedScheduler(sealed, 2).Run(&error));
-    EXPECT_EQ(error, "threaded scheduler runs only a graph with one root");
-}
-
-// Holds plain ports for Apply to rebind; never runs.
+// Holds plain ports for Apply to rebind; finishes at once when run.
 class TPortsTask : public ITask {
 public:
     ETaskResult Execute() override {
-        ADD_FAILURE() << "split tests do not run this task";
         return ETaskResult::FINISHED;
     }
 
@@ -797,6 +839,38 @@ TEST(SchedulerGraph, FailedApplyLeavesTheGraphDestroyable) {
     EXPECT_EQ(
         ApplyError(graph, Plan(Split(cut, EReboundPort::DestinationInput, 0, 1))),
         "split plan: task n2 has no input port to rebind");
+}
+
+// Apply makes one subgraph per color; a run starts from the roots of all of them.
+TEST(SchedulerGraph, SchedulersRunTheRootsOfEverySubgraph) {
+    for (bool threaded : {false, true}) {
+        SCOPED_TRACE(threaded);
+        TTaskGraph graph;
+        auto& connection = graph.AddConnection(std::make_unique<TOneToOneConnection>());
+        auto source = AddPortsNode(graph, {}, {{.Connection = &connection}});
+        auto sink = AddPortsNode(graph, {{.Connection = &connection}}, {});
+        auto& cut = graph.AddEdge(source.Node, sink.Node, connection);
+        ASSERT_TRUE(graph.Seal());
+        auto split = Split(cut, EReboundPort::DestinationInput, 0, 1);
+        auto remoteSink = std::make_unique<TPortsTask>();
+        remoteSink->Inputs.emplace_back();
+        auto remoteSource = std::make_unique<TPortsTask>();
+        remoteSource->Outputs.emplace_back();
+        split.SinkTask = std::move(remoteSink);
+        split.SourceTask = std::move(remoteSource);
+        const auto sealed = graph.Apply(Plan(std::move(split)));
+        auto& remoteSinkNode = *graph.Nodes()[2];
+        ASSERT_EQ(Graphs(sealed), (TGraphs{{&remoteSinkNode}, {&sink.Node}}));
+
+        std::string error;
+        if (threaded) {
+            ASSERT_TRUE(TThreadedScheduler(sealed, 2).Run(&error)) << error;
+        } else {
+            ASSERT_TRUE(TSingleThreadedScheduler(sealed).Run(&error)) << error;
+        }
+        EXPECT_EQ(remoteSinkNode.State.load(), ETaskState::Finished);
+        EXPECT_EQ(sink.Node.State.load(), ETaskState::Finished);
+    }
 }
 
 TEST(SchedulerGraph, SchedulersRejectFailedSeal) {

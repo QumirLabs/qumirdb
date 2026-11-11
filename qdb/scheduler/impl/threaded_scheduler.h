@@ -44,13 +44,12 @@ private:
     void ResetStats();
 
     TSealedTaskGraph Graph_;
-    TTaskNode* Root_ = nullptr;
     TExecutionState Execution_;
     TMPMCQueue<TTaskNode*> Ready_;
     // One permit is released per task pushed to Ready_; idle workers block on
     // it (after a short spin) instead of busy-yielding until work arrives.
     std::counting_semaphore<> WorkAvailable_{0};
-    std::atomic<size_t> FinishedCount_ = 0;
+    std::atomic<size_t> UnfinishedRoots_ = 0;
     std::atomic<bool> Failed_ = false;
     mutable std::mutex ErrorMutex_;
     std::string Error_;

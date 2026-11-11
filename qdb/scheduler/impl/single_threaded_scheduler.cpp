@@ -30,24 +30,30 @@ bool TSingleThreadedScheduler::Run(std::string* error) {
         SetError(error, "single-threaded scheduler cannot run twice");
         return false;
     }
-    const auto graphs = Graph_.Graphs();
-    if (graphs.size() != 1 || graphs.front().size() != 1) {
-        SetError(error, "single-threaded scheduler runs only a graph with one root");
-        return false;
-    }
     HasRun_ = true;
 
     Ready_.clear();
     Scheduled_.clear();
     Stats_ = {};
     TExecutionContext context{.State = &Execution_};
-    Schedule(graphs.front().front());
+    // Every root pulls its own inputs; the run ends when all of them finish.
+    size_t unfinishedRoots = 0;
+    for (const auto& graph : Graph_.Graphs()) {
+        unfinishedRoots += graph.size();
+        for (auto* root : graph) {
+            Schedule(root);
+        }
+    }
 
-    while (!Ready_.empty()) {
+    while (unfinishedRoots != 0 && !Ready_.empty()) {
         auto* node = Ready_.front();
         Ready_.pop_front();
         Scheduled_.erase(node);
         ++Stats_.Popped;
+        // Abandoned while queued: no consumer needs its output.
+        if (node->Retired.load(std::memory_order_acquire)) {
+            continue;
+        }
 
         ETaskResult state;
         try {
@@ -73,6 +79,10 @@ bool TSingleThreadedScheduler::Run(std::string* error) {
                 ++Stats_.Finished;
                 node->State.store(
                     ETaskState::Finished, std::memory_order_release);
+                Retire(*node);
+                if (IsRoot(*node)) {
+                    --unfinishedRoots;
+                }
             }
             ScheduleOutput(node);
         } else if (state == ETaskResult::WAITING) {
@@ -89,8 +99,9 @@ bool TSingleThreadedScheduler::Run(std::string* error) {
 }
 
 void TSingleThreadedScheduler::Schedule(TTaskNode* node) {
+    // A retired node is finished or abandoned.
     if (!node || Scheduled_.contains(node)
-        || node->State.load(std::memory_order_acquire) == ETaskState::Finished) {
+        || node->Retired.load(std::memory_order_acquire)) {
         return;
     }
     Ready_.push_back(node);

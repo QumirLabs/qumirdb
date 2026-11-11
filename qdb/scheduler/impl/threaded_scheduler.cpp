@@ -42,17 +42,18 @@ bool TThreadedScheduler::Run(std::string* error) {
         SetError(error, "threaded scheduler cannot run twice");
         return false;
     }
-    const auto graphs = Graph_.Graphs();
-    if (graphs.size() != 1 || graphs.front().size() != 1) {
-        SetError(error, "threaded scheduler runs only a graph with one root");
-        return false;
-    }
     HasRun_ = true;
-    Root_ = graphs.front().front();
 
-    FinishedCount_.store(0, std::memory_order_release);
     ResetStats();
-    Schedule(Root_);
+    // Every root pulls its own inputs; the run ends when all of them finish.
+    size_t roots = 0;
+    for (const auto& graph : Graph_.Graphs()) {
+        roots += graph.size();
+        for (auto* root : graph) {
+            Schedule(root);
+        }
+    }
+    UnfinishedRoots_.store(roots, std::memory_order_release);
 
     std::vector<std::thread> workers;
     workers.reserve(WorkerCount_);
@@ -82,7 +83,8 @@ void TThreadedScheduler::Cancel() {
 }
 
 void TThreadedScheduler::Schedule(TTaskNode* node) {
-    if (!node) {
+    // A retired node is finished or abandoned; external wakes for it are dropped too.
+    if (!node || node->Retired.load(std::memory_order_acquire)) {
         return;
     }
 
@@ -162,14 +164,15 @@ void TThreadedScheduler::ScheduleOutput(TTaskNode* node) {
 
 void TThreadedScheduler::Work() {
     TExecutionContext context{.State = &Execution_};
-    // Terminate once the root (sink) is Finished: all output the query needs has
-    // been produced. Nodes still unfinished at that point are upstream branches
-    // abandoned by early termination (a satisfied LIMIT stops pulling, leaving
-    // its producers blocked on a Finished consumer) - waiting for them to finish
-    // would deadlock. External waits on abandoned branches do not delay completion.
+    // Terminate once every root is Finished: all output the graph needs has
+    // been produced. Nodes still unfinished then feed only finished roots and
+    // were abandoned by early termination (a satisfied LIMIT stops pulling,
+    // leaving its producers blocked on a Finished consumer) - waiting for them to
+    // finish would deadlock. External waits on abandoned branches do not delay
+    // completion.
     auto done = [&] {
         return Failed_.load(std::memory_order_acquire) ||
-            Root_->State.load(std::memory_order_acquire) == ETaskState::Finished;
+            UnfinishedRoots_.load(std::memory_order_acquire) == 0;
     };
     // Brief spin on the work permit before blocking, so bursts of scheduling
     // are picked up without an OS wakeup; then park on the semaphore.
@@ -203,12 +206,15 @@ void TThreadedScheduler::Work() {
             node = PopReady();
         }
 
-        // The root may have finished while this node sat queued; abandon it
-        // rather than start (possibly heavy) upstream work no consumer needs, so
-        // cancellation after a satisfied LIMIT is prompt. Leaving it unrun is
-        // safe - the graph is being torn down.
+        // The last root may have finished while this node sat queued. Leaving it
+        // unrun is safe - the graph is being torn down.
         if (done()) {
             return;
+        }
+        // Abandoned while queued: no consumer needs its output, so it never runs,
+        // and a satisfied LIMIT stops its upstream promptly.
+        if (node->Retired.load(std::memory_order_acquire)) {
+            continue;
         }
 
         auto expected = ETaskState::Queued;
@@ -289,10 +295,10 @@ bool TThreadedScheduler::FinishRun(TTaskNode* node, ETaskState nextState) {
 void TThreadedScheduler::FinishNode(TTaskNode* node) {
     auto previous = node->State.exchange(ETaskState::Finished, std::memory_order_acq_rel);
     assert(previous == ETaskState::Running || previous == ETaskState::Reschedule);
-    FinishedCount_.fetch_add(1, std::memory_order_acq_rel);
-    if (node == Root_) {
-        // The sink is done: the query's output is complete. Wake every worker so
-        // they observe termination and exit instead of parking on the permit
+    Retire(*node);
+    if (IsRoot(*node) && UnfinishedRoots_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        // The last root is done: the graph's output is complete. Wake every worker
+        // so they observe termination and exit instead of parking on the permit
         // while upstream branches sit unfinished (abandoned by early termination).
         WorkAvailable_.release(static_cast<ptrdiff_t>(WorkerCount_));
     }

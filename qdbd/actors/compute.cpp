@@ -190,10 +190,6 @@ struct TComputeActor : public IBehaviorActor {
         if (error.empty()) {
             error = NScheduler::ValidateEndpoints(sealed, message.Endpoints);
         }
-        // The scheduler runs one root, and its Run() error would not reach the query actor.
-        if (error.empty() && sealed.Graphs().front().size() != 1) {
-            error = "compute actor runs only a graph with one root";
-        }
         if (!error.empty()) {
             SendError(ctx, "cannot start graph: " + error);
             return;
@@ -222,7 +218,7 @@ struct TComputeActor : public IBehaviorActor {
         SchedulerChannel = std::make_unique<NScheduler::TSchedulerChannel>(
             *Scheduler
         );
-        // Run() blocks until the graph's root finishes or the scheduler is cancelled.
+        // Run() blocks until every root of the graph finishes or the scheduler is cancelled.
         SchedulerThread = std::thread([this] {
             Scheduler->Run();
         });

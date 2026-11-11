@@ -1498,34 +1498,6 @@ TEST(DistributedAllocation, ComputeActorReportsGraphsItCannotBuild) {
     cluster.Pump();
 }
 
-// Two relays in one fragment: the scheduler runs one root, so the start fails.
-TEST(DistributedAllocation, ComputeActorRejectsAGraphWithTwoRoots) {
-    using namespace NQdb::NScheduler;
-    auto spec = RelaySpec();
-    spec.Connections.push_back(spec.Connections[0]);
-    spec.Nodes.push_back({.DebugKind = "source", .Body = TRemoteSourceNode{.Out = {1, 0}}});
-    spec.Nodes.push_back({.DebugKind = "sink", .Body = TRemoteSinkNode{.In = {1, 0}}});
-    spec.Edges.push_back({.Src = 2, .Dst = 3, .Connection = 1});
-    spec.Externals.push_back({.Id = 3, .Node = 3});
-    spec.Externals.push_back({.Id = 4, .Node = 2});
-    auto endpoints = RelayEndpoints();
-    endpoints.push_back({.Id = 3, .Kind = ERemoteEndpointKind::Sink, .PeerTaskId = 4});
-    endpoints.push_back({.Id = 4, .Kind = ERemoteEndpointKind::Source, .PeerTaskId = 3});
-
-    auto resources = std::make_shared<TRuntimeResources>();
-    TTestCluster cluster;
-    int statuses = 0;
-    std::vector<std::string> errors;
-    const auto probe = cluster.Follower.Register(std::make_unique<TOrchestratorProbe>(statuses, errors));
-    const auto actor = cluster.Follower.Register(std::unique_ptr<IActor>(CreateComputeActor(resources)));
-    cluster.Follower.Send<TTaskGraphMessage>(probe, actor, GraphMessage(spec, endpoints));
-    cluster.Pump();
-    EXPECT_EQ(errors, std::vector<std::string>{"cannot start graph: compute actor runs only a graph with one root"});
-    EXPECT_EQ(statuses, 0);
-    cluster.Follower.Send<TPoison>(probe, actor, TPoison{});
-    cluster.Pump();
-}
-
 TEST(DistributedAllocation, ComputeActorReleasesItsCounterExactlyOnce) {
     auto resources = std::make_shared<TRuntimeResources>();
     {
@@ -2370,6 +2342,128 @@ TEST(DistributedScheduler, SelectedRowsCrossNodesCompacted) {
     cluster.Pump();
     EXPECT_EQ(received, (std::vector<int64_t>{10, 30}));
     EXPECT_TRUE(senderIntact.load());
+}
+
+// One remote source feeds two remote sinks through a broadcast: a fragment
+// with two roots, like the partitioner cuts them. Each sink sends every row.
+TEST(DistributedScheduler, ComputeActorRunsAFragmentWithTwoRemoteSinks) {
+    using namespace NQdb::NScheduler;
+    TGraphSpec spec;
+    spec.Connections = {{.Kind = EConnectionKind::Broadcast, .DstCount = 2, .RowLayouts = {{.Width = 8}}}};
+    spec.Nodes = {
+        {.DebugKind = "source", .Body = TRemoteSourceNode{.Out = {0, 0}}},
+        {.DebugKind = "sink", .Body = TRemoteSinkNode{.In = {0, 0}}},
+        {.DebugKind = "sink", .Body = TRemoteSinkNode{.In = {0, 1}}},
+    };
+    spec.Edges = {{.Src = 0, .Dst = 1, .Connection = 0}, {.Src = 0, .Dst = 2, .Connection = 0, .DstLane = 1}};
+    spec.Externals = {{.Id = 1, .Node = 1}, {.Id = 2, .Node = 0}, {.Id = 3, .Node = 2}};
+
+    std::atomic<bool> senderIntact = false;
+    std::array<std::vector<int64_t>, 2> received;
+    std::array<std::atomic<bool>, 2> finished{};
+    auto resources = std::make_shared<TRuntimeResources>();
+    resources->Scheduler.WorkerCount = 2;
+    TTestCluster cluster;
+    std::map<std::string, int> statuses;
+    std::vector<std::string> errors;
+    const auto query = cluster.Follower.Register(std::make_unique<TReportProbe>(statuses, errors));
+    const auto peer = cluster.Follower.Register(std::make_unique<TBlackHole>());
+    std::vector<TRemoteEndpoint> endpoints{{.Id = 2, .Kind = ERemoteEndpointKind::Source, .PeerActor = peer}};
+    for (size_t i = 0; i < 2; ++i) {
+        const uint64_t sinkId = 1 + 2 * i;
+        const auto result = cluster.Leader.Register(std::make_unique<TResultProbe>(sinkId, [&, i](const TRowSet& rowSet) {
+            const auto* data = reinterpret_cast<const int64_t*>(rowSet.Columns[0].Data);
+            received[i].insert(received[i].end(), data, data + rowSet.RowCount);
+        }, finished[i]));
+        endpoints.push_back({.Id = sinkId, .Kind = ERemoteEndpointKind::Sink, .PeerActor = result});
+    }
+    const auto actor = cluster.Follower.Register(std::unique_ptr<IActor>(CreateComputeActor(resources)));
+    cluster.Follower.Send<TTaskGraphMessage>(query, actor, GraphMessage(spec, endpoints));
+    cluster.Follower.Send<TDataChunk>(query, actor, TDataChunk{
+        .DstTaskId = 2, .Seq = 1, .RowSet = SelectedInts({10, 20, 30, 40}, {1, 0, 1, 0}, &senderIntact)});
+    cluster.Follower.Send<TFinish>(query, actor, TFinish{.DstTaskId = 2});
+    const auto deadline = NNet::TClock::now() + std::chrono::seconds(10);
+    while (!(finished[0].load() && finished[1].load()) && errors.empty() && NNet::TClock::now() < deadline) {
+        cluster.Pump();
+    }
+    EXPECT_TRUE(finished[0].load());
+    EXPECT_TRUE(finished[1].load());
+    EXPECT_EQ(errors, std::vector<std::string>{});
+    cluster.Follower.Send<TPoison>(query, actor, TPoison{});
+    cluster.Pump();
+    EXPECT_EQ(received[0], (std::vector<int64_t>{10, 30}));
+    EXPECT_EQ(received[1], (std::vector<int64_t>{10, 30}));
+    EXPECT_TRUE(senderIntact.load());
+}
+
+// Two relays in one fragment: relay 1 gets its rows and finishes while relay 0
+// still waits on its remote source; relay 0 finishes once its rows arrive.
+TEST(DistributedScheduler, ComputeActorFinishesARootWhileAnotherWaitsOnItsSource) {
+    using namespace NQdb::NScheduler;
+    TGraphSpec spec;
+    spec.Connections = {{.RowLayouts = {{.Width = 8}}}, {.RowLayouts = {{.Width = 8}}}};
+    spec.Nodes = {
+        {.DebugKind = "source", .Body = TRemoteSourceNode{.Out = {0, 0}}},
+        {.DebugKind = "sink", .Body = TRemoteSinkNode{.In = {0, 0}}},
+        {.DebugKind = "source", .Body = TRemoteSourceNode{.Out = {1, 0}}},
+        {.DebugKind = "sink", .Body = TRemoteSinkNode{.In = {1, 0}}},
+    };
+    spec.Edges = {{.Src = 0, .Dst = 1, .Connection = 0}, {.Src = 2, .Dst = 3, .Connection = 1}};
+    // Relay i: source 2 + 2 * i -> sink 1 + 2 * i.
+    spec.Externals = {{.Id = 1, .Node = 1}, {.Id = 2, .Node = 0}, {.Id = 3, .Node = 3}, {.Id = 4, .Node = 2}};
+
+    std::array<std::atomic<bool>, 2> senderIntact{};
+    std::array<std::vector<int64_t>, 2> received;
+    std::array<std::atomic<bool>, 2> finished{};
+    auto resources = std::make_shared<TRuntimeResources>();
+    resources->Scheduler.WorkerCount = 2;
+    TTestCluster cluster;
+    std::map<std::string, int> statuses;
+    std::vector<std::string> errors;
+    const auto query = cluster.Follower.Register(std::make_unique<TReportProbe>(statuses, errors));
+    const auto peer = cluster.Follower.Register(std::make_unique<TBlackHole>());
+    std::vector<TRemoteEndpoint> endpoints;
+    for (size_t i = 0; i < 2; ++i) {
+        const uint64_t sinkId = 1 + 2 * i;
+        const auto result = cluster.Leader.Register(std::make_unique<TResultProbe>(sinkId, [&, i](const TRowSet& rowSet) {
+            const auto* data = reinterpret_cast<const int64_t*>(rowSet.Columns[0].Data);
+            received[i].insert(received[i].end(), data, data + rowSet.RowCount);
+        }, finished[i]));
+        endpoints.push_back({.Id = sinkId + 1, .Kind = ERemoteEndpointKind::Source, .PeerActor = peer});
+        endpoints.push_back({.Id = sinkId, .Kind = ERemoteEndpointKind::Sink, .PeerActor = result});
+    }
+    const auto actor = cluster.Follower.Register(std::unique_ptr<IActor>(CreateComputeActor(resources)));
+    cluster.Follower.Send<TTaskGraphMessage>(query, actor, GraphMessage(spec, endpoints));
+    auto deliver = [&](size_t relay, std::vector<int64_t> values) {
+        const uint64_t source = 2 + 2 * relay;
+        cluster.Follower.Send<TDataChunk>(query, actor, TDataChunk{
+            .DstTaskId = source, .Seq = 1, .RowSet = SelectedInts(std::move(values), {1, 0, 1, 0}, &senderIntact[relay])});
+        cluster.Follower.Send<TFinish>(query, actor, TFinish{.DstTaskId = source});
+    };
+    // The deadlines only guard against a hang.
+    auto pumpUntil = [&](auto done, std::chrono::milliseconds limit) {
+        const auto deadline = NNet::TClock::now() + limit;
+        while (!done() && errors.empty() && NNet::TClock::now() < deadline) {
+            cluster.Pump();
+        }
+    };
+
+    deliver(1, {50, 60, 70, 80});
+    pumpUntil([&] { return finished[1].load(); }, std::chrono::seconds(10));
+    EXPECT_TRUE(finished[1].load());
+    // The workers park with one root finished; relay 0 still waits.
+    pumpUntil([] { return false; }, std::chrono::milliseconds(100));
+    EXPECT_FALSE(finished[0].load());
+    deliver(0, {10, 20, 30, 40});
+    pumpUntil([&] { return finished[0].load(); }, std::chrono::seconds(10));
+    EXPECT_TRUE(finished[0].load());
+    EXPECT_EQ(errors, std::vector<std::string>{});
+    cluster.Follower.Send<TPoison>(query, actor, TPoison{});
+    cluster.Pump();
+    EXPECT_EQ(received[0], (std::vector<int64_t>{10, 30}));
+    EXPECT_EQ(received[1], (std::vector<int64_t>{50, 70}));
+    EXPECT_TRUE(senderIntact[0].load());
+    EXPECT_TRUE(senderIntact[1].load());
 }
 
 int main(int argc, char** argv) {

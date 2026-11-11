@@ -21,6 +21,7 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
@@ -610,6 +611,269 @@ TEST(SchedulerRuntimeAdapter, ThreadedRunCompletesWithAbandonedWaitingBranch) {
     EXPECT_TRUE(waitState->Waited.load());
     EXPECT_EQ(sinkState->Batches, 1);
     EXPECT_EQ(scheduler.Stats().Waiting, 1u);
+}
+
+namespace {
+
+// One graph with several roots built from counting sources and sinks.
+struct TMultiRootGraph {
+    // Outlives Graph: its connections release queued row sets at teardown.
+    std::shared_ptr<std::atomic<int>> DestroyCount = std::make_shared<std::atomic<int>>(0);
+    std::unique_ptr<TTaskGraph> Graph = std::make_unique<TTaskGraph>();
+
+    IConnection& Connect(std::unique_ptr<IConnection> connection) {
+        return Graph->AddConnection(std::move(connection));
+    }
+
+    // Batch i has i rows; a negative count never finishes.
+    TTaskNode& AddSource(IConnection& output, int batches, bool throws = false) {
+        auto code = std::make_shared<TSourceCode>(
+            [destroyCount = DestroyCount, throws](void* raw, TRowSet& rowSet) {
+                if (throws) {
+                    throw std::runtime_error("expected task failure");
+                }
+                auto* source = static_cast<TSourceState*>(raw);
+                if (source->End >= 0 && source->Next > source->End) {
+                    return ETaskResult::FINISHED;
+                }
+                rowSet = MakeRowSet(source->Next++, destroyCount.get());
+                return ETaskResult::OK;
+            });
+        return Graph->AddOwnedNode(std::make_unique<TSourceTask>(
+            code,
+            std::make_shared<TSourceState>(TSourceState{.Next = 1, .End = batches}),
+            TOutputPort{.Connection = &output}));
+    }
+
+    // Passes the first `limit` batches through, then finishes.
+    TTaskNode& AddLimit(TTaskNode& producer, IConnection& input, size_t lane, IConnection& output, int limit) {
+        struct TLimitState : ITaskState {
+            int Batches = 0;
+        };
+        auto code = std::make_shared<TBlockingCode>(
+            [limit](ITaskState& raw, TInputPort& in, TRowSet& out) {
+                auto& state = static_cast<TLimitState&>(raw);
+                if (state.Batches == limit) {
+                    return ETaskResult::FINISHED;
+                }
+                const auto fetch = in.Fetch(out);
+                if (fetch == EFetchResult::NO_DATA) {
+                    return ETaskResult::NEED_DATA;
+                }
+                if (fetch == EFetchResult::FINISHED) {
+                    return ETaskResult::FINISHED;
+                }
+                ++state.Batches;
+                return ETaskResult::OK;
+            });
+        auto& node = Graph->AddOwnedNode(std::make_unique<TBlockingTask>(
+            code,
+            std::make_shared<TLimitState>(),
+            TInputPort{.Connection = &input, .Lane = lane},
+            TOutputPort{.Connection = &output}));
+        Graph->AddEdge(producer, node, input, 0, lane);
+        return node;
+    }
+
+    std::shared_ptr<TSinkState> AddSink(TTaskNode& producer, IConnection& input, size_t lane = 0) {
+        auto state = std::make_shared<TSinkState>();
+        auto code = std::make_shared<TSinkCode>(
+            [](void* raw, const TRowSet& rowSet) {
+                auto* sink = static_cast<TSinkState*>(raw);
+                sink->Rows += static_cast<int>(rowSet.RowCount);
+                ++sink->Batches;
+                return ETaskResult::OK;
+            });
+        auto& node = Graph->AddOwnedNode(std::make_unique<TSinkTask>(
+            code, state, TInputPort{.Connection = &input, .Lane = lane}));
+        Graph->AddEdge(producer, node, input, 0, lane);
+        return state;
+    }
+
+    // No workers selects the single-threaded scheduler.
+    bool Run(size_t workers, std::string& error) {
+        const auto sealed = Graph->Seal(&error);
+        if (!sealed) {
+            return false;
+        }
+        if (workers == 0) {
+            return TSingleThreadedScheduler(sealed).Run(&error);
+        }
+        return TThreadedScheduler(sealed, workers).Run(&error);
+    }
+};
+
+constexpr size_t SchedulerWorkers[] = {0, 1, 4};
+
+} // namespace
+
+TEST(SchedulerMultiRoot, RunsTwoIndependentChains) {
+    for (size_t workers : SchedulerWorkers) {
+        SCOPED_TRACE(workers);
+        TMultiRootGraph graph;
+        auto& first = graph.Connect(std::make_unique<TOneToOneConnection>());
+        auto& second = graph.Connect(std::make_unique<TOneToOneConnection>());
+        const auto firstSink = graph.AddSink(graph.AddSource(first, 3), first);
+        const auto secondSink = graph.AddSink(graph.AddSource(second, 5), second);
+        std::string error;
+        ASSERT_TRUE(graph.Run(workers, error)) << error;
+        EXPECT_EQ(firstSink->Rows, 6);
+        EXPECT_EQ(secondSink->Rows, 15);
+        EXPECT_EQ(graph.DestroyCount->load(), 8);
+    }
+}
+
+TEST(SchedulerMultiRoot, RootsSharingAnUpstreamGetEveryRow) {
+    for (size_t workers : SchedulerWorkers) {
+        SCOPED_TRACE(workers);
+        TMultiRootGraph graph;
+        auto& broadcast = graph.Connect(std::make_unique<TBroadcastConnection>());
+        broadcast.Resize(1, 2);
+        auto& source = graph.AddSource(broadcast, 5);
+        const auto left = graph.AddSink(source, broadcast, 0);
+        const auto right = graph.AddSink(source, broadcast, 1);
+        std::string error;
+        ASSERT_TRUE(graph.Run(workers, error)) << error;
+        EXPECT_EQ(left->Rows, 15);
+        EXPECT_EQ(right->Rows, 15);
+        EXPECT_EQ(graph.DestroyCount->load(), 5);
+    }
+}
+
+// Two LIMIT 2 roots finish first. One shares its source with a root that still
+// reads every batch; the other leaves its endless source blocked for good.
+TEST(SchedulerMultiRoot, LimitRootsFinishWhileAnotherRootKeepsReading) {
+    constexpr int batches = 20;
+    for (size_t workers : SchedulerWorkers) {
+        SCOPED_TRACE(workers);
+        TMultiRootGraph graph;
+        // Holds every batch: a finished consumer cannot block the shared source.
+        auto& broadcast = graph.Connect(std::make_unique<TBroadcastConnection>(batches));
+        broadcast.Resize(1, 2);
+        auto& sharedLimited = graph.Connect(std::make_unique<TOneToOneConnection>());
+        auto& endless = graph.Connect(std::make_unique<TOneToOneConnection>());
+        auto& endlessLimited = graph.Connect(std::make_unique<TOneToOneConnection>());
+
+        auto& shared = graph.AddSource(broadcast, batches);
+        const auto sharedLimit = graph.AddSink(
+            graph.AddLimit(shared, broadcast, 0, sharedLimited, 2), sharedLimited);
+        const auto full = graph.AddSink(shared, broadcast, 1);
+        auto& endlessSource = graph.AddSource(endless, -1);
+        const auto endlessLimit = graph.AddSink(
+            graph.AddLimit(endlessSource, endless, 0, endlessLimited, 2), endlessLimited);
+
+        std::string error;
+        ASSERT_TRUE(graph.Run(workers, error)) << error;
+        EXPECT_EQ(sharedLimit->Rows, 3);
+        EXPECT_EQ(full->Rows, batches * (batches + 1) / 2);
+        EXPECT_EQ(endlessLimit->Rows, 3);
+        EXPECT_NE(endlessSource.State.load(), ETaskState::Finished);
+    }
+}
+
+// Root A is LIMIT 1 over a gather of a one-batch source and a task that reads an
+// endless source to the end, like an aggregation. Once the LIMIT finished, that
+// branch feeds nothing, so it must stop while root B still runs.
+TEST(SchedulerMultiRoot, BranchFeedingOnlyAFinishedRootStops) {
+    constexpr int batchesAfterA = 2000;
+    for (size_t workers : SchedulerWorkers) {
+        SCOPED_TRACE(workers);
+        TMultiRootGraph graph;
+        auto rootAFinished = std::make_shared<std::atomic<bool>>(false);
+        auto abandonedBatches = std::make_shared<std::atomic<int>>(0);
+        auto& gather = graph.Connect(std::make_unique<TGatherConnection>());
+        gather.Resize(2, 1);
+        auto& endless = graph.Connect(std::make_unique<TOneToOneConnection>());
+        auto& limited = graph.Connect(std::make_unique<TOneToOneConnection>());
+        auto& chain = graph.Connect(std::make_unique<TOneToOneConnection>());
+
+        // Counts the batches it makes after root A finished.
+        auto endlessCode = std::make_shared<TSourceCode>(
+            [destroyCount = graph.DestroyCount, rootAFinished, abandonedBatches](void*, TRowSet& rowSet) {
+                if (rootAFinished->load()) {
+                    abandonedBatches->fetch_add(1);
+                }
+                rowSet = MakeRowSet(1, destroyCount.get());
+                return ETaskResult::OK;
+            });
+        auto drainCode = std::make_shared<TBlockingCode>(
+            [](ITaskState&, TInputPort& input, TRowSet&) {
+                TRowSet rowSet{};
+                for (;;) {
+                    const auto fetch = input.Fetch(rowSet);
+                    if (fetch == EFetchResult::NO_DATA) {
+                        return ETaskResult::NEED_DATA;
+                    }
+                    if (fetch == EFetchResult::FINISHED) {
+                        return ETaskResult::FINISHED;
+                    }
+                    Release(&rowSet);
+                }
+            });
+        auto& endlessSource = graph.Graph->AddOwnedNode(std::make_unique<TSourceTask>(
+            endlessCode, nullptr, TOutputPort{.Connection = &endless}));
+        auto& drain = graph.Graph->AddOwnedNode(std::make_unique<TBlockingTask>(
+            drainCode,
+            std::make_shared<ITaskState>(),
+            TInputPort{.Connection = &endless},
+            TOutputPort{.Connection = &gather, .Lane = 1}));
+        graph.Graph->AddEdge(endlessSource, drain, endless);
+        auto& limit = graph.AddLimit(graph.AddSource(gather, 1), gather, 0, limited, 1);
+        graph.Graph->AddEdge(drain, limit, gather, 1, 0);
+
+        auto rootA = std::make_shared<TSinkState>();
+        auto rootACode = std::make_shared<TSinkCode>(
+            [](void* raw, const TRowSet& rowSet) {
+                auto* sink = static_cast<TSinkState*>(raw);
+                sink->Rows += static_cast<int>(rowSet.RowCount);
+                ++sink->Batches;
+                return ETaskResult::OK;
+            },
+            [rootAFinished](void*) {
+                rootAFinished->store(true);
+                return ETaskResult::OK;
+            });
+        auto& rootANode = graph.Graph->AddOwnedNode(std::make_unique<TSinkTask>(
+            rootACode, rootA, TInputPort{.Connection = &limited}));
+        graph.Graph->AddEdge(limit, rootANode, limited);
+
+        // Root B runs on for `batchesAfterA` batches after root A finished.
+        auto chainCode = std::make_shared<TSourceCode>(
+            [destroyCount = graph.DestroyCount, rootAFinished](void* raw, TRowSet& rowSet) {
+                auto* source = static_cast<TSourceState*>(raw);
+                if (rootAFinished->load() && ++source->Next > batchesAfterA) {
+                    return ETaskResult::FINISHED;
+                }
+                rowSet = MakeRowSet(1, destroyCount.get());
+                return ETaskResult::OK;
+            });
+        auto& chainSource = graph.Graph->AddOwnedNode(std::make_unique<TSourceTask>(
+            chainCode, std::make_shared<TSourceState>(), TOutputPort{.Connection = &chain}));
+        const auto rootB = graph.AddSink(chainSource, chain);
+
+        std::string error;
+        ASSERT_TRUE(graph.Run(workers, error)) << error;
+        EXPECT_EQ(rootA->Batches, 1);
+        EXPECT_EQ(rootA->Rows, 1);
+        EXPECT_GE(rootB->Batches, batchesAfterA);
+        // Root A can finish before the LIMIT's worker retires it, so a few batches may
+        // slip through; without abandonment there are thousands.
+        EXPECT_LT(abandonedBatches->load(), 100);
+    }
+}
+
+TEST(SchedulerMultiRoot, ErrorInOneBranchFailsTheRun) {
+    for (size_t workers : SchedulerWorkers) {
+        SCOPED_TRACE(workers);
+        TMultiRootGraph graph;
+        auto& endless = graph.Connect(std::make_unique<TOneToOneConnection>());
+        auto& failing = graph.Connect(std::make_unique<TOneToOneConnection>());
+        graph.AddSink(graph.AddSource(endless, -1), endless);
+        graph.AddSink(graph.AddSource(failing, 1, true), failing);
+        std::string error;
+        EXPECT_FALSE(graph.Run(workers, error));
+        EXPECT_EQ(error, "expected task failure");
+    }
 }
 
 TEST(SchedulerRuntimeAdapter, PartitionTasksShareCodeButOwnState) {

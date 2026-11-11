@@ -37,6 +37,10 @@ struct TTaskNode {
     std::vector<TTaskEdge*> Inbound;
     std::vector<TTaskEdge*> Outbound;
     std::atomic<ETaskState> State = ETaskState::Idle;
+    // Outbound edges whose consumer is not retired yet; set when the graph is sealed.
+    std::atomic<size_t> LiveConsumers = 0;
+    // Finished or abandoned (see Retire): the node never runs again.
+    std::atomic<bool> Retired = false;
 };
 
 struct TTaskEdge {
@@ -50,6 +54,13 @@ struct TTaskEdge {
     // join partitions target input 0 and all right partitions target input 1.
     size_t ExecInput = 0;
 };
+
+// A root has no rowset output; Graphs() lists the roots of each subgraph.
+bool IsRoot(const TTaskNode& node);
+
+// Retires a finished node. A producer that is not a root and whose consumers are
+// all retired is abandoned, and so on upstream: nobody needs its output.
+void Retire(TTaskNode& node);
 
 // A node woken from outside the graph (e.g. by a remote channel) under `Id`.
 struct TExternalNode {
