@@ -55,7 +55,7 @@ void Rebind(TTaskNode& node, const TPortRebind& rebind) {
 
 // Replaces split.Edge by Src -> remote sink and remote source -> Dst. Both
 // start as copies of it; the rebound side then uses lane 0 of the new connection.
-void Cut(
+std::pair<TTaskNode*, TTaskNode*> Cut(
     TTaskGraph& graph,
     TEdgeSplit& split,
     std::vector<std::unique_ptr<TTaskEdge>>& edges,
@@ -101,6 +101,7 @@ void Cut(
     Rebind(source, {.Kind = EPortKind::Output, .To = sourceEdge->Connection, .ToLane = sourceEdge->SrcLane});
     edges.push_back(std::move(sinkEdge));
     edges.push_back(std::move(sourceEdge));
+    return {&sink, &source};
 }
 
 // Union-find over rowset edges: each piece takes the color of its remote
@@ -338,7 +339,7 @@ TSealedTaskGraph TTaskGraph::Seal(std::string* error) {
         }
         Sealed_ = true;
     }
-    return TSealedTaskGraph(Graphs_, Nodes_.size(), Externals_);
+    return TSealedTaskGraph(Graphs_, Nodes_.size(), Externals_, Cuts_);
 }
 
 TSealedTaskGraph TTaskGraph::Apply(TSplitPlan&& plan) {
@@ -346,7 +347,7 @@ TSealedTaskGraph TTaskGraph::Apply(TSplitPlan&& plan) {
         throw std::logic_error("split plan applies only to a sealed task graph");
     }
     if (plan.Splits.empty()) {
-        return TSealedTaskGraph(Graphs_, Nodes_.size(), Externals_);
+        return TSealedTaskGraph(Graphs_, Nodes_.size(), Externals_, Cuts_);
     }
     if (Split_) {
         throw std::logic_error("task graph is already split");
@@ -379,12 +380,18 @@ TSealedTaskGraph TTaskGraph::Apply(TSplitPlan&& plan) {
     }
 
     Sealed_ = false;
+    uint64_t externalBase = Externals_.empty() ? 0 : Externals_.back().Id + 1;
+    Cuts_.resize(plan.Splits.size());
     std::vector<std::optional<int>> colors(Nodes_.size());
     std::vector<std::unique_ptr<TTaskEdge>> edges;
     edges.reserve(Edges_.size() + splits.size());
     for (auto& edge : Edges_) {
         if (auto it = splits.find(edge.get()); it != splits.end()) {
-            Cut(*this, *it->second, edges, colors);
+            const auto index = it->second - plan.Splits.data();
+            const auto [sink, source] = Cut(*this, *it->second, edges, colors);
+            Cuts_[index] = {sink, source, it->second->SinkColor, it->second->SourceColor};
+            Externals_.push_back({externalBase + 2 * index, sink});
+            Externals_.push_back({externalBase + 2 * index + 1, source});
         } else {
             edges.push_back(std::move(edge));
         }
@@ -398,7 +405,7 @@ TSealedTaskGraph TTaskGraph::Apply(TSplitPlan&& plan) {
     Graphs_ = GroupByColor(Nodes_, Edges_, colors);
     Split_ = true;
     Sealed_ = true;
-    return TSealedTaskGraph(Graphs_, Nodes_.size(), Externals_);
+    return TSealedTaskGraph(Graphs_, Nodes_.size(), Externals_, Cuts_);
 }
 
 void TTaskGraph::CheckMutable() const {
@@ -593,6 +600,10 @@ void TTaskGraph::PrintConnectionStats(std::ostream& out) const {
 
 std::span<const std::unique_ptr<IConnection>> TTaskGraph::Connections() const {
     return OwnedConnections_;
+}
+
+std::span<const TCut> TTaskGraph::Cuts() const {
+    return Cuts_;
 }
 
 std::span<const TExternalNode> TTaskGraph::Externals() const {

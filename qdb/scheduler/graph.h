@@ -91,6 +91,14 @@ struct TSplitPlan {
     std::vector<TEdgeSplit> Splits;
 };
 
+// A split edge after Apply: the placeholders and the colors they connect.
+struct TCut {
+    TTaskNode* Sink = nullptr;
+    TTaskNode* Source = nullptr;
+    int SinkColor = 0;
+    int SourceColor = 0;
+};
+
 // A validated, frozen graph; only TTaskGraph::Seal() and Apply() make a non-empty one.
 class TSealedTaskGraph {
 public:
@@ -103,6 +111,11 @@ public:
     // See TTaskGraph::Graphs().
     std::span<const std::vector<TTaskNode*>> Graphs() const {
         return Graphs_;
+    }
+
+    // See TTaskGraph::Cuts().
+    std::span<const TCut> Cuts() const {
+        return Cuts_;
     }
 
     size_t TaskCount() const {
@@ -118,16 +131,19 @@ private:
     TSealedTaskGraph(
         std::span<const std::vector<TTaskNode*>> graphs,
         size_t taskCount,
-        std::span<const TExternalNode> externals)
+        std::span<const TExternalNode> externals,
+        std::span<const TCut> cuts)
         : Graphs_(graphs)
         , TaskCount_(taskCount)
         , Externals_(externals)
+        , Cuts_(cuts)
     {}
 
     std::span<const std::vector<TTaskNode*>> Graphs_;
     size_t TaskCount_ = 0;
     // Sorted by Id.
     std::span<const TExternalNode> Externals_;
+    std::span<const TCut> Cuts_;
 };
 
 class TTaskGraph {
@@ -160,9 +176,9 @@ public:
 
     // Builds adjacency, validates and freezes the graph; empty on error.
     TSealedTaskGraph Seal(std::string* error = nullptr);
-    // Cuts the plan's edges of a sealed graph, once, into one subgraph per
-    // color (colors 0..K-1). Throws std::logic_error on a plan it cannot
-    // apply; after that the graph may only be destroyed.
+    // Cuts the plan's edges of a sealed graph, once, into one subgraph per color
+    // (0..K-1). Throws std::logic_error on a bad plan, then the graph may only be
+    // destroyed. Sealed views taken before Apply become invalid.
     TSealedTaskGraph Apply(TSplitPlan&& plan);
     void SetConnectionStatsEnabled(bool enabled);
     void Print(std::ostream& out) const;
@@ -175,6 +191,9 @@ public:
     // ExecutionSlot order. Seal() makes one of all roots; Apply() makes one per
     // color, so Graphs()[c] is the fragment of color c.
     const std::vector<std::vector<TTaskNode*>>& Graphs() const;
+    // The cuts of Apply() in plan order; empty if not split. Cut i's sink and source
+    // are external under base + 2i and base + 2i + 1, base = past the largest old id.
+    std::span<const TCut> Cuts() const;
     // Owned connections in creation order.
     std::span<const std::unique_ptr<IConnection>> Connections() const;
     // Marked nodes; sorted by id once the graph is sealed.
@@ -192,6 +211,7 @@ private:
     std::vector<std::unique_ptr<TTaskEdge>> Edges_;
     std::vector<TTaskNode*> Leaves_;
     std::vector<TExternalNode> Externals_;
+    std::vector<TCut> Cuts_;
     std::vector<std::vector<TTaskNode*>> Graphs_;
     bool Sealed_ = false;
     bool Split_ = false;
