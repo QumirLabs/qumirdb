@@ -1582,6 +1582,74 @@ TEST(DistributedHttp, QueryResultAndErrorKeepTheirStatusCodes) {
 
 namespace {
 
+// Plays the gateway: keeps the plan width of the query it gets and answers.
+class TPlanWidthProbe : public IActor {
+public:
+    explicit TPlanWidthProbe(std::vector<std::optional<size_t>>& widths)
+        : Widths_(widths)
+    {}
+
+    void Receive(TMessageId messageId, TBlob blob, TActorContext::TPtr ctx) override {
+        ASSERT_EQ(messageId, TExecuteQuery::MessageId);
+        Widths_.push_back(DeserializeNear<TExecuteQuery>(blob).PlanWidth);
+        ctx->Send<TExecuteQueryResponse>(ctx->Sender(), TExecuteQueryResponse{.Response = "ok"});
+    }
+
+private:
+    std::vector<std::optional<size_t>>& Widths_;
+};
+
+} // namespace
+
+// X-Qdb-Plan-Width reaches the query as its plan width; a bad value is the client's error.
+TEST(DistributedHttp, PlanWidthHeaderReachesTheQuery) {
+    struct TCase {
+        std::string Header;
+        int Status = 200;
+        std::optional<size_t> Width;
+    };
+    const std::vector<TCase> cases{
+        {.Header = ""},
+        {.Header = "X-Qdb-Plan-Width: 16\r\n", .Width = 16},
+        {.Header = "x-qdb-plan-width: 4096 \r\n", .Width = 4096},
+        {.Header = "X-Qdb-Plan-Width: 0\r\n", .Status = 400},
+        {.Header = "X-Qdb-Plan-Width: 4097\r\n", .Status = 400},
+        {.Header = "X-Qdb-Plan-Width: -2\r\n", .Status = 400},
+        {.Header = "X-Qdb-Plan-Width: 16x\r\n", .Status = 400},
+        {.Header = "X-Qdb-Plan-Width: \r\n", .Status = 400},
+    };
+    for (const auto& c : cases) {
+        SCOPED_TRACE(c.Header);
+        TTestCluster cluster;
+        std::vector<std::optional<size_t>> widths;
+        const auto gateway = cluster.Follower.Register(std::make_unique<TPlanWidthProbe>(widths));
+        auto router = NHttp::CreateRouter(&cluster.Follower, gateway);
+        NNet::TRequest request("POST /api/run HTTP/1.1\r\n" + c.Header + "Content-Length: 0\r\n\r\n",
+            [](char*, size_t) -> NNet::TFuture<ssize_t> { co_return 0; });
+        std::string output;
+        NNet::TResponse response([&](const void* data, size_t size) -> NNet::TFuture<ssize_t> {
+            output.append(static_cast<const char*>(data), size);
+            co_return size;
+        });
+        auto result = router->HandleRequest(request, response);
+        const auto deadline = NNet::TClock::now() + std::chrono::seconds(2);
+        while (!result.done() && NNet::TClock::now() < deadline) {
+            cluster.Pump();
+        }
+        ASSERT_TRUE(result.done());
+        ASSERT_NO_THROW(result.await_resume());
+        EXPECT_EQ(response.StatusCode(), c.Status);
+        if (c.Status == 200) {
+            EXPECT_EQ(widths, std::vector<std::optional<size_t>>{c.Width});
+        } else {
+            EXPECT_TRUE(widths.empty());
+            EXPECT_NE(output.find("X-Qdb-Plan-Width must be an integer in [1, 4096]"), std::string::npos);
+        }
+    }
+}
+
+namespace {
+
 class TFakeNotifier : public NNet::INotifier {
 public:
     void Notify() override {}
@@ -2886,6 +2954,7 @@ TEST(DistributedScheduler, QueryActorRunsAQueryOnEveryNode) {
     const auto leaderActors = cluster.Leader.ActorsSize();
 
     TDecimalsCompiler compiler;
+    size_t index = 0;
     for (const std::string sql : {
              "SELECT id % 7 AS k, COUNT(*) AS n, SUM(d15) AS total, MIN(s) AS lo FROM t "
              "WHERE id % 3 <> 0 GROUP BY id % 7 ORDER BY k",
@@ -2895,13 +2964,15 @@ TEST(DistributedScheduler, QueryActorRunsAQueryOnEveryNode) {
              LateLookupSql,
          }) {
         SCOPED_TRACE(sql);
+        // Every other query plans for a width of 4 instead of the query actor's 2 workers.
+        const auto width = index++ % 2 == 1 ? std::optional<size_t>(4) : std::nullopt;
         std::optional<TExecuteQueryResponse> answer;
         std::vector<std::string> log;
         const auto client = cluster.Follower.Register(std::make_unique<TAnswerProbe>(answer));
         const auto query = cluster.Follower.Register(std::unique_ptr<IActor>(CreateQueryActor(
             [&] { return compiler.MakeQueryCompiler(); }, settings,
             [&](const std::string& line) { log.push_back(line); })));
-        cluster.Follower.Send<TExecuteQuery>(client, query, TExecuteQuery{.Query = sql});
+        cluster.Follower.Send<TExecuteQuery>(client, query, TExecuteQuery{.Query = sql, .PlanWidth = width});
         // The deadline only guards against a hang.
         const auto queryDeadline = NNet::TClock::now() + std::chrono::seconds(60);
         while (!answer && NNet::TClock::now() < queryDeadline) {
@@ -2909,6 +2980,8 @@ TEST(DistributedScheduler, QueryActorRunsAQueryOnEveryNode) {
         }
         ASSERT_TRUE(answer);
         ASSERT_TRUE(answer->Response) << answer->Response.error().ToString();
+        const auto lowering = "Query: lowering for " + std::to_string(width.value_or(2)) + " workers";
+        EXPECT_TRUE(std::ranges::contains(log, lowering));
         EXPECT_TRUE(std::ranges::contains(log, std::string("Query: started 2 fragments")));
         const auto expected = RunLocally(sql, settings);
         EXPECT_GT(std::ranges::count(expected, '\n'), 2);

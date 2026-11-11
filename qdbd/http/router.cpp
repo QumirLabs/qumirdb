@@ -7,6 +7,12 @@
 
 #include "router.h"
 
+#include <algorithm>
+#include <cctype>
+#include <charconv>
+#include <optional>
+#include <string_view>
+
 using namespace NNet;
 using namespace NNet::NActors;
 
@@ -16,6 +22,34 @@ namespace NQdb {
 namespace NHttp {
 
 namespace {
+
+constexpr std::string_view PlanWidthHeader = "X-Qdb-Plan-Width";
+constexpr size_t MaxPlanWidth = 4096;
+
+// HTTP header names are case-insensitive.
+std::optional<std::string_view> FindHeader(const TRequest& request, std::string_view name) {
+    for (const auto& [key, value] : request.Headers()) {
+        if (key.size() == name.size() && std::equal(key.begin(), key.end(), name.begin(), [](char a, char b) {
+                return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
+            }))
+        {
+            return value;
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<size_t> ParsePlanWidth(std::string_view text) {
+    while (!text.empty() && (text.back() == ' ' || text.back() == '\t')) {
+        text.remove_suffix(1);
+    }
+    size_t width = 0;
+    const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), width);
+    if (error != std::errc() || end != text.data() + text.size() || width == 0 || width > MaxPlanWidth) {
+        return std::nullopt;
+    }
+    return width;
+}
 
 struct TRouter final : public IRouter {
     explicit TRouter(TActorSystem* actorSystem, TActorId gatewayId)
@@ -29,7 +63,7 @@ struct TRouter final : public IRouter {
             response.SetStatus(200);
             response.SetHeader("Access-Control-Allow-Origin", "*");
             response.SetHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-            response.SetHeader("Access-Control-Allow-Headers", "Content-Type");
+            response.SetHeader("Access-Control-Allow-Headers", "Content-Type, X-Qdb-Plan-Width");
             response.SetHeader("Content-Length", "0");
             co_await response.SendHeaders();
             co_return;
@@ -46,9 +80,20 @@ struct TRouter final : public IRouter {
         const auto& path = request.Uri().Path();
         if (path == "/api/run") {
             std::string body = co_await request.ReadBodyFull();
+            // The width the client plans for, e.g. nodes x workers of the cluster.
+            std::optional<size_t> planWidth;
+            if (const auto header = FindHeader(request, PlanWidthHeader)) {
+                planWidth = ParsePlanWidth(*header);
+                if (!planWidth) {
+                    co_return co_await SendText(response,
+                        "X-Qdb-Plan-Width must be an integer in [1, " + std::to_string(MaxPlanWidth) + "]",
+                        "text/plain; charset=utf-8", 400);
+                }
+            }
 
             auto res = co_await ActorSystem->Ask<TExecuteQueryResponse>(GatewayId, TExecuteQuery {
-                .Query = std::move(body)
+                .Query = std::move(body),
+                .PlanWidth = planWidth,
             });
 
             if (res.Response) {
