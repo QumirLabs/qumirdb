@@ -79,12 +79,19 @@ start() {
             return 1
         fi
     done
-    # HTTP answers before the scheduler has seen the nodes: wait until a real query is not refused (503).
-    local deadline=$((SECONDS + READY_TIMEOUT)) code
-    until code="$(curl -s --max-time 10 -o /dev/null -w '%{http_code}' --data-binary 'SELECT count(*) FROM region' \
-            "http://${hosts[0]}:$((HTTP_PORT_BASE + 1))/api/run")" && [[ "$code" != 503 && "$code" != 000 ]]; do
+    # HTTP answers before the scheduler has seen every node. Repeat a scan until it is not refused (503)
+    # and node 1 logs one fragment per node, so benchmarks never start on a partial cluster.
+    local deadline=$((SECONDS + READY_TIMEOUT)) code before log="$CLUSTER_DIR/node1.log"
+    while :; do
+        before="$(grep -c 'Query: started' "$log" || true)"
+        code="$(curl -s --max-time 10 -o /dev/null -w '%{http_code}' --data-binary 'SELECT count(*) FROM lineitem' \
+            "http://${hosts[0]}:$((HTTP_PORT_BASE + 1))/api/run")" || code=000
+        if [[ "$code" == 200 && "$(grep -c 'Query: started' "$log" || true)" -gt "$before" ]] \
+            && grep 'Query: started' "$log" | tail -n 1 | grep -q "started $nodes fragments"; then
+            break
+        fi
         if (( SECONDS >= deadline )); then
-            echo "cluster has no live compute nodes after ${READY_TIMEOUT}s, see $CLUSTER_DIR" >&2
+            echo "cluster did not start $nodes fragments after ${READY_TIMEOUT}s, see $CLUSTER_DIR" >&2
             return 1
         fi
         for i in $(seq 1 "$nodes"); do
