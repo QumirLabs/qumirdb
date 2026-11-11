@@ -103,7 +103,6 @@ struct TBaseBehavior {
 
     void Execute(TExecuteQuery& req, TActorContext::TPtr& ctx) {
         Logger("Query: compiling");
-        const auto planStart = TClock::now();
         State->RespondTo = ctx->Sender();
         std::istringstream input(req.Query);
         auto parseResult = State->Compiler.Parse(input);
@@ -111,6 +110,7 @@ struct TBaseBehavior {
             Complete(std::unexpected(parseResult.error()), ctx);
             return;
         }
+        const auto planStart = TClock::now();
         if (parseResult->Explain) {
             std::ostringstream explainOutput;
             for (auto& statement : parseResult.value().Statements) {
@@ -234,10 +234,10 @@ struct TBaseBehavior {
             ctx->Send<TPoison>(actorIds[i], TPoison{});
         }
         State->ComputeActors.resize(messages.size());
+        State->ExecuteStart = TClock::now();
         for (size_t i = 0; i < messages.size(); ++i) {
             ctx->Send<TTaskGraphMessage>(actorIds[i], std::move(messages[i]));
         }
-        State->ExecuteStart = TClock::now();
         Logger("Query: started " + std::to_string(messages.size()) + " fragments");
         return true;
     }

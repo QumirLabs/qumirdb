@@ -159,10 +159,11 @@ struct TExecuteQuery {
     std::string Query;
 };
 
-// What a distributed run spent, like the local run: Planning is parse and prepare,
-// KernelBuild lowers, seals and splits the graph, JitLLVM builds the kernel image.
-// Execute runs from sending the fragments to the last chunk, so it includes the
-// compute actors' image load.
+// What a distributed run spent, like the local run: Planning is prepare after
+// parsing, KernelBuild lowers, seals and splits the graph, JitLLVM builds the
+// kernel image. Execute runs from sending the fragments to the last chunk, so it
+// includes the compute actors' image load. Parsing and the wait for the compute
+// actors are in no phase.
 struct TQueryTiming {
     uint64_t Rows = 0;
     double Planning = 0;
