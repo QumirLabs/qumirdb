@@ -7,8 +7,6 @@
 
 #include "router.h"
 
-#include <algorithm>
-#include <cctype>
 #include <charconv>
 #include <optional>
 #include <string_view>
@@ -25,19 +23,6 @@ namespace {
 
 constexpr std::string_view PlanWidthHeader = "X-Qdb-Plan-Width";
 constexpr size_t MaxPlanWidth = 4096;
-
-// HTTP header names are case-insensitive.
-std::optional<std::string_view> FindHeader(const TRequest& request, std::string_view name) {
-    for (const auto& [key, value] : request.Headers()) {
-        if (key.size() == name.size() && std::equal(key.begin(), key.end(), name.begin(), [](char a, char b) {
-                return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
-            }))
-        {
-            return value;
-        }
-    }
-    return std::nullopt;
-}
 
 std::optional<size_t> ParsePlanWidth(std::string_view text) {
     while (!text.empty() && (text.back() == ' ' || text.back() == '\t')) {
@@ -82,8 +67,8 @@ struct TRouter final : public IRouter {
             std::string body = co_await request.ReadBodyFull();
             // The width the client plans for, e.g. nodes x workers of the cluster.
             std::optional<size_t> planWidth;
-            if (const auto header = FindHeader(request, PlanWidthHeader)) {
-                planWidth = ParsePlanWidth(*header);
+            if (const auto header = request.Headers().find(PlanWidthHeader); header != request.Headers().end()) {
+                planWidth = ParsePlanWidth(header->second);
                 if (!planWidth) {
                     co_return co_await SendText(response,
                         "X-Qdb-Plan-Width must be an integer in [1, " + std::to_string(MaxPlanWidth) + "]",
