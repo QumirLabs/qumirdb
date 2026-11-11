@@ -214,11 +214,12 @@ struct TBaseBehavior {
         for (const auto& cut : split.Cuts()) {
             const auto sink = ids.at(cut.Sink);
             const auto source = ids.at(cut.Source);
+            const bool rowset = cut.Kind == NScheduler::ETaskEdgeKind::Rowset;
             messages[cut.SinkColor].Endpoints.push_back({
-                .Id = sink, .Kind = ERemoteEndpointKind::Sink,
+                .Id = sink, .Kind = rowset ? ERemoteEndpointKind::Sink : ERemoteEndpointKind::FilterSink,
                 .PeerActor = actors[cut.SourceColor], .PeerTaskId = source});
             messages[cut.SourceColor].Endpoints.push_back({
-                .Id = source, .Kind = ERemoteEndpointKind::Source,
+                .Id = source, .Kind = rowset ? ERemoteEndpointKind::Source : ERemoteEndpointKind::FilterSource,
                 .PeerActor = actors[cut.SinkColor], .PeerTaskId = sink});
         }
         return messages;

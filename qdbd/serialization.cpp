@@ -20,6 +20,7 @@ using NQdb::TValueLayout;
 using NQdb::NRemote::ERemoteEndpointKind;
 using NQdb::NRemote::TComputeError;
 using NQdb::NRemote::TDataChunk;
+using NQdb::NRemote::TFilterPartial;
 using NQdb::NRemote::TRemoteEndpoint;
 using NQdb::NRemote::TSpawnComputeActorResponse;
 using NQdb::NRemote::TTaskGraphMessage;
@@ -177,6 +178,20 @@ void Write(TWriter& writer, const TTaskGraphMessage& message) {
         writer.Value<uint32_t>(endpoint.PeerActor.ActorId());
         writer.Value<uint16_t>(endpoint.PeerActor.Cookie());
         writer.Value<uint64_t>(endpoint.PeerTaskId);
+    }
+}
+
+// The partial's counts, then the hashes and the Bloom words, each after its length.
+void Write(TWriter& writer, const TFilterPartial& message) {
+    const auto& partial = message.Partial;
+    writer.Value<uint64_t>(message.DstTaskId);
+    writer.Value<uint32_t>(partial.Producers);
+    writer.Value<uint64_t>(partial.BuildRows);
+    writer.Value<uint8_t>(partial.ExactSetOverflowed);
+    for (const auto* words : {&partial.Hashes, &partial.BloomWords}) {
+        const auto bytes = ByteSize(words->size(), sizeof(uint64_t));
+        writer.Value<uint32_t>(words->size());
+        writer.Bytes(words->data(), bytes);
     }
 }
 
@@ -718,7 +733,7 @@ void DeserializeFrom(TTaskGraphMessage& message, TBlob& blob) {
     for (uint32_t i = 0; i < count; ++i) {
         TRemoteEndpoint endpoint{.Id = reader.Value<uint64_t>()};
         const auto kind = reader.Value<uint8_t>();
-        if (kind > static_cast<uint8_t>(ERemoteEndpointKind::Sink)) {
+        if (kind > static_cast<uint8_t>(ERemoteEndpointKind::FilterSink)) {
             Invalid("invalid endpoint kind");
         }
         endpoint.Kind = static_cast<ERemoteEndpointKind>(kind);
@@ -728,6 +743,39 @@ void DeserializeFrom(TTaskGraphMessage& message, TBlob& blob) {
         endpoint.PeerActor = TActorId(node, actor, cookie);
         endpoint.PeerTaskId = reader.Value<uint64_t>();
         result.Endpoints.push_back(endpoint);
+    }
+    reader.Finish();
+    message = std::move(result);
+}
+
+template<>
+size_t SerializedSize(const TFilterPartial& message) {
+    return CountedSize(message);
+}
+
+template<>
+void SerializeTo(const TFilterPartial& message, std::span<char> out) {
+    WriteExactly(message, out);
+}
+
+template<>
+void DeserializeFrom(TFilterPartial& message, TBlob& blob) {
+    TReader reader(blob);
+    TFilterPartial result{.DstTaskId = reader.Value<uint64_t>()};
+    auto& partial = result.Partial;
+    partial.Producers = reader.Value<uint32_t>();
+    partial.BuildRows = reader.Value<uint64_t>();
+    partial.ExactSetOverflowed = Flag(reader.Value<uint8_t>());
+    for (auto* words : {&partial.Hashes, &partial.BloomWords}) {
+        const auto count = reader.Value<uint32_t>();
+        if (count > reader.Remaining() / sizeof(uint64_t)) {
+            Invalid("truncated filter partial");
+        }
+        const auto bytes = reader.Bytes(count * sizeof(uint64_t));
+        words->resize(count);
+        if (count != 0) {
+            std::memcpy(words->data(), bytes.data(), bytes.size());
+        }
     }
     reader.Finish();
     message = std::move(result);

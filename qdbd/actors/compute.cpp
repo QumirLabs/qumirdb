@@ -30,7 +30,9 @@ using namespace NNet::NActors;
 namespace {
 
 struct TComputeActor : public IBehaviorActor {
-    struct TDefaultBehavior : public TBehavior<TDefaultBehavior, TTaskGraphMessage, TDataChunk, TDataConfirm, TFinish, TWakeUp> {
+    struct TDefaultBehavior : public TBehavior<TDefaultBehavior, TTaskGraphMessage, TDataChunk, TDataConfirm, TFinish,
+        TFilterPartial, TWakeUp>
+    {
         TDefaultBehavior(TComputeActor* parent)
             : Parent(parent)
         { }
@@ -49,6 +51,10 @@ struct TComputeActor : public IBehaviorActor {
 
         void Receive(TFinish&& message, TBlob, TActorContext::TPtr ctx) {
             Parent->OnFinish(message, ctx);
+        }
+
+        void Receive(TFilterPartial&& message, TBlob, TActorContext::TPtr ctx) {
+            Parent->OnFilterPartial(std::move(message), ctx);
         }
 
         void Receive(TWakeUp&&, TBlob, TActorContext::TPtr ctx) {
@@ -107,6 +113,10 @@ struct TComputeActor : public IBehaviorActor {
             NQdb::NScheduler::TRemoteSourceState* source = nullptr;
             while (ActorChannel->SourceQueue().TryPop(source)) {
                 source->SendConfirm(ctx);
+            }
+            NQdb::NScheduler::TRuntimeFilterSinkState* filterSink = nullptr;
+            while (ActorChannel->FilterSinkQueue().TryPop(filterSink)) {
+                filterSink->SendPartial(ctx);
             }
         } catch (const std::exception& e) {
             Fail(ctx, e.what());
@@ -197,20 +207,27 @@ struct TComputeActor : public IBehaviorActor {
         }
         OwnedGraph = std::move(graph);
         Graph = sealed;
-        const auto sources = static_cast<size_t>(std::ranges::count_if(message.Endpoints, [](const auto& endpoint) {
-            return endpoint.Kind == ERemoteEndpointKind::Source;
-        }));
+        auto count = [&](ERemoteEndpointKind kind) {
+            return static_cast<size_t>(std::ranges::count(message.Endpoints, kind, &TRemoteEndpoint::Kind));
+        };
         ActorChannel = std::make_unique<NScheduler::TActorNotificationChannel>(
-            ctx->CreateNotifier(), message.Endpoints.size() - sources, sources);
+            ctx->CreateNotifier(), count(ERemoteEndpointKind::Sink), count(ERemoteEndpointKind::Source),
+            count(ERemoteEndpointKind::FilterSink));
         for (const auto& endpoint : message.Endpoints) {
-            const bool isSource = endpoint.Kind == ERemoteEndpointKind::Source;
             auto* node = Graph.ExternalNode(endpoint.Id);
-            if (isSource) {
-                auto* source = dynamic_cast<NScheduler::TSourceTask*>(node->Task);
-                InitSource(endpoint, *source, node);
-            } else {
-                auto* sink = dynamic_cast<NScheduler::TSinkTask*>(node->Task);
-                InitSink(endpoint, *sink, node);
+            switch (endpoint.Kind) {
+                case ERemoteEndpointKind::Source:
+                    InitSource(endpoint, static_cast<NScheduler::TSourceTask&>(*node->Task), node);
+                    break;
+                case ERemoteEndpointKind::Sink:
+                    InitSink(endpoint, static_cast<NScheduler::TSinkTask&>(*node->Task), node);
+                    break;
+                case ERemoteEndpointKind::FilterSource:
+                    InitFilterSource(endpoint, static_cast<NScheduler::TRuntimeFilterSourceTask&>(*node->Task), node);
+                    break;
+                case ERemoteEndpointKind::FilterSink:
+                    InitFilterSink(endpoint, static_cast<NScheduler::TRuntimeFilterSinkTask&>(*node->Task));
+                    break;
             }
         }
         Scheduler = std::make_unique<NScheduler::TThreadedScheduler>(
@@ -229,6 +246,9 @@ struct TComputeActor : public IBehaviorActor {
         }
         for (const auto& finish : std::exchange(EarlyFinishes, {})) {
             OnFinish(finish, ctx);
+        }
+        for (auto& partial : std::exchange(EarlyFilterPartials, {})) {
+            OnFilterPartial(std::move(partial), ctx);
         }
         ScheduleStatus(ctx);
         // The closure of a coroutine lambda dies after this statement: no captures.
@@ -281,6 +301,27 @@ struct TComputeActor : public IBehaviorActor {
         Scheduler->Schedule(node);
     }
 
+    void OnFilterPartial(TFilterPartial&& message, TActorContext::TPtr& ctx) {
+        if (!QueryActorId) {
+            EarlyFilterPartials.push_back(std::move(message));
+            return;
+        }
+        if (Failed) {
+            return;
+        }
+        auto it = FilterSourceStates.find(message.DstTaskId);
+        if (it == FilterSourceStates.end()) {
+            SendError(ctx, "dropped filter partial for unknown task " + std::to_string(message.DstTaskId));
+            return;
+        }
+        auto& [state, node] = it->second;
+        if (!state->Push(std::move(message.Partial))) {
+            SendError(ctx, "dropped a second filter partial for task " + std::to_string(message.DstTaskId));
+            return;
+        }
+        Scheduler->Schedule(node);
+    }
+
     void OnDataConfirm(const TDataConfirm& confirm, TActorContext::TPtr& ctx) {
         auto it = SinkStates.find(confirm.SinkId);
         if (it == SinkStates.end() || !std::get<0>(it->second)->OnConfirm(confirm.LastApplied, ctx)) {
@@ -314,6 +355,23 @@ struct TComputeActor : public IBehaviorActor {
         SinkStates.emplace(endpoint.Id, std::tuple{std::move(state), node});
     }
 
+    void InitFilterSource(
+        const TRemoteEndpoint& endpoint,
+        NScheduler::TRuntimeFilterSourceTask& sourceTask,
+        NScheduler::TTaskNode* node)
+    {
+        auto [code, state] = NScheduler::MakeRuntimeFilterSource(endpoint.Id);
+        sourceTask.BindCode(std::move(code), state);
+        FilterSourceStates.emplace(endpoint.Id, std::tuple{std::move(state), node});
+    }
+
+    void InitFilterSink(const TRemoteEndpoint& endpoint, NScheduler::TRuntimeFilterSinkTask& sinkTask)
+    {
+        auto [code, state] = NScheduler::MakeRuntimeFilterSink(
+            endpoint.Id, endpoint.PeerActor, endpoint.PeerTaskId, *ActorChannel);
+        sinkTask.BindCode(std::move(code), std::move(state));
+    }
+
     TDefaultBehavior Behavior;
     std::shared_ptr<TRuntimeResources> Resources;
     NScheduler::TSchedulerSettings SchedulerSettings;
@@ -325,13 +383,16 @@ struct TComputeActor : public IBehaviorActor {
     std::unique_ptr<NScheduler::TThreadedScheduler> Scheduler;
     std::unordered_map<uint64_t, std::tuple<std::shared_ptr<NScheduler::TRemoteSourceState>, NScheduler::TTaskNode*>> SourceStates;
     std::unordered_map<uint64_t, std::tuple<std::shared_ptr<NScheduler::TRemoteSinkState>, NScheduler::TTaskNode*>> SinkStates;
+    std::unordered_map<uint64_t, std::tuple<std::shared_ptr<NScheduler::TRuntimeFilterSourceState>, NScheduler::TTaskNode*>>
+        FilterSourceStates;
     std::thread SchedulerThread;
     TVoidSuspendedTask NotificationTask;
     TActorId QueryActorId;
     // A peer may send before this actor gets its graph, which sets QueryActorId;
-    // its chunks and finishes wait here until the sources are bound.
+    // its chunks, finishes and filter partials wait here until the sources are bound.
     std::vector<TDataChunk> EarlyChunks;
     std::vector<TFinish> EarlyFinishes;
+    std::vector<TFilterPartial> EarlyFilterPartials;
     bool Failed = false;
     std::optional<NNet::NActors::TEvent> StatusEvent;
 };

@@ -6,6 +6,7 @@
 
 #include <coroio/actors/actorsystem.hpp>
 
+#include <optional>
 #include <stdexcept>
 #include <unordered_set>
 
@@ -177,6 +178,91 @@ bool TRemoteSourceState::Pop(TRowSet& rowSet) {
     return true;
 }
 
+TRuntimeFilterSinkState::TRuntimeFilterSinkState(
+    uint64_t id,
+    NNet::NActors::TActorId peerActor,
+    uint64_t peerTaskId,
+    TActorNotificationChannel& actorChannel)
+    : Id(id)
+    , PeerActor(peerActor)
+    , PeerTaskId(peerTaskId)
+    , ActorChannel(actorChannel)
+{ }
+
+void TRuntimeFilterSinkState::Send(TRuntimeFilterPartial&& partial) {
+    Partial = std::move(partial);
+    ActorChannel.Notify(this);
+}
+
+void TRuntimeFilterSinkState::SendPartial(NNet::NActors::TActorContext::TPtr& ctx) {
+    ctx->Send<TFilterPartial>(PeerActor, TFilterPartial {
+        .DstTaskId = PeerTaskId,
+        .Partial = std::move(Partial),
+    });
+}
+
+TRuntimeFilterSourceState::TRuntimeFilterSourceState(uint64_t id)
+    : Id(id)
+{ }
+
+bool TRuntimeFilterSourceState::Push(TRuntimeFilterPartial&& partial) {
+    if (Received) {
+        return false;
+    }
+    Received = true;
+    Partial = std::move(partial);
+    Arrived.store(true, std::memory_order_release);
+    return true;
+}
+
+bool TRuntimeFilterSourceState::Take(TRuntimeFilterPartial& partial) {
+    if (!Arrived.load(std::memory_order_acquire)) {
+        return false;
+    }
+    partial = std::move(Partial);
+    return true;
+}
+
+namespace {
+
+// A task whose code the compute actor binds, the endpoint kind it takes.
+struct TRemoteTask {
+    ERemoteEndpointKind Kind = ERemoteEndpointKind::Source;
+    bool HasCode = false;
+};
+
+std::optional<TRemoteTask> RemoteTask(const ITask* task) {
+    if (const auto* source = dynamic_cast<const TSourceTask*>(task)) {
+        return TRemoteTask{ERemoteEndpointKind::Source, source->Code() != nullptr};
+    }
+    if (const auto* sink = dynamic_cast<const TSinkTask*>(task)) {
+        return TRemoteTask{ERemoteEndpointKind::Sink, sink->Code() != nullptr};
+    }
+    if (const auto* source = dynamic_cast<const TRuntimeFilterSourceTask*>(task)) {
+        return TRemoteTask{ERemoteEndpointKind::FilterSource, source->Code() != nullptr};
+    }
+    if (const auto* sink = dynamic_cast<const TRuntimeFilterSinkTask*>(task)) {
+        return TRemoteTask{ERemoteEndpointKind::FilterSink, sink->Code() != nullptr};
+    }
+    return std::nullopt;
+}
+
+std::string KindName(ERemoteEndpointKind kind) {
+    switch (kind) {
+        case ERemoteEndpointKind::Source:
+            return "source";
+        case ERemoteEndpointKind::Sink:
+            return "sink";
+        case ERemoteEndpointKind::FilterSource:
+            return "runtime filter source";
+        case ERemoteEndpointKind::FilterSink:
+            return "runtime filter sink";
+    }
+    return "unknown";
+}
+
+} // namespace
+
 std::string ValidateEndpoints(
     const TSealedTaskGraph& graph,
     std::span<const TRemoteEndpoint> endpoints)
@@ -191,22 +277,20 @@ std::string ValidateEndpoints(
         if (!seen.insert(endpoint.Id).second) {
             return "external node " + std::to_string(endpoint.Id) + " has two endpoints";
         }
-        const auto* source = dynamic_cast<const TSourceTask*>(node->Task);
-        const auto* sink = dynamic_cast<const TSinkTask*>(node->Task);
-        const bool isSource = endpoint.Kind == ERemoteEndpointKind::Source;
-        if (isSource ? !source : !sink) {
-            return "external node " + std::to_string(endpoint.Id)
-                + (isSource ? " is not a source task" : " is not a sink task");
+        const auto remote = RemoteTask(node->Task);
+        if (!remote || remote->Kind != endpoint.Kind) {
+            return "external node " + std::to_string(endpoint.Id) + " is not a " + KindName(endpoint.Kind) + " task";
         }
-        if (isSource ? source->Code() != nullptr : sink->Code() != nullptr) {
+        if (remote->HasCode) {
             return "external node " + std::to_string(endpoint.Id) + " already has code";
         }
-        if (!isSource && (!sink->InputConnection() || sink->InputConnection()->RowLayouts().empty())) {
+        const auto* sink = dynamic_cast<const TSinkTask*>(node->Task);
+        if (sink && (!sink->InputConnection() || sink->InputConnection()->RowLayouts().empty())) {
             return "sink " + std::to_string(endpoint.Id) + " has no input row layouts";
         }
         covered.insert(node);
     }
-    // A source or sink left without code would dereference a null Code_.
+    // A remote task left without code would dereference a null Code_.
     std::vector<const TTaskNode*> stack;
     for (const auto& roots : graph.Graphs()) {
         stack.insert(stack.end(), roots.begin(), roots.end());
@@ -215,10 +299,9 @@ std::string ValidateEndpoints(
     while (!stack.empty()) {
         const auto* node = stack.back();
         stack.pop_back();
-        const auto* source = dynamic_cast<const TSourceTask*>(node->Task);
-        const auto* sink = dynamic_cast<const TSinkTask*>(node->Task);
-        if ((source ? source->Code() == nullptr : sink && sink->Code() == nullptr) && !covered.contains(node)) {
-            return std::string("a ") + (source ? "source" : "sink") + " task without code has no endpoint";
+        const auto remote = RemoteTask(node->Task);
+        if (remote && !remote->HasCode && !covered.contains(node)) {
+            return "a " + KindName(remote->Kind) + " task without code has no endpoint";
         }
         for (const auto* edges : {&node->Inbound, &node->Outbound}) {
             for (const auto* edge : *edges) {
@@ -267,6 +350,29 @@ std::pair<std::shared_ptr<const TSourceCode>, std::shared_ptr<TRemoteSourceState
     auto state = std::make_shared<TRemoteSourceState>(
         id, peerActor, peerTaskId, actorChannel, inboxCapacity);
     return {std::move(code), std::move(state)};
+}
+
+std::pair<std::shared_ptr<const TRuntimeFilterSinkCode>, std::shared_ptr<TRuntimeFilterSinkState>>
+MakeRuntimeFilterSink(
+    uint64_t id,
+    NNet::NActors::TActorId peerActor,
+    uint64_t peerTaskId,
+    TActorNotificationChannel& actorChannel)
+{
+    auto code = std::make_shared<const TRuntimeFilterSinkCode>([](void* state, TRuntimeFilterPartial&& partial) {
+        static_cast<TRuntimeFilterSinkState*>(state)->Send(std::move(partial));
+    });
+    auto state = std::make_shared<TRuntimeFilterSinkState>(id, peerActor, peerTaskId, actorChannel);
+    return {std::move(code), std::move(state)};
+}
+
+std::pair<std::shared_ptr<const TRuntimeFilterSourceCode>, std::shared_ptr<TRuntimeFilterSourceState>>
+MakeRuntimeFilterSource(uint64_t id)
+{
+    auto code = std::make_shared<const TRuntimeFilterSourceCode>([](void* state, TRuntimeFilterPartial& partial) {
+        return static_cast<TRuntimeFilterSourceState*>(state)->Take(partial);
+    });
+    return {std::move(code), std::make_shared<TRuntimeFilterSourceState>(id)};
 }
 
 } // namespace NScheduler
