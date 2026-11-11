@@ -1,8 +1,10 @@
+import os
 import socket
 import subprocess
 import sys
 import time
 import unittest
+import urllib.request
 
 QDBD = sys.argv.pop(1)
 
@@ -28,6 +30,20 @@ def listens(port, timeout=10):
     return False
 
 
+TABLES = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                      "regtest", "cases", "decimal_parquet", "tables")
+
+
+def query(http_port, sql):
+    req = urllib.request.Request(f"http://127.0.0.1:{http_port}/api/run",
+                                 data=sql.encode())
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status, r.read().decode()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode()
+
+
 class TestQdbdCli(unittest.TestCase):
     def test_node_ports_define_the_listen_ports(self):
         ports = [free_port() for _ in range(4)]
@@ -42,6 +58,32 @@ class TestQdbdCli(unittest.TestCase):
             self.assertTrue(listens(ports[1]), "node 2 must listen on its --node port")
             for p in procs:
                 self.assertIsNone(p.poll(), "a node exited")
+        finally:
+            for p in procs:
+                p.kill()
+                p.wait()
+
+    def test_queries_do_not_share_pruned_table_sources(self):
+        ports = [free_port() for _ in range(4)]
+        nodes = [f"127.0.0.1:{ports[0]}:1", f"127.0.0.1:{ports[1]}:2"]
+        procs = []
+        try:
+            for node_id, http_port in ((1, ports[2]), (2, ports[3])):
+                args = [QDBD, "--node", nodes[0], "--node", nodes[1], "--node-id", str(node_id),
+                        "--leader-id", "1", "--http-port", str(http_port), "--data", TABLES]
+                procs.append(subprocess.Popen(args, stderr=subprocess.DEVNULL))
+            for port in ports:
+                self.assertTrue(listens(port))
+            # The first query prunes "decimals" to id and d15; the others read more columns.
+            for sql in ("SELECT id % 7 AS k, SUM(d15) AS total FROM decimals GROUP BY id % 7",
+                        "SELECT a.id, b.s FROM decimals a JOIN decimals b ON a.id = b.id"):
+                status, body = None, ""
+                for _ in range(20):  # the compute actors may still be joining
+                    status, body = query(ports[2], sql)
+                    if status != 503:
+                        break
+                    time.sleep(0.25)
+                self.assertEqual(status, 200, body)
         finally:
             for p in procs:
                 p.kill()

@@ -37,7 +37,8 @@ struct TQueryState {
     // Stopped when the query completes.
     std::vector<TActorId> ComputeActors;
 
-    NCompiler::TQueryCompiler& Compiler;
+    // Owns the table sources the lowered plan reads: declared before Lowered.
+    std::unique_ptr<NCompiler::TQueryCompiler> Compiler;
     NScheduler::TSettings Settings;
     // Lowered on the request, split once the compute actors are known.
     std::optional<NScheduler::TLoweredPlan> Lowered;
@@ -82,7 +83,7 @@ struct TBaseBehavior {
         Logger("Query: compiling");
         State->RespondTo = ctx->Sender();
         std::istringstream input(req.Query);
-        auto parseResult = State->Compiler.Parse(input);
+        auto parseResult = State->Compiler->Parse(input);
         if (!parseResult) {
             Complete(std::unexpected(parseResult.error()), ctx);
             return;
@@ -90,7 +91,7 @@ struct TBaseBehavior {
         if (parseResult->Explain) {
             std::ostringstream explainOutput;
             for (auto& statement : parseResult.value().Statements) {
-                auto prepareResult = State->Compiler.Prepare(statement, parseResult->Explain);
+                auto prepareResult = State->Compiler->Prepare(statement, parseResult->Explain);
                 if (!prepareResult) {
                     Complete(std::unexpected(prepareResult.error()), ctx);
                     return;
@@ -103,7 +104,7 @@ struct TBaseBehavior {
 
         std::optional<NCompiler::TPreparedQuery> query;
         for (auto& statement : parseResult->Statements) {
-            auto prepared = State->Compiler.Prepare(statement);
+            auto prepared = State->Compiler->Prepare(statement);
             if (!prepared) {
                 Complete(std::unexpected(prepared.error()), ctx);
                 return;
@@ -292,10 +293,10 @@ struct TQueryActor : public IBehaviorActor {
     };
 
     TQueryActor(
-        NCompiler::TQueryCompiler& compiler,
+        TCompilerFactory compilerFactory,
         NScheduler::TSettings settings,
         std::function<void(const std::string&)> logger)
-        : State{.Compiler = compiler, .Settings = std::move(settings)}
+        : State{.Compiler = compilerFactory(), .Settings = std::move(settings)}
         , StartQuery(&State, this, logger)
         , WaitComputeActors(&State, this, logger)
         , MonitorQuery(&State, this, logger)
@@ -312,11 +313,11 @@ struct TQueryActor : public IBehaviorActor {
 } // namespace
 
 NNet::NActors::IActor* CreateQueryActor(
-    NCompiler::TQueryCompiler& compiler,
+    TCompilerFactory compilerFactory,
     NScheduler::TSettings settings,
     std::function<void(const std::string&)> logger)
 {
-    return new TQueryActor(compiler, std::move(settings), logger);
+    return new TQueryActor(std::move(compilerFactory), std::move(settings), logger);
 }
 
 } // namespace NRemote
