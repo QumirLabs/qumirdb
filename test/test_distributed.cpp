@@ -628,6 +628,7 @@ public:
                 ? std::expected<std::string, NQumir::TError>(std::unexpected(NQumir::TError("query failed")))
                 : std::expected<std::string, NQumir::TError>("query result"),
             .Unavailable = Mode_ == EReply::Unavailable,
+            .Timing = Mode_ == EReply::Result ? std::optional<TQueryTiming>(TQueryTiming{.Rows = 7, .Execute = 0.5}) : std::nullopt,
         };
         ctx->Send<TExecuteQueryResponse>(ctx->Sender(), std::move(response));
     }
@@ -1570,6 +1571,12 @@ TEST(DistributedHttp, QueryResultAndErrorKeepTheirStatusCodes) {
         EXPECT_TRUE(output.starts_with(lines[index]));
         EXPECT_NE(output.find(mode == EReply::Result ? "query result" : "query failed"), std::string::npos);
         EXPECT_NE(output.find("Access-Control-Allow-Origin: *\r\n"), std::string::npos);
+        EXPECT_EQ(output.find("X-Qdb-Rows: 7\r\n") != std::string::npos, mode == EReply::Result);
+        EXPECT_EQ(output.find("X-Qdb-Execute-Seconds: 0.5") != std::string::npos, mode == EReply::Result);
+        for (const char* name : {"Planning", "KernelBuild", "JitLLVM"}) {
+            EXPECT_EQ(output.find(std::string("X-Qdb-") + name + "-Seconds: ") != std::string::npos,
+                mode == EReply::Result);
+        }
     }
 }
 
@@ -2788,6 +2795,10 @@ TEST(DistributedScheduler, QueryActorRunsAQueryOnEveryNode) {
         const auto expected = RunLocally(sql, settings);
         EXPECT_GT(std::ranges::count(expected, '\n'), 2);
         EXPECT_EQ(*answer->Response, expected);
+        ASSERT_TRUE(answer->Timing);
+        // The CSV has a header line.
+        EXPECT_EQ(static_cast<int64_t>(answer->Timing->Rows), std::ranges::count(expected, '\n') - 1);
+        EXPECT_GT(answer->Timing->Execute, 0);
         // The query stops its compute actors.
         cluster.Pump();
         EXPECT_EQ(cluster.Leader.ActorsSize(), leaderActors);

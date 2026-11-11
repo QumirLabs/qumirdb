@@ -5,6 +5,7 @@
 
 #include <qumir/error.h>
 
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -158,12 +159,26 @@ struct TExecuteQuery {
     std::string Query;
 };
 
+// What a distributed run spent, like the local run: Planning is parse and prepare,
+// KernelBuild lowers, seals and splits the graph, JitLLVM builds the kernel image.
+// Execute runs from sending the fragments to the last chunk, so it includes the
+// compute actors' image load.
+struct TQueryTiming {
+    uint64_t Rows = 0;
+    double Planning = 0;
+    double KernelBuild = 0;
+    double JitLLVM = 0;
+    double Execute = 0;
+};
+
 struct TExecuteQueryResponse {
     static constexpr NNet::NActors::TMessageId MessageId = 1001;
     using LocalMessage = void;
     std::expected<std::string, NQumir::TError> Response;
     // The error is a lack of compute nodes, not a bad query: the client may retry.
     bool Unavailable = false;
+    // Set for an executed query only.
+    std::optional<TQueryTiming> Timing;
 };
 
 template<typename TMessagesFactory>
