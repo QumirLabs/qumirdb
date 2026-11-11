@@ -6,6 +6,7 @@
 #include <qumir/error.h>
 
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace NQdb {
@@ -38,18 +39,65 @@ struct TSpawnComputeActorResponse {
 };
 
 // The receiving RemoteSource is selected by DstTaskId and pushes into its own output lane.
-// Across nodes RowSet arrives decoded; within a node the receiver gets the
-// sender's reference to it. Either way the receiver releases it.
+// The chunk owns one reference to RowSet and releases it unless a receiver
+// takes it, so a chunk nobody handles frees its rows too. Within a node the
+// receiver gets the sender's chunk; for another node it is serialized, then destroyed.
 struct TDataChunk {
     static constexpr NNet::NActors::TMessageId MessageId = 200;
     uint64_t DstTaskId = 0;
     // Numbers the chunks of one DstTaskId from 1; TDataConfirm acknowledges them.
     uint64_t Seq = 0;
+    // Held while RefCount > 0; a view with RefCount 0 is never released.
     TRowSet RowSet{};
     const TValueLayout* Descriptor = nullptr;
 
-    // Force coroio to serialize the payload instead of copying its pointers.
-    ~TDataChunk() {}
+    TDataChunk() = default;
+
+    TDataChunk(uint64_t dstTaskId, uint64_t seq, TRowSet rowSet, const TValueLayout* descriptor = nullptr)
+        : DstTaskId(dstTaskId)
+        , Seq(seq)
+        , RowSet(rowSet)
+        , Descriptor(descriptor)
+    {}
+
+    TDataChunk(TDataChunk&& other) noexcept
+        : DstTaskId(other.DstTaskId)
+        , Seq(other.Seq)
+        , RowSet(other.Take())
+        , Descriptor(other.Descriptor)
+    {}
+
+    TDataChunk& operator=(TDataChunk&& other) noexcept
+    {
+        if (this != &other) {
+            ReleaseRowSet();
+            DstTaskId = other.DstTaskId;
+            Seq = other.Seq;
+            RowSet = other.Take();
+            Descriptor = other.Descriptor;
+        }
+        return *this;
+    }
+
+    ~TDataChunk()
+    {
+        ReleaseRowSet();
+    }
+
+    // Hands the reference over: the chunk then holds none.
+    TRowSet Take()
+    {
+        return std::exchange(RowSet, TRowSet{});
+    }
+
+private:
+    void ReleaseRowSet()
+    {
+        if (RowSet.RefCount > 0) {
+            Release(&RowSet);
+        }
+        RowSet = {};
+    }
 };
 
 // The receiving RemoteSource is selected by DstTaskId and finishes its own output lane.
