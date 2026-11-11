@@ -147,6 +147,10 @@ struct TBaseBehavior {
             return;
         }
         State->Timing.Planning = Seconds(planStart);
+        if (req.PlanWidth) {
+            State->Settings.Scheduler.WorkerCount = *req.PlanWidth;
+        }
+        Logger("Query: lowering for " + std::to_string(State->Settings.Scheduler.WorkerCount) + " workers");
         try {
             const auto buildStart = TClock::now();
             Lower(*query);

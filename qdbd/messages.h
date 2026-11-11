@@ -157,6 +157,9 @@ struct TExecuteQuery {
     static constexpr NNet::NActors::TMessageId MessageId = 1000;
     using LocalMessage = void;
     std::string Query;
+    // The scheduler workers to lower the plan for, e.g. those of the whole
+    // cluster; without it the query actor's own settings decide.
+    std::optional<size_t> PlanWidth;
 };
 
 // What a distributed run spent, like the local run: Planning is prepare after
