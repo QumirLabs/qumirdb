@@ -1022,9 +1022,10 @@ TEST(SchedulerRuntimeAdapter, RunsBinaryBlockingTask) {
     EXPECT_EQ(destroyCount->load(std::memory_order_relaxed), 5);
 }
 
-// source -> broadcast -> {LIMIT 2, pass-through} -> gather -> sink. Once the
-// LIMIT finished, its full lane blocked the source, and the source and the
-// pass-through woke each other forever; the call bound turns that into a failure.
+// source -> broadcast -> {LIMIT 2, pass-through} -> gather -> sink, and the same
+// with a forward task in front of the LIMIT. Once the LIMIT finished, a full lane
+// blocked the source, and the source and the pass-through woke each other forever;
+// the call bound turns that into a failure.
 TEST(SchedulerRuntimeAdapter, BroadcastFeedsTheLiveLaneAfterALimitFinishes) {
     constexpr int batches = 20;
     struct TForwardState : ITaskState {
@@ -1052,64 +1053,80 @@ TEST(SchedulerRuntimeAdapter, BroadcastFeedsTheLiveLaneAfterALimitFinishes) {
                 return ETaskResult::OK;
             });
     };
-    for (size_t workers : {size_t{0}, size_t{1}, size_t{4}}) {
-        SCOPED_TRACE(workers);
-        auto destroyCount = std::make_shared<std::atomic<int>>(0);
-        auto sinkState = std::make_shared<TSinkState>();
-        {
-            TTaskGraph graph;
-            auto& broadcast = graph.AddConnection(std::make_unique<TBroadcastConnection>(1));
-            broadcast.Resize(1, 2);
-            auto& gather = graph.AddConnection(std::make_unique<TGatherConnection>(1));
-            gather.Resize(2, 1);
-            auto sourceCode = std::make_shared<TSourceCode>(
-                [destroyCount](void* raw, TRowSet& rowSet) {
-                    auto* source = static_cast<TSourceState*>(raw);
-                    if (source->Next > source->End) {
-                        return ETaskResult::FINISHED;
-                    }
-                    rowSet = MakeRowSet(source->Next++, destroyCount.get());
-                    return ETaskResult::OK;
-                });
-            auto sinkCode = std::make_shared<TSinkCode>(
-                [](void* raw, const TRowSet& rowSet) {
-                    auto* sink = static_cast<TSinkState*>(raw);
-                    sink->Rows += static_cast<int>(rowSet.RowCount);
-                    ++sink->Batches;
-                    return ETaskResult::OK;
-                });
-            auto& source = graph.AddOwnedNode(std::make_unique<TSourceTask>(
-                sourceCode,
-                std::make_shared<TSourceState>(TSourceState{.Next = 1, .End = batches}),
-                TOutputPort{.Connection = &broadcast}));
-            auto& limit = graph.AddOwnedNode(std::make_unique<TBlockingTask>(
-                forward(2),
-                std::make_shared<TForwardState>(),
-                TInputPort{.Connection = &broadcast, .Lane = 0},
-                TOutputPort{.Connection = &gather, .Lane = 0}));
-            auto& pass = graph.AddOwnedNode(std::make_unique<TBlockingTask>(
-                forward(-1),
-                std::make_shared<TForwardState>(),
-                TInputPort{.Connection = &broadcast, .Lane = 1},
-                TOutputPort{.Connection = &gather, .Lane = 1}));
-            auto& sink = graph.AddOwnedNode(std::make_unique<TSinkTask>(
-                sinkCode, sinkState, TInputPort{.Connection = &gather}));
-            graph.AddEdge(source, limit, broadcast, 0, 0);
-            graph.AddEdge(source, pass, broadcast, 0, 1);
-            graph.AddEdge(limit, sink, gather, 0, 0);
-            graph.AddEdge(pass, sink, gather, 1, 0);
-            std::string error;
-            const auto sealed = graph.Seal(&error);
-            ASSERT_TRUE(sealed) << error;
-            const bool ok = workers == 0
-                ? TSingleThreadedScheduler(sealed).Run(&error)
-                : TThreadedScheduler(sealed, workers).Run(&error);
-            ASSERT_TRUE(ok) << error;
+    for (bool behindForward : {false, true}) {
+        for (size_t workers : {size_t{0}, size_t{1}, size_t{4}}) {
+            SCOPED_TRACE(testing::Message() << "behind a forward " << behindForward << ", workers " << workers);
+            auto destroyCount = std::make_shared<std::atomic<int>>(0);
+            auto sinkState = std::make_shared<TSinkState>();
+            {
+                TTaskGraph graph;
+                auto& broadcast = graph.AddConnection(std::make_unique<TBroadcastConnection>(1));
+                broadcast.Resize(1, 2);
+                auto& gather = graph.AddConnection(std::make_unique<TGatherConnection>(1));
+                gather.Resize(2, 1);
+                auto& forwarded = graph.AddConnection(std::make_unique<TOneToOneConnection>(1));
+                auto sourceCode = std::make_shared<TSourceCode>(
+                    [destroyCount](void* raw, TRowSet& rowSet) {
+                        auto* source = static_cast<TSourceState*>(raw);
+                        if (source->Next > source->End) {
+                            return ETaskResult::FINISHED;
+                        }
+                        rowSet = MakeRowSet(source->Next++, destroyCount.get());
+                        return ETaskResult::OK;
+                    });
+                auto sinkCode = std::make_shared<TSinkCode>(
+                    [](void* raw, const TRowSet& rowSet) {
+                        auto* sink = static_cast<TSinkState*>(raw);
+                        sink->Rows += static_cast<int>(rowSet.RowCount);
+                        ++sink->Batches;
+                        return ETaskResult::OK;
+                    });
+                auto& source = graph.AddOwnedNode(std::make_unique<TSourceTask>(
+                    sourceCode,
+                    std::make_shared<TSourceState>(TSourceState{.Next = 1, .End = batches}),
+                    TOutputPort{.Connection = &broadcast}));
+                const auto limitInput = behindForward
+                    ? TInputPort{.Connection = &forwarded}
+                    : TInputPort{.Connection = &broadcast, .Lane = 0};
+                auto& limit = graph.AddOwnedNode(std::make_unique<TBlockingTask>(
+                    forward(2),
+                    std::make_shared<TForwardState>(),
+                    limitInput,
+                    TOutputPort{.Connection = &gather, .Lane = 0}));
+                if (behindForward) {
+                    auto& pre = graph.AddOwnedNode(std::make_unique<TBlockingTask>(
+                        forward(-1),
+                        std::make_shared<TForwardState>(),
+                        TInputPort{.Connection = &broadcast, .Lane = 0},
+                        TOutputPort{.Connection = &forwarded}));
+                    graph.AddEdge(source, pre, broadcast, 0, 0);
+                    graph.AddEdge(pre, limit, forwarded);
+                } else {
+                    graph.AddEdge(source, limit, broadcast, 0, 0);
+                }
+                auto& pass = graph.AddOwnedNode(std::make_unique<TBlockingTask>(
+                    forward(-1),
+                    std::make_shared<TForwardState>(),
+                    TInputPort{.Connection = &broadcast, .Lane = 1},
+                    TOutputPort{.Connection = &gather, .Lane = 1}));
+                auto& sink = graph.AddOwnedNode(std::make_unique<TSinkTask>(
+                    sinkCode, sinkState, TInputPort{.Connection = &gather}));
+                graph.AddEdge(source, pass, broadcast, 0, 1);
+                graph.AddEdge(limit, sink, gather, 0, 0);
+                graph.AddEdge(pass, sink, gather, 1, 0);
+                std::string error;
+                const auto sealed = graph.Seal(&error);
+                ASSERT_TRUE(sealed) << error;
+                const bool ok = workers == 0
+                    ? TSingleThreadedScheduler(sealed).Run(&error)
+                    : TThreadedScheduler(sealed, workers).Run(&error);
+                ASSERT_TRUE(ok) << error;
+            }
+            EXPECT_EQ(sinkState->Batches, 2 + batches);
+            EXPECT_EQ(sinkState->Rows, 3 + batches * (batches + 1) / 2);
+            // Every source batch is released once, also one left in a closed lane.
+            EXPECT_EQ(destroyCount->load(), batches);
         }
-        EXPECT_EQ(sinkState->Batches, 2 + batches);
-        EXPECT_EQ(sinkState->Rows, 3 + batches * (batches + 1) / 2);
-        // Every source batch is released once, also one left in the closed lane.
-        EXPECT_EQ(destroyCount->load(), batches);
     }
 }
 

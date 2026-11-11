@@ -48,9 +48,9 @@ public:
     virtual void Finish(size_t srcId) = 0;
 
     virtual EFetchResult Fetch(size_t dstId, TRowSet& rowSet) = 0;
-    // The consumer of lane `dstId` finished and fetches no more. A broadcast then
-    // feeds only its open lanes; other connections keep the lane as it is, so its
-    // producer parks once the lane is full.
+    // The consumer of lane `dstId` reads no more: it finished or was abandoned,
+    // maybe while it still runs on another thread. A broadcast then feeds only its
+    // open lanes; other connections keep the lane as it is.
     virtual void Close(size_t dstId);
 
     void SetDebugName(std::string name);

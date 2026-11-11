@@ -296,7 +296,6 @@ void TThreadedScheduler::FinishNode(TTaskNode* node) {
     auto previous = node->State.exchange(ETaskState::Finished, std::memory_order_acq_rel);
     assert(previous == ETaskState::Running || previous == ETaskState::Reschedule);
     Retire(*node);
-    CloseInputs(*node);
     if (IsRoot(*node) && UnfinishedRoots_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
         // The last root is done: the graph's output is complete. Wake every worker
         // so they observe termination and exit instead of parking on the permit

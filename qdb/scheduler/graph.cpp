@@ -172,15 +172,19 @@ std::vector<std::vector<TTaskNode*>> GroupByColor(
     return graphs;
 }
 
-// `node` reads no more input: abandons each producer it was the last live consumer of.
-void ReleaseProducers(const TTaskNode& node) {
+// `node` reads no more input: closes its lanes, so a broadcast feeds only its other
+// consumers, and abandons each producer it was the last live consumer of.
+void ReleaseInputs(const TTaskNode& node) {
     for (auto* edge : node.Inbound) {
+        if (IsRowsetEdge(edge)) {
+            edge->Connection->Close(edge->DstLane);
+        }
         auto& producer = *edge->Src;
         if (producer.LiveConsumers.fetch_sub(1, std::memory_order_acq_rel) == 1
             && !IsRoot(producer)
             && !producer.Retired.exchange(true, std::memory_order_acq_rel))
         {
-            ReleaseProducers(producer);
+            ReleaseInputs(producer);
         }
     }
 }
@@ -193,15 +197,7 @@ bool IsRoot(const TTaskNode& node) {
 
 void Retire(TTaskNode& node) {
     if (!node.Retired.exchange(true, std::memory_order_acq_rel)) {
-        ReleaseProducers(node);
-    }
-}
-
-void CloseInputs(const TTaskNode& node) {
-    for (const auto* edge : node.Inbound) {
-        if (IsRowsetEdge(edge)) {
-            edge->Connection->Close(edge->DstLane);
-        }
+        ReleaseInputs(node);
     }
 }
 

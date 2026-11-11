@@ -80,7 +80,6 @@ bool TSingleThreadedScheduler::Run(std::string* error) {
                 node->State.store(
                     ETaskState::Finished, std::memory_order_release);
                 Retire(*node);
-                CloseInputs(*node);
                 if (IsRoot(*node)) {
                     --unfinishedRoots;
                 }

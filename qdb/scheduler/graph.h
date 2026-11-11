@@ -58,13 +58,10 @@ struct TTaskEdge {
 // A root has no rowset output; Graphs() lists the roots of each subgraph.
 bool IsRoot(const TTaskNode& node);
 
-// Retires a finished node. A producer that is not a root and whose consumers are
-// all retired is abandoned, and so on upstream: nobody needs its output.
+// Retires a finished node and closes its input lanes (IConnection::Close). A
+// producer that is not a root and whose consumers are all retired is abandoned
+// and retired the same way, and so on upstream: nobody needs its output.
 void Retire(TTaskNode& node);
-
-// Closes the rowset lanes a finished node read, so their producers stop
-// feeding it (IConnection::Close).
-void CloseInputs(const TTaskNode& node);
 
 // A node woken from outside the graph (e.g. by a remote channel) under `Id`.
 struct TExternalNode {
