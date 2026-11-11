@@ -5,6 +5,7 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <span>
 #include <stdexcept>
 #include <string_view>
 #include <vector>
@@ -22,6 +23,8 @@ using NQdb::NRemote::TDataChunk;
 using NQdb::NRemote::TRemoteEndpoint;
 using NQdb::NRemote::TSpawnComputeActorResponse;
 using NQdb::NRemote::TTaskGraphMessage;
+
+static_assert(std::endian::native == std::endian::little, "the chunk layout on the wire is little-endian");
 
 constexpr size_t MaxPayloadSize = std::numeric_limits<uint32_t>::max();
 // Id, kind, peer actor (node, actor, cookie) and peer task.
@@ -59,10 +62,14 @@ bool IsStringLayout(const TValueLayout& layout) {
     return layout.Width == 0 && !layout.Bitmap;
 }
 
+// Counts the bytes when it has no buffer, otherwise writes them into the reserved region.
 class TWriter {
 public:
-    explicit TWriter(std::ostringstream& output)
-        : Output_(output)
+    TWriter() = default;
+
+    explicit TWriter(std::span<char> out)
+        : Out_(out)
+        , Counting_(false)
     {}
 
     void Bytes(const void* data, size_t size) {
@@ -73,9 +80,11 @@ public:
             if (!data) {
                 Invalid("missing buffer");
             }
-            Output_.write(static_cast<const char*>(data), size);
-            if (!Output_) {
-                Invalid("cannot write payload");
+            if (!Counting_) {
+                if (size > Out_.size() - Size_) {
+                    Invalid("payload outgrew its size");
+                }
+                std::memcpy(Out_.data() + Size_, data, size);
             }
         }
         Size_ += size;
@@ -83,54 +92,24 @@ public:
 
     template<std::unsigned_integral T>
     void Value(T value) {
-        if constexpr (std::endian::native == std::endian::big) {
-            value = std::byteswap(value);
-        }
         Bytes(&value, sizeof(value));
     }
 
-    void Bitmap(const void* data, int32_t bitOffset, uint64_t rows) {
-        if (bitOffset < 0) {
-            Invalid("negative bitmap offset");
-        }
-        const size_t size = BitmapSize(rows);
-        if (size == 0) {
-            return;
-        }
-        if (!data) {
-            Invalid("missing bitmap");
-        }
-        const auto* source = static_cast<const uint8_t*>(data);
-        const size_t firstByte = static_cast<uint32_t>(bitOffset) / 8;
-        const unsigned shift = bitOffset % 8;
-        const uint64_t sourceSize = (rows + static_cast<uint32_t>(bitOffset) + 7) / 8;
-        std::vector<uint8_t> packed(size);
-        for (size_t i = 0; i < size; ++i) {
-            packed[i] = source[firstByte + i] >> shift;
-            if (shift != 0 && firstByte + i + 1 < sourceSize) {
-                packed[i] |= source[firstByte + i + 1] << (8 - shift);
-            }
-        }
-        if (rows % 8 != 0) {
-            packed.back() &= (1u << (rows % 8)) - 1;
-        }
-        Bytes(packed.data(), packed.size());
+    size_t Size() const {
+        return Size_;
     }
 
 private:
-    std::ostringstream& Output_;
+    std::span<char> Out_;
+    bool Counting_ = true;
     size_t Size_ = 0;
 };
 
 class TReader {
 public:
-    explicit TReader(std::istringstream& input)
-        : Data_(input.view())
-    {
-        if (Data_.size() > MaxPayloadSize) {
-            Invalid("payload size overflow");
-        }
-    }
+    explicit TReader(const TBlob& blob)
+        : Data_(static_cast<const char*>(blob.Data.get()), blob.Size)
+    {}
 
     std::string_view Bytes(size_t size) {
         if (size > Data_.size()) {
@@ -146,18 +125,7 @@ public:
         T value;
         const auto bytes = Bytes(sizeof(value));
         std::memcpy(&value, bytes.data(), sizeof(value));
-        if constexpr (std::endian::native == std::endian::big) {
-            value = std::byteswap(value);
-        }
         return value;
-    }
-
-    bool Flag() {
-        const auto flag = Value<uint8_t>();
-        if (flag > 1) {
-            Invalid("invalid presence flag");
-        }
-        return flag != 0;
     }
 
     size_t Remaining() const {
@@ -174,220 +142,7 @@ private:
     std::string_view Data_;
 };
 
-struct TRowSetStorage {
-    std::vector<TValueLayout> Layouts;
-    std::vector<TColumn> Columns;
-    std::vector<std::unique_ptr<char[]>> Buffers;
-
-    char* Allocate(size_t size) {
-        if (size == 0) {
-            return nullptr;
-        }
-        auto buffer = std::make_unique<char[]>(size);
-        auto* data = buffer.get();
-        Buffers.push_back(std::move(buffer));
-        return data;
-    }
-
-    char* Copy(std::string_view bytes) {
-        auto* data = Allocate(bytes.size());
-        if (!bytes.empty()) {
-            std::memcpy(data, bytes.data(), bytes.size());
-        }
-        return data;
-    }
-};
-
-uint64_t OffsetAt(const TColumn& column, uint64_t row) {
-    int64_t value = 0;
-    const auto* offsets = static_cast<const char*>(column.Offsets);
-    if (column.OffsetWidth == 4) {
-        int32_t offset;
-        std::memcpy(&offset, offsets + row * 4, 4);
-        value = offset;
-    } else {
-        std::memcpy(&value, offsets + row * 8, 8);
-    }
-    if (value < 0) {
-        Invalid("negative string offset");
-    }
-    return static_cast<uint64_t>(value);
-}
-
-void WriteStrings(TWriter& writer, const TColumn& column, uint64_t rows) {
-    const auto width = column.OffsetWidth;
-    if (width != 4 && width != 8) {
-        Invalid("unsupported string offset width");
-    }
-    ByteSize(rows + 1, width);
-    if (!column.Offsets && rows != 0) {
-        Invalid("missing string offsets");
-    }
-    writer.Value<uint8_t>(width);
-    const uint64_t first = column.Offsets ? OffsetAt(column, 0) : 0;
-    uint64_t last = first;
-    for (uint64_t row = 0; row <= rows; ++row) {
-        const uint64_t offset = column.Offsets ? OffsetAt(column, row) : 0;
-        if (offset < last) {
-            Invalid("decreasing string offsets");
-        }
-        if (width == 4) {
-            writer.Value<uint32_t>(offset - first);
-        } else {
-            writer.Value<uint64_t>(offset - first);
-        }
-        last = offset;
-    }
-    const auto bytes = ByteSize(last - first, 1);
-    if (bytes != 0 && !column.Data) {
-        Invalid("missing string data");
-    }
-    writer.Bytes(bytes == 0 ? nullptr : column.Data + first, bytes);
-}
-
-void ReadStrings(TReader& reader, TRowSetStorage& storage, TColumn& column, uint64_t rows) {
-    column.OffsetWidth = reader.Value<uint8_t>();
-    const auto width = column.OffsetWidth;
-    if (width != 4 && width != 8) {
-        Invalid("unsupported string offset width");
-    }
-    const auto encoded = reader.Bytes(ByteSize(rows + 1, width));
-    auto* offsets = storage.Allocate(encoded.size());
-    column.Offsets = offsets;
-    uint64_t last = 0;
-    for (uint64_t row = 0; row <= rows; ++row) {
-        uint64_t offset;
-        if (width == 4) {
-            uint32_t value;
-            std::memcpy(&value, encoded.data() + row * 4, 4);
-            if constexpr (std::endian::native == std::endian::big) {
-                value = std::byteswap(value);
-            }
-            offset = value;
-            std::memcpy(offsets + row * 4, &value, 4);
-        } else {
-            std::memcpy(&offset, encoded.data() + row * 8, 8);
-            if constexpr (std::endian::native == std::endian::big) {
-                offset = std::byteswap(offset);
-            }
-            std::memcpy(offsets + row * 8, &offset, 8);
-        }
-        const uint64_t maxOffset = width == 4
-            ? std::numeric_limits<int32_t>::max()
-            : std::numeric_limits<int64_t>::max();
-        if (offset > maxOffset || offset < last || (row == 0 && offset != 0)) {
-            Invalid("invalid string offsets");
-        }
-        last = offset;
-    }
-    column.Data = storage.Copy(reader.Bytes(ByteSize(last, 1)));
-}
-
-// Copies the selected rows of a column into `storage`; the source is never written.
-// The result is a column with zero bit offsets, starting string offsets and a compact Data.
-struct TSelectedColumn {
-    std::vector<char> Data;
-    std::vector<uint8_t> Mask;
-    std::vector<char> Offsets;
-    TColumn Column;
-};
-
-void GatherBits(std::vector<uint8_t>& out, const void* source, int32_t bitOffset,
-    const uint8_t* selection, uint64_t rows, uint64_t kept)
-{
-    if (bitOffset < 0) {
-        Invalid("negative bitmap offset");
-    }
-    out.assign(BitmapSize(kept), 0);
-    if (kept != 0 && !source) {
-        Invalid("missing bitmap");
-    }
-    const auto* bits = static_cast<const uint8_t*>(source);
-    uint64_t next = 0;
-    for (uint64_t row = 0; row < rows; ++row) {
-        if (selection[row]) {
-            const uint64_t bit = row + static_cast<uint32_t>(bitOffset);
-            out[next / 8] |= ((bits[bit / 8] >> (bit % 8)) & 1) << (next % 8);
-            ++next;
-        }
-    }
-}
-
-void GatherColumn(TSelectedColumn& result, const TColumn& column, const TValueLayout& layout,
-    const uint8_t* selection, uint64_t rows, uint64_t kept)
-{
-    result.Column = column;
-    result.Column.DataBitOffset = 0;
-    result.Column.MaskBitOffset = 0;
-    if (layout.Bitmap) {
-        std::vector<uint8_t> bits;
-        GatherBits(bits, column.Data, column.DataBitOffset, selection, rows, kept);
-        result.Data.assign(bits.begin(), bits.end());
-        result.Column.Data = result.Data.data();
-    } else if (IsStringLayout(layout)) {
-        const auto width = column.OffsetWidth;
-        if (width != 4 && width != 8) {
-            Invalid("unsupported string offset width");
-        }
-        if (!column.Offsets && rows != 0) {
-            Invalid("missing string offsets");
-        }
-        result.Offsets.resize(ByteSize(kept + 1, width));
-        uint64_t next = 0;
-        uint64_t total = 0;
-        auto put = [&](uint64_t value) {
-            if (width == 4) {
-                const int32_t v = static_cast<int32_t>(value);
-                std::memcpy(result.Offsets.data() + next * 4, &v, 4);
-            } else {
-                std::memcpy(result.Offsets.data() + next * 8, &value, 8);
-            }
-            ++next;
-        };
-        put(0);
-        for (uint64_t row = 0; row < rows; ++row) {
-            if (selection[row]) {
-                const uint64_t begin = OffsetAt(column, row);
-                const uint64_t end = OffsetAt(column, row + 1);
-                if (end < begin) {
-                    Invalid("decreasing string offsets");
-                }
-                if (end != begin && !column.Data) {
-                    Invalid("missing string data");
-                }
-                result.Data.insert(result.Data.end(), column.Data + begin, column.Data + end);
-                total += end - begin;
-                put(total);
-            }
-        }
-        result.Column.Data = result.Data.data();
-        result.Column.Offsets = result.Offsets.data();
-    } else {
-        const size_t width = layout.Width;
-        result.Data.resize(ByteSize(kept, width));
-        if (kept != 0 && !column.Data) {
-            Invalid("missing buffer");
-        }
-        size_t next = 0;
-        for (uint64_t row = 0; row < rows; ++row) {
-            if (selection[row]) {
-                std::memcpy(result.Data.data() + next * width, column.Data + row * width, width);
-                ++next;
-            }
-        }
-        result.Column.Data = result.Data.data();
-    }
-    if (column.Mask) {
-        GatherBits(result.Mask, column.Mask, column.MaskBitOffset, selection, rows, kept);
-        result.Column.Mask = result.Mask.data();
-    }
-}
-
-} // namespace
-
-template<>
-void SerializeToStream(const TSpawnComputeActorResponse& message, std::ostringstream& output) {
-    TWriter writer(output);
+void Write(TWriter& writer, const TSpawnComputeActorResponse& message) {
     if (message.ActorIds.size() > MaxPayloadSize / 8) {
         Invalid("too many actors");
     }
@@ -401,45 +156,12 @@ void SerializeToStream(const TSpawnComputeActorResponse& message, std::ostringst
     writer.Bytes(message.Error.data(), message.Error.size());
 }
 
-template<>
-void DeserializeFromStream(TSpawnComputeActorResponse& message, std::istringstream& input) {
-    TReader reader(input);
-    const auto count = reader.Value<uint32_t>();
-    if (count > reader.Remaining() / 8) {
-        Invalid("truncated actor list");
-    }
-    TSpawnComputeActorResponse result;
-    result.ActorIds.reserve(count);
-    for (uint32_t i = 0; i < count; ++i) {
-        const auto node = reader.Value<uint16_t>();
-        const auto actor = reader.Value<uint32_t>();
-        const auto cookie = reader.Value<uint16_t>();
-        result.ActorIds.emplace_back(node, actor, cookie);
-    }
-    result.Error = reader.Bytes(reader.Value<uint32_t>());
-    reader.Finish();
-    message = std::move(result);
-}
-
-template<>
-void SerializeToStream(const TComputeError& message, std::ostringstream& output) {
-    TWriter writer(output);
+void Write(TWriter& writer, const TComputeError& message) {
     writer.Value<uint32_t>(ByteSize(message.Message.size(), 1));
     writer.Bytes(message.Message.data(), message.Message.size());
 }
 
-template<>
-void DeserializeFromStream(TComputeError& message, std::istringstream& input) {
-    TReader reader(input);
-    TComputeError result;
-    result.Message = reader.Bytes(reader.Value<uint32_t>());
-    reader.Finish();
-    message = std::move(result);
-}
-
-template<>
-void SerializeToStream(const TTaskGraphMessage& message, std::ostringstream& output) {
-    TWriter writer(output);
+void Write(TWriter& writer, const TTaskGraphMessage& message) {
     writer.Value<uint32_t>(ByteSize(message.Spec.size(), 1));
     writer.Bytes(message.Spec.data(), message.Spec.size());
     writer.Value<uint32_t>(ByteSize(message.KernelImage.size(), 1));
@@ -458,9 +180,533 @@ void SerializeToStream(const TTaskGraphMessage& message, std::ostringstream& out
     }
 }
 
+// The small messages are written by one function twice: to count, then to fill.
+template<class T>
+size_t CountedSize(const T& message) {
+    TWriter writer;
+    Write(writer, message);
+    return writer.Size();
+}
+
+template<class T>
+void WriteExactly(const T& message, std::span<char> out) {
+    TWriter writer(out);
+    Write(writer, message);
+    if (writer.Size() != out.size()) {
+        Invalid("payload does not match its size");
+    }
+}
+
+// A chunk on the wire: a header, one entry per column, then 16-byte aligned regions
+// per column (values or string offsets and bytes, then the mask) and the hashes.
+// The received blob is 16-byte aligned, so the row set points into it.
+constexpr size_t ChunkAlign = 16;
+
+size_t AlignUp(size_t value) {
+    return (value + ChunkAlign - 1) & ~(ChunkAlign - 1);
+}
+
+struct TChunkHeader {
+    uint64_t DstTaskId;
+    uint64_t Seq;
+    uint64_t Columns;
+    uint64_t Rows;
+    uint64_t HasHash;
+};
+
+struct TChunkColumn {
+    uint8_t Width;
+    uint8_t Bitmap;
+    uint8_t HasMask;
+    uint8_t OffsetWidth;
+};
+
+struct TChunkStorage {
+    std::vector<TValueLayout> Layouts;
+    std::vector<TColumn> Columns;
+    TBlob::TRawPtr Bytes;
+};
+
+uint64_t OffsetAt(const TColumn& column, uint64_t row) {
+    int64_t value = 0;
+    const auto* offsets = static_cast<const char*>(column.Offsets);
+    if (column.OffsetWidth == 4) {
+        int32_t offset;
+        std::memcpy(&offset, offsets + row * 4, 4);
+        value = offset;
+    } else {
+        std::memcpy(&value, offsets + row * 8, 8);
+    }
+    if (value < 0) {
+        Invalid("negative string offset");
+    }
+    return static_cast<uint64_t>(value);
+}
+
+void PutOffset(char* offsets, uint64_t index, uint8_t width, uint64_t value) {
+    if (width == 4) {
+        const auto narrow = static_cast<uint32_t>(value);
+        std::memcpy(offsets + index * 4, &narrow, 4);
+    } else {
+        std::memcpy(offsets + index * 8, &value, 8);
+    }
+}
+
+uint64_t SelectedRows(const TRowSet& rowSet) {
+    if (!rowSet.Selection) {
+        return static_cast<uint64_t>(rowSet.RowCount);
+    }
+    uint64_t rows = 0;
+    for (int64_t row = 0; row < rowSet.RowCount; ++row) {
+        rows += rowSet.Selection[row] != 0;
+    }
+    return rows;
+}
+
+// The bytes of the selected strings; checks the offsets the writer then trusts.
+uint64_t StringBytes(const TColumn& column, const TRowSet& rowSet) {
+    if (column.OffsetWidth != 4 && column.OffsetWidth != 8) {
+        Invalid("unsupported string offset width");
+    }
+    const auto source = static_cast<uint64_t>(rowSet.RowCount);
+    if (!column.Offsets) {
+        if (source != 0) {
+            Invalid("missing string offsets");
+        }
+        return 0;
+    }
+    uint64_t total = 0;
+    uint64_t previous = OffsetAt(column, 0);
+    for (uint64_t row = 0; row < source; ++row) {
+        const uint64_t next = OffsetAt(column, row + 1);
+        if (next < previous) {
+            Invalid("decreasing string offsets");
+        }
+        if (!rowSet.Selection || rowSet.Selection[row]) {
+            total += next - previous;
+        }
+        previous = next;
+    }
+    if (total != 0 && !column.Data) {
+        Invalid("missing string data");
+    }
+    return total;
+}
+
+size_t ChunkSize(const TDataChunk& message) {
+    const auto& rowSet = message.RowSet;
+    if (rowSet.RowCount < 0 || rowSet.ColumnCount < 0) {
+        Invalid("row set must have nonnegative dimensions");
+    }
+    if (rowSet.ColumnCount != 0 && (!rowSet.Columns || !message.Descriptor)) {
+        Invalid("missing columns or value layouts");
+    }
+    const uint64_t rows = SelectedRows(rowSet);
+    size_t size = AlignUp(sizeof(TChunkHeader) + ByteSize(rowSet.ColumnCount, sizeof(TChunkColumn)));
+    for (int64_t i = 0; i < rowSet.ColumnCount; ++i) {
+        const auto& layout = message.Descriptor[i];
+        const auto& column = rowSet.Columns[i];
+        ValidateLayout(layout);
+        if (column.Offsets && !IsStringLayout(layout)) {
+            Invalid("string offsets do not match the value layout");
+        }
+        if (layout.Bitmap) {
+            if (rows != 0 && !column.Data) {
+                Invalid("missing bitmap");
+            }
+            size += AlignUp(BitmapSize(rows));
+        } else if (IsStringLayout(layout)) {
+            size = AlignUp(size + ByteSize(rows + 1, column.OffsetWidth == 8 ? 8 : 4));
+            size += AlignUp(ByteSize(StringBytes(column, rowSet), 1));
+        } else {
+            if (rows != 0 && !column.Data) {
+                Invalid("missing buffer");
+            }
+            size += AlignUp(ByteSize(rows, layout.Width));
+        }
+        if (column.Mask) {
+            size += AlignUp(BitmapSize(rows));
+        }
+        if (size > MaxPayloadSize) {
+            Invalid("payload size overflow");
+        }
+    }
+    if (rowSet.Hash) {
+        size += AlignUp(ByteSize(rows, sizeof(uint64_t)));
+    }
+    if (size > MaxPayloadSize) {
+        Invalid("payload size overflow");
+    }
+    return size;
+}
+
+void WriteBits(char* out, const void* source, int32_t bitOffset, const uint8_t* selection,
+    uint64_t sourceRows, uint64_t rows)
+{
+    const size_t bytes = BitmapSize(rows);
+    if (bytes == 0) {
+        return;
+    }
+    if (bitOffset < 0) {
+        Invalid("negative bitmap offset");
+    }
+    auto* target = reinterpret_cast<uint8_t*>(out);
+    const auto* bits = static_cast<const uint8_t*>(source);
+    if (!selection && bitOffset % 8 == 0) {
+        std::memcpy(target, bits + bitOffset / 8, bytes);
+        if (rows % 8 != 0) {
+            target[bytes - 1] &= (1u << (rows % 8)) - 1;
+        }
+        return;
+    }
+    std::memset(target, 0, bytes);
+    uint64_t next = 0;
+    for (uint64_t row = 0; row < sourceRows; ++row) {
+        if (selection && !selection[row]) {
+            continue;
+        }
+        const uint64_t bit = row + static_cast<uint32_t>(bitOffset);
+        target[next / 8] |= ((bits[bit / 8] >> (bit % 8)) & 1) << (next % 8);
+        ++next;
+    }
+}
+
+// Writes the offsets from 0 at `pos` and the bytes in the next aligned region; returns their end.
+size_t WriteStrings(char* out, size_t pos, const TColumn& column, const TRowSet& rowSet, uint64_t rows) {
+    const uint8_t width = column.OffsetWidth;
+    char* offsets = out + pos;
+    const size_t bytesStart = AlignUp(pos + (rows + 1) * width);
+    char* bytes = out + bytesStart;
+    const auto source = static_cast<uint64_t>(rowSet.RowCount);
+    if (source == 0) {
+        PutOffset(offsets, 0, width, 0);
+        return bytesStart;
+    }
+    if (!rowSet.Selection) {
+        const uint64_t first = OffsetAt(column, 0);
+        const uint64_t last = OffsetAt(column, source);
+        if (first == 0) {
+            std::memcpy(offsets, column.Offsets, (rows + 1) * width);
+        } else {
+            for (uint64_t row = 0; row <= rows; ++row) {
+                PutOffset(offsets, row, width, OffsetAt(column, row) - first);
+            }
+        }
+        if (last != first) {
+            std::memcpy(bytes, column.Data + first, last - first);
+        }
+        return bytesStart + (last - first);
+    }
+    uint64_t next = 0;
+    uint64_t total = 0;
+    PutOffset(offsets, next++, width, 0);
+    for (uint64_t row = 0; row < source; ++row) {
+        if (!rowSet.Selection[row]) {
+            continue;
+        }
+        const uint64_t begin = OffsetAt(column, row);
+        const uint64_t end = OffsetAt(column, row + 1);
+        if (end != begin) {
+            std::memcpy(bytes + total, column.Data + begin, end - begin);
+        }
+        total += end - begin;
+        PutOffset(offsets, next++, width, total);
+    }
+    return bytesStart + total;
+}
+
+void WriteValues(char* out, const TColumn& column, const TRowSet& rowSet, uint64_t rows, size_t width) {
+    if (rows == 0) {
+        return;
+    }
+    if (!rowSet.Selection) {
+        std::memcpy(out, column.Data, rows * width);
+        return;
+    }
+    size_t next = 0;
+    for (int64_t row = 0; row < rowSet.RowCount; ++row) {
+        if (rowSet.Selection[row]) {
+            std::memcpy(out + next * width, column.Data + row * width, width);
+            ++next;
+        }
+    }
+}
+
+// The caller has checked the message with ChunkSize, which `out` matches.
+void WriteChunk(const TDataChunk& message, std::span<char> out) {
+    const auto& rowSet = message.RowSet;
+    const uint64_t rows = SelectedRows(rowSet);
+    const auto source = static_cast<uint64_t>(rowSet.RowCount);
+    char* base = out.data();
+    const TChunkHeader header{
+        .DstTaskId = message.DstTaskId,
+        .Seq = message.Seq,
+        .Columns = static_cast<uint64_t>(rowSet.ColumnCount),
+        .Rows = rows,
+        .HasHash = rowSet.Hash != nullptr,
+    };
+    std::memcpy(base, &header, sizeof(header));
+    size_t pos = sizeof(header);
+    for (int64_t i = 0; i < rowSet.ColumnCount; ++i) {
+        const auto& layout = message.Descriptor[i];
+        const auto& column = rowSet.Columns[i];
+        const TChunkColumn entry{
+            .Width = static_cast<uint8_t>(layout.Width),
+            .Bitmap = layout.Bitmap,
+            .HasMask = column.Mask != nullptr,
+            .OffsetWidth = IsStringLayout(layout) ? column.OffsetWidth : uint8_t{0},
+        };
+        std::memcpy(base + pos, &entry, sizeof(entry));
+        pos += sizeof(entry);
+    }
+    // Padding is zeroed: the buffer may hold earlier messages' bytes.
+    std::memset(base + pos, 0, AlignUp(pos) - pos);
+    pos = AlignUp(pos);
+    auto pad = [&](size_t end) {
+        std::memset(base + end, 0, AlignUp(end) - end);
+        pos = AlignUp(end);
+    };
+    for (int64_t i = 0; i < rowSet.ColumnCount; ++i) {
+        const auto& layout = message.Descriptor[i];
+        const auto& column = rowSet.Columns[i];
+        if (layout.Bitmap) {
+            WriteBits(base + pos, column.Data, column.DataBitOffset, rowSet.Selection, source, rows);
+            pad(pos + BitmapSize(rows));
+        } else if (IsStringLayout(layout)) {
+            const size_t offsetsEnd = pos + (rows + 1) * column.OffsetWidth;
+            std::memset(base + offsetsEnd, 0, AlignUp(offsetsEnd) - offsetsEnd);
+            pad(WriteStrings(base, pos, column, rowSet, rows));
+        } else {
+            WriteValues(base + pos, column, rowSet, rows, layout.Width);
+            pad(pos + rows * layout.Width);
+        }
+        if (column.Mask) {
+            WriteBits(base + pos, column.Mask, column.MaskBitOffset, rowSet.Selection, source, rows);
+            pad(pos + BitmapSize(rows));
+        }
+    }
+    if (rowSet.Hash) {
+        if (!rowSet.Selection) {
+            std::memcpy(base + pos, rowSet.Hash, rows * sizeof(uint64_t));
+        } else {
+            size_t next = 0;
+            for (uint64_t row = 0; row < source; ++row) {
+                if (rowSet.Selection[row]) {
+                    std::memcpy(base + pos + next * sizeof(uint64_t), &rowSet.Hash[row], sizeof(uint64_t));
+                    ++next;
+                }
+            }
+        }
+        pad(pos + rows * sizeof(uint64_t));
+    }
+    if (pos != out.size()) {
+        Invalid("payload does not match its size");
+    }
+}
+
+bool Flag(uint64_t value) {
+    if (value > 1) {
+        Invalid("invalid presence flag");
+    }
+    return value != 0;
+}
+
+void CheckStringOffsets(const char* offsets, uint8_t width, uint64_t rows, uint64_t bytes) {
+    const uint64_t maxOffset = width == 4
+        ? std::numeric_limits<int32_t>::max()
+        : std::numeric_limits<int64_t>::max();
+    uint64_t last = 0;
+    for (uint64_t row = 0; row <= rows; ++row) {
+        uint64_t offset = 0;
+        if (width == 4) {
+            uint32_t value;
+            std::memcpy(&value, offsets + row * 4, 4);
+            offset = value;
+        } else {
+            std::memcpy(&offset, offsets + row * 8, 8);
+        }
+        if (offset > maxOffset || offset < last || (row == 0 && offset != 0) || offset > bytes) {
+            Invalid("invalid string offsets");
+        }
+        last = offset;
+    }
+}
+
+uint64_t LastOffset(const char* offsets, uint8_t width, uint64_t rows) {
+    if (width == 4) {
+        uint32_t value;
+        std::memcpy(&value, offsets + rows * 4, 4);
+        return value;
+    }
+    uint64_t value;
+    std::memcpy(&value, offsets + rows * 8, 8);
+    return value;
+}
+
+void ReadChunk(TDataChunk& message, TBlob& blob) {
+    const size_t size = blob.Size;
+    if (size < sizeof(TChunkHeader)) {
+        Invalid("truncated payload");
+    }
+    TChunkHeader header;
+    std::memcpy(&header, blob.Data.get(), sizeof(header));
+    const uint64_t rows = header.Rows;
+    const uint64_t columns = header.Columns;
+    if (rows > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())
+        || columns > (size - sizeof(header)) / sizeof(TChunkColumn))
+    {
+        Invalid("invalid row set dimensions");
+    }
+    const bool hasHash = Flag(header.HasHash);
+    // An envelope reader may hand out an unaligned blob: the row set then gets an aligned copy.
+    TBlob::TRawPtr copy;
+    char* base = static_cast<char*>(blob.Data.get());
+    if (reinterpret_cast<uintptr_t>(base) % ChunkAlign != 0) {
+        copy = TBlob::TRawPtr(::operator new(size), TBlobDeleter{[](void* ptr) {
+            ::operator delete(ptr);
+        }});
+        std::memcpy(copy.get(), base, size);
+        base = static_cast<char*>(copy.get());
+    }
+    auto storage = std::make_unique<TChunkStorage>();
+    storage->Layouts.resize(columns);
+    storage->Columns.resize(columns);
+    size_t pos = AlignUp(sizeof(header) + columns * sizeof(TChunkColumn));
+    auto take = [&](size_t length) {
+        if (pos > size || length > size - pos) {
+            Invalid("truncated payload");
+        }
+        char* region = base + pos;
+        pos += AlignUp(length);
+        return region;
+    };
+    for (uint64_t i = 0; i < columns; ++i) {
+        TChunkColumn entry;
+        std::memcpy(&entry, base + sizeof(header) + i * sizeof(entry), sizeof(entry));
+        auto& layout = storage->Layouts[i];
+        auto& column = storage->Columns[i];
+        layout = TValueLayout{.Width = entry.Width, .Bitmap = Flag(entry.Bitmap)};
+        ValidateLayout(layout);
+        column = TColumn{};
+        if (IsStringLayout(layout)) {
+            const uint8_t width = entry.OffsetWidth;
+            if (width != 4 && width != 8) {
+                Invalid("unsupported string offset width");
+            }
+            char* offsets = take(ByteSize(rows + 1, width));
+            const uint64_t length = LastOffset(offsets, width, rows);
+            if (pos > size || length > size - pos) {
+                Invalid("invalid string offsets");
+            }
+            CheckStringOffsets(offsets, width, rows, length);
+            column.Offsets = offsets;
+            column.OffsetWidth = width;
+            column.Data = take(length);
+        } else {
+            if (entry.OffsetWidth != 0) {
+                Invalid("string offsets do not match the value layout");
+            }
+            column.Data = take(layout.Bitmap ? BitmapSize(rows) : ByteSize(rows, layout.Width));
+        }
+        if (Flag(entry.HasMask)) {
+            column.Mask = reinterpret_cast<const uint8_t*>(take(BitmapSize(rows)));
+        }
+    }
+    uint64_t* hash = nullptr;
+    if (hasHash) {
+        hash = reinterpret_cast<uint64_t*>(take(ByteSize(rows, sizeof(uint64_t))));
+    }
+    if (pos != size) {
+        Invalid("trailing payload bytes");
+    }
+    // The row set keeps the bytes it points into.
+    if (copy) {
+        storage->Bytes = std::move(copy);
+    } else {
+        storage->Bytes = std::move(blob.Data);
+        blob.Size = 0;
+    }
+    message.DstTaskId = header.DstTaskId;
+    message.Seq = header.Seq;
+    message.Descriptor = storage->Layouts.data();
+    message.RowSet = TRowSet{
+        .Columns = storage->Columns.data(),
+        .ColumnCount = static_cast<int64_t>(columns),
+        .RowCount = static_cast<int64_t>(rows),
+        .Selection = nullptr,
+        .Hash = hash,
+        .Destroy = [](TRowSet* rowSet) {
+            delete static_cast<TChunkStorage*>(rowSet->Private);
+        },
+        .Private = storage.release(),
+        .RefCount = 1,
+    };
+}
+
+} // namespace
+
 template<>
-void DeserializeFromStream(TTaskGraphMessage& message, std::istringstream& input) {
-    TReader reader(input);
+size_t SerializedSize(const TSpawnComputeActorResponse& message) {
+    return CountedSize(message);
+}
+
+template<>
+void SerializeTo(const TSpawnComputeActorResponse& message, std::span<char> out) {
+    WriteExactly(message, out);
+}
+
+template<>
+void DeserializeFrom(TSpawnComputeActorResponse& message, TBlob& blob) {
+    TReader reader(blob);
+    const auto count = reader.Value<uint32_t>();
+    if (count > reader.Remaining() / 8) {
+        Invalid("truncated actor list");
+    }
+    TSpawnComputeActorResponse result;
+    result.ActorIds.reserve(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        const auto node = reader.Value<uint16_t>();
+        const auto actor = reader.Value<uint32_t>();
+        const auto cookie = reader.Value<uint16_t>();
+        result.ActorIds.emplace_back(node, actor, cookie);
+    }
+    result.Error = reader.Bytes(reader.Value<uint32_t>());
+    reader.Finish();
+    message = std::move(result);
+}
+
+template<>
+size_t SerializedSize(const TComputeError& message) {
+    return CountedSize(message);
+}
+
+template<>
+void SerializeTo(const TComputeError& message, std::span<char> out) {
+    WriteExactly(message, out);
+}
+
+template<>
+void DeserializeFrom(TComputeError& message, TBlob& blob) {
+    TReader reader(blob);
+    TComputeError result;
+    result.Message = reader.Bytes(reader.Value<uint32_t>());
+    reader.Finish();
+    message = std::move(result);
+}
+
+template<>
+size_t SerializedSize(const TTaskGraphMessage& message) {
+    return CountedSize(message);
+}
+
+template<>
+void SerializeTo(const TTaskGraphMessage& message, std::span<char> out) {
+    WriteExactly(message, out);
+}
+
+template<>
+void DeserializeFrom(TTaskGraphMessage& message, TBlob& blob) {
+    TReader reader(blob);
     TTaskGraphMessage result;
     result.Spec = reader.Bytes(reader.Value<uint32_t>());
     result.KernelImage = reader.Bytes(reader.Value<uint32_t>());
@@ -488,130 +734,18 @@ void DeserializeFromStream(TTaskGraphMessage& message, std::istringstream& input
 }
 
 template<>
-void SerializeToStream(const TDataChunk& message, std::ostringstream& output) {
-    const auto& rowSet = message.RowSet;
-    if (rowSet.RowCount < 0 || rowSet.ColumnCount < 0) {
-        Invalid("row set must have nonnegative dimensions");
-    }
-    const uint64_t sourceRows = rowSet.RowCount;
-    uint64_t rows = sourceRows;
-    if (rowSet.Selection) {
-        rows = 0;
-        for (uint64_t row = 0; row < sourceRows; ++row) {
-            rows += rowSet.Selection[row] != 0;
-        }
-    }
-    const uint64_t columns = rowSet.ColumnCount;
-    if (columns != 0 && (!rowSet.Columns || !message.Descriptor)) {
-        Invalid("missing columns or value layouts");
-    }
-    ByteSize(columns, 2);
-    TWriter writer(output);
-    writer.Value<uint64_t>(message.DstTaskId);
-    writer.Value<uint64_t>(message.Seq);
-    writer.Value<uint64_t>(columns);
-    writer.Value<uint64_t>(rows);
-    for (uint64_t i = 0; i < columns; ++i) {
-        const auto& layout = message.Descriptor[i];
-        ValidateLayout(layout);
-        if (rowSet.Columns && rowSet.Columns[i].Offsets && !IsStringLayout(layout)) {
-            Invalid("string offsets do not match the value layout");
-        }
-        writer.Value<uint8_t>(layout.Width);
-        writer.Value<uint8_t>(layout.Bitmap);
-    }
-    for (uint64_t i = 0; i < columns; ++i) {
-        const auto& layout = message.Descriptor[i];
-        // A selected row set is gathered into a copy; the sender's buffers stay untouched.
-        TSelectedColumn selected;
-        if (rowSet.Selection) {
-            GatherColumn(selected, rowSet.Columns[i], layout, rowSet.Selection, sourceRows, rows);
-        }
-        const auto& column = rowSet.Selection ? selected.Column : rowSet.Columns[i];
-        if (layout.Bitmap) {
-            writer.Bitmap(column.Data, column.DataBitOffset, rows);
-        } else if (IsStringLayout(layout)) {
-            WriteStrings(writer, column, rows);
-        } else {
-            writer.Bytes(column.Data, ByteSize(rows, layout.Width));
-        }
-        writer.Value<uint8_t>(column.Mask != nullptr);
-        if (column.Mask) {
-            writer.Bitmap(column.Mask, column.MaskBitOffset, rows);
-        }
-    }
-    writer.Value<uint8_t>(rowSet.Hash != nullptr);
-    if (rowSet.Hash) {
-        std::vector<uint64_t> hashes;
-        const uint64_t* hash = rowSet.Hash;
-        if (rowSet.Selection) {
-            for (uint64_t row = 0; row < sourceRows; ++row) {
-                if (rowSet.Selection[row]) {
-                    hashes.push_back(rowSet.Hash[row]);
-                }
-            }
-            hash = hashes.data();
-        }
-        writer.Bytes(hash, ByteSize(rows, sizeof(uint64_t)));
-    }
+size_t SerializedSize(const TDataChunk& message) {
+    return ChunkSize(message);
 }
 
 template<>
-void DeserializeFromStream(TDataChunk& message, std::istringstream& input) {
-    TReader reader(input);
-    const auto task = reader.Value<uint64_t>();
-    const auto seq = reader.Value<uint64_t>();
-    const auto columns = reader.Value<uint64_t>();
-    const auto rows = reader.Value<uint64_t>();
-    if (rows > std::numeric_limits<int64_t>::max() || columns > reader.Remaining() / 2) {
-        Invalid("invalid row set dimensions");
-    }
-    auto storage = std::make_unique<TRowSetStorage>();
-    storage->Layouts.reserve(columns);
-    for (uint64_t i = 0; i < columns; ++i) {
-        TValueLayout layout{
-            .Width = reader.Value<uint8_t>(),
-            .Bitmap = reader.Flag(),
-        };
-        ValidateLayout(layout);
-        storage->Layouts.push_back(layout);
-    }
-    storage->Columns.resize(columns);
-    for (uint64_t i = 0; i < columns; ++i) {
-        auto& column = storage->Columns[i];
-        const auto& layout = storage->Layouts[i];
-        if (layout.Bitmap) {
-            column.Data = storage->Copy(reader.Bytes(BitmapSize(rows)));
-        } else if (IsStringLayout(layout)) {
-            ReadStrings(reader, *storage, column, rows);
-        } else {
-            column.Data = storage->Copy(reader.Bytes(ByteSize(rows, layout.Width)));
-        }
-        if (reader.Flag()) {
-            column.Mask = reinterpret_cast<const uint8_t*>(
-                storage->Copy(reader.Bytes(BitmapSize(rows))));
-        }
-    }
-    uint64_t* hash = nullptr;
-    if (reader.Flag()) {
-        hash = reinterpret_cast<uint64_t*>(storage->Copy(reader.Bytes(ByteSize(rows, sizeof(uint64_t)))));
-    }
-    reader.Finish();
-    message.DstTaskId = task;
-    message.Seq = seq;
-    message.Descriptor = storage->Layouts.data();
-    message.RowSet = TRowSet{
-        .Columns = storage->Columns.data(),
-        .ColumnCount = static_cast<int64_t>(columns),
-        .RowCount = static_cast<int64_t>(rows),
-        .Selection = nullptr,
-        .Hash = hash,
-        .Destroy = [](TRowSet* rowSet) {
-            delete static_cast<TRowSetStorage*>(rowSet->Private);
-        },
-        .Private = storage.release(),
-        .RefCount = 1,
-    };
+void SerializeTo(const TDataChunk& message, std::span<char> out) {
+    WriteChunk(message, out);
+}
+
+template<>
+void DeserializeFrom(TDataChunk& message, TBlob& blob) {
+    ReadChunk(message, blob);
 }
 
 } // namespace NActors
