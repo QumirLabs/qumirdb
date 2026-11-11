@@ -721,10 +721,11 @@ TEST_F(RuntimeFilter, PartialCanBeMergedAfterLeavingTheProducer) {
 
 // Two fragments with two build lanes each, both probing: each forwards its
 // lanes to its own filter and sends their merge to the other, which then
-// publishes what one filter of all four lanes does, also with no build rows.
+// publishes what one filter of all four lanes does: with no build rows, exact,
+// exact lanes over the cap only together, and Bloom lanes.
 TEST_F(RuntimeFilter, MergedLanesOfAnotherFragmentPublishLikeTheLanes) {
     constexpr size_t Lanes = 4;
-    for (const size_t keysPerLane : {0, 3, 100}) {
+    for (const size_t keysPerLane : {0, 3, 20, 100}) {
         SCOPED_TRACE(keysPerLane);
         auto filter = [&] {
             auto made = std::make_shared<TRuntimeFilter>(Context_, /*maxKeys=*/32, /*bloomBytes=*/4096);
@@ -744,6 +745,7 @@ TEST_F(RuntimeFilter, MergedLanesOfAnotherFragmentPublishLikeTheLanes) {
             auto builder = lanes.MakeBuilder();
             builder.Add(part);
             auto partial = std::move(builder).TakePartial();
+            EXPECT_EQ(partial.ExactSetOverflowed, keysPerLane == 100);
             whole->FinishProducer(TRuntimeFilterPartial(partial));
             lanes.FinishProducer(std::move(partial));
         }
@@ -755,7 +757,7 @@ TEST_F(RuntimeFilter, MergedLanesOfAnotherFragmentPublishLikeTheLanes) {
         const auto probes = Hashes(20000, 99);
         for (const auto& merged : {first, second}) {
             ASSERT_TRUE(merged->Ready());
-            EXPECT_EQ(merged->UsesBloom(), keysPerLane == 100);
+            EXPECT_EQ(merged->UsesBloom(), keysPerLane >= 20);
             const auto stats = merged->StatsSnapshot();
             EXPECT_EQ(stats.BuildRows, keys.size());
             EXPECT_EQ(stats.ExactKeys, whole->StatsSnapshot().ExactKeys);

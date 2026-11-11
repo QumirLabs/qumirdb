@@ -223,15 +223,6 @@ const TRuntimeFilterBinding& RuntimeFilterAt(const TNodeTaskContext& context, ui
     return context.RuntimeFilterBindings[filter];
 }
 
-const std::shared_ptr<TRuntimeFilterExport>& RuntimeFilterExportAt(
-    const TNodeTaskContext& context, uint32_t filter)
-{
-    if (filter >= context.RuntimeFilterExports.size() || !context.RuntimeFilterExports[filter]) {
-        Invalid("a runtime filter sink needs the export of its filter");
-    }
-    return context.RuntimeFilterExports[filter];
-}
-
 // Build lanes deliver to the export of their filter where it has one.
 std::shared_ptr<IRuntimeFilterProducer> RuntimeFilterProducerAt(
     const TNodeTaskContext& context, uint32_t filter)
@@ -504,7 +495,8 @@ std::unique_ptr<ITask> MakeNodeTask(
             return std::make_unique<TRuntimeFilterTask>(
                 nullptr, InputPort(connections, node.In), OutputPort(connections, node.Out));
         } else if constexpr (std::is_same_v<TNode, TRuntimeFilterSinkNode>) {
-            return std::make_unique<TRuntimeFilterSinkTask>(RuntimeFilterExportAt(context, node.Filter));
+            // AddRuntimeFilterExports made the export of every sink's filter.
+            return std::make_unique<TRuntimeFilterSinkTask>(context.RuntimeFilterExports[node.Filter]);
         } else if constexpr (std::is_same_v<TNode, TRuntimeFilterSourceNode>) {
             return std::make_unique<TRuntimeFilterSourceTask>(RuntimeFilterAt(context, node.Filter).Producer);
         } else if constexpr (std::is_same_v<TNode, TForwardNode>) {
