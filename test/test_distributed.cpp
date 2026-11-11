@@ -2531,6 +2531,29 @@ TEST(DistributedScheduler, ComputeActorReleasesWhatItKeptForAGraphThatNeverCame)
     EXPECT_EQ(destroyed.load(), 1);
 }
 
+// A chunk kept for a graph that then fails to start: the error reaches the
+// query actor, and the rows are released once, with the actor.
+TEST(DistributedScheduler, ComputeActorReleasesWhatItKeptForAGraphThatFailedToStart) {
+    std::atomic<int> destroyed = 0;
+    TTestCluster cluster;
+    std::map<std::string, int> statuses;
+    std::vector<std::string> errors;
+    const auto query = cluster.Follower.Register(std::make_unique<TReportProbe>(statuses, errors));
+    const auto peer = cluster.Follower.Register(std::make_unique<TBlackHole>());
+    const auto actor = cluster.Follower.Register(std::unique_ptr<IActor>(CreateComputeActor()));
+    cluster.Follower.Send<TDataChunk>(peer, actor, TDataChunk(2, 1, CountedRows(3, &destroyed)));
+    cluster.Pump();
+    // The relay's source has no endpoint, so the graph cannot start.
+    cluster.Follower.Send<TTaskGraphMessage>(query, actor, GraphMessage(RelaySpec(), {RelayEndpoints(peer)[0]}));
+    cluster.Pump();
+    ASSERT_EQ(errors.size(), 1u);
+    EXPECT_NE(errors[0].find("cannot start graph"), std::string::npos) << errors[0];
+    EXPECT_EQ(destroyed.load(), 0);
+    cluster.Follower.Send<TPoison>(query, actor, TPoison{});
+    cluster.Pump();
+    EXPECT_EQ(destroyed.load(), 1);
+}
+
 // One remote source feeds two remote sinks through a broadcast: a fragment
 // with two roots, like the partitioner cuts them. Each sink sends every row.
 TEST(DistributedScheduler, ComputeActorRunsAFragmentWithTwoRemoteSinks) {
