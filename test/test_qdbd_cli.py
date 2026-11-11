@@ -74,9 +74,11 @@ class TestQdbdCli(unittest.TestCase):
                 procs.append(subprocess.Popen(args, stderr=subprocess.DEVNULL))
             for port in ports:
                 self.assertTrue(listens(port))
-            # The first query prunes "decimals" to id and d15; the others read more columns.
-            for sql in ("SELECT id % 7 AS k, SUM(d15) AS total FROM decimals GROUP BY id % 7",
-                        "SELECT a.id, b.s FROM decimals a JOIN decimals b ON a.id = b.id"):
+            # The first query prunes "decimals" to id and d15; the second reads more of them.
+            for sql, lines in (
+                ("SELECT id % 7 AS k, SUM(d15) AS total FROM decimals GROUP BY id % 7", None),
+                ("SELECT a.id, b.s FROM decimals a JOIN decimals b ON a.id = b.id", 257),  # 256 rows and the header
+            ):
                 status, body = None, ""
                 for _ in range(20):  # the compute actors may still be joining
                     status, body = query(ports[2], sql)
@@ -84,6 +86,8 @@ class TestQdbdCli(unittest.TestCase):
                         break
                     time.sleep(0.25)
                 self.assertEqual(status, 200, body)
+                if lines is not None:
+                    self.assertEqual(len(body.splitlines()), lines, body[:200])
         finally:
             for p in procs:
                 p.kill()
