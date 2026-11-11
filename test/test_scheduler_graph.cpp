@@ -706,7 +706,8 @@ struct TTwoCuts {
 void BuildTwoCuts(
     TTwoCuts& g,
     std::optional<uint64_t> rootId,
-    std::optional<uint64_t> sourceId = std::nullopt) {
+    std::optional<uint64_t> sourceId = std::nullopt)
+{
     auto& first = g.Graph.AddConnection(std::make_unique<TOneToOneConnection>());
     auto& second = g.Graph.AddConnection(std::make_unique<TOneToOneConnection>());
     auto source = AddPortsNode(g.Graph, {}, {{.Connection = &first}});
