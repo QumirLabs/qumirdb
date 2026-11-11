@@ -59,7 +59,7 @@ void TPartitioner::Do() {
 void TPartitioner::Partition(const std::vector<TTaskEdge*>& cuts) {
     for (auto* edge : cuts) {
         if (edge->Kind == ETaskEdgeKind::Dependency) {
-            // TODO: dependency transport is separate from rowset streams.
+            // Not planned: see the class comment; Apply rejects such a cut.
             continue;
         }
         if (auto* oneToOne = dynamic_cast<TOneToOneConnection*>(edge->Connection)) {

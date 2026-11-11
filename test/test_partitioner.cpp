@@ -514,7 +514,13 @@ TEST_F(TPartitionerTest, IncludesCrossPartitionDependency) {
     EXPECT_TRUE(partitioner.SplitEdges().contains(&dependency));
     EXPECT_EQ(partitioner.SplitEdges().size(), 2u);
     // The plan leaves dependency cuts out, and Apply rejects a gate across colors.
-    EXPECT_THROW(Graph_.Apply(partitioner.TakePlan()), std::logic_error);
+    try {
+        Graph_.Apply(partitioner.TakePlan());
+        FAIL() << "Apply accepted a dependency edge across colors";
+    } catch (const std::logic_error& e) {
+        EXPECT_NE(std::string(e.what()).find("dependency edge"), std::string::npos) << e.what();
+        EXPECT_NE(std::string(e.what()).find("crosses colors"), std::string::npos) << e.what();
+    }
 }
 
 TEST_F(TPartitionerTest, OneToOneSplitRebindsDestinationLane) {
