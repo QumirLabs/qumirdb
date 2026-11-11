@@ -79,6 +79,22 @@ start() {
             return 1
         fi
     done
+    # HTTP answers before the scheduler has seen the nodes: wait until a real query is not refused (503).
+    local deadline=$((SECONDS + READY_TIMEOUT)) code
+    until code="$(curl -s --max-time 10 -o /dev/null -w '%{http_code}' --data-binary 'SELECT count(*) FROM region' \
+            "http://${hosts[0]}:$((HTTP_PORT_BASE + 1))/api/run")" && [[ "$code" != 503 && "$code" != 000 ]]; do
+        if (( SECONDS >= deadline )); then
+            echo "cluster has no live compute nodes after ${READY_TIMEOUT}s, see $CLUSTER_DIR" >&2
+            return 1
+        fi
+        for i in $(seq 1 "$nodes"); do
+            if [[ -f "$CLUSTER_DIR/node$i.pid" ]] && ! kill -0 "$(cat "$CLUSTER_DIR/node$i.pid")" 2>/dev/null; then
+                echo "node $i exited, see $CLUSTER_DIR/node$i.log" >&2
+                return 1
+            fi
+        done
+        sleep 0.5
+    done
     echo "cluster: $nodes node(s) x $threads thread(s), logs in $CLUSTER_DIR" >&2
 }
 
