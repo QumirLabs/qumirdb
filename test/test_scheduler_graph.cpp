@@ -11,6 +11,8 @@
 #include <algorithm>
 #include <deque>
 #include <memory>
+#include <optional>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -674,6 +676,100 @@ TEST(SchedulerGraph, ApplyGroupsPiecesOfOneColorIntoOneGraph) {
     EXPECT_EQ(graph.Edges().back().get(), &gate);
     EXPECT_EQ(middle.Task.Inputs[0].Connection, graph.Connections()[2].get());
     EXPECT_EQ(root.Task.Inputs[0].Connection, graph.Connections()[3].get());
+}
+
+// Nodes reachable upstream from the roots of one fragment.
+std::set<const TTaskNode*> Fragment(const std::vector<TTaskNode*>& roots) {
+    std::set<const TTaskNode*> seen;
+    std::vector<const TTaskNode*> stack(roots.begin(), roots.end());
+    while (!stack.empty()) {
+        const auto* node = stack.back();
+        stack.pop_back();
+        if (seen.insert(node).second) {
+            for (const auto* edge : node->Inbound) {
+                stack.push_back(edge->Src);
+            }
+        }
+    }
+    return seen;
+}
+
+// source -> middle -> root with both edges cut; the plan lists the later edge first.
+struct TTwoCuts {
+    TTaskGraph Graph;
+    TTaskNode* Source = nullptr;
+    TTaskNode* Root = nullptr;
+    TTaskEdge* In = nullptr;
+    TTaskEdge* Out = nullptr;
+};
+
+void BuildTwoCuts(TTwoCuts& g, std::optional<uint64_t> externalId) {
+    auto& first = g.Graph.AddConnection(std::make_unique<TOneToOneConnection>());
+    auto& second = g.Graph.AddConnection(std::make_unique<TOneToOneConnection>());
+    auto source = AddPortsNode(g.Graph, {}, {{.Connection = &first}});
+    auto middle = AddPortsNode(g.Graph, {{.Connection = &first}}, {{.Connection = &second}});
+    auto root = AddPortsNode(g.Graph, {{.Connection = &second}}, {});
+    g.Source = &source.Node;
+    g.Root = &root.Node;
+    g.In = &g.Graph.AddEdge(source.Node, middle.Node, first);
+    g.Out = &g.Graph.AddEdge(middle.Node, root.Node, second);
+    if (externalId) {
+        g.Graph.MarkExternal(root.Node, *externalId);
+    }
+    std::string error;
+    ASSERT_TRUE(g.Graph.Seal(&error)) << error;
+}
+
+TEST(SchedulerGraph, ApplyRecordsCutsInPlanOrderWithExternalIds) {
+    TTwoCuts g;
+    ASSERT_NO_FATAL_FAILURE(BuildTwoCuts(g, std::nullopt));
+    EXPECT_TRUE(g.Graph.Cuts().empty());
+    EXPECT_TRUE(g.Graph.Apply({}).Cuts().empty());
+
+    const auto sealed = g.Graph.Apply(Plan(
+        Split(*g.Out, EReboundPort::DestinationInput, 1, 0),
+        Split(*g.In, EReboundPort::DestinationInput, 0, 1)));
+    ASSERT_EQ(sealed.Cuts().size(), 2u);
+    ASSERT_EQ(g.Graph.Cuts().size(), 2u);
+    // Nodes 3..6 are created in edge order: In's pair first, then Out's.
+    const auto& nodes = g.Graph.Nodes();
+    const auto& out = sealed.Cuts()[0];
+    const auto& in = sealed.Cuts()[1];
+    EXPECT_EQ(out.Sink, nodes[5].get());
+    EXPECT_EQ(out.Source, nodes[6].get());
+    EXPECT_EQ(out.SinkColor, 1);
+    EXPECT_EQ(out.SourceColor, 0);
+    EXPECT_EQ(in.Sink, nodes[3].get());
+    EXPECT_EQ(in.Source, nodes[4].get());
+    EXPECT_EQ(in.SinkColor, 0);
+    EXPECT_EQ(in.SourceColor, 1);
+
+    // No external node existed: base 0, pairs by plan index.
+    EXPECT_EQ(sealed.ExternalNode(0), out.Sink);
+    EXPECT_EQ(sealed.ExternalNode(1), out.Source);
+    EXPECT_EQ(sealed.ExternalNode(2), in.Sink);
+    EXPECT_EQ(sealed.ExternalNode(3), in.Source);
+    EXPECT_EQ(sealed.ExternalNode(4), nullptr);
+    EXPECT_EQ(g.Graph.Externals().size(), 4u);
+
+    // Each placeholder lives in the fragment of its own color.
+    const auto graphs = sealed.Graphs();
+    ASSERT_EQ(graphs.size(), 2u);
+    for (const auto& cut : sealed.Cuts()) {
+        EXPECT_TRUE(Fragment(graphs[cut.SinkColor]).contains(cut.Sink));
+        EXPECT_TRUE(Fragment(graphs[cut.SourceColor]).contains(cut.Source));
+    }
+}
+
+TEST(SchedulerGraph, ApplyNumbersCutExternalsPastExistingOnes) {
+    TTwoCuts g;
+    ASSERT_NO_FATAL_FAILURE(BuildTwoCuts(g, 7));
+    const auto sealed = g.Graph.Apply(Plan(Split(*g.In, EReboundPort::DestinationInput, 0, 1)));
+    ASSERT_EQ(sealed.Cuts().size(), 1u);
+    EXPECT_EQ(sealed.ExternalNode(7), g.Root);
+    EXPECT_EQ(sealed.ExternalNode(8), sealed.Cuts()[0].Sink);
+    EXPECT_EQ(sealed.ExternalNode(9), sealed.Cuts()[0].Source);
+    EXPECT_EQ(sealed.ExternalNode(0), nullptr);
 }
 
 TEST(SchedulerGraph, ApplyRejectsADependencyAcrossColors) {
