@@ -1982,10 +1982,12 @@ private:
             broadcastNode = &forwardNode;
         }
 
-        // No row type: each lane carries the columns of its own lookup.
-        auto& results = AddConn<NScheduler::TOneToOneConnection>(
-            lookupTaskCount, lookupTaskCount, "late-lookup-results");
+        // One connection per lookup, typed by the columns it reads, so a cut
+        // between a lookup and the merge carries its own row layouts.
+        const auto outputLayouts = RowLayouts(outputType);
+        std::vector<NScheduler::IConnection*> results;
         std::vector<NScheduler::TTaskNode*> lookupNodes;
+        results.reserve(lookupTaskCount);
         lookupNodes.reserve(lookupTaskCount);
         for (size_t taskIndex = 0; taskIndex < lookupTaskCount; ++taskIndex) {
             // The lookup API exposes no per-column byte estimate, so divide
@@ -1995,6 +1997,10 @@ private:
                 physicalColumns.size() * taskIndex / lookupTaskCount;
             const size_t end =
                 physicalColumns.size() * (taskIndex + 1) / lookupTaskCount;
+            auto& result = AddConn<NScheduler::TOneToOneConnection>(1, 1, "late-lookup-result");
+            result.SetRowLayouts(std::vector<TValueLayout>(
+                outputLayouts.begin() + begin, outputLayouts.begin() + end));
+            results.push_back(&result);
             auto& node = AddNode({
                 .ExecStageId = execStageId,
                 .TaskGroupId = execStageId,
@@ -2002,7 +2008,7 @@ private:
                 .DebugLabel = "late-lookup",
                 .Body = NScheduler::TLateLookupNode{
                     .In = PortSpec(Graph_, requests, taskIndex),
-                    .Out = PortSpec(Graph_, &results, taskIndex),
+                    .Out = PortSpec(Graph_, &result, 0),
                     .Path = parquetSource->Path(),
                     .Columns = {
                         physicalColumns.begin() + begin,
@@ -2029,8 +2035,8 @@ private:
         NScheduler::TLateMergeNode mergeBody{
             .Out = PortSpec(Graph_, &outConn, outLaneOffset),
         };
-        for (size_t taskIndex = 0; taskIndex < lookupTaskCount; ++taskIndex) {
-            mergeBody.In.push_back(PortSpec(Graph_, &results, taskIndex));
+        for (auto* result : results) {
+            mergeBody.In.push_back(PortSpec(Graph_, result, 0));
         }
         auto& mergeNode = AddNode({
             .ExecStageId = execStageId,
@@ -2040,12 +2046,7 @@ private:
             .Body = std::move(mergeBody),
         });
         for (size_t taskIndex = 0; taskIndex < lookupTaskCount; ++taskIndex) {
-            Graph_.AddEdge(
-                *lookupNodes[taskIndex],
-                mergeNode,
-                results,
-                taskIndex,
-                taskIndex);
+            Graph_.AddEdge(*lookupNodes[taskIndex], mergeNode, *results[taskIndex]);
         }
 
         return TLoweredOutput{

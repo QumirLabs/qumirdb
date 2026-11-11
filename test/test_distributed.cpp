@@ -2757,6 +2757,38 @@ std::string RunLocally(const std::string& sql, const NQdb::NScheduler::TSettings
 
 } // namespace
 
+// A wide top-3 that fetches its columns by locator after the sort.
+constexpr const char* LateLookupSql = "SELECT id, d9, d15, d18, d38, s FROM t ORDER BY d9, id LIMIT 3";
+
+// Each late lookup writes its own connection, so a cut between a lookup and the
+// merge carries the layouts of the columns that lookup reads.
+TEST(DistributedScheduler, SplitsALateLookupWithTheLayoutsOfItsColumns) {
+    using namespace NQdb::NScheduler;
+    TParquetSource source(DecimalsPath);
+    TSettings settings;
+    settings.Scheduler.WorkerCount = 2;
+    settings.ScanSplit.Strategy = EScanSplitStrategy::RowGroupRange;
+    settings.ScanSplit.MaxScanTasks = 4;
+    auto lowered = LowerSql(LateLookupSql, source, settings);
+    TNoSink sink;
+    AttachSink(lowered, sink);
+    TPartitioner partitioner(lowered.Graph->Seal(), 2);
+    partitioner.Do();
+    const auto split = ApplySplit(lowered, partitioner.TakePlan());
+    size_t lookupCuts = 0;
+    for (const auto& cut : split.Cuts()) {
+        const auto& edge = *cut.Sink->Inbound.front();
+        if (edge.Src->DebugKind != "late-lookup") {
+            continue;
+        }
+        ++lookupCuts;
+        const auto& lookup = std::get<TLateLookupNode>(lowered.NodeSpecs[edge.Src->ExecutionSlot]->Body);
+        EXPECT_EQ(edge.Connection->RowLayouts().size(), lookup.Columns.size());
+        EXPECT_FALSE(lookup.Columns.empty());
+    }
+    EXPECT_GT(lookupCuts, 0u);
+}
+
 // The query actor lowers each query, splits it over one compute actor per node
 // and gets the rows of the local run, in CSV.
 TEST(DistributedScheduler, QueryActorRunsAQueryOnEveryNode) {
@@ -2786,6 +2818,8 @@ TEST(DistributedScheduler, QueryActorRunsAQueryOnEveryNode) {
              "WHERE id % 3 <> 0 GROUP BY id % 7 ORDER BY k",
              "SELECT a.id, b.s, b.d38 FROM t a JOIN t b ON a.id = b.id WHERE a.id % 5 = 0 ORDER BY a.id",
              "SELECT id, d9 FROM t WHERE id % 3 <> 0 ORDER BY id DESC LIMIT 10",
+             // Late materialization: the split cuts lookups from their merge.
+             LateLookupSql,
          }) {
         SCOPED_TRACE(sql);
         std::optional<TExecuteQueryResponse> answer;

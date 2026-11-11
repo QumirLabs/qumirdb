@@ -695,10 +695,9 @@ std::vector<std::string> ExpectQueryFromSpec(
     }
     checkSpec(*spec);
     // A remote sink may replace any consumer, so connections name their rows;
-    // the CTE lanes carry none, and late lookup result lanes differ in columns.
+    // the CTE lanes carry none.
     for (const auto& connection : spec->Connections) {
-        const bool untyped = connection.DebugName == "cte-written" || connection.DebugName == "cte-completion"
-            || connection.DebugName == "late-lookup-results";
+        const bool untyped = connection.DebugName == "cte-written" || connection.DebugName == "cte-completion";
         EXPECT_EQ(connection.RowLayouts.empty(), untyped) << connection.DebugName;
     }
     const auto bytes = NScheduler::SerializeGraphSpec(*spec);
