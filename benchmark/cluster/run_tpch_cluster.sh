@@ -45,12 +45,13 @@ for q in $(seq 1 22); do
     out="$OUT_DIR/q${q}.csv"
     body="$OUT_DIR/q${q}.request.sql"
     if [[ "$EXPLAIN" == 1 ]]; then { echo "EXPLAIN"; cat "$sql"; } > "$body"; else cp "$sql" "$body"; fi
+    rm -f "$out"
     code_time="$(curl -s -o "$out" -w '%{http_code} %{time_total}' --max-time 3600 \
         --data-binary "@$body" "http://$FIRST_HOST:$((HTTP_PORT_BASE + 1))/api/run")" || code_time="000 0"
     read -r code wall <<< "$code_time"
     status=OK
-    if [[ "$code" != 200 ]]; then
-        status="ERROR(http $code): $(head -c 200 "$out" | tr '\n' ' ')"
+    if [[ "$code" != 200 || ! -f "$out" ]]; then
+        status="ERROR(http $code): $( [[ -f "$out" ]] && head -c 200 "$out" | tr '\n' ' ' || true)"
     elif [[ "$EXPLAIN" != 1 ]]; then
         reference="$OUT_DIR/local/queries/Q${q}_sf10.stdout"
         verdict="$(python3 -I -c '

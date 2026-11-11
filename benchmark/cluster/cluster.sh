@@ -5,8 +5,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 QDBD_BIN="${QDBD_BIN:-$ROOT/build/bin/qdbd}"
-DATA_DIR="${DATA_DIR:?DATA_DIR must point to the directory with <table>.parquet files}"
-CLUSTER_DIR="${CLUSTER_DIR:-./cluster}"
+CLUSTER_DIR="${CLUSTER_DIR:-${TMPDIR:-/tmp}/qdb-cluster}"
 NODE_PORT_BASE="${NODE_PORT_BASE:-7100}"   # node i listens on NODE_PORT_BASE + i
 HTTP_PORT_BASE="${HTTP_PORT_BASE:-8100}"   # node i serves HTTP on HTTP_PORT_BASE + i
 READY_TIMEOUT="${READY_TIMEOUT:-60}"
@@ -31,7 +30,8 @@ stop() {
 
 start() {
     local nodes="$1" threads="$2"
-    local hosts=() node_args=() i
+    local hosts=() node_args=() i port
+    : "${DATA_DIR:?DATA_DIR must point to the directory with <table>.parquet files}"
     if [[ -n "$HOSTS" ]]; then
         read -r -a hosts <<< "$HOSTS"
         [[ ${#hosts[@]} -eq $nodes ]] || { echo "HOSTS has ${#hosts[@]} entries, expected $nodes" >&2; return 1; }
@@ -44,6 +44,16 @@ start() {
 
     mkdir -p "$CLUSTER_DIR"
     stop
+    # A listener we did not start (e.g. another cluster) would answer the readiness poll.
+    for i in $(seq 1 "$nodes"); do
+        case "${hosts[i-1]}" in 127.0.0.1|localhost) ;; *) continue;; esac
+        for port in $((NODE_PORT_BASE + i)) $((HTTP_PORT_BASE + i)); do
+            if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+                echo "port $port is already in use" >&2
+                return 1
+            fi
+        done
+    done
     for i in $(seq 1 "$nodes"); do
         case "${hosts[i-1]}" in 127.0.0.1|localhost) ;; *) continue;; esac
         "$QDBD_BIN" --node-id "$i" --leader-id 1 --http-port "$((HTTP_PORT_BASE + i))" \
@@ -56,13 +66,18 @@ start() {
     for i in $(seq 1 "$nodes"); do
         [[ -f "$CLUSTER_DIR/node$i.pid" ]] || continue
         local deadline=$((SECONDS + READY_TIMEOUT))
-        until curl -s -o /dev/null "http://${hosts[i-1]}:$((HTTP_PORT_BASE + i))/"; do
+        until curl -s --max-time 2 -o /dev/null "http://${hosts[i-1]}:$((HTTP_PORT_BASE + i))/"; do
             if ! kill -0 "$(cat "$CLUSTER_DIR/node$i.pid")" 2>/dev/null || (( SECONDS >= deadline )); then
                 echo "node $i is not ready, see $CLUSTER_DIR/node$i.log" >&2
                 return 1
             fi
             sleep 0.2
         done
+        # The answer must come from our process, not from a foreign listener.
+        if ! kill -0 "$(cat "$CLUSTER_DIR/node$i.pid")" 2>/dev/null; then
+            echo "node $i exited, see $CLUSTER_DIR/node$i.log" >&2
+            return 1
+        fi
     done
     echo "cluster: $nodes node(s) x $threads thread(s), logs in $CLUSTER_DIR" >&2
 }
