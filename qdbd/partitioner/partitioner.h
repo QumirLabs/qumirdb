@@ -30,7 +30,7 @@ public:
 
 private:
     void Color();
-    void Partition();
+    void Partition(const std::vector<TTaskEdge*>& cuts);
     void PlanSplit(TTaskEdge& edge, EReboundPort reboundPort, size_t capacity);
 
     std::vector<TTaskNode*> Roots_;

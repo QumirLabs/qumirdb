@@ -467,6 +467,35 @@ TEST_F(TPartitionerTest, RootBehindDependencyEdgeInOneColorApplies) {
     ASSERT_NO_FATAL_FAILURE(ApplyPlan(partitioner));
 }
 
+TEST_F(TPartitionerTest, PlanFollowsNodeSlotOrder) {
+    auto& root = AddNode();
+    for (int i = 0; i < 8; ++i) {
+        Connect(AddNode(), root);
+    }
+    std::string error;
+    const auto sealed = Graph_.Seal(&error);
+    ASSERT_TRUE(sealed) << error;
+
+    TPartitioner partitioner(sealed, 4);
+    partitioner.Do();
+    const auto plan = partitioner.TakePlan();
+    ASSERT_GT(plan.Splits.size(), 1u);
+    for (size_t i = 1; i < plan.Splits.size(); ++i) {
+        EXPECT_LT(
+            plan.Splits[i - 1].Edge->Src->ExecutionSlot,
+            plan.Splits[i].Edge->Src->ExecutionSlot);
+    }
+}
+
+TEST_F(TPartitionerTest, RejectsNonPositivePartitions) {
+    AddNode();
+    std::string error;
+    const auto sealed = Graph_.Seal(&error);
+    ASSERT_TRUE(sealed) << error;
+    EXPECT_THROW(TPartitioner(sealed, 0), std::invalid_argument);
+    EXPECT_THROW(TPartitioner(sealed, -1), std::invalid_argument);
+}
+
 TEST_F(TPartitionerTest, IncludesCrossPartitionDependency) {
     auto& left = AddNode();
     auto& right = AddNode();

@@ -18,6 +18,9 @@ namespace NScheduler {
 TPartitioner::TPartitioner(const TSealedTaskGraph& graph, int partitions)
     : Partitions_(partitions)
 {
+    if (partitions <= 0) {
+        throw std::invalid_argument("partitions must be positive");
+    }
     if (!graph) {
         throw std::invalid_argument("partitioner needs a sealed graph");
     }
@@ -33,19 +36,28 @@ void TPartitioner::Do() {
 
     Color();
 
+    // Colors_ is a hash map: walk the nodes by slot to keep the plan order stable.
+    std::vector<TTaskNode*> nodes;
     for (const auto& [node, color] : Colors_) {
+        nodes.push_back(node);
+    }
+    std::ranges::sort(nodes, {}, &TTaskNode::ExecutionSlot);
+
+    std::vector<TTaskEdge*> cuts;
+    for (auto* node : nodes) {
         for (auto* edge : node->Outbound) {
-            if (color != Colors_.at(edge->Dst)) {
+            if (Colors_.at(node) != Colors_.at(edge->Dst)) {
                 SplitEdges_.insert(edge);
+                cuts.push_back(edge);
             }
         }
     }
 
-    Partition();
+    Partition(cuts);
 }
 
-void TPartitioner::Partition() {
-    for (auto* edge : SplitEdges_) {
+void TPartitioner::Partition(const std::vector<TTaskEdge*>& cuts) {
+    for (auto* edge : cuts) {
         if (edge->Kind == ETaskEdgeKind::Dependency) {
             // TODO: dependency transport is separate from rowset streams.
             continue;
