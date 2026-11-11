@@ -9,7 +9,6 @@
 #include <qdbd/partitioner/partitioner.h>
 #include <qdbd/scheduler/remote_task.h>
 #include <qdb/io/parquet/source.h>
-#include <qdb/io/row_layouts.h>
 #include <qdb/kernel/image.h>
 #include <qdb/plan/build.h>
 #include <qdb/plan/ops/source.h>
@@ -1357,9 +1356,6 @@ TLoweredFragment LowerFragment(const std::string& sql)
     auto& writer = spec->Nodes.back();
     const auto in = std::get<TSinkWriterNode>(writer.Body).In;
     writer.Body = TRemoteSinkNode{.In = in};
-    for (const auto& layout : RowLayouts(lowered.OutputType)) {
-        spec->Connections[in.Connection].RowLayouts.push_back({.Width = layout.Width, .Bitmap = layout.Bitmap});
-    }
     spec->Externals.push_back({.Id = 1, .Node = static_cast<uint32_t>(spec->Nodes.size() - 1)});
     return {std::move(*spec), SerializeKernelImage(CompileKernelImage(lowered.Kernels))};
 }
