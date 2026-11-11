@@ -688,7 +688,6 @@ TEST(GraphSpec, RuntimeFilterRecordsAndTableRoundTrip)
         .Out = {1, 3},
         .Hash = {.Kernel = 5, .Entry = 1, .KeyColumns = {2, 0}},
         .Filter = 1,
-        .AuxProducers = {7, 8, 9},
     }));
     spec.Nodes.push_back(Node("hash-shuffle", "join-right-repartition", THashShuffleNode{
         .In = {2, 1},
@@ -726,7 +725,6 @@ TEST(GraphSpec, RuntimeFilterRecordsAndTableRoundTrip)
     EXPECT_EQ(filter.Hash.Entry, 1u);
     EXPECT_EQ(filter.Hash.KeyColumns, (std::vector<int64_t>{2, 0}));
     EXPECT_EQ(filter.Filter, 1u);
-    EXPECT_EQ(filter.AuxProducers, (std::vector<uint32_t>{7, 8, 9}));
 
     const auto& shuffle = std::get<THashShuffleNode>(back.Nodes[1].Body);
     ASSERT_TRUE(shuffle.ProducedFilter);
@@ -894,8 +892,7 @@ TEST(GraphSpec, RejectsInvalidSpecs)
         .In = {0, 0}, .Out = {1, 0}, .PassThrough = TProjectPlanData{.ComputedWidths = {8}}};
     EXPECT_THROW(MaterializeGraph(spec, &sink, slots), std::runtime_error);
 
-    // Runtime filters need the runtime-filter kernel; records index the filter
-    // table and the nodes.
+    // Runtime filters need the runtime-filter kernel; records index the filter table.
     spec = FanOutSpec();
     spec.RuntimeFilterBindings = {{.Id = 3, .ProducerCount = 1}};
     EXPECT_THROW(MaterializeGraph(spec, &sink, slots), std::runtime_error);
@@ -905,9 +902,7 @@ TEST(GraphSpec, RejectsInvalidSpecs)
     EXPECT_THROW(MaterializeGraph(spec, &sink, slots), std::runtime_error);
     spec.Nodes[1].Body = TRuntimeFilterNode{.In = {0, 0}, .Out = {1, 0}, .Filter = 1};
     EXPECT_THROW(MaterializeGraph(spec, &sink, slots), std::runtime_error);
-    spec.Nodes[1].Body = TRuntimeFilterNode{.In = {0, 0}, .Out = {1, 0}, .AuxProducers = {4}};
-    EXPECT_THROW(MaterializeGraph(spec, &sink, slots), std::runtime_error);
-    spec.Nodes[1].Body = TRuntimeFilterNode{.In = {0, 0}, .Out = {1, 0}, .AuxProducers = {3}};
+    spec.Nodes[1].Body = TRuntimeFilterNode{.In = {0, 0}, .Out = {1, 0}};
     EXPECT_NO_THROW(MaterializeGraph(spec, &sink, slots));
 }
 

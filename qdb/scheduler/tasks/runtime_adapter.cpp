@@ -200,12 +200,27 @@ const TStructType& ShuffleInputStruct(const TTypePtr& type) {
 
 } // namespace
 
+EAuxInputStatus PollDependencies(const TTaskNode& consumer) {
+    bool finished = true;
+    for (const auto* edge : consumer.Inbound) {
+        if (edge->Kind != ETaskEdgeKind::Dependency) {
+            continue;
+        }
+        const auto state = edge->Src->State.load(std::memory_order_acquire);
+        if (state == ETaskState::Idle) {
+            return EAuxInputStatus::NeedProducer;
+        }
+        finished &= state == ETaskState::Finished;
+    }
+    return finished ? EAuxInputStatus::Ready : EAuxInputStatus::Waiting;
+}
+
 void TAuxInput::AddFilter(std::shared_ptr<IRuntimeFilterProbe> filter) {
     Filters_.push_back(std::move(filter));
 }
 
-void TAuxInput::AddProducer(TTaskNode& producer) {
-    Producers_.push_back(&producer);
+void TAuxInput::SetConsumer(const TTaskNode& consumer) {
+    Consumer_ = &consumer;
 }
 
 bool TAuxInput::Ready() const {
@@ -217,21 +232,15 @@ EAuxInputStatus TAuxInput::Poll() const {
     if (Ready()) {
         return EAuxInputStatus::Ready;
     }
-    if (Producers_.empty()) {
+    if (!Consumer_) {
         return EAuxInputStatus::Failed;
     }
-    if (std::any_of(Producers_.begin(), Producers_.end(), [](const auto* producer) {
-            return producer->State.load(std::memory_order_acquire) == ETaskState::Idle;
-        })) {
-        return EAuxInputStatus::NeedProducer;
-    }
-    if (std::all_of(Producers_.begin(), Producers_.end(), [](const auto* producer) {
-            return producer->State.load(std::memory_order_acquire) == ETaskState::Finished;
-        })) {
+    const auto producers = PollDependencies(*Consumer_);
+    if (producers == EAuxInputStatus::Ready) {
         // Publication and task completion are separate atomic operations.
         return Ready() ? EAuxInputStatus::Ready : EAuxInputStatus::Failed;
     }
-    return EAuxInputStatus::Waiting;
+    return producers;
 }
 
 TSourceCode::TSourceCode(TNext next)

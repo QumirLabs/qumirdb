@@ -632,10 +632,6 @@ public:
                     .KeyColumns = buildIsLeft ? kernels.RightKeyColumns : kernels.LeftKeyColumns,
                 };
             };
-            std::vector<uint32_t> auxProducers;
-            for (const auto* buildNode : producer.Nodes) {
-                auxProducers.push_back(static_cast<uint32_t>(buildNode->ExecutionSlot));
-            }
             for (auto& consumer : consumers) {
                 auto consumerSchema = NQumir::NAst::TMaybeType<
                     NQumir::NAst::TStructType>(consumer.OutputType);
@@ -692,8 +688,7 @@ public:
                         NodeSpecs_[probeNode->ExecutionSlot]->Body);
                     record.Hash = hash;
                     record.Filter = producer.Filter;
-                    record.AuxProducers = auxProducers;
-                    NScheduler::BindRuntimeFilterTask(record, *probeNode, Graph_, TaskContext_);
+                    NScheduler::BindRuntimeFilterTask(record, *probeNode, TaskContext_);
                 }
                 for (auto* buildNode : producer.Nodes) {
                     for (auto* probeNode : consumer.Nodes) {
