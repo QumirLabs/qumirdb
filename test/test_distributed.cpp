@@ -2080,8 +2080,9 @@ private:
 };
 
 // Plays the query actor at the end of a pipeline: hands the rows of each chunk
-// to `onRows`, confirms the chunk to sink `sinkId` and records the finish. It
-// runs on another node than the sink, so every chunk arrives decoded.
+// to `onRows`, confirms the chunk to sink `sinkId` and records the finish. A
+// sink on another node sends decoded, compacted rows; one on this node hands
+// over its row set.
 class TResultProbe : public IActor {
 public:
     TResultProbe(uint64_t sinkId, std::function<void(const TRowSet&)> onRows, std::atomic<bool>& finished)
@@ -2096,8 +2097,9 @@ public:
             return;
         }
         ASSERT_EQ(messageId, TDataChunk::MessageId);
-        ASSERT_EQ(blob.Type, TBlob::PointerType::Far);
-        auto chunk = DeserializeFar<TDataChunk>(blob);
+        TDataChunk chunk = blob.Type == TBlob::PointerType::Far
+            ? DeserializeFar<TDataChunk>(blob)
+            : DeserializeNear<TDataChunk>(blob);
         OnRows_(chunk.RowSet);
         Release(&chunk.RowSet);
         ctx->Send<TDataConfirm>(ctx->Sender(), TDataConfirm{.SinkId = SinkId_, .LastApplied = chunk.Seq});
@@ -2197,9 +2199,14 @@ TEST(DistributedScheduler, ComputeActorReportsKernelImagesItCannotLoad) {
 
 namespace {
 
+// Drops what it gets, releasing the row sets a sink on its node hands it.
 class TBlackHole : public IActor {
 public:
-    void Receive(TMessageId, TBlob, TActorContext::TPtr) override { }
+    void Receive(TMessageId messageId, TBlob blob, TActorContext::TPtr) override {
+        if (messageId == TDataChunk::MessageId && blob.Type == TBlob::PointerType::Near) {
+            Release(&DeserializeNear<TDataChunk>(blob).RowSet);
+        }
+    }
 };
 
 // Rows with `columns` columns for a sink whose layout count differs.
@@ -2353,6 +2360,47 @@ TEST(DistributedScheduler, SelectedRowsCrossNodesCompacted) {
 
 // One remote source feeds two remote sinks through a broadcast: a fragment
 // with two roots, like the partitioner cuts them. Each sink sends every row.
+// The relay's sink sends to a probe on its own node: the probe gets the sink's
+// row set, selection included, and the rows stay alive until it releases them.
+TEST(DistributedScheduler, RemoteSinkHandsItsRowsToAPeerOnItsNode) {
+    using namespace NQdb::NScheduler;
+    std::atomic<bool> senderIntact = false;
+    std::vector<int64_t> received;
+    std::atomic<bool> finished = false;
+    auto resources = std::make_shared<TRuntimeResources>();
+    resources->Scheduler.WorkerCount = 2;
+    TTestCluster cluster;
+    std::map<std::string, int> statuses;
+    std::vector<std::string> errors;
+    const auto query = cluster.Follower.Register(std::make_unique<TReportProbe>(statuses, errors));
+    const auto result = cluster.Follower.Register(std::make_unique<TResultProbe>(1, [&](const TRowSet& rowSet) {
+        // Set only when the row set is destroyed.
+        EXPECT_FALSE(senderIntact.load());
+        const auto* data = reinterpret_cast<const int64_t*>(rowSet.Columns[0].Data);
+        for (int64_t row = 0; row < rowSet.RowCount; ++row) {
+            if (!rowSet.Selection || rowSet.Selection[row]) {
+                received.push_back(data[row]);
+            }
+        }
+    }, finished));
+    const auto peer = cluster.Follower.Register(std::make_unique<TBlackHole>());
+    const auto actor = cluster.Follower.Register(std::unique_ptr<IActor>(CreateComputeActor(resources)));
+    cluster.Follower.Send<TTaskGraphMessage>(query, actor, GraphMessage(RelaySpec(), RelayEndpoints(result, peer)));
+    cluster.Follower.Send<TDataChunk>(query, actor, TDataChunk{
+        .DstTaskId = 2, .Seq = 1, .RowSet = SelectedInts({10, 20, 30, 40}, {1, 0, 1, 0}, &senderIntact)});
+    cluster.Follower.Send<TFinish>(query, actor, TFinish{.DstTaskId = 2});
+    const auto deadline = NNet::TClock::now() + std::chrono::seconds(10);
+    while (!finished.load() && errors.empty() && NNet::TClock::now() < deadline) {
+        cluster.Pump();
+    }
+    EXPECT_TRUE(finished.load());
+    EXPECT_EQ(errors, std::vector<std::string>{});
+    cluster.Follower.Send<TPoison>(query, actor, TPoison{});
+    cluster.Pump();
+    EXPECT_EQ(received, (std::vector<int64_t>{10, 30}));
+    EXPECT_TRUE(senderIntact.load());
+}
+
 TEST(DistributedScheduler, ComputeActorRunsAFragmentWithTwoRemoteSinks) {
     using namespace NQdb::NScheduler;
     TGraphSpec spec;

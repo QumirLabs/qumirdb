@@ -102,6 +102,10 @@ void TRemoteSinkState::SendChunk(NNet::NActors::TActorContext::TPtr& ctx, uint64
         Release(&rowSet);
         throw;
     }
+    // A peer on this node gets the message itself and takes over the reference.
+    if (ActorId.NodeId() == ctx->Self().NodeId()) {
+        return;
+    }
     // Send has serialized the payload, so the reference can go here. Row
     // sets own detached buffers, which any thread may free.
     Release(&rowSet);

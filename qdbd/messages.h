@@ -38,6 +38,8 @@ struct TSpawnComputeActorResponse {
 };
 
 // The receiving RemoteSource is selected by DstTaskId and pushes into its own output lane.
+// Across nodes RowSet arrives decoded; within a node the receiver gets the
+// sender's reference to it. Either way the receiver releases it.
 struct TDataChunk {
     static constexpr NNet::NActors::TMessageId MessageId = 200;
     uint64_t DstTaskId = 0;
