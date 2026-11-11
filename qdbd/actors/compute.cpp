@@ -5,6 +5,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <coroio/actors/actorsystem.hpp>
@@ -222,6 +223,13 @@ struct TComputeActor : public IBehaviorActor {
         SchedulerThread = std::thread([this] {
             Scheduler->Run();
         });
+        // Each source gets its chunks before its finish, as its sink sent them.
+        for (auto& chunk : std::exchange(EarlyChunks, {})) {
+            OnDataChunk(std::move(chunk), ctx);
+        }
+        for (const auto& finish : std::exchange(EarlyFinishes, {})) {
+            OnFinish(finish, ctx);
+        }
         ScheduleStatus(ctx);
         // The closure of a coroutine lambda dies after this statement: no captures.
         NotificationTask = [](TComputeActor* self, TActorContext::TPtr ctx) -> TVoidSuspendedTask {
@@ -234,6 +242,10 @@ struct TComputeActor : public IBehaviorActor {
 
     // A chunk that is not pushed releases its rows itself.
     void OnDataChunk(TDataChunk&& chunk, TActorContext::TPtr& ctx) {
+        if (!QueryActorId) {
+            EarlyChunks.push_back(std::move(chunk));
+            return;
+        }
         if (Failed) {
             return;
         }
@@ -255,6 +267,10 @@ struct TComputeActor : public IBehaviorActor {
     }
 
     void OnFinish(const TFinish& finish, TActorContext::TPtr& ctx) {
+        if (!QueryActorId) {
+            EarlyFinishes.push_back(finish);
+            return;
+        }
         auto it = SourceStates.find(finish.DstTaskId);
         if (it == SourceStates.end()) {
             SendError(ctx, "dropped finish for unknown task " + std::to_string(finish.DstTaskId));
@@ -312,6 +328,10 @@ struct TComputeActor : public IBehaviorActor {
     std::thread SchedulerThread;
     TVoidSuspendedTask NotificationTask;
     TActorId QueryActorId;
+    // A peer may send before this actor gets its graph, which sets QueryActorId;
+    // its chunks and finishes wait here until the sources are bound.
+    std::vector<TDataChunk> EarlyChunks;
+    std::vector<TFinish> EarlyFinishes;
     bool Failed = false;
     std::optional<NNet::NActors::TEvent> StatusEvent;
 };
