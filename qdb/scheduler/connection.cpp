@@ -12,6 +12,14 @@ void IConnection::SetDebugName(std::string name) {
 void IConnection::Close(size_t) {
 }
 
+bool IConnection::HasBlockedPush(size_t) const {
+    return false;
+}
+
+EParkedDemand IConnection::ParkedDemand(size_t, size_t) {
+    return EParkedDemand::WakeProducer;
+}
+
 const std::string& IConnection::DebugName() const {
     return DebugName_;
 }

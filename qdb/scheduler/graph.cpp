@@ -175,17 +175,20 @@ std::vector<std::vector<TTaskNode*>> GroupByColor(
 
 // `node` reads no more input: closes its lanes, so a broadcast feeds only its other
 // consumers, and abandons each producer it was the last live consumer of.
-void ReleaseInputs(const TTaskNode& node) {
+void ReleaseInputs(const TTaskNode& node, const std::function<void(TTaskNode&)>& wake) {
     for (auto* edge : node.Inbound) {
         if (IsRowsetEdge(edge)) {
             edge->Connection->Close(edge->DstLane);
         }
         auto& producer = *edge->Src;
         if (producer.LiveConsumers.fetch_sub(1, std::memory_order_acq_rel) == 1
-            && !IsRoot(producer)
-            && !producer.Retired.exchange(true, std::memory_order_acq_rel))
+            && !IsRoot(producer))
         {
-            ReleaseInputs(producer);
+            if (!producer.Retired.exchange(true, std::memory_order_acq_rel)) {
+                ReleaseInputs(producer, wake);
+            }
+        } else if (wake) {
+            wake(producer);
         }
     }
 }
@@ -196,10 +199,23 @@ bool IsRoot(const TTaskNode& node) {
     return std::ranges::none_of(node.Outbound, IsRowsetEdge);
 }
 
-void Retire(TTaskNode& node) {
+void Retire(TTaskNode& node, const std::function<void(TTaskNode&)>& wake) {
     if (!node.Retired.exchange(true, std::memory_order_acq_rel)) {
-        ReleaseInputs(node);
+        ReleaseInputs(node, wake);
     }
+}
+
+bool HasBlockedOutput(const TTaskNode& node) {
+    return std::ranges::any_of(node.Outbound, [](const TTaskEdge* edge) {
+        return IsRowsetEdge(edge) && edge->Connection->HasBlockedPush(edge->SrcLane);
+    });
+}
+
+EParkedDemand Demand(TTaskEdge& edge) {
+    if (!IsRowsetEdge(&edge) || !edge.Src->OutputBlocked.load(std::memory_order_acquire)) {
+        return EParkedDemand::WakeProducer;
+    }
+    return edge.Connection->ParkedDemand(edge.SrcLane, edge.DstLane);
 }
 
 TTaskNode& TTaskGraph::AddNode(ITask& task) {

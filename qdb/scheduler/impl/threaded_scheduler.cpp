@@ -134,6 +134,7 @@ TTaskNode* TThreadedScheduler::PopReady() {
 void TThreadedScheduler::ScheduleInput(TTaskNode* node) {
     bool hasWantedInput = false;
     bool allFinished = true;
+    bool rerun = false;
     for (auto* edge : node->Inbound) {
         if (!node->Task->WantsInput(*edge)) {
             continue;
@@ -145,9 +146,13 @@ void TThreadedScheduler::ScheduleInput(TTaskNode* node) {
             continue;
         }
         allFinished = false;
-        Schedule(edge->Src);
+        const auto demand = Demand(*edge);
+        if (demand == EParkedDemand::WakeProducer) {
+            Schedule(edge->Src);
+        }
+        rerun = rerun || demand == EParkedDemand::RerunConsumer;
     }
-    if (hasWantedInput && allFinished) {
+    if ((hasWantedInput && allFinished) || rerun) {
         Schedule(node);
     }
 }
@@ -251,6 +256,10 @@ void TThreadedScheduler::Work() {
             return;
         }
         Executed_.fetch_add(1, std::memory_order_relaxed);
+        // Set before the state leaves Running, so a consumer that sees it parked sees why.
+        node->OutputBlocked.store(
+            result == ETaskResult::BLOCKED_OUTPUT && HasBlockedOutput(*node),
+            std::memory_order_release);
         if (result == ETaskResult::NEED_DATA) {
             NeedData_.fetch_add(1, std::memory_order_relaxed);
             auto reschedule = FinishRun(node);
@@ -295,7 +304,9 @@ bool TThreadedScheduler::FinishRun(TTaskNode* node, ETaskState nextState) {
 void TThreadedScheduler::FinishNode(TTaskNode* node) {
     auto previous = node->State.exchange(ETaskState::Finished, std::memory_order_acq_rel);
     assert(previous == ETaskState::Running || previous == ETaskState::Reschedule);
-    Retire(*node);
+    Retire(*node, [this](TTaskNode& producer) {
+        Schedule(&producer);
+    });
     if (IsRoot(*node) && UnfinishedRoots_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
         // The last root is done: the graph's output is complete. Wake every worker
         // so they observe termination and exit instead of parking on the permit

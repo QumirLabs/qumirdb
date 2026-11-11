@@ -25,6 +25,16 @@ enum class EFetchResult {
     FINISHED = 2,
 };
 
+// What a consumer that asks for data does about a producer parked on a full output.
+enum class EParkedDemand {
+    // The lane has room again: run the producer.
+    WakeProducer = 0,
+    // The producer cannot push yet, but the lane holds rows: run the consumer again.
+    RerunConsumer = 1,
+    // Neither can go on: wait for the lane the producer is parked on to drain.
+    Wait = 2,
+};
+
 struct TConnectionStats {
     uint64_t Pushed = 0;
     uint64_t Popped = 0;
@@ -52,6 +62,14 @@ public:
     // maybe while it still runs on another thread. A broadcast then feeds only its
     // open lanes; other connections keep the lane as it is.
     virtual void Close(size_t dstId);
+
+    // A push of `srcId` that found no room marks the lane it waits for. The
+    // scheduler parks such a producer until the consumer of that lane drains it.
+    virtual bool HasBlockedPush(size_t srcId) const;
+    // For the consumer of the lane between `srcId` and `dstId` that asks for data
+    // while its producer is parked; takes the mark when it wakes the producer. A
+    // connection that keeps no marks always wakes the producer.
+    virtual EParkedDemand ParkedDemand(size_t srcId, size_t dstId);
 
     void SetDebugName(std::string name);
     const std::string& DebugName() const;

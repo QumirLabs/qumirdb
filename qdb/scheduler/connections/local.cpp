@@ -45,25 +45,59 @@ struct TConnectionLane {
     TSPSC<TRowSet> Queue;
     std::atomic<bool> Finished = false;
     std::atomic<bool> Closed = false;
+    // A push found the queue full; the consumer takes the mark when it drained it.
+    std::atomic<bool> PushBlocked = false;
 };
 
+namespace {
+
+// Marks a full lane, then looks again: either this producer sees the room a pop
+// made, or that consumer's later ParkedDemand sees the mark (both fence).
+bool MarkFullLane(TConnectionLane& lane) {
+    lane.PushBlocked.store(true, std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    return lane.Queue.CanPush();
+}
+
+} // namespace
+
 bool TLocalConnection::LaneCanPush(TConnectionLane& lane) const {
-    const bool canPush = lane.Queue.CanPush();
-    if (!canPush) {
-        CountBlockedPush();
+    if (lane.Queue.CanPush() || MarkFullLane(lane)) {
+        return true;
     }
-    return canPush;
+    CountBlockedPush();
+    return false;
 }
 
 bool TLocalConnection::LanePush(TConnectionLane& lane, TRowSet& rowSet) const {
     auto moved = TakeRowSet(rowSet);
-    if (lane.Queue.TryPush(std::move(moved))) {
+    if (lane.Queue.TryPush(std::move(moved))
+        || (MarkFullLane(lane) && lane.Queue.TryPush(std::move(moved))))
+    {
         CountPushed();
         return true;
     }
     CountBlockedPush();
     rowSet = TakeRowSet(moved);
     return false;
+}
+
+bool TLocalConnection::LaneHasBlockedPush(const TConnectionLane& lane) {
+    return lane.PushBlocked.load(std::memory_order_relaxed);
+}
+
+EParkedDemand TLocalConnection::LaneParkedDemand(TConnectionLane& lane) {
+    // Pairs with the fence in MarkFullLane: the pops of this consumer come first.
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    if (lane.PushBlocked.load(std::memory_order_relaxed)
+        && lane.Queue.CanPush()
+        && lane.PushBlocked.exchange(false, std::memory_order_relaxed))
+    {
+        return EParkedDemand::WakeProducer;
+    }
+    // A task may ask for more after one batch (a join takes one per run): rows left
+    // in the lane need another run of it, not of the parked producer.
+    return lane.Queue.Empty() ? EParkedDemand::Wait : EParkedDemand::RerunConsumer;
 }
 
 TOneToOneConnection::TOneToOneConnection(size_t capacity)
@@ -134,6 +168,16 @@ EFetchResult TOneToOneConnection::Fetch(size_t dstId, TRowSet& rowSet) {
     }
     CountFinishedFetch();
     return EFetchResult::FINISHED;
+}
+
+bool TOneToOneConnection::HasBlockedPush(size_t srcId) const {
+    assert(srcId < Size_);
+    return LaneHasBlockedPush(*Lanes_[srcId]);
+}
+
+EParkedDemand TOneToOneConnection::ParkedDemand(size_t srcId, size_t) {
+    assert(srcId < Size_);
+    return LaneParkedDemand(*Lanes_[srcId]);
 }
 
 TGatherConnection::TGatherConnection(size_t capacity)
@@ -224,6 +268,16 @@ EFetchResult TGatherConnection::Fetch(size_t dstId, TRowSet& rowSet) {
     return EFetchResult::FINISHED;
 }
 
+bool TGatherConnection::HasBlockedPush(size_t srcId) const {
+    assert(srcId < Size_);
+    return LaneHasBlockedPush(*Lanes_[srcId]);
+}
+
+EParkedDemand TGatherConnection::ParkedDemand(size_t srcId, size_t) {
+    assert(srcId < Size_);
+    return LaneParkedDemand(*Lanes_[srcId]);
+}
+
 TBroadcastConnection::TBroadcastConnection(size_t capacity)
     : Capacity_(capacity)
 {
@@ -264,20 +318,22 @@ bool TBroadcastConnection::CanPush(size_t srcId) const {
     // With every lane closed, block like a full lane: the producer parks instead
     // of producing rows nobody reads.
     bool open = false;
+    bool blocked = false;
     for (const auto& lane : Lanes_) {
         if (lane->Closed.load(std::memory_order_acquire)) {
             continue;
         }
         open = true;
-        if (!lane->Queue.CanPush()) {
-            CountBlockedPush();
-            return false;
+        // Every full lane is marked, so draining any of them wakes the producer.
+        if (!lane->Queue.CanPush() && !MarkFullLane(*lane)) {
+            blocked = true;
         }
     }
-    if (!open) {
+    if (!open || blocked) {
         CountBlockedPush();
+        return false;
     }
-    return open;
+    return true;
 }
 
 bool TBroadcastConnection::Push(size_t srcId, TRowSet&& rowSet) {
@@ -346,6 +402,20 @@ EFetchResult TBroadcastConnection::Fetch(size_t dstId, TRowSet& rowSet) {
 void TBroadcastConnection::Close(size_t dstId) {
     assert(dstId < Lanes_.size());
     Lanes_[dstId]->Closed.store(true, std::memory_order_release);
+}
+
+bool TBroadcastConnection::HasBlockedPush(size_t) const {
+    for (const auto& lane : Lanes_) {
+        if (LaneHasBlockedPush(*lane)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+EParkedDemand TBroadcastConnection::ParkedDemand(size_t, size_t dstId) {
+    assert(dstId < Lanes_.size());
+    return LaneParkedDemand(*Lanes_[dstId]);
 }
 
 } // namespace NScheduler

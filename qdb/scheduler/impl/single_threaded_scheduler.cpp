@@ -66,6 +66,9 @@ bool TSingleThreadedScheduler::Run(std::string* error) {
             return false;
         }
         ++Stats_.Executed;
+        node->OutputBlocked.store(
+            state == ETaskResult::BLOCKED_OUTPUT && HasBlockedOutput(*node),
+            std::memory_order_relaxed);
         if (state == ETaskResult::NEED_DATA) {
             ++Stats_.NeedData;
             ScheduleInput(node);
@@ -79,7 +82,9 @@ bool TSingleThreadedScheduler::Run(std::string* error) {
                 ++Stats_.Finished;
                 node->State.store(
                     ETaskState::Finished, std::memory_order_release);
-                Retire(*node);
+                Retire(*node, [this](TTaskNode& producer) {
+                    Schedule(&producer);
+                });
                 if (IsRoot(*node)) {
                     --unfinishedRoots;
                 }
@@ -112,6 +117,7 @@ void TSingleThreadedScheduler::Schedule(TTaskNode* node) {
 void TSingleThreadedScheduler::ScheduleInput(TTaskNode* node) {
     bool hasWantedInput = false;
     bool allFinished = true;
+    bool rerun = false;
     for (auto* edge : node->Inbound) {
         if (!node->Task->WantsInput(*edge)) {
             continue;
@@ -122,9 +128,13 @@ void TSingleThreadedScheduler::ScheduleInput(TTaskNode* node) {
             continue;
         }
         allFinished = false;
-        Schedule(edge->Src);
+        const auto demand = Demand(*edge);
+        if (demand == EParkedDemand::WakeProducer) {
+            Schedule(edge->Src);
+        }
+        rerun = rerun || demand == EParkedDemand::RerunConsumer;
     }
-    if (hasWantedInput && allFinished) {
+    if ((hasWantedInput && allFinished) || rerun) {
         Schedule(node);
     }
 }

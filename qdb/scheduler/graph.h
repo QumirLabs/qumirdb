@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <iosfwd>
 #include <memory>
 #include <span>
@@ -41,6 +42,9 @@ struct TTaskNode {
     std::atomic<size_t> LiveConsumers = 0;
     // Finished or abandoned (see Retire): the node never runs again.
     std::atomic<bool> Retired = false;
+    // The last run returned BLOCKED_OUTPUT on a marked full lane (see
+    // IConnection::HasBlockedPush): demand from other consumers cannot help it.
+    std::atomic<bool> OutputBlocked = false;
 };
 
 struct TTaskEdge {
@@ -60,8 +64,17 @@ bool IsRoot(const TTaskNode& node);
 
 // Retires a finished node and closes its input lanes (IConnection::Close). A
 // producer that is not a root and whose consumers are all retired is abandoned
-// and retired the same way, and so on upstream: nobody needs its output.
-void Retire(TTaskNode& node);
+// and retired the same way, and so on upstream: nobody needs its output. Every
+// producer that stays live is passed to `wake`: a closed lane may unblock it.
+void Retire(TTaskNode& node, const std::function<void(TTaskNode&)>& wake = {});
+
+// After a run that returned BLOCKED_OUTPUT: whether one of the node's output
+// lanes is marked full, so only the drain of that lane can let it go on.
+bool HasBlockedOutput(const TTaskNode& node);
+
+// What the demand of `edge`'s consumer runs: its producer, unless that is parked
+// on a full output and only the drain of that lane lets it go on (#320).
+EParkedDemand Demand(TTaskEdge& edge);
 
 // A node woken from outside the graph (e.g. by a remote channel) under `Id`.
 struct TExternalNode {
