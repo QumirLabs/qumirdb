@@ -3100,16 +3100,34 @@ TLoweredPlan LowerPlanToGraph(
     };
 }
 
+namespace {
+
+// Adds the task that reads every output rowset of `lowered`.
+TTaskNode& AttachTerminal(TLoweredPlan& lowered, TNodeSpec record, TNodeTaskContext& context) {
+    auto& node = AddTask(*lowered.Graph, lowered.NodeSpecs, std::move(record), context);
+    for (size_t p = 0; p < lowered.Lanes; ++p) {
+        lowered.Graph->AddEdge(
+            *lowered.Producers[p], node, *lowered.FinalGather, p, 0);
+    }
+    return node;
+}
+
+} // namespace
+
 void AttachSink(TLoweredPlan& lowered, ISink& sink) {
     TNodeTaskContext context{.Sink = &sink};
-    auto& sinkNode = AddTask(*lowered.Graph, lowered.NodeSpecs, {
+    AttachTerminal(lowered, {
         .DebugKind = "sink",
         .Body = TSinkWriterNode{.In = PortSpec(*lowered.Graph, lowered.FinalGather, 0)},
     }, context);
-    for (size_t p = 0; p < lowered.Lanes; ++p) {
-        lowered.Graph->AddEdge(
-            *lowered.Producers[p], sinkNode, *lowered.FinalGather, p, 0);
-    }
+}
+
+TTaskNode& AttachRemoteSink(TLoweredPlan& lowered) {
+    TNodeTaskContext context;
+    return AttachTerminal(lowered, {
+        .DebugKind = "remote-sink",
+        .Body = TRemoteSinkNode{.In = PortSpec(*lowered.Graph, lowered.FinalGather, 0)},
+    }, context);
 }
 
 std::optional<TGraphSpec> ExtractLoweredGraphSpec(

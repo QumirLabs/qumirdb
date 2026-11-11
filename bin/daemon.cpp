@@ -164,6 +164,8 @@ int main(int argc, char** argv)
     }
     TEngineSettings EngineSettings;
     ApplyEngineConfig(engineConfig, EngineSettings);
+    // Fragments on different nodes cannot share a runtime filter yet.
+    EngineSettings.Optimizer.EnableRuntimeFilters = false;
     NCompiler::TQueryCompiler compiler(catalog, tableFactory, EngineSettings.Optimizer);
 
     TAddress httpAddress{"::", httpPort};
@@ -232,7 +234,7 @@ int main(int argc, char** argv)
         std::cerr << "[QumirDB] " << msg << "\n";
     };
 
-    auto gatewayActorId = sys.RegisterWellKnown(TLocalActorId(EWellKnownActors::Gateway), IActor::TPtr(CreateGatewayActor(compiler, logger)));
+    auto gatewayActorId = sys.RegisterWellKnown(TLocalActorId(EWellKnownActors::Gateway), IActor::TPtr(CreateGatewayActor(compiler, EngineSettings.Scheduler, logger)));
     auto router = NHttp::CreateRouter(&sys, gatewayActorId);
 
     TWebServer<TSocket> server(std::move(*httpListenSocket), *router, logger);

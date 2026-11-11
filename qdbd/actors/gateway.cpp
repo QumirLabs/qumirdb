@@ -15,13 +15,17 @@ namespace {
 
 struct TGatewayActor : public IBehaviorActor {
     struct TDefaultBehavior : public TBehavior<TDefaultBehavior, TExecuteQuery> {
-        TDefaultBehavior(NCompiler::TQueryCompiler& compiler, std::function<void(const std::string&)> logger)
+        TDefaultBehavior(
+            NCompiler::TQueryCompiler& compiler,
+            NScheduler::TSettings settings,
+            std::function<void(const std::string&)> logger)
             : Compiler(compiler)
+            , Settings(std::move(settings))
             , Logger(logger)
         { }
 
         void Receive(TExecuteQuery&& req, TBlob, TActorContext::TPtr ctx) {
-            auto* queryActor = CreateQueryActor(Compiler, Logger);
+            auto* queryActor = CreateQueryActor(Compiler, Settings, Logger);
             auto queryActorId = ctx->Register(std::unique_ptr<IActor>(queryActor));
             Logger("Gateway: got request");
             ctx->Forward<TExecuteQuery>(queryActorId, std::move(req));
@@ -34,11 +38,15 @@ struct TGatewayActor : public IBehaviorActor {
         }
 
         NCompiler::TQueryCompiler& Compiler;
+        NScheduler::TSettings Settings;
         std::function<void(const std::string&)> Logger;
     };
 
-    TGatewayActor(NCompiler::TQueryCompiler& compiler, std::function<void(const std::string&)> logger)
-        : Behavior(compiler, logger)
+    TGatewayActor(
+        NCompiler::TQueryCompiler& compiler,
+        NScheduler::TSettings settings,
+        std::function<void(const std::string&)> logger)
+        : Behavior(compiler, std::move(settings), logger)
     {
         Become(&Behavior);
     }
@@ -48,9 +56,12 @@ struct TGatewayActor : public IBehaviorActor {
 
 } // namespace
 
-NNet::NActors::IActor* CreateGatewayActor(NCompiler::TQueryCompiler& compiler, std::function<void(const std::string&)> logger)
+NNet::NActors::IActor* CreateGatewayActor(
+    NCompiler::TQueryCompiler& compiler,
+    NScheduler::TSettings settings,
+    std::function<void(const std::string&)> logger)
 {
-    return new TGatewayActor(compiler, logger);
+    return new TGatewayActor(compiler, std::move(settings), logger);
 }
 
 } // namespace NRemote
