@@ -60,9 +60,28 @@ using namespace NNet::NActors;
 
 template<class T>
 std::string Encode(const T& message) {
-    std::ostringstream output;
-    SerializeToStream(message, output);
-    return output.str();
+    std::string bytes(SerializedSize(message), '\0');
+    SerializeTo(message, std::span<char>(bytes));
+    return bytes;
+}
+
+// A far blob as the envelope reader hands it out: a fresh allocation holding the payload.
+TBlob MakeBlob(const std::string& bytes) {
+    TBlob blob{
+        .Data = TBlob::TRawPtr(::operator new(bytes.size()), TBlobDeleter{[](void* ptr) {
+            ::operator delete(ptr);
+        }}),
+        .Size = static_cast<uint32_t>(bytes.size()),
+        .Type = TBlob::PointerType::Far,
+    };
+    std::memcpy(blob.Data.get(), bytes.data(), bytes.size());
+    return blob;
+}
+
+template<class T>
+void Decode(T& message, const std::string& bytes) {
+    auto blob = MakeBlob(bytes);
+    DeserializeFrom(message, blob);
 }
 
 struct TDecodedChunk {
@@ -71,8 +90,7 @@ struct TDecodedChunk {
     TDecodedChunk() = default;
 
     explicit TDecodedChunk(const std::string& bytes) {
-        std::istringstream input(bytes);
-        DeserializeFromStream(Message, input);
+        Decode(Message, bytes);
     }
 
     TDecodedChunk(const TDecodedChunk&) = delete;
@@ -198,9 +216,8 @@ TEST(DistributedSerialization, ActorIds) {
         }
         const auto bytes = Encode(original);
         EXPECT_EQ(bytes.size(), 8 + 8 * count);
-        std::istringstream input(bytes);
         TSpawnComputeActorResponse decoded;
-        DeserializeFromStream(decoded, input);
+        Decode(decoded, bytes);
         ASSERT_EQ(decoded.ActorIds.size(), count);
         for (size_t i = 0; i < count; ++i) {
             EXPECT_EQ(decoded.ActorIds[i].NodeId(), i + 1);
@@ -215,17 +232,14 @@ TEST(DistributedSerialization, ActorListRejectsTruncationAndTrailingBytes) {
     const auto bytes = Encode(original);
     for (size_t size = 0; size < bytes.size(); ++size) {
         SCOPED_TRACE(size);
-        std::istringstream input(bytes.substr(0, size));
         TSpawnComputeActorResponse decoded;
-        EXPECT_THROW(DeserializeFromStream(decoded, input), std::runtime_error);
+        EXPECT_THROW(Decode(decoded, bytes.substr(0, size)), std::runtime_error);
     }
-    std::istringstream trailing(bytes + 'x');
     TSpawnComputeActorResponse decoded;
-    EXPECT_THROW(DeserializeFromStream(decoded, trailing), std::runtime_error);
+    EXPECT_THROW(Decode(decoded, bytes + 'x'), std::runtime_error);
     auto invalid = bytes;
     Replace(invalid, 0, std::numeric_limits<uint32_t>::max());
-    std::istringstream input(invalid);
-    EXPECT_THROW(DeserializeFromStream(decoded, input), std::runtime_error);
+    EXPECT_THROW(Decode(decoded, invalid), std::runtime_error);
 }
 
 TEST(DistributedSerialization, MixedColumnsAndSlicedBuffers) {
@@ -234,6 +248,40 @@ TEST(DistributedSerialization, MixedColumnsAndSlicedBuffers) {
     CheckMixed(decoded.Message);
     EXPECT_EQ(original.Offsets32.front(), 2);
     EXPECT_EQ(original.Columns[1].DataBitOffset, 7);
+}
+
+TEST(DistributedSerialization, DecodedChunkPointsIntoTheBlob) {
+    TMixedBatch original;
+    auto blob = MakeBlob(Encode(original.Message));
+    const auto* begin = static_cast<const char*>(blob.Data.get());
+    const auto* end = begin + blob.Size;
+    TDecodedChunk decoded;
+    DeserializeFrom(decoded.Message, blob);
+    EXPECT_EQ(blob.Data.get(), nullptr);
+    CheckMixed(decoded.Message);
+    const auto& rows = decoded.Message.RowSet;
+    for (const auto& column : std::span(rows.Columns, rows.ColumnCount)) {
+        EXPECT_GE(column.Data, begin);
+        EXPECT_LT(column.Data, end);
+        EXPECT_EQ(reinterpret_cast<uintptr_t>(column.Data) % 16, 0);
+    }
+}
+
+TEST(DistributedSerialization, UnalignedBlobIsCopied) {
+    TMixedBatch original;
+    const auto bytes = Encode(original.Message);
+    TBlob blob{
+        .Data = TBlob::TRawPtr(static_cast<char*>(::operator new(bytes.size() + 1)) + 1, TBlobDeleter{[](void* ptr) {
+            ::operator delete(static_cast<char*>(ptr) - 1);
+        }}),
+        .Size = static_cast<uint32_t>(bytes.size()),
+        .Type = TBlob::PointerType::Far,
+    };
+    std::memcpy(blob.Data.get(), bytes.data(), bytes.size());
+    TDecodedChunk decoded;
+    DeserializeFrom(decoded.Message, blob);
+    EXPECT_NE(blob.Data.get(), nullptr);
+    CheckMixed(decoded.Message);
 }
 
 TEST(DistributedSerialization, UsesCodecThroughCoroioFarPath) {
@@ -451,16 +499,17 @@ TEST(DistributedSerialization, RejectsEveryTruncatedPrefixWithoutChangingOutput)
     const auto bytes = Encode(original.Message);
     for (size_t size = 0; size < bytes.size(); ++size) {
         SCOPED_TRACE(size);
-        std::istringstream input(bytes.substr(0, size));
         TDataChunk output;
         output.DstTaskId = 999;
-        EXPECT_THROW(DeserializeFromStream(output, input), std::runtime_error);
+        EXPECT_THROW(Decode(output, bytes.substr(0, size)), std::runtime_error);
         EXPECT_EQ(output.DstTaskId, 999);
         EXPECT_EQ(output.RowSet.Private, nullptr);
     }
     EXPECT_THROW(TDecodedChunk{bytes + 'x'}, std::runtime_error);
 }
 
+// The chunk header holds DstTaskId, Seq, Columns, Rows and HasHash as uint64 (bytes 0..39),
+// then one entry per column: Width, Bitmap, HasMask, OffsetWidth (bytes 40.. for column 0).
 TEST(DistributedSerialization, RejectsInvalidDimensionsAndLayouts) {
     TMixedBatch original;
     const auto bytes = Encode(original.Message);
@@ -469,7 +518,7 @@ TEST(DistributedSerialization, RejectsInvalidDimensionsAndLayouts) {
         Replace(invalid, offset, std::numeric_limits<uint64_t>::max());
         EXPECT_THROW(TDecodedChunk{invalid}, std::runtime_error);
     }
-    for (const auto [offset, value] : std::array<std::pair<size_t, uint8_t>, 3>{{{32, 3}, {33, 2}, {33, 1}}}) {
+    for (const auto [offset, value] : std::array<std::pair<size_t, uint8_t>, 5>{{{40, 3}, {41, 2}, {41, 1}, {42, 2}, {43, 4}}}) {
         auto invalid = bytes;
         Replace(invalid, offset, value);
         EXPECT_THROW(TDecodedChunk{invalid}, std::runtime_error);
@@ -479,7 +528,7 @@ TEST(DistributedSerialization, RejectsInvalidDimensionsAndLayouts) {
     EXPECT_THROW(TDecodedChunk{huge}, std::runtime_error);
     TDataChunk empty;
     auto flag = Encode(empty);
-    flag.back() = 2;
+    Replace(flag, 32, uint64_t{2});
     EXPECT_THROW(TDecodedChunk{flag}, std::runtime_error);
 }
 
@@ -492,17 +541,18 @@ TEST(DistributedSerialization, RejectsInvalidStringOffsets) {
     message.Descriptor = &layout;
     message.RowSet = {.Columns = &column, .ColumnCount = 1, .RowCount = 3};
     const auto bytes = Encode(message);
+    // The offset width of the column is byte 43; its offsets start at the aligned byte 48.
     auto invalid = bytes;
-    Replace(invalid, 34, uint8_t{3});
+    Replace(invalid, 43, uint8_t{3});
     EXPECT_THROW(TDecodedChunk{invalid}, std::runtime_error);
     for (uint32_t first : {1u, std::numeric_limits<uint32_t>::max()}) {
         invalid = bytes;
-        Replace(invalid, 35, first);
+        Replace(invalid, 48, first);
         EXPECT_THROW(TDecodedChunk{invalid}, std::runtime_error);
     }
     for (uint32_t last : {2u, 1000u}) {
         invalid = bytes;
-        Replace(invalid, 47, last);
+        Replace(invalid, 60, last);
         EXPECT_THROW(TDecodedChunk{invalid}, std::runtime_error);
     }
 }
@@ -591,7 +641,7 @@ private:
 };
 
 template<class T>
-T ReadMessage(const TBlob& blob) {
+T ReadMessage(TBlob& blob) {
     if (blob.Type == TBlob::PointerType::Near) {
         return DeserializeNear<T>(blob);
     }
@@ -995,30 +1045,25 @@ TEST(DistributedSerialization, AllocationErrorRoundTrip) {
     TSpawnComputeActorResponse original{
         .Error = std::string("failure\0details", 15),
     };
-    std::istringstream input(Encode(original));
     TSpawnComputeActorResponse decoded;
-    DeserializeFromStream(decoded, input);
+    Decode(decoded, Encode(original));
     EXPECT_EQ(decoded.Error, original.Error);
     auto invalid = Encode(original);
     Replace(invalid, 4, std::numeric_limits<uint32_t>::max());
-    std::istringstream badLength(invalid);
-    EXPECT_THROW(DeserializeFromStream(decoded, badLength), std::runtime_error);
+    EXPECT_THROW(Decode(decoded, invalid), std::runtime_error);
 }
 
 TEST(DistributedSerialization, ComputeErrorRoundTrip) {
     TComputeError original{.Message = std::string("bad\0graph", 9)};
     const auto bytes = Encode(original);
-    std::istringstream input(bytes);
     TComputeError decoded;
-    DeserializeFromStream(decoded, input);
+    Decode(decoded, bytes);
     EXPECT_EQ(decoded.Message, original.Message);
     for (size_t size = 0; size < bytes.size(); ++size) {
         SCOPED_TRACE(size);
-        std::istringstream truncated(bytes.substr(0, size));
-        EXPECT_THROW(DeserializeFromStream(decoded, truncated), std::runtime_error);
+        EXPECT_THROW(Decode(decoded, bytes.substr(0, size)), std::runtime_error);
     }
-    std::istringstream trailing(bytes + 'x');
-    EXPECT_THROW(DeserializeFromStream(decoded, trailing), std::runtime_error);
+    EXPECT_THROW(Decode(decoded, bytes + 'x'), std::runtime_error);
 }
 
 TEST(DistributedSerialization, TaskGraphMessageRoundTrip) {
@@ -1033,9 +1078,8 @@ TEST(DistributedSerialization, TaskGraphMessageRoundTrip) {
         },
     };
     const auto bytes = Encode(original);
-    std::istringstream input(bytes);
     TTaskGraphMessage decoded;
-    DeserializeFromStream(decoded, input);
+    Decode(decoded, bytes);
     EXPECT_EQ(decoded.Spec, original.Spec);
     EXPECT_EQ(decoded.KernelImage, original.KernelImage);
     ASSERT_EQ(decoded.Endpoints.size(), original.Endpoints.size());
@@ -1047,16 +1091,13 @@ TEST(DistributedSerialization, TaskGraphMessageRoundTrip) {
     }
     for (size_t size = 0; size < bytes.size(); ++size) {
         SCOPED_TRACE(size);
-        std::istringstream truncated(bytes.substr(0, size));
-        EXPECT_THROW(DeserializeFromStream(decoded, truncated), std::runtime_error);
+        EXPECT_THROW(Decode(decoded, bytes.substr(0, size)), std::runtime_error);
     }
-    std::istringstream trailing(bytes + 'x');
-    EXPECT_THROW(DeserializeFromStream(decoded, trailing), std::runtime_error);
+    EXPECT_THROW(Decode(decoded, bytes + 'x'), std::runtime_error);
     // The kind of the first endpoint follows the spec, the image, the endpoint count and its id.
     auto invalid = bytes;
     invalid[4 + original.Spec.size() + 4 + original.KernelImage.size() + 4 + 8] = 2;
-    std::istringstream badKind(invalid);
-    EXPECT_THROW(DeserializeFromStream(decoded, badKind), std::runtime_error);
+    EXPECT_THROW(Decode(decoded, invalid), std::runtime_error);
 }
 
 TEST(DistributedAllocation, NoNodesIsAnExplicitErrorAndZeroCountSucceeds) {

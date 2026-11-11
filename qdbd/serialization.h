@@ -6,33 +6,41 @@ namespace NNet {
 namespace NActors {
 
 template<>
-void SerializeToStream(
-    const NQdb::NRemote::TSpawnComputeActorResponse& message,
-    std::ostringstream& output);
+size_t SerializedSize(const NQdb::NRemote::TSpawnComputeActorResponse& message);
 
 template<>
-void DeserializeFromStream(
-    NQdb::NRemote::TSpawnComputeActorResponse& message,
-    std::istringstream& input);
+void SerializeTo(const NQdb::NRemote::TSpawnComputeActorResponse& message, std::span<char> out);
 
 template<>
-void SerializeToStream(const NQdb::NRemote::TComputeError& message, std::ostringstream& output);
+void DeserializeFrom(NQdb::NRemote::TSpawnComputeActorResponse& message, TBlob& blob);
 
 template<>
-void DeserializeFromStream(NQdb::NRemote::TComputeError& message, std::istringstream& input);
+size_t SerializedSize(const NQdb::NRemote::TComputeError& message);
 
 template<>
-void SerializeToStream(const NQdb::NRemote::TTaskGraphMessage& message, std::ostringstream& output);
+void SerializeTo(const NQdb::NRemote::TComputeError& message, std::span<char> out);
 
 template<>
-void DeserializeFromStream(NQdb::NRemote::TTaskGraphMessage& message, std::istringstream& input);
+void DeserializeFrom(NQdb::NRemote::TComputeError& message, TBlob& blob);
 
 template<>
-void SerializeToStream(const NQdb::NRemote::TDataChunk& message, std::ostringstream& output);
+size_t SerializedSize(const NQdb::NRemote::TTaskGraphMessage& message);
 
-// The decoded row set owns its buffers and descriptor; release it with NQdb::Release.
 template<>
-void DeserializeFromStream(NQdb::NRemote::TDataChunk& message, std::istringstream& input);
+void SerializeTo(const NQdb::NRemote::TTaskGraphMessage& message, std::span<char> out);
+
+template<>
+void DeserializeFrom(NQdb::NRemote::TTaskGraphMessage& message, TBlob& blob);
+
+template<>
+size_t SerializedSize(const NQdb::NRemote::TDataChunk& message);
+
+template<>
+void SerializeTo(const NQdb::NRemote::TDataChunk& message, std::span<char> out);
+
+// The decoded row set points into the blob, which it takes; release it with NQdb::Release.
+template<>
+void DeserializeFrom(NQdb::NRemote::TDataChunk& message, TBlob& blob);
 
 } // namespace NActors
 } // namespace NNet
