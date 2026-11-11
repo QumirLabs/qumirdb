@@ -88,23 +88,12 @@ bool TRemoteSinkState::OnConfirm(uint64_t lastApplied, NNet::NActors::TActorCont
 }
 
 void TRemoteSinkState::SendChunk(NNet::NActors::TActorContext::TPtr& ctx, uint64_t seq, TRowSet&& rowSet) {
-    try {
-        if (static_cast<size_t>(rowSet.ColumnCount) != Descriptor.size()) {
-            throw std::runtime_error("remote sink " + std::to_string(Id) + ": row set columns do not match layouts");
-        }
-        ctx->Send<TDataChunk>(ActorId, TDataChunk {
-            .DstTaskId = DstTaskId,
-            .Seq = seq,
-            .RowSet = rowSet,
-            .Descriptor = Descriptor.data(),
-        });
-    } catch (...) {
-        Release(&rowSet);
-        throw;
+    // The chunk owns the reference from here on, also when the check throws.
+    TDataChunk chunk(DstTaskId, seq, rowSet, Descriptor.data());
+    if (static_cast<size_t>(chunk.RowSet.ColumnCount) != Descriptor.size()) {
+        throw std::runtime_error("remote sink " + std::to_string(Id) + ": row set columns do not match layouts");
     }
-    // Send has serialized the payload, so the reference can go here. Row
-    // sets own detached buffers, which any thread may free.
-    Release(&rowSet);
+    ctx->Send<TDataChunk>(ActorId, std::move(chunk));
 }
 
 void TRemoteSinkState::SendFinish(NNet::NActors::TActorContext::TPtr& ctx) {

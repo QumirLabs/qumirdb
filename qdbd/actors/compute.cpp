@@ -232,25 +232,25 @@ struct TComputeActor : public IBehaviorActor {
         }(this, std::move(ctx));
     }
 
+    // A chunk that is not pushed releases its rows itself.
     void OnDataChunk(TDataChunk&& chunk, TActorContext::TPtr& ctx) {
         if (Failed) {
-            Release(&chunk.RowSet);
             return;
         }
         auto it = SourceStates.find(chunk.DstTaskId);
         if (it == SourceStates.end()) {
             SendError(ctx, "dropped chunk " + std::to_string(chunk.Seq) + " for unknown task "
                 + std::to_string(chunk.DstTaskId));
-            Release(&chunk.RowSet);
             return;
         }
         auto& [state, node] = it->second;
-        if (!state->Push(chunk.Seq, std::move(chunk.RowSet))) {
+        if (!state->Push(chunk.Seq, TRowSet(chunk.RowSet))) {
             SendError(ctx, "dropped chunk " + std::to_string(chunk.Seq) + " for task "
                 + std::to_string(chunk.DstTaskId) + ": out of order or beyond the window");
-            Release(&chunk.RowSet);
             return;
         }
+        // The inbox holds the reference now.
+        chunk.Take();
         Scheduler->Schedule(node);
     }
 

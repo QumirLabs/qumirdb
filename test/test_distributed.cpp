@@ -70,12 +70,6 @@ struct TDecodedChunk {
         DeserializeFromStream(Message, input);
     }
 
-    ~TDecodedChunk() {
-        if (Message.RowSet.RefCount > 0) {
-            Release(&Message.RowSet);
-        }
-    }
-
     TDecodedChunk(const TDecodedChunk&) = delete;
     TDecodedChunk& operator=(const TDecodedChunk&) = delete;
 };
@@ -241,7 +235,7 @@ TEST(DistributedSerialization, UsesCodecThroughCoroioFarPath) {
     EXPECT_FALSE(is_pod_v<TDataChunk>);
     TMixedBatch original;
     TAllocator allocator;
-    auto near = SerializeNear<TDataChunk>(allocator, original.Message);
+    auto near = SerializeNear<TDataChunk>(allocator, std::move(original.Message));
     auto far = SerializeFar<TDataChunk>(std::move(near));
     TDecodedChunk decoded;
     decoded.Message = DeserializeFar<TDataChunk>(far);
@@ -263,7 +257,7 @@ TEST(DistributedSerialization, UsesCodecForDirectRemoteSend) {
         }
     } stream;
     TMixedBatch original;
-    SerializeFarInplace<TDataChunk>(stream, TActorId(1, 2, 3), TActorId(4, 5, 6), original.Message);
+    SerializeFarInplace<TDataChunk>(stream, TActorId(1, 2, 3), TActorId(4, 5, 6), std::move(original.Message));
     ASSERT_EQ(stream.Committed, stream.Buffer.size());
     ASSERT_GE(stream.Buffer.size(), sizeof(THeader));
     THeader header;
@@ -1437,8 +1431,7 @@ TEST(DistributedAllocation, ComputeActorReportsErrorsToTheQueryActor) {
 
     // Unknown tasks: a chunk (its row set must be released), a finish and a confirm.
     std::atomic<int> destroyed = 0;
-    cluster.Follower.Send<TDataChunk>(probe, actor, TDataChunk{
-        .DstTaskId = 99, .Seq = 1, .RowSet = CountedRows(3, &destroyed)});
+    cluster.Follower.Send<TDataChunk>(probe, actor, TDataChunk(99, 1, CountedRows(3, &destroyed)));
     cluster.Follower.Send<TFinish>(probe, actor, TFinish{.DstTaskId = 99});
     cluster.Follower.Send<TDataConfirm>(probe, actor, TDataConfirm{.SinkId = 99, .LastApplied = 1});
     cluster.Pump();
@@ -2080,8 +2073,9 @@ private:
 };
 
 // Plays the query actor at the end of a pipeline: hands the rows of each chunk
-// to `onRows`, confirms the chunk to sink `sinkId` and records the finish. It
-// runs on another node than the sink, so every chunk arrives decoded.
+// to `onRows`, confirms the chunk to sink `sinkId` and records the finish. A
+// sink on another node sends decoded, compacted rows; one on this node hands
+// over its row set.
 class TResultProbe : public IActor {
 public:
     TResultProbe(uint64_t sinkId, std::function<void(const TRowSet&)> onRows, std::atomic<bool>& finished)
@@ -2096,11 +2090,16 @@ public:
             return;
         }
         ASSERT_EQ(messageId, TDataChunk::MessageId);
-        ASSERT_EQ(blob.Type, TBlob::PointerType::Far);
-        auto chunk = DeserializeFar<TDataChunk>(blob);
-        OnRows_(chunk.RowSet);
-        Release(&chunk.RowSet);
-        ctx->Send<TDataConfirm>(ctx->Sender(), TDataConfirm{.SinkId = SinkId_, .LastApplied = chunk.Seq});
+        // The chunk releases its rows: a decoded one here, a handed-over one with the blob.
+        const auto confirm = [&](const TDataChunk& chunk) {
+            OnRows_(chunk.RowSet);
+            ctx->Send<TDataConfirm>(ctx->Sender(), TDataConfirm{.SinkId = SinkId_, .LastApplied = chunk.Seq});
+        };
+        if (blob.Type == TBlob::PointerType::Far) {
+            confirm(DeserializeFar<TDataChunk>(blob));
+        } else {
+            confirm(DeserializeNear<TDataChunk>(blob));
+        }
     }
 
 private:
@@ -2236,8 +2235,8 @@ TEST(DistributedScheduler, ComputeActorReportsAFailedSendAndReleasesTheRowSet) {
         const auto actor = cluster.Follower.Register(std::unique_ptr<IActor>(CreateComputeActor(resources)));
         cluster.Follower.Send<TTaskGraphMessage>(query, actor, GraphMessage(
             RelaySpec(std::vector(c.Layouts, TRowLayoutSpec{.Width = 8})), RelayEndpoints(peer, peer)));
-        cluster.Follower.Send<TDataChunk>(query, actor, TDataChunk{
-            .DstTaskId = 2, .Seq = 1, .RowSet = UnsendableRows(c.Columns, c.Selection, &destroyed)});
+        cluster.Follower.Send<TDataChunk>(query, actor,
+            TDataChunk(2, 1, UnsendableRows(c.Columns, c.Selection, &destroyed)));
         const auto deadline = NNet::TClock::now() + std::chrono::seconds(10);
         while (errors.empty() && NNet::TClock::now() < deadline) {
             cluster.Pump();
@@ -2267,8 +2266,7 @@ TEST(DistributedScheduler, RemoteSinkReleasesItsOutboxOnTeardown) {
         const auto actor = cluster.Follower.Register(std::unique_ptr<IActor>(CreateComputeActor(resources)));
         cluster.Follower.Send<TTaskGraphMessage>(query, actor, GraphMessage(RelaySpec(), RelayEndpoints(peer, peer)));
         for (uint64_t seq = 1; seq <= produced; ++seq) {
-            cluster.Follower.Send<TDataChunk>(query, actor, TDataChunk{
-                .DstTaskId = 2, .Seq = seq, .RowSet = CountedRows(seq, &destroyed)});
+            cluster.Follower.Send<TDataChunk>(query, actor, TDataChunk(2, seq, CountedRows(seq, &destroyed)));
         }
         const auto until = NNet::TClock::now() + std::chrono::milliseconds(200);
         while (NNet::TClock::now() < until) {
@@ -2336,8 +2334,8 @@ TEST(DistributedScheduler, SelectedRowsCrossNodesCompacted) {
     const auto peer = cluster.Follower.Register(std::make_unique<TBlackHole>());
     const auto actor = cluster.Follower.Register(std::unique_ptr<IActor>(CreateComputeActor(resources)));
     cluster.Follower.Send<TTaskGraphMessage>(query, actor, GraphMessage(RelaySpec(), RelayEndpoints(result, peer)));
-    cluster.Follower.Send<TDataChunk>(query, actor, TDataChunk{
-        .DstTaskId = 2, .Seq = 1, .RowSet = SelectedInts({10, 20, 30, 40}, {1, 0, 1, 0}, &senderIntact)});
+    cluster.Follower.Send<TDataChunk>(query, actor,
+        TDataChunk(2, 1, SelectedInts({10, 20, 30, 40}, {1, 0, 1, 0}, &senderIntact)));
     cluster.Follower.Send<TFinish>(query, actor, TFinish{.DstTaskId = 2});
     const auto deadline = NNet::TClock::now() + std::chrono::seconds(10);
     while (!finished.load() && errors.empty() && NNet::TClock::now() < deadline) {
@@ -2349,6 +2347,133 @@ TEST(DistributedScheduler, SelectedRowsCrossNodesCompacted) {
     cluster.Pump();
     EXPECT_EQ(received, (std::vector<int64_t>{10, 30}));
     EXPECT_TRUE(senderIntact.load());
+}
+
+// The relay's sink sends to a probe on its own node: the probe gets the sink's
+// row set, selection included, and the rows stay alive while it reads them.
+TEST(DistributedScheduler, RemoteSinkHandsItsRowsToAPeerOnItsNode) {
+    using namespace NQdb::NScheduler;
+    std::atomic<bool> senderIntact = false;
+    std::vector<int64_t> received;
+    std::atomic<bool> finished = false;
+    auto resources = std::make_shared<TRuntimeResources>();
+    resources->Scheduler.WorkerCount = 2;
+    TTestCluster cluster;
+    std::map<std::string, int> statuses;
+    std::vector<std::string> errors;
+    const auto query = cluster.Follower.Register(std::make_unique<TReportProbe>(statuses, errors));
+    const auto result = cluster.Follower.Register(std::make_unique<TResultProbe>(1, [&](const TRowSet& rowSet) {
+        // Set only when the row set is destroyed.
+        EXPECT_FALSE(senderIntact.load());
+        const auto* data = reinterpret_cast<const int64_t*>(rowSet.Columns[0].Data);
+        for (int64_t row = 0; row < rowSet.RowCount; ++row) {
+            if (!rowSet.Selection || rowSet.Selection[row]) {
+                received.push_back(data[row]);
+            }
+        }
+    }, finished));
+    const auto peer = cluster.Follower.Register(std::make_unique<TBlackHole>());
+    const auto actor = cluster.Follower.Register(std::unique_ptr<IActor>(CreateComputeActor(resources)));
+    cluster.Follower.Send<TTaskGraphMessage>(query, actor, GraphMessage(RelaySpec(), RelayEndpoints(result, peer)));
+    cluster.Follower.Send<TDataChunk>(query, actor,
+        TDataChunk(2, 1, SelectedInts({10, 20, 30, 40}, {1, 0, 1, 0}, &senderIntact)));
+    cluster.Follower.Send<TFinish>(query, actor, TFinish{.DstTaskId = 2});
+    const auto deadline = NNet::TClock::now() + std::chrono::seconds(10);
+    while (!finished.load() && errors.empty() && NNet::TClock::now() < deadline) {
+        cluster.Pump();
+    }
+    EXPECT_TRUE(finished.load());
+    EXPECT_EQ(errors, std::vector<std::string>{});
+    cluster.Follower.Send<TPoison>(query, actor, TPoison{});
+    cluster.Pump();
+    EXPECT_EQ(received, (std::vector<int64_t>{10, 30}));
+    EXPECT_TRUE(senderIntact.load());
+}
+
+// A chunk owns its reference: a move hands it over, Take() gives it away, and
+// the chunk that still holds it releases it once.
+TEST(DistributedSerialization, DataChunkReleasesItsRowSetOnce) {
+    std::atomic<int> destroyed = 0;
+    {
+        TDataChunk chunk(2, 1, CountedRows(1, &destroyed));
+        TDataChunk moved(std::move(chunk));
+        TDataChunk assigned;
+        assigned = std::move(moved);
+        EXPECT_EQ(destroyed.load(), 0);
+        assigned = TDataChunk(2, 2, CountedRows(2, &destroyed));
+        EXPECT_EQ(destroyed.load(), 1);
+        auto taken = assigned.Take();
+        Release(&taken);
+        EXPECT_EQ(destroyed.load(), 2);
+        TDataChunk view;
+        view.RowSet = {.RowCount = 3};
+    }
+    EXPECT_EQ(destroyed.load(), 2);
+}
+
+// Every chunk a relay sends to a probe on its node is released exactly once.
+TEST(DistributedScheduler, RemoteSinkReleasesEachDeliveredChunkOnce) {
+    using namespace NQdb::NScheduler;
+    std::atomic<int> destroyed = 0;
+    std::atomic<bool> finished = false;
+    int64_t rows = 0;
+    auto resources = std::make_shared<TRuntimeResources>();
+    resources->Scheduler.WorkerCount = 2;
+    {
+        TTestCluster cluster;
+        std::map<std::string, int> statuses;
+        std::vector<std::string> errors;
+        const auto query = cluster.Follower.Register(std::make_unique<TReportProbe>(statuses, errors));
+        const auto result = cluster.Follower.Register(std::make_unique<TResultProbe>(1, [&](const TRowSet& rowSet) {
+            rows += rowSet.RowCount;
+        }, finished));
+        const auto peer = cluster.Follower.Register(std::make_unique<TBlackHole>());
+        const auto actor = cluster.Follower.Register(std::unique_ptr<IActor>(CreateComputeActor(resources)));
+        cluster.Follower.Send<TTaskGraphMessage>(query, actor, GraphMessage(RelaySpec(), RelayEndpoints(result, peer)));
+        for (uint64_t seq = 1; seq <= 3; ++seq) {
+            cluster.Follower.Send<TDataChunk>(query, actor, TDataChunk(2, seq, CountedRows(seq, &destroyed)));
+        }
+        cluster.Follower.Send<TFinish>(query, actor, TFinish{.DstTaskId = 2});
+        const auto deadline = NNet::TClock::now() + std::chrono::seconds(10);
+        while (!finished.load() && errors.empty() && NNet::TClock::now() < deadline) {
+            cluster.Pump();
+        }
+        EXPECT_TRUE(finished.load());
+        EXPECT_EQ(errors, std::vector<std::string>{});
+        cluster.Follower.Send<TPoison>(query, actor, TPoison{});
+        cluster.Pump();
+    }
+    EXPECT_EQ(rows, 6);
+    EXPECT_EQ(destroyed.load(), 3);
+}
+
+// A relay's sink sends to an actor on its node that is already gone: the
+// undelivered chunk still releases its rows.
+TEST(DistributedScheduler, RemoteSinkChunkToAStoppedActorIsReleased) {
+    using namespace NQdb::NScheduler;
+    std::atomic<bool> intact = false;
+    auto resources = std::make_shared<TRuntimeResources>();
+    resources->Scheduler.WorkerCount = 2;
+    TTestCluster cluster;
+    std::map<std::string, int> statuses;
+    std::vector<std::string> errors;
+    const auto query = cluster.Follower.Register(std::make_unique<TReportProbe>(statuses, errors));
+    const auto dead = cluster.Follower.Register(std::make_unique<TBlackHole>());
+    cluster.Follower.Send<TPoison>(query, dead, TPoison{});
+    cluster.Pump();
+    const auto confirms = cluster.Follower.Register(std::make_unique<TBlackHole>());
+    const auto actor = cluster.Follower.Register(std::unique_ptr<IActor>(CreateComputeActor(resources)));
+    cluster.Follower.Send<TTaskGraphMessage>(query, actor, GraphMessage(RelaySpec(), RelayEndpoints(dead, confirms)));
+    cluster.Follower.Send<TDataChunk>(query, actor,
+        TDataChunk(2, 1, SelectedInts({10, 20, 30, 40}, {1, 0, 1, 0}, &intact)));
+    cluster.Follower.Send<TFinish>(query, actor, TFinish{.DstTaskId = 2});
+    const auto deadline = NNet::TClock::now() + std::chrono::seconds(2);
+    while (NNet::TClock::now() < deadline) {
+        cluster.Pump();
+    }
+    cluster.Follower.Send<TPoison>(query, actor, TPoison{});
+    cluster.Pump();
+    EXPECT_TRUE(intact.load()) << "the row set was never destroyed";
 }
 
 // One remote source feeds two remote sinks through a broadcast: a fragment
@@ -2386,8 +2511,8 @@ TEST(DistributedScheduler, ComputeActorRunsAFragmentWithTwoRemoteSinks) {
     }
     const auto actor = cluster.Follower.Register(std::unique_ptr<IActor>(CreateComputeActor(resources)));
     cluster.Follower.Send<TTaskGraphMessage>(query, actor, GraphMessage(spec, endpoints));
-    cluster.Follower.Send<TDataChunk>(query, actor, TDataChunk{
-        .DstTaskId = 2, .Seq = 1, .RowSet = SelectedInts({10, 20, 30, 40}, {1, 0, 1, 0}, &senderIntact)});
+    cluster.Follower.Send<TDataChunk>(query, actor,
+        TDataChunk(2, 1, SelectedInts({10, 20, 30, 40}, {1, 0, 1, 0}, &senderIntact)));
     cluster.Follower.Send<TFinish>(query, actor, TFinish{.DstTaskId = 2});
     const auto deadline = NNet::TClock::now() + std::chrono::seconds(10);
     while (!(finished[0].load() && finished[1].load()) && errors.empty() && NNet::TClock::now() < deadline) {
@@ -2443,8 +2568,8 @@ TEST(DistributedScheduler, ComputeActorFinishesARootWhileAnotherWaitsOnItsSource
     cluster.Follower.Send<TTaskGraphMessage>(query, actor, GraphMessage(spec, endpoints));
     auto deliver = [&](size_t relay, std::vector<int64_t> values) {
         const uint64_t source = 2 + 2 * relay;
-        cluster.Follower.Send<TDataChunk>(query, actor, TDataChunk{
-            .DstTaskId = source, .Seq = 1, .RowSet = SelectedInts(std::move(values), {1, 0, 1, 0}, &senderIntact[relay])});
+        cluster.Follower.Send<TDataChunk>(query, actor,
+            TDataChunk(source, 1, SelectedInts(std::move(values), {1, 0, 1, 0}, &senderIntact[relay])));
         cluster.Follower.Send<TFinish>(query, actor, TFinish{.DstTaskId = source});
     };
     // The deadlines only guard against a hang.
