@@ -138,24 +138,7 @@ int main(int argc, char** argv)
         }
     }
 
-    std::unordered_map<std::string, std::unique_ptr<TParquetSource>> sources;
     TExternalModuleCatalog catalog;
-    auto tableFactory = [&](std::string_view table)
-        -> std::expected<NQdb::TOperatorPtr, NQumir::TError>
-    {
-        const auto path = ResolveTablePath(dataDir, table);
-        try {
-            auto& source = sources[path];
-            if (!source) {
-                source = std::make_unique<TParquetSource>(path);
-            }
-            auto op = std::make_shared<TSourceOperator>(*source, path);
-            return op;
-        } catch (const std::exception& e) {
-            return std::unexpected(NQumir::TError(
-                "cannot open table '" + std::string(table) + "': " + e.what()));
-        }
-    };
 
     NUtils::TConfig engineConfig(EngineConfigSchema());
     if (auto loaded = LoadEngineConfig(engineConfig, NQdb::NUtils::DefaultConfigPath(), configPath, overrides); !loaded) {
@@ -166,7 +149,26 @@ int main(int argc, char** argv)
     ApplyEngineConfig(engineConfig, EngineSettings);
     // Fragments on different nodes cannot share a runtime filter yet.
     EngineSettings.Optimizer.EnableRuntimeFilters = false;
-    NCompiler::TQueryCompiler compiler(catalog, tableFactory, EngineSettings.Optimizer);
+    // Column pruning narrows a source, so each query opens its own and releases
+    // them with its compiler.
+    auto compilerFactory = [&]() {
+        auto sources = std::make_shared<std::vector<std::unique_ptr<TParquetSource>>>();
+        auto tableFactory = [&dataDir, sources](std::string_view table)
+            -> std::expected<NQdb::TOperatorPtr, NQumir::TError>
+        {
+            const auto path = ResolveTablePath(dataDir, table);
+            try {
+                auto source = std::make_unique<TParquetSource>(path);
+                auto op = std::make_shared<TSourceOperator>(*source, path);
+                sources->push_back(std::move(source));
+                return op;
+            } catch (const std::exception& e) {
+                return std::unexpected(NQumir::TError(
+                    "cannot open table '" + std::string(table) + "': " + e.what()));
+            }
+        };
+        return std::make_unique<NCompiler::TQueryCompiler>(catalog, tableFactory, EngineSettings.Optimizer);
+    };
 
     TAddress httpAddress{"::", httpPort};
 
@@ -234,7 +236,7 @@ int main(int argc, char** argv)
         std::cerr << "[QumirDB] " << msg << "\n";
     };
 
-    auto gatewayActorId = sys.RegisterWellKnown(TLocalActorId(EWellKnownActors::Gateway), IActor::TPtr(CreateGatewayActor(compiler, EngineSettings.Scheduler, logger)));
+    auto gatewayActorId = sys.RegisterWellKnown(TLocalActorId(EWellKnownActors::Gateway), IActor::TPtr(CreateGatewayActor(compilerFactory, EngineSettings.Scheduler, logger)));
     auto router = NHttp::CreateRouter(&sys, gatewayActorId);
 
     TWebServer<TSocket> server(std::move(*httpListenSocket), *router, logger);

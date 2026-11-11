@@ -2706,6 +2706,16 @@ struct TDecimalsCompiler {
         auto& source = Sources.emplace_back(std::make_unique<TParquetSource>(DecimalsPath));
         return std::make_shared<TSourceOperator>(*source, "t");
     }, TPlanPassOptions{.EnableCbo = false, .EnableRuntimeFilters = false}};
+
+    // A compiler that owns its sources, as the daemon makes one per query.
+    std::unique_ptr<NCompiler::TQueryCompiler> MakeQueryCompiler()
+    {
+        auto sources = std::make_shared<std::vector<std::unique_ptr<TParquetSource>>>();
+        return std::make_unique<NCompiler::TQueryCompiler>(Catalog, [sources](std::string_view) -> std::expected<TOperatorPtr, NQumir::TError> {
+            auto& source = sources->emplace_back(std::make_unique<TParquetSource>(DecimalsPath));
+            return std::make_shared<TSourceOperator>(*source, "t");
+        }, TPlanPassOptions{.EnableCbo = false, .EnableRuntimeFilters = false});
+    }
 };
 
 // The CSV rows of `sql` run in this process.
@@ -2775,7 +2785,8 @@ TEST(DistributedScheduler, QueryActorRunsAQueryOnEveryNode) {
         std::vector<std::string> log;
         const auto client = cluster.Follower.Register(std::make_unique<TAnswerProbe>(answer));
         const auto query = cluster.Follower.Register(std::unique_ptr<IActor>(CreateQueryActor(
-            compiler.Compiler, settings, [&](const std::string& line) { log.push_back(line); })));
+            [&] { return compiler.MakeQueryCompiler(); }, settings,
+            [&](const std::string& line) { log.push_back(line); })));
         cluster.Follower.Send<TExecuteQuery>(client, query, TExecuteQuery{.Query = sql});
         // The deadline only guards against a hang.
         const auto queryDeadline = NNet::TClock::now() + std::chrono::seconds(60);
