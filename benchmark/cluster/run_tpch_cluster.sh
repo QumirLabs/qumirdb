@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # TPC-H SF10 on a local qdbd cluster, results checked against a single-process qdb run.
 #   run_tpch_cluster.sh <1node|4node> <tpch_base_dir> [query_filter]
-# 1node = 1 node x 18 threads, 4node = 4 nodes x 6 threads. The cluster is stopped on exit.
+# 1node = 1 node x 16 threads, 4node = 4 nodes x 4 threads. The cluster is stopped on exit.
 # Env: QDB_BIN, QDBD_BIN, OUT_DIR, HOSTS (see cluster.sh);
 #      EXPLAIN=1 sends "EXPLAIN <query>" and skips the result check (the cluster cannot execute yet).
 set -euo pipefail
@@ -15,8 +15,8 @@ HTTP_PORT_BASE="${HTTP_PORT_BASE:-8100}"
 
 [[ $# -ge 2 ]] || { echo "Usage: $0 <1node|4node> <tpch_base_dir> [query_filter]" >&2; exit 1; }
 case "$1" in
-    1node) NODES=1; THREADS=18 ;;
-    4node) NODES=4; THREADS=6 ;;
+    1node) NODES=1; THREADS=16 ;;
+    4node) NODES=4; THREADS=4 ;;
     *) echo "Unknown preset: $1" >&2; exit 1 ;;
 esac
 BASE_DIR="$(cd "$2" && pwd)"

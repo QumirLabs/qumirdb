@@ -47,7 +47,7 @@ start() {
     for i in $(seq 1 "$nodes"); do
         case "${hosts[i-1]}" in 127.0.0.1|localhost) ;; *) continue;; esac
         "$QDBD_BIN" --node-id "$i" --leader-id 1 --http-port "$((HTTP_PORT_BASE + i))" \
-            --data "$DATA_DIR" "--scheduler:workers=$threads" "${node_args[@]}" \
+            --data "$DATA_DIR" "--scheduler:workers=$threads" "--jit:cache_dir=$CLUSTER_DIR/node$i.jit" "${node_args[@]}" \
             > "$CLUSTER_DIR/node$i.log" 2>&1 &
         echo $! > "$CLUSTER_DIR/node$i.pid"
     done
