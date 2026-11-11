@@ -104,9 +104,44 @@ std::pair<TTaskNode*, TTaskNode*> Cut(
     return {&sink, &source};
 }
 
+// Replaces split.Edges by Src -> sink for each distinct Src and source -> Dst
+// for each distinct Dst.
+std::pair<TTaskNode*, TTaskNode*> CutDependencies(
+    TTaskGraph& graph,
+    TDependencySplit& split,
+    std::vector<std::unique_ptr<TTaskEdge>>& edges,
+    std::vector<std::optional<int>>& colors)
+{
+    auto& sink = graph.AddOwnedNode(std::move(split.SinkTask));
+    sink.DebugKind = "runtime-filter-sink";
+    auto& source = graph.AddOwnedNode(std::move(split.SourceTask));
+    source.DebugKind = "runtime-filter-source";
+    colors.resize(graph.Nodes().size());
+    colors[sink.ExecutionSlot] = split.SinkColor;
+    colors[source.ExecutionSlot] = split.SourceColor;
+
+    auto add = [&](TTaskNode& src, TTaskNode& dst) {
+        edges.push_back(std::make_unique<TTaskEdge>(TTaskEdge{
+            .Src = &src, .Dst = &dst, .Kind = ETaskEdgeKind::Dependency}));
+    };
+    std::unordered_set<const TTaskNode*> srcs;
+    std::unordered_set<const TTaskNode*> dsts;
+    for (const auto* edge : split.Edges) {
+        if (srcs.insert(edge->Src).second) {
+            add(*edge->Src, sink);
+        }
+    }
+    for (const auto* edge : split.Edges) {
+        if (dsts.insert(edge->Dst).second) {
+            add(source, *edge->Dst);
+        }
+    }
+    return {&sink, &source};
+}
+
 // Union-find over rowset edges: each piece takes the color of its remote
-// sinks and sources. A dependency edge is a scheduling gate with no transport
-// between fragments yet, so it must stay within one color.
+// sinks and sources. A dependency edge is a scheduling gate within one
+// fragment, so one between colors must have been cut.
 std::vector<std::vector<TTaskNode*>> GroupByColor(
     const std::vector<std::unique_ptr<TTaskNode>>& nodes,
     const std::vector<std::unique_ptr<TTaskEdge>>& edges,
@@ -346,26 +381,42 @@ TSealedTaskGraph TTaskGraph::Apply(TSplitPlan&& plan) {
     if (!Sealed_) {
         throw std::logic_error("split plan applies only to a sealed task graph");
     }
-    if (plan.Splits.empty()) {
+    if (plan.Splits.empty() && plan.DependencySplits.empty()) {
         return TSealedTaskGraph(Graphs_, Nodes_.size(), Externals_, Cuts_);
     }
     if (Split_) {
         throw std::logic_error("task graph is already split");
     }
     std::unordered_map<const TTaskEdge*, TEdgeSplit*> splits;
+    std::set<int> planColors;
     for (auto& split : plan.Splits) {
         if (!split.Edge || !split.NewConnection || !split.SinkTask || !split.SourceTask) {
             throw std::logic_error("split plan has an incomplete split");
         }
         if (!IsRowsetEdge(split.Edge)) {
-            throw std::logic_error("split plan cuts a dependency edge");
+            throw std::logic_error("split plan cuts a dependency edge as a rowset edge");
         }
         if (!splits.emplace(split.Edge, &split).second) {
             throw std::logic_error("split plan cuts one edge twice");
         }
+        planColors.insert(split.SinkColor);
+        planColors.insert(split.SourceColor);
     }
-    std::set<int> planColors;
-    for (const auto& split : plan.Splits) {
+    // Each dependency edge maps to its split's index past the rowset cuts.
+    std::unordered_map<const TTaskEdge*, size_t> dependencySplits;
+    for (size_t i = 0; i < plan.DependencySplits.size(); ++i) {
+        const auto& split = plan.DependencySplits[i];
+        if (split.Edges.empty() || !split.SinkTask || !split.SourceTask) {
+            throw std::logic_error("split plan has an incomplete dependency split");
+        }
+        for (const auto* edge : split.Edges) {
+            if (!edge || IsRowsetEdge(edge)) {
+                throw std::logic_error("split plan cuts a rowset edge as a dependency edge");
+            }
+            if (!dependencySplits.emplace(edge, plan.Splits.size() + i).second) {
+                throw std::logic_error("split plan cuts one edge twice");
+            }
+        }
         planColors.insert(split.SinkColor);
         planColors.insert(split.SourceColor);
     }
@@ -373,25 +424,38 @@ TSealedTaskGraph TTaskGraph::Apply(TSplitPlan&& plan) {
         throw std::logic_error("split plan colors must be 0..K-1 without gaps");
     }
     const auto known = std::ranges::count_if(Edges_, [&](const auto& edge) {
-        return splits.contains(edge.get());
+        return splits.contains(edge.get()) || dependencySplits.contains(edge.get());
     });
-    if (static_cast<size_t>(known) != splits.size()) {
+    if (static_cast<size_t>(known) != splits.size() + dependencySplits.size()) {
         throw std::logic_error("split plan cuts an edge of another task graph");
     }
 
     Sealed_ = false;
     uint64_t externalBase = Externals_.empty() ? 0 : Externals_.back().Id + 1;
-    Cuts_.resize(plan.Splits.size());
+    Cuts_.resize(plan.Splits.size() + plan.DependencySplits.size());
     std::vector<std::optional<int>> colors(Nodes_.size());
     std::vector<std::unique_ptr<TTaskEdge>> edges;
     edges.reserve(Edges_.size() + splits.size());
+    auto addCut = [&](size_t index, TTaskNode* sink, TTaskNode* source, int sinkColor, int sourceColor,
+        ETaskEdgeKind kind)
+    {
+        Cuts_[index] = {sink, source, sinkColor, sourceColor, kind};
+        Externals_.push_back({externalBase + 2 * index, sink});
+        Externals_.push_back({externalBase + 2 * index + 1, source});
+    };
     for (auto& edge : Edges_) {
         if (auto it = splits.find(edge.get()); it != splits.end()) {
-            const auto index = it->second - plan.Splits.data();
             const auto [sink, source] = Cut(*this, *it->second, edges, colors);
-            Cuts_[index] = {sink, source, it->second->SinkColor, it->second->SourceColor};
-            Externals_.push_back({externalBase + 2 * index, sink});
-            Externals_.push_back({externalBase + 2 * index + 1, source});
+            addCut(it->second - plan.Splits.data(), sink, source,
+                it->second->SinkColor, it->second->SourceColor, ETaskEdgeKind::Rowset);
+        } else if (auto found = dependencySplits.find(edge.get()); found != dependencySplits.end()) {
+            // A split's new edges take the place of its first edge.
+            const auto index = found->second;
+            if (!Cuts_[index].Sink) {
+                auto& split = plan.DependencySplits[index - plan.Splits.size()];
+                const auto [sink, source] = CutDependencies(*this, split, edges, colors);
+                addCut(index, sink, source, split.SinkColor, split.SourceColor, ETaskEdgeKind::Dependency);
+            }
         } else {
             edges.push_back(std::move(edge));
         }

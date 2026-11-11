@@ -88,7 +88,7 @@ bool ShouldCascadeGlobalAggregate(
 
 // Lower a logical plan into a scheduler graph (no terminal sink yet).
 // Kernels are generated but not compiled.
-// A custom filter factory can bind query-scoped filter ids to remote endpoints.
+// A custom filter factory replaces the local runtime filters.
 TLoweredPlan LowerPlanToGraph(
     const TOperatorPtr& root,
     TSettings settings,
@@ -110,8 +110,9 @@ std::optional<TGraphSpec> ExtractLoweredGraphSpec(
     const TLoweredPlan& lowered, std::vector<uint32_t>* missing = nullptr);
 
 // Applies `plan` to the sealed graph of `lowered` (see TTaskGraph::Apply) and
-// keeps NodeSpecs in step: the remote sinks and sources get records, and the
-// ports Apply moves to new connections move in the records too.
+// keeps NodeSpecs in step: the remote sinks and sources get records, those of a
+// dependency cut name the filter of the tasks it wakes, and the ports Apply
+// moves to new connections move in the records too.
 TSealedTaskGraph ApplySplit(TLoweredPlan& lowered, TSplitPlan&& plan);
 
 // The graph spec of each fragment of `lowered`, in Graphs() order: the nodes

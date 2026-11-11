@@ -800,6 +800,147 @@ TEST(SchedulerGraph, ApplyRejectsADependencyAcrossColors) {
         "split plan: dependency edge n0 -> n1 crosses colors 1 and 0");
 }
 
+TDependencySplit DependencySplit(std::vector<TTaskEdge*> edges, int sinkColor, int sourceColor) {
+    return {
+        .Edges = std::move(edges),
+        .SinkColor = sinkColor,
+        .SourceColor = sourceColor,
+        .SinkTask = std::make_unique<TRuntimeFilterSinkTask>(),
+        .SourceTask = std::make_unique<TRuntimeFilterSourceTask>(),
+    };
+}
+
+// Two build lanes in color 0 gate a probe in color 0 and two in color 1, whose
+// root sends to color 0.
+struct TFilterGraph {
+    TTaskGraph Graph;
+    std::vector<TTaskNode*> Builds;
+    std::vector<TTaskNode*> Probes;
+    TTaskNode* Root = nullptr;
+    TTaskNode* RemoteRoot = nullptr;
+    TTaskEdge* Out = nullptr;
+    std::vector<TTaskEdge*> Remote;
+};
+
+void BuildFilterGraph(TFilterGraph& g) {
+    auto connection = [&] {
+        return &g.Graph.AddConnection(std::make_unique<TOneToOneConnection>());
+    };
+    std::vector<IConnection*> local{connection(), connection(), connection()};
+    std::vector<IConnection*> remote{connection(), connection()};
+    auto* out = connection();
+    for (int i = 0; i < 2; ++i) {
+        g.Builds.push_back(&AddPortsNode(g.Graph, {}, {{.Connection = local[i]}}).Node);
+    }
+    g.Probes.push_back(&AddPortsNode(g.Graph, {}, {{.Connection = local[2]}}).Node);
+    for (auto* connection : remote) {
+        g.Probes.push_back(&AddPortsNode(g.Graph, {}, {{.Connection = connection}}).Node);
+    }
+    g.RemoteRoot = &AddPortsNode(g.Graph,
+        {{.Connection = remote[0]}, {.Connection = remote[1]}}, {{.Connection = out}}).Node;
+    g.Root = &AddPortsNode(g.Graph,
+        {{.Connection = local[0]}, {.Connection = local[1]}, {.Connection = local[2]}, {.Connection = out}}, {}).Node;
+    for (int i = 0; i < 3; ++i) {
+        g.Graph.AddEdge(i < 2 ? *g.Builds[i] : *g.Probes[0], *g.Root, *local[i]);
+    }
+    for (int i = 0; i < 2; ++i) {
+        g.Graph.AddEdge(*g.Probes[i + 1], *g.RemoteRoot, *remote[i]);
+    }
+    g.Out = &g.Graph.AddEdge(*g.RemoteRoot, *g.Root, *out);
+    for (auto* build : g.Builds) {
+        for (auto* probe : g.Probes) {
+            auto& edge = g.Graph.AddDependencyEdge(*build, *probe);
+            if (probe != g.Probes[0]) {
+                g.Remote.push_back(&edge);
+            }
+        }
+    }
+    std::string error;
+    ASSERT_TRUE(g.Graph.Seal(&error)) << error;
+}
+
+// The sources, or else the destinations, of the dependency edges among `edges`.
+std::set<const TTaskNode*> Gates(const std::vector<TTaskEdge*>& edges, bool sources) {
+    std::set<const TTaskNode*> nodes;
+    for (const auto* edge : edges) {
+        if (edge->Kind == ETaskEdgeKind::Dependency) {
+            nodes.insert(sources ? edge->Src : edge->Dst);
+        }
+    }
+    return nodes;
+}
+
+TEST(SchedulerGraph, ApplyCutsTheDependencyEdgesOfOneFilter) {
+    TFilterGraph g;
+    ASSERT_NO_FATAL_FAILURE(BuildFilterGraph(g));
+    TSplitPlan plan = Plan(Split(*g.Out, EReboundPort::DestinationInput, 1, 0));
+    plan.DependencySplits.push_back(DependencySplit(g.Remote, 0, 1));
+    const auto sealed = g.Graph.Apply(std::move(plan));
+
+    // The rowset cut comes first, though its nodes are created last.
+    ASSERT_EQ(sealed.Cuts().size(), 2u);
+    const auto& rows = sealed.Cuts()[0];
+    const auto& filter = sealed.Cuts()[1];
+    EXPECT_EQ(rows.Kind, ETaskEdgeKind::Rowset);
+    EXPECT_EQ(filter.Kind, ETaskEdgeKind::Dependency);
+    EXPECT_EQ(filter.SinkColor, 0);
+    EXPECT_EQ(filter.SourceColor, 1);
+    EXPECT_EQ(filter.Sink->DebugKind, "runtime-filter-sink");
+    EXPECT_EQ(filter.Source->DebugKind, "runtime-filter-source");
+    EXPECT_TRUE(dynamic_cast<TRuntimeFilterSinkTask*>(filter.Sink->Task));
+    EXPECT_TRUE(dynamic_cast<TRuntimeFilterSourceTask*>(filter.Source->Task));
+    EXPECT_EQ(sealed.ExternalNode(2), filter.Sink);
+    EXPECT_EQ(sealed.ExternalNode(3), filter.Source);
+
+    // Each build lane gates the sink once, the source gates each remote probe once.
+    const std::set<const TTaskNode*> builds(g.Builds.begin(), g.Builds.end());
+    EXPECT_EQ(filter.Sink->Inbound.size(), 2u);
+    EXPECT_EQ(Gates(filter.Sink->Inbound, true), builds);
+    EXPECT_TRUE(filter.Sink->Outbound.empty());
+    EXPECT_TRUE(filter.Source->Inbound.empty());
+    EXPECT_EQ(filter.Source->Outbound.size(), 2u);
+    EXPECT_EQ(Gates(filter.Source->Outbound, false), (std::set<const TTaskNode*>{g.Probes[1], g.Probes[2]}));
+    EXPECT_EQ(Gates(g.Probes[0]->Inbound, true), builds);
+    for (auto* probe : {g.Probes[1], g.Probes[2]}) {
+        EXPECT_EQ(Gates(probe->Inbound, true), (std::set<const TTaskNode*>{filter.Source}));
+    }
+
+    // Both placeholders are roots of their own colors.
+    EXPECT_EQ(Graphs(sealed), (TGraphs{{g.Root, filter.Sink}, {rows.Sink, filter.Source}}));
+}
+
+TEST(SchedulerGraph, ApplyRejectsInvalidDependencySplits) {
+    TFilterGraph g;
+    ASSERT_NO_FATAL_FAILURE(BuildFilterGraph(g));
+    auto plan = [&](TDependencySplit split) {
+        TSplitPlan plan = Plan(Split(*g.Out, EReboundPort::DestinationInput, 1, 0));
+        plan.DependencySplits.push_back(std::move(split));
+        return plan;
+    };
+    auto incomplete = DependencySplit(g.Remote, 0, 1);
+    incomplete.SourceTask.reset();
+    EXPECT_EQ(ApplyError(g.Graph, plan(std::move(incomplete))), "split plan has an incomplete dependency split");
+    EXPECT_EQ(ApplyError(g.Graph, plan(DependencySplit({}, 0, 1))), "split plan has an incomplete dependency split");
+    EXPECT_EQ(ApplyError(g.Graph, plan(DependencySplit({g.Out}, 1, 0))),
+        "split plan cuts a rowset edge as a dependency edge");
+    auto twice = plan(DependencySplit(g.Remote, 0, 1));
+    twice.DependencySplits.push_back(DependencySplit({g.Remote[0]}, 0, 1));
+    EXPECT_EQ(ApplyError(g.Graph, std::move(twice)), "split plan cuts one edge twice");
+    TTaskEdge foreign = *g.Remote[0];
+    EXPECT_EQ(ApplyError(g.Graph, plan(DependencySplit({&foreign}, 0, 1))),
+        "split plan cuts an edge of another task graph");
+}
+
+// A dependency split that names the wrong colors leaves a gate between colors.
+TEST(SchedulerGraph, ApplyRejectsADependencySplitOfTheWrongColors) {
+    TFilterGraph g;
+    ASSERT_NO_FATAL_FAILURE(BuildFilterGraph(g));
+    TSplitPlan plan = Plan(Split(*g.Out, EReboundPort::DestinationInput, 1, 0));
+    plan.DependencySplits.push_back(DependencySplit(g.Remote, 1, 0));
+    const auto error = ApplyError(g.Graph, std::move(plan));
+    EXPECT_NE(error.find("crosses colors"), std::string::npos) << error;
+}
+
 TEST(SchedulerGraph, ApplyRejectsATaskWithoutTheCutPort) {
     TTaskGraph graph;
     auto& connection = graph.AddConnection(std::make_unique<TOneToOneConnection>());
@@ -827,7 +968,7 @@ TEST(SchedulerGraph, ApplyRejectsInvalidPlans) {
     ASSERT_TRUE(graph.Seal(&error)) << error;
     EXPECT_EQ(
         ApplyError(graph, Plan(Split(gate, EReboundPort::DestinationInput, 0, 1))),
-        "split plan cuts a dependency edge");
+        "split plan cuts a dependency edge as a rowset edge");
     EXPECT_EQ(
         ApplyError(graph, Plan(
             Split(edge, EReboundPort::DestinationInput, 0, 1),

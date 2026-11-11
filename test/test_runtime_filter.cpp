@@ -719,6 +719,69 @@ TEST_F(RuntimeFilter, PartialCanBeMergedAfterLeavingTheProducer) {
     EXPECT_FALSE(RuntimeFilterMayContain(filter, 30));
 }
 
+// Two fragments with two build lanes each, both probing: each forwards its
+// lanes to its own filter and sends their merge to the other, which then
+// publishes what one filter of all four lanes does, also with no build rows.
+TEST_F(RuntimeFilter, MergedLanesOfAnotherFragmentPublishLikeTheLanes) {
+    constexpr size_t Lanes = 4;
+    for (const size_t keysPerLane : {0, 3, 100}) {
+        SCOPED_TRACE(keysPerLane);
+        auto filter = [&] {
+            auto made = std::make_shared<TRuntimeFilter>(Context_, /*maxKeys=*/32, /*bloomBytes=*/4096);
+            made->SetProducerCount(Lanes);
+            return made;
+        };
+        const auto whole = filter();
+        const auto first = filter();
+        const auto second = filter();
+        TRuntimeFilterExport firstLanes(Context_, first, /*forward=*/true);
+        TRuntimeFilterExport secondLanes(Context_, second, /*forward=*/true);
+        std::vector<uint64_t> keys;
+        for (size_t lane = 0; lane < Lanes; ++lane) {
+            const auto part = Hashes(keysPerLane, lane + 80);
+            keys.insert(keys.end(), part.begin(), part.end());
+            auto& lanes = lane < 2 ? firstLanes : secondLanes;
+            auto builder = lanes.MakeBuilder();
+            builder.Add(part);
+            auto partial = std::move(builder).TakePartial();
+            whole->FinishProducer(TRuntimeFilterPartial(partial));
+            lanes.FinishProducer(std::move(partial));
+        }
+        EXPECT_EQ(firstLanes.Merged().Producers, 2u);
+        EXPECT_FALSE(first->Ready());
+        first->FinishProducer(secondLanes.Merged());
+        second->FinishProducer(firstLanes.Merged());
+
+        const auto probes = Hashes(20000, 99);
+        for (const auto& merged : {first, second}) {
+            ASSERT_TRUE(merged->Ready());
+            EXPECT_EQ(merged->UsesBloom(), keysPerLane == 100);
+            const auto stats = merged->StatsSnapshot();
+            EXPECT_EQ(stats.BuildRows, keys.size());
+            EXPECT_EQ(stats.ExactKeys, whole->StatsSnapshot().ExactKeys);
+            EXPECT_EQ(stats.BloomSetBits, whole->StatsSnapshot().BloomSetBits);
+            ExpectContainsAll(*merged, keys);
+            EXPECT_EQ(Flags(ProbeRuntimeFilter(*merged, probes)), Flags(ProbeRuntimeFilter(*whole, probes)));
+        }
+    }
+}
+
+// Without forwarding, the export only merges: the fragment does not probe.
+TEST_F(RuntimeFilter, ExportKeepsTheMergeWithoutForwarding) {
+    auto filter = std::make_shared<TRuntimeFilter>(Context_, /*maxKeys=*/8);
+    TRuntimeFilterExport lanes(Context_, filter, /*forward=*/false);
+    for (uint64_t key : {11, 22}) {
+        auto builder = lanes.MakeBuilder();
+        builder.Add({&key, 1});
+        lanes.FinishProducer(std::move(builder).TakePartial());
+    }
+    EXPECT_FALSE(filter->Ready());
+    const auto merged = lanes.Merged();
+    EXPECT_EQ(merged.Hashes, (std::vector<uint64_t>{11, 22}));
+    EXPECT_EQ(merged.BuildRows, 2u);
+    EXPECT_EQ(merged.Producers, 2u);
+}
+
 TEST_F(RuntimeFilter, LocalBindingKeepsProducerAndProbeInSync) {
     TLocalRuntimeFilterBindingFactory factory;
     auto binding = factory.Create(/*id=*/7, /*producerCount=*/2,

@@ -698,6 +698,8 @@ TEST(GraphSpec, RuntimeFilterRecordsAndTableRoundTrip)
         }),
         .ProducedFilter = 0,
     }));
+    spec.Nodes.push_back(Node("runtime-filter-sink", "", TRuntimeFilterSinkNode{.Filter = 1}));
+    spec.Nodes.push_back(Node("runtime-filter-source", "", TRuntimeFilterSourceNode{.Filter = 0}));
 
     const auto bytes = SerializeGraphSpec(spec);
     const auto back = DeserializeGraphSpec(bytes);
@@ -716,7 +718,9 @@ TEST(GraphSpec, RuntimeFilterRecordsAndTableRoundTrip)
     EXPECT_EQ(back.RuntimeFilterBindings[1].Id, 9u);
     EXPECT_EQ(back.RuntimeFilterBindings[1].BloomBytes, 64u);
 
-    ASSERT_EQ(back.Nodes.size(), 2u);
+    ASSERT_EQ(back.Nodes.size(), 4u);
+    EXPECT_EQ(std::get<TRuntimeFilterSinkNode>(back.Nodes[2].Body).Filter, 1u);
+    EXPECT_EQ(std::get<TRuntimeFilterSourceNode>(back.Nodes[3].Body).Filter, 0u);
     const auto& filter = std::get<TRuntimeFilterNode>(back.Nodes[0].Body);
     EXPECT_EQ(filter.In.Lane, 2u);
     EXPECT_EQ(filter.Out.Connection, 1u);
@@ -904,6 +908,20 @@ TEST(GraphSpec, RejectsInvalidSpecs)
     EXPECT_THROW(MaterializeGraph(spec, &sink, slots), std::runtime_error);
     spec.Nodes[1].Body = TRuntimeFilterNode{.In = {0, 0}, .Out = {1, 0}};
     EXPECT_NO_THROW(MaterializeGraph(spec, &sink, slots));
+    spec.Nodes[1].Body = TRuntimeFilterSinkNode{.Filter = 1};
+    EXPECT_THROW(MaterializeGraph(spec, &sink, slots), std::runtime_error);
+    spec.Nodes[1].Body = TRuntimeFilterSourceNode{.Filter = 1};
+    EXPECT_THROW(MaterializeGraph(spec, &sink, slots), std::runtime_error);
+    spec.Nodes[1].Body = TRuntimeFilterSinkNode{.Filter = 0};
+    {
+        const auto graph = MaterializeGraph(spec, &sink, slots);
+        EXPECT_TRUE(dynamic_cast<TRuntimeFilterSinkTask*>(graph->Nodes()[1]->Task));
+    }
+    spec.Nodes[1].Body = TRuntimeFilterSourceNode{.Filter = 0};
+    {
+        const auto graph = MaterializeGraph(spec, &sink, slots);
+        EXPECT_TRUE(dynamic_cast<TRuntimeFilterSourceTask*>(graph->Nodes()[1]->Task));
+    }
 }
 
 TEST(GraphSpec, RebindPortMovesTheMatchingPortOfItsKind)

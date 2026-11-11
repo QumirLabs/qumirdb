@@ -60,12 +60,13 @@ using EMode = TRuntimeFilterBuildState::EMode;
 using EWant = TRuntimeFilterBuildState::EWant;
 
 // Parallel to RuntimeFilterKernelEntrypoints.
-enum EEntry : size_t { Build, Publish, Probe };
+enum EEntry : size_t { Build, Publish, Probe, Merge };
 
 using TBuild = int64_t (*)(TRuntimeFilterBuildState*, const uint64_t*, const uint8_t*, int64_t);
 using TPublish = void (*)(TPublishState*, const TPartialView*, int64_t);
 using TProbe = int64_t (*)(const TFilterData*, const uint64_t*, const uint8_t*, uint8_t*,
     int64_t, int64_t, uint64_t*, uint8_t*);
+using TMerge = void (*)(uint64_t*, const uint64_t*, int64_t);
 
 template <typename T, typename... TArgs>
 auto CallEntry(const TRuntimeContext& context, EEntry entry, TArgs... args) {
@@ -206,11 +207,14 @@ void TRuntimeFilter::StartExecutionClock() {
 
 void TRuntimeFilter::FinishProducer(TRuntimeFilterPartial&& partial) {
     const size_t slot = NextPartial_.fetch_add(1, std::memory_order_relaxed);
+    const size_t producers = partial.Producers;
     // Each producer writes its own slot. The acq_rel decrement chain makes all
     // contributions visible to the last producer, which alone builds Data_.
     assert(slot < Partials_.size());
     Partials_[slot] = std::move(partial);
-    if (PendingProducers_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+    const size_t pending = PendingProducers_.fetch_sub(producers, std::memory_order_acq_rel);
+    assert(producers <= pending);
+    if (pending == producers) {
         Publish();
     }
 }
@@ -397,6 +401,41 @@ TRuntimeFilterStats TRuntimeFilter::StatsSnapshot() const {
         stats.PausedProbeRows += state->PausedProbeRows;
     }
     return stats;
+}
+
+TRuntimeFilterExport::TRuntimeFilterExport(std::shared_ptr<TRuntimeContext> runtimeContext,
+    std::shared_ptr<IRuntimeFilterProducer> filter, bool forward)
+    : RuntimeContext_(std::move(runtimeContext))
+    , Filter_(std::move(filter))
+    , Forward_(forward)
+{
+    CheckKernels(RuntimeContext_);
+}
+
+void TRuntimeFilterExport::FinishProducer(TRuntimeFilterPartial&& partial) {
+    {
+        std::lock_guard lock(Mutex_);
+        Merged_.Hashes.insert(Merged_.Hashes.end(), partial.Hashes.begin(), partial.Hashes.end());
+        if (Merged_.BloomWords.empty()) {
+            Merged_.BloomWords = Forward_ ? partial.BloomWords : std::move(partial.BloomWords);
+        } else if (!partial.BloomWords.empty()) {
+            // The builders of one filter size their fragments alike.
+            assert(partial.BloomWords.size() == Merged_.BloomWords.size());
+            CallEntry<TMerge>(*RuntimeContext_, EEntry::Merge, Merged_.BloomWords.data(),
+                partial.BloomWords.data(), static_cast<int64_t>(Merged_.BloomWords.size()));
+        }
+        Merged_.ExactSetOverflowed |= partial.ExactSetOverflowed;
+        Merged_.BuildRows += partial.BuildRows;
+        Merged_.Producers += partial.Producers;
+    }
+    if (Forward_) {
+        Filter_->FinishProducer(std::move(partial));
+    }
+}
+
+TRuntimeFilterPartial TRuntimeFilterExport::Merged() const {
+    std::lock_guard lock(Mutex_);
+    return Merged_;
 }
 
 TRuntimeFilterBinding TLocalRuntimeFilterBindingFactory::Create(

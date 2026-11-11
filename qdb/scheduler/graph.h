@@ -87,16 +87,29 @@ struct TEdgeSplit {
     std::unique_ptr<ITask> SourceTask;
 };
 
-struct TSplitPlan {
-    std::vector<TEdgeSplit> Splits;
+// Cuts dependency edges that all run from SinkColor to SourceColor into
+// Src -> SinkTask for each of their Srcs and SourceTask -> Dst for each Dst, so
+// every Dst then waits for every Src: the edges of one runtime filter.
+struct TDependencySplit {
+    std::vector<TTaskEdge*> Edges;
+    int SinkColor = 0;
+    int SourceColor = 0;
+    std::unique_ptr<ITask> SinkTask;
+    std::unique_ptr<ITask> SourceTask;
 };
 
-// A split edge after Apply: the placeholders and the colors they connect.
+struct TSplitPlan {
+    std::vector<TEdgeSplit> Splits;
+    std::vector<TDependencySplit> DependencySplits;
+};
+
+// A split after Apply: the placeholders and the colors they connect.
 struct TCut {
     TTaskNode* Sink = nullptr;
     TTaskNode* Source = nullptr;
     int SinkColor = 0;
     int SourceColor = 0;
+    ETaskEdgeKind Kind = ETaskEdgeKind::Rowset;
 };
 
 // A validated, frozen graph; only TTaskGraph::Seal() and Apply() make a non-empty one.
@@ -191,8 +204,9 @@ public:
     // ExecutionSlot order. Seal() makes one of all roots; Apply() makes one per
     // color, so Graphs()[c] is the fragment of color c.
     const std::vector<std::vector<TTaskNode*>>& Graphs() const;
-    // The cuts of Apply() in plan order; empty if not split. Cut i's sink and source
-    // are external under base + 2i and base + 2i + 1, base = past the largest old id.
+    // The cuts of Apply() in plan order, the rowset ones first; empty if not split.
+    // Cut i's sink and source are external under base + 2i and base + 2i + 1,
+    // base = past the largest old id.
     std::span<const TCut> Cuts() const;
     // Owned connections in creation order.
     std::span<const std::unique_ptr<IConnection>> Connections() const;

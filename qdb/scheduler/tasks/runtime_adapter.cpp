@@ -256,6 +256,14 @@ TSinkCode::TSinkCode(TWrite write, TFinish finish)
     , Finish(std::move(finish))
 {}
 
+TRuntimeFilterSinkCode::TRuntimeFilterSinkCode(TSend send)
+    : Send(std::move(send))
+{}
+
+TRuntimeFilterSourceCode::TRuntimeFilterSourceCode(TTake take)
+    : Take(std::move(take))
+{}
+
 TBlockingCode::TBlockingCode(TProcess process)
     : Process(std::move(process))
 {}
@@ -366,6 +374,10 @@ void TRuntimeFilterTask::BindCode(std::shared_ptr<const TRuntimeFilterCode> code
     Code_ = std::move(code);
 }
 
+const IRuntimeFilterProbe* TRuntimeFilterTask::Filter() const {
+    return Code_ ? Code_->Probe.get() : nullptr;
+}
+
 bool TRuntimeFilterTask::WantsInput(const TTaskEdge& edge) const noexcept {
     switch (Code_->AuxInput->Poll()) {
         case EAuxInputStatus::Ready:
@@ -470,6 +482,73 @@ ETaskResult TRuntimeFilterTask::Execute() {
     HasInput_ = false;
     Prepared_ = false;
     return ETaskResult::OK;
+}
+
+TRuntimeFilterSinkTask::TRuntimeFilterSinkTask(std::shared_ptr<const TRuntimeFilterExport> filter)
+    : Filter_(std::move(filter))
+{}
+
+void TRuntimeFilterSinkTask::BindNode(const TTaskNode& node) {
+    Node_ = &node;
+}
+
+void TRuntimeFilterSinkTask::BindCode(
+    std::shared_ptr<const TRuntimeFilterSinkCode> code, std::shared_ptr<void> state) {
+    assert(!Code_);
+    Code_ = std::move(code);
+    State_ = std::move(state);
+}
+
+const std::shared_ptr<const TRuntimeFilterSinkCode>& TRuntimeFilterSinkTask::Code() const {
+    return Code_;
+}
+
+bool TRuntimeFilterSinkTask::WantsInput(const TTaskEdge& edge) const noexcept {
+    return edge.Kind == ETaskEdgeKind::Dependency
+        && PollDependencies(*Node_) == EAuxInputStatus::NeedProducer;
+}
+
+bool TRuntimeFilterSinkTask::TryNotifyDependency() noexcept {
+    return PollDependencies(*Node_) == EAuxInputStatus::Ready
+        && !DependencyNotified_.exchange(true, std::memory_order_acq_rel);
+}
+
+ETaskResult TRuntimeFilterSinkTask::Execute() {
+    if (!Sent_) {
+        if (PollDependencies(*Node_) != EAuxInputStatus::Ready) {
+            return ETaskResult::NEED_DATA;
+        }
+        Code_->Send(State_.get(), Filter_->Merged());
+        Sent_ = true;
+    }
+    return ETaskResult::FINISHED;
+}
+
+TRuntimeFilterSourceTask::TRuntimeFilterSourceTask(std::shared_ptr<IRuntimeFilterProducer> filter)
+    : Filter_(std::move(filter))
+{}
+
+void TRuntimeFilterSourceTask::BindCode(
+    std::shared_ptr<const TRuntimeFilterSourceCode> code, std::shared_ptr<void> state) {
+    assert(!Code_);
+    Code_ = std::move(code);
+    State_ = std::move(state);
+}
+
+const std::shared_ptr<const TRuntimeFilterSourceCode>& TRuntimeFilterSourceTask::Code() const {
+    return Code_;
+}
+
+ETaskResult TRuntimeFilterSourceTask::Execute() {
+    if (!Finished_) {
+        TRuntimeFilterPartial partial;
+        if (!Code_->Take(State_.get(), partial)) {
+            return ETaskResult::WAITING;
+        }
+        Filter_->FinishProducer(std::move(partial));
+        Finished_ = true;
+    }
+    return ETaskResult::FINISHED;
 }
 
 TUnaryTask::TUnaryTask(

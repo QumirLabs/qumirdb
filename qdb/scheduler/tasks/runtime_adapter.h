@@ -131,6 +131,25 @@ struct TRuntimeFilterCode {
     std::shared_ptr<TAuxInput> AuxInput;
 };
 
+struct TRuntimeFilterSinkCode {
+    // Takes the partial; called once.
+    using TSend = std::function<void(void*, TRuntimeFilterPartial&&)>;
+
+    explicit TRuntimeFilterSinkCode(TSend send);
+
+    TSend Send;
+};
+
+struct TRuntimeFilterSourceCode {
+    // True once the partial is there, which it then moves out. May be called
+    // before the external wake.
+    using TTake = std::function<bool(void*, TRuntimeFilterPartial&)>;
+
+    explicit TRuntimeFilterSourceCode(TTake take);
+
+    TTake Take;
+};
+
 struct TMergeCode {
     using TProcess = std::function<ETaskResult(
         ITaskState&,
@@ -180,6 +199,7 @@ public:
 
     // Only for a task built with empty code, before it is scheduled.
     void BindCode(std::shared_ptr<const TRuntimeFilterCode> code);
+    const IRuntimeFilterProbe* Filter() const;
 
 private:
     std::shared_ptr<const TRuntimeFilterCode> Code_;
@@ -192,6 +212,52 @@ private:
     bool InputFinished_ = false;
     bool OutputFinished_ = false;
     std::atomic<bool> DependencyNotified_ = false;
+};
+
+// Sends the merged partial of one filter's build lanes in this graph, the
+// producers of its dependency edges, once they all finished.
+class TRuntimeFilterSinkTask final : public ITask {
+public:
+    // Without a filter, a placeholder that never runs.
+    explicit TRuntimeFilterSinkTask(std::shared_ptr<const TRuntimeFilterExport> filter = nullptr);
+
+    ETaskResult Execute() override;
+    bool WantsInput(const TTaskEdge& edge) const noexcept override;
+    bool TryNotifyDependency() noexcept override;
+
+    // Before it is scheduled: the graph node that holds the task.
+    void BindNode(const TTaskNode& node);
+    // Only for a task built with empty code, before it is scheduled.
+    void BindCode(std::shared_ptr<const TRuntimeFilterSinkCode> code, std::shared_ptr<void> state);
+    const std::shared_ptr<const TRuntimeFilterSinkCode>& Code() const;
+
+private:
+    std::shared_ptr<const TRuntimeFilterExport> Filter_;
+    const TTaskNode* Node_ = nullptr;
+    std::shared_ptr<const TRuntimeFilterSinkCode> Code_;
+    std::shared_ptr<void> State_;
+    bool Sent_ = false;
+    std::atomic<bool> DependencyNotified_ = false;
+};
+
+// Hands the partial its code receives to a filter as one producer and
+// finishes, which wakes the filter tasks behind its dependency edges.
+class TRuntimeFilterSourceTask final : public ITask {
+public:
+    // Without a filter, a placeholder that never runs.
+    explicit TRuntimeFilterSourceTask(std::shared_ptr<IRuntimeFilterProducer> filter = nullptr);
+
+    ETaskResult Execute() override;
+
+    // Only for a task built with empty code, before it is scheduled.
+    void BindCode(std::shared_ptr<const TRuntimeFilterSourceCode> code, std::shared_ptr<void> state);
+    const std::shared_ptr<const TRuntimeFilterSourceCode>& Code() const;
+
+private:
+    std::shared_ptr<IRuntimeFilterProducer> Filter_;
+    std::shared_ptr<const TRuntimeFilterSourceCode> Code_;
+    std::shared_ptr<void> State_;
+    bool Finished_ = false;
 };
 
 class TUnaryTask final : public ITask {

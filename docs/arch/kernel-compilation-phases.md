@@ -40,7 +40,7 @@ Kernels per operator:
 - join: one program with dispatch and materialization entries, sharing
   probe/insert/finalization helpers; a separate hash kernel supports repartition.
 - runtime filters: one `runtime-filter` kernel per query, shared by all
-  filters, with the entries `rf_build`, `rf_publish` and `rf_probe`.
+  filters, with the entries `rf_build`, `rf_publish`, `rf_probe` and `rf_merge`.
 
 Lowering creates compilers via
 `KernelOptions(stage, execStageId)`: `Sink = &TLoweredPlan::Kernels`,

@@ -9,10 +9,13 @@
 #include <algorithm>
 #include <array>
 #include <deque>
+#include <map>
 #include <memory>
 #include <set>
 #include <stdexcept>
+#include <span>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -76,6 +79,18 @@ protected:
         return static_cast<TNoopTask&>(*node.Task);
     }
 
+    // A runtime filter task of `filter` that feeds `root`.
+    TTaskNode& AddProbe(const std::shared_ptr<NQdb::IRuntimeFilterProbe>& filter, TTaskNode& root) {
+        auto& connection = Graph_.AddConnection(std::make_unique<TOneToOneConnection>());
+        auto code = std::make_shared<TRuntimeFilterCode>();
+        code->Probe = filter;
+        auto& probe = Graph_.AddOwnedNode(std::make_unique<TRuntimeFilterTask>(
+            std::move(code), TInputPort{}, TOutputPort{.Connection = &connection}));
+        Task(root).Inputs.push_back({.Connection = &connection});
+        Graph_.AddEdge(probe, root, connection);
+        return probe;
+    }
+
     void CheckResult(const TPartitioner& partitioner, int partitions) {
         const auto& colors = partitioner.Colors();
         const auto& splits = partitioner.SplitEdges();
@@ -110,6 +125,18 @@ protected:
         });
         auto plan = partitioner.TakePlan();
         ASSERT_EQ(plan.Splits.size(), static_cast<size_t>(rowsetSplits));
+        size_t dependencyEdges = 0;
+        for (const auto& split : plan.DependencySplits) {
+            for (auto* edge : split.Edges) {
+                ASSERT_TRUE(splits.contains(edge));
+                EXPECT_EQ(split.SinkColor, colors.at(edge->Src));
+                EXPECT_EQ(split.SourceColor, colors.at(edge->Dst));
+            }
+            dependencyEdges += split.Edges.size();
+        }
+        EXPECT_EQ(dependencyEdges, static_cast<size_t>(std::ranges::count_if(splits, [](const TTaskEdge* edge) {
+            return edge->Kind == ETaskEdgeKind::Dependency && dynamic_cast<const TRuntimeFilterTask*>(edge->Dst->Task);
+        })));
         Cuts_.clear();
         std::vector<std::pair<const ITask*, const ITask*>> tasks;
         for (const auto& split : plan.Splits) {
@@ -174,9 +201,12 @@ protected:
             if (const auto it = colors.find(node.get()); it != colors.end()) {
                 color = it->second;
             } else {
-                const auto cut = std::ranges::find(Cuts_, node.get(), &TCut::Sink);
-                ASSERT_NE(cut, Cuts_.end()) << node->ExecutionSlot;
-                color = cut->SinkColor;
+                // A remote sink, or either placeholder of a dependency cut.
+                const auto cuts = sealed.Cuts();
+                const auto sink = std::ranges::find(cuts, node.get(), &NQdb::NScheduler::TCut::Sink);
+                const auto source = std::ranges::find(cuts, node.get(), &NQdb::NScheduler::TCut::Source);
+                ASSERT_TRUE(sink != cuts.end() || source != cuts.end()) << node->ExecutionSlot;
+                color = sink != cuts.end() ? sink->SinkColor : source->SourceColor;
             }
             ASSERT_LT(static_cast<size_t>(color), roots.size());
             roots[color].push_back(node.get());
@@ -233,8 +263,24 @@ protected:
             }), transport);
     }
 
+    // Never probed: the partitioner only tells filters apart.
+    class TFilter final : public NQdb::IRuntimeFilterProbe {
+    public:
+        bool Ready() const override {
+            return false;
+        }
+
+        size_t MayContainBatch(std::span<const uint64_t>, std::span<uint8_t>,
+            NQdb::TRuntimeFilterProbeState&, std::span<const uint8_t>) const override
+        {
+            return 0;
+        }
+    };
+
     TTaskGraph Graph_;
     std::vector<TCut> Cuts_;
+    std::array<std::shared_ptr<NQdb::IRuntimeFilterProbe>, 2> Filters_{
+        std::make_shared<TFilter>(), std::make_shared<TFilter>()};
 };
 
 TEST_F(TPartitionerTest, SingleNodeHasNoCuts) {
@@ -521,6 +567,71 @@ TEST_F(TPartitionerTest, IncludesCrossPartitionDependency) {
         EXPECT_NE(std::string(e.what()).find("dependency edge"), std::string::npos) << e.what();
         EXPECT_NE(std::string(e.what()).find("crosses colors"), std::string::npos) << e.what();
     }
+}
+
+// A runtime filter's build lanes and probes end up on both colors: the edges
+// between colors make one dependency split per filter and pair of colors.
+TEST_F(TPartitionerTest, GroupsRuntimeFilterGatesByFilterAndColors) {
+    auto& root = AddNode();
+    std::vector<std::pair<TTaskNode*, TTaskNode*>> gates;
+    for (const auto& [filter, lanes] : {std::pair{Filters_[0], 4}, std::pair{Filters_[1], 2}}) {
+        std::vector<TTaskNode*> builds;
+        for (int i = 0; i < lanes; ++i) {
+            builds.push_back(&AddNode());
+            Connect(*builds.back(), root);
+        }
+        for (int i = 0; i < lanes; ++i) {
+            auto& probe = AddProbe(filter, root);
+            for (auto* build : builds) {
+                Graph_.AddDependencyEdge(*build, probe);
+                gates.emplace_back(build, &probe);
+            }
+        }
+    }
+    std::string error;
+    const auto sealed = Graph_.Seal(&error);
+    ASSERT_TRUE(sealed) << error;
+
+    TPartitioner partitioner(sealed, 2);
+    partitioner.Do();
+    ASSERT_NO_FATAL_FAILURE(CheckResult(partitioner, 2));
+    const auto& colors = partitioner.Colors();
+    std::map<std::tuple<const NQdb::IRuntimeFilterProbe*, int, int>, size_t> expected;
+    for (const auto& [build, probe] : gates) {
+        if (colors.at(build) != colors.at(probe)) {
+            ++expected[{static_cast<const TRuntimeFilterTask*>(probe->Task)->Filter(),
+                colors.at(build), colors.at(probe)}];
+        }
+    }
+    {
+        // Peek at the plan without taking it.
+        TPartitioner peek(sealed, 2);
+        peek.Do();
+        const auto plan = peek.TakePlan();
+        ASSERT_EQ(plan.DependencySplits.size(), expected.size());
+        for (const auto& split : plan.DependencySplits) {
+            ASSERT_FALSE(split.Edges.empty());
+            const auto* filter = static_cast<const TRuntimeFilterTask*>(split.Edges.front()->Dst->Task)->Filter();
+            EXPECT_EQ(split.Edges.size(), expected.at({filter, split.SinkColor, split.SourceColor}));
+            for (const auto* edge : split.Edges) {
+                EXPECT_EQ(static_cast<const TRuntimeFilterTask*>(edge->Dst->Task)->Filter(), filter);
+            }
+        }
+        // The four-lane filter has lanes and probes on both colors.
+        EXPECT_TRUE(std::ranges::any_of(plan.DependencySplits, [](const auto& split) {
+            return split.Edges.size() > 1;
+        }));
+    }
+    ASSERT_NO_FATAL_FAILURE(ApplyPlan(partitioner));
+    size_t dependencyCuts = 0;
+    for (const auto& cut : Graph_.Cuts()) {
+        if (cut.Kind == ETaskEdgeKind::Dependency) {
+            ++dependencyCuts;
+            EXPECT_EQ(cut.Sink->DebugKind, "runtime-filter-sink");
+            EXPECT_EQ(cut.Source->DebugKind, "runtime-filter-source");
+        }
+    }
+    EXPECT_EQ(dependencyCuts, expected.size());
 }
 
 TEST_F(TPartitionerTest, OneToOneSplitRebindsDestinationLane) {
