@@ -703,7 +703,10 @@ struct TTwoCuts {
     TTaskEdge* Out = nullptr;
 };
 
-void BuildTwoCuts(TTwoCuts& g, std::optional<uint64_t> externalId) {
+void BuildTwoCuts(
+    TTwoCuts& g,
+    std::optional<uint64_t> rootId,
+    std::optional<uint64_t> sourceId = std::nullopt) {
     auto& first = g.Graph.AddConnection(std::make_unique<TOneToOneConnection>());
     auto& second = g.Graph.AddConnection(std::make_unique<TOneToOneConnection>());
     auto source = AddPortsNode(g.Graph, {}, {{.Connection = &first}});
@@ -713,8 +716,11 @@ void BuildTwoCuts(TTwoCuts& g, std::optional<uint64_t> externalId) {
     g.Root = &root.Node;
     g.In = &g.Graph.AddEdge(source.Node, middle.Node, first);
     g.Out = &g.Graph.AddEdge(middle.Node, root.Node, second);
-    if (externalId) {
-        g.Graph.MarkExternal(root.Node, *externalId);
+    if (rootId) {
+        g.Graph.MarkExternal(root.Node, *rootId);
+    }
+    if (sourceId) {
+        g.Graph.MarkExternal(source.Node, *sourceId);
     }
     std::string error;
     ASSERT_TRUE(g.Graph.Seal(&error)) << error;
@@ -763,13 +769,17 @@ TEST(SchedulerGraph, ApplyRecordsCutsInPlanOrderWithExternalIds) {
 
 TEST(SchedulerGraph, ApplyNumbersCutExternalsPastExistingOnes) {
     TTwoCuts g;
-    ASSERT_NO_FATAL_FAILURE(BuildTwoCuts(g, 7));
+    // Out of order on purpose: the maximum (10) is not the last one marked.
+    ASSERT_NO_FATAL_FAILURE(BuildTwoCuts(g, 10, 3));
     const auto sealed = g.Graph.Apply(Plan(Split(*g.In, EReboundPort::DestinationInput, 0, 1)));
     ASSERT_EQ(sealed.Cuts().size(), 1u);
-    EXPECT_EQ(sealed.ExternalNode(7), g.Root);
-    EXPECT_EQ(sealed.ExternalNode(8), sealed.Cuts()[0].Sink);
-    EXPECT_EQ(sealed.ExternalNode(9), sealed.Cuts()[0].Source);
-    EXPECT_EQ(sealed.ExternalNode(0), nullptr);
+    EXPECT_EQ(sealed.ExternalNode(10), g.Root);
+    EXPECT_EQ(sealed.ExternalNode(3), g.Source);
+    EXPECT_EQ(sealed.ExternalNode(11), sealed.Cuts()[0].Sink);
+    EXPECT_EQ(sealed.ExternalNode(12), sealed.Cuts()[0].Source);
+    EXPECT_EQ(sealed.ExternalNode(7), nullptr);
+    EXPECT_EQ(sealed.ExternalNode(13), nullptr);
+    EXPECT_EQ(g.Graph.Externals().size(), 4u);
 }
 
 TEST(SchedulerGraph, ApplyRejectsADependencyAcrossColors) {
