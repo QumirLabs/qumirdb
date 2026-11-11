@@ -10,6 +10,7 @@
 #include <qdb/exec/sort_exec.h>
 #include <qdb/exec/window_exec.h>
 #include <qdb/io/parquet/source.h>
+#include <qdb/io/row_layouts.h>
 #include <qdb/kernel/compiler.h>
 #include <qdb/kernel/finalize.h>
 #include <qdb/kernel/spec.h>
@@ -429,12 +430,15 @@ public:
         size_t outLaneOffset = 0)
     {
         if (op->RuntimeFilterUses.empty()) {
-            return LowerRaw(op, outConn, outLaneOffset);
+            auto lowered = LowerRaw(op, outConn, outLaneOffset);
+            SetRowType(outConn, lowered.OutputType);
+            return lowered;
         }
         const size_t lanes = OutputLanes(op);
         auto& firstInput = AddConn<NScheduler::TOneToOneConnection>(
             lanes, lanes, "runtime-filter-input");
         auto lowered = LowerRaw(op, firstInput, 0);
+        SetRowType(firstInput, lowered.OutputType);
         NScheduler::IConnection* input = &firstInput;
         for (size_t index = 0; index < op->RuntimeFilterUses.size(); ++index) {
             const auto& use = op->RuntimeFilterUses[index];
@@ -443,6 +447,7 @@ public:
                 output = &AddConn<NScheduler::TOneToOneConnection>(
                     lanes, lanes, "runtime-filter-chain");
             }
+            SetRowType(*output, lowered.OutputType);
             const auto execStageId = NewExecStage(
                 op.get(), EExecPlanNodeKind::RuntimeFilter);
             ExecStages_.back().RuntimeFilterUse = use;
@@ -976,6 +981,15 @@ private:
             srcLanes, dstLanes, std::move(name), QueueCapacity());
     }
 
+    // The type of the rows a connection carries: a remote sink that replaces
+    // its consumer serializes them by these layouts.
+    static void SetRowType(
+        NScheduler::IConnection& connection,
+        const NQumir::NAst::TTypePtr& type)
+    {
+        connection.SetRowLayouts(RowLayouts(type));
+    }
+
     TLoweredOutput LowerSource(
         TSourceOperator& src,
         NScheduler::IConnection& outConn,
@@ -1116,6 +1130,7 @@ private:
 
         const auto spool = static_cast<uint32_t>(CteSpools_.size());
         CteSpools_.push_back({.Segments = static_cast<uint32_t>(lanes)});
+        // No row type: the rows go through the spool, these only finish lanes.
         auto& written = AddConn<NScheduler::TGatherConnection>(
             lanes, 1, "cte-written");
         auto& completion = AddConn<NScheduler::TBroadcastConnection>(
@@ -1248,6 +1263,7 @@ private:
         auto body = stage.Node;
         body.In = PortSpec(Graph_, &input, inputLane);
         body.Out = PortSpec(Graph_, &output, outputLane);
+        SetRowType(output, stage.OutputType);
         return AddNode({
             .ExecStageId = execStageId,
             .TaskGroupId = execStageId,
@@ -1941,6 +1957,7 @@ private:
         if (lookupTaskCount > 1) {
             auto& broadcast = AddConn<NScheduler::TBroadcastConnection>(
                 1, lookupTaskCount, "late-lookup-requests");
+            SetRowType(broadcast, childOut.OutputType);
             // TBroadcastConnection requires one producer. This bridge turns
             // the already gathered locator stream into that producer.
             auto& forwardNode = AddNode({
@@ -1964,6 +1981,7 @@ private:
             broadcastNode = &forwardNode;
         }
 
+        // No row type: each lane carries the columns of its own lookup.
         auto& results = AddConn<NScheduler::TOneToOneConnection>(
             lookupTaskCount, lookupTaskCount, "late-lookup-results");
         std::vector<NScheduler::TTaskNode*> lookupNodes;
@@ -2118,6 +2136,7 @@ private:
         for (size_t i = 0; i < lanes; ++i) {
             auto& runRef = AddConn<NScheduler::TOneToOneConnection>(
                 1, 1, "sort-run-" + std::to_string(i));
+            SetRowType(runRef, childType);
             auto& node = AddNode({
                 .ExecStageId = execStageId,
                 .TaskGroupId = execStageId,
@@ -2136,6 +2155,7 @@ private:
         }
 
         mergeBody.Out = PortSpec(Graph_, &mergeOut, mergeOutLaneOffset);
+        SetRowType(mergeOut, childType);
         auto& mergeNode = AddNode({
             .TaskGroupId = NewTaskGroup(),
             .DebugKind = "merge",
@@ -2252,6 +2272,7 @@ private:
 
             auto& broadcastRef = AddConn<NScheduler::TBroadcastConnection>(
                 1, lanes, "cross-scalar-broadcast");
+            SetRowType(broadcastRef, scalarOut.OutputType);
 
             auto& fwdNode = AddNode({
                 .TaskGroupId = NewTaskGroup(),
@@ -2306,6 +2327,7 @@ private:
         if (filtersProduct) {
             residualConn = &AddConn<NScheduler::TOneToOneConnection>(
                 lanes, lanes, "cross-residual-input");
+            SetRowType(*residualConn, crossType);
             crossOut = residualConn;
         }
 
@@ -2645,6 +2667,7 @@ private:
         for (size_t m = 0; m < partitions; ++m) {
             side.Partitions.push_back(&AddConn<NScheduler::TGatherConnection>(
                 inputLanes, 1, label, ShuffleQueueCapacity()));
+            SetRowType(*side.Partitions.back(), input.OutputType);
         }
         side.Nodes.reserve(inputLanes);
         const auto shuffleTaskGroupId = NewTaskGroup();
