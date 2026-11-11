@@ -8,10 +8,12 @@
 #include <qdb/plan/ops/join_type.h>
 #include <qdb/scheduler/connection.h>
 #include <qdb/scheduler/graph.h>
+#include <qdb/scheduler/port.h>
 
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -65,6 +67,8 @@ struct TConnectionSpec {
 struct TPortSpec {
     uint32_t Connection = 0;
     uint32_t Lane = 0;
+
+    bool operator==(const TPortSpec&) const = default;
 
     void Fields(this auto& self, auto& v)
     {
@@ -654,6 +658,19 @@ std::unique_ptr<TTaskGraph> MaterializeGraph(
     const TGraphSpec& spec, ISink* sink = nullptr,
     std::vector<std::shared_ptr<TKernelSlot>> slots = {},
     std::shared_ptr<IRuntimeFilterBindingFactory> filterBindings = nullptr);
+
+// Moves the port of `body` bound to `from` to `to`, as ITask::RebindPort moves
+// a task's port. A record's inputs are its In, Left and Right ports, its outputs
+// Out. Returns whether a port matched.
+bool RebindPort(TNodeBody& body, EPortKind kind, TPortSpec from, TPortSpec to);
+
+// The part of `spec` on `nodes` (ascending node indices), with the connections
+// they use; nodes and connections are renumbered in order. The regex, CTE and
+// runtime filter tables stay whole, so the records' indices into them hold.
+// Throws std::runtime_error on an edge between a node in `nodes` and one outside
+// and on a CTE spool whose tasks `nodes` hold only in part: the spool is memory
+// its tasks share.
+TGraphSpec SubgraphSpec(const TGraphSpec& spec, std::span<const uint32_t> nodes);
 
 // Reads connections, edges and externals from a graph built by MaterializeGraph
 // or by hand. The caller supplies the node records, one per graph node in

@@ -12,6 +12,7 @@
 #include <qdb/scheduler/tasks/runtime_adapter.h>
 #include <qdb/utils/binary_io.h>
 
+#include <limits>
 #include <stdexcept>
 #include <type_traits>
 #include <unordered_map>
@@ -263,6 +264,53 @@ TTaskNode& NodeAt(const std::vector<TTaskNode*>& nodes, uint32_t index)
         Invalid("node index is out of range");
     }
     return *nodes[index];
+}
+
+// Calls input(port) on the In, Left and Right ports of a record and output(port)
+// on its Out ports.
+template <class TBody, class TInput, class TOutput>
+void ForEachPort(TBody& body, TInput&& input, TOutput&& output)
+{
+    auto each = [](auto& ports, auto& fn) {
+        if constexpr (std::is_same_v<std::remove_cvref_t<decltype(ports)>, TPortSpec>) {
+            fn(ports);
+        } else {
+            for (auto& port : ports) {
+                fn(port);
+            }
+        }
+    };
+    std::visit([&](auto& node) {
+        if constexpr (requires { node.In; }) {
+            each(node.In, input);
+        }
+        if constexpr (requires { node.Left; }) {
+            each(node.Left, input);
+        }
+        if constexpr (requires { node.Right; }) {
+            each(node.Right, input);
+        }
+        if constexpr (requires { node.Out; }) {
+            each(node.Out, output);
+        }
+    }, body);
+}
+
+std::optional<uint32_t> CteSpoolOf(const TGraphSpec& spec, const TNodeBody& body)
+{
+    if (const auto* producer = std::get_if<TCteProducerNode>(&body)) {
+        return producer->Spool;
+    }
+    if (const auto* publish = std::get_if<TCtePublishNode>(&body)) {
+        return publish->Spool;
+    }
+    if (const auto* consumer = std::get_if<TCteConsumerNode>(&body)) {
+        if (consumer->State >= spec.CteConsumerStates.size()) {
+            Invalid("cte consumer state index is out of range");
+        }
+        return spec.CteConsumerStates[consumer->State].Spool;
+    }
+    return std::nullopt;
 }
 
 TConnectionSpec ExtractConnection(const IConnection& connection)
@@ -605,6 +653,122 @@ TGraphSpec ExtractGraphSpec(const TTaskGraph& graph, std::vector<TNodeSpec> node
             .Id = external.Id, .Node = nodeIds.at(external.Node)});
     }
     return spec;
+}
+
+bool RebindPort(TNodeBody& body, EPortKind kind, TPortSpec from, TPortSpec to)
+{
+    bool moved = false;
+    auto rebind = [&](TPortSpec& port) {
+        if (!moved && port == from) {
+            port = to;
+            moved = true;
+        }
+    };
+    auto skip = [](TPortSpec&) {};
+    if (kind == EPortKind::Input) {
+        ForEachPort(body, rebind, skip);
+    } else {
+        ForEachPort(body, skip, rebind);
+    }
+    return moved;
+}
+
+TGraphSpec SubgraphSpec(const TGraphSpec& spec, std::span<const uint32_t> nodes)
+{
+    constexpr auto Absent = std::numeric_limits<uint32_t>::max();
+    std::vector<uint32_t> nodeIds(spec.Nodes.size(), Absent);
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        if (nodes[i] >= spec.Nodes.size() || (i > 0 && nodes[i] <= nodes[i - 1])) {
+            Invalid("subgraph node indices must ascend within the spec");
+        }
+        nodeIds[nodes[i]] = static_cast<uint32_t>(i);
+    }
+    auto kept = [&](uint32_t node) {
+        if (node >= nodeIds.size()) {
+            Invalid("node index is out of range");
+        }
+        return nodeIds[node] != Absent;
+    };
+
+    std::vector<std::optional<bool>> spools(spec.CteSpools.size());
+    for (uint32_t i = 0; i < spec.Nodes.size(); ++i) {
+        if (const auto spool = CteSpoolOf(spec, spec.Nodes[i].Body)) {
+            if (*spool >= spools.size()) {
+                Invalid("cte spool index is out of range");
+            }
+            if (spools[*spool] && *spools[*spool] != kept(i)) {
+                Invalid("the subgraph holds the tasks of cte spool " + std::to_string(*spool) + " in part");
+            }
+            spools[*spool] = kept(i);
+        }
+    }
+
+    // Connections keep their relative order.
+    std::vector<uint32_t> connectionIds(spec.Connections.size(), Absent);
+    auto use = [&](uint32_t connection) {
+        if (connection >= connectionIds.size()) {
+            Invalid("connection index is out of range");
+        }
+        connectionIds[connection] = 0;
+    };
+    for (const auto node : nodes) {
+        ForEachPort(spec.Nodes[node].Body,
+            [&](const TPortSpec& port) { use(port.Connection); },
+            [&](const TPortSpec& port) { use(port.Connection); });
+    }
+    for (const auto& edge : spec.Edges) {
+        if (kept(edge.Src) != kept(edge.Dst)) {
+            Invalid("an edge leaves the subgraph");
+        }
+        if (kept(edge.Src) && edge.Connection) {
+            use(*edge.Connection);
+        }
+    }
+
+    TGraphSpec subgraph;
+    for (uint32_t i = 0; i < spec.Connections.size(); ++i) {
+        if (connectionIds[i] != Absent) {
+            connectionIds[i] = static_cast<uint32_t>(subgraph.Connections.size());
+            subgraph.Connections.push_back(spec.Connections[i]);
+        }
+    }
+    auto renumber = [&](TPortSpec& port) {
+        port.Connection = connectionIds[port.Connection];
+    };
+    for (const auto node : nodes) {
+        auto& record = subgraph.Nodes.emplace_back(spec.Nodes[node]);
+        ForEachPort(record.Body, renumber, renumber);
+        if (auto* filter = std::get_if<TRuntimeFilterNode>(&record.Body)) {
+            for (auto& producer : filter->AuxProducers) {
+                if (!kept(producer)) {
+                    Invalid("a runtime filter waits for a producer outside the subgraph");
+                }
+                producer = nodeIds[producer];
+            }
+        }
+    }
+    for (const auto& edge : spec.Edges) {
+        if (!kept(edge.Src)) {
+            continue;
+        }
+        auto& copy = subgraph.Edges.emplace_back(edge);
+        copy.Src = nodeIds[edge.Src];
+        copy.Dst = nodeIds[edge.Dst];
+        if (copy.Connection) {
+            copy.Connection = connectionIds[*copy.Connection];
+        }
+    }
+    for (const auto& external : spec.Externals) {
+        if (kept(external.Node)) {
+            subgraph.Externals.push_back({.Id = external.Id, .Node = nodeIds[external.Node]});
+        }
+    }
+    subgraph.Regexes = spec.Regexes;
+    subgraph.CteSpools = spec.CteSpools;
+    subgraph.CteConsumerStates = spec.CteConsumerStates;
+    subgraph.RuntimeFilterKernel = spec.RuntimeFilterKernel;
+    subgraph.RuntimeFilterBindings = spec.RuntimeFilterBindings;
+    return subgraph;
 }
 
 } // namespace NScheduler

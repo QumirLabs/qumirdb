@@ -39,6 +39,7 @@
 #include <algorithm>
 #include <bit>
 #include <cstdint>
+#include <format>
 #include <functional>
 #include <limits>
 #include <optional>
@@ -3117,6 +3118,78 @@ std::optional<TGraphSpec> ExtractLoweredGraphSpec(
     spec.CteConsumerStates = lowered.CteConsumerStates;
     spec.RuntimeFilterBindings = lowered.RuntimeFilterBindings;
     return spec;
+}
+
+TSealedTaskGraph ApplySplit(TLoweredPlan& lowered, TSplitPlan&& plan) {
+    std::vector<EReboundPort> rebound;
+    for (const auto& split : plan.Splits) {
+        rebound.push_back(split.ReboundPort);
+    }
+    auto& graph = *lowered.Graph;
+    auto sealed = graph.Apply(std::move(plan));
+    auto& records = lowered.NodeSpecs;
+    records.resize(graph.Nodes().size());
+    const auto cuts = graph.Cuts();
+    for (size_t i = 0; i < cuts.size(); ++i) {
+        const auto& toSink = *cuts[i].Sink->Inbound.front();
+        const auto& fromSource = *cuts[i].Source->Outbound.front();
+        records[cuts[i].Sink->ExecutionSlot] = TNodeSpec{
+            .DebugKind = cuts[i].Sink->DebugKind,
+            .Body = TRemoteSinkNode{.In = PortSpec(graph, toSink.Connection, toSink.DstLane)},
+        };
+        records[cuts[i].Source->ExecutionSlot] = TNodeSpec{
+            .DebugKind = cuts[i].Source->DebugKind,
+            .Body = TRemoteSourceNode{.Out = PortSpec(graph, fromSource.Connection, fromSource.SrcLane)},
+        };
+        // The edge of the other placeholder keeps the cut edge's connection and lane.
+        const bool output = rebound[i] == EReboundPort::SourceOutput;
+        const auto& task = output ? *toSink.Src : *fromSource.Dst;
+        auto& record = records[task.ExecutionSlot];
+        if (!record) {
+            continue;
+        }
+        const auto from = output
+            ? PortSpec(graph, fromSource.Connection, fromSource.SrcLane)
+            : PortSpec(graph, toSink.Connection, toSink.DstLane);
+        const auto to = output
+            ? PortSpec(graph, toSink.Connection, toSink.SrcLane)
+            : PortSpec(graph, fromSource.Connection, fromSource.DstLane);
+        if (!RebindPort(record->Body, output ? EPortKind::Output : EPortKind::Input, from, to)) {
+            throw std::logic_error(std::format(
+                "split plan: the record of task n{} has no port to rebind", task.ExecutionSlot));
+        }
+    }
+    return sealed;
+}
+
+std::vector<TGraphSpec> ExtractFragmentSpecs(const TLoweredPlan& lowered) {
+    std::vector<uint32_t> missing;
+    const auto spec = ExtractLoweredGraphSpec(lowered, &missing);
+    if (!spec) {
+        throw std::runtime_error(std::format(
+            "task n{} has no graph spec record", missing.front()));
+    }
+    std::vector<TGraphSpec> fragments;
+    for (const auto& roots : lowered.Graph->Graphs()) {
+        std::vector<bool> seen(lowered.Graph->Nodes().size());
+        std::vector<const TTaskNode*> stack(roots.begin(), roots.end());
+        std::vector<uint32_t> nodes;
+        while (!stack.empty()) {
+            const auto* node = stack.back();
+            stack.pop_back();
+            if (seen[node->ExecutionSlot]) {
+                continue;
+            }
+            seen[node->ExecutionSlot] = true;
+            nodes.push_back(static_cast<uint32_t>(node->ExecutionSlot));
+            for (const auto* edge : node->Inbound) {
+                stack.push_back(edge->Src);
+            }
+        }
+        std::ranges::sort(nodes);
+        fragments.push_back(SubgraphSpec(*spec, nodes));
+    }
+    return fragments;
 }
 
 bool RunPlanIntoSink(
