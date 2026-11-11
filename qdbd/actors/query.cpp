@@ -10,6 +10,8 @@
 #include <qdb/scheduler/lowering/plan_lowerer.h>
 #include <qdb/scheduler/spec/graph_spec.h>
 
+#include <algorithm>
+#include <chrono>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -31,6 +33,22 @@ namespace {
 // The external id of the sink that sends the query's rows to the query actor.
 constexpr uint64_t ResultSinkId = 0;
 
+using TClock = std::chrono::steady_clock;
+
+double Seconds(TClock::time_point from)
+{
+    return std::chrono::duration<double>(TClock::now() - from).count();
+}
+
+uint64_t SelectedRows(const TRowSet& rows)
+{
+    if (!rows.Selection) {
+        return static_cast<uint64_t>(rows.RowCount);
+    }
+    return static_cast<uint64_t>(std::count_if(rows.Selection, rows.Selection + rows.RowCount,
+        [](uint8_t keep) { return keep != 0; }));
+}
+
 struct TQueryState {
     TActorId RespondTo;
     TActorId Collector;
@@ -48,6 +66,8 @@ struct TQueryState {
     TSchema Schema;
     std::ostringstream Out;
     std::unique_ptr<TCsvSink> Sink;
+    TQueryTiming Timing;
+    TClock::time_point ExecuteStart;
 };
 
 struct TBaseBehavior {
@@ -63,14 +83,17 @@ struct TBaseBehavior {
         Logger(str.str());
     }
 
-    void Complete(const std::expected<std::string, NQumir::TError>& res, TActorContext::TPtr& ctx, bool unavailable = false) {
+    void Complete(const std::expected<std::string, NQumir::TError>& res, TActorContext::TPtr& ctx, bool unavailable = false,
+        std::optional<TQueryTiming> timing = std::nullopt)
+    {
         for (const auto actor : State->ComputeActors) {
             ctx->Send<TPoison>(actor, TPoison{});
         }
         State->ComputeActors.clear();
         ctx->Send<TExecuteQueryResponse>(State->RespondTo, TExecuteQueryResponse {
             .Response = res,
-            .Unavailable = unavailable
+            .Unavailable = unavailable,
+            .Timing = timing
         });
         ctx->Send<TPoison>(ctx->Self(), TPoison{});
     }
@@ -88,6 +111,7 @@ struct TBaseBehavior {
             Complete(std::unexpected(parseResult.error()), ctx);
             return;
         }
+        const auto planStart = TClock::now();
         if (parseResult->Explain) {
             std::ostringstream explainOutput;
             for (auto& statement : parseResult.value().Statements) {
@@ -122,8 +146,11 @@ struct TBaseBehavior {
             Fail("no SELECT statement to run", ctx);
             return;
         }
+        State->Timing.Planning = Seconds(planStart);
         try {
+            const auto buildStart = TClock::now();
             Lower(*query);
+            State->Timing.KernelBuild = Seconds(buildStart);
         } catch (const std::exception& e) {
             Fail(e.what(), ctx);
             return;
@@ -154,12 +181,16 @@ struct TBaseBehavior {
     // Splits the graph into one fragment per compute actor (fewer when the
     // graph is small): fragment c runs on actors[c].
     std::vector<TTaskGraphMessage> SplitGraph(const std::vector<TActorId>& actors, TActorId self) {
+        const auto buildStart = TClock::now();
         auto& lowered = *State->Lowered;
         NScheduler::TPartitioner partitioner(State->Sealed, static_cast<int>(actors.size()));
         partitioner.Do();
         const auto split = NScheduler::ApplySplit(lowered, partitioner.TakePlan());
         const auto fragments = NScheduler::ExtractFragmentSpecs(lowered);
+        State->Timing.KernelBuild += Seconds(buildStart);
+        const auto jitStart = TClock::now();
         const auto image = SerializeKernelImage(CompileKernelImage(lowered.Kernels));
+        State->Timing.JitLLVM = Seconds(jitStart);
         std::vector<TTaskGraphMessage> messages(fragments.size());
         for (size_t i = 0; i < fragments.size(); ++i) {
             messages[i].Spec = NScheduler::SerializeGraphSpec(fragments[i]);
@@ -204,6 +235,7 @@ struct TBaseBehavior {
             ctx->Send<TPoison>(actorIds[i], TPoison{});
         }
         State->ComputeActors.resize(messages.size());
+        State->ExecuteStart = TClock::now();
         for (size_t i = 0; i < messages.size(); ++i) {
             ctx->Send<TTaskGraphMessage>(actorIds[i], std::move(messages[i]));
         }
@@ -272,6 +304,7 @@ struct TQueryActor : public IBehaviorActor {
         void Receive(TDataChunk&& chunk, TBlob, TActorContext::TPtr ctx) {
             try {
                 State->Sink->Write(chunk.RowSet);
+                State->Timing.Rows += SelectedRows(chunk.RowSet);
             } catch (const std::exception& e) {
                 Fail(e.what(), ctx);
                 return;
@@ -281,7 +314,8 @@ struct TQueryActor : public IBehaviorActor {
 
         void Receive(TFinish&&, TBlob, TActorContext::TPtr ctx) {
             State->Sink->Flush();
-            Complete(State->Out.str(), ctx);
+            State->Timing.Execute = Seconds(State->ExecuteStart);
+            Complete(State->Out.str(), ctx, false, State->Timing);
         }
 
         void Receive(TComputeStatus&&, TBlob, TActorContext::TPtr) {

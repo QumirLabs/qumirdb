@@ -52,6 +52,13 @@ struct TRouter final : public IRouter {
             });
 
             if (res.Response) {
+                if (res.Timing) {
+                    response.SetHeader("X-Qdb-Rows", std::to_string(res.Timing->Rows));
+                    response.SetHeader("X-Qdb-Planning-Seconds", std::to_string(res.Timing->Planning));
+                    response.SetHeader("X-Qdb-KernelBuild-Seconds", std::to_string(res.Timing->KernelBuild));
+                    response.SetHeader("X-Qdb-JitLLVM-Seconds", std::to_string(res.Timing->JitLLVM));
+                    response.SetHeader("X-Qdb-Execute-Seconds", std::to_string(res.Timing->Execute));
+                }
                 co_return co_await SendText(response, res.Response.value(), "text/plain; charset=utf-8");
             } else {
                 // A failed query is the client's error; only a lack of compute nodes asks to retry.
