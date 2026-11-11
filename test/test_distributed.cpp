@@ -6,6 +6,7 @@
 #include <qdbd/actors/local_scheduler.h>
 #include <qdbd/actors/scheduler.h>
 #include <qdbd/http/router.h>
+#include <qdbd/partitioner/partitioner.h>
 #include <qdbd/scheduler/remote_task.h>
 #include <qdb/io/parquet/source.h>
 #include <qdb/io/row_layouts.h>
@@ -1308,12 +1309,11 @@ struct TLoweredFragment {
     std::string KernelImage;
 };
 
-// Lowers `sql` over decimals.parquet as table t and turns the query's sink
-// writer into remote sink 1. The kernels are compiled only into the image.
-TLoweredFragment LowerFragment(const std::string& sql)
+// Lowers `sql` over `source` as table t, without a sink.
+NQdb::NScheduler::TLoweredPlan LowerSql(
+    const std::string& sql, TParquetSource& source, const NQdb::NScheduler::TSettings& settings)
 {
     using namespace NQdb::NScheduler;
-    TParquetSource source(DecimalsPath);
     std::istringstream input(sql);
     NSql::TTokenStream tokens(input);
     NSql::TParser parser;
@@ -1329,15 +1329,26 @@ TLoweredFragment LowerFragment(const std::string& sql)
     }
     auto root = *plan;
     ApplyPlanPasses(root, {.EnableCbo = false});
+    return LowerPlanToGraph(root, settings, nullptr);
+}
+
+struct TNoSink : ISink {
+    void Write(const TRowSet&) override
+    {}
+};
+
+// Lowers `sql` over decimals.parquet as table t and turns the query's sink
+// writer into remote sink 1. The kernels are compiled only into the image.
+TLoweredFragment LowerFragment(const std::string& sql)
+{
+    using namespace NQdb::NScheduler;
+    TParquetSource source(DecimalsPath);
     // One scan task keeps the file order.
     TSettings settings;
     settings.ScanSplit.Strategy = EScanSplitStrategy::SerialRead;
     settings.ScanSplit.MaxScanTasks = 1;
-    struct TNoSink : ISink {
-        void Write(const TRowSet&) override
-        {}
-    } sink;
-    auto lowered = LowerPlanToGraph(root, settings, nullptr);
+    TNoSink sink;
+    auto lowered = LowerSql(sql, source, settings);
     AttachSink(lowered, sink);
     auto spec = ExtractLoweredGraphSpec(lowered);
     if (!spec) {
@@ -2464,6 +2475,82 @@ TEST(DistributedScheduler, ComputeActorFinishesARootWhileAnotherWaitsOnItsSource
     EXPECT_EQ(received[1], (std::vector<int64_t>{50, 70}));
     EXPECT_TRUE(senderIntact[0].load());
     EXPECT_TRUE(senderIntact[1].load());
+}
+
+// A join over four scan lanes per side, colored into three fragments. Each
+// fragment spec stands alone: the ports of its records, including those Apply
+// moved, match its edges, and it holds the placeholders of its side of each cut.
+TEST(DistributedScheduler, SplitsALoweredPlanIntoFragmentSpecs) {
+    using namespace NQdb::NScheduler;
+    TParquetSource source(DecimalsPath);
+    TSettings settings;
+    settings.ScanSplit.Strategy = EScanSplitStrategy::RowGroupRange;
+    settings.ScanSplit.MaxScanTasks = 4;
+    auto lowered = LowerSql("SELECT a.id, b.id AS bid FROM t a JOIN t b ON a.id = b.id WHERE a.id % 5 = 0",
+        source, settings);
+    TNoSink sink;
+    AttachSink(lowered, sink);
+    TPartitioner partitioner(lowered.Graph->Seal(), 3);
+    partitioner.Do();
+    auto plan = partitioner.TakePlan();
+    std::set<EReboundPort> rebound;
+    for (const auto& split : plan.Splits) {
+        rebound.insert(split.ReboundPort);
+    }
+    EXPECT_EQ(rebound.size(), 2u) << "the plan should move both an input and an output port";
+
+    const auto split = ApplySplit(lowered, std::move(plan));
+    const auto fragments = ExtractFragmentSpecs(lowered);
+    ASSERT_EQ(fragments.size(), 3u);
+    ASSERT_EQ(split.Graphs().size(), 3u);
+    auto image = CompileKernelImage(lowered.Kernels);
+    std::vector<std::shared_ptr<TKernelSlot>> slots;
+    for (size_t i = 0; i < image.Entrypoints.size(); ++i) {
+        slots.push_back(std::make_shared<TKernelSlot>());
+    }
+    LoadKernelImage(image, slots);
+
+    size_t nodes = 0;
+    std::vector<std::unique_ptr<TTaskGraph>> graphs;
+    std::vector<TSealedTaskGraph> sealed;
+    for (const auto& fragment : fragments) {
+        const auto bytes = SerializeGraphSpec(fragment);
+        EXPECT_EQ(SerializeGraphSpec(DeserializeGraphSpec(bytes)), bytes);
+        auto& graph = graphs.emplace_back(MaterializeGraph(DeserializeGraphSpec(bytes), &sink, slots));
+        std::string error;
+        sealed.push_back(graph->Seal(&error));
+        ASSERT_TRUE(sealed.back()) << error;
+        nodes += graph->Nodes().size();
+        // A no-op rebind finds a task's port bound to the lane of its edge.
+        for (const auto& edge : graph->Edges()) {
+            if (edge->Kind != ETaskEdgeKind::Rowset) {
+                continue;
+            }
+            const auto lane = [&](EPortKind kind, size_t index) {
+                return TPortRebind{.Kind = kind, .From = edge->Connection, .FromLane = index,
+                    .To = edge->Connection, .ToLane = index};
+            };
+            EXPECT_TRUE(edge->Src->Task->RebindPort(lane(EPortKind::Output, edge->SrcLane)))
+                << edge->Src->DebugKind << " -> " << edge->Dst->DebugKind;
+            EXPECT_TRUE(edge->Dst->Task->RebindPort(lane(EPortKind::Input, edge->DstLane)))
+                << edge->Src->DebugKind << " -> " << edge->Dst->DebugKind;
+        }
+    }
+    EXPECT_EQ(nodes, lowered.Graph->Nodes().size());
+    const auto cuts = split.Cuts();
+    ASSERT_FALSE(cuts.empty());
+    for (size_t i = 0; i < cuts.size(); ++i) {
+        const auto* sinkNode = sealed.at(cuts[i].SinkColor).ExternalNode(2 * i);
+        const auto* sourceNode = sealed.at(cuts[i].SourceColor).ExternalNode(2 * i + 1);
+        ASSERT_TRUE(sinkNode && sourceNode);
+        EXPECT_TRUE(dynamic_cast<const TSinkTask*>(sinkNode->Task));
+        EXPECT_TRUE(dynamic_cast<const TSourceTask*>(sourceNode->Task));
+    }
+    size_t externals = 0;
+    for (const auto& fragment : fragments) {
+        externals += fragment.Externals.size();
+    }
+    EXPECT_EQ(externals, 2 * cuts.size());
 }
 
 int main(int argc, char** argv) {

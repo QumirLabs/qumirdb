@@ -105,6 +105,16 @@ void AttachSink(TLoweredPlan& lowered, ISink& sink);
 std::optional<TGraphSpec> ExtractLoweredGraphSpec(
     const TLoweredPlan& lowered, std::vector<uint32_t>* missing = nullptr);
 
+// Applies `plan` to the sealed graph of `lowered` (see TTaskGraph::Apply) and
+// keeps NodeSpecs in step: the remote sinks and sources get records, and the
+// ports Apply moves to new connections move in the records too.
+TSealedTaskGraph ApplySplit(TLoweredPlan& lowered, TSplitPlan&& plan);
+
+// The graph spec of each fragment of `lowered`, in Graphs() order: the nodes
+// upstream of the fragment's roots. Throws std::runtime_error when some node
+// has no record or a fragment cannot stand alone (see SubgraphSpec).
+std::vector<TGraphSpec> ExtractFragmentSpecs(const TLoweredPlan& lowered);
+
 // Attach a terminal sink that writes every output rowset to `sink`, then run the
 // graph on the configured scheduler. Returns false and sets `error` on failure.
 bool RunPlanIntoSink(

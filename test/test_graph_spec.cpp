@@ -911,6 +911,66 @@ TEST(GraphSpec, RejectsInvalidSpecs)
     EXPECT_NO_THROW(MaterializeGraph(spec, &sink, slots));
 }
 
+TEST(GraphSpec, RebindPortMovesTheMatchingPortOfItsKind)
+{
+    TNodeBody body = THashJoinNode{.Left = {0, 1}, .Right = {1, 0}, .Out = {2, 0}};
+    EXPECT_FALSE(RebindPort(body, EPortKind::Output, {1, 0}, {5, 0}));
+    EXPECT_TRUE(RebindPort(body, EPortKind::Input, {1, 0}, {5, 0}));
+    EXPECT_EQ(std::get<THashJoinNode>(body).Right, (TPortSpec{5, 0}));
+    EXPECT_EQ(std::get<THashJoinNode>(body).Left, (TPortSpec{0, 1}));
+
+    body = THashShuffleNode{.In = {0, 0}, .Out = {{1, 0}, {1, 1}}};
+    EXPECT_TRUE(RebindPort(body, EPortKind::Output, {1, 1}, {6, 0}));
+    EXPECT_EQ(std::get<THashShuffleNode>(body).Out, (std::vector<TPortSpec>{{1, 0}, {6, 0}}));
+}
+
+// Chain a: remote source 0 -> forward 1 -> remote sink 2 over connections 0, 1;
+// chain b: nodes 3..5 over connections 2, 3, with a dependency edge.
+TEST(GraphSpec, SubgraphRenumbersItsNodesConnectionsAndExternals)
+{
+    TGraphSpec spec;
+    spec.Connections = {{.DebugName = "a0"}, {.DebugName = "a1"}, {.DebugName = "b0"}, {.DebugName = "b1"}};
+    for (uint32_t chain = 0; chain < 2; ++chain) {
+        const uint32_t in = 2 * chain;
+        spec.Nodes.push_back(Node("source", "", TRemoteSourceNode{.Out = {in, 0}}));
+        spec.Nodes.push_back(Node("forward", "", TForwardNode{.In = {in, 0}, .Out = {in + 1, 0}}));
+        spec.Nodes.push_back(Node("sink", "", TRemoteSinkNode{.In = {in + 1, 0}}));
+        spec.Edges.push_back({.Src = 3 * chain, .Dst = 3 * chain + 1, .Connection = in});
+        spec.Edges.push_back({.Src = 3 * chain + 1, .Dst = 3 * chain + 2, .Connection = in + 1});
+    }
+    spec.Edges.push_back({.Src = 3, .Dst = 5, .Kind = ETaskEdgeKind::Dependency});
+    spec.Externals = {{.Id = 0, .Node = 2}, {.Id = 1, .Node = 3}, {.Id = 2, .Node = 0}, {.Id = 3, .Node = 5}};
+    spec.CteSpools = {{.Segments = 1}};
+
+    const std::vector<uint32_t> chainB{3, 4, 5};
+    const auto part = SubgraphSpec(spec, chainB);
+    ASSERT_EQ(part.Connections.size(), 2u);
+    EXPECT_EQ(part.Connections[0].DebugName, "b0");
+    EXPECT_EQ(part.Connections[1].DebugName, "b1");
+    ASSERT_EQ(part.Nodes.size(), 3u);
+    EXPECT_EQ(std::get<TForwardNode>(part.Nodes[1].Body).In, (TPortSpec{0, 0}));
+    EXPECT_EQ(std::get<TForwardNode>(part.Nodes[1].Body).Out, (TPortSpec{1, 0}));
+    ASSERT_EQ(part.Edges.size(), 3u);
+    EXPECT_EQ(part.Edges[1].Connection, 1u);
+    EXPECT_EQ(part.Edges[2].Src, 0u);
+    EXPECT_EQ(part.Edges[2].Dst, 2u);
+    ASSERT_EQ(part.Externals.size(), 2u);
+    EXPECT_EQ(part.Externals[0].Id, 1u);
+    EXPECT_EQ(part.Externals[0].Node, 0u);
+    EXPECT_EQ(part.Externals[1].Id, 3u);
+    EXPECT_EQ(part.Externals[1].Node, 2u);
+    EXPECT_EQ(part.CteSpools.size(), 1u);
+    std::string error;
+    EXPECT_TRUE(MaterializeGraph(part)->Seal(&error)) << error;
+
+    // Edges and CTE spools must not cross the subgraph's border.
+    EXPECT_THROW(SubgraphSpec(spec, std::vector<uint32_t>{0, 1}), std::runtime_error);
+    EXPECT_THROW(SubgraphSpec(spec, std::vector<uint32_t>{4, 3, 5}), std::runtime_error);
+    spec.Nodes[1].Body = TCteProducerNode{.In = {0, 0}, .Out = {1, 0}};
+    spec.Nodes[4].Body = TCtePublishNode{.In = {2, 0}, .Out = {3, 0}};
+    EXPECT_THROW(SubgraphSpec(spec, chainB), std::runtime_error);
+}
+
 TEST(GraphSpec, ForwardChainRunsRows)
 {
     TGraphSpec spec;
