@@ -3,12 +3,17 @@
 #include <qdbd/actors/compute.h>
 #include <qdbd/actors/collector.h>
 #include <qdbd/actors/pinger.h>
+#include <qdbd/actors/query.h>
 #include <qdbd/actors/local_scheduler.h>
 #include <qdbd/actors/scheduler.h>
 #include <qdbd/http/router.h>
 #include <qdbd/partitioner/partitioner.h>
 #include <qdbd/scheduler/remote_task.h>
+#include <qdb/catalog/external_module.h>
+#include <qdb/compiler/query.h>
 #include <qdb/io/parquet/source.h>
+#include <qdb/io/text/sink.h>
+#include <qdb/kernel/finalize.h>
 #include <qdb/kernel/image.h>
 #include <qdb/plan/build.h>
 #include <qdb/plan/ops/source.h>
@@ -2672,6 +2677,122 @@ TEST(DistributedScheduler, SplitsALoweredPlanIntoFragmentSpecs) {
         externals += fragment.Externals.size();
     }
     EXPECT_EQ(externals, 2 * cuts.size());
+}
+
+namespace {
+
+// Plays the client of a query actor: keeps its answer.
+class TAnswerProbe : public IActor {
+public:
+    explicit TAnswerProbe(std::optional<TExecuteQueryResponse>& answer)
+        : Answer_(answer)
+    {}
+
+    void Receive(TMessageId messageId, TBlob blob, TActorContext::TPtr) override {
+        ASSERT_EQ(messageId, TExecuteQueryResponse::MessageId);
+        Answer_ = DeserializeNear<TExecuteQueryResponse>(blob);
+    }
+
+private:
+    std::optional<TExecuteQueryResponse>& Answer_;
+};
+
+// Table t is decimals.parquet; each reference gets its own source, as column
+// pruning narrows a source.
+struct TDecimalsCompiler {
+    TExternalModuleCatalog Catalog;
+    std::vector<std::unique_ptr<TParquetSource>> Sources;
+    NCompiler::TQueryCompiler Compiler{Catalog, [this](std::string_view) -> std::expected<TOperatorPtr, NQumir::TError> {
+        auto& source = Sources.emplace_back(std::make_unique<TParquetSource>(DecimalsPath));
+        return std::make_shared<TSourceOperator>(*source, "t");
+    }, TPlanPassOptions{.EnableCbo = false, .EnableRuntimeFilters = false}};
+};
+
+// The CSV rows of `sql` run in this process.
+std::string RunLocally(const std::string& sql, const NQdb::NScheduler::TSettings& settings)
+{
+    using namespace NQdb::NScheduler;
+    TDecimalsCompiler compiler;
+    std::istringstream input(sql);
+    auto parsed = compiler.Compiler.Parse(input);
+    if (!parsed) {
+        throw std::runtime_error(parsed.error().ToString());
+    }
+    auto prepared = compiler.Compiler.Prepare(parsed->Statements.at(0));
+    if (!prepared || !*prepared) {
+        throw std::runtime_error("cannot prepare " + sql);
+    }
+    auto lowered = LowerPlanToGraph((*prepared)->Plan, settings, nullptr);
+    FinalizeKernels(lowered.Kernels, settings.Kernel.Backend);
+    std::vector<TColumnSchema> columns;
+    for (const auto& [name, type] : static_cast<const NQumir::NAst::TStructType&>(*lowered.OutputType).Fields) {
+        columns.push_back({.Name = name, .Type = type});
+    }
+    const TSchema schema{columns};
+    std::ostringstream out;
+    TCsvSink sink(schema, out);
+    std::string error;
+    if (!RunPlanIntoSink(std::move(lowered), sink, settings, nullptr, &error)) {
+        throw std::runtime_error(error);
+    }
+    return out.str();
+}
+
+} // namespace
+
+// The query actor lowers each query, splits it over one compute actor per node
+// and gets the rows of the local run, in CSV.
+TEST(DistributedScheduler, QueryActorRunsAQueryOnEveryNode) {
+    using namespace NQdb::NScheduler;
+    TSettings settings;
+    settings.Scheduler.WorkerCount = 2;
+    settings.ScanSplit.Strategy = EScanSplitStrategy::RowGroupRange;
+    settings.ScanSplit.MaxScanTasks = 4;
+    TTestCluster cluster;
+    cluster.Loop.Poller().SetMaxDuration(std::chrono::milliseconds(1));
+    const auto leaderId = cluster.LeaderScheduler.NodeId();
+    for (auto* system : {&cluster.Leader, &cluster.Follower}) {
+        system->RegisterWellKnown(
+            static_cast<TLocalActorId>(EWellKnownActors::LocalScheduler),
+            std::unique_ptr<IActor>(CreateLocalScheduler(leaderId, 1, settings.Scheduler)));
+    }
+    const auto deadline = NNet::TClock::now() + std::chrono::seconds(2);
+    do {
+        cluster.Spawn(2);
+    } while (cluster.Responses.back().ActorIds.size() < 2 && NNet::TClock::now() < deadline);
+    ASSERT_EQ(cluster.Responses.back().ActorIds.size(), 2u);
+    const auto leaderActors = cluster.Leader.ActorsSize();
+
+    TDecimalsCompiler compiler;
+    for (const std::string sql : {
+             "SELECT id % 7 AS k, COUNT(*) AS n, SUM(d15) AS total, MIN(s) AS lo FROM t "
+             "WHERE id % 3 <> 0 GROUP BY id % 7 ORDER BY k",
+             "SELECT a.id, b.s, b.d38 FROM t a JOIN t b ON a.id = b.id WHERE a.id % 5 = 0 ORDER BY a.id",
+             "SELECT id, d9 FROM t WHERE id % 3 <> 0 ORDER BY id DESC LIMIT 10",
+         }) {
+        SCOPED_TRACE(sql);
+        std::optional<TExecuteQueryResponse> answer;
+        std::vector<std::string> log;
+        const auto client = cluster.Follower.Register(std::make_unique<TAnswerProbe>(answer));
+        const auto query = cluster.Follower.Register(std::unique_ptr<IActor>(CreateQueryActor(
+            compiler.Compiler, settings, [&](const std::string& line) { log.push_back(line); })));
+        cluster.Follower.Send<TExecuteQuery>(client, query, TExecuteQuery{.Query = sql});
+        // The deadline only guards against a hang.
+        const auto queryDeadline = NNet::TClock::now() + std::chrono::seconds(60);
+        while (!answer && NNet::TClock::now() < queryDeadline) {
+            cluster.Pump();
+        }
+        ASSERT_TRUE(answer);
+        ASSERT_TRUE(answer->Response) << answer->Response.error().ToString();
+        EXPECT_TRUE(std::ranges::contains(log, std::string("Query: started 2 fragments")));
+        const auto expected = RunLocally(sql, settings);
+        EXPECT_GT(std::ranges::count(expected, '\n'), 2);
+        EXPECT_EQ(*answer->Response, expected);
+        // The query stops its compute actors.
+        cluster.Pump();
+        EXPECT_EQ(cluster.Leader.ActorsSize(), leaderActors);
+        cluster.Follower.Send<TPoison>(client, client, TPoison{});
+    }
 }
 
 int main(int argc, char** argv) {

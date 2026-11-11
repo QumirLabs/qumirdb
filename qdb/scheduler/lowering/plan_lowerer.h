@@ -100,6 +100,10 @@ TLoweredPlan LowerPlanToGraph(
 // sink must outlive the graph.
 void AttachSink(TLoweredPlan& lowered, ISink& sink);
 
+// Attach a remote sink placeholder that takes every output rowset; the node
+// that runs the graph binds its code and sends the rows on.
+TTaskNode& AttachRemoteSink(TLoweredPlan& lowered);
+
 // The graph spec of a lowered plan with its sink attached. Returns nullopt
 // when some nodes have no record; `missing` then lists their indices.
 std::optional<TGraphSpec> ExtractLoweredGraphSpec(
