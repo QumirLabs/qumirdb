@@ -20,8 +20,7 @@ TPartitioner::TPartitioner(TTaskNode* root, int partitions)
     , Partitions_(partitions)
 { }
 
-void TPartitioner::Do()
-{
+void TPartitioner::Do() {
     Colors_.clear();
     SplitEdges_.clear();
     Plan_ = {};
@@ -39,8 +38,7 @@ void TPartitioner::Do()
     Partition();
 }
 
-void TPartitioner::Partition()
-{
+void TPartitioner::Partition() {
     for (auto* edge : SplitEdges_) {
         if (edge->Kind == ETaskEdgeKind::Dependency) {
             // TODO: dependency transport is separate from rowset streams.
@@ -78,8 +76,7 @@ void TPartitioner::PlanSplit(TTaskEdge& edge, EReboundPort reboundPort, size_t c
     });
 }
 
-void TPartitioner::Color()
-{
+void TPartitioner::Color() {
     std::unordered_map<TTaskNode*, int> inDegree;
     std::unordered_set<TTaskNode*> visited;
     std::stack<TTaskNode*> st;
@@ -88,7 +85,8 @@ void TPartitioner::Color()
 
     std::vector<TTaskNode*> currentLevel;
     while (!st.empty()) {
-        auto node = st.top(); st.pop();
+        auto node = st.top();
+        st.pop();
         int count = 0;
         for (auto& edge : node->Inbound) {
             if (edge->Kind == ETaskEdgeKind::Rowset) {
@@ -98,7 +96,7 @@ void TPartitioner::Color()
                     st.push(next);
                 }
 
-                count ++;
+                ++count;
             }
         }
         inDegree[node] = count;
@@ -137,7 +135,6 @@ void TPartitioner::Color()
             int color = invalidColor;
             int colorUsage = std::numeric_limits<int>::max();
 
-            // parents
             for (auto* edge : node->Outbound) {
                 if (edge->Kind == ETaskEdgeKind::Rowset) {
                     auto* parent = edge->Dst;
@@ -157,7 +154,7 @@ void TPartitioner::Color()
             }
 
             Colors_[node] = color;
-            budget[color] ++;
+            ++budget[color];
         };
 
         for (auto* node : level) {
