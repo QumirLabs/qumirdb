@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# TPC-H SF10 on a local qdbd cluster, results checked against a single-process qdb run.
+# TPC-H SF (default 10) on a local qdbd cluster, results checked against a single-process qdb run.
 #   run_tpch_cluster.sh <1node|4node> <tpch_base_dir> [query_filter]
 # 1node = 1 node x 16 threads, 4node = 4 nodes x 4 threads. The cluster is stopped on exit.
-# Env: QDB_BIN, QDBD_BIN, OUT_DIR, HOSTS (see cluster.sh);
+# Env: SF (scale factor, default 10; needs <tpch_base_dir>/pq$SF and params/sf$SF.sh), QDB_BIN, QDBD_BIN, OUT_DIR, HOSTS (see cluster.sh);
 #      PLAN_WIDTH (default nodes x threads) is sent as X-Qdb-Plan-Width; times.tsv columns: query, curl wall,
 #      planning, kernel build, jit llvm, execute (server headers), status;
 #      EXPLAIN=1 sends "EXPLAIN <query>" and skips the result check.
@@ -14,6 +14,7 @@ QDB_BIN="${QDB_BIN:-$ROOT/build/bin/qdb}"
 OUT_DIR="$(mkdir -p "${OUT_DIR:-./results-cluster}" && cd "${OUT_DIR:-./results-cluster}" && pwd)"
 EXPLAIN="${EXPLAIN:-0}"
 HTTP_PORT_BASE="${HTTP_PORT_BASE:-8100}"
+SF="${SF:-10}"
 
 [[ $# -ge 2 ]] || { echo "Usage: $0 <1node|4node> <tpch_base_dir> [query_filter]" >&2; exit 1; }
 case "$1" in
@@ -23,16 +24,16 @@ case "$1" in
 esac
 BASE_DIR="$(cd "$2" && pwd)"
 QUERY_FILTER="${3:-}"
-export DATA_DIR="$BASE_DIR/pq10" QDB_BIN HTTP_PORT_BASE CLUSTER_DIR="$OUT_DIR/cluster"
+export DATA_DIR="$BASE_DIR/pq$SF" QDB_BIN HTTP_PORT_BASE CLUSTER_DIR="$OUT_DIR/cluster"
 export QDBD_BIN="${QDBD_BIN:-$ROOT/build/bin/qdbd}"
 PLAN_WIDTH="${PLAN_WIDTH:-$((NODES * THREADS))}"
 FIRST_HOST="$(read -r -a h <<< "${HOSTS:-127.0.0.1}"; echo "${h[0]}")"
 
-# Reference: the existing runner renders the SQL with the sf10 params and runs one qdb process.
+# Reference: the existing runner renders the SQL with the sf$SF params and runs one qdb process.
 if [[ "$EXPLAIN" != 1 ]]; then
-    MODE=sql OUT_DIR="$OUT_DIR/local" QDB_ARGS="--format <escape>csv" bash "$ROOT/benchmark/tpch/run_tpch.sh" "$BASE_DIR" 10 "$QUERY_FILTER"
+    MODE=sql OUT_DIR="$OUT_DIR/local" QDB_ARGS="--format <escape>csv" bash "$ROOT/benchmark/tpch/run_tpch.sh" "$BASE_DIR" "$SF" "$QUERY_FILTER"
 else
-    MODE=sql OUT_DIR="$OUT_DIR/local" RENDER_ONLY=1 bash "$ROOT/benchmark/tpch/run_tpch.sh" "$BASE_DIR" 10 "$QUERY_FILTER" > /dev/null
+    MODE=sql OUT_DIR="$OUT_DIR/local" RENDER_ONLY=1 bash "$ROOT/benchmark/tpch/run_tpch.sh" "$BASE_DIR" "$SF" "$QUERY_FILTER" > /dev/null
 fi
 
 trap 'bash "$HERE/cluster.sh" stop' EXIT
@@ -44,7 +45,7 @@ failed=0
 printf "%-6s %-10s %-10s %s\n" Query Wall\(s\) Exec\(s\) Status
 for q in $(seq 1 22); do
     case ",$QUERY_FILTER," in ,,|*,"$q",*) ;; *) continue;; esac
-    sql="$OUT_DIR/local/queries/q${q}_sf10.sql"
+    sql="$OUT_DIR/local/queries/q${q}_sf$SF.sql"
     out="$OUT_DIR/q${q}.csv"
     body="$OUT_DIR/q${q}.request.sql"
     headers="$OUT_DIR/q${q}.headers"
@@ -62,7 +63,7 @@ for q in $(seq 1 22); do
     if [[ "$code" != 200 || ! -f "$out" ]]; then
         status="ERROR(http $code): $( [[ -f "$out" ]] && head -c 200 "$out" | tr '\n' ' ' || true)"
     elif [[ "$EXPLAIN" != 1 ]]; then
-        reference="$OUT_DIR/local/queries/Q${q}_sf10.stdout"
+        reference="$OUT_DIR/local/queries/Q${q}_sf$SF.stdout"
         verdict="$(python3 -I -c '
 import sys
 sys.path.insert(0, sys.argv[1])
