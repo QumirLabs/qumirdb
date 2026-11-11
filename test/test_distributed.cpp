@@ -2481,6 +2481,56 @@ TEST(DistributedScheduler, RemoteSinkChunkToAStoppedActorIsReleased) {
     EXPECT_TRUE(intact.load()) << "the row set was never destroyed";
 }
 
+// A peer may start sending before the compute actor gets its graph: the chunk
+// and the finish wait for it, then the relay delivers them in order.
+TEST(DistributedScheduler, ComputeActorKeepsWhatArrivesBeforeItsGraph) {
+    using namespace NQdb::NScheduler;
+    std::atomic<bool> senderIntact = false;
+    std::vector<int64_t> received;
+    std::atomic<bool> finished = false;
+    auto resources = std::make_shared<TRuntimeResources>();
+    resources->Scheduler.WorkerCount = 2;
+    TTestCluster cluster;
+    std::map<std::string, int> statuses;
+    std::vector<std::string> errors;
+    const auto query = cluster.Follower.Register(std::make_unique<TReportProbe>(statuses, errors));
+    const auto result = cluster.Leader.Register(std::make_unique<TResultProbe>(1, [&](const TRowSet& rowSet) {
+        const auto* data = reinterpret_cast<const int64_t*>(rowSet.Columns[0].Data);
+        received.insert(received.end(), data, data + rowSet.RowCount);
+    }, finished));
+    const auto peer = cluster.Follower.Register(std::make_unique<TBlackHole>());
+    const auto actor = cluster.Follower.Register(std::unique_ptr<IActor>(CreateComputeActor(resources)));
+    cluster.Follower.Send<TDataChunk>(peer, actor,
+        TDataChunk(2, 1, SelectedInts({10, 20, 30, 40}, {1, 0, 1, 0}, &senderIntact)));
+    cluster.Follower.Send<TFinish>(peer, actor, TFinish{.DstTaskId = 2});
+    cluster.Pump();
+    cluster.Follower.Send<TTaskGraphMessage>(query, actor, GraphMessage(RelaySpec(), RelayEndpoints(result, peer)));
+    const auto deadline = NNet::TClock::now() + std::chrono::seconds(10);
+    while (!finished.load() && errors.empty() && NNet::TClock::now() < deadline) {
+        cluster.Pump();
+    }
+    EXPECT_TRUE(finished.load());
+    EXPECT_EQ(errors, std::vector<std::string>{});
+    cluster.Follower.Send<TPoison>(query, actor, TPoison{});
+    cluster.Pump();
+    EXPECT_EQ(received, (std::vector<int64_t>{10, 30}));
+    EXPECT_TRUE(senderIntact.load());
+}
+
+// A chunk kept for a graph that never comes is released once, with the actor.
+TEST(DistributedScheduler, ComputeActorReleasesWhatItKeptForAGraphThatNeverCame) {
+    std::atomic<int> destroyed = 0;
+    TTestCluster cluster;
+    const auto peer = cluster.Follower.Register(std::make_unique<TBlackHole>());
+    const auto actor = cluster.Follower.Register(std::unique_ptr<IActor>(CreateComputeActor()));
+    cluster.Follower.Send<TDataChunk>(peer, actor, TDataChunk(2, 1, CountedRows(3, &destroyed)));
+    cluster.Pump();
+    EXPECT_EQ(destroyed.load(), 0);
+    cluster.Follower.Send<TPoison>(peer, actor, TPoison{});
+    cluster.Pump();
+    EXPECT_EQ(destroyed.load(), 1);
+}
+
 // One remote source feeds two remote sinks through a broadcast: a fragment
 // with two roots, like the partitioner cuts them. Each sink sends every row.
 TEST(DistributedScheduler, ComputeActorRunsAFragmentWithTwoRemoteSinks) {
