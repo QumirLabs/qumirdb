@@ -59,7 +59,7 @@ import sys
 sys.path.insert(0, sys.argv[1])
 from compare_results import compare_csv
 print(compare_csv(sys.argv[2], sys.argv[3], open(sys.argv[4]).read())["status"])
-' "$ROOT/benchmark" "$reference" "$out" "$sql")"
+' "$ROOT/benchmark" "$reference" "$out" "$sql")" || verdict=error
         [[ "$verdict" == equal ]] || status="MISMATCH($verdict)"
     fi
     [[ "$status" == OK ]] || failed=$((failed + 1))
