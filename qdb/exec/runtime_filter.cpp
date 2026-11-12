@@ -404,10 +404,12 @@ TRuntimeFilterStats TRuntimeFilter::StatsSnapshot() const {
 }
 
 TRuntimeFilterExport::TRuntimeFilterExport(std::shared_ptr<TRuntimeContext> runtimeContext,
-    std::shared_ptr<IRuntimeFilterProducer> filter, bool forward)
+    std::shared_ptr<IRuntimeFilterProducer> filter, bool forward, size_t producers)
     : RuntimeContext_(std::move(runtimeContext))
     , Filter_(std::move(filter))
     , Forward_(forward)
+    , Producers_(producers)
+    , Complete_(producers == 0)
 {
     CheckKernels(RuntimeContext_);
 }
@@ -427,6 +429,9 @@ void TRuntimeFilterExport::FinishProducer(TRuntimeFilterPartial&& partial) {
         Merged_.ExactSetOverflowed |= partial.ExactSetOverflowed;
         Merged_.BuildRows += partial.BuildRows;
         Merged_.Producers += partial.Producers;
+        if (Merged_.Producers == Producers_) {
+            Complete_.store(true, std::memory_order_release);
+        }
     }
     if (Forward_) {
         Filter_->FinishProducer(std::move(partial));

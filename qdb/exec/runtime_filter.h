@@ -207,29 +207,35 @@ private:
     std::chrono::steady_clock::time_point ExecutionStart_;
 };
 
-// The producer of a fragment's build lanes when other fragments probe the
-// filter: keeps the merge of their partials for the fragment's runtime filter
-// sinks and, if `forward`, also hands each partial on to `filter`.
+// The producer of a fragment's `producers` build lanes when other fragments
+// probe the filter: keeps the merge of their partials for the fragment's
+// runtime filter sinks and, if `forward`, also hands each partial on to `filter`.
 class TRuntimeFilterExport final : public IRuntimeFilterProducer {
 public:
     TRuntimeFilterExport(std::shared_ptr<TRuntimeContext> runtimeContext,
-        std::shared_ptr<IRuntimeFilterProducer> filter, bool forward);
+        std::shared_ptr<IRuntimeFilterProducer> filter, bool forward, size_t producers);
 
     TRuntimeFilterBuilder MakeBuilder() const override {
         return Filter_->MakeBuilder();
     }
 
     void FinishProducer(TRuntimeFilterPartial&& partial) override;
+    // Every producer has finished its partial, at its input end.
+    bool Complete() const {
+        return Complete_.load(std::memory_order_acquire);
+    }
     // A copy of the merge, from which a filter publishes what it would from
-    // the merged partials; complete once every producer finished.
+    // the merged partials.
     TRuntimeFilterPartial Merged() const;
 
 private:
     std::shared_ptr<TRuntimeContext> RuntimeContext_;
     std::shared_ptr<IRuntimeFilterProducer> Filter_;
     bool Forward_;
+    size_t Producers_;
     mutable std::mutex Mutex_;
     TRuntimeFilterPartial Merged_{.Producers = 0};
+    std::atomic<bool> Complete_;
 };
 
 class TLocalRuntimeFilterBindingFactory final : public IRuntimeFilterBindingFactory {

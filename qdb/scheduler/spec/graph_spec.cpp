@@ -234,31 +234,35 @@ std::shared_ptr<IRuntimeFilterProducer> RuntimeFilterProducerAt(
     return producer;
 }
 
-// The exports of the filters that runtime filter sinks in `nodes` send; one
-// forwards to its filter too when `nodes` probe the filter.
+// The exports of the filters that runtime filter sinks in `nodes` send, each
+// counting the build lanes in `nodes` that deliver into it; one forwards to its
+// filter too when `nodes` probe the filter.
 void AddRuntimeFilterExports(const std::vector<TNodeSpec>& nodes, TNodeTaskContext& context)
 {
     const auto filters = context.RuntimeFilterBindings.size();
-    std::vector<bool> probed(filters);
-    std::vector<bool> sent(filters);
-    auto mark = [&](std::vector<bool>& marks, uint32_t filter) {
+    std::vector<size_t> probes(filters);
+    std::vector<size_t> sinks(filters);
+    std::vector<size_t> lanes(filters);
+    auto count = [&](std::vector<size_t>& counts, uint32_t filter) {
         if (filter >= filters) {
             Invalid("runtime filter index is out of range");
         }
-        marks[filter] = true;
+        ++counts[filter];
     };
     for (const auto& node : nodes) {
         if (const auto* probe = std::get_if<TRuntimeFilterNode>(&node.Body)) {
-            mark(probed, probe->Filter);
+            count(probes, probe->Filter);
         } else if (const auto* sink = std::get_if<TRuntimeFilterSinkNode>(&node.Body)) {
-            mark(sent, sink->Filter);
+            count(sinks, sink->Filter);
+        } else if (const auto* lane = std::get_if<THashShuffleNode>(&node.Body); lane && lane->ProducedFilter) {
+            count(lanes, *lane->ProducedFilter);
         }
     }
     context.RuntimeFilterExports.resize(filters);
     for (size_t i = 0; i < filters; ++i) {
-        if (sent[i]) {
+        if (sinks[i]) {
             context.RuntimeFilterExports[i] = std::make_shared<TRuntimeFilterExport>(
-                context.Runtime, context.RuntimeFilterBindings[i].Producer, probed[i]);
+                context.Runtime, context.RuntimeFilterBindings[i].Producer, probes[i] != 0, lanes[i]);
         }
     }
 }

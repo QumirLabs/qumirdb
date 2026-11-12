@@ -735,8 +735,8 @@ TEST_F(RuntimeFilter, MergedLanesOfAnotherFragmentPublishLikeTheLanes) {
         const auto whole = filter();
         const auto first = filter();
         const auto second = filter();
-        TRuntimeFilterExport firstLanes(Context_, first, /*forward=*/true);
-        TRuntimeFilterExport secondLanes(Context_, second, /*forward=*/true);
+        TRuntimeFilterExport firstLanes(Context_, first, /*forward=*/true, /*producers=*/2);
+        TRuntimeFilterExport secondLanes(Context_, second, /*forward=*/true, /*producers=*/2);
         std::vector<uint64_t> keys;
         for (size_t lane = 0; lane < Lanes; ++lane) {
             const auto part = Hashes(keysPerLane, lane + 80);
@@ -749,6 +749,7 @@ TEST_F(RuntimeFilter, MergedLanesOfAnotherFragmentPublishLikeTheLanes) {
             whole->FinishProducer(TRuntimeFilterPartial(partial));
             lanes.FinishProducer(std::move(partial));
         }
+        EXPECT_TRUE(firstLanes.Complete());
         EXPECT_EQ(firstLanes.Merged().Producers, 2u);
         EXPECT_FALSE(first->Ready());
         first->FinishProducer(secondLanes.Merged());
@@ -771,12 +772,14 @@ TEST_F(RuntimeFilter, MergedLanesOfAnotherFragmentPublishLikeTheLanes) {
 // Without forwarding, the export only merges: the fragment does not probe.
 TEST_F(RuntimeFilter, ExportKeepsTheMergeWithoutForwarding) {
     auto filter = std::make_shared<TRuntimeFilter>(Context_, /*maxKeys=*/8);
-    TRuntimeFilterExport lanes(Context_, filter, /*forward=*/false);
+    TRuntimeFilterExport lanes(Context_, filter, /*forward=*/false, /*producers=*/2);
     for (uint64_t key : {11, 22}) {
+        EXPECT_FALSE(lanes.Complete());
         auto builder = lanes.MakeBuilder();
         builder.Add({&key, 1});
         lanes.FinishProducer(std::move(builder).TakePartial());
     }
+    EXPECT_TRUE(lanes.Complete());
     EXPECT_FALSE(filter->Ready());
     const auto merged = lanes.Merged();
     EXPECT_EQ(merged.Hashes, (std::vector<uint64_t>{11, 22}));
