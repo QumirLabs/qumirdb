@@ -443,6 +443,11 @@ TRuntimeFilterPartial TRuntimeFilterExport::Merged() const {
     return Merged_;
 }
 
+TRuntimeFilterPartial TRuntimeFilterExport::PassAll() const {
+    // An overflowed exact set without Bloom words never rejects a key.
+    return TRuntimeFilterPartial{.ExactSetOverflowed = true, .Producers = static_cast<uint32_t>(Producers_)};
+}
+
 TRuntimeFilterBinding TLocalRuntimeFilterBindingFactory::Create(
     uint32_t id, size_t producerCount, size_t bloomBytes,
     std::shared_ptr<TRuntimeContext> runtimeContext)

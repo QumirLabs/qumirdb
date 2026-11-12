@@ -216,7 +216,8 @@ private:
 
 // Sends the merged partial of one filter's build lanes in this graph, the
 // producers of its dependency edges, once they all reached their input end:
-// their partials are final then, while their output may still drain.
+// their partials are final then, while their output may still drain. If a lane
+// is abandoned first, it sends a partial that passes every key.
 class TRuntimeFilterSinkTask final : public ITask {
 public:
     // Without a filter, a placeholder that never runs.

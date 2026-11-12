@@ -1638,6 +1638,92 @@ bool HashSelectedValues(TRowSet* batch, uint64_t* hashes) {
     return true;
 }
 
+// The only reader of a build lane stops at once, like a satisfied LIMIT, so the
+// lane would block on its gather before its input end. The filter sink must not
+// keep it alive: the lane is abandoned, and the sink sends a pass-all partial.
+TEST_F(SchedulerRuntimeFilter, FilterSinkSendsPassAllWhenItsBuildLaneIsAbandoned) {
+    struct TNoState : ITaskState {};
+    for (size_t workers : {size_t{0}, size_t{2}}) {
+        SCOPED_TRACE(workers);
+        std::atomic<int> destroyed = 0;
+        auto filter = std::make_shared<TRuntimeFilter>(Context_);
+        auto lanes = std::make_shared<TRuntimeFilterExport>(Context_, filter, /*forward=*/false, /*producers=*/1);
+        std::vector<TRuntimeFilterPartial> sent;
+        TTaskGraph graph;
+        auto& in = graph.AddConnection(std::make_unique<TOneToOneConnection>(1));
+        auto& gather = graph.AddConnection(std::make_unique<TGatherConnection>(1));
+        auto& out = graph.AddConnection(std::make_unique<TOneToOneConnection>(1));
+        auto& source = graph.AddOwnedNode(std::make_unique<TSourceTask>(
+            std::make_shared<TSourceCode>([&destroyed](void* raw, TRowSet& rowSet) {
+                auto* state = static_cast<TSourceState*>(raw);
+                if (state->Next > state->End) {
+                    return ETaskResult::FINISHED;
+                }
+                rowSet = MakeInt64RowSet({state->Next++}, &destroyed);
+                return ETaskResult::OK;
+            }),
+            std::make_shared<TSourceState>(TSourceState{.Next = 1, .End = 4}),
+            TOutputPort{.Connection = &in}));
+        auto code = std::make_shared<THashShuffleCode>(HashSelectedValues);
+        code->ProducedFilter = lanes;
+        auto& lane = graph.AddOwnedNode(std::make_unique<THashShuffleTask>(
+            code, TInputPort{.Connection = &in}, std::vector<TOutputPort>{TOutputPort{.Connection = &gather}}));
+        auto& stop = graph.AddOwnedNode(std::make_unique<TBlockingTask>(
+            std::make_shared<TBlockingCode>([](ITaskState&, TInputPort&, TRowSet&) {
+                return ETaskResult::FINISHED;
+            }),
+            std::make_shared<TNoState>(), TInputPort{.Connection = &gather}, TOutputPort{.Connection = &out}));
+        auto& result = graph.AddOwnedNode(std::make_unique<TSinkTask>(
+            std::make_shared<TSinkCode>([](void*, const TRowSet&) {
+                return ETaskResult::OK;
+            }),
+            nullptr, TInputPort{.Connection = &out}));
+        auto& sinkNode = graph.AddOwnedNode(std::make_unique<TRuntimeFilterSinkTask>(lanes));
+        auto& sink = static_cast<TRuntimeFilterSinkTask&>(*sinkNode.Task);
+        sink.BindNode(sinkNode);
+        sink.BindCode(std::make_shared<TRuntimeFilterSinkCode>([](void* state, TRuntimeFilterPartial&& partial) {
+            static_cast<std::vector<TRuntimeFilterPartial>*>(state)->push_back(std::move(partial));
+        }), std::shared_ptr<void>(std::shared_ptr<void>{}, &sent));
+        graph.AddEdge(source, lane, in);
+        graph.AddEdge(lane, stop, gather);
+        graph.AddEdge(stop, result, out);
+        graph.AddDependencyEdge(lane, sinkNode);
+        std::string error;
+        const auto sealed = graph.Seal(&error);
+        ASSERT_TRUE(sealed) << error;
+
+        bool ok = false;
+        if (workers == 0) {
+            ok = TSingleThreadedScheduler(sealed).Run(&error);
+        } else {
+            // A regression hangs Run(); the watchdog cancels it.
+            TThreadedScheduler scheduler(sealed, workers);
+            std::atomic<bool> returned = false;
+            std::thread watchdog([&] {
+                for (int i = 0; i < 100 && !returned.load(); ++i) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                }
+                if (!returned.load()) {
+                    scheduler.Cancel();
+                }
+            });
+            ok = scheduler.Run(&error);
+            returned.store(true);
+            watchdog.join();
+        }
+        ASSERT_TRUE(ok) << error;
+        EXPECT_EQ(sinkNode.State.load(), ETaskState::Finished);
+        ASSERT_EQ(sent.size(), 1u);
+        EXPECT_EQ(sent[0].Producers, 1u);
+        // The probes of the other fragments then keep every row.
+        filter->FinishProducer(std::move(sent[0]));
+        ASSERT_TRUE(filter->Ready());
+        for (uint64_t key : {1, 2, 3, 4, 99}) {
+            EXPECT_TRUE(NTest::RuntimeFilterMayContain(*filter, key)) << key;
+        }
+    }
+}
+
 struct TSelectedRows {
     std::vector<int64_t> Values;
     std::vector<uint64_t> Hashes;
