@@ -34,15 +34,26 @@ namespace {
 
 class SchedulerRuntimeFilter : public NTest::TRuntimeFilterTest {};
 
+// Gives `consumer` a dependency edge from each producer.
+void AddDependencies(TTaskNode& consumer, std::vector<TTaskEdge>& edges, std::initializer_list<TTaskNode*> producers) {
+    edges.reserve(producers.size());
+    for (auto* producer : producers) {
+        consumer.Inbound.push_back(&edges.emplace_back(TTaskEdge{
+            .Src = producer, .Dst = &consumer, .Kind = ETaskEdgeKind::Dependency}));
+    }
+}
+
 TEST_F(SchedulerRuntimeFilter, AuxInputWaitsForAllProducers) {
     auto filter = std::make_shared<TRuntimeFilter>(Context_, 16, 1024);
     filter->SetProducerCount(2);
     TTaskNode first;
     TTaskNode second;
+    TTaskNode consumer;
+    std::vector<TTaskEdge> edges;
+    AddDependencies(consumer, edges, {&first, &second});
     TAuxInput input;
     input.AddFilter(filter);
-    input.AddProducer(first);
-    input.AddProducer(second);
+    input.SetConsumer(consumer);
 
     EXPECT_EQ(input.Poll(), EAuxInputStatus::NeedProducer);
     first.State.store(ETaskState::Queued);
@@ -61,11 +72,14 @@ TEST_F(SchedulerRuntimeFilter, AuxInputWaitsForAllProducers) {
 TEST_F(SchedulerRuntimeFilter, FilterDependencyNotifiesOnlyOnPublication) {
     auto filter = std::make_shared<TRuntimeFilter>(Context_, 16, 1024);
     TTaskNode producer;
+    TTaskNode node;
+    std::vector<TTaskEdge> edges;
+    AddDependencies(node, edges, {&producer});
     auto code = std::make_shared<TRuntimeFilterCode>();
     code->Probe = filter;
     code->AuxInput = std::make_shared<TAuxInput>();
     code->AuxInput->AddFilter(filter);
-    code->AuxInput->AddProducer(producer);
+    code->AuxInput->SetConsumer(node);
     TRuntimeFilterTask consumer(code, {}, {});
     TTaskEdge dependency{.Kind = ETaskEdgeKind::Dependency};
 
@@ -83,11 +97,14 @@ TEST_F(SchedulerRuntimeFilter, MissingFilterPublicationFailsInExecute) {
     auto filter = std::make_shared<TRuntimeFilter>(Context_, 16, 1024);
     TTaskNode producer;
     producer.State.store(ETaskState::Finished);
+    TTaskNode node;
+    std::vector<TTaskEdge> edges;
+    AddDependencies(node, edges, {&producer});
     auto code = std::make_shared<TRuntimeFilterCode>();
     code->Probe = filter;
     code->AuxInput = std::make_shared<TAuxInput>();
     code->AuxInput->AddFilter(filter);
-    code->AuxInput->AddProducer(producer);
+    code->AuxInput->SetConsumer(node);
     TRuntimeFilterTask consumer(code, {}, {});
     TTaskEdge dependency{.Kind = ETaskEdgeKind::Dependency};
 

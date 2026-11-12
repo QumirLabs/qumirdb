@@ -511,18 +511,12 @@ void AppendRuntimeFilterBindings(
 }
 
 void BindRuntimeFilterTask(
-    const TRuntimeFilterNode& node, TTaskNode& task, const TTaskGraph& graph,
-    const TNodeTaskContext& context)
+    const TRuntimeFilterNode& node, TTaskNode& task, const TNodeTaskContext& context)
 {
     const auto& probe = RuntimeFilterAt(context, node.Filter).Probe;
     auto auxInput = std::make_shared<TAuxInput>();
     auxInput->AddFilter(probe);
-    for (const auto producer : node.AuxProducers) {
-        if (producer >= graph.Nodes().size()) {
-            Invalid("runtime filter producer index is out of range");
-        }
-        auxInput->AddProducer(*graph.Nodes()[producer]);
-    }
+    auxInput->SetConsumer(task);
     auto code = std::make_shared<TRuntimeFilterCode>(TRuntimeFilterCode{
         .Hash = BindJoinHashPlan(node.Hash, context),
         .Probe = probe,
@@ -584,10 +578,9 @@ std::unique_ptr<TTaskGraph> MaterializeGraph(
         node.DebugLabel = nodeSpec.DebugLabel;
         nodes.push_back(&node);
     }
-    // The filter tasks wait for producers that may follow them.
     for (size_t i = 0; i < spec.Nodes.size(); ++i) {
         if (const auto* filter = std::get_if<TRuntimeFilterNode>(&spec.Nodes[i].Body)) {
-            BindRuntimeFilterTask(*filter, *nodes[i], *graph, context);
+            BindRuntimeFilterTask(*filter, *nodes[i], context);
         }
     }
 
@@ -738,14 +731,6 @@ TGraphSpec SubgraphSpec(const TGraphSpec& spec, std::span<const uint32_t> nodes)
     for (const auto node : nodes) {
         auto& record = subgraph.Nodes.emplace_back(spec.Nodes[node]);
         ForEachPort(record.Body, renumber, renumber);
-        if (auto* filter = std::get_if<TRuntimeFilterNode>(&record.Body)) {
-            for (auto& producer : filter->AuxProducers) {
-                if (!kept(producer)) {
-                    Invalid("a runtime filter waits for a producer outside the subgraph");
-                }
-                producer = nodeIds[producer];
-            }
-        }
     }
     for (const auto& edge : spec.Edges) {
         if (!kept(edge.Src)) {

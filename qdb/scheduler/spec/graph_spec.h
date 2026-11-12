@@ -488,16 +488,14 @@ struct TRuntimeFilterBindingSpec {
 };
 
 // Passes the rows of In whose key hash Filter may contain, once the filter is
-// published. AuxProducers are the build lanes it waits for; they may follow it
-// in the graph, so BindRuntimeFilterTask binds the task after every node exists.
+// published. The build lanes it waits for are the sources of its dependency
+// edges, so BindRuntimeFilterTask binds the task to its node.
 struct TRuntimeFilterNode {
     TPortSpec In;
     TPortSpec Out;
     // The probe side of a join hash over In's key columns.
     TJoinHashPlanData Hash;
     uint32_t Filter = 0;
-    // Node indices.
-    std::vector<uint32_t> AuxProducers;
 
     void Fields(this auto& self, auto& v)
     {
@@ -505,7 +503,6 @@ struct TRuntimeFilterNode {
         v(self.Out);
         v(self.Hash);
         v(self.Filter);
-        v(self.AuxProducers);
     }
 };
 
@@ -640,12 +637,10 @@ void AppendRuntimeFilterBindings(
 std::unique_ptr<ITask> MakeNodeTask(
     const TNodeBody& body, const std::vector<IConnection*>& connections, TNodeTaskContext& context);
 
-// Binds the task MakeNodeTask built for `node` to its filter, its hash and its
-// producers, which index the nodes of `graph`. Throws std::runtime_error on an
-// invalid record.
+// Binds the task MakeNodeTask built for `node` to its filter, its hash and the
+// graph node `task` that holds it. Throws std::runtime_error on an invalid record.
 void BindRuntimeFilterTask(
-    const TRuntimeFilterNode& node, TTaskNode& task, const TTaskGraph& graph,
-    const TNodeTaskContext& context);
+    const TRuntimeFilterNode& node, TTaskNode& task, const TNodeTaskContext& context);
 
 // Builds an unsealed graph: node i has ExecutionSlot i. Remote source and sink
 // tasks have empty code, which the compute actor binds. `sink` is required for

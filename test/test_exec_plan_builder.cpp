@@ -1088,7 +1088,6 @@ void ExpectRuntimeFilterJoinFromSpec(NScheduler::EJoinTableKind table)
                 EXPECT_EQ(filter.Filter, 0u);
                 // The probe is the left input.
                 EXPECT_EQ(filter.Hash.Entry, 0u);
-                EXPECT_EQ(filter.AuxProducers, producers);
             }
             std::vector<std::pair<uint32_t, uint32_t>> dependencies;
             for (const auto& edge : spec.Edges) {

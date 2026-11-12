@@ -26,18 +26,23 @@ enum class ERequiredSide { Both = 0, Left = 1, Right = 2 };
 
 enum class EAuxInputStatus { Ready, NeedProducer, Waiting, Failed };
 
+// The producers behind the dependency edges into `consumer`: NeedProducer while
+// one is idle, Ready once all finished (also when there are none), else Waiting.
+EAuxInputStatus PollDependencies(const TTaskNode& consumer);
+
 // Query-local auxiliary input. It carries filter publication state rather
 // than rowsets; dependency edges supply demand and wakeups.
 class TAuxInput {
 public:
     void AddFilter(std::shared_ptr<IRuntimeFilterProbe> filter);
-    void AddProducer(TTaskNode& producer);
+    // The producers are the sources of the consumer's dependency edges.
+    void SetConsumer(const TTaskNode& consumer);
     bool Ready() const;
     EAuxInputStatus Poll() const;
 
 private:
     std::vector<std::shared_ptr<IRuntimeFilterProbe>> Filters_;
-    std::vector<TTaskNode*> Producers_;
+    const TTaskNode* Consumer_ = nullptr;
 };
 
 struct TSourceCode {
@@ -173,8 +178,7 @@ public:
     bool WantsInput(const TTaskEdge& edge) const noexcept override;
     bool TryNotifyDependency() noexcept override;
 
-    // Only for a task built with empty code, before it is scheduled: its aux
-    // producers may join the graph after it.
+    // Only for a task built with empty code, before it is scheduled.
     void BindCode(std::shared_ptr<const TRuntimeFilterCode> code);
 
 private:
