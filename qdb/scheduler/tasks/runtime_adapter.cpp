@@ -504,18 +504,19 @@ const std::shared_ptr<const TRuntimeFilterSinkCode>& TRuntimeFilterSinkTask::Cod
 }
 
 bool TRuntimeFilterSinkTask::WantsInput(const TTaskEdge& edge) const noexcept {
-    return edge.Kind == ETaskEdgeKind::Dependency
+    return edge.Kind == ETaskEdgeKind::Dependency && !Filter_->Complete()
         && PollDependencies(*Node_) == EAuxInputStatus::NeedProducer;
 }
 
+// A lane wakes its dependency consumers after every run that may push output,
+// so also after the run that finished its partial.
 bool TRuntimeFilterSinkTask::TryNotifyDependency() noexcept {
-    return PollDependencies(*Node_) == EAuxInputStatus::Ready
-        && !DependencyNotified_.exchange(true, std::memory_order_acq_rel);
+    return Filter_->Complete() && !DependencyNotified_.exchange(true, std::memory_order_acq_rel);
 }
 
 ETaskResult TRuntimeFilterSinkTask::Execute() {
     if (!Sent_) {
-        if (PollDependencies(*Node_) != EAuxInputStatus::Ready) {
+        if (!Filter_->Complete()) {
             return ETaskResult::NEED_DATA;
         }
         Code_->Send(State_.get(), Filter_->Merged());
