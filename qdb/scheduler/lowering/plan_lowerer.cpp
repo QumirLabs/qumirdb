@@ -1101,6 +1101,7 @@ private:
                     .In = PortSpec(Graph_, producer.Completion, completionLane),
                     .Out = PortSpec(Graph_, &outConn, lane + outLaneOffset),
                     .State = state,
+                    .Lane = static_cast<uint32_t>(lane),
                 },
             });
             Graph_.AddEdge(*producer.Publish, node, *producer.Completion,

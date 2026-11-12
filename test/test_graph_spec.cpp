@@ -635,6 +635,7 @@ TEST(GraphSpec, CteRecordsAndTablesRoundTrip)
         .In = {2, 6},
         .Out = {3, 2},
         .State = 2,
+        .Lane = 2,
     }));
 
     const auto bytes = SerializeGraphSpec(spec);
@@ -672,6 +673,7 @@ TEST(GraphSpec, CteRecordsAndTablesRoundTrip)
     EXPECT_EQ(consumer.Out.Connection, 3u);
     EXPECT_EQ(consumer.Out.Lane, 2u);
     EXPECT_EQ(consumer.State, 2u);
+    EXPECT_EQ(consumer.Lane, 2u);
 }
 
 TEST(GraphSpec, RuntimeFilterRecordsAndTableRoundTrip)
@@ -887,6 +889,8 @@ TEST(GraphSpec, RejectsInvalidSpecs)
     EXPECT_THROW(MaterializeGraph(spec, &sink), std::runtime_error);
     spec.CteConsumerStates = {{.Spool = 0}};
     EXPECT_NO_THROW(MaterializeGraph(spec, &sink));
+    spec.Nodes[1].Body = TCteConsumerNode{.In = {0, 0}, .Out = {1, 0}, .Lane = 2};
+    EXPECT_THROW(MaterializeGraph(spec, &sink), std::runtime_error);
     spec.CteConsumerStates = {{.Spool = 1}};
     EXPECT_THROW(MaterializeGraph(spec, &sink), std::runtime_error);
 

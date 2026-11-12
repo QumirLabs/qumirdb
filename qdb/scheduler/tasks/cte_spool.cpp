@@ -87,9 +87,17 @@ TCteConsumerState::TCteConsumerState(std::shared_ptr<const TCteSpool> spool)
     : Spool_(std::move(spool))
 {}
 
+void TCteConsumerState::AddLane(size_t lane) {
+    Lanes_.insert(std::ranges::upper_bound(Lanes_, lane), lane);
+}
+
 std::optional<size_t> TCteConsumerState::Claim() {
     // The spool is immutable after publication, so the cursor orders nothing.
-    const size_t index = Next_.fetch_add(1, std::memory_order_relaxed);
+    const size_t claim = Next_.fetch_add(1, std::memory_order_relaxed);
+    // Claims walk the lanes' batches in ascending order: once one is past the
+    // end, so are all later ones. With every lane present index == claim.
+    const size_t index = claim / Lanes_.size() * Spool_->SegmentCount()
+        + Lanes_[claim % Lanes_.size()];
     if (index >= Spool_->BatchCount()) {
         return std::nullopt;
     }

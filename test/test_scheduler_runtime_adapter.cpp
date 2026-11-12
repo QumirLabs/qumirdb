@@ -2190,6 +2190,37 @@ TEST(SchedulerRuntimeAdapter, HashShuffleTreatsFullSelectionAsNoSelection) {
     }
 }
 
+std::vector<size_t> ClaimAll(TCteConsumerState& state) {
+    std::vector<size_t> claims;
+    while (const auto claim = state.Claim()) {
+        claims.push_back(*claim);
+    }
+    return claims;
+}
+
+// The lanes of one reference split between two graphs read each batch once.
+TEST(SchedulerRuntimeAdapter, CteReferenceStatesSplitBatchesByLane) {
+    auto spool = std::make_shared<TCteSpool>(3);
+    for (size_t i = 0; i < 7; ++i) {
+        spool->Append(i % 3, TRowSet{.RefCount = 1});
+    }
+    spool->Seal();
+
+    TCteConsumerState whole(spool);
+    for (size_t lane : {1, 0, 2}) {
+        whole.AddLane(lane);
+    }
+    EXPECT_EQ(ClaimAll(whole), (std::vector<size_t>{0, 1, 2, 3, 4, 5, 6}));
+
+    TCteConsumerState first(spool);
+    first.AddLane(2);
+    first.AddLane(0);
+    TCteConsumerState second(spool);
+    second.AddLane(1);
+    EXPECT_EQ(ClaimAll(first), (std::vector<size_t>{0, 2, 3, 5, 6}));
+    EXPECT_EQ(ClaimAll(second), (std::vector<size_t>{1, 4}));
+}
+
 // The port of `kind` on {from, lane} moves away once and then moves back.
 void ExpectRebinds(ITask& task, EPortKind kind, IConnection& from, size_t lane) {
     TOneToOneConnection other;
