@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <memory>
 #include <optional>
+#include <span>
 #include <vector>
 
 namespace NQdb {
@@ -15,6 +16,9 @@ namespace NQdb {
 struct TOperatorInstrumentation;
 
 namespace NScheduler {
+
+struct TSinkCode;
+struct TSourceCode;
 
 // The rows of a materialized CTE. Each producer lane owns one segment and
 // appends to it without synchronization. Publication seals the spool once every
@@ -33,6 +37,8 @@ public:
     void Append(size_t segment, TRowSet rowSet);
     void Seal();
     size_t SegmentCount() const;
+    // Complete once the segment's writer has finished.
+    std::span<const TRowSet> Segment(size_t segment) const;
 
     // Consumer side, after Seal. Batches are numbered segment by segment.
     size_t BatchCount() const;
@@ -130,6 +136,66 @@ private:
     // A claimed batch whose push was refused; no other lane can take it.
     std::optional<size_t> Claimed_;
     bool Published_ = false;
+    bool Finished_ = false;
+};
+
+// Sends the batches of Segments to another fragment through code the compute
+// actor binds, once every input lane has finished: the segments of this
+// fragment's producer lanes, or every segment of the published spool.
+class TCteSinkTask final : public ITask {
+public:
+    // Without a spool, a placeholder with unbound inputs.
+    explicit TCteSinkTask(
+        std::shared_ptr<const TCteSpool> spool = nullptr,
+        std::vector<uint32_t> segments = {},
+        std::vector<TInputPort> inputs = {});
+
+    ETaskResult Execute() override;
+    bool RebindPort(const TPortRebind& rebind) override;
+
+    // Only for a task built with empty code, before it is scheduled.
+    void BindCode(std::shared_ptr<const TSinkCode> code, std::shared_ptr<void> state);
+    const std::shared_ptr<const TSinkCode>& Code() const;
+
+private:
+    std::shared_ptr<const TCteSpool> Spool_;
+    std::vector<uint32_t> Segments_;
+    std::vector<TInputPort> Inputs_;
+    std::shared_ptr<const TSinkCode> Code_;
+    std::shared_ptr<void> State_;
+    // The next batch to send: Batch_ of Segments_[Segment_].
+    size_t Segment_ = 0;
+    size_t Batch_ = 0;
+    bool InputFinished_ = false;
+    bool Finished_ = false;
+};
+
+// Appends the batches its code receives to Segment of the spool. At their end
+// it seals the spool if it is this fragment's copy of a published spool, then
+// finishes every output lane.
+class TCteSourceTask final : public ITask {
+public:
+    // Without a spool, a placeholder with unbound outputs.
+    explicit TCteSourceTask(
+        std::shared_ptr<TCteSpool> spool = nullptr,
+        uint32_t segment = 0,
+        bool seal = false,
+        std::vector<TOutputPort> outputs = {});
+
+    ETaskResult Execute() override;
+    bool RebindPort(const TPortRebind& rebind) override;
+
+    // Only for a task built with empty code, before it is scheduled.
+    void BindCode(std::shared_ptr<const TSourceCode> code, std::shared_ptr<void> state);
+    const std::shared_ptr<const TSourceCode>& Code() const;
+
+private:
+    std::shared_ptr<TCteSpool> Spool_;
+    uint32_t Segment_ = 0;
+    bool Seal_ = false;
+    std::vector<TOutputPort> Outputs_;
+    std::shared_ptr<const TSourceCode> Code_;
+    std::shared_ptr<void> State_;
     bool Finished_ = false;
 };
 

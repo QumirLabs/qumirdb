@@ -637,6 +637,17 @@ TEST(GraphSpec, CteRecordsAndTablesRoundTrip)
         .State = 2,
         .Lane = 2,
     }));
+    spec.Nodes.push_back(Node("remote-sink", "", TCteSinkNode{
+        .In = {{2, 1}, {2, 5}},
+        .Spool = 0,
+        .Segments = {3, 1},
+    }));
+    spec.Nodes.push_back(Node("remote-source", "", TCteSourceNode{
+        .Out = {{4, 0}},
+        .Spool = 0,
+        .Segment = 2,
+        .Seal = true,
+    }));
 
     const auto bytes = SerializeGraphSpec(spec);
     const auto back = DeserializeGraphSpec(bytes);
@@ -654,7 +665,7 @@ TEST(GraphSpec, CteRecordsAndTablesRoundTrip)
     EXPECT_EQ(back.CteConsumerStates[1].Spool, 0u);
     EXPECT_EQ(back.CteConsumerStates[2].Spool, 0u);
 
-    ASSERT_EQ(back.Nodes.size(), 3u);
+    ASSERT_EQ(back.Nodes.size(), 5u);
     const auto& producer = std::get<TCteProducerNode>(back.Nodes[0].Body);
     EXPECT_EQ(producer.In.Lane, 3u);
     EXPECT_EQ(producer.Out.Connection, 1u);
@@ -674,6 +685,15 @@ TEST(GraphSpec, CteRecordsAndTablesRoundTrip)
     EXPECT_EQ(consumer.Out.Lane, 2u);
     EXPECT_EQ(consumer.State, 2u);
     EXPECT_EQ(consumer.Lane, 2u);
+
+    const auto& sink = std::get<TCteSinkNode>(back.Nodes[3].Body);
+    EXPECT_EQ(sink.In, (std::vector<TPortSpec>{{2, 1}, {2, 5}}));
+    EXPECT_EQ(sink.Spool, 0u);
+    EXPECT_EQ(sink.Segments, (std::vector<uint32_t>{3, 1}));
+    const auto& source = std::get<TCteSourceNode>(back.Nodes[4].Body);
+    EXPECT_EQ(source.Out, (std::vector<TPortSpec>{{4, 0}}));
+    EXPECT_EQ(source.Segment, 2u);
+    EXPECT_TRUE(source.Seal);
 }
 
 TEST(GraphSpec, RuntimeFilterRecordsAndTableRoundTrip)
@@ -893,6 +913,11 @@ TEST(GraphSpec, RejectsInvalidSpecs)
     EXPECT_THROW(MaterializeGraph(spec, &sink), std::runtime_error);
     spec.CteConsumerStates = {{.Spool = 1}};
     EXPECT_THROW(MaterializeGraph(spec, &sink), std::runtime_error);
+    spec.CteConsumerStates.clear();
+    spec.Nodes[1].Body = TCteSourceNode{.Out = {{1, 0}}, .Segment = 1};
+    EXPECT_NO_THROW(MaterializeGraph(spec, &sink));
+    spec.Nodes[1].Body = TCteSourceNode{.Out = {{1, 0}}, .Segment = 2};
+    EXPECT_THROW(MaterializeGraph(spec, &sink), std::runtime_error);
 
     // A pass-through that computes a column needs its kernel.
     spec = FanOutSpec();
@@ -980,12 +1005,13 @@ TEST(GraphSpec, SubgraphRenumbersItsNodesConnectionsAndExternals)
     std::string error;
     EXPECT_TRUE(MaterializeGraph(part)->Seal(&error)) << error;
 
-    // Edges and CTE spools must not cross the subgraph's border.
+    // Edges must not cross the subgraph's border; the tasks of a CTE spool may,
+    // as CTE sinks and sources carry its rows.
     EXPECT_THROW(SubgraphSpec(spec, std::vector<uint32_t>{0, 1}), std::runtime_error);
     EXPECT_THROW(SubgraphSpec(spec, std::vector<uint32_t>{4, 3, 5}), std::runtime_error);
     spec.Nodes[1].Body = TCteProducerNode{.In = {0, 0}, .Out = {1, 0}};
     spec.Nodes[4].Body = TCtePublishNode{.In = {2, 0}, .Out = {3, 0}};
-    EXPECT_THROW(SubgraphSpec(spec, chainB), std::runtime_error);
+    EXPECT_NO_THROW(SubgraphSpec(spec, chainB));
 }
 
 TEST(GraphSpec, ForwardChainRunsRows)

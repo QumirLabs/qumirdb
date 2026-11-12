@@ -340,23 +340,6 @@ void ForEachPort(TBody& body, TInput&& input, TOutput&& output)
     }, body);
 }
 
-std::optional<uint32_t> CteSpoolOf(const TGraphSpec& spec, const TNodeBody& body)
-{
-    if (const auto* producer = std::get_if<TCteProducerNode>(&body)) {
-        return producer->Spool;
-    }
-    if (const auto* publish = std::get_if<TCtePublishNode>(&body)) {
-        return publish->Spool;
-    }
-    if (const auto* consumer = std::get_if<TCteConsumerNode>(&body)) {
-        if (consumer->State >= spec.CteConsumerStates.size()) {
-            Invalid("cte consumer state index is out of range");
-        }
-        return spec.CteConsumerStates[consumer->State].Spool;
-    }
-    return std::nullopt;
-}
-
 TConnectionSpec ExtractConnection(const IConnection& connection)
 {
     if (!dynamic_cast<const TLocalConnection*>(&connection)) {
@@ -499,6 +482,28 @@ std::unique_ptr<ITask> MakeNodeTask(
             state->AddLane(node.Lane);
             return std::make_unique<TCteConsumerTask>(
                 state, InputPort(connections, node.In), OutputPort(connections, node.Out));
+        } else if constexpr (std::is_same_v<TNode, TCteSinkNode>) {
+            const auto& spool = CteSpoolAt(context, node.Spool);
+            for (const auto segment : node.Segments) {
+                if (segment >= spool->SegmentCount()) {
+                    Invalid("cte spool segment is out of range");
+                }
+            }
+            std::vector<TInputPort> inputs;
+            for (const auto& port : node.In) {
+                inputs.push_back(InputPort(connections, port));
+            }
+            return std::make_unique<TCteSinkTask>(spool, node.Segments, std::move(inputs));
+        } else if constexpr (std::is_same_v<TNode, TCteSourceNode>) {
+            const auto& spool = CteSpoolAt(context, node.Spool);
+            if (node.Segment >= spool->SegmentCount()) {
+                Invalid("cte spool segment is out of range");
+            }
+            std::vector<TOutputPort> outputs;
+            for (const auto& port : node.Out) {
+                outputs.push_back(OutputPort(connections, port));
+            }
+            return std::make_unique<TCteSourceTask>(spool, node.Segment, node.Seal, std::move(outputs));
         } else if constexpr (std::is_same_v<TNode, TRuntimeFilterNode>) {
             return std::make_unique<TRuntimeFilterTask>(
                 nullptr, InputPort(connections, node.In), OutputPort(connections, node.Out));
@@ -738,19 +743,6 @@ TGraphSpec SubgraphSpec(const TGraphSpec& spec, std::span<const uint32_t> nodes)
         }
         return nodeIds[node] != Absent;
     };
-
-    std::vector<std::optional<bool>> spools(spec.CteSpools.size());
-    for (uint32_t i = 0; i < spec.Nodes.size(); ++i) {
-        if (const auto spool = CteSpoolOf(spec, spec.Nodes[i].Body)) {
-            if (*spool >= spools.size()) {
-                Invalid("cte spool index is out of range");
-            }
-            if (spools[*spool] && *spools[*spool] != kept(i)) {
-                Invalid("the subgraph holds the tasks of cte spool " + std::to_string(*spool) + " in part");
-            }
-            spools[*spool] = kept(i);
-        }
-    }
 
     // Connections keep their relative order.
     std::vector<uint32_t> connectionIds(spec.Connections.size(), Absent);

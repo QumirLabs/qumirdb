@@ -43,6 +43,8 @@
 #include <format>
 #include <functional>
 #include <limits>
+#include <map>
+#include <numeric>
 #include <optional>
 #include <ostream>
 #include <stdexcept>
@@ -3158,6 +3160,82 @@ std::optional<TGraphSpec> ExtractLoweredGraphSpec(
     return spec;
 }
 
+namespace {
+
+// Records the CTE sink and source of a cut of CTE edges and returns true, or
+// returns false for a cut of other edges. Producer lanes -> publish: the sink
+// sends the lanes' segments, the source puts them into the publish fragment's
+// spool. Publish -> consumer lanes: the sink sends the published spool and the
+// consumers read the copy the source seals, a spool and states of their own.
+bool RecordCteCut(TLoweredPlan& lowered, const TCut& cut) {
+    auto& records = lowered.NodeSpecs;
+    const auto& graph = *lowered.Graph;
+    const auto& toSink = *cut.Sink->Inbound.front();
+    const auto& fromSource = *cut.Source->Outbound.front();
+    const auto& from = records[toSink.Src->ExecutionSlot];
+    if (!from) {
+        return false;
+    }
+    auto record = [&](const TTaskNode& node, TNodeBody body) {
+        records[node.ExecutionSlot] = TNodeSpec{.DebugKind = node.DebugKind, .Body = std::move(body)};
+    };
+    if (const auto* producer = std::get_if<TCteProducerNode>(&from->Body)) {
+        const auto spool = producer->Spool;
+        std::vector<uint32_t> segments;
+        for (const auto* edge : cut.Sink->Inbound) {
+            segments.push_back(std::get<TCteProducerNode>(records[edge->Src->ExecutionSlot]->Body).Segment);
+        }
+        std::vector<TPortSpec> outputs;
+        for (const auto* edge : cut.Source->Outbound) {
+            outputs.push_back(PortSpec(graph, edge->Connection, edge->SrcLane));
+        }
+        // These segments have no writer in the publish fragment.
+        const auto segment = segments.front();
+        record(*cut.Sink, TCteSinkNode{
+            .In = {PortSpec(graph, toSink.Connection, toSink.DstLane)},
+            .Spool = spool,
+            .Segments = std::move(segments),
+        });
+        record(*cut.Source, TCteSourceNode{.Out = std::move(outputs), .Spool = spool, .Segment = segment});
+        return true;
+    }
+    const auto* publish = std::get_if<TCtePublishNode>(&from->Body);
+    if (!publish) {
+        return false;
+    }
+    const auto spool = publish->Spool;
+    std::vector<TPortSpec> inputs;
+    for (const auto* edge : cut.Sink->Inbound) {
+        inputs.push_back(PortSpec(graph, edge->Connection, edge->DstLane));
+    }
+    const auto spoolSpec = lowered.CteSpools[spool];
+    std::vector<uint32_t> segments(spoolSpec.Segments);
+    std::iota(segments.begin(), segments.end(), 0u);
+    // A fragment may also hold producer lanes of the spool, whose segments went
+    // to the publish fragment: the copy is a spool of its own.
+    const auto copy = static_cast<uint32_t>(lowered.CteSpools.size());
+    lowered.CteSpools.push_back(spoolSpec);
+    record(*cut.Sink, TCteSinkNode{.In = std::move(inputs), .Spool = spool, .Segments = std::move(segments)});
+    record(*cut.Source, TCteSourceNode{
+        .Out = {PortSpec(graph, fromSource.Connection, fromSource.SrcLane)},
+        .Spool = copy,
+        .Seal = true,
+    });
+    std::map<uint32_t, uint32_t> states;
+    for (const auto* edge : cut.Source->Outbound) {
+        auto& consumer = std::get<TCteConsumerNode>(records[edge->Dst->ExecutionSlot]->Body);
+        const auto [it, added] = states.try_emplace(
+            consumer.State, static_cast<uint32_t>(lowered.CteConsumerStates.size()));
+        if (added) {
+            lowered.CteConsumerStates.push_back({.Spool = copy});
+        }
+        consumer.State = it->second;
+    }
+    return true;
+}
+
+} // namespace
+
 TSealedTaskGraph ApplySplit(TLoweredPlan& lowered, TSplitPlan&& plan) {
     std::vector<EReboundPort> rebound;
     for (const auto& split : plan.Splits) {
@@ -3183,16 +3261,18 @@ TSealedTaskGraph ApplySplit(TLoweredPlan& lowered, TSplitPlan&& plan) {
             };
             continue;
         }
-        const auto& toSink = *cuts[i].Sink->Inbound.front();
-        const auto& fromSource = *cuts[i].Source->Outbound.front();
-        records[cuts[i].Sink->ExecutionSlot] = TNodeSpec{
-            .DebugKind = cuts[i].Sink->DebugKind,
-            .Body = TRemoteSinkNode{.In = PortSpec(graph, toSink.Connection, toSink.DstLane)},
-        };
-        records[cuts[i].Source->ExecutionSlot] = TNodeSpec{
-            .DebugKind = cuts[i].Source->DebugKind,
-            .Body = TRemoteSourceNode{.Out = PortSpec(graph, fromSource.Connection, fromSource.SrcLane)},
-        };
+        if (!RecordCteCut(lowered, cuts[i])) {
+            const auto& toSink = *cuts[i].Sink->Inbound.front();
+            const auto& fromSource = *cuts[i].Source->Outbound.front();
+            records[cuts[i].Sink->ExecutionSlot] = TNodeSpec{
+                .DebugKind = cuts[i].Sink->DebugKind,
+                .Body = TRemoteSinkNode{.In = PortSpec(graph, toSink.Connection, toSink.DstLane)},
+            };
+            records[cuts[i].Source->ExecutionSlot] = TNodeSpec{
+                .DebugKind = cuts[i].Source->DebugKind,
+                .Body = TRemoteSourceNode{.Out = PortSpec(graph, fromSource.Connection, fromSource.SrcLane)},
+            };
+        }
         // Cut edge j became sink edge j and source edge j. The edge of the other
         // placeholder keeps the cut edge's connection and lane.
         const bool output = rebound[i] == EReboundPort::SourceOutput;
