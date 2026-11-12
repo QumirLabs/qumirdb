@@ -22,16 +22,20 @@ namespace NScheduler {
 
 struct TRemoteSinkState;
 struct TRemoteSourceState;
+struct TRuntimeFilterSinkState;
 
-// Wakes the ComputeActor; carries the sink states that have rows in their outbox
-// and the source states that have consumed chunks to confirm. A state is queued
-// at most once, so queues sized by the number of states never fill up.
+// Wakes the ComputeActor; carries the sink states that have rows in their outbox,
+// the source states that have consumed chunks to confirm and the runtime filter
+// sink states that have their partial. A state is queued at most once, so queues
+// sized by the number of states never fill up.
 class TActorNotificationChannel {
 public:
-    TActorNotificationChannel(std::unique_ptr<NNet::INotifier> notifier, size_t sinks, size_t sources)
+    TActorNotificationChannel(
+        std::unique_ptr<NNet::INotifier> notifier, size_t sinks, size_t sources, size_t filterSinks = 0)
         : Notifier(std::move(notifier))
         , SinkReady(std::max<size_t>(sinks, 2)) // 2 is the queue minimum
         , SourceReady(std::max<size_t>(sources, 2))
+        , FilterSinkReady(std::max<size_t>(filterSinks, 2))
     { }
 
     TMPSCQueue<TRemoteSinkState*>& SinkQueue() {
@@ -42,12 +46,20 @@ public:
         return SourceReady;
     }
 
+    TMPSCQueue<TRuntimeFilterSinkState*>& FilterSinkQueue() {
+        return FilterSinkReady;
+    }
+
     void Notify(TRemoteSinkState* state) {
         Push(SinkReady, state);
     }
 
     void Notify(TRemoteSourceState* state) {
         Push(SourceReady, state);
+    }
+
+    void Notify(TRuntimeFilterSinkState* state) {
+        Push(FilterSinkReady, state);
     }
 
     NNet::TFuture<void> Wait() {
@@ -65,6 +77,7 @@ private:
     std::unique_ptr<NNet::INotifier> Notifier;
     TMPSCQueue<TRemoteSinkState*> SinkReady;
     TMPSCQueue<TRemoteSourceState*> SourceReady;
+    TMPSCQueue<TRuntimeFilterSinkState*> FilterSinkReady;
 };
 
 // Worker -> ComputeActor. The sink task writes into a bounded outbox; the actor
@@ -207,10 +220,52 @@ private:
     bool Pop(TRowSet& rowSet);
 };
 
+// Worker -> ComputeActor: a runtime filter sink task hands its partial over
+// once and queues the state; the actor then sends it to the source PeerTaskId
+// of PeerActor.
+struct TRuntimeFilterSinkState {
+    TRuntimeFilterSinkState(
+        uint64_t id,
+        NNet::NActors::TActorId peerActor,
+        uint64_t peerTaskId,
+        TActorNotificationChannel& actorChannel);
+
+    // TRuntimeFilterSinkCode::TSend
+    void Send(TRuntimeFilterPartial&& partial);
+    // ComputeActor side, once the state is popped from the queue.
+    void SendPartial(NNet::NActors::TActorContext::TPtr& ctx);
+
+    const uint64_t Id;
+    NNet::NActors::TActorId PeerActor;
+    uint64_t PeerTaskId;
+    TActorNotificationChannel& ActorChannel;
+    // Written before the state is queued, read after it is popped.
+    TRuntimeFilterPartial Partial;
+};
+
+// ComputeActor -> worker: the actor puts the received partial here and wakes
+// the source node, whose task takes it once.
+struct TRuntimeFilterSourceState {
+    explicit TRuntimeFilterSourceState(uint64_t id);
+
+    // ComputeActor side. False if a partial already came.
+    bool Push(TRuntimeFilterPartial&& partial);
+    // TRuntimeFilterSourceCode::TTake
+    bool Take(TRuntimeFilterPartial& partial);
+
+    const uint64_t Id;
+    // Written before Arrived is set.
+    TRuntimeFilterPartial Partial;
+    std::atomic<bool> Arrived = false;
+    // Actor only.
+    bool Received = false;
+};
+
 // Empty if every endpoint names its own node of the matching task type
-// (TSourceTask for Source, TSinkTask for Sink) built with empty code, and every
-// source or sink task with empty code has an endpoint, and every sink
-// task has an input connection with row layouts; otherwise the first problem.
+// (TSourceTask for Source, TSinkTask for Sink, TRuntimeFilterSourceTask and
+// TRuntimeFilterSinkTask for the filter kinds) built with empty code, and every
+// such task with empty code has an endpoint, and every sink task has an input
+// connection with row layouts; otherwise the first problem.
 std::string ValidateEndpoints(
     const TSealedTaskGraph& graph,
     std::span<const NRemote::TRemoteEndpoint> endpoints);
@@ -231,6 +286,17 @@ std::pair<std::shared_ptr<const TSourceCode>, std::shared_ptr<TRemoteSourceState
     uint64_t peerTaskId,
     TActorNotificationChannel& actorChannel,
     size_t inboxCapacity = 16);
+
+// Code and state for TRuntimeFilterSinkTask / TRuntimeFilterSourceTask.
+std::pair<std::shared_ptr<const TRuntimeFilterSinkCode>, std::shared_ptr<TRuntimeFilterSinkState>>
+MakeRuntimeFilterSink(
+    uint64_t id,
+    NNet::NActors::TActorId peerActor,
+    uint64_t peerTaskId,
+    TActorNotificationChannel& actorChannel);
+
+std::pair<std::shared_ptr<const TRuntimeFilterSourceCode>, std::shared_ptr<TRuntimeFilterSourceState>>
+MakeRuntimeFilterSource(uint64_t id);
 
 } // namespace NScheduler
 } // namespace NQdb

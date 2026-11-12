@@ -147,8 +147,6 @@ int main(int argc, char** argv)
     }
     TEngineSettings EngineSettings;
     ApplyEngineConfig(engineConfig, EngineSettings);
-    // Fragments on different nodes cannot share a runtime filter yet.
-    EngineSettings.Optimizer.EnableRuntimeFilters = false;
     // Column pruning narrows a source, so each query opens its own and releases
     // them with its compiler.
     auto compilerFactory = [&]() {

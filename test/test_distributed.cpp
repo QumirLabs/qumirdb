@@ -1075,6 +1075,8 @@ TEST(DistributedSerialization, TaskGraphMessageRoundTrip) {
             {.Id = 1, .Kind = ERemoteEndpointKind::Sink, .PeerActor = TActorId(2, 123, 4), .PeerTaskId = 7},
             {.Id = std::numeric_limits<uint64_t>::max(), .Kind = ERemoteEndpointKind::Source,
                 .PeerActor = TActorId(5, 0, 6), .PeerTaskId = 8},
+            {.Id = 3, .Kind = ERemoteEndpointKind::FilterSink, .PeerActor = TActorId(2, 9, 4), .PeerTaskId = 4},
+            {.Id = 4, .Kind = ERemoteEndpointKind::FilterSource, .PeerActor = TActorId(1, 9, 4), .PeerTaskId = 3},
         },
     };
     const auto bytes = Encode(original);
@@ -1096,8 +1098,42 @@ TEST(DistributedSerialization, TaskGraphMessageRoundTrip) {
     EXPECT_THROW(Decode(decoded, bytes + 'x'), std::runtime_error);
     // The kind of the first endpoint follows the spec, the image, the endpoint count and its id.
     auto invalid = bytes;
-    invalid[4 + original.Spec.size() + 4 + original.KernelImage.size() + 4 + 8] = 2;
+    invalid[4 + original.Spec.size() + 4 + original.KernelImage.size() + 4 + 8] = 4;
     EXPECT_THROW(Decode(decoded, invalid), std::runtime_error);
+}
+
+TEST(DistributedSerialization, FilterPartialRoundTrip) {
+    EXPECT_FALSE(is_local_message_v<TFilterPartial>);
+    for (const bool bloom : {false, true}) {
+        SCOPED_TRACE(bloom);
+        TFilterPartial original{.DstTaskId = 17, .Partial = {
+            .Hashes = {0, 5, std::numeric_limits<uint64_t>::max()},
+            .ExactSetOverflowed = bloom,
+            .BuildRows = 1000,
+            .Producers = 3,
+        }};
+        if (bloom) {
+            original.Partial.BloomWords = {1, 2, 4, 8, 16, 32, 64, 128};
+        }
+        const auto bytes = Encode(original);
+        TFilterPartial decoded;
+        Decode(decoded, bytes);
+        EXPECT_EQ(decoded.DstTaskId, 17u);
+        EXPECT_EQ(decoded.Partial.Hashes, original.Partial.Hashes);
+        EXPECT_EQ(decoded.Partial.BloomWords, original.Partial.BloomWords);
+        EXPECT_EQ(decoded.Partial.ExactSetOverflowed, bloom);
+        EXPECT_EQ(decoded.Partial.BuildRows, 1000u);
+        EXPECT_EQ(decoded.Partial.Producers, 3u);
+        for (size_t size = 0; size < bytes.size(); ++size) {
+            SCOPED_TRACE(size);
+            EXPECT_THROW(Decode(decoded, bytes.substr(0, size)), std::runtime_error);
+        }
+        EXPECT_THROW(Decode(decoded, bytes + 'x'), std::runtime_error);
+        // The overflow flag follows the task id, the producers and the build rows.
+        auto invalid = bytes;
+        invalid[8 + 4 + 8] = 2;
+        EXPECT_THROW(Decode(decoded, invalid), std::runtime_error);
+    }
 }
 
 TEST(DistributedAllocation, NoNodesIsAnExplicitErrorAndZeroCountSucceeds) {
@@ -2887,18 +2923,24 @@ private:
     std::optional<TExecuteQueryResponse>& Answer_;
 };
 
+const TPlanPassOptions WithoutRuntimeFilters{.EnableCbo = false, .EnableRuntimeFilters = false};
 // A filter at every join, whatever the estimates.
 const TPlanPassOptions WithRuntimeFilters{.EnableCbo = false, .ForceRuntimeFilters = true};
 
 // Table t is decimals.parquet; each reference gets its own source, as column
 // pruning narrows a source.
 struct TDecimalsCompiler {
+    explicit TDecimalsCompiler(TPlanPassOptions options = WithoutRuntimeFilters)
+        : Options(options)
+    {}
+
+    TPlanPassOptions Options;
     TExternalModuleCatalog Catalog;
     std::vector<std::unique_ptr<TParquetSource>> Sources;
     NCompiler::TQueryCompiler Compiler{Catalog, [this](std::string_view) -> std::expected<TOperatorPtr, NQumir::TError> {
         auto& source = Sources.emplace_back(std::make_unique<TParquetSource>(DecimalsPath));
         return std::make_shared<TSourceOperator>(*source, "t");
-    }, TPlanPassOptions{.EnableCbo = false, .EnableRuntimeFilters = false}};
+    }, Options};
 
     // A compiler that owns its sources, as the daemon makes one per query.
     std::unique_ptr<NCompiler::TQueryCompiler> MakeQueryCompiler()
@@ -2907,7 +2949,7 @@ struct TDecimalsCompiler {
         return std::make_unique<NCompiler::TQueryCompiler>(Catalog, [sources](std::string_view) -> std::expected<TOperatorPtr, NQumir::TError> {
             auto& source = sources->emplace_back(std::make_unique<TParquetSource>(DecimalsPath));
             return std::make_shared<TSourceOperator>(*source, "t");
-        }, TPlanPassOptions{.EnableCbo = false, .EnableRuntimeFilters = false});
+        }, Options);
     }
 };
 
@@ -3076,29 +3118,67 @@ TEST(DistributedScheduler, SplitsRuntimeFiltersSoEveryProbeMergesEveryBuildLane)
     }
 }
 
+namespace {
+
+// Query actors over the two nodes of a test cluster, one compute actor on each.
+struct TQueryCluster {
+    NQdb::NScheduler::TSettings Settings;
+    TTestCluster Cluster;
+    size_t LeaderActors = 0;
+
+    TQueryCluster() {
+        using namespace NQdb::NScheduler;
+        Settings.Scheduler.WorkerCount = 2;
+        Settings.ScanSplit.Strategy = EScanSplitStrategy::RowGroupRange;
+        Settings.ScanSplit.MaxScanTasks = 4;
+    }
+
+    void Start() {
+        Cluster.Loop.Poller().SetMaxDuration(std::chrono::milliseconds(1));
+        const auto leaderId = Cluster.LeaderScheduler.NodeId();
+        for (auto* system : {&Cluster.Leader, &Cluster.Follower}) {
+            system->RegisterWellKnown(
+                static_cast<TLocalActorId>(EWellKnownActors::LocalScheduler),
+                std::unique_ptr<IActor>(CreateLocalScheduler(leaderId, 1, Settings.Scheduler)));
+        }
+        const auto deadline = NNet::TClock::now() + std::chrono::seconds(2);
+        do {
+            Cluster.Spawn(2);
+        } while (Cluster.Responses.back().ActorIds.size() < 2 && NNet::TClock::now() < deadline);
+        ASSERT_EQ(Cluster.Responses.back().ActorIds.size(), 2u);
+        LeaderActors = Cluster.Leader.ActorsSize();
+    }
+
+    // The answer to `sql` planned for `width` workers; `log` gets the query actor's lines.
+    std::optional<TExecuteQueryResponse> Run(TDecimalsCompiler& compiler, const std::string& sql,
+        std::optional<size_t> width, std::vector<std::string>& log)
+    {
+        std::optional<TExecuteQueryResponse> answer;
+        const auto client = Cluster.Follower.Register(std::make_unique<TAnswerProbe>(answer));
+        const auto query = Cluster.Follower.Register(std::unique_ptr<IActor>(CreateQueryActor(
+            [&] { return compiler.MakeQueryCompiler(); }, Settings,
+            [&](const std::string& line) { log.push_back(line); })));
+        Cluster.Follower.Send<TExecuteQuery>(client, query, TExecuteQuery{.Query = sql, .PlanWidth = width});
+        // The deadline only guards against a hang.
+        const auto deadline = NNet::TClock::now() + std::chrono::seconds(60);
+        while (!answer && NNet::TClock::now() < deadline) {
+            Cluster.Pump();
+        }
+        // The query stops its compute actors.
+        Cluster.Pump();
+        EXPECT_EQ(Cluster.Leader.ActorsSize(), LeaderActors);
+        Cluster.Follower.Send<TPoison>(client, client, TPoison{});
+        return answer;
+    }
+};
+
+} // namespace
+
 // The query actor lowers each query, splits it over one compute actor per node
 // and gets the rows of the local run, in CSV.
 TEST(DistributedScheduler, QueryActorRunsAQueryOnEveryNode) {
-    using namespace NQdb::NScheduler;
-    TSettings settings;
-    settings.Scheduler.WorkerCount = 2;
-    settings.ScanSplit.Strategy = EScanSplitStrategy::RowGroupRange;
-    settings.ScanSplit.MaxScanTasks = 4;
-    TTestCluster cluster;
-    cluster.Loop.Poller().SetMaxDuration(std::chrono::milliseconds(1));
-    const auto leaderId = cluster.LeaderScheduler.NodeId();
-    for (auto* system : {&cluster.Leader, &cluster.Follower}) {
-        system->RegisterWellKnown(
-            static_cast<TLocalActorId>(EWellKnownActors::LocalScheduler),
-            std::unique_ptr<IActor>(CreateLocalScheduler(leaderId, 1, settings.Scheduler)));
-    }
-    const auto deadline = NNet::TClock::now() + std::chrono::seconds(2);
-    do {
-        cluster.Spawn(2);
-    } while (cluster.Responses.back().ActorIds.size() < 2 && NNet::TClock::now() < deadline);
-    ASSERT_EQ(cluster.Responses.back().ActorIds.size(), 2u);
-    const auto leaderActors = cluster.Leader.ActorsSize();
-
+    TQueryCluster cluster;
+    ASSERT_NO_FATAL_FAILURE(cluster.Start());
     TDecimalsCompiler compiler;
     size_t index = 0;
     for (const std::string sql : {
@@ -3112,34 +3192,42 @@ TEST(DistributedScheduler, QueryActorRunsAQueryOnEveryNode) {
         SCOPED_TRACE(sql);
         // Every other query plans for a width of 4 instead of the query actor's 2 workers.
         const auto width = index++ % 2 == 1 ? std::optional<size_t>(4) : std::nullopt;
-        std::optional<TExecuteQueryResponse> answer;
         std::vector<std::string> log;
-        const auto client = cluster.Follower.Register(std::make_unique<TAnswerProbe>(answer));
-        const auto query = cluster.Follower.Register(std::unique_ptr<IActor>(CreateQueryActor(
-            [&] { return compiler.MakeQueryCompiler(); }, settings,
-            [&](const std::string& line) { log.push_back(line); })));
-        cluster.Follower.Send<TExecuteQuery>(client, query, TExecuteQuery{.Query = sql, .PlanWidth = width});
-        // The deadline only guards against a hang.
-        const auto queryDeadline = NNet::TClock::now() + std::chrono::seconds(60);
-        while (!answer && NNet::TClock::now() < queryDeadline) {
-            cluster.Pump();
-        }
+        const auto answer = cluster.Run(compiler, sql, width, log);
         ASSERT_TRUE(answer);
         ASSERT_TRUE(answer->Response) << answer->Response.error().ToString();
         const auto lowering = "Query: lowering for " + std::to_string(width.value_or(2)) + " workers";
         EXPECT_TRUE(std::ranges::contains(log, lowering));
         EXPECT_TRUE(std::ranges::contains(log, std::string("Query: started 2 fragments")));
-        const auto expected = RunLocally(sql, settings);
+        const auto expected = RunLocally(sql, cluster.Settings);
         EXPECT_GT(std::ranges::count(expected, '\n'), 2);
         EXPECT_EQ(*answer->Response, expected);
         ASSERT_TRUE(answer->Timing);
         // The CSV has a header line.
         EXPECT_EQ(static_cast<int64_t>(answer->Timing->Rows), std::ranges::count(expected, '\n') - 1);
         EXPECT_GT(answer->Timing->Execute, 0);
-        // The query stops its compute actors.
-        cluster.Pump();
-        EXPECT_EQ(cluster.Leader.ActorsSize(), leaderActors);
-        cluster.Follower.Send<TPoison>(client, client, TPoison{});
+    }
+}
+
+// Joins whose build lanes and probes the split puts on both nodes: each node's
+// filter merges every build lane, so the rows are those of a local run without
+// filters. One build side is empty.
+TEST(DistributedScheduler, QueryActorRunsRuntimeFiltersAcrossNodes) {
+    TQueryCluster cluster;
+    ASSERT_NO_FATAL_FAILURE(cluster.Start());
+    TDecimalsCompiler compiler(WithRuntimeFilters);
+    for (const std::string sql : {RuntimeFilterJoinSql,
+             "SELECT id, d9 FROM t WHERE id IN (SELECT id FROM t WHERE id % 7 = 0) ORDER BY id",
+             "SELECT a.id, b.s FROM t a JOIN t b ON a.id = b.id WHERE b.id < 0 ORDER BY a.id"}) {
+        for (const std::optional<size_t> width : {std::optional<size_t>(), std::optional<size_t>(4)}) {
+            SCOPED_TRACE(sql + " width " + std::to_string(width.value_or(2)));
+            std::vector<std::string> log;
+            const auto answer = cluster.Run(compiler, sql, width, log);
+            ASSERT_TRUE(answer);
+            ASSERT_TRUE(answer->Response) << answer->Response.error().ToString();
+            EXPECT_TRUE(std::ranges::contains(log, std::string("Query: started 2 fragments")));
+            EXPECT_EQ(*answer->Response, RunLocally(sql, cluster.Settings));
+        }
     }
 }
 

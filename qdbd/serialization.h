@@ -33,6 +33,15 @@ template<>
 void DeserializeFrom(NQdb::NRemote::TTaskGraphMessage& message, TBlob& blob);
 
 template<>
+size_t SerializedSize(const NQdb::NRemote::TFilterPartial& message);
+
+template<>
+void SerializeTo(const NQdb::NRemote::TFilterPartial& message, std::span<char> out);
+
+template<>
+void DeserializeFrom(NQdb::NRemote::TFilterPartial& message, TBlob& blob);
+
+template<>
 size_t SerializedSize(const NQdb::NRemote::TDataChunk& message);
 
 template<>

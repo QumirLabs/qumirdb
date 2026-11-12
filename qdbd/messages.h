@@ -1,5 +1,6 @@
 #pragma once
 #include <coroio/actors/actor.hpp>
+#include <qdb/exec/runtime_filter.h>
 #include <qdb/io/io.h>
 #include <qdb/io/rowset_ops.h>
 
@@ -115,6 +116,14 @@ struct TDataConfirm {
     uint64_t LastApplied = 0;
 };
 
+// Runtime filter sink -> source: the merged partial of a fragment's build
+// lanes. The receiving source is selected by DstTaskId; there is no confirm.
+struct TFilterPartial {
+    static constexpr NNet::NActors::TMessageId MessageId = 206;
+    uint64_t DstTaskId = 0;
+    TRuntimeFilterPartial Partial;
+};
+
 // Compute actor -> query actor, periodically while the graph runs: the actor is alive.
 struct TComputeStatus {
     static constexpr NNet::NActors::TMessageId MessageId = 204;
@@ -129,13 +138,16 @@ struct TComputeError {
 enum class ERemoteEndpointKind {
     Source,
     Sink,
+    FilterSource,
+    FilterSink,
 };
 
 // Id is the node's external id in the graph; routing lives here, not in the graph.
 struct TRemoteEndpoint {
     uint64_t Id = 0;
     ERemoteEndpointKind Kind = ERemoteEndpointKind::Source;
-    // Sink: where the rows go. Source: where the confirms go (the peer sink).
+    // Sink: where the rows or the partial go. Source: where the confirms go (the
+    // peer sink).
     NNet::NActors::TActorId PeerActor;
     uint64_t PeerTaskId = 0;
 };
@@ -194,6 +206,7 @@ inline void RegisterMessages(TMessagesFactory& factory) {
     factory.template RegisterSerializer<TDataChunk>();
     factory.template RegisterSerializer<TFinish>();
     factory.template RegisterSerializer<TDataConfirm>();
+    factory.template RegisterSerializer<TFilterPartial>();
     factory.template RegisterSerializer<TComputeStatus>();
     factory.template RegisterSerializer<TComputeError>();
     factory.template RegisterSerializer<TTaskGraphMessage>();
