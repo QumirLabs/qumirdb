@@ -437,7 +437,7 @@ using TRemoteSourceTask = NQdb::NScheduler::TSourceTask;
 
 TEdgeSplit Split(TTaskEdge& edge, EReboundPort port, int sinkColor, int sourceColor) {
     return {
-        .Edge = &edge,
+        .Edges = {&edge},
         .ReboundPort = port,
         .SinkColor = sinkColor,
         .SourceColor = sourceColor,
@@ -649,6 +649,127 @@ TEST(SchedulerGraph, ApplyMovesTheDestinationOfABroadcastCut) {
     EXPECT_EQ(FetchRows(right.Task.Inputs[0]), 7);
     EXPECT_EQ(sink.Task->Execute(), ETaskResult::FINISHED);
     EXPECT_EQ(source.Task->Execute(), ETaskResult::FINISHED);
+    EXPECT_EQ(FetchState(right.Task.Inputs[0]), EFetchResult::FINISHED);
+}
+
+// Ports for Apply to bind: `inputs` unbound inputs and `outputs` unbound outputs.
+std::unique_ptr<TPortsTask> Placeholder(size_t inputs, size_t outputs) {
+    auto task = std::make_unique<TPortsTask>();
+    task->Inputs.resize(inputs);
+    task->Outputs.resize(outputs);
+    return task;
+}
+
+TEST(SchedulerGraph, ApplyCutsEdgesOfOneGatherIntoOneSinkAndSource) {
+    TTaskGraph graph;
+    auto connection = std::make_unique<TGatherConnection>();
+    connection->Resize(3, 1);
+    auto& original = graph.AddConnection(std::move(connection));
+    auto first = AddPortsNode(graph, {}, {{.Connection = &original, .Lane = 0}});
+    auto second = AddPortsNode(graph, {}, {{.Connection = &original, .Lane = 1}});
+    auto third = AddPortsNode(graph, {}, {{.Connection = &original, .Lane = 2}});
+    auto root = AddPortsNode(graph, {{.Connection = &original}}, {});
+    graph.AddEdge(first.Node, root.Node, original, 0, 0, 1);
+    auto& secondCut = graph.AddEdge(second.Node, root.Node, original, 1, 0, 1);
+    auto& thirdCut = graph.AddEdge(third.Node, root.Node, original, 2, 0, 1);
+    std::string error;
+    ASSERT_TRUE(graph.Seal(&error)) << error;
+
+    auto added = std::make_unique<TGatherConnection>();
+    added->Resize(2, 1);
+    auto sinkTask = Placeholder(1, 0);
+    auto sourceTask = Placeholder(0, 2);
+    auto& sinkPorts = *sinkTask;
+    auto& sourcePorts = *sourceTask;
+    TSplitPlan plan;
+    plan.Splits.push_back({
+        .Edges = {&secondCut, &thirdCut},
+        .ReboundPort = EReboundPort::SourceOutput,
+        .SinkColor = 1,
+        .SourceColor = 0,
+        .NewConnection = std::move(added),
+        .SinkTask = std::move(sinkTask),
+        .SourceTask = std::move(sourceTask),
+    });
+    const auto sealed = graph.Apply(std::move(plan));
+    ASSERT_EQ(graph.Nodes().size(), 6u);
+    auto& sink = *graph.Nodes()[4];
+    auto& source = *graph.Nodes()[5];
+    EXPECT_EQ(Graphs(sealed), (TGraphs{{&root.Node}, {&sink}}));
+    const auto* gather = graph.Connections().back().get();
+    ASSERT_EQ(graph.Edges().size(), 5u);
+    EXPECT_EQ(Shape(*graph.Edges()[1]), (TEdgeShape{&second.Node, &sink, gather, 0, 0, 0}));
+    EXPECT_EQ(Shape(*graph.Edges()[2]), (TEdgeShape{&source, &root.Node, &original, 1, 0, 1}));
+    EXPECT_EQ(Shape(*graph.Edges()[3]), (TEdgeShape{&third.Node, &sink, gather, 1, 0, 0}));
+    EXPECT_EQ(Shape(*graph.Edges()[4]), (TEdgeShape{&source, &root.Node, &original, 2, 0, 1}));
+
+    // The cut lanes move to one sink lane; the source finishes them in the old gather.
+    ASSERT_TRUE(third.Task.Outputs[0].Push(EmptyBatch(5)));
+    second.Task.Outputs[0].Finish();
+    third.Task.Outputs[0].Finish();
+    EXPECT_EQ(FetchRows(sinkPorts.Inputs[0]), 5);
+    EXPECT_EQ(FetchState(sinkPorts.Inputs[0]), EFetchResult::FINISHED);
+    first.Task.Outputs[0].Finish();
+    sourcePorts.Outputs[0].Finish();
+    EXPECT_EQ(FetchState(root.Task.Inputs[0]), EFetchResult::NO_DATA);
+    sourcePorts.Outputs[1].Finish();
+    EXPECT_EQ(FetchState(root.Task.Inputs[0]), EFetchResult::FINISHED);
+}
+
+TEST(SchedulerGraph, ApplyCutsEdgesOfOneBroadcastIntoOneSinkAndSource) {
+    TTaskGraph graph;
+    auto connection = std::make_unique<TBroadcastConnection>();
+    connection->Resize(1, 3);
+    auto& original = graph.AddConnection(std::move(connection));
+    auto producer = AddPortsNode(graph, {}, {{.Connection = &original}});
+    auto left = AddPortsNode(graph, {{.Connection = &original, .Lane = 0}}, {});
+    auto middle = AddPortsNode(graph, {{.Connection = &original, .Lane = 1}}, {});
+    auto right = AddPortsNode(graph, {{.Connection = &original, .Lane = 2}}, {});
+    graph.AddEdge(producer.Node, left.Node, original, 0, 0, 1);
+    auto& middleCut = graph.AddEdge(producer.Node, middle.Node, original, 0, 1, 1);
+    auto& rightCut = graph.AddEdge(producer.Node, right.Node, original, 0, 2, 1);
+    std::string error;
+    ASSERT_TRUE(graph.Seal(&error)) << error;
+
+    auto added = std::make_unique<TBroadcastConnection>();
+    added->Resize(1, 2);
+    auto sinkTask = Placeholder(2, 0);
+    auto sourceTask = Placeholder(0, 1);
+    auto& sinkPorts = *sinkTask;
+    auto& sourcePorts = *sourceTask;
+    TSplitPlan plan;
+    plan.Splits.push_back({
+        .Edges = {&middleCut, &rightCut},
+        .ReboundPort = EReboundPort::DestinationInput,
+        .SinkColor = 0,
+        .SourceColor = 1,
+        .NewConnection = std::move(added),
+        .SinkTask = std::move(sinkTask),
+        .SourceTask = std::move(sourceTask),
+    });
+    const auto sealed = graph.Apply(std::move(plan));
+    ASSERT_EQ(graph.Nodes().size(), 6u);
+    auto& sink = *graph.Nodes()[4];
+    auto& source = *graph.Nodes()[5];
+    EXPECT_EQ(Graphs(sealed), (TGraphs{{&left.Node, &sink}, {&middle.Node, &right.Node}}));
+    const auto* broadcast = graph.Connections().back().get();
+    ASSERT_EQ(graph.Edges().size(), 5u);
+    EXPECT_EQ(Shape(*graph.Edges()[1]), (TEdgeShape{&producer.Node, &sink, &original, 0, 1, 0}));
+    EXPECT_EQ(Shape(*graph.Edges()[2]), (TEdgeShape{&source, &middle.Node, broadcast, 0, 0, 1}));
+    EXPECT_EQ(Shape(*graph.Edges()[3]), (TEdgeShape{&producer.Node, &sink, &original, 0, 2, 0}));
+    EXPECT_EQ(Shape(*graph.Edges()[4]), (TEdgeShape{&source, &right.Node, broadcast, 0, 1, 1}));
+
+    // The sink reads both cut lanes of the old broadcast; one push of the
+    // source reaches both moved consumers.
+    ASSERT_TRUE(producer.Task.Outputs[0].Push(EmptyBatch(7)));
+    producer.Task.Outputs[0].Finish();
+    EXPECT_EQ(FetchRows(left.Task.Inputs[0]), 7);
+    EXPECT_EQ(FetchRows(sinkPorts.Inputs[0]), 7);
+    EXPECT_EQ(FetchRows(sinkPorts.Inputs[1]), 7);
+    ASSERT_TRUE(sourcePorts.Outputs[0].Push(EmptyBatch(7)));
+    sourcePorts.Outputs[0].Finish();
+    EXPECT_EQ(FetchRows(middle.Task.Inputs[0]), 7);
+    EXPECT_EQ(FetchRows(right.Task.Inputs[0]), 7);
     EXPECT_EQ(FetchState(right.Task.Inputs[0]), EFetchResult::FINISHED);
 }
 
@@ -1039,6 +1160,12 @@ TEST(SchedulerGraph, ApplyRejectsAnIncompleteSplit) {
     ASSERT_TRUE(graph.Seal(&error)) << error;
     auto split = Split(cut, EReboundPort::DestinationInput, 0, 1);
     split.SourceTask.reset();
+    EXPECT_EQ(ApplyError(graph, Plan(std::move(split))), "split plan has an incomplete split");
+    split = Split(cut, EReboundPort::DestinationInput, 0, 1);
+    split.Edges.clear();
+    EXPECT_EQ(ApplyError(graph, Plan(std::move(split))), "split plan has an incomplete split");
+    split = Split(cut, EReboundPort::DestinationInput, 0, 1);
+    split.Edges.push_back(nullptr);
     EXPECT_EQ(ApplyError(graph, Plan(std::move(split))), "split plan has an incomplete split");
 }
 

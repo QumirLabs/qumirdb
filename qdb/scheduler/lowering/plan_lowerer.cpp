@@ -3193,22 +3193,29 @@ TSealedTaskGraph ApplySplit(TLoweredPlan& lowered, TSplitPlan&& plan) {
             .DebugKind = cuts[i].Source->DebugKind,
             .Body = TRemoteSourceNode{.Out = PortSpec(graph, fromSource.Connection, fromSource.SrcLane)},
         };
-        // The edge of the other placeholder keeps the cut edge's connection and lane.
+        // Cut edge j became sink edge j and source edge j. The edge of the other
+        // placeholder keeps the cut edge's connection and lane.
         const bool output = rebound[i] == EReboundPort::SourceOutput;
-        const auto& task = output ? *toSink.Src : *fromSource.Dst;
-        auto& record = records[task.ExecutionSlot];
-        if (!record) {
-            continue;
-        }
-        const auto from = output
-            ? PortSpec(graph, fromSource.Connection, fromSource.SrcLane)
-            : PortSpec(graph, toSink.Connection, toSink.DstLane);
-        const auto to = output
-            ? PortSpec(graph, toSink.Connection, toSink.SrcLane)
-            : PortSpec(graph, fromSource.Connection, fromSource.DstLane);
-        if (!RebindPort(record->Body, output ? EPortKind::Output : EPortKind::Input, from, to)) {
-            throw std::logic_error(std::format(
-                "split plan: the record of task n{} has no port to rebind", task.ExecutionSlot));
+        const auto& sinkEdges = cuts[i].Sink->Inbound;
+        const auto& sourceEdges = cuts[i].Source->Outbound;
+        for (size_t j = 0; j < sinkEdges.size(); ++j) {
+            const auto& toSink = *sinkEdges[j];
+            const auto& fromSource = *sourceEdges[j];
+            const auto& task = output ? *toSink.Src : *fromSource.Dst;
+            auto& record = records[task.ExecutionSlot];
+            if (!record) {
+                continue;
+            }
+            const auto from = output
+                ? PortSpec(graph, fromSource.Connection, fromSource.SrcLane)
+                : PortSpec(graph, toSink.Connection, toSink.DstLane);
+            const auto to = output
+                ? PortSpec(graph, toSink.Connection, toSink.SrcLane)
+                : PortSpec(graph, fromSource.Connection, fromSource.DstLane);
+            if (!RebindPort(record->Body, output ? EPortKind::Output : EPortKind::Input, from, to)) {
+                throw std::logic_error(std::format(
+                    "split plan: the record of task n{} has no port to rebind", task.ExecutionSlot));
+            }
         }
     }
     return sealed;

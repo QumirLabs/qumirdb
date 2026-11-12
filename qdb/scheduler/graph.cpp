@@ -53,15 +53,15 @@ void Rebind(TTaskNode& node, const TPortRebind& rebind) {
     }
 }
 
-// Replaces split.Edge by Src -> remote sink and remote source -> Dst. Both
-// start as copies of it; the rebound side then uses lane 0 of the new connection.
+// Replaces split.Edges by Src -> sink and source -> Dst. The new edges start
+// as copies of the cut ones; the rebound side of edge j then uses lane j of the
+// new connection.
 std::pair<TTaskNode*, TTaskNode*> Cut(
     TTaskGraph& graph,
     TEdgeSplit& split,
     std::vector<std::unique_ptr<TTaskEdge>>& edges,
     std::vector<std::optional<int>>& colors)
 {
-    const auto& edge = *split.Edge;
     auto& connection = graph.AddConnection(std::move(split.NewConnection));
     auto& sink = graph.AddOwnedNode(std::move(split.SinkTask));
     sink.DebugKind = "remote-sink";
@@ -71,36 +71,49 @@ std::pair<TTaskNode*, TTaskNode*> Cut(
     colors[sink.ExecutionSlot] = split.SinkColor;
     colors[source.ExecutionSlot] = split.SourceColor;
 
-    auto sinkEdge = std::make_unique<TTaskEdge>(edge);
-    sinkEdge->Dst = &sink;
-    sinkEdge->ExecInput = 0;
-    auto sourceEdge = std::make_unique<TTaskEdge>(edge);
-    sourceEdge->Src = &source;
-    if (split.ReboundPort == EReboundPort::SourceOutput) {
-        Rebind(*edge.Src, {
-            .Kind = EPortKind::Output,
-            .From = edge.Connection,
-            .FromLane = edge.SrcLane,
-            .To = &connection,
-        });
-        sinkEdge->Connection = &connection;
-        sinkEdge->SrcLane = 0;
-        sinkEdge->DstLane = 0;
-    } else {
-        Rebind(*edge.Dst, {
-            .Kind = EPortKind::Input,
-            .From = edge.Connection,
-            .FromLane = edge.DstLane,
-            .To = &connection,
-        });
-        sourceEdge->Connection = &connection;
-        sourceEdge->SrcLane = 0;
-        sourceEdge->DstLane = 0;
+    // One placeholder port per distinct lane: a gather's sink reads one lane
+    // of the new connection, a broadcast's source writes one.
+    std::set<std::pair<const IConnection*, size_t>> sinkLanes;
+    std::set<std::pair<const IConnection*, size_t>> sourceLanes;
+    for (size_t lane = 0; lane < split.Edges.size(); ++lane) {
+        const auto& edge = *split.Edges[lane];
+        auto sinkEdge = std::make_unique<TTaskEdge>(edge);
+        sinkEdge->Dst = &sink;
+        sinkEdge->ExecInput = 0;
+        auto sourceEdge = std::make_unique<TTaskEdge>(edge);
+        sourceEdge->Src = &source;
+        if (split.ReboundPort == EReboundPort::SourceOutput) {
+            Rebind(*edge.Src, {
+                .Kind = EPortKind::Output,
+                .From = edge.Connection,
+                .FromLane = edge.SrcLane,
+                .To = &connection,
+                .ToLane = lane,
+            });
+            sinkEdge->Connection = &connection;
+            sinkEdge->SrcLane = lane;
+            sinkEdge->DstLane = 0;
+        } else {
+            Rebind(*edge.Dst, {
+                .Kind = EPortKind::Input,
+                .From = edge.Connection,
+                .FromLane = edge.DstLane,
+                .To = &connection,
+                .ToLane = lane,
+            });
+            sourceEdge->Connection = &connection;
+            sourceEdge->SrcLane = 0;
+            sourceEdge->DstLane = lane;
+        }
+        if (sinkLanes.emplace(sinkEdge->Connection, sinkEdge->DstLane).second) {
+            Rebind(sink, {.Kind = EPortKind::Input, .To = sinkEdge->Connection, .ToLane = sinkEdge->DstLane});
+        }
+        if (sourceLanes.emplace(sourceEdge->Connection, sourceEdge->SrcLane).second) {
+            Rebind(source, {.Kind = EPortKind::Output, .To = sourceEdge->Connection, .ToLane = sourceEdge->SrcLane});
+        }
+        edges.push_back(std::move(sinkEdge));
+        edges.push_back(std::move(sourceEdge));
     }
-    Rebind(sink, {.Kind = EPortKind::Input, .To = sinkEdge->Connection, .ToLane = sinkEdge->DstLane});
-    Rebind(source, {.Kind = EPortKind::Output, .To = sourceEdge->Connection, .ToLane = sourceEdge->SrcLane});
-    edges.push_back(std::move(sinkEdge));
-    edges.push_back(std::move(sourceEdge));
     return {&sink, &source};
 }
 
@@ -387,17 +400,23 @@ TSealedTaskGraph TTaskGraph::Apply(TSplitPlan&& plan) {
     if (Split_) {
         throw std::logic_error("task graph is already split");
     }
-    std::unordered_map<const TTaskEdge*, TEdgeSplit*> splits;
+    // Each rowset edge maps to its split's index.
+    std::unordered_map<const TTaskEdge*, size_t> splits;
     std::set<int> planColors;
-    for (auto& split : plan.Splits) {
-        if (!split.Edge || !split.NewConnection || !split.SinkTask || !split.SourceTask) {
+    for (size_t i = 0; i < plan.Splits.size(); ++i) {
+        const auto& split = plan.Splits[i];
+        if (split.Edges.empty() || std::ranges::find(split.Edges, nullptr) != split.Edges.end()
+            || !split.NewConnection || !split.SinkTask || !split.SourceTask)
+        {
             throw std::logic_error("split plan has an incomplete split");
         }
-        if (!IsRowsetEdge(split.Edge)) {
-            throw std::logic_error("split plan cuts a dependency edge as a rowset edge");
-        }
-        if (!splits.emplace(split.Edge, &split).second) {
-            throw std::logic_error("split plan cuts one edge twice");
+        for (const auto* edge : split.Edges) {
+            if (!IsRowsetEdge(edge)) {
+                throw std::logic_error("split plan cuts a dependency edge as a rowset edge");
+            }
+            if (!splits.emplace(edge, i).second) {
+                throw std::logic_error("split plan cuts one edge twice");
+            }
         }
         planColors.insert(split.SinkColor);
         planColors.insert(split.SourceColor);
@@ -443,13 +462,16 @@ TSealedTaskGraph TTaskGraph::Apply(TSplitPlan&& plan) {
         Externals_.push_back({externalBase + 2 * index, sink});
         Externals_.push_back({externalBase + 2 * index + 1, source});
     };
+    // A split's new edges take the place of its first edge.
     for (auto& edge : Edges_) {
         if (auto it = splits.find(edge.get()); it != splits.end()) {
-            const auto [sink, source] = Cut(*this, *it->second, edges, colors);
-            addCut(it->second - plan.Splits.data(), sink, source,
-                it->second->SinkColor, it->second->SourceColor, ETaskEdgeKind::Rowset);
+            const auto index = it->second;
+            if (!Cuts_[index].Sink) {
+                auto& split = plan.Splits[index];
+                const auto [sink, source] = Cut(*this, split, edges, colors);
+                addCut(index, sink, source, split.SinkColor, split.SourceColor, ETaskEdgeKind::Rowset);
+            }
         } else if (auto found = dependencySplits.find(edge.get()); found != dependencySplits.end()) {
-            // A split's new edges take the place of its first edge.
             const auto index = found->second;
             if (!Cuts_[index].Sink) {
                 auto& split = plan.DependencySplits[index - plan.Splits.size()];
