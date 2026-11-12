@@ -1,6 +1,7 @@
 #pragma once
 
 #include <qdb/scheduler/task.h>
+#include <qdb/scheduler/tasks/cte_spool.h>
 #include <qdb/scheduler/tasks/runtime_adapter.h>
 #include <qdb/scheduler/graph.h>
 #include <qdb/scheduler/port.h>
@@ -263,7 +264,8 @@ struct TRuntimeFilterSourceState {
 
 // Empty if every endpoint names its own node of the matching task type
 // (TSourceTask for Source, TSinkTask for Sink, TRuntimeFilterSourceTask and
-// TRuntimeFilterSinkTask for the filter kinds) built with empty code, and every
+// TRuntimeFilterSinkTask for the filter kinds, TCteSourceTask and TCteSinkTask
+// for the CTE kinds) built with empty code, and every
 // such task with empty code has an endpoint, and every sink task has an input
 // connection with row layouts; otherwise the first problem.
 std::string ValidateEndpoints(
