@@ -3162,11 +3162,9 @@ std::optional<TGraphSpec> ExtractLoweredGraphSpec(
 
 namespace {
 
-// Records the CTE sink and source of a cut of CTE edges and returns true, or
-// returns false for a cut of other edges. Producer lanes -> publish: the sink
-// sends the lanes' segments, the source puts them into the publish fragment's
-// spool. Publish -> consumer lanes: the sink sends the published spool and the
-// consumers read the copy the source seals, a spool and states of their own.
+// The records of a cut of CTE edges; false for other cuts. The consumers of a
+// spool cut read a copy with states of their own, as their fragment may also
+// write segments of the original spool for the publish fragment.
 bool RecordCteCut(TLoweredPlan& lowered, const TCut& cut) {
     auto& records = lowered.NodeSpecs;
     const auto& graph = *lowered.Graph;
@@ -3211,8 +3209,6 @@ bool RecordCteCut(TLoweredPlan& lowered, const TCut& cut) {
     const auto spoolSpec = lowered.CteSpools[spool];
     std::vector<uint32_t> segments(spoolSpec.Segments);
     std::iota(segments.begin(), segments.end(), 0u);
-    // A fragment may also hold producer lanes of the spool, whose segments went
-    // to the publish fragment: the copy is a spool of its own.
     const auto copy = static_cast<uint32_t>(lowered.CteSpools.size());
     lowered.CteSpools.push_back(spoolSpec);
     record(*cut.Sink, TCteSinkNode{.In = std::move(inputs), .Spool = spool, .Segments = std::move(segments)});

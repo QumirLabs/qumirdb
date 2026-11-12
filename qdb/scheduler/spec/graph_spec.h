@@ -490,9 +490,9 @@ struct TCteSinkNode {
     }
 };
 
-// Appends the batches its code receives to Segment of Spool, seals the spool if
-// Seal (this fragment's copy of a published spool) and finishes every lane of
-// Out: lanes of the publish task's input, or of a broadcast to consumer lanes.
+// Appends the batches its code receives to Segment of Spool, seals it if Seal
+// and finishes every lane of Out. A sealed copy must get the batches in the
+// publish fragment's seal order: consumer lanes own batches by their index.
 struct TCteSourceNode {
     std::vector<TPortSpec> Out;
     uint32_t Spool = 0;

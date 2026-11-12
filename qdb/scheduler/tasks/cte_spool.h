@@ -20,11 +20,9 @@ namespace NScheduler {
 struct TSinkCode;
 struct TSourceCode;
 
-// The rows of a materialized CTE. Each producer lane owns one segment and
-// appends to it without synchronization. Publication seals the spool once every
-// producer lane has finished; from then on it is immutable and consumer lanes
-// read it concurrently. Producer lanes, consumer references and the views they
-// emit share ownership, so the rows are released when the last of them is done.
+// The rows of a materialized CTE. Each segment has one writer, a producer lane
+// or a CTE source, so appends need no lock; once sealed the spool is immutable
+// and read concurrently. Writers, readers and their views share ownership.
 class TCteSpool {
 public:
     explicit TCteSpool(size_t segments);
