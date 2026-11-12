@@ -44,8 +44,9 @@ EFetchResult FetchCompletion(TInputPort& port) {
 
 } // namespace
 
-TCteSpool::TCteSpool(size_t segments)
+TCteSpool::TCteSpool(size_t segments, std::vector<TValueLayout> rowLayouts)
     : Segments_(segments)
+    , RowLayouts_(std::move(rowLayouts))
 {}
 
 TCteSpool::~TCteSpool() {
@@ -74,6 +75,10 @@ void TCteSpool::Seal() {
 size_t TCteSpool::SegmentCount() const
 {
     return Segments_.size();
+}
+
+std::span<const TValueLayout> TCteSpool::RowLayouts() const {
+    return RowLayouts_;
 }
 
 std::span<const TRowSet> TCteSpool::Segment(size_t segment) const {
@@ -254,7 +259,11 @@ TCteSinkTask::TCteSinkTask(
     : Spool_(std::move(spool))
     , Segments_(std::move(segments))
     , Inputs_(std::move(inputs))
-{}
+{
+    if (Spool_) {
+        RowLayouts_.assign(Spool_->RowLayouts().begin(), Spool_->RowLayouts().end());
+    }
+}
 
 ETaskResult TCteSinkTask::Execute() {
     if (Finished_) {
@@ -300,6 +309,10 @@ void TCteSinkTask::BindCode(std::shared_ptr<const TSinkCode> code, std::shared_p
 
 const std::shared_ptr<const TSinkCode>& TCteSinkTask::Code() const {
     return Code_;
+}
+
+std::span<const TValueLayout> TCteSinkTask::RowLayouts() const {
+    return RowLayouts_;
 }
 
 TCteSourceTask::TCteSourceTask(

@@ -29,6 +29,16 @@ namespace {
     throw std::runtime_error("invalid task graph spec: " + what);
 }
 
+std::vector<TValueLayout> ValueLayouts(const std::vector<TRowLayoutSpec>& specs)
+{
+    std::vector<TValueLayout> layouts;
+    layouts.reserve(specs.size());
+    for (const auto& layout : specs) {
+        layouts.push_back(TValueLayout{.Width = layout.Width, .Bitmap = layout.Bitmap});
+    }
+    return layouts;
+}
+
 std::unique_ptr<IConnection> MakeConnection(const TConnectionSpec& spec)
 {
     std::unique_ptr<IConnection> connection;
@@ -47,13 +57,7 @@ std::unique_ptr<IConnection> MakeConnection(const TConnectionSpec& spec)
     }
     connection->Resize(spec.SrcCount, spec.DstCount);
     connection->SetDebugName(spec.DebugName);
-    std::vector<TValueLayout> layouts;
-    layouts.reserve(spec.RowLayouts.size());
-    for (const auto& layout : spec.RowLayouts) {
-        layouts.push_back(TValueLayout{
-            .Width = layout.Width, .Bitmap = layout.Bitmap});
-    }
-    connection->SetRowLayouts(std::move(layouts));
+    connection->SetRowLayouts(ValueLayouts(spec.RowLayouts));
     return connection;
 }
 
@@ -546,7 +550,8 @@ void AppendCteObjects(
     TNodeTaskContext& context)
 {
     for (size_t i = context.CteSpools.size(); i < spools.size(); ++i) {
-        context.CteSpools.push_back(std::make_shared<TCteSpool>(spools[i].Segments));
+        context.CteSpools.push_back(
+            std::make_shared<TCteSpool>(spools[i].Segments, ValueLayouts(spools[i].RowLayouts)));
     }
     for (size_t i = context.CteConsumerStates.size(); i < states.size(); ++i) {
         context.CteConsumerStates.push_back(

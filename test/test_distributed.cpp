@@ -1079,6 +1079,8 @@ TEST(DistributedSerialization, TaskGraphMessageRoundTrip) {
                 .PeerActor = TActorId(5, 0, 6), .PeerTaskId = 8},
             {.Id = 3, .Kind = ERemoteEndpointKind::FilterSink, .PeerActor = TActorId(2, 9, 4), .PeerTaskId = 4},
             {.Id = 4, .Kind = ERemoteEndpointKind::FilterSource, .PeerActor = TActorId(1, 9, 4), .PeerTaskId = 3},
+            {.Id = 5, .Kind = ERemoteEndpointKind::CteSink, .PeerActor = TActorId(2, 9, 4), .PeerTaskId = 6},
+            {.Id = 6, .Kind = ERemoteEndpointKind::CteSource, .PeerActor = TActorId(1, 9, 4), .PeerTaskId = 5},
         },
     };
     const auto bytes = Encode(original);
@@ -1100,7 +1102,7 @@ TEST(DistributedSerialization, TaskGraphMessageRoundTrip) {
     EXPECT_THROW(Decode(decoded, bytes + 'x'), std::runtime_error);
     // The kind of the first endpoint follows the spec, the image, the endpoint count and its id.
     auto invalid = bytes;
-    invalid[4 + original.Spec.size() + 4 + original.KernelImage.size() + 4 + 8] = 4;
+    invalid[4 + original.Spec.size() + 4 + original.KernelImage.size() + 4 + 8] = 6;
     EXPECT_THROW(Decode(decoded, invalid), std::runtime_error);
 }
 
@@ -2178,6 +2180,34 @@ TEST(DistributedScheduler, ValidatesRemoteEndpoints) {
     EXPECT_EQ(ValidateEndpoints(sealed, sourceOnly), "");
     static_cast<TSourceTask*>(source.Task)->BindCode(sourceCode, sourceState);
     EXPECT_NE(ValidateEndpoints(sealed, sourceOnly), "");
+}
+
+// A CTE source and sink take the CTE kinds of endpoint, not the rowset ones.
+TEST(DistributedScheduler, ValidatesCteEndpoints) {
+    using namespace NQdb::NScheduler;
+    auto connection = std::make_unique<TOneToOneConnection>();
+    auto* connectionPtr = connection.get();
+    auto spool = std::make_shared<TCteSpool>(1, std::vector<TValueLayout>{{.Width = 8}});
+    TTaskGraph graph;
+    auto& source = graph.AddOwnedNode(std::make_unique<TCteSourceTask>(
+        spool, 0, false, std::vector<TOutputPort>{{.Connection = connectionPtr}}));
+    auto& sink = graph.AddOwnedNode(std::make_unique<TCteSinkTask>(
+        spool, std::vector<uint32_t>{0}, std::vector<TInputPort>{{.Connection = connectionPtr}}));
+    graph.AddOwnedEdge(source, sink, std::move(connection));
+    graph.MarkExternal(sink, 1);
+    graph.MarkExternal(source, 2);
+    const auto sealed = graph.Seal();
+    ASSERT_TRUE(sealed);
+    EXPECT_EQ(static_cast<TCteSinkTask*>(sink.Task)->RowLayouts().size(), 1u);
+
+    const std::vector<TRemoteEndpoint> good{
+        {.Id = 1, .Kind = ERemoteEndpointKind::CteSink}, {.Id = 2, .Kind = ERemoteEndpointKind::CteSource}};
+    EXPECT_EQ(ValidateEndpoints(sealed, good), "");
+    const std::vector<TRemoteEndpoint> rowset{
+        {.Id = 1, .Kind = ERemoteEndpointKind::Sink}, {.Id = 2, .Kind = ERemoteEndpointKind::Source}};
+    EXPECT_EQ(ValidateEndpoints(sealed, rowset), "external node 1 is not a sink task");
+    const std::vector<TRemoteEndpoint> sinkOnly{good[0]};
+    EXPECT_EQ(ValidateEndpoints(sealed, sinkOnly), "a cte source task without code has no endpoint");
 }
 
 // Two relays in one fragment: the endpoints of every root are checked.
@@ -3338,6 +3368,63 @@ TEST(DistributedScheduler, QueryActorRunsRuntimeFiltersAcrossNodes) {
     for (const std::string sql : {RuntimeFilterJoinSql,
              "SELECT id, d9 FROM t WHERE id IN (SELECT id FROM t WHERE id % 7 = 0) ORDER BY id",
              "SELECT a.id, b.s FROM t a JOIN t b ON a.id = b.id WHERE b.id < 0 ORDER BY a.id"}) {
+        for (const std::optional<size_t> width : {std::optional<size_t>(), std::optional<size_t>(4)}) {
+            SCOPED_TRACE(sql + " width " + std::to_string(width.value_or(2)));
+            std::vector<std::string> log;
+            const auto answer = cluster.Run(compiler, sql, width, log);
+            ASSERT_TRUE(answer);
+            ASSERT_TRUE(answer->Response) << answer->Response.error().ToString();
+            EXPECT_TRUE(std::ranges::contains(log, std::string("Query: started 2 fragments")));
+            EXPECT_EQ(*answer->Response, RunLocally(sql, cluster.Settings));
+        }
+    }
+}
+
+// CTEs read twice whose producer lanes, publish task and consumer lanes the
+// split spreads over both nodes: every reference reads each spooled row once,
+// as in a local run.
+TEST(DistributedScheduler, QueryActorRunsCtesAcrossNodes) {
+    using namespace NQdb::NScheduler;
+    TQueryCluster cluster;
+    // Small shuffle batches give a join's lanes several batches each, so the
+    // numbering of a spool's batches spans segments.
+    cluster.Settings.HashShuffle.TargetOutputBatchRows = 16;
+    cluster.Settings.HashShuffle.MaxOutputBatchRows = 16;
+    ASSERT_NO_FATAL_FAILURE(cluster.Start());
+
+    // At width 4 both kinds of CTE cut run: segments to the publish task and
+    // copies of the spool to the other node's consumer lanes.
+    TParquetSource table(DecimalsPath);
+    auto settings = cluster.Settings;
+    settings.Scheduler.WorkerCount = 4;
+    auto lowered = LowerSql(CteSql, table, settings, WithoutRuntimeFilters);
+    TNoSink sink;
+    AttachSink(lowered, sink);
+    TPartitioner partitioner(lowered.Graph->Seal(), 2);
+    partitioner.Do();
+    ApplySplit(lowered, partitioner.TakePlan());
+    size_t copies = 0;
+    size_t segmentCuts = 0;
+    for (const auto& record : lowered.NodeSpecs) {
+        if (const auto* source = record ? std::get_if<TCteSourceNode>(&record->Body) : nullptr) {
+            ++(source->Seal ? copies : segmentCuts);
+        }
+    }
+    EXPECT_GT(copies, 0u);
+    EXPECT_GT(segmentCuts, 0u);
+
+    TDecimalsCompiler compiler;
+    for (const std::string sql : {
+             std::string(CteSql),
+             std::string("WITH r AS (SELECT id % 50 AS k, COUNT(*) AS c FROM t GROUP BY id % 50) "
+                 "SELECT COUNT(*) AS n, SUM(a.c) AS s FROM r a JOIN r b ON a.k = b.k"),
+             std::string("WITH r AS (SELECT id % 7 AS k, SUM(id) AS s FROM t GROUP BY id % 7) "
+                 "SELECT k, s FROM r WHERE s = (SELECT MAX(s) FROM r)"),
+             std::string("WITH r AS (SELECT id, d9 FROM t WHERE id % 3 <> 0) "
+                 "SELECT a.id, b.d9 FROM r a JOIN r b ON a.id = b.id + 1 ORDER BY a.id"),
+             std::string("WITH r AS (SELECT a.id, b.d9 FROM t a JOIN t b ON a.id = b.id WHERE a.id % 3 <> 0) "
+                 "SELECT COUNT(*) AS n, SUM(id) AS s FROM (SELECT id FROM r UNION ALL SELECT id FROM r WHERE id > 100) u"),
+         }) {
         for (const std::optional<size_t> width : {std::optional<size_t>(), std::optional<size_t>(4)}) {
             SCOPED_TRACE(sql + " width " + std::to_string(width.value_or(2)));
             std::vector<std::string> log;

@@ -733,7 +733,7 @@ void DeserializeFrom(TTaskGraphMessage& message, TBlob& blob) {
     for (uint32_t i = 0; i < count; ++i) {
         TRemoteEndpoint endpoint{.Id = reader.Value<uint64_t>()};
         const auto kind = reader.Value<uint8_t>();
-        if (kind > static_cast<uint8_t>(ERemoteEndpointKind::FilterSink)) {
+        if (kind > static_cast<uint8_t>(ERemoteEndpointKind::CteSink)) {
             Invalid("invalid endpoint kind");
         }
         endpoint.Kind = static_cast<ERemoteEndpointKind>(kind);

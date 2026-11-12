@@ -140,6 +140,8 @@ enum class ERemoteEndpointKind {
     Sink,
     FilterSource,
     FilterSink,
+    CteSource,
+    CteSink,
 };
 
 // Id is the node's external id in the graph; routing lives here, not in the graph.

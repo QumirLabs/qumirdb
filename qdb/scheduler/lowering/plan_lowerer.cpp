@@ -1128,7 +1128,11 @@ private:
         auto planOut = Lower(materialization->Plan, input);
 
         const auto spool = static_cast<uint32_t>(CteSpools_.size());
-        CteSpools_.push_back({.Segments = static_cast<uint32_t>(lanes)});
+        std::vector<NScheduler::TRowLayoutSpec> rowLayouts;
+        for (const auto& layout : RowLayouts(planOut.OutputType)) {
+            rowLayouts.push_back({.Width = layout.Width, .Bitmap = layout.Bitmap});
+        }
+        CteSpools_.push_back({.Segments = static_cast<uint32_t>(lanes), .RowLayouts = std::move(rowLayouts)});
         // No row type: the rows go through the spool, these only finish lanes.
         auto& written = AddConn<NScheduler::TGatherConnection>(
             lanes, 1, "cte-written");

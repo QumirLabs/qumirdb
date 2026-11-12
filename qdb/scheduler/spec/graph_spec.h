@@ -407,10 +407,13 @@ struct TLateMergeNode {
 // The spool of a materialized CTE, one segment per producer lane.
 struct TCteSpoolSpec {
     uint32_t Segments = 0;
+    // Of the spooled rows, which a CTE sink sends.
+    std::vector<TRowLayoutSpec> RowLayouts;
 
     void Fields(this auto& self, auto& v)
     {
         v(self.Segments);
+        v(self.RowLayouts);
     }
 };
 

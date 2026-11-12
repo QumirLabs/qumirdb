@@ -210,8 +210,11 @@ struct TComputeActor : public IBehaviorActor {
         auto count = [&](ERemoteEndpointKind kind) {
             return static_cast<size_t>(std::ranges::count(message.Endpoints, kind, &TRemoteEndpoint::Kind));
         };
+        // CTE sinks and sources move their batches as remote sinks and sources do.
         ActorChannel = std::make_unique<NScheduler::TActorNotificationChannel>(
-            ctx->CreateNotifier(), count(ERemoteEndpointKind::Sink), count(ERemoteEndpointKind::Source),
+            ctx->CreateNotifier(),
+            count(ERemoteEndpointKind::Sink) + count(ERemoteEndpointKind::CteSink),
+            count(ERemoteEndpointKind::Source) + count(ERemoteEndpointKind::CteSource),
             count(ERemoteEndpointKind::FilterSink));
         for (const auto& endpoint : message.Endpoints) {
             auto* node = Graph.ExternalNode(endpoint.Id);
@@ -219,15 +222,25 @@ struct TComputeActor : public IBehaviorActor {
                 case ERemoteEndpointKind::Source:
                     InitSource(endpoint, static_cast<NScheduler::TSourceTask&>(*node->Task), node);
                     break;
-                case ERemoteEndpointKind::Sink:
-                    InitSink(endpoint, static_cast<NScheduler::TSinkTask&>(*node->Task), node);
+                case ERemoteEndpointKind::Sink: {
+                    auto& sink = static_cast<NScheduler::TSinkTask&>(*node->Task);
+                    InitSink(endpoint, sink, sink.InputConnection()->RowLayouts(), node);
                     break;
+                }
                 case ERemoteEndpointKind::FilterSource:
                     InitFilterSource(endpoint, static_cast<NScheduler::TRuntimeFilterSourceTask&>(*node->Task), node);
                     break;
                 case ERemoteEndpointKind::FilterSink:
                     InitFilterSink(endpoint, static_cast<NScheduler::TRuntimeFilterSinkTask&>(*node->Task));
                     break;
+                case ERemoteEndpointKind::CteSource:
+                    InitSource(endpoint, static_cast<NScheduler::TCteSourceTask&>(*node->Task), node);
+                    break;
+                case ERemoteEndpointKind::CteSink: {
+                    auto& sink = static_cast<NScheduler::TCteSinkTask&>(*node->Task);
+                    InitSink(endpoint, sink, sink.RowLayouts(), node);
+                    break;
+                }
             }
         }
         Scheduler = std::make_unique<NScheduler::TThreadedScheduler>(
@@ -333,9 +346,11 @@ struct TComputeActor : public IBehaviorActor {
         SchedulerChannel->Notify(std::get<1>(it->second));
     }
 
+    // TSourceTask or TCteSourceTask.
+    template <class TTask>
     void InitSource(
         const TRemoteEndpoint& endpoint,
-        NScheduler::TSourceTask& sourceTask,
+        TTask& sourceTask,
         NScheduler::TTaskNode* node)
     {
         auto [code, state] = NScheduler::MakeRemoteSource(
@@ -344,13 +359,16 @@ struct TComputeActor : public IBehaviorActor {
         SourceStates.emplace(endpoint.Id, std::tuple{std::move(state), node});
     }
 
+    // TSinkTask or TCteSinkTask; `layouts` live as long as the task.
+    template <class TTask>
     void InitSink(
         const TRemoteEndpoint& endpoint,
-        NScheduler::TSinkTask& sinkTask,
+        TTask& sinkTask,
+        std::span<const TValueLayout> layouts,
         NScheduler::TTaskNode* node)
     {
         auto [code, state] = NScheduler::MakeRemoteSink(
-            endpoint.Id, endpoint.PeerActor, endpoint.PeerTaskId, sinkTask.InputConnection()->RowLayouts(), *ActorChannel);
+            endpoint.Id, endpoint.PeerActor, endpoint.PeerTaskId, layouts, *ActorChannel);
         sinkTask.BindCode(std::move(code), state);
         SinkStates.emplace(endpoint.Id, std::tuple{std::move(state), node});
     }
