@@ -99,6 +99,14 @@ public:
     }
 };
 
+// Waits for input that no task produces.
+class TStarvedTask : public ITask {
+public:
+    ETaskResult Execute() override {
+        return ETaskResult::NEED_DATA;
+    }
+};
+
 class TWaitForBothTask : public ITask {
 public:
     TTaskNode* Left = nullptr;
@@ -1244,6 +1252,22 @@ TEST(SchedulerGraph, SingleThreadedSchedulerCannotRunTwice) {
     ASSERT_TRUE(scheduler.Run(&error)) << error;
     EXPECT_FALSE(scheduler.Run(&error));
     EXPECT_NE(error.find("cannot run twice"), std::string::npos);
+}
+
+// One root finishes, the other waits for input that never comes: the ready
+// queue drains with a root unfinished, which is a failed run, not a success.
+TEST(SchedulerGraph, SingleThreadedSchedulerReportsAStall) {
+    TTaskGraph graph;
+    auto& done = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& starved = graph.AddOwnedNode(std::make_unique<TStarvedTask>());
+    const auto sealed = graph.Seal();
+    ASSERT_TRUE(sealed);
+
+    std::string error;
+    EXPECT_FALSE(TSingleThreadedScheduler(sealed).Run(&error));
+    EXPECT_EQ(error, "single-threaded scheduler stalled with 1 of 2 roots unfinished");
+    EXPECT_EQ(done.State.load(), ETaskState::Finished);
+    EXPECT_NE(starved.State.load(), ETaskState::Finished);
 }
 
 } // namespace

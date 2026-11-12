@@ -2,6 +2,7 @@
 #include <qdb/scheduler/impl/single_threaded_scheduler.h>
 
 #include <exception>
+#include <format>
 #include <utility>
 
 namespace NQdb {
@@ -44,6 +45,7 @@ bool TSingleThreadedScheduler::Run(std::string* error) {
             Schedule(root);
         }
     }
+    const size_t roots = unfinishedRoots;
 
     while (unfinishedRoots != 0 && !Ready_.empty()) {
         auto* node = Ready_.front();
@@ -95,6 +97,12 @@ bool TSingleThreadedScheduler::Run(std::string* error) {
         }
     }
 
+    // Nothing can run, yet a root has not finished: its output is incomplete.
+    if (unfinishedRoots != 0) {
+        SetError(error, std::format(
+            "single-threaded scheduler stalled with {} of {} roots unfinished", unfinishedRoots, roots));
+        return false;
+    }
     return true;
 }
 
