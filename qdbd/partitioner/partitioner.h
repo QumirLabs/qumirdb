@@ -10,10 +10,10 @@
 namespace NQdb {
 namespace NScheduler {
 
-// Colors a sealed graph into `partitions` fragments. Only rowset edges are cut:
-// dependency edges are not transported yet, so Apply rejects a plan whose
-// coloring puts one across colors (e.g. runtime filters); distributed runs
-// must disable runtime filters for now.
+// Colors a sealed graph into `partitions` fragments and plans the cuts of the
+// edges between colors: rowset edges one by one, the dependency edges into a
+// runtime filter task by filter and pair of colors. Apply rejects any other
+// dependency edge between colors.
 class TPartitioner {
 public:
     TPartitioner(const TSealedTaskGraph& graph, int partitions);
@@ -28,7 +28,7 @@ public:
         return SplitEdges_;
     }
 
-    // The rowset cuts of SplitEdges() for TTaskGraph::Apply.
+    // The cuts of SplitEdges() for TTaskGraph::Apply.
     TSplitPlan TakePlan() {
         return std::exchange(Plan_, {});
     }

@@ -17,8 +17,8 @@ struct TRuntimeContext;
 // The runtime-filter kernel (qdb/kernel/join/runtime_filter.oz) implements
 // every operation on filter contents; these are its entry points, in
 // TKernelSlot::Fns order. C++ provides the storage and calls it once per batch.
-inline constexpr std::array<const char*, 3> RuntimeFilterKernelEntrypoints = {
-    "rf_build", "rf_publish", "rf_probe"};
+inline constexpr std::array<const char*, 4> RuntimeFilterKernelEntrypoints = {
+    "rf_build", "rf_publish", "rf_probe", "rf_merge"};
 
 // Mirrors RuntimeFilterBuild in the kernel, which documents the fields.
 struct TRuntimeFilterBuildState {
@@ -39,12 +39,14 @@ struct TRuntimeFilterBuildState {
     int64_t BloomWords = -1;
 };
 
-// Value-only contribution, suitable for transfer to a remote merger.
+// Value-only contribution, suitable for transfer to another fragment.
 struct TRuntimeFilterPartial {
     std::vector<uint64_t> Hashes;
     std::vector<uint64_t> BloomWords;
     bool ExactSetOverflowed = false;
     uint64_t BuildRows = 0;
+    // The producers whose contributions this one merges.
+    uint32_t Producers = 1;
 };
 
 // Filters may return false positives, never false negatives. Builders are
@@ -96,7 +98,8 @@ class IRuntimeFilterProducer {
 public:
     virtual ~IRuntimeFilterProducer() = default;
     virtual TRuntimeFilterBuilder MakeBuilder() const = 0;
-    // Once per lane at input EOF, before waiting for its output to drain.
+    // Once per lane at input EOF, before waiting for its output to drain, or
+    // once per merged partial of several lanes.
     virtual void FinishProducer(TRuntimeFilterPartial&& partial) = 0;
 };
 
@@ -123,7 +126,7 @@ struct TRuntimeFilterBinding {
     std::shared_ptr<IRuntimeFilterProbe> Probe;
 };
 
-// IDs are query-scoped; endpoints can also represent remote publication/probing.
+// IDs are query-scoped.
 // runtimeContext belongs to the query and holds its runtime-filter kernel.
 class IRuntimeFilterBindingFactory {
 public:
@@ -202,6 +205,31 @@ private:
     std::mutex ProbeStatesMutex_;
     std::vector<std::shared_ptr<TRuntimeFilterProbeState>> ProbeStates_;
     std::chrono::steady_clock::time_point ExecutionStart_;
+};
+
+// The producer of a fragment's build lanes when other fragments probe the
+// filter: keeps the merge of their partials for the fragment's runtime filter
+// sinks and, if `forward`, also hands each partial on to `filter`.
+class TRuntimeFilterExport final : public IRuntimeFilterProducer {
+public:
+    TRuntimeFilterExport(std::shared_ptr<TRuntimeContext> runtimeContext,
+        std::shared_ptr<IRuntimeFilterProducer> filter, bool forward);
+
+    TRuntimeFilterBuilder MakeBuilder() const override {
+        return Filter_->MakeBuilder();
+    }
+
+    void FinishProducer(TRuntimeFilterPartial&& partial) override;
+    // A copy of the merge, from which a filter publishes what it would from
+    // the merged partials; complete once every producer finished.
+    TRuntimeFilterPartial Merged() const;
+
+private:
+    std::shared_ptr<TRuntimeContext> RuntimeContext_;
+    std::shared_ptr<IRuntimeFilterProducer> Filter_;
+    bool Forward_;
+    mutable std::mutex Mutex_;
+    TRuntimeFilterPartial Merged_{.Producers = 0};
 };
 
 class TLocalRuntimeFilterBindingFactory final : public IRuntimeFilterBindingFactory {

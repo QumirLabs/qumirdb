@@ -1351,7 +1351,8 @@ struct TLoweredFragment {
 
 // Lowers `sql` over `source` as table t, without a sink.
 NQdb::NScheduler::TLoweredPlan LowerSql(
-    const std::string& sql, TParquetSource& source, const NQdb::NScheduler::TSettings& settings)
+    const std::string& sql, TParquetSource& source, const NQdb::NScheduler::TSettings& settings,
+    TPlanPassOptions options = {.EnableCbo = false})
 {
     using namespace NQdb::NScheduler;
     std::istringstream input(sql);
@@ -1368,7 +1369,7 @@ NQdb::NScheduler::TLoweredPlan LowerSql(
         throw std::runtime_error(plan.error().ToString());
     }
     auto root = *plan;
-    ApplyPlanPasses(root, {.EnableCbo = false});
+    ApplyPlanPasses(root, options);
     return LowerPlanToGraph(root, settings, nullptr);
 }
 
@@ -2886,6 +2887,9 @@ private:
     std::optional<TExecuteQueryResponse>& Answer_;
 };
 
+// A filter at every join, whatever the estimates.
+const TPlanPassOptions WithRuntimeFilters{.EnableCbo = false, .ForceRuntimeFilters = true};
+
 // Table t is decimals.parquet; each reference gets its own source, as column
 // pruning narrows a source.
 struct TDecimalsCompiler {
@@ -2969,6 +2973,107 @@ TEST(DistributedScheduler, SplitsALateLookupWithTheLayoutsOfItsColumns) {
         EXPECT_FALSE(lookup.Columns.empty());
     }
     EXPECT_GT(lookupCuts, 0u);
+}
+
+// An inner join; with forced runtime filters its build lanes publish a filter
+// that the probe side's scans wait for.
+constexpr const char* RuntimeFilterJoinSql =
+    "SELECT a.id, b.s, b.d38 FROM t a JOIN t b ON a.id = b.id WHERE a.id % 5 = 0 ORDER BY a.id";
+
+// Each fragment that probes a filter gets partials for every build lane: its
+// own lanes' and, through one runtime filter source per other fragment with
+// lanes, the merge of that fragment's lanes.
+TEST(DistributedScheduler, SplitsRuntimeFiltersSoEveryProbeMergesEveryBuildLane) {
+    using namespace NQdb::NScheduler;
+    TParquetSource source(DecimalsPath);
+    TSettings settings;
+    settings.Scheduler.WorkerCount = 4;
+    settings.ScanSplit.Strategy = EScanSplitStrategy::RowGroupRange;
+    settings.ScanSplit.MaxScanTasks = 4;
+    auto lowered = LowerSql(RuntimeFilterJoinSql, source, settings, WithRuntimeFilters);
+    ASSERT_FALSE(lowered.RuntimeFilterBindings.empty());
+    TNoSink sink;
+    AttachSink(lowered, sink);
+    TPartitioner partitioner(lowered.Graph->Seal(), 3);
+    partitioner.Do();
+    const auto split = ApplySplit(lowered, partitioner.TakePlan());
+    const auto fragments = ExtractFragmentSpecs(lowered);
+    ASSERT_EQ(fragments.size(), 3u);
+
+    using TPlace = std::pair<size_t, uint32_t>;
+    std::map<uint64_t, TPlace> externals;
+    for (size_t fragment = 0; fragment < fragments.size(); ++fragment) {
+        for (const auto& external : fragments[fragment].Externals) {
+            externals.emplace(external.Id, TPlace{fragment, external.Node});
+        }
+    }
+    // The build lanes behind each runtime filter source, from its peer sink.
+    std::map<TPlace, size_t> remoteLanes;
+    const auto cuts = split.Cuts();
+    for (size_t i = 0; i < cuts.size(); ++i) {
+        if (cuts[i].Kind != ETaskEdgeKind::Dependency) {
+            continue;
+        }
+        const auto sinkAt = externals.at(2 * i);
+        const auto sourceAt = externals.at(2 * i + 1);
+        EXPECT_EQ(sinkAt.first, static_cast<size_t>(cuts[i].SinkColor));
+        EXPECT_EQ(sourceAt.first, static_cast<size_t>(cuts[i].SourceColor));
+        const auto& sinkSpec = fragments[sinkAt.first];
+        EXPECT_EQ(std::get<TRuntimeFilterSinkNode>(sinkSpec.Nodes[sinkAt.second].Body).Filter,
+            std::get<TRuntimeFilterSourceNode>(fragments[sourceAt.first].Nodes[sourceAt.second].Body).Filter);
+        remoteLanes[sourceAt] = std::ranges::count_if(sinkSpec.Edges, [&](const TEdgeSpec& edge) {
+            return edge.Kind == ETaskEdgeKind::Dependency && edge.Dst == sinkAt.second;
+        });
+    }
+    ASSERT_FALSE(remoteLanes.empty()) << "no fragment probes a filter of another one's build lanes";
+
+    for (uint32_t filter = 0; filter < lowered.RuntimeFilterBindings.size(); ++filter) {
+        SCOPED_TRACE(filter);
+        const size_t producers = lowered.RuntimeFilterBindings[filter].ProducerCount;
+        size_t lanes = 0;
+        for (size_t fragment = 0; fragment < fragments.size(); ++fragment) {
+            size_t local = 0;
+            size_t probes = 0;
+            size_t remote = 0;
+            const auto& nodes = fragments[fragment].Nodes;
+            for (uint32_t node = 0; node < nodes.size(); ++node) {
+                const auto& body = nodes[node].Body;
+                if (const auto* shuffle = std::get_if<THashShuffleNode>(&body)) {
+                    local += shuffle->ProducedFilter == filter;
+                } else if (const auto* probe = std::get_if<TRuntimeFilterNode>(&body)) {
+                    probes += probe->Filter == filter;
+                } else if (const auto* from = std::get_if<TRuntimeFilterSourceNode>(&body)) {
+                    remote += from->Filter == filter ? remoteLanes.at({fragment, node}) : 0;
+                }
+            }
+            lanes += local;
+            EXPECT_EQ(local + remote, probes ? producers : local) << "fragment " << fragment;
+        }
+        EXPECT_EQ(lanes, producers);
+    }
+
+    // The fragments build, with the placeholders of each cut on their ends.
+    auto image = CompileKernelImage(lowered.Kernels);
+    std::vector<std::shared_ptr<TKernelSlot>> slots;
+    for (size_t i = 0; i < image.Entrypoints.size(); ++i) {
+        slots.push_back(std::make_shared<TKernelSlot>());
+    }
+    LoadKernelImage(image, slots);
+    for (const auto& fragment : fragments) {
+        const auto graph = MaterializeGraph(DeserializeGraphSpec(SerializeGraphSpec(fragment)), &sink, slots);
+        std::string error;
+        const auto sealed = graph->Seal(&error);
+        ASSERT_TRUE(sealed) << error;
+        for (const auto& external : fragment.Externals) {
+            const auto* task = sealed.ExternalNode(external.Id)->Task;
+            const auto& body = fragment.Nodes[external.Node].Body;
+            if (std::holds_alternative<TRuntimeFilterSinkNode>(body)) {
+                EXPECT_TRUE(dynamic_cast<const TRuntimeFilterSinkTask*>(task));
+            } else if (std::holds_alternative<TRuntimeFilterSourceNode>(body)) {
+                EXPECT_TRUE(dynamic_cast<const TRuntimeFilterSourceTask*>(task));
+            }
+        }
+    }
 }
 
 // The query actor lowers each query, splits it over one compute actor per node

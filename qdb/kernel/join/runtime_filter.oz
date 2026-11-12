@@ -1,9 +1,10 @@
 (block
   ;; Runtime filter kernel: every operation that reads or writes filter
-  ;; contents. It has three entry points, at the end of this file:
+  ;; contents. It has four entry points, at the end of this file:
   ;;   rf_build    adds a batch of hashes to a producer's contribution;
   ;;   rf_publish  merges the contributions into the published filter;
-  ;;   rf_probe    tests a batch of hashes against the published filter.
+  ;;   rf_probe    tests a batch of hashes against the published filter;
+  ;;   rf_merge    merges the Bloom fragments of two contributions.
   ;; C++ (qdb/exec/runtime_filter.cpp) provides the storage that the state
   ;; structs below point to, and owns publication and probe policy.
   ;; Conventions:
@@ -585,4 +586,10 @@
           (return (call rf_bloom_probe_vector words block_mask hashes selection
                     output count selected_hashes selected_output))))
       (return (call rf_bloom_probe_scalar words block_mask hashes selection
-                output count)))))
+                output count))))
+
+  ;; Folds the Bloom fragment `source` into `target`; C++ appends the exact keys.
+  (fun rf_merge
+       ((var target <ptr u64>) (var source <ptr u64>) (var count i64))
+    (block
+      (call rf_bloom_or target source count))))

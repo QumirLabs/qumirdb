@@ -474,7 +474,7 @@ struct TCteConsumerNode {
 // A runtime filter of a join: every build lane publishes one partial into it,
 // the filter tasks probe it. Created through the binding factory.
 struct TRuntimeFilterBindingSpec {
-    // Query-scoped; a factory may bind it to a remote filter.
+    // Query-scoped.
     uint32_t Id = 0;
     uint32_t ProducerCount = 0;
     uint64_t BloomBytes = 0;
@@ -506,13 +506,37 @@ struct TRuntimeFilterNode {
     }
 };
 
+// Sends the merged partial of Filter's build lanes in this graph, the sources
+// of its dependency edges, to a remote fragment through code the compute actor
+// binds.
+struct TRuntimeFilterSinkNode {
+    uint32_t Filter = 0;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.Filter);
+    }
+};
+
+// Hands the partial of a remote fragment's build lanes, which its code
+// receives, to Filter.
+struct TRuntimeFilterSourceNode {
+    uint32_t Filter = 0;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.Filter);
+    }
+};
+
 using TNodeBody = std::variant<
     TForwardNode, TRemoteSourceNode, TRemoteSinkNode, TSinkWriterNode,
     TParquetScanNode, TFilterNode, TProjectNode, TSortNode, TSortMergeNode,
     TWindowNode, TAggregateNode, THashShuffleNode, THashJoinNode, TRowJoinNode,
     TCrossJoinNode, TLimitNode, TLateLookupNode, TLateMergeNode,
     TCteProducerNode, TCtePublishNode, TCteConsumerNode, TPartialAggregateNode,
-    TGroupingSetsAggregateNode, TRuntimeFilterNode>;
+    TGroupingSetsAggregateNode, TRuntimeFilterNode, TRuntimeFilterSinkNode,
+    TRuntimeFilterSourceNode>;
 
 struct TNodeSpec {
     uint64_t ExecStageId = InvalidExecStageId;
@@ -614,6 +638,9 @@ struct TNodeTaskContext {
     std::vector<std::shared_ptr<TCteConsumerState>> CteConsumerStates;
     // Created from the runtime filter table, by index.
     std::vector<TRuntimeFilterBinding> RuntimeFilterBindings;
+    // By filter index: the producer of the build lanes of a filter that runtime
+    // filter sinks send, else null.
+    std::vector<std::shared_ptr<TRuntimeFilterExport>> RuntimeFilterExports;
 };
 
 // Builds the CTE spools and consumer states of the tables past those the
@@ -632,8 +659,8 @@ void AppendRuntimeFilterBindings(
 
 // Builds the task of one node; port connections index `connections`. The
 // lowerer builds the tasks of these kinds through this too. A runtime filter
-// task stays unbound until BindRuntimeFilterTask. Throws std::runtime_error on
-// an invalid body.
+// task stays unbound until BindRuntimeFilterTask, a runtime filter sink until
+// TRuntimeFilterSinkTask::BindNode. Throws std::runtime_error on an invalid body.
 std::unique_ptr<ITask> MakeNodeTask(
     const TNodeBody& body, const std::vector<IConnection*>& connections, TNodeTaskContext& context);
 
@@ -643,12 +670,12 @@ void BindRuntimeFilterTask(
     const TRuntimeFilterNode& node, TTaskNode& task, const TNodeTaskContext& context);
 
 // Builds an unsealed graph: node i has ExecutionSlot i. Remote source and sink
-// tasks have empty code, which the compute actor binds. `sink` is required for
-// SinkWriter nodes; `slots` are the query's kernel slots by kernel index. The
-// runtime context is rebuilt from the spec's regexes and runtime-filter kernel,
-// the CTE objects from its CTE tables, and the runtime filters through
-// `filterBindings` (local filters by default). Throws std::runtime_error on an
-// invalid spec.
+// tasks, runtime filter sources and sinks among them, have empty code, which the
+// compute actor binds. `sink` is required for SinkWriter nodes; `slots` are the
+// query's kernel slots by kernel index. The runtime context is rebuilt from the
+// spec's regexes and runtime-filter kernel, the CTE objects from its CTE tables,
+// and the runtime filters through `filterBindings` (local filters by default).
+// Throws std::runtime_error on an invalid spec.
 std::unique_ptr<TTaskGraph> MaterializeGraph(
     const TGraphSpec& spec, ISink* sink = nullptr,
     std::vector<std::shared_ptr<TKernelSlot>> slots = {},

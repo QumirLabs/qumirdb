@@ -7,9 +7,11 @@
 #include <algorithm>
 #include <cassert>
 #include <limits>
+#include <map>
 #include <memory>
 #include <stack>
 #include <stdexcept>
+#include <tuple>
 #include <utility>
 
 namespace NQdb {
@@ -57,9 +59,28 @@ void TPartitioner::Do() {
 }
 
 void TPartitioner::Partition(const std::vector<TTaskEdge*>& cuts) {
+    // Dependency splits by filter, sink color and source color.
+    std::map<std::tuple<const IRuntimeFilterProbe*, int, int>, size_t> filterSplits;
     for (auto* edge : cuts) {
         if (edge->Kind == ETaskEdgeKind::Dependency) {
-            // Not planned: see the class comment; Apply rejects such a cut.
+            const auto* probe = dynamic_cast<const TRuntimeFilterTask*>(edge->Dst->Task);
+            if (!probe) {
+                // Not planned: Apply rejects such a cut.
+                continue;
+            }
+            const int sinkColor = Colors_.at(edge->Src);
+            const int sourceColor = Colors_.at(edge->Dst);
+            const auto [it, added] = filterSplits.try_emplace(
+                {probe->Filter(), sinkColor, sourceColor}, Plan_.DependencySplits.size());
+            if (added) {
+                Plan_.DependencySplits.push_back({
+                    .SinkColor = sinkColor,
+                    .SourceColor = sourceColor,
+                    .SinkTask = std::make_unique<TRuntimeFilterSinkTask>(),
+                    .SourceTask = std::make_unique<TRuntimeFilterSourceTask>(),
+                });
+            }
+            Plan_.DependencySplits[it->second].Edges.push_back(edge);
             continue;
         }
         if (auto* oneToOne = dynamic_cast<TOneToOneConnection*>(edge->Connection)) {

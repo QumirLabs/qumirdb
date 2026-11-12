@@ -352,13 +352,12 @@ asks an `IRuntimeFilterBindingFactory` for separate producer and probe endpoints
 The default local factory binds both to one `TRuntimeFilter`. A producer hands
 off a value-only `TRuntimeFilterPartial`
 containing exact hashes or a 64-byte blocked Bloom fragment. Exact sets are
-used up to 16K distinct hashes; larger contributions switch to Bloom. A
-distributed factory can send each partial to a merger and make the published
-result available to probe workers.
-The merger must wait for every producer before publishing. Consumer tasks wait
-for publication before reading rows. Network encoding, global completion
-tracking, and worker failure handling remain part of a distributed runtime.
-Every worker must also
+used up to 16K distinct hashes; larger contributions switch to Bloom. Partials
+merge into one partial that stands for all their producers, and a filter
+publishes once its partials cover every producer. Consumer tasks wait for
+publication before reading rows. When a split puts build lanes and consumers in
+different fragments, the filter crosses them as explicit sink and source tasks
+in the task graph, like rowsets. Every worker must
 use the same join-key hash representation for filter publication and probing.
 
 Locally, each producer moves its contribution into a separate slot at input
@@ -384,9 +383,10 @@ kernels when the first join with a filter is lowered. The query's
 `TRuntimeContext` holds it and is passed to the binding factory, so a filter
 cannot be created without it.
 
-The kernel has three entry points, each called once per batch: `rf_build` adds
+The kernel has four entry points, each called once per batch: `rf_build` adds
 a batch to a producer's contribution, `rf_publish` merges the contributions,
-and `rf_probe` tests a batch. They work on state structs that point to storage
+`rf_probe` tests a batch, and `rf_merge` ORs one Bloom fragment into another
+when partials merge into one. They work on state structs that point to storage
 provided by C++. `rf_build` returns early when it needs storage it was not
 given, such as the Bloom words on overflow, and continues from the same row.
 `TRuntimeFilter` keeps the buffers, producer completion, publication, counters

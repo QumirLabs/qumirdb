@@ -223,6 +223,46 @@ const TRuntimeFilterBinding& RuntimeFilterAt(const TNodeTaskContext& context, ui
     return context.RuntimeFilterBindings[filter];
 }
 
+// Build lanes deliver to the export of their filter where it has one.
+std::shared_ptr<IRuntimeFilterProducer> RuntimeFilterProducerAt(
+    const TNodeTaskContext& context, uint32_t filter)
+{
+    const auto& producer = RuntimeFilterAt(context, filter).Producer;
+    if (filter < context.RuntimeFilterExports.size() && context.RuntimeFilterExports[filter]) {
+        return context.RuntimeFilterExports[filter];
+    }
+    return producer;
+}
+
+// The exports of the filters that runtime filter sinks in `nodes` send; one
+// forwards to its filter too when `nodes` probe the filter.
+void AddRuntimeFilterExports(const std::vector<TNodeSpec>& nodes, TNodeTaskContext& context)
+{
+    const auto filters = context.RuntimeFilterBindings.size();
+    std::vector<bool> probed(filters);
+    std::vector<bool> sent(filters);
+    auto mark = [&](std::vector<bool>& marks, uint32_t filter) {
+        if (filter >= filters) {
+            Invalid("runtime filter index is out of range");
+        }
+        marks[filter] = true;
+    };
+    for (const auto& node : nodes) {
+        if (const auto* probe = std::get_if<TRuntimeFilterNode>(&node.Body)) {
+            mark(probed, probe->Filter);
+        } else if (const auto* sink = std::get_if<TRuntimeFilterSinkNode>(&node.Body)) {
+            mark(sent, sink->Filter);
+        }
+    }
+    context.RuntimeFilterExports.resize(filters);
+    for (size_t i = 0; i < filters; ++i) {
+        if (sent[i]) {
+            context.RuntimeFilterExports[i] = std::make_shared<TRuntimeFilterExport>(
+                context.Runtime, context.RuntimeFilterBindings[i].Producer, probed[i]);
+        }
+    }
+}
+
 std::unique_ptr<ITask> MakeHashShuffleTask(
     const THashShuffleNode& node, const std::vector<IConnection*>& connections,
     const TNodeTaskContext& context)
@@ -239,7 +279,7 @@ std::unique_ptr<ITask> MakeHashShuffleTask(
         BindShuffleHash(node.Hash, context), node.InputType,
         node.TargetOutputBatchRows, node.MaxOutputBatchRows, node.TargetOutputBatchBytes);
     if (node.ProducedFilter) {
-        code->ProducedFilter = RuntimeFilterAt(context, *node.ProducedFilter).Producer;
+        code->ProducedFilter = RuntimeFilterProducerAt(context, *node.ProducedFilter);
     }
     code->UseInputHash = node.UseInputHash;
     return std::make_unique<THashShuffleTask>(
@@ -454,6 +494,11 @@ std::unique_ptr<ITask> MakeNodeTask(
         } else if constexpr (std::is_same_v<TNode, TRuntimeFilterNode>) {
             return std::make_unique<TRuntimeFilterTask>(
                 nullptr, InputPort(connections, node.In), OutputPort(connections, node.Out));
+        } else if constexpr (std::is_same_v<TNode, TRuntimeFilterSinkNode>) {
+            // AddRuntimeFilterExports made the export of every sink's filter.
+            return std::make_unique<TRuntimeFilterSinkTask>(context.RuntimeFilterExports[node.Filter]);
+        } else if constexpr (std::is_same_v<TNode, TRuntimeFilterSourceNode>) {
+            return std::make_unique<TRuntimeFilterSourceTask>(RuntimeFilterAt(context, node.Filter).Producer);
         } else if constexpr (std::is_same_v<TNode, TForwardNode>) {
             auto code = std::make_shared<TUnaryCode>([](void*, TRowSet&) {});
             return std::make_unique<TUnaryTask>(
@@ -561,6 +606,7 @@ std::unique_ptr<TTaskGraph> MaterializeGraph(
         filterBindings = std::make_shared<TLocalRuntimeFilterBindingFactory>();
     }
     AppendRuntimeFilterBindings(spec.RuntimeFilterBindings, *filterBindings, context);
+    AddRuntimeFilterExports(spec.Nodes, context);
 
     std::vector<IConnection*> connections;
     connections.reserve(spec.Connections.size());
@@ -581,6 +627,8 @@ std::unique_ptr<TTaskGraph> MaterializeGraph(
     for (size_t i = 0; i < spec.Nodes.size(); ++i) {
         if (const auto* filter = std::get_if<TRuntimeFilterNode>(&spec.Nodes[i].Body)) {
             BindRuntimeFilterTask(*filter, *nodes[i], context);
+        } else if (std::holds_alternative<TRuntimeFilterSinkNode>(spec.Nodes[i].Body)) {
+            static_cast<TRuntimeFilterSinkTask*>(nodes[i]->Task)->BindNode(*nodes[i]);
         }
     }
 

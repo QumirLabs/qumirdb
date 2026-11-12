@@ -21,6 +21,7 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -112,6 +113,85 @@ TEST_F(SchedulerRuntimeFilter, MissingFilterPublicationFailsInExecute) {
     EXPECT_FALSE(consumer.WantsInput(dependency));
     EXPECT_TRUE(consumer.TryNotifyDependency());
     EXPECT_THROW(consumer.Execute(), std::runtime_error);
+}
+
+TRuntimeFilterPartial KeyPartial(const IRuntimeFilterProducer& producer, uint64_t key) {
+    auto builder = producer.MakeBuilder();
+    builder.Add({&key, 1});
+    return std::move(builder).TakePartial();
+}
+
+TEST_F(SchedulerRuntimeFilter, FilterSinkSendsTheMergeOnceItsProducersFinish) {
+    auto filter = std::make_shared<TRuntimeFilter>(Context_, 16, 1024);
+    filter->SetProducerCount(3);
+    auto lanes = std::make_shared<TRuntimeFilterExport>(Context_, filter, /*forward=*/false);
+    TTaskNode first;
+    TTaskNode second;
+    TTaskNode node;
+    std::vector<TTaskEdge> edges;
+    AddDependencies(node, edges, {&first, &second});
+    TRuntimeFilterSinkTask sink(lanes);
+    sink.BindNode(node);
+    std::vector<TRuntimeFilterPartial> sent;
+    sink.BindCode(std::make_shared<TRuntimeFilterSinkCode>([](void* state, TRuntimeFilterPartial&& partial) {
+        static_cast<std::vector<TRuntimeFilterPartial>*>(state)->push_back(std::move(partial));
+    }), std::shared_ptr<void>(std::shared_ptr<void>{}, &sent));
+    TTaskEdge dependency{.Kind = ETaskEdgeKind::Dependency};
+
+    // It pulls idle producers, then waits for them.
+    EXPECT_TRUE(sink.WantsInput(dependency));
+    EXPECT_EQ(sink.Execute(), ETaskResult::NEED_DATA);
+    first.State.store(ETaskState::Queued);
+    second.State.store(ETaskState::Running);
+    EXPECT_FALSE(sink.WantsInput(dependency));
+    EXPECT_EQ(sink.Execute(), ETaskResult::NEED_DATA);
+    lanes->FinishProducer(KeyPartial(*lanes, 11));
+    first.State.store(ETaskState::Finished);
+    EXPECT_FALSE(sink.TryNotifyDependency());
+    lanes->FinishProducer(KeyPartial(*lanes, 22));
+    second.State.store(ETaskState::Finished);
+    EXPECT_TRUE(sink.TryNotifyDependency());
+    EXPECT_FALSE(sink.TryNotifyDependency());
+    EXPECT_TRUE(sent.empty());
+
+    EXPECT_EQ(sink.Execute(), ETaskResult::FINISHED);
+    EXPECT_EQ(sink.Execute(), ETaskResult::FINISHED);
+    ASSERT_EQ(sent.size(), 1u);
+    EXPECT_EQ(sent[0].Hashes, (std::vector<uint64_t>{11, 22}));
+    EXPECT_EQ(sent[0].Producers, 2u);
+    EXPECT_FALSE(filter->Ready());
+}
+
+TEST_F(SchedulerRuntimeFilter, FilterSourceHandsTheArrivedPartialToItsFilter) {
+    auto filter = std::make_shared<TRuntimeFilter>(Context_, 16, 1024);
+    filter->SetProducerCount(3);
+    TRuntimeFilterSourceTask source(filter);
+    std::optional<TRuntimeFilterPartial> inbox;
+    source.BindCode(std::make_shared<TRuntimeFilterSourceCode>([](void* state, TRuntimeFilterPartial& partial) {
+        auto& arrived = *static_cast<std::optional<TRuntimeFilterPartial>*>(state);
+        if (!arrived) {
+            return false;
+        }
+        partial = std::move(*arrived);
+        arrived.reset();
+        return true;
+    }), std::shared_ptr<void>(std::shared_ptr<void>{}, &inbox));
+
+    EXPECT_EQ(source.Execute(), ETaskResult::WAITING);
+    filter->FinishProducer(KeyPartial(*filter, 11));
+    // The other fragment's two lanes arrive as one partial.
+    TRuntimeFilterExport remote(Context_, filter, /*forward=*/false);
+    remote.FinishProducer(KeyPartial(*filter, 22));
+    remote.FinishProducer(KeyPartial(*filter, 33));
+    inbox = remote.Merged();
+    EXPECT_FALSE(filter->Ready());
+    EXPECT_EQ(source.Execute(), ETaskResult::FINISHED);
+    ASSERT_TRUE(filter->Ready());
+    EXPECT_EQ(source.Execute(), ETaskResult::FINISHED);
+    for (uint64_t key : {11, 22, 33}) {
+        EXPECT_TRUE(NTest::RuntimeFilterMayContain(*filter, key)) << key;
+    }
+    EXPECT_FALSE(NTest::RuntimeFilterMayContain(*filter, 44));
 }
 
 struct TSourceState {

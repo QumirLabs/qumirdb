@@ -3168,6 +3168,20 @@ TSealedTaskGraph ApplySplit(TLoweredPlan& lowered, TSplitPlan&& plan) {
     records.resize(graph.Nodes().size());
     const auto cuts = graph.Cuts();
     for (size_t i = 0; i < cuts.size(); ++i) {
+        if (cuts[i].Kind == ETaskEdgeKind::Dependency) {
+            // A dependency cut carries the filter of the tasks its source wakes.
+            const auto& probe = *cuts[i].Source->Outbound.front()->Dst;
+            const auto filter = std::get<TRuntimeFilterNode>(records[probe.ExecutionSlot].value().Body).Filter;
+            records[cuts[i].Sink->ExecutionSlot] = TNodeSpec{
+                .DebugKind = cuts[i].Sink->DebugKind,
+                .Body = TRuntimeFilterSinkNode{.Filter = filter},
+            };
+            records[cuts[i].Source->ExecutionSlot] = TNodeSpec{
+                .DebugKind = cuts[i].Source->DebugKind,
+                .Body = TRuntimeFilterSourceNode{.Filter = filter},
+            };
+            continue;
+        }
         const auto& toSink = *cuts[i].Sink->Inbound.front();
         const auto& fromSource = *cuts[i].Source->Outbound.front();
         records[cuts[i].Sink->ExecutionSlot] = TNodeSpec{
