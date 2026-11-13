@@ -67,7 +67,7 @@ ETaskResult TRemoteSinkState::Write(const TRowSet& rowSet, uint32_t segment) {
     // Pairs with the fence in Drain: the push must be visible before Queued is read.
     std::atomic_thread_fence(std::memory_order_seq_cst);
     // A full-chunk stream wakes the actor only once there is a chunk to send.
-    if ((!Limits.FullChunks || !pushed || queuedBytes >= Limits.ChunkBytes) && !Queued.exchange(true)) {
+    if ((!Limits.FullChunks || !pushed || queuedBytes >= FullChunkBytes()) && !Queued.exchange(true)) {
         ActorChannel.Notify(this);
     }
     return pushed ? ETaskResult::OK : ETaskResult::WAITING;
