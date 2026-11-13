@@ -44,19 +44,25 @@ private:
     std::vector<size_t> SegmentEnds_;
 };
 
-// The read progress of one CTE reference, shared by its lanes. A lane claims
-// the next unread batch, morsel-style, so each batch reaches exactly one lane
-// of the reference and an idle lane takes the work a busy one has not started.
+// The read progress of one CTE reference in one graph, shared by its lanes
+// there. Batch i belongs to lane i mod SegmentCount(), so lanes of one
+// reference in different graphs read disjoint batches. A lane claims the next
+// unread batch of the graph's lanes, morsel-style, so each batch reaches
+// exactly one lane and an idle lane takes the work a busy one has not started.
 class TCteConsumerState {
 public:
     explicit TCteConsumerState(std::shared_ptr<const TCteSpool> spool);
 
-    // Valid after publication; empty once every batch has been claimed.
+    // Before the first Claim: a lane of the reference in this graph.
+    void AddLane(size_t lane);
+    // Valid after publication; empty once every batch of the lanes has been claimed.
     std::optional<size_t> Claim();
     const std::shared_ptr<const TCteSpool>& Spool() const;
 
 private:
     std::shared_ptr<const TCteSpool> Spool_;
+    // Ascending.
+    std::vector<size_t> Lanes_;
     std::atomic<size_t> Next_ = 0;
 };
 

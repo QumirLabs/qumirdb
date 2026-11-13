@@ -492,9 +492,13 @@ std::unique_ptr<ITask> MakeNodeTask(
             if (node.State >= context.CteConsumerStates.size()) {
                 Invalid("cte consumer state index is out of range");
             }
+            const auto& state = context.CteConsumerStates[node.State];
+            if (node.Lane >= state->Spool()->SegmentCount()) {
+                Invalid("cte consumer lane is out of range");
+            }
+            state->AddLane(node.Lane);
             return std::make_unique<TCteConsumerTask>(
-                context.CteConsumerStates[node.State], InputPort(connections, node.In),
-                OutputPort(connections, node.Out));
+                state, InputPort(connections, node.In), OutputPort(connections, node.Out));
         } else if constexpr (std::is_same_v<TNode, TRuntimeFilterNode>) {
             return std::make_unique<TRuntimeFilterTask>(
                 nullptr, InputPort(connections, node.In), OutputPort(connections, node.Out));

@@ -462,12 +462,15 @@ struct TCteConsumerNode {
     TPortSpec In;
     TPortSpec Out;
     uint32_t State = 0;
+    // Its lane of the reference, which owns the batches i with i mod lanes == Lane.
+    uint32_t Lane = 0;
 
     void Fields(this auto& self, auto& v)
     {
         v(self.In);
         v(self.Out);
         v(self.State);
+        v(self.Lane);
     }
 };
 
