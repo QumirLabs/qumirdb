@@ -32,6 +32,12 @@ bool IsRowsetEdge(const TTaskEdge* edge) {
     return edge->Kind == ETaskEdgeKind::Rowset;
 }
 
+// A root retires only when it finishes, so through a dependency edge it would
+// keep a producer alive after the readers of its output are gone.
+bool KeepsProducerAlive(const TTaskEdge* edge) {
+    return IsRowsetEdge(edge) || !IsRoot(*edge->Dst);
+}
+
 const char* ConnectionKindName(EConnectionKind kind) {
     switch (kind) {
         case EConnectionKind::OneToOne:
@@ -223,17 +229,23 @@ std::vector<std::vector<TTaskNode*>> GroupByColor(
 
 // `node` reads no more input: closes its lanes, so a broadcast feeds only its other
 // consumers, and abandons each producer it was the last live consumer of.
-void ReleaseInputs(const TTaskNode& node) {
+void ReleaseInputs(const TTaskNode& node, const std::function<void(TTaskNode&)>& abandoned) {
     for (auto* edge : node.Inbound) {
         if (IsRowsetEdge(edge)) {
             edge->Connection->Close(edge->DstLane);
+        }
+        if (!KeepsProducerAlive(edge)) {
+            continue;
         }
         auto& producer = *edge->Src;
         if (producer.LiveConsumers.fetch_sub(1, std::memory_order_acq_rel) == 1
             && !IsRoot(producer)
             && !producer.Retired.exchange(true, std::memory_order_acq_rel))
         {
-            ReleaseInputs(producer);
+            ReleaseInputs(producer, abandoned);
+            if (abandoned) {
+                abandoned(producer);
+            }
         }
     }
 }
@@ -244,9 +256,9 @@ bool IsRoot(const TTaskNode& node) {
     return std::ranges::none_of(node.Outbound, IsRowsetEdge);
 }
 
-void Retire(TTaskNode& node) {
+void Retire(TTaskNode& node, const std::function<void(TTaskNode&)>& abandoned) {
     if (!node.Retired.exchange(true, std::memory_order_acq_rel)) {
-        ReleaseInputs(node);
+        ReleaseInputs(node, abandoned);
     }
 }
 
@@ -365,7 +377,8 @@ void TTaskGraph::Build() {
     }
 
     for (auto& node : Nodes_) {
-        node->LiveConsumers.store(node->Outbound.size(), std::memory_order_release);
+        node->LiveConsumers.store(
+            std::ranges::count_if(node->Outbound, KeepsProducerAlive), std::memory_order_release);
         if (std::ranges::none_of(node->Inbound, IsRowsetEdge)) {
             Leaves_.push_back(node.get());
         }

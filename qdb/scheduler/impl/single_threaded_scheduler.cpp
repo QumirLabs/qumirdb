@@ -81,7 +81,11 @@ bool TSingleThreadedScheduler::Run(std::string* error) {
                 ++Stats_.Finished;
                 node->State.store(
                     ETaskState::Finished, std::memory_order_release);
-                Retire(*node);
+                // Wake the roots on an abandoned producer's dependency edges,
+                // as its finish would.
+                Retire(*node, [this](TTaskNode& abandoned) {
+                    ScheduleOutput(&abandoned);
+                });
                 if (IsRoot(*node)) {
                     --unfinishedRoots;
                 }

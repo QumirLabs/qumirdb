@@ -227,6 +227,9 @@ public:
     // A copy of the merge, from which a filter publishes what it would from
     // the merged partials.
     TRuntimeFilterPartial Merged() const;
+    // In place of the merge when a producer may never deliver: a filter that
+    // gets it passes every key.
+    TRuntimeFilterPartial PassAll() const;
 
 private:
     std::shared_ptr<TRuntimeContext> RuntimeContext_;

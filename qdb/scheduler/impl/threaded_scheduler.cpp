@@ -295,7 +295,10 @@ bool TThreadedScheduler::FinishRun(TTaskNode* node, ETaskState nextState) {
 void TThreadedScheduler::FinishNode(TTaskNode* node) {
     auto previous = node->State.exchange(ETaskState::Finished, std::memory_order_acq_rel);
     assert(previous == ETaskState::Running || previous == ETaskState::Reschedule);
-    Retire(*node);
+    // Wake the roots on an abandoned producer's dependency edges, as its finish would.
+    Retire(*node, [this](TTaskNode& abandoned) {
+        ScheduleOutput(&abandoned);
+    });
     if (IsRoot(*node) && UnfinishedRoots_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
         // The last root is done: the graph's output is complete. Wake every worker
         // so they observe termination and exit instead of parking on the permit

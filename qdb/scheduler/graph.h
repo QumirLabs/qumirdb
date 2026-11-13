@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <iosfwd>
 #include <memory>
 #include <span>
@@ -37,7 +38,8 @@ struct TTaskNode {
     std::vector<TTaskEdge*> Inbound;
     std::vector<TTaskEdge*> Outbound;
     std::atomic<ETaskState> State = ETaskState::Idle;
-    // Outbound edges whose consumer is not retired yet; set when the graph is sealed.
+    // Outbound edges that keep the node alive (see Retire) and whose consumer is
+    // not retired yet; set when the graph is sealed.
     std::atomic<size_t> LiveConsumers = 0;
     // Finished or abandoned (see Retire): the node never runs again.
     std::atomic<bool> Retired = false;
@@ -60,8 +62,10 @@ bool IsRoot(const TTaskNode& node);
 
 // Retires a finished node and closes its input lanes (IConnection::Close). A
 // producer that is not a root and whose consumers are all retired is abandoned
-// and retired the same way, and so on upstream: nobody needs its output.
-void Retire(TTaskNode& node);
+// and retired the same way, and so on upstream: nobody needs its output. A
+// dependency edge into a root does not count, and `abandoned` gets each abandoned
+// producer, so that the scheduler wakes the roots waiting on it.
+void Retire(TTaskNode& node, const std::function<void(TTaskNode&)>& abandoned = {});
 
 // A node woken from outside the graph (e.g. by a remote channel) under `Id`.
 struct TExternalNode {
