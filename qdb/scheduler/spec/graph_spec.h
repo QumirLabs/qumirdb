@@ -477,9 +477,10 @@ struct TCteConsumerNode {
     }
 };
 
-// Sends the batches of Segments of Spool, once every lane of In has finished,
-// through code the compute actor binds: the segments of this fragment's
-// producer lanes, or every segment of the published spool.
+// Sends the batches of Segments of Spool with their segment through code the
+// compute actor binds, as they are appended, and finishes once every lane of
+// In has finished: the segments of this fragment's producer lanes, or every
+// segment of the published spool.
 struct TCteSinkNode {
     std::vector<TPortSpec> In;
     uint32_t Spool = 0;
@@ -493,20 +494,19 @@ struct TCteSinkNode {
     }
 };
 
-// Appends the batches its code receives to Segment of Spool, seals it if Seal
-// and finishes every lane of Out. A sealed copy must get the batches in the
-// publish fragment's seal order: consumer lanes own batches by their index.
+// Appends each batch its code receives to the segment of Spool it was sent
+// from, seals Spool if Seal and finishes every lane of Out. So a sealed copy
+// numbers the batches as the publish fragment's spool does, whatever order
+// they come in: consumer lanes own batches by their index.
 struct TCteSourceNode {
     std::vector<TPortSpec> Out;
     uint32_t Spool = 0;
-    uint32_t Segment = 0;
     bool Seal = false;
 
     void Fields(this auto& self, auto& v)
     {
         v(self.Out);
         v(self.Spool);
-        v(self.Segment);
         v(self.Seal);
     }
 };

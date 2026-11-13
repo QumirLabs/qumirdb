@@ -5,6 +5,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -352,8 +353,13 @@ struct TComputeActor : public IBehaviorActor {
         TTask& sourceTask,
         NScheduler::TTaskNode* node)
     {
-        auto [code, state] = NScheduler::MakeRemoteSource(
-            endpoint.Id, endpoint.PeerActor, endpoint.PeerTaskId, *ActorChannel);
+        auto [code, state] = [&] {
+            if constexpr (std::is_same_v<TTask, NScheduler::TCteSourceTask>) {
+                return NScheduler::MakeRemoteCteSource(endpoint.Id, endpoint.PeerActor, endpoint.PeerTaskId, *ActorChannel);
+            } else {
+                return NScheduler::MakeRemoteSource(endpoint.Id, endpoint.PeerActor, endpoint.PeerTaskId, *ActorChannel);
+            }
+        }();
         sourceTask.BindCode(std::move(code), state);
         SourceStates.emplace(endpoint.Id, std::tuple{std::move(state), node});
     }
@@ -366,10 +372,20 @@ struct TComputeActor : public IBehaviorActor {
         std::span<const TValueLayout> layouts,
         NScheduler::TTaskNode* node)
     {
-        auto [code, state] = NScheduler::MakeRemoteSink(
-            endpoint.Id, endpoint.PeerActor, endpoint.PeerTaskId, layouts, *ActorChannel);
-        sinkTask.BindCode(std::move(code), state);
-        SinkStates.emplace(endpoint.Id, std::tuple{std::move(state), node});
+        if constexpr (std::is_same_v<TTask, NScheduler::TCteSinkTask>) {
+            auto [code, state] = NScheduler::MakeRemoteCteSink(
+                endpoint.Id, endpoint.PeerActor, endpoint.PeerTaskId, layouts, *ActorChannel);
+            // A CTE sink streams its spool: an append wakes it while it waits.
+            sinkTask.BindCode(std::move(code), state, [this, node] {
+                SchedulerChannel->Notify(node);
+            });
+            SinkStates.emplace(endpoint.Id, std::tuple{std::move(state), node});
+        } else {
+            auto [code, state] = NScheduler::MakeRemoteSink(
+                endpoint.Id, endpoint.PeerActor, endpoint.PeerTaskId, layouts, *ActorChannel);
+            sinkTask.BindCode(std::move(code), state);
+            SinkStates.emplace(endpoint.Id, std::tuple{std::move(state), node});
+        }
     }
 
     void InitFilterSource(

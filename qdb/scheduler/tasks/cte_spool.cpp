@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cassert>
 #include <stdexcept>
+#include <string>
 #include <utility>
 
 namespace NQdb {
@@ -58,11 +59,21 @@ TCteSpool::~TCteSpool() {
 }
 
 void TCteSpool::Append(size_t segment, TRowSet rowSet) {
-    assert(SegmentEnds_.empty());
-    Segments_[segment].push_back(rowSet);
+    {
+        std::lock_guard lock(Lock_);
+        assert(SegmentEnds_.empty());
+        Segments_[segment].push_back(rowSet);
+    }
+    // A reader armed before this append may have missed its batch: wake it.
+    for (auto* watcher : Watchers_) {
+        if (watcher->Armed.load() && watcher->Armed.exchange(false)) {
+            watcher->Wake();
+        }
+    }
 }
 
 void TCteSpool::Seal() {
+    std::lock_guard lock(Lock_);
     assert(SegmentEnds_.empty());
     SegmentEnds_.reserve(Segments_.size());
     size_t end = 0;
@@ -81,8 +92,17 @@ std::span<const TValueLayout> TCteSpool::RowLayouts() const {
     return RowLayouts_;
 }
 
-std::span<const TRowSet> TCteSpool::Segment(size_t segment) const {
-    return Segments_[segment];
+void TCteSpool::Watch(TCteSpoolWatcher& watcher) const {
+    Watchers_.push_back(&watcher);
+}
+
+std::optional<TRowSet> TCteSpool::TryBatch(size_t segment, size_t index) const {
+    std::lock_guard lock(Lock_);
+    const auto& batches = Segments_[segment];
+    if (index >= batches.size()) {
+        return std::nullopt;
+    }
+    return batches[index];
 }
 
 size_t TCteSpool::BatchCount() const {
@@ -259,6 +279,7 @@ TCteSinkTask::TCteSinkTask(
     : Spool_(std::move(spool))
     , Segments_(std::move(segments))
     , Inputs_(std::move(inputs))
+    , Next_(Segments_.size())
 {
     if (Spool_) {
         RowLayouts_.assign(Spool_->RowLayouts().begin(), Spool_->RowLayouts().end());
@@ -269,24 +290,36 @@ ETaskResult TCteSinkTask::Execute() {
     if (Finished_) {
         return ETaskResult::FINISHED;
     }
-    if (!InputFinished_) {
-        for (auto& input : Inputs_) {
-            if (FetchCompletion(input) == EFetchResult::NO_DATA) {
-                return ETaskResult::NEED_DATA;
-            }
+    // A running task reads every batch: only a wait needs a wake.
+    Watcher_.Armed.store(false);
+    for (bool armed = false;;) {
+        // A writer finishes after its last append, so a pass after the finish sends everything.
+        if (!InputFinished_) {
+            InputFinished_ = std::ranges::all_of(Inputs_, [](auto& input) {
+                return FetchCompletion(input) == EFetchResult::FINISHED;
+            });
         }
-        InputFinished_ = true;
-    }
-    for (; Segment_ < Segments_.size(); ++Segment_, Batch_ = 0) {
-        const auto batches = Spool_->Segment(Segments_[Segment_]);
-        for (; Batch_ < batches.size(); ++Batch_) {
-            // The code takes its own reference if it keeps the view.
-            TRowSet view = SpoolView(Spool_, batches[Batch_]);
-            const auto result = Code_->Write(State_.get(), view);
-            Release(&view);
-            if (result == ETaskResult::WAITING) {
-                return ETaskResult::WAITING;
-            }
+        const bool inputFinished = InputFinished_;
+        bool sent = false;
+        if (!SendAppended(sent)) {
+            return ETaskResult::WAITING;
+        }
+        if (inputFinished) {
+            break;
+        }
+        if (sent) {
+            armed = false;
+        } else if (Watcher_.Wake && !armed) {
+            // One more pass: an append it misses comes after the arm and wakes the task.
+            Watcher_.Armed.store(true);
+            armed = true;
+        } else if (Watcher_.Wake && Pulled_) {
+            // The next append or the finish of an input lane wakes the task.
+            return ETaskResult::WAITING;
+        } else {
+            // Pulls the inputs, whose writers then run on their own input.
+            Pulled_ = true;
+            return ETaskResult::NEED_DATA;
         }
     }
     if (Code_->Finish && Code_->Finish(State_.get()) == ETaskResult::WAITING) {
@@ -297,17 +330,40 @@ ETaskResult TCteSinkTask::Execute() {
     return ETaskResult::FINISHED;
 }
 
+bool TCteSinkTask::SendAppended(bool& sent) {
+    for (size_t i = 0; i < Segments_.size(); ++i) {
+        while (const auto batch = Spool_->TryBatch(Segments_[i], Next_[i])) {
+            // The code takes its own reference if it keeps the view.
+            TRowSet view = SpoolView(Spool_, *batch);
+            const auto result = Code_->Write(State_.get(), view, Segments_[i]);
+            Release(&view);
+            if (result == ETaskResult::WAITING) {
+                return false;
+            }
+            ++Next_[i];
+            sent = true;
+        }
+    }
+    return true;
+}
+
 bool TCteSinkTask::RebindPort(const TPortRebind& rebind) {
     return std::ranges::any_of(Inputs_, [&](auto& input) { return rebind.Apply(input); });
 }
 
-void TCteSinkTask::BindCode(std::shared_ptr<const TSinkCode> code, std::shared_ptr<void> state) {
+void TCteSinkTask::BindCode(
+    std::shared_ptr<const TCteSinkCode> code, std::shared_ptr<void> state, std::function<void()> wake)
+{
     assert(!Code_);
     Code_ = std::move(code);
     State_ = std::move(state);
+    if (wake) {
+        Watcher_.Wake = std::move(wake);
+        Spool_->Watch(Watcher_);
+    }
 }
 
-const std::shared_ptr<const TSinkCode>& TCteSinkTask::Code() const {
+const std::shared_ptr<const TCteSinkCode>& TCteSinkTask::Code() const {
     return Code_;
 }
 
@@ -317,11 +373,9 @@ std::span<const TValueLayout> TCteSinkTask::RowLayouts() const {
 
 TCteSourceTask::TCteSourceTask(
     std::shared_ptr<TCteSpool> spool,
-    uint32_t segment,
     bool seal,
     std::vector<TOutputPort> outputs)
     : Spool_(std::move(spool))
-    , Segment_(segment)
     , Seal_(seal)
     , Outputs_(std::move(outputs))
 {}
@@ -332,9 +386,15 @@ ETaskResult TCteSourceTask::Execute() {
     }
     for (;;) {
         TRowSet rowSet{};
-        switch (Code_->Next(State_.get(), rowSet)) {
+        uint32_t segment = 0;
+        switch (Code_->Next(State_.get(), rowSet, segment)) {
             case ETaskResult::OK:
-                Spool_->Append(Segment_, rowSet);
+                if (segment >= Spool_->SegmentCount()) {
+                    Release(&rowSet);
+                    throw std::runtime_error("cte source: a batch of segment " + std::to_string(segment)
+                        + " for a spool of " + std::to_string(Spool_->SegmentCount()));
+                }
+                Spool_->Append(segment, rowSet);
                 break;
             case ETaskResult::WAITING:
                 return ETaskResult::WAITING;
@@ -356,13 +416,13 @@ bool TCteSourceTask::RebindPort(const TPortRebind& rebind) {
     return std::ranges::any_of(Outputs_, [&](auto& output) { return rebind.Apply(output); });
 }
 
-void TCteSourceTask::BindCode(std::shared_ptr<const TSourceCode> code, std::shared_ptr<void> state) {
+void TCteSourceTask::BindCode(std::shared_ptr<const TCteSourceCode> code, std::shared_ptr<void> state) {
     assert(!Code_);
     Code_ = std::move(code);
     State_ = std::move(state);
 }
 
-const std::shared_ptr<const TSourceCode>& TCteSourceTask::Code() const {
+const std::shared_ptr<const TCteSourceCode>& TCteSourceTask::Code() const {
     return Code_;
 }
 

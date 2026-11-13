@@ -22,10 +22,12 @@
 #include <cstdint>
 #include <deque>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -2434,71 +2436,122 @@ protected:
     std::unique_ptr<TRuntimeFilterTask> Task_;
 };
 
-TEST(SchedulerRuntimeAdapter, CteSinkSendsItsSegmentsOnceItsInputsFinish) {
+// What a CTE sink's code got: each batch's segment and rows, then the finish.
+struct TCteSent {
+    std::vector<std::pair<uint32_t, int64_t>> Batches;
+    // The number of batches after which one Write waits, as for a full outbox.
+    std::optional<size_t> RefuseAt;
+    bool Finished = false;
+};
+
+std::shared_ptr<const TCteSinkCode> CteSentCode() {
+    return std::make_shared<const TCteSinkCode>(TCteSinkCode{
+        .Write = [](void* state, const TRowSet& rows, uint32_t segment) {
+            auto& sent = *static_cast<TCteSent*>(state);
+            if (sent.RefuseAt == sent.Batches.size()) {
+                sent.RefuseAt.reset();
+                return ETaskResult::WAITING;
+            }
+            sent.Batches.emplace_back(segment, rows.RowCount);
+            return ETaskResult::OK;
+        },
+        .Finish = [](void* state) {
+            static_cast<TCteSent*>(state)->Finished = true;
+            return ETaskResult::OK;
+        },
+    });
+}
+
+// The sink sends each batch of its segments as it is appended, before its
+// input lanes finish; an append wakes it once it has found nothing new. Its
+// first wait pulls the inputs, later ones wait for the wake.
+TEST(SchedulerRuntimeAdapter, CteSinkStreamsBatchesAsTheyAreAppended) {
     auto spool = std::make_shared<TCteSpool>(3);
-    for (const int64_t rows : {1, 2}) {
-        spool->Append(0, TRowSet{.RowCount = rows, .RefCount = 1});
-    }
-    spool->Append(1, TRowSet{.RowCount = 3, .RefCount = 1});
-    for (const int64_t rows : {4, 5}) {
-        spool->Append(2, TRowSet{.RowCount = rows, .RefCount = 1});
-    }
     TBroadcastConnection completion;
     completion.Resize(1, 2);
     TCteSinkTask sink(spool, {2, 0}, {{.Connection = &completion, .Lane = 0}, {.Connection = &completion, .Lane = 1}});
-    struct TSent {
-        std::vector<int64_t> Rows;
-        bool Refused = false;
-        bool Finished = false;
-    };
-    auto sent = std::make_shared<TSent>();
-    sink.BindCode(std::make_shared<TSinkCode>(
-        [](void* state, const TRowSet& rows) {
-            auto& sent = *static_cast<TSent*>(state);
-            // The second batch waits once, as for a full outbox.
-            if (sent.Rows.size() == 1 && !std::exchange(sent.Refused, true)) {
-                return ETaskResult::WAITING;
-            }
-            sent.Rows.push_back(rows.RowCount);
-            return ETaskResult::OK;
-        },
-        [](void* state) {
-            static_cast<TSent*>(state)->Finished = true;
-            return ETaskResult::OK;
-        }), sent);
+    auto sent = std::make_shared<TCteSent>();
+    int wakes = 0;
+    sink.BindCode(CteSentCode(), sent, [&] {
+        ++wakes;
+    });
+    using TBatches = std::vector<std::pair<uint32_t, int64_t>>;
 
     EXPECT_EQ(sink.Execute(), ETaskResult::NEED_DATA);
-    TOutputPort{.Connection = &completion}.Finish();
+    spool->Append(2, TRowSet{.RowCount = 4, .RefCount = 1});
+    EXPECT_EQ(wakes, 1);
+    spool->Append(2, TRowSet{.RowCount = 5, .RefCount = 1});
+    EXPECT_EQ(wakes, 1);
+    sent->RefuseAt = 1;
     EXPECT_EQ(sink.Execute(), ETaskResult::WAITING);
-    EXPECT_EQ(sent->Rows, (std::vector<int64_t>{4}));
+    EXPECT_EQ(sent->Batches, (TBatches{{2, 4}}));
+    EXPECT_EQ(sink.Execute(), ETaskResult::WAITING);
+    EXPECT_EQ(sent->Batches, (TBatches{{2, 4}, {2, 5}}));
+
+    // Segment 1 is another sink's; the wake it causes finds nothing to send.
+    spool->Append(1, TRowSet{.RowCount = 3, .RefCount = 1});
+    EXPECT_EQ(wakes, 2);
+    EXPECT_EQ(sink.Execute(), ETaskResult::WAITING);
+    for (const int64_t rows : {1, 2}) {
+        spool->Append(0, TRowSet{.RowCount = rows, .RefCount = 1});
+    }
+    EXPECT_EQ(wakes, 3);
+    TOutputPort{.Connection = &completion}.Finish();
     EXPECT_EQ(sink.Execute(), ETaskResult::FINISHED);
-    EXPECT_EQ(sent->Rows, (std::vector<int64_t>{4, 5, 1, 2}));
+    EXPECT_EQ(sent->Batches, (TBatches{{2, 4}, {2, 5}, {0, 1}, {0, 2}}));
     EXPECT_TRUE(sent->Finished);
 }
 
-TEST(SchedulerRuntimeAdapter, CteSourceFillsItsSegmentThenFinishesItsLanes) {
+// Without a wake the sink sends once its inputs finish.
+TEST(SchedulerRuntimeAdapter, CteSinkWithoutAWakeSendsAtItsInputsEnd) {
+    auto spool = std::make_shared<TCteSpool>(2);
+    TGatherConnection completion;
+    completion.Resize(1, 1);
+    TCteSinkTask sink(spool, {1}, {{.Connection = &completion}});
+    auto sent = std::make_shared<TCteSent>();
+    sink.BindCode(CteSentCode(), sent);
+    spool->Append(1, TRowSet{.RowCount = 6, .RefCount = 1});
+    EXPECT_EQ(sink.Execute(), ETaskResult::NEED_DATA);
+    EXPECT_EQ(sent->Batches.size(), 1u);
+    spool->Append(1, TRowSet{.RowCount = 7, .RefCount = 1});
+    TOutputPort{.Connection = &completion}.Finish();
+    EXPECT_EQ(sink.Execute(), ETaskResult::FINISHED);
+    EXPECT_EQ(sent->Batches, (std::vector<std::pair<uint32_t, int64_t>>{{1, 6}, {1, 7}}));
+}
+
+// Batches as a CTE source's code hands them out, each with its segment.
+struct TCteReceived {
+    std::deque<std::pair<uint32_t, TRowSet>> Batches;
+    bool Finished = false;
+};
+
+std::shared_ptr<const TCteSourceCode> CteReceivedCode() {
+    return std::make_shared<const TCteSourceCode>(TCteSourceCode{
+        .Next = [](void* state, TRowSet& rows, uint32_t& segment) {
+            auto& received = *static_cast<TCteReceived*>(state);
+            if (received.Batches.empty()) {
+                return received.Finished ? ETaskResult::FINISHED : ETaskResult::WAITING;
+            }
+            std::tie(segment, rows) = received.Batches.front();
+            received.Batches.pop_front();
+            return ETaskResult::OK;
+        },
+    });
+}
+
+TEST(SchedulerRuntimeAdapter, CteSourceAppendsEachBatchToItsSegment) {
     for (const bool seal : {false, true}) {
         SCOPED_TRACE(seal);
         auto spool = std::make_shared<TCteSpool>(2);
         TGatherConnection lanes;
         lanes.Resize(2, 1);
-        TCteSourceTask source(spool, 1, seal, {{.Connection = &lanes, .Lane = 0}, {.Connection = &lanes, .Lane = 1}});
-        struct TReceived {
-            std::deque<int64_t> Rows;
-            bool Finished = false;
-        };
-        auto received = std::make_shared<TReceived>();
-        source.BindCode(std::make_shared<TSourceCode>([](void* state, TRowSet& rows) {
-            auto& received = *static_cast<TReceived*>(state);
-            if (received.Rows.empty()) {
-                return received.Finished ? ETaskResult::FINISHED : ETaskResult::WAITING;
-            }
-            rows = TRowSet{.RowCount = received.Rows.front(), .RefCount = 1};
-            received.Rows.pop_front();
-            return ETaskResult::OK;
-        }), received);
+        TCteSourceTask source(spool, seal, {{.Connection = &lanes, .Lane = 0}, {.Connection = &lanes, .Lane = 1}});
+        auto received = std::make_shared<TCteReceived>();
+        source.BindCode(CteReceivedCode(), received);
 
-        received->Rows = {7, 8};
+        for (const auto [segment, rows] : {std::pair{1u, 7}, {0u, 8}, {1u, 9}}) {
+            received->Batches.emplace_back(segment, TRowSet{.RowCount = rows, .RefCount = 1});
+        }
         EXPECT_EQ(source.Execute(), ETaskResult::WAITING);
         const TInputPort publish{.Connection = &lanes};
         TRowSet none{};
@@ -2506,12 +2559,124 @@ TEST(SchedulerRuntimeAdapter, CteSourceFillsItsSegmentThenFinishesItsLanes) {
         received->Finished = true;
         EXPECT_EQ(source.Execute(), ETaskResult::FINISHED);
         EXPECT_EQ(publish.Fetch(none), EFetchResult::FINISHED);
-        EXPECT_TRUE(spool->Segment(0).empty());
-        ASSERT_EQ(spool->Segment(1).size(), 2u);
-        EXPECT_EQ(spool->Segment(1)[1].RowCount, 8);
+        EXPECT_EQ(spool->TryBatch(0, 0)->RowCount, 8);
+        EXPECT_FALSE(spool->TryBatch(0, 1));
+        EXPECT_EQ(spool->TryBatch(1, 0)->RowCount, 7);
+        EXPECT_EQ(spool->TryBatch(1, 1)->RowCount, 9);
         if (seal) {
-            EXPECT_EQ(spool->BatchCount(), 2u);
+            // Numbered segment by segment, whatever order the batches came in.
+            ASSERT_EQ(spool->BatchCount(), 3u);
+            EXPECT_EQ(spool->Batch(0).RowCount, 8);
+            EXPECT_EQ(spool->Batch(1).RowCount, 7);
+            EXPECT_EQ(spool->Batch(2).RowCount, 9);
         }
+    }
+
+    auto spool = std::make_shared<TCteSpool>(2);
+    TCteSourceTask source(spool, true, {});
+    auto received = std::make_shared<TCteReceived>();
+    source.BindCode(CteReceivedCode(), received);
+    received->Batches.emplace_back(2, TRowSet{.RowCount = 1});
+    EXPECT_THROW(source.Execute(), std::runtime_error);
+}
+
+// Writers append to three segments while a sink streams them to a source
+// that fills a copy: every batch is sent once, many before the writers
+// finish, and the sealed copy numbers the batches as the spool does.
+TEST(SchedulerRuntimeAdapter, CteSinkStreamsAGrowingSpoolIntoAnEqualCopy) {
+    constexpr uint32_t segments = 3;
+    constexpr int64_t batches = 200;
+    auto spool = std::make_shared<TCteSpool>(segments);
+    TGatherConnection completion;
+    completion.Resize(segments, 1);
+    TCteSinkTask sink(spool, {0, 1, 2}, {{.Connection = &completion}});
+    struct TLink {
+        std::mutex Lock;
+        std::deque<std::pair<uint32_t, TRowSet>> Batches;
+        size_t Sent = 0;
+        size_t SentEarly = 0;
+        std::atomic<int> WritersLeft = segments;
+        std::atomic<bool> Woken = false;
+        bool Finished = false;
+    };
+    auto link = std::make_shared<TLink>();
+    sink.BindCode(std::make_shared<const TCteSinkCode>(TCteSinkCode{
+        .Write = [](void* state, const TRowSet& rows, uint32_t segment) {
+            auto& link = *static_cast<TLink*>(state);
+            // The sink releases its view after Write; the copy owns the reference taken here.
+            auto& view = const_cast<TRowSet&>(rows);
+            Retain(&view);
+            TRowSet copy = view;
+            copy.RefCount = 1;
+            std::lock_guard lock(link.Lock);
+            link.Batches.emplace_back(segment, copy);
+            ++link.Sent;
+            link.SentEarly += link.WritersLeft.load() > 0;
+            return ETaskResult::OK;
+        },
+        .Finish = [](void* state) {
+            auto& link = *static_cast<TLink*>(state);
+            std::lock_guard lock(link.Lock);
+            link.Finished = true;
+            return ETaskResult::OK;
+        },
+    }), link, [&] {
+        link->Woken.store(true);
+    });
+    auto copy = std::make_shared<TCteSpool>(segments);
+    TCteSourceTask source(copy, true, {});
+    source.BindCode(std::make_shared<const TCteSourceCode>(TCteSourceCode{
+        .Next = [](void* state, TRowSet& rows, uint32_t& segment) {
+            auto& link = *static_cast<TLink*>(state);
+            std::lock_guard lock(link.Lock);
+            if (link.Batches.empty()) {
+                return link.Finished ? ETaskResult::FINISHED : ETaskResult::WAITING;
+            }
+            std::tie(segment, rows) = link.Batches.front();
+            link.Batches.pop_front();
+            return ETaskResult::OK;
+        },
+    }), link);
+
+    std::vector<std::thread> writers;
+    for (uint32_t segment = 0; segment < segments; ++segment) {
+        writers.emplace_back([&, segment] {
+            for (int64_t i = 0; i < batches; ++i) {
+                // Distinct row counts tell the batches apart.
+                spool->Append(segment, TRowSet{.RowCount = segment * batches + i + 1, .RefCount = 1});
+                std::this_thread::sleep_for(std::chrono::microseconds(50));
+            }
+            TOutputPort{.Connection = &completion, .Lane = segment}.Finish();
+            link->WritersLeft.fetch_sub(1);
+        });
+    }
+    // Runs the sink as the scheduler would: again after a wake or an input lane's finish.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    bool stuck = false;
+    while (!stuck) {
+        const auto left = link->WritersLeft.load();
+        const auto result = sink.Execute();
+        if (result == ETaskResult::FINISHED) {
+            break;
+        }
+        EXPECT_TRUE(result == ETaskResult::NEED_DATA || result == ETaskResult::WAITING);
+        while (!link->Woken.exchange(false) && link->WritersLeft.load() == left && !stuck) {
+            stuck = std::chrono::steady_clock::now() > deadline;
+            std::this_thread::yield();
+        }
+        EXPECT_EQ(source.Execute(), ETaskResult::WAITING);
+    }
+    for (auto& writer : writers) {
+        writer.join();
+    }
+    ASSERT_FALSE(stuck) << "the sink waits with batches or a finish unseen";
+    EXPECT_EQ(source.Execute(), ETaskResult::FINISHED);
+    EXPECT_EQ(link->Sent, segments * batches);
+    EXPECT_GT(link->SentEarly, 0u);
+    spool->Seal();
+    ASSERT_EQ(copy->BatchCount(), spool->BatchCount());
+    for (size_t i = 0; i < spool->BatchCount(); ++i) {
+        ASSERT_EQ(copy->Batch(i).RowCount, spool->Batch(i).RowCount) << i;
     }
 }
 
@@ -2520,7 +2685,7 @@ TEST(SchedulerRuntimeAdapter, CtePlaceholdersBindTheirPortsInTurn) {
     TGatherConnection lanes;
     lanes.Resize(2, 1);
     TCteSinkTask sink(nullptr, {}, std::vector<TInputPort>(2));
-    TCteSourceTask source(nullptr, 0, false, std::vector<TOutputPort>(2));
+    TCteSourceTask source(nullptr, false, std::vector<TOutputPort>(2));
     for (const size_t lane : {0, 1}) {
         EXPECT_TRUE(sink.RebindPort({.Kind = EPortKind::Input, .To = &lanes, .ToLane = lane}));
         EXPECT_TRUE(source.RebindPort({.Kind = EPortKind::Output, .To = &lanes, .ToLane = lane}));
