@@ -53,3 +53,14 @@ void DeserializeFrom(NQdb::NRemote::TDataChunk& message, TBlob& blob);
 
 } // namespace NActors
 } // namespace NNet
+
+namespace NQdb {
+namespace NRemote {
+
+// The bytes of a row set's part of a chunk, as the serializer counts them:
+// selected rows only. The row set must match the layouts; the serializer, not
+// this, checks it.
+size_t RowSetWireSize(const TRowSet& rowSet, std::span<const TValueLayout> layouts);
+
+} // namespace NRemote
+} // namespace NQdb

@@ -82,13 +82,15 @@ private:
     TMPSCQueue<TRuntimeFilterSinkState*> FilterSinkReady;
 };
 
-// Flow control of one remote stream, in bytes of row sets. A sink queues at
-// most ChunkBytes (and OutboxCapacity row sets) for the actor, which packs them
-// into chunks of up to ChunkBytes and keeps at most WindowBytes unconfirmed. A
-// row set larger than ChunkBytes goes alone. The peer's inbox holds WindowChunks
+// Flow control of one remote stream, in serialized bytes of row sets. A sink
+// queues at most OutboxBytes (and OutboxCapacity row sets) for the actor, which
+// packs them into chunks and keeps at most WindowBytes unconfirmed. A chunk
+// closes once it holds ChunkBytes, so its last row set may overshoot it; so
+// may the last row set the outbox takes. The peer's inbox holds WindowChunks
 // chunks, so that many may be unconfirmed too.
 struct TRemoteStreamLimits {
     size_t OutboxCapacity = 64;
+    size_t OutboxBytes = 32 << 20;
     size_t ChunkBytes = 256 << 10;
     size_t WindowBytes = 2 << 20;
     size_t WindowChunks = 16;
@@ -181,7 +183,7 @@ struct TRemoteSinkState {
         uint64_t Bytes = 0;
     };
     TMPSCQueue<TQueued> Outbox;
-    std::atomic<uint64_t> OutboxBytes = 0;
+    std::atomic<uint64_t> QueuedBytes = 0;
     std::atomic<bool> Queued = false;
     std::atomic<bool> InputFinished = false;
     uint64_t Written = 0; // worker only until InputFinished: rows pushed into the outbox
@@ -207,7 +209,7 @@ private:
         uint64_t bytes = 0;
         TQueued queued;
         while (bytes < Limits.ChunkBytes && Outbox.TryPop(queued)) {
-            OutboxBytes.fetch_sub(queued.Bytes);
+            QueuedBytes.fetch_sub(queued.Bytes);
             rowSets.push_back(queued.RowSet);
             bytes += queued.Bytes;
             ++Popped;
