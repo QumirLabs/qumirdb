@@ -140,15 +140,17 @@ protected:
         Cuts_.clear();
         std::vector<std::pair<const ITask*, const ITask*>> tasks;
         for (const auto& split : plan.Splits) {
-            ASSERT_TRUE(splits.contains(split.Edge));
-            const bool gather = split.Edge->Connection->Kind() == EConnectionKind::Gather;
+            ASSERT_EQ(split.Edges.size(), 1u);
+            auto* edge = split.Edges.front();
+            ASSERT_TRUE(splits.contains(edge));
+            const bool gather = edge->Connection->Kind() == EConnectionKind::Gather;
             EXPECT_EQ(
                 split.ReboundPort,
                 gather ? EReboundPort::SourceOutput : EReboundPort::DestinationInput);
-            EXPECT_EQ(split.SinkColor, colors.at(split.Edge->Src));
-            EXPECT_EQ(split.SourceColor, colors.at(split.Edge->Dst));
+            EXPECT_EQ(split.SinkColor, colors.at(edge->Src));
+            EXPECT_EQ(split.SourceColor, colors.at(edge->Dst));
             Cuts_.push_back({
-                .Edge = *split.Edge,
+                .Edge = *edge,
                 .ReboundPort = split.ReboundPort,
                 .SinkColor = split.SinkColor,
                 .NewConnection = split.NewConnection.get(),
@@ -528,8 +530,8 @@ TEST_F(TPartitionerTest, PlanFollowsNodeSlotOrder) {
     ASSERT_GT(plan.Splits.size(), 1u);
     for (size_t i = 1; i < plan.Splits.size(); ++i) {
         EXPECT_LT(
-            plan.Splits[i - 1].Edge->Src->ExecutionSlot,
-            plan.Splits[i].Edge->Src->ExecutionSlot);
+            plan.Splits[i - 1].Edges.front()->Src->ExecutionSlot,
+            plan.Splits[i].Edges.front()->Src->ExecutionSlot);
     }
 }
 

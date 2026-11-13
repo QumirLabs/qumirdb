@@ -105,7 +105,7 @@ void TPartitioner::PlanSplit(TTaskEdge& edge, EReboundPort reboundPort, size_t c
         std::vector<TValueLayout>(layouts.begin(), layouts.end()));
     // The placeholder tasks stay unbound: Apply binds them to the new edges.
     Plan_.Splits.push_back({
-        .Edge = &edge,
+        .Edges = {&edge},
         .ReboundPort = reboundPort,
         .SinkColor = Colors_.at(edge.Src),
         .SourceColor = Colors_.at(edge.Dst),

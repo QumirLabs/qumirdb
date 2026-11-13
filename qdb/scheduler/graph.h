@@ -69,16 +69,18 @@ struct TExternalNode {
     TTaskNode* Node = nullptr;
 };
 
-// The side of a cut edge whose port moves to the new 1->1 connection: Dst's
-// input for a one-to-one or broadcast cut, Src's output for a gather cut, so
-// the gather keeps all its producer lanes.
+// The side of a cut edge whose port moves to the new connection: Dst's input
+// for a one-to-one or broadcast cut, Src's output for a gather cut, so the
+// gather keeps all its producer lanes.
 enum class EReboundPort { SourceOutput, DestinationInput };
 
-// Cuts one rowset edge into Src -> SinkTask and SourceTask -> Dst, the remote
-// sink in Src's color and the remote source in Dst's color. The placeholder
-// tasks come with unbound ports; Apply binds them to the new edges.
+// Cuts rowset edges into Src -> SinkTask and SourceTask -> Dst, the sink in
+// Src's color and the source in Dst's color: one edge, or edges of one
+// connection that share the side that is not rebound. The rebound side of
+// Edges[j] moves to lane j of NewConnection. The placeholder tasks come with
+// one unbound port per distinct lane of their new edges; Apply binds them.
 struct TEdgeSplit {
-    TTaskEdge* Edge = nullptr;
+    std::vector<TTaskEdge*> Edges;
     EReboundPort ReboundPort = EReboundPort::DestinationInput;
     int SinkColor = 0;
     int SourceColor = 0;
