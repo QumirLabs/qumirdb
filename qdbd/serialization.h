@@ -47,7 +47,7 @@ size_t SerializedSize(const NQdb::NRemote::TDataChunk& message);
 template<>
 void SerializeTo(const NQdb::NRemote::TDataChunk& message, std::span<char> out);
 
-// The decoded row set points into the blob, which it takes; release it with NQdb::Release.
+// The decoded row sets point into the blob, which they share; release each with NQdb::Release.
 template<>
 void DeserializeFrom(NQdb::NRemote::TDataChunk& message, TBlob& blob);
 

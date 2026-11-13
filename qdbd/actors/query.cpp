@@ -313,8 +313,10 @@ struct TQueryActor : public IBehaviorActor {
         // The chunk releases its rows when the handler returns.
         void Receive(TDataChunk&& chunk, TBlob, TActorContext::TPtr ctx) {
             try {
-                State->Sink->Write(chunk.RowSet);
-                State->Timing.Rows += SelectedRows(chunk.RowSet);
+                for (const auto& rowSet : chunk.RowSets) {
+                    State->Sink->Write(rowSet);
+                    State->Timing.Rows += SelectedRows(rowSet);
+                }
             } catch (const std::exception& e) {
                 Fail(e.what(), ctx);
                 return;
