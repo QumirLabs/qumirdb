@@ -55,14 +55,22 @@ struct TDataChunk {
     std::vector<TRowSet> RowSets;
     // The sender's value layouts, one per column; null in a received chunk.
     const TValueLayout* Descriptor = nullptr;
+    // The CTE spool segment of each row set, or empty for segment 0 of all.
+    std::vector<uint32_t> Segments;
 
     TDataChunk() = default;
 
-    TDataChunk(uint64_t dstTaskId, uint64_t seq, std::vector<TRowSet> rowSets, const TValueLayout* descriptor = nullptr)
+    TDataChunk(
+        uint64_t dstTaskId,
+        uint64_t seq,
+        std::vector<TRowSet> rowSets,
+        const TValueLayout* descriptor = nullptr,
+        std::vector<uint32_t> segments = {})
         : DstTaskId(dstTaskId)
         , Seq(seq)
         , RowSets(std::move(rowSets))
         , Descriptor(descriptor)
+        , Segments(std::move(segments))
     {}
 
     TDataChunk(TDataChunk&& other) noexcept
@@ -70,6 +78,7 @@ struct TDataChunk {
         , Seq(other.Seq)
         , RowSets(other.Take())
         , Descriptor(other.Descriptor)
+        , Segments(std::exchange(other.Segments, {}))
     {}
 
     TDataChunk& operator=(TDataChunk&& other) noexcept
@@ -80,8 +89,14 @@ struct TDataChunk {
             Seq = other.Seq;
             RowSets = other.Take();
             Descriptor = other.Descriptor;
+            Segments = std::exchange(other.Segments, {});
         }
         return *this;
+    }
+
+    uint32_t Segment(size_t index) const
+    {
+        return Segments.empty() ? 0 : Segments[index];
     }
 
     ~TDataChunk()

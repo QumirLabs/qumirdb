@@ -500,14 +500,11 @@ std::unique_ptr<ITask> MakeNodeTask(
             return std::make_unique<TCteSinkTask>(spool, node.Segments, std::move(inputs));
         } else if constexpr (std::is_same_v<TNode, TCteSourceNode>) {
             const auto& spool = CteSpoolAt(context, node.Spool);
-            if (node.Segment >= spool->SegmentCount()) {
-                Invalid("cte spool segment is out of range");
-            }
             std::vector<TOutputPort> outputs;
             for (const auto& port : node.Out) {
                 outputs.push_back(OutputPort(connections, port));
             }
-            return std::make_unique<TCteSourceTask>(spool, node.Segment, node.Seal, std::move(outputs));
+            return std::make_unique<TCteSourceTask>(spool, node.Seal, std::move(outputs));
         } else if constexpr (std::is_same_v<TNode, TRuntimeFilterNode>) {
             return std::make_unique<TRuntimeFilterTask>(
                 nullptr, InputPort(connections, node.In), OutputPort(connections, node.Out));

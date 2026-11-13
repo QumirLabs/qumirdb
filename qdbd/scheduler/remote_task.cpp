@@ -38,7 +38,7 @@ TRemoteSinkState::~TRemoteSinkState() {
     }
 }
 
-ETaskResult TRemoteSinkState::Write(const TRowSet& rowSet) {
+ETaskResult TRemoteSinkState::Write(const TRowSet& rowSet, uint32_t segment) {
     if (QueuedBytes.load() >= Limits.OutboxBytes) {
         return ETaskResult::WAITING;
     }
@@ -49,22 +49,28 @@ ETaskResult TRemoteSinkState::Write(const TRowSet& rowSet) {
     // one taken here and is released by whoever drains it.
     auto& task = const_cast<TRowSet&>(rowSet);
     Retain(&task);
-    TQueued queued{.RowSet = task, .Bytes = bytes};
+    TQueued queued{.RowSet = task, .Bytes = bytes, .Segment = segment};
     queued.RowSet.RefCount = 1;
     // Counted before the push, so the actor's pop never takes the count below zero.
-    QueuedBytes.fetch_add(queued.Bytes);
-    if (!Outbox.TryPush(std::move(queued))) {
+    const auto queuedBytes = QueuedBytes.fetch_add(queued.Bytes) + queued.Bytes;
+    const bool pushed = Outbox.TryPush(std::move(queued));
+    if (pushed) {
+        ++Written;
+    } else {
         QueuedBytes.fetch_sub(queued.Bytes);
         --task.RefCount;
-        return ETaskResult::WAITING;
+        if (!Limits.FullChunks) {
+            return ETaskResult::WAITING;
+        }
+        Flush.store(true);
     }
-    ++Written;
     // Pairs with the fence in Drain: the push must be visible before Queued is read.
     std::atomic_thread_fence(std::memory_order_seq_cst);
-    if (!Queued.exchange(true)) {
+    // A full-chunk stream wakes the actor only once there is a chunk to send.
+    if ((!Limits.FullChunks || !pushed || queuedBytes >= Limits.ChunkBytes) && !Queued.exchange(true)) {
         ActorChannel.Notify(this);
     }
-    return ETaskResult::OK;
+    return pushed ? ETaskResult::OK : ETaskResult::WAITING;
 }
 
 ETaskResult TRemoteSinkState::Finish() {
@@ -158,18 +164,18 @@ void TRemoteSourceState::SendConfirm(NNet::NActors::TActorContext::TPtr& ctx) {
     }
 }
 
-ETaskResult TRemoteSourceState::Next(TRowSet& rowSet) {
-    if (Pop(rowSet)) {
+ETaskResult TRemoteSourceState::Next(TRowSet& rowSet, uint32_t& segment) {
+    if (Pop(rowSet, segment)) {
         return ETaskResult::OK;
     }
     if (!Finished.load(std::memory_order_acquire)) {
         return ETaskResult::WAITING;
     }
     // Rows pushed before Finish are visible now.
-    return Pop(rowSet) ? ETaskResult::OK : ETaskResult::FINISHED;
+    return Pop(rowSet, segment) ? ETaskResult::OK : ETaskResult::FINISHED;
 }
 
-bool TRemoteSourceState::Pop(TRowSet& rowSet) {
+bool TRemoteSourceState::Pop(TRowSet& rowSet, uint32_t& segment) {
     while (CurrentPos == Current.RowSets.size()) {
         Current = {};
         CurrentPos = 0;
@@ -183,6 +189,7 @@ bool TRemoteSourceState::Pop(TRowSet& rowSet) {
         }
     }
     // The row set handed out belongs to the task now.
+    segment = Current.Segment(CurrentPos);
     rowSet = std::exchange(Current.RowSets[CurrentPos++], TRowSet{});
     return true;
 }
@@ -362,11 +369,47 @@ std::pair<std::shared_ptr<const TSourceCode>, std::shared_ptr<TRemoteSourceState
     size_t inboxCapacity)
 {
     auto code = std::make_shared<const TSourceCode>([](void* state, TRowSet& rowSet) {
-        return static_cast<TRemoteSourceState*>(state)->Next(rowSet);
+        uint32_t segment = 0;
+        return static_cast<TRemoteSourceState*>(state)->Next(rowSet, segment);
     });
     auto state = std::make_shared<TRemoteSourceState>(
         id, peerActor, peerTaskId, actorChannel, inboxCapacity);
     return {std::move(code), std::move(state)};
+}
+
+std::pair<std::shared_ptr<const TCteSinkCode>, std::shared_ptr<TRemoteSinkState>> MakeRemoteCteSink(
+    uint64_t id,
+    NNet::NActors::TActorId actorId,
+    uint64_t dstTaskId,
+    std::span<const TValueLayout> descriptor,
+    TActorNotificationChannel& actorChannel)
+{
+    auto code = std::make_shared<const TCteSinkCode>(TCteSinkCode{
+        .Write = [](void* state, const TRowSet& rowSet, uint32_t segment) {
+            return static_cast<TRemoteSinkState*>(state)->Write(rowSet, segment);
+        },
+        .Finish = [](void* state) {
+            return static_cast<TRemoteSinkState*>(state)->Finish();
+        },
+    });
+    // The receiver reads the spool only after the finish, so small chunks would only cost messages.
+    auto state = std::make_shared<TRemoteSinkState>(
+        id, actorId, dstTaskId, descriptor, actorChannel, TRemoteStreamLimits{.FullChunks = true});
+    return {std::move(code), std::move(state)};
+}
+
+std::pair<std::shared_ptr<const TCteSourceCode>, std::shared_ptr<TRemoteSourceState>> MakeRemoteCteSource(
+    uint64_t id,
+    NNet::NActors::TActorId peerActor,
+    uint64_t peerTaskId,
+    TActorNotificationChannel& actorChannel)
+{
+    auto code = std::make_shared<const TCteSourceCode>(TCteSourceCode{
+        .Next = [](void* state, TRowSet& rowSet, uint32_t& segment) {
+            return static_cast<TRemoteSourceState*>(state)->Next(rowSet, segment);
+        },
+    });
+    return {std::move(code), std::make_shared<TRemoteSourceState>(id, peerActor, peerTaskId, actorChannel)};
 }
 
 std::pair<std::shared_ptr<const TRuntimeFilterSinkCode>, std::shared_ptr<TRuntimeFilterSinkState>>

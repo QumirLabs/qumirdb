@@ -150,7 +150,7 @@ void TPartitioner::PlanCteSplit(std::vector<TTaskEdge*> edges) {
         .SinkTask = std::make_unique<TCteSinkTask>(
             nullptr, std::vector<uint32_t>{}, std::vector<TInputPort>(segments ? 1 : lanes)),
         .SourceTask = std::make_unique<TCteSourceTask>(
-            nullptr, 0, false, std::vector<TOutputPort>(segments ? lanes : 1)),
+            nullptr, false, std::vector<TOutputPort>(segments ? lanes : 1)),
     });
 }
 
