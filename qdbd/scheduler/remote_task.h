@@ -11,8 +11,10 @@
 
 #include <algorithm>
 #include <cassert>
+#include <deque>
 #include <span>
 #include <string>
+#include <vector>
 
 #include <coroio/notifier.hpp>
 #include <coroio/actors/actor.hpp>
@@ -80,10 +82,22 @@ private:
     TMPSCQueue<TRuntimeFilterSinkState*> FilterSinkReady;
 };
 
+// Flow control of one remote stream, in bytes of row sets. A sink queues at
+// most ChunkBytes (and OutboxCapacity row sets) for the actor, which packs them
+// into chunks of up to ChunkBytes and keeps at most WindowBytes unconfirmed. A
+// row set larger than ChunkBytes goes alone. The peer's inbox holds WindowChunks
+// chunks, so that many may be unconfirmed too.
+struct TRemoteStreamLimits {
+    size_t OutboxCapacity = 64;
+    size_t ChunkBytes = 256 << 10;
+    size_t WindowBytes = 2 << 20;
+    size_t WindowChunks = 16;
+};
+
 // Worker -> ComputeActor. The sink task writes into a bounded outbox; the actor
 // is its only consumer. The external id of the sink node is kept here so the
 // actor can wake the node with Graph.ExternalNode(Id). The actor numbers the
-// chunks it sends from 1 and keeps at most Window of them unconfirmed.
+// chunks it sends from 1.
 struct TRemoteSinkState {
     TRemoteSinkState(
         uint64_t id,
@@ -91,8 +105,7 @@ struct TRemoteSinkState {
         uint64_t dstTaskId,
         std::span<const TValueLayout> descriptor,
         TActorNotificationChannel& actorChannel,
-        size_t outboxCapacity = 16,
-        size_t window = 2);
+        TRemoteStreamLimits limits = {});
     ~TRemoteSinkState();
 
     // TSinkCode::TWrite: OK or WAITING (the outbox is full).
@@ -100,27 +113,26 @@ struct TRemoteSinkState {
     // TSinkCode::TFinish
     ETaskResult Finish();
 
-    // ComputeActor side. Passes queued row sets and their Seq to `send`, which
-    // takes ownership, while fewer than Window are unconfirmed; calls `finish`
-    // once after the last row of a finished sink. Queued stays set while the
-    // actor owns the state: from the queue pop until the outbox is empty, or
-    // parked on a closed window until Confirm resumes the drain.
+    // ComputeActor side. While the window is open, packs the queued row sets
+    // into chunks and passes each to `send`; a chunk takes what is queued and
+    // never waits for more. Calls `finish` once after the last row of a
+    // finished sink. Queued stays set while the actor owns the state: from the
+    // queue pop until the outbox is empty, or parked on a closed window until
+    // Confirm resumes the drain.
     template <class TSend, class TSendFinish>
     void Drain(TSend&& send, TSendFinish&& finish) {
-        TRowSet rowSet;
         for (;;) {
-            while (Sent - Confirmed < Window && Outbox.TryPop(rowSet)) {
-                send(++Sent, std::move(rowSet));
+            while (WindowOpen() && SendQueued(send)) {
             }
             // Finish follows the last Write, so Written is final once InputFinished is set.
-            if (InputFinished.load() && Sent == Written) {
+            if (InputFinished.load() && Popped == Written) {
                 if (!FinishSent) {
                     FinishSent = true;
                     finish();
                 }
                 return;
             }
-            if (Sent - Confirmed >= Window) {
+            if (!WindowOpen()) {
                 Parked = true;
                 return;
             }
@@ -128,9 +140,7 @@ struct TRemoteSinkState {
             // Store-buffering with the worker's push: the pop must not run before the store.
             std::atomic_thread_fence(std::memory_order_seq_cst);
             // A Write or Finish that saw Queued set did not notify: look again.
-            if (Outbox.TryPop(rowSet)) {
-                send(++Sent, std::move(rowSet));
-            } else if (!InputFinished.load()) {
+            if (!SendQueued(send) && !InputFinished.load()) {
                 return;
             }
             if (Queued.exchange(true)) {
@@ -145,8 +155,11 @@ struct TRemoteSinkState {
         if (lastApplied > Sent) {
             return false;
         }
-        Confirmed = std::max(Confirmed, lastApplied);
-        if (Parked && Sent - Confirmed < Window) {
+        for (; Confirmed < lastApplied; ++Confirmed) {
+            InFlightBytes -= InFlight.front();
+            InFlight.pop_front();
+        }
+        if (Parked && WindowOpen()) {
             Parked = false;
             Drain(send, finish);
         }
@@ -161,39 +174,74 @@ struct TRemoteSinkState {
     uint64_t DstTaskId;
     std::span<const TValueLayout> Descriptor;
     TActorNotificationChannel& ActorChannel;
-    TMPSCQueue<TRowSet> Outbox;
-    const size_t Window;
+    const TRemoteStreamLimits Limits;
+    // A row set and its bytes, counted once by the worker.
+    struct TQueued {
+        TRowSet RowSet{};
+        uint64_t Bytes = 0;
+    };
+    TMPSCQueue<TQueued> Outbox;
+    std::atomic<uint64_t> OutboxBytes = 0;
     std::atomic<bool> Queued = false;
     std::atomic<bool> InputFinished = false;
     uint64_t Written = 0; // worker only until InputFinished: rows pushed into the outbox
-    // Actor only: the last sent and the last confirmed Seq.
+    // Actor only: row sets taken from the outbox, the last sent and the last
+    // confirmed Seq, and the bytes of each unconfirmed chunk.
+    uint64_t Popped = 0;
     uint64_t Sent = 0;
     uint64_t Confirmed = 0;
+    std::deque<uint64_t> InFlight;
+    uint64_t InFlightBytes = 0;
     bool Parked = false;
     bool FinishSent = false;
 
 private:
-    void SendChunk(NNet::NActors::TActorContext::TPtr& ctx, uint64_t seq, TRowSet&& rowSet);
+    bool WindowOpen() const {
+        return InFlightBytes < Limits.WindowBytes && Sent - Confirmed < Limits.WindowChunks;
+    }
+
+    // Packs queued row sets up to ChunkBytes into the next chunk; false if none is queued.
+    template <class TSend>
+    bool SendQueued(TSend& send) {
+        std::vector<TRowSet> rowSets;
+        uint64_t bytes = 0;
+        TQueued queued;
+        while (bytes < Limits.ChunkBytes && Outbox.TryPop(queued)) {
+            OutboxBytes.fetch_sub(queued.Bytes);
+            rowSets.push_back(queued.RowSet);
+            bytes += queued.Bytes;
+            ++Popped;
+        }
+        if (rowSets.empty()) {
+            return false;
+        }
+        InFlight.push_back(bytes);
+        InFlightBytes += bytes;
+        send(NRemote::TDataChunk(DstTaskId, ++Sent, std::move(rowSets), Descriptor.data()));
+        return true;
+    }
+
+    void SendChunk(NNet::NActors::TActorContext::TPtr& ctx, NRemote::TDataChunk&& chunk);
     void SendFinish(NNet::NActors::TActorContext::TPtr& ctx);
 };
 
-// ComputeActor -> worker. The actor pushes received row sets into a bounded
+// ComputeActor -> worker. The actor pushes received chunks into a bounded
 // inbox and then wakes the source node with Graph.ExternalNode(Id). A chunk is
-// applied once Next pops it; the worker then wakes the actor, which confirms
-// the last applied Seq to the peer sink (PeerActor, PeerTaskId).
+// applied once Next takes it from the inbox; the worker then wakes the actor,
+// which confirms the last applied Seq to the peer sink (PeerActor, PeerTaskId).
 struct TRemoteSourceState {
     TRemoteSourceState(
         uint64_t id,
         NNet::NActors::TActorId peerActor,
         uint64_t peerTaskId,
         TActorNotificationChannel& actorChannel,
-        size_t inboxCapacity = 16);
-    ~TRemoteSourceState();
+        size_t inboxCapacity = TRemoteStreamLimits{}.WindowChunks);
 
-    // ComputeActor side. False if seq is not the next one or the inbox is full;
-    // rowSet is then left untouched. The peer keeps at most its window of chunks
-    // unconfirmed, so an inbox that holds the window never fills up.
-    bool Push(uint64_t seq, TRowSet&& rowSet);
+    // ComputeActor side. False if the chunk's Seq is not the next one or the
+    // inbox is full; the chunk is then left untouched. The peer keeps at most
+    // its window of chunks unconfirmed, so an inbox that holds the window never
+    // fills up.
+    bool Push(NRemote::TDataChunk&& chunk);
     void Finish();
 
     // ComputeActor side, on a wake: the last applied Seq if it moved since the
@@ -208,9 +256,10 @@ struct TRemoteSourceState {
     NNet::NActors::TActorId PeerActor;
     uint64_t PeerTaskId;
     TActorNotificationChannel& ActorChannel;
-    TMPSCQueue<TRowSet> Inbox;
+    // The chunks release the rows they still hold.
+    TMPSCQueue<NRemote::TDataChunk> Inbox;
     std::atomic<bool> Finished = false;
-    std::atomic<uint64_t> Applied = 0; // worker: the Seq of the last popped chunk
+    std::atomic<uint64_t> Applied = 0; // worker: the Seq of the last chunk taken from the inbox
     std::atomic<bool> Queued = false;
     // Actor only: the last received and the last confirmed Seq.
     uint64_t Received = 0;
@@ -218,6 +267,10 @@ struct TRemoteSourceState {
 
 private:
     bool Pop(TRowSet& rowSet);
+
+    // Worker only: the chunk being handed out and its next row set.
+    NRemote::TDataChunk Current;
+    size_t CurrentPos = 0;
 };
 
 // Worker -> ComputeActor: a runtime filter sink task hands its partial over
@@ -277,15 +330,14 @@ std::pair<std::shared_ptr<const TSinkCode>, std::shared_ptr<TRemoteSinkState>> M
     uint64_t dstTaskId,
     std::span<const TValueLayout> descriptor,
     TActorNotificationChannel& actorChannel,
-    size_t outboxCapacity = 16,
-    size_t window = 2);
+    TRemoteStreamLimits limits = {});
 
 std::pair<std::shared_ptr<const TSourceCode>, std::shared_ptr<TRemoteSourceState>> MakeRemoteSource(
     uint64_t id,
     NNet::NActors::TActorId peerActor,
     uint64_t peerTaskId,
     TActorNotificationChannel& actorChannel,
-    size_t inboxCapacity = 16);
+    size_t inboxCapacity = TRemoteStreamLimits{}.WindowChunks);
 
 // Code and state for TRuntimeFilterSinkTask / TRuntimeFilterSourceTask.
 std::pair<std::shared_ptr<const TRuntimeFilterSinkCode>, std::shared_ptr<TRuntimeFilterSinkState>>
