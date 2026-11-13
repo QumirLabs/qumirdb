@@ -42,13 +42,14 @@ ETaskResult TRemoteSinkState::Write(const TRowSet& rowSet) {
     if (QueuedBytes.load() >= Limits.OutboxBytes) {
         return ETaskResult::WAITING;
     }
+    // A row set that does not match the layouts fails on the actor.
+    const bool matches = static_cast<size_t>(rowSet.ColumnCount) == Descriptor.size();
+    const auto bytes = matches ? RowSetWireSize(rowSet, Descriptor) : 0;
     // TSinkTask releases its reference after Write. The outbox copy owns the
     // one taken here and is released by whoever drains it.
     auto& task = const_cast<TRowSet&>(rowSet);
     Retain(&task);
-    // A row set that does not match the layouts fails on the actor.
-    const bool matches = static_cast<size_t>(task.ColumnCount) == Descriptor.size();
-    TQueued queued{.RowSet = task, .Bytes = matches ? RowSetWireSize(task, Descriptor) : 0};
+    TQueued queued{.RowSet = task, .Bytes = bytes};
     queued.RowSet.RefCount = 1;
     // Counted before the push, so the actor's pop never takes the count below zero.
     QueuedBytes.fetch_add(queued.Bytes);
