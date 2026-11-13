@@ -300,6 +300,19 @@ TEST(DistributedSerialization, ChunkCarriesSeveralRowSetsSharingTheBlob) {
     EXPECT_THROW(Encode(original), std::runtime_error);
 }
 
+// The worker sizes a row set as the serializer writes it: selected rows only.
+TEST(DistributedSerialization, RowSetWireSizeCountsSelectedRows) {
+    TMixedBatch batch;
+    // A chunk of one row set is the 32-byte chunk header and the row set's part.
+    const auto all = Encode(batch.Message).size() - 32;
+    EXPECT_EQ(RowSetWireSize(batch.Message.RowSets[0], batch.Layouts), all);
+    std::array<uint8_t, 3> selection{0, 1, 0};
+    batch.Message.RowSets[0].Selection = selection.data();
+    const auto selected = Encode(batch.Message).size() - 32;
+    EXPECT_EQ(RowSetWireSize(batch.Message.RowSets[0], batch.Layouts), selected);
+    EXPECT_LT(selected, all);
+}
+
 // Every part starts aligned, so the regions of a second part with mixed layouts are too.
 TEST(DistributedSerialization, SecondPartWithMixedLayoutsIsAligned) {
     TMixedBatch original;
