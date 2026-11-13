@@ -52,17 +52,18 @@ TCteSpool::TCteSpool(size_t segments, std::vector<TValueLayout> rowLayouts)
 
 TCteSpool::~TCteSpool() {
     for (auto& segment : Segments_) {
-        for (auto& batch : segment) {
+        for (auto& batch : segment.Batches) {
             Release(&batch);
         }
     }
 }
 
 void TCteSpool::Append(size_t segment, TRowSet rowSet) {
+    assert(SegmentEnds_.empty());
     {
-        std::lock_guard lock(Lock_);
-        assert(SegmentEnds_.empty());
-        Segments_[segment].push_back(rowSet);
+        auto& target = Segments_[segment];
+        std::lock_guard lock(target.Lock);
+        target.Batches.push_back(rowSet);
     }
     // A reader armed before this append may have missed its batch: wake it.
     for (auto* watcher : Watchers_) {
@@ -73,12 +74,12 @@ void TCteSpool::Append(size_t segment, TRowSet rowSet) {
 }
 
 void TCteSpool::Seal() {
-    std::lock_guard lock(Lock_);
     assert(SegmentEnds_.empty());
     SegmentEnds_.reserve(Segments_.size());
     size_t end = 0;
+    // Every writer has finished: the segments no longer change.
     for (const auto& segment : Segments_) {
-        end += segment.size();
+        end += segment.Batches.size();
         SegmentEnds_.push_back(end);
     }
 }
@@ -92,17 +93,17 @@ std::span<const TValueLayout> TCteSpool::RowLayouts() const {
     return RowLayouts_;
 }
 
-void TCteSpool::Watch(TCteSpoolWatcher& watcher) const {
+void TCteSpool::Watch(TCteSpoolWatcher& watcher) {
     Watchers_.push_back(&watcher);
 }
 
 std::optional<TRowSet> TCteSpool::TryBatch(size_t segment, size_t index) const {
-    std::lock_guard lock(Lock_);
-    const auto& batches = Segments_[segment];
-    if (index >= batches.size()) {
+    const auto& source = Segments_[segment];
+    std::lock_guard lock(source.Lock);
+    if (index >= source.Batches.size()) {
         return std::nullopt;
     }
-    return batches[index];
+    return source.Batches[index];
 }
 
 size_t TCteSpool::BatchCount() const {
@@ -118,7 +119,7 @@ const TRowSet& TCteSpool::Batch(size_t index) const {
     const size_t begin = segment == 0
         ? 0
         : SegmentEnds_[segment - 1];
-    return Segments_[segment][index - begin];
+    return Segments_[segment].Batches[index - begin];
 }
 
 TCteConsumerState::TCteConsumerState(std::shared_ptr<const TCteSpool> spool)
@@ -273,7 +274,7 @@ bool TCteConsumerTask::RebindPort(const TPortRebind& rebind) {
 }
 
 TCteSinkTask::TCteSinkTask(
-    std::shared_ptr<const TCteSpool> spool,
+    std::shared_ptr<TCteSpool> spool,
     std::vector<uint32_t> segments,
     std::vector<TInputPort> inputs)
     : Spool_(std::move(spool))

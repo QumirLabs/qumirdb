@@ -205,6 +205,11 @@ struct TRemoteSinkState {
     bool FinishSent = false;
 
 private:
+    // A full chunk; the outbox may hold less than ChunkBytes.
+    size_t FullChunkBytes() const {
+        return std::min(Limits.ChunkBytes, Limits.OutboxBytes);
+    }
+
     bool WindowOpen() const {
         return InFlightBytes < Limits.WindowBytes && Sent - Confirmed < Limits.WindowChunks;
     }
@@ -212,7 +217,7 @@ private:
     // Packs queued row sets up to ChunkBytes into the next chunk; false if none is queued.
     template <class TSend>
     bool SendQueued(TSend& send) {
-        if (Limits.FullChunks && QueuedBytes.load() < Limits.ChunkBytes && !InputFinished.load()
+        if (Limits.FullChunks && QueuedBytes.load() < FullChunkBytes() && !InputFinished.load()
             && !Flush.exchange(false))
         {
             return false;

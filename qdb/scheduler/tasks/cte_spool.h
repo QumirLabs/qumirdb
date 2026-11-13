@@ -47,9 +47,9 @@ struct TCteSpoolWatcher {
 };
 
 // The rows of a materialized CTE. Each segment has one writer, a producer lane
-// or a CTE source. Before Seal, CTE sinks read the segments while they are
-// appended to, under a lock; once sealed the spool is immutable and read
-// concurrently without it. Writers, readers and their views share ownership.
+// or a CTE source. Before Seal, CTE sinks read a segment while it is appended
+// to, under the segment's lock; once sealed the spool is immutable and read
+// concurrently without locks. Writers, readers and their views share ownership.
 class TCteSpool {
 public:
     explicit TCteSpool(size_t segments, std::vector<TValueLayout> rowLayouts = {});
@@ -66,7 +66,7 @@ public:
     std::span<const TValueLayout> RowLayouts() const;
 
     // Streaming side, before the writers start; the watcher outlives their appends.
-    void Watch(TCteSpoolWatcher& watcher) const;
+    void Watch(TCteSpoolWatcher& watcher);
     // Batch `index` of the segment once it is appended, also while the segment grows.
     std::optional<TRowSet> TryBatch(size_t segment, size_t index) const;
 
@@ -75,11 +75,14 @@ public:
     const TRowSet& Batch(size_t index) const;
 
 private:
-    mutable std::mutex Lock_;
-    std::vector<std::vector<TRowSet>> Segments_;
+    struct TSegment {
+        mutable std::mutex Lock;
+        std::vector<TRowSet> Batches;
+    };
+
+    std::vector<TSegment> Segments_;
     std::vector<TValueLayout> RowLayouts_;
-    // Readers' registrations, not rows.
-    mutable std::vector<TCteSpoolWatcher*> Watchers_;
+    std::vector<TCteSpoolWatcher*> Watchers_;
     // Exclusive end of each segment in the batch numbering.
     std::vector<size_t> SegmentEnds_;
 };
@@ -181,7 +184,7 @@ class TCteSinkTask final : public ITask {
 public:
     // Without a spool, a placeholder with unbound inputs.
     explicit TCteSinkTask(
-        std::shared_ptr<const TCteSpool> spool = nullptr,
+        std::shared_ptr<TCteSpool> spool = nullptr,
         std::vector<uint32_t> segments = {},
         std::vector<TInputPort> inputs = {});
 
@@ -200,7 +203,7 @@ private:
     // Passes every batch appended so far to Write; false on WAITING.
     bool SendAppended(bool& sent);
 
-    std::shared_ptr<const TCteSpool> Spool_;
+    std::shared_ptr<TCteSpool> Spool_;
     std::vector<uint32_t> Segments_;
     // A copy: the spool goes once everything is sent.
     std::vector<TValueLayout> RowLayouts_;
