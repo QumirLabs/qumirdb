@@ -53,6 +53,7 @@ struct TDataChunk {
     uint64_t Seq = 0;
     // Each held while RefCount > 0; a view with RefCount 0 is never released.
     std::vector<TRowSet> RowSets;
+    // The sender's value layouts, one per column; null in a received chunk.
     const TValueLayout* Descriptor = nullptr;
 
     TDataChunk() = default;

@@ -155,19 +155,12 @@ struct TMixedBatch {
     }
 };
 
-void CheckMixed(const TDataChunk& message) {
-    EXPECT_EQ(message.DstTaskId, 123);
-    EXPECT_EQ(message.Seq, 7);
-    ASSERT_EQ(message.RowSets.size(), 1u);
-    const auto& rows = message.RowSets[0];
+void CheckMixedRows(const TRowSet& rows) {
     ASSERT_EQ(rows.ColumnCount, 4);
     ASSERT_EQ(rows.RowCount, 3);
     EXPECT_EQ(rows.Selection, nullptr);
     EXPECT_EQ(rows.RefCount, 1);
     ASSERT_NE(rows.Destroy, nullptr);
-    ASSERT_NE(message.Descriptor, nullptr);
-    EXPECT_EQ(message.Descriptor[0].Width, 16);
-    EXPECT_TRUE(message.Descriptor[1].Bitmap);
     for (int i = 0; i < 48; ++i) {
         EXPECT_EQ(rows.Columns[0].Data[i], static_cast<char>(i));
     }
@@ -196,6 +189,18 @@ void CheckMixed(const TDataChunk& message) {
     EXPECT_EQ(rows.Hash[0], 0);
     EXPECT_EQ(rows.Hash[1], 123);
     EXPECT_EQ(rows.Hash[2], std::numeric_limits<uint64_t>::max());
+    for (const auto& column : std::span(rows.Columns, rows.ColumnCount)) {
+        EXPECT_EQ(reinterpret_cast<uintptr_t>(column.Data) % 16, 0u);
+    }
+}
+
+void CheckMixed(const TDataChunk& message) {
+    EXPECT_EQ(message.DstTaskId, 123);
+    EXPECT_EQ(message.Seq, 7);
+    // A received chunk keeps no layouts: they would live only as long as its first row set.
+    EXPECT_EQ(message.Descriptor, nullptr);
+    ASSERT_EQ(message.RowSets.size(), 1u);
+    CheckMixedRows(message.RowSets[0]);
 }
 
 struct TAllocator {
@@ -295,6 +300,18 @@ TEST(DistributedSerialization, ChunkCarriesSeveralRowSetsSharingTheBlob) {
     TColumn wide[2] = {};
     original.RowSets.push_back({.Columns = wide, .ColumnCount = 2, .RowCount = 0});
     EXPECT_THROW(Encode(original), std::runtime_error);
+}
+
+// Every part starts aligned, so the regions of a second part with mixed layouts are too.
+TEST(DistributedSerialization, SecondPartWithMixedLayoutsIsAligned) {
+    TMixedBatch original;
+    original.Message.RowSets.push_back(original.Message.RowSets[0]);
+    const auto bytes = Encode(original.Message);
+    EXPECT_EQ(bytes.size() % 16, 0u);
+    TDecodedChunk decoded(bytes);
+    ASSERT_EQ(decoded.Message.RowSets.size(), 2u);
+    CheckMixedRows(decoded.Message.RowSets[0]);
+    CheckMixedRows(decoded.Message.RowSets[1]);
 }
 
 TEST(DistributedSerialization, DecodedChunkPointsIntoTheBlob) {
@@ -1811,9 +1828,8 @@ const std::array<TValueLayout, 1> CountedLayouts{{{.Width = 8}}};
 struct TRemotePipeline {
     int64_t Total = 300;
     size_t Workers = 2;
-    // A row set of i rows is 8 * i bytes.
     NQdb::NScheduler::TRemoteStreamLimits Limits{
-        .OutboxCapacity = 2, .ChunkBytes = 64, .WindowBytes = 256, .WindowChunks = 2};
+        .OutboxCapacity = 2, .OutboxBytes = 512, .ChunkBytes = 512, .WindowBytes = 2048, .WindowChunks = 2};
 };
 
 // producer -> remote sink | fake compute actors | remote source -> collector.
@@ -1884,7 +1900,7 @@ void RunRemotePipeline(const TRemotePipeline& options) {
         auto send = [&](TDataChunk&& chunk) {
             EXPECT_LE(sinkState->Sent - sinkState->Confirmed, limits.WindowChunks);
             // The window was open before this chunk; it adds no more than ChunkBytes and a row set.
-            const auto last = static_cast<uint64_t>(chunk.RowSets.back().RowCount) * 8;
+            const auto last = RowSetWireSize(chunk.RowSets.back(), CountedLayouts);
             EXPECT_LT(sinkState->InFlightBytes - sinkState->InFlight.back(), limits.WindowBytes);
             EXPECT_LT(sinkState->InFlight.back() - last, limits.ChunkBytes);
             chunks.push_back(std::move(chunk));
@@ -1972,27 +1988,33 @@ TEST(DistributedScheduler, RemoteTasksDeliverEverythingWithSmallWindows) {
         for (size_t outbox : {1, 4}) {
             for (size_t bytes : {1, 100, 1 << 20}) {
                 SCOPED_TRACE(std::to_string(chunks) + "/" + std::to_string(outbox) + "/" + std::to_string(bytes));
-                // Rows of up to 8000 bytes against chunks and windows of 1 byte to 1 MB.
+                // Rows of up to 8 KB against chunks and windows of 1 byte to 1 MB.
                 RunRemotePipeline({
                     .Total = 1000,
                     .Workers = 4,
-                    .Limits = {.OutboxCapacity = outbox, .ChunkBytes = bytes, .WindowBytes = 2 * bytes,
-                        .WindowChunks = chunks},
+                    .Limits = {.OutboxCapacity = outbox, .OutboxBytes = bytes, .ChunkBytes = bytes,
+                        .WindowBytes = 2 * bytes, .WindowChunks = chunks},
                 });
             }
         }
     }
 }
 
+// The bytes a row set of CountedRows takes in a chunk: the part header and column
+// entry, then 8 bytes a row, 16-byte aligned.
+uint64_t CountedBytes(int64_t rows) {
+    return 32 + (rows * 8 + 15) / 16 * 16;
+}
+
 // The sink packs what is queued into chunks of about ChunkBytes and keeps at
-// most WindowBytes and WindowChunks of them unconfirmed. A row of CountedRows
-// takes 8 bytes here.
+// most WindowBytes and WindowChunks of them unconfirmed.
 TEST(DistributedScheduler, RemoteSinkPacksRowSetsIntoAByteWindow) {
     using namespace NQdb::NScheduler;
     std::atomic<int> destroyed = 0;
     TActorNotificationChannel channel(std::make_unique<TFakeNotifier>(), 2, 2);
+    ASSERT_EQ(CountedBytes(1), 48u);
     auto [code, state] = MakeRemoteSink(1, TActorId{}, 2, CountedLayouts, channel,
-        {.OutboxCapacity = 16, .ChunkBytes = 64, .WindowBytes = 128, .WindowChunks = 4});
+        {.OutboxCapacity = 16, .OutboxBytes = 192, .ChunkBytes = 192, .WindowBytes = 384, .WindowChunks = 4});
     // The rows of each sent chunk, in order.
     std::vector<std::vector<int64_t>> sent;
     auto send = [&](TDataChunk&& chunk) {
@@ -2017,21 +2039,21 @@ TEST(DistributedScheduler, RemoteSinkPacksRowSetsIntoAByteWindow) {
         queued->Drain(send, finish);
     };
 
-    // The outbox takes rows up to a chunk: the ninth row waits.
-    for (int i = 0; i < 8; ++i) {
+    // The outbox takes rows up to OutboxBytes: the fifth row waits.
+    for (int i = 0; i < 4; ++i) {
         EXPECT_EQ(write(1), ETaskResult::OK);
     }
     EXPECT_EQ(write(1), ETaskResult::WAITING);
     drain();
-    EXPECT_EQ(sent, (std::vector<std::vector<int64_t>>{{1, 1, 1, 1, 1, 1, 1, 1}}));
-    EXPECT_EQ(state->InFlightBytes, 64);
+    EXPECT_EQ(sent, (std::vector<std::vector<int64_t>>{{1, 1, 1, 1}}));
+    EXPECT_EQ(state->InFlightBytes, 192u);
 
     // The next chunk fills the window, so later rows stay queued without a wake.
-    EXPECT_EQ(write(4), ETaskResult::OK);
-    EXPECT_EQ(write(4), ETaskResult::OK);
+    EXPECT_EQ(write(8), ETaskResult::OK);
+    EXPECT_EQ(write(8), ETaskResult::OK);
     drain();
-    EXPECT_EQ(sent.back(), (std::vector<int64_t>{4, 4}));
-    EXPECT_EQ(state->InFlightBytes, 128);
+    EXPECT_EQ(sent.back(), (std::vector<int64_t>{8, 8}));
+    EXPECT_EQ(state->InFlightBytes, 384u);
     EXPECT_EQ(write(1), ETaskResult::OK);
     EXPECT_EQ(write(2), ETaskResult::OK);
     EXPECT_FALSE(channel.SinkQueue().TryPop(queued));
@@ -2040,17 +2062,24 @@ TEST(DistributedScheduler, RemoteSinkPacksRowSetsIntoAByteWindow) {
     // A confirm reopens the window: the queued rows go as one chunk at once.
     EXPECT_TRUE(state->Confirm(1, send, finish));
     EXPECT_EQ(sent.back(), (std::vector<int64_t>{1, 2}));
-    EXPECT_EQ(state->InFlightBytes, 88);
+    EXPECT_EQ(state->InFlightBytes, 288u);
     EXPECT_FALSE(state->Confirm(4, send, finish));
 
-    // A row set larger than a chunk goes alone, and the window may overshoot by it.
-    EXPECT_EQ(write(20), ETaskResult::OK);
+    // A row set larger than a chunk makes a chunk of its own, and the window may overshoot by it.
+    EXPECT_EQ(write(40), ETaskResult::OK);
     EXPECT_EQ(write(1), ETaskResult::WAITING);
     drain();
-    EXPECT_EQ(sent.back(), (std::vector<int64_t>{20}));
-    EXPECT_EQ(state->InFlightBytes, 248);
+    EXPECT_EQ(sent.back(), (std::vector<int64_t>{40}));
+    EXPECT_EQ(state->InFlightBytes, 288 + CountedBytes(40));
     EXPECT_TRUE(state->Confirm(4, send, finish));
-    EXPECT_EQ(state->InFlightBytes, 0);
+    EXPECT_EQ(state->InFlightBytes, 0u);
+
+    // A chunk closes once it holds ChunkBytes, so its last row set may overshoot it.
+    EXPECT_EQ(write(1), ETaskResult::OK);
+    EXPECT_EQ(write(40), ETaskResult::OK);
+    drain();
+    EXPECT_EQ(sent.back(), (std::vector<int64_t>{1, 40}));
+    EXPECT_TRUE(state->Confirm(5, send, finish));
 
     // Small chunks: WindowChunks of them close the window before its bytes do.
     for (int i = 0; i < 4; ++i) {
@@ -2060,10 +2089,10 @@ TEST(DistributedScheduler, RemoteSinkPacksRowSetsIntoAByteWindow) {
     EXPECT_EQ(state->Sent - state->Confirmed, 4u);
     EXPECT_EQ(write(1), ETaskResult::OK);
     EXPECT_FALSE(channel.SinkQueue().TryPop(queued));
-    EXPECT_TRUE(state->Confirm(5, send, finish));
-    EXPECT_EQ(sent.size(), 9u);
+    EXPECT_TRUE(state->Confirm(6, send, finish));
+    EXPECT_EQ(sent.size(), 10u);
     EXPECT_EQ(sent.back(), (std::vector<int64_t>{1}));
-    EXPECT_EQ(destroyed.load(), 20);
+    EXPECT_EQ(destroyed.load(), 18);
 }
 
 TEST(DistributedScheduler, RemoteSinkFinishesAfterItsLastChunk) {
@@ -2071,7 +2100,8 @@ TEST(DistributedScheduler, RemoteSinkFinishesAfterItsLastChunk) {
     std::atomic<int> destroyed = 0;
     TActorNotificationChannel channel(std::make_unique<TFakeNotifier>(), 2, 2);
     // One chunk at a time is unconfirmed; the outbox holds two rows.
-    const TRemoteStreamLimits limits{.OutboxCapacity = 4, .ChunkBytes = 16, .WindowBytes = 1 << 20, .WindowChunks = 1};
+    const TRemoteStreamLimits limits{
+        .OutboxCapacity = 4, .OutboxBytes = 96, .ChunkBytes = 96, .WindowBytes = 1 << 20, .WindowChunks = 1};
     auto [code, state] = MakeRemoteSink(1, TActorId{}, 2, CountedLayouts, channel, limits);
     std::vector<uint64_t> events; // 0 is the finish
     std::vector<size_t> parts;
