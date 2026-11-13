@@ -20,6 +20,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -2432,6 +2433,103 @@ protected:
     std::shared_ptr<TRuntimeFilter> Filter_;
     std::unique_ptr<TRuntimeFilterTask> Task_;
 };
+
+TEST(SchedulerRuntimeAdapter, CteSinkSendsItsSegmentsOnceItsInputsFinish) {
+    auto spool = std::make_shared<TCteSpool>(3);
+    for (const int64_t rows : {1, 2}) {
+        spool->Append(0, TRowSet{.RowCount = rows, .RefCount = 1});
+    }
+    spool->Append(1, TRowSet{.RowCount = 3, .RefCount = 1});
+    for (const int64_t rows : {4, 5}) {
+        spool->Append(2, TRowSet{.RowCount = rows, .RefCount = 1});
+    }
+    TBroadcastConnection completion;
+    completion.Resize(1, 2);
+    TCteSinkTask sink(spool, {2, 0}, {{.Connection = &completion, .Lane = 0}, {.Connection = &completion, .Lane = 1}});
+    struct TSent {
+        std::vector<int64_t> Rows;
+        bool Refused = false;
+        bool Finished = false;
+    };
+    auto sent = std::make_shared<TSent>();
+    sink.BindCode(std::make_shared<TSinkCode>(
+        [](void* state, const TRowSet& rows) {
+            auto& sent = *static_cast<TSent*>(state);
+            // The second batch waits once, as for a full outbox.
+            if (sent.Rows.size() == 1 && !std::exchange(sent.Refused, true)) {
+                return ETaskResult::WAITING;
+            }
+            sent.Rows.push_back(rows.RowCount);
+            return ETaskResult::OK;
+        },
+        [](void* state) {
+            static_cast<TSent*>(state)->Finished = true;
+            return ETaskResult::OK;
+        }), sent);
+
+    EXPECT_EQ(sink.Execute(), ETaskResult::NEED_DATA);
+    TOutputPort{.Connection = &completion}.Finish();
+    EXPECT_EQ(sink.Execute(), ETaskResult::WAITING);
+    EXPECT_EQ(sent->Rows, (std::vector<int64_t>{4}));
+    EXPECT_EQ(sink.Execute(), ETaskResult::FINISHED);
+    EXPECT_EQ(sent->Rows, (std::vector<int64_t>{4, 5, 1, 2}));
+    EXPECT_TRUE(sent->Finished);
+}
+
+TEST(SchedulerRuntimeAdapter, CteSourceFillsItsSegmentThenFinishesItsLanes) {
+    for (const bool seal : {false, true}) {
+        SCOPED_TRACE(seal);
+        auto spool = std::make_shared<TCteSpool>(2);
+        TGatherConnection lanes;
+        lanes.Resize(2, 1);
+        TCteSourceTask source(spool, 1, seal, {{.Connection = &lanes, .Lane = 0}, {.Connection = &lanes, .Lane = 1}});
+        struct TReceived {
+            std::deque<int64_t> Rows;
+            bool Finished = false;
+        };
+        auto received = std::make_shared<TReceived>();
+        source.BindCode(std::make_shared<TSourceCode>([](void* state, TRowSet& rows) {
+            auto& received = *static_cast<TReceived*>(state);
+            if (received.Rows.empty()) {
+                return received.Finished ? ETaskResult::FINISHED : ETaskResult::WAITING;
+            }
+            rows = TRowSet{.RowCount = received.Rows.front(), .RefCount = 1};
+            received.Rows.pop_front();
+            return ETaskResult::OK;
+        }), received);
+
+        received->Rows = {7, 8};
+        EXPECT_EQ(source.Execute(), ETaskResult::WAITING);
+        const TInputPort publish{.Connection = &lanes};
+        TRowSet none{};
+        EXPECT_EQ(publish.Fetch(none), EFetchResult::NO_DATA);
+        received->Finished = true;
+        EXPECT_EQ(source.Execute(), ETaskResult::FINISHED);
+        EXPECT_EQ(publish.Fetch(none), EFetchResult::FINISHED);
+        EXPECT_TRUE(spool->Segment(0).empty());
+        ASSERT_EQ(spool->Segment(1).size(), 2u);
+        EXPECT_EQ(spool->Segment(1)[1].RowCount, 8);
+        if (seal) {
+            EXPECT_EQ(spool->BatchCount(), 2u);
+        }
+    }
+}
+
+// A placeholder gets one port per lane; Apply binds them in turn.
+TEST(SchedulerRuntimeAdapter, CtePlaceholdersBindTheirPortsInTurn) {
+    TGatherConnection lanes;
+    lanes.Resize(2, 1);
+    TCteSinkTask sink(nullptr, {}, std::vector<TInputPort>(2));
+    TCteSourceTask source(nullptr, 0, false, std::vector<TOutputPort>(2));
+    for (const size_t lane : {0, 1}) {
+        EXPECT_TRUE(sink.RebindPort({.Kind = EPortKind::Input, .To = &lanes, .ToLane = lane}));
+        EXPECT_TRUE(source.RebindPort({.Kind = EPortKind::Output, .To = &lanes, .ToLane = lane}));
+    }
+    EXPECT_FALSE(sink.RebindPort({.Kind = EPortKind::Input, .To = &lanes}));
+    EXPECT_FALSE(source.RebindPort({.Kind = EPortKind::Output, .To = &lanes}));
+    ExpectRebinds(sink, EPortKind::Input, lanes, 1);
+    ExpectRebinds(source, EPortKind::Output, lanes, 1);
+}
 
 TEST_F(RuntimeFilterTask, SparseSelectionProbesOnlySelectedRows) {
     Push({11, 33, 0, 22, 11, 44}, {1, 1, 0, 0xff, 0, 2});

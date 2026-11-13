@@ -2,6 +2,7 @@
 
 #include <qdb/scheduler/connections/local.h>
 #include <qdb/scheduler/port.h>
+#include <qdb/scheduler/tasks/cte_spool.h>
 #include <qdb/scheduler/tasks/runtime_adapter.h>
 
 #include <algorithm>
@@ -16,6 +17,15 @@
 
 namespace NQdb {
 namespace NScheduler {
+namespace {
+
+// Producer lanes -> publish task or publish task -> consumer lanes of a CTE.
+bool IsCteEdge(const TTaskEdge& edge) {
+    return dynamic_cast<const TCtePublishTask*>(edge.Src->Task)
+        || dynamic_cast<const TCtePublishTask*>(edge.Dst->Task);
+}
+
+} // namespace
 
 TPartitioner::TPartitioner(const TSealedTaskGraph& graph, int partitions)
     : Partitions_(partitions)
@@ -61,6 +71,9 @@ void TPartitioner::Do() {
 void TPartitioner::Partition(const std::vector<TTaskEdge*>& cuts) {
     // Dependency splits by filter, sink color and source color.
     std::map<std::tuple<const IRuntimeFilterProbe*, int, int>, size_t> filterSplits;
+    // CTE edges by connection, sink color and source color, in plan order.
+    std::map<std::tuple<const IConnection*, int, int>, size_t> cteSplits;
+    std::vector<std::vector<TTaskEdge*>> cteEdges;
     for (auto* edge : cuts) {
         if (edge->Kind == ETaskEdgeKind::Dependency) {
             const auto* probe = dynamic_cast<const TRuntimeFilterTask*>(edge->Dst->Task);
@@ -83,6 +96,17 @@ void TPartitioner::Partition(const std::vector<TTaskEdge*>& cuts) {
             Plan_.DependencySplits[it->second].Edges.push_back(edge);
             continue;
         }
+        // These edges carry only finish signals: the spool's rows cross with
+        // one split per connection and pair of colors.
+        if (IsCteEdge(*edge)) {
+            const auto [it, added] = cteSplits.try_emplace(
+                {edge->Connection, Colors_.at(edge->Src), Colors_.at(edge->Dst)}, cteEdges.size());
+            if (added) {
+                cteEdges.emplace_back();
+            }
+            cteEdges[it->second].push_back(edge);
+            continue;
+        }
         if (auto* oneToOne = dynamic_cast<TOneToOneConnection*>(edge->Connection)) {
             assert(edge->SrcLane == edge->DstLane);
             PlanSplit(*edge, EReboundPort::DestinationInput, oneToOne->Capacity());
@@ -96,6 +120,38 @@ void TPartitioner::Partition(const std::vector<TTaskEdge*>& cuts) {
             throw std::logic_error("unsupported connection for partitioning");
         }
     }
+    for (auto& edges : cteEdges) {
+        PlanCteSplit(std::move(edges));
+    }
+}
+
+// Producer lanes -> publish: the sink reads the lanes through a new gather and
+// the source finishes them in the publish task's input. Publish -> consumer
+// lanes: the sink reads their lanes, the source finishes a new broadcast to them.
+void TPartitioner::PlanCteSplit(std::vector<TTaskEdge*> edges) {
+    const size_t lanes = edges.size();
+    const bool segments = dynamic_cast<const TCtePublishTask*>(edges.front()->Dst->Task);
+    std::unique_ptr<IConnection> connection;
+    if (segments) {
+        connection = std::make_unique<TGatherConnection>();
+        connection->Resize(lanes, 1);
+    } else {
+        connection = std::make_unique<TBroadcastConnection>();
+        connection->Resize(1, lanes);
+    }
+    const int sinkColor = Colors_.at(edges.front()->Src);
+    const int sourceColor = Colors_.at(edges.front()->Dst);
+    Plan_.Splits.push_back({
+        .Edges = std::move(edges),
+        .ReboundPort = segments ? EReboundPort::SourceOutput : EReboundPort::DestinationInput,
+        .SinkColor = sinkColor,
+        .SourceColor = sourceColor,
+        .NewConnection = std::move(connection),
+        .SinkTask = std::make_unique<TCteSinkTask>(
+            nullptr, std::vector<uint32_t>{}, std::vector<TInputPort>(segments ? 1 : lanes)),
+        .SourceTask = std::make_unique<TCteSourceTask>(
+            nullptr, 0, false, std::vector<TOutputPort>(segments ? lanes : 1)),
+    });
 }
 
 void TPartitioner::PlanSplit(TTaskEdge& edge, EReboundPort reboundPort, size_t capacity) {

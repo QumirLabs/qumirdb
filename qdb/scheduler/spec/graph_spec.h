@@ -474,6 +474,40 @@ struct TCteConsumerNode {
     }
 };
 
+// Sends the batches of Segments of Spool, once every lane of In has finished,
+// through code the compute actor binds: the segments of this fragment's
+// producer lanes, or every segment of the published spool.
+struct TCteSinkNode {
+    std::vector<TPortSpec> In;
+    uint32_t Spool = 0;
+    std::vector<uint32_t> Segments;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.In);
+        v(self.Spool);
+        v(self.Segments);
+    }
+};
+
+// Appends the batches its code receives to Segment of Spool, seals it if Seal
+// and finishes every lane of Out. A sealed copy must get the batches in the
+// publish fragment's seal order: consumer lanes own batches by their index.
+struct TCteSourceNode {
+    std::vector<TPortSpec> Out;
+    uint32_t Spool = 0;
+    uint32_t Segment = 0;
+    bool Seal = false;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.Out);
+        v(self.Spool);
+        v(self.Segment);
+        v(self.Seal);
+    }
+};
+
 // A runtime filter of a join: every build lane publishes one partial into it,
 // the filter tasks probe it. Created through the binding factory.
 struct TRuntimeFilterBindingSpec {
@@ -537,9 +571,9 @@ using TNodeBody = std::variant<
     TParquetScanNode, TFilterNode, TProjectNode, TSortNode, TSortMergeNode,
     TWindowNode, TAggregateNode, THashShuffleNode, THashJoinNode, TRowJoinNode,
     TCrossJoinNode, TLimitNode, TLateLookupNode, TLateMergeNode,
-    TCteProducerNode, TCtePublishNode, TCteConsumerNode, TPartialAggregateNode,
-    TGroupingSetsAggregateNode, TRuntimeFilterNode, TRuntimeFilterSinkNode,
-    TRuntimeFilterSourceNode>;
+    TCteProducerNode, TCtePublishNode, TCteConsumerNode, TCteSinkNode, TCteSourceNode,
+    TPartialAggregateNode, TGroupingSetsAggregateNode, TRuntimeFilterNode,
+    TRuntimeFilterSinkNode, TRuntimeFilterSourceNode>;
 
 struct TNodeSpec {
     uint64_t ExecStageId = InvalidExecStageId;
@@ -673,8 +707,8 @@ void BindRuntimeFilterTask(
     const TRuntimeFilterNode& node, TTaskNode& task, const TNodeTaskContext& context);
 
 // Builds an unsealed graph: node i has ExecutionSlot i. Remote source and sink
-// tasks, runtime filter sources and sinks among them, have empty code, which the
-// compute actor binds. `sink` is required for SinkWriter nodes; `slots` are the
+// tasks, runtime filter and CTE sources and sinks among them, have empty code,
+// which the compute actor binds. `sink` is required for SinkWriter nodes; `slots` are the
 // query's kernel slots by kernel index. The runtime context is rebuilt from the
 // spec's regexes and runtime-filter kernel, the CTE objects from its CTE tables,
 // and the runtime filters through `filterBindings` (local filters by default).
@@ -692,9 +726,7 @@ bool RebindPort(TNodeBody& body, EPortKind kind, TPortSpec from, TPortSpec to);
 // The part of `spec` on `nodes` (ascending node indices), with the connections
 // they use; nodes and connections are renumbered in order. The regex, CTE and
 // runtime filter tables stay whole, so the records' indices into them hold.
-// Throws std::runtime_error on an edge between a node in `nodes` and one outside
-// and on a CTE spool whose tasks `nodes` hold only in part: the spool is memory
-// its tasks share.
+// Throws std::runtime_error on an edge between a node in `nodes` and one outside.
 TGraphSpec SubgraphSpec(const TGraphSpec& spec, std::span<const uint32_t> nodes);
 
 // Reads connections, edges and externals from a graph built by MaterializeGraph

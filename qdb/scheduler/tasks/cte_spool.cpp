@@ -2,6 +2,7 @@
 
 #include <qdb/exec/instrumentation/operator.h>
 #include <qdb/scheduler/instrumentation/task.h>
+#include <qdb/scheduler/tasks/runtime_adapter.h>
 
 #include <algorithm>
 #include <cassert>
@@ -20,6 +21,14 @@ struct TCteViewData {
 
 void DestroyCteView(TRowSet* rowSet) {
     delete static_cast<TCteViewData*>(rowSet->Private);
+}
+
+TRowSet SpoolView(const std::shared_ptr<const TCteSpool>& spool, const TRowSet& batch) {
+    TRowSet view = batch;
+    view.Destroy = DestroyCteView;
+    view.Private = new TCteViewData{spool};
+    view.RefCount = 1;
+    return view;
 }
 
 // Completion connections carry finish signals only.
@@ -65,6 +74,10 @@ void TCteSpool::Seal() {
 size_t TCteSpool::SegmentCount() const
 {
     return Segments_.size();
+}
+
+std::span<const TRowSet> TCteSpool::Segment(size_t segment) const {
+    return Segments_[segment];
 }
 
 size_t TCteSpool::BatchCount() const {
@@ -217,10 +230,7 @@ ETaskResult TCteConsumerTask::Execute() {
     }
 
     const auto& spool = State_->Spool();
-    TRowSet view = spool->Batch(*Claimed_);
-    view.Destroy = DestroyCteView;
-    view.Private = new TCteViewData{spool};
-    view.RefCount = 1;
+    TRowSet view = SpoolView(spool, spool->Batch(*Claimed_));
     if (!Output_.Push(std::move(view))) {
         Release(&view);
         return ETaskResult::BLOCKED_OUTPUT;
@@ -235,6 +245,112 @@ void TCteConsumerTask::ConfigureInstrumentation(TTaskInstrumentationSetup& setup
 
 bool TCteConsumerTask::RebindPort(const TPortRebind& rebind) {
     return rebind.Apply(Completion_) || rebind.Apply(Output_);
+}
+
+TCteSinkTask::TCteSinkTask(
+    std::shared_ptr<const TCteSpool> spool,
+    std::vector<uint32_t> segments,
+    std::vector<TInputPort> inputs)
+    : Spool_(std::move(spool))
+    , Segments_(std::move(segments))
+    , Inputs_(std::move(inputs))
+{}
+
+ETaskResult TCteSinkTask::Execute() {
+    if (Finished_) {
+        return ETaskResult::FINISHED;
+    }
+    if (!InputFinished_) {
+        for (auto& input : Inputs_) {
+            if (FetchCompletion(input) == EFetchResult::NO_DATA) {
+                return ETaskResult::NEED_DATA;
+            }
+        }
+        InputFinished_ = true;
+    }
+    for (; Segment_ < Segments_.size(); ++Segment_, Batch_ = 0) {
+        const auto batches = Spool_->Segment(Segments_[Segment_]);
+        for (; Batch_ < batches.size(); ++Batch_) {
+            // The code takes its own reference if it keeps the view.
+            TRowSet view = SpoolView(Spool_, batches[Batch_]);
+            const auto result = Code_->Write(State_.get(), view);
+            Release(&view);
+            if (result == ETaskResult::WAITING) {
+                return ETaskResult::WAITING;
+            }
+        }
+    }
+    if (Code_->Finish && Code_->Finish(State_.get()) == ETaskResult::WAITING) {
+        return ETaskResult::WAITING;
+    }
+    Spool_.reset();
+    Finished_ = true;
+    return ETaskResult::FINISHED;
+}
+
+bool TCteSinkTask::RebindPort(const TPortRebind& rebind) {
+    return std::ranges::any_of(Inputs_, [&](auto& input) { return rebind.Apply(input); });
+}
+
+void TCteSinkTask::BindCode(std::shared_ptr<const TSinkCode> code, std::shared_ptr<void> state) {
+    assert(!Code_);
+    Code_ = std::move(code);
+    State_ = std::move(state);
+}
+
+const std::shared_ptr<const TSinkCode>& TCteSinkTask::Code() const {
+    return Code_;
+}
+
+TCteSourceTask::TCteSourceTask(
+    std::shared_ptr<TCteSpool> spool,
+    uint32_t segment,
+    bool seal,
+    std::vector<TOutputPort> outputs)
+    : Spool_(std::move(spool))
+    , Segment_(segment)
+    , Seal_(seal)
+    , Outputs_(std::move(outputs))
+{}
+
+ETaskResult TCteSourceTask::Execute() {
+    if (Finished_) {
+        return ETaskResult::FINISHED;
+    }
+    for (;;) {
+        TRowSet rowSet{};
+        switch (Code_->Next(State_.get(), rowSet)) {
+            case ETaskResult::OK:
+                Spool_->Append(Segment_, rowSet);
+                break;
+            case ETaskResult::WAITING:
+                return ETaskResult::WAITING;
+            default:
+                if (Seal_) {
+                    Spool_->Seal();
+                }
+                Spool_.reset();
+                Finished_ = true;
+                for (const auto& output : Outputs_) {
+                    output.Finish();
+                }
+                return ETaskResult::FINISHED;
+        }
+    }
+}
+
+bool TCteSourceTask::RebindPort(const TPortRebind& rebind) {
+    return std::ranges::any_of(Outputs_, [&](auto& output) { return rebind.Apply(output); });
+}
+
+void TCteSourceTask::BindCode(std::shared_ptr<const TSourceCode> code, std::shared_ptr<void> state) {
+    assert(!Code_);
+    Code_ = std::move(code);
+    State_ = std::move(state);
+}
+
+const std::shared_ptr<const TSourceCode>& TCteSourceTask::Code() const {
+    return Code_;
 }
 
 } // namespace NScheduler

@@ -23,6 +23,7 @@
 #include <qdb/scheduler/connections/local.h>
 #include <qdb/scheduler/lowering/plan_lowerer.h>
 #include <qdb/scheduler/spec/graph_spec.h>
+#include <qdb/scheduler/tasks/cte_spool.h>
 #include <qdb/sql/parser.h>
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
@@ -43,6 +44,7 @@
 #include <limits>
 #include <optional>
 #include <map>
+#include <numeric>
 #include <set>
 #include <span>
 #include <sstream>
@@ -3113,6 +3115,123 @@ TEST(DistributedScheduler, SplitsRuntimeFiltersSoEveryProbeMergesEveryBuildLane)
                 EXPECT_TRUE(dynamic_cast<const TRuntimeFilterSinkTask*>(task));
             } else if (std::holds_alternative<TRuntimeFilterSourceNode>(body)) {
                 EXPECT_TRUE(dynamic_cast<const TRuntimeFilterSourceTask*>(task));
+            }
+        }
+    }
+}
+
+// A CTE read twice; its definition has a lane per scan task, each with
+// several batches.
+constexpr const char* CteSql =
+    "WITH r AS (SELECT id, d9 FROM t WHERE id % 3 <> 0) "
+    "SELECT COUNT(*) AS n, SUM(id) AS s FROM (SELECT id FROM r UNION ALL SELECT id FROM r WHERE id > 100) u";
+
+// The publish fragment's spool gets every segment once, from a local producer
+// lane or a CTE source; each other fragment with consumers reads a copy of the
+// whole published spool that its CTE source seals.
+TEST(DistributedScheduler, SplitsACteIntoSegmentAndSpoolCuts) {
+    using namespace NQdb::NScheduler;
+    TParquetSource source(DecimalsPath);
+    TSettings settings;
+    settings.Scheduler.WorkerCount = 4;
+    settings.ScanSplit.Strategy = EScanSplitStrategy::RowGroupRange;
+    settings.ScanSplit.MaxScanTasks = 4;
+    auto lowered = LowerSql(CteSql, source, settings);
+    ASSERT_EQ(lowered.CteSpools.size(), 1u);
+    const auto segments = lowered.CteSpools[0].Segments;
+    ASSERT_GT(segments, 1u);
+    TNoSink sink;
+    AttachSink(lowered, sink);
+    TPartitioner partitioner(lowered.Graph->Seal(), 3);
+    partitioner.Do();
+    const auto split = ApplySplit(lowered, partitioner.TakePlan());
+    const auto fragments = ExtractFragmentSpecs(lowered);
+    ASSERT_EQ(fragments.size(), 3u);
+
+    using TPlace = std::pair<size_t, uint32_t>;
+    std::map<uint64_t, TPlace> externals;
+    std::optional<size_t> publishAt;
+    for (size_t fragment = 0; fragment < fragments.size(); ++fragment) {
+        for (const auto& external : fragments[fragment].Externals) {
+            externals.emplace(external.Id, TPlace{fragment, external.Node});
+        }
+        for (const auto& node : fragments[fragment].Nodes) {
+            if (std::holds_alternative<TCtePublishNode>(node.Body)) {
+                publishAt = fragment;
+            }
+        }
+    }
+    ASSERT_TRUE(publishAt);
+    auto body = [&](TPlace place) -> const TNodeBody& {
+        return fragments[place.first].Nodes[place.second].Body;
+    };
+
+    std::vector<uint32_t> published;
+    std::map<size_t, uint32_t> copies;
+    size_t segmentCuts = 0;
+    const auto cuts = split.Cuts();
+    for (size_t i = 0; i < cuts.size(); ++i) {
+        const auto sinkAt = externals.at(2 * i);
+        const auto sourceAt = externals.at(2 * i + 1);
+        const auto* to = std::get_if<TCteSinkNode>(&body(sinkAt));
+        if (!to) {
+            continue;
+        }
+        const auto& from = std::get<TCteSourceNode>(body(sourceAt));
+        if (from.Seal) {
+            EXPECT_EQ(sinkAt.first, *publishAt);
+            EXPECT_EQ(to->Segments.size(), segments);
+            EXPECT_TRUE(copies.emplace(sourceAt.first, from.Spool).second);
+        } else {
+            ++segmentCuts;
+            EXPECT_EQ(sourceAt.first, *publishAt);
+            EXPECT_EQ(from.Out.size(), to->Segments.size());
+            published.insert(published.end(), to->Segments.begin(), to->Segments.end());
+        }
+    }
+    EXPECT_GT(segmentCuts, 0u);
+    EXPECT_FALSE(copies.empty());
+
+    size_t consumers = 0;
+    for (size_t fragment = 0; fragment < fragments.size(); ++fragment) {
+        const auto& spec = fragments[fragment];
+        for (const auto& node : spec.Nodes) {
+            if (const auto* producer = std::get_if<TCteProducerNode>(&node.Body)) {
+                if (fragment == *publishAt) {
+                    published.push_back(producer->Segment);
+                }
+            } else if (const auto* consumer = std::get_if<TCteConsumerNode>(&node.Body)) {
+                ++consumers;
+                const auto spool = spec.CteConsumerStates.at(consumer->State).Spool;
+                EXPECT_EQ(spool, fragment == *publishAt ? 0u : copies.at(fragment)) << "fragment " << fragment;
+            }
+        }
+    }
+    std::ranges::sort(published);
+    std::vector<uint32_t> all(segments);
+    std::iota(all.begin(), all.end(), 0u);
+    EXPECT_EQ(published, all);
+    EXPECT_EQ(consumers, 2 * segments);
+
+    // The fragments build, with the placeholders of each cut on their ends.
+    auto image = CompileKernelImage(lowered.Kernels);
+    std::vector<std::shared_ptr<TKernelSlot>> slots;
+    for (size_t i = 0; i < image.Entrypoints.size(); ++i) {
+        slots.push_back(std::make_shared<TKernelSlot>());
+    }
+    LoadKernelImage(image, slots);
+    for (const auto& fragment : fragments) {
+        const auto graph = MaterializeGraph(DeserializeGraphSpec(SerializeGraphSpec(fragment)), &sink, slots);
+        std::string error;
+        const auto sealed = graph->Seal(&error);
+        ASSERT_TRUE(sealed) << error;
+        for (const auto& external : fragment.Externals) {
+            const auto* task = sealed.ExternalNode(external.Id)->Task;
+            const auto& node = fragment.Nodes[external.Node].Body;
+            if (std::holds_alternative<TCteSinkNode>(node)) {
+                EXPECT_TRUE(dynamic_cast<const TCteSinkTask*>(task));
+            } else if (std::holds_alternative<TCteSourceNode>(node)) {
+                EXPECT_TRUE(dynamic_cast<const TCteSourceTask*>(task));
             }
         }
     }
