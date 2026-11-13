@@ -488,7 +488,7 @@ namespace {
 
 // A lane retired without finishing was abandoned (see Retire), maybe before it
 // delivered its partial.
-bool LaneAbandoned(const TTaskNode& sink) {
+bool AnyLaneAbandoned(const TTaskNode& sink) {
     return std::ranges::any_of(sink.Inbound, [](const TTaskEdge* edge) {
         return edge->Kind == ETaskEdgeKind::Dependency
             && edge->Src->Retired.load(std::memory_order_acquire)
@@ -525,15 +525,24 @@ bool TRuntimeFilterSinkTask::WantsInput(const TTaskEdge& edge) const noexcept {
 // A lane wakes its dependency consumers after every run that may push output,
 // so also after the run that finished its partial, and when it is abandoned.
 bool TRuntimeFilterSinkTask::TryNotifyDependency() noexcept {
-    return (Filter_->Complete() || LaneAbandoned(*Node_))
+    return (Filter_->Complete() || LaneAbandoned())
         && !DependencyNotified_.exchange(true, std::memory_order_acq_rel);
+}
+
+// Latched: a lane abandoned while it runs may still finish, and the one-shot
+// wake must not be spent on a state that turns back.
+bool TRuntimeFilterSinkTask::LaneAbandoned() noexcept {
+    if (!Abandoned_.load(std::memory_order_acquire) && AnyLaneAbandoned(*Node_)) {
+        Abandoned_.store(true, std::memory_order_release);
+    }
+    return Abandoned_.load(std::memory_order_acquire);
 }
 
 ETaskResult TRuntimeFilterSinkTask::Execute() {
     if (!Sent_) {
         if (Filter_->Complete()) {
             Code_->Send(State_.get(), Filter_->Merged());
-        } else if (LaneAbandoned(*Node_)) {
+        } else if (LaneAbandoned()) {
             // The export may never complete; passing every key is always correct.
             Code_->Send(State_.get(), Filter_->PassAll());
         } else {

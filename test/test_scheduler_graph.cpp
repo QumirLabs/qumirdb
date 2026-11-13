@@ -356,6 +356,39 @@ TEST(SchedulerGraph, RetireAbandonsADependencyProducerWithItsLastConsumer) {
     EXPECT_FALSE(q.Retired.load());
 }
 
+// P feeds C and gates D and the root S. A root retires only when it finishes, so
+// its dependency edge does not keep P alive; D's still does.
+TEST(SchedulerGraph, RetireIgnoresADependencyEdgeIntoARoot) {
+    TTaskGraph graph;
+    auto& p = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& c = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& d = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& s = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& r1 = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& r2 = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    graph.AddOwnedEdge(p, c, std::make_unique<TOneToOneConnection>());
+    graph.AddOwnedEdge(c, r1, std::make_unique<TOneToOneConnection>());
+    graph.AddOwnedEdge(d, r2, std::make_unique<TOneToOneConnection>());
+    graph.AddDependencyEdge(p, d);
+    graph.AddDependencyEdge(p, s);
+    std::string error;
+    ASSERT_TRUE(graph.Seal(&error)) << error;
+    EXPECT_EQ(p.LiveConsumers.load(), 2u);
+
+    std::vector<TTaskNode*> abandoned;
+    auto record = [&](TTaskNode& node) {
+        abandoned.push_back(&node);
+    };
+    Retire(r1, record);
+    EXPECT_TRUE(c.Retired.load());
+    EXPECT_FALSE(p.Retired.load());
+    Retire(r2, record);
+    EXPECT_TRUE(d.Retired.load());
+    EXPECT_TRUE(p.Retired.load());
+    EXPECT_FALSE(s.Retired.load());
+    EXPECT_EQ(abandoned, (std::vector<TTaskNode*>{&c, &p, &d}));
+}
+
 // P has two edges to C and one to D: it lives until both consumers retire.
 TEST(SchedulerGraph, RetireCountsEveryEdgeToOneConsumer) {
     TTaskGraph graph;

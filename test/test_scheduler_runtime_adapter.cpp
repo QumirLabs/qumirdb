@@ -162,6 +162,42 @@ TEST_F(SchedulerRuntimeFilter, FilterSinkSendsTheMergeOnceEveryProducerDelivered
     EXPECT_FALSE(filter->Ready());
 }
 
+// A worker abandons a lane while another one runs it, and the lane still delivers
+// and finishes before the sink runs. The sink's one wake went to the abandonment;
+// if this run waited, the wake of the second lane's later abandonment would be lost.
+TEST_F(SchedulerRuntimeFilter, FilterSinkPassesAllAfterAnAbandonedLaneFinishes) {
+    auto filter = std::make_shared<TRuntimeFilter>(Context_);
+    filter->SetProducerCount(2);
+    auto lanes = std::make_shared<TRuntimeFilterExport>(Context_, filter, /*forward=*/false, /*producers=*/2);
+    TTaskNode first;
+    TTaskNode second;
+    TTaskNode node;
+    std::vector<TTaskEdge> edges;
+    AddDependencies(node, edges, {&first, &second});
+    TRuntimeFilterSinkTask sink(lanes);
+    sink.BindNode(node);
+    std::vector<TRuntimeFilterPartial> sent;
+    sink.BindCode(std::make_shared<TRuntimeFilterSinkCode>([](void* state, TRuntimeFilterPartial&& partial) {
+        static_cast<std::vector<TRuntimeFilterPartial>*>(state)->push_back(std::move(partial));
+    }), std::shared_ptr<void>(std::shared_ptr<void>{}, &sent));
+
+    first.State.store(ETaskState::Running);
+    first.Retired.store(true);
+    EXPECT_TRUE(sink.TryNotifyDependency());
+    lanes->FinishProducer(KeyPartial(*lanes, 11));
+    first.State.store(ETaskState::Finished);
+    EXPECT_FALSE(sink.TryNotifyDependency());
+
+    EXPECT_EQ(sink.Execute(), ETaskResult::FINISHED);
+    ASSERT_EQ(sent.size(), 1u);
+    EXPECT_EQ(sent[0].Producers, 2u);
+    filter->FinishProducer(std::move(sent[0]));
+    ASSERT_TRUE(filter->Ready());
+    for (uint64_t key : {11, 22}) {
+        EXPECT_TRUE(NTest::RuntimeFilterMayContain(*filter, key)) << key;
+    }
+}
+
 TEST_F(SchedulerRuntimeFilter, FilterSourceHandsTheArrivedPartialToItsFilter) {
     auto filter = std::make_shared<TRuntimeFilter>(Context_, 16, 1024);
     filter->SetProducerCount(3);

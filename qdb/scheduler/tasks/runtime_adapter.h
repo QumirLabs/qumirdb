@@ -234,12 +234,15 @@ public:
     const std::shared_ptr<const TRuntimeFilterSinkCode>& Code() const;
 
 private:
+    bool LaneAbandoned() noexcept;
+
     std::shared_ptr<const TRuntimeFilterExport> Filter_;
     const TTaskNode* Node_ = nullptr;
     std::shared_ptr<const TRuntimeFilterSinkCode> Code_;
     std::shared_ptr<void> State_;
     bool Sent_ = false;
     std::atomic<bool> DependencyNotified_ = false;
+    std::atomic<bool> Abandoned_ = false;
 };
 
 // Hands the partial its code receives to a filter as one producer and
