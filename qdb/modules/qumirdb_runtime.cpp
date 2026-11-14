@@ -494,30 +494,52 @@ int32_t qdb_sql_date(qdb_string_view date) {
 }
 
 // year/month are approximate (365/30): the base date is not available here for
-// calendar-exact arithmetic.
+// calendar-exact arithmetic. Like PostgreSQL, the amount must be an integer in
+// the i32 range; the day count must fit i32 too.
 int32_t qdb_sql_interval(qdb_string_view amount, qdb_string_view unit) {
-    int n = 0;
+    std::string_view text(reinterpret_cast<const char*>(amount.Data),
+                          static_cast<size_t>(amount.Size));
+    while (!text.empty() && text.front() == ' ') {
+        text.remove_prefix(1);
+    }
+    while (!text.empty() && text.back() == ' ') {
+        text.remove_suffix(1);
+    }
     bool neg = false;
-    for (int64_t i = 0; i < amount.Size; ++i) {
-        const char c = static_cast<char>(amount.Data[i]);
-        if (c == '-') {
-            neg = true;
-        } else if (c >= '0' && c <= '9') {
-            n = n * 10 + (c - '0');
+    if (!text.empty() && (text.front() == '-' || text.front() == '+')) {
+        neg = text.front() == '-';
+        text.remove_prefix(1);
+    }
+    if (text.empty()) {
+        throw std::invalid_argument("invalid input syntax for interval amount");
+    }
+    int64_t n = 0;
+    for (const char c : text) {
+        if (c < '0' || c > '9') {
+            throw std::invalid_argument("invalid input syntax for interval amount");
+        }
+        n = n * 10 + (c - '0');
+        if (n > std::numeric_limits<int32_t>::max() + int64_t{1}) {
+            throw std::overflow_error("interval field value out of range");
         }
     }
     if (neg) {
         n = -n;
     }
+    if (n > std::numeric_limits<int32_t>::max()) {
+        throw std::overflow_error("interval field value out of range");
+    }
     std::string_view u(reinterpret_cast<const char*>(unit.Data),
                        static_cast<size_t>(unit.Size));
     if (u == "year" || u == "years") {
-        return n * 365;
+        n *= 365;
+    } else if (u == "month" || u == "months") {
+        n *= 30;
     }
-    if (u == "month" || u == "months") {
-        return n * 30;
+    if (n < std::numeric_limits<int32_t>::min() || n > std::numeric_limits<int32_t>::max()) {
+        throw std::overflow_error("interval is out of range");
     }
-    return n;
+    return static_cast<int32_t>(n);
 }
 
 // SQL ROUND: round half away from zero to `digits` decimals.

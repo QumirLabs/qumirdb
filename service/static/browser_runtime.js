@@ -1485,23 +1485,21 @@ function createQdbEnv(getMemory, holder) {
   };
   // year/month are approximate (365/30). amount and unit are StringViews.
   const sqlInterval = (amount, unit) => {
-    const bytes = svBytes(amount);
-    let n = 0;
-    let neg = false;
-    for (const b of bytes) {
-      if (b === 45) neg = true;
-      else if (b >= 48 && b <= 57) n = n * 10 + (b - 48);
+    const text = new TextDecoder().decode(svBytes(amount)).trim();
+    if (!/^[+-]?[0-9]+$/.test(text)) {
+      throw new Error('invalid input syntax for interval amount');
     }
-    if (neg) n = -n;
-    const bytesEqual = (bs, text) => {
-      if (bs.length !== text.length) return false;
-      for (let i = 0; i < bs.length; ++i) if (bs[i] !== text.charCodeAt(i)) return false;
-      return true;
-    };
-    const u = svBytes(unit);
-    if (bytesEqual(u, 'year') || bytesEqual(u, 'years')) return (n * 365) | 0;
-    if (bytesEqual(u, 'month') || bytesEqual(u, 'months')) return (n * 30) | 0;
-    return n | 0;
+    let n = Number(text);
+    if (n > 2147483647 || n < -2147483648) {
+      throw new Error('interval field value out of range');
+    }
+    const u = new TextDecoder().decode(svBytes(unit));
+    if (u === 'year' || u === 'years') n *= 365;
+    else if (u === 'month' || u === 'months') n *= 30;
+    if (n > 2147483647 || n < -2147483648) {
+      throw new Error('interval is out of range');
+    }
+    return n;
   };
   const substring = (out, str, start, length) => {
     const view = new DataView(getMemory().buffer);
