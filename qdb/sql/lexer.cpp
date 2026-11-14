@@ -263,8 +263,15 @@ void TTokenStream::Read() {
         }
 
         if (isFloat) {
+            // PostgreSQL rejects float8 overflow/underflow; there is no NUMERIC literal to fall back to.
+            double value = 0;
+            auto [end, ec] = std::from_chars(rawValue.data(), rawValue.data() + rawValue.size(), value);
+            if (ec != std::errc()) {
+                throw std::runtime_error("floating-point literal " + rawValue + " is out of range for DOUBLE at "
+                    + location.ToString());
+            }
             Tokens.emplace_back(TToken {
-                .Value = {.f64 = std::stod(rawValue)},
+                .Value = {.f64 = value},
                 .RawValue = rawValue,
                 .Type = TToken::Float,
                 .Location = location,
