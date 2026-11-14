@@ -55,6 +55,10 @@ bool TLocalConnection::LaneCanPush(TConnectionLane& lane) const {
     return canPush;
 }
 
+bool TLocalConnection::LaneReadable(const TConnectionLane& lane) const {
+    return !lane.Queue.Empty() || lane.Finished.load(std::memory_order_acquire);
+}
+
 bool TLocalConnection::LanePush(TConnectionLane& lane, TRowSet& rowSet) const {
     auto moved = TakeRowSet(rowSet);
     if (lane.Queue.TryPush(std::move(moved))) {
@@ -134,6 +138,11 @@ EFetchResult TOneToOneConnection::Fetch(size_t dstId, TRowSet& rowSet) {
     }
     CountFinishedFetch();
     return EFetchResult::FINISHED;
+}
+
+bool TOneToOneConnection::Readable(size_t srcId, size_t) const {
+    assert(srcId < Size_);
+    return LaneReadable(*Lanes_[srcId]);
 }
 
 TGatherConnection::TGatherConnection(size_t capacity)
@@ -222,6 +231,11 @@ EFetchResult TGatherConnection::Fetch(size_t dstId, TRowSet& rowSet) {
     }
     CountFinishedFetch();
     return EFetchResult::FINISHED;
+}
+
+bool TGatherConnection::Readable(size_t srcId, size_t) const {
+    assert(srcId < Size_);
+    return LaneReadable(*Lanes_[srcId]);
 }
 
 TBroadcastConnection::TBroadcastConnection(size_t capacity)
@@ -341,6 +355,11 @@ EFetchResult TBroadcastConnection::Fetch(size_t dstId, TRowSet& rowSet) {
     }
     CountFinishedFetch();
     return EFetchResult::FINISHED;
+}
+
+bool TBroadcastConnection::Readable(size_t, size_t dstId) const {
+    assert(dstId < Lanes_.size());
+    return !Lanes_[dstId]->Queue.Empty() || Finished_.load(std::memory_order_acquire);
 }
 
 void TBroadcastConnection::Close(size_t dstId) {

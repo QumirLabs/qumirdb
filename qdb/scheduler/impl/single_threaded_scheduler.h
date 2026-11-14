@@ -20,7 +20,8 @@ public:
 private:
     void Schedule(TTaskNode* node);
     void ScheduleInput(TTaskNode* node);
-    void ScheduleOutput(TTaskNode* node);
+    // Wakes the consumers of a finished node, else those with something to fetch from it.
+    void ScheduleOutput(TTaskNode* node, bool finished);
 
     TSealedTaskGraph Graph_;
     TExecutionState Execution_;

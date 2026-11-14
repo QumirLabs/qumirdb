@@ -48,6 +48,10 @@ public:
     virtual void Finish(size_t srcId) = 0;
 
     virtual EFetchResult Fetch(size_t dstId, TRowSet& rowSet) = 0;
+    // Whether the lane from producer `srcId` to consumer `dstId` holds a rowset
+    // or has finished. Read by the producer after its run: a lane its consumer
+    // has emptied gives that consumer nothing to wake for.
+    virtual bool Readable(size_t srcId, size_t dstId) const = 0;
     // The consumer of lane `dstId` reads no more: it finished or was abandoned,
     // maybe while it still runs on another thread. A broadcast then feeds only its
     // open lanes; other connections keep the lane as it is.

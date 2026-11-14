@@ -105,9 +105,9 @@ state machine and returns:
 
 | Result | Meaning | Scheduler reaction |
 |---|---|---|
-| `OK` | The task made progress and may have more work immediately. | Schedule the same task and its downstream tasks. |
+| `OK` | The task made progress and may have more work immediately. | Schedule the same task and the downstream tasks whose lane holds rows. |
 | `NEED_DATA` | The task cannot proceed until an input produces or finishes. | Schedule upstream tasks. |
-| `BLOCKED_OUTPUT` | The task has output but the downstream queue is full. | Schedule downstream tasks. |
+| `BLOCKED_OUTPUT` | The task has output but the downstream queue is full. | Schedule the downstream tasks whose lane holds rows. |
 | `FINISHED` | The task is done and has signalled output finish if it has output. | Mark done and schedule downstream tasks. |
 
 ### Single-threaded One-to-one Subset
@@ -140,6 +140,12 @@ as a WASM node adapter with `push/finish/next/destroy`.
 Every connection is made of bounded rowset queues plus finish state. The graph
 stores edges with `(connection, srcLane, dstLane)` so diagnostics can print the
 same logical connection between multiple task pairs.
+
+A producer wakes the consumer of a lane only while that lane holds a rowset or
+its finish. A consumer that has emptied its lane has nothing to do there, and
+the producer's next push wakes it again. A hash shuffle that pushes to a few of
+its lanes, or blocks on one full lane, therefore does not run the consumers of
+its other lanes; those would only ask for data again and wake the shuffle back.
 
 ## Compiled Kernels
 

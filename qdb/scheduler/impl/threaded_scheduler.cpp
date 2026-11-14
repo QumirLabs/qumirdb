@@ -152,10 +152,14 @@ void TThreadedScheduler::ScheduleInput(TTaskNode* node) {
     }
 }
 
-void TThreadedScheduler::ScheduleOutput(TTaskNode* node) {
+void TThreadedScheduler::ScheduleOutput(TTaskNode* node, bool finished) {
     for (auto* edge : node->Outbound) {
-        if (edge->Kind == ETaskEdgeKind::Dependency
-            && !edge->Dst->Task->TryNotifyDependency()) {
+        if (edge->Kind == ETaskEdgeKind::Dependency) {
+            if (!edge->Dst->Task->TryNotifyDependency()) {
+                continue;
+            }
+        } else if (!finished && !edge->Connection->Readable(edge->SrcLane, edge->DstLane)) {
+            // The consumer has fetched all of this lane: the next push wakes it.
             continue;
         }
         Schedule(edge->Dst);
@@ -262,7 +266,7 @@ void TThreadedScheduler::Work() {
         } else if (result == ETaskResult::BLOCKED_OUTPUT) {
             BlockedOutput_.fetch_add(1, std::memory_order_relaxed);
             auto reschedule = FinishRun(node);
-            ScheduleOutput(node);
+            ScheduleOutput(node, /*finished=*/false);
             if (reschedule) {
                 Rescheduled_.fetch_add(1, std::memory_order_relaxed);
                 Schedule(node);
@@ -276,12 +280,12 @@ void TThreadedScheduler::Work() {
         } else if (result == ETaskResult::FINISHED) {
             Finished_.fetch_add(1, std::memory_order_relaxed);
             FinishNode(node);
-            ScheduleOutput(node);
+            ScheduleOutput(node, /*finished=*/true);
         } else if (result == ETaskResult::OK) {
             Ok_.fetch_add(1, std::memory_order_relaxed);
             FinishRun(node);
             Schedule(node);
-            ScheduleOutput(node);
+            ScheduleOutput(node, /*finished=*/false);
         }
     }
 }
@@ -297,7 +301,7 @@ void TThreadedScheduler::FinishNode(TTaskNode* node) {
     assert(previous == ETaskState::Running || previous == ETaskState::Reschedule);
     // Wake the roots on an abandoned producer's dependency edges, as its finish would.
     Retire(*node, [this](TTaskNode& abandoned) {
-        ScheduleOutput(&abandoned);
+        ScheduleOutput(&abandoned, /*finished=*/true);
     });
     if (IsRoot(*node) && UnfinishedRoots_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
         // The last root is done: the graph's output is complete. Wake every worker

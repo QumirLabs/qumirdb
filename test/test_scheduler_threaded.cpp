@@ -6,11 +6,15 @@
 #include <qdb/scheduler/graph.h>
 #include <qdb/scheduler/impl/single_threaded_scheduler.h>
 #include <qdb/scheduler/impl/threaded_scheduler.h>
+#include <qdb/scheduler/port.h>
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <cstdint>
 #include <latch>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -554,6 +558,164 @@ TEST(SchedulerThreaded, ReportsTaskExceptions) {
 
     run(false);
     run(true);
+}
+
+// Pushes `rows` one-row batches to its outputs, each to a lane among the first
+// `lanes` that a seeded generator picks, at most `burst` per run. Like a hash
+// shuffle, a run that meets a full lane ends with BLOCKED_OUTPUT, maybe after
+// some pushes.
+class TFanOutTask : public ITask {
+public:
+    TFanOutTask(int rows, int burst, uint32_t seed, size_t lanes)
+        : Rows_(rows)
+        , Burst_(burst)
+        , Seed_(seed)
+        , Lanes_(lanes)
+    {}
+
+    ETaskResult Execute() override {
+        for (int pushed = 0; pushed < Burst_; ++pushed) {
+            if (Sent_ == Rows_) {
+                for (const auto& output : Outputs) {
+                    output.Finish();
+                }
+                return ETaskResult::FINISHED;
+            }
+            if (!Outputs[(Seed_ >> 16) % Lanes_].Push(NQdb::TRowSet{.RowCount = 1, .RefCount = 1})) {
+                return ETaskResult::BLOCKED_OUTPUT;
+            }
+            ++Sent_;
+            Seed_ = Seed_ * 1103515245u + 12345u;
+        }
+        return ETaskResult::OK;
+    }
+
+    std::vector<TOutputPort> Outputs;
+
+private:
+    int Rows_;
+    int Burst_;
+    uint32_t Seed_;
+    size_t Lanes_;
+    int Sent_ = 0;
+};
+
+// Counts the rows of its input, one batch per run.
+class TCountTask : public ITask {
+public:
+    ETaskResult Execute() override {
+        ++Calls;
+        NQdb::TRowSet rowSet{};
+        switch (Input.Fetch(rowSet)) {
+            case EFetchResult::OK:
+                Rows += rowSet.RowCount;
+                NQdb::Release(&rowSet);
+                return ETaskResult::OK;
+            case EFetchResult::NO_DATA:
+                return ETaskResult::NEED_DATA;
+            case EFetchResult::FINISHED:
+                break;
+        }
+        return ETaskResult::FINISHED;
+    }
+
+    TInputPort Input;
+    int64_t Rows = 0;
+    int Calls = 0;
+};
+
+// Every producer has a lane of capacity one to every consumer, which gathers them.
+struct TFanOutGraph {
+    TTaskGraph Graph;
+    std::vector<TCountTask*> Consumers;
+};
+
+std::unique_ptr<TFanOutGraph> MakeFanOut(size_t producers, size_t consumers, int rows, int burst, size_t lanes) {
+    auto fanOut = std::make_unique<TFanOutGraph>();
+    std::vector<TFanOutTask*> tasks;
+    std::vector<TTaskNode*> nodes;
+    for (size_t i = 0; i < producers; ++i) {
+        auto task = std::make_unique<TFanOutTask>(rows, burst, static_cast<uint32_t>(i + 1), lanes);
+        tasks.push_back(task.get());
+        nodes.push_back(&fanOut->Graph.AddOwnedNode(std::move(task)));
+    }
+    for (size_t i = 0; i < consumers; ++i) {
+        auto task = std::make_unique<TCountTask>();
+        auto& consumer = *task;
+        auto& node = fanOut->Graph.AddOwnedNode(std::move(task));
+        auto& gather = fanOut->Graph.AddConnection(std::make_unique<TGatherConnection>(1));
+        gather.Resize(producers, 1);
+        consumer.Input = {.Connection = &gather, .Lane = 0};
+        for (size_t j = 0; j < producers; ++j) {
+            fanOut->Graph.AddEdge(*nodes[j], node, gather, j, 0);
+            tasks[j]->Outputs.push_back({.Connection = &gather, .Lane = j});
+        }
+        fanOut->Consumers.push_back(&consumer);
+    }
+    return fanOut;
+}
+
+// Zero workers runs the single-threaded scheduler. A stalled threaded run is
+// cancelled, so a lost wakeup fails the test instead of hanging it.
+bool RunFanOut(TFanOutGraph& fanOut, size_t workers, std::string* error) {
+    const auto sealed = fanOut.Graph.Seal(error);
+    if (!sealed) {
+        return false;
+    }
+    if (workers == 0) {
+        return TSingleThreadedScheduler(sealed).Run(error);
+    }
+    TThreadedScheduler scheduler(sealed, workers);
+    std::mutex mutex;
+    std::condition_variable done;
+    bool returned = false;
+    std::thread watchdog([&] {
+        std::unique_lock lock(mutex);
+        if (!done.wait_for(lock, std::chrono::seconds(30), [&] { return returned; })) {
+            scheduler.Cancel();
+        }
+    });
+    const bool ok = scheduler.Run(error);
+    {
+        std::lock_guard lock(mutex);
+        returned = true;
+    }
+    done.notify_one();
+    watchdog.join();
+    return ok;
+}
+
+TEST(SchedulerWakeups, FanOutDeliversEveryRow) {
+    constexpr size_t producers = 3;
+    constexpr size_t consumers = 4;
+    constexpr int rows = 20000;
+    for (size_t workers : {0, 1, 4, 8}) {
+        for (int round = 0; round < 10; ++round) {
+            SCOPED_TRACE(testing::Message() << "workers " << workers << " round " << round);
+            auto fanOut = MakeFanOut(producers, consumers, rows, /*burst=*/3, consumers);
+            std::string error;
+            ASSERT_TRUE(RunFanOut(*fanOut, workers, &error)) << error;
+            int64_t received = 0;
+            for (const auto* consumer : fanOut->Consumers) {
+                received += consumer->Rows;
+            }
+            EXPECT_EQ(received, static_cast<int64_t>(producers) * rows);
+        }
+    }
+}
+
+TEST(SchedulerWakeups, PushesToOtherLanesDoNotRunAConsumer) {
+    for (size_t workers : {0, 4}) {
+        SCOPED_TRACE(workers);
+        // The producer sends all rows to the first consumer.
+        auto fanOut = MakeFanOut(/*producers=*/1, /*consumers=*/2, /*rows=*/1000, /*burst=*/1, /*lanes=*/1);
+        std::string error;
+        ASSERT_TRUE(RunFanOut(*fanOut, workers, &error)) << error;
+        EXPECT_EQ(fanOut->Consumers[0]->Rows, 1000);
+        EXPECT_EQ(fanOut->Consumers[1]->Rows, 0);
+        // Its first run asks for data, the last sees the finish.
+        EXPECT_LE(fanOut->Consumers[1]->Calls, 3);
+    }
 }
 
 } // namespace

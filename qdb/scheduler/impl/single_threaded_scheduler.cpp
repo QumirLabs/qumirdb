@@ -84,20 +84,20 @@ bool TSingleThreadedScheduler::Run(std::string* error) {
                 // Wake the roots on an abandoned producer's dependency edges,
                 // as its finish would.
                 Retire(*node, [this](TTaskNode& abandoned) {
-                    ScheduleOutput(&abandoned);
+                    ScheduleOutput(&abandoned, /*finished=*/true);
                 });
                 if (IsRoot(*node)) {
                     --unfinishedRoots;
                 }
             }
-            ScheduleOutput(node);
+            ScheduleOutput(node, state == ETaskResult::FINISHED);
         } else if (state == ETaskResult::WAITING) {
             SetError(error, "single-threaded scheduler does not support external waits");
             return false;
         } else if (state == ETaskResult::OK) {
             ++Stats_.Ok;
             Schedule(node);
-            ScheduleOutput(node);
+            ScheduleOutput(node, /*finished=*/false);
         }
     }
 
@@ -141,10 +141,14 @@ void TSingleThreadedScheduler::ScheduleInput(TTaskNode* node) {
     }
 }
 
-void TSingleThreadedScheduler::ScheduleOutput(TTaskNode* node) {
+void TSingleThreadedScheduler::ScheduleOutput(TTaskNode* node, bool finished) {
     for (auto* edge : node->Outbound) {
-        if (edge->Kind == ETaskEdgeKind::Dependency
-            && !edge->Dst->Task->TryNotifyDependency()) {
+        if (edge->Kind == ETaskEdgeKind::Dependency) {
+            if (!edge->Dst->Task->TryNotifyDependency()) {
+                continue;
+            }
+        } else if (!finished && !edge->Connection->Readable(edge->SrcLane, edge->DstLane)) {
+            // The consumer has fetched all of this lane: the next push wakes it.
             continue;
         }
         Schedule(edge->Dst);
