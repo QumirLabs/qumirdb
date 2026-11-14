@@ -43,6 +43,9 @@ TExprPtr CloneExpr(const TExprPtr& expr) {
     } else if (auto cast = TMaybeNode<TCastExpr>(expr)) {
         result = std::make_shared<TCastExpr>(expr->Location,
             CloneExpr(cast.Cast()->Operand), expr->Type);
+    } else if (auto bitcast = TMaybeNode<TBitcastExpr>(expr)) {
+        result = std::make_shared<TBitcastExpr>(expr->Location,
+            CloneExpr(bitcast.Cast()->Operand), expr->Type);
     } else if (auto ifExpr = TMaybeNode<TIfExpr>(expr)) {
         result = std::make_shared<TIfExpr>(expr->Location,
             CloneExpr(ifExpr.Cast()->Cond),

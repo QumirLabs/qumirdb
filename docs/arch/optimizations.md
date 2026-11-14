@@ -731,6 +731,22 @@ SELECT regexp_replace(url, '^https?://([^/]+)/.*$', '\\1') AS host, count(*)
 FROM hits GROUP BY host;   -- the key has no NDV: partial[N] -> repartition -> final[P]
 ```
 
+### 4.11 Long constant IN lists
+
+Kernel expansion turns `x IN (c1, ..., cn)` into an OR of `x = ci`, and LLVM takes
+time superlinear in n to compile the chain. From 16 constants on, the expansion
+sorts the distinct constants into a table written into a string literal of the
+kernel, and the predicate becomes a branch-free binary search over it
+(`qdb_in_sorted_*` in `qumirdb.oz`): compilation no longer depends on n, and a row
+costs O(log n) comparisons. At 16 constants the search already runs no slower than
+the switch LLVM makes of the chain; shorter lists keep the comparisons.
+
+A constant enters the table only when `=` with `x` compares values: integers and
+dates, INT64 decimals rescaled exactly to the scale of `x`, floats in the type `=`
+converts both sides to, strings by their bytes. The other items (columns, NULL,
+NaN) stay comparisons ORed with the lookup, so three-valued logic, `NOT IN` and a
+NULL `x` behave as before.
+
 ## 5. Helpers that are not optimizations
 
 - `TConstFolder` is a helper, not a pipeline pass. UNION ALL pushdown uses it

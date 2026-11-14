@@ -13,14 +13,18 @@
 #include <qumir/frontend/source_module_loader.h>
 
 #include <algorithm>
+#include <bit>
 #include <charconv>
 #include <cmath>
 #include <functional>
 #include <limits>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
+#include <variant>
 #include <vector>
 
 namespace NQdb::NKernel {
@@ -1085,6 +1089,9 @@ TTypePtr InferType(const TExprPtr& e, const TStructType& schema) {
     if (TMaybeNode<TStringLiteralExpr>(e)) {
         return std::make_shared<TStringType>();
     }
+    if (auto bitcast = TMaybeNode<TBitcastExpr>(e)) {
+        return bitcast.Cast()->Type;
+    }
     if (auto num = TMaybeNode<TNumberExpr>(e)) {
         // The ctor sets ->Type (bool / i64 / float); i32_literal overrides to i32.
         return num.Cast()->Type ? num.Cast()->Type
@@ -1384,6 +1391,266 @@ TExprPtr CoerceBranch(const TExprPtr& branch, const TTypePtr& branchType, bool i
 
 TTypePtr Expand(TExprPtr& e, const TStructType& inputType, uint64_t& counter);
 
+// An IN list with this many constants is one lookup in a sorted table: LLVM compiles a
+// comparison per item in time superlinear in their number, and from 16 constants on the
+// lookup also runs no slower than the comparisons (measured in #606).
+constexpr size_t InTableMinItems = 16;
+
+using TNumericConstant = std::variant<int64_t, float, double>;
+
+// A number literal in its own type, through a unary minus and the float casts that
+// CoerceRealOperands writes.
+std::optional<TNumericConstant> NumericConstant(const TExprPtr& e) {
+    if (auto num = TMaybeNode<TNumberExpr>(e)) {
+        const TTypePtr type = UnwrapNamedType(num.Cast()->Type);
+        if (IsReal(type)) {
+            return static_cast<float>(num.Cast()->FloatValue);
+        }
+        if (IsFloat(type)) {
+            return num.Cast()->FloatValue;
+        }
+        if (auto integer = TMaybeType<TIntegerType>(type); integer && integer.Cast()->IsSigned()) {
+            return num.Cast()->IntValue;
+        }
+        return std::nullopt;
+    }
+    if (auto un = TMaybeNode<TUnaryExpr>(e); un && un.Cast()->Operator == "-"_op) {
+        auto operand = NumericConstant(un.Cast()->Operand);
+        if (!operand || *operand == TNumericConstant{std::numeric_limits<int64_t>::min()}) {
+            return std::nullopt;
+        }
+        return std::visit([](auto v) { return TNumericConstant{-v}; }, *operand);
+    }
+    if (auto cast = TMaybeNode<TCastExpr>(e)) {
+        auto target = TMaybeType<TFloatType>(UnwrapNamedType(cast.Cast()->Type));
+        auto operand = NumericConstant(cast.Cast()->Operand);
+        if (!target || !operand) {
+            return std::nullopt;
+        }
+        const bool single = target.Cast()->Kind == TFloatType::F32;
+        return std::visit([single](auto v) {
+            return single ? TNumericConstant{static_cast<float>(v)}
+                          : TNumericConstant{static_cast<double>(v)};
+        }, *operand);
+    }
+    return std::nullopt;
+}
+
+// A string literal, also under the cast to StringView the parser writes.
+const TStringLiteralExpr* StringConstant(const TExprPtr& e) {
+    if (auto cast = TMaybeNode<TCastExpr>(e)) {
+        return TMaybeType<TStringType>(FromQumirType(cast.Cast()->Type))
+            ? StringConstant(cast.Cast()->Operand)
+            : nullptr;
+    }
+    auto literal = TMaybeNode<TStringLiteralExpr>(e);
+    return literal ? literal.Cast().get() : nullptr;
+}
+
+// Digits at scale `from` as digits at scale `to`; nullopt if they need more fractional
+// digits or more than i64, so that no DECIMAL(18) value at `to` equals them.
+std::optional<int64_t> RescaleDigits(int64_t digits, int32_t from, int32_t to) {
+    for (; from < to; ++from) {
+        if (__builtin_mul_overflow(digits, 10, &digits)) {
+            return std::nullopt;
+        }
+    }
+    for (; from > to; --from) {
+        if (digits % 10 != 0) {
+            return std::nullopt;
+        }
+        digits /= 10;
+    }
+    return digits;
+}
+
+// The constant items of an IN list as the table of qdb_in_sorted_* (qumirdb.oz), written
+// into the bytes of a string literal. An item is taken only where `==` with the lhs
+// compares values: integers and dates, decimals at the lhs's scale, floats in the type
+// `==` converts both sides to, strings by their bytes. NaN and anything else stay
+// comparisons.
+class TInTable {
+public:
+    explicit TInTable(const TTypePtr& lhsValue) {
+        const TTypePtr type = UnwrapNamedType(lhsValue);
+        if (auto decimal = DecimalSpecOfValueType(lhsValue)) {
+            if (DecimalStorageOf(*decimal) == EDecimalStorage::I64) {
+                Kind_ = EKind::Decimal;
+                Decimal_ = *decimal;
+            }
+        } else if (auto integer = TMaybeType<TIntegerType>(type);
+            integer && integer.Cast()->IsSigned() && integer.Cast()->BitWidth() <= 64)
+        {
+            Kind_ = EKind::Integer;
+        } else if (IsFloat(type)) {
+            Kind_ = EKind::Float;
+            RealLhs_ = IsReal(type);
+        } else if (TMaybeType<TStringType>(type)) {
+            Kind_ = EKind::String;
+        }
+    }
+
+    // Takes a constant item. One that no lhs value equals (a decimal with more nonzero
+    // fractional digits than the lhs has) is taken without an entry.
+    bool Take(const TExprPtr& item) {
+        switch (Kind_) {
+            case EKind::None:
+                return false;
+            case EKind::Integer: {
+                auto constant = NumericConstant(item);
+                if (!constant || !std::holds_alternative<int64_t>(*constant)) {
+                    return false;
+                }
+                Integers_.push_back(std::get<int64_t>(*constant));
+                break;
+            }
+            case EKind::Decimal: {
+                // An integer literal is a decimal of scale 0, a fractional one of its digits.
+                std::optional<TDecimalLiteral> literal;
+                if (auto constant = NumericConstant(item);
+                    constant && std::holds_alternative<int64_t>(*constant))
+                {
+                    literal = TDecimalLiteral{std::get<int64_t>(*constant), {.Scale = 0}};
+                } else {
+                    literal = DecimalLiteralOf(item);
+                }
+                if (!literal) {
+                    return false;
+                }
+                auto digits = RescaleDigits(literal->Unscaled, literal->Spec.Scale, Decimal_.Scale);
+                if (digits) {
+                    Integers_.push_back(*digits);
+                }
+                break;
+            }
+            case EKind::Float: {
+                auto constant = NumericConstant(item);
+                if (!constant) {
+                    return false;
+                }
+                // A REAL lhs meets an integer as REAL, any other pair meets as DOUBLE;
+                // widening a REAL to DOUBLE keeps `==`.
+                double value = std::visit([this](auto v) {
+                    if constexpr (std::is_same_v<decltype(v), int64_t>) {
+                        return RealLhs_ ? static_cast<double>(static_cast<float>(v))
+                                        : static_cast<double>(v);
+                    } else {
+                        return static_cast<double>(v);
+                    }
+                }, *constant);
+                if (std::isnan(value)) {
+                    return false;
+                }
+                Floats_.push_back(value);
+                break;
+            }
+            case EKind::String: {
+                const TStringLiteralExpr* literal = StringConstant(item);
+                if (!literal) {
+                    return false;
+                }
+                Strings_.push_back(literal->Value);
+                break;
+            }
+        }
+        ++Taken_;
+        return true;
+    }
+
+    size_t Taken() const {
+        return Taken_;
+    }
+
+    // Whether `lhsValue` is in the table: a bool, the lhs is not NULL.
+    TExprPtr Lookup(const TExprPtr& lhsValue, TLocation loc) {
+        std::string table;
+        auto append = [&table](uint64_t bits) {
+            for (int shift = 0; shift < 64; shift += 8) {
+                table.push_back(static_cast<char>(bits >> shift));
+            }
+        };
+        const char* lookup = "qdb_in_sorted_i64";
+        TExprPtr x;
+        size_t count = 0;
+        switch (Kind_) {
+            case EKind::None:
+                throw std::logic_error("TInTable::Lookup: no table for the lhs type");
+            case EKind::Integer:
+            case EKind::Decimal: {
+                std::ranges::sort(Integers_);
+                const auto [end, _] = std::ranges::unique(Integers_);
+                Integers_.erase(end, Integers_.end());
+                for (int64_t v : Integers_) {
+                    append(static_cast<uint64_t>(v));
+                }
+                count = Integers_.size();
+                // A DECIMAL is passed as its digits at the scale of the table.
+                x = std::make_shared<TCastExpr>(loc, CloneExpr(lhsValue), Kind_ == EKind::Decimal
+                    ? MakeDecimalType(Decimal_)
+                    : std::static_pointer_cast<TType>(std::make_shared<TIntegerType>()));
+                break;
+            }
+            case EKind::Float: {
+                // Without NaN `<` is a strict weak order; -0.0 and 0.0 are one entry.
+                std::ranges::sort(Floats_);
+                const auto [end, _] = std::ranges::unique(Floats_);
+                Floats_.erase(end, Floats_.end());
+                for (double v : Floats_) {
+                    append(std::bit_cast<uint64_t>(v));
+                }
+                count = Floats_.size();
+                lookup = "qdb_in_sorted_f64";
+                x = std::make_shared<TCastExpr>(loc, CloneExpr(lhsValue),
+                    std::make_shared<TFloatType>());
+                break;
+            }
+            case EKind::String: {
+                // std::string orders bytes as unsigned, as qdb_filter_string_compare does.
+                std::ranges::sort(Strings_);
+                const auto [end, _] = std::ranges::unique(Strings_);
+                Strings_.erase(end, Strings_.end());
+                count = Strings_.size();
+                uint64_t offset = (count + 1) * 8;
+                append(offset);
+                for (const auto& s : Strings_) {
+                    offset += s.size();
+                    append(offset);
+                }
+                for (const auto& s : Strings_) {
+                    table += s;
+                }
+                lookup = "qdb_in_sorted_string";
+                x = CloneExpr(lhsValue);
+                break;
+            }
+        }
+        auto bytes = std::make_shared<TBitcastExpr>(loc,
+            std::make_shared<TStringLiteralExpr>(loc, std::move(table)),
+            std::make_shared<TPointerType>(std::make_shared<TIntegerType>(TIntegerType::U8)));
+        return std::make_shared<TCallExpr>(loc, Ident(lookup, loc), std::vector<TExprPtr>{
+            std::move(x), std::move(bytes),
+            std::make_shared<TNumberExpr>(loc, static_cast<int64_t>(count)),
+        });
+    }
+
+private:
+    enum class EKind {
+        None,
+        Integer,
+        Decimal,
+        Float,
+        String,
+    };
+
+    EKind Kind_ = EKind::None;
+    TDecimalSpec Decimal_;
+    bool RealLhs_ = false;
+    std::vector<int64_t> Integers_;
+    std::vector<double> Floats_;
+    std::vector<std::string> Strings_;
+    size_t Taken_ = 0;
+};
+
 // qdb_in_list(lhs, item...) preserves the SQL IN boundary until operand types are
 // known. Hoist lhs validity once, compare its plain value to every item, and only
 // retain per-item 3VL when an item itself can be NULL.
@@ -1412,12 +1679,31 @@ std::pair<TExprPtr, TTypePtr> ExpandInList(const TCallExpr& node,
         ? FieldOf(lhsRef, "Value", loc)
         : lhsRef;
 
-    std::vector<std::pair<TExprPtr, TTypePtr>> terms;
-    terms.reserve(node.Args.size() - 1);
+    std::vector<std::pair<TExprPtr, TTypePtr>> items;
+    items.reserve(node.Args.size() - 1);
     for (size_t i = 1; i < node.Args.size(); ++i) {
         TExprPtr item = node.Args[i];
         TTypePtr itemType = Expand(item, inputType, counter);
+        items.emplace_back(std::move(item), std::move(itemType));
+    }
 
+    // The OR of the comparisons is commutative in 3VL: the constants of a long list go
+    // to one lookup, the other items (NULL, columns) stay comparisons beside it.
+    std::vector<std::pair<TExprPtr, TTypePtr>> terms;
+    if (items.size() >= InTableMinItems) {
+        TInTable table(ValueType(lhsType));
+        std::vector<std::pair<TExprPtr, TTypePtr>> compared;
+        for (const auto& item : items) {
+            if (!table.Take(item.first)) {
+                compared.push_back(item);
+            }
+        }
+        if (table.Taken() >= InTableMinItems) {
+            terms.emplace_back(table.Lookup(lhsValue, loc), boolType);
+            items = std::move(compared);
+        }
+    }
+    for (auto& [item, itemType] : items) {
         TExprPtr equal;
         TTypePtr equalType;
         if (!itemType) {
@@ -2235,6 +2521,10 @@ TTypePtr ExpandDecimalNode(TExprPtr& e, const TStructType& inputType, TTypeEnv& 
         }
         if (auto cid = TMaybeNode<TIdentExpr>(node->Callee)) {
             if (cid.Cast()->Name == "qdb_is_null" || cid.Cast()->Name == "qdb_is_true") {
+                return std::make_shared<TBoolType>();
+            }
+            // ExpandInList passes a DECIMAL lhs to its table as the digits at the table's scale.
+            if (cid.Cast()->Name == "qdb_in_sorted_i64") {
                 return std::make_shared<TBoolType>();
             }
             if (cid.Cast()->Name == "coalesce") {
