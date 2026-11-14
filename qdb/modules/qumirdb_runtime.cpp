@@ -506,6 +506,9 @@ int32_t qdb_sql_interval(qdb_string_view amount, qdb_string_view unit) {
     while (!text.empty() && text.back() == ' ') {
         text.remove_suffix(1);
     }
+    if (text.size() > 1 && text.front() == '+' && text[1] >= '0' && text[1] <= '9') {
+        text.remove_prefix(1);
+    }
     int32_t n = 0;
     const auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), n);
     if (ec == std::errc::result_out_of_range) {
