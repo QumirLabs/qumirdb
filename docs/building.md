@@ -9,6 +9,7 @@ Requirements:
 - LLVM
 - Apache Arrow and Parquet development packages discoverable via `pkg-config`
 - Readline
+- liburing (optional, Linux): enables the `uring` poller in coroio; the Debian packages are built with it
 - GoogleTest
 
 Configure and build:
