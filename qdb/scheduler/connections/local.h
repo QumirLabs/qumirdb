@@ -19,6 +19,7 @@ protected:
     // is left untouched for a retry.
     bool LaneCanPush(TConnectionLane& lane) const;
     bool LanePush(TConnectionLane& lane, TRowSet& rowSet) const;
+    bool LaneReadable(const TConnectionLane& lane) const;
 };
 
 class TOneToOneConnection : public TLocalConnection {
@@ -36,6 +37,7 @@ public:
     void Finish(size_t srcId) override;
 
     EFetchResult Fetch(size_t dstId, TRowSet& rowSet) override;
+    bool Readable(size_t srcId, size_t dstId) const override;
 
     size_t Capacity() const;
 
@@ -60,6 +62,7 @@ public:
     void Finish(size_t srcId) override;
 
     EFetchResult Fetch(size_t dstId, TRowSet& rowSet) override;
+    bool Readable(size_t srcId, size_t dstId) const override;
 
     size_t Capacity() const;
 
@@ -89,6 +92,7 @@ public:
     void Finish(size_t srcId) override;
 
     EFetchResult Fetch(size_t dstId, TRowSet& rowSet) override;
+    bool Readable(size_t srcId, size_t dstId) const override;
     void Close(size_t dstId) override;
 
     size_t Capacity() const;

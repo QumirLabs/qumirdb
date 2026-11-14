@@ -37,7 +37,8 @@ public:
 private:
     TTaskNode* PopReady();
     void ScheduleInput(TTaskNode* node);
-    void ScheduleOutput(TTaskNode* node);
+    // Wakes the consumers of a finished node, else those with something to fetch from it.
+    void ScheduleOutput(TTaskNode* node, bool finished);
     void Work();
     bool FinishRun(TTaskNode* node, ETaskState nextState = ETaskState::Idle);
     void FinishNode(TTaskNode* node);

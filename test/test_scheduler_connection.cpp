@@ -145,6 +145,45 @@ TEST(SchedulerConnection, BroadcastFeedsOpenLanesAndBlocksWhenAllAreClosed) {
     EXPECT_EQ(destroyCount.load(), 3);
 }
 
+TEST(SchedulerConnection, LaneIsReadableWhileItHoldsRowsOrHasFinished) {
+    TRowSet out{};
+    TOneToOneConnection oneToOne(2);
+    oneToOne.Resize(2, 2);
+    EXPECT_FALSE(oneToOne.Readable(0, 0));
+    ASSERT_TRUE(oneToOne.Push(0, MakeRowSet(1)));
+    EXPECT_TRUE(oneToOne.Readable(0, 0));
+    EXPECT_FALSE(oneToOne.Readable(1, 1));
+    ASSERT_EQ(oneToOne.Fetch(0, out), EFetchResult::OK);
+    EXPECT_FALSE(oneToOne.Readable(0, 0));
+    oneToOne.Finish(1);
+    EXPECT_TRUE(oneToOne.Readable(1, 1));
+
+    // A gather lane belongs to one producer.
+    TGatherConnection gather(1);
+    gather.Resize(2, 1);
+    ASSERT_TRUE(gather.Push(1, MakeRowSet(1)));
+    EXPECT_FALSE(gather.Readable(0, 0));
+    EXPECT_TRUE(gather.Readable(1, 0));
+    gather.Finish(0);
+    EXPECT_TRUE(gather.Readable(0, 0));
+
+    // A broadcast lane belongs to one consumer; the finish covers them all.
+    TBroadcastConnection broadcast(1);
+    broadcast.Resize(1, 2);
+    EXPECT_FALSE(broadcast.Readable(0, 1));
+    ASSERT_TRUE(broadcast.Push(0, MakeRowSet(1)));
+    ASSERT_EQ(broadcast.Fetch(0, out), EFetchResult::OK);
+    Release(&out);
+    EXPECT_FALSE(broadcast.Readable(0, 0));
+    EXPECT_TRUE(broadcast.Readable(0, 1));
+    ASSERT_EQ(broadcast.Fetch(1, out), EFetchResult::OK);
+    Release(&out);
+    EXPECT_FALSE(broadcast.Readable(0, 1));
+    broadcast.Finish(0);
+    EXPECT_TRUE(broadcast.Readable(0, 0));
+    EXPECT_TRUE(broadcast.Readable(0, 1));
+}
+
 TEST(SchedulerConnection, QueuedRowSetsAreReleasedOnConnectionDestroy) {
     std::atomic<int> destroyCount = 0;
     {

@@ -842,6 +842,11 @@ struct TForeignConnection : IConnection {
     {
         return EFetchResult::NO_DATA;
     }
+
+    bool Readable(size_t, size_t) const override
+    {
+        return false;
+    }
 };
 
 TEST(GraphSpec, ExtractRejectsNonLocalConnectionAndMissingRowsetConnection)

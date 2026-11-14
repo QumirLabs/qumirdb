@@ -5,6 +5,7 @@
 #include <qdb/scheduler/graph.h>
 #include <qdb/scheduler/impl/single_threaded_scheduler.h>
 #include <qdb/scheduler/impl/threaded_scheduler.h>
+#include <qdb/scheduler/port.h>
 
 #include <gtest/gtest.h>
 
@@ -247,10 +248,13 @@ public:
         if (!Block) {
             Block = qdb_alloc(64);
             Allocated.store(true, std::memory_order_release);
+            // The rowset wakes the consumer, which never reads it: the lane stays full.
+            Output.Push(TRowSet{.RowCount = 0, .RefCount = 1});
         }
         return ETaskResult::BLOCKED_OUTPUT;
     }
 
+    TOutputPort Output;
     // The block belongs to the task heap, which reclaims it at teardown.
     void* Block = nullptr;
     std::atomic<bool> Allocated = false;
@@ -345,7 +349,8 @@ TEST(ExecutionContext, AbandonedTaskHeapIsReclaimedBeforeGraphTeardown) {
         auto* consumer = consumerTask.get();
         auto& source = graph.AddOwnedNode(std::move(producerTask));
         auto& sink = graph.AddOwnedNode(std::move(consumerTask));
-        graph.AddOwnedEdge(source, sink, std::make_unique<TOneToOneConnection>());
+        auto& edge = graph.AddOwnedEdge(source, sink, std::make_unique<TOneToOneConnection>());
+        producer->Output = {.Connection = edge.Connection};
         const auto sealed = graph.Seal();
         ASSERT_TRUE(sealed);
 
