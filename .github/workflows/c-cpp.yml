@@ -65,8 +65,6 @@ jobs:
           max_size=2G
     - name: Configure
       run: |
-        # coroio builds its io_uring backend only if pkg-config finds liburing.
-        pkg-config --exists liburing
         cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
           -DLLVM_DIR="$(llvm-config-22 --cmakedir)" \
           -DCMAKE_PREFIX_PATH="$(llvm-config-22 --prefix)" \
