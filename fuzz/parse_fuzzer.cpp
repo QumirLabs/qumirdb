@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <exception>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 
 // SQL text -> lexer -> parser -> AST printer.
@@ -20,8 +21,11 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
                 NQdb::NSql::PrintAst(statement);
             }
         }
+    } catch (const std::out_of_range&) {
+        // A bug (e.g. stoll on a long literal): qdb prints it as an error, but it is a finding.
+        throw;
     } catch (const std::exception&) {
-        // qdb reports these as errors of the query: the lexer throws on bad literals.
+        // Deliberate errors of the query: the lexer throws on bad literals.
     }
     return 0;
 }

@@ -236,8 +236,11 @@ void RunStatements(std::string_view sql, const TPlanHandler& handler) {
                 handler(**prepared, query->Explain, sources.size());
             }
         }
+    } catch (const std::out_of_range&) {
+        // A bug (e.g. stoll on a long literal): qdb prints it as an error, but it is a finding.
+        throw;
     } catch (const std::exception&) {
-        // qdb reports these as errors of the query: the lexer and lowering throw.
+        // Deliberate errors of the query: the lexer and lowering throw.
     }
 }
 

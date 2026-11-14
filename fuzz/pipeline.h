@@ -18,8 +18,8 @@ using TPlanHandler = std::function<void(
 
 // Parses, binds and optimizes every statement of `sql` over tiny Parquet copies
 // of the regression fixture tables, the way `qdb --sql` does. An input that the
-// engine rejects with an error ends the run: only crashes, sanitizer reports and
-// hangs are findings.
+// engine rejects with an error ends the run. Findings are crashes, sanitizer
+// reports, hangs and std::out_of_range, which escapes.
 void RunStatements(std::string_view sql, const TPlanHandler& handler);
 
 } // namespace NFuzz
