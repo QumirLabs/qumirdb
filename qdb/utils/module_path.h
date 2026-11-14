@@ -7,7 +7,8 @@
 namespace NQdb::NUtils {
 
 // Directory holding the `.oz` modules: the versioned install tree next to the
-// binary, the prefix install, or the source tree of this build.
+// binary, the prefix install, modules/ beside the binary, or the source tree of
+// this build.
 const std::filesystem::path& ModulesDir();
 
 // Root of the `.oz` kernel libraries; their aggregation/join/sort subdirectories

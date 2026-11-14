@@ -1,0 +1,3 @@
+language: c++
+# The Ubuntu 24.04 builder and runner: LLVM 22 and Arrow have no 20.04 packages.
+base_os_version: ubuntu-24-04

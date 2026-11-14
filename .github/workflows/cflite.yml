@@ -1,0 +1,116 @@
+name: ClusterFuzzLite
+
+# Fuzzing of the qdb query pipeline (fuzz/) on the master head: batch fuzzing
+# every night, corpus pruning every day. Pull requests are not fuzzed.
+on:
+  schedule:
+    - cron: '0 1 * * *'  # batch
+    - cron: '0 5 * * *'  # prune
+  workflow_dispatch:
+    inputs:
+      mode:
+        type: choice
+        options: [batch, prune]
+        default: batch
+
+permissions: read-all
+
+env:
+  # Corpus storage: the private repository QumirLabs/qumirdb-fuzz-corpus.
+  # FUZZ_CORPUS_TOKEN is a fine-grained token with contents:write on it.
+  CORPUS_REPO: https://x-access-token:${{ secrets.FUZZ_CORPUS_TOKEN }}@github.com/QumirLabs/qumirdb-fuzz-corpus.git
+
+concurrency:
+  group: cflite
+  cancel-in-progress: false
+
+jobs:
+  # An open issue with the fuzz label pauses batch fuzzing, so a crash that is
+  # not fixed yet is not reported again every night. Closing it resumes fuzzing.
+  gate:
+    if: github.event.schedule == '0 1 * * *' || inputs.mode == 'batch'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: read
+    outputs:
+      open: ${{ steps.issues.outputs.open }}
+    steps:
+      - name: Find open fuzz issues
+        id: issues
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          open=$(gh issue list -R "$GITHUB_REPOSITORY" --label fuzz --state open \
+            --json number,title --jq '.[] | "#\(.number) \(.title)"')
+          if [ -n "$open" ]; then
+            echo "Fuzzing is paused until these issues are closed:" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "$open" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "open=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "open=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  batch:
+    needs: gate
+    if: needs.gate.outputs.open == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [address, undefined]
+    steps:
+      # The actions read base_os_version from .clusterfuzzlite/project.yaml in the workspace.
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .clusterfuzzlite
+      - name: Build fuzzers (${{ matrix.sanitizer }})
+        uses: google/clusterfuzzlite/actions/build_fuzzers@v1
+        with:
+          language: c++
+          sanitizer: ${{ matrix.sanitizer }}
+      - name: Run fuzzers (${{ matrix.sanitizer }})
+        id: run
+        uses: google/clusterfuzzlite/actions/run_fuzzers@v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          fuzz-seconds: 3600
+          mode: batch
+          sanitizer: ${{ matrix.sanitizer }}
+          minimize-crashes: true
+          storage-repo: ${{ env.CORPUS_REPO }}
+          storage-repo-branch: main
+      - name: File an issue for the finding
+        if: failure() && steps.run.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SANITIZER: ${{ matrix.sanitizer }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash .clusterfuzzlite/report_finding.sh
+
+  prune:
+    if: github.event.schedule == '0 5 * * *' || inputs.mode == 'prune'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .clusterfuzzlite
+      - name: Build fuzzers
+        uses: google/clusterfuzzlite/actions/build_fuzzers@v1
+        with:
+          language: c++
+          sanitizer: address
+      - name: Prune the corpus
+        uses: google/clusterfuzzlite/actions/run_fuzzers@v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          fuzz-seconds: 600
+          mode: prune
+          sanitizer: address
+          storage-repo: ${{ env.CORPUS_REPO }}
+          storage-repo-branch: main
