@@ -66,6 +66,66 @@ See [logical planning](docs/arch/logical_plan_build.md),
 [kernel compilation](docs/arch/kernel-compilation-phases.md), and
 [scheduled execution](docs/arch/scheduler_runtime.md) for the design.
 
+## Distributed execution
+
+`qdbd` ([qdbd/](qdbd/), [bin/daemon.cpp](bin/daemon.cpp)) is the QumirDB
+daemon. Run one per node; every node lists all nodes with `--node
+host:port:id`. Nodes talk through [Coroio](https://coroio.dev) actors. The
+node that receives an HTTP query runs its **query actor**, and every node runs
+**compute actors** that execute the work.
+
+```mermaid
+flowchart LR
+    SQL["POST /api/run"] --> Query["Query actor: plan, lower, compile"]
+    Query --> Part["Partitioner: one fragment per node"]
+    Part -->|fragment + kernel image| C1["Compute actor, node 1"]
+    Part -->|fragment + kernel image| C2["Compute actor, node 2"]
+    C1 <-->|"sink/source pairs"| C2
+    C1 --> Query
+```
+
+The query actor plans the SQL and lowers it for the cluster's plan width,
+which a client can set with the `X-Qdb-Plan-Width` header. It compiles the
+kernels once into one PIC kernel image. The
+[partitioner](qdbd/partitioner/) colors the sealed task graph into one
+fragment per node. `TTaskGraph::Apply` cuts every edge between two colors
+into a sink/source pair: rowset edges, runtime filter dependency edges
+(`RFSink`/`RFSource`), and materialized CTE edges (`CteSink`/`CteSource`).
+The fragments and the kernel image go to the compute actors
+([qdbd/actors/](qdbd/actors/)). Rows travel between nodes as chunks. Each
+chunk has a sequence number, the receiver confirms it, and a byte window
+bounds the unconfirmed data. The window and chunk sizes are the
+`--transport:*` settings in
+[engine_settings.cpp](qdb/scheduler/settings/engine_settings.cpp). The graph
+cuts are in [qdb/scheduler/graph.h](qdb/scheduler/graph.h).
+
+To try it on one machine, build `qdbd` (see [docs/building.md](docs/building.md))
+and point `DATA_DIR` at a directory with `<table>.parquet` files. The script
+starts one process per node and waits until every node takes part in queries:
+
+```bash
+DATA_DIR=/path/to/parquet benchmark/cluster/cluster.sh start 2 4   # 2 nodes x 4 threads
+curl --data-binary 'SELECT count(*) FROM lineitem' http://127.0.0.1:8101/api/run
+benchmark/cluster/cluster.sh stop
+```
+
+Node `i` serves HTTP on port `8100 + i` and talks to other nodes on `7100 + i`.
+Logs are in `$TMPDIR/qdb-cluster`. Extra `qdbd` flags go through `QDBD_ARGS`,
+for example `QDBD_ARGS="--transport:window_chunks=2"`. Set `HOSTS` to run
+across machines. The TPC-H stand
+[run_tpch_cluster.sh](benchmark/cluster/run_tpch_cluster.sh) runs the 22 queries
+on a cluster and compares the results with a single-process run. The numbers
+are in [docs/benchmarks/](docs/benchmarks/README.md).
+
+Current limitations:
+
+- There is no spill, so the memory of each node bounds the data size.
+- `--transport:window_chunks` also sets the receiving inbox size, so use the
+  same value on every node.
+- A distributed query runs one `SELECT` statement.
+- A task exception on a node can leave the query hanging instead of returning
+  the error ([#564](https://github.com/QumirLabs/qumirdb/issues/564)).
+
 ## Project principles
 
 1. **A database at the forefront of the field.** QumirDB draws on modern
@@ -253,7 +313,8 @@ Design notes live in [docs/arch/](docs/arch/README.md).
 
 - `qdb/`: engine library. SQL/parser, logical plan, passes, kernel
   generation, execution, scheduler, parquet IO.
-- `bin/`: the `qdb` command line tool.
+- `bin/`: the `qdb` command line tool and the `qdbd` daemon.
+- `qdbd/`: distributed execution: actors, graph partitioner, remote tasks.
 - `service/`: web server and static browser workbench.
 - `test/`: C++ unit and regression tests.
 - `benchmark/`: TPC-H, TPC-DS, and ClickBench query packs and runners.
