@@ -1,0 +1,3 @@
+project (d) (rows≈1 cost≈68)
+└─ filter (== |date_strings_invalid.s| (cast "1998-08-03" <named StringView>)) (rows≈1 cost≈64)
+   └─ source date_strings_invalid AS date_strings_invalid row-groups (== |date_strings_invalid.s| (cast "1998-08-03" <named StringView>)) (rows≈2 cost≈32)

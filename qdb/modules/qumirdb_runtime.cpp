@@ -522,7 +522,7 @@ bool qdb_try_parse_date(qdb_string_view date, int32_t* days) {
 
 int32_t qdb_sql_date(qdb_string_view date) {
     int32_t days = 0;
-    if (!qdb_try_parse_date(date, &days)) {
+    if (!qdb_try_parse_date(date, &days) && !NQdb::DeferRowError()) {
         throw std::invalid_argument("invalid input syntax for type date: \"" +
             std::string(reinterpret_cast<const char*>(date.Data), static_cast<size_t>(date.Size)) + "\"");
     }
