@@ -1,6 +1,7 @@
 #include "lexer.h"
 
 #include <cctype>
+#include <charconv>
 #include <stdexcept>
 #include <string>
 #include <unordered_set>
@@ -269,8 +270,15 @@ void TTokenStream::Read() {
                 .Location = location,
             });
         } else {
+            // Without NUMERIC literals, an integer beyond BIGINT has no representation.
+            int64_t value = 0;
+            auto [end, ec] = std::from_chars(rawValue.data(), rawValue.data() + rawValue.size(), value);
+            if (ec != std::errc()) {
+                throw std::runtime_error("integer literal " + rawValue + " is out of range for BIGINT at "
+                    + location.ToString());
+            }
             Tokens.emplace_back(TToken {
-                .Value = {.i64 = std::stoll(rawValue)},
+                .Value = {.i64 = value},
                 .RawValue = rawValue,
                 .Type = TToken::Integer,
                 .Location = location,
