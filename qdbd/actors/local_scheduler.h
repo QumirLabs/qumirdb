@@ -9,7 +9,8 @@ namespace NRemote {
 
 NNet::NActors::IActor* CreateLocalScheduler(NNet::NActors::TNodeId leader,
     uint64_t pingPeriodMs,
-    const NScheduler::TSchedulerSettings& scheduler = {});
+    const NScheduler::TSchedulerSettings& scheduler = {},
+    const NScheduler::TTransportSettings& transport = {});
 
 } // NRemote
 } // NQdb

@@ -96,6 +96,11 @@ TEST(EngineSettings, OverridesReachTheirFields) {
              "jit:cache_dir=/tmp/jit",
              "kernel:backend=vm",
              "io:arrow_memory_pool=system",
+             "transport:outbox_row_sets=3",
+             "transport:outbox_bytes=4096",
+             "transport:chunk_bytes=1024",
+             "transport:window_bytes=8192",
+             "transport:window_chunks=2",
          })
     {
         const auto result = config.Override(spec);
@@ -127,6 +132,11 @@ TEST(EngineSettings, OverridesReachTheirFields) {
     EXPECT_EQ(settings.Scheduler.Jit.CacheDir, "/tmp/jit");
     EXPECT_EQ(settings.Scheduler.Kernel.Backend, EKernelBackend::Vm);
     EXPECT_EQ(settings.ArrowMemoryPool, EArrowMemoryPool::System);
+    EXPECT_EQ(settings.Scheduler.Transport.OutboxRowSets, 3u);
+    EXPECT_EQ(settings.Scheduler.Transport.OutboxBytes, 4096u);
+    EXPECT_EQ(settings.Scheduler.Transport.ChunkBytes, 1024u);
+    EXPECT_EQ(settings.Scheduler.Transport.WindowBytes, 8192u);
+    EXPECT_EQ(settings.Scheduler.Transport.WindowChunks, 2u);
 }
 
 TEST(EngineSettings, BadSettingsAreErrorsThatListTheAccepted) {
@@ -142,6 +152,9 @@ TEST(EngineSettings, BadSettingsAreErrorsThatListTheAccepted) {
     EXPECT_NE(message("aggregate:cascade_global=yes").find("one of: auto, true, false"), std::string::npos);
     EXPECT_NE(message("join:tabel=row").find("table"), std::string::npos);
     EXPECT_NE(message("joins:table=row").find("accepted sections: scheduler, queue, scan, join"), std::string::npos);
+    for (const char* key : {"outbox_row_sets", "outbox_bytes", "chunk_bytes", "window_bytes", "window_chunks"}) {
+        EXPECT_NE(message((std::string("transport:") + key + "=0").c_str()).find("an integer >= 1"), std::string::npos);
+    }
     EXPECT_NE(message("scheduler:workers=0").find("an integer >= 1"), std::string::npos);
     EXPECT_NE(message("late_materialization:min_savings=0.5").find("a number >= 1"), std::string::npos);
     EXPECT_NE(message("io:arrow_memory_pool=tcmalloc").find("jemalloc"), std::string::npos);

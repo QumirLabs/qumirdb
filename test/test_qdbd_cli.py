@@ -103,6 +103,7 @@ class TestQdbdCli(unittest.TestCase):
             (["--node", "127.0.0.1:1"], "Invalid node format"),
             (["--data"], "--data requires a value"),
             (["--config"], "--config requires a value"),
+            (["--transport:window_chunks=0"], "an integer >= 1"),
         ):
             with self.subTest(args=args):
                 r = run(*args)

@@ -51,6 +51,17 @@ struct TSchedulerSettings {
     size_t StatusPeriodMs = 1000;
 };
 
+// Flow control of one remote stream between qdbd nodes, in serialized bytes;
+// see TRemoteStreamLimits. WindowChunks also sizes the receiving inbox, so keep
+// these equal on every node.
+struct TTransportSettings {
+    size_t OutboxRowSets = 64;
+    size_t OutboxBytes = 32 << 20;
+    size_t ChunkBytes = 256 << 10;
+    size_t WindowBytes = 2 << 20;
+    size_t WindowChunks = 16;
+};
+
 struct TQueueSettings {
     // Rowset slots per connection lane. Depth 1 ping-pongs producer/consumer on
     // every batch; a small buffer (measured sweet spot ~4) lets a producer run
@@ -235,6 +246,7 @@ struct TInstrumentationSettings {
 
 struct TSettings {
     TSchedulerSettings Scheduler;
+    TTransportSettings Transport;
     TQueueSettings Queue;
     TScanSplitSettings ScanSplit;
     THashShuffleSettings HashShuffle;

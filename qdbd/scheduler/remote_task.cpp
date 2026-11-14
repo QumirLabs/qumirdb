@@ -382,7 +382,8 @@ std::pair<std::shared_ptr<const TCteSinkCode>, std::shared_ptr<TRemoteSinkState>
     NNet::NActors::TActorId actorId,
     uint64_t dstTaskId,
     std::span<const TValueLayout> descriptor,
-    TActorNotificationChannel& actorChannel)
+    TActorNotificationChannel& actorChannel,
+    TRemoteStreamLimits limits)
 {
     auto code = std::make_shared<const TCteSinkCode>(TCteSinkCode{
         .Write = [](void* state, const TRowSet& rowSet, uint32_t segment) {
@@ -393,8 +394,8 @@ std::pair<std::shared_ptr<const TCteSinkCode>, std::shared_ptr<TRemoteSinkState>
         },
     });
     // The receiver reads the spool only after the finish, so small chunks would only cost messages.
-    auto state = std::make_shared<TRemoteSinkState>(
-        id, actorId, dstTaskId, descriptor, actorChannel, TRemoteStreamLimits{.FullChunks = true});
+    limits.FullChunks = true;
+    auto state = std::make_shared<TRemoteSinkState>(id, actorId, dstTaskId, descriptor, actorChannel, limits);
     return {std::move(code), std::move(state)};
 }
 
@@ -402,14 +403,15 @@ std::pair<std::shared_ptr<const TCteSourceCode>, std::shared_ptr<TRemoteSourceSt
     uint64_t id,
     NNet::NActors::TActorId peerActor,
     uint64_t peerTaskId,
-    TActorNotificationChannel& actorChannel)
+    TActorNotificationChannel& actorChannel,
+    size_t inboxCapacity)
 {
     auto code = std::make_shared<const TCteSourceCode>(TCteSourceCode{
         .Next = [](void* state, TRowSet& rowSet, uint32_t& segment) {
             return static_cast<TRemoteSourceState*>(state)->Next(rowSet, segment);
         },
     });
-    return {std::move(code), std::make_shared<TRemoteSourceState>(id, peerActor, peerTaskId, actorChannel)};
+    return {std::move(code), std::make_shared<TRemoteSourceState>(id, peerActor, peerTaskId, actorChannel, inboxCapacity)};
 }
 
 std::pair<std::shared_ptr<const TRuntimeFilterSinkCode>, std::shared_ptr<TRuntimeFilterSinkState>>
