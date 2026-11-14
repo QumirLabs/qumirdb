@@ -105,7 +105,10 @@ qdb_string_view qdb_regexp_replace(
 // Returns the Gregorian year for a date given as days since 1970-01-01.
 int32_t qdb_date_year(int32_t days);
 
-// SQL DATE '<yyyy-mm-dd>' literal -> days since 1970-01-01.
+// Parses 'YYYY-MM-DD' to days since 1970-01-01; false if invalid or out of range.
+bool qdb_try_parse_date(qdb_string_view date, int32_t* days);
+
+// SQL DATE '<yyyy-mm-dd>' literal -> days since 1970-01-01; throws if invalid.
 int32_t qdb_sql_date(qdb_string_view date);
 
 // SQL INTERVAL '<amount>' <unit> -> days (year/month approximate: 365/30).

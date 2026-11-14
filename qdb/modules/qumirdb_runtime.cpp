@@ -479,19 +479,58 @@ static int32_t DaysFromCivil(int y, int m, int d) {
     return static_cast<int32_t>(era * 146097 + doe - 719468);
 }
 
+// PostgreSQL's DATE range: the last year whose day number fits int32.
+constexpr int kMaxDateYear = 5874897;
+
+// Parses 'Y-M-D' (surrounding spaces allowed); false when the text is not a valid date.
 // Size-aware: CAST(<string column> AS DATE) passes a non-null-terminated StringView.
-int32_t qdb_sql_date(qdb_string_view date) {
+bool qdb_try_parse_date(qdb_string_view date, int32_t* days) {
     int parts[3] = {0, 0, 0};
+    int digits[3] = {0, 0, 0};
     int idx = 0;
-    for (int64_t i = 0; i < date.Size && idx < 3; ++i) {
+    int64_t i = 0;
+    int64_t end = date.Size;
+    while (i < end && date.Data[i] == ' ') {
+        ++i;
+    }
+    while (end > i && date.Data[end - 1] == ' ') {
+        --end;
+    }
+    for (; i < end; ++i) {
         const char c = static_cast<char>(date.Data[i]);
-        if (c == '-') {
+        if (c == '-' && idx < 2) {
             ++idx;
-        } else if (c >= '0' && c <= '9') {
+        } else if (c >= '0' && c <= '9' && digits[idx] < 7) {
             parts[idx] = parts[idx] * 10 + (c - '0');
+            ++digits[idx];
+        } else {
+            return false;
         }
     }
-    return DaysFromCivil(parts[0], parts[1], parts[2]);
+    const int year = parts[0];
+    const int month = parts[1];
+    const int day = parts[2];
+    if (idx != 2 || digits[1] == 0 || digits[2] == 0 || year < 1 || year > kMaxDateYear ||
+        month < 1 || month > 12 || day < 1)
+    {
+        return false;
+    }
+    static constexpr int kDaysInMonth[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    const bool leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    if (day > kDaysInMonth[month - 1] + (month == 2 && leap)) {
+        return false;
+    }
+    *days = DaysFromCivil(year, month, day);
+    return true;
+}
+
+int32_t qdb_sql_date(qdb_string_view date) {
+    int32_t days = 0;
+    if (!qdb_try_parse_date(date, &days)) {
+        throw std::invalid_argument("invalid input syntax for type date: \"" +
+            std::string(reinterpret_cast<const char*>(date.Data), static_cast<size_t>(date.Size)) + "\"");
+    }
+    return days;
 }
 
 // year/month are approximate (365/30): the base date is not available here for
