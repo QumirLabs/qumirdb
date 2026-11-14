@@ -111,8 +111,11 @@ bool qdb_try_parse_date(qdb_string_view date, int32_t* days);
 // SQL DATE '<yyyy-mm-dd>' literal -> days since 1970-01-01; an invalid one is a row error.
 int32_t qdb_sql_date(qdb_string_view date);
 
-// SQL INTERVAL '<amount>' <unit> -> days (year/month approximate: 365/30).
+// SQL INTERVAL '<amount>' DAY -> days; MONTH/YEAR -> months (year = 12 months).
 int32_t qdb_sql_interval(qdb_string_view amount, qdb_string_view unit);
+int32_t qdb_sql_interval_months(qdb_string_view amount, qdb_string_view unit);
+// DATE literal (days) + months, the day clamped to the target month; throws past i32.
+int32_t qdb_sql_date_add_months(int32_t days, int64_t months);
 
 // SQL ROUND(x, digits) -> round half away from zero.
 double qdb_round(double value, int32_t digits);

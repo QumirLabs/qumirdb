@@ -34,7 +34,7 @@
     )
     (where
       (&& (&& (&& (&& (&& (== c_custkey o_custkey) (== l_orderkey o_orderkey)) (>= o_orderdate (: 8917 i32)))
-            (< o_orderdate (+ (: 8917 i32) (: 90 i32))))
+            (< o_orderdate (: 9009 i32)))
           (== l_returnflag (cast "R" <named StringView>)))
         (== c_nationkey n_nationkey))
     )

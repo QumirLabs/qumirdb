@@ -404,6 +404,19 @@ qdb_string_view AsStringView(const std::string& s) {
     return {reinterpret_cast<const uint8_t*>(s.data()), static_cast<int64_t>(s.size())};
 }
 
+// An INTERVAL in months is a marker call, consumed by add_expr into a calendar-wise
+// date kernel; a day interval is a plain day count.
+const char* const IntervalMonthsMarker = "qdb_interval_months";
+
+NQumir::NAst::TExprPtr interval_literal(TLocation loc, const std::string& amount, const std::string& unit) {
+    const auto u = ToLowerStr(unit);
+    if (u == "month" || u == "months" || u == "year" || u == "years") {
+        return call(loc, IntervalMonthsMarker,
+            {i32_literal(loc, qdb_sql_interval_months(AsStringView(amount), AsStringView(u)))});
+    }
+    return i32_literal(loc, qdb_sql_interval(AsStringView(amount), AsStringView(u)));
+}
+
 NQumir::NAst::TExprPtr list(TLocation loc, std::vector<NQumir::NAst::TExprPtr> items) {
     return std::make_shared<NQumir::NAst::TBlockExpr>(loc, std::move(items));
 }
@@ -1586,8 +1599,53 @@ TAstExprTask concat_expr(TParserContext& ctx) {
     co_return ret;
 }
 
+// The months of an INTERVAL ... MONTH|YEAR marker, or null.
+NQumir::NAst::TExprPtr IntervalMonths(const NQumir::NAst::TExprPtr& e) {
+    if (auto maybeCall = NQumir::NAst::TMaybeNode<NQumir::NAst::TCallExpr>(e)) {
+        auto c = maybeCall.Cast();
+        if (auto maybeId = NQumir::NAst::TMaybeNode<NQumir::NAst::TIdentExpr>(c->Callee);
+            maybeId && maybeId.Cast()->Name == IntervalMonthsMarker)
+        {
+            return c->Args.front();
+        }
+    }
+    return nullptr;
+}
+
+// DATE +- INTERVAL n MONTH|YEAR adds calendar months, keeping the day (clamped); a DATE
+// literal is folded here, so that predicates keep literal bounds.
+NQumir::NAst::TExprPtr AddMonths(TLocation loc, NQumir::NAst::TExprPtr date,
+    NQumir::NAst::TExprPtr months, bool negate)
+{
+    auto monthsNumber = NQumir::NAst::TMaybeNode<NQumir::NAst::TNumberExpr>(months);
+    auto dateNumber = NQumir::NAst::TMaybeNode<NQumir::NAst::TNumberExpr>(date);
+    if (monthsNumber && dateNumber) {
+        const int64_t n = monthsNumber.Cast()->IntValue;
+        return i32_literal(loc, qdb_sql_date_add_months(
+            static_cast<int32_t>(dateNumber.Cast()->IntValue), negate ? -n : n));
+    }
+    return call(loc, negate ? "qdb_date_sub_months" : "qdb_date_add_months", {date, months});
+}
+
 TAstExprTask add_expr(TParserContext& ctx) {
-    co_return co_await binary_op_helper(ctx, mul_expr, "+"_op, "-"_op);
+    auto ret = co_await mul_expr(ctx);
+    for (;;) {
+        auto token = ctx.Stream.Next();
+        const bool plus = IsOp(token, '+');
+        if (!plus && !IsOp(token, '-')) {
+            ctx.Stream.Unget(token);
+            co_return ret;
+        }
+        auto rhs = co_await mul_expr(ctx);
+        auto loc = ret->Location;
+        if (auto months = IntervalMonths(rhs)) {
+            ret = AddMonths(loc, ret, months, !plus);
+        } else if (auto lhsMonths = IntervalMonths(ret); lhsMonths && plus) {
+            ret = AddMonths(loc, rhs, lhsMonths, false);
+        } else {
+            ret = binary(loc, plus ? "+"_op : "-"_op, ret, rhs);
+        }
+    }
 }
 
 TAstExprTask mul_expr(TParserContext& ctx) {
@@ -1757,8 +1815,7 @@ TAstExprTask primary_expr(TParserContext& ctx) {
         if ((unit.Type == TToken::Identifier || unit.Type == TToken::Keyword)
             && IsIntervalUnit(unit.Name)) {
             try {
-                co_return i32_literal(loc, qdb_sql_interval(
-                    AsStringView(std::to_string(token.Value.i64)), AsStringView(ToLowerStr(unit.Name))));
+                co_return interval_literal(loc, std::to_string(token.Value.i64), unit.Name);
             } catch (const std::exception& e) {
                 co_return Error(token, e.what());
             }
@@ -1817,7 +1874,7 @@ TAstExprTask primary_expr(TParserContext& ctx) {
         // TODO: constant functions should be expanded by Qumir constant folding,
         // not special-cased in the SQL parser.
         try {
-            co_return i32_literal(loc, qdb_sql_interval(AsStringView(value.Name), AsStringView(unit.Name)));
+            co_return interval_literal(loc, value.Name, unit.Name);
         } catch (const std::exception& e) {
             co_return Error(value, e.what());
         }

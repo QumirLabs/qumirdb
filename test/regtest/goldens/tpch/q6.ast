@@ -9,7 +9,7 @@
       (table lineitem)
     )
     (where
-      (&& (&& (&& (>= l_shipdate (: 9131 i32)) (< l_shipdate (+ (: 9131 i32) (: 365 i32))))
+      (&& (&& (&& (>= l_shipdate (: 9131 i32)) (< l_shipdate (: 9496 i32)))
           (&& (<= (- 0.040000000000000001 0.01) l_discount) (<= l_discount (+ 0.040000000000000001 0.01))))
         (< l_quantity 24))
     )

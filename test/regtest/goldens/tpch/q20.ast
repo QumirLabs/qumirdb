@@ -53,7 +53,7 @@
                 )
                 (where
                   (&& (&& (&& (== l_partkey ps_partkey) (== l_suppkey ps_suppkey)) (>= l_shipdate (: 9131 i32)))
-                    (< l_shipdate (+ (: 9131 i32) (: 365 i32))))
+                    (< l_shipdate (: 9496 i32)))
                 )
               )
             )
