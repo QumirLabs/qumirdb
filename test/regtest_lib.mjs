@@ -41,9 +41,19 @@ function findManifests(dir) {
   return manifests.sort();
 }
 
-// The identifier rule of the Qumir core printer.
+// Escapes inside `|...|` of the Qumir core lexer: backslash + key -> character.
+const IDENTIFIER_ESCAPES = {'|': '|', '\\': '\\', ' ': ' ', ')': ')', n: '\n', t: '\t', r: '\r', v: '\v', f: '\f'};
+const IDENTIFIER_UNESCAPES = {'|': '\\|', '\\': '\\\\', '\n': '\\n', '\t': '\\t', '\r': '\\r', '\v': '\\v', '\f': '\\f'};
+
+// The identifier rule of the Qumir core printer: a plain name stays bare, any other
+// is quoted (a leading space or ')' is escaped).
 function printIdentifier(name) {
-  return name.includes(' ') || name.includes('.') ? `|${name}|` : name;
+  if (/^[^\s.|\\()<>]+$/.test(name)) {
+    return name;
+  }
+  const body = [...name].map((ch, i) =>
+    IDENTIFIER_UNESCAPES[ch] ?? ((ch === ' ' || ch === ')') && i === 0 ? `\\${ch}` : ch)).join('');
+  return `|${body}|`;
 }
 
 // A DECIMAL column keeps its precision and scale: the exact decimal string of a
@@ -100,10 +110,16 @@ function parseSchema(text) {
     skipSpaces();
     let name;
     if (body[pos] === '|') {
-      const end = body.indexOf('|', pos + 1);
-      if (end < 0) throw new Error(`unterminated field name: ${source}`);
-      name = body.slice(pos + 1, end);
-      pos = end + 1;
+      name = '';
+      for (++pos; pos < body.length && body[pos] !== '|'; ++pos) {
+        const escaped = body[pos] === '\\' ? IDENTIFIER_ESCAPES[body[pos + 1]] : undefined;
+        if (escaped !== undefined) {
+          ++pos;
+        }
+        name += escaped ?? body[pos];
+      }
+      if (pos >= body.length) throw new Error(`unterminated field name: ${source}`);
+      ++pos;
     } else {
       const start = pos;
       while (pos < body.length && !/[\s()]/.test(body[pos])) ++pos;
