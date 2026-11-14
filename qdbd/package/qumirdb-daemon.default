@@ -1,0 +1,8 @@
+# Arguments of qdbd, run by qumirdb-daemon.service. The service is not enabled
+# on install: set the arguments, then `systemctl enable --now qumirdb-daemon`.
+# Run `qdbd --help` for the full list.
+#
+# Every node of the cluster is listed with --node host:port:id, one entry
+# carries this node's id (--node-id). Example for a node with id 2:
+#QDBD_ARGS="--node-id 2 --leader-id 1 --http-port 8080 --data /var/lib/qumirdb-data --node a.example:7001:1 --node b.example:7001:2"
+QDBD_ARGS=""

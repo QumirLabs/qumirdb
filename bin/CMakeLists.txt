@@ -25,3 +25,26 @@ install(CODE "
     file(MAKE_DIRECTORY \"\${_bindir}\")
     file(CREATE_LINK \"../${QDB_PRIVATE_BINDIR}/qdb\" \"\${_bindir}/qdb\" SYMBOLIC)
 " COMPONENT engine)
+
+if(QDB_BUILD_DAEMON)
+    # Same layout as qdb: the oz modules are found relative to the resolved binary.
+    install(TARGETS qdbd
+        RUNTIME DESTINATION ${QDB_PRIVATE_BINDIR}
+        COMPONENT daemon)
+
+    install(CODE "
+        set(_bindir \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/bin\")
+        file(MAKE_DIRECTORY \"\${_bindir}\")
+        file(CREATE_LINK \"../${QDB_PRIVATE_BINDIR}/qdbd\" \"\${_bindir}/qdbd\" SYMBOLIC)
+    " COMPONENT daemon)
+
+    set(QDBD_PACKAGE_DIR ${CMAKE_SOURCE_DIR}/qdbd/package)
+    configure_file(${QDBD_PACKAGE_DIR}/qumirdb-daemon.service.in qumirdb-daemon.service @ONLY)
+    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/qumirdb-daemon.service
+        DESTINATION lib/systemd/system
+        COMPONENT daemon)
+    install(FILES ${QDBD_PACKAGE_DIR}/qumirdb-daemon.default
+        DESTINATION /etc/default
+        RENAME qumirdb-daemon
+        COMPONENT daemon)
+endif()

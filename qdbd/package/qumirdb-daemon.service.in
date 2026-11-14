@@ -1,0 +1,16 @@
+[Unit]
+Description=QumirDB cluster node daemon
+After=network.target
+
+[Service]
+# Arguments (--node host:port:id for every node, --node-id, --data, ...) come from the
+# defaults file, so the unit does not depend on the cluster layout.
+EnvironmentFile=-/etc/default/qumirdb-daemon
+ExecStart=@CMAKE_INSTALL_PREFIX@/bin/qdbd $QDBD_ARGS
+User=qumirdb-daemon
+Group=qumirdb-daemon
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

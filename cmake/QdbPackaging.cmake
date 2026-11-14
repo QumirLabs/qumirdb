@@ -35,4 +35,17 @@ if(QDB_BUILD_SERVICE)
         "QumirDB workbench web service.\n HTTP server backing the browser workbench: SQL editor,\n plan viewer and dataset management.")
 endif()
 
+if(QDB_BUILD_DAEMON)
+    list(APPEND CPACK_COMPONENTS_ALL daemon)
+    set(CPACK_DEBIAN_DAEMON_PACKAGE_NAME "qumirdb-daemon")
+    set(CPACK_DEBIAN_DAEMON_PACKAGE_SECTION "database")
+    # qdbd and the oz modules it compiles come from the same build; both packages
+    # are released together, so a rebuild bumps both.
+    set(CPACK_DEBIAN_DAEMON_PACKAGE_DEPENDS "qumirdb (= ${CPACK_PACKAGE_VERSION}-${CPACK_DEBIAN_PACKAGE_RELEASE}), adduser")
+    set(CPACK_DEBIAN_DAEMON_PACKAGE_CONTROL_EXTRA
+        "${CMAKE_SOURCE_DIR}/qdbd/package/postinst;${CMAKE_SOURCE_DIR}/qdbd/package/conffiles")
+    set(CPACK_COMPONENT_DAEMON_DESCRIPTION
+        "QumirDB cluster node daemon.\n qdbd runs a distributed-execution node; the systemd unit is\n installed disabled and reads its arguments from /etc/default/qumirdb-daemon.")
+endif()
+
 include(CPack)
