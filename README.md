@@ -68,11 +68,11 @@ See [logical planning](docs/arch/logical_plan_build.md),
 
 ## Distributed execution
 
-`qdbd` ([qdbd/](qdbd/), [bin/daemon.cpp](bin/daemon.cpp)) is the QumirDB
-daemon. Run one per node; every node lists all nodes with `--node
-host:port:id`. Nodes talk through [Coroio](https://coroio.dev) actors. The
-node that receives an HTTP query runs its **query actor**, and every node runs
-**compute actors** that execute the work.
+`qdbd` ([qdbd/](qdbd/)) is the QumirDB daemon: run one per node. The node
+that gets a query plans it, compiles the kernels once, splits the task graph
+into one fragment per node, and sends the fragments and the compiled code to
+the nodes. Every edge between two fragments becomes a sink/source pair, and
+rows stream between the nodes through it.
 
 ```mermaid
 flowchart LR
@@ -84,24 +84,8 @@ flowchart LR
     C1 --> Query
 ```
 
-The query actor plans the SQL and lowers it for the cluster's plan width,
-which a client can set with the `X-Qdb-Plan-Width` header. It compiles the
-kernels once into one PIC kernel image. The
-[partitioner](qdbd/partitioner/) colors the sealed task graph into one
-fragment per node. `TTaskGraph::Apply` cuts every edge between two colors
-into a sink/source pair: rowset edges, runtime filter dependency edges
-(`RFSink`/`RFSource`), and materialized CTE edges (`CteSink`/`CteSource`).
-The fragments and the kernel image go to the compute actors
-([qdbd/actors/](qdbd/actors/)). Rows travel between nodes as chunks. Each
-chunk has a sequence number, the receiver confirms it, and a byte window
-bounds the unconfirmed data. The window and chunk sizes are the
-`--transport:*` settings in
-[engine_settings.cpp](qdb/scheduler/settings/engine_settings.cpp). The graph
-cuts are in [qdb/scheduler/graph.h](qdb/scheduler/graph.h).
-
 To try it on one machine, build `qdbd` (see [docs/building.md](docs/building.md))
-and point `DATA_DIR` at a directory with `<table>.parquet` files. The script
-starts one process per node and waits until every node takes part in queries:
+and point `DATA_DIR` at a directory with `<table>.parquet` files:
 
 ```bash
 DATA_DIR=/path/to/parquet benchmark/cluster/cluster.sh start 2 4   # 2 nodes x 4 threads
@@ -110,19 +94,10 @@ benchmark/cluster/cluster.sh stop
 ```
 
 Node `i` serves HTTP on port `8100 + i` and talks to other nodes on `7100 + i`.
-Logs are in `$TMPDIR/qdb-cluster`. Extra `qdbd` flags go through `QDBD_ARGS`,
-for example `QDBD_ARGS="--transport:window_chunks=2"`. Set `HOSTS` to run
-across machines. The TPC-H stand
+`QDBD_BIN` picks the binary, `QDBD_ARGS` adds `qdbd` flags, and `HOSTS` runs
+the nodes on several machines. The TPC-H stand
 [run_tpch_cluster.sh](benchmark/cluster/run_tpch_cluster.sh) runs the 22 queries
-on a cluster and compares the results with a single-process run. The numbers
-are in [docs/benchmarks/](docs/benchmarks/README.md).
-
-Current limitations:
-
-- There is no spill, so the memory of each node bounds the data size.
-- `--transport:window_chunks` also sets the receiving inbox size, so use the
-  same value on every node.
-- A distributed query runs one `SELECT` statement.
+on a cluster and compares the results with a single-process run.
 
 ## Project principles
 
