@@ -83,14 +83,19 @@ void TThreadedScheduler::Cancel() {
 }
 
 void TThreadedScheduler::Schedule(TTaskNode* node) {
+    Wake(node, EWake::Event);
+}
+
+void TThreadedScheduler::Wake(TTaskNode* node, EWake wake) {
     // A retired node is finished or abandoned; external wakes for it are dropped too.
     if (!node || node->Retired.load(std::memory_order_acquire)) {
         return;
     }
 
+    const bool event = wake == EWake::Event;
     auto state = node->State.load(std::memory_order_acquire);
     for (;;) {
-        if (state == ETaskState::Idle || state == ETaskState::Waiting) {
+        if (state == ETaskState::Idle || (event && state == ETaskState::Waiting)) {
             if (node->State.compare_exchange_weak(
                     state,
                     ETaskState::Queued,
@@ -98,15 +103,16 @@ void TThreadedScheduler::Schedule(TTaskNode* node) {
                     std::memory_order_acquire)) {
                 break;
             }
-        } else if (state == ETaskState::Running) {
+        } else if (state == ETaskState::Running || (event && state == ETaskState::Reschedule)) {
             if (node->State.compare_exchange_weak(
                     state,
-                    ETaskState::Reschedule,
+                    event ? ETaskState::Notified : ETaskState::Reschedule,
                     std::memory_order_acq_rel,
                     std::memory_order_acquire)) {
                 return;
             }
         } else {
+            // Queued, Notified or Finished, or a neighbour's wake of a waiting node.
             return;
         }
     }
@@ -145,24 +151,24 @@ void TThreadedScheduler::ScheduleInput(TTaskNode* node) {
             continue;
         }
         allFinished = false;
-        Schedule(edge->Src);
+        Wake(edge->Src, EWake::Neighbour);
     }
     if (hasWantedInput && allFinished) {
-        Schedule(node);
+        Wake(node, EWake::Neighbour);
     }
 }
 
-void TThreadedScheduler::ScheduleOutput(TTaskNode* node, bool finished) {
+void TThreadedScheduler::ScheduleOutput(TTaskNode* node, EWake wake) {
     for (auto* edge : node->Outbound) {
         if (edge->Kind == ETaskEdgeKind::Dependency) {
             if (!edge->Dst->Task->TryNotifyDependency()) {
                 continue;
             }
-        } else if (!finished && !edge->Connection->Readable(edge->SrcLane, edge->DstLane)) {
+        } else if (wake != EWake::Event && !edge->Connection->Readable(edge->SrcLane, edge->DstLane)) {
             // The consumer has fetched all of this lane: the next push wakes it.
             continue;
         }
-        Schedule(edge->Dst);
+        Wake(edge->Dst, wake);
     }
 }
 
@@ -257,51 +263,54 @@ void TThreadedScheduler::Work() {
         Executed_.fetch_add(1, std::memory_order_relaxed);
         if (result == ETaskResult::NEED_DATA) {
             NeedData_.fetch_add(1, std::memory_order_relaxed);
-            auto reschedule = FinishRun(node);
+            auto reschedule = FinishRun(node) != ETaskState::Running;
             ScheduleInput(node);
             if (reschedule) {
                 Rescheduled_.fetch_add(1, std::memory_order_relaxed);
-                Schedule(node);
+                Wake(node, EWake::Neighbour);
             }
         } else if (result == ETaskResult::BLOCKED_OUTPUT) {
             BlockedOutput_.fetch_add(1, std::memory_order_relaxed);
-            auto reschedule = FinishRun(node);
-            ScheduleOutput(node, /*finished=*/false);
+            auto reschedule = FinishRun(node) != ETaskState::Running;
+            ScheduleOutput(node, EWake::Neighbour);
             if (reschedule) {
                 Rescheduled_.fetch_add(1, std::memory_order_relaxed);
-                Schedule(node);
+                Wake(node, EWake::Neighbour);
             }
         } else if (result == ETaskResult::WAITING) {
             Waiting_.fetch_add(1, std::memory_order_relaxed);
-            if (FinishRun(node, ETaskState::Waiting)) {
+            // A neighbour's wake during the run is dropped: the task waits for an event.
+            if (FinishRun(node, ETaskState::Waiting) == ETaskState::Notified) {
                 Rescheduled_.fetch_add(1, std::memory_order_relaxed);
-                Schedule(node);
+                Wake(node, EWake::Event);
             }
         } else if (result == ETaskResult::FINISHED) {
             Finished_.fetch_add(1, std::memory_order_relaxed);
             FinishNode(node);
-            ScheduleOutput(node, /*finished=*/true);
+            ScheduleOutput(node, EWake::Event);
         } else if (result == ETaskResult::OK) {
             Ok_.fetch_add(1, std::memory_order_relaxed);
             FinishRun(node);
-            Schedule(node);
-            ScheduleOutput(node, /*finished=*/false);
+            Wake(node, EWake::Neighbour);
+            ScheduleOutput(node, EWake::Neighbour);
         }
     }
 }
 
-bool TThreadedScheduler::FinishRun(TTaskNode* node, ETaskState nextState) {
+ETaskState TThreadedScheduler::FinishRun(TTaskNode* node, ETaskState nextState) {
     auto previous = node->State.exchange(nextState, std::memory_order_acq_rel);
-    assert(previous == ETaskState::Running || previous == ETaskState::Reschedule);
-    return previous == ETaskState::Reschedule;
+    assert(previous == ETaskState::Running || previous == ETaskState::Reschedule
+        || previous == ETaskState::Notified);
+    return previous;
 }
 
 void TThreadedScheduler::FinishNode(TTaskNode* node) {
     auto previous = node->State.exchange(ETaskState::Finished, std::memory_order_acq_rel);
-    assert(previous == ETaskState::Running || previous == ETaskState::Reschedule);
+    assert(previous == ETaskState::Running || previous == ETaskState::Reschedule
+        || previous == ETaskState::Notified);
     // Wake the roots on an abandoned producer's dependency edges, as its finish would.
     Retire(*node, [this](TTaskNode& abandoned) {
-        ScheduleOutput(&abandoned, /*finished=*/true);
+        ScheduleOutput(&abandoned, EWake::Event);
     });
     if (IsRoot(*node) && UnfinishedRoots_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
         // The last root is done: the graph's output is complete. Wake every worker

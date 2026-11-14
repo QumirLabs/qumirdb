@@ -97,7 +97,7 @@ normal processing on both targets.
 Every task exposes one scheduler method:
 
 ```text
-Execute() -> OK | NEED_DATA | BLOCKED_OUTPUT | FINISHED
+Execute() -> OK | NEED_DATA | BLOCKED_OUTPUT | FINISHED | WAITING
 ```
 
 The scheduler owns only the ready/reschedule protocol. The task owns the local
@@ -109,6 +109,7 @@ state machine and returns:
 | `NEED_DATA` | The task cannot proceed until an input produces or finishes. | Schedule upstream tasks. |
 | `BLOCKED_OUTPUT` | The task has output but the downstream queue is full. | Schedule the downstream tasks whose lane holds rows. |
 | `FINISHED` | The task is done and has signalled output finish if it has output. | Mark done and schedule downstream tasks. |
+| `WAITING` | The task waits for an event: rows or a confirm from another fragment, a spool append, or a producer's finish. | Park it: only the event schedules it again, not the data or demand of its neighbours. |
 
 ### Single-threaded One-to-one Subset
 

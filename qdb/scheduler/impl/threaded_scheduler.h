@@ -18,6 +18,7 @@ class IThreadedScheduler {
 public:
     virtual ~IThreadedScheduler() = default;
 
+    // An event from outside the graph: it also wakes a WAITING task.
     virtual void Schedule(TTaskNode* task) = 0;
 };
 
@@ -35,12 +36,17 @@ public:
     void Schedule(TTaskNode* node) override;
 
 private:
+    // Data or demand of a neighbour, or an event: an external wake or a producer's finish.
+    enum class EWake { Neighbour, Event };
+
+    void Wake(TTaskNode* node, EWake wake);
     TTaskNode* PopReady();
     void ScheduleInput(TTaskNode* node);
-    // Wakes the consumers of a finished node, else those with something to fetch from it.
-    void ScheduleOutput(TTaskNode* node, bool finished);
+    // An event (a finish) wakes every consumer, a neighbour's wake those with something to fetch.
+    void ScheduleOutput(TTaskNode* node, EWake wake);
     void Work();
-    bool FinishRun(TTaskNode* node, ETaskState nextState = ETaskState::Idle);
+    // Ends a run and returns the state it had: Reschedule or Notified asks for another run.
+    ETaskState FinishRun(TTaskNode* node, ETaskState nextState = ETaskState::Idle);
     void FinishNode(TTaskNode* node);
     void ResetStats();
 

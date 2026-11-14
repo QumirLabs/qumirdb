@@ -14,6 +14,7 @@ enum class ETaskResult {
     NEED_DATA = 1,
     BLOCKED_OUTPUT = 2,
     FINISHED = 3,
+    // Waits for an event: a wake from outside the graph or a producer's finish.
     WAITING = 4,
 };
 
@@ -21,9 +22,13 @@ enum class ETaskState {
     Idle = 0,
     Queued = 1,
     Running = 2,
+    // Woken by a neighbour while running.
     Reschedule = 3,
     Finished = 4,
+    // Returned WAITING; neighbours' data and demand do not wake it.
     Waiting = 5,
+    // Woken by an event while running.
+    Notified = 6,
 };
 
 class ITask {
