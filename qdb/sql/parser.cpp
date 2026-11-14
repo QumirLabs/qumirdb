@@ -1756,8 +1756,12 @@ TAstExprTask primary_expr(TParserContext& ctx) {
         auto unit = ctx.Stream.Next();
         if ((unit.Type == TToken::Identifier || unit.Type == TToken::Keyword)
             && IsIntervalUnit(unit.Name)) {
-            co_return i32_literal(loc, qdb_sql_interval(
-                AsStringView(std::to_string(token.Value.i64)), AsStringView(ToLowerStr(unit.Name))));
+            try {
+                co_return i32_literal(loc, qdb_sql_interval(
+                    AsStringView(std::to_string(token.Value.i64)), AsStringView(ToLowerStr(unit.Name))));
+            } catch (const std::exception& e) {
+                co_return Error(token, e.what());
+            }
         }
         ctx.Stream.Unget(unit);
         co_return std::make_shared<NQumir::NAst::TNumberExpr>(loc, token.Value.i64);
@@ -1808,7 +1812,11 @@ TAstExprTask primary_expr(TParserContext& ctx) {
         }
         // TODO: constant functions should be expanded by Qumir constant folding,
         // not special-cased in the SQL parser.
-        co_return i32_literal(loc, qdb_sql_interval(AsStringView(value.Name), AsStringView(unit.Name)));
+        try {
+            co_return i32_literal(loc, qdb_sql_interval(AsStringView(value.Name), AsStringView(unit.Name)));
+        } catch (const std::exception& e) {
+            co_return Error(value, e.what());
+        }
     }
 
     if (token.Type == TToken::Identifier) {

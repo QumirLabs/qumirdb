@@ -20,6 +20,7 @@
     "group_alias_new_name_control.sql": {"expect_error": false, "order": "unordered"},
     "group_qualified_key_control.sql": {"expect_error": false, "order": "unordered"},
     "in_subquery_distinct_two_columns.sql": {},
+    "interval_amount_out_of_range.sql": {},
     "internal_scope_alias_control.sql": {"expect_error": false, "order": "unordered"},
     "internal_scope_in_group_by.sql": {},
     "internal_scope_in_order_by.sql": {},

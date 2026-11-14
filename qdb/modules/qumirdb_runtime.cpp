@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <charconv>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -494,28 +495,38 @@ int32_t qdb_sql_date(qdb_string_view date) {
 }
 
 // year/month are approximate (365/30): the base date is not available here for
-// calendar-exact arithmetic.
+// calendar-exact arithmetic. Like PostgreSQL, the amount must be an integer in
+// the i32 range; the day count must fit i32 too.
 int32_t qdb_sql_interval(qdb_string_view amount, qdb_string_view unit) {
-    int n = 0;
-    bool neg = false;
-    for (int64_t i = 0; i < amount.Size; ++i) {
-        const char c = static_cast<char>(amount.Data[i]);
-        if (c == '-') {
-            neg = true;
-        } else if (c >= '0' && c <= '9') {
-            n = n * 10 + (c - '0');
-        }
+    std::string_view text(reinterpret_cast<const char*>(amount.Data),
+                          static_cast<size_t>(amount.Size));
+    while (!text.empty() && text.front() == ' ') {
+        text.remove_prefix(1);
     }
-    if (neg) {
-        n = -n;
+    while (!text.empty() && text.back() == ' ') {
+        text.remove_suffix(1);
+    }
+    if (text.size() > 1 && text.front() == '+' && text[1] >= '0' && text[1] <= '9') {
+        text.remove_prefix(1);
+    }
+    int32_t n = 0;
+    const auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), n);
+    if (ec == std::errc::result_out_of_range) {
+        throw std::overflow_error("interval field value out of range");
+    }
+    if (ec != std::errc() || end != text.data() + text.size()) {
+        throw std::invalid_argument("invalid input syntax for interval amount");
     }
     std::string_view u(reinterpret_cast<const char*>(unit.Data),
                        static_cast<size_t>(unit.Size));
     if (u == "year" || u == "years") {
-        return n * 365;
-    }
-    if (u == "month" || u == "months") {
-        return n * 30;
+        if (__builtin_mul_overflow(n, 365, &n)) {
+            throw std::overflow_error("interval is out of range");
+        }
+    } else if (u == "month" || u == "months") {
+        if (__builtin_mul_overflow(n, 30, &n)) {
+            throw std::overflow_error("interval is out of range");
+        }
     }
     return n;
 }
