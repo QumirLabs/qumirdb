@@ -1,0 +1,2 @@
+Error: invalid input syntax for type date: "2147483648-01-01" @ Line: 1, Byte: 13, Column: 13
+
