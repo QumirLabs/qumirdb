@@ -7,6 +7,9 @@ option(QDB_BUILD_SERVICE "Build QumirDB web service" OFF)
 option(QDB_BUILD_DAEMON "Build QumirDB daemon" OFF)
 option(QDB_BUILD_TESTS "Build QumirDB tests" OFF)
 option(QDB_USE_CCACHE "Compile through ccache when it is installed" ON)
+option(QDB_FUZZ "Build the libFuzzer targets in fuzz/ (clang only)" OFF)
+# ClusterFuzzLite passes one sanitizer per build in CFLAGS and sets this empty.
+set(QDB_FUZZ_SANITIZERS "address,undefined" CACHE STRING "Sanitizers of a QDB_FUZZ build")
 # Static LLVM archives add ~50 MB to every binary linking the codegen; the shared
 # libLLVM trades that for a runtime dependency on the LLVM package.
 option(QDB_LLVM_LINK_SHARED "Link the shared libLLVM instead of static LLVM archives" OFF)
@@ -60,6 +63,13 @@ else()
     message(STATUS "ccache: disabled")
 endif()
 
+# Coverage feedback and sanitizers instrument the engine and Qumir, not only the targets.
+if(QDB_FUZZ AND QDB_FUZZ_SANITIZERS)
+    add_compile_options(-fsanitize=fuzzer-no-link,${QDB_FUZZ_SANITIZERS}
+        -fno-sanitize-recover=all -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=${QDB_FUZZ_SANITIZERS})
+endif()
+
 add_subdirectory(externals)
 add_subdirectory(qdb)
 if(QDB_BUILD_DAEMON)
@@ -68,6 +78,9 @@ endif()
 add_subdirectory(bin)
 if(QDB_BUILD_TESTS)
     add_subdirectory(test)
+endif()
+if(QDB_FUZZ)
+    add_subdirectory(fuzz)
 endif()
 if(QDB_BUILD_SERVICE)
     add_subdirectory(service)

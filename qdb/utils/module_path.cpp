@@ -49,6 +49,8 @@ TRoots FindRoots() {
         for (const auto& candidate : {
             *dir / ".." / "modules",
             *dir / ".." / "share" / "qumirdb" / "modules",
+            // A self-contained bundle, such as the fuzz targets of ClusterFuzzLite.
+            *dir / "modules",
         }) {
             if (fs::is_directory(candidate, ec)) {
                 auto normalized = candidate.lexically_normal();
