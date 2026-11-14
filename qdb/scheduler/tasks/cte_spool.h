@@ -1,6 +1,7 @@
 #pragma once
 
 #include <qdb/io/io.h>
+#include <qdb/io/rowset_ops.h>
 #include <qdb/scheduler/port.h>
 #include <qdb/scheduler/task.h>
 
@@ -25,7 +26,7 @@ struct TSourceCode;
 // and read concurrently. Writers, readers and their views share ownership.
 class TCteSpool {
 public:
-    explicit TCteSpool(size_t segments);
+    explicit TCteSpool(size_t segments, std::vector<TValueLayout> rowLayouts = {});
     ~TCteSpool();
 
     TCteSpool(const TCteSpool&) = delete;
@@ -35,6 +36,7 @@ public:
     void Append(size_t segment, TRowSet rowSet);
     void Seal();
     size_t SegmentCount() const;
+    std::span<const TValueLayout> RowLayouts() const;
     // Complete once the segment's writer has finished.
     std::span<const TRowSet> Segment(size_t segment) const;
 
@@ -44,6 +46,7 @@ public:
 
 private:
     std::vector<std::vector<TRowSet>> Segments_;
+    std::vector<TValueLayout> RowLayouts_;
     // Exclusive end of each segment in the batch numbering.
     std::vector<size_t> SegmentEnds_;
 };
@@ -154,10 +157,14 @@ public:
     // Only for a task built with empty code, before it is scheduled.
     void BindCode(std::shared_ptr<const TSinkCode> code, std::shared_ptr<void> state);
     const std::shared_ptr<const TSinkCode>& Code() const;
+    // Of the rows it sends; valid while the task lives.
+    std::span<const TValueLayout> RowLayouts() const;
 
 private:
     std::shared_ptr<const TCteSpool> Spool_;
     std::vector<uint32_t> Segments_;
+    // A copy: the spool goes once everything is sent.
+    std::vector<TValueLayout> RowLayouts_;
     std::vector<TInputPort> Inputs_;
     std::shared_ptr<const TSinkCode> Code_;
     std::shared_ptr<void> State_;

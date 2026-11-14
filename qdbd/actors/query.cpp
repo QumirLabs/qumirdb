@@ -214,13 +214,18 @@ struct TBaseBehavior {
         for (const auto& cut : split.Cuts()) {
             const auto sink = ids.at(cut.Sink);
             const auto source = ids.at(cut.Source);
-            const bool rowset = cut.Kind == NScheduler::ETaskEdgeKind::Rowset;
+            auto sinkKind = ERemoteEndpointKind::FilterSink;
+            auto sourceKind = ERemoteEndpointKind::FilterSource;
+            if (cut.Kind == NScheduler::ETaskEdgeKind::Rowset) {
+                const bool cte = std::holds_alternative<NScheduler::TCteSinkNode>(
+                    lowered.NodeSpecs[cut.Sink->ExecutionSlot]->Body);
+                sinkKind = cte ? ERemoteEndpointKind::CteSink : ERemoteEndpointKind::Sink;
+                sourceKind = cte ? ERemoteEndpointKind::CteSource : ERemoteEndpointKind::Source;
+            }
             messages[cut.SinkColor].Endpoints.push_back({
-                .Id = sink, .Kind = rowset ? ERemoteEndpointKind::Sink : ERemoteEndpointKind::FilterSink,
-                .PeerActor = actors[cut.SourceColor], .PeerTaskId = source});
+                .Id = sink, .Kind = sinkKind, .PeerActor = actors[cut.SourceColor], .PeerTaskId = source});
             messages[cut.SourceColor].Endpoints.push_back({
-                .Id = source, .Kind = rowset ? ERemoteEndpointKind::Source : ERemoteEndpointKind::FilterSource,
-                .PeerActor = actors[cut.SinkColor], .PeerTaskId = sink});
+                .Id = source, .Kind = sourceKind, .PeerActor = actors[cut.SinkColor], .PeerTaskId = sink});
         }
         return messages;
     }

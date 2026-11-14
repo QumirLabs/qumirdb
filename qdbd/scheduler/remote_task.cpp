@@ -244,6 +244,12 @@ std::optional<TRemoteTask> RemoteTask(const ITask* task) {
     if (const auto* sink = dynamic_cast<const TRuntimeFilterSinkTask*>(task)) {
         return TRemoteTask{ERemoteEndpointKind::FilterSink, sink->Code() != nullptr};
     }
+    if (const auto* source = dynamic_cast<const TCteSourceTask*>(task)) {
+        return TRemoteTask{ERemoteEndpointKind::CteSource, source->Code() != nullptr};
+    }
+    if (const auto* sink = dynamic_cast<const TCteSinkTask*>(task)) {
+        return TRemoteTask{ERemoteEndpointKind::CteSink, sink->Code() != nullptr};
+    }
     return std::nullopt;
 }
 
@@ -257,6 +263,10 @@ std::string KindName(ERemoteEndpointKind kind) {
             return "runtime filter source";
         case ERemoteEndpointKind::FilterSink:
             return "runtime filter sink";
+        case ERemoteEndpointKind::CteSource:
+            return "cte source";
+        case ERemoteEndpointKind::CteSink:
+            return "cte sink";
     }
     return "unknown";
 }
