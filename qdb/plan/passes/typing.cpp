@@ -559,17 +559,17 @@ TTypePtr CommonKeyType(const TTypePtr& left, const TTypePtr& right) {
     return std::make_shared<TDecimal>(integerDigits + scale, scale);
 }
 
-} // namespace
-
-void CoerceJoinKeys(TOperatorPtr& root) {
+// `aliasCounter` spans the whole plan: the types of the joins below are stale
+// until re-annotation, so an alias cannot be checked against their schemas.
+void CoerceJoinKeys(TOperatorPtr& root, size_t& aliasCounter) {
     for (auto& input : root->MutableInputs()) {
-        CoerceJoinKeys(input);
+        CoerceJoinKeys(input, aliasCounter);
     }
     auto join = TMaybeOp<TJoinOperator>(root);
     if (!join) {
         return;
     }
-    size_t counter = 0;
+    bool coerced = false;
     // A semi or anti join outputs one input as is, so nothing above it drops a key
     // alias added to that input (INTERSECT, EXCEPT); project the original columns back.
     std::vector<TProjectionSpec> restored;
@@ -599,12 +599,13 @@ void CoerceJoinKeys(TOperatorPtr& root) {
             auto& side = isLeft ? join.Cast()->MutableLeft() : join.Cast()->MutableRight();
             const auto target = IsNullableType(sideType)
                 ? std::static_pointer_cast<TType>(std::make_shared<TNullable>(common)) : common;
-            const auto alias = "__join_key_" + std::to_string(counter++) + "__";
+            const auto alias = "__join_key_" + std::to_string(aliasCounter++) + "__";
+            coerced = true;
             side = AddCastedKey(side, column, target, alias);
             column = alias;
         }
     }
-    if (counter == 0) {
+    if (!coerced) {
         return;
     }
     switch (join.Cast()->JoinType()) {
@@ -617,6 +618,13 @@ void CoerceJoinKeys(TOperatorPtr& root) {
         default:
             break;
     }
+}
+
+} // namespace
+
+void CoerceJoinKeys(TOperatorPtr& root) {
+    size_t aliasCounter = 0;
+    CoerceJoinKeys(root, aliasCounter);
 }
 
 } // namespace NQdb

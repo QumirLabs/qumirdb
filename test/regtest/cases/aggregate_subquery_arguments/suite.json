@@ -3,6 +3,7 @@
   "fixtures": {
     "t": {"json": "tables/t.json", "parquet": {"row_group_rows": 2}},
     "s": {"json": "tables/s.json", "parquet": {"row_group_rows": 2}},
+    "s32": {"json": "tables/s32.json", "parquet": {"row_group_rows": 2}},
     "empty": {"json": "tables/empty.json", "parquet": {"row_group_rows": 2}}
   },
   "tables": {"t": "t", "s": "s"},
@@ -23,6 +24,7 @@
     "count_distinct_subquery.sql": {"order": "unordered"},
     "inside_and_outside.sql": {"order": "unordered"},
     "where_and_argument.sql": {"order": "unordered"},
+    "where_integer_key.sql": {"tables": {"t": "t", "s": "s32"}, "order": "unordered"},
     "where_narrow_key.sql": {"order": "unordered"},
     "window_argument_aggregate.sql": {"order": "unordered"},
     "window_order_aggregate.sql": {"order": "unordered"},
