@@ -66,6 +66,39 @@ See [logical planning](docs/arch/logical_plan_build.md),
 [kernel compilation](docs/arch/kernel-compilation-phases.md), and
 [scheduled execution](docs/arch/scheduler_runtime.md) for the design.
 
+## Distributed execution
+
+`qdbd` ([qdbd/](qdbd/)) is the QumirDB daemon: run one per node. The node
+that gets a query plans it, compiles the kernels once, splits the task graph
+into one fragment per node, and sends the fragments and the compiled code to
+the nodes. Every edge between two fragments becomes a sink/source pair, and
+rows stream between the nodes through it.
+
+```mermaid
+flowchart LR
+    SQL["POST /api/run"] --> Query["Query actor: plan, lower, compile"]
+    Query --> Part["Partitioner: one fragment per node"]
+    Part -->|fragment + kernel image| C1["Compute actor, node 1"]
+    Part -->|fragment + kernel image| C2["Compute actor, node 2"]
+    C1 <-->|"sink/source pairs"| C2
+    C1 --> Query
+```
+
+To try it on one machine, build `qdbd` (see [docs/building.md](docs/building.md))
+and point `DATA_DIR` at a directory with `<table>.parquet` files:
+
+```bash
+DATA_DIR=/path/to/parquet benchmark/cluster/cluster.sh start 2 4   # 2 nodes x 4 threads
+curl --data-binary 'SELECT count(*) FROM lineitem' http://127.0.0.1:8101/api/run
+benchmark/cluster/cluster.sh stop
+```
+
+Node `i` serves HTTP on port `8100 + i` and talks to other nodes on `7100 + i`.
+`QDBD_BIN` picks the binary, `QDBD_ARGS` adds `qdbd` flags, and `HOSTS` runs
+the nodes on several machines. The TPC-H stand
+[run_tpch_cluster.sh](benchmark/cluster/run_tpch_cluster.sh) runs the 22 queries
+on a cluster and compares the results with a single-process run.
+
 ## Project principles
 
 1. **A database at the forefront of the field.** QumirDB draws on modern
@@ -253,7 +286,8 @@ Design notes live in [docs/arch/](docs/arch/README.md).
 
 - `qdb/`: engine library. SQL/parser, logical plan, passes, kernel
   generation, execution, scheduler, parquet IO.
-- `bin/`: the `qdb` command line tool.
+- `bin/`: the `qdb` command line tool and the `qdbd` daemon.
+- `qdbd/`: distributed execution: actors, graph partitioner, remote tasks.
 - `service/`: web server and static browser workbench.
 - `test/`: C++ unit and regression tests.
 - `benchmark/`: TPC-H, TPC-DS, and ClickBench query packs and runners.
