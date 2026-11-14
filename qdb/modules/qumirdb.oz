@@ -1408,7 +1408,7 @@
   (fun qdb_date_add_months ((var d i32) (var n i32)) -> i32
     (block (return (call qdb_date_add_months_i64 d (cast n i64)))))
   (fun qdb_date_sub_months ((var d i32) (var n i32)) -> i32
-    (block (return (call qdb_date_add_months_i64 d (- (: 0 i64) (cast n i64))))))
+    (block (return (call qdb_date_add_months_i64 d (- 0 (cast n i64))))))
   (fun qdb_date_add ((var d DATE) (var n i32)) -> DATE (attrs (operator "+"))
     (block (return (bitcast (+ (bitcast d i32) n) DATE))))
   (fun qdb_date_sub ((var d DATE) (var n i32)) -> DATE (attrs (operator "-"))

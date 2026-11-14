@@ -183,7 +183,7 @@ constexpr const char* CacheSchemaVersion = "v1";
 // row_group_interval.oz gains f32 operand intervals.
 // qumirdb.oz gains the sorted-table lookups of long IN lists (qdb_in_sorted_*).
 // qdb_decimal_from_f32 returns right after an overflow, which returns while row errors are deferred.
-constexpr const char* KernelLibVersion = "68";
+constexpr const char* KernelLibVersion = "69";
 } // namespace
 
 NQumir::NCodeGen::TLlvmRunner::TLinkedModule CompileKernelAstCached(
