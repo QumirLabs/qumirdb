@@ -1,0 +1,18 @@
+{
+  "schema": "<struct (id i32) (k_in_or_id <named Nullable [bool]>) (k_not_in_null <named Nullable [bool]>) (s_in <named Nullable [bool]>) (p_in_null <named Nullable [bool]>) (p_not_in <named Nullable [bool]>) (d_in <named Nullable [bool]>)>",
+  "rows": [
+    [1, true, false, true, true, false, true],
+    [2, false, null, false, null, true, true],
+    [3, null, null, null, null, null, null],
+    [4, true, false, true, true, false, true],
+    [5, true, false, true, true, false, false],
+    [6, false, null, false, true, false, false],
+    [7, true, false, false, null, true, true],
+    [8, false, null, true, null, true, false],
+    [9, false, null, false, null, true, false],
+    [10, false, null, true, true, false, true],
+    [11, true, false, null, true, false, true],
+    [12, null, null, true, null, null, true],
+    [13, true, null, false, null, true, true]
+  ]
+}

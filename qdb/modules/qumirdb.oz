@@ -309,6 +309,68 @@
     (attrs inline)
     (block (return (cast (struct ((Data data) (Size size))) StringView))))
 
+  ;; x IN a long list of constants: a binary search in the sorted table of the
+  ;; distinct values that ExpandInList writes into a string literal. The table
+  ;; holds n little-endian i64 (an f64 by its bits); a literal is not aligned,
+  ;; so a value is loaded as a vector of bytes.
+  (fun qdb_in_table_i64 ((var table <ptr u8>) (var i i64)) -> i64
+    (attrs inline)
+    (block
+      (var bytes = (cast (+ (cast table i64) (* i 8)) <ptr <vec u8 8>>))
+      (return (bitcast (index bytes 0) i64))))
+
+  ;; The search narrows to the last value <= x without a branch on the data,
+  ;; then compares it with x.
+  (fun qdb_in_sorted_i64 ((var x i64) (var table <ptr u8>) (var n i64)) -> bool
+    (block
+      (if (== n 0) (block (return #f)))
+      (var at = 0)
+      (var len = n)
+      (while (> len 1)
+        (block
+          (var half = (>> len 1))
+          (if (<= (call qdb_in_table_i64 table (+ at half)) x) (block (= at (+ at half))))
+          (= len (- len half))))
+      (return (== (call qdb_in_table_i64 table at) x))))
+
+  ;; As `==`: NaN equals no value, -0.0 equals 0.0 (the table holds one of them).
+  (fun qdb_in_sorted_f64 ((var x f64) (var table <ptr u8>) (var n i64)) -> bool
+    (block
+      (if (== n 0) (block (return #f)))
+      (var at = 0)
+      (var len = n)
+      (while (> len 1)
+        (block
+          (var half = (>> len 1))
+          (if (<= (bitcast (call qdb_in_table_i64 table (+ at half)) f64) x)
+            (block (= at (+ at half))))
+          (= len (- len half))))
+      (return (== (bitcast (call qdb_in_table_i64 table at) f64) x))))
+
+  ;; A string table holds n + 1 offsets from its start, then the bytes of the
+  ;; strings in the order of qdb_filter_string_compare.
+  (fun qdb_in_table_string_order ((var table <ptr u8>) (var i i64) (var x StringView)) -> i64
+    (attrs inline)
+    (block
+      (var start = (call qdb_in_table_i64 table i))
+      (return (call qdb_filter_string_compare
+                (cast (+ (cast table i64) start) <ptr u8>)
+                (- (call qdb_in_table_i64 table (+ i 1)) start)
+                (field x Data) (field x Size)))))
+
+  (fun qdb_in_sorted_string ((var x StringView) (var table <ptr u8>) (var n i64)) -> bool
+    (block
+      (if (== n 0) (block (return #f)))
+      (var at = 0)
+      (var len = n)
+      (while (> len 1)
+        (block
+          (var half = (>> len 1))
+          (if (<= (call qdb_in_table_string_order table (+ at half) x) 0)
+            (block (= at (+ at half))))
+          (= len (- len half))))
+      (return (== (call qdb_in_table_string_order table at x) 0))))
+
   (fun qdb_substring ((var str StringView) (var start i32) (var length i32)) -> StringView
        (attrs extern) (block))
 

@@ -1,0 +1,3 @@
+sort [id asc]
+└─ project (id, k_in_or_id, k_not_in_null, s_in, p_in_null, p_not_in, d_in) (rows≈13 cost≈650)
+   └─ source l AS l (rows≈13 cost≈520)

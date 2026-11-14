@@ -5,9 +5,10 @@
     "finite": {"json": "tables/c.json", "parquet": {"row_group_rows": 3}},
     "extreme": {"json": "tables/x.json", "parquet": {"row_group_rows": 3}},
     "sweep": {"json": "tables/s.json", "parquet": {"row_group_rows": 7}},
-    "wide": {"json": "tables/w.json", "parquet": {"row_group_rows": 3}}
+    "wide": {"json": "tables/w.json", "parquet": {"row_group_rows": 3}},
+    "lists": {"json": "tables/l.json", "parquet": {"row_group_rows": 4}}
   },
-  "tables": {"t": "values", "c": "finite", "x": "extreme", "s": "sweep", "w": "wide"},
+  "tables": {"t": "values", "c": "finite", "x": "extreme", "s": "sweep", "w": "wide", "l": "lists"},
   "variants": ["single", "threaded", "js"],
   "cases": {
     "types.sql": {"order": "ordered"},
@@ -16,6 +17,8 @@
     "compare.sql": {"order": "ordered"},
     "in_list.sql": {"order": "ordered"},
     "in_list_long.sql": {"order": "ordered"},
+    "in_list_table.sql": {"order": "ordered"},
+    "in_list_table_filter.sql": {"order": "ordered"},
     "branches.sql": {"order": "ordered"},
     "group.sql": {"order": "ordered"},
     "distinct.sql": {"order": "ordered"},

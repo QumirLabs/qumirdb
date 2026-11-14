@@ -16,6 +16,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
 
 using namespace NQdb::NKernel;
 using namespace NQumir::NAst;
@@ -260,6 +261,29 @@ TEST(ProjectType, InListExpansionUsesOneNullableLhsGuard) {
     EXPECT_EQ(CountOccurrences(printed, "qdb_sql_null"), 1u);
     EXPECT_EQ(CountOccurrences(printed, "(field __nx0 Valid)"), 1u);
     EXPECT_EQ(CountOccurrences(printed, "(||"), 2u);
+}
+
+// The constants of a long list are one lookup whatever their number, so the kernel
+// compiles in constant time; a NULL and a column item stay beside it.
+TEST(ProjectType, LongInListIsOneTableLookup) {
+    auto list = [](int constants) {
+        std::string src = "(call qdb_in_list a";
+        for (int i = 0; i < constants; ++i) {
+            src += " " + std::to_string(i * 3);
+        }
+        return src + " (call qdb_sql_null) b)";
+    };
+    auto [expr, type] = ExpandNullable(Parse(list(100000)), NullableSchema());
+    ASSERT_TRUE(IsNullable(type));
+    EXPECT_TRUE(IsBool(NullableInner(type)));
+    std::string printed = NQumir::NAst::NCore::PrintAst(expr);
+    EXPECT_EQ(CountOccurrences(printed, "qdb_in_sorted_i64"), 1u);
+    EXPECT_EQ(CountOccurrences(printed, "(=="), 1u);
+
+    std::tie(expr, type) = ExpandNullable(Parse(list(15)), NullableSchema());
+    printed = NQumir::NAst::NCore::PrintAst(expr);
+    EXPECT_EQ(CountOccurrences(printed, "qdb_in_sorted_i64"), 0u);
+    EXPECT_EQ(CountOccurrences(printed, "(=="), 16u);
 }
 
 TEST(ProjectType, DecimalArithmeticAnnotates) {
