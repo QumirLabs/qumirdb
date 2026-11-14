@@ -2,6 +2,7 @@ import os
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 import urllib.request
@@ -62,6 +63,46 @@ class TestQdbdCli(unittest.TestCase):
             for p in procs:
                 p.kill()
                 p.wait()
+
+    def test_jit_cache_dir_is_filled_by_the_first_query_and_hit_by_the_second(self):
+        ports = [free_port() for _ in range(4)]
+        nodes = [f"127.0.0.1:{ports[0]}:1", f"127.0.0.1:{ports[1]}:2"]
+        sql = "SELECT id % 7 AS k, SUM(d15) AS total FROM decimals GROUP BY id % 7"
+        procs = []
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = os.path.join(tmp, "missing", "jit")  # created by the daemon
+            try:
+                for node_id, http_port in ((1, ports[2]), (2, ports[3])):
+                    args = [QDBD, "--node", nodes[0], "--node", nodes[1], "--node-id", str(node_id),
+                            "--leader-id", "1", "--http-port", str(http_port), "--data", TABLES,
+                            f"--jit:cache_dir={cache}"]
+                    procs.append(subprocess.Popen(args, stderr=subprocess.DEVNULL))
+                for port in ports:
+                    self.assertTrue(listens(port))
+
+                def files():
+                    return {os.path.join(d, f): os.stat(os.path.join(d, f)).st_mtime_ns
+                            for d, _, names in os.walk(cache) for f in names}
+
+                bodies = []
+                snapshots = []
+                for _ in range(2):
+                    status, body = None, ""
+                    for _ in range(20):  # the compute actors may still be joining
+                        status, body = query(ports[2], sql)
+                        if status != 503:
+                            break
+                        time.sleep(0.25)
+                    self.assertEqual(status, 200, body)
+                    bodies.append(sorted(body.splitlines()))
+                    snapshots.append(files())
+                self.assertTrue(snapshots[0], "the first query must write cache files")
+                self.assertEqual(snapshots[0], snapshots[1], "the second query must only hit the cache")
+                self.assertEqual(bodies[0], bodies[1])
+            finally:
+                for p in procs:
+                    p.kill()
+                    p.wait()
 
     def test_queries_do_not_share_pruned_table_sources(self):
         ports = [free_port() for _ in range(4)]
