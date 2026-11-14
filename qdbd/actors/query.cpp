@@ -193,7 +193,7 @@ struct TBaseBehavior {
         const auto fragments = NScheduler::ExtractFragmentSpecs(lowered);
         State->Timing.KernelBuild += Seconds(buildStart);
         const auto jitStart = TClock::now();
-        const auto image = SerializeKernelImage(CompileKernelImage(lowered.Kernels));
+        const auto image = SerializeKernelImage(CompileKernelImage(lowered.Kernels, State->Settings.Jit.CacheDir));
         State->Timing.JitLLVM = Seconds(jitStart);
         std::vector<TTaskGraphMessage> messages(fragments.size());
         for (size_t i = 0; i < fragments.size(); ++i) {

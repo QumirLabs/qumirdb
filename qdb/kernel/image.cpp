@@ -8,6 +8,8 @@
 
 #include <cstdint>
 #include <cstring>
+#include <fstream>
+#include <sstream>
 #include <stdexcept>
 #include <unordered_map>
 
@@ -67,9 +69,20 @@ private:
     size_t Pos_ = 0;
 };
 
+std::string ReadFile(const std::string& path)
+{
+    std::ifstream in(path, std::ios::binary);
+    std::ostringstream bytes;
+    bytes << in.rdbuf();
+    if (!in && !in.eof()) {
+        throw std::runtime_error("cannot read cached object " + path);
+    }
+    return bytes.str();
+}
+
 } // namespace
 
-TKernelImage CompileKernelImage(std::span<TGeneratedKernel> kernels)
+TKernelImage CompileKernelImage(std::span<TGeneratedKernel> kernels, const std::string& cacheDir)
 {
     // TODO: check that the slots are not bound yet.
     auto dedup = DeduplicateKernels(kernels, [](const TGeneratedKernel&) {
@@ -81,13 +94,27 @@ TKernelImage CompileKernelImage(std::span<TGeneratedKernel> kernels)
     options.NativeCode = true;
     NQumir::TLLVMRunner runner(std::move(options));
     std::string error;
-    auto object = CompileKernelAstToObject(runner, fused.Program, fused.Entrypoints, &error);
-    if (!object) {
-        throw std::runtime_error("kernel image compilation failed: " + error);
-    }
-
     TKernelImage image;
-    image.Object = std::move(*object);
+    if (cacheDir.empty()) {
+        auto object = CompileKernelAstToObject(runner, fused.Program, fused.Entrypoints, &error);
+        if (!object) {
+            throw std::runtime_error("kernel image compilation failed: " + error);
+        }
+        image.Object = std::move(*object);
+    } else {
+        auto compiled = CompileKernelAstToObjectsCached(
+            runner, fused.Program, fused.Entrypoints, cacheDir, &error);
+        if (!compiled) {
+            throw std::runtime_error("kernel image compilation failed: " + error);
+        }
+        for (const auto& path : compiled->ObjectFiles) {
+            image.Dependencies.push_back(ReadFile(path));
+        }
+        for (auto& blob : compiled->ObjectBlobs) {
+            image.Dependencies.push_back(std::move(blob));
+        }
+        image.Object = std::move(compiled->KernelObject);
+    }
     for (const auto& [kernel, uniqueIndex] : dedup.Bindings) {
         (void)kernel;
         image.Entrypoints.push_back(fused.UniqueEntrypoints[uniqueIndex]);
@@ -108,7 +135,9 @@ void LoadKernelImage(const TKernelImage& image, std::span<const std::shared_ptr<
     }
     NQumir::NCodeGen::TLlvmRunner linker({.EnablePerfJitEventListener = true});
     std::string error;
-    auto linked = linker.LinkAndLookup({}, {image.Object}, nullptr, true, names, &error);
+    auto blobs = image.Dependencies;
+    blobs.push_back(image.Object);
+    auto linked = linker.LinkAndLookup({}, blobs, nullptr, true, names, &error);
     if (linked.Entries.empty() && !names.empty()) {
         throw std::runtime_error("kernel image link failed: " + error);
     }
@@ -127,6 +156,10 @@ std::string SerializeKernelImage(const TKernelImage& image)
 {
     std::string out;
     WriteString(out, image.Object);
+    WriteU64(out, image.Dependencies.size());
+    for (const auto& dependency : image.Dependencies) {
+        WriteString(out, dependency);
+    }
     WriteU64(out, image.Entrypoints.size());
     for (const auto& names : image.Entrypoints) {
         WriteU64(out, names.size());
@@ -142,6 +175,9 @@ TKernelImage DeserializeKernelImage(std::string_view bytes)
     TReader reader(bytes);
     TKernelImage image;
     image.Object = reader.ReadString();
+    for (uint64_t dependencies = reader.ReadU64(); dependencies > 0; --dependencies) {
+        image.Dependencies.push_back(reader.ReadString());
+    }
     for (uint64_t kernels = reader.ReadU64(); kernels > 0; --kernels) {
         auto& names = image.Entrypoints.emplace_back();
         for (uint64_t n = reader.ReadU64(); n > 0; --n) {
