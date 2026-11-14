@@ -15,6 +15,7 @@
     "arithmetic.sql": {"order": "ordered"},
     "compare.sql": {"order": "ordered"},
     "in_list.sql": {"order": "ordered"},
+    "in_list_long.sql": {"order": "ordered"},
     "branches.sql": {"order": "ordered"},
     "group.sql": {"order": "ordered"},
     "distinct.sql": {"order": "ordered"},

@@ -1,0 +1,15 @@
+{
+  "schema": "<struct (id i32) (hit <named Nullable [bool]>)>",
+  "rows": [
+    [1, true],
+    [2, null],
+    [3, true],
+    [4, true],
+    [5, null],
+    [6, null],
+    [7, true],
+    [8, true],
+    [9, true],
+    [10, null]
+  ]
+}

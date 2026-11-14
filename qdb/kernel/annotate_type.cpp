@@ -1412,8 +1412,8 @@ std::pair<TExprPtr, TTypePtr> ExpandInList(const TCallExpr& node,
         ? FieldOf(lhsRef, "Value", loc)
         : lhsRef;
 
-    TExprPtr result;
-    TTypePtr resultType;
+    std::vector<std::pair<TExprPtr, TTypePtr>> terms;
+    terms.reserve(node.Args.size() - 1);
     for (size_t i = 1; i < node.Args.size(); ++i) {
         TExprPtr item = node.Args[i];
         TTypePtr itemType = Expand(item, inputType, counter);
@@ -1435,18 +1435,31 @@ std::pair<TExprPtr, TTypePtr> ExpandInList(const TCallExpr& node,
             equalType = boolType;
         }
 
-        if (!result) {
-            result = std::move(equal);
-            resultType = equalType;
-        } else if (IsNullableType(resultType) || IsNullableType(equalType)) {
-            result = Build3VL(
-                /*isAnd=*/false, result, resultType, equal, equalType, counter, loc);
-            resultType = nullableBool;
-        } else {
-            result = Bin("||", std::move(result), std::move(equal), loc);
-            resultType = boolType;
-        }
+        terms.emplace_back(std::move(equal), equalType);
     }
+
+    // OR the comparisons as a balanced tree: a left-deep chain is as deep as the
+    // list and overflows the stack in the recursive passes. Leaf order is kept.
+    while (terms.size() > 1) {
+        std::vector<std::pair<TExprPtr, TTypePtr>> next;
+        next.reserve((terms.size() + 1) / 2);
+        for (size_t i = 0; i + 1 < terms.size(); i += 2) {
+            auto& [l, lt] = terms[i];
+            auto& [r, rt] = terms[i + 1];
+            if (IsNullableType(lt) || IsNullableType(rt)) {
+                next.emplace_back(Build3VL(/*isAnd=*/false, l, lt, r, rt, counter, loc),
+                    nullableBool);
+            } else {
+                next.emplace_back(Bin("||", std::move(l), std::move(r), loc), boolType);
+            }
+        }
+        if (terms.size() % 2 == 1) {
+            next.push_back(std::move(terms.back()));
+        }
+        terms = std::move(next);
+    }
+    TExprPtr result = std::move(terms.front().first);
+    TTypePtr resultType = terms.front().second;
 
     if (IsNullableType(lhsType)) {
         result = std::make_shared<TIfExpr>(
