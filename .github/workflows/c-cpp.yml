@@ -48,7 +48,7 @@ jobs:
         # A slow mirror can stall the download for tens of minutes. Each retry
         # keeps the packages that were already fetched.
         for attempt in 1 2 3; do
-          sudo timeout 300 apt-get install -y ccache cmake ninja-build pkg-config llvm-22-dev lld libgtest-dev libarrow-dev libparquet-dev libreadline-dev g++-16 && exit 0
+          sudo timeout 300 apt-get install -y ccache cmake ninja-build pkg-config llvm-22-dev lld libgtest-dev libarrow-dev libparquet-dev libreadline-dev liburing-dev g++-16 && exit 0
           sudo dpkg --configure -a || true
         done
         exit 1
@@ -65,6 +65,8 @@ jobs:
           max_size=2G
     - name: Configure
       run: |
+        # coroio builds its io_uring backend only if pkg-config finds liburing.
+        pkg-config --exists liburing
         cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
           -DLLVM_DIR="$(llvm-config-22 --cmakedir)" \
           -DCMAKE_PREFIX_PATH="$(llvm-config-22 --prefix)" \

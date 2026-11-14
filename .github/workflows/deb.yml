@@ -46,6 +46,8 @@ jobs:
 
     - name: configure
       run: |
+        # coroio enables io_uring only if pkg-config finds liburing; fail instead of building without it.
+        pkg-config --exists liburing
         cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
           -DCMAKE_INSTALL_PREFIX=/usr \
           -DLLVM_DIR="$(llvm-config-22 --cmakedir)" \
@@ -71,6 +73,8 @@ jobs:
           dpkg-deb --info "$deb"
           dpkg-deb --contents "$deb"
         done
+        # dpkg-shlibdeps must have added the runtime library to the daemon.
+        dpkg-deb --field qumirdb-daemon_*.deb Depends | grep -q liburing
 
     - uses: actions/upload-artifact@v4
       with:
