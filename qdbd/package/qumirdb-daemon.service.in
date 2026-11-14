@@ -10,6 +10,7 @@ ExecStart=@CMAKE_INSTALL_PREFIX@/bin/qdbd $QDBD_ARGS
 User=qumirdb-daemon
 Group=qumirdb-daemon
 Restart=on-failure
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target

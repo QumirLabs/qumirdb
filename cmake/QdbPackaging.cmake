@@ -39,8 +39,9 @@ if(QDB_BUILD_DAEMON)
     list(APPEND CPACK_COMPONENTS_ALL daemon)
     set(CPACK_DEBIAN_DAEMON_PACKAGE_NAME "qumirdb-daemon")
     set(CPACK_DEBIAN_DAEMON_PACKAGE_SECTION "database")
-    # qdbd compiles kernels from the oz modules installed by the engine package.
-    set(CPACK_DEBIAN_DAEMON_PACKAGE_DEPENDS "qumirdb (>= ${PROJECT_VERSION}), adduser")
+    # qdbd and the oz modules it compiles come from the same build; both packages
+    # are released together, so a rebuild bumps both.
+    set(CPACK_DEBIAN_DAEMON_PACKAGE_DEPENDS "qumirdb (= ${CPACK_PACKAGE_VERSION}-${CPACK_DEBIAN_PACKAGE_RELEASE}), adduser")
     set(CPACK_DEBIAN_DAEMON_PACKAGE_CONTROL_EXTRA
         "${CMAKE_SOURCE_DIR}/qdbd/package/postinst;${CMAKE_SOURCE_DIR}/qdbd/package/conffiles")
     set(CPACK_COMPONENT_DAEMON_DESCRIPTION
