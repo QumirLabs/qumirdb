@@ -1486,7 +1486,7 @@ function createQdbEnv(getMemory, holder) {
   // year/month are approximate (365/30). amount and unit are StringViews.
   const sqlInterval = (amount, unit) => {
     const text = new TextDecoder().decode(svBytes(amount)).trim();
-    if (!/^[+-]?[0-9]+$/.test(text)) {
+    if (!/^-?[0-9]+$/.test(text)) {
       throw new Error('invalid input syntax for interval amount');
     }
     let n = Number(text);

@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <charconv>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -505,41 +506,26 @@ int32_t qdb_sql_interval(qdb_string_view amount, qdb_string_view unit) {
     while (!text.empty() && text.back() == ' ') {
         text.remove_suffix(1);
     }
-    bool neg = false;
-    if (!text.empty() && (text.front() == '-' || text.front() == '+')) {
-        neg = text.front() == '-';
-        text.remove_prefix(1);
-    }
-    if (text.empty()) {
-        throw std::invalid_argument("invalid input syntax for interval amount");
-    }
-    int64_t n = 0;
-    for (const char c : text) {
-        if (c < '0' || c > '9') {
-            throw std::invalid_argument("invalid input syntax for interval amount");
-        }
-        n = n * 10 + (c - '0');
-        if (n > std::numeric_limits<int32_t>::max() + int64_t{1}) {
-            throw std::overflow_error("interval field value out of range");
-        }
-    }
-    if (neg) {
-        n = -n;
-    }
-    if (n > std::numeric_limits<int32_t>::max()) {
+    int32_t n = 0;
+    const auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), n);
+    if (ec == std::errc::result_out_of_range) {
         throw std::overflow_error("interval field value out of range");
+    }
+    if (ec != std::errc() || end != text.data() + text.size()) {
+        throw std::invalid_argument("invalid input syntax for interval amount");
     }
     std::string_view u(reinterpret_cast<const char*>(unit.Data),
                        static_cast<size_t>(unit.Size));
     if (u == "year" || u == "years") {
-        n *= 365;
+        if (__builtin_mul_overflow(n, 365, &n)) {
+            throw std::overflow_error("interval is out of range");
+        }
     } else if (u == "month" || u == "months") {
-        n *= 30;
+        if (__builtin_mul_overflow(n, 30, &n)) {
+            throw std::overflow_error("interval is out of range");
+        }
     }
-    if (n < std::numeric_limits<int32_t>::min() || n > std::numeric_limits<int32_t>::max()) {
-        throw std::overflow_error("interval is out of range");
-    }
-    return static_cast<int32_t>(n);
+    return n;
 }
 
 // SQL ROUND: round half away from zero to `digits` decimals.
