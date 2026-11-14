@@ -46,8 +46,9 @@ struct TCteSpoolWatcher {
     std::atomic<bool> Armed = false;
 };
 
-// The rows of a materialized CTE. Segment l holds the batches that lane l of
-// each reference reads, so a fragment needs only the segments of its lanes.
+// The rows of a materialized CTE. Segment l belongs to lane l of each
+// reference: the graph holding that lane reads it, so a fragment needs only the
+// segments of its lanes.
 // Producer lanes and CTE sources append under the segment's lock, and before
 // Seal CTE sinks read a segment while it grows; once sealed the spool is
 // immutable and read concurrently without locks. Writers, readers and their
@@ -88,9 +89,9 @@ private:
 };
 
 // The read progress of one CTE reference in one graph, shared by its lanes
-// there. Lane l reads segment l, so lanes of one reference in different graphs
-// read disjoint batches. A lane claims the next unread batch of the graph's
-// lanes, morsel-style, so each batch reaches exactly one lane and an idle lane
+// there. It reads the segments of those lanes, so graphs read disjoint batches.
+// The lanes share one cursor over these segments: a lane claims the next unread
+// batch, morsel-style, so each batch reaches exactly one lane and an idle lane
 // takes the work a busy one has not started.
 class TCteConsumerState {
 public:

@@ -2608,9 +2608,10 @@ TEST(SchedulerRuntimeAdapter, CteSourceAppendsEachBatchToItsSegment) {
     EXPECT_THROW(source.Execute(), std::runtime_error);
 }
 
-// Writers append to three segments while a sink streams them to a source
-// that fills a copy: every batch is sent once, many before the writers
-// finish, and each segment of the sealed copy is that of the spool.
+// Three writers deal their batches over three segments, as producer lanes do,
+// while a sink streams them to a source that fills a copy: every batch is sent
+// once, many before the writers finish, and each segment of the sealed copy is
+// that of the spool.
 TEST(SchedulerRuntimeAdapter, CteSinkStreamsAGrowingSpoolIntoAnEqualCopy) {
     constexpr uint32_t segments = 3;
     constexpr int64_t batches = 200;
@@ -2667,14 +2668,15 @@ TEST(SchedulerRuntimeAdapter, CteSinkStreamsAGrowingSpoolIntoAnEqualCopy) {
     }), link);
 
     std::vector<std::thread> writers;
-    for (uint32_t segment = 0; segment < segments; ++segment) {
-        writers.emplace_back([&, segment] {
+    for (uint32_t writer = 0; writer < segments; ++writer) {
+        writers.emplace_back([&, writer] {
             for (int64_t i = 0; i < batches; ++i) {
                 // Distinct row counts tell the batches apart.
-                spool->Append(segment, TRowSet{.RowCount = segment * batches + i + 1, .RefCount = 1});
+                spool->Append(static_cast<size_t>(writer + i) % segments,
+                    TRowSet{.RowCount = writer * batches + i + 1, .RefCount = 1});
                 std::this_thread::sleep_for(std::chrono::microseconds(50));
             }
-            TOutputPort{.Connection = &completion, .Lane = segment}.Finish();
+            TOutputPort{.Connection = &completion, .Lane = writer}.Finish();
             link->WritersLeft.fetch_sub(1);
         });
     }

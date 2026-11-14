@@ -292,12 +292,12 @@ flowchart LR
 ```
 
 A definition shared by several references is written once into a spool and read
-by every reference. Segment `l` holds the batches that lane `l` of each
-reference reads. Producer lane `i` deals the batches of definition lane `i` over
-the segments in turn, starting at segment `i`, so the consumer lanes get equal
-shares however skewed the definition's lanes are. There is no gather. The spool
-has no capacity limit: a producer never waits for a consumer, so two
-references feeding the same join cannot deadlock.
+by every reference. Segment `l` belongs to lane `l` of each reference: the
+graph holding that lane reads it. Producer lane `i` deals the batches of
+definition lane `i` over the segments in turn, starting at segment `i`, so the
+consumer lanes get equal shares however skewed the definition's lanes are.
+There is no gather. The spool has no capacity limit: a producer never waits for
+a consumer, so two references feeding the same join cannot deadlock.
 
 Completion connections carry finish signals only. Each producer lane finishes
 its lane of a gather when its input ends. The `cte-publish` task runs once all of

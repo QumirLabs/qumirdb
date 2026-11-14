@@ -465,7 +465,8 @@ struct TCteConsumerNode {
     TPortSpec In;
     TPortSpec Out;
     uint32_t State = 0;
-    // Its lane of the reference, which reads segment Lane of the spool.
+    // Its lane of the reference. The graph holding it reads segment Lane; that
+    // graph's lanes of the reference claim its batches together.
     uint32_t Lane = 0;
 
     void Fields(this auto& self, auto& v)
