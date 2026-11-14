@@ -9,6 +9,8 @@
   "cases": {
     "aggregate_extra_argument_sum.sql": {},
     "aggregate_order_by_same_expression_control.sql": {"expect_error": false, "order": "ordered"},
+    "cte_forward_reference_control.sql": {"expect_error": false, "order": "unordered"},
+    "cte_own_name_outer_table_control.sql": {"expect_error": false, "order": "unordered"},
     "distinct_aggregate_order_by_control.sql": {"expect_error": false, "order": "ordered"},
     "distinct_order_by_other_column.sql": {},
     "distinct_order_by_outputs_control.sql": {"expect_error": false, "order": "unordered"},
