@@ -17,7 +17,7 @@
       (table part)
     )
     (where
-      (&& (&& (== l_partkey p_partkey) (>= l_shipdate (: 8460 i32))) (< l_shipdate (+ (: 8460 i32) (: 30 i32))))
+      (&& (&& (== l_partkey p_partkey) (>= l_shipdate (: 8460 i32))) (< l_shipdate (: 8491 i32)))
     )
   )
 )

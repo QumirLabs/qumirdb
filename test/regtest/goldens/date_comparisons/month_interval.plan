@@ -1,0 +1,4 @@
+project (iso, p1m, m1m, m3m, p25m, p1y, m2y, p10d, q4_bound, in_q4)
+└─ sort [__sort_0 asc]
+   └─ project (iso, p1m, m1m, m3m, p25m, p1y, m2y, p10d, q4_bound, in_q4, __sort_0) (rows≈10 cost≈1.5K)
+      └─ source month_edges AS month_edges (rows≈10 cost≈40)

@@ -1496,21 +1496,15 @@ function createQdbEnv(getMemory, holder) {
     }
     throw new Error('invalid input syntax for type date: "' + new TextDecoder().decode(bytes) + '"');
   };
-  // year/month are approximate (365/30). amount and unit are StringViews.
-  const sqlInterval = (amount, unit) => {
+  // DAY interval; amount is a StringView.
+  const sqlInterval = (amount) => {
     const text = new TextDecoder().decode(svBytes(amount)).trim();
     if (!/^(\+?[0-9]+|-[0-9]+)$/.test(text)) {
       throw new Error('invalid input syntax for interval amount');
     }
-    let n = Number(text);
+    const n = Number(text);
     if (n > 2147483647 || n < -2147483648) {
       throw new Error('interval field value out of range');
-    }
-    const u = new TextDecoder().decode(svBytes(unit));
-    if (u === 'year' || u === 'years') n *= 365;
-    else if (u === 'month' || u === 'months') n *= 30;
-    if (n > 2147483647 || n < -2147483648) {
-      throw new Error('interval is out of range');
     }
     return n;
   };

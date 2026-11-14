@@ -12,6 +12,6 @@ sort [revenue desc]
                │  ├─ source supplier AS supplier (rows≈10 cost≈80)
                │  └─ source lineitem AS lineitem (rows≈10 cost≈240)
                └─ join inner [orders.o_custkey = customer.c_custkey] (rows≈1 cost≈4.5K)
-                  ├─ filter (&& (>= |orders.o_orderdate| (: 9131 i32)) (< |orders.o_orderdate| (+ (: 9131 i32) (: 365 i32)))) (rows≈2 cost≈240)
-                  │  └─ source orders AS orders row-groups (&& (>= |orders.o_orderdate| (: 9131 i32)) (< |orders.o_orderdate| (+ (: 9131 i32) (: 365 i32)))) (rows≈10 cost≈120)
+                  ├─ filter (&& (>= |orders.o_orderdate| (: 9131 i32)) (< |orders.o_orderdate| (: 9496 i32))) (rows≈2 cost≈240)
+                  │  └─ source orders AS orders row-groups (&& (>= |orders.o_orderdate| (: 9131 i32)) (< |orders.o_orderdate| (: 9496 i32))) (rows≈10 cost≈120)
                   └─ source customer AS customer (rows≈10 cost≈80)

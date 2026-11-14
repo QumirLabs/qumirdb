@@ -1,0 +1,1 @@
+SELECT x + 2 * INTERVAL '1' MONTH FROM t;

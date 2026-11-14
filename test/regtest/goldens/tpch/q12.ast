@@ -37,7 +37,7 @@
               (< l_commitdate l_receiptdate))
             (< l_shipdate l_commitdate))
           (>= l_receiptdate (: 8401 i32)))
-        (< l_receiptdate (+ (: 8401 i32) (: 365 i32))))
+        (< l_receiptdate (: 8766 i32)))
     )
     (group-by
       l_shipmode

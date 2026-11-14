@@ -1353,7 +1353,7 @@
 
   (fun qdb_date_year ((var days i32)) -> i32 (attrs extern) (block))
   (fun qdb_sql_date ((var date StringView)) -> DATE (attrs extern (operator "cast")) (block))
-  (fun qdb_sql_interval ((var amount StringView) (var unit StringView)) -> i32 (attrs extern) (block))
+  (fun qdb_sql_interval ((var amount StringView)) -> i32 (attrs extern) (block))
 
   (fun qdb_date_to_i32 ((var d DATE)) -> i32 (attrs (operator "cast"))
     (block (return (bitcast d i32))))
@@ -1373,6 +1373,42 @@
     (block (return (> (bitcast l i32) (bitcast r i32)))))
   (fun qdb_date_ge ((var l DATE) (var r DATE)) -> bool (attrs (operator ">="))
     (block (return (>= (bitcast l i32) (bitcast r i32)))))
+  ;; DATE + n months (PostgreSQL): the day is kept and clamped to the last day of the
+  ;; target month. Hinnant's civil_from_days / days_from_civil, in i64, no branches on
+  ;; the data except the day clamp.
+  (fun qdb_date_add_months_i64 ((var d i32) (var months i64)) -> i32
+    (block
+      (var z = (+ (cast d i64) 719468))
+      (var era = (// z 146097))
+      (if (< z 0) (block (= era (// (- z 146096) 146097))))
+      (var doe = (- z (* era 146097)))
+      (var yoe = (// (- (+ doe (// doe 36524)) (+ (// doe 1460) (// doe 146096))) 365))
+      (var doy = (- doe (- (+ (* 365 yoe) (// yoe 4)) (// yoe 100))))
+      (var mp = (// (+ (* 5 doy) 2) 153))
+      (var day = (+ (- doy (// (+ (* 153 mp) 2) 5)) 1))
+      ;; March-based month index (0 = March) of the shifted year, so total months
+      ;; since year 0 are era-aligned and the leap day stays the last day of a year.
+      (var total = (+ (+ (* (+ yoe (* era 400)) 12) mp) months))
+      (var ny = (// total 12))
+      (if (< (- total (* ny 12)) 0) (block (= ny (- ny 1))))
+      (var nmp = (- total (* ny 12)))
+      (var nera = (// ny 400))
+      (if (< ny 0) (block (= nera (// (- ny 399) 400))))
+      (var nyoe = (- ny (* nera 400)))
+      ;; The leap day ends shifted year ny, i.e. it is Feb of calendar year ny + 1.
+      (var cy = (+ nyoe 1))
+      (var leap = (&& (== (% cy 4) 0) (|| (!= (% cy 100) 0) (== cy 400))))
+      (var dim = (- 31 (% (+ nmp (// nmp 5)) 2)))
+      (if (== nmp 11) (block (= dim 28)))
+      (if (&& (== nmp 11) leap) (block (= dim 29)))
+      (if (> day dim) (block (= day dim)))
+      (var ndoy = (+ (// (+ (* 153 nmp) 2) 5) (- day 1)))
+      (var ndoe = (- (+ (+ (* nyoe 365) (// nyoe 4)) ndoy) (// nyoe 100)))
+      (return (cast (- (+ (* nera 146097) ndoe) 719468) i32))))
+  (fun qdb_date_add_months ((var d i32) (var n i32)) -> i32
+    (block (return (call qdb_date_add_months_i64 d (cast n i64)))))
+  (fun qdb_date_sub_months ((var d i32) (var n i32)) -> i32
+    (block (return (call qdb_date_add_months_i64 d (- 0 (cast n i64))))))
   (fun qdb_date_add ((var d DATE) (var n i32)) -> DATE (attrs (operator "+"))
     (block (return (bitcast (+ (bitcast d i32) n) DATE))))
   (fun qdb_date_sub ((var d DATE) (var n i32)) -> DATE (attrs (operator "-"))
