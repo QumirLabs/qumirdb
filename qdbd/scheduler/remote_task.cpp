@@ -21,32 +21,40 @@ TRemoteSinkState::TRemoteSinkState(
     uint64_t dstTaskId,
     std::span<const TValueLayout> descriptor,
     TActorNotificationChannel& actorChannel,
-    size_t outboxCapacity,
-    size_t window)
+    TRemoteStreamLimits limits)
     : Id(id)
     , ActorId(actorId)
     , DstTaskId(dstTaskId)
     , Descriptor(descriptor)
     , ActorChannel(actorChannel)
-    , Outbox(outboxCapacity)
-    , Window(window)
+    , Limits(limits)
+    , Outbox(limits.OutboxCapacity)
 { }
 
 TRemoteSinkState::~TRemoteSinkState() {
-    TRowSet rowSet;
-    while (Outbox.TryPop(rowSet)) {
-        Release(&rowSet);
+    TQueued queued;
+    while (Outbox.TryPop(queued)) {
+        Release(&queued.RowSet);
     }
 }
 
 ETaskResult TRemoteSinkState::Write(const TRowSet& rowSet) {
+    if (QueuedBytes.load() >= Limits.OutboxBytes) {
+        return ETaskResult::WAITING;
+    }
+    // A row set that does not match the layouts fails on the actor.
+    const bool matches = static_cast<size_t>(rowSet.ColumnCount) == Descriptor.size();
+    const auto bytes = matches ? RowSetWireSize(rowSet, Descriptor) : 0;
     // TSinkTask releases its reference after Write. The outbox copy owns the
     // one taken here and is released by whoever drains it.
     auto& task = const_cast<TRowSet&>(rowSet);
     Retain(&task);
-    TRowSet copy = task;
-    copy.RefCount = 1;
-    if (!Outbox.TryPush(std::move(copy))) {
+    TQueued queued{.RowSet = task, .Bytes = bytes};
+    queued.RowSet.RefCount = 1;
+    // Counted before the push, so the actor's pop never takes the count below zero.
+    QueuedBytes.fetch_add(queued.Bytes);
+    if (!Outbox.TryPush(std::move(queued))) {
+        QueuedBytes.fetch_sub(queued.Bytes);
         --task.RefCount;
         return ETaskResult::WAITING;
     }
@@ -69,8 +77,8 @@ ETaskResult TRemoteSinkState::Finish() {
 
 void TRemoteSinkState::SendQueue(NNet::NActors::TActorContext::TPtr& ctx) {
     Drain(
-        [&](uint64_t seq, TRowSet&& rowSet) {
-            SendChunk(ctx, seq, std::move(rowSet));
+        [&](TDataChunk&& chunk) {
+            SendChunk(ctx, std::move(chunk));
         },
         [&] {
             SendFinish(ctx);
@@ -80,19 +88,20 @@ void TRemoteSinkState::SendQueue(NNet::NActors::TActorContext::TPtr& ctx) {
 bool TRemoteSinkState::OnConfirm(uint64_t lastApplied, NNet::NActors::TActorContext::TPtr& ctx) {
     return Confirm(
         lastApplied,
-        [&](uint64_t seq, TRowSet&& rowSet) {
-            SendChunk(ctx, seq, std::move(rowSet));
+        [&](TDataChunk&& chunk) {
+            SendChunk(ctx, std::move(chunk));
         },
         [&] {
             SendFinish(ctx);
         });
 }
 
-void TRemoteSinkState::SendChunk(NNet::NActors::TActorContext::TPtr& ctx, uint64_t seq, TRowSet&& rowSet) {
-    // The chunk owns the reference from here on, also when the check throws.
-    TDataChunk chunk(DstTaskId, seq, rowSet, Descriptor.data());
-    if (static_cast<size_t>(chunk.RowSet.ColumnCount) != Descriptor.size()) {
-        throw std::runtime_error("remote sink " + std::to_string(Id) + ": row set columns do not match layouts");
+// The chunk releases its rows also when the check throws.
+void TRemoteSinkState::SendChunk(NNet::NActors::TActorContext::TPtr& ctx, TDataChunk&& chunk) {
+    for (const auto& rowSet : chunk.RowSets) {
+        if (static_cast<size_t>(rowSet.ColumnCount) != Descriptor.size()) {
+            throw std::runtime_error("remote sink " + std::to_string(Id) + ": row set columns do not match layouts");
+        }
     }
     ctx->Send<TDataChunk>(ActorId, std::move(chunk));
 }
@@ -116,15 +125,9 @@ TRemoteSourceState::TRemoteSourceState(
     , Inbox(inboxCapacity)
 { }
 
-TRemoteSourceState::~TRemoteSourceState() {
-    TRowSet rowSet;
-    while (Inbox.TryPop(rowSet)) {
-        Release(&rowSet);
-    }
-}
-
-bool TRemoteSourceState::Push(uint64_t seq, TRowSet&& rowSet) {
-    if (seq != Received + 1 || !Inbox.TryPush(std::move(rowSet))) {
+bool TRemoteSourceState::Push(TDataChunk&& chunk) {
+    const auto seq = chunk.Seq;
+    if (seq != Received + 1 || !Inbox.TryPush(std::move(chunk))) {
         return false;
     }
     Received = seq;
@@ -167,14 +170,20 @@ ETaskResult TRemoteSourceState::Next(TRowSet& rowSet) {
 }
 
 bool TRemoteSourceState::Pop(TRowSet& rowSet) {
-    if (!Inbox.TryPop(rowSet)) {
-        return false;
+    while (CurrentPos == Current.RowSets.size()) {
+        Current = {};
+        CurrentPos = 0;
+        if (!Inbox.TryPop(Current)) {
+            return false;
+        }
+        // Seqs arrive without gaps, so the pop count is the Seq of this chunk.
+        Applied.fetch_add(1);
+        if (!Queued.exchange(true)) {
+            ActorChannel.Notify(this);
+        }
     }
-    // Seqs arrive without gaps, so the pop count is the Seq of this chunk.
-    Applied.fetch_add(1);
-    if (!Queued.exchange(true)) {
-        ActorChannel.Notify(this);
-    }
+    // The row set handed out belongs to the task now.
+    rowSet = std::exchange(Current.RowSets[CurrentPos++], TRowSet{});
     return true;
 }
 
@@ -332,8 +341,7 @@ std::pair<std::shared_ptr<const TSinkCode>, std::shared_ptr<TRemoteSinkState>> M
     uint64_t dstTaskId,
     std::span<const TValueLayout> descriptor,
     TActorNotificationChannel& actorChannel,
-    size_t outboxCapacity,
-    size_t window)
+    TRemoteStreamLimits limits)
 {
     auto code = std::make_shared<const TSinkCode>(
         [](void* state, const TRowSet& rowSet) {
@@ -342,8 +350,7 @@ std::pair<std::shared_ptr<const TSinkCode>, std::shared_ptr<TRemoteSinkState>> M
         [](void* state) {
             return static_cast<TRemoteSinkState*>(state)->Finish();
         });
-    auto state = std::make_shared<TRemoteSinkState>(
-        id, actorId, dstTaskId, descriptor, actorChannel, outboxCapacity, window);
+    auto state = std::make_shared<TRemoteSinkState>(id, actorId, dstTaskId, descriptor, actorChannel, limits);
     return {std::move(code), std::move(state)};
 }
 

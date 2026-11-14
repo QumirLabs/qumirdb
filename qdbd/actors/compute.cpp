@@ -289,13 +289,12 @@ struct TComputeActor : public IBehaviorActor {
             return;
         }
         auto& [state, node] = it->second;
-        if (!state->Push(chunk.Seq, TRowSet(chunk.RowSet))) {
+        // A chunk the inbox refuses stays here and releases its rows.
+        if (!state->Push(std::move(chunk))) {
             SendError(ctx, "dropped chunk " + std::to_string(chunk.Seq) + " for task "
                 + std::to_string(chunk.DstTaskId) + ": out of order or beyond the window");
             return;
         }
-        // The inbox holds the reference now.
-        chunk.Take();
         Scheduler->Schedule(node);
     }
 

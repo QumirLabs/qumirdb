@@ -40,42 +40,45 @@ struct TSpawnComputeActorResponse {
     std::string Error;
 };
 
-// The receiving RemoteSource is selected by DstTaskId and pushes into its own output lane.
-// The chunk owns one reference to RowSet and releases it unless a receiver
-// takes it, so a chunk nobody handles frees its rows too. Within a node the
-// receiver gets the sender's chunk; for another node it is serialized, then destroyed.
+// The receiving RemoteSource is selected by DstTaskId and pushes the row sets
+// into its own output lane in order; a sink packs consecutive small row sets
+// into one chunk. The chunk owns one reference to each row set and releases
+// those no receiver takes, so a chunk nobody handles frees its rows too. Within
+// a node the receiver gets the sender's chunk; for another node it is
+// serialized, then destroyed.
 struct TDataChunk {
     static constexpr NNet::NActors::TMessageId MessageId = 200;
     uint64_t DstTaskId = 0;
     // Numbers the chunks of one DstTaskId from 1; TDataConfirm acknowledges them.
     uint64_t Seq = 0;
-    // Held while RefCount > 0; a view with RefCount 0 is never released.
-    TRowSet RowSet{};
+    // Each held while RefCount > 0; a view with RefCount 0 is never released.
+    std::vector<TRowSet> RowSets;
+    // The sender's value layouts, one per column; null in a received chunk.
     const TValueLayout* Descriptor = nullptr;
 
     TDataChunk() = default;
 
-    TDataChunk(uint64_t dstTaskId, uint64_t seq, TRowSet rowSet, const TValueLayout* descriptor = nullptr)
+    TDataChunk(uint64_t dstTaskId, uint64_t seq, std::vector<TRowSet> rowSets, const TValueLayout* descriptor = nullptr)
         : DstTaskId(dstTaskId)
         , Seq(seq)
-        , RowSet(rowSet)
+        , RowSets(std::move(rowSets))
         , Descriptor(descriptor)
     {}
 
     TDataChunk(TDataChunk&& other) noexcept
         : DstTaskId(other.DstTaskId)
         , Seq(other.Seq)
-        , RowSet(other.Take())
+        , RowSets(other.Take())
         , Descriptor(other.Descriptor)
     {}
 
     TDataChunk& operator=(TDataChunk&& other) noexcept
     {
         if (this != &other) {
-            ReleaseRowSet();
+            ReleaseRowSets();
             DstTaskId = other.DstTaskId;
             Seq = other.Seq;
-            RowSet = other.Take();
+            RowSets = other.Take();
             Descriptor = other.Descriptor;
         }
         return *this;
@@ -83,22 +86,24 @@ struct TDataChunk {
 
     ~TDataChunk()
     {
-        ReleaseRowSet();
+        ReleaseRowSets();
     }
 
-    // Hands the reference over: the chunk then holds none.
-    TRowSet Take()
+    // Hands the references over: the chunk then holds none.
+    std::vector<TRowSet> Take()
     {
-        return std::exchange(RowSet, TRowSet{});
+        return std::exchange(RowSets, {});
     }
 
 private:
-    void ReleaseRowSet()
+    void ReleaseRowSets()
     {
-        if (RowSet.RefCount > 0) {
-            Release(&RowSet);
+        for (auto& rowSet : RowSets) {
+            if (rowSet.RefCount > 0) {
+                Release(&rowSet);
+            }
         }
-        RowSet = {};
+        RowSets.clear();
     }
 };
 
