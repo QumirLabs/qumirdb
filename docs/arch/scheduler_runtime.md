@@ -158,6 +158,20 @@ kernel when it builds and probes, and the join and aggregate kernels that take a
 precomputed hash. A selection only shrinks on the way downstream, so a row that
 is still selected always has its hash.
 
+A computed project evaluates every row of its batch, also the rows the selection
+has dropped, but SQL computes the select list only over the rows that WHERE
+keeps. A runtime error of a dropped row (an integer `abs` overflow, a value
+that does not fit its DECIMAL precision) therefore must not fail the query, and
+the project defers row errors. While its kernel runs, a runtime function that
+fails on a row records the failure in the worker's execution context and returns
+a placeholder instead of throwing. When a call has recorded a failure, the
+project evaluates only the selected rows again, now raising errors: a failing
+row raises its own error exactly when it reaches the output. A batch without
+failures costs one flag check. A filter evaluates only the rows its input
+selects and raises the errors of its own predicate; one conjunct of the
+predicate does not guard another, since SQL leaves the order in which a
+condition's parts are evaluated open.
+
 The important ownership split is:
 
 | Layer | Owns | Does not own |

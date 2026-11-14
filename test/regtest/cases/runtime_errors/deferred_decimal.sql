@@ -1,0 +1,1 @@
+SELECT id, CAST(v AS DECIMAL(5, 0)) AS d FROM t WHERE v > -10 ORDER BY id;

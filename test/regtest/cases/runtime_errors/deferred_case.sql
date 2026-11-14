@@ -1,0 +1,1 @@
+SELECT id, CASE WHEN v < 0 THEN abs(v) ELSE v END AS a FROM t WHERE v > -10 ORDER BY id;
