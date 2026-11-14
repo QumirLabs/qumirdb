@@ -2,12 +2,18 @@
   "version": 1,
   "fixtures": {
     "extremes": {"json": "tables/extremes.json"},
-    "narrow": {"json": "tables/narrow.json"}
+    "narrow": {"json": "tables/narrow.json"},
+    "deferred": {"json": "tables/deferred.json", "parquet": {"row_group_rows": 2}}
   },
   "tables": {"t": "extremes"},
   "variants": ["single", "threaded", "js"],
   "cases": {
     "abs_overflow.sql": {"expect_error": true},
-    "abs_narrow.sql": {"tables": {"t": "narrow"}, "order": "ordered"}
+    "abs_narrow.sql": {"tables": {"t": "narrow"}, "order": "ordered"},
+    "deferred_filtered_out.sql": {"tables": {"t": "deferred"}, "order": "ordered", "execute": ["llvm", "vm"]},
+    "deferred_output_row.sql": {"tables": {"t": "deferred"}, "expect_error": true},
+    "deferred_case.sql": {"tables": {"t": "deferred"}, "order": "ordered", "execute": ["llvm", "vm"]},
+    "deferred_coalesce.sql": {"tables": {"t": "deferred"}, "order": "ordered", "execute": ["llvm", "vm"]},
+    "deferred_decimal.sql": {"tables": {"t": "deferred"}, "order": "ordered"}
   }
 }

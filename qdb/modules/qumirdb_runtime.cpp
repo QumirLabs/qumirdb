@@ -541,28 +541,40 @@ double qdb_round(double value, int32_t digits) {
 // without signext, so the callee may see a zero-extended value on arm64.
 int32_t qdb_abs_i8(int32_t value) {
     if (value == std::numeric_limits<int8_t>::min()) {
-        throw std::overflow_error("abs overflow for i8");
+        if (!NQdb::DeferRowError()) {
+            throw std::overflow_error("abs overflow for i8");
+        }
+        return value;
     }
     return value < 0 ? -value : value;
 }
 
 int32_t qdb_abs_i16(int32_t value) {
     if (value == std::numeric_limits<int16_t>::min()) {
-        throw std::overflow_error("abs overflow for i16");
+        if (!NQdb::DeferRowError()) {
+            throw std::overflow_error("abs overflow for i16");
+        }
+        return value;
     }
     return value < 0 ? -value : value;
 }
 
 int32_t qdb_abs_i32(int32_t value) {
     if (value == std::numeric_limits<int32_t>::min()) {
-        throw std::overflow_error("abs overflow for i32");
+        if (!NQdb::DeferRowError()) {
+            throw std::overflow_error("abs overflow for i32");
+        }
+        return value;
     }
     return value < 0 ? -value : value;
 }
 
 int64_t qdb_abs_i64(int64_t value) {
     if (value == std::numeric_limits<int64_t>::min()) {
-        throw std::overflow_error("abs overflow for i64");
+        if (!NQdb::DeferRowError()) {
+            throw std::overflow_error("abs overflow for i64");
+        }
+        return value;
     }
     return value < 0 ? -value : value;
 }
@@ -572,7 +584,10 @@ double qdb_fabs(double value) {
 }
 
 int64_t qdb_decimal64_overflow(int64_t precision) {
-    throw std::overflow_error("value does not fit DECIMAL precision " + std::to_string(precision));
+    if (!NQdb::DeferRowError()) {
+        throw std::overflow_error("value does not fit DECIMAL precision " + std::to_string(precision));
+    }
+    return 0;
 }
 
 qdb_bin_int qdb_decimal_from_i64(int64_t value, int64_t scale) {

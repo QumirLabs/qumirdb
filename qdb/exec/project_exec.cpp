@@ -1,4 +1,5 @@
 #include <qdb/exec/project_exec.h>
+#include <qdb/kernel/execution_context.h>
 #include <qdb/modules/qumirdb_types.h>
 #include <qdb/modules/qumirdb_runtime.h>
 
@@ -65,7 +66,16 @@ TUnaryStreamProcess MakeProjectProcess(
             // outlive the kernel *and* the string post-processing below, which copies the
             // bytes into owned StringData - a local here does exactly that.
             TStringArena arena;
-            computeDispatch(&rowSet, outBuffers.data(), &arena);
+            bool failed = false;
+            {
+                TRowErrorDeferral deferral;
+                computeDispatch(&rowSet, outBuffers.data(), &arena);
+                failed = deferral.Deferred();
+            }
+            if (failed) {
+                // A row failed: evaluate the selected rows again, now raising their errors.
+                computeDispatch(&rowSet, outBuffers.data(), &arena, selection);
+            }
 
             // Post-process string computed columns: convert TStringView array
             // (ptr + size per row) into a proper offset-based string TColumn.

@@ -1048,6 +1048,7 @@
       (return acc)))
   ;; Raises (C++ throws) when a value has more than `precision` digits, like DuckDB's
   ;; conversion error; the kernels test the range inline and call it only on failure.
+  ;; While row errors are deferred it returns 0, so a caller must not rely on it not returning.
   (fun qdb_decimal64_overflow ((var precision i64)) -> i64
     (attrs extern) (block))
   (fun qdb_decimal64_scale_up ((var value i64) (var delta i64)) -> i64
@@ -1104,8 +1105,10 @@
       (var negative = (< a 0.0))
       (if negative (block (= a (- 0.0 a))))
       (var result = (: 0 i128))
+      ;; The overflow call returns while row errors are deferred: return at once,
+      ;; the digit loops below never end for an infinity.
       (if (! (< a (call qdb_f64_pow10 (: 38 i64))))
-        (block (= result (cast (call qdb_decimal64_overflow (: 38 i64)) i128))))
+        (block (return (cast (struct ((V (cast (call qdb_decimal64_overflow (: 38 i64)) i128)))) BinInt))))
       (if (> a 0.0)
         (block
           (var e = 0)
@@ -1125,14 +1128,14 @@
           (if (>= shift 0)
             (block
               (if (> shift 32)
-                (block (= result (cast (call qdb_decimal64_overflow (: 38 i64)) i128))))
+                (block (return (cast (struct ((V (cast (call qdb_decimal64_overflow (: 38 i64)) i128)))) BinInt))))
               (var factor BinInt)
               (= factor (call qdb_pow10_i128 shift))
               (= result (* wide (field factor V)))
               (var limit BinInt)
               (= limit (call qdb_pow10_i128 (: 38 i64)))
               (if (>= result (field limit V))
-                (block (= result (cast (call qdb_decimal64_overflow (: 38 i64)) i128)))))
+                (block (return (cast (struct ((V (cast (call qdb_decimal64_overflow (: 38 i64)) i128)))) BinInt)))))
             (block
               (var drop = (- 0 shift))
               (if (<= drop 7)

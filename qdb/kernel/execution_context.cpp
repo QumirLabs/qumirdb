@@ -159,6 +159,36 @@ TExecutionContext& ExecutionContext() {
     return *CurrentContext;
 }
 
+bool DeferRowError() noexcept {
+    if (!CurrentContext || !CurrentContext->DeferRowErrors) {
+        return false;
+    }
+    CurrentContext->RowErrorDeferred = true;
+    return true;
+}
+
+TRowErrorDeferral::TRowErrorDeferral() noexcept
+    : Context_(CurrentContext)
+{
+    if (Context_) {
+        PreviousDefer_ = Context_->DeferRowErrors;
+        PreviousDeferred_ = Context_->RowErrorDeferred;
+        Context_->DeferRowErrors = true;
+        Context_->RowErrorDeferred = false;
+    }
+}
+
+TRowErrorDeferral::~TRowErrorDeferral() {
+    if (Context_) {
+        Context_->DeferRowErrors = PreviousDefer_;
+        Context_->RowErrorDeferred = PreviousDeferred_;
+    }
+}
+
+bool TRowErrorDeferral::Deferred() const noexcept {
+    return Context_ && Context_->RowErrorDeferred;
+}
+
 TTaskExecutionGuard::TTaskExecutionGuard(TExecutionContext& context, size_t task)
     : Context_(context)
     , Previous_(CurrentContext)
