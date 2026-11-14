@@ -1,0 +1,2 @@
+Error: integer literal 99999999999999999999 is out of range for BIGINT at Line: 1, Byte: 27, Column: 27 @ Line: 0, Byte: 0, Column: 0
+
