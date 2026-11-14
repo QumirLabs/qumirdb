@@ -14,7 +14,8 @@ if [ -z "$testcase" ]; then
     exit 0
 fi
 original=${testcase%-minimized}
-target=$(basename "$(dirname "$original")")
+# run_fuzzers saves out/artifacts/<target>/<sanitizer>/<testcase>.
+target=$(basename "$(dirname "$(dirname "$original")")")
 summary=$(grep -m 1 '^SUMMARY:' "$original.summary" || echo "SUMMARY: $(basename "$original")")
 title="Fuzzing: $target: ${summary#SUMMARY: }"
 title=${title:0:200}

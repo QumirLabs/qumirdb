@@ -28,6 +28,7 @@ for target in $targets; do
     cp "$WORK/seed_corpus.zip" "$OUT/${target}_seed_corpus.zip"
     cp fuzz/sql.dict "$OUT/$target.dict"
 done
+cp fuzz/qdb_fuzz_vm.options "$OUT/"
 
 # The runner image has none of the shared libraries: ship them in lib/ beside
 # the fuzzers, except the C library of the image itself.

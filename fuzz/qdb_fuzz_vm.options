@@ -1,0 +1,6 @@
+[libfuzzer]
+# Compiling the VM kernels of a wide TPC-DS or ClickBench query under ASan takes
+# seconds and up to 2 GB; a single huge allocation still fails at malloc_limit_mb.
+timeout = 100
+rss_limit_mb = 4096
+malloc_limit_mb = 2560

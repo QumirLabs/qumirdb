@@ -39,6 +39,6 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           mkdir -p "$RUNNER_TEMP/stub"
-          printf '#!/bin/bash\necho "gh $*"\nfor a in "$@"; do [ -f "$a" ] && cat "$a"; done\nexit 0\n' > "$RUNNER_TEMP/stub/gh"
+          printf '#!/bin/bash\n[ "$1 $2" = "issue list" ] && exit 0\necho "gh $*"\nfor a in "$@"; do [ -f "$a" ] && cat "$a"; done\nexit 0\n' > "$RUNNER_TEMP/stub/gh"
           chmod +x "$RUNNER_TEMP/stub/gh"
           PATH="$RUNNER_TEMP/stub:$PATH" bash .clusterfuzzlite/report_finding.sh
