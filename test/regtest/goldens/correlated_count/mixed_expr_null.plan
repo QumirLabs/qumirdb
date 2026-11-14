@@ -1,0 +1,7 @@
+project (id, n) (rows≈8 cost≈5.2K)
+└─ join left [t.k = __corr_0_0__] (rows≈8 cost≈5.1K)
+   ├─ source t AS t (rows≈8 cost≈128)
+   └─ project (__corr_0_0__, __scalar_0_state_0__, __scalar_0_state_1__) (rows≈4 cost≈464)
+      └─ aggregate keys=[v.k] aggs=[count_0=count, sum_0=sum] (rows≈4 cost≈368)
+         └─ filter (! (call qdb_is_null |v.k|)) (rows≈6 cost≈224)
+            └─ source v AS v row-groups (! (call qdb_is_null |v.k|)) (rows≈7 cost≈112)
