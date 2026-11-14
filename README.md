@@ -123,8 +123,6 @@ Current limitations:
 - `--transport:window_chunks` also sets the receiving inbox size, so use the
   same value on every node.
 - A distributed query runs one `SELECT` statement.
-- A task exception on a node can leave the query hanging instead of returning
-  the error ([#564](https://github.com/QumirLabs/qumirdb/issues/564)).
 
 ## Project principles
 
