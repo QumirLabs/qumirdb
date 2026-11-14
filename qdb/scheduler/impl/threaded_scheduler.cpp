@@ -111,8 +111,18 @@ void TThreadedScheduler::Wake(TTaskNode* node, EWake wake) {
                     std::memory_order_acquire)) {
                 return;
             }
+        } else if (event && (state == ETaskState::Queued || state == ETaskState::Notified)) {
+            // A release RMW, not a load: the worker that takes the node or ends its run reads
+            // the state from it, so that run sees the event published before this call.
+            if (node->State.compare_exchange_weak(
+                    state,
+                    state,
+                    std::memory_order_acq_rel,
+                    std::memory_order_acquire)) {
+                return;
+            }
         } else {
-            // Queued, Notified or Finished, or a neighbour's wake of a waiting node.
+            // Finished, or a neighbour's wake of a node that is queued, rescheduled, notified or waiting.
             return;
         }
     }
