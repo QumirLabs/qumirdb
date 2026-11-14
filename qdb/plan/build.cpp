@@ -3248,18 +3248,27 @@ std::expected<TRelation, TError> BuildQuery(
         std::vector<std::string> Labels;
     };
     std::map<std::string, TBuiltCte> builtDefs;
+    // A CTE body sees only the CTEs defined before it (no RECURSIVE): its own name
+    // and later ones resolve to the enclosing scope, as in PostgreSQL.
+    std::map<std::string, size_t> positions;
+    for (size_t i = 0; i < query.WithClause->Ctes.size(); ++i) {
+        positions[ToLower(query.WithClause->Ctes[i]->Name)] = i;
+    }
+    size_t visible = query.WithClause->Ctes.size();
     TBuildContext inner{.Annotation = context.Annotation, .SourceAliases = context.SourceAliases};
     inner.Sources = [&](std::string_view name) -> std::expected<TRelation, TError> {
         const std::string lower = ToLower(std::string(name));
         auto it = ctes.find(lower);
-        if (it == ctes.end()) {
+        if (it == ctes.end() || positions.at(lower) >= visible) {
             return context.Sources(name);
         }
         auto cached = builtDefs.find(lower);
         if (cached == builtDefs.end()) {
             // A definition is optimized as a plan of its own and numbers its sources apart.
             auto aliases = std::exchange(inner.SourceAliases, {});
+            const size_t outerVisible = std::exchange(visible, positions.at(lower));
             auto plan = BuildQuery(*it->second->Query, inner);
+            visible = outerVisible;
             inner.SourceAliases = std::move(aliases);
             if (!plan) {
                 return std::unexpected(plan.error());
