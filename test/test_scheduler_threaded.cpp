@@ -657,8 +657,8 @@ std::unique_ptr<TFanOutGraph> MakeFanOut(size_t producers, size_t consumers, int
 
 // Zero workers runs the single-threaded scheduler. A stalled threaded run is
 // cancelled, so a lost wakeup fails the test instead of hanging it.
-bool RunFanOut(TFanOutGraph& fanOut, size_t workers, std::string* error) {
-    const auto sealed = fanOut.Graph.Seal(error);
+bool RunGraph(TTaskGraph& graph, size_t workers, std::string* error) {
+    const auto sealed = graph.Seal(error);
     if (!sealed) {
         return false;
     }
@@ -694,7 +694,7 @@ TEST(SchedulerWakeups, FanOutDeliversEveryRow) {
             SCOPED_TRACE(testing::Message() << "workers " << workers << " round " << round);
             auto fanOut = MakeFanOut(producers, consumers, rows, /*burst=*/3, consumers);
             std::string error;
-            ASSERT_TRUE(RunFanOut(*fanOut, workers, &error)) << error;
+            ASSERT_TRUE(RunGraph(fanOut->Graph, workers, &error)) << error;
             int64_t received = 0;
             for (const auto* consumer : fanOut->Consumers) {
                 received += consumer->Rows;
@@ -710,11 +710,84 @@ TEST(SchedulerWakeups, PushesToOtherLanesDoNotRunAConsumer) {
         // The producer sends all rows to the first consumer.
         auto fanOut = MakeFanOut(/*producers=*/1, /*consumers=*/2, /*rows=*/1000, /*burst=*/1, /*lanes=*/1);
         std::string error;
-        ASSERT_TRUE(RunFanOut(*fanOut, workers, &error)) << error;
+        ASSERT_TRUE(RunGraph(fanOut->Graph, workers, &error)) << error;
         EXPECT_EQ(fanOut->Consumers[0]->Rows, 1000);
         EXPECT_EQ(fanOut->Consumers[1]->Rows, 0);
         // Its first run asks for data, the last sees the finish.
         EXPECT_LE(fanOut->Consumers[1]->Calls, 3);
+    }
+}
+
+// Reads its left input to the end before its right one, as a hash join reads
+// its build side first, and asks only for the side it reads. It returns
+// NEED_DATA while its right lane holds rows.
+class TBuildThenProbeTask : public ITask {
+public:
+    ETaskResult Execute() override {
+        PullBoth_.store(!Started_, std::memory_order_relaxed);
+        if (!Started_) {
+            Started_ = true;
+            return ETaskResult::NEED_DATA;
+        }
+        NQdb::TRowSet rowSet{};
+        switch (Input().Fetch(rowSet)) {
+            case EFetchResult::OK:
+                Rows += rowSet.RowCount;
+                NQdb::Release(&rowSet);
+                return ETaskResult::OK;
+            case EFetchResult::NO_DATA:
+                return ETaskResult::NEED_DATA;
+            case EFetchResult::FINISHED:
+                break;
+        }
+        if (LeftDone_.load(std::memory_order_relaxed)) {
+            return ETaskResult::FINISHED;
+        }
+        LeftDone_.store(true, std::memory_order_relaxed);
+        return ETaskResult::OK;
+    }
+
+    // The first run pulls both sides, so the right producer fills its lane early.
+    // The scheduler may ask while the task runs again on another worker.
+    bool WantsInput(const TTaskEdge& edge) const noexcept override {
+        return PullBoth_.load(std::memory_order_relaxed) || edge.Connection == Input().Connection;
+    }
+
+    TInputPort Left;
+    TInputPort Right;
+    int64_t Rows = 0;
+
+private:
+    const TInputPort& Input() const {
+        return LeftDone_.load(std::memory_order_relaxed) ? Right : Left;
+    }
+
+    bool Started_ = false;
+    std::atomic<bool> PullBoth_ = false;
+    std::atomic<bool> LeftDone_ = false;
+};
+
+TEST(SchedulerWakeups, ConsumerThatSkipsAFullLaneGetsEveryRow) {
+    constexpr int rows = 5000;
+    for (size_t workers : {0, 1, 4, 8}) {
+        for (int round = 0; round < 5; ++round) {
+            SCOPED_TRACE(testing::Message() << "workers " << workers << " round " << round);
+            TTaskGraph graph;
+            auto consumerTask = std::make_unique<TBuildThenProbeTask>();
+            auto& consumer = *consumerTask;
+            auto& consumerNode = graph.AddOwnedNode(std::move(consumerTask));
+            for (auto* input : {&consumer.Left, &consumer.Right}) {
+                auto producerTask = std::make_unique<TFanOutTask>(rows, /*burst=*/2, /*seed=*/1, /*lanes=*/1);
+                auto& producer = *producerTask;
+                auto& producerNode = graph.AddOwnedNode(std::move(producerTask));
+                auto& edge = graph.AddOwnedEdge(producerNode, consumerNode, std::make_unique<TOneToOneConnection>(1));
+                producer.Outputs.push_back({.Connection = edge.Connection});
+                *input = {.Connection = edge.Connection};
+            }
+            std::string error;
+            ASSERT_TRUE(RunGraph(graph, workers, &error)) << error;
+            EXPECT_EQ(consumer.Rows, 2 * rows);
+        }
     }
 }
 
