@@ -1480,17 +1480,21 @@ function createQdbEnv(getMemory, holder) {
   // Size-aware: CAST(<string column> AS DATE) passes a non-null-terminated StringView.
   const sqlDate = (str) => {
     const bytes = svBytes(str);
-    const parts = [0, 0, 0];
-    let idx = 0;
-    for (const b of bytes) {
-      if (idx >= 3) break;
-      if (b === 45) {
-        ++idx;
-      } else if (b >= 48 && b <= 57) {
-        parts[idx] = parts[idx] * 10 + (b - 48);
+    const text = new TextDecoder().decode(bytes).replace(/^ +| +$/g, '');
+    const m = /^([0-9]+)-([0-9]+)-([0-9]+)$/.exec(text);
+    if (m) {
+      const [year, month, day] = [Number(m[1]), Number(m[2]), Number(m[3])];
+      const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+      const dim = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+      if (year >= 1 && year <= 5874897 && month >= 1 && month <= 12 && day >= 1 &&
+          day <= 2147483647 && day <= dim[month - 1] + (month === 2 && leap ? 1 : 0)) {
+        return daysFromCivil(year, month, day);
       }
     }
-    return daysFromCivil(parts[0], parts[1], parts[2]);
+    if (deferRowError()) {
+      return 0;
+    }
+    throw new Error('invalid input syntax for type date: "' + new TextDecoder().decode(bytes) + '"');
   };
   // year/month are approximate (365/30). amount and unit are StringViews.
   const sqlInterval = (amount, unit) => {

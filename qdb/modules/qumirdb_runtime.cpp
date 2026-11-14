@@ -479,19 +479,54 @@ static int32_t DaysFromCivil(int y, int m, int d) {
     return static_cast<int32_t>(era * 146097 + doe - 719468);
 }
 
+// PostgreSQL's DATE range: the last year whose day number fits int32.
+constexpr int kMaxDateYear = 5874897;
+
+// Parses 'Y-M-D' (surrounding spaces allowed); false when the text is not a valid date.
 // Size-aware: CAST(<string column> AS DATE) passes a non-null-terminated StringView.
-int32_t qdb_sql_date(qdb_string_view date) {
-    int parts[3] = {0, 0, 0};
-    int idx = 0;
-    for (int64_t i = 0; i < date.Size && idx < 3; ++i) {
-        const char c = static_cast<char>(date.Data[i]);
-        if (c == '-') {
-            ++idx;
-        } else if (c >= '0' && c <= '9') {
-            parts[idx] = parts[idx] * 10 + (c - '0');
-        }
+// from_chars accepts no '+'; a '-' sign gives a negative part that the range checks reject.
+bool qdb_try_parse_date(qdb_string_view date, int32_t* days) {
+    std::string_view text(reinterpret_cast<const char*>(date.Data), static_cast<size_t>(date.Size));
+    while (!text.empty() && text.front() == ' ') {
+        text.remove_prefix(1);
     }
-    return DaysFromCivil(parts[0], parts[1], parts[2]);
+    while (!text.empty() && text.back() == ' ') {
+        text.remove_suffix(1);
+    }
+    const char* end = text.data() + text.size();
+    int32_t year = 0;
+    int32_t month = 0;
+    int32_t day = 0;
+    auto res = std::from_chars(text.data(), end, year);
+    if (res.ec != std::errc() || res.ptr == end || *res.ptr != '-') {
+        return false;
+    }
+    res = std::from_chars(res.ptr + 1, end, month);
+    if (res.ec != std::errc() || res.ptr == end || *res.ptr != '-') {
+        return false;
+    }
+    res = std::from_chars(res.ptr + 1, end, day);
+    if (res.ec != std::errc() || res.ptr != end || year < 1 || year > kMaxDateYear ||
+        month < 1 || month > 12 || day < 1)
+    {
+        return false;
+    }
+    static constexpr int kDaysInMonth[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    const bool leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    if (day > kDaysInMonth[month - 1] + (month == 2 && leap)) {
+        return false;
+    }
+    *days = DaysFromCivil(year, month, day);
+    return true;
+}
+
+int32_t qdb_sql_date(qdb_string_view date) {
+    int32_t days = 0;
+    if (!qdb_try_parse_date(date, &days) && !NQdb::DeferRowError()) {
+        throw std::invalid_argument("invalid input syntax for type date: \"" +
+            std::string(reinterpret_cast<const char*>(date.Data), static_cast<size_t>(date.Size)) + "\"");
+    }
+    return days;
 }
 
 // year/month are approximate (365/30): the base date is not available here for
