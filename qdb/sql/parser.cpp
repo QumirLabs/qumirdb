@@ -414,7 +414,7 @@ NQumir::NAst::TExprPtr interval_literal(TLocation loc, const std::string& amount
         return call(loc, IntervalMonthsMarker,
             {i32_literal(loc, qdb_sql_interval_months(AsStringView(amount), AsStringView(u)))});
     }
-    return i32_literal(loc, qdb_sql_interval(AsStringView(amount), AsStringView(u)));
+    return i32_literal(loc, qdb_sql_interval(AsStringView(amount)));
 }
 
 NQumir::NAst::TExprPtr list(TLocation loc, std::vector<NQumir::NAst::TExprPtr> items) {
@@ -1649,7 +1649,20 @@ TAstExprTask add_expr(TParserContext& ctx) {
 }
 
 TAstExprTask mul_expr(TParserContext& ctx) {
-    co_return co_await binary_op_helper(ctx, unary_expr, "*"_op, "/"_op, "%"_op);
+    auto ret = co_await unary_expr(ctx);
+    auto loc = ret->Location;
+    for (;;) {
+        auto token = ctx.Stream.Next();
+        if (!IsOp(token, "*"_op) && !IsOp(token, "/"_op) && !IsOp(token, "%"_op)) {
+            ctx.Stream.Unget(token);
+            co_return ret;
+        }
+        auto rhs = co_await unary_expr(ctx);
+        if (IntervalMonths(ret) || IntervalMonths(rhs)) {
+            co_return Error(token, "arithmetic on a month or year INTERVAL is not supported");
+        }
+        ret = binary(loc, static_cast<uint64_t>(token.Value.i64), ret, rhs);
+    }
 }
 
 TAstExprTask unary_expr(TParserContext& ctx) {

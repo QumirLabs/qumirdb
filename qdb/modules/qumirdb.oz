@@ -432,7 +432,7 @@
   ;; least four digits, more when it needs them, and a minus sign when negative.
   (fun qdb_string_from_date ((var arena <ptr i8>) (var d DATE)) -> StringView
     (block
-      (var z = (+ (cast d i64) 719468))
+      (var z = (+ (cast (bitcast d i32) i64) 719468))
       (var era = (// z 146097))
       (if (< z 0) (block (= era (// (- z 146096) 146097))))
       (var doe = (- z (* era 146097)))
@@ -1353,7 +1353,7 @@
 
   (fun qdb_date_year ((var days i32)) -> i32 (attrs extern) (block))
   (fun qdb_sql_date ((var date StringView)) -> DATE (attrs extern (operator "cast")) (block))
-  (fun qdb_sql_interval ((var amount StringView) (var unit StringView)) -> i32 (attrs extern) (block))
+  (fun qdb_sql_interval ((var amount StringView)) -> i32 (attrs extern) (block))
 
   (fun qdb_date_to_i32 ((var d DATE)) -> i32 (attrs (operator "cast"))
     (block (return (bitcast d i32))))
@@ -1373,7 +1373,7 @@
     (block (return (> (bitcast l i32) (bitcast r i32)))))
   (fun qdb_date_ge ((var l DATE) (var r DATE)) -> bool (attrs (operator ">="))
     (block (return (>= (bitcast l i32) (bitcast r i32)))))
-;; DATE + n months (PostgreSQL): the day is kept and clamped to the last day of the
+  ;; DATE + n months (PostgreSQL): the day is kept and clamped to the last day of the
   ;; target month. Hinnant's civil_from_days / days_from_civil, in i64, no branches on
   ;; the data except the day clamp.
   (fun qdb_date_add_months_i64 ((var d i32) (var months i64)) -> i32

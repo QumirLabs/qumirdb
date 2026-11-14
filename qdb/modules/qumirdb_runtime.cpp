@@ -593,7 +593,7 @@ static int32_t ParseIntervalAmount(qdb_string_view amount) {
 }
 
 // INTERVAL '<amount>' DAY -> days.
-int32_t qdb_sql_interval(qdb_string_view amount, qdb_string_view unit) {
+int32_t qdb_sql_interval(qdb_string_view amount) {
     return ParseIntervalAmount(amount);
 }
 

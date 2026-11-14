@@ -1,0 +1,2 @@
+Error: arithmetic on a month or year INTERVAL is not supported @ Line: 1, Byte: 14, Column: 14
+

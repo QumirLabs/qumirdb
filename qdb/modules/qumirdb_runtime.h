@@ -112,7 +112,7 @@ bool qdb_try_parse_date(qdb_string_view date, int32_t* days);
 int32_t qdb_sql_date(qdb_string_view date);
 
 // SQL INTERVAL '<amount>' DAY -> days; MONTH/YEAR -> months (year = 12 months).
-int32_t qdb_sql_interval(qdb_string_view amount, qdb_string_view unit);
+int32_t qdb_sql_interval(qdb_string_view amount);
 int32_t qdb_sql_interval_months(qdb_string_view amount, qdb_string_view unit);
 // DATE literal (days) + months, the day clamped to the target month; throws past i32.
 int32_t qdb_sql_date_add_months(int32_t days, int64_t months);
