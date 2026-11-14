@@ -66,6 +66,9 @@ struct TExecutionContext {
     // Lazy interpreter state belongs to the worker, independently of the
     // task's heap. Migrating tasks reuse prepared code on their next worker.
     std::shared_ptr<TVmExecutionState> Vm;
+    // Set by TRowErrorDeferral for the kernel calls it encloses.
+    bool DeferRowErrors = false;
+    bool RowErrorDeferred = false;
 
     int64_t Invoke(
         const std::shared_ptr<TVmProgram>& program,
@@ -75,6 +78,28 @@ struct TExecutionContext {
 
 TExecutionContext* TryExecutionContext() noexcept;
 TExecutionContext& ExecutionContext();
+
+// Called by a runtime function that fails on a row. True when the running kernel
+// call defers row errors: the failure is recorded and the function returns any value.
+bool DeferRowError() noexcept;
+
+// Defers the row errors of the kernel calls in its scope, for an operator that
+// evaluates rows it may not output. Without an execution context errors stay eager.
+class TRowErrorDeferral {
+public:
+    TRowErrorDeferral() noexcept;
+    ~TRowErrorDeferral();
+    TRowErrorDeferral(const TRowErrorDeferral&) = delete;
+    TRowErrorDeferral& operator=(const TRowErrorDeferral&) = delete;
+
+    // Whether a row failed in the scope so far.
+    bool Deferred() const noexcept;
+
+private:
+    TExecutionContext* Context_;
+    bool PreviousDefer_ = false;
+    bool PreviousDeferred_ = false;
+};
 
 class TTaskExecutionGuard {
 public:

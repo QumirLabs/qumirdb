@@ -1454,6 +1454,7 @@ NQumir::NAst::TExprPtr GenProjectKernelAst(
         std::make_shared<TVarStmt>(loc, "out", ptrPtrU8Type),
         std::make_shared<TVarStmt>(loc, "__arena__", ptrI8Type),
         std::make_shared<TVarStmt>(loc, "__regexes__", ptrPtrI8Type),
+        std::make_shared<TVarStmt>(loc, "__input_selection__", ptrU8Type),
     };
 
     std::vector<TExprPtr> bodyStmts;
@@ -1584,11 +1585,27 @@ NQumir::NAst::TExprPtr GenProjectKernelAst(
             emitOutput(field(resultName, fieldName), fieldType);
         }
     }
-    loopSetup.push_back(assign("i",
+    // Null evaluates every row; otherwise only the rows the mask selects, so that
+    // the errors of a deferred first pass are raised for the output rows alone.
+    bodyStmts.push_back(var("input_selection_is_null", boolType));
+    bodyStmts.push_back(assign("input_selection_is_null",
+        std::make_shared<TBinaryExpr>(loc, TOperator("=="),
+            cast(ident("__input_selection__"), i64Type), numI64(0))));
+    auto u8Zero = std::make_shared<TNumberExpr>(loc, int64_t(0));
+    u8Zero->Type = u8Type;
+    auto inputSelected = std::make_shared<TBinaryExpr>(loc, TOperator("||"),
+        ident("input_selection_is_null"),
+        std::make_shared<TBinaryExpr>(loc, TOperator("!="),
+            std::make_shared<TIndexExpr>(loc, ident("__input_selection__"), ident("i")),
+            std::move(u8Zero)));
+    std::vector<TExprPtr> loopBody;
+    loopBody.push_back(std::make_shared<TIfExpr>(loc, std::move(inputSelected),
+        std::make_shared<TBlockExpr>(loc, std::move(loopSetup)), nullptr));
+    loopBody.push_back(assign("i",
         std::make_shared<TBinaryExpr>(loc, TOperator("+"), ident("i"), numI64(1))));
     auto cond = std::make_shared<TBinaryExpr>(loc, TOperator("<"), ident("i"), ident("n"));
     bodyStmts.push_back(std::make_shared<TWhileStmtExpr>(loc, cond,
-        std::make_shared<TBlockExpr>(loc, std::move(loopSetup))));
+        std::make_shared<TBlockExpr>(loc, std::move(loopBody))));
 
     auto funBody = std::make_shared<TBlockExpr>(loc, std::move(bodyStmts));
     auto funDecl = std::make_shared<TFunDecl>(loc, "<project>",
