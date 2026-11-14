@@ -14,6 +14,7 @@
     "distinct_aggregate_order_by_control.sql": {"expect_error": false, "order": "ordered"},
     "distinct_order_by_other_column.sql": {},
     "distinct_order_by_outputs_control.sql": {"expect_error": false, "order": "unordered"},
+    "float_literal_out_of_range.sql": {},
     "group_alias_ambiguous_derived_input.sql": {},
     "group_alias_ambiguous_input.sql": {},
     "group_alias_and_input_key_control.sql": {"expect_error": false, "order": "unordered"},

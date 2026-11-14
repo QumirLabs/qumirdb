@@ -1,0 +1,1 @@
+SELECT x FROM t WHERE x < 1e3088;
