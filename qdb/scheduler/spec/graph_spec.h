@@ -404,7 +404,7 @@ struct TLateMergeNode {
     }
 };
 
-// The spool of a materialized CTE, one segment per producer lane.
+// The spool of a materialized CTE, one segment per lane of each reference.
 struct TCteSpoolSpec {
     uint32_t Segments = 0;
     // Of the spooled rows, which a CTE sink sends.
@@ -427,8 +427,8 @@ struct TCteConsumerStateSpec {
     }
 };
 
-// One lane of a CTE producer: appends In to its segment of the spool and then
-// finishes its lane of Out, the publish task's input.
+// One lane of a CTE producer: deals the batches of In over the segments of the
+// spool from Segment on, then finishes its lane of Out, the publish task's input.
 struct TCteProducerNode {
     TPortSpec In;
     TPortSpec Out;
@@ -465,7 +465,8 @@ struct TCteConsumerNode {
     TPortSpec In;
     TPortSpec Out;
     uint32_t State = 0;
-    // Its lane of the reference, which owns the batches i with i mod lanes == Lane.
+    // Its lane of the reference. The graph holding it reads segment Lane; that
+    // graph's lanes of the reference claim its batches together.
     uint32_t Lane = 0;
 
     void Fields(this auto& self, auto& v)
@@ -479,8 +480,8 @@ struct TCteConsumerNode {
 
 // Sends the batches of Segments of Spool with their segment through code the
 // compute actor binds, as they are appended, and finishes once every lane of
-// In has finished: the segments of this fragment's producer lanes, or every
-// segment of the published spool.
+// In has finished: every segment this fragment's producer lanes write, or the
+// segments of the receiving fragment's consumer lanes.
 struct TCteSinkNode {
     std::vector<TPortSpec> In;
     uint32_t Spool = 0;
@@ -495,9 +496,8 @@ struct TCteSinkNode {
 };
 
 // Appends each batch its code receives to the segment of Spool it was sent
-// from, seals Spool if Seal and finishes every lane of Out. So a sealed copy
-// numbers the batches as the publish fragment's spool does, whatever order
-// they come in: consumer lanes own batches by their index.
+// from, the lane that reads it, seals Spool if Seal and finishes every lane of
+// Out.
 struct TCteSourceNode {
     std::vector<TPortSpec> Out;
     uint32_t Spool = 0;

@@ -59,7 +59,7 @@ TCteSpool::~TCteSpool() {
 }
 
 void TCteSpool::Append(size_t segment, TRowSet rowSet) {
-    assert(SegmentEnds_.empty());
+    assert(!Sealed_);
     {
         auto& target = Segments_[segment];
         std::lock_guard lock(target.Lock);
@@ -74,14 +74,9 @@ void TCteSpool::Append(size_t segment, TRowSet rowSet) {
 }
 
 void TCteSpool::Seal() {
-    assert(SegmentEnds_.empty());
-    SegmentEnds_.reserve(Segments_.size());
-    size_t end = 0;
     // Every writer has finished: the segments no longer change.
-    for (const auto& segment : Segments_) {
-        end += segment.Batches.size();
-        SegmentEnds_.push_back(end);
-    }
+    assert(!Sealed_);
+    Sealed_ = true;
 }
 
 size_t TCteSpool::SegmentCount() const
@@ -106,20 +101,9 @@ std::optional<TRowSet> TCteSpool::TryBatch(size_t segment, size_t index) const {
     return source.Batches[index];
 }
 
-size_t TCteSpool::BatchCount() const {
-    assert(SegmentEnds_.size() == Segments_.size());
-    return SegmentEnds_.empty() ? 0 : SegmentEnds_.back();
-}
-
-const TRowSet& TCteSpool::Batch(size_t index) const {
-    assert(index < BatchCount());
-    const auto end = std::upper_bound(
-        SegmentEnds_.begin(), SegmentEnds_.end(), index);
-    const auto segment = static_cast<size_t>(end - SegmentEnds_.begin());
-    const size_t begin = segment == 0
-        ? 0
-        : SegmentEnds_[segment - 1];
-    return Segments_[segment].Batches[index - begin];
+std::span<const TRowSet> TCteSpool::Batches(size_t segment) const {
+    assert(Sealed_);
+    return Segments_[segment].Batches;
 }
 
 TCteConsumerState::TCteConsumerState(std::shared_ptr<const TCteSpool> spool)
@@ -130,17 +114,17 @@ void TCteConsumerState::AddLane(size_t lane) {
     Lanes_.insert(std::ranges::upper_bound(Lanes_, lane), lane);
 }
 
-std::optional<size_t> TCteConsumerState::Claim() {
+const TRowSet* TCteConsumerState::Claim() {
     // The spool is immutable after publication, so the cursor orders nothing.
-    const size_t claim = Next_.fetch_add(1, std::memory_order_relaxed);
-    // Claims walk the lanes' batches in ascending order: once one is past the
-    // end, so are all later ones. With every lane present index == claim.
-    const size_t index = claim / Lanes_.size() * Spool_->SegmentCount()
-        + Lanes_[claim % Lanes_.size()];
-    if (index >= Spool_->BatchCount()) {
-        return std::nullopt;
+    size_t claim = Next_.fetch_add(1, std::memory_order_relaxed);
+    for (const size_t lane : Lanes_) {
+        const auto batches = Spool_->Batches(lane);
+        if (claim < batches.size()) {
+            return &batches[claim];
+        }
+        claim -= batches.size();
     }
-    return index;
+    return nullptr;
 }
 
 const std::shared_ptr<const TCteSpool>& TCteConsumerState::Spool() const {
@@ -171,6 +155,7 @@ ETaskResult TCteProducerTask::Execute() {
                     Instrumentation_->Output.Add(rowSet);
                 }
                 Spool_->Append(Segment_, rowSet);
+                Segment_ = (Segment_ + 1) % Spool_->SegmentCount();
                 break;
             case EFetchResult::NO_DATA:
                 return ETaskResult::NEED_DATA;
@@ -255,13 +240,12 @@ ETaskResult TCteConsumerTask::Execute() {
         }
     }
 
-    const auto& spool = State_->Spool();
-    TRowSet view = SpoolView(spool, spool->Batch(*Claimed_));
+    TRowSet view = SpoolView(State_->Spool(), *Claimed_);
     if (!Output_.Push(std::move(view))) {
         Release(&view);
         return ETaskResult::BLOCKED_OUTPUT;
     }
-    Claimed_.reset();
+    Claimed_ = nullptr;
     return ETaskResult::OK;
 }
 

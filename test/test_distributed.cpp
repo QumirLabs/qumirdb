@@ -3476,9 +3476,10 @@ constexpr const char* CteSql =
     "WITH r AS (SELECT id, d9 FROM t WHERE id % 3 <> 0) "
     "SELECT COUNT(*) AS n, SUM(id) AS s FROM (SELECT id FROM r UNION ALL SELECT id FROM r WHERE id > 100) u";
 
-// The publish fragment's spool gets every segment once, from a local producer
-// lane or a CTE source; each other fragment with consumers reads a copy of the
-// whole published spool that its CTE source seals.
+// The publish task hears of every producer lane once, from the lane itself or
+// from a CTE source that writes every segment of another fragment's producer
+// lanes. Each other fragment with consumers reads a copy of only the segments
+// of its consumer lanes, which its CTE source seals.
 TEST(DistributedScheduler, SplitsACteIntoSegmentAndSpoolCuts) {
     using namespace NQdb::NScheduler;
     TParquetSource source(DecimalsPath);
@@ -3516,8 +3517,11 @@ TEST(DistributedScheduler, SplitsACteIntoSegmentAndSpoolCuts) {
         return fragments[place.first].Nodes[place.second].Body;
     };
 
+    std::vector<uint32_t> all(segments);
+    std::iota(all.begin(), all.end(), 0u);
     std::vector<uint32_t> published;
     std::map<size_t, uint32_t> copies;
+    std::map<size_t, std::vector<uint32_t>> copied;
     size_t segmentCuts = 0;
     const auto cuts = split.Cuts();
     for (size_t i = 0; i < cuts.size(); ++i) {
@@ -3530,38 +3534,49 @@ TEST(DistributedScheduler, SplitsACteIntoSegmentAndSpoolCuts) {
         const auto& from = std::get<TCteSourceNode>(body(sourceAt));
         if (from.Seal) {
             EXPECT_EQ(sinkAt.first, *publishAt);
-            EXPECT_EQ(to->Segments.size(), segments);
             EXPECT_TRUE(copies.emplace(sourceAt.first, from.Spool).second);
+            copied.emplace(sourceAt.first, to->Segments);
         } else {
             ++segmentCuts;
             EXPECT_EQ(sourceAt.first, *publishAt);
-            EXPECT_EQ(from.Out.size(), to->Segments.size());
-            published.insert(published.end(), to->Segments.begin(), to->Segments.end());
+            EXPECT_EQ(to->Segments, all);
+            for (const auto& out : from.Out) {
+                published.push_back(out.Lane);
+            }
         }
     }
     EXPECT_GT(segmentCuts, 0u);
     EXPECT_FALSE(copies.empty());
 
     size_t consumers = 0;
+    std::map<size_t, std::set<uint32_t>> consumerLanes;
     for (size_t fragment = 0; fragment < fragments.size(); ++fragment) {
         const auto& spec = fragments[fragment];
         for (const auto& node : spec.Nodes) {
             if (const auto* producer = std::get_if<TCteProducerNode>(&node.Body)) {
                 if (fragment == *publishAt) {
-                    published.push_back(producer->Segment);
+                    published.push_back(producer->Out.Lane);
                 }
             } else if (const auto* consumer = std::get_if<TCteConsumerNode>(&node.Body)) {
                 ++consumers;
                 const auto spool = spec.CteConsumerStates.at(consumer->State).Spool;
                 EXPECT_EQ(spool, fragment == *publishAt ? 0u : copies.at(fragment)) << "fragment " << fragment;
+                if (fragment != *publishAt) {
+                    consumerLanes[fragment].insert(consumer->Lane);
+                }
             }
         }
     }
     std::ranges::sort(published);
-    std::vector<uint32_t> all(segments);
-    std::iota(all.begin(), all.end(), 0u);
     EXPECT_EQ(published, all);
     EXPECT_EQ(consumers, 2 * segments);
+    for (const auto& [fragment, lanes] : consumerLanes) {
+        EXPECT_EQ(copied.at(fragment), std::vector<uint32_t>(lanes.begin(), lanes.end())) << "fragment " << fragment;
+    }
+    // Some copy holds fewer segments than the spool.
+    EXPECT_TRUE(std::ranges::any_of(copied, [&](const auto& copy) {
+        return copy.second.size() < segments;
+    }));
 
     // The fragments build, with the placeholders of each cut on their ends.
     auto image = CompileKernelImage(lowered.Kernels);
@@ -3706,8 +3721,8 @@ TEST(DistributedScheduler, QueryActorRunsRuntimeFiltersAcrossNodes) {
 TEST(DistributedScheduler, QueryActorRunsCtesAcrossNodes) {
     using namespace NQdb::NScheduler;
     TQueryCluster cluster;
-    // Small shuffle batches give a join's lanes several batches each, so the
-    // numbering of a spool's batches spans segments.
+    // Small shuffle batches give a join's lanes several batches each, so a
+    // spool segment holds batches of several producer lanes.
     cluster.Settings.HashShuffle.TargetOutputBatchRows = 16;
     cluster.Settings.HashShuffle.MaxOutputBatchRows = 16;
     ASSERT_NO_FATAL_FAILURE(cluster.Start());

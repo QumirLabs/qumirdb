@@ -2315,19 +2315,30 @@ TEST(SchedulerRuntimeAdapter, HashShuffleTreatsFullSelectionAsNoSelection) {
     }
 }
 
-std::vector<size_t> ClaimAll(TCteConsumerState& state) {
-    std::vector<size_t> claims;
-    while (const auto claim = state.Claim()) {
-        claims.push_back(*claim);
+// The row counts of the batches a state hands out, in claim order.
+std::vector<int64_t> ClaimAll(TCteConsumerState& state) {
+    std::vector<int64_t> claims;
+    while (const auto* batch = state.Claim()) {
+        claims.push_back(batch->RowCount);
     }
     return claims;
 }
 
-// The lanes of one reference split between two graphs read each batch once.
+// The row counts of the batches of a sealed segment.
+std::vector<int64_t> SegmentRows(const TCteSpool& spool, size_t segment) {
+    std::vector<int64_t> rows;
+    for (const auto& batch : spool.Batches(segment)) {
+        rows.push_back(batch.RowCount);
+    }
+    return rows;
+}
+
+// Lane l reads segment l, so the lanes of one reference split between two
+// graphs read each batch once.
 TEST(SchedulerRuntimeAdapter, CteReferenceStatesSplitBatchesByLane) {
     auto spool = std::make_shared<TCteSpool>(3);
-    for (size_t i = 0; i < 7; ++i) {
-        spool->Append(i % 3, TRowSet{.RefCount = 1});
+    for (int64_t i = 0; i < 7; ++i) {
+        spool->Append(i % 3, TRowSet{.RowCount = i, .RefCount = 1});
     }
     spool->Seal();
 
@@ -2335,15 +2346,35 @@ TEST(SchedulerRuntimeAdapter, CteReferenceStatesSplitBatchesByLane) {
     for (size_t lane : {1, 0, 2}) {
         whole.AddLane(lane);
     }
-    EXPECT_EQ(ClaimAll(whole), (std::vector<size_t>{0, 1, 2, 3, 4, 5, 6}));
+    EXPECT_EQ(ClaimAll(whole), (std::vector<int64_t>{0, 3, 6, 1, 4, 2, 5}));
 
     TCteConsumerState first(spool);
     first.AddLane(2);
     first.AddLane(0);
     TCteConsumerState second(spool);
     second.AddLane(1);
-    EXPECT_EQ(ClaimAll(first), (std::vector<size_t>{0, 2, 3, 5, 6}));
-    EXPECT_EQ(ClaimAll(second), (std::vector<size_t>{1, 4}));
+    EXPECT_EQ(ClaimAll(first), (std::vector<int64_t>{0, 3, 6, 2, 5}));
+    EXPECT_EQ(ClaimAll(second), (std::vector<int64_t>{1, 4}));
+}
+
+// A producer lane deals its batches over the segments in turn, from its own on.
+TEST(SchedulerRuntimeAdapter, CteProducerDealsItsBatchesOverTheSegments) {
+    auto spool = std::make_shared<TCteSpool>(3);
+    TOneToOneConnection input(8);
+    TGatherConnection completion;
+    completion.Resize(1, 1);
+    TCteProducerTask producer(spool, 1, {.Connection = &input}, {.Connection = &completion});
+    for (int64_t rows = 1; rows <= 4; ++rows) {
+        ASSERT_TRUE(input.Push(0, TRowSet{.RowCount = rows, .RefCount = 1}));
+    }
+    input.Finish(0);
+    EXPECT_EQ(producer.Execute(), ETaskResult::FINISHED);
+    TRowSet none{};
+    EXPECT_EQ(TInputPort{.Connection = &completion}.Fetch(none), EFetchResult::FINISHED);
+    spool->Seal();
+    EXPECT_EQ(SegmentRows(*spool, 0), (std::vector<int64_t>{3}));
+    EXPECT_EQ(SegmentRows(*spool, 1), (std::vector<int64_t>{1, 4}));
+    EXPECT_EQ(SegmentRows(*spool, 2), (std::vector<int64_t>{2}));
 }
 
 // The port of `kind` on {from, lane} moves away once and then moves back.
@@ -2564,11 +2595,8 @@ TEST(SchedulerRuntimeAdapter, CteSourceAppendsEachBatchToItsSegment) {
         EXPECT_EQ(spool->TryBatch(1, 0)->RowCount, 7);
         EXPECT_EQ(spool->TryBatch(1, 1)->RowCount, 9);
         if (seal) {
-            // Numbered segment by segment, whatever order the batches came in.
-            ASSERT_EQ(spool->BatchCount(), 3u);
-            EXPECT_EQ(spool->Batch(0).RowCount, 8);
-            EXPECT_EQ(spool->Batch(1).RowCount, 7);
-            EXPECT_EQ(spool->Batch(2).RowCount, 9);
+            EXPECT_EQ(SegmentRows(*spool, 0), (std::vector<int64_t>{8}));
+            EXPECT_EQ(SegmentRows(*spool, 1), (std::vector<int64_t>{7, 9}));
         }
     }
 
@@ -2580,9 +2608,10 @@ TEST(SchedulerRuntimeAdapter, CteSourceAppendsEachBatchToItsSegment) {
     EXPECT_THROW(source.Execute(), std::runtime_error);
 }
 
-// Writers append to three segments while a sink streams them to a source
-// that fills a copy: every batch is sent once, many before the writers
-// finish, and the sealed copy numbers the batches as the spool does.
+// Three writers deal their batches over three segments, as producer lanes do,
+// while a sink streams them to a source that fills a copy: every batch is sent
+// once, many before the writers finish, and each segment of the sealed copy is
+// that of the spool.
 TEST(SchedulerRuntimeAdapter, CteSinkStreamsAGrowingSpoolIntoAnEqualCopy) {
     constexpr uint32_t segments = 3;
     constexpr int64_t batches = 200;
@@ -2639,14 +2668,15 @@ TEST(SchedulerRuntimeAdapter, CteSinkStreamsAGrowingSpoolIntoAnEqualCopy) {
     }), link);
 
     std::vector<std::thread> writers;
-    for (uint32_t segment = 0; segment < segments; ++segment) {
-        writers.emplace_back([&, segment] {
+    for (uint32_t writer = 0; writer < segments; ++writer) {
+        writers.emplace_back([&, writer] {
             for (int64_t i = 0; i < batches; ++i) {
                 // Distinct row counts tell the batches apart.
-                spool->Append(segment, TRowSet{.RowCount = segment * batches + i + 1, .RefCount = 1});
+                spool->Append(static_cast<size_t>(writer + i) % segments,
+                    TRowSet{.RowCount = writer * batches + i + 1, .RefCount = 1});
                 std::this_thread::sleep_for(std::chrono::microseconds(50));
             }
-            TOutputPort{.Connection = &completion, .Lane = segment}.Finish();
+            TOutputPort{.Connection = &completion, .Lane = writer}.Finish();
             link->WritersLeft.fetch_sub(1);
         });
     }
@@ -2674,9 +2704,193 @@ TEST(SchedulerRuntimeAdapter, CteSinkStreamsAGrowingSpoolIntoAnEqualCopy) {
     EXPECT_EQ(link->Sent, segments * batches);
     EXPECT_GT(link->SentEarly, 0u);
     spool->Seal();
-    ASSERT_EQ(copy->BatchCount(), spool->BatchCount());
-    for (size_t i = 0; i < spool->BatchCount(); ++i) {
-        ASSERT_EQ(copy->Batch(i).RowCount, spool->Batch(i).RowCount) << i;
+    for (uint32_t segment = 0; segment < segments; ++segment) {
+        EXPECT_EQ(SegmentRows(*copy, segment), SegmentRows(*spool, segment)) << segment;
+    }
+}
+
+// A CTE stream between two fragments in one process: the sink's batches go to
+// the source in order, each with its segment.
+struct TCteLink {
+    std::deque<std::pair<uint32_t, TRowSet>> Batches;
+    size_t Sent = 0;
+    bool Finished = false;
+};
+
+std::shared_ptr<const TCteSinkCode> CteLinkSinkCode() {
+    return std::make_shared<const TCteSinkCode>(TCteSinkCode{
+        .Write = [](void* state, const TRowSet& rows, uint32_t segment) {
+            auto& link = *static_cast<TCteLink*>(state);
+            // The sink releases its view after Write; the copy owns the reference taken here.
+            auto& view = const_cast<TRowSet&>(rows);
+            Retain(&view);
+            TRowSet copy = view;
+            copy.RefCount = 1;
+            link.Batches.emplace_back(segment, copy);
+            ++link.Sent;
+            return ETaskResult::OK;
+        },
+        .Finish = [](void* state) {
+            static_cast<TCteLink*>(state)->Finished = true;
+            return ETaskResult::OK;
+        },
+    });
+}
+
+std::shared_ptr<const TCteSourceCode> CteLinkSourceCode() {
+    return std::make_shared<const TCteSourceCode>(TCteSourceCode{
+        .Next = [](void* state, TRowSet& rows, uint32_t& segment) {
+            auto& link = *static_cast<TCteLink*>(state);
+            if (link.Batches.empty()) {
+                return link.Finished ? ETaskResult::FINISHED : ETaskResult::WAITING;
+            }
+            std::tie(segment, rows) = link.Batches.front();
+            link.Batches.pop_front();
+            return ETaskResult::OK;
+        },
+    });
+}
+
+// A spool of 3 lanes read by two references, split as a cut would split it:
+// fragment A writes segments for the publish fragment B and reads a copy
+// (A == C), and D reads a copy for lane 2 of both references. Each reference
+// reads every batch once, and each copy gets only the segments of its lanes,
+// also when they are empty.
+TEST(SchedulerRuntimeAdapter, CteFragmentsReadEachBatchOnceFromCopiesOfTheirLanes) {
+    constexpr size_t lanes = 3;
+    constexpr size_t refs = 2;
+    // Batches of producer lanes 0 and 1 (in A) and 2 (in B): first two or more
+    // in every segment, then none in segment 2.
+    for (const auto& produced : {std::vector<int64_t>{5, 4, 3}, std::vector<int64_t>{2, 1, 0}}) {
+        SCOPED_TRACE(produced[0]);
+        std::vector<std::unique_ptr<ITask>> tasks;
+        auto stateOf = [](const std::shared_ptr<TCteSpool>& spool, size_t lane) {
+            auto state = std::make_shared<TCteConsumerState>(spool);
+            state->AddLane(lane);
+            return state;
+        };
+        TOneToOneConnection outputs[refs] = {TOneToOneConnection(64), TOneToOneConnection(64)};
+        for (auto& output : outputs) {
+            output.Resize(lanes, lanes);
+        }
+        auto consumer = [&](std::shared_ptr<TCteConsumerState> state, TInputPort completion, size_t ref, size_t lane) {
+            tasks.push_back(std::make_unique<TCteConsumerTask>(
+                std::move(state), completion, TOutputPort{.Connection = &outputs[ref], .Lane = lane}));
+        };
+
+        TOneToOneConnection input(16);
+        input.Resize(lanes, lanes);
+        std::vector<int64_t> all;
+        for (size_t lane = 0; lane < lanes; ++lane) {
+            for (int64_t i = 0; i < produced[lane]; ++i) {
+                // Distinct row counts tell the batches apart.
+                all.push_back(static_cast<int64_t>(lane) * 100 + i + 1);
+                ASSERT_TRUE(input.Push(lane, TRowSet{.RowCount = all.back(), .RefCount = 1}));
+            }
+            input.Finish(lane);
+        }
+
+        auto a = std::make_shared<TCteSpool>(lanes);
+        auto b = std::make_shared<TCteSpool>(lanes);
+        auto copyA = std::make_shared<TCteSpool>(lanes);
+        auto copyD = std::make_shared<TCteSpool>(lanes);
+        TGatherConnection writtenA;
+        writtenA.Resize(2, 1);
+        TGatherConnection writtenB;
+        writtenB.Resize(lanes, 1);
+        TBroadcastConnection completionB;
+        completionB.Resize(1, refs * lanes);
+        TBroadcastConnection completionA;
+        completionA.Resize(1, 2);
+        TBroadcastConnection completionD;
+        completionD.Resize(1, 2);
+        auto toB = std::make_shared<TCteLink>();
+        auto toA = std::make_shared<TCteLink>();
+        auto toD = std::make_shared<TCteLink>();
+        auto completion = [&](size_t ref, size_t lane) {
+            return TInputPort{.Connection = &completionB, .Lane = ref * lanes + lane};
+        };
+
+        // A: producer lanes 0 and 1, every segment they write to B.
+        for (size_t lane : {0, 1}) {
+            tasks.push_back(std::make_unique<TCteProducerTask>(a, lane,
+                TInputPort{.Connection = &input, .Lane = lane}, TOutputPort{.Connection = &writtenA, .Lane = lane}));
+        }
+        auto sinkA = std::make_unique<TCteSinkTask>(a, std::vector<uint32_t>{0, 1, 2},
+            std::vector<TInputPort>{{.Connection = &writtenA}});
+        sinkA->BindCode(CteLinkSinkCode(), toB);
+        tasks.push_back(std::move(sinkA));
+
+        // B: producer lane 2, A's segments into lanes 0 and 1 of the publish input.
+        tasks.push_back(std::make_unique<TCteProducerTask>(b, 2,
+            TInputPort{.Connection = &input, .Lane = 2}, TOutputPort{.Connection = &writtenB, .Lane = 2}));
+        auto sourceB = std::make_unique<TCteSourceTask>(b, false, std::vector<TOutputPort>{
+            {.Connection = &writtenB, .Lane = 0}, {.Connection = &writtenB, .Lane = 1}});
+        sourceB->BindCode(CteLinkSourceCode(), toB);
+        tasks.push_back(std::move(sourceB));
+        tasks.push_back(std::make_unique<TCtePublishTask>(
+            b, TInputPort{.Connection = &writtenB}, TOutputPort{.Connection = &completionB}));
+        consumer(stateOf(b, 1), completion(0, 1), 0, 1);
+        consumer(stateOf(b, 0), completion(1, 0), 1, 0);
+        // To A: lane 0 of ref 0 and lane 1 of ref 1; to D: lane 2 of both.
+        auto sinkToA = std::make_unique<TCteSinkTask>(b, std::vector<uint32_t>{0, 1},
+            std::vector<TInputPort>{completion(0, 0), completion(1, 1)});
+        sinkToA->BindCode(CteLinkSinkCode(), toA);
+        tasks.push_back(std::move(sinkToA));
+        auto sinkToD = std::make_unique<TCteSinkTask>(b, std::vector<uint32_t>{2},
+            std::vector<TInputPort>{completion(0, 2), completion(1, 2)});
+        sinkToD->BindCode(CteLinkSinkCode(), toD);
+        tasks.push_back(std::move(sinkToD));
+
+        // The copies in A and D.
+        for (auto [copy, link, copyCompletion] :
+            {std::tuple{copyA, toA, &completionA}, std::tuple{copyD, toD, &completionD}})
+        {
+            auto source = std::make_unique<TCteSourceTask>(
+                copy, true, std::vector<TOutputPort>{{.Connection = copyCompletion}});
+            source->BindCode(CteLinkSourceCode(), link);
+            tasks.push_back(std::move(source));
+        }
+        consumer(stateOf(copyA, 0), {.Connection = &completionA, .Lane = 0}, 0, 0);
+        consumer(stateOf(copyA, 1), {.Connection = &completionA, .Lane = 1}, 1, 1);
+        consumer(stateOf(copyD, 2), {.Connection = &completionD, .Lane = 0}, 0, 2);
+        consumer(stateOf(copyD, 2), {.Connection = &completionD, .Lane = 1}, 1, 2);
+
+        // Runs every task in turn, as a scheduler might, until all have finished.
+        std::vector<bool> finished(tasks.size());
+        auto done = [&] {
+            return std::ranges::find(finished, false) == finished.end();
+        };
+        for (size_t round = 0; round < 100 && !done(); ++round) {
+            for (size_t i = 0; i < tasks.size(); ++i) {
+                if (!finished[i]) {
+                    finished[i] = tasks[i]->Execute() == ETaskResult::FINISHED;
+                }
+            }
+        }
+        ASSERT_TRUE(done());
+
+        std::ranges::sort(all);
+        for (auto& output : outputs) {
+            std::vector<int64_t> read;
+            for (size_t lane = 0; lane < lanes; ++lane) {
+                TRowSet rows{};
+                while (TInputPort{.Connection = &output, .Lane = lane}.Fetch(rows) == EFetchResult::OK) {
+                    read.push_back(rows.RowCount);
+                    Release(&rows);
+                }
+            }
+            std::ranges::sort(read);
+            EXPECT_EQ(read, all);
+        }
+        EXPECT_EQ(toB->Sent, static_cast<size_t>(produced[0] + produced[1]));
+        EXPECT_EQ(toA->Sent, b->Batches(0).size() + b->Batches(1).size());
+        EXPECT_EQ(toD->Sent, b->Batches(2).size());
+        for (size_t segment = 0; segment < lanes; ++segment) {
+            const auto rows = SegmentRows(*b, segment);
+            EXPECT_EQ(SegmentRows(*copyA, segment), segment < 2 ? rows : std::vector<int64_t>{}) << segment;
+            EXPECT_EQ(SegmentRows(*copyD, segment), segment == 2 ? rows : std::vector<int64_t>{}) << segment;
+        }
     }
 }
 

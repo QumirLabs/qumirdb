@@ -46,10 +46,13 @@ struct TCteSpoolWatcher {
     std::atomic<bool> Armed = false;
 };
 
-// The rows of a materialized CTE. Each segment has one writer, a producer lane
-// or a CTE source. Before Seal, CTE sinks read a segment while it is appended
-// to, under the segment's lock; once sealed the spool is immutable and read
-// concurrently without locks. Writers, readers and their views share ownership.
+// The rows of a materialized CTE. Segment l belongs to lane l of each
+// reference: the graph holding that lane reads it, so a fragment needs only the
+// segments of its lanes.
+// Producer lanes and CTE sources append under the segment's lock, and before
+// Seal CTE sinks read a segment while it grows; once sealed the spool is
+// immutable and read concurrently without locks. Writers, readers and their
+// views share ownership.
 class TCteSpool {
 public:
     explicit TCteSpool(size_t segments, std::vector<TValueLayout> rowLayouts = {});
@@ -70,9 +73,8 @@ public:
     // Batch `index` of the segment once it is appended, also while the segment grows.
     std::optional<TRowSet> TryBatch(size_t segment, size_t index) const;
 
-    // Consumer side, after Seal. Batches are numbered segment by segment.
-    size_t BatchCount() const;
-    const TRowSet& Batch(size_t index) const;
+    // Consumer side, after Seal.
+    std::span<const TRowSet> Batches(size_t segment) const;
 
 private:
     struct TSegment {
@@ -83,23 +85,22 @@ private:
     std::vector<TSegment> Segments_;
     std::vector<TValueLayout> RowLayouts_;
     std::vector<TCteSpoolWatcher*> Watchers_;
-    // Exclusive end of each segment in the batch numbering.
-    std::vector<size_t> SegmentEnds_;
+    bool Sealed_ = false;
 };
 
 // The read progress of one CTE reference in one graph, shared by its lanes
-// there. Batch i belongs to lane i mod SegmentCount(), so lanes of one
-// reference in different graphs read disjoint batches. A lane claims the next
-// unread batch of the graph's lanes, morsel-style, so each batch reaches
-// exactly one lane and an idle lane takes the work a busy one has not started.
+// there. It reads the segments of those lanes, so graphs read disjoint batches.
+// The lanes share one cursor over these segments: a lane claims the next unread
+// batch, morsel-style, so each batch reaches exactly one lane and an idle lane
+// takes the work a busy one has not started.
 class TCteConsumerState {
 public:
     explicit TCteConsumerState(std::shared_ptr<const TCteSpool> spool);
 
     // Before the first Claim: a lane of the reference in this graph.
     void AddLane(size_t lane);
-    // Valid after publication; empty once every batch of the lanes has been claimed.
-    std::optional<size_t> Claim();
+    // Valid after publication; null once every batch of the lanes has been claimed.
+    const TRowSet* Claim();
     const std::shared_ptr<const TCteSpool>& Spool() const;
 
 private:
@@ -109,9 +110,11 @@ private:
     std::atomic<size_t> Next_ = 0;
 };
 
-// One lane of a CTE producer: appends its input to its own spool segment and
-// finishes its completion lane at the end of the input. The spool has no
-// capacity limit, so no consumer can block the producer.
+// One lane of a CTE producer: deals its input batches over the spool segments
+// in turn, from its own segment on, and finishes its completion lane at the end
+// of the input. Dealing gives the consumer lanes equal shares however the
+// definition's lanes are skewed. The spool has no capacity limit, so no
+// consumer can block the producer.
 class TCteProducerTask final : public ITask {
 public:
     TCteProducerTask(
@@ -126,6 +129,7 @@ public:
 
 private:
     std::shared_ptr<TCteSpool> Spool_;
+    // The segment of the next batch.
     size_t Segment_ = 0;
     TInputPort Input_;
     TOutputPort Completion_;
@@ -171,15 +175,16 @@ private:
     TInputPort Completion_;
     TOutputPort Output_;
     // A claimed batch whose push was refused; no other lane can take it.
-    std::optional<size_t> Claimed_;
+    const TRowSet* Claimed_ = nullptr;
     bool Published_ = false;
     bool Finished_ = false;
 };
 
 // Sends the batches of Segments to another fragment, with their segment,
-// through code the compute actor binds: the segments of this fragment's
-// producer lanes, or every segment of the published spool. It streams each
-// batch as it is appended and finishes once every input lane has finished.
+// through code the compute actor binds: every segment this fragment's producer
+// lanes write, or the segments of the receiving fragment's consumer lanes. It
+// streams each batch as it is appended and finishes once every input lane has
+// finished.
 class TCteSinkTask final : public ITask {
 public:
     // Without a spool, a placeholder with unbound inputs.
@@ -218,10 +223,9 @@ private:
     bool Finished_ = false;
 };
 
-// Appends each batch its code receives to the segment it was sent from, so a
-// copy numbers the batches as the spool it copies does. At their end it seals
-// the spool if it is this fragment's copy of a published spool, then finishes
-// every output lane.
+// Appends each batch its code receives to the segment it was sent from, so the
+// batch keeps the lane that reads it. At their end it seals the spool if it is
+// this fragment's copy of a published spool, then finishes every output lane.
 class TCteSourceTask final : public ITask {
 public:
     // Without a spool, a placeholder with unbound outputs.
