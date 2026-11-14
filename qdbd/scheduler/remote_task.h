@@ -95,6 +95,9 @@ struct TRemoteStreamLimits {
     size_t ChunkBytes = 256 << 10;
     size_t WindowBytes = 2 << 20;
     size_t WindowChunks = 16;
+    // Send a partial chunk only when the outbox is full or the input has
+    // finished: for a stream its receiver reads after the finish (a CTE spool).
+    bool FullChunks = false;
 };
 
 // Worker -> ComputeActor. The sink task writes into a bounded outbox; the actor
@@ -111,8 +114,8 @@ struct TRemoteSinkState {
         TRemoteStreamLimits limits = {});
     ~TRemoteSinkState();
 
-    // TSinkCode::TWrite: OK or WAITING (the outbox is full).
-    ETaskResult Write(const TRowSet& rowSet);
+    // TSinkCode::TWrite and TCteSinkCode::TWrite: OK or WAITING (the outbox is full).
+    ETaskResult Write(const TRowSet& rowSet, uint32_t segment = 0);
     // TSinkCode::TFinish
     ETaskResult Finish();
 
@@ -182,9 +185,12 @@ struct TRemoteSinkState {
     struct TQueued {
         TRowSet RowSet{};
         uint64_t Bytes = 0;
+        uint32_t Segment = 0;
     };
     TMPSCQueue<TQueued> Outbox;
     std::atomic<uint64_t> QueuedBytes = 0;
+    // FullChunks: the outbox is full of row sets that make less than a chunk.
+    std::atomic<bool> Flush = false;
     std::atomic<bool> Queued = false;
     std::atomic<bool> InputFinished = false;
     uint64_t Written = 0; // worker only until InputFinished: rows pushed into the outbox
@@ -199,6 +205,11 @@ struct TRemoteSinkState {
     bool FinishSent = false;
 
 private:
+    // A full chunk; the outbox may hold less than ChunkBytes.
+    size_t FullChunkBytes() const {
+        return std::min(Limits.ChunkBytes, Limits.OutboxBytes);
+    }
+
     bool WindowOpen() const {
         return InFlightBytes < Limits.WindowBytes && Sent - Confirmed < Limits.WindowChunks;
     }
@@ -206,12 +217,19 @@ private:
     // Packs queued row sets up to ChunkBytes into the next chunk; false if none is queued.
     template <class TSend>
     bool SendQueued(TSend& send) {
+        if (Limits.FullChunks && QueuedBytes.load() < FullChunkBytes() && !InputFinished.load()
+            && !Flush.exchange(false))
+        {
+            return false;
+        }
         std::vector<TRowSet> rowSets;
+        std::vector<uint32_t> segments;
         uint64_t bytes = 0;
         TQueued queued;
         while (bytes < Limits.ChunkBytes && Outbox.TryPop(queued)) {
             QueuedBytes.fetch_sub(queued.Bytes);
             rowSets.push_back(queued.RowSet);
+            segments.push_back(queued.Segment);
             bytes += queued.Bytes;
             ++Popped;
         }
@@ -220,7 +238,7 @@ private:
         }
         InFlight.push_back(bytes);
         InFlightBytes += bytes;
-        send(NRemote::TDataChunk(DstTaskId, ++Sent, std::move(rowSets), Descriptor.data()));
+        send(NRemote::TDataChunk(DstTaskId, ++Sent, std::move(rowSets), Descriptor.data(), std::move(segments)));
         return true;
     }
 
@@ -252,8 +270,8 @@ struct TRemoteSourceState {
     uint64_t TakeApplied();
     void SendConfirm(NNet::NActors::TActorContext::TPtr& ctx);
 
-    // TSourceCode::TNext
-    ETaskResult Next(TRowSet& rowSet);
+    // TSourceCode::TNext and TCteSourceCode::TNext.
+    ETaskResult Next(TRowSet& rowSet, uint32_t& segment);
 
     const uint64_t Id;
     NNet::NActors::TActorId PeerActor;
@@ -269,7 +287,7 @@ struct TRemoteSourceState {
     uint64_t Confirmed = 0;
 
 private:
-    bool Pop(TRowSet& rowSet);
+    bool Pop(TRowSet& rowSet, uint32_t& segment);
 
     // Worker only: the chunk being handed out and its next row set.
     NRemote::TDataChunk Current;
@@ -342,6 +360,21 @@ std::pair<std::shared_ptr<const TSourceCode>, std::shared_ptr<TRemoteSourceState
     uint64_t peerTaskId,
     TActorNotificationChannel& actorChannel,
     size_t inboxCapacity = TRemoteStreamLimits{}.WindowChunks);
+
+// Code and state for TCteSinkTask / TCteSourceTask: the remote ones that carry
+// the segment of each batch.
+std::pair<std::shared_ptr<const TCteSinkCode>, std::shared_ptr<TRemoteSinkState>> MakeRemoteCteSink(
+    uint64_t id,
+    NNet::NActors::TActorId actorId,
+    uint64_t dstTaskId,
+    std::span<const TValueLayout> descriptor,
+    TActorNotificationChannel& actorChannel);
+
+std::pair<std::shared_ptr<const TCteSourceCode>, std::shared_ptr<TRemoteSourceState>> MakeRemoteCteSource(
+    uint64_t id,
+    NNet::NActors::TActorId peerActor,
+    uint64_t peerTaskId,
+    TActorNotificationChannel& actorChannel);
 
 // Code and state for TRuntimeFilterSinkTask / TRuntimeFilterSourceTask.
 std::pair<std::shared_ptr<const TRuntimeFilterSinkCode>, std::shared_ptr<TRuntimeFilterSinkState>>

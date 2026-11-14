@@ -232,6 +232,7 @@ struct TChunkHeader {
 struct TPartHeader {
     uint64_t Rows;
     uint64_t HasHash;
+    uint64_t Segment;
 };
 
 struct TChunkColumn {
@@ -372,6 +373,9 @@ size_t ChunkSize(const TDataChunk& message) {
     if (message.RowSets.empty()) {
         Invalid("a chunk carries no row sets");
     }
+    if (!message.Segments.empty() && message.Segments.size() != message.RowSets.size()) {
+        Invalid("a chunk has segments for some of its row sets");
+    }
     size_t size = sizeof(TChunkHeader);
     for (const auto& rowSet : message.RowSets) {
         if (rowSet.ColumnCount != message.RowSets.front().ColumnCount) {
@@ -478,12 +482,13 @@ void WriteValues(char* out, const TColumn& column, const TRowSet& rowSet, uint64
 }
 
 // Writes the part at `base`, which PartSize has checked; returns its size.
-size_t WritePart(char* base, const TRowSet& rowSet, const TValueLayout* descriptor) {
+size_t WritePart(char* base, const TRowSet& rowSet, uint32_t segment, const TValueLayout* descriptor) {
     const uint64_t rows = SelectedRows(rowSet);
     const auto source = static_cast<uint64_t>(rowSet.RowCount);
     const TPartHeader header{
         .Rows = rows,
         .HasHash = rowSet.Hash != nullptr,
+        .Segment = segment,
     };
     std::memcpy(base, &header, sizeof(header));
     size_t pos = sizeof(header);
@@ -553,8 +558,8 @@ void WriteChunk(const TDataChunk& message, std::span<char> out) {
     };
     std::memcpy(base, &header, sizeof(header));
     size_t pos = sizeof(header);
-    for (const auto& rowSet : message.RowSets) {
-        pos += WritePart(base + pos, rowSet, message.Descriptor);
+    for (size_t i = 0; i < message.RowSets.size(); ++i) {
+        pos += WritePart(base + pos, message.RowSets[i], message.Segment(i), message.Descriptor);
     }
     if (pos != out.size()) {
         Invalid("payload does not match its size");
@@ -637,6 +642,7 @@ void ReadChunk(TDataChunk& message, TBlob& blob) {
         std::unique_ptr<TChunkStorage> Storage;
         uint64_t Rows = 0;
         uint64_t* Hash = nullptr;
+        uint32_t Segment = 0;
     };
     std::vector<TPart> parts;
     for (uint64_t index = 0; index < header.Parts; ++index) {
@@ -652,9 +658,16 @@ void ReadChunk(TDataChunk& message, TBlob& blob) {
         {
             Invalid("invalid row set dimensions");
         }
+        if (partHeader.Segment > std::numeric_limits<uint32_t>::max()) {
+            Invalid("invalid segment");
+        }
         const bool hasHash = Flag(partHeader.HasHash);
         pos = AlignUp(entries + columns * sizeof(TChunkColumn));
-        auto& part = parts.emplace_back(TPart{.Storage = std::make_unique<TChunkStorage>(), .Rows = rows});
+        auto& part = parts.emplace_back(TPart{
+            .Storage = std::make_unique<TChunkStorage>(),
+            .Rows = rows,
+            .Segment = static_cast<uint32_t>(partHeader.Segment),
+        });
         auto& storage = *part.Storage;
         storage.Columns.resize(columns);
         for (uint64_t i = 0; i < columns; ++i) {
@@ -704,8 +717,11 @@ void ReadChunk(TDataChunk& message, TBlob& blob) {
         blob.Size = 0;
     }
     std::vector<TRowSet> rowSets;
+    std::vector<uint32_t> segments;
     rowSets.reserve(parts.size());
+    segments.reserve(parts.size());
     for (auto& part : parts) {
+        segments.push_back(part.Segment);
         part.Storage->Bytes = bytes;
         rowSets.push_back(TRowSet{
             .Columns = part.Storage->Columns.data(),
@@ -720,7 +736,7 @@ void ReadChunk(TDataChunk& message, TBlob& blob) {
             .RefCount = 1,
         });
     }
-    message = TDataChunk(header.DstTaskId, header.Seq, std::move(rowSets));
+    message = TDataChunk(header.DstTaskId, header.Seq, std::move(rowSets), nullptr, std::move(segments));
 }
 
 } // namespace

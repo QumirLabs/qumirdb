@@ -272,7 +272,7 @@ TEST(DistributedSerialization, ChunkCarriesSeveralRowSetsSharingTheBlob) {
     TDataChunk original(5, 9, {
         {.Columns = &columns[0], .ColumnCount = 1, .RowCount = 3},
         {.Columns = &columns[1], .ColumnCount = 1, .RowCount = 0},
-        {.Columns = &columns[2], .ColumnCount = 1, .RowCount = 2, .Selection = selection.data()}}, &layout);
+        {.Columns = &columns[2], .ColumnCount = 1, .RowCount = 2, .Selection = selection.data()}}, &layout, {4, 0, 7});
     auto blob = MakeBlob(Encode(original));
     const auto* begin = static_cast<const char*>(blob.Data.get());
     const auto* end = begin + blob.Size;
@@ -281,6 +281,7 @@ TEST(DistributedSerialization, ChunkCarriesSeveralRowSetsSharingTheBlob) {
     EXPECT_EQ(decoded.DstTaskId, 5);
     EXPECT_EQ(decoded.Seq, 9);
     ASSERT_EQ(decoded.RowSets.size(), 3u);
+    EXPECT_EQ(decoded.Segments, (std::vector<uint32_t>{4, 0, 7}));
     auto rowSets = decoded.Take();
     const auto values = [](const TRowSet& rowSet) {
         const auto* data = reinterpret_cast<const int64_t*>(rowSet.Columns[0].Data);
@@ -297,6 +298,14 @@ TEST(DistributedSerialization, ChunkCarriesSeveralRowSetsSharingTheBlob) {
     EXPECT_EQ(values(rowSets[2]), (std::vector<int64_t>{50}));
     Release(&rowSets[2]);
 
+    // Without segments a chunk's row sets are all of segment 0.
+    original.Segments.clear();
+    TDataChunk unsegmented;
+    Decode(unsegmented, Encode(original));
+    EXPECT_EQ(unsegmented.Segments, (std::vector<uint32_t>{0, 0, 0}));
+    original.Segments = {1};
+    EXPECT_THROW(Encode(original), std::runtime_error);
+    original.Segments.clear();
     TColumn wide[2] = {};
     original.RowSets.push_back({.Columns = wide, .ColumnCount = 2, .RowCount = 0});
     EXPECT_THROW(Encode(original), std::runtime_error);
@@ -590,12 +599,12 @@ TEST(DistributedSerialization, RejectsEveryTruncatedPrefixWithoutChangingOutput)
 }
 
 // The chunk header holds DstTaskId, Seq, Columns and Parts as uint64 (bytes 0..31); the
-// first part's header holds Rows and HasHash (bytes 32..47), then one entry per column:
-// Width, Bitmap, HasMask, OffsetWidth (bytes 48.. for column 0).
+// first part's header holds Rows, HasHash and Segment (bytes 32..55), then one entry per
+// column: Width, Bitmap, HasMask, OffsetWidth (bytes 56.. for column 0).
 TEST(DistributedSerialization, RejectsInvalidDimensionsAndLayouts) {
     TMixedBatch original;
     const auto bytes = Encode(original.Message);
-    for (size_t offset : {16, 24, 32}) {
+    for (size_t offset : {16, 24, 32, 48}) {
         auto invalid = bytes;
         Replace(invalid, offset, std::numeric_limits<uint64_t>::max());
         EXPECT_THROW(TDecodedChunk{invalid}, std::runtime_error);
@@ -605,7 +614,7 @@ TEST(DistributedSerialization, RejectsInvalidDimensionsAndLayouts) {
         Replace(invalid, 24, parts);
         EXPECT_THROW(TDecodedChunk{invalid}, std::runtime_error);
     }
-    for (const auto [offset, value] : std::array<std::pair<size_t, uint8_t>, 5>{{{48, 3}, {49, 2}, {49, 1}, {50, 2}, {51, 4}}}) {
+    for (const auto [offset, value] : std::array<std::pair<size_t, uint8_t>, 5>{{{56, 3}, {57, 2}, {57, 1}, {58, 2}, {59, 4}}}) {
         auto invalid = bytes;
         Replace(invalid, offset, value);
         EXPECT_THROW(TDecodedChunk{invalid}, std::runtime_error);
@@ -628,9 +637,9 @@ TEST(DistributedSerialization, RejectsInvalidStringOffsets) {
     message.Descriptor = &layout;
     message.RowSets = {{.Columns = &column, .ColumnCount = 1, .RowCount = 3}};
     const auto bytes = Encode(message);
-    // The offset width of the column is byte 51; its offsets start at the aligned byte 64.
+    // The offset width of the column is byte 59; its offsets start at the aligned byte 64.
     auto invalid = bytes;
-    Replace(invalid, 51, uint8_t{3});
+    Replace(invalid, 59, uint8_t{3});
     EXPECT_THROW(TDecodedChunk{invalid}, std::runtime_error);
     for (uint32_t first : {1u, std::numeric_limits<uint32_t>::max()}) {
         invalid = bytes;
@@ -2158,6 +2167,102 @@ TEST(DistributedScheduler, RemoteSinkFinishesAfterItsLastChunk) {
     EXPECT_EQ(events, (std::vector<uint64_t>{0}));
 }
 
+// A CTE stream carries the segment of each batch from the sink's Write to the source's Next.
+TEST(DistributedScheduler, RemoteCteStreamCarriesTheSegmentOfEachBatch) {
+    using namespace NQdb::NScheduler;
+    std::atomic<int> destroyed = 0;
+    TActorNotificationChannel channel(std::make_unique<TFakeNotifier>(), 2, 2);
+    auto [sinkCode, sinkState] = MakeRemoteCteSink(1, TActorId{}, 2, CountedLayouts, channel);
+    auto [sourceCode, sourceState] = MakeRemoteCteSource(2, TActorId{}, 1, channel);
+    const std::vector<std::pair<uint32_t, int64_t>> batches{{2, 1}, {0, 2}, {2, 3}};
+    for (const auto [segment, rows] : batches) {
+        auto rowSet = CountedRows(rows, &destroyed);
+        EXPECT_EQ(sinkCode->Write(sinkState.get(), rowSet, segment), ETaskResult::OK);
+        Release(&rowSet);
+    }
+    // Less than a chunk waits for the finish.
+    TRemoteSinkState* queued = nullptr;
+    EXPECT_FALSE(channel.SinkQueue().TryPop(queued));
+    EXPECT_EQ(sinkCode->Finish(sinkState.get()), ETaskResult::OK);
+    std::vector<TDataChunk> chunks;
+    bool finished = false;
+    ASSERT_TRUE(channel.SinkQueue().TryPop(queued));
+    queued->Drain([&](TDataChunk&& chunk) {
+        chunks.push_back(std::move(chunk));
+    }, [&] {
+        finished = true;
+    });
+    EXPECT_TRUE(finished);
+    ASSERT_EQ(chunks.size(), 1u);
+    EXPECT_EQ(chunks[0].Segments, (std::vector<uint32_t>{2, 0, 2}));
+    ASSERT_TRUE(sourceState->Push(std::move(chunks[0])));
+    std::vector<std::pair<uint32_t, int64_t>> received;
+    TRowSet rowSet{};
+    uint32_t segment = 0;
+    while (sourceCode->Next(sourceState.get(), rowSet, segment) == ETaskResult::OK) {
+        received.emplace_back(segment, rowSet.RowCount);
+        Release(&rowSet);
+    }
+    EXPECT_EQ(received, batches);
+    EXPECT_EQ(destroyed.load(), 3);
+}
+
+// A full-chunk stream sends less than a chunk only for a full outbox or its finish.
+TEST(DistributedScheduler, RemoteSinkWithFullChunksHoldsAPartialChunk) {
+    using namespace NQdb::NScheduler;
+    std::atomic<int> destroyed = 0;
+    TActorNotificationChannel channel(std::make_unique<TFakeNotifier>(), 2, 2);
+    auto [code, state] = MakeRemoteSink(1, TActorId{}, 2, CountedLayouts, channel,
+        {.OutboxCapacity = 4, .OutboxBytes = 1 << 20, .ChunkBytes = 256, .WindowBytes = 1 << 20, .WindowChunks = 16,
+            .FullChunks = true});
+    std::vector<std::vector<int64_t>> sent;
+    bool finished = false;
+    auto send = [&](TDataChunk&& chunk) {
+        auto& rows = sent.emplace_back();
+        for (const auto& rowSet : chunk.RowSets) {
+            rows.push_back(rowSet.RowCount);
+        }
+    };
+    auto finish = [&] {
+        finished = true;
+    };
+    auto write = [&](int64_t rows) {
+        auto rowSet = CountedRows(rows, &destroyed);
+        const auto result = code->Write(state.get(), rowSet);
+        Release(&rowSet);
+        return result;
+    };
+    TRemoteSinkState* queued = nullptr;
+
+    // Four row sets of 192 bytes fill the outbox: the fifth wakes the actor.
+    for (const int64_t rows : {1, 1, 1, 2}) {
+        EXPECT_EQ(write(rows), ETaskResult::OK);
+    }
+    EXPECT_FALSE(channel.SinkQueue().TryPop(queued));
+    EXPECT_EQ(write(1), ETaskResult::WAITING);
+    ASSERT_TRUE(channel.SinkQueue().TryPop(queued));
+    queued->Drain(send, finish);
+    EXPECT_EQ(sent, (std::vector<std::vector<int64_t>>{{1, 1, 1, 2}}));
+
+    // A full chunk goes at once.
+    EXPECT_EQ(write(20), ETaskResult::OK);
+    EXPECT_FALSE(channel.SinkQueue().TryPop(queued));
+    EXPECT_EQ(write(8), ETaskResult::OK);
+    ASSERT_TRUE(channel.SinkQueue().TryPop(queued));
+    queued->Drain(send, finish);
+    EXPECT_EQ(sent.back(), (std::vector<int64_t>{20, 8}));
+
+    // The finish sends the rest, then itself.
+    EXPECT_EQ(write(1), ETaskResult::OK);
+    EXPECT_FALSE(channel.SinkQueue().TryPop(queued));
+    EXPECT_EQ(code->Finish(state.get()), ETaskResult::OK);
+    ASSERT_TRUE(channel.SinkQueue().TryPop(queued));
+    queued->Drain(send, finish);
+    EXPECT_EQ(sent.back(), (std::vector<int64_t>{1}));
+    EXPECT_TRUE(finished);
+    EXPECT_EQ(destroyed.load(), 8);
+}
+
 // A row pushed while the actor leaves Drain must still be picked up or announced.
 TEST(DistributedScheduler, RemoteSinkNeverStrandsARowAgainstConcurrentDrain) {
     using namespace NQdb::NScheduler;
@@ -2339,7 +2444,7 @@ TEST(DistributedScheduler, ValidatesCteEndpoints) {
     auto spool = std::make_shared<TCteSpool>(1, std::vector<TValueLayout>{{.Width = 8}});
     TTaskGraph graph;
     auto& source = graph.AddOwnedNode(std::make_unique<TCteSourceTask>(
-        spool, 0, false, std::vector<TOutputPort>{{.Connection = connectionPtr}}));
+        spool, false, std::vector<TOutputPort>{{.Connection = connectionPtr}}));
     auto& sink = graph.AddOwnedNode(std::make_unique<TCteSinkTask>(
         spool, std::vector<uint32_t>{0}, std::vector<TInputPort>{{.Connection = connectionPtr}}));
     graph.AddOwnedEdge(source, sink, std::move(connection));

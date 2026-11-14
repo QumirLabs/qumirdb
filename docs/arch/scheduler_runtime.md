@@ -293,9 +293,9 @@ flowchart LR
 
 A definition shared by several references is written once into a spool and read
 by every reference. Producer lane `i` appends the batches of definition lane `i`
-to segment `i`. A segment has one writer, so writes need no lock, and there is
-no gather. The spool has no capacity limit: a producer never waits for a
-consumer, so two references feeding the same join cannot deadlock.
+to segment `i`. A segment has one writer, and there is no gather. The spool
+has no capacity limit: a producer never waits for a consumer, so two
+references feeding the same join cannot deadlock.
 
 Completion connections carry finish signals only. Each producer lane finishes
 its lane of a gather when its input ends. The `cte-publish` task runs once all of

@@ -3191,14 +3191,13 @@ bool RecordCteCut(TLoweredPlan& lowered, const TCut& cut) {
         for (const auto* edge : cut.Source->Outbound) {
             outputs.push_back(PortSpec(graph, edge->Connection, edge->SrcLane));
         }
-        // These segments have no writer in the publish fragment.
-        const auto segment = segments.front();
+        // The source writes these segments, which have no other writer in the publish fragment.
         record(*cut.Sink, TCteSinkNode{
             .In = {PortSpec(graph, toSink.Connection, toSink.DstLane)},
             .Spool = spool,
             .Segments = std::move(segments),
         });
-        record(*cut.Source, TCteSourceNode{.Out = std::move(outputs), .Spool = spool, .Segment = segment});
+        record(*cut.Source, TCteSourceNode{.Out = std::move(outputs), .Spool = spool});
         return true;
     }
     const auto* publish = std::get_if<TCtePublishNode>(&from->Body);

@@ -645,7 +645,6 @@ TEST(GraphSpec, CteRecordsAndTablesRoundTrip)
     spec.Nodes.push_back(Node("remote-source", "", TCteSourceNode{
         .Out = {{4, 0}},
         .Spool = 0,
-        .Segment = 2,
         .Seal = true,
     }));
 
@@ -692,7 +691,7 @@ TEST(GraphSpec, CteRecordsAndTablesRoundTrip)
     EXPECT_EQ(sink.Segments, (std::vector<uint32_t>{3, 1}));
     const auto& source = std::get<TCteSourceNode>(back.Nodes[4].Body);
     EXPECT_EQ(source.Out, (std::vector<TPortSpec>{{4, 0}}));
-    EXPECT_EQ(source.Segment, 2u);
+    EXPECT_EQ(source.Spool, 0u);
     EXPECT_TRUE(source.Seal);
 }
 
@@ -914,9 +913,9 @@ TEST(GraphSpec, RejectsInvalidSpecs)
     spec.CteConsumerStates = {{.Spool = 1}};
     EXPECT_THROW(MaterializeGraph(spec, &sink), std::runtime_error);
     spec.CteConsumerStates.clear();
-    spec.Nodes[1].Body = TCteSourceNode{.Out = {{1, 0}}, .Segment = 1};
+    spec.Nodes[1].Body = TCteSourceNode{.Out = {{1, 0}}};
     EXPECT_NO_THROW(MaterializeGraph(spec, &sink));
-    spec.Nodes[1].Body = TCteSourceNode{.Out = {{1, 0}}, .Segment = 2};
+    spec.Nodes[1].Body = TCteSourceNode{.Out = {{1, 0}}, .Spool = 1};
     EXPECT_THROW(MaterializeGraph(spec, &sink), std::runtime_error);
 
     // A pass-through that computes a column needs its kernel.
