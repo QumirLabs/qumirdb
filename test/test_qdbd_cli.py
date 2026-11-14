@@ -1,4 +1,5 @@
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -134,6 +135,40 @@ class TestQdbdCli(unittest.TestCase):
                 p.kill()
                 p.wait()
 
+    def test_every_poller_serves_a_query(self):
+        pollers = re.search(r"--net:poller=name .*one of: ([^(]*)", run("--help").stdout).group(1)
+        for poller in [p.strip() for p in pollers.split(",")]:
+            with self.subTest(poller=poller):
+                ports = [free_port() for _ in range(4)]
+                nodes = [f"127.0.0.1:{ports[0]}:1", f"127.0.0.1:{ports[1]}:2"]
+                procs = []
+                try:
+                    for node_id, http_port in ((1, ports[2]), (2, ports[3])):
+                        args = [QDBD, "--node", nodes[0], "--node", nodes[1], "--node-id", str(node_id),
+                                "--leader-id", "1", "--http-port", str(http_port), "--data", TABLES,
+                                f"--net:poller={poller}"]
+                        procs.append(subprocess.Popen(args, stderr=subprocess.DEVNULL))
+                    for port in ports:
+                        self.assertTrue(listens(port))
+                    status, body = None, ""
+                    for _ in range(20):  # the compute actors may still be joining
+                        status, body = query(ports[2], "SELECT COUNT(*) FROM decimals")
+                        if status != 503:
+                            break
+                        time.sleep(0.25)
+                    self.assertEqual(status, 200, body)
+                    self.assertIn("256", body)
+                finally:
+                    for p in procs:
+                        p.kill()
+                        p.wait()
+
+    def test_unavailable_poller_lists_the_available_ones(self):
+        missing = "kqueue" if sys.platform.startswith("linux") else "epoll"
+        r = run(f"--net:poller={missing}", "--node", f"127.0.0.1:{free_port()}:1")
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("is not available on this platform; available: auto", r.stderr)
+
     def test_bad_command_lines_fail_with_a_message(self):
         for args, text in (
             (["--bogus"], "Unknown argument: --bogus"),
@@ -145,6 +180,7 @@ class TestQdbdCli(unittest.TestCase):
             (["--data"], "--data requires a value"),
             (["--config"], "--config requires a value"),
             (["--transport:window_chunks=0"], "an integer >= 1"),
+            (["--net:poller=iocp"], "one of: auto"),
         ):
             with self.subTest(args=args):
                 r = run(*args)
@@ -167,6 +203,7 @@ class TestQdbdCli(unittest.TestCase):
             with self.subTest(flag=flag):
                 self.assertRegex(r.stdout, rf"(?m)^\s*{flag}(\s|$)")
         self.assertIn("required", r.stdout)
+        self.assertIn("--net:poller", r.stdout)
 
     def test_unregistered_node_id_exits_with_one(self):
         for args in ([], ["--node", f"127.0.0.1:{free_port()}:2"]):

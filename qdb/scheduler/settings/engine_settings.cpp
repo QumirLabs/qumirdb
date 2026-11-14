@@ -229,6 +229,11 @@ TEngineConfigBuilder BuildEngineConfig() {
         [](auto& s) -> auto& { return s.ArrowMemoryPool; },
         "Allocator behind parquet reads.");
 
+    b.Section("net");
+    b.Enum("poller", PollerBackendNames, ParsePollerBackend,
+        [](auto& s) -> auto& { return s.Poller; },
+        "Network poller of qdbd; auto is the platform default. qdbd rejects a backend this platform lacks.");
+
     b.Section("transport");
     b.Size("outbox_row_sets", [](auto& s) -> auto& { return s.Scheduler.Transport.OutboxRowSets; },
         "Row sets a remote sink queues for its node's network actor.", 1);
