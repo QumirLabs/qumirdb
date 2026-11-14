@@ -1,0 +1,44 @@
+name: ClusterFuzzLite PR check (temporary, removed before merge)
+
+on:
+  pull_request:
+    branches: [master]
+
+permissions: read-all
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [address, undefined]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .clusterfuzzlite
+      - name: Build fuzzers (${{ matrix.sanitizer }})
+        uses: google/clusterfuzzlite/actions/build_fuzzers@v1
+        with:
+          language: c++
+          sanitizer: ${{ matrix.sanitizer }}
+      - name: Run fuzzers (${{ matrix.sanitizer }})
+        id: run
+        uses: google/clusterfuzzlite/actions/run_fuzzers@v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          fuzz-seconds: 600
+          mode: code-change
+          sanitizer: ${{ matrix.sanitizer }}
+          minimize-crashes: true
+      - name: Dry run of the issue report
+        if: failure() && steps.run.outcome == 'failure'
+        env:
+          SANITIZER: ${{ matrix.sanitizer }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/stub"
+          printf '#!/bin/bash\necho "gh $*"\nfor a in "$@"; do [ -f "$a" ] && cat "$a"; done\nexit 0\n' > "$RUNNER_TEMP/stub/gh"
+          chmod +x "$RUNNER_TEMP/stub/gh"
+          PATH="$RUNNER_TEMP/stub:$PATH" bash .clusterfuzzlite/report_finding.sh
