@@ -11,6 +11,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <thread>
@@ -181,6 +182,21 @@ TEST(ExecutionContext, NestedQueriesRestoreWorkerContext) {
     }
     EXPECT_EQ(&ExecutionContext(), &first);
     EXPECT_EQ(second.Heap, nullptr);
+}
+
+TEST(ExecutionContext, RowErrorDeferralRecordsFailuresInItsScope) {
+    constexpr int64_t min = std::numeric_limits<int64_t>::min();
+    TKernelHeap heap;
+    TKernelHeapScope scope(heap);
+    EXPECT_THROW(qdb_abs_i64(min), std::overflow_error);
+    {
+        TRowErrorDeferral deferral;
+        EXPECT_EQ(qdb_abs_i64(-7), 7);
+        EXPECT_FALSE(deferral.Deferred());
+        qdb_abs_i64(min);
+        EXPECT_TRUE(deferral.Deferred());
+    }
+    EXPECT_THROW(qdb_abs_i64(min), std::overflow_error);
 }
 
 TEST(ExecutionContext, AllocationAlignmentAndFailure) {

@@ -455,9 +455,11 @@ public:
     // Project dispatch: called per batch; for each computed column k and row i,
     // writes outBuffers[k][i] = <expr_k>. outBuffers has one pointer per computed
     // projection, each to a caller-owned buffer of RowCount * sizeof(computed
-    // type). Only computed (non-ident) columns go through this kernel.
+    // type). Only computed (non-ident) columns go through this kernel. A non-null
+    // inputSelection limits the rows evaluated to the ones it selects.
     struct TProjectDispatch {
-        void operator()(TRowSet* in, void** outBuffers, void* arena) const;
+        void operator()(TRowSet* in, void** outBuffers, void* arena,
+            const uint8_t* inputSelection = nullptr) const;
 
         std::shared_ptr<TKernelSlot> Slot;
         std::shared_ptr<TRuntimeContext> Runtime;

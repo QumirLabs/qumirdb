@@ -182,7 +182,8 @@ constexpr const char* CacheSchemaVersion = "v1";
 // radix.oz gains qumir_radix_key(f32).
 // row_group_interval.oz gains f32 operand intervals.
 // qumirdb.oz gains the sorted-table lookups of long IN lists (qdb_in_sorted_*).
-constexpr const char* KernelLibVersion = "67";
+// qdb_decimal_from_f32 returns right after an overflow, which returns while row errors are deferred.
+constexpr const char* KernelLibVersion = "68";
 } // namespace
 
 NQumir::NCodeGen::TLlvmRunner::TLinkedModule CompileKernelAstCached(
@@ -1883,12 +1884,12 @@ TKernelCompiler::TProjectDispatch BindProject(
 }
 
 void TKernelCompiler::TProjectDispatch::operator()(
-    TRowSet* in, void** outBuffers, void* arena) const
+    TRowSet* in, void** outBuffers, void* arena, const uint8_t* inputSelection) const
 {
-    using TProjectFn = void(*)(void*, void**, void*, void**);
+    using TProjectFn = void(*)(void*, void**, void*, void**, const uint8_t*);
     Slot->Call<TProjectFn>(0,
         in, outBuffers, arena,
-        Runtime ? Runtime->Regexes.Handles() : nullptr);
+        Runtime ? Runtime->Regexes.Handles() : nullptr, inputSelection);
 }
 
 TKernelCompiler::TSortRadixCompositeDispatch TKernelCompiler::CompileRadixSortComposite(

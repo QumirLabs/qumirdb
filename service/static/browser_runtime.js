@@ -1445,6 +1445,15 @@ function createQdbEnv(getMemory, holder) {
     }
     return ptr;
   };
+  // A runtime function that fails on a row records the failure instead of
+  // throwing while the kernel call defers row errors (DeferRowError natively).
+  const deferRowError = () => {
+    if (!holder.deferRowErrors) {
+      return false;
+    }
+    holder.rowErrorDeferred = true;
+    return true;
+  };
   const bytesAt = (ptr, size) => {
     const mem = new Uint8Array(getMemory().buffer);
     const start = Number(ptr);
@@ -1471,17 +1480,21 @@ function createQdbEnv(getMemory, holder) {
   // Size-aware: CAST(<string column> AS DATE) passes a non-null-terminated StringView.
   const sqlDate = (str) => {
     const bytes = svBytes(str);
-    const parts = [0, 0, 0];
-    let idx = 0;
-    for (const b of bytes) {
-      if (idx >= 3) break;
-      if (b === 45) {
-        ++idx;
-      } else if (b >= 48 && b <= 57) {
-        parts[idx] = parts[idx] * 10 + (b - 48);
+    const text = new TextDecoder().decode(bytes).replace(/^ +| +$/g, '');
+    const m = /^([0-9]+)-([0-9]+)-([0-9]+)$/.exec(text);
+    if (m) {
+      const [year, month, day] = [Number(m[1]), Number(m[2]), Number(m[3])];
+      const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+      const dim = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+      if (year >= 1 && year <= 5874897 && month >= 1 && month <= 12 && day >= 1 &&
+          day <= 2147483647 && day <= dim[month - 1] + (month === 2 && leap ? 1 : 0)) {
+        return daysFromCivil(year, month, day);
       }
     }
-    return daysFromCivil(parts[0], parts[1], parts[2]);
+    if (deferRowError()) {
+      return 0;
+    }
+    throw new Error('invalid input syntax for type date: "' + new TextDecoder().decode(bytes) + '"');
   };
   // year/month are approximate (365/30). amount and unit are StringViews.
   const sqlInterval = (amount, unit) => {
@@ -1645,34 +1658,49 @@ function createQdbEnv(getMemory, holder) {
     qdb_abs_i8: (value) => {
       value = Number(value) | 0;
       if (value === -128) {
-        throw new Error('abs overflow for i8');
+        if (!deferRowError()) {
+          throw new Error('abs overflow for i8');
+        }
+        return value;
       }
       return Math.abs(value);
     },
     qdb_abs_i16: (value) => {
       value = Number(value) | 0;
       if (value === -32768) {
-        throw new Error('abs overflow for i16');
+        if (!deferRowError()) {
+          throw new Error('abs overflow for i16');
+        }
+        return value;
       }
       return Math.abs(value);
     },
     qdb_abs_i32: (value) => {
       value = Number(value) | 0;
       if (value === -2147483648) {
-        throw new Error('abs overflow for i32');
+        if (!deferRowError()) {
+          throw new Error('abs overflow for i32');
+        }
+        return value;
       }
       return Math.abs(value) | 0;
     },
     qdb_abs_i64: (value) => {
       value = BigInt.asIntN(64, BigInt(value));
       if (value === -(1n << 63n)) {
-        throw new Error('abs overflow for i64');
+        if (!deferRowError()) {
+          throw new Error('abs overflow for i64');
+        }
+        return value;
       }
       return value < 0n ? -value : value;
     },
     qdb_fabs: Math.abs,
     qdb_decimal64_overflow: (precision) => {
-      throw new Error(`value does not fit DECIMAL precision ${precision}`);
+      if (!deferRowError()) {
+        throw new Error(`value does not fit DECIMAL precision ${precision}`);
+      }
+      return 0n;
     },
     // Cast a string-literal char* to a StringView {Data = lit, Size = strlen}
     // (sret out pointer). Matches qdb_lit_to_sv in qumirdb_runtime.cpp.
@@ -2136,9 +2164,21 @@ export function runProject(kernel, layout, rowSet, output, arena) {
         throw new Error('project kernel rowset/output pointer is missing');
       }
       releaseStringScratch = beginKernelStringScratch(kernel);
-      kernel.fn(
+      const runKernel = (selectionPtr) => kernel.fn(
         toWasmPtr(input.rowsetPtr), toWasmPtr(outArrayPtr), toWasmPtr(0),
-        toWasmPtr(kernel.regexHandles || 0));
+        toWasmPtr(kernel.regexHandles || 0), toWasmPtr(selectionPtr));
+      const holder = kernel.holder;
+      holder.deferRowErrors = true;
+      holder.rowErrorDeferred = false;
+      try {
+        runKernel(0);
+      } finally {
+        holder.deferRowErrors = false;
+      }
+      if (holder.rowErrorDeferred) {
+        // A row failed: evaluate the selected rows again, now raising their errors.
+        runKernel(readPointer(arena.view(), input.rowsetPtr + layout.rowset.selection));
+      }
       arena.free(outArrayPtr);
       outArrayPtr = 0;
     }
