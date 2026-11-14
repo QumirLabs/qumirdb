@@ -398,6 +398,429 @@ TEST(SchedulerExternal, SingleThreadedRejectsExternalWaits) {
     EXPECT_EQ(error, "single-threaded scheduler does not support external waits");
 }
 
+// Cancels a run that stalls, so a lost wakeup fails the test instead of hanging it.
+bool RunOrCancel(TThreadedScheduler& scheduler, std::string* error) {
+    std::mutex mutex;
+    std::condition_variable done;
+    bool returned = false;
+    std::thread watchdog([&] {
+        std::unique_lock lock(mutex);
+        if (!done.wait_for(lock, std::chrono::seconds(30), [&] { return returned; })) {
+            scheduler.Cancel();
+        }
+    });
+    const bool ok = scheduler.Run(error);
+    {
+        std::lock_guard lock(mutex);
+        returned = true;
+    }
+    done.notify_one();
+    watchdog.join();
+    return ok;
+}
+
+NQdb::TRowSet OneRow() {
+    return {.RowCount = 1, .RefCount = 1};
+}
+
+// Waits until `ready` holds, for at most five seconds.
+template <class TReady>
+bool SpinUntil(TReady ready) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!ready()) {
+        if (std::chrono::steady_clock::now() > deadline) {
+            return false;
+        }
+        std::this_thread::yield();
+    }
+    return true;
+}
+
+// Pushes `rows` one-row batches, one per run, then finishes.
+class TPushTask : public ITask {
+public:
+    explicit TPushTask(int rows)
+        : Rows_(rows)
+    {}
+
+    ETaskResult Execute() override {
+        if (Sent_ == Rows_) {
+            Output.Finish();
+            return ETaskResult::FINISHED;
+        }
+        if (!Output.Push(OneRow())) {
+            return ETaskResult::BLOCKED_OUTPUT;
+        }
+        ++Sent_;
+        return ETaskResult::OK;
+    }
+
+    TOutputPort Output;
+
+private:
+    int Rows_;
+    int Sent_ = 0;
+};
+
+// Pulls its input once, then waits for Ready and an external wake before it reads it all.
+class TGateTask : public ITask {
+public:
+    ETaskResult Execute() override {
+        ++Calls;
+        if (!Pulled_) {
+            Pulled_ = true;
+            return ETaskResult::NEED_DATA;
+        }
+        if (!Ready.load(std::memory_order_acquire)) {
+            return ETaskResult::WAITING;
+        }
+        for (;;) {
+            NQdb::TRowSet rowSet{};
+            switch (Input.Fetch(rowSet)) {
+                case EFetchResult::OK:
+                    Rows += rowSet.RowCount;
+                    NQdb::Release(&rowSet);
+                    break;
+                case EFetchResult::NO_DATA:
+                    return ETaskResult::NEED_DATA;
+                case EFetchResult::FINISHED:
+                    return ETaskResult::FINISHED;
+            }
+        }
+    }
+
+    TInputPort Input;
+    std::atomic<bool> Ready = false;
+    std::atomic<int> Calls = 0;
+    int64_t Rows = 0;
+
+private:
+    bool Pulled_ = false;
+};
+
+TEST(SchedulerExternal, WaitingTaskIsNotRunForEveryPush) {
+    constexpr int rows = 1000;
+    for (size_t workers : {1, 4}) {
+        SCOPED_TRACE(workers);
+        TTaskGraph graph;
+        auto& producer = graph.AddOwnedNode(std::make_unique<TPushTask>(rows));
+        auto gateTask = std::make_unique<TGateTask>();
+        auto& gate = *gateTask;
+        auto& gateNode = graph.AddOwnedNode(std::move(gateTask));
+        auto& edge = graph.AddOwnedEdge(producer, gateNode, std::make_unique<TOneToOneConnection>(rows));
+        static_cast<TPushTask*>(producer.Task)->Output = {.Connection = edge.Connection};
+        gate.Input = {.Connection = edge.Connection};
+        const auto sealed = graph.Seal();
+        ASSERT_TRUE(sealed);
+        TThreadedScheduler scheduler(sealed, workers);
+        TSchedulerChannel channel(scheduler);
+        std::string error;
+        bool success = false;
+        std::thread runner([&] { success = RunOrCancel(scheduler, &error); });
+        EXPECT_TRUE(SpinUntil([&] {
+            return producer.State.load() == ETaskState::Finished && gateNode.State.load() == ETaskState::Waiting;
+        }));
+        // The pull, a wait after the first push and one after the producer's finish.
+        EXPECT_LE(gate.Calls.load(), 3);
+        gate.Ready.store(true, std::memory_order_release);
+        channel.Notify(&gateNode);
+        runner.join();
+        EXPECT_TRUE(success) << error;
+        EXPECT_EQ(gate.Rows, rows);
+        EXPECT_LE(gate.Calls.load(), 4);
+    }
+}
+
+// The consumer of TPushDuringRunTask: its second run waits until the producer
+// has woken it while it runs, then returns WAITING.
+class TWaitDuringPushTask : public ITask {
+public:
+    ETaskResult Execute() override {
+        const int call = ++Calls;
+        if (call == 1) {
+            return ETaskResult::NEED_DATA;
+        }
+        if (call == 2) {
+            InRun.store(true, std::memory_order_release);
+            Woken = SpinUntil([&] {
+                return Node->State.load() == ETaskState::Reschedule;
+            });
+            if (Channel) {
+                Channel->Notify(Node);
+                Notified = Node->State.load() == ETaskState::Notified;
+            }
+            return ETaskResult::WAITING;
+        }
+        if (!Ready.load(std::memory_order_acquire)) {
+            return ETaskResult::WAITING;
+        }
+        for (int i = 0; i < 2; ++i) {
+            NQdb::TRowSet rowSet{};
+            if (Input.Fetch(rowSet) == EFetchResult::OK) {
+                Rows += rowSet.RowCount;
+                NQdb::Release(&rowSet);
+            }
+        }
+        return ETaskResult::FINISHED;
+    }
+
+    TTaskNode* Node = nullptr;
+    // If set, the second run also sends itself an event after the producer's wake.
+    TSchedulerChannel* Channel = nullptr;
+    TInputPort Input;
+    std::atomic<bool> InRun = false;
+    std::atomic<bool> Ready = false;
+    std::atomic<int> Calls = 0;
+    bool Woken = false;
+    bool Notified = false;
+    int64_t Rows = 0;
+};
+
+// Pushes a row, then another one while its consumer runs, then parks.
+class TPushDuringRunTask : public ITask {
+public:
+    ETaskResult Execute() override {
+        const int call = ++Calls_;
+        if (call == 2 && !SpinUntil([&] { return Consumer->InRun.load(std::memory_order_acquire); })) {
+            return ETaskResult::WAITING;
+        }
+        if (call <= 2) {
+            Output.Push(OneRow());
+            return ETaskResult::OK;
+        }
+        return ETaskResult::WAITING;
+    }
+
+    TWaitDuringPushTask* Consumer = nullptr;
+    TOutputPort Output;
+
+private:
+    int Calls_ = 0;
+};
+
+TEST(SchedulerExternal, NeighbourWakeDuringARunDoesNotEndAWait) {
+    for (size_t workers : {2, 4}) {
+        SCOPED_TRACE(workers);
+        TTaskGraph graph;
+        auto producerTask = std::make_unique<TPushDuringRunTask>();
+        auto consumerTask = std::make_unique<TWaitDuringPushTask>();
+        auto& producer = *producerTask;
+        auto& consumer = *consumerTask;
+        auto& producerNode = graph.AddOwnedNode(std::move(producerTask));
+        auto& consumerNode = graph.AddOwnedNode(std::move(consumerTask));
+        auto& edge = graph.AddOwnedEdge(producerNode, consumerNode, std::make_unique<TOneToOneConnection>(2));
+        producer.Consumer = &consumer;
+        producer.Output = {.Connection = edge.Connection};
+        consumer.Node = &consumerNode;
+        consumer.Input = {.Connection = edge.Connection};
+        const auto sealed = graph.Seal();
+        ASSERT_TRUE(sealed);
+        TThreadedScheduler scheduler(sealed, workers);
+        TSchedulerChannel channel(scheduler);
+        std::string error;
+        bool success = false;
+        std::thread runner([&] { success = RunOrCancel(scheduler, &error); });
+        EXPECT_TRUE(SpinUntil([&] {
+            return consumer.Calls.load() == 2 && consumerNode.State.load() == ETaskState::Waiting;
+        }));
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        // The producer's wake came during the run that returned WAITING.
+        EXPECT_EQ(consumer.Calls.load(), 2);
+        consumer.Ready.store(true, std::memory_order_release);
+        channel.Notify(&consumerNode);
+        runner.join();
+        EXPECT_TRUE(success) << error;
+        EXPECT_TRUE(consumer.Woken);
+        EXPECT_EQ(consumer.Calls.load(), 3);
+        EXPECT_EQ(consumer.Rows, 2);
+    }
+}
+
+TEST(SchedulerExternal, EventAfterANeighbourWakeInOneRunRunsItAgain) {
+    for (size_t workers : {2, 4}) {
+        SCOPED_TRACE(workers);
+        TTaskGraph graph;
+        auto producerTask = std::make_unique<TPushDuringRunTask>();
+        auto consumerTask = std::make_unique<TWaitDuringPushTask>();
+        auto& producer = *producerTask;
+        auto& consumer = *consumerTask;
+        auto& producerNode = graph.AddOwnedNode(std::move(producerTask));
+        auto& consumerNode = graph.AddOwnedNode(std::move(consumerTask));
+        auto& edge = graph.AddOwnedEdge(producerNode, consumerNode, std::make_unique<TOneToOneConnection>(2));
+        producer.Consumer = &consumer;
+        producer.Output = {.Connection = edge.Connection};
+        consumer.Node = &consumerNode;
+        consumer.Input = {.Connection = edge.Connection};
+        consumer.Ready.store(true, std::memory_order_release);
+        const auto sealed = graph.Seal();
+        ASSERT_TRUE(sealed);
+        TThreadedScheduler scheduler(sealed, workers);
+        TSchedulerChannel channel(scheduler);
+        consumer.Channel = &channel;
+        std::string error;
+        // Reschedule then Notified in the run that returns WAITING: it runs again at once.
+        EXPECT_TRUE(RunOrCancel(scheduler, &error)) << error;
+        EXPECT_TRUE(consumer.Woken);
+        EXPECT_TRUE(consumer.Notified);
+        EXPECT_EQ(consumer.Calls.load(), 3);
+        EXPECT_EQ(consumer.Rows, 2);
+    }
+}
+
+// Waits for Ready and an external wake, then sends one row and finishes.
+class TExternalRowTask : public ITask {
+public:
+    ETaskResult Execute() override {
+        ++Calls;
+        if (!Ready.load(std::memory_order_acquire)) {
+            return ETaskResult::WAITING;
+        }
+        if (!Output.Push(OneRow())) {
+            return ETaskResult::BLOCKED_OUTPUT;
+        }
+        Output.Finish();
+        return ETaskResult::FINISHED;
+    }
+
+    TOutputPort Output;
+    std::atomic<bool> Ready = false;
+    std::atomic<int> Calls = 0;
+};
+
+// Counts the rows of its input, one batch per run.
+class TRowCountTask : public ITask {
+public:
+    ETaskResult Execute() override {
+        NQdb::TRowSet rowSet{};
+        switch (Input.Fetch(rowSet)) {
+            case EFetchResult::OK:
+                Rows += rowSet.RowCount;
+                NQdb::Release(&rowSet);
+                return ETaskResult::OK;
+            case EFetchResult::NO_DATA:
+                return ETaskResult::NEED_DATA;
+            case EFetchResult::FINISHED:
+                break;
+        }
+        return ETaskResult::FINISHED;
+    }
+
+    TInputPort Input;
+    int64_t Rows = 0;
+};
+
+TEST(SchedulerExternal, ConsumerDemandDoesNotRunAWaitingSource) {
+    constexpr int rows = 1000;
+    for (size_t workers : {1, 4}) {
+        SCOPED_TRACE(workers);
+        // The consumer gathers a waiting source and a producer, and asks both for
+        // data each time its lanes are empty.
+        TTaskGraph graph;
+        auto& source = graph.AddOwnedNode(std::make_unique<TExternalRowTask>());
+        auto& producer = graph.AddOwnedNode(std::make_unique<TPushTask>(rows));
+        auto consumerTask = std::make_unique<TRowCountTask>();
+        auto& consumer = *consumerTask;
+        auto& consumerNode = graph.AddOwnedNode(std::move(consumerTask));
+        auto& gather = graph.AddConnection(std::make_unique<TGatherConnection>(1));
+        gather.Resize(2, 1);
+        graph.AddEdge(source, consumerNode, gather, 0, 0);
+        graph.AddEdge(producer, consumerNode, gather, 1, 0);
+        auto& sourceTask = *static_cast<TExternalRowTask*>(source.Task);
+        sourceTask.Output = {.Connection = &gather, .Lane = 0};
+        static_cast<TPushTask*>(producer.Task)->Output = {.Connection = &gather, .Lane = 1};
+        consumer.Input = {.Connection = &gather};
+        const auto sealed = graph.Seal();
+        ASSERT_TRUE(sealed);
+        TThreadedScheduler scheduler(sealed, workers);
+        TSchedulerChannel channel(scheduler);
+        std::string error;
+        bool success = false;
+        std::thread runner([&] { success = RunOrCancel(scheduler, &error); });
+        EXPECT_TRUE(SpinUntil([&] {
+            return producer.State.load() == ETaskState::Finished && source.State.load() == ETaskState::Waiting
+                && consumerNode.State.load() == ETaskState::Idle;
+        }));
+        // The first demand; the consumer's later NEED_DATA do not run the source.
+        EXPECT_EQ(sourceTask.Calls.load(), 1);
+        sourceTask.Ready.store(true, std::memory_order_release);
+        channel.Notify(&source);
+        runner.join();
+        EXPECT_TRUE(success) << error;
+        EXPECT_EQ(consumer.Rows, rows + 1);
+        EXPECT_EQ(sourceTask.Calls.load(), 2);
+    }
+}
+
+// Spends one credit per row, as a remote sink spends its window, and waits
+// for an external wake when it has none.
+class TCreditSinkTask : public ITask {
+public:
+    ETaskResult Execute() override {
+        if (!HasRow_) {
+            NQdb::TRowSet rowSet{};
+            const auto fetch = Input.Fetch(rowSet);
+            if (fetch == EFetchResult::NO_DATA) {
+                return ETaskResult::NEED_DATA;
+            }
+            if (fetch == EFetchResult::FINISHED) {
+                return ETaskResult::FINISHED;
+            }
+            NQdb::Release(&rowSet);
+            HasRow_ = true;
+        }
+        auto credits = Credits.load(std::memory_order_acquire);
+        do {
+            if (credits == 0) {
+                return ETaskResult::WAITING;
+            }
+        } while (!Credits.compare_exchange_weak(credits, credits - 1, std::memory_order_acq_rel));
+        HasRow_ = false;
+        ++Rows;
+        return ETaskResult::OK;
+    }
+
+    TInputPort Input;
+    std::atomic<int> Credits = 0;
+    int Rows = 0;
+
+private:
+    bool HasRow_ = false;
+};
+
+TEST(SchedulerExternal, EveryCreditWakesAWaitingSink) {
+    constexpr int rows = 20000;
+    for (size_t workers : {1, 2, 4, 8}) {
+        for (int round = 0; round < 10; ++round) {
+            SCOPED_TRACE(testing::Message() << "workers " << workers << " round " << round);
+            TTaskGraph graph;
+            auto& producer = graph.AddOwnedNode(std::make_unique<TPushTask>(rows));
+            auto sinkTask = std::make_unique<TCreditSinkTask>();
+            auto& sink = *sinkTask;
+            auto& sinkNode = graph.AddOwnedNode(std::move(sinkTask));
+            auto& edge = graph.AddOwnedEdge(producer, sinkNode, std::make_unique<TOneToOneConnection>(2));
+            static_cast<TPushTask*>(producer.Task)->Output = {.Connection = edge.Connection};
+            sink.Input = {.Connection = edge.Connection};
+            const auto sealed = graph.Seal();
+            ASSERT_TRUE(sealed);
+            TThreadedScheduler scheduler(sealed, workers);
+            TSchedulerChannel channel(scheduler);
+            std::string error;
+            bool success = false;
+            std::thread runner([&] { success = RunOrCancel(scheduler, &error); });
+            for (int i = 0; i < rows; ++i) {
+                sink.Credits.fetch_add(1, std::memory_order_acq_rel);
+                channel.Notify(&sinkNode);
+                if (i % 16 == 0) {
+                    std::this_thread::yield();
+                }
+            }
+            runner.join();
+            ASSERT_TRUE(success) << error;
+            EXPECT_EQ(sink.Rows, rows);
+        }
+    }
+}
+
 TEST(SchedulerThreaded, RunsSmallGraph) {
     constexpr int total = 100;
 
@@ -655,8 +1078,7 @@ std::unique_ptr<TFanOutGraph> MakeFanOut(size_t producers, size_t consumers, int
     return fanOut;
 }
 
-// Zero workers runs the single-threaded scheduler. A stalled threaded run is
-// cancelled, so a lost wakeup fails the test instead of hanging it.
+// Zero workers runs the single-threaded scheduler.
 bool RunGraph(TTaskGraph& graph, size_t workers, std::string* error) {
     const auto sealed = graph.Seal(error);
     if (!sealed) {
@@ -666,23 +1088,7 @@ bool RunGraph(TTaskGraph& graph, size_t workers, std::string* error) {
         return TSingleThreadedScheduler(sealed).Run(error);
     }
     TThreadedScheduler scheduler(sealed, workers);
-    std::mutex mutex;
-    std::condition_variable done;
-    bool returned = false;
-    std::thread watchdog([&] {
-        std::unique_lock lock(mutex);
-        if (!done.wait_for(lock, std::chrono::seconds(30), [&] { return returned; })) {
-            scheduler.Cancel();
-        }
-    });
-    const bool ok = scheduler.Run(error);
-    {
-        std::lock_guard lock(mutex);
-        returned = true;
-    }
-    done.notify_one();
-    watchdog.join();
-    return ok;
+    return RunOrCancel(scheduler, error);
 }
 
 TEST(SchedulerWakeups, FanOutDeliversEveryRow) {
