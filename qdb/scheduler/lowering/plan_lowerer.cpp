@@ -47,6 +47,7 @@
 #include <numeric>
 #include <optional>
 #include <ostream>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -3183,15 +3184,13 @@ bool RecordCteCut(TLoweredPlan& lowered, const TCut& cut) {
     };
     if (const auto* producer = std::get_if<TCteProducerNode>(&from->Body)) {
         const auto spool = producer->Spool;
-        std::vector<uint32_t> segments;
-        for (const auto* edge : cut.Sink->Inbound) {
-            segments.push_back(std::get<TCteProducerNode>(records[edge->Src->ExecutionSlot]->Body).Segment);
-        }
+        // Producer lanes deal their batches over every segment.
+        std::vector<uint32_t> segments(lowered.CteSpools[spool].Segments);
+        std::iota(segments.begin(), segments.end(), 0u);
         std::vector<TPortSpec> outputs;
         for (const auto* edge : cut.Source->Outbound) {
             outputs.push_back(PortSpec(graph, edge->Connection, edge->SrcLane));
         }
-        // The source writes these segments, which have no other writer in the publish fragment.
         record(*cut.Sink, TCteSinkNode{
             .In = {PortSpec(graph, toSink.Connection, toSink.DstLane)},
             .Spool = spool,
@@ -3210,19 +3209,14 @@ bool RecordCteCut(TLoweredPlan& lowered, const TCut& cut) {
         inputs.push_back(PortSpec(graph, edge->Connection, edge->DstLane));
     }
     const auto spoolSpec = lowered.CteSpools[spool];
-    std::vector<uint32_t> segments(spoolSpec.Segments);
-    std::iota(segments.begin(), segments.end(), 0u);
     const auto copy = static_cast<uint32_t>(lowered.CteSpools.size());
     lowered.CteSpools.push_back(spoolSpec);
-    record(*cut.Sink, TCteSinkNode{.In = std::move(inputs), .Spool = spool, .Segments = std::move(segments)});
-    record(*cut.Source, TCteSourceNode{
-        .Out = {PortSpec(graph, fromSource.Connection, fromSource.SrcLane)},
-        .Spool = copy,
-        .Seal = true,
-    });
+    // The copy holds only the segments its consumer lanes read, of any reference.
+    std::set<uint32_t> lanes;
     std::map<uint32_t, uint32_t> states;
     for (const auto* edge : cut.Source->Outbound) {
         auto& consumer = std::get<TCteConsumerNode>(records[edge->Dst->ExecutionSlot]->Body);
+        lanes.insert(consumer.Lane);
         const auto [it, added] = states.try_emplace(
             consumer.State, static_cast<uint32_t>(lowered.CteConsumerStates.size()));
         if (added) {
@@ -3230,6 +3224,16 @@ bool RecordCteCut(TLoweredPlan& lowered, const TCut& cut) {
         }
         consumer.State = it->second;
     }
+    record(*cut.Sink, TCteSinkNode{
+        .In = std::move(inputs),
+        .Spool = spool,
+        .Segments = {lanes.begin(), lanes.end()},
+    });
+    record(*cut.Source, TCteSourceNode{
+        .Out = {PortSpec(graph, fromSource.Connection, fromSource.SrcLane)},
+        .Spool = copy,
+        .Seal = true,
+    });
     return true;
 }
 

@@ -292,22 +292,23 @@ flowchart LR
 ```
 
 A definition shared by several references is written once into a spool and read
-by every reference. Producer lane `i` appends the batches of definition lane `i`
-to segment `i`. A segment has one writer, and there is no gather. The spool
+by every reference. Segment `l` holds the batches that lane `l` of each
+reference reads. Producer lane `i` deals the batches of definition lane `i` over
+the segments in turn, starting at segment `i`, so the consumer lanes get equal
+shares however skewed the definition's lanes are. There is no gather. The spool
 has no capacity limit: a producer never waits for a consumer, so two
 references feeding the same join cannot deadlock.
 
 Completion connections carry finish signals only. Each producer lane finishes
 its lane of a gather when its input ends. The `cte-publish` task runs once all of
-them have finished: it seals the spool, numbering the batches segment by
-segment, and finishes a broadcast with one lane per consumer lane. The
-release/acquire order of these finish flags makes every segment visible to the
-consumers, and the spool is immutable from then on.
+them have finished: it seals the spool and finishes a broadcast with one lane
+per consumer lane. The release/acquire order of these finish flags makes every
+segment visible to the consumers, and the spool is immutable from then on.
 
 Each reference has as many lanes as the definition, which is the parallelism an
-inlined copy would have. Its lanes share one cursor and claim the next batch
-from it, in the manner of morsel-driven scheduling ([Leis et al.,
-"Morsel-Driven Parallelism", SIGMOD 2014](https://doi.org/10.1145/2588555.2610507)):
+inlined copy would have. Its lanes share one cursor over their segments and
+claim the next batch from it, in the manner of morsel-driven scheduling ([Leis
+et al., "Morsel-Driven Parallelism", SIGMOD 2014](https://doi.org/10.1145/2588555.2610507)):
 every batch reaches exactly one lane of the reference, and an idle lane takes
 the batches a busy one has not started. A lane emits views of the spooled
 batches. The spool is owned jointly by the producer lanes, the publish task, the
