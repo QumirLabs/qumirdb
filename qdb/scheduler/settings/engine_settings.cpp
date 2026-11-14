@@ -229,6 +229,19 @@ TEngineConfigBuilder BuildEngineConfig() {
         [](auto& s) -> auto& { return s.ArrowMemoryPool; },
         "Allocator behind parquet reads.");
 
+    b.Section("transport");
+    b.Size("outbox_row_sets", [](auto& s) -> auto& { return s.Scheduler.Transport.OutboxRowSets; },
+        "Row sets a remote sink queues for its node's network actor.", 1);
+    b.Size("outbox_bytes", [](auto& s) -> auto& { return s.Scheduler.Transport.OutboxBytes; },
+        "Serialized bytes a remote sink queues for its node's network actor.", 1);
+    b.Size("chunk_bytes", [](auto& s) -> auto& { return s.Scheduler.Transport.ChunkBytes; },
+        "Serialized bytes at which a chunk of a remote stream closes.", 1);
+    b.Size("window_bytes", [](auto& s) -> auto& { return s.Scheduler.Transport.WindowBytes; },
+        "Bytes of a remote stream the receiver may leave unconfirmed.", 1);
+    b.Size("window_chunks", [](auto& s) -> auto& { return s.Scheduler.Transport.WindowChunks; },
+        "Chunks of a remote stream the receiver may leave unconfirmed; it is also the receiving inbox size, "
+        "so set it the same on every node.", 1);
+
     return b;
 }
 

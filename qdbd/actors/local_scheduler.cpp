@@ -18,12 +18,17 @@ namespace {
 
 struct TLocalSchedulerActor : public IBehaviorActor {
     struct TDefaultBehavior : public TBehavior<TDefaultBehavior, TSpawnComputeActor> {
-        TDefaultBehavior(TNodeId leader, uint64_t pingPeriodMs, const NScheduler::TSchedulerSettings& scheduler)
+        TDefaultBehavior(
+            TNodeId leader,
+            uint64_t pingPeriodMs,
+            const NScheduler::TSchedulerSettings& scheduler,
+            const NScheduler::TTransportSettings& transport)
             : Leader(leader)
             , PingPeriodMs(pingPeriodMs)
             , Resources(std::make_shared<TRuntimeResources>())
         {
             Resources->Scheduler = scheduler;
+            Resources->Transport = transport;
         }
 
         void Receive(TSpawnComputeActor&& request, TBlob, TActorContext::TPtr ctx)
@@ -65,8 +70,12 @@ struct TLocalSchedulerActor : public IBehaviorActor {
         TActorId PingerActorId;
     };
 
-    TLocalSchedulerActor(TNodeId leader, uint64_t pingPeriodMs, const NScheduler::TSchedulerSettings& scheduler)
-        : Behavior(leader, pingPeriodMs, scheduler)
+    TLocalSchedulerActor(
+        TNodeId leader,
+        uint64_t pingPeriodMs,
+        const NScheduler::TSchedulerSettings& scheduler,
+        const NScheduler::TTransportSettings& transport)
+        : Behavior(leader, pingPeriodMs, scheduler, transport)
     {
         Become(&Behavior);
     }
@@ -87,9 +96,10 @@ struct TLocalSchedulerActor : public IBehaviorActor {
 NNet::NActors::IActor* CreateLocalScheduler(
     TNodeId leader,
     uint64_t pingPeriodMs,
-    const NScheduler::TSchedulerSettings& scheduler)
+    const NScheduler::TSchedulerSettings& scheduler,
+    const NScheduler::TTransportSettings& transport)
 {
-    return new TLocalSchedulerActor(leader, pingPeriodMs, scheduler);
+    return new TLocalSchedulerActor(leader, pingPeriodMs, scheduler, transport);
 }
 
 } // namespace NRemote

@@ -5,6 +5,7 @@
 #include <qdb/scheduler/tasks/runtime_adapter.h>
 #include <qdb/scheduler/graph.h>
 #include <qdb/scheduler/port.h>
+#include <qdb/scheduler/settings/settings.h>
 #include <qdb/scheduler/utils/mpsc.h>
 #include <qdb/io/rowset_ops.h>
 
@@ -90,14 +91,24 @@ private:
 // may the last row set the outbox takes. The peer's inbox holds WindowChunks
 // chunks, so that many may be unconfirmed too.
 struct TRemoteStreamLimits {
-    size_t OutboxCapacity = 64;
-    size_t OutboxBytes = 32 << 20;
-    size_t ChunkBytes = 256 << 10;
-    size_t WindowBytes = 2 << 20;
-    size_t WindowChunks = 16;
+    size_t OutboxCapacity = TTransportSettings{}.OutboxRowSets;
+    size_t OutboxBytes = TTransportSettings{}.OutboxBytes;
+    size_t ChunkBytes = TTransportSettings{}.ChunkBytes;
+    size_t WindowBytes = TTransportSettings{}.WindowBytes;
+    size_t WindowChunks = TTransportSettings{}.WindowChunks;
     // Send a partial chunk only when the outbox is full or the input has
     // finished: for a stream its receiver reads after the finish (a CTE spool).
     bool FullChunks = false;
+
+    static TRemoteStreamLimits From(const TTransportSettings& settings) {
+        return {
+            .OutboxCapacity = settings.OutboxRowSets,
+            .OutboxBytes = settings.OutboxBytes,
+            .ChunkBytes = settings.ChunkBytes,
+            .WindowBytes = settings.WindowBytes,
+            .WindowChunks = settings.WindowChunks,
+        };
+    }
 };
 
 // Worker -> ComputeActor. The sink task writes into a bounded outbox; the actor
@@ -368,13 +379,15 @@ std::pair<std::shared_ptr<const TCteSinkCode>, std::shared_ptr<TRemoteSinkState>
     NNet::NActors::TActorId actorId,
     uint64_t dstTaskId,
     std::span<const TValueLayout> descriptor,
-    TActorNotificationChannel& actorChannel);
+    TActorNotificationChannel& actorChannel,
+    TRemoteStreamLimits limits = {});
 
 std::pair<std::shared_ptr<const TCteSourceCode>, std::shared_ptr<TRemoteSourceState>> MakeRemoteCteSource(
     uint64_t id,
     NNet::NActors::TActorId peerActor,
     uint64_t peerTaskId,
-    TActorNotificationChannel& actorChannel);
+    TActorNotificationChannel& actorChannel,
+    size_t inboxCapacity = TRemoteStreamLimits{}.WindowChunks);
 
 // Code and state for TRuntimeFilterSinkTask / TRuntimeFilterSourceTask.
 std::pair<std::shared_ptr<const TRuntimeFilterSinkCode>, std::shared_ptr<TRuntimeFilterSinkState>>

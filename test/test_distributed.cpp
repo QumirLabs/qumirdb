@@ -1592,6 +1592,67 @@ TEST(DistributedAllocation, ComputeActorSendsPeriodicStatus) {
     EXPECT_TRUE(errors.empty());
 }
 
+namespace {
+
+// Counts the chunks and confirms a compute actor sends it.
+class TTransportProbe : public IActor {
+public:
+    TTransportProbe(int& chunks, int& confirms)
+        : Chunks_(chunks)
+        , Confirms_(confirms)
+    {}
+
+    void Receive(TMessageId messageId, TBlob, TActorContext::TPtr) override {
+        if (messageId == TDataChunk::MessageId) {
+            ++Chunks_;
+        } else if (messageId == TDataConfirm::MessageId) {
+            ++Confirms_;
+        }
+    }
+
+private:
+    int& Chunks_;
+    int& Confirms_;
+};
+
+} // namespace
+
+TEST(DistributedAllocation, ComputeActorUsesTheTransportSettings) {
+    auto resources = std::make_shared<TRuntimeResources>();
+    resources->Transport.WindowChunks = 1;
+    TTestCluster cluster;
+    int chunks = 0;
+    int confirms = 0;
+    const auto peer = cluster.Follower.Register(std::make_unique<TTransportProbe>(chunks, confirms));
+    const auto actor = cluster.Follower.Register(std::unique_ptr<IActor>(CreateComputeActor(resources)));
+    cluster.Follower.Send<TTaskGraphMessage>(peer, actor, GraphMessage(RelaySpec(), RelayEndpoints(peer, peer)));
+    auto pumpUntil = [&](auto done) {
+        const auto deadline = NNet::TClock::now() + std::chrono::seconds(5);
+        while (!done() && NNet::TClock::now() < deadline) {
+            cluster.Pump();
+        }
+    };
+
+    // The relay sink may leave one chunk unconfirmed; the source inbox holds exactly one.
+    std::atomic<int> destroyed = 0;
+    cluster.Follower.Send<TDataChunk>(peer, actor, TDataChunk(2, 1, {CountedRows(3, &destroyed)}));
+    pumpUntil([&] { return chunks == 1 && confirms == 1; });
+    ASSERT_EQ(chunks, 1);
+    cluster.Follower.Send<TDataChunk>(peer, actor, TDataChunk(2, 2, {CountedRows(3, &destroyed)}));
+    const auto quiet = NNet::TClock::now() + std::chrono::milliseconds(200);
+    while (NNet::TClock::now() < quiet) {
+        cluster.Pump();
+    }
+    EXPECT_EQ(chunks, 1);
+
+    cluster.Follower.Send<TDataConfirm>(peer, actor, TDataConfirm{.SinkId = 1, .LastApplied = 1});
+    pumpUntil([&] { return chunks == 2; });
+    EXPECT_EQ(chunks, 2);
+
+    cluster.Follower.Send<TPoison>(peer, actor, TPoison{});
+    cluster.Pump();
+}
+
 TEST(DistributedAllocation, ComputeActorReportsErrorsToTheQueryActor) {
     auto resources = std::make_shared<TRuntimeResources>();
     TTestCluster cluster;

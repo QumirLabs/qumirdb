@@ -12,6 +12,8 @@ READY_TIMEOUT="${READY_TIMEOUT:-60}"
 # Space-separated host of every node, in node-id order (ids start at 1); default: all on this machine.
 # Only nodes on 127.0.0.1/localhost are started by this script.
 HOSTS="${HOSTS:-}"
+# Extra qdbd arguments for every node, space-separated (e.g. "--transport:window_chunks=2").
+QDBD_ARGS="${QDBD_ARGS:-}"
 
 stop() {
     local pidfile pid
@@ -57,7 +59,7 @@ start() {
     for i in $(seq 1 "$nodes"); do
         case "${hosts[i-1]}" in 127.0.0.1|localhost) ;; *) continue;; esac
         "$QDBD_BIN" --node-id "$i" --leader-id 1 --http-port "$((HTTP_PORT_BASE + i))" \
-            --data "$DATA_DIR" "--scheduler:workers=$threads" "--jit:cache_dir=$CLUSTER_DIR/node$i.jit" "${node_args[@]}" \
+            --data "$DATA_DIR" "--scheduler:workers=$threads" "--jit:cache_dir=$CLUSTER_DIR/node$i.jit" "${node_args[@]}" $QDBD_ARGS \
             > "$CLUSTER_DIR/node$i.log" 2>&1 &
         echo $! > "$CLUSTER_DIR/node$i.pid"
     done

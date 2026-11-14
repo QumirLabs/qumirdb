@@ -16,6 +16,7 @@ struct TRuntimeResources {
     std::atomic<uint64_t> CpuTime = 0;
     // How compute actors build their scheduler; filled once at node start.
     NScheduler::TSchedulerSettings Scheduler;
+    NScheduler::TTransportSettings Transport;
 };
 
 NNet::NActors::IActor* CreatePinger(

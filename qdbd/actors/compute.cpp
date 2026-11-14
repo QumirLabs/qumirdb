@@ -75,6 +75,7 @@ struct TComputeActor : public IBehaviorActor {
     {
         if (Resources) {
             SchedulerSettings = Resources->Scheduler;
+            Limits = NScheduler::TRemoteStreamLimits::From(Resources->Transport);
             Resources->UsedSlots.fetch_add(1, std::memory_order_relaxed);
         }
         Become(&Behavior);
@@ -355,9 +356,11 @@ struct TComputeActor : public IBehaviorActor {
     {
         auto [code, state] = [&] {
             if constexpr (std::is_same_v<TTask, NScheduler::TCteSourceTask>) {
-                return NScheduler::MakeRemoteCteSource(endpoint.Id, endpoint.PeerActor, endpoint.PeerTaskId, *ActorChannel);
+                return NScheduler::MakeRemoteCteSource(
+                    endpoint.Id, endpoint.PeerActor, endpoint.PeerTaskId, *ActorChannel, Limits.WindowChunks);
             } else {
-                return NScheduler::MakeRemoteSource(endpoint.Id, endpoint.PeerActor, endpoint.PeerTaskId, *ActorChannel);
+                return NScheduler::MakeRemoteSource(
+                    endpoint.Id, endpoint.PeerActor, endpoint.PeerTaskId, *ActorChannel, Limits.WindowChunks);
             }
         }();
         sourceTask.BindCode(std::move(code), state);
@@ -374,7 +377,7 @@ struct TComputeActor : public IBehaviorActor {
     {
         if constexpr (std::is_same_v<TTask, NScheduler::TCteSinkTask>) {
             auto [code, state] = NScheduler::MakeRemoteCteSink(
-                endpoint.Id, endpoint.PeerActor, endpoint.PeerTaskId, layouts, *ActorChannel);
+                endpoint.Id, endpoint.PeerActor, endpoint.PeerTaskId, layouts, *ActorChannel, Limits);
             // A CTE sink streams its spool: an append wakes it while it waits.
             sinkTask.BindCode(std::move(code), state, [this, node] {
                 SchedulerChannel->Notify(node);
@@ -382,7 +385,7 @@ struct TComputeActor : public IBehaviorActor {
             SinkStates.emplace(endpoint.Id, std::tuple{std::move(state), node});
         } else {
             auto [code, state] = NScheduler::MakeRemoteSink(
-                endpoint.Id, endpoint.PeerActor, endpoint.PeerTaskId, layouts, *ActorChannel);
+                endpoint.Id, endpoint.PeerActor, endpoint.PeerTaskId, layouts, *ActorChannel, Limits);
             sinkTask.BindCode(std::move(code), state);
             SinkStates.emplace(endpoint.Id, std::tuple{std::move(state), node});
         }
@@ -408,6 +411,7 @@ struct TComputeActor : public IBehaviorActor {
     TDefaultBehavior Behavior;
     std::shared_ptr<TRuntimeResources> Resources;
     NScheduler::TSchedulerSettings SchedulerSettings;
+    NScheduler::TRemoteStreamLimits Limits;
     // Declared before Graph and Scheduler: they point into it and die first.
     std::unique_ptr<NScheduler::TTaskGraph> OwnedGraph;
     NScheduler::TSealedTaskGraph Graph;
