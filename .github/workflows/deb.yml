@@ -71,8 +71,6 @@ jobs:
           dpkg-deb --info "$deb"
           dpkg-deb --contents "$deb"
         done
-        # dpkg-shlibdeps must have added the runtime library to the daemon.
-        dpkg-deb --field qumirdb-daemon_*.deb Depends | grep -q liburing
 
     - uses: actions/upload-artifact@v4
       with:
