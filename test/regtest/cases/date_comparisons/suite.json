@@ -20,6 +20,7 @@
     "cast_column_nullable.sql": {"order": "unordered"},
     "cast_string_column_nullable.sql": {"order": "ordered"},
     "cast_string_column_invalid.sql": {"expect_error": true, "variants": ["single", "threaded"]},
+    "cast_string_column_invalid_filtered.sql": {"order": "unordered"},
     "literal_out_of_range.sql": {"expect_error": true},
     "cast_date_varchar_nullable.sql": {"order": "ordered"},
     "between_plus_interval.sql": {"order": "ordered"},
