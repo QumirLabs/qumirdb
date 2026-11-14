@@ -1797,7 +1797,11 @@ TAstExprTask primary_expr(TParserContext& ctx) {
         }
         // TODO: constant functions should be expanded by Qumir constant folding,
         // not special-cased in the SQL parser.
-        co_return i32_literal(loc, qdb_sql_date(AsStringView(value.Name)));
+        int32_t days = 0;
+        if (!qdb_try_parse_date(AsStringView(value.Name), &days)) {
+            co_return Error(value, "invalid input syntax for type date: \"" + value.Name + "\"");
+        }
+        co_return i32_literal(loc, days);
     }
 
     // <interval_literal> ::= "INTERVAL" <string_literal> <unit>

@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "schema": "<struct (s <named Nullable [string]>)>",
+  "rows": [
+    ["1998-08-03"],
+    ["1998-02-30"]
+  ]
+}

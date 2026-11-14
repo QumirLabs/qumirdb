@@ -1,0 +1,2 @@
+project (d) (rows≈2 cost≈40)
+└─ source date_strings_invalid AS date_strings_invalid (rows≈2 cost≈32)
