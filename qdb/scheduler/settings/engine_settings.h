@@ -2,6 +2,7 @@
 
 #include <qdb/io/parquet/source.h>
 #include <qdb/plan/pipeline.h>
+#include <qdb/scheduler/settings/poller.h>
 #include <qdb/scheduler/settings/settings.h>
 #include <qdb/utils/config.h>
 
@@ -20,6 +21,8 @@ struct TEngineSettings {
     TPlanPassOptions Optimizer;
     // Arrow memory pools are process singletons: apply it once at startup.
     EArrowMemoryPool ArrowMemoryPool = EArrowMemoryPool::Auto;
+    // Read by qdbd only.
+    EPollerBackend Poller = EPollerBackend::Auto;
 };
 
 // The one table of settings the config accepts: every section and key with its

@@ -54,6 +54,20 @@ std::optional<int> ParseNumber(std::string_view flag, const std::string& text, i
     return value;
 }
 
+// The backends of this build, by coroio's own macros; poll and select always exist.
+constexpr std::string_view AvailablePollers =
+    "auto"
+#ifdef HAVE_EPOLL
+    ", epoll"
+#endif
+#ifdef HAVE_URING
+    ", uring"
+#endif
+#ifdef HAVE_KQUEUE
+    ", kqueue"
+#endif
+    ", poll, select";
+
 void PrintUsage(std::ostream& out, const char* program)
 {
     out << "Usage: " << program << " [options]\n"
@@ -64,7 +78,135 @@ void PrintUsage(std::ostream& out, const char* program)
         << "  --data dir            directory with <table>.parquet files\n"
         << "  --config path         engine config file\n"
         << "  --section:key=value   engine config override\n"
+        << "                        --net:poller=name network poller, one of: " << AvailablePollers << " (default auto)\n"
         << "  --help                print this text\n";
+}
+
+struct TDaemonOptions {
+    TNodeId MyNodeId;
+    TNodeId LeaderId;
+    int HttpPort;
+    std::vector<std::tuple<std::string,int,int>> AllHosts;
+    std::string DataDir;
+    TEngineSettings Engine;
+};
+
+template <typename TPoller>
+int RunDaemon(const TDaemonOptions& options, const char* pollerName)
+{
+    const auto myNodeId = options.MyNodeId;
+    const auto leaderId = options.LeaderId;
+    const auto httpPort = options.HttpPort;
+    const auto& allHosts = options.AllHosts;
+
+    TExternalModuleCatalog catalog;
+    const auto& EngineSettings = options.Engine;
+    const auto& dataDir = options.DataDir;
+    // Column pruning narrows a source, so each query opens its own and releases
+    // them with its compiler.
+    auto compilerFactory = [&]() {
+        auto sources = std::make_shared<std::vector<std::unique_ptr<TParquetSource>>>();
+        auto tableFactory = [&dataDir, sources](std::string_view table)
+            -> std::expected<NQdb::TOperatorPtr, NQumir::TError>
+        {
+            const auto path = ResolveTablePath(dataDir, table);
+            try {
+                auto source = std::make_unique<TParquetSource>(path);
+                auto op = std::make_shared<TSourceOperator>(*source, path);
+                sources->push_back(std::move(source));
+                return op;
+            } catch (const std::exception& e) {
+                return std::unexpected(NQumir::TError(
+                    "cannot open table '" + std::string(table) + "': " + e.what()));
+            }
+        };
+        return std::make_unique<NCompiler::TQueryCompiler>(catalog, tableFactory, EngineSettings.Optimizer);
+    };
+
+    TAddress httpAddress{"::", httpPort};
+
+    using TSocket = typename TPoller::TSocket;
+    std::vector<std::tuple<int, std::unique_ptr<TNode<TPoller>>>> nodes;
+    TLoop<TPoller> loop;
+    TResolver resolver(loop.Poller());
+
+    TMessagesFactory factory;
+    RegisterMessages(factory);
+
+    for (const auto& [host, nodePort, nodeId] : allHosts) {
+        nodes.emplace_back(nodeId, std::make_unique<TNode<TPoller>>(
+            loop.Poller(),
+            factory,
+            resolver,
+            [&](const TAddress& addr) {
+                return typename TPoller::TSocket(loop.Poller(), addr.Domain());
+            },
+            THostPort(host, nodePort)
+        ));
+    }
+
+    // This node listens on the port of its own --node entry.
+    int port = 0;
+    std::vector<TNodeId> nodeIds;
+    TActorSystem sys(&loop.Poller(), myNodeId);
+    for (auto&& [nodeId, node] : nodes) {
+        if (nodeId != myNodeId) {
+            std::cerr << "Adding node with id: " << nodeId << "\n";
+            sys.AddNode(nodeId, std::move(node));
+        } else {
+            port = node->GetHostPort().GetPort();
+        }
+        nodeIds.push_back(nodeId);
+    }
+    std::sort(nodeIds.begin(), nodeIds.end());
+    auto it = std::find(nodeIds.begin(), nodeIds.end(), myNodeId);
+    if (it == nodeIds.end()) {
+        std::cerr << "Node with id: " << myNodeId << " is not registered. Pass --node host:port:id for it.\n";
+        return 1;
+    }
+
+    TAddress actorSysAddress{"::", port};
+    std::optional<TSocket> httpListenSocket;
+    std::optional<TSocket> actorSysListenSocket;
+    try {
+        httpListenSocket.emplace(loop.Poller(), httpAddress.Domain());
+        httpListenSocket->Bind(httpAddress);
+        httpListenSocket->Listen();
+
+        actorSysListenSocket.emplace(loop.Poller(), actorSysAddress.Domain());
+        actorSysListenSocket->Bind(actorSysAddress);
+        actorSysListenSocket->Listen();
+    } catch (const std::exception& e) {
+        std::cerr << "Cannot listen on http port " << httpPort << " and actor port " << port << ": " << e.what() << "\n";
+        return 1;
+    }
+
+    const auto httpListenAddress = httpListenSocket->LocalAddr()->ToString();
+    const auto actorSysListenAddress = actorSysListenSocket->LocalAddr()->ToString();
+
+    auto logger = [](const std::string& msg) {
+        std::cerr << "[QumirDB] " << msg << "\n";
+    };
+
+    auto gatewayActorId = sys.RegisterWellKnown(TLocalActorId(EWellKnownActors::Gateway), IActor::TPtr(CreateGatewayActor(compilerFactory, EngineSettings.Scheduler, logger)));
+    auto router = NHttp::CreateRouter(&sys, gatewayActorId);
+
+    TWebServer<TSocket> server(std::move(*httpListenSocket), *router, logger);
+    server.Start();
+
+    sys.Serve(std::move(*actorSysListenSocket));
+
+    TTimeSource timeSource;
+    sys.RegisterWellKnown(TLocalActorId(EWellKnownActors::Scheduler), IActor::TPtr(CreateSchedulerActor(&timeSource, leaderId, logger)));
+
+    uint64_t pingPeriodMs = 1000;
+    sys.RegisterWellKnown(TLocalActorId(EWellKnownActors::LocalScheduler), IActor::TPtr(CreateLocalScheduler(leaderId, pingPeriodMs, EngineSettings.Scheduler.Scheduler, EngineSettings.Scheduler.Transport)));
+
+    std::cerr << "QumirDB poller: " << pollerName << "\n";
+    std::cerr << "QumirDB listening on " << httpListenAddress << ", " << actorSysListenAddress << "\n";
+    loop.Loop();
+
+    return 0;
 }
 
 } // namespace
@@ -138,118 +280,37 @@ int main(int argc, char** argv)
         }
     }
 
-    TExternalModuleCatalog catalog;
-
     NUtils::TConfig engineConfig(EngineConfigSchema());
     if (auto loaded = LoadEngineConfig(engineConfig, NQdb::NUtils::DefaultConfigPath(), configPath, overrides); !loaded) {
         std::cerr << loaded.error() << "\n";
         return 1;
     }
-    TEngineSettings EngineSettings;
-    ApplyEngineConfig(engineConfig, EngineSettings);
-    // Column pruning narrows a source, so each query opens its own and releases
-    // them with its compiler.
-    auto compilerFactory = [&]() {
-        auto sources = std::make_shared<std::vector<std::unique_ptr<TParquetSource>>>();
-        auto tableFactory = [&dataDir, sources](std::string_view table)
-            -> std::expected<NQdb::TOperatorPtr, NQumir::TError>
-        {
-            const auto path = ResolveTablePath(dataDir, table);
-            try {
-                auto source = std::make_unique<TParquetSource>(path);
-                auto op = std::make_shared<TSourceOperator>(*source, path);
-                sources->push_back(std::move(source));
-                return op;
-            } catch (const std::exception& e) {
-                return std::unexpected(NQumir::TError(
-                    "cannot open table '" + std::string(table) + "': " + e.what()));
-            }
-        };
-        return std::make_unique<NCompiler::TQueryCompiler>(catalog, tableFactory, EngineSettings.Optimizer);
-    };
+    TEngineSettings engineSettings;
+    ApplyEngineConfig(engineConfig, engineSettings);
+    const TDaemonOptions options{myNodeId, leaderId, httpPort, std::move(allHosts), std::move(dataDir), std::move(engineSettings)};
 
-    TAddress httpAddress{"::", httpPort};
-
-    using TPoller = TDefaultPoller;
-    using TSocket = typename TPoller::TSocket;
-    std::vector<std::tuple<int, std::unique_ptr<TNode<TPoller>>>> nodes;
-    TLoop<TPoller> loop;
-    TResolver resolver(loop.Poller());
-
-    TMessagesFactory factory;
-    RegisterMessages(factory);
-
-    for (auto& [host, nodePort, nodeId] : allHosts) {
-        nodes.emplace_back(nodeId, std::make_unique<TNode<TPoller>>(
-            loop.Poller(),
-            factory,
-            resolver,
-            [&](const TAddress& addr) {
-                return TPoller::TSocket(loop.Poller(), addr.Domain());
-            },
-            THostPort(host, nodePort)
-        ));
-    }
-
-    // This node listens on the port of its own --node entry.
-    int port = 0;
-    std::vector<TNodeId> nodeIds;
-    TActorSystem sys(&loop.Poller(), myNodeId);
-    for (auto&& [nodeId, node] : nodes) {
-        if (nodeId != myNodeId) {
-            std::cerr << "Adding node with id: " << nodeId << "\n";
-            sys.AddNode(nodeId, std::move(node));
-        } else {
-            port = node->GetHostPort().GetPort();
-        }
-        nodeIds.push_back(nodeId);
-    }
-    std::sort(nodeIds.begin(), nodeIds.end());
-    auto it = std::find(nodeIds.begin(), nodeIds.end(), myNodeId);
-    if (it == nodeIds.end()) {
-        std::cerr << "Node with id: " << myNodeId << " is not registered. Pass --node host:port:id for it.\n";
+    switch (options.Engine.Poller) {
+    case EPollerBackend::Auto:
+        return RunDaemon<TDefaultPoller>(options, "auto");
+#ifdef HAVE_EPOLL
+    case EPollerBackend::Epoll:
+        return RunDaemon<TEPoll>(options, "epoll");
+#endif
+#ifdef HAVE_URING
+    case EPollerBackend::Uring:
+        return RunDaemon<TUring>(options, "uring");
+#endif
+#ifdef HAVE_KQUEUE
+    case EPollerBackend::Kqueue:
+        return RunDaemon<TKqueue>(options, "kqueue");
+#endif
+    case EPollerBackend::Poll:
+        return RunDaemon<TPoll>(options, "poll");
+    case EPollerBackend::Select:
+        return RunDaemon<TSelect>(options, "select");
+    default:
+        std::cerr << "Poller backend '" << engineConfig.GetString("net", "poller")
+                  << "' is not available on this platform; available: " << AvailablePollers << "\n";
         return 1;
     }
-
-    TAddress actorSysAddress{"::", port};
-    std::optional<TSocket> httpListenSocket;
-    std::optional<TSocket> actorSysListenSocket;
-    try {
-        httpListenSocket.emplace(loop.Poller(), httpAddress.Domain());
-        httpListenSocket->Bind(httpAddress);
-        httpListenSocket->Listen();
-
-        actorSysListenSocket.emplace(loop.Poller(), actorSysAddress.Domain());
-        actorSysListenSocket->Bind(actorSysAddress);
-        actorSysListenSocket->Listen();
-    } catch (const std::exception& e) {
-        std::cerr << "Cannot listen on http port " << httpPort << " and actor port " << port << ": " << e.what() << "\n";
-        return 1;
-    }
-
-    const auto httpListenAddress = httpListenSocket->LocalAddr()->ToString();
-    const auto actorSysListenAddress = actorSysListenSocket->LocalAddr()->ToString();
-
-    auto logger = [](const std::string& msg) {
-        std::cerr << "[QumirDB] " << msg << "\n";
-    };
-
-    auto gatewayActorId = sys.RegisterWellKnown(TLocalActorId(EWellKnownActors::Gateway), IActor::TPtr(CreateGatewayActor(compilerFactory, EngineSettings.Scheduler, logger)));
-    auto router = NHttp::CreateRouter(&sys, gatewayActorId);
-
-    TWebServer<TSocket> server(std::move(*httpListenSocket), *router, logger);
-    server.Start();
-
-    sys.Serve(std::move(*actorSysListenSocket));
-
-    TTimeSource timeSource;
-    sys.RegisterWellKnown(TLocalActorId(EWellKnownActors::Scheduler), IActor::TPtr(CreateSchedulerActor(&timeSource, leaderId, logger)));
-
-    uint64_t pingPeriodMs = 1000;
-    sys.RegisterWellKnown(TLocalActorId(EWellKnownActors::LocalScheduler), IActor::TPtr(CreateLocalScheduler(leaderId, pingPeriodMs, EngineSettings.Scheduler.Scheduler, EngineSettings.Scheduler.Transport)));
-
-    std::cerr << "QumirDB listening on " << httpListenAddress << ", " << actorSysListenAddress << "\n";
-    loop.Loop();
-
-    return 0;
 }

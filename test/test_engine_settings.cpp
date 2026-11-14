@@ -46,6 +46,18 @@ TEST(EngineSettings, SchemaDefaultsAreTheDefaultsOfTheSettings) {
     EXPECT_EQ(config.GetString("io", "arrow_memory_pool"), "auto");
     EXPECT_EQ(config.GetString("jit", "cache_dir"), "");
     EXPECT_EQ(config.GetString("kernel", "backend"), "llvm");
+    EXPECT_EQ(config.GetString("net", "poller"), "auto");
+}
+
+TEST(EngineSettings, PollerIsParsed) {
+    auto config = MakeConfig();
+    TEngineSettings settings;
+    ASSERT_TRUE(config.Override("net:poller=select").has_value());
+    ApplyEngineConfig(config, settings);
+    EXPECT_EQ(settings.Poller, EPollerBackend::Select);
+    const auto result = config.Override("net:poller=iocp");
+    ASSERT_FALSE(result.has_value());
+    EXPECT_NE(result.error().find("one of: auto, epoll, uring, kqueue, poll, select"), std::string::npos);
 }
 
 TEST(EngineSettings, EveryDefaultSurvivesApplyingTheWholeDump) {
