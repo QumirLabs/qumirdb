@@ -129,6 +129,7 @@ render() {
         -e "s|__Q10_DATE_LOW__|${Q10_DATE_LOW:-0}|g" \
         -e "s|__Q10_DATE_HIGH__|${Q10_DATE_HIGH:-0}|g" \
         -e "s|__Q11_NATION__|${Q11_NATION:-}|g" \
+        -e "s|__Q11_FRACTION__|${Q11_FRACTION:-0}|g" \
         -e "s|__Q12_SHIPMODE1__|${Q12_SHIPMODE1:-}|g" \
         -e "s|__Q12_SHIPMODE2__|${Q12_SHIPMODE2:-}|g" \
         -e "s|__Q12_DATE_LOW__|${Q12_DATE_LOW:-0}|g" \

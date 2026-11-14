@@ -29,7 +29,7 @@
               (dummy (: 1 i64)))
             (keys dummy)
             (agg total_value sum value))
-          (threshold (* total_value (: 0.0001 f64))))
+          (threshold (* total_value (: __Q11_FRACTION__ f64))))
         () (inner))
       (: (> value threshold) u8))
     (ps_partkey ps_partkey)
