@@ -17,7 +17,21 @@ original=${testcase%-minimized}
 # run_fuzzers saves out/artifacts/<target>/<sanitizer>/<testcase>.
 target=$(basename "$(dirname "$(dirname "$original")")")
 summary=$(grep -m 1 '^SUMMARY:' "$original.summary" || echo "SUMMARY: $(basename "$original")")
-title="Fuzzing: $target: ${summary#SUMMARY: }"
+# Abort-type summaries are generic ("deadly signal", timeout, OOM), so the title
+# also carries the exception text or the first frame of the crashing thread that
+# is not libFuzzer, sanitizer or libstdc++ code.
+detail=
+case $summary in
+*libFuzzer:*)
+    detail=$(sed -n -E 's/^ *what\(\): +//p' "$original.summary" | head -n 1)
+    ;;
+esac
+if [ -z "$detail" ] && [[ $summary == *libFuzzer:* ]]; then
+    detail=$(grep -E '^ *#[0-9]+ ' "$original.summary" \
+        | grep -v -E 'libFuzzer|fuzzer::|__sanitizer|__asan|__ubsan|__interceptor|/usr/(lib|include)|libc\.so|std::|__gnu_cxx|LLVMFuzzerTestOneInput' \
+        | head -n 1 | sed -E 's/^ *#[0-9]+ +(0x[0-9a-f]+ +)?(in +)?//; s/ +\(?[^ ]*(:[0-9]+)+\)?$//' || true)
+fi
+title="Fuzzing: $target: ${summary#SUMMARY: }${detail:+ [$detail]}"
 title=${title:0:200}
 
 body="$RUNNER_TEMP/finding.md"

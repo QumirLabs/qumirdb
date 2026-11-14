@@ -15,11 +15,6 @@ on:
 
 permissions: read-all
 
-env:
-  # Corpus storage: the private repository QumirLabs/qumirdb-fuzz-corpus.
-  # FUZZ_CORPUS_TOKEN is a fine-grained token with contents:write on it.
-  CORPUS_REPO: https://x-access-token:${{ secrets.FUZZ_CORPUS_TOKEN }}@github.com/QumirLabs/qumirdb-fuzz-corpus.git
-
 concurrency:
   group: cflite
   cancel-in-progress: false
@@ -52,7 +47,8 @@ jobs:
 
   batch:
     needs: gate
-    if: needs.gate.outputs.open == 'false'
+    # The corpus token is used here: never hand it to a dispatch from another branch.
+    if: github.ref == 'refs/heads/master' && needs.gate.outputs.open == 'false'
     runs-on: ubuntu-latest
     timeout-minutes: 180
     permissions:
@@ -82,7 +78,9 @@ jobs:
           mode: batch
           sanitizer: ${{ matrix.sanitizer }}
           minimize-crashes: true
-          storage-repo: ${{ env.CORPUS_REPO }}
+          # Corpus storage: the private repository QumirLabs/qumirdb-fuzz-corpus;
+          # FUZZ_CORPUS_TOKEN is a fine-grained token with contents:write on it.
+          storage-repo: https://x-access-token:${{ secrets.FUZZ_CORPUS_TOKEN }}@github.com/QumirLabs/qumirdb-fuzz-corpus.git
           storage-repo-branch: main
       - name: File an issue for the finding
         if: failure() && steps.run.outcome == 'failure'
@@ -93,7 +91,8 @@ jobs:
         run: bash .clusterfuzzlite/report_finding.sh
 
   prune:
-    if: github.event.schedule == '0 5 * * *' || inputs.mode == 'prune'
+    # The corpus token is used here: never hand it to a dispatch from another branch.
+    if: github.ref == 'refs/heads/master' && (github.event.schedule == '0 5 * * *' || inputs.mode == 'prune')
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -112,5 +111,7 @@ jobs:
           fuzz-seconds: 600
           mode: prune
           sanitizer: address
-          storage-repo: ${{ env.CORPUS_REPO }}
+          # Corpus storage: the private repository QumirLabs/qumirdb-fuzz-corpus;
+          # FUZZ_CORPUS_TOKEN is a fine-grained token with contents:write on it.
+          storage-repo: https://x-access-token:${{ secrets.FUZZ_CORPUS_TOKEN }}@github.com/QumirLabs/qumirdb-fuzz-corpus.git
           storage-repo-branch: main
