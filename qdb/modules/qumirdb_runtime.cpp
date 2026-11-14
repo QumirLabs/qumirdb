@@ -484,33 +484,29 @@ constexpr int kMaxDateYear = 5874897;
 
 // Parses 'Y-M-D' (surrounding spaces allowed); false when the text is not a valid date.
 // Size-aware: CAST(<string column> AS DATE) passes a non-null-terminated StringView.
+// from_chars accepts no '+'; a '-' sign gives a negative part that the range checks reject.
 bool qdb_try_parse_date(qdb_string_view date, int32_t* days) {
-    int parts[3] = {0, 0, 0};
-    int digits[3] = {0, 0, 0};
-    int idx = 0;
-    int64_t i = 0;
-    int64_t end = date.Size;
-    while (i < end && date.Data[i] == ' ') {
-        ++i;
+    std::string_view text(reinterpret_cast<const char*>(date.Data), static_cast<size_t>(date.Size));
+    while (!text.empty() && text.front() == ' ') {
+        text.remove_prefix(1);
     }
-    while (end > i && date.Data[end - 1] == ' ') {
-        --end;
+    while (!text.empty() && text.back() == ' ') {
+        text.remove_suffix(1);
     }
-    for (; i < end; ++i) {
-        const char c = static_cast<char>(date.Data[i]);
-        if (c == '-' && idx < 2) {
-            ++idx;
-        } else if (c >= '0' && c <= '9' && digits[idx] < 7) {
-            parts[idx] = parts[idx] * 10 + (c - '0');
-            ++digits[idx];
-        } else {
-            return false;
-        }
+    const char* end = text.data() + text.size();
+    int32_t year = 0;
+    int32_t month = 0;
+    int32_t day = 0;
+    auto res = std::from_chars(text.data(), end, year);
+    if (res.ec != std::errc() || res.ptr == end || *res.ptr != '-') {
+        return false;
     }
-    const int year = parts[0];
-    const int month = parts[1];
-    const int day = parts[2];
-    if (idx != 2 || digits[1] == 0 || digits[2] == 0 || year < 1 || year > kMaxDateYear ||
+    res = std::from_chars(res.ptr + 1, end, month);
+    if (res.ec != std::errc() || res.ptr == end || *res.ptr != '-') {
+        return false;
+    }
+    res = std::from_chars(res.ptr + 1, end, day);
+    if (res.ec != std::errc() || res.ptr != end || year < 1 || year > kMaxDateYear ||
         month < 1 || month > 12 || day < 1)
     {
         return false;
