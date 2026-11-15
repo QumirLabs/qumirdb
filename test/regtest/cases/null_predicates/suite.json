@@ -19,6 +19,7 @@
     "select_not_null.sql": {"order": "ordered"},
     "where_null_is_null.sql": {"order": "ordered"},
     "where_null_is_not_null.sql": {"order": "ordered"},
-    "select_null_is_null.sql": {"order": "ordered"}
+    "select_null_is_null.sql": {"order": "ordered"},
+    "where_not_chain_deep.sql": {"order": "ordered"}
   }
 }

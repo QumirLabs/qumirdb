@@ -332,6 +332,24 @@ std::string Dispatch(TSqlNode& node)
     return visitor.Name;
 }
 
+// The error of parsing `sql`, empty if it parses.
+std::string ParseError(const std::string& sql) {
+    std::istringstream in(sql);
+    TTokenStream tokens(in);
+    TParser parser;
+    auto parsed = parser.Parse(tokens);
+    return parsed ? std::string{} : parsed.error().ToString();
+}
+
+std::string Repeat(const std::string& text, size_t count) {
+    std::string result;
+    result.reserve(text.size() * count);
+    for (size_t i = 0; i < count; ++i) {
+        result += text;
+    }
+    return result;
+}
+
 } // namespace
 
 TEST(SqlAst, AcceptDispatchesToTheNodeOverload) {
@@ -354,6 +372,33 @@ TEST(SqlAst, AcceptDispatchesToTheNodeOverload) {
     ASSERT_TRUE(join);
     EXPECT_EQ(Dispatch(*join.Cast()), "TSqlJoin");
     EXPECT_EQ(Dispatch(*join.Cast()->Left), "TSqlTableName");
+}
+
+// A tree is freed by a destructor that recurses once per node, so a chain of 300000
+// terms overflowed the stack even after the depth check had rejected it (#636).
+TEST(SqlParser, LongChainsFailBeforeTheTreeGrows) {
+    const std::vector<std::string> chains = {
+        "SELECT x" + Repeat(" + x", 300000) + " FROM t",
+        "SELECT x" + Repeat(" - x", 1000000) + " FROM t",
+        "SELECT x" + Repeat(" * x", 300000) + " FROM t",
+        "SELECT x" + Repeat(" || x", 300000) + " FROM t",
+        "SELECT x" + Repeat("::INTEGER", 300000) + " FROM t",
+        "SELECT x FROM t WHERE x = 0" + Repeat(" OR x = 1", 1000000),
+        "SELECT x FROM t WHERE x <> 0" + Repeat(" AND x <> 1", 300000),
+        "SELECT CASE" + Repeat(" WHEN x = 1 THEN 1", 300000) + " END FROM t",
+        "SELECT x FROM t" + Repeat(" JOIN t ON true", 300000),
+        "SELECT x FROM t" + Repeat(" EXCEPT SELECT x FROM t", 300000),
+        "SELECT x FROM t" + Repeat(" INTERSECT SELECT x FROM t", 300000),
+        "SELECT x FROM t" + Repeat(" UNION ALL SELECT x FROM t", 300000),
+        // Short chains inside nested parentheses add up to a deep tree as well.
+        "SELECT " + Repeat("(", 250) + "x"
+            + Repeat(Repeat(" * x", 200) + Repeat(" + x", 200) + Repeat(" || x", 200)
+                + Repeat(" AND x", 200) + Repeat(" OR x", 200) + ")", 250) + " FROM t",
+    };
+    for (const auto& sql : chains) {
+        EXPECT_NE(ParseError(sql).find("query nesting is too deep"), std::string::npos)
+            << sql.substr(0, 80);
+    }
 }
 
 int main(int argc, char** argv) {
