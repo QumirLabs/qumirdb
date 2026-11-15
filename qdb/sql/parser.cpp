@@ -322,14 +322,52 @@ using TVoidTask = NQumir::TExpectedTask<std::monostate, TError, TLocation>;
 
 struct TParserContext {
     TWrappedTokenStream& Stream;
+    size_t Nesting = 0;
 
     TParserContext(TWrappedTokenStream& stream)
         : Stream(stream)
     { }
 };
 
+// The parser recurses once per nesting level, so the depth is bounded to keep
+// hostile input from overflowing the stack (an ASan frame is the largest).
+constexpr size_t MaxNesting = 256;
+
+// Counts one level of the cycles of the grammar (expr, NOT, unary minus, select,
+// parenthesised table reference); Exceeded() tells when the limit is passed.
+class TNestingGuard {
+public:
+    explicit TNestingGuard(TParserContext& ctx)
+        : Ctx(ctx)
+    {
+        ++Ctx.Nesting;
+    }
+
+    ~TNestingGuard()
+    {
+        --Ctx.Nesting;
+    }
+
+    TNestingGuard(const TNestingGuard&) = delete;
+    TNestingGuard& operator=(const TNestingGuard&) = delete;
+
+    bool Exceeded() const
+    {
+        return Ctx.Nesting > MaxNesting;
+    }
+
+private:
+    TParserContext& Ctx;
+};
+
 TError Error(const TToken& token, const std::string& message) {
     return TError(token.Location, message);
+}
+
+TError NestingError(TParserContext& ctx) {
+    auto token = ctx.Stream.Next();
+    ctx.Stream.Unget(token);
+    return Error(token, "query nesting is too deep (limit " + std::to_string(MaxNesting) + ")");
 }
 
 bool IsEof(const TToken& token) {
@@ -799,6 +837,10 @@ TAstTask<TSqlExternalFunction> create_function_stmt(TParserContext& ctx) {
 }
 
 TAstTask<TSqlQuery> select_stmt(TParserContext& ctx) {
+    TNestingGuard nesting(ctx);
+    if (nesting.Exceeded()) {
+        co_return NestingError(ctx);
+    }
     TSqlPtr<TSqlQuery> q = std::make_shared<TSqlQuery>();
 
     q->WithClause = co_await TryKeywords(with_clause, ctx, {"WITH"});
@@ -1144,6 +1186,10 @@ TAstTask<TSqlNode> grouping_set(TParserContext& ctx) {
 }
 
 TAstTask<TSqlTableRef> table_ref(TParserContext& ctx) {
+    TNestingGuard nesting(ctx);
+    if (nesting.Exceeded()) {
+        co_return NestingError(ctx);
+    }
     auto left = co_await table_factor(ctx);
     const std::vector<std::pair<std::string, ESqlJoinType>> joinStart = {
         {"INNER", ESqlJoinType::Inner},
@@ -1425,6 +1471,10 @@ TAstTask<TSqlCte> cte_def(TParserContext& ctx) {
 /* exprs */
 
 TAstExprTask expr(TParserContext& ctx) {
+    TNestingGuard nesting(ctx);
+    if (nesting.Exceeded()) {
+        co_return NestingError(ctx);
+    }
     co_return co_await or_expr(ctx);
 }
 
@@ -1483,6 +1533,10 @@ TAstExprTask and_expr(TParserContext& ctx) {
 TAstExprTask not_expr(TParserContext& ctx) {
     auto token = ctx.Stream.Next();
     if (IsKeyword(token, "NOT")) {
+        TNestingGuard nesting(ctx);
+        if (nesting.Exceeded()) {
+            co_return NestingError(ctx);
+        }
         co_return unary(token.Location, "!"_op, co_await not_expr(ctx));
     }
     ctx.Stream.Unget(token);
@@ -1667,11 +1721,14 @@ TAstExprTask mul_expr(TParserContext& ctx) {
 
 TAstExprTask unary_expr(TParserContext& ctx) {
     auto token = ctx.Stream.Next();
-    if (IsOp(token, '+')) {
-        co_return co_await unary_expr(ctx);
-    }
-
-    if (IsOp(token, '-')) {
+    if (IsOp(token, '+') || IsOp(token, '-')) {
+        TNestingGuard nesting(ctx);
+        if (nesting.Exceeded()) {
+            co_return NestingError(ctx);
+        }
+        if (IsOp(token, '+')) {
+            co_return co_await unary_expr(ctx);
+        }
         co_return unary(token.Location, "-"_op, co_await unary_expr(ctx));
     }
 
