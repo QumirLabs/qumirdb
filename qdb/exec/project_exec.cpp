@@ -4,6 +4,7 @@
 #include <qdb/modules/qumirdb_runtime.h>
 
 #include <cstring>
+#include <memory>
 #include <utility>
 
 namespace NQdb {
@@ -40,7 +41,9 @@ TUnaryStreamProcess MakeProjectProcess(
         TRowSet& rowSet,
         TUnaryStreamingKernelState&)
     {
-        auto* data = new TProjectedRowSetData;
+        // Owned until the rowset takes it: the second dispatch can raise a row error.
+        auto owned = std::make_unique<TProjectedRowSetData>();
+        auto* data = owned.get();
         data->Input = rowSet;
         const int64_t rowCount = rowSet.RowCount;
         uint8_t* selection = rowSet.Selection;
@@ -138,7 +141,7 @@ TUnaryStreamProcess MakeProjectProcess(
             .RowCount = rowCount,
             .Selection = selection,
             .Destroy = DestroyProjectedRowSet,
-            .Private = data,
+            .Private = owned.release(),
             .RefCount = 1,
         };
     };
