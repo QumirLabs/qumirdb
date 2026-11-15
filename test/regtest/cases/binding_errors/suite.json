@@ -29,6 +29,8 @@
     "internal_scope_in_group_by.sql": {},
     "internal_scope_in_order_by.sql": {},
     "internal_scope_in_where.sql": {},
+    "nesting_limit_control.sql": {"expect_error": false, "order": "unordered"},
+    "nesting_too_deep.sql": {},
     "order_by_repeated_label.sql": {},
     "reserved_cte_column.sql": {},
     "reserved_select_alias.sql": {},
