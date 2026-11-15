@@ -7,11 +7,14 @@
 namespace NQdb {
 namespace NSql {
 
+struct ISqlVisitor;
+
 struct TSqlNode {
     virtual ~TSqlNode() = default;
     // Identifies the concrete node for TMaybeNode; defaults to "" for nodes
     // that are never downcast to.
     virtual std::string_view NodeName() const { return {}; }
+    virtual void Accept(ISqlVisitor& visitor) = 0;
 };
 
 using TSqlNodePtr = std::shared_ptr<TSqlNode>;
@@ -47,11 +50,15 @@ struct TSqlCte : TSqlNode {
     std::string Name;
     TSqlPtr<TIdentList> Columns; // optional column name list
     TSqlPtr<TSqlQuery> Query;
+
+    void Accept(ISqlVisitor& visitor) override;
 };
 
 struct TSqlWithClause : TSqlNode {
     bool Recursive = false;
     std::vector<TSqlPtr<TSqlCte>> Ctes;
+
+    void Accept(ISqlVisitor& visitor) override;
 };
 
 struct TSqlOrderItem : TSqlNode {
@@ -64,10 +71,14 @@ struct TSqlOrderItem : TSqlNode {
         Last
     };
     ENullOrder NullOrder = ENullOrder::Default;
+
+    void Accept(ISqlVisitor& visitor) override;
 };
 
 struct TSqlOrder : TSqlNode {
     std::vector<TSqlPtr<TSqlOrderItem>> Items;
+
+    void Accept(ISqlVisitor& visitor) override;
 };
 
 struct TSqlSelectItem : TSqlNode {
@@ -81,6 +92,8 @@ struct TSqlSelectItem : TSqlNode {
     // unused; StarPrefix holds the optional qualifier (empty for a bare "*").
     bool Star = false;
     std::vector<std::string> StarPrefix;
+
+    void Accept(ISqlVisitor& visitor) override;
 };
 
 struct TSqlTableRef : TSqlNode {
@@ -92,6 +105,8 @@ struct TSqlTableName : TSqlTableRef {
     std::string_view NodeName() const override { return NodeId; }
 
     std::vector<std::string> Name; // schema.table
+
+    void Accept(ISqlVisitor& visitor) override;
 };
 
 struct TSqlQuery;
@@ -102,6 +117,8 @@ struct TSqlSubqueryTable : TSqlTableRef {
 
     TSqlPtr<TSqlQuery> Query;
     TSqlPtr<TIdentList> ColumnAliases; // optional column rename list
+
+    void Accept(ISqlVisitor& visitor) override;
 };
 
 enum class ESqlJoinType {
@@ -116,11 +133,15 @@ enum class ESqlJoinType {
 
 struct TIdentList : TSqlNode {
     std::vector<std::string> Items;
+
+    void Accept(ISqlVisitor& visitor) override;
 };
 
 struct TJoinCondition : TSqlNode {
     NQumir::NAst::TExprPtr On;
     TSqlPtr<TIdentList> UsingColumns;
+
+    void Accept(ISqlVisitor& visitor) override;
 };
 
 struct TSqlJoin : TSqlTableRef {
@@ -138,6 +159,8 @@ struct TSqlJoin : TSqlTableRef {
     NQumir::TLocation NaturalLocation;
 
     TSqlPtr<TJoinCondition> Condition;
+
+    void Accept(ISqlVisitor& visitor) override;
 };
 
 struct TSqlQuery : TSqlNode {
@@ -152,6 +175,8 @@ struct TSqlQuery : TSqlNode {
 
     NQumir::NAst::TExprPtr Limit;
     NQumir::NAst::TExprPtr Offset;
+
+    void Accept(ISqlVisitor& visitor) override;
 };
 
 struct TSqlSelectList : TSqlNode {
@@ -159,6 +184,8 @@ struct TSqlSelectList : TSqlNode {
     // Leading items a rewrite adds for outputs of its own, such as the correlation
     // keys of a decorrelated subquery. SQL positions do not count them.
     size_t HelperItems = 0;
+
+    void Accept(ISqlVisitor& visitor) override;
 };
 
 struct TSqlFrameBound : TSqlNode {
@@ -181,6 +208,8 @@ struct TSqlFrameBound : TSqlNode {
         : Type(type)
         , Expr(std::move(expr))
     { }
+
+    void Accept(ISqlVisitor& visitor) override;
 };
 
 struct TSqlWindowFrame : TSqlNode {
@@ -201,6 +230,8 @@ struct TSqlWindowFrame : TSqlNode {
         , Start(std::move(start))
         , End(std::move(end))
     {}
+
+    void Accept(ISqlVisitor& visitor) override;
 };
 
 struct TSqlWindowSpec : TSqlNode {
@@ -222,6 +253,8 @@ struct TSqlWindowSpec : TSqlNode {
         , OrderBy(std::move(orderBy))
         , Frame(std::move(frame))
     {}
+
+    void Accept(ISqlVisitor& visitor) override;
 };
 
 struct TWindowExpr : NQumir::NAst::TExpr {
@@ -308,6 +341,8 @@ struct TSqlRollUp : TSqlNode {
     explicit TSqlRollUp(NQumir::NAst::TExprPtr exprs) : Exprs(std::move(exprs)) {}
     // BlockExpr
     NQumir::NAst::TExprPtr Exprs;
+
+    void Accept(ISqlVisitor& visitor) override;
 };
 
 struct TSqlCube : TSqlNode {
@@ -316,6 +351,8 @@ struct TSqlCube : TSqlNode {
     explicit TSqlCube(NQumir::NAst::TExprPtr exprs) : Exprs(std::move(exprs)) {}
     // BlockExpr
     NQumir::NAst::TExprPtr Exprs;
+
+    void Accept(ISqlVisitor& visitor) override;
 };
 
 struct TSqlGroupingExprOrList : TSqlNode {
@@ -324,6 +361,8 @@ struct TSqlGroupingExprOrList : TSqlNode {
     explicit TSqlGroupingExprOrList(NQumir::NAst::TExprPtr exprs) : Exprs(std::move(exprs)) {}
     // BlockExpr for a list, or a single expr
     NQumir::NAst::TExprPtr Exprs;
+
+    void Accept(ISqlVisitor& visitor) override;
 };
 
 struct TSqlGroupingSet : TSqlNode {
@@ -331,6 +370,8 @@ struct TSqlGroupingSet : TSqlNode {
     std::string_view NodeName() const override { return NodeId; }
     // TSqlGroupingExprOrList or TSqlRollUp or TSqlCube
     std::vector<TSqlPtr<TSqlNode>> Items;
+
+    void Accept(ISqlVisitor& visitor) override;
 };
 
 struct TSqlGroupBy : TSqlNode {
@@ -339,10 +380,14 @@ struct TSqlGroupBy : TSqlNode {
     // TSqlCube or
     // TSqlGroupingSet
     std::vector<TSqlPtr<TSqlNode>> Items;
+
+    void Accept(ISqlVisitor& visitor) override;
 };
 
 struct TSqlFrom : TSqlNode {
     std::vector<TSqlPtr<TSqlTableRef>> Items;
+
+    void Accept(ISqlVisitor& visitor) override;
 };
 
 struct TSqlSelect : TSqlNode {
@@ -360,6 +405,8 @@ struct TSqlSelect : TSqlNode {
     TSqlPtr<TSqlGroupBy> GroupBy;
 
     NQumir::NAst::TExprPtr Having;
+
+    void Accept(ISqlVisitor& visitor) override;
 };
 
 struct TSqlSetOp : TSqlNode {
@@ -384,6 +431,8 @@ struct TSqlSetOp : TSqlNode {
         , Op(op)
         , Quantifier(quantifier)
     { }
+
+    void Accept(ISqlVisitor& visitor) override;
 };
 
 struct TSqlExternalModule : TSqlNode {
@@ -401,6 +450,8 @@ struct TSqlExternalModule : TSqlNode {
         , Code(std::move(code))
         , Replace(replace)
     { }
+
+    void Accept(ISqlVisitor& visitor) override;
 };
 
 struct TSqlExternalFunction : TSqlNode {
@@ -442,6 +493,39 @@ struct TSqlExternalFunction : TSqlNode {
     explicit TSqlExternalFunction(bool replace)
         : Replace(replace)
     { }
+
+    void Accept(ISqlVisitor& visitor) override;
+};
+
+// One Visit per concrete SQL node, so a new node fails to compile until every visitor
+// handles it. Expressions go through NQumir::NAst::IVisitor.
+struct ISqlVisitor {
+    virtual ~ISqlVisitor() = default;
+    virtual void Visit(TSqlCte& node) = 0;
+    virtual void Visit(TSqlWithClause& node) = 0;
+    virtual void Visit(TSqlOrderItem& node) = 0;
+    virtual void Visit(TSqlOrder& node) = 0;
+    virtual void Visit(TSqlSelectItem& node) = 0;
+    virtual void Visit(TSqlTableName& node) = 0;
+    virtual void Visit(TSqlSubqueryTable& node) = 0;
+    virtual void Visit(TIdentList& node) = 0;
+    virtual void Visit(TJoinCondition& node) = 0;
+    virtual void Visit(TSqlJoin& node) = 0;
+    virtual void Visit(TSqlQuery& node) = 0;
+    virtual void Visit(TSqlSelectList& node) = 0;
+    virtual void Visit(TSqlFrameBound& node) = 0;
+    virtual void Visit(TSqlWindowFrame& node) = 0;
+    virtual void Visit(TSqlWindowSpec& node) = 0;
+    virtual void Visit(TSqlRollUp& node) = 0;
+    virtual void Visit(TSqlCube& node) = 0;
+    virtual void Visit(TSqlGroupingExprOrList& node) = 0;
+    virtual void Visit(TSqlGroupingSet& node) = 0;
+    virtual void Visit(TSqlGroupBy& node) = 0;
+    virtual void Visit(TSqlFrom& node) = 0;
+    virtual void Visit(TSqlSelect& node) = 0;
+    virtual void Visit(TSqlSetOp& node) = 0;
+    virtual void Visit(TSqlExternalModule& node) = 0;
+    virtual void Visit(TSqlExternalFunction& node) = 0;
 };
 
 // A subquery used inside an expression. Bridges a SQL query into the Qumir
