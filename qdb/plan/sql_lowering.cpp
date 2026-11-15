@@ -821,6 +821,9 @@ std::expected<NAst::TExprPtr, TError> TAggCollector::Emit(const TAggCall& agg, T
         return std::unexpected(TError(loc, agg.Func + "() takes 1 argument, got " +
             std::to_string(agg.ArgCount)));
     }
+    if (agg.Star && agg.Func != "count") {
+        return std::unexpected(TError(loc, agg.Func + "(*) is not supported, only count(*) takes *"));
+    }
     if (agg.Distinct) {
         if (agg.Func != "count") {
             return std::unexpected(TError(loc, "only count(distinct ...) is supported"));

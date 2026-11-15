@@ -1,2 +1,2 @@
-Error: bool_or requires one argument @ Line: 1, Byte: 8, Column: 8
+Error: bool_or(*) is not supported, only count(*) takes * @ Line: 1, Byte: 8, Column: 8
 

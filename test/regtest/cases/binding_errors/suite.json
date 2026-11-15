@@ -8,6 +8,7 @@
   "variants": ["single", "threaded", "js"],
   "cases": {
     "aggregate_extra_argument_sum.sql": {},
+    "aggregate_star_avg.sql": {},
     "aggregate_order_by_same_expression_control.sql": {"expect_error": false, "order": "ordered"},
     "cte_forward_reference_control.sql": {"expect_error": false, "order": "unordered"},
     "cte_own_name_outer_table_control.sql": {"expect_error": false, "order": "unordered"},
