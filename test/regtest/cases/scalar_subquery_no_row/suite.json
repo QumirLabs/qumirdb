@@ -8,6 +8,7 @@
   "variants": ["single", "threaded", "js"],
   "cases": {
     "nested_scalar.sql": {"order": "unordered"},
+    "cte_in_subquery.sql": {"order": "unordered"},
     "select_list.sql": {"order": "unordered"},
     "select_list_coalesce.sql": {"order": "unordered"},
     "where_is_null.sql": {"order": "unordered"},

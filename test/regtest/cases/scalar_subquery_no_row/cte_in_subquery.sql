@@ -1,0 +1,1 @@
+WITH c AS (SELECT id, a FROM t WHERE a IN (SELECT x FROM u)) SELECT id FROM c;

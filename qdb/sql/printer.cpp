@@ -208,17 +208,20 @@ struct TSqlPrinter {
         opts.NodePrinters[TSubqueryExpr::NodeId] =
             [rendered](NQumir::NAst::TExpr& node, NCore::TPrinter& p, NCore::TPrintFrame frame) {
                 auto& sub = static_cast<TSubqueryExpr&>(node);
+                // Printing the operand may replace this closure in the options, so
+                // read its state first.
+                auto [it, inserted] = rendered->try_emplace(&sub);
+                if (inserted) {
+                    it->second = PrintAst(std::static_pointer_cast<TSqlNode>(sub.Query));
+                }
+                const std::string& text = it->second;
                 auto& out = p.GetOut();
                 out << "(subquery " << KindName(sub.Kind);
                 if (sub.Operand) {
                     out << ' ';
                     p.PrintExpr(sub.Operand, false, frame.Level);
                 }
-                auto [it, inserted] = rendered->try_emplace(&sub);
-                if (inserted) {
-                    it->second = PrintAst(std::static_pointer_cast<TSqlNode>(sub.Query));
-                }
-                out << ' ' << it->second;
+                out << ' ' << text;
                 out << ')';
             };
         opts.NodePrinters[TWindowExpr::NodeId] =

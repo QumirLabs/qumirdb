@@ -1,0 +1,46 @@
+(query
+  (with
+    (cte c
+      (query
+        (select
+          (select-list
+            (item
+              id
+            )
+            (item
+              a
+            )
+          )
+          (from
+            (table t)
+          )
+          (where
+            (subquery in a (query
+              (select
+                (select-list
+                  (item
+                    x
+                  )
+                )
+                (from
+                  (table u)
+                )
+              )
+            )
+            )
+          )
+        )
+      )
+    )
+  )
+  (select
+    (select-list
+      (item
+        id
+      )
+    )
+    (from
+      (table c)
+    )
+  )
+)
