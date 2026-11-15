@@ -116,3 +116,29 @@ jobs:
           # FUZZ_CORPUS_TOKEN is a fine-grained token with contents:write on it.
           storage-repo: https://x-access-token:${{ secrets.FUZZ_CORPUS_TOKEN }}@github.com/QumirLabs/qumirdb-fuzz-corpus.git
           storage-repo-branch: main
+
+  # Prune drops the crashing inputs from the corpus, and run_fuzzers returns no
+  # crash for them. The sanitizer reports are in the prune job log, so they are
+  # filed from there; the inputs come from the corpus repository history.
+  prune-report:
+    needs: prune
+    if: failure()
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .clusterfuzzlite
+      - name: File issues for the crashes found by prune
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          FUZZ_CORPUS_URL: https://x-access-token:${{ secrets.FUZZ_CORPUS_TOKEN }}@github.com/QumirLabs/qumirdb-fuzz-corpus.git
+        run: |
+          job=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs" \
+            --jq '.jobs[] | select(.name == "prune") | .id')
+          gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$job/logs" > "$RUNNER_TEMP/prune.log"
+          bash .clusterfuzzlite/report_prune.sh "$RUNNER_TEMP/prune.log"
