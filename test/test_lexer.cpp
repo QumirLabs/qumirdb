@@ -286,6 +286,76 @@ TEST(SqlParser, StructProjectionColumnAliases) {
         (std::vector<std::string>{"position_x", "position_y", "position_z"}));
 }
 
+namespace {
+
+// Records which Visit overload Accept dispatched to.
+struct TNameVisitor : ISqlVisitor {
+    std::string Name;
+
+#define VISIT(T) \
+    void Visit(T&) override \
+    { \
+        Name = #T; \
+    }
+    VISIT(TSqlCte)
+    VISIT(TSqlWithClause)
+    VISIT(TSqlOrderItem)
+    VISIT(TSqlOrder)
+    VISIT(TSqlSelectItem)
+    VISIT(TSqlTableName)
+    VISIT(TSqlSubqueryTable)
+    VISIT(TIdentList)
+    VISIT(TJoinCondition)
+    VISIT(TSqlJoin)
+    VISIT(TSqlQuery)
+    VISIT(TSqlSelectList)
+    VISIT(TSqlFrameBound)
+    VISIT(TSqlWindowFrame)
+    VISIT(TSqlWindowSpec)
+    VISIT(TSqlRollUp)
+    VISIT(TSqlCube)
+    VISIT(TSqlGroupingExprOrList)
+    VISIT(TSqlGroupingSet)
+    VISIT(TSqlGroupBy)
+    VISIT(TSqlFrom)
+    VISIT(TSqlSelect)
+    VISIT(TSqlSetOp)
+    VISIT(TSqlExternalModule)
+    VISIT(TSqlExternalFunction)
+#undef VISIT
+};
+
+std::string Dispatch(TSqlNode& node)
+{
+    TNameVisitor visitor;
+    node.Accept(visitor);
+    return visitor.Name;
+}
+
+} // namespace
+
+TEST(SqlAst, AcceptDispatchesToTheNodeOverload) {
+    std::istringstream in("SELECT a FROM t JOIN u ON t.a = u.a UNION SELECT b FROM v;");
+    TTokenStream tokens(in);
+    TParser parser;
+    auto parsed = parser.Parse(tokens);
+    ASSERT_TRUE(parsed) << parsed.error().ToString();
+
+    auto query = NQdb::NSql::TMaybeNode<TSqlQuery>(*parsed);
+    ASSERT_TRUE(query);
+    EXPECT_EQ(Dispatch(*query.Cast()), "TSqlQuery");
+    auto setOp = NQdb::NSql::TMaybeNode<TSqlSetOp>(query.Cast()->Body);
+    ASSERT_TRUE(setOp);
+    EXPECT_EQ(Dispatch(*setOp.Cast()), "TSqlSetOp");
+    auto select = NQdb::NSql::TMaybeNode<TSqlSelect>(setOp.Cast()->Left);
+    ASSERT_TRUE(select);
+    EXPECT_EQ(Dispatch(*select.Cast()), "TSqlSelect");
+    auto join = NQdb::NSql::TMaybeNode<TSqlJoin>(select.Cast()->From->Items[0]);
+    ASSERT_TRUE(join);
+    EXPECT_EQ(Dispatch(*join.Cast()), "TSqlJoin");
+    EXPECT_EQ(Dispatch(*join.Cast()->Left), "TSqlTableName");
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
