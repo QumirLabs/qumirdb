@@ -1,0 +1,7 @@
+project (id) (rows≈4 cost≈4.4K)
+└─ project (c.id) (rows≈4 cost≈4.4K)
+   └─ project (id) (rows≈4 cost≈4.3K)
+      └─ join left_semi [t.a = __qdb_in__x] (rows≈4 cost≈4.3K)
+         ├─ source t AS t (rows≈4 cost≈64)
+         └─ project (__qdb_in__x) (rows≈2 cost≈32)
+            └─ source u AS u (rows≈2 cost≈16)
