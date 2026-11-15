@@ -3,7 +3,7 @@
 Results are organized by benchmark:
 
 - [ClickBench](clickbench.md) — 43 queries over `hits.parquet`.
-- [TPC-H](tpch.md) — 22 queries at scale factors 1, 10, and 100.
+- [TPC-H](tpch.md) — 22 queries at scale factors 1, 10, and 100, plus 4-node distributed runs at scales 10 and 100.
 - [TPC-DS](tpcds.md) — 99 queries at scale factors 1, 10, and 100.
 
 All runs on one machine: an Apple M5 Pro with 18 cores and 64 GB of memory,
