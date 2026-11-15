@@ -5,11 +5,14 @@
 
 #include <qumir/optional.h>
 
+#include <algorithm>
 #include <cctype>
 #include <map>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 /*
 
@@ -323,6 +326,9 @@ using TVoidTask = NQumir::TExpectedTask<std::monostate, TError, TLocation>;
 struct TParserContext {
     TWrappedTokenStream& Stream;
     size_t Nesting = 0;
+    // How deep the parse under the innermost open chain went: the deepest Nesting plus
+    // the links of the chains below it.
+    size_t Peak = 0;
 
     TParserContext(TWrappedTokenStream& stream)
         : Stream(stream)
@@ -341,6 +347,7 @@ public:
         : Ctx(ctx)
     {
         ++Ctx.Nesting;
+        Ctx.Peak = std::max(Ctx.Peak, Ctx.Nesting);
     }
 
     ~TNestingGuard()
@@ -360,14 +367,270 @@ private:
     TParserContext& Ctx;
 };
 
+// A loop builds its chain (a + b + ..., CASE, JOIN, UNION) as deep as it is long, on
+// top of its deepest operand. Stopping the loop at the limit keeps every tree the parser
+// builds shallow, also a rejected one, whose destructor recurses once per node too.
+class TChainDepth {
+public:
+    explicit TChainDepth(TParserContext& ctx)
+        : Ctx(ctx)
+        , Outer(ctx.Peak)
+    {
+        Ctx.Peak = Ctx.Nesting;
+    }
+
+    ~TChainDepth()
+    {
+        Ctx.Peak = std::max(Outer, Ctx.Peak + Links);
+    }
+
+    TChainDepth(const TChainDepth&) = delete;
+    TChainDepth& operator=(const TChainDepth&) = delete;
+
+    // Counts the link to the operand just parsed; false once the chain is too deep.
+    bool Extend()
+    {
+        ++Links;
+        return Ctx.Peak + Links <= MaxNesting;
+    }
+
+private:
+    TParserContext& Ctx;
+    size_t Outer;
+    size_t Links = 0;
+};
+
 TError Error(const TToken& token, const std::string& message) {
     return TError(token.Location, message);
+}
+
+TError NestingError(TLocation location) {
+    return TError(location, "query nesting is too deep (limit " + std::to_string(MaxNesting) + ")");
 }
 
 TError NestingError(TParserContext& ctx) {
     auto token = ctx.Stream.Next();
     ctx.Stream.Unget(token);
-    return Error(token, "query nesting is too deep (limit " + std::to_string(MaxNesting) + ")");
+    return NestingError(token.Location);
+}
+
+// A walk item is a clause node or an expression node, with its depth.
+struct TDepthItem {
+    TSqlNode* Clause = nullptr;
+    NQumir::NAst::TExpr* Expr = nullptr;
+    size_t Depth = 0;
+};
+
+// Pushes the children of a clause node onto the walk's stack; Accept is the one-level
+// dispatch and FindTooDeep's loop drives, so the walk stays iterative.
+class TPushChildren : public ISqlVisitor {
+public:
+    explicit TPushChildren(std::vector<TDepthItem>& stack)
+        : Stack(stack)
+    { }
+
+    void Push(TSqlNode& node, size_t depth)
+    {
+        Depth = depth;
+        node.Accept(*this);
+    }
+
+    void Visit(TSqlQuery& query) override
+    {
+        if (query.WithClause) {
+            for (const auto& cte : query.WithClause->Ctes) {
+                Clause(cte->Query);
+            }
+        }
+        Clause(query.Body);
+        if (query.OrderBy) {
+            for (const auto& orderItem : query.OrderBy->Items) {
+                Expr(orderItem->Expr);
+            }
+        }
+        Expr(query.Limit);
+        Expr(query.Offset);
+    }
+
+    void Visit(TSqlSelect& select) override
+    {
+        if (select.SelectList) {
+            for (const auto& selectItem : select.SelectList->Items) {
+                Expr(selectItem->Expr);
+            }
+        }
+        if (select.From) {
+            for (const auto& table : select.From->Items) {
+                Clause(table);
+            }
+        }
+        Expr(select.Where);
+        if (select.GroupBy) {
+            for (const auto& grouping : select.GroupBy->Items) {
+                Clause(grouping);
+            }
+        }
+        Expr(select.Having);
+    }
+
+    void Visit(TSqlSetOp& setOp) override
+    {
+        Clause(setOp.Left);
+        Clause(setOp.Right);
+    }
+
+    void Visit(TSqlJoin& join) override
+    {
+        Clause(join.Left);
+        Clause(join.Right);
+        if (join.Condition) {
+            Expr(join.Condition->On);
+        }
+    }
+
+    void Visit(TSqlSubqueryTable& table) override
+    {
+        Clause(table.Query);
+    }
+
+    void Visit(TSqlGroupingSet& set) override
+    {
+        for (const auto& grouping : set.Items) {
+            Clause(grouping);
+        }
+    }
+
+    void Visit(TSqlRollUp& rollUp) override
+    {
+        Expr(rollUp.Exprs);
+    }
+
+    void Visit(TSqlCube& cube) override
+    {
+        Expr(cube.Exprs);
+    }
+
+    void Visit(TSqlGroupingExprOrList& list) override
+    {
+        Expr(list.Exprs);
+    }
+
+    // The other clause nodes are reached only through the ones above, which look inside them.
+    void Visit(TSqlCte&) override
+    {
+    }
+
+    void Visit(TSqlWithClause&) override
+    {
+    }
+
+    void Visit(TSqlOrderItem&) override
+    {
+    }
+
+    void Visit(TSqlOrder&) override
+    {
+    }
+
+    void Visit(TSqlSelectItem&) override
+    {
+    }
+
+    void Visit(TSqlTableName&) override
+    {
+    }
+
+    void Visit(TIdentList&) override
+    {
+    }
+
+    void Visit(TJoinCondition&) override
+    {
+    }
+
+    void Visit(TSqlSelectList&) override
+    {
+    }
+
+    void Visit(TSqlFrameBound&) override
+    {
+    }
+
+    void Visit(TSqlWindowFrame&) override
+    {
+    }
+
+    void Visit(TSqlWindowSpec&) override
+    {
+    }
+
+    void Visit(TSqlGroupBy&) override
+    {
+    }
+
+    void Visit(TSqlFrom&) override
+    {
+    }
+
+    void Visit(TSqlExternalModule&) override
+    {
+    }
+
+    void Visit(TSqlExternalFunction&) override
+    {
+    }
+
+private:
+    void Clause(const TSqlNodePtr& node)
+    {
+        if (node) {
+            Stack.push_back({.Clause = node.get(), .Depth = Depth});
+        }
+    }
+
+    void Expr(const NQumir::NAst::TExprPtr& node)
+    {
+        if (node) {
+            Stack.push_back({.Expr = node.get(), .Depth = Depth});
+        }
+    }
+
+    std::vector<TDepthItem>& Stack;
+    size_t Depth = 0;
+};
+
+// Later passes recurse once per node, so the limit bounds the tree too, counting every
+// SQL clause and expression node; the parser's counters see only some of them. A clause
+// node has no location of its own.
+std::optional<TLocation> FindTooDeep(const TSqlNodePtr& statement, const TLocation& clauseLocation) {
+    std::vector<TDepthItem> stack;
+    TPushChildren pushChildren(stack);
+    stack.push_back({.Clause = statement.get(), .Depth = 1});
+    while (!stack.empty()) {
+        const auto item = stack.back();
+        stack.pop_back();
+        if (item.Depth > MaxNesting) {
+            return item.Expr ? item.Expr->Location : clauseLocation;
+        }
+        const size_t depth = item.Depth + 1;
+        if (!item.Expr) {
+            pushChildren.Push(*item.Clause, depth);
+            continue;
+        }
+        for (const auto& child : item.Expr->Children()) {
+            if (child) {
+                stack.push_back({.Expr = child.get(), .Depth = depth});
+            }
+        }
+        // The only bridge from an expression back into SQL clauses.
+        if (item.Expr->NodeName() == TSubqueryExpr::NodeId) {
+            const auto& subquery = static_cast<const TSubqueryExpr&>(*item.Expr);
+            if (subquery.Query) {
+                stack.push_back({.Clause = subquery.Query.get(), .Depth = depth});
+            }
+        }
+    }
+    return std::nullopt;
 }
 
 bool IsEof(const TToken& token) {
@@ -655,6 +918,9 @@ TAstTask<TSqlNode> statement(TParserContext& ctx) {
     }
 
     auto token = ctx.Stream.Next();
+    if (auto deep = FindTooDeep(node, token.Location)) {
+        co_return NestingError(*deep);
+    }
     if (IsEof(token) || IsOp(token, ';')) {
         co_return node;
     }
@@ -855,6 +1121,7 @@ TAstTask<TSqlQuery> select_stmt(TParserContext& ctx) {
 }
 
 TAstTask<TSqlNode> query_expr(TParserContext& ctx) {
+    TChainDepth chain(ctx);
     auto node = co_await query_term(ctx);
     while (true) {
         auto token = ctx.Stream.Next();
@@ -873,6 +1140,9 @@ TAstTask<TSqlNode> query_expr(TParserContext& ctx) {
                 ctx.Stream.Unget(quantifierTok);
             }
             auto right = co_await query_term(ctx);
+            if (!chain.Extend()) {
+                co_return NestingError(ctx);
+            }
             node = std::make_shared<TSqlSetOp>(std::move(node), std::move(right), op, quantifier);
         } else {
             ctx.Stream.Unget(token);
@@ -884,6 +1154,7 @@ TAstTask<TSqlNode> query_expr(TParserContext& ctx) {
 }
 
 TAstTask<TSqlNode> query_term(TParserContext& ctx) {
+    TChainDepth chain(ctx);
     auto node = co_await query_primary(ctx);
     while (true) {
         auto token = ctx.Stream.Next();
@@ -898,6 +1169,9 @@ TAstTask<TSqlNode> query_term(TParserContext& ctx) {
                 ctx.Stream.Unget(quantifierTok);
             }
             auto right = co_await query_primary(ctx);
+            if (!chain.Extend()) {
+                co_return NestingError(ctx);
+            }
             node = std::make_shared<TSqlSetOp>(std::move(node), std::move(right), TSqlSetOp::EOp::Intersect, quantifier);
         } else {
             ctx.Stream.Unget(token);
@@ -1190,6 +1464,7 @@ TAstTask<TSqlTableRef> table_ref(TParserContext& ctx) {
     if (nesting.Exceeded()) {
         co_return NestingError(ctx);
     }
+    TChainDepth chain(ctx);
     auto left = co_await table_factor(ctx);
     const std::vector<std::pair<std::string, ESqlJoinType>> joinStart = {
         {"INNER", ESqlJoinType::Inner},
@@ -1281,6 +1556,9 @@ TAstTask<TSqlTableRef> table_ref(TParserContext& ctx) {
             ctx.Stream.Unget(after);
         } else {
             join->Condition = co_await join_condition(ctx);
+        }
+        if (!chain.Extend()) {
+            co_return NestingError(ctx);
         }
 
         left = join;
@@ -1480,6 +1758,7 @@ TAstExprTask expr(TParserContext& ctx) {
 
 template<typename Func>
 TAstExprTask binary_op_kw_helper(TParserContext& ctx, Func prev_parser, const std::string& kw, TOperator op) {
+    TChainDepth chain(ctx);
     auto ret = co_await prev_parser(ctx);
     TLocation loc = ret->Location;
     auto isKw = [&] () {
@@ -1493,6 +1772,9 @@ TAstExprTask binary_op_kw_helper(TParserContext& ctx, Func prev_parser, const st
     };
     while (isKw()) {
         auto next_expr = co_await prev_parser(ctx);
+        if (!chain.Extend()) {
+            co_return NestingError(ctx);
+        }
         ret = binary(loc, op, ret, next_expr);
     }
     co_return ret;
@@ -1639,6 +1921,7 @@ TAstExprTask comparison_expr(TParserContext& ctx) {
 // `strcat(a, b)` pseudo-call: the typer types it as StringView and ExpandNullable
 // rewrites it into the real qdb_string_concat runtime call.
 TAstExprTask concat_expr(TParserContext& ctx) {
+    TChainDepth chain(ctx);
     auto ret = co_await add_expr(ctx);
     auto loc = ret->Location;
     while (true) {
@@ -1648,6 +1931,9 @@ TAstExprTask concat_expr(TParserContext& ctx) {
             break;
         }
         auto rhs = co_await add_expr(ctx);
+        if (!chain.Extend()) {
+            co_return NestingError(ctx);
+        }
         ret = call(loc, "strcat", {std::move(ret), std::move(rhs)});
     }
     co_return ret;
@@ -1682,6 +1968,7 @@ NQumir::NAst::TExprPtr AddMonths(TLocation loc, NQumir::NAst::TExprPtr date,
 }
 
 TAstExprTask add_expr(TParserContext& ctx) {
+    TChainDepth chain(ctx);
     auto ret = co_await mul_expr(ctx);
     for (;;) {
         auto token = ctx.Stream.Next();
@@ -1691,6 +1978,9 @@ TAstExprTask add_expr(TParserContext& ctx) {
             co_return ret;
         }
         auto rhs = co_await mul_expr(ctx);
+        if (!chain.Extend()) {
+            co_return NestingError(ctx);
+        }
         auto loc = ret->Location;
         if (auto months = IntervalMonths(rhs)) {
             ret = AddMonths(loc, ret, months, !plus);
@@ -1703,6 +1993,7 @@ TAstExprTask add_expr(TParserContext& ctx) {
 }
 
 TAstExprTask mul_expr(TParserContext& ctx) {
+    TChainDepth chain(ctx);
     auto ret = co_await unary_expr(ctx);
     auto loc = ret->Location;
     for (;;) {
@@ -1712,6 +2003,9 @@ TAstExprTask mul_expr(TParserContext& ctx) {
             co_return ret;
         }
         auto rhs = co_await unary_expr(ctx);
+        if (!chain.Extend()) {
+            co_return NestingError(ctx);
+        }
         if (IntervalMonths(ret) || IntervalMonths(rhs)) {
             co_return Error(token, "arithmetic on a month or year INTERVAL is not supported");
         }
@@ -1737,6 +2031,7 @@ TAstExprTask unary_expr(TParserContext& ctx) {
 }
 
 TAstExprTask postfix_expr(TParserContext& ctx) {
+    TChainDepth chain(ctx);
     auto ret = co_await primary_expr(ctx);
     TLocation loc = ret->Location;
     auto isCast = [&]() {
@@ -1772,6 +2067,9 @@ TAstExprTask postfix_expr(TParserContext& ctx) {
 
     while (isCast()) {
         ret = cast(loc, ret, co_await type_name(ctx));
+        if (!chain.Extend()) {
+            co_return NestingError(ctx);
+        }
     }
     co_return ret;
 }
@@ -2168,6 +2466,7 @@ TAstExprTask function_args(TParserContext& ctx) {
 // conditions compare the operand with each WHEN value, as the SQL standard defines
 // it, so a NULL operand matches no WHEN; the comparisons share the operand node.
 TAstExprTask case_expr(TParserContext& ctx) {
+    TChainDepth chain(ctx);
     std::vector<std::pair<NQumir::NAst::TExprPtr, NQumir::NAst::TExprPtr>> branches;
 
     auto token = ctx.Stream.Next();
@@ -2190,6 +2489,9 @@ TAstExprTask case_expr(TParserContext& ctx) {
             co_return Error(then, "`THEN' expected");
         }
         auto result = co_await expr(ctx);
+        if (!chain.Extend()) {
+            co_return NestingError(ctx);
+        }
         branches.emplace_back(std::move(cond), std::move(result));
 
         token = ctx.Stream.Next();
@@ -2202,6 +2504,10 @@ TAstExprTask case_expr(TParserContext& ctx) {
     NQumir::NAst::TExprPtr ret = nullptr;
     if (IsKeyword(token, "ELSE")) {
         ret = co_await expr(ctx);
+        // The ELSE result is the last link of the chain.
+        if (!chain.Extend()) {
+            co_return NestingError(ctx);
+        }
         token = ctx.Stream.Next();
     } else {
         ret = call(loc, "qdb_sql_null", {});
