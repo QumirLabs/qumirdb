@@ -18,7 +18,7 @@
             (table item)
           )
           (where
-            (&& (&& (&& (&& (&& (&& (subquery in i_item_id (query
+            (&& (&& (&& (subquery in i_item_id (query
               (select
                 (select-list
                   (item
@@ -39,12 +39,9 @@
               )
             )
             )
-                        (== ss_item_sk i_item_sk))
-                      (== ss_sold_date_sk d_date_sk))
-                    (== d_year 2000))
-                  (== d_moy 1))
-                (== ss_addr_sk ca_address_sk))
-              (== ca_gmt_offset (- 8)))
+                  (== ss_item_sk i_item_sk))
+                (&& (== ss_sold_date_sk d_date_sk) (== d_year 2000)))
+              (&& (&& (== d_moy 1) (== ss_addr_sk ca_address_sk)) (== ca_gmt_offset (- 8))))
           )
           (group-by
             i_item_id
@@ -70,7 +67,7 @@
             (table item)
           )
           (where
-            (&& (&& (&& (&& (&& (&& (subquery in i_item_id (query
+            (&& (&& (&& (subquery in i_item_id (query
               (select
                 (select-list
                   (item
@@ -91,12 +88,9 @@
               )
             )
             )
-                        (== cs_item_sk i_item_sk))
-                      (== cs_sold_date_sk d_date_sk))
-                    (== d_year 2000))
-                  (== d_moy 1))
-                (== cs_bill_addr_sk ca_address_sk))
-              (== ca_gmt_offset (- 8)))
+                  (== cs_item_sk i_item_sk))
+                (&& (== cs_sold_date_sk d_date_sk) (== d_year 2000)))
+              (&& (&& (== d_moy 1) (== cs_bill_addr_sk ca_address_sk)) (== ca_gmt_offset (- 8))))
           )
           (group-by
             i_item_id
@@ -122,7 +116,7 @@
             (table item)
           )
           (where
-            (&& (&& (&& (&& (&& (&& (subquery in i_item_id (query
+            (&& (&& (&& (subquery in i_item_id (query
               (select
                 (select-list
                   (item
@@ -143,12 +137,9 @@
               )
             )
             )
-                        (== ws_item_sk i_item_sk))
-                      (== ws_sold_date_sk d_date_sk))
-                    (== d_year 2000))
-                  (== d_moy 1))
-                (== ws_bill_addr_sk ca_address_sk))
-              (== ca_gmt_offset (- 8)))
+                  (== ws_item_sk i_item_sk))
+                (&& (== ws_sold_date_sk d_date_sk) (== d_year 2000)))
+              (&& (&& (== d_moy 1) (== ws_bill_addr_sk ca_address_sk)) (== ca_gmt_offset (- 8))))
           )
           (group-by
             i_item_id

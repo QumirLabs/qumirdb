@@ -45,25 +45,22 @@
       (table item)
     )
     (where
-      (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (== cs_sold_date_sk d_date_sk) (== cs_item_sk i_item_sk))
-                        (== cs_bill_cdemo_sk |cd1.cd_demo_sk|))
-                      (== cs_bill_customer_sk c_customer_sk))
-                    (== |cd1.cd_gender| (cast "M" <named StringView>)))
-                  (== |cd1.cd_education_status| (cast "College" <named StringView>)))
-                (== c_current_cdemo_sk |cd2.cd_demo_sk|))
-              (== c_current_addr_sk ca_address_sk))
-            (call qdb_in_list c_birth_month 9 5 12 4 1 10))
-          (== d_year 2001))
-        (call
-          qdb_in_list
-          ca_state
-          (cast "ND" <named StringView>)
-          (cast "WI" <named StringView>)
-          (cast "AL" <named StringView>)
-          (cast "NC" <named StringView>)
-          (cast "OK" <named StringView>)
-          (cast "MS" <named StringView>)
-          (cast "TN" <named StringView>)))
+      (&& (&& (&& (&& (== cs_sold_date_sk d_date_sk) (== cs_item_sk i_item_sk))
+            (&& (== cs_bill_cdemo_sk |cd1.cd_demo_sk|) (== cs_bill_customer_sk c_customer_sk)))
+          (&& (&& (== |cd1.cd_gender| (cast "M" <named StringView>))
+              (== |cd1.cd_education_status| (cast "College" <named StringView>)))
+            (&& (== c_current_cdemo_sk |cd2.cd_demo_sk|) (== c_current_addr_sk ca_address_sk))))
+        (&& (&& (call qdb_in_list c_birth_month 9 5 12 4 1 10) (== d_year 2001))
+          (call
+            qdb_in_list
+            ca_state
+            (cast "ND" <named StringView>)
+            (cast "WI" <named StringView>)
+            (cast "AL" <named StringView>)
+            (cast "NC" <named StringView>)
+            (cast "OK" <named StringView>)
+            (cast "MS" <named StringView>)
+            (cast "TN" <named StringView>))))
     )
     (group-by
       (rollup

@@ -58,29 +58,24 @@
       (table item)
     )
     (where
-      (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (== |d1.d_quarter_name| (cast "1998Q1" <named StringView>))
-                              (== |d1.d_date_sk| ss_sold_date_sk))
-                            (== i_item_sk ss_item_sk))
-                          (== s_store_sk ss_store_sk))
-                        (== ss_customer_sk sr_customer_sk))
-                      (== ss_item_sk sr_item_sk))
-                    (== ss_ticket_number sr_ticket_number))
-                  (== sr_returned_date_sk |d2.d_date_sk|))
-                (call
-                  qdb_in_list
-                  |d2.d_quarter_name|
-                  (cast "1998Q1" <named StringView>)
-                  (cast "1998Q2" <named StringView>)
-                  (cast "1998Q3" <named StringView>)))
+      (&& (&& (&& (&& (== |d1.d_quarter_name| (cast "1998Q1" <named StringView>)) (== |d1.d_date_sk| ss_sold_date_sk))
+            (&& (== i_item_sk ss_item_sk) (== s_store_sk ss_store_sk)))
+          (&& (&& (== ss_customer_sk sr_customer_sk) (== ss_item_sk sr_item_sk))
+            (&& (== ss_ticket_number sr_ticket_number) (== sr_returned_date_sk |d2.d_date_sk|))))
+        (&& (&& (&& (call
+                qdb_in_list
+                |d2.d_quarter_name|
+                (cast "1998Q1" <named StringView>)
+                (cast "1998Q2" <named StringView>)
+                (cast "1998Q3" <named StringView>))
               (== sr_customer_sk cs_bill_customer_sk))
-            (== sr_item_sk cs_item_sk))
-          (== cs_sold_date_sk |d3.d_date_sk|))
-        (call
-          qdb_in_list
-          |d3.d_quarter_name|
-          (cast "1998Q1" <named StringView>)
-          (cast "1998Q2" <named StringView>)
-          (cast "1998Q3" <named StringView>)))
+            (&& (== sr_item_sk cs_item_sk) (== cs_sold_date_sk |d3.d_date_sk|)))
+          (call
+            qdb_in_list
+            |d3.d_quarter_name|
+            (cast "1998Q1" <named StringView>)
+            (cast "1998Q2" <named StringView>)
+            (cast "1998Q3" <named StringView>))))
     )
     (group-by
       i_item_id

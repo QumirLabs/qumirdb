@@ -1,6 +1,7 @@
 #include <qdb/plan/passes/predicate_requirements.h>
 
 #include <qdb/plan/clone_expr.h>
+#include <qdb/plan/junction.h>
 #include <qdb/plan/passes/flatten_conjuncts.h>
 #include <qdb/plan/passes/unbound_vars.h>
 
@@ -21,17 +22,6 @@ namespace {
 using TColumns = std::vector<std::string>;
 using TByColumns = std::map<TColumns, std::vector<TExprPtr>>;
 
-TExprPtr Reduce(std::vector<TExprPtr> parts, const char* op) {
-    TExprPtr result;
-    for (auto& part : parts) {
-        result = result
-            ? std::make_shared<TBinaryExpr>(
-                NQumir::TLocation{}, TOperator(op), result, part)
-            : std::move(part);
-    }
-    return result;
-}
-
 } // namespace
 
 TExprPtr ConjoinPredicates(const std::vector<TExprPtr>& predicates) {
@@ -42,7 +32,7 @@ TExprPtr ConjoinPredicates(const std::vector<TExprPtr>& predicates) {
             cloned.push_back(CloneExpr(predicate));
         }
     }
-    return Reduce(std::move(cloned), "&&");
+    return Junction(TOperator("&&"), std::move(cloned));
 }
 
 TExprPtr BuildPredicateSuperset(
@@ -99,9 +89,9 @@ TExprPtr BuildPredicateSuperset(
                 perConsumer.push_back(std::move(conjoined));
             }
         }
-        commonGroups.push_back(Reduce(std::move(perConsumer), "||"));
+        commonGroups.push_back(Junction(TOperator("||"), std::move(perConsumer)));
     }
-    return Reduce(std::move(commonGroups), "&&");
+    return Junction(TOperator("&&"), std::move(commonGroups));
 }
 
 } // namespace NQdb

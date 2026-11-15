@@ -10,45 +10,42 @@
       (table part)
     )
     (where
-      (|| (|| (&& (&& (&& (&& (&& (&& (&& (== p_partkey l_partkey) (== p_brand (cast "Brand#35" <named StringView>)))
-                      (call
-                        qdb_in_list
-                        p_container
-                        (cast "SM CASE" <named StringView>)
-                        (cast "SM BOX" <named StringView>)
-                        (cast "SM PACK" <named StringView>)
-                        (cast "SM PKG" <named StringView>)))
-                    (>= l_quantity 10))
-                  (<= l_quantity (+ 10 10)))
-                (&& (<= 1 p_size) (<= p_size 5)))
-              (call qdb_in_list l_shipmode (cast "AIR" <named StringView>) (cast "AIR REG" <named StringView>)))
-            (== l_shipinstruct (cast "DELIVER IN PERSON" <named StringView>)))
-          (&& (&& (&& (&& (&& (&& (&& (== p_partkey l_partkey) (== p_brand (cast "Brand#34" <named StringView>)))
-                      (call
-                        qdb_in_list
-                        p_container
-                        (cast "MED BAG" <named StringView>)
-                        (cast "MED BOX" <named StringView>)
-                        (cast "MED PKG" <named StringView>)
-                        (cast "MED PACK" <named StringView>)))
-                    (>= l_quantity 18))
-                  (<= l_quantity (+ 18 10)))
-                (&& (<= 1 p_size) (<= p_size 10)))
-              (call qdb_in_list l_shipmode (cast "AIR" <named StringView>) (cast "AIR REG" <named StringView>)))
-            (== l_shipinstruct (cast "DELIVER IN PERSON" <named StringView>))))
-        (&& (&& (&& (&& (&& (&& (&& (== p_partkey l_partkey) (== p_brand (cast "Brand#23" <named StringView>)))
-                    (call
-                      qdb_in_list
-                      p_container
-                      (cast "LG CASE" <named StringView>)
-                      (cast "LG BOX" <named StringView>)
-                      (cast "LG PACK" <named StringView>)
-                      (cast "LG PKG" <named StringView>)))
-                  (>= l_quantity 24))
-                (<= l_quantity (+ 24 10)))
-              (&& (<= 1 p_size) (<= p_size 15)))
-            (call qdb_in_list l_shipmode (cast "AIR" <named StringView>) (cast "AIR REG" <named StringView>)))
-          (== l_shipinstruct (cast "DELIVER IN PERSON" <named StringView>))))
+      (|| (|| (&& (&& (&& (== p_partkey l_partkey) (== p_brand (cast "Brand#35" <named StringView>)))
+              (&& (call
+                  qdb_in_list
+                  p_container
+                  (cast "SM CASE" <named StringView>)
+                  (cast "SM BOX" <named StringView>)
+                  (cast "SM PACK" <named StringView>)
+                  (cast "SM PKG" <named StringView>))
+                (>= l_quantity 10)))
+            (&& (&& (<= l_quantity (+ 10 10)) (&& (<= 1 p_size) (<= p_size 5)))
+              (&& (call qdb_in_list l_shipmode (cast "AIR" <named StringView>) (cast "AIR REG" <named StringView>))
+                (== l_shipinstruct (cast "DELIVER IN PERSON" <named StringView>)))))
+          (&& (&& (&& (== p_partkey l_partkey) (== p_brand (cast "Brand#34" <named StringView>)))
+              (&& (call
+                  qdb_in_list
+                  p_container
+                  (cast "MED BAG" <named StringView>)
+                  (cast "MED BOX" <named StringView>)
+                  (cast "MED PKG" <named StringView>)
+                  (cast "MED PACK" <named StringView>))
+                (>= l_quantity 18)))
+            (&& (&& (<= l_quantity (+ 18 10)) (&& (<= 1 p_size) (<= p_size 10)))
+              (&& (call qdb_in_list l_shipmode (cast "AIR" <named StringView>) (cast "AIR REG" <named StringView>))
+                (== l_shipinstruct (cast "DELIVER IN PERSON" <named StringView>))))))
+        (&& (&& (&& (== p_partkey l_partkey) (== p_brand (cast "Brand#23" <named StringView>)))
+            (&& (call
+                qdb_in_list
+                p_container
+                (cast "LG CASE" <named StringView>)
+                (cast "LG BOX" <named StringView>)
+                (cast "LG PACK" <named StringView>)
+                (cast "LG PKG" <named StringView>))
+              (>= l_quantity 24)))
+          (&& (&& (<= l_quantity (+ 24 10)) (&& (<= 1 p_size) (<= p_size 15)))
+            (&& (call qdb_in_list l_shipmode (cast "AIR" <named StringView>) (cast "AIR REG" <named StringView>))
+              (== l_shipinstruct (cast "DELIVER IN PERSON" <named StringView>))))))
     )
   )
 )

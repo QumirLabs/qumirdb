@@ -99,8 +99,9 @@
       (table time_dim)
     )
     (where
-      (&& (&& (&& (== sold_item_sk i_item_sk) (== i_manager_id 1)) (== time_sk t_time_sk))
-        (|| (== t_meal_time (cast "breakfast" <named StringView>)) (== t_meal_time (cast "dinner" <named StringView>))))
+      (&& (&& (== sold_item_sk i_item_sk) (== i_manager_id 1))
+        (&& (== time_sk t_time_sk)
+          (|| (== t_meal_time (cast "breakfast" <named StringView>)) (== t_meal_time (cast "dinner" <named StringView>)))))
     )
     (group-by
       i_brand

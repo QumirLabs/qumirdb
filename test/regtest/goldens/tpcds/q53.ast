@@ -34,22 +34,23 @@
               (table store)
             )
             (where
-              (&& (&& (&& (&& (== ss_item_sk i_item_sk) (== ss_sold_date_sk d_date_sk)) (== ss_store_sk s_store_sk))
-                  (call
-                    qdb_in_list
-                    d_month_seq
-                    1212
-                    (+ 1212 1)
-                    (+ 1212 2)
-                    (+ 1212 3)
-                    (+ 1212 4)
-                    (+ 1212 5)
-                    (+ 1212 6)
-                    (+ 1212 7)
-                    (+ 1212 8)
-                    (+ 1212 9)
-                    (+ 1212 10)
-                    (+ 1212 11)))
+              (&& (&& (&& (== ss_item_sk i_item_sk) (== ss_sold_date_sk d_date_sk))
+                  (&& (== ss_store_sk s_store_sk)
+                    (call
+                      qdb_in_list
+                      d_month_seq
+                      1212
+                      (+ 1212 1)
+                      (+ 1212 2)
+                      (+ 1212 3)
+                      (+ 1212 4)
+                      (+ 1212 5)
+                      (+ 1212 6)
+                      (+ 1212 7)
+                      (+ 1212 8)
+                      (+ 1212 9)
+                      (+ 1212 10)
+                      (+ 1212 11))))
                 (|| (&& (&& (call
                         qdb_in_list
                         i_category

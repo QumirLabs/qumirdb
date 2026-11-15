@@ -41,8 +41,8 @@
       (table customer)
     )
     (where
-      (&& (&& (&& (> |ctr1.ctr_total_return|
-              (subquery scalar (query
+      (&& (&& (> |ctr1.ctr_total_return|
+            (subquery scalar (query
         (select
           (select-list
             (item
@@ -58,9 +58,8 @@
         )
       )
       ))
-            (== s_store_sk |ctr1.ctr_store_sk|))
-          (== s_state (cast "TN" <named StringView>)))
-        (== |ctr1.ctr_customer_sk| c_customer_sk))
+          (== s_store_sk |ctr1.ctr_store_sk|))
+        (&& (== s_state (cast "TN" <named StringView>)) (== |ctr1.ctr_customer_sk| c_customer_sk)))
     )
   )
   (order-by

@@ -31,14 +31,11 @@
             (table promotion)
           )
           (where
-            (&& (&& (&& (&& (&& (&& (== ss_sold_date_sk d_date_sk)
-                        (&& (<= (cast (cast "1998-08-04" <named StringView>) <named DATE>) d_date)
-                          (<= d_date (+ (cast (cast "1998-08-04" <named StringView>) <named DATE>) (: 30 i32)))))
-                      (== ss_store_sk s_store_sk))
-                    (== ss_item_sk i_item_sk))
-                  (> i_current_price 50))
-                (== ss_promo_sk p_promo_sk))
-              (== p_channel_tv (cast "N" <named StringView>)))
+            (&& (&& (&& (== ss_sold_date_sk d_date_sk)
+                  (&& (<= (cast (cast "1998-08-04" <named StringView>) <named DATE>) d_date)
+                    (<= d_date (+ (cast (cast "1998-08-04" <named StringView>) <named DATE>) (: 30 i32)))))
+                (&& (== ss_store_sk s_store_sk) (== ss_item_sk i_item_sk)))
+              (&& (&& (> i_current_price 50) (== ss_promo_sk p_promo_sk)) (== p_channel_tv (cast "N" <named StringView>))))
           )
           (group-by
             s_store_id
@@ -77,14 +74,11 @@
             (table promotion)
           )
           (where
-            (&& (&& (&& (&& (&& (&& (== cs_sold_date_sk d_date_sk)
-                        (&& (<= (cast (cast "1998-08-04" <named StringView>) <named DATE>) d_date)
-                          (<= d_date (+ (cast (cast "1998-08-04" <named StringView>) <named DATE>) (: 30 i32)))))
-                      (== cs_catalog_page_sk cp_catalog_page_sk))
-                    (== cs_item_sk i_item_sk))
-                  (> i_current_price 50))
-                (== cs_promo_sk p_promo_sk))
-              (== p_channel_tv (cast "N" <named StringView>)))
+            (&& (&& (&& (== cs_sold_date_sk d_date_sk)
+                  (&& (<= (cast (cast "1998-08-04" <named StringView>) <named DATE>) d_date)
+                    (<= d_date (+ (cast (cast "1998-08-04" <named StringView>) <named DATE>) (: 30 i32)))))
+                (&& (== cs_catalog_page_sk cp_catalog_page_sk) (== cs_item_sk i_item_sk)))
+              (&& (&& (> i_current_price 50) (== cs_promo_sk p_promo_sk)) (== p_channel_tv (cast "N" <named StringView>))))
           )
           (group-by
             cp_catalog_page_id
@@ -123,14 +117,11 @@
             (table promotion)
           )
           (where
-            (&& (&& (&& (&& (&& (&& (== ws_sold_date_sk d_date_sk)
-                        (&& (<= (cast (cast "1998-08-04" <named StringView>) <named DATE>) d_date)
-                          (<= d_date (+ (cast (cast "1998-08-04" <named StringView>) <named DATE>) (: 30 i32)))))
-                      (== ws_web_site_sk web_site_sk))
-                    (== ws_item_sk i_item_sk))
-                  (> i_current_price 50))
-                (== ws_promo_sk p_promo_sk))
-              (== p_channel_tv (cast "N" <named StringView>)))
+            (&& (&& (&& (== ws_sold_date_sk d_date_sk)
+                  (&& (<= (cast (cast "1998-08-04" <named StringView>) <named DATE>) d_date)
+                    (<= d_date (+ (cast (cast "1998-08-04" <named StringView>) <named DATE>) (: 30 i32)))))
+                (&& (== ws_web_site_sk web_site_sk) (== ws_item_sk i_item_sk)))
+              (&& (&& (> i_current_price 50) (== ws_promo_sk p_promo_sk)) (== p_channel_tv (cast "N" <named StringView>))))
           )
           (group-by
             web_site_id

@@ -13,40 +13,41 @@
       (table date_dim)
     )
     (where
-      (&& (&& (&& (&& (== s_store_sk ss_store_sk) (== ss_sold_date_sk d_date_sk)) (== d_year 1998))
-          (|| (|| (&& (&& (&& (== cd_demo_sk ss_cdemo_sk) (== cd_marital_status (cast "M" <named StringView>)))
-                  (== cd_education_status (cast "4 yr Degree" <named StringView>)))
-                (&& (<= 100.0 ss_sales_price) (<= ss_sales_price 150.0)))
-              (&& (&& (&& (== cd_demo_sk ss_cdemo_sk) (== cd_marital_status (cast "D" <named StringView>)))
-                  (== cd_education_status (cast "Primary" <named StringView>)))
-                (&& (<= 50.0 ss_sales_price) (<= ss_sales_price 100.0))))
-            (&& (&& (&& (== cd_demo_sk ss_cdemo_sk) (== cd_marital_status (cast "U" <named StringView>)))
-                (== cd_education_status (cast "Advanced Degree" <named StringView>)))
-              (&& (<= 150.0 ss_sales_price) (<= ss_sales_price 200.0)))))
-        (|| (|| (&& (&& (&& (== ss_addr_sk ca_address_sk) (== ca_country (cast "United States" <named StringView>)))
-                (call
+      (&& (&& (&& (== s_store_sk ss_store_sk) (== ss_sold_date_sk d_date_sk))
+          (&& (== d_year 1998)
+            (|| (|| (&& (&& (== cd_demo_sk ss_cdemo_sk) (== cd_marital_status (cast "M" <named StringView>)))
+                  (&& (== cd_education_status (cast "4 yr Degree" <named StringView>))
+                    (&& (<= 100.0 ss_sales_price) (<= ss_sales_price 150.0))))
+                (&& (&& (== cd_demo_sk ss_cdemo_sk) (== cd_marital_status (cast "D" <named StringView>)))
+                  (&& (== cd_education_status (cast "Primary" <named StringView>))
+                    (&& (<= 50.0 ss_sales_price) (<= ss_sales_price 100.0)))))
+              (&& (&& (== cd_demo_sk ss_cdemo_sk) (== cd_marital_status (cast "U" <named StringView>)))
+                (&& (== cd_education_status (cast "Advanced Degree" <named StringView>))
+                  (&& (<= 150.0 ss_sales_price) (<= ss_sales_price 200.0)))))))
+        (|| (|| (&& (&& (== ss_addr_sk ca_address_sk) (== ca_country (cast "United States" <named StringView>)))
+              (&& (call
                   qdb_in_list
                   ca_state
                   (cast "KY" <named StringView>)
                   (cast "GA" <named StringView>)
-                  (cast "NM" <named StringView>)))
-              (&& (<= 0 ss_net_profit) (<= ss_net_profit 2000)))
-            (&& (&& (&& (== ss_addr_sk ca_address_sk) (== ca_country (cast "United States" <named StringView>)))
-                (call
+                  (cast "NM" <named StringView>))
+                (&& (<= 0 ss_net_profit) (<= ss_net_profit 2000))))
+            (&& (&& (== ss_addr_sk ca_address_sk) (== ca_country (cast "United States" <named StringView>)))
+              (&& (call
                   qdb_in_list
                   ca_state
                   (cast "MT" <named StringView>)
                   (cast "OR" <named StringView>)
-                  (cast "IN" <named StringView>)))
-              (&& (<= 150 ss_net_profit) (<= ss_net_profit 3000))))
-          (&& (&& (&& (== ss_addr_sk ca_address_sk) (== ca_country (cast "United States" <named StringView>)))
-              (call
+                  (cast "IN" <named StringView>))
+                (&& (<= 150 ss_net_profit) (<= ss_net_profit 3000)))))
+          (&& (&& (== ss_addr_sk ca_address_sk) (== ca_country (cast "United States" <named StringView>)))
+            (&& (call
                 qdb_in_list
                 ca_state
                 (cast "WI" <named StringView>)
                 (cast "MO" <named StringView>)
-                (cast "WV" <named StringView>)))
-            (&& (<= 50 ss_net_profit) (<= ss_net_profit 25000)))))
+                (cast "WV" <named StringView>))
+              (&& (<= 50 ss_net_profit) (<= ss_net_profit 25000))))))
     )
   )
 )

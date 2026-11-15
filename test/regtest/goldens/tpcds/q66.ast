@@ -248,11 +248,10 @@
                 (table ship_mode)
               )
               (where
-                (&& (&& (&& (&& (&& (&& (== ws_warehouse_sk w_warehouse_sk) (== ws_sold_date_sk d_date_sk)) (== ws_sold_time_sk t_time_sk))
-                        (== ws_ship_mode_sk sm_ship_mode_sk))
-                      (== d_year 2002))
-                    (&& (<= 49530 t_time) (<= t_time (+ 49530 28800))))
-                  (call qdb_in_list sm_carrier (cast "DIAMOND" <named StringView>) (cast "AIRBORNE" <named StringView>)))
+                (&& (&& (&& (== ws_warehouse_sk w_warehouse_sk) (== ws_sold_date_sk d_date_sk))
+                    (&& (== ws_sold_time_sk t_time_sk) (== ws_ship_mode_sk sm_ship_mode_sk)))
+                  (&& (&& (== d_year 2002) (&& (<= 49530 t_time) (<= t_time (+ 49530 28800))))
+                    (call qdb_in_list sm_carrier (cast "DIAMOND" <named StringView>) (cast "AIRBORNE" <named StringView>))))
               )
               (group-by
                 w_warehouse_name
@@ -374,11 +373,10 @@
                 (table ship_mode)
               )
               (where
-                (&& (&& (&& (&& (&& (&& (== cs_warehouse_sk w_warehouse_sk) (== cs_sold_date_sk d_date_sk)) (== cs_sold_time_sk t_time_sk))
-                        (== cs_ship_mode_sk sm_ship_mode_sk))
-                      (== d_year 2002))
-                    (&& (<= 49530 t_time) (<= t_time (+ 49530 28800))))
-                  (call qdb_in_list sm_carrier (cast "DIAMOND" <named StringView>) (cast "AIRBORNE" <named StringView>)))
+                (&& (&& (&& (== cs_warehouse_sk w_warehouse_sk) (== cs_sold_date_sk d_date_sk))
+                    (&& (== cs_sold_time_sk t_time_sk) (== cs_ship_mode_sk sm_ship_mode_sk)))
+                  (&& (&& (== d_year 2002) (&& (<= 49530 t_time) (<= t_time (+ 49530 28800))))
+                    (call qdb_in_list sm_carrier (cast "DIAMOND" <named StringView>) (cast "AIRBORNE" <named StringView>))))
               )
               (group-by
                 w_warehouse_name

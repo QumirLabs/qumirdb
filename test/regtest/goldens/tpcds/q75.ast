@@ -232,13 +232,11 @@
       (table all_sales as prev_yr)
     )
     (where
-      (&& (&& (&& (&& (&& (&& (== |curr_yr.i_brand_id| |prev_yr.i_brand_id|) (== |curr_yr.i_class_id| |prev_yr.i_class_id|))
-                (== |curr_yr.i_category_id| |prev_yr.i_category_id|))
-              (== |curr_yr.i_manufact_id| |prev_yr.i_manufact_id|))
-            (== |curr_yr.d_year| 2002))
-          (== |prev_yr.d_year| (- 2002 1)))
-        (< (/ (cast |curr_yr.sales_cnt| <named DECIMAL [17 2]>) (cast |prev_yr.sales_cnt| <named DECIMAL [17 2]>))
-          0.90000000000000002))
+      (&& (&& (&& (== |curr_yr.i_brand_id| |prev_yr.i_brand_id|) (== |curr_yr.i_class_id| |prev_yr.i_class_id|))
+          (&& (== |curr_yr.i_category_id| |prev_yr.i_category_id|) (== |curr_yr.i_manufact_id| |prev_yr.i_manufact_id|)))
+        (&& (&& (== |curr_yr.d_year| 2002) (== |prev_yr.d_year| (- 2002 1)))
+          (< (/ (cast |curr_yr.sales_cnt| <named DECIMAL [17 2]>) (cast |prev_yr.sales_cnt| <named DECIMAL [17 2]>))
+            0.90000000000000002)))
     )
   )
   (order-by

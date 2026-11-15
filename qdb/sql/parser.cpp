@@ -1,15 +1,19 @@
 #include "parser.h"
 
 #include <qdb/modules/qumirdb_runtime.h>
+#include <qdb/plan/junction.h>
 #include <qdb/plan/types/decimal.h>
+#include <qdb/utils/balanced_fold.h>
 
 #include <qumir/optional.h>
 
 #include <cctype>
 #include <map>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 /*
 
@@ -364,10 +368,114 @@ TError Error(const TToken& token, const std::string& message) {
     return TError(token.Location, message);
 }
 
+TError NestingError(TLocation location) {
+    return TError(location, "query nesting is too deep (limit " + std::to_string(MaxNesting) + ")");
+}
+
 TError NestingError(TParserContext& ctx) {
     auto token = ctx.Stream.Next();
     ctx.Stream.Unget(token);
-    return Error(token, "query nesting is too deep (limit " + std::to_string(MaxNesting) + ")");
+    return NestingError(token.Location);
+}
+
+// Later passes recurse once per node, so the limit bounds the tree too: a chain built
+// in a loop (a + b + ..., CASE, JOIN, EXCEPT) is as deep as it is long. Iterative, as
+// it measures trees too deep to recurse over; a clause node has no location of its own.
+std::optional<TLocation> FindTooDeep(const TSqlNodePtr& statement, const TLocation& clauseLocation) {
+    struct TItem {
+        const TSqlNode* Clause = nullptr;
+        const NQumir::NAst::TExpr* Expr = nullptr;
+        size_t Depth = 0;
+    };
+    std::vector<TItem> stack;
+    auto clause = [&](const auto& node, size_t depth) {
+        if (node) {
+            stack.push_back({.Clause = node.get(), .Depth = depth});
+        }
+    };
+    auto expr = [&](const NQumir::NAst::TExprPtr& node, size_t depth) {
+        if (node) {
+            stack.push_back({.Expr = node.get(), .Depth = depth});
+        }
+    };
+    clause(statement, 1);
+    while (!stack.empty()) {
+        const auto item = stack.back();
+        stack.pop_back();
+        if (item.Depth > MaxNesting) {
+            return item.Expr ? item.Expr->Location : clauseLocation;
+        }
+        const size_t depth = item.Depth + 1;
+        if (item.Expr) {
+            for (const auto& child : item.Expr->Children()) {
+                expr(child, depth);
+            }
+            if (item.Expr->NodeName() == TSubqueryExpr::NodeId) {
+                clause(static_cast<const TSubqueryExpr*>(item.Expr)->Query, depth);
+            }
+            continue;
+        }
+        const auto name = item.Clause->NodeName();
+        if (name == TSqlQuery::NodeId) {
+            const auto& query = static_cast<const TSqlQuery&>(*item.Clause);
+            if (query.WithClause) {
+                for (const auto& cte : query.WithClause->Ctes) {
+                    clause(cte->Query, depth);
+                }
+            }
+            clause(query.Body, depth);
+            if (query.OrderBy) {
+                for (const auto& orderItem : query.OrderBy->Items) {
+                    expr(orderItem->Expr, depth);
+                }
+            }
+            expr(query.Limit, depth);
+            expr(query.Offset, depth);
+        } else if (name == TSqlSelect::NodeId) {
+            const auto& select = static_cast<const TSqlSelect&>(*item.Clause);
+            if (select.SelectList) {
+                for (const auto& selectItem : select.SelectList->Items) {
+                    expr(selectItem->Expr, depth);
+                }
+            }
+            if (select.From) {
+                for (const auto& table : select.From->Items) {
+                    clause(table, depth);
+                }
+            }
+            expr(select.Where, depth);
+            if (select.GroupBy) {
+                for (const auto& grouping : select.GroupBy->Items) {
+                    clause(grouping, depth);
+                }
+            }
+            expr(select.Having, depth);
+        } else if (name == TSqlSetOp::NodeId) {
+            const auto& setOp = static_cast<const TSqlSetOp&>(*item.Clause);
+            clause(setOp.Left, depth);
+            clause(setOp.Right, depth);
+        } else if (name == TSqlJoin::NodeId) {
+            const auto& join = static_cast<const TSqlJoin&>(*item.Clause);
+            clause(join.Left, depth);
+            clause(join.Right, depth);
+            if (join.Condition) {
+                expr(join.Condition->On, depth);
+            }
+        } else if (name == TSqlSubqueryTable::NodeId) {
+            clause(static_cast<const TSqlSubqueryTable&>(*item.Clause).Query, depth);
+        } else if (name == TSqlGroupingSet::NodeId) {
+            for (const auto& grouping : static_cast<const TSqlGroupingSet&>(*item.Clause).Items) {
+                clause(grouping, depth);
+            }
+        } else if (name == TSqlRollUp::NodeId) {
+            expr(static_cast<const TSqlRollUp&>(*item.Clause).Exprs, depth);
+        } else if (name == TSqlCube::NodeId) {
+            expr(static_cast<const TSqlCube&>(*item.Clause).Exprs, depth);
+        } else if (name == TSqlGroupingExprOrList::NodeId) {
+            expr(static_cast<const TSqlGroupingExprOrList&>(*item.Clause).Exprs, depth);
+        }
+    }
+    return std::nullopt;
 }
 
 bool IsEof(const TToken& token) {
@@ -655,6 +763,9 @@ TAstTask<TSqlNode> statement(TParserContext& ctx) {
     }
 
     auto token = ctx.Stream.Next();
+    if (auto deep = FindTooDeep(node, token.Location)) {
+        co_return NestingError(*deep);
+    }
     if (IsEof(token) || IsOp(token, ';')) {
         co_return node;
     }
@@ -854,8 +965,17 @@ TAstTask<TSqlQuery> select_stmt(TParserContext& ctx) {
     co_return q;
 }
 
+// A run of UNIONs with one quantifier is associative and becomes a balanced tree,
+// so that a long UNION ALL list stays shallow; EXCEPT nests to the left.
 TAstTask<TSqlNode> query_expr(TParserContext& ctx) {
-    auto node = co_await query_term(ctx);
+    std::vector<TSqlNodePtr> run{co_await query_term(ctx)};
+    ESetQuantifier runQuantifier = ESetQuantifier::All;
+    auto fold = [&] {
+        return FoldBalanced(std::move(run), [&](TSqlNodePtr left, TSqlNodePtr right) -> TSqlNodePtr {
+            return std::make_shared<TSqlSetOp>(
+                std::move(left), std::move(right), TSqlSetOp::EOp::Union, runQuantifier);
+        });
+    };
     while (true) {
         auto token = ctx.Stream.Next();
         if (IsKeyword(token, "UNION") || IsKeyword(token, "EXCEPT")) {
@@ -873,14 +993,24 @@ TAstTask<TSqlNode> query_expr(TParserContext& ctx) {
                 ctx.Stream.Unget(quantifierTok);
             }
             auto right = co_await query_term(ctx);
-            node = std::make_shared<TSqlSetOp>(std::move(node), std::move(right), op, quantifier);
+            if (op == TSqlSetOp::EOp::Union && run.size() > 1 && quantifier == runQuantifier) {
+                run.push_back(std::move(right));
+                continue;
+            }
+            auto left = fold();
+            if (op == TSqlSetOp::EOp::Union) {
+                run = {std::move(left), std::move(right)};
+                runQuantifier = quantifier;
+            } else {
+                run = {std::make_shared<TSqlSetOp>(std::move(left), std::move(right), op, quantifier)};
+            }
         } else {
             ctx.Stream.Unget(token);
             break;
         }
     }
 
-    co_return node;
+    co_return fold();
 }
 
 TAstTask<TSqlNode> query_term(TParserContext& ctx) {
@@ -1478,13 +1608,14 @@ TAstExprTask expr(TParserContext& ctx) {
     co_return co_await or_expr(ctx);
 }
 
+// AND and OR chains are balanced trees: a long OR of generated conditions would
+// be as deep as it is long.
 template<typename Func>
-TAstExprTask binary_op_kw_helper(TParserContext& ctx, Func prev_parser, const std::string& kw, TOperator op) {
-    auto ret = co_await prev_parser(ctx);
-    TLocation loc = ret->Location;
+TAstExprTask junction_helper(TParserContext& ctx, Func prev_parser, const std::string& kw, TOperator op) {
+    std::vector<NQumir::NAst::TExprPtr> parts;
+    parts.push_back(co_await prev_parser(ctx));
     auto isKw = [&] () {
         auto next = ctx.Stream.Next();
-        loc = next.Location;
         if (IsKeyword(next, kw)) {
             return true;
         }
@@ -1492,10 +1623,9 @@ TAstExprTask binary_op_kw_helper(TParserContext& ctx, Func prev_parser, const st
         return false;
     };
     while (isKw()) {
-        auto next_expr = co_await prev_parser(ctx);
-        ret = binary(loc, op, ret, next_expr);
+        parts.push_back(co_await prev_parser(ctx));
     }
-    co_return ret;
+    co_return Junction(op, std::move(parts));
 }
 
 template<typename Func, typename... TOps>
@@ -1523,11 +1653,11 @@ TAstExprTask binary_op_helper(TParserContext& ctx, Func prev_parser, TOps... ops
 }
 
 TAstExprTask or_expr(TParserContext& ctx) {
-    co_return co_await binary_op_kw_helper(ctx, and_expr, "OR", "||"_op);
+    co_return co_await junction_helper(ctx, and_expr, "OR", "||"_op);
 }
 
 TAstExprTask and_expr(TParserContext& ctx) {
-    co_return co_await binary_op_kw_helper(ctx, not_expr, "AND", "&&"_op);
+    co_return co_await junction_helper(ctx, not_expr, "AND", "&&"_op);
 }
 
 TAstExprTask not_expr(TParserContext& ctx) {

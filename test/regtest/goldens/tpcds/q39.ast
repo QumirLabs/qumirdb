@@ -57,8 +57,8 @@
                     (table date_dim)
                   )
                   (where
-                    (&& (&& (&& (== inv_item_sk i_item_sk) (== inv_warehouse_sk w_warehouse_sk)) (== inv_date_sk d_date_sk))
-                      (== d_year 1998))
+                    (&& (&& (== inv_item_sk i_item_sk) (== inv_warehouse_sk w_warehouse_sk))
+                      (&& (== inv_date_sk d_date_sk) (== d_year 1998)))
                   )
                   (group-by
                     w_warehouse_name
@@ -115,8 +115,8 @@
       (table inv as inv2)
     )
     (where
-      (&& (&& (&& (== |inv1.i_item_sk| |inv2.i_item_sk|) (== |inv1.w_warehouse_sk| |inv2.w_warehouse_sk|)) (== |inv1.d_moy| 4))
-        (== |inv2.d_moy| (+ 4 1)))
+      (&& (&& (== |inv1.i_item_sk| |inv2.i_item_sk|) (== |inv1.w_warehouse_sk| |inv2.w_warehouse_sk|))
+        (&& (== |inv1.d_moy| 4) (== |inv2.d_moy| (+ 4 1))))
     )
   )
   (order-by

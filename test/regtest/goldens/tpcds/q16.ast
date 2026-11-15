@@ -18,12 +18,11 @@
       (table call_center)
     )
     (where
-      (&& (&& (&& (&& (&& (&& (&& (&& (<= (cast "1999-2-01" <named StringView>) d_date)
-                      (<= d_date (+ (cast (cast "1999-2-01" <named StringView>) <named DATE>) (: 60 i32))))
-                    (== |cs1.cs_ship_date_sk| d_date_sk))
-                  (== |cs1.cs_ship_addr_sk| ca_address_sk))
-                (== ca_state (cast "IL" <named StringView>)))
-              (== |cs1.cs_call_center_sk| cc_call_center_sk))
+      (&& (&& (&& (&& (<= (cast "1999-2-01" <named StringView>) d_date)
+              (<= d_date (+ (cast (cast "1999-2-01" <named StringView>) <named DATE>) (: 60 i32))))
+            (== |cs1.cs_ship_date_sk| d_date_sk))
+          (&& (== |cs1.cs_ship_addr_sk| ca_address_sk) (== ca_state (cast "IL" <named StringView>))))
+        (&& (&& (== |cs1.cs_call_center_sk| cc_call_center_sk)
             (call
               qdb_in_list
               cc_county
@@ -32,7 +31,7 @@
               (cast "Williamson County" <named StringView>)
               (cast "Williamson County" <named StringView>)
               (cast "Williamson County" <named StringView>)))
-          (subquery exists (query
+          (&& (subquery exists (query
         (select
           (select-list
             (star *)
@@ -45,8 +44,8 @@
           )
         )
       )
-      ))
-        (! (subquery exists (query
+      )
+            (! (subquery exists (query
         (select
           (select-list
             (star *)
@@ -59,7 +58,7 @@
           )
         )
       )
-      )))
+      )))))
     )
   )
   (order-by

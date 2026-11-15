@@ -31,12 +31,10 @@
       (table item)
     )
     (where
-      (&& (&& (&& (&& (&& (&& (&& (&& (== ss_sold_date_sk d_date_sk) (== ss_item_sk i_item_sk)) (== ss_store_sk s_store_sk))
-                  (== ss_cdemo_sk cd_demo_sk))
-                (== cd_gender (cast "F" <named StringView>)))
-              (== cd_marital_status (cast "W" <named StringView>)))
-            (== cd_education_status (cast "Primary" <named StringView>)))
-          (== d_year 1998))
+      (&& (&& (&& (&& (== ss_sold_date_sk d_date_sk) (== ss_item_sk i_item_sk))
+            (&& (== ss_store_sk s_store_sk) (== ss_cdemo_sk cd_demo_sk)))
+          (&& (&& (== cd_gender (cast "F" <named StringView>)) (== cd_marital_status (cast "W" <named StringView>)))
+            (&& (== cd_education_status (cast "Primary" <named StringView>)) (== d_year 1998))))
         (call
           qdb_in_list
           s_state

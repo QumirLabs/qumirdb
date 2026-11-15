@@ -64,6 +64,7 @@ add_library(qumirdb
     plan/passes/factor_conjuncts.cpp
     plan/passes/flatten_joins.cpp
     plan/clone_expr.cpp
+    plan/junction.cpp
     plan/clone_operator.cpp
     plan/passes/cte_reuse.cpp
     plan/pipeline.cpp

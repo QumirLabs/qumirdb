@@ -137,8 +137,9 @@
                 (table date_dim)
               )
               (where
-                (&& (&& (&& (&& (== d_year 1999) (== d_moy 1)) (== cs_sold_date_sk d_date_sk))
-                    (subquery in cs_item_sk (query
+                (&& (&& (&& (== d_year 1999) (== d_moy 1))
+                    (&& (== cs_sold_date_sk d_date_sk)
+                      (subquery in cs_item_sk (query
                   (select
                     (select-list
                       (item
@@ -150,7 +151,7 @@
                     )
                   )
                 )
-                ))
+                )))
                   (subquery in cs_bill_customer_sk (query
                   (select
                     (select-list
@@ -177,8 +178,9 @@
                 (table date_dim)
               )
               (where
-                (&& (&& (&& (&& (== d_year 1999) (== d_moy 1)) (== ws_sold_date_sk d_date_sk))
-                    (subquery in ws_item_sk (query
+                (&& (&& (&& (== d_year 1999) (== d_moy 1))
+                    (&& (== ws_sold_date_sk d_date_sk)
+                      (subquery in ws_item_sk (query
                   (select
                     (select-list
                       (item
@@ -190,7 +192,7 @@
                     )
                   )
                 )
-                ))
+                )))
                   (subquery in ws_bill_customer_sk (query
                   (select
                     (select-list

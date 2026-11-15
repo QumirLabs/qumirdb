@@ -25,12 +25,11 @@
       (table promotion)
     )
     (where
-      (&& (&& (&& (&& (&& (&& (&& (&& (== ss_sold_date_sk d_date_sk) (== ss_item_sk i_item_sk)) (== ss_cdemo_sk cd_demo_sk))
-                  (== ss_promo_sk p_promo_sk))
-                (== cd_gender (cast "F" <named StringView>)))
-              (== cd_marital_status (cast "W" <named StringView>)))
-            (== cd_education_status (cast "Primary" <named StringView>)))
-          (|| (== p_channel_email (cast "N" <named StringView>)) (== p_channel_event (cast "N" <named StringView>))))
+      (&& (&& (&& (&& (== ss_sold_date_sk d_date_sk) (== ss_item_sk i_item_sk))
+            (&& (== ss_cdemo_sk cd_demo_sk) (== ss_promo_sk p_promo_sk)))
+          (&& (&& (== cd_gender (cast "F" <named StringView>)) (== cd_marital_status (cast "W" <named StringView>)))
+            (&& (== cd_education_status (cast "Primary" <named StringView>))
+              (|| (== p_channel_email (cast "N" <named StringView>)) (== p_channel_event (cast "N" <named StringView>))))))
         (== d_year 1998))
     )
     (group-by

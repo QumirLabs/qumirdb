@@ -100,9 +100,8 @@
       )
     )
     (where
-      (&& (&& (&& (== |sb.ss_store_sk| |sc.ss_store_sk|) (<= |sc.revenue| (* 0.10000000000000001 |sb.ave|)))
-          (== s_store_sk |sc.ss_store_sk|))
-        (== i_item_sk |sc.ss_item_sk|))
+      (&& (&& (== |sb.ss_store_sk| |sc.ss_store_sk|) (<= |sc.revenue| (* 0.10000000000000001 |sb.ave|)))
+        (&& (== s_store_sk |sc.ss_store_sk|) (== i_item_sk |sc.ss_item_sk|)))
     )
   )
   (order-by

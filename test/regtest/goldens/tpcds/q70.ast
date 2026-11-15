@@ -36,9 +36,9 @@
       (table store)
     )
     (where
-      (&& (&& (&& (&& (<= 1212 |d1.d_month_seq|) (<= |d1.d_month_seq| (+ 1212 11))) (== |d1.d_date_sk| ss_sold_date_sk))
-          (== s_store_sk ss_store_sk))
-        (subquery in s_state (query
+      (&& (&& (&& (<= 1212 |d1.d_month_seq|) (<= |d1.d_month_seq| (+ 1212 11))) (== |d1.d_date_sk| ss_sold_date_sk))
+        (&& (== s_store_sk ss_store_sk)
+          (subquery in s_state (query
         (select
           (select-list
             (item
@@ -90,7 +90,7 @@
           )
         )
       )
-      ))
+      )))
     )
     (group-by
       (rollup

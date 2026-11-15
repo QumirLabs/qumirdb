@@ -217,7 +217,7 @@
                   (table date_dim)
                 )
                 (where
-                  (&& (&& (&& (&& (subquery in ss_item_sk (query
+                  (&& (&& (&& (subquery in ss_item_sk (query
                     (select
                       (select-list
                         (item
@@ -230,9 +230,8 @@
                     )
                   )
                   )
-                          (== ss_item_sk i_item_sk))
-                        (== ss_sold_date_sk d_date_sk))
-                      (== d_year (+ 1998 2)))
+                        (== ss_item_sk i_item_sk))
+                      (&& (== ss_sold_date_sk d_date_sk) (== d_year (+ 1998 2))))
                     (== d_moy 11))
                 )
                 (group-by
@@ -284,7 +283,7 @@
                   (table date_dim)
                 )
                 (where
-                  (&& (&& (&& (&& (subquery in cs_item_sk (query
+                  (&& (&& (&& (subquery in cs_item_sk (query
                     (select
                       (select-list
                         (item
@@ -297,9 +296,8 @@
                     )
                   )
                   )
-                          (== cs_item_sk i_item_sk))
-                        (== cs_sold_date_sk d_date_sk))
-                      (== d_year (+ 1998 2)))
+                        (== cs_item_sk i_item_sk))
+                      (&& (== cs_sold_date_sk d_date_sk) (== d_year (+ 1998 2))))
                     (== d_moy 11))
                 )
                 (group-by
@@ -352,7 +350,7 @@
                 (table date_dim)
               )
               (where
-                (&& (&& (&& (&& (subquery in ws_item_sk (query
+                (&& (&& (&& (subquery in ws_item_sk (query
                   (select
                     (select-list
                       (item
@@ -365,9 +363,8 @@
                   )
                 )
                 )
-                        (== ws_item_sk i_item_sk))
-                      (== ws_sold_date_sk d_date_sk))
-                    (== d_year (+ 1998 2)))
+                      (== ws_item_sk i_item_sk))
+                    (&& (== ws_sold_date_sk d_date_sk) (== d_year (+ 1998 2))))
                   (== d_moy 11))
               )
               (group-by

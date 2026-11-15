@@ -55,11 +55,9 @@
             (table customer)
           )
           (where
-            (&& (&& (&& (&& (&& (&& (== sold_date_sk d_date_sk) (== item_sk i_item_sk)) (== i_category (cast "Jewelry" <named StringView>)))
-                    (== i_class (cast "consignment" <named StringView>)))
-                  (== c_customer_sk |cs_or_ws_sales.customer_sk|))
-                (== d_moy 3))
-              (== d_year 1999))
+            (&& (&& (&& (== sold_date_sk d_date_sk) (== item_sk i_item_sk))
+                (&& (== i_category (cast "Jewelry" <named StringView>)) (== i_class (cast "consignment" <named StringView>))))
+              (&& (&& (== c_customer_sk |cs_or_ws_sales.customer_sk|) (== d_moy 3)) (== d_year 1999)))
           )
         )
       )
@@ -83,10 +81,10 @@
             (table date_dim)
           )
           (where
-            (&& (&& (&& (&& (&& (== c_current_addr_sk ca_address_sk) (== ca_county s_county)) (== ca_state s_state))
-                  (== ss_sold_date_sk d_date_sk))
-                (== c_customer_sk ss_customer_sk))
-              (&& (<= (subquery scalar (query
+            (&& (&& (&& (== c_current_addr_sk ca_address_sk) (== ca_county s_county))
+                (&& (== ca_state s_state) (== ss_sold_date_sk d_date_sk)))
+              (&& (== c_customer_sk ss_customer_sk)
+                (&& (<= (subquery scalar (query
               (select distinct
                 (select-list
                   (item
@@ -102,9 +100,9 @@
               )
             )
             )
-                  d_month_seq)
-                (<= d_month_seq
-                  (subquery scalar (query
+                    d_month_seq)
+                  (<= d_month_seq
+                    (subquery scalar (query
               (select distinct
                 (select-list
                   (item
@@ -119,7 +117,7 @@
                 )
               )
             )
-            ))))
+            )))))
           )
           (group-by
             c_customer_sk
