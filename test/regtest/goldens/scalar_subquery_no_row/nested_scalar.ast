@@ -1,0 +1,465 @@
+(query
+  (select
+    (select-list
+      (item
+        (subquery scalar (query
+          (select
+            (select-list
+              (item
+                (subquery scalar (query
+                  (select
+                    (select-list
+                      (item
+                        (subquery scalar (query
+                          (select
+                            (select-list
+                              (item
+                                (subquery scalar (query
+                                  (select
+                                    (select-list
+                                      (item
+                                        (subquery scalar (query
+                                          (select
+                                            (select-list
+                                              (item
+                                                (subquery scalar (query
+                                                  (select
+                                                    (select-list
+                                                      (item
+                                                        (subquery scalar (query
+                                                          (select
+                                                            (select-list
+                                                              (item
+                                                                (subquery scalar (query
+                                                                  (select
+                                                                    (select-list
+                                                                      (item
+                                                                        (subquery scalar (query
+                                                                          (select
+                                                                            (select-list
+                                                                              (item
+                                                                                (subquery scalar (query
+                                                                                  (select
+                                                                                    (select-list
+                                                                                      (item
+                                                                                        (subquery scalar (query
+                                                                                          (select
+                                                                                            (select-list
+                                                                                              (item
+                                                                                                (subquery scalar (query
+                                                                                                  (select
+                                                                                                    (select-list
+                                                                                                      (item
+                                                                                                        (subquery scalar (query
+                                                                                                          (select
+                                                                                                            (select-list
+                                                                                                              (item
+                                                                                                                (subquery scalar (query
+                                                                                                                  (select
+                                                                                                                    (select-list
+                                                                                                                      (item
+                                                                                                                        (subquery scalar (query
+                                                                                                                          (select
+                                                                                                                            (select-list
+                                                                                                                              (item
+                                                                                                                                (subquery scalar (query
+                                                                                                                                  (select
+                                                                                                                                    (select-list
+                                                                                                                                      (item
+                                                                                                                                        (subquery scalar (query
+                                                                                                                                          (select
+                                                                                                                                            (select-list
+                                                                                                                                              (item
+                                                                                                                                                (subquery scalar (query
+                                                                                                                                                  (select
+                                                                                                                                                    (select-list
+                                                                                                                                                      (item
+                                                                                                                                                        (subquery scalar (query
+                                                                                                                                                          (select
+                                                                                                                                                            (select-list
+                                                                                                                                                              (item
+                                                                                                                                                                (subquery scalar (query
+                                                                                                                                                                  (select
+                                                                                                                                                                    (select-list
+                                                                                                                                                                      (item
+                                                                                                                                                                        (subquery scalar (query
+                                                                                                                                                                          (select
+                                                                                                                                                                            (select-list
+                                                                                                                                                                              (item
+                                                                                                                                                                                (subquery scalar (query
+                                                                                                                                                                                  (select
+                                                                                                                                                                                    (select-list
+                                                                                                                                                                                      (item
+                                                                                                                                                                                        (subquery scalar (query
+                                                                                                                                                                                          (select
+                                                                                                                                                                                            (select-list
+                                                                                                                                                                                              (item
+                                                                                                                                                                                                (subquery scalar (query
+                                                                                                                                                                                                  (select
+                                                                                                                                                                                                    (select-list
+                                                                                                                                                                                                      (item
+                                                                                                                                                                                                        (subquery scalar (query
+                                                                                                                                                                                                          (select
+                                                                                                                                                                                                            (select-list
+                                                                                                                                                                                                              (item
+                                                                                                                                                                                                                (subquery scalar (query
+                                                                                                                                                                                                                  (select
+                                                                                                                                                                                                                    (select-list
+                                                                                                                                                                                                                      (item
+                                                                                                                                                                                                                        (subquery scalar (query
+                                                                                                                                                                                                                          (select
+                                                                                                                                                                                                                            (select-list
+                                                                                                                                                                                                                              (item
+                                                                                                                                                                                                                                (subquery scalar (query
+                                                                                                                                                                                                                                  (select
+                                                                                                                                                                                                                                    (select-list
+                                                                                                                                                                                                                                      (item
+                                                                                                                                                                                                                                        (subquery scalar (query
+                                                                                                                                                                                                                                          (select
+                                                                                                                                                                                                                                            (select-list
+                                                                                                                                                                                                                                              (item
+                                                                                                                                                                                                                                                (subquery scalar (query
+                                                                                                                                                                                                                                                  (select
+                                                                                                                                                                                                                                                    (select-list
+                                                                                                                                                                                                                                                      (item
+                                                                                                                                                                                                                                                        1
+                                                                                                                                                                                                                                                      )
+                                                                                                                                                                                                                                                    )
+                                                                                                                                                                                                                                                    (from
+                                                                                                                                                                                                                                                      (table u)
+                                                                                                                                                                                                                                                    )
+                                                                                                                                                                                                                                                    (where
+                                                                                                                                                                                                                                                      (== x 1)
+                                                                                                                                                                                                                                                    )
+                                                                                                                                                                                                                                                  )
+                                                                                                                                                                                                                                                )
+                                                                                                                                                                                                                                                )
+                                                                                                                                                                                                                                              )
+                                                                                                                                                                                                                                            )
+                                                                                                                                                                                                                                            (from
+                                                                                                                                                                                                                                              (table u)
+                                                                                                                                                                                                                                            )
+                                                                                                                                                                                                                                            (where
+                                                                                                                                                                                                                                              (== x 1)
+                                                                                                                                                                                                                                            )
+                                                                                                                                                                                                                                          )
+                                                                                                                                                                                                                                        )
+                                                                                                                                                                                                                                        )
+                                                                                                                                                                                                                                      )
+                                                                                                                                                                                                                                    )
+                                                                                                                                                                                                                                    (from
+                                                                                                                                                                                                                                      (table u)
+                                                                                                                                                                                                                                    )
+                                                                                                                                                                                                                                    (where
+                                                                                                                                                                                                                                      (== x 1)
+                                                                                                                                                                                                                                    )
+                                                                                                                                                                                                                                  )
+                                                                                                                                                                                                                                )
+                                                                                                                                                                                                                                )
+                                                                                                                                                                                                                              )
+                                                                                                                                                                                                                            )
+                                                                                                                                                                                                                            (from
+                                                                                                                                                                                                                              (table u)
+                                                                                                                                                                                                                            )
+                                                                                                                                                                                                                            (where
+                                                                                                                                                                                                                              (== x 1)
+                                                                                                                                                                                                                            )
+                                                                                                                                                                                                                          )
+                                                                                                                                                                                                                        )
+                                                                                                                                                                                                                        )
+                                                                                                                                                                                                                      )
+                                                                                                                                                                                                                    )
+                                                                                                                                                                                                                    (from
+                                                                                                                                                                                                                      (table u)
+                                                                                                                                                                                                                    )
+                                                                                                                                                                                                                    (where
+                                                                                                                                                                                                                      (== x 1)
+                                                                                                                                                                                                                    )
+                                                                                                                                                                                                                  )
+                                                                                                                                                                                                                )
+                                                                                                                                                                                                                )
+                                                                                                                                                                                                              )
+                                                                                                                                                                                                            )
+                                                                                                                                                                                                            (from
+                                                                                                                                                                                                              (table u)
+                                                                                                                                                                                                            )
+                                                                                                                                                                                                            (where
+                                                                                                                                                                                                              (== x 1)
+                                                                                                                                                                                                            )
+                                                                                                                                                                                                          )
+                                                                                                                                                                                                        )
+                                                                                                                                                                                                        )
+                                                                                                                                                                                                      )
+                                                                                                                                                                                                    )
+                                                                                                                                                                                                    (from
+                                                                                                                                                                                                      (table u)
+                                                                                                                                                                                                    )
+                                                                                                                                                                                                    (where
+                                                                                                                                                                                                      (== x 1)
+                                                                                                                                                                                                    )
+                                                                                                                                                                                                  )
+                                                                                                                                                                                                )
+                                                                                                                                                                                                )
+                                                                                                                                                                                              )
+                                                                                                                                                                                            )
+                                                                                                                                                                                            (from
+                                                                                                                                                                                              (table u)
+                                                                                                                                                                                            )
+                                                                                                                                                                                            (where
+                                                                                                                                                                                              (== x 1)
+                                                                                                                                                                                            )
+                                                                                                                                                                                          )
+                                                                                                                                                                                        )
+                                                                                                                                                                                        )
+                                                                                                                                                                                      )
+                                                                                                                                                                                    )
+                                                                                                                                                                                    (from
+                                                                                                                                                                                      (table u)
+                                                                                                                                                                                    )
+                                                                                                                                                                                    (where
+                                                                                                                                                                                      (== x 1)
+                                                                                                                                                                                    )
+                                                                                                                                                                                  )
+                                                                                                                                                                                )
+                                                                                                                                                                                )
+                                                                                                                                                                              )
+                                                                                                                                                                            )
+                                                                                                                                                                            (from
+                                                                                                                                                                              (table u)
+                                                                                                                                                                            )
+                                                                                                                                                                            (where
+                                                                                                                                                                              (== x 1)
+                                                                                                                                                                            )
+                                                                                                                                                                          )
+                                                                                                                                                                        )
+                                                                                                                                                                        )
+                                                                                                                                                                      )
+                                                                                                                                                                    )
+                                                                                                                                                                    (from
+                                                                                                                                                                      (table u)
+                                                                                                                                                                    )
+                                                                                                                                                                    (where
+                                                                                                                                                                      (== x 1)
+                                                                                                                                                                    )
+                                                                                                                                                                  )
+                                                                                                                                                                )
+                                                                                                                                                                )
+                                                                                                                                                              )
+                                                                                                                                                            )
+                                                                                                                                                            (from
+                                                                                                                                                              (table u)
+                                                                                                                                                            )
+                                                                                                                                                            (where
+                                                                                                                                                              (== x 1)
+                                                                                                                                                            )
+                                                                                                                                                          )
+                                                                                                                                                        )
+                                                                                                                                                        )
+                                                                                                                                                      )
+                                                                                                                                                    )
+                                                                                                                                                    (from
+                                                                                                                                                      (table u)
+                                                                                                                                                    )
+                                                                                                                                                    (where
+                                                                                                                                                      (== x 1)
+                                                                                                                                                    )
+                                                                                                                                                  )
+                                                                                                                                                )
+                                                                                                                                                )
+                                                                                                                                              )
+                                                                                                                                            )
+                                                                                                                                            (from
+                                                                                                                                              (table u)
+                                                                                                                                            )
+                                                                                                                                            (where
+                                                                                                                                              (== x 1)
+                                                                                                                                            )
+                                                                                                                                          )
+                                                                                                                                        )
+                                                                                                                                        )
+                                                                                                                                      )
+                                                                                                                                    )
+                                                                                                                                    (from
+                                                                                                                                      (table u)
+                                                                                                                                    )
+                                                                                                                                    (where
+                                                                                                                                      (== x 1)
+                                                                                                                                    )
+                                                                                                                                  )
+                                                                                                                                )
+                                                                                                                                )
+                                                                                                                              )
+                                                                                                                            )
+                                                                                                                            (from
+                                                                                                                              (table u)
+                                                                                                                            )
+                                                                                                                            (where
+                                                                                                                              (== x 1)
+                                                                                                                            )
+                                                                                                                          )
+                                                                                                                        )
+                                                                                                                        )
+                                                                                                                      )
+                                                                                                                    )
+                                                                                                                    (from
+                                                                                                                      (table u)
+                                                                                                                    )
+                                                                                                                    (where
+                                                                                                                      (== x 1)
+                                                                                                                    )
+                                                                                                                  )
+                                                                                                                )
+                                                                                                                )
+                                                                                                              )
+                                                                                                            )
+                                                                                                            (from
+                                                                                                              (table u)
+                                                                                                            )
+                                                                                                            (where
+                                                                                                              (== x 1)
+                                                                                                            )
+                                                                                                          )
+                                                                                                        )
+                                                                                                        )
+                                                                                                      )
+                                                                                                    )
+                                                                                                    (from
+                                                                                                      (table u)
+                                                                                                    )
+                                                                                                    (where
+                                                                                                      (== x 1)
+                                                                                                    )
+                                                                                                  )
+                                                                                                )
+                                                                                                )
+                                                                                              )
+                                                                                            )
+                                                                                            (from
+                                                                                              (table u)
+                                                                                            )
+                                                                                            (where
+                                                                                              (== x 1)
+                                                                                            )
+                                                                                          )
+                                                                                        )
+                                                                                        )
+                                                                                      )
+                                                                                    )
+                                                                                    (from
+                                                                                      (table u)
+                                                                                    )
+                                                                                    (where
+                                                                                      (== x 1)
+                                                                                    )
+                                                                                  )
+                                                                                )
+                                                                                )
+                                                                              )
+                                                                            )
+                                                                            (from
+                                                                              (table u)
+                                                                            )
+                                                                            (where
+                                                                              (== x 1)
+                                                                            )
+                                                                          )
+                                                                        )
+                                                                        )
+                                                                      )
+                                                                    )
+                                                                    (from
+                                                                      (table u)
+                                                                    )
+                                                                    (where
+                                                                      (== x 1)
+                                                                    )
+                                                                  )
+                                                                )
+                                                                )
+                                                              )
+                                                            )
+                                                            (from
+                                                              (table u)
+                                                            )
+                                                            (where
+                                                              (== x 1)
+                                                            )
+                                                          )
+                                                        )
+                                                        )
+                                                      )
+                                                    )
+                                                    (from
+                                                      (table u)
+                                                    )
+                                                    (where
+                                                      (== x 1)
+                                                    )
+                                                  )
+                                                )
+                                                )
+                                              )
+                                            )
+                                            (from
+                                              (table u)
+                                            )
+                                            (where
+                                              (== x 1)
+                                            )
+                                          )
+                                        )
+                                        )
+                                      )
+                                    )
+                                    (from
+                                      (table u)
+                                    )
+                                    (where
+                                      (== x 1)
+                                    )
+                                  )
+                                )
+                                )
+                              )
+                            )
+                            (from
+                              (table u)
+                            )
+                            (where
+                              (== x 1)
+                            )
+                          )
+                        )
+                        )
+                      )
+                    )
+                    (from
+                      (table u)
+                    )
+                    (where
+                      (== x 1)
+                    )
+                  )
+                )
+                )
+              )
+            )
+            (from
+              (table u)
+            )
+            (where
+              (== x 1)
+            )
+          )
+        )
+        )
+      )
+    )
+    (from
+      (table u)
+    )
+    (where
+      (== x 1)
+    )
+  )
+)

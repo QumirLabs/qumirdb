@@ -4,6 +4,7 @@
 
 #include <memory>
 #include <sstream>
+#include <unordered_map>
 
 namespace NQdb {
 namespace NSql {
@@ -201,8 +202,11 @@ struct TSqlPrinter {
 
     NCore::TPrintOptions ExprOptions() {
         NCore::TPrintOptions opts;
+        // The core printer renders an expression twice (FitsOneLine, then the
+        // real print) at every level, so render each subquery text only once.
+        auto rendered = std::make_shared<std::unordered_map<const TSubqueryExpr*, std::string>>();
         opts.NodePrinters[TSubqueryExpr::NodeId] =
-            [](NQumir::NAst::TExpr& node, NCore::TPrinter& p, NCore::TPrintFrame frame) {
+            [rendered](NQumir::NAst::TExpr& node, NCore::TPrinter& p, NCore::TPrintFrame frame) {
                 auto& sub = static_cast<TSubqueryExpr&>(node);
                 auto& out = p.GetOut();
                 out << "(subquery " << KindName(sub.Kind);
@@ -210,7 +214,11 @@ struct TSqlPrinter {
                     out << ' ';
                     p.PrintExpr(sub.Operand, false, frame.Level);
                 }
-                out << ' ' << PrintAst(std::static_pointer_cast<TSqlNode>(sub.Query));
+                auto [it, inserted] = rendered->try_emplace(&sub);
+                if (inserted) {
+                    it->second = PrintAst(std::static_pointer_cast<TSqlNode>(sub.Query));
+                }
+                out << ' ' << it->second;
                 out << ')';
             };
         opts.NodePrinters[TWindowExpr::NodeId] =
