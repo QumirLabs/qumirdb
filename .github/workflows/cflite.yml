@@ -118,11 +118,13 @@ jobs:
           storage-repo-branch: main
 
   # Prune drops the crashing inputs from the corpus, and run_fuzzers returns no
-  # crash for them. The sanitizer reports are in the prune job log, so they are
-  # filed from there; the inputs come from the corpus repository history.
+  # crash for them, so the prune job can succeed with crashes in its log. The
+  # sanitizer reports are in the prune job log, so they are filed from there;
+  # the inputs come from the corpus repository history. The script does nothing
+  # when the log has no crash.
   prune-report:
     needs: prune
-    if: failure()
+    if: ${{ !cancelled() && needs.prune.result != 'skipped' }}
     runs-on: ubuntu-latest
     permissions:
       actions: read
