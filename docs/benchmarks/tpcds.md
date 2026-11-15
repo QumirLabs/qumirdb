@@ -351,3 +351,169 @@ The DuckDB column is still the 2026-08-22 run.
 | q98 | 0.553 | 0.550 | 1.01× |
 | q99 | 0.893 | 0.240 | 3.72× |
 | **total** | **212.676** | **117.86** | **1.80×** |
+
+## Distributed runs (4 nodes)
+
+Distributed runs on a 4-node cluster were made on 2026-11-15 at scale 10. They
+are separate from the single-machine results above and are not included in the
+benchmark index summary.
+
+### Cluster
+
+- **Hardware:** 4 × Hetzner Cloud CCX13 (2 dedicated vCPU, 8 GB RAM, about
+  75 GB usable local disk each), location fsn1, private network between the
+  nodes (MTU 1450, iperf3 about 8.9 Gbit/s per stream), image ubuntu-26.04.
+  The 2 vCPU are one AMD EPYC Milan core with 2 SMT threads.
+- **Data:** TPC-DS SF10 Parquet with decimals stored as double, a full copy on
+  every node.
+- **qdb:** `qdbd` from master `64aafafe`, Debian packages 0.5.1-23 from
+  Actions run 43740271438, one 4-node cluster, network poller epoll
+  (`--net:poller=epoll`). Queries are the `benchmark/tpcds` templates with the
+  SF10 parameters. qdb runs the original TPC-DS SQL.
+- **ClickHouse:** 26.8.37, MergeTree tables, set up following the
+  [ClickHouse TPC-DS guide](https://clickhouse.com/docs/getting-started/example-datasets/tpcds),
+  with the DDL from ClickHouse's `tests/benchmarks/tpc-ds` and the guide's
+  settings (`join_use_nulls`, `group_by_use_nulls`, `UNION`/`INTERSECT`
+  default `DISTINCT`, ...). The 4-shard layout is ours; the guide does not
+  describe one:
+  - Sales and returns tables are sharded by ticket or order number, so a sale
+    and its returns are on one node; `inventory` is sharded by item; the 17
+    dimension tables are fully copied to every node.
+  - `distributed_product_mode=local`, except q72, which uses `global`.
+  - After loading, `OPTIMIZE TABLE ... FINAL`.
+  - 18 queries (marked \*) are decorrelated or otherwise rewritten for
+    ClickHouse only. The mechanical `+ 30 days` to `INTERVAL 30 DAY`
+    substitution is not counted as a rewrite.
+- **Measurement:** execution time only: qdb `X-Qdb-Execute-Seconds`,
+  ClickHouse `clickhouse-client --time`. Each query is the best of 3 hot runs
+  after 1 cold run; the page cache is dropped before the cold run. Loading
+  into MergeTree (about 96 s for SF10, plus `OPTIMIZE TABLE ... FINAL`),
+  planning, JIT compilation and wall time are excluded. Totals are the sums
+  of the per-query values. Ratios use the rounded values shown.
+
+### Scale 10
+
+103 query executions (99 queries; q14, q23, q24 and q39 have two parts, shown
+separately). qdb completed all of them; ClickHouse completed 102. 99 of 103
+qdb answers match DuckDB on the same Parquet and rendered queries; q31, q34,
+q65 and q71 differ only in row order (PostgreSQL-style NULL ordering for q34
+and q71, ties in `ORDER BY` for q31 and q65), with no value differences.
+
+| Query | qdb (s) | ClickHouse (s) | qdb ÷ ClickHouse |
+| --- | --- | --- | --- |
+| q01\* | 0.164† | 0.227 | 0.72× |
+| q02 | 0.530 | 0.633 | 0.84× |
+| q03 | 0.203 | 0.196 | 1.04× |
+| q04 | 3.521 | 5.180 | 0.68× |
+| q05 | 0.757 | 0.947 | 0.80× |
+| q06\* | 0.211 | 0.391 | 0.54× |
+| q07 | 0.508 | 0.257 | 1.98× |
+| q08 | 0.985 | 0.123 | 8.01× |
+| q09 | 1.535 | 0.754 | 2.04× |
+| q10\* | 0.318 | 0.232 | 1.37× |
+| q11\* | 2.075 | 4.580 | 0.45× |
+| q12 | 0.074 | 0.060 | 1.23× |
+| q13 | 0.811 | 0.424 | 1.91× |
+| q14_1 | 2.084 | 3.101 | 0.67× |
+| q14_2 | 4.057 | 2.145 | 1.89× |
+| q15 | 0.126 | 0.111 | 1.14× |
+| q16\* | 0.394 | 0.603 | 0.65× |
+| q17 | 0.426 | 0.273 | 1.56× |
+| q18 | 0.414 | 0.317 | 1.31× |
+| q19 | 0.303 | 0.556 | 0.54× |
+| q20 | 0.093 | 0.074 | 1.26× |
+| q21 | 0.367 | 0.178 | 2.06× |
+| q22 | 4.592 | 0.868 | 5.29× |
+| q23_1 | 3.820 | 8.211 | 0.47× |
+| q23_2 | 4.030 | 7.984 | 0.50× |
+| q24_1 | 0.317 | 0.478 | 0.66× |
+| q24_2 | 0.310 | 0.477 | 0.65× |
+| q25 | 0.462 | 0.267 | 1.73× |
+| q26 | 0.274 | 0.151 | 1.81× |
+| q27 | 0.485 | 0.264 | 1.84× |
+| q28 | 1.627 | 0.555 | 2.93× |
+| q29 | 0.365 | 0.295 | 1.24× |
+| q30\* | 0.157 | 0.163 | 0.96× |
+| q31\* | 0.496 | 3.743 | 0.13× |
+| q32\* | 0.157 | 0.095 | 1.65× |
+| q33 | 0.382 | 0.238 | 1.61× |
+| q34 | 0.371 | 0.220 | 1.69× |
+| q35\* | 0.422 | 0.279 | 1.51× |
+| q36 | 0.568 | 0.188 | 3.02× |
+| q37 | 0.396 | 0.653 | 0.61× |
+| q38 | 0.793 | 1.114 | 0.71× |
+| q39_1 | 0.711 | 2.732 | 0.26× |
+| q39_2 | 0.695 | 2.644 | 0.26× |
+| q40 | 0.537 | 0.088 | 6.10× |
+| q41 | 0.065 | 0.031 | 2.10× |
+| q42 | 0.223 | 0.286 | 0.78× |
+| q43 | 0.336 | 1.009 | 0.33× |
+| q44 | 0.679 | 0.241 | 2.82× |
+| q45 | 0.113 | 0.093 | 1.22× |
+| q46 | 0.647 | 0.329 | 1.97× |
+| q47\* | 1.263 | 5.746 | 0.22× |
+| q48 | 0.630 | 0.338 | 1.86× |
+| q49 | 0.565 | 0.348 | 1.62× |
+| q50 | 0.325 | 0.221 | 1.47× |
+| q51 | 1.178 | 3.380 | 0.35× |
+| q52 | 0.228 | 0.268 | 0.85× |
+| q53 | 0.233 | 0.530 | 0.44× |
+| q54 | 0.300 | 0.718 | 0.42× |
+| q55 | 0.187 | 0.270 | 0.69× |
+| q56 | 0.373 | 0.221 | 1.69× |
+| q57\* | 0.591 | 5.246 | 0.11× |
+| q58\* | 0.285 | 0.150 | 1.90× |
+| q59 | 0.861 | 1.091 | 0.79× |
+| q60 | 0.415 | 0.249 | 1.67× |
+| q61 | 0.454 | 0.054 | 8.41× |
+| q62 | 0.196 | 0.097 | 2.02× |
+| q63 | 0.232 | 0.559 | 0.42× |
+| q64 | 2.578 | 0.672 | 3.84× |
+| q65 | 0.917 | 1.269 | 0.72× |
+| q66\* | 0.388 | 0.222 | 1.75× |
+| q67 | 9.264 | 11.417 | 0.81× |
+| q68 | 0.543 | 0.335 | 1.62× |
+| q69\* | 0.315 | 0.217 | 1.45× |
+| q70 | 1.163 | 0.366 | 3.18× |
+| q71 | 0.404 | 0.184 | 2.20× |
+| q72 | 2.945 | `MEMORY_LIMIT_EXCEEDED`‡ | - |
+| q73 | 0.295 | 0.215 | 1.37× |
+| q74 | 1.477 | 3.311 | 0.45× |
+| q75\* | 0.950 | 1.573 | 0.60× |
+| q76 | 0.438 | 0.223 | 1.96× |
+| q77 | 0.572 | 0.241 | 2.37× |
+| q78 | 3.155 | 6.983 | 0.45× |
+| q79 | 0.641 | 0.372 | 1.72× |
+| q80 | 2.783 | 0.383 | 7.27× |
+| q81\* | 0.169 | 0.164 | 1.03× |
+| q82 | 0.453 | 0.816 | 0.56× |
+| q83 | 0.070 | 0.089 | 0.79× |
+| q84 | 0.107 | 0.115 | 0.93× |
+| q85 | 0.330 | 0.324 | 1.02× |
+| q86 | 0.132 | 0.068 | 1.94× |
+| q87 | 1.094 | 1.206 | 0.91× |
+| q88 | 1.467 | 0.763 | 1.92× |
+| q89 | 0.350 | 8.104 | 0.04× |
+| q90 | 0.085 | 0.084 | 1.01× |
+| q91 | 0.124 | 0.093 | 1.33× |
+| q92\* | 0.109 | 0.081 | 1.35× |
+| q93 | 0.295 | 0.466 | 0.63× |
+| q94\* | 0.197 | 0.281 | 0.70× |
+| q95 | 1.858 | 3.768 | 0.49× |
+| q96 | 0.172 | 0.093 | 1.85× |
+| q97 | 1.129 | 1.199 | 0.94× |
+| q98 | 0.279 | 0.105 | 2.66× |
+| q99 | 0.373 | 0.164 | 2.27× |
+| **total (102 queries)** | **86.98** | **120.51** | **0.72×** |
+
+The total covers the 102 queries both systems completed (q72 excluded); qdb
+over all 103 executions: 89.93 s.
+
+\* Rewritten for ClickHouse; qdb runs the original SQL.
+
+† qdb q01: the cold and first hot runs got HTTP 503 `compute actor allocation
+timed out` right after the `qdbd` restart (#649); the value is the best of hot
+runs 2 and 3.
+
+‡ ClickHouse failed q72 with `MEMORY_LIMIT_EXCEEDED` (server limit 5.89 GiB)
+while broadcasting `inventory` under `distributed_product_mode=global`.
