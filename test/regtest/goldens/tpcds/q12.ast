@@ -39,16 +39,16 @@
       (table date_dim)
     )
     (where
-      (&& (&& (&& (== ws_item_sk i_item_sk)
-            (call
-              qdb_in_list
-              i_category
-              (cast "Jewelry" <named StringView>)
-              (cast "Sports" <named StringView>)
-              (cast "Books" <named StringView>)))
-          (== ws_sold_date_sk d_date_sk))
-        (&& (<= (cast (cast "2001-01-12" <named StringView>) <named DATE>) d_date)
-          (<= d_date (+ (cast (cast "2001-01-12" <named StringView>) <named DATE>) (: 30 i32)))))
+      (&& (&& (== ws_item_sk i_item_sk)
+          (call
+            qdb_in_list
+            i_category
+            (cast "Jewelry" <named StringView>)
+            (cast "Sports" <named StringView>)
+            (cast "Books" <named StringView>)))
+        (&& (== ws_sold_date_sk d_date_sk)
+          (&& (<= (cast (cast "2001-01-12" <named StringView>) <named DATE>) d_date)
+            (<= d_date (+ (cast (cast "2001-01-12" <named StringView>) <named DATE>) (: 30 i32))))))
     )
     (group-by
       i_item_id

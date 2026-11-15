@@ -18,13 +18,13 @@
       (table catalog_sales)
     )
     (where
-      (&& (&& (&& (&& (&& (&& (&& (<= 22 i_current_price) (<= i_current_price (+ 22 30))) (== inv_item_sk i_item_sk))
-                (== d_date_sk inv_date_sk))
-              (&& (<= (cast (cast "2001-06-02" <named StringView>) <named DATE>) d_date)
-                (<= d_date (+ (cast (cast "2001-06-02" <named StringView>) <named DATE>) (: 60 i32)))))
-            (call qdb_in_list i_manufact_id 678 964 918 849))
-          (&& (<= 100 inv_quantity_on_hand) (<= inv_quantity_on_hand 500)))
-        (== cs_item_sk i_item_sk))
+      (&& (&& (&& (&& (<= 22 i_current_price) (<= i_current_price (+ 22 30))) (== inv_item_sk i_item_sk))
+          (&& (== d_date_sk inv_date_sk)
+            (&& (<= (cast (cast "2001-06-02" <named StringView>) <named DATE>) d_date)
+              (<= d_date (+ (cast (cast "2001-06-02" <named StringView>) <named DATE>) (: 60 i32))))))
+        (&& (&& (call qdb_in_list i_manufact_id 678 964 918 849)
+            (&& (<= 100 inv_quantity_on_hand) (<= inv_quantity_on_hand 500)))
+          (== cs_item_sk i_item_sk)))
     )
     (group-by
       i_item_id

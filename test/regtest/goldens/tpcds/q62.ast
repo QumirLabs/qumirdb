@@ -49,9 +49,8 @@
       (table date_dim)
     )
     (where
-      (&& (&& (&& (&& (&& (<= 1212 d_month_seq) (<= d_month_seq (+ 1212 11))) (== ws_ship_date_sk d_date_sk))
-            (== ws_warehouse_sk w_warehouse_sk))
-          (== ws_ship_mode_sk sm_ship_mode_sk))
+      (&& (&& (&& (&& (<= 1212 d_month_seq) (<= d_month_seq (+ 1212 11))) (== ws_ship_date_sk d_date_sk))
+          (&& (== ws_warehouse_sk w_warehouse_sk) (== ws_ship_mode_sk sm_ship_mode_sk)))
         (== ws_web_site_sk web_site_sk))
     )
     (group-by

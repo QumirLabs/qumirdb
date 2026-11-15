@@ -15,10 +15,9 @@
       (table nation)
     )
     (where
-      (&& (&& (&& (&& (&& (&& (&& (== s_suppkey |l1.l_suppkey|) (== o_orderkey |l1.l_orderkey|))
-                  (== o_orderstatus (cast "F" <named StringView>)))
-                (> |l1.l_receiptdate| |l1.l_commitdate|))
-              (subquery exists (query
+      (&& (&& (&& (== s_suppkey |l1.l_suppkey|) (== o_orderkey |l1.l_orderkey|))
+          (&& (== o_orderstatus (cast "F" <named StringView>)) (> |l1.l_receiptdate| |l1.l_commitdate|)))
+        (&& (&& (subquery exists (query
         (select
           (select-list
             (star *)
@@ -31,7 +30,7 @@
           )
         )
       )
-      ))
+      )
             (! (subquery exists (query
         (select
           (select-list
@@ -47,8 +46,7 @@
         )
       )
       )))
-          (== s_nationkey n_nationkey))
-        (== n_name (cast "IRAQ" <named StringView>)))
+          (&& (== s_nationkey n_nationkey) (== n_name (cast "IRAQ" <named StringView>)))))
     )
     (group-by
       s_name

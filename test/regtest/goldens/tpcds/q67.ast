@@ -91,8 +91,8 @@
                       (table item)
                     )
                     (where
-                      (&& (&& (&& (== ss_sold_date_sk d_date_sk) (== ss_item_sk i_item_sk)) (== ss_store_sk s_store_sk))
-                        (&& (<= 1212 d_month_seq) (<= d_month_seq (+ 1212 11))))
+                      (&& (&& (== ss_sold_date_sk d_date_sk) (== ss_item_sk i_item_sk))
+                        (&& (== ss_store_sk s_store_sk) (&& (<= 1212 d_month_seq) (<= d_month_seq (+ 1212 11)))))
                     )
                     (group-by
                       (rollup

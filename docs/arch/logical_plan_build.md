@@ -23,6 +23,17 @@ source-alias and qualification passes that follow leave such a plan unchanged
 and serve plans written by hand; typing re-annotates it after rewrites change
 its structure.
 
+## Depth of the trees
+
+The builder, the optimizer passes, kernel generation and the Qumir lowering all
+recurse once per node, so the parser bounds the trees it returns: a statement is
+at most 256 nodes deep, counting SQL clauses and expressions, and a deeper one
+fails with `query nesting is too deep`. Associative chains are balanced trees,
+so that long lists stay far below the bound: a run of `AND`, of `OR`, or of
+`UNION` with one quantifier is log2 of its length deep, and every pass that joins
+conjuncts back into one expression builds the same balanced tree. Other chains
+(`a + b + ...`, CASE branches, JOIN, EXCEPT) are as deep as they are long.
+
 ## Operators produced
 
 | Operator | Carries |

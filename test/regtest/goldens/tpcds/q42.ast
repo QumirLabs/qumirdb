@@ -20,9 +20,8 @@
       (table item)
     )
     (where
-      (&& (&& (&& (&& (== |dt.d_date_sk| |store_sales.ss_sold_date_sk|) (== |store_sales.ss_item_sk| |item.i_item_sk|))
-            (== |item.i_manager_id| 1))
-          (== |dt.d_moy| 12))
+      (&& (&& (&& (== |dt.d_date_sk| |store_sales.ss_sold_date_sk|) (== |store_sales.ss_item_sk| |item.i_item_sk|))
+          (&& (== |item.i_manager_id| 1) (== |dt.d_moy| 12)))
         (== |dt.d_year| 1998))
     )
     (group-by

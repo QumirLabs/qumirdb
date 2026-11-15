@@ -69,8 +69,9 @@
             (table store)
           )
           (where
-            (&& (&& (&& (== ss_item_sk i_item_sk) (== ss_sold_date_sk d_date_sk)) (== ss_store_sk s_store_sk))
-              (|| (|| (== d_year 2000) (&& (== d_year (- 2000 1)) (== d_moy 12))) (&& (== d_year (+ 2000 1)) (== d_moy 1))))
+            (&& (&& (== ss_item_sk i_item_sk) (== ss_sold_date_sk d_date_sk))
+              (&& (== ss_store_sk s_store_sk)
+                (|| (|| (== d_year 2000) (&& (== d_year (- 2000 1)) (== d_moy 12))) (&& (== d_year (+ 2000 1)) (== d_moy 1)))))
           )
           (group-by
             i_category
@@ -118,15 +119,11 @@
             (table v1 as v1_lead)
           )
           (where
-            (&& (&& (&& (&& (&& (&& (&& (&& (&& (== |v1.i_category| |v1_lag.i_category|) (== |v1.i_category| |v1_lead.i_category|))
-                            (== |v1.i_brand| |v1_lag.i_brand|))
-                          (== |v1.i_brand| |v1_lead.i_brand|))
-                        (== |v1.s_store_name| |v1_lag.s_store_name|))
-                      (== |v1.s_store_name| |v1_lead.s_store_name|))
-                    (== |v1.s_company_name| |v1_lag.s_company_name|))
-                  (== |v1.s_company_name| |v1_lead.s_company_name|))
-                (== |v1.rn| (+ |v1_lag.rn| 1)))
-              (== |v1.rn| (- |v1_lead.rn| 1)))
+            (&& (&& (&& (&& (== |v1.i_category| |v1_lag.i_category|) (== |v1.i_category| |v1_lead.i_category|))
+                  (&& (== |v1.i_brand| |v1_lag.i_brand|) (== |v1.i_brand| |v1_lead.i_brand|)))
+                (&& (&& (== |v1.s_store_name| |v1_lag.s_store_name|) (== |v1.s_store_name| |v1_lead.s_store_name|))
+                  (&& (== |v1.s_company_name| |v1_lag.s_company_name|) (== |v1.s_company_name| |v1_lead.s_company_name|))))
+              (&& (== |v1.rn| (+ |v1_lag.rn| 1)) (== |v1.rn| (- |v1_lead.rn| 1))))
           )
         )
       )

@@ -10,10 +10,10 @@
       (table part)
     )
     (where
-      (&& (&& (&& (== p_partkey l_partkey) (== p_brand (cast "Brand#45" <named StringView>)))
-          (== p_container (cast "MED BAG" <named StringView>)))
-        (< l_quantity
-          (subquery scalar (query
+      (&& (&& (== p_partkey l_partkey) (== p_brand (cast "Brand#45" <named StringView>)))
+        (&& (== p_container (cast "MED BAG" <named StringView>))
+          (< l_quantity
+            (subquery scalar (query
         (select
           (select-list
             (item
@@ -28,7 +28,7 @@
           )
         )
       )
-      )))
+      ))))
     )
   )
 )

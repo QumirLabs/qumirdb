@@ -4,6 +4,7 @@
 #include <qdb/kernel/cast_rules.h>
 #include <qdb/kernel/vm_function.h>
 #include <qdb/plan/clone_expr.h>
+#include <qdb/plan/junction.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/utils/module_path.h>
@@ -1255,10 +1256,7 @@ TExprPtr BuildNullStrict(const std::vector<std::pair<TExprPtr, bool>>& operands,
         }
     }
     auto nq = NullableQ(R);
-    TExprPtr guard = valids.front();
-    for (size_t i = 1; i < valids.size(); ++i) {
-        guard = Bin("&&", guard, valids[i], loc);
-    }
+    TExprPtr guard = Junction(TOperator("&&"), std::move(valids));
     TExprPtr thenE = std::make_shared<TCastExpr>(loc, apply(unwrapped), nq);
     TExprPtr elseE = std::make_shared<TCastExpr>(loc, MakeNull(loc), nq);
     stmts.push_back(std::make_shared<TIfExpr>(loc, guard, thenE, elseE));
@@ -1805,13 +1803,37 @@ std::pair<TExprPtr, TTypePtr> ExpandCoalesce(const TCallExpr& node,
     };
 
     std::vector<TExprPtr> stmts;
+    // args[0..m-1] are nullable; their temps are bound last to first.
+    std::vector<TExprPtr> refs(m);
+    for (size_t i = m; i-- > 0;) {
+        refs[i] = BindTemp(args[i].first, stmts, counter, loc);
+    }
+    // The first valid of refs[lo, hi), else `fallback`; no fallback means one is valid.
+    // The first half is tested as a whole, since nesting the second half in the
+    // fallback would make the tree as deep as the argument list.
+    std::function<TExprPtr(size_t, size_t, TExprPtr)> select =
+        [&](size_t lo, size_t hi, TExprPtr fallback) -> TExprPtr {
+        if (hi - lo == 1) {
+            auto chosen = pick(refs[lo], args[lo].second);
+            return fallback
+                ? std::make_shared<TIfExpr>(loc, FieldOf(refs[lo], "Valid", loc), chosen, fallback)
+                : chosen;
+        }
+        const size_t mid = lo + (hi - lo) / 2;
+        // Built last to first, the order the temps are bound in.
+        auto otherwise = select(mid, hi, std::move(fallback));
+        auto then = select(lo, mid, nullptr);
+        std::vector<TExprPtr> valids;
+        for (size_t i = lo; i < mid; ++i) {
+            valids.push_back(FieldOf(refs[i], "Valid", loc));
+        }
+        return std::make_shared<TIfExpr>(loc, Junction(TOperator("||"), std::move(valids)),
+            std::move(then), std::move(otherwise));
+    };
     // Terminator is returned unconditionally (no `.Valid` guard).
     TExprPtr acc = pick(args[m].first, args[m].second);
-    // Chain args[0..m-1] (all nullable) from the inside out.
-    for (int i = static_cast<int>(m) - 1; i >= 0; --i) {
-        TExprPtr ref = BindTemp(args[i].first, stmts, counter, loc);
-        acc = std::make_shared<TIfExpr>(loc,
-            FieldOf(ref, "Valid", loc), pick(ref, args[i].second), acc);
+    if (m > 0) {
+        acc = select(0, m, std::move(acc));
     }
     if (stmts.empty()) {
         return {acc, resultNullable ? std::static_pointer_cast<TType>(

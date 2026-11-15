@@ -9,6 +9,7 @@
 #include <qdb/plan/ops/union.h>
 #include <qdb/plan/ops/window.h>
 #include <qdb/plan/clone_expr.h>
+#include <qdb/plan/junction.h>
 #include <qdb/plan/passes/simplify_outer_joins.h>
 #include <qdb/plan/passes/unbound_vars.h>
 #include <qdb/plan/types/nullable.h>
@@ -55,14 +56,12 @@ TExprPtr ConjuctExpr(const TConjuct& conj) {
 }
 
 TExprPtr Conjoin(const std::vector<TConjuct>& conjucts) {
-    TExprPtr result;
+    std::vector<TExprPtr> exprs;
+    exprs.reserve(conjucts.size());
     for (const auto& conj : conjucts) {
-        auto expr = ConjuctExpr(conj);
-        result = result
-            ? std::make_shared<TBinaryExpr>(expr->Location, TOperator("&&"), result, expr)
-            : expr;
+        exprs.push_back(ConjuctExpr(conj));
     }
-    return result;
+    return Junction(TOperator("&&"), std::move(exprs));
 }
 
 TOperatorPtr Materialize(TOperatorPtr result, const std::vector<TConjuct>& conjucts) {
@@ -171,16 +170,6 @@ bool SingleRelation(const TConjuct& conj) {
     return !first;
 }
 
-TExprPtr Combine(const std::vector<TExprPtr>& parts, TOperator op) {
-    TExprPtr result;
-    for (const auto& part : parts) {
-        result = result
-            ? std::make_shared<TBinaryExpr>(part->Location, op, result, part)
-            : part;
-    }
-    return result;
-}
-
 // Weakens a disjunction into a single-side necessary condition: per disjunct,
 // keep only the atoms over `side`; if a disjunct constrains no `side` column,
 // nothing can be derived. Returns null when there is nothing to push.
@@ -205,9 +194,9 @@ TExprPtr DeriveSideFilter(const TExprPtr& expr, const std::unordered_set<std::st
         if (kept.empty()) {
             return nullptr;
         }
-        parts.push_back(Combine(kept, TOperator("&&")));
+        parts.push_back(Junction(TOperator("&&"), std::move(kept)));
     }
-    return Combine(parts, TOperator("||"));
+    return Junction(TOperator("||"), std::move(parts));
 }
 
 struct TRemapTarget {

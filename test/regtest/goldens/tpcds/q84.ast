@@ -20,13 +20,10 @@
       (table store_returns)
     )
     (where
-      (&& (&& (&& (&& (&& (&& (&& (== ca_city (cast "Hopewell" <named StringView>)) (== c_current_addr_sk ca_address_sk))
-                  (>= ib_lower_bound 32287))
-                (<= ib_upper_bound (+ 32287 50000)))
-              (== ib_income_band_sk hd_income_band_sk))
-            (== cd_demo_sk c_current_cdemo_sk))
-          (== hd_demo_sk c_current_hdemo_sk))
-        (== sr_cdemo_sk cd_demo_sk))
+      (&& (&& (&& (== ca_city (cast "Hopewell" <named StringView>)) (== c_current_addr_sk ca_address_sk))
+          (&& (>= ib_lower_bound 32287) (<= ib_upper_bound (+ 32287 50000))))
+        (&& (&& (== ib_income_band_sk hd_income_band_sk) (== cd_demo_sk c_current_cdemo_sk))
+          (&& (== hd_demo_sk c_current_hdemo_sk) (== sr_cdemo_sk cd_demo_sk))))
     )
   )
   (order-by

@@ -484,7 +484,7 @@
       )
     )
     (where
-      (&& (&& (&& (&& (== ss_store_sk s_store_sk) (== ss_sold_date_sk d_date_sk)) (== d_qoy 1)) (== d_year 2002))
+      (&& (&& (&& (== ss_store_sk s_store_sk) (== ss_sold_date_sk d_date_sk)) (&& (== d_qoy 1) (== d_year 2002)))
         (== (call substr s_zip 1 2) (call substr |v1.ca_zip| 1 2)))
     )
     (group-by

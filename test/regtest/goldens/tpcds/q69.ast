@@ -32,15 +32,15 @@
       (table customer_demographics)
     )
     (where
-      (&& (&& (&& (&& (== |c.c_current_addr_sk| |ca.ca_address_sk|)
-              (call
-                qdb_in_list
-                ca_state
-                (cast "CO" <named StringView>)
-                (cast "IL" <named StringView>)
-                (cast "MN" <named StringView>)))
-            (== cd_demo_sk |c.c_current_cdemo_sk|))
-          (subquery exists (query
+      (&& (&& (&& (== |c.c_current_addr_sk| |ca.ca_address_sk|)
+            (call
+              qdb_in_list
+              ca_state
+              (cast "CO" <named StringView>)
+              (cast "IL" <named StringView>)
+              (cast "MN" <named StringView>)))
+          (&& (== cd_demo_sk |c.c_current_cdemo_sk|)
+            (subquery exists (query
         (select
           (select-list
             (star *)
@@ -50,12 +50,12 @@
             (table date_dim)
           )
           (where
-            (&& (&& (&& (== |c.c_customer_sk| ss_customer_sk) (== ss_sold_date_sk d_date_sk)) (== d_year 1999))
-              (&& (<= 1 d_moy) (<= d_moy (+ 1 2))))
+            (&& (&& (== |c.c_customer_sk| ss_customer_sk) (== ss_sold_date_sk d_date_sk))
+              (&& (== d_year 1999) (&& (<= 1 d_moy) (<= d_moy (+ 1 2)))))
           )
         )
       )
-      ))
+      )))
         (&& (! (subquery exists (query
         (select
           (select-list
@@ -66,8 +66,8 @@
             (table date_dim)
           )
           (where
-            (&& (&& (&& (== |c.c_customer_sk| ws_bill_customer_sk) (== ws_sold_date_sk d_date_sk)) (== d_year 1999))
-              (&& (<= 1 d_moy) (<= d_moy (+ 1 2))))
+            (&& (&& (== |c.c_customer_sk| ws_bill_customer_sk) (== ws_sold_date_sk d_date_sk))
+              (&& (== d_year 1999) (&& (<= 1 d_moy) (<= d_moy (+ 1 2)))))
           )
         )
       )
@@ -82,8 +82,8 @@
             (table date_dim)
           )
           (where
-            (&& (&& (&& (== |c.c_customer_sk| cs_ship_customer_sk) (== cs_sold_date_sk d_date_sk)) (== d_year 1999))
-              (&& (<= 1 d_moy) (<= d_moy (+ 1 2))))
+            (&& (&& (== |c.c_customer_sk| cs_ship_customer_sk) (== cs_sold_date_sk d_date_sk))
+              (&& (== d_year 1999) (&& (<= 1 d_moy) (<= d_moy (+ 1 2)))))
           )
         )
       )

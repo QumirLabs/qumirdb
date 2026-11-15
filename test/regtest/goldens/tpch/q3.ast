@@ -20,9 +20,8 @@
       (table lineitem)
     )
     (where
-      (&& (&& (&& (&& (== c_mktsegment (cast "FURNITURE" <named StringView>)) (== c_custkey o_custkey))
-            (== l_orderkey o_orderkey))
-          (< o_orderdate (: 9209 i32)))
+      (&& (&& (&& (== c_mktsegment (cast "FURNITURE" <named StringView>)) (== c_custkey o_custkey))
+          (&& (== l_orderkey o_orderkey) (< o_orderdate (: 9209 i32))))
         (> l_shipdate (: 9209 i32)))
     )
     (group-by

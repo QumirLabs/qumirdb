@@ -34,13 +34,12 @@
       (table region)
     )
     (where
-      (&& (&& (&& (&& (&& (&& (&& (== p_partkey ps_partkey) (== s_suppkey ps_suppkey)) (== p_size 37))
-                (call qdb_string_view_sql_like p_type (cast "%BRASS" <named StringView>)))
-              (== s_nationkey n_nationkey))
-            (== n_regionkey r_regionkey))
-          (== r_name (cast "EUROPE" <named StringView>)))
-        (== ps_supplycost
-          (subquery scalar (query
+      (&& (&& (&& (== p_partkey ps_partkey) (== s_suppkey ps_suppkey))
+          (&& (== p_size 37) (call qdb_string_view_sql_like p_type (cast "%BRASS" <named StringView>))))
+        (&& (&& (== s_nationkey n_nationkey) (== n_regionkey r_regionkey))
+          (&& (== r_name (cast "EUROPE" <named StringView>))
+            (== ps_supplycost
+              (subquery scalar (query
         (select
           (select-list
             (item
@@ -54,13 +53,13 @@
             (table region)
           )
           (where
-            (&& (&& (&& (&& (== p_partkey ps_partkey) (== s_suppkey ps_suppkey)) (== s_nationkey n_nationkey))
-                (== n_regionkey r_regionkey))
+            (&& (&& (&& (== p_partkey ps_partkey) (== s_suppkey ps_suppkey))
+                (&& (== s_nationkey n_nationkey) (== n_regionkey r_regionkey)))
               (== r_name (cast "EUROPE" <named StringView>)))
           )
         )
       )
-      )))
+      )))))
     )
   )
   (order-by

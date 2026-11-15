@@ -12,12 +12,10 @@
       (table store)
     )
     (where
-      (&& (&& (&& (&& (&& (&& (== ss_sold_time_sk |time_dim.t_time_sk|) (== ss_hdemo_sk |household_demographics.hd_demo_sk|))
-                (== ss_store_sk s_store_sk))
-              (== |time_dim.t_hour| 8))
-            (>= |time_dim.t_minute| 30))
-          (== |household_demographics.hd_dep_count| 5))
-        (== |store.s_store_name| (cast "ese" <named StringView>)))
+      (&& (&& (&& (== ss_sold_time_sk |time_dim.t_time_sk|) (== ss_hdemo_sk |household_demographics.hd_demo_sk|))
+          (&& (== ss_store_sk s_store_sk) (== |time_dim.t_hour| 8)))
+        (&& (&& (>= |time_dim.t_minute| 30) (== |household_demographics.hd_dep_count| 5))
+          (== |store.s_store_name| (cast "ese" <named StringView>))))
     )
   )
   (order-by

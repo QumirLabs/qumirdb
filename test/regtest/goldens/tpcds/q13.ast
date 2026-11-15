@@ -23,46 +23,44 @@
       (table date_dim)
     )
     (where
-      (&& (&& (&& (&& (== s_store_sk ss_store_sk) (== ss_sold_date_sk d_date_sk)) (== d_year 2001))
-          (|| (|| (&& (&& (&& (&& (&& (== ss_hdemo_sk hd_demo_sk) (== cd_demo_sk ss_cdemo_sk))
-                      (== cd_marital_status (cast "D" <named StringView>)))
-                    (== cd_education_status (cast "2 yr Degree" <named StringView>)))
-                  (&& (<= 100.0 ss_sales_price) (<= ss_sales_price 150.0)))
-                (== hd_dep_count 3))
-              (&& (&& (&& (&& (&& (== ss_hdemo_sk hd_demo_sk) (== cd_demo_sk ss_cdemo_sk))
-                      (== cd_marital_status (cast "S" <named StringView>)))
-                    (== cd_education_status (cast "Secondary" <named StringView>)))
-                  (&& (<= 50.0 ss_sales_price) (<= ss_sales_price 100.0)))
-                (== hd_dep_count 1)))
-            (&& (&& (&& (&& (&& (== ss_hdemo_sk hd_demo_sk) (== cd_demo_sk ss_cdemo_sk))
-                    (== cd_marital_status (cast "W" <named StringView>)))
-                  (== cd_education_status (cast "Advanced Degree" <named StringView>)))
-                (&& (<= 150.0 ss_sales_price) (<= ss_sales_price 200.0)))
-              (== hd_dep_count 1))))
-        (|| (|| (&& (&& (&& (== ss_addr_sk ca_address_sk) (== ca_country (cast "United States" <named StringView>)))
-                (call
+      (&& (&& (&& (== s_store_sk ss_store_sk) (== ss_sold_date_sk d_date_sk))
+          (&& (== d_year 2001)
+            (|| (|| (&& (&& (&& (== ss_hdemo_sk hd_demo_sk) (== cd_demo_sk ss_cdemo_sk))
+                    (&& (== cd_marital_status (cast "D" <named StringView>))
+                      (== cd_education_status (cast "2 yr Degree" <named StringView>))))
+                  (&& (&& (<= 100.0 ss_sales_price) (<= ss_sales_price 150.0)) (== hd_dep_count 3)))
+                (&& (&& (&& (== ss_hdemo_sk hd_demo_sk) (== cd_demo_sk ss_cdemo_sk))
+                    (&& (== cd_marital_status (cast "S" <named StringView>))
+                      (== cd_education_status (cast "Secondary" <named StringView>))))
+                  (&& (&& (<= 50.0 ss_sales_price) (<= ss_sales_price 100.0)) (== hd_dep_count 1))))
+              (&& (&& (&& (== ss_hdemo_sk hd_demo_sk) (== cd_demo_sk ss_cdemo_sk))
+                  (&& (== cd_marital_status (cast "W" <named StringView>))
+                    (== cd_education_status (cast "Advanced Degree" <named StringView>))))
+                (&& (&& (<= 150.0 ss_sales_price) (<= ss_sales_price 200.0)) (== hd_dep_count 1))))))
+        (|| (|| (&& (&& (== ss_addr_sk ca_address_sk) (== ca_country (cast "United States" <named StringView>)))
+              (&& (call
                   qdb_in_list
                   ca_state
                   (cast "CO" <named StringView>)
                   (cast "IL" <named StringView>)
-                  (cast "MN" <named StringView>)))
-              (&& (<= 100 ss_net_profit) (<= ss_net_profit 200)))
-            (&& (&& (&& (== ss_addr_sk ca_address_sk) (== ca_country (cast "United States" <named StringView>)))
-                (call
+                  (cast "MN" <named StringView>))
+                (&& (<= 100 ss_net_profit) (<= ss_net_profit 200))))
+            (&& (&& (== ss_addr_sk ca_address_sk) (== ca_country (cast "United States" <named StringView>)))
+              (&& (call
                   qdb_in_list
                   ca_state
                   (cast "OH" <named StringView>)
                   (cast "MT" <named StringView>)
-                  (cast "NM" <named StringView>)))
-              (&& (<= 150 ss_net_profit) (<= ss_net_profit 300))))
-          (&& (&& (&& (== ss_addr_sk ca_address_sk) (== ca_country (cast "United States" <named StringView>)))
-              (call
+                  (cast "NM" <named StringView>))
+                (&& (<= 150 ss_net_profit) (<= ss_net_profit 300)))))
+          (&& (&& (== ss_addr_sk ca_address_sk) (== ca_country (cast "United States" <named StringView>)))
+            (&& (call
                 qdb_in_list
                 ca_state
                 (cast "TX" <named StringView>)
                 (cast "MO" <named StringView>)
-                (cast "MI" <named StringView>)))
-            (&& (<= 50 ss_net_profit) (<= ss_net_profit 250)))))
+                (cast "MI" <named StringView>))
+              (&& (<= 50 ss_net_profit) (<= ss_net_profit 250))))))
     )
   )
 )

@@ -3,6 +3,8 @@
 #include "flatten_conjuncts.h"
 #include "flatten_disjuncts.h"
 
+#include <qdb/plan/junction.h>
+
 #include <qumir/parser/core/printer.h>
 
 #include <string>
@@ -32,26 +34,6 @@ std::string Key(const TExprPtr& expr) {
         return "(" + node->Operator.ToString() + " " + left + " " + right + ")";
     }
     return NCore::PrintAst(expr);
-}
-
-TExprPtr Conjoin(const std::vector<TExprPtr>& atoms) {
-    TExprPtr result;
-    for (const auto& atom : atoms) {
-        result = result
-            ? std::make_shared<TBinaryExpr>(atom->Location, TOperator("&&"), result, atom)
-            : atom;
-    }
-    return result;
-}
-
-TExprPtr Disjoin(const std::vector<TExprPtr>& parts) {
-    TExprPtr result;
-    for (const auto& part : parts) {
-        result = result
-            ? std::make_shared<TBinaryExpr>(part->Location, TOperator("||"), result, part)
-            : part;
-    }
-    return result;
 }
 
 } // namespace
@@ -127,10 +109,10 @@ void FactorConjuncts(const TExprPtr& expr, std::vector<TExprPtr>& out) {
                 implied = true;
                 break;
             }
-            reducedParts.push_back(Conjoin(rest));
+            reducedParts.push_back(Junction(TOperator("&&"), std::move(rest)));
         }
         if (!implied) {
-            out.push_back(Disjoin(reducedParts));
+            out.push_back(Junction(TOperator("||"), std::move(reducedParts)));
         }
     }
 }

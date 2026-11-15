@@ -12,6 +12,7 @@
 #include <qdb/plan/ops/window.h>
 
 #include <qdb/plan/clone_expr.h>
+#include <qdb/plan/junction.h>
 #include <qdb/plan/sql_lowering.h>
 #include <qdb/plan/passes/flatten_conjuncts.h>
 #include <qdb/plan/passes/flatten_disjuncts.h>
@@ -1200,16 +1201,6 @@ std::expected<TRelation, TError> BuildFrom(
             return std::unexpected(right.error());
         }
         result = JoinRelations(std::move(result), std::move(*right), {}, EJoinType::Inner, nullptr);
-    }
-    return result;
-}
-
-NAst::TExprPtr Conjoin(const std::vector<NAst::TExprPtr>& parts) {
-    NAst::TExprPtr result;
-    for (const auto& part : parts) {
-        result = result
-            ? std::make_shared<NAst::TBinaryExpr>(part->Location, NAst::TOperator("&&"), result, part)
-            : part;
     }
     return result;
 }
@@ -2462,7 +2453,7 @@ std::expected<TRelation, TError> BuildSelect(
             }
 
             if (!residual.empty()) {
-                node.Plan = std::make_shared<TFilterOperator>(std::move(node.Plan), Conjoin(residual));
+                node.Plan = std::make_shared<TFilterOperator>(std::move(node.Plan), Junction(NAst::TOperator("&&"), residual));
             }
         }
         return node;
@@ -2819,7 +2810,7 @@ std::expected<TRelation, TError> BuildSelect(
             }
             conjunct = std::move(*rewritten);
         }
-        node.Plan = std::make_shared<TFilterOperator>(std::move(node.Plan), Conjoin(conjuncts));
+        node.Plan = std::make_shared<TFilterOperator>(std::move(node.Plan), Junction(NAst::TOperator("&&"), conjuncts));
     }
     {
         auto windowed = applyWindows(node);

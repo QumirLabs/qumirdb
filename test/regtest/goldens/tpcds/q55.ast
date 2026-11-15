@@ -17,7 +17,7 @@
       (table item)
     )
     (where
-      (&& (&& (&& (&& (== d_date_sk ss_sold_date_sk) (== ss_item_sk i_item_sk)) (== i_manager_id 36)) (== d_moy 12))
+      (&& (&& (&& (== d_date_sk ss_sold_date_sk) (== ss_item_sk i_item_sk)) (&& (== i_manager_id 36) (== d_moy 12)))
         (== d_year 2001))
     )
     (group-by

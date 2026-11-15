@@ -1,5 +1,6 @@
 #include <qdb/plan/passes/flatten_joins.h>
 
+#include <qdb/plan/junction.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
 
@@ -15,16 +16,6 @@ TExprPtr Eq(const std::string& l, const std::string& r) {
     return std::make_shared<TBinaryExpr>(NQumir::TLocation{}, TOperator("=="),
         std::make_shared<TIdentExpr>(NQumir::TLocation{}, l),
         std::make_shared<TIdentExpr>(NQumir::TLocation{}, r));
-}
-
-TExprPtr Conjoin(const std::vector<TExprPtr>& parts) {
-    TExprPtr result;
-    for (const auto& p : parts) {
-        result = result
-            ? std::make_shared<TBinaryExpr>(p->Location, TOperator("&&"), result, p)
-            : p;
-    }
-    return result;
 }
 
 // Flattening would discard the annotation with its join node.
@@ -76,7 +67,7 @@ TOperatorPtr FlattenInnerJoins(TOperatorPtr root) {
         }
         return conds.empty()
             ? chain
-            : std::make_shared<TFilterOperator>(chain, Conjoin(conds));
+            : std::make_shared<TFilterOperator>(chain, Junction(TOperator("&&"), conds));
     }
     for (auto& input : root->MutableInputs()) {
         input = FlattenInnerJoins(input);

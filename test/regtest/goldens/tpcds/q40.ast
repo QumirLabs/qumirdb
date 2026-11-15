@@ -37,9 +37,8 @@
       (table date_dim)
     )
     (where
-      (&& (&& (&& (&& (&& (<= 0.98999999999999999 i_current_price) (<= i_current_price 1.49)) (== i_item_sk cs_item_sk))
-            (== cs_warehouse_sk w_warehouse_sk))
-          (== cs_sold_date_sk d_date_sk))
+      (&& (&& (&& (&& (<= 0.98999999999999999 i_current_price) (<= i_current_price 1.49)) (== i_item_sk cs_item_sk))
+          (&& (== cs_warehouse_sk w_warehouse_sk) (== cs_sold_date_sk d_date_sk)))
         (&& (<= (- (cast (cast "1998-04-08" <named StringView>) <named DATE>) (: 30 i32)) d_date)
           (<= d_date (+ (cast (cast "1998-04-08" <named StringView>) <named DATE>) (: 30 i32)))))
     )

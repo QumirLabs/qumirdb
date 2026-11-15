@@ -41,7 +41,7 @@ project (product_name, item_sk, store_name, store_zip, b_street_number, b_street
       │  │  │  │  │  └─ source customer_address AS ad2 use-filter 5 keys=[ad2.ca_address_sk] (rows≈10 cost≈680)
       │  │  │  │  └─ source income_band AS ib1 use-filter 4 keys=[ib1.ib_income_band_sk] (rows≈10 cost≈40)
       │  │  │  └─ source income_band AS ib2 use-filter 3 keys=[ib2.ib_income_band_sk] (rows≈10 cost≈40)
-      │  │  └─ filter (&& (&& (&& (&& (call qdb_in_list |item.i_color| (cast "maroon" <named StringView>) (cast "burnished" <named StringView>) (cast "dim" <named StringView>) (cast "steel" <named StringView>) (cast "navajo" <named StringView>) (cast "chocolate" <named StringView>)) (<= 35 |item.i_current_price|)) (<= |item.i_current_price| (+ 35 10))) (<= (+ 35 1) |item.i_current_price|)) (<= |item.i_current_price| (+ 35 15))) (rows≈1 cost≈880)
+      │  │  └─ filter (&& (&& (&& (call qdb_in_list |item.i_color| (cast "maroon" <named StringView>) (cast "burnished" <named StringView>) (cast "dim" <named StringView>) (cast "steel" <named StringView>) (cast "navajo" <named StringView>) (cast "chocolate" <named StringView>)) (<= 35 |item.i_current_price|)) (&& (<= |item.i_current_price| (+ 35 10)) (<= (+ 35 1) |item.i_current_price|))) (<= |item.i_current_price| (+ 35 15))) (rows≈1 cost≈880)
       │  │     └─ source item AS item (rows≈10 cost≈440)
       │  └─ source date_dim AS d2 use-filter 2 keys=[d2.d_date_sk] (rows≈10 cost≈80)
       └─ source date_dim AS d3 use-filter 1 keys=[d3.d_date_sk] (rows≈10 cost≈80)

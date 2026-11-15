@@ -1,5 +1,6 @@
 #include <qdb/plan/passes/cbo/dpccp.h>
 
+#include <qdb/plan/junction.h>
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/passes/estimate_stats.h>
 #include <qdb/plan/passes/unbound_vars.h>
@@ -14,6 +15,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 namespace NQdb {
 namespace NCbo {
@@ -288,17 +290,14 @@ private:
     // The residuals over leaves of both subsets and of no other relation.
     NQumir::NAst::TExprPtr CrossingResidual(TSubset s1, TSubset s2) const {
         const TSubset s = s1 | s2;
-        NQumir::NAst::TExprPtr conjunction;
+        std::vector<NQumir::NAst::TExprPtr> conjuncts;
         for (const auto& r : Residuals_) {
             if ((r.Leaves & s) != r.Leaves || (r.Leaves & s1) == r.Leaves || (r.Leaves & s2) == r.Leaves) {
                 continue;
             }
-            conjunction = conjunction
-                ? std::make_shared<NQumir::NAst::TBinaryExpr>(
-                    r.Predicate->Location, NQumir::NAst::TOperator("&&"), conjunction, r.Predicate)
-                : r.Predicate;
+            conjuncts.push_back(r.Predicate);
         }
-        return conjunction;
+        return Junction(NQumir::NAst::TOperator("&&"), std::move(conjuncts));
     }
 
     bool Connected(TSubset s) const {

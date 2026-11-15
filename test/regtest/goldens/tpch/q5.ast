@@ -17,12 +17,10 @@
       (table region)
     )
     (where
-      (&& (&& (&& (&& (&& (&& (&& (&& (== c_custkey o_custkey) (== l_orderkey o_orderkey)) (== l_suppkey s_suppkey))
-                  (== c_nationkey s_nationkey))
-                (== s_nationkey n_nationkey))
-              (== n_regionkey r_regionkey))
-            (== r_name (cast "MIDDLE EAST" <named StringView>)))
-          (>= o_orderdate (: 9131 i32)))
+      (&& (&& (&& (&& (== c_custkey o_custkey) (== l_orderkey o_orderkey))
+            (&& (== l_suppkey s_suppkey) (== c_nationkey s_nationkey)))
+          (&& (&& (== s_nationkey n_nationkey) (== n_regionkey r_regionkey))
+            (&& (== r_name (cast "MIDDLE EAST" <named StringView>)) (>= o_orderdate (: 9131 i32)))))
         (< o_orderdate (: 9496 i32)))
     )
     (group-by

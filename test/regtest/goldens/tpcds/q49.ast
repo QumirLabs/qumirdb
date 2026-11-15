@@ -89,10 +89,8 @@
                                   (table date_dim)
                                 )
                                 (where
-                                  (&& (&& (&& (&& (&& (&& (> |wr.wr_return_amt| 10000) (> |ws.ws_net_profit| 1)) (> |ws.ws_net_paid| 0)) (> |ws.ws_quantity| 0))
-                                        (== ws_sold_date_sk d_date_sk))
-                                      (== d_year 2000))
-                                    (== d_moy 12))
+                                  (&& (&& (&& (> |wr.wr_return_amt| 10000) (> |ws.ws_net_profit| 1)) (&& (> |ws.ws_net_paid| 0) (> |ws.ws_quantity| 0)))
+                                    (&& (&& (== ws_sold_date_sk d_date_sk) (== d_year 2000)) (== d_moy 12)))
                                 )
                                 (group-by
                                   |ws.ws_item_sk|
@@ -176,11 +174,8 @@
                                   (table date_dim)
                                 )
                                 (where
-                                  (&& (&& (&& (&& (&& (&& (> |cr.cr_return_amount| 10000) (> |cs.cs_net_profit| 1)) (> |cs.cs_net_paid| 0))
-                                          (> |cs.cs_quantity| 0))
-                                        (== cs_sold_date_sk d_date_sk))
-                                      (== d_year 2000))
-                                    (== d_moy 12))
+                                  (&& (&& (&& (> |cr.cr_return_amount| 10000) (> |cs.cs_net_profit| 1)) (&& (> |cs.cs_net_paid| 0) (> |cs.cs_quantity| 0)))
+                                    (&& (&& (== cs_sold_date_sk d_date_sk) (== d_year 2000)) (== d_moy 12)))
                                 )
                                 (group-by
                                   |cs.cs_item_sk|
@@ -265,11 +260,8 @@
                                 (table date_dim)
                               )
                               (where
-                                (&& (&& (&& (&& (&& (&& (> |sr.sr_return_amt| 10000) (> |sts.ss_net_profit| 1)) (> |sts.ss_net_paid| 0))
-                                        (> |sts.ss_quantity| 0))
-                                      (== ss_sold_date_sk d_date_sk))
-                                    (== d_year 2000))
-                                  (== d_moy 12))
+                                (&& (&& (&& (> |sr.sr_return_amt| 10000) (> |sts.ss_net_profit| 1)) (&& (> |sts.ss_net_paid| 0) (> |sts.ss_quantity| 0)))
+                                  (&& (&& (== ss_sold_date_sk d_date_sk) (== d_year 2000)) (== d_moy 12)))
                               )
                               (group-by
                                 |sts.ss_item_sk|
