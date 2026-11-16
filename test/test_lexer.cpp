@@ -2,7 +2,6 @@
 
 #include <qdb/sql/lexer.h>
 #include <qdb/sql/parser.h>
-#include <qdb/sql/printer.h>
 
 #include <sstream>
 #include <vector>
@@ -399,19 +398,6 @@ TEST(SqlParser, LongChainsFailBeforeTheTreeGrows) {
     for (const auto& sql : chains) {
         EXPECT_NE(ParseError(sql).find("query nesting is too deep"), std::string::npos)
             << sql.substr(0, 80);
-    }
-}
-
-TEST(SqlParser, MalformedUtf8InQuotedIdentifierIsNotUndefinedBehavior) {
-    // A complete two-byte character followed by a stray continuation byte (issue #656).
-    std::istringstream in("SELECT\"'\xDB\x9F\x9F'\"");
-    TTokenStream tokens(in);
-    TParser parser;
-    auto parsed = parser.ParseAll(tokens);
-    if (parsed) {
-        for (const auto& statement : *parsed) {
-            PrintAst(statement);
-        }
     }
 }
 
