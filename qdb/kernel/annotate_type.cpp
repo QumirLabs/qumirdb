@@ -7,6 +7,7 @@
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/utils/module_path.h>
+#include <qdb/utils/nesting.h>
 
 #include <qumir/error.h>
 #include <qumir/parser/core/printer.h>
@@ -1763,6 +1764,17 @@ std::pair<TExprPtr, TTypePtr> ExpandInList(const TCallExpr& node,
     };
 }
 
+size_t TreeDepth(const TExprPtr& e)
+{
+    size_t depth = 0;
+    for (const auto& child : e->Children()) {
+        if (child) {
+            depth = std::max(depth, TreeDepth(child));
+        }
+    }
+    return depth + 1;
+}
+
 // COALESCE(a, b, ...) -> an `if`-chain: return the first arg with `.Valid`; once a
 // non-nullable arg is reached it is returned directly (result becomes non-nullable).
 // Bare-NULL args are dropped. Args are bound to temps (referenced for both `.Valid` and
@@ -1803,6 +1815,14 @@ std::pair<TExprPtr, TTypePtr> ExpandCoalesce(const TCallExpr& node,
         }
         return val;
     };
+
+    // One `if` per argument is nested, argument i sits i levels down; the parser
+    // sees only the flat list. Every argument is shallower than the limit already.
+    for (size_t i = 0; i <= m; ++i) {
+        if (i + TreeDepth(args[i].first) > MaxNesting) {
+            throw NQumir::TError(loc, NestingTooDeepMessage());
+        }
+    }
 
     std::vector<TExprPtr> stmts;
     // Terminator is returned unconditionally (no `.Valid` guard).
