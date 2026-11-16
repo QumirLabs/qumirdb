@@ -14,7 +14,7 @@ struct TRowSet {
 };
 
 int RandomInt(int* seed) {
-    *seed = (*seed * 1103515245 + 12345) & 0x7fffffff;
+    *seed = (static_cast<uint32_t>(*seed) * 1103515245u + 12345u) & 0x7fffffff;
     return *seed;
 }
 

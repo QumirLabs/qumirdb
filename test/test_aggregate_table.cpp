@@ -568,7 +568,9 @@ std::string Render(const TColumn& column, EValue kind, int64_t row) {
         return "f" + std::to_string(bits);
     }
     case EValue::Wide: {
-        const auto value = reinterpret_cast<const __int128*>(column.Data)[row];
+        // Wide column data is only 8-byte aligned, so read it with memcpy.
+        __int128 value;
+        std::memcpy(&value, reinterpret_cast<const char*>(column.Data) + row * sizeof(value), sizeof(value));
         return "w" + std::to_string(static_cast<int64_t>(value >> 64)) + ":" +
             std::to_string(static_cast<uint64_t>(value));
     }
