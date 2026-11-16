@@ -2,6 +2,7 @@
 
 #include <qdb/modules/qumirdb_runtime.h>
 #include <qdb/plan/types/decimal.h>
+#include <qdb/utils/nesting.h>
 
 #include <qumir/optional.h>
 
@@ -335,10 +336,6 @@ struct TParserContext {
     { }
 };
 
-// The parser recurses once per nesting level, so the depth is bounded to keep
-// hostile input from overflowing the stack (an ASan frame is the largest).
-constexpr size_t MaxNesting = 256;
-
 // Counts one level of the cycles of the grammar (expr, NOT, unary minus, select,
 // parenthesised table reference); Exceeded() tells when the limit is passed.
 class TNestingGuard {
@@ -405,7 +402,7 @@ TError Error(const TToken& token, const std::string& message) {
 }
 
 TError NestingError(TLocation location) {
-    return TError(location, "query nesting is too deep (limit " + std::to_string(MaxNesting) + ")");
+    return TError(location, NestingTooDeepMessage());
 }
 
 TError NestingError(TParserContext& ctx) {
