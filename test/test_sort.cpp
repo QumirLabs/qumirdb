@@ -126,7 +126,9 @@ uint64_t MakePrefix(std::string_view s) {
         x = (x << 8) | static_cast<unsigned char>(s[i]);
     }
 
-    x <<= 8 * (8 - n); // padding zeroes
+    if (n > 0) {
+        x <<= 8 * (8 - n); // padding zeroes; n == 0 would shift by 64, which is UB
+    }
     return x;
 }
 
@@ -252,7 +254,7 @@ void RadixSort(uint32_t* dest, uint32_t* work, int n) {
 }
 
 int RandomInt(int* seed) {
-    *seed = (*seed * 1103515245 + 12345) & 0x7fffffff;
+    *seed = (static_cast<uint32_t>(*seed) * 1103515245u + 12345u) & 0x7fffffff;
     return *seed;
 }
 

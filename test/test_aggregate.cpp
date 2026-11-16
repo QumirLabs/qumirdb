@@ -34,6 +34,7 @@
 #include <array>
 #include <bit>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <limits>
 #include <memory>
@@ -155,6 +156,13 @@ bool IsValid(const TColumn& column, int64_t row) {
     }
     const int64_t bit = column.MaskBitOffset + row;
     return ((column.Mask[bit / 8] >> (bit % 8)) & 1) != 0;
+}
+
+// Wide column data is only 8-byte aligned, so read it with memcpy.
+__int128 LoadWide(const TColumn& column, int64_t row) {
+    __int128 value;
+    std::memcpy(&value, reinterpret_cast<const char*>(column.Data) + row * sizeof(value), sizeof(value));
+    return value;
 }
 
 std::string StringAt(const TColumn& column, int64_t row) {
@@ -2558,9 +2566,9 @@ TEST(AggregateE2E, NullableFloatAndWideStatesSurviveRepeatedGrowth) {
         EXPECT_DOUBLE_EQ(reinterpret_cast<const double*>(result.Columns[3].Data)[row], state.FloatSum);
         EXPECT_DOUBLE_EQ(reinterpret_cast<const double*>(result.Columns[4].Data)[row], state.FloatMin);
         EXPECT_DOUBLE_EQ(reinterpret_cast<const double*>(result.Columns[5].Data)[row], state.FloatMax);
-        EXPECT_TRUE(reinterpret_cast<const __int128*>(result.Columns[6].Data)[row] == state.WideSum);
-        EXPECT_TRUE(reinterpret_cast<const __int128*>(result.Columns[7].Data)[row] == state.WideMin);
-        EXPECT_TRUE(reinterpret_cast<const __int128*>(result.Columns[8].Data)[row] == state.WideMax);
+        EXPECT_TRUE(LoadWide(result.Columns[6], row) == state.WideSum);
+        EXPECT_TRUE(LoadWide(result.Columns[7], row) == state.WideMin);
+        EXPECT_TRUE(LoadWide(result.Columns[8], row) == state.WideMax);
     }
     Release(&result);
 }
