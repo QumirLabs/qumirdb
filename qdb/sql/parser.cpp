@@ -1344,9 +1344,14 @@ TAstTask<TSqlSelectItem> select_item(TParserContext& ctx) {
 
 TAstTask<TSqlFrom> from_clause(TParserContext& ctx) {
     auto from = std::make_shared<TSqlFrom>();
+    // The plan builder nests one join per item of the list.
+    TChainDepth chain(ctx);
     TToken token;
     do {
         auto table = co_await table_ref(ctx);
+        if (!from->Items.empty() && !chain.Extend()) {
+            co_return NestingError(ctx);
+        }
         from->Items.emplace_back(std::move(table));
         token = ctx.Stream.Next();
     } while (IsOp(token, ','));
