@@ -45,6 +45,15 @@ fuzz_key() {
     echo "$1|$2|$type|$loc"
 }
 
+# fuzz_stack <summary file>: the crash report from its first sanitizer or
+# libFuzzer marker, so the start-up log does not use up the size limit. Without
+# a marker the whole file is used.
+fuzz_stack() {
+    local line
+    line=$(grep -n -m 1 -E '^==([0-9]+==)? ?(ERROR|WARNING):|runtime error:' "$1" | cut -d: -f1 || true)
+    tail -n "+${line:-1}" "$1" | head -c 30000
+}
+
 fuzz_marker() {
     echo "<!-- fuzz-key: $1 -->"
 }
@@ -118,7 +127,7 @@ fuzz_report() {
         echo "Stack:"
         echo
         echo '`````'
-        head -c 30000 "$summaryfile"
+        fuzz_stack "$summaryfile"
         echo
         echo '`````'
         echo
