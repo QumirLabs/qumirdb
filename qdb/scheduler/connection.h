@@ -61,6 +61,7 @@ public:
     const std::string& DebugName() const;
     void SetStatsEnabled(bool enabled);
     TConnectionStats Stats() const;
+    std::optional<uint32_t> Id() const;
 
     // Row descriptor, one entry per column; empty until the graph builder sets it.
     // Set while building the graph, before Seal; sinks keep spans into it, so it must not change later.
@@ -68,6 +69,9 @@ public:
     std::span<const TValueLayout> RowLayouts() const;
 
 protected:
+    friend class TTaskGraph;
+    void SetId(uint32_t id);
+
     void CountPushed(uint64_t count = 1) const;
     void CountPopped(uint64_t count = 1) const;
     void CountFinished(uint64_t count = 1) const;
@@ -77,6 +81,7 @@ protected:
 
 private:
     std::string DebugName_;
+    std::optional<uint32_t> Id_;
     std::vector<TValueLayout> RowLayouts_;
     bool StatsEnabled_ = false;
     mutable std::atomic<uint64_t> Pushed_ = 0;

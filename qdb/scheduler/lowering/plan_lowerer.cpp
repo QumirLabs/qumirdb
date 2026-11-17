@@ -69,15 +69,13 @@ NScheduler::TPortSpec PortSpec(
     const NScheduler::IConnection* connection,
     size_t lane)
 {
-    const auto connections = graph.Connections();
-    const auto it = std::ranges::find_if(connections, [&](const auto& owned) {
-        return owned.get() == connection;
-    });
-    if (it == connections.end()) {
+    auto maybeId = connection->Id();
+    auto&& connections = graph.Connections();
+    if (!maybeId || *maybeId >= connections.size() || connections[*maybeId].get() != connection) {
         throw std::logic_error("a task port uses a connection outside the graph");
     }
     return {
-        .Connection = static_cast<uint32_t>(it - connections.begin()),
+        .Connection = *maybeId,
         .Lane = static_cast<uint32_t>(lane),
     };
 }

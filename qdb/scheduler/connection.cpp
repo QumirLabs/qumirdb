@@ -20,6 +20,14 @@ void IConnection::SetStatsEnabled(bool enabled) {
     StatsEnabled_ = enabled;
 }
 
+void IConnection::SetId(uint32_t id) {
+    Id_ = id;
+}
+
+std::optional<uint32_t> IConnection::Id() const {
+    return Id_;
+}
+
 void IConnection::SetRowLayouts(std::vector<TValueLayout> layouts) {
     RowLayouts_ = std::move(layouts);
 }
