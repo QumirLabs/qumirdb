@@ -21,6 +21,7 @@
 #include <chrono>
 #include <cstdint>
 #include <deque>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -1532,6 +1533,33 @@ TEST(SchedulerRuntimeAdapter, HashShuffleTaskRoutesPartitionsByItsTable) {
     };
     EXPECT_EQ(scatter({}), (std::vector<std::vector<int64_t>>{{0, 2}, {1, 3, 4}}));
     EXPECT_EQ(scatter({1, 0, 0, 1}), (std::vector<std::vector<int64_t>>{{1, 2, 4}, {0, 3}}));
+}
+
+// A row of a partition routed nowhere fails the task instead of picking an output.
+TEST(SchedulerRuntimeAdapter, HashShuffleTaskFailsOnAPartitionRoutedNowhere) {
+    std::vector<uint64_t> hashes = {0, 3};
+    std::atomic<int> destroyCount = 0;
+    TOneToOneConnection input(1);
+    TShuffleOutputs output(2, 1);
+    auto rowSet = MakeRowSet(static_cast<int64_t>(hashes.size()), &destroyCount);
+    rowSet.Hash = hashes.data();
+    ASSERT_TRUE(input.Push(0, std::move(rowSet)));
+    input.Finish(0);
+
+    auto code = std::make_shared<THashShuffleCode>([](TRowSet*, uint64_t*) {
+        return false;
+    });
+    code->UseInputHash = true;
+    // Partition 1 = hash 3 mod 2 is NoRoute.
+    code->Routes = {0, std::numeric_limits<uint32_t>::max()};
+    THashShuffleTask task(code, TInputPort{.Connection = &input}, output.Ports());
+    try {
+        task.Execute();
+        FAIL() << "the shuffle routed a row of partition 1";
+    } catch (const std::runtime_error& e) {
+        EXPECT_NE(std::string(e.what()).find("partition 1, which it routes nowhere"), std::string::npos) << e.what();
+    }
+    EXPECT_EQ(destroyCount.load(std::memory_order_relaxed), 1);
 }
 
 TEST(SchedulerRuntimeAdapter, HashShuffleTaskBatchesRowsUntilFinish) {

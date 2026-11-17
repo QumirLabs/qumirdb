@@ -963,9 +963,13 @@ size_t THashShuffleTask::OutputOf(uint64_t hash) const {
     if (routes.empty()) {
         return hash % Outputs_.size();
     }
-    const size_t output = routes[hash % routes.size()];
-    // A partition routed nowhere (NoRoute) never reaches this task.
-    assert(output < Outputs_.size());
+    const size_t partition = hash % routes.size();
+    const size_t output = routes[partition];
+    // A partition routed nowhere (NoRoute) belongs to another node.
+    if (output >= Outputs_.size()) [[unlikely]] {
+        throw std::runtime_error(
+            "hash shuffle got a row of partition " + std::to_string(partition) + ", which it routes nowhere");
+    }
     return output;
 }
 
@@ -1036,7 +1040,7 @@ void THashShuffleTask::ScatterBuffered(const std::shared_ptr<TRowSet>& input) {
 
     const size_t estimatedRowBytes = EstimateShuffleRowBytes(inputType);
 
-    if (outputs == 1 && !Code_->ProducedFilter) {
+    if (outputs == 1 && Code_->Routes.empty() && !Code_->ProducedFilter) {
         rows[0].reserve(input->RowCount);
         for (int64_t row = 0; row < input->RowCount; ++row) {
             if (!RowSelected(*input, row)) {
@@ -1074,8 +1078,9 @@ void THashShuffleTask::ScatterViews(const std::shared_ptr<TRowSet>& input) {
     const size_t outputs = Outputs_.size();
 
     // Many-to-one shuffle: every row routes to output 0, so skip hashing and
-    // forward the whole rowset (keeping its existing selection) unchanged.
-    if (outputs == 1 && !Code_->ProducedFilter) {
+    // forward the whole rowset (keeping its existing selection) unchanged. A
+    // table still hashes, to reject the partitions it routes nowhere.
+    if (outputs == 1 && Code_->Routes.empty() && !Code_->ProducedFilter) {
         ClearPending();
         ObserveInstrumentation();
         auto* data = new THashShuffleRowSetData;
