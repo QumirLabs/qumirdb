@@ -958,6 +958,21 @@ bool THashShuffleTask::BatchingEnabled() const {
     return Code_->InputType && Code_->TargetOutputBatchRows > 0;
 }
 
+size_t THashShuffleTask::OutputOf(uint64_t hash) const {
+    const auto& routes = Code_->Routes;
+    if (routes.empty()) {
+        return hash % Outputs_.size();
+    }
+    const size_t partition = hash % routes.size();
+    const size_t output = routes[partition];
+    // A partition routed nowhere (NoRoute) belongs to another node.
+    if (output >= Outputs_.size()) [[unlikely]] {
+        throw std::runtime_error(
+            "hash shuffle got a row of partition " + std::to_string(partition) + ", which it routes nowhere");
+    }
+    return output;
+}
+
 std::shared_ptr<uint64_t> THashShuffleTask::ComputeHashes(
     const std::shared_ptr<TRowSet>& input)
 {
@@ -986,13 +1001,13 @@ void THashShuffleTask::AccumulateFilter(
         : std::span<const uint8_t>{});
 }
 
-void THashShuffleTask::EnsureBuffers(size_t partitions) {
-    if (Buffers_.size() == partitions) {
+void THashShuffleTask::EnsureBuffers(size_t outputs) {
+    if (Buffers_.size() == outputs) {
         return;
     }
     Buffers_.clear();
-    Buffers_.reserve(partitions);
-    for (size_t i = 0; i < partitions; ++i) {
+    Buffers_.reserve(outputs);
+    for (size_t i = 0; i < outputs; ++i) {
         Buffers_.push_back(std::make_unique<TDestinationBuffer>());
     }
 }
@@ -1012,20 +1027,20 @@ void THashShuffleTask::Scatter(TRowSet& rowSet) {
 }
 
 void THashShuffleTask::ScatterBuffered(const std::shared_ptr<TRowSet>& input) {
-    const size_t partitions = Outputs_.size();
-    EnsureBuffers(partitions);
+    const size_t outputs = Outputs_.size();
+    EnsureBuffers(outputs);
 
     const auto& inputType = ShuffleInputStruct(Code_->InputType);
     if (input->ColumnCount < static_cast<int64_t>(inputType.Fields.size())) {
         throw std::runtime_error("hash shuffle rowset has fewer columns than schema");
     }
 
-    std::vector<std::vector<int32_t>> rows(partitions);
-    std::vector<size_t> bytes(partitions, 0);
+    std::vector<std::vector<int32_t>> rows(outputs);
+    std::vector<size_t> bytes(outputs, 0);
 
     const size_t estimatedRowBytes = EstimateShuffleRowBytes(inputType);
 
-    if (partitions == 1 && !Code_->ProducedFilter) {
+    if (outputs == 1 && Code_->Routes.empty() && !Code_->ProducedFilter) {
         rows[0].reserve(input->RowCount);
         for (int64_t row = 0; row < input->RowCount; ++row) {
             if (!RowSelected(*input, row)) {
@@ -1049,23 +1064,23 @@ void THashShuffleTask::ScatterBuffered(const std::shared_ptr<TRowSet>& input) {
         if (!RowSelected(*input, row)) {
             continue;
         }
-        const size_t dst = partitions == 1 ? 0 : hashValues[row] % partitions;
-        rows[dst].push_back(static_cast<int32_t>(row));
+        rows[OutputOf(hashValues[row])].push_back(static_cast<int32_t>(row));
     }
 
     const size_t inputBytes = ReferencedInputBytes(*input, inputType, hashes);
-    for (size_t dst = 0; dst < partitions; ++dst) {
+    for (size_t dst = 0; dst < outputs; ++dst) {
         bytes[dst] = rows[dst].size() * estimatedRowBytes;
         AddBufferedRows(dst, input, std::move(rows[dst]), bytes[dst], hashes, inputBytes);
     }
 }
 
 void THashShuffleTask::ScatterViews(const std::shared_ptr<TRowSet>& input) {
-    const size_t partitions = Outputs_.size();
+    const size_t outputs = Outputs_.size();
 
     // Many-to-one shuffle: every row routes to output 0, so skip hashing and
-    // forward the whole rowset (keeping its existing selection) unchanged.
-    if (partitions == 1 && !Code_->ProducedFilter) {
+    // forward the whole rowset (keeping its existing selection) unchanged. A
+    // table still hashes, to reject the partitions it routes nowhere.
+    if (outputs == 1 && Code_->Routes.empty() && !Code_->ProducedFilter) {
         ClearPending();
         ObserveInstrumentation();
         auto* data = new THashShuffleRowSetData;
@@ -1090,8 +1105,8 @@ void THashShuffleTask::ScatterViews(const std::shared_ptr<TRowSet>& input) {
     const std::span<const uint64_t> hashValues(hashes.get(), input->RowCount);
     AccumulateFilter(*input, hashValues);
 
-    std::vector<std::vector<uint8_t>> selections(partitions);
-    std::vector<size_t> counts(partitions, 0);
+    std::vector<std::vector<uint8_t>> selections(outputs);
+    std::vector<size_t> counts(outputs, 0);
     for (auto& selection : selections) {
         selection.assign(input->RowCount, uint8_t{0});
     }
@@ -1099,7 +1114,7 @@ void THashShuffleTask::ScatterViews(const std::shared_ptr<TRowSet>& input) {
         if (!RowSelected(*input, row)) {
             continue;
         }
-        const size_t dst = partitions == 1 ? 0 : hashValues[row] % partitions;
+        const size_t dst = OutputOf(hashValues[row]);
         selections[dst][row] = 0xff;
         ++counts[dst];
     }
@@ -1107,8 +1122,8 @@ void THashShuffleTask::ScatterViews(const std::shared_ptr<TRowSet>& input) {
     ClearPending();
     ObserveInstrumentation();
 
-    Pending_.reserve(partitions);
-    for (size_t dst = 0; dst < partitions; ++dst) {
+    Pending_.reserve(outputs);
+    for (size_t dst = 0; dst < outputs; ++dst) {
         if (counts[dst] == 0) {
             continue;
         }

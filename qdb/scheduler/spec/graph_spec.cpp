@@ -278,6 +278,11 @@ std::unique_ptr<ITask> MakeHashShuffleTask(
     if (node.Out.empty()) {
         Invalid("a hash shuffle node needs an output per partition");
     }
+    for (const auto route : node.Routes) {
+        if (route >= node.Out.size() && route != THashShuffleNode::NoRoute) {
+            Invalid("a hash shuffle route names no output");
+        }
+    }
     std::vector<TOutputPort> outputs;
     outputs.reserve(node.Out.size());
     for (const auto& port : node.Out) {
@@ -290,6 +295,7 @@ std::unique_ptr<ITask> MakeHashShuffleTask(
         code->ProducedFilter = RuntimeFilterProducerAt(context, *node.ProducedFilter);
     }
     code->UseInputHash = node.UseInputHash;
+    code->Routes = node.Routes;
     return std::make_unique<THashShuffleTask>(
         std::move(code), InputPort(connections, node.In), std::move(outputs));
 }
