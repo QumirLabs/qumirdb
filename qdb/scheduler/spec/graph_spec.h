@@ -11,6 +11,7 @@
 #include <qdb/scheduler/port.h>
 
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
@@ -269,9 +270,14 @@ struct TGroupingSetsAggregateNode {
 struct THashShuffleNode {
     using THash = std::variant<TAggregateHashPlanData, TJoinHashPlanData>;
 
+    // The route of a partition that never reaches this task.
+    static constexpr uint32_t NoRoute = std::numeric_limits<uint32_t>::max();
+
     TPortSpec In;
-    // Out[d] receives the rows whose hash picks partition d.
+    // Out[Routes[p]] receives the rows of partition p = hash mod Routes.size();
+    // without Routes, Out[p] those of p = hash mod Out.size().
     std::vector<TPortSpec> Out;
+    std::vector<uint32_t> Routes;
     THash Hash;
     NQumir::NAst::TTypePtr InputType;
     uint64_t TargetOutputBatchRows = 0;
@@ -286,6 +292,7 @@ struct THashShuffleNode {
     {
         v(self.In);
         v(self.Out);
+        v(self.Routes);
         v(self.Hash);
         TypeField(v, self.InputType);
         v(self.TargetOutputBatchRows);

@@ -123,6 +123,9 @@ struct THashShuffleCode {
     std::shared_ptr<IRuntimeFilterProducer> ProducedFilter;
     // Reuse hashes produced by a preceding runtime-filter task for this key.
     bool UseInputHash = false;
+    // Partition p = hash mod Routes.size() goes to output Routes[p]; without
+    // Routes, partition p = hash mod outputs goes to output p.
+    std::vector<uint32_t> Routes;
 };
 
 struct TRuntimeFilterCode {
@@ -392,7 +395,7 @@ private:
     bool OutputFinished_ = false;
 };
 
-// Routes each row by its key hash to one output per destination partition.
+// Routes each row by its key hash to the output of its partition.
 class THashShuffleTask final : public ITask {
 public:
     THashShuffleTask(
@@ -412,9 +415,10 @@ private:
     struct TInstrumentationState;
 
     bool BatchingEnabled() const;
+    size_t OutputOf(uint64_t hash) const;
     std::shared_ptr<uint64_t> ComputeHashes(const std::shared_ptr<TRowSet>& input);
     void AccumulateFilter(const TRowSet& rowSet, std::span<const uint64_t> hashes);
-    void EnsureBuffers(size_t partitions);
+    void EnsureBuffers(size_t outputs);
     void Scatter(TRowSet& rowSet);
     void ScatterBuffered(const std::shared_ptr<TRowSet>& input);
     void ScatterViews(const std::shared_ptr<TRowSet>& input);

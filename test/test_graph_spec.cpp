@@ -306,6 +306,7 @@ TEST(GraphSpec, AggregateAndHashShuffleRecordsRoundTrip)
     spec.Nodes.push_back(Node("hash-shuffle", "aggregate-repartition", THashShuffleNode{
         .In = {0, 1},
         .Out = {{1, 1}, {2, 1}},
+        .Routes = {1, THashShuffleNode::NoRoute, 0},
         .Hash = TAggregateHashPlanData{.Kernel = 3, .KeyColumns = {0, 2}},
         .InputType = inputType,
         .TargetOutputBatchRows = 4096,
@@ -351,6 +352,7 @@ TEST(GraphSpec, AggregateAndHashShuffleRecordsRoundTrip)
     ASSERT_EQ(shuffle.Out.size(), 2u);
     EXPECT_EQ(shuffle.Out[1].Connection, 2u);
     EXPECT_EQ(shuffle.Out[1].Lane, 1u);
+    EXPECT_EQ(shuffle.Routes, (std::vector<uint32_t>{1, THashShuffleNode::NoRoute, 0}));
     const auto& hash = std::get<TAggregateHashPlanData>(shuffle.Hash);
     EXPECT_EQ(hash.Kernel, 3u);
     EXPECT_EQ(hash.KeyColumns, (std::vector<int64_t>{0, 2}));
@@ -894,6 +896,11 @@ TEST(GraphSpec, RejectsInvalidSpecs)
     const std::vector<std::shared_ptr<TKernelSlot>> slots{std::make_shared<TKernelSlot>()};
     EXPECT_THROW(MaterializeGraph(spec, &sink, slots), std::runtime_error);
     spec.Nodes[1].Body = THashShuffleNode{.In = {0, 0}, .Out = {{1, 0}, {9, 0}}};
+    EXPECT_THROW(MaterializeGraph(spec, &sink, slots), std::runtime_error);
+    // A route names an output, or none for a partition that never comes.
+    spec.Nodes[1].Body = THashShuffleNode{.In = {0, 0}, .Out = {{1, 0}}, .Routes = {0, THashShuffleNode::NoRoute}};
+    EXPECT_NO_THROW(MaterializeGraph(spec, &sink, slots));
+    std::get<THashShuffleNode>(spec.Nodes[1].Body).Routes = {0, 1};
     EXPECT_THROW(MaterializeGraph(spec, &sink, slots), std::runtime_error);
 
     // A join hash has entries 0 and 1 only.
