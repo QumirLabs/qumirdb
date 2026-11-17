@@ -83,6 +83,11 @@ enum class EReboundPort { SourceOutput, DestinationInput };
 // connection that share the side that is not rebound. The rebound side of
 // Edges[j] moves to lane j of NewConnection. The placeholder tasks come with
 // one unbound port per distinct lane of their new edges; Apply binds them.
+//
+// With a RelayTask, the edges share Src and Src's output is rebound: all its
+// ports of the edges move to lane 0 of NewConnection, and the relay, in the
+// source's color, reads the source through RelayConnection and writes the
+// cut edges' lanes in Src's place.
 struct TEdgeSplit {
     std::vector<TTaskEdge*> Edges;
     EReboundPort ReboundPort = EReboundPort::DestinationInput;
@@ -91,6 +96,8 @@ struct TEdgeSplit {
     std::unique_ptr<IConnection> NewConnection;
     std::unique_ptr<ITask> SinkTask;
     std::unique_ptr<ITask> SourceTask;
+    std::unique_ptr<ITask> RelayTask;
+    std::unique_ptr<IConnection> RelayConnection;
 };
 
 // Cuts dependency edges that all run from SinkColor to SourceColor into
@@ -116,6 +123,8 @@ struct TCut {
     int SinkColor = 0;
     int SourceColor = 0;
     ETaskEdgeKind Kind = ETaskEdgeKind::Rowset;
+    // See TEdgeSplit::RelayTask.
+    TTaskNode* Relay = nullptr;
 };
 
 // A validated, frozen graph; only TTaskGraph::Seal() and Apply() make a non-empty one.

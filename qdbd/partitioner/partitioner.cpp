@@ -74,6 +74,9 @@ void TPartitioner::Partition(const std::vector<TTaskEdge*>& cuts) {
     // CTE edges by connection, sink color and source color, in plan order.
     std::map<std::tuple<const IConnection*, int, int>, size_t> cteSplits;
     std::vector<std::vector<TTaskEdge*>> cteEdges;
+    // Hash shuffle edges by shuffle and destination color, in plan order.
+    std::map<std::pair<const TTaskNode*, int>, size_t> shuffleSplits;
+    std::vector<std::vector<TTaskEdge*>> shuffleEdges;
     for (auto* edge : cuts) {
         if (edge->Kind == ETaskEdgeKind::Dependency) {
             const auto* probe = dynamic_cast<const TRuntimeFilterTask*>(edge->Dst->Task);
@@ -112,6 +115,15 @@ void TPartitioner::Partition(const std::vector<TTaskEdge*>& cuts) {
             PlanSplit(*edge, EReboundPort::DestinationInput, oneToOne->Capacity());
         } else if (auto* gather = dynamic_cast<TGatherConnection*>(edge->Connection)) {
             assert(edge->DstLane == 0);
+            if (dynamic_cast<const THashShuffleTask*>(edge->Src->Task)) {
+                const auto [it, added] = shuffleSplits.try_emplace(
+                    {edge->Src, Colors_.at(edge->Dst)}, shuffleEdges.size());
+                if (added) {
+                    shuffleEdges.emplace_back();
+                }
+                shuffleEdges[it->second].push_back(edge);
+                continue;
+            }
             PlanSplit(*edge, EReboundPort::SourceOutput, gather->Capacity());
         } else if (auto* broadcast = dynamic_cast<TBroadcastConnection*>(edge->Connection)) {
             assert(edge->SrcLane == 0);
@@ -120,9 +132,42 @@ void TPartitioner::Partition(const std::vector<TTaskEdge*>& cuts) {
             throw std::logic_error("unsupported connection for partitioning");
         }
     }
+    for (auto& edges : shuffleEdges) {
+        PlanShuffleSplit(std::move(edges));
+    }
     for (auto& edges : cteEdges) {
         PlanCteSplit(std::move(edges));
     }
+}
+
+// The partitions a shuffle lane sends to one other color cross in one stream:
+// the lane routes them all to the sink, and a relay there with the lane's hash
+// routes them to their consumers. ApplySplit writes the relay's record.
+void TPartitioner::PlanShuffleSplit(std::vector<TTaskEdge*> edges) {
+    auto& edge = *edges.front();
+    const auto capacity = static_cast<const TGatherConnection*>(edge.Connection)->Capacity();
+    if (edges.size() == 1) {
+        PlanSplit(edge, EReboundPort::SourceOutput, capacity);
+        return;
+    }
+    const auto layouts = edge.Connection->RowLayouts();
+    auto newConnection = [&] {
+        auto connection = std::make_unique<TOneToOneConnection>(capacity);
+        connection->SetRowLayouts(std::vector<TValueLayout>(layouts.begin(), layouts.end()));
+        return connection;
+    };
+    const size_t outputs = edges.size();
+    Plan_.Splits.push_back({
+        .Edges = std::move(edges),
+        .ReboundPort = EReboundPort::SourceOutput,
+        .SinkColor = Colors_.at(edge.Src),
+        .SourceColor = Colors_.at(edge.Dst),
+        .NewConnection = newConnection(),
+        .SinkTask = std::make_unique<TSinkTask>(nullptr, nullptr, TInputPort{}),
+        .SourceTask = std::make_unique<TSourceTask>(nullptr, nullptr, TOutputPort{}),
+        .RelayTask = std::make_unique<THashShuffleTask>(nullptr, TInputPort{}, std::vector<TOutputPort>(outputs)),
+        .RelayConnection = newConnection(),
+    });
 }
 
 // Producer lanes -> publish: the sink reads the lanes through a new gather and

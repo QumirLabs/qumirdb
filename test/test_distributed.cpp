@@ -3257,6 +3257,60 @@ TEST(DistributedScheduler, SplitsALoweredPlanIntoFragmentSpecs) {
     EXPECT_EQ(externals, 2 * cuts.size());
 }
 
+// The partitions of one shuffle lane in another fragment cross in one stream:
+// the lane routes them to one sink, and a relay there routes them to their
+// consumers by the same hash and partition count.
+TEST(DistributedScheduler, SplitsEachShuffleLaneIntoOneStreamPerFragment) {
+    using namespace NQdb::NScheduler;
+    TParquetSource source(DecimalsPath);
+    TSettings settings;
+    settings.Scheduler.WorkerCount = 8;
+    settings.ScanSplit.Strategy = EScanSplitStrategy::RowGroupRange;
+    settings.ScanSplit.MaxScanTasks = 4;
+    auto lowered = LowerSql("SELECT a.id, b.id AS bid FROM t a JOIN t b ON a.id = b.id WHERE a.id % 5 = 0",
+        source, settings);
+    TNoSink sink;
+    AttachSink(lowered, sink);
+    TPartitioner partitioner(lowered.Graph->Seal(), 3);
+    partitioner.Do();
+    // The partition count of each shuffle lane, by slot.
+    std::map<size_t, size_t> partitions;
+    for (size_t slot = 0; slot < lowered.NodeSpecs.size(); ++slot) {
+        const auto& record = lowered.NodeSpecs[slot];
+        if (const auto* shuffle = record ? std::get_if<THashShuffleNode>(&record->Body) : nullptr) {
+            partitions.emplace(slot, shuffle->Out.size());
+        }
+    }
+    const auto split = ApplySplit(lowered, partitioner.TakePlan());
+
+    std::set<std::pair<const TTaskNode*, int>> streams;
+    size_t relays = 0;
+    for (const auto& cut : split.Cuts()) {
+        const auto* lane = cut.Sink->Inbound.front()->Src;
+        if (cut.Kind != ETaskEdgeKind::Rowset || !partitions.contains(lane->ExecutionSlot)) {
+            continue;
+        }
+        EXPECT_TRUE(streams.emplace(lane, cut.SourceColor).second) << "lane n" << lane->ExecutionSlot;
+        if (!cut.Relay) {
+            continue;
+        }
+        ++relays;
+        const auto& sender = std::get<THashShuffleNode>(lowered.NodeSpecs[lane->ExecutionSlot]->Body);
+        const auto& relay = std::get<THashShuffleNode>(lowered.NodeSpecs[cut.Relay->ExecutionSlot]->Body);
+        const auto toSink = std::get<TRemoteSinkNode>(lowered.NodeSpecs[cut.Sink->ExecutionSlot]->Body).In;
+        ASSERT_EQ(sender.Routes.size(), partitions.at(lane->ExecutionSlot));
+        ASSERT_EQ(relay.Routes.size(), sender.Routes.size());
+        EXPECT_EQ(relay.Out.size(), cut.Relay->Outbound.size());
+        EXPECT_FALSE(relay.ProducedFilter);
+        EXPECT_FALSE(relay.UseInputHash);
+        for (size_t partition = 0; partition < relay.Routes.size(); ++partition) {
+            EXPECT_EQ(relay.Routes[partition] != THashShuffleNode::NoRoute,
+                sender.Out.at(sender.Routes[partition]) == toSink) << partition;
+        }
+    }
+    EXPECT_GT(relays, 0u);
+}
+
 namespace {
 
 // Plays the client of a query actor: keeps its answer.
