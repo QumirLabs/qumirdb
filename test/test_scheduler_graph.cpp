@@ -814,6 +814,86 @@ TEST(SchedulerGraph, ApplyCutsEdgesOfOneBroadcastIntoOneSinkAndSource) {
     EXPECT_EQ(FetchState(right.Task.Inputs[0]), EFetchResult::FINISHED);
 }
 
+// A shuffle lane writes three partitions; the two in color 1 cross through
+// one sink, and a relay there writes the shuffle's lane of each.
+TEST(SchedulerGraph, ApplyRelaysTheEdgesOfOneSourceIntoOneColor) {
+    TTaskGraph graph;
+    std::vector<IConnection*> partitions;
+    for (int i = 0; i < 3; ++i) {
+        partitions.push_back(&graph.AddConnection(std::make_unique<TGatherConnection>()));
+    }
+    auto shuffle = AddPortsNode(graph, {}, {
+        {.Connection = partitions[0]}, {.Connection = partitions[1]}, {.Connection = partitions[2]}});
+    shuffle.Node.DebugKind = "hash-shuffle";
+    auto local = AddPortsNode(graph, {{.Connection = partitions[0]}}, {});
+    auto first = AddPortsNode(graph, {{.Connection = partitions[1]}}, {});
+    auto second = AddPortsNode(graph, {{.Connection = partitions[2]}}, {});
+    graph.AddEdge(shuffle.Node, local.Node, *partitions[0]);
+    auto& firstCut = graph.AddEdge(shuffle.Node, first.Node, *partitions[1], 0, 0, 1);
+    auto& secondCut = graph.AddEdge(shuffle.Node, second.Node, *partitions[2], 0, 0, 1);
+    std::string error;
+    ASSERT_TRUE(graph.Seal(&error)) << error;
+
+    auto sinkTask = Placeholder(1, 0);
+    auto sourceTask = Placeholder(0, 1);
+    auto relayTask = Placeholder(1, 2);
+    auto& sinkPorts = *sinkTask;
+    auto& sourcePorts = *sourceTask;
+    auto& relayPorts = *relayTask;
+    TSplitPlan plan;
+    plan.Splits.push_back({
+        .Edges = {&firstCut, &secondCut},
+        .ReboundPort = EReboundPort::SourceOutput,
+        .SinkColor = 0,
+        .SourceColor = 1,
+        .NewConnection = std::make_unique<TOneToOneConnection>(2),
+        .SinkTask = std::move(sinkTask),
+        .SourceTask = std::move(sourceTask),
+        .RelayTask = std::move(relayTask),
+        .RelayConnection = std::make_unique<TOneToOneConnection>(),
+    });
+    const auto sealed = graph.Apply(std::move(plan));
+    ASSERT_EQ(graph.Nodes().size(), 7u);
+    auto& sink = *graph.Nodes()[4];
+    auto& source = *graph.Nodes()[5];
+    auto& relay = *graph.Nodes()[6];
+    ASSERT_EQ(sealed.Cuts().size(), 1u);
+    EXPECT_EQ(sealed.Cuts()[0].Relay, &relay);
+    EXPECT_EQ(relay.DebugKind, "hash-shuffle");
+    EXPECT_EQ(Graphs(sealed), (TGraphs{{&local.Node, &sink}, {&first.Node, &second.Node}}));
+    const auto* toSink = graph.Connections()[3].get();
+    const auto* toRelay = graph.Connections()[4].get();
+    ASSERT_EQ(graph.Edges().size(), 5u);
+    EXPECT_EQ(Shape(*graph.Edges()[1]), (TEdgeShape{&shuffle.Node, &sink, toSink, 0, 0, 0}));
+    EXPECT_EQ(Shape(*graph.Edges()[2]), (TEdgeShape{&source, &relay, toRelay, 0, 0, 0}));
+    EXPECT_EQ(Shape(*graph.Edges()[3]), (TEdgeShape{&relay, &first.Node, partitions[1], 0, 0, 1}));
+    EXPECT_EQ(Shape(*graph.Edges()[4]), (TEdgeShape{&relay, &second.Node, partitions[2], 0, 0, 1}));
+    EXPECT_EQ(relayPorts.Outputs[0].Connection, partitions[1]);
+    EXPECT_EQ(relayPorts.Outputs[1].Connection, partitions[2]);
+
+    // Both cut partitions go into the sink's one lane; the relay's input end
+    // reaches each of its consumers once it finishes.
+    ASSERT_TRUE(shuffle.Task.Outputs[1].Push(EmptyBatch(3)));
+    ASSERT_TRUE(shuffle.Task.Outputs[2].Push(EmptyBatch(4)));
+    for (const auto& output : shuffle.Task.Outputs) {
+        output.Finish();
+    }
+    EXPECT_EQ(FetchRows(sinkPorts.Inputs[0]), 3);
+    EXPECT_EQ(FetchRows(sinkPorts.Inputs[0]), 4);
+    EXPECT_EQ(FetchState(sinkPorts.Inputs[0]), EFetchResult::FINISHED);
+    EXPECT_EQ(FetchState(local.Task.Inputs[0]), EFetchResult::FINISHED);
+    ASSERT_TRUE(sourcePorts.Outputs[0].Push(EmptyBatch(7)));
+    sourcePorts.Outputs[0].Finish();
+    EXPECT_EQ(FetchRows(relayPorts.Inputs[0]), 7);
+    EXPECT_EQ(FetchState(relayPorts.Inputs[0]), EFetchResult::FINISHED);
+    EXPECT_EQ(FetchState(first.Task.Inputs[0]), EFetchResult::NO_DATA);
+    for (const auto& output : relayPorts.Outputs) {
+        output.Finish();
+    }
+    EXPECT_EQ(FetchState(first.Task.Inputs[0]), EFetchResult::FINISHED);
+    EXPECT_EQ(FetchState(second.Task.Inputs[0]), EFetchResult::FINISHED);
+}
+
 TEST(SchedulerGraph, ApplyGroupsPiecesOfOneColorIntoOneGraph) {
     TTaskGraph graph;
     auto& first = graph.AddConnection(std::make_unique<TOneToOneConnection>());
@@ -1208,6 +1288,11 @@ TEST(SchedulerGraph, ApplyRejectsAnIncompleteSplit) {
     split = Split(cut, EReboundPort::DestinationInput, 0, 1);
     split.Edges.push_back(nullptr);
     EXPECT_EQ(ApplyError(graph, Plan(std::move(split))), "split plan has an incomplete split");
+    // A relay writes in place of the cut edges' Src.
+    split = Split(cut, EReboundPort::DestinationInput, 0, 1);
+    split.RelayTask = Placeholder(1, 1);
+    split.RelayConnection = std::make_unique<TOneToOneConnection>();
+    EXPECT_EQ(ApplyError(graph, Plan(std::move(split))), "split plan relays edges that do not share their rebound Src");
 }
 
 TEST(SchedulerGraph, ApplyRejectsColorsWithGaps) {

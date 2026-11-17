@@ -59,10 +59,52 @@ void Rebind(TTaskNode& node, const TPortRebind& rebind) {
     }
 }
 
+// Replaces the split's edges, all from Src, by Src -> sink, source -> relay and
+// relay -> each Dst. The relay takes Src's lane in the cut edges' connections.
+TTaskNode& AddRelay(
+    TTaskGraph& graph,
+    TEdgeSplit& split,
+    IConnection& connection,
+    TTaskNode& sink,
+    TTaskNode& source,
+    std::vector<std::unique_ptr<TTaskEdge>>& edges,
+    std::vector<std::optional<int>>& colors)
+{
+    auto& src = *split.Edges.front()->Src;
+    auto& relayConnection = graph.AddConnection(std::move(split.RelayConnection));
+    auto& relay = graph.AddOwnedNode(std::move(split.RelayTask));
+    relay.ExecStageId = src.ExecStageId;
+    relay.TaskGroupId = src.TaskGroupId;
+    relay.DebugKind = src.DebugKind;
+    relay.DebugLabel = src.DebugLabel;
+    colors.resize(graph.Nodes().size());
+    colors[relay.ExecutionSlot] = split.SourceColor;
+
+    Rebind(sink, {.Kind = EPortKind::Input, .To = &connection});
+    Rebind(source, {.Kind = EPortKind::Output, .To = &relayConnection});
+    Rebind(relay, {.Kind = EPortKind::Input, .To = &relayConnection});
+    edges.push_back(std::make_unique<TTaskEdge>(TTaskEdge{.Src = &src, .Dst = &sink, .Connection = &connection}));
+    edges.push_back(std::make_unique<TTaskEdge>(
+        TTaskEdge{.Src = &source, .Dst = &relay, .Connection = &relayConnection}));
+    for (const auto* edge : split.Edges) {
+        Rebind(src, {
+            .Kind = EPortKind::Output,
+            .From = edge->Connection,
+            .FromLane = edge->SrcLane,
+            .To = &connection,
+        });
+        Rebind(relay, {.Kind = EPortKind::Output, .To = edge->Connection, .ToLane = edge->SrcLane});
+        auto relayEdge = std::make_unique<TTaskEdge>(*edge);
+        relayEdge->Src = &relay;
+        edges.push_back(std::move(relayEdge));
+    }
+    return relay;
+}
+
 // Replaces split.Edges by Src -> sink and source -> Dst. The new edges start
 // as copies of the cut ones; the rebound side of edge j then uses lane j of the
 // new connection.
-std::pair<TTaskNode*, TTaskNode*> Cut(
+TCut Cut(
     TTaskGraph& graph,
     TEdgeSplit& split,
     std::vector<std::unique_ptr<TTaskEdge>>& edges,
@@ -76,6 +118,11 @@ std::pair<TTaskNode*, TTaskNode*> Cut(
     colors.resize(graph.Nodes().size());
     colors[sink.ExecutionSlot] = split.SinkColor;
     colors[source.ExecutionSlot] = split.SourceColor;
+    TCut cut{.Sink = &sink, .Source = &source, .SinkColor = split.SinkColor, .SourceColor = split.SourceColor};
+    if (split.RelayTask) {
+        cut.Relay = &AddRelay(graph, split, connection, sink, source, edges, colors);
+        return cut;
+    }
 
     // One placeholder port per distinct lane: a gather's sink reads one lane
     // of the new connection, a broadcast's source writes one.
@@ -120,12 +167,12 @@ std::pair<TTaskNode*, TTaskNode*> Cut(
         edges.push_back(std::move(sinkEdge));
         edges.push_back(std::move(sourceEdge));
     }
-    return {&sink, &source};
+    return cut;
 }
 
 // Replaces split.Edges by Src -> sink for each distinct Src and source -> Dst
 // for each distinct Dst.
-std::pair<TTaskNode*, TTaskNode*> CutDependencies(
+TCut CutDependencies(
     TTaskGraph& graph,
     TDependencySplit& split,
     std::vector<std::unique_ptr<TTaskEdge>>& edges,
@@ -155,7 +202,13 @@ std::pair<TTaskNode*, TTaskNode*> CutDependencies(
             add(source, *edge->Dst);
         }
     }
-    return {&sink, &source};
+    return {
+        .Sink = &sink,
+        .Source = &source,
+        .SinkColor = split.SinkColor,
+        .SourceColor = split.SourceColor,
+        .Kind = ETaskEdgeKind::Dependency,
+    };
 }
 
 // Union-find over rowset edges: each piece takes the color of its remote
@@ -424,6 +477,12 @@ TSealedTaskGraph TTaskGraph::Apply(TSplitPlan&& plan) {
         {
             throw std::logic_error("split plan has an incomplete split");
         }
+        const auto* src = split.Edges.front()->Src;
+        if (split.RelayTask && (!split.RelayConnection || split.ReboundPort != EReboundPort::SourceOutput
+            || std::ranges::any_of(split.Edges, [&](const auto* edge) { return edge->Src != src; })))
+        {
+            throw std::logic_error("split plan relays edges that do not share their rebound Src");
+        }
         for (const auto* edge : split.Edges) {
             if (!IsRowsetEdge(edge)) {
                 throw std::logic_error("split plan cuts a dependency edge as a rowset edge");
@@ -469,28 +528,22 @@ TSealedTaskGraph TTaskGraph::Apply(TSplitPlan&& plan) {
     std::vector<std::optional<int>> colors(Nodes_.size());
     std::vector<std::unique_ptr<TTaskEdge>> edges;
     edges.reserve(Edges_.size() + splits.size());
-    auto addCut = [&](size_t index, TTaskNode* sink, TTaskNode* source, int sinkColor, int sourceColor,
-        ETaskEdgeKind kind)
-    {
-        Cuts_[index] = {sink, source, sinkColor, sourceColor, kind};
-        Externals_.push_back({externalBase + 2 * index, sink});
-        Externals_.push_back({externalBase + 2 * index + 1, source});
+    auto addCut = [&](size_t index, const TCut& cut) {
+        Cuts_[index] = cut;
+        Externals_.push_back({externalBase + 2 * index, cut.Sink});
+        Externals_.push_back({externalBase + 2 * index + 1, cut.Source});
     };
     // A split's new edges take the place of its first edge.
     for (auto& edge : Edges_) {
         if (auto it = splits.find(edge.get()); it != splits.end()) {
             const auto index = it->second;
             if (!Cuts_[index].Sink) {
-                auto& split = plan.Splits[index];
-                const auto [sink, source] = Cut(*this, split, edges, colors);
-                addCut(index, sink, source, split.SinkColor, split.SourceColor, ETaskEdgeKind::Rowset);
+                addCut(index, Cut(*this, plan.Splits[index], edges, colors));
             }
         } else if (auto found = dependencySplits.find(edge.get()); found != dependencySplits.end()) {
             const auto index = found->second;
             if (!Cuts_[index].Sink) {
-                auto& split = plan.DependencySplits[index - plan.Splits.size()];
-                const auto [sink, source] = CutDependencies(*this, split, edges, colors);
-                addCut(index, sink, source, split.SinkColor, split.SourceColor, ETaskEdgeKind::Dependency);
+                addCut(index, CutDependencies(*this, plan.DependencySplits[index - plan.Splits.size()], edges, colors));
             }
         } else {
             edges.push_back(std::move(edge));

@@ -3235,6 +3235,66 @@ bool RecordCteCut(TLoweredPlan& lowered, const TCut& cut) {
     return true;
 }
 
+// The records of a cut through a relay. The sender, with an output per
+// partition, moves the outputs of the relay's partitions to the sink; the
+// relay, a copy of the sender, routes those partitions to their consumers.
+void RecordRelayCut(TLoweredPlan& lowered, const TCut& cut) {
+    auto& records = lowered.NodeSpecs;
+    const auto& graph = *lowered.Graph;
+    const auto& toSink = *cut.Sink->Inbound.front();
+    const auto& toRelay = *cut.Relay->Inbound.front();
+    const auto sinkPort = PortSpec(graph, toSink.Connection, toSink.SrcLane);
+    const auto relayPort = PortSpec(graph, toRelay.Connection, toRelay.DstLane);
+    records[cut.Sink->ExecutionSlot] = TNodeSpec{
+        .DebugKind = cut.Sink->DebugKind,
+        .Body = TRemoteSinkNode{.In = sinkPort},
+    };
+    records[cut.Source->ExecutionSlot] = TNodeSpec{
+        .DebugKind = cut.Source->DebugKind,
+        .Body = TRemoteSourceNode{.Out = relayPort},
+    };
+
+    std::set<std::pair<uint32_t, uint32_t>> relayed;
+    for (const auto* edge : cut.Relay->Outbound) {
+        const auto port = PortSpec(graph, edge->Connection, edge->SrcLane);
+        relayed.emplace(port.Connection, port.Lane);
+    }
+    auto& sender = std::get<THashShuffleNode>(records[toSink.Src->ExecutionSlot].value().Body);
+    auto relay = records[toSink.Src->ExecutionSlot].value();
+    auto& body = std::get<THashShuffleNode>(relay.Body);
+    body.In = relayPort;
+    body.Out.clear();
+    body.Routes.assign(sender.Out.size(), THashShuffleNode::NoRoute);
+    // The relay recomputes the hash and publishes no filter of its own.
+    body.UseInputHash = false;
+    body.ProducedFilter.reset();
+    for (size_t partition = 0; partition < sender.Out.size(); ++partition) {
+        auto& port = sender.Out[partition];
+        if (relayed.contains({port.Connection, port.Lane})) {
+            body.Routes[partition] = static_cast<uint32_t>(body.Out.size());
+            body.Out.push_back(port);
+            port = sinkPort;
+        }
+    }
+    records[cut.Relay->ExecutionSlot] = std::move(relay);
+}
+
+// The outputs of a shuffle with an output per partition that share a port
+// merge into one, which their partitions route to.
+void MergeSharedOutputs(THashShuffleNode& shuffle) {
+    std::map<std::pair<uint32_t, uint32_t>, uint32_t> outputs;
+    std::vector<TPortSpec> out;
+    for (const auto& port : shuffle.Out) {
+        const auto [it, added] = outputs.try_emplace(
+            {port.Connection, port.Lane}, static_cast<uint32_t>(out.size()));
+        if (added) {
+            out.push_back(port);
+        }
+        shuffle.Routes.push_back(it->second);
+    }
+    shuffle.Out = std::move(out);
+}
+
 } // namespace
 
 TSealedTaskGraph ApplySplit(TLoweredPlan& lowered, TSplitPlan&& plan) {
@@ -3247,7 +3307,14 @@ TSealedTaskGraph ApplySplit(TLoweredPlan& lowered, TSplitPlan&& plan) {
     auto& records = lowered.NodeSpecs;
     records.resize(graph.Nodes().size());
     const auto cuts = graph.Cuts();
+    // The shuffles that send through a relay, by slot.
+    std::set<size_t> senders;
     for (size_t i = 0; i < cuts.size(); ++i) {
+        if (cuts[i].Relay) {
+            RecordRelayCut(lowered, cuts[i]);
+            senders.insert(cuts[i].Sink->Inbound.front()->Src->ExecutionSlot);
+            continue;
+        }
         if (cuts[i].Kind == ETaskEdgeKind::Dependency) {
             // A dependency cut carries the filter of the tasks its source wakes.
             const auto& probe = *cuts[i].Source->Outbound.front()->Dst;
@@ -3298,6 +3365,9 @@ TSealedTaskGraph ApplySplit(TLoweredPlan& lowered, TSplitPlan&& plan) {
                     "split plan: the record of task n{} has no port to rebind", task.ExecutionSlot));
             }
         }
+    }
+    for (const auto slot : senders) {
+        MergeSharedOutputs(std::get<THashShuffleNode>(records[slot]->Body));
     }
     return sealed;
 }

@@ -71,8 +71,8 @@ See [logical planning](docs/arch/logical_plan_build.md),
 `qdbd` ([qdbd/](qdbd/)) is the QumirDB daemon: run one per node. The node
 that gets a query plans it, compiles the kernels once, splits the task graph
 into one fragment per node, and sends the fragments and the compiled code to
-the nodes. Every edge between two fragments becomes a sink/source pair, and
-rows stream between the nodes through it.
+the nodes. Edges between two fragments become sink/source pairs, and rows
+stream between the nodes through them.
 
 ```mermaid
 flowchart LR

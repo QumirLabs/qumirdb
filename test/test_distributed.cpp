@@ -3257,6 +3257,60 @@ TEST(DistributedScheduler, SplitsALoweredPlanIntoFragmentSpecs) {
     EXPECT_EQ(externals, 2 * cuts.size());
 }
 
+// The partitions of one shuffle lane in another fragment cross in one stream:
+// the lane routes them to one sink, and a relay there routes them to their
+// consumers by the same hash and partition count.
+TEST(DistributedScheduler, SplitsEachShuffleLaneIntoOneStreamPerFragment) {
+    using namespace NQdb::NScheduler;
+    TParquetSource source(DecimalsPath);
+    TSettings settings;
+    settings.Scheduler.WorkerCount = 8;
+    settings.ScanSplit.Strategy = EScanSplitStrategy::RowGroupRange;
+    settings.ScanSplit.MaxScanTasks = 4;
+    auto lowered = LowerSql("SELECT a.id, b.id AS bid FROM t a JOIN t b ON a.id = b.id WHERE a.id % 5 = 0",
+        source, settings);
+    TNoSink sink;
+    AttachSink(lowered, sink);
+    TPartitioner partitioner(lowered.Graph->Seal(), 3);
+    partitioner.Do();
+    // The partition count of each shuffle lane, by slot.
+    std::map<size_t, size_t> partitions;
+    for (size_t slot = 0; slot < lowered.NodeSpecs.size(); ++slot) {
+        const auto& record = lowered.NodeSpecs[slot];
+        if (const auto* shuffle = record ? std::get_if<THashShuffleNode>(&record->Body) : nullptr) {
+            partitions.emplace(slot, shuffle->Out.size());
+        }
+    }
+    const auto split = ApplySplit(lowered, partitioner.TakePlan());
+
+    std::set<std::pair<const TTaskNode*, int>> streams;
+    size_t relays = 0;
+    for (const auto& cut : split.Cuts()) {
+        const auto* lane = cut.Sink->Inbound.front()->Src;
+        if (cut.Kind != ETaskEdgeKind::Rowset || !partitions.contains(lane->ExecutionSlot)) {
+            continue;
+        }
+        EXPECT_TRUE(streams.emplace(lane, cut.SourceColor).second) << "lane n" << lane->ExecutionSlot;
+        if (!cut.Relay) {
+            continue;
+        }
+        ++relays;
+        const auto& sender = std::get<THashShuffleNode>(lowered.NodeSpecs[lane->ExecutionSlot]->Body);
+        const auto& relay = std::get<THashShuffleNode>(lowered.NodeSpecs[cut.Relay->ExecutionSlot]->Body);
+        const auto toSink = std::get<TRemoteSinkNode>(lowered.NodeSpecs[cut.Sink->ExecutionSlot]->Body).In;
+        ASSERT_EQ(sender.Routes.size(), partitions.at(lane->ExecutionSlot));
+        ASSERT_EQ(relay.Routes.size(), sender.Routes.size());
+        EXPECT_EQ(relay.Out.size(), cut.Relay->Outbound.size());
+        EXPECT_FALSE(relay.ProducedFilter);
+        EXPECT_FALSE(relay.UseInputHash);
+        for (size_t partition = 0; partition < relay.Routes.size(); ++partition) {
+            EXPECT_EQ(relay.Routes[partition] != THashShuffleNode::NoRoute,
+                sender.Out.at(sender.Routes[partition]) == toSink) << partition;
+        }
+    }
+    EXPECT_GT(relays, 0u);
+}
+
 namespace {
 
 // Plays the client of a query actor: keeps its answer.
@@ -3305,11 +3359,9 @@ struct TDecimalsCompiler {
     }
 };
 
-// The CSV rows of `sql` run in this process.
-std::string RunLocally(const std::string& sql, const NQdb::NScheduler::TSettings& settings)
+// The plan of `sql`, as the query actor prepares it.
+TOperatorPtr PlanQuery(TDecimalsCompiler& compiler, const std::string& sql)
 {
-    using namespace NQdb::NScheduler;
-    TDecimalsCompiler compiler;
     std::istringstream input(sql);
     auto parsed = compiler.Compiler.Parse(input);
     if (!parsed) {
@@ -3319,7 +3371,16 @@ std::string RunLocally(const std::string& sql, const NQdb::NScheduler::TSettings
     if (!prepared || !*prepared) {
         throw std::runtime_error("cannot prepare " + sql);
     }
-    auto lowered = LowerPlanToGraph((*prepared)->Plan, settings, nullptr);
+    return (*prepared)->Plan;
+}
+
+// The CSV rows of `sql` run in this process.
+std::string RunLocally(const std::string& sql, const NQdb::NScheduler::TSettings& settings)
+{
+    using namespace NQdb::NScheduler;
+    TDecimalsCompiler compiler;
+    const auto plan = PlanQuery(compiler, sql);
+    auto lowered = LowerPlanToGraph(plan, settings, nullptr);
     FinalizeKernels(lowered.Kernels, settings.Kernel.Backend);
     std::vector<TColumnSchema> columns;
     for (const auto& [name, type] : static_cast<const NQumir::NAst::TStructType&>(*lowered.OutputType).Fields) {
@@ -3333,6 +3394,24 @@ std::string RunLocally(const std::string& sql, const NQdb::NScheduler::TSettings
         throw std::runtime_error(error);
     }
     return out.str();
+}
+
+// The cuts through a relay when the query actor plans `sql` for `width`
+// workers and splits it over the two nodes of a TQueryCluster.
+size_t RelayCuts(TDecimalsCompiler& compiler, const std::string& sql,
+    NQdb::NScheduler::TSettings settings, size_t width)
+{
+    using namespace NQdb::NScheduler;
+    settings.Scheduler.WorkerCount = width;
+    const auto plan = PlanQuery(compiler, sql);
+    auto lowered = LowerPlanToGraph(plan, settings, nullptr);
+    AttachRemoteSink(lowered);
+    TPartitioner partitioner(lowered.Graph->Seal(), 2);
+    partitioner.Do();
+    const auto split = ApplySplit(lowered, partitioner.TakePlan());
+    return std::ranges::count_if(split.Cuts(), [](const TCut& cut) {
+        return cut.Relay != nullptr;
+    });
 }
 
 } // namespace
@@ -3707,6 +3786,33 @@ TEST(DistributedScheduler, QueryActorRunsRuntimeFiltersAcrossNodes) {
             SCOPED_TRACE(sql + " width " + std::to_string(width.value_or(2)));
             std::vector<std::string> log;
             const auto answer = cluster.Run(compiler, sql, width, log);
+            ASSERT_TRUE(answer);
+            ASSERT_TRUE(answer->Response) << answer->Response.error().ToString();
+            EXPECT_TRUE(std::ranges::contains(log, std::string("Query: started 2 fragments")));
+            EXPECT_EQ(*answer->Response, RunLocally(sql, cluster.Settings));
+        }
+    }
+}
+
+// With more partitions than nodes, a shuffle lane has several partitions on
+// the other node: they cross through one relay, which routes them to their
+// consumers, with and without the lane's runtime filter.
+TEST(DistributedScheduler, QueryActorRunsShufflesThroughRelays) {
+    TQueryCluster cluster;
+    cluster.Settings.HashShuffle.PartitionCount = 4;
+    ASSERT_NO_FATAL_FAILURE(cluster.Start());
+    for (const auto& options : {WithoutRuntimeFilters, WithRuntimeFilters}) {
+        TDecimalsCompiler compiler(options);
+        for (const std::string sql : {
+                 std::string("SELECT id % 7 AS k, COUNT(*) AS n, SUM(d15) AS total, MIN(s) AS lo FROM t "
+                     "WHERE id % 3 <> 0 GROUP BY id % 7 ORDER BY k"),
+                 std::string(RuntimeFilterJoinSql),
+                 std::string("SELECT id, d9 FROM t WHERE id IN (SELECT id FROM t WHERE id % 7 = 0) ORDER BY id"),
+             }) {
+            SCOPED_TRACE(sql);
+            EXPECT_GT(RelayCuts(compiler, sql, cluster.Settings, 4), 0u);
+            std::vector<std::string> log;
+            const auto answer = cluster.Run(compiler, sql, 4, log);
             ASSERT_TRUE(answer);
             ASSERT_TRUE(answer->Response) << answer->Response.error().ToString();
             EXPECT_TRUE(std::ranges::contains(log, std::string("Query: started 2 fragments")));
