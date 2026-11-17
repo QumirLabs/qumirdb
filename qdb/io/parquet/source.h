@@ -112,8 +112,11 @@ private:
         const std::unordered_set<std::string>* columnNames = nullptr) const;
     std::vector<NScheduler::TScanRowGroup> ScanRowGroupsForColumns(
         const std::unordered_set<std::string>* columnNames) const;
+
+    void SelectColumns();
     void RefreshSchema();
     bool RowIdRequested() const;
+    void EnsureOpen();
 
     std::shared_ptr<TParquetFileData> File_;
     // nullopt means the full file; an engaged empty vector is an empty scan.
