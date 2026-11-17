@@ -3359,11 +3359,9 @@ struct TDecimalsCompiler {
     }
 };
 
-// The CSV rows of `sql` run in this process.
-std::string RunLocally(const std::string& sql, const NQdb::NScheduler::TSettings& settings)
+// The plan of `sql`, as the query actor prepares it.
+TOperatorPtr PlanQuery(TDecimalsCompiler& compiler, const std::string& sql)
 {
-    using namespace NQdb::NScheduler;
-    TDecimalsCompiler compiler;
     std::istringstream input(sql);
     auto parsed = compiler.Compiler.Parse(input);
     if (!parsed) {
@@ -3373,7 +3371,16 @@ std::string RunLocally(const std::string& sql, const NQdb::NScheduler::TSettings
     if (!prepared || !*prepared) {
         throw std::runtime_error("cannot prepare " + sql);
     }
-    auto lowered = LowerPlanToGraph((*prepared)->Plan, settings, nullptr);
+    return (*prepared)->Plan;
+}
+
+// The CSV rows of `sql` run in this process.
+std::string RunLocally(const std::string& sql, const NQdb::NScheduler::TSettings& settings)
+{
+    using namespace NQdb::NScheduler;
+    TDecimalsCompiler compiler;
+    const auto plan = PlanQuery(compiler, sql);
+    auto lowered = LowerPlanToGraph(plan, settings, nullptr);
     FinalizeKernels(lowered.Kernels, settings.Kernel.Backend);
     std::vector<TColumnSchema> columns;
     for (const auto& [name, type] : static_cast<const NQumir::NAst::TStructType&>(*lowered.OutputType).Fields) {
@@ -3387,6 +3394,24 @@ std::string RunLocally(const std::string& sql, const NQdb::NScheduler::TSettings
         throw std::runtime_error(error);
     }
     return out.str();
+}
+
+// The cuts through a relay when the query actor plans `sql` for `width`
+// workers and splits it over the two nodes of a TQueryCluster.
+size_t RelayCuts(TDecimalsCompiler& compiler, const std::string& sql,
+    NQdb::NScheduler::TSettings settings, size_t width)
+{
+    using namespace NQdb::NScheduler;
+    settings.Scheduler.WorkerCount = width;
+    const auto plan = PlanQuery(compiler, sql);
+    auto lowered = LowerPlanToGraph(plan, settings, nullptr);
+    AttachRemoteSink(lowered);
+    TPartitioner partitioner(lowered.Graph->Seal(), 2);
+    partitioner.Do();
+    const auto split = ApplySplit(lowered, partitioner.TakePlan());
+    return std::ranges::count_if(split.Cuts(), [](const TCut& cut) {
+        return cut.Relay != nullptr;
+    });
 }
 
 } // namespace
@@ -3761,6 +3786,33 @@ TEST(DistributedScheduler, QueryActorRunsRuntimeFiltersAcrossNodes) {
             SCOPED_TRACE(sql + " width " + std::to_string(width.value_or(2)));
             std::vector<std::string> log;
             const auto answer = cluster.Run(compiler, sql, width, log);
+            ASSERT_TRUE(answer);
+            ASSERT_TRUE(answer->Response) << answer->Response.error().ToString();
+            EXPECT_TRUE(std::ranges::contains(log, std::string("Query: started 2 fragments")));
+            EXPECT_EQ(*answer->Response, RunLocally(sql, cluster.Settings));
+        }
+    }
+}
+
+// With more partitions than nodes, a shuffle lane has several partitions on
+// the other node: they cross through one relay, which routes them to their
+// consumers, with and without the lane's runtime filter.
+TEST(DistributedScheduler, QueryActorRunsShufflesThroughRelays) {
+    TQueryCluster cluster;
+    cluster.Settings.HashShuffle.PartitionCount = 4;
+    ASSERT_NO_FATAL_FAILURE(cluster.Start());
+    for (const auto& options : {WithoutRuntimeFilters, WithRuntimeFilters}) {
+        TDecimalsCompiler compiler(options);
+        for (const std::string sql : {
+                 std::string("SELECT id % 7 AS k, COUNT(*) AS n, SUM(d15) AS total, MIN(s) AS lo FROM t "
+                     "WHERE id % 3 <> 0 GROUP BY id % 7 ORDER BY k"),
+                 std::string(RuntimeFilterJoinSql),
+                 std::string("SELECT id, d9 FROM t WHERE id IN (SELECT id FROM t WHERE id % 7 = 0) ORDER BY id"),
+             }) {
+            SCOPED_TRACE(sql);
+            EXPECT_GT(RelayCuts(compiler, sql, cluster.Settings, 4), 0u);
+            std::vector<std::string> log;
+            const auto answer = cluster.Run(compiler, sql, 4, log);
             ASSERT_TRUE(answer);
             ASSERT_TRUE(answer->Response) << answer->Response.error().ToString();
             EXPECT_TRUE(std::ranges::contains(log, std::string("Query: started 2 fragments")));
