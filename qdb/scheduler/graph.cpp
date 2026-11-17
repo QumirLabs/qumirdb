@@ -295,6 +295,7 @@ TTaskNode* TSealedTaskGraph::ExternalNode(uint64_t id) const {
 IConnection& TTaskGraph::AddConnection(std::unique_ptr<IConnection> connection) {
     CheckMutable();
     auto* ptr = connection.get();
+    connection->SetId(OwnedConnections_.size());
     OwnedConnections_.push_back(std::move(connection));
     return *ptr;
 }
@@ -622,12 +623,6 @@ void TTaskGraph::Print(std::ostream& out) const {
         nodeIds.emplace(Nodes_[i].get(), i);
     }
 
-    std::unordered_map<const IConnection*, size_t> connectionIds;
-    connectionIds.reserve(OwnedConnections_.size());
-    for (size_t i = 0; i < OwnedConnections_.size(); ++i) {
-        connectionIds.emplace(OwnedConnections_[i].get(), i);
-    }
-
     out << "nodes: " << Nodes_.size()
         << ", edges: " << Edges_.size()
         << ", connections: " << OwnedConnections_.size() << "\n";
@@ -671,12 +666,18 @@ void TTaskGraph::Print(std::ostream& out) const {
                 << " -> n" << nodeIds[edge->Dst] << "\n";
             continue;
         }
+        auto maybeId = edge->Connection->Id();
         out << "edge e" << i
             << " n" << nodeIds[edge->Src]
             << "[" << edge->SrcLane << "] -> n"
             << nodeIds[edge->Dst]
-            << "[" << edge->DstLane << "] via c"
-            << connectionIds[edge->Connection] << "\n";
+            << "[" << edge->DstLane << "] via c";
+        if (!maybeId) {
+            out << "?";
+        } else {
+            out << *maybeId;
+        }
+        out << "\n";
     }
 }
 
