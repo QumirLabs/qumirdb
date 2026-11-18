@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "mock_source.h"
 
 #include <qdb/io/parquet/source.h>
 #include <qdb/exec/planner_helpers.h>
@@ -161,7 +162,7 @@ TEST(StatsTest, FractionBelowStrictExcludesTheValue) {
     EXPECT_DOUBLE_EQ(top.FractionBelow<int64_t>(10, true).value(), 0.5);
 }
 
-// --- TParquetSource::Stats(): row count + standard column stats --------------
+// --- TParquetFile::Stats(): row count + standard column stats --------------
 
 TEST(StatsTest, ParquetStandardStats) {
     const std::string path = "/tmp/test_stats_qdb.parquet";
@@ -188,7 +189,7 @@ TEST(StatsTest, ParquetStandardStats) {
     });
     WriteParquet(path, batch);
 
-    NQdb::TParquetSource source(path);
+    NQdb::TParquetFile source(path);
     auto st = source.Stats();
     ASSERT_TRUE(st != nullptr);          // always present: parquet carries num_rows
     EXPECT_EQ(st->RowCount, 4u);
@@ -218,10 +219,10 @@ TEST(StatsTest, ParquetRowGroupPredicateUsesPerGroupBounds) {
         schema, 6, {x.Finish().ValueOrDie()});
     WriteParquet(path, batch, /*rowGroupRows*/ 2);
 
-    NQdb::TParquetSource source(path);
+    NQdb::TParquetFile source(path);
     ASSERT_EQ(source.ScanRowGroups().size(), 3u);
     NQdb::TOperatorPtr sourceOp =
-        std::make_shared<NQdb::TSourceOperator>(source, path);
+        std::make_shared<NQdb::TSourceOperator>(Borrow(source), path);
 
     auto filter = NQdb::MakeFilter(sourceOp, "(> x 50)");
     ASSERT_TRUE(filter.has_value()) << filter.error().ToString();
@@ -247,7 +248,7 @@ TEST(StatsTest, ParquetRowGroupPredicateUsesPerGroupBounds) {
         NQdb::TMaybeOp<NQdb::TFilterOperator>(*impossible).Cast();
     EXPECT_TRUE(source.PruneRowGroups(impossibleFilter->Predicate(), "").empty());
 
-    auto emptySource = source.File().MakeSource(std::vector<int>{}, source.RestrictedColumns());
+    auto emptySource = source.MakeSource(std::vector<int>{}, std::nullopt);
     NQdb::TRowSet rowSet{};
     EXPECT_FALSE(emptySource->Next(rowSet));
 }
@@ -260,27 +261,19 @@ TEST(StatsTest, ParquetRowGroupPredicateUsesPerGroupBounds) {
 
 namespace {
 
-// Source with known column statistics (bare column names, like TParquetSource).
+// Source with known column statistics (bare column names, like TParquetFile).
 // Each column is i64 with a uniform histogram over [0,1000); ndv is per-column.
-struct TStatsSource : NQdb::ISource {
-    std::vector<std::string> NameStore;         // owns the strings TColumnSchema views
-    std::vector<NQdb::TColumnSchema> Cols;      // span target for TSchema
-    NQdb::TSchema Schema_;
+struct TStatsSource : NQdb::TMockSource {
     NQdb::TStatsPtr Stats_;
 
     explicit TStatsSource(
         std::vector<std::pair<std::string, uint64_t>> cols = {{"x", 100}},
         uint64_t rowCount = 1000)
+        : TMockSource(ColumnNames(cols))
     {
-        using NQumir::NAst::TIntegerType;
         Stats_ = std::make_shared<TStats>();
         Stats_->RowCount = rowCount;
-        NameStore.reserve(cols.size());                     // no realloc: views stay valid
-        for (const auto& [name, ndv] : cols) {
-            NameStore.push_back(name);
-        }
         for (size_t i = 0; i < cols.size(); ++i) {
-            Cols.push_back({NameStore[i], std::make_shared<TIntegerType>(TIntegerType::I64)});
             auto cs = std::make_shared<TColumnStats>();
             cs->Ndv = cols[i].second;
             cs->MinValue = std::bit_cast<uint64_t>(int64_t{0});
@@ -288,21 +281,29 @@ struct TStatsSource : NQdb::ISource {
             for (int64_t v = 0; v <= 1000; v += 10) {       // uniform, 100 buckets
                 cs->Histogram.push_back(std::bit_cast<uint64_t>(v));
             }
-            Stats_->ColumnStats[NameStore[i]] = std::move(cs); // bare name
+            Stats_->ColumnStats[Names[i]] = std::move(cs); // bare name
         }
-        Schema_ = NQdb::TSchema{Cols};
     }
 
-    const NQdb::TSchema& Schema() const override { return Schema_; }
     const NQdb::TStatsPtr Stats() const override { return Stats_; }
-    bool Next(NQdb::TRowSet&) override { return false; }
+
+private:
+    static std::vector<std::string> ColumnNames(
+        const std::vector<std::pair<std::string, uint64_t>>& cols)
+    {
+        std::vector<std::string> names;
+        for (const auto& [name, ndv] : cols) {
+            names.push_back(name);
+        }
+        return names;
+    }
 };
 
 } // namespace
 
 TEST(StatsTest, FilterSelectivityPropagation) {
     TStatsSource src;
-    auto sourceOp = std::make_shared<NQdb::TSourceOperator>(src, "t");
+    auto sourceOp = std::make_shared<NQdb::TSourceOperator>(Borrow(src), "t");
     NQdb::TOperatorPtr plan = sourceOp;
 
     auto filter = NQdb::MakeFilter(plan, "(< x 250)");
@@ -334,7 +335,7 @@ protected:
     // Row estimate of the filters stacked on the source, innermost first. No
     // pushdown runs, so the filters stay separate.
     uint64_t Rows(std::initializer_list<const char*> predicates) {
-        NQdb::TOperatorPtr plan = std::make_shared<NQdb::TSourceOperator>(Src, "t");
+        NQdb::TOperatorPtr plan = std::make_shared<NQdb::TSourceOperator>(Borrow(Src), "t");
         for (const char* predicate : predicates) {
             auto filter = NQdb::MakeFilter(plan, predicate);
             EXPECT_TRUE(filter.has_value()) << filter.error().ToString();
@@ -368,7 +369,7 @@ TEST_F(NullCountStats, NullCountAppliesOnlyAboveTheSource) {
 
 TEST(StatsTest, AggregateStatsAccountForGroupingSets) {
     TStatsSource src({{"x", 100}, {"y", 100}}, 100);
-    auto input = std::make_shared<NQdb::TSourceOperator>(src, "");
+    auto input = std::make_shared<NQdb::TSourceOperator>(Borrow(src), "");
     input->SetAlias("t");
     auto aggregate = std::make_shared<NQdb::TAggregateOperator>(
         input, std::vector<std::string>{"t.x", "t.y"},
@@ -387,7 +388,7 @@ TEST(StatsTest, AggregateStatsAccountForGroupingSets) {
 
 TEST(StatsTest, AggregateInitialCapacityUsesNdvAndPartitionCount) {
     TStatsSource src({{"x", 100}}, 1000);
-    auto input = std::make_shared<NQdb::TSourceOperator>(src, "t");
+    auto input = std::make_shared<NQdb::TSourceOperator>(Borrow(src), "t");
     input->Stats_ = src.Stats_;
     NQdb::TAggregateOperator aggregate(input, {"x"}, {});
 
@@ -428,7 +429,7 @@ TEST(StatsTest, AggregateInitialCapacityUsesNdvAndPartitionCount) {
 
 TEST(StatsTest, AggregateGroupCountUsesNdvProductAndRowCountCap) {
     TStatsSource src({{"x", 100}, {"y", 20}}, 1000);
-    auto input = std::make_shared<NQdb::TSourceOperator>(src, "t");
+    auto input = std::make_shared<NQdb::TSourceOperator>(Borrow(src), "t");
     input->Stats_ = src.Stats_;
 
     NQdb::TAggregateOperator product(input, {"x", "y"}, {});
@@ -443,7 +444,7 @@ TEST(StatsTest, AggregateGroupCountUsesNdvProductAndRowCountCap) {
 
 TEST(StatsTest, AggregatePartitionsExpandForLargeFixedWidthCardinality) {
     TStatsSource src({{"x", 100'000'000}}, 100'000'000);
-    auto input = std::make_shared<NQdb::TSourceOperator>(src, "t");
+    auto input = std::make_shared<NQdb::TSourceOperator>(Borrow(src), "t");
     input->Stats_ = src.Stats_;
     NQdb::TAggregateOperator aggregate(input, {"x"}, {});
 
@@ -462,14 +463,14 @@ TEST(StatsTest, AggregatePartitionsKeepBaseForUncertainOrCheapCases) {
     settings.Scheduler.WorkerCount = 18;
 
     TStatsSource lowGroups({{"x", 1000}}, 100'000'000);
-    auto lowInput = std::make_shared<NQdb::TSourceOperator>(lowGroups, "t");
+    auto lowInput = std::make_shared<NQdb::TSourceOperator>(Borrow(lowGroups), "t");
     lowInput->Stats_ = lowGroups.Stats_;
     NQdb::TAggregateOperator lowAggregate(lowInput, {"x"}, {});
     EXPECT_EQ(NQdb::NScheduler::ChooseAggregatePartitionCount(
         lowAggregate, 32, settings), 9);
 
     TStatsSource filtered({{"x", 30'000'000}}, 30'000'000);
-    auto filteredInput = std::make_shared<NQdb::TSourceOperator>(filtered, "t");
+    auto filteredInput = std::make_shared<NQdb::TSourceOperator>(Borrow(filtered), "t");
     filteredInput->Stats_ = filtered.Stats_;
     NQdb::TAggregateOperator filteredAggregate(filteredInput, {"x"}, {});
     EXPECT_EQ(NQdb::NScheduler::ChooseAggregatePartitionCount(
@@ -477,7 +478,7 @@ TEST(StatsTest, AggregatePartitionsKeepBaseForUncertainOrCheapCases) {
 
     TStatsSource strings({{"x", 100'000'000}}, 100'000'000);
     strings.Cols[0].Type = std::make_shared<NQumir::NAst::TStringType>();
-    auto stringInput = std::make_shared<NQdb::TSourceOperator>(strings, "t");
+    auto stringInput = std::make_shared<NQdb::TSourceOperator>(Borrow(strings), "t");
     stringInput->Stats_ = strings.Stats_;
     NQdb::TAggregateOperator stringAggregate(stringInput, {"x"}, {});
     EXPECT_EQ(NQdb::NScheduler::ChooseAggregatePartitionCount(
@@ -486,7 +487,7 @@ TEST(StatsTest, AggregatePartitionsKeepBaseForUncertainOrCheapCases) {
 
 TEST(StatsTest, ExplicitShufflePartitionsOverrideAggregateHeuristic) {
     TStatsSource src({{"x", 100'000'000}}, 100'000'000);
-    auto input = std::make_shared<NQdb::TSourceOperator>(src, "t");
+    auto input = std::make_shared<NQdb::TSourceOperator>(Borrow(src), "t");
     input->Stats_ = src.Stats_;
     NQdb::TAggregateOperator aggregate(input, {"x"}, {});
 
@@ -502,21 +503,21 @@ TEST(StatsTest, PartialAggregateRequiresLargeEstimatedReduction) {
     NQdb::NScheduler::TSettings settings;
 
     TStatsSource useful({{"x", 10'000'000}}, 100'000'000);
-    auto usefulInput = std::make_shared<NQdb::TSourceOperator>(useful, "t");
+    auto usefulInput = std::make_shared<NQdb::TSourceOperator>(Borrow(useful), "t");
     usefulInput->Stats_ = useful.Stats_;
     NQdb::TAggregateOperator usefulAggregate(usefulInput, {"x"}, {});
     EXPECT_TRUE(NQdb::NScheduler::ShouldUsePartialAggregate(
         usefulAggregate, settings));
 
     TStatsSource weak({{"x", 30'000'000}}, 100'000'000);
-    auto weakInput = std::make_shared<NQdb::TSourceOperator>(weak, "t");
+    auto weakInput = std::make_shared<NQdb::TSourceOperator>(Borrow(weak), "t");
     weakInput->Stats_ = weak.Stats_;
     NQdb::TAggregateOperator weakAggregate(weakInput, {"x"}, {});
     EXPECT_FALSE(NQdb::NScheduler::ShouldUsePartialAggregate(
         weakAggregate, settings));
 
     TStatsSource small({{"x", 10}}, 1000);
-    auto smallInput = std::make_shared<NQdb::TSourceOperator>(small, "t");
+    auto smallInput = std::make_shared<NQdb::TSourceOperator>(Borrow(small), "t");
     smallInput->Stats_ = small.Stats_;
     NQdb::TAggregateOperator smallAggregate(smallInput, {"x"}, {});
     EXPECT_FALSE(NQdb::NScheduler::ShouldUsePartialAggregate(
@@ -532,7 +533,7 @@ TEST(StatsTest, PartialAggregateWithoutUsableEstimateDecidesAtRunTime) {
 
     // No statistics for the key: the partial aggregate judges its reduction.
     TStatsSource unknown({{"x", 10'000'000}}, 100'000'000);
-    auto unknownInput = std::make_shared<NQdb::TSourceOperator>(unknown, "t");
+    auto unknownInput = std::make_shared<NQdb::TSourceOperator>(Borrow(unknown), "t");
     unknownInput->Stats_ = unknown.Stats_;
     NQdb::TAggregateOperator unknownAggregate(unknownInput, {"y"}, {});
     EXPECT_TRUE(NQdb::NScheduler::ShouldUsePartialAggregate(
@@ -541,7 +542,7 @@ TEST(StatsTest, PartialAggregateWithoutUsableEstimateDecidesAtRunTime) {
     // The product of two key NDVs reaches the row count: an estimate, so the
     // plan rule decides, and it promises no reduction.
     TStatsSource saturated({{"x", 11'000'000}, {"y", 11'000'000}}, 100'000'000);
-    auto saturatedInput = std::make_shared<NQdb::TSourceOperator>(saturated, "t");
+    auto saturatedInput = std::make_shared<NQdb::TSourceOperator>(Borrow(saturated), "t");
     saturatedInput->Stats_ = saturated.Stats_;
     NQdb::TAggregateOperator saturatedAggregate(saturatedInput, {"x", "y"}, {});
     EXPECT_FALSE(NQdb::NScheduler::ShouldUsePartialAggregate(
@@ -549,7 +550,7 @@ TEST(StatsTest, PartialAggregateWithoutUsableEstimateDecidesAtRunTime) {
 
     // One key with as many values as rows is a unique key: nothing to reduce.
     TStatsSource unique({{"x", 100'000'000}}, 100'000'000);
-    auto uniqueInput = std::make_shared<NQdb::TSourceOperator>(unique, "t");
+    auto uniqueInput = std::make_shared<NQdb::TSourceOperator>(Borrow(unique), "t");
     uniqueInput->Stats_ = unique.Stats_;
     NQdb::TAggregateOperator uniqueAggregate(uniqueInput, {"x"}, {});
     EXPECT_FALSE(NQdb::NScheduler::ShouldUsePartialAggregate(
@@ -558,20 +559,20 @@ TEST(StatsTest, PartialAggregateWithoutUsableEstimateDecidesAtRunTime) {
     // The groups are at least those of the keys with statistics, whatever the
     // key without them adds, so their estimate rules the partial out on its own.
     TStatsSource wideKey({{"x", 30'000'000}}, 100'000'000);
-    auto wideKeyInput = std::make_shared<NQdb::TSourceOperator>(wideKey, "t");
+    auto wideKeyInput = std::make_shared<NQdb::TSourceOperator>(Borrow(wideKey), "t");
     wideKeyInput->Stats_ = wideKey.Stats_;
     NQdb::TAggregateOperator wideKeyAggregate(wideKeyInput, {"x", "y"}, {});
     EXPECT_FALSE(NQdb::NScheduler::ShouldUsePartialAggregate(
         wideKeyAggregate, settings));
     TStatsSource widePair({{"x", 20'000}, {"y", 20'000}}, 100'000'000);
-    auto widePairInput = std::make_shared<NQdb::TSourceOperator>(widePair, "t");
+    auto widePairInput = std::make_shared<NQdb::TSourceOperator>(Borrow(widePair), "t");
     widePairInput->Stats_ = widePair.Stats_;
     NQdb::TAggregateOperator widePairAggregate(widePairInput, {"x", "y", "z"}, {});
     EXPECT_FALSE(NQdb::NScheduler::ShouldUsePartialAggregate(
         widePairAggregate, settings));
     // A narrow known part leaves the decision to the partial phase.
     TStatsSource narrowKey({{"x", 10}}, 100'000'000);
-    auto narrowKeyInput = std::make_shared<NQdb::TSourceOperator>(narrowKey, "t");
+    auto narrowKeyInput = std::make_shared<NQdb::TSourceOperator>(Borrow(narrowKey), "t");
     narrowKeyInput->Stats_ = narrowKey.Stats_;
     NQdb::TAggregateOperator narrowKeyAggregate(narrowKeyInput, {"x", "y"}, {});
     EXPECT_TRUE(NQdb::NScheduler::ShouldUsePartialAggregate(
@@ -579,7 +580,7 @@ TEST(StatsTest, PartialAggregateWithoutUsableEstimateDecidesAtRunTime) {
 
     // A small input is not worth a second phase whatever its keys.
     TStatsSource small({{"x", 10}}, 1000);
-    auto smallInput = std::make_shared<NQdb::TSourceOperator>(small, "t");
+    auto smallInput = std::make_shared<NQdb::TSourceOperator>(Borrow(small), "t");
     smallInput->Stats_ = small.Stats_;
     NQdb::TAggregateOperator smallAggregate(smallInput, {"y"}, {});
     EXPECT_FALSE(NQdb::NScheduler::ShouldUsePartialAggregate(
@@ -592,7 +593,7 @@ TEST(StatsTest, PartialAggregateWithoutUsableEstimateDecidesAtRunTime) {
 
 TEST(StatsTest, AggregateCombineOperatorMergesPartialStates) {
     TStatsSource src({{"k", 10}, {"v", 100}}, 1000);
-    auto input = std::make_shared<NQdb::TSourceOperator>(src, "t");
+    auto input = std::make_shared<NQdb::TSourceOperator>(Borrow(src), "t");
     std::vector<NQdb::TAggregateSpec> aggregates{
         {.Name = "c", .Func = "count", .Arg = nullptr},
         {.Name = "s", .Func = "sum",
@@ -623,7 +624,7 @@ TEST(StatsTest, AggregateCombineOperatorMergesPartialStates) {
 
 TEST(StatsTest, RowGroupHintCollectsNestedFilterChain) {
     TStatsSource src;
-    auto source = std::make_shared<NQdb::TSourceOperator>(src, "t");
+    auto source = std::make_shared<NQdb::TSourceOperator>(Borrow(src), "t");
     auto inner = NQdb::MakeFilter(source, "(> x 10)");
     ASSERT_TRUE(inner.has_value()) << inner.error().ToString();
     auto outer = NQdb::MakeFilter(*inner, "(< x 20)");
@@ -644,7 +645,7 @@ TEST(StatsTest, RowGroupHintCollectsNestedFilterChain) {
 // source column's stats over to the projected (renamed) output column.
 TEST(StatsTest, ProjectStatsPropagation) {
     TStatsSource src;
-    NQdb::TOperatorPtr plan = std::make_shared<NQdb::TSourceOperator>(src, "t");
+    NQdb::TOperatorPtr plan = std::make_shared<NQdb::TSourceOperator>(Borrow(src), "t");
 
     auto project = NQdb::MakeProject(plan, {{"y", "x"}}); // SELECT x AS y
     ASSERT_TRUE(project.has_value()) << project.error().ToString();
@@ -672,8 +673,8 @@ TEST(StatsTest, ProjectStatsPropagation) {
 TEST(StatsTest, JoinKeyNdvCollapse) {
     TStatsSource left({{"x", 100}});
     TStatsSource right({{"y", 10}});
-    auto l = std::make_shared<NQdb::TSourceOperator>(left, "l");
-    auto r = std::make_shared<NQdb::TSourceOperator>(right, "r");
+    auto l = std::make_shared<NQdb::TSourceOperator>(Borrow(left), "l");
+    auto r = std::make_shared<NQdb::TSourceOperator>(Borrow(right), "r");
 
     auto join = NQdb::MakeJoin(l, r, {{"x", "y"}}, NQdb::EJoinType::Inner);
     ASSERT_TRUE(join.has_value()) << join.error().ToString();
@@ -719,13 +720,13 @@ protected:
     // Estimated stats of `dimension JOIN fact ON x = k`, the dimension
     // filtered by `predicate` when there is one.
     NQdb::TStatsPtr Join(const char* predicate = nullptr) {
-        NQdb::TOperatorPtr dimension = std::make_shared<NQdb::TSourceOperator>(Dim, "d");
+        NQdb::TOperatorPtr dimension = std::make_shared<NQdb::TSourceOperator>(Borrow(Dim), "d");
         if (predicate) {
             auto filter = NQdb::MakeFilter(dimension, predicate);
             EXPECT_TRUE(filter.has_value()) << filter.error().ToString();
             dimension = *filter;
         }
-        auto fact = std::make_shared<NQdb::TSourceOperator>(Fact, "f");
+        auto fact = std::make_shared<NQdb::TSourceOperator>(Borrow(Fact), "f");
         auto join = NQdb::MakeJoin(dimension, fact, {{"x", "k"}}, NQdb::EJoinType::Inner);
         EXPECT_TRUE(join.has_value()) << join.error().ToString();
         NQdb::TOperatorPtr plan = *join;
@@ -774,9 +775,9 @@ TEST_F(SharedKeyRangeStats, CappedKeyDropsItsHistogram) {
 // shrink them to the tenth the dimension's histogram would place inside it.
 TEST_F(SharedKeyRangeStats, SelectedKeysAreNotSpreadByTheBaseHistogram) {
     TStatsSource small({{"z", 10}}, 10);
-    NQdb::TOperatorPtr dimension = std::make_shared<NQdb::TSourceOperator>(Dim, "d");
-    NQdb::TOperatorPtr selector = std::make_shared<NQdb::TSourceOperator>(small, "s");
-    NQdb::TOperatorPtr fact = std::make_shared<NQdb::TSourceOperator>(Fact, "f");
+    NQdb::TOperatorPtr dimension = std::make_shared<NQdb::TSourceOperator>(Borrow(Dim), "d");
+    NQdb::TOperatorPtr selector = std::make_shared<NQdb::TSourceOperator>(Borrow(small), "s");
+    NQdb::TOperatorPtr fact = std::make_shared<NQdb::TSourceOperator>(Borrow(Fact), "f");
     auto selected = NQdb::MakeJoin(dimension, selector, {{"y", "z"}}, NQdb::EJoinType::Inner);
     ASSERT_TRUE(selected.has_value()) << selected.error().ToString();
     auto join = NQdb::MakeJoin(*selected, fact, {{"x", "k"}}, NQdb::EJoinType::Inner);
@@ -801,9 +802,9 @@ TEST_F(SharedKeyRangeStats, SelectedKeysAreNotSpreadByTheBaseHistogram) {
 TEST_F(SharedKeyRangeStats, JoinOrderEstimatesKeysAnotherJoinSelected) {
     TStatsSource small({{"z", 10}}, 10);
     std::vector<NQdb::TOperatorPtr> leaves{
-        std::make_shared<NQdb::TSourceOperator>(Dim, "d"),
-        std::make_shared<NQdb::TSourceOperator>(small, "s"),
-        std::make_shared<NQdb::TSourceOperator>(Fact, "f"),
+        std::make_shared<NQdb::TSourceOperator>(Borrow(Dim), "d"),
+        std::make_shared<NQdb::TSourceOperator>(Borrow(small), "s"),
+        std::make_shared<NQdb::TSourceOperator>(Borrow(Fact), "f"),
     };
     for (auto& leaf : leaves) {
         NQdb::AssignSourceAliases(leaf);
@@ -848,8 +849,8 @@ struct TKeyedRelation {
 // Rows of `left JOIN right` on the composite key.
 uint64_t CompositeKeyJoinRows(TKeyedRelation& left, TKeyedRelation& right) {
     auto join = NQdb::MakeJoin(
-        std::make_shared<NQdb::TSourceOperator>(left.Source, left.Name),
-        std::make_shared<NQdb::TSourceOperator>(right.Source, right.Name),
+        std::make_shared<NQdb::TSourceOperator>(Borrow(left.Source), left.Name),
+        std::make_shared<NQdb::TSourceOperator>(Borrow(right.Source), right.Name),
         {{left.Name + "_item", right.Name + "_item"}, {left.Name + "_ticket", right.Name + "_ticket"}},
         NQdb::EJoinType::Inner);
     EXPECT_TRUE(join.has_value()) << join.error().ToString();
@@ -897,7 +898,7 @@ protected:
         Src.Stats_->ColumnStats.at("n")->NullCount = 250;
         Src.Cols[2].Type = std::make_shared<NQumir::NAst::TFloatType>();
         Src.Cols[3].Type = std::make_shared<NQumir::NAst::TFloatType>();
-        Source = std::make_shared<NQdb::TSourceOperator>(Src, "");
+        Source = std::make_shared<NQdb::TSourceOperator>(Borrow(Src), "");
         Source->SetAlias("t");
     }
 
@@ -936,7 +937,7 @@ TEST_F(SelfEqualityStats, FloatColumnKeepsTheGeneralEstimate) {
 // The shape decorrelation leaves under a correlated aggregate (TPC-H Q17).
 TEST_F(SelfEqualityStats, GroupEstimateIsNotCappedBySelfEquality) {
     auto filter = NQdb::MakeFilter(
-        std::make_shared<NQdb::TSourceOperator>(Src, "t"), "(== x x)");
+        std::make_shared<NQdb::TSourceOperator>(Borrow(Src), "t"), "(== x x)");
     ASSERT_TRUE(filter.has_value()) << filter.error().ToString();
     NQdb::TOperatorPtr plan = std::make_shared<NQdb::TAggregateOperator>(
         *filter, std::vector<std::string>{"x"}, std::vector<NQdb::TAggregateSpec>{});

@@ -37,16 +37,16 @@ std::unordered_set<std::string> ColNames(const TTypePtr& type) {
 
 // Parses `sexp` with two-sided source factory: path "L" -> left, else right.
 // Captures the constructed source operators in leftOp/rightOp for inspection.
-TOperatorPtr ParseJoinPlan(const std::string& sexp, ISource& left, ISource& right,
+TOperatorPtr ParseJoinPlan(const std::string& sexp, ITable& left, ITable& right,
     std::shared_ptr<TSourceOperator>& leftOp, std::shared_ptr<TSourceOperator>& rightOp)
 {
     TRelParserOptions opts;
     opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
         if (path == "L") {
-            leftOp = std::make_shared<TSourceOperator>(left, std::string(path));
+            leftOp = std::make_shared<TSourceOperator>(Borrow(left), std::string(path));
             return leftOp;
         }
-        rightOp = std::make_shared<TSourceOperator>(right, std::string(path));
+        rightOp = std::make_shared<TSourceOperator>(Borrow(right), std::string(path));
         return rightOp;
     };
     TParser parser;

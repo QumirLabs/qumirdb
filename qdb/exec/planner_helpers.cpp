@@ -352,13 +352,17 @@ TAggregateTablePlan PlanAggregateTable(
 
 NQumir::NAst::TTypePtr BuildSourceRuntimeType(TSourceOperator& src)
 {
+    const auto& table = src.GetTable();
+    // The narrowed reader's schema is the row the scan emits.
+    std::unique_ptr<ISource> narrowed;
     if (auto requiredColumns = src.RequiredColumns()) {
         std::unordered_set<std::string> cols;
         for (auto& [name, _] : requiredColumns->Fields) {
             auto dot = name.rfind('.');
             cols.insert(dot != std::string::npos ? name.substr(dot + 1) : name);
         }
-        src.GetSource().RestrictColumns(cols);
+        src.RestrictColumns(cols);
+        narrowed = table->MakeSource(std::nullopt, std::move(cols));
     }
 
     auto&& qualSt = src.OutputColumns();
@@ -372,7 +376,8 @@ NQumir::NAst::TTypePtr BuildSourceRuntimeType(TSourceOperator& src)
     }
 
     std::vector<std::pair<std::string, NQumir::NAst::TTypePtr>> fields;
-    for (const auto& col : src.GetSource().Schema().Columns) {
+    const auto& schema = narrowed ? narrowed->Schema() : table->Schema();
+    for (const auto& col : schema.Columns) {
         auto bare = std::string(col.Name);
         auto it = bareToQual.find(bare);
         if (it != bareToQual.end()) {

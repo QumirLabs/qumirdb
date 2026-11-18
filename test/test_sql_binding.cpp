@@ -35,7 +35,7 @@ std::expected<TOperatorPtr, NQumir::TError> Build(
     return BuildPlan(*query, [&](std::string_view name)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
-        return std::make_shared<TSourceOperator>(source, std::string(name));
+        return std::make_shared<TSourceOperator>(Borrow(source), std::string(name));
     }, annotation);
 }
 

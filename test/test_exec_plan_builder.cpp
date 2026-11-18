@@ -39,10 +39,7 @@ using namespace NQdb;
 
 namespace {
 
-class TSplitMockSource final
-    : public TMockSource
-    , public NScheduler::IScanMetadataSource
-{
+class TSplitMockSource final : public TMockSource {
 public:
     using TMockSource::TMockSource;
 
@@ -56,10 +53,7 @@ public:
     }
 };
 
-class TStatsSplitMockSource final
-    : public TMockSource
-    , public NScheduler::IScanMetadataSource
-{
+class TStatsSplitMockSource final : public TMockSource {
 public:
     TStatsSplitMockSource(uint64_t rows, uint64_t ndv)
         : TMockSource({"k"})
@@ -135,7 +129,7 @@ bool HasRuntimeFilterUse(const TOperatorPtr& node) {
 
 TOperatorPtr BuildSqlPlan(
     std::string_view sql,
-    const std::unordered_map<std::string, ISource*>& sources,
+    const std::unordered_map<std::string, ITable*>& sources,
     TPlanPassOptions passes = {.EnableCbo = false})
 {
     std::istringstream input{std::string(sql)};
@@ -154,7 +148,7 @@ TOperatorPtr BuildSqlPlan(
                 NQumir::TError("unknown table: " + std::string(table)));
         }
         return std::make_shared<TSourceOperator>(
-            *it->second, std::string(table));
+            Borrow(*it->second), std::string(table));
     });
     if (!plan) {
         throw std::runtime_error(plan.error().ToString());
@@ -210,7 +204,7 @@ struct TBuiltPlan {
 
 TBuiltPlan Lower(
     std::string_view sql,
-    const std::unordered_map<std::string, ISource*>& sources,
+    const std::unordered_map<std::string, ITable*>& sources,
     NScheduler::TSettings settings)
 {
     auto logical = BuildSqlPlan(sql, sources);
@@ -306,7 +300,7 @@ size_t CountKind(const TExecPlan& plan, EExecPlanNodeKind kind) {
 TEST(ExecPlanBuilder, SingleAndMultiCollapseJoinToSameSemanticDag) {
     TSplitMockSource left({"k", "lv"});
     TSplitMockSource right({"k", "rv"});
-    const std::unordered_map<std::string, ISource*> sources{
+    const std::unordered_map<std::string, ITable*> sources{
         {"l", &left},
         {"r", &right},
     };
@@ -327,7 +321,7 @@ TEST(ExecPlanBuilder, SingleAndMultiCollapseJoinToSameSemanticDag) {
 TEST(ExecPlanBuilder, CostedRuntimeFilterIsPlacedBeforeLowering) {
     TStatsSplitMockSource large(1'000'000, 1'000'000);
     TStatsSplitMockSource small(100'000, 10'000);
-    const std::unordered_map<std::string, ISource*> sources{
+    const std::unordered_map<std::string, ITable*> sources{
         {"l", &large}, {"r", &small},
     };
     auto plan = BuildSqlPlan(
@@ -346,7 +340,7 @@ TEST(ExecPlanBuilder, CostedRuntimeFilterIsPlacedBeforeLowering) {
 TEST(ExecPlanBuilder, LowererUsesInjectedRuntimeFilterBindings) {
     TSplitMockSource left({"k"});
     TSplitMockSource right({"k"});
-    const std::unordered_map<std::string, ISource*> sources{
+    const std::unordered_map<std::string, ITable*> sources{
         {"l", &left},
         {"r", &right},
     };
@@ -386,8 +380,7 @@ TEST(ExecPlanBuilder, LowererUsesInjectedRuntimeFilterBindings) {
         }
     }
     EXPECT_EQ(dependencies, 16u);
-    // The build shuffles publish into the table entry the filter tasks probe;
-    // only the mock sources keep no record.
+    // The build shuffles publish into the table entry the filter tasks probe.
     ASSERT_EQ(lowered.RuntimeFilterBindings.size(), 1u);
     EXPECT_EQ(lowered.RuntimeFilterBindings[0].Id, 17u);
     EXPECT_EQ(lowered.RuntimeFilterBindings[0].ProducerCount, 4u);
@@ -396,7 +389,7 @@ TEST(ExecPlanBuilder, LowererUsesInjectedRuntimeFilterBindings) {
     size_t buildShuffles = 0;
     for (size_t i = 0; i < nodes.size(); ++i) {
         const auto& record = lowered.NodeSpecs[i];
-        ASSERT_EQ(record.has_value(), nodes[i]->DebugKind != "source") << nodes[i]->DebugKind;
+        ASSERT_TRUE(record.has_value()) << nodes[i]->DebugKind;
         if (nodes[i]->DebugLabel == "join-right-repartition") {
             ++buildShuffles;
             const auto& filter = std::get<NScheduler::THashShuffleNode>(record->Body).ProducedFilter;
@@ -427,7 +420,7 @@ TEST(ExecPlanBuilder, LowererUsesInjectedRuntimeFilterBindings) {
 
 TEST(ExecPlanBuilder, RuntimeFilterStaysAfterOneSharedCteReader) {
     TSplitMockSource source({"k", "v"});
-    const std::unordered_map<std::string, ISource*> sources{{"t", &source}};
+    const std::unordered_map<std::string, ITable*> sources{{"t", &source}};
     constexpr std::string_view sql =
         "WITH x AS (SELECT k, v FROM t) "
         "SELECT p.k FROM x p JOIN x q ON p.k = q.k";
@@ -479,7 +472,7 @@ TEST(ExecPlanBuilder, RuntimeFilterStaysAfterOneSharedCteReader) {
 
 TEST(ExecPlanBuilder, RuntimeFiltersShareTheQueryJit) {
     TSplitMockSource left({"k"}), right({"k"}), third({"k"});
-    const std::unordered_map<std::string, ISource*> sources{
+    const std::unordered_map<std::string, ITable*> sources{
         {"l", &left}, {"r", &right}, {"t", &third},
     };
     auto plan = BuildSqlPlan(
@@ -517,7 +510,7 @@ TEST(ExecPlanBuilder, RuntimeFiltersShareTheQueryJit) {
 
 TEST(ExecPlanBuilder, RejectsDuplicateRuntimeFilterProducerIds) {
     TSplitMockSource left({"k"}), right({"k"}), third({"k"});
-    const std::unordered_map<std::string, ISource*> sources{
+    const std::unordered_map<std::string, ITable*> sources{
         {"l", &left}, {"r", &right}, {"t", &third},
     };
     auto plan = BuildSqlPlan(
@@ -537,7 +530,7 @@ TEST(ExecPlanBuilder, RejectsDuplicateRuntimeFilterProducerIds) {
 TEST(ExecPlanBuilder, SingleAndMultiCollapseUnionLanes) {
     TSplitMockSource left({"k"});
     TSplitMockSource right({"k"});
-    const std::unordered_map<std::string, ISource*> sources{
+    const std::unordered_map<std::string, ITable*> sources{
         {"l", &left},
         {"r", &right},
     };
@@ -561,7 +554,7 @@ TEST(ExecPlanBuilder, SingleAndMultiCollapseUnionLanes) {
 TEST(ExecPlanBuilder, CrossJoinResidualPreservesBothInputSchemas) {
     TSplitMockSource left({"lv"});
     TSplitMockSource right({"rv"});
-    const std::unordered_map<std::string, ISource*> sources{
+    const std::unordered_map<std::string, ITable*> sources{
         {"l", &left}, {"r", &right},
     };
     constexpr std::string_view sql =
@@ -593,7 +586,7 @@ TEST(ExecPlanBuilder, CrossJoinResidualPreservesBothInputSchemas) {
 TEST(ExecPlanBuilder, LoweringRecordsSpecsForSupportedNodeKinds) {
     TSplitMockSource left({"lv"});
     TSplitMockSource right({"rv"});
-    const std::unordered_map<std::string, ISource*> sources{
+    const std::unordered_map<std::string, ITable*> sources{
         {"l", &left}, {"r", &right},
     };
     auto plan = BuildSqlPlan(
@@ -610,9 +603,8 @@ TEST(ExecPlanBuilder, LoweringRecordsSpecsForSupportedNodeKinds) {
         const auto& record = lowered.NodeSpecs[i];
         const auto& kind = nodes[i]->DebugKind;
         const bool isForward = kind == "broadcast";
-        // Mock sources are not parquet scans, so they keep no record.
-        const bool recorded = isForward || kind == "sink" || kind == "filter" || kind == "project"
-            || kind == "aggregate" || kind == "hash-shuffle" || kind == "join";
+        const bool recorded = isForward || kind == "source" || kind == "sink" || kind == "filter"
+            || kind == "project" || kind == "aggregate" || kind == "hash-shuffle" || kind == "join";
         ASSERT_EQ(record.has_value(), recorded) << kind;
         if (!record) {
             expectedMissing.push_back(static_cast<uint32_t>(i));
@@ -628,7 +620,9 @@ TEST(ExecPlanBuilder, LoweringRecordsSpecsForSupportedNodeKinds) {
     EXPECT_GT(forwards, 0u);
 
     std::vector<uint32_t> missing;
-    EXPECT_FALSE(NScheduler::ExtractLoweredGraphSpec(lowered, &missing));
+    EXPECT_EQ(
+        NScheduler::ExtractLoweredGraphSpec(lowered, &missing).has_value(),
+        expectedMissing.empty());
     EXPECT_EQ(missing, expectedMissing);
 }
 
@@ -668,9 +662,9 @@ std::vector<std::string> ExpectQueryFromSpec(
     TPlanPassOptions passes = {.EnableCbo = false},
     std::shared_ptr<IRuntimeFilterBindingFactory> filterBindings = nullptr)
 {
-    auto source = std::make_unique<TParquetSource>(
+    auto source = std::make_unique<TParquetFile>(
         QDB_TEST_DATA_DIR "/regtest/cases/decimal_parquet/tables/decimals.parquet");
-    const std::unordered_map<std::string, ISource*> sources{{"t", source.get()}};
+    const std::unordered_map<std::string, ITable*> sources{{"t", source.get()}};
     auto plan = BuildSqlPlan(sql, sources, std::move(passes));
     auto lowered = std::make_unique<NScheduler::TLoweredPlan>(
         NScheduler::LowerPlanToGraph(plan, settings, nullptr));
@@ -1184,7 +1178,7 @@ TEST(ExecPlanBuilder, NestedCteSpoolsGraphRunsFromItsSerializedSpec) {
 
 TEST(ExecPlanBuilder, MultiKeepsRealPartialAndCombineStages) {
     TSplitMockSource source({"k"});
-    const std::unordered_map<std::string, ISource*> sources{{"t", &source}};
+    const std::unordered_map<std::string, ITable*> sources{{"t", &source}};
     constexpr std::string_view sql = "SELECT count(*) AS c FROM t";
 
     auto singleSettings = SingleSettings();
@@ -1255,7 +1249,7 @@ TEST(ExecPlanBuilder, AutoGlobalCascadeFollowsTheInputEstimate) {
 
 TEST(ExecPlanBuilder, GroupedPartialAggregateHasDistributedPhaseBoundary) {
     TStatsSplitMockSource source(100'000'000, 5'000'000);
-    const std::unordered_map<std::string, ISource*> sources{{"t", &source}};
+    const std::unordered_map<std::string, ITable*> sources{{"t", &source}};
     constexpr std::string_view sql =
         "SELECT k, count(*) AS c FROM t GROUP BY k";
 
@@ -1295,7 +1289,7 @@ TEST(ExecPlanBuilder, GroupedPartialAggregateHasDistributedPhaseBoundary) {
 
 TEST(ExecPlanBuilder, CteConsumersShareTypedMaterialization) {
     TSplitMockSource source({"k", "v"});
-    const std::unordered_map<std::string, ISource*> sources{{"t", &source}};
+    const std::unordered_map<std::string, ITable*> sources{{"t", &source}};
     constexpr std::string_view sql =
         "WITH x AS (SELECT k, v FROM t) "
         "SELECT p.k, q.v FROM x p JOIN x q ON p.k = q.k";
@@ -1323,7 +1317,7 @@ TEST(ExecPlanBuilder, CteConsumersShareTypedMaterialization) {
 TEST(ExecPlanBuilder, AutoScanTasksAreChosenPerSourceBeforeJoinShuffle) {
     TStatsSplitMockSource large(100'000'000, 5'000'000);
     TSplitMockSource small({"k"});
-    const std::unordered_map<std::string, ISource*> sources{
+    const std::unordered_map<std::string, ITable*> sources{
         {"l", &large}, {"r", &small},
     };
     auto settings = MultiSettings();
@@ -1352,7 +1346,7 @@ TEST(ExecPlanBuilder, AutoScanTasksAreChosenPerSourceBeforeJoinShuffle) {
 
 TEST(ExecPlanBuilder, AutoScanJoinBudgetReachesSharedCteMaterialization) {
     TSplitMockSource source({"k"});
-    const std::unordered_map<std::string, ISource*> sources{{"t", &source}};
+    const std::unordered_map<std::string, ITable*> sources{{"t", &source}};
     auto settings = MultiSettings();
     settings.Scheduler.WorkerCount = 2;
     settings.ScanSplit.MaxScanTasks = 0;

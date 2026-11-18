@@ -276,7 +276,7 @@ int RunQuery(
     const TCliOptions& config,
     NQdb::TExternalModuleCatalog& catalog)
 {
-    std::vector<std::unique_ptr<NQdb::TParquetSource>> sources;
+    std::vector<std::shared_ptr<NQdb::TParquetFile>> sources;
     auto factory = [&](std::string_view table)
         -> std::expected<NQdb::TOperatorPtr, NQumir::TError>
     {
@@ -284,8 +284,8 @@ int RunQuery(
             ? ResolveTablePath(config.DataDir, table)
             : std::string(table);
         try {
-            auto source = std::make_unique<NQdb::TParquetSource>(path);
-            auto op = std::make_shared<NQdb::TSourceOperator>(*source, path);
+            auto source = std::make_shared<NQdb::TParquetFile>(path);
+            auto op = std::make_shared<NQdb::TSourceOperator>(source, path);
             sources.push_back(std::move(source));
             return op;
         } catch (const std::exception& e) {
@@ -395,7 +395,7 @@ void DescribeTable(std::string_view table, const TCliOptions& config) {
     }
     const std::string path = ResolveTablePath(config.DataDir, table);
     try {
-        NQdb::TParquetSource source(path);
+        NQdb::TParquetFile source(path);
         const auto& schema = source.Schema();
         std::cout << "Table \"" << table << "\" (" << path << ")\n";
         for (const auto& column : schema.Columns) {

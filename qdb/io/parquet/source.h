@@ -1,6 +1,7 @@
 #pragma once
 
 #include <qdb/io/io.h>
+#include <qdb/io/table.h>
 #include <qdb/plan/ops/stats.h>
 #include <qdb/scheduler/lowering/scan_split.h>
 
@@ -20,7 +21,6 @@ namespace arrow { class RecordBatchReader; class Schema; }
 namespace NQdb {
 
 class TDecimalColumnScan;
-class TParquetSource;
 struct TParquetFileData;
 
 // Allocator behind Arrow's parquet reads. Auto prefers jemalloc and falls back
@@ -42,62 +42,49 @@ std::optional<EArrowMemoryPool> ParseArrowMemoryPool(std::string_view name);
 // Call it once at startup, before the first parquet file is opened.
 void SetArrowMemoryPool(EArrowMemoryPool pool);
 
-// Opened parquet file shared by all of its scan sources. The file schema and
-// statistics are loaded once; each source creates its own record-batch reader.
-class TParquetFile {
+// A parquet table: the opened file shared by all of its scan sources. The file
+// schema and statistics are loaded once; each source creates its own
+// record-batch reader.
+class TParquetFile : public ITable {
 public:
     explicit TParquetFile(const std::string& path);
     ~TParquetFile();
 
     // nullopt row groups read the whole file and an empty list nothing;
     // nullopt columns read every file column.
-    std::unique_ptr<TParquetSource> MakeSource(
+    std::unique_ptr<ISource> MakeSource(
         std::optional<std::vector<int>> rowGroups = std::nullopt,
-        std::optional<std::unordered_set<std::string>> restrictedColumns = std::nullopt) const;
-
-    // Random-access reader of the given file columns, for late materialization.
-    std::shared_ptr<const IPhysicalRowReader> CompileReader(
-        std::span<const std::string> columnNames) const;
-
-private:
-    friend class TParquetSource;
-    explicit TParquetFile(std::shared_ptr<TParquetFileData> data);
-
-    std::shared_ptr<TParquetFileData> Data_;
-};
-
-class TParquetSource :
-    public ISource,
-    public IRowLookupSource,
-    public NScheduler::IScanMetadataSource
-{
-public:
-    explicit TParquetSource(const std::string& path);
-    ~TParquetSource();
+        std::optional<std::unordered_set<std::string>> restrictedColumns = std::nullopt) const override;
 
     const TSchema& Schema() const override;
-    bool Next(TRowSet& rowSet) override;
-    void RestrictColumns(const std::unordered_set<std::string>& names) override;
+    const TStatsPtr Stats() const override;
+    const std::string& Path() const override;
+    std::unique_ptr<IRowLookupSource> MakeLookupSource() const override;
     std::vector<NScheduler::TScanRowGroup> ScanRowGroups() const override;
-    // Estimate a planned projection without changing the source's reader.
+    // Estimate a planned projection without opening a reader.
     std::vector<NScheduler::TScanRowGroup> ScanRowGroups(
-        const std::unordered_set<std::string>& columnNames) const;
+        const std::unordered_set<std::string>& columnNames) const override;
     std::vector<NScheduler::TScanRowGroup> PruneRowGroups(
         const NQumir::NAst::TExprPtr& predicate,
         std::string_view sourceAlias,
         std::ostream* diagnostics = nullptr,
-        const std::unordered_set<std::string>* columnNames = nullptr) const;
-    std::optional<TLateMaterializationCost> EstimateLookup(
-        std::span<const std::string> earlyColumns,
-        std::span<const std::string> fetchColumns,
-        uint64_t maxRows) const override;
-    const TStatsPtr Stats() const override;
+        const std::unordered_set<std::string>* columnNames = nullptr) const override;
 
-    // What a scan task needs to recreate this source from its file.
-    TParquetFile File() const;
-    const std::string& Path() const;
-    const std::optional<std::vector<int>>& RowGroups() const;
-    const std::optional<std::unordered_set<std::string>>& RestrictedColumns() const;
+private:
+    std::vector<NScheduler::TScanRowGroup> ScanRowGroupsForColumns(
+        const std::unordered_set<std::string>* columnNames) const;
+
+    std::shared_ptr<TParquetFileData> Data_;
+};
+
+// A reader of one scan: the chosen row groups and columns of a parquet file.
+class TParquetSource : public ISource {
+public:
+    ~TParquetSource();
+
+    const TSchema& Schema() const override;
+    const TStatsPtr Stats() const override;
+    bool Next(TRowSet& rowSet) override;
 
 private:
     friend class TParquetFile;
@@ -108,10 +95,7 @@ private:
 
     void ResetReader();
     std::vector<int> EffectiveRowGroups() const;
-    std::vector<int> EffectiveFileColumnIndexes(
-        const std::unordered_set<std::string>* columnNames = nullptr) const;
-    std::vector<NScheduler::TScanRowGroup> ScanRowGroupsForColumns(
-        const std::unordered_set<std::string>* columnNames) const;
+    std::vector<int> EffectiveFileColumnIndexes() const;
 
     void SelectColumns();
     void RefreshSchema();

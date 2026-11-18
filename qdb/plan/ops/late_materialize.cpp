@@ -70,8 +70,7 @@ const std::string TLateMaterializeOperator::ToString() const {
     return result + ")";
 }
 
-TLateMaterializationSourceBinding ResolveLateMaterializationSource(
-    const TLateMaterializeOperator& late)
+TSourceOperator& ResolveLateMaterializationSource(const TLateMaterializeOperator& late)
 {
     std::vector<TSourceOperator*> sources;
     CollectInputSources(late.Input(), sources);
@@ -79,16 +78,11 @@ TLateMaterializationSourceBinding ResolveLateMaterializationSource(
         throw std::runtime_error(
             "late materialize requires exactly one input source");
     }
-    auto* lookup = dynamic_cast<IRowLookupSource*>(
-        &sources.front()->GetSource());
-    if (!lookup) {
+    if (!sources.front()->GetTable()->MakeLookupSource()) {
         throw std::runtime_error(
             "late materialize source does not support physical row lookup");
     }
-    return {
-        .Source = *sources.front(),
-        .Lookup = *lookup,
-    };
+    return *sources.front();
 }
 
 } // namespace NQdb

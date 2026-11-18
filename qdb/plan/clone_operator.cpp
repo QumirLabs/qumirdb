@@ -82,7 +82,7 @@ TOperatorPtr StructuralClone(const TOperatorPtr& op) {
 TOperatorPtr Reconstruct(const TOperatorPtr& op) {
     if (auto n = TMaybeOp<TSourceOperator>(op)) {
         auto src = std::make_shared<TSourceOperator>(
-            n.Cast()->GetSource(), n.Cast()->SourcePath());
+            n.Cast()->GetTable(), n.Cast()->SourcePath());
         if (n.Cast()->EmitsRowId()) {
             src->EnableRowId();
         }

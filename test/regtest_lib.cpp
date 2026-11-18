@@ -112,7 +112,7 @@ std::expected<std::string, std::string> BuildPlanText(std::istream& input) {
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
         auto& source = sources.emplace_back(MakePlanSource(table));
-        return std::make_shared<TSourceOperator>(*source, std::string(table));
+        return std::make_shared<TSourceOperator>(Borrow(*source), std::string(table));
     };
     auto plan = BuildPlan(*parsed, factory);
     if (!plan) return std::unexpected(plan.error().ToString() + "\n");
@@ -1361,7 +1361,6 @@ TCaseResult CheckCase(const TQueryCase& test, bool canonize, const TRegTestOptio
     variant.ScanSplit.MaxScanTasks = test.Variant == "single" ? 1 : 4;
     variant.Kernel.Backend = *ParseKernelBackend(test.Backend);
     ApplyEngineConfig(options.Engine, engine);
-    std::vector<std::unique_ptr<TParquetSource>> sources;
     std::optional<TParsedQuery> parsed;
     TOperatorPtr plan;
     // Parsing, binding and optimization are the planning stage: its error is the
@@ -1382,8 +1381,7 @@ TCaseResult CheckCase(const TQueryCase& test, bool canonize, const TRegTestOptio
             auto& fixture = test.Suite->Fixtures.at(binding->second);
             if (!fixture.Error.empty()) throw THarnessError(fixture.Error);
             if (!fixture.File) throw THarnessError("fixture was not prepared");
-            auto& source = sources.emplace_back(fixture.File->MakeSource());
-            return std::make_shared<TSourceOperator>(*source, std::string(table));
+            return std::make_shared<TSourceOperator>(fixture.File, std::string(table));
         }, parsed->Annotation);
         buildMs = mark();
         if (!built) throw built.error();

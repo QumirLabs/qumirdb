@@ -58,10 +58,10 @@ namespace {
 // Parses `sexp` as a (rel aggregate ...) plan whose (rel source "...") leaf is
 // backed by `source`, runs AnnotateTypes + ApplyColumnPruning, and returns the
 // resulting logical plan root.
-TOperatorPtr ParsePlan(const std::string& sexp, ISource& source) {
+TOperatorPtr ParsePlan(const std::string& sexp, ITable& source) {
     TRelParserOptions opts;
     opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
-        return std::make_shared<TSourceOperator>(source, std::string(path));
+        return std::make_shared<TSourceOperator>(Borrow(source), std::string(path));
     };
 
     NQumir::NAst::NCore::TParser parser;
@@ -97,11 +97,11 @@ TOperatorPtr BuildSqlPlan(const std::string& sql, const TTableSourceFactory& sou
     return std::move(*plan);
 }
 
-TOperatorPtr BuildSqlPlan(const std::string& sql, ISource& source) {
+TOperatorPtr BuildSqlPlan(const std::string& sql, ITable& source) {
     return BuildSqlPlan(sql, [&](std::string_view table)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
-        return std::make_shared<TSourceOperator>(source, std::string(table));
+        return std::make_shared<TSourceOperator>(Borrow(source), std::string(table));
     });
 }
 
@@ -253,10 +253,10 @@ TEST(AggregateE2E, GlobalIdentitySurvivesParallelCascade) {
                 auto root = BuildSqlPlan(sql, [&](std::string_view table)
                     -> std::expected<TOperatorPtr, NQumir::TError>
                 {
-                    ISource& source = table == "l"
+                    ITable& source = table == "l"
                         ? left
                         : right;
-                    return std::make_shared<TSourceOperator>(source, std::string(table));
+                    return std::make_shared<TSourceOperator>(Borrow(source), std::string(table));
                 });
                 ApplyPlanPasses(root);
                 NScheduler::TSettings settings;
@@ -296,7 +296,7 @@ TEST(AggregateE2E, AutoCascadeFollowsTheParquetEstimate) {
     TTempDir dir;
     const auto path = (dir.Path() / "values.parquet").string();
     WriteValueParquet(path, rows, /*rowGroupRows*/ 256);
-    TParquetSource source(path);
+    TParquetFile source(path);
 
     const std::vector<EAggregatePhase> cascade{EAggregatePhase::Partial, EAggregatePhase::Final};
     const std::vector<EAggregatePhase> gather{EAggregatePhase::Single};
@@ -577,8 +577,8 @@ TEST(AggregateE2E, PartialAggregateModesAgree) {
             "SELECT k, s, COUNT(*), COUNT(v), SUM(v), MIN(v), MAX(v) "
             "FROM (SELECT k, s, v FROM l UNION ALL SELECT k, s, v FROM r) u GROUP BY k, s",
             [&](std::string_view table) -> std::expected<TOperatorPtr, NQumir::TError> {
-                ISource& source = table == "l" ? left : right;
-                return std::make_shared<TSourceOperator>(source, std::string(table));
+                ITable& source = table == "l" ? left : right;
+                return std::make_shared<TSourceOperator>(Borrow(source), std::string(table));
             });
         ApplyPlanPasses(root);
         NScheduler::TSettings settings;
@@ -1796,7 +1796,7 @@ TEST(AggregateE2E, MixedI32F32I64CompositeKeyPreservesLayoutAndTypedColumns) {
 }
 
 TEST(AggregateE2E, PlannerUsesPhysicalPrunedSchemaForKeyDescriptor) {
-    class TPruningSource final : public ISource {
+    class TPruningSource final : public ISource, public ITable {
     public:
         TPruningSource() {
             OriginalColumns_ = {
@@ -1811,6 +1811,7 @@ TEST(AggregateE2E, PlannerUsesPhysicalPrunedSchemaForKeyDescriptor) {
                 {"key_i32", std::make_shared<TIntegerType>(TIntegerType::I32)},
             };
             CurrentSchema_ = TSchema{OriginalColumns_};
+            PhysicalSchema_ = TSchema{PhysicalColumns_};
         }
 
         const TSchema& Schema() const override {
@@ -1821,9 +1822,42 @@ TEST(AggregateE2E, PlannerUsesPhysicalPrunedSchemaForKeyDescriptor) {
             return nullptr;
         }
 
-        void RestrictColumns(const std::unordered_set<std::string>& names) override {
-            RestrictedColumns_ = names;
-            CurrentSchema_ = TSchema{PhysicalColumns_};
+        const std::string& Path() const override {
+            return Path_;
+        }
+
+        std::unique_ptr<IRowLookupSource> MakeLookupSource() const override {
+            return nullptr;
+        }
+
+        // A pruned scan reads the physical column order.
+        std::unique_ptr<ISource> MakeSource(
+            std::optional<std::vector<int>>,
+            std::optional<std::unordered_set<std::string>> names) const override
+        {
+            if (names) {
+                RestrictedColumns_ = *names;
+            }
+            return std::make_unique<TReader>(const_cast<TPruningSource&>(*this));
+        }
+
+        std::vector<NScheduler::TScanRowGroup> ScanRowGroups() const override {
+            return {{.RowGroup = 0, .RowCount = static_cast<int64_t>(Values_.size())}};
+        }
+
+        std::vector<NScheduler::TScanRowGroup> ScanRowGroups(
+            const std::unordered_set<std::string>&) const override
+        {
+            return ScanRowGroups();
+        }
+
+        std::vector<NScheduler::TScanRowGroup> PruneRowGroups(
+            const NQumir::NAst::TExprPtr&,
+            std::string_view,
+            std::ostream*,
+            const std::unordered_set<std::string>*) const override
+        {
+            return ScanRowGroups();
         }
 
         bool Next(TRowSet& rowSet) override {
@@ -1851,10 +1885,32 @@ TEST(AggregateE2E, PlannerUsesPhysicalPrunedSchemaForKeyDescriptor) {
         }
 
     private:
+        struct TReader final : ISource {
+            explicit TReader(TPruningSource& table)
+                : Table(table)
+            {}
+
+            const TSchema& Schema() const override {
+                return Table.PhysicalSchema_;
+            }
+
+            const TStatsPtr Stats() const override {
+                return nullptr;
+            }
+
+            bool Next(TRowSet& rowSet) override {
+                return Table.Next(rowSet);
+            }
+
+            TPruningSource& Table;
+        };
+
         std::vector<TColumnSchema> OriginalColumns_;
         std::vector<TColumnSchema> PhysicalColumns_;
         TSchema CurrentSchema_{};
-        std::unordered_set<std::string> RestrictedColumns_;
+        TSchema PhysicalSchema_{};
+        mutable std::unordered_set<std::string> RestrictedColumns_;
+        std::string Path_ = NextMockTablePath();
         std::vector<int64_t> Values_ = {5, 7, 11, 13, -2, 17};
         std::vector<double> F64Keys_ = {1.25, 2.5, 1.25, 3.75, 2.5, 4.125};
         std::vector<int32_t> I32Keys_ = {10, 20, 10, 30, 20, 40};

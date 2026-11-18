@@ -86,7 +86,7 @@ double EstimateJoinCost(
   +-------------+-----------------------------------------------------+--------------------------------------------------------------------------------------------------------+
   |  Оператор   |                       RowCount                      |                                                колонки                                                 |
   +-------------+-----------------------------------------------------+--------------------------------------------------------------------------------------------------------+
-  | Source      | из футера (TParquetSource::Stats())                 | min/max/null/ndv/hist                                                                                  |
+  | Source      | из футера (TParquetFile::Stats())                   | min/max/null/ndv/hist                                                                                  |
   +-------------+-----------------------------------------------------+--------------------------------------------------------------------------------------------------------+
   | Project     | без изменений                                       | прямые ссылки - pass-through; производные (a*b, func) - stats теряются                                 |
   +-------------+-----------------------------------------------------+--------------------------------------------------------------------------------------------------------+
@@ -1629,7 +1629,7 @@ TStatsPtr ComputeJoinStats(
 }
 
 TStatsPtr ComputeSourceStats(const std::shared_ptr<TSourceOperator>& source) {
-    auto raw = source->GetSource().Stats();
+    auto raw = source->GetTable()->Stats();
     if (!raw) {
         return nullptr;
     }
@@ -1638,7 +1638,7 @@ TStatsPtr ComputeSourceStats(const std::shared_ptr<TSourceOperator>& source) {
     out->RowCount = raw->RowCount;
     out->Cost = static_cast<double>(out->RowCount)
         * std::max(OutputRowWidth(source), 1.0);
-    for (const auto& col : source->GetSource().Schema().Columns) {
+    for (const auto& col : source->GetTable()->Schema().Columns) {
         auto it = raw->ColumnStats.find(std::string(col.Name));
         if (it != raw->ColumnStats.end()) {
             out->ColumnStats[alias + "." + std::string(col.Name)] = it->second;

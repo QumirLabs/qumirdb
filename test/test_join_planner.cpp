@@ -73,7 +73,7 @@ private:
 
 std::unique_ptr<TTestRuntime> PlanJoinWithSources(
     const std::string& sexp,
-    const std::function<ISource*(std::string_view)>& sourceLookup,
+    const std::function<ITable*(std::string_view)>& sourceLookup,
     NScheduler::TSettings settings = {},
     std::shared_ptr<IRuntimeFilterBindingFactory> filterBindings = nullptr,
     std::function<void(const TOperatorPtr&)> configure = {})
@@ -83,7 +83,7 @@ std::unique_ptr<TTestRuntime> PlanJoinWithSources(
         -> TOperatorPtr {
         auto* source = sourceLookup(path);
         return source
-            ? std::make_shared<TSourceOperator>(*source, std::string(path))
+            ? std::make_shared<TSourceOperator>(Borrow(*source), std::string(path))
             : nullptr;
     };
     TParser parser;
@@ -109,24 +109,24 @@ std::unique_ptr<TTestRuntime> PlanJoinWithSources(
 // runs the full logical pipeline + physical planner.
 std::unique_ptr<TTestRuntime> PlanJoin(
     const std::string& sexp,
-    ISource& left,
-    ISource& right,
+    ITable& left,
+    ITable& right,
     NScheduler::TSettings schedulerSettings = {},
     std::shared_ptr<IRuntimeFilterBindingFactory> filterBindings = nullptr)
 {
     return PlanJoinWithSources(sexp,
-        [&](std::string_view path) -> ISource* {
+        [&](std::string_view path) -> ITable* {
             return path == "L" ? &left : &right;
         }, schedulerSettings, std::move(filterBindings));
 }
 
 std::unique_ptr<TTestRuntime> PlanJoin3(
     const std::string& sexp,
-    ISource& left,
-    ISource& right,
-    ISource& third)
+    ITable& left,
+    ITable& right,
+    ITable& third)
 {
-    return PlanJoinWithSources(sexp, [&](std::string_view path) -> ISource* {
+    return PlanJoinWithSources(sexp, [&](std::string_view path) -> ITable* {
         if (path == "L") {
             return &left;
         }
@@ -139,13 +139,13 @@ std::unique_ptr<TTestRuntime> PlanJoin3(
 
 std::unique_ptr<TTestRuntime> PlanJoinMany(
     const std::string& sexp,
-    const std::unordered_map<std::string, ISource*>& sources,
+    const std::unordered_map<std::string, ITable*>& sources,
     NScheduler::TSettings settings,
     std::shared_ptr<IRuntimeFilterBindingFactory> filterBindings,
     std::function<void(const TOperatorPtr&)> configure = {})
 {
     return PlanJoinWithSources(sexp,
-        [&](std::string_view path) -> ISource* {
+        [&](std::string_view path) -> ITable* {
             auto it = sources.find(std::string(path));
             return it == sources.end() ? nullptr : it->second;
         }, settings, std::move(filterBindings), std::move(configure));
@@ -697,12 +697,12 @@ TEST(JoinPlanner, RuntimeFilterCrossesOnlyDirectProjectKeyLineage) {
             {KeyValBatch(lk.data(), lv.data(), 3, lcols)});
         TMockSource right({"rk", "rv"},
             {KeyValBatch(rk.data(), rv.data(), 1, rcols)});
-        auto source = std::make_shared<TSourceOperator>(left, "L");
+        auto source = std::make_shared<TSourceOperator>(Borrow(left), "L");
         auto projected = MakeProject(source,
             {{"lv", "lv"}, {"alias_key", expression}});
         ASSERT_TRUE(projected);
         auto join = std::make_shared<TJoinOperator>(*projected,
-            std::make_shared<TSourceOperator>(right, "R"),
+            std::make_shared<TSourceOperator>(Borrow(right), "R"),
             std::vector<TJoinKey>{{"alias_key", "rk"}},
             EJoinType::Inner, nullptr);
         join->MutableRuntimeFilter() = TRuntimeFilterSpec{
@@ -775,7 +775,7 @@ TEST(JoinPlanner, RuntimeFilterMergesTwoBuildLanesBeforeProbing) {
     TMockSource left2({"lk", "lv"}, {KeyValBatch(lk2.data(), lv2.data(), 2, lc2)});
     TMockSource right1({"rk", "rv"}, {KeyValBatch(rk1.data(), rv1.data(), 1, rc1)});
     TMockSource right2({"rk", "rv"}, {KeyValBatch(rk2.data(), rv2.data(), 1, rc2)});
-    const std::unordered_map<std::string, ISource*> sources{
+    const std::unordered_map<std::string, ITable*> sources{
         {"L1", &left1}, {"L2", &left2},
         {"R1", &right1}, {"R2", &right2},
     };
@@ -827,16 +827,16 @@ TEST(JoinPlanner, RuntimeFilterUsesEachUnionBranchKeyName) {
         {KeyValBatch(lk3.data(), lv3.data(), 2, lc3)});
     TMockSource right({"rk", "rv"},
         {KeyValBatch(rk.data(), rv.data(), 3, rc)});
-    auto first = std::make_shared<TSourceOperator>(left1, "L1");
-    auto second = std::make_shared<TSourceOperator>(left2, "L2");
-    auto third = std::make_shared<TSourceOperator>(left3, "L3");
+    auto first = std::make_shared<TSourceOperator>(Borrow(left1), "L1");
+    auto second = std::make_shared<TSourceOperator>(Borrow(left2), "L2");
+    auto third = std::make_shared<TSourceOperator>(Borrow(left3), "L3");
     auto computed = MakeProject(third,
         {{"raw_v", "raw_v"}, {"computed_k", "(+ raw_k 0)"}});
     ASSERT_TRUE(computed);
     auto unionAll = std::make_shared<TUnionAllOperator>(
         std::vector<TOperatorPtr>{first, second, *computed});
     auto join = std::make_shared<TJoinOperator>(unionAll,
-        std::make_shared<TSourceOperator>(right, "R"),
+        std::make_shared<TSourceOperator>(Borrow(right), "R"),
         std::vector<TJoinKey>{{"lk", "rk"}}, EJoinType::Inner, nullptr);
     join->MutableRuntimeFilter() = TRuntimeFilterSpec{
         .Id = 7, .BuildSide = EJoinFilterSide::Right};
@@ -901,8 +901,8 @@ TEST(JoinPlanner, RuntimeFilterCrossesOnlySameSideInnerJoinKeys) {
         TMockSource a({"ak", "av"}, {KeyValBatch(ak.data(), av.data(), 3, ac)});
         TMockSource b({"bk", "bv"}, {KeyValBatch(bk.data(), bv.data(), 3, bc)});
         TMockSource r({"rk", "rv"}, {KeyValBatch(rk.data(), rv.data(), 1, rc)});
-        auto aSource = std::make_shared<TSourceOperator>(a, "A");
-        auto bSource = std::make_shared<TSourceOperator>(b, "B");
+        auto aSource = std::make_shared<TSourceOperator>(Borrow(a), "A");
+        auto bSource = std::make_shared<TSourceOperator>(Borrow(b), "B");
         auto nested = std::make_shared<TJoinOperator>(aSource, bSource,
             std::vector<TJoinKey>{{"ak", "bk"}}, nestedType, nullptr);
         if (nestedType == EJoinType::Inner) {
@@ -910,7 +910,7 @@ TEST(JoinPlanner, RuntimeFilterCrossesOnlySameSideInnerJoinKeys) {
                 .Id = 8, .BuildSide = EJoinFilterSide::Right};
         }
         auto parent = std::make_shared<TJoinOperator>(nested,
-            std::make_shared<TSourceOperator>(r, "R"),
+            std::make_shared<TSourceOperator>(Borrow(r), "R"),
             std::vector<TJoinKey>{{parentKey, "rk"}},
             EJoinType::Inner, nullptr);
         parent->MutableRuntimeFilter() = TRuntimeFilterSpec{
@@ -960,12 +960,12 @@ TEST(JoinPlanner, RuntimeFilterCrossesOnlySameSideInnerJoinKeys) {
 
 TEST(JoinPlanner, RuntimeFilterStaysAboveInnerJoinForSplitKeys) {
     TMockSource a({"ak"}), b({"bk", "bv"}), r({"rk1", "rk2"});
-    auto aSource = std::make_shared<TSourceOperator>(a, "A");
-    auto bSource = std::make_shared<TSourceOperator>(b, "B");
+    auto aSource = std::make_shared<TSourceOperator>(Borrow(a), "A");
+    auto bSource = std::make_shared<TSourceOperator>(Borrow(b), "B");
     auto nested = std::make_shared<TJoinOperator>(aSource, bSource,
         std::vector<TJoinKey>{{"ak", "bk"}}, EJoinType::Inner, nullptr);
     auto parent = std::make_shared<TJoinOperator>(nested,
-        std::make_shared<TSourceOperator>(r, "R"),
+        std::make_shared<TSourceOperator>(Borrow(r), "R"),
         std::vector<TJoinKey>{{"ak", "rk1"}, {"bv", "rk2"}},
         EJoinType::Inner, nullptr);
     parent->MutableRuntimeFilter() = TRuntimeFilterSpec{

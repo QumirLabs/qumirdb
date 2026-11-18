@@ -1674,8 +1674,8 @@ TEST(OuterStreamJoinPlan, MatchesGeneralPathAcrossPartitions) {
             KeyValBatch(rk.data() + 200, rv.data() + 200, 200, rc1),
             KeyValBatch(rk.data() + 400, rv.data() + 400, 200, rc2)});
         auto join = std::make_shared<TJoinOperator>(
-            std::make_shared<TSourceOperator>(left, "L"),
-            std::make_shared<TSourceOperator>(right, "R"),
+            std::make_shared<TSourceOperator>(Borrow(left), "L"),
+            std::make_shared<TSourceOperator>(Borrow(right), "R"),
             std::vector<TJoinKey>{{"lk", "rk"}}, type, nullptr);
         TOperatorPtr root = join;
         AnnotateTypes(root);

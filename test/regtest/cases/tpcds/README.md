@@ -7,7 +7,7 @@ NULLs.
 
 The schema preserves column names, widths, order, and nullability from each
 Parquet Arrow schema. DATE32 columns become `i32` days since 1970-01-01, as in
-`TParquetSource`'s Qumir schema. No decimal conversion is necessary: this dataset
+`TParquetFile`'s Qumir schema. No decimal conversion is necessary: this dataset
 already uses `f64` amounts. Statistics are computed from the sample when
 `test_reg` generates temporary Parquet files.
 

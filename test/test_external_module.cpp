@@ -194,7 +194,7 @@ TEST(ExternalModuleCatalog, RustFunctionRunsThroughSqlPlan) {
         if (table != "points") {
             return std::unexpected(NQumir::TError("unknown test table"));
         }
-        return std::make_shared<TSourceOperator>(source, std::string(table));
+        return std::make_shared<TSourceOperator>(Borrow(source), std::string(table));
     }, annotation);
     ASSERT_TRUE(plan) << plan.error().ToString();
 
@@ -293,7 +293,7 @@ TEST(ExternalModuleCatalog, DerivedTableQualifiesStructAliasGroup) {
         auto plan = BuildPlan(statement, [&](std::string_view table)
             -> std::expected<TOperatorPtr, NQumir::TError>
         {
-            return std::make_shared<TSourceOperator>(source, std::string(table));
+            return std::make_shared<TSourceOperator>(Borrow(source), std::string(table));
         }, annotation);
         if (!plan) {
             ADD_FAILURE() << plan.error().ToString();
@@ -366,7 +366,7 @@ TEST(ExternalModuleCatalog, KumirFunctionsAreExportedAndRunWithoutCreateFunction
         if (table != "points") {
             return std::unexpected(NQumir::TError("unknown test table"));
         }
-        return std::make_shared<TSourceOperator>(source, std::string(table));
+        return std::make_shared<TSourceOperator>(Borrow(source), std::string(table));
     }, annotation);
     ASSERT_TRUE(plan) << plan.error().ToString();
 
@@ -416,7 +416,7 @@ TEST(ExternalModuleCatalog, OzlangFunctionsAreExportedAndRunWithoutCreateFunctio
     auto plan = BuildPlan(statements[1], [&](std::string_view table)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
-        return std::make_shared<TSourceOperator>(source, std::string(table));
+        return std::make_shared<TSourceOperator>(Borrow(source), std::string(table));
     }, annotation);
     ASSERT_TRUE(plan) << plan.error().ToString();
 
@@ -465,7 +465,7 @@ TEST(ExternalModuleCatalog, VmBackendRejectsExternalModules) {
     auto plan = BuildPlan(statements[2], [&](std::string_view table)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
-        return std::make_shared<TSourceOperator>(source, std::string(table));
+        return std::make_shared<TSourceOperator>(Borrow(source), std::string(table));
     }, annotation);
     ASSERT_TRUE(plan) << plan.error().ToString();
     AnnotateTypes(*plan, annotation);
@@ -513,7 +513,7 @@ TEST(ExternalModuleCatalog, StddevArgumentTypesExternalFunctions) {
         return BuildPlan(statements[1], [&](std::string_view table)
             -> std::expected<TOperatorPtr, NQumir::TError>
         {
-            return std::make_shared<TSourceOperator>(source, std::string(table));
+            return std::make_shared<TSourceOperator>(Borrow(source), std::string(table));
         }, annotation);
     };
     // The aggregate argument is typed while the plan is built, so the builder
@@ -564,7 +564,7 @@ TEST(ExternalModuleCatalog, DistinctStructProjectionNamesFieldsByColumnAliases) 
             if (table != "points") {
                 return std::unexpected(NQumir::TError("unknown test table"));
             }
-            return std::make_shared<TSourceOperator>(source, std::string(table));
+            return std::make_shared<TSourceOperator>(Borrow(source), std::string(table));
         }, {.ExternalCatalog = catalog.Snapshot()});
     };
 
@@ -618,7 +618,7 @@ TEST(ExternalModuleCatalog, RustFunctionRunsInFilter) {
         if (table != "points") {
             return std::unexpected(NQumir::TError("unknown test table"));
         }
-        return std::make_shared<TSourceOperator>(source, std::string(table));
+        return std::make_shared<TSourceOperator>(Borrow(source), std::string(table));
     });
     ASSERT_TRUE(plan) << plan.error().ToString();
 

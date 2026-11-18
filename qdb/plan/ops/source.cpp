@@ -12,14 +12,15 @@ namespace NQdb {
 namespace {
 
 NQumir::NAst::TTypePtr SourceOutputType(
-    const ISource& source,
+    const ITable& table,
     const std::string& alias,
     bool emitRowId)
 {
     using namespace NQumir::NAst;
     std::vector<std::pair<std::string, TTypePtr>> fields;
-    fields.reserve(source.Schema().Columns.size() + (emitRowId ? 1 : 0));
-    for (const auto& col : source.Schema().Columns) {
+    auto& columns = table.Schema().Columns;
+    fields.reserve(columns.size() + (emitRowId ? 1 : 0));
+    for (const auto& col : columns) {
         auto name = std::string(col.Name);
         fields.emplace_back(alias.empty() ? name : alias + "." + name, col.Type);
     }
@@ -43,32 +44,41 @@ NQumir::NAst::TTypePtr StructTypeFromSchema(const TSchema& schema) {
     return std::make_shared<NQumir::NAst::TStructType>(std::move(fields));
 }
 
-TSourceOperator::TSourceOperator(ISource& source, std::string path)
-    : Source_(source)
+TSourceOperator::TSourceOperator(std::shared_ptr<const ITable> table, std::string path)
+    : Table_(std::move(table))
     , SourcePath_(std::move(path))
 {
     Type = std::make_shared<NQumir::NAst::TFunctionType>(
         std::vector<NQumir::NAst::TTypePtr>{},
-        StructTypeFromSchema(source.Schema()));
+        StructTypeFromSchema(Table_->Schema()));
 }
 
 void TSourceOperator::SetAlias(std::string alias) {
     Alias_ = std::move(alias);
     if (auto* fun = static_cast<NQumir::NAst::TFunctionType*>(Type.get())) {
-        fun->ReturnType = SourceOutputType(Source_, Alias_, EmitRowId_);
+        fun->ReturnType = SourceOutputType(*Table_, Alias_, EmitRowId_);
     }
 }
 
 void TSourceOperator::EnableRowId() {
     EmitRowId_ = true;
     if (auto* fun = static_cast<NQumir::NAst::TFunctionType*>(Type.get())) {
-        fun->ReturnType = SourceOutputType(Source_, Alias_, true);
+        fun->ReturnType = SourceOutputType(*Table_, Alias_, true);
     }
 }
 
 std::string TSourceOperator::RowIdColumn() const {
     const std::string rowIdName(InternalRowIdColumnName);
     return Alias_.empty() ? rowIdName : Alias_ + "." + rowIdName;
+}
+
+void TSourceOperator::RestrictColumns(const std::unordered_set<std::string>& names) {
+    RestrictedColumns_ = std::vector<std::string>(names.begin(), names.end());
+    std::sort(RestrictedColumns_->begin(), RestrictedColumns_->end());
+}
+
+std::optional<std::vector<std::string>> TSourceOperator::RestrictedColumns() const {
+    return RestrictedColumns_;
 }
 
 const std::string TSourceOperator::ToString() const {

@@ -29,6 +29,8 @@ using namespace NQdb;
 
 namespace {
 
+using TColumnNames = std::unordered_set<std::string>;
+
 void WriteParquet(
     const std::string& path,
     std::shared_ptr<arrow::RecordBatch> batch,
@@ -99,8 +101,8 @@ TEST(IOTest, ParquetRoundtrip) {
     });
     WriteParquet(path, batch);
 
-    NQdb::TParquetSource source(path);
-    const auto& s = source.Schema();
+    auto source = NQdb::TParquetFile(path).MakeSource();
+    const auto& s = source->Schema();
 
     ASSERT_EQ(s.Columns.size(), 4u);
     EXPECT_EQ(s.Columns[0].Name, "id");
@@ -120,7 +122,7 @@ TEST(IOTest, ParquetRoundtrip) {
     EXPECT_EQ(structType.Cast()->Fields[1].second, s.Columns[1].Type);
 
     TRowSet rowSet = {};
-    ASSERT_TRUE(source.Next(rowSet));
+    ASSERT_TRUE(source->Next(rowSet));
     EXPECT_EQ(rowSet.RowCount, 3);
     EXPECT_EQ(rowSet.ColumnCount, 4);
 
@@ -136,7 +138,7 @@ TEST(IOTest, ParquetRoundtrip) {
 
     NQdb::Release(&rowSet);
 
-    ASSERT_FALSE(source.Next(rowSet));
+    ASSERT_FALSE(source->Next(rowSet));
 }
 
 TEST(IOTest, NullsInColumn) {
@@ -151,10 +153,10 @@ TEST(IOTest, NullsInColumn) {
     auto batch = arrow::RecordBatch::Make(schema, 3, {ids.Finish().ValueOrDie()});
     WriteParquet(path, batch);
 
-    NQdb::TParquetSource source(path);
+    auto source = NQdb::TParquetFile(path).MakeSource();
 
     TRowSet rowSet = {};
-    ASSERT_TRUE(source.Next(rowSet));
+    ASSERT_TRUE(source->Next(rowSet));
 
     const auto& col = rowSet.Columns[0];
     ASSERT_NE(col.Mask, nullptr);
@@ -167,7 +169,7 @@ TEST(IOTest, NullsInColumn) {
     EXPECT_NE(isValid(2), 0); // row 2: valid
 
     std::ostringstream out;
-    NQdb::TConsoleSink sink(source.Schema(), out);
+    NQdb::TConsoleSink sink(source->Schema(), out);
     sink.Write(rowSet);
     sink.Flush();
     EXPECT_NE(out.str().find("NULL"), std::string::npos);
@@ -194,35 +196,31 @@ TEST(IOTest, ParquetRowGroupRangeSource) {
     WriteParquet(path, batch, 2);
 
     NQdb::TParquetFile file(path);
-    auto source = file.MakeSource();
-    auto rowGroups = source->ScanRowGroups();
+    auto rowGroups = file.ScanRowGroups();
     ASSERT_EQ(rowGroups.size(), 3u);
     EXPECT_EQ(rowGroups[0].RowCount, 2);
     EXPECT_EQ(rowGroups[1].RowCount, 2);
     EXPECT_EQ(rowGroups[2].RowCount, 1);
 
-    const auto plannedGroups = source->ScanRowGroups(
-        std::unordered_set<std::string>{"id"});
-    // Planning metadata must not alter a reader shared by other scan aliases.
-    EXPECT_EQ(source->Schema().Columns.size(), 2u);
-    EXPECT_EQ(source->ScanRowGroups()[0].ByteSize, rowGroups[0].ByteSize);
-    source->RestrictColumns({"id"});
-    ASSERT_EQ(source->Schema().Columns.size(), 1u);
-    const auto projectedGroups = source->ScanRowGroups();
+    const auto projectedGroups = file.ScanRowGroups(TColumnNames{"id"});
+    // Planning metadata must not alter a table shared by other scan aliases.
+    EXPECT_EQ(file.Schema().Columns.size(), 2u);
+    EXPECT_EQ(file.ScanRowGroups()[0].ByteSize, rowGroups[0].ByteSize);
+    auto projected = file.MakeSource(std::nullopt, TColumnNames{"id"});
+    ASSERT_EQ(projected->Schema().Columns.size(), 1u);
     ASSERT_EQ(projectedGroups.size(), rowGroups.size());
     for (size_t rg = 0; rg < rowGroups.size(); ++rg) {
         EXPECT_EQ(projectedGroups[rg].RowGroup, rowGroups[rg].RowGroup);
         EXPECT_EQ(projectedGroups[rg].RowCount, rowGroups[rg].RowCount);
         EXPECT_GT(projectedGroups[rg].ByteSize, 0);
         EXPECT_LT(projectedGroups[rg].ByteSize, rowGroups[rg].ByteSize);
-        EXPECT_EQ(projectedGroups[rg].ByteSize, plannedGroups[rg].ByteSize);
     }
     const std::vector<std::string> columnNames{
         "payload",
         "id",
         "payload",
     };
-    auto reader = source->File().CompileReader(columnNames);
+    auto reader = file.MakeLookupSource()->CompileReader(columnNames);
     const std::vector<TPhysicalRowId> rowIds{
         MakeParquetRowId(2, 0),
         MakeParquetRowId(0, 1),
@@ -247,13 +245,8 @@ TEST(IOTest, ParquetRowGroupRangeSource) {
         (std::vector<int64_t>{50, 20, 30}));
     Release(&lookupRows);
 
-    auto split = source->File().MakeSource(std::vector<int>{1}, source->RestrictedColumns());
-    EXPECT_EQ(split->Stats().get(), source->Stats().get());
-    const auto splitGroups = split->ScanRowGroups();
-    ASSERT_EQ(splitGroups.size(), 1u);
-    EXPECT_EQ(splitGroups[0].RowGroup, 1u);
-    EXPECT_EQ(splitGroups[0].RowCount, projectedGroups[1].RowCount);
-    EXPECT_EQ(splitGroups[0].ByteSize, projectedGroups[1].ByteSize);
+    auto split = file.MakeSource(std::vector<int>{1}, TColumnNames{"id"});
+    EXPECT_EQ(split->Stats().get(), file.Stats().get());
     TRowSet rowSet = {};
     ASSERT_TRUE(split->Next(rowSet));
     ASSERT_EQ(rowSet.RowCount, 2);
@@ -266,12 +259,12 @@ TEST(IOTest, ParquetRowGroupRangeSource) {
     NQdb::Release(&rowSet);
     EXPECT_FALSE(split->Next(rowSet));
 
-    source->RestrictColumns({});
-    for (const auto& group : source->ScanRowGroups()) {
+    for (const auto& group : file.ScanRowGroups(TColumnNames{})) {
         EXPECT_EQ(group.ByteSize, 0);
     }
+    auto noColumns = file.MakeSource(std::nullopt, TColumnNames{});
     int64_t rowCount = 0;
-    while (source->Next(rowSet)) {
+    while (noColumns->Next(rowSet)) {
         EXPECT_EQ(rowSet.ColumnCount, 0);
         rowCount += rowSet.RowCount;
         NQdb::Release(&rowSet);
@@ -339,14 +332,14 @@ const std::vector<TPhysicalRowId> ExpectedRowIds = {
 
 TEST(IOTest, RowIdColumnIsAppendedAfterFileColumns) {
     NQdb::TParquetFile file(WriteRowIdFixture());
-    auto source = file.MakeSource();
 
     // Without the request the synthetic column does not exist.
-    source->RestrictColumns({"id"});
-    ASSERT_EQ(source->Schema().Columns.size(), 1u);
-    EXPECT_EQ(source->Schema().Columns[0].Name, "id");
+    auto idOnly = file.MakeSource(std::nullopt, TColumnNames{"id"});
+    ASSERT_EQ(idOnly->Schema().Columns.size(), 1u);
+    EXPECT_EQ(idOnly->Schema().Columns[0].Name, "id");
 
-    source->RestrictColumns({"id", std::string(InternalRowIdColumnName)});
+    auto source = file.MakeSource(
+        std::nullopt, TColumnNames{"id", std::string(InternalRowIdColumnName)});
     ASSERT_EQ(source->Schema().Columns.size(), 2u);
     EXPECT_EQ(source->Schema().Columns[0].Name, "id");
     EXPECT_EQ(source->Schema().Columns[1].Name, InternalRowIdColumnName);
@@ -369,8 +362,8 @@ TEST(IOTest, RowIdColumnIsAppendedAfterFileColumns) {
 
 TEST(IOTest, RowIdColumnWithoutAnyFileColumn) {
     NQdb::TParquetFile file(WriteRowIdFixture());
-    auto source = file.MakeSource();
-    source->RestrictColumns({std::string(InternalRowIdColumnName)});
+    const TColumnNames rowIdOnly{std::string(InternalRowIdColumnName)};
+    auto source = file.MakeSource(std::nullopt, rowIdOnly);
     ASSERT_EQ(source->Schema().Columns.size(), 1u);
     EXPECT_EQ(source->Schema().Columns[0].Name, InternalRowIdColumnName);
 
@@ -379,19 +372,17 @@ TEST(IOTest, RowIdColumnWithoutAnyFileColumn) {
     EXPECT_EQ(rowSet.ColumnCount, 1);
     Release(&rowSet);
 
-    auto fresh = file.MakeSource();
-    fresh->RestrictColumns({std::string(InternalRowIdColumnName)});
+    auto fresh = file.MakeSource(std::nullopt, rowIdOnly);
     EXPECT_EQ(DrainRowIds(*fresh, 0), ExpectedRowIds);
 }
 
 TEST(IOTest, RowIdColumnKeepsFileWideLocatorsInSplitScans) {
     NQdb::TParquetFile file(WriteRowIdFixture());
-    auto source = file.MakeSource();
-    source->RestrictColumns({"id", std::string(InternalRowIdColumnName)});
+    const TColumnNames columns{"id", std::string(InternalRowIdColumnName)};
 
     // A split source scans one row group but must still report file-wide
     // locators, otherwise a later lookup would read the wrong rows.
-    auto split = source->File().MakeSource(std::vector<int>{1}, source->RestrictedColumns());
+    auto split = file.MakeSource(std::vector<int>{1}, columns);
     std::vector<int64_t> ids;
     const auto rowIds = DrainRowIds(*split, 1, &ids);
     EXPECT_EQ(rowIds, (std::vector<TPhysicalRowId>{
@@ -401,29 +392,25 @@ TEST(IOTest, RowIdColumnKeepsFileWideLocatorsInSplitScans) {
     }));
     EXPECT_EQ(ids, (std::vector<int64_t>{4, 5, 6}));
 
-    auto tail = source->File().MakeSource(std::vector<int>{2}, source->RestrictedColumns());
+    auto tail = file.MakeSource(std::vector<int>{2}, columns);
     EXPECT_EQ(DrainRowIds(*tail, 1),
         (std::vector<TPhysicalRowId>{MakeParquetRowId(2, 0)}));
 
-    auto empty = source->File().MakeSource(std::vector<int>{}, source->RestrictedColumns());
+    auto empty = file.MakeSource(std::vector<int>{}, columns);
     EXPECT_TRUE(DrainRowIds(*empty, 1).empty());
 }
 
 TEST(IOTest, SplitSourceRebuildsFromItsFileAndScanParameters) {
     const auto path = WriteRowIdFixture();
     NQdb::TParquetFile file(path);
-    auto source = file.MakeSource();
-    source->RestrictColumns({"id", std::string(InternalRowIdColumnName)});
-    auto split = source->File().MakeSource(std::vector<int>{1}, source->RestrictedColumns());
-    EXPECT_EQ(split->Path(), path);
-    EXPECT_FALSE(source->RowGroups());
-    EXPECT_EQ(split->RowGroups(), std::optional(std::vector<int>{1}));
-    EXPECT_EQ(split->RestrictedColumns(), source->RestrictedColumns());
+    const ITable& table = file;
+    EXPECT_EQ(table.Path(), path);
 
-    // A scan task recreates the split from these on the shared file.
-    auto rebuilt = split->File().MakeSource(split->RowGroups(), split->RestrictedColumns());
+    // A scan task makes its split from the spec's row groups and columns.
+    auto split = table.MakeSource(
+        std::vector<int>{1}, TColumnNames{"id", std::string(InternalRowIdColumnName)});
     std::vector<int64_t> ids;
-    EXPECT_EQ(DrainRowIds(*rebuilt, 1, &ids), (std::vector<TPhysicalRowId>{
+    EXPECT_EQ(DrainRowIds(*split, 1, &ids), (std::vector<TPhysicalRowId>{
         MakeParquetRowId(1, 0),
         MakeParquetRowId(1, 1),
         MakeParquetRowId(1, 2),
@@ -431,29 +418,11 @@ TEST(IOTest, SplitSourceRebuildsFromItsFileAndScanParameters) {
     EXPECT_EQ(ids, (std::vector<int64_t>{4, 5, 6}));
 }
 
-TEST(IOTest, RowIdColumnRestartsAfterRestrictColumns) {
-    NQdb::TParquetFile file(WriteRowIdFixture());
-    auto source = file.MakeSource();
-    source->RestrictColumns({"id", std::string(InternalRowIdColumnName)});
-
-    TRowSet rowSet = {};
-    ASSERT_TRUE(source->Next(rowSet));
-    ASSERT_GT(rowSet.RowCount, 0);
-    Release(&rowSet);
-
-    // Re-restricting rebuilds the reader, so locators must start over instead
-    // of continuing from the partially consumed scan.
-    source->RestrictColumns({"payload", std::string(InternalRowIdColumnName)});
-    std::vector<int64_t> payload;
-    EXPECT_EQ(DrainRowIds(*source, 1, &payload), ExpectedRowIds);
-    EXPECT_EQ(payload, (std::vector<int64_t>{10, 20, 30, 40, 50, 60, 70}));
-}
-
 TEST(IOTest, ScannedRowIdsResolveBackToTheirRows) {
     const auto path = WriteRowIdFixture();
     NQdb::TParquetFile file(path);
-    auto source = file.MakeSource();
-    source->RestrictColumns({"id", std::string(InternalRowIdColumnName)});
+    auto source = file.MakeSource(
+        std::nullopt, TColumnNames{"id", std::string(InternalRowIdColumnName)});
     std::vector<int64_t> ids;
     const auto rowIds = DrainRowIds(*source, 1, &ids);
     ASSERT_EQ(rowIds.size(), 7u);
@@ -461,7 +430,7 @@ TEST(IOTest, ScannedRowIdsResolveBackToTheirRows) {
     // Feed the locators the scan produced back into a lookup and check that
     // every row comes back with the payload of the row the scan saw.
     const std::vector<std::string> columns{"payload", "id"};
-    auto reader = source->File().CompileReader(columns);
+    auto reader = file.MakeLookupSource()->CompileReader(columns);
     TRowSet lookup = {};
     std::string error;
     ASSERT_TRUE(reader->ReadRows(rowIds, lookup, &error)) << error;
@@ -518,10 +487,9 @@ TEST(IOTest, EstimateLookupChargesPagesNotWholeChunks) {
     // One row group whose fetch chunk spans several pages.
     WriteParquet(path, batch, rowCount);
     NQdb::TParquetFile file(path);
-    auto source = file.MakeSource();
 
-    auto few = source->EstimateLookup(early, fetch, 2);
-    auto many = source->EstimateLookup(early, fetch, 1000);
+    auto few = file.MakeLookupSource()->EstimateLookup(early, fetch, 2);
+    auto many = file.MakeLookupSource()->EstimateLookup(early, fetch, 1000);
     ASSERT_TRUE(few);
     ASSERT_TRUE(many);
     EXPECT_GT(few->LookupBytes, 0u);
@@ -531,7 +499,7 @@ TEST(IOTest, EstimateLookupChargesPagesNotWholeChunks) {
 
     // Past the page count the estimate saturates at the whole chunk, and then
     // the eager cost is exactly the narrow scan plus the fetched columns.
-    auto saturated = source->EstimateLookup(early, fetch, 1000000);
+    auto saturated = file.MakeLookupSource()->EstimateLookup(early, fetch, 1000000);
     ASSERT_TRUE(saturated);
     EXPECT_EQ(saturated->LookupBytes, many->LookupBytes);
     EXPECT_EQ(saturated->EagerBytes,
@@ -541,14 +509,14 @@ TEST(IOTest, EstimateLookupChargesPagesNotWholeChunks) {
     // The synthetic locator is not a file column and costs nothing.
     const std::vector<std::string> earlyWithLocator{
         "id", std::string(InternalRowIdColumnName)};
-    auto withLocator = source->EstimateLookup(earlyWithLocator, fetch, 2);
+    auto withLocator = file.MakeLookupSource()->EstimateLookup(earlyWithLocator, fetch, 2);
     ASSERT_TRUE(withLocator);
     EXPECT_EQ(withLocator->NarrowBytes, few->NarrowBytes);
     EXPECT_EQ(withLocator->LookupBytes, few->LookupBytes);
 
-    EXPECT_FALSE(source->EstimateLookup(early, fetch, 0));
-    EXPECT_FALSE(source->EstimateLookup(early, std::vector<std::string>{}, 2));
-    EXPECT_FALSE(source->EstimateLookup(
+    EXPECT_FALSE(file.MakeLookupSource()->EstimateLookup(early, fetch, 0));
+    EXPECT_FALSE(file.MakeLookupSource()->EstimateLookup(early, std::vector<std::string>{}, 2));
+    EXPECT_FALSE(file.MakeLookupSource()->EstimateLookup(
         early, std::vector<std::string>{"nosuch"}, 2));
 
     // Small row groups hold a single page each, so the page estimate falls back
@@ -556,8 +524,7 @@ TEST(IOTest, EstimateLookupChargesPagesNotWholeChunks) {
     const std::string smallPath = "/tmp/test_io_qdb_estimate_small.parquet";
     WriteParquet(smallPath, batch, 500);
     NQdb::TParquetFile smallFile(smallPath);
-    auto smallSource = smallFile.MakeSource();
-    auto everyGroup = smallSource->EstimateLookup(early, fetch, rowCount);
+    auto everyGroup = smallFile.MakeLookupSource()->EstimateLookup(early, fetch, rowCount);
     ASSERT_TRUE(everyGroup);
     EXPECT_EQ(everyGroup->EagerBytes,
         everyGroup->NarrowBytes + everyGroup->LookupBytes);
@@ -635,8 +602,8 @@ TEST(IOTest, FloatColumnIsReadAsFloat) {
                 };
 
                 NQdb::TParquetFile file(path);
-                auto source = file.MakeSource();
-                source->RestrictColumns({"f", std::string(InternalRowIdColumnName)});
+                auto source = file.MakeSource(
+                    std::nullopt, TColumnNames{"f", std::string(InternalRowIdColumnName)});
                 auto type = NQumir::NAst::TMaybeType<NQumir::NAst::TFloatType>(
                     UnwrapNullableType(source->Schema().Columns[0].Type));
                 ASSERT_TRUE(type);
@@ -657,7 +624,7 @@ TEST(IOTest, FloatColumnIsReadAsFloat) {
                 const std::vector<std::string> columns{"f"};
                 TRowSet lookup = {};
                 std::string error;
-                ASSERT_TRUE(source->File().CompileReader(columns)->ReadRows(rowIds, lookup, &error)) << error;
+                ASSERT_TRUE(file.MakeLookupSource()->CompileReader(columns)->ReadRows(rowIds, lookup, &error)) << error;
                 expectRead(FloatCells(lookup.Columns[0], lookup.RowCount));
                 Release(&lookup);
             }

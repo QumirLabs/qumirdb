@@ -8,7 +8,6 @@
 #include <span>
 #include <string>
 #include <string_view>
-#include <unordered_set>
 
 #include <qdb/io/schema.h>
 #include <qdb/plan/ops/stats.h>
@@ -54,7 +53,6 @@ struct ISource {
     virtual const TSchema& Schema() const = 0;
     virtual const TStatsPtr Stats() const = 0;
     virtual bool Next(TRowSet& rowSet) = 0;
-    virtual void RestrictColumns(const std::unordered_set<std::string>& names) {}
 };
 
 class IPhysicalRowReader {
@@ -86,6 +84,9 @@ public:
         std::span<const std::string> earlyColumns,
         std::span<const std::string> fetchColumns,
         uint64_t maxRows) const = 0;
+    // Random-access reader of the given columns; null if it cannot be built.
+    virtual std::shared_ptr<const IPhysicalRowReader> CompileReader(
+        std::span<const std::string> columnNames) const = 0;
 };
 
 struct ISink {

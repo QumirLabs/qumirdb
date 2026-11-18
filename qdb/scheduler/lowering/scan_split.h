@@ -24,12 +24,6 @@ struct TScanSplit {
     bool SerialRead = false;
 };
 
-class IScanMetadataSource {
-public:
-    virtual ~IScanMetadataSource() = default;
-    virtual std::vector<TScanRowGroup> ScanRowGroups() const = 0;
-};
-
 // Resolve an explicit cap or choose one for a source after pruning. Join inputs
 // stay within the worker count; other large scans may use two lanes per worker.
 size_t ChooseScanTaskCount(

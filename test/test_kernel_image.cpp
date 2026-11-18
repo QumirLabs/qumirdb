@@ -409,7 +409,7 @@ std::vector<int64_t> RunWindow(const TKernelCompiler::TSortRadixCompositeDispatc
 std::shared_ptr<TWindowOperator> MakeWindowOperator(TMockSource& source)
 {
     return std::make_shared<TWindowOperator>(
-        std::make_shared<TSourceOperator>(source, "data"),
+        std::make_shared<TSourceOperator>(Borrow(source), "data"),
         std::vector<std::string>{"k"},
         std::vector<TSortKey>{{.Column = "v"}},
         std::nullopt,

@@ -1,6 +1,7 @@
 #include <charconv>
 #include <limits>
 #include <optional>
+#include <filesystem>
 
 #include <coroio/all.hpp>
 #include <coroio/actors/actorsystem.hpp>
@@ -91,6 +92,13 @@ struct TDaemonOptions {
     TEngineSettings Engine;
 };
 
+struct TTableCacheEntity {
+    std::shared_ptr<const ITable> Table;
+    std::chrono::file_clock::time_point MTime;
+};
+
+using TTableCache = std::unordered_map<std::string, TTableCacheEntity>;
+
 template <typename TPoller>
 int RunDaemon(const TDaemonOptions& options, const char* pollerName)
 {
@@ -102,18 +110,25 @@ int RunDaemon(const TDaemonOptions& options, const char* pollerName)
     TExternalModuleCatalog catalog;
     const auto& EngineSettings = options.Engine;
     const auto& dataDir = options.DataDir;
-    // Column pruning narrows a source, so each query opens its own and releases
-    // them with its compiler.
+    auto tablesCache = std::make_shared<TTableCache>();
     auto compilerFactory = [&]() {
-        auto sources = std::make_shared<std::vector<std::unique_ptr<TParquetSource>>>();
-        auto tableFactory = [&dataDir, sources](std::string_view table)
+        auto tableFactory = [&dataDir, tablesCache](std::string_view table)
             -> std::expected<NQdb::TOperatorPtr, NQumir::TError>
         {
             const auto path = ResolveTablePath(dataDir, table);
             try {
-                auto source = std::make_unique<TParquetSource>(path);
-                auto op = std::make_shared<TSourceOperator>(*source, path);
-                sources->push_back(std::move(source));
+                auto mtime = std::filesystem::last_write_time(path);
+                auto maybeCached = tablesCache->find(path);
+                if (maybeCached != tablesCache->end() && maybeCached->second.MTime == mtime) {
+                    return std::make_shared<TSourceOperator>(maybeCached->second.Table, path);
+                }
+                auto source = std::make_shared<TParquetFile>(path);
+                auto op = std::make_shared<TSourceOperator>(source, path);
+                if (maybeCached == tablesCache->end()) {
+                    tablesCache->insert({path, {source, mtime}});
+                } else {
+                    maybeCached->second = {source, mtime};
+                }
                 return op;
             } catch (const std::exception& e) {
                 return std::unexpected(NQumir::TError(

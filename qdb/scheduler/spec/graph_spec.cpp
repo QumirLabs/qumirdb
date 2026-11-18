@@ -107,16 +107,24 @@ std::unique_ptr<ITask> MakeProcessTask(
         std::move(code), std::make_shared<TUnaryStreamingKernelState>(), input, output);
 }
 
+const ITable& ResolveTable(TNodeTaskContext& context, const std::string& path)
+{
+    auto& table = context.Tables[path];
+    if (!table) {
+        table = std::make_shared<TParquetFile>(path);
+    }
+    return *table;
+}
+
 std::unique_ptr<ITask> MakeParquetScanTask(
     const TParquetScanNode& node, TOutputPort output, TNodeTaskContext& context)
 {
-    const auto& file = context.ParquetFiles.try_emplace(node.Path, node.Path).first->second;
     std::optional<std::unordered_set<std::string>> columns;
     if (node.Columns) {
         columns.emplace(node.Columns->begin(), node.Columns->end());
     }
     auto state = std::make_shared<NLowering::TSchedulerSourceState>();
-    state->OwnedSource = file.MakeSource(node.RowGroups, std::move(columns));
+    state->OwnedSource = ResolveTable(context, node.Path).MakeSource(node.RowGroups, std::move(columns));
     state->Source = state->OwnedSource.get();
     return std::make_unique<TSourceTask>(NLowering::MakeSourceCode(), std::move(state), output);
 }
@@ -451,8 +459,11 @@ std::unique_ptr<ITask> MakeNodeTask(
                 std::make_shared<NLowering::TLimitBlockingState>(node.Limit, node.Offset),
                 InputPort(connections, node.In), OutputPort(connections, node.Out));
         } else if constexpr (std::is_same_v<TNode, TLateLookupNode>) {
-            const auto& file = context.ParquetFiles.try_emplace(node.Path, node.Path).first->second;
-            auto reader = file.CompileReader(node.Columns);
+            auto lookup = ResolveTable(context, node.Path).MakeLookupSource();
+            if (!lookup) {
+                Invalid("a late lookup table has no row locators");
+            }
+            auto reader = lookup->CompileReader(node.Columns);
             if (!reader) {
                 Invalid("a late lookup could not compile its row reader");
             }

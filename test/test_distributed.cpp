@@ -1,4 +1,5 @@
 #include <qdbd/serialization.h>
+#include "mock_source.h"
 #include <qdbd/actors.h>
 #include <qdbd/actors/compute.h>
 #include <qdbd/actors/collector.h>
@@ -1485,7 +1486,7 @@ struct TLoweredFragment {
 
 // Lowers `sql` over `source` as table t, without a sink.
 NQdb::NScheduler::TLoweredPlan LowerSql(
-    const std::string& sql, TParquetSource& source, const NQdb::NScheduler::TSettings& settings,
+    const std::string& sql, TParquetFile& source, const NQdb::NScheduler::TSettings& settings,
     TPlanPassOptions options = {.EnableCbo = false})
 {
     using namespace NQdb::NScheduler;
@@ -1497,7 +1498,7 @@ NQdb::NScheduler::TLoweredPlan LowerSql(
         throw std::runtime_error(parsed.error().ToString());
     }
     auto plan = BuildPlan(*parsed, [&](std::string_view) -> std::expected<TOperatorPtr, NQumir::TError> {
-        return std::make_shared<TSourceOperator>(source, "t");
+        return std::make_shared<TSourceOperator>(Borrow(source), "t");
     });
     if (!plan) {
         throw std::runtime_error(plan.error().ToString());
@@ -1517,7 +1518,7 @@ struct TNoSink : ISink {
 TLoweredFragment LowerFragment(const std::string& sql)
 {
     using namespace NQdb::NScheduler;
-    TParquetSource source(DecimalsPath);
+    TParquetFile source(DecimalsPath);
     // One scan task keeps the file order.
     TSettings settings;
     settings.ScanSplit.Strategy = EScanSplitStrategy::SerialRead;
@@ -3186,7 +3187,7 @@ TEST(DistributedScheduler, ComputeActorFinishesARootWhileAnotherWaitsOnItsSource
 // moved, match its edges, and it holds the placeholders of its side of each cut.
 TEST(DistributedScheduler, SplitsALoweredPlanIntoFragmentSpecs) {
     using namespace NQdb::NScheduler;
-    TParquetSource source(DecimalsPath);
+    TParquetFile source(DecimalsPath);
     TSettings settings;
     settings.ScanSplit.Strategy = EScanSplitStrategy::RowGroupRange;
     settings.ScanSplit.MaxScanTasks = 4;
@@ -3262,7 +3263,7 @@ TEST(DistributedScheduler, SplitsALoweredPlanIntoFragmentSpecs) {
 // consumers by the same hash and partition count.
 TEST(DistributedScheduler, SplitsEachShuffleLaneIntoOneStreamPerFragment) {
     using namespace NQdb::NScheduler;
-    TParquetSource source(DecimalsPath);
+    TParquetFile source(DecimalsPath);
     TSettings settings;
     settings.Scheduler.WorkerCount = 8;
     settings.ScanSplit.Strategy = EScanSplitStrategy::RowGroupRange;
@@ -3342,19 +3343,19 @@ struct TDecimalsCompiler {
 
     TPlanPassOptions Options;
     TExternalModuleCatalog Catalog;
-    std::vector<std::unique_ptr<TParquetSource>> Sources;
+    std::vector<std::unique_ptr<TParquetFile>> Sources;
     NCompiler::TQueryCompiler Compiler{Catalog, [this](std::string_view) -> std::expected<TOperatorPtr, NQumir::TError> {
-        auto& source = Sources.emplace_back(std::make_unique<TParquetSource>(DecimalsPath));
-        return std::make_shared<TSourceOperator>(*source, "t");
+        auto& source = Sources.emplace_back(std::make_unique<TParquetFile>(DecimalsPath));
+        return std::make_shared<TSourceOperator>(Borrow(*source), "t");
     }, Options};
 
     // A compiler that owns its sources, as the daemon makes one per query.
     std::unique_ptr<NCompiler::TQueryCompiler> MakeQueryCompiler()
     {
-        auto sources = std::make_shared<std::vector<std::unique_ptr<TParquetSource>>>();
+        auto sources = std::make_shared<std::vector<std::unique_ptr<TParquetFile>>>();
         return std::make_unique<NCompiler::TQueryCompiler>(Catalog, [sources](std::string_view) -> std::expected<TOperatorPtr, NQumir::TError> {
-            auto& source = sources->emplace_back(std::make_unique<TParquetSource>(DecimalsPath));
-            return std::make_shared<TSourceOperator>(*source, "t");
+            auto& source = sources->emplace_back(std::make_unique<TParquetFile>(DecimalsPath));
+            return std::make_shared<TSourceOperator>(Borrow(*source), "t");
         }, Options);
     }
 };
@@ -3423,7 +3424,7 @@ constexpr const char* LateLookupSql = "SELECT id, d9, d15, d18, d38, s FROM t OR
 // merge carries the layouts of the columns that lookup reads.
 TEST(DistributedScheduler, SplitsALateLookupWithTheLayoutsOfItsColumns) {
     using namespace NQdb::NScheduler;
-    TParquetSource source(DecimalsPath);
+    TParquetFile source(DecimalsPath);
     TSettings settings;
     settings.Scheduler.WorkerCount = 2;
     settings.ScanSplit.Strategy = EScanSplitStrategy::RowGroupRange;
@@ -3458,7 +3459,7 @@ constexpr const char* RuntimeFilterJoinSql =
 // lanes, the merge of that fragment's lanes.
 TEST(DistributedScheduler, SplitsRuntimeFiltersSoEveryProbeMergesEveryBuildLane) {
     using namespace NQdb::NScheduler;
-    TParquetSource source(DecimalsPath);
+    TParquetFile source(DecimalsPath);
     TSettings settings;
     settings.Scheduler.WorkerCount = 4;
     settings.ScanSplit.Strategy = EScanSplitStrategy::RowGroupRange;
@@ -3561,7 +3562,7 @@ constexpr const char* CteSql =
 // of its consumer lanes, which its CTE source seals.
 TEST(DistributedScheduler, SplitsACteIntoSegmentAndSpoolCuts) {
     using namespace NQdb::NScheduler;
-    TParquetSource source(DecimalsPath);
+    TParquetFile source(DecimalsPath);
     TSettings settings;
     settings.Scheduler.WorkerCount = 4;
     settings.ScanSplit.Strategy = EScanSplitStrategy::RowGroupRange;
@@ -3835,7 +3836,7 @@ TEST(DistributedScheduler, QueryActorRunsCtesAcrossNodes) {
 
     // At width 4 both kinds of CTE cut run: segments to the publish task and
     // copies of the spool to the other node's consumer lanes.
-    TParquetSource table(DecimalsPath);
+    TParquetFile table(DecimalsPath);
     auto settings = cluster.Settings;
     settings.Scheduler.WorkerCount = 4;
     auto lowered = LowerSql(CteSql, table, settings, WithoutRuntimeFilters);

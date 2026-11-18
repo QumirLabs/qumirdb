@@ -31,7 +31,7 @@ std::string PlanningError(std::string_view sql) {
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
         if (table == "t") {
-            return std::make_shared<TSourceOperator>(t, std::string(table));
+            return std::make_shared<TSourceOperator>(Borrow(t), std::string(table));
         }
         if (table == "opaque") {
             return std::make_shared<TCteRef>(std::make_shared<TCteDefinition>());

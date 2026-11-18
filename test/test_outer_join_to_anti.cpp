@@ -90,14 +90,14 @@ TOperatorPtr PlanSql(
     if (!parsed) {
         throw std::runtime_error(parsed.error().ToString());
     }
-    const std::map<std::string, ISource*> tables = {
+    const std::map<std::string, ITable*> tables = {
         {"sales", &sales.Source}, {"returns", &returns.Source},
     };
     auto plan = BuildPlan(*parsed, [&](std::string_view name)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
         return std::make_shared<TSourceOperator>(
-            *tables.at(std::string(name)), std::string(name));
+            Borrow(*tables.at(std::string(name))), std::string(name));
     });
     if (!plan) {
         throw std::runtime_error(plan.error().ToString());

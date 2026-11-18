@@ -143,15 +143,45 @@ std::optional<uint64_t> EncodeStatsScalar(
     return std::nullopt;
 }
 
+// A scan of the export never runs, so the reader has only its schema.
+class TSchemaOnlyReader final : public NQdb::ISource {
+public:
+    TSchemaOnlyReader(std::vector<NQdb::TColumnSchema> columns, NQdb::TStatsPtr stats)
+        : Columns_(std::move(columns))
+        , Stats_(std::move(stats))
+    {
+        Schema_ = NQdb::TSchema{std::span<const NQdb::TColumnSchema>(Columns_)};
+    }
+
+    const NQdb::TSchema& Schema() const override {
+        return Schema_;
+    }
+
+    const NQdb::TStatsPtr Stats() const override {
+        return Stats_;
+    }
+
+    bool Next(NQdb::TRowSet&) override {
+        return false;
+    }
+
+private:
+    std::vector<NQdb::TColumnSchema> Columns_;
+    NQdb::TSchema Schema_;
+    NQdb::TStatsPtr Stats_;
+};
+
 class TSchemaOnlySource final
     : public NQdb::ISource
-    , public NQdb::NScheduler::IScanMetadataSource
+    , public NQdb::ITable
 {
 public:
-    explicit TSchemaOnlySource(
+    TSchemaOnlySource(
+        std::string path,
         std::vector<std::pair<std::string, NQumir::NAst::TTypePtr>> fields,
         TTableStats stats)
-        : Stats_(stats)
+        : Path_(std::move(path))
+        , Stats_(stats)
     {
         Names_.reserve(fields.size());
         Columns_.reserve(fields.size());
@@ -228,14 +258,40 @@ public:
         return false;
     }
 
-    void RestrictColumns(const std::unordered_set<std::string>& names) override {
-        Columns_.clear();
+    const std::string& Path() const override {
+        return Path_;
+    }
+
+    std::unique_ptr<NQdb::IRowLookupSource> MakeLookupSource() const override {
+        return nullptr;
+    }
+
+    std::unique_ptr<NQdb::ISource> MakeSource(
+        std::optional<std::vector<int>>,
+        std::optional<std::unordered_set<std::string>> names) const override
+    {
+        std::vector<NQdb::TColumnSchema> columns;
         for (const auto& column : AllColumns_) {
-            if (names.contains(std::string(column.Name))) {
-                Columns_.push_back(column);
+            if (!names || names->contains(std::string(column.Name))) {
+                columns.push_back(column);
             }
         }
-        Schema_ = NQdb::TSchema{std::span<const NQdb::TColumnSchema>(Columns_)};
+        return std::make_unique<TSchemaOnlyReader>(std::move(columns), Stats());
+    }
+
+    std::vector<NQdb::NScheduler::TScanRowGroup> ScanRowGroups(
+        const std::unordered_set<std::string>&) const override
+    {
+        return ScanRowGroups();
+    }
+
+    std::vector<NQdb::NScheduler::TScanRowGroup> PruneRowGroups(
+        const NQumir::NAst::TExprPtr&,
+        std::string_view,
+        std::ostream*,
+        const std::unordered_set<std::string>*) const override
+    {
+        return ScanRowGroups();
     }
 
     std::vector<NQdb::NScheduler::TScanRowGroup> ScanRowGroups() const override {
@@ -265,6 +321,7 @@ public:
     }
 
 private:
+    std::string Path_;
     TTableStats Stats_;
     std::vector<std::string> Names_;
     std::vector<NQdb::TColumnSchema> AllColumns_;
@@ -273,7 +330,7 @@ private:
 };
 
 struct TCatalog {
-    std::unordered_map<std::string, std::unique_ptr<TSchemaOnlySource>> Sources;
+    std::unordered_map<std::string, std::shared_ptr<TSchemaOnlySource>> Sources;
 };
 
 struct TExportRequest {
@@ -863,7 +920,8 @@ TCatalog ParseCatalog(const llvm::json::Object& root) {
         }
         catalog.Sources.emplace(
             std::string(*name),
-            std::make_unique<TSchemaOnlySource>(
+            std::make_shared<TSchemaOnlySource>(
+                std::string(*name),
                 ParseTableColumns(*table),
                 ParseTableStats(*table)));
     }
@@ -1033,7 +1091,7 @@ std::expected<TParsedSql, NQumir::TError> ParseSql(
             return std::unexpected(NQumir::TError(
                 "unknown browser dataset table: " + std::string(table)));
         }
-        return std::make_shared<NQdb::TSourceOperator>(*it->second, std::string(table));
+        return std::make_shared<NQdb::TSourceOperator>(it->second, std::string(table));
     };
 
     NQdb::NKernel::TAnnotationContext annotation{

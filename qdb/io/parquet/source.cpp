@@ -283,6 +283,41 @@ struct TParquetFileData {
     TStatsPtr Stats;
 };
 
+namespace {
+
+// Random row access to a parquet file, for late materialization.
+class TParquetRowLookup final : public IRowLookupSource {
+public:
+    explicit TParquetRowLookup(std::shared_ptr<TParquetFileData> data)
+        : Data_(std::move(data))
+    {}
+
+    std::shared_ptr<const IPhysicalRowReader> CompileReader(
+        std::span<const std::string> columnNames) const override;
+    std::optional<TLateMaterializationCost> EstimateLookup(
+        std::span<const std::string> earlyColumns,
+        std::span<const std::string> fetchColumns,
+        uint64_t maxRows) const override;
+
+private:
+    std::shared_ptr<TParquetFileData> Data_;
+};
+
+// Indices into the full file schema of the named columns.
+std::vector<int> FileColumnIndexes(
+    const TParquetFileData& file, const std::unordered_set<std::string>& columnNames)
+{
+    std::vector<int> indices;
+    for (int i = 0; i < static_cast<int>(file.FileNames.size()); ++i) {
+        if (columnNames.contains(file.FileNames[i])) {
+            indices.push_back(i);
+        }
+    }
+    return indices;
+}
+
+} // namespace
+
 void TParquetFileData::Open()
 {
     // Compiled physical readers share this FileReader across scheduler tasks.
@@ -588,24 +623,15 @@ TParquetFile::TParquetFile(const std::string& path)
     : Data_(std::make_shared<TParquetFileData>(path))
 {}
 
-TParquetFile::TParquetFile(std::shared_ptr<TParquetFileData> data)
-    : Data_(std::move(data))
-{}
-
 TParquetFile::~TParquetFile() = default;
 
-std::unique_ptr<TParquetSource> TParquetFile::MakeSource(
+std::unique_ptr<ISource> TParquetFile::MakeSource(
     std::optional<std::vector<int>> rowGroups,
     std::optional<std::unordered_set<std::string>> restrictedColumns) const
 {
-    return std::unique_ptr<TParquetSource>(
+    return std::unique_ptr<ISource>(
         new TParquetSource(Data_, std::move(rowGroups), std::move(restrictedColumns)));
 }
-
-TParquetSource::TParquetSource(const std::string& path)
-    : TParquetSource(
-        std::make_shared<TParquetFileData>(path), std::nullopt, std::nullopt)
-{}
 
 TParquetSource::TParquetSource(
     std::shared_ptr<TParquetFileData> file,
@@ -690,33 +716,21 @@ bool TParquetSource::RowIdRequested() const {
         std::string(InternalRowIdColumnName));
 }
 
-std::vector<int> TParquetSource::EffectiveFileColumnIndexes(
-    const std::unordered_set<std::string>* columnNames) const
+std::vector<int> TParquetSource::EffectiveFileColumnIndexes() const
 {
-    if (!columnNames && RestrictedColumns_) {
-        columnNames = &*RestrictedColumns_;
-    }
-    if (!columnNames) {
-        return {};
-    }
-
-    // Map restricted names to indices into the full file schema,
-    // never the possibly-narrowed Names_, so repeated restrictions stay stable.
-    std::vector<int> indices;
-    for (int i = 0; i < static_cast<int>(File_->FileNames.size()); ++i) {
-        if (columnNames->count(File_->FileNames[i])) {
-            indices.push_back(i);
-        }
-    }
-    return indices;
+    return RestrictedColumns_
+        ? FileColumnIndexes(*File_, *RestrictedColumns_)
+        : std::vector<int>{};
 }
 
 void TParquetSource::RefreshSchema()
 {
     Names_.clear();
     Columns_.clear();
-    Names_.reserve(SelectedColumns_.size());
-    Columns_.reserve(SelectedColumns_.size());
+    // Columns_ names view Names_, so it must not reallocate for the row id.
+    const size_t columnCount = SelectedColumns_.size() + (RowIdRequested() ? 1 : 0);
+    Names_.reserve(columnCount);
+    Columns_.reserve(columnCount);
     std::vector<std::shared_ptr<arrow::Field>> fields;
     fields.reserve(SelectedColumns_.size());
     size_t nextScan = 0;
@@ -974,69 +988,53 @@ const TStatsPtr TParquetSource::Stats() const
     return File_->Stats;
 }
 
-TParquetFile TParquetSource::File() const
+const TSchema& TParquetFile::Schema() const
 {
-    return TParquetFile(File_);
+    return Data_->FullSchema;
 }
 
-const std::string& TParquetSource::Path() const
+const TStatsPtr TParquetFile::Stats() const
 {
-    return File_->Path;
+    return Data_->Stats;
 }
 
-const std::optional<std::vector<int>>& TParquetSource::RowGroups() const
+const std::string& TParquetFile::Path() const
 {
-    return RowGroups_;
+    return Data_->Path;
 }
 
-const std::optional<std::unordered_set<std::string>>& TParquetSource::RestrictedColumns() const
-{
-    return RestrictedColumns_;
-}
-
-void TParquetSource::RestrictColumns(const std::unordered_set<std::string>& names) {
-    RestrictedColumns_ = names;
-    SelectColumns();
-}
-
-std::vector<NScheduler::TScanRowGroup> TParquetSource::ScanRowGroups() const
+std::vector<NScheduler::TScanRowGroup> TParquetFile::ScanRowGroups() const
 {
     return ScanRowGroupsForColumns(nullptr);
 }
 
-std::vector<NScheduler::TScanRowGroup> TParquetSource::ScanRowGroups(
+std::vector<NScheduler::TScanRowGroup> TParquetFile::ScanRowGroups(
     const std::unordered_set<std::string>& columnNames) const
 {
     return ScanRowGroupsForColumns(&columnNames);
 }
 
-std::vector<NScheduler::TScanRowGroup> TParquetSource::ScanRowGroupsForColumns(
+std::vector<NScheduler::TScanRowGroup> TParquetFile::ScanRowGroupsForColumns(
     const std::unordered_set<std::string>* columnNames) const
 {
-    if (!columnNames && RestrictedColumns_) {
-        columnNames = &*RestrictedColumns_;
+    if (!columnNames) {
+        return Data_->RowGroups;
     }
-    std::vector<NScheduler::TScanRowGroup> groups;
-    const auto rowGroups = EffectiveRowGroups();
-    const auto columns = EffectiveFileColumnIndexes(columnNames);
-    const auto metadata = File_->FileReader->parquet_reader()->metadata();
-    groups.reserve(rowGroups.size());
-    for (int rg : rowGroups) {
-        auto group = File_->RowGroups[static_cast<size_t>(rg)];
-        if (columnNames) {
-            group.ByteSize = 0;
-            const auto rowGroup = metadata->RowGroup(rg);
-            for (int column : columns) {
-                group.ByteSize += rowGroup->ColumnChunk(column)
-                    ->total_uncompressed_size();
-            }
+    auto groups = Data_->RowGroups;
+    const auto columns = FileColumnIndexes(*Data_, *columnNames);
+    const auto metadata = Data_->FileReader->parquet_reader()->metadata();
+    for (auto& group : groups) {
+        group.ByteSize = 0;
+        const auto rowGroup = metadata->RowGroup(static_cast<int>(group.RowGroup));
+        for (int column : columns) {
+            group.ByteSize += rowGroup->ColumnChunk(column)
+                ->total_uncompressed_size();
         }
-        groups.push_back(group);
     }
     return groups;
 }
 
-std::vector<NScheduler::TScanRowGroup> TParquetSource::PruneRowGroups(
+std::vector<NScheduler::TScanRowGroup> TParquetFile::PruneRowGroups(
     const NQumir::NAst::TExprPtr& predicate,
     std::string_view sourceAlias,
     std::ostream* diagnostics,
@@ -1047,8 +1045,8 @@ std::vector<NScheduler::TScanRowGroup> TParquetSource::PruneRowGroups(
         return rowGroups;
     }
     auto evaluator = TRowGroupPredicateEvaluator::Compile(
-        predicate, File_->FullSchema, sourceAlias, diagnostics);
-    if (!evaluator || File_->RowGroupRanges.size() != File_->RowGroups.size()) {
+        predicate, Data_->FullSchema, sourceAlias, diagnostics);
+    if (!evaluator || Data_->RowGroupRanges.size() != Data_->RowGroups.size()) {
         return rowGroups;
     }
 
@@ -1056,15 +1054,15 @@ std::vector<NScheduler::TScanRowGroup> TParquetSource::PruneRowGroups(
     kept.reserve(rowGroups.size());
     for (const auto& group : rowGroups) {
         const size_t rg = group.RowGroup;
-        const bool mayBeTrue = evaluator->MayBeTrue(File_->RowGroupRanges[rg]);
+        const bool mayBeTrue = evaluator->MayBeTrue(Data_->RowGroupRanges[rg]);
         if (diagnostics) {
             *diagnostics << "row-group predicate: rg=" << rg
                          << " may_be_true=" << mayBeTrue;
             for (size_t column = 0;
-                 column < File_->RowGroupRanges[rg].size(); ++column)
+                 column < Data_->RowGroupRanges[rg].size(); ++column)
             {
-                const auto& range = File_->RowGroupRanges[rg][column];
-                *diagnostics << " col=" << File_->FileNames[column]
+                const auto& range = Data_->RowGroupRanges[rg][column];
+                *diagnostics << " col=" << Data_->FileNames[column]
                              << " bounds=" << range.HasBounds
                              << " min_bits=" << static_cast<uint64_t>(range.MinValue)
                              << " max_bits=" << static_cast<uint64_t>(range.MaxValue)
@@ -1080,11 +1078,16 @@ std::vector<NScheduler::TScanRowGroup> TParquetSource::PruneRowGroups(
     return kept;
 }
 
-std::shared_ptr<const IPhysicalRowReader> TParquetFile::CompileReader(
+std::shared_ptr<const IPhysicalRowReader> TParquetRowLookup::CompileReader(
     std::span<const std::string> columnNames) const
 {
     return std::make_shared<TParquetPhysicalRowReader>(
         Data_->FileReader, columnNames, GetMemoryPool());
+}
+
+std::unique_ptr<IRowLookupSource> TParquetFile::MakeLookupSource() const
+{
+    return std::make_unique<TParquetRowLookup>(Data_);
 }
 
 // Parquet page sizes are not in the metadata. Writers cap a data page at 1 MiB
@@ -1092,15 +1095,15 @@ std::shared_ptr<const IPhysicalRowReader> TParquetFile::CompileReader(
 // writer using smaller pages only makes the real lookup cheaper.
 inline constexpr uint64_t ParquetPageSizeGuess = uint64_t{1} << 20;
 
-std::optional<TLateMaterializationCost> TParquetSource::EstimateLookup(
+std::optional<TLateMaterializationCost> TParquetRowLookup::EstimateLookup(
     std::span<const std::string> earlyColumns,
     std::span<const std::string> fetchColumns,
     uint64_t maxRows) const
 {
-    auto metadata = File_->FileReader->parquet_reader()->metadata();
+    auto metadata = Data_->FileReader->parquet_reader()->metadata();
     std::unordered_map<std::string, int> columnIndexes;
-    for (int i = 0; i < static_cast<int>(File_->FileNames.size()); ++i) {
-        columnIndexes.emplace(File_->FileNames[static_cast<size_t>(i)], i);
+    for (int i = 0; i < static_cast<int>(Data_->FileNames.size()); ++i) {
+        columnIndexes.emplace(Data_->FileNames[static_cast<size_t>(i)], i);
     }
 
     auto normalize = [&](std::span<const std::string> columns)

@@ -62,7 +62,7 @@ struct TFixture {
             names.push_back(col.Name);
         }
         Sources.push_back(std::make_unique<TMockSource>(names));
-        auto op = std::make_shared<TSourceOperator>(*Sources.back(), std::string{});
+        auto op = std::make_shared<TSourceOperator>(Borrow(*Sources.back()), std::string{});
         auto stats = std::make_shared<TStats>();
         stats->RowCount = spec.Rows;
         for (const auto& col : spec.Cols) {
@@ -611,7 +611,7 @@ TWidthPlan PlanWithPayload(size_t payloadColumns, bool demandPayload) {
     TWidthSource a(std::move(aNames), std::move(aTypes), 100, std::move(aNdvs));
     TWidthSource b({"a_id", "c_id"}, {integer, integer}, 1000, {100, 1000});
     TWidthSource c({"id", "payload"}, {integer, string}, 1000, {1000, 1000});
-    std::map<std::string, ISource*> sources{{"a", &a}, {"b", &b}, {"c", &c}};
+    std::map<std::string, ITable*> sources{{"a", &a}, {"b", &b}, {"c", &c}};
     std::istringstream sql(select
         + " from a, b, c where a.id = b.a_id and b.c_id = c.id");
     NSql::TTokenStream tokens(sql);
@@ -623,7 +623,7 @@ TWidthPlan PlanWithPayload(size_t payloadColumns, bool demandPayload) {
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
         return std::make_shared<TSourceOperator>(
-            *sources.at(std::string(table)), std::string(table));
+            Borrow(*sources.at(std::string(table))), std::string(table));
     });
     if (!built) {
         throw std::runtime_error(built.error().ToString());

@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "mock_source.h"
 
 #include "plan_runner.h"
 
@@ -167,7 +168,7 @@ std::shared_ptr<TSourceOperator> FindSource(const TOperatorPtr& node) {
 
 TOperatorPtr BuildSqlPlan(
     std::string_view sql,
-    const std::unordered_map<std::string, ISource*>& sources)
+    const std::unordered_map<std::string, ITable*>& sources)
 {
     std::istringstream input{std::string(sql)};
     NSql::TTokenStream tokens(input);
@@ -180,7 +181,7 @@ TOperatorPtr BuildSqlPlan(
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
         return std::make_shared<TSourceOperator>(
-            *sources.at(std::string(table)), std::string(table));
+            Borrow(*sources.at(std::string(table))), std::string(table));
     });
     if (!plan) {
         throw std::runtime_error(plan.error().ToString());
@@ -189,7 +190,7 @@ TOperatorPtr BuildSqlPlan(
     return *plan;
 }
 
-TOperatorPtr BuildSqlPlan(std::string_view sql, TParquetSource& source) {
+TOperatorPtr BuildSqlPlan(std::string_view sql, TParquetFile& source) {
     return BuildSqlPlan(sql, {{"t", &source}});
 }
 
@@ -220,7 +221,7 @@ TRunResult RunQuery(
     bool enablePruning,
     bool autoTasks = false)
 {
-    TParquetSource source(path);
+    TParquetFile source(path);
     auto plan = BuildSqlPlan(sql, source);
     auto sourceOp = FindSource(plan);
     if (!sourceOp) {
@@ -411,11 +412,11 @@ TEST(RowGroupPushdownE2E, AutoJoinRunsWithUnequalSourceWidths) {
     const std::string path = (tempDir.Path() / "auto-join.parquet").string();
     WriteFixture(path);
     TParquetFile file(path);
-    auto left = file.MakeSource();
-    auto right = file.MakeSource(std::vector<int>{1});
+    // The id filter prunes r to one row group, so the join inputs differ in width.
     auto plan = BuildSqlPlan(
-        "SELECT l.id FROM l JOIN r ON l.signed_value = r.signed_value",
-        {{"l", left.get()}, {"r", right.get()}});
+        "SELECT l.id FROM l JOIN r ON l.signed_value = r.signed_value "
+        "WHERE r.id >= 2 AND r.id <= 3",
+        {{"l", &file}, {"r", &file}});
     NScheduler::TSettings settings;
     settings.Scheduler.Mode = NScheduler::EExecutionMode::ThreadedScheduler;
     settings.Scheduler.WorkerCount = 2;

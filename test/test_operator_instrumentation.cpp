@@ -45,7 +45,7 @@ std::shared_ptr<TKernelSlot> MeasurementKernel() {
     return TKernelCompiler().CompileInstrumentation();
 }
 
-TOperatorPtr SqlPlan(const std::string& sql, ISource& source) {
+TOperatorPtr SqlPlan(const std::string& sql, ITable& source) {
     std::istringstream input(sql);
     NSql::TTokenStream tokens(input);
     NSql::TParser parser;
@@ -56,7 +56,7 @@ TOperatorPtr SqlPlan(const std::string& sql, ISource& source) {
     auto plan = BuildPlan(*parsed, [&](std::string_view table)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
-        return std::make_shared<TSourceOperator>(source, std::string(table));
+        return std::make_shared<TSourceOperator>(Borrow(source), std::string(table));
     });
     if (!plan) {
         throw plan.error();
@@ -364,8 +364,8 @@ TEST(OperatorInstrumentation, StreamingOuterResidualsKeepCountersAcrossFinalizat
             TMockSource right({"rk", "rv"}, {rightBatch});
             auto residual = NKernel::NOz::Bin("<"_op, NKernel::NOz::Ident("lv"), NKernel::NOz::Ident("rv"));
             auto plan = std::make_shared<TJoinOperator>(
-                std::make_shared<TSourceOperator>(left, "l"),
-                std::make_shared<TSourceOperator>(right, "r"),
+                std::make_shared<TSourceOperator>(Borrow(left), "l"),
+                std::make_shared<TSourceOperator>(Borrow(right), "r"),
                 std::vector<TJoinKey>{{"lk", "rk"}}, joinType, std::move(residual));
             AnnotateTypes(plan);
             ApplyColumnPruning(plan);
@@ -415,10 +415,10 @@ TEST(OperatorInstrumentation, UnionShufflesKeepTheirOwnInputSchemas) {
         TMockSource second({"r"}, {matchBatch});
         TMockSource third({"k", "v"}, {batch});
         TMockSource fourth({"r"}, {matchBatch});
-        auto branch = [](ISource& firstInput, ISource& secondInput) -> TOperatorPtr {
+        auto branch = [](ITable& firstInput, ITable& secondInput) -> TOperatorPtr {
             auto inputs = std::make_shared<TJoinOperator>(
-                std::make_shared<TSourceOperator>(firstInput, "t"),
-                std::make_shared<TSourceOperator>(secondInput, "u"),
+                std::make_shared<TSourceOperator>(Borrow(firstInput), "t"),
+                std::make_shared<TSourceOperator>(Borrow(secondInput), "u"),
                 std::vector<TJoinKey>{{"k", "r"}}, EJoinType::Inner, nullptr);
             auto grouped = std::make_shared<TAggregateOperator>(inputs,
                 std::vector<std::string>{"k"}, std::vector<TAggregateSpec>{

@@ -7,7 +7,6 @@
 
 namespace NQdb {
 
-class IRowLookupSource;
 class TSourceOperator;
 
 struct TLateMaterializeColumn {
@@ -56,12 +55,7 @@ private:
     std::vector<TLateMaterializeColumn> Columns_;
 };
 
-struct TLateMaterializationSourceBinding {
-    TSourceOperator& Source;
-    IRowLookupSource& Lookup;
-};
-
-TLateMaterializationSourceBinding ResolveLateMaterializationSource(
-    const TLateMaterializeOperator& late);
+// The single input source; it must support physical row lookup.
+TSourceOperator& ResolveLateMaterializationSource(const TLateMaterializeOperator& late);
 
 } // namespace NQdb
