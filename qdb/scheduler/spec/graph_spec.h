@@ -3,6 +3,7 @@
 #include <qdb/exec/plan_data.h>
 #include <qdb/exec/runtime_filter.h>
 #include <qdb/io/io.h>
+#include <qdb/io/parquet/table_cache.h>
 #include <qdb/io/table.h>
 #include <qdb/kernel/regex.h>
 #include <qdb/plan/ops/join_type.h>
@@ -675,8 +676,10 @@ struct TNodeTaskContext {
     // Kernel slots by kernel index.
     std::vector<std::shared_ptr<TKernelSlot>> Slots;
     std::shared_ptr<TRuntimeContext> Runtime;
-    // The plan's tables by path; a node opens the file of a path it lacks.
+    // The plan's tables by path; a node opens the file of a path it lacks,
+    // through `TableCache` when set.
     std::unordered_map<std::string, std::shared_ptr<const ITable>> Tables;
+    std::shared_ptr<TTableCache> TableCache;
     // Required for SinkWriter nodes.
     ISink* Sink = nullptr;
     // Built from the CTE tables, by index. They keep the spooled rows alive, so
@@ -722,11 +725,13 @@ void BindRuntimeFilterTask(
 // query's kernel slots by kernel index. The runtime context is rebuilt from the
 // spec's regexes and runtime-filter kernel, the CTE objects from its CTE tables,
 // and the runtime filters through `filterBindings` (local filters by default).
+// Scanned files the spec's tables lack are opened through `tableCache`, if any.
 // Throws std::runtime_error on an invalid spec.
 std::unique_ptr<TTaskGraph> MaterializeGraph(
     const TGraphSpec& spec, ISink* sink = nullptr,
     std::vector<std::shared_ptr<TKernelSlot>> slots = {},
-    std::shared_ptr<IRuntimeFilterBindingFactory> filterBindings = nullptr);
+    std::shared_ptr<IRuntimeFilterBindingFactory> filterBindings = nullptr,
+    std::shared_ptr<TTableCache> tableCache = nullptr);
 
 // Moves the port of `body` bound to `from` to `to`, as ITask::RebindPort moves
 // a task's port. A record's inputs are its In, Left and Right ports, its outputs

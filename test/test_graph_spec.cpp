@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <qdb/io/parquet/table_cache.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/plan/types/type_text.h>
@@ -9,6 +10,7 @@
 #include <qdb/scheduler/spec/graph_spec.h>
 #include <qdb/scheduler/tasks/runtime_adapter.h>
 
+#include <filesystem>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -1062,6 +1064,50 @@ TEST(GraphSpec, ForwardChainRunsRows)
     std::string error;
     ASSERT_TRUE(scheduler.Run(&error)) << error;
     EXPECT_EQ(sink.Rows, 10 + 11 + 12);
+}
+
+TEST(GraphSpec, MaterializationsReuseCachedTableUntilFileIdentityChanges)
+{
+    namespace fs = std::filesystem;
+    const auto path = (fs::temp_directory_path() / "graph_spec_table_cache.parquet").string();
+    fs::copy_file(QDB_TEST_DATA_DIR "/regtest/cases/decimal_parquet/tables/decimals.parquet", path,
+        fs::copy_options::overwrite_existing);
+
+    TGraphSpec spec;
+    spec.Connections = {{.Kind = EConnectionKind::Gather, .Capacity = 2, .SrcCount = 1, .DstCount = 1}};
+    spec.Nodes = {
+        Node("source", "t", TParquetScanNode{.Out = {0, 0}, .Path = path}),
+        Node("sink", "out", TSinkWriterNode{.In = {0, 0}}),
+    };
+    spec.Edges = {{.Src = 0, .Dst = 1, .Connection = 0, .SrcLane = 0, .DstLane = 0}};
+
+    TCountingSink sink;
+    auto cache = std::make_shared<TTableCache>();
+    auto table = cache->Open(path);
+    MaterializeGraph(spec, &sink, {}, nullptr, cache);
+    MaterializeGraph(spec, &sink, {}, nullptr, cache);
+    EXPECT_EQ(cache->Open(path), table);
+
+    // A scan of a changed file replaces the entry; the old table dies with its last user.
+    std::weak_ptr<const ITable> old = table;
+    table.reset();
+    fs::last_write_time(path, fs::last_write_time(path) + std::chrono::seconds(10));
+    MaterializeGraph(spec, &sink, {}, nullptr, cache);
+    EXPECT_TRUE(old.expired());
+
+    // A replacement that keeps the mtime still changes the identity (inode and size).
+    table = cache->Open(path);
+    const void* before = table.get();
+    table.reset();
+    const auto mtime = fs::last_write_time(path);
+    const auto replacement = path + ".new";
+    fs::copy_file(QDB_TEST_DATA_DIR "/regtest/cases/decimal_input/tables/amounts.parquet", replacement,
+        fs::copy_options::overwrite_existing);
+    fs::last_write_time(replacement, mtime);
+    fs::rename(replacement, path);
+    EXPECT_EQ(fs::last_write_time(path), mtime);
+    EXPECT_NE(cache->Open(path).get(), before);
+    fs::remove(path);
 }
 
 int main(int argc, char** argv)

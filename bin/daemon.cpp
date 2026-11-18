@@ -2,8 +2,6 @@
 #include <limits>
 #include <optional>
 #include <filesystem>
-#include <cerrno>
-#include <sys/stat.h>
 
 #include <coroio/all.hpp>
 #include <coroio/actors/actorsystem.hpp>
@@ -18,6 +16,7 @@
 
 #include <qdb/utils/config.h>
 #include <qdb/compiler/query.h>
+#include <qdb/io/parquet/table_cache.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/catalog/external_module.h>
 #include <qdb/scheduler/settings/engine_settings.h>
@@ -94,34 +93,6 @@ struct TDaemonOptions {
     TEngineSettings Engine;
 };
 
-// A replaced file can keep its mtime (cp -p, rsync -t), so the identity is wider.
-struct TFileIdentity {
-    dev_t Device;
-    ino_t Inode;
-    std::uintmax_t Size;
-    std::chrono::file_clock::time_point MTime;
-
-    bool operator==(const TFileIdentity&) const = default;
-};
-
-TFileIdentity GetFileIdentity(const std::string& path)
-{
-    struct stat st;
-    if (::stat(path.c_str(), &st) != 0) {
-        throw std::filesystem::filesystem_error(
-            "stat", path, std::error_code(errno, std::generic_category()));
-    }
-    return {st.st_dev, st.st_ino, std::filesystem::file_size(path),
-            std::filesystem::last_write_time(path)};
-}
-
-struct TTableCacheEntity {
-    std::shared_ptr<const ITable> Table;
-    TFileIdentity Identity;
-};
-
-using TTableCache = std::unordered_map<std::string, TTableCacheEntity>;
-
 template <typename TPoller>
 int RunDaemon(const TDaemonOptions& options, const char* pollerName)
 {
@@ -133,6 +104,7 @@ int RunDaemon(const TDaemonOptions& options, const char* pollerName)
     TExternalModuleCatalog catalog;
     const auto& EngineSettings = options.Engine;
     const auto& dataDir = options.DataDir;
+    // Shared by planning and the compute actors' graphs.
     auto tablesCache = std::make_shared<TTableCache>();
     auto compilerFactory = [&]() {
         auto tableFactory = [&dataDir, tablesCache](std::string_view table)
@@ -140,19 +112,7 @@ int RunDaemon(const TDaemonOptions& options, const char* pollerName)
         {
             const auto path = ResolveTablePath(dataDir, table);
             try {
-                auto identity = GetFileIdentity(path);
-                auto maybeCached = tablesCache->find(path);
-                if (maybeCached != tablesCache->end() && maybeCached->second.Identity == identity) {
-                    return std::make_shared<TSourceOperator>(maybeCached->second.Table, path);
-                }
-                auto source = std::make_shared<TParquetFile>(path);
-                auto op = std::make_shared<TSourceOperator>(source, path);
-                if (maybeCached == tablesCache->end()) {
-                    tablesCache->insert({path, {source, identity}});
-                } else {
-                    maybeCached->second = {source, identity};
-                }
-                return op;
+                return std::make_shared<TSourceOperator>(tablesCache->Open(path), path);
             } catch (const std::exception& e) {
                 return std::unexpected(NQumir::TError(
                     "cannot open table '" + std::string(table) + "': " + e.what()));
@@ -238,7 +198,7 @@ int RunDaemon(const TDaemonOptions& options, const char* pollerName)
     sys.RegisterWellKnown(TLocalActorId(EWellKnownActors::Scheduler), IActor::TPtr(CreateSchedulerActor(&timeSource, leaderId, logger)));
 
     uint64_t pingPeriodMs = 1000;
-    sys.RegisterWellKnown(TLocalActorId(EWellKnownActors::LocalScheduler), IActor::TPtr(CreateLocalScheduler(leaderId, pingPeriodMs, EngineSettings.Scheduler.Scheduler, EngineSettings.Scheduler.Transport)));
+    sys.RegisterWellKnown(TLocalActorId(EWellKnownActors::LocalScheduler), IActor::TPtr(CreateLocalScheduler(leaderId, pingPeriodMs, EngineSettings.Scheduler.Scheduler, EngineSettings.Scheduler.Transport, tablesCache)));
 
     std::cerr << "QumirDB poller: " << pollerName << "\n";
     std::cerr << "QumirDB listening on " << httpListenAddress << ", " << actorSysListenAddress << "\n";
