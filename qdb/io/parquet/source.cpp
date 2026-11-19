@@ -17,7 +17,9 @@
 #include <arrow/util/key_value_metadata.h>
 #include <parquet/arrow/reader.h>
 #include <parquet/arrow/schema.h>
+#include <parquet/file_reader.h>
 #include <parquet/metadata.h>
+#include <parquet/properties.h>
 #include <parquet/schema.h>
 #include <parquet/statistics.h>
 
@@ -273,6 +275,9 @@ struct TParquetFileData {
 
     std::string Path;
     std::shared_ptr<parquet::arrow::FileReader> FileReader;
+    // The same file for range reads, which skip most pages of a chunk: its
+    // buffered streams read the pages kept rather than the whole chunk.
+    std::shared_ptr<parquet::ParquetFileReader> PageFile;
     std::shared_ptr<arrow::Schema> FileSchema;
     std::vector<std::string> FileNames;
     std::vector<TColumnSchema> FileColumns;
@@ -351,6 +356,11 @@ void TParquetFileData::Open()
         throw std::runtime_error(fileReaderResult.status().ToString());
     }
     FileReader = std::move(*fileReaderResult);
+
+    parquet::ReaderProperties pageProperties(GetMemoryPool());
+    pageProperties.enable_buffered_stream();
+    PageFile = parquet::ParquetFileReader::Open(
+        infile, pageProperties, FileReader->parquet_reader()->metadata());
 
     auto schemaStatus = FileReader->GetSchema(&FileSchema);
     if (!schemaStatus.ok()) {
@@ -630,41 +640,34 @@ std::unique_ptr<ISource> TParquetFile::MakeSource(
     std::optional<std::vector<int>> rowGroups,
     std::optional<std::unordered_set<std::string>> restrictedColumns) const
 {
+    if (!rowGroups) {
+        rowGroups.emplace(Data_->RowGroups.size());
+        std::iota(rowGroups->begin(), rowGroups->end(), 0);
+    }
+    std::vector<TParquetSource::TPart> parts;
+    parts.reserve(rowGroups->size());
+    for (int rowGroup : *rowGroups) {
+        const int64_t rows = Data_->RowGroups.at(static_cast<size_t>(rowGroup)).RowCount;
+        if (rows > 0) {
+            parts.push_back({.RowGroup = rowGroup, .Ranges = {{.Begin = 0, .End = rows}}});
+        }
+    }
     return std::unique_ptr<ISource>(
-        new TParquetSource(Data_, std::move(rowGroups), std::move(restrictedColumns)));
+        new TParquetSource(Data_, std::move(parts), std::move(restrictedColumns)));
 }
 
 TParquetSource::TParquetSource(
     std::shared_ptr<TParquetFileData> file,
-    std::optional<std::vector<int>> rowGroups,
+    std::vector<TPart> parts,
     std::optional<std::unordered_set<std::string>> restrictedColumns)
     : File_(std::move(file))
-    , RowGroups_(std::move(rowGroups))
+    , Parts_(std::move(parts))
     , RestrictedColumns_(std::move(restrictedColumns))
 {
     SelectColumns();
 }
 
-void TParquetSource::EnsureOpen() {
-    if (!Reader_) {
-        ResetReader();
-    }
-}
-
-std::vector<int> TParquetSource::EffectiveRowGroups() const
-{
-    if (RowGroups_) {
-        return *RowGroups_;
-    }
-
-    const int numRgs = static_cast<int>(File_->RowGroups.size());
-    std::vector<int> rowGroups(numRgs);
-    std::iota(rowGroups.begin(), rowGroups.end(), 0);
-    return rowGroups;
-}
-
 void TParquetSource::SelectColumns() {
-    auto rowGroups = EffectiveRowGroups();
     SelectedColumns_.clear();
     if (RestrictedColumns_) {
         SelectedColumns_ = EffectiveFileColumnIndexes();
@@ -673,43 +676,102 @@ void TParquetSource::SelectColumns() {
             SelectedColumns_.push_back(i);
         }
     }
+    // Decimal columns bypass Arrow's per-value Decimal128 conversion (TDecimalColumnScan).
+    ArrowColumns_.clear();
     DecimalScans_.clear();
     for (size_t position = 0; position < SelectedColumns_.size(); ++position) {
         const int field = SelectedColumns_[position];
         const int leaf = File_->DecimalScanColumns[static_cast<size_t>(field)];
         if (leaf < 0) {
+            ArrowColumns_.push_back(field);
             continue;
         }
         DecimalScans_.push_back({
             .Position = position,
             .Scan = std::make_unique<TDecimalColumnScan>(
-                *File_->FileReader->parquet_reader(), leaf, rowGroups, GetMemoryPool()),
+                *File_->FileReader->parquet_reader(), leaf, GetMemoryPool()),
         });
     }
-    Reader_.reset();
     RefreshSchema();
 }
 
-void TParquetSource::ResetReader()
+void TParquetSource::OpenPart(const TPart& part)
 {
-    auto rowGroups = EffectiveRowGroups();
-    // Decimal columns bypass Arrow's per-value Decimal128 conversion (TDecimalColumnScan).
-    std::vector<int> arrowColumns;
-    for (size_t position = 0; position < SelectedColumns_.size(); ++position) {
-        const int field = SelectedColumns_[position];
-        const int leaf = File_->DecimalScanColumns[static_cast<size_t>(field)];
-        if (leaf < 0) {
-            arrowColumns.push_back(field);
+    Part_ = &part;
+    const int64_t rows = File_->RowGroups[static_cast<size_t>(part.RowGroup)].RowCount;
+    const bool whole = part.Ranges.size() == 1 &&
+        part.Ranges.front() == TRowRange{.Begin = 0, .End = rows};
+    if (!whole) {
+        RangeReader_ = TParquetRangeReader::Make(
+            File_->FileReader->manifest(), *File_->PageFile, part.RowGroup, ArrowColumns_, part.Ranges,
+            GetMemoryPool());
+        if (RangeReader_) {
+            return;
         }
     }
-    auto batchReaderResult = File_->FileReader->GetRecordBatchReader(rowGroups, arrowColumns);
+    auto batchReaderResult = File_->FileReader->GetRecordBatchReader({part.RowGroup}, ArrowColumns_);
     if (!batchReaderResult.ok()) {
         throw std::runtime_error(batchReaderResult.status().ToString());
     }
-    Reader_ = std::move(*batchReaderResult);
-    ReaderRowGroups_ = std::move(rowGroups);
-    ReaderRowGroupIndex_ = 0;
-    ReaderRowOffset_ = 0;
+    ArrowReader_ = std::move(*batchReaderResult);
+    ArrowBatch_.reset();
+    ArrowBatchBegin_ = 0;
+    ArrowBatchEnd_ = 0;
+    ArrowCursor_ = 0;
+    ArrowRange_ = 0;
+}
+
+void TParquetSource::ClosePart()
+{
+    Part_ = nullptr;
+    RangeReader_.reset();
+    ArrowReader_.reset();
+    ArrowBatch_.reset();
+}
+
+std::optional<TRowRangeBatch> TParquetSource::ReadPart()
+{
+    if (!RangeReader_) {
+        return ReadArrowPart();
+    }
+    auto batch = RangeReader_->Next(File_->FileReader->properties().batch_size());
+    if (!batch.ok()) {
+        throw std::runtime_error(batch.status().ToString());
+    }
+    return std::move(*batch);
+}
+
+std::optional<TRowRangeBatch> TParquetSource::ReadArrowPart()
+{
+    const auto& ranges = Part_->Ranges;
+    while (true) {
+        while (ArrowRange_ < ranges.size() && ranges[ArrowRange_].End <= ArrowCursor_) {
+            ++ArrowRange_;
+        }
+        if (ArrowRange_ == ranges.size()) {
+            return std::nullopt;
+        }
+        const auto& range = ranges[ArrowRange_];
+        if (ArrowBatch_ && ArrowCursor_ < ArrowBatchEnd_ && range.Begin < ArrowBatchEnd_) {
+            const int64_t begin = std::max(ArrowCursor_, range.Begin);
+            const int64_t end = std::min(ArrowBatchEnd_, range.End);
+            ArrowCursor_ = end;
+            auto slice = end - begin == ArrowBatch_->num_rows()
+                ? ArrowBatch_
+                : ArrowBatch_->Slice(begin - ArrowBatchBegin_, end - begin);
+            return TRowRangeBatch{
+                .FirstRow = begin,
+                .RowCount = end - begin,
+                .Columns = slice->columns(),
+            };
+        }
+        if (!ArrowReader_->ReadNext(&ArrowBatch_).ok() || !ArrowBatch_) {
+            return std::nullopt;
+        }
+        ArrowBatchBegin_ = ArrowBatchEnd_;
+        ArrowBatchEnd_ += ArrowBatch_->num_rows();
+        ArrowCursor_ = ArrowBatchBegin_;
+    }
 }
 
 bool TParquetSource::RowIdRequested() const {
@@ -1211,56 +1273,45 @@ const TSchema& TParquetSource::Schema() const {
 }
 
 bool TParquetSource::Next(TRowSet& rowSet) {
-    EnsureOpen();
-
-    std::shared_ptr<arrow::RecordBatch> batch;
-    if (!Reader_->ReadNext(&batch).ok() || !batch) {
-        return false;
-    }
-    if (!DecimalScans_.empty()) {
-        // The decimal columns take their positions among the columns Arrow read.
-        std::vector<std::shared_ptr<arrow::Array>> columns;
-        columns.reserve(SelectedColumns_.size());
-        int arrowColumn = 0;
-        size_t nextScan = 0;
-        for (size_t position = 0; position < SelectedColumns_.size(); ++position) {
-            if (nextScan < DecimalScans_.size() && DecimalScans_[nextScan].Position == position) {
-                columns.push_back(DecimalScans_[nextScan++].Scan->Read(batch->num_rows()));
-            } else {
-                columns.push_back(batch->column(arrowColumn++));
+    std::optional<TRowRangeBatch> rows;
+    while (!rows) {
+        if (!Part_) {
+            if (NextPart_ == Parts_.size()) {
+                return false;
             }
+            OpenPart(Parts_[NextPart_++]);
         }
-        batch = arrow::RecordBatch::Make(BatchSchema_, batch->num_rows(), std::move(columns));
+        rows = ReadPart();
+        if (!rows) {
+            ClosePart();
+        }
     }
+    const int rowGroup = Part_->RowGroup;
+    std::vector<std::shared_ptr<arrow::Array>> columns;
+    columns.reserve(SelectedColumns_.size() + (RowIdRequested() ? 1 : 0));
+    // The decimal columns take their positions among the other columns.
+    size_t arrowColumn = 0;
+    size_t nextScan = 0;
+    for (size_t position = 0; position < SelectedColumns_.size(); ++position) {
+        if (nextScan < DecimalScans_.size() && DecimalScans_[nextScan].Position == position) {
+            columns.push_back(DecimalScans_[nextScan++].Scan->Read(
+                rowGroup, rows->FirstRow, rows->RowCount));
+        } else {
+            columns.push_back(std::move(rows->Columns[arrowColumn++]));
+        }
+    }
+    auto batch = arrow::RecordBatch::Make(BatchSchema_, rows->RowCount, std::move(columns));
     if (RowIdRequested()) {
         arrow::UInt64Builder rowIds(GetMemoryPool());
-        if (auto status = rowIds.Reserve(batch->num_rows()); !status.ok()) {
+        if (auto status = rowIds.Reserve(rows->RowCount); !status.ok()) {
             throw std::runtime_error(status.ToString());
         }
-        int64_t remaining = batch->num_rows();
-        while (remaining > 0 && ReaderRowGroupIndex_ < ReaderRowGroups_.size()) {
-            const int rg = ReaderRowGroups_[ReaderRowGroupIndex_];
-            const int64_t rowGroupRows =
-                File_->RowGroups[static_cast<size_t>(rg)].RowCount;
-            const int64_t count = std::min(
-                remaining, rowGroupRows - ReaderRowOffset_);
-            for (int64_t i = 0; i < count; ++i) {
-                // The file metadata check in TParquetFileData proves that the
-                // row-group id and row offset fit in the locator fields.
-                rowIds.UnsafeAppend(MakeParquetRowIdUnchecked(
-                    static_cast<uint32_t>(rg),
-                    static_cast<uint32_t>(ReaderRowOffset_ + i)));
-            }
-            remaining -= count;
-            ReaderRowOffset_ += count;
-            if (ReaderRowOffset_ == rowGroupRows) {
-                ++ReaderRowGroupIndex_;
-                ReaderRowOffset_ = 0;
-            }
-        }
-        if (remaining != 0) {
-            throw std::runtime_error(
-                "parquet source row-group metadata ended before the batch");
+        for (int64_t i = 0; i < rows->RowCount; ++i) {
+            // The file metadata check in TParquetFileData proves that the
+            // row-group id and row offset fit in the locator fields.
+            rowIds.UnsafeAppend(MakeParquetRowIdUnchecked(
+                static_cast<uint32_t>(rowGroup),
+                static_cast<uint32_t>(rows->FirstRow + i)));
         }
         auto rowIdArray = rowIds.Finish();
         if (!rowIdArray.ok()) {

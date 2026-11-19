@@ -25,7 +25,8 @@ void WriteParquet(
     const std::string& path,
     const std::shared_ptr<arrow::RecordBatch>& batch,
     int64_t rowGroupSize,
-    bool storeDecimalAsInteger = false)
+    bool storeDecimalAsInteger = false,
+    parquet::Compression::type compression = parquet::Compression::UNCOMPRESSED)
 {
     auto output = arrow::io::FileOutputStream::Open(path).ValueOrDie();
     auto table = arrow::Table::FromRecordBatches({batch}).ValueOrDie();
@@ -33,7 +34,8 @@ void WriteParquet(
     properties
         .max_rows_per_page(16)
         ->data_pagesize(256)
-        ->disable_write_page_index();
+        ->disable_write_page_index()
+        ->compression(compression);
     if (storeDecimalAsInteger) {
         properties.enable_store_decimal_as_integer();
     }
@@ -248,6 +250,103 @@ TEST(ParquetRowReaderTest, ReadsSelectedPagesInLocatorOrder) {
     EXPECT_THROW(
         TParquetRowReader(fileReader, std::vector<std::string>{"missing"}),
         std::invalid_argument);
+}
+
+// Pages hold 16 rows: ranges start and end inside pages, on their edges, and
+// leave whole pages out.
+TEST(ParquetRowReaderTest, RangeReaderReadsTheRowsOfItsRanges) {
+    const std::string path = "/tmp/test_parquet_range_reader_qdb.parquet";
+    constexpr int64_t rowGroupSize = 300;
+    constexpr int64_t rowCount = rowGroupSize * 2;
+
+    arrow::Int64Builder integers;
+    arrow::StringBuilder strings;
+    arrow::BooleanBuilder booleans;
+    arrow::Int16Builder shorts;
+    arrow::BinaryBuilder binary;
+    for (int64_t row = 0; row < rowCount; ++row) {
+        if (row % 7 == 0) {
+            ASSERT_TRUE(integers.AppendNull().ok());
+        } else {
+            ASSERT_TRUE(integers.Append(row * 10).ok());
+        }
+        if (row % 11 == 0) {
+            ASSERT_TRUE(strings.AppendNull().ok());
+        } else {
+            ASSERT_TRUE(strings.Append("value-" + std::to_string(row % 40)).ok());
+        }
+        ASSERT_TRUE(booleans.Append((row & 1) != 0).ok());
+        ASSERT_TRUE(shorts.Append(static_cast<int16_t>(row / 3)).ok());
+        ASSERT_TRUE(binary.Append("raw").ok());
+    }
+    auto schema = arrow::schema({
+        arrow::field("i", arrow::int64(), true),
+        arrow::field("s", arrow::utf8(), true),
+        arrow::field("b", arrow::boolean(), false),
+        arrow::field("h", arrow::int16(), false),
+        arrow::field("raw", arrow::binary(), false),
+    });
+    auto batch = arrow::RecordBatch::Make(schema, rowCount, {
+        integers.Finish().ValueOrDie(),
+        strings.Finish().ValueOrDie(),
+        booleans.Finish().ValueOrDie(),
+        shorts.Finish().ValueOrDie(),
+        binary.Finish().ValueOrDie(),
+    });
+    // A compressed dictionary page shares the decompression buffer with the
+    // data pages the reader fetches after it.
+    WriteParquet(path, batch, rowGroupSize, false, parquet::Compression::SNAPPY);
+
+    auto fileReader = OpenParquet(path);
+    parquet::ReaderProperties buffered;
+    buffered.enable_buffered_stream();
+    auto bufferedPages = parquet::ParquetFileReader::OpenFile(path, false, buffered);
+    auto& pages = *fileReader->parquet_reader();
+    const std::vector<int> columns{0, 1, 2, 3};
+    const std::vector<std::vector<TRowRange>> rangeSets{
+        {{0, 1}},
+        {{15, 17}, {40, 80}},
+        {{0, rowGroupSize}},
+        {{16, 32}, {299, 300}},
+        {{5, 6}, {7, 8}, {100, 250}},
+    };
+    // Both row groups, read through unbuffered and buffered column streams.
+    for (int run = 0; run < 4; ++run) {
+        auto* file = run < 2 ? &pages : bufferedPages.get();
+        const int rowGroup = run % 2;
+        std::shared_ptr<arrow::Table> expected;
+        ASSERT_TRUE(fileReader->ReadRowGroup(rowGroup, columns, &expected).ok());
+        for (const auto& ranges : rangeSets) {
+            auto reader = TParquetRangeReader::Make(fileReader->manifest(), *file, rowGroup, columns, ranges);
+            ASSERT_TRUE(reader);
+            size_t range = 0;
+            int64_t next = ranges.front().Begin;
+            while (true) {
+                auto read = reader->Next(37);
+                ASSERT_TRUE(read.ok()) << read.status().ToString();
+                if (!*read) {
+                    break;
+                }
+                const auto& rows = **read;
+                if (next == ranges[range].End) {
+                    next = ranges[++range].Begin;
+                }
+                ASSERT_EQ(rows.FirstRow, next);
+                ASSERT_LE(rows.FirstRow + rows.RowCount, ranges[range].End);
+                ASSERT_EQ(rows.Columns.size(), columns.size());
+                for (size_t column = 0; column < columns.size(); ++column) {
+                    auto want = expected->column(static_cast<int>(column))->Slice(rows.FirstRow, rows.RowCount);
+                    EXPECT_TRUE(want->Equals(arrow::ChunkedArray(rows.Columns[column])))
+                        << "row group " << rowGroup << " column " << column << " row " << rows.FirstRow;
+                }
+                next += rows.RowCount;
+            }
+            EXPECT_EQ(range + 1, ranges.size());
+            EXPECT_EQ(next, ranges.back().End);
+        }
+    }
+
+    EXPECT_FALSE(TParquetRangeReader::Make(fileReader->manifest(), pages, 0, std::vector<int>{0, 4}, {{0, 1}}));
 }
 
 // DECIMAL is stored as INT32/INT64 or as big-endian FIXED_LEN_BYTE_ARRAY; the

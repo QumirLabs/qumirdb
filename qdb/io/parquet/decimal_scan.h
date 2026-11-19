@@ -6,7 +6,6 @@
 #include <parquet/file_reader.h>
 
 #include <memory>
-#include <vector>
 
 namespace NQdb {
 
@@ -21,7 +20,6 @@ public:
     TDecimalColumnScan(
         parquet::ParquetFileReader& file,
         int column,
-        std::vector<int> rowGroups,
         arrow::MemoryPool* memoryPool);
     ~TDecimalColumnScan();
 
@@ -31,20 +29,23 @@ public:
     // The Arrow type of the arrays Read returns: Decimal64 or Decimal128 by storage.
     const std::shared_ptr<arrow::DataType>& Type() const;
 
-    // The next `rows` values of the column, continuing across row groups.
-    std::shared_ptr<arrow::Array> Read(int64_t rows);
+    // Rows [firstRow, firstRow + rows) of a row group. Reads move forward: a
+    // read starts at or after the end of the previous one in the same group.
+    std::shared_ptr<arrow::Array> Read(int rowGroup, int64_t firstRow, int64_t rows);
 
 private:
+    void Seek(int rowGroup, int64_t row);
+
     parquet::ParquetFileReader& File_;
     const int Column_;
-    const std::vector<int> RowGroups_;
-    size_t NextRowGroup_ = 0;
     arrow::MemoryPool* MemoryPool_;
     const parquet::ColumnDescriptor* Descriptor_;
     TDecimalSpec Spec_;
     std::shared_ptr<arrow::DataType> Type_;
-    // The reader of the current row group.
+    // The reader of the current row group and the row it reads next.
     std::shared_ptr<parquet::ColumnReader> Reader_;
+    int RowGroup_ = -1;
+    int64_t Position_ = 0;
 };
 
 } // namespace NQdb
