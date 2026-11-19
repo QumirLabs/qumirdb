@@ -90,11 +90,25 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: bash .clusterfuzzlite/report_finding.sh
 
+  # The corpus of qdb_fuzz_plan is merged in about as long as the whole budget of
+  # one target, so the targets are pruned in two passes, one after the other: the
+  # budget is split only across the targets of a pass, and no two passes push to
+  # the corpus repository at the same time.
   prune:
+    name: prune (${{ matrix.name }})
     # The corpus token is used here: never hand it to a dispatch from another branch.
     if: github.ref == 'refs/heads/master' && (github.event.schedule == '0 5 * * *' || inputs.mode == 'prune')
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - name: plan
+            targets: qdb_fuzz_plan
+          - name: parse and vm
+            targets: qdb_fuzz_parse qdb_fuzz_vm
     steps:
       - uses: actions/checkout@v4
         with:
@@ -104,11 +118,23 @@ jobs:
         with:
           language: c++
           sanitizer: address
+      # run_fuzzers prunes every fuzzer in build-out: keep only the targets of this pass.
+      - name: Keep the targets of this pass
+        env:
+          TARGETS: ${{ matrix.targets }}
+        run: |
+          for target in qdb_fuzz_parse qdb_fuzz_plan qdb_fuzz_vm; do
+            case " $TARGETS " in
+              *" $target "*) ;;
+              *) rm -f "build-out/$target" ;;
+            esac
+          done
+          ls build-out
       - name: Prune the corpus
         uses: google/clusterfuzzlite/actions/run_fuzzers@v1
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          # The budget is split across the targets; merging the corpus of qdb_fuzz_vm is slow.
+          # The budget is split across the targets of this pass.
           fuzz-seconds: 3600
           mode: prune
           sanitizer: address
@@ -140,7 +166,9 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           FUZZ_CORPUS_URL: https://x-access-token:${{ secrets.FUZZ_CORPUS_TOKEN }}@github.com/QumirLabs/qumirdb-fuzz-corpus.git
         run: |
-          job=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs" \
-            --jq '.jobs[] | select(.name == "prune") | .id')
-          gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$job/logs" > "$RUNNER_TEMP/prune.log"
+          : > "$RUNNER_TEMP/prune.log"
+          for job in $(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs" \
+              --paginate --jq '.jobs[] | select(.name | startswith("prune (")) | .id'); do
+            gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$job/logs" >> "$RUNNER_TEMP/prune.log"
+          done
           bash .clusterfuzzlite/report_prune.sh "$RUNNER_TEMP/prune.log"
