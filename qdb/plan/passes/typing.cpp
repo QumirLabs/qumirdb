@@ -64,8 +64,9 @@ TTypePtr UnifyIntegers(const TIntegerType& a, const TIntegerType& b) {
 // base types are not a compatible numeric mix (caller reports the mismatch).
 TTypePtr UnifyUnionBase(const TTypePtr& a, const TTypePtr& b) {
     if (!a || !b) return nullptr;
+    // A DATE prints as its integer type: test it first. PostgreSQL has no DATE with a number.
+    if (IsDateType(a) || IsDateType(b)) return IsDateType(a) && IsDateType(b) ? a : nullptr;
     if (a->ToString() == b->ToString()) return a;
-    if (IsDateType(a) && IsDateType(b)) return a;
     auto da = DecimalSpecOfValueType(a);
     auto db = DecimalSpecOfValueType(b);
     const bool numA = da || IsFloatType(a) || IsIntType(a);

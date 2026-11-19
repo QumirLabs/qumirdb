@@ -304,11 +304,24 @@ bool IsUnsupportedToString(EKind from, EKind to) {
     return to == EKind::String && (from == EKind::Float || from == EKind::Decimal);
 }
 
+// PostgreSQL has no cast of a DATE to a number. The reverse is left alone: the regression
+// fixtures hold day counts in JSON, which cannot say DATE, and cast them to DATE.
+bool IsUnsupportedDateCast(EKind from, EKind to) {
+    return from == EKind::Date &&
+        (to == EKind::Integer || to == EKind::Float || to == EKind::Decimal);
+}
+
 // The SQL spelling of a type in the rejection: Qumir's diagnostic name of a DECIMAL is
 // its SQL name already, those of DOUBLE and REAL are `f64` and `f32`.
 std::string SqlTypeName(const TTypePtr& type) {
     if (auto floating = TMaybeType<TFloatType>(UnwrapNamedType(type))) {
         return floating.Cast()->Kind == TFloatType::F32 ? "REAL" : "DOUBLE";
+    }
+    if (KindOf(type) == EKind::Date) {
+        return "DATE";
+    }
+    if (auto integer = TMaybeType<TIntegerType>(UnwrapNamedType(type))) {
+        return integer.Cast()->BitWidth() == 64 ? "BIGINT" : "INTEGER";
     }
     return TypeDiagnosticName(type);
 }
@@ -331,6 +344,10 @@ TExprPtr ApplyCastRule(
     if (IsUnsupportedToString(fromKind, toKind)) {
         throw NQumir::TError(loc,
             "CAST from " + SqlTypeName(from) + " to VARCHAR is not implemented");
+    }
+    if (IsUnsupportedDateCast(fromKind, toKind)) {
+        throw NQumir::TError(loc,
+            "cannot cast type " + SqlTypeName(from) + " to " + SqlTypeName(to));
     }
     return nullptr;
 }
@@ -356,7 +373,7 @@ bool HasCastRule(const TTypePtr& from, const TTypePtr& to) {
     const EKind fromKind = KindOf(from);
     const EKind toKind = KindOf(to);
     return (!HasDecimalSide(fromKind, toKind) && FindCastRule(fromKind, toKind))
-        || IsUnsupportedToString(fromKind, toKind);
+        || IsUnsupportedToString(fromKind, toKind) || IsUnsupportedDateCast(fromKind, toKind);
 }
 
 } // namespace NKernel

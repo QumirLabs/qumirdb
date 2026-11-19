@@ -1,0 +1,1 @@
+SELECT CAST(d AS BIGINT) FROM date_values;

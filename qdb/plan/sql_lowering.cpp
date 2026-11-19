@@ -3,6 +3,7 @@
 #include <qdb/kernel/annotate_type.h>
 #include <qdb/plan/clone_expr.h>
 #include <qdb/plan/ops/project.h>
+#include <qdb/plan/types/date.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 
@@ -855,6 +856,16 @@ std::expected<NAst::TExprPtr, TError> TAggCollector::Emit(const TAggCall& agg, T
     NAst::TExprPtr arg = (agg.Func == "count" && agg.Star)
         ? nullptr
         : agg.Arg;
+    // PostgreSQL has no sum or avg of a DATE; avg would report the sum it is lowered to.
+    if (arg && (agg.Func == "sum" || agg.Func == "avg") && InputSchema_ && !InputSchema_->Fields.empty()) {
+        try {
+            if (IsDateType(NKernel::AnnotateExprType(arg, *InputSchema_, &Context_))) {
+                return std::unexpected(TError(loc, "function " + agg.Func + "(DATE) does not exist"));
+            }
+        } catch (const TError& error) {
+            return std::unexpected(error);
+        }
+    }
     if (arg && (agg.Func == "sum" || agg.Func == "avg" ||
                 agg.Func == "min" || agg.Func == "max" ||
                 agg.Func == "count"))

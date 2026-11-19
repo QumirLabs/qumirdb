@@ -553,6 +553,28 @@ TTypePtr Propagate(std::initializer_list<TTypePtr> operands, const TTypePtr& R) 
 
 bool IsInt(const TTypePtr& t) { return static_cast<bool>(TMaybeType<TIntegerType>(t)); }
 bool IsFloat(const TTypePtr& t) { return static_cast<bool>(TMaybeType<TFloatType>(t)); }
+
+// A number a DATE does not mix with: a plain integer, a float or a decimal.
+bool IsNumber(const TTypePtr& type) {
+    const TTypePtr value = UnwrapNamedType(type);
+    return (IsInt(value) && !IsDateType(value)) || IsFloat(value) || DecimalSpecOfValueType(value);
+}
+
+// The SQL spelling of a type in the DATE errors below.
+std::string SqlTypeName(const TTypePtr& type) {
+    const TTypePtr value = UnwrapNamedType(ValueType(type));
+    if (IsDateType(value)) {
+        return "DATE";
+    }
+    if (auto integer = TMaybeType<TIntegerType>(value)) {
+        return integer.Cast()->BitWidth() == 64 ? "BIGINT" : "INTEGER";
+    }
+    if (auto floating = TMaybeType<TFloatType>(value)) {
+        return floating.Cast()->Kind == TFloatType::F32 ? "REAL" : "DOUBLE";
+    }
+    return TypeDiagnosticName(value);
+}
+
 bool IsReal(const TTypePtr& t) {
     auto floating = TMaybeType<TFloatType>(t);
     return floating && floating.Cast()->Kind == TFloatType::F32;
@@ -944,6 +966,10 @@ TTypePtr UnifyBranchTypes(const TTypePtr& a, const TTypePtr& b,
     if (!a) return b ? UnwrapNullableType(b) : nullptr;
     if (!b) return UnwrapNullableType(a);
     TTypePtr va = UnwrapNullableType(a), vb = UnwrapNullableType(b);
+    if ((IsDateType(va) && IsNumber(vb)) || (IsNumber(va) && IsDateType(vb))) {
+        throw NQumir::TError("types " + SqlTypeName(va) + " and " + SqlTypeName(vb) +
+            " cannot be matched");
+    }
     auto da = DecimalSpecOfValueType(va);
     auto db = DecimalSpecOfValueType(vb);
     if (da || db) {
@@ -1015,6 +1041,40 @@ std::pair<TTypePtr, bool> CoalesceValueType(const std::vector<TTypePtr>& argType
     return {v, allNullable};
 }
 
+// PostgreSQL has only date + integer, integer + date, date - integer (a date) and
+// date - date (an integer number of days) for a date operand; the width of a min/max
+// DATE (an i64) carries over to the result. Deliberate deviation: any integer width is a
+// day count, because qdb types integer literals and integer arithmetic as BIGINT.
+TTypePtr DateBinaryValueType(TOperator op, const TExprPtr& le, const TExprPtr& re,
+    TTypePtr vl, TTypePtr vr)
+{
+    // A literal that fits an INTEGER is one, not a BIGINT.
+    const TTypePtr integer = std::make_shared<TIntegerType>(TIntegerType::I32);
+    if (!IsDateType(vl) && IntLiteralFits(le, integer)) {
+        vl = integer;
+    }
+    if (!IsDateType(vr) && IntLiteralFits(re, integer)) {
+        vr = integer;
+    }
+    auto leftMaybe = TMaybeType<TIntegerType>(vl);
+    auto rightMaybe = TMaybeType<TIntegerType>(vr);
+    if (leftMaybe && rightMaybe) {
+        const auto left = leftMaybe.Cast();
+        const auto right = rightMaybe.Cast();
+        const bool leftDate = IsDateType(vl);
+        const bool rightDate = IsDateType(vr);
+        const auto wider = left->BitWidth() > right->BitWidth() ? left->Kind : right->Kind;
+        if (leftDate && rightDate && op == "-") {
+            return std::make_shared<TIntegerType>(wider);
+        }
+        if (leftDate != rightDate && (op == "+" || (op == "-" && leftDate))) {
+            return std::make_shared<TDateType>(wider);
+        }
+    }
+    throw NQumir::TError(le->Location, "operator does not exist: " + SqlTypeName(vl) + " " +
+        op.ToString() + " " + SqlTypeName(vr));
+}
+
 // The plain (non-null-propagated) result value type of a binary op, matching qumir's
 // AnnotateBinary: `/` -> a float (the common one, else DOUBLE), `+ - * %`/bitwise ->
 // CommonNumeric, comparisons/logical -> bool. An integer-literal operand adopts the other
@@ -1027,28 +1087,14 @@ TTypePtr BinaryValueType(TOperator op, const TExprPtr& le, const TExprPtr& re,
     }
     TTypePtr vl = UnwrapNamedType(ValueType(lt));
     TTypePtr vr = UnwrapNamedType(ValueType(rt));
+    if (IsDateType(vl) || IsDateType(vr)) {
+        return DateBinaryValueType(op, le, re, vl, vr);
+    }
     if (auto decimal = DecimalBinaryValueType(op, le, re, ValueType(lt), ValueType(rt))) {
         return decimal;
     }
     if (op == "+" && (TMaybeType<TStringType>(vl) || TMaybeType<TStringType>(vr))) {
         return std::make_shared<TStringType>(); // string concatenation
-    }
-    // PostgreSQL: date + integer, integer + date and date - integer are dates; date - date
-    // is an integer number of days.
-    if (IsDateType(vl) || IsDateType(vr)) {
-        const bool bothDates = IsDateType(vl) && IsDateType(vr);
-        if ((op == "+" && !bothDates) || (op == "-" && IsDateType(vl) && !bothDates)) {
-            // The date operand's width: a min/max result is an i64.
-            return std::make_shared<TDateType>(
-                TMaybeType<TIntegerType>(IsDateType(vl) ? vl : vr).Cast()->Kind);
-        }
-        if (op == "-" && bothDates) {
-            // Days between: an i64 when either side is a min/max result.
-            const auto left = TMaybeType<TIntegerType>(vl).Cast();
-            const auto right = TMaybeType<TIntegerType>(vr).Cast();
-            return std::make_shared<TIntegerType>(
-                left->BitWidth() >= right->BitWidth() ? left->Kind : right->Kind);
-        }
     }
     if (IsInt(vl) && IsInt(vr)) {
         if (IntLiteralFits(re, vl)) vr = vl;
@@ -1142,6 +1188,10 @@ TTypePtr InferType(const TExprPtr& e, const TStructType& schema) {
     if (auto un = TMaybeNode<TUnaryExpr>(e)) {
         auto node =un.Cast();
         TTypePtr ot = InferType(node->Operand, schema);
+        if (IsDateType(ot)) {
+            throw NQumir::TError(node->Location,
+                "operator does not exist: " + node->Operator.ToString() + " DATE");
+        }
         TTypePtr R = node->Operator == "!"
             ? std::static_pointer_cast<TType>(std::make_shared<TBoolType>())
             : ValueType(ot);
