@@ -24,6 +24,9 @@
     "composite_key.sql": {
       "tables": {"t": "outer_pairs", "v": "inner_pairs"},
       "order": "unordered"
-    }
+    },
+    "limit_per_outer_row.sql": {"order": "unordered"},
+    "first_row_per_outer_row.sql": {"order": "unordered"},
+    "several_rows_per_outer_row.sql": {"expect_error": true}
   }
 }

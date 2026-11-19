@@ -349,6 +349,32 @@
           (= data [i] rank)
           (= i (+ i (: 1 i64)))))))
 
+  ;; row_number() OVER (PARTITION BY ... [ORDER BY ...]): the 1-based row
+  ;; position inside the partition; peers get distinct numbers.
+  (fun window_fill_row_number
+       ((var store <ptr TRowSet>)
+        (var row_ids <ptr i64>)
+        (var start i64)
+        (var n i64)
+        (var out_col <ref TColumn>)
+        (var out <ref TRowSet>)
+        (var data_owner_idx i64))
+    (block
+      (var data = (call window_init_i64_output n out_col out data_owner_idx))
+      (var pos = 1)
+      (var i = 0)
+      (while (< i n)
+        (block
+          (if (> i 0)
+            (block
+              (if (call window_same_partition
+                    store (index row_ids (+ start (- i 1)))
+                    (index row_ids (+ start i)))
+                (block (= pos (+ pos 1)))
+                (block (= pos 1)))))
+          (= data [i] pos)
+          (= i (+ i 1))))))
+
   ;; avg(x) OVER (PARTITION BY ...) with no ORDER BY: compute one value for the
   ;; whole contiguous partition and broadcast it to every row in that partition.
   (fun window_fill_partition_avg_f64 [Value]

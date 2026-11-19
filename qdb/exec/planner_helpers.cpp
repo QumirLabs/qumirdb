@@ -895,8 +895,8 @@ TWindowPlanData BuildWindowPlanData(
     // currently full-partition only; max is currently ordered-prefix only.
     std::vector<TWindowFuncInput> funcs;
     for (const auto& fn : window.Functions()) {
-        if (fn.Func != "sum" && fn.Func != "rank" && fn.Func != "avg" &&
-            fn.Func != "max") {
+        if (fn.Func != "sum" && fn.Func != "rank" && fn.Func != "row_number" &&
+            fn.Func != "avg" && fn.Func != "max") {
             throw std::runtime_error(
                 "window function not supported in exec yet: " + fn.Func);
         }
@@ -907,6 +907,13 @@ TWindowPlanData BuildWindowPlanData(
             if (orderRadixKeys.empty()) {
                 throw std::runtime_error("window rank requires an order key yet");
             }
+            funcs.push_back({
+                .Func = fn.Func,
+                .ResultType = std::make_shared<TIntegerType>(),
+            });
+            continue;
+        }
+        if (fn.Func == "row_number") {
             funcs.push_back({
                 .Func = fn.Func,
                 .ResultType = std::make_shared<TIntegerType>(),
