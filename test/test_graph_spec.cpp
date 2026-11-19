@@ -167,12 +167,13 @@ TEST(GraphSpec, RejectsTruncatedInput)
 
 TEST(GraphSpec, ScanFilterProjectRecordsRoundTrip)
 {
-    using TRowGroups = std::optional<std::vector<int32_t>>;
+    using TRanges = std::optional<std::vector<TScanRowRange>>;
+    const TRanges cut{{{.RowGroup = 1, .FirstRow = 5, .RowCount = 7}, {.RowGroup = 3, .RowCount = 2}}};
     TGraphSpec spec;
-    for (const auto& rowGroups : {TRowGroups{}, TRowGroups{std::vector<int32_t>{}}, TRowGroups{{1, 3}}}) {
+    for (const auto& ranges : {TRanges{}, TRanges{std::vector<TScanRowRange>{}}, cut}) {
         spec.Nodes.push_back(Node("source", "t", TParquetScanNode{
             .Out = {0, 2}, .Path = "/data/t.parquet",
-            .Columns = std::vector<std::string>{"a", "b"}, .RowGroups = rowGroups}));
+            .Columns = std::vector<std::string>{"a", "b"}, .Ranges = ranges}));
     }
     spec.Nodes.push_back(Node("source", "u", TParquetScanNode{.Path = "/data/u.parquet"}));
     spec.Nodes.push_back(Node("filter", "", TFilterNode{.In = {0, 2}, .Out = {1, 2}, .Plan = {.Kernel = 2}}));
@@ -197,10 +198,10 @@ TEST(GraphSpec, ScanFilterProjectRecordsRoundTrip)
     }
 
     ASSERT_EQ(back.Nodes.size(), 8u);
-    EXPECT_FALSE(std::get<TParquetScanNode>(back.Nodes[0].Body).RowGroups);
-    EXPECT_EQ(std::get<TParquetScanNode>(back.Nodes[1].Body).RowGroups, TRowGroups{std::vector<int32_t>{}});
+    EXPECT_FALSE(std::get<TParquetScanNode>(back.Nodes[0].Body).Ranges);
+    EXPECT_EQ(std::get<TParquetScanNode>(back.Nodes[1].Body).Ranges, TRanges{std::vector<TScanRowRange>{}});
     const auto& scan = std::get<TParquetScanNode>(back.Nodes[2].Body);
-    EXPECT_EQ(scan.RowGroups, (TRowGroups{{1, 3}}));
+    EXPECT_EQ(scan.Ranges, cut);
     EXPECT_EQ(scan.Path, "/data/t.parquet");
     EXPECT_EQ(scan.Columns, (std::vector<std::string>{"a", "b"}));
     EXPECT_EQ(scan.Out.Lane, 2u);

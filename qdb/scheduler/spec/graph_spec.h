@@ -126,14 +126,14 @@ struct TParquetScanNode {
     // File columns to read, sorted; nullopt reads all of them.
     std::optional<std::vector<std::string>> Columns;
     // nullopt reads the whole file; an empty list is a proven-empty scan.
-    std::optional<std::vector<int32_t>> RowGroups;
+    std::optional<std::vector<TScanRowRange>> Ranges;
 
     void Fields(this auto& self, auto& v)
     {
         v(self.Out);
         v(self.Path);
         v(self.Columns);
-        v(self.RowGroups);
+        v(self.Ranges);
     }
 };
 

@@ -17,8 +17,10 @@ namespace NQdb {
 struct ITable {
     virtual ~ITable() = default;
 
+    // nullopt ranges read the whole table and an empty list nothing; nullopt
+    // columns read every column.
     virtual std::unique_ptr<ISource> MakeSource(
-        std::optional<std::vector<int>> rowGroups,
+        std::optional<std::vector<NScheduler::TScanRowRange>> ranges,
         std::optional<std::unordered_set<std::string>> restrictedColumns) const = 0;
 
     virtual const TStatsPtr Stats() const = 0;

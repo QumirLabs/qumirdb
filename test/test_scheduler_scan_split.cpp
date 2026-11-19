@@ -18,12 +18,22 @@ std::vector<TScanRowGroup> RowGroups()
     };
 }
 
+// Whole row groups of 10 * (id + 1) rows, as RowGroups() has them.
+std::vector<TScanRowRange> Whole(std::vector<int32_t> ids)
+{
+    std::vector<TScanRowRange> ranges;
+    for (int32_t id : ids) {
+        ranges.push_back({.RowGroup = id, .RowCount = 10 * (id + 1)});
+    }
+    return ranges;
+}
+
 TEST(SchedulerScanSplit, DefaultsToSingleSerialSplit) {
     TScanSplitSettings settings;
     auto splits = BuildScanSplits(RowGroups(), settings);
 
     ASSERT_EQ(splits.size(), 1u);
-    EXPECT_EQ(splits[0].RowGroups, (std::vector<size_t>{0, 1, 2, 3}));
+    EXPECT_EQ(splits[0].Ranges, Whole({0, 1, 2, 3}));
     EXPECT_EQ(splits[0].RowCount, 100);
     EXPECT_EQ(splits[0].ByteSize, 1000);
     EXPECT_TRUE(splits[0].SerialRead);
@@ -39,7 +49,7 @@ TEST(SchedulerScanSplit, SplitsOnePerRowGroupWhenTasksAllow) {
 
     ASSERT_EQ(splits.size(), 4u);
     for (size_t i = 0; i < splits.size(); ++i) {
-        EXPECT_EQ(splits[i].RowGroups, (std::vector<size_t>{i}));
+        EXPECT_EQ(splits[i].Ranges, Whole({static_cast<int32_t>(i)}));
         EXPECT_FALSE(splits[i].SerialRead);
     }
 }
@@ -53,9 +63,9 @@ TEST(SchedulerScanSplit, SplitsEvenlyAndCapsAtMaxTasks) {
     auto splits = BuildScanSplits(RowGroups(), settings);
 
     ASSERT_EQ(splits.size(), 2u);
-    EXPECT_EQ(splits[0].RowGroups, (std::vector<size_t>{0, 1}));
+    EXPECT_EQ(splits[0].Ranges, Whole({0, 1}));
     EXPECT_EQ(splits[0].RowCount, 30);
-    EXPECT_EQ(splits[1].RowGroups, (std::vector<size_t>{2, 3}));
+    EXPECT_EQ(splits[1].Ranges, Whole({2, 3}));
     EXPECT_EQ(splits[1].RowCount, 70);
 }
 
@@ -82,9 +92,9 @@ TEST(SchedulerScanSplit, SplitsContiguousRangesEvenly) {
     auto splits = BuildScanSplits(rowGroups, settings);
 
     ASSERT_EQ(splits.size(), 2u);
-    EXPECT_EQ(splits[0].RowGroups, (std::vector<size_t>{0, 1, 2}));
+    EXPECT_EQ(splits[0].Ranges, Whole({0, 1, 2}));
     EXPECT_EQ(splits[0].RowCount, 60);
-    EXPECT_EQ(splits[1].RowGroups, (std::vector<size_t>{3, 4}));
+    EXPECT_EQ(splits[1].Ranges, Whole({3, 4}));
     EXPECT_EQ(splits[1].RowCount, 90);
 }
 
@@ -101,10 +111,40 @@ TEST(SchedulerScanSplit, PreservesSparseRowGroupIds) {
     auto splits = BuildScanSplits(sparse, settings);
 
     ASSERT_EQ(splits.size(), 2u);
-    EXPECT_EQ(splits[0].RowGroups, (std::vector<size_t>{0, 2}));
+    EXPECT_EQ(splits[0].Ranges, (std::vector<TScanRowRange>{
+        {.RowGroup = 0, .RowCount = 10}, {.RowGroup = 2, .RowCount = 20}}));
     EXPECT_EQ(splits[0].RowCount, 30);
-    EXPECT_EQ(splits[1].RowGroups, (std::vector<size_t>{5}));
+    EXPECT_EQ(splits[1].Ranges, (std::vector<TScanRowRange>{{.RowGroup = 5, .RowCount = 30}}));
     EXPECT_EQ(splits[1].RowCount, 30);
+}
+
+TEST(SchedulerScanSplit, CutsRowGroupsWhenTasksOutnumberThem) {
+    // 100 rows in 4 row groups, 8 tasks -> splits of 13 rows across groups.
+    TScanSplitSettings settings;
+    settings.Strategy = EScanSplitStrategy::RowGroupRange;
+    settings.MaxScanTasks = 8;
+
+    auto splits = BuildScanSplits(RowGroups(), settings);
+
+    ASSERT_EQ(splits.size(), 8u);
+    EXPECT_EQ(splits[0].Ranges, (std::vector<TScanRowRange>{
+        {.RowGroup = 0, .RowCount = 10}, {.RowGroup = 1, .RowCount = 3}}));
+    EXPECT_EQ(splits[0].ByteSize, 100 + 30);
+    EXPECT_EQ(splits[1].Ranges, (std::vector<TScanRowRange>{
+        {.RowGroup = 1, .FirstRow = 3, .RowCount = 13}}));
+    std::vector<TScanRowRange> rows;
+    for (const auto& split : splits) {
+        EXPECT_LE(split.RowCount, 13);
+        for (const auto& range : split.Ranges) {
+            if (!rows.empty() && rows.back().RowGroup == range.RowGroup) {
+                EXPECT_EQ(rows.back().FirstRow + rows.back().RowCount, range.FirstRow);
+                rows.back().RowCount += range.RowCount;
+            } else {
+                rows.push_back(range);
+            }
+        }
+    }
+    EXPECT_EQ(rows, Whole({0, 1, 2, 3}));
 }
 
 TEST(SchedulerScanSplit, AutoSizesEachSourceAndLimitsJoinFanIn) {
@@ -119,9 +159,10 @@ TEST(SchedulerScanSplit, AutoSizesEachSourceAndLimitsJoinFanIn) {
     EXPECT_EQ(ChooseScanTaskCount(groups, settings, false), 8u);
     EXPECT_EQ(ChooseScanTaskCount(groups, settings, true), 4u);
 
+    // Two row groups still give four tasks: the splits cut them.
     groups.resize(2);
-    groups[0].RowCount = groups[1].RowCount = 2 * 1024 * 1024;
-    EXPECT_EQ(ChooseScanTaskCount(groups, settings, false), 2u);
+    groups[0].RowCount = groups[1].RowCount = 512 * 1024;
+    EXPECT_EQ(ChooseScanTaskCount(groups, settings, false), 4u);
     EXPECT_EQ(ChooseScanTaskCount({}, settings, false), 1u);
 }
 
@@ -136,7 +177,7 @@ TEST(SchedulerScanSplit, AutoAccountsForProjectedBytesAndRows) {
     EXPECT_EQ(ChooseScanTaskCount(groups, settings, false), 2u);
     for (auto& group : groups) {
         group.ByteSize = 0;
-        group.RowCount = 1024 * 1024;
+        group.RowCount = 256 * 1024;
     }
     EXPECT_EQ(ChooseScanTaskCount(groups, settings, false), 4u);
 }
@@ -148,7 +189,7 @@ TEST(SchedulerScanSplit, AutoRespectsSerialExecutionAndExplicitOverrides) {
     settings.ScanSplit.TargetRowsPerTask = 1;
     EXPECT_EQ(ChooseScanTaskCount(RowGroups(), settings, false), 1u);
     settings.Scheduler.Mode = EExecutionMode::ThreadedScheduler;
-    EXPECT_EQ(ChooseScanTaskCount(RowGroups(), settings, false), 4u);
+    EXPECT_EQ(ChooseScanTaskCount(RowGroups(), settings, false), 8u);
     settings.Scheduler.WorkerCount = 1;
     EXPECT_EQ(ChooseScanTaskCount(RowGroups(), settings, false), 1u);
     settings.Scheduler.WorkerCount = 4;

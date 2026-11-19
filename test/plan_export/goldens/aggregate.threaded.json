@@ -17,7 +17,7 @@
       ],
       "id": 0,
       "kind": "source",
-      "stageId": 3,
+      "stageId": 2,
       "table": "t"
     },
     {
@@ -42,7 +42,7 @@
           "type": "i64"
         }
       ],
-      "stageId": 2
+      "stageId": 3
     },
     {
       "entrypoints": {},

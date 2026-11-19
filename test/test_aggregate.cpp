@@ -1832,7 +1832,7 @@ TEST(AggregateE2E, PlannerUsesPhysicalPrunedSchemaForKeyDescriptor) {
 
         // A pruned scan reads the physical column order.
         std::unique_ptr<ISource> MakeSource(
-            std::optional<std::vector<int>>,
+            std::optional<std::vector<NScheduler::TScanRowRange>>,
             std::optional<std::unordered_set<std::string>> names) const override
         {
             if (names) {

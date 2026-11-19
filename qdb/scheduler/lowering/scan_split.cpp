@@ -6,17 +6,28 @@ namespace NQdb {
 namespace NScheduler {
 namespace {
 
+// Rows [firstRow, firstRow + rows) of `group`, with its share of the bytes.
+void AddRows(TScanSplit& split, const TScanRowGroup& group, int64_t firstRow, int64_t rows) {
+    split.Ranges.push_back({
+        .RowGroup = static_cast<int32_t>(group.RowGroup),
+        .FirstRow = firstRow,
+        .RowCount = rows,
+    });
+    split.RowCount += rows;
+    split.ByteSize += rows == group.RowCount
+        ? group.ByteSize
+        : group.ByteSize * rows / group.RowCount;
+}
+
 TScanSplit MakeSingleSplit(
     const std::vector<TScanRowGroup>& rowGroups,
     bool serialRead)
 {
     TScanSplit split;
-    split.RowGroups.reserve(rowGroups.size());
+    split.Ranges.reserve(rowGroups.size());
     split.SerialRead = serialRead;
     for (const auto& rowGroup : rowGroups) {
-        split.RowGroups.push_back(rowGroup.RowGroup);
-        split.RowCount += rowGroup.RowCount;
-        split.ByteSize += rowGroup.ByteSize;
+        AddRows(split, rowGroup, 0, rowGroup.RowCount);
     }
     return split;
 }
@@ -53,11 +64,7 @@ size_t ChooseScanTaskCount(
         tasksFor(bytes, settings.ScanSplit.TargetBytesPerTask),
         uint64_t{1}});
 
-    size_t budget = std::min(workers, rowGroups.size());
-    if (!feedsJoin) {
-        // Saturate at the available row groups without overflowing 2 * workers.
-        budget += std::min(workers, rowGroups.size() - budget);
-    }
+    const size_t budget = feedsJoin ? workers : 2 * workers;
     return static_cast<size_t>(std::min<uint64_t>(sizeTasks, budget));
 }
 
@@ -78,6 +85,7 @@ std::vector<TScanSplit> BuildScanSplits(
     if (
         settings.Strategy == EScanSplitStrategy::SerialRead ||
         maxTasks == 1 ||
+        totalRows <= 0 ||
         (
             settings.TinyInputRowsThreshold &&
             totalRows <= static_cast<int64_t>(settings.TinyInputRowsThreshold)))
@@ -85,27 +93,44 @@ std::vector<TScanSplit> BuildScanSplits(
         return {MakeSingleSplit(rowGroups, true)};
     }
 
-    // Split the row groups into up to maxTasks evenly-sized, contiguous chunks
-    // of ceil(n / m) groups each. The last chunk may be slightly smaller, which
-    // is fine - an even split keeps every worker busy. (The previous target/byte
-    // heuristic degenerated to 15 one-group splits plus one giant split when no
-    // target was configured, serialising the whole scan onto a single worker.)
     const size_t groupCount = rowGroups.size();
-    const size_t taskCount = std::min(maxTasks, groupCount);
-    const size_t groupsPerTask = (groupCount + taskCount - 1) / taskCount;
-
     std::vector<TScanSplit> splits;
-    splits.reserve(taskCount);
-    for (size_t begin = 0; begin < groupCount; begin += groupsPerTask) {
-        const size_t end = std::min(begin + groupsPerTask, groupCount);
-        TScanSplit split;
-        split.RowGroups.reserve(end - begin);
-        for (size_t i = begin; i < end; ++i) {
-            split.RowGroups.push_back(rowGroups[i].RowGroup);
-            split.RowCount += rowGroups[i].RowCount;
-            split.ByteSize += rowGroups[i].ByteSize;
+    if (groupCount >= maxTasks) {
+        // Contiguous chunks of ceil(n / m) whole row groups; the last may be
+        // smaller, which still keeps every worker busy.
+        const size_t groupsPerTask = (groupCount + maxTasks - 1) / maxTasks;
+        splits.reserve(maxTasks);
+        for (size_t begin = 0; begin < groupCount; begin += groupsPerTask) {
+            const size_t end = std::min(begin + groupsPerTask, groupCount);
+            TScanSplit split;
+            split.Ranges.reserve(end - begin);
+            for (size_t i = begin; i < end; ++i) {
+                AddRows(split, rowGroups[i], 0, rowGroups[i].RowCount);
+            }
+            splits.push_back(std::move(split));
         }
-        splits.push_back(split);
+        return splits;
+    }
+
+    // Fewer row groups than tasks: cut them, from metadata alone, into splits
+    // of ceil(rows / m) rows. A split may end in one group and go on in the next.
+    const auto tasks = static_cast<int64_t>(maxTasks);
+    const int64_t rowsPerTask = std::max<int64_t>((totalRows + tasks - 1) / tasks, 1);
+    splits.reserve(maxTasks);
+    TScanSplit split;
+    for (const auto& group : rowGroups) {
+        for (int64_t first = 0; first < group.RowCount;) {
+            const int64_t rows = std::min(group.RowCount - first, rowsPerTask - split.RowCount);
+            AddRows(split, group, first, rows);
+            first += rows;
+            if (split.RowCount == rowsPerTask) {
+                splits.push_back(std::move(split));
+                split = {};
+            }
+        }
+    }
+    if (!split.Ranges.empty()) {
+        splits.push_back(std::move(split));
     }
     return splits;
 }

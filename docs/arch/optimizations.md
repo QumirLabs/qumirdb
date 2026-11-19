@@ -593,15 +593,15 @@ See [predicate_pushdown.md](predicate_pushdown.md#parquet-row-group-pruning).
 ### 4.2 Scan splitting
 
 With the threaded scheduler a Parquet source is split into up to `[scan] max_tasks`
-independent row-group ranges, which is what creates the parallel lanes every
-optimization below builds on. A single-row-group file yields one lane, and the
-parallel variants then do not apply.
+independent units, which is what creates the parallel lanes every optimization
+below builds on. A unit is a run of whole row groups or, when there are fewer
+groups than tasks, a row range cut from a group's footer metadata, so a file
+with a single row group still fills the workers.
 
 Without an explicit limit, each source is sized after column and row-group
-pruning: one task per 1,048,576 rows or 64 MiB of uncompressed selected-column
-data, whichever yields more tasks. The limit is capped at the number of row
-groups and at the worker count for sources feeding a join, or twice the worker
-count otherwise. Single-threaded execution stays serial by default. Positive
+pruning: one task per 262,144 rows or 64 MiB of uncompressed selected-column
+data, whichever yields more tasks. The limit is capped at the worker count for
+sources feeding a join, or twice the worker count otherwise. Single-threaded execution stays serial by default. Positive
 `max_tasks` values preserve the explicit limit. See
 [Scan parallelism](scan_parallelism.md), including the comparison with DuckDB.
 

@@ -5,13 +5,16 @@
 #include <arrow/compute/api.h>
 #include <parquet/arrow/reader.h>
 #include <parquet/arrow/schema.h>
+#include <parquet/column_page.h>
 #include <parquet/column_reader.h>
+#include <parquet/exception.h>
 #include <parquet/file_reader.h>
 #include <parquet/level_conversion.h>
 #include <parquet/metadata.h>
 #include <parquet/schema.h>
 
 #include <algorithm>
+#include <deque>
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
@@ -266,6 +269,97 @@ struct TPageSelection {
     bool Invalid = false;
 };
 
+std::shared_ptr<parquet::internal::RecordReader> MakeRecordReader(
+    const TCompiledColumn& column,
+    arrow::MemoryPool* memoryPool)
+{
+    // Arrow rejects a decimal type over BYTE_ARRAY; read the raw bytes instead.
+    const auto readerType =
+        column.DecimalStorage &&
+            column.Descriptor->physical_type() == parquet::Type::BYTE_ARRAY
+        ? arrow::binary()
+        : column.Field->type();
+    return parquet::internal::RecordReader::Make(
+        column.Descriptor,
+        column.Levels,
+        memoryPool,
+        false,
+        false,
+        readerType);
+}
+
+// The `rows` records the reader has read since it was last reset, as an array
+// of the column's Arrow type.
+arrow::Result<std::shared_ptr<arrow::Array>> TakeRecords(
+    parquet::internal::RecordReader& recordReader,
+    const TCompiledColumn& column,
+    int64_t rows,
+    arrow::MemoryPool* memoryPool)
+{
+    std::shared_ptr<arrow::Array> retained;
+    if (column.Read == EColumnRead::Binary) {
+        auto* binary = dynamic_cast<parquet::internal::BinaryRecordReader*>(
+            &recordReader);
+        if (!binary) {
+            return arrow::Status::Invalid(
+                "parquet page lookup: binary record reader is unavailable");
+        }
+        auto chunks = binary->GetBuilderChunks();
+        if (chunks.empty()) {
+            return arrow::Status::Invalid(
+                "parquet page lookup: binary reader returned no chunks");
+        }
+        if (chunks.size() == 1) {
+            retained = std::move(chunks.front());
+        } else {
+            ARROW_ASSIGN_OR_RAISE(
+                retained, arrow::Concatenate(chunks, memoryPool));
+        }
+    } else {
+        const int64_t valuesWritten = recordReader.values_written();
+        const int64_t nullCount = recordReader.null_count();
+        auto values = recordReader.ReleaseValues();
+        auto validity = recordReader.ReleaseIsValid();
+        if (valuesWritten != rows || !values) {
+            return arrow::Status::Invalid(
+                "parquet page lookup: inconsistent primitive value count");
+        }
+
+        auto data = arrow::ArrayData::Make(
+            column.StorageType,
+            valuesWritten,
+            {std::move(validity), std::move(values)},
+            nullCount);
+        retained = arrow::MakeArray(std::move(data));
+
+        if (column.ReinterpretStorage) {
+            retained = arrow::MakeArray(arrow::ArrayData::Make(
+                column.Field->type(),
+                valuesWritten,
+                retained->data()->buffers,
+                nullCount));
+        } else if (column.CastStorage) {
+            // The logical type bounds the stored values; Arrow's reader narrows unchecked too.
+            ARROW_ASSIGN_OR_RAISE(
+                auto casted,
+                arrow::compute::Cast(
+                    arrow::Datum(retained), column.Field->type(), arrow::compute::CastOptions::Unsafe()));
+            retained = casted.make_array();
+        }
+    }
+    if (column.DecimalStorage) {
+        ARROW_ASSIGN_OR_RAISE(
+            retained,
+            DecimalFromUnscaled(retained, column.Field->type(), memoryPool));
+    }
+
+    if (retained->length() != rows) {
+        return arrow::Status::Invalid(
+            "parquet page lookup: decoded page length mismatch");
+    }
+    return retained;
+}
+
 arrow::Result<std::shared_ptr<arrow::Array>> ReadPageSelectedColumn(
     parquet::RowGroupReader& rowGroup,
     int64_t rowGroupRows,
@@ -285,19 +379,7 @@ arrow::Result<std::shared_ptr<arrow::Array>> ReadPageSelectedColumn(
             return selection.Skip(stats);
         });
 
-    // Arrow rejects a decimal type over BYTE_ARRAY; read the raw bytes instead.
-    const auto readerType =
-        column.DecimalStorage &&
-            column.Descriptor->physical_type() == parquet::Type::BYTE_ARRAY
-        ? arrow::binary()
-        : column.Field->type();
-    auto recordReader = parquet::internal::RecordReader::Make(
-        column.Descriptor,
-        column.Levels,
-        memoryPool,
-        false,
-        false,
-        readerType);
+    auto recordReader = MakeRecordReader(column, memoryPool);
     recordReader->SetPageReader(std::move(pageReader));
     const int64_t recordsRead = recordReader->ReadRecords(rowGroupRows);
 
@@ -310,66 +392,9 @@ arrow::Result<std::shared_ptr<arrow::Array>> ReadPageSelectedColumn(
             "parquet page lookup: inconsistent page row boundaries");
     }
 
-    std::shared_ptr<arrow::Array> retained;
-    if (column.Read == EColumnRead::Binary) {
-        auto* binary = dynamic_cast<parquet::internal::BinaryRecordReader*>(
-            recordReader.get());
-        if (!binary) {
-            return arrow::Status::Invalid(
-                "parquet page lookup: binary record reader is unavailable");
-        }
-        auto chunks = binary->GetBuilderChunks();
-        if (chunks.empty()) {
-            return arrow::Status::Invalid(
-                "parquet page lookup: binary reader returned no chunks");
-        }
-        if (chunks.size() == 1) {
-            retained = std::move(chunks.front());
-        } else {
-            ARROW_ASSIGN_OR_RAISE(
-                retained, arrow::Concatenate(chunks, memoryPool));
-        }
-    } else {
-        const int64_t valuesWritten = recordReader->values_written();
-        const int64_t nullCount = recordReader->null_count();
-        auto values = recordReader->ReleaseValues();
-        auto validity = recordReader->ReleaseIsValid();
-        if (valuesWritten != selection.DenseRows || !values) {
-            return arrow::Status::Invalid(
-                "parquet page lookup: inconsistent primitive value count");
-        }
-
-        auto data = arrow::ArrayData::Make(
-            column.StorageType,
-            valuesWritten,
-            {std::move(validity), std::move(values)},
-            nullCount);
-        retained = arrow::MakeArray(std::move(data));
-
-        if (column.ReinterpretStorage) {
-            retained = arrow::MakeArray(arrow::ArrayData::Make(
-                column.Field->type(),
-                valuesWritten,
-                retained->data()->buffers,
-                nullCount));
-        } else if (column.CastStorage) {
-            ARROW_ASSIGN_OR_RAISE(
-                auto casted,
-                arrow::compute::Cast(
-                    arrow::Datum(retained), column.Field->type()));
-            retained = casted.make_array();
-        }
-    }
-    if (column.DecimalStorage) {
-        ARROW_ASSIGN_OR_RAISE(
-            retained,
-            DecimalFromUnscaled(retained, column.Field->type(), memoryPool));
-    }
-
-    if (retained->length() != selection.DenseRows) {
-        return arrow::Status::Invalid(
-            "parquet page lookup: decoded page length mismatch");
-    }
+    ARROW_ASSIGN_OR_RAISE(
+        auto retained,
+        TakeRecords(*recordReader, column, selection.DenseRows, memoryPool));
 
     arrow::Int64Builder takeBuilder(memoryPool);
     ARROW_RETURN_NOT_OK(takeBuilder.AppendValues(selection.DenseRowsByTarget));
@@ -552,6 +577,150 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> ReadWholeRowGroups(
         outputSchema,
         uniqueBatch->num_rows(),
         std::move(outputArrays));
+}
+
+// The data pages of one column chunk against sorted, disjoint row ranges. A
+// page outside every range is dropped before decompression. The next kept page
+// is fetched before the column reader asks for it, so the caller knows where
+// it starts and skips exactly to a range.
+class TRangePageReader final : public parquet::PageReader {
+public:
+    TRangePageReader(
+        std::unique_ptr<parquet::PageReader> pages,
+        std::span<const TRowRange> ranges,
+        arrow::MemoryPool* memoryPool)
+        : Pages_(std::move(pages))
+        , Ranges_(ranges)
+        , MemoryPool_(memoryPool)
+    {
+        Pages_->set_data_page_filter([this](const parquet::DataPageStats& stats) {
+            return SkipPage(stats);
+        });
+    }
+
+    std::shared_ptr<parquet::Page> NextPage() override {
+        if (Pending_.empty()) {
+            // A page the cursor has not peeked would shift its row positions.
+            throw parquet::ParquetException("parquet range read: unexpected page request");
+        }
+        auto page = std::move(Pending_.front());
+        Pending_.pop_front();
+        return page;
+    }
+
+    void set_max_page_header_size(uint32_t size) override {
+        Pages_->set_max_page_header_size(size);
+    }
+
+    // The rows of the next kept data page; nullopt at the end of the chunk.
+    arrow::Result<std::optional<TRowRange>> PeekDataPage() {
+        while (true) {
+            auto page = Pages_->NextPage();
+            if (!page) {
+                return std::nullopt;
+            }
+            if (page->type() == parquet::PageType::DICTIONARY_PAGE) {
+                // The page reader reuses its decompression buffer for the next page.
+                const auto& dictionary = static_cast<const parquet::DictionaryPage&>(*page);
+                ARROW_ASSIGN_OR_RAISE(
+                    auto buffer,
+                    dictionary.buffer()->CopySlice(0, dictionary.size(), MemoryPool_));
+                Pending_.push_back(std::make_shared<parquet::DictionaryPage>(
+                    std::move(buffer),
+                    dictionary.num_values(),
+                    dictionary.encoding(),
+                    dictionary.is_sorted()));
+                continue;
+            }
+            if (
+                page->type() == parquet::PageType::DATA_PAGE ||
+                page->type() == parquet::PageType::DATA_PAGE_V2)
+            {
+                Pending_.push_back(std::move(page));
+                return Kept_;
+            }
+        }
+    }
+
+private:
+    bool SkipPage(const parquet::DataPageStats& stats) {
+        const int64_t rows = stats.num_rows
+            ? static_cast<int64_t>(*stats.num_rows)
+            : static_cast<int64_t>(stats.num_values);
+        const TRowRange page{.Begin = SourceRows_, .End = SourceRows_ + rows};
+        SourceRows_ = page.End;
+        while (NextRange_ < Ranges_.size() && Ranges_[NextRange_].End <= page.Begin) {
+            ++NextRange_;
+        }
+        const bool keep = NextRange_ < Ranges_.size() && Ranges_[NextRange_].Begin < page.End;
+        if (keep) {
+            Kept_ = page;
+        }
+        return !keep;
+    }
+
+    std::unique_ptr<parquet::PageReader> Pages_;
+    std::span<const TRowRange> Ranges_;
+    arrow::MemoryPool* MemoryPool_;
+    size_t NextRange_ = 0;
+    int64_t SourceRows_ = 0;
+    TRowRange Kept_;
+    std::deque<std::shared_ptr<parquet::Page>> Pending_;
+};
+
+// One column of a range read: its record reader and the row-group row the
+// reader delivers next, inside the kept page that ends at PageEnd.
+struct TRangeColumn {
+    TCompiledColumn Column;
+    std::shared_ptr<parquet::internal::RecordReader> Records;
+    // Owned by Records.
+    TRangePageReader* Pages = nullptr;
+    int64_t Position = 0;
+    int64_t PageEnd = 0;
+};
+
+arrow::Status SkipRows(TRangeColumn& column, int64_t rows) {
+    if (rows > 0 && column.Records->SkipRecords(rows) != rows) {
+        return arrow::Status::Invalid("parquet range read: a page ended early");
+    }
+    column.Position += rows;
+    return arrow::Status::OK();
+}
+
+// Moves the reader to `row`, at or after its position; every page holding a
+// range row is kept, so the page of `row` is the next kept one at the latest.
+arrow::Status Seek(TRangeColumn& column, int64_t row) {
+    while (row >= column.PageEnd) {
+        ARROW_RETURN_NOT_OK(SkipRows(column, column.PageEnd - column.Position));
+        ARROW_ASSIGN_OR_RAISE(auto page, column.Pages->PeekDataPage());
+        if (!page || page->Begin > row) {
+            return arrow::Status::Invalid("parquet range read: no page holds a range row");
+        }
+        column.Position = page->Begin;
+        column.PageEnd = page->End;
+    }
+    return SkipRows(column, row - column.Position);
+}
+
+arrow::Result<std::shared_ptr<arrow::Array>> ReadRangeRows(
+    TRangeColumn& column,
+    int64_t firstRow,
+    int64_t rows,
+    arrow::MemoryPool* memoryPool)
+{
+    column.Records->Reset();
+    column.Records->Reserve(rows);
+    ARROW_RETURN_NOT_OK(Seek(column, firstRow));
+    for (int64_t left = rows; left > 0;) {
+        ARROW_RETURN_NOT_OK(Seek(column, column.Position));
+        const int64_t count = std::min(left, column.PageEnd - column.Position);
+        if (column.Records->ReadRecords(count) != count) {
+            return arrow::Status::Invalid("parquet range read: a page ended early");
+        }
+        column.Position += count;
+        left -= count;
+    }
+    return TakeRecords(*column.Records, column.Column, rows, memoryPool);
 }
 
 } // namespace
@@ -738,6 +907,96 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> TParquetRowReader::ReadRows(s
         Impl_->OutputToReadColumn,
         Impl_->OutputSchema,
         Impl_->MemoryPool);
+}
+
+struct TParquetRangeReader::TImpl {
+    arrow::MemoryPool* MemoryPool = nullptr;
+    // The page readers of Columns view these ranges.
+    std::vector<TRowRange> Ranges;
+    std::shared_ptr<parquet::RowGroupReader> RowGroup;
+    std::vector<TRangeColumn> Columns;
+    size_t NextRange = 0;
+    int64_t Position = 0;
+};
+
+TParquetRangeReader::TParquetRangeReader(std::unique_ptr<TImpl> impl)
+    : Impl_(std::move(impl))
+{}
+
+TParquetRangeReader::~TParquetRangeReader() = default;
+
+std::unique_ptr<TParquetRangeReader> TParquetRangeReader::Make(
+    const parquet::arrow::SchemaManifest& manifest,
+    parquet::ParquetFileReader& file,
+    int rowGroup,
+    std::span<const int> columns,
+    std::vector<TRowRange> ranges,
+    arrow::MemoryPool* memoryPool)
+{
+    const auto metadata = file.metadata();
+    if (manifest.schema_fields.size() != static_cast<size_t>(metadata->num_columns())) {
+        return nullptr;
+    }
+    auto impl = std::make_unique<TImpl>();
+    impl->MemoryPool = MemoryPoolOrDefault(memoryPool);
+    impl->Ranges = std::move(ranges);
+    impl->RowGroup = file.RowGroup(rowGroup);
+    impl->Columns.reserve(columns.size());
+    for (int field : columns) {
+        const auto& schemaField = manifest.schema_fields[static_cast<size_t>(field)];
+        if (!schemaField.is_leaf()) {
+            return nullptr;
+        }
+        auto column = CompileColumn(
+            schemaField.column_index,
+            schemaField.field,
+            metadata->schema()->Column(schemaField.column_index));
+        if (column.Read == EColumnRead::Unsupported) {
+            return nullptr;
+        }
+        auto pages = std::make_unique<TRangePageReader>(
+            impl->RowGroup->GetColumnPageReader(column.FileIndex),
+            impl->Ranges,
+            impl->MemoryPool);
+        auto* pagesView = pages.get();
+        auto records = MakeRecordReader(column, impl->MemoryPool);
+        records->SetPageReader(std::move(pages));
+        impl->Columns.push_back({
+            .Column = std::move(column),
+            .Records = std::move(records),
+            .Pages = pagesView,
+        });
+    }
+    return std::unique_ptr<TParquetRangeReader>(new TParquetRangeReader(std::move(impl)));
+}
+
+arrow::Result<std::optional<TRowRangeBatch>> TParquetRangeReader::Next(int64_t rows) {
+    auto& impl = *Impl_;
+    while (impl.NextRange < impl.Ranges.size() && impl.Position >= impl.Ranges[impl.NextRange].End) {
+        ++impl.NextRange;
+    }
+    if (impl.NextRange == impl.Ranges.size() || rows <= 0) {
+        return std::nullopt;
+    }
+    const auto& range = impl.Ranges[impl.NextRange];
+    impl.Position = std::max(impl.Position, range.Begin);
+    TRowRangeBatch batch{
+        .FirstRow = impl.Position,
+        .RowCount = std::min(rows, range.End - impl.Position),
+    };
+    batch.Columns.reserve(impl.Columns.size());
+    try {
+        for (auto& column : impl.Columns) {
+            ARROW_ASSIGN_OR_RAISE(
+                auto array,
+                ReadRangeRows(column, batch.FirstRow, batch.RowCount, impl.MemoryPool));
+            batch.Columns.push_back(std::move(array));
+        }
+    } catch (const std::exception& e) {
+        return arrow::Status::IOError(e.what());
+    }
+    impl.Position += batch.RowCount;
+    return batch;
 }
 
 } // namespace NQdb

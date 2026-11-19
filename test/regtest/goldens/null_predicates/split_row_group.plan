@@ -1,0 +1,4 @@
+sort [id asc]
+└─ project (id, a) (rows≈6 cost≈448)
+   └─ filter (|| (call qdb_is_null |cut.a|) (> |cut.a| 0)) (rows≈6 cost≈352)
+      └─ source cut AS cut row-groups (|| (call qdb_is_null |cut.a|) (> |cut.a| 0)) (rows≈11 cost≈176)

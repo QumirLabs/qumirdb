@@ -1,0 +1,1 @@
+SELECT id, a FROM cut WHERE a IS NULL OR a > 0 ORDER BY id;

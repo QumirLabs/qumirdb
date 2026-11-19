@@ -76,7 +76,9 @@ struct TScanSplitSettings {
     // Zero selects a per-source limit from scan size, workers and consumers.
     // A positive value is an explicit cap, including 1 for a serial scan.
     size_t MaxScanTasks = 0;
-    size_t TargetRowsPerTask = 1024 * 1024;
+    // A task that starts inside a row group decodes the dictionary pages and
+    // the rows before its range again; smaller tasks lose more to that.
+    size_t TargetRowsPerTask = 256 * 1024;
     size_t TargetBytesPerTask = 64 * 1024 * 1024;
     size_t TinyInputRowsThreshold = 0;
 };

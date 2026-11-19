@@ -142,11 +142,9 @@ void ReadRows(
 TDecimalColumnScan::TDecimalColumnScan(
     parquet::ParquetFileReader& file,
     int column,
-    std::vector<int> rowGroups,
     arrow::MemoryPool* memoryPool)
     : File_(file)
     , Column_(column)
-    , RowGroups_(std::move(rowGroups))
     , MemoryPool_(memoryPool)
     , Descriptor_(File_.metadata()->schema()->Column(Column_))
 {
@@ -182,15 +180,49 @@ const std::shared_ptr<arrow::DataType>& TDecimalColumnScan::Type() const {
     return Type_;
 }
 
-std::shared_ptr<arrow::Array> TDecimalColumnScan::Read(int64_t rows) {
+void TDecimalColumnScan::Seek(int rowGroup, int64_t row) {
+    if (rowGroup != RowGroup_) {
+        Reader_ = parquet::ColumnReader::Make(
+            Descriptor_, File_.RowGroup(rowGroup)->GetColumnPageReader(Column_), MemoryPool_);
+        RowGroup_ = rowGroup;
+        Position_ = 0;
+    }
+    if (row < Position_) {
+        throw std::runtime_error("parquet decimal scan cannot read backwards");
+    }
+    auto skip = [&]<typename TDType>(TDType) {
+        auto& typed = static_cast<parquet::TypedColumnReader<TDType>&>(*Reader_);
+        if (typed.Skip(row - Position_) != row - Position_) {
+            throw std::runtime_error("parquet decimal scan ran past its row group");
+        }
+    };
+    if (row > Position_) {
+        switch (Descriptor_->physical_type()) {
+            case parquet::Type::INT32:
+                skip(parquet::Int32Type{});
+                break;
+            case parquet::Type::INT64:
+                skip(parquet::Int64Type{});
+                break;
+            case parquet::Type::FIXED_LEN_BYTE_ARRAY:
+                skip(parquet::FLBAType{});
+                break;
+            case parquet::Type::BYTE_ARRAY:
+                skip(parquet::ByteArrayType{});
+                break;
+            default:
+                throw std::runtime_error("parquet decimal scan: unsupported physical type");
+        }
+    }
+    Position_ = row;
+}
+
+std::shared_ptr<arrow::Array> TDecimalColumnScan::Read(int rowGroup, int64_t firstRow, int64_t rows) {
+    Seek(rowGroup, firstRow);
+    Position_ += rows;
     auto reader = [this]() -> parquet::ColumnReader& {
-        while (!Reader_ || !Reader_->HasNext()) {
-            if (NextRowGroup_ == RowGroups_.size()) {
-                throw std::runtime_error("parquet decimal scan ran past its row groups");
-            }
-            auto rowGroup = File_.RowGroup(RowGroups_[NextRowGroup_++]);
-            Reader_ = parquet::ColumnReader::Make(
-                Descriptor_, rowGroup->GetColumnPageReader(Column_), MemoryPool_);
+        if (!Reader_->HasNext()) {
+            throw std::runtime_error("parquet decimal scan ran past its row group");
         }
         return *Reader_;
     };
