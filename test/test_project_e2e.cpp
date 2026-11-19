@@ -45,11 +45,11 @@ using namespace NQumir::NAst;
 namespace {
 
 
-TOperatorPtr ParseRel(const std::string& sexp, ISource& src)
+TOperatorPtr ParseRel(const std::string& sexp, ITable& src)
 {
     TRelParserOptions opts;
     opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
-        return std::make_shared<TSourceOperator>(src, std::string(path));
+        return std::make_shared<TSourceOperator>(Borrow(src), std::string(path));
     };
     NCore::TParser parser;
     for (auto& [name, fn] : MakeRelParsers(std::move(opts))) {
@@ -67,7 +67,7 @@ TOperatorPtr ParseRel(const std::string& sexp, ISource& src)
 
 std::unique_ptr<TTestRuntime> Plan(
     const std::string& sexp,
-    ISource& src,
+    ITable& src,
     NScheduler::TSettings schedulerSettings = {})
 {
     return RunPlan(ParseRel(sexp, src), schedulerSettings);
@@ -75,7 +75,7 @@ std::unique_ptr<TTestRuntime> Plan(
 
 std::unique_ptr<TTestRuntime> SqlPlan(
     const std::string& sql,
-    const std::unordered_map<std::string, ISource*>& sources,
+    const std::unordered_map<std::string, ITable*>& sources,
     NScheduler::TSettings settings = {},
     bool optimize = false)
 {
@@ -94,7 +94,7 @@ std::unique_ptr<TTestRuntime> SqlPlan(
             return std::unexpected(NQumir::TError(
                 "unknown test table: " + std::string(table)));
         }
-        return std::make_shared<TSourceOperator>(*it->second, std::string(table));
+        return std::make_shared<TSourceOperator>(Borrow(*it->second), std::string(table));
     });
     if (!root) {
         throw std::runtime_error(root.error().ToString());
@@ -124,7 +124,7 @@ TEST(ProjectE2E, NamedStructProjectionFreezesItsFlattenedLayout) {
     auto structure = std::make_shared<TNamedType>("Pair", std::make_shared<TStructType>(
         std::vector<std::pair<std::string, TTypePtr>>{{"first", i64}, {"second", i64}}));
     TMockSource source(TMockColumns{}, {{"x", i64}, {"pair", structure}});
-    auto input = std::make_shared<TSourceOperator>(source, "t");
+    auto input = std::make_shared<TSourceOperator>(Borrow(source), "t");
     TOperatorPtr plan = std::make_shared<TProjectOperator>(input, std::vector<TProjectionSpec>{
         {.Name = "unused", .Expression = std::make_shared<TIdentExpr>(NQumir::TLocation{}, "x")},
         {.Expression = std::make_shared<TIdentExpr>(NQumir::TLocation{}, "pair"),

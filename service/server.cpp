@@ -338,7 +338,7 @@ llvm::json::Array ColumnHistogramJson(
     return out;
 }
 
-llvm::json::Array ColumnStatsJson(const NQdb::TParquetSource& source) {
+llvm::json::Array ColumnStatsJson(const NQdb::TParquetFile& source) {
     llvm::json::Array columns;
     auto stats = source.Stats();
     if (!stats) {
@@ -996,7 +996,7 @@ private:
             const auto tableName = TableNameFromPath(file);
             const auto sourceFile = file.filename().string();
             try {
-                NQdb::TParquetSource source(file.string());
+                NQdb::TParquetFile source(file.string());
                 llvm::json::Array columns;
                 for (const auto& column : source.Schema().Columns) {
                     columns.push_back(llvm::json::Object{

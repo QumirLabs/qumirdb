@@ -44,7 +44,7 @@ namespace {
 
 
 
-std::expected<TOperatorPtr, NQumir::TError> BuildSqlPlan(std::string_view sql, ISource& source) {
+std::expected<TOperatorPtr, NQumir::TError> BuildSqlPlan(std::string_view sql, ITable& source) {
     std::istringstream in{std::string(sql)};
     NSql::TTokenStream ts(in);
     NSql::TParser parser;
@@ -56,7 +56,7 @@ std::expected<TOperatorPtr, NQumir::TError> BuildSqlPlan(std::string_view sql, I
     auto factory = [&](std::string_view table)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
-        return std::make_shared<TSourceOperator>(source, std::string(table));
+        return std::make_shared<TSourceOperator>(Borrow(source), std::string(table));
     };
 
     return BuildPlan(parsed.value(), factory);
@@ -264,7 +264,7 @@ TEST(SortPlan, LimitAndTopSortPassesTraverseUnionUnderTopSort) {
 TEST(SortPlan, QualifyColumnsUpdatesTopSortKeys) {
     auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
     NQdb::TMockSource source(TMockColumns{}, {{"s_name", i64}});
-    auto sourceOp = std::make_shared<TSourceOperator>(source, "supplier.parquet");
+    auto sourceOp = std::make_shared<TSourceOperator>(Borrow(source), "supplier.parquet");
     auto aggregate = std::make_shared<TAggregateOperator>(
         sourceOp,
         std::vector<std::string>{"s_name"},
@@ -497,7 +497,7 @@ TEST(SortPlan, ColumnPruningKeepsSortKeyColumns) {
 
     auto i64 = std::make_shared<TIntegerType>();
     NQdb::TMockSource source(TMockColumns{}, {{"a", i64}, {"b", i64}, {"c", i64}});
-    auto sourceOp = std::make_shared<TSourceOperator>(source, "t");
+    auto sourceOp = std::make_shared<TSourceOperator>(Borrow(source), "t");
     auto sort = std::make_shared<TSortOperator>(sourceOp, std::vector<TSortKey>{
         {.Column = "b", .Direction = ESortDirection::Asc},
     });
@@ -533,7 +533,7 @@ TEST(SortExec, SortsStringAndNumericKeysAcrossBatches) {
         {{"name", str}, {"score", i64}},
         {batch1, batch2});
 
-    auto sourceOp = std::make_shared<TSourceOperator>(source, "t");
+    auto sourceOp = std::make_shared<TSourceOperator>(Borrow(source), "t");
     auto root = std::make_shared<TSortOperator>(sourceOp, std::vector<TSortKey>{
         {.Column = "name", .Direction = ESortDirection::Asc},
         {.Column = "score", .Direction = ESortDirection::Desc},
@@ -575,7 +575,7 @@ TEST(SortExec, SortsCompositeNumericKeysWithFusedRadixKernel) {
         {{"a", i64}, {"b", i64}},
         {batch1, batch2});
 
-    auto sourceOp = std::make_shared<TSourceOperator>(source, "t");
+    auto sourceOp = std::make_shared<TSourceOperator>(Borrow(source), "t");
     auto root = std::make_shared<TSortOperator>(sourceOp, std::vector<TSortKey>{
         {.Column = "a", .Direction = ESortDirection::Asc},
         {.Column = "b", .Direction = ESortDirection::Desc},
@@ -691,7 +691,7 @@ TEST(SortExec, SchedulerRuntimeRunsSortTail) {
         {{"a", i64}, {"b", i64}},
         {batch1, batch2});
 
-    auto sourceOp = std::make_shared<TSourceOperator>(source, "t");
+    auto sourceOp = std::make_shared<TSourceOperator>(Borrow(source), "t");
     auto root = std::make_shared<TSortOperator>(sourceOp, std::vector<TSortKey>{
         {.Column = "a", .Direction = ESortDirection::Asc},
         {.Column = "b", .Direction = ESortDirection::Desc},
@@ -761,7 +761,7 @@ TEST(SortExec, SchedulerRuntimeRunsTopSortTail) {
         TMockColumns{},
         {{"k", i64}, {"payload", i64}},
         {batch});
-    auto sourceOp = std::make_shared<TSourceOperator>(source, "t");
+    auto sourceOp = std::make_shared<TSourceOperator>(Borrow(source), "t");
     auto root = std::make_shared<TTopSortOperator>(
         sourceOp,
         std::vector<TSortKey>{
@@ -883,7 +883,7 @@ TEST(SortExec, HeapTopSortMergesReducedBatchesStably) {
         TMockColumns{},
         {{"k", i64}, {"payload", i64}},
         {batch1, batch2});
-    auto sourceOp = std::make_shared<TSourceOperator>(source, "t");
+    auto sourceOp = std::make_shared<TSourceOperator>(Borrow(source), "t");
     auto root = std::make_shared<TTopSortOperator>(
         sourceOp,
         std::vector<TSortKey>{
@@ -964,7 +964,7 @@ TEST(SortExec, EmptyInputProducesNoRows) {
     auto i64 = std::make_shared<TIntegerType>();
     NQdb::TMockSource source(TMockColumns{}, {{"a", i64}}, {});
 
-    auto sourceOp = std::make_shared<TSourceOperator>(source, "t");
+    auto sourceOp = std::make_shared<TSourceOperator>(Borrow(source), "t");
     auto root = std::make_shared<TSortOperator>(sourceOp, std::vector<TSortKey>{
         {.Column = "a", .Direction = ESortDirection::Asc},
     });
@@ -989,7 +989,7 @@ TEST(SortExec, AllEqualNumericKeysKeepInputOrderWithRadixKernel) {
         {{"k", i64}, {"payload", i64}},
         {batch});
 
-    auto sourceOp = std::make_shared<TSourceOperator>(source, "t");
+    auto sourceOp = std::make_shared<TSourceOperator>(Borrow(source), "t");
     auto root = std::make_shared<TSortOperator>(sourceOp, std::vector<TSortKey>{
         {.Column = "k", .Direction = ESortDirection::Desc},
     });
@@ -1019,7 +1019,7 @@ TEST(SortExec, ProjectionAfterSortSeesSortedRows) {
         {{"a", i64}, {"b", i64}},
         {batch});
 
-    auto sourceOp = std::make_shared<TSourceOperator>(source, "t");
+    auto sourceOp = std::make_shared<TSourceOperator>(Borrow(source), "t");
     auto sort = std::make_shared<TSortOperator>(sourceOp, std::vector<TSortKey>{
         {.Column = "b", .Direction = ESortDirection::Asc},
     });
@@ -1053,7 +1053,7 @@ TEST(SortExec, SortAfterAggregate) {
         {{"k", i64}, {"v", i64}},
         {batch});
 
-    auto sourceOp = std::make_shared<TSourceOperator>(source, "t");
+    auto sourceOp = std::make_shared<TSourceOperator>(Borrow(source), "t");
     auto aggregate = std::make_shared<TAggregateOperator>(
         sourceOp,
         std::vector<std::string>{"k"},
@@ -1111,7 +1111,7 @@ TEST(SortExec, MaterializesNullableDecimalPayload) {
         {{"k", i64}, {"amount", decimal}},
         {batch});
 
-    auto sourceOp = std::make_shared<TSourceOperator>(source, "t");
+    auto sourceOp = std::make_shared<TSourceOperator>(Borrow(source), "t");
     auto sort = std::make_shared<TSortOperator>(sourceOp, std::vector<TSortKey>{
         {.Column = "k", .Direction = ESortDirection::Asc},
     });
@@ -1160,7 +1160,7 @@ TEST(SortExec, NullableNumericKeysUseRadixNullOrdering) {
         {{"k", std::make_shared<TNullable>(i64)}, {"payload", i64}},
         {batch});
 
-    auto sourceOp = std::make_shared<TSourceOperator>(source, "t");
+    auto sourceOp = std::make_shared<TSourceOperator>(Borrow(source), "t");
     auto sort = std::make_shared<TSortOperator>(sourceOp, std::vector<TSortKey>{
         {.Column = "k", .Direction = ESortDirection::Asc, .Nulls = ESortNulls::First},
     });
@@ -1205,7 +1205,7 @@ TEST(SortExec, NullableNumericKeysRespectDescNullsLast) {
         {{"k", std::make_shared<TNullable>(i64)}, {"payload", i64}},
         {batch});
 
-    auto sourceOp = std::make_shared<TSourceOperator>(source, "t");
+    auto sourceOp = std::make_shared<TSourceOperator>(Borrow(source), "t");
     auto sort = std::make_shared<TSortOperator>(sourceOp, std::vector<TSortKey>{
         {.Column = "k", .Direction = ESortDirection::Desc, .Nulls = ESortNulls::Last},
     });
@@ -1244,7 +1244,7 @@ TEST(SortExec, RespectsInputSelection) {
         {{"name", str}, {"score", i64}},
         {batch});
 
-    auto sourceOp = std::make_shared<TSourceOperator>(source, "t");
+    auto sourceOp = std::make_shared<TSourceOperator>(Borrow(source), "t");
     auto root = std::make_shared<TSortOperator>(sourceOp, std::vector<TSortKey>{
         {.Column = "score", .Direction = ESortDirection::Asc},
     });

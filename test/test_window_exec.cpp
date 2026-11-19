@@ -32,10 +32,10 @@ using namespace NQdb;
 
 namespace {
 
-TOperatorPtr ParsePlan(const std::string& sexp, ISource& source) {
+TOperatorPtr ParsePlan(const std::string& sexp, ITable& source) {
     NSexp::TRelParserOptions opts;
     opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
-        return std::make_shared<TSourceOperator>(source, std::string(path));
+        return std::make_shared<TSourceOperator>(Borrow(source), std::string(path));
     };
     opts.CteRegistry =
         std::make_shared<std::unordered_map<uint32_t, TCteDefinitionPtr>>();

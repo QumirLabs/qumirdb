@@ -118,7 +118,7 @@ std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op) {
     if (auto maybe = TMaybeOp<TSourceOperator>(op)) {
         auto src = maybe.Cast();
         const std::string& alias = src->GetAlias();
-        const auto& schema = src->GetSource().Schema();
+        const auto& schema = src->GetTable()->Schema();
 
         std::vector<std::pair<std::string, TTypePtr>> newFields;
         newFields.reserve(

@@ -33,7 +33,7 @@ using namespace NQdb;
 
 namespace {
 
-class TLookupMockSource final : public TMockSource, public IRowLookupSource {
+class TLookupMockSource final : public TMockSource {
 public:
     TLookupMockSource()
         : TMockSource(TMockColumns{}, {
@@ -46,22 +46,35 @@ public:
         })
     {}
 
-    std::optional<TLateMaterializationCost> EstimateLookup(
-        std::span<const std::string>,
-        std::span<const std::string>,
-        uint64_t) const override
-    {
-        return TLateMaterializationCost{
-            .EagerBytes = 10000,
-            .NarrowBytes = 500,
-            .LookupBytes = 500,
-        };
+    std::unique_ptr<IRowLookupSource> MakeLookupSource() const override {
+        return std::make_unique<TLookup>();
     }
+
+private:
+    struct TLookup final : IRowLookupSource {
+        std::optional<TLateMaterializationCost> EstimateLookup(
+            std::span<const std::string>,
+            std::span<const std::string>,
+            uint64_t) const override
+        {
+            return TLateMaterializationCost{
+                .EagerBytes = 10000,
+                .NarrowBytes = 500,
+                .LookupBytes = 500,
+            };
+        }
+
+        std::shared_ptr<const IPhysicalRowReader> CompileReader(
+            std::span<const std::string>) const override
+        {
+            return nullptr;
+        }
+    };
 };
 
 std::expected<TOperatorPtr, NQumir::TError> BuildSqlPlan(
     std::string_view sql,
-    ISource& source)
+    ITable& source)
 {
     std::istringstream input{std::string(sql)};
     NSql::TTokenStream tokens(input);
@@ -73,7 +86,7 @@ std::expected<TOperatorPtr, NQumir::TError> BuildSqlPlan(
     return BuildPlan(*parsed, [&](std::string_view table)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
-        return std::make_shared<TSourceOperator>(source, std::string(table));
+        return std::make_shared<TSourceOperator>(Borrow(source), std::string(table));
     });
 }
 
@@ -304,7 +317,7 @@ TEST(LateMaterialization, SExpressionRoundTripBindsOutsideParser) {
     options.SourceFactory = [&](std::string_view path, NQumir::TLocation)
         -> TOperatorPtr
     {
-        return std::make_shared<TSourceOperator>(source, std::string(path));
+        return std::make_shared<TSourceOperator>(Borrow(source), std::string(path));
     };
     NQumir::NAst::NCore::TParser parser;
     for (auto& [name, parse] : NSexp::MakeRelParsers(std::move(options))) {
@@ -381,7 +394,7 @@ TEST(LateMaterialization, ExecutesParquetLookupAfterGlobalTopK) {
                        bool enabled,
                        size_t workerCount)
     {
-        TParquetSource source(path);
+        TParquetFile source(path);
         auto plan = BuildSqlPlan(sql, source);
         EXPECT_TRUE(plan) << (plan ? "" : plan.error().ToString());
         if (!plan) return std::vector<int64_t>{};
@@ -413,7 +426,7 @@ TEST(LateMaterialization, ExecutesParquetLookupAfterGlobalTopK) {
                     -> TOperatorPtr
                 {
                     return std::make_shared<TSourceOperator>(
-                        source, std::string(sourcePath));
+                        Borrow(source), std::string(sourcePath));
                 };
             NQumir::NAst::NCore::TParser parser;
             for (auto& [name, parse] :
@@ -578,9 +591,9 @@ TEST(LateMaterialization, ExecutesParquetLookupAfterGlobalTopK) {
         true,
         1), firstTen);
 
-    TParquetSource multiLaneSource(path);
+    TParquetFile multiLaneSource(path);
     auto sourcePlan = std::make_shared<TSourceOperator>(
-        multiLaneSource, path);
+        Borrow(multiLaneSource), path);
     sourcePlan->EnableRowId();
     auto integerType = std::make_shared<NQumir::NAst::TIntegerType>();
     auto multiLanePlan = std::make_shared<TLateMaterializeOperator>(

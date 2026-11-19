@@ -20,7 +20,7 @@ struct TFixture {
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
         Tables.emplace_back(table);
-        return std::make_shared<TSourceOperator>(Source, std::string(table));
+        return std::make_shared<TSourceOperator>(Borrow(Source), std::string(table));
     };
 
     std::expected<TParsedQuery, NQumir::TError> Parse(

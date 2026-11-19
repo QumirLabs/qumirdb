@@ -3,7 +3,7 @@
 #include <qdb/exec/plan_data.h>
 #include <qdb/exec/runtime_filter.h>
 #include <qdb/io/io.h>
-#include <qdb/io/parquet/source.h>
+#include <qdb/io/table.h>
 #include <qdb/kernel/regex.h>
 #include <qdb/plan/ops/join_type.h>
 #include <qdb/scheduler/connection.h>
@@ -675,8 +675,8 @@ struct TNodeTaskContext {
     // Kernel slots by kernel index.
     std::vector<std::shared_ptr<TKernelSlot>> Slots;
     std::shared_ptr<TRuntimeContext> Runtime;
-    // Opened on first use; the scans of one path share the file.
-    std::unordered_map<std::string, TParquetFile> ParquetFiles;
+    // The plan's tables by path; a node opens the file of a path it lacks.
+    std::unordered_map<std::string, std::shared_ptr<const ITable>> Tables;
     // Required for SinkWriter nodes.
     ISink* Sink = nullptr;
     // Built from the CTE tables, by index. They keep the spooled rows alive, so

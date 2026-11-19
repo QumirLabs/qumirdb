@@ -1074,10 +1074,11 @@ std::expected<TRelation, TError> BuildTableRef(
             return std::unexpected(source.error());
         }
         const auto qualifier = *ItemQualifier(ref);
-        if (auto sourceOp = TMaybeOp<TSourceOperator>(source->Plan)) {
-            sourceOp.Cast()->SetAlias(SourceAlias(*node, context.SourceAliases));
+        if (auto maybeSourceOp = TMaybeOp<TSourceOperator>(source->Plan)) {
+            auto sourceOp = maybeSourceOp.Cast();
+            sourceOp->SetAlias(SourceAlias(*node, context.SourceAliases));
             source->Labels.clear();
-            for (const auto& column : sourceOp.Cast()->GetSource().Schema().Columns) {
+            for (const auto& column : sourceOp->GetTable()->Schema().Columns) {
                 source->Labels.push_back(qualifier + "." + std::string(column.Name));
             }
             return source;

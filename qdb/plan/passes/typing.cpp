@@ -188,7 +188,7 @@ void AnnotateOperatorType(
         }
         root->Type = std::make_shared<TFunctionType>(
             std::vector<TTypePtr>{},
-            StructTypeFromSchema(src->GetSource().Schema()));
+            StructTypeFromSchema(src->GetTable()->Schema()));
         if (src->EmitsRowId()) {
             src->EnableRowId();
         }

@@ -22,7 +22,7 @@ using namespace NQdb;
 namespace {
 
 std::expected<TOperatorPtr, NQumir::TError> BuildSqlPlan(
-    std::string_view sql, const std::map<std::string, ISource*>& tables)
+    std::string_view sql, const std::map<std::string, ITable*>& tables)
 {
     std::istringstream in{std::string(sql)};
     NSql::TTokenStream ts(in);
@@ -38,7 +38,7 @@ std::expected<TOperatorPtr, NQumir::TError> BuildSqlPlan(
         if (it == tables.end()) {
             return std::unexpected(NQumir::TError("unknown table: " + std::string(table)));
         }
-        return std::make_shared<TSourceOperator>(*it->second, std::string(table));
+        return std::make_shared<TSourceOperator>(Borrow(*it->second), std::string(table));
     };
     return BuildPlan(parsed.value(), factory);
 }
@@ -112,7 +112,7 @@ void AssertWindowFuncArgsExistInInput(const TOperatorPtr& op) {
 
 TEST(WindowPlan, SingleSpecStructure) {
     NQdb::TMockSource t({"a", "b", "c"});
-    std::map<std::string, ISource*> tables = {{"t", &t}};
+    std::map<std::string, ITable*> tables = {{"t", &t}};
 
     auto plan = BuildSqlPlan(
         "SELECT rank() OVER (PARTITION BY a ORDER BY b DESC) AS r FROM t", tables);
@@ -137,7 +137,7 @@ TEST(WindowPlan, SingleSpecStructure) {
 
 TEST(WindowPlan, DistinctSpecsStack) {
     NQdb::TMockSource t({"a", "b", "x"});
-    std::map<std::string, ISource*> tables = {{"t", &t}};
+    std::map<std::string, ITable*> tables = {{"t", &t}};
 
     // Two functions share the (partition a) spec -> one node; a different spec
     // (partition b) -> a second, stacked node.
@@ -153,7 +153,7 @@ TEST(WindowPlan, DistinctSpecsStack) {
 TEST(WindowPlan, FullPipelineOverJoin) {
     NQdb::TMockSource orders({"o_orderkey", "o_custkey", "o_total"});
     NQdb::TMockSource customer({"c_custkey", "c_name"});
-    std::map<std::string, ISource*> tables = {{"orders", &orders}, {"customer", &customer}};
+    std::map<std::string, ITable*> tables = {{"orders", &orders}, {"customer", &customer}};
 
     auto plan = BuildSqlPlan(
         "SELECT c_name, "
@@ -174,7 +174,7 @@ TEST(WindowPlan, FullPipelineOverJoin) {
 
 TEST(WindowPlan, CteWindowAggregateArgsAreIndependentPerInline) {
     NQdb::TMockSource t({"k", "v"});
-    std::map<std::string, ISource*> tables = {{"t", &t}};
+    std::map<std::string, ITable*> tables = {{"t", &t}};
 
     auto plan = BuildSqlPlan(
         "WITH w AS ("
@@ -195,7 +195,7 @@ TEST(WindowPlan, HavingScalarSubqueryIgnoresFunctionCalleeForCorrelation) {
         "ss_store_sk",
         "ss_hdemo_sk",
     });
-    std::map<std::string, ISource*> tables = {{"store_sales", &storeSales}};
+    std::map<std::string, ITable*> tables = {{"store_sales", &storeSales}};
 
     auto plan = BuildSqlPlan(
         "SELECT item_sk, rank() OVER (ORDER BY rank_col ASC) AS r "
@@ -231,7 +231,7 @@ TEST(WindowPlan, HavingScalarSubqueryIgnoresFunctionCalleeForCorrelation) {
 
 TEST(WindowPlan, ColumnListAliasesSurviveTyping) {
     NQdb::TMockSource t({"x"});
-    std::map<std::string, ISource*> tables = {{"t", &t}};
+    std::map<std::string, ITable*> tables = {{"t", &t}};
 
     for (const auto sql : {
         "SELECT q.renamed FROM (SELECT x + 1 FROM t) AS q(renamed)",
@@ -255,7 +255,7 @@ TEST(WindowPlan, ScalarSubqueryIgnoresInListTemporaryForCorrelation) {
         "c_custkey",
     });
     NQdb::TMockSource orders({"o_custkey"});
-    std::map<std::string, ISource*> tables = {
+    std::map<std::string, ITable*> tables = {
         {"customer", &customer},
         {"orders", &orders},
     };
@@ -284,7 +284,7 @@ TEST(WindowPlan, ScalarSubqueryIgnoresInListTemporaryForCorrelation) {
 
 TEST(WindowPlan, WindowOutsideSelectListRejected) {
     NQdb::TMockSource t({"a", "b"});
-    std::map<std::string, ISource*> tables = {{"t", &t}};
+    std::map<std::string, ITable*> tables = {{"t", &t}};
 
     // Windows are only valid in the SELECT list / ORDER BY; elsewhere they must
     // yield a clean error rather than crashing in later passes.

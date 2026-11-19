@@ -70,7 +70,7 @@ std::unique_ptr<TTable> MakeTable(int64_t rows, size_t batches) {
 
 TOperatorPtr BuildSqlPlan(
     const std::string& sql,
-    const std::unordered_map<std::string, ISource*>& sources)
+    const std::unordered_map<std::string, ITable*>& sources)
 {
     std::istringstream in(sql);
     NSql::TTokenStream ts(in);
@@ -86,7 +86,7 @@ TOperatorPtr BuildSqlPlan(
         if (it == sources.end()) {
             return std::unexpected(NQumir::TError("unknown table: " + std::string(table)));
         }
-        return std::make_shared<TSourceOperator>(*it->second, std::string(table));
+        return std::make_shared<TSourceOperator>(Borrow(*it->second), std::string(table));
     });
     if (!root) {
         throw std::runtime_error(root.error().ToString());
@@ -98,7 +98,7 @@ TOperatorPtr BuildSqlPlan(
 
 std::unique_ptr<TTestRuntime> RunSql(
     const std::string& sql,
-    const std::unordered_map<std::string, ISource*>& sources,
+    const std::unordered_map<std::string, ITable*>& sources,
     NScheduler::TSettings settings = {})
 {
     return RunPlan(BuildSqlPlan(sql, sources), settings);
@@ -161,10 +161,7 @@ std::vector<int64_t> CollectFirstColumnSorted(TTestRuntime& runtime) {
 
 // Four row groups give the source four scan lanes. The lanes share one batch
 // cursor, so threaded lanes can read it concurrently.
-class TSplitSource final
-    : public TMockSource
-    , public NScheduler::IScanMetadataSource
-{
+class TSplitSource final : public TMockSource {
 public:
     using TMockSource::TMockSource;
 
@@ -173,7 +170,11 @@ public:
         return TMockSource::Next(rowSet);
     }
 
-    std::vector<NScheduler::TScanRowGroup> ScanRowGroups() const override {
+    std::vector<NScheduler::TScanRowGroup> PruneRowGroups(
+        const NQumir::NAst::TExprPtr&,
+        std::string_view,
+        std::ostream*,
+        const std::unordered_set<std::string>*) const override {
         return {
             {.RowGroup = 0, .RowCount = 10, .ByteSize = 160},
             {.RowGroup = 1, .RowCount = 10, .ByteSize = 160},
@@ -200,7 +201,7 @@ size_t CountTasks(const NScheduler::TTaskGraph& graph, std::string_view kind) {
 TEST(CteMaterialize, DiamondSelfJoinRunsDefinitionOnce) {
     auto table = MakeTable(/*rows=*/12, /*batches=*/3);
     TMockSource t({"k", "v"}, std::move(table->Batches));
-    std::unordered_map<std::string, ISource*> sources = {{"t", &t}};
+    std::unordered_map<std::string, ITable*> sources = {{"t", &t}};
 
     auto runtime = RunSql(
         "WITH x AS (SELECT k, v FROM t) "
@@ -214,7 +215,7 @@ TEST(CteMaterialize, DiamondSelfJoinRunsDefinitionOnce) {
 TEST(CteMaterialize, DiamondCapacityOneNoDeadlock) {
     auto table = MakeTable(/*rows=*/40, /*batches=*/20);
     TMockSource t({"k", "v"}, std::move(table->Batches));
-    std::unordered_map<std::string, ISource*> sources = {{"t", &t}};
+    std::unordered_map<std::string, ITable*> sources = {{"t", &t}};
 
     NScheduler::TSettings settings;
     settings.Queue.RowsetCapacityPerLane = 1;
@@ -229,7 +230,7 @@ TEST(CteMaterialize, DiamondCapacityOneNoDeadlock) {
 TEST(CteMaterialize, DiamondCapacityOneThreadedNoDeadlock) {
     auto table = MakeTable(/*rows=*/40, /*batches=*/20);
     TMockSource t({"k", "v"}, std::move(table->Batches));
-    std::unordered_map<std::string, ISource*> sources = {{"t", &t}};
+    std::unordered_map<std::string, ITable*> sources = {{"t", &t}};
 
     NScheduler::TSettings settings;
     settings.Queue.RowsetCapacityPerLane = 1;
@@ -247,7 +248,7 @@ TEST(CteMaterialize, RuntimeFilterAfterSharedReaderDoesNotDeadlock) {
     for (bool threaded : {false, true}) {
         auto table = MakeTable(/*rows=*/40, /*batches=*/20);
         TMockSource t({"k", "v"}, std::move(table->Batches));
-        std::unordered_map<std::string, ISource*> sources = {{"t", &t}};
+        std::unordered_map<std::string, ITable*> sources = {{"t", &t}};
         auto plan = BuildSqlPlan(
             "WITH x AS (SELECT k, v FROM t) "
             "SELECT p.k FROM x p JOIN "
@@ -281,7 +282,7 @@ TEST(CteMaterialize, ParallelSpoolKeepsDefinitionLanes) {
     for (bool threaded : {false, true}) {
         auto table = MakeTable(/*rows=*/40, /*batches=*/20);
         TSplitSource t({"k", "v"}, std::move(table->Batches));
-        std::unordered_map<std::string, ISource*> sources = {{"t", &t}};
+        std::unordered_map<std::string, ITable*> sources = {{"t", &t}};
         const std::string sql =
             "WITH x AS (SELECT k, v FROM t WHERE v > 0) "
             "SELECT k FROM x UNION ALL SELECT k FROM x";
@@ -315,7 +316,7 @@ TEST(CteMaterialize, ParallelSpoolKeepsDefinitionLanes) {
 TEST(CteMaterialize, EmptyCte) {
     auto table = MakeTable(/*rows=*/0, /*batches=*/1);
     TMockSource t({"k", "v"}, std::move(table->Batches));
-    std::unordered_map<std::string, ISource*> sources = {{"t", &t}};
+    std::unordered_map<std::string, ITable*> sources = {{"t", &t}};
 
     auto runtime = RunSql(
         "WITH x AS (SELECT k, v FROM t) "
@@ -329,7 +330,7 @@ TEST(CteMaterialize, EmptyCte) {
 TEST(CteMaterialize, NestedMaterializedProducer) {
     auto table = MakeTable(/*rows=*/12, /*batches=*/3);
     TMockSource t({"k", "v"}, std::move(table->Batches));
-    std::unordered_map<std::string, ISource*> sources = {{"t", &t}};
+    std::unordered_map<std::string, ITable*> sources = {{"t", &t}};
 
     auto runtime = RunSql(
         "WITH a AS (SELECT k, v FROM t), b AS (SELECT k, v FROM a) "
@@ -342,7 +343,7 @@ TEST(CteMaterialize, NestedMaterializedProducer) {
 TEST(CteMaterialize, UnionAllTwoConsumers) {
     auto table = MakeTable(/*rows=*/12, /*batches=*/3);
     TMockSource t({"k", "v"}, std::move(table->Batches));
-    std::unordered_map<std::string, ISource*> sources = {{"t", &t}};
+    std::unordered_map<std::string, ITable*> sources = {{"t", &t}};
 
     auto runtime = RunSql(
         "WITH x AS (SELECT k FROM t) "
@@ -356,7 +357,7 @@ TEST(CteMaterialize, UnionAllTwoConsumers) {
 TEST(CteMaterialize, SortBranchDoesNotCorruptSpool) {
     auto table = MakeTable(/*rows=*/12, /*batches=*/3);
     TMockSource t({"k", "v"}, std::move(table->Batches));
-    std::unordered_map<std::string, ISource*> sources = {{"t", &t}};
+    std::unordered_map<std::string, ITable*> sources = {{"t", &t}};
 
     auto runtime = RunSql(
         "WITH x AS (SELECT k FROM t) "
@@ -381,7 +382,7 @@ TEST(CteMaterialize, ChainedSelfJoinHonorsFilteredConsumerSelection) {
         .RefCount = 1,
     };
     TMockSource t({"k", "rn"}, {batch});
-    std::unordered_map<std::string, ISource*> sources = {{"t", &t}};
+    std::unordered_map<std::string, ITable*> sources = {{"t", &t}};
 
     auto runtime = RunSql(R"sql(
 WITH x AS (SELECT k, rn FROM t)
@@ -418,7 +419,7 @@ void RunFilteredCteSelfJoin(NScheduler::TSettings settings) {
         TRowSet{.Columns = cols2.data(), .ColumnCount = 2, .RowCount = 2, .RefCount = 1},
     };
     TMockSource t({"id", "flag"}, std::move(batches));
-    std::unordered_map<std::string, ISource*> sources = {{"t", &t}};
+    std::unordered_map<std::string, ITable*> sources = {{"t", &t}};
 
     auto runtime = RunSql(
         "WITH x AS (SELECT id FROM t WHERE flag = 1) "
@@ -450,7 +451,7 @@ TEST(CteMaterialize, CountStarWithFilterKeepsTechnicalColumn) {
     TRowSet batch{
         .Columns = cols.data(), .ColumnCount = 2, .RowCount = 4, .RefCount = 1};
     TMockSource t({"id", "flag"}, {batch});
-    std::unordered_map<std::string, ISource*> sources = {{"t", &t}};
+    std::unordered_map<std::string, ITable*> sources = {{"t", &t}};
 
     auto runtime = RunSql("SELECT COUNT(*) FROM t WHERE flag = 1", sources);
     EXPECT_EQ(CollectFirstColumnSorted(*runtime), (std::vector<int64_t>{2}));
@@ -460,7 +461,7 @@ TEST(CteMaterialize, CountStarWithFilterKeepsTechnicalColumn) {
 // schema (only the predicate uses it) but stays in its input schema.
 TEST(CteMaterialize, FilterDropsPredicateOnlyColumnFromOutput) {
     TMockSource t({"id", "flag"});
-    std::unordered_map<std::string, ISource*> sources = {{"t", &t}};
+    std::unordered_map<std::string, ITable*> sources = {{"t", &t}};
     auto plan = BuildSqlPlan("SELECT id FROM t WHERE flag = 1", sources);
 
     auto filter = FindFilter(plan);

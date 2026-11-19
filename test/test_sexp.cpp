@@ -65,13 +65,13 @@ TExprPtr Parse(TParser& p, const std::string& src) {
 
 TEST(SexpPrinter, Source) {
     NQdb::TMockSource src({"x", "y"});
-    auto op = std::make_shared<TSourceOperator>(src);
+    auto op = std::make_shared<TSourceOperator>(Borrow(src));
     EXPECT_EQ(PrintAst(op, MakePrintOpts()), "(rel source)");
 }
 
 TEST(SexpParser, SourceRowGroupPredicateRoundtrip) {
     NQdb::TMockSource src({"x"});
-    auto sourceOp = std::make_shared<TSourceOperator>(src);
+    auto sourceOp = std::make_shared<TSourceOperator>(Borrow(src));
     const std::string input =
         "(rel source \"data.parquet\" \"t\" (> |t.x| 5))";
 
@@ -79,7 +79,7 @@ TEST(SexpParser, SourceRowGroupPredicateRoundtrip) {
     opts.SourceFactory = [&](std::string_view path, NQumir::TLocation)
         -> TOperatorPtr
     {
-        sourceOp = std::make_shared<TSourceOperator>(src, std::string(path));
+        sourceOp = std::make_shared<TSourceOperator>(Borrow(src), std::string(path));
         return sourceOp;
     };
     auto p = MakeParser(std::move(opts));
@@ -95,7 +95,7 @@ TEST(SexpParser, RuntimeFilterUsesRoundtrip) {
     TRelParserOptions opts;
     opts.SourceFactory = [&](std::string_view path, NQumir::TLocation)
         -> TOperatorPtr {
-        return std::make_shared<TSourceOperator>(src, std::string(path));
+        return std::make_shared<TSourceOperator>(Borrow(src), std::string(path));
     };
     auto parser = MakeParser(std::move(opts));
     const std::string input =
@@ -121,7 +121,7 @@ TEST(SexpParser, SharedFilterConsumerPlacementRoundtrip) {
     opts.SourceFactory = [&](std::string_view path, NQumir::TLocation)
         -> TOperatorPtr {
         auto& source = path == "L" ? left : path == "R" ? middle : third;
-        return std::make_shared<TSourceOperator>(source, std::string(path));
+        return std::make_shared<TSourceOperator>(Borrow(source), std::string(path));
     };
     auto parser = MakeParser(std::move(opts));
     const std::string input =
@@ -145,7 +145,7 @@ TEST(SexpParser, SharedFilterConsumerPlacementRoundtrip) {
 
 TEST(SexpPrinter, Filter) {
     NQdb::TMockSource src({"x"});
-    auto source = std::make_shared<TSourceOperator>(src);
+    auto source = std::make_shared<TSourceOperator>(Borrow(src));
     auto filt = MakeFilter(source, "(> x 5)");
     ASSERT_TRUE(filt.has_value());
     EXPECT_EQ(PrintAst(*filt, MakePrintOpts()), "(rel filter (rel source) (> x 5))");
@@ -153,7 +153,7 @@ TEST(SexpPrinter, Filter) {
 
 TEST(SexpPrinter, Project) {
     NQdb::TMockSource src({"x", "y"});
-    auto source = std::make_shared<TSourceOperator>(src);
+    auto source = std::make_shared<TSourceOperator>(Borrow(src));
     auto proj = MakeProject(source, {{"a", "x"}, {"b", "y"}});
     ASSERT_TRUE(proj.has_value());
     EXPECT_EQ(PrintAst(*proj, MakePrintOpts()), "(rel project (rel source) (a x) (b y))");
@@ -161,7 +161,7 @@ TEST(SexpPrinter, Project) {
 
 TEST(SexpPrinter, Aggregate) {
     NQdb::TMockSource src({"x", "y"});
-    auto source = std::make_shared<TSourceOperator>(src);
+    auto source = std::make_shared<TSourceOperator>(Borrow(src));
     auto agg = MakeAggregate(source, {"x"}, {{"cnt", "count", ""}, {"s", "sum", "y"}});
     ASSERT_TRUE(agg.has_value());
     EXPECT_EQ(PrintAst(*agg, MakePrintOpts()),
@@ -170,7 +170,7 @@ TEST(SexpPrinter, Aggregate) {
 
 TEST(SexpPrinter, FilterOfProject) {
     NQdb::TMockSource src({"x", "y"});
-    auto source = std::make_shared<TSourceOperator>(src);
+    auto source = std::make_shared<TSourceOperator>(Borrow(src));
     auto proj = MakeProject(source, {{"a", "x"}});
     ASSERT_TRUE(proj.has_value());
     auto filt = MakeFilter(*proj, "(> a 0)");
@@ -203,11 +203,11 @@ TEST(SexpParser, SourceRejectsInvalidTrailingTokenClearly) {
 
 TEST(SexpParser, Filter) {
     NQdb::TMockSource src({"x"});
-    auto sourceOp = std::make_shared<TSourceOperator>(src);
+    auto sourceOp = std::make_shared<TSourceOperator>(Borrow(src));
 
     TRelParserOptions opts;
     opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
-    sourceOp = std::make_shared<TSourceOperator>(src, std::string(path));
+    sourceOp = std::make_shared<TSourceOperator>(Borrow(src), std::string(path));
     return sourceOp;
 };
     auto p = MakeParser(std::move(opts));
@@ -225,11 +225,11 @@ TEST(SexpParser, Filter) {
 
 TEST(SexpParser, Project) {
     NQdb::TMockSource src({"x", "y"});
-    auto sourceOp = std::make_shared<TSourceOperator>(src);
+    auto sourceOp = std::make_shared<TSourceOperator>(Borrow(src));
 
     TRelParserOptions opts;
     opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
-    sourceOp = std::make_shared<TSourceOperator>(src, std::string(path));
+    sourceOp = std::make_shared<TSourceOperator>(Borrow(src), std::string(path));
     return sourceOp;
 };
     auto p = MakeParser(std::move(opts));
@@ -247,7 +247,7 @@ TEST(SexpParser, ProjectColumnAliasesPrintRoundtrip) {
     NQdb::TMockSource src({"pair"});
     TRelParserOptions opts;
     opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
-        return std::make_shared<TSourceOperator>(src, std::string(path));
+        return std::make_shared<TSourceOperator>(Borrow(src), std::string(path));
     };
     auto parser = MakeParser(std::move(opts));
     const std::string input =
@@ -265,7 +265,7 @@ TEST(SexpParser, ProjectRejectsMalformedColumnAliases) {
     NQdb::TMockSource src({"pair"});
     TRelParserOptions opts;
     opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
-        return std::make_shared<TSourceOperator>(src, std::string(path));
+        return std::make_shared<TSourceOperator>(Borrow(src), std::string(path));
     };
     auto parser = MakeParser(std::move(opts));
     for (const auto& [input, message] : std::vector<std::pair<std::string, std::string>>{
@@ -292,7 +292,7 @@ TEST(SexpParser, LateMaterializePrintRoundtrip) {
     TRelParserOptions opts;
     opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr
     {
-        return std::make_shared<TSourceOperator>(src, std::string(path));
+        return std::make_shared<TSourceOperator>(Borrow(src), std::string(path));
     };
     auto parser = MakeParser(std::move(opts));
     const std::string input = R"((rel late-materialize (rel source "data.parquet") (locator __row_id__) (column url URL string) (column event_time EventTime i64)))";
@@ -315,13 +315,13 @@ TEST(SexpParser, LateMaterializePrintRoundtrip) {
 
 TEST(SexpParser, FilterPrintRoundtrip) {
     NQdb::TMockSource src({"x"});
-    auto sourceOp = std::make_shared<TSourceOperator>(src);
+    auto sourceOp = std::make_shared<TSourceOperator>(Borrow(src));
 
     const std::string input = "(rel filter (rel source \"data.parquet\") (> x 5))";
 
     TRelParserOptions opts;
     opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
-    sourceOp = std::make_shared<TSourceOperator>(src, std::string(path));
+    sourceOp = std::make_shared<TSourceOperator>(Borrow(src), std::string(path));
     return sourceOp;
 };
     auto p = MakeParser(std::move(opts));
@@ -335,13 +335,13 @@ TEST(SexpParser, FilterPrintRoundtrip) {
 
 TEST(SexpParser, AggregatePrintRoundtrip) {
     NQdb::TMockSource src({"x", "y"});
-    auto sourceOp = std::make_shared<TSourceOperator>(src);
+    auto sourceOp = std::make_shared<TSourceOperator>(Borrow(src));
 
     const std::string input = "(rel aggregate (rel source \"data.parquet\") (keys x) (agg cnt count) (agg s sum y))";
 
     TRelParserOptions opts;
     opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
-    sourceOp = std::make_shared<TSourceOperator>(src, std::string(path));
+    sourceOp = std::make_shared<TSourceOperator>(Borrow(src), std::string(path));
     return sourceOp;
 };
     auto p = MakeParser(std::move(opts));
@@ -366,7 +366,7 @@ TEST(SexpParser, AggregatePrintRoundtrip) {
 
 TEST(SexpParser, WindowPrintRoundtrip) {
     NQdb::TMockSource src({"a", "b", "c", "y"});
-    auto sourceOp = std::make_shared<TSourceOperator>(src);
+    auto sourceOp = std::make_shared<TSourceOperator>(Borrow(src));
 
     const std::string input =
         "(rel window (rel source \"data.parquet\") (partition a b) "
@@ -376,7 +376,7 @@ TEST(SexpParser, WindowPrintRoundtrip) {
 
     TRelParserOptions opts;
     opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
-    sourceOp = std::make_shared<TSourceOperator>(src, std::string(path));
+    sourceOp = std::make_shared<TSourceOperator>(Borrow(src), std::string(path));
     return sourceOp;
 };
     auto p = MakeParser(std::move(opts));
@@ -408,13 +408,13 @@ TEST(SexpParser, WindowPrintRoundtrip) {
 
 TEST(SexpParser, WindowNoFrameRoundtrip) {
     NQdb::TMockSource src({"a"});
-    auto sourceOp = std::make_shared<TSourceOperator>(src);
+    auto sourceOp = std::make_shared<TSourceOperator>(Borrow(src));
 
     const std::string input = "(rel window (rel source \"data.parquet\") (fn w_0 rank))";
 
     TRelParserOptions opts;
     opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
-    sourceOp = std::make_shared<TSourceOperator>(src, std::string(path));
+    sourceOp = std::make_shared<TSourceOperator>(Borrow(src), std::string(path));
     return sourceOp;
 };
     auto p = MakeParser(std::move(opts));
@@ -437,7 +437,7 @@ TEST(SexpParser, SortPrintRoundtrip) {
 
     TRelParserOptions opts;
     opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
-        return std::make_shared<TSourceOperator>(src, std::string(path));
+        return std::make_shared<TSourceOperator>(Borrow(src), std::string(path));
     };
     auto p = MakeParser(std::move(opts));
 
@@ -461,7 +461,7 @@ TEST(SexpParser, TopSortPrintRoundtrip) {
 
     TRelParserOptions opts;
     opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
-        return std::make_shared<TSourceOperator>(src, std::string(path));
+        return std::make_shared<TSourceOperator>(Borrow(src), std::string(path));
     };
     auto p = MakeParser(std::move(opts));
 
@@ -484,7 +484,7 @@ TEST(SexpParser, LimitPrintRoundtrip) {
 
     TRelParserOptions opts;
     opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
-        return std::make_shared<TSourceOperator>(src, std::string(path));
+        return std::make_shared<TSourceOperator>(Borrow(src), std::string(path));
     };
     auto p = MakeParser(std::move(opts));
 
@@ -502,8 +502,8 @@ TEST(SexpParser, LimitPrintRoundtrip) {
 TEST(SexpPrinter, Join) {
     NQdb::TMockSource leftSrc({"a", "b"});
     NQdb::TMockSource rightSrc({"c", "d"});
-    auto l = std::make_shared<TSourceOperator>(leftSrc);
-    auto r = std::make_shared<TSourceOperator>(rightSrc);
+    auto l = std::make_shared<TSourceOperator>(Borrow(leftSrc));
+    auto r = std::make_shared<TSourceOperator>(Borrow(rightSrc));
     auto join = MakeJoin(l, r, {{"a", "c"}}, EJoinType::Inner);
     ASSERT_TRUE(join.has_value()) << (join ? "" : join.error().ToString());
     EXPECT_EQ(PrintAst(*join, MakePrintOpts()),
@@ -513,8 +513,8 @@ TEST(SexpPrinter, Join) {
 TEST(SexpPrinter, JoinWithFilterAndMultipleKeys) {
     NQdb::TMockSource leftSrc({"a", "b"});
     NQdb::TMockSource rightSrc({"c", "d"});
-    auto l = std::make_shared<TSourceOperator>(leftSrc);
-    auto r = std::make_shared<TSourceOperator>(rightSrc);
+    auto l = std::make_shared<TSourceOperator>(Borrow(leftSrc));
+    auto r = std::make_shared<TSourceOperator>(Borrow(rightSrc));
     auto join = MakeJoin(l, r, {{"a", "c"}, {"b", "d"}}, EJoinType::Left, "(< b d)");
     ASSERT_TRUE(join.has_value()) << (join ? "" : join.error().ToString());
     EXPECT_EQ(PrintAst(*join, MakePrintOpts()),
@@ -532,9 +532,9 @@ TEST(SexpParser, JoinPrintRoundtrip) {
     TRelParserOptions opts;
     opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
         if (path == "left.parquet") {
-            return std::make_shared<TSourceOperator>(leftSrc, std::string(path));
+            return std::make_shared<TSourceOperator>(Borrow(leftSrc), std::string(path));
         }
-        return std::make_shared<TSourceOperator>(rightSrc, std::string(path));
+        return std::make_shared<TSourceOperator>(Borrow(rightSrc), std::string(path));
     };
     auto p = MakeParser(std::move(opts));
 
@@ -571,9 +571,9 @@ TEST(SexpParser, JoinAnnotationRoundtrip) {
         opts.SourceFactory =
             [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
             if (path == "left.parquet") {
-                return std::make_shared<TSourceOperator>(leftSrc, std::string(path));
+                return std::make_shared<TSourceOperator>(Borrow(leftSrc), std::string(path));
             }
-            return std::make_shared<TSourceOperator>(rightSrc, std::string(path));
+            return std::make_shared<TSourceOperator>(Borrow(rightSrc), std::string(path));
         };
         auto p = MakeParser(std::move(opts));
         return Parse(p, input);
@@ -625,9 +625,9 @@ TEST(SexpParser, JoinAnnotationRoundtrip) {
         opts.SourceFactory =
             [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
             if (path == "left.parquet") {
-                return std::make_shared<TSourceOperator>(leftSrc, std::string(path));
+                return std::make_shared<TSourceOperator>(Borrow(leftSrc), std::string(path));
             }
-            return std::make_shared<TSourceOperator>(rightSrc, std::string(path));
+            return std::make_shared<TSourceOperator>(Borrow(rightSrc), std::string(path));
         };
         auto p = MakeParser(std::move(opts));
         std::istringstream in(input);
@@ -648,9 +648,9 @@ TEST(SexpParser, CloneKeepsJoinRuntimeFilter) {
     TRelParserOptions opts;
     opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
         if (path == "left.parquet") {
-            return std::make_shared<TSourceOperator>(leftSrc, std::string(path));
+            return std::make_shared<TSourceOperator>(Borrow(leftSrc), std::string(path));
         }
-        return std::make_shared<TSourceOperator>(rightSrc, std::string(path));
+        return std::make_shared<TSourceOperator>(Borrow(rightSrc), std::string(path));
     };
     auto p = MakeParser(std::move(opts));
     auto expr = Parse(p,
@@ -672,9 +672,9 @@ TEST(SexpParser, JoinToStringUsesTaggedForms) {
     NQdb::TMockSource rightSrc({"c", "d"});
     auto factory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
         if (path == "left.parquet") {
-            return std::make_shared<TSourceOperator>(leftSrc, std::string(path));
+            return std::make_shared<TSourceOperator>(Borrow(leftSrc), std::string(path));
         }
-        return std::make_shared<TSourceOperator>(rightSrc, std::string(path));
+        return std::make_shared<TSourceOperator>(Borrow(rightSrc), std::string(path));
     };
     TRelParserOptions opts;
     opts.SourceFactory = factory;
@@ -699,12 +699,12 @@ TEST(SexpParser, FlattenKeepsAnnotatedJoin) {
     TRelParserOptions opts;
     opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
         if (path == "left.parquet") {
-            return std::make_shared<TSourceOperator>(leftSrc, std::string(path));
+            return std::make_shared<TSourceOperator>(Borrow(leftSrc), std::string(path));
         }
         if (path == "right.parquet") {
-            return std::make_shared<TSourceOperator>(rightSrc, std::string(path));
+            return std::make_shared<TSourceOperator>(Borrow(rightSrc), std::string(path));
         }
-        return std::make_shared<TSourceOperator>(thirdSrc, std::string(path));
+        return std::make_shared<TSourceOperator>(Borrow(thirdSrc), std::string(path));
     };
     auto p = MakeParser(std::move(opts));
     auto expr = Parse(p,
@@ -750,9 +750,9 @@ TEST(SexpParser, CrossJoinAcceptsEmptyKeyList) {
     TRelParserOptions opts;
     opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
         if (path == "left.parquet") {
-            return std::make_shared<TSourceOperator>(leftSrc, std::string(path));
+            return std::make_shared<TSourceOperator>(Borrow(leftSrc), std::string(path));
         }
-        return std::make_shared<TSourceOperator>(rightSrc, std::string(path));
+        return std::make_shared<TSourceOperator>(Borrow(rightSrc), std::string(path));
     };
     auto p = MakeParser(std::move(opts));
 
@@ -770,9 +770,9 @@ TEST(SexpParser, JoinRejectsEmptyKeysWithNonInnerType) {
     TRelParserOptions opts;
     opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
         if (path == "left.parquet") {
-            return std::make_shared<TSourceOperator>(leftSrc, std::string(path));
+            return std::make_shared<TSourceOperator>(Borrow(leftSrc), std::string(path));
         }
-        return std::make_shared<TSourceOperator>(rightSrc, std::string(path));
+        return std::make_shared<TSourceOperator>(Borrow(rightSrc), std::string(path));
     };
     auto p = MakeParser(std::move(opts));
 
@@ -792,7 +792,7 @@ TEST(SexpCte, EnvelopeRoundTrips) {
         opts.CteRegistry =
             std::make_shared<std::unordered_map<uint32_t, TCteDefinitionPtr>>();
         opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
-            return std::make_shared<TSourceOperator>(src, std::string(path));
+            return std::make_shared<TSourceOperator>(Borrow(src), std::string(path));
         };
         return opts;
     };
@@ -836,7 +836,7 @@ TEST(SexpCte, NestedDefinitionsRoundTrip) {
         opts.CteRegistry =
             std::make_shared<std::unordered_map<uint32_t, TCteDefinitionPtr>>();
         opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
-            return std::make_shared<TSourceOperator>(src, std::string(path));
+            return std::make_shared<TSourceOperator>(Borrow(src), std::string(path));
         };
         return opts;
     };
@@ -874,7 +874,7 @@ TEST(SexpCte, DuplicateDefinitionIdFails) {
     opts.CteRegistry =
         std::make_shared<std::unordered_map<uint32_t, TCteDefinitionPtr>>();
     opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
-        return std::make_shared<TSourceOperator>(src, std::string(path));
+        return std::make_shared<TSourceOperator>(Borrow(src), std::string(path));
     };
     auto p = MakeParser(std::move(opts));
 
@@ -891,7 +891,7 @@ TEST(SexpCte, DuplicateDefinitionIdFails) {
 
 TEST(SexpCte, MaterializedPlanIsNotRelPlanSerializable) {
     NQdb::TMockSource src({"a"});
-    auto producer = std::make_shared<TSourceOperator>(src, "base");
+    auto producer = std::make_shared<TSourceOperator>(Borrow(src), "base");
 
     auto def = std::make_shared<TCteDefinition>();
     def->Id = 0;

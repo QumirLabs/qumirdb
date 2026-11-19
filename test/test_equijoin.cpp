@@ -41,10 +41,10 @@ using namespace NQumir::NAst;
 
 namespace {
 
-TOperatorPtr BuildAnnotated(const std::string& sexp, const std::map<std::string, ISource*>& tables) {
+TOperatorPtr BuildAnnotated(const std::string& sexp, const std::map<std::string, ITable*>& tables) {
     TRelParserOptions opts;
     opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
-        return std::make_shared<TSourceOperator>(*tables.at(std::string(path)), std::string(path));
+        return std::make_shared<TSourceOperator>(Borrow(*tables.at(std::string(path))), std::string(path));
     };
 
     TParser parser;
@@ -66,7 +66,7 @@ TOperatorPtr BuildAnnotated(const std::string& sexp, const std::map<std::string,
     return root;
 }
 
-TOperatorPtr Optimize(const std::string& sexp, const std::map<std::string, ISource*>& tables) {
+TOperatorPtr Optimize(const std::string& sexp, const std::map<std::string, ITable*>& tables) {
     TConstFolder folder;
     return ExtractEquiJoins(BuildAnnotated(sexp, tables), folder);
 }
@@ -137,7 +137,7 @@ std::set<std::string> LeafAliases(const TOperatorPtr& op) {
 TEST(EquiJoin, OneJoinFromFilter) {
     NQdb::TMockSource a({"aid", "aval"});
     NQdb::TMockSource b({"bid", "bval"});
-    std::map<std::string, ISource*> tables = {{"A", &a}, {"B", &b}};
+    std::map<std::string, ITable*> tables = {{"A", &a}, {"B", &b}};
 
     auto root = Optimize(
         "(rel filter"
@@ -153,7 +153,7 @@ TEST(EquiJoin, TwoJoinsFromFilter) {
     NQdb::TMockSource a({"aid", "aval"});
     NQdb::TMockSource b({"bid", "bcid", "bval"});
     NQdb::TMockSource c({"cid", "cval"});
-    std::map<std::string, ISource*> tables = {{"A", &a}, {"B", &b}, {"C", &c}};
+    std::map<std::string, ITable*> tables = {{"A", &a}, {"B", &b}, {"C", &c}};
 
     auto root = Optimize(
         "(rel filter"
@@ -172,7 +172,7 @@ TEST(EquiJoin, ThreeJoinsFromFilter) {
     NQdb::TMockSource b({"bid", "bcid", "bval"});
     NQdb::TMockSource c({"cid", "ccid", "cval"});
     NQdb::TMockSource d({"did", "dval"});
-    std::map<std::string, ISource*> tables = {{"A", &a}, {"B", &b}, {"C", &c}, {"D", &d}};
+    std::map<std::string, ITable*> tables = {{"A", &a}, {"B", &b}, {"C", &c}, {"D", &d}};
 
     auto root = Optimize(
         "(rel filter"
@@ -191,9 +191,9 @@ TEST(EquiJoin, ExtractsKeysThroughLimitAndSort) {
     NQdb::TMockSource a({"aid", "aval"});
     NQdb::TMockSource b({"bid", "bval"});
 
-    auto left = std::make_shared<TSourceOperator>(a, "A");
+    auto left = std::make_shared<TSourceOperator>(Borrow(a), "A");
     left->SetAlias("a");
-    auto right = std::make_shared<TSourceOperator>(b, "B");
+    auto right = std::make_shared<TSourceOperator>(Borrow(b), "B");
     right->SetAlias("b");
 
     TOperatorPtr root = std::make_shared<TLimitOperator>(
@@ -221,11 +221,11 @@ TEST(JoinOrder, ReordersThroughLimitAndSort) {
     NQdb::TMockSource b({"bid", "bval"});
     NQdb::TMockSource c({"cid", "cval"});
 
-    auto sourceA = std::make_shared<TSourceOperator>(a, "A");
+    auto sourceA = std::make_shared<TSourceOperator>(Borrow(a), "A");
     sourceA->SetAlias("a");
-    auto sourceB = std::make_shared<TSourceOperator>(b, "B");
+    auto sourceB = std::make_shared<TSourceOperator>(Borrow(b), "B");
     sourceB->SetAlias("b");
-    auto sourceC = std::make_shared<TSourceOperator>(c, "C");
+    auto sourceC = std::make_shared<TSourceOperator>(Borrow(c), "C");
     sourceC->SetAlias("c");
 
     TOperatorPtr root = std::make_shared<TLimitOperator>(
@@ -271,7 +271,7 @@ TEST(JoinOrder, ReordersThroughLimitAndSort) {
 TEST(PushDown, SingleTableToLeafEqualityStaysAbove) {
     NQdb::TMockSource a({"aid", "aval"});
     NQdb::TMockSource b({"bid", "bval"});
-    std::map<std::string, ISource*> tables = {{"A", &a}, {"B", &b}};
+    std::map<std::string, ITable*> tables = {{"A", &a}, {"B", &b}};
 
     TConstFolder folder;
     auto root = PushDownPredicates(BuildAnnotated(
@@ -303,7 +303,7 @@ TEST(PushDown, SingleTableToLeafEqualityStaysAbove) {
 // whole partitions is safe); a predicate over the window output stays above.
 TEST(PushDown, PartitionPredicateThroughWindow) {
     NQdb::TMockSource t({"a", "b"});
-    std::map<std::string, ISource*> tables = {{"T", &t}};
+    std::map<std::string, ITable*> tables = {{"T", &t}};
 
     TConstFolder folder;
     auto root = PushDownPredicates(BuildAnnotated(
@@ -328,7 +328,7 @@ TEST(PushDown, PartitionPredicateThroughWindow) {
 TEST(PushDown, WindowRecursesToChildJoin) {
     NQdb::TMockSource a({"aid", "aval"});
     NQdb::TMockSource b({"bid", "bval"});
-    std::map<std::string, ISource*> tables = {{"A", &a}, {"B", &b}};
+    std::map<std::string, ITable*> tables = {{"A", &a}, {"B", &b}};
 
     auto root = Optimize(
         "(rel window"
@@ -345,7 +345,7 @@ TEST(PushDown, WindowRecursesToChildJoin) {
 // namespace (x -> aid) and pushed below the project onto the leaf.
 TEST(PushDown, ProjectRewritesAndPushesPredicate) {
     NQdb::TMockSource a({"aid"});
-    std::map<std::string, ISource*> tables = {{"A", &a}};
+    std::map<std::string, ITable*> tables = {{"A", &a}};
 
     TConstFolder folder;
     auto root = PushDownPredicates(BuildAnnotated(
@@ -373,7 +373,7 @@ TEST(PushDown, ProjectRewritesAndPushesPredicate) {
 TEST(PushDown, UnionAllPrunesConstantBranch) {
     NQdb::TMockSource a({"aid"});
     NQdb::TMockSource b({"bid"});
-    std::map<std::string, ISource*> tables = {{"A", &a}, {"B", &b}};
+    std::map<std::string, ITable*> tables = {{"A", &a}, {"B", &b}};
 
     TConstFolder folder;
     auto root = PushDownPredicates(BuildAnnotated(
@@ -398,7 +398,7 @@ TEST(PushDown, UnionAllShrinksToMultipleSurvivingBranches) {
     NQdb::TMockSource a({"aid"});
     NQdb::TMockSource b({"bid"});
     NQdb::TMockSource c({"cid"});
-    std::map<std::string, ISource*> tables = {{"A", &a}, {"B", &b}, {"C", &c}};
+    std::map<std::string, ITable*> tables = {{"A", &a}, {"B", &b}, {"C", &c}};
 
     TConstFolder folder;
     auto root = PushDownPredicates(BuildAnnotated(
@@ -429,7 +429,7 @@ TEST(PushDown, UnionAllShrinksToMultipleSurvivingBranches) {
 TEST(PushDown, UnionAllPrunesAllBranchesToEmpty) {
     NQdb::TMockSource a({"aid"});
     NQdb::TMockSource b({"bid"});
-    std::map<std::string, ISource*> tables = {{"A", &a}, {"B", &b}};
+    std::map<std::string, ITable*> tables = {{"A", &a}, {"B", &b}};
 
     TConstFolder folder;
     auto root = PushDownPredicates(BuildAnnotated(

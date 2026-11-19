@@ -9,7 +9,6 @@
 #include <qdb/exec/runtime_context.h>
 #include <qdb/exec/sort_exec.h>
 #include <qdb/exec/window_exec.h>
-#include <qdb/io/parquet/source.h>
 #include <qdb/io/row_layouts.h>
 #include <qdb/kernel/compiler.h>
 #include <qdb/kernel/finalize.h>
@@ -845,37 +844,26 @@ private:
         {
             return found->second;
         }
-        auto* metadata =
-            dynamic_cast<NScheduler::IScanMetadataSource*>(&src.GetSource());
-        if (!metadata) {
-            return std::nullopt;
-        }
-        std::vector<NScheduler::TScanRowGroup> rowGroups;
-        if (auto* parquet = dynamic_cast<TParquetSource*>(&src.GetSource())) {
-            // OutputLanes runs before BuildSourceRuntimeType restricts the
-            // reader. Estimate the logical scan's projection without mutating
-            // a source that may also be used by an inlined CTE reference.
-            std::optional<std::unordered_set<std::string>> columns;
-            if (auto required = src.RequiredColumns();
-                required && Settings_.ScanSplit.MaxScanTasks == 0)
-            {
-                columns.emplace();
-                for (const auto& [name, _] : required->Fields) {
-                    const auto dot = name.rfind('.');
-                    columns->insert(dot == std::string::npos
-                        ? name : name.substr(dot + 1));
-                }
+        // OutputLanes runs before BuildSourceRuntimeType restricts the
+        // operator's columns, so estimate the projection from the required ones.
+        std::optional<std::unordered_set<std::string>> columns;
+        if (auto required = src.RequiredColumns();
+            required && Settings_.ScanSplit.MaxScanTasks == 0)
+        {
+            columns.emplace();
+            for (const auto& [name, _] : required->Fields) {
+                const auto dot = name.rfind('.');
+                columns->insert(dot == std::string::npos
+                    ? name : name.substr(dot + 1));
             }
-            rowGroups = parquet->PruneRowGroups(
-                src.RowGroupPredicate(),
-                src.GetAlias(),
-                Settings_.Instrumentation.RowGroupPredicate
-                    ? Settings_.Instrumentation.Output
-                    : nullptr,
-                columns ? &*columns : nullptr);
-        } else {
-            rowGroups = metadata->ScanRowGroups();
         }
+        auto rowGroups = src.GetTable()->PruneRowGroups(
+            src.RowGroupPredicate(),
+            src.GetAlias(),
+            Settings_.Instrumentation.RowGroupPredicate
+                ? Settings_.Instrumentation.Output
+                : nullptr,
+            columns ? &*columns : nullptr);
         if (rowGroups.empty()) {
             TSourceSplits empty = std::vector<NScheduler::TScanSplit>{};
             ScanSplitCache_.emplace(&src, empty);
@@ -996,21 +984,10 @@ private:
         const auto execStageId = NewExecStage(
             &src, EExecPlanNodeKind::Source);
         auto splitPlan = ScanSplits(src);
-        auto* sourcePtr = &src.GetSource();
-        auto* parquetSource = dynamic_cast<TParquetSource*>(sourcePtr);
+        const auto& table = src.GetTable();
         const auto label = src.GetAlias().empty() ? "source" : "source " + src.GetAlias();
-        // Parquet scans are built from records; other sources keep their task.
-        std::optional<std::vector<std::string>> columns;
-        std::shared_ptr<const NScheduler::TSourceCode> code;
-        if (parquetSource) {
-            TaskContext_.ParquetFiles.try_emplace(parquetSource->Path(), parquetSource->File());
-            if (const auto& restricted = parquetSource->RestrictedColumns()) {
-                columns.emplace(restricted->begin(), restricted->end());
-                std::ranges::sort(*columns);
-            }
-        } else {
-            code = MakeSourceCode();
-        }
+        TaskContext_.Tables.try_emplace(table->Path(), table);
+        const auto columns = src.RestrictedColumns();
 
         const size_t lanes = std::max<size_t>(
             splitPlan ? splitPlan->size() : 0, 1);
@@ -1021,34 +998,24 @@ private:
             const auto* split = splitPlan && !splitPlan->empty()
                 ? &(*splitPlan)[p]
                 : nullptr;
-            if (parquetSource) {
-                auto rowGroups = parquetSource->RowGroups();
-                if (split && !split->RowGroups.empty()) {
-                    rowGroups.emplace(split->RowGroups.begin(), split->RowGroups.end());
-                } else if (splitPlan && splitPlan->empty()) {
-                    rowGroups.emplace();
-                }
-                auto& node = AddNode({
-                    .ExecStageId = execStageId,
-                    .TaskGroupId = execStageId,
-                    .DebugKind = "source",
-                    .DebugLabel = label,
-                    .Body = NScheduler::TParquetScanNode{
-                        .Out = PortSpec(Graph_, &outConn, p + outLaneOffset),
-                        .Path = parquetSource->Path(),
-                        .Columns = columns,
-                        .RowGroups = std::move(rowGroups),
-                    },
-                });
-                result.Producers.push_back(&node);
-                continue;
+            std::optional<std::vector<int32_t>> rowGroups;
+            if (split && !split->RowGroups.empty()) {
+                rowGroups.emplace(split->RowGroups.begin(), split->RowGroups.end());
+            } else if (splitPlan && splitPlan->empty()) {
+                rowGroups.emplace();
             }
-            auto task = std::make_unique<NScheduler::TSourceTask>(
-                code,
-                std::make_shared<TSchedulerSourceState>(TSchedulerSourceState{.Source = sourcePtr}),
-                NScheduler::TOutputPort{.Connection = &outConn, .Lane = p + outLaneOffset});
-            auto& node = Graph_.AddOwnedNode(std::move(task));
-            MarkNode(node, "source", execStageId, label, execStageId);
+            auto& node = AddNode({
+                .ExecStageId = execStageId,
+                .TaskGroupId = execStageId,
+                .DebugKind = "source",
+                .DebugLabel = label,
+                .Body = NScheduler::TParquetScanNode{
+                    .Out = PortSpec(Graph_, &outConn, p + outLaneOffset),
+                    .Path = table->Path(),
+                    .Columns = columns,
+                    .RowGroups = std::move(rowGroups),
+                },
+            });
             result.Producers.push_back(&node);
         }
         return result;
@@ -1881,17 +1848,13 @@ private:
         const auto execStageId = NewExecStage(
             &late, EExecPlanNodeKind::LateMaterialize);
         auto columns = late.Columns();
-        auto source = ResolveLateMaterializationSource(late);
-        if (!source.Source.EmitsRowId()) {
+        auto& source = ResolveLateMaterializationSource(late);
+        if (!source.EmitsRowId()) {
             throw std::runtime_error(
                 "late materialize source has not been bound to emit locators");
         }
-        auto* parquetSource = dynamic_cast<TParquetSource*>(&source.Lookup);
-        if (!parquetSource) {
-            throw std::runtime_error(
-                "late materialize lowering needs a parquet source");
-        }
-        TaskContext_.ParquetFiles.try_emplace(parquetSource->Path(), parquetSource->File());
+        const auto& table = source.GetTable();
+        TaskContext_.Tables.try_emplace(table->Path(), table);
         const auto locator = late.LocatorColumn();
         const auto outputType = late.OutputColumns();
         const size_t childLanes = OutputLanes(late.Input());
@@ -2010,7 +1973,7 @@ private:
                 .Body = NScheduler::TLateLookupNode{
                     .In = PortSpec(Graph_, requests, taskIndex),
                     .Out = PortSpec(Graph_, &result, 0),
-                    .Path = parquetSource->Path(),
+                    .Path = table->Path(),
                     .Columns = {
                         physicalColumns.begin() + begin,
                         physicalColumns.begin() + end},
@@ -2815,7 +2778,7 @@ private:
     std::shared_ptr<const TExternalCatalogSnapshot> ExternalCatalog_;
     std::shared_ptr<IRuntimeFilterBindingFactory> RuntimeFilterBindings_;
     std::shared_ptr<TRuntimeContext> RuntimeContext_;
-    // Slots follow KernelSink_; ParquetFiles reuses the plan's opened files.
+    // Slots follow KernelSink_; Tables reuses the plan's opened tables.
     NScheduler::TNodeTaskContext TaskContext_;
     std::unordered_set<const TSourceOperator*> SourcesFeedingJoins_;
     // Split planning includes Parquet predicate compilation and evaluation;

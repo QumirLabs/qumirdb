@@ -32,12 +32,12 @@ namespace {
 
 std::unique_ptr<TTestRuntime> Plan(
     const std::string& sexp,
-    ISource& src,
+    ITable& src,
     NScheduler::TSettings schedulerSettings = {})
 {
     TRelParserOptions opts;
     opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
-        return std::make_shared<TSourceOperator>(src, std::string(path));
+        return std::make_shared<TSourceOperator>(Borrow(src), std::string(path));
     };
     TParser parser;
     for (auto& [name, fn] : MakeRelParsers(std::move(opts))) parser.NodeParsers[name] = std::move(fn);

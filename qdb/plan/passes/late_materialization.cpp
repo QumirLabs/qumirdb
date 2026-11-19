@@ -56,7 +56,7 @@ std::optional<std::vector<TLateMaterializeColumn>> DirectOutputColumns(
         ? std::string{}
         : source.GetAlias() + ".";
     std::unordered_set<std::string> physicalColumns;
-    for (const auto& column : source.GetSource().Schema().Columns) {
+    for (const auto& column : source.GetTable()->Schema().Columns) {
         physicalColumns.insert(std::string(column.Name));
     }
 
@@ -130,7 +130,7 @@ std::optional<std::vector<TLateMaterializeColumn>> DirectOutputColumns(
 }
 
 bool HasPhysicalRowIdCollision(const TSourceOperator& source) {
-    for (const auto& column : source.GetSource().Schema().Columns) {
+    for (const auto& column : source.GetTable()->Schema().Columns) {
         if (column.Name == InternalRowIdColumnName) {
             return true;
         }
@@ -219,7 +219,7 @@ void BindLateMaterializationSources(const TOperatorPtr& root) {
         return;
     }
     if (auto late = TMaybeOp<TLateMaterializeOperator>(root)) {
-        ResolveLateMaterializationSource(*late.Cast()).Source.EnableRowId();
+        ResolveLateMaterializationSource(*late.Cast()).EnableRowId();
     }
     for (const auto& input : root->Inputs()) {
         BindLateMaterializationSources(input);
@@ -263,8 +263,7 @@ TOperatorPtr ApplyLateMaterialization(
         SetReason(diagnostics, "plan is not a single-source row-preserving chain");
         return root;
     }
-    auto* lookup = dynamic_cast<IRowLookupSource*>(
-        &chain->Source->GetSource());
+    auto lookup = chain->Source->GetTable()->MakeLookupSource();
     if (!lookup) {
         SetReason(diagnostics, "source has no row lookup capability");
         return root;

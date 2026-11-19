@@ -28,7 +28,7 @@ using namespace NQdb;
 
 namespace {
 
-TOperatorPtr BuildSqlPlan(std::string_view sql, const std::map<std::string, ISource*>& tables) {
+TOperatorPtr BuildSqlPlan(std::string_view sql, const std::map<std::string, ITable*>& tables) {
     std::istringstream in{std::string(sql)};
     NSql::TTokenStream ts(in);
     NSql::TParser parser;
@@ -41,7 +41,7 @@ TOperatorPtr BuildSqlPlan(std::string_view sql, const std::map<std::string, ISou
         if (it == tables.end()) {
             return std::unexpected(NQumir::TError("unknown table: " + std::string(table)));
         }
-        return std::make_shared<TSourceOperator>(*it->second, std::string(table));
+        return std::make_shared<TSourceOperator>(Borrow(*it->second), std::string(table));
     };
     auto plan = BuildPlan(parsed.value(), factory);
     EXPECT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
@@ -190,7 +190,7 @@ TEST(CteReuse, RefcountDecidesMode) {
 
 TEST(CteReuse, SingleReferenceInlines) {
     NQdb::TMockSource t({"a"});
-    std::map<std::string, ISource*> tables = {{"t", &t}};
+    std::map<std::string, ITable*> tables = {{"t", &t}};
 
     auto usage = Analyze(BuildSqlPlan("WITH x AS (SELECT a FROM t) SELECT a FROM x", tables));
     EXPECT_EQ(RefCounts(usage), (std::multiset<size_t>{1}));
@@ -198,7 +198,7 @@ TEST(CteReuse, SingleReferenceInlines) {
 
 TEST(CteReuse, TwoReferencesMaterialize) {
     NQdb::TMockSource t({"a"});
-    std::map<std::string, ISource*> tables = {{"t", &t}};
+    std::map<std::string, ITable*> tables = {{"t", &t}};
 
     auto usage = Analyze(BuildSqlPlan(
         "WITH x AS (SELECT a FROM t) SELECT p.a FROM x p JOIN x q ON p.a = q.a", tables));
@@ -209,7 +209,7 @@ TEST(CteReuse, TwoReferencesMaterialize) {
 // referenced twice, a once (inside b), regardless of b's own reuse.
 TEST(CteReuse, NestedRefcountsAreSyntactic) {
     NQdb::TMockSource t({"a"});
-    std::map<std::string, ISource*> tables = {{"t", &t}};
+    std::map<std::string, ITable*> tables = {{"t", &t}};
 
     auto usage = Analyze(BuildSqlPlan(
         "WITH a AS (SELECT a FROM t), b AS (SELECT a FROM a) "
@@ -219,7 +219,7 @@ TEST(CteReuse, NestedRefcountsAreSyntactic) {
 
 TEST(CteReuse, ApplyRemovesEveryCteRef) {
     NQdb::TMockSource t({"a"});
-    std::map<std::string, ISource*> tables = {{"t", &t}};
+    std::map<std::string, ITable*> tables = {{"t", &t}};
 
     auto plan = BuildSqlPlan(
         "WITH x AS (SELECT a FROM t) SELECT p.a FROM x p JOIN x q ON p.a = q.a", tables);
@@ -233,7 +233,7 @@ TEST(CteReuse, ApplyRemovesEveryCteRef) {
 // the unused b, keeping only a.
 TEST(CteReuse, MaterializeNarrowsSpoolAndSourceToDemand) {
     NQdb::TMockSource t({"a", "b"});
-    std::map<std::string, ISource*> tables = {{"t", &t}};
+    std::map<std::string, ITable*> tables = {{"t", &t}};
 
     auto plan = BuildSqlPlan(
         "WITH x AS (SELECT a, b FROM t) SELECT p.a FROM x p JOIN x q ON p.a = q.a", tables);
@@ -257,7 +257,7 @@ TEST(CteReuse, MaterializeNarrowsSpoolAndSourceToDemand) {
 // narrow (branches stay aligned), so the boundary projection is what drops b.
 TEST(CteReuse, BoundaryProjectionNarrowsUnionSpool) {
     NQdb::TMockSource t({"a", "b"});
-    std::map<std::string, ISource*> tables = {{"t", &t}};
+    std::map<std::string, ITable*> tables = {{"t", &t}};
 
     auto plan = BuildSqlPlan(
         "WITH x AS (SELECT a, b FROM t UNION ALL SELECT a, b FROM t) "
@@ -274,7 +274,7 @@ TEST(CteReuse, BoundaryProjectionNarrowsUnionSpool) {
 // not the sum s, so only sum(b) is dropped from the aggregate.
 TEST(CteReuse, AggregateOutputPruningDropsOnlyUnusedAggregate) {
     NQdb::TMockSource t({"a", "b"});
-    std::map<std::string, ISource*> tables = {{"t", &t}};
+    std::map<std::string, ITable*> tables = {{"t", &t}};
 
     auto plan = BuildSqlPlan(
         "WITH x AS (SELECT a, count(*) AS c, sum(b) AS s FROM t GROUP BY a) "
@@ -296,7 +296,7 @@ TEST(CteReuse, AggregateOutputPruningDropsOnlyUnusedAggregate) {
 // Filter adds count(*) to the demand even though the outer query selects only a.
 TEST(CteReuse, AggregateOutputPruningKeepsHavingAggregate) {
     NQdb::TMockSource t({"a", "b"});
-    std::map<std::string, ISource*> tables = {{"t", &t}};
+    std::map<std::string, ITable*> tables = {{"t", &t}};
 
     auto plan = BuildSqlPlan(
         "WITH x AS (SELECT a, count(*) AS c, sum(b) AS s FROM t "
@@ -319,7 +319,7 @@ TEST(CteReuse, AggregateOutputPruningKeepsHavingAggregate) {
 // re-executed (inline), an expensive one is materialized once and streamed.
 TEST(CteReuse, CostBasedReuseDecision) {
     NQdb::TMockSource t({"a"});
-    std::map<std::string, ISource*> tables = {{"t", &t}};
+    std::map<std::string, ITable*> tables = {{"t", &t}};
 
     auto plan = BuildSqlPlan(
         "WITH x AS (SELECT a FROM t) SELECT p.a FROM x p JOIN x q ON p.a = q.a", tables);
@@ -348,7 +348,7 @@ TEST(CteReuse, CostBasedReuseDecision) {
 // decision is Materialize only if the spool is costed over RequiredOutputs.
 TEST(CteReuse, CostBasedUsesNarrowedSpoolBytes) {
     NQdb::TMockSource t({"a", "b", "c", "d"});
-    std::map<std::string, ISource*> tables = {{"t", &t}};
+    std::map<std::string, ITable*> tables = {{"t", &t}};
 
     auto plan = BuildSqlPlan(
         "WITH x AS (SELECT a, b, c, d FROM t UNION ALL SELECT a, b, c, d FROM t) "
@@ -371,7 +371,7 @@ TEST(CteReuse, CostBasedUsesNarrowedSpoolBytes) {
 // into the shared definition and lands on the source, shrinking the producer.
 TEST(CteReuse, ConsumerPredicatePushedToDefinitionSource) {
     NQdb::TMockSource t({"a", "b"});
-    std::map<std::string, ISource*> tables = {{"t", &t}};
+    std::map<std::string, ITable*> tables = {{"t", &t}};
 
     auto plan = BuildSqlPlan(
         "WITH x AS (SELECT a, b FROM t) "
@@ -387,7 +387,7 @@ TEST(CteReuse, ConsumerPredicatePushedToDefinitionSource) {
 
 TEST(CteReuse, MultiColumnConsumerPredicatesUseSharedSupersetBuilder) {
     NQdb::TMockSource t({"a", "b"});
-    std::map<std::string, ISource*> tables = {{"t", &t}};
+    std::map<std::string, ITable*> tables = {{"t", &t}};
 
     auto plan = BuildSqlPlan(
         "WITH x AS (SELECT a, b FROM t) "
@@ -410,7 +410,7 @@ TEST(CteReuse, MultiColumnConsumerPredicatesUseSharedSupersetBuilder) {
 // nothing is safely shareable and the definition source stays unfiltered.
 TEST(CteReuse, AsymmetricPredicateNotPushed) {
     NQdb::TMockSource t({"a", "b"});
-    std::map<std::string, ISource*> tables = {{"t", &t}};
+    std::map<std::string, ITable*> tables = {{"t", &t}};
 
     auto plan = BuildSqlPlan(
         "WITH x AS (SELECT a, b FROM t) "
