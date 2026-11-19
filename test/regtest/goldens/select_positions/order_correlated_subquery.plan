@@ -1,9 +1,7 @@
 sort [y asc]
-└─ project (y, m)
-   └─ join left [o.x = __corr_0_0__]
+└─ project (y, m) (rows≈5 cost≈4.7K)
+   └─ join left [o.x = __corr_0_0__] (rows≈5 cost≈4.6K)
       ├─ source t AS o (rows≈5 cost≈80)
-      └─ project (__corr_0_0__, __scalar_0__)
-         └─ sort [col1 asc]
-            └─ project (__corr_0_0__, col1) (rows≈3 cost≈208)
-               └─ aggregate keys=[i.x] aggs=[max_0=max] (rows≈3 cost≈160)
-                  └─ source t AS i (rows≈5 cost≈80)
+      └─ project (__corr_0_0__, __scalar_0__) (rows≈3 cost≈208)
+         └─ aggregate keys=[i.x] aggs=[max_0=max] (rows≈3 cost≈160)
+            └─ source t AS i (rows≈5 cost≈80)

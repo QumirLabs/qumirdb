@@ -1145,7 +1145,8 @@ NQumir::NAst::TExprPtr BuildWindowMaterializeWrapperAst(
     const int64_t inputColumnCount = static_cast<int64_t>(inputType.Fields.size());
     int64_t extraOwnerCount = 0;
     for (const auto& func : funcs) {
-        extraOwnerCount += func.Func == "rank" ? 1 : 2; // data; plus Mask for aggregates.
+        // data; plus Mask for aggregates.
+        extraOwnerCount += func.Func == "rank" || func.Func == "row_number" ? 1 : 2;
     }
 
     auto emitWindowColumns = [&](
@@ -1155,8 +1156,11 @@ NQumir::NAst::TExprPtr BuildWindowMaterializeWrapperAst(
     {
         for (size_t f = 0; f < funcs.size(); ++f) {
             const int64_t dataOwner = ownerIdx++;
-            if (funcs[f].Func == "rank") {
-                builder.Stmt(Oz::Call("window_fill_rank", {
+            if (funcs[f].Func == "rank" || funcs[f].Func == "row_number") {
+                const char* filler = funcs[f].Func == "rank"
+                    ? "window_fill_rank"
+                    : "window_fill_row_number";
+                builder.Stmt(Oz::Call(filler, {
                     Oz::Ident("store"), Oz::Ident("row_ids"), Oz::Ident("start"),
                     Oz::Ident("n"),
                     column(static_cast<size_t>(inputColumnCount) + f),

@@ -1,0 +1,11 @@
+{
+  "schema": "<struct (a <named Nullable [i64]>) (c i64) (max_e <named Nullable [i64]>) (matches i64) (skipped <named Nullable [i64]>) (top_e <named Nullable [i64]>)>",
+  "rows": [
+    ["1", "10", "20", "2", null, "20"],
+    ["1", "30", "20", "2", null, "20"],
+    ["2", "1", "7", "1", null, "7"],
+    ["2", "7", "7", "1", null, "7"],
+    ["5", "50", null, "0", null, null],
+    [null, "40", null, "0", null, null]
+  ]
+}

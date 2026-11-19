@@ -15,8 +15,8 @@ namespace NQdb {
 // by identical spec at build time), so only the callable itself lives here.
 struct TWindowFunc {
     std::string Name; // synthetic output column name
-    std::string Func;  // "rank" | "sum" | "avg" | "max"
-    NQumir::NAst::TExprPtr Arg; // parsed, unannotated; nullptr for rank()
+    std::string Func;  // "rank" | "row_number" | "sum" | "avg" | "max"
+    NQumir::NAst::TExprPtr Arg; // parsed, unannotated; nullptr for rank() and row_number()
 };
 
 enum class EWindowFrameMode {

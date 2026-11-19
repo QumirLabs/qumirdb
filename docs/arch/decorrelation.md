@@ -103,10 +103,12 @@ as a bound. In TPC-DS q6, `(SELECT DISTINCT d_month_seq FROM date_dim WHERE
 d_year = 2000 AND d_moy = 2)` is one row; its aggregate alone would be estimated
 at the 30 dates of that month, and the dates equal to it at 912 instead of 29.
 
-### Correlated → group-by + LEFT join (Apply elimination)
+### Correlated → LEFT join on the correlation columns (Apply elimination)
 
 A correlated scalar subquery references outer columns. It is decorrelated by
-grouping the subquery on its correlation columns and `LEFT JOIN`-ing it back.
+returning its correlation columns and `LEFT JOIN`-ing it back on them; an
+aggregating subquery is also grouped by them. The correlation columns identify
+the outer row each subquery row belongs to.
 
 Detection: a `WHERE` equality between one **local** and one **outer** ident (see
 [Local and outer references](#local-and-outer-references)) is a correlation pair
@@ -120,7 +122,9 @@ handles it. The same rule picks the correlation of each `EXISTS` in a disjunctio
 of `EXISTS`.
 
 Rewrite of the subquery:
-- `GROUP BY` each `localCol`;
+- `GROUP BY` each `localCol` when the subquery aggregates (an aggregate, GROUP
+  BY or HAVING), or when it is a `SELECT DISTINCT` of constants and correlation
+  columns, which that grouping computes; a plain subquery keeps its rows;
 - prepend `localCol AS __corr_N_k__` to its SELECT (a fresh, unambiguous name);
 - `WHERE` keeps the local predicates; each correlation equality is renamed
   to `localCol = localCol`.
@@ -159,7 +163,30 @@ HAVING is evaluated after these identities are restored. If it rejects the
 aggregate row, the scalar subquery yields NULL. Explicit GROUP BY retains its
 ordinary missing-group behavior; it does not acquire an empty identity group.
 
-Multiple correlation columns are supported (one group key + one join key each).
+`ORDER BY`, `LIMIT` and `OFFSET` choose rows for one outer row, so they apply
+to each group of equal correlation columns, not to the whole result. They become
+a `row_number()` window partitioned by the correlation columns and ordered by the
+`ORDER BY` keys, and a filter `OFFSET < row_number <= OFFSET + LIMIT`:
+
+```
+SELECT t.id, (SELECT s.v FROM s WHERE s.k = t.id ORDER BY s.v LIMIT 1) FROM t
+=>
+join left [t.id = __corr_0_0__]
+├─ source t
+└─ project (__corr_0_0__, __scalar_0__)
+   └─ filter (<= __row_number_0 1)
+      └─ window partition=[__corr_0_0__] order=[v asc] fns=[__row_number_0=row_number]
+         └─ project (__corr_0_0__, v)
+            └─ source s
+```
+
+Without `LIMIT` the order does not change the value and is dropped. An ungrouped
+aggregate has exactly one row per outer row, so it needs no window: `LIMIT 0` or
+a positive `OFFSET` makes the subquery empty and its value NULL, COUNT included,
+and any other `LIMIT` keeps the row.
+
+Multiple correlation columns are supported (one join key each, and one group
+key each in a grouped subquery).
 The correlated subquery may itself sit inside an `IN` subquery — it is handled
 recursively while that `IN`'s body is built (q20: correlation on `ps_partkey` and
 `ps_suppkey`).
@@ -188,4 +215,10 @@ statistics are estimated, so it is not costed as a selective predicate
   whole predicate requires;
 - the correlated subquery must reduce to a single value (one non-correlation
   output column);
+- more than one row per outer row is not detected at run time, so a subquery
+  that may return several needs `LIMIT 0` or `LIMIT 1`; an ungrouped aggregate
+  and a `DISTINCT` of constants and correlation columns return at most one, and
+  a grouped subquery without `LIMIT` is not checked yet;
+- window functions of a correlated subquery are not partitioned by the
+  correlation columns; a plain subquery with one is rejected;
 - `WITH RECURSIVE` in scalar subqueries is not handled.

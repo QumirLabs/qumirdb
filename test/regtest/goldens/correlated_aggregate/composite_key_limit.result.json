@@ -1,0 +1,9 @@
+{
+  "schema": "<struct (a i64) (b i64) (low_e <named Nullable [i64]>) (high_e <named Nullable [i64]>)>",
+  "rows": [
+    ["1", "1", "10", "20"],
+    ["1", "2", "5", "5"],
+    ["2", "1", null, null],
+    ["2", "2", "7", "7"]
+  ]
+}

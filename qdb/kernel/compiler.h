@@ -141,8 +141,8 @@ NQumir::NAst::TExprPtr BuildTopSortMergeProgramAst(
     const NQumir::NAst::TStructType* materializeType = nullptr);
 
 // One window function to materialize as an appended output column. Func is the
-// internal kernel variant ("rank", "sum_prefix", "sum_partition",
-// "avg_partition", "max_prefix").
+// internal kernel variant ("rank", "row_number", "sum_prefix",
+// "sum_partition", "avg_partition", "max_prefix").
 struct TWindowFuncInput {
     std::string Func;
     int32_t ArgColumn = -1;

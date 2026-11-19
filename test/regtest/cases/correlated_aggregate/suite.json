@@ -4,7 +4,8 @@
     "outer": {"json": "tables/outer.json", "parquet": {"row_group_rows": 2}},
     "inner": {"json": "tables/inner.json", "parquet": {"row_group_rows": 8}},
     "outer_pairs": {"json": "tables/outer_pairs.json", "parquet": {"row_group_rows": 2}},
-    "inner_pairs": {"json": "tables/inner_pairs.json", "parquet": {"row_group_rows": 8}}
+    "inner_pairs": {"json": "tables/inner_pairs.json", "parquet": {"row_group_rows": 8}},
+    "inner_nullable": {"json": "tables/inner_nullable.json", "parquet": {"row_group_rows": 2}}
   },
   "tables": {"t": "outer", "v": "inner"},
   "variants": ["single", "threaded", "js"],
@@ -24,6 +25,20 @@
     "composite_key.sql": {
       "tables": {"t": "outer_pairs", "v": "inner_pairs"},
       "order": "unordered"
-    }
+    },
+    "limit_per_outer_row.sql": {"order": "unordered"},
+    "first_row_per_outer_row.sql": {"order": "unordered"},
+    "several_rows_per_outer_row.sql": {"expect_error": true},
+    "null_order_per_outer_row.sql": {
+      "tables": {"t": "outer", "v": "inner_nullable"},
+      "order": "unordered"
+    },
+    "composite_key_limit.sql": {
+      "tables": {"t": "outer_pairs", "v": "inner_pairs"},
+      "order": "unordered"
+    },
+    "distinct_per_outer_row.sql": {"order": "unordered"},
+    "distinct_filter.sql": {"order": "unordered"},
+    "grouped_several_rows_per_outer_row.sql": {"expect_error": true}
   }
 }

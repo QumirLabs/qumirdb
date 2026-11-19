@@ -25,6 +25,7 @@
 
 #include <algorithm>
 #include <initializer_list>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -947,10 +948,21 @@ std::expected<std::vector<std::string>, TError> OutputColumnNames(
 
 struct TSelectOutput;
 
+struct TLimitClause {
+    int64_t Limit = 0;
+    int64_t Offset = 0;
+};
+
+// LIMIT and OFFSET of `query`; nullopt when it has neither.
+std::expected<std::optional<TLimitClause>, TError> LimitClause(const NSql::TSqlQuery& query);
+
+// The leading `bindingColumns` outputs of a correlated subquery body identify
+// the outer binding of each row; ORDER BY and LIMIT then apply per binding.
 std::expected<TRelation, TError> BuildQuery(
     const NSql::TSqlQuery& query,
     TBuildContext& context,
-    std::optional<TSelectOutput>* output = nullptr);
+    std::optional<TSelectOutput>* output = nullptr,
+    size_t bindingColumns = 0);
 
 // A USING column is one column of the join: the left input of an inner or left
 // join, the right input of a right join, or the COALESCE of both for a full join.
@@ -1745,6 +1757,28 @@ bool HasUnmappedOuter(
     return false;
 }
 
+// True if `expr` reads only constants and the local columns of `correlation`,
+// so it has one value per outer binding.
+bool ReadsOnlyCorrelation(
+    const NAst::TExprPtr& expr,
+    const std::vector<TCorrelation>& correlation,
+    const TLocalSqlScope& local)
+{
+    if (!expr || HasSubquery(expr) || HasWindowExprLocal(expr)) {
+        return false;
+    }
+    // A bare local name and a qualified one reach the same column.
+    auto sameColumn = [](const std::string& a, const std::string& b) {
+        return a == b
+            || ((!a.contains('.') || !b.contains('.')) && BareColumnName(a) == BareColumnName(b));
+    };
+    return std::ranges::all_of(FindUnboundVars(expr), [&](const std::string& name) {
+        return local.IsLocal(name) && std::ranges::any_of(correlation, [&](const TCorrelation& pair) {
+            return sameColumn(name, pair.second);
+        });
+    });
+}
+
 // The grouped rewrite must recover COUNT's identity before evaluating the
 // scalar expression or HAVING; a missing group is not a NULL COUNT value.
 NAst::TExprPtr RestoreCorrelatedCountDefaults(
@@ -1853,9 +1887,10 @@ struct TExtractedSubqueries {
 // Replaces each scalar subquery in a bound expression with a reference to a fresh
 // column. An uncorrelated subquery is broadcast onto `node` by a keyless join: a
 // LEFT join, so that a subquery with no row yields NULL. Correlated subqueries are
-// decorrelated: the subquery is grouped by its correlation columns and LEFT-joined
-// onto `node` (Apply elimination). Where a filter above rejects the NULL value,
-// outer-join simplification turns either join into an inner one.
+// decorrelated: the subquery returns its correlation columns, grouped by them when
+// it aggregates, and is LEFT-joined onto `node` on them (Apply elimination). Where
+// a filter above rejects the NULL value, outer-join simplification turns either
+// join into an inner one.
 std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
     NAst::TExprPtr expr,
     TRelation& node,
@@ -1961,8 +1996,45 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
 
             if (!correlation.empty()) {
                 int id = extracted.Counter++;
-                const bool ungrouped = !sel->GroupBy;
-                if (!sel->GroupBy) {
+                // The correlation columns identify the rows of one outer binding:
+                // an aggregate body is grouped by them, a plain one returns them.
+                const bool aggregated = sel->GroupBy || sel->Having
+                    || std::ranges::any_of(sel->SelectList->Items, [](const auto& item) {
+                        return HasAggregateCall(item->Expr);
+                    });
+                // DISTINCT over values of the binding is its grouping by them:
+                // at most one row per binding.
+                const bool distinctBinding = !aggregated
+                    && sel->Quantifier == NSql::ESetQuantifier::Distinct
+                    && std::ranges::all_of(sel->SelectList->Items, [&](const auto& item) {
+                        return ReadsOnlyCorrelation(item->Expr, correlation, local);
+                    });
+                const bool grouped = aggregated || distinctBinding;
+                const bool ungrouped = aggregated && !sel->GroupBy;
+                auto limit = LimitClause(*scalar->Query);
+                if (!limit) {
+                    return std::unexpected(limit.error());
+                }
+                // An ungrouped aggregate has one row per binding, which LIMIT and
+                // OFFSET keep or drop.
+                bool empty = false;
+                if (ungrouped) {
+                    empty = *limit && ((*limit)->Limit == 0 || (*limit)->Offset > 0);
+                    scalar->Query->Limit = nullptr;
+                    scalar->Query->Offset = nullptr;
+                } else if (!distinctBinding && (*limit ? (*limit)->Limit > 1 : !grouped)) {
+                    // TODO: a run-time check for more than one row per binding (#156);
+                    // a grouped body without LIMIT is not checked yet either.
+                    return std::unexpected(TError(expr->Location,
+                        "correlated scalar subquery that may return more than one row is not supported"));
+                } else if (!aggregated && std::ranges::any_of(sel->SelectList->Items, [](const auto& item) {
+                    return HasWindowExprLocal(item->Expr);
+                })) {
+                    // TODO: windows of a correlated body need per-binding partitions (#689).
+                    return std::unexpected(TError(expr->Location,
+                        "window function in a correlated scalar subquery is not supported"));
+                }
+                if (grouped && !sel->GroupBy) {
                     sel->GroupBy = std::make_shared<NSql::TSqlGroupBy>();
                 }
                 std::vector<NSql::TSqlPtr<NSql::TSqlSelectItem>> prepend;
@@ -1977,8 +2049,10 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
                     item->Expr = Ident({}, localCol);
                     item->Alias = corrName;
                     prepend.push_back(std::move(item));
-                    sel->GroupBy->Items.push_back(
-                        std::make_shared<NSql::TSqlGroupingExprOrList>(Ident({}, localCol)));
+                    if (grouped) {
+                        sel->GroupBy->Items.push_back(
+                            std::make_shared<NSql::TSqlGroupingExprOrList>(Ident({}, localCol)));
+                    }
                     auto outer = BindColumn(outerCol, node);
                     if (!outer) {
                         return std::unexpected(outer.error());
@@ -2000,7 +2074,7 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
                         unsupported("unsupported correlated subquery (outer column outside an equality)"));
                 }
 
-                auto plan = BuildQuery(*scalar->Query, context);
+                auto plan = BuildQuery(*scalar->Query, context, nullptr, correlation.size());
                 if (!plan) {
                     return std::unexpected(plan.error());
                 }
@@ -2008,8 +2082,11 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
                     return std::unexpected(
                         TError("correlated scalar subquery must return one value"));
                 }
+                if (empty) {
+                    plan->Plan = std::make_shared<TLimitOperator>(std::move(plan->Plan), 0);
+                }
                 std::optional<TCorrelatedCount> counts;
-                if (ungrouped) {
+                if (ungrouped && !empty) {
                     counts = SplitCorrelatedCount(plan->Plan, correlation.size());
                 }
                 if (counts) {
@@ -2957,16 +3034,18 @@ std::expected<TRelation, TError> BuildSelect(
     return project(node);
 }
 
-std::expected<TRelation, TError> ApplyOrderBy(
-    const NSql::TSqlQuery& query,
-    TRelation relation,
-    const TSelectOutput* select,
-    const TBuildContext& context)
-{
-    if (!query.OrderBy || query.OrderBy->Items.empty()) {
-        return relation;
-    }
+struct TOrderByKeys {
+    std::vector<TSortKey> Keys;
+    // Keys that are not output columns, to compute in the top projection.
+    std::vector<TProjectionSpec> Hidden;
+};
 
+// The sort keys of the ORDER BY of `query` over `relation`.
+std::expected<TOrderByKeys, TError> ResolveOrderBy(
+    const NSql::TSqlQuery& query,
+    const TRelation& relation,
+    const TSelectOutput* select)
+{
     // BuildSelect always tops the plan with a projection. An ORDER BY item is
     // resolved in order of preference:
     //   1. a SELECT position or a plain output-column identifier -> sort on that
@@ -2975,9 +3054,8 @@ std::expected<TRelation, TError> ApplyOrderBy(
     //      structurally) -> sort on that output column, so aggregates and other
     //      computed columns are reused rather than re-evaluated;
     //   3. a pure-scalar expression over the projection's input, where a SELECT
-    //      alias may stand for a missing input column -> materialized as a hidden
-    //      column, sorted on, then stripped by a final projection so the output
-    //      schema is unchanged.
+    //      alias may stand for a missing input column -> a hidden column of that
+    //      projection, which the caller adds and strips after sorting.
     // An aggregate not present in the select list cannot be sorted on (it would
     // be re-applied as a scalar over already-grouped rows), so it is rejected.
     auto topProject = TMaybeOp<TProjectOperator>(relation.Plan);
@@ -3117,30 +3195,59 @@ std::expected<TRelation, TError> ApplyOrderBy(
         });
     }
 
+    return TOrderByKeys{.Keys = std::move(keys), .Hidden = std::move(hidden)};
+}
+
+// Adds the hidden sort keys to the top projection of `relation`.
+std::expected<void, TError> AddHiddenKeys(
+    TRelation& relation,
+    std::vector<TProjectionSpec> hidden,
+    const TBuildContext& context)
+{
     if (hidden.empty()) {
-        relation.Plan = std::make_shared<TSortOperator>(std::move(relation.Plan), std::move(keys));
+        return {};
+    }
+    auto project = TMaybeOp<TProjectOperator>(relation.Plan).Cast();
+    for (auto& h : hidden) {
+        project->MutableProjections().push_back(std::move(h));
+    }
+    return Annotate(project, context);
+}
+
+// Projects `relation` back onto its outputs `columns` when operators added
+// columns of their own, such as hidden sort keys.
+TRelation KeepColumns(TRelation relation, const std::vector<std::string>& columns) {
+    if (ColumnNames(relation.Plan).size() == columns.size()) {
         return relation;
     }
-
-    // Pass-through projection over the original outputs; it becomes the strip
-    // projection above the sort.
-    std::vector<TProjectionSpec> outputProjections;
-    outputProjections.reserve(columns.size());
+    std::vector<TProjectionSpec> projections;
+    projections.reserve(columns.size());
     for (const auto& name : columns) {
-        outputProjections.push_back({ .Name = name, .Expression = Ident({}, name) });
+        projections.push_back({ .Name = name, .Expression = Ident({}, name) });
     }
-
-    auto& projections = topProject.Cast()->MutableProjections();
-    for (auto& h : hidden) {
-        projections.push_back(std::move(h));
-    }
-    if (auto annotated = Annotate(topProject.Cast(), context); !annotated) {
-        return std::unexpected(annotated.error());
-    }
-
-    TOperatorPtr sorted = std::make_shared<TSortOperator>(std::move(relation.Plan), std::move(keys));
-    relation.Plan = std::make_shared<TProjectOperator>(std::move(sorted), std::move(outputProjections));
+    relation.Plan = std::make_shared<TProjectOperator>(std::move(relation.Plan), std::move(projections));
     return relation;
+}
+
+std::expected<TRelation, TError> ApplyOrderBy(
+    const NSql::TSqlQuery& query,
+    TRelation relation,
+    const TSelectOutput* select,
+    const TBuildContext& context)
+{
+    if (!query.OrderBy || query.OrderBy->Items.empty()) {
+        return relation;
+    }
+    const auto columns = ColumnNames(relation.Plan);
+    auto order = ResolveOrderBy(query, relation, select);
+    if (!order) {
+        return std::unexpected(order.error());
+    }
+    if (auto added = AddHiddenKeys(relation, std::move(order->Hidden), context); !added) {
+        return std::unexpected(added.error());
+    }
+    relation.Plan = std::make_shared<TSortOperator>(std::move(relation.Plan), std::move(order->Keys));
+    return KeepColumns(std::move(relation), columns);
 }
 
 std::expected<int64_t, TError> ConstNonNegativeI64(
@@ -3162,12 +3269,9 @@ std::expected<int64_t, TError> ConstNonNegativeI64(
     return number.Cast()->IntValue;
 }
 
-std::expected<TRelation, TError> ApplyLimit(
-    const NSql::TSqlQuery& query,
-    TRelation relation)
-{
+std::expected<std::optional<TLimitClause>, TError> LimitClause(const NSql::TSqlQuery& query) {
     if (!query.Limit && !query.Offset) {
-        return relation;
+        return std::nullopt;
     }
     if (!query.Limit) {
         return std::unexpected(TError(query.Offset->Location,
@@ -3178,16 +3282,84 @@ std::expected<TRelation, TError> ApplyLimit(
     if (!limit) {
         return std::unexpected(limit.error());
     }
-    int64_t offsetValue = 0;
-    if (query.Offset) {
-        auto offset = ConstNonNegativeI64(query.Offset, "OFFSET");
-        if (!offset) {
-            return std::unexpected(offset.error());
-        }
-        offsetValue = *offset;
+    auto offset = ConstNonNegativeI64(query.Offset, "OFFSET");
+    if (!offset) {
+        return std::unexpected(offset.error());
     }
-    relation.Plan = std::make_shared<TLimitOperator>(std::move(relation.Plan), *limit, offsetValue);
+    return TLimitClause{.Limit = *limit, .Offset = *offset};
+}
+
+std::expected<TRelation, TError> ApplyLimit(
+    const NSql::TSqlQuery& query,
+    TRelation relation)
+{
+    auto clause = LimitClause(query);
+    if (!clause) {
+        return std::unexpected(clause.error());
+    }
+    if (*clause) {
+        relation.Plan = std::make_shared<TLimitOperator>(
+            std::move(relation.Plan), (*clause)->Limit, (*clause)->Offset);
+    }
     return relation;
+}
+
+// ORDER BY and LIMIT of a correlated subquery body pick rows of each outer
+// binding: row_number() over the binding columns, in ORDER BY order, keeps the
+// rows OFFSET < n <= OFFSET + LIMIT. Without LIMIT the order is moot.
+std::expected<TRelation, TError> ApplyBindingLimit(
+    const NSql::TSqlQuery& query,
+    TRelation relation,
+    const TSelectOutput* select,
+    const TBuildContext& context,
+    size_t bindingColumns)
+{
+    TOrderByKeys order;
+    if (query.OrderBy && !query.OrderBy->Items.empty()) {
+        auto resolved = ResolveOrderBy(query, relation, select);
+        if (!resolved) {
+            return std::unexpected(resolved.error());
+        }
+        order = std::move(*resolved);
+    }
+    auto clause = LimitClause(query);
+    if (!clause) {
+        return std::unexpected(clause.error());
+    }
+    if (!*clause) {
+        return relation;
+    }
+    const auto columns = ColumnNames(relation.Plan);
+    if (auto added = AddHiddenKeys(relation, std::move(order.Hidden), context); !added) {
+        return std::unexpected(added.error());
+    }
+    TFreshNames names;
+    for (const auto& column : ColumnNames(relation.Plan)) {
+        names.Reserve(column);
+    }
+    const auto rowNumber = names.Next("__row_number");
+    TOperatorPtr window = std::make_shared<TWindowOperator>(
+        std::move(relation.Plan),
+        std::vector<std::string>(columns.begin(), columns.begin() + bindingColumns),
+        std::move(order.Keys),
+        std::nullopt,
+        std::vector<TWindowFunc>{{.Name = rowNumber, .Func = "row_number"}});
+
+    const auto [limit, offset] = **clause;
+    auto compare = [&](const char* op, int64_t bound) -> NAst::TExprPtr {
+        return std::make_shared<NAst::TBinaryExpr>(TLocation{}, NAst::TOperator(op),
+            Ident({}, rowNumber), std::make_shared<NAst::TNumberExpr>(TLocation{}, bound));
+    };
+    // OFFSET + LIMIT saturates: a bound past every row number keeps them all.
+    const int64_t last = limit > std::numeric_limits<int64_t>::max() - offset
+        ? std::numeric_limits<int64_t>::max()
+        : offset + limit;
+    std::vector<NAst::TExprPtr> keep{compare("<=", last)};
+    if (offset > 0) {
+        keep.push_back(compare(">", offset));
+    }
+    relation.Plan = std::make_shared<TFilterOperator>(std::move(window), Conjoin(keep));
+    return KeepColumns(std::move(relation), columns);
 }
 
 std::expected<TRelation, TError> BuildSetOp(
@@ -3332,7 +3504,8 @@ std::expected<TRelation, TError> BuildSetOp(
 std::expected<TRelation, TError> BuildQuery(
     const NSql::TSqlQuery& query,
     TBuildContext& context,
-    std::optional<TSelectOutput>* output)
+    std::optional<TSelectOutput>* output,
+    size_t bindingColumns)
 {
     // A query without ORDER BY or LIMIT ends in the projection of its body, so an
     // enclosing query, e.g. `(SELECT ...) ORDER BY ...`, may extend it.
@@ -3345,6 +3518,10 @@ std::expected<TRelation, TError> BuildQuery(
         if (output && !query.OrderBy && !query.Limit && !query.Offset) {
             *output = std::move(select);
             return plan;
+        }
+        if (bindingColumns > 0) {
+            return ApplyBindingLimit(
+                query, std::move(*plan), select ? &*select : nullptr, scope, bindingColumns);
         }
         auto ordered = ApplyOrderBy(query, std::move(*plan), select ? &*select : nullptr, scope);
         if (!ordered) {
