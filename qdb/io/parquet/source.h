@@ -1,6 +1,7 @@
 #pragma once
 
 #include <qdb/io/io.h>
+#include <qdb/io/parquet/row_reader.h>
 #include <qdb/io/table.h>
 #include <qdb/plan/ops/stats.h>
 #include <qdb/scheduler/lowering/scan_split.h>
@@ -16,7 +17,7 @@
 #include <unordered_set>
 #include <vector>
 
-namespace arrow { class RecordBatchReader; class Schema; }
+namespace arrow { class RecordBatch; class RecordBatchReader; class Schema; }
 
 namespace NQdb {
 
@@ -77,7 +78,7 @@ private:
     std::shared_ptr<TParquetFileData> Data_;
 };
 
-// A reader of one scan: the chosen row groups and columns of a parquet file.
+// A reader of one scan: the chosen rows and columns of a parquet file.
 class TParquetSource : public ISource {
 public:
     ~TParquetSource();
@@ -88,39 +89,60 @@ public:
 
 private:
     friend class TParquetFile;
+
+    // One row group of the scan and its rows to read.
+    struct TPart {
+        int RowGroup = 0;
+        // Sorted and disjoint.
+        std::vector<TRowRange> Ranges;
+    };
+
     TParquetSource(
         std::shared_ptr<TParquetFileData> file,
-        std::optional<std::vector<int>> rowGroups,
+        std::vector<TPart> parts,
         std::optional<std::unordered_set<std::string>> restrictedColumns);
-
-    void ResetReader();
-    std::vector<int> EffectiveRowGroups() const;
-    std::vector<int> EffectiveFileColumnIndexes() const;
 
     void SelectColumns();
     void RefreshSchema();
     bool RowIdRequested() const;
-    void EnsureOpen();
+    std::vector<int> EffectiveFileColumnIndexes() const;
+
+    void OpenPart(const TPart& part);
+    void ClosePart();
+    // The next rows of the open part, all from one of its ranges.
+    std::optional<TRowRangeBatch> ReadPart();
+    std::optional<TRowRangeBatch> ReadArrowPart();
 
     std::shared_ptr<TParquetFileData> File_;
-    // nullopt means the full file; an engaged empty vector is an empty scan.
-    std::optional<std::vector<int>> RowGroups_;
+    std::vector<TPart> Parts_;
+    size_t NextPart_ = 0;
     std::optional<std::unordered_set<std::string>> RestrictedColumns_;
-    std::shared_ptr<arrow::RecordBatchReader> Reader_;
-    // File fields in output order; the decimal ones are read by DecimalScans_.
+    // File fields in output order; the decimal ones are read by DecimalScans_,
+    // the others, ArrowColumns_, by Arrow or a range reader.
     std::vector<int> SelectedColumns_;
+    std::vector<int> ArrowColumns_;
     struct TDecimalScan {
         size_t Position = 0;
         std::unique_ptr<TDecimalColumnScan> Scan;
     };
     std::vector<TDecimalScan> DecimalScans_;
     std::shared_ptr<arrow::Schema> BatchSchema_;
-    std::vector<int> ReaderRowGroups_;
-    size_t ReaderRowGroupIndex_ = 0;
-    int64_t ReaderRowOffset_ = 0;
     std::vector<std::string> Names_;
     std::vector<TColumnSchema> Columns_;
     TSchema Schema_;
+
+    // The open part. A part of whole row groups, or one a range reader cannot
+    // read, goes through Arrow's reader and is sliced to its ranges.
+    const TPart* Part_ = nullptr;
+    std::unique_ptr<TParquetRangeReader> RangeReader_;
+    std::shared_ptr<arrow::RecordBatchReader> ArrowReader_;
+    std::shared_ptr<arrow::RecordBatch> ArrowBatch_;
+    // Rows [ArrowBatchBegin_, ArrowBatchEnd_) of ArrowBatch_; ArrowCursor_ is
+    // the first of them not yet returned.
+    int64_t ArrowBatchBegin_ = 0;
+    int64_t ArrowBatchEnd_ = 0;
+    int64_t ArrowCursor_ = 0;
+    size_t ArrowRange_ = 0;
 };
 
 } // namespace NQdb
