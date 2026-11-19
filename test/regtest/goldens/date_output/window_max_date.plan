@@ -1,0 +1,6 @@
+sort [id asc]
+└─ project (id, run_max, next_day)
+   └─ window order=[s.id asc] fns=[w_0=max, w_1=max]
+      └─ project (s.id, s.lo) (rows≈4 cost≈128)
+         └─ aggregate keys=[date_values.id] aggs=[min_0=min] (rows≈4 cost≈80)
+            └─ source date_values AS date_values (rows≈4 cost≈32)
