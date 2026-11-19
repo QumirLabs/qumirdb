@@ -1757,6 +1757,28 @@ bool HasUnmappedOuter(
     return false;
 }
 
+// True if `expr` reads only constants and the local columns of `correlation`,
+// so it has one value per outer binding.
+bool ReadsOnlyCorrelation(
+    const NAst::TExprPtr& expr,
+    const std::vector<TCorrelation>& correlation,
+    const TLocalSqlScope& local)
+{
+    if (!expr || HasSubquery(expr) || HasWindowExprLocal(expr)) {
+        return false;
+    }
+    // A bare local name and a qualified one reach the same column.
+    auto sameColumn = [](const std::string& a, const std::string& b) {
+        return a == b
+            || ((!a.contains('.') || !b.contains('.')) && BareColumnName(a) == BareColumnName(b));
+    };
+    return std::ranges::all_of(FindUnboundVars(expr), [&](const std::string& name) {
+        return local.IsLocal(name) && std::ranges::any_of(correlation, [&](const TCorrelation& pair) {
+            return sameColumn(name, pair.second);
+        });
+    });
+}
+
 // The grouped rewrite must recover COUNT's identity before evaluating the
 // scalar expression or HAVING; a missing group is not a NULL COUNT value.
 NAst::TExprPtr RestoreCorrelatedCountDefaults(
@@ -1865,9 +1887,10 @@ struct TExtractedSubqueries {
 // Replaces each scalar subquery in a bound expression with a reference to a fresh
 // column. An uncorrelated subquery is broadcast onto `node` by a keyless join: a
 // LEFT join, so that a subquery with no row yields NULL. Correlated subqueries are
-// decorrelated: the subquery is grouped by its correlation columns and LEFT-joined
-// onto `node` (Apply elimination). Where a filter above rejects the NULL value,
-// outer-join simplification turns either join into an inner one.
+// decorrelated: the subquery returns its correlation columns, grouped by them when
+// it aggregates, and is LEFT-joined onto `node` on them (Apply elimination). Where
+// a filter above rejects the NULL value, outer-join simplification turns either
+// join into an inner one.
 std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
     NAst::TExprPtr expr,
     TRelation& node,
@@ -1979,6 +2002,14 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
                     || std::ranges::any_of(sel->SelectList->Items, [](const auto& item) {
                         return HasAggregateCall(item->Expr);
                     });
+                // DISTINCT over values of the binding is its grouping by them:
+                // at most one row per binding.
+                const bool distinctBinding = !aggregated
+                    && sel->Quantifier == NSql::ESetQuantifier::Distinct
+                    && std::ranges::all_of(sel->SelectList->Items, [&](const auto& item) {
+                        return ReadsOnlyCorrelation(item->Expr, correlation, local);
+                    });
+                const bool grouped = aggregated || distinctBinding;
                 const bool ungrouped = aggregated && !sel->GroupBy;
                 auto limit = LimitClause(*scalar->Query);
                 if (!limit) {
@@ -1991,8 +2022,9 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
                     empty = *limit && ((*limit)->Limit == 0 || (*limit)->Offset > 0);
                     scalar->Query->Limit = nullptr;
                     scalar->Query->Offset = nullptr;
-                } else if (!aggregated && (!*limit || (*limit)->Limit > 1)) {
-                    // TODO: a run-time check for more than one row per binding (#156).
+                } else if (!distinctBinding && (*limit ? (*limit)->Limit > 1 : !grouped)) {
+                    // TODO: a run-time check for more than one row per binding (#156);
+                    // a grouped body without LIMIT is not checked yet either.
                     return std::unexpected(TError(expr->Location,
                         "correlated scalar subquery that may return more than one row is not supported"));
                 } else if (!aggregated && std::ranges::any_of(sel->SelectList->Items, [](const auto& item) {
@@ -2002,7 +2034,7 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
                     return std::unexpected(TError(expr->Location,
                         "window function in a correlated scalar subquery is not supported"));
                 }
-                if (aggregated && !sel->GroupBy) {
+                if (grouped && !sel->GroupBy) {
                     sel->GroupBy = std::make_shared<NSql::TSqlGroupBy>();
                 }
                 std::vector<NSql::TSqlPtr<NSql::TSqlSelectItem>> prepend;
@@ -2017,7 +2049,7 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
                     item->Expr = Ident({}, localCol);
                     item->Alias = corrName;
                     prepend.push_back(std::move(item));
-                    if (aggregated) {
+                    if (grouped) {
                         sel->GroupBy->Items.push_back(
                             std::make_shared<NSql::TSqlGroupingExprOrList>(Ident({}, localCol)));
                     }
@@ -3004,7 +3036,7 @@ std::expected<TRelation, TError> BuildSelect(
 
 struct TOrderByKeys {
     std::vector<TSortKey> Keys;
-    // Keys that are no output column, to compute in the top projection.
+    // Keys that are not output columns, to compute in the top projection.
     std::vector<TProjectionSpec> Hidden;
 };
 

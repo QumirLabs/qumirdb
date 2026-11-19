@@ -1,0 +1,2 @@
+Error: correlated scalar subquery that may return more than one row is not supported @ Line: 1, Byte: 18, Column: 18
+

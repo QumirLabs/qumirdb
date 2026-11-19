@@ -1,0 +1,30 @@
+project (a, c, low_e, high_e, second_e, near_e)
+└─ join left [t.a = __corr_3_0__]
+   ├─ join left [t.a = __corr_2_0__]
+   │  ├─ join left [t.a = __corr_1_0__]
+   │  │  ├─ join left [t.a = __corr_0_0__]
+   │  │  │  ├─ source t AS t (rows≈6 cost≈96)
+   │  │  │  └─ project (__corr_0_0__, __scalar_0__)
+   │  │  │     └─ filter (<= __row_number_0 1)
+   │  │  │        └─ window partition=[__corr_0_0__] order=[e asc] fns=[__row_number_0=row_number]
+   │  │  │           └─ project (__corr_0_0__, e) (rows≈5 cost≈272)
+   │  │  │              └─ filter (! (call qdb_is_null |v.a|)) (rows≈5 cost≈192)
+   │  │  │                 └─ source v AS v row-groups (! (call qdb_is_null |v.a|)) (rows≈6 cost≈96)
+   │  │  └─ project (__corr_1_0__, __scalar_1__)
+   │  │     └─ filter (<= __row_number_0 1)
+   │  │        └─ window partition=[__corr_1_0__] order=[e desc] fns=[__row_number_0=row_number]
+   │  │           └─ project (__corr_1_0__, e) (rows≈5 cost≈272)
+   │  │              └─ filter (! (call qdb_is_null |v_1.a|)) (rows≈5 cost≈192)
+   │  │                 └─ source v AS v_1 row-groups (! (call qdb_is_null |v_1.a|)) (rows≈6 cost≈96)
+   │  └─ project (__corr_2_0__, __scalar_2__)
+   │     └─ filter (&& (<= __row_number_0 2) (> __row_number_0 1))
+   │        └─ window partition=[__corr_2_0__] order=[e asc nulls-first] fns=[__row_number_0=row_number]
+   │           └─ project (__corr_2_0__, e) (rows≈5 cost≈272)
+   │              └─ filter (! (call qdb_is_null |v_2.a|)) (rows≈5 cost≈192)
+   │                 └─ source v AS v_2 row-groups (! (call qdb_is_null |v_2.a|)) (rows≈6 cost≈96)
+   └─ project (__corr_3_0__, __scalar_3__)
+      └─ filter (<= __row_number_0 1)
+         └─ window partition=[__corr_3_0__] order=[__sort_0 asc] fns=[__row_number_0=row_number]
+            └─ project (__corr_3_0__, e, __sort_0) (rows≈5 cost≈312)
+               └─ filter (! (call qdb_is_null |v_3.a|)) (rows≈5 cost≈192)
+                  └─ source v AS v_3 row-groups (! (call qdb_is_null |v_3.a|)) (rows≈6 cost≈96)
