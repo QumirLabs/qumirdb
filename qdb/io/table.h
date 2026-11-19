@@ -28,10 +28,6 @@ struct ITable {
     // Random access by physical row locator; null if the table has none.
     virtual std::unique_ptr<IRowLookupSource> MakeLookupSource() const = 0;
 
-    virtual std::vector<NScheduler::TScanRowGroup> ScanRowGroups() const = 0;
-    // Estimate a planned projection without changing the source's reader.
-    virtual std::vector<NScheduler::TScanRowGroup> ScanRowGroups(
-        const std::unordered_set<std::string>& columnNames) const = 0;
     virtual std::vector<NScheduler::TScanRowGroup> PruneRowGroups(
         const NQumir::NAst::TExprPtr& predicate,
         std::string_view sourceAlias,

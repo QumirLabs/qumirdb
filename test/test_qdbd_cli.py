@@ -1,5 +1,6 @@
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -132,6 +133,36 @@ class TestQdbdCli(unittest.TestCase):
                     self.assertEqual(len(body.splitlines()), lines, body[:200])
         finally:
             for p in procs:
+                p.kill()
+                p.wait()
+
+    def test_replaced_table_file_with_the_same_mtime_is_reopened(self):
+        ports = [free_port() for _ in range(2)]
+        amounts = os.path.join(os.path.dirname(TABLES), "..", "decimal_input", "tables", "amounts.parquet")
+        with tempfile.TemporaryDirectory() as tmp:
+            table = os.path.join(tmp, "t.parquet")
+            shutil.copyfile(os.path.join(TABLES, "decimals.parquet"), table)
+            stat = os.stat(table)
+            p = subprocess.Popen([QDBD, "--node", f"127.0.0.1:{ports[0]}:1", "--node-id", "1",
+                                  "--leader-id", "1", "--http-port", str(ports[1]), "--data", tmp],
+                                 stderr=subprocess.DEVNULL)
+            try:
+                self.assertTrue(listens(ports[1]))
+                bodies = []
+                for step in range(2):
+                    if step:
+                        shutil.copyfile(amounts, table)
+                        os.utime(table, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+                    status, body = None, ""
+                    for _ in range(20):  # the compute actors may still be joining
+                        status, body = query(ports[1], "SELECT COUNT(*) FROM t")
+                        if status != 503:
+                            break
+                        time.sleep(0.25)
+                    self.assertEqual(status, 200, body)
+                    bodies.append(body)
+                self.assertNotEqual(bodies[0], bodies[1])
+            finally:
                 p.kill()
                 p.wait()
 

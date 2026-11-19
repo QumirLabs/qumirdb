@@ -171,10 +171,7 @@ private:
     NQdb::TStatsPtr Stats_;
 };
 
-class TSchemaOnlySource final
-    : public NQdb::ISource
-    , public NQdb::ITable
-{
+class TSchemaOnlySource final : public NQdb::ITable {
 public:
     TSchemaOnlySource(
         std::string path,
@@ -254,10 +251,6 @@ public:
         return stats;
     }
 
-    bool Next(NQdb::TRowSet&) override {
-        return false;
-    }
-
     const std::string& Path() const override {
         return Path_;
     }
@@ -279,22 +272,12 @@ public:
         return std::make_unique<TSchemaOnlyReader>(std::move(columns), Stats());
     }
 
-    std::vector<NQdb::NScheduler::TScanRowGroup> ScanRowGroups(
-        const std::unordered_set<std::string>&) const override
-    {
-        return ScanRowGroups();
-    }
-
     std::vector<NQdb::NScheduler::TScanRowGroup> PruneRowGroups(
         const NQumir::NAst::TExprPtr&,
         std::string_view,
         std::ostream*,
         const std::unordered_set<std::string>*) const override
     {
-        return ScanRowGroups();
-    }
-
-    std::vector<NQdb::NScheduler::TScanRowGroup> ScanRowGroups() const override {
         if (Stats_.Rows <= 0 || Stats_.RowGroups == 0) {
             return {};
         }

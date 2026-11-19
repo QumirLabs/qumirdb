@@ -43,7 +43,11 @@ class TSplitMockSource final : public TMockSource {
 public:
     using TMockSource::TMockSource;
 
-    std::vector<NScheduler::TScanRowGroup> ScanRowGroups() const override {
+    std::vector<NScheduler::TScanRowGroup> PruneRowGroups(
+        const NQumir::NAst::TExprPtr&,
+        std::string_view,
+        std::ostream*,
+        const std::unordered_set<std::string>*) const override {
         return {
             {.RowGroup = 0, .RowCount = 100, .ByteSize = 800},
             {.RowGroup = 1, .RowCount = 100, .ByteSize = 800},
@@ -69,7 +73,11 @@ public:
         return Stats_;
     }
 
-    std::vector<NScheduler::TScanRowGroup> ScanRowGroups() const override {
+    std::vector<NScheduler::TScanRowGroup> PruneRowGroups(
+        const NQumir::NAst::TExprPtr&,
+        std::string_view,
+        std::ostream*,
+        const std::unordered_set<std::string>*) const override {
         return {
             {.RowGroup = 0, .RowCount = 25'000'000, .ByteSize = 200'000'000},
             {.RowGroup = 1, .RowCount = 25'000'000, .ByteSize = 200'000'000},

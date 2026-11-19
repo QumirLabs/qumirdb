@@ -60,10 +60,10 @@ public:
     const TStatsPtr Stats() const override;
     const std::string& Path() const override;
     std::unique_ptr<IRowLookupSource> MakeLookupSource() const override;
-    std::vector<NScheduler::TScanRowGroup> ScanRowGroups() const override;
+    std::vector<NScheduler::TScanRowGroup> ScanRowGroups() const;
     // Estimate a planned projection without opening a reader.
     std::vector<NScheduler::TScanRowGroup> ScanRowGroups(
-        const std::unordered_set<std::string>& columnNames) const override;
+        const std::unordered_set<std::string>& columnNames) const;
     std::vector<NScheduler::TScanRowGroup> PruneRowGroups(
         const NQumir::NAst::TExprPtr& predicate,
         std::string_view sourceAlias,

@@ -1841,23 +1841,13 @@ TEST(AggregateE2E, PlannerUsesPhysicalPrunedSchemaForKeyDescriptor) {
             return std::make_unique<TReader>(const_cast<TPruningSource&>(*this));
         }
 
-        std::vector<NScheduler::TScanRowGroup> ScanRowGroups() const override {
-            return {{.RowGroup = 0, .RowCount = static_cast<int64_t>(Values_.size())}};
-        }
-
-        std::vector<NScheduler::TScanRowGroup> ScanRowGroups(
-            const std::unordered_set<std::string>&) const override
-        {
-            return ScanRowGroups();
-        }
-
         std::vector<NScheduler::TScanRowGroup> PruneRowGroups(
             const NQumir::NAst::TExprPtr&,
             std::string_view,
             std::ostream*,
             const std::unordered_set<std::string>*) const override
         {
-            return ScanRowGroups();
+            return {{.RowGroup = 0, .RowCount = static_cast<int64_t>(Values_.size())}};
         }
 
         bool Next(TRowSet& rowSet) override {

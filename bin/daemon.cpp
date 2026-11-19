@@ -2,6 +2,8 @@
 #include <limits>
 #include <optional>
 #include <filesystem>
+#include <cerrno>
+#include <sys/stat.h>
 
 #include <coroio/all.hpp>
 #include <coroio/actors/actorsystem.hpp>
@@ -92,9 +94,30 @@ struct TDaemonOptions {
     TEngineSettings Engine;
 };
 
+// A replaced file can keep its mtime (cp -p, rsync -t), so the identity is wider.
+struct TFileIdentity {
+    dev_t Device;
+    ino_t Inode;
+    std::uintmax_t Size;
+    std::chrono::file_clock::time_point MTime;
+
+    bool operator==(const TFileIdentity&) const = default;
+};
+
+TFileIdentity GetFileIdentity(const std::string& path)
+{
+    struct stat st;
+    if (::stat(path.c_str(), &st) != 0) {
+        throw std::filesystem::filesystem_error(
+            "stat", path, std::error_code(errno, std::generic_category()));
+    }
+    return {st.st_dev, st.st_ino, std::filesystem::file_size(path),
+            std::filesystem::last_write_time(path)};
+}
+
 struct TTableCacheEntity {
     std::shared_ptr<const ITable> Table;
-    std::chrono::file_clock::time_point MTime;
+    TFileIdentity Identity;
 };
 
 using TTableCache = std::unordered_map<std::string, TTableCacheEntity>;
@@ -117,17 +140,17 @@ int RunDaemon(const TDaemonOptions& options, const char* pollerName)
         {
             const auto path = ResolveTablePath(dataDir, table);
             try {
-                auto mtime = std::filesystem::last_write_time(path);
+                auto identity = GetFileIdentity(path);
                 auto maybeCached = tablesCache->find(path);
-                if (maybeCached != tablesCache->end() && maybeCached->second.MTime == mtime) {
+                if (maybeCached != tablesCache->end() && maybeCached->second.Identity == identity) {
                     return std::make_shared<TSourceOperator>(maybeCached->second.Table, path);
                 }
                 auto source = std::make_shared<TParquetFile>(path);
                 auto op = std::make_shared<TSourceOperator>(source, path);
                 if (maybeCached == tablesCache->end()) {
-                    tablesCache->insert({path, {source, mtime}});
+                    tablesCache->insert({path, {source, identity}});
                 } else {
-                    maybeCached->second = {source, mtime};
+                    maybeCached->second = {source, identity};
                 }
                 return op;
             } catch (const std::exception& e) {

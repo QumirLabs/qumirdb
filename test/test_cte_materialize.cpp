@@ -170,7 +170,11 @@ public:
         return TMockSource::Next(rowSet);
     }
 
-    std::vector<NScheduler::TScanRowGroup> ScanRowGroups() const override {
+    std::vector<NScheduler::TScanRowGroup> PruneRowGroups(
+        const NQumir::NAst::TExprPtr&,
+        std::string_view,
+        std::ostream*,
+        const std::unordered_set<std::string>*) const override {
         return {
             {.RowGroup = 0, .RowCount = 10, .ByteSize = 160},
             {.RowGroup = 1, .RowCount = 10, .ByteSize = 160},

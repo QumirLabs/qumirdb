@@ -5,6 +5,7 @@
 #include <qdb/exec/runtime_context.h>
 #include <qdb/exec/sort_exec.h>
 #include <qdb/exec/window_exec.h>
+#include <qdb/io/parquet/source.h>
 #include <qdb/kernel/compiler.h>
 #include <qdb/scheduler/connections/local.h>
 #include <qdb/scheduler/lowering/task_factory.h>

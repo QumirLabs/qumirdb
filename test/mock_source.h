@@ -118,28 +118,18 @@ struct TMockSource : ISource, ITable {
         return std::make_unique<TMockReader>(const_cast<TMockSource&>(*this));
     }
 
-    // One group keeps the mock a single scan lane.
-    std::vector<NScheduler::TScanRowGroup> ScanRowGroups() const override {
-        int64_t rows = 0;
-        for (const auto& batch : Batches) {
-            rows += batch.RowCount;
-        }
-        return {{.RowGroup = 0, .RowCount = rows}};
-    }
-
-    std::vector<NScheduler::TScanRowGroup> ScanRowGroups(
-        const std::unordered_set<std::string>&) const override
-    {
-        return ScanRowGroups();
-    }
-
     std::vector<NScheduler::TScanRowGroup> PruneRowGroups(
         const NQumir::NAst::TExprPtr&,
         std::string_view,
         std::ostream*,
         const std::unordered_set<std::string>*) const override
     {
-        return ScanRowGroups();
+        // One group keeps the mock a single scan lane.
+        int64_t rows = 0;
+        for (const auto& batch : Batches) {
+            rows += batch.RowCount;
+        }
+        return {{.RowGroup = 0, .RowCount = rows}};
     }
 
 private:

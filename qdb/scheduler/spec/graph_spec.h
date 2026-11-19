@@ -3,7 +3,7 @@
 #include <qdb/exec/plan_data.h>
 #include <qdb/exec/runtime_filter.h>
 #include <qdb/io/io.h>
-#include <qdb/io/parquet/source.h>
+#include <qdb/io/table.h>
 #include <qdb/kernel/regex.h>
 #include <qdb/plan/ops/join_type.h>
 #include <qdb/scheduler/connection.h>
