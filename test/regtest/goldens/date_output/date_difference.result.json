@@ -1,0 +1,9 @@
+{
+  "schema": "<struct (id <named Nullable [i32]>) (since_lo <named Nullable [i64]>) (span <named Nullable [i64]>) (since_epoch <named Nullable [i64]>)>",
+  "rows": [
+    [1, "7306", "7336", "7336"],
+    [2, "7336", "7336", "7336"],
+    [3, "0", "7336", "7336"],
+    [4, null, "7336", "7336"]
+  ]
+}
