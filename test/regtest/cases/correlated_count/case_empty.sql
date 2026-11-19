@@ -1,0 +1,1 @@
+SELECT t.id AS id, (SELECT CASE WHEN COUNT(*) = 0 THEN 7 ELSE COUNT(*) END FROM v WHERE v.k = t.k) AS n FROM t;
