@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "fixtures": {
+    "date_values": {"parquet_file": "tables/date_values.parquet"}
+  },
+  "tables": {"date_values": "date_values"},
+  "variants": ["single", "threaded"],
+  "cases": {
+    "output_types.sql": {"order": "ordered"}
+  }
+}
