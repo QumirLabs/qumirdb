@@ -7,7 +7,9 @@
 #include <cstdint>
 #include <iosfwd>
 #include <memory>
+#include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -27,17 +29,62 @@ struct TRowGroupColumnRange {
     bool MayBeNaN = false;
 };
 
-// Compiles a typed source predicate into a Qumir VM function over interval
-// arguments. Unsupported AST fragments become an unknown truth value. The
-// compiled function is reusable for every row group of the source.
-class TRowGroupPredicateEvaluator {
+// A source predicate lowered to oz-lang over the intervals of the columns it
+// reads: the form a scan node carries to the process that runs the scan.
+struct TRowGroupPredicateProgram {
+    // (block (return <truth>)) over the interval parameters of Columns.
+    std::string Body;
+    // Schema columns the body reads, ascending.
+    std::vector<int32_t> Columns;
+
+    bool operator==(const TRowGroupPredicateProgram&) const = default;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.Body);
+        v(self.Columns);
+    }
+};
+
+// A source predicate compiled to a Qumir VM function over the intervals of
+// the columns it reads. Unsupported AST fragments become an unknown truth
+// value. Immutable once compiled: row-group pruning and the scan tasks of a
+// graph share one, each through a TRowGroupPredicateEvaluator of its own.
+class TRowGroupPredicate {
 public:
-    static std::unique_ptr<TRowGroupPredicateEvaluator> Compile(
+    // Null when the program does not compile.
+    static std::shared_ptr<const TRowGroupPredicate> Compile(
+        const TRowGroupPredicateProgram& program,
+        const TSchema& schema,
+        std::ostream* diagnostics = nullptr);
+
+    // Lowers a typed source predicate to its program and compiles that.
+    static std::shared_ptr<const TRowGroupPredicate> Compile(
         const NQumir::NAst::TExprPtr& predicate,
         const TSchema& schema,
         std::string_view sourceAlias,
         std::ostream* diagnostics = nullptr);
 
+    ~TRowGroupPredicate();
+
+    TRowGroupPredicate(const TRowGroupPredicate&) = delete;
+    TRowGroupPredicate& operator=(const TRowGroupPredicate&) = delete;
+
+    const TRowGroupPredicateProgram& Program() const;
+
+private:
+    friend class TRowGroupPredicateEvaluator;
+    struct TImpl;
+    explicit TRowGroupPredicate(std::unique_ptr<TImpl> impl);
+
+    std::unique_ptr<TImpl> Impl_;
+};
+
+// Evaluates a TRowGroupPredicate in an interpreter state of its own. The
+// predicate must outlive it, and one thread at a time uses it.
+class TRowGroupPredicateEvaluator {
+public:
+    explicit TRowGroupPredicateEvaluator(const TRowGroupPredicate& predicate);
     ~TRowGroupPredicateEvaluator();
 
     TRowGroupPredicateEvaluator(const TRowGroupPredicateEvaluator&) = delete;
@@ -45,12 +92,10 @@ public:
 
     // False is returned only when TRUE is absent from the VM's over-approximate
     // set of possible SQL results. Any VM/runtime failure returns true.
-    bool MayBeTrue(std::span<const TRowGroupColumnRange> columns) const noexcept;
+    bool MayBeTrue(std::span<const TRowGroupColumnRange> columns) noexcept;
 
 private:
     struct TImpl;
-    explicit TRowGroupPredicateEvaluator(std::unique_ptr<TImpl> impl);
-
     std::unique_ptr<TImpl> Impl_;
 };
 

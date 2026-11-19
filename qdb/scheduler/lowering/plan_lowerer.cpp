@@ -845,6 +845,22 @@ private:
     using TSourceSplits =
         std::optional<std::vector<NScheduler::TScanSplit>>;
 
+    // The source's row-group predicate, compiled once: row-group pruning and
+    // the block selection of its scan tasks share it.
+    std::shared_ptr<const TRowGroupPredicate> SourcePredicate(TSourceOperator& src) const {
+        auto [found, inserted] = SourcePredicates_.try_emplace(&src);
+        if (inserted && src.RowGroupPredicate()) {
+            found->second = TRowGroupPredicate::Compile(
+                src.RowGroupPredicate(),
+                src.GetTable()->Schema(),
+                src.GetAlias(),
+                Settings_.Instrumentation.RowGroupPredicate
+                    ? Settings_.Instrumentation.Output
+                    : nullptr);
+        }
+        return found->second;
+    }
+
     TSourceSplits ScanSplits(TSourceOperator& src) const {
         if (auto found = ScanSplitCache_.find(&src);
             found != ScanSplitCache_.end())
@@ -865,8 +881,7 @@ private:
             }
         }
         auto rowGroups = src.GetTable()->PruneRowGroups(
-            src.RowGroupPredicate(),
-            src.GetAlias(),
+            SourcePredicate(src).get(),
             Settings_.Instrumentation.RowGroupPredicate
                 ? Settings_.Instrumentation.Output
                 : nullptr,
@@ -995,6 +1010,11 @@ private:
         const auto label = src.GetAlias().empty() ? "source" : "source " + src.GetAlias();
         TaskContext_.Tables.try_emplace(table->Path(), table);
         const auto columns = src.RestrictedColumns();
+        std::optional<TRowGroupPredicateProgram> blockPredicate;
+        if (auto predicate = SourcePredicate(src); predicate && !predicate->Program().Columns.empty()) {
+            blockPredicate = predicate->Program();
+            TaskContext_.BlockPredicates.try_emplace({table->Path(), blockPredicate->Body}, std::move(predicate));
+        }
 
         const size_t lanes = std::max<size_t>(
             splitPlan ? splitPlan->size() : 0, 1);
@@ -1021,6 +1041,7 @@ private:
                     .Path = table->Path(),
                     .Columns = columns,
                     .RowGroups = std::move(rowGroups),
+                    .BlockPredicate = blockPredicate,
                 },
             });
             result.Producers.push_back(&node);
@@ -2811,6 +2832,8 @@ private:
     // source", while an engaged empty vector is a proven empty scan.
     mutable std::unordered_map<const TSourceOperator*, TSourceSplits>
         ScanSplitCache_;
+    mutable std::unordered_map<const TSourceOperator*, std::shared_ptr<const TRowGroupPredicate>>
+        SourcePredicates_;
     std::unordered_map<uint32_t, std::vector<TFilterConsumerTasks>> FilterConsumers_;
     std::vector<TFilterProducerTasks> FilterProducers_;
     std::unordered_map<const TCteMaterialization*, TMaterializedProducer> Materialized_;

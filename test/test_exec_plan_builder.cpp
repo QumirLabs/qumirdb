@@ -44,8 +44,7 @@ public:
     using TMockSource::TMockSource;
 
     std::vector<NScheduler::TScanRowGroup> PruneRowGroups(
-        const NQumir::NAst::TExprPtr&,
-        std::string_view,
+        const TRowGroupPredicate*,
         std::ostream*,
         const std::unordered_set<std::string>*) const override {
         return {
@@ -74,8 +73,7 @@ public:
     }
 
     std::vector<NScheduler::TScanRowGroup> PruneRowGroups(
-        const NQumir::NAst::TExprPtr&,
-        std::string_view,
+        const TRowGroupPredicate*,
         std::ostream*,
         const std::unordered_set<std::string>*) const override {
         return {

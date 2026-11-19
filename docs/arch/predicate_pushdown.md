@@ -241,3 +241,39 @@ Lowering caches the resulting explicit split list per source. In that cache,
 chosen row groups, and an engaged empty list is a proven empty scan.
 
 The source hint is included in text plans and S-expression round-trips.
+
+### Block selection inside a row group
+
+Footer statistics describe a whole row group, often hundreds of thousands of
+rows. A scan task narrows a surviving group with small materialized aggregates:
+min/max/null bounds per block of rows that let a scan skip a block whose bounds
+rule the predicate out (G. Moerkotte, *Small Materialized Aggregates: A Light
+Weight Index Structure for Data Warehousing*, VLDB 1998, pp. 476-487). QDB does
+not store them. The scan derives them from the predicate columns, which it reads
+anyway, for blocks of 2^16 rows, the block size of Data Blocks (H. Lang et al.,
+*Data Blocks: Hybrid OLTP and OLAP on Compressed Storage using both
+Vectorization and Compilation*, SIGMOD 2016, doi:10.1145/2882903.2882925).
+
+For one scan batch of its rows at a time, the task reads the predicate columns,
+computes the bounds of each block and evaluates the same compiled
+`__row_group_predicate__` on them: block bounds replace the footer's for those
+columns, and the other columns keep the group's. The other columns are then read
+only for the kept blocks, and the predicate columns already read are reused.
+This is late materialization of the non-predicate columns (D. Abadi et al.,
+*Materialization Strategies in a Column-Oriented DBMS*, ICDE 2007,
+doi:10.1109/ICDE.2007.367892): data pages outside the kept rows are skipped
+before decompression, and rows outside them inside a kept page are skipped
+rather than materialized.
+
+The Parquet reader computes the block bounds; no generated kernel does. They
+are the statistics a writer stores per page, so footer statistics and block
+bounds are interchangeable inputs to the one compiled predicate, and a scan
+needs no compiled code before its first operator. The scan node carries the
+lowered predicate as oz-lang text. A task graph compiles it once, and its scan
+tasks share the immutable bytecode, each with an interpreter state of its own;
+row-group pruning at planning uses the same compiled predicate.
+
+A block is skipped only when `TRUE` is impossible for every row in it, NULL and
+NaN included, and the filter above still checks every emitted row. On data not
+clustered by the predicate columns nothing is skipped, and the cost is the
+bounds pass and one evaluation per block.

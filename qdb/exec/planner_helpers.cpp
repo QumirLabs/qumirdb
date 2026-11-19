@@ -363,7 +363,7 @@ NQumir::NAst::TTypePtr BuildSourceRuntimeType(TSourceOperator& src)
             cols.insert(dot != std::string::npos ? name.substr(dot + 1) : name);
         }
         src.RestrictColumns(cols);
-        narrowed = table->MakeSource(std::nullopt, std::move(cols));
+        narrowed = table->MakeSource(std::nullopt, std::move(cols), nullptr);
     }
 
     auto&& qualSt = src.OutputColumns();

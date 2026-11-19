@@ -189,18 +189,51 @@ struct TVmFunction::TImpl {
     NQumir::NIR::TModule Module;
     NQumir::NIR::TVMCompiler Compiler{Module};
     NQumir::NIR::TFunction* Entry = nullptr;
-    std::ostringstream Out;
-    std::istringstream In;
-    std::unique_ptr<NQumir::NIR::TInterpreter> Interpreter;
 };
 
 TVmFunction::TVmFunction(std::unique_ptr<TImpl> impl)
     : Impl_(std::move(impl))
 {}
 
-TVmFunction::~TVmFunction() {
-    if (Impl_ && Impl_->Interpreter) {
-        (void)Impl_->Interpreter->Finalize();
+TVmFunction::~TVmFunction() = default;
+
+struct TVmFunctionState::TImpl {
+    TImpl(NQumir::NIR::TModule& module, NQumir::NIR::TVMCompiler& compiler, NQumir::NIR::TFunction& entry)
+        : Entry(entry)
+        , Interpreter(module, compiler, Out, In)
+    {}
+
+    NQumir::NIR::TFunction& Entry;
+    std::ostringstream Out;
+    std::istringstream In;
+    NQumir::NIR::TInterpreter Interpreter;
+    bool Initialized = false;
+};
+
+TVmFunctionState::TVmFunctionState(const TVmFunction& function)
+    : Impl_(std::make_unique<TImpl>(function.Impl_->Module, function.Impl_->Compiler, *function.Impl_->Entry))
+{
+    Impl_->Initialized = Impl_->Interpreter.Initialize().has_value();
+}
+
+TVmFunctionState::~TVmFunctionState()
+{
+    (void)Impl_->Interpreter.Finalize();
+}
+
+std::optional<int64_t> TVmFunctionState::EvalRaw(std::vector<int64_t> args) noexcept
+{
+    if (!Impl_->Initialized) {
+        return std::nullopt;
+    }
+    try {
+        auto result = Impl_->Interpreter.Invoke(Impl_->Entry, std::move(args));
+        if (!result) {
+            return std::nullopt;
+        }
+        return *result;
+    } catch (...) {
+        return std::nullopt;
     }
 }
 
@@ -248,14 +281,6 @@ std::expected<std::unique_ptr<TVmFunction>, std::string> TVmFunction::Compile(
         if (auto prepared = impl->Compiler.Prepare({impl->Entry}); !prepared) {
             return std::unexpected(prepared.error().ToString());
         }
-        impl->Interpreter = std::make_unique<NQumir::NIR::TInterpreter>(
-            impl->Module,
-            impl->Compiler,
-            impl->Out,
-            impl->In);
-        if (auto initialized = impl->Interpreter->Initialize(); !initialized) {
-            return std::unexpected(initialized.error().ToString());
-        }
         return std::unique_ptr<TVmFunction>(
             new TVmFunction(std::move(impl)));
     } catch (const std::exception& error) {
@@ -266,14 +291,16 @@ std::expected<std::unique_ptr<TVmFunction>, std::string> TVmFunction::Compile(
 }
 
 std::optional<std::string> TVmFunction::Eval(
-    std::vector<int64_t> args) noexcept
+    std::vector<int64_t> args) const noexcept
 {
-    auto raw = EvalRaw(std::move(args));
-    if (!raw) {
-        return std::nullopt;
-    }
-    // Formats the result the way TInterpreter::Eval does.
+    // Formats the result the way TInterpreter::Eval does, while the state
+    // that may hold a structured result is alive.
     try {
+        TVmFunctionState state(*this);
+        auto raw = state.EvalRaw(std::move(args));
+        if (!raw) {
+            return std::nullopt;
+        }
         const auto& entry = *Impl_->Entry;
         std::ostringstream out;
         if (entry.ReturnTypeIsString) {
@@ -292,17 +319,10 @@ std::optional<std::string> TVmFunction::Eval(
 }
 
 std::optional<int64_t> TVmFunction::EvalRaw(
-    std::vector<int64_t> args) noexcept
+    std::vector<int64_t> args) const noexcept
 {
-    if (!Impl_ || !Impl_->Entry || !Impl_->Interpreter) {
-        return std::nullopt;
-    }
     try {
-        auto result = Impl_->Interpreter->Invoke(*Impl_->Entry, std::move(args));
-        if (!result) {
-            return std::nullopt;
-        }
-        return *result;
+        return TVmFunctionState(*this).EvalRaw(std::move(args));
     } catch (...) {
         return std::nullopt;
     }

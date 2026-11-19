@@ -1833,7 +1833,8 @@ TEST(AggregateE2E, PlannerUsesPhysicalPrunedSchemaForKeyDescriptor) {
         // A pruned scan reads the physical column order.
         std::unique_ptr<ISource> MakeSource(
             std::optional<std::vector<int>>,
-            std::optional<std::unordered_set<std::string>> names) const override
+            std::optional<std::unordered_set<std::string>> names,
+            std::shared_ptr<const TRowGroupPredicate>) const override
         {
             if (names) {
                 RestrictedColumns_ = *names;
@@ -1842,8 +1843,7 @@ TEST(AggregateE2E, PlannerUsesPhysicalPrunedSchemaForKeyDescriptor) {
         }
 
         std::vector<NScheduler::TScanRowGroup> PruneRowGroups(
-            const NQumir::NAst::TExprPtr&,
-            std::string_view,
+            const TRowGroupPredicate*,
             std::ostream*,
             const std::unordered_set<std::string>*) const override
         {

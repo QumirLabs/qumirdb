@@ -67,11 +67,10 @@ private:
 // Shared default context used by expression annotation.
 TVmFrontendContext& QumirdbVmContext();
 
-// Reusable AST -> compose -> resolve -> IR -> interpreter pipeline for small
-// planning-time functions. The compiled module and interpreter stay alive so
-// the same function can be evaluated repeatedly with different arguments.
-// The bytecode is prepared at compilation and calls touch no global state, so
-// separate functions may run on separate threads.
+// Reusable AST -> compose -> resolve -> IR -> bytecode pipeline for small
+// functions. The bytecode is prepared at compilation and only read after it;
+// each caller evaluates it in a TVmFunctionState of its own, so the states of
+// one function may run on separate threads.
 class TVmFunction {
 public:
     static std::expected<std::unique_ptr<TVmFunction>, std::string> Compile(
@@ -85,13 +84,34 @@ public:
     TVmFunction(TVmFunction&&) = delete;
     TVmFunction& operator=(TVmFunction&&) = delete;
 
-    std::optional<std::string> Eval(std::vector<int64_t> args) noexcept;
+    // One call in a fresh state, for planning-time evaluation.
+    std::optional<std::string> Eval(std::vector<int64_t> args) const noexcept;
+    std::optional<int64_t> EvalRaw(std::vector<int64_t> args) const noexcept;
+
+private:
+    friend class TVmFunctionState;
+    struct TImpl;
+    explicit TVmFunction(std::unique_ptr<TImpl> impl);
+
+    std::unique_ptr<TImpl> Impl_;
+};
+
+// The interpreter of one caller of a TVmFunction: registers, stack and module
+// globals. The function must outlive it, and one thread at a time uses it.
+class TVmFunctionState {
+public:
+    explicit TVmFunctionState(const TVmFunction& function);
+    ~TVmFunctionState();
+
+    TVmFunctionState(const TVmFunctionState&) = delete;
+    TVmFunctionState& operator=(const TVmFunctionState&) = delete;
+    TVmFunctionState(TVmFunctionState&&) = delete;
+    TVmFunctionState& operator=(TVmFunctionState&&) = delete;
+
     std::optional<int64_t> EvalRaw(std::vector<int64_t> args) noexcept;
 
 private:
     struct TImpl;
-    explicit TVmFunction(std::unique_ptr<TImpl> impl);
-
     std::unique_ptr<TImpl> Impl_;
 };
 

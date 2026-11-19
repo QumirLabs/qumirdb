@@ -14,10 +14,13 @@
 #include <arrow/api.h>
 #include <arrow/io/api.h>
 #include <arrow/memory_pool.h>
+#include <arrow/util/bitmap_ops.h>
 #include <arrow/util/key_value_metadata.h>
 #include <parquet/arrow/reader.h>
 #include <parquet/arrow/schema.h>
+#include <parquet/file_reader.h>
 #include <parquet/metadata.h>
+#include <parquet/properties.h>
 #include <parquet/schema.h>
 #include <parquet/statistics.h>
 
@@ -26,8 +29,10 @@
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <limits>
 #include <numeric>
 #include <optional>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 
@@ -259,6 +264,151 @@ void SetArrowMemoryPool(EArrowMemoryPool pool) {
     ConfiguredMemoryPool.store(pool);
 }
 
+namespace {
+
+// Rows per block of block selection: Data Blocks keep a small materialized
+// aggregate per block of at most 2^16 records (Lang et al., SIGMOD 2016).
+constexpr int64_t BlockRows = int64_t{1} << 16;
+
+// Calls `visit` with the Arrow type of a column whose values have bounds and
+// returns true; false for other columns. Footer and block bounds share it.
+template <typename TVisit>
+bool VisitBoundedType(arrow::Type::type type, TVisit&& visit) {
+    switch (type) {
+        case arrow::Type::INT8:
+            visit(arrow::Int8Type{});
+            return true;
+        case arrow::Type::INT16:
+            visit(arrow::Int16Type{});
+            return true;
+        case arrow::Type::INT32:
+            visit(arrow::Int32Type{});
+            return true;
+        case arrow::Type::INT64:
+            visit(arrow::Int64Type{});
+            return true;
+        case arrow::Type::DATE32:
+            visit(arrow::Date32Type{});
+            return true;
+        case arrow::Type::DATE64:
+            visit(arrow::Date64Type{});
+            return true;
+        case arrow::Type::UINT8:
+            visit(arrow::UInt8Type{});
+            return true;
+        case arrow::Type::UINT16:
+            visit(arrow::UInt16Type{});
+            return true;
+        case arrow::Type::UINT32:
+            visit(arrow::UInt32Type{});
+            return true;
+        case arrow::Type::UINT64:
+            visit(arrow::UInt64Type{});
+            return true;
+        case arrow::Type::FLOAT:
+            visit(arrow::FloatType{});
+            return true;
+        case arrow::Type::DOUBLE:
+            visit(arrow::DoubleType{});
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Sets [lo, hi] in the words of TRowGroupColumnRange: i64 bits for signed
+// integers and dates, u64 for unsigned integers, f64 bits for floats. A NaN or
+// lo > hi leaves the range without bounds.
+template <typename TValue>
+void SetBounds(TRowGroupColumnRange& range, TValue lo, TValue hi) {
+    auto word = [](TValue value) -> uint64_t {
+        if constexpr (std::is_floating_point_v<TValue>) {
+            return std::bit_cast<uint64_t>(static_cast<double>(value));
+        } else if constexpr (std::is_signed_v<TValue>) {
+            return std::bit_cast<uint64_t>(static_cast<int64_t>(value));
+        } else {
+            return static_cast<uint64_t>(value);
+        }
+    };
+    if (lo <= hi) {
+        range.MinValue = word(lo);
+        range.MaxValue = word(hi);
+        range.HasBounds = true;
+    }
+}
+
+// The footer statistics of a column of TArrowType: integers and dates are
+// stored as INT32 or INT64, floats as FLOAT or DOUBLE.
+template <typename TArrowType>
+void SetStatisticsBounds(
+    TRowGroupColumnRange& range, const parquet::ColumnDescriptor& descriptor, const parquet::Statistics& stats)
+{
+    using TValue = typename TArrowType::c_type;
+    using TStorage = std::conditional_t<std::is_same_v<TValue, float>, parquet::FloatType,
+        std::conditional_t<std::is_same_v<TValue, double>, parquet::DoubleType,
+            std::conditional_t<sizeof(TValue) <= 4, parquet::Int32Type, parquet::Int64Type>>>;
+    if (descriptor.physical_type() != TStorage::type_num) {
+        return;
+    }
+    const auto& typed = static_cast<const parquet::TypedStatistics<TStorage>&>(stats);
+    if constexpr (std::is_unsigned_v<TValue>) {
+        // Unsigned values keep their order in signed storage.
+        using TBound = std::make_unsigned_t<typename TStorage::c_type>;
+        SetBounds(range, static_cast<TBound>(typed.min()), static_cast<TBound>(typed.max()));
+    } else {
+        SetBounds(range, typed.min(), typed.max());
+    }
+}
+
+// The bounds of rows [offset, offset + length) of a numeric array.
+template <typename TArrowType>
+TRowGroupColumnRange ValueBounds(const arrow::NumericArray<TArrowType>& array, int64_t offset, int64_t length) {
+    using TValue = typename TArrowType::c_type;
+    constexpr TValue top = std::numeric_limits<TValue>::has_infinity
+        ? std::numeric_limits<TValue>::infinity()
+        : std::numeric_limits<TValue>::max();
+    TValue lo = top;
+    TValue hi = std::numeric_limits<TValue>::has_infinity ? -top : std::numeric_limits<TValue>::lowest();
+    bool nan = false;
+    const TValue* values = array.raw_values() + offset;
+    const int64_t nulls = array.null_count() == 0
+        ? 0
+        : length - arrow::internal::CountSetBits(array.null_bitmap_data(), array.offset() + offset, length);
+    // std::min and std::max keep the bound when the value is NaN.
+    if (nulls == 0) {
+        for (int64_t row = 0; row < length; ++row) {
+            nan |= values[row] != values[row];
+            lo = std::min(lo, values[row]);
+            hi = std::max(hi, values[row]);
+        }
+    } else {
+        for (int64_t row = 0; row < length; ++row) {
+            if (array.IsValid(offset + row)) {
+                nan |= values[row] != values[row];
+                lo = std::min(lo, values[row]);
+                hi = std::max(hi, values[row]);
+            }
+        }
+    }
+    TRowGroupColumnRange range{
+        .MayBeNull = nulls > 0,
+        .MayBeValue = nulls < length,
+        .MayBeNaN = nan,
+    };
+    SetBounds(range, lo, hi);
+    return range;
+}
+
+TRowGroupColumnRange BlockBounds(const arrow::Array& array, int64_t offset, int64_t length) {
+    TRowGroupColumnRange range;
+    VisitBoundedType(array.type_id(), [&]<typename TArrowType>(TArrowType) {
+        range = ValueBounds(static_cast<const arrow::NumericArray<TArrowType>&>(array), offset, length);
+    });
+    return range;
+}
+
+} // namespace
+
 struct TParquetFileData {
     explicit TParquetFileData(const std::string& path)
         : Path(path)
@@ -273,6 +423,9 @@ struct TParquetFileData {
 
     std::string Path;
     std::shared_ptr<parquet::arrow::FileReader> FileReader;
+    // The same file for range reads, which skip most pages of a chunk: its
+    // buffered streams read the pages kept rather than the whole chunk.
+    std::shared_ptr<parquet::ParquetFileReader> PageFile;
     std::shared_ptr<arrow::Schema> FileSchema;
     std::vector<std::string> FileNames;
     std::vector<TColumnSchema> FileColumns;
@@ -351,6 +504,11 @@ void TParquetFileData::Open()
         throw std::runtime_error(fileReaderResult.status().ToString());
     }
     FileReader = std::move(*fileReaderResult);
+
+    parquet::ReaderProperties pageProperties(GetMemoryPool());
+    pageProperties.enable_buffered_stream();
+    PageFile = parquet::ParquetFileReader::Open(
+        infile, pageProperties, FileReader->parquet_reader()->metadata());
 
     auto schemaStatus = FileReader->GetSchema(&FileSchema);
     if (!schemaStatus.ok()) {
@@ -513,108 +671,17 @@ void TParquetFileData::LoadRowGroupRanges()
                 continue;
             }
 
-            switch (typeId) {
-                case arrow::Type::INT8:
-                case arrow::Type::INT16:
-                case arrow::Type::INT32:
-                case arrow::Type::DATE32: {
-                    if (descriptor->physical_type() != parquet::Type::INT32) {
-                        break;
-                    }
-                    auto typed = std::static_pointer_cast<parquet::Int32Statistics>(stats);
-                    const int64_t lo = typed->min();
-                    const int64_t hi = typed->max();
-                    if (lo <= hi) {
-                        range.MinValue = std::bit_cast<uint64_t>(lo);
-                        range.MaxValue = std::bit_cast<uint64_t>(hi);
-                        range.HasBounds = true;
-                    }
-                    break;
+            if (typeId == arrow::Type::DECIMAL128) {
+                auto bounds = DecimalStatisticsBounds(*descriptor, *stats);
+                if (bounds && bounds->first <= bounds->second) {
+                    range.MinValue = static_cast<unsigned __int128>(bounds->first);
+                    range.MaxValue = static_cast<unsigned __int128>(bounds->second);
+                    range.HasBounds = true;
                 }
-                case arrow::Type::INT64:
-                case arrow::Type::DATE64: {
-                    if (descriptor->physical_type() != parquet::Type::INT64) {
-                        break;
-                    }
-                    auto typed = std::static_pointer_cast<parquet::Int64Statistics>(stats);
-                    const int64_t lo = typed->min();
-                    const int64_t hi = typed->max();
-                    if (lo <= hi) {
-                        range.MinValue = std::bit_cast<uint64_t>(lo);
-                        range.MaxValue = std::bit_cast<uint64_t>(hi);
-                        range.HasBounds = true;
-                    }
-                    break;
-                }
-                case arrow::Type::UINT8:
-                case arrow::Type::UINT16:
-                case arrow::Type::UINT32: {
-                    if (descriptor->physical_type() != parquet::Type::INT32) {
-                        break;
-                    }
-                    auto typed = std::static_pointer_cast<parquet::Int32Statistics>(stats);
-                    const uint64_t lo = static_cast<uint32_t>(typed->min());
-                    const uint64_t hi = static_cast<uint32_t>(typed->max());
-                    if (lo <= hi) {
-                        range.MinValue = lo;
-                        range.MaxValue = hi;
-                        range.HasBounds = true;
-                    }
-                    break;
-                }
-                case arrow::Type::UINT64: {
-                    if (descriptor->physical_type() != parquet::Type::INT64) {
-                        break;
-                    }
-                    auto typed = std::static_pointer_cast<parquet::Int64Statistics>(stats);
-                    const uint64_t lo = static_cast<uint64_t>(typed->min());
-                    const uint64_t hi = static_cast<uint64_t>(typed->max());
-                    if (lo <= hi) {
-                        range.MinValue = lo;
-                        range.MaxValue = hi;
-                        range.HasBounds = true;
-                    }
-                    break;
-                }
-                case arrow::Type::FLOAT: {
-                    if (descriptor->physical_type() != parquet::Type::FLOAT) {
-                        break;
-                    }
-                    auto typed = std::static_pointer_cast<parquet::FloatStatistics>(stats);
-                    const double lo = typed->min();
-                    const double hi = typed->max();
-                    if (!std::isnan(lo) && !std::isnan(hi) && lo <= hi) {
-                        range.MinValue = std::bit_cast<uint64_t>(lo);
-                        range.MaxValue = std::bit_cast<uint64_t>(hi);
-                        range.HasBounds = true;
-                    }
-                    break;
-                }
-                case arrow::Type::DOUBLE: {
-                    if (descriptor->physical_type() != parquet::Type::DOUBLE) {
-                        break;
-                    }
-                    auto typed = std::static_pointer_cast<parquet::DoubleStatistics>(stats);
-                    const double lo = typed->min();
-                    const double hi = typed->max();
-                    if (!std::isnan(lo) && !std::isnan(hi) && lo <= hi) {
-                        range.MinValue = std::bit_cast<uint64_t>(lo);
-                        range.MaxValue = std::bit_cast<uint64_t>(hi);
-                        range.HasBounds = true;
-                    }
-                    break;
-                }
-                case arrow::Type::DECIMAL128: {
-                    auto bounds = DecimalStatisticsBounds(*descriptor, *stats);
-                    if (bounds && bounds->first <= bounds->second) {
-                        range.MinValue = static_cast<unsigned __int128>(bounds->first);
-                        range.MaxValue = static_cast<unsigned __int128>(bounds->second);
-                        range.HasBounds = true;
-                    }
-                    break;
-                }
-                default:
-                    break;
+            } else {
+                VisitBoundedType(typeId, [&]<typename TArrowType>(TArrowType) {
+                    SetStatisticsBounds<TArrowType>(range, *descriptor, *stats);
+                });
             }
         }
     }
@@ -628,43 +695,39 @@ TParquetFile::~TParquetFile() = default;
 
 std::unique_ptr<ISource> TParquetFile::MakeSource(
     std::optional<std::vector<int>> rowGroups,
-    std::optional<std::unordered_set<std::string>> restrictedColumns) const
+    std::optional<std::unordered_set<std::string>> restrictedColumns,
+    std::shared_ptr<const TRowGroupPredicate> blockPredicate) const
 {
-    return std::unique_ptr<ISource>(
-        new TParquetSource(Data_, std::move(rowGroups), std::move(restrictedColumns)));
+    if (!rowGroups) {
+        rowGroups.emplace(Data_->RowGroups.size());
+        std::iota(rowGroups->begin(), rowGroups->end(), 0);
+    }
+    std::vector<TParquetSource::TPart> parts;
+    parts.reserve(rowGroups->size());
+    for (int rowGroup : *rowGroups) {
+        const int64_t rows = Data_->RowGroups.at(static_cast<size_t>(rowGroup)).RowCount;
+        if (rows > 0) {
+            parts.push_back({.RowGroup = rowGroup, .Ranges = {{.Begin = 0, .End = rows}}});
+        }
+    }
+    return std::unique_ptr<ISource>(new TParquetSource(
+        Data_, std::move(parts), std::move(restrictedColumns), std::move(blockPredicate)));
 }
 
 TParquetSource::TParquetSource(
     std::shared_ptr<TParquetFileData> file,
-    std::optional<std::vector<int>> rowGroups,
-    std::optional<std::unordered_set<std::string>> restrictedColumns)
+    std::vector<TPart> parts,
+    std::optional<std::unordered_set<std::string>> restrictedColumns,
+    std::shared_ptr<const TRowGroupPredicate> blockPredicate)
     : File_(std::move(file))
-    , RowGroups_(std::move(rowGroups))
+    , Parts_(std::move(parts))
     , RestrictedColumns_(std::move(restrictedColumns))
+    , BlockPredicate_(std::move(blockPredicate))
 {
     SelectColumns();
 }
 
-void TParquetSource::EnsureOpen() {
-    if (!Reader_) {
-        ResetReader();
-    }
-}
-
-std::vector<int> TParquetSource::EffectiveRowGroups() const
-{
-    if (RowGroups_) {
-        return *RowGroups_;
-    }
-
-    const int numRgs = static_cast<int>(File_->RowGroups.size());
-    std::vector<int> rowGroups(numRgs);
-    std::iota(rowGroups.begin(), rowGroups.end(), 0);
-    return rowGroups;
-}
-
 void TParquetSource::SelectColumns() {
-    auto rowGroups = EffectiveRowGroups();
     SelectedColumns_.clear();
     if (RestrictedColumns_) {
         SelectedColumns_ = EffectiveFileColumnIndexes();
@@ -673,43 +736,191 @@ void TParquetSource::SelectColumns() {
             SelectedColumns_.push_back(i);
         }
     }
+    // Decimal columns bypass Arrow's per-value Decimal128 conversion (TDecimalColumnScan).
+    ArrowColumns_.clear();
     DecimalScans_.clear();
     for (size_t position = 0; position < SelectedColumns_.size(); ++position) {
         const int field = SelectedColumns_[position];
         const int leaf = File_->DecimalScanColumns[static_cast<size_t>(field)];
         if (leaf < 0) {
+            ArrowColumns_.push_back(field);
             continue;
         }
         DecimalScans_.push_back({
             .Position = position,
             .Scan = std::make_unique<TDecimalColumnScan>(
-                *File_->FileReader->parquet_reader(), leaf, rowGroups, GetMemoryPool()),
+                *File_->FileReader->parquet_reader(), leaf, GetMemoryPool()),
         });
     }
-    Reader_.reset();
+    BlockColumns_.clear();
+    RestColumns_.clear();
+    for (size_t position = 0; position < ArrowColumns_.size(); ++position) {
+        const int field = ArrowColumns_[position];
+        const bool bounded = BlockPredicate_ &&
+            std::ranges::contains(BlockPredicate_->Program().Columns, field) &&
+            VisitBoundedType(File_->FileSchema->field(field)->type()->id(), [](auto) {});
+        if (bounded) {
+            BlockColumns_.push_back(position);
+        } else {
+            RestColumns_.push_back(field);
+        }
+    }
     RefreshSchema();
 }
 
-void TParquetSource::ResetReader()
+void TParquetSource::OpenPart(const TPart& part)
 {
-    auto rowGroups = EffectiveRowGroups();
-    // Decimal columns bypass Arrow's per-value Decimal128 conversion (TDecimalColumnScan).
-    std::vector<int> arrowColumns;
-    for (size_t position = 0; position < SelectedColumns_.size(); ++position) {
-        const int field = SelectedColumns_[position];
-        const int leaf = File_->DecimalScanColumns[static_cast<size_t>(field)];
-        if (leaf < 0) {
-            arrowColumns.push_back(field);
+    Part_ = &part;
+    PartRanges_ = part.Ranges;
+    PartColumns_ = ArrowColumns_;
+    int64_t decided = std::numeric_limits<int64_t>::max();
+    if (StartBlockSelection(part)) {
+        PartRanges_.clear();
+        PartColumns_ = RestColumns_;
+        decided = part.Ranges.front().Begin;
+    }
+    const int64_t rows = File_->RowGroups[static_cast<size_t>(part.RowGroup)].RowCount;
+    const bool whole = !BlockReader_ && PartRanges_.size() == 1 &&
+        PartRanges_.front() == TRowRange{.Begin = 0, .End = rows};
+    if (!whole) {
+        RangeReader_ = TParquetRangeReader::Make(
+            File_->FileReader->manifest(), *File_->PageFile, part.RowGroup, PartColumns_, PartRanges_,
+            GetMemoryPool(), decided);
+        if (RangeReader_) {
+            return;
         }
     }
-    auto batchReaderResult = File_->FileReader->GetRecordBatchReader(rowGroups, arrowColumns);
+    auto batchReaderResult = File_->FileReader->GetRecordBatchReader({part.RowGroup}, PartColumns_);
     if (!batchReaderResult.ok()) {
         throw std::runtime_error(batchReaderResult.status().ToString());
     }
-    Reader_ = std::move(*batchReaderResult);
-    ReaderRowGroups_ = std::move(rowGroups);
-    ReaderRowGroupIndex_ = 0;
-    ReaderRowOffset_ = 0;
+    ArrowReader_ = std::move(*batchReaderResult);
+    ArrowBatch_.reset();
+    ArrowBatchBegin_ = 0;
+    ArrowBatchEnd_ = 0;
+    ArrowCursor_ = 0;
+    ArrowRange_ = 0;
+}
+
+bool TParquetSource::StartBlockSelection(const TPart& part)
+{
+    if (BlockColumns_.empty() || part.Ranges.size() != 1) {
+        return false;
+    }
+    if (!BlockEvaluator_) {
+        BlockEvaluator_.emplace(*BlockPredicate_);
+    }
+    std::vector<int> columns;
+    for (size_t position : BlockColumns_) {
+        columns.push_back(ArrowColumns_[position]);
+    }
+    BlockReader_ = TParquetRangeReader::Make(
+        File_->FileReader->manifest(), *File_->PageFile, part.RowGroup, columns, part.Ranges, GetMemoryPool());
+    return BlockReader_ != nullptr;
+}
+
+void TParquetSource::SelectNextBlocks()
+{
+    // A window of a batch keeps the scan as pipelined as without selection.
+    auto read = BlockReader_->Next(File_->FileReader->properties().batch_size());
+    if (!read.ok()) {
+        throw std::runtime_error(read.status().ToString());
+    }
+    if (!*read) {
+        BlockReader_.reset();
+        BlockArrays_.clear();
+        return;
+    }
+    auto& window = **read;
+    BlockArrays_ = std::move(window.Columns);
+    BlockArraysBegin_ = window.FirstRow;
+    const int64_t windowEnd = window.FirstRow + window.RowCount;
+
+    // Columns without block bounds keep the row group's.
+    auto bounds = File_->RowGroupRanges[static_cast<size_t>(Part_->RowGroup)];
+    std::vector<TRowRange> kept;
+    for (int64_t begin = window.FirstRow; begin < windowEnd; begin += BlockRows) {
+        const int64_t end = std::min(begin + BlockRows, windowEnd);
+        for (size_t block = 0; block < BlockColumns_.size(); ++block) {
+            bounds[static_cast<size_t>(ArrowColumns_[BlockColumns_[block]])] =
+                BlockBounds(*BlockArrays_[block], begin - window.FirstRow, end - begin);
+        }
+        if (!BlockEvaluator_->MayBeTrue(bounds)) {
+            continue;
+        }
+        if (!kept.empty() && kept.back().End == begin) {
+            kept.back().End = end;
+        } else {
+            kept.push_back({.Begin = begin, .End = end});
+        }
+    }
+    PartRanges_.insert(PartRanges_.end(), kept.begin(), kept.end());
+    if (RangeReader_) {
+        RangeReader_->Extend(kept, windowEnd);
+    }
+}
+
+void TParquetSource::ClosePart()
+{
+    Part_ = nullptr;
+    BlockReader_.reset();
+    BlockArrays_.clear();
+    RangeReader_.reset();
+    ArrowReader_.reset();
+    ArrowBatch_.reset();
+}
+
+std::optional<TRowRangeBatch> TParquetSource::ReadPart()
+{
+    while (true) {
+        std::optional<TRowRangeBatch> rows;
+        if (RangeReader_) {
+            auto batch = RangeReader_->Next(File_->FileReader->properties().batch_size());
+            if (!batch.ok()) {
+                throw std::runtime_error(batch.status().ToString());
+            }
+            rows = std::move(*batch);
+        } else {
+            rows = ReadArrowPart();
+        }
+        if (rows || !BlockReader_) {
+            return rows;
+        }
+        SelectNextBlocks();
+    }
+}
+
+std::optional<TRowRangeBatch> TParquetSource::ReadArrowPart()
+{
+    const auto& ranges = PartRanges_;
+    while (true) {
+        while (ArrowRange_ < ranges.size() && ranges[ArrowRange_].End <= ArrowCursor_) {
+            ++ArrowRange_;
+        }
+        if (ArrowRange_ == ranges.size()) {
+            return std::nullopt;
+        }
+        const auto& range = ranges[ArrowRange_];
+        if (ArrowBatch_ && ArrowCursor_ < ArrowBatchEnd_ && range.Begin < ArrowBatchEnd_) {
+            const int64_t begin = std::max(ArrowCursor_, range.Begin);
+            const int64_t end = std::min(ArrowBatchEnd_, range.End);
+            ArrowCursor_ = end;
+            auto slice = end - begin == ArrowBatch_->num_rows()
+                ? ArrowBatch_
+                : ArrowBatch_->Slice(begin - ArrowBatchBegin_, end - begin);
+            return TRowRangeBatch{
+                .FirstRow = begin,
+                .RowCount = end - begin,
+                .Columns = slice->columns(),
+            };
+        }
+        if (!ArrowReader_->ReadNext(&ArrowBatch_).ok() || !ArrowBatch_) {
+            return std::nullopt;
+        }
+        ArrowBatchBegin_ = ArrowBatchEnd_;
+        ArrowBatchEnd_ += ArrowBatch_->num_rows();
+        ArrowCursor_ = ArrowBatchBegin_;
+    }
 }
 
 bool TParquetSource::RowIdRequested() const {
@@ -1036,26 +1247,21 @@ std::vector<NScheduler::TScanRowGroup> TParquetFile::ScanRowGroupsForColumns(
 }
 
 std::vector<NScheduler::TScanRowGroup> TParquetFile::PruneRowGroups(
-    const NQumir::NAst::TExprPtr& predicate,
-    std::string_view sourceAlias,
+    const TRowGroupPredicate* predicate,
     std::ostream* diagnostics,
     const std::unordered_set<std::string>* columnNames) const
 {
     auto rowGroups = ScanRowGroupsForColumns(columnNames);
-    if (!predicate) {
+    if (!predicate || Data_->RowGroupRanges.size() != Data_->RowGroups.size()) {
         return rowGroups;
     }
-    auto evaluator = TRowGroupPredicateEvaluator::Compile(
-        predicate, Data_->FullSchema, sourceAlias, diagnostics);
-    if (!evaluator || Data_->RowGroupRanges.size() != Data_->RowGroups.size()) {
-        return rowGroups;
-    }
+    TRowGroupPredicateEvaluator evaluator(*predicate);
 
     std::vector<NScheduler::TScanRowGroup> kept;
     kept.reserve(rowGroups.size());
     for (const auto& group : rowGroups) {
         const size_t rg = group.RowGroup;
-        const bool mayBeTrue = evaluator->MayBeTrue(Data_->RowGroupRanges[rg]);
+        const bool mayBeTrue = evaluator.MayBeTrue(Data_->RowGroupRanges[rg]);
         if (diagnostics) {
             *diagnostics << "row-group predicate: rg=" << rg
                          << " may_be_true=" << mayBeTrue;
@@ -1211,56 +1417,61 @@ const TSchema& TParquetSource::Schema() const {
 }
 
 bool TParquetSource::Next(TRowSet& rowSet) {
-    EnsureOpen();
-
-    std::shared_ptr<arrow::RecordBatch> batch;
-    if (!Reader_->ReadNext(&batch).ok() || !batch) {
-        return false;
+    std::optional<TRowRangeBatch> rows;
+    while (!rows) {
+        if (!Part_) {
+            if (NextPart_ == Parts_.size()) {
+                return false;
+            }
+            OpenPart(Parts_[NextPart_++]);
+        }
+        rows = ReadPart();
+        if (!rows) {
+            ClosePart();
+        }
     }
-    if (!DecimalScans_.empty()) {
-        // The decimal columns take their positions among the columns Arrow read.
-        std::vector<std::shared_ptr<arrow::Array>> columns;
-        columns.reserve(SelectedColumns_.size());
-        int arrowColumn = 0;
-        size_t nextScan = 0;
-        for (size_t position = 0; position < SelectedColumns_.size(); ++position) {
-            if (nextScan < DecimalScans_.size() && DecimalScans_[nextScan].Position == position) {
-                columns.push_back(DecimalScans_[nextScan++].Scan->Read(batch->num_rows()));
+    const int rowGroup = Part_->RowGroup;
+    if (!BlockArrays_.empty()) {
+        // The predicate columns read for block selection join the rest.
+        std::vector<std::shared_ptr<arrow::Array>> arrowColumns;
+        arrowColumns.reserve(ArrowColumns_.size());
+        size_t block = 0;
+        size_t rest = 0;
+        for (size_t position = 0; position < ArrowColumns_.size(); ++position) {
+            if (block < BlockColumns_.size() && BlockColumns_[block] == position) {
+                arrowColumns.push_back(BlockArrays_[block++]->Slice(
+                    rows->FirstRow - BlockArraysBegin_, rows->RowCount));
             } else {
-                columns.push_back(batch->column(arrowColumn++));
+                arrowColumns.push_back(std::move(rows->Columns[rest++]));
             }
         }
-        batch = arrow::RecordBatch::Make(BatchSchema_, batch->num_rows(), std::move(columns));
+        rows->Columns = std::move(arrowColumns);
     }
+    std::vector<std::shared_ptr<arrow::Array>> columns;
+    columns.reserve(SelectedColumns_.size() + (RowIdRequested() ? 1 : 0));
+    // The decimal columns take their positions among the other columns.
+    size_t arrowColumn = 0;
+    size_t nextScan = 0;
+    for (size_t position = 0; position < SelectedColumns_.size(); ++position) {
+        if (nextScan < DecimalScans_.size() && DecimalScans_[nextScan].Position == position) {
+            columns.push_back(DecimalScans_[nextScan++].Scan->Read(
+                rowGroup, rows->FirstRow, rows->RowCount));
+        } else {
+            columns.push_back(std::move(rows->Columns[arrowColumn++]));
+        }
+    }
+    auto batch = arrow::RecordBatch::Make(BatchSchema_, rows->RowCount, std::move(columns));
     if (RowIdRequested()) {
         arrow::UInt64Builder rowIds(GetMemoryPool());
-        if (auto status = rowIds.Reserve(batch->num_rows()); !status.ok()) {
+        if (auto status = rowIds.Reserve(rows->RowCount); !status.ok()) {
             throw std::runtime_error(status.ToString());
         }
-        int64_t remaining = batch->num_rows();
-        while (remaining > 0 && ReaderRowGroupIndex_ < ReaderRowGroups_.size()) {
-            const int rg = ReaderRowGroups_[ReaderRowGroupIndex_];
-            const int64_t rowGroupRows =
-                File_->RowGroups[static_cast<size_t>(rg)].RowCount;
-            const int64_t count = std::min(
-                remaining, rowGroupRows - ReaderRowOffset_);
-            for (int64_t i = 0; i < count; ++i) {
-                // The file metadata check in TParquetFileData proves that the
-                // row-group id and row offset fit in the locator fields.
-                rowIds.UnsafeAppend(MakeParquetRowIdUnchecked(
-                    static_cast<uint32_t>(rg),
-                    static_cast<uint32_t>(ReaderRowOffset_ + i)));
-            }
-            remaining -= count;
-            ReaderRowOffset_ += count;
-            if (ReaderRowOffset_ == rowGroupRows) {
-                ++ReaderRowGroupIndex_;
-                ReaderRowOffset_ = 0;
-            }
-        }
-        if (remaining != 0) {
-            throw std::runtime_error(
-                "parquet source row-group metadata ended before the batch");
+        for (int64_t i = 0; i < rows->RowCount; ++i) {
+            // The file metadata check in TParquetFileData proves that the
+            // row-group id and row offset fit in the locator fields.
+            rowIds.UnsafeAppend(MakeParquetRowIdUnchecked(
+                static_cast<uint32_t>(rowGroup),
+                static_cast<uint32_t>(rows->FirstRow + i)));
         }
         auto rowIdArray = rowIds.Finish();
         if (!rowIdArray.ok()) {

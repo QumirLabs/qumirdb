@@ -590,6 +590,12 @@ filter (> |t.c| 40)                 filter (> |t.c| 40)
 
 See [predicate_pushdown.md](predicate_pushdown.md#parquet-row-group-pruning).
 
+Inside a row group that survives, the scan applies the same predicate to blocks
+of 2^16 rows: it reads the predicate columns first, derives each block's
+min/max/null bounds from them and reads the other columns only for the blocks
+the predicate may keep. See
+[block selection](predicate_pushdown.md#block-selection-inside-a-row-group).
+
 ### 4.2 Scan splitting
 
 With the threaded scheduler a Parquet source is split into up to `[scan] max_tasks`

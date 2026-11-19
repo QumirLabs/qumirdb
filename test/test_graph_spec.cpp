@@ -174,7 +174,8 @@ TEST(GraphSpec, ScanFilterProjectRecordsRoundTrip)
             .Out = {0, 2}, .Path = "/data/t.parquet",
             .Columns = std::vector<std::string>{"a", "b"}, .RowGroups = rowGroups}));
     }
-    spec.Nodes.push_back(Node("source", "u", TParquetScanNode{.Path = "/data/u.parquet"}));
+    const TRowGroupPredicateProgram blocks{.Body = "(block (return (call rg_truth_unknown)))", .Columns = {0, 2}};
+    spec.Nodes.push_back(Node("source", "u", TParquetScanNode{.Path = "/data/u.parquet", .BlockPredicate = blocks}));
     spec.Nodes.push_back(Node("filter", "", TFilterNode{.In = {0, 2}, .Out = {1, 2}, .Plan = {.Kernel = 2}}));
     spec.Nodes.push_back(Node("filter", "", TFilterNode{
         .Plan = {.Kernel = 3, .KeptInputColumns = std::vector<int32_t>{2, 0}}}));
@@ -205,6 +206,8 @@ TEST(GraphSpec, ScanFilterProjectRecordsRoundTrip)
     EXPECT_EQ(scan.Columns, (std::vector<std::string>{"a", "b"}));
     EXPECT_EQ(scan.Out.Lane, 2u);
     EXPECT_FALSE(std::get<TParquetScanNode>(back.Nodes[3].Body).Columns);
+    EXPECT_FALSE(scan.BlockPredicate);
+    EXPECT_EQ(std::get<TParquetScanNode>(back.Nodes[3].Body).BlockPredicate, blocks);
 
     EXPECT_EQ(std::get<TFilterNode>(back.Nodes[4].Body).Plan.Kernel, 2u);
     EXPECT_FALSE(std::get<TFilterNode>(back.Nodes[4].Body).Plan.KeptInputColumns);
@@ -1108,6 +1111,26 @@ TEST(GraphSpec, MaterializationsReuseCachedTableUntilFileIdentityChanges)
     EXPECT_EQ(fs::last_write_time(path), mtime);
     EXPECT_NE(cache->Open(path).get(), before);
     fs::remove(path);
+}
+
+// The scan tasks of one graph share a block predicate compiled once.
+TEST(GraphSpec, ScanTasksOfAGraphShareTheirCompiledBlockPredicate)
+{
+    const std::string path = QDB_TEST_DATA_DIR "/regtest/cases/decimal_parquet/tables/decimals.parquet";
+    const TRowGroupPredicateProgram unknown{.Body = "(block (return (call rg_truth_unknown)))"};
+    const TRowGroupPredicateProgram never{.Body = "(block (return (call rg_truth_false)))"};
+    TGatherConnection connection(1);
+    connection.Resize(3, 1);
+    const std::vector<IConnection*> connections{&connection};
+    TNodeTaskContext context;
+    for (uint32_t lane = 0; lane < 3; ++lane) {
+        const auto& program = lane < 2 ? unknown : never;
+        ASSERT_TRUE(MakeNodeTask(
+            TParquetScanNode{.Out = {0, lane}, .Path = path, .BlockPredicate = program}, connections, context));
+    }
+    ASSERT_EQ(context.BlockPredicates.size(), 2u);
+    EXPECT_TRUE(context.BlockPredicates.at({path, unknown.Body}));
+    EXPECT_TRUE(context.BlockPredicates.at({path, never.Body}));
 }
 
 int main(int argc, char** argv)
