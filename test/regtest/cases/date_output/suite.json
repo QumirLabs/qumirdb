@@ -6,6 +6,7 @@
   "tables": {"date_values": "date_values"},
   "variants": ["single", "threaded"],
   "cases": {
-    "output_types.sql": {"order": "ordered"}
+    "output_types.sql": {"order": "ordered"},
+    "date_difference.sql": {"order": "ordered"}
   }
 }
