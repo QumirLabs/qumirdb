@@ -1,4 +1,5 @@
 #include <qdb/io/text/sink.h>
+#include <qdb/plan/types/date.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 
@@ -159,6 +160,9 @@ std::string FormatCell(const TColumn& col, int32_t row, const TTypePtr& type) {
     if (auto decimal = DecimalSpecOfValueType(valueType)) {
         return FormatDecimalCell(col, row, *decimal);
     }
+    if (IsDateType(valueType)) {
+        return FormatDate(DateCellDays(col.Data, row, valueType));
+    }
     if (auto t = TMaybeType<TIntegerType>(valueType)) {
         auto intType = t.Cast();
         const char* ptr = col.Data + row * (intType->BitWidth() / 8);
@@ -222,6 +226,11 @@ void WriteValue(std::ostream& out, const TColumn& col, int32_t row, const TTypeP
     const auto valueType = UnwrapNullableType(type);
     if (auto decimal = DecimalSpecOfValueType(valueType)) {
         const auto formatted = FormatDecimalCell(col, row, *decimal);
+        out.write(formatted.data(), static_cast<std::streamsize>(formatted.size()));
+        return;
+    }
+    if (IsDateType(valueType)) {
+        const auto formatted = FormatDate(DateCellDays(col.Data, row, valueType));
         out.write(formatted.data(), static_cast<std::streamsize>(formatted.size()));
         return;
     }
@@ -297,6 +306,9 @@ void WriteValue(std::ostream& out, const TColumn& col, int32_t row, const TTypeP
 
 bool IsNumeric(const TTypePtr& type) {
     const auto valueType = UnwrapNullableType(type);
+    if (IsDateType(valueType)) {
+        return false;
+    }
     return IsDecimalType(valueType) ||
            static_cast<bool>(TMaybeType<TIntegerType>(valueType)) ||
            static_cast<bool>(TMaybeType<TFloatType>(valueType));

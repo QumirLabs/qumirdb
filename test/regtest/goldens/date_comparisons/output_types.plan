@@ -1,0 +1,8 @@
+sort [id asc]
+└─ project (id, d, next_day, plus_day, plus_month, days_since, s, lo, hi) (rows≈4 cost≈4.6K)
+   └─ join inner (rows≈4 cost≈4.4K)
+      ├─ source date_values AS t (rows≈4 cost≈32)
+      └─ project (m.lo, m.hi) (rows≈1 cost≈176)
+         └─ aggregate keys=[__group__] aggs=[min_0=min, max_0=max] (rows≈1 cost≈160)
+            └─ project (date_values.d, __group__) (rows≈4 cost≈64)
+               └─ source date_values AS date_values (rows≈4 cost≈16)

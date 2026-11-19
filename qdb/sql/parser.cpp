@@ -1,6 +1,7 @@
 #include "parser.h"
 
 #include <qdb/modules/qumirdb_runtime.h>
+#include <qdb/plan/types/date.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/utils/nesting.h>
 
@@ -689,6 +690,12 @@ NQumir::NAst::TExprPtr call(TLocation loc, const std::string& name, std::vector<
 NQumir::NAst::TExprPtr i32_literal(TLocation loc, int32_t value) {
     auto ret = std::make_shared<NQumir::NAst::TNumberExpr>(loc, static_cast<int64_t>(value));
     ret->Type = std::make_shared<NQumir::NAst::TIntegerType>(NQumir::NAst::TIntegerType::I32);
+    return ret;
+}
+
+NQumir::NAst::TExprPtr date_literal(TLocation loc, int32_t days) {
+    auto ret = std::make_shared<NQumir::NAst::TNumberExpr>(loc, static_cast<int64_t>(days));
+    ret->Type = std::make_shared<TDateType>();
     return ret;
 }
 
@@ -1963,10 +1970,11 @@ NQumir::NAst::TExprPtr AddMonths(TLocation loc, NQumir::NAst::TExprPtr date,
     auto dateNumber = NQumir::NAst::TMaybeNode<NQumir::NAst::TNumberExpr>(date);
     if (monthsNumber && dateNumber) {
         const int64_t n = monthsNumber.Cast()->IntValue;
-        return i32_literal(loc, qdb_sql_date_add_months(
+        return date_literal(loc, qdb_sql_date_add_months(
             static_cast<int32_t>(dateNumber.Cast()->IntValue), negate ? -n : n));
     }
-    return call(loc, negate ? "qdb_date_sub_months" : "qdb_date_add_months", {date, months});
+    return cast(loc, call(loc, negate ? "qdb_date_sub_months" : "qdb_date_add_months", {date, months}),
+        std::make_shared<NQumir::NAst::TNamedType>("DATE", nullptr));
 }
 
 TAstExprTask add_expr(TParserContext& ctx) {
@@ -2228,7 +2236,7 @@ TAstExprTask primary_expr(TParserContext& ctx) {
         if (!qdb_try_parse_date(AsStringView(value.Name), &days)) {
             co_return Error(value, "invalid input syntax for type date: \"" + value.Name + "\"");
         }
-        co_return i32_literal(loc, days);
+        co_return date_literal(loc, days);
     }
 
     // <interval_literal> ::= "INTERVAL" <string_literal> <unit>
