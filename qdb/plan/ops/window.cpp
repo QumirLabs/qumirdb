@@ -3,7 +3,6 @@
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/passes/unbound_vars.h>
 #include <qdb/plan/types/nullable.h>
-#include <qdb/plan/types/date.h>
 #include <qdb/plan/types/decimal.h>
 
 #include <qumir/parser/ast.h>
@@ -40,9 +39,6 @@ TTypePtr WindowResultType(const std::string& func, const TTypePtr& argType) {
     }
     // max: i64 state for every integer argument, else keep the arg type.
     auto inner = nullable ? UnwrapNullableType(argType) : argType;
-    if (IsDateType(inner)) {
-        return wrap(std::make_shared<TDateType>(TIntegerType::I64));
-    }
     if (inner && inner->TypeName() == TIntegerType::TypeId) {
         return wrap(std::make_shared<TIntegerType>());
     }
