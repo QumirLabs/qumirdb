@@ -3,6 +3,7 @@
 #include <atomic>
 #include <memory>
 
+#include <qdb/io/parquet/table_cache.h>
 #include <qdb/scheduler/settings/settings.h>
 
 #include <coroio/actors/actor.hpp>
@@ -17,6 +18,8 @@ struct TRuntimeResources {
     // How compute actors build their scheduler; filled once at node start.
     NScheduler::TSchedulerSettings Scheduler;
     NScheduler::TTransportSettings Transport;
+    // Tables opened by the node's earlier queries; null opens every file anew.
+    std::shared_ptr<TTableCache> Tables;
 };
 
 NNet::NActors::IActor* CreatePinger(

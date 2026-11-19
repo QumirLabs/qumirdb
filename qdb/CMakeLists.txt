@@ -19,6 +19,7 @@ add_library(qumirdb
     io/parquet/decimal_scan.cpp
     io/parquet/decimal_storage.cpp
     io/parquet/source.cpp
+    io/parquet/table_cache.cpp
     io/parquet/row_reader.cpp
     io/parquet/row_group_predicate.cpp
     io/row_layouts.cpp

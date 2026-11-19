@@ -112,7 +112,7 @@ const ITable& ResolveTable(TNodeTaskContext& context, const std::string& path)
 {
     auto& table = context.Tables[path];
     if (!table) {
-        table = std::make_shared<TParquetFile>(path);
+        table = context.TableCache ? context.TableCache->Open(path) : std::make_shared<TParquetFile>(path);
     }
     return *table;
 }
@@ -623,10 +623,10 @@ TGraphSpec DeserializeGraphSpec(std::string_view bytes)
 
 std::unique_ptr<TTaskGraph> MaterializeGraph(
     const TGraphSpec& spec, ISink* sink, std::vector<std::shared_ptr<TKernelSlot>> slots,
-    std::shared_ptr<IRuntimeFilterBindingFactory> filterBindings)
+    std::shared_ptr<IRuntimeFilterBindingFactory> filterBindings, std::shared_ptr<TTableCache> tableCache)
 {
     auto graph = std::make_unique<TTaskGraph>();
-    TNodeTaskContext context{.Slots = std::move(slots), .Sink = sink};
+    TNodeTaskContext context{.Slots = std::move(slots), .TableCache = std::move(tableCache), .Sink = sink};
     std::shared_ptr<TKernelSlot> filterKernel;
     if (spec.RuntimeFilterKernel) {
         filterKernel = SlotAt(context, *spec.RuntimeFilterKernel);

@@ -195,7 +195,8 @@ struct TComputeActor : public IBehaviorActor {
                 LoadKernelImage(image, slots);
             }
             // No sink: a compute actor's results leave through its remote sinks.
-            graph = NScheduler::MaterializeGraph(spec, nullptr, std::move(slots));
+            graph = NScheduler::MaterializeGraph(
+                spec, nullptr, std::move(slots), nullptr, Resources ? Resources->Tables : nullptr);
             sealed = graph->Seal(&error);
         } catch (const std::exception& e) {
             error = e.what();
