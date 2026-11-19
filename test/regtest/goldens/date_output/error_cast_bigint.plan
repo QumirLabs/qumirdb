@@ -1,0 +1,2 @@
+project (col0) (rows≈4 cost≈48)
+└─ source date_values AS date_values (rows≈4 cost≈16)

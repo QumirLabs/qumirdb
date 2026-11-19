@@ -8,6 +8,16 @@
   "cases": {
     "output_types.sql": {"order": "ordered"},
     "date_difference.sql": {"order": "ordered"},
+    "error_times_integer.sql": {"expect_error": true},
+    "error_plus_double.sql": {"expect_error": true},
+    "integer_day_operands.sql": {"order": "ordered"},
+    "integer_day_operand_group.sql": {"order": "ordered"},
+    "error_window_avg.sql": {"expect_error": true},
+    "error_coalesce_integer.sql": {"expect_error": true},
+    "error_cast_bigint.sql": {"expect_error": true},
+    "error_sum.sql": {"expect_error": true},
+    "error_avg.sql": {"expect_error": true},
+    "error_union_integer.sql": {"expect_error": true},
     "window_max_date.sql": {"order": "ordered"}
   }
 }

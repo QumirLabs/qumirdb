@@ -1,0 +1,5 @@
+project (x)
+└─ sort [__sort_0 asc]
+   └─ project (x, __sort_0) (rows≈4 cost≈128)
+      └─ aggregate keys=[date_values.d] aggs=[min_0=min] (rows≈4 cost≈80)
+         └─ source date_values AS date_values (rows≈4 cost≈32)

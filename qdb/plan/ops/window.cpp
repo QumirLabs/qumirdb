@@ -33,6 +33,9 @@ TTypePtr WindowResultType(const std::string& func, const TTypePtr& argType) {
         return nullable ? std::make_shared<TNullable>(std::move(type)) : type;
     };
     if (func == "avg") {
+        if (IsDateType(UnwrapNullableType(argType))) {
+            throw NQumir::TError("function avg(DATE) does not exist");
+        }
         return ComputeWindowAvgResultType(argType);
     }
     if (func == "sum") {

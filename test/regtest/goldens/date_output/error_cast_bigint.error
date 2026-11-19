@@ -1,0 +1,2 @@
+Error: cannot cast type DATE to BIGINT @ Line: 1, Byte: 8, Column: 8
+

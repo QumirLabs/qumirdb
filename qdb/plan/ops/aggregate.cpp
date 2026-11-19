@@ -5,6 +5,7 @@
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 
+#include <qumir/error.h>
 #include <qumir/parser/ast.h>
 #include <qumir/parser/core/lexer.h>
 #include <qumir/parser/core/parser.h>
@@ -30,6 +31,9 @@ TTypePtr AggregateResultType(const std::string& func, const TTypePtr& argType) {
         if (IsDateType(inner) && (func == "min" || func == "max")) {
             TTypePtr dateType = std::make_shared<TDateType>(TIntegerType::I64);
             return nullable ? std::make_shared<TNullable>(std::move(dateType)) : dateType;
+        }
+        if (IsDateType(inner) && (func == "sum" || func == "avg")) {
+            throw NQumir::TError("function " + func + "(DATE) does not exist");
         }
         if (inner && inner->TypeName() == TIntegerType::TypeId) {
             // i64 state for every integer aggregate, incl. min/max over narrow ints.
