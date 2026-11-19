@@ -7,7 +7,9 @@
 #include <cstdint>
 #include <iosfwd>
 #include <memory>
+#include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -27,6 +29,23 @@ struct TRowGroupColumnRange {
     bool MayBeNaN = false;
 };
 
+// A source predicate lowered to oz-lang over the intervals of the columns it
+// reads: the form a scan node carries to the process that runs the scan.
+struct TRowGroupPredicateProgram {
+    // (block (return <truth>)) over the interval parameters of Columns.
+    std::string Body;
+    // Schema columns the body reads, ascending.
+    std::vector<int32_t> Columns;
+
+    bool operator==(const TRowGroupPredicateProgram&) const = default;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.Body);
+        v(self.Columns);
+    }
+};
+
 // Compiles a typed source predicate into a Qumir VM function over interval
 // arguments. Unsupported AST fragments become an unknown truth value. The
 // compiled function is reusable for every row group of the source.
@@ -36,6 +55,18 @@ public:
         const NQumir::NAst::TExprPtr& predicate,
         const TSchema& schema,
         std::string_view sourceAlias,
+        std::ostream* diagnostics = nullptr);
+
+    // nullopt when the predicate bounds no column, so no rows can be ruled out
+    // by their values.
+    static std::optional<TRowGroupPredicateProgram> Program(
+        const NQumir::NAst::TExprPtr& predicate,
+        const TSchema& schema,
+        std::string_view sourceAlias);
+
+    static std::unique_ptr<TRowGroupPredicateEvaluator> Compile(
+        const TRowGroupPredicateProgram& program,
+        const TSchema& schema,
         std::ostream* diagnostics = nullptr);
 
     ~TRowGroupPredicateEvaluator();

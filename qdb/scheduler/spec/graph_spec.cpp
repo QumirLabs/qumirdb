@@ -125,7 +125,8 @@ std::unique_ptr<ITask> MakeParquetScanTask(
         columns.emplace(node.Columns->begin(), node.Columns->end());
     }
     auto state = std::make_shared<NLowering::TSchedulerSourceState>();
-    state->OwnedSource = ResolveTable(context, node.Path).MakeSource(node.RowGroups, std::move(columns));
+    state->OwnedSource = ResolveTable(context, node.Path).MakeSource(
+        node.RowGroups, std::move(columns), node.BlockPredicate);
     state->Source = state->OwnedSource.get();
     return std::make_unique<TSourceTask>(NLowering::MakeSourceCode(), std::move(state), output);
 }

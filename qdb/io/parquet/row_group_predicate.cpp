@@ -7,6 +7,7 @@
 #include <qdb/plan/types/nullable.h>
 #include <qdb/utils/module_path.h>
 
+#include <qumir/parser/core/parser.h>
 #include <qumir/parser/core/printer.h>
 
 #include <algorithm>
@@ -15,6 +16,8 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <set>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -242,40 +245,9 @@ public:
         return UnknownTruth();
     }
 
-    std::vector<TParam> Params() const {
-        std::vector<TParam> out;
-        auto param = [&](std::string name, TTypePtr type) {
-            out.push_back(std::make_shared<TVarStmt>(
-                NQumir::TLocation{}, std::move(name), std::move(type)));
-        };
-        for (size_t column = 0; column < Schema_.Columns.size(); ++column) {
-            auto info = NumberInfo(Schema_.Columns[column].Type);
-            if (!info) {
-                continue;
-            }
-            auto word = std::make_shared<TIntegerType>(TIntegerType::I64);
-            if (info.Kind == ENumberKind::Decimal) {
-                for (const char* bound : {"lo_lo", "lo_hi", "hi_lo", "hi_hi"}) {
-                    param(ParamName(column, bound), word);
-                }
-            } else {
-                auto type = PrimitiveType(info.Kind);
-                param(ParamName(column, "lo"), type);
-                param(ParamName(column, "hi"), type);
-            }
-            param(ParamName(column, "flags"), word);
-        }
-        return out;
-    }
-
-    std::vector<TParamColumn> ParamColumns() const {
-        std::vector<TParamColumn> out;
-        for (size_t column = 0; column < Schema_.Columns.size(); ++column) {
-            if (auto info = NumberInfo(Schema_.Columns[column].Type)) {
-                out.push_back({column, info.Kind == ENumberKind::Decimal});
-            }
-        }
-        return out;
+    // The columns the lowered predicate reads, ascending.
+    std::vector<int32_t> Columns() const {
+        return {UsedColumns_.begin(), UsedColumns_.end()};
     }
 
 private:
@@ -464,6 +436,7 @@ private:
         if (!info) {
             return {};
         }
+        UsedColumns_.insert(static_cast<int32_t>(*column));
         auto value = TLoweredNumber{
             .Expr = Call("rg_range", {
                 Bound(*column, "lo", info),
@@ -682,7 +655,66 @@ private:
     std::string SourceAlias_;
     std::unordered_map<std::string, size_t> BareColumns_;
     std::unordered_map<std::string, size_t> QualifiedColumns_;
+    std::set<int32_t> UsedColumns_;
 };
+
+// The VM parameters of `columns`: low and high bounds, then the flags of each.
+std::vector<TParam> IntervalParams(const TSchema& schema, std::span<const int32_t> columns) {
+    std::vector<TParam> out;
+    auto param = [&](std::string name, TTypePtr type) {
+        out.push_back(std::make_shared<TVarStmt>(
+            NQumir::TLocation{}, std::move(name), std::move(type)));
+    };
+    for (int32_t column : columns) {
+        const auto info = NumberInfo(schema.Columns[static_cast<size_t>(column)].Type);
+        auto word = std::make_shared<TIntegerType>(TIntegerType::I64);
+        if (info.Kind == ENumberKind::Decimal) {
+            for (const char* bound : {"lo_lo", "lo_hi", "hi_lo", "hi_hi"}) {
+                param(ParamName(static_cast<size_t>(column), bound), word);
+            }
+        } else {
+            auto type = PrimitiveType(info.Kind);
+            param(ParamName(static_cast<size_t>(column), "lo"), type);
+            param(ParamName(static_cast<size_t>(column), "hi"), type);
+        }
+        param(ParamName(static_cast<size_t>(column), "flags"), word);
+    }
+    return out;
+}
+
+struct TLoweredPredicate {
+    std::shared_ptr<TBlockExpr> Body;
+    std::vector<int32_t> Columns;
+};
+
+TLoweredPredicate LowerPredicate(
+    const TExprPtr& predicate,
+    const TSchema& schema,
+    std::string_view sourceAlias)
+{
+    TPredicateLowerer lowerer(schema, sourceAlias);
+    auto typedPredicate = CloneExpr(predicate);
+    std::vector<std::pair<std::string, TTypePtr>> fields;
+    fields.reserve(schema.Columns.size() * (sourceAlias.empty() ? 1 : 2));
+    for (const auto& column : schema.Columns) {
+        fields.emplace_back(std::string(column.Name), column.Type);
+        if (!sourceAlias.empty()) {
+            fields.emplace_back(
+                std::string(sourceAlias) + "." + std::string(column.Name),
+                column.Type);
+        }
+    }
+    NKernel::AnnotateExprTreeTypes(
+        typedPredicate, TStructType(std::move(fields)));
+    auto truth = lowerer.LowerTruth(typedPredicate);
+    NQumir::TLocation loc{};
+    return {
+        .Body = std::make_shared<TBlockExpr>(
+            loc,
+            std::vector<TExprPtr>{std::make_shared<TReturnExpr>(loc, std::move(truth))}),
+        .Columns = lowerer.Columns(),
+    };
+}
 
 } // namespace
 
@@ -697,6 +729,52 @@ TRowGroupPredicateEvaluator::TRowGroupPredicateEvaluator(std::unique_ptr<TImpl> 
 
 TRowGroupPredicateEvaluator::~TRowGroupPredicateEvaluator() = default;
 
+namespace {
+
+struct TCompiledPredicate {
+    std::unique_ptr<TVmFunction> Function;
+    std::vector<TParamColumn> ParamColumns;
+};
+
+TCompiledPredicate CompileLowered(
+    TLoweredPredicate lowered,
+    const TSchema& schema,
+    std::ostream* diagnostics)
+{
+    for (int32_t column : lowered.Columns) {
+        if (column < 0 || static_cast<size_t>(column) >= schema.Columns.size() ||
+            !NumberInfo(schema.Columns[static_cast<size_t>(column)].Type))
+        {
+            throw std::runtime_error("predicate column outside the schema");
+        }
+    }
+    if (diagnostics) {
+        *diagnostics << "row-group predicate: compiled body "
+                     << NQumir::NAst::NCore::PrintAst(lowered.Body) << '\n';
+    }
+    auto compiled = TVmFunction::Compile(RowGroupVmContext(), {
+        .NamePrefix = EvalFn,
+        .Params = IntervalParams(schema, lowered.Columns),
+        .Body = std::move(lowered.Body),
+        .ReturnType = std::make_shared<TIntegerType>(TIntegerType::I64),
+        .Imports = {"row_group_interval"},
+    });
+    if (!compiled) {
+        throw std::runtime_error(compiled.error());
+    }
+    TCompiledPredicate result{.Function = std::move(*compiled)};
+    for (int32_t column : lowered.Columns) {
+        const auto info = NumberInfo(schema.Columns[static_cast<size_t>(column)].Type);
+        result.ParamColumns.push_back({
+            .Column = static_cast<size_t>(column),
+            .Wide = info.Kind == ENumberKind::Decimal,
+        });
+    }
+    return result;
+}
+
+} // namespace
+
 std::unique_ptr<TRowGroupPredicateEvaluator> TRowGroupPredicateEvaluator::Compile(
     const TExprPtr& predicate,
     const TSchema& schema,
@@ -704,54 +782,58 @@ std::unique_ptr<TRowGroupPredicateEvaluator> TRowGroupPredicateEvaluator::Compil
     std::ostream* diagnostics)
 {
     try {
-        auto diagnostic = [&](const std::string& message) {
-            if (diagnostics) {
-                *diagnostics << "row-group predicate: " << message << '\n';
-            }
-        };
-        TPredicateLowerer lowerer(schema, sourceAlias);
-        auto typedPredicate = CloneExpr(predicate);
-        std::vector<std::pair<std::string, TTypePtr>> fields;
-        fields.reserve(schema.Columns.size() * (sourceAlias.empty() ? 1 : 2));
-        for (const auto& column : schema.Columns) {
-            fields.emplace_back(std::string(column.Name), column.Type);
-            if (!sourceAlias.empty()) {
-                fields.emplace_back(
-                    std::string(sourceAlias) + "." + std::string(column.Name),
-                    column.Type);
-            }
-        }
-        NKernel::AnnotateExprTreeTypes(
-            typedPredicate, TStructType(std::move(fields)));
-        auto truth = lowerer.LowerTruth(typedPredicate);
-        auto params = lowerer.Params();
-
-        NQumir::TLocation loc{};
-        auto body = std::make_shared<TBlockExpr>(
-            loc,
-            std::vector<TExprPtr>{std::make_shared<TReturnExpr>(loc, std::move(truth))});
+        auto compiled = CompileLowered(LowerPredicate(predicate, schema, sourceAlias), schema, diagnostics);
+        return std::unique_ptr<TRowGroupPredicateEvaluator>(new TRowGroupPredicateEvaluator(
+            std::make_unique<TImpl>(std::move(compiled.Function), std::move(compiled.ParamColumns))));
+    } catch (const std::exception& error) {
         if (diagnostics) {
-            diagnostic("compiled body " + NQumir::NAst::NCore::PrintAst(body));
+            *diagnostics << "row-group predicate: " << error.what() << '\n';
         }
+        return nullptr;
+    } catch (...) {
+        return nullptr;
+    }
+}
 
-        auto compiled = TVmFunction::Compile(RowGroupVmContext(), {
-            .NamePrefix = EvalFn,
-            .Params = std::move(params),
-            .Body = std::move(body),
-            .ReturnType =
-                std::make_shared<TIntegerType>(TIntegerType::I64),
-            .Imports = {"row_group_interval"},
-        });
-        if (!compiled) {
-            diagnostic(compiled.error());
-            return nullptr;
+std::optional<TRowGroupPredicateProgram> TRowGroupPredicateEvaluator::Program(
+    const TExprPtr& predicate,
+    const TSchema& schema,
+    std::string_view sourceAlias)
+{
+    try {
+        auto lowered = LowerPredicate(predicate, schema, sourceAlias);
+        if (lowered.Columns.empty()) {
+            return std::nullopt;
         }
+        return TRowGroupPredicateProgram{
+            .Body = NQumir::NAst::NCore::PrintAst(lowered.Body),
+            .Columns = std::move(lowered.Columns),
+        };
+    } catch (...) {
+        return std::nullopt;
+    }
+}
 
-        auto impl = std::make_unique<TImpl>();
-        impl->Function = std::move(*compiled);
-        impl->ParamColumns = lowerer.ParamColumns();
-        return std::unique_ptr<TRowGroupPredicateEvaluator>(
-            new TRowGroupPredicateEvaluator(std::move(impl)));
+std::unique_ptr<TRowGroupPredicateEvaluator> TRowGroupPredicateEvaluator::Compile(
+    const TRowGroupPredicateProgram& program,
+    const TSchema& schema,
+    std::ostream* diagnostics)
+{
+    try {
+        std::istringstream input(program.Body);
+        NQumir::NAst::NCore::TTokenStream tokens(input);
+        NQumir::NAst::NCore::TParser parser;
+        auto parsed = parser.Parse(tokens);
+        if (!parsed) {
+            throw std::runtime_error(parsed.error().ToString());
+        }
+        auto body = TMaybeNode<TBlockExpr>(*parsed);
+        if (!body) {
+            throw std::runtime_error("predicate program is not a block");
+        }
+        auto compiled = CompileLowered({.Body = body.Cast(), .Columns = program.Columns}, schema, diagnostics);
+        return std::unique_ptr<TRowGroupPredicateEvaluator>(new TRowGroupPredicateEvaluator(
+            std::make_unique<TImpl>(std::move(compiled.Function), std::move(compiled.ParamColumns))));
     } catch (const std::exception& error) {
         if (diagnostics) {
             *diagnostics << "row-group predicate: " << error.what() << '\n';

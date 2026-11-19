@@ -261,7 +261,8 @@ public:
 
     std::unique_ptr<NQdb::ISource> MakeSource(
         std::optional<std::vector<int>>,
-        std::optional<std::unordered_set<std::string>> names) const override
+        std::optional<std::unordered_set<std::string>> names,
+        std::optional<NQdb::TRowGroupPredicateProgram>) const override
     {
         std::vector<NQdb::TColumnSchema> columns;
         for (const auto& column : AllColumns_) {

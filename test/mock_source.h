@@ -113,7 +113,8 @@ struct TMockSource : ISource, ITable {
     // Columns are ignored: the mock always emits its whole schema.
     std::unique_ptr<ISource> MakeSource(
         std::optional<std::vector<int>>,
-        std::optional<std::unordered_set<std::string>>) const override
+        std::optional<std::unordered_set<std::string>>,
+        std::optional<TRowGroupPredicateProgram>) const override
     {
         return std::make_unique<TMockReader>(const_cast<TMockSource&>(*this));
     }

@@ -995,6 +995,11 @@ private:
         const auto label = src.GetAlias().empty() ? "source" : "source " + src.GetAlias();
         TaskContext_.Tables.try_emplace(table->Path(), table);
         const auto columns = src.RestrictedColumns();
+        std::optional<TRowGroupPredicateProgram> blockPredicate;
+        if (src.RowGroupPredicate()) {
+            blockPredicate = TRowGroupPredicateEvaluator::Program(
+                src.RowGroupPredicate(), table->Schema(), src.GetAlias());
+        }
 
         const size_t lanes = std::max<size_t>(
             splitPlan ? splitPlan->size() : 0, 1);
@@ -1021,6 +1026,7 @@ private:
                     .Path = table->Path(),
                     .Columns = columns,
                     .RowGroups = std::move(rowGroups),
+                    .BlockPredicate = blockPredicate,
                 },
             });
             result.Producers.push_back(&node);

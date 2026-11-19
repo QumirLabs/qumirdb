@@ -127,6 +127,8 @@ struct TParquetScanNode {
     std::optional<std::vector<std::string>> Columns;
     // nullopt reads the whole file; an empty list is a proven-empty scan.
     std::optional<std::vector<int32_t>> RowGroups;
+    // The source predicate, for the scan to skip blocks of rows by their values.
+    std::optional<TRowGroupPredicateProgram> BlockPredicate;
 
     void Fields(this auto& self, auto& v)
     {
@@ -134,6 +136,7 @@ struct TParquetScanNode {
         v(self.Path);
         v(self.Columns);
         v(self.RowGroups);
+        v(self.BlockPredicate);
     }
 };
 

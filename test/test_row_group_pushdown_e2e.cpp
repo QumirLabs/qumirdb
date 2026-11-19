@@ -152,6 +152,48 @@ void WriteLargeRealFixture(const std::string& path) {
     CheckArrow(output->Close());
 }
 
+// One row group of five 2^16-row blocks and a tail, two windows of a scan
+// batch: k counts up in block 0 and the tail, is NULL in blocks 1 and 4, and
+// starts at 200000 and 300000 in blocks 2 and 3.
+constexpr int64_t FixtureBlockRows = int64_t{1} << 16;
+
+void WriteBlockFixture(const std::string& path) {
+    constexpr int64_t rows = 5 * FixtureBlockRows + 1000;
+    arrow::Int64Builder id;
+    arrow::Int64Builder k;
+    for (int64_t row = 0; row < rows; ++row) {
+        CheckArrow(id.Append(row));
+        const int64_t block = row / FixtureBlockRows;
+        const int64_t offset = row % FixtureBlockRows;
+        if (block == 1 || block == 4) {
+            CheckArrow(k.AppendNull());
+        } else if (block == 2 || block == 3) {
+            CheckArrow(k.Append(100000 * block + offset));
+        } else {
+            CheckArrow(k.Append(row));
+        }
+    }
+    auto schema = arrow::schema({
+        arrow::field("id", arrow::int64(), false),
+        arrow::field("k", arrow::int64(), true),
+    });
+    auto batch = arrow::RecordBatch::Make(schema, rows, {
+        id.Finish().ValueOrDie(), k.Finish().ValueOrDie()});
+    auto output = arrow::io::FileOutputStream::Open(path).ValueOrDie();
+    auto table = arrow::Table::FromRecordBatches({batch}).ValueOrDie();
+    CheckArrow(parquet::arrow::WriteTable(
+        *table, arrow::default_memory_pool(), output, /*chunk_size*/ rows));
+    CheckArrow(output->Close());
+}
+
+std::vector<int64_t> IdRange(int64_t begin, int64_t end) {
+    std::vector<int64_t> ids;
+    for (int64_t id = begin; id < end; ++id) {
+        ids.push_back(id);
+    }
+    return ids;
+}
+
 std::shared_ptr<TSourceOperator> FindSource(const TOperatorPtr& node) {
     if (auto source = TMaybeOp<TSourceOperator>(node)) {
         return source.Cast();
@@ -405,6 +447,47 @@ TEST(RowGroupPushdownE2E, AutoScanTasksUseSurvivingRowGroups) {
         std::string::npos);
     EXPECT_NE(full.Diagnostics.find("scan_tasks=auto max_tasks=3 tasks=3"),
         std::string::npos);
+}
+
+// The row group survives pruning; the scan skips the blocks whose bounds rule
+// the predicate out, across a NULL block and the end of a scan batch.
+TEST(RowGroupPushdownE2E, BlockSelectionMatchesFullScan) {
+    TTempDir tempDir;
+    const std::string path = (tempDir.Path() / "blocks.parquet").string();
+    WriteBlockFixture(path);
+    auto expectSame = [&](std::string_view sql, const std::vector<int64_t>& expected) {
+        const auto selected = RunQuery(path, sql, true);
+        EXPECT_EQ(selected.Ids, RunQuery(path, sql, false).Ids) << sql;
+        EXPECT_EQ(selected.Ids, expected) << sql;
+        EXPECT_NE(selected.Diagnostics.find("rg=0 may_be_true=1"), std::string::npos) << sql;
+    };
+    constexpr std::string_view across = "SELECT id FROM t WHERE k >= 65530 AND k < 200010";
+    auto acrossIds = IdRange(65530, FixtureBlockRows);
+    for (int64_t id : IdRange(2 * FixtureBlockRows, 2 * FixtureBlockRows + 10)) {
+        acrossIds.push_back(id);
+    }
+    expectSame(across, acrossIds);
+    auto nullIds = IdRange(FixtureBlockRows, 2 * FixtureBlockRows);
+    for (int64_t id : IdRange(4 * FixtureBlockRows, 5 * FixtureBlockRows)) {
+        nullIds.push_back(id);
+    }
+    expectSame("SELECT id FROM t WHERE k IS NULL", nullIds);
+    expectSame("SELECT id FROM t WHERE k = 100000", {});
+
+    // The scan itself reads blocks 0 and 2 only.
+    TParquetFile file(path);
+    auto plan = BuildSqlPlan(across, file);
+    auto program = TRowGroupPredicateEvaluator::Program(
+        FindSource(plan)->RowGroupPredicate(), file.Schema(), "t");
+    ASSERT_TRUE(program);
+    auto source = file.MakeSource(std::nullopt, std::unordered_set<std::string>{"id", "k"}, program);
+    int64_t rows = 0;
+    TRowSet rowSet{};
+    while (source->Next(rowSet)) {
+        rows += rowSet.RowCount;
+        Release(&rowSet);
+    }
+    EXPECT_EQ(rows, 2 * FixtureBlockRows);
 }
 
 TEST(RowGroupPushdownE2E, AutoJoinRunsWithUnequalSourceWidths) {

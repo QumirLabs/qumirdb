@@ -17,12 +17,13 @@
 #include <unordered_set>
 #include <vector>
 
-namespace arrow { class RecordBatch; class RecordBatchReader; class Schema; }
+namespace arrow { class Array; class RecordBatch; class RecordBatchReader; class Schema; }
 
 namespace NQdb {
 
 class TDecimalColumnScan;
 struct TParquetFileData;
+struct TSharedRowGroupPredicate;
 
 // Allocator behind Arrow's parquet reads. Auto prefers jemalloc and falls back
 // to Arrow's default pool; the others fall back to it when not compiled in.
@@ -55,7 +56,8 @@ public:
     // nullopt columns read every file column.
     std::unique_ptr<ISource> MakeSource(
         std::optional<std::vector<int>> rowGroups = std::nullopt,
-        std::optional<std::unordered_set<std::string>> restrictedColumns = std::nullopt) const override;
+        std::optional<std::unordered_set<std::string>> restrictedColumns = std::nullopt,
+        std::optional<TRowGroupPredicateProgram> blockPredicate = std::nullopt) const override;
 
     const TSchema& Schema() const override;
     const TStatsPtr Stats() const override;
@@ -100,7 +102,8 @@ private:
     TParquetSource(
         std::shared_ptr<TParquetFileData> file,
         std::vector<TPart> parts,
-        std::optional<std::unordered_set<std::string>> restrictedColumns);
+        std::optional<std::unordered_set<std::string>> restrictedColumns,
+        std::optional<TRowGroupPredicateProgram> blockPredicate);
 
     void SelectColumns();
     void RefreshSchema();
@@ -108,6 +111,10 @@ private:
     std::vector<int> EffectiveFileColumnIndexes() const;
 
     void OpenPart(const TPart& part);
+    // Block selection reads the predicate columns of a window of the part and
+    // gives the other columns the ranges of its blocks the predicate may keep.
+    bool StartBlockSelection(const TPart& part);
+    void SelectNextBlocks();
     void ClosePart();
     // The next rows of the open part, all from one of its ranges.
     std::optional<TRowRangeBatch> ReadPart();
@@ -126,14 +133,28 @@ private:
         std::unique_ptr<TDecimalColumnScan> Scan;
     };
     std::vector<TDecimalScan> DecimalScans_;
+    // Block selection: the positions in ArrowColumns_ of the predicate columns
+    // with value bounds, and the other arrow columns.
+    std::optional<TRowGroupPredicateProgram> BlockProgram_;
+    std::shared_ptr<TSharedRowGroupPredicate> BlockPredicate_;
+    std::vector<size_t> BlockColumns_;
+    std::vector<int> RestColumns_;
     std::shared_ptr<arrow::Schema> BatchSchema_;
     std::vector<std::string> Names_;
     std::vector<TColumnSchema> Columns_;
     TSchema Schema_;
 
-    // The open part. A part of whole row groups, or one a range reader cannot
-    // read, goes through Arrow's reader and is sliced to its ranges.
+    // The open part and the rows and columns its reader reads. A whole row
+    // group, or ranges a range reader cannot read, go through Arrow's reader
+    // sliced to the ranges. Under block selection BlockReader_ reads the
+    // predicate columns: BlockArrays_ holds a window of them from row
+    // BlockArraysBegin_, and PartRanges_ grows window by window.
     const TPart* Part_ = nullptr;
+    std::vector<TRowRange> PartRanges_;
+    std::vector<int> PartColumns_;
+    std::unique_ptr<TParquetRangeReader> BlockReader_;
+    std::vector<std::shared_ptr<arrow::Array>> BlockArrays_;
+    int64_t BlockArraysBegin_ = 0;
     std::unique_ptr<TParquetRangeReader> RangeReader_;
     std::shared_ptr<arrow::RecordBatchReader> ArrowReader_;
     std::shared_ptr<arrow::RecordBatch> ArrowBatch_;

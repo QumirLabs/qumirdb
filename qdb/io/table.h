@@ -6,6 +6,7 @@
 #include <string>
 
 #include <qumir/parser/ast.h>
+#include <qdb/io/parquet/row_group_predicate.h>
 #include <qdb/scheduler/lowering/scan_split.h>
 #include <qdb/plan/ops/stats.h>
 
@@ -17,9 +18,12 @@ namespace NQdb {
 struct ITable {
     virtual ~ITable() = default;
 
+    // The source may skip rows whose column ranges rule out the block
+    // predicate, a program over Schema(); a filter above still checks the rest.
     virtual std::unique_ptr<ISource> MakeSource(
         std::optional<std::vector<int>> rowGroups,
-        std::optional<std::unordered_set<std::string>> restrictedColumns) const = 0;
+        std::optional<std::unordered_set<std::string>> restrictedColumns,
+        std::optional<TRowGroupPredicateProgram> blockPredicate) const = 0;
 
     virtual const TStatsPtr Stats() const = 0;
     virtual const TSchema& Schema() const = 0;

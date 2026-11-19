@@ -579,15 +579,21 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> ReadWholeRowGroups(
         std::move(outputArrays));
 }
 
-// The data pages of one column chunk against sorted, disjoint row ranges. A
-// page outside every range is dropped before decompression. The next kept page
-// is fetched before the column reader asks for it, so the caller knows where
-// it starts and skips exactly to a range.
+// Sorted, disjoint row ranges. Rows from Decided on may still get ranges.
+struct TRangeSet {
+    std::vector<TRowRange> Ranges;
+    int64_t Decided = std::numeric_limits<int64_t>::max();
+};
+
+// The data pages of one column chunk against a range set. A page that holds no
+// row of a range, nor an undecided row, is dropped before decompression. The
+// next kept page is fetched before the column reader asks for it, so the
+// caller knows where it starts and skips exactly to a range.
 class TRangePageReader final : public parquet::PageReader {
 public:
     TRangePageReader(
         std::unique_ptr<parquet::PageReader> pages,
-        std::span<const TRowRange> ranges,
+        const TRangeSet& ranges,
         arrow::MemoryPool* memoryPool)
         : Pages_(std::move(pages))
         , Ranges_(ranges)
@@ -649,10 +655,12 @@ private:
             : static_cast<int64_t>(stats.num_values);
         const TRowRange page{.Begin = SourceRows_, .End = SourceRows_ + rows};
         SourceRows_ = page.End;
-        while (NextRange_ < Ranges_.size() && Ranges_[NextRange_].End <= page.Begin) {
+        const auto& ranges = Ranges_.Ranges;
+        while (NextRange_ < ranges.size() && ranges[NextRange_].End <= page.Begin) {
             ++NextRange_;
         }
-        const bool keep = NextRange_ < Ranges_.size() && Ranges_[NextRange_].Begin < page.End;
+        const bool keep = page.End > Ranges_.Decided ||
+            (NextRange_ < ranges.size() && ranges[NextRange_].Begin < page.End);
         if (keep) {
             Kept_ = page;
         }
@@ -660,7 +668,7 @@ private:
     }
 
     std::unique_ptr<parquet::PageReader> Pages_;
-    std::span<const TRowRange> Ranges_;
+    const TRangeSet& Ranges_;
     arrow::MemoryPool* MemoryPool_;
     size_t NextRange_ = 0;
     int64_t SourceRows_ = 0;
@@ -687,8 +695,9 @@ arrow::Status SkipRows(TRangeColumn& column, int64_t rows) {
     return arrow::Status::OK();
 }
 
-// Moves the reader to `row`, at or after its position; every page holding a
-// range row is kept, so the page of `row` is the next kept one at the latest.
+// Moves the reader to `row`, a decided range row at or after its position.
+// Every page holding a range row is kept and no page before it reaches past the
+// decided rows, so the page of `row` is the next kept one at the latest.
 arrow::Status Seek(TRangeColumn& column, int64_t row) {
     while (row >= column.PageEnd) {
         ARROW_RETURN_NOT_OK(SkipRows(column, column.PageEnd - column.Position));
@@ -912,7 +921,7 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> TParquetRowReader::ReadRows(s
 struct TParquetRangeReader::TImpl {
     arrow::MemoryPool* MemoryPool = nullptr;
     // The page readers of Columns view these ranges.
-    std::vector<TRowRange> Ranges;
+    TRangeSet Ranges;
     std::shared_ptr<parquet::RowGroupReader> RowGroup;
     std::vector<TRangeColumn> Columns;
     size_t NextRange = 0;
@@ -931,7 +940,8 @@ std::unique_ptr<TParquetRangeReader> TParquetRangeReader::Make(
     int rowGroup,
     std::span<const int> columns,
     std::vector<TRowRange> ranges,
-    arrow::MemoryPool* memoryPool)
+    arrow::MemoryPool* memoryPool,
+    int64_t decided)
 {
     const auto metadata = file.metadata();
     if (manifest.schema_fields.size() != static_cast<size_t>(metadata->num_columns())) {
@@ -939,7 +949,7 @@ std::unique_ptr<TParquetRangeReader> TParquetRangeReader::Make(
     }
     auto impl = std::make_unique<TImpl>();
     impl->MemoryPool = MemoryPoolOrDefault(memoryPool);
-    impl->Ranges = std::move(ranges);
+    impl->Ranges = {.Ranges = std::move(ranges), .Decided = decided};
     impl->RowGroup = file.RowGroup(rowGroup);
     impl->Columns.reserve(columns.size());
     for (int field : columns) {
@@ -972,13 +982,14 @@ std::unique_ptr<TParquetRangeReader> TParquetRangeReader::Make(
 
 arrow::Result<std::optional<TRowRangeBatch>> TParquetRangeReader::Next(int64_t rows) {
     auto& impl = *Impl_;
-    while (impl.NextRange < impl.Ranges.size() && impl.Position >= impl.Ranges[impl.NextRange].End) {
+    const auto& ranges = impl.Ranges.Ranges;
+    while (impl.NextRange < ranges.size() && impl.Position >= ranges[impl.NextRange].End) {
         ++impl.NextRange;
     }
-    if (impl.NextRange == impl.Ranges.size() || rows <= 0) {
+    if (impl.NextRange == ranges.size() || rows <= 0) {
         return std::nullopt;
     }
-    const auto& range = impl.Ranges[impl.NextRange];
+    const auto& range = ranges[impl.NextRange];
     impl.Position = std::max(impl.Position, range.Begin);
     TRowRangeBatch batch{
         .FirstRow = impl.Position,
@@ -997,6 +1008,12 @@ arrow::Result<std::optional<TRowRangeBatch>> TParquetRangeReader::Next(int64_t r
     }
     impl.Position += batch.RowCount;
     return batch;
+}
+
+void TParquetRangeReader::Extend(std::span<const TRowRange> ranges, int64_t decided) {
+    auto& set = Impl_->Ranges;
+    set.Ranges.insert(set.Ranges.end(), ranges.begin(), ranges.end());
+    set.Decided = decided;
 }
 
 } // namespace NQdb

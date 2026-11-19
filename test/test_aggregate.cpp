@@ -1833,7 +1833,8 @@ TEST(AggregateE2E, PlannerUsesPhysicalPrunedSchemaForKeyDescriptor) {
         // A pruned scan reads the physical column order.
         std::unique_ptr<ISource> MakeSource(
             std::optional<std::vector<int>>,
-            std::optional<std::unordered_set<std::string>> names) const override
+            std::optional<std::unordered_set<std::string>> names,
+            std::optional<TRowGroupPredicateProgram>) const override
         {
             if (names) {
                 RestrictedColumns_ = *names;

@@ -174,7 +174,8 @@ TEST(GraphSpec, ScanFilterProjectRecordsRoundTrip)
             .Out = {0, 2}, .Path = "/data/t.parquet",
             .Columns = std::vector<std::string>{"a", "b"}, .RowGroups = rowGroups}));
     }
-    spec.Nodes.push_back(Node("source", "u", TParquetScanNode{.Path = "/data/u.parquet"}));
+    const TRowGroupPredicateProgram blocks{.Body = "(block (return (call rg_truth_unknown)))", .Columns = {0, 2}};
+    spec.Nodes.push_back(Node("source", "u", TParquetScanNode{.Path = "/data/u.parquet", .BlockPredicate = blocks}));
     spec.Nodes.push_back(Node("filter", "", TFilterNode{.In = {0, 2}, .Out = {1, 2}, .Plan = {.Kernel = 2}}));
     spec.Nodes.push_back(Node("filter", "", TFilterNode{
         .Plan = {.Kernel = 3, .KeptInputColumns = std::vector<int32_t>{2, 0}}}));
@@ -205,6 +206,8 @@ TEST(GraphSpec, ScanFilterProjectRecordsRoundTrip)
     EXPECT_EQ(scan.Columns, (std::vector<std::string>{"a", "b"}));
     EXPECT_EQ(scan.Out.Lane, 2u);
     EXPECT_FALSE(std::get<TParquetScanNode>(back.Nodes[3].Body).Columns);
+    EXPECT_FALSE(scan.BlockPredicate);
+    EXPECT_EQ(std::get<TParquetScanNode>(back.Nodes[3].Body).BlockPredicate, blocks);
 
     EXPECT_EQ(std::get<TFilterNode>(back.Nodes[4].Body).Plan.Kernel, 2u);
     EXPECT_FALSE(std::get<TFilterNode>(back.Nodes[4].Body).Plan.KeptInputColumns);

@@ -14,6 +14,7 @@
 #include <arrow/api.h>
 #include <arrow/io/api.h>
 #include <arrow/memory_pool.h>
+#include <arrow/util/bitmap_ops.h>
 #include <arrow/util/key_value_metadata.h>
 #include <parquet/arrow/reader.h>
 #include <parquet/arrow/schema.h>
@@ -28,6 +29,9 @@
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <functional>
+#include <limits>
+#include <mutex>
 #include <numeric>
 #include <optional>
 #include <unordered_map>
@@ -261,6 +265,133 @@ void SetArrowMemoryPool(EArrowMemoryPool pool) {
     ConfiguredMemoryPool.store(pool);
 }
 
+namespace {
+
+// Rows per block of block selection: Data Blocks keep a small materialized
+// aggregate per block of at most 2^16 records (Lang et al., SIGMOD 2016).
+constexpr int64_t BlockRows = int64_t{1} << 16;
+
+bool HasBlockBounds(const arrow::DataType& type) {
+    switch (type.id()) {
+        case arrow::Type::INT8:
+        case arrow::Type::INT16:
+        case arrow::Type::INT32:
+        case arrow::Type::INT64:
+        case arrow::Type::DATE32:
+        case arrow::Type::DATE64:
+        case arrow::Type::UINT8:
+        case arrow::Type::UINT16:
+        case arrow::Type::UINT32:
+        case arrow::Type::UINT64:
+        case arrow::Type::FLOAT:
+        case arrow::Type::DOUBLE:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// The bounds of rows [offset, offset + length) of a numeric array, encoded as
+// LoadRowGroupRanges encodes the footer statistics of the column.
+template <typename TArray, typename TEncode>
+TRowGroupColumnRange ValueBounds(const TArray& array, int64_t offset, int64_t length, TEncode encode) {
+    using TValue = typename TArray::value_type;
+    constexpr TValue top = std::numeric_limits<TValue>::has_infinity
+        ? std::numeric_limits<TValue>::infinity()
+        : std::numeric_limits<TValue>::max();
+    TValue lo = top;
+    TValue hi = std::numeric_limits<TValue>::has_infinity ? -top : std::numeric_limits<TValue>::lowest();
+    bool nan = false;
+    const TValue* values = array.raw_values() + offset;
+    const int64_t nulls = array.null_count() == 0
+        ? 0
+        : length - arrow::internal::CountSetBits(array.null_bitmap_data(), array.offset() + offset, length);
+    // std::min and std::max keep the bound when the value is NaN.
+    if (nulls == 0) {
+        for (int64_t row = 0; row < length; ++row) {
+            nan |= values[row] != values[row];
+            lo = std::min(lo, values[row]);
+            hi = std::max(hi, values[row]);
+        }
+    } else {
+        for (int64_t row = 0; row < length; ++row) {
+            if (array.IsValid(offset + row)) {
+                nan |= values[row] != values[row];
+                lo = std::min(lo, values[row]);
+                hi = std::max(hi, values[row]);
+            }
+        }
+    }
+    TRowGroupColumnRange range{
+        .MayBeNull = nulls > 0,
+        .MayBeValue = nulls < length,
+        .MayBeNaN = nan,
+    };
+    if (lo <= hi) {
+        range.MinValue = encode(lo);
+        range.MaxValue = encode(hi);
+        range.HasBounds = true;
+    }
+    return range;
+}
+
+TRowGroupColumnRange BlockBounds(const arrow::Array& array, int64_t offset, int64_t length) {
+    auto bounds = [&]<typename TArrowType>(TArrowType, auto encode) {
+        return ValueBounds(static_cast<const arrow::NumericArray<TArrowType>&>(array), offset, length, encode);
+    };
+    auto signedBits = [](auto value) {
+        return std::bit_cast<uint64_t>(static_cast<int64_t>(value));
+    };
+    auto unsignedBits = [](auto value) {
+        return static_cast<uint64_t>(value);
+    };
+    auto doubleBits = [](auto value) {
+        return std::bit_cast<uint64_t>(static_cast<double>(value));
+    };
+    switch (array.type_id()) {
+        case arrow::Type::INT8:
+            return bounds(arrow::Int8Type{}, signedBits);
+        case arrow::Type::INT16:
+            return bounds(arrow::Int16Type{}, signedBits);
+        case arrow::Type::INT32:
+            return bounds(arrow::Int32Type{}, signedBits);
+        case arrow::Type::INT64:
+            return bounds(arrow::Int64Type{}, signedBits);
+        case arrow::Type::DATE32:
+            return bounds(arrow::Date32Type{}, signedBits);
+        case arrow::Type::DATE64:
+            return bounds(arrow::Date64Type{}, signedBits);
+        case arrow::Type::UINT8:
+            return bounds(arrow::UInt8Type{}, unsignedBits);
+        case arrow::Type::UINT16:
+            return bounds(arrow::UInt16Type{}, unsignedBits);
+        case arrow::Type::UINT32:
+            return bounds(arrow::UInt32Type{}, unsignedBits);
+        case arrow::Type::UINT64:
+            return bounds(arrow::UInt64Type{}, unsignedBits);
+        case arrow::Type::FLOAT:
+            return bounds(arrow::FloatType{}, doubleBits);
+        case arrow::Type::DOUBLE:
+            return bounds(arrow::DoubleType{}, doubleBits);
+        default:
+            return {};
+    }
+}
+
+} // namespace
+
+// A predicate evaluator shared by the scans of a file. Its VM function is not
+// reentrant, so a call holds the mutex.
+struct TSharedRowGroupPredicate {
+    std::mutex Mutex;
+    std::unique_ptr<TRowGroupPredicateEvaluator> Evaluator;
+
+    bool MayBeTrue(std::span<const TRowGroupColumnRange> columns) {
+        std::lock_guard lock(Mutex);
+        return Evaluator->MayBeTrue(columns);
+    }
+};
+
 struct TParquetFileData {
     explicit TParquetFileData(const std::string& path)
         : Path(path)
@@ -269,6 +400,11 @@ struct TParquetFileData {
     }
 
     void Open();
+    // The evaluator of a program, compiled by `compile` on first use; null if
+    // that fails.
+    std::shared_ptr<TSharedRowGroupPredicate> SharedPredicate(
+        const TRowGroupPredicateProgram& program,
+        const std::function<std::unique_ptr<TRowGroupPredicateEvaluator>()>& compile);
     void LoadColumnStats();
     void LoadStandardColumnStats(TStats& stats);
     void LoadRowGroupRanges();
@@ -287,6 +423,9 @@ struct TParquetFileData {
     std::vector<NScheduler::TScanRowGroup> RowGroups;
     std::vector<std::vector<TRowGroupColumnRange>> RowGroupRanges;
     TStatsPtr Stats;
+    // A compile costs milliseconds, more than a scan task of a pruned scan.
+    std::mutex PredicatesMutex;
+    std::unordered_map<std::string, std::shared_ptr<TSharedRowGroupPredicate>> Predicates;
 };
 
 namespace {
@@ -323,6 +462,30 @@ std::vector<int> FileColumnIndexes(
 }
 
 } // namespace
+
+std::shared_ptr<TSharedRowGroupPredicate> TParquetFileData::SharedPredicate(
+    const TRowGroupPredicateProgram& program,
+    const std::function<std::unique_ptr<TRowGroupPredicateEvaluator>()>& compile)
+{
+    // The body names its columns, so it is the whole key.
+    std::lock_guard lock(PredicatesMutex);
+    if (auto found = Predicates.find(program.Body); found != Predicates.end()) {
+        return found->second;
+    }
+    auto evaluator = compile();
+    if (!evaluator) {
+        return nullptr;
+    }
+    // A file shared across queries keeps a bounded set of predicates.
+    constexpr size_t maxPredicates = 64;
+    if (Predicates.size() >= maxPredicates) {
+        Predicates.clear();
+    }
+    auto shared = std::make_shared<TSharedRowGroupPredicate>();
+    shared->Evaluator = std::move(evaluator);
+    Predicates.emplace(program.Body, shared);
+    return shared;
+}
 
 void TParquetFileData::Open()
 {
@@ -638,7 +801,8 @@ TParquetFile::~TParquetFile() = default;
 
 std::unique_ptr<ISource> TParquetFile::MakeSource(
     std::optional<std::vector<int>> rowGroups,
-    std::optional<std::unordered_set<std::string>> restrictedColumns) const
+    std::optional<std::unordered_set<std::string>> restrictedColumns,
+    std::optional<TRowGroupPredicateProgram> blockPredicate) const
 {
     if (!rowGroups) {
         rowGroups.emplace(Data_->RowGroups.size());
@@ -652,17 +816,19 @@ std::unique_ptr<ISource> TParquetFile::MakeSource(
             parts.push_back({.RowGroup = rowGroup, .Ranges = {{.Begin = 0, .End = rows}}});
         }
     }
-    return std::unique_ptr<ISource>(
-        new TParquetSource(Data_, std::move(parts), std::move(restrictedColumns)));
+    return std::unique_ptr<ISource>(new TParquetSource(
+        Data_, std::move(parts), std::move(restrictedColumns), std::move(blockPredicate)));
 }
 
 TParquetSource::TParquetSource(
     std::shared_ptr<TParquetFileData> file,
     std::vector<TPart> parts,
-    std::optional<std::unordered_set<std::string>> restrictedColumns)
+    std::optional<std::unordered_set<std::string>> restrictedColumns,
+    std::optional<TRowGroupPredicateProgram> blockPredicate)
     : File_(std::move(file))
     , Parts_(std::move(parts))
     , RestrictedColumns_(std::move(restrictedColumns))
+    , BlockProgram_(std::move(blockPredicate))
 {
     SelectColumns();
 }
@@ -692,24 +858,45 @@ void TParquetSource::SelectColumns() {
                 *File_->FileReader->parquet_reader(), leaf, GetMemoryPool()),
         });
     }
+    BlockColumns_.clear();
+    RestColumns_.clear();
+    for (size_t position = 0; position < ArrowColumns_.size(); ++position) {
+        const int field = ArrowColumns_[position];
+        const bool bounded = BlockProgram_ &&
+            std::ranges::contains(BlockProgram_->Columns, field) &&
+            HasBlockBounds(*File_->FileSchema->field(field)->type());
+        if (bounded) {
+            BlockColumns_.push_back(position);
+        } else {
+            RestColumns_.push_back(field);
+        }
+    }
     RefreshSchema();
 }
 
 void TParquetSource::OpenPart(const TPart& part)
 {
     Part_ = &part;
+    PartRanges_ = part.Ranges;
+    PartColumns_ = ArrowColumns_;
+    int64_t decided = std::numeric_limits<int64_t>::max();
+    if (StartBlockSelection(part)) {
+        PartRanges_.clear();
+        PartColumns_ = RestColumns_;
+        decided = part.Ranges.front().Begin;
+    }
     const int64_t rows = File_->RowGroups[static_cast<size_t>(part.RowGroup)].RowCount;
-    const bool whole = part.Ranges.size() == 1 &&
-        part.Ranges.front() == TRowRange{.Begin = 0, .End = rows};
+    const bool whole = !BlockReader_ && PartRanges_.size() == 1 &&
+        PartRanges_.front() == TRowRange{.Begin = 0, .End = rows};
     if (!whole) {
         RangeReader_ = TParquetRangeReader::Make(
-            File_->FileReader->manifest(), *File_->PageFile, part.RowGroup, ArrowColumns_, part.Ranges,
-            GetMemoryPool());
+            File_->FileReader->manifest(), *File_->PageFile, part.RowGroup, PartColumns_, PartRanges_,
+            GetMemoryPool(), decided);
         if (RangeReader_) {
             return;
         }
     }
-    auto batchReaderResult = File_->FileReader->GetRecordBatchReader({part.RowGroup}, ArrowColumns_);
+    auto batchReaderResult = File_->FileReader->GetRecordBatchReader({part.RowGroup}, PartColumns_);
     if (!batchReaderResult.ok()) {
         throw std::runtime_error(batchReaderResult.status().ToString());
     }
@@ -721,9 +908,72 @@ void TParquetSource::OpenPart(const TPart& part)
     ArrowRange_ = 0;
 }
 
+bool TParquetSource::StartBlockSelection(const TPart& part)
+{
+    if (BlockProgram_) {
+        BlockPredicate_ = File_->SharedPredicate(*BlockProgram_, [&] {
+            return TRowGroupPredicateEvaluator::Compile(*BlockProgram_, File_->FullSchema);
+        });
+        BlockProgram_.reset();
+    }
+    if (!BlockPredicate_ || BlockColumns_.empty() || part.Ranges.size() != 1) {
+        return false;
+    }
+    std::vector<int> columns;
+    for (size_t position : BlockColumns_) {
+        columns.push_back(ArrowColumns_[position]);
+    }
+    BlockReader_ = TParquetRangeReader::Make(
+        File_->FileReader->manifest(), *File_->PageFile, part.RowGroup, columns, part.Ranges, GetMemoryPool());
+    return BlockReader_ != nullptr;
+}
+
+void TParquetSource::SelectNextBlocks()
+{
+    // A window of a batch keeps the scan as pipelined as without selection.
+    auto read = BlockReader_->Next(File_->FileReader->properties().batch_size());
+    if (!read.ok()) {
+        throw std::runtime_error(read.status().ToString());
+    }
+    if (!*read) {
+        BlockReader_.reset();
+        BlockArrays_.clear();
+        return;
+    }
+    auto& window = **read;
+    BlockArrays_ = std::move(window.Columns);
+    BlockArraysBegin_ = window.FirstRow;
+    const int64_t windowEnd = window.FirstRow + window.RowCount;
+
+    // Columns without block bounds keep the row group's.
+    auto bounds = File_->RowGroupRanges[static_cast<size_t>(Part_->RowGroup)];
+    std::vector<TRowRange> kept;
+    for (int64_t begin = window.FirstRow; begin < windowEnd; begin += BlockRows) {
+        const int64_t end = std::min(begin + BlockRows, windowEnd);
+        for (size_t block = 0; block < BlockColumns_.size(); ++block) {
+            bounds[static_cast<size_t>(ArrowColumns_[BlockColumns_[block]])] =
+                BlockBounds(*BlockArrays_[block], begin - window.FirstRow, end - begin);
+        }
+        if (!BlockPredicate_->MayBeTrue(bounds)) {
+            continue;
+        }
+        if (!kept.empty() && kept.back().End == begin) {
+            kept.back().End = end;
+        } else {
+            kept.push_back({.Begin = begin, .End = end});
+        }
+    }
+    PartRanges_.insert(PartRanges_.end(), kept.begin(), kept.end());
+    if (RangeReader_) {
+        RangeReader_->Extend(kept, windowEnd);
+    }
+}
+
 void TParquetSource::ClosePart()
 {
     Part_ = nullptr;
+    BlockReader_.reset();
+    BlockArrays_.clear();
     RangeReader_.reset();
     ArrowReader_.reset();
     ArrowBatch_.reset();
@@ -731,19 +981,27 @@ void TParquetSource::ClosePart()
 
 std::optional<TRowRangeBatch> TParquetSource::ReadPart()
 {
-    if (!RangeReader_) {
-        return ReadArrowPart();
+    while (true) {
+        std::optional<TRowRangeBatch> rows;
+        if (RangeReader_) {
+            auto batch = RangeReader_->Next(File_->FileReader->properties().batch_size());
+            if (!batch.ok()) {
+                throw std::runtime_error(batch.status().ToString());
+            }
+            rows = std::move(*batch);
+        } else {
+            rows = ReadArrowPart();
+        }
+        if (rows || !BlockReader_) {
+            return rows;
+        }
+        SelectNextBlocks();
     }
-    auto batch = RangeReader_->Next(File_->FileReader->properties().batch_size());
-    if (!batch.ok()) {
-        throw std::runtime_error(batch.status().ToString());
-    }
-    return std::move(*batch);
 }
 
 std::optional<TRowRangeBatch> TParquetSource::ReadArrowPart()
 {
-    const auto& ranges = Part_->Ranges;
+    const auto& ranges = PartRanges_;
     while (true) {
         while (ArrowRange_ < ranges.size() && ranges[ArrowRange_].End <= ArrowCursor_) {
             ++ArrowRange_;
@@ -1107,8 +1365,18 @@ std::vector<NScheduler::TScanRowGroup> TParquetFile::PruneRowGroups(
     if (!predicate) {
         return rowGroups;
     }
-    auto evaluator = TRowGroupPredicateEvaluator::Compile(
-        predicate, Data_->FullSchema, sourceAlias, diagnostics);
+    auto compile = [&] {
+        return TRowGroupPredicateEvaluator::Compile(
+            predicate, Data_->FullSchema, sourceAlias, diagnostics);
+    };
+    // The scans of this predicate select blocks with the same evaluator.
+    std::shared_ptr<TSharedRowGroupPredicate> evaluator;
+    if (auto program = TRowGroupPredicateEvaluator::Program(predicate, Data_->FullSchema, sourceAlias)) {
+        evaluator = Data_->SharedPredicate(*program, compile);
+    } else if (auto compiled = compile()) {
+        evaluator = std::make_shared<TSharedRowGroupPredicate>();
+        evaluator->Evaluator = std::move(compiled);
+    }
     if (!evaluator || Data_->RowGroupRanges.size() != Data_->RowGroups.size()) {
         return rowGroups;
     }
@@ -1287,6 +1555,22 @@ bool TParquetSource::Next(TRowSet& rowSet) {
         }
     }
     const int rowGroup = Part_->RowGroup;
+    if (!BlockArrays_.empty()) {
+        // The predicate columns read for block selection join the rest.
+        std::vector<std::shared_ptr<arrow::Array>> arrowColumns;
+        arrowColumns.reserve(ArrowColumns_.size());
+        size_t block = 0;
+        size_t rest = 0;
+        for (size_t position = 0; position < ArrowColumns_.size(); ++position) {
+            if (block < BlockColumns_.size() && BlockColumns_[block] == position) {
+                arrowColumns.push_back(BlockArrays_[block++]->Slice(
+                    rows->FirstRow - BlockArraysBegin_, rows->RowCount));
+            } else {
+                arrowColumns.push_back(std::move(rows->Columns[rest++]));
+            }
+        }
+        rows->Columns = std::move(arrowColumns);
+    }
     std::vector<std::shared_ptr<arrow::Array>> columns;
     columns.reserve(SelectedColumns_.size() + (RowIdRequested() ? 1 : 0));
     // The decimal columns take their positions among the other columns.
