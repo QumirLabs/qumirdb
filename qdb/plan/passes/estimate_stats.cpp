@@ -6,6 +6,7 @@
 
 #include <qdb/kernel/column_value.h>
 #include <qdb/plan/ops/source.h>
+#include <qdb/plan/ops/one_row.h>
 #include <qdb/plan/ops/cte_ref.h>
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/filter.h>
@@ -1802,6 +1803,12 @@ TStatsPtr ComputeStatsFor(TOperatorPtr op, TConstFolder& folder) {
     }
     if (auto ref = TMaybeOp<TCteRef>(op)) {
         return ref.Cast()->Def()->Plan->Stats_;
+    }
+    if (TMaybeOp<TOneRowOperator>(op)) {
+        auto stats = std::make_shared<TStats>();
+        stats->RowCount = 1;
+        stats->Cost = 1.0;
+        return stats;
     }
     if (auto maybeUnion = TMaybeOp<TUnionAllOperator>(op)) {
         return ComputeUnionStats(maybeUnion.Cast());

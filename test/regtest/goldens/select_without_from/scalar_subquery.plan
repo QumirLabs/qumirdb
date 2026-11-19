@@ -1,0 +1,5 @@
+project (x) (rows≈1 cost≈4.1K)
+└─ join left (rows≈1 cost≈4.1K)
+   ├─ one-row (rows≈1 cost≈1)
+   └─ project (__scalar_0__) (rows≈1 cost≈9)
+      └─ one-row (rows≈1 cost≈1)

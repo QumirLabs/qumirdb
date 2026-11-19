@@ -130,6 +130,20 @@ std::unique_ptr<ITask> MakeParquetScanTask(
     return std::make_unique<TSourceTask>(NLowering::MakeSourceCode(), std::move(state), output);
 }
 
+std::unique_ptr<ITask> MakeOneRowTask(TOutputPort output)
+{
+    auto code = std::make_shared<TSourceCode>([](void* state, TRowSet& rowSet) {
+        auto& emitted = *static_cast<bool*>(state);
+        if (emitted) {
+            return ETaskResult::FINISHED;
+        }
+        emitted = true;
+        rowSet = TRowSet{.RowCount = 1, .RefCount = 1};
+        return ETaskResult::OK;
+    });
+    return std::make_unique<TSourceTask>(std::move(code), std::make_shared<bool>(false), output);
+}
+
 std::unique_ptr<ITask> MakeSortTask(
     const TSortNode& node, TInputPort input, TOutputPort output, const TNodeTaskContext& context)
 {
@@ -396,6 +410,8 @@ std::unique_ptr<ITask> MakeNodeTask(
         using TNode = std::decay_t<decltype(node)>;
         if constexpr (std::is_same_v<TNode, TParquetScanNode>) {
             return MakeParquetScanTask(node, OutputPort(connections, node.Out), context);
+        } else if constexpr (std::is_same_v<TNode, TOneRowNode>) {
+            return MakeOneRowTask(OutputPort(connections, node.Out));
         } else if constexpr (std::is_same_v<TNode, TFilterNode>) {
             TKernelCompiler::TFilterDispatch dispatch{
                 .Slot = SlotAt(context, node.Plan.Kernel),

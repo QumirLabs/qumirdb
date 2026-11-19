@@ -615,9 +615,9 @@ TEST(RegSuiteInfrastructure, PlanOnlyCasesFollowExpectError) {
         EXPECT_EQ(check("SELECT missing FROM t;", tables, R"("expect_error":true)"), "") << tables;
         EXPECT_EQ(check("SELECT v FROM t;", tables, ""), "") << tables;
     }
-    // A query without FROM is a planning error as well.
-    EXPECT_NE(check("SELECT 1;", "{}", "").find("unexpected planning error"), std::string::npos);
-    EXPECT_EQ(check("SELECT 1;", "{}", R"("expect_error":true)"), "");
+    // An invalid query without FROM is a planning error as well.
+    EXPECT_NE(check("SELECT *;", "{}", "").find("unexpected planning error"), std::string::npos);
+    EXPECT_EQ(check("SELECT *;", "{}", R"("expect_error":true)"), "");
 }
 
 TEST(RegSuiteInfrastructure, ErrorWithoutLocationHasNoLocationSuffix) {

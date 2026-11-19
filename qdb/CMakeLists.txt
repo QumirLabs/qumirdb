@@ -33,6 +33,7 @@ add_library(qumirdb
     plan/ops/union.cpp
     plan/ops/sort.cpp
     plan/ops/limit.cpp
+    plan/ops/one_row.cpp
     plan/ops/late_materialize.cpp
     plan/ops/window.cpp
     plan/ops/cte_ref.cpp

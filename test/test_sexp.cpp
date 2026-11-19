@@ -7,6 +7,7 @@
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/late_materialize.h>
 #include <qdb/plan/ops/limit.h>
+#include <qdb/plan/ops/one_row.h>
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/sort.h>
 #include <qdb/plan/ops/source.h>
@@ -497,6 +498,15 @@ TEST(SexpParser, LimitPrintRoundtrip) {
 
     auto printed = PrintAst(std::static_pointer_cast<TExpr>(expr), MakePrintOpts());
     EXPECT_EQ(printed, input);
+}
+
+TEST(SexpParser, OneRowPrintRoundtrip) {
+    const std::string input = "(rel project (rel one-row) (x 1))";
+    auto p = MakeParser();
+    auto expr = Parse(p, input);
+    ASSERT_NE(expr, nullptr);
+    EXPECT_TRUE(TMaybeOp<TOneRowOperator>(static_cast<TProjectOperator&>(*expr).Input()));
+    EXPECT_EQ(PrintAst(expr, MakePrintOpts()), input);
 }
 
 TEST(SexpPrinter, Join) {

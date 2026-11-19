@@ -1,0 +1,2 @@
+project (x, s, d, e, n, b) (rows≈1 cost≈46)
+└─ one-row (rows≈1 cost≈1)

@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "fixtures": {
+    "t": {"json": "tables/t.json", "parquet": {"row_group_rows": 2}}
+  },
+  "tables": {"t": "t"},
+  "variants": ["single", "threaded", "js"],
+  "cases": {
+    "select_one.sql": {},
+    "expressions.sql": {},
+    "where_false.sql": {},
+    "where_true.sql": {},
+    "count_star.sql": {},
+    "count_star_where_false.sql": {},
+    "union_all.sql": {"order": "unordered"},
+    "scalar_subquery.sql": {},
+    "cte.sql": {},
+    "limit_zero.sql": {},
+    "with_table.sql": {"order": "unordered"},
+    "union_with_table.sql": {"order": "unordered"},
+    "star.sql": {"expect_error": true}
+  }
+}

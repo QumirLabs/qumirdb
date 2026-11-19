@@ -5,6 +5,7 @@
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/late_materialize.h>
 #include <qdb/plan/ops/limit.h>
+#include <qdb/plan/ops/one_row.h>
 #include <qdb/plan/ops/operator.h>
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/sort.h>
@@ -45,6 +46,11 @@ void PrintRelBody(NQumir::NAst::TExpr& expr, TPrinter& printer, TPrintFrame fram
                 src.RowGroupPredicate(), frame.AllowTypeWrap, frame.Level + 1);
         }
         out << ')';
+        return;
+    }
+
+    if (rel == TOneRowOperator::OpId) {
+        out << "(rel one-row)";
         return;
     }
 
