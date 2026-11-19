@@ -262,7 +262,8 @@ TRunResult RunQuery(
             lowered.Graph->Nodes(), [](const auto& node) {
                 return node->DebugKind == "source";
             });
-        EXPECT_EQ(lanes, enablePruning ? 1 : 3);
+        // One task per surviving row: the splits cut the 2-row groups.
+        EXPECT_EQ(lanes, enablePruning ? 2 : 6);
         EXPECT_NE(diagnostics.str().find(" bytes=" + std::to_string(projectedBytes)),
             std::string::npos);
     }
@@ -401,9 +402,9 @@ TEST(RowGroupPushdownE2E, AutoScanTasksUseSurvivingRowGroups) {
     const auto full = RunQuery(path, sql, false, true);
     EXPECT_EQ(pruned.Ids, (std::vector<int64_t>{2, 3}));
     EXPECT_EQ(pruned.Ids, full.Ids);
-    EXPECT_NE(pruned.Diagnostics.find("scan_tasks=auto max_tasks=1 tasks=1"),
+    EXPECT_NE(pruned.Diagnostics.find("scan_tasks=auto max_tasks=2 tasks=2"),
         std::string::npos);
-    EXPECT_NE(full.Diagnostics.find("scan_tasks=auto max_tasks=3 tasks=3"),
+    EXPECT_NE(full.Diagnostics.find("scan_tasks=auto max_tasks=6 tasks=6"),
         std::string::npos);
 }
 
@@ -420,7 +421,8 @@ TEST(RowGroupPushdownE2E, AutoJoinRunsWithUnequalSourceWidths) {
     NScheduler::TSettings settings;
     settings.Scheduler.Mode = NScheduler::EExecutionMode::ThreadedScheduler;
     settings.Scheduler.WorkerCount = 2;
-    settings.ScanSplit.TargetRowsPerTask = 1;
+    // Two rows per task: l (6 rows) fills both workers, r (2 rows) takes one.
+    settings.ScanSplit.TargetRowsPerTask = 2;
     settings.ScanSplit.TargetBytesPerTask = 0;
     settings.HashShuffle.PartitionCount = 2;
     auto lowered = NScheduler::LowerPlanToGraph(plan, settings, nullptr);

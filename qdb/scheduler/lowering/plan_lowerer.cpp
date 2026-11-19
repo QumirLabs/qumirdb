@@ -998,11 +998,11 @@ private:
             const auto* split = splitPlan && !splitPlan->empty()
                 ? &(*splitPlan)[p]
                 : nullptr;
-            std::optional<std::vector<int32_t>> rowGroups;
-            if (split && !split->RowGroups.empty()) {
-                rowGroups.emplace(split->RowGroups.begin(), split->RowGroups.end());
-            } else if (splitPlan && splitPlan->empty()) {
-                rowGroups.emplace();
+            std::optional<std::vector<NScheduler::TScanRowRange>> ranges;
+            if (split) {
+                ranges = split->Ranges;
+            } else if (splitPlan) {
+                ranges.emplace();
             }
             auto& node = AddNode({
                 .ExecStageId = execStageId,
@@ -1013,7 +1013,7 @@ private:
                     .Out = PortSpec(Graph_, &outConn, p + outLaneOffset),
                     .Path = table->Path(),
                     .Columns = columns,
-                    .RowGroups = std::move(rowGroups),
+                    .Ranges = std::move(ranges),
                 },
             });
             result.Producers.push_back(&node);

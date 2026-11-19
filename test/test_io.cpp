@@ -30,6 +30,7 @@ using namespace NQdb;
 namespace {
 
 using TColumnNames = std::unordered_set<std::string>;
+using TRanges = std::vector<NScheduler::TScanRowRange>;
 
 void WriteParquet(
     const std::string& path,
@@ -245,7 +246,7 @@ TEST(IOTest, ParquetRowGroupRangeSource) {
         (std::vector<int64_t>{50, 20, 30}));
     Release(&lookupRows);
 
-    auto split = file.MakeSource(std::vector<int>{1}, TColumnNames{"id"});
+    auto split = file.MakeSource(TRanges{{.RowGroup = 1, .RowCount = 2}}, TColumnNames{"id"});
     EXPECT_EQ(split->Stats().get(), file.Stats().get());
     TRowSet rowSet = {};
     ASSERT_TRUE(split->Next(rowSet));
@@ -382,7 +383,7 @@ TEST(IOTest, RowIdColumnKeepsFileWideLocatorsInSplitScans) {
 
     // A split source scans one row group but must still report file-wide
     // locators, otherwise a later lookup would read the wrong rows.
-    auto split = file.MakeSource(std::vector<int>{1}, columns);
+    auto split = file.MakeSource(TRanges{{.RowGroup = 1, .RowCount = 3}}, columns);
     std::vector<int64_t> ids;
     const auto rowIds = DrainRowIds(*split, 1, &ids);
     EXPECT_EQ(rowIds, (std::vector<TPhysicalRowId>{
@@ -392,11 +393,11 @@ TEST(IOTest, RowIdColumnKeepsFileWideLocatorsInSplitScans) {
     }));
     EXPECT_EQ(ids, (std::vector<int64_t>{4, 5, 6}));
 
-    auto tail = file.MakeSource(std::vector<int>{2}, columns);
+    auto tail = file.MakeSource(TRanges{{.RowGroup = 2, .RowCount = 1}}, columns);
     EXPECT_EQ(DrainRowIds(*tail, 1),
         (std::vector<TPhysicalRowId>{MakeParquetRowId(2, 0)}));
 
-    auto empty = file.MakeSource(std::vector<int>{}, columns);
+    auto empty = file.MakeSource(TRanges{}, columns);
     EXPECT_TRUE(DrainRowIds(*empty, 1).empty());
 }
 
@@ -408,7 +409,7 @@ TEST(IOTest, SplitSourceRebuildsFromItsFileAndScanParameters) {
 
     // A scan task makes its split from the spec's row groups and columns.
     auto split = table.MakeSource(
-        std::vector<int>{1}, TColumnNames{"id", std::string(InternalRowIdColumnName)});
+        TRanges{{.RowGroup = 1, .RowCount = 3}}, TColumnNames{"id", std::string(InternalRowIdColumnName)});
     std::vector<int64_t> ids;
     EXPECT_EQ(DrainRowIds(*split, 1, &ids), (std::vector<TPhysicalRowId>{
         MakeParquetRowId(1, 0),

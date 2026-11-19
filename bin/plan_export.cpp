@@ -260,7 +260,7 @@ public:
     }
 
     std::unique_ptr<NQdb::ISource> MakeSource(
-        std::optional<std::vector<int>>,
+        std::optional<std::vector<NQdb::NScheduler::TScanRowRange>>,
         std::optional<std::unordered_set<std::string>> names) const override
     {
         std::vector<NQdb::TColumnSchema> columns;

@@ -238,6 +238,6 @@ compiled function has independent resolver/lowering state. VM evaluation returns
 the scalar truth bits directly, without formatting and reparsing a string.
 Lowering caches the resulting explicit split list per source. In that cache,
 `nullopt` means "use the original source", an engaged non-empty list means the
-chosen row groups, and an engaged empty list is a proven empty scan.
+chosen row ranges, and an engaged empty list is a proven empty scan.
 
 The source hint is included in text plans and S-expression round-trips.

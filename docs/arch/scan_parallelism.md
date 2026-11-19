@@ -11,13 +11,13 @@ scans serial. The single scheduler defaults to one scan task. Sources without
 row-group metadata keep their original single source task.
 
 For each source, the lowerer first prunes columns and row groups. Let `R` be the
-remaining row count, `B` the uncompressed bytes of selected Parquet columns,
-`G` the remaining row-group count and `W` the worker count. The automatic cap is:
+remaining row count, `B` the uncompressed bytes of selected Parquet columns
+and `W` the worker count. The automatic cap is:
 
 ```
-size_tasks = max(1, ceil(R / 1,048,576), ceil(B / 67,108,864))
+size_tasks = max(1, ceil(R / 262,144), ceil(B / 67,108,864))
 budget = W if the source feeds a join, otherwise 2 * W
-max_tasks = min(size_tasks, G, budget)
+max_tasks = min(size_tasks, budget)
 ```
 
 The grain settings are `ScanSplit.TargetRowsPerTask` and `TargetBytesPerTask`;
@@ -31,10 +31,21 @@ These are initial heuristics, not a claim of optimality for every query.
 `--verbose` prints each automatic cap, actual task count, remaining rows,
 row groups and projected bytes.
 
-Splits retain the existing contiguous row-group ranges. For a cap `M`, each
-range contains at most `ceil(G / M)` groups, so the actual lane count can be
-less than `M`. For example, 59 groups capped at 18 produce 15 lanes. Uneven
-row-group sizes can still cause uneven work.
+The row-group count does not cap the tasks. Let `G` be the remaining row-group
+count and `M` the cap. With `G >= M`, each split is a contiguous run of at most
+`ceil(G / M)` whole groups, so the actual lane count can be less than `M`: 59
+groups capped at 18 produce 15 lanes, and uneven group sizes still cause uneven
+work. With `G < M`, the splits cut the groups: each split gets `ceil(R / M)`
+rows as row ranges (group, first row, row count), computed from the footer
+alone, and may end inside one group and continue in the next. Sizing work units
+by rows rather than by storage layout is the morsel idea of Leis et al.,
+*Morsel-driven parallelism*, SIGMOD 2014, doi:10.1145/2588555.2610507.
+
+A task that starts inside a row group pays for it. Without a Parquet page index
+the reader cannot jump to a row: every column of the task reads its dictionary
+page and skips the rows of the page that holds its first row. Pages that end
+before the range are dropped without decompression. The grain of 262,144 rows
+keeps that cost small next to the rows a task reads.
 
 ## Scan lanes and join partitions
 

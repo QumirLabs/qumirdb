@@ -51,10 +51,9 @@ public:
     explicit TParquetFile(const std::string& path);
     ~TParquetFile();
 
-    // nullopt row groups read the whole file and an empty list nothing;
-    // nullopt columns read every file column.
+    // Ranges are in scan order and do not overlap.
     std::unique_ptr<ISource> MakeSource(
-        std::optional<std::vector<int>> rowGroups = std::nullopt,
+        std::optional<std::vector<NScheduler::TScanRowRange>> ranges = std::nullopt,
         std::optional<std::unordered_set<std::string>> restrictedColumns = std::nullopt) const override;
 
     const TSchema& Schema() const override;

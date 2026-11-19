@@ -2,9 +2,10 @@
   "version": 1,
   "fixtures": {
     "values": {"json": "tables/t.json", "parquet": {"row_group_rows": 2}},
-    "pairs": {"json": "tables/s.json"}
+    "pairs": {"json": "tables/s.json"},
+    "one_group": {"json": "tables/cut.json", "parquet": {"row_group_rows": 11}}
   },
-  "tables": {"t": "values", "s": "pairs"},
+  "tables": {"t": "values", "s": "pairs", "cut": "one_group"},
   "variants": ["single", "threaded", "js"],
   "cases": {
     "where_null.sql": {"order": "ordered"},
@@ -20,6 +21,7 @@
     "where_null_is_null.sql": {"order": "ordered"},
     "where_null_is_not_null.sql": {"order": "ordered"},
     "select_null_is_null.sql": {"order": "ordered"},
-    "where_not_chain_deep.sql": {"order": "ordered"}
+    "where_not_chain_deep.sql": {"order": "ordered"},
+    "split_row_group.sql": {"order": "ordered"}
   }
 }

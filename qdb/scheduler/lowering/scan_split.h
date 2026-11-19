@@ -16,9 +16,26 @@ struct TScanRowGroup {
     int64_t ByteSize = 0;
 };
 
+// Rows [FirstRow, FirstRow + RowCount) of one row group.
+struct TScanRowRange {
+    int32_t RowGroup = 0;
+    int64_t FirstRow = 0;
+    int64_t RowCount = 0;
+
+    bool operator==(const TScanRowRange&) const = default;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.RowGroup);
+        v(self.FirstRow);
+        v(self.RowCount);
+    }
+};
+
 struct TScanSplit {
-    // Predicate pruning can leave a non-contiguous set of row groups.
-    std::vector<size_t> RowGroups;
+    // Predicate pruning can leave a non-contiguous set of row groups, and a
+    // row group is cut between splits when there are fewer groups than tasks.
+    std::vector<TScanRowRange> Ranges;
     int64_t RowCount = 0;
     int64_t ByteSize = 0;
     bool SerialRead = false;
@@ -26,6 +43,7 @@ struct TScanSplit {
 
 // Resolve an explicit cap or choose one for a source after pruning. Join inputs
 // stay within the worker count; other large scans may use two lanes per worker.
+// Row groups do not cap the count: BuildScanSplits cuts them.
 size_t ChooseScanTaskCount(
     const std::vector<TScanRowGroup>& rowGroups,
     const TSettings& settings,

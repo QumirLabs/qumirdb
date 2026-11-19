@@ -637,20 +637,37 @@ TParquetFile::TParquetFile(const std::string& path)
 TParquetFile::~TParquetFile() = default;
 
 std::unique_ptr<ISource> TParquetFile::MakeSource(
-    std::optional<std::vector<int>> rowGroups,
+    std::optional<std::vector<NScheduler::TScanRowRange>> ranges,
     std::optional<std::unordered_set<std::string>> restrictedColumns) const
 {
-    if (!rowGroups) {
-        rowGroups.emplace(Data_->RowGroups.size());
-        std::iota(rowGroups->begin(), rowGroups->end(), 0);
+    if (!ranges) {
+        ranges.emplace();
+        for (const auto& group : Data_->RowGroups) {
+            ranges->push_back({
+                .RowGroup = static_cast<int32_t>(group.RowGroup),
+                .RowCount = group.RowCount,
+            });
+        }
     }
     std::vector<TParquetSource::TPart> parts;
-    parts.reserve(rowGroups->size());
-    for (int rowGroup : *rowGroups) {
-        const int64_t rows = Data_->RowGroups.at(static_cast<size_t>(rowGroup)).RowCount;
-        if (rows > 0) {
-            parts.push_back({.RowGroup = rowGroup, .Ranges = {{.Begin = 0, .End = rows}}});
+    for (const auto& range : *ranges) {
+        if (range.RowCount == 0) {
+            continue;
         }
+        const auto rowGroup = static_cast<size_t>(range.RowGroup);
+        const bool inside = range.RowGroup >= 0 && rowGroup < Data_->RowGroups.size() &&
+            range.FirstRow >= 0 && range.RowCount > 0 &&
+            range.FirstRow + range.RowCount <= Data_->RowGroups[rowGroup].RowCount;
+        if (!inside) {
+            throw std::runtime_error("parquet scan range is outside the file");
+        }
+        const TRowRange rows{.Begin = range.FirstRow, .End = range.FirstRow + range.RowCount};
+        if (parts.empty() || parts.back().RowGroup != range.RowGroup) {
+            parts.push_back({.RowGroup = range.RowGroup});
+        } else if (parts.back().Ranges.back().End > rows.Begin) {
+            throw std::runtime_error("parquet scan ranges of a row group overlap or go back");
+        }
+        parts.back().Ranges.push_back(rows);
     }
     return std::unique_ptr<ISource>(
         new TParquetSource(Data_, std::move(parts), std::move(restrictedColumns)));
