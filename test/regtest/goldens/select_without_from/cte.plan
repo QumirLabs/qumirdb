@@ -1,0 +1,8 @@
+project (ax, bx) (rows≈1 cost≈4.2K)
+└─ join inner (rows≈1 cost≈4.1K)
+   ├─ project (a.x) (rows≈1 cost≈17)
+   │  └─ project (x) (rows≈1 cost≈9)
+   │     └─ one-row (rows≈1 cost≈1)
+   └─ project (b.x) (rows≈1 cost≈17)
+      └─ project (x) (rows≈1 cost≈9)
+         └─ one-row (rows≈1 cost≈1)

@@ -18,6 +18,7 @@
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/late_materialize.h>
 #include <qdb/plan/ops/limit.h>
+#include <qdb/plan/ops/one_row.h>
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/sort.h>
 #include <qdb/plan/ops/union.h>
@@ -310,6 +311,9 @@ public:
             auto splits = ScanSplits(*n.Cast());
             return std::max<size_t>(splits ? splits->size() : 0, 1);
         }
+        if (TMaybeOp<TOneRowOperator>(op)) {
+            return 1;
+        }
         if (auto n = TMaybeOp<TCteConsumer>(op)) {
             // Every reference reads the spool on as many lanes as the
             // definition writes it, like an inlined copy would.
@@ -488,6 +492,9 @@ public:
     {
         if (auto n = TMaybeOp<TSourceOperator>(op)) {
             return LowerSource(*n.Cast(), outConn, outLaneOffset);
+        }
+        if (auto n = TMaybeOp<TOneRowOperator>(op)) {
+            return LowerOneRow(*n.Cast(), outConn, outLaneOffset);
         }
         if (auto n = TMaybeOp<TCteConsumer>(op)) {
             return LowerCteConsumer(*n.Cast(), outConn, outLaneOffset);
@@ -1019,6 +1026,24 @@ private:
             result.Producers.push_back(&node);
         }
         return result;
+    }
+
+    TLoweredOutput LowerOneRow(
+        TOneRowOperator& oneRow,
+        NScheduler::IConnection& outConn,
+        size_t outLaneOffset)
+    {
+        const auto execStageId = NewExecStage(&oneRow, EExecPlanNodeKind::OneRow);
+        auto& node = AddNode({
+            .ExecStageId = execStageId,
+            .TaskGroupId = execStageId,
+            .DebugKind = "one-row",
+            .DebugLabel = "one-row",
+            .Body = NScheduler::TOneRowNode{
+                .Out = PortSpec(Graph_, &outConn, outLaneOffset),
+            },
+        });
+        return {.Producers = {&node}, .OutputType = oneRow.OutputColumns()};
     }
 
     // A materialized CTE: its producer lanes write a shared spool, and the

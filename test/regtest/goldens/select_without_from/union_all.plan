@@ -1,0 +1,5 @@
+union-all (rows≈2 cost≈18)
+├─ project (x) (rows≈1 cost≈9)
+│  └─ one-row (rows≈1 cost≈1)
+└─ project (col0) (rows≈1 cost≈9)
+   └─ one-row (rows≈1 cost≈1)

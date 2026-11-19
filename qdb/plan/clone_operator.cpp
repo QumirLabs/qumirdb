@@ -8,6 +8,7 @@
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/late_materialize.h>
 #include <qdb/plan/ops/limit.h>
+#include <qdb/plan/ops/one_row.h>
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/sort.h>
 #include <qdb/plan/ops/source.h>
@@ -93,6 +94,9 @@ TOperatorPtr Reconstruct(const TOperatorPtr& op) {
             src->SetRowGroupPredicate(CloneExpr(n.Cast()->RowGroupPredicate()));
         }
         return src;
+    }
+    if (TMaybeOp<TOneRowOperator>(op)) {
+        return std::make_shared<TOneRowOperator>();
     }
     if (auto n = TMaybeOp<TCteRef>(op)) {
         return std::make_shared<TCteRef>(n.Cast()->Def());

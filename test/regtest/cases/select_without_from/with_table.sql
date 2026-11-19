@@ -1,0 +1,1 @@
+SELECT id, k FROM t CROSS JOIN (SELECT 7 AS k) c WHERE id < 3;

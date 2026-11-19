@@ -14,6 +14,7 @@ namespace NQdb {
 
 enum class EExecPlanNodeKind {
     Source,
+    OneRow,
     Filter,
     RuntimeFilter,
     Project,
@@ -49,6 +50,7 @@ inline std::string_view AggregatePhaseName(EAggregatePhase phase) {
 inline std::string_view ExecPlanNodeKindName(EExecPlanNodeKind kind) {
     switch (kind) {
         case EExecPlanNodeKind::Source: return "source";
+        case EExecPlanNodeKind::OneRow: return "one-row";
         case EExecPlanNodeKind::Filter: return "filter";
         case EExecPlanNodeKind::RuntimeFilter: return "runtime-filter";
         case EExecPlanNodeKind::Project: return "project";

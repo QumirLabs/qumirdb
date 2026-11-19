@@ -137,6 +137,16 @@ struct TParquetScanNode {
     }
 };
 
+// Emits one row of no columns: the input of a SELECT without FROM.
+struct TOneRowNode {
+    TPortSpec Out;
+
+    void Fields(this auto& self, auto& v)
+    {
+        v(self.Out);
+    }
+};
+
 struct TFilterNode {
     TPortSpec In;
     TPortSpec Out;
@@ -579,7 +589,7 @@ struct TRuntimeFilterSourceNode {
 
 using TNodeBody = std::variant<
     TForwardNode, TRemoteSourceNode, TRemoteSinkNode, TSinkWriterNode,
-    TParquetScanNode, TFilterNode, TProjectNode, TSortNode, TSortMergeNode,
+    TParquetScanNode, TOneRowNode, TFilterNode, TProjectNode, TSortNode, TSortMergeNode,
     TWindowNode, TAggregateNode, THashShuffleNode, THashJoinNode, TRowJoinNode,
     TCrossJoinNode, TLimitNode, TLateLookupNode, TLateMergeNode,
     TCteProducerNode, TCtePublishNode, TCteConsumerNode, TCteSinkNode, TCteSourceNode,

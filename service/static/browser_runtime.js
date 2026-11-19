@@ -3576,6 +3576,37 @@ class SourceTask {
   }
 }
 
+// Emits one row of no columns: the input of a SELECT without FROM.
+class OneRowTask {
+  constructor(stage, layout, shared) {
+    this.stage = stage;
+    this.layout = layout;
+    this.shared = shared;
+    this.done = false;
+    this.rows = 0;
+  }
+
+  async execute() {
+    if (this.done) {
+      return TaskResult.FINISHED;
+    }
+    const out = this.node.outbound[0].connection;
+    if (!out.canPush()) {
+      return TaskResult.BLOCKED_OUTPUT;
+    }
+    if (this.rows === 0) {
+      const batch = pinSourceBatch(
+        { columns: [], rowCount: 1 }, this.shared.arena, this.layout);
+      this.rows = 1;
+      out.push({ batch, selection: null });
+      return TaskResult.OK;
+    }
+    out.finish();
+    this.done = true;
+    return TaskResult.FINISHED;
+  }
+}
+
 class FilterTask {
   constructor(stage, layout, shared) {
     this.stage = stage;
@@ -4728,6 +4759,9 @@ function taskNodeForStage(stage, layout, readSourceBatches, onProgress, shared) 
     return makeNode(
       new SourceTask(stage, layout, shared, readSourceBatches, onProgress || null),
       stageLabel(stage));
+  }
+  if (stage.kind === 'one-row') {
+    return makeNode(new OneRowTask(stage, layout, shared), stageLabel(stage));
   }
   if (stage.kind === 'filter') {
     return makeNode(new FilterTask(stage, layout, shared), stageLabel(stage));

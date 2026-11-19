@@ -28,6 +28,7 @@ its structure.
 | Operator | Carries |
 |---|---|
 | `source` | table, alias |
+| `one-row` | nothing: one row of no columns |
 | `filter` | one predicate expression |
 | `project` | list of `(name, expression)` |
 | `aggregate` | group keys (names), aggregate specs `(name, func, arg-expr\|null)` |
@@ -52,6 +53,11 @@ join inner            (empty keys)
 │  └─ source b
 └─ source c
 ```
+
+A SELECT without FROM reads `one-row`, so WHERE, aggregation and the select
+list apply to it as to any input: `SELECT 1 WHERE false` returns no row and
+`SELECT count(*)` returns 1. It lowers to a task that emits that row, with no
+table to resolve where the graph runs.
 
 `a JOIN b ON <cond>` → one `join` whose whole `ON` is the **residual** (key
 extraction happens later). `USING (c)` → a key on the `c` column of each side,

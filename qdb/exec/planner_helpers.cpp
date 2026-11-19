@@ -6,6 +6,7 @@
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/limit.h>
 #include <qdb/plan/ops/late_materialize.h>
+#include <qdb/plan/ops/one_row.h>
 #include <qdb/kernel/column_value.h>
 #include <qdb/kernel/compiler.h>
 #include <qdb/kernel/annotate_type.h>
@@ -1019,6 +1020,10 @@ void PrintRuntimePlanNode(
     out << indent;
     if (auto node = TMaybeOp<TSourceOperator>(root)) {
         out << "source " << node.Cast()->SourcePath() << "\n";
+        return;
+    }
+    if (TMaybeOp<TOneRowOperator>(root)) {
+        out << "one-row\n";
         return;
     }
     if (auto node = TMaybeOp<TFilterOperator>(root)) {

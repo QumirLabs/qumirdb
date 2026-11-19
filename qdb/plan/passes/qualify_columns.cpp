@@ -4,6 +4,7 @@
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/limit.h>
+#include <qdb/plan/ops/one_row.h>
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/sort.h>
 #include <qdb/plan/ops/source.h>
@@ -307,6 +308,10 @@ std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op) {
             outFields.emplace_back(func.Name, nullptr);
         }
         return std::make_shared<TStructType>(std::move(outFields));
+    }
+
+    if (TMaybeOp<TOneRowOperator>(op)) {
+        return std::make_shared<TStructType>(std::vector<std::pair<std::string, TTypePtr>>{});
     }
 
     // -- Union -----------------------------------------------------------------

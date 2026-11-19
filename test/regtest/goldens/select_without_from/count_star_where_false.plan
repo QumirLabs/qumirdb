@@ -1,0 +1,5 @@
+project (c) (rows≈1 cost≈34)
+└─ aggregate keys=[__group__] aggs=[count_0=count] (rows≈1 cost≈26)
+   └─ project (__group__) (rows≈1 cost≈10)
+      └─ filter #f (rows≈1 cost≈2)
+         └─ one-row (rows≈1 cost≈1)

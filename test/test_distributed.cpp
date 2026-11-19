@@ -3752,6 +3752,8 @@ TEST(DistributedScheduler, QueryActorRunsAQueryOnEveryNode) {
              "SELECT id, d9 FROM t WHERE id % 3 <> 0 ORDER BY id DESC LIMIT 10",
              // Late materialization: the split cuts lookups from their merge.
              LateLookupSql,
+             // A SELECT without FROM: its one-row source opens no table.
+             "SELECT id, k FROM t CROSS JOIN (SELECT 7 AS k) c WHERE id % 3 <> 0 ORDER BY id",
          }) {
         SCOPED_TRACE(sql);
         // Every other query plans for a width of 4 instead of the query actor's 2 workers.

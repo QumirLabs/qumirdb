@@ -1,0 +1,3 @@
+project (x)
+└─ limit
+   └─ one-row (rows≈1 cost≈1)

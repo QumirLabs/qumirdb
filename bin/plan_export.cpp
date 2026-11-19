@@ -2348,6 +2348,9 @@ struct TExecPlanCodec {
                 });
                 return;
             }
+            case NQdb::EExecPlanNodeKind::OneRow:
+                AddNode(node, llvm::json::Object{{"kind", "one-row"}});
+                return;
             case NQdb::EExecPlanNodeKind::Filter: {
                 auto* filter = static_cast<const NQdb::TFilterOperator*>(
                     node.Operator);

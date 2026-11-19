@@ -4,6 +4,7 @@
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/limit.h>
+#include <qdb/plan/ops/one_row.h>
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/sort.h>
 #include <qdb/plan/ops/source.h>
@@ -1407,7 +1408,7 @@ std::expected<void, TError> CollectOutputNames(
                 continue;
             }
             if (!select.Cast()->From) {
-                continue; // BuildSelect rejects a SELECT without FROM.
+                continue; // BuildSelect rejects a star without FROM.
             }
             TLocalSqlScope expanded;
             for (const auto& ref : select.Cast()->From->Items) {
@@ -2502,9 +2503,6 @@ std::expected<TRelation, TError> BuildSelect(
     TBuildContext& context,
     std::optional<TSelectOutput>* output)
 {
-    if (!select.From) {
-        return std::unexpected(TError("SELECT without FROM is not supported yet"));
-    }
     // Window functions are only valid in the SELECT list and ORDER BY. Elsewhere
     // they are left as raw TWindowExpr nodes (applyWindows rewrites projections
     // only), so reject them with a clear message instead of crashing later in
@@ -2536,7 +2534,9 @@ std::expected<TRelation, TError> BuildSelect(
     };
     // Builds the pre-aggregate input (FROM + joins + WHERE).
     auto buildInput = [&]() -> std::expected<TRelation, TError> {
-        auto base = BuildFrom(*select.From, context);
+        auto base = select.From
+            ? BuildFrom(*select.From, context)
+            : Relation(std::make_shared<TOneRowOperator>());
         if (!base) {
             return std::unexpected(base.error());
         }
@@ -2695,6 +2695,9 @@ std::expected<TRelation, TError> BuildSelect(
     for (size_t i = 0; i < select.SelectList->Items.size(); ++i) {
         const auto& item = select.SelectList->Items[i];
         if (item->Star) {
+            if (!select.From && item->StarPrefix.empty()) {
+                return std::unexpected(TError("SELECT * with no tables specified is not valid"));
+            }
             auto&& schema = from.Plan->OutputColumns();
             if (!schema) {
                 return std::unexpected(TError("'*' over an unresolved input"));

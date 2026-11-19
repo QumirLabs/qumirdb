@@ -1,0 +1,6 @@
+{
+  "schema": "<struct (ax i64) (bx i64)>",
+  "rows": [
+    ["1", "1"]
+  ]
+}

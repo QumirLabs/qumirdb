@@ -1,0 +1,6 @@
+project (id, k) (rows≈2 cost≈4.2K)
+└─ join inner (rows≈2 cost≈4.2K)
+   ├─ filter (< |t.id| 3) (rows≈2 cost≈64)
+   │  └─ source t AS t row-groups (< |t.id| 3) (rows≈4 cost≈32)
+   └─ project (c.k) (rows≈1 cost≈9)
+      └─ one-row (rows≈1 cost≈1)
