@@ -3,6 +3,7 @@
 #include <qdb/exec/plan_data.h>
 #include <qdb/exec/runtime_filter.h>
 #include <qdb/io/io.h>
+#include <qdb/io/parquet/row_group_predicate.h>
 #include <qdb/io/parquet/table_cache.h>
 #include <qdb/io/table.h>
 #include <qdb/kernel/regex.h>
@@ -13,6 +14,7 @@
 
 #include <cstdint>
 #include <limits>
+#include <map>
 #include <memory>
 #include <optional>
 #include <span>
@@ -693,6 +695,9 @@ struct TNodeTaskContext {
     // through `TableCache` when set.
     std::unordered_map<std::string, std::shared_ptr<const ITable>> Tables;
     std::shared_ptr<TTableCache> TableCache;
+    // The block predicates of the graph's scans, compiled once per file path
+    // and program body; null for one that does not compile.
+    std::map<std::pair<std::string, std::string>, std::shared_ptr<const TRowGroupPredicate>> BlockPredicates;
     // Required for SinkWriter nodes.
     ISink* Sink = nullptr;
     // Built from the CTE tables, by index. They keep the spooled rows alive, so

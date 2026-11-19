@@ -228,7 +228,8 @@ TEST(StatsTest, ParquetRowGroupPredicateUsesPerGroupBounds) {
     ASSERT_TRUE(filter.has_value()) << filter.error().ToString();
     NQdb::AnnotateTypes(*filter);
     auto typedFilter = NQdb::TMaybeOp<NQdb::TFilterOperator>(*filter).Cast();
-    auto kept = source.PruneRowGroups(typedFilter->Predicate(), "");
+    auto kept = source.PruneRowGroups(
+        NQdb::TRowGroupPredicate::Compile(typedFilter->Predicate(), source.Schema(), "").get());
     ASSERT_EQ(kept.size(), 1u);
     EXPECT_EQ(kept[0].RowGroup, 1u);
 
@@ -236,7 +237,8 @@ TEST(StatsTest, ParquetRowGroupPredicateUsesPerGroupBounds) {
     ASSERT_TRUE(sparse.has_value()) << sparse.error().ToString();
     NQdb::AnnotateTypes(*sparse);
     auto sparseFilter = NQdb::TMaybeOp<NQdb::TFilterOperator>(*sparse).Cast();
-    auto sparseGroups = source.PruneRowGroups(sparseFilter->Predicate(), "");
+    auto sparseGroups = source.PruneRowGroups(
+        NQdb::TRowGroupPredicate::Compile(sparseFilter->Predicate(), source.Schema(), "").get());
     ASSERT_EQ(sparseGroups.size(), 2u);
     EXPECT_EQ(sparseGroups[0].RowGroup, 0u);
     EXPECT_EQ(sparseGroups[1].RowGroup, 2u);
@@ -246,7 +248,8 @@ TEST(StatsTest, ParquetRowGroupPredicateUsesPerGroupBounds) {
     NQdb::AnnotateTypes(*impossible);
     auto impossibleFilter =
         NQdb::TMaybeOp<NQdb::TFilterOperator>(*impossible).Cast();
-    EXPECT_TRUE(source.PruneRowGroups(impossibleFilter->Predicate(), "").empty());
+    EXPECT_TRUE(source.PruneRowGroups(
+        NQdb::TRowGroupPredicate::Compile(impossibleFilter->Predicate(), source.Schema(), "").get()).empty());
 
     auto emptySource = source.MakeSource(std::vector<int>{}, std::nullopt);
     NQdb::TRowSet rowSet{};

@@ -262,7 +262,7 @@ public:
     std::unique_ptr<NQdb::ISource> MakeSource(
         std::optional<std::vector<int>>,
         std::optional<std::unordered_set<std::string>> names,
-        std::optional<NQdb::TRowGroupPredicateProgram>) const override
+        std::shared_ptr<const NQdb::TRowGroupPredicate>) const override
     {
         std::vector<NQdb::TColumnSchema> columns;
         for (const auto& column : AllColumns_) {
@@ -274,8 +274,7 @@ public:
     }
 
     std::vector<NQdb::NScheduler::TScanRowGroup> PruneRowGroups(
-        const NQumir::NAst::TExprPtr&,
-        std::string_view,
+        const NQdb::TRowGroupPredicate*,
         std::ostream*,
         const std::unordered_set<std::string>*) const override
     {

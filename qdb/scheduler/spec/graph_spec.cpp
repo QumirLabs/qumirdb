@@ -117,6 +117,20 @@ const ITable& ResolveTable(TNodeTaskContext& context, const std::string& path)
     return *table;
 }
 
+std::shared_ptr<const TRowGroupPredicate> ResolveBlockPredicate(
+    TNodeTaskContext& context, const TParquetScanNode& node, const ITable& table)
+{
+    if (!node.BlockPredicate) {
+        return nullptr;
+    }
+    // The body names its columns, so with the path it is the whole key.
+    auto [found, inserted] = context.BlockPredicates.try_emplace({node.Path, node.BlockPredicate->Body});
+    if (inserted) {
+        found->second = TRowGroupPredicate::Compile(*node.BlockPredicate, table.Schema());
+    }
+    return found->second;
+}
+
 std::unique_ptr<ITask> MakeParquetScanTask(
     const TParquetScanNode& node, TOutputPort output, TNodeTaskContext& context)
 {
@@ -124,9 +138,10 @@ std::unique_ptr<ITask> MakeParquetScanTask(
     if (node.Columns) {
         columns.emplace(node.Columns->begin(), node.Columns->end());
     }
+    const auto& table = ResolveTable(context, node.Path);
     auto state = std::make_shared<NLowering::TSchedulerSourceState>();
-    state->OwnedSource = ResolveTable(context, node.Path).MakeSource(
-        node.RowGroups, std::move(columns), node.BlockPredicate);
+    state->OwnedSource = table.MakeSource(
+        node.RowGroups, std::move(columns), ResolveBlockPredicate(context, node, table));
     state->Source = state->OwnedSource.get();
     return std::make_unique<TSourceTask>(NLowering::MakeSourceCode(), std::move(state), output);
 }

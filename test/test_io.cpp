@@ -408,7 +408,7 @@ TEST(IOTest, SplitSourceRebuildsFromItsFileAndScanParameters) {
 
     // A scan task makes its split from the spec's row groups and columns.
     auto split = table.MakeSource(
-        std::vector<int>{1}, TColumnNames{"id", std::string(InternalRowIdColumnName)}, std::nullopt);
+        std::vector<int>{1}, TColumnNames{"id", std::string(InternalRowIdColumnName)}, nullptr);
     std::vector<int64_t> ids;
     EXPECT_EQ(DrainRowIds(*split, 1, &ids), (std::vector<TPhysicalRowId>{
         MakeParquetRowId(1, 0),

@@ -477,10 +477,10 @@ TEST(RowGroupPushdownE2E, BlockSelectionMatchesFullScan) {
     // The scan itself reads blocks 0 and 2 only.
     TParquetFile file(path);
     auto plan = BuildSqlPlan(across, file);
-    auto program = TRowGroupPredicateEvaluator::Program(
+    auto predicate = TRowGroupPredicate::Compile(
         FindSource(plan)->RowGroupPredicate(), file.Schema(), "t");
-    ASSERT_TRUE(program);
-    auto source = file.MakeSource(std::nullopt, std::unordered_set<std::string>{"id", "k"}, program);
+    ASSERT_TRUE(predicate);
+    auto source = file.MakeSource(std::nullopt, std::unordered_set<std::string>{"id", "k"}, predicate);
     int64_t rows = 0;
     TRowSet rowSet{};
     while (source->Next(rowSet)) {

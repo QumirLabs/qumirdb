@@ -269,8 +269,9 @@ The Parquet reader computes the block bounds; no generated kernel does. They
 are the statistics a writer stores per page, so footer statistics and block
 bounds are interchangeable inputs to the one compiled predicate, and a scan
 needs no compiled code before its first operator. The scan node carries the
-lowered predicate as oz-lang text; a process compiles it once per file and
-shares the evaluator between its scans.
+lowered predicate as oz-lang text. A task graph compiles it once, and its scan
+tasks share the immutable bytecode, each with an interpreter state of its own;
+row-group pruning at planning uses the same compiled predicate.
 
 A block is skipped only when `TRUE` is impossible for every row in it, NULL and
 NaN included, and the filter above still checks every emitted row. On data not

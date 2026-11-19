@@ -682,12 +682,7 @@ std::vector<TParam> IntervalParams(const TSchema& schema, std::span<const int32_
     return out;
 }
 
-struct TLoweredPredicate {
-    std::shared_ptr<TBlockExpr> Body;
-    std::vector<int32_t> Columns;
-};
-
-TLoweredPredicate LowerPredicate(
+TRowGroupPredicateProgram LowerProgram(
     const TExprPtr& predicate,
     const TSchema& schema,
     std::string_view sourceAlias)
@@ -708,118 +703,47 @@ TLoweredPredicate LowerPredicate(
         typedPredicate, TStructType(std::move(fields)));
     auto truth = lowerer.LowerTruth(typedPredicate);
     NQumir::TLocation loc{};
+    auto body = std::make_shared<TBlockExpr>(
+        loc,
+        std::vector<TExprPtr>{std::make_shared<TReturnExpr>(loc, std::move(truth))});
     return {
-        .Body = std::make_shared<TBlockExpr>(
-            loc,
-            std::vector<TExprPtr>{std::make_shared<TReturnExpr>(loc, std::move(truth))}),
+        .Body = NQumir::NAst::NCore::PrintAst(body),
         .Columns = lowerer.Columns(),
     };
 }
 
 } // namespace
 
-struct TRowGroupPredicateEvaluator::TImpl {
+struct TRowGroupPredicate::TImpl {
+    TRowGroupPredicateProgram Program;
     std::unique_ptr<TVmFunction> Function;
     std::vector<TParamColumn> ParamColumns;
 };
 
-TRowGroupPredicateEvaluator::TRowGroupPredicateEvaluator(std::unique_ptr<TImpl> impl)
+TRowGroupPredicate::TRowGroupPredicate(std::unique_ptr<TImpl> impl)
     : Impl_(std::move(impl))
 {}
 
-TRowGroupPredicateEvaluator::~TRowGroupPredicateEvaluator() = default;
+TRowGroupPredicate::~TRowGroupPredicate() = default;
 
-namespace {
-
-struct TCompiledPredicate {
-    std::unique_ptr<TVmFunction> Function;
-    std::vector<TParamColumn> ParamColumns;
-};
-
-TCompiledPredicate CompileLowered(
-    TLoweredPredicate lowered,
-    const TSchema& schema,
-    std::ostream* diagnostics)
+const TRowGroupPredicateProgram& TRowGroupPredicate::Program() const
 {
-    for (int32_t column : lowered.Columns) {
-        if (column < 0 || static_cast<size_t>(column) >= schema.Columns.size() ||
-            !NumberInfo(schema.Columns[static_cast<size_t>(column)].Type))
-        {
-            throw std::runtime_error("predicate column outside the schema");
-        }
-    }
-    if (diagnostics) {
-        *diagnostics << "row-group predicate: compiled body "
-                     << NQumir::NAst::NCore::PrintAst(lowered.Body) << '\n';
-    }
-    auto compiled = TVmFunction::Compile(RowGroupVmContext(), {
-        .NamePrefix = EvalFn,
-        .Params = IntervalParams(schema, lowered.Columns),
-        .Body = std::move(lowered.Body),
-        .ReturnType = std::make_shared<TIntegerType>(TIntegerType::I64),
-        .Imports = {"row_group_interval"},
-    });
-    if (!compiled) {
-        throw std::runtime_error(compiled.error());
-    }
-    TCompiledPredicate result{.Function = std::move(*compiled)};
-    for (int32_t column : lowered.Columns) {
-        const auto info = NumberInfo(schema.Columns[static_cast<size_t>(column)].Type);
-        result.ParamColumns.push_back({
-            .Column = static_cast<size_t>(column),
-            .Wide = info.Kind == ENumberKind::Decimal,
-        });
-    }
-    return result;
+    return Impl_->Program;
 }
 
-} // namespace
-
-std::unique_ptr<TRowGroupPredicateEvaluator> TRowGroupPredicateEvaluator::Compile(
-    const TExprPtr& predicate,
-    const TSchema& schema,
-    std::string_view sourceAlias,
-    std::ostream* diagnostics)
-{
-    try {
-        auto compiled = CompileLowered(LowerPredicate(predicate, schema, sourceAlias), schema, diagnostics);
-        return std::unique_ptr<TRowGroupPredicateEvaluator>(new TRowGroupPredicateEvaluator(
-            std::make_unique<TImpl>(std::move(compiled.Function), std::move(compiled.ParamColumns))));
-    } catch (const std::exception& error) {
-        if (diagnostics) {
-            *diagnostics << "row-group predicate: " << error.what() << '\n';
-        }
-        return nullptr;
-    } catch (...) {
-        return nullptr;
-    }
-}
-
-std::optional<TRowGroupPredicateProgram> TRowGroupPredicateEvaluator::Program(
-    const TExprPtr& predicate,
-    const TSchema& schema,
-    std::string_view sourceAlias)
-{
-    try {
-        auto lowered = LowerPredicate(predicate, schema, sourceAlias);
-        if (lowered.Columns.empty()) {
-            return std::nullopt;
-        }
-        return TRowGroupPredicateProgram{
-            .Body = NQumir::NAst::NCore::PrintAst(lowered.Body),
-            .Columns = std::move(lowered.Columns),
-        };
-    } catch (...) {
-        return std::nullopt;
-    }
-}
-
-std::unique_ptr<TRowGroupPredicateEvaluator> TRowGroupPredicateEvaluator::Compile(
+std::shared_ptr<const TRowGroupPredicate> TRowGroupPredicate::Compile(
     const TRowGroupPredicateProgram& program,
     const TSchema& schema,
     std::ostream* diagnostics)
 {
     try {
+        for (int32_t column : program.Columns) {
+            if (column < 0 || static_cast<size_t>(column) >= schema.Columns.size() ||
+                !NumberInfo(schema.Columns[static_cast<size_t>(column)].Type))
+            {
+                throw std::runtime_error("predicate column outside the schema");
+            }
+        }
         std::istringstream input(program.Body);
         NQumir::NAst::NCore::TTokenStream tokens(input);
         NQumir::NAst::NCore::TParser parser;
@@ -831,9 +755,28 @@ std::unique_ptr<TRowGroupPredicateEvaluator> TRowGroupPredicateEvaluator::Compil
         if (!body) {
             throw std::runtime_error("predicate program is not a block");
         }
-        auto compiled = CompileLowered({.Body = body.Cast(), .Columns = program.Columns}, schema, diagnostics);
-        return std::unique_ptr<TRowGroupPredicateEvaluator>(new TRowGroupPredicateEvaluator(
-            std::make_unique<TImpl>(std::move(compiled.Function), std::move(compiled.ParamColumns))));
+        if (diagnostics) {
+            *diagnostics << "row-group predicate: compiled body " << program.Body << '\n';
+        }
+        auto compiled = TVmFunction::Compile(RowGroupVmContext(), {
+            .NamePrefix = EvalFn,
+            .Params = IntervalParams(schema, program.Columns),
+            .Body = body.Cast(),
+            .ReturnType = std::make_shared<TIntegerType>(TIntegerType::I64),
+            .Imports = {"row_group_interval"},
+        });
+        if (!compiled) {
+            throw std::runtime_error(compiled.error());
+        }
+        auto impl = std::make_unique<TImpl>(program, std::move(*compiled));
+        for (int32_t column : program.Columns) {
+            const auto info = NumberInfo(schema.Columns[static_cast<size_t>(column)].Type);
+            impl->ParamColumns.push_back({
+                .Column = static_cast<size_t>(column),
+                .Wide = info.Kind == ENumberKind::Decimal,
+            });
+        }
+        return std::shared_ptr<const TRowGroupPredicate>(new TRowGroupPredicate(std::move(impl)));
     } catch (const std::exception& error) {
         if (diagnostics) {
             *diagnostics << "row-group predicate: " << error.what() << '\n';
@@ -844,12 +787,45 @@ std::unique_ptr<TRowGroupPredicateEvaluator> TRowGroupPredicateEvaluator::Compil
     }
 }
 
-bool TRowGroupPredicateEvaluator::MayBeTrue(
-    std::span<const TRowGroupColumnRange> columns) const noexcept
+std::shared_ptr<const TRowGroupPredicate> TRowGroupPredicate::Compile(
+    const TExprPtr& predicate,
+    const TSchema& schema,
+    std::string_view sourceAlias,
+    std::ostream* diagnostics)
 {
-    if (!Impl_ || !Impl_->Function) {
-        return true;
+    TRowGroupPredicateProgram program;
+    try {
+        program = LowerProgram(predicate, schema, sourceAlias);
+    } catch (const std::exception& error) {
+        if (diagnostics) {
+            *diagnostics << "row-group predicate: " << error.what() << '\n';
+        }
+        return nullptr;
+    } catch (...) {
+        return nullptr;
     }
+    return Compile(program, schema, diagnostics);
+}
+
+struct TRowGroupPredicateEvaluator::TImpl {
+    TImpl(const TVmFunction& function, const std::vector<TParamColumn>& paramColumns)
+        : ParamColumns(paramColumns)
+        , State(function)
+    {}
+
+    const std::vector<TParamColumn>& ParamColumns;
+    TVmFunctionState State;
+};
+
+TRowGroupPredicateEvaluator::TRowGroupPredicateEvaluator(const TRowGroupPredicate& predicate)
+    : Impl_(std::make_unique<TImpl>(*predicate.Impl_->Function, predicate.Impl_->ParamColumns))
+{}
+
+TRowGroupPredicateEvaluator::~TRowGroupPredicateEvaluator() = default;
+
+bool TRowGroupPredicateEvaluator::MayBeTrue(
+    std::span<const TRowGroupColumnRange> columns) noexcept
+{
     try {
         std::vector<int64_t> args;
         args.reserve(Impl_->ParamColumns.size() * 5);
@@ -874,7 +850,7 @@ bool TRowGroupPredicateEvaluator::MayBeTrue(
             if (range.MayBeNaN) flags |= 8;
             args.push_back(flags);
         }
-        auto result = Impl_->Function->EvalRaw(std::move(args));
+        auto result = Impl_->State.EvalRaw(std::move(args));
         if (!result) {
             return true;
         }

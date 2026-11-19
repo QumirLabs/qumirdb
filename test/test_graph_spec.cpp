@@ -1113,6 +1113,26 @@ TEST(GraphSpec, MaterializationsReuseCachedTableUntilFileIdentityChanges)
     fs::remove(path);
 }
 
+// The scan tasks of one graph share a block predicate compiled once.
+TEST(GraphSpec, ScanTasksOfAGraphShareTheirCompiledBlockPredicate)
+{
+    const std::string path = QDB_TEST_DATA_DIR "/regtest/cases/decimal_parquet/tables/decimals.parquet";
+    const TRowGroupPredicateProgram unknown{.Body = "(block (return (call rg_truth_unknown)))"};
+    const TRowGroupPredicateProgram never{.Body = "(block (return (call rg_truth_false)))"};
+    TGatherConnection connection(1);
+    connection.Resize(3, 1);
+    const std::vector<IConnection*> connections{&connection};
+    TNodeTaskContext context;
+    for (uint32_t lane = 0; lane < 3; ++lane) {
+        const auto& program = lane < 2 ? unknown : never;
+        ASSERT_TRUE(MakeNodeTask(
+            TParquetScanNode{.Out = {0, lane}, .Path = path, .BlockPredicate = program}, connections, context));
+    }
+    ASSERT_EQ(context.BlockPredicates.size(), 2u);
+    EXPECT_TRUE(context.BlockPredicates.at({path, unknown.Body}));
+    EXPECT_TRUE(context.BlockPredicates.at({path, never.Body}));
+}
+
 int main(int argc, char** argv)
 {
     testing::InitGoogleTest(&argc, argv);

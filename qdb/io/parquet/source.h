@@ -1,12 +1,11 @@
 #pragma once
 
 #include <qdb/io/io.h>
+#include <qdb/io/parquet/row_group_predicate.h>
 #include <qdb/io/parquet/row_reader.h>
 #include <qdb/io/table.h>
 #include <qdb/plan/ops/stats.h>
 #include <qdb/scheduler/lowering/scan_split.h>
-
-#include <qumir/parser/ast.h>
 
 #include <memory>
 #include <iosfwd>
@@ -23,7 +22,6 @@ namespace NQdb {
 
 class TDecimalColumnScan;
 struct TParquetFileData;
-struct TSharedRowGroupPredicate;
 
 // Allocator behind Arrow's parquet reads. Auto prefers jemalloc and falls back
 // to Arrow's default pool; the others fall back to it when not compiled in.
@@ -57,7 +55,7 @@ public:
     std::unique_ptr<ISource> MakeSource(
         std::optional<std::vector<int>> rowGroups = std::nullopt,
         std::optional<std::unordered_set<std::string>> restrictedColumns = std::nullopt,
-        std::optional<TRowGroupPredicateProgram> blockPredicate = std::nullopt) const override;
+        std::shared_ptr<const TRowGroupPredicate> blockPredicate = nullptr) const override;
 
     const TSchema& Schema() const override;
     const TStatsPtr Stats() const override;
@@ -68,8 +66,7 @@ public:
     std::vector<NScheduler::TScanRowGroup> ScanRowGroups(
         const std::unordered_set<std::string>& columnNames) const;
     std::vector<NScheduler::TScanRowGroup> PruneRowGroups(
-        const NQumir::NAst::TExprPtr& predicate,
-        std::string_view sourceAlias,
+        const TRowGroupPredicate* predicate,
         std::ostream* diagnostics = nullptr,
         const std::unordered_set<std::string>* columnNames = nullptr) const override;
 
@@ -103,7 +100,7 @@ private:
         std::shared_ptr<TParquetFileData> file,
         std::vector<TPart> parts,
         std::optional<std::unordered_set<std::string>> restrictedColumns,
-        std::optional<TRowGroupPredicateProgram> blockPredicate);
+        std::shared_ptr<const TRowGroupPredicate> blockPredicate);
 
     void SelectColumns();
     void RefreshSchema();
@@ -133,10 +130,11 @@ private:
         std::unique_ptr<TDecimalColumnScan> Scan;
     };
     std::vector<TDecimalScan> DecimalScans_;
-    // Block selection: the positions in ArrowColumns_ of the predicate columns
-    // with value bounds, and the other arrow columns.
-    std::optional<TRowGroupPredicateProgram> BlockProgram_;
-    std::shared_ptr<TSharedRowGroupPredicate> BlockPredicate_;
+    // Block selection: the predicate the scans of a graph share, this scan's
+    // interpreter of it, the positions in ArrowColumns_ of the predicate
+    // columns with value bounds, and the other arrow columns.
+    std::shared_ptr<const TRowGroupPredicate> BlockPredicate_;
+    std::optional<TRowGroupPredicateEvaluator> BlockEvaluator_;
     std::vector<size_t> BlockColumns_;
     std::vector<int> RestColumns_;
     std::shared_ptr<arrow::Schema> BatchSchema_;
