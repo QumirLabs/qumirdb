@@ -175,7 +175,7 @@ public:
         for (const auto& [name, fields] : MergedSchemas()) {
             const auto path = Dir_ / (name + ".parquet");
             WriteTable(path, fields);
-            Files_.emplace(name, std::make_unique<TParquetFile>(path.string()));
+            Files_.emplace(name, std::make_shared<TParquetFile>(path.string()));
         }
     }
 
@@ -185,31 +185,31 @@ public:
         fs::remove_all(Dir_, error);
     }
 
-    const TParquetFile* Find(std::string_view table) const {
+    std::shared_ptr<const TParquetFile> Find(std::string_view table) const {
         auto found = Files_.find(table);
         return found == Files_.end()
             ? nullptr
-            : found->second.get();
+            : found->second;
     }
 
 private:
     NQumir::NCodeGen::TLLVMInitializer LlvmInit_;
     fs::path Dir_;
-    std::map<std::string, std::unique_ptr<TParquetFile>, std::less<>> Files_;
+    std::map<std::string, std::shared_ptr<TParquetFile>, std::less<>> Files_;
 };
 
 } // namespace
 
 void RunStatements(std::string_view sql, const TPlanHandler& handler) {
     static const TEnvironment environment;
-    std::vector<std::unique_ptr<TParquetSource>> sources;
+    size_t scans = 0;
     auto factory = [&](std::string_view table) -> std::expected<TOperatorPtr, NQumir::TError> {
-        const auto* file = environment.Find(table);
+        auto file = environment.Find(table);
         if (!file) {
             return std::unexpected(NQumir::TError("cannot open table '" + std::string(table) + "'"));
         }
-        auto& source = sources.emplace_back(file->MakeSource());
-        return std::make_shared<TSourceOperator>(*source, std::string(table));
+        ++scans;
+        return std::make_shared<TSourceOperator>(std::move(file), std::string(table));
     };
     TExternalModuleCatalog catalog;
     NCompiler::TQueryCompiler compiler(catalog, factory);
@@ -227,13 +227,13 @@ void RunStatements(std::string_view sql, const TPlanHandler& handler) {
             {
                 continue;
             }
-            sources.clear();
+            scans = 0;
             auto prepared = compiler.Prepare(statement, query->Explain);
             if (!prepared) {
                 return;
             }
             if (*prepared) {
-                handler(**prepared, query->Explain, sources.size());
+                handler(**prepared, query->Explain, scans);
             }
         }
     } catch (const std::out_of_range&) {
