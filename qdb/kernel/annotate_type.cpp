@@ -4,6 +4,7 @@
 #include <qdb/kernel/cast_rules.h>
 #include <qdb/kernel/vm_function.h>
 #include <qdb/plan/clone_expr.h>
+#include <qdb/plan/types/date.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/utils/module_path.h>
@@ -126,11 +127,12 @@ TTypePtr FromQumirType(const TTypePtr& type) {
     if (auto named = TMaybeType<TNamedType>(t); named && named.Cast()->Name == "StringView") {
         return std::make_shared<TStringType>();
     }
-    // DATE/TIMESTAMP are erased to i32 at the schema boundary (parquet DATE32 -> i32);
-    // a `cast(... as date)` target carries no underlying type, so map it explicitly.
-    if (auto named = TMaybeType<TNamedType>(t);
-        named && (named.Cast()->Name == "DATE" || named.Cast()->Name == "TIMESTAMP"))
-    {
+    // A `cast(... as date)` target carries no underlying type, so map it explicitly. DATE
+    // is an i32 to kernels (ToQumirType leaves TDateType alone); TIMESTAMP is plain i32.
+    if (auto named = TMaybeType<TNamedType>(t); named && named.Cast()->Name == "DATE") {
+        return std::make_shared<TDateType>();
+    }
+    if (auto named = TMaybeType<TNamedType>(t); named && named.Cast()->Name == "TIMESTAMP") {
         return std::make_shared<TIntegerType>(TIntegerType::I32);
     }
     return UnwrapNamedType(UnwrapNullableType(t));
@@ -967,6 +969,9 @@ TTypePtr UnifyBranchTypes(const TTypePtr& a, const TTypePtr& b,
         }
         return MakeDecimalType(da ? *da : *db);
     }
+    if (IsDateType(va) && IsDateType(vb)) {
+        return va;
+    }
     if ((IsInt(va) || IsFloat(va)) && (IsInt(vb) || IsFloat(vb))) {
         if (IsReal(va) && AbsorbedByReal(eb, schema)) {
             return va;
@@ -1027,6 +1032,19 @@ TTypePtr BinaryValueType(TOperator op, const TExprPtr& le, const TExprPtr& re,
     }
     if (op == "+" && (TMaybeType<TStringType>(vl) || TMaybeType<TStringType>(vr))) {
         return std::make_shared<TStringType>(); // string concatenation
+    }
+    // PostgreSQL: date + integer, integer + date and date - integer are dates; date - date
+    // is an integer number of days.
+    if (IsDateType(vl) || IsDateType(vr)) {
+        const bool bothDates = IsDateType(vl) && IsDateType(vr);
+        if ((op == "+" && !bothDates) || (op == "-" && IsDateType(vl) && !bothDates)) {
+            // The date operand's width: a min/max result is an i64.
+            return std::make_shared<TDateType>(
+                TMaybeType<TIntegerType>(IsDateType(vl) ? vl : vr).Cast()->Kind);
+        }
+        if (op == "-" && bothDates) {
+            return std::make_shared<TIntegerType>(TIntegerType::I32);
+        }
     }
     if (IsInt(vl) && IsInt(vr)) {
         if (IntLiteralFits(re, vl)) vr = vl;

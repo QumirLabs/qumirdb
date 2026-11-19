@@ -1,6 +1,7 @@
 #include <qdb/plan/ops/aggregate.h>
 
 #include <qdb/plan/passes/unbound_vars.h>
+#include <qdb/plan/types/date.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 
@@ -26,6 +27,10 @@ TTypePtr AggregateResultType(const std::string& func, const TTypePtr& argType) {
         // reducer's i64 state buffer (every other output element reads a high 0).
         const bool nullable = IsNullableType(argType);
         auto inner = nullable ? UnwrapNullableType(argType) : argType;
+        if (IsDateType(inner) && (func == "min" || func == "max")) {
+            TTypePtr dateType = std::make_shared<TDateType>(TIntegerType::I64);
+            return nullable ? std::make_shared<TNullable>(std::move(dateType)) : dateType;
+        }
         if (inner && inner->TypeName() == TIntegerType::TypeId) {
             // i64 state for every integer aggregate, incl. min/max over narrow ints.
             TTypePtr i64Type = std::make_shared<TIntegerType>();

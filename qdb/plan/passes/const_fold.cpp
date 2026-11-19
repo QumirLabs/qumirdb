@@ -4,6 +4,7 @@
 #include <qdb/kernel/vm_function.h>
 #include <qdb/plan/clone_expr.h>
 #include <qdb/plan/passes/unbound_vars.h>
+#include <qdb/plan/types/date.h>
 #include <qdb/utils/module_path.h>
 
 #include <qumir/error.h>
@@ -157,6 +158,9 @@ TExprPtr TConstFolder::Fold(TExprPtr expr) {
         return expr;
     }
     auto literal = Eval(rewritten, rewrittenType);
+    if (literal && IsDateType(rewrittenType)) {
+        literal->Type = std::make_shared<TDateType>();
+    }
     return literal ? literal : expr;
 }
 

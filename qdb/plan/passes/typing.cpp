@@ -11,6 +11,7 @@
 #include <qdb/plan/ops/cte_ref.h>
 #include <qdb/plan/ops/union.h>
 #include <qdb/plan/ops/window.h>
+#include <qdb/plan/types/date.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/kernel/annotate_type.h>
@@ -64,6 +65,7 @@ TTypePtr UnifyIntegers(const TIntegerType& a, const TIntegerType& b) {
 TTypePtr UnifyUnionBase(const TTypePtr& a, const TTypePtr& b) {
     if (!a || !b) return nullptr;
     if (a->ToString() == b->ToString()) return a;
+    if (IsDateType(a) && IsDateType(b)) return a;
     auto da = DecimalSpecOfValueType(a);
     auto db = DecimalSpecOfValueType(b);
     const bool numA = da || IsFloatType(a) || IsIntType(a);

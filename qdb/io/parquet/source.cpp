@@ -4,6 +4,7 @@
 #include <qdb/io/parquet/row_reader.h>
 #include <qdb/io/parquet/row_id.h>
 #include <qdb/io/parquet/row_group_predicate.h>
+#include <qdb/plan/types/date.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 
@@ -54,7 +55,7 @@ TTypePtr ArrowTypeToQumir(const std::shared_ptr<arrow::DataType>& type) {
         case arrow::Type::BOOL: return std::make_shared<NQumir::NAst::TBoolType>();
         case arrow::Type::STRING:
         case arrow::Type::LARGE_STRING: return std::make_shared<NQumir::NAst::TStringType>();
-        case arrow::Type::DATE32: return std::make_shared<TIntegerType>(TIntegerType::I32);
+        case arrow::Type::DATE32: return std::make_shared<TDateType>();
         case arrow::Type::DATE64: return std::make_shared<TIntegerType>(TIntegerType::I64);
         case arrow::Type::DECIMAL128: {
             auto decimal = std::static_pointer_cast<arrow::Decimal128Type>(type);

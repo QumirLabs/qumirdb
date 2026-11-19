@@ -8,6 +8,7 @@
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/pipeline.h>
 #include <qdb/plan/plan_print.h>
+#include <qdb/plan/types/date.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/sql/parser.h>
@@ -1119,6 +1120,7 @@ TValue Cell(const TColumn& column, int64_t row, const TTypePtr& type) {
         }
         return WideIntegerText(column.Data + row * 16, decimal->Scale);
     }
+    if (IsDateType(valueType)) return FormatDate(DateCellDays(column.Data, row, valueType));
     if (auto integer = TMaybeType<TIntegerType>(valueType)) {
         switch (integer.Cast()->Kind) {
             case TIntegerType::I8: return reinterpret_cast<const int8_t*>(column.Data)[row];

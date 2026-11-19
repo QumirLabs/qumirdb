@@ -1,6 +1,6 @@
 {
   "schema": "<struct (d <named Nullable [i32]>)>",
   "rows": [
-    [10441]
+    ["1998-08-03"]
   ]
 }

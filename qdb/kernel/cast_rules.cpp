@@ -1,5 +1,6 @@
 #include <qdb/kernel/cast_rules.h>
 
+#include <qdb/plan/types/date.h>
 #include <qdb/plan/types/decimal.h>
 
 #include <qumir/error.h>
@@ -32,6 +33,9 @@ EKind KindOf(const TTypePtr& type) {
     }
     if (IsDecimalType(type)) {
         return EKind::Decimal;
+    }
+    if (IsDateType(type)) {
+        return EKind::Date;
     }
     if (auto named = TMaybeType<TNamedType>(type)) {
         const std::string& name = named.Cast()->Name;
