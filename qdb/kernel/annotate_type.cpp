@@ -1043,7 +1043,11 @@ TTypePtr BinaryValueType(TOperator op, const TExprPtr& le, const TExprPtr& re,
                 TMaybeType<TIntegerType>(IsDateType(vl) ? vl : vr).Cast()->Kind);
         }
         if (op == "-" && bothDates) {
-            return std::make_shared<TIntegerType>(TIntegerType::I32);
+            // Days between: an i64 when either side is a min/max result.
+            const auto left = TMaybeType<TIntegerType>(vl).Cast();
+            const auto right = TMaybeType<TIntegerType>(vr).Cast();
+            return std::make_shared<TIntegerType>(
+                left->BitWidth() >= right->BitWidth() ? left->Kind : right->Kind);
         }
     }
     if (IsInt(vl) && IsInt(vr)) {
