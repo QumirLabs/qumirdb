@@ -235,6 +235,7 @@ class TestQdbdCli(unittest.TestCase):
                 self.assertRegex(r.stdout, rf"(?m)^\s*{flag}(\s|$)")
         self.assertIn("required", r.stdout)
         self.assertIn("--net:poller", r.stdout)
+        self.assertIn("--net:envelope_reader", r.stdout)
 
     def test_unregistered_node_id_exits_with_one(self):
         for args in ([], ["--node", f"127.0.0.1:{free_port()}:2"]):

@@ -395,6 +395,10 @@ TEST(DistributedSerialization, UsesCodecForDirectRemoteSend) {
         void Commit(size_t size) {
             Committed = size;
         }
+
+        uint64_t Offset() const {
+            return 0;
+        }
     } stream;
     TMixedBatch original;
     SerializeFarInplace<TDataChunk>(stream, TActorId(1, 2, 3), TActorId(4, 5, 6), std::move(original.Message));
@@ -402,9 +406,11 @@ TEST(DistributedSerialization, UsesCodecForDirectRemoteSend) {
     ASSERT_GE(stream.Buffer.size(), sizeof(THeader));
     THeader header;
     std::memcpy(&header, stream.Buffer.data(), sizeof(header));
-    EXPECT_EQ(header.MessageId, TDataChunk::MessageId);
-    EXPECT_EQ(header.Size, stream.Buffer.size() - sizeof(THeader));
-    TDecodedChunk decoded(std::string(stream.Buffer.data() + sizeof(THeader), header.Size));
+    const size_t padding = HeaderPadding(header);
+    EXPECT_EQ(HeaderMessageId(header), TDataChunk::MessageId);
+    EXPECT_EQ((sizeof(THeader) + padding) % TDataChunk::PayloadAlignment, 0);
+    EXPECT_EQ(header.Size, stream.Buffer.size() - sizeof(THeader) - padding);
+    TDecodedChunk decoded(std::string(stream.Buffer.data() + sizeof(THeader) + padding, header.Size));
     CheckMixed(decoded.Message);
 }
 
@@ -711,9 +717,10 @@ public:
         ASSERT_GE(size, sizeof(THeader));
         THeader header;
         std::memcpy(&header, Buffer_.data(), sizeof(header));
-        ASSERT_EQ(size, sizeof(header) + header.Size);
+        const size_t padding = HeaderPadding(header);
+        ASSERT_EQ(size, sizeof(header) + padding + header.Size);
         auto* data = ::operator new(header.Size);
-        std::memcpy(data, Buffer_.data() + sizeof(header), header.Size);
+        std::memcpy(data, Buffer_.data() + sizeof(header) + padding, header.Size);
         TBlob blob{
             .Data = TBlob::TRawPtr(data, TBlobDeleter{[](void* pointer) {
                 ::operator delete(pointer);
@@ -721,7 +728,7 @@ public:
             .Size = header.Size,
             .Type = TBlob::PointerType::Far,
         };
-        Peer_.Send(header.Sender, header.Recipient, header.MessageId, std::move(blob));
+        Peer_.Send(header.Sender, header.Recipient, HeaderMessageId(header), std::move(blob));
     }
 
     void StartConnect() override {}
