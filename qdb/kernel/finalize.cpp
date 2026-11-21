@@ -5,6 +5,10 @@
 #include <qdb/kernel/finalize_fused.h>
 #include <qdb/kernel/vm_program.h>
 
+#ifdef QUMIR_ENABLE_TPDE
+#include <qumir/codegen/tpde/tpde_backend.h>
+#endif
+
 #include <memory>
 #include <optional>
 #include <ostream>
@@ -60,7 +64,8 @@ void FinalizeKernels(
                      << ", function decls: " << fused.FunctionDeclCount
                      << ", entrypoints: " << fused.Entrypoints.size()
                      << (backend == EKernelBackend::Vm ? ", backend: vm" : "")
-                     << (cacheDir.empty() ? "" : ", cache: on")
+                     << (backend == EKernelBackend::Tpde ? ", backend: tpde" : "")
+                     << (cacheDir.empty() || backend == EKernelBackend::Tpde ? "" : ", cache: on")
                      << "\n";
     }
 
@@ -95,7 +100,17 @@ void FinalizeKernels(
     options.EnablePerfJitEventListener = true;
     options.PrintIr = diagnostics != nullptr;
     options.PrintLlvm = diagnostics != nullptr;
-    auto runner = std::make_shared<NQumir::TLLVMRunner>(std::move(options));
+    std::unique_ptr<NQumir::NCodeGen::ICodegenBackend> codegen;
+    if (backend == EKernelBackend::Tpde) {
+#ifdef QUMIR_ENABLE_TPDE
+        codegen = std::make_unique<NQumir::NCodeGen::TTpdeBackend>();
+#else
+        throw std::runtime_error("the tpde kernel backend needs a build with QUMIR_ENABLE_TPDE");
+#endif
+    }
+    auto runner = std::make_shared<NQumir::TLLVMRunner>(std::move(options), std::move(codegen));
+    // The object cache splits modules by symbol, which only the LLVM codegen does.
+    const bool useCache = !cacheDir.empty() && backend != EKernelBackend::Tpde;
 
     std::string error;
     std::unordered_map<std::string, void*> fns;
@@ -109,12 +124,12 @@ void FinalizeKernels(
         externalProgram = std::move(*composed);
     }
     if (externalProgram) {
-        if (diagnostics && !cacheDir.empty()) {
+        if (diagnostics && useCache) {
             *diagnostics << "[external-modules] persistent JIT cache bypassed\n";
         }
         fns = CompileKernelAst(
             *runner, std::move(*externalProgram), fused.Entrypoints, &error);
-    } else if (!cacheDir.empty()) {
+    } else if (useCache) {
         auto linked = CompileKernelAstCached(
             *runner, storage->Program, fused.Entrypoints, cacheDir, &error);
         fns = std::move(linked.Entries);

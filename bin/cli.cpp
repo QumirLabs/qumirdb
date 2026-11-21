@@ -261,7 +261,8 @@ int ExecutePlan(
                   << std::chrono::duration<double>(planElapsed).count() << " seconds\n"
                   << "KernelBuild: "
                   << std::chrono::duration<double>(buildElapsed).count() << " seconds\n"
-                  << (backend == NQdb::EKernelBackend::Vm ? "VmPrepare: " : "JitLLVM: ")
+                  << (backend == NQdb::EKernelBackend::Vm ? "VmPrepare: "
+                      : backend == NQdb::EKernelBackend::Tpde ? "JitTpde: " : "JitLLVM: ")
                   << std::chrono::duration<double>(llvmElapsed).count() << " seconds\n"
                   << "Cpu: " << cpuElapsed.count() << " seconds\n";
     }
