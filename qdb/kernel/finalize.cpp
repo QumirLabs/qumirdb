@@ -66,6 +66,9 @@ void FinalizeKernels(
                      << ", function decls: " << fused.FunctionDeclCount
                      << ", entrypoints: " << fused.Entrypoints.size()
                      << (backend == EKernelBackend::Vm ? ", backend: vm" : "")
+#ifdef QUMIR_ENABLE_TPDE
+                     << (backend == EKernelBackend::Tpde ? ", backend: tpde" : "")
+#endif
                      << (useCache ? ", cache: on" : "")
                      << "\n";
     }
