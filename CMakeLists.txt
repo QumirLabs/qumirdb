@@ -17,6 +17,12 @@ set(QDB_FUZZ_SANITIZERS "address,undefined" CACHE STRING "Sanitizers of a QDB_FU
 # libLLVM trades that for a runtime dependency on the LLVM package.
 option(QDB_LLVM_LINK_SHARED "Link the shared libLLVM instead of static LLVM archives" OFF)
 set(QUMIR_LLVM_LINK_SHARED ${QDB_LLVM_LINK_SHARED})
+# The experimental tpde kernel backend; Qumir builds TPDE from externals/tpde.
+option(QDB_ENABLE_TPDE "Build the tpde kernel backend (Linux AArch64 and x86-64, LLVM 22.1 or 23.1)" OFF)
+set(QUMIR_ENABLE_TPDE ${QDB_ENABLE_TPDE})
+if(QDB_ENABLE_TPDE)
+    set(QUMIR_TPDE_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/externals/tpde)
+endif()
 set(QDB_BUILD_NUMBER "0" CACHE STRING "Build number, becomes the Debian revision after the hyphen")
 
 # The upstream version is bumped by hand above; the build number rides along as the

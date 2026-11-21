@@ -124,6 +124,10 @@ target_include_directories(qumirdb PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
 target_include_directories(qumirdb PRIVATE ${LLVM_INCLUDE_DIRS})
 target_compile_definitions(qumirdb PUBLIC QDB_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 target_compile_features(qumirdb PUBLIC cxx_std_23)
+if(QDB_ENABLE_TPDE)
+    # Ahead of the qumir link group, which resolves its qumir symbols.
+    target_link_libraries(qumirdb PUBLIC qumir_codegen_tpde)
+endif()
 if(UNIX AND NOT APPLE)
     target_link_libraries(qumirdb PUBLIC
         "$<LINK_GROUP:RESCAN,qumir,qumir_runtime,qumir_codegen_llvm>"
