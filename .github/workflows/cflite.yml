@@ -45,7 +45,11 @@ jobs:
             echo "open=false" >> "$GITHUB_OUTPUT"
           fi
 
+  # libFuzzer replays the whole stored corpus before it mutates anything, and
+  # qdb_fuzz_vm needed its whole 20-minute share for that. It gets a pass of its
+  # own; two passes at a time keep the concurrent corpus uploads at two, as before.
   batch:
+    name: batch (${{ matrix.name }}, ${{ matrix.sanitizer }})
     needs: gate
     # The corpus token is used here: never hand it to a dispatch from another branch.
     if: github.ref == 'refs/heads/master' && needs.gate.outputs.open == 'false'
@@ -57,8 +61,15 @@ jobs:
       issues: write
     strategy:
       fail-fast: false
+      max-parallel: 2
       matrix:
         sanitizer: [address, undefined]
+        name: [vm, parse and plan]
+        include:
+          - name: vm
+            targets: qdb_fuzz_vm
+          - name: parse and plan
+            targets: qdb_fuzz_parse qdb_fuzz_plan
     steps:
       # The actions read base_os_version from .clusterfuzzlite/project.yaml in the workspace.
       - uses: actions/checkout@v4
@@ -69,6 +80,19 @@ jobs:
         with:
           language: c++
           sanitizer: ${{ matrix.sanitizer }}
+      # run_fuzzers fuzzes every fuzzer in build-out: keep only the targets of this pass.
+      # build_fuzzers runs in a root container, so build-out belongs to root.
+      - name: Keep the targets of this pass
+        env:
+          TARGETS: ${{ matrix.targets }}
+        run: |
+          for target in qdb_fuzz_parse qdb_fuzz_plan qdb_fuzz_vm; do
+            case " $TARGETS " in
+              *" $target "*) ;;
+              *) sudo rm -f "build-out/$target" ;;
+            esac
+          done
+          ls build-out
       - name: Run fuzzers (${{ matrix.sanitizer }})
         id: run
         uses: google/clusterfuzzlite/actions/run_fuzzers@v1
