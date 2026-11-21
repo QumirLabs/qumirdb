@@ -170,6 +170,7 @@ jobs:
           : > "$RUNNER_TEMP/prune.log"
           for job in $(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs" \
               --paginate --jq '.jobs[] | select(.name | startswith("prune (")) | .id'); do
-            gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$job/logs" >> "$RUNNER_TEMP/prune.log"
+            # Job logs carry ANSI colour codes, which gh refuses to print without the flag.
+            gh api --allow-escape-sequences "repos/$GITHUB_REPOSITORY/actions/jobs/$job/logs" >> "$RUNNER_TEMP/prune.log"
           done
           bash .clusterfuzzlite/report_prune.sh "$RUNNER_TEMP/prune.log"
