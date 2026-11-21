@@ -108,7 +108,7 @@ std::shared_ptr<TVmProgram> PrepareVmProgram(
     KeepEntryNames(ast, entryNames);
     TVmFrontendContext frontend({NUtils::ModuleFile("qumirdb.oz")});
     auto program = std::make_shared<TVmProgram>();
-    auto lowered = frontend.Lower(std::move(ast), program->Module, /*runDefiniteAssignment=*/false);
+    auto lowered = frontend.Lower(std::move(ast), program->Module);
     if (!lowered) {
         throw std::runtime_error("VM kernel frontend failed: " + lowered.error());
     }

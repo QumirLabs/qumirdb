@@ -42,7 +42,7 @@ private:
     // here in about 0.05 ms.
     std::unique_ptr<TVmFrontendContext> Builtin_;
     // With the qumirdb module, for an expression with a qdb type, function or
-    // operator. Each compilation composes the whole module, about 13 ms. Once
+    // operator. Each compilation composes the whole module, about 8 ms. Once
     // the module is loaded, every compilation in a frontend composes it, so
     // the expressions that do not need it compile in the other one.
     std::unique_ptr<TVmFrontendContext> Qumirdb_;

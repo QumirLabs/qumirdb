@@ -51,11 +51,12 @@ public:
         NQumir::NAst::TExprPtr module);
     std::expected<NQumir::NAst::TExprPtr, std::string> Transform(
         NQumir::NAst::TExprPtr module);
-    // Kernels skip definite-assignment analysis, as KernelRunnerOptions does.
+    // Lowers engine-generated code, kernels and planning-time functions, without
+    // definite-assignment analysis, as KernelRunnerOptions does: on the composed
+    // qumirdb module the analysis takes most of a compilation.
     std::expected<void, std::string> Lower(
         NQumir::NAst::TExprPtr module,
-        NQumir::NIR::TModule& output,
-        bool runDefiniteAssignment = true);
+        NQumir::NIR::TModule& output);
 
 private:
     struct TImpl;
