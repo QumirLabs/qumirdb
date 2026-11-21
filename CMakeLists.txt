@@ -2,6 +2,9 @@ cmake_minimum_required(VERSION 3.30)
 project(qumirdb VERSION 0.5.1)
 enable_testing()
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+# No C++20 modules here: without this, CMake 3.28+ with Ninja and GCC 14+ scans every
+# file for them and adds -fmodules-ts, which also makes ccache skip the compile.
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 
 option(QDB_BUILD_SERVICE "Build QumirDB web service" OFF)
 option(QDB_BUILD_DAEMON "Build QumirDB daemon" OFF)
