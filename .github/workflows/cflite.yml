@@ -119,6 +119,7 @@ jobs:
           language: c++
           sanitizer: address
       # run_fuzzers prunes every fuzzer in build-out: keep only the targets of this pass.
+      # build_fuzzers runs in a root container, so build-out belongs to root.
       - name: Keep the targets of this pass
         env:
           TARGETS: ${{ matrix.targets }}
@@ -126,7 +127,7 @@ jobs:
           for target in qdb_fuzz_parse qdb_fuzz_plan qdb_fuzz_vm; do
             case " $TARGETS " in
               *" $target "*) ;;
-              *) rm -f "build-out/$target" ;;
+              *) sudo rm -f "build-out/$target" ;;
             esac
           done
           ls build-out
