@@ -6,6 +6,7 @@
 	url = https://github.com/resetius/coroio.git
 # Only QDB_ENABLE_TPDE builds need it, so --recursive skips it: git submodule update --init
 # --checkout externals/tpde, then git -C externals/tpde submodule update --init deps/fadec deps/disarm.
+# After a pin bump run the first command again.
 [submodule "externals/tpde"]
 	path = externals/tpde
 	url = https://github.com/tpde2/tpde.git

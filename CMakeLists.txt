@@ -21,6 +21,12 @@ set(QUMIR_LLVM_LINK_SHARED ${QDB_LLVM_LINK_SHARED})
 option(QDB_ENABLE_TPDE "Build the tpde kernel backend (Linux AArch64 and x86-64, LLVM 22.1 or 23.1)" OFF)
 set(QUMIR_ENABLE_TPDE ${QDB_ENABLE_TPDE})
 if(QDB_ENABLE_TPDE)
+    if(NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/externals/tpde/CMakeLists.txt
+       OR NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/externals/tpde/deps/fadec)
+        message(FATAL_ERROR "externals/tpde is not checked out, run: "
+            "git submodule update --init --checkout externals/tpde && "
+            "git -C externals/tpde submodule update --init deps/fadec deps/disarm")
+    endif()
     set(QUMIR_TPDE_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/externals/tpde)
 endif()
 set(QDB_BUILD_NUMBER "0" CACHE STRING "Build number, becomes the Debian revision after the hyphen")
