@@ -48,6 +48,8 @@ struct TSpawnComputeActorResponse {
 // serialized, then destroyed.
 struct TDataChunk {
     static constexpr NNet::NActors::TMessageId MessageId = 200;
+    // A received chunk's row sets point into its payload only if the payload is 16-byte aligned.
+    static constexpr size_t PayloadAlignment = 16;
     uint64_t DstTaskId = 0;
     // Numbers the chunks of one DstTaskId from 1; TDataConfirm acknowledges them.
     uint64_t Seq = 0;

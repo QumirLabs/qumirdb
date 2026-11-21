@@ -214,9 +214,9 @@ void WriteExactly(const T& message, std::span<char> out) {
 
 // A chunk on the wire: a header, then each row set as a part: its header, one
 // entry per column, then 16-byte aligned regions per column (values or string
-// offsets and bytes, then the mask) and the hashes. The received blob is
-// 16-byte aligned, so the row sets point into it and share it.
-constexpr size_t ChunkAlign = 16;
+// offsets and bytes, then the mask) and the hashes. The transport aligns the
+// received blob to TDataChunk::PayloadAlignment, so the row sets point into it and share it.
+constexpr size_t ChunkAlign = TDataChunk::PayloadAlignment;
 
 size_t AlignUp(size_t value) {
     return (value + ChunkAlign - 1) & ~(ChunkAlign - 1);
