@@ -4,3 +4,6 @@
 timeout = 100
 rss_limit_mb = 4096
 malloc_limit_mb = 2560
+# libFuzzer replays the whole corpus before it mutates, and long queries compile
+# slowly; 93% of the stored corpus is under 8 KB.
+max_len = 8192
