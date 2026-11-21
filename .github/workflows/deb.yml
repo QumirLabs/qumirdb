@@ -28,6 +28,12 @@ jobs:
       with:
         submodules: recursive
 
+    # `update = none` makes the recursive checkout skip externals/tpde.
+    - name: Check out TPDE
+      run: |
+        git submodule update --init --checkout externals/tpde
+        git -C externals/tpde submodule update --init deps/fadec deps/disarm
+
     - name: Install Arrow apt source
       run: |
         sudo apt-get install -y ca-certificates lsb-release wget
@@ -55,6 +61,7 @@ jobs:
           -DQDB_BUILD_SERVICE=ON \
           -DQDB_BUILD_DAEMON=ON \
           -DQDB_LLVM_LINK_SHARED=ON \
+          -DQDB_ENABLE_TPDE=ON \
           -DQDB_BUILD_NUMBER=${{ github.run_number }}
 
     - name: build
