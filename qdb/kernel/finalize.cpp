@@ -5,6 +5,10 @@
 #include <qdb/kernel/finalize_fused.h>
 #include <qdb/kernel/vm_program.h>
 
+#ifdef QUMIR_ENABLE_TPDE
+#include <qumir/codegen/tpde/tpde_backend.h>
+#endif
+
 #include <memory>
 #include <optional>
 #include <ostream>
@@ -51,6 +55,8 @@ void FinalizeKernels(
     }
 
     auto fused = BuildFusedProgram(unique);
+    // The object cache is built on the partitioned LLVM codegen.
+    const bool useCache = !cacheDir.empty() && backend == EKernelBackend::Llvm;
 
     if (diagnostics) {
         *diagnostics << "\n========== RUNTIME FUSED FINALIZE ==========\n"
@@ -60,7 +66,7 @@ void FinalizeKernels(
                      << ", function decls: " << fused.FunctionDeclCount
                      << ", entrypoints: " << fused.Entrypoints.size()
                      << (backend == EKernelBackend::Vm ? ", backend: vm" : "")
-                     << (cacheDir.empty() ? "" : ", cache: on")
+                     << (useCache ? ", cache: on" : "")
                      << "\n";
     }
 
@@ -95,7 +101,13 @@ void FinalizeKernels(
     options.EnablePerfJitEventListener = true;
     options.PrintIr = diagnostics != nullptr;
     options.PrintLlvm = diagnostics != nullptr;
-    auto runner = std::make_shared<NQumir::TLLVMRunner>(std::move(options));
+    std::unique_ptr<NQumir::NCodeGen::ICodegenBackend> codegen;
+#ifdef QUMIR_ENABLE_TPDE
+    if (backend == EKernelBackend::Tpde) {
+        codegen = std::make_unique<NQumir::NCodeGen::TTpdeBackend>();
+    }
+#endif
+    auto runner = std::make_shared<NQumir::TLLVMRunner>(std::move(options), std::move(codegen));
 
     std::string error;
     std::unordered_map<std::string, void*> fns;
@@ -114,7 +126,7 @@ void FinalizeKernels(
         }
         fns = CompileKernelAst(
             *runner, std::move(*externalProgram), fused.Entrypoints, &error);
-    } else if (!cacheDir.empty()) {
+    } else if (useCache) {
         auto linked = CompileKernelAstCached(
             *runner, storage->Program, fused.Entrypoints, cacheDir, &error);
         fns = std::move(linked.Entries);
