@@ -150,8 +150,7 @@ std::expected<TExprPtr, std::string> TVmFrontendContext::Transform(
 
 std::expected<void, std::string> TVmFrontendContext::Lower(
     TExprPtr module,
-    NQumir::NIR::TModule& output,
-    bool runDefiniteAssignment)
+    NQumir::NIR::TModule& output)
 {
     std::lock_guard lock(Impl_->Mutex);
     if (Impl_->LoadError) {
@@ -166,7 +165,7 @@ std::expected<void, std::string> TVmFrontendContext::Lower(
     resolver.RegisterModule(Impl_->Builtins.get());
     (void)resolver.ImportModule(Impl_->Builtins->Name());
     auto transformed = TransformWithResolver(
-        Impl_->Loader, Impl_->Pragmas, resolver, std::move(module), runDefiniteAssignment);
+        Impl_->Loader, Impl_->Pragmas, resolver, std::move(module), /*runDefiniteAssignment=*/false);
     if (!transformed) {
         return std::unexpected(transformed.error());
     }
