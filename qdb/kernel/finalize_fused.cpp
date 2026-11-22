@@ -452,7 +452,9 @@ private:
 } // namespace
 
 std::string MakeKernelDedupKey(const TGeneratedKernel &kernel) {
-  std::string key = NCore::PrintAst(kernel.Ast);
+  std::string key = NCore::PrintAst(kernel.Ast, NCore::TPrintOptions {
+    .Pretty = false
+  });
   key += "\n# qdb-kernel-entrypoints\n";
   for (const auto &entrypoint : kernel.Entrypoints) {
     key += std::to_string(entrypoint.size());
