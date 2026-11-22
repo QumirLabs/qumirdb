@@ -188,7 +188,9 @@ TEST(TypeText, QumirDbTypesAreTheOnesQumirdbOzDeclares) {
         .NamePrefix = "__type_check__",
         .Params = std::move(params),
         .Body = NQumir::MakeIntrusive<TBlockExpr>(loc, std::vector<TExprPtr>{
-            NQumir::MakeIntrusive<TReturnExpr>(loc, NQumir::MakeIntrusive<TNumberExpr>(loc, int64_t{0}, types))}),
+            NQumir::MakeIntrusive<TReturnExpr>(
+                loc, NQumir::MakeIntrusive<TNumberExpr>(loc, int64_t{0}, types)),
+        }),
         .ReturnType = types.MakeInteger(),
         .Imports = {"qumirdb"},
     });

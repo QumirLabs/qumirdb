@@ -35,7 +35,9 @@ namespace {
 bool IsIntType(const TTypePtr& t) {
     return static_cast<bool>(MaybeIntegerType(t));
 }
-bool IsFloatType(const TTypePtr& t) { return static_cast<bool>(TMaybeType<TFloatType>(t)); }
+bool IsFloatType(const TTypePtr& t) {
+    return static_cast<bool>(TMaybeType<TFloatType>(t));
+}
 
 // Narrowest integer type holding both operands, as in DuckDB: the wider of two
 // integers of one signedness, and for mixed signedness the signed type wider than
