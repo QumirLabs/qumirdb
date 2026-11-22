@@ -203,7 +203,7 @@ struct TBuiltPlan {
     size_t PhysicalTasks = 0;
     std::unordered_map<std::string, size_t> SourceLanes;
     struct TRepartition {
-        std::vector<std::string> Keys;
+        std::vector<int64_t> KeyColumns;
         size_t Sources = 0;
         size_t Destinations = 0;
     };
@@ -228,8 +228,7 @@ TBuiltPlan Lower(
             ++sourceLanes[node->DebugLabel];
         }
     }
-    // The shuffle tasks of one exchange share a task group; the hash key
-    // columns of their input name the keys.
+    // The shuffle tasks of one exchange share a task group.
     std::unordered_map<NScheduler::TTaskGroupId, size_t> exchanges;
     for (const auto& record : lowered.NodeSpecs) {
         const auto* shuffle = record
@@ -240,15 +239,10 @@ TBuiltPlan Lower(
         }
         const auto [exchange, added] = exchanges.emplace(record->TaskGroupId, repartitions.size());
         if (added) {
-            const auto& fields = static_cast<const NQumir::NAst::TStructType&>(*shuffle->InputType).Fields;
-            const auto& columns = std::visit([](const auto& hash) -> const std::vector<int64_t>& {
-                return hash.KeyColumns;
-            }, shuffle->Hash);
-            TBuiltPlan::TRepartition repartition{.Destinations = shuffle->Out.size()};
-            for (const auto column : columns) {
-                repartition.Keys.push_back(fields[column].first);
-            }
-            repartitions.push_back(std::move(repartition));
+            repartitions.push_back({
+                .KeyColumns = std::visit([](const auto& hash) { return hash.KeyColumns; }, shuffle->Hash),
+                .Destinations = shuffle->Out.size(),
+            });
         }
         ++repartitions[exchange->second].Sources;
     }
@@ -1279,8 +1273,8 @@ TEST(ExecPlanBuilder, GroupedPartialAggregateHasDistributedPhaseBoundary) {
     ASSERT_EQ(built.Repartitions.size(), 1u);
     EXPECT_EQ(built.Repartitions[0].Sources, 4u);
     EXPECT_EQ(built.Repartitions[0].Destinations, 2u);
-    EXPECT_EQ(built.Repartitions[0].Keys,
-        (std::vector<std::string>{"t.k"}));
+    ASSERT_EQ(built.Repartitions[0].KeyColumns, (std::vector<int64_t>{0}));
+    EXPECT_EQ(static_cast<const NQumir::NAst::TStructType&>(*aggregates[0]->OutputType).Fields[0].first, "t.k");
     ExpectKernelBindings(built);
 
     settings.Aggregate.EnablePartial = false;

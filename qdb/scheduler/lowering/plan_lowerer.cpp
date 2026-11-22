@@ -1119,11 +1119,7 @@ private:
         auto planOut = Lower(materialization->Plan, input);
 
         const auto spool = static_cast<uint32_t>(CteSpools_.size());
-        std::vector<NScheduler::TRowLayoutSpec> rowLayouts;
-        for (const auto& layout : RowLayouts(planOut.OutputType)) {
-            rowLayouts.push_back({.Width = layout.Width, .Bitmap = layout.Bitmap});
-        }
-        CteSpools_.push_back({.Segments = static_cast<uint32_t>(lanes), .RowLayouts = std::move(rowLayouts)});
+        CteSpools_.push_back({.Segments = static_cast<uint32_t>(lanes), .RowLayouts = RowLayouts(planOut.OutputType)});
         // No row type: the rows go through the spool, these only finish lanes.
         auto& written = AddConn<NScheduler::TGatherConnection>(
             lanes, 1, "cte-written");
@@ -2654,11 +2650,12 @@ private:
         TShuffleRuntimeFilter runtimeFilter = {})
     {
         TRepartitionExchange side;
+        const auto layouts = RowLayouts(input.OutputType);
         side.Partitions.reserve(partitions);
         for (size_t m = 0; m < partitions; ++m) {
             side.Partitions.push_back(&AddConn<NScheduler::TGatherConnection>(
                 inputLanes, 1, label, ShuffleQueueCapacity()));
-            SetRowType(*side.Partitions.back(), input.OutputType);
+            side.Partitions.back()->SetRowLayouts(layouts);
         }
         side.Nodes.reserve(inputLanes);
         const auto shuffleTaskGroupId = NewTaskGroup();
@@ -2676,7 +2673,7 @@ private:
                     .In = PortSpec(Graph_, &inputConn, p),
                     .Out = std::move(outputs),
                     .Hash = hash,
-                    .InputType = input.OutputType,
+                    .InputLayouts = layouts,
                     .TargetOutputBatchRows = Settings_.HashShuffle.TargetOutputBatchRows,
                     .MaxOutputBatchRows = Settings_.HashShuffle.MaxOutputBatchRows,
                     .TargetOutputBatchBytes = Settings_.HashShuffle.TargetOutputBatchBytes,

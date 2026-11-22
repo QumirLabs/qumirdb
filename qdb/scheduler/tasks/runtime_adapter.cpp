@@ -2,11 +2,6 @@
 
 #include <qdb/scheduler/graph.h>
 #include <qdb/scheduler/instrumentation/task.h>
-#include <qdb/kernel/column_value.h>
-#include <qdb/plan/types/decimal.h>
-#include <qdb/plan/types/nullable.h>
-
-#include <qumir/error.h>
 
 #include <algorithm>
 #include <cassert>
@@ -23,8 +18,6 @@
 namespace NQdb {
 namespace NScheduler {
 namespace {
-
-using namespace NQumir::NAst;
 
 // Flush a blocking task's buffered output rowset. Returns the result to return
 // immediately (OK once pushed, BLOCKED_OUTPUT if the queue is full), or nullopt
@@ -110,33 +103,19 @@ void ClearBit(std::vector<uint8_t>& mask, size_t i) {
     mask[i / 8] &= ~(uint8_t(1) << (i % 8));
 }
 
-TTypePtr ShuffleValueType(const TTypePtr& type) {
-    return UnwrapNamedType(UnwrapNullableType(type));
+bool IsStringLayout(const TValueLayout& layout) {
+    return !layout.Bitmap && layout.Width == 0;
 }
 
-size_t ShuffleColumnFixedWidth(const TTypePtr& type) {
-    auto valueType = ShuffleValueType(type);
-    if (TMaybeType<TBoolType>(valueType) || TMaybeType<TStringType>(valueType)) {
-        return 0;
-    }
-    if (const auto width = NKernel::FixedValueWidth(type)) {
-        return static_cast<size_t>(width);
-    }
-    throw NQumir::TError(
-        "hash shuffle cannot materialize column of type " +
-        (type ? type->ToString() : std::string("<null>")));
-}
-
-size_t EstimateShuffleRowBytes(const TStructType& inputType) {
+size_t EstimateShuffleRowBytes(std::span<const TValueLayout> layouts) {
     size_t total = 0;
-    for (const auto& field : inputType.Fields) {
-        const auto valueType = ShuffleValueType(field.second);
-        if (TMaybeType<TStringType>(valueType)) {
+    for (const auto& layout : layouts) {
+        if (IsStringLayout(layout)) {
             total += sizeof(int64_t) + 32;
-        } else if (TMaybeType<TBoolType>(valueType)) {
+        } else if (layout.Bitmap) {
             total += 1;
         } else {
-            total += ShuffleColumnFixedWidth(field.second);
+            total += static_cast<size_t>(layout.Width);
         }
     }
     return std::max<size_t>(total, 1);
@@ -156,23 +135,22 @@ void AddPayloadBytes(size_t& total, size_t count, size_t width = 1) {
 // be charged more than once, and opaque source ancestors are not visible here.
 size_t ReferencedInputBytes(
     const TRowSet& input,
-    const TStructType& type,
+    std::span<const TValueLayout> layouts,
     const std::shared_ptr<uint64_t>& hashes)
 {
     const size_t rows = static_cast<size_t>(input.RowCount);
     size_t bytes = 0;
-    for (size_t index = 0; index < type.Fields.size(); ++index) {
+    for (size_t index = 0; index < layouts.size(); ++index) {
         const auto& column = input.Columns[index];
-        const auto& fieldType = type.Fields[index].second;
-        const auto valueType = ShuffleValueType(fieldType);
-        if (TMaybeType<TStringType>(valueType)) {
+        const auto& layout = layouts[index];
+        if (IsStringLayout(layout)) {
             AddPayloadBytes(bytes, rows + 1, column.OffsetWidth);
             AddPayloadBytes(bytes, static_cast<size_t>(
                 OffsetAt(column, input.RowCount) - OffsetAt(column, 0)));
-        } else if (TMaybeType<TBoolType>(valueType)) {
+        } else if (layout.Bitmap) {
             AddPayloadBytes(bytes, (rows + column.DataBitOffset % 8 + 7) / 8);
         } else {
-            AddPayloadBytes(bytes, rows, ShuffleColumnFixedWidth(fieldType));
+            AddPayloadBytes(bytes, rows, static_cast<size_t>(layout.Width));
         }
         if (column.Mask) {
             AddPayloadBytes(bytes, (rows + column.MaskBitOffset % 8 + 7) / 8);
@@ -188,14 +166,6 @@ size_t ReferencedInputBytes(
         AddPayloadBytes(bytes, rows, sizeof(uint64_t));
     }
     return bytes;
-}
-
-const TStructType& ShuffleInputStruct(const TTypePtr& type) {
-    auto structure = TMaybeType<TStructType>(UnwrapNamedType(type));
-    if (!structure) {
-        throw std::runtime_error("hash shuffle input must have TStructType");
-    }
-    return *structure.Cast();
 }
 
 } // namespace
@@ -281,12 +251,12 @@ THashShuffleCode::THashShuffleCode(THash hash)
 {}
 
 THashShuffleCode::THashShuffleCode(THash hash,
-    NQumir::NAst::TTypePtr inputType,
+    std::vector<TValueLayout> inputLayouts,
     size_t targetOutputBatchRows,
     size_t maxOutputBatchRows,
     size_t targetOutputBatchBytes)
     : Hash(std::move(hash))
-    , InputType(std::move(inputType))
+    , InputLayouts(std::move(inputLayouts))
     , TargetOutputBatchRows(targetOutputBatchRows)
     , MaxOutputBatchRows(maxOutputBatchRows)
     , TargetOutputBatchBytes(targetOutputBatchBytes)
@@ -955,7 +925,7 @@ void THashShuffleTask::ObserveInstrumentation() {
 }
 
 bool THashShuffleTask::BatchingEnabled() const {
-    return Code_->InputType && Code_->TargetOutputBatchRows > 0;
+    return !Code_->InputLayouts.empty() && Code_->TargetOutputBatchRows > 0;
 }
 
 size_t THashShuffleTask::OutputOf(uint64_t hash) const {
@@ -1030,15 +1000,15 @@ void THashShuffleTask::ScatterBuffered(const std::shared_ptr<TRowSet>& input) {
     const size_t outputs = Outputs_.size();
     EnsureBuffers(outputs);
 
-    const auto& inputType = ShuffleInputStruct(Code_->InputType);
-    if (input->ColumnCount < static_cast<int64_t>(inputType.Fields.size())) {
+    const auto& layouts = Code_->InputLayouts;
+    if (input->ColumnCount < static_cast<int64_t>(layouts.size())) {
         throw std::runtime_error("hash shuffle rowset has fewer columns than schema");
     }
 
     std::vector<std::vector<int32_t>> rows(outputs);
     std::vector<size_t> bytes(outputs, 0);
 
-    const size_t estimatedRowBytes = EstimateShuffleRowBytes(inputType);
+    const size_t estimatedRowBytes = EstimateShuffleRowBytes(layouts);
 
     if (outputs == 1 && Code_->Routes.empty() && !Code_->ProducedFilter) {
         rows[0].reserve(input->RowCount);
@@ -1051,7 +1021,7 @@ void THashShuffleTask::ScatterBuffered(const std::shared_ptr<TRowSet>& input) {
         bytes[0] = rows[0].size() * estimatedRowBytes;
         const auto hashes = Code_->UseInputHash && input->Hash
             ? std::shared_ptr<uint64_t>(input, input->Hash) : nullptr;
-        const size_t inputBytes = ReferencedInputBytes(*input, inputType, hashes);
+        const size_t inputBytes = ReferencedInputBytes(*input, layouts, hashes);
         AddBufferedRows(0, input, std::move(rows[0]), bytes[0], hashes, inputBytes);
         return;
     }
@@ -1067,7 +1037,7 @@ void THashShuffleTask::ScatterBuffered(const std::shared_ptr<TRowSet>& input) {
         rows[OutputOf(hashValues[row])].push_back(static_cast<int32_t>(row));
     }
 
-    const size_t inputBytes = ReferencedInputBytes(*input, inputType, hashes);
+    const size_t inputBytes = ReferencedInputBytes(*input, layouts, hashes);
     for (size_t dst = 0; dst < outputs; ++dst) {
         bytes[dst] = rows[dst].size() * estimatedRowBytes;
         AddBufferedRows(dst, input, std::move(rows[dst]), bytes[dst], hashes, inputBytes);
@@ -1221,10 +1191,10 @@ void THashShuffleTask::FlushBuffer(size_t dst, bool releaseInputs) {
         return;
     }
 
-    const auto& inputType = ShuffleInputStruct(Code_->InputType);
+    const auto& layouts = Code_->InputLayouts;
     auto* data = new TMaterializedShuffleRowSetData;
-    data->Gathered.resize(inputType.Fields.size());
-    data->Columns.resize(inputType.Fields.size());
+    data->Gathered.resize(layouts.size());
+    data->Columns.resize(layouts.size());
     if (std::all_of(buffer.Batches.begin(), buffer.Batches.end(),
             [](const auto& batch) { return static_cast<bool>(batch.Hashes); })) {
         data->Hashes.reserve(buffer.RowCount);
@@ -1235,12 +1205,11 @@ void THashShuffleTask::FlushBuffer(size_t dst, bool releaseInputs) {
         }
     }
 
-    for (size_t colIdx = 0; colIdx < inputType.Fields.size(); ++colIdx) {
-        const auto& type = inputType.Fields[colIdx].second;
-        const auto valueType = ShuffleValueType(type);
-        const bool isString = static_cast<bool>(TMaybeType<TStringType>(valueType));
-        const bool isBool = static_cast<bool>(TMaybeType<TBoolType>(valueType));
-        const size_t width = ShuffleColumnFixedWidth(type);
+    for (size_t colIdx = 0; colIdx < layouts.size(); ++colIdx) {
+        const auto& layout = layouts[colIdx];
+        const bool isString = IsStringLayout(layout);
+        const bool isBool = layout.Bitmap;
+        const size_t width = static_cast<size_t>(layout.Width);
         auto& out = data->Gathered[colIdx];
         const size_t rowCount = buffer.RowCount;
 

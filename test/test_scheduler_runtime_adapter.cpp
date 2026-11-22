@@ -2,7 +2,6 @@
 
 #include "runtime_filter_test_util.h"
 
-#include <qdb/plan/types/nullable.h>
 #include <qdb/scheduler/channel.h>
 #include <qdb/scheduler/connection.h>
 #include <qdb/scheduler/connections/local.h>
@@ -14,7 +13,6 @@
 #include <qdb/scheduler/impl/threaded_scheduler.h>
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
-#include <qumir/parser/type.h>
 
 #include <algorithm>
 #include <atomic>
@@ -1563,7 +1561,6 @@ TEST(SchedulerRuntimeAdapter, HashShuffleTaskFailsOnAPartitionRoutedNowhere) {
 }
 
 TEST(SchedulerRuntimeAdapter, HashShuffleTaskBatchesRowsUntilFinish) {
-    using namespace NQumir::NAst;
 
     std::atomic<int> destroyCount = 0;
     TOneToOneConnection input(2);
@@ -1573,10 +1570,7 @@ TEST(SchedulerRuntimeAdapter, HashShuffleTaskBatchesRowsUntilFinish) {
     ASSERT_TRUE(input.Push(0, MakeInt64RowSet({2, 3}, &destroyCount)));
     input.Finish(0);
 
-    auto schema = std::make_shared<TStructType>(
-        std::vector<std::pair<std::string, TTypePtr>>{
-            {"value", std::make_shared<TIntegerType>()},
-        });
+    const std::vector<TValueLayout> layouts = {{.Width = 8}};
     auto code = std::make_shared<THashShuffleCode>(
         [](TRowSet* batch, uint64_t* hashes) {
             auto* values = reinterpret_cast<int64_t*>(batch->Columns[0].Data);
@@ -1585,7 +1579,7 @@ TEST(SchedulerRuntimeAdapter, HashShuffleTaskBatchesRowsUntilFinish) {
             }
             return true;
         },
-        schema,
+        layouts,
         16,
         64,
         1024 * 1024);
@@ -1632,7 +1626,6 @@ TEST(SchedulerRuntimeAdapter, HashShuffleTaskBatchesRowsUntilFinish) {
 }
 
 TEST_F(SchedulerRuntimeFilter, PublishesRuntimeFilterBeforeBufferedOutputDrains) {
-    using namespace NQumir::NAst;
     std::atomic<int> destroyCount = 0;
     TOneToOneConnection input(1);
     TShuffleOutputs output(1, 1);
@@ -1640,10 +1633,7 @@ TEST_F(SchedulerRuntimeFilter, PublishesRuntimeFilterBeforeBufferedOutputDrains)
     input.Finish(0);
     ASSERT_TRUE(output[0].Push(0, MakeRowSet(1, &destroyCount)));
 
-    auto schema = std::make_shared<TStructType>(
-        std::vector<std::pair<std::string, TTypePtr>>{
-            {"value", std::make_shared<TIntegerType>()},
-        });
+    const std::vector<TValueLayout> layouts = {{.Width = 8}};
     auto code = std::make_shared<THashShuffleCode>(
         [](TRowSet* batch, uint64_t* hashes) {
             auto* values = reinterpret_cast<int64_t*>(batch->Columns[0].Data);
@@ -1651,7 +1641,7 @@ TEST_F(SchedulerRuntimeFilter, PublishesRuntimeFilterBeforeBufferedOutputDrains)
                 hashes[row] = static_cast<uint64_t>(values[row]);
             }
             return true;
-        }, schema, 16, 64, 1024 * 1024);
+        }, layouts, 16, 64, 1024 * 1024);
     auto filter = std::make_shared<TRuntimeFilter>(Context_);
     code->ProducedFilter = filter;
     THashShuffleTask task(code, TInputPort{.Connection = &input}, output.Ports());
@@ -1679,17 +1669,13 @@ TEST_F(SchedulerRuntimeFilter, PublishesRuntimeFilterBeforeBufferedOutputDrains)
 // A build lane at its input end with its output still full: the runtime filter
 // sink already sends, though the lane cannot finish yet.
 TEST_F(SchedulerRuntimeFilter, FilterSinkSendsBeforeItsBuildLaneDrains) {
-    using namespace NQumir::NAst;
     std::atomic<int> destroyCount = 0;
     TOneToOneConnection input(1);
     TShuffleOutputs output(1, 1);
     ASSERT_TRUE(input.Push(0, MakeInt64RowSet({11, 22}, &destroyCount)));
     input.Finish(0);
     ASSERT_TRUE(output[0].Push(0, MakeRowSet(1, &destroyCount)));
-    auto schema = std::make_shared<TStructType>(
-        std::vector<std::pair<std::string, TTypePtr>>{
-            {"value", std::make_shared<TIntegerType>()},
-        });
+    const std::vector<TValueLayout> layouts = {{.Width = 8}};
     auto code = std::make_shared<THashShuffleCode>(
         [](TRowSet* batch, uint64_t* hashes) {
             auto* values = reinterpret_cast<int64_t*>(batch->Columns[0].Data);
@@ -1697,7 +1683,7 @@ TEST_F(SchedulerRuntimeFilter, FilterSinkSendsBeforeItsBuildLaneDrains) {
                 hashes[row] = static_cast<uint64_t>(values[row]);
             }
             return true;
-        }, schema, 16, 64, 1024 * 1024);
+        }, layouts, 16, 64, 1024 * 1024);
     auto filter = std::make_shared<TRuntimeFilter>(Context_);
     auto lanes = std::make_shared<TRuntimeFilterExport>(Context_, filter, /*forward=*/false, /*producers=*/1);
     code->ProducedFilter = lanes;
@@ -1912,13 +1898,11 @@ TEST(SchedulerRuntimeAdapter, HashShuffleTasksRouteEveryRowToItsPartition)
 }
 
 TEST(SchedulerRuntimeAdapter, HashShuffleBoundsSparseInputOwnersBeforeEof) {
-    using namespace NQumir::NAst;
     std::atomic<int> destroyed = 0;
     TOneToOneConnection input(1);
     TShuffleOutputs output(1, 1);
-    auto schema = std::make_shared<TStructType>(
-        std::vector<std::pair<std::string, TTypePtr>>{{"value", std::make_shared<TIntegerType>()}});
-    auto code = std::make_shared<THashShuffleCode>(HashSelectedValues, schema, 16, 64, 800);
+    const std::vector<TValueLayout> layouts = {{.Width = 8}};
+    auto code = std::make_shared<THashShuffleCode>(HashSelectedValues, layouts, 16, 64, 800);
     THashShuffleTask task(code, TInputPort{.Connection = &input}, output.Ports());
     std::vector<uint8_t> selection(64, 0);
 
@@ -1949,16 +1933,13 @@ TEST(SchedulerRuntimeAdapter, HashShuffleBoundsSparseInputOwnersBeforeEof) {
 }
 
 TEST(SchedulerRuntimeAdapter, HashShuffleBudgetSharesOwnersAndHonorsBackpressure) {
-    using namespace NQumir::NAst;
     std::atomic<int> destroyed = 0;
     std::atomic<int> dummyDestroyed = 0;
     TOneToOneConnection input(1);
     TShuffleOutputs output(1, 2);
-    auto schema = std::make_shared<TStructType>(
-        std::vector<std::pair<std::string, TTypePtr>>{
-            {"value", std::make_shared<TIntegerType>()}});
+    const std::vector<TValueLayout> layouts = {{.Width = 8}};
     auto code = std::make_shared<THashShuffleCode>(
-        HashSelectedValues, schema, 16, 64, 1800);
+        HashSelectedValues, layouts, 16, 64, 1800);
     THashShuffleTask task(code, TInputPort{.Connection = &input}, output.Ports());
     std::vector<uint8_t> both(64, 0);
     std::vector<uint8_t> evenOnly(64, 0);
@@ -2030,18 +2011,15 @@ TRowSet PayloadRowSet(std::unique_ptr<TShufflePayload> data, int64_t rows) {
 }
 
 TEST(SchedulerRuntimeAdapter, HashShuffleInputBudgetPreservesNullableBitmapOffsets) {
-    using namespace NQumir::NAst;
     std::atomic<int> destroyed = 0;
     TOneToOneConnection input(1);
     TShuffleOutputs output(1, 1);
-    auto nullableBool = std::make_shared<TNullable>(std::make_shared<TBoolType>());
-    auto schema = std::make_shared<TStructType>(
-        std::vector<std::pair<std::string, TTypePtr>>{{"flag", std::move(nullableBool)}});
+    const std::vector<TValueLayout> layouts = {{.Bitmap = true}};
     auto code = std::make_shared<THashShuffleCode>(
         [](TRowSet*, uint64_t*) {
             ADD_FAILURE() << "a one-partition shuffle does not need hashes";
             return false;
-        }, schema, 16, 64, 70);
+        }, layouts, 16, 64, 70);
     THashShuffleTask task(code, TInputPort{.Connection = &input}, output.Ports());
     std::vector<uint8_t> selection(32, 0);
     selection[16] = 1;
@@ -2072,20 +2050,17 @@ TEST(SchedulerRuntimeAdapter, HashShuffleInputBudgetPreservesNullableBitmapOffse
 }
 
 TEST(SchedulerRuntimeAdapter, HashShuffleInputBudgetCountsUnselectedStringPayload) {
-    using namespace NQumir::NAst;
     for (uint8_t width : {4, 8}) {
         for (bool dense : {false, true}) {
             std::atomic<int> destroyed = 0;
             TOneToOneConnection input(1);
             TShuffleOutputs output(1, 1);
-            auto schema = std::make_shared<TStructType>(
-                std::vector<std::pair<std::string, TTypePtr>>{
-                    {"text", std::make_shared<TStringType>()}});
+            const std::vector<TValueLayout> layouts = {TValueLayout{}};
             auto code = std::make_shared<THashShuffleCode>(
                 [](TRowSet*, uint64_t*) {
                     ADD_FAILURE() << "a one-partition shuffle does not need hashes";
                     return false;
-                }, schema, 16, 64, 128);
+                }, layouts, 16, 64, 128);
             THashShuffleTask task(code, TInputPort{.Connection = &input}, output.Ports());
             auto data = std::make_unique<TShufflePayload>();
             data->Destroyed = &destroyed;
@@ -2131,17 +2106,14 @@ TEST(SchedulerRuntimeAdapter, HashShuffleInputBudgetCountsUnselectedStringPayloa
 // byte target each partition is compacted and the owner is released at once;
 // below it the partitions stay views of the owner until EOF.
 TEST(SchedulerRuntimeAdapter, HashShuffleBoundsDenseInputSplitAcrossPartitions) {
-    using namespace NQumir::NAst;
     for (bool overBudget : {true, false}) {
         SCOPED_TRACE(overBudget);
         std::atomic<int> destroyed = 0;
         TOneToOneConnection input(1);
         TShuffleOutputs output(1, 4);
-        auto schema = std::make_shared<TStructType>(
-            std::vector<std::pair<std::string, TTypePtr>>{
-                {"value", std::make_shared<TIntegerType>()}});
+        const std::vector<TValueLayout> layouts = {{.Width = 8}};
         auto code = std::make_shared<THashShuffleCode>(
-            HashSelectedValues, schema, 64, 64, overBudget ? 200 : 1 << 20);
+            HashSelectedValues, layouts, 64, 64, overBudget ? 200 : 1 << 20);
         THashShuffleTask task(code, TInputPort{.Connection = &input}, output.Ports());
         std::vector<int64_t> values(64);
         for (int64_t i = 0; i < 64; ++i) {
@@ -2196,14 +2168,11 @@ TEST(SchedulerRuntimeAdapter, HashShuffleBoundsDenseInputSplitAcrossPartitions) 
 // sparse inputs accumulate up to the row target, and at EOF a single sparse
 // input is forwarded as a view of its owner.
 TEST(SchedulerRuntimeAdapter, HashShuffleZeroByteTargetKeepsRowBatching) {
-    using namespace NQumir::NAst;
     std::atomic<int> destroyed = 0;
     TOneToOneConnection input(1);
     TShuffleOutputs output(1, 1);
-    auto schema = std::make_shared<TStructType>(
-        std::vector<std::pair<std::string, TTypePtr>>{
-            {"value", std::make_shared<TIntegerType>()}});
-    auto code = std::make_shared<THashShuffleCode>(HashSelectedValues, schema, 4, 64, 0);
+    const std::vector<TValueLayout> layouts = {{.Width = 8}};
+    auto code = std::make_shared<THashShuffleCode>(HashSelectedValues, layouts, 4, 64, 0);
     THashShuffleTask task(code, TInputPort{.Connection = &input}, output.Ports());
     std::vector<uint8_t> selection(64, 0);
     selection[7] = 1;
@@ -2250,17 +2219,14 @@ TEST(SchedulerRuntimeAdapter, HashShuffleZeroByteTargetKeepsRowBatching) {
 }
 
 TEST(SchedulerRuntimeAdapter, HashShuffleCancellationReleasesInputOwners) {
-    using namespace NQumir::NAst;
     for (bool pending : {false, true}) {
         std::atomic<int> destroyed = 0;
         std::atomic<int> dummyDestroyed = 0;
         TOneToOneConnection input(1);
         TShuffleOutputs output(1, 1);
-        auto schema = std::make_shared<TStructType>(
-            std::vector<std::pair<std::string, TTypePtr>>{
-                {"value", std::make_shared<TIntegerType>()}});
+        const std::vector<TValueLayout> layouts = {{.Width = 8}};
         auto code = std::make_shared<THashShuffleCode>(
-            HashSelectedValues, schema, 16, 64, pending ? 32 : 1024);
+            HashSelectedValues, layouts, 16, 64, pending ? 32 : 1024);
         if (pending) {
             ASSERT_TRUE(output[0].Push(0, MakeRowSet(1, &dummyDestroyed)));
         }
@@ -2283,7 +2249,6 @@ TEST(SchedulerRuntimeAdapter, HashShuffleCancellationReleasesInputOwners) {
 // of an unselected row stays 0: a shuffle that read it would send the row to
 // partition 0 and add 0 to the filter.
 TEST_F(SchedulerRuntimeFilter, HashShuffleReadsHashesOfSelectedRowsOnly) {
-    using namespace NQumir::NAst;
     std::atomic<int> destroyCount = 0;
     TOneToOneConnection input(2);
     TShuffleOutputs output(4, 2);
@@ -2298,12 +2263,9 @@ TEST_F(SchedulerRuntimeFilter, HashShuffleReadsHashesOfSelectedRowsOnly) {
     ASSERT_TRUE(input.Push(0, std::move(second)));
     input.Finish(0);
 
-    auto schema = std::make_shared<TStructType>(
-        std::vector<std::pair<std::string, TTypePtr>>{
-            {"value", std::make_shared<TIntegerType>()},
-        });
+    const std::vector<TValueLayout> layouts = {{.Width = 8}};
     auto code = std::make_shared<THashShuffleCode>(
-        HashSelectedValues, schema, 16, 64, 1024 * 1024);
+        HashSelectedValues, layouts, 16, 64, 1024 * 1024);
     auto filter = std::make_shared<TRuntimeFilter>(Context_);
     code->ProducedFilter = filter;
     THashShuffleTask task(code, TInputPort{.Connection = &input}, output.Ports());

@@ -3,11 +3,10 @@
 #include <qdb/exec/runtime_filter.h>
 #include <qdb/exec/instrumentation/operator.h>
 #include <qdb/io/io.h>
+#include <qdb/io/rowset_ops.h>
 #include <qdb/scheduler/port.h>
 #include <qdb/scheduler/task.h>
 #include <qdb/scheduler/tasks/task_state.h>
-
-#include <qumir/parser/type.h>
 
 #include <atomic>
 #include <cstdint>
@@ -107,13 +106,14 @@ struct THashShuffleCode {
 
     explicit THashShuffleCode(THash hash);
     THashShuffleCode(THash hash,
-        NQumir::NAst::TTypePtr inputType,
+        std::vector<TValueLayout> inputLayouts,
         size_t targetOutputBatchRows,
         size_t maxOutputBatchRows,
         size_t targetOutputBatchBytes);
 
     THash Hash;
-    NQumir::NAst::TTypePtr InputType;
+    // One per input column; without them the task forwards views of its input.
+    std::vector<TValueLayout> InputLayouts;
     size_t TargetOutputBatchRows = 0;
     size_t MaxOutputBatchRows = 0;
     // Also bounds the full visible input payload referenced by each buffer.

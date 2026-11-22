@@ -298,19 +298,13 @@ TEST(GraphSpec, SortMergeWindowRecordsRoundTrip)
 
 TEST(GraphSpec, AggregateAndHashShuffleRecordsRoundTrip)
 {
-    using namespace NQumir::NAst;
-    const TTypePtr inputType = std::make_shared<TStructType>(std::vector<std::pair<std::string, TTypePtr>>{
-        {"k", std::make_shared<TIntegerType>(TIntegerType::I64)},
-        {"d", std::make_shared<TNullable>(std::make_shared<TDecimal>(18, 2))},
-        {"s", std::make_shared<TStringType>()},
-    });
     TGraphSpec spec;
     spec.Nodes.push_back(Node("hash-shuffle", "aggregate-repartition", THashShuffleNode{
         .In = {0, 1},
         .Out = {{1, 1}, {2, 1}},
         .Routes = {1, THashShuffleNode::NoRoute, 0},
         .Hash = TAggregateHashPlanData{.Kernel = 3, .KeyColumns = {0, 2}},
-        .InputType = inputType,
+        .InputLayouts = {{.Width = 8}, {.Width = 16}, {}, {.Bitmap = true}},
         .TargetOutputBatchRows = 4096,
         .MaxOutputBatchRows = 65536,
         .TargetOutputBatchBytes = 1 << 20,
@@ -358,9 +352,12 @@ TEST(GraphSpec, AggregateAndHashShuffleRecordsRoundTrip)
     const auto& hash = std::get<TAggregateHashPlanData>(shuffle.Hash);
     EXPECT_EQ(hash.Kernel, 3u);
     EXPECT_EQ(hash.KeyColumns, (std::vector<int64_t>{0, 2}));
-    ASSERT_TRUE(shuffle.InputType);
-    EXPECT_NE(shuffle.InputType, inputType);
-    EXPECT_EQ(PrintTypeText(shuffle.InputType), PrintTypeText(inputType));
+    ASSERT_EQ(shuffle.InputLayouts.size(), 4u);
+    EXPECT_EQ(shuffle.InputLayouts[1].Width, 16);
+    EXPECT_FALSE(shuffle.InputLayouts[1].Bitmap);
+    EXPECT_EQ(shuffle.InputLayouts[2].Width, 0);
+    EXPECT_FALSE(shuffle.InputLayouts[2].Bitmap);
+    EXPECT_TRUE(shuffle.InputLayouts[3].Bitmap);
     EXPECT_EQ(shuffle.TargetOutputBatchRows, 4096u);
     EXPECT_EQ(shuffle.MaxOutputBatchRows, 65536u);
     EXPECT_EQ(shuffle.TargetOutputBatchBytes, 1u << 20);
@@ -470,16 +467,12 @@ TEST(GraphSpec, PartialAndGroupingSetsAggregateRecordsRoundTrip)
 
 TEST(GraphSpec, JoinAndJoinHashShuffleRecordsRoundTrip)
 {
-    using namespace NQumir::NAst;
-    const TTypePtr inputType = std::make_shared<TStructType>(std::vector<std::pair<std::string, TTypePtr>>{
-        {"k", std::make_shared<TIntegerType>(TIntegerType::I32)},
-    });
     TGraphSpec spec;
     spec.Nodes.push_back(Node("hash-shuffle", "join-right-repartition", THashShuffleNode{
         .In = {0, 2},
         .Out = {{1, 2}},
         .Hash = TJoinHashPlanData{.Kernel = 5, .Entry = 1, .KeyColumns = {1, 0}},
-        .InputType = inputType,
+        .InputLayouts = {{.Width = 4}},
     }));
     spec.Nodes.push_back(Node("join", "join inner", THashJoinNode{
         .Left = {1, 0},
@@ -528,7 +521,8 @@ TEST(GraphSpec, JoinAndJoinHashShuffleRecordsRoundTrip)
     EXPECT_EQ(hash.Kernel, 5u);
     EXPECT_EQ(hash.Entry, 1u);
     EXPECT_EQ(hash.KeyColumns, (std::vector<int64_t>{1, 0}));
-    EXPECT_EQ(PrintTypeText(shuffle.InputType), PrintTypeText(inputType));
+    ASSERT_EQ(shuffle.InputLayouts.size(), 1u);
+    EXPECT_EQ(shuffle.InputLayouts[0].Width, 4);
 
     const auto& hashJoin = std::get<THashJoinNode>(back.Nodes[1].Body);
     EXPECT_EQ(hashJoin.Left.Connection, 1u);
@@ -701,7 +695,6 @@ TEST(GraphSpec, CteRecordsAndTablesRoundTrip)
 
 TEST(GraphSpec, RuntimeFilterRecordsAndTableRoundTrip)
 {
-    using namespace NQumir::NAst;
     TGraphSpec spec;
     spec.RuntimeFilterKernel = 11;
     spec.RuntimeFilterBindings = {
@@ -718,9 +711,7 @@ TEST(GraphSpec, RuntimeFilterRecordsAndTableRoundTrip)
         .In = {2, 1},
         .Out = {{3, 0}},
         .Hash = TJoinHashPlanData{.Kernel = 5, .Entry = 1, .KeyColumns = {0}},
-        .InputType = std::make_shared<TStructType>(std::vector<std::pair<std::string, TTypePtr>>{
-            {"k", std::make_shared<TIntegerType>(TIntegerType::I64)},
-        }),
+        .InputLayouts = {{.Width = 8}},
         .ProducedFilter = 0,
     }));
     spec.Nodes.push_back(Node("runtime-filter-sink", "", TRuntimeFilterSinkNode{.Filter = 1}));
