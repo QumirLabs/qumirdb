@@ -874,7 +874,8 @@ private:
             Settings_.Instrumentation.RowGroupPredicate
                 ? Settings_.Instrumentation.Output
                 : nullptr,
-            columns ? &*columns : nullptr);
+            columns ? &*columns : nullptr,
+            Annotation_);
         if (rowGroups.empty()) {
             TSourceSplits empty = std::vector<NScheduler::TScanSplit>{};
             ScanSplitCache_.emplace(&src, empty);

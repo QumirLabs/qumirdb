@@ -144,8 +144,7 @@ std::optional<uint64_t> EncodeStatsScalar(
     return std::nullopt;
 }
 
-// A scan of the export never runs, so the reader has only its schema. The types are
-// of the request's factory, which its query compiles in.
+// A scan of the export never runs, so the reader has only its schema.
 class TSchemaOnlyReader final : public NQdb::ISource {
 public:
     TSchemaOnlyReader(std::vector<NQdb::TColumnSchema> columns, NQdb::TStatsPtr stats)
@@ -153,6 +152,7 @@ public:
         , Stats_(std::move(stats))
     {}
 
+    // The types come from the query's factory, the only one in plan_export.
     NQdb::TSchema Schema(NQumir::NAst::TTypeFactory&) const override {
         return Schema_;
     }
@@ -190,7 +190,7 @@ public:
         }
     }
 
-    // The types are of the request's factory, which its query compiles in.
+    // The types come from the query's factory, the only one in plan_export.
     NQdb::TSchema Schema(NQumir::NAst::TTypeFactory&) const override {
         return {AllColumns_};
     }
@@ -274,7 +274,8 @@ public:
         const NQumir::NAst::TExprPtr&,
         std::string_view,
         std::ostream*,
-        const std::unordered_set<std::string>*) const override
+        const std::unordered_set<std::string>*,
+        const NQdb::NKernel::TAnnotationContext*) const override
     {
         if (Stats_.Rows <= 0 || Stats_.RowGroups == 0) {
             return {};

@@ -132,7 +132,8 @@ struct TMockSource : ISource, ITable {
         const NQumir::NAst::TExprPtr&,
         std::string_view,
         std::ostream*,
-        const std::unordered_set<std::string>*) const override
+        const std::unordered_set<std::string>*,
+        const NQdb::NKernel::TAnnotationContext*) const override
     {
         // One group keeps the mock a single scan lane.
         int64_t rows = 0;

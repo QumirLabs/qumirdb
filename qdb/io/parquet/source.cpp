@@ -1039,14 +1039,15 @@ std::vector<NScheduler::TScanRowGroup> TParquetFile::PruneRowGroups(
     const NQumir::NAst::TExprPtr& predicate,
     std::string_view sourceAlias,
     std::ostream* diagnostics,
-    const std::unordered_set<std::string>* columnNames) const
+    const std::unordered_set<std::string>* columnNames,
+    const NKernel::TAnnotationContext* annotation) const
 {
     auto rowGroups = ScanRowGroupsForColumns(columnNames);
     if (!predicate) {
         return rowGroups;
     }
     auto evaluator = TRowGroupPredicateEvaluator::Compile(
-        types, predicate, Schema(types), sourceAlias, diagnostics);
+        types, predicate, Schema(types), sourceAlias, diagnostics, annotation);
     if (!evaluator || Data_->RowGroupRanges.size() != Data_->RowGroups.size()) {
         return rowGroups;
     }

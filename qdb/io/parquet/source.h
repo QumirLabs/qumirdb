@@ -69,7 +69,8 @@ public:
         const NQumir::NAst::TExprPtr& predicate,
         std::string_view sourceAlias,
         std::ostream* diagnostics = nullptr,
-        const std::unordered_set<std::string>* columnNames = nullptr) const override;
+        const std::unordered_set<std::string>* columnNames = nullptr,
+        const NKernel::TAnnotationContext* annotation = nullptr) const override;
 
 private:
     std::vector<NScheduler::TScanRowGroup> ScanRowGroupsForColumns(

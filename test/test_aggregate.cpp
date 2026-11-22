@@ -1847,7 +1847,8 @@ TEST(AggregateE2E, PlannerUsesPhysicalPrunedSchemaForKeyDescriptor) {
             const NQumir::NAst::TExprPtr&,
             std::string_view,
             std::ostream*,
-            const std::unordered_set<std::string>*) const override
+            const std::unordered_set<std::string>*,
+            const NQdb::NKernel::TAnnotationContext*) const override
         {
             return {{.RowGroup = 0, .RowCount = static_cast<int64_t>(Values_.size())}};
         }

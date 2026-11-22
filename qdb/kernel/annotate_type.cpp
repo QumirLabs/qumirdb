@@ -656,8 +656,12 @@ TTypePtr Propagate(NQumir::NAst::TTypeFactory& types, std::initializer_list<TTyp
     return nullable ? MakeNullableType(types, base) : base;
 }
 
-bool IsInt(const TTypePtr& t) { return static_cast<bool>(MaybeIntegerType(t)); }
-bool IsFloat(const TTypePtr& t) { return static_cast<bool>(TMaybeType<TFloatType>(t)); }
+bool IsInt(const TTypePtr& t) {
+    return static_cast<bool>(MaybeIntegerType(t));
+}
+bool IsFloat(const TTypePtr& t) {
+    return static_cast<bool>(TMaybeType<TFloatType>(t));
+}
 
 // A number a DATE does not mix with: a plain integer, a float or a decimal.
 bool IsNumber(const TTypePtr& type) {
