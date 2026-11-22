@@ -98,26 +98,17 @@ TFormatSpec ParseFormat(const std::string& spec) {
     return result;
 }
 
-NQdb::TSchema SchemaFromType(
-    const NQumir::NAst::TTypePtr& type,
-    std::vector<std::string>& names,
-    std::vector<NQdb::TColumnSchema>& columns)
-{
-    auto* structType = static_cast<NQumir::NAst::TStructType*>(type.get());
+NQdb::TSchema SchemaFromType(const NQumir::NAst::TTypePtr& type) {
+    auto* structType = static_cast<const NQumir::NAst::TStructType*>(type);
     if (!structType) {
         throw std::runtime_error("executor output type must be TStructType");
     }
-    names.clear();
-    columns.clear();
-    names.reserve(structType->Fields.size());
-    columns.reserve(structType->Fields.size());
+    NQdb::TSchema schema;
+    schema.Columns.reserve(structType->Fields.size());
     for (const auto& [name, fieldType] : structType->Fields) {
-        names.push_back(name);
+        schema.Columns.push_back({.Name = name, .Type = fieldType});
     }
-    for (size_t i = 0; i < structType->Fields.size(); ++i) {
-        columns.push_back({.Name = names[i], .Type = structType->Fields[i].second});
-    }
-    return NQdb::TSchema{std::span<const NQdb::TColumnSchema>(columns)};
+    return schema;
 }
 
 std::optional<EExplainMode> ParseExplainMode(std::string_view value) {
@@ -221,18 +212,16 @@ int ExecutePlan(
 
     auto buildStart = std::chrono::steady_clock::now();
     auto lowered = NQdb::NScheduler::LowerPlanToGraph(
-        plan, config.Engine.Scheduler, diagnostics, annotation.ExternalCatalog);
+        plan, prepared.Types, config.Engine.Scheduler, diagnostics, &annotation);
     auto buildElapsed = std::chrono::steady_clock::now() - buildStart;
     const auto backend = config.Engine.Scheduler.Kernel.Backend;
     auto llvmStart = std::chrono::steady_clock::now();
     NQdb::FinalizeKernels(
-        lowered.Kernels, backend, diagnostics, annotation.ExternalCatalog,
+        lowered.Kernels, lowered.Types, backend, diagnostics, annotation.ExternalCatalog,
         config.Engine.Scheduler.Jit.CacheDir);
     auto llvmElapsed = std::chrono::steady_clock::now() - llvmStart;
 
-    std::vector<std::string> outputNames;
-    std::vector<NQdb::TColumnSchema> outputColumns;
-    auto schema = SchemaFromType(lowered.OutputType, outputNames, outputColumns);
+    const auto schema = SchemaFromType(lowered.OutputType);
 
     std::unique_ptr<NQdb::ISink> sink;
     if (config.Format.Name == "csv") {
@@ -277,7 +266,7 @@ int RunQuery(
     const TCliOptions& config,
     NQdb::TExternalModuleCatalog& catalog)
 {
-    auto factory = [&](std::string_view table)
+    auto factory = [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
         -> std::expected<NQdb::TOperatorPtr, NQumir::TError>
     {
         const auto path = syntax == ESyntax::Sql
@@ -285,7 +274,7 @@ int RunQuery(
             : std::string(table);
         try {
             auto source = std::make_shared<NQdb::TParquetFile>(path);
-            return std::make_shared<NQdb::TSourceOperator>(source, path);
+            return NQumir::MakeIntrusive<NQdb::TSourceOperator>(types, source, path);
         } catch (const std::exception& e) {
             return std::unexpected(NQumir::TError(
                 "cannot open table '" + std::string(table) + "': " + e.what()));
@@ -391,7 +380,8 @@ void DescribeTable(std::string_view table, const TCliOptions& config) {
     const std::string path = ResolveTablePath(config.DataDir, table);
     try {
         NQdb::TParquetFile source(path);
-        const auto& schema = source.Schema();
+        NQumir::NAst::TTypeFactory types;
+        const auto schema = source.Schema(types);
         std::cout << "Table \"" << table << "\" (" << path << ")\n";
         for (const auto& column : schema.Columns) {
             std::cout << "  " << column.Name << "  "

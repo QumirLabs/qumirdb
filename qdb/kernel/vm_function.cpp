@@ -1,6 +1,7 @@
 #include <qdb/kernel/vm_function.h>
 
 #include <qdb/catalog/external_module.h>
+#include <qdb/kernel/annotate_type.h>
 #include <qdb/utils/module_path.h>
 
 #include <qumir/frontend/compose.h>
@@ -26,23 +27,29 @@ namespace NQdb {
 using namespace NQumir::NAst;
 
 struct TVmFrontendContext::TImpl {
+    explicit TImpl(TTypeFactory& types)
+        : Types(types)
+    {}
+
     const std::vector<TPragma> Pragmas{
         TPragma{"language", {"overloads"}, {}},
     };
+    TTypeFactory& Types;
     std::shared_ptr<NQumir::NRegistry::SystemModule> System =
-        std::make_shared<NQumir::NRegistry::SystemModule>();
+        std::make_shared<NQumir::NRegistry::SystemModule>(Types);
     // qumirdb.oz kernels call builtin::memcmp/cttz.
     std::shared_ptr<NQumir::NRegistry::BuiltinsModule> Builtins =
-        std::make_shared<NQumir::NRegistry::BuiltinsModule>();
-    NQumir::NFrontend::TSourceModuleLoader Loader;
+        std::make_shared<NQumir::NRegistry::BuiltinsModule>(Types);
+    NQumir::NFrontend::TSourceModuleLoader Loader{Types};
     std::optional<std::string> LoadError;
     uint64_t Counter = 0;
     std::mutex Mutex;
 };
 
 TVmFrontendContext::TVmFrontendContext(
+    TTypeFactory& types,
     std::vector<std::string> moduleFiles)
-    : Impl_(std::make_unique<TImpl>())
+    : Impl_(std::make_unique<TImpl>(types))
 {
     for (const auto& path : moduleFiles) {
         if (auto error = RegisterSourceModule(path)) {
@@ -53,6 +60,10 @@ TVmFrontendContext::TVmFrontendContext(
 }
 
 TVmFrontendContext::~TVmFrontendContext() = default;
+
+TTypeFactory& TVmFrontendContext::Types() {
+    return Impl_->Types;
+}
 
 std::optional<std::string> TVmFrontendContext::RegisterSourceModule(
     const std::string& path)
@@ -132,7 +143,7 @@ std::expected<TExprPtr, std::string> TVmFrontendContext::TransformLocked(
     if (Impl_->LoadError) {
         return std::unexpected(*Impl_->LoadError);
     }
-    NQumir::NSemantics::TNameResolver resolver;
+    NQumir::NSemantics::TNameResolver resolver(Impl_->Types);
     resolver.ApplyPragmas(Impl_->Pragmas);
     resolver.RegisterModule(Impl_->System.get());
     resolver.RegisterModule(Impl_->Builtins.get());
@@ -159,7 +170,7 @@ std::expected<void, std::string> TVmFrontendContext::Lower(
     // Lowered modules are independent. A fresh resolver avoids retaining
     // transformed return-normalization state between compilations, while the
     // shared loader still prevents reparsing source modules.
-    NQumir::NSemantics::TNameResolver resolver;
+    NQumir::NSemantics::TNameResolver resolver(Impl_->Types);
     resolver.ApplyPragmas(Impl_->Pragmas);
     resolver.RegisterModule(Impl_->System.get());
     resolver.RegisterModule(Impl_->Builtins.get());
@@ -175,13 +186,6 @@ std::expected<void, std::string> TVmFrontendContext::Lower(
         return std::unexpected(lowered.error().ToString());
     }
     return {};
-}
-
-TVmFrontendContext& QumirdbVmContext() {
-    static TVmFrontendContext context({
-        NUtils::ModuleFile("qumirdb.oz"),
-    });
-    return context;
 }
 
 struct TVmFunction::TImpl {
@@ -211,7 +215,7 @@ std::expected<std::unique_ptr<TVmFunction>, std::string> TVmFunction::Compile(
         const std::string functionName =
             context.UniqueName(spec.NamePrefix);
         NQumir::TLocation loc{};
-        auto fn = std::make_shared<TFunDecl>(
+        auto fn = NQumir::MakeIntrusive<TFunDecl>(
             loc,
             functionName,
             std::vector<TGenericParam>{},
@@ -222,12 +226,13 @@ std::expected<std::unique_ptr<TVmFunction>, std::string> TVmFunction::Compile(
         declarations.reserve(spec.Imports.size() + 1);
         for (auto& name : spec.Imports) {
             declarations.push_back(
-                std::make_shared<TUseExpr>(loc, std::move(name)));
+                NQumir::MakeIntrusive<TUseExpr>(loc, std::move(name)));
         }
         declarations.push_back(std::move(fn));
-        TExprPtr chunk = std::make_shared<TBlockExpr>(
+        TExprPtr chunk = NQumir::MakeIntrusive<TBlockExpr>(
             loc, std::move(declarations));
 
+        NKernel::EraseDateTypes(context.Types(), chunk);
         auto impl = std::make_unique<TImpl>();
         if (auto lowered = context.Lower(std::move(chunk), impl->Module);
             !lowered)

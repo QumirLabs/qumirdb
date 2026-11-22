@@ -21,7 +21,7 @@ namespace {
 using namespace NQumir::NAst;
 
 struct TRowChain {
-    std::shared_ptr<TSourceOperator> Source;
+    NQumir::TIntrusivePtr<TSourceOperator> Source;
     std::unordered_set<std::string> EarlyColumns;
 };
 
@@ -56,7 +56,7 @@ std::optional<std::vector<TLateMaterializeColumn>> DirectOutputColumns(
         ? std::string{}
         : source.GetAlias() + ".";
     std::unordered_set<std::string> physicalColumns;
-    for (const auto& column : source.GetTable()->Schema().Columns) {
+    for (const auto& column : source.TableSchema().Columns) {
         physicalColumns.insert(std::string(column.Name));
     }
 
@@ -130,7 +130,7 @@ std::optional<std::vector<TLateMaterializeColumn>> DirectOutputColumns(
 }
 
 bool HasPhysicalRowIdCollision(const TSourceOperator& source) {
-    for (const auto& column : source.GetTable()->Schema().Columns) {
+    for (const auto& column : source.TableSchema().Columns) {
         if (column.Name == InternalRowIdColumnName) {
             return true;
         }
@@ -145,11 +145,11 @@ void SetReason(TLateMaterializationDiagnostics* diagnostics, std::string reason)
 }
 
 struct TRewriteCandidate {
-    std::shared_ptr<TProjectOperator> OutputProject;
-    std::shared_ptr<TProjectOperator> OrderingProject;
-    std::shared_ptr<TTopSortOperator> TopSort;
-    std::shared_ptr<TSortOperator> Sort;
-    std::shared_ptr<TLimitOperator> Limit;
+    NQumir::TIntrusivePtr<TProjectOperator> OutputProject;
+    NQumir::TIntrusivePtr<TProjectOperator> OrderingProject;
+    NQumir::TIntrusivePtr<TTopSortOperator> TopSort;
+    NQumir::TIntrusivePtr<TSortOperator> Sort;
+    NQumir::TIntrusivePtr<TLimitOperator> Limit;
     TOperatorPtr RowChainRoot;
     uint64_t MaxOutputRows = 0;
 };
@@ -214,19 +214,20 @@ std::optional<TRewriteCandidate> MatchCandidate(const TOperatorPtr& root) {
 
 } // namespace
 
-void BindLateMaterializationSources(const TOperatorPtr& root) {
+void BindLateMaterializationSources(NQumir::NAst::TTypeFactory& types, const TOperatorPtr& root) {
     if (!root) {
         return;
     }
     if (auto late = TMaybeOp<TLateMaterializeOperator>(root)) {
-        ResolveLateMaterializationSource(*late.Cast()).EnableRowId();
+        ResolveLateMaterializationSource(*late.Cast()).EnableRowId(types);
     }
     for (const auto& input : root->Inputs()) {
-        BindLateMaterializationSources(input);
+        BindLateMaterializationSources(types, input);
     }
 }
 
 TOperatorPtr ApplyLateMaterialization(
+    NQumir::NAst::TTypeFactory& types,
     const TOperatorPtr& root,
     const TLateMaterializationSettings& settings,
     TLateMaterializationDiagnostics* diagnostics)
@@ -274,7 +275,7 @@ TOperatorPtr ApplyLateMaterialization(
     }
 
     const auto* bridge = candidate->OrderingProject != candidate->OutputProject
-        ? candidate->OrderingProject.get()
+        ? candidate->OrderingProject.Get()
         : nullptr;
     auto columns = DirectOutputColumns(
         *candidate->OutputProject, *chain->Source, bridge);
@@ -340,38 +341,38 @@ TOperatorPtr ApplyLateMaterialization(
         return root;
     }
 
-    chain->Source->EnableRowId();
+    chain->Source->EnableRowId(types);
     const std::string qualifiedLocator = chain->Source->RowIdColumn();
     narrowProjections.push_back({
         .Name = std::string(InternalRowIdColumnName),
-        .Expression = std::make_shared<TIdentExpr>(
+        .Expression = NQumir::MakeIntrusive<TIdentExpr>(
             NQumir::TLocation{}, qualifiedLocator),
     });
-    auto narrow = std::make_shared<TProjectOperator>(
-        candidate->RowChainRoot, std::move(narrowProjections));
+    auto narrow = NQumir::MakeIntrusive<TProjectOperator>(
+        types, candidate->RowChainRoot, std::move(narrowProjections));
 
     TOperatorPtr bounded;
     if (candidate->TopSort) {
-        bounded = std::make_shared<TTopSortOperator>(
-            std::move(narrow),
+        bounded = NQumir::MakeIntrusive<TTopSortOperator>(
+            types, std::move(narrow),
             candidate->TopSort->Keys(),
             candidate->TopSort->Limit());
         if (candidate->Limit) {
-            bounded = std::make_shared<TLimitOperator>(
-                std::move(bounded),
+            bounded = NQumir::MakeIntrusive<TLimitOperator>(
+                types, std::move(bounded),
                 candidate->Limit->Limit(),
                 candidate->Limit->Offset());
         }
     } else if (candidate->Sort) {
-        auto sorted = std::make_shared<TSortOperator>(
-            std::move(narrow), candidate->Sort->Keys());
-        bounded = std::make_shared<TLimitOperator>(
-            std::move(sorted),
+        auto sorted = NQumir::MakeIntrusive<TSortOperator>(
+            types, std::move(narrow), candidate->Sort->Keys());
+        bounded = NQumir::MakeIntrusive<TLimitOperator>(
+            types, std::move(sorted),
             candidate->Limit->Limit(),
             candidate->Limit->Offset());
     } else {
-        bounded = std::make_shared<TLimitOperator>(
-            std::move(narrow),
+        bounded = NQumir::MakeIntrusive<TLimitOperator>(
+            types, std::move(narrow),
             candidate->Limit->Limit(),
             candidate->Limit->Offset());
     }
@@ -380,8 +381,8 @@ TOperatorPtr ApplyLateMaterialization(
         diagnostics->Applied = true;
         diagnostics->Reason = "applied";
     }
-    return std::make_shared<TLateMaterializeOperator>(
-        std::move(bounded),
+    return NQumir::MakeIntrusive<TLateMaterializeOperator>(
+        types, std::move(bounded),
         std::string(InternalRowIdColumnName),
         std::move(*columns));
 }

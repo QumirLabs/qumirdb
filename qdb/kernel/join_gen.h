@@ -16,6 +16,7 @@ namespace NQdb::NKernel {
 // GenJoinProcessAst so the same TProcessFn ABI can be reused; `opp` and
 // `pairs` parameters are present but unused in the generated body.
 NQumir::NAst::TExprPtr GenJoinInsertKeyOnlyAst(
+    NQumir::NAst::TTypeFactory& types,
     const TJoinKeyDescriptor& key,
     const std::string& funcName,
     NQumir::NAst::TTypePtr columnType,
@@ -29,6 +30,7 @@ NQumir::NAst::TExprPtr GenJoinInsertKeyOnlyAst(
 // left RowIds to pairs (right_row_id = -1; jt_materialize ignores it because
 // semi/anti output schema contains only left columns).
 NQumir::NAst::TExprPtr GenJoinFinalizeSemiAntiAst(
+    NQumir::NAst::TTypeFactory& types,
     const TJoinKeyDescriptor& key,
     bool isAnti,
     const std::string& funcName,
@@ -50,6 +52,7 @@ NQumir::NAst::TExprPtr GenJoinFinalizeSemiAntiAst(
 // join columns (plan_lowerer.cpp decides this). markMatched marks the matched
 // rows of both tables, for a FULL join with a residual.
 NQumir::NAst::TExprPtr GenJoinProcessAst(
+    NQumir::NAst::TTypeFactory& types,
     const TJoinKeyDescriptor& key,
     bool isLeft,
     const std::string& funcName,
@@ -65,6 +68,7 @@ NQumir::NAst::TExprPtr GenJoinProcessAst(
 // reads keys from the batch and inserts row ids into the own table without
 // probing the opposite table. Used by residual SEMI/ANTI for the left build.
 NQumir::NAst::TExprPtr GenJoinInsertRowsOnlyAst(
+    NQumir::NAst::TTypeFactory& types,
     const TJoinKeyDescriptor& key,
     bool isLeft,
     const std::string& funcName,
@@ -81,6 +85,7 @@ NQumir::NAst::TExprPtr GenJoinInsertRowsOnlyAst(
 // markMatched also marks the matched build rows, for a streaming outer join
 // that emits the unmarked ones at EOF.
 NQumir::NAst::TExprPtr GenJoinProbeAst(
+    NQumir::NAst::TTypeFactory& types,
     const TJoinKeyDescriptor& key,
     bool isLeft,
     const std::string& funcName,
@@ -93,6 +98,7 @@ NQumir::NAst::TExprPtr GenJoinProbeAst(
     bool markMatched = false);
 
 NQumir::NAst::TExprPtr GenJoinProbeSemiAst(
+    NQumir::NAst::TTypeFactory& types,
     const TJoinKeyDescriptor& key,
     bool isAnti,
     const std::string& funcName,
@@ -107,6 +113,7 @@ NQumir::NAst::TExprPtr GenJoinProbeSemiAst(
 // probes the complete right key set and pushes (left row id, marker code) for
 // every selected row, NULL keys included (join_mark.oz).
 NQumir::NAst::TExprPtr GenMarkJoinProbeAst(
+    NQumir::NAst::TTypeFactory& types,
     const TJoinKeyDescriptor& key,
     const std::string& funcName,
     NQumir::NAst::TTypePtr columnType,
@@ -122,6 +129,7 @@ NQumir::NAst::TExprPtr GenMarkJoinProbeAst(
 // (jt_probe_and_mark). keyDecides says the join has no residual, so a key
 // match marks a whole bucket.
 NQumir::NAst::TExprPtr GenJoinProbeMarkAst(
+    NQumir::NAst::TTypeFactory& types,
     const TJoinKeyDescriptor& key,
     bool keyDecides,
     const std::string& funcName,
@@ -141,6 +149,7 @@ NQumir::NAst::TExprPtr GenJoinProbeMarkAst(
 // key type part of automatic cache mangling.
 // Operator-neutral; GenJoinHashBatchAst below shims join keys into it.
 NQumir::NAst::TExprPtr GenKeyHashBatchAst(
+    NQumir::NAst::TTypeFactory& types,
     const TAggregateKeyDescriptor& key,
     const std::string& funcName,
     NQumir::NAst::TTypePtr columnType,
@@ -148,6 +157,7 @@ NQumir::NAst::TExprPtr GenKeyHashBatchAst(
     NQumir::NAst::TTypePtr stringViewType);
 
 NQumir::NAst::TExprPtr GenJoinHashBatchAst(
+    NQumir::NAst::TTypeFactory& types,
     const TJoinKeyDescriptor& key,
     const std::string& funcName,
     NQumir::NAst::TTypePtr columnType,
@@ -156,6 +166,7 @@ NQumir::NAst::TExprPtr GenJoinHashBatchAst(
 
 // Thin entrypoint forwarding to the batch function named `batchFuncName`.
 NQumir::NAst::TExprPtr GenKeyHashEntrypointAst(
+    NQumir::NAst::TTypeFactory& types,
     const TAggregateKeyDescriptor& key,
     const std::string& funcName,
     const std::string& batchFuncName,
@@ -163,17 +174,19 @@ NQumir::NAst::TExprPtr GenKeyHashEntrypointAst(
 
 // Thin wrapper: forwards to "jt_hash_batch" (join's fixed batch func name).
 NQumir::NAst::TExprPtr GenJoinHashEntrypointAst(
+    NQumir::NAst::TTypeFactory& types,
     const TJoinKeyDescriptor& key,
     const std::string& funcName,
     NQumir::NAst::TTypePtr rowSetType);
 
 // Generates the rh_hash / rh_key_equal overloads for the join key type, reusing
 // the aggregation key-ops generator (GenKeyOperationFunDecls).
-std::vector<NQumir::NAst::TExprPtr> GenJoinKeyOpsFunDecls(const TJoinKeyDescriptor& key);
+std::vector<NQumir::NAst::TExprPtr> GenJoinKeyOpsFunDecls(NQumir::NAst::TTypeFactory& types, const TJoinKeyDescriptor& key);
 
 // Generates the key_owned_bytes / key_clone_owned overloads for the join key
 // type (owned-string cloning), reusing the aggregation ownership generator.
 std::vector<NQumir::NAst::TExprPtr> GenJoinKeyOwnershipFunDecls(
+    NQumir::NAst::TTypeFactory& types,
     const TJoinKeyDescriptor& key);
 
 // Emits the (type ...) declarations that make the named Key type(s) known to
@@ -204,6 +217,7 @@ enum class EJoinOutputColumns {
 // rows materialized (0 leaves `out` untouched). The caller assigns out.Destroy
 // (the kernel sets it to null).
 NQumir::NAst::TExprPtr GenJoinMaterializeAst(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TStructType& leftType,
     const NQumir::NAst::TStructType& rightType,
     EJoinOutputColumns output,
@@ -224,6 +238,7 @@ NQumir::NAst::TExprPtr GenJoinMaterializeAst(
 // stored left rows without keeping them, is unsupported and returns false.
 // arena is the TStringArena the residual builds its strings in.
 NQumir::NAst::TExprPtr GenJoinDispatchAst(
+    NQumir::NAst::TTypeFactory& types,
     const TJoinKeyDescriptor& key,
     EJoinType type,
     bool hasResidual,
@@ -248,7 +263,7 @@ struct TRowJoinColumn {
     // Byte offset of the validity byte; -1 for a column that cannot be NULL.
     int64_t ValidOffset = -1;
     int64_t FixedWidth = 0;
-    NQumir::NAst::TTypePtr StorageType;
+    NQumir::NAst::TTypePtr StorageType = nullptr;
 };
 
 struct TRowJoinLayout {
@@ -263,19 +278,20 @@ struct TRowJoinLayout {
 
 // `marked` gives the rows a mark byte.
 TRowJoinLayout BuildRowJoinLayout(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TStructType& buildType,
     const TJoinKeyDescriptor& key,
     bool marked);
 
 // External types the row join generators refer to by name.
 struct TRowJoinGenTypes {
-    NQumir::NAst::TTypePtr Column;
-    NQumir::NAst::TTypePtr RowSet;
-    NQumir::NAst::TTypePtr PairBuffer;
-    NQumir::NAst::TTypePtr StringView;
-    NQumir::NAst::TTypePtr Arena;
-    NQumir::NAst::TTypePtr Table;
-    NQumir::NAst::TTypePtr Scratch;
+    NQumir::NAst::TTypePtr Column = nullptr;
+    NQumir::NAst::TTypePtr RowSet = nullptr;
+    NQumir::NAst::TTypePtr PairBuffer = nullptr;
+    NQumir::NAst::TTypePtr StringView = nullptr;
+    NQumir::NAst::TTypePtr Arena = nullptr;
+    NQumir::NAst::TTypePtr Table = nullptr;
+    NQumir::NAst::TTypePtr Scratch = nullptr;
 };
 
 // jr_append_batch(arena, batch, key_columns) -> bool: appends every selected
@@ -284,10 +300,11 @@ struct TRowJoinGenTypes {
 // rows whose key is NULL instead: the rows an ANTI join emits without a probe,
 // which it keeps in an arena that no table indexes.
 NQumir::NAst::TExprPtr GenRowJoinAppendAst(
+    NQumir::NAst::TTypeFactory& types,
     const TJoinKeyDescriptor& key,
     const TRowJoinLayout& layout,
     const std::string& funcName,
-    const TRowJoinGenTypes& types,
+    const TRowJoinGenTypes& joinTypes,
     bool hasPrecomputedHash,
     bool nullKeys);
 
@@ -301,12 +318,13 @@ NQumir::NAst::TExprPtr GenRowJoinAppendAst(
 // preserved side of a SEMI/ANTI join: a match marks the build rows and pushes
 // no pair.
 NQumir::NAst::TExprPtr GenRowJoinProbeAst(
+    NQumir::NAst::TTypeFactory& types,
     const TJoinKeyDescriptor& key,
     const TRowJoinLayout& layout,
     bool probeIsLeft,
     bool emitUnmatched,
     const std::string& funcName,
-    const TRowJoinGenTypes& types,
+    const TRowJoinGenTypes& joinTypes,
     bool hasPrecomputedHash);
 
 // jr_dispatch(arena, table, scratch, pairs, batch, key_columns, op) -> bool
@@ -314,9 +332,10 @@ NQumir::NAst::TExprPtr GenRowJoinProbeAst(
 // marked rows of a LeftSemi join or the unmarked ones of a LeftAnti join, and
 // for LeftAnti AppendNullKeys.
 NQumir::NAst::TExprPtr GenRowJoinDispatchAst(
+    NQumir::NAst::TTypeFactory& types,
     const TJoinKeyDescriptor& key,
     const TRowJoinLayout& layout,
-    const TRowJoinGenTypes& types,
+    const TRowJoinGenTypes& joinTypes,
     EJoinType type);
 
 // jr_materialize(pairs, stream, start, limit, out) -> i64: the probe side's
@@ -324,12 +343,13 @@ NQumir::NAst::TExprPtr GenRowJoinDispatchAst(
 // the build side's from the rows through the jr_gather_* workers. A SEMI/ANTI
 // join outputs the Left columns only, which it builds.
 NQumir::NAst::TExprPtr GenRowJoinMaterializeAst(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TStructType& leftType,
     const NQumir::NAst::TStructType& rightType,
     bool buildIsLeft,
     EJoinOutputColumns output,
     const TRowJoinLayout& layout,
-    const TRowJoinGenTypes& types);
+    const TRowJoinGenTypes& joinTypes);
 
 // Generates the nested-loop (keyless) join entrypoint:
 //   xj_dispatch(left_store, batch_idx, right_store, right_batch_count,
@@ -337,6 +357,7 @@ NQumir::NAst::TExprPtr GenRowJoinMaterializeAst(
 // It passes the emission flags of `type` (Inner, Left, Right, Full,
 // LeftSemi or LeftAnti) to the join_cross.oz helpers as constants.
 NQumir::NAst::TExprPtr GenCrossJoinDispatchAst(
+    NQumir::NAst::TTypeFactory& types,
     EJoinType type,
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr pairBufferType);

@@ -22,8 +22,8 @@
                 (== s_nationkey n_nationkey))
               (== n_regionkey r_regionkey))
             (== r_name (cast "MIDDLE EAST" <named StringView>)))
-          (>= o_orderdate (: 9131 i32)))
-        (< o_orderdate (: 9496 i32)))
+          (>= o_orderdate (: 9131 <named DATE [i32]>)))
+        (< o_orderdate (: 9496 <named DATE [i32]>)))
     )
     (group-by
       n_name

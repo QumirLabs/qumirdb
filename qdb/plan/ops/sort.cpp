@@ -44,12 +44,12 @@ std::vector<TColumnReference> SortKeyReferences(const std::vector<TSortKey>& key
 
 } // namespace
 
-TSortOperator::TSortOperator(TOperatorPtr input, std::vector<TSortKey> keys)
+TSortOperator::TSortOperator(NQumir::NAst::TTypeFactory& types, TOperatorPtr input, std::vector<TSortKey> keys)
     : Input_(std::move(input))
     , Keys_(std::move(keys))
 {
     auto inputSchema = Input_->OutputColumns();
-    Type = std::make_shared<TFunctionType>(
+    Type = types.MakeFunction(
         std::vector<TTypePtr>{inputSchema},
         inputSchema);
 }
@@ -70,13 +70,13 @@ const std::string TSortOperator::ToString() const {
     return s + ")";
 }
 
-TTopSortOperator::TTopSortOperator(TOperatorPtr input, std::vector<TSortKey> keys, int64_t limit)
+TTopSortOperator::TTopSortOperator(NQumir::NAst::TTypeFactory& types, TOperatorPtr input, std::vector<TSortKey> keys, int64_t limit)
     : Input_(std::move(input))
     , Keys_(std::move(keys))
     , Limit_(limit)
 {
     auto inputSchema = Input_->OutputColumns();
-    Type = std::make_shared<TFunctionType>(
+    Type = types.MakeFunction(
         std::vector<TTypePtr>{inputSchema},
         inputSchema);
 }

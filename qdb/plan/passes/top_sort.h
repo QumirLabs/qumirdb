@@ -8,6 +8,6 @@ namespace NQdb {
 // `limit(sort(input), N, M)` to `limit(top-sort(input, keys, N + M), N, M)`.
 // The pass returns the possibly replaced root and recursively optimizes child
 // operators first.
-TOperatorPtr ApplyTopSort(const TOperatorPtr& root);
+TOperatorPtr ApplyTopSort(NQumir::NAst::TTypeFactory& types, const TOperatorPtr& root);
 
 } // namespace NQdb

@@ -22,8 +22,8 @@
     (where
       (&& (&& (&& (&& (== c_mktsegment (cast "FURNITURE" <named StringView>)) (== c_custkey o_custkey))
             (== l_orderkey o_orderkey))
-          (< o_orderdate (: 9209 i32)))
-        (> l_shipdate (: 9209 i32)))
+          (< o_orderdate (: 9209 <named DATE [i32]>)))
+        (> l_shipdate (: 9209 <named DATE [i32]>)))
     )
     (group-by
       l_orderkey

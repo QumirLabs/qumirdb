@@ -40,7 +40,7 @@
                         (== |n1.n_regionkey| r_regionkey))
                       (== r_name (cast "EUROPE" <named StringView>)))
                     (== s_nationkey |n2.n_nationkey|))
-                  (&& (<= (: 9131 i32) o_orderdate) (<= o_orderdate (: 9861 i32))))
+                  (&& (<= (: 9131 <named DATE [i32]>) o_orderdate) (<= o_orderdate (: 9861 <named DATE [i32]>))))
                 (== p_type (cast "PROMO POLISHED BRASS" <named StringView>)))
             )
           )

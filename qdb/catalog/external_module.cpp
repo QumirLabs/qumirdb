@@ -1,6 +1,8 @@
 #include <qdb/catalog/external_module.h>
 
+#include <qdb/plan/types/date.h>
 #include <qdb/plan/types/nullable.h>
+#include <qdb/plan/types/type_text.h>
 #include <qdb/sql/ast.h>
 #include <qdb/utils/rust_std_loader.h>
 #include <qdb/utils/sha1.h>
@@ -23,6 +25,7 @@
 #include <fstream>
 #include <map>
 #include <mutex>
+#include <set>
 #include <sstream>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -41,7 +44,7 @@ std::string CatalogTypeKey(const TTypePtr& type) {
     if (!type) {
         return "?";
     }
-    return NQumir::NAst::TypeKey(UnwrapNamedType(UnwrapNullableType(type)));
+    return NQumir::NAst::TypeKey(UnwrapNamedValueType(UnwrapNullableType(type)));
 }
 
 std::string FunctionKey(const TFunDecl& function) {
@@ -70,26 +73,26 @@ std::string CallKey(const std::string& name, const std::vector<TTypePtr>& argTyp
     return key;
 }
 
-std::shared_ptr<TFunDecl> CloneFunction(const TFunDecl& source) {
+NQumir::TIntrusivePtr<TFunDecl> CloneFunction(const TFunDecl& source) {
     std::vector<TParam> params;
     params.reserve(source.Params.size());
     for (const auto& param : source.Params) {
-        params.push_back(std::make_shared<TVarStmt>(
+        params.push_back(NQumir::MakeIntrusive<TVarStmt>(
             param->Location, param->Name, param->Type));
     }
-    auto result = std::make_shared<TFunDecl>(
+    auto result = NQumir::MakeIntrusive<TFunDecl>(
         source.Location,
         source.Name,
-        source.GenericParams,
+        std::vector(source.GenericParams),
         std::move(params),
-        std::make_shared<TBlockExpr>(source.Location, std::vector<TExprPtr>{}),
+        NQumir::MakeIntrusive<TBlockExpr>(source.Location, std::vector<TExprPtr>{}),
         source.RetType);
     result->MangledName = source.MangledName;
     result->Type = source.Type;
     return result;
 }
 
-std::shared_ptr<TFunDecl> CloneDeclaration(const TFunDecl& source) {
+NQumir::TIntrusivePtr<TFunDecl> CloneDeclaration(const TFunDecl& source) {
     auto result = CloneFunction(source);
     if (result->MangledName.empty()) {
         result->MangledName = result->Name;
@@ -100,10 +103,11 @@ std::shared_ptr<TFunDecl> CloneDeclaration(const TFunDecl& source) {
 struct TParsedModule {
     TExprPtr Ast;
     std::vector<TPragma> Pragmas;
-    std::map<std::string, std::shared_ptr<TFunDecl>> Functions;
+    std::map<std::string, NQumir::TIntrusivePtr<TFunDecl>> Functions;
 };
 
 std::expected<TParsedModule, TError> ParseSourceModule(
+    TTypeFactory& types,
     const std::string& moduleName,
     const std::string& source,
     const std::string& language)
@@ -113,7 +117,7 @@ std::expected<TParsedModule, TError> ParseSourceModule(
     std::istringstream input(source);
     if (language == "ozlang") {
         NCore::TTokenStream stream(input);
-        NCore::TParser parser;
+        NCore::TParser parser(types);
         auto parsed = parser.Parse(stream);
         if (!parsed) {
             return std::unexpected(parsed.error());
@@ -121,15 +125,15 @@ std::expected<TParsedModule, TError> ParseSourceModule(
         ast = std::move(*parsed);
         pragmas = std::move(parser.Pragmas);
     } else {
-        NSemantics::TNameResolver resolver;
-        auto system = std::make_shared<NRegistry::SystemModule>();
+        NSemantics::TNameResolver resolver(types);
+        auto system = std::make_shared<NRegistry::SystemModule>(types);
         resolver.RegisterModule(system.get());
         (void)resolver.ImportModule("System");
         for (const auto& [alias, canonical] : NSemantics::NKumir::ModuleAliases()) {
             resolver.RegisterModuleAlias(alias, canonical);
         }
         TTokenStream stream(input);
-        TParser parser;
+        TParser parser(types);
         auto parsed = parser.parse(stream, &resolver);
         if (!parsed) {
             return std::unexpected(parsed.error());
@@ -150,14 +154,14 @@ std::expected<TParsedModule, TError> ParseSourceModule(
 
     // Reuse the source-loader validation contract: imported modules cannot
     // contain an entry point or arbitrary top-level statements.
-    NFrontend::TSourceModuleLoader loader;
+    NFrontend::TSourceModuleLoader loader(types);
     auto loaded = loader.LoadAst(
         moduleName, ast, {}, pragmas, "<" + language + ":" + moduleName + ">");
     if (!loaded) {
         return std::unexpected(loaded.error());
     }
 
-    std::map<std::string, std::shared_ptr<TFunDecl>> functions;
+    std::map<std::string, NQumir::TIntrusivePtr<TFunDecl>> functions;
     for (const auto& stmt : block.Cast()->Stmts) {
         auto function = TMaybeNode<TFunDecl>(stmt);
         if (!function) {
@@ -473,11 +477,21 @@ struct TExternalCatalogSnapshot::TState {
         std::unordered_map<std::string, std::string> ByTarget;
     };
 
+    // A CREATE FUNCTION declaration, with its types as type text.
+    struct TDeclaration {
+        std::string Name;
+        std::string Symbol;
+        std::vector<std::pair<std::string, std::string>> Params;
+        std::string ReturnType;
+    };
+
     struct TModule {
         std::string Name;
         std::string Language;
         std::string Source;
-        std::map<std::string, std::shared_ptr<TFunDecl>> Functions;
+        // The keys of the module's functions; a rust module also has their declarations.
+        std::set<std::string> FunctionKeys;
+        std::map<std::string, TDeclaration> Declarations;
         std::shared_ptr<TBitcodeCache> Bitcode = std::make_shared<TBitcodeCache>();
     };
 
@@ -516,7 +530,8 @@ std::shared_ptr<TExternalCatalogSnapshot::TState::TModule> CloneModule(
     result->Name = source->Name;
     result->Language = source->Language;
     result->Source = source->Source;
-    result->Functions = source->Functions;
+    result->FunctionKeys = source->FunctionKeys;
+    result->Declarations = source->Declarations;
     if (keepBitcode) {
         result->Bitcode = source->Bitcode;
     }
@@ -547,10 +562,66 @@ std::expected<std::string, TError> ModuleBitcode(
 
 } // namespace
 
-TExternalCatalogSnapshot::TExternalCatalogSnapshot(std::shared_ptr<const TState> state)
+namespace {
+
+TExternalCatalogSnapshot::TState::TDeclaration DeclarationText(const TFunDecl& function) {
+    TExternalCatalogSnapshot::TState::TDeclaration result{
+        .Name = function.Name,
+        .Symbol = function.MangledName,
+        .ReturnType = PrintTypeText(function.RetType),
+    };
+    for (const auto& param : function.Params) {
+        result.Params.emplace_back(param->Name, PrintTypeText(param->Type));
+    }
+    return result;
+}
+
+NQumir::TIntrusivePtr<TFunDecl> ParseDeclaration(
+    TTypeFactory& types,
+    const TExternalCatalogSnapshot::TState::TDeclaration& text)
+{
+    std::vector<TParam> params;
+    std::vector<TTypePtr> paramTypes;
+    for (const auto& [name, type] : text.Params) {
+        params.push_back(NQumir::MakeIntrusive<TVarStmt>(TLocation{}, name, ParseTypeText(types, type)));
+        paramTypes.push_back(params.back()->Type);
+    }
+    const TTypePtr returnType = ParseTypeText(types, text.ReturnType);
+    auto result = NQumir::MakeIntrusive<TFunDecl>(
+        TLocation{},
+        text.Name,
+        std::vector<TGenericParam>{},
+        std::move(params),
+        NQumir::MakeIntrusive<TBlockExpr>(TLocation{}, std::vector<TExprPtr>{}),
+        returnType);
+    result->MangledName = text.Symbol;
+    result->Type = types.MakeFunction(std::move(paramTypes), returnType);
+    return result;
+}
+
+} // namespace
+
+TExternalCatalogSnapshot::TExternalCatalogSnapshot(
+    std::shared_ptr<const TState> state,
+    std::shared_ptr<TTypeFactory> types)
     : State_(std::move(state))
+    , Types_(std::move(types))
     , ResolvedTypes_(std::make_shared<TResolvedTypes>())
 {
+    for (const auto& [name, module] : State_->Modules) {
+        auto& functions = Functions_[name];
+        if (module->Language == "rust") {
+            for (const auto& [key, declaration] : module->Declarations) {
+                functions.emplace(key, ParseDeclaration(*Types_, declaration));
+            }
+            continue;
+        }
+        auto parsed = ParseSourceModule(*Types_, module->Name, module->Source, module->Language);
+        if (!parsed) {
+            throw parsed.error();
+        }
+        functions = std::move(parsed->Functions);
+    }
 }
 
 std::expected<std::optional<TTypePtr>, TError>
@@ -568,8 +639,8 @@ TExternalCatalogSnapshot::ResolveReturnType(
             return std::optional<TTypePtr>{it->second};
         }
     }
-    for (const auto& [_, module] : State_->Modules) {
-        for (const auto& [functionKey, function] : module->Functions) {
+    for (const auto& [_, functions] : Functions_) {
+        for (const auto& [functionKey, function] : functions) {
             knownName = knownName || function->Name == name;
             if (functionKey == key) {
                 return std::optional<TTypePtr>{function->RetType};
@@ -593,9 +664,9 @@ void TExternalCatalogSnapshot::RememberResolvedReturnType(
 }
 
 bool TExternalCatalogSnapshot::HasFunction(const std::string& name) const {
-    for (const auto& [_, module] : State_->Modules) {
+    for (const auto& [_, functions] : Functions_) {
         if (std::ranges::any_of(
-                module->Functions,
+                functions,
                 [&](const auto& item) { return item.second->Name == name; }))
         {
             return true;
@@ -623,15 +694,15 @@ std::expected<std::monostate, TError>
 TExternalCatalogSnapshot::RegisterDeclarations(
     NQumir::NFrontend::TSourceModuleLoader& loader) const
 {
-    for (const auto& [_, module] : State_->Modules) {
+    for (const auto& [name, functions] : Functions_) {
         std::vector<TExprPtr> declarations;
-        declarations.reserve(module->Functions.size());
-        for (const auto& [__, function] : module->Functions) {
+        declarations.reserve(functions.size());
+        for (const auto& [__, function] : functions) {
             declarations.push_back(CloneDeclaration(*function));
         }
         auto loaded = loader.LoadAst(
-            module->Name,
-            std::make_shared<TBlockExpr>(TLocation{}, std::move(declarations)),
+            name,
+            NQumir::MakeIntrusive<TBlockExpr>(TLocation{}, std::move(declarations)),
             {},
             {TPragma{"language", {"overloads"}, {}}});
         if (!loaded) {
@@ -645,15 +716,17 @@ namespace {
 
 // The modules that define a function `ast` calls.
 std::vector<std::shared_ptr<const TExternalCatalogSnapshot::TState::TModule>> ReferencedModules(
-    const TExternalCatalogSnapshot::TState& state, const TExprPtr& ast)
+    const TExternalCatalogSnapshot::TState& state,
+    const std::map<std::string, std::map<std::string, NQumir::TIntrusivePtr<TFunDecl>>>& functions,
+    const TExprPtr& ast)
 {
     std::unordered_set<std::string> callNames;
     CollectCallNames(ast, callNames);
 
     std::vector<std::shared_ptr<const TExternalCatalogSnapshot::TState::TModule>> modules;
-    for (const auto& [_, module] : state.Modules) {
+    for (const auto& [name, module] : state.Modules) {
         bool referenced = std::ranges::any_of(
-            module->Functions,
+            functions.at(name),
             [&](const auto& item) { return callNames.contains(item.second->Name); });
         if (referenced) {
             modules.push_back(module);
@@ -665,7 +738,7 @@ std::vector<std::shared_ptr<const TExternalCatalogSnapshot::TState::TModule>> Re
 } // namespace
 
 bool TExternalCatalogSnapshot::ReferencesModules(const TExprPtr& ast) const {
-    return !ReferencedModules(*State_, ast).empty();
+    return !ReferencedModules(*State_, Functions_, ast).empty();
 }
 
 std::expected<std::optional<NQumir::NFrontend::TComposeResult>, TError>
@@ -674,7 +747,7 @@ TExternalCatalogSnapshot::ComposeReferenced(
     const std::string& target,
     const std::string& cacheDir) const
 {
-    auto modules = ReferencedModules(*State_, ast);
+    auto modules = ReferencedModules(*State_, Functions_, ast);
     if (modules.empty()) {
         return std::optional<NQumir::NFrontend::TComposeResult>{};
     }
@@ -694,19 +767,21 @@ TExternalCatalogSnapshot::ComposeReferenced(
     if (!inputBlock) {
         return std::unexpected(TError("external modules require a block program"));
     }
-    auto program = std::make_shared<TBlockExpr>(
-        ast->Location, inputBlock.Cast()->Stmts);
+    auto program = NQumir::MakeIntrusive<TBlockExpr>(
+        ast->Location, std::vector(inputBlock.Cast()->Stmts));
     program->Type = ast->Type;
     program->Origin = ast->Origin;
 
-    NQumir::NFrontend::TSourceModuleLoader loader;
+    auto& types = *Types_;
+    NQumir::NFrontend::TSourceModuleLoader loader(types);
     for (const auto& module : modules) {
         std::expected<const NFrontend::TSourceModule*, TError> loaded =
             std::unexpected(TError("unsupported external module language"));
         if (module->Language == "rust") {
+            const auto& functions = Functions_.at(module->Name);
             std::vector<TExprPtr> declarations;
-            declarations.reserve(module->Functions.size());
-            for (const auto& [_, function] : module->Functions) {
+            declarations.reserve(functions.size());
+            for (const auto& [_, function] : functions) {
                 declarations.push_back(CloneDeclaration(*function));
             }
             auto bitcode = ModuleBitcode(*module, target, cacheDir);
@@ -715,12 +790,12 @@ TExternalCatalogSnapshot::ComposeReferenced(
             }
             loaded = loader.LoadAst(
                 module->Name,
-                std::make_shared<TBlockExpr>(TLocation{}, std::move(declarations)),
+                NQumir::MakeIntrusive<TBlockExpr>(TLocation{}, std::move(declarations)),
                 {std::move(*bitcode)},
                 {TPragma{"language", {"overloads"}, {}}});
         } else if (module->Language == "kumir" || module->Language == "ozlang") {
             auto parsed = ParseSourceModule(
-                module->Name, module->Source, module->Language);
+                types, module->Name, module->Source, module->Language);
             if (!parsed) {
                 return std::unexpected(parsed.error());
             }
@@ -735,7 +810,7 @@ TExternalCatalogSnapshot::ComposeReferenced(
         }
         program->Stmts.insert(
             program->Stmts.begin(),
-            std::make_shared<TUseExpr>(TLocation{}, module->Name));
+            NQumir::MakeIntrusive<TUseExpr>(TLocation{}, module->Name));
     }
 
     auto composed = NQumir::NFrontend::LoadAndCompose(
@@ -752,6 +827,7 @@ TExternalModuleCatalog::TExternalModuleCatalog()
 }
 
 std::expected<std::monostate, TError> TExternalModuleCatalog::Apply(
+    TTypeFactory& types,
     const NSql::TSqlExternalModule& definition)
 {
     if (definition.Language != "rust" && definition.Language != "kumir"
@@ -763,7 +839,7 @@ std::expected<std::monostate, TError> TExternalModuleCatalog::Apply(
     std::optional<TParsedModule> parsedSource;
     if (definition.Language != "rust") {
         auto parsed = ParseSourceModule(
-            definition.Name, definition.Code, definition.Language);
+            types, definition.Name, definition.Code, definition.Language);
         if (!parsed) {
             return std::unexpected(parsed.error());
         }
@@ -785,16 +861,17 @@ std::expected<std::monostate, TError> TExternalModuleCatalog::Apply(
     if (parsedSource) {
         for (const auto& [key, _] : parsedSource->Functions) {
             for (const auto& [otherName, other] : State_->Modules) {
-                if (otherName != definition.Name && other->Functions.contains(key)) {
+                if (otherName != definition.Name && other->FunctionKeys.contains(key)) {
                     return std::unexpected(TError(
                         "external function `" + key + "' already exists"));
                 }
             }
+            module->FunctionKeys.insert(key);
         }
-        module->Functions = std::move(parsedSource->Functions);
     } else if (existing != State_->Modules.end()
         && existing->second->Language == "rust") {
-        module->Functions = existing->second->Functions;
+        module->FunctionKeys = existing->second->FunctionKeys;
+        module->Declarations = existing->second->Declarations;
     }
     next->Modules[definition.Name] = std::move(module);
     State_ = std::move(next);
@@ -822,7 +899,7 @@ std::expected<std::monostate, TError> TExternalModuleCatalog::Apply(
 
     std::optional<std::string> oldModule;
     for (const auto& [moduleName, module] : State_->Modules) {
-        if (module->Functions.contains(key)) {
+        if (module->FunctionKeys.contains(key)) {
             oldModule = moduleName;
             break;
         }
@@ -835,20 +912,28 @@ std::expected<std::monostate, TError> TExternalModuleCatalog::Apply(
     auto next = std::make_shared<TExternalCatalogSnapshot::TState>(*State_);
     if (oldModule && *oldModule != definition.ModuleName) {
         auto oldCopy = CloneModule(next->Modules.at(*oldModule), true);
-        oldCopy->Functions.erase(key);
+        oldCopy->FunctionKeys.erase(key);
+        oldCopy->Declarations.erase(key);
         next->Modules[*oldModule] = std::move(oldCopy);
     }
     auto targetCopy = CloneModule(next->Modules.at(definition.ModuleName), true);
-    targetCopy->Functions[key] = CloneFunction(*definition.Func);
+    targetCopy->FunctionKeys.insert(key);
+    targetCopy->Declarations[key] = DeclarationText(*definition.Func);
     next->Modules[definition.ModuleName] = std::move(targetCopy);
     State_ = std::move(next);
     return std::monostate{};
 }
 
-std::shared_ptr<const TExternalCatalogSnapshot> TExternalModuleCatalog::Snapshot() const {
-    std::lock_guard lock(Mutex_);
+std::shared_ptr<const TExternalCatalogSnapshot> TExternalModuleCatalog::Snapshot(
+    std::shared_ptr<TTypeFactory> types) const
+{
+    std::shared_ptr<const TExternalCatalogSnapshot::TState> state;
+    {
+        std::lock_guard lock(Mutex_);
+        state = State_;
+    }
     return std::shared_ptr<const TExternalCatalogSnapshot>(
-        new TExternalCatalogSnapshot(State_));
+        new TExternalCatalogSnapshot(std::move(state), std::move(types)));
 }
 
 } // namespace NQdb

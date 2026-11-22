@@ -6,10 +6,10 @@
 
 namespace NQdb {
 
-TCteRef::TCteRef(TCteDefinitionPtr def)
+TCteRef::TCteRef(NQumir::NAst::TTypeFactory& types, TCteDefinitionPtr def)
     : Def_(std::move(def))
 {
-    Type = std::make_shared<NQumir::NAst::TFunctionType>(
+    Type = types.MakeFunction(
         std::vector<NQumir::NAst::TTypePtr>{}, Def_->OutputType);
 }
 

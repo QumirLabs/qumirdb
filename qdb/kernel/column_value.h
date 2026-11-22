@@ -13,10 +13,11 @@ struct TColumnValueAst {
     std::vector<NQumir::NAst::TExprPtr> Setup;
     NQumir::NAst::TExprPtr Value;
     NQumir::NAst::TExprPtr IsValid;
-    NQumir::NAst::TTypePtr ValueType;
+    NQumir::NAst::TTypePtr ValueType = nullptr;
 };
 
 TColumnValueAst BuildColumnValueAst(
+    NQumir::NAst::TTypeFactory& types,
     const std::string& columnName,
     const std::string& rowName,
     const std::string& temporaryPrefix,

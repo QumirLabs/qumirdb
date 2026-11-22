@@ -27,6 +27,8 @@
 #include <parquet/file_reader.h>
 #include <parquet/file_writer.h>
 
+#include "test_types.h"
+
 using namespace NQdb;
 
 namespace {
@@ -104,7 +106,7 @@ TEST(IOTest, ParquetRoundtrip) {
     WriteParquet(path, batch);
 
     auto source = NQdb::TParquetFile(path).MakeSource();
-    const auto& s = source->Schema();
+    const auto& s = source->Schema(TestTypes());
 
     ASSERT_EQ(s.Columns.size(), 4u);
     EXPECT_EQ(s.Columns[0].Name, "id");
@@ -119,7 +121,7 @@ TEST(IOTest, ParquetRoundtrip) {
         NQumir::NAst::TStringType::TypeId);
 
     auto structType = NQumir::NAst::TMaybeType<NQumir::NAst::TStructType>(
-        StructTypeFromSchema(s));
+        StructTypeFromSchema(TestTypes(), s));
     ASSERT_TRUE(structType);
     EXPECT_EQ(structType.Cast()->Fields[1].second, s.Columns[1].Type);
 
@@ -171,7 +173,8 @@ TEST(IOTest, NullsInColumn) {
     EXPECT_NE(isValid(2), 0); // row 2: valid
 
     std::ostringstream out;
-    NQdb::TConsoleSink sink(source->Schema(), out);
+    const auto outSchema = source->Schema(TestTypes());
+    NQdb::TConsoleSink sink(outSchema, out);
     sink.Write(rowSet);
     sink.Flush();
     EXPECT_NE(out.str().find("NULL"), std::string::npos);
@@ -206,10 +209,10 @@ TEST(IOTest, ParquetRowGroupRangeSource) {
 
     const auto projectedGroups = file.ScanRowGroups(TColumnNames{"id"});
     // Planning metadata must not alter a table shared by other scan aliases.
-    EXPECT_EQ(file.Schema().Columns.size(), 2u);
+    EXPECT_EQ(file.Schema(TestTypes()).Columns.size(), 2u);
     EXPECT_EQ(file.ScanRowGroups()[0].ByteSize, rowGroups[0].ByteSize);
     auto projected = file.MakeSource(std::nullopt, TColumnNames{"id"});
-    ASSERT_EQ(projected->Schema().Columns.size(), 1u);
+    ASSERT_EQ(projected->Schema(TestTypes()).Columns.size(), 1u);
     ASSERT_EQ(projectedGroups.size(), rowGroups.size());
     for (size_t rg = 0; rg < rowGroups.size(); ++rg) {
         EXPECT_EQ(projectedGroups[rg].RowGroup, rowGroups[rg].RowGroup);
@@ -253,8 +256,8 @@ TEST(IOTest, ParquetRowGroupRangeSource) {
     ASSERT_TRUE(split->Next(rowSet));
     ASSERT_EQ(rowSet.RowCount, 2);
     ASSERT_EQ(rowSet.ColumnCount, 1);
-    ASSERT_EQ(split->Schema().Columns.size(), 1u);
-    EXPECT_EQ(split->Schema().Columns[0].Name, "id");
+    ASSERT_EQ(split->Schema(TestTypes()).Columns.size(), 1u);
+    EXPECT_EQ(split->Schema(TestTypes()).Columns[0].Name, "id");
     const auto* values = reinterpret_cast<const int64_t*>(rowSet.Columns[0].Data);
     EXPECT_EQ(values[0], 3);
     EXPECT_EQ(values[1], 4);
@@ -337,14 +340,14 @@ TEST(IOTest, RowIdColumnIsAppendedAfterFileColumns) {
 
     // Without the request the synthetic column does not exist.
     auto idOnly = file.MakeSource(std::nullopt, TColumnNames{"id"});
-    ASSERT_EQ(idOnly->Schema().Columns.size(), 1u);
-    EXPECT_EQ(idOnly->Schema().Columns[0].Name, "id");
+    ASSERT_EQ(idOnly->Schema(TestTypes()).Columns.size(), 1u);
+    EXPECT_EQ(idOnly->Schema(TestTypes()).Columns[0].Name, "id");
 
     auto source = file.MakeSource(
         std::nullopt, TColumnNames{"id", std::string(InternalRowIdColumnName)});
-    ASSERT_EQ(source->Schema().Columns.size(), 2u);
-    EXPECT_EQ(source->Schema().Columns[0].Name, "id");
-    EXPECT_EQ(source->Schema().Columns[1].Name, InternalRowIdColumnName);
+    ASSERT_EQ(source->Schema(TestTypes()).Columns.size(), 2u);
+    EXPECT_EQ(source->Schema(TestTypes()).Columns[0].Name, "id");
+    EXPECT_EQ(source->Schema(TestTypes()).Columns[1].Name, InternalRowIdColumnName);
 
     // Arrow coalesces row groups into one record batch, so this also covers
     // a batch whose rows straddle several row groups.
@@ -366,8 +369,8 @@ TEST(IOTest, RowIdColumnWithoutAnyFileColumn) {
     NQdb::TParquetFile file(WriteRowIdFixture());
     const TColumnNames rowIdOnly{std::string(InternalRowIdColumnName)};
     auto source = file.MakeSource(std::nullopt, rowIdOnly);
-    ASSERT_EQ(source->Schema().Columns.size(), 1u);
-    EXPECT_EQ(source->Schema().Columns[0].Name, InternalRowIdColumnName);
+    ASSERT_EQ(source->Schema(TestTypes()).Columns.size(), 1u);
+    EXPECT_EQ(source->Schema(TestTypes()).Columns[0].Name, InternalRowIdColumnName);
 
     TRowSet rowSet = {};
     ASSERT_TRUE(source->Next(rowSet));
@@ -607,7 +610,7 @@ TEST(IOTest, FloatColumnIsReadAsFloat) {
                 auto source = file.MakeSource(
                     std::nullopt, TColumnNames{"f", std::string(InternalRowIdColumnName)});
                 auto type = NQumir::NAst::TMaybeType<NQumir::NAst::TFloatType>(
-                    UnwrapNullableType(source->Schema().Columns[0].Type));
+                    UnwrapNullableType(source->Schema(TestTypes()).Columns[0].Type));
                 ASSERT_TRUE(type);
                 EXPECT_EQ(type.Cast()->Kind, NQumir::NAst::TFloatType::F32);
 
@@ -694,19 +697,19 @@ TEST(IOTest, ValueTypeOfDescribesHowTasksReadAColumn) {
         EXPECT_EQ(value->Kind, kind) << type->ToString();
         EXPECT_EQ(value->Width, width) << type->ToString();
         EXPECT_EQ(value->Scale, scale) << type->ToString();
-        EXPECT_EQ(value->Nullable, static_cast<bool>(TMaybeType<TNullable>(type))) << type->ToString();
+        EXPECT_EQ(value->Nullable, IsNullableType(type)) << type->ToString();
     };
-    check(std::make_shared<TNullable>(MakeDecimalType({.Precision = 38, .Scale = 2})), EValueKind::Decimal, 16, 2);
-    check(MakeDecimalType({.Precision = 15, .Scale = 4}), EValueKind::Decimal, 8, 4);
-    check(std::make_shared<TNullable>(std::make_shared<TDateType>()), EValueKind::Date, 4);
-    check(std::make_shared<TIntegerType>(TIntegerType::I128), EValueKind::Signed, 16);
-    check(BinIntStorageType(), EValueKind::Signed, 16);
-    check(std::make_shared<TIntegerType>(TIntegerType::U16), EValueKind::Unsigned, 2);
-    check(std::make_shared<TFloatType>(TFloatType::F32), EValueKind::Float, 4);
-    check(std::make_shared<TNullable>(std::make_shared<TBoolType>()), EValueKind::Bool, 0);
-    check(std::make_shared<TStringType>(), EValueKind::String, 0);
-    EXPECT_FALSE(ValueTypeOf(std::make_shared<TStructType>(
-        std::vector<std::pair<std::string, TTypePtr>>{{"x", std::make_shared<TIntegerType>()}})));
+    check(MakeNullableType(TestTypes(), MakeDecimalType(TestTypes(), {.Precision = 38, .Scale = 2})), EValueKind::Decimal, 16, 2);
+    check(MakeDecimalType(TestTypes(), {.Precision = 15, .Scale = 4}), EValueKind::Decimal, 8, 4);
+    check(MakeNullableType(TestTypes(), MakeDateType(TestTypes())), EValueKind::Date, 4);
+    check(TestTypes().MakeInteger(TIntegerType::I128), EValueKind::Signed, 16);
+    check(BinIntStorageType(TestTypes()), EValueKind::Signed, 16);
+    check(TestTypes().MakeInteger(TIntegerType::U16), EValueKind::Unsigned, 2);
+    check(TestTypes().MakeFloat(TFloatType::F32), EValueKind::Float, 4);
+    check(MakeNullableType(TestTypes(), TestTypes().Make<TBoolType>()), EValueKind::Bool, 0);
+    check(TestTypes().Make<TStringType>(), EValueKind::String, 0);
+    EXPECT_FALSE(ValueTypeOf(TestTypes().MakeStruct(
+        std::vector<std::pair<std::string, TTypePtr>>{{"x", TestTypes().MakeInteger()}})));
 }
 
 // An f32 column holds 4-byte values and prints as the shortest text that reads back as
@@ -724,7 +727,7 @@ TEST(IOTest, SinkPrintsF32AtFloatPrecision) {
         .RefCount = 1,
     };
     const std::vector<TColumnSchema> columns{
-        {"f", std::make_shared<NQumir::NAst::TFloatType>(NQumir::NAst::TFloatType::F32)},
+        {"f", TestTypes().MakeFloat(NQumir::NAst::TFloatType::F32)},
     };
     const TSchema schema{columns};
 
@@ -774,16 +777,16 @@ TEST(IOTest, SinksPrintEveryValueKind) {
         .RefCount = 1,
     };
     const std::vector<TColumnSchema> schemaColumns{
-        {"i8", std::make_shared<TNullable>(std::make_shared<TIntegerType>(TIntegerType::I8))},
-        {"u64", std::make_shared<TNullable>(std::make_shared<TIntegerType>(TIntegerType::U64))},
-        {"i128", std::make_shared<TNullable>(std::make_shared<TIntegerType>(TIntegerType::I128))},
-        {"f64", std::make_shared<TNullable>(std::make_shared<TFloatType>(TFloatType::F64))},
-        {"d32", std::make_shared<TNullable>(std::make_shared<TDateType>())},
-        {"d64", std::make_shared<TNullable>(std::make_shared<TDateType>(TIntegerType::I64))},
-        {"dec15", std::make_shared<TNullable>(MakeDecimalType({.Precision = 15, .Scale = 2}))},
-        {"dec38", std::make_shared<TNullable>(MakeDecimalType({.Precision = 38, .Scale = 4}))},
-        {"b", std::make_shared<TNullable>(std::make_shared<TBoolType>())},
-        {"s", std::make_shared<TNullable>(std::make_shared<TStringType>())},
+        {"i8", MakeNullableType(TestTypes(), TestTypes().MakeInteger(TIntegerType::I8))},
+        {"u64", MakeNullableType(TestTypes(), TestTypes().MakeInteger(TIntegerType::U64))},
+        {"i128", MakeNullableType(TestTypes(), TestTypes().MakeInteger(TIntegerType::I128))},
+        {"f64", MakeNullableType(TestTypes(), TestTypes().MakeFloat(TFloatType::F64))},
+        {"d32", MakeNullableType(TestTypes(), MakeDateType(TestTypes()))},
+        {"d64", MakeNullableType(TestTypes(), MakeDateType(TestTypes(), TIntegerType::I64))},
+        {"dec15", MakeNullableType(TestTypes(), MakeDecimalType(TestTypes(), {.Precision = 15, .Scale = 2}))},
+        {"dec38", MakeNullableType(TestTypes(), MakeDecimalType(TestTypes(), {.Precision = 38, .Scale = 4}))},
+        {"b", MakeNullableType(TestTypes(), TestTypes().Make<TBoolType>())},
+        {"s", MakeNullableType(TestTypes(), TestTypes().Make<TStringType>())},
         {"q", nullptr},
     };
     const TSchema schema{schemaColumns};

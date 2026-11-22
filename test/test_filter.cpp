@@ -19,6 +19,8 @@
 #include <string>
 #include <vector>
 
+#include "test_types.h"
+
 namespace {
 
 using namespace NQdb;
@@ -27,7 +29,7 @@ using namespace NQumir::NAst;
 TExprPtr ParsePredicate(const std::string& source) {
     std::istringstream input(source);
     NCore::TTokenStream tokens(input);
-    NCore::TParser parser;
+    NCore::TParser parser(TestTypes());
     auto parsed = parser.Parse(tokens);
     if (!parsed) {
         throw std::runtime_error(parsed.error().ToString());
@@ -47,8 +49,8 @@ std::array<uint8_t, 4> RunStringLiteralFilter(
         TColumn{.Data = const_cast<char*>(data.data()), .Mask = nullptr,
             .Offsets = const_cast<int32_t*>(offsets.data()), .OffsetWidth = 4},
     };
-    TStructType inputType({
-        {"value", std::make_shared<TStringType>()},
+    const auto& inputType = *TestTypes().MakeStruct({
+        {"value", TestTypes().Make<TStringType>()},
     });
     auto predicate = ParsePredicate(literalFirst
         ? "(" + op + " \"placeholder\" value)"
@@ -58,13 +60,13 @@ std::array<uint8_t, 4> RunStringLiteralFilter(
         literalFirst ? binary->Left : binary->Right).Cast();
     literalExpr->Value = literal;
     if (castLiteral) {
-        auto cast = std::make_shared<TCastExpr>(literalExpr->Location,
-            literalExpr, std::make_shared<TStringType>());
+        auto cast = NQumir::MakeIntrusive<TCastExpr>(literalExpr->Location,
+            NQumir::TIntrusivePtr<TStringLiteralExpr>(literalExpr), TestTypes().Make<TStringType>());
         (literalFirst ? binary->Left : binary->Right) = std::move(cast);
     }
 
-    auto dispatch = TKernelCompiler().CompileFilter(
-        NKernel::BuildFilterKernelSpec(inputType, predicate));
+    auto dispatch = TKernelCompiler({.Types = SharedTestTypes()}).CompileFilter(
+        NKernel::BuildFilterKernelSpec(TestTypes(), inputType, predicate));
     std::array<uint8_t, 4> selection{};
     TRowSet rowSet{
         .Columns = columns.data(),
@@ -90,12 +92,12 @@ std::array<uint8_t, 6> RunNullableIntegerFilter(
         TColumn{.Data = reinterpret_cast<char*>(right.data()),
             .Mask = rightMask.data()},
     };
-    TStructType inputType({
-        {"left", std::make_shared<TNullable>(std::make_shared<TIntegerType>())},
-        {"right", std::make_shared<TNullable>(std::make_shared<TIntegerType>())},
+    const auto& inputType = *TestTypes().MakeStruct({
+        {"left", MakeNullableType(TestTypes(), TestTypes().MakeInteger())},
+        {"right", MakeNullableType(TestTypes(), TestTypes().MakeInteger())},
     });
-    auto dispatch = TKernelCompiler().CompileFilter(
-        NKernel::BuildFilterKernelSpec(
+    auto dispatch = TKernelCompiler({.Types = SharedTestTypes()}).CompileFilter(
+        NKernel::BuildFilterKernelSpec(TestTypes(),
             inputType, ParsePredicate(predicateSource)));
     std::array<uint8_t, 6> selection{};
     TRowSet rowSet{
@@ -125,13 +127,13 @@ protected:
             .Data = reinterpret_cast<char*>(values.data()),
             .Mask = validity.empty() ? nullptr : validity.data(),
         };
-        TTypePtr valueType = std::make_shared<TIntegerType>(TIntegerType::I64);
+        TTypePtr valueType = TestTypes().MakeInteger(TIntegerType::I64);
         if (!validity.empty()) {
-            valueType = std::make_shared<TNullable>(valueType);
+            valueType = MakeNullableType(TestTypes(), valueType);
         }
-        TStructType inputType({{"value", valueType}});
-        auto process = MakeFilterProcess({}, TKernelCompiler().CompileFilter(
-            NKernel::BuildFilterKernelSpec(inputType, ParsePredicate(predicate))));
+        const auto& inputType = *TestTypes().MakeStruct({{"value", valueType}});
+        auto process = MakeFilterProcess({}, TKernelCompiler({.Types = SharedTestTypes()}).CompileFilter(
+            NKernel::BuildFilterKernelSpec(TestTypes(), inputType, ParsePredicate(predicate))));
         TRowSet rowSet{
             .Columns = &column,
             .ColumnCount = 1,
@@ -192,11 +194,11 @@ TEST(FilterKernel, ClearsOutputOfRejectedRows) {
     const std::array<int32_t, 5> offsets = {0, 1, 5, 6, 10};
     TColumn column{.Data = const_cast<char*>(data.data()), .Mask = nullptr,
         .Offsets = const_cast<int32_t*>(offsets.data()), .OffsetWidth = 4};
-    TStructType inputType({
-        {"value", std::make_shared<TStringType>()},
+    const auto& inputType = *TestTypes().MakeStruct({
+        {"value", TestTypes().Make<TStringType>()},
     });
-    auto dispatch = TKernelCompiler().CompileFilter(
-        NKernel::BuildFilterKernelSpec(
+    auto dispatch = TKernelCompiler({.Types = SharedTestTypes()}).CompileFilter(
+        NKernel::BuildFilterKernelSpec(TestTypes(),
             inputType, ParsePredicate("(== value \"same\")")));
     const std::array<uint8_t, 4> inputSelection = {0, 1, 0xff, 0};
     std::array<uint8_t, 4> selection = {7, 7, 7, 7};
@@ -225,9 +227,9 @@ TEST(FilterKernel, ComparesStringColumnsWithoutMutatingLogicalPredicate) {
         TColumn{.Data = const_cast<char*>(rightData.data()), .Mask = nullptr,
             .Offsets = offsets.data(), .OffsetWidth = 4},
     };
-    TStructType inputType({
-        {"left", std::make_shared<TStringType>()},
-        {"right", std::make_shared<TStringType>()},
+    const auto& inputType = *TestTypes().MakeStruct({
+        {"left", TestTypes().Make<TStringType>()},
+        {"right", TestTypes().Make<TStringType>()},
     });
     const std::array<std::pair<const char*, std::array<uint8_t, 4>>, 6> cases = {{
         {"==", {0, 0, 0xff, 0}},
@@ -242,8 +244,8 @@ TEST(FilterKernel, ComparesStringColumnsWithoutMutatingLogicalPredicate) {
         auto predicate = ParsePredicate(
             "(" + std::string(op) + " left right)");
         const std::string logical = NCore::PrintAst(predicate);
-        auto dispatch = TKernelCompiler().CompileFilter(
-            NKernel::BuildFilterKernelSpec(inputType, predicate));
+        auto dispatch = TKernelCompiler({.Types = SharedTestTypes()}).CompileFilter(
+            NKernel::BuildFilterKernelSpec(TestTypes(), inputType, predicate));
         std::array<uint8_t, 4> selection{};
         TRowSet rowSet{
             .Columns = columns.data(),
@@ -292,8 +294,8 @@ TEST(FilterKernel, StringViewLiteralKeepsItsLength) {
         TColumn{.Data = const_cast<char*>(data.data()), .Mask = nullptr,
             .Offsets = const_cast<int32_t*>(offsets.data()), .OffsetWidth = 4},
     };
-    TStructType inputType({
-        {"value", std::make_shared<TStringType>()},
+    const auto& inputType = *TestTypes().MakeStruct({
+        {"value", TestTypes().Make<TStringType>()},
     });
     auto predicate = ParsePredicate(
         "(== value (cast \"placeholder\" <named StringView>))");
@@ -302,9 +304,9 @@ TEST(FilterKernel, StringViewLiteralKeepsItsLength) {
     TMaybeNode<TStringLiteralExpr>(cast->Operand).Cast()->Value = literal;
 
     std::ostringstream diagnostics;
-    TKernelCompiler compiler(&diagnostics);
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Diagnostics = &diagnostics});
     auto dispatch = compiler.CompileFilter(
-        NKernel::BuildFilterKernelSpec(inputType, predicate));
+        NKernel::BuildFilterKernelSpec(TestTypes(), inputType, predicate));
     std::array<uint8_t, 4> selection{};
     TRowSet rowSet{
         .Columns = columns.data(),
@@ -335,11 +337,11 @@ TEST(FilterKernel, PreservesInputSelectionAndPrecomputedHashes) {
     std::array<uint8_t, 3> inputSelection = {2, 0, 0xff};
     std::array<uint64_t, 3> hashes = {11, 22, 33};
     TColumn column{.Data = reinterpret_cast<char*>(values.data())};
-    TStructType inputType({
-        {"value", std::make_shared<TIntegerType>(TIntegerType::I64)},
+    const auto& inputType = *TestTypes().MakeStruct({
+        {"value", TestTypes().MakeInteger(TIntegerType::I64)},
     });
-    auto dispatch = TKernelCompiler().CompileFilter(
-        NKernel::BuildFilterKernelSpec(inputType, ParsePredicate("(> value 0)")));
+    auto dispatch = TKernelCompiler({.Types = SharedTestTypes()}).CompileFilter(
+        NKernel::BuildFilterKernelSpec(TestTypes(), inputType, ParsePredicate("(> value 0)")));
     auto process = MakeFilterProcess({}, std::move(dispatch));
     TRowSet rowSet{
         .Columns = &column,
@@ -390,12 +392,12 @@ TEST(FilterKernel, CompilesFromKernelSpec) {
     std::array<TColumn, 1> columns = {
         TColumn{.Data = reinterpret_cast<char*>(values.data())},
     };
-    TStructType inputType({
-        {"value", std::make_shared<TIntegerType>()},
+    const auto& inputType = *TestTypes().MakeStruct({
+        {"value", TestTypes().MakeInteger()},
     });
-    auto spec = NKernel::BuildFilterKernelSpec(
+    auto spec = NKernel::BuildFilterKernelSpec(TestTypes(),
         inputType, ParsePredicate("(> value 1)"));
-    auto dispatch = TKernelCompiler().CompileFilter(spec);
+    auto dispatch = TKernelCompiler({.Types = SharedTestTypes()}).CompileFilter(spec);
     std::array<uint8_t, 4> selection{};
     TRowSet rowSet{
         .Columns = columns.data(),
@@ -411,14 +413,13 @@ TEST(FilterKernel, CompilesFromKernelSpec) {
 }
 
 TEST(FilterKernel, SkipsThreeValuedLogicForNonNullablePredicate) {
-    TStructType inputType({
-        {"plain", std::make_shared<TIntegerType>()},
-        {"optional", std::make_shared<TNullable>(
-            std::make_shared<TIntegerType>())},
+    const auto& inputType = *TestTypes().MakeStruct({
+        {"plain", TestTypes().MakeInteger()},
+        {"optional", MakeNullableType(TestTypes(), TestTypes().MakeInteger())},
     });
     std::ostringstream diagnostics;
-    TKernelCompiler compiler(&diagnostics);
-    auto dispatch = compiler.CompileFilter(NKernel::BuildFilterKernelSpec(
+    TKernelCompiler compiler({.Types = SharedTestTypes(), .Diagnostics = &diagnostics});
+    auto dispatch = compiler.CompileFilter(NKernel::BuildFilterKernelSpec(TestTypes(),
         inputType, ParsePredicate("(== plain 1)")));
     ASSERT_NE(dispatch.Slot, nullptr);
     EXPECT_EQ(diagnostics.str().find("qdb_sql_bool_"), std::string::npos);

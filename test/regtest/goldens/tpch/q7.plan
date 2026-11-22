@@ -13,6 +13,6 @@ sort [supp_nation asc, cust_nation asc, l_year asc]
                ├─ filter (|| (== |n1.n_name| (cast "FRANCE" <named StringView>)) (== |n1.n_name| (cast "UNITED KINGDOM" <named StringView>))) (rows≈1 cost≈400)
                │  └─ source nation AS n1 row-groups (|| (== |n1.n_name| (cast "FRANCE" <named StringView>)) (== |n1.n_name| (cast "UNITED KINGDOM" <named StringView>))) (rows≈10 cost≈200)
                └─ join inner [lineitem.l_suppkey = supplier.s_suppkey] (rows≈1 cost≈4.8K)
-                  ├─ filter (&& (<= (: 9131 i32) |lineitem.l_shipdate|) (<= |lineitem.l_shipdate| (: 9861 i32))) (rows≈7 cost≈560)
-                  │  └─ source lineitem AS lineitem row-groups (&& (<= (: 9131 i32) |lineitem.l_shipdate|) (<= |lineitem.l_shipdate| (: 9861 i32))) (rows≈10 cost≈280)
+                  ├─ filter (&& (<= (: 9131 <named DATE [i32]>) |lineitem.l_shipdate|) (<= |lineitem.l_shipdate| (: 9861 <named DATE [i32]>))) (rows≈7 cost≈560)
+                  │  └─ source lineitem AS lineitem row-groups (&& (<= (: 9131 <named DATE [i32]>) |lineitem.l_shipdate|) (<= |lineitem.l_shipdate| (: 9861 <named DATE [i32]>))) (rows≈10 cost≈280)
                   └─ source supplier AS supplier (rows≈10 cost≈80)

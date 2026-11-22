@@ -49,11 +49,13 @@ struct TDpEntry {
 class TDpccp {
 public:
     TDpccp(
+        NQumir::NAst::TTypeFactory& types,
         const std::vector<TOperatorPtr>& leaves,
         const std::vector<TJoinEdge>& edges,
         const std::vector<NQumir::NAst::TExprPtr>& residuals,
         TConstFolder& folder)
-        : Leaves_(leaves)
+        : Types_(types)
+        , Leaves_(leaves)
         , N_(leaves.size())
         , Neighbors_(leaves.size(), 0)
         , Folder_(folder)
@@ -224,8 +226,8 @@ private:
         return largest;
     }
 
-    std::shared_ptr<TJoinOperator> Join(TSubset s1, TSubset s2, const std::vector<TDpEntry>& dp) const {
-        return std::make_shared<TJoinOperator>(
+    NQumir::TIntrusivePtr<TJoinOperator> Join(TSubset s1, TSubset s2, const std::vector<TDpEntry>& dp) const {
+        return NQumir::MakeIntrusive<TJoinOperator>(Types_,
             dp[s1].Tree,
             dp[s2].Tree,
             CrossingKeys(s1, s2),
@@ -239,7 +241,7 @@ private:
         if (std::popcount(s) == 1) {
             return dp[s].Tree;
         }
-        auto join = std::make_shared<TJoinOperator>(
+        auto join = NQumir::MakeIntrusive<TJoinOperator>(Types_,
             Unkeyed(dp[s].Left, dp),
             Unkeyed(s ^ dp[s].Left, dp),
             std::vector<TJoinKey>{},
@@ -294,7 +296,7 @@ private:
                 continue;
             }
             conjunction = conjunction
-                ? std::make_shared<NQumir::NAst::TBinaryExpr>(
+                ? NQumir::MakeIntrusive<NQumir::NAst::TBinaryExpr>(
                     r.Predicate->Location, NQumir::NAst::TOperator("&&"), conjunction, r.Predicate)
                 : r.Predicate;
         }
@@ -316,6 +318,7 @@ private:
         return visited == s;
     }
 
+    NQumir::NAst::TTypeFactory& Types_;
     const std::vector<TOperatorPtr>& Leaves_;
     size_t N_;
     std::vector<TSubset> Neighbors_;
@@ -330,6 +333,7 @@ private:
 } // namespace
 
 TOperatorPtr DpccpJoinOrder(
+    NQumir::NAst::TTypeFactory& types,
     const std::vector<TOperatorPtr>& leaves,
     const std::vector<TJoinEdge>& edges,
     const std::vector<NQumir::NAst::TExprPtr>& residuals,
@@ -344,7 +348,7 @@ TOperatorPtr DpccpJoinOrder(
     if (leaves.size() > MaxRelations) {
         return nullptr;
     }
-    return TDpccp(leaves, edges, residuals, folder).Solve();
+    return TDpccp(types, leaves, edges, residuals, folder).Solve();
 }
 
 } // namespace NCbo

@@ -89,7 +89,7 @@ public:
         TFreshNames& names,
         const NKernel::TAnnotationContext&& context) = delete;
 
-    std::expected<NQumir::NAst::TExprPtr, NQumir::TError> Rewrite(NQumir::NAst::TExprPtr expr);
+    std::expected<NQumir::NAst::TExprPtr, NQumir::TError> Rewrite(NQumir::NAst::TTypeFactory& types, NQumir::NAst::TExprPtr expr);
 
     std::vector<TAggregateSpec> TakeSpecs() {
         return std::move(Specs_);
@@ -117,7 +117,7 @@ public:
     // The aggregate columns collected so far, typed as the aggregate will produce
     // them from the input schema.
     std::expected<std::vector<std::pair<std::string, NQumir::NAst::TTypePtr>>, NQumir::TError>
-    SlotTypes() const;
+    SlotTypes(NQumir::NAst::TTypeFactory& types) const;
 
 private:
     bool IsIntegerColumn(const NQumir::NAst::TExprPtr& expr) const;
@@ -126,18 +126,23 @@ private:
         NQumir::NAst::TExprPtr arg,
         NQumir::TLocation loc);
     std::optional<NQumir::NAst::TExprPtr> TryEmitAffineAggregate(
+        NQumir::NAst::TTypeFactory& types,
         const std::string& func,
         const NQumir::NAst::TExprPtr& arg,
         NQumir::TLocation loc);
     std::expected<NQumir::NAst::TTypePtr, NQumir::TError> StddevArgType(
+        NQumir::NAst::TTypeFactory& types,
         const TAggCall& agg,
         NQumir::TLocation loc) const;
     std::expected<NQumir::NAst::TExprPtr, NQumir::TError> EmitStddevSamp(
+        NQumir::NAst::TTypeFactory& types,
         const TAggCall& agg, NQumir::TLocation loc);
     // bool_and, bool_or and every, lowered to min/max over BOOLEAN.
     std::expected<NQumir::NAst::TExprPtr, NQumir::TError> EmitBoolAggregate(
+        NQumir::NAst::TTypeFactory& types,
         const TAggCall& agg, NQumir::TLocation loc);
     std::expected<NQumir::NAst::TExprPtr, NQumir::TError> Emit(
+        NQumir::NAst::TTypeFactory& types,
         const TAggCall& agg, NQumir::TLocation loc);
 
     std::vector<TAggregateSpec> Specs_;
@@ -183,15 +188,16 @@ public:
         const NQumir::NAst::TStructType* inputSchema,
         const NKernel::TAnnotationContext&& context) = delete;
 
-    std::expected<NQumir::NAst::TExprPtr, NQumir::TError> Rewrite(NQumir::NAst::TExprPtr expr);
+    std::expected<NQumir::NAst::TExprPtr, NQumir::TError> Rewrite(NQumir::NAst::TTypeFactory& types, NQumir::NAst::TExprPtr expr);
 
     bool Empty() const { return Raw_.empty(); }
 
-    std::expected<TOperatorPtr, NQumir::TError> Build(TOperatorPtr input);
+    std::expected<TOperatorPtr, NQumir::TError> Build(NQumir::NAst::TTypeFactory& types, TOperatorPtr input);
 
 private:
     std::expected<NQumir::NAst::TExprPtr, NQumir::TError> Emit(
-        const NSql::TSqlPtr<NSql::TWindowExpr>& w);
+        NQumir::NAst::TTypeFactory& types,
+        const NQumir::TIntrusivePtr<NSql::TWindowExpr>& w);
     std::string Signature(const TRaw& raw) const;
 
     std::vector<TRaw> Raw_;
@@ -240,6 +246,7 @@ TGroupingRewriteInfo MakeGroupingRewriteInfo(
     const std::vector<std::vector<size_t>>& sets);
 
 std::expected<NQumir::NAst::TExprPtr, NQumir::TError> RewriteGroupingCalls(
+    NQumir::NAst::TTypeFactory& types,
     NQumir::NAst::TExprPtr expr,
     const TGroupingRewriteInfo& info);
 

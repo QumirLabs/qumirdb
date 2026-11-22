@@ -27,7 +27,7 @@ using TEdge = NScheduler::TTaskEdge;
 
 struct TBuildResult {
     TExecPlanNodeId NodeId = InvalidExecPlanNodeId;
-    NQumir::NAst::TTypePtr OutputType;
+    NQumir::NAst::TTypePtr OutputType = nullptr;
 };
 
 class TExecPlanBuilder {
@@ -130,8 +130,8 @@ private:
         const NQumir::NAst::TTypePtr& a, const NQumir::NAst::TTypePtr& b)
     {
         using namespace NQumir::NAst;
-        auto* sa = a ? static_cast<TStructType*>(a.get()) : nullptr;
-        auto* sb = b ? static_cast<TStructType*>(b.get()) : nullptr;
+        auto* sa = a ? static_cast<const TStructType*>(a) : nullptr;
+        auto* sb = b ? static_cast<const TStructType*>(b) : nullptr;
         if (!sa || !sb || sa->Fields.size() != sb->Fields.size()) {
             return false;
         }
@@ -298,14 +298,14 @@ private:
         std::vector<TBuildResult> inputs)
     {
         using namespace NQumir::NAst;
-        TTypePtr outputType;
+        TTypePtr outputType = nullptr;
         std::optional<std::vector<int32_t>> keptColumns;
         std::optional<size_t> materialization;
 
         switch (stage.Kind) {
             case EExecPlanNodeKind::Source:
                 outputType = BuildSourceRuntimeType(
-                    *const_cast<TSourceOperator*>(
+                    *Lowered_.Types, *const_cast<TSourceOperator*>(
                         static_cast<const TSourceOperator*>(stage.Operator)));
                 break;
             case EExecPlanNodeKind::OneRow:
@@ -329,14 +329,14 @@ private:
             case EExecPlanNodeKind::Project: {
                 auto* project = const_cast<TProjectOperator*>(
                     static_cast<const TProjectOperator*>(stage.Operator));
-                auto* input = static_cast<TStructType*>(inputs[0].OutputType.get());
-                outputType = BuildProjectColumnPlan(*project, *input).OutputType;
+                auto* input = static_cast<const TStructType*>(inputs[0].OutputType);
+                outputType = BuildProjectColumnPlan(*Lowered_.Types, *project, *input).OutputType;
                 break;
             }
             case EExecPlanNodeKind::Aggregate: {
                 auto* aggregate = static_cast<const TAggregateOperator*>(stage.Operator);
                 outputType = ComputeAggregateOutputType(
-                    inputs[0].OutputType,
+                    *Lowered_.Types, inputs[0].OutputType,
                     aggregate->GroupKeys(),
                     aggregate->Aggs(),
                     !aggregate->GroupingSets().empty(), !aggregate->EmptyInputGroups().empty());
@@ -346,7 +346,7 @@ private:
             case EExecPlanNodeKind::CrossJoin: {
                 auto* join = static_cast<const TJoinOperator*>(stage.Operator);
                 auto result = ComputeJoinOutputType(
-                    inputs[0].OutputType, inputs[1].OutputType, join->JoinType());
+                    *Lowered_.Types, inputs[0].OutputType, inputs[1].OutputType, join->JoinType());
                 if (!result) {
                     throw result.error();
                 }
@@ -376,7 +376,7 @@ private:
             case EExecPlanNodeKind::Window: {
                 auto* window = static_cast<const TWindowOperator*>(stage.Operator);
                 outputType = ComputeWindowOutputType(
-                    inputs[0].OutputType, window->Functions());
+                    *Lowered_.Types, inputs[0].OutputType, window->Functions());
                 break;
             }
             case EExecPlanNodeKind::Sort:

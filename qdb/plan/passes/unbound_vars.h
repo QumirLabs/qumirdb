@@ -19,7 +19,7 @@ std::unordered_set<std::string> FindUnboundVars(const NQumir::NAst::TExprPtr& ex
 
 // The identifier nodes behind FindUnboundVars, in AST order (pre-order, left to
 // right), so a diagnostic can point at the first reference.
-std::vector<std::shared_ptr<NQumir::NAst::TIdentExpr>> FindUnboundIdents(
+std::vector<NQumir::TIntrusivePtr<NQumir::NAst::TIdentExpr>> FindUnboundIdents(
     const NQumir::NAst::TExprPtr& expr);
 
 // Appends an operator column reference for each free identifier of `expr`, in

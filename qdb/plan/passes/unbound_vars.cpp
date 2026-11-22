@@ -11,7 +11,7 @@ using namespace NQumir::NAst;
 void Collect(
     const TExprPtr& expr,
     const std::unordered_set<std::string>& bound,
-    std::vector<std::shared_ptr<TIdentExpr>>& out)
+    std::vector<NQumir::TIntrusivePtr<TIdentExpr>>& out)
 {
     if (!expr) {
         return;
@@ -19,7 +19,7 @@ void Collect(
 
     if (auto node = TMaybeNode<TIdentExpr>(expr)) {
         if (!bound.count(node.Cast()->Name)) {
-            out.push_back(node.Cast());
+            out.emplace_back(node.Cast());
         }
         return;
     }
@@ -102,8 +102,8 @@ std::unordered_set<std::string> FindUnboundVars(const TExprPtr& expr) {
     return result;
 }
 
-std::vector<std::shared_ptr<TIdentExpr>> FindUnboundIdents(const TExprPtr& expr) {
-    std::vector<std::shared_ptr<TIdentExpr>> result;
+std::vector<NQumir::TIntrusivePtr<TIdentExpr>> FindUnboundIdents(const TExprPtr& expr) {
+    std::vector<NQumir::TIntrusivePtr<TIdentExpr>> result;
     Collect(expr, {}, result);
     return result;
 }

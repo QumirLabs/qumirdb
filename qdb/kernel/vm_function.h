@@ -25,22 +25,24 @@ class TExternalCatalogSnapshot;
 struct TVmFunctionSpec {
     std::string NamePrefix;
     std::vector<NQumir::NAst::TParam> Params;
-    std::shared_ptr<NQumir::NAst::TBlockExpr> Body;
-    NQumir::NAst::TTypePtr ReturnType;
+    NQumir::TIntrusivePtr<NQumir::NAst::TBlockExpr> Body;
+    NQumir::NAst::TTypePtr ReturnType = nullptr;
     std::vector<std::string> Imports;
 };
 
-// Owns the expensive, reusable frontend state. Source modules are registered
-// and parsed once; each independent transform/lowering gets a fresh resolver so
-// semantic mutations cannot leak between compilations. Loader access is
-// serialized because its parsed-module cache is stateful.
+// The frontend state of one query: source modules are registered and parsed once,
+// in the query's type factory, which must outlive the context. Each independent
+// transform/lowering gets a fresh resolver so semantic mutations cannot leak between
+// compilations. Loader access is serialized because its parsed-module cache is stateful.
 class TVmFrontendContext {
 public:
-    explicit TVmFrontendContext(std::vector<std::string> moduleFiles = {});
+    TVmFrontendContext(NQumir::NAst::TTypeFactory& types, std::vector<std::string> moduleFiles = {});
     ~TVmFrontendContext();
 
     TVmFrontendContext(const TVmFrontendContext&) = delete;
     TVmFrontendContext& operator=(const TVmFrontendContext&) = delete;
+
+    NQumir::NAst::TTypeFactory& Types();
 
     std::optional<std::string> RegisterSourceModule(const std::string& path);
     std::optional<std::string> RegisterExternalDeclarations(
@@ -64,9 +66,6 @@ private:
         NQumir::NAst::TExprPtr module);
     std::unique_ptr<TImpl> Impl_;
 };
-
-// Shared default context used by expression annotation.
-TVmFrontendContext& QumirdbVmContext();
 
 // Reusable AST -> compose -> resolve -> IR -> interpreter pipeline for small
 // planning-time functions. The compiled module and interpreter stay alive so

@@ -20,6 +20,8 @@
 #include <utility>
 #include <vector>
 
+#include "test_types.h"
+
 namespace {
 
 const char* TestSortRowIdWrapperSource = R"(
@@ -42,7 +44,7 @@ struct TCompiledRowIdSort {
 TCompiledRowIdSort
 CompileRowIdSort(const std::vector<NQdb::TSortRadixKeyInput>& keys) {
     std::vector<NQumir::NAst::TExprPtr> statements;
-    auto heap = NQdb::NKernel::ParseFunctionLibrary(
+    auto heap = NQdb::NKernel::ParseFunctionLibrary(NQdb::TestTypes(),
         NQdb::NKernel::ReadSortKernel("heap.oz"));
     if (!heap) {
         ADD_FAILURE() << heap.error().ToString();
@@ -51,10 +53,10 @@ CompileRowIdSort(const std::vector<NQdb::TSortRadixKeyInput>& keys) {
     for (auto& statement : *heap) {
         statements.push_back(std::move(statement));
     }
-    statements.push_back(NQdb::BuildSortRowIdLessAst(keys));
+    statements.push_back(NQdb::BuildSortRowIdLessAst(NQdb::TestTypes(), keys));
 
     auto wrapper =
-        NQdb::NKernel::ParseFunctionLibrary(TestSortRowIdWrapperSource);
+        NQdb::NKernel::ParseFunctionLibrary(NQdb::TestTypes(), TestSortRowIdWrapperSource);
     if (!wrapper) {
         ADD_FAILURE() << wrapper.error().ToString();
         return {};
@@ -65,8 +67,8 @@ CompileRowIdSort(const std::vector<NQdb::TSortRadixKeyInput>& keys) {
 
     auto options = NQdb::KernelRunnerOptions();
     options.NativeCode = true;
-    auto runner = std::make_unique<NQumir::TLLVMRunner>(options);
-    auto program = std::make_shared<NQumir::NAst::TBlockExpr>(
+    auto runner = std::make_unique<NQumir::TLLVMRunner>(options, nullptr, &NQdb::TestTypes());
+    auto program = NQumir::MakeIntrusive<NQumir::NAst::TBlockExpr>(
         NQumir::TLocation{}, std::move(statements));
     std::string error;
     auto entries = NQdb::CompileKernelAst(*runner, std::move(program),
@@ -84,7 +86,7 @@ CompileRowIdSort(const std::vector<NQdb::TSortRadixKeyInput>& keys) {
 
 NQdb::TKernelCompiler::THeapTopKDispatch
 CompileHeapTopK(const std::vector<NQdb::TSortRadixKeyInput>& keys) {
-    return NQdb::TKernelCompiler().CompileHeapTopK(keys);
+    return NQdb::TKernelCompiler({.Types = NQdb::SharedTestTypes()}).CompileHeapTopK(keys);
 }
 
 std::vector<int64_t> MakeRowIds(std::array<NQdb::TRowSet, 2>& store) {
@@ -101,8 +103,8 @@ std::vector<int64_t> MakeRowIds(std::array<NQdb::TRowSet, 2>& store) {
 TEST(SortRowId, SortsSeveralBatchesByMixedNumericKeys) {
     using namespace NQumir::NAst;
 
-    auto i64 = std::make_shared<TIntegerType>();
-    auto i32 = std::make_shared<TIntegerType>(TIntegerType::I32);
+    auto i64 = NQdb::TestTypes().MakeInteger();
+    auto i32 = NQdb::TestTypes().MakeInteger(TIntegerType::I32);
     auto compiled = CompileRowIdSort({
         {.ColumnIndex = 0, .Type = i64, .Desc = true},
         {.ColumnIndex = 1, .Type = i32},
@@ -154,9 +156,9 @@ std::vector<int64_t> SortFloatKeyRows(bool desc, int64_t topLimit) {
     using namespace NQumir::NAst;
     const TFloat inf = std::numeric_limits<TFloat>::infinity();
     const TFloat nan = std::numeric_limits<TFloat>::quiet_NaN();
-    auto type = std::make_shared<TFloatType>(
+    auto type = NQdb::TestTypes().MakeFloat(
         sizeof(TFloat) == 4 ? TFloatType::F32 : TFloatType::F64);
-    auto i32 = std::make_shared<TIntegerType>(TIntegerType::I32);
+    auto i32 = NQdb::TestTypes().MakeInteger(TIntegerType::I32);
     std::vector<NQdb::TSortRadixKeyInput> keys = {
         {.ColumnIndex = 0, .Type = type, .Desc = desc},
         {.ColumnIndex = 1, .Type = i32},
@@ -253,7 +255,7 @@ TEST(SortRowId, SortsNullableStringsWithSqlNullOrder) {
         .RowCount = 6,
     };
     auto stringType =
-        std::make_shared<NQdb::TNullable>(std::make_shared<TStringType>());
+        NQdb::MakeNullableType(NQdb::TestTypes(), NQdb::TestTypes().Make<TStringType>());
 
     auto nullsFirst = CompileRowIdSort({{
         .ColumnIndex = 0,
@@ -294,8 +296,8 @@ TEST(SortRowId, SortsNullableStringsWithSqlNullOrder) {
 TEST(HeapTopK, SelectsSortedPrefixFromRandomRows) {
     using namespace NQumir::NAst;
 
-    auto i64 = std::make_shared<TIntegerType>();
-    auto i32 = std::make_shared<TIntegerType>(TIntegerType::I32);
+    auto i64 = NQdb::TestTypes().MakeInteger();
+    auto i32 = NQdb::TestTypes().MakeInteger(TIntegerType::I32);
     auto select = CompileHeapTopK({
         {.ColumnIndex = 0, .Type = i64, .Desc = true},
         {.ColumnIndex = 1, .Type = i32},
@@ -382,7 +384,7 @@ TEST(HeapTopK, AppliesNullableStringOrder) {
         .RowCount = 6,
     };
     auto stringType =
-        std::make_shared<NQdb::TNullable>(std::make_shared<TStringType>());
+        NQdb::MakeNullableType(NQdb::TestTypes(), NQdb::TestTypes().Make<TStringType>());
     auto select = CompileHeapTopK({{
         .ColumnIndex = 0,
         .Type = stringType,

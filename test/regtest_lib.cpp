@@ -1,6 +1,7 @@
 #include "regtest_lib.h"
 #include "mock_source.h"
 #include "plan_runner.h"
+#include "test_types.h"
 
 #include <qdb/catalog/external_module.h>
 #include <qdb/io/parquet/source.h>
@@ -74,7 +75,7 @@ void WriteAll(const fs::path& path, const std::string& contents) {
 
 std::string BuildAst(std::istream& input) {
     NSql::TTokenStream tokens(input);
-    NSql::TParser parser;
+    NSql::TParser parser(TestTypes());
     auto parsed = parser.Parse(tokens);
     if (!parsed) return parsed.error().ToString() + "\n";
     return NSql::PrintAst(*parsed);
@@ -97,7 +98,7 @@ std::unique_ptr<TMockSource> MakePlanSource(std::string_view table) {
         return std::make_unique<TMockSource>(
             std::vector<std::string>{"ca_zip"},
             std::vector<TRowSet>{},
-            std::vector<TTypePtr>{std::make_shared<TStringType>()});
+            std::vector<TTypePtr>{TestTypes().Make<TStringType>()});
     }
     throw std::runtime_error("unknown plan fixture table '" + std::string(table) + "'");
 }
@@ -105,17 +106,18 @@ std::unique_ptr<TMockSource> MakePlanSource(std::string_view table) {
 // The plan text, or the text of the planning error.
 std::expected<std::string, std::string> BuildPlanText(std::istream& input) {
     NSql::TTokenStream tokens(input);
-    NSql::TParser parser;
+    NSql::TParser parser(TestTypes());
     auto parsed = parser.Parse(tokens);
     if (!parsed) return std::unexpected(parsed.error().ToString() + "\n");
     std::vector<std::unique_ptr<TMockSource>> sources;
-    auto factory = [&](std::string_view table)
+    auto factory = [&](TTypeFactory& types, std::string_view table)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
         auto& source = sources.emplace_back(MakePlanSource(table));
-        return std::make_shared<TSourceOperator>(Borrow(*source), std::string(table));
+        return NQumir::MakeIntrusive<TSourceOperator>(types, Borrow(*source), std::string(table));
     };
-    auto plan = BuildPlan(*parsed, factory);
+    // The mock tables are typed in TestTypes().
+    auto plan = BuildPlan(TestTypes(), *parsed, factory);
     if (!plan) return std::unexpected(plan.error().ToString() + "\n");
     std::ostringstream output;
     NSexp::PrintRelPlan(output, *plan);
@@ -229,10 +231,10 @@ public:
     fs::path Path;
 };
 
-std::shared_ptr<TStructType> ParseSchema(const TValue& value) {
+const TStructType* ParseSchema(TTypeFactory& types, const TValue& value) {
     std::istringstream input(String(value));
     NCore::TTokenStream tokens(input);
-    auto parsed = NCore::ParseType(tokens);
+    auto parsed = NCore::ParseType(tokens, types);
     if (!parsed) throw std::runtime_error(parsed.error().ToString());
     if (!tokens.Next().IsEof()) throw std::runtime_error("unexpected input after schema type");
     auto structure = TMaybeType<TStructType>(*parsed);
@@ -241,15 +243,7 @@ std::shared_ptr<TStructType> ParseSchema(const TValue& value) {
 }
 
 std::pair<TTypePtr, bool> FieldType(const TTypePtr& type) {
-    if (auto named = TMaybeType<TNamedType>(type)) {
-        const auto& t = *named.Cast();
-        if (t.Name == "Nullable" && !t.UnderlyingType && t.TypeArgs.size() == 1
-            && t.TypeArgs[0].Kind == TGenericArg::EKind::Type && t.TypeArgs[0].Type)
-        {
-            return {t.TypeArgs[0].Type, true};
-        }
-    }
-    return {type, false};
+    return {UnwrapNullableType(type), IsNullableType(type)};
 }
 
 std::shared_ptr<arrow::DataType> ArrowType(const TTypePtr& type) {
@@ -275,19 +269,19 @@ std::shared_ptr<arrow::DataType> ArrowType(const TTypePtr& type) {
     throw std::runtime_error("unsupported fixture type '" + NCore::PrintType(type) + "'");
 }
 
-std::string PrintSchema(const std::shared_ptr<TStructType>& schema) {
+// `schema`'s types are of `types`. The fixture syntax is plain Qumir type text: a Nullable
+// prints without the struct a kernel completes it with, a DATE as its storage integer.
+std::string PrintSchema(TTypeFactory& types, const TStructType* schema) {
     std::vector<std::pair<std::string, TTypePtr>> fields;
     for (const auto& [name, type] : schema->Fields) {
-        auto printed = type;
-        // QDB nullable types are represented as a generic named Qumir type in
-        // the fixture syntax; the core printer/parser require no QDB extension.
-        if (IsNullableType(type)) {
-            printed = std::make_shared<TNamedType>("Nullable", nullptr,
-                std::vector<TGenericArg>{TGenericArg::TypeArg(UnwrapNullableType(type))});
-        }
-        fields.emplace_back(name, std::move(printed));
+        const auto value = UnwrapNullableType(type);
+        const auto* date = DateStorageType(value);
+        const TTypePtr printed = date ? date : value;
+        fields.emplace_back(name, IsNullableType(type) ? MakeNullableType(types, printed) : printed);
     }
-    return NCore::PrintType(std::make_shared<TStructType>(std::move(fields)));
+    NCore::TPrintOptions options;
+    options.ShortNamedTypes = {"Nullable"};
+    return NCore::PrintType(types.MakeStruct(std::move(fields)), options);
 }
 
 template <typename TInt>
@@ -450,7 +444,9 @@ std::shared_ptr<arrow::Table> ReadTable(const fs::path& path) {
     Version(object);
     std::vector<std::shared_ptr<arrow::Field>> fields;
     std::vector<std::unique_ptr<arrow::ArrayBuilder>> builders;
-    const auto schema = ParseSchema(Required(object, "schema"));
+    // The types only describe the file written here.
+    TTypeFactory types;
+    const auto schema = ParseSchema(types, Required(object, "schema"));
     std::set<std::string> names;
     for (const auto& [name, columnType] : schema->Fields) {
         if (name.empty() || !names.insert(name).second) {
@@ -1009,10 +1005,10 @@ struct TParsedQuery {
 
 // A suite query may follow CREATE MODULE and CREATE FUNCTION definitions, as in
 // the CLI and the plan exporter; planning and execution use their catalog.
-TParsedQuery ParseQuery(const fs::path& sql) {
+TParsedQuery ParseQuery(const std::shared_ptr<TTypeFactory>& types, const fs::path& sql) {
     std::istringstream input(ReadAll(sql));
     NSql::TTokenStream tokens(input);
-    NSql::TParser parser;
+    NSql::TParser parser(*types);
     auto statements = parser.ParseAll(tokens);
     if (!statements) throw statements.error();
     if (statements->empty()) throw std::runtime_error("SQL file has no query");
@@ -1021,7 +1017,7 @@ TParsedQuery ParseQuery(const fs::path& sql) {
         const auto& statement = (*statements)[i];
         std::expected<std::monostate, NQumir::TError> applied;
         if (auto module = NSql::TMaybeNode<NSql::TSqlExternalModule>(statement)) {
-            applied = catalog.Apply(*module.Cast());
+            applied = catalog.Apply(*types, *module.Cast());
         } else if (auto function = NSql::TMaybeNode<NSql::TSqlExternalFunction>(statement)) {
             applied = catalog.Apply(*function.Cast());
         } else {
@@ -1031,7 +1027,8 @@ TParsedQuery ParseQuery(const fs::path& sql) {
     }
     return {
         .Query = statements->back(),
-        .Annotation = {.ExternalCatalog = statements->size() > 1 ? catalog.Snapshot() : nullptr},
+        .Annotation = NKernel::MakeAnnotationContext(
+            *types, statements->size() > 1 ? catalog.Snapshot(types) : nullptr),
     };
 }
 
@@ -1168,7 +1165,7 @@ TValue Cell(const TColumn& column, int64_t row, const TTypePtr& type) {
     throw std::runtime_error("unsupported result type " + type->ToString());
 }
 
-TValue Result(TTestRuntime& runtime) {
+TValue Result(TTypeFactory& types, TTestRuntime& runtime) {
     auto output = TMaybeType<TStructType>(runtime.OutputType());
     if (!output) throw std::runtime_error("query output is not a struct");
     TArray rows;
@@ -1192,15 +1189,17 @@ TValue Result(TTestRuntime& runtime) {
         }
         Release(&batch);
     }
-    return TObject{{"schema", PrintSchema(output.Cast())}, {"rows", std::move(rows)}};
+    return TObject{{"schema", PrintSchema(types, output.Cast())}, {"rows", std::move(rows)}};
 }
 
 void Normalize(TValue& value, bool ordered) {
     if (!value.getAsObject()) throw std::runtime_error("result must be an object");
     auto& object = *value.getAsObject();
     Fields(object, {"schema", "rows"});
-    const auto schema = ParseSchema(Required(object, "schema"));
-    object["schema"] = PrintSchema(schema);
+    // The types only reprint the schema text.
+    TTypeFactory types;
+    const auto schema = ParseSchema(types, Required(object, "schema"));
+    object["schema"] = PrintSchema(types, schema);
     auto* rows = object.getArray("rows");
     if (!rows) throw std::runtime_error("result rows must be an array");
     for (auto& row : *rows) {
@@ -1242,7 +1241,8 @@ bool ResultsMatch(const TValue& actual, const TValue& expected, bool ordered, TF
     const auto& actualRows = Array(Required(a, "rows"));
     const auto& expectedRows = Array(Required(e, "rows"));
     if (actualRows.size() != expectedRows.size()) return false;
-    const auto schema = ParseSchema(Required(a, "schema"));
+    TTypeFactory types;
+    const auto schema = ParseSchema(types, Required(a, "schema"));
     std::vector<bool> floats;
     for (const auto& [name, type] : schema->Fields) {
         floats.push_back(static_cast<bool>(TMaybeType<TFloatType>(FieldType(type).first)));
@@ -1363,6 +1363,8 @@ TCaseResult CheckCase(const TQueryCase& test, bool canonize, const TRegTestOptio
     variant.ScanSplit.MaxScanTasks = test.Variant == "single" ? 1 : 4;
     variant.Kernel.Backend = *ParseKernelBackend(test.Backend);
     ApplyEngineConfig(options.Engine, engine);
+    // The query's type factory: its plan, kernels and result schema are its types.
+    const auto types = std::make_shared<TTypeFactory>();
     std::optional<TParsedQuery> parsed;
     TOperatorPtr plan;
     // Parsing, binding and optimization are the planning stage: its error is the
@@ -1371,9 +1373,9 @@ TCaseResult CheckCase(const TQueryCase& test, bool canonize, const TRegTestOptio
     double buildMs = 0;
     double optimizeMs = 0;
     const auto planError = CaptureError([&] {
-        parsed.emplace(ParseQuery(test.Sql));
+        parsed.emplace(ParseQuery(types, test.Sql));
         parseMs = mark();
-        auto built = BuildPlan(parsed->Query, [&](std::string_view table)
+        auto built = BuildPlan(*types, parsed->Query, [&](TTypeFactory& queryTypes, std::string_view table)
             -> std::expected<TOperatorPtr, NQumir::TError>
         {
             const auto binding = test.Tables.find(std::string(table));
@@ -1383,14 +1385,14 @@ TCaseResult CheckCase(const TQueryCase& test, bool canonize, const TRegTestOptio
             auto& fixture = test.Suite->Fixtures.at(binding->second);
             if (!fixture.Error.empty()) throw THarnessError(fixture.Error);
             if (!fixture.File) throw THarnessError("fixture was not prepared");
-            return std::make_shared<TSourceOperator>(fixture.File, std::string(table));
+            return NQumir::MakeIntrusive<TSourceOperator>(queryTypes, fixture.File, std::string(table));
         }, parsed->Annotation);
         buildMs = mark();
         if (!built) throw built.error();
         plan = std::move(*built);
         auto passOptions = engine.Optimizer;
         passOptions.Annotation = parsed->Annotation;
-        ApplyPlanPasses(plan, std::move(passOptions));
+        ApplyPlanPasses(*types, plan, std::move(passOptions));
         optimizeMs = mark();
     });
     const std::string where = " (" + test.Sql.string() + ", " + test.Label() + ")";
@@ -1434,9 +1436,9 @@ TCaseResult CheckCase(const TQueryCase& test, bool canonize, const TRegTestOptio
     // Lowering, JIT compilation and the run itself.
     const auto runError = CaptureError([&] {
         auto runtime = RunPlan(
-            plan, settings, parsed->Annotation.ExternalCatalog, nullptr, timing ? &runTimings : nullptr);
+            plan, settings, parsed->Annotation.ExternalCatalog, nullptr, timing ? &runTimings : nullptr, types);
         mark();
-        actual = Result(*runtime);
+        actual = Result(*types, *runtime);
     });
     if (runError) {
         if (!test.ExpectError) {

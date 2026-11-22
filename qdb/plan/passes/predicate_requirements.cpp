@@ -25,7 +25,7 @@ TExprPtr Reduce(std::vector<TExprPtr> parts, const char* op) {
     TExprPtr result;
     for (auto& part : parts) {
         result = result
-            ? std::make_shared<TBinaryExpr>(
+            ? NQumir::MakeIntrusive<TBinaryExpr>(
                 NQumir::TLocation{}, TOperator(op), result, part)
             : std::move(part);
     }

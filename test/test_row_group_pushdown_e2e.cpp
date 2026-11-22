@@ -2,6 +2,7 @@
 #include "mock_source.h"
 
 #include "plan_runner.h"
+#include "test_types.h"
 
 #include <qdb/io/parquet/source.h>
 #include <qdb/plan/build.h>
@@ -152,13 +153,13 @@ void WriteLargeRealFixture(const std::string& path) {
     CheckArrow(output->Close());
 }
 
-std::shared_ptr<TSourceOperator> FindSource(const TOperatorPtr& node) {
+NQumir::TIntrusivePtr<TSourceOperator> FindSource(const TOperatorPtr& node) {
     if (auto source = TMaybeOp<TSourceOperator>(node)) {
         return source.Cast();
     }
     for (const auto& child : node->Children()) {
         if (auto op = NQumir::NAst::TMaybeNode<IOperator>(child)) {
-            if (auto source = FindSource(op.Cast())) {
+            if (auto source = FindSource(TOperatorPtr(op.Cast()))) {
                 return source;
             }
         }
@@ -172,21 +173,21 @@ TOperatorPtr BuildSqlPlan(
 {
     std::istringstream input{std::string(sql)};
     NSql::TTokenStream tokens(input);
-    NSql::TParser parser;
+    NSql::TParser parser(TestTypes());
     auto parsed = parser.Parse(tokens);
     if (!parsed) {
         throw std::runtime_error(parsed.error().ToString());
     }
-    auto plan = BuildPlan(*parsed, [&](std::string_view table)
+    auto plan = BuildPlan(TestTypes(), *parsed, [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
-        return std::make_shared<TSourceOperator>(
+        return NQumir::MakeIntrusive<TSourceOperator>(types,
             Borrow(*sources.at(std::string(table))), std::string(table));
     });
     if (!plan) {
         throw std::runtime_error(plan.error().ToString());
     }
-    ApplyPlanPasses(*plan, {.EnableCbo = false});
+    ApplyPlanPasses(TestTypes(), *plan, {.EnableCbo = false});
     return *plan;
 }
 
@@ -257,7 +258,7 @@ TRunResult RunQuery(
                 projectedBytes += projectedGroups[rg].ByteSize;
             }
         }
-        auto lowered = NScheduler::LowerPlanToGraph(plan, settings, &diagnostics);
+        auto lowered = NScheduler::LowerPlanToGraph(plan, SharedTestTypes(), settings, &diagnostics);
         const auto lanes = std::ranges::count_if(
             lowered.Graph->Nodes(), [](const auto& node) {
                 return node->DebugKind == "source";
@@ -423,7 +424,7 @@ TEST(RowGroupPushdownE2E, AutoJoinRunsWithUnequalSourceWidths) {
     settings.ScanSplit.TargetRowsPerTask = 1;
     settings.ScanSplit.TargetBytesPerTask = 0;
     settings.HashShuffle.PartitionCount = 2;
-    auto lowered = NScheduler::LowerPlanToGraph(plan, settings, nullptr);
+    auto lowered = NScheduler::LowerPlanToGraph(plan, SharedTestTypes(), settings, nullptr);
     std::unordered_map<std::string, size_t> lanes;
     for (const auto& node : lowered.Graph->Nodes()) {
         if (node->DebugKind == "source") {

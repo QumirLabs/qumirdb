@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "test_types.h"
 
 #include <qdb/kernel/lib.h>
 #include <qdb/modules/qumirdb.h>
@@ -23,7 +24,7 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileStringOperation(
     const std::string& entryName,
     void*& entry)
 {
-    auto library = NQdb::NKernel::ParseFunctionLibrary(
+    auto library = NQdb::NKernel::ParseFunctionLibrary(NQdb::TestTypes(),
         NQdb::NKernel::ReadAggregationKernel("string_ops.oz"));
     if (!library) {
         ADD_FAILURE() << library.error().ToString();
@@ -35,8 +36,8 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileStringOperation(
     options.NativeCode = true;
     options.AllowOverloads = true;
     NQdb::NTest::ConfigureQumirDbSourceModule(options);
-    auto runner = std::make_unique<NQumir::TLLVMRunner>(options);
-    auto program = std::make_shared<NQumir::NAst::TBlockExpr>(
+    auto runner = std::make_unique<NQumir::TLLVMRunner>(options, nullptr, &NQdb::TestTypes());
+    auto program = NQumir::MakeIntrusive<NQumir::NAst::TBlockExpr>(
         NQumir::TLocation{}, std::move(*library));
     NQdb::NTest::AddQumirDbUse(program);
     std::string error;
@@ -79,7 +80,7 @@ TEST(QumirDbStringOps, LikeFastPathsMatchByteSemantics) {
 
 // The oz kernel must agree with the C++ reference around every block boundary.
 TEST(QumirDbStringOps, LikeContainsKernelMatchesReference) {
-    auto library = NQdb::NKernel::ParseFunctionLibrary(
+    auto library = NQdb::NKernel::ParseFunctionLibrary(NQdb::TestTypes(),
         "(block (fun like_contains_entry"
         " ((var str StringView) (var lit StringView)) -> i64"
         " (block (return (call qdb_like_contains str lit)))))");
@@ -89,8 +90,8 @@ TEST(QumirDbStringOps, LikeContainsKernelMatchesReference) {
     options.NativeCode = true;
     options.AllowOverloads = true;
     NQdb::NTest::ConfigureQumirDbSourceModule(options);
-    NQumir::TLLVMRunner runner(options);
-    auto program = std::make_shared<NQumir::NAst::TBlockExpr>(
+    NQumir::TLLVMRunner runner(options, nullptr, &NQdb::TestTypes());
+    auto program = NQumir::MakeIntrusive<NQumir::NAst::TBlockExpr>(
         NQumir::TLocation{}, std::move(*library));
     NQdb::NTest::AddQumirDbUse(program);
     std::string error;
@@ -127,7 +128,7 @@ TEST(QumirDbStringOps, LikeContainsKernelMatchesReference) {
 
 TEST(QumirDbStringOps, CaseMappingRewritesUtf8Characters) {
     auto compile = [](const std::string& function, void*& entry) {
-        auto library = NQdb::NKernel::ParseFunctionLibrary(
+        auto library = NQdb::NKernel::ParseFunctionLibrary(NQdb::TestTypes(),
             "(block (fun case_entry ((var arena <ptr i8>) (var str StringView)) -> StringView"
             " (block (return (call " + function + " arena str)))))");
         if (!library) {
@@ -139,8 +140,8 @@ TEST(QumirDbStringOps, CaseMappingRewritesUtf8Characters) {
         options.NativeCode = true;
         options.AllowOverloads = true;
         NQdb::NTest::ConfigureQumirDbSourceModule(options);
-        auto runner = std::make_unique<NQumir::TLLVMRunner>(options);
-        auto program = std::make_shared<NQumir::NAst::TBlockExpr>(
+        auto runner = std::make_unique<NQumir::TLLVMRunner>(options, nullptr, &NQdb::TestTypes());
+        auto program = NQumir::MakeIntrusive<NQumir::NAst::TBlockExpr>(
             NQumir::TLocation{}, std::move(*library));
         NQdb::NTest::AddQumirDbUse(program);
         std::string error;
@@ -183,7 +184,7 @@ TEST(QumirDbStringOps, CaseMappingRewritesUtf8Characters) {
 // Compiles a kernel entry that calls the case function qdb_string_upper or
 // qdb_string_lower.
 std::unique_ptr<NQumir::TLLVMRunner> CompileCaseFunction(const std::string& function, void*& entry) {
-    auto library = NQdb::NKernel::ParseFunctionLibrary(
+    auto library = NQdb::NKernel::ParseFunctionLibrary(NQdb::TestTypes(),
         "(block (fun case_entry ((var arena <ptr i8>) (var str StringView)) -> StringView"
         " (block (return (call " + function + " arena str)))))");
     if (!library) {
@@ -195,8 +196,8 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileCaseFunction(const std::string& func
     options.NativeCode = true;
     options.AllowOverloads = true;
     NQdb::NTest::ConfigureQumirDbSourceModule(options);
-    auto runner = std::make_unique<NQumir::TLLVMRunner>(options);
-    auto program = std::make_shared<NQumir::NAst::TBlockExpr>(
+    auto runner = std::make_unique<NQumir::TLLVMRunner>(options, nullptr, &NQdb::TestTypes());
+    auto program = NQumir::MakeIntrusive<NQumir::NAst::TBlockExpr>(
         NQumir::TLocation{}, std::move(*library));
     NQdb::NTest::AddQumirDbUse(program);
     std::string error;

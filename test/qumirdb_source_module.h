@@ -27,7 +27,7 @@ inline void AddQumirDbUse(const NQumir::NAst::TExprPtr& ast) {
     }
     block.Cast()->Stmts.insert(
         block.Cast()->Stmts.begin(),
-        std::make_shared<TUseExpr>(NQumir::TLocation{}, "qumirdb"));
+        NQumir::MakeIntrusive<TUseExpr>(NQumir::TLocation{}, "qumirdb"));
 }
 
 } // namespace NQdb::NTest

@@ -2,6 +2,7 @@
 
 #include <qdb/plan/passes/unbound_vars.h>
 #include <qdb/plan/types/nullable.h>
+#include <qdb/plan/types/type_text.h>
 
 #include <qumir/parser/ast.h>
 #include <qumir/parser/core/lexer.h>
@@ -14,14 +15,8 @@
 namespace NQdb {
 
 size_t FlattenedArity(const NQumir::NAst::TTypePtr& type) {
-    using namespace NQumir::NAst;
-    if (IsNullableType(type)) {
-        return 1;
-    }
-    if (auto structure = TMaybeType<TStructType>(UnwrapNamedType(type))) {
-        return structure.Cast()->Fields.size();
-    }
-    return 1;
+    const auto* record = RecordFields(type);
+    return record ? record->Fields.size() : 1;
 }
 
 size_t FlattenedProjectionArity(const TProjectionSpec& projection) {
@@ -30,7 +25,7 @@ size_t FlattenedProjectionArity(const TProjectionSpec& projection) {
         : 1;
 }
 
-TProjectOperator::TProjectOperator(TOperatorPtr input, std::vector<TProjectionSpec> projections)
+TProjectOperator::TProjectOperator(NQumir::NAst::TTypeFactory& types, TOperatorPtr input, std::vector<TProjectionSpec> projections)
     : Input_(std::move(input))
     , Projections_(std::move(projections))
 {
@@ -38,7 +33,7 @@ TProjectOperator::TProjectOperator(TOperatorPtr input, std::vector<TProjectionSp
     std::vector<std::pair<std::string, NQumir::NAst::TTypePtr>> outFields;
     if (inputStruct) {
         for (const auto& proj : Projections_) {
-            NQumir::NAst::TTypePtr fieldType;
+            NQumir::NAst::TTypePtr fieldType = nullptr;
             if (auto ident = NQumir::NAst::TMaybeNode<NQumir::NAst::TIdentExpr>(proj.Expression)) {
                 for (const auto& [name, type] : inputStruct->Fields) {
                     if (name == ident.Cast()->Name) { fieldType = type; break; }
@@ -54,9 +49,9 @@ TProjectOperator::TProjectOperator(TOperatorPtr input, std::vector<TProjectionSp
         }
     }
     // ParamTypes[0] = full input schema initially; narrowed by column push-down.
-    Type = std::make_shared<NQumir::NAst::TFunctionType>(
+    Type = types.MakeFunction(
         std::vector<NQumir::NAst::TTypePtr>{Input_->OutputColumns()},
-        std::make_shared<NQumir::NAst::TStructType>(std::move(outFields)));
+        types.MakeStruct(std::move(outFields)));
 }
 
 std::vector<TColumnReference> TProjectOperator::ColumnReferences() const {
@@ -76,20 +71,20 @@ const std::string TProjectOperator::ToString() const {
 }
 
 std::expected<TOperatorPtr, NQumir::TError>
-MakeProject(TOperatorPtr input, std::vector<std::pair<std::string, std::string>> projections) {
+MakeProject(NQumir::NAst::TTypeFactory& types, TOperatorPtr input, std::vector<std::pair<std::string, std::string>> projections) {
     std::vector<TProjectionSpec> specs;
     specs.reserve(projections.size());
     for (auto& [name, exprStr] : projections) {
         std::istringstream ss(exprStr);
         NQumir::NAst::NCore::TTokenStream tokens(ss);
-        NQumir::NAst::NCore::TParser parser;
+        NQumir::NAst::NCore::TParser parser(types);
         auto parsed = parser.Parse(tokens);
         if (!parsed) {
             return std::unexpected(parsed.error());
         }
         specs.push_back({std::move(name), std::move(*parsed)});
     }
-    return std::make_shared<TProjectOperator>(std::move(input), std::move(specs));
+    return NQumir::MakeIntrusive<TProjectOperator>(types, std::move(input), std::move(specs));
 }
 
 } // namespace NQdb

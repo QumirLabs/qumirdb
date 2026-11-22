@@ -14,6 +14,7 @@
 #include <qdb/plan/types/nullable.h>
 
 #include "qumirdb_source_module.h"
+#include "test_types.h"
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/parser/core/lexer.h>
@@ -89,7 +90,7 @@ constexpr int64_t JoinOpCode(EJoinKernelOp op) {
 NQumir::NAst::TExprPtr ParseExpr(const std::string& src) {
     std::istringstream in(src);
     NQumir::NAst::NCore::TTokenStream tokens(in);
-    NQumir::NAst::NCore::TParser parser;
+    NQumir::NAst::NCore::TParser parser(TestTypes());
     auto parsed = parser.Parse(tokens);
     if (!parsed) {
         throw std::runtime_error(parsed.error().ToString());
@@ -99,26 +100,26 @@ NQumir::NAst::TExprPtr ParseExpr(const std::string& src) {
 
 std::unique_ptr<NQumir::TLLVMRunner> CompileJoinEntry(const std::string& entryName, void*& entry) {
     using namespace NQumir::NAst;
-    auto lib = NKernel::BuildJoinKernelLibrary();
+    auto lib = NKernel::BuildJoinKernelLibrary(TestTypes());
     if (!lib) {
         ADD_FAILURE() << lib.error().ToString();
         return {};
     }
-    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
-    TStructType leftType({{"lk", i64}});
-    TStructType rightType({{"rk", i64}});
-    auto keyDesc = NKernel::BuildJoinKeyDescriptor(leftType, rightType, {{"lk", "rk"}});
+    auto i64 = TestTypes().MakeInteger(TIntegerType::I64);
+    const auto& leftType = *TestTypes().MakeStruct({{"lk", i64}});
+    const auto& rightType = *TestTypes().MakeStruct({{"rk", i64}});
+    auto keyDesc = NKernel::BuildJoinKeyDescriptor(TestTypes(), leftType, rightType, {{"lk", "rk"}});
     std::vector<TExprPtr> stmts;
     for (auto& f : NKernel::GenJoinKeyTypeDecls(keyDesc)) {
         stmts.push_back(std::move(f));
     }
-    for (auto& f : NKernel::GenJoinKeyOpsFunDecls(keyDesc)) {
+    for (auto& f : NKernel::GenJoinKeyOpsFunDecls(TestTypes(), keyDesc)) {
         stmts.push_back(std::move(f));
     }
-    for (auto& f : NKernel::GenJoinKeyOwnershipFunDecls(keyDesc)) {
+    for (auto& f : NKernel::GenJoinKeyOwnershipFunDecls(TestTypes(), keyDesc)) {
         stmts.push_back(std::move(f));
     }
-    auto dualLib = NKernel::BuildJoinDualKeyLibrary();
+    auto dualLib = NKernel::BuildJoinDualKeyLibrary(TestTypes());
     if (!dualLib) {
         ADD_FAILURE() << dualLib.error().ToString();
         return {};
@@ -135,9 +136,9 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileJoinEntry(const std::string& entryNa
     options.NativeCode = true;
     options.AllowOverloads = true;
     NQdb::NTest::ConfigureQumirDbSourceModule(options);
-    auto runner = std::make_unique<NQumir::TLLVMRunner>(options);
+    auto runner = std::make_unique<NQumir::TLLVMRunner>(options, nullptr, &NQdb::TestTypes());
     auto program =
-        std::make_shared<NQumir::NAst::TBlockExpr>(NQumir::TLocation{}, std::move(stmts));
+        NQumir::MakeIntrusive<NQumir::NAst::TBlockExpr>(NQumir::TLocation{}, std::move(stmts));
     NQdb::NTest::AddQumirDbUse(program);
     std::string error;
     entry = runner->CompileKernelAst(program, entryName, &error);
@@ -148,9 +149,9 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileJoinEntry(const std::string& entryNa
 } // namespace
 
 TEST_F(JoinKernel, PairBufferLayout) {
-    std::shared_ptr<NQumir::NAst::TStructType> pairBuffer;
-    std::shared_ptr<NQumir::NAst::TStructType> joinTable;
-    for (const auto& type : NQumir::NRegistry::QumirDbExternalTypes()) {
+    const NQumir::NAst::TStructType* pairBuffer = nullptr;
+    const NQumir::NAst::TStructType* joinTable = nullptr;
+    for (const auto& type : NQumir::NRegistry::QumirDbExternalTypes(NQdb::TestTypes())) {
         if (type.Name == "PairBuffer") {
             pairBuffer = NQumir::NAst::TMaybeType<NQumir::NAst::TStructType>(type.Type).Cast();
         } else if (type.Name == "RowTable") {
@@ -168,10 +169,10 @@ TEST_F(JoinKernel, PairBufferLayout) {
 }
 
 TEST_F(JoinKernel, MaterializeLibraryMarksPhysicalWorkersCacheable) {
-    auto library = NKernel::BuildJoinKernelLibrary();
+    auto library = NKernel::BuildJoinKernelLibrary(TestTypes());
     ASSERT_TRUE(library) << library.error().ToString();
 
-    std::unordered_map<std::string, std::shared_ptr<NQumir::NAst::TFunDecl>> functions;
+    std::unordered_map<std::string, NQumir::TIntrusivePtr<NQumir::NAst::TFunDecl>> functions;
     for (const auto& stmt : *library) {
         auto fun = NQumir::NAst::TMaybeNode<NQumir::NAst::TFunDecl>(stmt);
         if (fun) {
@@ -201,7 +202,7 @@ TEST_F(JoinKernel, LibrariesKeepGrowthWithoutTeardown) {
             NKernel::BuildJoinKernelLibrary,
             NKernel::BuildCrossJoinKernelLibrary,
             NKernel::BuildRowJoinKernelLibrary}) {
-        auto library = build();
+        auto library = build(TestTypes());
         ASSERT_TRUE(library) << library.error().ToString();
         std::unordered_set<std::string> functions;
         for (const auto& stmt : *library) {
@@ -301,13 +302,13 @@ TEST_F(JoinKernel, PairBufferPushGrowsAndStoresPairs) {
 TEST_F(CompileJoin, ProducesWorkingInnerJoinKernels) {
     using namespace NQumir::NAst;
     auto i64 = [] {
-        return std::make_shared<TIntegerType>(TIntegerType::I64);
+        return TestTypes().MakeInteger(TIntegerType::I64);
     };
-    TStructType leftType({{"lv", i64()}, {"lk", i64()}});
-    TStructType rightType({{"rv", i64()}, {"rk", i64()}});
+    const auto& leftType = *TestTypes().MakeStruct({{"lv", i64()}, {"lk", i64()}});
+    const auto& rightType = *TestTypes().MakeStruct({{"rv", i64()}, {"rk", i64()}});
 
-    TKernelCompiler compiler;
-    auto spec = NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
+    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    auto spec = NKernel::BuildJoinKernelSpec(TestTypes(), leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
     auto kernels = compiler.CompileJoin(spec);
 
     std::vector<int64_t> lkeys = {1, 2, 1};
@@ -378,22 +379,22 @@ TEST_F(CompileJoin, ProducesWorkingInnerJoinKernels) {
 TEST_F(CompileJoin, NormalizesNullableResidualIfBranch) {
     using namespace NQumir::NAst;
     auto i64 = [] {
-        return std::make_shared<TIntegerType>(TIntegerType::I64);
+        return TestTypes().MakeInteger(TIntegerType::I64);
     };
     auto f64 = [] {
-        return std::make_shared<TFloatType>();
+        return TestTypes().MakeFloat();
     };
-    TStructType leftType({{"lk", i64()}, {"lv", f64()}});
-    TStructType rightType({{"rk", i64()}, {"rv", std::make_shared<TNullable>(f64())}});
+    const auto& leftType = *TestTypes().MakeStruct({{"lk", i64()}, {"lv", f64()}});
+    const auto& rightType = *TestTypes().MakeStruct({{"rk", i64()}, {"rv", MakeNullableType(TestTypes(), f64())}});
 
-    auto spec = NKernel::BuildJoinKernelSpec(
+    auto spec = NKernel::BuildJoinKernelSpec(TestTypes(),
         leftType,
         rightType,
         {{"lk", "rk"}},
         EJoinType::Inner,
         ParseExpr("(> (if (< lv (: 10.0 f64)) lv rv) (: 0.0 f64))"));
 
-    TKernelCompiler compiler;
+    TKernelCompiler compiler({.Types = SharedTestTypes()});
     auto kernels = compiler.CompileJoin(spec);
     EXPECT_TRUE(static_cast<bool>(kernels.Dispatch));
 }
@@ -401,15 +402,15 @@ TEST_F(CompileJoin, NormalizesNullableResidualIfBranch) {
 TEST_F(CompileJoin, RejectsGeneralOuterFinalizationWithResidual) {
     using namespace NQumir::NAst;
     auto i64 = [] {
-        return std::make_shared<TIntegerType>(TIntegerType::I64);
+        return TestTypes().MakeInteger(TIntegerType::I64);
     };
-    TStructType leftType({{"lk", i64()}, {"lv", i64()}});
-    TStructType rightType({{"rk", i64()}, {"rv", i64()}});
-    TKernelCompiler compiler;
+    const auto& leftType = *TestTypes().MakeStruct({{"lk", i64()}, {"lv", i64()}});
+    const auto& rightType = *TestTypes().MakeStruct({{"rk", i64()}, {"rv", i64()}});
+    TKernelCompiler compiler({.Types = SharedTestTypes()});
 
     for (auto type : {EJoinType::Left, EJoinType::Right}) {
         SCOPED_TRACE(static_cast<int>(type));
-        auto spec = NKernel::BuildJoinKernelSpec(
+        auto spec = NKernel::BuildJoinKernelSpec(TestTypes(),
             leftType,
             rightType,
             {{"lk", "rk"}},
@@ -455,13 +456,13 @@ TEST_F(CompileJoin, RejectsGeneralOuterFinalizationWithResidual) {
 TEST_F(CompileJoinHash, ProducesMatchingSideHashes) {
     using namespace NQumir::NAst;
     auto i64 = [] {
-        return std::make_shared<TIntegerType>(TIntegerType::I64);
+        return TestTypes().MakeInteger(TIntegerType::I64);
     };
-    TStructType leftType({{"lk", i64()}, {"lv", i64()}});
-    TStructType rightType({{"rv", i64()}, {"rk", i64()}});
+    const auto& leftType = *TestTypes().MakeStruct({{"lk", i64()}, {"lv", i64()}});
+    const auto& rightType = *TestTypes().MakeStruct({{"rv", i64()}, {"rk", i64()}});
 
-    TKernelCompiler compiler;
-    auto spec = NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
+    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    auto spec = NKernel::BuildJoinKernelSpec(TestTypes(), leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
     auto kernels = compiler.CompileJoinHash(spec);
 
     std::vector<int64_t> lkeys = {1, 2, 1, 4};
@@ -505,14 +506,14 @@ TEST_F(CompileJoinHash, ProducesMatchingSideHashes) {
 // meet, next to i32 and i64 key parts of a composite key.
 TEST_F(CompileJoinHash, F32KeyCanonicalizesZeroAndNaN) {
     using namespace NQumir::NAst;
-    auto f32 = [] { return std::make_shared<TFloatType>(TFloatType::F32); };
-    auto i32 = [] { return std::make_shared<TIntegerType>(TIntegerType::I32); };
-    auto i64 = [] { return std::make_shared<TIntegerType>(TIntegerType::I64); };
-    TStructType leftType({{"lf", f32()}, {"li", i32()}, {"ll", i64()}});
-    TStructType rightType({{"rf", f32()}, {"ri", i32()}, {"rl", i64()}});
+    auto f32 = [] { return TestTypes().MakeFloat(TFloatType::F32); };
+    auto i32 = [] { return TestTypes().MakeInteger(TIntegerType::I32); };
+    auto i64 = [] { return TestTypes().MakeInteger(TIntegerType::I64); };
+    const auto& leftType = *TestTypes().MakeStruct({{"lf", f32()}, {"li", i32()}, {"ll", i64()}});
+    const auto& rightType = *TestTypes().MakeStruct({{"rf", f32()}, {"ri", i32()}, {"rl", i64()}});
 
-    TKernelCompiler compiler;
-    auto spec = NKernel::BuildJoinKernelSpec(
+    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    auto spec = NKernel::BuildJoinKernelSpec(TestTypes(),
         leftType, rightType, {{"lf", "rf"}, {"li", "ri"}, {"ll", "rl"}}, EJoinType::Inner);
     auto kernels = compiler.CompileJoinHash(spec);
 
@@ -550,13 +551,13 @@ TEST_F(CompileJoinHash, F32KeyCanonicalizesZeroAndNaN) {
 // zeroes and NaN payloads as equal.
 TEST_F(CompileJoin, F32KeyMatchesSignedZeroAndNaN) {
     using namespace NQumir::NAst;
-    auto f32 = [] { return std::make_shared<TFloatType>(TFloatType::F32); };
-    auto i64 = [] { return std::make_shared<TIntegerType>(TIntegerType::I64); };
-    TStructType leftType({{"lv", i64()}, {"lk", f32()}});
-    TStructType rightType({{"rv", i64()}, {"rk", f32()}});
+    auto f32 = [] { return TestTypes().MakeFloat(TFloatType::F32); };
+    auto i64 = [] { return TestTypes().MakeInteger(TIntegerType::I64); };
+    const auto& leftType = *TestTypes().MakeStruct({{"lv", i64()}, {"lk", f32()}});
+    const auto& rightType = *TestTypes().MakeStruct({{"rv", i64()}, {"rk", f32()}});
 
-    TKernelCompiler compiler;
-    auto spec = NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
+    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    auto spec = NKernel::BuildJoinKernelSpec(TestTypes(), leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
     auto kernels = compiler.CompileJoin(spec);
 
     const float nan1 = std::numeric_limits<float>::quiet_NaN();
@@ -621,12 +622,12 @@ protected:
     void SetUp() override {
         using namespace NQumir::NAst;
         auto i64 = [] {
-            return std::make_shared<TIntegerType>(TIntegerType::I64);
+            return TestTypes().MakeInteger(TIntegerType::I64);
         };
-        TStructType leftType({{"lk", i64()}});
-        TStructType rightType({{"rk", i64()}});
-        Spec_ = NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
-        Hash_ = TKernelCompiler().CompileJoinHash(Spec_);
+        const auto& leftType = *TestTypes().MakeStruct({{"lk", i64()}});
+        const auto& rightType = *TestTypes().MakeStruct({{"rk", i64()}});
+        Spec_ = NKernel::BuildJoinKernelSpec(TestTypes(), leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
+        Hash_ = TKernelCompiler({.Types = SharedTestTypes()}).CompileJoinHash(Spec_);
     }
 
     // Hashes the side with its own kernel and attaches the result to the batch.
@@ -685,7 +686,7 @@ TEST_F(JoinKeyHash, JoinWithPrecomputedHashesSkipsUnselectedRows) {
     Prepare(right, Hash_.Right);
 
     Spec_.HasPrecomputedHash = true;
-    auto kernels = TKernelCompiler().CompileJoin(Spec_);
+    auto kernels = TKernelCompiler({.Types = SharedTestTypes()}).CompileJoin(Spec_);
     THashTable leftTable{}, rightTable{};
     TPairBuffer pairs{};
     ASSERT_TRUE(kernels.Dispatch(
@@ -730,13 +731,13 @@ TEST_F(JoinKeyHash, JoinWithPrecomputedHashesSkipsUnselectedRows) {
 TEST_F(CompileJoin, ProbeOnlyStreamsWithoutInserting) {
     using namespace NQumir::NAst;
     auto i64 = [] {
-        return std::make_shared<TIntegerType>(TIntegerType::I64);
+        return TestTypes().MakeInteger(TIntegerType::I64);
     };
-    TStructType leftType({{"lk", i64()}, {"lv", i64()}});
-    TStructType rightType({{"rk", i64()}, {"rv", i64()}});
+    const auto& leftType = *TestTypes().MakeStruct({{"lk", i64()}, {"lv", i64()}});
+    const auto& rightType = *TestTypes().MakeStruct({{"rk", i64()}, {"rv", i64()}});
 
-    TKernelCompiler compiler;
-    auto spec = NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
+    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    auto spec = NKernel::BuildJoinKernelSpec(TestTypes(), leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
     auto kernels = compiler.CompileJoin(spec);
 
     std::vector<int64_t> lkeys = {1, 2, 1};
@@ -846,33 +847,33 @@ TEST_F(CompileJoin, ProbeOnlyStreamsWithoutInserting) {
 TEST_F(CompileJoin, AcceptsStringKeyAndRejectsUnsupportedSpecs) {
     using namespace NQumir::NAst;
     auto i64 = [] {
-        return std::make_shared<TIntegerType>(TIntegerType::I64);
+        return TestTypes().MakeInteger(TIntegerType::I64);
     };
-    TKernelCompiler compiler;
+    TKernelCompiler compiler({.Types = SharedTestTypes()});
 
-    TStructType strLeft({{"lk", std::make_shared<TStringType>()}});
-    TStructType strRight({{"rk", std::make_shared<TStringType>()}});
+    const auto& strLeft = *TestTypes().MakeStruct({{"lk", TestTypes().Make<TStringType>()}});
+    const auto& strRight = *TestTypes().MakeStruct({{"rk", TestTypes().Make<TStringType>()}});
     auto stringSpec =
-        NKernel::BuildJoinKernelSpec(strLeft, strRight, {{"lk", "rk"}}, EJoinType::Inner);
+        NKernel::BuildJoinKernelSpec(TestTypes(), strLeft, strRight, {{"lk", "rk"}}, EJoinType::Inner);
     EXPECT_NO_THROW(compiler.CompileJoin(stringSpec));
 
-    TStructType leftType({{"lk", i64()}});
-    TStructType rightType({{"rk", i64()}});
+    const auto& leftType = *TestTypes().MakeStruct({{"lk", i64()}});
+    const auto& rightType = *TestTypes().MakeStruct({{"rk", i64()}});
     // FULL OUTER is supported (left- + right-unmatched finalize).
     auto fullSpec =
-        NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}}, EJoinType::Full);
+        NKernel::BuildJoinKernelSpec(TestTypes(), leftType, rightType, {{"lk", "rk"}}, EJoinType::Full);
     EXPECT_NO_THROW(compiler.CompileJoin(fullSpec));
     // Unsupported join type (RightSemi is not implemented yet).
     auto rightSemiSpec =
-        NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}}, EJoinType::RightSemi);
+        NKernel::BuildJoinKernelSpec(TestTypes(), leftType, rightType, {{"lk", "rk"}}, EJoinType::RightSemi);
     EXPECT_THROW(compiler.CompileJoin(rightSemiSpec), NQumir::TError);
     // Missing column.
     EXPECT_THROW(
-        NKernel::BuildJoinKernelSpec(leftType, rightType, {{"missing", "rk"}}, EJoinType::Inner),
+        NKernel::BuildJoinKernelSpec(TestTypes(), leftType, rightType, {{"missing", "rk"}}, EJoinType::Inner),
         std::runtime_error);
     // Incompatible key types (i64 vs string).
     auto incompatibleSpec =
-        NKernel::BuildJoinKernelSpec(leftType, strRight, {{"lk", "rk"}}, EJoinType::Inner);
+        NKernel::BuildJoinKernelSpec(TestTypes(), leftType, strRight, {{"lk", "rk"}}, EJoinType::Inner);
     EXPECT_THROW(compiler.CompileJoin(incompatibleSpec), NQumir::TError);
 }
 
@@ -887,7 +888,7 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileGenericJoin(
 {
     using namespace NQumir::NAst;
     TTypePtr columnType, rowSetType, hashTableType, pairBufferType, stringViewType;
-    for (const auto& et : NQumir::NRegistry::QumirDbExternalTypes()) {
+    for (const auto& et : NQumir::NRegistry::QumirDbExternalTypes(NQdb::TestTypes())) {
         if (et.Name == "TColumn") {
             columnType = et.Type;
         } else if (et.Name == "TRowSet") {
@@ -900,7 +901,7 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileGenericJoin(
             stringViewType = et.Type;
         }
     }
-    auto lib = NKernel::BuildJoinKernelLibrary();
+    auto lib = NKernel::BuildJoinKernelLibrary(TestTypes());
     if (!lib) {
         ADD_FAILURE() << lib.error().ToString();
         return {};
@@ -911,7 +912,7 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileGenericJoin(
     }
     if (keyDesc.HasDistinctLookupType()) {
         auto stringOps =
-            NKernel::ParseFunctionLibrary(NKernel::ReadAggregationKernel("string_ops.oz"));
+            NKernel::ParseFunctionLibrary(TestTypes(), NKernel::ReadAggregationKernel("string_ops.oz"));
         if (!stringOps) {
             ADD_FAILURE() << stringOps.error().ToString();
             return {};
@@ -920,13 +921,13 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileGenericJoin(
             program.push_back(std::move(f));
         }
     }
-    for (auto& f : NKernel::GenJoinKeyOpsFunDecls(keyDesc)) {
+    for (auto& f : NKernel::GenJoinKeyOpsFunDecls(TestTypes(), keyDesc)) {
         program.push_back(std::move(f));
     }
-    for (auto& f : NKernel::GenJoinKeyOwnershipFunDecls(keyDesc)) {
+    for (auto& f : NKernel::GenJoinKeyOwnershipFunDecls(TestTypes(), keyDesc)) {
         program.push_back(std::move(f));
     }
-    auto dualLib = NKernel::BuildJoinDualKeyLibrary();
+    auto dualLib = NKernel::BuildJoinDualKeyLibrary(TestTypes());
     if (!dualLib) {
         ADD_FAILURE() << dualLib.error().ToString();
         return {};
@@ -938,7 +939,7 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileGenericJoin(
         program.push_back(std::move(f));
     }
     program.push_back(
-        NKernel::GenJoinProcessAst(
+        NKernel::GenJoinProcessAst(TestTypes(),
             keyDesc,
             true,
             "jt_process_left",
@@ -948,7 +949,7 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileGenericJoin(
             pairBufferType,
             stringViewType));
     program.push_back(
-        NKernel::GenJoinProcessAst(
+        NKernel::GenJoinProcessAst(TestTypes(),
             keyDesc,
             false,
             "jt_process_right",
@@ -958,7 +959,7 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileGenericJoin(
             pairBufferType,
             stringViewType));
     program.push_back(
-        NKernel::GenJoinProbeAst(
+        NKernel::GenJoinProbeAst(TestTypes(),
             keyDesc,
             true,
             "jt_probe_left_stream",
@@ -968,7 +969,7 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileGenericJoin(
             pairBufferType,
             stringViewType));
     program.push_back(
-        NKernel::GenJoinProbeAst(
+        NKernel::GenJoinProbeAst(TestTypes(),
             keyDesc,
             false,
             "jt_probe_right_stream",
@@ -983,8 +984,8 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileGenericJoin(
     options.NativeCode = true;
     options.AllowOverloads = true;
     NQdb::NTest::ConfigureQumirDbSourceModule(options);
-    auto runner = std::make_unique<NQumir::TLLVMRunner>(options);
-    auto prog = std::make_shared<TBlockExpr>(NQumir::TLocation{}, std::move(program));
+    auto runner = std::make_unique<NQumir::TLLVMRunner>(options, nullptr, &NQdb::TestTypes());
+    auto prog = NQumir::MakeIntrusive<TBlockExpr>(NQumir::TLocation{}, std::move(program));
     NQdb::NTest::AddQumirDbUse(prog);
     std::string error;
     fn = runner->CompileKernelAst(prog, entry, &error);
@@ -996,11 +997,11 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileGenericJoin(
 
 TEST_F(JoinKernelGeneric, Int32KeyMatchesNestedLoop) {
     using namespace NQumir::NAst;
-    auto i32 = std::make_shared<TIntegerType>(TIntegerType::I32);
-    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
-    TStructType leftType({{"lk", i32}, {"lv", i64}});
-    TStructType rightType({{"rk", i32}, {"rv", i64}});
-    auto keyDesc = NKernel::BuildJoinKeyDescriptor(leftType, rightType, {{"lk", "rk"}});
+    auto i32 = TestTypes().MakeInteger(TIntegerType::I32);
+    auto i64 = TestTypes().MakeInteger(TIntegerType::I64);
+    const auto& leftType = *TestTypes().MakeStruct({{"lk", i32}, {"lv", i64}});
+    const auto& rightType = *TestTypes().MakeStruct({{"rk", i32}, {"rv", i64}});
+    auto keyDesc = NKernel::BuildJoinKeyDescriptor(TestTypes(), leftType, rightType, {{"lk", "rk"}});
 
     void* initFn = nullptr;
     auto r1 = CompileGenericJoin(keyDesc, "jt_init", initFn);
@@ -1058,10 +1059,10 @@ TEST_F(JoinKernelGeneric, Int32KeyMatchesNestedLoop) {
 
 TEST_F(JoinKernelGeneric, Int32KeyTriggersRehash) {
     using namespace NQumir::NAst;
-    auto i32 = std::make_shared<TIntegerType>(TIntegerType::I32);
-    TStructType leftType({{"lk", i32}});
-    TStructType rightType({{"rk", i32}});
-    auto keyDesc = NKernel::BuildJoinKeyDescriptor(leftType, rightType, {{"lk", "rk"}});
+    auto i32 = TestTypes().MakeInteger(TIntegerType::I32);
+    const auto& leftType = *TestTypes().MakeStruct({{"lk", i32}});
+    const auto& rightType = *TestTypes().MakeStruct({{"rk", i32}});
+    auto keyDesc = NKernel::BuildJoinKeyDescriptor(TestTypes(), leftType, rightType, {{"lk", "rk"}});
 
     void* initFn = nullptr;
     auto r1 = CompileGenericJoin(keyDesc, "jt_init", initFn);
@@ -1166,13 +1167,13 @@ bool MaskBit(const TColumn& col, int64_t row) {
 
 TEST_F(JoinMaterialize, GathersFixedAndStringColumnsWithNullPadding) {
     using namespace NQumir::NAst;
-    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
-    auto i32 = std::make_shared<TIntegerType>(TIntegerType::I32);
-    TStructType leftType({{"lk", i64}, {"lname", std::make_shared<TStringType>()}});
-    TStructType rightType({{"rk", i64}, {"rv", i32}});
+    auto i64 = TestTypes().MakeInteger(TIntegerType::I64);
+    auto i32 = TestTypes().MakeInteger(TIntegerType::I32);
+    const auto& leftType = *TestTypes().MakeStruct({{"lk", i64}, {"lname", TestTypes().Make<TStringType>()}});
+    const auto& rightType = *TestTypes().MakeStruct({{"rk", i64}, {"rv", i32}});
 
-    TKernelCompiler compiler;
-    auto spec = NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}}, EJoinType::Left);
+    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    auto spec = NKernel::BuildJoinKernelSpec(TestTypes(), leftType, rightType, {{"lk", "rk"}}, EJoinType::Left);
     auto kernels = compiler.CompileJoin(spec);
 
     // Left store: one batch of 3 rows with a string payload column.
@@ -1259,12 +1260,12 @@ TEST_F(JoinMaterialize, GathersFixedAndStringColumnsWithNullPadding) {
 
 TEST_F(JoinMaterialize, PropagatesSourceNullsAndReadsStreamBatches) {
     using namespace NQumir::NAst;
-    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
-    TStructType leftType({{"lk", i64}, {"lv", std::make_shared<TNullable>(i64)}});
-    TStructType rightType({{"rk", i64}});
+    auto i64 = TestTypes().MakeInteger(TIntegerType::I64);
+    const auto& leftType = *TestTypes().MakeStruct({{"lk", i64}, {"lv", MakeNullableType(TestTypes(), i64)}});
+    const auto& rightType = *TestTypes().MakeStruct({{"rk", i64}});
 
-    TKernelCompiler compiler;
-    auto spec = NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
+    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    auto spec = NKernel::BuildJoinKernelSpec(TestTypes(), leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
     auto kernels = compiler.CompileJoin(spec);
 
     // Left store: 2 rows; lv row 1 is NULL at the source.
@@ -1314,12 +1315,12 @@ TEST_F(JoinMaterialize, PropagatesSourceNullsAndReadsStreamBatches) {
 
 TEST_F(JoinMaterialize, FullOuterPadsBothSides) {
     using namespace NQumir::NAst;
-    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
-    TStructType leftType({{"lk", i64}});
-    TStructType rightType({{"rk", i64}});
+    auto i64 = TestTypes().MakeInteger(TIntegerType::I64);
+    const auto& leftType = *TestTypes().MakeStruct({{"lk", i64}});
+    const auto& rightType = *TestTypes().MakeStruct({{"rk", i64}});
 
-    TKernelCompiler compiler;
-    auto spec = NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}}, EJoinType::Full);
+    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    auto spec = NKernel::BuildJoinKernelSpec(TestTypes(), leftType, rightType, {{"lk", "rk"}}, EJoinType::Full);
     auto kernels = compiler.CompileJoin(spec);
 
     std::vector<int64_t> leftValues = {10, 20};
@@ -1372,13 +1373,13 @@ TEST_F(JoinMaterialize, FullOuterPadsBothSides) {
 
 TEST_F(JoinMaterialize, SemiAntiOutputsLeftColumnsOnly) {
     using namespace NQumir::NAst;
-    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
-    TStructType leftType({{"lk", i64}, {"lv", i64}});
-    TStructType rightType({{"rk", i64}});
+    auto i64 = TestTypes().MakeInteger(TIntegerType::I64);
+    const auto& leftType = *TestTypes().MakeStruct({{"lk", i64}, {"lv", i64}});
+    const auto& rightType = *TestTypes().MakeStruct({{"rk", i64}});
 
-    TKernelCompiler compiler;
+    TKernelCompiler compiler({.Types = SharedTestTypes()});
     auto spec =
-        NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}}, EJoinType::LeftSemi);
+        NKernel::BuildJoinKernelSpec(TestTypes(), leftType, rightType, {{"lk", "rk"}}, EJoinType::LeftSemi);
     auto kernels = compiler.CompileJoin(spec);
 
     std::vector<int64_t> lk = {1, 2};
@@ -1414,13 +1415,13 @@ TEST_F(JoinMaterialize, SemiAntiOutputsLeftColumnsOnly) {
 
 TEST_F(JoinMaterialize, GathersBoolAndDecimalWorkers) {
     using namespace NQumir::NAst;
-    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
-    TStructType leftType({{"lk", i64}, {"flag", std::make_shared<TBoolType>()}});
+    auto i64 = TestTypes().MakeInteger(TIntegerType::I64);
+    const auto& leftType = *TestTypes().MakeStruct({{"lk", i64}, {"flag", TestTypes().Make<TBoolType>()}});
     // DECIMAL(20,2) is stored in i128 (BinInt); one of p <= 18 would be a plain i64.
-    TStructType rightType({{"rk", i64}, {"amount", std::make_shared<TDecimal>(20, 2)}});
+    const auto& rightType = *TestTypes().MakeStruct({{"rk", i64}, {"amount", MakeDecimalType(TestTypes(), {20, 2})}});
 
-    TKernelCompiler compiler;
-    auto spec = NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}}, EJoinType::Left);
+    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    auto spec = NKernel::BuildJoinKernelSpec(TestTypes(), leftType, rightType, {{"lk", "rk"}}, EJoinType::Left);
     auto kernels = compiler.CompileJoin(spec);
 
     std::vector<int64_t> lk = {1, 2};
@@ -1469,12 +1470,12 @@ TEST_F(JoinMaterialize, GathersBoolAndDecimalWorkers) {
 
 TEST_F(CompileCrossJoin, EmitsSelectedPairsAndMaterializesStringPayload) {
     using namespace NQumir::NAst;
-    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
-    TStructType leftType({{"lk", i64}, {"lname", std::make_shared<TStringType>()}});
-    TStructType rightType({{"rv", i64}});
+    auto i64 = TestTypes().MakeInteger(TIntegerType::I64);
+    const auto& leftType = *TestTypes().MakeStruct({{"lk", i64}, {"lname", TestTypes().Make<TStringType>()}});
+    const auto& rightType = *TestTypes().MakeStruct({{"rv", i64}});
 
-    TKernelCompiler compiler;
-    auto spec = NKernel::BuildCrossJoinKernelSpec(leftType, rightType);
+    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    auto spec = NKernel::BuildCrossJoinKernelSpec(TestTypes(), leftType, rightType);
     auto kernels = compiler.CompileCrossJoin(spec);
 
     std::vector<int64_t> lk = {1, 2, 3};
@@ -1578,12 +1579,12 @@ struct TCrossJoinResidualInput {
 
 TCrossJoinKernels CompileResidualCrossJoin(EJoinType type) {
     using namespace NQumir::NAst;
-    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
-    TStructType leftType({{"lk", i64}});
-    TStructType rightType({{"rv", i64}});
-    TKernelCompiler compiler;
+    auto i64 = TestTypes().MakeInteger(TIntegerType::I64);
+    const auto& leftType = *TestTypes().MakeStruct({{"lk", i64}});
+    const auto& rightType = *TestTypes().MakeStruct({{"rv", i64}});
+    TKernelCompiler compiler({.Types = SharedTestTypes()});
     return compiler.CompileCrossJoin(
-        NKernel::BuildCrossJoinKernelSpec(leftType, rightType, type, ParseExpr("(< lk rv)")));
+        NKernel::BuildCrossJoinKernelSpec(TestTypes(), leftType, rightType, type, ParseExpr("(< lk rv)")));
 }
 
 std::vector<int64_t> CrossJoinPairs(
@@ -1672,12 +1673,12 @@ std::string ReadString(const TColumn& col, int64_t row) {
 
 TEST_F(JoinStringKey, InnerJoinMatchesAndMaterializes) {
     using namespace NQumir::NAst;
-    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
-    TStructType leftType({{"lk", std::make_shared<TStringType>()}, {"lv", i64}});
-    TStructType rightType({{"rk", std::make_shared<TStringType>()}, {"rv", i64}});
+    auto i64 = TestTypes().MakeInteger(TIntegerType::I64);
+    const auto& leftType = *TestTypes().MakeStruct({{"lk", TestTypes().Make<TStringType>()}, {"lv", i64}});
+    const auto& rightType = *TestTypes().MakeStruct({{"rk", TestTypes().Make<TStringType>()}, {"rv", i64}});
 
-    TKernelCompiler compiler;
-    auto spec = NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
+    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    auto spec = NKernel::BuildJoinKernelSpec(TestTypes(), leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
     auto kernels = compiler.CompileJoin(spec);
 
     TStringColumn lk({"apple", "banana", "apple"});
@@ -1742,9 +1743,9 @@ TEST_F(JoinStringKey, InnerJoinMatchesAndMaterializes) {
 
 TEST_F(JoinStringKey, SemiAntiClonesRightKeysAndSurvivesRehash) {
     using namespace NQumir::NAst;
-    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
-    TStructType leftType({{"lk", std::make_shared<TStringType>()}, {"lv", i64}});
-    TStructType rightType({{"rk", std::make_shared<TStringType>()}});
+    auto i64 = TestTypes().MakeInteger(TIntegerType::I64);
+    const auto& leftType = *TestTypes().MakeStruct({{"lk", TestTypes().Make<TStringType>()}, {"lv", i64}});
+    const auto& rightType = *TestTypes().MakeStruct({{"rk", TestTypes().Make<TStringType>()}});
 
     // Enough distinct string keys to rehash with 8-slot or 16-slot groups,
     // exercising owned-key cloning and carry across rehash.
@@ -1763,9 +1764,9 @@ TEST_F(JoinStringKey, SemiAntiClonesRightKeysAndSurvivesRehash) {
         rightKeys.push_back("key_" + std::to_string(rnd() % 20));
     }
 
-    TKernelCompiler compiler;
+    TKernelCompiler compiler({.Types = SharedTestTypes()});
     auto spec =
-        NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}}, EJoinType::LeftAnti);
+        NKernel::BuildJoinKernelSpec(TestTypes(), leftType, rightType, {{"lk", "rk"}}, EJoinType::LeftAnti);
     auto kernels = compiler.CompileJoin(spec);
 
     TStringColumn lk(leftKeys);
@@ -1864,12 +1865,12 @@ TEST_F(JoinStringKey, SemiAntiClonesRightKeysAndSurvivesRehash) {
 
 TEST_F(JoinStringKey, CompositeStringIntKey) {
     using namespace NQumir::NAst;
-    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
-    TStructType leftType({{"lk", std::make_shared<TStringType>()}, {"ln", i64}, {"lv", i64}});
-    TStructType rightType({{"rk", std::make_shared<TStringType>()}, {"rn", i64}, {"rv", i64}});
+    auto i64 = TestTypes().MakeInteger(TIntegerType::I64);
+    const auto& leftType = *TestTypes().MakeStruct({{"lk", TestTypes().Make<TStringType>()}, {"ln", i64}, {"lv", i64}});
+    const auto& rightType = *TestTypes().MakeStruct({{"rk", TestTypes().Make<TStringType>()}, {"rn", i64}, {"rv", i64}});
 
-    TKernelCompiler compiler;
-    auto spec = NKernel::BuildJoinKernelSpec(
+    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    auto spec = NKernel::BuildJoinKernelSpec(TestTypes(),
         leftType,
         rightType,
         {{"lk", "rk"}, {"ln", "rn"}},
@@ -2039,7 +2040,7 @@ NKernel::TOperatorKernelSpec MarkJoinSpec(
     const NQumir::NAst::TStructType& rightType,
     const std::vector<TJoinKey>& keys)
 {
-    return NKernel::BuildJoinKernelSpec(
+    return NKernel::BuildJoinKernelSpec(TestTypes(),
         leftType,
         rightType,
         keys,
@@ -2178,12 +2179,12 @@ RandomNullableKeys(uint32_t& seed, size_t count, uint32_t domain, uint32_t nullE
 
 TEST_F(MarkJoinKernel, NullableKeyFollowsThreeValuedIn) {
     using namespace NQumir::NAst;
-    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
-    auto nullableI64 = std::make_shared<TNullable>(i64);
-    TStructType leftType({{"lk", nullableI64}, {"lv", i64}});
-    TStructType rightType({{"rk", nullableI64}});
+    auto i64 = TestTypes().MakeInteger(TIntegerType::I64);
+    auto nullableI64 = MakeNullableType(TestTypes(), i64);
+    const auto& leftType = *TestTypes().MakeStruct({{"lk", nullableI64}, {"lv", i64}});
+    const auto& rightType = *TestTypes().MakeStruct({{"rk", nullableI64}});
 
-    TKernelCompiler compiler;
+    TKernelCompiler compiler({.Types = SharedTestTypes()});
     auto kernels = compiler.CompileJoin(MarkJoinSpec(leftType, rightType, {{"lk", "rk"}}));
 
     struct TCase {
@@ -2273,12 +2274,12 @@ TEST_F(MarkJoinKernel, NullableKeyFollowsThreeValuedIn) {
 
 TEST_F(MarkJoinKernel, NonNullableCompositeKeyIsTwoValued) {
     using namespace NQumir::NAst;
-    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
-    auto i32 = std::make_shared<TIntegerType>(TIntegerType::I32);
-    TStructType leftType({{"la", i64}, {"lb", i32}, {"lv", i64}});
-    TStructType rightType({{"rb", i32}, {"ra", i64}});
+    auto i64 = TestTypes().MakeInteger(TIntegerType::I64);
+    auto i32 = TestTypes().MakeInteger(TIntegerType::I32);
+    const auto& leftType = *TestTypes().MakeStruct({{"la", i64}, {"lb", i32}, {"lv", i64}});
+    const auto& rightType = *TestTypes().MakeStruct({{"rb", i32}, {"ra", i64}});
 
-    TKernelCompiler compiler;
+    TKernelCompiler compiler({.Types = SharedTestTypes()});
     auto kernels =
         compiler.CompileJoin(MarkJoinSpec(leftType, rightType, {{"la", "ra"}, {"lb", "rb"}}));
 
@@ -2336,12 +2337,12 @@ TEST_F(MarkJoinKernel, NonNullableCompositeKeyIsTwoValued) {
 
 TEST_F(MarkJoinKernel, NullableStringKeys) {
     using namespace NQumir::NAst;
-    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
-    auto nullableString = std::make_shared<TNullable>(std::make_shared<TStringType>());
-    TStructType leftType({{"lk", nullableString}, {"lv", i64}});
-    TStructType rightType({{"rk", nullableString}});
+    auto i64 = TestTypes().MakeInteger(TIntegerType::I64);
+    auto nullableString = MakeNullableType(TestTypes(), TestTypes().Make<TStringType>());
+    const auto& leftType = *TestTypes().MakeStruct({{"lk", nullableString}, {"lv", i64}});
+    const auto& rightType = *TestTypes().MakeStruct({{"rk", nullableString}});
 
-    TKernelCompiler compiler;
+    TKernelCompiler compiler({.Types = SharedTestTypes()});
     auto kernels = compiler.CompileJoin(MarkJoinSpec(leftType, rightType, {{"lk", "rk"}}));
 
     // A NULL row keeps a payload that equals a key of the other side.
@@ -2405,12 +2406,12 @@ TEST_F(MarkJoinKernel, NullableStringKeys) {
 
 TEST_F(MarkJoinKernel, RehashSizedSidesMatchReference) {
     using namespace NQumir::NAst;
-    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
-    auto nullableI64 = std::make_shared<TNullable>(i64);
-    TStructType leftType({{"lk", nullableI64}, {"lv", i64}});
-    TStructType rightType({{"rk", nullableI64}});
+    auto i64 = TestTypes().MakeInteger(TIntegerType::I64);
+    auto nullableI64 = MakeNullableType(TestTypes(), i64);
+    const auto& leftType = *TestTypes().MakeStruct({{"lk", nullableI64}, {"lv", i64}});
+    const auto& rightType = *TestTypes().MakeStruct({{"rk", nullableI64}});
 
-    TKernelCompiler compiler;
+    TKernelCompiler compiler({.Types = SharedTestTypes()});
     auto kernels = compiler.CompileJoin(MarkJoinSpec(leftType, rightType, {{"lk", "rk"}}));
 
     uint32_t seed = 2024;
@@ -2458,12 +2459,12 @@ TEST_F(MarkJoinKernel, RehashSizedSidesMatchReference) {
 
 TEST_F(MarkJoinKernel, ReadsPrecomputedLeftHashes) {
     using namespace NQumir::NAst;
-    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
-    auto nullableI64 = std::make_shared<TNullable>(i64);
-    TStructType leftType({{"lk", nullableI64}, {"lv", i64}});
-    TStructType rightType({{"rk", nullableI64}});
+    auto i64 = TestTypes().MakeInteger(TIntegerType::I64);
+    auto nullableI64 = MakeNullableType(TestTypes(), i64);
+    const auto& leftType = *TestTypes().MakeStruct({{"lk", nullableI64}, {"lv", i64}});
+    const auto& rightType = *TestTypes().MakeStruct({{"rk", nullableI64}});
 
-    TKernelCompiler compiler;
+    TKernelCompiler compiler({.Types = SharedTestTypes()});
     auto spec = MarkJoinSpec(leftType, rightType, {{"lk", "rk"}});
     auto hash = compiler.CompileJoinHash(spec);
     spec.HasPrecomputedHash = true;
@@ -2502,11 +2503,11 @@ TEST_F(MarkJoinKernel, ReadsPrecomputedLeftHashes) {
 
 TEST_F(MarkJoinKernel, RejectsUnsupportedSpecs) {
     using namespace NQumir::NAst;
-    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
-    auto nullableI64 = std::make_shared<TNullable>(i64);
-    TStructType leftType({{"lk", nullableI64}, {"ln", i64}, {"lv", i64}});
-    TStructType rightType({{"rk", nullableI64}, {"rn", i64}});
-    TKernelCompiler compiler;
+    auto i64 = TestTypes().MakeInteger(TIntegerType::I64);
+    auto nullableI64 = MakeNullableType(TestTypes(), i64);
+    const auto& leftType = *TestTypes().MakeStruct({{"lk", nullableI64}, {"ln", i64}, {"lv", i64}});
+    const auto& rightType = *TestTypes().MakeStruct({{"rk", nullableI64}, {"rn", i64}});
+    TKernelCompiler compiler({.Types = SharedTestTypes()});
 
     auto expectError = [&](const NKernel::TOperatorKernelSpec& spec, const std::string& message) {
         try {
@@ -2518,7 +2519,7 @@ TEST_F(MarkJoinKernel, RejectsUnsupportedSpecs) {
     };
 
     expectError(
-        NKernel::BuildJoinKernelSpec(
+        NKernel::BuildJoinKernelSpec(TestTypes(),
             leftType,
             rightType,
             {{"lk", "rk"}},
@@ -2533,15 +2534,15 @@ TEST_F(MarkJoinKernel, RejectsUnsupportedSpecs) {
         MarkJoinSpec(leftType, rightType, {{"lk", "rk"}, {"ln", "rn"}}),
         "left_mark join does not support a nullable multi-column key");
     EXPECT_THROW(
-        NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}}, EJoinType::LeftMark),
+        NKernel::BuildJoinKernelSpec(TestTypes(), leftType, rightType, {{"lk", "rk"}}, EJoinType::LeftMark),
         std::runtime_error);
 
     // Without equi-keys there is no key set to answer IN: the nested-loop kernel
     // rejects the type.
     EXPECT_THROW(
-        NKernel::BuildCrossJoinKernelSpec(leftType, rightType, EJoinType::LeftMark),
+        NKernel::BuildCrossJoinKernelSpec(TestTypes(), leftType, rightType, EJoinType::LeftMark),
         std::runtime_error);
-    auto keyless = NKernel::BuildCrossJoinKernelSpec(leftType, rightType);
+    auto keyless = NKernel::BuildCrossJoinKernelSpec(TestTypes(), leftType, rightType);
     keyless.JoinType = EJoinType::LeftMark;
     EXPECT_THROW(compiler.CompileCrossJoin(keyless), NQumir::TError);
 
@@ -2587,8 +2588,8 @@ std::vector<int64_t>
 FilterRows(const NQumir::NAst::TTypePtr& type, TRowSet rowSet, const std::string& predicate) {
     auto schema = NQumir::NAst::TMaybeType<NQumir::NAst::TStructType>(type);
     EXPECT_TRUE(schema);
-    auto dispatch = TKernelCompiler().CompileFilter(
-        NKernel::BuildFilterKernelSpec(*schema.Cast(), ParseExpr(predicate)));
+    auto dispatch = TKernelCompiler({.Types = SharedTestTypes()}).CompileFilter(
+        NKernel::BuildFilterKernelSpec(TestTypes(), *schema.Cast(), ParseExpr(predicate)));
     std::vector<uint8_t> selection(rowSet.RowCount);
     rowSet.Selection = selection.data();
     dispatch(rowSet, nullptr);
@@ -2607,8 +2608,8 @@ FilterRows(const NQumir::NAst::TTypePtr& type, TRowSet rowSet, const std::string
 // ABI (bit-packed Data, Mask bit 1 = valid) as the type the spec declares.
 TEST_F(MarkJoinKernel, MarkerColumnReadsBackAsDeclaredType) {
     using namespace NQumir::NAst;
-    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
-    auto nullableI64 = std::make_shared<TNullable>(i64);
+    auto i64 = TestTypes().MakeInteger(TIntegerType::I64);
+    auto nullableI64 = MakeNullableType(TestTypes(), i64);
 
     auto materialize = [](
         const NKernel::TOperatorKernelSpec& spec,
@@ -2619,7 +2620,7 @@ TEST_F(MarkJoinKernel, MarkerColumnReadsBackAsDeclaredType) {
         THashTable& rightTable,
         TRowSet& out)
     {
-        auto kernels = TKernelCompiler().CompileJoin(spec);
+        auto kernels = TKernelCompiler({.Types = SharedTestTypes()}).CompileJoin(spec);
         TRowSet leftBatch = left;
         TRowSet rightBatch = right;
         ASSERT_TRUE(kernels.Dispatch(
@@ -2661,8 +2662,8 @@ TEST_F(MarkJoinKernel, MarkerColumnReadsBackAsDeclaredType) {
     // Nullable keys, S with NULL: TRUE, NULL (missing key), NULL (NULL key),
     // TRUE. The streamed probe keeps the left row order.
     {
-        TStructType leftType({{"lk", nullableI64}, {"lv", i64}});
-        TStructType rightType({{"rk", nullableI64}});
+        const auto& leftType = *TestTypes().MakeStruct({{"lk", nullableI64}, {"lv", i64}});
+        const auto& rightType = *TestTypes().MakeStruct({{"rk", nullableI64}});
         auto spec = MarkJoinSpec(leftType, rightType, {{"lk", "rk"}});
         TNullableColumn<int64_t> lk({1, 5, std::nullopt, 2});
         std::vector<int64_t> lv = RowIndices(4);
@@ -2693,8 +2694,8 @@ TEST_F(MarkJoinKernel, MarkerColumnReadsBackAsDeclaredType) {
 
     // Nullable keys, S without NULL: the missing key is FALSE, the NULL key NULL.
     {
-        TStructType leftType({{"lk", nullableI64}, {"lv", i64}});
-        TStructType rightType({{"rk", i64}});
+        const auto& leftType = *TestTypes().MakeStruct({{"lk", nullableI64}, {"lv", i64}});
+        const auto& rightType = *TestTypes().MakeStruct({{"rk", i64}});
         auto spec = MarkJoinSpec(leftType, rightType, {{"lk", "rk"}});
         TNullableColumn<int64_t> lk({1, 5, std::nullopt});
         std::vector<int64_t> lv = RowIndices(3);
@@ -2722,8 +2723,8 @@ TEST_F(MarkJoinKernel, MarkerColumnReadsBackAsDeclaredType) {
 
     // Non-nullable keys: a plain bool marker.
     {
-        TStructType leftType({{"lk", i64}, {"lv", i64}});
-        TStructType rightType({{"rk", i64}});
+        const auto& leftType = *TestTypes().MakeStruct({{"lk", i64}, {"lv", i64}});
+        const auto& rightType = *TestTypes().MakeStruct({{"rk", i64}});
         auto spec = MarkJoinSpec(leftType, rightType, {{"lk", "rk"}});
         std::vector<int64_t> lk = {1, 5, 2, 7};
         std::vector<int64_t> lv = RowIndices(4);
@@ -2756,10 +2757,10 @@ constexpr size_t TestProbeHoldBytes = 1 << 20;
 // from the retained batch through the row's StringView.
 TEST_F(RowJoinProcessor, ChainsNullKeysAndStringPayload) {
     using namespace NQumir::NAst;
-    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
-    auto nullableI64 = std::make_shared<TNullable>(i64);
-    TStructType leftType({{"lk", nullableI64}, {"lname", std::make_shared<TStringType>()}});
-    TStructType rightType({{"rk", nullableI64}, {"rv", i64}});
+    auto i64 = TestTypes().MakeInteger(TIntegerType::I64);
+    auto nullableI64 = MakeNullableType(TestTypes(), i64);
+    const auto& leftType = *TestTypes().MakeStruct({{"lk", nullableI64}, {"lname", TestTypes().Make<TStringType>()}});
+    const auto& rightType = *TestTypes().MakeStruct({{"rk", nullableI64}, {"rv", i64}});
 
     // Probe (left): keys 1, 2, NULL, 1, 7 with string payloads.
     std::vector<int64_t> lk = {1, 2, 0, 1, 7};
@@ -2782,8 +2783,8 @@ TEST_F(RowJoinProcessor, ChainsNullKeysAndStringPayload) {
     };
     TRowSet rightBatch{.Columns = rcols.data(), .ColumnCount = 2, .RowCount = 5, .RefCount = 1};
 
-    TKernelCompiler compiler;
-    auto spec = NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
+    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    auto spec = NKernel::BuildJoinKernelSpec(TestTypes(), leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
     TRowJoinProcessor processor(
         compiler.CompileRowJoin(spec, /*buildIsLeft=*/false),
         EJoinBuildSide::Right,
@@ -2864,7 +2865,7 @@ std::vector<TRowSet> RunRowJoin(
     std::vector<TRowSet> leftBatches,
     std::vector<TRowSet> rightBatches)
 {
-    TKernelCompiler compiler;
+    TKernelCompiler compiler({.Types = SharedTestTypes()});
     TRowJoinProcessor processor(
         compiler.CompileRowJoin(spec, buildSide == EJoinBuildSide::Left),
         buildSide,
@@ -2913,9 +2914,9 @@ std::string StringAt(const TColumn& column, int64_t row) {
 // build order.
 TEST_F(RowJoinProcessor, BuildLeftStringPayloadInBuildOrder) {
     using namespace NQumir::NAst;
-    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
-    TStructType leftType({{"lk", i64}, {"lname", std::make_shared<TStringType>()}});
-    TStructType rightType({{"rk", i64}, {"rv", i64}});
+    auto i64 = TestTypes().MakeInteger(TIntegerType::I64);
+    const auto& leftType = *TestTypes().MakeStruct({{"lk", i64}, {"lname", TestTypes().Make<TStringType>()}});
+    const auto& rightType = *TestTypes().MakeStruct({{"rk", i64}, {"rv", i64}});
 
     std::vector<int64_t> lk = {5, 5, 6, 5};
     std::string lnameBytes = "xyywzzz"; // "x", "yy", "w", "zzz"
@@ -2934,7 +2935,7 @@ TEST_F(RowJoinProcessor, BuildLeftStringPayloadInBuildOrder) {
     };
     TRowSet probe{.Columns = rcols.data(), .ColumnCount = 2, .RowCount = 3, .RefCount = 1};
 
-    auto spec = NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
+    auto spec = NKernel::BuildJoinKernelSpec(TestTypes(), leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
     using TRow = std::tuple<int64_t, std::string, int64_t, int64_t>;
     std::vector<TRow> got;
     for (auto& out : RunRowJoin(spec, EJoinBuildSide::Left, {build}, {probe})) {
@@ -2962,9 +2963,9 @@ TEST_F(RowJoinProcessor, BuildLeftStringPayloadInBuildOrder) {
 // table exists, also when the probe side ended first.
 TEST_F(RowJoinProcessor, HoldsProbeBatchesUntilTheTableIsBuilt) {
     using namespace NQumir::NAst;
-    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
-    TStructType leftType({{"lk", i64}, {"lv", i64}});
-    TStructType rightType({{"rk", i64}, {"rv", i64}});
+    auto i64 = TestTypes().MakeInteger(TIntegerType::I64);
+    const auto& leftType = *TestTypes().MakeStruct({{"lk", i64}, {"lv", i64}});
+    const auto& rightType = *TestTypes().MakeStruct({{"rk", i64}, {"rv", i64}});
 
     std::vector<int64_t> lk1 = {1, 2};
     std::vector<int64_t> lv1 = {10, 20};
@@ -2990,8 +2991,8 @@ TEST_F(RowJoinProcessor, HoldsProbeBatchesUntilTheTableIsBuilt) {
     };
     TRowSet build{.Columns = rcols.data(), .ColumnCount = 2, .RowCount = 3, .RefCount = 1};
 
-    TKernelCompiler compiler;
-    auto spec = NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
+    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    auto spec = NKernel::BuildJoinKernelSpec(TestTypes(), leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
     TRowJoinProcessor processor(
         compiler.CompileRowJoin(spec, /*buildIsLeft=*/false),
         EJoinBuildSide::Right,
@@ -3094,10 +3095,10 @@ THeldProbeRun RunHeldProbe(
     bool stringProbe = false)
 {
     using namespace NQumir::NAst;
-    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
-    TStructType leftType({{"lk", i64}, {stringProbe ? "lname" : "lv", stringProbe
-        ? std::static_pointer_cast<TType>(std::make_shared<TStringType>()) : i64}});
-    TStructType rightType({{"rk", i64}, {"rv", i64}});
+    auto i64 = TestTypes().MakeInteger(TIntegerType::I64);
+    const auto& leftType = *TestTypes().MakeStruct({{"lk", i64}, {stringProbe ? "lname" : "lv", stringProbe
+        ? TTypePtr(TestTypes().Make<TStringType>()) : TTypePtr(i64)}});
+    const auto& rightType = *TestTypes().MakeStruct({{"rk", i64}, {"rv", i64}});
 
     std::vector<int64_t> lk = {1, 2};
     std::vector<int64_t> lv = {10, 20};
@@ -3119,8 +3120,8 @@ THeldProbeRun RunHeldProbe(
         TColumn{.Data = reinterpret_cast<char*>(rv.data())},
     };
 
-    TKernelCompiler compiler;
-    auto spec = NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
+    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    auto spec = NKernel::BuildJoinKernelSpec(TestTypes(), leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
     TRowJoinProcessor processor(
         compiler.CompileRowJoin(spec, buildLeft),
         buildLeft ? EJoinBuildSide::Left : EJoinBuildSide::Right,
@@ -3264,9 +3265,9 @@ TEST_F(RowJoinProcessor, ZeroBudgetHoldsNothing) {
 // the table must then be released with it.
 TEST_F(RowJoinProcessor, ReleasesHeldProbeBatchesWhenDestroyedBeforeTheBuild) {
     using namespace NQumir::NAst;
-    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
-    TStructType leftType({{"lk", i64}});
-    TStructType rightType({{"rk", i64}});
+    auto i64 = TestTypes().MakeInteger(TIntegerType::I64);
+    const auto& leftType = *TestTypes().MakeStruct({{"lk", i64}});
+    const auto& rightType = *TestTypes().MakeStruct({{"rk", i64}});
 
     std::vector<int64_t> keys = {1, 2};
     std::vector<TColumn> cols = {TColumn{.Data = reinterpret_cast<char*>(keys.data())}};
@@ -3274,8 +3275,8 @@ TEST_F(RowJoinProcessor, ReleasesHeldProbeBatchesWhenDestroyedBeforeTheBuild) {
     auto countDestroy = [](TRowSet* rs) {
         ++*static_cast<int*>(rs->Private);
     };
-    TKernelCompiler compiler;
-    auto spec = NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
+    TKernelCompiler compiler({.Types = SharedTestTypes()});
+    auto spec = NKernel::BuildJoinKernelSpec(TestTypes(), leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
     {
         TRowJoinProcessor processor(
             compiler.CompileRowJoin(spec, /*buildIsLeft=*/false),
@@ -3316,9 +3317,9 @@ TEST_F(RowJoinProcessor, ReleasesHeldProbeBatchesWhenDestroyedBeforeTheBuild) {
 // key comparison must reject those and keep probing.
 TEST_F(RowJoinProcessor, ManyArenaBlocksAndSaltCollisions) {
     using namespace NQumir::NAst;
-    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
-    TStructType leftType({{"lk", i64}});
-    TStructType rightType({{"rk", i64}, {"rv", i64}});
+    auto i64 = TestTypes().MakeInteger(TIntegerType::I64);
+    const auto& leftType = *TestTypes().MakeStruct({{"lk", i64}});
+    const auto& rightType = *TestTypes().MakeStruct({{"rk", i64}, {"rv", i64}});
 
     constexpr int64_t buildRows = 500000;
     constexpr int64_t probeRows = 2000000;
@@ -3354,7 +3355,7 @@ TEST_F(RowJoinProcessor, ManyArenaBlocksAndSaltCollisions) {
         });
     }
 
-    auto spec = NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
+    auto spec = NKernel::BuildJoinKernelSpec(TestTypes(), leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
     int64_t matches = 0;
     int64_t keySum = 0;
     int64_t wrong = 0;
@@ -3401,11 +3402,11 @@ std::optional<std::string> StringOrNullAt(const TColumn& column, int64_t row) {
 // NULL on a padded row. The unselected probe row is not part of the input.
 TEST_F(RowJoinProcessor, LeftOuterPadsUnmatchedProbeRows) {
     using namespace NQumir::NAst;
-    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
-    auto nullableI64 = std::make_shared<TNullable>(i64);
-    auto nullableString = std::make_shared<TNullable>(std::make_shared<TStringType>());
-    TStructType leftType({{"lk", nullableI64}, {"lname", std::make_shared<TStringType>()}});
-    TStructType rightType({{"rk", nullableI64}, {"rv", nullableI64}, {"rs", nullableString}});
+    auto i64 = TestTypes().MakeInteger(TIntegerType::I64);
+    auto nullableI64 = MakeNullableType(TestTypes(), i64);
+    auto nullableString = MakeNullableType(TestTypes(), TestTypes().Make<TStringType>());
+    const auto& leftType = *TestTypes().MakeStruct({{"lk", nullableI64}, {"lname", TestTypes().Make<TStringType>()}});
+    const auto& rightType = *TestTypes().MakeStruct({{"rk", nullableI64}, {"rv", nullableI64}, {"rs", nullableString}});
 
     // Probe batch 1: keys 1, NULL, 2, 7, 1 (unselected).
     std::vector<int64_t> lk1 = {1, 0, 2, 7, 1};
@@ -3455,7 +3456,7 @@ TEST_F(RowJoinProcessor, LeftOuterPadsUnmatchedProbeRows) {
     };
     TRowSet build{.Columns = rcols.data(), .ColumnCount = 3, .RowCount = 5, .RefCount = 1};
 
-    auto spec = NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}}, EJoinType::Left);
+    auto spec = NKernel::BuildJoinKernelSpec(TestTypes(), leftType, rightType, {{"lk", "rk"}}, EJoinType::Left);
     using TRow = std::tuple<
         std::optional<int64_t>,
         std::string,
@@ -3497,10 +3498,10 @@ TEST_F(RowJoinProcessor, LeftOuterPadsUnmatchedProbeRows) {
 // is padded, and so is one whose nullable component is NULL.
 TEST_F(RowJoinProcessor, RightOuterMultiColumnKeyBuildsLeft) {
     using namespace NQumir::NAst;
-    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
-    auto nullableI64 = std::make_shared<TNullable>(i64);
-    TStructType leftType({{"la", i64}, {"lb", nullableI64}, {"lv", i64}});
-    TStructType rightType({{"ra", i64}, {"rb", nullableI64}, {"rv", i64}});
+    auto i64 = TestTypes().MakeInteger(TIntegerType::I64);
+    auto nullableI64 = MakeNullableType(TestTypes(), i64);
+    const auto& leftType = *TestTypes().MakeStruct({{"la", i64}, {"lb", nullableI64}, {"lv", i64}});
+    const auto& rightType = *TestTypes().MakeStruct({{"ra", i64}, {"rb", nullableI64}, {"rv", i64}});
 
     // Build: (1, 10, 100), (1, 20, 200), (2, 10, 300), (1, 10, 400), (3, NULL, 500).
     std::vector<int64_t> la = {1, 1, 2, 1, 3};
@@ -3526,7 +3527,7 @@ TEST_F(RowJoinProcessor, RightOuterMultiColumnKeyBuildsLeft) {
     };
     TRowSet probe{.Columns = rcols.data(), .ColumnCount = 3, .RowCount = 5, .RefCount = 1};
 
-    auto spec = NKernel::BuildJoinKernelSpec(
+    auto spec = NKernel::BuildJoinKernelSpec(TestTypes(),
         leftType, rightType, {{"la", "ra"}, {"lb", "rb"}}, EJoinType::Right);
     using TRow = std::array<std::optional<int64_t>, 6>;
     std::vector<TRow> got;
@@ -3560,10 +3561,10 @@ TEST_F(RowJoinProcessor, RightOuterMultiColumnKeyBuildsLeft) {
 // produces nothing.
 TEST_F(RowJoinProcessor, LeftOuterEmptySides) {
     using namespace NQumir::NAst;
-    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
-    TStructType leftType({{"lk", i64}});
-    TStructType rightType({{"rk", i64}, {"rs", std::make_shared<TStringType>()}});
-    auto spec = NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}}, EJoinType::Left);
+    auto i64 = TestTypes().MakeInteger(TIntegerType::I64);
+    const auto& leftType = *TestTypes().MakeStruct({{"lk", i64}});
+    const auto& rightType = *TestTypes().MakeStruct({{"rk", i64}, {"rs", TestTypes().Make<TStringType>()}});
+    auto spec = NKernel::BuildJoinKernelSpec(TestTypes(), leftType, rightType, {{"lk", "rk"}}, EJoinType::Left);
 
     std::vector<int64_t> lk = {4, 5, 4};
     std::vector<TColumn> lcols = {TColumn{.Data = reinterpret_cast<char*>(lk.data())}};
@@ -3623,11 +3624,10 @@ std::vector<TSemiAntiRow> SemiAntiRows(std::vector<TRowSet> outputs) {
 // payloads. Unselected rows of both sides take no part.
 TEST_F(RowJoinProcessor, SemiAntiBuildLeftEmitsEachLeftRowOnce) {
     using namespace NQumir::NAst;
-    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
-    auto nullableI64 = std::make_shared<TNullable>(i64);
-    TStructType leftType(
-        {{"lk", nullableI64}, {"lname", std::make_shared<TStringType>()}, {"lv", nullableI64}});
-    TStructType rightType({{"rk", nullableI64}});
+    auto i64 = TestTypes().MakeInteger(TIntegerType::I64);
+    auto nullableI64 = MakeNullableType(TestTypes(), i64);
+    const auto& leftType = *TestTypes().MakeStruct({{"lk", nullableI64}, {"lname", TestTypes().Make<TStringType>()}, {"lv", nullableI64}});
+    const auto& rightType = *TestTypes().MakeStruct({{"rk", nullableI64}});
 
     // Build batch 1: (1, "a", 10), (2, "bb", NULL), (NULL, "n", 30), (1, "c", 40).
     TNullableColumn<int64_t> lk1({1, 2, std::nullopt, 1});
@@ -3670,7 +3670,7 @@ TEST_F(RowJoinProcessor, SemiAntiBuildLeftEmitsEachLeftRowOnce) {
         for (auto* batch : {&build1, &build2, &probe1, &probe2}) {
             batch->RefCount = 1;
         }
-        auto spec = NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}}, type);
+        auto spec = NKernel::BuildJoinKernelSpec(TestTypes(), leftType, rightType, {{"lk", "rk"}}, type);
         auto got = SemiAntiRows(
             RunRowJoin(spec, EJoinBuildSide::Left, {build1, build2}, {probe1, probe2}));
         std::vector<TSemiAntiRow> expected = type == EJoinType::LeftSemi
@@ -3685,11 +3685,10 @@ TEST_F(RowJoinProcessor, SemiAntiBuildLeftEmitsEachLeftRowOnce) {
 // NULL keys included; without build rows neither emits anything.
 TEST_F(RowJoinProcessor, SemiAntiBuildLeftEmptySides) {
     using namespace NQumir::NAst;
-    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
-    auto nullableI64 = std::make_shared<TNullable>(i64);
-    TStructType leftType(
-        {{"lk", nullableI64}, {"lname", std::make_shared<TStringType>()}, {"lv", nullableI64}});
-    TStructType rightType({{"rk", nullableI64}});
+    auto i64 = TestTypes().MakeInteger(TIntegerType::I64);
+    auto nullableI64 = MakeNullableType(TestTypes(), i64);
+    const auto& leftType = *TestTypes().MakeStruct({{"lk", nullableI64}, {"lname", TestTypes().Make<TStringType>()}, {"lv", nullableI64}});
+    const auto& rightType = *TestTypes().MakeStruct({{"rk", nullableI64}});
 
     TNullableColumn<int64_t> lk({4, std::nullopt, 4});
     TStringColumn lname({"x", "y", "z"});
@@ -3703,7 +3702,7 @@ TEST_F(RowJoinProcessor, SemiAntiBuildLeftEmptySides) {
     const auto null = std::nullopt;
     for (auto type : {EJoinType::LeftSemi, EJoinType::LeftAnti}) {
         SCOPED_TRACE(JoinTypeName(type));
-        auto spec = NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}}, type);
+        auto spec = NKernel::BuildJoinKernelSpec(TestTypes(), leftType, rightType, {{"lk", "rk"}}, type);
         build.RefCount = 1;
         const auto got = SemiAntiRows(RunRowJoin(spec, EJoinBuildSide::Left, {build}, {}));
         const std::vector<TSemiAntiRow> expected = type == EJoinType::LeftSemi
@@ -3721,9 +3720,9 @@ TEST_F(RowJoinProcessor, SemiAntiBuildLeftEmptySides) {
 // once however often its key is matched.
 TEST_F(RowJoinProcessor, SemiAntiBuildLeftManyBlocksUniqueKeys) {
     using namespace NQumir::NAst;
-    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
-    TStructType leftType({{"lk", i64}, {"lv", i64}});
-    TStructType rightType({{"rk", i64}});
+    auto i64 = TestTypes().MakeInteger(TIntegerType::I64);
+    const auto& leftType = *TestTypes().MakeStruct({{"lk", i64}, {"lv", i64}});
+    const auto& rightType = *TestTypes().MakeStruct({{"rk", i64}});
 
     constexpr int64_t buildRows = 40000;
     std::vector<int64_t> lk(buildRows), lv(buildRows);
@@ -3748,7 +3747,7 @@ TEST_F(RowJoinProcessor, SemiAntiBuildLeftManyBlocksUniqueKeys) {
         build.RefCount = 1;
         std::vector<TRowSet> probes(3, TRowSet{
             .Columns = rcols.data(), .ColumnCount = 1, .RowCount = probeRows, .RefCount = 1});
-        auto spec = NKernel::BuildJoinKernelSpec(leftType, rightType, {{"lk", "rk"}}, type);
+        auto spec = NKernel::BuildJoinKernelSpec(TestTypes(), leftType, rightType, {{"lk", "rk"}}, type);
         std::vector<int64_t> got;
         for (auto& out : RunRowJoin(spec, EJoinBuildSide::Left, {build}, probes)) {
             for (int64_t i = 0; i < out.RowCount; ++i) {
@@ -3774,12 +3773,12 @@ TEST_F(RowJoinProcessor, SemiAntiBuildLeftManyBlocksUniqueKeys) {
 // side of a SEMI/ANTI join, or decide a residual's matches.
 TEST_F(RowJoinProcessor, RejectsJoinsItCannotStream) {
     using namespace NQumir::NAst;
-    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
-    TStructType leftType({{"lk", i64}, {"lv", i64}});
-    TStructType rightType({{"rk", i64}, {"rv", i64}});
-    TKernelCompiler compiler;
+    auto i64 = TestTypes().MakeInteger(TIntegerType::I64);
+    const auto& leftType = *TestTypes().MakeStruct({{"lk", i64}, {"lv", i64}});
+    const auto& rightType = *TestTypes().MakeStruct({{"rk", i64}, {"rv", i64}});
+    TKernelCompiler compiler({.Types = SharedTestTypes()});
     auto spec = [&](EJoinType type, TExprPtr residual = nullptr) {
-        return NKernel::BuildJoinKernelSpec(
+        return NKernel::BuildJoinKernelSpec(TestTypes(),
             leftType, rightType, {{"lk", "rk"}}, type, residual);
     };
     EXPECT_THROW(compiler.CompileRowJoin(spec(EJoinType::Left), /*buildIsLeft=*/true),
@@ -3793,11 +3792,11 @@ TEST_F(RowJoinProcessor, RejectsJoinsItCannotStream) {
     EXPECT_THROW(compiler.CompileRowJoin(spec(EJoinType::LeftAnti), /*buildIsLeft=*/false),
         NQumir::TError);
     using namespace NQumir::NAst::NLiterals;
-    auto residual = std::make_shared<TBinaryExpr>(
+    auto residual = NQumir::MakeIntrusive<TBinaryExpr>(
         NQumir::TLocation{},
         "<"_op,
-        std::make_shared<TIdentExpr>(NQumir::TLocation{}, "lv"),
-        std::make_shared<TIdentExpr>(NQumir::TLocation{}, "rv"));
+        NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "lv"),
+        NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "rv"));
     EXPECT_THROW(
         compiler.CompileRowJoin(spec(EJoinType::Left, residual), /*buildIsLeft=*/false),
         NQumir::TError);

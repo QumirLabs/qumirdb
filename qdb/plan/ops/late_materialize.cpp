@@ -18,7 +18,7 @@ void CollectInputSources(
     std::vector<TSourceOperator*>& sources)
 {
     if (auto source = TMaybeOp<TSourceOperator>(root)) {
-        sources.push_back(source.Cast().get());
+        sources.push_back(source.Cast().Get());
         return;
     }
     for (const auto& input : root->Inputs()) {
@@ -29,6 +29,7 @@ void CollectInputSources(
 } // namespace
 
 TLateMaterializeOperator::TLateMaterializeOperator(
+    NQumir::NAst::TTypeFactory& types,
     TOperatorPtr input,
     std::string locatorColumn,
     std::vector<TLateMaterializeColumn> columns)
@@ -42,9 +43,9 @@ TLateMaterializeOperator::TLateMaterializeOperator(
     for (const auto& column : Columns_) {
         fields.emplace_back(column.OutputName, column.Type);
     }
-    Type = std::make_shared<TFunctionType>(
+    Type = types.MakeFunction(
         std::vector<TTypePtr>{Input_->OutputColumns()},
-        std::make_shared<TStructType>(std::move(fields)));
+        types.MakeStruct(std::move(fields)));
 }
 
 std::vector<TColumnReference> TLateMaterializeOperator::ColumnReferences() const {

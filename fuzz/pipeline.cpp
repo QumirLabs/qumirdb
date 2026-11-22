@@ -3,6 +3,7 @@
 #include <qdb/catalog/external_module.h>
 #include <qdb/io/parquet/source.h>
 #include <qdb/plan/ops/source.h>
+#include <qdb/plan/types/date.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/plan/types/type_text.h>
@@ -60,10 +61,10 @@ void Check(const arrow::Status& status) {
 }
 
 // A table name of several suites gets the union of their columns; the first type wins.
-std::map<std::string, TFields> MergedSchemas() {
+std::map<std::string, TFields> MergedSchemas(TTypeFactory& types) {
     std::map<std::string, TFields> tables;
     for (const auto& text : TableTexts) {
-        auto schema = TMaybeType<TStructType>(ParseTypeText(text.Schema));
+        auto schema = TMaybeType<TStructType>(ParseTypeText(types, text.Schema));
         if (!schema) {
             throw std::runtime_error("fuzz table '" + std::string(text.Name) + "' is not a struct");
         }
@@ -78,7 +79,7 @@ std::map<std::string, TFields> MergedSchemas() {
 }
 
 std::shared_ptr<arrow::DataType> ArrowType(const TTypePtr& type) {
-    if (auto integer = TMaybeType<TIntegerType>(type)) {
+    if (auto integer = MaybeIntegerType(type)) {
         switch (integer.Cast()->Kind) {
             case TIntegerType::I8: return arrow::int8();
             case TIntegerType::I16: return arrow::int16();
@@ -172,7 +173,9 @@ public:
             throw std::runtime_error("cannot create a temporary directory");
         }
         Dir_ = pattern;
-        for (const auto& [name, fields] : MergedSchemas()) {
+        // The types only describe the files written here.
+        TTypeFactory types;
+        for (const auto& [name, fields] : MergedSchemas(types)) {
             const auto path = Dir_ / (name + ".parquet");
             WriteTable(path, fields);
             Files_.emplace(name, std::make_shared<TParquetFile>(path.string()));
@@ -203,13 +206,15 @@ private:
 void RunStatements(std::string_view sql, const TPlanHandler& handler) {
     static const TEnvironment environment;
     size_t scans = 0;
-    auto factory = [&](std::string_view table) -> std::expected<TOperatorPtr, NQumir::TError> {
+    auto factory = [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
+        -> std::expected<TOperatorPtr, NQumir::TError>
+    {
         auto file = environment.Find(table);
         if (!file) {
             return std::unexpected(NQumir::TError("cannot open table '" + std::string(table) + "'"));
         }
         ++scans;
-        return std::make_shared<TSourceOperator>(std::move(file), std::string(table));
+        return NQumir::MakeIntrusive<TSourceOperator>(types, std::move(file), std::string(table));
     };
     TExternalModuleCatalog catalog;
     NCompiler::TQueryCompiler compiler(catalog, factory);

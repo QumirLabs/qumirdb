@@ -38,7 +38,7 @@ TExprPtr Conjoin(const std::vector<TExprPtr>& atoms) {
     TExprPtr result;
     for (const auto& atom : atoms) {
         result = result
-            ? std::make_shared<TBinaryExpr>(atom->Location, TOperator("&&"), result, atom)
+            ? NQumir::MakeIntrusive<TBinaryExpr>(atom->Location, TOperator("&&"), result, atom)
             : atom;
     }
     return result;
@@ -48,7 +48,7 @@ TExprPtr Disjoin(const std::vector<TExprPtr>& parts) {
     TExprPtr result;
     for (const auto& part : parts) {
         result = result
-            ? std::make_shared<TBinaryExpr>(part->Location, TOperator("||"), result, part)
+            ? NQumir::MakeIntrusive<TBinaryExpr>(part->Location, TOperator("||"), result, part)
             : part;
     }
     return result;

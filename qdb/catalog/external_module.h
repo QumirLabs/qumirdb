@@ -3,8 +3,10 @@
 #include <qumir/error.h>
 #include <qumir/frontend/compose.h>
 #include <qumir/parser/ast.h>
+#include <qumir/parser/type_factory.h>
 
 #include <expected>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -23,6 +25,8 @@ class TExternalTypingResolver;
 
 namespace NQdb {
 
+// The catalog as one query sees it: the declarations of its modules, parsed in the
+// query's type factory.
 class TExternalCatalogSnapshot {
 public:
     struct TState;
@@ -57,31 +61,44 @@ public:
 
 private:
     struct TResolvedTypes;
+    using TFunctions = std::map<std::string, NQumir::TIntrusivePtr<NQumir::NAst::TFunDecl>>;
 
-    explicit TExternalCatalogSnapshot(std::shared_ptr<const TState> state);
+    TExternalCatalogSnapshot(
+        std::shared_ptr<const TState> state,
+        std::shared_ptr<NQumir::NAst::TTypeFactory> types);
     void RememberResolvedReturnType(
         const std::string& name,
         const std::vector<NQumir::NAst::TTypePtr>& argTypes,
         NQumir::NAst::TTypePtr returnType) const;
 
     std::shared_ptr<const TState> State_;
+    // The query's factory, declared first: the declarations below are its types.
+    std::shared_ptr<NQumir::NAst::TTypeFactory> Types_;
+    // By module name, then by function key.
+    std::map<std::string, TFunctions> Functions_;
     std::shared_ptr<TResolvedTypes> ResolvedTypes_;
 
     friend class TExternalModuleCatalog;
     friend class NKernel::TExternalTypingResolver;
 };
 
-// In-memory, instance-owned catalog. It intentionally has no persistence.
+// In-memory, instance-owned catalog. It intentionally has no persistence. It
+// outlives queries, so it keeps module sources and declarations as text and each
+// query parses them into its own type factory.
 class TExternalModuleCatalog {
 public:
     TExternalModuleCatalog();
 
+    // `types` is the factory of the query that runs the statement.
     std::expected<std::monostate, NQumir::TError> Apply(
+        NQumir::NAst::TTypeFactory& types,
         const NSql::TSqlExternalModule& module);
     std::expected<std::monostate, NQumir::TError> Apply(
         const NSql::TSqlExternalFunction& function);
 
-    std::shared_ptr<const TExternalCatalogSnapshot> Snapshot() const;
+    // Throws NQumir::TError when a module no longer parses.
+    std::shared_ptr<const TExternalCatalogSnapshot> Snapshot(
+        std::shared_ptr<NQumir::NAst::TTypeFactory> types) const;
 
 private:
     mutable std::mutex Mutex_;

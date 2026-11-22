@@ -1,4 +1,5 @@
 #include "regtest_lib.h"
+#include "test_types.h"
 
 #include <gtest/gtest.h>
 
@@ -274,8 +275,8 @@ TEST(RegResultComparison, F32CellPrintsTheShortestFloatText) {
     const double doubles[] = {0.1, 16777216.0};
     NQdb::TColumn f32Column{.Data = reinterpret_cast<char*>(const_cast<float*>(floats))};
     NQdb::TColumn f64Column{.Data = reinterpret_cast<char*>(const_cast<double*>(doubles))};
-    const auto f32 = std::make_shared<NQumir::NAst::TFloatType>(NQumir::NAst::TFloatType::F32);
-    const auto f64 = std::make_shared<NQumir::NAst::TFloatType>(NQumir::NAst::TFloatType::F64);
+    const auto f32 = NQdb::TestTypes().MakeFloat(NQumir::NAst::TFloatType::F32);
+    const auto f64 = NQdb::TestTypes().MakeFloat(NQumir::NAst::TFloatType::F64);
     for (int64_t row = 0; row < 2; ++row) {
         EXPECT_EQ(NRegTest::CellJson(f32Column, row, f32), NRegTest::CellJson(f64Column, row, f64));
     }

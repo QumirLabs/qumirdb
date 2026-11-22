@@ -12,7 +12,7 @@ class TSortOperator : public IOperator {
 public:
     static constexpr const char* OpId = "sort";
 
-    TSortOperator(TOperatorPtr input, std::vector<TSortKey> keys);
+    TSortOperator(NQumir::NAst::TTypeFactory& types, TOperatorPtr input, std::vector<TSortKey> keys);
 
     std::string_view RelName() const override { return OpId; }
     std::vector<TColumnReference> ColumnReferences() const override;
@@ -41,7 +41,7 @@ class TTopSortOperator : public IOperator {
 public:
     static constexpr const char* OpId = "top-sort";
 
-    TTopSortOperator(TOperatorPtr input, std::vector<TSortKey> keys, int64_t limit);
+    TTopSortOperator(NQumir::NAst::TTypeFactory& types, TOperatorPtr input, std::vector<TSortKey> keys, int64_t limit);
 
     std::string_view RelName() const override { return OpId; }
     std::vector<TColumnReference> ColumnReferences() const override;

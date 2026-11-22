@@ -14,6 +14,8 @@
 #include <utility>
 #include <vector>
 
+#include "test_types.h"
+
 using namespace NQdb;
 using namespace NQdb::NScheduler;
 

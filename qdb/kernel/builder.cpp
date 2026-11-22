@@ -22,7 +22,7 @@ TFunBuilder::TFunBuilder(std::string name)
 {}
 
 TFunBuilder& TFunBuilder::Param(std::string name, TTypePtr type) {
-    Params_.push_back(std::make_shared<TVarStmt>(
+    Params_.push_back(NQumir::MakeIntrusive<TVarStmt>(
         Loc(), std::move(name), std::move(type)));
     return *this;
 }
@@ -46,58 +46,58 @@ TFunBuilder& TFunBuilder::Assign(std::string name, TExprPtr value) {
 }
 
 TExprPtr TFunBuilder::Build() && {
-    auto body = std::make_shared<TBlockExpr>(Loc(), std::move(Stmts_));
-    return std::make_shared<TFunDecl>(
+    auto body = NQumir::MakeIntrusive<TBlockExpr>(Loc(), std::move(Stmts_));
+    return NQumir::MakeIntrusive<TFunDecl>(
         Loc(), std::move(Name_), std::vector<TGenericParam>{}, std::move(Params_), std::move(body),
         std::move(RetType_));
 }
 
 TExprPtr Ident(std::string name) {
-    return std::make_shared<TIdentExpr>(Loc(), std::move(name));
+    return NQumir::MakeIntrusive<TIdentExpr>(Loc(), std::move(name));
 }
 
 TExprPtr Return(TExprPtr value) {
-    return std::make_shared<TReturnExpr>(Loc(), std::move(value));
+    return NQumir::MakeIntrusive<TReturnExpr>(Loc(), std::move(value));
 }
 
 TExprPtr Block(std::vector<TExprPtr> stmts) {
-    return std::make_shared<TBlockExpr>(Loc(), std::move(stmts));
+    return NQumir::MakeIntrusive<TBlockExpr>(Loc(), std::move(stmts));
 }
 
 TExprPtr Var(std::string name, TTypePtr type) {
-    return std::make_shared<TVarStmt>(Loc(), std::move(name), std::move(type));
+    return NQumir::MakeIntrusive<TVarStmt>(Loc(), std::move(name), std::move(type));
 }
 
 TExprPtr Assign(std::string name, TExprPtr value) {
-    return std::make_shared<TAssignExpr>(Loc(), std::move(name), std::move(value));
+    return NQumir::MakeIntrusive<TAssignExpr>(Loc(), std::move(name), std::move(value));
 }
 
-TExprPtr Int(int64_t v) {
-    return std::make_shared<TNumberExpr>(Loc(), v);
+TExprPtr Int(NQumir::NAst::TTypeFactory& types, int64_t v) {
+    return NQumir::MakeIntrusive<TNumberExpr>(Loc(), v, types);
 }
 
-TExprPtr TypedInt(int64_t v, TTypePtr type) {
-    auto e = std::make_shared<TNumberExpr>(Loc(), v);
+TExprPtr TypedInt(NQumir::NAst::TTypeFactory& types, int64_t v, TTypePtr type) {
+    auto e = NQumir::MakeIntrusive<TNumberExpr>(Loc(), v, types);
     e->Type = std::move(type);
     return e;
 }
 
-TExprPtr Float(double v) {
-    return std::make_shared<TNumberExpr>(Loc(), v);
+TExprPtr Float(NQumir::NAst::TTypeFactory& types, double v) {
+    return NQumir::MakeIntrusive<TNumberExpr>(Loc(), v, types);
 }
 
-TExprPtr Bool(bool v) {
-    auto e = std::make_shared<TNumberExpr>(Loc(), static_cast<int64_t>(v));
-    e->Type = std::make_shared<TBoolType>();
+TExprPtr Bool(NQumir::NAst::TTypeFactory& types, bool v) {
+    auto e = NQumir::MakeIntrusive<TNumberExpr>(Loc(), static_cast<int64_t>(v), types);
+    e->Type = types.Make<TBoolType>();
     return e;
 }
 
-TExprPtr String(std::string v) {
-    return std::make_shared<TStringLiteralExpr>(Loc(), std::move(v));
+TExprPtr String(NQumir::NAst::TTypeFactory& types, std::string v) {
+    return NQumir::MakeIntrusive<TStringLiteralExpr>(Loc(), std::move(v), types);
 }
 
 TExprPtr Bin(TOperator op, TExprPtr l, TExprPtr r) {
-    return std::make_shared<TBinaryExpr>(
+    return NQumir::MakeIntrusive<TBinaryExpr>(
         Loc(), std::move(op), std::move(l), std::move(r));
 }
 
@@ -107,27 +107,27 @@ TExprPtr Mul(TExprPtr l, TExprPtr r) { return Bin("*"_op, std::move(l), std::mov
 TExprPtr Div(TExprPtr l, TExprPtr r) { return Bin("/"_op, std::move(l), std::move(r)); }
 
 TExprPtr Call(std::string name, std::vector<TExprPtr> args) {
-    return std::make_shared<TCallExpr>(
+    return NQumir::MakeIntrusive<TCallExpr>(
         Loc(),
         Ident(std::move(name)),
         std::move(args));
 }
 
 TExprPtr Cast(TExprPtr expr, TTypePtr type) {
-    return std::make_shared<TCastExpr>(Loc(), std::move(expr), std::move(type));
+    return NQumir::MakeIntrusive<TCastExpr>(Loc(), std::move(expr), std::move(type));
 }
 
-TExprPtr NullPtr(TTypePtr type) {
-    return Cast(Int(0), std::move(type));
+TExprPtr NullPtr(NQumir::NAst::TTypeFactory& types, TTypePtr type) {
+    return Cast(Int(types, 0), std::move(type));
 }
 
 TExprPtr Unary(TOperator op, TExprPtr value) {
-    return std::make_shared<TUnaryExpr>(
+    return NQumir::MakeIntrusive<TUnaryExpr>(
         Loc(), std::move(op), std::move(value));
 }
 
 TExprPtr If(TExprPtr cond, TExprPtr thenBody, TExprPtr elseBody) {
-    return std::make_shared<TIfExpr>(
+    return NQumir::MakeIntrusive<TIfExpr>(
         Loc(),
         std::move(cond),
         std::move(thenBody),
@@ -135,12 +135,12 @@ TExprPtr If(TExprPtr cond, TExprPtr thenBody, TExprPtr elseBody) {
 }
 
 TExprPtr While(TExprPtr cond, TExprPtr body) {
-    auto loop = std::make_shared<TWhileStmtExpr>(Loc(), std::move(cond), std::move(body));
+    auto loop = NQumir::MakeIntrusive<TWhileStmtExpr>(Loc(), std::move(cond), std::move(body));
     return loop;
 }
 
 TExprPtr Index(TExprPtr collection, TExprPtr index) {
-    return std::make_shared<TIndexExpr>(
+    return NQumir::MakeIntrusive<TIndexExpr>(
         Loc(),
         std::move(collection),
         std::move(index));
@@ -157,12 +157,12 @@ TExprPtr ArrayAssign(std::string collection, TExprPtr index, TExprPtr value) {
 }
 
 TExprPtr ArrayAssign(std::string collection, std::vector<TExprPtr> indices, TExprPtr value) {
-    return std::make_shared<TArrayAssignExpr>(
+    return NQumir::MakeIntrusive<TArrayAssignExpr>(
         Loc(), std::move(collection), std::move(indices), std::move(value));
 }
 
 TExprPtr Field(TExprPtr object, std::string field) {
-    return std::make_shared<TFieldAccessExpr>(
+    return NQumir::MakeIntrusive<TFieldAccessExpr>(
         Loc(), std::move(object), std::move(field));
 }
 
@@ -171,7 +171,7 @@ TExprPtr Field(std::string object, std::string field) {
 }
 
 TExprPtr FieldAssign(TExprPtr object, std::string field, TExprPtr value) {
-    return std::make_shared<TFieldAssignExpr>(
+    return NQumir::MakeIntrusive<TFieldAssignExpr>(
         Loc(), std::move(object), std::move(field), std::move(value));
 }
 

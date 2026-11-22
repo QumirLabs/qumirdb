@@ -34,78 +34,6 @@ std::string TypeKeyString(const TTypePtr &type) {
   return NQumir::NAst::TypeKey(type);
 }
 
-void RewriteType(const TTypePtr &type,
-                 const std::unordered_map<std::string, std::string> &renames,
-                 std::unordered_set<const TType *> &seen) {
-  if (!type || !seen.insert(type.get()).second) {
-    return;
-  }
-
-  if (auto named = TMaybeType<TNamedType>(type)) {
-    auto node = named.Cast();
-    if (auto it = renames.find(node->Name); it != renames.end()) {
-      node->Name = it->second;
-    }
-    for (auto &arg : node->TypeArgs) {
-      if (arg.Kind == TGenericArg::EKind::Type) {
-        RewriteType(arg.Type, renames, seen);
-      }
-    }
-    RewriteType(node->UnderlyingType, renames, seen);
-  } else if (auto function = TMaybeType<TFunctionType>(type)) {
-    auto node = function.Cast();
-    for (auto &param : node->ParamTypes) {
-      RewriteType(param, renames, seen);
-    }
-    RewriteType(node->ReturnType, renames, seen);
-  } else if (auto future = TMaybeType<TFutureType>(type)) {
-    RewriteType(future.Cast()->ResultType, renames, seen);
-  } else if (auto array = TMaybeType<TArrayType>(type)) {
-    RewriteType(array.Cast()->ElementType, renames, seen);
-  } else if (auto pointer = TMaybeType<TPointerType>(type)) {
-    RewriteType(pointer.Cast()->PointeeType, renames, seen);
-  } else if (auto reference = TMaybeType<TReferenceType>(type)) {
-    RewriteType(reference.Cast()->ReferencedType, renames, seen);
-  } else if (auto structure = TMaybeType<TStructType>(type)) {
-    for (auto &field : structure.Cast()->Fields) {
-      RewriteType(field.second, renames, seen);
-    }
-  }
-}
-
-void RewriteExprTypes(
-    const TExprPtr &expr,
-    const std::unordered_map<std::string, std::string> &renames,
-    std::unordered_set<const TType *> &seen) {
-  if (!expr) {
-    return;
-  }
-
-  RewriteType(expr->Type, renames, seen);
-  if (auto fun = TMaybeNode<TFunDecl>(expr)) {
-    auto node = fun.Cast();
-    RewriteType(node->RetType, renames, seen);
-    for (auto &generic : node->GenericParams) {
-      RewriteType(generic.ValueType, renames, seen);
-    }
-  } else if (auto typeDecl = TMaybeNode<TTypeDeclStmt>(expr)) {
-    for (auto &generic : typeDecl.Cast()->GenericParams) {
-      RewriteType(generic.ValueType, renames, seen);
-    }
-  }
-
-  for (auto *child : expr->MutableChildren()) {
-    RewriteExprTypes(*child, renames, seen);
-  }
-}
-
-void RewriteExprTypes(
-    const TExprPtr &expr,
-    const std::unordered_map<std::string, std::string> &renames) {
-  std::unordered_set<const TType *> seen;
-  RewriteExprTypes(expr, renames, seen);
-}
-
 void RewriteCalls(const TExprPtr &expr,
                   const std::unordered_map<std::string, std::string> &renames) {
   if (!expr) {
@@ -144,92 +72,6 @@ void CollectLocalCalls(const TExprPtr &expr,
   for (const auto &child : expr->Children()) {
     CollectLocalCalls(child, localNames, calls);
   }
-}
-
-void CollectLocalTypeRefs(const TTypePtr &type,
-                          const std::unordered_set<std::string> &localNames,
-                          std::unordered_set<std::string> &refs,
-                          std::unordered_set<const TType *> &seen) {
-  if (!type || !seen.insert(type.get()).second) {
-    return;
-  }
-
-  if (auto named = TMaybeType<TNamedType>(type)) {
-    auto node = named.Cast();
-    if (localNames.contains(node->Name)) {
-      refs.insert(node->Name);
-    }
-    for (const auto &arg : node->TypeArgs) {
-      if (arg.Kind == TGenericArg::EKind::Type) {
-        CollectLocalTypeRefs(arg.Type, localNames, refs, seen);
-      }
-    }
-    CollectLocalTypeRefs(node->UnderlyingType, localNames, refs, seen);
-  } else if (auto function = TMaybeType<TFunctionType>(type)) {
-    auto node = function.Cast();
-    for (const auto &param : node->ParamTypes) {
-      CollectLocalTypeRefs(param, localNames, refs, seen);
-    }
-    CollectLocalTypeRefs(node->ReturnType, localNames, refs, seen);
-  } else if (auto future = TMaybeType<TFutureType>(type)) {
-    CollectLocalTypeRefs(future.Cast()->ResultType, localNames, refs, seen);
-  } else if (auto array = TMaybeType<TArrayType>(type)) {
-    CollectLocalTypeRefs(array.Cast()->ElementType, localNames, refs, seen);
-  } else if (auto pointer = TMaybeType<TPointerType>(type)) {
-    CollectLocalTypeRefs(pointer.Cast()->PointeeType, localNames, refs, seen);
-  } else if (auto reference = TMaybeType<TReferenceType>(type)) {
-    CollectLocalTypeRefs(reference.Cast()->ReferencedType, localNames, refs,
-                         seen);
-  } else if (auto structure = TMaybeType<TStructType>(type)) {
-    for (const auto &field : structure.Cast()->Fields) {
-      CollectLocalTypeRefs(field.second, localNames, refs, seen);
-    }
-  }
-}
-
-std::unordered_set<std::string>
-CollectLocalTypeRefs(const TTypeDeclStmt &typeDecl,
-                     const std::unordered_set<std::string> &localNames) {
-  std::unordered_set<std::string> refs;
-  std::unordered_set<const TType *> seen;
-  if (auto named = TMaybeType<TNamedType>(typeDecl.Type)) {
-    auto node = named.Cast();
-    for (const auto &arg : node->TypeArgs) {
-      if (arg.Kind == TGenericArg::EKind::Type) {
-        CollectLocalTypeRefs(arg.Type, localNames, refs, seen);
-      }
-    }
-    CollectLocalTypeRefs(node->UnderlyingType, localNames, refs, seen);
-  } else {
-    CollectLocalTypeRefs(typeDecl.Type, localNames, refs, seen);
-  }
-  return refs;
-}
-
-std::string TypeDeclVariantKey(
-    const TExprPtr &stmt, const std::unordered_set<std::string> &deps,
-    const std::unordered_map<std::string, std::string> &renames) {
-  std::string key = PrintDecl(stmt);
-  if (deps.empty()) {
-    return key;
-  }
-  std::vector<std::string> renamedDeps;
-  renamedDeps.reserve(deps.size());
-  for (const auto &dep : deps) {
-    if (auto it = renames.find(dep); it != renames.end()) {
-      renamedDeps.push_back(dep + "->" + it->second);
-    }
-  }
-  if (renamedDeps.empty()) {
-    return key;
-  }
-  std::ranges::sort(renamedDeps);
-  key += "\n# qdb-type-renames\n";
-  for (const auto &dep : renamedDeps) {
-    key += dep;
-    key += '\n';
-  }
-  return key;
 }
 
 std::string FunctionSignatureKey(const TFunDecl &fun) {
@@ -281,14 +123,9 @@ public:
     }
 
     const std::string prefix = KernelPrefix(index);
-    std::unordered_map<std::string, std::string> typeRenames;
     std::unordered_set<TExpr *> includeTypes;
     std::unordered_set<TExpr *> includeFunctions;
 
-    DecideTypeNames(*block.Cast(), prefix, typeRenames);
-    if (!typeRenames.empty()) {
-      RewriteExprTypes(kernel.Ast, typeRenames);
-    }
     IncludeTypeDecls(*block.Cast(), includeTypes);
 
     std::unordered_map<std::string, std::string> functionRenames;
@@ -328,7 +165,7 @@ public:
     for (auto &stmt : FunctionDecls_) {
       stmts.push_back(std::move(stmt));
     }
-    return std::make_shared<TBlockExpr>(NQumir::TLocation{}, std::move(stmts));
+    return NQumir::MakeIntrusive<TBlockExpr>(NQumir::TLocation{}, std::move(stmts));
   }
 
   size_t TypeDeclCount() const { return TypeDecls_.size(); }
@@ -336,96 +173,8 @@ public:
   size_t FunctionDeclCount() const { return FunctionDecls_.size(); }
 
 private:
-  struct TTypeVariant {
-    std::string Key;
-    std::string OutputName;
-  };
-
-  struct TTypeDeclInfo {
-    std::string Name;
-    TExprPtr Stmt;
-    std::unordered_set<std::string> Deps;
-  };
-
-  void DecideTypeNames(TBlockExpr &block, const std::string &prefix,
-                       std::unordered_map<std::string, std::string> &renames) {
-    std::vector<TTypeDeclInfo> types;
-    std::unordered_set<std::string> localNames;
-    for (const auto &stmt : block.Stmts) {
-      auto typeDecl = TMaybeNode<TTypeDeclStmt>(stmt);
-      if (!typeDecl) {
-        continue;
-      }
-
-      const std::string name = TypeDeclName(*typeDecl.Cast());
-      if (name.empty()) {
-        continue;
-      }
-      localNames.insert(name);
-      types.push_back({.Name = name, .Stmt = stmt});
-    }
-
-    for (auto &type : types) {
-      auto typeDecl = TMaybeNode<TTypeDeclStmt>(type.Stmt);
-      type.Deps = CollectLocalTypeRefs(*typeDecl.Cast(), localNames);
-    }
-
-    for (const auto &type : types) {
-      const std::string key = TypeDeclVariantKey(type.Stmt, type.Deps, renames);
-      auto &variants = TypeVariants_[type.Name];
-      auto existing = std::find_if(
-          variants.begin(), variants.end(),
-          [&](const TTypeVariant &variant) { return variant.Key == key; });
-      if (existing != variants.end()) {
-        if (existing->OutputName != type.Name) {
-          renames[type.Name] = existing->OutputName;
-        }
-        continue;
-      }
-
-      if (!variants.empty()) {
-        renames[type.Name] = prefix + type.Name;
-      }
-    }
-
-    bool changed = true;
-    while (changed) {
-      changed = false;
-      for (const auto &type : types) {
-        if (renames.contains(type.Name)) {
-          continue;
-        }
-        if (std::ranges::any_of(type.Deps, [&](const std::string &dep) {
-              return renames.contains(dep);
-            })) {
-          renames[type.Name] = prefix + type.Name;
-          changed = true;
-        }
-      }
-    }
-
-    for (const auto &type : types) {
-      const std::string outputName =
-          renames.contains(type.Name) ? renames.at(type.Name) : type.Name;
-      const std::string key = TypeDeclVariantKey(type.Stmt, type.Deps, renames);
-      auto &variants = TypeVariants_[type.Name];
-      auto existing = std::find_if(
-          variants.begin(), variants.end(),
-          [&](const TTypeVariant &variant) { return variant.Key == key; });
-      if (existing != variants.end()) {
-        if (existing->OutputName != type.Name) {
-          renames[type.Name] = existing->OutputName;
-        }
-        continue;
-      }
-
-      variants.push_back({
-          .Key = key,
-          .OutputName = outputName,
-      });
-    }
-  }
-
+  // Kernel generators name their types uniquely, so in one query a name is one
+  // interned type, which is declared once.
   void IncludeTypeDecls(TBlockExpr &block,
                         std::unordered_set<TExpr *> &includeTypes) {
     for (const auto &stmt : block.Stmts) {
@@ -440,10 +189,11 @@ private:
             "top-level type declaration has no named type");
       }
 
-      const std::string key = PrintDecl(stmt);
-      auto &known = IncludedTypeDecls_[name];
-      if (known.insert(key).second) {
-        includeTypes.insert(stmt.get());
+      auto [known, inserted] = IncludedTypes_.emplace(name, typeDecl.Cast()->Type);
+      if (inserted) {
+        includeTypes.insert(stmt.Get());
+      } else if (known->second != typeDecl.Cast()->Type) {
+        throw std::runtime_error("kernels declare two types named '" + name + "'");
       }
     }
   }
@@ -453,7 +203,7 @@ private:
                        std::unordered_map<std::string, std::string> &renames,
                        std::unordered_set<TExpr *> &includeFunctions) {
     std::vector<std::string> names;
-    std::unordered_map<std::string, std::vector<std::shared_ptr<TFunDecl>>>
+    std::unordered_map<std::string, std::vector<NQumir::TIntrusivePtr<TFunDecl>>>
         groups;
     for (const auto &stmt : block.Stmts) {
       auto fun = TMaybeNode<TFunDecl>(stmt);
@@ -464,7 +214,7 @@ private:
       if (!groups.contains(name)) {
         names.push_back(name);
       }
-      groups[name].push_back(fun.Cast());
+      groups[name].emplace_back(fun.Cast());
     }
 
     auto renameNames = FunctionNamesToRename(names, groups, entrypoints);
@@ -482,7 +232,7 @@ private:
         renames.emplace(name, outputName);
         outputs.emplace(name, std::move(outputName));
         for (const auto &fun : groups.at(name)) {
-          includeFunctions.insert(fun.get());
+          includeFunctions.insert(fun.Get());
         }
       }
       RenamedComponents_.emplace(key, std::move(outputs));
@@ -501,7 +251,7 @@ private:
         auto known = knownBySignature.find(signature);
         if (known == knownBySignature.end()) {
           knownBySignature.emplace(signature, key);
-          includeFunctions.insert(fun.get());
+          includeFunctions.insert(fun.Get());
         } else if (known->second != key) {
           throw std::runtime_error("function conflict was not renamed: " +
                                    name);
@@ -513,7 +263,7 @@ private:
   std::unordered_set<std::string> FunctionNamesToRename(
       const std::vector<std::string> &names,
       const std::unordered_map<std::string,
-                               std::vector<std::shared_ptr<TFunDecl>>> &groups,
+                               std::vector<NQumir::TIntrusivePtr<TFunDecl>>> &groups,
       const std::vector<std::string> &entrypoints) const {
     std::unordered_set<std::string> localNames(names.begin(), names.end());
     std::unordered_map<std::string, std::unordered_set<std::string>>
@@ -560,7 +310,7 @@ private:
   std::vector<std::vector<std::string>> RenameComponents(
       const std::vector<std::string> &names,
       const std::unordered_map<std::string,
-                               std::vector<std::shared_ptr<TFunDecl>>> &groups,
+                               std::vector<NQumir::TIntrusivePtr<TFunDecl>>> &groups,
       const std::unordered_set<std::string> &renameNames) const {
     std::unordered_set<std::string> localNames(names.begin(), names.end());
     std::unordered_map<std::string, std::unordered_set<std::string>> adjacent;
@@ -606,7 +356,7 @@ private:
   std::string RenamedComponentKey(
       const std::vector<std::string> &component,
       const std::unordered_map<
-          std::string, std::vector<std::shared_ptr<TFunDecl>>> &groups) const {
+          std::string, std::vector<NQumir::TIntrusivePtr<TFunDecl>>> &groups) const {
     std::string key;
     for (const auto &name : component) {
       AppendKeyPart(key, name);
@@ -628,7 +378,7 @@ private:
 
   bool MustRenameFunctionGroup(
       const std::string &name,
-      const std::vector<std::shared_ptr<TFunDecl>> &functions) const {
+      const std::vector<NQumir::TIntrusivePtr<TFunDecl>> &functions) const {
     std::unordered_map<std::string, std::string> local;
     for (const auto &fun : functions) {
       const std::string signature = FunctionSignatureKey(*fun);
@@ -675,11 +425,11 @@ private:
         continue;
       }
       if (TMaybeNode<TTypeDeclStmt>(stmt)) {
-        if (includeTypes.contains(stmt.get())) {
+        if (includeTypes.contains(stmt.Get())) {
           TypeDecls_.push_back(stmt);
         }
       } else if (TMaybeNode<TFunDecl>(stmt)) {
-        if (includeFunctions.contains(stmt.get())) {
+        if (includeFunctions.contains(stmt.Get())) {
           FunctionDecls_.push_back(stmt);
         }
       } else {
@@ -691,9 +441,7 @@ private:
 
   std::vector<TExprPtr> TypeDecls_;
   std::vector<TExprPtr> FunctionDecls_;
-  std::unordered_map<std::string, std::vector<TTypeVariant>> TypeVariants_;
-  std::unordered_map<std::string, std::unordered_set<std::string>>
-      IncludedTypeDecls_;
+  std::unordered_map<std::string, TTypePtr> IncludedTypes_;
   std::unordered_map<std::string, std::unordered_map<std::string, std::string>>
       Functions_;
   std::unordered_map<std::string, std::unordered_map<std::string, std::string>>

@@ -15,14 +15,15 @@ using TColumnSet = std::unordered_set<std::string>;
 // to restrict physical column reads from parquet.
 //
 // Must be called after AnnotateTypes (operators must have TFunctionType set).
-void ApplyColumnPruning(const TOperatorPtr& root);
+void ApplyColumnPruning(NQumir::NAst::TTypeFactory& types, const TOperatorPtr& root);
 
 // `explicitRootDemand` null -> seed from the root's full output; non-null (even
 // empty) -> seed exactly from it. Each TCteRef accumulates its refcount and the
 // columns its consumer needs into `usage`.
 void ApplyColumnPruning(
+    NQumir::NAst::TTypeFactory& types,
     const TOperatorPtr& root, const TColumnSet* explicitRootDemand, TCteUsageMap* usage);
 
-TCteUsageMap PropagateCteDemands(const TOperatorPtr& main);
+TCteUsageMap PropagateCteDemands(NQumir::NAst::TTypeFactory& types, const TOperatorPtr& main);
 
 } // namespace NQdb

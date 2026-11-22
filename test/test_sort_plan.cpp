@@ -3,6 +3,7 @@
 
 #include <qdb/io/schema.h>
 #include "plan_runner.h"
+#include "test_types.h"
 #include <qdb/modules/qumirdb_runtime.h>
 #include <qdb/plan/build.h>
 #include <qdb/plan/ops/aggregate.h>
@@ -47,19 +48,19 @@ namespace {
 std::expected<TOperatorPtr, NQumir::TError> BuildSqlPlan(std::string_view sql, ITable& source) {
     std::istringstream in{std::string(sql)};
     NSql::TTokenStream ts(in);
-    NSql::TParser parser;
+    NSql::TParser parser(TestTypes());
     auto parsed = parser.Parse(ts);
     if (!parsed) {
         return std::unexpected(parsed.error());
     }
 
-    auto factory = [&](std::string_view table)
+    auto factory = [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
-        return std::make_shared<TSourceOperator>(Borrow(source), std::string(table));
+        return NQumir::MakeIntrusive<TSourceOperator>(types, Borrow(source), std::string(table));
     };
 
-    return BuildPlan(parsed.value(), factory);
+    return BuildPlan(TestTypes(), parsed.value(), factory);
 }
 
 TRowSet MakeStringI64Batch(const std::string& names, int64_t* offsets, int64_t* values,
@@ -103,12 +104,12 @@ bool MaskBit(const TColumn& column, int64_t row) {
 }
 
 NQumir::NAst::TExprPtr Ident(std::string name) {
-    return std::make_shared<NQumir::NAst::TIdentExpr>(
+    return NQumir::MakeIntrusive<NQumir::NAst::TIdentExpr>(
         NQumir::TLocation{}, std::move(name));
 }
 
 std::vector<std::string> FieldNames(const NQumir::NAst::TTypePtr& type) {
-    auto* st = static_cast<NQumir::NAst::TStructType*>(type.get());
+    auto* st = static_cast<const NQumir::NAst::TStructType*>(type);
     std::vector<std::string> names;
     if (!st) {
         return names;
@@ -122,7 +123,7 @@ std::vector<std::string> FieldNames(const NQumir::NAst::TTypePtr& type) {
 } // namespace
 
 TEST(SortPlan, BuildPlanWrapsOrderByAfterProjection) {
-    auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
+    auto i64 = TestTypes().MakeInteger();
     NQdb::TMockSource source(TMockColumns{}, {{"a", i64}, {"b", i64}});
     auto plan = BuildSqlPlan("SELECT a AS k FROM t ORDER BY k DESC NULLS LAST", source);
     ASSERT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
@@ -141,7 +142,7 @@ TEST(SortPlan, BuildPlanWrapsOrderByAfterProjection) {
 }
 
 TEST(SortPlan, BuildPlanKeepsLimitAboveSort) {
-    auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
+    auto i64 = TestTypes().MakeInteger();
     NQdb::TMockSource source(TMockColumns{}, {{"a", i64}, {"b", i64}});
     auto plan = BuildSqlPlan("SELECT a FROM t ORDER BY a LIMIT 3", source);
     ASSERT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
@@ -157,12 +158,12 @@ TEST(SortPlan, BuildPlanKeepsLimitAboveSort) {
 }
 
 TEST(SortPlan, TopSortPassRewritesLimitOverSort) {
-    auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
+    auto i64 = TestTypes().MakeInteger();
     NQdb::TMockSource source(TMockColumns{}, {{"a", i64}, {"b", i64}});
     auto plan = BuildSqlPlan("SELECT a FROM t ORDER BY a DESC LIMIT 3", source);
     ASSERT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
 
-    auto optimized = ApplyTopSort(*plan);
+    auto optimized = ApplyTopSort(TestTypes(), *plan);
 
     auto topSort = TMaybeOp<TTopSortOperator>(optimized);
     ASSERT_TRUE(topSort);
@@ -175,15 +176,15 @@ TEST(SortPlan, TopSortPassRewritesLimitOverSort) {
 }
 
 TEST(SortPlan, LimitPushdownEnablesTopSortThroughStripProjection) {
-    auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
+    auto i64 = TestTypes().MakeInteger();
     NQdb::TMockSource source(TMockColumns{}, {{"a", i64}, {"b", i64}});
     auto plan = BuildSqlPlan("SELECT a FROM t ORDER BY b LIMIT 3", source);
     ASSERT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
 
     ASSERT_TRUE(TMaybeOp<TLimitOperator>(*plan));
 
-    auto pushed = PushDownLimits(*plan);
-    auto optimized = ApplyTopSort(pushed);
+    auto pushed = PushDownLimits(TestTypes(), *plan);
+    auto optimized = ApplyTopSort(TestTypes(), pushed);
 
     auto project = TMaybeOp<TProjectOperator>(optimized);
     ASSERT_TRUE(project);
@@ -193,28 +194,28 @@ TEST(SortPlan, LimitPushdownEnablesTopSortThroughStripProjection) {
 }
 
 TEST(SortPlan, LimitPushdownStaysAboveOtherOperators) {
-    auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
+    auto i64 = TestTypes().MakeInteger();
     NQdb::TMockSource source(TMockColumns{}, {{"a", i64}});
     auto plan = BuildSqlPlan("SELECT a FROM t", source);
     ASSERT_TRUE(plan.has_value());
-    auto filter = MakeFilter(*plan, "(> a 0)");
+    auto filter = MakeFilter(TestTypes(), *plan, "(> a 0)");
     ASSERT_TRUE(filter.has_value());
 
     std::vector<TSortKey> sortKeys{{.Column = "a"}};
     std::vector<TOperatorPtr> barriers = {
         *filter,
-        std::make_shared<TJoinOperator>(
+        NQumir::MakeIntrusive<TJoinOperator>(TestTypes(),
             *plan, *plan, std::vector<TJoinKey>{{"a", "a"}}, EJoinType::LeftSemi, nullptr),
-        std::make_shared<TAggregateOperator>(
+        NQumir::MakeIntrusive<TAggregateOperator>(TestTypes(),
             *plan, std::vector<std::string>{"a"}, std::vector<TAggregateSpec>{}),
-        std::make_shared<TSortOperator>(*plan, sortKeys),
-        std::make_shared<TTopSortOperator>(*plan, sortKeys, 8),
-        std::make_shared<TLimitOperator>((*plan)->Inputs().front(), 7, 1),
-        std::make_shared<TUnionAllOperator>(std::vector<TOperatorPtr>{*plan, *plan}),
-        std::make_shared<TWindowOperator>(
+        NQumir::MakeIntrusive<TSortOperator>(TestTypes(), *plan, sortKeys),
+        NQumir::MakeIntrusive<TTopSortOperator>(TestTypes(), *plan, sortKeys, 8),
+        NQumir::MakeIntrusive<TLimitOperator>(TestTypes(), (*plan)->Inputs().front(), 7, 1),
+        NQumir::MakeIntrusive<TUnionAllOperator>(TestTypes(), std::vector<TOperatorPtr>{*plan, *plan}),
+        NQumir::MakeIntrusive<TWindowOperator>(TestTypes(),
             *plan, std::vector<std::string>{}, sortKeys, std::nullopt,
             std::vector<TWindowFunc>{{.Name = "r", .Func = "rank"}}),
-        std::make_shared<TLateMaterializeOperator>(
+        NQumir::MakeIntrusive<TLateMaterializeOperator>(TestTypes(),
             *plan, "a", std::vector<TLateMaterializeColumn>{
                 {.PhysicalName = "a", .OutputName = "a", .Type = i64},
             }),
@@ -222,8 +223,8 @@ TEST(SortPlan, LimitPushdownStaysAboveOtherOperators) {
 
     for (const auto& barrier : barriers) {
         SCOPED_TRACE(barrier->RelName());
-        auto limit = std::make_shared<TLimitOperator>(barrier, 3, 2);
-        auto optimized = PushDownLimits(limit);
+        auto limit = NQumir::MakeIntrusive<TLimitOperator>(TestTypes(), barrier, 3, 2);
+        auto optimized = PushDownLimits(TestTypes(), limit);
         ASSERT_EQ(optimized, limit);
         EXPECT_EQ(limit->Input(), barrier);
         EXPECT_EQ(limit->Limit(), 3);
@@ -232,18 +233,18 @@ TEST(SortPlan, LimitPushdownStaysAboveOtherOperators) {
 }
 
 TEST(SortPlan, LimitAndTopSortPassesTraverseUnionUnderTopSort) {
-    auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
+    auto i64 = TestTypes().MakeInteger();
     NQdb::TMockSource source(TMockColumns{}, {{"a", i64}, {"b", i64}});
     auto first = BuildSqlPlan("SELECT a FROM t ORDER BY b LIMIT 3", source);
     auto second = BuildSqlPlan("SELECT a FROM t ORDER BY b LIMIT 5", source);
     ASSERT_TRUE(first.has_value());
     ASSERT_TRUE(second.has_value());
 
-    auto unionAll = std::make_shared<TUnionAllOperator>(
+    auto unionAll = NQumir::MakeIntrusive<TUnionAllOperator>(TestTypes(),
         std::vector<TOperatorPtr>{*first, *second});
-    auto root = std::make_shared<TTopSortOperator>(
+    auto root = NQumir::MakeIntrusive<TTopSortOperator>(TestTypes(),
         unionAll, std::vector<TSortKey>{{.Column = "a"}}, 2);
-    auto optimized = ApplyTopSort(PushDownLimits(root));
+    auto optimized = ApplyTopSort(TestTypes(), PushDownLimits(TestTypes(), root));
 
     ASSERT_EQ(optimized, root);
     ASSERT_EQ(root->Input(), unionAll);
@@ -262,14 +263,14 @@ TEST(SortPlan, LimitAndTopSortPassesTraverseUnionUnderTopSort) {
 }
 
 TEST(SortPlan, QualifyColumnsUpdatesTopSortKeys) {
-    auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
+    auto i64 = TestTypes().MakeInteger();
     NQdb::TMockSource source(TMockColumns{}, {{"s_name", i64}});
-    auto sourceOp = std::make_shared<TSourceOperator>(Borrow(source), "supplier.parquet");
-    auto aggregate = std::make_shared<TAggregateOperator>(
+    auto sourceOp = NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(source), "supplier.parquet");
+    auto aggregate = NQumir::MakeIntrusive<TAggregateOperator>(TestTypes(),
         sourceOp,
         std::vector<std::string>{"s_name"},
         std::vector<TAggregateSpec>{{.Name = "numwait", .Func = "count"}});
-    auto topSort = std::make_shared<TTopSortOperator>(
+    auto topSort = NQumir::MakeIntrusive<TTopSortOperator>(TestTypes(),
         aggregate,
         std::vector<TSortKey>{
             {.Column = "numwait", .Direction = ESortDirection::Desc},
@@ -277,8 +278,8 @@ TEST(SortPlan, QualifyColumnsUpdatesTopSortKeys) {
         },
         100);
 
-    AssignSourceAliases(topSort);
-    QualifyColumns(topSort);
+    AssignSourceAliases(TestTypes(), topSort);
+    QualifyColumns(TestTypes(), topSort);
 
     ASSERT_EQ(aggregate->GroupKeys().size(), 1u);
     EXPECT_EQ(aggregate->GroupKeys()[0], "supplier.s_name");
@@ -288,7 +289,7 @@ TEST(SortPlan, QualifyColumnsUpdatesTopSortKeys) {
 }
 
 TEST(SortPlan, BuildPlanSortsOrderByExpressionViaHiddenColumn) {
-    auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
+    auto i64 = TestTypes().MakeInteger();
     NQdb::TMockSource source(TMockColumns{}, {{"a", i64}, {"b", i64}});
     auto plan = BuildSqlPlan("SELECT a FROM t ORDER BY a + b", source);
     ASSERT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
@@ -313,7 +314,7 @@ TEST(SortPlan, BuildPlanSortsOrderByExpressionViaHiddenColumn) {
 }
 
 TEST(SortPlan, BuildPlanRejectsOrderByAggregateMissingFromSelectList) {
-    auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
+    auto i64 = TestTypes().MakeInteger();
     NQdb::TMockSource source(TMockColumns{}, {{"a", i64}, {"b", i64}});
     // The item is rejected without lowering its aggregate, so a malformed one
     // reports the same error.
@@ -329,7 +330,7 @@ TEST(SortPlan, BuildPlanRejectsOrderByAggregateMissingFromSelectList) {
 TEST(SortPlan, OrderByInputNameReusesSelectedGroupKey) {
     // ORDER BY on an unqualified name of a qualified group key binds as the SELECT
     // list does, so it sorts on the selected output instead of a hidden column.
-    auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
+    auto i64 = TestTypes().MakeInteger();
     NQdb::TMockSource source(TMockColumns{}, {{"a", i64}, {"b", i64}});
     auto plan = BuildSqlPlan(
         "SELECT d1.a AS x, count(*) AS c FROM t d1 GROUP BY d1.a ORDER BY a", source);
@@ -342,7 +343,7 @@ TEST(SortPlan, OrderByInputNameReusesSelectedGroupKey) {
 }
 
 TEST(SortPlan, GroupByExpressionMaterializesKeyAndSubstitutesRefs) {
-    auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
+    auto i64 = TestTypes().MakeInteger();
     NQdb::TMockSource source(TMockColumns{}, {{"a", i64}, {"b", i64}});
     auto plan = BuildSqlPlan(
         "SELECT a + b AS k, count(*) AS c FROM t GROUP BY a + b HAVING a + b > 5", source);
@@ -367,13 +368,13 @@ TEST(SortPlan, GroupByExpressionMaterializesKeyAndSubstitutesRefs) {
     EXPECT_EQ(NQumir::NAst::NCore::PrintAst(keyProject.Cast()->Projections()[0].Expression), "(+ |t.a| |t.b|)");
 
     // full name/type resolution succeeds: no dangling base columns above the aggregate
-    AssignSourceAliases(*plan);
-    QualifyColumns(*plan);
-    EXPECT_NO_THROW(AnnotateTypes(*plan));
+    AssignSourceAliases(TestTypes(), *plan);
+    QualifyColumns(TestTypes(), *plan);
+    EXPECT_NO_THROW(AnnotateTypes(TestTypes(), *plan));
 }
 
 TEST(SortPlan, GroupBySelectAliasMaterializesAliasedExpression) {
-    auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
+    auto i64 = TestTypes().MakeInteger();
     NQdb::TMockSource source(TMockColumns{}, {{"a", i64}, {"b", i64}});
     auto plan = BuildSqlPlan(
         "SELECT a + b AS k, count(*) AS c FROM t src GROUP BY k", source);
@@ -399,13 +400,13 @@ TEST(SortPlan, GroupBySelectAliasMaterializesAliasedExpression) {
             keyProject.Cast()->Projections()[0].Expression),
         "(+ |src.a| |src.b|)");
 
-    AssignSourceAliases(*plan);
-    QualifyColumns(*plan);
-    EXPECT_NO_THROW(AnnotateTypes(*plan));
+    AssignSourceAliases(TestTypes(), *plan);
+    QualifyColumns(TestTypes(), *plan);
+    EXPECT_NO_THROW(AnnotateTypes(TestTypes(), *plan));
 }
 
 TEST(SortPlan, GroupByColumnAliasUsesInputColumnDirectly) {
-    auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
+    auto i64 = TestTypes().MakeInteger();
     NQdb::TMockSource source(TMockColumns{}, {{"a", i64}});
     auto plan = BuildSqlPlan(
         "SELECT a AS k, count(*) AS c FROM t GROUP BY k", source);
@@ -418,13 +419,13 @@ TEST(SortPlan, GroupByColumnAliasUsesInputColumnDirectly) {
     EXPECT_EQ(aggregate.Cast()->GroupKeys(), (std::vector<std::string>{"t.a"}));
     EXPECT_TRUE(TMaybeOp<TSourceOperator>(aggregate.Cast()->Input()));
 
-    AssignSourceAliases(*plan);
-    QualifyColumns(*plan);
-    EXPECT_NO_THROW(AnnotateTypes(*plan));
+    AssignSourceAliases(TestTypes(), *plan);
+    QualifyColumns(TestTypes(), *plan);
+    EXPECT_NO_THROW(AnnotateTypes(TestTypes(), *plan));
 }
 
 TEST(SortPlan, GroupByDropsConstantFromCompositeKey) {
-    auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
+    auto i64 = TestTypes().MakeInteger();
     NQdb::TMockSource source(TMockColumns{}, {{"url", i64}});
     auto plan = BuildSqlPlan(
         "SELECT 1, url, count(*) AS c FROM t GROUP BY 1, url", source);
@@ -442,13 +443,13 @@ TEST(SortPlan, GroupByDropsConstantFromCompositeKey) {
     EXPECT_EQ(aggregate.Cast()->GroupKeys(), (std::vector<std::string>{"t.url"}));
     EXPECT_TRUE(TMaybeOp<TSourceOperator>(aggregate.Cast()->Input()));
 
-    AssignSourceAliases(*plan);
-    QualifyColumns(*plan);
-    EXPECT_NO_THROW(AnnotateTypes(*plan));
+    AssignSourceAliases(TestTypes(), *plan);
+    QualifyColumns(TestTypes(), *plan);
+    EXPECT_NO_THROW(AnnotateTypes(TestTypes(), *plan));
 }
 
 TEST(SortPlan, GroupByDropsAffineKeysDeterminedByRetainedColumn) {
-    auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
+    auto i64 = TestTypes().MakeInteger();
     NQdb::TMockSource source(TMockColumns{}, {{"client_ip", i64}});
     auto plan = BuildSqlPlan(
         "SELECT client_ip, client_ip - 1, client_ip - 2, client_ip - 3, "
@@ -471,13 +472,13 @@ TEST(SortPlan, GroupByDropsAffineKeysDeterminedByRetainedColumn) {
         (std::vector<std::string>{"t.client_ip"}));
     EXPECT_TRUE(TMaybeOp<TSourceOperator>(aggregate.Cast()->Input()));
 
-    AssignSourceAliases(*plan);
-    QualifyColumns(*plan);
-    EXPECT_NO_THROW(AnnotateTypes(*plan));
+    AssignSourceAliases(TestTypes(), *plan);
+    QualifyColumns(TestTypes(), *plan);
+    EXPECT_NO_THROW(AnnotateTypes(TestTypes(), *plan));
 }
 
 TEST(SortPlan, GroupByKeepsAffineKeyWithoutItsBaseKey) {
-    auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
+    auto i64 = TestTypes().MakeInteger();
     NQdb::TMockSource source(TMockColumns{}, {{"client_ip", i64}});
     auto plan = BuildSqlPlan(
         "SELECT client_ip - 1, count(*) AS c FROM t GROUP BY client_ip - 1",
@@ -495,17 +496,17 @@ TEST(SortPlan, GroupByKeepsAffineKeyWithoutItsBaseKey) {
 TEST(SortPlan, ColumnPruningKeepsSortKeyColumns) {
     using namespace NQumir::NAst;
 
-    auto i64 = std::make_shared<TIntegerType>();
+    auto i64 = TestTypes().MakeInteger();
     NQdb::TMockSource source(TMockColumns{}, {{"a", i64}, {"b", i64}, {"c", i64}});
-    auto sourceOp = std::make_shared<TSourceOperator>(Borrow(source), "t");
-    auto sort = std::make_shared<TSortOperator>(sourceOp, std::vector<TSortKey>{
+    auto sourceOp = NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(source), "t");
+    auto sort = NQumir::MakeIntrusive<TSortOperator>(TestTypes(), sourceOp, std::vector<TSortKey>{
         {.Column = "b", .Direction = ESortDirection::Asc},
     });
-    auto project = std::make_shared<TProjectOperator>(sort, std::vector<TProjectionSpec>{
+    auto project = NQumir::MakeIntrusive<TProjectOperator>(TestTypes(), sort, std::vector<TProjectionSpec>{
         {.Name = "a", .Expression = Ident("a")},
     });
 
-    ApplyColumnPruning(project);
+    ApplyColumnPruning(TestTypes(), project);
 
     EXPECT_EQ(FieldNames(sourceOp->OutputColumns()), (std::vector<std::string>{"a", "b"}));
     EXPECT_EQ(FieldNames(sort->RequiredColumns()), (std::vector<std::string>{"a", "b"}));
@@ -526,15 +527,15 @@ TEST(SortExec, SortsStringAndNumericKeysAcrossBatches) {
     std::vector<TColumn> columns2;
     TRowSet batch2 = MakeStringI64Batch(data2, offsets2, values2, 2, columns2);
 
-    auto str = std::make_shared<TStringType>();
-    auto i64 = std::make_shared<TIntegerType>();
+    auto str = TestTypes().Make<TStringType>();
+    auto i64 = TestTypes().MakeInteger();
     NQdb::TMockSource source(
         TMockColumns{},
         {{"name", str}, {"score", i64}},
         {batch1, batch2});
 
-    auto sourceOp = std::make_shared<TSourceOperator>(Borrow(source), "t");
-    auto root = std::make_shared<TSortOperator>(sourceOp, std::vector<TSortKey>{
+    auto sourceOp = NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(source), "t");
+    auto root = NQumir::MakeIntrusive<TSortOperator>(TestTypes(), sourceOp, std::vector<TSortKey>{
         {.Column = "name", .Direction = ESortDirection::Asc},
         {.Column = "score", .Direction = ESortDirection::Desc},
     });
@@ -569,14 +570,14 @@ TEST(SortExec, SortsCompositeNumericKeysWithFusedRadixKernel) {
     std::vector<TColumn> columns2;
     TRowSet batch2 = MakeI64I64Batch(a2, b2, 2, columns2);
 
-    auto i64 = std::make_shared<TIntegerType>();
+    auto i64 = TestTypes().MakeInteger();
     NQdb::TMockSource source(
         TMockColumns{},
         {{"a", i64}, {"b", i64}},
         {batch1, batch2});
 
-    auto sourceOp = std::make_shared<TSourceOperator>(Borrow(source), "t");
-    auto root = std::make_shared<TSortOperator>(sourceOp, std::vector<TSortKey>{
+    auto sourceOp = NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(source), "t");
+    auto root = NQumir::MakeIntrusive<TSortOperator>(TestTypes(), sourceOp, std::vector<TSortKey>{
         {.Column = "a", .Direction = ESortDirection::Asc},
         {.Column = "b", .Direction = ESortDirection::Desc},
     });
@@ -619,19 +620,19 @@ std::vector<int64_t> SortFloatKeyPayload(const char* sql, bool topSort) {
     TRowSet batch1{.Columns = columns1.data(), .ColumnCount = 2, .RowCount = 5, .RefCount = 1};
     TRowSet batch2{.Columns = columns2.data(), .ColumnCount = 2, .RowCount = 4, .RefCount = 1};
 
-    auto floatType = std::make_shared<TFloatType>(
+    auto floatType = TestTypes().MakeFloat(
         sizeof(TFloat) == 4 ? TFloatType::F32 : TFloatType::F64);
     NQdb::TMockSource source(
         TMockColumns{},
-        {{"k", std::make_shared<TNullable>(floatType)},
-         {"payload", std::make_shared<TIntegerType>()}},
+        {{"k", MakeNullableType(TestTypes(), floatType)},
+         {"payload", TestTypes().MakeInteger()}},
         {batch1, batch2});
     auto plan = BuildSqlPlan(sql, source);
     EXPECT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
     if (!plan) {
         return {};
     }
-    auto root = topSort ? ApplyTopSort(*plan) : *plan;
+    auto root = topSort ? ApplyTopSort(TestTypes(), *plan) : *plan;
     auto runtime = RunPlan(root);
 
     std::vector<int64_t> result;
@@ -685,14 +686,14 @@ TEST(SortExec, SchedulerRuntimeRunsSortTail) {
     std::vector<TColumn> columns2;
     TRowSet batch2 = MakeI64I64Batch(a2, b2, 2, columns2);
 
-    auto i64 = std::make_shared<TIntegerType>();
+    auto i64 = TestTypes().MakeInteger();
     NQdb::TMockSource source(
         TMockColumns{},
         {{"a", i64}, {"b", i64}},
         {batch1, batch2});
 
-    auto sourceOp = std::make_shared<TSourceOperator>(Borrow(source), "t");
-    auto root = std::make_shared<TSortOperator>(sourceOp, std::vector<TSortKey>{
+    auto sourceOp = NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(source), "t");
+    auto root = NQumir::MakeIntrusive<TSortOperator>(TestTypes(), sourceOp, std::vector<TSortKey>{
         {.Column = "a", .Direction = ESortDirection::Asc},
         {.Column = "b", .Direction = ESortDirection::Desc},
     });
@@ -722,14 +723,14 @@ TEST(SortExec, TopSortReturnsLimitFromOneBatch) {
     std::vector<TColumn> columns;
     TRowSet batch = MakeI64I64Batch(keys, payload, 4, columns);
 
-    auto i64 = std::make_shared<TIntegerType>();
+    auto i64 = TestTypes().MakeInteger();
     NQdb::TMockSource source(
         TMockColumns{},
         {{"k", i64}, {"payload", i64}},
         {batch});
     auto plan = BuildSqlPlan("SELECT k, payload FROM t ORDER BY k LIMIT 2", source);
     ASSERT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
-    auto optimized = ApplyTopSort(*plan);
+    auto optimized = ApplyTopSort(TestTypes(), *plan);
     ASSERT_TRUE(TMaybeOp<TTopSortOperator>(optimized));
 
     auto runtime = RunPlan(optimized);
@@ -756,13 +757,13 @@ TEST(SortExec, SchedulerRuntimeRunsTopSortTail) {
     std::vector<TColumn> columns;
     TRowSet batch = MakeI64I64Batch(keys, payload, 4, columns);
 
-    auto i64 = std::make_shared<TIntegerType>();
+    auto i64 = TestTypes().MakeInteger();
     NQdb::TMockSource source(
         TMockColumns{},
         {{"k", i64}, {"payload", i64}},
         {batch});
-    auto sourceOp = std::make_shared<TSourceOperator>(Borrow(source), "t");
-    auto root = std::make_shared<TTopSortOperator>(
+    auto sourceOp = NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(source), "t");
+    auto root = NQumir::MakeIntrusive<TTopSortOperator>(TestTypes(),
         sourceOp,
         std::vector<TSortKey>{
             {.Column = "k", .Direction = ESortDirection::Asc},
@@ -794,14 +795,14 @@ TEST(SortExec, TopSortHonorsDescDirection) {
     std::vector<TColumn> columns;
     TRowSet batch = MakeI64I64Batch(keys, payload, 4, columns);
 
-    auto i64 = std::make_shared<TIntegerType>();
+    auto i64 = TestTypes().MakeInteger();
     NQdb::TMockSource source(
         TMockColumns{},
         {{"k", i64}, {"payload", i64}},
         {batch});
     auto plan = BuildSqlPlan("SELECT k, payload FROM t ORDER BY k DESC LIMIT 2", source);
     ASSERT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
-    auto optimized = ApplyTopSort(*plan);
+    auto optimized = ApplyTopSort(TestTypes(), *plan);
     ASSERT_TRUE(TMaybeOp<TTopSortOperator>(optimized));
 
     auto runtime = RunPlan(optimized);
@@ -831,14 +832,14 @@ TEST(SortExec, TopSortMergesBatchesStably) {
     std::vector<TColumn> columns2;
     TRowSet batch2 = MakeI64I64Batch(k2, p2, 3, columns2);
 
-    auto i64 = std::make_shared<TIntegerType>();
+    auto i64 = TestTypes().MakeInteger();
     NQdb::TMockSource source(
         TMockColumns{},
         {{"k", i64}, {"payload", i64}},
         {batch1, batch2});
     auto plan = BuildSqlPlan("SELECT k, payload FROM t ORDER BY k LIMIT 5", source);
     ASSERT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
-    auto optimized = ApplyTopSort(*plan);
+    auto optimized = ApplyTopSort(TestTypes(), *plan);
     ASSERT_TRUE(TMaybeOp<TTopSortOperator>(optimized));
 
     auto runtime = RunPlan(optimized);
@@ -878,13 +879,13 @@ TEST(SortExec, HeapTopSortMergesReducedBatchesStably) {
     TRowSet batch2 = MakeI64I64Batch(
         keys2.data(), payload2.data(), batchRows, columns2);
 
-    auto i64 = std::make_shared<TIntegerType>();
+    auto i64 = TestTypes().MakeInteger();
     NQdb::TMockSource source(
         TMockColumns{},
         {{"k", i64}, {"payload", i64}},
         {batch1, batch2});
-    auto sourceOp = std::make_shared<TSourceOperator>(Borrow(source), "t");
-    auto root = std::make_shared<TTopSortOperator>(
+    auto sourceOp = NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(source), "t");
+    auto root = NQumir::MakeIntrusive<TTopSortOperator>(TestTypes(),
         sourceOp,
         std::vector<TSortKey>{
             {.Column = "k", .Direction = ESortDirection::Asc},
@@ -932,15 +933,15 @@ TEST(SortExec, TopSortHandlesNullableNumericKeys) {
         .RefCount = 1,
     };
 
-    auto i64 = std::make_shared<TIntegerType>();
+    auto i64 = TestTypes().MakeInteger();
     NQdb::TMockSource source(
         TMockColumns{},
-        {{"k", std::make_shared<TNullable>(i64)}, {"payload", i64}},
+        {{"k", MakeNullableType(TestTypes(), i64)}, {"payload", i64}},
         {batch});
     auto plan = BuildSqlPlan(
         "SELECT k, payload FROM t ORDER BY k NULLS FIRST LIMIT 3", source);
     ASSERT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
-    auto optimized = ApplyTopSort(*plan);
+    auto optimized = ApplyTopSort(TestTypes(), *plan);
     ASSERT_TRUE(TMaybeOp<TTopSortOperator>(optimized));
 
     auto runtime = RunPlan(optimized);
@@ -961,11 +962,11 @@ TEST(SortExec, TopSortHandlesNullableNumericKeys) {
 TEST(SortExec, EmptyInputProducesNoRows) {
     using namespace NQumir::NAst;
 
-    auto i64 = std::make_shared<TIntegerType>();
+    auto i64 = TestTypes().MakeInteger();
     NQdb::TMockSource source(TMockColumns{}, {{"a", i64}}, {});
 
-    auto sourceOp = std::make_shared<TSourceOperator>(Borrow(source), "t");
-    auto root = std::make_shared<TSortOperator>(sourceOp, std::vector<TSortKey>{
+    auto sourceOp = NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(source), "t");
+    auto root = NQumir::MakeIntrusive<TSortOperator>(TestTypes(), sourceOp, std::vector<TSortKey>{
         {.Column = "a", .Direction = ESortDirection::Asc},
     });
 
@@ -983,14 +984,14 @@ TEST(SortExec, AllEqualNumericKeysKeepInputOrderWithRadixKernel) {
     std::vector<TColumn> columns;
     TRowSet batch = MakeI64I64Batch(keys, payload, 4, columns);
 
-    auto i64 = std::make_shared<TIntegerType>();
+    auto i64 = TestTypes().MakeInteger();
     NQdb::TMockSource source(
         TMockColumns{},
         {{"k", i64}, {"payload", i64}},
         {batch});
 
-    auto sourceOp = std::make_shared<TSourceOperator>(Borrow(source), "t");
-    auto root = std::make_shared<TSortOperator>(sourceOp, std::vector<TSortKey>{
+    auto sourceOp = NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(source), "t");
+    auto root = NQumir::MakeIntrusive<TSortOperator>(TestTypes(), sourceOp, std::vector<TSortKey>{
         {.Column = "k", .Direction = ESortDirection::Desc},
     });
 
@@ -1013,17 +1014,17 @@ TEST(SortExec, ProjectionAfterSortSeesSortedRows) {
     std::vector<TColumn> columns;
     TRowSet batch = MakeI64I64Batch(a, b, 4, columns);
 
-    auto i64 = std::make_shared<TIntegerType>();
+    auto i64 = TestTypes().MakeInteger();
     NQdb::TMockSource source(
         TMockColumns{},
         {{"a", i64}, {"b", i64}},
         {batch});
 
-    auto sourceOp = std::make_shared<TSourceOperator>(Borrow(source), "t");
-    auto sort = std::make_shared<TSortOperator>(sourceOp, std::vector<TSortKey>{
+    auto sourceOp = NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(source), "t");
+    auto sort = NQumir::MakeIntrusive<TSortOperator>(TestTypes(), sourceOp, std::vector<TSortKey>{
         {.Column = "b", .Direction = ESortDirection::Asc},
     });
-    auto project = std::make_shared<TProjectOperator>(sort, std::vector<TProjectionSpec>{
+    auto project = NQumir::MakeIntrusive<TProjectOperator>(TestTypes(), sort, std::vector<TProjectionSpec>{
         {.Name = "a", .Expression = Ident("a")},
     });
 
@@ -1047,14 +1048,14 @@ TEST(SortExec, SortAfterAggregate) {
     std::vector<TColumn> columns;
     TRowSet batch = MakeI64I64Batch(keys, values, 5, columns);
 
-    auto i64 = std::make_shared<TIntegerType>();
+    auto i64 = TestTypes().MakeInteger();
     NQdb::TMockSource source(
         TMockColumns{},
         {{"k", i64}, {"v", i64}},
         {batch});
 
-    auto sourceOp = std::make_shared<TSourceOperator>(Borrow(source), "t");
-    auto aggregate = std::make_shared<TAggregateOperator>(
+    auto sourceOp = NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(source), "t");
+    auto aggregate = NQumir::MakeIntrusive<TAggregateOperator>(TestTypes(),
         sourceOp,
         std::vector<std::string>{"k"},
         std::vector<TAggregateSpec>{{
@@ -1062,7 +1063,7 @@ TEST(SortExec, SortAfterAggregate) {
             .Func = "sum",
             .Arg = Ident("v"),
         }});
-    auto sort = std::make_shared<TSortOperator>(aggregate, std::vector<TSortKey>{
+    auto sort = NQumir::MakeIntrusive<TSortOperator>(TestTypes(), aggregate, std::vector<TSortKey>{
         {.Column = "s", .Direction = ESortDirection::Desc},
     });
 
@@ -1102,17 +1103,16 @@ TEST(SortExec, MaterializesNullableDecimalPayload) {
         .RefCount = 1,
     };
 
-    auto i64 = std::make_shared<TIntegerType>();
+    auto i64 = TestTypes().MakeInteger();
     // DECIMAL(20,2) is stored in i128 (BinInt); one of p <= 18 would be a plain i64.
-    auto decimal = std::make_shared<NQdb::TNullable>(
-        std::make_shared<NQdb::TDecimal>(20, 2));
+    auto decimal = MakeNullableType(TestTypes(), MakeDecimalType(TestTypes(), {20, 2}));
     NQdb::TMockSource source(
         TMockColumns{},
         {{"k", i64}, {"amount", decimal}},
         {batch});
 
-    auto sourceOp = std::make_shared<TSourceOperator>(Borrow(source), "t");
-    auto sort = std::make_shared<TSortOperator>(sourceOp, std::vector<TSortKey>{
+    auto sourceOp = NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(source), "t");
+    auto sort = NQumir::MakeIntrusive<TSortOperator>(TestTypes(), sourceOp, std::vector<TSortKey>{
         {.Column = "k", .Direction = ESortDirection::Asc},
     });
 
@@ -1154,14 +1154,14 @@ TEST(SortExec, NullableNumericKeysUseRadixNullOrdering) {
         .RefCount = 1,
     };
 
-    auto i64 = std::make_shared<TIntegerType>();
+    auto i64 = TestTypes().MakeInteger();
     NQdb::TMockSource source(
         TMockColumns{},
-        {{"k", std::make_shared<TNullable>(i64)}, {"payload", i64}},
+        {{"k", MakeNullableType(TestTypes(), i64)}, {"payload", i64}},
         {batch});
 
-    auto sourceOp = std::make_shared<TSourceOperator>(Borrow(source), "t");
-    auto sort = std::make_shared<TSortOperator>(sourceOp, std::vector<TSortKey>{
+    auto sourceOp = NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(source), "t");
+    auto sort = NQumir::MakeIntrusive<TSortOperator>(TestTypes(), sourceOp, std::vector<TSortKey>{
         {.Column = "k", .Direction = ESortDirection::Asc, .Nulls = ESortNulls::First},
     });
 
@@ -1199,14 +1199,14 @@ TEST(SortExec, NullableNumericKeysRespectDescNullsLast) {
         .RefCount = 1,
     };
 
-    auto i64 = std::make_shared<TIntegerType>();
+    auto i64 = TestTypes().MakeInteger();
     NQdb::TMockSource source(
         TMockColumns{},
-        {{"k", std::make_shared<TNullable>(i64)}, {"payload", i64}},
+        {{"k", MakeNullableType(TestTypes(), i64)}, {"payload", i64}},
         {batch});
 
-    auto sourceOp = std::make_shared<TSourceOperator>(Borrow(source), "t");
-    auto sort = std::make_shared<TSortOperator>(sourceOp, std::vector<TSortKey>{
+    auto sourceOp = NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(source), "t");
+    auto sort = NQumir::MakeIntrusive<TSortOperator>(TestTypes(), sourceOp, std::vector<TSortKey>{
         {.Column = "k", .Direction = ESortDirection::Desc, .Nulls = ESortNulls::Last},
     });
 
@@ -1237,15 +1237,15 @@ TEST(SortExec, RespectsInputSelection) {
     std::vector<TColumn> columns;
     TRowSet batch = MakeStringI64Batch(data, offsets, values, 3, columns, selection);
 
-    auto str = std::make_shared<TStringType>();
-    auto i64 = std::make_shared<TIntegerType>();
+    auto str = TestTypes().Make<TStringType>();
+    auto i64 = TestTypes().MakeInteger();
     NQdb::TMockSource source(
         TMockColumns{},
         {{"name", str}, {"score", i64}},
         {batch});
 
-    auto sourceOp = std::make_shared<TSourceOperator>(Borrow(source), "t");
-    auto root = std::make_shared<TSortOperator>(sourceOp, std::vector<TSortKey>{
+    auto sourceOp = NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(source), "t");
+    auto root = NQumir::MakeIntrusive<TSortOperator>(TestTypes(), sourceOp, std::vector<TSortKey>{
         {.Column = "score", .Direction = ESortDirection::Asc},
     });
 

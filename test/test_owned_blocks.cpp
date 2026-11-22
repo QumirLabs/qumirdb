@@ -15,6 +15,8 @@
 #include <string>
 #include <vector>
 
+#include "test_types.h"
+
 namespace {
 
 using TArenaAllocate =
@@ -73,7 +75,7 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileOwnedBlocks(
     std::vector<NQumir::NAst::TExprPtr> functions;
     for (const char* name : {
              "owned_arena_lifecycle.oz", "owned_blocks.oz"}) {
-        auto library = NQdb::NKernel::ParseFunctionLibrary(
+        auto library = NQdb::NKernel::ParseFunctionLibrary(NQdb::TestTypes(),
             NQdb::NKernel::ReadAggregationKernel(name));
         if (!library) {
             ADD_FAILURE() << name << ": " << library.error().ToString();
@@ -81,7 +83,7 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileOwnedBlocks(
         }
         functions.insert(functions.end(), library->begin(), library->end());
     }
-    auto adapter = NQdb::NKernel::ParseFunctionLibrary(ArenaAdapterTestSource);
+    auto adapter = NQdb::NKernel::ParseFunctionLibrary(NQdb::TestTypes(), ArenaAdapterTestSource);
     if (!adapter) {
         ADD_FAILURE() << "arena adapter test: " << adapter.error().ToString();
         return {};
@@ -91,8 +93,8 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileOwnedBlocks(
     options.CoreInput = true;
     options.NativeCode = true;
     NQdb::NTest::ConfigureQumirDbSourceModule(options);
-    auto runner = std::make_unique<NQumir::TLLVMRunner>(options);
-    auto program = std::make_shared<NQumir::NAst::TBlockExpr>(
+    auto runner = std::make_unique<NQumir::TLLVMRunner>(options, nullptr, &NQdb::TestTypes());
+    auto program = NQumir::MakeIntrusive<NQumir::NAst::TBlockExpr>(
         NQumir::TLocation{}, std::move(functions));
     NQdb::NTest::AddQumirDbUse(program);
     std::string error;
@@ -241,8 +243,8 @@ TEST(OwnedBlocks, HashTableAdaptersWriteBackReallocatedRegistry) {
 }
 
 TEST(OwnedBlocks, HashTableUsesFormerScratchSlots) {
-    std::shared_ptr<NQumir::NAst::TStructType> hashTable;
-    for (const auto& type : NQumir::NRegistry::QumirDbExternalTypes()) {
+    const NQumir::NAst::TStructType* hashTable = nullptr;
+    for (const auto& type : NQumir::NRegistry::QumirDbExternalTypes(NQdb::TestTypes())) {
         if (type.Name == "HashTable") {
             hashTable = NQumir::NAst::TMaybeType<NQumir::NAst::TStructType>(
                 type.Type).Cast();

@@ -14,6 +14,7 @@
 #include <qdb/plan/ops/window.h>
 #include <qdb/plan/ops/cte_ref.h>
 #include <qdb/plan/ops/cte_consumer.h>
+#include <qdb/plan/types/type_text.h>
 
 #include <stdexcept>
 
@@ -374,7 +375,10 @@ void PrintRelPlan(std::ostream& out, const TOperatorPtr& plan) {
     }
 
     auto defs = CollectCteDefinitions(plan);
-    NQumir::NAst::NCore::TPrintOptions options{.NodePrinters = MakeRelPrinters()};
+    NQumir::NAst::NCore::TPrintOptions options{
+        .ShortNamedTypes = PlanNamedTypes(),
+        .NodePrinters = MakeRelPrinters(),
+    };
     if (defs.empty()) {
         NQumir::NAst::NCore::PrintAst(out, plan, options);
         return;

@@ -108,12 +108,12 @@ int RunDaemon(const TDaemonOptions& options, const char* pollerName)
     // Shared by planning and the compute actors' graphs.
     auto tablesCache = std::make_shared<TTableCache>();
     auto compilerFactory = [&]() {
-        auto tableFactory = [&dataDir, tablesCache](std::string_view table)
+        auto tableFactory = [&dataDir, tablesCache](NQumir::NAst::TTypeFactory& types, std::string_view table)
             -> std::expected<NQdb::TOperatorPtr, NQumir::TError>
         {
             const auto path = ResolveTablePath(dataDir, table);
             try {
-                return std::make_shared<TSourceOperator>(tablesCache->Open(path), path);
+                return NQumir::MakeIntrusive<TSourceOperator>(types, tablesCache->Open(path), path);
             } catch (const std::exception& e) {
                 return std::unexpected(NQumir::TError(
                     "cannot open table '" + std::string(table) + "': " + e.what()));

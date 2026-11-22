@@ -33,6 +33,7 @@ struct TRowGroupColumnRange {
 class TRowGroupPredicateEvaluator {
 public:
     static std::unique_ptr<TRowGroupPredicateEvaluator> Compile(
+        NQumir::NAst::TTypeFactory& types,
         const NQumir::NAst::TExprPtr& predicate,
         const TSchema& schema,
         std::string_view sourceAlias,

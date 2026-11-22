@@ -2,6 +2,7 @@
 #include <gtest/gtest.h>
 
 #include "mock_source.h"
+#include "test_types.h"
 
 #include <qdb/exec/plan_builder.h>
 #include <qdb/exec/runtime_filter.h>
@@ -44,6 +45,7 @@ public:
     using TMockSource::TMockSource;
 
     std::vector<NScheduler::TScanRowGroup> PruneRowGroups(
+        NQumir::NAst::TTypeFactory&,
         const NQumir::NAst::TExprPtr&,
         std::string_view,
         std::ostream*,
@@ -74,6 +76,7 @@ public:
     }
 
     std::vector<NScheduler::TScanRowGroup> PruneRowGroups(
+        NQumir::NAst::TTypeFactory&,
         const NQumir::NAst::TExprPtr&,
         std::string_view,
         std::ostream*,
@@ -111,11 +114,11 @@ private:
 
 TJoinOperator* FindJoin(const TOperatorPtr& node) {
     if (auto join = TMaybeOp<TJoinOperator>(node)) {
-        return join.Cast().get();
+        return join.Cast().Get();
     }
     for (const auto& child : node->Children()) {
         if (auto op = NQumir::NAst::TMaybeNode<IOperator>(child)) {
-            if (auto* join = FindJoin(op.Cast())) {
+            if (auto* join = FindJoin(TOperatorPtr(op.Cast()))) {
                 return join;
             }
         }
@@ -142,12 +145,12 @@ TOperatorPtr BuildSqlPlan(
 {
     std::istringstream input{std::string(sql)};
     NSql::TTokenStream tokens(input);
-    NSql::TParser parser;
+    NSql::TParser parser(TestTypes());
     auto parsed = parser.Parse(tokens);
     if (!parsed) {
         throw std::runtime_error(parsed.error().ToString());
     }
-    auto plan = BuildPlan(*parsed, [&](std::string_view table)
+    auto plan = BuildPlan(TestTypes(), *parsed, [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
         auto it = sources.find(std::string(table));
@@ -155,14 +158,14 @@ TOperatorPtr BuildSqlPlan(
             return std::unexpected(
                 NQumir::TError("unknown table: " + std::string(table)));
         }
-        return std::make_shared<TSourceOperator>(
-            Borrow(*it->second), std::string(table));
+        return NQumir::MakeIntrusive<TSourceOperator>(
+            types, Borrow(*it->second), std::string(table));
     });
     if (!plan) {
         throw std::runtime_error(plan.error().ToString());
     }
     auto root = *plan;
-    ApplyPlanPasses(root, std::move(passes));
+    ApplyPlanPasses(TestTypes(), root, std::move(passes));
     return root;
 }
 
@@ -216,7 +219,7 @@ TBuiltPlan Lower(
     NScheduler::TSettings settings)
 {
     auto logical = BuildSqlPlan(sql, sources);
-    auto lowered = NScheduler::LowerPlanToGraph(logical, settings, nullptr);
+    auto lowered = NScheduler::LowerPlanToGraph(logical, SharedTestTypes(), settings, nullptr);
     auto exec = BuildExecPlan(lowered);
     if (!exec) {
         throw std::runtime_error(exec.error());
@@ -360,8 +363,7 @@ TEST(ExecPlanBuilder, LowererUsesInjectedRuntimeFilterBindings) {
         std::string::npos);
 
     auto bindings = std::make_shared<TRecordingFilterBindingFactory>();
-    auto lowered = NScheduler::LowerPlanToGraph(
-        plan, MultiSettings(), nullptr, nullptr, bindings);
+    auto lowered = NScheduler::LowerPlanToGraph(plan, SharedTestTypes(), MultiSettings(), nullptr, nullptr, bindings);
     ASSERT_TRUE(lowered.Graph);
     EXPECT_EQ(bindings->Created,
         (std::vector<std::pair<uint32_t, size_t>>{{17, 4}}));
@@ -443,8 +445,7 @@ TEST(ExecPlanBuilder, RuntimeFilterStaysAfterOneSharedCteReader) {
     EXPECT_TRUE(right.Cast()->RuntimeFilterUses.empty());
     EXPECT_FALSE(HasRuntimeFilterUse(left.Cast()->Materialization()->Plan));
 
-    auto lowered = NScheduler::LowerPlanToGraph(
-        plan, MultiSettings(), nullptr);
+    auto lowered = NScheduler::LowerPlanToGraph(plan, SharedTestTypes(), MultiSettings(), nullptr);
     size_t dependencyCount = 0;
     for (const auto& edge : lowered.Graph->Edges()) {
         if (edge->Kind == NScheduler::ETaskEdgeKind::Dependency) {
@@ -488,8 +489,8 @@ TEST(ExecPlanBuilder, RuntimeFiltersShareTheQueryJit) {
     outer->MutableRuntimeFilter() = TRuntimeFilterSpec{
         .Id = 2, .BuildSide = EJoinFilterSide::Right};
 
-    auto first = NScheduler::LowerPlanToGraph(plan, MultiSettings(), nullptr);
-    auto second = NScheduler::LowerPlanToGraph(plan, MultiSettings(), nullptr);
+    auto first = NScheduler::LowerPlanToGraph(plan, SharedTestTypes(), MultiSettings(), nullptr);
+    auto second = NScheduler::LowerPlanToGraph(plan, SharedTestTypes(), MultiSettings(), nullptr);
     ASSERT_EQ(first.RuntimeFilters.size(), 2u);
     EXPECT_EQ(std::ranges::count(first.Kernels, "runtime-filter",
         &TGeneratedKernel::Name), 1);
@@ -503,7 +504,7 @@ TEST(ExecPlanBuilder, RuntimeFiltersShareTheQueryJit) {
     EXPECT_NE(filter->RuntimeContext, secondFilter->RuntimeContext);
     EXPECT_FALSE(filter->Slot->Runner);
 
-    FinalizeKernels(first.Kernels, EKernelBackend::Llvm);
+    FinalizeKernels(first.Kernels, SharedTestTypes(), EKernelBackend::Llvm);
     ASSERT_TRUE(filter->Slot->Runner);
     for (const auto& kernel : first.Kernels) {
         EXPECT_EQ(kernel.Slot->Runner, filter->Slot->Runner);
@@ -525,7 +526,7 @@ TEST(ExecPlanBuilder, RejectsDuplicateRuntimeFilterProducerIds) {
         .Id = 7, .BuildSide = EJoinFilterSide::Right};
     outer->MutableRuntimeFilter() = TRuntimeFilterSpec{
         .Id = 7, .BuildSide = EJoinFilterSide::Right};
-    EXPECT_THROW(NScheduler::LowerPlanToGraph(plan, SingleSettings(), nullptr),
+    EXPECT_THROW(NScheduler::LowerPlanToGraph(plan, SharedTestTypes(), SingleSettings(), nullptr),
         std::runtime_error);
 }
 
@@ -580,8 +581,8 @@ TEST(ExecPlanBuilder, CrossJoinResidualPreservesBothInputSchemas) {
         auto output = NQumir::NAst::TMaybeType<NQumir::NAst::TStructType>(
             residual->OutputType);
         ASSERT_TRUE(output);
-        EXPECT_TRUE(FieldType(output.Cast().get(), "l.lv"));
-        EXPECT_TRUE(FieldType(output.Cast().get(), "r.rv"));
+        EXPECT_TRUE(FieldType(output.Cast(), "l.lv"));
+        EXPECT_TRUE(FieldType(output.Cast(), "r.rv"));
     }
 }
 
@@ -593,7 +594,7 @@ TEST(ExecPlanBuilder, LoweringRecordsSpecsForSupportedNodeKinds) {
     };
     auto plan = BuildSqlPlan(
         "SELECT r.rv, count(*) AS n FROM l, r WHERE r.rv > l.lv GROUP BY r.rv", sources);
-    auto lowered = NScheduler::LowerPlanToGraph(plan, MultiSettings(), nullptr);
+    auto lowered = NScheduler::LowerPlanToGraph(plan, SharedTestTypes(), MultiSettings(), nullptr);
     TCollectSink sink;
     NScheduler::AttachSink(lowered, sink);
 
@@ -669,11 +670,11 @@ std::vector<std::string> ExpectQueryFromSpec(
     const std::unordered_map<std::string, ITable*> sources{{"t", source.get()}};
     auto plan = BuildSqlPlan(sql, sources, std::move(passes));
     auto lowered = std::make_unique<NScheduler::TLoweredPlan>(
-        NScheduler::LowerPlanToGraph(plan, settings, nullptr));
+        NScheduler::LowerPlanToGraph(plan, SharedTestTypes(), settings, nullptr));
 
     // The schema's column names point into the output type.
     const auto outputType = lowered->OutputType;
-    const auto& fields = static_cast<NQumir::NAst::TStructType&>(*outputType).Fields;
+    const auto& fields = static_cast<const NQumir::NAst::TStructType&>(*outputType).Fields;
     std::vector<TColumnSchema> columns;
     for (const auto& [name, type] : fields) {
         columns.push_back({.Name = name, .Type = type});
@@ -700,7 +701,7 @@ std::vector<std::string> ExpectQueryFromSpec(
     const auto decoded = NScheduler::DeserializeGraphSpec(bytes);
     EXPECT_EQ(NScheduler::SerializeGraphSpec(decoded), bytes);
 
-    FinalizeKernels(lowered->Kernels, settings.Kernel.Backend);
+    FinalizeKernels(lowered->Kernels, SharedTestTypes(), settings.Kernel.Backend);
     std::vector<std::shared_ptr<TKernelSlot>> slots;
     for (const auto& kernel : lowered->Kernels) {
         slots.push_back(kernel.Slot);
@@ -708,7 +709,7 @@ std::vector<std::string> ExpectQueryFromSpec(
     const auto expected = RunCsv(*lowered->Graph, originalOut, settings, ordered);
 
     lowered.reset();
-    plan.reset();
+    plan = nullptr;
     source.reset();
 
     for (const auto& runSettings : {MultiSettings(), SingleSettings()}) {

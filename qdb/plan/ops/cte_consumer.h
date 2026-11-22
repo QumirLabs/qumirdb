@@ -22,7 +22,7 @@ class TCteConsumer : public IOperator {
 public:
     static constexpr const char* OpId = "cte-consumer";
 
-    TCteConsumer(TCteDefinitionPtr def, TCteMaterializationPtr materialization);
+    TCteConsumer(NQumir::NAst::TTypeFactory& types, TCteDefinitionPtr def, TCteMaterializationPtr materialization);
 
     std::string_view RelName() const override { return OpId; }
     std::vector<TColumnReference> ColumnReferences() const override { return {}; }

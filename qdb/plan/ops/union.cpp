@@ -4,7 +4,7 @@ namespace NQdb {
 
 using namespace NQumir::NAst;
 
-TUnionAllOperator::TUnionAllOperator(std::vector<TOperatorPtr> inputs)
+TUnionAllOperator::TUnionAllOperator(NQumir::NAst::TTypeFactory& types, std::vector<TOperatorPtr> inputs)
     : Inputs_(std::move(inputs))
 {
     std::vector<TTypePtr> paramTypes;
@@ -13,7 +13,7 @@ TUnionAllOperator::TUnionAllOperator(std::vector<TOperatorPtr> inputs)
         paramTypes.push_back(input->OutputColumns());
     }
     auto output = Inputs_.empty() ? nullptr : Inputs_[0]->OutputColumns();
-    Type = std::make_shared<TFunctionType>(std::move(paramTypes), std::move(output));
+    Type = types.MakeFunction(std::move(paramTypes), std::move(output));
 }
 
 std::unordered_set<std::string> TUnionAllOperator::RequiredColumnsForChild(

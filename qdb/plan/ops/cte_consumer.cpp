@@ -7,11 +7,11 @@
 
 namespace NQdb {
 
-TCteConsumer::TCteConsumer(TCteDefinitionPtr def, TCteMaterializationPtr materialization)
+TCteConsumer::TCteConsumer(NQumir::NAst::TTypeFactory& types, TCteDefinitionPtr def, TCteMaterializationPtr materialization)
     : Def_(std::move(def))
     , Materialization_(std::move(materialization))
 {
-    Type = std::make_shared<NQumir::NAst::TFunctionType>(
+    Type = types.MakeFunction(
         std::vector<NQumir::NAst::TTypePtr>{}, Materialization_->Plan->OutputColumns());
 }
 

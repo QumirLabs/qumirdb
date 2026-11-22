@@ -3,6 +3,7 @@
 #include <qdb/kernel/aggregate_key.h>
 
 #include <qumir/parser/type.h>
+#include <qumir/parser/type_factory.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -20,9 +21,9 @@ struct TJoinKeyField {
     std::string RightColumnName;
     int32_t LeftColumnIndex = -1;
     int32_t RightColumnIndex = -1;
-    NQumir::NAst::TTypePtr Type;       // inner (Nullable stripped), shared by both sides
-    NQumir::NAst::TTypePtr LookupType;
-    NQumir::NAst::TTypePtr StoredType;
+    NQumir::NAst::TTypePtr Type = nullptr;       // inner (Nullable stripped), shared by both sides
+    NQumir::NAst::TTypePtr LookupType = nullptr;
+    NQumir::NAst::TTypePtr StoredType = nullptr;
     bool IsNullable = false;           // left.Nullable || right.Nullable (unified)
     bool NullsEqual = false;
     size_t Offset = 0;
@@ -37,9 +38,9 @@ struct TJoinKeyDescriptor {
     std::string TypeName;
     std::string LookupTypeName;
     std::string StoredTypeName;
-    NQumir::NAst::TTypePtr KeyType; // == StoredType
-    NQumir::NAst::TTypePtr LookupType;
-    NQumir::NAst::TTypePtr StoredType;
+    NQumir::NAst::TTypePtr KeyType = nullptr; // == StoredType
+    NQumir::NAst::TTypePtr LookupType = nullptr;
+    NQumir::NAst::TTypePtr StoredType = nullptr;
     std::vector<TJoinKeyField> Fields;
     size_t Size = 0;
     size_t Alignment = 0;
@@ -52,6 +53,7 @@ struct TJoinKeyDescriptor {
 // the per-component representation; throws NQumir::TError if a column is missing
 // or the two sides of a key pair have incompatible types.
 TJoinKeyDescriptor BuildJoinKeyDescriptor(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TStructType& leftType,
     const NQumir::NAst::TStructType& rightType,
     const std::vector<std::pair<std::string, std::string>>& keys);

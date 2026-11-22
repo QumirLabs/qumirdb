@@ -91,9 +91,9 @@ void EnableOperatorInstrumentation(TLoweredPlan& lowered) {
         }
     }
     TKernelCompiler compiler({
+        .Types = lowered.Types,
         .Sink = &lowered.Kernels,
         .BindNow = false,
-        .ExternalCatalog = lowered.ExternalCatalog,
     });
     auto kernel = compiler.CompileInstrumentation();
     for (const auto& node : lowered.Graph->Nodes()) {

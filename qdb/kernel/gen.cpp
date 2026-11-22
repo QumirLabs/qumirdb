@@ -2,8 +2,11 @@
 #include <qdb/kernel/builder.h>
 #include <qdb/kernel/column_value.h>
 #include <qdb/plan/passes/unbound_vars.h>
+#include <qdb/modules/qumirdb.h>
+#include <qdb/plan/types/date.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
+#include <qdb/plan/types/type_text.h>
 
 #include <qumir/parser/ast.h>
 #include <qumir/parser/operator.h>
@@ -21,16 +24,15 @@ namespace NKernel {
 
 namespace {
 
-NQumir::NAst::TTypePtr NamedType(const std::string& name) {
-    return std::make_shared<NQumir::NAst::TNamedType>(name, nullptr);
-}
+using NQumir::NRegistry::QumirDbNamedType;
 
 NQumir::NAst::TTypePtr ColumnPointerType(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TTypePtr& columnType,
     const NQumir::NAst::TTypePtr& rowSetType)
 {
     using namespace NQumir::NAst;
-    auto rowSetStruct = TMaybeType<TStructType>(UnwrapNamedType(rowSetType));
+    auto rowSetStruct = TMaybeType<TStructType>(UnwrapNamedValueType(rowSetType));
     if (rowSetStruct) {
         for (const auto& [name, type] : rowSetStruct.Cast()->Fields) {
             if (name == "Columns") {
@@ -38,11 +40,12 @@ NQumir::NAst::TTypePtr ColumnPointerType(
             }
         }
     }
-    return std::make_shared<TPointerType>(
-        columnType ? columnType : NamedType("TColumn"));
+    return types.MakePointer(
+        columnType ? columnType : QumirDbNamedType(types, "TColumn"));
 }
 
 NQumir::NAst::TTypePtr PointerPointeeOr(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TTypePtr& pointerType,
     const NQumir::NAst::TTypePtr& fallback)
 {
@@ -50,7 +53,7 @@ NQumir::NAst::TTypePtr PointerPointeeOr(
     if (auto pointer = TMaybeType<TPointerType>(pointerType)) {
         return pointer.Cast()->PointeeType;
     }
-    return fallback ? fallback : NamedType("TColumn");
+    return fallback ? fallback : QumirDbNamedType(types, "TColumn");
 }
 
 // A BinInt or a decimal stored in i128; a decimal stored in i64 is a plain i64.
@@ -59,21 +62,23 @@ bool IsBinIntValueType(const NQumir::NAst::TTypePtr& type) {
 }
 
 NQumir::NAst::TTypePtr AggregateStorageType(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TTypePtr& type)
 {
     if (auto decimal = DecimalSpecOf(type)) {
-        return DecimalStorageType(*decimal);
+        return DecimalStorageType(types, *decimal);
     }
     return type;
 }
 
 NQumir::NAst::TTypePtr ColumnBufferElementType(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TTypePtr& valueType)
 {
     using namespace NQumir::NAst;
     // Bitmap buffers are byte-addressed; scalar bool storage is not their layout.
-    if (TMaybeType<TBoolType>(UnwrapNamedType(valueType))) {
-        return std::make_shared<TIntegerType>(TIntegerType::U8);
+    if (TMaybeType<TBoolType>(UnwrapNamedValueType(valueType))) {
+        return types.MakeInteger(TIntegerType::U8);
     }
     return valueType;
 }
@@ -88,16 +93,17 @@ bool HasStringReducer(const TAggReducerLayout& layout) {
 }
 
 std::vector<NQumir::NAst::TExprPtr> StringCleanupCalls(
+    NQumir::NAst::TTypeFactory& types,
     const TAggReducerLayout& layout)
 {
     using namespace NQumir::NAst;
-    auto i64Type = std::make_shared<TIntegerType>();
+    auto i64Type = types.MakeInteger();
     std::vector<TExprPtr> result;
     for (const auto& reducer : layout.Reducers) {
         if (reducer.IsString()) {
             result.push_back(NOz::Call("agg_string_cleanup_at", {
-                NOz::Ident("ht"), NOz::TypedInt(reducer.ValueBufIdx, i64Type),
-                NOz::TypedInt(reducer.ExtraBufIdx, i64Type)}));
+                NOz::Ident("ht"), NOz::TypedInt(types, reducer.ValueBufIdx, i64Type),
+                NOz::TypedInt(types, reducer.ExtraBufIdx, i64Type)}));
         }
     }
     return result;
@@ -109,6 +115,7 @@ std::vector<NQumir::NAst::TExprPtr> StringCleanupCalls(
 // for (Named("StringView"), Named("StringView")) and
 // (Named("StringView"), TStringType) that the Qumir type-checker resolves.
 void SpecializeFilterPredicate(
+    NQumir::NAst::TTypeFactory& types,
     NQumir::NAst::TExprPtr& expr,
     const std::unordered_set<std::string>& stringFields,
     const std::unordered_map<std::string, std::string>& stringValues)
@@ -116,7 +123,7 @@ void SpecializeFilterPredicate(
     using namespace NQumir::NAst;
     if (auto ident = TMaybeNode<TIdentExpr>(expr)) {
         if (stringFields.contains(ident.Cast()->Name)) {
-            expr = std::make_shared<TIdentExpr>(
+            expr = NQumir::MakeIntrusive<TIdentExpr>(
                 expr->Location, stringValues.at(ident.Cast()->Name));
         }
         return;
@@ -127,20 +134,20 @@ void SpecializeFilterPredicate(
         auto target = TMaybeType<TNamedType>(cast.Cast()->Type);
         if (literal && target && target.Cast()->Name == "StringView") {
             const auto loc = expr->Location;
-            auto size = std::make_shared<TNumberExpr>(
-                loc, static_cast<int64_t>(literal.Cast()->Value.size()));
-            size->Type = std::make_shared<TIntegerType>();
-            auto data = std::make_shared<TBitcastExpr>(loc, cast.Cast()->Operand,
-                std::make_shared<TPointerType>(
-                    std::make_shared<TIntegerType>(TIntegerType::U8)));
-            expr = std::make_shared<TCallExpr>(loc,
-                std::make_shared<TIdentExpr>(loc, "qdb_sv_from_ptr"),
+            auto size = NQumir::MakeIntrusive<TNumberExpr>(
+                loc, static_cast<int64_t>(literal.Cast()->Value.size()), types);
+            size->Type = types.MakeInteger();
+            auto data = NQumir::MakeIntrusive<TBitcastExpr>(loc, cast.Cast()->Operand,
+                types.MakePointer(
+                    types.MakeInteger(TIntegerType::U8)));
+            expr = NQumir::MakeIntrusive<TCallExpr>(loc,
+                NQumir::MakeIntrusive<TIdentExpr>(loc, "qdb_sv_from_ptr"),
                 std::vector<TExprPtr>{std::move(data), std::move(size)});
             return;
         }
     }
     for (auto* child : expr->MutableChildren()) {
-        SpecializeFilterPredicate(*child, stringFields, stringValues);
+        SpecializeFilterPredicate(types, *child, stringFields, stringValues);
     }
 }
 
@@ -174,15 +181,16 @@ NQumir::NAst::TExprPtr KeyValueExpr(
 {
     using namespace NQumir::NAst;
     NQumir::TLocation loc{};
-    TExprPtr result = std::make_shared<TIdentExpr>(loc, root);
+    TExprPtr result = NQumir::MakeIntrusive<TIdentExpr>(loc, root);
     for (const auto& field : path) {
-        result = std::make_shared<TFieldAccessExpr>(loc, std::move(result), field);
+        result = NQumir::MakeIntrusive<TFieldAccessExpr>(loc, std::move(result), field);
     }
     return result;
 }
 
 // Float key bits with +0/-0 and all NaNs collapsed; u32 for f32, u64 for f64.
 NQumir::NAst::TExprPtr CanonicalFloatBits(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TTypePtr& floatType,
     const std::string& root,
     const std::vector<std::string>& path)
@@ -190,23 +198,23 @@ NQumir::NAst::TExprPtr CanonicalFloatBits(
     using namespace NQumir::NAst;
     NQumir::TLocation loc{};
     const bool single = FixedValueWidth(floatType) == 4;
-    auto bitsType = std::make_shared<TIntegerType>(
+    auto bitsType = types.MakeInteger(
         single ? TIntegerType::U32 : TIntegerType::U64);
     const int64_t absMask = single ? 0x7fffffffLL : 0x7fffffffffffffffLL;
     const int64_t expMask = single ? 0x7f800000LL : 0x7ff0000000000000LL;
     const int64_t fracMask = single ? 0x007fffffLL : 0x000fffffffffffffLL;
     const int64_t quietNaN = single ? 0x7fc00000LL : 0x7ff8000000000000LL;
     auto number = [&](int64_t value) -> TExprPtr {
-        auto result = std::make_shared<TNumberExpr>(loc, value);
+        auto result = NQumir::MakeIntrusive<TNumberExpr>(loc, value, types);
         result->Type = bitsType;
         return result;
     };
     auto binary = [&](const char* op, TExprPtr left, TExprPtr right) -> TExprPtr {
-        return std::make_shared<TBinaryExpr>(
+        return NQumir::MakeIntrusive<TBinaryExpr>(
             loc, TOperator(op), std::move(left), std::move(right));
     };
     auto bitcast = [&](TExprPtr e, TTypePtr type) -> TExprPtr {
-        return std::make_shared<TBitcastExpr>(loc,
+        return NQumir::MakeIntrusive<TBitcastExpr>(loc,
             std::move(e),
             std::move(type));
     };
@@ -217,12 +225,13 @@ NQumir::NAst::TExprPtr CanonicalFloatBits(
     auto isNaN = binary("&&",
         binary("==", masked(expMask), number(expMask)),
         binary("!=", masked(fracMask), number(0)));
-    return std::make_shared<TIfExpr>(loc, std::move(isZero), number(0),
-        std::make_shared<TIfExpr>(loc, std::move(isNaN),
+    return NQumir::MakeIntrusive<TIfExpr>(loc, std::move(isZero), number(0),
+        NQumir::MakeIntrusive<TIfExpr>(loc, std::move(isNaN),
             number(quietNaN), bitcast(KeyValueExpr(root, path), bitsType)));
 }
 
 NQumir::NAst::TExprPtr HashKeyValue(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TTypePtr& originalType,
     const std::string& root,
     std::vector<std::string>& path,
@@ -234,27 +243,27 @@ NQumir::NAst::TExprPtr HashKeyValue(
     auto named = TMaybeType<TNamedType>(originalType);
     if (named && (named.Cast()->Name == "StringView" ||
                   named.Cast()->Name == "OwnedString")) {
-        return std::make_shared<TCastExpr>(loc,
-            std::make_shared<TCallExpr>(loc,
-                std::make_shared<TIdentExpr>(loc, "qdb_string_hash"),
+        return NQumir::MakeIntrusive<TCastExpr>(loc,
+            NQumir::MakeIntrusive<TCallExpr>(loc,
+                NQumir::MakeIntrusive<TIdentExpr>(loc, "qdb_string_hash"),
                 std::vector<TExprPtr>{KeyValueExpr(root, path)}),
-            std::make_shared<TIntegerType>(TIntegerType::U64));
+            types.MakeInteger(TIntegerType::U64));
     }
-    auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
+    auto u64Type = types.MakeInteger(TIntegerType::U64);
     auto ident = [&](const std::string& name) -> TExprPtr {
-        return std::make_shared<TIdentExpr>(loc, name);
+        return NQumir::MakeIntrusive<TIdentExpr>(loc, name);
     };
     auto number = [&](int64_t value) -> TExprPtr {
-        auto result = std::make_shared<TNumberExpr>(loc, value);
+        auto result = NQumir::MakeIntrusive<TNumberExpr>(loc, value, types);
         result->Type = u64Type;
         return result;
     };
     auto binary = [&](const char* op, TExprPtr left, TExprPtr right) -> TExprPtr {
-        return std::make_shared<TBinaryExpr>(
+        return NQumir::MakeIntrusive<TBinaryExpr>(
             loc, TOperator(op), std::move(left), std::move(right));
     };
     auto assign = [&](const std::string& name, TExprPtr value) {
-        body.push_back(std::make_shared<TAssignExpr>(
+        body.push_back(NQumir::MakeIntrusive<TAssignExpr>(
             loc, name, std::move(value)));
     };
     auto mixU64 = [&](const std::string& name) {
@@ -271,19 +280,19 @@ NQumir::NAst::TExprPtr HashKeyValue(
         const std::string loName = "key_hash_" + std::to_string(nextTemporary++);
         const std::string hiName = "key_hash_" + std::to_string(nextTemporary++);
         const std::string name = "key_hash_" + std::to_string(nextTemporary++);
-        body.push_back(std::make_shared<TVarStmt>(loc, loName, u64Type));
-        body.push_back(std::make_shared<TVarStmt>(loc, hiName, u64Type));
-        body.push_back(std::make_shared<TVarStmt>(loc, name, u64Type));
-        auto i128Type = std::make_shared<TIntegerType>(TIntegerType::I128);
+        body.push_back(NQumir::MakeIntrusive<TVarStmt>(loc, loName, u64Type));
+        body.push_back(NQumir::MakeIntrusive<TVarStmt>(loc, hiName, u64Type));
+        body.push_back(NQumir::MakeIntrusive<TVarStmt>(loc, name, u64Type));
+        auto i128Type = types.MakeInteger(TIntegerType::I128);
         auto raw = [&]() -> TExprPtr {
-            return std::make_shared<TFieldAccessExpr>(
+            return NQumir::MakeIntrusive<TFieldAccessExpr>(
                 loc, KeyValueExpr(root, path), "V");
         };
-        auto shift64 = std::make_shared<TNumberExpr>(loc, int64_t{64});
+        auto shift64 = NQumir::MakeIntrusive<TNumberExpr>(loc, int64_t{64}, types);
         shift64->Type = i128Type;
-        assign(loName, std::make_shared<TCastExpr>(loc, raw(), u64Type));
-        assign(hiName, std::make_shared<TCastExpr>(loc,
-            std::make_shared<TBinaryExpr>(loc, TOperator(">>"),
+        assign(loName, NQumir::MakeIntrusive<TCastExpr>(loc, raw(), u64Type));
+        assign(hiName, NQumir::MakeIntrusive<TCastExpr>(loc,
+            NQumir::MakeIntrusive<TBinaryExpr>(loc, TOperator(">>"),
                 raw(), std::move(shift64)),
             u64Type));
         mixU64(loName);
@@ -297,24 +306,24 @@ NQumir::NAst::TExprPtr HashKeyValue(
         return ident(name);
     }
 
-    const auto type = UnwrapNamedType(originalType);
+    const auto type = UnwrapNamedValueType(originalType);
 
-    if (auto integer = TMaybeType<TIntegerType>(type)) {
+    if (auto integer = MaybeIntegerType(type)) {
         const std::string name = "key_hash_" + std::to_string(nextTemporary++);
-        body.push_back(std::make_shared<TVarStmt>(loc, name, u64Type));
-        auto unsignedType = std::make_shared<TIntegerType>(
+        body.push_back(NQumir::MakeIntrusive<TVarStmt>(loc, name, u64Type));
+        auto unsignedType = types.MakeInteger(
             UnsignedIntegerKind(integer.Cast()->Kind));
-        auto bits = std::make_shared<TCastExpr>(
+        auto bits = NQumir::MakeIntrusive<TCastExpr>(
             loc, KeyValueExpr(root, path), std::move(unsignedType));
-        assign(name, std::make_shared<TCastExpr>(loc, std::move(bits), u64Type));
+        assign(name, NQumir::MakeIntrusive<TCastExpr>(loc, std::move(bits), u64Type));
         mixU64(name);
         return ident(name);
     }
 
     if (TMaybeType<TBoolType>(type)) {
         const std::string name = "key_hash_" + std::to_string(nextTemporary++);
-        body.push_back(std::make_shared<TVarStmt>(loc, name, u64Type));
-        assign(name, std::make_shared<TCastExpr>(loc,
+        body.push_back(NQumir::MakeIntrusive<TVarStmt>(loc, name, u64Type));
+        assign(name, NQumir::MakeIntrusive<TCastExpr>(loc,
             KeyValueExpr(root, path), u64Type));
         assign(name, binary("*", ident(name), number(2685821657736338717LL)));
         return ident(name);
@@ -322,10 +331,10 @@ NQumir::NAst::TExprPtr HashKeyValue(
 
     if (TMaybeType<TFloatType>(type)) {
         const std::string name = "key_hash_" + std::to_string(nextTemporary++);
-        body.push_back(std::make_shared<TVarStmt>(loc, name, u64Type));
-        TExprPtr bits = CanonicalFloatBits(type, root, path);
+        body.push_back(NQumir::MakeIntrusive<TVarStmt>(loc, name, u64Type));
+        TExprPtr bits = CanonicalFloatBits(types, type, root, path);
         if (FixedValueWidth(type) == 4) {
-            bits = std::make_shared<TCastExpr>(loc, std::move(bits), u64Type);
+            bits = NQumir::MakeIntrusive<TCastExpr>(loc, std::move(bits), u64Type);
         }
         assign(name, std::move(bits));
         mixU64(name);
@@ -334,12 +343,12 @@ NQumir::NAst::TExprPtr HashKeyValue(
 
     if (auto structure = TMaybeType<TStructType>(type)) {
         const std::string name = "key_hash_" + std::to_string(nextTemporary++);
-        body.push_back(std::make_shared<TVarStmt>(loc, name, u64Type));
+        body.push_back(NQumir::MakeIntrusive<TVarStmt>(loc, name, u64Type));
         assign(name, number(0));
         for (const auto& [fieldName, fieldType] : structure.Cast()->Fields) {
             path.push_back(fieldName);
             auto fieldHash = HashKeyValue(
-                fieldType, root, path, body, nextTemporary);
+                types, fieldType, root, path, body, nextTemporary);
             path.pop_back();
             const std::string validityName = fieldName.starts_with("key_")
                 ? "valid_" + fieldName.substr(std::string("key_").size())
@@ -350,7 +359,7 @@ NQumir::NAst::TExprPtr HashKeyValue(
             if (hasValidity) {
                 auto validPath = path;
                 validPath.push_back(validityName);
-                fieldHash = std::make_shared<TIfExpr>(loc,
+                fieldHash = NQumir::MakeIntrusive<TIfExpr>(loc,
                     KeyValueExpr(root, validPath), std::move(fieldHash), number(0));
             }
             // boost-style ordered combine over already mixed field hashes.
@@ -366,10 +375,11 @@ NQumir::NAst::TExprPtr HashKeyValue(
 
     throw std::invalid_argument(
         "GenKeyOperationFunDecls: unsupported key leaf type " +
-        (originalType ? originalType->ToString() : std::string("<null>")));
+        SqlTypeName(originalType));
 }
 
 NQumir::NAst::TExprPtr EqualKeyValue(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TTypePtr& leftType,
     const NQumir::NAst::TTypePtr& rightType,
     std::vector<std::string>& path)
@@ -385,7 +395,7 @@ NQumir::NAst::TExprPtr EqualKeyValue(
         (rightNamed.Cast()->Name == "StringView" ||
          rightNamed.Cast()->Name == "OwnedString");
     auto binary = [&](const char* op, TExprPtr left, TExprPtr right) -> TExprPtr {
-        return std::make_shared<TBinaryExpr>(
+        return NQumir::MakeIntrusive<TBinaryExpr>(
             loc, TOperator(op), std::move(left), std::move(right));
     };
     if (leftString || rightString) {
@@ -393,8 +403,8 @@ NQumir::NAst::TExprPtr EqualKeyValue(
             throw std::invalid_argument(
                 "GenKeyOperationFunDecls: mismatched string key leaves");
         }
-        return std::make_shared<TCallExpr>(loc,
-            std::make_shared<TIdentExpr>(loc, "qdb_string_equal"),
+        return NQumir::MakeIntrusive<TCallExpr>(loc,
+            NQumir::MakeIntrusive<TIdentExpr>(loc, "qdb_string_equal"),
             std::vector<TExprPtr>{
                 KeyValueExpr("left", path), KeyValueExpr("right", path)});
     }
@@ -405,9 +415,9 @@ NQumir::NAst::TExprPtr EqualKeyValue(
         }
         return binary("==", KeyValueExpr("left", path), KeyValueExpr("right", path));
     }
-    const auto left = UnwrapNamedType(leftType);
-    const auto right = UnwrapNamedType(rightType);
-    if (TMaybeType<TIntegerType>(left) && TMaybeType<TIntegerType>(right)) {
+    const auto left = UnwrapNamedValueType(leftType);
+    const auto right = UnwrapNamedValueType(rightType);
+    if (MaybeIntegerType(left) && MaybeIntegerType(right)) {
         return binary("==", KeyValueExpr("left", path), KeyValueExpr("right", path));
     }
     if (TMaybeType<TBoolType>(left) && TMaybeType<TBoolType>(right)) {
@@ -419,8 +429,8 @@ NQumir::NAst::TExprPtr EqualKeyValue(
                 "GenKeyOperationFunDecls: mismatched float key widths");
         }
         return binary("==",
-            CanonicalFloatBits(left, "left", path),
-            CanonicalFloatBits(right, "right", path));
+            CanonicalFloatBits(types, left, "left", path),
+            CanonicalFloatBits(types, right, "right", path));
     }
     if (auto leftStruct = TMaybeType<TStructType>(left)) {
         auto rightStruct = TMaybeType<TStructType>(right);
@@ -438,7 +448,7 @@ NQumir::NAst::TExprPtr EqualKeyValue(
                     "GenKeyOperationFunDecls: mismatched struct key fields");
             }
             path.push_back(fieldName);
-            auto fieldEqual = EqualKeyValue(fieldType, rightField->second, path);
+            auto fieldEqual = EqualKeyValue(types, fieldType, rightField->second, path);
             path.pop_back();
             const std::string validityName = fieldName.starts_with("key_")
                 ? "valid_" + fieldName.substr(std::string("key_").size())
@@ -450,7 +460,7 @@ NQumir::NAst::TExprPtr EqualKeyValue(
                 auto validPath = path;
                 validPath.push_back(validityName);
                 fieldEqual = binary("||",
-                    std::make_shared<TUnaryExpr>(loc, TOperator("!"),
+                    NQumir::MakeIntrusive<TUnaryExpr>(loc, TOperator("!"),
                         KeyValueExpr("left", validPath)),
                     std::move(fieldEqual));
             }
@@ -466,7 +476,7 @@ NQumir::NAst::TExprPtr EqualKeyValue(
     }
     throw std::invalid_argument(
         "GenKeyOperationFunDecls: unsupported equality leaf type " +
-        (leftType ? leftType->ToString() : std::string("<null>")));
+        SqlTypeName(leftType));
 }
 
 bool IsStringHandleType(const NQumir::NAst::TTypePtr& type) {
@@ -481,10 +491,10 @@ NQumir::NAst::TTypePtr FindStringViewType(
     using namespace NQumir::NAst;
     if (auto named = TMaybeType<TNamedType>(originalType)) {
         if (named.Cast()->Name == "StringView") {
-            return named.Cast()->UnderlyingType;
+            return named.Cast()->UnderlyingType();
         }
     }
-    auto type = UnwrapNamedType(originalType);
+    auto type = UnwrapNamedValueType(originalType);
     if (auto structure = TMaybeType<TStructType>(type)) {
         for (const auto& [_, fieldType] : structure.Cast()->Fields) {
             if (auto result = FindStringViewType(fieldType)) {
@@ -497,7 +507,7 @@ NQumir::NAst::TTypePtr FindStringViewType(
 
 bool ContainsLogicalString(const NQumir::NAst::TTypePtr& originalType) {
     using namespace NQumir::NAst;
-    auto type = UnwrapNamedType(originalType);
+    auto type = UnwrapNamedValueType(originalType);
     if (TMaybeType<TStringType>(type)) {
         return true;
     }
@@ -511,27 +521,28 @@ bool ContainsLogicalString(const NQumir::NAst::TTypePtr& originalType) {
 }
 
 NQumir::NAst::TExprPtr KeyOwnedBytesExpr(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TTypePtr& originalType,
     const std::string& root,
     std::vector<std::string>& path)
 {
     using namespace NQumir::NAst;
     NQumir::TLocation loc{};
-    auto i64Type = std::make_shared<TIntegerType>(TIntegerType::I64);
+    auto i64Type = types.MakeInteger(TIntegerType::I64);
     auto zero = [&]() -> TExprPtr {
-        auto value = std::make_shared<TNumberExpr>(loc, int64_t{0});
+        auto value = NQumir::MakeIntrusive<TNumberExpr>(loc, int64_t{0}, types);
         value->Type = i64Type;
         return value;
     };
     if (IsStringHandleType(originalType)) {
-        return std::make_shared<TFieldAccessExpr>(
+        return NQumir::MakeIntrusive<TFieldAccessExpr>(
             loc, KeyValueExpr(root, path), "Size");
     }
     if (IsBinIntStorageType(originalType)) {
         return zero();
     }
-    auto type = UnwrapNamedType(originalType);
-    if (TMaybeType<TIntegerType>(type) || TMaybeType<TFloatType>(type) ||
+    auto type = UnwrapNamedValueType(originalType);
+    if (MaybeIntegerType(type) || TMaybeType<TFloatType>(type) ||
         TMaybeType<TBoolType>(type)) {
         return zero();
     }
@@ -539,7 +550,7 @@ NQumir::NAst::TExprPtr KeyOwnedBytesExpr(
         TExprPtr result = zero();
         for (const auto& [fieldName, fieldType] : structure.Cast()->Fields) {
             path.push_back(fieldName);
-            auto fieldBytes = KeyOwnedBytesExpr(fieldType, root, path);
+            auto fieldBytes = KeyOwnedBytesExpr(types, fieldType, root, path);
             path.pop_back();
             const std::string validityName = fieldName.starts_with("key_")
                 ? "valid_" + fieldName.substr(std::string("key_").size())
@@ -550,20 +561,21 @@ NQumir::NAst::TExprPtr KeyOwnedBytesExpr(
             if (hasValidity) {
                 auto validPath = path;
                 validPath.push_back(validityName);
-                fieldBytes = std::make_shared<TIfExpr>(loc,
+                fieldBytes = NQumir::MakeIntrusive<TIfExpr>(loc,
                     KeyValueExpr(root, validPath), std::move(fieldBytes), zero());
             }
-            result = std::make_shared<TBinaryExpr>(loc, TOperator("+"),
+            result = NQumir::MakeIntrusive<TBinaryExpr>(loc, TOperator("+"),
                 std::move(result), std::move(fieldBytes));
         }
         return result;
     }
     throw std::invalid_argument(
         "GenKeyOwnershipFunDecls: unsupported key leaf type " +
-        (originalType ? originalType->ToString() : std::string("<null>")));
+        SqlTypeName(originalType));
 }
 
 NQumir::NAst::TExprPtr CloneKeyValue(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TTypePtr& lookupType,
     const NQumir::NAst::TTypePtr& storedType,
     const std::string& root,
@@ -573,14 +585,14 @@ NQumir::NAst::TExprPtr CloneKeyValue(
 {
     using namespace NQumir::NAst;
     NQumir::TLocation loc{};
-    auto i64Type = std::make_shared<TIntegerType>(TIntegerType::I64);
-    auto u8Type = std::make_shared<TIntegerType>(TIntegerType::U8);
-    auto ptrU8Type = std::make_shared<TPointerType>(u8Type);
+    auto i64Type = types.MakeInteger(TIntegerType::I64);
+    auto u8Type = types.MakeInteger(TIntegerType::U8);
+    auto ptrU8Type = types.MakePointer(u8Type);
     auto ident = [&](const std::string& name) -> TExprPtr {
-        return std::make_shared<TIdentExpr>(loc, name);
+        return NQumir::MakeIntrusive<TIdentExpr>(loc, name);
     };
     auto field = [&](const std::string& name) -> TExprPtr {
-        return std::make_shared<TFieldAccessExpr>(
+        return NQumir::MakeIntrusive<TFieldAccessExpr>(
             loc, KeyValueExpr(root, path), name);
     };
 
@@ -591,34 +603,34 @@ NQumir::NAst::TExprPtr CloneKeyValue(
             "owned_value_" + std::to_string(nextTemporary++);
         const std::string copyName =
             "owned_copy_" + std::to_string(nextTemporary++);
-        body.push_back(std::make_shared<TVarStmt>(loc, dataName, ptrU8Type));
-        auto address = std::make_shared<TBinaryExpr>(loc, TOperator("+"),
-            std::make_shared<TCastExpr>(loc, ident("owned_buffer"), i64Type),
+        body.push_back(NQumir::MakeIntrusive<TVarStmt>(loc, dataName, ptrU8Type));
+        auto address = NQumir::MakeIntrusive<TBinaryExpr>(loc, TOperator("+"),
+            NQumir::MakeIntrusive<TCastExpr>(loc, ident("owned_buffer"), i64Type),
             ident("owned_offset"));
-        body.push_back(std::make_shared<TAssignExpr>(loc, dataName,
-            std::make_shared<TCastExpr>(loc, std::move(address), ptrU8Type)));
-        body.push_back(std::make_shared<TVarStmt>(loc, copyName, i64Type));
-        body.push_back(std::make_shared<TAssignExpr>(loc, copyName,
-            std::make_shared<TCallExpr>(loc,
+        body.push_back(NQumir::MakeIntrusive<TAssignExpr>(loc, dataName,
+            NQumir::MakeIntrusive<TCastExpr>(loc, std::move(address), ptrU8Type)));
+        body.push_back(NQumir::MakeIntrusive<TVarStmt>(loc, copyName, i64Type));
+        body.push_back(NQumir::MakeIntrusive<TAssignExpr>(loc, copyName,
+            NQumir::MakeIntrusive<TCallExpr>(loc,
                 ident("qdb_string_copy_bytes"),
                 std::vector<TExprPtr>{
                     ident(dataName), field("Data"), field("Size")})));
-        body.push_back(std::make_shared<TVarStmt>(loc, valueName, storedType));
-        body.push_back(std::make_shared<TAssignExpr>(loc, valueName,
-            std::make_shared<TStructConstructExpr>(loc, storedType,
+        body.push_back(NQumir::MakeIntrusive<TVarStmt>(loc, valueName, storedType));
+        body.push_back(NQumir::MakeIntrusive<TAssignExpr>(loc, valueName,
+            NQumir::MakeIntrusive<TStructConstructExpr>(loc, storedType,
                 std::vector<TExprPtr>{ident(dataName), field("Size")})));
-        body.push_back(std::make_shared<TAssignExpr>(loc, "owned_offset",
-            std::make_shared<TBinaryExpr>(loc, TOperator("+"),
+        body.push_back(NQumir::MakeIntrusive<TAssignExpr>(loc, "owned_offset",
+            NQumir::MakeIntrusive<TBinaryExpr>(loc, TOperator("+"),
                 ident("owned_offset"), field("Size"))));
         return ident(valueName);
     }
 
-    auto lookup = UnwrapNamedType(lookupType);
-    auto stored = UnwrapNamedType(storedType);
+    auto lookup = UnwrapNamedValueType(lookupType);
+    auto stored = UnwrapNamedValueType(storedType);
     if (IsBinIntStorageType(lookupType) && IsBinIntStorageType(storedType)) {
         return KeyValueExpr(root, path);
     }
-    if ((TMaybeType<TIntegerType>(lookup) && TMaybeType<TIntegerType>(stored)) ||
+    if ((MaybeIntegerType(lookup) && MaybeIntegerType(stored)) ||
         (TMaybeType<TFloatType>(lookup) && TMaybeType<TFloatType>(stored)) ||
         (TMaybeType<TBoolType>(lookup) && TMaybeType<TBoolType>(stored))) {
         return KeyValueExpr(root, path);
@@ -640,82 +652,84 @@ NQumir::NAst::TExprPtr CloneKeyValue(
                     "GenKeyOwnershipFunDecls: mismatched struct key fields");
             }
             path.push_back(fieldName);
-            fields.push_back(CloneKeyValue(lookupField->second, fieldType,
+            fields.push_back(CloneKeyValue(types, lookupField->second, fieldType,
                 root, path, body, nextTemporary));
             path.pop_back();
         }
-        return std::make_shared<TStructConstructExpr>(
+        return NQumir::MakeIntrusive<TStructConstructExpr>(
             loc, storedType, std::move(fields));
     }
     throw std::invalid_argument(
         "GenKeyOwnershipFunDecls: unsupported clone type " +
-        (lookupType ? lookupType->ToString() : std::string("<null>")));
+        SqlTypeName(lookupType));
 }
 
 } // namespace
 
 NQumir::NAst::TExprPtr ZeroValueExpr(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TTypePtr& originalType)
 {
     using namespace NQumir::NAst;
     NQumir::TLocation loc{};
-    auto i64Type = std::make_shared<TIntegerType>(TIntegerType::I64);
-    auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
-    auto zero = std::make_shared<TNumberExpr>(loc, int64_t{0});
+    auto i64Type = types.MakeInteger(TIntegerType::I64);
+    auto u64Type = types.MakeInteger(TIntegerType::U64);
+    auto zero = NQumir::MakeIntrusive<TNumberExpr>(loc, int64_t{0}, types);
     zero->Type = i64Type;
     if (IsBinIntStorageType(originalType)) {
-        auto zeroI128 = std::make_shared<TNumberExpr>(loc, int64_t{0});
-        zeroI128->Type = std::make_shared<TIntegerType>(TIntegerType::I128);
-        return std::make_shared<TStructConstructExpr>(loc, originalType,
+        auto zeroI128 = NQumir::MakeIntrusive<TNumberExpr>(loc, int64_t{0}, types);
+        zeroI128->Type = types.MakeInteger(TIntegerType::I128);
+        return NQumir::MakeIntrusive<TStructConstructExpr>(loc, originalType,
             std::vector<TExprPtr>{std::move(zeroI128)},
             std::vector<std::string>{"V"});
     }
-    auto type = UnwrapNamedType(originalType);
-    if (TMaybeType<TIntegerType>(type)) {
-        auto value = std::make_shared<TNumberExpr>(loc, int64_t{0});
+    auto type = UnwrapNamedValueType(originalType);
+    if (MaybeIntegerType(type)) {
+        auto value = NQumir::MakeIntrusive<TNumberExpr>(loc, int64_t{0}, types);
         value->Type = originalType;
         return value;
     }
     if (TMaybeType<TFloatType>(type) || TMaybeType<TBoolType>(type) ||
         TMaybeType<TPointerType>(type)) {
-        return std::make_shared<TCastExpr>(loc, std::move(zero), originalType);
+        return NQumir::MakeIntrusive<TCastExpr>(loc, std::move(zero), originalType);
     }
     if (auto structure = TMaybeType<TStructType>(type)) {
         std::vector<TExprPtr> fields;
         fields.reserve(structure.Cast()->Fields.size());
         for (const auto& [_, fieldType] : structure.Cast()->Fields) {
-            fields.push_back(ZeroValueExpr(fieldType));
+            fields.push_back(ZeroValueExpr(types, fieldType));
         }
-        return std::make_shared<TStructConstructExpr>(
+        return NQumir::MakeIntrusive<TStructConstructExpr>(
             loc, originalType, std::move(fields));
     }
     throw std::invalid_argument(
         "ZeroValueExpr: unsupported type " +
-        (originalType ? originalType->ToString() : std::string("<null>")));
+        SqlTypeName(originalType));
 }
 
 std::vector<NQumir::NAst::TExprPtr> GenKeyOperationFunDecls(
+    NQumir::NAst::TTypeFactory& types,
     const TAggregateKeyDescriptor& key)
 {
     using namespace NQumir::NAst;
     NQumir::TLocation loc{};
 
-    auto i64Type = std::make_shared<TIntegerType>(TIntegerType::I64);
-    auto boolType = std::make_shared<TBoolType>();
+    auto i64Type = types.MakeInteger(TIntegerType::I64);
+    auto boolType = types.Make<TBoolType>();
 
     auto makeHash = [&](const TTypePtr& type) -> TExprPtr {
         std::vector<TExprPtr> body;
         size_t nextTemporary = 0;
         std::vector<std::string> path;
-        auto value = HashKeyValue(type, "key", path, body, nextTemporary);
-        body.push_back(std::make_shared<TReturnExpr>(loc,
-            std::make_shared<TCastExpr>(loc, std::move(value), i64Type)));
+        auto value = HashKeyValue(types, type, "key", path, body, nextTemporary);
+        body.push_back(NQumir::MakeIntrusive<TReturnExpr>(loc,
+            NQumir::MakeIntrusive<TCastExpr>(loc, std::move(value), i64Type)));
         std::vector<TParam> params = {
-            std::make_shared<TVarStmt>(loc, "key", type),
+            NQumir::MakeIntrusive<TVarStmt>(loc, "key", type),
         };
-        auto function = std::make_shared<TFunDecl>(loc, "rh_hash", std::vector<TGenericParam>{}, std::move(params),
-            std::make_shared<TBlockExpr>(loc, std::move(body)), i64Type);
-        function->Type = std::make_shared<TFunctionType>(
+        auto function = NQumir::MakeIntrusive<TFunDecl>(loc, "rh_hash", std::vector<TGenericParam>{}, std::move(params),
+            NQumir::MakeIntrusive<TBlockExpr>(loc, std::move(body)), i64Type);
+        function->Type = types.MakeFunction(
             std::vector<TTypePtr>{type}, i64Type);
         function->Cacheable = true;
         return function;
@@ -723,18 +737,18 @@ std::vector<NQumir::NAst::TExprPtr> GenKeyOperationFunDecls(
     auto makeEqual = [&](const TTypePtr& leftType,
                          const TTypePtr& rightType) -> TExprPtr {
         std::vector<TParam> params = {
-            std::make_shared<TVarStmt>(loc, "left", leftType),
-            std::make_shared<TVarStmt>(loc, "right", rightType),
+            NQumir::MakeIntrusive<TVarStmt>(loc, "left", leftType),
+            NQumir::MakeIntrusive<TVarStmt>(loc, "right", rightType),
         };
         std::vector<std::string> path;
         std::vector<TExprPtr> body = {
-            std::make_shared<TReturnExpr>(
-                loc, EqualKeyValue(leftType, rightType, path)),
+            NQumir::MakeIntrusive<TReturnExpr>(
+                loc, EqualKeyValue(types, leftType, rightType, path)),
         };
-        auto function = std::make_shared<TFunDecl>(loc, "rh_key_equal",
-            std::vector<TGenericParam>{}, std::move(params), std::make_shared<TBlockExpr>(loc, std::move(body)),
+        auto function = NQumir::MakeIntrusive<TFunDecl>(loc, "rh_key_equal",
+            std::vector<TGenericParam>{}, std::move(params), NQumir::MakeIntrusive<TBlockExpr>(loc, std::move(body)),
             boolType);
-        function->Type = std::make_shared<TFunctionType>(
+        function->Type = types.MakeFunction(
             std::vector<TTypePtr>{leftType, rightType}, boolType);
         function->Cacheable = true;
         return function;
@@ -754,53 +768,54 @@ std::vector<NQumir::NAst::TExprPtr> GenKeyOperationFunDecls(
 }
 
 std::vector<NQumir::NAst::TExprPtr> GenKeyOwnershipFunDecls(
+    NQumir::NAst::TTypeFactory& types,
     const TAggregateKeyDescriptor& key)
 {
     using namespace NQumir::NAst;
     NQumir::TLocation loc{};
-    auto i64Type = std::make_shared<TIntegerType>(TIntegerType::I64);
-    auto u8Type = std::make_shared<TIntegerType>(TIntegerType::U8);
-    auto ptrU8Type = std::make_shared<TPointerType>(u8Type);
+    auto i64Type = types.MakeInteger(TIntegerType::I64);
+    auto u8Type = types.MakeInteger(TIntegerType::U8);
+    auto ptrU8Type = types.MakePointer(u8Type);
 
     std::vector<std::string> path;
-    auto bytesExpr = KeyOwnedBytesExpr(key.LookupType, "key", path);
+    auto bytesExpr = KeyOwnedBytesExpr(types, key.LookupType, "key", path);
     std::vector<TParam> bytesParams = {
-        std::make_shared<TVarStmt>(loc, "key", key.LookupType),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "key", key.LookupType),
     };
-    auto bytes = std::make_shared<TFunDecl>(loc, "key_owned_bytes",
+    auto bytes = NQumir::MakeIntrusive<TFunDecl>(loc, "key_owned_bytes",
         std::vector<TGenericParam>{},
-        std::move(bytesParams), std::make_shared<TBlockExpr>(loc,
+        std::move(bytesParams), NQumir::MakeIntrusive<TBlockExpr>(loc,
             std::vector<TExprPtr>{
-                std::make_shared<TReturnExpr>(loc, std::move(bytesExpr))}),
+                NQumir::MakeIntrusive<TReturnExpr>(loc, std::move(bytesExpr))}),
         i64Type);
-    bytes->Type = std::make_shared<TFunctionType>(
+    bytes->Type = types.MakeFunction(
         std::vector<TTypePtr>{key.LookupType}, i64Type);
     bytes->Cacheable = true;
 
     std::vector<TExprPtr> cloneBody;
     TExprPtr cloneValue;
     if (key.HasDistinctLookupType()) {
-        auto offset = std::make_shared<TVarStmt>(loc, "owned_offset", i64Type);
-        offset->Init = std::make_shared<TNumberExpr>(loc, int64_t{0});
+        auto offset = NQumir::MakeIntrusive<TVarStmt>(loc, "owned_offset", i64Type);
+        offset->Init = NQumir::MakeIntrusive<TNumberExpr>(loc, int64_t{0}, types);
         cloneBody.push_back(std::move(offset));
         size_t nextTemporary = 0;
         path.clear();
-        cloneValue = CloneKeyValue(key.LookupType, key.StoredType,
+        cloneValue = CloneKeyValue(types, key.LookupType, key.StoredType,
             "key", path, cloneBody, nextTemporary);
     } else {
-        cloneValue = std::make_shared<TIdentExpr>(loc, "key");
+        cloneValue = NQumir::MakeIntrusive<TIdentExpr>(loc, "key");
     }
     cloneBody.push_back(
-        std::make_shared<TReturnExpr>(loc, std::move(cloneValue)));
+        NQumir::MakeIntrusive<TReturnExpr>(loc, std::move(cloneValue)));
     std::vector<TParam> cloneParams = {
-        std::make_shared<TVarStmt>(loc, "key", key.LookupType),
-        std::make_shared<TVarStmt>(loc, "owned_buffer", ptrU8Type),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "key", key.LookupType),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "owned_buffer", ptrU8Type),
     };
-    auto clone = std::make_shared<TFunDecl>(loc, "key_clone_owned",
+    auto clone = NQumir::MakeIntrusive<TFunDecl>(loc, "key_clone_owned",
         std::vector<TGenericParam>{},
         std::move(cloneParams),
-        std::make_shared<TBlockExpr>(loc, std::move(cloneBody)), key.StoredType);
-    clone->Type = std::make_shared<TFunctionType>(
+        NQumir::MakeIntrusive<TBlockExpr>(loc, std::move(cloneBody)), key.StoredType);
+    clone->Type = types.MakeFunction(
         std::vector<TTypePtr>{key.LookupType, ptrU8Type}, key.StoredType);
     clone->Cacheable = true;
 
@@ -817,7 +832,7 @@ void SubstFieldsInPlace(
     if (auto node = NQumir::NAst::TMaybeNode<NQumir::NAst::TIdentExpr>(expr)) {
         if (auto it = fieldValues.find(node.Cast()->Name);
             it != fieldValues.end()) {
-            expr = std::make_shared<NQumir::NAst::TIdentExpr>(
+            expr = NQumir::MakeIntrusive<NQumir::NAst::TIdentExpr>(
                 expr->Location, it->second);
             return;
         }
@@ -870,18 +885,9 @@ bool HasNullableBoolCast(const NQumir::NAst::TExprPtr& expr) {
     });
 }
 
-// qumirdb.oz's Nullable[T] = <struct (Value T) (Valid bool)>. Wrap a materialized
-// value + validity into that struct so the .oz nullable operators apply.
-NQumir::NAst::TTypePtr NullableNamedType(const NQumir::NAst::TTypePtr& valueType) {
-    using namespace NQumir::NAst;
-    auto structType = std::make_shared<TStructType>(
-        std::vector<std::pair<std::string, TTypePtr>>{
-            {"Value", valueType}, {"Valid", std::make_shared<TBoolType>()}});
-    return std::make_shared<TNamedType>("Nullable", structType,
-        std::vector<TGenericArg>{TGenericArg::TypeArg(valueType)});
-}
 
 NQumir::NAst::TExprPtr BuildNullableStruct(
+    NQumir::NAst::TTypeFactory& types,
     NQumir::NAst::TExprPtr value,
     NQumir::NAst::TExprPtr valid,
     const NQumir::NAst::TTypePtr& valueType)
@@ -891,18 +897,19 @@ NQumir::NAst::TExprPtr BuildNullableStruct(
     // Mirror the .oz operators: (cast (struct ((Value v) (Valid b))) <named Nullable[T]>).
     // A cast constructs the named struct; a bare `(:)` annotation is weaker and leaves
     // operator resolution unable to pick the nullable overloads.
-    auto anonStruct = std::make_shared<TStructType>(
+    auto anonStruct = types.MakeStruct(
         std::vector<std::pair<std::string, TTypePtr>>{
-            {"Value", valueType}, {"Valid", std::make_shared<TBoolType>()}});
-    auto structLit = std::make_shared<TStructConstructExpr>(loc, anonStruct,
+            {"Value", valueType}, {"Valid", types.Make<TBoolType>()}});
+    auto structLit = NQumir::MakeIntrusive<TStructConstructExpr>(loc, anonStruct,
         std::vector<TExprPtr>{std::move(value), std::move(valid)},
         std::vector<std::string>{"Value", "Valid"});
-    return std::make_shared<TCastExpr>(loc, structLit, NullableNamedType(valueType));
+    return NQumir::MakeIntrusive<TCastExpr>(loc, structLit, MakeNullableType(types, valueType));
 }
 
 // Kernel takes (ref TRowSet) directly. Column data pointers are extracted via
 // TRowSet.Columns[colIdx].Data with a two-step cast: <ptr i8> -> i64 -> <ptr T>.
 NQumir::NAst::TExprPtr GenFilterKernelAst(
+    NQumir::NAst::TTypeFactory& types,
     NQumir::NAst::TExprPtr predicate,
     const NQumir::NAst::TStructType& inputType,
     const std::unordered_map<std::string, int32_t>& fieldIndices,
@@ -924,7 +931,7 @@ NQumir::NAst::TExprPtr GenFilterKernelAst(
     std::unordered_map<std::string, std::string> stringValues;
     for (const auto& [name, type] : inputType.Fields) {
         if (TMaybeType<TStringType>(
-                UnwrapNamedType(UnwrapNullableType(type)))) {
+                UnwrapNamedValueType(UnwrapNullableType(type)))) {
             stringFields.insert(name);
             stringValues.emplace(name, name + "_value");
         } else {
@@ -933,30 +940,30 @@ NQumir::NAst::TExprPtr GenFilterKernelAst(
     }
 
     SpecializeFilterPredicate(
-        predicate, stringFields, stringValues);
+        types, predicate, stringFields, stringValues);
     SubstFieldsInPlace(predicate, fixedValues);
 
     // Single param: (var rowSet <ref TRowSet>) - raw struct type, no TNamedType wrapper
-    auto rowSetRefType = std::make_shared<TReferenceType>(rowSetType);
+    auto rowSetRefType = types.MakeReference(rowSetType);
 
     std::vector<TExprPtr> bodyStmts;
     auto identRowSet = NOz::Ident("rowSet");
 
     auto fieldOf = [&](const std::string& name) {
-        return std::make_shared<TFieldAccessExpr>(loc, identRowSet, name);
+        return NQumir::MakeIntrusive<TFieldAccessExpr>(loc, identRowSet, name);
     };
 
     // Extract n, selection, cols from rowSet
-    bodyStmts.push_back(NOz::Var("n", std::make_shared<TIntegerType>()));
+    bodyStmts.push_back(NOz::Var("n", types.MakeInteger()));
     bodyStmts.push_back(NOz::Assign("n", fieldOf("RowCount")));
 
-    auto ptrU8Type = std::make_shared<TPointerType>(
-        std::make_shared<TIntegerType>(TIntegerType::U8));
+    auto ptrU8Type = types.MakePointer(
+        types.MakeInteger(TIntegerType::U8));
     bodyStmts.push_back(NOz::Var("selection", ptrU8Type));
     bodyStmts.push_back(NOz::Assign("selection", fieldOf("Selection")));
 
-    auto ptrColumnType = ColumnPointerType(columnType, rowSetType);
-    auto columnValueType = PointerPointeeOr(ptrColumnType, columnType);
+    auto ptrColumnType = ColumnPointerType(types, columnType, rowSetType);
+    auto columnValueType = PointerPointeeOr(types, ptrColumnType, columnType);
     bodyStmts.push_back(NOz::Var("cols", ptrColumnType));
     bodyStmts.push_back(NOz::Assign("cols", fieldOf("Columns")));
 
@@ -968,29 +975,29 @@ NQumir::NAst::TExprPtr GenFilterKernelAst(
             continue;
         }
         int32_t idx = fieldIndices.at(name);
-        auto colElem = std::make_shared<TIndexExpr>(loc,
-            std::make_shared<TIdentExpr>(loc, "cols"),
-            std::make_shared<TNumberExpr>(loc, int64_t(idx)));
+        auto colElem = NQumir::MakeIntrusive<TIndexExpr>(loc,
+            NQumir::MakeIntrusive<TIdentExpr>(loc, "cols"),
+            NQumir::MakeIntrusive<TNumberExpr>(loc, int64_t(idx), types));
         bodyStmts.push_back(NOz::Var(name, columnValueType));
         bodyStmts.push_back(NOz::Assign(name, colElem));
         const std::string prefix = name + "_filter";
         auto materialized = BuildColumnValueAst(
-            name, "i", prefix, type, stringViewType);
+            types, name, "i", prefix, type, stringViewType);
         loopSetup.insert(loopSetup.end(),
             std::make_move_iterator(materialized.Setup.begin()),
             std::make_move_iterator(materialized.Setup.end()));
         const std::string valueName = TMaybeType<TStringType>(
-            UnwrapNamedType(UnwrapNullableType(type)))
+            UnwrapNamedValueType(UnwrapNullableType(type)))
             ? stringValues.at(name)
             : fixedValues.at(name);
         if (IsNullableType(type)) {
             // Bind as Nullable[T] so predicate operators resolve to the .oz nullable
             // overloads (comparisons -> Nullable[bool], qdb_is_null -> bool).
             validityNames.emplace(valueName, prefix + "_valid");
-            auto nt = NullableNamedType(materialized.ValueType);
+            auto nt = MakeNullableType(types, materialized.ValueType);
             loopSetup.push_back(NOz::Var(valueName, nt));
             loopSetup.push_back(NOz::Assign(valueName, BuildNullableStruct(
-                std::move(materialized.Value), std::move(materialized.IsValid),
+                types, std::move(materialized.Value), std::move(materialized.IsValid),
                 materialized.ValueType)));
         } else {
             loopSetup.push_back(NOz::Var(valueName, materialized.ValueType));
@@ -999,12 +1006,12 @@ NQumir::NAst::TExprPtr GenFilterKernelAst(
     }
 
     // Loop
-    auto varI = NOz::Var("i", std::make_shared<TIntegerType>());
+    auto varI = NOz::Var("i", types.MakeInteger());
     auto initI = NOz::Assign("i",
-        std::make_shared<TNumberExpr>(loc, int64_t(0)));
-    auto cond = std::make_shared<TBinaryExpr>(loc, TOperator("<"),
-        std::make_shared<TIdentExpr>(loc, "i"),
-        std::make_shared<TIdentExpr>(loc, "n"));
+        NQumir::MakeIntrusive<TNumberExpr>(loc, int64_t(0), types));
+    auto cond = NQumir::MakeIntrusive<TBinaryExpr>(loc, TOperator("<"),
+        NQumir::MakeIntrusive<TIdentExpr>(loc, "i"),
+        NQumir::MakeIntrusive<TIdentExpr>(loc, "n"));
     TExprPtr selected;
     if (!HasNullableBoolCast(predicate) &&
         (validityNames.empty() || !UsesNullableValue(predicate, validityNames)))
@@ -1014,19 +1021,19 @@ NQumir::NAst::TExprPtr GenFilterKernelAst(
     } else {
         // The predicate evaluates through the .oz nullable operators to Nullable[bool]
         // (or plain bool); qdb_is_true selects iff it is TRUE (NULL is not TRUE).
-        selected = std::make_shared<TCallExpr>(loc,
-            std::make_shared<TIdentExpr>(loc, "qdb_is_true"),
+        selected = NQumir::MakeIntrusive<TCallExpr>(loc,
+            NQumir::MakeIntrusive<TIdentExpr>(loc, "qdb_is_true"),
             std::vector<TExprPtr>{std::move(predicate)});
     }
-    auto castedPred = std::make_shared<TCastExpr>(loc, std::move(selected),
-        std::make_shared<TIntegerType>(TIntegerType::U8));
-    auto writeSel = std::make_shared<TArrayAssignExpr>(loc, "selection",
-        std::vector<TExprPtr>{std::make_shared<TIdentExpr>(loc, "i")},
+    auto castedPred = NQumir::MakeIntrusive<TCastExpr>(loc, std::move(selected),
+        types.MakeInteger(TIntegerType::U8));
+    auto writeSel = NQumir::MakeIntrusive<TArrayAssignExpr>(loc, "selection",
+        std::vector<TExprPtr>{NQumir::MakeIntrusive<TIdentExpr>(loc, "i")},
         castedPred);
     auto incrI = NOz::Assign("i",
-        std::make_shared<TBinaryExpr>(loc, TOperator("+"),
-            std::make_shared<TIdentExpr>(loc, "i"),
-            std::make_shared<TNumberExpr>(loc, int64_t(1))));
+        NQumir::MakeIntrusive<TBinaryExpr>(loc, TOperator("+"),
+            NQumir::MakeIntrusive<TIdentExpr>(loc, "i"),
+            NQumir::MakeIntrusive<TNumberExpr>(loc, int64_t(1), types)));
 
     bodyStmts.push_back(varI);
     bodyStmts.push_back(initI);
@@ -1035,52 +1042,52 @@ NQumir::NAst::TExprPtr GenFilterKernelAst(
     // A row an earlier operator rejected is not evaluated: the predicate may
     // be expensive, and may fail on a value that was filtered out on purpose.
     auto u8Zero = [&]() {
-        auto zero = std::make_shared<TNumberExpr>(loc, int64_t(0));
-        zero->Type = std::make_shared<TIntegerType>(TIntegerType::U8);
+        auto zero = NQumir::MakeIntrusive<TNumberExpr>(loc, int64_t(0), types);
+        zero->Type = types.MakeInteger(TIntegerType::U8);
         return zero;
     };
     bodyStmts.push_back(NOz::Var("input_selection_is_null",
-        std::make_shared<TBoolType>()));
+        types.Make<TBoolType>()));
     bodyStmts.push_back(NOz::Assign("input_selection_is_null",
-        std::make_shared<TBinaryExpr>(loc, TOperator("=="),
-            std::make_shared<TCastExpr>(loc,
-                std::make_shared<TIdentExpr>(loc, "__input_selection__"),
-                std::make_shared<TIntegerType>()),
-            std::make_shared<TNumberExpr>(loc, int64_t(0)))));
-    auto inputSelected = std::make_shared<TBinaryExpr>(loc, TOperator("||"),
-        std::make_shared<TIdentExpr>(loc, "input_selection_is_null"),
-        std::make_shared<TBinaryExpr>(loc, TOperator("!="),
-            std::make_shared<TIndexExpr>(loc,
-                std::make_shared<TIdentExpr>(loc, "__input_selection__"),
-                std::make_shared<TIdentExpr>(loc, "i")),
+        NQumir::MakeIntrusive<TBinaryExpr>(loc, TOperator("=="),
+            NQumir::MakeIntrusive<TCastExpr>(loc,
+                NQumir::MakeIntrusive<TIdentExpr>(loc, "__input_selection__"),
+                types.MakeInteger()),
+            NQumir::MakeIntrusive<TNumberExpr>(loc, int64_t(0), types))));
+    auto inputSelected = NQumir::MakeIntrusive<TBinaryExpr>(loc, TOperator("||"),
+        NQumir::MakeIntrusive<TIdentExpr>(loc, "input_selection_is_null"),
+        NQumir::MakeIntrusive<TBinaryExpr>(loc, TOperator("!="),
+            NQumir::MakeIntrusive<TIndexExpr>(loc,
+                NQumir::MakeIntrusive<TIdentExpr>(loc, "__input_selection__"),
+                NQumir::MakeIntrusive<TIdentExpr>(loc, "i")),
             u8Zero()));
-    auto writeRejected = std::make_shared<TArrayAssignExpr>(loc, "selection",
-        std::vector<TExprPtr>{std::make_shared<TIdentExpr>(loc, "i")},
+    auto writeRejected = NQumir::MakeIntrusive<TArrayAssignExpr>(loc, "selection",
+        std::vector<TExprPtr>{NQumir::MakeIntrusive<TIdentExpr>(loc, "i")},
         u8Zero());
     std::vector<TExprPtr> loopBody;
-    loopBody.push_back(std::make_shared<TIfExpr>(loc, std::move(inputSelected),
-        std::make_shared<TBlockExpr>(loc, std::move(loopSetup)),
-        std::make_shared<TBlockExpr>(loc,
+    loopBody.push_back(NQumir::MakeIntrusive<TIfExpr>(loc, std::move(inputSelected),
+        NQumir::MakeIntrusive<TBlockExpr>(loc, std::move(loopSetup)),
+        NQumir::MakeIntrusive<TBlockExpr>(loc,
             std::vector<TExprPtr>{std::move(writeRejected)})));
     loopBody.push_back(std::move(incrI));
-    bodyStmts.push_back(std::make_shared<TWhileStmtExpr>(loc, cond,
-        std::make_shared<TBlockExpr>(loc, std::move(loopBody))));
+    bodyStmts.push_back(NQumir::MakeIntrusive<TWhileStmtExpr>(loc, cond,
+        NQumir::MakeIntrusive<TBlockExpr>(loc, std::move(loopBody))));
 
-    auto ptrI8Type = std::make_shared<TPointerType>(
-        std::make_shared<TIntegerType>(TIntegerType::I8));
-    auto ptrPtrI8Type = std::make_shared<TPointerType>(ptrI8Type);
+    auto ptrI8Type = types.MakePointer(
+        types.MakeInteger(TIntegerType::I8));
+    auto ptrPtrI8Type = types.MakePointer(ptrI8Type);
     auto builder = NOz::TFunBuilder("<kernel>")
         .Param("rowSet", rowSetRefType)
         .Param("__arena__", ptrI8Type)
         .Param("__regexes__", ptrPtrI8Type)
         .Param("__input_selection__", ptrU8Type)
-        .Return(std::make_shared<TVoidType>());
+        .Return(types.Make<TVoidType>());
     for (auto& stmt : bodyStmts) {
         builder.Stmt(std::move(stmt));
     }
     auto funDecl = std::move(builder).Build();
 
-    return std::make_shared<TBlockExpr>(loc, std::vector<TExprPtr>{funDecl});
+    return NQumir::MakeIntrusive<TBlockExpr>(loc, std::vector<TExprPtr>{funDecl});
 }
 
 namespace {
@@ -1107,7 +1114,7 @@ void CollectIdentNames(
 // (SpecializeFilterPredicate / SubstFieldsInPlace) don't mutate a predicate
 // shared across multiple compilations (CompileJoin compiles each entry from a
 // fresh program). Covers the node kinds that appear in filter predicates.
-NQumir::NAst::TExprPtr CloneFilterExpr(const NQumir::NAst::TExprPtr& expr) {
+NQumir::NAst::TExprPtr CloneFilterExpr(NQumir::NAst::TTypeFactory& types, const NQumir::NAst::TExprPtr& expr) {
     using namespace NQumir::NAst;
     if (!expr) {
         return nullptr;
@@ -1115,49 +1122,49 @@ NQumir::NAst::TExprPtr CloneFilterExpr(const NQumir::NAst::TExprPtr& expr) {
     const NQumir::TLocation loc = expr->Location;
     TExprPtr out;
     if (auto n = TMaybeNode<TIdentExpr>(expr)) {
-        out = std::make_shared<TIdentExpr>(loc, n.Cast()->Name);
+        out = NQumir::MakeIntrusive<TIdentExpr>(loc, n.Cast()->Name);
     } else if (auto n = TMaybeNode<TNumberExpr>(expr)) {
         out = n.Cast()->IsFloat()
-            ? std::make_shared<TNumberExpr>(loc, n.Cast()->FloatValue)
-            : std::make_shared<TNumberExpr>(loc, n.Cast()->IntValue);
+            ? NQumir::MakeIntrusive<TNumberExpr>(loc, n.Cast()->FloatValue, types)
+            : NQumir::MakeIntrusive<TNumberExpr>(loc, n.Cast()->IntValue, types);
     } else if (auto n = TMaybeNode<TStringLiteralExpr>(expr)) {
-        out = std::make_shared<TStringLiteralExpr>(loc, n.Cast()->Value);
+        out = NQumir::MakeIntrusive<TStringLiteralExpr>(loc, n.Cast()->Value, types);
     } else if (auto n = TMaybeNode<TUnaryExpr>(expr)) {
-        out = std::make_shared<TUnaryExpr>(loc, n.Cast()->Operator,
-            CloneFilterExpr(n.Cast()->Operand));
+        out = NQumir::MakeIntrusive<TUnaryExpr>(loc, n.Cast()->Operator,
+            CloneFilterExpr(types, n.Cast()->Operand));
     } else if (auto n = TMaybeNode<TBinaryExpr>(expr)) {
-        out = std::make_shared<TBinaryExpr>(loc, n.Cast()->Operator,
-            CloneFilterExpr(n.Cast()->Left), CloneFilterExpr(n.Cast()->Right));
+        out = NQumir::MakeIntrusive<TBinaryExpr>(loc, n.Cast()->Operator,
+            CloneFilterExpr(types, n.Cast()->Left), CloneFilterExpr(types, n.Cast()->Right));
     } else if (auto n = TMaybeNode<TCallExpr>(expr)) {
         std::vector<TExprPtr> args;
         args.reserve(n.Cast()->Args.size());
         for (const auto& a : n.Cast()->Args) {
-            args.push_back(CloneFilterExpr(a));
+            args.push_back(CloneFilterExpr(types, a));
         }
-        out = std::make_shared<TCallExpr>(loc,
-            CloneFilterExpr(n.Cast()->Callee), std::move(args));
+        out = NQumir::MakeIntrusive<TCallExpr>(loc,
+            CloneFilterExpr(types, n.Cast()->Callee), std::move(args));
     } else if (auto n = TMaybeNode<TCastExpr>(expr)) {
-        out = std::make_shared<TCastExpr>(loc,
-            CloneFilterExpr(n.Cast()->Operand), n.Cast()->Type);
+        out = NQumir::MakeIntrusive<TCastExpr>(loc,
+            CloneFilterExpr(types, n.Cast()->Operand), n.Cast()->Type);
     } else if (auto n = TMaybeNode<TIndexExpr>(expr)) {
-        out = std::make_shared<TIndexExpr>(loc,
-            CloneFilterExpr(n.Cast()->Collection), CloneFilterExpr(n.Cast()->Index));
+        out = NQumir::MakeIntrusive<TIndexExpr>(loc,
+            CloneFilterExpr(types, n.Cast()->Collection), CloneFilterExpr(types, n.Cast()->Index));
     } else if (auto n = TMaybeNode<TIfExpr>(expr)) {
         auto ifExpr = n.Cast();
-        out = std::make_shared<TIfExpr>(loc,
-            CloneFilterExpr(ifExpr->Cond), CloneFilterExpr(ifExpr->Then),
-            ifExpr->Else ? CloneFilterExpr(ifExpr->Else) : nullptr);
+        out = NQumir::MakeIntrusive<TIfExpr>(loc,
+            CloneFilterExpr(types, ifExpr->Cond), CloneFilterExpr(types, ifExpr->Then),
+            ifExpr->Else ? CloneFilterExpr(types, ifExpr->Else) : nullptr);
     } else if (auto n = TMaybeNode<TFieldAccessExpr>(expr)) {
-        out = std::make_shared<TFieldAccessExpr>(loc,
-            CloneFilterExpr(n.Cast()->Object), n.Cast()->FieldName);
+        out = NQumir::MakeIntrusive<TFieldAccessExpr>(loc,
+            CloneFilterExpr(types, n.Cast()->Object), n.Cast()->FieldName);
     } else if (auto n = TMaybeNode<TBlockExpr>(expr)) {
         std::vector<TExprPtr> stmts;
         stmts.reserve(n.Cast()->Stmts.size());
-        for (const auto& s : n.Cast()->Stmts) stmts.push_back(CloneFilterExpr(s));
-        out = std::make_shared<TBlockExpr>(loc, std::move(stmts));
+        for (const auto& s : n.Cast()->Stmts) stmts.push_back(CloneFilterExpr(types, s));
+        out = NQumir::MakeIntrusive<TBlockExpr>(loc, std::move(stmts));
     } else if (auto n = TMaybeNode<TVarStmt>(expr)) {
-        auto v = std::make_shared<TVarStmt>(loc, n.Cast()->Name, n.Cast()->Type);
-        if (n.Cast()->Init) v->Init = CloneFilterExpr(n.Cast()->Init);
+        auto v = NQumir::MakeIntrusive<TVarStmt>(loc, n.Cast()->Name, n.Cast()->Type);
+        if (n.Cast()->Init) v->Init = CloneFilterExpr(types, n.Cast()->Init);
         out = std::move(v);
     } else {
         throw std::runtime_error(
@@ -1177,6 +1184,7 @@ NQumir::NAst::TExprPtr CloneFilterExpr(const NQumir::NAst::TExprPtr& expr) {
 // fields with index < leftFieldCount come from left_store at left_row, the rest
 // from right_store at right_row.
 NQumir::NAst::TExprPtr GenJoinResidualFilterAst(
+    NQumir::NAst::TTypeFactory& types,
     NQumir::NAst::TExprPtr predicate,
     const NQumir::NAst::TStructType& innerType,
     size_t leftFieldCount,
@@ -1187,19 +1195,19 @@ NQumir::NAst::TExprPtr GenJoinResidualFilterAst(
     using namespace NQumir::NAst;
     NQumir::TLocation loc{};
 
-    auto i64Type = std::make_shared<TIntegerType>();
-    auto boolType = std::make_shared<TBoolType>();
+    auto i64Type = types.MakeInteger();
+    auto boolType = types.Make<TBoolType>();
 
     // Work on a private copy - CompileJoin compiles each entry from a fresh
     // program, so the shared predicate must not be mutated in place.
-    predicate = CloneFilterExpr(predicate);
+    predicate = CloneFilterExpr(types, predicate);
 
     // Per-field value-variable names (matching GenFilterKernelAst's scheme).
     std::unordered_map<std::string, std::string> fixedValues;
     std::unordered_set<std::string> stringFields;
     std::unordered_map<std::string, std::string> stringValues;
     for (const auto& [name, type] : innerType.Fields) {
-        if (TMaybeType<TStringType>(UnwrapNamedType(UnwrapNullableType(type)))) {
+        if (TMaybeType<TStringType>(UnwrapNamedValueType(UnwrapNullableType(type)))) {
             stringFields.insert(name);
             stringValues.emplace(name, name + "_value");
         } else {
@@ -1211,49 +1219,49 @@ NQumir::NAst::TExprPtr GenJoinResidualFilterAst(
     std::unordered_set<std::string> referenced;
     CollectIdentNames(predicate, referenced);
 
-    SpecializeFilterPredicate(predicate, stringFields, stringValues);
+    SpecializeFilterPredicate(types, predicate, stringFields, stringValues);
     SubstFieldsInPlace(predicate, fixedValues);
 
-    auto rowSetPtrType = std::make_shared<TPointerType>(
-        AsNamed("TRowSet", rowSetType));
-    auto rowSetRefType = std::make_shared<TReferenceType>(
-        AsNamed("TRowSet", rowSetType));
-    auto ptrI8Type = std::make_shared<TPointerType>(
-        std::make_shared<TIntegerType>(TIntegerType::I8));
+    auto rowSetPtrType = types.MakePointer(
+        AsNamed(types, "TRowSet", rowSetType));
+    auto rowSetRefType = types.MakeReference(
+        AsNamed(types, "TRowSet", rowSetType));
+    auto ptrI8Type = types.MakePointer(
+        types.MakeInteger(TIntegerType::I8));
     std::vector<TParam> params = {
-        std::make_shared<TVarStmt>(loc, "left_store", rowSetPtrType),
-        std::make_shared<TVarStmt>(loc, "right_store", rowSetPtrType),
-        std::make_shared<TVarStmt>(loc, "__arena__", ptrI8Type),
-        std::make_shared<TVarStmt>(loc, "stream_left_batch", rowSetRefType),
-        std::make_shared<TVarStmt>(loc, "stream_right_batch", rowSetRefType),
-        std::make_shared<TVarStmt>(loc, "left_row_id", i64Type),
-        std::make_shared<TVarStmt>(loc, "right_row_id", i64Type),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "left_store", rowSetPtrType),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "right_store", rowSetPtrType),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "__arena__", ptrI8Type),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "stream_left_batch", rowSetRefType),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "stream_right_batch", rowSetRefType),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "left_row_id", i64Type),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "right_row_id", i64Type),
     };
 
     auto ident = [&](const std::string& name) -> TExprPtr {
-        return std::make_shared<TIdentExpr>(loc, name);
+        return NQumir::MakeIntrusive<TIdentExpr>(loc, name);
     };
     auto numI64 = [&](int64_t value) -> TExprPtr {
-        auto result = std::make_shared<TNumberExpr>(loc, value);
+        auto result = NQumir::MakeIntrusive<TNumberExpr>(loc, value, types);
         result->Type = i64Type;
         return result;
     };
     auto binary = [&](const char* op, TExprPtr l, TExprPtr r) -> TExprPtr {
-        return std::make_shared<TBinaryExpr>(loc, TOperator(op),
+        return NQumir::MakeIntrusive<TBinaryExpr>(loc, TOperator(op),
             std::move(l), std::move(r));
     };
     auto var = [&](const std::string& name, TTypePtr type) -> TExprPtr {
-        return std::make_shared<TVarStmt>(loc, name, std::move(type));
+        return NQumir::MakeIntrusive<TVarStmt>(loc, name, std::move(type));
     };
     auto assign = [&](const std::string& name, TExprPtr value) -> TExprPtr {
-        return std::make_shared<TAssignExpr>(loc, name, std::move(value));
+        return NQumir::MakeIntrusive<TAssignExpr>(loc, name, std::move(value));
     };
     auto block = [&](std::vector<TExprPtr> stmts) -> TExprPtr {
-        return std::make_shared<TBlockExpr>(loc, std::move(stmts));
+        return NQumir::MakeIntrusive<TBlockExpr>(loc, std::move(stmts));
     };
 
-    auto ptrColumnType = ColumnPointerType(columnType, rowSetType);
-    auto columnValueType = PointerPointeeOr(ptrColumnType, columnType);
+    auto ptrColumnType = ColumnPointerType(types, columnType, rowSetType);
+    auto columnValueType = PointerPointeeOr(types, ptrColumnType, columnType);
 
     std::vector<TExprPtr> body;
     // Decode packed row IDs: batch = id >> 32, row = id & 0xffffffff.
@@ -1269,19 +1277,19 @@ NQumir::NAst::TExprPtr GenJoinResidualFilterAst(
     // Per-side Columns pointers. Batch index -1 means the side is the current
     // stream batch and is not present in the row store.
     auto storeColumns = [&](const char* store, const char* batchVar) -> TExprPtr {
-        auto rs = std::make_shared<TIndexExpr>(loc, ident(store), ident(batchVar));
-        return std::make_shared<TFieldAccessExpr>(loc, rs, "Columns");
+        auto rs = NQumir::MakeIntrusive<TIndexExpr>(loc, ident(store), ident(batchVar));
+        return NQumir::MakeIntrusive<TFieldAccessExpr>(loc, rs, "Columns");
     };
     auto streamColumns = [&](const char* streamBatch) -> TExprPtr {
-        return std::make_shared<TFieldAccessExpr>(loc, ident(streamBatch), "Columns");
+        return NQumir::MakeIntrusive<TFieldAccessExpr>(loc, ident(streamBatch), "Columns");
     };
     body.push_back(var("left_cols", ptrColumnType));
-    body.push_back(std::make_shared<TIfExpr>(loc,
+    body.push_back(NQumir::MakeIntrusive<TIfExpr>(loc,
         binary("==", ident("left_batch"), numI64(-1)),
         block({assign("left_cols", streamColumns("stream_left_batch"))}),
         block({assign("left_cols", storeColumns("left_store", "left_batch"))})));
     body.push_back(var("right_cols", ptrColumnType));
-    body.push_back(std::make_shared<TIfExpr>(loc,
+    body.push_back(NQumir::MakeIntrusive<TIfExpr>(loc,
         binary("==", ident("right_batch"), numI64(-1)),
         block({assign("right_cols", streamColumns("stream_right_batch"))}),
         block({assign("right_cols", storeColumns("right_store", "right_batch"))})));
@@ -1300,26 +1308,26 @@ NQumir::NAst::TExprPtr GenJoinResidualFilterAst(
         const int32_t colIdx = isLeft ? idx
             : idx - static_cast<int32_t>(leftFieldCount);
 
-        auto colElem = std::make_shared<TIndexExpr>(loc,
+        auto colElem = NQumir::MakeIntrusive<TIndexExpr>(loc,
             ident(colsVar), numI64(colIdx));
         body.push_back(var(name, columnValueType));
         body.push_back(assign(name, colElem));
 
         const std::string prefix = name + "_residual";
-        auto materialized = BuildColumnValueAst(name, rowVar, prefix, type, stringViewType);
+        auto materialized = BuildColumnValueAst(types, name, rowVar, prefix, type, stringViewType);
         body.insert(body.end(),
             std::make_move_iterator(materialized.Setup.begin()),
             std::make_move_iterator(materialized.Setup.end()));
         const std::string valueName = TMaybeType<TStringType>(
-            UnwrapNamedType(UnwrapNullableType(type)))
+            UnwrapNamedValueType(UnwrapNullableType(type)))
             ? stringValues.at(name)
             : fixedValues.at(name);
         if (IsNullableType(type)) {
             validityNames.emplace(valueName, prefix + "_valid");
-            auto nt = NullableNamedType(materialized.ValueType);
+            auto nt = MakeNullableType(types, materialized.ValueType);
             body.push_back(var(valueName, nt));
             body.push_back(assign(valueName, BuildNullableStruct(
-                std::move(materialized.Value), std::move(materialized.IsValid),
+                types, std::move(materialized.Value), std::move(materialized.IsValid),
                 materialized.ValueType)));
         } else {
             body.push_back(var(valueName, materialized.ValueType));
@@ -1334,26 +1342,26 @@ NQumir::NAst::TExprPtr GenJoinResidualFilterAst(
     {
         result = std::move(predicate);
     } else {
-        result = std::make_shared<TCallExpr>(loc,
-            std::make_shared<TIdentExpr>(loc, "qdb_is_true"),
+        result = NQumir::MakeIntrusive<TCallExpr>(loc,
+            NQumir::MakeIntrusive<TIdentExpr>(loc, "qdb_is_true"),
             std::vector<TExprPtr>{std::move(predicate)});
     }
-    TExprPtr castedResult = std::make_shared<TCastExpr>(loc, std::move(result), boolType);
+    TExprPtr castedResult = NQumir::MakeIntrusive<TCastExpr>(loc, std::move(result), boolType);
     if (referenced.contains("__arena__")) {
         // The strings of one pair are dead once its truth is known. Releasing
         // them keeps the scratch of a kernel call at one pair, however many
         // pairs the call evaluates.
         body.push_back(var("pair_matched", boolType));
         body.push_back(assign("pair_matched", std::move(castedResult)));
-        body.push_back(std::make_shared<TCallExpr>(loc,
+        body.push_back(NQumir::MakeIntrusive<TCallExpr>(loc,
             ident("qdb_string_arena_reset"), std::vector<TExprPtr>{ident("__arena__")}));
         castedResult = ident("pair_matched");
     }
-    body.push_back(std::make_shared<TReturnExpr>(loc, std::move(castedResult)));
+    body.push_back(NQumir::MakeIntrusive<TReturnExpr>(loc, std::move(castedResult)));
 
-    return std::make_shared<TFunDecl>(loc, "jt_residual_filter",
+    return NQumir::MakeIntrusive<TFunDecl>(loc, "jt_residual_filter",
         std::vector<TGenericParam>{},
-        std::move(params), std::make_shared<TBlockExpr>(loc, std::move(body)),
+        std::move(params), NQumir::MakeIntrusive<TBlockExpr>(loc, std::move(body)),
         boolType);
 }
 
@@ -1363,6 +1371,7 @@ NQumir::NAst::TExprPtr GenJoinResidualFilterAst(
 // output buffers. A struct expression is evaluated once into a temporary and
 // its fields are scattered into adjacent scalar buffers.
 NQumir::NAst::TExprPtr GenProjectKernelAst(
+    NQumir::NAst::TTypeFactory& types,
     std::vector<NQumir::NAst::TExprPtr> computedExprs,
     const std::vector<NQumir::NAst::TTypePtr>& computedTypes,
     const NQumir::NAst::TStructType& inputType,
@@ -1375,41 +1384,37 @@ NQumir::NAst::TExprPtr GenProjectKernelAst(
     NQumir::TLocation loc{};
 
     auto ident = [&](const std::string& name) -> TExprPtr {
-        return std::make_shared<TIdentExpr>(loc, name);
+        return NQumir::MakeIntrusive<TIdentExpr>(loc, name);
     };
     auto numI64 = [&](int64_t v) -> TExprPtr {
-        auto r = std::make_shared<TNumberExpr>(loc, v);
-        r->Type = std::make_shared<TIntegerType>();
+        auto r = NQumir::MakeIntrusive<TNumberExpr>(loc, v, types);
+        r->Type = types.MakeInteger();
         return r;
     };
     auto var = [&](const std::string& name, TTypePtr type) -> TExprPtr {
-        return std::make_shared<TVarStmt>(loc, name, std::move(type));
+        return NQumir::MakeIntrusive<TVarStmt>(loc, name, std::move(type));
     };
     auto assign = [&](const std::string& name, TExprPtr value) -> TExprPtr {
-        return std::make_shared<TAssignExpr>(loc, name, std::move(value));
+        return NQumir::MakeIntrusive<TAssignExpr>(loc, name, std::move(value));
     };
     auto cast = [&](TExprPtr e, TTypePtr t) -> TExprPtr {
-        return std::make_shared<TCastExpr>(loc, std::move(e), std::move(t));
+        return NQumir::MakeIntrusive<TCastExpr>(loc, std::move(e), std::move(t));
     };
 
-    auto i64Type = std::make_shared<TIntegerType>();
-    auto u8Type = std::make_shared<TIntegerType>(TIntegerType::U8);
-    auto ptrU8Type = std::make_shared<TPointerType>(u8Type);
-    auto ptrPtrU8Type = std::make_shared<TPointerType>(ptrU8Type);
-    auto boolType = std::make_shared<TBoolType>();
+    auto i64Type = types.MakeInteger();
+    auto u8Type = types.MakeInteger(TIntegerType::U8);
+    auto ptrU8Type = types.MakePointer(u8Type);
+    auto ptrPtrU8Type = types.MakePointer(ptrU8Type);
+    auto boolType = types.Make<TBoolType>();
 
-    // qumirdb.oz's Nullable[T] = <struct (Value T) (Valid bool)>. Kernels carry
-    // nullable values as this struct so the .oz operators apply; on output the
-    // struct is split back into a data buffer (Value) and a validity mask (Valid).
-    auto nullableType = [&](const TTypePtr& valueType) -> TTypePtr {
-        auto structType = std::make_shared<TStructType>(
-            std::vector<std::pair<std::string, TTypePtr>>{
-                {"Value", valueType}, {"Valid", boolType}});
-        return std::make_shared<TNamedType>("Nullable", structType,
-            std::vector<TGenericArg>{TGenericArg::TypeArg(valueType)});
+    // Kernels carry nullable values as qumirdb.oz's Nullable[T] struct so the .oz
+    // operators apply; on output the struct is split back into a data buffer (Value)
+    // and a validity mask (Valid).
+    auto nullableType = [&](const TTypePtr& valueType) {
+        return MakeNullableType(types, valueType);
     };
     auto field = [&](const std::string& name, const std::string& f) -> TExprPtr {
-        return std::make_shared<TFieldAccessExpr>(loc, ident(name), f);
+        return NQumir::MakeIntrusive<TFieldAccessExpr>(loc, ident(name), f);
     };
 
     // Collect column names referenced in computed expressions before substitution.
@@ -1431,7 +1436,7 @@ NQumir::NAst::TExprPtr GenProjectKernelAst(
     std::unordered_set<std::string> stringFields;
     std::unordered_map<std::string, std::string> stringValues;
     for (const auto& [name, type] : inputType.Fields) {
-        if (TMaybeType<TStringType>(UnwrapNamedType(UnwrapNullableType(type)))) {
+        if (TMaybeType<TStringType>(UnwrapNamedValueType(UnwrapNullableType(type)))) {
             stringFields.insert(name);
             stringValues.emplace(name, name + "_value");
         } else {
@@ -1439,34 +1444,34 @@ NQumir::NAst::TExprPtr GenProjectKernelAst(
         }
     }
     for (auto& expr : computedExprs) {
-        SpecializeFilterPredicate(expr, stringFields, stringValues);
+        SpecializeFilterPredicate(types, expr, stringFields, stringValues);
         SubstFieldsInPlace(expr, fixedValues);
     }
 
-    auto rowSetRefType = std::make_shared<TReferenceType>(rowSetType);
+    auto rowSetRefType = types.MakeReference(rowSetType);
     // `__arena__` is the string-concat scratch arena (opaque TStringArena*). It is
     // always passed even when unused; qdb_string_concat(__arena__, ...) references it.
-    auto ptrI8Type = std::make_shared<TPointerType>(
-        std::make_shared<TIntegerType>(TIntegerType::I8));
-    auto ptrPtrI8Type = std::make_shared<TPointerType>(ptrI8Type);
+    auto ptrI8Type = types.MakePointer(
+        types.MakeInteger(TIntegerType::I8));
+    auto ptrPtrI8Type = types.MakePointer(ptrI8Type);
     std::vector<TParam> params = {
-        std::make_shared<TVarStmt>(loc, "rowSet", rowSetRefType),
-        std::make_shared<TVarStmt>(loc, "out", ptrPtrU8Type),
-        std::make_shared<TVarStmt>(loc, "__arena__", ptrI8Type),
-        std::make_shared<TVarStmt>(loc, "__regexes__", ptrPtrI8Type),
-        std::make_shared<TVarStmt>(loc, "__input_selection__", ptrU8Type),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "rowSet", rowSetRefType),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "out", ptrPtrU8Type),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "__arena__", ptrI8Type),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "__regexes__", ptrPtrI8Type),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "__input_selection__", ptrU8Type),
     };
 
     std::vector<TExprPtr> bodyStmts;
     auto identRowSet = ident("rowSet");
     auto fieldOf = [&](const std::string& name) {
-        return std::make_shared<TFieldAccessExpr>(loc, identRowSet, name);
+        return NQumir::MakeIntrusive<TFieldAccessExpr>(loc, identRowSet, name);
     };
     bodyStmts.push_back(var("n", i64Type));
     bodyStmts.push_back(assign("n", fieldOf("RowCount")));
 
-    auto ptrColumnType = ColumnPointerType(columnType, rowSetType);
-    auto columnValueType = PointerPointeeOr(ptrColumnType, columnType);
+    auto ptrColumnType = ColumnPointerType(types, columnType, rowSetType);
+    auto columnValueType = PointerPointeeOr(types, ptrColumnType, columnType);
     bodyStmts.push_back(var("cols", ptrColumnType));
     bodyStmts.push_back(assign("cols", fieldOf("Columns")));
 
@@ -1477,10 +1482,10 @@ NQumir::NAst::TExprPtr GenProjectKernelAst(
             continue;
         }
         const int32_t idx = fieldIndices.at(name);
-        auto colElem = std::make_shared<TIndexExpr>(loc, ident("cols"), numI64(idx));
+        auto colElem = NQumir::MakeIntrusive<TIndexExpr>(loc, ident("cols"), numI64(idx));
         bodyStmts.push_back(var(name, columnValueType));
         bodyStmts.push_back(assign(name, colElem));
-        auto materialized = BuildColumnValueAst(name, "i", name + "_proj", type, stringViewType);
+        auto materialized = BuildColumnValueAst(types, name, "i", name + "_proj", type, stringViewType);
         loopSetup.insert(loopSetup.end(),
             std::make_move_iterator(materialized.Setup.begin()),
             std::make_move_iterator(materialized.Setup.end()));
@@ -1490,7 +1495,7 @@ NQumir::NAst::TExprPtr GenProjectKernelAst(
             // Bind the column as a Nullable[T] struct so nullable operators apply.
             loopSetup.push_back(var(valueName, nullableType(materialized.ValueType)));
             loopSetup.push_back(assign(valueName, BuildNullableStruct(
-                std::move(materialized.Value), std::move(materialized.IsValid),
+                types, std::move(materialized.Value), std::move(materialized.IsValid),
                 materialized.ValueType)));
         } else {
             loopSetup.push_back(var(valueName, materialized.ValueType));
@@ -1502,10 +1507,7 @@ NQumir::NAst::TExprPtr GenProjectKernelAst(
     // each field has its own physical output buffer.
     std::vector<TTypePtr> outputTypes;
     for (const auto& type : computedTypes) {
-        auto structure = TMaybeType<TStructType>(
-            !IsNullableType(type) ? UnwrapNamedType(type) : TTypePtr{});
-        if (structure) {
-            const auto structType = structure.Cast();
+        if (const auto* structType = RecordFields(type)) {
             for (const auto& [_, fieldType] : structType->Fields) {
                 outputTypes.push_back(fieldType);
             }
@@ -1520,13 +1522,13 @@ NQumir::NAst::TExprPtr GenProjectKernelAst(
     for (size_t k = 0; k < numComputed; ++k) {
         const bool nullable = IsNullableType(outputTypes[k]);
         auto valueType = nullable ? UnwrapNullableType(outputTypes[k]) : outputTypes[k];
-        auto ptrTk = std::make_shared<TPointerType>(ColumnBufferElementType(valueType));
-        auto outK = std::make_shared<TIndexExpr>(loc, ident("out"), numI64(int64_t(k)));
+        auto ptrTk = types.MakePointer(ColumnBufferElementType(types, valueType));
+        auto outK = NQumir::MakeIntrusive<TIndexExpr>(loc, ident("out"), numI64(int64_t(k)));
         bodyStmts.push_back(var("out_" + std::to_string(k), ptrTk));
         bodyStmts.push_back(assign("out_" + std::to_string(k),
             cast(cast(outK, i64Type), ptrTk)));
         if (nullable) {
-            auto outMaskK = std::make_shared<TIndexExpr>(loc, ident("out"),
+            auto outMaskK = NQumir::MakeIntrusive<TIndexExpr>(loc, ident("out"),
                 numI64(int64_t(numComputed + k)));
             bodyStmts.push_back(var("out_mask_" + std::to_string(k), ptrU8Type));
             bodyStmts.push_back(assign("out_mask_" + std::to_string(k),
@@ -1541,13 +1543,13 @@ NQumir::NAst::TExprPtr GenProjectKernelAst(
         const size_t k = outputIndex++;
         auto emitValue = [&](TExprPtr result) {
             const auto valueType = UnwrapNullableType(type);
-            if (TMaybeType<TBoolType>(UnwrapNamedType(valueType))) {
-                loopSetup.push_back(std::make_shared<TCallExpr>(loc,
+            if (TMaybeType<TBoolType>(UnwrapNamedValueType(valueType))) {
+                loopSetup.push_back(NQumir::MakeIntrusive<TCallExpr>(loc,
                     ident("qdb_bitmap_set_valid"),
                     std::vector<TExprPtr>{ident("out_" + std::to_string(k)),
                         ident("i"), cast(std::move(result), valueType)}));
             } else {
-                loopSetup.push_back(std::make_shared<TArrayAssignExpr>(loc,
+                loopSetup.push_back(NQumir::MakeIntrusive<TArrayAssignExpr>(loc,
                     "out_" + std::to_string(k), std::vector<TExprPtr>{ident("i")},
                     cast(std::move(result), valueType)));
             }
@@ -1559,7 +1561,7 @@ NQumir::NAst::TExprPtr GenProjectKernelAst(
             loopSetup.push_back(var(rName, nt));
             loopSetup.push_back(assign(rName, std::move(value)));
             emitValue(field(rName, "Value"));
-            loopSetup.push_back(std::make_shared<TCallExpr>(loc,
+            loopSetup.push_back(NQumir::MakeIntrusive<TCallExpr>(loc,
                 ident("qdb_bitmap_set_valid"),
                 std::vector<TExprPtr>{ident("out_mask_" + std::to_string(k)),
                     ident("i"), field(rName, "Valid")}));
@@ -1568,11 +1570,8 @@ NQumir::NAst::TExprPtr GenProjectKernelAst(
         }
     };
     for (size_t k = 0; k < computedExprs.size(); ++k) {
-        auto structure = TMaybeType<TStructType>(
-            !IsNullableType(computedTypes[k])
-                ? UnwrapNamedType(computedTypes[k])
-                : TTypePtr{});
-        if (!structure) {
+        const auto* structType = RecordFields(computedTypes[k]);
+        if (!structType) {
             emitOutput(std::move(computedExprs[k]), computedTypes[k]);
             continue;
         }
@@ -1580,7 +1579,6 @@ NQumir::NAst::TExprPtr GenProjectKernelAst(
         const std::string resultName = "project_result_" + std::to_string(k);
         loopSetup.push_back(var(resultName, computedTypes[k]));
         loopSetup.push_back(assign(resultName, std::move(computedExprs[k])));
-        const auto structType = structure.Cast();
         for (const auto& [fieldName, fieldType] : structType->Fields) {
             emitOutput(field(resultName, fieldName), fieldType);
         }
@@ -1589,29 +1587,29 @@ NQumir::NAst::TExprPtr GenProjectKernelAst(
     // the errors of a deferred first pass are raised for the output rows alone.
     bodyStmts.push_back(var("input_selection_is_null", boolType));
     bodyStmts.push_back(assign("input_selection_is_null",
-        std::make_shared<TBinaryExpr>(loc, TOperator("=="),
+        NQumir::MakeIntrusive<TBinaryExpr>(loc, TOperator("=="),
             cast(ident("__input_selection__"), i64Type), numI64(0))));
-    auto u8Zero = std::make_shared<TNumberExpr>(loc, int64_t(0));
+    auto u8Zero = NQumir::MakeIntrusive<TNumberExpr>(loc, int64_t(0), types);
     u8Zero->Type = u8Type;
-    auto inputSelected = std::make_shared<TBinaryExpr>(loc, TOperator("||"),
+    auto inputSelected = NQumir::MakeIntrusive<TBinaryExpr>(loc, TOperator("||"),
         ident("input_selection_is_null"),
-        std::make_shared<TBinaryExpr>(loc, TOperator("!="),
-            std::make_shared<TIndexExpr>(loc, ident("__input_selection__"), ident("i")),
+        NQumir::MakeIntrusive<TBinaryExpr>(loc, TOperator("!="),
+            NQumir::MakeIntrusive<TIndexExpr>(loc, ident("__input_selection__"), ident("i")),
             std::move(u8Zero)));
     std::vector<TExprPtr> loopBody;
-    loopBody.push_back(std::make_shared<TIfExpr>(loc, std::move(inputSelected),
-        std::make_shared<TBlockExpr>(loc, std::move(loopSetup)), nullptr));
+    loopBody.push_back(NQumir::MakeIntrusive<TIfExpr>(loc, std::move(inputSelected),
+        NQumir::MakeIntrusive<TBlockExpr>(loc, std::move(loopSetup)), nullptr));
     loopBody.push_back(assign("i",
-        std::make_shared<TBinaryExpr>(loc, TOperator("+"), ident("i"), numI64(1))));
-    auto cond = std::make_shared<TBinaryExpr>(loc, TOperator("<"), ident("i"), ident("n"));
-    bodyStmts.push_back(std::make_shared<TWhileStmtExpr>(loc, cond,
-        std::make_shared<TBlockExpr>(loc, std::move(loopBody))));
+        NQumir::MakeIntrusive<TBinaryExpr>(loc, TOperator("+"), ident("i"), numI64(1))));
+    auto cond = NQumir::MakeIntrusive<TBinaryExpr>(loc, TOperator("<"), ident("i"), ident("n"));
+    bodyStmts.push_back(NQumir::MakeIntrusive<TWhileStmtExpr>(loc, cond,
+        NQumir::MakeIntrusive<TBlockExpr>(loc, std::move(loopBody))));
 
-    auto funBody = std::make_shared<TBlockExpr>(loc, std::move(bodyStmts));
-    auto funDecl = std::make_shared<TFunDecl>(loc, "<project>",
+    auto funBody = NQumir::MakeIntrusive<TBlockExpr>(loc, std::move(bodyStmts));
+    auto funDecl = NQumir::MakeIntrusive<TFunDecl>(loc, "<project>",
         std::vector<TGenericParam>{},
-        std::move(params), funBody, std::make_shared<TVoidType>());
-    return std::make_shared<TBlockExpr>(loc, std::vector<TExprPtr>{funDecl});
+        std::move(params), funBody, types.Make<TVoidType>());
+    return NQumir::MakeIntrusive<TBlockExpr>(loc, std::vector<TExprPtr>{funDecl});
 }
 
 TAggReducerLayout BuildAggReducerLayout(
@@ -1683,22 +1681,24 @@ constexpr int64_t AggRowBlockRows = 16384;
 class TAggregateUpdateAst {
 public:
     TAggregateUpdateAst(
+        NQumir::NAst::TTypeFactory& types,
         const NQumir::NAst::TStructType& inputType,
         const TAggregateKeyDescriptor& key,
         const TAggReducerLayout& layout,
         const NQumir::NAst::TTypePtr& columnType,
         const NQumir::NAst::TTypePtr& rowSetType,
         bool hasPrecomputedHash)
-        : Key_(key)
+        : Types_(types)
+        , Key_(key)
         , Layout_(layout)
-        , PtrColumnType_(ColumnPointerType(columnType, rowSetType))
-        , ColumnValueType_(PointerPointeeOr(PtrColumnType_, columnType))
+        , PtrColumnType_(ColumnPointerType(Types_, columnType, rowSetType))
+        , ColumnValueType_(PointerPointeeOr(Types_, PtrColumnType_, columnType))
         , StringViewType_(FindStringViewType(key.LookupType))
         , HasPrecomputedHash_(hasPrecomputedHash)
     {
         using namespace NQumir::NAst;
         if (!StringViewType_ && HasStringReducer(layout)) {
-            StringViewType_ = std::make_shared<TNamedType>("StringView", nullptr);
+            StringViewType_ = QumirDbNamedType(Types_, "StringView");
         }
         // Each argument column is read at most once per row. Count-only
         // arguments need no value; nullable ones read only their validity.
@@ -1717,11 +1717,11 @@ public:
             const auto valueType = UnwrapNullableType(ac.Type);
             if (IsBinIntValueType(valueType)) {
                 ac.ValueKind = EAggValueKind::BinInt;
-            } else if (TMaybeType<TFloatType>(UnwrapNamedType(valueType))) {
+            } else if (TMaybeType<TFloatType>(UnwrapNamedValueType(valueType))) {
                 ac.ValueKind = EAggValueKind::Float64;
-            } else if (TMaybeType<TStringType>(UnwrapNamedType(valueType))) {
+            } else if (TMaybeType<TStringType>(UnwrapNamedValueType(valueType))) {
                 ac.ValueKind = EAggValueKind::String;
-            } else if (TMaybeType<TBoolType>(UnwrapNamedType(valueType))) {
+            } else if (TMaybeType<TBoolType>(UnwrapNamedValueType(valueType))) {
                 ac.ValueKind = EAggValueKind::Bool;
             }
             ac.Nullable = IsNullableType(ac.Type);
@@ -1736,19 +1736,19 @@ public:
     // The batch row count, selection and the columns the update reads.
     std::vector<NQumir::NAst::TExprPtr> Prologue() const {
         using namespace NQumir::NAst;
-        auto u8Type = std::make_shared<TIntegerType>(TIntegerType::U8);
-        auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
+        auto u8Type = Types_.MakeInteger(TIntegerType::U8);
+        auto u64Type = Types_.MakeInteger(TIntegerType::U64);
         std::vector<TExprPtr> stmts;
         auto bind = [&](const std::string& name, TTypePtr type, TExprPtr value) {
             stmts.push_back(NOz::Var(name, std::move(type)));
             stmts.push_back(NOz::Assign(name, std::move(value)));
         };
         bind("n", I64(), NOz::Field("batch", "RowCount"));
-        bind("selection", std::make_shared<TPointerType>(u8Type),
+        bind("selection", Types_.MakePointer(u8Type),
             NOz::Field("batch", "Selection"));
         bind("cols", PtrColumnType_, NOz::Field("batch", "Columns"));
         if (HasPrecomputedHash_) {
-            bind("hash_ptr", std::make_shared<TPointerType>(u64Type),
+            bind("hash_ptr", Types_.MakePointer(u64Type),
                 NOz::Field("batch", "Hash"));
         }
         for (size_t fieldIndex = 0; fieldIndex < Key_.Fields.size(); ++fieldIndex) {
@@ -1759,40 +1759,40 @@ public:
             if (ac.Materialized) {
                 bind("arg_column_" + std::to_string(idx), ColumnValueType_, ColumnAt(idx));
             } else if (ac.NeedValue) {
-                auto ptrValType = std::make_shared<TPointerType>(
-                    AggregateStorageType(UnwrapNullableType(ac.Type)));
+                auto ptrValType = Types_.MakePointer(
+                    AggregateStorageType(Types_, UnwrapNullableType(ac.Type)));
                 bind("values_" + std::to_string(idx), ptrValType, NOz::Cast(
                     NOz::Cast(NOz::Field(ColumnAt(idx), "Data"), I64()), ptrValType));
             }
         }
-        bind("selection_is_null", std::make_shared<TBoolType>(),
+        bind("selection_is_null", Types_.Make<TBoolType>(),
             NOz::Bin(TOperator("=="), NOz::Cast(NOz::Ident("selection"), I64()),
-                NOz::TypedInt(0, I64())));
+                NOz::TypedInt(Types_, 0, I64())));
         return stmts;
     }
 
     NQumir::NAst::TExprPtr Selected(const std::string& row) const {
         using namespace NQumir::NAst;
-        auto u8Type = std::make_shared<TIntegerType>(TIntegerType::U8);
+        auto u8Type = Types_.MakeInteger(TIntegerType::U8);
         return NOz::Bin(TOperator("||"), NOz::Ident("selection_is_null"),
             NOz::Bin(TOperator("!="), NOz::Index("selection", NOz::Ident(row)),
-                NOz::TypedInt(0, u8Type)));
+                NOz::TypedInt(Types_, 0, u8Type)));
     }
 
     // key_value and hash_value of batch row `row`.
     std::vector<NQumir::NAst::TExprPtr> Key(const std::string& row) const {
         using namespace NQumir::NAst;
         NQumir::TLocation loc{};
-        auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
+        auto u64Type = Types_.MakeInteger(TIntegerType::U64);
         std::vector<TExprPtr> stmts;
         std::vector<TColumnValueAst> keyFields;
         keyFields.reserve(Key_.Fields.size());
         for (size_t fieldIndex = 0; fieldIndex < Key_.Fields.size(); ++fieldIndex) {
             auto logicalType = Key_.Fields[fieldIndex].IsNullable
-                ? std::make_shared<TNullable>(Key_.Fields[fieldIndex].Type)
+                ? MakeNullableType(Types_, Key_.Fields[fieldIndex].Type)
                 : Key_.Fields[fieldIndex].Type;
             keyFields.push_back(BuildColumnValueAst(
-                "key_column_" + std::to_string(fieldIndex), row,
+                Types_, "key_column_" + std::to_string(fieldIndex), row,
                 "key_value_" + std::to_string(fieldIndex),
                 std::move(logicalType), StringViewType_));
             stmts.insert(stmts.end(),
@@ -1801,7 +1801,7 @@ public:
         }
         auto namedKey = TMaybeType<TNamedType>(Key_.LookupType);
         auto keyStruct = namedKey
-            ? TMaybeType<TStructType>(namedKey.Cast()->UnderlyingType)
+            ? TMaybeType<TStructType>(namedKey.Cast()->UnderlyingType())
             : TMaybeType<TStructType>(Key_.LookupType);
         if (!keyStruct) {
             throw std::invalid_argument(
@@ -1828,7 +1828,7 @@ public:
                 : keyFields[fieldIndex].Value);
         }
         stmts.push_back(NOz::Var("key_value", Key_.LookupType));
-        stmts.push_back(NOz::Assign("key_value", std::make_shared<TStructConstructExpr>(
+        stmts.push_back(NOz::Assign("key_value", NQumir::MakeIntrusive<TStructConstructExpr>(
             loc, Key_.LookupType, std::move(fields))));
         stmts.push_back(NOz::Var("hash_value", u64Type));
         auto computed = NOz::Cast(NOz::Call("rh_hash", {NOz::Ident("key_value")}), u64Type);
@@ -1838,7 +1838,7 @@ public:
             // gather path leaves it null, so fall back to rh_hash per row.
             stmts.push_back(NOz::If(
                 NOz::Bin(TOperator("!="), NOz::Cast(NOz::Ident("hash_ptr"), I64()),
-                    NOz::TypedInt(0, I64())),
+                    NOz::TypedInt(Types_, 0, I64())),
                 NOz::Block({NOz::Assign("hash_value",
                     NOz::Index("hash_ptr", NOz::Ident(row)))}),
                 NOz::Block({NOz::Assign("hash_value", std::move(computed))})));
@@ -1853,13 +1853,13 @@ public:
     std::vector<NQumir::NAst::TExprPtr> Arguments(const std::string& row) const {
         using namespace NQumir::NAst;
         NQumir::TLocation loc{};
-        auto boolType = std::make_shared<TBoolType>();
+        auto boolType = Types_.Make<TBoolType>();
         std::vector<TExprPtr> stmts;
         for (const auto& [idx, ac] : ArgColumns_) {
             std::optional<TColumnValueAst> mat;
             if (ac.Materialized) {
                 mat = BuildColumnValueAst(
-                    "arg_column_" + std::to_string(idx), row,
+                    Types_, "arg_column_" + std::to_string(idx), row,
                     "arg_value_" + std::to_string(idx), ac.Type,
                     StringViewType_, ac.NeedValue);
                 stmts.insert(stmts.end(),
@@ -1876,11 +1876,11 @@ public:
             }
             // One float state kind: an f32 argument is widened to f64 before the bitcast.
             auto floatBits = [&](TExprPtr value) -> TExprPtr {
-                auto floating = TMaybeType<TFloatType>(UnwrapNamedType(UnwrapNullableType(ac.Type)));
+                auto floating = TMaybeType<TFloatType>(UnwrapNamedValueType(UnwrapNullableType(ac.Type)));
                 if (floating && floating.Cast()->BitWidth() == 32) {
-                    value = NOz::Cast(std::move(value), std::make_shared<TFloatType>());
+                    value = NOz::Cast(std::move(value), Types_.MakeFloat());
                 }
-                return std::make_shared<TBitcastExpr>(loc, std::move(value), I64());
+                return NQumir::MakeIntrusive<TBitcastExpr>(loc, std::move(value), I64());
             };
             TExprPtr valExpr;
             if (mat) {
@@ -1891,7 +1891,7 @@ public:
                     valExpr = floatBits(mat->Value);
                 } else if (ac.ValueKind == EAggValueKind::Bool) {
                     // Not a cast: an integer cast sign-extends TRUE to -1.
-                    valExpr = NOz::If(mat->Value, NOz::TypedInt(1, I64()), NOz::TypedInt(0, I64()));
+                    valExpr = NOz::If(mat->Value, NOz::TypedInt(Types_, 1, I64()), NOz::TypedInt(Types_, 0, I64()));
                 } else {
                     valExpr = NOz::Cast(mat->Value, I64());
                 }
@@ -1906,9 +1906,9 @@ public:
                 }
             }
             auto argType = ac.ValueKind == EAggValueKind::BinInt
-                ? BinIntStorageType()
+                ? BinIntStorageType(Types_)
                 : (ac.ValueKind == EAggValueKind::String
-                    ? AsNamed("StringView", StringViewType_)
+                    ? AsNamed(Types_, "StringView", StringViewType_)
                     : I64());
             const std::string vname = "arg_val_" + std::to_string(idx);
             stmts.push_back(NOz::Var(vname, argType));
@@ -1928,8 +1928,8 @@ public:
         const std::function<NQumir::NAst::TExprPtr(int)>& buffer) const
     {
         using namespace NQumir::NAst;
-        auto ptrI64Type = std::make_shared<TPointerType>(I64());
-        auto numI64 = [&](int64_t value) { return NOz::TypedInt(value, I64()); };
+        auto ptrI64Type = Types_.MakePointer(I64());
+        auto numI64 = [&](int64_t value) { return NOz::TypedInt(Types_, value, I64()); };
         auto binary = [&](const char* op, TExprPtr left, TExprPtr right) {
             return NOz::Bin(TOperator(op), std::move(left), std::move(right));
         };
@@ -1977,13 +1977,13 @@ public:
             auto validI = [&]() -> TExprPtr {
                 return info.NeedsValidity && ArgColumns_.at(info.ArgColumnIndex).Nullable
                     ? NOz::Ident("arg_valid_" + std::to_string(info.ArgColumnIndex))
-                    : NOz::Bool(true);
+                    : NOz::Bool(Types_, true);
             };
             if (info.IsString()) {
                 auto invoke = [&](TExprPtr seed) -> TExprPtr {
                     return NOz::Call("agg_string_reduce", {
                         NOz::Ident(bufName), NOz::Ident(hiBufName), NOz::Ident("state_slot"),
-                        valueI(), NOz::Bool(info.Func == "min"), std::move(seed)});
+                        valueI(), NOz::Bool(Types_, info.Func == "min"), std::move(seed)});
                 };
                 if (!info.NeedsValidity) {
                     stmts.push_back(NOz::If(
@@ -2030,7 +2030,7 @@ public:
 
 private:
     struct TArgColumn {
-        NQumir::NAst::TTypePtr Type;
+        NQumir::NAst::TTypePtr Type = nullptr;
         EAggValueKind ValueKind = EAggValueKind::Int64;
         bool Nullable = false;
         bool NeedValue = false;
@@ -2038,19 +2038,20 @@ private:
         bool Materialized = false;
     };
 
-    static NQumir::NAst::TTypePtr I64() {
-        return std::make_shared<NQumir::NAst::TIntegerType>();
+    NQumir::NAst::TTypePtr I64() const {
+        return Types_.MakeInteger();
     }
 
-    static NQumir::NAst::TExprPtr ColumnAt(int32_t index) {
-        return NOz::Index("cols", NOz::TypedInt(index, I64()));
+    NQumir::NAst::TExprPtr ColumnAt(int32_t index) const {
+        return NOz::Index("cols", NOz::TypedInt(Types_, index, I64()));
     }
 
+    NQumir::NAst::TTypeFactory& Types_;
     const TAggregateKeyDescriptor& Key_;
     const TAggReducerLayout& Layout_;
-    NQumir::NAst::TTypePtr PtrColumnType_;
-    NQumir::NAst::TTypePtr ColumnValueType_;
-    NQumir::NAst::TTypePtr StringViewType_;
+    NQumir::NAst::TTypePtr PtrColumnType_ = nullptr;
+    NQumir::NAst::TTypePtr ColumnValueType_ = nullptr;
+    NQumir::NAst::TTypePtr StringViewType_ = nullptr;
     bool HasPrecomputedHash_ = false;
     std::map<int32_t, TArgColumn> ArgColumns_;
 };
@@ -2058,19 +2059,21 @@ private:
 // A pointer to state word `word` of the group row `rowVar` (tagged as in
 // agr_find_or_insert: the caller masks bit 0 off first).
 NQumir::NAst::TExprPtr RowStateWord(
+    NQumir::NAst::TTypeFactory& types,
     const std::string& rowVar, const TAggRowLayout& rows, int word)
 {
     using namespace NQumir::NAst;
-    auto i64Type = std::make_shared<TIntegerType>();
+    auto i64Type = types.MakeInteger();
     return NOz::Cast(
         NOz::Add(NOz::Cast(NOz::Ident(rowVar), i64Type),
-            NOz::TypedInt(rows.StateOffset + 8 * static_cast<int64_t>(word), i64Type)),
-        std::make_shared<TPointerType>(i64Type));
+            NOz::TypedInt(types, rows.StateOffset + 8 * static_cast<int64_t>(word), i64Type)),
+        types.MakePointer(i64Type));
 }
 
 } // namespace
 
 NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TStructType& inputType,
     const TAggregateKeyDescriptor& key,
     const TAggReducerLayout& layout,
@@ -2084,56 +2087,56 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     using namespace NQumir::NAst;
     NQumir::TLocation loc{};
 
-    auto i64Type = std::make_shared<TIntegerType>();
-    auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
-    auto ptrI64Type = std::make_shared<TPointerType>(i64Type);
-    auto ptrStoredKeyType = std::make_shared<TPointerType>(key.StoredType);
+    auto i64Type = types.MakeInteger();
+    auto u64Type = types.MakeInteger(TIntegerType::U64);
+    auto ptrI64Type = types.MakePointer(i64Type);
+    auto ptrStoredKeyType = types.MakePointer(key.StoredType);
 
     auto ident = [&](const std::string& name) -> TExprPtr {
-        return std::make_shared<TIdentExpr>(loc, name);
+        return NQumir::MakeIntrusive<TIdentExpr>(loc, name);
     };
     auto number = [&](int64_t value, TTypePtr type) -> TExprPtr {
-        auto result = std::make_shared<TNumberExpr>(loc, value);
+        auto result = NQumir::MakeIntrusive<TNumberExpr>(loc, value, types);
         result->Type = std::move(type);
         return result;
     };
     auto numI64 = [&](int64_t value) { return number(value, i64Type); };
     auto binary = [&](const char* op, TExprPtr left, TExprPtr right) -> TExprPtr {
-        return std::make_shared<TBinaryExpr>(
+        return NQumir::MakeIntrusive<TBinaryExpr>(
             loc, TOperator(op), std::move(left), std::move(right));
     };
     auto call = [&](const std::string& name, std::vector<TExprPtr> args) -> TExprPtr {
-        return std::make_shared<TCallExpr>(loc, ident(name), std::move(args));
+        return NQumir::MakeIntrusive<TCallExpr>(loc, ident(name), std::move(args));
     };
     auto cast = [&](TExprPtr expr, TTypePtr type) -> TExprPtr {
-        return std::make_shared<TCastExpr>(loc, std::move(expr), std::move(type));
+        return NQumir::MakeIntrusive<TCastExpr>(loc, std::move(expr), std::move(type));
     };
     auto assign = [&](const std::string& name, TExprPtr value) -> TExprPtr {
-        return std::make_shared<TAssignExpr>(loc, name, std::move(value));
+        return NQumir::MakeIntrusive<TAssignExpr>(loc, name, std::move(value));
     };
     auto var = [&](const std::string& name, TTypePtr type) -> TExprPtr {
-        return std::make_shared<TVarStmt>(loc, name, std::move(type));
+        return NQumir::MakeIntrusive<TVarStmt>(loc, name, std::move(type));
     };
     auto block = [&](std::vector<TExprPtr> stmts) -> TExprPtr {
-        return std::make_shared<TBlockExpr>(loc, std::move(stmts));
+        return NQumir::MakeIntrusive<TBlockExpr>(loc, std::move(stmts));
     };
     auto field = [&](const std::string& object, const std::string& name) -> TExprPtr {
-        return std::make_shared<TFieldAccessExpr>(loc, ident(object), name);
+        return NQumir::MakeIntrusive<TFieldAccessExpr>(loc, ident(object), name);
     };
 
-    auto hashTableRefType = std::make_shared<TReferenceType>(
-        AsNamed("HashTable", hashTableType));
-    auto rowSetRefType = std::make_shared<TReferenceType>(
-        AsNamed("TRowSet", rowSetType));
+    auto hashTableRefType = types.MakeReference(
+        AsNamed(types, "HashTable", hashTableType));
+    auto rowSetRefType = types.MakeReference(
+        AsNamed(types, "TRowSet", rowSetType));
     std::vector<TParam> params = {
-        std::make_shared<TVarStmt>(loc, "ht", hashTableRefType),
-        std::make_shared<TVarStmt>(loc, "batch", rowSetRefType),
-        std::make_shared<TVarStmt>(loc, "arg", i64Type),
-        std::make_shared<TVarStmt>(loc, "op", i64Type),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "ht", hashTableRefType),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "batch", rowSetRefType),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "arg", i64Type),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "op", i64Type),
     };
 
     const TAggregateUpdateAst row(
-        inputType, key, layout, columnType, rowSetType, hasPrecomputedHash);
+        types, inputType, key, layout, columnType, rowSetType, hasPrecomputedHash);
     std::vector<TExprPtr> update;
     if (rows) {
         update.push_back(NOz::If(call("agr_active", {ident("ht")}), block({
@@ -2148,7 +2151,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     update.push_back(var("is_new", i64Type));
     update.push_back(assign("is_new", numI64(0)));
     update.push_back(var("stored_witness", key.StoredType));
-    update.push_back(assign("stored_witness", ZeroValueExpr(key.StoredType)));
+    update.push_back(assign("stored_witness", ZeroValueExpr(types, key.StoredType)));
     update.push_back(var("i", i64Type));
     update.push_back(assign("i", numI64(0)));
 
@@ -2186,24 +2189,24 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
             NOz::Return(call("agg_rows_update", {ident("ht"), ident("batch"), ident("i")})),
         })));
     }
-    validBody.push_back(std::make_shared<TIfExpr>(loc,
+    validBody.push_back(NQumir::MakeIntrusive<TIfExpr>(loc,
         binary("<", ident("state_slot"), numI64(0)),
-        block({std::make_shared<TReturnExpr>(loc, numI64(-1))}), nullptr));
-    auto ptrPtrI64Type = std::make_shared<TPointerType>(ptrI64Type);
+        block({NQumir::MakeIntrusive<TReturnExpr>(loc, numI64(-1))}), nullptr));
+    auto ptrPtrI64Type = types.MakePointer(ptrI64Type);
     validBody.push_back(var("agg_buffers", ptrPtrI64Type));
     validBody.push_back(assign("agg_buffers", field("ht", "AggBuffers")));
     for (auto& stmt : row.Reducers([&](int index) {
-             return std::make_shared<TIndexExpr>(loc, ident("agg_buffers"), numI64(index));
+             return NQumir::MakeIntrusive<TIndexExpr>(loc, ident("agg_buffers"), numI64(index));
          }))
     {
         validBody.push_back(std::move(stmt));
     }
     process.push_back(block(std::move(validBody)));
     auto loop = block({
-        std::make_shared<TIfExpr>(loc, row.Selected("i"), block(std::move(process)), nullptr),
+        NQumir::MakeIntrusive<TIfExpr>(loc, row.Selected("i"), block(std::move(process)), nullptr),
         assign("i", binary("+", ident("i"), numI64(1))),
     });
-    update.push_back(std::make_shared<TWhileStmtExpr>(
+    update.push_back(NQumir::MakeIntrusive<TWhileStmtExpr>(
         loc, binary("<", ident("i"), ident("n")), std::move(loop)));
     update.push_back(numI64(0));
 
@@ -2218,14 +2221,14 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
         // column is NULL, which is how the update loop encodes a NULL key. Reducer
         // buffers remain at their identity (COUNT 0, validity 0).
         if (key.Fields.empty() || key.Fields[0].IsNullable ||
-            !TMaybeType<TIntegerType>(UnwrapNamedType(key.Fields[0].Type)))
+            !MaybeIntegerType(UnwrapNamedValueType(key.Fields[0].Type)))
         {
             throw std::invalid_argument(
                 "an aggregate with empty-input groups requires a leading integer key");
         }
         auto namedSeedKey = TMaybeType<TNamedType>(key.LookupType);
         auto seedKeyStruct = namedSeedKey
-            ? TMaybeType<TStructType>(namedSeedKey.Cast()->UnderlyingType)
+            ? TMaybeType<TStructType>(namedSeedKey.Cast()->UnderlyingType())
             : TMaybeType<TStructType>(key.LookupType);
         if (!seedKeyStruct) {
             throw std::invalid_argument("GenGenericAggregateDispatchAst: key must be a struct");
@@ -2233,12 +2236,12 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
         std::vector<TExprPtr> seed = {
             var("initialized", i64Type),
             assign("initialized", std::move(init)),
-            std::make_shared<TIfExpr>(loc,
+            NQumir::MakeIntrusive<TIfExpr>(loc,
                 binary("==", ident("initialized"), numI64(0)),
-                block({std::make_shared<TReturnExpr>(loc, numI64(0))}), nullptr),
+                block({NQumir::MakeIntrusive<TReturnExpr>(loc, numI64(0))}), nullptr),
             var("seed_key", key.LookupType),
             var("stored_witness", key.StoredType),
-            assign("stored_witness", ZeroValueExpr(key.StoredType)),
+            assign("stored_witness", ZeroValueExpr(types, key.StoredType)),
             var("is_new", i64Type),
             assign("is_new", numI64(0)),
             var("state_slot", i64Type),
@@ -2248,18 +2251,18 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
             for (const auto& [fieldName, fieldType] : seedKeyStruct.Cast()->Fields) {
                 fields.push_back(fieldName == "key_0"
                     ? number(id, key.Fields[0].Type)
-                    : ZeroValueExpr(fieldType));
+                    : ZeroValueExpr(types, fieldType));
             }
-            seed.push_back(assign("seed_key", std::make_shared<TStructConstructExpr>(
+            seed.push_back(assign("seed_key", NQumir::MakeIntrusive<TStructConstructExpr>(
                 loc, key.LookupType, std::move(fields))));
             seed.push_back(assign("state_slot", call(upsertName, {
                 ident("ht"), ident("seed_key"), ident("stored_witness"),
                 ident("is_new"), cast(call("rh_hash", {ident("seed_key")}), u64Type),
             })));
-            seed.push_back(std::make_shared<TIfExpr>(loc,
+            seed.push_back(NQumir::MakeIntrusive<TIfExpr>(loc,
                 binary("<", ident("state_slot"), numI64(0)),
                 block({call("aht_destroy", {ident("ht")}),
-                    std::make_shared<TReturnExpr>(loc, numI64(0))}), nullptr));
+                    NQumir::MakeIntrusive<TReturnExpr>(loc, numI64(0))}), nullptr));
         }
         seed.push_back(numI64(1));
         init = block(std::move(seed));
@@ -2288,14 +2291,15 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     }
     dispatch = NOz::If(opIs(1), block(std::move(update)), std::move(dispatch));
     dispatch = NOz::If(opIs(0), std::move(init), std::move(dispatch));
-    auto body = std::make_shared<TBlockExpr>(loc,
-        std::vector<TExprPtr>{std::make_shared<TReturnExpr>(loc, dispatch)});
-    auto function = std::make_shared<TFunDecl>(
+    auto body = NQumir::MakeIntrusive<TBlockExpr>(loc,
+        std::vector<TExprPtr>{NQumir::MakeIntrusive<TReturnExpr>(loc, dispatch)});
+    auto function = NQumir::MakeIntrusive<TFunDecl>(
         loc, "agg_dispatch", std::vector<TGenericParam>{}, std::move(params), std::move(body), i64Type);
-    return std::make_shared<TBlockExpr>(loc, std::vector<TExprPtr>{function});
+    return NQumir::MakeIntrusive<TBlockExpr>(loc, std::vector<TExprPtr>{function});
 }
 
 NQumir::NAst::TExprPtr GenGenericAggregateRowsUpdateAst(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TStructType& inputType,
     const TAggregateKeyDescriptor& key,
     const TAggReducerLayout& layout,
@@ -2306,12 +2310,12 @@ NQumir::NAst::TExprPtr GenGenericAggregateRowsUpdateAst(
     bool hasPrecomputedHash)
 {
     using namespace NQumir::NAst;
-    auto i64Type = std::make_shared<TIntegerType>();
-    auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
-    auto u8Type = std::make_shared<TIntegerType>(TIntegerType::U8);
-    auto ptrKeyType = std::make_shared<TPointerType>(key.LookupType);
-    auto ptrStoredKeyType = std::make_shared<TPointerType>(key.StoredType);
-    auto numI64 = [&](int64_t value) { return NOz::TypedInt(value, i64Type); };
+    auto i64Type = types.MakeInteger();
+    auto u64Type = types.MakeInteger(TIntegerType::U64);
+    auto u8Type = types.MakeInteger(TIntegerType::U8);
+    auto ptrKeyType = types.MakePointer(key.LookupType);
+    auto ptrStoredKeyType = types.MakePointer(key.StoredType);
+    auto numI64 = [&](int64_t value) { return NOz::TypedInt(types, value, i64Type); };
     auto binary = [&](const char* op, TExprPtr left, TExprPtr right) {
         return NOz::Bin(TOperator(op), std::move(left), std::move(right));
     };
@@ -2323,10 +2327,10 @@ NQumir::NAst::TExprPtr GenGenericAggregateRowsUpdateAst(
     };
 
     const TAggregateUpdateAst row(
-        inputType, key, layout, columnType, rowSetType, hasPrecomputedHash);
+        types, inputType, key, layout, columnType, rowSetType, hasPrecomputedHash);
     NOz::TFunBuilder builder("agg_rows_update");
-    builder.Param("ht", std::make_shared<TReferenceType>(AsNamed("HashTable", hashTableType)))
-        .Param("batch", std::make_shared<TReferenceType>(AsNamed("TRowSet", rowSetType)))
+    builder.Param("ht", types.MakeReference(AsNamed(types, "HashTable", hashTableType)))
+        .Param("batch", types.MakeReference(AsNamed(types, "TRowSet", rowSetType)))
         .Param("start", i64Type)
         .Return(i64Type);
     for (auto& stmt : row.Prologue()) {
@@ -2339,13 +2343,13 @@ NQumir::NAst::TExprPtr GenGenericAggregateRowsUpdateAst(
                 numI64(rows.KeyStride),
             })),
             failure()))
-        .Var("hashes", std::make_shared<TPointerType>(u64Type))
+        .Var("hashes", types.MakePointer(u64Type))
         .Assign("hashes", scratch("Hashes"))
-        .Var("rows", std::make_shared<TPointerType>(i64Type))
+        .Var("rows", types.MakePointer(i64Type))
         .Assign("rows", scratch("Rows"))
-        .Var("keys", std::make_shared<TPointerType>(u8Type))
+        .Var("keys", types.MakePointer(u8Type))
         .Assign("keys", scratch("Keys"))
-        .Var("groups", std::make_shared<TPointerType>(u64Type))
+        .Var("groups", types.MakePointer(u64Type))
         .Assign("groups", scratch("Entries"))
         .Var("i", i64Type)
         .Assign("i", NOz::Ident("start"));
@@ -2373,11 +2377,11 @@ NQumir::NAst::TExprPtr GenGenericAggregateRowsUpdateAst(
         NOz::Assign("group", NOz::Index("groups", NOz::Ident("j"))),
         NOz::Var("is_new", i64Type),
         NOz::Assign("is_new", NOz::Cast(
-            binary("&", NOz::Ident("group"), NOz::TypedInt(1, u64Type)), i64Type)),
-        NOz::Var("group_row", std::make_shared<TPointerType>(u8Type)),
+            binary("&", NOz::Ident("group"), NOz::TypedInt(types, 1, u64Type)), i64Type)),
+        NOz::Var("group_row", types.MakePointer(u8Type)),
         NOz::Assign("group_row", NOz::Cast(NOz::Cast(
-            binary("&", NOz::Ident("group"), NOz::TypedInt(-2, u64Type)), i64Type),
-            std::make_shared<TPointerType>(u8Type))),
+            binary("&", NOz::Ident("group"), NOz::TypedInt(types, -2, u64Type)), i64Type),
+            types.MakePointer(u8Type))),
         NOz::Var("state_slot", i64Type),
         NOz::Assign("state_slot", numI64(0)),
     };
@@ -2385,7 +2389,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateRowsUpdateAst(
         apply.push_back(std::move(stmt));
     }
     for (auto& stmt : row.Reducers([&](int word) {
-             return RowStateWord("group_row", rows, word);
+             return RowStateWord(types, "group_row", rows, word);
          }))
     {
         apply.push_back(std::move(stmt));
@@ -2424,6 +2428,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateRowsUpdateAst(
 }
 
 NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
+    NQumir::NAst::TTypeFactory& types,
     const TAggregateKeyDescriptor& key,
     const TAggReducerLayout& layout,
     NQumir::NAst::TTypePtr hashTableType,
@@ -2433,52 +2438,52 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
     using namespace NQumir::NAst;
     NQumir::TLocation loc{};
 
-    auto i64Type = std::make_shared<TIntegerType>();
-    auto u8Type = std::make_shared<TIntegerType>(TIntegerType::U8);
-    auto ptrKeyType = std::make_shared<TPointerType>(key.KeyType);
-    auto ptrU8Type = std::make_shared<TPointerType>(u8Type);
-    auto ptrPtrU8Type = std::make_shared<TPointerType>(ptrU8Type);
+    auto i64Type = types.MakeInteger();
+    auto u8Type = types.MakeInteger(TIntegerType::U8);
+    auto ptrKeyType = types.MakePointer(key.KeyType);
+    auto ptrU8Type = types.MakePointer(u8Type);
+    auto ptrPtrU8Type = types.MakePointer(ptrU8Type);
 
     auto numI64 = [&](int64_t value) -> TExprPtr {
-        auto expr = std::make_shared<TNumberExpr>(loc, value);
+        auto expr = NQumir::MakeIntrusive<TNumberExpr>(loc, value, types);
         expr->Type = i64Type;
         return expr;
     };
-    auto ptrI64Type = std::make_shared<TPointerType>(i64Type);
-    auto ptrPtrI64Type = std::make_shared<TPointerType>(ptrI64Type);
+    auto ptrI64Type = types.MakePointer(i64Type);
+    auto ptrPtrI64Type = types.MakePointer(ptrI64Type);
     auto ptrColumnType = columnType
-        ? std::make_shared<TPointerType>(
-            AsNamed("TColumn", columnType))
+        ? types.MakePointer(
+            AsNamed(types, "TColumn", columnType))
         : nullptr;
-    auto hashTableRefType = std::make_shared<TReferenceType>(
-        AsNamed("HashTable", std::move(hashTableType)));
+    auto hashTableRefType = types.MakeReference(
+        AsNamed(types, "HashTable", std::move(hashTableType)));
     auto ident = [&](const std::string& name) -> TExprPtr {
-        return std::make_shared<TIdentExpr>(loc, name);
+        return NQumir::MakeIntrusive<TIdentExpr>(loc, name);
     };
     auto binary = [&](const char* op, TExprPtr left, TExprPtr right) -> TExprPtr {
-        return std::make_shared<TBinaryExpr>(
+        return NQumir::MakeIntrusive<TBinaryExpr>(
             loc, TOperator(op), std::move(left), std::move(right));
     };
     auto index = [&](TExprPtr object, TExprPtr slot) -> TExprPtr {
-        return std::make_shared<TIndexExpr>(loc, std::move(object), std::move(slot));
+        return NQumir::MakeIntrusive<TIndexExpr>(loc, std::move(object), std::move(slot));
     };
 
     std::vector<TParam> params = {
-        std::make_shared<TVarStmt>(loc, "ht", hashTableRefType),
-        std::make_shared<TVarStmt>(loc, "columns", ptrColumnType),
-        std::make_shared<TVarStmt>(loc, "output_buffers", ptrPtrI64Type),
-        std::make_shared<TVarStmt>(loc, "output_agg_masks", ptrPtrU8Type),
-        std::make_shared<TVarStmt>(loc, "output_capacity", i64Type),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "ht", hashTableRefType),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "columns", ptrColumnType),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "output_buffers", ptrPtrI64Type),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "output_agg_masks", ptrPtrU8Type),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "output_capacity", i64Type),
     };
 
     std::vector<TExprPtr> bodyStmts;
-    bodyStmts.push_back(std::make_shared<TVarStmt>(loc, "result", i64Type));
-    bodyStmts.push_back(std::make_shared<TAssignExpr>(loc, "result",
-        std::make_shared<TFieldAccessExpr>(loc, ident("ht"), "Size")));
-    bodyStmts.push_back(std::make_shared<TIfExpr>(loc,
+    bodyStmts.push_back(NQumir::MakeIntrusive<TVarStmt>(loc, "result", i64Type));
+    bodyStmts.push_back(NQumir::MakeIntrusive<TAssignExpr>(loc, "result",
+        NQumir::MakeIntrusive<TFieldAccessExpr>(loc, ident("ht"), "Size")));
+    bodyStmts.push_back(NQumir::MakeIntrusive<TIfExpr>(loc,
         binary("<", ident("output_capacity"), ident("result")),
-        std::make_shared<TBlockExpr>(loc, std::vector<TExprPtr>{
-            std::make_shared<TAssignExpr>(loc, "result", numI64(-1)),
+        NQumir::MakeIntrusive<TBlockExpr>(loc, std::vector<TExprPtr>{
+            NQumir::MakeIntrusive<TAssignExpr>(loc, "result", numI64(-1)),
         }),
         nullptr));
 
@@ -2487,7 +2492,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
     const bool slotOrder = !HasStringReducer(layout) &&
         std::ranges::none_of(key.Fields, [](const auto& field) {
             return static_cast<bool>(
-                TMaybeType<TStringType>(UnwrapNamedType(field.Type)));
+                TMaybeType<TStringType>(UnwrapNamedValueType(field.Type)));
         });
     const char* keyIndex = slotOrder ? "phys" : "slot";
     // The output columns, which both layouts fill.
@@ -2496,18 +2501,18 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
     // only while the table is swiss.
     std::vector<TExprPtr> swissOnly;
     auto& swiss = rows ? swissOnly : project;
-    swiss.push_back(std::make_shared<TVarStmt>(loc, "group_keys", ptrKeyType));
-    swiss.push_back(std::make_shared<TAssignExpr>(loc, "group_keys",
-        std::make_shared<TCastExpr>(loc,
-            std::make_shared<TFieldAccessExpr>(
+    swiss.push_back(NQumir::MakeIntrusive<TVarStmt>(loc, "group_keys", ptrKeyType));
+    swiss.push_back(NQumir::MakeIntrusive<TAssignExpr>(loc, "group_keys",
+        NQumir::MakeIntrusive<TCastExpr>(loc,
+            NQumir::MakeIntrusive<TFieldAccessExpr>(
                 loc, ident("ht"), slotOrder ? "Keys" : "GroupKeys"),
             ptrKeyType)));
     if (slotOrder) {
-        swiss.push_back(std::make_shared<TVarStmt>(loc, "ctrl", ptrU8Type));
-        swiss.push_back(std::make_shared<TAssignExpr>(loc, "ctrl",
-            std::make_shared<TFieldAccessExpr>(loc, ident("ht"), "Ctrl")));
-        swiss.push_back(std::make_shared<TVarStmt>(loc, "phys", i64Type));
-        swiss.push_back(std::make_shared<TAssignExpr>(loc, "phys", numI64(0)));
+        swiss.push_back(NQumir::MakeIntrusive<TVarStmt>(loc, "ctrl", ptrU8Type));
+        swiss.push_back(NQumir::MakeIntrusive<TAssignExpr>(loc, "ctrl",
+            NQumir::MakeIntrusive<TFieldAccessExpr>(loc, ident("ht"), "Ctrl")));
+        swiss.push_back(NQumir::MakeIntrusive<TVarStmt>(loc, "phys", i64Type));
+        swiss.push_back(NQumir::MakeIntrusive<TAssignExpr>(loc, "phys", numI64(0)));
     }
     if (!ptrColumnType) {
         throw std::invalid_argument(
@@ -2515,7 +2520,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
     }
     for (size_t fieldIndex = 0; fieldIndex < key.Fields.size(); ++fieldIndex) {
         const bool isString = TMaybeType<TStringType>(
-            UnwrapNamedType(key.Fields[fieldIndex].Type));
+            UnwrapNamedValueType(key.Fields[fieldIndex].Type));
         const std::string maskName =
             "output_mask_" + std::to_string(fieldIndex);
         // Index() on `columns` gives this field's address directly, scaled
@@ -2523,13 +2528,13 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
         // here (see column() in agg_finish_rowset, which fills this same
         // `columns` array).
         auto fieldIndexLit = [&]() {
-            return std::make_shared<TNumberExpr>(loc, static_cast<int64_t>(fieldIndex));
+            return NQumir::MakeIntrusive<TNumberExpr>(loc, static_cast<int64_t>(fieldIndex), types);
         };
-        auto column = std::make_shared<TIndexExpr>(loc, ident("columns"), fieldIndexLit());
+        auto column = NQumir::MakeIntrusive<TIndexExpr>(loc, ident("columns"), fieldIndexLit());
         if (key.Fields[fieldIndex].IsNullable) {
-            project.push_back(std::make_shared<TVarStmt>(loc, maskName, ptrU8Type));
-            project.push_back(std::make_shared<TAssignExpr>(loc, maskName,
-                std::make_shared<TFieldAccessExpr>(loc, column, "Mask")));
+            project.push_back(NQumir::MakeIntrusive<TVarStmt>(loc, maskName, ptrU8Type));
+            project.push_back(NQumir::MakeIntrusive<TAssignExpr>(loc, maskName,
+                NQumir::MakeIntrusive<TFieldAccessExpr>(loc, column, "Mask")));
         }
         if (isString) {
             const std::string dataName =
@@ -2538,85 +2543,85 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
                 "output_offsets_" + std::to_string(fieldIndex);
             const std::string copyResultName =
                 "output_copy_result_" + std::to_string(fieldIndex);
-            column = std::make_shared<TIndexExpr>(loc, ident("columns"), fieldIndexLit());
-            project.push_back(std::make_shared<TVarStmt>(loc, dataName, ptrU8Type));
-            project.push_back(std::make_shared<TAssignExpr>(loc, dataName,
-                std::make_shared<TCastExpr>(loc,
-                    std::make_shared<TCastExpr>(loc,
-                        std::make_shared<TFieldAccessExpr>(
+            column = NQumir::MakeIntrusive<TIndexExpr>(loc, ident("columns"), fieldIndexLit());
+            project.push_back(NQumir::MakeIntrusive<TVarStmt>(loc, dataName, ptrU8Type));
+            project.push_back(NQumir::MakeIntrusive<TAssignExpr>(loc, dataName,
+                NQumir::MakeIntrusive<TCastExpr>(loc,
+                    NQumir::MakeIntrusive<TCastExpr>(loc,
+                        NQumir::MakeIntrusive<TFieldAccessExpr>(
                             loc, column, "Data"), i64Type),
                     ptrU8Type)));
-            column = std::make_shared<TIndexExpr>(loc, ident("columns"), fieldIndexLit());
-            project.push_back(std::make_shared<TVarStmt>(
+            column = NQumir::MakeIntrusive<TIndexExpr>(loc, ident("columns"), fieldIndexLit());
+            project.push_back(NQumir::MakeIntrusive<TVarStmt>(
                 loc, offsetsName, ptrI64Type));
-            project.push_back(std::make_shared<TAssignExpr>(loc, offsetsName,
-                std::make_shared<TCastExpr>(loc,
-                    std::make_shared<TCastExpr>(loc,
-                        std::make_shared<TFieldAccessExpr>(
+            project.push_back(NQumir::MakeIntrusive<TAssignExpr>(loc, offsetsName,
+                NQumir::MakeIntrusive<TCastExpr>(loc,
+                    NQumir::MakeIntrusive<TCastExpr>(loc,
+                        NQumir::MakeIntrusive<TFieldAccessExpr>(
                             loc, column, "Offsets"), i64Type),
                     ptrI64Type)));
-            project.push_back(std::make_shared<TArrayAssignExpr>(loc,
+            project.push_back(NQumir::MakeIntrusive<TArrayAssignExpr>(loc,
                 offsetsName,
                 std::vector<TExprPtr>{
-                    std::make_shared<TNumberExpr>(loc, int64_t{0})},
-                std::make_shared<TNumberExpr>(loc, int64_t{0})));
-            project.push_back(std::make_shared<TVarStmt>(
+                    NQumir::MakeIntrusive<TNumberExpr>(loc, int64_t{0}, types)},
+                NQumir::MakeIntrusive<TNumberExpr>(loc, int64_t{0}, types)));
+            project.push_back(NQumir::MakeIntrusive<TVarStmt>(
                 loc, copyResultName, i64Type));
-            project.push_back(std::make_shared<TAssignExpr>(
+            project.push_back(NQumir::MakeIntrusive<TAssignExpr>(
                 loc, copyResultName,
-                std::make_shared<TNumberExpr>(loc, int64_t{0})));
+                NQumir::MakeIntrusive<TNumberExpr>(loc, int64_t{0}, types)));
             continue;
         }
         const std::string name = "output_key_" + std::to_string(fieldIndex);
-        auto ptrFieldType = std::make_shared<TPointerType>(
-            ColumnBufferElementType(key.Fields[fieldIndex].Type));
-        project.push_back(std::make_shared<TVarStmt>(loc, name, ptrFieldType));
-        column = std::make_shared<TIndexExpr>(loc, ident("columns"), fieldIndexLit());
-        project.push_back(std::make_shared<TAssignExpr>(loc, name,
-            std::make_shared<TCastExpr>(loc,
-                std::make_shared<TCastExpr>(loc,
-                    std::make_shared<TFieldAccessExpr>(
+        auto ptrFieldType = types.MakePointer(
+            ColumnBufferElementType(types, key.Fields[fieldIndex].Type));
+        project.push_back(NQumir::MakeIntrusive<TVarStmt>(loc, name, ptrFieldType));
+        column = NQumir::MakeIntrusive<TIndexExpr>(loc, ident("columns"), fieldIndexLit());
+        project.push_back(NQumir::MakeIntrusive<TAssignExpr>(loc, name,
+            NQumir::MakeIntrusive<TCastExpr>(loc,
+                NQumir::MakeIntrusive<TCastExpr>(loc,
+                    NQumir::MakeIntrusive<TFieldAccessExpr>(
                         loc, column, "Data"), i64Type),
                 ptrFieldType)));
     }
     if (!layout.Reducers.empty()) {
-        swiss.push_back(std::make_shared<TVarStmt>(loc, "agg_buffers", ptrPtrI64Type));
-        swiss.push_back(std::make_shared<TAssignExpr>(loc, "agg_buffers",
-            std::make_shared<TFieldAccessExpr>(loc, ident("ht"), "AggBuffers")));
+        swiss.push_back(NQumir::MakeIntrusive<TVarStmt>(loc, "agg_buffers", ptrPtrI64Type));
+        swiss.push_back(NQumir::MakeIntrusive<TAssignExpr>(loc, "agg_buffers",
+            NQumir::MakeIntrusive<TFieldAccessExpr>(loc, ident("ht"), "AggBuffers")));
         for (size_t i = 0; i < layout.Reducers.size(); ++i) {
             const auto& r = layout.Reducers[i];
             const std::string srcName = "agg_src_" + std::to_string(i);
             const std::string dstName = "output_agg_" + std::to_string(i);
             if (r.IsString()) {
-                project.push_back(std::make_shared<TCallExpr>(loc,
+                project.push_back(NQumir::MakeIntrusive<TCallExpr>(loc,
                     ident("agg_string_finalize_at"), std::vector<TExprPtr>{
                         ident("ht"), numI64(r.ValueBufIdx),
                         numI64(r.ExtraBufIdx),
-                        std::make_shared<TCastExpr>(loc,
+                        NQumir::MakeIntrusive<TCastExpr>(loc,
                             index(ident("output_buffers"), numI64(i)), i64Type),
                         ident("result")}));
             } else {
-                swiss.push_back(std::make_shared<TVarStmt>(loc, srcName, ptrI64Type));
-                swiss.push_back(std::make_shared<TAssignExpr>(loc, srcName,
+                swiss.push_back(NQumir::MakeIntrusive<TVarStmt>(loc, srcName, ptrI64Type));
+                swiss.push_back(NQumir::MakeIntrusive<TAssignExpr>(loc, srcName,
                     index(ident("agg_buffers"),
                         numI64(static_cast<int64_t>(r.ValueBufIdx)))));
                 auto output = index(ident("output_buffers"), numI64(static_cast<int64_t>(i)));
                 if (r.IsBool()) {
                     // A boolean output column is a bitmap, not one word per row.
-                    project.push_back(std::make_shared<TVarStmt>(loc, dstName, ptrU8Type));
-                    project.push_back(std::make_shared<TAssignExpr>(loc, dstName,
-                        std::make_shared<TCastExpr>(loc,
-                            std::make_shared<TCastExpr>(loc, std::move(output), i64Type),
+                    project.push_back(NQumir::MakeIntrusive<TVarStmt>(loc, dstName, ptrU8Type));
+                    project.push_back(NQumir::MakeIntrusive<TAssignExpr>(loc, dstName,
+                        NQumir::MakeIntrusive<TCastExpr>(loc,
+                            NQumir::MakeIntrusive<TCastExpr>(loc, std::move(output), i64Type),
                             ptrU8Type)));
                 } else {
-                    project.push_back(std::make_shared<TVarStmt>(loc, dstName, ptrI64Type));
-                    project.push_back(std::make_shared<TAssignExpr>(
+                    project.push_back(NQumir::MakeIntrusive<TVarStmt>(loc, dstName, ptrI64Type));
+                    project.push_back(NQumir::MakeIntrusive<TAssignExpr>(
                         loc, dstName, std::move(output)));
                 }
                 if (r.IsBinInt()) {
                     const std::string hiName = "agg_hi_" + std::to_string(i);
-                    swiss.push_back(std::make_shared<TVarStmt>(loc, hiName, ptrI64Type));
-                    swiss.push_back(std::make_shared<TAssignExpr>(loc, hiName,
+                    swiss.push_back(NQumir::MakeIntrusive<TVarStmt>(loc, hiName, ptrI64Type));
+                    swiss.push_back(NQumir::MakeIntrusive<TAssignExpr>(loc, hiName,
                         index(ident("agg_buffers"),
                             numI64(static_cast<int64_t>(r.ExtraBufIdx)))));
                 }
@@ -2627,20 +2632,20 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
             // Bind the internal valid-count buffer so the slot loop can derive a
             // nullable aggregate's output mask (zero valid args => NULL result).
             const std::string validName = "validbuf_" + std::to_string(i);
-            swiss.push_back(std::make_shared<TVarStmt>(loc, validName, ptrI64Type));
-            swiss.push_back(std::make_shared<TAssignExpr>(loc, validName,
+            swiss.push_back(NQumir::MakeIntrusive<TVarStmt>(loc, validName, ptrI64Type));
+            swiss.push_back(NQumir::MakeIntrusive<TAssignExpr>(loc, validName,
                 index(ident("agg_buffers"), numI64(static_cast<int64_t>(r.ValidBufIdx)))));
         }
     }
-    project.push_back(std::make_shared<TVarStmt>(loc, "slot", i64Type));
-    project.push_back(std::make_shared<TAssignExpr>(
-        loc, "slot", std::make_shared<TNumberExpr>(loc, int64_t{0})));
+    project.push_back(NQumir::MakeIntrusive<TVarStmt>(loc, "slot", i64Type));
+    project.push_back(NQumir::MakeIntrusive<TAssignExpr>(
+        loc, "slot", NQumir::MakeIntrusive<TNumberExpr>(loc, int64_t{0}, types)));
 
     // Dense output order is independent of the physical aggregate-state slot.
     if (!HasStringReducer(layout) && !slotOrder) {
-        swiss.push_back(std::make_shared<TVarStmt>(loc, "state_slots", ptrI64Type));
-        swiss.push_back(std::make_shared<TAssignExpr>(loc, "state_slots",
-            std::make_shared<TFieldAccessExpr>(loc, ident("ht"), "SlotId")));
+        swiss.push_back(NQumir::MakeIntrusive<TVarStmt>(loc, "state_slots", ptrI64Type));
+        swiss.push_back(NQumir::MakeIntrusive<TAssignExpr>(loc, "state_slots",
+            NQumir::MakeIntrusive<TFieldAccessExpr>(loc, ident("ht"), "SlotId")));
     }
     auto stateSlot = [&]() -> TExprPtr {
         if (slotOrder) {
@@ -2659,21 +2664,21 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
     {
         std::vector<TExprPtr> loopStmts;
         for (size_t fieldIndex = 0; fieldIndex < key.Fields.size(); ++fieldIndex) {
-            TExprPtr value = std::make_shared<TFieldAccessExpr>(
+            TExprPtr value = NQumir::MakeIntrusive<TFieldAccessExpr>(
                 loc, keyAt(), "key_" + std::to_string(fieldIndex));
             if (key.Fields[fieldIndex].IsNullable) {
-                auto valid = std::make_shared<TFieldAccessExpr>(
+                auto valid = NQumir::MakeIntrusive<TFieldAccessExpr>(
                     loc, keyAt(), "valid_" + std::to_string(fieldIndex));
-                loopStmts.push_back(std::make_shared<TCallExpr>(loc,
+                loopStmts.push_back(NQumir::MakeIntrusive<TCallExpr>(loc,
                     ident("qdb_bitmap_set_valid"),
                     std::vector<TExprPtr>{
                         ident("output_mask_" + std::to_string(fieldIndex)),
                         ident("slot"), std::move(valid)}));
             }
             const bool isString = TMaybeType<TStringType>(
-                UnwrapNamedType(key.Fields[fieldIndex].Type));
-            if (TMaybeType<TBoolType>(UnwrapNamedType(key.Fields[fieldIndex].Type))) {
-                loopStmts.push_back(std::make_shared<TCallExpr>(loc,
+                UnwrapNamedValueType(key.Fields[fieldIndex].Type));
+            if (TMaybeType<TBoolType>(UnwrapNamedValueType(key.Fields[fieldIndex].Type))) {
+                loopStmts.push_back(NQumir::MakeIntrusive<TCallExpr>(loc,
                     ident("qdb_bitmap_set_valid"),
                     std::vector<TExprPtr>{
                         ident("output_key_" + std::to_string(fieldIndex)),
@@ -2681,7 +2686,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
                 continue;
             }
             if (!isString) {
-                loopStmts.push_back(std::make_shared<TArrayAssignExpr>(
+                loopStmts.push_back(NQumir::MakeIntrusive<TArrayAssignExpr>(
                     loc, "output_key_" + std::to_string(fieldIndex),
                     std::vector<TExprPtr>{ident("slot")}, std::move(value)));
                 continue;
@@ -2692,30 +2697,30 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
                 "output_offsets_" + std::to_string(fieldIndex);
             const std::string copyResultName =
                 "output_copy_result_" + std::to_string(fieldIndex);
-            auto offset = std::make_shared<TIndexExpr>(
+            auto offset = NQumir::MakeIntrusive<TIndexExpr>(
                 loc, ident(offsetsName), ident("slot"));
-            auto destination = std::make_shared<TCastExpr>(loc,
-                std::make_shared<TBinaryExpr>(loc, TOperator("+"),
-                    std::make_shared<TCastExpr>(loc, ident(dataName), i64Type),
+            auto destination = NQumir::MakeIntrusive<TCastExpr>(loc,
+                NQumir::MakeIntrusive<TBinaryExpr>(loc, TOperator("+"),
+                    NQumir::MakeIntrusive<TCastExpr>(loc, ident(dataName), i64Type),
                     offset), ptrU8Type);
-            auto source = std::make_shared<TFieldAccessExpr>(
+            auto source = NQumir::MakeIntrusive<TFieldAccessExpr>(
                 loc, value, "Data");
-            auto byteSize = std::make_shared<TFieldAccessExpr>(
+            auto byteSize = NQumir::MakeIntrusive<TFieldAccessExpr>(
                 loc, value, "Size");
-            loopStmts.push_back(std::make_shared<TAssignExpr>(loc, copyResultName,
-                std::make_shared<TCallExpr>(loc,
+            loopStmts.push_back(NQumir::MakeIntrusive<TAssignExpr>(loc, copyResultName,
+                NQumir::MakeIntrusive<TCallExpr>(loc,
                     ident("qdb_string_copy_bytes"),
                     std::vector<TExprPtr>{
                         std::move(destination), std::move(source), byteSize})));
-            loopStmts.push_back(std::make_shared<TArrayAssignExpr>(loc,
+            loopStmts.push_back(NQumir::MakeIntrusive<TArrayAssignExpr>(loc,
                 offsetsName,
-                std::vector<TExprPtr>{std::make_shared<TBinaryExpr>(loc,
+                std::vector<TExprPtr>{NQumir::MakeIntrusive<TBinaryExpr>(loc,
                     TOperator("+"), ident("slot"),
-                    std::make_shared<TNumberExpr>(loc, int64_t{1}))},
-                std::make_shared<TBinaryExpr>(loc, TOperator("+"),
-                    std::make_shared<TIndexExpr>(
+                    NQumir::MakeIntrusive<TNumberExpr>(loc, int64_t{1}, types))},
+                NQumir::MakeIntrusive<TBinaryExpr>(loc, TOperator("+"),
+                    NQumir::MakeIntrusive<TIndexExpr>(
                         loc, ident(offsetsName), ident("slot")),
-                    std::make_shared<TFieldAccessExpr>(loc, value, "Size"))));
+                    NQumir::MakeIntrusive<TFieldAccessExpr>(loc, value, "Size"))));
         }
         for (size_t i = 0; i < layout.Reducers.size(); ++i) {
             const auto& r = layout.Reducers[i];
@@ -2727,20 +2732,20 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
                     auto outLoSlot = binary("*", ident("slot"), numI64(2));
                     auto outHiSlot = binary("+",
                         binary("*", ident("slot"), numI64(2)), numI64(1));
-                    loopStmts.push_back(std::make_shared<TArrayAssignExpr>(loc, dstName,
+                    loopStmts.push_back(NQumir::MakeIntrusive<TArrayAssignExpr>(loc, dstName,
                         std::vector<TExprPtr>{std::move(outLoSlot)},
                         stateAt(srcName, r.ValueBufIdx)));
-                    loopStmts.push_back(std::make_shared<TArrayAssignExpr>(loc, dstName,
+                    loopStmts.push_back(NQumir::MakeIntrusive<TArrayAssignExpr>(loc, dstName,
                         std::vector<TExprPtr>{std::move(outHiSlot)},
                         stateAt(hiName, r.ExtraBufIdx)));
                 } else if (r.IsBool()) {
-                    loopStmts.push_back(std::make_shared<TCallExpr>(loc,
+                    loopStmts.push_back(NQumir::MakeIntrusive<TCallExpr>(loc,
                         ident("qdb_bitmap_set_valid"),
                         std::vector<TExprPtr>{
                             ident(dstName), ident("slot"),
                             binary("!=", stateAt(srcName, r.ValueBufIdx), numI64(0))}));
                 } else {
-                    loopStmts.push_back(std::make_shared<TArrayAssignExpr>(loc, dstName,
+                    loopStmts.push_back(NQumir::MakeIntrusive<TArrayAssignExpr>(loc, dstName,
                         std::vector<TExprPtr>{ident("slot")},
                         stateAt(srcName, r.ValueBufIdx)));
                 }
@@ -2749,45 +2754,45 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
                 continue;
             }
             const std::string validName = "validbuf_" + std::to_string(i);
-            loopStmts.push_back(std::make_shared<TCallExpr>(loc,
+            loopStmts.push_back(NQumir::MakeIntrusive<TCallExpr>(loc,
                 ident("qdb_bitmap_set_valid"),
                 std::vector<TExprPtr>{
-                    std::make_shared<TIndexExpr>(loc, ident("output_agg_masks"),
+                    NQumir::MakeIntrusive<TIndexExpr>(loc, ident("output_agg_masks"),
                         numI64(static_cast<int64_t>(i))),
                     ident("slot"),
-                    std::make_shared<TBinaryExpr>(loc, TOperator(">"),
+                    NQumir::MakeIntrusive<TBinaryExpr>(loc, TOperator(">"),
                         stateAt(validName, r.ValidBufIdx), numI64(0))}));
         }
-        loopStmts.push_back(std::make_shared<TAssignExpr>(loc, "slot",
-            std::make_shared<TBinaryExpr>(loc, TOperator("+"), ident("slot"),
-                std::make_shared<TNumberExpr>(loc, int64_t{1}))));
+        loopStmts.push_back(NQumir::MakeIntrusive<TAssignExpr>(loc, "slot",
+            NQumir::MakeIntrusive<TBinaryExpr>(loc, TOperator("+"), ident("slot"),
+                NQumir::MakeIntrusive<TNumberExpr>(loc, int64_t{1}, types))));
         return loopStmts;
     };
 
     auto loopStmts = groupStatements(
         [&] {
-            return std::make_shared<TIndexExpr>(loc, ident("group_keys"), ident(keyIndex));
+            return NQumir::MakeIntrusive<TIndexExpr>(loc, ident("group_keys"), ident(keyIndex));
         },
         [&](const std::string& buffer, int) {
             return index(ident(buffer), stateSlot());
         });
     if (slotOrder) {
         // Empty Ctrl bytes are 0x80; the scan stops at the last group.
-        auto empty = std::make_shared<TNumberExpr>(loc, int64_t{128});
+        auto empty = NQumir::MakeIntrusive<TNumberExpr>(loc, int64_t{128}, types);
         empty->Type = u8Type;
         auto occupied = binary("<", index(ident("ctrl"), ident("phys")), empty);
-        auto emit = std::make_shared<TIfExpr>(loc, std::move(occupied),
-            std::make_shared<TBlockExpr>(loc, std::move(loopStmts)), nullptr);
+        auto emit = NQumir::MakeIntrusive<TIfExpr>(loc, std::move(occupied),
+            NQumir::MakeIntrusive<TBlockExpr>(loc, std::move(loopStmts)), nullptr);
         loopStmts = {
             std::move(emit),
-            std::make_shared<TAssignExpr>(loc, "phys",
+            NQumir::MakeIntrusive<TAssignExpr>(loc, "phys",
                 binary("+", ident("phys"), numI64(1))),
         };
     }
-    swiss.push_back(std::make_shared<TWhileStmtExpr>(loc,
-        std::make_shared<TBinaryExpr>(loc, TOperator("<"),
+    swiss.push_back(NQumir::MakeIntrusive<TWhileStmtExpr>(loc,
+        NQumir::MakeIntrusive<TBinaryExpr>(loc, TOperator("<"),
             ident("slot"), ident("result")),
-        std::make_shared<TBlockExpr>(loc, std::move(loopStmts))));
+        NQumir::MakeIntrusive<TBlockExpr>(loc, std::move(loopStmts))));
 
     if (rows) {
         // A table in the row layout: a scan of the arena, in insertion order.
@@ -2817,18 +2822,19 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
         }), NOz::Block(std::move(swissOnly))));
     }
 
-    bodyStmts.push_back(std::make_shared<TIfExpr>(loc,
-        std::make_shared<TBinaryExpr>(loc, TOperator(">="), ident("result"),
-            std::make_shared<TNumberExpr>(loc, int64_t{0})),
-        std::make_shared<TBlockExpr>(loc, std::move(project)), nullptr));
-    bodyStmts.push_back(std::make_shared<TReturnExpr>(loc, ident("result")));
-    auto body = std::make_shared<TBlockExpr>(loc, std::move(bodyStmts));
-    auto function = std::make_shared<TFunDecl>(
+    bodyStmts.push_back(NQumir::MakeIntrusive<TIfExpr>(loc,
+        NQumir::MakeIntrusive<TBinaryExpr>(loc, TOperator(">="), ident("result"),
+            NQumir::MakeIntrusive<TNumberExpr>(loc, int64_t{0}, types)),
+        NQumir::MakeIntrusive<TBlockExpr>(loc, std::move(project)), nullptr));
+    bodyStmts.push_back(NQumir::MakeIntrusive<TReturnExpr>(loc, ident("result")));
+    auto body = NQumir::MakeIntrusive<TBlockExpr>(loc, std::move(bodyStmts));
+    auto function = NQumir::MakeIntrusive<TFunDecl>(
         loc, "agg_finalize", std::vector<TGenericParam>{}, std::move(params), std::move(body), i64Type);
-    return std::make_shared<TBlockExpr>(loc, std::vector<TExprPtr>{function});
+    return NQumir::MakeIntrusive<TBlockExpr>(loc, std::vector<TExprPtr>{function});
 }
 
 NQumir::NAst::TExprPtr GenGenericAggregateFinishRowSetAst(
+    NQumir::NAst::TTypeFactory& types,
     const TAggregateKeyDescriptor& key,
     const TAggReducerLayout& layout,
     NQumir::NAst::TTypePtr hashTableType,
@@ -2848,30 +2854,30 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinishRowSetAst(
     constexpr int64_t ColumnSize = 48;
     constexpr int64_t PtrSize = 8;
 
-    auto i64Type = std::make_shared<TIntegerType>(TIntegerType::I64);
-    auto i32Type = std::make_shared<TIntegerType>(TIntegerType::I32);
-    auto i8Type = std::make_shared<TIntegerType>(TIntegerType::I8);
-    auto u8Type = std::make_shared<TIntegerType>(TIntegerType::U8);
-    auto ptrI8Type = std::make_shared<TPointerType>(i8Type);
-    auto ptrU8Type = std::make_shared<TPointerType>(u8Type);
-    auto ptrI64Type = std::make_shared<TPointerType>(i64Type);
-    auto ptrPtrU8Type = std::make_shared<TPointerType>(ptrU8Type);
-    auto ptrPtrI64Type = std::make_shared<TPointerType>(ptrI64Type);
-    auto ptrColumnType = std::make_shared<TPointerType>(
-        AsNamed("TColumn", columnType));
-    auto rowSetRefType = std::make_shared<TReferenceType>(
-        AsNamed("TRowSet", rowSetType));
-    auto hashTableRefType = std::make_shared<TReferenceType>(
-        AsNamed("HashTable", hashTableType));
+    auto i64Type = types.MakeInteger(TIntegerType::I64);
+    auto i32Type = types.MakeInteger(TIntegerType::I32);
+    auto i8Type = types.MakeInteger(TIntegerType::I8);
+    auto u8Type = types.MakeInteger(TIntegerType::U8);
+    auto ptrI8Type = types.MakePointer(i8Type);
+    auto ptrU8Type = types.MakePointer(u8Type);
+    auto ptrI64Type = types.MakePointer(i64Type);
+    auto ptrPtrU8Type = types.MakePointer(ptrU8Type);
+    auto ptrPtrI64Type = types.MakePointer(ptrI64Type);
+    auto ptrColumnType = types.MakePointer(
+        AsNamed(types, "TColumn", columnType));
+    auto rowSetRefType = types.MakeReference(
+        AsNamed(types, "TRowSet", rowSetType));
+    auto hashTableRefType = types.MakeReference(
+        AsNamed(types, "HashTable", hashTableType));
 
     auto number = [&](int64_t value) -> TExprPtr {
-        return Oz::TypedInt(value, i64Type);
+        return Oz::TypedInt(types, value, i64Type);
     };
     auto numI32 = [&](int64_t value) -> TExprPtr {
-        return Oz::TypedInt(value, i32Type);
+        return Oz::TypedInt(types, value, i32Type);
     };
     auto numU8 = [&](int64_t value) -> TExprPtr {
-        return Oz::TypedInt(value, u8Type);
+        return Oz::TypedInt(types, value, u8Type);
     };
     auto allocAs = [&](TTypePtr type, TExprPtr byteSize) -> TExprPtr {
         return Oz::Cast(
@@ -2908,7 +2914,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinishRowSetAst(
         if (field.IsNullable) {
             ++ownedPtrCount; // Mask
         }
-        if (TMaybeType<TStringType>(UnwrapNamedType(field.Type))) {
+        if (TMaybeType<TStringType>(UnwrapNamedValueType(field.Type))) {
             ++ownedPtrCount; // Offsets
         }
     }
@@ -2984,7 +2990,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinishRowSetAst(
         .Assign("measured", Oz::Call("agg_measure_outputs", {
             Oz::Ident("ht"), Oz::Ident("key_bytes"), Oz::Ident("agg_bytes"),
             Oz::Ident("size")}));
-    auto measureFailure = StringCleanupCalls(layout);
+    auto measureFailure = StringCleanupCalls(types, layout);
     measureFailure.push_back(Oz::Call(destroy, {Oz::Ident("ht")}));
     measureFailure.push_back(Oz::Return(number(-1)));
     builder.Stmt(Oz::If(
@@ -2994,7 +3000,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinishRowSetAst(
     for (size_t i = 0; i < key.Fields.size(); ++i) {
         const auto& fieldInfo = key.Fields[i];
         const bool isString = TMaybeType<TStringType>(
-            UnwrapNamedType(fieldInfo.Type));
+            UnwrapNamedValueType(fieldInfo.Type));
         const auto idx = number(static_cast<int64_t>(i));
         const std::string dataName = "key_data_" + std::to_string(i);
         const std::string maskName = "key_mask_" + std::to_string(i);
@@ -3016,7 +3022,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinishRowSetAst(
             remember(maskName);
             builder.Stmt(Oz::FieldAssign(column(i), "Mask", Oz::Ident(maskName)));
         } else {
-            builder.Stmt(Oz::FieldAssign(column(i), "Mask", Oz::NullPtr(ptrU8Type)));
+            builder.Stmt(Oz::FieldAssign(column(i), "Mask", Oz::NullPtr(types, ptrU8Type)));
         }
         builder.Stmt(Oz::FieldAssign(column(i), "MaskBitOffset", numI32(0)));
 
@@ -3031,7 +3037,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinishRowSetAst(
                 .Stmt(Oz::FieldAssign(column(i), "OffsetWidth", numU8(8)));
         } else {
             builder
-                .Stmt(Oz::FieldAssign(column(i), "Offsets", Oz::NullPtr(ptrI64Type)))
+                .Stmt(Oz::FieldAssign(column(i), "Offsets", Oz::NullPtr(types, ptrI64Type)))
                 .Stmt(Oz::FieldAssign(column(i), "OffsetWidth", numU8(0)));
         }
     }
@@ -3074,7 +3080,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinishRowSetAst(
                     Oz::Cast(Oz::Ident(dataName), ptrI8Type)))
                 .Stmt(Oz::FieldAssign(column(columnIdx), "DataBitOffset", numI32(0)))
                 .Stmt(Oz::FieldAssign(column(columnIdx), "Offsets",
-                    Oz::NullPtr(ptrI64Type)))
+                    Oz::NullPtr(types, ptrI64Type)))
                 .Stmt(Oz::FieldAssign(column(columnIdx), "OffsetWidth", numU8(0)));
         }
 
@@ -3088,8 +3094,8 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinishRowSetAst(
                 .Stmt(Oz::FieldAssign(column(columnIdx), "Mask", Oz::Ident(maskName)));
         } else {
             builder
-                .Stmt(Oz::ArrayAssign("agg_masks", idx, Oz::NullPtr(ptrU8Type)))
-                .Stmt(Oz::FieldAssign(column(columnIdx), "Mask", Oz::NullPtr(ptrU8Type)));
+                .Stmt(Oz::ArrayAssign("agg_masks", idx, Oz::NullPtr(types, ptrU8Type)))
+                .Stmt(Oz::FieldAssign(column(columnIdx), "Mask", Oz::NullPtr(types, ptrU8Type)));
         }
         builder.Stmt(Oz::FieldAssign(
             column(columnIdx), "MaskBitOffset", numI32(0)));
@@ -3104,7 +3110,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinishRowSetAst(
             Oz::Ident("agg_masks"),
             Oz::Ident("size"),
         }));
-    for (auto& cleanup : StringCleanupCalls(layout)) {
+    for (auto& cleanup : StringCleanupCalls(types, layout)) {
         builder.Stmt(std::move(cleanup));
     }
     builder
@@ -3115,8 +3121,8 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinishRowSetAst(
         .Stmt(Oz::FieldAssign(Oz::Ident("out_rowset"), "Columns", Oz::Ident("columns")))
         .Stmt(Oz::FieldAssign(Oz::Ident("out_rowset"), "ColumnCount", number(columnCount)))
         .Stmt(Oz::FieldAssign(Oz::Ident("out_rowset"), "RowCount", Oz::Ident("size")))
-        .Stmt(Oz::FieldAssign(Oz::Ident("out_rowset"), "Selection", Oz::NullPtr(ptrU8Type)))
-        .Stmt(Oz::FieldAssign(Oz::Ident("out_rowset"), "Destroy", Oz::NullPtr(ptrI64Type)))
+        .Stmt(Oz::FieldAssign(Oz::Ident("out_rowset"), "Selection", Oz::NullPtr(types, ptrU8Type)))
+        .Stmt(Oz::FieldAssign(Oz::Ident("out_rowset"), "Destroy", Oz::NullPtr(types, ptrI64Type)))
         .Stmt(Oz::FieldAssign(Oz::Ident("out_rowset"), "Private", Oz::Ident("owners")))
         .Stmt(Oz::FieldAssign(Oz::Ident("out_rowset"), "RefCount", number(1)))
         .Stmt(Oz::Return(Oz::Ident("size")));
@@ -3125,6 +3131,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinishRowSetAst(
 }
 
 NQumir::NAst::TExprPtr GenGenericAggregateMeasureAst(
+    NQumir::NAst::TTypeFactory& types,
     const TAggregateKeyDescriptor& key,
     const TAggReducerLayout& layout,
     NQumir::NAst::TTypePtr hashTableType,
@@ -3132,53 +3139,53 @@ NQumir::NAst::TExprPtr GenGenericAggregateMeasureAst(
 {
     using namespace NQumir::NAst;
     NQumir::TLocation loc{};
-    auto i64Type = std::make_shared<TIntegerType>(TIntegerType::I64);
-    auto ptrI64Type = std::make_shared<TPointerType>(i64Type);
-    auto ptrPtrI64Type = std::make_shared<TPointerType>(ptrI64Type);
-    auto ptrKeyType = std::make_shared<TPointerType>(key.StoredType);
-    auto ptrU8Type = std::make_shared<TPointerType>(
-        std::make_shared<TIntegerType>(TIntegerType::U8));
-    auto hashTableRefType = std::make_shared<TReferenceType>(
-        AsNamed("HashTable", std::move(hashTableType)));
+    auto i64Type = types.MakeInteger(TIntegerType::I64);
+    auto ptrI64Type = types.MakePointer(i64Type);
+    auto ptrPtrI64Type = types.MakePointer(ptrI64Type);
+    auto ptrKeyType = types.MakePointer(key.StoredType);
+    auto ptrU8Type = types.MakePointer(
+        types.MakeInteger(TIntegerType::U8));
+    auto hashTableRefType = types.MakeReference(
+        AsNamed(types, "HashTable", std::move(hashTableType)));
     auto ident = [&](const std::string& name) -> TExprPtr {
-        return std::make_shared<TIdentExpr>(loc, name);
+        return NQumir::MakeIntrusive<TIdentExpr>(loc, name);
     };
     auto number = [&](int64_t value) -> TExprPtr {
-        auto result = std::make_shared<TNumberExpr>(loc, value);
+        auto result = NQumir::MakeIntrusive<TNumberExpr>(loc, value, types);
         result->Type = i64Type;
         return result;
     };
     auto binary = [&](const char* op, TExprPtr left, TExprPtr right) -> TExprPtr {
-        return std::make_shared<TBinaryExpr>(
+        return NQumir::MakeIntrusive<TBinaryExpr>(
             loc, TOperator(op), std::move(left), std::move(right));
     };
     auto outputAt = [&](size_t fieldIndex) -> TExprPtr {
-        return std::make_shared<TIndexExpr>(loc, ident("output_key_bytes"),
+        return NQumir::MakeIntrusive<TIndexExpr>(loc, ident("output_key_bytes"),
             number(static_cast<int64_t>(fieldIndex)));
     };
 
     std::vector<TParam> params = {
-        std::make_shared<TVarStmt>(loc, "ht", hashTableRefType),
-        std::make_shared<TVarStmt>(loc, "output_key_bytes", ptrI64Type),
-        std::make_shared<TVarStmt>(loc, "output_agg_bytes", ptrI64Type),
-        std::make_shared<TVarStmt>(loc, "output_capacity", i64Type),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "ht", hashTableRefType),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "output_key_bytes", ptrI64Type),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "output_agg_bytes", ptrI64Type),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "output_capacity", i64Type),
     };
     std::vector<TExprPtr> body;
-    body.push_back(std::make_shared<TVarStmt>(loc, "size", i64Type));
-    body.push_back(std::make_shared<TAssignExpr>(loc, "size",
-        std::make_shared<TFieldAccessExpr>(loc, ident("ht"), "Size")));
-    body.push_back(std::make_shared<TIfExpr>(loc,
+    body.push_back(NQumir::MakeIntrusive<TVarStmt>(loc, "size", i64Type));
+    body.push_back(NQumir::MakeIntrusive<TAssignExpr>(loc, "size",
+        NQumir::MakeIntrusive<TFieldAccessExpr>(loc, ident("ht"), "Size")));
+    body.push_back(NQumir::MakeIntrusive<TIfExpr>(loc,
         binary("<", ident("output_capacity"), ident("size")),
-        std::make_shared<TBlockExpr>(loc, std::vector<TExprPtr>{
-            std::make_shared<TReturnExpr>(loc, number(-1))}), nullptr));
-    body.push_back(std::make_shared<TVarStmt>(loc, "group_keys", ptrKeyType));
-    body.push_back(std::make_shared<TAssignExpr>(loc, "group_keys",
-        std::make_shared<TCastExpr>(loc,
-            std::make_shared<TFieldAccessExpr>(loc, ident("ht"), "GroupKeys"),
+        NQumir::MakeIntrusive<TBlockExpr>(loc, std::vector<TExprPtr>{
+            NQumir::MakeIntrusive<TReturnExpr>(loc, number(-1))}), nullptr));
+    body.push_back(NQumir::MakeIntrusive<TVarStmt>(loc, "group_keys", ptrKeyType));
+    body.push_back(NQumir::MakeIntrusive<TAssignExpr>(loc, "group_keys",
+        NQumir::MakeIntrusive<TCastExpr>(loc,
+            NQumir::MakeIntrusive<TFieldAccessExpr>(loc, ident("ht"), "GroupKeys"),
             ptrKeyType)));
 
     for (size_t fieldIndex = 0; fieldIndex < key.Fields.size(); ++fieldIndex) {
-        const auto logical = UnwrapNamedType(key.Fields[fieldIndex].Type);
+        const auto logical = UnwrapNamedValueType(key.Fields[fieldIndex].Type);
         if (ContainsLogicalString(key.Fields[fieldIndex].Type) &&
             !TMaybeType<TStringType>(logical)) {
             throw std::invalid_argument(
@@ -3186,16 +3193,16 @@ NQumir::NAst::TExprPtr GenGenericAggregateMeasureAst(
                 "is not supported");
         }
         if (TMaybeType<TStringType>(logical)) {
-            body.push_back(std::make_shared<TArrayAssignExpr>(loc,
+            body.push_back(NQumir::MakeIntrusive<TArrayAssignExpr>(loc,
                 "output_key_bytes", std::vector<TExprPtr>{
                     number(static_cast<int64_t>(fieldIndex))}, number(0)));
         } else if (TMaybeType<TBoolType>(logical)) {
-            body.push_back(std::make_shared<TArrayAssignExpr>(loc,
+            body.push_back(NQumir::MakeIntrusive<TArrayAssignExpr>(loc,
                 "output_key_bytes",
                 std::vector<TExprPtr>{number(static_cast<int64_t>(fieldIndex))},
                 binary(">>", binary("+", ident("size"), number(7)), number(3))));
         } else {
-            body.push_back(std::make_shared<TArrayAssignExpr>(loc,
+            body.push_back(NQumir::MakeIntrusive<TArrayAssignExpr>(loc,
                 "output_key_bytes",
                 std::vector<TExprPtr>{number(static_cast<int64_t>(fieldIndex))},
                 binary("*", ident("size"),
@@ -3204,17 +3211,17 @@ NQumir::NAst::TExprPtr GenGenericAggregateMeasureAst(
     }
 
     if (HasStringReducer(layout)) {
-        body.push_back(std::make_shared<TVarStmt>(loc, "agg_buffers", ptrPtrI64Type));
-        body.push_back(std::make_shared<TAssignExpr>(loc, "agg_buffers",
-            std::make_shared<TFieldAccessExpr>(loc, ident("ht"), "AggBuffers")));
+        body.push_back(NQumir::MakeIntrusive<TVarStmt>(loc, "agg_buffers", ptrPtrI64Type));
+        body.push_back(NQumir::MakeIntrusive<TAssignExpr>(loc, "agg_buffers",
+            NQumir::MakeIntrusive<TFieldAccessExpr>(loc, ident("ht"), "AggBuffers")));
     }
     for (size_t i = 0; i < layout.Reducers.size(); ++i) {
         const auto& reducer = layout.Reducers[i];
         TExprPtr bytes;
         if (reducer.IsString()) {
-            bytes = std::make_shared<TCallExpr>(loc, ident("agg_string_measure"),
+            bytes = NQumir::MakeIntrusive<TCallExpr>(loc, ident("agg_string_measure"),
                 std::vector<TExprPtr>{
-                    std::make_shared<TIndexExpr>(loc, ident("agg_buffers"),
+                    NQumir::MakeIntrusive<TIndexExpr>(loc, ident("agg_buffers"),
                         number(static_cast<int64_t>(reducer.ExtraBufIdx))),
                     ident("size")});
         } else if (reducer.IsBool()) {
@@ -3222,7 +3229,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateMeasureAst(
         } else {
             bytes = binary("*", ident("size"), number(AggStateByteWidth(reducer)));
         }
-        body.push_back(std::make_shared<TArrayAssignExpr>(loc,
+        body.push_back(NQumir::MakeIntrusive<TArrayAssignExpr>(loc,
             "output_agg_bytes", std::vector<TExprPtr>{number(static_cast<int64_t>(i))},
             std::move(bytes)));
     }
@@ -3230,19 +3237,19 @@ NQumir::NAst::TExprPtr GenGenericAggregateMeasureAst(
     // The bytes of the string keys, summed over the groups: the swiss table's
     // dense keys, or the rows of a table in the row layout.
     const bool stringKey = std::ranges::any_of(key.Fields, [](const auto& field) {
-        return static_cast<bool>(TMaybeType<TStringType>(UnwrapNamedType(field.Type)));
+        return static_cast<bool>(TMaybeType<TStringType>(UnwrapNamedValueType(field.Type)));
     });
     auto addKeyBytes = [&](const std::function<TExprPtr()>& keyAt) {
         std::vector<TExprPtr> stmts;
         for (size_t fieldIndex = 0; fieldIndex < key.Fields.size(); ++fieldIndex) {
-            if (!TMaybeType<TStringType>(UnwrapNamedType(key.Fields[fieldIndex].Type))) {
+            if (!TMaybeType<TStringType>(UnwrapNamedValueType(key.Fields[fieldIndex].Type))) {
                 continue;
             }
-            TExprPtr stored = std::make_shared<TFieldAccessExpr>(
+            TExprPtr stored = NQumir::MakeIntrusive<TFieldAccessExpr>(
                 loc, keyAt(), "key_" + std::to_string(fieldIndex));
-            auto size = std::make_shared<TFieldAccessExpr>(
+            auto size = NQumir::MakeIntrusive<TFieldAccessExpr>(
                 loc, std::move(stored), "Size");
-            stmts.push_back(std::make_shared<TArrayAssignExpr>(loc,
+            stmts.push_back(NQumir::MakeIntrusive<TArrayAssignExpr>(loc,
                 "output_key_bytes",
                 std::vector<TExprPtr>{number(static_cast<int64_t>(fieldIndex))},
                 binary("+", outputAt(fieldIndex), std::move(size))));
@@ -3250,16 +3257,16 @@ NQumir::NAst::TExprPtr GenGenericAggregateMeasureAst(
         return stmts;
     };
     std::vector<TExprPtr> swiss;
-    swiss.push_back(std::make_shared<TVarStmt>(loc, "slot", i64Type));
-    swiss.push_back(std::make_shared<TAssignExpr>(loc, "slot", number(0)));
+    swiss.push_back(NQumir::MakeIntrusive<TVarStmt>(loc, "slot", i64Type));
+    swiss.push_back(NQumir::MakeIntrusive<TAssignExpr>(loc, "slot", number(0)));
     auto loop = addKeyBytes([&] {
-        return std::make_shared<TIndexExpr>(loc, ident("group_keys"), ident("slot"));
+        return NQumir::MakeIntrusive<TIndexExpr>(loc, ident("group_keys"), ident("slot"));
     });
-    loop.push_back(std::make_shared<TAssignExpr>(loc, "slot",
+    loop.push_back(NQumir::MakeIntrusive<TAssignExpr>(loc, "slot",
         binary("+", ident("slot"), number(1))));
-    swiss.push_back(std::make_shared<TWhileStmtExpr>(loc,
+    swiss.push_back(NQumir::MakeIntrusive<TWhileStmtExpr>(loc,
         binary("<", ident("slot"), ident("size")),
-        std::make_shared<TBlockExpr>(loc, std::move(loop))));
+        NQumir::MakeIntrusive<TBlockExpr>(loc, std::move(loop))));
     if (rows && stringKey) {
         auto rowStmts = addKeyBytes([&] { return NOz::Index("row_key", number(0)); });
         rowStmts.insert(rowStmts.begin(), {
@@ -3281,69 +3288,70 @@ NQumir::NAst::TExprPtr GenGenericAggregateMeasureAst(
     } else {
         body.insert(body.end(), swiss.begin(), swiss.end());
     }
-    body.push_back(std::make_shared<TReturnExpr>(loc, ident("size")));
+    body.push_back(NQumir::MakeIntrusive<TReturnExpr>(loc, ident("size")));
 
-    auto function = std::make_shared<TFunDecl>(loc, "agg_measure_outputs",
+    auto function = NQumir::MakeIntrusive<TFunDecl>(loc, "agg_measure_outputs",
         std::vector<TGenericParam>{},
-        std::move(params), std::make_shared<TBlockExpr>(loc, std::move(body)),
+        std::move(params), NQumir::MakeIntrusive<TBlockExpr>(loc, std::move(body)),
         i64Type);
-    return std::make_shared<TBlockExpr>(
+    return NQumir::MakeIntrusive<TBlockExpr>(
         loc, std::vector<TExprPtr>{std::move(function)});
 }
 
 std::vector<NQumir::NAst::TExprPtr> GenReducerFunDecls(
+    NQumir::NAst::TTypeFactory& types,
     const TAggReducerLayout& layout)
 {
     using namespace NQumir::NAst;
     NQumir::TLocation loc{};
 
-    auto i64Type = std::make_shared<TIntegerType>();
-    auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
-    auto f64Type = std::make_shared<TFloatType>();
-    auto boolType = std::make_shared<TBoolType>();
-    auto voidType = std::make_shared<TVoidType>();
-    auto ptrI64Type = std::make_shared<TPointerType>(i64Type);
-    auto binIntType = BinIntStorageType();
+    auto i64Type = types.MakeInteger();
+    auto u64Type = types.MakeInteger(TIntegerType::U64);
+    auto f64Type = types.MakeFloat();
+    auto boolType = types.Make<TBoolType>();
+    auto voidType = types.Make<TVoidType>();
+    auto ptrI64Type = types.MakePointer(i64Type);
+    auto binIntType = BinIntStorageType(types);
 
     auto ident = [&](const std::string& name) {
-        return std::make_shared<TIdentExpr>(loc, name);
+        return NQumir::MakeIntrusive<TIdentExpr>(loc, name);
     };
     auto numI64 = [&](int64_t value) -> TExprPtr {
-        auto expr = std::make_shared<TNumberExpr>(loc, value);
+        auto expr = NQumir::MakeIntrusive<TNumberExpr>(loc, value, types);
         expr->Type = i64Type;
         return expr;
     };
     auto binary = [&](const char* op, TExprPtr l, TExprPtr r) -> TExprPtr {
-        return std::make_shared<TBinaryExpr>(loc, TOperator(op), std::move(l), std::move(r));
+        return NQumir::MakeIntrusive<TBinaryExpr>(loc, TOperator(op), std::move(l), std::move(r));
     };
-    auto block = [&](std::vector<TExprPtr> stmts) -> std::shared_ptr<TBlockExpr> {
-        return std::make_shared<TBlockExpr>(loc, std::move(stmts));
+    auto block = [&](std::vector<TExprPtr> stmts) -> NQumir::TIntrusivePtr<TBlockExpr> {
+        return NQumir::MakeIntrusive<TBlockExpr>(loc, std::move(stmts));
     };
     // buf[dense_slot]
     auto slotOf = [&](const std::string& buf) -> TExprPtr {
-        return std::make_shared<TIndexExpr>(loc, ident(buf), ident("dense_slot"));
+        return NQumir::MakeIntrusive<TIndexExpr>(loc, ident(buf), ident("dense_slot"));
     };
     // buf[dense_slot] = value
     auto storeSlot = [&](const std::string& buf, TExprPtr value) -> TExprPtr {
-        return std::make_shared<TArrayAssignExpr>(loc, buf,
+        return NQumir::MakeIntrusive<TArrayAssignExpr>(loc, buf,
             std::vector<TExprPtr>{ident("dense_slot")}, std::move(value));
     };
     auto bitcast = [&](TExprPtr e, TTypePtr type) -> TExprPtr {
-        return std::make_shared<TBitcastExpr>(loc,
+        return NQumir::MakeIntrusive<TBitcastExpr>(loc,
             std::move(e),
             type);
     };
     auto cast = [&](TExprPtr e, TTypePtr type) -> TExprPtr {
-        return std::make_shared<TCastExpr>(loc, std::move(e), std::move(type));
+        return NQumir::MakeIntrusive<TCastExpr>(loc, std::move(e), std::move(type));
     };
     auto field = [&](TExprPtr object, const std::string& name) -> TExprPtr {
-        return std::make_shared<TFieldAccessExpr>(loc, std::move(object), name);
+        return NQumir::MakeIntrusive<TFieldAccessExpr>(loc, std::move(object), name);
     };
     // A BinInt is an i128; aggregate state still lives in two i64 slot words,
     // so it is split and reassembled here rather than read as struct fields.
-    auto i128Type = std::make_shared<TIntegerType>(TIntegerType::I128);
+    auto i128Type = types.MakeInteger(TIntegerType::I128);
     auto shift64 = [&]() -> TExprPtr {
-        auto value = std::make_shared<TNumberExpr>(loc, int64_t{64});
+        auto value = NQumir::MakeIntrusive<TNumberExpr>(loc, int64_t{64}, types);
         value->Type = i128Type;
         return value;
     };
@@ -3351,7 +3359,7 @@ std::vector<NQumir::NAst::TExprPtr> GenReducerFunDecls(
         // The low half must not sign-extend, so it goes through u64 first.
         auto loWide = cast(cast(std::move(lo), u64Type), i128Type);
         auto hiWide = binary("<<", cast(std::move(hi), i128Type), shift64());
-        return std::make_shared<TStructConstructExpr>(loc, binIntType,
+        return NQumir::MakeIntrusive<TStructConstructExpr>(loc, binIntType,
             std::vector<TExprPtr>{binary("|", std::move(hiWide), std::move(loWide))},
             std::vector<std::string>{"V"});
     };
@@ -3369,16 +3377,16 @@ std::vector<NQumir::NAst::TExprPtr> GenReducerFunDecls(
             return binary("+", ident("prev"), ident("value"));
         }
         if (func == "min") {
-            return std::make_shared<TIfExpr>(loc, std::move(seed),
+            return NQumir::MakeIntrusive<TIfExpr>(loc, std::move(seed),
                 ident("value"),
-                std::make_shared<TIfExpr>(loc,
+                NQumir::MakeIntrusive<TIfExpr>(loc,
                     binary("<", ident("value"), ident("prev")),
                     ident("value"), ident("prev")));
         }
         if (func == "max") {
-            return std::make_shared<TIfExpr>(loc, std::move(seed),
+            return NQumir::MakeIntrusive<TIfExpr>(loc, std::move(seed),
                 ident("value"),
-                std::make_shared<TIfExpr>(loc,
+                NQumir::MakeIntrusive<TIfExpr>(loc,
                     binary(">", ident("value"), ident("prev")),
                     ident("value"), ident("prev")));
         }
@@ -3401,30 +3409,30 @@ std::vector<NQumir::NAst::TExprPtr> GenReducerFunDecls(
             const std::string loBuf = "lo_buf";
             const std::string hiBuf = "hi_buf";
             std::vector<TParam> params = {
-                std::make_shared<TVarStmt>(loc, loBuf, ptrI64Type),
-                std::make_shared<TVarStmt>(loc, hiBuf, ptrI64Type),
-                std::make_shared<TVarStmt>(loc, "dense_slot", i64Type),
+                NQumir::MakeIntrusive<TVarStmt>(loc, loBuf, ptrI64Type),
+                NQumir::MakeIntrusive<TVarStmt>(loc, hiBuf, ptrI64Type),
+                NQumir::MakeIntrusive<TVarStmt>(loc, "dense_slot", i64Type),
             };
             if (r.NeedsValidity) {
-                params.push_back(std::make_shared<TVarStmt>(loc, "valid_buf", ptrI64Type));
+                params.push_back(NQumir::MakeIntrusive<TVarStmt>(loc, "valid_buf", ptrI64Type));
             }
-            params.push_back(std::make_shared<TVarStmt>(loc, "value", binIntType));
+            params.push_back(NQumir::MakeIntrusive<TVarStmt>(loc, "value", binIntType));
             if (r.NeedsValidity) {
-                params.push_back(std::make_shared<TVarStmt>(loc, "value_is_valid", boolType));
+                params.push_back(NQumir::MakeIntrusive<TVarStmt>(loc, "value_is_valid", boolType));
             } else {
-                params.push_back(std::make_shared<TVarStmt>(loc, "is_new", boolType));
+                params.push_back(NQumir::MakeIntrusive<TVarStmt>(loc, "is_new", boolType));
             }
 
             std::vector<TExprPtr> stmts = {
-                std::make_shared<TVarStmt>(loc, "prev", binIntType),
-                std::make_shared<TAssignExpr>(loc, "prev",
+                NQumir::MakeIntrusive<TVarStmt>(loc, "prev", binIntType),
+                NQumir::MakeIntrusive<TAssignExpr>(loc, "prev",
                     binInt(slotOf(loBuf), slotOf(hiBuf))),
-                std::make_shared<TVarStmt>(loc, "next", binIntType),
+                NQumir::MakeIntrusive<TVarStmt>(loc, "next", binIntType),
             };
             if (r.NeedsValidity) {
                 auto stores = storeBinInt(loBuf, hiBuf);
                 std::vector<TExprPtr> inner = {
-                    std::make_shared<TAssignExpr>(loc, "next",
+                    NQumir::MakeIntrusive<TAssignExpr>(loc, "next",
                         binIntAccumulate(func,
                             binary("==", slotOf("valid_buf"), numI64(0)))),
                 };
@@ -3433,17 +3441,17 @@ std::vector<NQumir::NAst::TExprPtr> GenReducerFunDecls(
                     std::make_move_iterator(stores.end()));
                 inner.push_back(storeSlot("valid_buf",
                     binary("+", slotOf("valid_buf"), numI64(1))));
-                stmts.push_back(std::make_shared<TIfExpr>(loc, ident("value_is_valid"),
+                stmts.push_back(NQumir::MakeIntrusive<TIfExpr>(loc, ident("value_is_valid"),
                     block(std::move(inner)), nullptr));
             } else {
-                stmts.push_back(std::make_shared<TAssignExpr>(loc, "next",
+                stmts.push_back(NQumir::MakeIntrusive<TAssignExpr>(loc, "next",
                     binIntAccumulate(func, ident("is_new"))));
                 auto stores = storeBinInt(loBuf, hiBuf);
                 stmts.insert(stmts.end(),
                     std::make_move_iterator(stores.begin()),
                     std::make_move_iterator(stores.end()));
             }
-            result.push_back(std::make_shared<TFunDecl>(loc, name,
+            result.push_back(NQumir::MakeIntrusive<TFunDecl>(loc, name,
                 std::vector<TGenericParam>{},
                 std::move(params), block(std::move(stmts)), voidType));
             continue;
@@ -3454,9 +3462,9 @@ std::vector<NQumir::NAst::TExprPtr> GenReducerFunDecls(
         // to the historical reducer contract.
         if (!r.NeedsValidity) {
             std::vector<TParam> params = {
-                std::make_shared<TVarStmt>(loc, "prev", i64Type),
-                std::make_shared<TVarStmt>(loc, "value", i64Type),
-                std::make_shared<TVarStmt>(loc, "is_new", boolType),
+                NQumir::MakeIntrusive<TVarStmt>(loc, "prev", i64Type),
+                NQumir::MakeIntrusive<TVarStmt>(loc, "value", i64Type),
+                NQumir::MakeIntrusive<TVarStmt>(loc, "is_new", boolType),
             };
             TExprPtr resultExpr;
             if (r.IsFloat()) {
@@ -3467,14 +3475,14 @@ std::vector<NQumir::NAst::TExprPtr> GenReducerFunDecls(
                 if (func == "sum") {
                     resultExpr = bitcast(binary("+", prevF, valueF), i64Type);
                 } else if (func == "min") {
-                    resultExpr = bitcast(std::make_shared<TIfExpr>(loc, ident("is_new"),
+                    resultExpr = bitcast(NQumir::MakeIntrusive<TIfExpr>(loc, ident("is_new"),
                         valueF,
-                        std::make_shared<TIfExpr>(loc, binary("<", valueF, prevF),
+                        NQumir::MakeIntrusive<TIfExpr>(loc, binary("<", valueF, prevF),
                             valueF, prevF)), i64Type);
                 } else if (func == "max") {
-                    resultExpr = bitcast(std::make_shared<TIfExpr>(loc, ident("is_new"),
+                    resultExpr = bitcast(NQumir::MakeIntrusive<TIfExpr>(loc, ident("is_new"),
                         valueF,
-                        std::make_shared<TIfExpr>(loc, binary(">", valueF, prevF),
+                        NQumir::MakeIntrusive<TIfExpr>(loc, binary(">", valueF, prevF),
                             valueF, prevF)), i64Type);
                 } else {
                     throw std::invalid_argument(
@@ -3485,19 +3493,19 @@ std::vector<NQumir::NAst::TExprPtr> GenReducerFunDecls(
             } else if (func == "sum") {
                 resultExpr = binary("+", ident("prev"), ident("value"));
             } else if (func == "min") {
-                resultExpr = std::make_shared<TIfExpr>(loc, ident("is_new"), ident("value"),
-                    std::make_shared<TIfExpr>(loc, binary("<", ident("value"), ident("prev")),
+                resultExpr = NQumir::MakeIntrusive<TIfExpr>(loc, ident("is_new"), ident("value"),
+                    NQumir::MakeIntrusive<TIfExpr>(loc, binary("<", ident("value"), ident("prev")),
                         ident("value"), ident("prev")));
             } else if (func == "max") {
-                resultExpr = std::make_shared<TIfExpr>(loc, ident("is_new"), ident("value"),
-                    std::make_shared<TIfExpr>(loc, binary(">", ident("value"), ident("prev")),
+                resultExpr = NQumir::MakeIntrusive<TIfExpr>(loc, ident("is_new"), ident("value"),
+                    NQumir::MakeIntrusive<TIfExpr>(loc, binary(">", ident("value"), ident("prev")),
                         ident("value"), ident("prev")));
             } else {
                 throw std::invalid_argument(
                     "GenReducerFunDecls: unknown aggregate function: " + func);
             }
-            auto body = block({std::make_shared<TReturnExpr>(loc, std::move(resultExpr))});
-            result.push_back(std::make_shared<TFunDecl>(loc, name,
+            auto body = block({NQumir::MakeIntrusive<TReturnExpr>(loc, std::move(resultExpr))});
+            result.push_back(NQumir::MakeIntrusive<TFunDecl>(loc, name,
                 std::vector<TGenericParam>{},
                 std::move(params), std::move(body), i64Type));
             continue;
@@ -3507,16 +3515,16 @@ std::vector<NQumir::NAst::TExprPtr> GenReducerFunDecls(
         // whose argument is non-null; count(*) never reaches here (HasArg false).
         if (func == "count") {
             std::vector<TParam> params = {
-                std::make_shared<TVarStmt>(loc, "buf", ptrI64Type),
-                std::make_shared<TVarStmt>(loc, "dense_slot", i64Type),
-                std::make_shared<TVarStmt>(loc, "value_is_valid", boolType),
+                NQumir::MakeIntrusive<TVarStmt>(loc, "buf", ptrI64Type),
+                NQumir::MakeIntrusive<TVarStmt>(loc, "dense_slot", i64Type),
+                NQumir::MakeIntrusive<TVarStmt>(loc, "value_is_valid", boolType),
             };
             auto body = block({
-                std::make_shared<TIfExpr>(loc, ident("value_is_valid"),
+                NQumir::MakeIntrusive<TIfExpr>(loc, ident("value_is_valid"),
                     block({storeSlot("buf", binary("+", slotOf("buf"), numI64(1)))}),
                     nullptr),
             });
-            result.push_back(std::make_shared<TFunDecl>(loc, name,
+            result.push_back(NQumir::MakeIntrusive<TFunDecl>(loc, name,
                 std::vector<TGenericParam>{},
                 std::move(params), std::move(body), voidType));
             continue;
@@ -3527,11 +3535,11 @@ std::vector<NQumir::NAst::TExprPtr> GenReducerFunDecls(
         // seeds buf, and only later values accumulate/compare (so min/max never
         // fold against the zero-initialized buffer).
         std::vector<TParam> params = {
-            std::make_shared<TVarStmt>(loc, "buf", ptrI64Type),
-            std::make_shared<TVarStmt>(loc, "valid_buf", ptrI64Type),
-            std::make_shared<TVarStmt>(loc, "dense_slot", i64Type),
-            std::make_shared<TVarStmt>(loc, "value", i64Type),
-            std::make_shared<TVarStmt>(loc, "value_is_valid", boolType),
+            NQumir::MakeIntrusive<TVarStmt>(loc, "buf", ptrI64Type),
+            NQumir::MakeIntrusive<TVarStmt>(loc, "valid_buf", ptrI64Type),
+            NQumir::MakeIntrusive<TVarStmt>(loc, "dense_slot", i64Type),
+            NQumir::MakeIntrusive<TVarStmt>(loc, "value", i64Type),
+            NQumir::MakeIntrusive<TVarStmt>(loc, "value_is_valid", boolType),
         };
         TExprPtr accumulate;
         if (r.IsFloat()) {
@@ -3541,10 +3549,10 @@ std::vector<NQumir::NAst::TExprPtr> GenReducerFunDecls(
             if (func == "sum") {
                 accumulate = storeSlot("buf", bitcast(binary("+", prevF, valueF), i64Type));
             } else if (func == "min") {
-                accumulate = std::make_shared<TIfExpr>(loc, binary("<", valueF, prevF),
+                accumulate = NQumir::MakeIntrusive<TIfExpr>(loc, binary("<", valueF, prevF),
                     block({storeSlot("buf", ident("value"))}), nullptr);
             } else if (func == "max") {
-                accumulate = std::make_shared<TIfExpr>(loc, binary(">", valueF, prevF),
+                accumulate = NQumir::MakeIntrusive<TIfExpr>(loc, binary(">", valueF, prevF),
                     block({storeSlot("buf", ident("value"))}), nullptr);
             } else {
                 throw std::invalid_argument(
@@ -3553,18 +3561,18 @@ std::vector<NQumir::NAst::TExprPtr> GenReducerFunDecls(
         } else if (func == "sum") {
             accumulate = storeSlot("buf", binary("+", slotOf("buf"), ident("value")));
         } else if (func == "min") {
-            accumulate = std::make_shared<TIfExpr>(loc,
+            accumulate = NQumir::MakeIntrusive<TIfExpr>(loc,
                 binary("<", ident("value"), slotOf("buf")),
                 block({storeSlot("buf", ident("value"))}), nullptr);
         } else if (func == "max") {
-            accumulate = std::make_shared<TIfExpr>(loc,
+            accumulate = NQumir::MakeIntrusive<TIfExpr>(loc,
                 binary(">", ident("value"), slotOf("buf")),
                 block({storeSlot("buf", ident("value"))}), nullptr);
         } else {
             throw std::invalid_argument(
                 "GenReducerFunDecls: unknown aggregate function: " + func);
         }
-        auto seedOrAccumulate = std::make_shared<TIfExpr>(loc,
+        auto seedOrAccumulate = NQumir::MakeIntrusive<TIfExpr>(loc,
             binary("==", slotOf("valid_buf"), numI64(0)),
             block({storeSlot("buf", ident("value"))}),
             block({std::move(accumulate)}));
@@ -3573,47 +3581,47 @@ std::vector<NQumir::NAst::TExprPtr> GenReducerFunDecls(
             storeSlot("valid_buf", binary("+", slotOf("valid_buf"), numI64(1))),
         });
         auto body = block({
-            std::make_shared<TIfExpr>(loc, ident("value_is_valid"),
+            NQumir::MakeIntrusive<TIfExpr>(loc, ident("value_is_valid"),
                 std::move(inner), nullptr),
         });
-        result.push_back(std::make_shared<TFunDecl>(loc, name,
+        result.push_back(NQumir::MakeIntrusive<TFunDecl>(loc, name,
             std::vector<TGenericParam>{},
             std::move(params), std::move(body), voidType));
     }
     return result;
 }
 
-NQumir::NAst::TExprPtr GenApplyReducersFunDecl(const TAggReducerLayout& layout)
+NQumir::NAst::TExprPtr GenApplyReducersFunDecl(NQumir::NAst::TTypeFactory& types, const TAggReducerLayout& layout)
 {
     using namespace NQumir::NAst;
     NQumir::TLocation loc{};
 
-    auto i64Type = std::make_shared<TIntegerType>();
-    auto boolType = std::make_shared<TBoolType>();
-    auto ptrI64Type = std::make_shared<TPointerType>(i64Type);
-    auto ptrPtrI64Type = std::make_shared<TPointerType>(ptrI64Type);
+    auto i64Type = types.MakeInteger();
+    auto boolType = types.Make<TBoolType>();
+    auto ptrI64Type = types.MakePointer(i64Type);
+    auto ptrPtrI64Type = types.MakePointer(ptrI64Type);
 
     auto ident = [&](const std::string& name) {
-        return std::make_shared<TIdentExpr>(loc, name);
+        return NQumir::MakeIntrusive<TIdentExpr>(loc, name);
     };
     auto numI64 = [&](int64_t value) -> TExprPtr {
-        auto expr = std::make_shared<TNumberExpr>(loc, value);
+        auto expr = NQumir::MakeIntrusive<TNumberExpr>(loc, value, types);
         expr->Type = i64Type;
         return expr;
     };
     auto bindBuffer = [&](const std::string& name, int index, std::vector<TExprPtr>& out) {
-        out.push_back(std::make_shared<TVarStmt>(loc, name, ptrI64Type));
-        out.push_back(std::make_shared<TAssignExpr>(loc, name,
-            std::make_shared<TIndexExpr>(loc, ident("agg_buffers"),
+        out.push_back(NQumir::MakeIntrusive<TVarStmt>(loc, name, ptrI64Type));
+        out.push_back(NQumir::MakeIntrusive<TAssignExpr>(loc, name,
+            NQumir::MakeIntrusive<TIndexExpr>(loc, ident("agg_buffers"),
                 numI64(static_cast<int64_t>(index)))));
     };
 
     std::vector<TParam> params = {
-        std::make_shared<TVarStmt>(loc, "agg_buffers", ptrPtrI64Type),
-        std::make_shared<TVarStmt>(loc, "dense_slot", i64Type),
-        std::make_shared<TVarStmt>(loc, "value", i64Type),
-        std::make_shared<TVarStmt>(loc, "value_is_valid", boolType),
-        std::make_shared<TVarStmt>(loc, "is_new", boolType),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "agg_buffers", ptrPtrI64Type),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "dense_slot", i64Type),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "value", i64Type),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "value_is_valid", boolType),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "is_new", boolType),
     };
 
     std::vector<TExprPtr> stmts;
@@ -3631,17 +3639,17 @@ NQumir::NAst::TExprPtr GenApplyReducersFunDecl(const TAggReducerLayout& layout)
 
         if (!r.NeedsValidity) {
             // Shape A: out-of-line scalar reducer; capture and store the result.
-            auto prev = std::make_shared<TIndexExpr>(loc, ident(bufName), ident("dense_slot"));
-            auto call = std::make_shared<TCallExpr>(loc, ident(reduceName),
+            auto prev = NQumir::MakeIntrusive<TIndexExpr>(loc, ident(bufName), ident("dense_slot"));
+            auto call = NQumir::MakeIntrusive<TCallExpr>(loc, ident(reduceName),
                 std::vector<TExprPtr>{prev, ident("value"), ident("is_new")});
-            stmts.push_back(std::make_shared<TArrayAssignExpr>(loc, bufName,
+            stmts.push_back(NQumir::MakeIntrusive<TArrayAssignExpr>(loc, bufName,
                 std::vector<TExprPtr>{ident("dense_slot")}, call));
             continue;
         }
 
         if (r.Func == "count") {
             // Shape B-count: in-place reducer, no return value.
-            stmts.push_back(std::make_shared<TCallExpr>(loc, ident(reduceName),
+            stmts.push_back(NQumir::MakeIntrusive<TCallExpr>(loc, ident(reduceName),
                 std::vector<TExprPtr>{
                     ident(bufName), ident("dense_slot"), ident("value_is_valid")}));
             continue;
@@ -3650,16 +3658,16 @@ NQumir::NAst::TExprPtr GenApplyReducersFunDecl(const TAggReducerLayout& layout)
         // Shape B-agg: in-place reducer over value buffer + valid-count buffer.
         const std::string validName = "validbuf_" + std::to_string(i);
         bindBuffer(validName, r.ValidBufIdx, stmts);
-        stmts.push_back(std::make_shared<TCallExpr>(loc, ident(reduceName),
+        stmts.push_back(NQumir::MakeIntrusive<TCallExpr>(loc, ident(reduceName),
             std::vector<TExprPtr>{
                 ident(bufName), ident(validName), ident("dense_slot"),
                 ident("value"), ident("value_is_valid")}));
     }
 
-    auto body = std::make_shared<TBlockExpr>(loc, std::move(stmts));
-    return std::make_shared<TFunDecl>(loc, "agg_apply_reducers",
+    auto body = NQumir::MakeIntrusive<TBlockExpr>(loc, std::move(stmts));
+    return NQumir::MakeIntrusive<TFunDecl>(loc, "agg_apply_reducers",
         std::vector<TGenericParam>{},
-        std::move(params), std::move(body), std::make_shared<TVoidType>());
+        std::move(params), std::move(body), types.Make<TVoidType>());
 }
 
 } // namespace NKernel

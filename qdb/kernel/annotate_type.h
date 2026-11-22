@@ -16,9 +16,13 @@ class TExternalCatalogSnapshot;
 
 namespace NQdb::NKernel {
 
+// Planner return types of qumirdb.oz functions and of external catalog functions.
+// Nothing is built until the first lookup, which composes qumirdb.oz (with the
+// catalog's declarations) in `types`, the query's factory.
 class TExternalTypingResolver {
 public:
-    explicit TExternalTypingResolver(
+    TExternalTypingResolver(
+        NQumir::NAst::TTypeFactory& types,
         std::shared_ptr<const TExternalCatalogSnapshot> catalog);
     ~TExternalTypingResolver();
 
@@ -26,17 +30,31 @@ public:
         const std::string& name,
         const std::vector<NQumir::NAst::TTypePtr>& argTypes);
 
+    // The return type of a qumirdb.oz function, or null for an unknown name.
+    NQumir::NAst::TTypePtr QumirdbReturnType(const std::string& name);
+
 private:
     struct TImpl;
     std::shared_ptr<TImpl> Impl_;
 };
 
+// The typing state of one query. Copies share the resolver, so a query composes
+// qumirdb.oz for typing at most once.
 struct TAnnotationContext {
     std::shared_ptr<const TExternalCatalogSnapshot> ExternalCatalog;
-    // Filled lazily on the first external annotation and then reused by all
-    // repeated AnnotateTypes passes for this context.
-    mutable std::shared_ptr<TExternalTypingResolver> Resolver;
+    std::shared_ptr<TExternalTypingResolver> Resolver;
 };
+
+TAnnotationContext MakeAnnotationContext(
+    NQumir::NAst::TTypeFactory& types,
+    std::shared_ptr<const TExternalCatalogSnapshot> catalog);
+
+// Kernels read a DATE as its storage integer, as qumirdb.oz declares DATE columns, so a
+// plan AST is erased before Qumir compiles it: every kernel and planning-time function.
+NQumir::NAst::TTypePtr EraseDateType(
+    NQumir::NAst::TTypeFactory& types,
+    const NQumir::NAst::TTypePtr& type);
+void EraseDateTypes(NQumir::NAst::TTypeFactory& types, const NQumir::NAst::TExprPtr& ast);
 
 // Lightweight SQL type inference for a Project/filter/aggregate expression over
 // `inputType`. Operators use local promotion rules; catalog calls use the reusable
@@ -45,6 +63,7 @@ struct TAnnotationContext {
 // such as equi-join extraction. An untyped NULL value (`SELECT NULL AS x`) is
 // NULL[INTEGER], as in ExpandKernelValue. Throws on a null expression.
 NQumir::NAst::TTypePtr AnnotateExprType(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TExprPtr& expr,
     const NQumir::NAst::TStructType& inputType,
     const TAnnotationContext* context = nullptr);
@@ -55,6 +74,7 @@ NQumir::NAst::TTypePtr AnnotateExprType(
 // node that cannot be typed, such as a call to a function outside the catalog,
 // keeps its type.
 NQumir::NAst::TTypePtr AnnotateExprTreeTypes(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TExprPtr& expr,
     const NQumir::NAst::TStructType& inputType,
     const TAnnotationContext* context = nullptr);
@@ -83,9 +103,10 @@ NQumir::NAst::TTypePtr EffectiveBinaryNumericType(
 // Nullable[T]); the non-nullable path is untouched. Operates on a clone - the plan's
 // shared expression is left intact. Returns the rewritten expression and its planner type.
 std::pair<NQumir::NAst::TExprPtr, NQumir::NAst::TTypePtr> ExpandNullable(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TExprPtr& expr,
     const NQumir::NAst::TStructType& inputType,
-    const TExternalCatalogSnapshot* externalCatalog = nullptr);
+    const TAnnotationContext* context = nullptr);
 
 // Whether ExpandNullable makes a call NULL whenever its argument `index` is NULL.
 // Calls with their own NULL semantics (`qdb_is_null`, `coalesce`, ...) are not
@@ -95,14 +116,16 @@ bool IsNullStrictCallArgument(const std::string& name, size_t index);
 // Final expression rewrite for kernel compilation. Applies the existing nullable
 // normalization and then qdb-only decimal erasure (Decimal -> qumirdb.oz BinInt).
 std::pair<NQumir::NAst::TExprPtr, NQumir::NAst::TTypePtr> ExpandKernelExpr(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TExprPtr& expr,
     const NQumir::NAst::TStructType& inputType,
-    const TExternalCatalogSnapshot* externalCatalog = nullptr);
+    const TAnnotationContext* context = nullptr);
 
 // Whether `expr` is an untyped NULL value (`NULL`, `CASE WHEN c THEN NULL END`): AnnotateExprType
 // types it NULL[INTEGER] only because nothing else gives it a type. A UNION takes the type of
 // such a column from its other branches.
 bool IsUntypedNullValue(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TExprPtr& expr,
     const NQumir::NAst::TStructType& inputType,
     const TAnnotationContext* context = nullptr);
@@ -110,16 +133,18 @@ bool IsUntypedNullValue(
 // ExpandKernelExpr for a filter or join residual predicate. A predicate is a boolean
 // context: an untyped NULL predicate (`WHERE NULL`) becomes NULL[bool], which selects no rows.
 std::pair<NQumir::NAst::TExprPtr, NQumir::NAst::TTypePtr> ExpandKernelPredicate(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TExprPtr& expr,
     const NQumir::NAst::TStructType& inputType,
-    const TExternalCatalogSnapshot* externalCatalog = nullptr);
+    const TAnnotationContext* context = nullptr);
 
 // ExpandKernelExpr for a projected column or an aggregate argument. Nothing there types
 // an untyped NULL (`SELECT NULL AS x`), so it becomes NULL[INTEGER], the type
 // AnnotateExprType gives the column.
 std::pair<NQumir::NAst::TExprPtr, NQumir::NAst::TTypePtr> ExpandKernelValue(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TExprPtr& expr,
     const NQumir::NAst::TStructType& inputType,
-    const TExternalCatalogSnapshot* externalCatalog = nullptr);
+    const TAnnotationContext* context = nullptr);
 
 } // namespace NQdb::NKernel

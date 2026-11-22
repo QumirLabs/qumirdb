@@ -1,4 +1,5 @@
 #include "mock_source.h"
+#include "test_types.h"
 
 #include <qdb/catalog/external_module.h>
 #include <qdb/plan/build.h>
@@ -27,15 +28,15 @@ std::expected<TOperatorPtr, NQumir::TError> Build(
 {
     std::istringstream input{std::string(text)};
     NSql::TTokenStream tokens(input);
-    NSql::TParser parser;
+    NSql::TParser parser(TestTypes());
     auto query = parser.Parse(tokens);
     if (!query) {
         return std::unexpected(query.error());
     }
-    return BuildPlan(*query, [&](std::string_view name)
+    return BuildPlan(TestTypes(), *query, [&](NQumir::NAst::TTypeFactory& types, std::string_view name)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
-        return std::make_shared<TSourceOperator>(Borrow(source), std::string(name));
+        return NQumir::MakeIntrusive<TSourceOperator>(types, Borrow(source), std::string(name));
     }, annotation);
 }
 
@@ -122,11 +123,11 @@ TEST(SqlBinding, SubqueryWidthsUseResolvedDistinctOutputs) {
 }
 
 TEST(SqlBinding, RepeatedLabelsSortByInputExpression) {
-    auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
+    auto i64 = TestTypes().MakeInteger();
     TMockSource source(TMockColumns{}, {{"x", i64}, {"y", i64}});
     auto plan = Build("SELECT x AS a, y AS a FROM t ORDER BY y", source);
     ASSERT_TRUE(plan) << plan.error().ToString();
-    ApplyPlanPasses(*plan);
+    ApplyPlanPasses(TestTypes(), *plan);
     auto output = TMaybeOp<TProjectOperator>(*plan);
     ASSERT_TRUE(output);
     auto sorted = output.Cast()->Input();
@@ -153,13 +154,14 @@ TEST(SqlPositions, StructItemsCountTheirFields) {
         "CREATE FUNCTION pair(DOUBLE) RETURNS (DOUBLE, DOUBLE) "
         "SET MODULE TO m SET SYMBOL TO pair;");
     NSql::TTokenStream tokens(definitions);
-    NSql::TParser parser;
+    NSql::TParser parser(TestTypes());
     auto statements = parser.ParseAll(tokens);
     ASSERT_TRUE(statements) << statements.error().ToString();
-    ASSERT_TRUE(catalog.Apply(*NSql::TMaybeNode<NSql::TSqlExternalModule>((*statements)[0]).Cast()));
+    ASSERT_TRUE(catalog.Apply(TestTypes(), *NSql::TMaybeNode<NSql::TSqlExternalModule>((*statements)[0]).Cast()));
     ASSERT_TRUE(catalog.Apply(*NSql::TMaybeNode<NSql::TSqlExternalFunction>((*statements)[1]).Cast()));
-    const NKernel::TAnnotationContext annotation{.ExternalCatalog = catalog.Snapshot()};
-    auto f64 = std::make_shared<NQumir::NAst::TFloatType>();
+    const auto annotation = NKernel::MakeAnnotationContext(
+        TestTypes(), catalog.Snapshot(SharedTestTypes()));
+    auto f64 = TestTypes().MakeFloat();
     TMockSource source(TMockColumns{}, {{"x", f64}, {"y", f64}});
 
     // ORDER BY reads the typed outputs, a struct item's fields included.

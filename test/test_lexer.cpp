@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "test_types.h"
 
 #include <qdb/sql/lexer.h>
 #include <qdb/sql/parser.h>
@@ -184,7 +185,7 @@ TEST(SqlParser, CreateOrReplaceModule) {
         "LANGUAGE rust\n"
         "AS $$fn orbit_position() {}$$;");
     TTokenStream tokens(in);
-    TParser parser;
+    TParser parser(NQdb::TestTypes());
     auto parsed = parser.Parse(tokens);
     ASSERT_TRUE(parsed) << parsed.error().ToString();
 
@@ -203,7 +204,7 @@ TEST(SqlParser, CreateOrReplaceExternalFunction) {
         "SET SYMBOL = orbit_position "
         "SET MODULE TO orbital;");
     TTokenStream tokens(in);
-    TParser parser;
+    TParser parser(NQdb::TestTypes());
     auto parsed = parser.Parse(tokens);
     ASSERT_TRUE(parsed) << parsed.error().ToString();
 
@@ -232,7 +233,7 @@ TEST(SqlParser, CreateExternalFunctionWithScalarReturn) {
         "CREATE FUNCTION orbit_distance(DOUBLE) RETURNS DOUBLE "
         "SET MODULE = orbital;");
     TTokenStream tokens(in);
-    TParser parser;
+    TParser parser(NQdb::TestTypes());
     auto parsed = parser.Parse(tokens);
     ASSERT_TRUE(parsed) << parsed.error().ToString();
 
@@ -257,7 +258,7 @@ TEST(SqlParser, ParseAllExternalModuleFunctionAndQuery) {
         "SET MODULE TO orbital SET SYMBOL TO distance;\n"
         "SELECT distance(x) FROM points;");
     TTokenStream tokens(in);
-    TParser parser;
+    TParser parser(NQdb::TestTypes());
     auto parsed = parser.ParseAll(tokens);
     ASSERT_TRUE(parsed) << parsed.error().ToString();
     ASSERT_EQ(parsed->size(), 3u);
@@ -271,7 +272,7 @@ TEST(SqlParser, StructProjectionColumnAliases) {
         "SELECT orbit_vector(x) AS (position_x, position_y, position_z) "
         "FROM points;");
     TTokenStream tokens(in);
-    TParser parser;
+    TParser parser(NQdb::TestTypes());
     auto parsed = parser.Parse(tokens);
     ASSERT_TRUE(parsed) << parsed.error().ToString();
 
@@ -336,7 +337,7 @@ std::string Dispatch(TSqlNode& node)
 std::string ParseError(const std::string& sql) {
     std::istringstream in(sql);
     TTokenStream tokens(in);
-    TParser parser;
+    TParser parser(NQdb::TestTypes());
     auto parsed = parser.Parse(tokens);
     return parsed ? std::string{} : parsed.error().ToString();
 }
@@ -355,7 +356,7 @@ std::string Repeat(const std::string& text, size_t count) {
 TEST(SqlAst, AcceptDispatchesToTheNodeOverload) {
     std::istringstream in("SELECT a FROM t JOIN u ON t.a = u.a UNION SELECT b FROM v;");
     TTokenStream tokens(in);
-    TParser parser;
+    TParser parser(NQdb::TestTypes());
     auto parsed = parser.Parse(tokens);
     ASSERT_TRUE(parsed) << parsed.error().ToString();
 

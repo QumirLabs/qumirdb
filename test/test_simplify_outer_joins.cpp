@@ -7,6 +7,8 @@
 #include <stdexcept>
 #include <string>
 
+#include "test_types.h"
+
 using namespace NQdb;
 
 namespace {
@@ -14,7 +16,7 @@ namespace {
 NQumir::NAst::TExprPtr Predicate(const std::string& where) {
     std::istringstream input("SELECT 1 FROM s, r WHERE " + where);
     NSql::TTokenStream tokens(input);
-    auto parsed = NSql::TParser().Parse(tokens);
+    auto parsed = NSql::TParser(TestTypes()).Parse(tokens);
     if (!parsed) {
         throw std::runtime_error(parsed.error().ToString());
     }

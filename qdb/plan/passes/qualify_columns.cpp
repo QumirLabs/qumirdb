@@ -42,7 +42,7 @@ std::string ExtractStem(const std::string& path) {
 
 // Collect all TSourceOperator nodes in pre-order.
 void CollectSources(const TOperatorPtr& op,
-    std::vector<std::shared_ptr<TSourceOperator>>& out)
+    std::vector<NQumir::TIntrusivePtr<TSourceOperator>>& out)
 {
     if (auto maybe = TMaybeOp<TSourceOperator>(op)) {
         out.push_back(maybe.Cast());
@@ -113,13 +113,13 @@ void QualifyExpr(TExprPtr& expr, const TStructType& schema) {
 
 // Bottom-up pass: returns the qualified output schema for each node.
 // Also modifies the node in-place (source Type, join keys, expression idents, etc.)
-std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op) {
+const TStructType* QualifyColumnsImpl(NQumir::NAst::TTypeFactory& types, const TOperatorPtr& op) {
 
     // -- Source --------------------------------------------------------------
     if (auto maybe = TMaybeOp<TSourceOperator>(op)) {
         auto src = maybe.Cast();
         const std::string& alias = src->GetAlias();
-        const auto& schema = src->GetTable()->Schema();
+        const auto& schema = src->TableSchema();
 
         std::vector<std::pair<std::string, TTypePtr>> newFields;
         newFields.reserve(
@@ -130,15 +130,15 @@ std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op) {
         if (src->EmitsRowId()) {
             newFields.emplace_back(
                 src->RowIdColumn(),
-                std::make_shared<TIntegerType>(TIntegerType::U64));
+                types.MakeInteger(TIntegerType::U64));
         }
-        auto qStruct = std::make_shared<TStructType>(std::move(newFields));
+        auto qStruct = types.MakeStruct(std::move(newFields));
 
-        // Update the source's TFunctionType::ReturnType in-place.
-        if (auto* fun = static_cast<TFunctionType*>(src->Type.get())) {
-            fun->ReturnType = qStruct;
+        // Signatures are immutable: replace the source's with the qualified output.
+        if (auto* fun = static_cast<const TFunctionType*>(src->Type)) {
+            src->Type = types.MakeFunction(std::vector(fun->ParamTypes), qStruct);
         } else {
-            src->Type = std::make_shared<TFunctionType>(
+            src->Type = types.MakeFunction(
                 std::vector<TTypePtr>{}, qStruct);
         }
         return qStruct;
@@ -147,7 +147,7 @@ std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op) {
     // -- Filter --------------------------------------------------------------
     if (auto maybe = TMaybeOp<TFilterOperator>(op)) {
         auto flt = maybe.Cast();
-        auto childSchema = QualifyColumnsImpl(flt->Input());
+        auto childSchema = QualifyColumnsImpl(types, flt->Input());
         if (childSchema) {
             QualifyExpr(flt->MutablePredicate(), *childSchema);
         }
@@ -157,7 +157,7 @@ std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op) {
     // -- Sort / TopSort / Limit ---------------------------------------------
     if (auto maybe = TMaybeOp<TSortOperator>(op)) {
         auto sort = maybe.Cast();
-        auto childSchema = QualifyColumnsImpl(sort->Input());
+        auto childSchema = QualifyColumnsImpl(types, sort->Input());
         if (childSchema) {
             for (auto& key : sort->MutableKeys()) {
                 key.Column = QualifyIdent(*childSchema, key.Column);
@@ -168,7 +168,7 @@ std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op) {
 
     if (auto maybe = TMaybeOp<TTopSortOperator>(op)) {
         auto topSort = maybe.Cast();
-        auto childSchema = QualifyColumnsImpl(topSort->Input());
+        auto childSchema = QualifyColumnsImpl(types, topSort->Input());
         if (childSchema) {
             for (auto& key : topSort->MutableKeys()) {
                 key.Column = QualifyIdent(*childSchema, key.Column);
@@ -179,14 +179,14 @@ std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op) {
 
     if (auto maybe = TMaybeOp<TLimitOperator>(op)) {
         auto limit = maybe.Cast();
-        return QualifyColumnsImpl(limit->Input());
+        return QualifyColumnsImpl(types, limit->Input());
     }
 
     // -- Join ----------------------------------------------------------------
     if (auto maybe = TMaybeOp<TJoinOperator>(op)) {
         auto join = maybe.Cast();
-        auto leftSchema  = QualifyColumnsImpl(join->Left());
-        auto rightSchema = QualifyColumnsImpl(join->Right());
+        auto leftSchema  = QualifyColumnsImpl(types, join->Left());
+        auto rightSchema = QualifyColumnsImpl(types, join->Right());
 
         // Update equi-join keys.
         if (leftSchema && rightSchema) {
@@ -200,8 +200,7 @@ std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op) {
         if (join->MutableFilter() && leftSchema && rightSchema) {
             std::vector<std::pair<std::string, TTypePtr>> merged = leftSchema->Fields;
             for (auto& f : rightSchema->Fields) merged.push_back(f);
-            TStructType mergedStruct(std::move(merged));
-            QualifyExpr(join->MutableFilter(), mergedStruct);
+            QualifyExpr(join->MutableFilter(), *types.MakeStruct(std::move(merged)));
         }
 
         // Build the qualified output schema by join type: semi/anti joins expose
@@ -226,13 +225,13 @@ std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op) {
                 for (auto& f : rightSchema->Fields) outFields.push_back(f);
                 break;
         }
-        auto outSchema = std::make_shared<TStructType>(std::move(outFields));
+        auto outSchema = types.MakeStruct(std::move(outFields));
 
         // Update the join's TFunctionType::ReturnType so AnnotateTypes can skip it if needed.
         // (AnnotateTypes will re-compute it anyway, so this just ensures a non-null ReturnType
         //  is available during the QualifyColumns bottom-up walk for ancestor nodes.)
-        if (auto* fun = static_cast<TFunctionType*>(join->Type.get())) {
-            fun->ReturnType = outSchema;
+        if (auto* fun = static_cast<const TFunctionType*>(join->Type)) {
+            join->Type = types.MakeFunction(std::vector(fun->ParamTypes), outSchema);
         }
         return outSchema;
     }
@@ -240,7 +239,7 @@ std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op) {
     // -- Project -------------------------------------------------------------
     if (auto maybe = TMaybeOp<TProjectOperator>(op)) {
         auto proj = maybe.Cast();
-        auto childSchema = QualifyColumnsImpl(proj->Input());
+        auto childSchema = QualifyColumnsImpl(types, proj->Input());
         if (childSchema) {
             for (auto& spec : proj->MutableProjections()) {
                 QualifyExpr(spec.Expression, *childSchema);
@@ -257,13 +256,13 @@ std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op) {
                 }
             }
         }
-        return std::make_shared<TStructType>(std::move(outFields));
+        return types.MakeStruct(std::move(outFields));
     }
 
     // -- Aggregate -----------------------------------------------------------
     if (auto maybe = TMaybeOp<TAggregateOperator>(op)) {
         auto agg = maybe.Cast();
-        auto childSchema = QualifyColumnsImpl(agg->Input());
+        auto childSchema = QualifyColumnsImpl(types, agg->Input());
         if (childSchema) {
             for (auto& key : agg->MutableGroupKeys()) {
                 key = QualifyIdent(*childSchema, key);
@@ -280,7 +279,7 @@ std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op) {
         for (const auto& spec : agg->Aggs()) {
             outFields.emplace_back(spec.Name, nullptr);
         }
-        return std::make_shared<TStructType>(std::move(outFields));
+        return types.MakeStruct(std::move(outFields));
     }
 
     // -- Window --------------------------------------------------------------
@@ -288,7 +287,7 @@ std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op) {
     // partition/order key names and the function arguments against the input.
     if (auto maybe = TMaybeOp<TWindowOperator>(op)) {
         auto window = maybe.Cast();
-        auto childSchema = QualifyColumnsImpl(window->Input());
+        auto childSchema = QualifyColumnsImpl(types, window->Input());
         if (childSchema) {
             for (auto& key : window->MutablePartitionKeys()) {
                 key = QualifyIdent(*childSchema, key);
@@ -307,11 +306,11 @@ std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op) {
         for (const auto& func : window->Functions()) {
             outFields.emplace_back(func.Name, nullptr);
         }
-        return std::make_shared<TStructType>(std::move(outFields));
+        return types.MakeStruct(std::move(outFields));
     }
 
     if (TMaybeOp<TOneRowOperator>(op)) {
-        return std::make_shared<TStructType>(std::vector<std::pair<std::string, TTypePtr>>{});
+        return types.MakeStruct(std::vector<std::pair<std::string, TTypePtr>>{});
     }
 
     // -- Union -----------------------------------------------------------------
@@ -321,9 +320,9 @@ std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op) {
     // schema - otherwise the join returns null and its ancestors stop qualifying.
     if (auto maybe = TMaybeOp<TUnionAllOperator>(op)) {
         auto un = maybe.Cast();
-        std::shared_ptr<TStructType> first;
+        const TStructType* first = nullptr;
         for (auto& branch : un->MutableInputs()) {
-            auto branchSchema = QualifyColumnsImpl(branch);
+            auto branchSchema = QualifyColumnsImpl(types, branch);
             if (!first) first = branchSchema;
         }
         return first;
@@ -331,7 +330,7 @@ std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op) {
 
     // Unknown operator: recurse into inputs to qualify sources beneath it.
     for (const auto& input : op->Inputs()) {
-        QualifyColumnsImpl(input);
+        QualifyColumnsImpl(types, input);
     }
     return nullptr;
 }
@@ -340,8 +339,8 @@ std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op) {
 
 // ----------------------------------------------------------------------------
 
-void AssignSourceAliases(const TOperatorPtr& root) {
-    std::vector<std::shared_ptr<TSourceOperator>> sources;
+void AssignSourceAliases(NQumir::NAst::TTypeFactory& types, const TOperatorPtr& root) {
+    std::vector<NQumir::TIntrusivePtr<TSourceOperator>> sources;
     CollectSources(root, sources);
 
     // Count stems (only for sources without an explicit alias).
@@ -358,16 +357,16 @@ void AssignSourceAliases(const TOperatorPtr& root) {
         if (!src->GetAlias().empty()) continue; // explicit alias already set
         std::string stem = ExtractStem(src->SourcePath());
         if (stemCount[stem] == 1) {
-            src->SetAlias(stem);
+            src->SetAlias(types, stem);
         } else {
             int idx = stemIndex[stem]++;
-            src->SetAlias(stem + "_" + std::to_string(idx));
+            src->SetAlias(types, stem + "_" + std::to_string(idx));
         }
     }
 }
 
-void QualifyColumns(const TOperatorPtr& root) {
-    QualifyColumnsImpl(root);
+void QualifyColumns(NQumir::NAst::TTypeFactory& types, const TOperatorPtr& root) {
+    QualifyColumnsImpl(types, root);
 }
 
 } // namespace NQdb

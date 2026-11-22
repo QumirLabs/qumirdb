@@ -40,18 +40,17 @@ void Execute(const NCompiler::TPreparedQuery& prepared, bool explain, size_t sca
     settings.ScanSplit.MaxScanTasks = 1;
     settings.Kernel.Backend = EKernelBackend::Vm;
     auto lowered = NScheduler::LowerPlanToGraph(
-        prepared.Plan, settings, nullptr, prepared.Annotation.ExternalCatalog);
-    FinalizeKernels(lowered.Kernels, settings.Kernel.Backend, nullptr, lowered.ExternalCatalog);
+        prepared.Plan, prepared.Types, settings, nullptr, &prepared.Annotation);
+    FinalizeKernels(lowered.Kernels, lowered.Types, settings.Kernel.Backend, nullptr, lowered.ExternalCatalog);
     const auto outputType = lowered.OutputType;
     auto output = NQumir::NAst::TMaybeType<NQumir::NAst::TStructType>(outputType);
     if (!output) {
         return;
     }
-    std::vector<TColumnSchema> columns;
+    TSchema schema;
     for (const auto& [name, type] : output.Cast()->Fields) {
-        columns.push_back({.Name = name, .Type = type});
+        schema.Columns.push_back({.Name = name, .Type = type});
     }
-    const TSchema schema{columns};
     std::ostringstream text;
     TCsvSink sink(schema, text);
     std::string error;

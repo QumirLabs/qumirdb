@@ -13,32 +13,34 @@
 #include <utility>
 #include <vector>
 
+#include "test_types.h"
+
 using namespace NQdb;
 using namespace NQumir::NAst;
 
 namespace {
 
 TExprPtr Id(const std::string& name) {
-    auto out = std::make_shared<TIdentExpr>(NQumir::TLocation{}, name);
-    out->Type = std::make_shared<TIntegerType>(TIntegerType::I64);
+    auto out = NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, name);
+    out->Type = TestTypes().MakeInteger(TIntegerType::I64);
     return out;
 }
 
 TExprPtr Num(int64_t value) {
-    return std::make_shared<TNumberExpr>(NQumir::TLocation{}, value);
+    return NQumir::MakeIntrusive<TNumberExpr>(NQumir::TLocation{}, value, TestTypes());
 }
 
 TExprPtr Fraction(double value) {
-    return std::make_shared<TNumberExpr>(NQumir::TLocation{}, value);
+    return NQumir::MakeIntrusive<TNumberExpr>(NQumir::TLocation{}, value, TestTypes());
 }
 
 TExprPtr Neg(TExprPtr operand) {
-    return std::make_shared<TUnaryExpr>(
+    return NQumir::MakeIntrusive<TUnaryExpr>(
         NQumir::TLocation{}, TOperator("-"), std::move(operand));
 }
 
 TExprPtr Bin(std::string op, TExprPtr left, TExprPtr right, TTypePtr type) {
-    auto out = std::make_shared<TBinaryExpr>(
+    auto out = NQumir::MakeIntrusive<TBinaryExpr>(
         NQumir::TLocation{}, TOperator(std::move(op)),
         std::move(left), std::move(right));
     out->Type = std::move(type);
@@ -46,11 +48,11 @@ TExprPtr Bin(std::string op, TExprPtr left, TExprPtr right, TTypePtr type) {
 }
 
 TTypePtr I64Type() {
-    return std::make_shared<TIntegerType>(TIntegerType::I64);
+    return TestTypes().MakeInteger(TIntegerType::I64);
 }
 
 TTypePtr BoolType() {
-    return std::make_shared<TBoolType>();
+    return TestTypes().Make<TBoolType>();
 }
 
 TRowGroupColumnRange I64Range(int64_t lo, int64_t hi) {
@@ -136,7 +138,7 @@ struct TTestSchema {
 TEST(RowGroupPredicate, PrunesSimpleComparison) {
     TTestSchema schema({"x"});
     auto predicate = Bin(">", Id("t.x"), Num(10), BoolType());
-    auto evaluator = TRowGroupPredicateEvaluator::Compile(
+    auto evaluator = TRowGroupPredicateEvaluator::Compile(TestTypes(),
         predicate, schema.Schema, "t");
     ASSERT_TRUE(evaluator);
 
@@ -151,13 +153,13 @@ TEST(RowGroupPredicate, PrunesSimpleComparison) {
 // A fractional literal meets a DECIMAL column at the larger of the two scales,
 // an integer literal at the column's scale; both compare exactly on i128.
 TEST(RowGroupPredicate, PrunesDecimalComparisons) {
-    TTestSchema schema("d", std::make_shared<TDecimal>(15, 2));
+    TTestSchema schema("d", MakeDecimalType(TestTypes(), {15, 2}));
     const std::vector<TRowGroupColumnRange> low{DecimalRange(-1000, 500)};
     const std::vector<TRowGroupColumnRange> high{DecimalRange(501, 2400)};
     const std::vector<TRowGroupColumnRange> crossing{DecimalRange(0, 700)};
 
     auto fraction = Bin("<=", Id("d"), Fraction(5.0), BoolType());
-    auto evaluator = TRowGroupPredicateEvaluator::Compile(
+    auto evaluator = TRowGroupPredicateEvaluator::Compile(TestTypes(),
         fraction, schema.Schema, "");
     ASSERT_TRUE(evaluator);
     EXPECT_TRUE(evaluator->MayBeTrue(low));
@@ -166,21 +168,21 @@ TEST(RowGroupPredicate, PrunesDecimalComparisons) {
 
     // 5.005 has three fractional digits: the column is rescaled, not the literal.
     auto finer = Bin(">", Id("d"), Fraction(5.005), BoolType());
-    evaluator = TRowGroupPredicateEvaluator::Compile(finer, schema.Schema, "");
+    evaluator = TRowGroupPredicateEvaluator::Compile(TestTypes(), finer, schema.Schema, "");
     ASSERT_TRUE(evaluator);
     EXPECT_FALSE(evaluator->MayBeTrue(low));
     EXPECT_TRUE(evaluator->MayBeTrue(high));
     EXPECT_TRUE(evaluator->MayBeTrue(crossing));
 
     auto integer = Bin("<", Id("d"), Num(24), BoolType());
-    evaluator = TRowGroupPredicateEvaluator::Compile(integer, schema.Schema, "");
+    evaluator = TRowGroupPredicateEvaluator::Compile(TestTypes(), integer, schema.Schema, "");
     ASSERT_TRUE(evaluator);
     EXPECT_TRUE(evaluator->MayBeTrue(low));
     EXPECT_TRUE(evaluator->MayBeTrue(crossing));
     EXPECT_FALSE(evaluator->MayBeTrue(TRanges{DecimalRange(2400, 3000)}));
 
     auto negative = Bin("<", Id("d"), Neg(Fraction(9.5)), BoolType());
-    evaluator = TRowGroupPredicateEvaluator::Compile(negative, schema.Schema, "");
+    evaluator = TRowGroupPredicateEvaluator::Compile(TestTypes(), negative, schema.Schema, "");
     ASSERT_TRUE(evaluator);
     EXPECT_TRUE(evaluator->MayBeTrue(low));
     EXPECT_FALSE(evaluator->MayBeTrue(TRanges{DecimalRange(-950, 0)}));
@@ -195,12 +197,12 @@ TEST(RowGroupPredicate, PrunesDecimalComparisons) {
 // on the full 128 bits.
 TEST(RowGroupPredicate, ComparesWideDecimalColumns) {
     TTestSchema schema({
-        {"a", std::make_shared<TDecimal>(38, 6)},
-        {"b", std::make_shared<TDecimal>(38, 2)},
+        {"a", MakeDecimalType(TestTypes(), {38, 6})},
+        {"b", MakeDecimalType(TestTypes(), {38, 2})},
     });
     const __int128 unit = static_cast<__int128>(1000000000000000000LL) * 1000000000000LL;
     auto predicate = Bin("<", Id("a"), Id("b"), BoolType());
-    auto evaluator = TRowGroupPredicateEvaluator::Compile(
+    auto evaluator = TRowGroupPredicateEvaluator::Compile(TestTypes(),
         predicate, schema.Schema, "");
     ASSERT_TRUE(evaluator);
 
@@ -219,7 +221,7 @@ TEST(RowGroupPredicate, EvaluatesMultiColumnArithmeticIntervals) {
     TTestSchema schema({"x", "y"});
     auto sum = Bin("+", Id("x"), Id("y"), I64Type());
     auto predicate = Bin("<", std::move(sum), Num(10), BoolType());
-    auto evaluator = TRowGroupPredicateEvaluator::Compile(
+    auto evaluator = TRowGroupPredicateEvaluator::Compile(TestTypes(),
         predicate, schema.Schema, "");
     ASSERT_TRUE(evaluator);
 
@@ -234,13 +236,13 @@ TEST(RowGroupPredicate, EvaluatesMultiColumnArithmeticIntervals) {
 TEST(RowGroupPredicate, UnknownConjunctDoesNotHideFalseSupportedConjunct) {
     TTestSchema schema({"x"});
     auto supported = Bin(">", Id("x"), Num(10), BoolType());
-    auto unsupported = std::make_shared<TCallExpr>(
+    auto unsupported = NQumir::MakeIntrusive<TCallExpr>(
         NQumir::TLocation{},
-        std::make_shared<TIdentExpr>(NQumir::TLocation{}, "unsupported"),
+        NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "unsupported"),
         std::vector<TExprPtr>{Id("x")});
     unsupported->Type = BoolType();
     auto predicate = Bin("&&", supported, unsupported, BoolType());
-    auto evaluator = TRowGroupPredicateEvaluator::Compile(
+    auto evaluator = TRowGroupPredicateEvaluator::Compile(TestTypes(),
         predicate, schema.Schema, "");
     ASSERT_TRUE(evaluator);
 
@@ -251,13 +253,13 @@ TEST(RowGroupPredicate, UnknownConjunctDoesNotHideFalseSupportedConjunct) {
 TEST(RowGroupPredicate, UnknownDisjunctPreventsPruning) {
     TTestSchema schema({"x"});
     auto supported = Bin(">", Id("x"), Num(10), BoolType());
-    auto unsupported = std::make_shared<TCallExpr>(
+    auto unsupported = NQumir::MakeIntrusive<TCallExpr>(
         NQumir::TLocation{},
-        std::make_shared<TIdentExpr>(NQumir::TLocation{}, "unsupported"),
+        NQumir::MakeIntrusive<TIdentExpr>(NQumir::TLocation{}, "unsupported"),
         std::vector<TExprPtr>{Id("x")});
     unsupported->Type = BoolType();
     auto predicate = Bin("||", supported, unsupported, BoolType());
-    auto evaluator = TRowGroupPredicateEvaluator::Compile(
+    auto evaluator = TRowGroupPredicateEvaluator::Compile(TestTypes(),
         predicate, schema.Schema, "");
     ASSERT_TRUE(evaluator);
 
@@ -269,7 +271,7 @@ TEST(RowGroupPredicate, MultiplicationKeepsInteriorPossibilities) {
     TTestSchema schema({"x"});
     auto square = Bin("*", Id("x"), Id("x"), I64Type());
     auto predicate = Bin("<", std::move(square), Num(1), BoolType());
-    auto evaluator = TRowGroupPredicateEvaluator::Compile(
+    auto evaluator = TRowGroupPredicateEvaluator::Compile(TestTypes(),
         predicate, schema.Schema, "");
     ASSERT_TRUE(evaluator);
 
@@ -283,7 +285,7 @@ TEST(RowGroupPredicate, OverflowAndMissingBoundsStayConservative) {
     TTestSchema schema({"x"});
     auto sum = Bin("+", Id("x"), Num(1), I64Type());
     auto predicate = Bin("<", std::move(sum), Num(0), BoolType());
-    auto evaluator = TRowGroupPredicateEvaluator::Compile(
+    auto evaluator = TRowGroupPredicateEvaluator::Compile(TestTypes(),
         predicate, schema.Schema, "");
     ASSERT_TRUE(evaluator);
 
@@ -298,7 +300,7 @@ TEST(RowGroupPredicate, OverflowAndMissingBoundsStayConservative) {
 TEST(RowGroupPredicate, NullOnlyRangeCannotPassWhere) {
     TTestSchema schema({"x"});
     auto predicate = Bin(">", Id("x"), Num(10), BoolType());
-    auto evaluator = TRowGroupPredicateEvaluator::Compile(
+    auto evaluator = TRowGroupPredicateEvaluator::Compile(TestTypes(),
         predicate, schema.Schema, "");
     ASSERT_TRUE(evaluator);
 
@@ -312,9 +314,9 @@ TEST(RowGroupPredicate, NullOnlyRangeCannotPassWhere) {
 
 TEST(RowGroupPredicate, SupportsUnsignedRangesAndOverflowFallback) {
     TTestSchema schema(
-        "x", std::make_shared<TIntegerType>(TIntegerType::U64));
+        "x", TestTypes().MakeInteger(TIntegerType::U64));
     auto predicate = Bin(">", Id("x"), Num(10), BoolType());
-    auto evaluator = TRowGroupPredicateEvaluator::Compile(
+    auto evaluator = TRowGroupPredicateEvaluator::Compile(TestTypes(),
         predicate, schema.Schema, "");
     ASSERT_TRUE(evaluator);
 
@@ -324,9 +326,9 @@ TEST(RowGroupPredicate, SupportsUnsignedRangesAndOverflowFallback) {
     EXPECT_TRUE(evaluator->MayBeTrue(above));
 
     auto sum = Bin("+", Id("x"), Num(1),
-        std::make_shared<TIntegerType>(TIntegerType::U64));
+        TestTypes().MakeInteger(TIntegerType::U64));
     auto wrappedPredicate = Bin("<", std::move(sum), Num(1), BoolType());
-    auto wrappedEvaluator = TRowGroupPredicateEvaluator::Compile(
+    auto wrappedEvaluator = TRowGroupPredicateEvaluator::Compile(TestTypes(),
         wrappedPredicate, schema.Schema, "");
     ASSERT_TRUE(wrappedEvaluator);
     const auto max = std::numeric_limits<uint64_t>::max();
@@ -335,12 +337,12 @@ TEST(RowGroupPredicate, SupportsUnsignedRangesAndOverflowFallback) {
 }
 
 TEST(RowGroupPredicate, SupportsFloatArithmeticWithOutwardBounds) {
-    TTestSchema schema("x", std::make_shared<TFloatType>());
-    auto offset = std::make_shared<TNumberExpr>(NQumir::TLocation{}, 0.1);
-    auto sum = Bin("+", Id("x"), offset, std::make_shared<TFloatType>());
-    auto zero = std::make_shared<TNumberExpr>(NQumir::TLocation{}, 0.0);
+    TTestSchema schema("x", TestTypes().MakeFloat());
+    auto offset = NQumir::MakeIntrusive<TNumberExpr>(NQumir::TLocation{}, 0.1, TestTypes());
+    auto sum = Bin("+", Id("x"), offset, TestTypes().MakeFloat());
+    auto zero = NQumir::MakeIntrusive<TNumberExpr>(NQumir::TLocation{}, 0.0, TestTypes());
     auto predicate = Bin("<", std::move(sum), zero, BoolType());
-    auto evaluator = TRowGroupPredicateEvaluator::Compile(
+    auto evaluator = TRowGroupPredicateEvaluator::Compile(TestTypes(),
         predicate, schema.Schema, "");
     ASSERT_TRUE(evaluator);
 
@@ -351,7 +353,7 @@ TEST(RowGroupPredicate, SupportsFloatArithmeticWithOutwardBounds) {
 }
 
 TEST(RowGroupPredicate, F32ArithmeticRoundsToTheF32GridAndNeverPrunesAWitness) {
-    const auto f32 = std::make_shared<TFloatType>(TFloatType::F32);
+    const auto f32 = TestTypes().MakeFloat(TFloatType::F32);
     std::vector<TColumnSchema> columns{{"x", f32}, {"y", f32}, {"z", f32}};
     const TSchema schema{columns};
     auto sum = Bin("+", Id("x"), Id("y"), f32);
@@ -360,7 +362,7 @@ TEST(RowGroupPredicate, F32ArithmeticRoundsToTheF32GridAndNeverPrunesAWitness) {
     // sum would miss; the product adds another rounding.
     for (const char* op : {"==", "<", ">"}) {
         for (const bool multiply : {false, true}) {
-            auto evaluator = TRowGroupPredicateEvaluator::Compile(
+            auto evaluator = TRowGroupPredicateEvaluator::Compile(TestTypes(),
                 Bin(op, multiply ? product : sum, Id("z"), BoolType()), schema, "");
             ASSERT_TRUE(evaluator);
             const std::vector<float> grid{
@@ -399,7 +401,7 @@ TEST(RowGroupPredicate, F32ArithmeticRoundsToTheF32GridAndNeverPrunesAWitness) {
 }
 
 TEST(RowGroupPredicate, F32ColumnVsLiteralComparesInF64) {
-    const auto f32 = std::make_shared<TFloatType>(TFloatType::F32);
+    const auto f32 = TestTypes().MakeFloat(TFloatType::F32);
     std::vector<TColumnSchema> columns{{"x", f32}};
     const TSchema schema{columns};
     // Literals on both sides of the f32 grid points above 2^24 (the grid step is 2 there).
@@ -414,7 +416,7 @@ TEST(RowGroupPredicate, F32ColumnVsLiteralComparesInF64) {
             if (literal == std::floor(literal)) {
                 number = Num(static_cast<int64_t>(literal));
             }
-            auto evaluator = TRowGroupPredicateEvaluator::Compile(
+            auto evaluator = TRowGroupPredicateEvaluator::Compile(TestTypes(),
                 Bin(op, Id("x"), std::move(number), BoolType()), schema, "");
             ASSERT_TRUE(evaluator);
             for (const float lo : grid) for (const float hi : grid) {
@@ -441,10 +443,10 @@ TEST(RowGroupPredicate, F32ColumnVsLiteralComparesInF64) {
 TEST(RowGroupPredicate, SupportsNotAndNonStrictComparison) {
     TTestSchema schema({"x"});
     auto atMostTen = Bin("<=", Id("x"), Num(10), BoolType());
-    auto predicate = std::make_shared<TUnaryExpr>(
+    auto predicate = NQumir::MakeIntrusive<TUnaryExpr>(
         NQumir::TLocation{}, TOperator("!"), std::move(atMostTen));
     predicate->Type = BoolType();
-    auto evaluator = TRowGroupPredicateEvaluator::Compile(
+    auto evaluator = TRowGroupPredicateEvaluator::Compile(TestTypes(),
         predicate, schema.Schema, "");
     ASSERT_TRUE(evaluator);
 
@@ -458,7 +460,7 @@ TEST(RowGroupPredicate, ComparesArithmeticExpressions) {
     TTestSchema schema({"a", "b", "c"});
     auto product = Bin("*", Id("a"), Id("b"), I64Type());
     auto predicate = Bin(">=", std::move(product), Id("c"), BoolType());
-    auto evaluator = TRowGroupPredicateEvaluator::Compile(
+    auto evaluator = TRowGroupPredicateEvaluator::Compile(TestTypes(),
         predicate, schema.Schema, "");
     ASSERT_TRUE(evaluator);
 
@@ -475,7 +477,7 @@ TEST(RowGroupPredicate, NeverPrunesAnExhaustiveIntegerWitness) {
     auto product = Bin("*", Id("x"), Id("y"), I64Type());
     auto expression = Bin("+", std::move(product), Id("x"), I64Type());
     auto predicate = Bin("<", std::move(expression), Num(5), BoolType());
-    auto evaluator = TRowGroupPredicateEvaluator::Compile(
+    auto evaluator = TRowGroupPredicateEvaluator::Compile(TestTypes(),
         predicate, schema.Schema, "");
     ASSERT_TRUE(evaluator);
 

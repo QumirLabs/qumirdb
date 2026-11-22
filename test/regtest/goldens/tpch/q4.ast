@@ -12,7 +12,7 @@
       (table orders)
     )
     (where
-      (&& (&& (>= o_orderdate (: 9465 i32)) (< o_orderdate (: 9556 i32)))
+      (&& (&& (>= o_orderdate (: 9465 <named DATE [i32]>)) (< o_orderdate (: 9556 <named DATE [i32]>)))
         (subquery exists (query
         (select
           (select-list

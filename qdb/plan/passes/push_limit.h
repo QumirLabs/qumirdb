@@ -10,6 +10,6 @@ namespace NQdb {
 // list) still fuses into a top-sort.
 // Recursion visits all relational inputs. The limit itself moves only across
 // projects; it stays above filters, joins, unions, windows and other operators.
-TOperatorPtr PushDownLimits(const TOperatorPtr& root);
+TOperatorPtr PushDownLimits(NQumir::NAst::TTypeFactory& types, const TOperatorPtr& root);
 
 } // namespace NQdb

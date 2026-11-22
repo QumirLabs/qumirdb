@@ -149,20 +149,21 @@ std::vector<size_t> ConnectedOrder(
     return order;
 }
 
-TOperatorPtr MakeInnerJoin(TOperatorPtr left, TOperatorPtr right) {
-    return std::make_shared<TJoinOperator>(
-        std::move(left), std::move(right), std::vector<TJoinKey>{}, EJoinType::Inner, nullptr);
+TOperatorPtr MakeInnerJoin(NQumir::NAst::TTypeFactory& types, TOperatorPtr left, TOperatorPtr right) {
+    return NQumir::MakeIntrusive<TJoinOperator>(
+        types, std::move(left), std::move(right), std::vector<TJoinKey>{}, EJoinType::Inner, nullptr);
 }
 
 // Left-deep heuristic order - fallback when a component exceeds MaxRelations.
 TOperatorPtr HeuristicChain(
+    NQumir::NAst::TTypeFactory& types,
     const std::vector<TOperatorPtr>& leaves,
     const std::vector<std::unordered_set<size_t>>& adjacency)
 {
     auto order = ConnectedOrder(leaves.size(), adjacency);
     TOperatorPtr result = leaves[order.front()];
     for (size_t i = 1; i < order.size(); ++i) {
-        result = MakeInnerJoin(std::move(result), leaves[order[i]]);
+        result = MakeInnerJoin(types, std::move(result), leaves[order[i]]);
     }
     return result;
 }
@@ -226,6 +227,7 @@ void RecordJoinReorderChain(
 }
 
 TOperatorPtr BuildChain(
+    NQumir::NAst::TTypeFactory& types,
     const std::vector<TOperatorPtr>& leaves,
     const TJoinPredicates& predicates,
     TContext& ctx)
@@ -263,12 +265,12 @@ TOperatorPtr BuildChain(
     if (!ctx.EnableCbo) {
         RecordJoinReorderChain(
             ctx, leaves.size(), graphEdges.size(), false, "heuristic", "cbo disabled");
-        return HeuristicChain(leaves, adjacency);
+        return HeuristicChain(types, leaves, adjacency);
     }
     if (auto reason = CboStatsFallbackReason(leaves, graphEdges)) {
         RecordJoinReorderChain(
             ctx, leaves.size(), graphEdges.size(), false, "heuristic", *reason);
-        return HeuristicChain(leaves, adjacency);
+        return HeuristicChain(types, leaves, adjacency);
     }
 
     // Connected components (a disconnected graph means a deliberate cross).
@@ -302,7 +304,7 @@ TOperatorPtr BuildChain(
             RecordJoinReorderChain(
                 ctx, leaves.size(), graphEdges.size(), false, "heuristic",
                 "too many relations for cbo");
-            return HeuristicChain(leaves, adjacency);
+            return HeuristicChain(types, leaves, adjacency);
         }
     }
     std::vector<std::vector<NCbo::TJoinEdge>> compEdges(components);
@@ -315,12 +317,12 @@ TOperatorPtr BuildChain(
     for (int c = 0; c < components; ++c) {
         TOperatorPtr tree = compLeaves[c].size() == 1
             ? compLeaves[c].front()
-            : NCbo::DpccpJoinOrder(compLeaves[c], compEdges[c], predicates.Residuals, ctx.Folder);
+            : NCbo::DpccpJoinOrder(types, compLeaves[c], compEdges[c], predicates.Residuals, ctx.Folder);
         if (!tree) {
             RecordJoinReorderChain(
                 ctx, leaves.size(), graphEdges.size(), false, "heuristic",
                 "cbo returned no plan");
-            return HeuristicChain(leaves, adjacency); // defensive
+            return HeuristicChain(types, leaves, adjacency); // defensive
         }
         subtrees.push_back({compLeaves[c].size(), std::move(tree)});
     }
@@ -331,7 +333,7 @@ TOperatorPtr BuildChain(
 
     TOperatorPtr result = std::move(subtrees.front().second);
     for (size_t i = 1; i < subtrees.size(); ++i) {
-        result = MakeInnerJoin(std::move(result), std::move(subtrees[i].second));
+        result = MakeInnerJoin(types, std::move(result), std::move(subtrees[i].second));
     }
     return result;
 }
@@ -343,6 +345,7 @@ TOperatorPtr BuildChain(
 // DPccp the residuals that read columns the chain's leaves do not own
 // (qualified names disambiguate).
 TOperatorPtr Reorder(
+    NQumir::NAst::TTypeFactory& types,
     TOperatorPtr node,
     TJoinPredicates predicates,
     TContext& ctx)
@@ -354,25 +357,25 @@ TOperatorPtr Reorder(
         auto filter = maybeFilter.Cast();
         CollectJoinPredicates(filter->Predicate(), predicates);
         filter->MutableInput() = Reorder(
-            filter->Input(), std::move(predicates), ctx);
+            types, filter->Input(), std::move(predicates), ctx);
         return filter;
     }
     if (IsReorderableJoin(node)) {
         std::vector<TOperatorPtr> leaves;
         CollectChainLeaves(node, leaves);
         for (auto& leaf : leaves) {
-            leaf = Reorder(std::move(leaf), {}, ctx);
+            leaf = Reorder(types, std::move(leaf), {}, ctx);
         }
-        return BuildChain(leaves, predicates, ctx);
+        return BuildChain(types, leaves, predicates, ctx);
     }
     if (auto maybeJoin = TMaybeOp<TJoinOperator>(node)) {
         auto join = maybeJoin.Cast();
-        join->MutableLeft() = Reorder(join->Left(), predicates, ctx);
-        join->MutableRight() = Reorder(join->Right(), predicates, ctx);
+        join->MutableLeft() = Reorder(types, join->Left(), predicates, ctx);
+        join->MutableRight() = Reorder(types, join->Right(), predicates, ctx);
         return join;
     }
     for (auto& input : node->MutableInputs()) {
-        input = Reorder(input, {}, ctx);
+        input = Reorder(types, input, {}, ctx);
     }
     return node;
 }
@@ -383,8 +386,8 @@ namespace {
 
 std::unordered_set<std::string> ColumnNames(const TOperatorPtr& node) {
     std::unordered_set<std::string> names;
-    if (auto st = TMaybeType<TStructType>(node->OutputColumns())) {
-        for (const auto& [name, _] : st.Cast()->Fields) {
+    if (auto st = node->OutputColumns()) {
+        for (const auto& [name, _] : st->Fields) {
             names.insert(name);
         }
     }
@@ -405,7 +408,7 @@ bool AllIn(const std::unordered_set<std::string>& cols,
 // Sinks a LeftSemi/LeftAnti join through the inner joins beneath its build side,
 // as deep as its build-side dependencies allow. Reads output schemas of the
 // current (typed) tree before mutating, so a caller must re-annotate afterwards.
-TOperatorPtr SinkSemi(std::shared_ptr<TJoinOperator> semi) {
+TOperatorPtr SinkSemi(NQumir::NAst::TTypeFactory& types, NQumir::TIntrusivePtr<TJoinOperator> semi) {
     auto childJoin = TMaybeOp<TJoinOperator>(semi->Left());
     if (!childJoin || childJoin.Cast()->JoinType() != EJoinType::Inner) {
         return semi;
@@ -444,15 +447,15 @@ TOperatorPtr SinkSemi(std::shared_ptr<TJoinOperator> semi) {
     }
 
     auto& target = toLeft ? inner->MutableLeft() : inner->MutableRight();
-    auto pushed = std::make_shared<TJoinOperator>(
-        target, semi->Right(), semi->Keys(), semi->JoinType(), semi->Filter());
+    auto pushed = NQumir::MakeIntrusive<TJoinOperator>(
+        types, target, semi->Right(), semi->Keys(), semi->JoinType(), semi->Filter());
     // The filters derived from the residual lie in `target` and the build side.
     pushed->MutableDerivedSideFilters() = semi->DerivedSideFilters();
-    target = SinkSemi(std::move(pushed));
+    target = SinkSemi(types, std::move(pushed));
     return inner;
 }
 
-TOperatorPtr PushDown(TOperatorPtr node) {
+TOperatorPtr PushDown(NQumir::NAst::TTypeFactory& types, TOperatorPtr node) {
     if (!node) {
         return node;
     }
@@ -463,14 +466,14 @@ TOperatorPtr PushDown(TOperatorPtr node) {
         // SinkSemi preserves output column names, so recursing into the
         // restructured result stays valid before the pipeline re-annotates.
         if (type == EJoinType::LeftSemi || type == EJoinType::LeftAnti) {
-            auto sunk = SinkSemi(j);
-            if (sunk.get() != j.get()) {
-                return PushDown(std::move(sunk));
+            auto sunk = SinkSemi(types, j);
+            if (sunk.Get() != j.Get()) {
+                return PushDown(types, std::move(sunk));
             }
         }
     }
     for (auto& input : node->MutableInputs()) {
-        input = PushDown(input);
+        input = PushDown(types, input);
     }
     return node;
 }
@@ -478,6 +481,7 @@ TOperatorPtr PushDown(TOperatorPtr node) {
 } // namespace
 
 TOperatorPtr ReorderJoins(
+    NQumir::NAst::TTypeFactory& types,
     TOperatorPtr root,
     TConstFolder& folder,
     bool enableCbo,
@@ -492,11 +496,11 @@ TOperatorPtr ReorderJoins(
         .Diagnostics = diagnostics,
         .Folder = folder,
     };
-    return Reorder(std::move(root), {}, ctx);
+    return Reorder(types, std::move(root), {}, ctx);
 }
 
-TOperatorPtr PushDownSemiJoins(TOperatorPtr root) {
-    return PushDown(std::move(root));
+TOperatorPtr PushDownSemiJoins(NQumir::NAst::TTypeFactory& types, TOperatorPtr root) {
+    return PushDown(types, std::move(root));
 }
 
 } // namespace NQdb

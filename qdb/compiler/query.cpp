@@ -18,13 +18,14 @@ namespace NCompiler {
 namespace {
 
 std::expected<TOperatorPtr, NQumir::TError> ParseSexpr(
+    NQumir::NAst::TTypeFactory& types,
     std::istream& in,
     const TTableSourceFactory& makeSource)
 {
     std::optional<NQumir::TError> sourceError;
     NSexp::TRelParserOptions opts;
     opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) {
-        auto source = makeSource(path);
+        auto source = makeSource(types, path);
         if (!source) {
             sourceError = source.error();
             return TOperatorPtr{};
@@ -32,7 +33,7 @@ std::expected<TOperatorPtr, NQumir::TError> ParseSexpr(
         return *source;
     };
 
-    NQumir::NAst::NCore::TParser parser;
+    NQumir::NAst::NCore::TParser parser(types);
     for (auto& [key, value] : NSexp::MakeRelParsers(std::move(opts))) {
         parser.NodeParsers[key] = std::move(value);
     }
@@ -45,18 +46,18 @@ std::expected<TOperatorPtr, NQumir::TError> ParseSexpr(
     if (!parsed) {
         return std::unexpected(parsed.error());
     }
-    auto plan = std::dynamic_pointer_cast<IOperator>(*parsed);
-    if (!plan) {
+    auto maybePlan = NQumir::NAst::TMaybeNode<IOperator>(*parsed);
+    if (!maybePlan) {
         return std::unexpected(NQumir::TError("input must be a relational plan (rel ...)"));
     }
-    return plan;
+    return TOperatorPtr(maybePlan.Cast());
 }
 
 std::expected<std::vector<NSql::TSqlNodePtr>, NQumir::TError>
-ParseSqlStatements(std::istream& in)
+ParseSqlStatements(NQumir::NAst::TTypeFactory& types, std::istream& in)
 {
     NSql::TTokenStream tokens(in);
-    NSql::TParser parser;
+    NSql::TParser parser(types);
     return parser.ParseAll(tokens);
 }
 
@@ -93,7 +94,7 @@ std::expected<TParsedQuery, NQumir::TError> TQueryCompiler::Parse(
     query.Explain = StripExplain(text);
     std::istringstream stream(text);
     if (syntax == ESyntax::Sql) {
-        auto statements = ParseSqlStatements(stream);
+        auto statements = ParseSqlStatements(*Types_, stream);
         if (!statements) {
             return std::unexpected(statements.error());
         }
@@ -104,7 +105,7 @@ std::expected<TParsedQuery, NQumir::TError> TQueryCompiler::Parse(
             query.Statements.emplace_back(std::move(statement));
         }
     } else {
-        auto plan = ParseSexpr(stream, Sources_);
+        auto plan = ParseSexpr(*Types_, stream, Sources_);
         if (!plan) {
             return std::unexpected(plan.error());
         }
@@ -117,7 +118,8 @@ TQueryCompiler::TQueryCompiler(
     TExternalModuleCatalog& catalog,
     TTableSourceFactory sources,
     TPlanPassOptions options)
-    : Catalog_(catalog)
+    : Types_(std::make_shared<NQumir::NAst::TTypeFactory>())
+    , Catalog_(catalog)
     , Sources_(std::move(sources))
     , Options_(std::move(options))
 {}
@@ -126,8 +128,8 @@ std::expected<std::optional<TPreparedQuery>, NQumir::TError> TQueryCompiler::Pre
     const TStatement& statement,
     bool explain) const
 {
-    TPreparedQuery prepared;
-    if (auto sql = std::get_if<NSql::TSqlNodePtr>(&statement)) {
+    auto sql = std::get_if<NSql::TSqlNodePtr>(&statement);
+    if (sql) {
         auto module = NSql::TMaybeNode<NSql::TSqlExternalModule>(*sql);
         auto function = NSql::TMaybeNode<NSql::TSqlExternalFunction>(*sql);
         if (module || function) {
@@ -135,15 +137,20 @@ std::expected<std::optional<TPreparedQuery>, NQumir::TError> TQueryCompiler::Pre
                 return std::unexpected(NQumir::TError("EXPLAIN requires a SELECT statement"));
             }
             auto applied = module
-                ? Catalog_.Apply(*module.Cast())
+                ? Catalog_.Apply(*Types_, *module.Cast())
                 : Catalog_.Apply(*function.Cast());
             if (!applied) {
                 return std::unexpected(applied.error());
             }
             return std::nullopt;
         }
-        prepared.Annotation.ExternalCatalog = Catalog_.Snapshot();
-        auto plan = BuildPlan(*sql, Sources_, prepared.Annotation);
+    }
+    TPreparedQuery prepared{
+        .Types = Types_,
+        .Annotation = NKernel::MakeAnnotationContext(*Types_, Catalog_.Snapshot(Types_)),
+    };
+    if (sql) {
+        auto plan = BuildPlan(*Types_, *sql, Sources_, prepared.Annotation);
         if (!plan) {
             return std::unexpected(plan.error());
         }
@@ -154,7 +161,7 @@ std::expected<std::optional<TPreparedQuery>, NQumir::TError> TQueryCompiler::Pre
     auto options = Options_;
     options.Annotation = prepared.Annotation;
     options.Diagnostics = &prepared.Diagnostics;
-    ApplyPlanPasses(prepared.Plan, std::move(options));
+    ApplyPlanPasses(*Types_, prepared.Plan, std::move(options));
     return prepared;
 }
 

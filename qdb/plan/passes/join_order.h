@@ -34,6 +34,7 @@ struct TJoinReorderDiagnostics {
 // ExtractEquiJoins. `folder` folds the query's constants.
 // Returns the new root.
 TOperatorPtr ReorderJoins(
+    NQumir::NAst::TTypeFactory& types,
     TOperatorPtr root,
     TConstFolder& folder,
     bool enableCbo = true,
@@ -52,6 +53,6 @@ TOperatorPtr ReorderJoins(
 //
 // Runs after ExtractEquiJoins and AnnotateTypes (needs join keys and output
 // schemas); re-annotate afterwards since it restructures the join tree.
-TOperatorPtr PushDownSemiJoins(TOperatorPtr root);
+TOperatorPtr PushDownSemiJoins(NQumir::NAst::TTypeFactory& types, TOperatorPtr root);
 
 } // namespace NQdb

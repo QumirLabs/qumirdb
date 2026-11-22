@@ -14,27 +14,30 @@
 #include <unordered_map>
 #include <vector>
 
+#include "test_types.h"
+
 namespace {
 
 using namespace NQumir;
 using namespace NQumir::NAst;
+using NQdb::TestTypes;
 
-TTypePtr I64() { return std::make_shared<TIntegerType>(TIntegerType::I64); }
+TTypePtr I64() { return TestTypes().MakeInteger(TIntegerType::I64); }
 
-TTypePtr F64() { return std::make_shared<TFloatType>(); }
+TTypePtr F64() { return TestTypes().MakeFloat(); }
 
-TTypePtr Void() { return std::make_shared<TVoidType>(); }
+TTypePtr Void() { return TestTypes().Make<TVoidType>(); }
 
 TTypePtr Struct(std::vector<std::pair<std::string, TTypePtr>> fields) {
-  return std::make_shared<TStructType>(std::move(fields));
+  return TestTypes().MakeStruct(std::move(fields));
 }
 
 TTypePtr Named(std::string name, TTypePtr underlying = {}) {
-  return std::make_shared<TNamedType>(std::move(name), std::move(underlying));
+  return TestTypes().MakeNamed(std::move(name), std::move(underlying));
 }
 
 TExprPtr TypeDecl(std::string name, TTypePtr underlying) {
-  return std::make_shared<TTypeDeclStmt>(
+  return NQumir::MakeIntrusive<TTypeDeclStmt>(
       TLocation{}, Named(std::move(name), std::move(underlying)));
 }
 
@@ -42,45 +45,45 @@ TExprPtr Function(std::string name, std::vector<TTypePtr> paramTypes = {}) {
   std::vector<TParam> params;
   params.reserve(paramTypes.size());
   for (size_t i = 0; i < paramTypes.size(); ++i) {
-    params.push_back(std::make_shared<TVarStmt>(
+    params.push_back(NQumir::MakeIntrusive<TVarStmt>(
         TLocation{}, "arg" + std::to_string(i), paramTypes[i]));
   }
   auto ret = Void();
-  auto fun = std::make_shared<TFunDecl>(
+  auto fun = NQumir::MakeIntrusive<TFunDecl>(
       TLocation{}, std::move(name), std::vector<TGenericParam>{},
       std::move(params),
-      std::make_shared<TBlockExpr>(TLocation{}, std::vector<TExprPtr>{}), ret);
-  fun->Type = std::make_shared<TFunctionType>(std::move(paramTypes), ret);
+      NQumir::MakeIntrusive<TBlockExpr>(TLocation{}, std::vector<TExprPtr>{}), ret);
+  fun->Type = TestTypes().MakeFunction(std::move(paramTypes), ret);
   return fun;
 }
 
 TExprPtr MarkerFunction(std::string name, int64_t marker) {
   auto ret = Void();
-  auto value = std::make_shared<TNumberExpr>(TLocation{}, marker);
+  auto value = NQumir::MakeIntrusive<TNumberExpr>(TLocation{}, marker, TestTypes());
   value->Type = I64();
-  auto fun = std::make_shared<TFunDecl>(
+  auto fun = NQumir::MakeIntrusive<TFunDecl>(
       TLocation{}, std::move(name), std::vector<TGenericParam>{},
       std::vector<TParam>{},
-      std::make_shared<TBlockExpr>(TLocation{},
+      NQumir::MakeIntrusive<TBlockExpr>(TLocation{},
                                    std::vector<TExprPtr>{std::move(value)}),
       ret);
-  fun->Type = std::make_shared<TFunctionType>(std::vector<TTypePtr>{}, ret);
+  fun->Type = TestTypes().MakeFunction(std::vector<TTypePtr>{}, ret);
   return fun;
 }
 
 TExprPtr CallingFunction(std::string name, std::string callee) {
   auto ret = Void();
-  auto call = std::make_shared<TCallExpr>(
-      TLocation{}, std::make_shared<TIdentExpr>(TLocation{}, std::move(callee)),
+  auto call = NQumir::MakeIntrusive<TCallExpr>(
+      TLocation{}, NQumir::MakeIntrusive<TIdentExpr>(TLocation{}, std::move(callee)),
       std::vector<TExprPtr>{});
   call->Type = ret;
-  auto fun = std::make_shared<TFunDecl>(
+  auto fun = NQumir::MakeIntrusive<TFunDecl>(
       TLocation{}, std::move(name), std::vector<TGenericParam>{},
       std::vector<TParam>{},
-      std::make_shared<TBlockExpr>(TLocation{},
+      NQumir::MakeIntrusive<TBlockExpr>(TLocation{},
                                    std::vector<TExprPtr>{std::move(call)}),
       ret);
-  fun->Type = std::make_shared<TFunctionType>(std::vector<TTypePtr>{}, ret);
+  fun->Type = TestTypes().MakeFunction(std::vector<TTypePtr>{}, ret);
   return fun;
 }
 
@@ -90,7 +93,7 @@ NQdb::TGeneratedKernel Kernel(std::string name, std::vector<TExprPtr> stmts,
       .Name = std::move(name),
       .Stage = "stage",
       .Entrypoints = std::move(entrypoints),
-      .Ast = std::make_shared<TBlockExpr>(TLocation{}, std::move(stmts)),
+      .Ast = NQumir::MakeIntrusive<TBlockExpr>(TLocation{}, std::move(stmts)),
   };
 }
 
@@ -135,30 +138,32 @@ JoinHashKernel(std::string name, const NQdb::NKernel::TJoinKeyDescriptor &key) {
   for (auto &decl : NQdb::NKernel::GenJoinKeyTypeDecls(key)) {
     stmts.push_back(std::move(decl));
   }
-  for (auto &fun : NQdb::NKernel::GenJoinKeyOpsFunDecls(key)) {
+  for (auto &fun : NQdb::NKernel::GenJoinKeyOpsFunDecls(TestTypes(), key)) {
     stmts.push_back(std::move(fun));
   }
   stmts.push_back(NQdb::NKernel::GenJoinHashBatchAst(
-      key, "jt_hash_batch", columnType, rowSetType, stringViewType));
+      TestTypes(), key, "jt_hash_batch", columnType, rowSetType, stringViewType));
   stmts.push_back(
-      NQdb::NKernel::GenJoinHashEntrypointAst(key, "jt_hash_left", rowSetType));
+      NQdb::NKernel::GenJoinHashEntrypointAst(TestTypes(), key, "jt_hash_left", rowSetType));
   return Kernel(std::move(name), std::move(stmts), {"jt_hash_left"});
 }
 
 } // namespace
 
-TEST(FinalizeFused, RenamesTypesThatDependOnRenamedLocalTypes) {
+// Generators name their types uniquely: in one query factory a name is one type,
+// which the fused program declares once.
+TEST(FinalizeFused, DeclaresSharedTypesOnce) {
   auto k0 = Kernel("k0",
                    {
-                       TypeDecl("A", Struct({{"x", I64()}})),
-                       TypeDecl("B", Struct({{"a", Named("A")}})),
+                       TypeDecl("SharedA", Struct({{"x", I64()}})),
+                       TypeDecl("SharedB", Struct({{"a", Named("SharedA")}})),
                        Function("entry0"),
                    },
                    {"entry0"});
   auto k1 = Kernel("k1",
                    {
-                       TypeDecl("A", Struct({{"x", F64()}})),
-                       TypeDecl("B", Struct({{"a", Named("A")}})),
+                       TypeDecl("SharedA", Struct({{"x", I64()}})),
+                       TypeDecl("SharedB", Struct({{"a", Named("SharedA")}})),
                        Function("entry1"),
                    },
                    {"entry1"});
@@ -167,9 +172,22 @@ TEST(FinalizeFused, RenamesTypesThatDependOnRenamedLocalTypes) {
   auto fused = NQdb::BuildFusedProgram(
       std::span<NQdb::TGeneratedKernel *const>(kernels.data(), kernels.size()));
 
-  EXPECT_EQ(fused.TypeDeclCount, 4u);
+  EXPECT_EQ(fused.TypeDeclCount, 2u);
   EXPECT_EQ(TypeDeclNames(fused.Program),
-            (std::vector<std::string>{"A", "B", "__qdb_k1_A", "__qdb_k1_B"}));
+            (std::vector<std::string>{"SharedA", "SharedB"}));
+}
+
+TEST(FinalizeFused, RejectsTwoTypesOfOneName) {
+  auto k0 = Kernel("k0", {TypeDecl("ConflictA", Struct({{"x", I64()}})), Function("entry0")},
+                   {"entry0"});
+  auto k1 = Kernel("k1", {TypeDecl("ConflictA", Struct({{"x", F64()}})), Function("entry1")},
+                   {"entry1"});
+
+  std::array<NQdb::TGeneratedKernel *, 2> kernels{&k0, &k1};
+  EXPECT_THROW(
+      NQdb::BuildFusedProgram(
+          std::span<NQdb::TGeneratedKernel *const>(kernels.data(), kernels.size())),
+      std::runtime_error);
 }
 
 TEST(FinalizeFused,
@@ -193,14 +211,14 @@ TEST(FinalizeFused,
 
 TEST(FinalizeFused, ReusesJoinHashWorkerAcrossColumnPositions) {
   auto i64 = I64();
-  TStructType left0({{"key", i64}, {"value", i64}});
-  TStructType right0({{"value", i64}, {"key", i64}});
-  TStructType left1({{"value", i64}, {"key", i64}});
-  TStructType right1({{"key", i64}, {"value", i64}});
+  const auto& left0 = *TestTypes().MakeStruct({{"key", i64}, {"value", i64}});
+  const auto& right0 = *TestTypes().MakeStruct({{"value", i64}, {"key", i64}});
+  const auto& left1 = *TestTypes().MakeStruct({{"value", i64}, {"key", i64}});
+  const auto& right1 = *TestTypes().MakeStruct({{"key", i64}, {"value", i64}});
   auto key0 =
-      NQdb::NKernel::BuildJoinKeyDescriptor(left0, right0, {{"key", "key"}});
+      NQdb::NKernel::BuildJoinKeyDescriptor(TestTypes(), left0, right0, {{"key", "key"}});
   auto key1 =
-      NQdb::NKernel::BuildJoinKeyDescriptor(left1, right1, {{"key", "key"}});
+      NQdb::NKernel::BuildJoinKeyDescriptor(TestTypes(), left1, right1, {{"key", "key"}});
   auto k0 = JoinHashKernel("hash0", key0);
   auto k1 = JoinHashKernel("hash1", key1);
 
@@ -216,16 +234,16 @@ TEST(FinalizeFused, ReusesJoinHashWorkerAcrossColumnPositions) {
 }
 
 TEST(FinalizeFused, KeepsTypedJoinHashWorkersAsOverloads) {
-  auto i32 = std::make_shared<TIntegerType>(TIntegerType::I32);
+  auto i32 = TestTypes().MakeInteger(TIntegerType::I32);
   auto i64 = I64();
-  TStructType left32({{"key", i32}});
-  TStructType right32({{"key", i32}});
-  TStructType left64({{"key", i64}});
-  TStructType right64({{"key", i64}});
+  const auto& left32 = *TestTypes().MakeStruct({{"key", i32}});
+  const auto& right32 = *TestTypes().MakeStruct({{"key", i32}});
+  const auto& left64 = *TestTypes().MakeStruct({{"key", i64}});
+  const auto& right64 = *TestTypes().MakeStruct({{"key", i64}});
   auto key32 =
-      NQdb::NKernel::BuildJoinKeyDescriptor(left32, right32, {{"key", "key"}});
+      NQdb::NKernel::BuildJoinKeyDescriptor(TestTypes(), left32, right32, {{"key", "key"}});
   auto key64 =
-      NQdb::NKernel::BuildJoinKeyDescriptor(left64, right64, {{"key", "key"}});
+      NQdb::NKernel::BuildJoinKeyDescriptor(TestTypes(), left64, right64, {{"key", "key"}});
   auto k0 = JoinHashKernel("hash32", key32);
   auto k1 = JoinHashKernel("hash64", key64);
 

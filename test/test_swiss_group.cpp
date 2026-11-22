@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "test_types.h"
 
 #include <qdb/kernel/lib.h>
 #include "qumirdb_source_module.h"
@@ -18,7 +19,7 @@ constexpr uint8_t Empty = 0x80;
 class SwissGroup : public testing::Test {
 protected:
     void SetUp() override {
-        auto library = NQdb::NKernel::ParseFunctionLibrary(
+        auto library = NQdb::NKernel::ParseFunctionLibrary(NQdb::TestTypes(),
             NQdb::NKernel::ReadAggregationKernel("swiss_group.oz"));
         ASSERT_TRUE(library) << library.error().ToString();
         NQumir::TLLVMRunnerOptions options;
@@ -27,8 +28,8 @@ protected:
         options.AllowOverloads = true;
         options.OptLevel = 3;
         NQdb::NTest::ConfigureQumirDbSourceModule(options);
-        Runner_ = std::make_unique<NQumir::TLLVMRunner>(options);
-        auto program = std::make_shared<NQumir::NAst::TBlockExpr>(
+        Runner_ = std::make_unique<NQumir::TLLVMRunner>(options, nullptr, &NQdb::TestTypes());
+        auto program = NQumir::MakeIntrusive<NQumir::NAst::TBlockExpr>(
             NQumir::TLocation{}, std::move(*library));
         NQdb::NTest::AddQumirDbUse(program);
         std::string error;

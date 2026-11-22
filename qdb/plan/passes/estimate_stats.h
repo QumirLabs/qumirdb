@@ -18,7 +18,7 @@ class TConstFolder;
 
 // `folder` folds the constants of the estimated predicates; the estimates of
 // one query share it.
-TStatsPtr EstimateStats(TOperatorPtr op);
+TStatsPtr EstimateStats(NQumir::NAst::TTypeFactory& types, TOperatorPtr op);
 TStatsPtr EstimateStats(TOperatorPtr op, TConstFolder& folder);
 
 class TJoinOperator;
@@ -29,7 +29,7 @@ struct TJoinKey;
 // those columns get statistics: the search reads the ones of its keys and
 // residuals.
 TStatsPtr EstimateJoinStats(
-    const std::shared_ptr<TJoinOperator>& join,
+    const NQumir::TIntrusivePtr<TJoinOperator>& join,
     TConstFolder& folder,
     const std::unordered_set<std::string>* columns = nullptr);
 

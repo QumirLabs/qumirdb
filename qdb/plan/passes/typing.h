@@ -14,11 +14,13 @@ namespace NQdb {
 // The first call fixes projection output names; later calls keep them, so it is
 // safe to call again after plan modifications.
 void AnnotateTypes(
+    NQumir::NAst::TTypeFactory& types,
     const TOperatorPtr& root,
     const NKernel::TAnnotationContext& context = {});
 
 // Applies the same type rules to one node whose inputs are already typed.
 void AnnotateOperatorType(
+    NQumir::NAst::TTypeFactory& types,
     const TOperatorPtr& root,
     const NKernel::TAnnotationContext& context = {});
 
@@ -26,6 +28,7 @@ void AnnotateOperatorType(
 // column layout. Run after AnnotateTypes (needs the union's unified output type), then
 // re-annotate.
 void CoerceSetOpBranches(
+    NQumir::NAst::TTypeFactory& types,
     const TOperatorPtr& root,
     const NKernel::TAnnotationContext& context = {});
 
@@ -34,6 +37,6 @@ void CoerceSetOpBranches(
 // decimal type (an integer against a decimal counts as DECIMAL(digits,0)) in a projection below
 // that side and re-points the key at the casted column. Run after AnnotateTypes, then
 // re-annotate. A semi or anti join (INTERSECT, EXCEPT, IN) keeps its original output columns.
-void CoerceJoinKeys(TOperatorPtr& root);
+void CoerceJoinKeys(NQumir::NAst::TTypeFactory& types, TOperatorPtr& root);
 
 } // namespace NQdb

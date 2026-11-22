@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "mock_source.h"
+#include "test_types.h"
 
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/operator.h>
@@ -62,7 +63,7 @@ struct TFixture {
             names.push_back(col.Name);
         }
         Sources.push_back(std::make_unique<TMockSource>(names));
-        auto op = std::make_shared<TSourceOperator>(Borrow(*Sources.back()), std::string{});
+        auto op = NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(*Sources.back()), std::string{});
         auto stats = std::make_shared<TStats>();
         stats->RowCount = spec.Rows;
         for (const auto& col : spec.Cols) {
@@ -86,10 +87,10 @@ struct TFixture {
 };
 
 NQumir::NAst::TExprPtr Compare(const char* op, const std::string& left, const std::string& right) {
-    return std::make_shared<NQumir::NAst::TBinaryExpr>(
+    return NQumir::MakeIntrusive<NQumir::NAst::TBinaryExpr>(
         NQumir::TLocation{}, NQumir::NAst::TOperator(op),
-        std::make_shared<NQumir::NAst::TIdentExpr>(NQumir::TLocation{}, left),
-        std::make_shared<NQumir::NAst::TIdentExpr>(NQumir::TLocation{}, right));
+        NQumir::MakeIntrusive<NQumir::NAst::TIdentExpr>(NQumir::TLocation{}, left),
+        NQumir::MakeIntrusive<NQumir::NAst::TIdentExpr>(NQumir::TLocation{}, right));
 }
 
 // Independent Cout model - mirrors dpccp's cost, used to check optimality. A
@@ -116,7 +117,7 @@ struct TModel {
     std::vector<TResidual> Residuals;
     // A join tree of each connected set, carrying the set's statistics.
     mutable std::map<TSubset, TOperatorPtr> Sets;
-    mutable TConstFolder Folder;
+    mutable TConstFolder Folder{TestTypes()};
 
     TModel(
         const std::vector<TOperatorPtr>& leaves,
@@ -127,8 +128,8 @@ struct TModel {
     {
         std::map<std::string, size_t> owner;
         for (size_t i = 0; i < Leaves.size(); ++i) {
-            LeafIdx[Leaves[i].get()] = i;
-            auto* schema = static_cast<NQumir::NAst::TStructType*>(Leaves[i]->OutputColumns().get());
+            LeafIdx[Leaves[i].Get()] = i;
+            auto* schema = static_cast<const NQumir::NAst::TStructType*>(Leaves[i]->OutputColumns());
             for (const auto& [name, type] : schema->Fields) {
                 owner[name] = i;
             }
@@ -217,7 +218,7 @@ struct TModel {
                 continue;
             }
             conjunction = conjunction
-                ? std::make_shared<NQumir::NAst::TBinaryExpr>(
+                ? NQumir::MakeIntrusive<NQumir::NAst::TBinaryExpr>(
                     NQumir::TLocation{}, NQumir::NAst::TOperator("&&"), conjunction, r.Predicate)
                 : r.Predicate;
         }
@@ -243,7 +244,7 @@ struct TModel {
             for (const auto& [left, right] : CrossingClasses(s1, s2)) {
                 keys.push_back({left->Column, right->Column});
             }
-            auto join = std::make_shared<TJoinOperator>(
+            auto join = NQumir::MakeIntrusive<TJoinOperator>(TestTypes(),
                 Set(s1), Set(s2), std::move(keys), EJoinType::Inner, CrossingResidual(s1, s2));
             join->Stats_ = NQdb::EstimateJoinStats(join, Folder);
             if (!largest || join->Stats_->RowCount > largest->Stats_->RowCount) {
@@ -299,7 +300,7 @@ struct TModel {
                 CrossingKeyWidth(left.Mask, right.Mask));
             return {left.Mask | right.Mask, card, cost, width};
         }
-        size_t idx = LeafIdx.at(node.get());
+        size_t idx = LeafIdx.at(node.Get());
         return {TSubset{1} << idx, LeafRows(idx), LeafCost(idx), LeafWidth(idx)};
     }
 
@@ -348,8 +349,8 @@ void ExpectOptimal(
     const std::vector<NCbo::TJoinEdge>& edges,
     const std::vector<NQumir::NAst::TExprPtr>& residuals = {})
 {
-    TConstFolder folder;
-    auto tree = NCbo::DpccpJoinOrder(fx.Leaves, edges, residuals, folder);
+    TConstFolder folder(TestTypes());
+    auto tree = NCbo::DpccpJoinOrder(TestTypes(), fx.Leaves, edges, residuals, folder);
     ASSERT_NE(tree, nullptr);
 
     TModel model(fx.Leaves, edges, residuals);
@@ -416,12 +417,12 @@ TEST(Cbo, ResidualScalesTheJoinItCompletes) {
     fx.Add({1000, {{"a_b", 100}, {"a_x", 2}}});
     fx.Add({100, {{"b_id", 100}, {"b_c", 10}}});
     fx.Add({10, {{"c_id", 10}, {"c_y", 2}}});
-    auto residual = std::make_shared<NQumir::NAst::TBinaryExpr>(
+    auto residual = NQumir::MakeIntrusive<NQumir::NAst::TBinaryExpr>(
         NQumir::TLocation{}, NQumir::NAst::TOperator("!="),
-        std::make_shared<NQumir::NAst::TIdentExpr>(NQumir::TLocation{}, "a_x"),
-        std::make_shared<NQumir::NAst::TIdentExpr>(NQumir::TLocation{}, "c_y"));
-    TConstFolder folder;
-    auto tree = NCbo::DpccpJoinOrder(
+        NQumir::MakeIntrusive<NQumir::NAst::TIdentExpr>(NQumir::TLocation{}, "a_x"),
+        NQumir::MakeIntrusive<NQumir::NAst::TIdentExpr>(NQumir::TLocation{}, "c_y"));
+    TConstFolder folder(TestTypes());
+    auto tree = NCbo::DpccpJoinOrder(TestTypes(),
         fx.Leaves, {{"a_b", "b_id"}, {"b_c", "c_id"}}, {residual}, folder);
     ASSERT_TRUE(tree && tree->Stats_);
     // 1000 rows find their b and their c; a_x != c_y keeps half of them.
@@ -430,7 +431,7 @@ TEST(Cbo, ResidualScalesTheJoinItCompletes) {
     TFixture pair;
     pair.Add({1000, {{"a_x", 2}}});
     pair.Add({10, {{"c_y", 2}}});
-    EXPECT_EQ(NCbo::DpccpJoinOrder(pair.Leaves, {}, {residual}, folder), nullptr);
+    EXPECT_EQ(NCbo::DpccpJoinOrder(TestTypes(), pair.Leaves, {}, {residual}, folder), nullptr);
 }
 
 TEST(Cbo, DisconnectedReturnsNull) {
@@ -438,15 +439,15 @@ TEST(Cbo, DisconnectedReturnsNull) {
     fx.Add({100, {{"a_id", 100}}});
     fx.Add({100, {{"b_id", 100}}}); // isolated
     fx.Add({100, {{"c_a", 100}}});
-    TConstFolder folder;
-    EXPECT_EQ(NCbo::DpccpJoinOrder(fx.Leaves, {{"a_id", "c_a"}}, {}, folder), nullptr);
+    TConstFolder folder(TestTypes());
+    EXPECT_EQ(NCbo::DpccpJoinOrder(TestTypes(), fx.Leaves, {{"a_id", "c_a"}}, {}, folder), nullptr);
 }
 
 TEST(Cbo, SingleLeafReturnsLeaf) {
     TFixture fx;
     auto leaf = fx.Add({100, {{"a_id", 100}}});
-    TConstFolder folder;
-    EXPECT_EQ(NCbo::DpccpJoinOrder(fx.Leaves, {}, {}, folder), leaf);
+    TConstFolder folder(TestTypes());
+    EXPECT_EQ(NCbo::DpccpJoinOrder(TestTypes(), fx.Leaves, {}, {}, folder), leaf);
 }
 
 TEST(Cbo, FallbackAboveMaxRelations) {
@@ -454,8 +455,8 @@ TEST(Cbo, FallbackAboveMaxRelations) {
     for (size_t i = 0; i < NCbo::MaxRelations + 1; ++i) {
         fx.Add({100, {{"c" + std::to_string(i), 100}}});
     }
-    TConstFolder folder;
-    EXPECT_EQ(NCbo::DpccpJoinOrder(fx.Leaves, {}, {}, folder), nullptr);
+    TConstFolder folder(TestTypes());
+    EXPECT_EQ(NCbo::DpccpJoinOrder(TestTypes(), fx.Leaves, {}, {}, folder), nullptr);
 }
 
 // Random connected graphs (spanning tree + extra edges) must all be optimal.
@@ -542,8 +543,8 @@ TEST(Cbo, CompositeKeyThroughAnEquatedColumn) {
         {"s_suppkey", "l_suppkey"}, {"ps_suppkey", "l_suppkey"}, {"ps_partkey", "l_partkey"}};
     ExpectOptimal(fx, edges);
 
-    TConstFolder folder;
-    auto lineitemSupplier = std::make_shared<TJoinOperator>(
+    TConstFolder folder(TestTypes());
+    auto lineitemSupplier = NQumir::MakeIntrusive<TJoinOperator>(TestTypes(),
         fx.Leaves[0], fx.Leaves[1], std::vector<TJoinKey>{{"l_suppkey", "s_suppkey"}},
         EJoinType::Inner, nullptr);
     lineitemSupplier->Stats_ = EstimateJoinStats(lineitemSupplier, folder);
@@ -593,8 +594,8 @@ struct TWidthPlan {
 
 TWidthPlan PlanWithPayload(size_t payloadColumns, bool demandPayload) {
     using namespace NQumir::NAst;
-    auto integer = std::make_shared<TIntegerType>();
-    auto string = std::make_shared<TStringType>();
+    auto integer = TestTypes().MakeInteger();
+    auto string = TestTypes().Make<TStringType>();
     std::vector<std::string> aNames{"id"};
     std::vector<TTypePtr> aTypes{integer};
     std::vector<uint64_t> aNdvs{100};
@@ -615,14 +616,14 @@ TWidthPlan PlanWithPayload(size_t payloadColumns, bool demandPayload) {
     std::istringstream sql(select
         + " from a, b, c where a.id = b.a_id and b.c_id = c.id");
     NSql::TTokenStream tokens(sql);
-    auto parsed = NSql::TParser{}.Parse(tokens);
+    auto parsed = NSql::TParser(TestTypes()).Parse(tokens);
     if (!parsed) {
         throw std::runtime_error(parsed.error().ToString());
     }
-    auto built = BuildPlan(*parsed, [&](std::string_view table)
+    auto built = BuildPlan(TestTypes(), *parsed, [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
-        return std::make_shared<TSourceOperator>(
+        return NQumir::MakeIntrusive<TSourceOperator>(types,
             Borrow(*sources.at(std::string(table))), std::string(table));
     });
     if (!built) {
@@ -630,7 +631,7 @@ TWidthPlan PlanWithPayload(size_t payloadColumns, bool demandPayload) {
     }
     auto plan = *built;
     TPlanPassDiagnostics diagnostics;
-    ApplyPlanPasses(plan, {.EnableRuntimeFilters = false, .Diagnostics = &diagnostics});
+    ApplyPlanPasses(TestTypes(), plan, {.EnableRuntimeFilters = false, .Diagnostics = &diagnostics});
     TWidthPlan result;
     result.UsedCbo = diagnostics.JoinReorder.UsedCbo;
     result.OutputColumns = plan->OutputColumns()->Fields.size();

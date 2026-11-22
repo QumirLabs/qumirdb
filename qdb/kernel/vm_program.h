@@ -19,10 +19,11 @@ struct TVmProgram {
     std::unordered_map<std::string, NQumir::NIR::TFunction*> Entries;
 };
 
-// Lowers a kernel AST with the frontend settings of KernelRunnerOptions and
-// prepares the bytecode of the entries and all they call. Throws on any
-// frontend or preparation error.
+// Lowers a kernel AST, built in `types`, with the frontend settings of
+// KernelRunnerOptions and prepares the bytecode of the entries and all they call.
+// Throws on any frontend or preparation error.
 std::shared_ptr<TVmProgram> PrepareVmProgram(
+    NQumir::NAst::TTypeFactory& types,
     NQumir::NAst::TExprPtr ast,
     const std::vector<std::string>& entryNames);
 

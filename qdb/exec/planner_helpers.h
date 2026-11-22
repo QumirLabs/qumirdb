@@ -25,18 +25,18 @@ namespace NQdb {
 
 // The filter plan data and output type; the process is built from a kernel slot.
 struct TFilterPlan {
-    NQumir::NAst::TTypePtr OutputType;
+    NQumir::NAst::TTypePtr OutputType = nullptr;
     TFilterPlanData Plan;
 };
 
 // The project plan data and output type; the process is built from a kernel slot.
 struct TProjectPlan {
-    NQumir::NAst::TTypePtr OutputType;
+    NQumir::NAst::TTypePtr OutputType = nullptr;
     TProjectPlanData Plan;
 };
 
 struct TFilterColumnPlan {
-    NQumir::NAst::TTypePtr OutputType;
+    NQumir::NAst::TTypePtr OutputType = nullptr;
     std::optional<std::vector<int32_t>> KeptInputColumns;
 };
 
@@ -103,7 +103,8 @@ TAggregateTablePlan PlanAggregateTable(
 // Build the final-phase operator that merges rows emitted by a partial
 // aggregate. This is scheduler-neutral physical planning shared by local and
 // future distributed lowerers.
-std::shared_ptr<TAggregateOperator> BuildAggregateCombineOperator(
+NQumir::TIntrusivePtr<TAggregateOperator> BuildAggregateCombineOperator(
+    NQumir::NAst::TTypeFactory& types,
     const TAggregateOperator& aggregate,
     std::vector<std::string> groupKeys);
 
@@ -112,7 +113,8 @@ std::shared_ptr<TAggregateOperator> BuildAggregateCombineOperator(
 // argument of sum, min and max widened to the state type. It lets a partial
 // aggregate hand rows through once hashing them stops paying off. nullptr when
 // an aggregate function has no single-row state.
-std::shared_ptr<TProjectOperator> BuildAggregatePassThroughOperator(
+NQumir::TIntrusivePtr<TProjectOperator> BuildAggregatePassThroughOperator(
+    NQumir::NAst::TTypeFactory& types,
     const TAggregateOperator& aggregate);
 
 // Compilation-free projection layout: column plan, computed-expression types
@@ -127,10 +129,11 @@ struct TProjectColumnPlan {
     std::vector<size_t> ComputedWidths;
     std::vector<bool> ComputedIsString;
     std::vector<bool> ComputedIsNullable;
-    NQumir::NAst::TTypePtr OutputType;
+    NQumir::NAst::TTypePtr OutputType = nullptr;
 };
 
 TProjectColumnPlan BuildProjectColumnPlan(
+    NQumir::NAst::TTypeFactory& types,
     TProjectOperator& project,
     const NQumir::NAst::TStructType& inputStruct);
 
@@ -140,7 +143,7 @@ void PrintRuntimePlan(
     const TOperatorPtr& root,
     NScheduler::EJoinTableKind table);
 
-NQumir::NAst::TTypePtr BuildSourceRuntimeType(TSourceOperator& src);
+NQumir::NAst::TTypePtr BuildSourceRuntimeType(NQumir::NAst::TTypeFactory& types, TSourceOperator& src);
 
 // Build-side selection for a join. Shared by native lowering and the browser
 // plan export so the JoinAsymmetryRatio threshold has one home (C++). An
@@ -163,11 +166,13 @@ bool RowJoinTableServes(
 std::string_view JoinBuildSideName(EJoinBuildSide side);
 
 TFilterPlan BuildFilterPlan(
+    NQumir::NAst::TTypeFactory& types,
     TFilterOperator& filter,
     const NQumir::NAst::TTypePtr& inputType,
     TKernelCompilerOptions options);
 
 TProjectPlan BuildProjectPlan(
+    NQumir::NAst::TTypeFactory& types,
     TProjectOperator& project,
     const NQumir::NAst::TTypePtr& inputType,
     TKernelCompilerOptions options);
@@ -175,6 +180,7 @@ TProjectPlan BuildProjectPlan(
 // Compiles the sort kernels and returns the plan data the task binds them from.
 // topLimit makes it a top-sort that keeps that many rows.
 TSortPlanData BuildSortPlanData(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TTypePtr& inputType,
     const std::vector<TSortKey>& keys,
     std::string_view kernelName,
@@ -183,6 +189,7 @@ TSortPlanData BuildSortPlanData(
 
 // Compiles the window kernel and returns the plan data the task binds it from.
 TWindowPlanData BuildWindowPlanData(
+    NQumir::NAst::TTypeFactory& types,
     TWindowOperator& window,
     const NQumir::NAst::TTypePtr& inputType,
     TKernelCompilerOptions options);

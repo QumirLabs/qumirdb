@@ -1,66 +1,58 @@
 #include <gtest/gtest.h>
 
+#include <qdb/plan/types/date.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/plan/types/type_text.h>
 
 #include <qumir/parser/type.h>
 
-#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+#include "test_types.h"
 
 using namespace NQdb;
 using namespace NQumir::NAst;
 
 namespace {
 
-// TypeKey does not look inside TNullable, so descend into it here.
-std::string Key(const TTypePtr& type) {
-    if (auto nullable = TMaybeType<TNullable>(type)) {
-        return "Nullable<" + Key(nullable.Cast()->UnderlyingType) + ">";
-    }
-    if (auto structure = TMaybeType<TStructType>(type)) {
-        std::string key = "Struct{";
-        for (const auto& [name, field] : structure.Cast()->Fields) {
-            key += name + ":" + Key(field) + ";";
-        }
-        return key + "}";
-    }
-    return TypeKey(type);
-}
-
 TTypePtr Int(TIntegerType::EKind kind) {
-    return std::make_shared<TIntegerType>(kind);
+    return TestTypes().MakeInteger(kind);
 }
 
 TTypePtr Nullable(TTypePtr type) {
-    return std::make_shared<TNullable>(std::move(type));
+    return MakeNullableType(TestTypes(), type);
 }
 
 TTypePtr Struct(std::vector<std::pair<std::string, TTypePtr>> fields) {
-    return std::make_shared<TStructType>(std::move(fields));
+    return TestTypes().MakeStruct(std::move(fields));
 }
 
+TTypePtr Parse(std::string_view text) {
+    return ParseTypeText(TestTypes(), text);
+}
+
+// Types are interned, so a round trip gives back the same object.
 void ExpectRoundTrip(const TTypePtr& type) {
     auto text = PrintTypeText(type);
-    auto parsed = ParseTypeText(text);
-    EXPECT_EQ(Key(parsed), Key(type)) << text;
-    EXPECT_EQ(PrintTypeText(parsed), text);
+    EXPECT_EQ(Parse(text), type) << text;
 }
 
 std::vector<TTypePtr> Scalars() {
     return {
         Int(TIntegerType::I32),
         Int(TIntegerType::I64),
-        std::make_shared<TFloatType>(TFloatType::F32),
-        std::make_shared<TFloatType>(TFloatType::F64),
-        std::make_shared<TBoolType>(),
-        std::make_shared<TStringType>(),
-        std::make_shared<TDecimal>(18, 2),
-        std::make_shared<TDecimal>(38, 10),
-        BinIntStorageType(),
+        TestTypes().MakeFloat(TFloatType::F32),
+        TestTypes().MakeFloat(TFloatType::F64),
+        TestTypes().Make<TBoolType>(),
+        TestTypes().Make<TStringType>(),
+        MakeDecimalType(TestTypes(), {18, 2}),
+        MakeDecimalType(TestTypes(), {38, 10}),
+        MakeDateType(TestTypes()),
+        MakeDateType(TestTypes(), TIntegerType::I64),
+        BinIntStorageType(TestTypes()),
     };
 }
 
@@ -76,59 +68,89 @@ TEST(TypeText, NullableRoundTrip) {
     for (const auto& type : Scalars()) {
         auto nullable = Nullable(type);
         ExpectRoundTrip(nullable);
-        EXPECT_TRUE(IsNullableType(ParseTypeText(PrintTypeText(nullable))));
+        EXPECT_TRUE(IsNullableType(Parse(PrintTypeText(nullable))));
+        EXPECT_EQ(UnwrapNullableType(nullable), type);
     }
 }
 
-TEST(TypeText, ParsesQdbClasses) {
+TEST(TypeText, ParsesQdbTypes) {
     EXPECT_EQ(PrintTypeText(Nullable(Int(TIntegerType::I64))), "<named Nullable [i64]>");
-    auto decimal = ParseTypeText(PrintTypeText(std::make_shared<TDecimal>(12, 3)));
-    auto typed = std::dynamic_pointer_cast<TDecimal>(decimal);
-    ASSERT_TRUE(typed);
-    EXPECT_EQ(typed->Spec.Precision, 12);
-    EXPECT_EQ(typed->Spec.Scale, 3);
+    EXPECT_EQ(PrintTypeText(MakeDateType(TestTypes())), "<named DATE [i32]>");
+    EXPECT_EQ(PrintTypeText(MakeDecimalType(TestTypes(), {12, 3})), "<named DECIMAL [12 3]>");
 
-    auto nested = ParseTypeText(PrintTypeText(Nullable(std::make_shared<TDecimal>(18, 2))));
-    auto nullable = std::dynamic_pointer_cast<TNullable>(nested);
-    ASSERT_TRUE(nullable);
-    EXPECT_TRUE(std::dynamic_pointer_cast<TDecimal>(nullable->UnderlyingType));
+    auto decimal = DecimalSpecOfValueType(Parse("<named DECIMAL [12 3]>"));
+    ASSERT_TRUE(decimal);
+    EXPECT_EQ(decimal->Precision, 12);
+    EXPECT_EQ(decimal->Scale, 3);
+
+    auto nested = Parse(PrintTypeText(Nullable(MakeDecimalType(TestTypes(), {18, 2}))));
+    ASSERT_TRUE(IsNullableType(nested));
+    EXPECT_EQ(UnwrapNullableType(nested), MakeDecimalType(TestTypes(), {18, 2}));
+
+    const auto* storage = DateStorageType(Parse("<named DATE [i64]>"));
+    ASSERT_TRUE(storage);
+    EXPECT_EQ(storage->Kind, TIntegerType::I64);
+}
+
+// A kernel compilation completes Nullable [T] with its qumirdb.oz struct; plan text
+// stays the plan's.
+TEST(TypeText, CompletedNullablePrintsWithoutItsStruct) {
+    const auto value = Int(TIntegerType::I16);
+    const auto layout = TestTypes().MakeStruct({{"Value", value}, {"Valid", TestTypes().Make<TBoolType>()}});
+    const auto completed = TestTypes().MakeNamed("Nullable", layout, {TGenericArg::TypeArg(value)});
+    EXPECT_EQ(completed, Nullable(value));
+    EXPECT_EQ(PrintTypeText(completed), "<named Nullable [i16]>");
+    EXPECT_EQ(UnwrapNullableType(completed), value);
 }
 
 TEST(TypeText, StructsRoundTrip) {
     auto flat = Struct({
         {"a", Int(TIntegerType::I32)},
         {"b", Nullable(Int(TIntegerType::I64))},
-        {"c", std::make_shared<TStringType>()},
-        {"d", Nullable(std::make_shared<TDecimal>(18, 2))},
-        {"e", BinIntStorageType()},
+        {"c", TestTypes().Make<TStringType>()},
+        {"d", Nullable(MakeDecimalType(TestTypes(), {18, 2}))},
+        {"e", BinIntStorageType(TestTypes())},
+        {"f", Nullable(MakeDateType(TestTypes()))},
     });
     ExpectRoundTrip(flat);
     ExpectRoundTrip(Struct({
         {"x", flat},
-        {"y", Nullable(std::make_shared<TBoolType>())},
-        {"z", Struct({{"w", std::make_shared<TDecimal>(38, 0)}})},
+        {"y", Nullable(TestTypes().Make<TBoolType>())},
+        {"z", Struct({{"w", MakeDecimalType(TestTypes(), {38, 0})}})},
     }));
 }
 
 TEST(TypeText, AcceptsSchemaSpellings) {
-    auto key = Key(ParseTypeText("<named Nullable [<named Decimal [18 2]>]>"));
-    EXPECT_EQ(key, Key(Nullable(std::make_shared<TDecimal>(18, 2))));
-    EXPECT_TRUE(std::dynamic_pointer_cast<TDecimal>(ParseTypeText("<named Decimal [18 2]>")));
+    EXPECT_EQ(
+        Parse("<named Nullable [<named Decimal [18 2]>]>"),
+        Nullable(MakeDecimalType(TestTypes(), {18, 2})));
+    EXPECT_EQ(Parse("<named Decimal [18 2]>"), MakeDecimalType(TestTypes(), {18, 2}));
 }
 
+// DECIMAL arguments are interned as text, so every DECIMAL is built with explicit ones.
 TEST(TypeText, BareDecimalIsDefault) {
-    auto decimal = std::dynamic_pointer_cast<TDecimal>(ParseTypeText("DECIMAL"));
-    ASSERT_TRUE(decimal);
-    EXPECT_EQ(decimal->Spec.Precision, DefaultDecimalPrecision);
-    EXPECT_EQ(decimal->Spec.Scale, DefaultDecimalScale);
+    EXPECT_EQ(
+        Parse("DECIMAL"),
+        MakeDecimalType(TestTypes(), {DefaultDecimalPrecision, DefaultDecimalScale}));
+    EXPECT_EQ(Parse("<named DECIMAL [018 2]>"), MakeDecimalType(TestTypes(), {18, 2}));
+}
+
+TEST(TypeText, SqlTypeNames) {
+    EXPECT_EQ(SqlTypeName(Nullable(MakeDecimalType(TestTypes(), {15, 2}))), "DECIMAL(15,2)");
+    EXPECT_EQ(SqlTypeName(MakeDateType(TestTypes())), "DATE");
+    EXPECT_EQ(SqlTypeName(Int(TIntegerType::I64)), "BIGINT");
+    EXPECT_EQ(SqlTypeName(Int(TIntegerType::I32)), "INTEGER");
+    EXPECT_EQ(SqlTypeName(TestTypes().MakeFloat(TFloatType::F32)), "REAL");
+    EXPECT_EQ(SqlTypeName(TestTypes().MakeFloat(TFloatType::F64)), "DOUBLE");
 }
 
 TEST(TypeText, RejectsBadInput) {
-    EXPECT_THROW(ParseTypeText("<named Nullable [1 2]>"), std::runtime_error);
-    EXPECT_THROW(ParseTypeText("<named DECIMAL [18]>"), std::runtime_error);
-    EXPECT_THROW(ParseTypeText("<named DECIMAL [39 0]>"), std::runtime_error);
-    EXPECT_THROW(ParseTypeText("i64 i64"), std::runtime_error);
-    EXPECT_THROW(ParseTypeText("Nullable<DECIMAL(18,2)>"), std::runtime_error);
+    EXPECT_THROW(Parse("<named Nullable [1 2]>"), std::runtime_error);
+    EXPECT_THROW(Parse("<named DECIMAL [18]>"), std::runtime_error);
+    EXPECT_THROW(Parse("<named DECIMAL [39 0]>"), std::runtime_error);
+    EXPECT_THROW(Parse("<named DATE [f64]>"), std::runtime_error);
+    EXPECT_THROW(Parse("i64 i64"), std::runtime_error);
+    EXPECT_THROW(Parse("Nullable<DECIMAL(18,2)>"), std::runtime_error);
 }
 
 int main(int argc, char** argv) {

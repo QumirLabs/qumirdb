@@ -85,7 +85,11 @@ std::string ReadFile(const std::string& path)
 
 } // namespace
 
-TKernelImage CompileKernelImage(std::span<TGeneratedKernel> kernels, EKernelBackend backend, const std::string& cacheDir)
+TKernelImage CompileKernelImage(
+    std::span<TGeneratedKernel> kernels,
+    NQumir::NAst::TTypeFactory& types,
+    EKernelBackend backend,
+    const std::string& cacheDir)
 {
     if (backend == EKernelBackend::Vm) {
         throw std::runtime_error("kernel images hold native code, kernel.backend=vm is not supported");
@@ -104,7 +108,7 @@ TKernelImage CompileKernelImage(std::span<TGeneratedKernel> kernels, EKernelBack
         codegen = std::make_unique<NQumir::NCodeGen::TTpdeBackend>();
     }
 #endif
-    NQumir::TLLVMRunner runner(std::move(options), std::move(codegen));
+    NQumir::TLLVMRunner runner(std::move(options), std::move(codegen), &types);
     std::string error;
     TKernelImage image;
     // The object cache is built on the partitioned LLVM codegen.

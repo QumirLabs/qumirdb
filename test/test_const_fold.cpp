@@ -16,6 +16,8 @@
 #include <stdexcept>
 #include <string>
 
+#include "test_types.h"
+
 using namespace NQumir::NAst;
 using namespace NQumir::NAst::NLiterals;
 
@@ -26,7 +28,7 @@ namespace {
 TExprPtr Parse(const std::string& src) {
     std::istringstream in(src);
     NCore::TTokenStream tokens(in);
-    NCore::TParser parser;
+    NCore::TParser parser(NQdb::TestTypes());
     auto parsed = parser.Parse(tokens);
     if (!parsed) {
         throw std::runtime_error(parsed.error().ToString());
@@ -35,7 +37,7 @@ TExprPtr Parse(const std::string& src) {
 }
 
 TExprPtr Fold(TExprPtr expr) {
-    NQdb::TConstFolder folder;
+    NQdb::TConstFolder folder(NQdb::TestTypes());
     return folder.Fold(std::move(expr));
 }
 
@@ -78,12 +80,12 @@ TEST(ConstFold, FoldsStringViewLength) {
 TEST(ConstFold, FoldsDecimalComparison) {
     NQumir::TLocation loc{};
     auto decLit = [&](int64_t v) -> TExprPtr {
-        return std::make_shared<TCastExpr>(
-            loc, std::make_shared<TNumberExpr>(loc, v),
-            std::make_shared<NQdb::TDecimal>(10, 2));
+        return NQumir::MakeIntrusive<TCastExpr>(
+            loc, NQumir::MakeIntrusive<TNumberExpr>(loc, v, NQdb::TestTypes()),
+            NQdb::MakeDecimalType(NQdb::TestTypes(), {10, 2}));
     };
     auto eq = [&](int64_t l, int64_t r) {
-        auto cmp = std::make_shared<TBinaryExpr>(loc, "=="_op, decLit(l), decLit(r));
+        auto cmp = NQumir::MakeIntrusive<TBinaryExpr>(loc, "=="_op, decLit(l), decLit(r));
         auto folded = Fold(cmp);
         auto number = TMaybeNode<TNumberExpr>(folded);
         EXPECT_TRUE(number) << "not folded: " << NCore::PrintAst(folded);
@@ -108,36 +110,38 @@ TEST(ConstFold, LeavesExpressionItCannotTypeUnfolded) {
     // The kernel expander rejects a decimal product.
     NQumir::TLocation loc{};
     auto decLit = [&](int64_t v) -> TExprPtr {
-        return std::make_shared<TCastExpr>(
-            loc, std::make_shared<TNumberExpr>(loc, v),
-            std::make_shared<NQdb::TDecimal>(10, 2));
+        return NQumir::MakeIntrusive<TCastExpr>(
+            loc, NQumir::MakeIntrusive<TNumberExpr>(loc, v, NQdb::TestTypes()),
+            NQdb::MakeDecimalType(NQdb::TestTypes(), {10, 2}));
     };
-    auto product = std::make_shared<TBinaryExpr>(loc, "*"_op, decLit(5), decLit(2));
+    auto product = NQumir::MakeIntrusive<TBinaryExpr>(loc, "*"_op, decLit(5), decLit(2));
     EXPECT_EQ(Fold(product), product);
 }
 
 // Arithmetic over Qumir's own types compiles without the qumirdb module; the
 // fold must give what the module's compilation gives.
 TEST(ConstFold, BuiltinArithmeticFoldsAsWithTheModule) {
-    NQdb::TVmFrontendContext module({NQdb::NUtils::ModuleFile("qumirdb.oz")});
+    NQdb::TVmFrontendContext module(NQdb::TestTypes(), {NQdb::NUtils::ModuleFile("qumirdb.oz")});
     for (const char* src : {
         "(+ 1212 11)", "(// 7 2)", "(% -7 2)", "(* 9223372036854775807 2)",
         "(cast -3.7 i32)", "(- (cast 5 u8) (cast 6 u8))", "(cast (cast 300 i32) i8)",
         "(+ (cast 9131 i32) (cast 90 i32))", "(/ 7 2)", "(+ 0.1 0.2)", "(< 3 4.5)"})
     {
-        auto [expanded, type] = NQdb::NKernel::ExpandKernelExpr(Parse(src), TStructType({}));
+        auto [expanded, type] = NQdb::NKernel::ExpandKernelExpr(
+            NQdb::TestTypes(), Parse(src), *NQdb::TestTypes().MakeStruct({}));
         NQumir::TLocation loc{};
         auto compiled = NQdb::TVmFunction::Compile(module, {
             .NamePrefix = "__module_eval__",
             .Params = {},
-            .Body = std::make_shared<TBlockExpr>(loc, std::vector<TExprPtr>{expanded}),
+            .Body = NQumir::MakeIntrusive<TBlockExpr>(loc, std::vector<TExprPtr>{expanded}),
             .ReturnType = type,
             .Imports = {"qumirdb"},
         });
         ASSERT_TRUE(compiled) << src << ": " << compiled.error();
         auto expected = (*compiled)->Eval({});
         ASSERT_TRUE(expected) << src;
-        auto folded = TMaybeNode<TNumberExpr>(Fold(Parse(src)));
+        auto foldedExpr = Fold(Parse(src));
+    auto folded = TMaybeNode<TNumberExpr>(foldedExpr);
         ASSERT_TRUE(folded) << src;
         const auto& number = *folded.Cast();
         if (number.IsFloat()) {
@@ -153,7 +157,8 @@ TEST(ConstFold, BuiltinArithmeticFoldsAsWithTheModule) {
 // SQL `%` on doubles is the qumirdb module's operator; Qumir takes integers
 // only, so the fold compiles it with the module.
 TEST(ConstFold, FoldsDoubleRemainderWithTheModule) {
-    auto folded = TMaybeNode<TNumberExpr>(Fold(Parse("(% 7.5 2.0)")));
+    auto foldedExpr = Fold(Parse("(% 7.5 2.0)"));
+    auto folded = TMaybeNode<TNumberExpr>(foldedExpr);
     ASSERT_TRUE(folded);
     EXPECT_DOUBLE_EQ(folded.Cast()->FloatValue, 1.5);
 }
@@ -161,7 +166,8 @@ TEST(ConstFold, FoldsDoubleRemainderWithTheModule) {
 // A REAL result stays a REAL literal with its exact value: the text form would
 // make it a DOUBLE rounded to 15 decimals.
 TEST(ConstFold, KeepsRealResultAsRealLiteral) {
-    auto folded = TMaybeNode<TNumberExpr>(Fold(Parse("(+ (cast 0.1 f32) (cast 0.2 f32))")));
+    auto foldedExpr = Fold(Parse("(+ (cast 0.1 f32) (cast 0.2 f32))"));
+    auto folded = TMaybeNode<TNumberExpr>(foldedExpr);
     ASSERT_TRUE(folded);
     auto type = TMaybeType<TFloatType>(folded.Cast()->Type);
     ASSERT_TRUE(type);
@@ -172,7 +178,7 @@ TEST(ConstFold, KeepsRealResultAsRealLiteral) {
 // The estimates of a query read the same constants for every plan the join
 // order search considers; the query's folder folds each of them once.
 TEST(ConstFold, FoldsEachNumberOnce) {
-    NQdb::TConstFolder folder;
+    NQdb::TConstFolder folder(NQdb::TestTypes());
     auto first = folder.FoldNumber(Parse("(+ 1212 11)"));
     ASSERT_TRUE(first);
     EXPECT_EQ(first->IntValue, 1223);

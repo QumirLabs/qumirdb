@@ -39,10 +39,11 @@ const NQumir::NAst::TStringLiteralExpr* StringLiteral(
         current = cast.Cast()->Operand;
     }
     auto literal = TMaybeNode<TStringLiteralExpr>(current);
-    return literal ? literal.Cast().get() : nullptr;
+    return literal ? literal.Cast() : nullptr;
 }
 
 void LowerRegexCalls(
+    NQumir::NAst::TTypeFactory& types,
     NQumir::NAst::TExprPtr& expr,
     TRegexRegistry* registry)
 {
@@ -51,7 +52,7 @@ void LowerRegexCalls(
         return;
     }
     for (auto* child : expr->MutableChildren()) {
-        LowerRegexCalls(*child, registry);
+        LowerRegexCalls(types, *child, registry);
     }
 
     auto call = TMaybeNode<TCallExpr>(expr);
@@ -76,17 +77,17 @@ void LowerRegexCalls(
     }
 
     const size_t id = registry->Register(pattern->Value, replacement->Value);
-    auto index = std::make_shared<TNumberExpr>(
-        call.Cast()->Location, static_cast<int64_t>(id));
-    auto handle = std::make_shared<TIndexExpr>(
+    auto index = NQumir::MakeIntrusive<TNumberExpr>(
+        call.Cast()->Location, static_cast<int64_t>(id), types);
+    auto handle = NQumir::MakeIntrusive<TIndexExpr>(
         call.Cast()->Location,
-        std::make_shared<TIdentExpr>(call.Cast()->Location, "__regexes__"),
+        NQumir::MakeIntrusive<TIdentExpr>(call.Cast()->Location, "__regexes__"),
         std::move(index));
-    auto lowered = std::make_shared<TCallExpr>(
+    auto lowered = NQumir::MakeIntrusive<TCallExpr>(
         call.Cast()->Location,
-        std::make_shared<TIdentExpr>(call.Cast()->Location, "qdb_regexp_replace"),
+        NQumir::MakeIntrusive<TIdentExpr>(call.Cast()->Location, "qdb_regexp_replace"),
         std::vector<TExprPtr>{
-            std::make_shared<TIdentExpr>(call.Cast()->Location, "__arena__"),
+            NQumir::MakeIntrusive<TIdentExpr>(call.Cast()->Location, "__arena__"),
             std::move(handle),
             call.Cast()->Args[0],
         });
@@ -110,6 +111,7 @@ bool ContainsRegexCall(const NQumir::NAst::TExprPtr& expr) {
 }
 
 NQumir::NAst::TExprPtr LowerRegexExpression(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TExprPtr& expr,
     TRegexRegistry* registry)
 {
@@ -117,7 +119,7 @@ NQumir::NAst::TExprPtr LowerRegexExpression(
         return expr;
     }
     auto lowered = CloneExpr(expr);
-    LowerRegexCalls(lowered, registry);
+    LowerRegexCalls(types, lowered, registry);
     return lowered;
 }
 
@@ -150,17 +152,18 @@ std::string_view KernelKindName(EOperatorKernelKind kind) {
 }
 
 TOperatorKernelSpec BuildFilterKernelSpec(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TStructType& inputType,
     const NQumir::NAst::TExprPtr& predicate,
     std::string entrypointName,
-    const TExternalCatalogSnapshot* externalCatalog,
+    const NKernel::TAnnotationContext* annotation,
     TRuntimeContext* runtimeContext)
 {
     // Make NULL propagation explicit right before compilation (never in logical planning).
     auto expanded = NKernel::ExpandKernelPredicate(
-        predicate, inputType, externalCatalog).first;
+        types, predicate, inputType, annotation).first;
     expanded = LowerRegexExpression(
-        expanded, runtimeContext ? &runtimeContext->Regexes : nullptr);
+        types, expanded, runtimeContext ? &runtimeContext->Regexes : nullptr);
     const auto refs = FindUnboundVars(expanded);
 
     std::vector<TKernelColumnRef> referenced;
@@ -178,8 +181,8 @@ TOperatorKernelSpec BuildFilterKernelSpec(
     return TOperatorKernelSpec{
         .Kind = EOperatorKernelKind::UnaryStreaming,
         .OperatorName = "filter",
-        .InputSchemas = {std::make_shared<NQumir::NAst::TStructType>(inputType.Fields)},
-        .OutputSchema = std::make_shared<NQumir::NAst::TStructType>(inputType.Fields),
+        .InputSchemas = {types.MakeStruct(std::vector(inputType.Fields))},
+        .OutputSchema = types.MakeStruct(std::vector(inputType.Fields)),
         .ReferencedColumns = std::move(referenced),
         .Expressions = {expanded},
         .Entrypoints = {
@@ -190,11 +193,12 @@ TOperatorKernelSpec BuildFilterKernelSpec(
 }
 
 TOperatorKernelSpec BuildProjectKernelSpec(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TStructType& inputType,
     const std::vector<NQumir::NAst::TExprPtr>& computedExprs,
     const std::vector<NQumir::NAst::TTypePtr>& computedTypes,
     std::string entrypointName,
-    const TExternalCatalogSnapshot* externalCatalog,
+    const NKernel::TAnnotationContext* annotation,
     TRuntimeContext* runtimeContext)
 {
     std::vector<std::pair<std::string, NQumir::NAst::TTypePtr>> outputFields;
@@ -207,9 +211,9 @@ TOperatorKernelSpec BuildProjectKernelSpec(
     expanded.reserve(computedExprs.size());
     for (const auto& expr : computedExprs) {
         auto kernelExpr = NKernel::ExpandKernelValue(
-            expr, inputType, externalCatalog).first;
+            types, expr, inputType, annotation).first;
         expanded.push_back(LowerRegexExpression(
-            kernelExpr, runtimeContext ? &runtimeContext->Regexes : nullptr));
+            types, kernelExpr, runtimeContext ? &runtimeContext->Regexes : nullptr));
     }
 
     std::unordered_set<std::string> refs;
@@ -233,8 +237,8 @@ TOperatorKernelSpec BuildProjectKernelSpec(
     return TOperatorKernelSpec{
         .Kind = EOperatorKernelKind::UnaryStreaming,
         .OperatorName = "project-compute",
-        .InputSchemas = {std::make_shared<NQumir::NAst::TStructType>(inputType.Fields)},
-        .OutputSchema = std::make_shared<NQumir::NAst::TStructType>(std::move(outputFields)),
+        .InputSchemas = {types.MakeStruct(std::vector(inputType.Fields))},
+        .OutputSchema = types.MakeStruct(std::move(outputFields)),
         .ReferencedColumns = std::move(referenced),
         .Expressions = expanded,
         .Entrypoints = {
@@ -245,10 +249,11 @@ TOperatorKernelSpec BuildProjectKernelSpec(
 }
 
 TOperatorKernelSpec BuildAggregateKernelSpec(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TStructType& inputType,
     const std::vector<std::string>& groupKeys,
     const std::vector<TAggregateSpec>& aggs,
-    const TExternalCatalogSnapshot* externalCatalog,
+    const NKernel::TAnnotationContext* annotation,
     std::vector<int64_t> emptyInputGroups)
 {
     auto columnRef = [&](const std::string& name) -> TKernelColumnRef {
@@ -273,7 +278,7 @@ TOperatorKernelSpec BuildAggregateKernelSpec(
         RejectRegexCall(agg.Arg, "aggregate");
         // Expand NULL propagation in the argument expression before compilation.
         auto argExpr = agg.Arg
-            ? NKernel::ExpandKernelValue(agg.Arg, inputType, externalCatalog).first
+            ? NKernel::ExpandKernelValue(types, agg.Arg, inputType, annotation).first
             : agg.Arg;
         TKernelAggregateSpec spec{
             .Name = agg.Name,
@@ -308,9 +313,9 @@ TOperatorKernelSpec BuildAggregateKernelSpec(
     return TOperatorKernelSpec{
         .Kind = EOperatorKernelKind::UnaryBlocking,
         .OperatorName = "aggregate",
-        .InputSchemas = {std::make_shared<NQumir::NAst::TStructType>(inputType.Fields)},
+        .InputSchemas = {types.MakeStruct(std::vector(inputType.Fields))},
         .OutputSchema = ComputeAggregateOutputType(
-            std::make_shared<NQumir::NAst::TStructType>(inputType.Fields),
+            types, types.MakeStruct(std::vector(inputType.Fields)),
             groupKeys, aggs, false, !emptyInputGroups.empty()),
         .ReferencedColumns = std::move(referenced),
         .Keys = {
@@ -327,6 +332,7 @@ TOperatorKernelSpec BuildAggregateKernelSpec(
 }
 
 TOperatorKernelSpec BuildSortKernelSpec(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TStructType& inputType,
     const std::vector<TSortKey>& keys,
     std::string operatorName)
@@ -358,8 +364,8 @@ TOperatorKernelSpec BuildSortKernelSpec(
     return TOperatorKernelSpec{
         .Kind = EOperatorKernelKind::UnaryBlocking,
         .OperatorName = std::move(operatorName),
-        .InputSchemas = {std::make_shared<NQumir::NAst::TStructType>(inputType.Fields)},
-        .OutputSchema = std::make_shared<NQumir::NAst::TStructType>(inputType.Fields),
+        .InputSchemas = {types.MakeStruct(std::vector(inputType.Fields))},
+        .OutputSchema = types.MakeStruct(std::vector(inputType.Fields)),
         .ReferencedColumns = std::move(referenced),
         .SortKeys = std::move(sortKeys),
         .SourceModules = {"qumirdb"},
@@ -367,6 +373,7 @@ TOperatorKernelSpec BuildSortKernelSpec(
 }
 
 TOperatorKernelSpec BuildJoinKernelSpec(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TStructType& leftType,
     const NQumir::NAst::TStructType& rightType,
     const std::vector<TJoinKey>& keys,
@@ -402,7 +409,7 @@ TOperatorKernelSpec BuildJoinKernelSpec(
         expressions.push_back(residualPredicate);
     }
 
-    NQumir::NAst::TTypePtr outputType;
+    NQumir::NAst::TTypePtr outputType = nullptr;
     if (type == EJoinType::LeftMark) {
         if (markerName.empty()) {
             throw std::runtime_error("join kernel spec: left_mark needs a marker column name");
@@ -411,17 +418,17 @@ TOperatorKernelSpec BuildJoinKernelSpec(
         const bool nullableMarker = std::ranges::any_of(joinKeys, [](const auto& key) {
             return IsNullableType(key.Left.Type) || IsNullableType(key.Right.Type);
         });
-        NQumir::NAst::TTypePtr markerType = std::make_shared<NQumir::NAst::TBoolType>();
+        NQumir::NAst::TTypePtr markerType = types.Make<NQumir::NAst::TBoolType>();
         if (nullableMarker) {
-            markerType = std::make_shared<TNullable>(std::move(markerType));
+            markerType = MakeNullableType(types, std::move(markerType));
         }
         auto fields = leftType.Fields;
         fields.emplace_back(markerName, std::move(markerType));
-        outputType = std::make_shared<NQumir::NAst::TStructType>(std::move(fields));
+        outputType = types.MakeStruct(std::move(fields));
     } else {
         auto output = ComputeJoinOutputType(
-            std::make_shared<NQumir::NAst::TStructType>(leftType.Fields),
-            std::make_shared<NQumir::NAst::TStructType>(rightType.Fields),
+            types, types.MakeStruct(std::vector(leftType.Fields)),
+            types.MakeStruct(std::vector(rightType.Fields)),
             type);
         if (!output) {
             throw std::runtime_error("join kernel spec: " + output.error().ToString());
@@ -433,8 +440,8 @@ TOperatorKernelSpec BuildJoinKernelSpec(
         .Kind = EOperatorKernelKind::Binary,
         .OperatorName = "join",
         .InputSchemas = {
-            std::make_shared<NQumir::NAst::TStructType>(leftType.Fields),
-            std::make_shared<NQumir::NAst::TStructType>(rightType.Fields),
+            types.MakeStruct(std::vector(leftType.Fields)),
+            types.MakeStruct(std::vector(rightType.Fields)),
         },
         .OutputSchema = std::move(outputType),
         .Expressions = std::move(expressions),
@@ -449,6 +456,7 @@ TOperatorKernelSpec BuildJoinKernelSpec(
 }
 
 TOperatorKernelSpec BuildCrossJoinKernelSpec(
+    NQumir::NAst::TTypeFactory& types,
     const NQumir::NAst::TStructType& leftType,
     const NQumir::NAst::TStructType& rightType,
     EJoinType type,
@@ -456,8 +464,8 @@ TOperatorKernelSpec BuildCrossJoinKernelSpec(
 {
     RejectRegexCall(residualPredicate, "join");
     auto outputType = ComputeJoinOutputType(
-        std::make_shared<NQumir::NAst::TStructType>(leftType.Fields),
-        std::make_shared<NQumir::NAst::TStructType>(rightType.Fields),
+        types, types.MakeStruct(std::vector(leftType.Fields)),
+        types.MakeStruct(std::vector(rightType.Fields)),
         type);
     if (!outputType) {
         throw std::runtime_error(
@@ -473,8 +481,8 @@ TOperatorKernelSpec BuildCrossJoinKernelSpec(
         .Kind = EOperatorKernelKind::Binary,
         .OperatorName = "cross-join",
         .InputSchemas = {
-            std::make_shared<NQumir::NAst::TStructType>(leftType.Fields),
-            std::make_shared<NQumir::NAst::TStructType>(rightType.Fields),
+            types.MakeStruct(std::vector(leftType.Fields)),
+            types.MakeStruct(std::vector(rightType.Fields)),
         },
         .OutputSchema = std::move(*outputType),
         .Expressions = std::move(expressions),

@@ -1,5 +1,7 @@
 #include "printer.h"
 
+#include <qdb/plan/types/type_text.h>
+
 #include <qumir/parser/core/printer.h>
 
 #include <memory>
@@ -202,6 +204,7 @@ struct TSqlPrinter {
 
     NCore::TPrintOptions ExprOptions() {
         NCore::TPrintOptions opts;
+        opts.ShortNamedTypes = PlanNamedTypes();
         // The core printer renders an expression twice (FitsOneLine, then the
         // real print) at every level, so render each subquery text only once.
         auto rendered = std::make_shared<std::unordered_map<const TSubqueryExpr*, std::string>>();

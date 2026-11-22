@@ -1,8 +1,11 @@
 #pragma once
 
+#include "test_types.h"
+
 #include <qdb/io/io.h>
 #include <qdb/io/schema.h>
 #include <qdb/io/table.h>
+#include <qdb/plan/types/type_text.h>
 
 #include <qumir/parser/type.h>
 
@@ -33,7 +36,7 @@ struct TMockReader final : ISource {
         : Table(table)
     {}
 
-    const TSchema& Schema() const override { return Table.Schema(); }
+    TSchema Schema(NQumir::NAst::TTypeFactory& types) const override { return Table.Schema(types); }
     const TStatsPtr Stats() const override { return Table.Stats(); }
     bool Next(TRowSet& rowSet) override { return Table.Next(rowSet); }
 
@@ -43,10 +46,11 @@ struct TMockReader final : ISource {
 // Disambiguates the column-schema constructor from the plain name list one.
 struct TMockColumns {};
 
+// Its column types are kept in TestTypes() and rebuilt in the factory a schema is
+// asked for, as a table builds them in the factory of the query.
 struct TMockSource : ISource, ITable {
     std::vector<std::string> Names; // owns backing strings (TColumnSchema::Name is a view)
     std::vector<TColumnSchema> Cols;
-    TSchema Schema_;
     std::vector<TRowSet> Batches;
     size_t Index = 0;
     std::string Path_ = NextMockTablePath();
@@ -91,10 +95,15 @@ struct TMockSource : ISource, ITable {
         for (size_t i = 0; i < columns.size(); ++i) {
             Cols.push_back({Names[i], columns[i].Type});
         }
-        Schema_ = TSchema{Cols};
     }
 
-    const TSchema& Schema() const override { return Schema_; }
+    TSchema Schema(NQumir::NAst::TTypeFactory& types) const override {
+        TSchema schema;
+        for (const auto& column : Cols) {
+            schema.Columns.push_back({column.Name, ParseTypeText(types, PrintTypeText(column.Type))});
+        }
+        return schema;
+    }
     const TStatsPtr Stats() const override { return nullptr; }
     const std::string& Path() const override { return Path_; }
 
@@ -119,6 +128,7 @@ struct TMockSource : ISource, ITable {
     }
 
     std::vector<NScheduler::TScanRowGroup> PruneRowGroups(
+        NQumir::NAst::TTypeFactory&,
         const NQumir::NAst::TExprPtr&,
         std::string_view,
         std::ostream*,
@@ -140,11 +150,10 @@ private:
                 Names[i],
                 (i < types.size() && types[i])
                     ? types[i]
-                    : std::make_shared<NQumir::NAst::TIntegerType>(
+                    : TestTypes().MakeInteger(
                           NQumir::NAst::TIntegerType::I64),
             });
         }
-        Schema_ = TSchema{Cols};
     }
 };
 

@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "test_types.h"
 
 #include <stdint.h>
 
@@ -345,7 +346,7 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileRadixOperation(
 {
     std::vector<NQumir::NAst::TExprPtr> programStmts;
     auto addLibrary = [&](const std::string& name, bool skipUse) -> bool {
-        auto library = NQdb::NKernel::ParseFunctionLibrary(
+        auto library = NQdb::NKernel::ParseFunctionLibrary(NQdb::TestTypes(),
             NQdb::NKernel::ReadSortKernel(name));
         if (!library) {
             ADD_FAILURE() << library.error().ToString();
@@ -362,7 +363,7 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileRadixOperation(
     if (!addLibrary("radix.oz", false)) {
         return {};
     }
-    auto wrappers = NQdb::NKernel::ParseFunctionLibrary(TestRadixWrapperSource);
+    auto wrappers = NQdb::NKernel::ParseFunctionLibrary(NQdb::TestTypes(), TestRadixWrapperSource);
     if (!wrappers) {
         ADD_FAILURE() << wrappers.error().ToString();
         return {};
@@ -375,8 +376,8 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileRadixOperation(
     options.CoreInput = true;
     options.NativeCode = true;
     options.AllowOverloads = true;
-    auto runner = std::make_unique<NQumir::TLLVMRunner>(options);
-    auto program = std::make_shared<NQumir::NAst::TBlockExpr>(
+    auto runner = std::make_unique<NQumir::TLLVMRunner>(options, nullptr, &NQdb::TestTypes());
+    auto program = NQumir::MakeIntrusive<NQumir::NAst::TBlockExpr>(
         NQumir::TLocation{}, std::move(programStmts));
     std::string error;
     entry = runner->CompileKernelAst(program, entryName, &error);
@@ -390,7 +391,7 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileTopSortOperation(
     void*& entry)
 {
     std::vector<NQumir::NAst::TExprPtr> programStmts;
-    auto library = NQdb::NKernel::ParseFunctionLibrary(
+    auto library = NQdb::NKernel::ParseFunctionLibrary(NQdb::TestTypes(),
         NQdb::NKernel::ReadSortKernel("top_sort.oz"));
     if (!library) {
         ADD_FAILURE() << library.error().ToString();
@@ -400,7 +401,7 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileTopSortOperation(
         programStmts.push_back(std::move(stmt));
     }
 
-    auto wrapper = NQdb::NKernel::ParseFunctionLibrary(entrySource);
+    auto wrapper = NQdb::NKernel::ParseFunctionLibrary(NQdb::TestTypes(), entrySource);
     if (!wrapper) {
         ADD_FAILURE() << wrapper.error().ToString();
         return {};
@@ -413,8 +414,8 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileTopSortOperation(
     options.CoreInput = true;
     options.NativeCode = true;
     options.AllowOverloads = true;
-    auto runner = std::make_unique<NQumir::TLLVMRunner>(options);
-    auto program = std::make_shared<NQumir::NAst::TBlockExpr>(
+    auto runner = std::make_unique<NQumir::TLLVMRunner>(options, nullptr, &NQdb::TestTypes());
+    auto program = NQumir::MakeIntrusive<NQumir::NAst::TBlockExpr>(
         NQumir::TLocation{}, std::move(programStmts));
     std::string error;
     entry = runner->CompileKernelAst(program, entryName, &error);
@@ -909,7 +910,7 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileSortStringsOperation(
     void*& entry)
 {
     std::vector<NQumir::NAst::TExprPtr> programStmts;
-    auto library = NQdb::NKernel::ParseFunctionLibrary(
+    auto library = NQdb::NKernel::ParseFunctionLibrary(NQdb::TestTypes(),
         NQdb::NKernel::ReadSortKernel("sort_strings.oz"));
     if (!library) {
         ADD_FAILURE() << library.error().ToString();
@@ -923,8 +924,8 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileSortStringsOperation(
     options.CoreInput = true;
     options.NativeCode = true;
     options.AllowOverloads = true;
-    auto runner = std::make_unique<NQumir::TLLVMRunner>(options);
-    auto program = std::make_shared<NQumir::NAst::TBlockExpr>(
+    auto runner = std::make_unique<NQumir::TLLVMRunner>(options, nullptr, &NQdb::TestTypes());
+    auto program = NQumir::MakeIntrusive<NQumir::NAst::TBlockExpr>(
         NQumir::TLocation{}, std::move(programStmts));
     std::string error;
     entry = runner->CompileKernelAst(program, entryName, &error);

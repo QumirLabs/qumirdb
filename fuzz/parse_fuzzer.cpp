@@ -14,7 +14,8 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     std::istringstream input(std::string(reinterpret_cast<const char*>(data), size));
     try {
         NQdb::NSql::TTokenStream tokens(input);
-        NQdb::NSql::TParser parser;
+        NQumir::NAst::TTypeFactory types;
+        NQdb::NSql::TParser parser(types);
         auto statements = parser.ParseAll(tokens);
         if (statements) {
             for (const auto& statement : *statements) {

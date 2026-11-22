@@ -1,8 +1,10 @@
 #pragma once
 
+#include <qdb/plan/types/date.h>
 #include <qdb/plan/types/nullable.h>
 
 #include <qumir/parser/type.h>
+#include <qumir/parser/type_factory.h>
 
 #include <charconv>
 #include <cstdint>
@@ -31,29 +33,6 @@ inline void ValidateDecimalSpec(TDecimalSpec spec) {
     }
 }
 
-// Keep DECIMAL printable by the existing qumir core printer: it is a Named type
-// syntactically, with qdb-only precision/scale semantics.
-struct TDecimal : NQumir::NAst::TNamedType {
-    TDecimalSpec Spec;
-
-    explicit TDecimal(
-        int32_t precision = DefaultDecimalPrecision,
-        int32_t scale = DefaultDecimalScale)
-        : TNamedType("DECIMAL", nullptr, {
-              NQumir::NAst::TGenericArg::ValueArg(std::to_string(precision)),
-              NQumir::NAst::TGenericArg::ValueArg(std::to_string(scale)),
-          })
-        , Spec{.Precision = precision, .Scale = scale}
-    {
-        ValidateDecimalSpec(Spec);
-    }
-
-    std::string ToString() const override {
-        return "DECIMAL(" + std::to_string(Spec.Precision) + "," +
-            std::to_string(Spec.Scale) + ")";
-    }
-};
-
 inline std::optional<int32_t> ParseDecimalArg(std::string_view value) {
     int32_t parsed = 0;
     auto [ptr, ec] = std::from_chars(value.data(), value.data() + value.size(), parsed);
@@ -66,24 +45,13 @@ inline std::optional<int32_t> ParseDecimalArg(std::string_view value) {
 inline std::optional<TDecimalSpec> DecimalSpecOfValueType(
     const NQumir::NAst::TTypePtr& type)
 {
-    if (!type) {
-        return std::nullopt;
-    }
-    if (auto decimal = std::dynamic_pointer_cast<TDecimal>(type)) {
-        return decimal->Spec;
-    }
     auto named = NQumir::NAst::TMaybeType<NQumir::NAst::TNamedType>(type);
-    if (!named || named.Cast()->Name != "DECIMAL") {
+    if (!named) {
         return std::nullopt;
     }
-    const auto& args = named.Cast()->TypeArgs;
-    if (args.empty()) {
-        return TDecimalSpec{
-            .Precision = DefaultDecimalPrecision,
-            .Scale = DefaultDecimalScale,
-        };
-    }
-    if (args.size() != 2 ||
+    auto decimal = named.Cast();
+    const auto& args = decimal->TypeArgs;
+    if (decimal->Name != "DECIMAL" || args.size() != 2 ||
         args[0].Kind != NQumir::NAst::TGenericArg::EKind::Value ||
         args[1].Kind != NQumir::NAst::TGenericArg::EKind::Value)
     {
@@ -130,9 +98,14 @@ inline int32_t DecimalStorageBytes(TDecimalSpec spec) {
         : 16;
 }
 
-inline NQumir::NAst::TTypePtr MakeDecimalType(TDecimalSpec spec) {
+// `<named DECIMAL [p s]>`. The only constructor of a DECIMAL type: the arguments are
+// interned as text, so they are always explicit and printed one way.
+inline NQumir::NAst::TTypePtr MakeDecimalType(NQumir::NAst::TTypeFactory& types, TDecimalSpec spec) {
     ValidateDecimalSpec(spec);
-    return std::make_shared<TDecimal>(spec.Precision, spec.Scale);
+    return types.MakeNamed("DECIMAL", nullptr, {
+        NQumir::NAst::TGenericArg::ValueArg(std::to_string(spec.Precision)),
+        NQumir::NAst::TGenericArg::ValueArg(std::to_string(spec.Scale)),
+    });
 }
 
 inline bool IsBinIntStorageType(const NQumir::NAst::TTypePtr& type) {
@@ -158,35 +131,38 @@ inline bool HasBinIntLayout(const NQumir::NAst::TTypePtr& type) {
     return IsDecimal128Type(type) || IsBinIntStorageType(type) || IsInt128Type(type);
 }
 
-inline NQumir::NAst::TTypePtr BinIntStorageType() {
-    return std::make_shared<NQumir::NAst::TNamedType>("BinInt", nullptr);
+// qumirdb.oz's `(type BinInt <struct (V i128)>)`, built complete.
+inline NQumir::NAst::TTypePtr BinIntStorageType(NQumir::NAst::TTypeFactory& types) {
+    auto layout = types.MakeStruct({{"V", types.MakeInteger(NQumir::NAst::TIntegerType::I128)}});
+    return types.MakeNamed("BinInt", layout);
 }
 
 // The kernel type of the unscaled value: a plain i64, or an i128 inside the BinInt
 // struct that keeps decimal operators away from other integers.
-inline NQumir::NAst::TTypePtr DecimalStorageType(TDecimalSpec spec) {
+inline NQumir::NAst::TTypePtr DecimalStorageType(NQumir::NAst::TTypeFactory& types, TDecimalSpec spec) {
     if (DecimalStorageOf(spec) == EDecimalStorage::I64) {
-        return std::make_shared<NQumir::NAst::TIntegerType>(NQumir::NAst::TIntegerType::I64);
+        return types.MakeInteger(NQumir::NAst::TIntegerType::I64);
     }
-    return BinIntStorageType();
+    return BinIntStorageType(types);
 }
 
 // The value type a physical path reads: a decimal's storage, else the type without
 // nullability and named wrappers.
-inline NQumir::NAst::TTypePtr PhysicalValueType(const NQumir::NAst::TTypePtr& type) {
+inline NQumir::NAst::TTypePtr PhysicalValueType(
+    NQumir::NAst::TTypeFactory& types, const NQumir::NAst::TTypePtr& type)
+{
     if (auto decimal = DecimalSpecOf(type)) {
-        return DecimalStorageType(*decimal);
+        return DecimalStorageType(types, *decimal);
     }
-    return NQumir::NAst::UnwrapNamedType(UnwrapNullableType(type));
+    return UnwrapNamedValueType(UnwrapNullableType(type));
 }
 
 inline NQumir::NAst::TTypePtr DecimalStorageTypeFor(
-    const NQumir::NAst::TTypePtr& type)
+    NQumir::NAst::TTypeFactory& types, const NQumir::NAst::TTypePtr& type)
 {
-    auto storage = DecimalStorageType(*DecimalSpecOf(type));
+    auto storage = DecimalStorageType(types, *DecimalSpecOf(type));
     return IsNullableType(type)
-        ? std::static_pointer_cast<NQumir::NAst::TType>(
-              std::make_shared<TNullable>(std::move(storage)))
+        ? MakeNullableType(types, std::move(storage))
         : storage;
 }
 

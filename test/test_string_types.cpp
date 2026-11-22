@@ -7,6 +7,7 @@
 #include <qdb/plan/types/nullable.h>
 
 #include "qumirdb_source_module.h"
+#include "test_types.h"
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/parser/type.h>
@@ -36,12 +37,12 @@ TTypePtr FindExternalType(
 }
 
 struct TModuleTypes {
-    TTypePtr Column;
-    TTypePtr StringView;
+    TTypePtr Column = nullptr;
+    TTypePtr StringView = nullptr;
 };
 
 TModuleTypes GetModuleTypes() {
-    const auto& types = NQumir::NRegistry::QumirDbExternalTypes();
+    const auto types = NQumir::NRegistry::QumirDbExternalTypes(NQdb::TestTypes());
     return {
         .Column = FindExternalType(types, "TColumn"),
         .StringView = FindExternalType(types, "StringView"),
@@ -74,53 +75,53 @@ bool ContainsField(
 
 std::unique_ptr<TLLVMRunner> CompileStringColumnReader(void*& entry) {
     auto types = GetModuleTypes();
-    auto materialized = NQdb::NKernel::BuildColumnValueAst(
+    auto materialized = NQdb::NKernel::BuildColumnValueAst(NQdb::TestTypes(),
         "column", "row", "value",
-        std::make_shared<NQdb::TNullable>(std::make_shared<TStringType>()),
+        NQdb::MakeNullableType(NQdb::TestTypes(), NQdb::TestTypes().Make<TStringType>()),
         types.StringView);
 
     TLocation loc{};
-    auto i64Type = std::make_shared<TIntegerType>();
-    auto boolType = std::make_shared<TBoolType>();
-    auto stringViewType = std::make_shared<TNamedType>(
+    auto i64Type = NQdb::TestTypes().MakeInteger();
+    auto boolType = NQdb::TestTypes().Make<TBoolType>();
+    auto stringViewType = NQdb::TestTypes().MakeNamed(
         "StringView", types.StringView);
-    auto columnType = std::make_shared<TNamedType>("TColumn", types.Column);
+    auto columnType = NQdb::TestTypes().MakeNamed("TColumn", types.Column);
     auto ident = [&](const std::string& name) -> TExprPtr {
-        return std::make_shared<TIdentExpr>(loc, name);
+        return NQumir::MakeIntrusive<TIdentExpr>(loc, name);
     };
 
     std::vector<TParam> params = {
-        std::make_shared<TVarStmt>(loc, "column",
-            std::make_shared<TReferenceType>(columnType)),
-        std::make_shared<TVarStmt>(loc, "row", i64Type),
-        std::make_shared<TVarStmt>(loc, "output",
-            std::make_shared<TPointerType>(stringViewType)),
-        std::make_shared<TVarStmt>(loc, "valid",
-            std::make_shared<TPointerType>(boolType)),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "column",
+            NQdb::TestTypes().MakeReference(columnType)),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "row", i64Type),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "output",
+            NQdb::TestTypes().MakePointer(stringViewType)),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "valid",
+            NQdb::TestTypes().MakePointer(boolType)),
     };
     std::vector<TExprPtr> body = std::move(materialized.Setup);
     body.insert(body.end(), {
-        std::make_shared<TArrayAssignExpr>(loc, "output",
+        NQumir::MakeIntrusive<TArrayAssignExpr>(loc, "output",
             std::vector<TExprPtr>{ident("row")}, materialized.Value),
-        std::make_shared<TArrayAssignExpr>(loc, "valid",
+        NQumir::MakeIntrusive<TArrayAssignExpr>(loc, "valid",
             std::vector<TExprPtr>{ident("row")}, materialized.IsValid),
-        std::make_shared<TReturnExpr>(loc,
-            std::make_shared<TFieldAccessExpr>(loc,
-                std::make_shared<TIndexExpr>(loc, ident("output"), ident("row")),
+        NQumir::MakeIntrusive<TReturnExpr>(loc,
+            NQumir::MakeIntrusive<TFieldAccessExpr>(loc,
+                NQumir::MakeIntrusive<TIndexExpr>(loc, ident("output"), ident("row")),
                 "Size")),
     });
-    auto function = std::make_shared<TFunDecl>(loc, "read_string_column",
+    auto function = NQumir::MakeIntrusive<TFunDecl>(loc, "read_string_column",
         std::vector<TGenericParam>{},
-        std::move(params), std::make_shared<TBlockExpr>(loc, std::move(body)),
+        std::move(params), NQumir::MakeIntrusive<TBlockExpr>(loc, std::move(body)),
         i64Type);
-    auto program = std::make_shared<TBlockExpr>(loc,
+    auto program = NQumir::MakeIntrusive<TBlockExpr>(loc,
         std::vector<TExprPtr>{std::move(function)});
 
     TLLVMRunnerOptions options;
     options.CoreInput = true;
     options.NativeCode = true;
     NQdb::NTest::ConfigureQumirDbSourceModule(options);
-    auto runner = std::make_unique<TLLVMRunner>(options);
+    auto runner = std::make_unique<TLLVMRunner>(options, nullptr, &NQdb::TestTypes());
     std::string error;
     NQdb::NTest::AddQumirDbUse(program);
     entry = runner->CompileKernelAst(
@@ -131,44 +132,44 @@ std::unique_ptr<TLLVMRunner> CompileStringColumnReader(void*& entry) {
 
 std::unique_ptr<TLLVMRunner> CompileI32ColumnReader(void*& entry) {
     auto types = GetModuleTypes();
-    auto i32Type = std::make_shared<TIntegerType>(TIntegerType::I32);
-    auto materialized = NQdb::NKernel::BuildColumnValueAst(
-        "column", "row", "value", std::make_shared<NQdb::TNullable>(i32Type),
+    auto i32Type = NQdb::TestTypes().MakeInteger(TIntegerType::I32);
+    auto materialized = NQdb::NKernel::BuildColumnValueAst(NQdb::TestTypes(),
+        "column", "row", "value", NQdb::MakeNullableType(NQdb::TestTypes(), i32Type),
         types.StringView);
 
     TLocation loc{};
-    auto i64Type = std::make_shared<TIntegerType>();
-    auto boolType = std::make_shared<TBoolType>();
-    auto columnType = std::make_shared<TNamedType>("TColumn", types.Column);
+    auto i64Type = NQdb::TestTypes().MakeInteger();
+    auto boolType = NQdb::TestTypes().Make<TBoolType>();
+    auto columnType = NQdb::TestTypes().MakeNamed("TColumn", types.Column);
     auto ident = [&](const std::string& name) -> TExprPtr {
-        return std::make_shared<TIdentExpr>(loc, name);
+        return NQumir::MakeIntrusive<TIdentExpr>(loc, name);
     };
     std::vector<TParam> params = {
-        std::make_shared<TVarStmt>(loc, "column",
-            std::make_shared<TReferenceType>(columnType)),
-        std::make_shared<TVarStmt>(loc, "row", i64Type),
-        std::make_shared<TVarStmt>(loc, "valid",
-            std::make_shared<TPointerType>(boolType)),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "column",
+            NQdb::TestTypes().MakeReference(columnType)),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "row", i64Type),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "valid",
+            NQdb::TestTypes().MakePointer(boolType)),
     };
     std::vector<TExprPtr> body = std::move(materialized.Setup);
     body.insert(body.end(), {
-        std::make_shared<TArrayAssignExpr>(loc, "valid",
+        NQumir::MakeIntrusive<TArrayAssignExpr>(loc, "valid",
             std::vector<TExprPtr>{ident("row")}, materialized.IsValid),
-        std::make_shared<TReturnExpr>(loc,
-            std::make_shared<TCastExpr>(loc, materialized.Value, i64Type)),
+        NQumir::MakeIntrusive<TReturnExpr>(loc,
+            NQumir::MakeIntrusive<TCastExpr>(loc, materialized.Value, i64Type)),
     });
-    auto function = std::make_shared<TFunDecl>(loc, "read_i32_column",
+    auto function = NQumir::MakeIntrusive<TFunDecl>(loc, "read_i32_column",
         std::vector<TGenericParam>{},
-        std::move(params), std::make_shared<TBlockExpr>(loc, std::move(body)),
+        std::move(params), NQumir::MakeIntrusive<TBlockExpr>(loc, std::move(body)),
         i64Type);
-    auto program = std::make_shared<TBlockExpr>(loc,
+    auto program = NQumir::MakeIntrusive<TBlockExpr>(loc,
         std::vector<TExprPtr>{std::move(function)});
 
     TLLVMRunnerOptions options;
     options.CoreInput = true;
     options.NativeCode = true;
     NQdb::NTest::ConfigureQumirDbSourceModule(options);
-    auto runner = std::make_unique<TLLVMRunner>(options);
+    auto runner = std::make_unique<TLLVMRunner>(options, nullptr, &NQdb::TestTypes());
     std::string error;
     NQdb::NTest::AddQumirDbUse(program);
     entry = runner->CompileKernelAst(
@@ -183,42 +184,42 @@ std::unique_ptr<TLLVMRunner> CompileScalarColumnReader(
     const std::string& entryName)
 {
     auto types = GetModuleTypes();
-    auto materialized = NQdb::NKernel::BuildColumnValueAst(
+    auto materialized = NQdb::NKernel::BuildColumnValueAst(NQdb::TestTypes(),
         "column", "row", "value",
-        std::make_shared<NQdb::TNullable>(valueType), types.StringView);
+        NQdb::MakeNullableType(NQdb::TestTypes(), valueType), types.StringView);
 
     TLocation loc{};
-    auto i64Type = std::make_shared<TIntegerType>();
-    auto boolType = std::make_shared<TBoolType>();
-    auto columnType = std::make_shared<TNamedType>("TColumn", types.Column);
+    auto i64Type = NQdb::TestTypes().MakeInteger();
+    auto boolType = NQdb::TestTypes().Make<TBoolType>();
+    auto columnType = NQdb::TestTypes().MakeNamed("TColumn", types.Column);
     auto ident = [&](const std::string& name) -> TExprPtr {
-        return std::make_shared<TIdentExpr>(loc, name);
+        return NQumir::MakeIntrusive<TIdentExpr>(loc, name);
     };
     std::vector<TParam> params = {
-        std::make_shared<TVarStmt>(loc, "column",
-            std::make_shared<TReferenceType>(columnType)),
-        std::make_shared<TVarStmt>(loc, "row", i64Type),
-        std::make_shared<TVarStmt>(loc, "valid",
-            std::make_shared<TPointerType>(boolType)),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "column",
+            NQdb::TestTypes().MakeReference(columnType)),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "row", i64Type),
+        NQumir::MakeIntrusive<TVarStmt>(loc, "valid",
+            NQdb::TestTypes().MakePointer(boolType)),
     };
     std::vector<TExprPtr> body = std::move(materialized.Setup);
     body.insert(body.end(), {
-        std::make_shared<TArrayAssignExpr>(loc, "valid",
+        NQumir::MakeIntrusive<TArrayAssignExpr>(loc, "valid",
             std::vector<TExprPtr>{ident("row")}, materialized.IsValid),
-        std::make_shared<TReturnExpr>(loc, materialized.Value),
+        NQumir::MakeIntrusive<TReturnExpr>(loc, materialized.Value),
     });
-    auto function = std::make_shared<TFunDecl>(loc, entryName,
+    auto function = NQumir::MakeIntrusive<TFunDecl>(loc, entryName,
         std::vector<TGenericParam>{},
-        std::move(params), std::make_shared<TBlockExpr>(loc, std::move(body)),
+        std::move(params), NQumir::MakeIntrusive<TBlockExpr>(loc, std::move(body)),
         valueType);
-    auto program = std::make_shared<TBlockExpr>(loc,
+    auto program = NQumir::MakeIntrusive<TBlockExpr>(loc,
         std::vector<TExprPtr>{std::move(function)});
 
     TLLVMRunnerOptions options;
     options.CoreInput = true;
     options.NativeCode = true;
     NQdb::NTest::ConfigureQumirDbSourceModule(options);
-    auto runner = std::make_unique<TLLVMRunner>(options);
+    auto runner = std::make_unique<TLLVMRunner>(options, nullptr, &NQdb::TestTypes());
     std::string error;
     NQdb::NTest::AddQumirDbUse(program);
     entry = runner->CompileKernelAst(std::move(program), entryName, &error);
@@ -234,7 +235,7 @@ void CheckStringHandleJit(const std::string& typeName) {
     options.NativeCode = true;
     NQdb::NTest::ConfigureQumirDbSourceModule(options);
 
-    TLLVMRunner runner(options);
+    TLLVMRunner runner(options, nullptr, &NQdb::TestTypes());
 
     const std::string source =
         "(block "
@@ -261,13 +262,16 @@ void CheckStringHandleJit(const std::string& typeName) {
 }
 
 TEST(QumirDbStringTypes, ExternalTypesAreDistinctPodStructs) {
-    const auto& externalTypes = NQumir::NRegistry::QumirDbExternalTypes();
+    const auto externalTypes = NQumir::NRegistry::QumirDbExternalTypes(NQdb::TestTypes());
     auto stringView = FindExternalType(externalTypes, "StringView");
     auto ownedString = FindExternalType(externalTypes, "OwnedString");
 
     ASSERT_NE(stringView, nullptr);
     ASSERT_NE(ownedString, nullptr);
-    EXPECT_NE(stringView, ownedString);
+    // Their layouts are one interned struct; the names keep the two types apart.
+    EXPECT_NE(
+        NQumir::NRegistry::QumirDbNamedType(NQdb::TestTypes(), "StringView"),
+        NQumir::NRegistry::QumirDbNamedType(NQdb::TestTypes(), "OwnedString"));
     EXPECT_FALSE(TMaybeType<TStringType>(stringView));
     EXPECT_FALSE(TMaybeType<TStringType>(ownedString));
 
@@ -293,13 +297,13 @@ TEST(QumirDbStringTypes, OwnedStringUsesPlainStructCopies) {
 TEST(QumirDbStringTypes, NonNullableMaterializersSkipValidityBitmap) {
     auto types = GetModuleTypes();
     const std::array<TTypePtr, 4> logicalTypes = {
-        std::make_shared<TIntegerType>(TIntegerType::I32),
-        std::make_shared<TFloatType>(),
-        std::make_shared<TBoolType>(),
-        std::make_shared<TStringType>(),
+        NQdb::TestTypes().MakeInteger(TIntegerType::I32),
+        NQdb::TestTypes().MakeFloat(),
+        NQdb::TestTypes().Make<TBoolType>(),
+        NQdb::TestTypes().Make<TStringType>(),
     };
     for (const auto& type : logicalTypes) {
-        auto value = NQdb::NKernel::BuildColumnValueAst(
+        auto value = NQdb::NKernel::BuildColumnValueAst(NQdb::TestTypes(),
             "column", "row", "value", type, types.StringView);
         EXPECT_FALSE(ContainsField(value, "Mask")) << type->ToString();
         EXPECT_FALSE(ContainsField(value, "MaskBitOffset")) << type->ToString();
@@ -308,9 +312,9 @@ TEST(QumirDbStringTypes, NonNullableMaterializersSkipValidityBitmap) {
         ASSERT_TRUE(valid) << type->ToString();
         EXPECT_NE(valid.Cast()->IntValue, 0) << type->ToString();
 
-        auto nullableValue = NQdb::NKernel::BuildColumnValueAst(
+        auto nullableValue = NQdb::NKernel::BuildColumnValueAst(NQdb::TestTypes(),
             "column", "row", "value",
-            std::make_shared<NQdb::TNullable>(type), types.StringView);
+            NQdb::MakeNullableType(NQdb::TestTypes(), type), types.StringView);
         EXPECT_TRUE(ContainsField(nullableValue, "Mask")) << type->ToString();
         EXPECT_TRUE(ContainsField(nullableValue, "MaskBitOffset"))
             << type->ToString();
@@ -416,7 +420,7 @@ TEST(QumirDbStringTypes, DoesNotReadNullPayload) {
 
     void* f64Entry = nullptr;
     auto f64Runner = CompileScalarColumnReader(
-        f64Entry, std::make_shared<TFloatType>(), "read_f64_column");
+        f64Entry, NQdb::TestTypes().MakeFloat(), "read_f64_column");
     ASSERT_NE(f64Entry, nullptr);
     NQdb::TColumn f64Column{.Data = nullptr, .Mask = mask.data()};
     bool f64Valid = true;
@@ -427,7 +431,7 @@ TEST(QumirDbStringTypes, DoesNotReadNullPayload) {
 
     void* boolEntry = nullptr;
     auto boolRunner = CompileScalarColumnReader(
-        boolEntry, std::make_shared<TBoolType>(), "read_bool_column");
+        boolEntry, NQdb::TestTypes().Make<TBoolType>(), "read_bool_column");
     ASSERT_NE(boolEntry, nullptr);
     NQdb::TColumn boolColumn{.Data = nullptr, .Mask = mask.data()};
     bool boolValid = true;

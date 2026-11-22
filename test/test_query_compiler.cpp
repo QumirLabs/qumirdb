@@ -16,20 +16,21 @@ struct TFixture {
     TMockSource Source{{"value"}};
     TExternalModuleCatalog Catalog;
     std::vector<std::string> Tables;
-    TTableSourceFactory Sources = [&](std::string_view table)
+    TTableSourceFactory Sources = [&](NQumir::NAst::TTypeFactory& types, std::string_view table)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
         Tables.emplace_back(table);
-        return std::make_shared<TSourceOperator>(Borrow(Source), std::string(table));
+        return NQumir::MakeIntrusive<TSourceOperator>(types, Borrow(Source), std::string(table));
     };
+    // Parses and prepares with one factory, as a query does.
+    TQueryCompiler Compiler{Catalog, Sources};
 
     std::expected<TParsedQuery, NQumir::TError> Parse(
         const std::string& text,
         ESyntax syntax = ESyntax::Sql)
     {
         std::istringstream input(text);
-        TQueryCompiler compiler(Catalog, Sources);
-        return compiler.Parse(input, syntax);
+        return Compiler.Parse(input, syntax);
     }
 };
 
@@ -42,7 +43,7 @@ TEST(QueryCompiler, SqlPreparationAndExplain) {
     ASSERT_TRUE(query->Explain);
     ASSERT_EQ(query->Statements.size(), 1);
     EXPECT_TRUE(fixture.Tables.empty());
-    TQueryCompiler compiler(fixture.Catalog, fixture.Sources);
+    auto& compiler = fixture.Compiler;
     auto prepared = compiler.Prepare(query->Statements[0], query->Explain);
     ASSERT_TRUE(prepared) << prepared.error().ToString();
     ASSERT_TRUE(*prepared);
@@ -64,11 +65,11 @@ TEST(QueryCompiler, ExplainRejectsBatchAndDeclarations) {
     EXPECT_FALSE(fixture.Parse("EXPLAIN SELECT 1; SELECT 2;"));
     auto query = fixture.Parse("EXPLAIN CREATE MODULE math LANGUAGE rust AS $$$$;");
     ASSERT_TRUE(query) << query.error().ToString();
-    TQueryCompiler compiler(fixture.Catalog, fixture.Sources);
+    auto& compiler = fixture.Compiler;
     auto prepared = compiler.Prepare(query->Statements[0], query->Explain);
     ASSERT_FALSE(prepared);
     EXPECT_NE(prepared.error().ToString().find("EXPLAIN requires a SELECT"), std::string::npos);
-    EXPECT_TRUE(fixture.Catalog.Snapshot()->ModuleNames().empty());
+    EXPECT_TRUE(fixture.Catalog.Snapshot(SharedTestTypes())->ModuleNames().empty());
 }
 
 TEST(QueryCompiler, DeclarationsAreAppliedBeforeQueries) {
@@ -79,7 +80,7 @@ TEST(QueryCompiler, DeclarationsAreAppliedBeforeQueries) {
         "SELECT convert(1.0) FROM items;");
     ASSERT_TRUE(query) << query.error().ToString();
     ASSERT_EQ(query->Statements.size(), 3);
-    TQueryCompiler compiler(fixture.Catalog, fixture.Sources);
+    auto& compiler = fixture.Compiler;
     for (size_t i = 0; i < query->Statements.size(); ++i) {
         auto prepared = compiler.Prepare(query->Statements[i]);
         ASSERT_TRUE(prepared) << prepared.error().ToString();
@@ -97,7 +98,7 @@ TEST(QueryCompiler, SexprUsesSourceFactory) {
     ASSERT_TRUE(query->Explain);
     ASSERT_EQ(query->Statements.size(), 1);
     EXPECT_EQ(fixture.Tables, std::vector<std::string>{"items.parquet"});
-    TQueryCompiler compiler(fixture.Catalog, fixture.Sources);
+    auto& compiler = fixture.Compiler;
     auto prepared = compiler.Prepare(query->Statements[0], query->Explain);
     ASSERT_TRUE(prepared) << prepared.error().ToString();
     ASSERT_TRUE(*prepared);
@@ -105,7 +106,7 @@ TEST(QueryCompiler, SexprUsesSourceFactory) {
 
 TEST(QueryCompiler, SourceErrorsArePreserved) {
     TExternalModuleCatalog catalog;
-    TTableSourceFactory sources = [](std::string_view)
+    TTableSourceFactory sources = [](NQumir::NAst::TTypeFactory&, std::string_view)
         -> std::expected<TOperatorPtr, NQumir::TError>
     {
         return std::unexpected(NQumir::TError("table unavailable"));

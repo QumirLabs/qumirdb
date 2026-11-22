@@ -7,6 +7,7 @@
 #include <qumir/parser/type.h>
 
 #include "plan_runner.h"
+#include "test_types.h"
 #include <qdb/io/io.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/passes/column_pruning.h>
@@ -37,17 +38,17 @@ std::unique_ptr<TTestRuntime> Plan(
 {
     TRelParserOptions opts;
     opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
-        return std::make_shared<TSourceOperator>(Borrow(src), std::string(path));
+        return NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(src), std::string(path));
     };
-    TParser parser;
+    TParser parser(TestTypes());
     for (auto& [name, fn] : MakeRelParsers(std::move(opts))) parser.NodeParsers[name] = std::move(fn);
     std::istringstream in(sexp);
     TTokenStream ts(in);
     auto parsed = parser.Parse(ts);
     if (!parsed) throw std::runtime_error(parsed.error().ToString());
-    auto root = std::static_pointer_cast<IOperator>(*parsed);
-    AnnotateTypes(root);
-    ApplyColumnPruning(root);
+    auto root = NQumir::StaticPointerCast<IOperator>(*parsed);
+    AnnotateTypes(TestTypes(), root);
+    ApplyColumnPruning(TestTypes(), root);
     return RunPlan(root, schedulerSettings);
 }
 
@@ -63,7 +64,7 @@ TEST(AggregateF64, SumMinMaxOverFloatColumn) {
     };
     TRowSet batch{.Columns = cols.data(), .ColumnCount = 2, .RowCount = 4, .RefCount = 1};
     NQdb::TMockSource src({"k", "v"},
-        {std::make_shared<TIntegerType>(TIntegerType::I64), std::make_shared<TFloatType>()},
+        {TestTypes().MakeInteger(TIntegerType::I64), TestTypes().MakeFloat()},
         {batch});
 
     auto plan = Plan(
@@ -71,7 +72,7 @@ TEST(AggregateF64, SumMinMaxOverFloatColumn) {
         "(agg s sum v) (agg mn min v) (agg mx max v))", src);
 
     // Output: k (i64), s/mn/mx (f64).
-    auto* outType = static_cast<TStructType*>(plan->OutputType().get());
+    auto* outType = static_cast<const TStructType*>(plan->OutputType());
     ASSERT_EQ(outType->Fields.size(), 4u);
     EXPECT_TRUE(TMaybeType<TFloatType>(outType->Fields[1].second));
 
@@ -110,9 +111,9 @@ TEST(AggregateF64, MultipleDistinctColumns) {
     };
     TRowSet batch{.Columns = cols.data(), .ColumnCount = 3, .RowCount = 4, .RefCount = 1};
     NQdb::TMockSource src({"k", "a", "b"},
-        {std::make_shared<TIntegerType>(TIntegerType::I64),
-         std::make_shared<TIntegerType>(TIntegerType::I64),
-         std::make_shared<TFloatType>()},
+        {TestTypes().MakeInteger(TIntegerType::I64),
+         TestTypes().MakeInteger(TIntegerType::I64),
+         TestTypes().MakeFloat()},
         {batch});
 
     auto plan = Plan(
@@ -120,7 +121,7 @@ TEST(AggregateF64, MultipleDistinctColumns) {
         "(agg sa sum a) (agg sb sum b) (agg mxa max a) (agg cnt count))", src);
 
     // Output: k(i64), sa(i64), sb(f64), mxa(i64), cnt(i64).
-    auto* outType = static_cast<TStructType*>(plan->OutputType().get());
+    auto* outType = static_cast<const TStructType*>(plan->OutputType());
     ASSERT_EQ(outType->Fields.size(), 5u);
     EXPECT_TRUE(TMaybeType<TIntegerType>(outType->Fields[1].second)); // sa
     EXPECT_TRUE(TMaybeType<TFloatType>(outType->Fields[2].second));   // sb
@@ -163,8 +164,8 @@ TEST(AggregateF64, SchedulerUnaryPrefixFeedsAggregate) {
     };
     NQdb::TMockSource src(
         {"k", "v"},
-        {std::make_shared<TIntegerType>(TIntegerType::I64),
-         std::make_shared<TFloatType>()},
+        {TestTypes().MakeInteger(TIntegerType::I64),
+         TestTypes().MakeFloat()},
         {batch});
     NScheduler::TSettings settings;
     settings.Scheduler.Mode = NScheduler::EExecutionMode::ThreadedScheduler;
@@ -207,15 +208,15 @@ TEST(AggregateF64, Float32ArgumentFeedsF64States) {
     };
     TRowSet batch{.Columns = cols.data(), .ColumnCount = 2, .RowCount = 8, .RefCount = 1};
     NQdb::TMockSource src({"k", "v"},
-        {std::make_shared<TIntegerType>(TIntegerType::I64),
-         std::make_shared<TNullable>(std::make_shared<TFloatType>(TFloatType::F32))},
+        {TestTypes().MakeInteger(TIntegerType::I64),
+         MakeNullableType(TestTypes(), TestTypes().MakeFloat(TFloatType::F32))},
         {batch});
 
     auto plan = Plan(
         "(rel aggregate (rel source \"L\") (keys k) "
         "(agg s sum v) (agg mn min v) (agg mx max v))", src);
 
-    auto* outType = static_cast<TStructType*>(plan->OutputType().get());
+    auto* outType = static_cast<const TStructType*>(plan->OutputType());
     ASSERT_EQ(outType->Fields.size(), 4u);
     for (size_t i = 1; i < 4; ++i) {
         auto inner = UnwrapNullableType(outType->Fields[i].second);

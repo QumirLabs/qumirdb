@@ -27,12 +27,12 @@ TFields CopyFields(const TStructType* s) {
     return out;
 }
 
-TFields NullableFields(const TStructType* s) {
+TFields NullableFields(NQumir::NAst::TTypeFactory& types, const TStructType* s) {
     TFields out;
     if (s) {
         for (const auto& [name, type] : s->Fields) {
             out.emplace_back(name,
-                IsNullableType(type) ? type : std::make_shared<TNullable>(type));
+                IsNullableType(type) ? type : MakeNullableType(types, type));
         }
     }
     return out;
@@ -83,19 +83,20 @@ std::optional<EJoinType> ParseJoinType(std::string_view name) {
 }
 
 std::expected<TTypePtr, NQumir::TError> ComputeJoinOutputType(
+    NQumir::NAst::TTypeFactory& types,
     const TTypePtr& left, const TTypePtr& right, EJoinType type)
 {
-    auto* leftStruct = static_cast<TStructType*>(left.get());
-    auto* rightStruct = static_cast<TStructType*>(right.get());
+    auto* leftStruct = static_cast<const TStructType*>(left);
+    auto* rightStruct = static_cast<const TStructType*>(right);
 
     // SEMI / ANTI keep only the preserved side's columns (nullability intact).
     switch (type) {
         case EJoinType::LeftSemi:
         case EJoinType::LeftAnti:
-            return std::make_shared<TStructType>(CopyFields(leftStruct));
+            return types.MakeStruct(CopyFields(leftStruct));
         case EJoinType::RightSemi:
         case EJoinType::RightAnti:
-            return std::make_shared<TStructType>(CopyFields(rightStruct));
+            return types.MakeStruct(CopyFields(rightStruct));
         case EJoinType::LeftMark:
             return std::unexpected(NQumir::TError(
                 "left_mark join output is not supported in plans yet"));
@@ -105,10 +106,10 @@ std::expected<TTypePtr, NQumir::TError> ComputeJoinOutputType(
 
     // INNER/OUTER: both sides contribute. NULL-padded side becomes nullable.
     TFields leftFields = (type == EJoinType::Right || type == EJoinType::Full)
-        ? NullableFields(leftStruct)
+        ? NullableFields(types, leftStruct)
         : CopyFields(leftStruct);
     TFields rightFields = (type == EJoinType::Left || type == EJoinType::Full)
-        ? NullableFields(rightStruct)
+        ? NullableFields(types, rightStruct)
         : CopyFields(rightStruct);
 
     std::unordered_set<std::string> seen;
@@ -126,10 +127,10 @@ std::expected<TTypePtr, NQumir::TError> ComputeJoinOutputType(
         }
         out.push_back(std::move(field));
     }
-    return std::make_shared<TStructType>(std::move(out));
+    return types.MakeStruct(std::move(out));
 }
 
-TJoinOperator::TJoinOperator(TOperatorPtr left, TOperatorPtr right,
+TJoinOperator::TJoinOperator(NQumir::NAst::TTypeFactory& types, TOperatorPtr left, TOperatorPtr right,
     std::vector<TJoinKey> keys, EJoinType type, TExprPtr filter)
     : Inputs_{std::move(left), std::move(right)}
     , Keys_(std::move(keys))
@@ -138,10 +139,10 @@ TJoinOperator::TJoinOperator(TOperatorPtr left, TOperatorPtr right,
 {
     auto leftSchema = Left()->OutputColumns();
     auto rightSchema = Right()->OutputColumns();
-    auto output = ComputeJoinOutputType(leftSchema, rightSchema, Type_);
+    auto output = ComputeJoinOutputType(types, leftSchema, rightSchema, Type_);
     // Callers go through MakeJoin, which validates before construction; on the
     // unvalidated path leave the output type null rather than throwing.
-    Type = std::make_shared<TFunctionType>(
+    Type = types.MakeFunction(
         std::vector<TTypePtr>{leftSchema, rightSchema},
         output ? *output : nullptr);
 }
@@ -218,7 +219,7 @@ const std::string TJoinOperator::ToString() const {
 }
 
 std::expected<TOperatorPtr, NQumir::TError>
-MakeJoin(TOperatorPtr left, TOperatorPtr right,
+MakeJoin(NQumir::NAst::TTypeFactory& types, TOperatorPtr left, TOperatorPtr right,
     std::vector<std::pair<std::string, std::string>> keys,
     EJoinType type, const std::string& filter)
 {
@@ -235,7 +236,7 @@ MakeJoin(TOperatorPtr left, TOperatorPtr right,
     if (!filter.empty()) {
         std::istringstream ss(filter);
         NQumir::NAst::NCore::TTokenStream tokens(ss);
-        NQumir::NAst::NCore::TParser parser;
+        NQumir::NAst::NCore::TParser parser(types);
         auto parsed = parser.Parse(tokens);
         if (!parsed) {
             return std::unexpected(parsed.error());
@@ -245,12 +246,12 @@ MakeJoin(TOperatorPtr left, TOperatorPtr right,
 
     // Validate the output schema (duplicate column names) before constructing.
     auto output = ComputeJoinOutputType(
-        left->OutputColumns(), right->OutputColumns(), type);
+        types, left->OutputColumns(), right->OutputColumns(), type);
     if (!output) {
         return std::unexpected(output.error());
     }
 
-    return std::make_shared<TJoinOperator>(std::move(left), std::move(right),
+    return NQumir::MakeIntrusive<TJoinOperator>(types, std::move(left), std::move(right),
         std::move(joinKeys), type, std::move(filterExpr));
 }
 

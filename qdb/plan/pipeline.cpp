@@ -25,7 +25,7 @@ namespace NQdb {
 
 namespace {
 
-void OptimizeOne(TOperatorPtr& plan, TPlanPassOptions& options, TConstFolder& folder) {
+void OptimizeOne(NQumir::NAst::TTypeFactory& types, TOperatorPtr& plan, TPlanPassOptions& options, TConstFolder& folder) {
     std::ostream* const dump = options.DumpPasses;
     auto stage = [&](const char* name) {
         if (dump) {
@@ -35,60 +35,60 @@ void OptimizeOne(TOperatorPtr& plan, TPlanPassOptions& options, TConstFolder& fo
     };
     if (dump) { *dump << "\n===== initial =====\n"; PrintPlanTree(*dump, plan); }
 
-    BindLateMaterializationSources(plan);
-    AssignSourceAliases(plan); stage("AssignSourceAliases");
-    QualifyColumns(plan); stage("QualifyColumns");
-    AnnotateTypes(plan, options.Annotation);
+    BindLateMaterializationSources(types, plan);
+    AssignSourceAliases(types, plan); stage("AssignSourceAliases");
+    QualifyColumns(types, plan); stage("QualifyColumns");
+    AnnotateTypes(types, plan, options.Annotation);
     // Before inner-join flattening, so that a join narrowed to INNER joins its
     // inner region, where join ordering, pushdown and runtime filters apply.
-    if (SimplifyOuterJoins(plan)) {
+    if (SimplifyOuterJoins(types, plan)) {
         stage("SimplifyOuterJoins");
-        AnnotateTypes(plan, options.Annotation); // re-annotate: narrowed joins null-extend fewer columns
+        AnnotateTypes(types, plan, options.Annotation); // re-annotate: narrowed joins null-extend fewer columns
     }
     if (options.EnableCbo) {
-        plan = FlattenInnerJoins(plan); stage("FlattenInnerJoins");
-        AnnotateTypes(plan, options.Annotation); // re-annotate: inner-join regions were reassociated
+        plan = FlattenInnerJoins(types, plan); stage("FlattenInnerJoins");
+        AnnotateTypes(types, plan, options.Annotation); // re-annotate: inner-join regions were reassociated
     }
     // Before pushdown and the first EstimateStats: a self-equality left by
     // decorrelation would otherwise be costed as a selective predicate.
     plan = SimplifySelfEquality(plan); stage("SimplifySelfEquality");
     plan = PushDownPredicates(plan, folder); stage("PushDownPredicates");
-    AnnotateTypes(plan, options.Annotation); // re-annotate: pushdown moved filters onto leaves
+    AnnotateTypes(types, plan, options.Annotation); // re-annotate: pushdown moved filters onto leaves
     if (options.EnableCbo) {
         // Join widths must describe demanded scan/filter outputs. Unused source
         // payload would otherwise bias the choice before final column pruning.
-        ApplyColumnPruning(plan); stage("PruneBeforeJoinOrder");
+        ApplyColumnPruning(types, plan); stage("PruneBeforeJoinOrder");
     }
     EstimateStats(plan, folder); // leaf cardinalities for cost-based ReorderJoins
     plan = ReorderJoins(
-        plan,
+        types, plan,
         folder,
         options.EnableCbo,
         options.Diagnostics ? &options.Diagnostics->JoinReorder : nullptr);
     stage("ReorderJoins");
-    AnnotateTypes(plan, options.Annotation); // re-annotate: reordering rebuilt the join tree
+    AnnotateTypes(types, plan, options.Annotation); // re-annotate: reordering rebuilt the join tree
     plan = ExtractEquiJoins(plan, folder); stage("ExtractEquiJoins");
-    AnnotateTypes(plan, options.Annotation); // re-annotate: equi-join extraction adds/removes nodes
-    CoerceJoinKeys(plan); stage("CoerceJoinKeys");
-    AnnotateTypes(plan, options.Annotation); // re-annotate: key casts add projections below joins
-    plan = PushDownSemiJoins(plan); stage("PushDownSemiJoins");
-    AnnotateTypes(plan, options.Annotation); // re-annotate: semi pushdown restructured joins
-    plan = PushDownLimits(plan);
-    AnnotateTypes(plan, options.Annotation); // re-annotate: limit moved below strip projections
-    plan = ApplyTopSort(plan);
-    AnnotateTypes(plan, options.Annotation); // re-annotate: top-sort replaces limit(sort(...))
-    CoerceSetOpBranches(plan, options.Annotation); stage("CoerceSetOpBranches");
-    AnnotateTypes(plan, options.Annotation); // re-annotate: coercion added cast projections on union branches
-    ApplyColumnPruning(plan); stage("ApplyColumnPruning");
+    AnnotateTypes(types, plan, options.Annotation); // re-annotate: equi-join extraction adds/removes nodes
+    CoerceJoinKeys(types, plan); stage("CoerceJoinKeys");
+    AnnotateTypes(types, plan, options.Annotation); // re-annotate: key casts add projections below joins
+    plan = PushDownSemiJoins(types, plan); stage("PushDownSemiJoins");
+    AnnotateTypes(types, plan, options.Annotation); // re-annotate: semi pushdown restructured joins
+    plan = PushDownLimits(types, plan);
+    AnnotateTypes(types, plan, options.Annotation); // re-annotate: limit moved below strip projections
+    plan = ApplyTopSort(types, plan);
+    AnnotateTypes(types, plan, options.Annotation); // re-annotate: top-sort replaces limit(sort(...))
+    CoerceSetOpBranches(types, plan, options.Annotation); stage("CoerceSetOpBranches");
+    AnnotateTypes(types, plan, options.Annotation); // re-annotate: coercion added cast projections on union branches
+    ApplyColumnPruning(types, plan); stage("ApplyColumnPruning");
 
     // Pruning removes dead null-extended projections before the anti-join rule
     // checks demand. The narrower join schema needs typing/pruning again.
-    if (RewriteOuterJoinAsAnti(plan)) {
+    if (RewriteOuterJoinAsAnti(types, plan)) {
         stage("RewriteOuterJoinAsAnti");
-        AnnotateTypes(plan, options.Annotation);
-        plan = PushDownSemiJoins(plan);
-        AnnotateTypes(plan, options.Annotation);
-        ApplyColumnPruning(plan);
+        AnnotateTypes(types, plan, options.Annotation);
+        plan = PushDownSemiJoins(types, plan);
+        AnnotateTypes(types, plan, options.Annotation);
+        ApplyColumnPruning(types, plan);
     }
 
     EstimateStats(plan, folder);
@@ -106,16 +106,19 @@ void ForEachPlan(TOperatorPtr& main, TFn&& fn, bool includeMain = true) {
 
 } // namespace
 
-void ApplyPlanPasses(TOperatorPtr& plan, TPlanPassOptions options) {
-    TConstFolder folder; // one per query: see TConstFolder
+void ApplyPlanPasses(NQumir::NAst::TTypeFactory& types, TOperatorPtr& plan, TPlanPassOptions options) {
+    if (!options.Annotation.Resolver) {
+        options.Annotation = NKernel::MakeAnnotationContext(types, options.Annotation.ExternalCatalog);
+    }
+    TConstFolder folder(types, &options.Annotation); // one per query: see TConstFolder
     ForEachPlan(plan, [&](TOperatorPtr& current, TCteDefinition* def) {
-        OptimizeOne(current, options, folder);
+        OptimizeOne(types, current, options, folder);
         if (def) {
             def->OutputType = current->OutputColumns();
         }
     });
-    PushConsumerPredicatesIntoDefinitions(plan, options.Annotation, folder);
-    auto usage = PropagateCteDemands(plan);
+    PushConsumerPredicatesIntoDefinitions(types, plan, options.Annotation, folder);
+    auto usage = PropagateCteDemands(types, plan);
 
     // CTE output demand is only known after PropagateCteDemands. Apply the
     // width-sensitive rewrite now so it costs and fetches the pruned schema.
@@ -124,8 +127,8 @@ void ApplyPlanPasses(TOperatorPtr& plan, TPlanPassOptions options) {
     ForEachPlan(plan, [&](TOperatorPtr& current, TCteDefinition* def) {
         TLateMaterializationDiagnostics local;
         current = ApplyLateMaterialization(
-            current, options.LateMaterialization, &local);
-        AnnotateTypes(current, options.Annotation);
+            types, current, options.LateMaterialization, &local);
+        AnnotateTypes(types, current, options.Annotation);
 
         // Re-annotation restores schema-preserving operators (notably filters)
         // to their full input schema. Re-apply the already-computed demand so
@@ -140,7 +143,7 @@ void ApplyPlanPasses(TOperatorPtr& plan, TPlanPassOptions options) {
             }
             rootDemand = &it->second.RequiredOutputs;
         }
-        ApplyColumnPruning(current, rootDemand, nullptr);
+        ApplyColumnPruning(types, current, rootDemand, nullptr);
         if (def) {
             def->OutputType = current->OutputColumns();
         }
@@ -159,7 +162,7 @@ void ApplyPlanPasses(TOperatorPtr& plan, TPlanPassOptions options) {
         options.Diagnostics->LateMaterialization = std::move(lateDiagnostics);
     }
     auto decisions = ChooseCteReuse(usage);
-    plan = ApplyCteReuse(std::move(plan), decisions);
+    plan = ApplyCteReuse(types, std::move(plan), decisions);
     ForEachPlan(plan, [](TOperatorPtr& current, TCteDefinition*) {
         AttachRowGroupPredicates(current);
     });

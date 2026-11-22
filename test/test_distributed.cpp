@@ -1,5 +1,6 @@
 #include <qdbd/serialization.h>
 #include "mock_source.h"
+#include "test_types.h"
 #include <qdbd/actors.h>
 #include <qdbd/actors/compute.h>
 #include <qdbd/actors/collector.h>
@@ -1499,20 +1500,20 @@ NQdb::NScheduler::TLoweredPlan LowerSql(
     using namespace NQdb::NScheduler;
     std::istringstream input(sql);
     NSql::TTokenStream tokens(input);
-    NSql::TParser parser;
+    NSql::TParser parser(TestTypes());
     auto parsed = parser.Parse(tokens);
     if (!parsed) {
         throw std::runtime_error(parsed.error().ToString());
     }
-    auto plan = BuildPlan(*parsed, [&](std::string_view) -> std::expected<TOperatorPtr, NQumir::TError> {
-        return std::make_shared<TSourceOperator>(Borrow(source), "t");
+    auto plan = BuildPlan(TestTypes(), *parsed, [&](NQumir::NAst::TTypeFactory& types, std::string_view) -> std::expected<TOperatorPtr, NQumir::TError> {
+        return NQumir::MakeIntrusive<TSourceOperator>(types, Borrow(source), "t");
     });
     if (!plan) {
         throw std::runtime_error(plan.error().ToString());
     }
     auto root = *plan;
-    ApplyPlanPasses(root, options);
-    return LowerPlanToGraph(root, settings, nullptr);
+    ApplyPlanPasses(TestTypes(), root, options);
+    return LowerPlanToGraph(root, SharedTestTypes(), settings, nullptr);
 }
 
 struct TNoSink : ISink {
@@ -1541,7 +1542,7 @@ TLoweredFragment LowerFragment(const std::string& sql)
     const auto in = std::get<TSinkWriterNode>(writer.Body).In;
     writer.Body = TRemoteSinkNode{.In = in};
     spec->Externals.push_back({.Id = 1, .Node = static_cast<uint32_t>(spec->Nodes.size() - 1)});
-    return {std::move(*spec), SerializeKernelImage(CompileKernelImage(lowered.Kernels))};
+    return {std::move(*spec), SerializeKernelImage(CompileKernelImage(lowered.Kernels, TestTypes()))};
 }
 
 // Plays the query actor: counts what the compute actor reports.
@@ -3215,7 +3216,7 @@ TEST(DistributedScheduler, SplitsALoweredPlanIntoFragmentSpecs) {
     const auto fragments = ExtractFragmentSpecs(lowered);
     ASSERT_EQ(fragments.size(), 3u);
     ASSERT_EQ(split.Graphs().size(), 3u);
-    auto image = CompileKernelImage(lowered.Kernels);
+    auto image = CompileKernelImage(lowered.Kernels, TestTypes());
     std::vector<std::shared_ptr<TKernelSlot>> slots;
     for (size_t i = 0; i < image.Entrypoints.size(); ++i) {
         slots.push_back(std::make_shared<TKernelSlot>());
@@ -3351,24 +3352,25 @@ struct TDecimalsCompiler {
     TPlanPassOptions Options;
     TExternalModuleCatalog Catalog;
     std::vector<std::unique_ptr<TParquetFile>> Sources;
-    NCompiler::TQueryCompiler Compiler{Catalog, [this](std::string_view) -> std::expected<TOperatorPtr, NQumir::TError> {
+    NCompiler::TQueryCompiler Compiler{Catalog, [this](NQumir::NAst::TTypeFactory& types, std::string_view) -> std::expected<TOperatorPtr, NQumir::TError> {
         auto& source = Sources.emplace_back(std::make_unique<TParquetFile>(DecimalsPath));
-        return std::make_shared<TSourceOperator>(Borrow(*source), "t");
+        return NQumir::MakeIntrusive<TSourceOperator>(types, Borrow(*source), "t");
     }, Options};
 
     // A compiler that owns its sources, as the daemon makes one per query.
     std::unique_ptr<NCompiler::TQueryCompiler> MakeQueryCompiler()
     {
         auto sources = std::make_shared<std::vector<std::unique_ptr<TParquetFile>>>();
-        return std::make_unique<NCompiler::TQueryCompiler>(Catalog, [sources](std::string_view) -> std::expected<TOperatorPtr, NQumir::TError> {
+        return std::make_unique<NCompiler::TQueryCompiler>(Catalog, [sources](NQumir::NAst::TTypeFactory& types, std::string_view) -> std::expected<TOperatorPtr, NQumir::TError> {
             auto& source = sources->emplace_back(std::make_unique<TParquetFile>(DecimalsPath));
-            return std::make_shared<TSourceOperator>(Borrow(*source), "t");
+            return NQumir::MakeIntrusive<TSourceOperator>(types, Borrow(*source), "t");
         }, Options);
     }
 };
 
-// The plan of `sql`, as the query actor prepares it.
-TOperatorPtr PlanQuery(TDecimalsCompiler& compiler, const std::string& sql)
+// The prepared `sql`, as the query actor prepares it: its plan is built in the
+// compiler's own type factory, which lowering must use too.
+NCompiler::TPreparedQuery PlanQuery(TDecimalsCompiler& compiler, const std::string& sql)
 {
     std::istringstream input(sql);
     auto parsed = compiler.Compiler.Parse(input);
@@ -3379,7 +3381,7 @@ TOperatorPtr PlanQuery(TDecimalsCompiler& compiler, const std::string& sql)
     if (!prepared || !*prepared) {
         throw std::runtime_error("cannot prepare " + sql);
     }
-    return (*prepared)->Plan;
+    return std::move(**prepared);
 }
 
 // The CSV rows of `sql` run in this process.
@@ -3387,9 +3389,9 @@ std::string RunLocally(const std::string& sql, const NQdb::NScheduler::TSettings
 {
     using namespace NQdb::NScheduler;
     TDecimalsCompiler compiler;
-    const auto plan = PlanQuery(compiler, sql);
-    auto lowered = LowerPlanToGraph(plan, settings, nullptr);
-    FinalizeKernels(lowered.Kernels, settings.Kernel.Backend);
+    const auto prepared = PlanQuery(compiler, sql);
+    auto lowered = LowerPlanToGraph(prepared.Plan, prepared.Types, settings, nullptr);
+    FinalizeKernels(lowered.Kernels, prepared.Types, settings.Kernel.Backend);
     std::vector<TColumnSchema> columns;
     for (const auto& [name, type] : static_cast<const NQumir::NAst::TStructType&>(*lowered.OutputType).Fields) {
         columns.push_back({.Name = name, .Type = type});
@@ -3411,8 +3413,8 @@ size_t RelayCuts(TDecimalsCompiler& compiler, const std::string& sql,
 {
     using namespace NQdb::NScheduler;
     settings.Scheduler.WorkerCount = width;
-    const auto plan = PlanQuery(compiler, sql);
-    auto lowered = LowerPlanToGraph(plan, settings, nullptr);
+    const auto prepared = PlanQuery(compiler, sql);
+    auto lowered = LowerPlanToGraph(prepared.Plan, prepared.Types, settings, nullptr);
     AttachRemoteSink(lowered);
     TPartitioner partitioner(lowered.Graph->Seal(), 2);
     partitioner.Do();
@@ -3534,7 +3536,7 @@ TEST(DistributedScheduler, SplitsRuntimeFiltersSoEveryProbeMergesEveryBuildLane)
     }
 
     // The fragments build, with the placeholders of each cut on their ends.
-    auto image = CompileKernelImage(lowered.Kernels);
+    auto image = CompileKernelImage(lowered.Kernels, TestTypes());
     std::vector<std::shared_ptr<TKernelSlot>> slots;
     for (size_t i = 0; i < image.Entrypoints.size(); ++i) {
         slots.push_back(std::make_shared<TKernelSlot>());
@@ -3666,7 +3668,7 @@ TEST(DistributedScheduler, SplitsACteIntoSegmentAndSpoolCuts) {
     }));
 
     // The fragments build, with the placeholders of each cut on their ends.
-    auto image = CompileKernelImage(lowered.Kernels);
+    auto image = CompileKernelImage(lowered.Kernels, TestTypes());
     std::vector<std::shared_ptr<TKernelSlot>> slots;
     for (size_t i = 0; i < image.Entrypoints.size(); ++i) {
         slots.push_back(std::make_shared<TKernelSlot>());

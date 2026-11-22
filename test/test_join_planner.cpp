@@ -7,6 +7,7 @@
 #include <qumir/parser/type.h>
 
 #include "plan_runner.h"
+#include "test_types.h"
 #include <qdb/exec/runtime_filter.h>
 #include <qdb/io/io.h>
 #include <qdb/plan/ops/source.h>
@@ -83,10 +84,10 @@ std::unique_ptr<TTestRuntime> PlanJoinWithSources(
         -> TOperatorPtr {
         auto* source = sourceLookup(path);
         return source
-            ? std::make_shared<TSourceOperator>(Borrow(*source), std::string(path))
+            ? NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(*source), std::string(path))
             : nullptr;
     };
-    TParser parser;
+    TParser parser(TestTypes());
     for (auto& [name, fn] : MakeRelParsers(std::move(opts))) {
         parser.NodeParsers[name] = std::move(fn);
     }
@@ -96,9 +97,9 @@ std::unique_ptr<TTestRuntime> PlanJoinWithSources(
     if (!parsed) {
         throw std::runtime_error(parsed.error().ToString());
     }
-    auto root = std::static_pointer_cast<IOperator>(*parsed);
-    AnnotateTypes(root);
-    ApplyColumnPruning(root);
+    auto root = NQumir::StaticPointerCast<IOperator>(*parsed);
+    AnnotateTypes(TestTypes(), root);
+    ApplyColumnPruning(TestTypes(), root);
     if (configure) {
         configure(root);
     }
@@ -697,18 +698,18 @@ TEST(JoinPlanner, RuntimeFilterCrossesOnlyDirectProjectKeyLineage) {
             {KeyValBatch(lk.data(), lv.data(), 3, lcols)});
         TMockSource right({"rk", "rv"},
             {KeyValBatch(rk.data(), rv.data(), 1, rcols)});
-        auto source = std::make_shared<TSourceOperator>(Borrow(left), "L");
-        auto projected = MakeProject(source,
+        auto source = NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(left), "L");
+        auto projected = MakeProject(TestTypes(), source,
             {{"lv", "lv"}, {"alias_key", expression}});
         ASSERT_TRUE(projected);
-        auto join = std::make_shared<TJoinOperator>(*projected,
-            std::make_shared<TSourceOperator>(Borrow(right), "R"),
+        auto join = NQumir::MakeIntrusive<TJoinOperator>(TestTypes(), *projected,
+            NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(right), "R"),
             std::vector<TJoinKey>{{"alias_key", "rk"}},
             EJoinType::Inner, nullptr);
         join->MutableRuntimeFilter() = TRuntimeFilterSpec{
             .Id = 7, .BuildSide = EJoinFilterSide::Right};
         TOperatorPtr root = join;
-        AnnotateTypes(root);
+        AnnotateTypes(TestTypes(), root);
         PlaceRuntimeFilterConsumers(root);
 
         ASSERT_EQ(source->RuntimeFilterUses.size(), reachesSource ? 1u : 0u);
@@ -827,21 +828,21 @@ TEST(JoinPlanner, RuntimeFilterUsesEachUnionBranchKeyName) {
         {KeyValBatch(lk3.data(), lv3.data(), 2, lc3)});
     TMockSource right({"rk", "rv"},
         {KeyValBatch(rk.data(), rv.data(), 3, rc)});
-    auto first = std::make_shared<TSourceOperator>(Borrow(left1), "L1");
-    auto second = std::make_shared<TSourceOperator>(Borrow(left2), "L2");
-    auto third = std::make_shared<TSourceOperator>(Borrow(left3), "L3");
-    auto computed = MakeProject(third,
+    auto first = NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(left1), "L1");
+    auto second = NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(left2), "L2");
+    auto third = NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(left3), "L3");
+    auto computed = MakeProject(TestTypes(), third,
         {{"raw_v", "raw_v"}, {"computed_k", "(+ raw_k 0)"}});
     ASSERT_TRUE(computed);
-    auto unionAll = std::make_shared<TUnionAllOperator>(
+    auto unionAll = NQumir::MakeIntrusive<TUnionAllOperator>(TestTypes(),
         std::vector<TOperatorPtr>{first, second, *computed});
-    auto join = std::make_shared<TJoinOperator>(unionAll,
-        std::make_shared<TSourceOperator>(Borrow(right), "R"),
+    auto join = NQumir::MakeIntrusive<TJoinOperator>(TestTypes(), unionAll,
+        NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(right), "R"),
         std::vector<TJoinKey>{{"lk", "rk"}}, EJoinType::Inner, nullptr);
     join->MutableRuntimeFilter() = TRuntimeFilterSpec{
         .Id = 7, .BuildSide = EJoinFilterSide::Right};
     TOperatorPtr root = join;
-    AnnotateTypes(root);
+    AnnotateTypes(TestTypes(), root);
     PlaceRuntimeFilterConsumers(root);
 
     ASSERT_TRUE(unionAll->RuntimeFilterUses.empty());
@@ -901,22 +902,22 @@ TEST(JoinPlanner, RuntimeFilterCrossesOnlySameSideInnerJoinKeys) {
         TMockSource a({"ak", "av"}, {KeyValBatch(ak.data(), av.data(), 3, ac)});
         TMockSource b({"bk", "bv"}, {KeyValBatch(bk.data(), bv.data(), 3, bc)});
         TMockSource r({"rk", "rv"}, {KeyValBatch(rk.data(), rv.data(), 1, rc)});
-        auto aSource = std::make_shared<TSourceOperator>(Borrow(a), "A");
-        auto bSource = std::make_shared<TSourceOperator>(Borrow(b), "B");
-        auto nested = std::make_shared<TJoinOperator>(aSource, bSource,
+        auto aSource = NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(a), "A");
+        auto bSource = NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(b), "B");
+        auto nested = NQumir::MakeIntrusive<TJoinOperator>(TestTypes(), aSource, bSource,
             std::vector<TJoinKey>{{"ak", "bk"}}, nestedType, nullptr);
         if (nestedType == EJoinType::Inner) {
             nested->MutableRuntimeFilter() = TRuntimeFilterSpec{
                 .Id = 8, .BuildSide = EJoinFilterSide::Right};
         }
-        auto parent = std::make_shared<TJoinOperator>(nested,
-            std::make_shared<TSourceOperator>(Borrow(r), "R"),
+        auto parent = NQumir::MakeIntrusive<TJoinOperator>(TestTypes(), nested,
+            NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(r), "R"),
             std::vector<TJoinKey>{{parentKey, "rk"}},
             EJoinType::Inner, nullptr);
         parent->MutableRuntimeFilter() = TRuntimeFilterSpec{
             .Id = 7, .BuildSide = EJoinFilterSide::Right};
         TOperatorPtr root = parent;
-        AnnotateTypes(root);
+        AnnotateTypes(TestTypes(), root);
         PlaceRuntimeFilterConsumers(root);
 
         auto hasUse = [](const TOperatorPtr& op, uint32_t id) {
@@ -960,18 +961,18 @@ TEST(JoinPlanner, RuntimeFilterCrossesOnlySameSideInnerJoinKeys) {
 
 TEST(JoinPlanner, RuntimeFilterStaysAboveInnerJoinForSplitKeys) {
     TMockSource a({"ak"}), b({"bk", "bv"}), r({"rk1", "rk2"});
-    auto aSource = std::make_shared<TSourceOperator>(Borrow(a), "A");
-    auto bSource = std::make_shared<TSourceOperator>(Borrow(b), "B");
-    auto nested = std::make_shared<TJoinOperator>(aSource, bSource,
+    auto aSource = NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(a), "A");
+    auto bSource = NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(b), "B");
+    auto nested = NQumir::MakeIntrusive<TJoinOperator>(TestTypes(), aSource, bSource,
         std::vector<TJoinKey>{{"ak", "bk"}}, EJoinType::Inner, nullptr);
-    auto parent = std::make_shared<TJoinOperator>(nested,
-        std::make_shared<TSourceOperator>(Borrow(r), "R"),
+    auto parent = NQumir::MakeIntrusive<TJoinOperator>(TestTypes(), nested,
+        NQumir::MakeIntrusive<TSourceOperator>(TestTypes(), Borrow(r), "R"),
         std::vector<TJoinKey>{{"ak", "rk1"}, {"bv", "rk2"}},
         EJoinType::Inner, nullptr);
     parent->MutableRuntimeFilter() = TRuntimeFilterSpec{
         .Id = 7, .BuildSide = EJoinFilterSide::Right};
     TOperatorPtr root = parent;
-    AnnotateTypes(root);
+    AnnotateTypes(TestTypes(), root);
     PlaceRuntimeFilterConsumers(root);
 
     ASSERT_EQ(nested->RuntimeFilterUses.size(), 1u);
@@ -1017,8 +1018,8 @@ TEST(JoinPlanner, ProjectOnTopPrunesJoinInputs) {
 
 namespace {
 
-TTypePtr I32() { return std::make_shared<TIntegerType>(TIntegerType::I32); }
-TTypePtr I64T() { return std::make_shared<TIntegerType>(TIntegerType::I64); }
+TTypePtr I32() { return TestTypes().MakeInteger(TIntegerType::I32); }
+TTypePtr I64T() { return TestTypes().MakeInteger(TIntegerType::I64); }
 
 } // namespace
 

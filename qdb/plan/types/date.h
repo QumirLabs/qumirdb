@@ -3,32 +3,67 @@
 #include <qdb/plan/types/nullable.h>
 
 #include <qumir/parser/type.h>
+#include <qumir/parser/type_factory.h>
 
 #include <cstdint>
 #include <cstdio>
-#include <memory>
 #include <string>
 
 namespace NQdb {
 
-// DATE is a day count, an i32 in a column. It stays an integer type for every consumer
-// that only moves or compares values; the output formatter and the SQL operator and cast
-// rules tell it from i32 by this subclass. A min/max aggregate keeps its value in the i64
-// state of every integer aggregate, so its DATE is an I64 one.
-struct TDateType : NQumir::NAst::TIntegerType {
-    explicit TDateType(EKind kind = I32)
-        : TIntegerType(kind)
-    { }
-};
+// DATE is a day count, an i32 in a column: `<named DATE [i32]>` over that i32. A
+// min/max aggregate keeps its value in the i64 state of every integer aggregate, so its
+// DATE is an I64 one. The argument keeps the two apart.
+inline NQumir::NAst::TTypePtr MakeDateType(
+    NQumir::NAst::TTypeFactory& types,
+    NQumir::NAst::TIntegerType::EKind kind = NQumir::NAst::TIntegerType::I32)
+{
+    const NQumir::NAst::TTypePtr storage = types.MakeInteger(kind);
+    return types.MakeNamed("DATE", storage, {NQumir::NAst::TGenericArg::TypeArg(storage)});
+}
+
+// qumirdb.oz's `(type DATE i32)`, the target of a SQL cast to DATE. Built complete,
+// as the qumirdb.oz declaration completes it.
+inline NQumir::NAst::TTypePtr DateCastTarget(NQumir::NAst::TTypeFactory& types) {
+    return types.MakeNamed("DATE", types.MakeInteger(NQumir::NAst::TIntegerType::I32));
+}
+
+// The storage integer of a DATE value type, else null.
+inline const NQumir::NAst::TIntegerType* DateStorageType(const NQumir::NAst::TTypePtr& type) {
+    auto named = NQumir::NAst::TMaybeType<NQumir::NAst::TNamedType>(type);
+    if (!named) {
+        return nullptr;
+    }
+    auto date = named.Cast();
+    if (date->Name != "DATE" || date->TypeArgs.size() != 1) {
+        return nullptr;
+    }
+    return NQumir::NAst::TMaybeType<NQumir::NAst::TIntegerType>(date->TypeArgs[0].Type).Cast();
+}
 
 inline bool IsDateType(const NQumir::NAst::TTypePtr& type) {
-    return std::dynamic_pointer_cast<TDateType>(UnwrapNullableType(type)) != nullptr;
+    return DateStorageType(UnwrapNullableType(type)) != nullptr;
+}
+
+// Qumir's UnwrapNamedType that keeps a DATE: a DATE is an integer to move and compare,
+// but its rules and output are its own.
+inline NQumir::NAst::TTypePtr UnwrapNamedValueType(const NQumir::NAst::TTypePtr& type) {
+    return DateStorageType(type) ? type : NQumir::NAst::UnwrapNamedType(type);
+}
+
+// An integer type, or the storage integer of a DATE: DATE moves and compares as one.
+inline NQumir::NAst::TMaybeType<NQumir::NAst::TIntegerType> MaybeIntegerType(
+    const NQumir::NAst::TTypePtr& type)
+{
+    if (const auto* storage = DateStorageType(type)) {
+        return NQumir::NAst::TMaybeType<NQumir::NAst::TIntegerType>(storage);
+    }
+    return NQumir::NAst::TMaybeType<NQumir::NAst::TIntegerType>(type);
 }
 
 // The day count of the DATE cell `row` of a column of type `type` (IsDateType).
 inline int64_t DateCellDays(const char* data, int64_t row, const NQumir::NAst::TTypePtr& type) {
-    const auto kind = std::static_pointer_cast<TDateType>(UnwrapNullableType(type))->Kind;
-    return kind == NQumir::NAst::TIntegerType::I64
+    return DateStorageType(UnwrapNullableType(type))->Kind == NQumir::NAst::TIntegerType::I64
         ? reinterpret_cast<const int64_t*>(data)[row]
         : reinterpret_cast<const int32_t*>(data)[row];
 }

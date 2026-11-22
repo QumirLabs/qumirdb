@@ -18,6 +18,7 @@
 #include <memory>
 #include <optional>
 #include <ostream>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -27,16 +28,24 @@ namespace NQdb {
 
 class TExternalCatalogSnapshot;
 
+namespace NKernel {
+struct TAnnotationContext;
+} // namespace NKernel
+
 // Kernel generation appends TGeneratedKernels to Sink (when set); BindNow
 // additionally finalizes them for Backend immediately so the returned
 // dispatches are live (the default; deferred callers use FinalizeKernels).
 struct TKernelCompilerOptions {
+    // The query's type factory: kernels are built in it, and BindNow binds their
+    // slots to it.
+    std::shared_ptr<NQumir::NAst::TTypeFactory> Types;
     std::ostream* Diagnostics = nullptr;
     std::string Stage;
     TExecStageId ExecStageId = InvalidExecStageId;
     std::vector<TGeneratedKernel>* Sink = nullptr;
     bool BindNow = true;
-    std::shared_ptr<const TExternalCatalogSnapshot> ExternalCatalog;
+    // The query's typing context, with its external catalog; null without one.
+    const NKernel::TAnnotationContext* Annotation = nullptr;
     std::shared_ptr<TRuntimeContext> RuntimeContext;
     // Persistent JIT cache used when BindNow finalizes; empty disables it.
     std::string JitCacheDir;
@@ -100,7 +109,7 @@ CompileKernelAstToObjectsCached(
 
 struct TSortRadixKeyInput {
     int32_t ColumnIndex = 0;
-    NQumir::NAst::TTypePtr Type;
+    NQumir::NAst::TTypePtr Type = nullptr;
     bool Desc = false;
     bool NullsFirst = false;
 };
@@ -110,12 +119,14 @@ struct TSortRadixKeyInput {
 // row and compares them in lexicographic SQL order. Equal keys use packed row
 // id order as a stable tie break.
 NQumir::NAst::TExprPtr BuildSortRowIdLessAst(
+    NQumir::NAst::TTypeFactory& types,
     const std::vector<TSortRadixKeyInput>& keys);
 
 // Heap Top-K program (entry qdb_top_k_select). It keeps the first K packed row
 // ids in SQL sort order and returns their count. The tail holds unspecified
 // values, not the remaining row ids.
 NQumir::NAst::TExprPtr BuildHeapTopKProgramAst(
+    NQumir::NAst::TTypeFactory& types,
     const std::vector<TSortRadixKeyInput>& keys);
 
 // Radix composite sort program. With a materialize schema it exports one
@@ -123,11 +134,13 @@ NQumir::NAst::TExprPtr BuildHeapTopKProgramAst(
 // in-place, then materializes a requested slice into a kernel-owned TRowSet.
 // Throws on an unsupported key/output type.
 NQumir::NAst::TExprPtr BuildRadixSortProgramAst(
+    NQumir::NAst::TTypeFactory& types,
     const std::vector<TSortRadixKeyInput>& keys,
     const NQumir::NAst::TStructType* materializeType = nullptr);
 
 // Nullable-key variant of qdb_sort_run.
 NQumir::NAst::TExprPtr BuildRadixSortNullableProgramAst(
+    NQumir::NAst::TTypeFactory& types,
     const std::vector<TSortRadixKeyInput>& keys,
     const NQumir::NAst::TStructType* materializeType = nullptr);
 
@@ -137,6 +150,7 @@ NQumir::NAst::TExprPtr BuildRadixSortNullableProgramAst(
 // state into a kernel-owned TRowSet. pick_src/pick_idx are scratch buffers, not
 // host output.
 NQumir::NAst::TExprPtr BuildTopSortMergeProgramAst(
+    NQumir::NAst::TTypeFactory& types,
     const std::vector<TSortRadixKeyInput>& keys,
     const NQumir::NAst::TStructType* materializeType = nullptr);
 
@@ -146,7 +160,7 @@ NQumir::NAst::TExprPtr BuildTopSortMergeProgramAst(
 struct TWindowFuncInput {
     std::string Func;
     int32_t ArgColumn = -1;
-    NQumir::NAst::TTypePtr ResultType;
+    NQumir::NAst::TTypePtr ResultType = nullptr;
     // For running sum/max (sum_prefix/max_prefix): RANGE frame (each row shares
     // the running value through the last order-key peer) vs ROWS (row-by-row).
     bool PeerInclusive = false;
@@ -157,6 +171,7 @@ struct TWindowFuncInput {
 // limit) slice into a kernel-owned TRowSet whose columns are the input columns
 // (in sorted order) followed by one computed column per window function.
 NQumir::NAst::TExprPtr BuildWindowProgramAst(
+    NQumir::NAst::TTypeFactory& types,
     const std::vector<TSortRadixKeyInput>& keys,
     const NQumir::NAst::TStructType& inputType,
     const std::vector<TSortRadixKeyInput>& partitionKeys,
@@ -415,19 +430,17 @@ struct TRuntimeFilterKernel {
 // Compiles qumir core-lang kernel sources to LLVM JIT function pointers.
 class TKernelCompiler {
 public:
-    explicit TKernelCompiler(std::ostream* diagnostics = nullptr)
-        : TKernelCompiler(TKernelCompilerOptions{.Diagnostics = diagnostics})
-    {}
-
     explicit TKernelCompiler(TKernelCompilerOptions options)
-        : Diagnostics_(options.Diagnostics)
+        : Types_(options.Types ? std::move(options.Types)
+            : throw std::logic_error("kernel compiler options have no type factory"))
+        , Diagnostics_(options.Diagnostics)
         , Stage_(std::move(options.Stage))
         , ExecStageId_(options.ExecStageId)
         , Sink_(options.Sink)
         , BindNow_(options.BindNow)
         , JitCacheDir_(std::move(options.JitCacheDir))
         , Backend_(options.Backend)
-        , ExternalCatalog_(std::move(options.ExternalCatalog))
+        , Annotation_(options.Annotation)
         , RuntimeContext_(std::move(options.RuntimeContext))
     {
         Opts_ = KernelRunnerOptions();
@@ -656,6 +669,7 @@ private:
         std::vector<std::string> entrypoints,
         NQumir::NAst::TExprPtr ast);
 
+    std::shared_ptr<NQumir::NAst::TTypeFactory> Types_;
     std::ostream* Diagnostics_ = nullptr;
     std::string Stage_;
     TExecStageId ExecStageId_ = InvalidExecStageId;
@@ -663,7 +677,7 @@ private:
     bool BindNow_ = true;
     std::string JitCacheDir_;
     EKernelBackend Backend_ = EKernelBackend::Llvm;
-    std::shared_ptr<const TExternalCatalogSnapshot> ExternalCatalog_;
+    const NKernel::TAnnotationContext* Annotation_ = nullptr;
     std::shared_ptr<TRuntimeContext> RuntimeContext_;
     NQumir::TLLVMRunnerOptions Opts_;
 };
