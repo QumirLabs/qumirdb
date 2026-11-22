@@ -11,8 +11,6 @@ enum class EValueKind : uint8_t {
     // Bit-packed.
     Bool,
     String,
-    // One char per row.
-    Symbol,
     // A day count since 1970-01-01.
     Date,
     // An unscaled signed integer.

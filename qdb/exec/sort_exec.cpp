@@ -204,8 +204,6 @@ int CompareValues(const TColumn& left, int32_t leftRow,
             return CompareScalar(BoolAt(left, leftRow), BoolAt(right, rightRow));
         case EValueKind::String:
             return StringAt(left, leftRow).compare(StringAt(right, rightRow));
-        case EValueKind::Symbol:
-            break;
     }
     throw std::runtime_error("sort: unsupported key kind");
 }

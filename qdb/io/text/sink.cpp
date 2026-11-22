@@ -210,8 +210,6 @@ std::string FormatCell(const TColumn& col, int32_t row, const std::optional<TVal
                 return std::string(StringViewValue<int32_t>(col, row));
             }
             return std::string(StringViewValue<int64_t>(col, row));
-        case EValueKind::Symbol:
-            return std::string(1, col.Data[row]);
     }
     return "?";
 }
@@ -259,9 +257,6 @@ void WriteValue(std::ostream& out, const TColumn& col, int32_t row, const std::o
             return;
         case EValueKind::String:
             CsvWriteEscapedView<TOffset>(out, StringViewValue<TOffset>(col, row), ',');
-            return;
-        case EValueKind::Symbol:
-            out.put(col.Data[row]);
             return;
     }
     out << '?';
