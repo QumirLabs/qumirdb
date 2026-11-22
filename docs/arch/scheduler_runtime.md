@@ -35,11 +35,9 @@ Prepared code is immutable and can serve several tasks. Configuration that
 depends on one task's lifetime belongs to its mutable state and is applied
 before scheduling starts; it must not be captured by the shared code object.
 
-Column types exist only while a query compiles. Lowering turns what a task
-needs to know about its columns into plain data: row layouts (value width,
-bit-packed bool, string offsets) and value descriptors (kind, width, decimal
-scale, nullability). Code on the workers reads only this data, so a graph spec
-carries no types and runs the same way on another node.
+Tasks on the workers do not read column types: lowering gives each task what
+it needs to know about its columns as plain data, and a graph spec carries no
+types.
 
 The scheduler itself does not know SQL semantics. It only executes task nodes
 and reschedules their neighbors when a task returns `OK`, `NEED_DATA`,
