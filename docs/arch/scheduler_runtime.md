@@ -35,6 +35,10 @@ Prepared code is immutable and can serve several tasks. Configuration that
 depends on one task's lifetime belongs to its mutable state and is applied
 before scheduling starts; it must not be captured by the shared code object.
 
+Tasks on the workers do not read column types: lowering gives each task what
+it needs to know about its columns as plain data, and a graph spec carries no
+types.
+
 The scheduler itself does not know SQL semantics. It only executes task nodes
 and reschedules their neighbors when a task returns `OK`, `NEED_DATA`,
 `BLOCKED_OUTPUT`, or `FINISHED`.
