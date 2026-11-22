@@ -1,5 +1,6 @@
 #pragma once
 
+#include <qdb/kernel/backend.h>
 #include <qdb/kernel/generated.h>
 
 #include <memory>
@@ -10,7 +11,7 @@
 
 namespace NQdb {
 
-// Compiled LLVM code of kernels that another process loads without compiling.
+// Compiled native code of kernels that another process loads without compiling.
 // Object is one relocatable PIC object; runtime helpers stay undefined symbols
 // that the loader binds by name.
 struct TKernelImage {
@@ -22,9 +23,11 @@ struct TKernelImage {
 };
 
 // Deduplicates and fuses `kernels` as FinalizeKernels does and compiles them once; binds no slot.
-// A non-empty cacheDir persists the library objects there (created if missing) and the image
-// carries them in Dependencies. Fusion rewrites the ASTs, so the kernels cannot be finalized afterwards.
-TKernelImage CompileKernelImage(std::span<TGeneratedKernel> kernels, const std::string& cacheDir = {});
+// With the llvm backend a non-empty cacheDir persists the library objects there (created if missing)
+// and the image carries them in Dependencies; tpde has no cache, vm throws (an image is native code).
+// Fusion rewrites the ASTs, so the kernels cannot be finalized afterwards.
+TKernelImage CompileKernelImage(
+    std::span<TGeneratedKernel> kernels, EKernelBackend backend = EKernelBackend::Llvm, const std::string& cacheDir = {});
 
 // Links the image into this process and binds slots[i] to kernel i.
 void LoadKernelImage(const TKernelImage& image, std::span<const std::shared_ptr<TKernelSlot>> slots);

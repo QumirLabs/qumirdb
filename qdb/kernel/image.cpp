@@ -5,6 +5,9 @@
 #include <qdb/modules/qumirdb.h>
 
 #include <qumir/codegen/llvm/llvm_runner.h>
+#ifdef QUMIR_ENABLE_TPDE
+#include <qumir/codegen/tpde/tpde_backend.h>
+#endif
 
 #include <cstdint>
 #include <cstring>
@@ -82,8 +85,11 @@ std::string ReadFile(const std::string& path)
 
 } // namespace
 
-TKernelImage CompileKernelImage(std::span<TGeneratedKernel> kernels, const std::string& cacheDir)
+TKernelImage CompileKernelImage(std::span<TGeneratedKernel> kernels, EKernelBackend backend, const std::string& cacheDir)
 {
+    if (backend == EKernelBackend::Vm) {
+        throw std::runtime_error("kernel images hold native code, kernel.backend=vm is not supported");
+    }
     // TODO: check that the slots are not bound yet.
     auto dedup = DeduplicateKernels(kernels, [](const TGeneratedKernel&) {
         return false;
@@ -92,10 +98,17 @@ TKernelImage CompileKernelImage(std::span<TGeneratedKernel> kernels, const std::
 
     auto options = KernelRunnerOptions();
     options.NativeCode = true;
-    NQumir::TLLVMRunner runner(std::move(options));
+    std::unique_ptr<NQumir::NCodeGen::ICodegenBackend> codegen;
+#ifdef QUMIR_ENABLE_TPDE
+    if (backend == EKernelBackend::Tpde) {
+        codegen = std::make_unique<NQumir::NCodeGen::TTpdeBackend>();
+    }
+#endif
+    NQumir::TLLVMRunner runner(std::move(options), std::move(codegen));
     std::string error;
     TKernelImage image;
-    if (cacheDir.empty()) {
+    // The object cache is built on the partitioned LLVM codegen.
+    if (cacheDir.empty() || backend != EKernelBackend::Llvm) {
         auto object = CompileKernelAstToObject(runner, fused.Program, fused.Entrypoints, &error);
         if (!object) {
             throw std::runtime_error("kernel image compilation failed: " + error);
