@@ -4,8 +4,10 @@
 #include <qdb/io/parquet/row_id.h>
 #include <qdb/io/parquet/source.h>
 #include <qdb/io/parquet/row_id.h>
+#include <qdb/io/row_layouts.h>
 #include <qdb/io/text/sink.h>
 #include <qdb/plan/ops/source.h>
+#include <qdb/plan/types/date.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 
@@ -682,6 +684,29 @@ TEST(IOTest, DecimalStorageValuesTakeTheStorageWidth) {
     check(arrow::decimal64(18, 0), {7, 999999999999999999, -999999999999999999, -1});
     check(arrow::decimal128(15, 2), {7, 999999999999999, -999999999999999, -1});
     check(arrow::decimal128(38, 2), {7, big, -big, -1});
+}
+
+TEST(IOTest, ValueTypeOfDescribesHowTasksReadAColumn) {
+    using namespace NQumir::NAst;
+    auto check = [](const TTypePtr& type, EValueKind kind, int32_t width, int32_t scale = 0) {
+        const auto value = ValueTypeOf(type);
+        ASSERT_TRUE(value) << type->ToString();
+        EXPECT_EQ(value->Kind, kind) << type->ToString();
+        EXPECT_EQ(value->Width, width) << type->ToString();
+        EXPECT_EQ(value->Scale, scale) << type->ToString();
+        EXPECT_EQ(value->Nullable, static_cast<bool>(TMaybeType<TNullable>(type))) << type->ToString();
+    };
+    check(std::make_shared<TNullable>(MakeDecimalType({.Precision = 38, .Scale = 2})), EValueKind::Decimal, 16, 2);
+    check(MakeDecimalType({.Precision = 15, .Scale = 4}), EValueKind::Decimal, 8, 4);
+    check(std::make_shared<TNullable>(std::make_shared<TDateType>()), EValueKind::Date, 4);
+    check(std::make_shared<TIntegerType>(TIntegerType::I128), EValueKind::Signed, 16);
+    check(BinIntStorageType(), EValueKind::Signed, 16);
+    check(std::make_shared<TIntegerType>(TIntegerType::U16), EValueKind::Unsigned, 2);
+    check(std::make_shared<TFloatType>(TFloatType::F32), EValueKind::Float, 4);
+    check(std::make_shared<TNullable>(std::make_shared<TBoolType>()), EValueKind::Bool, 0);
+    check(std::make_shared<TStringType>(), EValueKind::String, 0);
+    EXPECT_FALSE(ValueTypeOf(std::make_shared<TStructType>(
+        std::vector<std::pair<std::string, TTypePtr>>{{"x", std::make_shared<TIntegerType>()}})));
 }
 
 // An f32 column holds 4-byte values and prints as the shortest text that reads back as

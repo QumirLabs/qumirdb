@@ -2,6 +2,7 @@
 #include <qdb/exec/runtime_context.h>
 #include <qdb/exec/filter_exec.h>
 #include <qdb/exec/sort_key_ops.h>
+#include <qdb/io/row_layouts.h>
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/limit.h>
@@ -75,14 +76,12 @@ bool IsRadixSortableType(const NQumir::NAst::TTypePtr& type) {
 }
 
 struct TSortKernelInputs {
-    std::vector<TSortColumnRef> KeyColumns;
     std::vector<TSortRadixKeyInput> RadixKeys;
     bool AllKeysRadixSortable = true;
 };
 
 TSortKernelInputs BuildSortKernelInputs(const NKernel::TOperatorKernelSpec& spec) {
     TSortKernelInputs inputs;
-    inputs.KeyColumns.reserve(spec.SortKeys.size());
     inputs.RadixKeys.reserve(spec.SortKeys.size());
     for (const auto& key : spec.SortKeys) {
         inputs.AllKeysRadixSortable =
@@ -93,12 +92,39 @@ TSortKernelInputs BuildSortKernelInputs(const NKernel::TOperatorKernelSpec& spec
             .Desc = key.Direction == ESortDirection::Desc,
             .NullsFirst = EffectiveSortNulls(key.Direction, key.Nulls) == ESortNulls::First,
         });
-        inputs.KeyColumns.push_back({
-            .Index = key.Column.Index,
-            .Type = key.Column.Type,
-        });
     }
     return inputs;
+}
+
+std::vector<TSortColumnRef> SortColumnRefs(const std::vector<TSortRadixKeyInput>& keys) {
+    std::vector<TSortColumnRef> columns;
+    columns.reserve(keys.size());
+    for (const auto& key : keys) {
+        const auto value = ValueTypeOf(key.Type);
+        if (!value) {
+            throw std::runtime_error("sort key of unsupported type " + key.Type->ToString());
+        }
+        columns.push_back({.Index = key.ColumnIndex, .Value = *value});
+    }
+    return columns;
+}
+
+// Resolved key metadata for the exec exporter, where a bool key is one byte wide.
+std::vector<TGeneratedKernel::TSortKeyMeta> SortKeyMeta(
+    const std::vector<TSortKey>& keys, const std::vector<TSortColumnRef>& columns)
+{
+    std::vector<TGeneratedKernel::TSortKeyMeta> meta;
+    meta.reserve(columns.size());
+    for (size_t k = 0; k < columns.size(); ++k) {
+        const auto& value = columns[k].Value;
+        meta.push_back({
+            .Index = columns[k].Index,
+            .WidthBytes = value.Kind == EValueKind::Bool ? 1 : value.Width,
+            .IsString = value.Kind == EValueKind::String,
+            .Desc = keys[k].Direction == ESortDirection::Desc,
+        });
+    }
+    return meta;
 }
 
 void PrintKernelSpec(std::ostream* out, const NKernel::TOperatorKernelSpec& spec) {
@@ -723,12 +749,6 @@ TProjectPlan BuildProjectPlan(
     };
 }
 
-bool IsStringRadixKey(const NQumir::NAst::TTypePtr& type) {
-    using namespace NQumir::NAst;
-    return static_cast<bool>(TMaybeType<TStringType>(
-        UnwrapNamedType(UnwrapNullableType(type))));
-}
-
 TSortPlanData BuildSortPlanData(
     const NQumir::NAst::TTypePtr& inputTypePtr,
     const std::vector<TSortKey>& keys,
@@ -744,10 +764,10 @@ TSortPlanData BuildSortPlanData(
     auto spec = NKernel::BuildSortKernelSpec(inputType, keys, std::string(kernelName));
     PrintKernelSpec(options.Diagnostics, spec);
     auto sortInputs = BuildSortKernelInputs(spec);
-    TSortPlanData plan{.OutputType = inputTypePtr, .Keys = keys};
     if (!sortInputs.AllKeysRadixSortable || sortInputs.RadixKeys.empty()) {
         throw std::runtime_error("sort kernel is unavailable for requested keys");
     }
+    TSortPlanData plan{.Keys = keys, .KeyColumns = SortColumnRefs(sortInputs.RadixKeys)};
     {
         auto* sink = options.Sink;
         const size_t sinkBefore = sink ? sink->size() : 0;
@@ -786,24 +806,12 @@ TSortPlanData BuildSortPlanData(
             };
         }
         if (sink) {
-            // Resolved key metadata for the exec exporter, on all emitted sort
-            // kernels.
-            std::vector<TGeneratedKernel::TSortKeyMeta> meta;
-            meta.reserve(keys.size());
-            for (size_t k = 0; k < sortInputs.KeyColumns.size(); ++k) {
-                meta.push_back({
-                    .Index = sortInputs.KeyColumns[k].Index,
-                    .WidthBytes = static_cast<int32_t>(NKernel::FixedValueWidth(sortInputs.KeyColumns[k].Type)),
-                    .IsString = IsStringRadixKey(sortInputs.KeyColumns[k].Type),
-                    .Desc = keys[k].Direction == ESortDirection::Desc,
-                });
-            }
+            const auto meta = SortKeyMeta(plan.Keys, plan.KeyColumns);
             for (size_t i = sinkBefore; i < sink->size(); ++i) {
                 (*sink)[i].SortKeys = meta;
             }
         }
     }
-    plan.KeyColumns = std::move(sortInputs.KeyColumns);
     return plan;
 }
 
@@ -849,7 +857,6 @@ TWindowPlanData BuildWindowPlanData(
             "window without partition/order is not supported in exec yet");
     }
 
-    std::vector<TSortColumnRef> keyColumns;
     std::vector<TSortRadixKeyInput> radixKeys;
     std::vector<TSortRadixKeyInput> partitionRadixKeys;
     std::vector<TSortRadixKeyInput> orderRadixKeys;
@@ -862,7 +869,6 @@ TWindowPlanData BuildWindowPlanData(
             .Desc = key.Direction == ESortDirection::Desc,
             .NullsFirst = EffectiveSortNulls(key.Direction, key.Nulls) == ESortNulls::First,
         };
-        keyColumns.push_back({.Index = idx, .Type = type});
         if (partitionRadixKeys.size() < window.PartitionKeys().size()) {
             partitionRadixKeys.push_back(radixKey);
         } else {
@@ -991,24 +997,15 @@ TWindowPlanData BuildWindowPlanData(
     auto dispatch = compiler.CompileWindow(
         radixKeys, *inputStruct, partitionRadixKeys, orderRadixKeys, funcs);
     const uint32_t kernelIndex = dispatch.Kernel;
+    auto keyColumns = SortColumnRefs(radixKeys);
     if (sink) {
-        std::vector<TGeneratedKernel::TSortKeyMeta> meta;
-        meta.reserve(keyColumns.size());
-        for (size_t k = 0; k < keyColumns.size(); ++k) {
-            meta.push_back({
-                .Index = keyColumns[k].Index,
-                .WidthBytes = static_cast<int32_t>(NKernel::FixedValueWidth(keyColumns[k].Type)),
-                .IsString = IsStringRadixKey(keyColumns[k].Type),
-                .Desc = keys[k].Direction == ESortDirection::Desc,
-            });
-        }
+        const auto meta = SortKeyMeta(keys, keyColumns);
         for (size_t i = sinkBefore; i < sink->size(); ++i) {
             (*sink)[i].SortKeys = meta;
         }
     }
 
     return TWindowPlanData{
-        .OutputType = ComputeWindowOutputType(inputType, window.Functions()),
         .Keys = std::move(keys),
         .KeyColumns = std::move(keyColumns),
         .Kernel = kernelIndex,

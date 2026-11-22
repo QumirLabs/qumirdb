@@ -2109,9 +2109,10 @@ private:
         }();
 
         // One local (top-)sort per input lane, each writing a sorted run.
+        const auto layouts = RowLayouts(childType);
         NScheduler::TSortMergeNode mergeBody{
             .Plan = {
-                .OutputType = childType,
+                .OutputLayouts = layouts,
                 .Keys = sortKeys,
                 .KeyColumns = plan.KeyColumns,
             },
@@ -2123,7 +2124,7 @@ private:
         for (size_t i = 0; i < lanes; ++i) {
             auto& runRef = AddConn<NScheduler::TOneToOneConnection>(
                 1, 1, "sort-run-" + std::to_string(i));
-            SetRowType(runRef, childType);
+            runRef.SetRowLayouts(layouts);
             auto& node = AddNode({
                 .ExecStageId = execStageId,
                 .TaskGroupId = execStageId,
@@ -2142,7 +2143,7 @@ private:
         }
 
         mergeBody.Out = PortSpec(Graph_, &mergeOut, mergeOutLaneOffset);
-        SetRowType(mergeOut, childType);
+        mergeOut.SetRowLayouts(layouts);
         auto& mergeNode = AddNode({
             .TaskGroupId = NewTaskGroup(),
             .DebugKind = "merge",
@@ -2557,12 +2558,10 @@ private:
         std::string stage,
         TExecStageId execStageId)
     {
-        auto plan = BuildWindowPlanData(
-            window, childType, KernelOptions(std::move(stage), execStageId));
-        auto outputType = plan.OutputType;
         return {
-            .Node = {.Plan = std::move(plan)},
-            .OutputType = std::move(outputType),
+            .Node = {.Plan = BuildWindowPlanData(
+                window, childType, KernelOptions(std::move(stage), execStageId))},
+            .OutputType = ComputeWindowOutputType(childType, window.Functions()),
         };
     }
 

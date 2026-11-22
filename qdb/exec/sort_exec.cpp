@@ -3,11 +3,6 @@
 #include <qdb/exec/kernel_rowset.h>
 #include <qdb/exec/sort_key_ops.h>
 #include <qdb/modules/qumirdb_runtime.h>
-#include <qdb/kernel/column_value.h>
-#include <qdb/plan/types/decimal.h>
-#include <qdb/plan/types/nullable.h>
-
-#include <qumir/parser/type.h>
 
 #include <algorithm>
 #include <cstring>
@@ -38,8 +33,6 @@ TSortRadixKernel MakeSortRadixKernel(
     }
     return kernel;
 }
-
-using namespace NQumir::NAst;
 
 struct TGatheredColumn {
     std::vector<char> Data;
@@ -147,58 +140,72 @@ T Load(const TColumn& col, int32_t row) {
     return value;
 }
 
+int CompareSigned(const TColumn& left, int32_t leftRow,
+    const TColumn& right, int32_t rightRow, int32_t width)
+{
+    switch (width) {
+        case 1:
+            return CompareScalar(Load<int8_t>(left, leftRow), Load<int8_t>(right, rightRow));
+        case 2:
+            return CompareScalar(Load<int16_t>(left, leftRow), Load<int16_t>(right, rightRow));
+        case 4:
+            return CompareScalar(Load<int32_t>(left, leftRow), Load<int32_t>(right, rightRow));
+        case 8:
+            return CompareScalar(Load<int64_t>(left, leftRow), Load<int64_t>(right, rightRow));
+        case 16: {
+            const auto lhs = Load<qdb_bin_int>(left, leftRow);
+            const auto rhs = Load<qdb_bin_int>(right, rightRow);
+            if (qdb_decimal_lt(lhs, rhs)) {
+                return -1;
+            }
+            if (qdb_decimal_gt(lhs, rhs)) {
+                return 1;
+            }
+            return 0;
+        }
+    }
+    throw std::runtime_error("sort: unsupported signed key width " + std::to_string(width));
+}
+
+int CompareUnsigned(const TColumn& left, int32_t leftRow,
+    const TColumn& right, int32_t rightRow, int32_t width)
+{
+    switch (width) {
+        case 1:
+            return CompareScalar(Load<uint8_t>(left, leftRow), Load<uint8_t>(right, rightRow));
+        case 2:
+            return CompareScalar(Load<uint16_t>(left, leftRow), Load<uint16_t>(right, rightRow));
+        case 4:
+            return CompareScalar(Load<uint32_t>(left, leftRow), Load<uint32_t>(right, rightRow));
+        case 8:
+            return CompareScalar(Load<uint64_t>(left, leftRow), Load<uint64_t>(right, rightRow));
+    }
+    throw std::runtime_error("sort: unsupported unsigned key width " + std::to_string(width));
+}
+
+// Dates and decimals compare as the signed integers they are stored as.
 int CompareValues(const TColumn& left, int32_t leftRow,
     const TColumn& right, int32_t rightRow,
-    const TTypePtr& type)
+    const TValueType& value)
 {
-    if (HasBinIntLayout(type)) {
-        const auto lhs = Load<qdb_bin_int>(left, leftRow);
-        const auto rhs = Load<qdb_bin_int>(right, rightRow);
-        if (qdb_decimal_lt(lhs, rhs)) {
-            return -1;
-        }
-        if (qdb_decimal_gt(lhs, rhs)) {
-            return 1;
-        }
-        return 0;
+    switch (value.Kind) {
+        case EValueKind::Signed:
+        case EValueKind::Date:
+        case EValueKind::Decimal:
+            return CompareSigned(left, leftRow, right, rightRow, value.Width);
+        case EValueKind::Unsigned:
+            return CompareUnsigned(left, leftRow, right, rightRow, value.Width);
+        case EValueKind::Float:
+            if (value.Width == sizeof(float)) {
+                return CompareScalar(Load<float>(left, leftRow), Load<float>(right, rightRow));
+            }
+            return CompareScalar(Load<double>(left, leftRow), Load<double>(right, rightRow));
+        case EValueKind::Bool:
+            return CompareScalar(BoolAt(left, leftRow), BoolAt(right, rightRow));
+        case EValueKind::String:
+            return StringAt(left, leftRow).compare(StringAt(right, rightRow));
     }
-
-    auto valueType = PhysicalValueType(type);
-    if (auto integer = TMaybeType<TIntegerType>(valueType)) {
-        switch (integer.Cast()->Kind) {
-            case TIntegerType::I8:
-                return CompareScalar(Load<int8_t>(left, leftRow), Load<int8_t>(right, rightRow));
-            case TIntegerType::I16:
-                return CompareScalar(Load<int16_t>(left, leftRow), Load<int16_t>(right, rightRow));
-            case TIntegerType::I32:
-                return CompareScalar(Load<int32_t>(left, leftRow), Load<int32_t>(right, rightRow));
-            case TIntegerType::I64:
-                return CompareScalar(Load<int64_t>(left, leftRow), Load<int64_t>(right, rightRow));
-            case TIntegerType::U8:
-                return CompareScalar(Load<uint8_t>(left, leftRow), Load<uint8_t>(right, rightRow));
-            case TIntegerType::U16:
-                return CompareScalar(Load<uint16_t>(left, leftRow), Load<uint16_t>(right, rightRow));
-            case TIntegerType::U32:
-                return CompareScalar(Load<uint32_t>(left, leftRow), Load<uint32_t>(right, rightRow));
-            case TIntegerType::U64:
-                return CompareScalar(Load<uint64_t>(left, leftRow), Load<uint64_t>(right, rightRow));
-        }
-    }
-    if (TMaybeType<TFloatType>(valueType)) {
-        if (NKernel::FixedValueWidth(valueType) == sizeof(float)) {
-            return CompareScalar(Load<float>(left, leftRow), Load<float>(right, rightRow));
-        }
-        return CompareScalar(Load<double>(left, leftRow), Load<double>(right, rightRow));
-    }
-    if (TMaybeType<TBoolType>(valueType)) {
-        return CompareScalar(BoolAt(left, leftRow), BoolAt(right, rightRow));
-    }
-    if (TMaybeType<TStringType>(valueType)) {
-        return StringAt(left, leftRow).compare(StringAt(right, rightRow));
-    }
-    throw std::runtime_error(
-        "sort: unsupported key type " +
-        (type ? type->ToString() : std::string("<null>")));
+    throw std::runtime_error("sort: unsupported key kind");
 }
 
 bool LessByKey(const TRowStore& store, TRowId leftId, TRowId rightId,
@@ -220,7 +227,7 @@ bool LessByKey(const TRowStore& store, TRowId leftId, TRowId rightId,
         return EffectiveSortNulls(key.Direction, key.Nulls) == ESortNulls::First ? !leftValid : leftValid;
     }
 
-    int cmp = CompareValues(leftColumn, leftRow, rightColumn, rightRow, keyColumn.Type);
+    int cmp = CompareValues(leftColumn, leftRow, rightColumn, rightRow, keyColumn.Value);
     if (key.Direction == ESortDirection::Desc) {
         cmp = -cmp;
     }
@@ -245,7 +252,7 @@ bool EqualByKey(const TRowStore& store, TRowId leftId, TRowId rightId,
     if (!leftValid) {
         return true;
     }
-    return CompareValues(leftColumn, leftRow, rightColumn, rightRow, keyColumn.Type) == 0;
+    return CompareValues(leftColumn, leftRow, rightColumn, rightRow, keyColumn.Value) == 0;
 }
 
 bool SortRowsLess(const TRowStore& store, const std::vector<TSortKey>& keys,
@@ -262,28 +269,13 @@ bool SortRowsLess(const TRowStore& store, const std::vector<TSortKey>& keys,
     return false;
 }
 
-// Bool is bit-packed and strings use offsets, so neither has a fixed value width here.
-size_t SortColumnFixedWidth(const TTypePtr& type) {
-    const auto valueType = PhysicalValueType(type);
-    if (TMaybeType<TBoolType>(valueType) || TMaybeType<TStringType>(valueType)) {
-        return 0;
-    }
-    if (const auto width = NKernel::FixedValueWidth(type)) {
-        return static_cast<size_t>(width);
-    }
-    throw std::runtime_error(
-        "sort: unsupported output column type " +
-        (type ? type->ToString() : std::string("<null>")));
-}
-
 void GatherColumn(const TRowStore& store, const std::vector<TRowId>& rowIds,
-    int32_t srcColIdx, const TTypePtr& type, TGatheredColumn& out)
+    int32_t srcColIdx, const TValueLayout& layout, TGatheredColumn& out)
 {
     const size_t n = rowIds.size();
-    const auto valueType = UnwrapNamedType(UnwrapNullableType(type));
-    const bool isBool = static_cast<bool>(TMaybeType<TBoolType>(valueType));
-    const bool isString = static_cast<bool>(TMaybeType<TStringType>(valueType));
-    const size_t width = SortColumnFixedWidth(type);
+    const bool isBool = layout.Bitmap;
+    const bool isString = layout.IsString();
+    const size_t width = static_cast<size_t>(layout.Width);
 
     out.Data.clear();
     out.Offsets.clear();
@@ -375,13 +367,11 @@ void GatherColumn(const TRowStore& store, const std::vector<TRowId>& rowIds,
 } // namespace
 
 TSortProcessor::TSortProcessor(
-    TTypePtr outputType,
     std::vector<TSortKey> keys,
     std::vector<TSortColumnRef> keyColumns,
     TSortRadixKernel radixKernel,
     int64_t batchRows)
-    : OutputType_(std::move(outputType))
-    , Keys_(std::move(keys))
+    : Keys_(std::move(keys))
     , KeyColumns_(std::move(keyColumns))
     , RadixKernel_(std::move(radixKernel))
     , BatchRows_(batchRows)
@@ -488,12 +478,12 @@ bool TSortProcessor::Next(TRowSet& rowSet)
 }
 
 TMergeProcessor::TMergeProcessor(
-    TTypePtr outputType,
+    std::vector<TValueLayout> outputLayouts,
     std::vector<TSortKey> keys,
     std::vector<TSortColumnRef> keyColumns,
     size_t runCount,
     int64_t batchRows)
-    : OutputType_(std::move(outputType))
+    : OutputLayouts_(std::move(outputLayouts))
     , Keys_(std::move(keys))
     , KeyColumns_(std::move(keyColumns))
     , BatchRows_(batchRows)
@@ -574,16 +564,12 @@ bool TMergeProcessor::Next(TRowSet& rowSet)
     const std::vector<TRowId> slice(
         Merged_.begin() + Cursor_, Merged_.begin() + Cursor_ + n);
 
-    auto* outputType = static_cast<TStructType*>(OutputType_.get());
-    if (!outputType) {
-        throw std::runtime_error("merge output must have TStructType");
-    }
     auto* data = new TSortedRowSetData;
-    data->Gathered.resize(outputType->Fields.size());
-    data->Columns.resize(outputType->Fields.size());
-    for (size_t c = 0; c < outputType->Fields.size(); ++c) {
+    data->Gathered.resize(OutputLayouts_.size());
+    data->Columns.resize(OutputLayouts_.size());
+    for (size_t c = 0; c < OutputLayouts_.size(); ++c) {
         GatherColumn(Store_, slice, static_cast<int32_t>(c),
-            outputType->Fields[c].second, data->Gathered[c]);
+            OutputLayouts_[c], data->Gathered[c]);
         data->Columns[c] = data->Gathered[c].Column;
     }
 
@@ -601,14 +587,12 @@ bool TMergeProcessor::Next(TRowSet& rowSet)
 }
 
 TTopSortProcessor::TTopSortProcessor(
-    TTypePtr outputType,
     std::vector<TSortKey> keys,
     std::vector<TSortColumnRef> keyColumns,
     TSortRadixKernel radixKernel,
     int64_t limit,
     int64_t batchRows)
-    : OutputType_(std::move(outputType))
-    , Keys_(std::move(keys))
+    : Keys_(std::move(keys))
     , KeyColumns_(std::move(keyColumns))
     , RadixKernel_(std::move(radixKernel))
     , Limit_(limit)
@@ -641,9 +625,6 @@ void TTopSortProcessor::Add(TRowSet& batch)
         Release(&batch);
         batch = {};
         throw std::runtime_error("top-sort kernel is unavailable");
-    }
-    if (!static_cast<TStructType*>(OutputType_.get())) {
-        throw std::runtime_error("top-sort output must have TStructType");
     }
 
     auto& scratch = *Scratch_;

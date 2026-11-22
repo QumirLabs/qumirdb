@@ -152,11 +152,11 @@ std::unique_ptr<ITask> MakeSortTask(
     if (plan.Top) {
         code = NLowering::MakeDrainBlockingCode<NLowering::TTopSortBlockingState>();
         state = std::make_shared<NLowering::TTopSortBlockingState>(
-            plan.OutputType, plan.Keys, plan.KeyColumns, std::move(radix), plan.Top->Limit);
+            plan.Keys, plan.KeyColumns, std::move(radix), plan.Top->Limit);
     } else {
         code = NLowering::MakeDrainBlockingCode<NLowering::TSortBlockingState>();
         state = std::make_shared<NLowering::TSortBlockingState>(
-            plan.OutputType, plan.Keys, plan.KeyColumns, std::move(radix));
+            plan.Keys, plan.KeyColumns, std::move(radix));
     }
     return std::make_unique<TBlockingTask>(
         std::move(code), std::move(state), input, output);
@@ -425,7 +425,7 @@ std::unique_ptr<ITask> MakeNodeTask(
             return std::make_unique<TMergeTask>(
                 NLowering::MakeMergeCode(),
                 std::make_shared<NLowering::TMergeState>(
-                    plan.OutputType, plan.Keys, plan.KeyColumns, inputs.size()),
+                    plan.OutputLayouts, plan.Keys, plan.KeyColumns, inputs.size()),
                 std::move(inputs), OutputPort(connections, node.Out));
         } else if constexpr (std::is_same_v<TNode, TWindowNode>) {
             const auto& plan = node.Plan;
@@ -433,7 +433,7 @@ std::unique_ptr<ITask> MakeNodeTask(
             return std::make_unique<TBlockingTask>(
                 NLowering::MakeDrainBlockingCode<NLowering::TWindowBlockingState>(),
                 std::make_shared<NLowering::TWindowBlockingState>(
-                    plan.OutputType, plan.Keys, plan.KeyColumns, std::move(kernel)),
+                    plan.Keys, plan.KeyColumns, std::move(kernel)),
                 InputPort(connections, node.In), OutputPort(connections, node.Out));
         } else if constexpr (std::is_same_v<TNode, TAggregateNode>) {
             return MakeAggregateTask(node, connections, context);

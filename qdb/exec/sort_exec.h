@@ -33,7 +33,6 @@ TSortRadixKernel MakeSortRadixKernel(
 class TSortProcessor {
 public:
     TSortProcessor(
-        NQumir::NAst::TTypePtr outputType,
         std::vector<TSortKey> keys,
         std::vector<TSortColumnRef> keyColumns,
         TSortRadixKernel radixKernel,
@@ -50,7 +49,6 @@ public:
 private:
     bool TryRadixSort();
 
-    NQumir::NAst::TTypePtr OutputType_;
     std::vector<TSortKey> Keys_;
     std::vector<TSortColumnRef> KeyColumns_;
     TSortRadixKernel RadixKernel_;
@@ -69,7 +67,7 @@ private:
 class TMergeProcessor {
 public:
     TMergeProcessor(
-        NQumir::NAst::TTypePtr outputType,
+        std::vector<TValueLayout> outputLayouts,
         std::vector<TSortKey> keys,
         std::vector<TSortColumnRef> keyColumns,
         size_t runCount,
@@ -84,7 +82,7 @@ public:
     bool Next(TRowSet& rowSet);
 
 private:
-    NQumir::NAst::TTypePtr OutputType_;
+    std::vector<TValueLayout> OutputLayouts_;
     std::vector<TSortKey> Keys_;
     std::vector<TSortColumnRef> KeyColumns_;
     int64_t BatchRows_ = JoinOutputBatchRows;
@@ -99,7 +97,6 @@ private:
 class TTopSortProcessor {
 public:
     TTopSortProcessor(
-        NQumir::NAst::TTypePtr outputType,
         std::vector<TSortKey> keys,
         std::vector<TSortColumnRef> keyColumns,
         TSortRadixKernel radixKernel,
@@ -113,7 +110,6 @@ public:
     bool Next(TRowSet& rowSet);
 
 private:
-    NQumir::NAst::TTypePtr OutputType_;
     std::vector<TSortKey> Keys_;
     std::vector<TSortColumnRef> KeyColumns_;
     TSortRadixKernel RadixKernel_;

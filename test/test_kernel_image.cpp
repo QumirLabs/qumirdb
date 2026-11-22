@@ -324,14 +324,13 @@ std::pair<std::vector<int64_t>, std::vector<int64_t>> RunSort(
     const TSortPlanData& plan,
     const std::vector<std::shared_ptr<TKernelSlot>>& slots,
     const std::vector<TSortKey>& keys,
-    const TTypePtr& outputType,
     TKeyValueBatch batch)
 {
     const auto radixKernel = BindSortKernel(plan, slots);
     std::pair<std::vector<int64_t>, std::vector<int64_t>> result;
     TRowSet out{};
     {
-        TSortProcessor sort(outputType, keys, plan.KeyColumns, radixKernel);
+        TSortProcessor sort(keys, plan.KeyColumns, radixKernel);
         auto rows = batch.RowSet();
         sort.Add(rows);
         sort.Finish();
@@ -340,8 +339,7 @@ std::pair<std::vector<int64_t>, std::vector<int64_t>> RunSort(
         Release(&out);
     }
     if (plan.Top) {
-        TTopSortProcessor topSort(
-            outputType, keys, plan.KeyColumns, radixKernel, plan.Top->Limit);
+        TTopSortProcessor topSort(keys, plan.KeyColumns, radixKernel, plan.Top->Limit);
         auto rows = batch.RowSet();
         topSort.Add(rows);
         topSort.Finish();
@@ -358,7 +356,6 @@ std::pair<std::vector<int64_t>, std::vector<int64_t>> RunSort(
     return RunSort(
         plan, slots,
         {{.Column = "v"}},
-        std::make_shared<TStructType>(KeyValueType()),
         TKeyValueBatch{.Keys = {1, 2, 3, 4, 5}, .Values = {5, 1, 3, 9, 2}});
 }
 
@@ -376,7 +373,7 @@ std::pair<std::vector<int64_t>, std::vector<int64_t>> RunSortDirect(
     if constexpr (sizeof...(batch) == 0) {
         return RunSort(plan, SlotsOf(kernels));
     } else {
-        return RunSort(plan, SlotsOf(kernels), keys, inputType, batch...);
+        return RunSort(plan, SlotsOf(kernels), keys, batch...);
     }
 }
 
@@ -397,11 +394,9 @@ std::vector<int64_t> RunWindow(TWindowProcessor& window)
 std::vector<int64_t> RunWindow(const TKernelCompiler::TSortRadixCompositeDispatch& dispatch)
 {
     const std::vector<TSortKey> keys = {{.Column = "k"}, {.Column = "v"}};
-    const std::vector<TSortColumnRef> keyColumns = {
-        {.Index = 0, .Type = I64Type()}, {.Index = 1, .Type = I64Type()}};
-    const auto outputType = std::make_shared<TStructType>(TStructType({
-        {"k", I64Type()}, {"v", I64Type()}, {"s", I64Type()}}));
-    TWindowProcessor window(outputType, keys, keyColumns, MakeWindowKernel(dispatch));
+    const TValueType i64{.Kind = EValueKind::Signed, .Width = 8};
+    const std::vector<TSortColumnRef> keyColumns = {{.Index = 0, .Value = i64}, {.Index = 1, .Value = i64}};
+    TWindowProcessor window(keys, keyColumns, MakeWindowKernel(dispatch));
     return RunWindow(window);
 }
 
@@ -668,15 +663,16 @@ TEST(KernelImage, NullableSortBindsFromPlanDataAndImageSlots)
     ASSERT_TRUE(plan.RadixNullable);
     ASSERT_TRUE(plan.Top);
     ASSERT_EQ(kernels.size(), 3u);
-    EXPECT_EQ(
-        plan.OutputType->ToString(),
-        TStructType({{"k", nullableType}, {"v", I64Type()}}).ToString());
+    ASSERT_EQ(plan.KeyColumns.size(), 1u);
+    EXPECT_EQ(plan.KeyColumns[0].Value.Kind, EValueKind::Signed);
+    EXPECT_EQ(plan.KeyColumns[0].Value.Width, 8);
+    EXPECT_TRUE(plan.KeyColumns[0].Value.Nullable);
 
     auto slots = LoadImageSlots(kernels);
     const auto radixKernel = BindSortKernel(plan, slots);
     EXPECT_TRUE(radixKernel.NullableDispatch.Slot);
     EXPECT_FALSE(radixKernel.Dispatch.Slot);
-    EXPECT_EQ(RunSort(plan, slots, keys, inputType, batch()), expected);
+    EXPECT_EQ(RunSort(plan, slots, keys, batch()), expected);
     // Ascending, nulls last: 10, 20, 30, then the null rows.
     EXPECT_EQ(expected.second, (std::vector<int64_t>{3, 5, 1}));
     EXPECT_EQ(std::vector<int64_t>(expected.first.begin(), expected.first.begin() + 3), expected.second);
@@ -729,7 +725,7 @@ TEST(KernelImage, WindowBindsFromPlanDataAndImageSlot)
     std::vector<TGeneratedKernel> directKernels;
     const auto direct = BuildWindowPlanData(*window, inputType, {.Sink = &directKernels});
     TWindowProcessor original(
-        direct.OutputType, direct.Keys, direct.KeyColumns,
+        direct.Keys, direct.KeyColumns,
         MakeWindowKernel(BindSortRadixComposite(directKernels[direct.Kernel].Slot)));
     const auto expected = RunWindow(original);
 
@@ -744,7 +740,7 @@ TEST(KernelImage, WindowBindsFromPlanDataAndImageSlot)
 
     auto slots = LoadImageSlots(kernels);
     TWindowProcessor rebuilt(
-        plan.OutputType, plan.Keys, plan.KeyColumns,
+        plan.Keys, plan.KeyColumns,
         MakeWindowKernel(BindSortRadixComposite(slots[plan.Kernel])));
     EXPECT_EQ(RunWindow(rebuilt), expected);
     EXPECT_EQ(expected, (std::vector<int64_t>{2, 7, 3, 7}));

@@ -103,14 +103,10 @@ void ClearBit(std::vector<uint8_t>& mask, size_t i) {
     mask[i / 8] &= ~(uint8_t(1) << (i % 8));
 }
 
-bool IsStringLayout(const TValueLayout& layout) {
-    return !layout.Bitmap && layout.Width == 0;
-}
-
 size_t EstimateShuffleRowBytes(std::span<const TValueLayout> layouts) {
     size_t total = 0;
     for (const auto& layout : layouts) {
-        if (IsStringLayout(layout)) {
+        if (layout.IsString()) {
             total += sizeof(int64_t) + 32;
         } else if (layout.Bitmap) {
             total += 1;
@@ -143,7 +139,7 @@ size_t ReferencedInputBytes(
     for (size_t index = 0; index < layouts.size(); ++index) {
         const auto& column = input.Columns[index];
         const auto& layout = layouts[index];
-        if (IsStringLayout(layout)) {
+        if (layout.IsString()) {
             AddPayloadBytes(bytes, rows + 1, column.OffsetWidth);
             AddPayloadBytes(bytes, static_cast<size_t>(
                 OffsetAt(column, input.RowCount) - OffsetAt(column, 0)));
@@ -1207,7 +1203,7 @@ void THashShuffleTask::FlushBuffer(size_t dst, bool releaseInputs) {
 
     for (size_t colIdx = 0; colIdx < layouts.size(); ++colIdx) {
         const auto& layout = layouts[colIdx];
-        const bool isString = IsStringLayout(layout);
+        const bool isString = layout.IsString();
         const bool isBool = layout.Bitmap;
         const size_t width = static_cast<size_t>(layout.Width);
         auto& out = data->Gathered[colIdx];
