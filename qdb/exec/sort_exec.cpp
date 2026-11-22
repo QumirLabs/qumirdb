@@ -274,7 +274,7 @@ void GatherColumn(const TRowStore& store, const std::vector<TRowId>& rowIds,
 {
     const size_t n = rowIds.size();
     const bool isBool = layout.Bitmap;
-    const bool isString = !layout.Bitmap && layout.Width == 0;
+    const bool isString = layout.IsString();
     const size_t width = static_cast<size_t>(layout.Width);
 
     out.Data.clear();

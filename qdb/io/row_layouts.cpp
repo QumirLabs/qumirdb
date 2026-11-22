@@ -1,6 +1,5 @@
 #include "row_layouts.h"
 
-#include <qdb/kernel/column_value.h>
 #include <qdb/plan/types/date.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
@@ -17,23 +16,11 @@ std::vector<TValueLayout> RowLayouts(const NQumir::NAst::TTypePtr& type) {
     }
     std::vector<TValueLayout> layouts;
     for (const auto& [name, field] : structure.Cast()->Fields) {
-        auto value = field;
-        while (true) {
-            const auto inner = UnwrapNamedType(UnwrapNullableType(value));
-            if (inner == value) {
-                break;
-            }
-            value = inner;
-        }
-        if (TMaybeType<TStringType>(value)) {
-            layouts.push_back({});
-        } else if (TMaybeType<TBoolType>(value)) {
-            layouts.push_back({.Bitmap = true});
-        } else if (const auto width = NKernel::FixedValueWidth(field)) {
-            layouts.push_back({.Width = static_cast<int32_t>(width)});
-        } else {
+        const auto value = ValueTypeOf(field);
+        if (!value) {
             throw std::runtime_error("unsupported row column: " + field->ToString());
         }
+        layouts.push_back({.Width = value->Width, .Bitmap = value->Kind == EValueKind::Bool});
     }
     return layouts;
 }
@@ -56,7 +43,15 @@ std::optional<TValueType> ValueTypeOf(const NQumir::NAst::TTypePtr& type) {
     if (IsBinIntStorageType(value)) {
         return TValueType{.Kind = EValueKind::Signed, .Width = 16, .Nullable = nullable};
     }
-    const auto inner = UnwrapNamedType(value);
+    // Aliases and Nullable may nest around the other types.
+    auto inner = value;
+    while (true) {
+        const auto next = UnwrapNamedType(UnwrapNullableType(inner));
+        if (next == inner) {
+            break;
+        }
+        inner = next;
+    }
     if (auto maybeInteger = TMaybeType<TIntegerType>(inner)) {
         const auto integer = maybeInteger.Cast();
         return TValueType{

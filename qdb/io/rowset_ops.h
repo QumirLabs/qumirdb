@@ -13,6 +13,11 @@ struct TValueLayout {
     int32_t Width = 0;
     bool Bitmap = false;
 
+    bool IsString() const
+    {
+        return !Bitmap && Width == 0;
+    }
+
     void Fields(this auto& self, auto& v)
     {
         v(self.Width);

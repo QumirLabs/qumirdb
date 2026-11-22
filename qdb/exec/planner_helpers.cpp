@@ -109,22 +109,19 @@ std::vector<TSortColumnRef> SortColumnRefs(const std::vector<TSortRadixKeyInput>
     return columns;
 }
 
-bool IsStringRadixKey(const NQumir::NAst::TTypePtr& type) {
-    using namespace NQumir::NAst;
-    return static_cast<bool>(TMaybeType<TStringType>(
-        UnwrapNamedType(UnwrapNullableType(type))));
-}
-
-// Resolved key metadata for the exec exporter.
-std::vector<TGeneratedKernel::TSortKeyMeta> SortKeyMeta(const std::vector<TSortRadixKeyInput>& keys) {
+// Resolved key metadata for the exec exporter, where a bool key is one byte wide.
+std::vector<TGeneratedKernel::TSortKeyMeta> SortKeyMeta(
+    const std::vector<TSortKey>& keys, const std::vector<TSortColumnRef>& columns)
+{
     std::vector<TGeneratedKernel::TSortKeyMeta> meta;
-    meta.reserve(keys.size());
-    for (const auto& key : keys) {
+    meta.reserve(columns.size());
+    for (size_t k = 0; k < columns.size(); ++k) {
+        const auto& value = columns[k].Value;
         meta.push_back({
-            .Index = key.ColumnIndex,
-            .WidthBytes = static_cast<int32_t>(NKernel::FixedValueWidth(key.Type)),
-            .IsString = IsStringRadixKey(key.Type),
-            .Desc = key.Desc,
+            .Index = columns[k].Index,
+            .WidthBytes = value.Kind == EValueKind::Bool ? 1 : value.Width,
+            .IsString = value.Kind == EValueKind::String,
+            .Desc = keys[k].Direction == ESortDirection::Desc,
         });
     }
     return meta;
@@ -767,10 +764,10 @@ TSortPlanData BuildSortPlanData(
     auto spec = NKernel::BuildSortKernelSpec(inputType, keys, std::string(kernelName));
     PrintKernelSpec(options.Diagnostics, spec);
     auto sortInputs = BuildSortKernelInputs(spec);
-    TSortPlanData plan{.Keys = keys};
     if (!sortInputs.AllKeysRadixSortable || sortInputs.RadixKeys.empty()) {
         throw std::runtime_error("sort kernel is unavailable for requested keys");
     }
+    TSortPlanData plan{.Keys = keys, .KeyColumns = SortColumnRefs(sortInputs.RadixKeys)};
     {
         auto* sink = options.Sink;
         const size_t sinkBefore = sink ? sink->size() : 0;
@@ -809,13 +806,12 @@ TSortPlanData BuildSortPlanData(
             };
         }
         if (sink) {
-            const auto meta = SortKeyMeta(sortInputs.RadixKeys);
+            const auto meta = SortKeyMeta(plan.Keys, plan.KeyColumns);
             for (size_t i = sinkBefore; i < sink->size(); ++i) {
                 (*sink)[i].SortKeys = meta;
             }
         }
     }
-    plan.KeyColumns = SortColumnRefs(sortInputs.RadixKeys);
     return plan;
 }
 
@@ -1001,8 +997,9 @@ TWindowPlanData BuildWindowPlanData(
     auto dispatch = compiler.CompileWindow(
         radixKeys, *inputStruct, partitionRadixKeys, orderRadixKeys, funcs);
     const uint32_t kernelIndex = dispatch.Kernel;
+    auto keyColumns = SortColumnRefs(radixKeys);
     if (sink) {
-        const auto meta = SortKeyMeta(radixKeys);
+        const auto meta = SortKeyMeta(keys, keyColumns);
         for (size_t i = sinkBefore; i < sink->size(); ++i) {
             (*sink)[i].SortKeys = meta;
         }
@@ -1010,7 +1007,7 @@ TWindowPlanData BuildWindowPlanData(
 
     return TWindowPlanData{
         .Keys = std::move(keys),
-        .KeyColumns = SortColumnRefs(radixKeys),
+        .KeyColumns = std::move(keyColumns),
         .Kernel = kernelIndex,
     };
 }
