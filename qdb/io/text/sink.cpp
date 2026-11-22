@@ -1,7 +1,6 @@
 #include <qdb/io/text/sink.h>
+#include <qdb/io/row_layouts.h>
 #include <qdb/plan/types/date.h>
-#include <qdb/plan/types/decimal.h>
-#include <qdb/plan/types/nullable.h>
 
 #include <algorithm>
 #include <charconv>
@@ -11,13 +10,9 @@
 #include <string_view>
 #include <string>
 
-#include <qumir/parser/type.h>
-
 namespace NQdb {
 
 namespace {
-
-using namespace NQumir::NAst;
 
 bool IsMasked(const TColumn& col, int32_t row) {
     if (!col.Mask) {
@@ -77,10 +72,9 @@ std::string_view ToCharsView(std::ostream& out, T value, char* buffer, size_t si
 }
 
 // Shortest text that reads back as the same value in the column's float width.
-std::to_chars_result FloatToChars(char* first, char* last, const TColumn& col, int32_t row,
-    const TFloatType& type)
+std::to_chars_result FloatToChars(char* first, char* last, const TColumn& col, int32_t row, int32_t width)
 {
-    if (type.BitWidth() == 32) {
+    if (width == sizeof(float)) {
         float value;
         std::memcpy(&value, col.Data + static_cast<int64_t>(row) * sizeof(float), sizeof(float));
         return std::to_chars(first, last, value);
@@ -137,181 +131,153 @@ std::string FormatInt128(const char* data, bool isSigned) {
 }
 
 // A DECIMAL cell holds its unscaled value at the storage width of its type.
-std::string FormatDecimalCell(const TColumn& col, int32_t row, TDecimalSpec spec) {
-    const char* data = col.Data + static_cast<int64_t>(row) * DecimalStorageBytes(spec);
-    if (DecimalStorageOf(spec) == EDecimalStorage::I64) {
-        int64_t value = 0;
-        std::memcpy(&value, data, sizeof(value));
-        const __int128 wide = value;
-        return FormatDecimal128(reinterpret_cast<const char*>(&wide), spec.Scale);
+std::string FormatDecimalCell(const TColumn& col, int32_t row, const TValueType& value) {
+    const char* data = col.Data + static_cast<int64_t>(row) * value.Width;
+    if (value.Width == sizeof(int64_t)) {
+        int64_t unscaled = 0;
+        std::memcpy(&unscaled, data, sizeof(unscaled));
+        const __int128 wide = unscaled;
+        return FormatDecimal128(reinterpret_cast<const char*>(&wide), value.Scale);
     }
-    return FormatDecimal128(data, spec.Scale);
+    return FormatDecimal128(data, value.Scale);
 }
 
-std::string FormatCell(const TColumn& col, int32_t row, const TTypePtr& type) {
+int64_t SignedCell(const TColumn& col, int32_t row, int32_t width) {
+    const char* ptr = col.Data + static_cast<int64_t>(row) * width;
+    switch (width) {
+        case 1:
+            return *reinterpret_cast<const int8_t*>(ptr);
+        case 2:
+            return *reinterpret_cast<const int16_t*>(ptr);
+        case 4:
+            return *reinterpret_cast<const int32_t*>(ptr);
+    }
+    return *reinterpret_cast<const int64_t*>(ptr);
+}
+
+uint64_t UnsignedCell(const TColumn& col, int32_t row, int32_t width) {
+    const char* ptr = col.Data + static_cast<int64_t>(row) * width;
+    switch (width) {
+        case 1:
+            return *reinterpret_cast<const uint8_t*>(ptr);
+        case 2:
+            return *reinterpret_cast<const uint16_t*>(ptr);
+        case 4:
+            return *reinterpret_cast<const uint32_t*>(ptr);
+    }
+    return *reinterpret_cast<const uint64_t*>(ptr);
+}
+
+bool IsInteger(const TValueType& value) {
+    return value.Kind == EValueKind::Signed || value.Kind == EValueKind::Unsigned;
+}
+
+std::string FormatInt128Cell(const TColumn& col, int32_t row, const TValueType& value) {
+    return FormatInt128(col.Data + static_cast<int64_t>(row) * value.Width, value.Kind == EValueKind::Signed);
+}
+
+std::string FormatCell(const TColumn& col, int32_t row, const std::optional<TValueType>& value) {
     if (IsMasked(col, row)) {
         return "NULL";
     }
-    if (!type) {
+    if (!value) {
         return "?";
     }
     char buf[64];
-    const auto valueType = UnwrapNullableType(type);
-    if (auto decimal = DecimalSpecOfValueType(valueType)) {
-        return FormatDecimalCell(col, row, *decimal);
-    }
-    if (IsDateType(valueType)) {
-        return FormatDate(DateCellDays(col.Data, row, valueType));
-    }
-    if (auto t = TMaybeType<TIntegerType>(valueType)) {
-        auto intType = t.Cast();
-        const char* ptr = col.Data + row * (intType->BitWidth() / 8);
-        if (intType->BitWidth() == 128) {
-            return FormatInt128(ptr, intType->IsSigned());
-        }
-        std::to_chars_result r;
-        if (intType->IsSigned()) {
-            int64_t v = 0;
-            switch (intType->BitWidth()) {
-                case 8:  v = *reinterpret_cast<const int8_t*>(ptr); break;
-                case 16: v = *reinterpret_cast<const int16_t*>(ptr); break;
-                case 32: v = *reinterpret_cast<const int32_t*>(ptr); break;
-                case 64: v = *reinterpret_cast<const int64_t*>(ptr); break;
+    switch (value->Kind) {
+        case EValueKind::Decimal:
+            return FormatDecimalCell(col, row, *value);
+        case EValueKind::Date:
+            return FormatDate(SignedCell(col, row, value->Width));
+        case EValueKind::Signed:
+        case EValueKind::Unsigned: {
+            if (value->Width == 16) {
+                return FormatInt128Cell(col, row, *value);
             }
-            r = std::to_chars(buf, buf + sizeof(buf), v);
-        } else {
-            uint64_t v = 0;
-            switch (intType->BitWidth()) {
-                case 8:  v = *reinterpret_cast<const uint8_t*>(ptr); break;
-                case 16: v = *reinterpret_cast<const uint16_t*>(ptr); break;
-                case 32: v = *reinterpret_cast<const uint32_t*>(ptr); break;
-                case 64: v = *reinterpret_cast<const uint64_t*>(ptr); break;
+            const auto r = value->Kind == EValueKind::Signed
+                ? std::to_chars(buf, buf + sizeof(buf), SignedCell(col, row, value->Width))
+                : std::to_chars(buf, buf + sizeof(buf), UnsignedCell(col, row, value->Width));
+            return std::string(buf, r.ptr);
+        }
+        case EValueKind::Float: {
+            const auto r = FloatToChars(buf, buf + sizeof(buf), col, row, value->Width);
+            return std::string(buf, r.ptr);
+        }
+        case EValueKind::Bool:
+            return IsBitSet(col, row) ? "true" : "false";
+        case EValueKind::String:
+            if (col.OffsetWidth == 4) {
+                return std::string(StringViewValue<int32_t>(col, row));
             }
-            r = std::to_chars(buf, buf + sizeof(buf), v);
-        }
-        return std::string(buf, r.ptr);
-    }
-    if (auto floating = TMaybeType<TFloatType>(valueType)) {
-        auto r = FloatToChars(buf, buf + sizeof(buf), col, row, *floating.Cast());
-        return std::string(buf, r.ptr);
-    }
-    if (TMaybeType<TBoolType>(valueType)) {
-        return IsBitSet(col, row) ? "true" : "false";
-    }
-    if (TMaybeType<TStringType>(valueType)) {
-        if (col.OffsetWidth == 4) {
-            auto sv = StringViewValue<int32_t>(col, row);
-            return std::string(sv);
-        }
-        auto sv = StringViewValue<int64_t>(col, row);
-        return std::string(sv);
-    }
-    if (TMaybeType<TSymbolType>(valueType)) {
-        return std::string(1, col.Data[row]);
+            return std::string(StringViewValue<int64_t>(col, row));
+        case EValueKind::Symbol:
+            return std::string(1, col.Data[row]);
     }
     return "?";
 }
 
+void WriteText(std::ostream& out, std::string_view text) {
+    out.write(text.data(), static_cast<std::streamsize>(text.size()));
+}
+
 template <typename TOffset>
-void WriteValue(std::ostream& out, const TColumn& col, int32_t row, const TTypePtr& type) {
+void WriteValue(std::ostream& out, const TColumn& col, int32_t row, const std::optional<TValueType>& value) {
     if (IsMasked(col, row)) {
         out << "NULL";
         return;
     }
-    if (!type) {
+    if (!value) {
         out << '?';
         return;
     }
 
-    const auto valueType = UnwrapNullableType(type);
-    if (auto decimal = DecimalSpecOfValueType(valueType)) {
-        const auto formatted = FormatDecimalCell(col, row, *decimal);
-        out.write(formatted.data(), static_cast<std::streamsize>(formatted.size()));
-        return;
-    }
-    if (IsDateType(valueType)) {
-        const auto formatted = FormatDate(DateCellDays(col.Data, row, valueType));
-        out.write(formatted.data(), static_cast<std::streamsize>(formatted.size()));
-        return;
-    }
-    if (auto t = TMaybeType<TIntegerType>(valueType)) {
-        auto intType = t.Cast();
-        const char* ptr = col.Data + row * (intType->BitWidth() / 8);
-        char buffer[64];
-        switch (intType->BitWidth()) {
-            case 128: {
-                const auto formatted = FormatInt128(ptr, intType->IsSigned());
-                out.write(formatted.data(), static_cast<std::streamsize>(formatted.size()));
-                return;
+    char buffer[64];
+    switch (value->Kind) {
+        case EValueKind::Decimal:
+            WriteText(out, FormatDecimalCell(col, row, *value));
+            return;
+        case EValueKind::Date:
+            WriteText(out, FormatDate(SignedCell(col, row, value->Width)));
+            return;
+        case EValueKind::Signed:
+        case EValueKind::Unsigned:
+            if (value->Width == 16) {
+                WriteText(out, FormatInt128Cell(col, row, *value));
+            } else if (value->Kind == EValueKind::Signed) {
+                WriteText(out, ToCharsView(out, SignedCell(col, row, value->Width), buffer, sizeof(buffer)));
+            } else {
+                WriteText(out, ToCharsView(out, UnsignedCell(col, row, value->Width), buffer, sizeof(buffer)));
             }
-            case 8:
-                if (intType->IsSigned()) {
-                    auto view = ToCharsView(out, static_cast<int64_t>(*reinterpret_cast<const int8_t*>(ptr)), buffer, sizeof(buffer));
-                    out.write(view.data(), static_cast<std::streamsize>(view.size()));
-                } else {
-                    auto view = ToCharsView(out, static_cast<uint64_t>(*reinterpret_cast<const uint8_t*>(ptr)), buffer, sizeof(buffer));
-                    out.write(view.data(), static_cast<std::streamsize>(view.size()));
-                }
-                return;
-            case 16:
-                if (intType->IsSigned()) {
-                    auto view = ToCharsView(out, static_cast<int64_t>(*reinterpret_cast<const int16_t*>(ptr)), buffer, sizeof(buffer));
-                    out.write(view.data(), static_cast<std::streamsize>(view.size()));
-                } else {
-                    auto view = ToCharsView(out, static_cast<uint64_t>(*reinterpret_cast<const uint16_t*>(ptr)), buffer, sizeof(buffer));
-                    out.write(view.data(), static_cast<std::streamsize>(view.size()));
-                }
-                return;
-            case 32:
-                if (intType->IsSigned()) {
-                    auto view = ToCharsView(out, static_cast<int64_t>(*reinterpret_cast<const int32_t*>(ptr)), buffer, sizeof(buffer));
-                    out.write(view.data(), static_cast<std::streamsize>(view.size()));
-                } else {
-                    auto view = ToCharsView(out, static_cast<uint64_t>(*reinterpret_cast<const uint32_t*>(ptr)), buffer, sizeof(buffer));
-                    out.write(view.data(), static_cast<std::streamsize>(view.size()));
-                }
-                return;
-            case 64:
-                if (intType->IsSigned()) {
-                    auto view = ToCharsView(out, static_cast<int64_t>(*reinterpret_cast<const int64_t*>(ptr)), buffer, sizeof(buffer));
-                    out.write(view.data(), static_cast<std::streamsize>(view.size()));
-                } else {
-                    auto view = ToCharsView(out, static_cast<uint64_t>(*reinterpret_cast<const uint64_t*>(ptr)), buffer, sizeof(buffer));
-                    out.write(view.data(), static_cast<std::streamsize>(view.size()));
-                }
-                return;
+            return;
+        case EValueKind::Float: {
+            const auto result = FloatToChars(buffer, buffer + sizeof(buffer), col, row, value->Width);
+            out.write(buffer, result.ptr - buffer);
+            return;
         }
-    } else if (auto floating = TMaybeType<TFloatType>(valueType)) {
-        char buffer[64];
-        const auto result = FloatToChars(buffer, buffer + sizeof(buffer), col, row, *floating.Cast());
-        out.write(buffer, result.ptr - buffer);
-        return;
-    } else if (TMaybeType<TBoolType>(valueType)) {
-        out << (IsBitSet(col, row) ? "true" : "false");
-        return;
-    } else if (TMaybeType<TStringType>(valueType)) {
-        if constexpr (std::is_same_v<TOffset, int32_t>) {
-            CsvWriteEscapedView<int32_t>(out, StringViewValue<int32_t>(col, row), ',');
-        } else {
-            CsvWriteEscapedView<int64_t>(out, StringViewValue<int64_t>(col, row), ',');
-        }
-        return;
-    } else if (TMaybeType<TSymbolType>(valueType)) {
-        out.put(col.Data[row]);
-        return;
+        case EValueKind::Bool:
+            out << (IsBitSet(col, row) ? "true" : "false");
+            return;
+        case EValueKind::String:
+            CsvWriteEscapedView<TOffset>(out, StringViewValue<TOffset>(col, row), ',');
+            return;
+        case EValueKind::Symbol:
+            out.put(col.Data[row]);
+            return;
     }
-
     out << '?';
 }
 
-bool IsNumeric(const TTypePtr& type) {
-    const auto valueType = UnwrapNullableType(type);
-    if (IsDateType(valueType)) {
-        return false;
+bool IsNumeric(const std::optional<TValueType>& value) {
+    return value && (IsInteger(*value) || value->Kind == EValueKind::Float || value->Kind == EValueKind::Decimal);
+}
+
+std::vector<std::optional<TValueType>> ColumnValueTypes(const TSchema& schema) {
+    std::vector<std::optional<TValueType>> values;
+    values.reserve(schema.Columns.size());
+    for (const auto& column : schema.Columns) {
+        values.push_back(ValueTypeOf(column.Type));
     }
-    return IsDecimalType(valueType) ||
-           static_cast<bool>(TMaybeType<TIntegerType>(valueType)) ||
-           static_cast<bool>(TMaybeType<TFloatType>(valueType));
+    return values;
 }
 
 template <typename TOffset>
@@ -347,6 +313,7 @@ void WriteCsvStringRaw(std::ostream& out, const TColumn& col, int32_t row) {
 
 TConsoleSink::TConsoleSink(const TSchema& schema, std::ostream& out)
     : Schema_(schema)
+    , Values_(ColumnValueTypes(schema))
     , Out_(out)
 {
     Widths_.resize(schema.Columns.size());
@@ -362,7 +329,7 @@ void TConsoleSink::Write(const TRowSet& rowSet) {
         }
         std::vector<std::string> formatted(rowSet.ColumnCount);
         for (int32_t c = 0; c < rowSet.ColumnCount; ++c) {
-            formatted[c] = FormatCell(rowSet.Columns[c], row, Schema_.Columns[c].Type);
+            formatted[c] = FormatCell(rowSet.Columns[c], row, Values_[c]);
             if (formatted[c].size() > Widths_[c]) {
                 Widths_[c] = formatted[c].size();
             }
@@ -395,7 +362,7 @@ void TConsoleSink::Flush() {
             if (c > 0) {
                 Out_ << " | ";
             }
-            if (IsNumeric(Schema_.Columns[c].Type)) {
+            if (IsNumeric(Values_[c])) {
                 Out_ << std::right << std::setw(static_cast<int>(Widths_[c])) << row[c];
             } else {
                 Out_ << std::left << std::setw(static_cast<int>(Widths_[c])) << row[c];
@@ -409,6 +376,7 @@ void TConsoleSink::Flush() {
 
 TCsvSink::TCsvSink(const TSchema& schema, std::ostream& out, char separator, bool noEscape)
     : Schema_(schema)
+    , Values_(ColumnValueTypes(schema))
     , Out_(out)
     , Separator_(separator)
     , NoEscape_(noEscape)
@@ -435,29 +403,22 @@ void TCsvSink::Write(const TRowSet& rowSet) {
                 Out_ << Separator_;
             }
             const auto& col = rowSet.Columns[c];
-            const auto type = UnwrapNullableType(Schema_.Columns[c].Type);
-            if (NoEscape_ && TMaybeType<TStringType>(type)) {
+            const auto& value = Values_[c];
+            const bool isString = value && value->Kind == EValueKind::String;
+            if (NoEscape_ && isString) {
                 if (col.OffsetWidth == 4) {
                     WriteCsvStringRaw<int32_t>(Out_, col, row);
                 } else {
                     WriteCsvStringRaw<int64_t>(Out_, col, row);
                 }
-            } else if (TMaybeType<TStringType>(type)) {
+            } else if (isString) {
                 if (col.OffsetWidth == 4) {
                     WriteCsvString<int32_t>(Out_, col, row, Separator_);
                 } else {
                     WriteCsvString<int64_t>(Out_, col, row, Separator_);
                 }
             } else {
-                if (TMaybeType<TStringType>(type)) {
-                    if (col.OffsetWidth == 4) {
-                        WriteCsvString<int32_t>(Out_, col, row, Separator_);
-                    } else {
-                        WriteCsvString<int64_t>(Out_, col, row, Separator_);
-                    }
-                } else {
-                    WriteValue<int64_t>(Out_, col, row, type);
-                }
+                WriteValue<int64_t>(Out_, col, row, value);
             }
         }
         Out_ << "\n";

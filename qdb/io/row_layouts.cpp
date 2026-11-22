@@ -69,6 +69,9 @@ std::optional<TValueType> ValueTypeOf(const NQumir::NAst::TTypePtr& type) {
     if (TMaybeType<TStringType>(inner)) {
         return TValueType{.Kind = EValueKind::String, .Nullable = nullable};
     }
+    if (TMaybeType<TSymbolType>(inner)) {
+        return TValueType{.Kind = EValueKind::Symbol, .Width = 1, .Nullable = nullable};
+    }
     return std::nullopt;
 }
 

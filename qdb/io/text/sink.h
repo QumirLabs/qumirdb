@@ -1,7 +1,9 @@
 #pragma once
 
 #include <qdb/io/io.h>
+#include <qdb/io/value_type.h>
 
+#include <optional>
 #include <ostream>
 #include <string>
 #include <vector>
@@ -19,6 +21,8 @@ public:
 
 private:
     const TSchema& Schema_;
+    // By column; nullopt prints "?".
+    std::vector<std::optional<TValueType>> Values_;
     std::ostream& Out_;
     std::vector<std::vector<std::string>> Rows_;
     std::vector<size_t> Widths_;
@@ -33,6 +37,8 @@ public:
 
 private:
     const TSchema& Schema_;
+    // By column; nullopt prints "?".
+    std::vector<std::optional<TValueType>> Values_;
     std::ostream& Out_;
     char Separator_;
     bool NoEscape_ = false;
